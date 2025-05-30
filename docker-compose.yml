@@ -1,1 +1,52 @@
+version: '3.8'
 
+services:
+  openwebui:
+    image: openwebui/openwebui:latest
+    container_name: openwebui
+    ports:
+      - "3000:3000"
+    volumes:
+      - openwebui_sessions:/app/data
+      - ./config:/app/config
+    environment:
+      - OLLAMA_HOST=${OLLAMA_HOST}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_models:/models
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+
+  tailscale:
+    image: tailscale/tailscale:latest
+    container_name: tailscale
+    volumes:
+      - /run/tailscale:/run/tailscale
+    environment:
+      - TAILSCALE_AUTH_KEY=${TAILSCALE_AUTH_KEY}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:853"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+
+volumes:
+  openwebui_sessions:
+  ollama_models:
+  ai_logs:
