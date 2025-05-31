@@ -1,0 +1,13 @@
+FROM tailscale/tailscale:latest
+
+# socat proxy forwarding
+RUN apk add --no-cache socat
+
+# Copy your custom startup script into the container
+COPY entrypoint.sh /entrypoint.sh
+
+# Make sure the script has execution permission
+RUN chmod +x /entrypoint.sh
+
+# Use your script as the default command
+ENTRYPOINT ["/entrypoint.sh"]
