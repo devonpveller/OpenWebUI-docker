@@ -1,1 +1,52 @@
+# docker-compose.yaml
 
+services:
+  openwebui:
+    image: ghcr.io/open-webui/open-webui:latest
+    container_name: openwebui
+    ports:
+      - "3000:8080"
+    volumes:
+      - ./data/openwebui:/app/backend/data
+      - ./config:/app/config  
+    environment:
+      - OLLAMA_HOST=${OLLAMA_HOST}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    ports:
+      - "11434:11434"
+    environment:
+      - OLLAMA_HOST=${OLLAMA_HOST}
+    volumes:
+      - ./data/ollama:/root/.ollama  
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+
+  tailscale:
+    build:
+      context: .
+      dockerfile: dockerfile.tailscale
+    container_name: tailscale
+    hostname: openwebui
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    environment:
+      - TAILSCALE_AUTH_KEY=${TAILSCALE_AUTH_KEY}
+      - TS_STATE_DIR=/var/lib/tailscale
+    volumes:
+      - ./data/tailscale:/var/lib/tailscale
+      - /dev/net/tun:/dev/net/tun
+    restart: unless-stopped
