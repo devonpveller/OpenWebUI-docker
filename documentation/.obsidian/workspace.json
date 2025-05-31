@@ -1,0 +1,198 @@
+{
+  "main": {
+    "id": "d861635abf66f350",
+    "type": "split",
+    "children": [
+      {
+        "id": "346a289fdedc3962",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "a0ef046c0bd3baa8",
+            "type": "leaf",
+            "state": {
+              "type": "markdown",
+              "state": {
+                "file": "AI/Tutorial NLP openwebui tool.md",
+                "mode": "source",
+                "source": false
+              },
+              "icon": "lucide-file",
+              "title": "Tutorial NLP openwebui tool"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "vertical"
+  },
+  "left": {
+    "id": "baeac1c133962e56",
+    "type": "split",
+    "children": [
+      {
+        "id": "7a3374aab58edc4e",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "a827093ddb77c60e",
+            "type": "leaf",
+            "state": {
+              "type": "file-explorer",
+              "state": {
+                "sortOrder": "alphabetical",
+                "autoReveal": false
+              },
+              "icon": "lucide-folder-closed",
+              "title": "Files"
+            }
+          },
+          {
+            "id": "89314829648de04b",
+            "type": "leaf",
+            "state": {
+              "type": "search",
+              "state": {
+                "query": "",
+                "matchingCase": false,
+                "explainSearch": false,
+                "collapseAll": false,
+                "extraContext": false,
+                "sortOrder": "alphabetical"
+              },
+              "icon": "lucide-search",
+              "title": "Search"
+            }
+          },
+          {
+            "id": "7047d6fcff127ff3",
+            "type": "leaf",
+            "state": {
+              "type": "bookmarks",
+              "state": {},
+              "icon": "lucide-bookmark",
+              "title": "Bookmarks"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "horizontal",
+    "width": 269.5
+  },
+  "right": {
+    "id": "9abfb42a2ef1e600",
+    "type": "split",
+    "children": [
+      {
+        "id": "6ba1203291cdcd74",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "3a87cfa8c0f6cafa",
+            "type": "leaf",
+            "state": {
+              "type": "backlink",
+              "state": {
+                "file": "Tutorial Docker Compose Setup for Open WebUI.md",
+                "collapseAll": false,
+                "extraContext": false,
+                "sortOrder": "alphabetical",
+                "showSearch": false,
+                "searchQuery": "",
+                "backlinkCollapsed": false,
+                "unlinkedCollapsed": true
+              },
+              "icon": "links-coming-in",
+              "title": "Backlinks for Tutorial Docker Compose Setup for Open WebUI"
+            }
+          },
+          {
+            "id": "f97e61550bd8a288",
+            "type": "leaf",
+            "state": {
+              "type": "outgoing-link",
+              "state": {
+                "file": "Tutorial Docker Compose Setup for Open WebUI.md",
+                "linksCollapsed": false,
+                "unlinkedCollapsed": true
+              },
+              "icon": "links-going-out",
+              "title": "Outgoing links from Tutorial Docker Compose Setup for Open WebUI"
+            }
+          },
+          {
+            "id": "cba8c9d56d7b72ef",
+            "type": "leaf",
+            "state": {
+              "type": "tag",
+              "state": {
+                "sortOrder": "frequency",
+                "useHierarchy": true,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-tags",
+              "title": "Tags"
+            }
+          },
+          {
+            "id": "e5062e8b1df17e86",
+            "type": "leaf",
+            "state": {
+              "type": "outline",
+              "state": {
+                "file": "Tutorial Docker Compose Setup for Open WebUI.md",
+                "followCursor": false,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-list",
+              "title": "Outline of Tutorial Docker Compose Setup for Open WebUI"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "horizontal",
+    "width": 300,
+    "collapsed": true
+  },
+  "left-ribbon": {
+    "hiddenItems": {
+      "switcher:Open quick switcher": false,
+      "graph:Open graph view": false,
+      "canvas:Create new canvas": false,
+      "daily-notes:Open today's daily note": false,
+      "templates:Insert template": false,
+      "command-palette:Open command palette": false
+    }
+  },
+  "active": "a0ef046c0bd3baa8",
+  "lastOpenFiles": [
+    "AI/Tutorial NLP openwebui tool 1.md",
+    "AI/Tutorial NLP openwebui tool.md",
+    "2025-05-31.md",
+    "Readme.md",
+    "AI/prompts/Setting Up a Modular, Version-Controlled Local AI Stack with Docker.md",
+    "AI/prompts/Prompt Morning Routine.md",
+    "AI/prompts/OpenWebUI docker Generated outline of Overall Goal o4-mini-high.md",
+    "AI/prompts/Generated o1 prompt from prompt Engineering bot.md",
+    "AI/Tutorial Docker Compose Setup for Open WebUI.md",
+    "Links.md",
+    "AI/New folder",
+    "AI/prompts",
+    "AI",
+    "ai",
+    "New folder",
+    "Tutorial Docker Compose Setup for Open WebUI.md",
+    "path/to/docker_ps_screenshot.png.md",
+    "path/to/openwebui_screenshot.png.md",
+    "path/to",
+    "path",
+    "2025-05-30.md",
+    "Untitled 1.canvas",
+    "Untitled.canvas",
+    "Welcome.md"
+  ]
+}
