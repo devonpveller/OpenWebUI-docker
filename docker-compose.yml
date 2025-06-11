@@ -12,19 +12,32 @@ services:
     environment:
       - OLLAMA_HOST=${OLLAMA_HOST}
     restart: unless-stopped
+    pull_policy: always
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080"]
       interval: 5s
       timeout: 3s
       retries: 3
 
+  watchtower:
+    image: containrrr/watchtower:latest
+    container_name: watchtower
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - WATCHTOWER_CLEANUP=true            # remove old images
+      - WATCHTOWER_POLL_INTERVAL=3600      # check every hour
+    restart: unless-stopped
+
   ollama:
     image: ollama/ollama:latest
     container_name: ollama
+    pull_policy: always
     ports:
       - "11434:11434"
     environment:
       - OLLAMA_HOST=${OLLAMA_HOST}
+      - OLLAMA_KEEP_ALIVE=315360000  # 10 years in seconds
     volumes:
       - ./data/ollama:/root/.ollama
     restart: unless-stopped
@@ -33,12 +46,6 @@ services:
       interval: 5s
       timeout: 3s
       retries: 3
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - capabilities: [gpu]
-    runtime: nvidia
 
   tailscale:
     build:

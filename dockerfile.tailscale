@@ -1,6 +1,6 @@
 FROM tailscale/tailscale:latest
 
-# socat proxy forwarding
+# Install socat
 RUN apk add --no-cache socat
 
 # Copy your custom startup script into the container
