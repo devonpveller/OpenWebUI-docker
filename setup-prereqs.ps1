@@ -20,9 +20,7 @@ function Throw-Error {
 try {
     Write-Host "Checking internet connectivity..."
     $null = Invoke-WebRequest -Uri "https://www.google.com" -UseBasicParsing -TimeoutSec 10
-} catch {
-    Throw-Error "No internet connection detected. Please connect to the internet and try again."
-}
+} catch { Throw-Error "No internet connection detected. Please connect to the internet and try again."}
 
 # Check for at least 20GB free disk space on system drive
 try {
@@ -31,24 +29,34 @@ try {
     if ($sysDrive.Free -lt 20GB) {
         Throw-Error "Insufficient disk space. At least 20GB free space is recommended."
     }
-} catch {
-    Write-Host "[WARNING] Could not determine free disk space. Please ensure you have at least 20GB free."
-}
+} catch { Write-Host "[WARNING] Could not determine free disk space. Please ensure you have at least 20GB free." }
 
 try {
     Write-Host "Enabling required Windows features..."
-    dism.exe /online /enable-feature /featurename:Microsoft-Windows-Subsystem-Linux /all /norestart || Throw-Error "Failed to enable WSL feature."
-    dism.exe /online /enable-feature /featurename:VirtualMachinePlatform /all /norestart || Throw-Error "Failed to enable Virtual Machine Platform."
+    $wslResult = dism.exe /online /enable-feature /featurename:Microsoft-Windows-Subsystem-Linux /all /norestart
+    if ($LASTEXITCODE -ne 0) {
+        Throw-Error "Failed to enable WSL feature."
+    }
+    $vmResult = dism.exe /online /enable-feature /featurename:VirtualMachinePlatform /all /norestart
+    if ($LASTEXITCODE -ne 0) {
+        Throw-Error "Failed to enable Virtual Machine Platform."
+    }
 } catch { Throw-Error $_ }
 
 try {
     Write-Host "Installing WSL2 kernel update..."
-    wsl --set-default-version 2 || Throw-Error "Failed to set WSL2 as default."
+    wsl --set-default-version 2
+    if ($LASTEXITCODE -ne 0) {
+        Throw-Error "Failed to set WSL2 as default."
+    }
 } catch { Throw-Error $_ }
 
 try {
     Write-Host "Installing Ubuntu (default WSL distro)..."
-    wsl --install -d Ubuntu || Write-Host "If Ubuntu is already installed, this step may be safely ignored."
+    wsl --install -d Ubuntu
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "If Ubuntu is already installed, this step may be safely ignored."
+    }
 } catch { Write-Host "If Ubuntu is already installed, this step may be safely ignored." }
 
 try {
