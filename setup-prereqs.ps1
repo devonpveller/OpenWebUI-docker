@@ -8,23 +8,43 @@ if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdent
     exit
 }
 
-function Handle-Error {
+# Fix function name to use approved verb
+function Throw-Error {
     param([string]$msg)
     Write-Host "[ERROR] $msg" -ForegroundColor Red
     Write-Host "Please check your internet connection, permissions, and try running this script as Administrator."
     exit 1
 }
 
+# Check for internet connectivity
+try {
+    Write-Host "Checking internet connectivity..."
+    $null = Invoke-WebRequest -Uri "https://www.google.com" -UseBasicParsing -TimeoutSec 10
+} catch {
+    Throw-Error "No internet connection detected. Please connect to the internet and try again."
+}
+
+# Check for at least 20GB free disk space on system drive
+try {
+    Write-Host "Checking for sufficient disk space (at least 20GB free on system drive)..."
+    $sysDrive = Get-PSDrive -Name ((Get-Location).Path.Substring(0,1))
+    if ($sysDrive.Free -lt 20GB) {
+        Throw-Error "Insufficient disk space. At least 20GB free space is recommended."
+    }
+} catch {
+    Write-Host "[WARNING] Could not determine free disk space. Please ensure you have at least 20GB free."
+}
+
 try {
     Write-Host "Enabling required Windows features..."
-    dism.exe /online /enable-feature /featurename:Microsoft-Windows-Subsystem-Linux /all /norestart || Handle-Error "Failed to enable WSL feature."
-    dism.exe /online /enable-feature /featurename:VirtualMachinePlatform /all /norestart || Handle-Error "Failed to enable Virtual Machine Platform."
-} catch { Handle-Error $_ }
+    dism.exe /online /enable-feature /featurename:Microsoft-Windows-Subsystem-Linux /all /norestart || Throw-Error "Failed to enable WSL feature."
+    dism.exe /online /enable-feature /featurename:VirtualMachinePlatform /all /norestart || Throw-Error "Failed to enable Virtual Machine Platform."
+} catch { Throw-Error $_ }
 
 try {
     Write-Host "Installing WSL2 kernel update..."
-    wsl --set-default-version 2 || Handle-Error "Failed to set WSL2 as default."
-} catch { Handle-Error $_ }
+    wsl --set-default-version 2 || Throw-Error "Failed to set WSL2 as default."
+} catch { Throw-Error $_ }
 
 try {
     Write-Host "Installing Ubuntu (default WSL distro)..."
@@ -35,12 +55,12 @@ try {
     Write-Host "Downloading Docker Desktop installer..."
     $dockerInstaller = "$env:TEMP\DockerDesktopInstaller.exe"
     Invoke-WebRequest -Uri "https://desktop.docker.com/win/main/amd64/Docker%20Desktop%20Installer.exe" -OutFile $dockerInstaller -ErrorAction Stop
-} catch { Handle-Error "Failed to download Docker Desktop installer." }
+} catch { Throw-Error "Failed to download Docker Desktop installer." }
 
 try {
     Write-Host "Installing Docker Desktop..."
     Start-Process -FilePath $dockerInstaller -Wait -ErrorAction Stop
-} catch { Handle-Error "Failed to start Docker Desktop installer. Please install manually from https://www.docker.com/products/docker-desktop/" }
+} catch { Throw-Error "Failed to start Docker Desktop installer. Please install manually from https://www.docker.com/products/docker-desktop/" }
 
 try {
     Write-Host "Checking for NVIDIA GPU..."
@@ -51,10 +71,10 @@ try {
         $nvidiaDriverInstaller = "$env:TEMP\WSL-Driver-Latest.exe"
         try {
             Invoke-WebRequest -Uri $nvidiaDriverUrl -OutFile $nvidiaDriverInstaller -ErrorAction Stop
-        } catch { Handle-Error "Failed to download NVIDIA WSL2 driver. Download manually from https://developer.nvidia.com/cuda/wsl/download" }
+        } catch { Throw-Error "Failed to download NVIDIA WSL2 driver. Download manually from https://developer.nvidia.com/cuda/wsl/download" }
         try {
             Start-Process -FilePath $nvidiaDriverInstaller -Wait -ErrorAction Stop
-        } catch { Handle-Error "Failed to install NVIDIA WSL2 driver. Please install manually." }
+        } catch { Throw-Error "Failed to install NVIDIA WSL2 driver. Please install manually." }
         Write-Host "To complete GPU support, run the following inside your Ubuntu WSL2 shell after rebooting:"
         Write-Host "------------------------------------------------------------"
         Write-Host "sudo apt-get update && sudo apt-get install -y nvidia-container-toolkit"
