@@ -42,7 +42,7 @@ services:
       - ./data/ollama:/root/.ollama
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:11434"]
+      test: ["CMD", "curl", "-f", "http://host.docker.internal:11434"]
       interval: 5s
       timeout: 3s
       retries: 3
