@@ -48,18 +48,27 @@ services:
       retries: 3
 
   tailscale:
+    image: tailscale/tailscale:latest
     build:
       context: .
       dockerfile: dockerfile.tailscale
     container_name: tailscale
-    hostname: openwebui
+    network_mode: service:openwebui
+    env_file:
+      - .env
     cap_add:
       - NET_ADMIN
       - NET_RAW
+    entrypoint: /entrypoint.sh
     environment:
-      - TAILSCALE_AUTH_KEY=${TAILSCALE_AUTH_KEY}
+      - TS_AUTHKEY
+      - TS_HOSTNAME=openwebui
+      - TS_ACCEPT_DNS=false
       - TS_STATE_DIR=/var/lib/tailscale
+      - TS_SOCKET=/tmp/tailscaled.sock
     volumes:
+      - ./tailscale-state:/var/lib/tailscale
+      - ./entrypoint.sh:/entrypoint.sh:ro
       - ./data/tailscale:/var/lib/tailscale
       - /dev/net/tun:/dev/net/tun
     restart: unless-stopped
