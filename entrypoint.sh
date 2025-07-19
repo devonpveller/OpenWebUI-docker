@@ -1,18 +1,32 @@
 #!/bin/sh
+set -e
 
+# 1) Clean up any old socket
+rm -f /tmp/tailscaled.sock
+
+# 2) Launch the daemon
 /usr/local/bin/containerboot &
 
-# Wait a bit for tailscaled
-sleep 5
+# 3) Wait up to 5s for the socket
+timeout=5
+while [ ! -S /tmp/tailscaled.sock ] && [ $timeout -gt 0 ]; do
+  sleep 1
+  timeout=$((timeout - 1))
+done
+[ -S /tmp/tailscaled.sock ] || {
+  echo >&2 "Error: /tmp/tailscaled.sock not found"
+  exit 1
+}
 
-# Authenticate
-tailscale up --authkey=${TAILSCALE_AUTH_KEY} --hostname=openwebui --state=${TS_STATE_DIR}
+# 4) Join your tailnet, wiping any broken state
+tailscale --socket=/tmp/tailscaled.sock up --reset \
+  --auth-key="${TS_AUTHKEY}" \
+  --hostname="openwebui" \
+  --accept-dns=false
 
-# Forward localhost:3000 to Open WebUI running in host.docker.internal
-socat TCP4-LISTEN:3000,bind=127.0.0.1,fork TCP:host.docker.internal:3000 &
+# 5) Expose Open WebUI via Tailscale (IPv4)
+tailscale --socket=/tmp/tailscaled.sock serve \
+  --https=443 --bg http://127.0.0.1:8080
 
-# Serve on tailnet
-tailscale serve --https=443 --bg http://localhost:3000
-
-# Keep container alive
+# 6) Keep the container running
 tail -f /dev/null
