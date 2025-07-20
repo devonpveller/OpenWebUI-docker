@@ -48,7 +48,6 @@ services:
       retries: 3
 
   tailscale:
-    image: tailscale/tailscale:latest
     build:
       context: .
       dockerfile: dockerfile.tailscale
