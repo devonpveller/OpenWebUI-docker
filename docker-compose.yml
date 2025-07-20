@@ -61,14 +61,12 @@ services:
       - NET_RAW
     entrypoint: /entrypoint.sh
     environment:
-      - TS_AUTHKEY
       - TS_HOSTNAME=openwebui
       - TS_ACCEPT_DNS=false
-      - TS_STATE_DIR=/var/lib/tailscale
-      - TS_SOCKET=/tmp/tailscaled.sock
     volumes:
-      - ./tailscale-state:/var/lib/tailscale
-      - ./entrypoint.sh:/entrypoint.sh:ro
       - ./data/tailscale:/var/lib/tailscale
+      - ./entrypoint.sh:/entrypoint.sh:ro
       - /dev/net/tun:/dev/net/tun
     restart: unless-stopped
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
