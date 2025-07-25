@@ -350,7 +350,9 @@ docker compose exec tailscale env | grep TAILSCALE_AUTH_KEY
 ```
 
 #### Connection Drops
-**Symptoms**: Tailscale disconnects after some time
+**Symptoms**: Tailscale disconnects after some time, "Network unreachable" errors
+
+**Root Cause**: OpenWebUI container recreation breaks network namespace sharing
 
 **Debug**:
 ```bash
@@ -362,6 +364,102 @@ docker compose logs tailscale | grep -E "(error|failed|timeout)"
 
 # Check container resource usage
 docker stats tailscale
+
+# Test internet connectivity from Tailscale container
+docker compose exec tailscale ping -c 4 8.8.8.8
+
+# Check if network namespace is broken
+docker compose exec tailscale ip addr
+# Should show more than just loopback (lo) interface
+```
+
+**Common Symptoms**:
+- Logs show: "Tailscale could not connect to relay server"
+- Logs show: "Network unreachable" 
+- `ping` fails from Tailscale container but works from OpenWebUI
+- `ip addr` in Tailscale shows only loopback interface
+
+**Fix**:
+```bash
+# Quick fix - restart both containers
+docker compose down tailscale
+docker compose up -d tailscale
+
+# If that doesn't work, check for orphaned containers
+docker compose down
+docker compose up -d
+```
+
+**Prevention**: This happens when:
+- Watchtower updates OpenWebUI (creates new container ID)
+- Manual `docker compose restart openwebui` 
+- Docker daemon restarts
+- System reboots
+
+**Automated Prevention** (Add to crontab or scheduled task):
+```bash
+# Daily check and fix script
+#!/bin/bash
+cd /path/to/ai-stack
+if ! docker compose exec tailscale ping -c 1 8.8.8.8 >/dev/null 2>&1; then
+    echo "Tailscale network broken, fixing..."
+    docker compose down tailscale
+    docker compose up -d tailscale
+fi
+```
+
+### Network Namespace Issues
+
+#### Broken Network Sharing (Most Common Recurring Issue)
+**Symptoms**: 
+- Tailscale shows "Network unreachable" 
+- Can't connect to DERP servers
+- `ping` fails from Tailscale container
+- Only loopback interface visible in Tailscale container
+
+**Root Cause**: 
+When OpenWebUI container is recreated (new container ID), Tailscale loses its network namespace attachment.
+
+**Quick Diagnostic**:
+```bash
+# Test internet from both containers
+docker compose exec openwebui curl -I http://google.com  # Should work
+docker compose exec tailscale ping -c 1 8.8.8.8         # Fails if broken
+
+# Check network interfaces
+docker compose exec tailscale ip addr
+# Broken: Only shows '1: lo: <LOOPBACK...'
+# Working: Shows eth0 or similar network interface
+```
+
+**Immediate Fix**:
+```bash
+# Restart both containers in correct order
+docker compose down tailscale
+docker compose up -d tailscale
+```
+
+**Permanent Monitoring Solution**:
+Create a monitoring script that runs every 10 minutes:
+
+```bash
+#!/bin/bash
+# Save as: scripts/check-tailscale-health.sh
+cd "d:\Open WebUI\ai-stack"
+
+# Test network connectivity
+if ! docker compose exec tailscale ping -c 1 8.8.8.8 >/dev/null 2>&1; then
+    echo "$(date): Tailscale network broken, restarting..." >> logs/tailscale-health.log
+    docker compose down tailscale
+    docker compose up -d tailscale
+    echo "$(date): Tailscale restarted" >> logs/tailscale-health.log
+fi
+```
+
+**Windows Task Scheduler Setup**:
+```powershell
+# Run this PowerShell command as Administrator
+schtasks /create /tn "TailscaleHealthCheck" /tr "powershell.exe -File 'C:\path\to\scripts\check-tailscale-health.ps1'" /sc minute /mo 10
 ```
 
 ### Advanced Debugging
