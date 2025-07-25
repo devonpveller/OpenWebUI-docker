@@ -1,31 +1,49 @@
 #!/bin/sh
-set -e
+set -euo pipefail  # Strict error handling
 
 # Enhanced entrypoint with autonomous recovery capabilities
 echo "🚀 Starting Tailscale with autonomous management..."
 
-# Function to check network connectivity
+# Constants
+readonly SOCKET_PATH="/tmp/tailscaled.sock"
+readonly STATE_DIR="/var/lib/tailscale"
+readonly MAX_NETWORK_ATTEMPTS=30
+readonly SOCKET_TIMEOUT=15
+
+# Function to log with timestamp
+log_info() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') [INFO] $*"
+}
+
+log_warn() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') [WARN] $*" >&2
+}
+
+log_error() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') [ERROR] $*" >&2
+}
+
+# Function to check network connectivity with validation
 check_network() {
-    ping -c 1 8.8.8.8 >/dev/null 2>&1
+    ping -c 1 -W 5 8.8.8.8 >/dev/null 2>&1
 }
 
 # Function to wait for network with retry logic
 wait_for_network() {
-    local max_attempts=30
     local attempt=1
     
-    echo "⏳ Waiting for network connectivity..."
-    while [ $attempt -le $max_attempts ]; do
+    log_info "Waiting for network connectivity..."
+    while [ $attempt -le $MAX_NETWORK_ATTEMPTS ]; do
         if check_network; then
-            echo "✅ Network connectivity established"
+            log_info "Network connectivity established"
             return 0
         fi
-        echo "🔄 Network attempt $attempt/$max_attempts failed, retrying in 5s..."
+        log_warn "Network attempt $attempt/$MAX_NETWORK_ATTEMPTS failed, retrying in 5s..."
         sleep 5
         attempt=$((attempt + 1))
     done
     
-    echo "❌ Failed to establish network connectivity after $max_attempts attempts"
+    log_error "Failed to establish network connectivity after $MAX_NETWORK_ATTEMPTS attempts"
     return 1
 }
 
