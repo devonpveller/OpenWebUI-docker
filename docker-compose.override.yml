@@ -1,0 +1,35 @@
+# Docker Compose override for autonomous Tailscale management
+# This file ensures Tailscale automatically restarts when OpenWebUI is updated
+
+version: '3.8'
+
+services:
+  # Add Watchtower labels to coordinate updates
+  openwebui:
+    labels:
+      - "com.centurylinklabs.watchtower.depends-on=tailscale"
+      - "com.centurylinklabs.watchtower.lifecycle.pre-update=docker compose stop tailscale"
+      - "com.centurylinklabs.watchtower.lifecycle.post-update=docker compose up -d tailscale"
+  
+  # Enhanced Tailscale configuration for autonomous operation
+  tailscale:
+    # Restart policy that handles failures
+    restart: unless-stopped
+    
+    # Labels for Watchtower coordination  
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+      - "com.centurylinklabs.watchtower.scope=ignore"
+      
+    # Dependency to ensure proper startup order
+    depends_on:
+      openwebui:
+        condition: service_healthy
+        
+    # Health check to monitor connectivity
+    healthcheck:
+      test: ["CMD", "sh", "-c", "ping -c 1 8.8.8.8 >/dev/null 2>&1 && tailscale --socket=/tmp/tailscaled.sock status >/dev/null 2>&1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
