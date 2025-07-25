@@ -1,33 +1,56 @@
 # Enhanced Tailscale Health Check and Recovery Service for Windows
 # This script provides autonomous management of Tailscale connectivity
 
+[CmdletBinding()]
 param(
     [Parameter(Mandatory=$false)]
-    [string]$Mode = "check",  # "check", "daemon", or "install-service"
+    [ValidateSet("check", "daemon", "install-service")]
+    [string]$Mode = "check",
     
     [Parameter(Mandatory=$false)]
+    [ValidateRange(10, 3600)]
     [int]$IntervalSeconds = 60
 )
 
-$ErrorActionPreference = "SilentlyContinue"
-$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
-$ProjectDir = Split-Path -Parent $ScriptDir
-$LogFile = Join-Path $ProjectDir "logs\tailscale-health.log"
-$ServiceName = "TailscaleHealthMonitor"
+# Set strict error handling
+$ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"
+
+# Constants
+$SCRIPT_DIR = Split-Path -Parent $PSCommandPath
+$PROJECT_DIR = Split-Path -Parent $SCRIPT_DIR
+$LOG_FILE = Join-Path $PROJECT_DIR "logs\tailscale-health.log"
+$SERVICE_NAME = "TailscaleHealthMonitor"
 
 # Create logs directory if it doesn't exist
-$LogDir = Split-Path -Parent $LogFile
-if (!(Test-Path $LogDir)) {
-    New-Item -ItemType Directory -Path $LogDir -Force
+$LogDir = Split-Path -Parent $LOG_FILE
+if (-not (Test-Path $LogDir)) {
+    New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
 }
 
-# Function to write timestamped log entries
-function Write-Log {
-    param($Message, $Level = "INFO")
+# Function to write structured log entries
+function Write-LogEntry {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Message,
+        
+        [Parameter()]
+        [ValidateSet("INFO", "WARN", "ERROR", "SUCCESS", "DEBUG")]
+        [string]$Level = "INFO"
+    )
+    
     $Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     $LogEntry = "$Timestamp [$Level] $Message"
-    $LogEntry | Out-File -FilePath $LogFile -Append
-    Write-Host $LogEntry
+    
+    try {
+        $LogEntry | Out-File -FilePath $LOG_FILE -Append -Encoding UTF8
+        Write-Information $LogEntry -InformationAction Continue
+    }
+    catch {
+        Write-Warning "Failed to write to log file: $_"
+        Write-Host $LogEntry
+    }
 }
 
 # Function to check Docker Compose service health
@@ -44,30 +67,42 @@ function Test-ServiceHealth {
 
 # Function to test network connectivity
 function Test-NetworkConnectivity {
+    [CmdletBinding()]
+    param()
+    
     try {
-        $Result = docker compose exec -T tailscale ping -c 1 8.8.8.8 2>$null
+        $null = docker compose exec -T tailscale ping -c 1 8.8.8.8 2>$null
         return $LASTEXITCODE -eq 0
-    } catch {
+    }
+    catch {
         return $false
     }
 }
 
 # Function to test Tailscale connection
 function Test-TailscaleConnection {
+    [CmdletBinding()]
+    param()
+    
     try {
-        $Result = docker compose exec -T tailscale tailscale --socket=/tmp/tailscaled.sock status 2>$null
+        $null = docker compose exec -T tailscale tailscale --socket=/tmp/tailscaled.sock status 2>$null
         return $LASTEXITCODE -eq 0
-    } catch {
+    }
+    catch {
         return $false
     }
 }
 
 # Function to test serve configuration
 function Test-ServeConfiguration {
+    [CmdletBinding()]
+    param()
+    
     try {
         $Result = docker compose exec -T tailscale tailscale --socket=/tmp/tailscaled.sock serve status 2>$null
         return ($Result -like "*127.0.0.1:8080*")
-    } catch {
+    }
+    catch {
         return $false
     }
 }

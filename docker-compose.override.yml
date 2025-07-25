@@ -1,8 +1,6 @@
 # Docker Compose override for autonomous Tailscale management
 # This file ensures Tailscale automatically restarts when OpenWebUI is updated
 
-version: '3.8'
-
 services:
   # Add Watchtower labels to coordinate updates
   openwebui:
