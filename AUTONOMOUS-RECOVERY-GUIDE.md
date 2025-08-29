@@ -20,7 +20,7 @@ The codebase has been enhanced with enterprise-level security:
 - Credentials excluded from git
 - Structured logging for audit trails
 
-⚠️ **Action Required**: Update TAILSCALE_AUTH_KEY in .env before August 28, 2025
+⚠️ **Action Required**: Update TAILSCALE_AUTH_KEY in .env before November 27, 2025
 
 ---
 

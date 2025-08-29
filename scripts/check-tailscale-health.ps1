@@ -109,102 +109,113 @@ function Test-ServeConfiguration {
 
 # Function to recover Tailscale service
 function Repair-TailscaleService {
-    Write-Log "Starting Tailscale service recovery..." "WARN"
+    Write-LogEntry "Starting Tailscale service recovery..." "WARN"
     
     try {
-        # Stop Tailscale container
-        Write-Log "Stopping Tailscale container..."
+        # First try gentle restart (preserves network namespace)
+        Write-LogEntry "Attempting gentle restart..."
         docker compose stop tailscale | Out-Null
         Start-Sleep 5
         
-        # Start Tailscale container
-        Write-Log "Starting Tailscale container..."
         docker compose start tailscale | Out-Null
         Start-Sleep 30
         
-        # Verify recovery
+        # Verify gentle restart worked
         if (Test-NetworkConnectivity -and Test-TailscaleConnection) {
-            Write-Log "Tailscale service recovery successful" "SUCCESS"
+            Write-LogEntry "Gentle restart successful" "SUCCESS"
             return $true
-        } else {
-            Write-Log "Recovery failed, attempting full restart..." "WARN"
-            docker compose down tailscale | Out-Null
-            docker compose up -d tailscale | Out-Null
-            Start-Sleep 45
-            
-            return (Test-NetworkConnectivity -and Test-TailscaleConnection)
         }
-    } catch {
-        Write-Log "Recovery failed with error: $($_.Exception.Message)" "ERROR"
+        
+        # If gentle restart failed, try network namespace recovery
+        Write-LogEntry "Gentle restart failed, attempting network namespace recovery..." "WARN"
+        
+        # Use the proper network namespace recovery method
+        docker compose down tailscale | Out-Null
+        Start-Sleep 3
+        docker compose up -d tailscale | Out-Null
+        Start-Sleep 45
+        
+        # Final verification
+        if (Test-NetworkConnectivity -and Test-TailscaleConnection) {
+            Write-LogEntry "Network namespace recovery successful" "SUCCESS"
+            return $true
+        }
+        else {
+            Write-LogEntry "Network namespace recovery failed, may need OpenWebUI restart" "ERROR"
+            return $false
+        }
+    } 
+    catch {
+        Write-LogEntry "Recovery failed with error: $($_.Exception.Message)" "ERROR"
         return $false
     }
 }
 
 # Function to perform comprehensive health check
 function Invoke-HealthCheck {
-    Write-Log "Starting comprehensive health check..."
+    Write-LogEntry "Starting comprehensive health check..."
     
     # Change to project directory
-    Set-Location $ProjectDir
+    Set-Location $PROJECT_DIR
     
     # Check OpenWebUI health first
     if (-not (Test-ServiceHealth "openwebui")) {
-        Write-Log "OpenWebUI is not healthy, waiting..." "WARN"
+        Write-LogEntry "OpenWebUI is not healthy, waiting..." "WARN"
         return $false
     }
     
     # Check if Tailscale container is running
     if (-not (Test-ServiceHealth "tailscale")) {
-        Write-Log "Tailscale container not running, starting..." "WARN"
+        Write-LogEntry "Tailscale container not running, starting..." "WARN"
         docker compose up -d tailscale | Out-Null
         Start-Sleep 30
     }
     
     # Test network connectivity
     if (-not (Test-NetworkConnectivity)) {
-        Write-Log "Network connectivity failed, attempting recovery..." "WARN"
+        Write-LogEntry "Network connectivity failed, attempting recovery..." "WARN"
         if (-not (Repair-TailscaleService)) {
-            Write-Log "Failed to restore network connectivity" "ERROR"
+            Write-LogEntry "Failed to restore network connectivity" "ERROR"
             return $false
         }
     }
     
     # Test Tailscale connection
     if (-not (Test-TailscaleConnection)) {
-        Write-Log "Tailscale connection failed, attempting recovery..." "WARN"
+        Write-LogEntry "Tailscale connection failed, attempting recovery..." "WARN"
         if (-not (Repair-TailscaleService)) {
-            Write-Log "Failed to restore Tailscale connection" "ERROR"
+            Write-LogEntry "Failed to restore Tailscale connection" "ERROR"
             return $false
         }
     }
     
     # Test serve configuration
     if (-not (Test-ServeConfiguration)) {
-        Write-Log "Serve configuration missing, reconfiguring..." "WARN"
+        Write-LogEntry "Serve configuration missing, reconfiguring..." "WARN"
         try {
             docker compose exec -T tailscale tailscale --socket=/tmp/tailscaled.sock serve reset | Out-Null
             docker compose exec -T tailscale tailscale --socket=/tmp/tailscaled.sock serve --https=443 --bg http://127.0.0.1:8080 | Out-Null
-            Write-Log "Serve configuration restored"
+            Write-LogEntry "Serve configuration restored"
         } catch {
-            Write-Log "Failed to restore serve configuration: $($_.Exception.Message)" "ERROR"
+            Write-LogEntry "Failed to restore serve configuration: $($_.Exception.Message)" "ERROR"
             return $false
         }
     }
     
-    Write-Log "All health checks passed" "SUCCESS"
+    Write-LogEntry "All health checks passed" "SUCCESS"
     return $true
 }
 
 # Function to run as a daemon
 function Start-Daemon {
-    Write-Log "Starting Tailscale Health Monitor daemon (interval: ${IntervalSeconds}s)"
+    Write-LogEntry "Starting Tailscale Health Monitor daemon (interval: ${IntervalSeconds}s)"
     
     while ($true) {
         try {
             Invoke-HealthCheck | Out-Null
             Start-Sleep $IntervalSeconds
         } catch {
-            Write-Log "Daemon error: $($_.Exception.Message)" "ERROR"
+            Write-LogEntry "Daemon error: $($_.Exception.Message)" "ERROR"
             Start-Sleep 30
         }
     }
@@ -216,20 +227,20 @@ function Install-WindowsService {
     
     # Check if service already exists
     if (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue) {
-        Write-Log "Service $ServiceName already exists. Removing first..."
+        Write-LogEntry "Service $ServiceName already exists. Removing first..."
         Stop-Service -Name $ServiceName -Force
         sc.exe delete $ServiceName
         Start-Sleep 5
     }
     
     # Create the service
-    Write-Log "Installing Windows Service: $ServiceName"
+    Write-LogEntry "Installing Windows Service: $ServiceName"
     sc.exe create $ServiceName binPath= $ServicePath start= auto
     sc.exe description $ServiceName "Autonomous Tailscale Health Monitor for AI Stack"
     
     # Start the service
     Start-Service -Name $ServiceName
-    Write-Log "Service installed and started successfully"
+    Write-LogEntry "Service installed and started successfully"
 }
 
 # Main execution logic
@@ -245,7 +256,7 @@ switch ($Mode.ToLower()) {
     
     "install-service" {
         if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
-            Write-Log "Administrator privileges required to install service" "ERROR"
+            Write-LogEntry "Administrator privileges required to install service" "ERROR"
             exit 1
         }
         Install-WindowsService

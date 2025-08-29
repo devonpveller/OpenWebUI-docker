@@ -11,14 +11,16 @@ if %ERRORLEVEL% NEQ 0 (
     echo [ERROR] Tailscale has no internet connectivity
     echo [INFO] Restarting Tailscale container...
     
-    docker compose down tailscale
+    REM Stop only the Tailscale container (not the entire stack)
+    docker compose stop tailscale
     if %ERRORLEVEL% NEQ 0 (
         echo [ERROR] Failed to stop Tailscale container
         pause
         exit /b 1
     )
     
-    docker compose up -d tailscale
+    REM Start Tailscale container back up
+    docker compose start tailscale
     if %ERRORLEVEL% NEQ 0 (
         echo [ERROR] Failed to start Tailscale container
         pause
@@ -26,15 +28,32 @@ if %ERRORLEVEL% NEQ 0 (
     )
     
     echo [INFO] Waiting for Tailscale to start...
-    timeout /t 20 /nobreak >nul
+    timeout /t 30 /nobreak >nul
     
     REM Test again
     docker compose exec tailscale ping -c 1 8.8.8.8 >nul 2>&1
     if %ERRORLEVEL% NEQ 0 (
         echo [ERROR] Tailscale still has connectivity issues
-        echo [INFO] You may need to check Docker network settings
-        pause
-        exit /b 1
+        echo [INFO] Trying full network namespace recovery...
+        
+        REM Try the full recovery method
+        docker compose down tailscale
+        docker compose up -d tailscale
+        
+        echo [INFO] Waiting longer for network namespace recovery...
+        timeout /t 45 /nobreak >nul
+        
+        REM Final test
+        docker compose exec tailscale ping -c 1 8.8.8.8 >nul 2>&1
+        if %ERRORLEVEL% NEQ 0 (
+            echo [ERROR] Network namespace recovery failed
+            echo [INFO] Check if OpenWebUI container needs restart
+            echo [INFO] Try: docker compose restart openwebui tailscale
+            pause
+            exit /b 1
+        ) else (
+            echo [SUCCESS] Network namespace recovery successful!
+        )
     ) else (
         echo [SUCCESS] Tailscale connectivity restored!
     )
