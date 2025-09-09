@@ -1,13 +1,16 @@
 FROM tailscale/tailscale:latest
 
-# Install socat
-RUN apk add --no-cache socat
+# Install socat and dos2unix for line ending conversion
+RUN apk add --no-cache socat dos2unix
 
 # Copy your custom startup script into the container
 COPY entrypoint.sh /entrypoint.sh
 
-# Make sure the script has execution permission
-RUN chmod +x /entrypoint.sh
+# Convert line endings and make executable (prevents Windows CRLF issues)
+RUN dos2unix /entrypoint.sh && chmod +x /entrypoint.sh
+
+# Verify the script is properly formatted
+RUN head -1 /entrypoint.sh | grep -q "^#!/bin/sh" || (echo "ERROR: Invalid shebang" && exit 1)
 
 # Use your script as the default command
 ENTRYPOINT ["/entrypoint.sh"]
