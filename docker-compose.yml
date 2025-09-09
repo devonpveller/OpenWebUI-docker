@@ -38,29 +38,6 @@ services:
     security_opt:
       - no-new-privileges:true             # Prevent privilege escalation
 
-  ollama:
-    image: ollama/ollama:latest
-    container_name: ollama
-    pull_policy: always
-    ports:
-      - "127.0.0.1:11434:11434"  # Bind to localhost only
-    environment:
-      - OLLAMA_HOST=${OLLAMA_HOST}
-      - OLLAMA_KEEP_ALIVE=315360000  # 10 years in seconds
-    volumes:
-      - ./data/ollama:/root/.ollama
-    restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
-    read_only: false  # Ollama needs write access for models
-    tmpfs:
-      - /tmp:noexec,nosuid,size=2g  # Larger tmpfs for model processing
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:11434"]
-      interval: 5s
-      timeout: 3s
-      retries: 3
-
   tailscale:
     build:
       context: .
@@ -72,13 +49,11 @@ services:
     cap_add:
       - NET_ADMIN
       - NET_RAW
-    entrypoint: /entrypoint.sh
     environment:
       - TS_HOSTNAME=openwebui
       - TS_ACCEPT_DNS=false
     volumes:
       - ./data/tailscale:/var/lib/tailscale
-      - ./entrypoint.sh:/entrypoint.sh:ro
       - /dev/net/tun:/dev/net/tun
     restart: unless-stopped
     depends_on:
