@@ -18,6 +18,8 @@ services:
     read_only: false  # OpenWebUI needs write access for temp files
     tmpfs:
       - /tmp:noexec,nosuid,size=100m
+    labels:
+      - "com.centurylinklabs.watchtower.lifecycle.post-update=/post-update-hook.sh"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080"]
       interval: 5s
@@ -29,37 +31,19 @@ services:
     container_name: watchtower
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro  # Read-only access
+      - ./scripts/post-update-hook.sh:/post-update-hook.sh:ro  # Post-update hook
+      - .:/compose-dir:ro  # Access to compose files for hook
     environment:
       - WATCHTOWER_CLEANUP=true            # remove old images
-      - WATCHTOWER_POLL_INTERVAL=3600      # check every hour
-      - WATCHTOWER_SCOPE=ai-stack          # Limit scope to this project
+      - WATCHTOWER_POLL_INTERVAL=120       # check every 2 minutes for testing
       - WATCHTOWER_INCLUDE_STOPPED=false   # Only running containers
+      - WATCHTOWER_DEBUG=true              # Enable debug logging to verify container detection
+      - WATCHTOWER_RUN_ONCE=false          # Keep running
+      - WATCHTOWER_LIFECYCLE_HOOKS=true    # Enable lifecycle hooks
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true             # Prevent privilege escalation
-
-  ollama:
-    image: ollama/ollama:latest
-    container_name: ollama
-    pull_policy: always
-    ports:
-      - "127.0.0.1:11434:11434"  # Bind to localhost only
-    environment:
-      - OLLAMA_HOST=${OLLAMA_HOST}
-      - OLLAMA_KEEP_ALIVE=315360000  # 10 years in seconds
-    volumes:
-      - ./data/ollama:/root/.ollama
-    restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
-    read_only: false  # Ollama needs write access for models
-    tmpfs:
-      - /tmp:noexec,nosuid,size=2g  # Larger tmpfs for model processing
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:11434"]
-      interval: 5s
-      timeout: 3s
-      retries: 3
+    command: ["openwebui"]  # Monitor only the openwebui container by name
 
   tailscale:
     build:
@@ -72,13 +56,11 @@ services:
     cap_add:
       - NET_ADMIN
       - NET_RAW
-    entrypoint: /entrypoint.sh
     environment:
       - TS_HOSTNAME=openwebui
       - TS_ACCEPT_DNS=false
     volumes:
       - ./data/tailscale:/var/lib/tailscale
-      - ./entrypoint.sh:/entrypoint.sh:ro
       - /dev/net/tun:/dev/net/tun
     restart: unless-stopped
     depends_on:
