@@ -107,6 +107,39 @@ function Test-ServeConfiguration {
     }
 }
 
+# Function to validate entrypoint and detect common issues
+function Test-EntrypointHealth {
+    [CmdletBinding()]
+    param()
+    
+    try {
+        # Check if entrypoint.sh has Windows line endings
+        $EntrypointPath = Join-Path $PROJECT_DIR "entrypoint.sh"
+        if (Test-Path $EntrypointPath) {
+            $Content = Get-Content $EntrypointPath -Raw
+            if ($Content -match "`r`n") {
+                Write-LogEntry "WARNING: entrypoint.sh has Windows line endings (CRLF). This can cause container startup failures." "WARN"
+                Write-LogEntry "Run: (Get-Content .\entrypoint.sh -Raw) -replace '`r`n', '`n' | Set-Content .\entrypoint.sh -NoNewline" "INFO"
+                return $false
+            }
+        }
+        
+        # Check for common Docker build issues in logs
+        $Logs = docker compose logs tailscale --tail=5 2>$null
+        if ($Logs -match "no such file or directory" -and $Logs -match "entrypoint") {
+            Write-LogEntry "CRITICAL: Entrypoint script not found in container. Rebuild required." "ERROR"
+            Write-LogEntry "Run: docker compose build --no-cache tailscale" "INFO"
+            return $false
+        }
+        
+        return $true
+    }
+    catch {
+        Write-LogEntry "Failed to validate entrypoint: $($_.Exception.Message)" "ERROR"
+        return $false
+    }
+}
+
 # Function to recover Tailscale service
 function Repair-TailscaleService {
     Write-LogEntry "Starting Tailscale service recovery..." "WARN"
@@ -157,6 +190,12 @@ function Invoke-HealthCheck {
     
     # Change to project directory
     Set-Location $PROJECT_DIR
+    
+    # First, validate entrypoint and detect common issues
+    if (-not (Test-EntrypointHealth)) {
+        Write-LogEntry "Entrypoint validation failed. Manual intervention required." "ERROR"
+        return $false
+    }
     
     # Check OpenWebUI health first
     if (-not (Test-ServiceHealth "openwebui")) {

@@ -1,4 +1,4 @@
 # .gitignore
 .env
 data/
-logs/tailscale-health.log
+logs/
