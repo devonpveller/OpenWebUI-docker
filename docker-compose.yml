@@ -12,7 +12,7 @@ services:
       - ./data/openwebui:/app/backend/data
       - ./config:/app/config:ro  # Read-only config
     environment:
-      - OLLAMA_HOST=${OLLAMA_HOST}
+      - OLLAMA_HOST=http://localhost:11434
       - USE_CUDA=true
       - USE_CUDA_DOCKER=true
       - TRANSFORMERS_CACHE=/tmp/transformers_cache
@@ -87,3 +87,35 @@ services:
       timeout: 10s
       retries: 3
       start_period: 60s
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    network_mode: service:openwebui
+    volumes:
+      - ./data/ollama:/root/.ollama
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+    pull_policy: always
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      openwebui:
+        condition: service_healthy
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
