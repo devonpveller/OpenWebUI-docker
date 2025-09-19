@@ -19,10 +19,17 @@ Docker Engine → OpenWebUI (healthy) → Tailscale (shared network) → Watchto
 ## Core Components
 
 ### Docker Compose Services
-- **openwebui**: AI chat interface (port 3000→8080)
+- **openwebui**: AI chat interface (port 3000→8080) with GPU-accelerated reranker models
 - **ollama**: LLM server (port 11434)  
 - **tailscale**: VPN access via custom build (`dockerfile.tailscale` + `entrypoint.sh`)
 - **watchtower**: Auto-updates (excluded from Tailscale to prevent breaks)
+
+### Custom OpenWebUI GPU Integration
+**Files**: `Dockerfile.openwebui-gpu`, `docker-compose.yml`
+- Custom build replacing CPU-only PyTorch with CUDA-enabled version
+- GPU passthrough configuration with NVIDIA Container Toolkit
+- Environment variables: `USE_CUDA=true`, `USE_CUDA_DOCKER=true`
+- **Never use pre-built OpenWebUI images** - breaks GPU acceleration for reranker models
 
 ### Custom Tailscale Integration
 **Files**: `dockerfile.tailscale`, `entrypoint.sh`
@@ -32,12 +39,25 @@ Docker Engine → OpenWebUI (healthy) → Tailscale (shared network) → Watchto
 - **Never mix `image:` and `build:` directives** - breaks custom entrypoint
 
 ### Autonomous Recovery System
-**5-tier redundancy** for Tailscale connectivity:
-1. Docker health checks (`docker-compose.yml`)
-2. Internal monitoring (`entrypoint.sh`)
-3. Watchtower coordination (`docker-compose.override.yml`)
-4. Windows service (`scripts/check-tailscale-health.ps1`)
-5. Simple background monitor (`scripts/simple-monitor.ps1`)
+**3-tier recovery redundancy** for system reliability:
+1. **Quick Fixes** (`scripts/quick-fixes.bat`): Simple targeted repairs
+   - Network namespace reset (most common)
+   - GPU availability check and restart
+   - System status overview
+   - Nuclear option for complete restart
+2. **Enhanced Legacy** (`scripts/emergency-recovery.bat`): Updated batch with GPU awareness
+3. **Advanced PowerShell** (`scripts/emergency-recovery.ps1`): Full-featured recovery
+   - Graceful shutdown with timeout handling
+   - Health check validation before/after operations
+   - GPU availability testing and recovery
+   - Multiple recovery modes with comprehensive error handling
+
+**Plus existing 5-tier Tailscale redundancy**:
+4. Docker health checks (`docker-compose.yml`)
+5. Internal monitoring (`entrypoint.sh`)
+6. Watchtower coordination (`docker-compose.override.yml`)
+7. Windows service (`scripts/check-tailscale-health.ps1`)
+8. Simple background monitor (`scripts/simple-monitor.ps1`)
 
 ## Development Patterns
 
@@ -58,6 +78,18 @@ Docker Engine → OpenWebUI (healthy) → Tailscale (shared network) → Watchto
 - **Persistent data**: `./data/` directory for state retention
 
 ## Critical Debugging Knowledge
+
+### GPU Integration Issues (New Critical Area)
+**Symptoms**: Reranker models using CPU instead of GPU, CUDA not available
+**Root cause**: Default OpenWebUI images have CPU-only PyTorch
+**Quick fix**:
+```bash
+# Check GPU availability
+docker compose exec openwebui python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
+
+# GPU-specific recovery
+.\scripts\emergency-recovery.ps1 -Action gpu-reset
+```
 
 ### Network Namespace Issues (Most Common)
 **Symptoms**: "Network unreachable", Tailscale can't connect to DERP servers
@@ -86,6 +118,9 @@ docker compose up -d tailscale
 # Quick system check
 docker compose ps && docker compose exec tailscale tailscale status
 
+# GPU availability check (critical for OpenWebUI)
+docker compose exec openwebui python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
+
 # Network connectivity test (most important)
 docker compose exec tailscale ping -c 1 8.8.8.8
 
@@ -95,14 +130,22 @@ docker compose exec tailscale tailscale serve status
 
 ### Recovery Operations
 ```bash
+# Quick targeted fixes (most efficient)
+scripts\quick-fixes.bat namespace    # Network issues
+scripts\quick-fixes.bat gpu         # GPU issues
+scripts\quick-fixes.bat status      # System overview
+
 # Standard Tailscale restart
 docker compose restart tailscale
 
 # Full namespace recovery
 docker compose down tailscale && docker compose up -d tailscale
 
-# Nuclear option (rebuilds custom image)
-docker compose build --no-cache tailscale && docker compose up -d tailscale
+# Advanced PowerShell recovery with health checks
+.\scripts\emergency-recovery.ps1 -Action recover
+
+# Nuclear option (rebuilds custom images)
+docker compose build --no-cache && docker compose up -d
 ```
 
 ### Windows Monitoring
@@ -124,12 +167,16 @@ docker compose build --no-cache tailscale && docker compose up -d tailscale
 ### Scripts Directory
 - `*.ps1`: Windows PowerShell utilities
 - `*.bat`: Quick batch fixes
+- `emergency-recovery.ps1`: Advanced recovery with health checks
+- `emergency-recovery.bat`: Enhanced legacy recovery with GPU awareness
+- `quick-fixes.bat`: Simple targeted fixes for common issues
 - Monitoring and health check automation
 
 ### Data Persistence
 - `data/tailscale/`: Device identity (critical for VPN)
 - `data/ollama/`: AI models (large files)  
 - `data/openwebui/`: User data and conversations
+- `data/openwebui-models/`: Custom model definitions with GPU configurations
 
 ## Common Workflow Patterns
 
@@ -141,9 +188,13 @@ docker compose build --no-cache tailscale && docker compose up -d tailscale
 
 ### Troubleshooting Workflow
 1. Check service health: `docker compose ps`
-2. Test network connectivity from Tailscale container
-3. Examine logs for namespace/DERP connection issues
-4. Apply graduated recovery (restart → rebuild → reset state)
+2. Test GPU availability: `docker compose exec openwebui python -c "import torch; print('CUDA available:', torch.cuda.is_available())"`
+3. Test network connectivity from Tailscale container
+4. Examine logs for namespace/DERP connection issues or GPU errors
+5. Apply graduated recovery (restart → rebuild → reset state)
+   - Quick fixes: `scripts\quick-fixes.bat [namespace|gpu|status]`
+   - Advanced recovery: `.\scripts\emergency-recovery.ps1 -Action recover`
+   - Nuclear option: `.\scripts\emergency-recovery.ps1 -Action nuclear`
 
 ## Security Considerations
 
@@ -158,4 +209,4 @@ docker compose build --no-cache tailscale && docker compose up -d tailscale
 - Network access limited to localhost only
 - Docker socket access is read-only where possible
 
-When working on this codebase, prioritize understanding the network namespace sharing pattern and autonomous recovery mechanisms - these are the most complex and failure-prone aspects of the system.
+When working on this codebase, prioritize understanding the network namespace sharing pattern and autonomous recovery mechanisms - these are the most complex and failure-prone aspects of the system. Additionally, be aware of the custom GPU integration for OpenWebUI which requires specific Docker build contexts and environment variables to function properly.
