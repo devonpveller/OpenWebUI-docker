@@ -1,5 +1,6 @@
 # Simple Tailscale Monitor Launcher
 # This script provides an alternative to Windows Service installation
+# Compatible with GPU-enabled OpenWebUI containers (handles longer startup times)
 
 param(
     [Parameter(Mandatory=$false)]

@@ -59,6 +59,20 @@ function Test-ServiceHealth {
     
     try {
         $Status = docker compose ps $ServiceName --format json | ConvertFrom-Json
+        
+        # For OpenWebUI with GPU, allow extra time for CUDA initialization
+        if ($ServiceName -eq "openwebui" -and $Status.State -eq "running") {
+            # Additional check for GPU-enabled OpenWebUI readiness
+            $HealthStatus = $Status.Health
+            if ($HealthStatus -eq "healthy") {
+                return $true
+            } elseif ($HealthStatus -eq "starting") {
+                # GPU initialization may take longer, give it more time
+                Write-LogEntry "OpenWebUI with GPU is starting, allowing extra time for CUDA initialization..." "INFO"
+                return $false
+            }
+        }
+        
         return $Status.State -eq "running" -and $Status.Health -ne "unhealthy"
     } catch {
         return $false
@@ -146,12 +160,18 @@ function Repair-TailscaleService {
     
     try {
         # First try gentle restart (preserves network namespace)
-        Write-LogEntry "Attempting gentle restart..."
+        Write-LogEntry "Attempting gentle restart (preserving GPU container)..."
         docker compose stop tailscale | Out-Null
         Start-Sleep 5
         
+        # Ensure OpenWebUI is still healthy before restarting Tailscale
+        if (-not (Test-ServiceHealth "openwebui")) {
+            Write-LogEntry "OpenWebUI became unhealthy during restart, aborting gentle restart" "ERROR"
+            return $false
+        }
+        
         docker compose start tailscale | Out-Null
-        Start-Sleep 30
+        Start-Sleep 45  # Increased wait time for GPU container dependencies
         
         # Verify gentle restart worked
         if (Test-NetworkConnectivity -and Test-TailscaleConnection) {
@@ -162,11 +182,17 @@ function Repair-TailscaleService {
         # If gentle restart failed, try network namespace recovery
         Write-LogEntry "Gentle restart failed, attempting network namespace recovery..." "WARN"
         
+        # Ensure OpenWebUI is healthy before namespace recovery
+        if (-not (Test-ServiceHealth "openwebui")) {
+            Write-LogEntry "OpenWebUI is not healthy, cannot perform safe namespace recovery" "ERROR"
+            return $false
+        }
+        
         # Use the proper network namespace recovery method
         docker compose down tailscale | Out-Null
-        Start-Sleep 3
+        Start-Sleep 5  # Give OpenWebUI time to stabilize
         docker compose up -d tailscale | Out-Null
-        Start-Sleep 45
+        Start-Sleep 60  # Increased wait for GPU container + network namespace reattachment
         
         # Final verification
         if (Test-NetworkConnectivity -and Test-TailscaleConnection) {
@@ -197,17 +223,48 @@ function Invoke-HealthCheck {
         return $false
     }
     
-    # Check OpenWebUI health first
+    # Check OpenWebUI health first (critical for GPU container)
     if (-not (Test-ServiceHealth "openwebui")) {
-        Write-LogEntry "OpenWebUI is not healthy, waiting..." "WARN"
-        return $false
+        Write-LogEntry "OpenWebUI (GPU-enabled) is not healthy, waiting for CUDA initialization..." "WARN"
+        
+        # For GPU containers, we need to wait longer for CUDA to initialize
+        $MaxWaitTime = 180  # 3 minutes for GPU initialization
+        $WaitTime = 0
+        
+        while ($WaitTime -lt $MaxWaitTime) {
+            Start-Sleep 10
+            $WaitTime += 10
+            
+            if (Test-ServiceHealth "openwebui") {
+                Write-LogEntry "OpenWebUI became healthy after ${WaitTime}s (CUDA initialized)" "SUCCESS"
+                break
+            }
+            
+            if ($WaitTime % 30 -eq 0) {
+                Write-LogEntry "Still waiting for OpenWebUI GPU initialization... (${WaitTime}s/${MaxWaitTime}s)" "INFO"
+            }
+        }
+        
+        # Final check after waiting
+        if (-not (Test-ServiceHealth "openwebui")) {
+            Write-LogEntry "OpenWebUI failed to become healthy within ${MaxWaitTime}s - may need manual intervention" "ERROR"
+            return $false
+        }
     }
     
     # Check if Tailscale container is running
     if (-not (Test-ServiceHealth "tailscale")) {
         Write-LogEntry "Tailscale container not running, starting..." "WARN"
         docker compose up -d tailscale | Out-Null
-        Start-Sleep 30
+        
+        # Wait longer for GPU container dependencies
+        Start-Sleep 45  # Increased from 30s for GPU container startup
+        
+        # Verify Tailscale started and can attach to OpenWebUI network namespace
+        if (-not (Test-ServiceHealth "tailscale")) {
+            Write-LogEntry "Tailscale failed to start properly, may need OpenWebUI restart" "WARN"
+            return $false
+        }
     }
     
     # Test network connectivity
