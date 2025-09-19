@@ -61,7 +61,6 @@ function Install-Service {
     }
     
     if ($ServiceCreated) {
-    if ($ServiceCreated) {
         Write-Host "Service installed successfully!" -ForegroundColor Green
         
         # Set description if using sc.exe method

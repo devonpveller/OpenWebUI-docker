@@ -5,17 +5,18 @@ A comprehensive Docker Compose setup for running OpenWebUI, Ollama, and secure r
 ## 🚀 Overview
 
 This project provides a complete AI chat interface with:
-- **OpenWebUI**: Modern web interface for AI models
+- **OpenWebUI**: Modern web interface for AI models with GPU-accelerated reranker models
 - **Ollama**: Local LLM hosting and management
 - **Tailscale**: Secure VPN access for remote connections
 - **Watchtower**: Automatic container updates
-- **GPU Support**: NVIDIA GPU acceleration for Ollama
+- **GPU Support**: NVIDIA GPU acceleration for both Ollama and OpenWebUI components
 
 ## 📁 Project Structure
 
 ```
 ai-stack/
 ├── docker-compose.yml          # Main container orchestration
+├── Dockerfile.openwebui-gpu    # Custom OpenWebUI build with GPU support
 ├── dockerfile.tailscale        # Custom Tailscale container build
 ├── entrypoint.sh              # Tailscale startup script
 ├── .env                       # Environment variables (create this)
@@ -28,6 +29,10 @@ ai-stack/
 │   ├── openwebui-models/      # Custom model definitions
 │   └── tailscale/             # Tailscale state and certificates
 ├── scripts/                   # Utility scripts
+│   ├── emergency-recovery.ps1 # Advanced PowerShell recovery tool
+│   ├── emergency-recovery.bat # Enhanced legacy recovery script  
+│   ├── quick-fixes.bat        # Simple targeted fixes
+│   └── ...                   # Other utility scripts
 ├── documentation/             # Additional documentation
 └── README.md                  # This file
 ```
@@ -66,6 +71,45 @@ TS_ACCEPT_DNS=false
 
 # Ollama Configuration
 OLLAMA_HOST=http://ollama:11434
+
+# OpenWebUI GPU Configuration
+USE_CUDA=true
+USE_CUDA_DOCKER=true
+```
+
+### 3. GPU Support Configuration
+
+This project includes custom GPU support for OpenWebUI to accelerate reranker models and other AI components.
+
+#### GPU Prerequisites
+- NVIDIA GPU with CUDA support
+- NVIDIA drivers installed on host system
+- NVIDIA Container Toolkit installed via setup script
+
+#### Custom GPU Build
+The project uses a custom `Dockerfile.openwebui-gpu` that:
+- Removes CPU-only PyTorch packages from base OpenWebUI image
+- Installs CUDA-enabled PyTorch for GPU acceleration
+- Configures proper device selection for reranker models
+
+```dockerfile
+# Custom build replaces CPU PyTorch with GPU version
+FROM ghcr.io/open-webui/open-webui:latest
+RUN pip uninstall -y torch torchvision torchaudio
+RUN pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+```
+
+#### GPU Environment Variables
+- `USE_CUDA=true`: Enables CUDA support in OpenWebUI
+- `USE_CUDA_DOCKER=true`: Configures proper device selection in containerized environment
+
+#### Verify GPU Support
+```bash
+# Check if GPU is detected
+docker compose exec openwebui python -c "import torch; print('CUDA available:', torch.cuda.is_available()); print('GPU count:', torch.cuda.device_count())"
+
+# Check GPU device name
+docker compose exec openwebui python -c "import torch; print('GPU:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'No GPU')"
 ```
 
 ### 2. Tailscale Auth Key
@@ -207,6 +251,55 @@ volumes:
 
 ## 🐛 Debugging
 
+### Enhanced Recovery Scripts
+
+The project includes multiple recovery tools for different scenarios:
+
+#### 1. PowerShell Advanced Recovery (`emergency-recovery.ps1`)
+Full-featured recovery with health checks and timing controls:
+```powershell
+# Standard recovery with health monitoring
+.\scripts\emergency-recovery.ps1 -Action recover
+
+# Nuclear option for complete stack restart
+.\scripts\emergency-recovery.ps1 -Action nuclear
+
+# GPU-specific recovery
+.\scripts\emergency-recovery.ps1 -Action gpu-reset
+```
+
+Features:
+- Graceful service shutdown with timeout handling
+- Health check validation before/after operations
+- GPU availability testing and recovery
+- Comprehensive error handling and logging
+- Multiple recovery modes with fallback options
+
+#### 2. Enhanced Legacy Recovery (`emergency-recovery.bat`)
+Updated batch script with GPU awareness:
+```batch
+# Quick network recovery (most common fix)
+scripts\emergency-recovery.bat
+
+# Includes nuclear option for complete reset
+```
+
+#### 3. Quick Targeted Fixes (`quick-fixes.bat`)
+Simple, fast fixes for specific issues:
+```batch
+# Network namespace reset (most common)
+scripts\quick-fixes.bat namespace
+
+# GPU check and restart
+scripts\quick-fixes.bat gpu
+
+# System status overview
+scripts\quick-fixes.bat status
+
+# Complete stack restart
+scripts\quick-fixes.bat nuclear
+```
+
 ### General Docker Debugging
 
 ```bash
@@ -230,6 +323,53 @@ docker compose down
 docker compose build --no-cache
 docker compose up -d
 ```
+
+### GPU-Specific Debugging
+
+#### GPU Not Detected
+**Symptoms**: Reranker models running on CPU instead of GPU
+**Debug Steps**:
+```bash
+# Check GPU availability in container
+docker compose exec openwebui python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
+
+# Check environment variables
+docker compose exec openwebui env | grep -E "(USE_CUDA|DEVICE_TYPE)"
+
+# Verify GPU passthrough
+docker compose exec openwebui nvidia-smi  # Should show GPU info
+
+# Check PyTorch CUDA installation
+docker compose exec openwebui python -c "import torch; print('PyTorch CUDA version:', torch.version.cuda)"
+```
+
+**Common Solutions**:
+```bash
+# Restart OpenWebUI container
+docker compose restart openwebui
+
+# Rebuild with GPU support (if Dockerfile changed)
+docker compose build --no-cache openwebui
+docker compose up -d openwebui
+
+# Use GPU-specific recovery
+.\scripts\emergency-recovery.ps1 -Action gpu-reset
+```
+
+#### GPU Memory Issues
+**Symptoms**: CUDA out of memory errors
+**Debug Steps**:
+```bash
+# Check GPU memory usage
+docker compose exec openwebui nvidia-smi
+
+# Monitor GPU utilization during operations
+watch -n 1 'docker compose exec openwebui nvidia-smi'
+```
+
+**Solutions**:
+- Reduce model size or batch size in OpenWebUI settings
+- Restart container to clear GPU memory: `docker compose restart openwebui`
 
 ### Common Issues
 
@@ -579,6 +719,35 @@ docker stats --format "table {{.Container}}\t{{.CPUPerc}}\t{{.MemUsage}}"
 
 ## 🆘 Emergency Procedures
 
+### Quick Recovery Options
+
+#### Network/Connectivity Issues (Most Common)
+```bash
+# Quick namespace reset
+scripts\quick-fixes.bat namespace
+
+# Advanced PowerShell recovery
+.\scripts\emergency-recovery.ps1 -Action recover
+```
+
+#### GPU Issues
+```bash
+# GPU-specific recovery
+scripts\quick-fixes.bat gpu
+
+# Advanced GPU reset
+.\scripts\emergency-recovery.ps1 -Action gpu-reset
+```
+
+#### Complete System Issues
+```bash
+# Nuclear option (quick)
+scripts\quick-fixes.bat nuclear
+
+# Advanced nuclear option with health checks
+.\scripts\emergency-recovery.ps1 -Action nuclear
+```
+
 ### Complete Reset
 ```bash
 # Stop all services
@@ -611,8 +780,20 @@ docker compose restart tailscale
 # Quick status check
 docker compose ps && docker compose exec tailscale tailscale status
 
+# GPU status check
+docker compose exec openwebui python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
+
 # Full system logs
 docker compose logs --tail=100
+
+# Quick recovery options
+scripts\quick-fixes.bat namespace        # Network issues (most common)
+scripts\quick-fixes.bat gpu             # GPU issues
+scripts\quick-fixes.bat status          # System overview
+
+# Advanced recovery
+.\scripts\emergency-recovery.ps1 -Action recover    # Full recovery with health checks
+.\scripts\emergency-recovery.ps1 -Action gpu-reset  # GPU-specific recovery
 
 # Emergency restart
 docker compose restart
@@ -634,11 +815,14 @@ docker compose down && docker compose build --no-cache && docker compose up -d
 ## 📝 Notes
 
 - This setup is optimized for development and small-scale production use
-- GPU acceleration requires NVIDIA Container Toolkit
+- GPU acceleration available for both Ollama and OpenWebUI components
+- Custom OpenWebUI build includes CUDA-enabled PyTorch for reranker models
+- Enhanced recovery scripts provide multiple repair options with health monitoring
 - Tailscale provides zero-config VPN access
 - All data persists across container restarts
 - Watchtower keeps services updated automatically (except Tailscale)
 
-**Last Updated**: July 20, 2025  
+**Last Updated**: September 19, 2025  
+**OpenWebUI**: Custom GPU-enabled build  
 **Tailscale Version**: v1.84.3  
 **Docker Compose Version**: v2.x
