@@ -17,6 +17,14 @@ services:
       - USE_CUDA_DOCKER=true
       - TRANSFORMERS_CACHE=/tmp/transformers_cache
       - HF_HOME=/tmp/hf_cache
+      # Performance Optimizations for faster Ollama communication
+      - AIOHTTP_CLIENT_TIMEOUT=300
+      - AIOHTTP_CLIENT_TIMEOUT_MODEL_LIST=60
+      - MODELS_CACHE_TTL=10  # Cache model list for 10 seconds to reduce repeated calls
+      - ENABLE_BASE_MODELS_CACHE=true  # Cache base models for faster loading
+      # Reduce OpenWebUI overhead for model requests
+      - CHAT_RESPONSE_STREAM_DELTA_CHUNK_SIZE=4  # Larger chunks for better streaming performance
+      - BYPASS_MODEL_ACCESS_CONTROL=true  # Skip access control checks for faster requests
     deploy:
       resources:
         reservations:
@@ -97,6 +105,13 @@ services:
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      # Optimized Ollama settings for faster response to OpenWebUI
+      - OLLAMA_KEEP_ALIVE=5m  # Keep models in memory longer
+      - OLLAMA_HOST=0.0.0.0:11434
+      - OLLAMA_ORIGINS=*
+      - OLLAMA_MAX_LOADED_MODELS=3  # Allow multiple models to stay loaded
+      - OLLAMA_NUM_PARALLEL=2  # Allow parallel requests
+      - OLLAMA_FLASH_ATTENTION=1  # Enable flash attention for faster inference
     deploy:
       resources:
         reservations:
