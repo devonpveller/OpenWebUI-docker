@@ -2,7 +2,9 @@
 
 services:
   openwebui:
-    image: ghcr.io/open-webui/open-webui:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.openwebui-gpu
     container_name: openwebui
     ports:
       - "127.0.0.1:3000:8080"  # Bind to localhost only
@@ -11,6 +13,17 @@ services:
       - ./config:/app/config:ro  # Read-only config
     environment:
       - OLLAMA_HOST=${OLLAMA_HOST}
+      - USE_CUDA=true
+      - USE_CUDA_DOCKER=true
+      - TRANSFORMERS_CACHE=/tmp/transformers_cache
+      - HF_HOME=/tmp/hf_cache
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
     restart: unless-stopped
     pull_policy: always
     security_opt:

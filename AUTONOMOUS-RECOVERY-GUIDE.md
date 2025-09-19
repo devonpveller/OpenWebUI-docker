@@ -45,9 +45,9 @@ The codebase has been enhanced with enterprise-level security:
 - **Recovery Time:** During update process
 
 ### 🐧 **Level 4: External Daemon (Linux/WSL)**
-- **File:** `scripts/tailscale-service-manager.sh`
-- **What:** Independent monitoring process
-- **Usage:** `chmod +x scripts/tailscale-service-manager.sh && scripts/tailscale-service-manager.sh start`
+- **File:** `scripts/simple-monitor.ps1` (Cross-platform PowerShell)
+- **What:** Background monitoring process
+- **Usage:** `scripts/simple-monitor.ps1 -Action start`
 
 ### 🪟 **Level 5: Windows Service (Windows Native)**
 - **Files:** `scripts/check-tailscale-health.ps1` + `scripts/install-service.ps1`
@@ -87,15 +87,20 @@ cd "d:\Open WebUI\ai-stack\scripts"
 
 ### For Linux/WSL Users:
 
-1. **Start External Monitor:**
-```bash
-chmod +x scripts/tailscale-service-manager.sh
-scripts/tailscale-service-manager.sh start
+1. **Start Background Monitor:**
+```powershell
+# PowerShell works on Linux/WSL too
+pwsh scripts/simple-monitor.ps1 -Action start -IntervalSeconds 30
 ```
 
 2. **Check Monitor Status:**
-```bash
-scripts/tailscale-service-manager.sh status
+```powershell
+pwsh scripts/simple-monitor.ps1 -Action status
+```
+
+3. **Stop Monitor:**
+```powershell
+pwsh scripts/simple-monitor.ps1 -Action stop
 ```
 
 ---
@@ -178,19 +183,19 @@ docker compose exec tailscale tailscale --socket=/tmp/tailscaled.sock serve stat
 .\install-service.ps1 -Action uninstall
 ```
 
-### Linux/WSL Daemon:
-```bash
-# Start daemon
-scripts/tailscale-service-manager.sh start
+### Linux/WSL Background Monitor:
+```powershell
+# Start monitor (cross-platform PowerShell)
+pwsh scripts/simple-monitor.ps1 -Action start
 
 # Check status
-scripts/tailscale-service-manager.sh status
+pwsh scripts/simple-monitor.ps1 -Action status
 
-# Stop daemon
-scripts/tailscale-service-manager.sh stop
+# Stop monitor
+pwsh scripts/simple-monitor.ps1 -Action stop
 
-# Restart daemon
-scripts/tailscale-service-manager.sh restart
+# Restart monitor
+pwsh scripts/simple-monitor.ps1 -Action restart
 ```
 
 ---

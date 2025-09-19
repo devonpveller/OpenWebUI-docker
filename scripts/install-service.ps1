@@ -1,5 +1,6 @@
 # Install Tailscale Health Monitor as Windows Service
 # Run this script as Administrator
+# Compatible with GPU-enabled OpenWebUI containers (handles longer startup times)
 
 param(
     [Parameter(Mandatory=$false)]
@@ -60,7 +61,6 @@ function Install-Service {
         $ServiceCreated = ($LASTEXITCODE -eq 0)
     }
     
-    if ($ServiceCreated) {
     if ($ServiceCreated) {
         Write-Host "Service installed successfully!" -ForegroundColor Green
         
