@@ -14,28 +14,33 @@ cd /compose-dir
 echo "POST-UPDATE HOOK: Stopping Tailscale..."
 docker compose stop tailscale
 
-echo "POST-UPDATE HOOK: Waiting for OpenWebUI to be healthy..."
-timeout=60
+echo "POST-UPDATE HOOK: Waiting for OpenWebUI (GPU-enabled) to be healthy..."
+timeout=180  # Increased timeout for GPU container CUDA initialization
 while [ $timeout -gt 0 ]; do
     if docker compose ps openwebui | grep -q "healthy"; then
-        echo "POST-UPDATE HOOK: OpenWebUI is healthy"
+        echo "POST-UPDATE HOOK: OpenWebUI is healthy (CUDA initialized)"
         break
     fi
-    echo "POST-UPDATE HOOK: Waiting for OpenWebUI health... ($timeout seconds remaining)"
-    sleep 2
-    timeout=$((timeout - 2))
+    echo "POST-UPDATE HOOK: Waiting for OpenWebUI GPU initialization... ($timeout seconds remaining)"
+    sleep 5  # Check more frequently but with longer total timeout
+    timeout=$((timeout - 5))
 done
 
 if [ $timeout -le 0 ]; then
-    echo "POST-UPDATE HOOK: WARNING - Timeout waiting for OpenWebUI health"
+    echo "POST-UPDATE HOOK: ERROR - Timeout waiting for OpenWebUI GPU initialization"
+    echo "POST-UPDATE HOOK: OpenWebUI may need manual intervention for CUDA setup"
     exit 1
 fi
+
+# Additional wait for GPU container to fully stabilize
+echo "POST-UPDATE HOOK: Allowing additional time for GPU container stabilization..."
+sleep 15
 
 echo "POST-UPDATE HOOK: Starting Tailscale..."
 docker compose up -d tailscale
 
 echo "POST-UPDATE HOOK: Verifying Tailscale connectivity..."
-sleep 10
+sleep 20  # Increased wait time for GPU container dependencies
 
 # Verify the restart worked
 if docker compose ps tailscale | grep -q "healthy\|starting"; then

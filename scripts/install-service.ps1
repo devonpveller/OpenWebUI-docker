@@ -1,5 +1,6 @@
 # Install Tailscale Health Monitor as Windows Service
 # Run this script as Administrator
+# Compatible with GPU-enabled OpenWebUI containers (handles longer startup times)
 
 param(
     [Parameter(Mandatory=$false)]
