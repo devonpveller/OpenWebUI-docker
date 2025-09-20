@@ -44,7 +44,19 @@ goto :end
 echo [WARN] ==========================================
 echo [WARN] NUCLEAR OPTION - FULL STACK RESTART
 echo [WARN] ==========================================
+
+echo [INFO] Pre-nuclear diagnostic check...
+docker compose exec tailscale ping -c 1 8.8.8.8 >nul 2>&1
+if %ERRORLEVEL% EQU 0 (
+    echo [SUCCESS] Wait - connectivity is actually working!
+    echo [INFO] Issue may be performance/timing related, not connectivity
+    echo [INFO] Try: quick-fixes.bat status  (to check detailed status)
+    echo [INFO] Or just wait a bit longer for services to stabilize
+    goto :end
+)
+
 echo [WARN] This will restart ALL containers and may take several minutes
+echo [WARN] This will DESTROY containers and rebuild them
 pause
 echo [INFO] Performing full stack restart...
 docker compose down
@@ -62,21 +74,40 @@ if %ERRORLEVEL% EQU 0 (
 goto :end
 
 :gpu_check
-echo [INFO] Checking GPU status and restarting OpenWebUI if needed...
+echo [INFO] Checking GPU status and restarting GPU services if needed...
+echo [INFO] Testing OpenWebUI GPU access...
 docker compose exec openwebui python -c "import torch; print('CUDA available:', torch.cuda.is_available())" 2>nul
 if %ERRORLEVEL% NEQ 0 (
-    echo [WARN] GPU check failed, restarting OpenWebUI...
-    docker compose restart openwebui
-    timeout /t 45 /nobreak >nul
+    echo [WARN] GPU check failed, restarting GPU services...
+    docker compose restart ollama openwebui
+    echo [INFO] Waiting for GPU services to restart...
+    timeout /t 60 /nobreak >nul
+    echo [INFO] Re-testing GPU access...
     docker compose exec openwebui python -c "import torch; print('CUDA available:', torch.cuda.is_available())" 2>nul
     if %ERRORLEVEL% EQU 0 (
         echo [SUCCESS] GPU restored after restart
+        echo [INFO] Testing Ollama availability...
+        docker compose exec ollama ollama list >nul 2>&1
+        if %ERRORLEVEL% EQU 0 (
+            echo [SUCCESS] Ollama GPU integration working
+        ) else (
+            echo [WARN] Ollama may need additional time to initialize
+        )
     ) else (
         echo [ERROR] GPU still not available - may need full rebuild
         echo [INFO] Try: quick-fixes.bat nuclear
     )
 ) else (
-    echo [SUCCESS] GPU is working correctly
+    echo [SUCCESS] OpenWebUI GPU is working correctly
+    echo [INFO] Testing Ollama GPU integration...
+    docker compose exec ollama ollama list >nul 2>&1
+    if %ERRORLEVEL% EQU 0 (
+        echo [SUCCESS] Ollama GPU integration working
+    ) else (
+        echo [WARN] Ollama may need restart
+        docker compose restart ollama
+        timeout /t 30 /nobreak >nul
+    )
 )
 goto :end
 
@@ -88,8 +119,14 @@ echo.
 echo [INFO] Container Status:
 docker compose ps
 echo.
-echo [INFO] GPU Status:
+echo [INFO] Starting any missing services...
+docker compose up -d watchtower >nul 2>&1
+echo.
+echo [INFO] OpenWebUI GPU Status:
 docker compose exec openwebui python -c "import torch; print('CUDA available:', torch.cuda.is_available()); print('GPU count:', torch.cuda.device_count())" 2>nul
+echo.
+echo [INFO] Ollama Status:
+docker compose exec ollama ollama list 2>nul
 echo.
 echo [INFO] Network Connectivity:
 docker compose exec tailscale ping -c 1 8.8.8.8 >nul 2>&1
