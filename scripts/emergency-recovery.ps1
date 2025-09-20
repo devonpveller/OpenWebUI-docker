@@ -42,6 +42,101 @@ function Test-NetworkConnectivity {
     }
 }
 
+function Test-BasicConnectivity {
+    Write-Log "INFO" "Performing basic connectivity checks..."
+    
+    # Check if containers are running
+    try {
+        $containers = docker compose ps --format json | ConvertFrom-Json
+        $openwebuiStatus = ($containers | Where-Object { $_.Service -eq "openwebui" }).State
+        $ollamaStatus = ($containers | Where-Object { $_.Service -eq "ollama" }).State
+        $tailscaleStatus = ($containers | Where-Object { $_.Service -eq "tailscale" }).State
+        
+        Write-Log "INFO" "Container states - OpenWebUI: $openwebuiStatus, Ollama: $ollamaStatus, Tailscale: $tailscaleStatus"
+        
+        # If all containers are running, test basic functionality
+        if ($openwebuiStatus -eq "running" -and $ollamaStatus -eq "running" -and $tailscaleStatus -eq "running") {
+            # Test OpenWebUI health
+            try {
+                $response = docker compose exec openwebui curl -f -s http://localhost:8080/health 2>$null
+                if ($LASTEXITCODE -eq 0) {
+                    Write-Log "INFO" "OpenWebUI health check: PASSED"
+                    
+                    # Test Ollama connectivity
+                    try {
+                        docker compose exec openwebui curl -f -s http://localhost:11434/api/version 2>$null | Out-Null
+                        if ($LASTEXITCODE -eq 0) {
+                            Write-Log "INFO" "Ollama connectivity: PASSED"
+                            
+                            # Test external connectivity
+                            if (Test-NetworkConnectivity "tailscale") {
+                                Write-Log "SUCCESS" "All basic checks PASSED - issue may be timing/performance related"
+                                return $true
+                            }
+                            else {
+                                Write-Log "WARN" "External connectivity failed"
+                            }
+                        }
+                        else {
+                            Write-Log "WARN" "Ollama connectivity failed"
+                        }
+                    }
+                    catch {
+                        Write-Log "WARN" "Ollama connectivity test failed: $_"
+                    }
+                }
+                else {
+                    Write-Log "WARN" "OpenWebUI health check failed"
+                }
+            }
+            catch {
+                Write-Log "WARN" "OpenWebUI health test failed: $_"
+            }
+        }
+        else {
+            Write-Log "WARN" "Not all containers are running - recovery needed"
+        }
+    }
+    catch {
+        Write-Log "ERROR" "Failed to check container status: $_"
+    }
+    
+    return $false
+}
+
+function Invoke-MinimalRecovery {
+    Write-Log "INFO" "========================================="
+    Write-Log "INFO" "MINIMAL RECOVERY - GENTLE RESTART"
+    Write-Log "INFO" "========================================="
+    
+    Write-Log "INFO" "Attempting gentle service restart..."
+    
+    # Just restart services without destroying containers
+    try {
+        docker compose restart tailscale ollama openwebui
+        
+        # Start Watchtower if it's missing (it doesn't need restart usually)
+        docker compose up -d watchtower
+        
+        Write-Log "INFO" "Waiting for services to stabilize..."
+        Start-Sleep -Seconds 60
+        
+        # Test if this fixed the issue
+        if (Test-BasicConnectivity) {
+            Write-Log "SUCCESS" "Minimal recovery successful!"
+            return $true
+        }
+        else {
+            Write-Log "WARN" "Minimal recovery insufficient, proceeding to standard recovery"
+            return $false
+        }
+    }
+    catch {
+        Write-Log "ERROR" "Minimal recovery failed: $_"
+        return $false
+    }
+}
+
 function Test-GPUAvailability {
     try {
         $result = docker compose exec openwebui python -c "import torch; print('CUDA:', torch.cuda.is_available())" 2>$null
@@ -130,13 +225,29 @@ function Invoke-EmergencyRecovery {
     Write-Log "INFO" "Current container status:"
     docker compose ps
     
+    # CRITICAL: Perform diagnostics before destructive actions
+    Write-Log "INFO" "Running pre-recovery diagnostics..."
+    if (Test-BasicConnectivity) {
+        Write-Log "SUCCESS" "Basic connectivity working - trying minimal recovery first"
+        if (Invoke-MinimalRecovery) {
+            return  # Success, no need for destructive recovery
+        }
+    }
+    
+    Write-Log "INFO" "Minimal recovery failed or basic checks failed - proceeding with full recovery"
+    
     # Phase 1: Graceful shutdown in reverse dependency order
     Write-Log "INFO" "Phase 1: Graceful shutdown"
-    Write-Log "WARN" "This will restart OpenWebUI and Tailscale services"
+    Write-Log "WARN" "This will restart OpenWebUI, Ollama, and Tailscale services"
     
     # Stop Tailscale first (dependent on OpenWebUI network)
     if (-not (Stop-ServiceGracefully "tailscale" 30)) {
         Write-Log "WARN" "Tailscale stop had issues, continuing..."
+    }
+    
+    # Stop Ollama (dependent on OpenWebUI network)
+    if (-not (Stop-ServiceGracefully "ollama" 30)) {
+        Write-Log "WARN" "Ollama stop had issues, continuing..."
     }
     
     # Stop OpenWebUI 
@@ -155,7 +266,7 @@ function Invoke-EmergencyRecovery {
     Write-Log "INFO" "Starting OpenWebUI with GPU support..."
     try {
         docker compose up -d openwebui
-        if (-not (Wait-ForHealthy "openwebui" 120)) {
+        if (-not (Wait-ForHealthy "openwebui" 240)) {
             throw "OpenWebUI failed to become healthy"
         }
     }
@@ -176,6 +287,19 @@ function Invoke-EmergencyRecovery {
     Write-Log "INFO" "Allowing network namespace to stabilize..."
     Start-Sleep -Seconds 20
     
+    # Start Ollama (depends on OpenWebUI network)
+    Write-Log "INFO" "Starting Ollama with GPU support..."
+    try {
+        docker compose up -d ollama
+        if (-not (Wait-ForHealthy "ollama" 60)) {
+            Write-Log "WARN" "Ollama health check failed, but continuing..."
+        }
+    }
+    catch {
+        Write-Log "ERROR" "Failed to start Ollama: $_"
+        throw
+    }
+    
     # Start Tailscale (depends on OpenWebUI network)
     Write-Log "INFO" "Starting Tailscale with shared network namespace..."
     try {
@@ -187,6 +311,17 @@ function Invoke-EmergencyRecovery {
     catch {
         Write-Log "ERROR" "Failed to start Tailscale: $_"
         throw
+    }
+    
+    # Start Watchtower (independent service)
+    Write-Log "INFO" "Starting Watchtower monitoring service..."
+    try {
+        docker compose up -d watchtower
+        Write-Log "SUCCESS" "Watchtower started"
+    }
+    catch {
+        Write-Log "WARN" "Failed to start Watchtower: $_"
+        # Don't throw - Watchtower is not critical for basic functionality
     }
     
     # Phase 4: Connectivity verification
@@ -206,6 +341,9 @@ function Invoke-EmergencyRecovery {
     Write-Log "INFO" "Phase 5: Service verification"
     
     try {
+        Write-Log "INFO" "Ollama status:"
+        docker compose exec ollama ollama list
+        
         Write-Log "INFO" "Tailscale status:"
         docker compose exec tailscale tailscale --socket=/tmp/tailscaled.sock status
         
@@ -213,7 +351,7 @@ function Invoke-EmergencyRecovery {
         docker compose exec tailscale tailscale --socket=/tmp/tailscaled.sock serve status
     }
     catch {
-        Write-Log "WARN" "Unable to verify Tailscale configuration: $_"
+        Write-Log "WARN" "Unable to verify service configurations: $_"
     }
     
     Write-Log "SUCCESS" "========================================="
@@ -225,6 +363,19 @@ function Invoke-NuclearRecovery {
     Write-Log "WARN" "========================================="
     Write-Log "WARN" "NUCLEAR RECOVERY - FULL STACK RESTART"
     Write-Log "WARN" "========================================="
+    
+    # CRITICAL: Last-chance diagnostic check
+    Write-Log "INFO" "Performing final diagnostic before nuclear option..."
+    if (Test-BasicConnectivity) {
+        Write-Log "SUCCESS" "Basic connectivity working - trying minimal recovery instead of nuclear"
+        if (Invoke-MinimalRecovery) {
+            Write-Log "SUCCESS" "Minimal recovery successful - nuclear option avoided!"
+            return
+        }
+    }
+    
+    Write-Log "WARN" "All diagnostics failed - proceeding with nuclear recovery..."
+    Write-Log "WARN" "This will destroy and rebuild containers..."
     
     Write-Log "INFO" "Performing complete stack shutdown..."
     docker compose down
@@ -257,11 +408,11 @@ function Invoke-NuclearRecovery {
 
 function Invoke-GPUReset {
     Write-Log "INFO" "========================================="
-    Write-Log "INFO" "GPU RECOVERY - REBUILDING OPENWEBUI"
+    Write-Log "INFO" "GPU RECOVERY - REBUILDING GPU SERVICES"
     Write-Log "INFO" "========================================="
     
-    Write-Log "INFO" "Stopping OpenWebUI for GPU reset..."
-    docker compose down openwebui
+    Write-Log "INFO" "Stopping GPU-dependent services for reset..."
+    docker compose down ollama openwebui
     
     Write-Log "INFO" "Rebuilding OpenWebUI with fresh GPU configuration..."
     docker compose build --no-cache openwebui
@@ -269,13 +420,30 @@ function Invoke-GPUReset {
     Write-Log "INFO" "Starting OpenWebUI with GPU support..."
     docker compose up -d openwebui
     
-    if (Wait-ForHealthy "openwebui" 180) {
-        if (Test-GPUAvailability) {
-            Write-Log "SUCCESS" "GPU reset successful - CUDA is available"
+    if (Wait-ForHealthy "openwebui" 240) {
+        Write-Log "INFO" "Starting Ollama with GPU support..."
+        docker compose up -d ollama
+        
+        if (Wait-ForHealthy "ollama" 60) {
+            if (Test-GPUAvailability) {
+                Write-Log "SUCCESS" "GPU reset successful - CUDA is available"
+                
+                # Test Ollama GPU access
+                try {
+                    docker compose exec ollama ollama list
+                    Write-Log "SUCCESS" "Ollama GPU integration verified"
+                }
+                catch {
+                    Write-Log "WARN" "Ollama may need additional time to initialize"
+                }
+            }
+            else {
+                Write-Log "ERROR" "GPU reset failed - CUDA not available"
+                throw "GPU reset failed"
+            }
         }
         else {
-            Write-Log "ERROR" "GPU reset failed - CUDA not available"
-            throw "GPU reset failed"
+            Write-Log "WARN" "Ollama startup slow but continuing..."
         }
     }
     else {

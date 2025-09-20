@@ -12,11 +12,19 @@ services:
       - ./data/openwebui:/app/backend/data
       - ./config:/app/config:ro  # Read-only config
     environment:
-      - OLLAMA_HOST=${OLLAMA_HOST}
+      - OLLAMA_HOST=http://localhost:11434
       - USE_CUDA=true
       - USE_CUDA_DOCKER=true
       - TRANSFORMERS_CACHE=/tmp/transformers_cache
       - HF_HOME=/tmp/hf_cache
+      # Performance Optimizations for faster Ollama communication
+      - AIOHTTP_CLIENT_TIMEOUT=300
+      - AIOHTTP_CLIENT_TIMEOUT_MODEL_LIST=60
+      - MODELS_CACHE_TTL=10  # Cache model list for 10 seconds to reduce repeated calls
+      - ENABLE_BASE_MODELS_CACHE=true  # Cache base models for faster loading
+      # Reduce OpenWebUI overhead for model requests
+      - CHAT_RESPONSE_STREAM_DELTA_CHUNK_SIZE=4  # Larger chunks for better streaming performance
+      - BYPASS_MODEL_ACCESS_CONTROL=true  # Skip access control checks for faster requests
     deploy:
       resources:
         reservations:
@@ -87,3 +95,42 @@ services:
       timeout: 10s
       retries: 3
       start_period: 60s
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    network_mode: service:openwebui
+    volumes:
+      - ./data/ollama:/root/.ollama
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      # Optimized Ollama settings for faster response to OpenWebUI
+      - OLLAMA_KEEP_ALIVE=20m  # Keep models in memory longer
+      - OLLAMA_HOST=0.0.0.0:11434
+      - OLLAMA_ORIGINS=*
+      - OLLAMA_MAX_LOADED_MODELS=2  # Allow multiple models to stay loaded
+      - OLLAMA_NUM_PARALLEL=2  # Allow parallel requests
+      - OLLAMA_FLASH_ATTENTION=1  # Enable flash attention for faster inference
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+    pull_policy: always
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      openwebui:
+        condition: service_healthy
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
