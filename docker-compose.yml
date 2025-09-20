@@ -106,10 +106,10 @@ services:
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
       # Optimized Ollama settings for faster response to OpenWebUI
-      - OLLAMA_KEEP_ALIVE=5m  # Keep models in memory longer
+      - OLLAMA_KEEP_ALIVE=20m  # Keep models in memory longer
       - OLLAMA_HOST=0.0.0.0:11434
       - OLLAMA_ORIGINS=*
-      - OLLAMA_MAX_LOADED_MODELS=3  # Allow multiple models to stay loaded
+      - OLLAMA_MAX_LOADED_MODELS=2  # Allow multiple models to stay loaded
       - OLLAMA_NUM_PARALLEL=2  # Allow parallel requests
       - OLLAMA_FLASH_ATTENTION=1  # Enable flash attention for faster inference
     deploy:
