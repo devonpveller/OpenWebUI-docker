@@ -141,6 +141,20 @@ docker compose exec tailscale tailscale --socket=/tmp/tailscaled.sock status 2>n
 echo.
 echo [INFO] Tailscale Serve Status:
 docker compose exec tailscale tailscale --socket=/tmp/tailscaled.sock serve status 2>nul
+echo.
+echo [INFO] Service Accessibility Check:
+docker compose exec tailscale wget -q -T 3 -O /dev/null http://127.0.0.1:8080 2>nul
+if %ERRORLEVEL% EQU 0 (
+    echo [SUCCESS] OpenWebUI accessibility: OK
+) else (
+    echo [ERROR] OpenWebUI accessibility: FAILED
+)
+docker compose exec tailscale wget -q -T 3 -O /dev/null http://127.0.0.1:11434/api/version 2>nul
+if %ERRORLEVEL% EQU 0 (
+    echo [SUCCESS] Ollama API accessibility: OK
+) else (
+    echo [ERROR] Ollama API accessibility: FAILED
+)
 goto :end
 
 :usage
