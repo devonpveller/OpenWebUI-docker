@@ -107,12 +107,30 @@ fi
 echo "🌐 Configuring Tailscale serve..."
 # Clear any existing serve config and set up fresh
 tailscale --socket=/tmp/tailscaled.sock serve reset
+
+# Configure OpenWebUI at root path
 tailscale --socket=/tmp/tailscaled.sock serve \
   --https=443 \
   --bg \
   http://127.0.0.1:8080
 
-echo "✅ Tailscale serve configured for HTTPS on port 443 -> 127.0.0.1:8080"
+# Wait a moment and then configure Ollama API at /ollama path
+sleep 2
+echo "🤖 Configuring Ollama API access..."
+if wget -q -T 5 -O /dev/null http://127.0.0.1:11434/api/version; then
+    tailscale --socket=/tmp/tailscaled.sock serve \
+      --https=443 \
+      --set-path=/ollama \
+      --bg \
+      http://127.0.0.1:11434
+    echo "✅ Ollama API configured at /ollama"
+else
+    echo "⚠️ Ollama not responding, skipping serve configuration"
+fi
+
+echo "✅ Tailscale serve configured:"
+echo "  - OpenWebUI: HTTPS port 443 -> 127.0.0.1:8080"
+echo "  - Ollama API: HTTPS port 443/ollama -> 127.0.0.1:11434"
 
 # 8) Background monitoring loop for autonomous recovery
 (
@@ -139,13 +157,35 @@ echo "✅ Tailscale serve configured for HTTPS on port 443 -> 127.0.0.1:8080"
             sleep 10
             
             # Reconfigure serve if needed
-            if ! tailscale --socket=/tmp/tailscaled.sock serve status | grep -q "127.0.0.1:8080"; then
+            serve_status=$(tailscale --socket=/tmp/tailscaled.sock serve status)
+            if ! echo "$serve_status" | grep -q "127.0.0.1:8080"; then
                 echo "🔄 $(date): Reconfiguring serve..."
                 tailscale --socket=/tmp/tailscaled.sock serve reset || true
+                
+                # Reconfigure OpenWebUI
                 tailscale --socket=/tmp/tailscaled.sock serve \
                   --https=443 \
                   --bg \
                   http://127.0.0.1:8080 || true
+                
+                # Reconfigure Ollama API if available
+                if wget -q -T 5 -O /dev/null http://127.0.0.1:11434/api/version; then
+                    tailscale --socket=/tmp/tailscaled.sock serve \
+                      --https=443 \
+                      --set-path=/ollama \
+                      --bg \
+                      http://127.0.0.1:11434 || true
+                fi
+            elif ! echo "$serve_status" | grep -q "127.0.0.1:11434"; then
+                # Ollama serve is missing, try to add it
+                echo "🔄 $(date): Adding missing Ollama serve configuration..."
+                if wget -q -T 5 -O /dev/null http://127.0.0.1:11434/api/version; then
+                    tailscale --socket=/tmp/tailscaled.sock serve \
+                      --https=443 \
+                      --set-path=/ollama \
+                      --bg \
+                      http://127.0.0.1:11434 || true
+                fi
             fi
         fi
     done
@@ -157,6 +197,10 @@ tailscale --socket=/tmp/tailscaled.sock status || echo "⚠️ Status check fail
 echo ""
 echo "🌐 Serve configuration:"
 tailscale --socket=/tmp/tailscaled.sock serve status || echo "⚠️ Serve status check failed"
+echo ""
+echo "🔗 Access URLs (via Tailnet):"
+echo "  - OpenWebUI: https://$(tailscale --socket=/tmp/tailscaled.sock status --json | grep '\"Name\"' | cut -d'"' -f4 2>/dev/null || echo 'your-hostname').tail[...].ts.net/"
+echo "  - Ollama API: https://$(tailscale --socket=/tmp/tailscaled.sock status --json | grep '\"Name\"' | cut -d'"' -f4 2>/dev/null || echo 'your-hostname').tail[...].ts.net/ollama"
 
 # 9) Keep the container running
 tail -f /dev/null

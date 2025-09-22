@@ -90,7 +90,7 @@ services:
     labels:
       - "com.centurylinklabs.watchtower.enable=false"
     healthcheck:
-      test: ["CMD", "sh", "-c", "tailscale --socket=/tmp/tailscaled.sock status >/dev/null 2>&1 && ping -c 1 8.8.8.8 >/dev/null 2>&1"]
+      test: ["CMD", "sh", "-c", "tailscale --socket=/tmp/tailscaled.sock status >/dev/null 2>&1 && ping -c 1 8.8.8.8 >/dev/null 2>&1 && wget -q -T 3 -O /dev/null http://127.0.0.1:8080 && wget -q -T 3 -O /dev/null http://127.0.0.1:11434/api/version"]
       interval: 30s
       timeout: 10s
       retries: 3
