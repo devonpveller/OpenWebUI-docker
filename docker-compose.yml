@@ -39,8 +39,6 @@ services:
     read_only: false  # OpenWebUI needs write access for temp files
     tmpfs:
       - /tmp:noexec,nosuid,size=100m
-    labels:
-      - "com.centurylinklabs.watchtower.lifecycle.post-update=/post-update-hook.sh"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080"]
       interval: 5s
@@ -64,7 +62,6 @@ services:
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true             # Prevent privilege escalation
-    command: ["openwebui"]  # Monitor only the openwebui container by name
 
   tailscale:
     build:
@@ -106,7 +103,7 @@ services:
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
       # Optimized Ollama settings for faster response to OpenWebUI
-      - OLLAMA_KEEP_ALIVE=20m  # Keep models in memory longer
+      - OLLAMA_KEEP_ALIVE=1200  # Keep models in memory longer (20 minutes in seconds)
       - OLLAMA_HOST=0.0.0.0:11434
       - OLLAMA_ORIGINS=*
       - OLLAMA_MAX_LOADED_MODELS=2  # Allow multiple models to stay loaded
