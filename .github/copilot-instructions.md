@@ -31,6 +31,33 @@ Docker Engine → OpenWebUI (healthy) → Tailscale (shared network) → Watchto
 - Environment variables: `USE_CUDA=true`, `USE_CUDA_DOCKER=true`
 - **Never use pre-built OpenWebUI images** - breaks GPU acceleration for reranker models
 
+**Critical Update Process for New OpenWebUI Versions:**
+1. **Check base image compatibility**: Update `FROM ghcr.io/open-webui/open-webui:latest` to specific version tag
+2. **Verify CUDA compatibility**: Ensure PyTorch CUDA version matches your NVIDIA drivers
+3. **Test GPU availability**: Always run `python -c "import torch; print('CUDA available:', torch.cuda.is_available())"` after updates
+4. **Rebuild custom image**: Use `docker compose build --no-cache openwebui` for version updates
+5. **Monitor reranker performance**: GPU acceleration should show in container logs during model loading
+
+**Version Pinning Strategy:**
+```dockerfile
+# Pin to specific version for stability
+FROM ghcr.io/open-webui/open-webui:v0.3.21  # Replace with current stable
+# Always use cu121 index for CUDA 12.1+ compatibility
+RUN pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+```
+
+**GPU Troubleshooting Commands:**
+```bash
+# Verify NVIDIA runtime availability
+docker run --rm --gpus all nvidia/cuda:12.1-base-ubuntu22.04 nvidia-smi
+
+# Check OpenWebUI GPU detection
+docker compose exec openwebui python -c "import torch; print('GPU count:', torch.cuda.device_count()); print('GPU name:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'None')"
+
+# Monitor GPU usage during reranker operations
+docker compose exec openwebui nvidia-smi
+```
+
 ### Custom Tailscale Integration
 **Files**: `dockerfile.tailscale`, `entrypoint.sh`
 - Custom Alpine build with socat
@@ -71,6 +98,8 @@ Docker Engine → OpenWebUI (healthy) → Tailscale (shared network) → Watchto
 - **Security-first**: `no-new-privileges:true`, localhost-only ports, read-only mounts
 - **Health checks**: All services have comprehensive health validation
 - **Dependency management**: `depends_on` with `condition: service_healthy`
+- **Custom builds only**: Never use pre-built images for `openwebui` or `tailscale` - breaks GPU and VPN functionality
+- **Network namespace sharing**: `network_mode: service:openwebui` in Tailscale service creates shared networking
 
 ### Configuration Management
 - **Environment variables**: `.env` file (excluded from git)
@@ -79,17 +108,37 @@ Docker Engine → OpenWebUI (healthy) → Tailscale (shared network) → Watchto
 
 ## Critical Debugging Knowledge
 
-### GPU Integration Issues (New Critical Area)
-**Symptoms**: Reranker models using CPU instead of GPU, CUDA not available
-**Root cause**: Default OpenWebUI images have CPU-only PyTorch
-**Quick fix**:
-```bash
-# Check GPU availability
-docker compose exec openwebui python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
+### GPU Integration Issues (Critical for OpenWebUI Updates)
+**Symptoms**: Reranker models using CPU instead of GPU, CUDA not available, slow embedding generation
+**Root causes**: 
+- Default OpenWebUI images ship with CPU-only PyTorch
+- CUDA version mismatch between PyTorch and NVIDIA drivers
+- Missing `USE_CUDA=true` environment variables
+- GPU memory exhaustion from other processes
 
-# GPU-specific recovery
-.\scripts\emergency-recovery.ps1 -Action gpu-reset
+**Diagnostic Commands**:
+```bash
+# Check GPU availability in container (most important)
+docker compose exec openwebui python -c "import torch; print('CUDA available:', torch.cuda.is_available()); print('GPU count:', torch.cuda.device_count()); print('GPU memory:', torch.cuda.get_device_properties(0).total_memory if torch.cuda.is_available() else 'N/A')"
+
+# Verify NVIDIA Container Toolkit
+docker run --rm --gpus all nvidia/cuda:12.1-base-ubuntu22.04 nvidia-smi
+
+# Check host GPU status
+nvidia-smi
 ```
+
+**Recovery Steps**:
+1. **Immediate fix**: `.\scripts\emergency-recovery.ps1 -Action gpu-reset`
+2. **Rebuild custom image**: `docker compose build --no-cache openwebui`
+3. **Update PyTorch version**: Edit `Dockerfile.openwebui-gpu` with compatible CUDA index
+4. **Clear GPU cache**: Restart containers to free GPU memory
+
+**Version Update Workflow for OpenWebUI**:
+1. **Never use Watchtower** for OpenWebUI updates - always manual rebuild
+2. **Pin base image version** in `Dockerfile.openwebui-gpu` to avoid breaking changes
+3. **Test GPU after updates**: Run diagnostic commands before deploying
+4. **Monitor performance**: Check embedding generation speed and reranker logs
 
 ### Network Namespace Issues (Most Common)
 **Symptoms**: "Network unreachable", Tailscale can't connect to DERP servers
@@ -113,48 +162,48 @@ docker compose up -d tailscale
 
 ## Essential Commands
 
+### Quick Diagnostics & Recovery (Most Important)
+```powershell
+# Quick targeted fixes (start here for common issues)
+scripts\quick-fixes.bat namespace    # Network namespace reset (most common)
+scripts\quick-fixes.bat gpu         # GPU availability check and restart
+scripts\quick-fixes.bat status      # System overview
+scripts\quick-fixes.bat nuclear     # Complete restart as last resort
+
+# Advanced PowerShell recovery with comprehensive health checks
+.\scripts\emergency-recovery.ps1 -Action recover  # Standard recovery
+.\scripts\emergency-recovery.ps1 -Action gpu-reset  # GPU-specific issues
+```
+
 ### Health Diagnostics
 ```bash
-# Quick system check
-docker compose ps && docker compose exec tailscale tailscale status
+# System health overview
+docker compose ps
 
-# GPU availability check (critical for OpenWebUI)
+# GPU availability check (critical for OpenWebUI reranker models)
 docker compose exec openwebui python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
 
-# Network connectivity test (most important)
+# Network connectivity test (most common failure point)
 docker compose exec tailscale ping -c 1 8.8.8.8
 
-# Serve configuration check
-docker compose exec tailscale tailscale serve status
+# Tailscale status and serve configuration
+docker compose exec tailscale tailscale --socket=/tmp/tailscaled.sock status
+docker compose exec tailscale tailscale --socket=/tmp/tailscaled.sock serve status
 ```
 
-### Recovery Operations
+### Recovery Operations (Graduated Response)
 ```bash
-# Quick targeted fixes (most efficient)
-scripts\quick-fixes.bat namespace    # Network issues
-scripts\quick-fixes.bat gpu         # GPU issues
-scripts\quick-fixes.bat status      # System overview
-
-# Standard Tailscale restart
+# 1. Simple restart (try first)
 docker compose restart tailscale
 
-# Full namespace recovery
-docker compose down tailscale && docker compose up -d tailscale
+# 2. Full namespace recovery (most effective for network issues)
+docker compose down tailscale; docker compose up -d tailscale
 
-# Advanced PowerShell recovery with health checks
-.\scripts\emergency-recovery.ps1 -Action recover
+# 3. Rebuild custom images (for deeper issues)
+docker compose build --no-cache; docker compose up -d
 
-# Nuclear option (rebuilds custom images)
-docker compose build --no-cache && docker compose up -d
-```
-
-### Windows Monitoring
-```powershell
-# Start background monitor (no admin required)
-.\scripts\simple-monitor.ps1 -Action start
-
-# Install Windows service (requires admin)
-.\scripts\install-service.ps1 -Action install
+# 4. Monitor background processes
+.\scripts\simple-monitor.ps1 -Action start  # No admin required
 ```
 
 ## File Organization Patterns
@@ -178,29 +227,61 @@ docker compose build --no-cache && docker compose up -d
 - `data/openwebui/`: User data and conversations
 - `data/openwebui-models/`: Custom model definitions with GPU configurations
 
+### Critical File Dependencies
+- **Never edit**: `Dockerfile.openwebui-gpu` without understanding PyTorch CUDA requirements
+  - Must uninstall CPU-only PyTorch: `pip uninstall -y torch torchvision torchaudio`
+  - Must use CUDA index: `--index-url https://download.pytorch.org/whl/cu121`
+  - Version compatibility critical: Match PyTorch CUDA version to NVIDIA drivers
+- **Line endings matter**: `entrypoint.sh` uses `dos2unix` conversion in `dockerfile.tailscale`
+- **Environment template**: Always create `.env` from `.env.example` - contains auth key expiration dates
+- **Override behavior**: `docker-compose.override.yml` handles Watchtower coordination for updates
+- **Windows-specific**: All PowerShell scripts use `[CmdletBinding()]` and structured logging
+- **GPU passthrough**: `docker-compose.yml` deploy.resources.reservations.devices section required for GPU access
+
 ## Common Workflow Patterns
+
+### Emergency Response Workflow (Use This Order)
+1. **Quick Assessment**: `scripts\quick-fixes.bat status` - Get system overview
+2. **Most Common Fix**: `scripts\quick-fixes.bat namespace` - Reset network namespace
+3. **GPU Issues**: `scripts\quick-fixes.bat gpu` - Check and restart GPU services
+4. **Advanced Recovery**: `.\scripts\emergency-recovery.ps1 -Action recover` - Full health checks
+5. **Last Resort**: `scripts\quick-fixes.bat nuclear` - Complete system restart
+
+### Development Workflow
+```powershell
+# Safe testing without affecting production
+docker compose -f docker-compose.yml -f docker-compose.override.yml up -d
+
+# Check container build status
+docker compose build --dry-run
+
+# Monitor logs during development
+docker compose logs -f tailscale  # Most failure-prone service
+```
 
 ### Safe Updates
 1. Always backup `data/` directory first
-2. Update images: `docker compose pull` (excludes Tailscale)
+2. Update images: `docker compose pull` (excludes custom Tailscale/OpenWebUI builds)
 3. Restart services: `docker compose up -d`
-4. Verify Tailscale connectivity after updates
+4. **Critical**: Verify Tailscale connectivity after updates using namespace reset
 
-### Troubleshooting Workflow
-1. Check service health: `docker compose ps`
-2. Test GPU availability: `docker compose exec openwebui python -c "import torch; print('CUDA available:', torch.cuda.is_available())"`
-3. Test network connectivity from Tailscale container
-4. Examine logs for namespace/DERP connection issues or GPU errors
-5. Apply graduated recovery (restart → rebuild → reset state)
-   - Quick fixes: `scripts\quick-fixes.bat [namespace|gpu|status]`
-   - Advanced recovery: `.\scripts\emergency-recovery.ps1 -Action recover`
-   - Nuclear option: `.\scripts\emergency-recovery.ps1 -Action nuclear`
+### Troubleshooting Decision Tree
+```
+Issue → Start Here:
+├── "Network unreachable" → scripts\quick-fixes.bat namespace
+├── "CUDA not available" → scripts\quick-fixes.bat gpu  
+├── Reranker models slow/CPU-only → Check: docker compose exec openwebui python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
+├── OpenWebUI update broke GPU → Rebuild: docker compose build --no-cache openwebui
+├── General slowness → Check logs: docker compose logs --tail=50 openwebui
+├── Containers not starting → docker compose ps; check dependencies
+└── Unknown/Complex → .\scripts\emergency-recovery.ps1 -Action recover
+```
 
 ## Security Considerations
 
 ### Secrets Management
-- **Tailscale auth keys**: Rotate before expiration (currently Aug 28, 2025)
-- **Environment isolation**: All secrets in `.env`, excluded from git
+- **Tailscale auth keys**: Rotate before expiration (check `.env.example` for current expiry)
+- **Environment isolation**: All secrets in `.env` (create from `.env.example`), excluded from git
 - **Audit trail**: Structured logging for security events
 
 ### Container Hardening
