@@ -22,7 +22,13 @@ Docker Engine → OpenWebUI (healthy) → Tailscale (shared network) → Watchto
 - **openwebui**: AI chat interface (port 3000→8080) with GPU-accelerated reranker models
 - **ollama**: LLM server (port 11434)  
 - **tailscale**: VPN access via custom build (`dockerfile.tailscale` + `entrypoint.sh`)
-- **watchtower**: Auto-updates (excluded from Tailscale to prevent breaks)
+- **watchtower**: Auto-updates (excluded from Tailscale to prevent breaks, **CANNOT update OpenWebUI custom builds**)
+
+**⚠️ CRITICAL: Watchtower Limitation with Custom Builds**
+- Watchtower monitors `openwebui` but CANNOT update custom-built containers
+- The `openwebui` service uses `build: dockerfile: Dockerfile.openwebui-gpu` (no `image:` field)
+- Post-update hooks will NEVER trigger for OpenWebUI updates via Watchtower
+- **All OpenWebUI updates must be manual** - edit Dockerfile base image and rebuild
 
 ### Custom OpenWebUI GPU Integration
 **Files**: `Dockerfile.openwebui-gpu`, `docker-compose.yml`
@@ -135,10 +141,11 @@ nvidia-smi
 4. **Clear GPU cache**: Restart containers to free GPU memory
 
 **Version Update Workflow for OpenWebUI**:
-1. **Never use Watchtower** for OpenWebUI updates - always manual rebuild
-2. **Pin base image version** in `Dockerfile.openwebui-gpu` to avoid breaking changes
-3. **Test GPU after updates**: Run diagnostic commands before deploying
-4. **Monitor performance**: Check embedding generation speed and reranker logs
+1. **Watchtower CANNOT update OpenWebUI** - custom builds are ignored by Watchtower
+2. **Manual updates required**: Edit `Dockerfile.openwebui-gpu` to update base image version
+3. **Rebuild process**: `docker compose build --no-cache openwebui && docker compose up -d`
+4. **Post-rebuild testing**: Run GPU diagnostic commands before considering deployment complete
+5. **Monitor performance**: Check embedding generation speed and reranker logs
 
 ### Network Namespace Issues (Most Common)
 **Symptoms**: "Network unreachable", Tailscale can't connect to DERP servers
