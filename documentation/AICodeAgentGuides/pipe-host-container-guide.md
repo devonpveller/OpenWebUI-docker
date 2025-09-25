@@ -1,6 +1,6 @@
 # Open WebUI Pipe Template: Exposing Host Scripts to AI Stack
 
-This guide enables autonomous coding agents and developers to expose Python scripts running on the host machine to **Open WebUI** through **Pipe Functions** in your containerized AI stack. This template is specifically designed for the ai-stack workspace with GPU-enabled OpenWebUI, Ollama, and Tailscale integration.
+This guide enables autonomous coding agents and developers to expose Python scripts running on the host machine to **Open WebUI** through **Pipe Functions** in your containerized AI stack. This template provides a bridge between your local Python development environment and the containerized AI services, allowing seamless integration of custom tools, automation scripts, and system management functions.
 
 ---
 ## 1. AI Stack Integration Setup
@@ -19,27 +19,44 @@ services:
       - "127.0.0.1:3000:8080"  # Localhost only (security hardened)
     volumes:
       - ./data/openwebui:/app/backend/data
-      - ./config:/app/config:ro
+      - ./config:/app/config:ro  # Matches your actual mount path
       - ./scripts:/host_scripts:ro  # NEW: Expose scripts directory
       # Alternative: Mount any directory with your Python scripts
       # - D:/my_python_scripts:/host_scripts:ro
     environment:
-      - OLLAMA_HOST=http://localhost:11434
+      - OLLAMA_HOST=http://localhost:11434  # Correct - both services share network namespace
       - USE_CUDA=true
       - USE_CUDA_DOCKER=true
+      - TRANSFORMERS_CACHE=/tmp/transformers_cache
+      - HF_HOME=/tmp/hf_cache
       # ... rest of your existing environment variables
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=100m
+    depends_on:
+      openwebui:
+        condition: service_healthy
 ```
 
 ### Security Considerations for AI Stack
 - **Read-only mount**: Scripts are mounted with `:ro` flag for security
 - **Localhost binding**: Maintains your security-hardened localhost-only approach
 - **No new privileges**: Consistent with your `no-new-privileges:true` security model
-- **Tailscale isolation**: Scripts remain isolated within the shared network namespace
+- **Container isolation**: Scripts remain isolated within the container environment
 
 ### Setup Steps
 1. **Add volume mount** to your existing `docker-compose.yml` (see above)
 2. **Restart OpenWebUI**: `docker compose up -d openwebui`
-3. **Access OpenWebUI** at `https://your-tailscale-ip` (via your Tailscale setup)
+3. **Access OpenWebUI** at `https://openwebui.tail37f875.ts.net`
 4. **Go to Admin → Functions → New Function**
 5. **Paste the enhanced pipe template** (below)
 6. **Configure valves** from the gear ⚙️ icon
@@ -48,7 +65,7 @@ services:
 ---
 ## 2. Enhanced Pipe Function Template for AI Stack
 
-This template is optimized for your GPU-enabled environment and autonomous recovery patterns:
+This template provides a robust foundation for exposing host Python scripts to OpenWebUI, with examples optimized for your GPU-enabled environment and recovery automation:
 
 ```python
 from __future__ import annotations
@@ -82,7 +99,7 @@ class Pipe:
         )
         LOG_EXECUTION: bool = Field(
             default=True,
-            description="Log script execution for debugging (follows your structured logging pattern)."
+            description="Log script execution for debugging and monitoring."
         )
         
         @field_validator("EXEC_MODE")
@@ -232,9 +249,9 @@ class Pipe:
 ```
 
 ---
-## 3. AI Stack Optimized Directory Structure
+## 3. AI Stack Directory Structure for Local Script Access
 
-Place scripts in your existing `scripts/` directory or create a dedicated structure:
+Place scripts in your existing `scripts/` directory to expose them to OpenWebUI:
 
 ```
 d:\Open WebUI\ai-stack\
@@ -244,12 +261,12 @@ d:\Open WebUI\ai-stack\
 │   │   ├── config.json          # Central configuration
 │   │   ├── emergency_recovery_pipe.py  # Integrate with your recovery system
 │   │   ├── gpu_status_pipe.py   # GPU monitoring integration
-│   │   ├── tailscale_status_pipe.py    # Tailscale health checks
-│   │   └── system_health_pipe.py       # Overall system status
+│   │   ├── system_health_pipe.py       # Overall system status
+│   │   └── custom_tools_pipe.py        # Your custom automation scripts
 │   ├── utilities\               # Enhanced version of existing utilities
 │   │   ├── __init__.py
 │   │   ├── docker_helpers.py    # Docker compose operations
-│   │   ├── network_helpers.py   # Network namespace utilities
+│   │   ├── system_helpers.py    # System monitoring utilities
 │   │   └── gpu_helpers.py       # GPU availability checks
 │   ├── templates\               # Templates for new pipe scripts
 │   │   ├── ai_stack_cli_template.py
@@ -261,7 +278,9 @@ d:\Open WebUI\ai-stack\
 ```
 
 ---
-## 4. AI Stack Integration Examples
+## 4. Practical Integration Examples
+
+These examples demonstrate common use cases for exposing host scripts to OpenWebUI:
 
 ### Emergency Recovery Integration
 ```python
@@ -275,11 +294,12 @@ def main(payload):
     user_input = payload.get("input", "").lower()
     
     recovery_actions = {
-        "namespace": "quick-fixes.bat namespace",
-        "gpu": "quick-fixes.bat gpu", 
-        "status": "quick-fixes.bat status",
-        "tailscale": "emergency-recovery.ps1 -Action recover",
-        "nuclear": "emergency-recovery.ps1 -Action nuclear"
+        "namespace": "scripts\\quick-fixes.bat namespace",
+        "gpu": "scripts\\quick-fixes.bat gpu", 
+        "status": "scripts\\quick-fixes.bat status",
+        "nuclear": "scripts\\quick-fixes.bat nuclear",
+        "tailscale": "scripts\\emergency-recovery.ps1 -Action recover",
+        "advanced": "scripts\\emergency-recovery.ps1 -Action nuclear"
     }
     
     for keyword, command in recovery_actions.items():
@@ -325,42 +345,50 @@ def main(payload):
     return device_info
 ```
 
-### Tailscale Status Integration
+### System Health Integration
 ```python
-# scripts/ai_pipes/tailscale_status_pipe.py
+# scripts/ai_pipes/system_health_pipe.py
 import subprocess
 import json
+import psutil  # Add psutil to your host Python environment
 
 def main(payload):
-    """Check Tailscale connectivity status"""
+    """Overall system health check"""
     try:
-        # This would be executed inside the container that shares network namespace
-        result = subprocess.run(
-            ["tailscale", "status", "--json"],
+        # Check Docker service status
+        docker_result = subprocess.run(
+            ["docker", "compose", "ps", "--format", "json"],
             capture_output=True,
             text=True,
-            timeout=10
+            timeout=10,
+            cwd="d:\\Open WebUI\\ai-stack"  # Your actual path
         )
         
-        if result.returncode == 0:
-            status_data = json.loads(result.stdout)
-            return {
-                "status": "✅ Tailscale Connected",
-                "backend_state": status_data.get("BackendState", "unknown"),
-                "self": status_data.get("Self", {}),
-                "peer_count": len(status_data.get("Peer", {}))
-            }
-        else:
-            return {
-                "status": "❌ Tailscale Error",
-                "error": result.stderr,
-                "recovery_suggestion": "Run: docker compose restart tailscale"
-            }
+        health_data = {
+            "timestamp": payload.get("timestamp", "unknown"),
+            "docker_services": "✅ Running" if docker_result.returncode == 0 else "❌ Issues detected",
+            "cpu_usage": f"{psutil.cpu_percent()}%",
+            "memory_usage": f"{psutil.virtual_memory().percent}%",
+            "disk_usage": f"{psutil.disk_usage('D:').percent}%",  # Adjust drive as needed
+            "gpu_status": "✅ Available" if torch.cuda.is_available() else "❌ Not Available"
+        }
+        
+        if docker_result.returncode == 0:
+            # Parse container status if available
+            try:
+                containers = json.loads(docker_result.stdout)
+                health_data["container_count"] = len(containers)
+                health_data["services"] = [c.get("Service", "unknown") for c in containers]
+            except:
+                health_data["containers"] = "Status parsing failed"
+        
+        return health_data
+        
     except Exception as e:
         return {
-            "status": "❌ Tailscale Check Failed",
+            "status": "❌ Health Check Failed",
             "error": str(e),
-            "recovery_suggestion": "Check if Tailscale container is running"
+            "suggestion": "Check if Docker is running and accessible"
         }
 ```
 
@@ -376,12 +404,12 @@ services:
     # ... your existing configuration
     volumes:
       - ./data/openwebui:/app/backend/data
-      - ./config:/app/config:ro
+      - ./config:/app/config:ro  # Matches your actual mount path
       - ./scripts:/host_scripts:ro  # NEW: Mount scripts directory
 ```
 
 ### Pipe Function Configuration in OpenWebUI
-1. Access OpenWebUI at `https://your-tailscale-ip` (via your Tailscale setup)
+1. Access OpenWebUI at `https://openwebui.tail37f875.ts.net`
 2. Go to **Admin → Functions → New Function**
 3. Paste the enhanced pipe template
 4. Configure valves:
@@ -471,17 +499,19 @@ def main(payload):
 ```
 
 ---
-## 6. Autonomous Agent Integration Points
+## 6. Local Script Access Integration Points
 
-### Recovery System Integration
-- **Quick Fixes**: Scripts can trigger your `quick-fixes.bat` commands
-- **PowerShell Recovery**: Integration with `emergency-recovery.ps1`
-- **Health Monitoring**: Pipe functions can report to your monitoring system
+### Primary Purpose: Host-Container Bridge
+- **Script Execution**: Run host Python scripts from within OpenWebUI conversations
+- **Development Integration**: Connect local development tools to AI interface
+- **Automation Bridge**: Trigger host-based automation from AI conversations
+- **System Management**: Access system utilities through conversational interface
 
-### GPU Awareness
-- **CUDA Integration**: Leverages your custom OpenWebUI GPU build
-- **Performance Monitoring**: Can report GPU utilization and memory usage
-- **Recovery Triggers**: Can detect GPU issues and suggest recovery actions
+### Practical Getting-Started Examples
+- **GPU Monitoring**: Check CUDA availability and GPU memory usage
+- **System Recovery**: Trigger emergency recovery scripts when issues detected
+- **Docker Management**: Check container health and restart services
+- **Custom Tools**: Integrate your existing Python utilities and automation
 
 ### Security Compliance
 - **Read-only Mounts**: Maintains your security-hardened approach
@@ -490,28 +520,29 @@ def main(payload):
 
 ### Monitoring Integration
 - **Structured Logging**: Compatible with your existing log formats
-- **Health Checks**: Can integrate with your Tailscale and Docker health monitoring
+- **Health Checks**: Can integrate with your Docker Compose health checks
 - **Background Monitoring**: Can work with your `simple-monitor.ps1` system
 
 ---
-## 7. Best Practices for AI Stack Environment
+## 7. Best Practices for Local Script Integration
 
-1. **GPU Resource Management**: Scripts should check GPU availability before intensive operations
-2. **Recovery Integration**: Include recovery suggestions in error responses
+1. **Script Organization**: Structure scripts in logical directories under `/scripts/ai_pipes/`
+2. **Error Handling**: Include comprehensive error handling and recovery suggestions
 3. **Logging Consistency**: Use structured logging compatible with your monitoring
 4. **Security Awareness**: Maintain read-only script access and localhost-only networking
 5. **Windows Compatibility**: Ensure scripts work with your PowerShell-based tooling
-6. **Tailscale Awareness**: Scripts can provide network connectivity status
+6. **Resource Management**: Check system resources before intensive operations
 7. **Docker Integration**: Scripts can interact with your Docker Compose setup
 
-### Implementation Workflow for Autonomous Agents
+### Implementation Workflow for Local Script Access
 
-When adapting scripts to this framework:
+When creating pipe functions for host script access:
 
-1. **Identify Integration Points**:
-   - Does script need GPU access? → Enable `ENABLE_GPU_CHECK`
-   - Does script need recovery capabilities? → Use emergency recovery patterns
-   - Does script need network status? → Integrate with Tailscale checks
+1. **Identify Script Purpose**:
+   - System monitoring → Use `import` mode with structured data return
+   - Command execution → Use `subprocess` mode for CLI tools
+   - Data processing → Use `import` mode with payload processing
+   - Custom utilities → Choose mode based on script complexity
 
 2. **Choose Execution Mode**:
    - Interactive/complex logic → Use `import` mode with library template
@@ -523,10 +554,10 @@ When adapting scripts to this framework:
    - Include proper error handling and timeouts
 
 4. **Testing Approach**:
-   - Test GPU availability checks
-   - Verify recovery command suggestions
-   - Validate logging output format
-   - Check Tailscale network namespace compatibility
+   - Test script execution from host environment first
+   - Verify volume mount accessibility
+   - Validate error handling and logging output
+   - Check integration with your existing tooling
 
-This enhanced framework provides robust integration with your containerized AI stack while maintaining security, GPU optimization, and autonomous recovery capabilities. The pipe functions can serve as both tools for users and integration points for autonomous agents managing your AI infrastructure.
+This enhanced framework provides robust integration between your local development environment and containerized AI stack. The pipe functions serve as a bridge for accessing host Python scripts through OpenWebUI's conversational interface, enabling seamless integration of custom tools, automation scripts, and system management functions. The GPU monitoring, recovery automation, and system health examples provide practical starting points for common use cases.
 ```
