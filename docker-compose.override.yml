@@ -2,13 +2,6 @@
 # This file ensures Tailscale automatically restarts when OpenWebUI is updated
 
 services:
-  # Add Watchtower labels to coordinate updates
-  openwebui:
-    labels:
-      - "com.centurylinklabs.watchtower.depends-on=tailscale"
-      - "com.centurylinklabs.watchtower.lifecycle.pre-update=docker compose stop tailscale"
-      - "com.centurylinklabs.watchtower.lifecycle.post-update=docker compose up -d tailscale"
-  
   # Enhanced Tailscale configuration for autonomous operation
   tailscale:
     # Restart policy that handles failures

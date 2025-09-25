@@ -22,13 +22,13 @@ Docker Engine → OpenWebUI (healthy) → Tailscale (shared network) → Watchto
 - **openwebui**: AI chat interface (port 3000→8080) with GPU-accelerated reranker models
 - **ollama**: LLM server (port 11434)  
 - **tailscale**: VPN access via custom build (`dockerfile.tailscale` + `entrypoint.sh`)
-- **watchtower**: Auto-updates (excluded from Tailscale to prevent breaks, **CANNOT update OpenWebUI custom builds**)
+- **watchtower**: Auto-updates (monitors Ollama only, OpenWebUI excluded due to custom GPU build)
 
 **⚠️ CRITICAL: Watchtower Limitation with Custom Builds**
-- Watchtower monitors `openwebui` but CANNOT update custom-built containers
+- Watchtower is configured to skip OpenWebUI - custom builds cannot be auto-updated
 - The `openwebui` service uses `build: dockerfile: Dockerfile.openwebui-gpu` (no `image:` field)
-- Post-update hooks will NEVER trigger for OpenWebUI updates via Watchtower
 - **All OpenWebUI updates must be manual** - edit Dockerfile base image and rebuild
+- Watchtower only monitors standard image-based services (Ollama)
 
 ### Custom OpenWebUI GPU Integration
 **Files**: `Dockerfile.openwebui-gpu`, `docker-compose.yml`
@@ -43,6 +43,33 @@ Docker Engine → OpenWebUI (healthy) → Tailscale (shared network) → Watchto
 3. **Test GPU availability**: Always run `python -c "import torch; print('CUDA available:', torch.cuda.is_available())"` after updates
 4. **Rebuild custom image**: Use `docker compose build --no-cache openwebui` for version updates
 5. **Monitor reranker performance**: GPU acceleration should show in container logs during model loading
+
+**Manual Update Workflow (Required - Watchtower Cannot Update Custom Builds):**
+```bash
+# 1. Check for new OpenWebUI releases
+curl -s https://api.github.com/repos/open-webui/open-webui/releases/latest | grep '"tag_name"'
+
+# 2. Backup data directory (critical step)
+cp -r ./data ./data-backup-$(date +%Y%m%d)
+
+# 3. Update Dockerfile.openwebui-gpu base image
+# Edit: FROM ghcr.io/open-webui/open-webui:v0.X.X (replace with new version)
+
+# 4. Rebuild with clean cache
+docker compose build --no-cache openwebui
+
+# 5. Test build before deployment
+docker compose up -d openwebui
+
+# 6. Validate GPU functionality
+docker compose exec openwebui python -c "import torch; print('CUDA available:', torch.cuda.is_available()); print('GPU count:', torch.cuda.device_count())"
+
+# 7. Monitor container logs for CUDA initialization
+docker compose logs openwebui | grep -i cuda
+
+# 8. Test reranker performance (should use GPU)
+# Access OpenWebUI and test embedding generation speed
+```
 
 **Version Pinning Strategy:**
 ```dockerfile
@@ -139,6 +166,25 @@ nvidia-smi
 2. **Rebuild custom image**: `docker compose build --no-cache openwebui`
 3. **Update PyTorch version**: Edit `Dockerfile.openwebui-gpu` with compatible CUDA index
 4. **Clear GPU cache**: Restart containers to free GPU memory
+
+**Manual Update Troubleshooting:**
+```bash
+# Build failed with CUDA errors
+docker compose build --no-cache --progress=plain openwebui  # Verbose output
+
+# GPU not available after update
+docker compose exec openwebui nvidia-smi  # Check GPU visibility
+docker compose exec openwebui python -c "import torch; print(torch.version.cuda)"  # Check PyTorch CUDA version
+
+# Container won't start after update
+docker compose logs openwebui  # Check startup errors
+docker compose exec openwebui python -c "import torch; print('Import successful')"  # Test PyTorch import
+
+# Rollback to previous version
+# 1. Restore data backup: rm -rf ./data && mv ./data-backup-YYYYMMDD ./data
+# 2. Revert Dockerfile.openwebui-gpu to previous base image version  
+# 3. Rebuild: docker compose build --no-cache openwebui && docker compose up -d
+```
 
 **Version Update Workflow for OpenWebUI**:
 1. **Watchtower CANNOT update OpenWebUI** - custom builds are ignored by Watchtower
@@ -298,3 +344,22 @@ Issue → Start Here:
 - Docker socket access is read-only where possible
 
 When working on this codebase, prioritize understanding the network namespace sharing pattern and autonomous recovery mechanisms - these are the most complex and failure-prone aspects of the system. Additionally, be aware of the custom GPU integration for OpenWebUI which requires specific Docker build contexts and environment variables to function properly.
+
+## Quick Reference Summary
+
+### Most Common Issues & Solutions:
+1. **Network connectivity lost** → `scripts\quick-fixes.bat namespace`
+2. **GPU not available** → `scripts\quick-fixes.bat gpu`  
+3. **OpenWebUI needs update** → Manual rebuild process (see Manual Update Workflow above)
+4. **General system issues** → `.\scripts\emergency-recovery.ps1 -Action recover`
+
+### Key Files to Never Edit Without Understanding:
+- `Dockerfile.openwebui-gpu` - GPU PyTorch replacement logic
+- `entrypoint.sh` - Tailscale startup with line ending handling  
+- `docker-compose.yml` - Network namespace sharing configuration
+- `.env` - Contains auth keys with expiration dates
+
+### Advanced Topics:
+- **Automated Update Strategy**: See `documentation/AICodeAgentGuides/hybrid-openwebui-update-approach.md`
+- **Recovery System Architecture**: 8-tier redundancy from quick fixes to Windows services
+- **Security Hardening**: Container isolation, localhost-only binding, read-only mounts
