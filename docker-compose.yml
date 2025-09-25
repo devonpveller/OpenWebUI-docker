@@ -39,8 +39,6 @@ services:
     read_only: false  # OpenWebUI needs write access for temp files
     tmpfs:
       - /tmp:noexec,nosuid,size=100m
-    labels:
-      - "com.centurylinklabs.watchtower.lifecycle.post-update=/post-update-hook.sh"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080"]
       interval: 5s
@@ -64,7 +62,6 @@ services:
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true             # Prevent privilege escalation
-    command: ["openwebui"]  # Monitor only the openwebui container by name
 
   tailscale:
     build:
