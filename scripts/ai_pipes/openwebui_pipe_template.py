@@ -271,6 +271,40 @@ class Pipe:
                         if action.get("execution_note"):
                             formatted_lines.append(f"Note: {action['execution_note']}")
                 
+                # Handle help system responses
+                if "help_type" in result and "service" in result:
+                    formatted_lines.append(f"**{result['service']}**")
+                    
+                    if "overview" in result:
+                        overview = result["overview"]
+                        formatted_lines.append(f"\n{overview.get('description', '')}")
+                        if overview.get("capabilities"):
+                            formatted_lines.append(f"\n**Capabilities:**")
+                            for cap in overview["capabilities"]:
+                                formatted_lines.append(f"• {cap}")
+                    
+                    if "quick_start" in result:
+                        quick = result["quick_start"] 
+                        formatted_lines.append(f"\n**Quick Start:**")
+                        for key, value in quick.items():
+                            formatted_lines.append(f"• {value}")
+                    
+                    if "pipe_functions" in result:
+                        formatted_lines.append(f"\n**Available Pipe Functions:**")
+                        for pipe_name, pipe_info in result["pipe_functions"].items():
+                            formatted_lines.append(f"\n**{pipe_info['name']}:**")
+                            formatted_lines.append(f"• {pipe_info['description']}")
+                            if pipe_info.get("commands"):
+                                example_cmds = pipe_info["commands"][:2]  # Show first 2
+                                formatted_lines.append(f"• Try: '{example_cmds[0]}' or '{example_cmds[1] if len(example_cmds) > 1 else example_cmds[0]}'")
+                    
+                    if "conversational_examples" in result:
+                        formatted_lines.append(f"\n**Conversational Examples:**")
+                        for category, data in result["conversational_examples"].items():
+                            formatted_lines.append(f"\n**{data['category']}:**")
+                            for example in data["examples"][:3]:  # Show first 3
+                                formatted_lines.append(f"• \"{example}\"")
+                
                 # Add timestamp if available
                 if "timestamp" in result:
                     formatted_lines.append(f"\n*Updated: {result['timestamp']}*")
