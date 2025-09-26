@@ -1,28 +1,47 @@
 """
 AI Stack Refactored Router - Core Infrastructure
 
-This is the new manifest-driven router based on the refactoring guide.
+This implements the intended manifest-driven router architecture from the refactoring guide.
 Implements explicit contracts, module isolation, and comprehensive observability.
 """
 
 from __future__ import annotations
-import asyncio
 import json
-import jsonschema
 import logging
 import os
 import sys
 import time
 import uuid
+import importlib.util
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 from dataclasses import dataclass, asdict
 from enum import Enum
 
-# Add paths for existing modules during migration
-sys.path.append('/host_scripts/ai_pipes')
-sys.path.append('/host_scripts')
+# Environment-aware path setup for container vs host
+if os.path.exists('/host_project/scripts'):
+    # Container environment - use project mount
+    sys.path.append('/host_project/scripts/ai_pipes')
+    sys.path.append('/host_project/scripts')
+    MODULES_DIR = '/host_project/modules'
+    SCHEMAS_DIR = '/host_project/schemas'
+else:
+    # Host environment - use relative paths
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.dirname(current_dir)  # core -> ai-stack
+    sys.path.append(os.path.join(project_root, 'scripts', 'ai_pipes'))
+    sys.path.append(os.path.join(project_root, 'scripts'))
+    MODULES_DIR = os.path.join(project_root, 'modules')
+    SCHEMAS_DIR = os.path.join(project_root, 'schemas')
+
+# Try to import jsonschema, fall back gracefully if not available
+try:
+    import jsonschema
+    JSONSCHEMA_AVAILABLE = True
+except ImportError:
+    JSONSCHEMA_AVAILABLE = False
+    logging.warning("⚠️ jsonschema not available - schema validation disabled")
 
 class ModuleStatus(Enum):
     READY = "ready"
@@ -82,13 +101,17 @@ class ModuleResult:
 class SchemaValidator:
     """JSON Schema validation for envelopes"""
     
-    def __init__(self, schema_dir: str = "/host_scripts/schemas"):
-        self.schema_dir = Path(schema_dir)
+    def __init__(self, schema_dir: Optional[str] = None):
+        self.schema_dir = Path(schema_dir or SCHEMAS_DIR)
         self._schemas = {}
         self._load_schemas()
     
     def _load_schemas(self):
         """Load all schema files"""
+        if not JSONSCHEMA_AVAILABLE:
+            logging.warning("⚠️ Schema validation disabled - jsonschema not available")
+            return
+            
         try:
             schema_files = {
                 "request_envelope": self.schema_dir / "request_envelope.schema.json",
@@ -108,8 +131,8 @@ class SchemaValidator:
     
     def validate_request(self, request_data: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
         """Validate request envelope against schema"""
-        if "request_envelope" not in self._schemas:
-            return True, None  # Skip validation if schema not loaded
+        if not JSONSCHEMA_AVAILABLE or "request_envelope" not in self._schemas:
+            return True, None  # Skip validation if schema not available
         
         try:
             jsonschema.validate(request_data, self._schemas["request_envelope"])
@@ -119,23 +142,10 @@ class SchemaValidator:
         except Exception as e:
             return False, f"Validation error: {str(e)}"
     
-    def validate_result(self, result_data: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
-        """Validate result envelope against schema"""
-        if "module_result" not in self._schemas:
-            return True, None  # Skip validation if schema not loaded
-        
-        try:
-            jsonschema.validate(result_data, self._schemas["module_result"])
-            return True, None
-        except jsonschema.ValidationError as e:
-            return False, f"Result validation error: {e.message}"
-        except Exception as e:
-            return False, f"Validation error: {str(e)}"
-
     def validate_manifest(self, manifest_data: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
         """Validate module manifest against schema"""
-        if "module_manifest" not in self._schemas:
-            return True, None  # Skip validation if schema not loaded
+        if not JSONSCHEMA_AVAILABLE or "module_manifest" not in self._schemas:
+            return True, None  # Skip validation if schema not available
         
         try:
             jsonschema.validate(manifest_data, self._schemas["module_manifest"])
@@ -145,11 +155,110 @@ class SchemaValidator:
         except Exception as e:
             return False, f"Validation error: {str(e)}"
 
+class DirectModuleAdapter:
+    """Direct execution adapter for Python modules"""
+    
+    def __init__(self, logger):
+        self.logger = logger
+    
+    def execute(self, manifest: Dict[str, Any], request: RequestEnvelope) -> ModuleResult:
+        """Execute module directly"""
+        try:
+            module_slug = manifest["slug"]
+            entry_path = manifest["entry"]["path"]
+            
+            # Resolve the full path to the module file
+            if os.path.isabs(entry_path) and os.path.exists(entry_path):
+                module_path = entry_path
+            else:
+                # Handle relative paths - if entry_path already includes directory structure, use as-is
+                if entry_path.startswith('service/'):
+                    module_path = os.path.join(MODULES_DIR, module_slug, entry_path)
+                else:
+                    # Default to service directory for bare filenames
+                    module_path = os.path.join(MODULES_DIR, module_slug, "service", entry_path)
+            
+            if not os.path.exists(module_path):
+                return ModuleResult(
+                    request_id=request.request_id,
+                    module_id=module_slug,
+                    status=ExecutionStatus.ERROR,
+                    content=f"❌ Module file not found: {module_path}",
+                    error={"code": "MODULE_NOT_FOUND", "message": f"Module file not found: {module_path}"}
+                )
+            
+            # Load and execute module
+            spec = importlib.util.spec_from_file_location(f"_{module_slug}_module", module_path)
+            if spec is None or spec.loader is None:
+                return ModuleResult(
+                    request_id=request.request_id,
+                    module_id=module_slug,
+                    status=ExecutionStatus.ERROR,
+                    content=f"❌ Cannot load module: {module_path}",
+                    error={"code": "MODULE_LOAD_ERROR", "message": f"Cannot load module: {module_path}"}
+                )
+            
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            
+            # Execute the module's main function
+            if not hasattr(module, 'main'):
+                return ModuleResult(
+                    request_id=request.request_id,
+                    module_id=module_slug,
+                    status=ExecutionStatus.ERROR,
+                    content=f"❌ Module missing 'main' function: {module_slug}",
+                    error={"code": "MISSING_ENTRYPOINT", "message": f"Module missing 'main' function"}
+                )
+            
+            # Convert request to legacy format for existing modules during migration
+            legacy_payload = {
+                "input": str(request.input),
+                "user_id": request.user["id"],
+                "timestamp": request.timestamp,
+                "messages": request.context.get("messages", []) if request.context else []
+            }
+            
+            # Execute module
+            result = module.main(legacy_payload)
+            
+            # Convert result to new envelope format
+            if isinstance(result, dict) and result.get("module_id"):
+                # Already in new format
+                return ModuleResult(
+                    request_id=request.request_id,
+                    module_id=result.get("module_id", module_slug),
+                    status=ExecutionStatus.OK if result.get("status") == "ok" else ExecutionStatus.ERROR,
+                    content=result.get("content", str(result)),
+                    structured_data=result.get("structured_data"),
+                    diagnostics=result.get("diagnostics")
+                )
+            else:
+                # Legacy format - convert
+                content = result.get("content") if isinstance(result, dict) else str(result)
+                return ModuleResult(
+                    request_id=request.request_id,
+                    module_id=module_slug,
+                    status=ExecutionStatus.OK,
+                    content=content,
+                    structured_data=result if isinstance(result, dict) else None
+                )
+                
+        except Exception as e:
+            self.logger.error(f"❌ Module execution error {module_slug}: {e}")
+            return ModuleResult(
+                request_id=request.request_id,
+                module_id=manifest.get("slug", "unknown"),
+                status=ExecutionStatus.ERROR,
+                content=f"❌ Execution error: {str(e)}",
+                error={"code": "EXECUTION_ERROR", "message": str(e)}
+            )
+
 class ModuleRegistry:
     """Registry for managing module manifests and discovery"""
     
-    def __init__(self, modules_dir: str = "/host_scripts/modules"):
-        self.modules_dir = Path(modules_dir)
+    def __init__(self, modules_dir: Optional[str] = None):
+        self.modules_dir = Path(modules_dir or MODULES_DIR)
         self.modules: Dict[str, Dict[str, Any]] = {}
         self.module_status: Dict[str, ModuleStatus] = {}
         self.validator = SchemaValidator()
@@ -167,6 +276,49 @@ class ModuleRegistry:
                 manifest_file = module_path / "module.manifest.json"
                 if manifest_file.exists():
                     self._load_module_manifest(manifest_file)
+                else:
+                    # Try to create a default manifest for existing modules
+                    self._create_default_manifest(module_path)
+    
+    def _create_default_manifest(self, module_path: Path):
+        """Create a default manifest for legacy modules"""
+        module_name = module_path.name
+        service_dir = module_path / "service"
+        
+        # Look for Python files in service directory
+        if service_dir.exists():
+            py_files = list(service_dir.glob("*.py"))
+            if py_files:
+                main_file = py_files[0].name  # Use first Python file
+                
+                default_manifest = {
+                    "slug": module_name,
+                    "name": module_name.replace("-", " ").title(),
+                    "version": "1.0.0",
+                    "description": f"Legacy module {module_name}",
+                    "entry": {
+                        "kind": "python",
+                        "path": main_file
+                    },
+                    "capabilities": [],
+                    "schema": {
+                        "input": {},
+                        "output": {}
+                    },
+                    "limits": {
+                        "timeout_ms": 30000
+                    },
+                    "help": {
+                        "short": f"Legacy {module_name} module",
+                        "long": f"Automatically generated manifest for legacy module {module_name}"
+                    },
+                    "routerCompatibility": "v1.0.0"
+                }
+                
+                # Store in memory (don't write to disk)
+                self.modules[module_name] = default_manifest
+                self.module_status[module_name] = ModuleStatus.READY
+                self.logger.info(f"✅ Generated default manifest for legacy module: {module_name}")
     
     def _load_module_manifest(self, manifest_file: Path):
         """Load and validate a single module manifest"""
@@ -176,7 +328,7 @@ class ModuleRegistry:
             
             # Validate manifest
             is_valid, error = self.validator.validate_manifest(manifest)
-            if not is_valid:
+            if not is_valid and JSONSCHEMA_AVAILABLE:
                 self.logger.error(f"❌ Invalid manifest {manifest_file}: {error}")
                 return
             
@@ -210,12 +362,6 @@ class ModuleRegistry:
             slug: manifest for slug, manifest in self.modules.items()
             if self.module_status.get(slug) == ModuleStatus.READY
         }
-    
-    def update_module_status(self, slug: str, status: ModuleStatus):
-        """Update module status"""
-        if slug in self.modules:
-            self.module_status[slug] = status
-            self.logger.info(f"📊 Module {slug} status: {status.value}")
 
 class AIStackRouter:
     """Main router implementing the refactored architecture"""
@@ -231,16 +377,14 @@ class AIStackRouter:
         """Setup structured logging"""
         logging.basicConfig(
             level=logging.INFO,
-            format='%(asctime)s - %(name)s - %(levelname)s - [%(request_id)s] %(message)s',
+            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
             datefmt='%Y-%m-%d %H:%M:%S'
         )
         return logging.getLogger("ai_stack_router")
     
     def _setup_adapters(self):
         """Setup execution adapters"""
-        # For now, use legacy adapter for backward compatibility
-        from .legacy_adapter import LegacyModuleAdapter
-        self._execution_adapters["legacy"] = LegacyModuleAdapter(self.logger)
+        self._execution_adapters["direct"] = DirectModuleAdapter(self.logger)
     
     def create_request_envelope(self, user_input: str, user_data: Dict[str, Any], 
                               additional_data: Optional[Dict[str, Any]] = None) -> RequestEnvelope:
@@ -258,9 +402,22 @@ class AIStackRouter:
                 "permissions": user_data.get("permissions", [])
             },
             input=user_input,
-            session=additional_data.get("session") if additional_data else None,
+            session=additional_data.get("session") or {
+                "conversation_id": "default",
+                "turn_number": 1
+            } if additional_data else {
+                "conversation_id": "default",
+                "turn_number": 1
+            },
+            timezone="UTC",  # Provide default timezone instead of None
             attachments=additional_data.get("attachments", []) if additional_data else [],
-            context=additional_data.get("context") if additional_data else None
+            context=additional_data.get("context") or {
+                "prior_turns": [],
+                "system_hints": {}
+            } if additional_data else {
+                "prior_turns": [],
+                "system_hints": {}
+            }
         )
     
     def route_request(self, request: RequestEnvelope) -> ModuleResult:
@@ -279,14 +436,14 @@ class AIStackRouter:
             # Check module availability
             module_manifest = self.registry.get_module(target_module)
             if not module_manifest:
-                # Fallback to legacy routing for backward compatibility
-                return self._legacy_route(request)
+                return self._create_error_result(request.request_id, target_module,
+                                               "MODULE_NOT_FOUND", f"Module {target_module} not found")
             
             # Execute module
             return self._execute_module(target_module, request)
             
         except Exception as e:
-            self.logger.error(f"❌ Router error: {e}", extra={"request_id": request.request_id})
+            self.logger.error(f"❌ Router error: {e}")
             return self._create_error_result(request.request_id, "router", 
                                            "EXECUTION_ERROR", str(e))
     
@@ -294,12 +451,12 @@ class AIStackRouter:
         """Analyze input to determine target module"""
         if isinstance(user_input, dict):
             # Structured input - check for explicit module
-            return user_input.get("module", "help")
+            return user_input.get("module", "help-system")
         
         # Text analysis for routing
         input_lower = str(user_input).lower()
         
-        # Define routing patterns
+        # Define routing patterns (following original design)
         if any(keyword in input_lower for keyword in ["gpu", "cuda", "graphics", "nvidia"]):
             return "gpu-status"
         elif any(keyword in input_lower for keyword in ["recovery", "fix", "repair", "emergency"]):
@@ -309,7 +466,7 @@ class AIStackRouter:
         elif any(keyword in input_lower for keyword in ["tools", "available", "commands"]):
             return "custom-tools"
         else:
-            return "help"
+            return "help-system"
     
     def _execute_module(self, module_slug: str, request: RequestEnvelope) -> ModuleResult:
         """Execute a specific module"""
@@ -318,69 +475,15 @@ class AIStackRouter:
             return self._create_error_result(request.request_id, module_slug, 
                                            "MODULE_NOT_FOUND", f"Module {module_slug} not found")
         
-        # Determine execution adapter
-        entry_kind = module_manifest["entry"]["kind"]
-        adapter = self._execution_adapters.get("legacy")  # Use legacy for now
+        # Use direct execution adapter
+        adapter = self._execution_adapters.get("direct")
         
         if not adapter:
             return self._create_error_result(request.request_id, module_slug, 
-                                           "NO_ADAPTER", f"No adapter for {entry_kind}")
+                                           "NO_ADAPTER", f"No execution adapter available")
         
         # Execute module
         return adapter.execute(module_manifest, request)
-    
-    def _legacy_route(self, request: RequestEnvelope) -> ModuleResult:
-        """Fallback to legacy routing during migration"""
-        try:
-            # Import and use existing router for backward compatibility
-            from ai_stack_router import router as legacy_router
-            
-            # Convert to legacy format
-            legacy_payload = {
-                "input": str(request.input),
-                "user_id": request.user["id"],
-                "timestamp": request.timestamp,
-                "messages": []  # Default empty
-            }
-            
-            # Execute legacy router
-            result = legacy_router.route_request(str(request.input), legacy_payload)
-            
-            # Convert result to new format
-            return ModuleResult(
-                request_id=request.request_id,
-                module_id="legacy-router",
-                status=ExecutionStatus.OK,
-                content=self._format_legacy_result(result),
-                structured_data=result if isinstance(result, dict) else None,
-                timestamp=datetime.now(timezone.utc).isoformat()
-            )
-            
-        except Exception as e:
-            return self._create_error_result(request.request_id, "legacy-router", 
-                                           "LEGACY_ERROR", str(e))
-    
-    def _format_legacy_result(self, result: Any) -> str:
-        """Format legacy result for display"""
-        if isinstance(result, dict):
-            # Extract meaningful content from legacy format
-            if "status" in result and result["status"] == "error":
-                return f"❌ **Error**: {result.get('message', 'Unknown error')}"
-            
-            # Format structured result
-            content_parts = []
-            if "service" in result:
-                content_parts.append(f"**{result['service']}**")
-            
-            if "message" in result:
-                content_parts.append(result["message"])
-            
-            if "description" in result:
-                content_parts.append(result["description"])
-            
-            return "\n\n".join(content_parts) if content_parts else str(result)
-        
-        return str(result)
     
     def _create_error_result(self, request_id: str, module_id: str, 
                            error_code: str, error_message: str) -> ModuleResult:
@@ -406,10 +509,10 @@ class AIStackRouter:
             "status": "operational",
             "available_modules": {
                 slug: {
-                    "name": manifest["name"],
+                    "name": manifest.get("name", slug),
                     "description": manifest.get("description", ""),
                     "capabilities": manifest.get("capabilities", []),
-                    "version": manifest["version"]
+                    "version": manifest.get("version", "1.0.0")
                 }
                 for slug, manifest in ready_modules.items()
             },
@@ -444,6 +547,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
             "structured_data": result.structured_data,
             "request_id": result.request_id,
             "timestamp": result.timestamp,
+            "module_id": result.module_id,
             **(result.error or {})
         }
         

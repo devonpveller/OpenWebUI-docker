@@ -415,7 +415,7 @@ class RouterTester:
 class RegressionTester:
     """Regression testing between legacy and refactored systems"""
     
-    def __init__(self, legacy_router: str = "/host_scripts/ai_pipes/ai_stack_router.py",
+    def __init__(self, legacy_router: str = "/host_project/core/router.py",
                  refactored_router: str = "/host_scripts/core/router.py"):
         self.legacy_router = Path(legacy_router)
         self.refactored_router = Path(refactored_router)

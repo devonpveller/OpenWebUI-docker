@@ -2,6 +2,21 @@
 
 This is a containerized AI stack with OpenWebUI, Ollama, and Tailscale VPN running via Docker Compose. The project emphasizes security hardening, autonomous recovery, Windows/PowerShell workflows, and **AI Stack pipe functions** for intelligent system management.
 
+## 🚨 CRITICAL CODING GUIDELINES
+
+### File Management & Architecture
+- **NEVER create "refactored_" variations** of existing files (e.g., `refactored_router.py`, `refactored_module.py`)
+- **Instead**: Directly refactor the original file in place (e.g., update `router.py` directly)
+- **NEVER create legacy placeholder files** - remove redundant files immediately
+- **Consolidate functionality** into single canonical files rather than maintaining duplicates
+- **Clean up redundant files** after refactoring (remove old versions, clean `__pycache__` directories)
+
+### Architecture Patterns
+- Use **manifest-driven architecture** with JSON Schema validation
+- Implement **single entry points** rather than multiple similar files
+- Follow **explicit contracts** with versioned schemas
+- Maintain **environment-aware paths** for container vs host operation
+
 ## Architecture Overview
 
 **Service Dependencies Flow:**
@@ -13,9 +28,9 @@ Docker Engine → OpenWebUI (healthy) → Tailscale (shared network) → Watchto
 
 **AI Stack Pipe Function Architecture:**
 ```
-OpenWebUI → unified_openwebui_pipe.py → ai_stack_router.py → [gpu_status_pipe, emergency_recovery_pipe, system_health_pipe, custom_tools_pipe, help_pipe]
-                                                      ↓
-                                              Refactored System: core/router.py → modules/ (manifest-driven)
+OpenWebUI → unified_openwebui_pipe.py → core/router.py → modules/ (manifest-driven)
+                                              ↓
+                                    [gpu-status, system-health, emergency-recovery, custom-tools, help-system]
 ```
 
 **Critical Network Pattern:**
@@ -24,10 +39,10 @@ OpenWebUI → unified_openwebui_pipe.py → ai_stack_router.py → [gpu_status_p
 - This is the **most common recurring issue** requiring autonomous recovery
 
 **AI Stack Pipe Function Integration:**
-- Scripts mounted at `/host_scripts:ro` in OpenWebUI container for security
-- **Single unified pipe function** replaces multiple separate pipe functions
-- Intelligent natural language routing: "Check GPU status" → `gpu_status_pipe.py`
-- **Dual architecture**: Legacy (`scripts/ai_pipes/`) + Refactored (`core/`, `modules/`, `schemas/`)
+- Project mounted at `.:/host_project:ro` in OpenWebUI container for complete access
+- **Single unified pipe function** with manifest-driven architecture
+- Intelligent natural language routing: "Check GPU status" → `gpu-status` module
+- **Consolidated architecture**: Single `core/router.py` with modules in `/modules/` directory
 
 ## Core Components
 
@@ -38,30 +53,25 @@ OpenWebUI → unified_openwebui_pipe.py → ai_stack_router.py → [gpu_status_p
 - **watchtower**: Auto-updates (monitors Ollama only, OpenWebUI excluded due to custom GPU build)
 
 **⚠️ CRITICAL: AI Stack Pipe Functions Mount**
-- OpenWebUI container **MUST** have `./scripts:/host_scripts:ro` volume mount
-- **Read-only security**: Scripts are mounted with `:ro` flag for container isolation
-- **Path dependency**: All pipe modules expect `/host_scripts/ai_pipes/` structure
+- OpenWebUI container **MUST** have `.:/host_project:ro` volume mount
+- **Read-only security**: Project is mounted with `:ro` flag for container isolation
+- **Path dependency**: All pipe modules expect `/host_project/` structure
 - **Single entry point**: Use only `unified_openwebui_pipe.py` in OpenWebUI Functions
 
 ### AI Stack Pipe Function System
 **Files**: `scripts/ai_pipes/`, `core/`, `modules/`, `schemas/`, `tools/`
 
-**Legacy System (Production)**:
+**Current Architecture (Production)**:
 - `unified_openwebui_pipe.py`: Single OpenWebUI integration point
-- `ai_stack_router.py`: Intelligent routing with keyword analysis  
-- Individual modules: `gpu_status_pipe.py`, `emergency_recovery_pipe.py`, `system_health_pipe.py`, `custom_tools_pipe.py`, `help_pipe.py`
-
-**Refactored System (Development)**:
-- `core/router.py`: Manifest-driven router with JSON Schema validation
-- `schemas/*.json`: Request/response contracts and module manifests
-- `modules/`: Independent modules with explicit capability definitions
-- `tools/`: Migration automation, scaffolding, and validation utilities
+- `core/router.py`: Manifest-driven router with JSON Schema validation and DirectModuleAdapter
+- `modules/`: Independent modules with `module.manifest.json` contracts
+- `schemas/`: JSON Schema definitions for validation
 
 **Critical Architecture Patterns**:
-- **Natural Language Routing**: "Check GPU status" → keyword analysis → `gpu_status_pipe.py`
-- **Dual System Coexistence**: Legacy production + refactored development with migration path
+- **Natural Language Routing**: "Check GPU status" → keyword analysis → `gpu-status` module
+- **Manifest-Driven System**: All modules discovered via `module.manifest.json` files
 - **Container Security**: All pipe execution happens within GPU-enabled OpenWebUI container
-- **Schema Validation**: Refactored system uses JSON Schema for all communications
+- **Schema Validation**: JSON Schema validation for all communications
 
 **⚠️ CRITICAL: Watchtower Limitation with Custom Builds**
 - Watchtower is configured to skip OpenWebUI - custom builds cannot be auto-updated

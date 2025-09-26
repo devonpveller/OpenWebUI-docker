@@ -99,7 +99,7 @@ class HelpSystemModule:
                     "pipe_function_not_working": {
                         "symptoms": ["Pipe function not accessible", "Module not found", "Import errors"],
                         "cause": "Scripts not mounted or incorrect volume configuration",
-                        "solution": "Check: docker compose exec openwebui ls /host_scripts/ai_pipes/",
+                        "solution": "Check: docker compose exec openwebui ls /host_project/scripts/ai_pipes/",
                         "explanation": "Verify script mount and container access"
                     }
                 }
@@ -111,7 +111,7 @@ class HelpSystemModule:
                     "description": "Current production system using intelligent routing",
                     "components": [
                         "unified_openwebui_pipe.py - Single OpenWebUI integration point",
-                        "ai_stack_router.py - Intelligent routing based on keyword analysis",
+                        "router.py - Manifest-driven router with intelligent routing",
                         "Individual pipe modules for specific capabilities"
                     ]
                 },
@@ -133,9 +133,9 @@ class HelpSystemModule:
                     "docker compose exec openwebui python -c \"import torch; print('CUDA available:', torch.cuda.is_available())\" - GPU check"
                 ],
                 "pipe_function_testing": [
-                    "docker compose exec openwebui ls /host_scripts/ai_pipes/ - Verify script mount",
-                    "docker compose exec openwebui python /host_scripts/ai_pipes/unified_openwebui_pipe.py - Test unified pipe",
-                    "docker compose exec openwebui python /host_scripts/ai_pipes/ai_stack_router.py '{\"input\": \"gpu status\"}' - Test router"
+                    "docker compose exec openwebui ls /host_project/scripts/ai_pipes/ - Verify script mount",
+                    "docker compose exec openwebui python /host_project/scripts/ai_pipes/unified_openwebui_pipe.py - Test unified pipe",
+                    "docker compose exec openwebui python /host_project/core/router.py '{\"input\": \"gpu status\"}' - Test router"
                 ],
                 "development": [
                     "python tools/validation_tool.py --all - Validate schemas and modules",
