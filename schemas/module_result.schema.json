@@ -1,0 +1,155 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://aistack.dev/schemas/module_result/v1",
+  "title": "AI Stack Module Result Envelope",
+  "description": "Response envelope from AI Stack modules",
+  "type": "object",
+  "required": ["request_id", "module_id", "status", "content"],
+  "properties": {
+    "request_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Matching request ID from request envelope"
+    },
+    "module_id": {
+      "type": "string",
+      "description": "Module identifier that processed the request"
+    },
+    "status": {
+      "type": "string",
+      "enum": ["ok", "error", "partial", "streaming_end"],
+      "description": "Execution status"
+    },
+    "content": {
+      "type": "string",
+      "description": "Primary response content in markdown format"
+    },
+    "structured_data": {
+      "type": "object",
+      "description": "Optional structured data for programmatic consumption"
+    },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["file", "model", "data", "config"]
+          },
+          "path": {
+            "type": "string",
+            "description": "Artifact location"
+          },
+          "description": {
+            "type": "string",
+            "description": "Artifact description"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Artifact expiration time"
+          }
+        }
+      },
+      "description": "Generated artifacts from module execution"
+    },
+    "events": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "description": "Event type"
+          },
+          "data": {
+            "type": "object",
+            "description": "Event data"
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Event timestamp"
+          }
+        }
+      },
+      "description": "Events generated during execution"
+    },
+    "usage": {
+      "type": "object",
+      "properties": {
+        "cpu_time_ms": {
+          "type": "integer",
+          "description": "CPU time consumed in milliseconds"
+        },
+        "memory_mb": {
+          "type": "number",
+          "description": "Memory consumed in megabytes"
+        },
+        "tokens": {
+          "type": "integer",
+          "description": "Tokens processed"
+        },
+        "operations": {
+          "type": "integer",
+          "description": "Operations performed"
+        }
+      },
+      "description": "Resource usage information"
+    },
+    "diagnostics": {
+      "type": "object",
+      "properties": {
+        "execution_time_ms": {
+          "type": "integer",
+          "description": "Total execution time in milliseconds"
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Warning messages"
+        },
+        "debug_info": {
+          "type": "object",
+          "description": "Debug information"
+        },
+        "trace_id": {
+          "type": "string",
+          "description": "Distributed tracing ID"
+        }
+      },
+      "description": "Diagnostic information"
+    },
+    "error": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string",
+          "description": "Error code"
+        },
+        "message": {
+          "type": "string",
+          "description": "Human-readable error message"
+        },
+        "details": {
+          "type": "object",
+          "description": "Additional error details"
+        },
+        "retriable": {
+          "type": "boolean",
+          "description": "Whether the operation can be retried"
+        }
+      },
+      "required": ["code", "message"],
+      "description": "Error information (present when status is 'error')"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Response generation timestamp"
+    }
+  }
+}
