@@ -1,0 +1,145 @@
+{
+  "name": "GPU Status Monitor",
+  "slug": "gpu-status",
+  "version": "1.0.0",
+  "description": "Comprehensive GPU monitoring and diagnostics for AI Stack CUDA environment",
+  "author": "AI Stack Team",
+  "license": "MIT",
+  "entry": {
+    "kind": "cli",
+    "path": "service/gpu_status.py",
+    "function": "main"
+  },
+  "schema": {
+    "input": {
+      "type": "object",
+      "properties": {
+        "request_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "input": {
+          "oneOf": [
+            {
+              "type": "string",
+              "description": "Text query about GPU status"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "action": {
+                  "type": "string",
+                  "enum": ["status", "detailed", "diagnostics", "memory"],
+                  "description": "Specific GPU action to perform"
+                }
+              }
+            }
+          ]
+        },
+        "user": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            }
+          }
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["request_id", "input"]
+    },
+    "output": {
+      "type": "object",
+      "properties": {
+        "request_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "module_id": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["ok", "error", "partial", "streaming_end"]
+        },
+        "content": {
+          "type": "string",
+          "description": "Markdown-formatted GPU status information"
+        },
+        "structured_data": {
+          "type": "object",
+          "properties": {
+            "gpu_available": {
+              "type": "boolean"
+            },
+            "torch_available": {
+              "type": "boolean"
+            },
+            "cuda_version": {
+              "type": "string"
+            },
+            "gpu_count": {
+              "type": "integer"
+            },
+            "memory_info": {
+              "type": "object"
+            }
+          }
+        }
+      }
+    }
+  },
+  "capabilities": [
+    "system_monitoring",
+    "gpu_access"
+  ],
+  "limits": {
+    "timeout_ms": 15000,
+    "memory_mb": 128,
+    "cpu_cores": 0.5,
+    "input_size_mb": 1,
+    "concurrent_requests": 10
+  },
+  "environment": {
+    "kind": "venv",
+    "python_version": ">=3.8",
+    "dependencies": [
+      "torch",
+      "psutil"
+    ],
+    "gpu_required": true
+  },
+  "health": {
+    "probe_interval_ms": 30000,
+    "startup_timeout_ms": 10000
+  },
+  "help": {
+    "short": "Monitor GPU status and CUDA availability",
+    "long": "Provides comprehensive GPU monitoring including CUDA availability, memory usage, temperature, and PyTorch integration status. Optimized for AI Stack's custom GPU configuration.",
+    "examples": [
+      {
+        "input": "gpu status",
+        "description": "Get basic GPU availability and status"
+      },
+      {
+        "input": "gpu memory",
+        "description": "Check GPU memory usage and availability"
+      },
+      {
+        "input": "cuda diagnostics",
+        "description": "Detailed CUDA and PyTorch diagnostics"
+      }
+    ]
+  },
+  "permissions": {
+    "allowed_roles": ["user", "admin"],
+    "safety_rating": "SAFE"
+  },
+  "compatibility": {
+    "router_version": ">=1.0.0",
+    "openwebui_version": ">=0.3.0"
+  }
+}

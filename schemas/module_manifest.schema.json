@@ -1,0 +1,292 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://aistack.dev/schemas/module_manifest/v1",
+  "title": "AI Stack Module Manifest",
+  "description": "Module manifest defining capabilities, schemas, and execution requirements",
+  "type": "object",
+  "required": ["name", "slug", "version", "entry", "schema", "capabilities"],
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "Human-readable module name"
+    },
+    "slug": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]*$",
+      "description": "Unique module identifier (lowercase, hyphens/underscores allowed)"
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(-[a-zA-Z0-9.-]+)?$",
+      "description": "Semantic version"
+    },
+    "description": {
+      "type": "string",
+      "description": "Module description"
+    },
+    "author": {
+      "type": "string",
+      "description": "Module author"
+    },
+    "license": {
+      "type": "string",
+      "description": "License identifier"
+    },
+    "entry": {
+      "type": "object",
+      "required": ["kind", "path"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["cli", "http", "grpc"],
+          "description": "Execution interface type"
+        },
+        "path": {
+          "type": "string",
+          "description": "Entry point path (script, executable, or URL)"
+        },
+        "function": {
+          "type": "string",
+          "description": "Function name for Python modules"
+        },
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Default command line arguments"
+        }
+      }
+    },
+    "schema": {
+      "type": "object",
+      "required": ["input", "output"],
+      "properties": {
+        "input": {
+          "oneOf": [
+            {
+              "type": "string",
+              "format": "uri",
+              "description": "URI reference to input schema"
+            },
+            {
+              "type": "object",
+              "description": "Inline JSON Schema for input"
+            }
+          ]
+        },
+        "output": {
+          "oneOf": [
+            {
+              "type": "string",
+              "format": "uri",
+              "description": "URI reference to output schema"
+            },
+            {
+              "type": "object",
+              "description": "Inline JSON Schema for output"
+            }
+          ]
+        }
+      }
+    },
+    "capabilities": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "search", "vision", "audio", "file_processing", "code_generation",
+          "system_monitoring", "gpu_access", "network_access", "file_write",
+          "admin_operations", "security_sensitive", "data_analysis"
+        ]
+      },
+      "description": "Module capabilities for routing and security"
+    },
+    "limits": {
+      "type": "object",
+      "properties": {
+        "timeout_ms": {
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 300000,
+          "default": 30000,
+          "description": "Maximum execution timeout in milliseconds"
+        },
+        "memory_mb": {
+          "type": "integer",
+          "minimum": 64,
+          "maximum": 8192,
+          "default": 512,
+          "description": "Maximum memory allocation in megabytes"
+        },
+        "cpu_cores": {
+          "type": "number",
+          "minimum": 0.1,
+          "maximum": 8.0,
+          "default": 1.0,
+          "description": "CPU core allocation"
+        },
+        "input_size_mb": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100,
+          "default": 10,
+          "description": "Maximum input size in megabytes"
+        },
+        "concurrent_requests": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100,
+          "default": 5,
+          "description": "Maximum concurrent requests"
+        }
+      }
+    },
+    "auth": {
+      "type": "object",
+      "properties": {
+        "required_secrets": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Required secret keys"
+        },
+        "scopes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Required permission scopes"
+        }
+      }
+    },
+    "health": {
+      "type": "object",
+      "properties": {
+        "probe_endpoint": {
+          "type": "string",
+          "description": "Health check endpoint"
+        },
+        "probe_interval_ms": {
+          "type": "integer",
+          "default": 30000,
+          "description": "Health probe interval"
+        },
+        "startup_timeout_ms": {
+          "type": "integer",
+          "default": 60000,
+          "description": "Startup timeout"
+        }
+      }
+    },
+    "environment": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["venv", "container"],
+          "default": "venv",
+          "description": "Execution environment type"
+        },
+        "python_version": {
+          "type": "string",
+          "description": "Required Python version"
+        },
+        "dependencies": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Required packages or dependencies"
+        },
+        "container_image": {
+          "type": "string",
+          "description": "Container image (if kind=container)"
+        },
+        "gpu_required": {
+          "type": "boolean",
+          "default": false,
+          "description": "GPU access required"
+        }
+      }
+    },
+    "compatibility": {
+      "type": "object",
+      "properties": {
+        "router_version": {
+          "type": "string",
+          "description": "Compatible router version"
+        },
+        "openwebui_version": {
+          "type": "string",
+          "description": "Compatible OpenWebUI version"
+        }
+      }
+    },
+    "help": {
+      "type": "object",
+      "properties": {
+        "short": {
+          "type": "string",
+          "description": "Brief description for listings"
+        },
+        "long": {
+          "type": "string",
+          "description": "Detailed help text"
+        },
+        "examples": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "input": {
+                "type": "string",
+                "description": "Example input"
+              },
+              "description": {
+                "type": "string",
+                "description": "What this example demonstrates"
+              }
+            }
+          },
+          "description": "Usage examples"
+        }
+      }
+    },
+    "permissions": {
+      "type": "object",
+      "properties": {
+        "allowed_roles": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "User roles allowed to access this module"
+        },
+        "safety_rating": {
+          "type": "string",
+          "enum": ["SAFE", "CAUTION", "RESTRICTED", "DESTRUCTIVE"],
+          "default": "SAFE",
+          "description": "Safety classification"
+        }
+      }
+    },
+    "install": {
+      "type": "object",
+      "properties": {
+        "warmup_script": {
+          "type": "string",
+          "description": "Script to run for initialization"
+        },
+        "post_install": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Commands to run after installation"
+        }
+      }
+    }
+  }
+}
