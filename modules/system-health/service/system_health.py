@@ -72,23 +72,77 @@ class SystemHealthModule:
     def check_docker_services(self) -> Dict[str, Any]:
         """Check Docker service status"""
         try:
-            # In container context, we can only check our own container and possibly siblings
-            # This would need to be adapted based on actual deployment setup
+            # Check if Docker is actually available by running docker version
+            docker_available = False
+            docker_version = None
+            compose_available = False
+            
+            try:
+                # Test Docker availability
+                result = subprocess.run(
+                    ["docker", "version", "--format", "json"],
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
+                
+                if result.returncode == 0:
+                    docker_available = True
+                    try:
+                        import json
+                        version_data = json.loads(result.stdout)
+                        docker_version = version_data.get("Client", {}).get("Version", "Unknown")
+                    except:
+                        docker_version = "Available"
+                        
+            except Exception:
+                pass
+            
+            # Test Docker Compose availability
+            try:
+                result = subprocess.run(
+                    ["docker", "compose", "version"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5
+                )
+                compose_available = result.returncode == 0
+            except Exception:
+                pass
             
             service_status = {
-                "docker_available": True,  # If we're running, Docker is available
-                "current_container": "openwebui",  # Assuming we're in OpenWebUI container
-                "services_accessible": False,
-                "note": "Service checks limited in container context"
+                "docker_available": docker_available,
+                "docker_version": docker_version,
+                "compose_available": compose_available
             }
             
-            # Try to check if we can access docker socket (if mounted)
+            if docker_available:
+                # Try to get AI Stack specific services if we're in the right context
+                try:
+                    result = subprocess.run(
+                        ["docker", "compose", "ps", "--format", "json"],
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                        cwd=self.config["ai_stack"].get("workspace_root", ".")
+                    )
+                    
+                    if result.returncode == 0:
+                        service_status["ai_stack_services"] = "accessible"
+                        # Could parse JSON to get specific service status
+                    else:
+                        service_status["ai_stack_services"] = "not_accessible"
+                        service_status["note"] = "Docker available but AI Stack compose not accessible from current location"
+                        
+                except Exception as e:
+                    service_status["ai_stack_services"] = "unknown"
+                    service_status["note"] = f"Docker available but compose check failed: {str(e)[:100]}"
+            
+            # Check docker socket access (for container environments)
             if os.path.exists("/var/run/docker.sock"):
                 service_status["docker_socket_accessible"] = True
-                # Could potentially run docker commands here if socket is accessible
             else:
                 service_status["docker_socket_accessible"] = False
-                service_status["limitation"] = "Docker socket not mounted - cannot check external services"
             
             return service_status
             
@@ -96,7 +150,7 @@ class SystemHealthModule:
             return {
                 "docker_available": False,
                 "error": str(e),
-                "suggestion": "Check Docker service availability"
+                "suggestion": "Check Docker Desktop installation or Docker service status"
             }
     
     def check_network_connectivity(self) -> Dict[str, Any]:
@@ -276,8 +330,18 @@ class SystemHealthModule:
             health_score -= 30
             critical_issues.append("Host scripts not mounted - pipe functions may not work")
         
-        if not container_env.get("gpu_available", False):
-            health_score -= 20  # Not critical but important for AI workloads
+        # Only penalize GPU if we're in a container context where it's expected
+        if container_env.get("in_container", False) and not container_env.get("gpu_available", False):
+            health_score -= 20  # Not critical but important for AI workloads in container
+        
+        # Check Docker services
+        docker_services = report["checks"]["docker_services"]
+        if not docker_services.get("docker_available", False):
+            health_score -= 30
+            critical_issues.append("Docker not available - AI Stack services cannot run")
+        elif not docker_services.get("compose_available", False):
+            health_score -= 15
+            critical_issues.append("Docker Compose not available - limited service management")
         
         # Check network connectivity
         network_status = report["checks"]["network_connectivity"].get("overall_status")
@@ -403,13 +467,59 @@ class SystemHealthModule:
 **Overall Status**: {status_emoji.get(overall_status, "❓")} {overall_status.title()}
 **Health Score**: {health_score}/100
 **Timestamp**: {result_data.get("timestamp", "Unknown")}
+
+### 📊 Quick Status
 """
         
-        # Add critical issues if any
-        if critical_issues:
-            content += "\n### 🚨 Critical Issues:\n"
-            for issue in critical_issues:
-                content += f"- {issue}\n"
+        # Quick status summary
+        docker_status = checks.get("docker_services", {})
+        docker_icon = "✅" if docker_status.get("docker_available") else "❌"
+        
+        services_icon = "✅"
+        if not docker_status.get("docker_available"):
+            services_icon = "❌"
+        elif docker_status.get("ai_stack_services") == "not_accessible":
+            services_icon = "⚠️"
+        elif docker_status.get("ai_stack_services") != "accessible":
+            services_icon = "❓"
+            
+        gpu_status = checks.get("container_environment", {})
+        gpu_icon = "✅" if gpu_status.get("gpu_available") else "❌"
+        
+        content += f"""• **Docker**: {docker_icon}
+• **Services**: {services_icon}
+• **GPU**: {gpu_icon}
+"""
+        
+        # Add issues found
+        issues_found = []
+        recommendations = []
+        
+        # Check for specific issues
+        if not docker_status.get("docker_available"):
+            issues_found.append("Docker not available")
+            recommendations.append("Install Docker Desktop or check Docker service")
+        
+        if not docker_status.get("compose_available"):
+            issues_found.append("Docker Compose not available") 
+            recommendations.append("Install Docker Compose or update Docker Desktop")
+        
+        if not gpu_status.get("gpu_available"):
+            issues_found.append("GPU not available")
+            recommendations.append("Check GPU drivers and CUDA installation")
+        
+        # Add critical issues
+        issues_found.extend(critical_issues)
+        
+        if issues_found:
+            content += "\n### ⚠️ Issues Found\n"
+            for issue in issues_found:
+                content += f"• {issue}\n"
+        
+        if recommendations:
+            content += "\n### 💡 Recommendations\n"
+            for rec in recommendations:
+                content += f"• {rec}\n"
         
         # Container Environment
         if "container_environment" in checks:
@@ -423,6 +533,24 @@ class SystemHealthModule:
 """
             if "torch_version" in env:
                 content += f"- **PyTorch Version**: {env['torch_version']}\n"
+
+        # Docker Services
+        if "docker_services" in checks:
+            docker = checks["docker_services"]
+            content += f"""
+### 🐳 Docker Services
+- **Docker Available**: {"✅" if docker.get("docker_available") else "❌"}"""
+            
+            if docker.get("docker_available"):
+                content += f" (v{docker.get('docker_version', 'Unknown')})"
+                content += f"""
+- **Docker Compose**: {"✅" if docker.get("compose_available") else "❌"}
+- **AI Stack Services**: {"✅" if docker.get("ai_stack_services") == "accessible" else "⚠️" if docker.get("ai_stack_services") == "not_accessible" else "❓"}
+"""
+                if docker.get("note"):
+                    content += f"- **Note**: {docker['note']}\n"
+            else:
+                content += "\n"
         
         # Network Connectivity
         if "network_connectivity" in checks:
@@ -459,7 +587,17 @@ class SystemHealthModule:
                 for mount in disk.get("mounts", []):
                     content += f"  - `{mount['path']}`: {mount['used_percent']}% used ({mount['free_gb']:.1f}GB free)\n"
         
-        content += "\n*Use 'detailed system health' for comprehensive diagnostics*"
+        # Add GPU details if available
+        if gpu_status.get("gpu_available") and gpu_status.get("torch_available"):
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    device_count = torch.cuda.device_count()
+                    content += f"\n### 🎮 GPU Details\nCUDA Available ({device_count} devices)\n"
+            except:
+                pass
+        
+        content += f"\n*Updated: {result_data.get('timestamp', 'Unknown')}*"
         
         return content
     

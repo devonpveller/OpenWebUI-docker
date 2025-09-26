@@ -20,9 +20,15 @@ from typing import Any, Dict, List, Optional, Tuple
 import sys, os, importlib.util, logging, json
 import time
 
-# Ensure we can import from the ai_pipes directory
-sys.path.append('/host_scripts/ai_pipes')
-sys.path.append('/host_scripts')
+# Dynamic path setup for both host and container environments
+if os.path.exists('/host_project'):
+    sys.path.append('/host_project/scripts/ai_pipes')
+    sys.path.append('/host_project/scripts')
+else:
+    # Host environment - add current directory paths
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    sys.path.append(current_dir)  # ai_pipes directory
+    sys.path.append(os.path.dirname(current_dir))  # scripts directory
 
 def setup_logging() -> logging.Logger:
     """Configure logging for router operations"""
@@ -42,30 +48,43 @@ class AIStackRouter:
         self._load_modules()
     
     def _load_modules(self):
-        """Load all available pipe modules"""
+        """Load all available pipe modules - using refactored architecture"""
+        # Determine the correct base path (container vs host environment)
+        # Check for project mount (container environment)
+        container_indicator = os.path.exists('/host_project/scripts/ai_pipes')
+        
+        if container_indicator:
+            # Container environment - use project mount
+            base_path = '/host_project'
+        else:
+            # We're in host environment, use relative path from script location
+            current_dir = os.path.dirname(os.path.abspath(__file__))
+            # From scripts/ai_pipes/ go up to ai-stack root: scripts/ai_pipes -> scripts -> ai-stack
+            base_path = os.path.dirname(os.path.dirname(current_dir))
+        
         module_configs = {
             'gpu_status': {
-                'path': '/host_scripts/ai_pipes/gpu_status_pipe.py',
+                'path': os.path.join(base_path, 'modules', 'gpu-status', 'service', 'gpu_status.py'),
                 'entrypoint': 'main',
                 'description': 'GPU monitoring and diagnostics'
             },
             'emergency_recovery': {
-                'path': '/host_scripts/ai_pipes/emergency_recovery_pipe.py', 
+                'path': os.path.join(base_path, 'modules', 'emergency-recovery', 'service', 'emergency_recovery.py'), 
                 'entrypoint': 'main',
                 'description': 'System recovery and troubleshooting'
             },
             'system_health': {
-                'path': '/host_scripts/ai_pipes/system_health_pipe.py',
+                'path': os.path.join(base_path, 'modules', 'system-health', 'service', 'system_health.py'),
                 'entrypoint': 'main', 
                 'description': 'Health monitoring and status checks'
             },
             'custom_tools': {
-                'path': '/host_scripts/ai_pipes/custom_tools_pipe.py',
+                'path': os.path.join(base_path, 'modules', 'custom-tools', 'service', 'custom_tools.py'),
                 'entrypoint': 'main',
                 'description': 'Tool discovery and automation'
             },
             'help': {
-                'path': '/host_scripts/ai_pipes/help_pipe.py',
+                'path': os.path.join(base_path, 'modules', 'help-system', 'service', 'help_system.py'),
                 'entrypoint': 'main',
                 'description': 'Help system and command discovery'
             }
@@ -321,6 +340,11 @@ def process(input_data: str) -> str:
         }, indent=2)
 
 if __name__ == "__main__":
+    import codecs
+    # Ensure unicode output works on Windows
+    if sys.platform.startswith('win'):
+        sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer)
+    
     if len(sys.argv) > 1:
         # Command line usage
         input_text = " ".join(sys.argv[1:])
