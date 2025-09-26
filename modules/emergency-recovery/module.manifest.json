@@ -1,13 +1,13 @@
 {
-  "name": "GPU Status Monitor",
-  "slug": "gpu-status",
+  "name": "Emergency Recovery System",
+  "slug": "emergency-recovery",
   "version": "1.0.0-migrated",
-  "description": "GPU monitoring and CUDA diagnostics",
+  "description": "System recovery and troubleshooting automation",
   "author": "AI Stack Migration Tool",
   "license": "MIT",
   "entry": {
     "kind": "cli",
-    "path": "service/gpu_status.py",
+    "path": "service/emergency_recovery.py",
     "function": "main"
   },
   "schema": {
@@ -74,13 +74,13 @@
     }
   },
   "capabilities": [
-    "system_monitoring",
-    "gpu_access"
+    "admin_operations",
+    "system_monitoring"
   ],
   "limits": {
-    "timeout_ms": 38000,
+    "timeout_ms": 23000,
     "memory_mb": 512,
-    "cpu_cores": 1.0,
+    "cpu_cores": 0.5,
     "input_size_mb": 5,
     "concurrent_requests": 3
   },
@@ -88,15 +88,15 @@
     "kind": "venv",
     "python_version": ">=3.8",
     "dependencies": [],
-    "gpu_required": true
+    "gpu_required": false
   },
   "health": {
     "probe_interval_ms": 30000,
     "startup_timeout_ms": 60000
   },
   "help": {
-    "short": "GPU monitoring and CUDA diagnostics",
-    "long": "Migrated from gpu_status_pipe.py. GPU Status Pipe for AI Stack\n\nProvides comprehensive GPU monitoring and status checking leveraging\nthe custom CUDA setup in the AI stack environment.",
+    "short": "System recovery and troubleshooting automation",
+    "long": "Migrated from emergency_recovery_pipe.py. Emergency Recovery Pipe for AI Stack\n\nIntegrates with the existing emergency recovery system to provide\nAI-driven system recovery through OpenWebUI conversations.",
     "examples": [
       {
         "input": "status",
@@ -113,16 +113,16 @@
       "user",
       "admin"
     ],
-    "safety_rating": "SAFE"
+    "safety_rating": "RESTRICTED"
   },
   "compatibility": {
     "router_version": ">=1.0.0",
     "openwebui_version": ">=0.3.0"
   },
   "_migration": {
-    "source_file": "gpu_status_pipe.py",
-    "migrated_at": "2025-09-26T15:44:07.106735",
-    "complexity_score": 38,
+    "source_file": "emergency_recovery_pipe.py",
+    "migrated_at": "2025-09-26T15:44:07.110009",
+    "complexity_score": 23,
     "original_functions": []
   }
 }

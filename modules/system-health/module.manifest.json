@@ -1,13 +1,13 @@
 {
-  "name": "GPU Status Monitor",
-  "slug": "gpu-status",
+  "name": "System Health Monitor",
+  "slug": "system-health",
   "version": "1.0.0-migrated",
-  "description": "GPU monitoring and CUDA diagnostics",
+  "description": "Comprehensive system health monitoring",
   "author": "AI Stack Migration Tool",
   "license": "MIT",
   "entry": {
     "kind": "cli",
-    "path": "service/gpu_status.py",
+    "path": "service/system_health.py",
     "function": "main"
   },
   "schema": {
@@ -74,11 +74,10 @@
     }
   },
   "capabilities": [
-    "system_monitoring",
-    "gpu_access"
+    "system_monitoring"
   ],
   "limits": {
-    "timeout_ms": 38000,
+    "timeout_ms": 45000,
     "memory_mb": 512,
     "cpu_cores": 1.0,
     "input_size_mb": 5,
@@ -88,15 +87,15 @@
     "kind": "venv",
     "python_version": ">=3.8",
     "dependencies": [],
-    "gpu_required": true
+    "gpu_required": false
   },
   "health": {
     "probe_interval_ms": 30000,
     "startup_timeout_ms": 60000
   },
   "help": {
-    "short": "GPU monitoring and CUDA diagnostics",
-    "long": "Migrated from gpu_status_pipe.py. GPU Status Pipe for AI Stack\n\nProvides comprehensive GPU monitoring and status checking leveraging\nthe custom CUDA setup in the AI stack environment.",
+    "short": "Comprehensive system health monitoring",
+    "long": "Migrated from system_health_pipe.py. System Health Pipe for AI Stack\n\nProvides comprehensive system health monitoring including Docker services,\nresource usage, and overall system status.",
     "examples": [
       {
         "input": "status",
@@ -120,9 +119,9 @@
     "openwebui_version": ">=0.3.0"
   },
   "_migration": {
-    "source_file": "gpu_status_pipe.py",
-    "migrated_at": "2025-09-26T15:44:07.106735",
-    "complexity_score": 38,
+    "source_file": "system_health_pipe.py",
+    "migrated_at": "2025-09-26T15:44:07.112862",
+    "complexity_score": 45,
     "original_functions": []
   }
 }

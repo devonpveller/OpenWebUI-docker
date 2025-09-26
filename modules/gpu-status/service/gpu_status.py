@@ -43,8 +43,157 @@ class GPUStatusModule:
     
     def __init__(self):
         self.module_id = "gpu-status"
-        self.version = "1.0.0"
+        self.version = "1.0.0-migrated"
     
+    def check_torch_availability(self) -> Dict[str, Any]:
+        """Check if PyTorch is available and properly configured"""
+        if not TORCH_AVAILABLE:
+            return {
+                "torch_available": False,
+                "error": "PyTorch not available in container",
+                "suggestion": "Check if container was built with GPU support",
+                "recovery_action": "Rebuild container: docker compose build --no-cache openwebui"
+            }
+        
+        return {
+            "torch_available": True,
+            "torch_version": torch.__version__,
+            "cuda_compiled": torch.version.cuda if hasattr(torch.version, 'cuda') else "Unknown"
+        }
+    
+    def get_comprehensive_gpu_status(self) -> Dict[str, Any]:
+        """Get comprehensive GPU status information"""
+        if not TORCH_AVAILABLE:
+            return self.check_torch_availability()
+        
+        try:
+            gpu_info = {
+                "cuda_available": torch.cuda.is_available(),
+                "torch_info": {
+                    "version": torch.__version__,
+                    "cuda_version": torch.version.cuda if hasattr(torch.version, 'cuda') else "Unknown"
+                }
+            }
+            
+            if torch.cuda.is_available():
+                device_count = torch.cuda.device_count()
+                current_device = torch.cuda.current_device()
+                
+                gpu_info.update({
+                    "status": "✅ GPU Available",
+                    "device_count": device_count,
+                    "current_device": current_device,
+                    "devices": []
+                })
+                
+                # Get information for each GPU device
+                for i in range(device_count):
+                    device_props = torch.cuda.get_device_properties(i)
+                    device_info = {
+                        "device_id": i,
+                        "name": torch.cuda.get_device_name(i),
+                        "total_memory_gb": round(device_props.total_memory / 1024**3, 2),
+                        "major": device_props.major,
+                        "minor": device_props.minor,
+                        "multi_processor_count": device_props.multi_processor_count
+                    }
+                    
+                    # Get current memory usage
+                    try:
+                        memory_allocated = torch.cuda.memory_allocated(i) / 1024**3
+                        memory_reserved = torch.cuda.memory_reserved(i) / 1024**3
+                        device_info.update({
+                            "memory_allocated_gb": round(memory_allocated, 2),
+                            "memory_reserved_gb": round(memory_reserved, 2),
+                            "memory_free_gb": round(device_info["total_memory_gb"] - memory_reserved, 2)
+                        })
+                    except Exception as e:
+                        device_info["memory_error"] = str(e)
+                    
+                    gpu_info["devices"].append(device_info)
+                
+                # Overall memory summary for current device
+                try:
+                    gpu_info.update({
+                        "current_device_memory": {
+                            "allocated_gb": round(torch.cuda.memory_allocated() / 1024**3, 2),
+                            "reserved_gb": round(torch.cuda.memory_reserved() / 1024**3, 2),
+                            "max_reserved_gb": round(torch.cuda.max_memory_reserved() / 1024**3, 2)
+                        }
+                    })
+                except Exception as e:
+                    gpu_info["memory_summary_error"] = str(e)
+            
+            else:
+                gpu_info.update({
+                    "status": "❌ GPU Not Available",
+                    "possible_causes": [
+                        "CUDA drivers not properly installed",
+                        "Container not started with GPU support",
+                        "PyTorch compiled without CUDA support",
+                        "NVIDIA Container Toolkit not configured"
+                    ],
+                    "recovery_suggestions": [
+                        "Check host GPU status: nvidia-smi",
+                        "Verify container GPU access: docker compose exec openwebui nvidia-smi",
+                        "Run GPU recovery: scripts\\quick-fixes.bat gpu",
+                        "Rebuild container with GPU support"
+                    ]
+                })
+            
+            return gpu_info
+            
+        except Exception as e:
+            return {
+                "status": "❌ GPU Status Check Failed",
+                "error": str(e),
+                "torch_available": TORCH_AVAILABLE,
+                "recovery_action": "scripts\\quick-fixes.bat gpu"
+            }
+    
+    def run_gpu_diagnostics(self, user_input: str) -> Dict[str, Any]:
+        """Run comprehensive GPU diagnostics"""
+        user_input = user_input.lower()
+        
+        # Check for specific diagnostic requests
+        detailed_check = any(keyword in user_input for keyword in [
+            "detailed", "comprehensive", "full", "diagnostic", "memory", "usage"
+        ])
+        
+        gpu_status = self.get_comprehensive_gpu_status()
+        
+        result = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "diagnostic_type": "detailed" if detailed_check else "standard",
+            "gpu_status": gpu_status
+        }
+        
+        # Add specific recommendations based on status
+        if gpu_status.get("cuda_available"):
+            result["recommendations"] = {
+                "status": "GPU functioning normally",
+                "optimization_tips": [
+                    "Monitor memory usage during model loading",
+                    "Use torch.cuda.empty_cache() to free unused memory",
+                    "Consider using mixed precision for better performance"
+                ]
+            }
+        else:
+            result["recommendations"] = {
+                "status": "GPU issues detected",
+                "immediate_actions": [
+                    "Run: scripts\\quick-fixes.bat gpu",
+                    "Check: docker compose logs openwebui",
+                    "Verify: docker compose exec openwebui nvidia-smi"
+                ],
+                "escalation_path": [
+                    "If basic recovery fails, run: scripts\\emergency-recovery.ps1 -Action gpu-reset",
+                    "Consider rebuilding container: docker compose build --no-cache openwebui"
+                ]
+            }
+        
+        return result
+
     def describe(self) -> Dict[str, Any]:
         """Return module metadata"""
         return {
@@ -80,27 +229,35 @@ class GPUStatusModule:
         }
     
     def execute(self, request_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute GPU status check"""
+        """Execute GPU status check with migrated functionality"""
         start_time = time.time()
         request_id = request_data.get("request_id", "unknown")
         
         try:
-            # Parse input
+            # Parse input - handle both string and structured input
             input_data = request_data.get("input", "")
-            action = self._parse_action(input_data)
-            
-            # Execute appropriate action
-            if action == "detailed":
-                result_data = self._get_detailed_status()
-            elif action == "memory":
-                result_data = self._get_memory_status()
-            elif action == "diagnostics":
-                result_data = self._get_diagnostics()
+            if isinstance(input_data, dict):
+                user_input = input_data.get("query", "")
             else:
-                result_data = self._get_basic_status()
+                user_input = str(input_data)
             
-            # Format response
-            content = self._format_content(result_data, action)
+            # If no specific input, return basic status
+            if not user_input.strip():
+                gpu_status = self.get_comprehensive_gpu_status()
+                result_data = {
+                    "service": "GPU Status Module",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "quick_status": gpu_status.get("status", "Unknown"),
+                    "cuda_available": gpu_status.get("cuda_available", False),
+                    "torch_available": TORCH_AVAILABLE,
+                    "usage_tip": "Ask for 'detailed gpu status' or 'gpu diagnostics' for comprehensive information"
+                }
+                content = self._format_basic_status(result_data)
+            else:
+                # Run comprehensive diagnostics
+                result_data = self.run_gpu_diagnostics(user_input)
+                content = self._format_diagnostic_content(result_data)
+            
             execution_time = int((time.time() - start_time) * 1000)
             
             return {
@@ -111,7 +268,6 @@ class GPUStatusModule:
                 "structured_data": result_data,
                 "diagnostics": {
                     "execution_time_ms": execution_time,
-                    "action": action,
                     "torch_available": TORCH_AVAILABLE
                 },
                 "timestamp": datetime.now(timezone.utc).isoformat()
@@ -132,6 +288,80 @@ class GPUStatusModule:
                 "timestamp": datetime.now(timezone.utc).isoformat()
             }
     
+    def _format_basic_status(self, result_data: Dict[str, Any]) -> str:
+        """Format basic status for display"""
+        status = result_data.get("quick_status", "Unknown")
+        cuda_available = result_data.get("cuda_available", False)
+        torch_available = result_data.get("torch_available", False)
+        
+        return f"""## 🖥️ GPU Status Overview
+
+**Status**: {status}
+**CUDA Available**: {"✅" if cuda_available else "❌"}
+**PyTorch Available**: {"✅" if torch_available else "❌"}
+
+{result_data.get("usage_tip", "")}
+
+*Use "detailed gpu status" for comprehensive diagnostics*
+"""
+
+    def _format_diagnostic_content(self, result_data: Dict[str, Any]) -> str:
+        """Format diagnostic results for display"""
+        gpu_status = result_data.get("gpu_status", {})
+        recommendations = result_data.get("recommendations", {})
+        
+        content = f"""## 🔍 GPU Diagnostics Report
+
+**Timestamp**: {result_data.get("timestamp", "Unknown")}
+**Diagnostic Type**: {result_data.get("diagnostic_type", "standard").title()}
+
+### GPU Status
+**Overall Status**: {gpu_status.get("status", "Unknown")}
+**CUDA Available**: {"✅" if gpu_status.get("cuda_available") else "❌"}
+"""
+        
+        # Add device information if available
+        if "devices" in gpu_status and gpu_status["devices"]:
+            content += "\n### 🎮 GPU Devices\n"
+            for device in gpu_status["devices"]:
+                content += f"""
+**Device {device['device_id']}**: {device['name']}
+- Memory: {device.get('memory_allocated_gb', 0):.2f}GB / {device.get('total_memory_gb', 0):.2f}GB
+- Free: {device.get('memory_free_gb', 0):.2f}GB
+- Compute: {device.get('major', 0)}.{device.get('minor', 0)}
+"""
+        
+        # Add memory summary
+        if "current_device_memory" in gpu_status:
+            mem = gpu_status["current_device_memory"]
+            content += f"""
+### 💾 Memory Usage (Current Device)
+- **Allocated**: {mem.get('allocated_gb', 0):.2f}GB
+- **Reserved**: {mem.get('reserved_gb', 0):.2f}GB
+- **Max Reserved**: {mem.get('max_reserved_gb', 0):.2f}GB
+"""
+        
+        # Add recommendations
+        if recommendations:
+            content += f"\n### 💡 Recommendations\n**Status**: {recommendations.get('status', 'Unknown')}\n"
+            
+            if "optimization_tips" in recommendations:
+                content += "\n**Optimization Tips**:\n"
+                for tip in recommendations["optimization_tips"]:
+                    content += f"- {tip}\n"
+            
+            if "immediate_actions" in recommendations:
+                content += "\n**Immediate Actions**:\n"
+                for action in recommendations["immediate_actions"]:
+                    content += f"- `{action}`\n"
+            
+            if "escalation_path" in recommendations:
+                content += "\n**Escalation Path**:\n"
+                for step in recommendations["escalation_path"]:
+                    content += f"- {step}\n"
+        
+        return content
+
     def validate(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
         """Validate input without execution"""
         required_fields = ["request_id", "input"]
@@ -490,22 +720,29 @@ def validate(input_data: Dict[str, Any]) -> Dict[str, Any]:
     return gpu_module.validate(input_data)
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1:
-        # CLI mode
+    # Check for piped input first
+    if not sys.stdin.isatty():
+        # Input from pipe
+        try:
+            input_data = json.loads(sys.stdin.read())
+            result = main(input_data)
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+        except Exception as e:
+            error_result = {"error": str(e), "type": "CLI execution error"}
+            print(json.dumps(error_result, indent=2))
+            sys.exit(1)
+    elif len(sys.argv) > 1:
+        # CLI mode with arguments
         if sys.argv[1] == "--describe":
             print(json.dumps(describe(), indent=2))
         elif sys.argv[1] == "--health":
             print(json.dumps(health(), indent=2))
         else:
-            # Process input from stdin or args
-            if sys.stdin.isatty():
-                input_text = " ".join(sys.argv[1:])
-                input_data = {"request_id": str(time.time()), "input": input_text}
-            else:
-                input_data = json.loads(sys.stdin.read())
-            
+            # Process command line arguments as input
+            input_text = " ".join(sys.argv[1:])
+            input_data = {"request_id": str(time.time()), "input": input_text}
             result = main(input_data)
             print(json.dumps(result, indent=2, ensure_ascii=False))
     else:
-        # Interactive mode
+        # Interactive mode - show description
         print(json.dumps(describe(), indent=2))
