@@ -1,15 +1,13 @@
 {
+  "slug": "help-system",
   "name": "help-system",
   "version": "1.0.0-migrated",
   "description": "Comprehensive help and documentation system for AI Stack",
   "type": "documentation",
   "category": "system-management",
   "capabilities": [
-    "help_search",
-    "documentation_access",
-    "troubleshooting_guide",
-    "topic_exploration",
-    "command_reference"
+    "search",
+    "data_analysis"
   ],
   "resources": {
     "cpu": "low",
@@ -122,6 +120,28 @@
     "resource_limits": {
       "max_memory_mb": 64,
       "max_cpu_percent": 10
+    }
+  },
+  "entry": {
+    "kind": "cli",
+    "path": "help_system.py"
+  },
+  "schema": {
+    "input": {
+      "type": "object",
+      "properties": {
+        "query": {"type": "string"},
+        "topic": {"type": "string"},
+        "search_type": {"type": "string", "enum": ["topic", "search", "overview"]}
+      }
+    },
+    "output": {
+      "type": "object",
+      "properties": {
+        "status": {"type": "string"},
+        "content": {"type": "string"},
+        "structured_data": {"type": "object"}
+      }
     }
   },
   "routing": {

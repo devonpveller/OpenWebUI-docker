@@ -54,12 +54,13 @@ class Pipe:
         # Dynamically determine router path (container vs host environment)
         # This MUST be done here as OpenWebUI may not call __init__ at the right time
         if not self.valves.ROUTER_SCRIPT_PATH:  # Only set if not already set
-            if os.path.exists('/host_project/scripts/ai_pipes'):
-                self.valves.ROUTER_SCRIPT_PATH = "/host_project/scripts/ai_pipes/ai_stack_router.py"
+            if os.path.exists('/host_project/core'):
+                self.valves.ROUTER_SCRIPT_PATH = "/host_project/core/router.py"
             else:
                 # Host environment - use relative path
                 current_dir = os.path.dirname(os.path.abspath(__file__))
-                self.valves.ROUTER_SCRIPT_PATH = os.path.join(current_dir, "ai_stack_router.py")
+                project_root = os.path.dirname(os.path.dirname(current_dir))
+                self.valves.ROUTER_SCRIPT_PATH = os.path.join(project_root, "core", "router.py")
         
         self.logger = self._setup_logging()
         
@@ -110,23 +111,24 @@ class Pipe:
         try:
             # Safety check: ensure router path is set (in case __init__ didn't run properly in OpenWebUI)
             if not self.valves.ROUTER_SCRIPT_PATH:
-                if os.path.exists('/host_project/scripts/ai_pipes'):
-                    self.valves.ROUTER_SCRIPT_PATH = "/host_project/scripts/ai_pipes/ai_stack_router.py"
+                if os.path.exists('/host_project/core'):
+                    self.valves.ROUTER_SCRIPT_PATH = "/host_project/core/router.py"
                 else:
                     # Host environment - use relative path
                     current_dir = os.path.dirname(os.path.abspath(__file__))
-                    self.valves.ROUTER_SCRIPT_PATH = os.path.join(current_dir, "ai_stack_router.py")
+                    project_root = os.path.dirname(os.path.dirname(current_dir))
+                    self.valves.ROUTER_SCRIPT_PATH = os.path.join(project_root, "core", "router.py")
             
             if not os.path.exists(self.valves.ROUTER_SCRIPT_PATH):
                 return {
                     "service": "AI Stack Unified Pipe",
                     "status": "error", 
                     "message": f"Router script not found: {self.valves.ROUTER_SCRIPT_PATH}",
-                    "help": "Ensure the ai_stack_router.py file exists and is mounted correctly",
+                    "help": "Ensure the router.py file exists and is mounted correctly",
                     "debug_info": {
                         "checked_paths": [
-                            "/host_project/scripts/ai_pipes/ai_stack_router.py",
-                            "/host_scripts/ai_pipes/ai_stack_router.py"
+                            "/host_project/core/router.py",
+                            "/host_scripts/core/router.py"
                         ],
                         "host_project_exists": os.path.exists('/host_project'),
                         "host_scripts_exists": os.path.exists('/host_scripts'),
@@ -134,36 +136,20 @@ class Pipe:
                     }
                 }
                 
-            # Import and execute router - environment-aware path setup
-            if os.path.exists('/host_project/scripts/ai_pipes'):
-                sys.path.append('/host_project/scripts/ai_pipes')
-                sys.path.append('/host_project/scripts')
+            # Direct import approach instead of dynamic loading
+            if os.path.exists('/host_project/core'):
+                sys.path.append('/host_project/core')
+                from router import main as router_main
             else:
-                # Host environment - add current directory paths
+                # Host environment - add core directory path
                 current_dir = os.path.dirname(os.path.abspath(__file__))
-                sys.path.append(current_dir)  # ai_pipes directory
-                sys.path.append(os.path.dirname(current_dir))  # scripts directory
-            
-            spec = importlib.util.spec_from_file_location("ai_stack_router", self.valves.ROUTER_SCRIPT_PATH)
-            if spec is None or spec.loader is None:
-                return {
-                    "service": "AI Stack Unified Pipe",
-                    "status": "error",
-                    "message": f"Cannot load router script: {self.valves.ROUTER_SCRIPT_PATH}"
-                }
-                
-            router_module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(router_module)
-            
-            if not hasattr(router_module, 'main'):
-                return {
-                    "service": "AI Stack Unified Pipe", 
-                    "status": "error",
-                    "message": "Router script missing 'main' function"
-                }
+                project_root = os.path.dirname(os.path.dirname(current_dir))
+                core_dir = os.path.join(project_root, "core")
+                sys.path.append(core_dir)
+                from router import main as router_main
             
             # Execute router main function
-            result = router_module.main(payload)
+            result = router_main(payload)
             
             if self.valves.LOG_EXECUTION:
                 user_input = payload.get('input', '')[:50]
@@ -255,7 +241,7 @@ class Pipe:
             payload = {
                 "input": user_input,
                 "user_id": __user__.get("id", "unknown"),
-                "timestamp": body.get("timestamp"),
+                "timestamp": body.get("timestamp") or "2024-01-01T12:00:00Z",  # Provide default timestamp
                 "messages": body.get("messages", [])
             }
             

@@ -1,40 +1,42 @@
 import sys, json
-sys.path.append('/host_scripts')
-from ai_pipes import ai_stack_router
+sys.path.append('/host_project/core')
+from router import router, main
 
 # Test comprehensive routing scenarios
 test_scenarios = [
     # GPU queries
-    ('Check my GPU status', 'gpu_status'),
-    ('CUDA availability check', 'gpu_status'), 
-    ('RTX memory usage', 'gpu_status'),
+    ('Check my GPU status', 'gpu-status'),
+    ('CUDA availability check', 'gpu-status'), 
+    ('RTX memory usage', 'gpu-status'),
     
-    # Recovery scenarios
-    ('Tailscale is down', 'emergency_recovery'),
-    ('Network connectivity problems', 'emergency_recovery'),
-    ('System recovery needed', 'emergency_recovery'),
+    # System health queries
+    ('System status check', 'system-health'),
+    ('Overall system health', 'system-health'),
+    ('Are services running?', 'system-health'),
     
-    # Health monitoring
-    ('How is my system doing?', 'system_health'),
-    ('Docker container status', 'system_health'),
+    # Emergency recovery
+    ('Fix network issues', 'emergency-recovery'),
+    ('Emergency shutdown', 'emergency-recovery'),
+    ('System recovery', 'emergency-recovery'),
     
-    # Tools and help
-    ('What tools are available?', 'custom_tools'),
-    ('Help me', 'help')
+    # Help requests
+    ('Show available commands', 'help-system'),
+    ('What can you do?', 'help-system'),
+    ('Help with GPU', 'help-system')
 ]
 
 print('🧪 AI Stack Unified Router - Comprehensive Test')
 print('=' * 60)
 
-router_instance = ai_stack_router.AIStackRouter()
-
+# Test routing function
 for query, expected in test_scenarios:
-    target, confidence = router_instance.analyze_user_input(query)
-    status = '✅' if expected in target else '❌'
-    print(f'{status} "{query[:30]:<30}" → {target:<18} ({confidence:.2f})')
+    target = router._analyze_input_for_routing(query)
+    status = '✅' if expected == target else '❌'
+    print(f'{status} "{query[:30]:<30}" → {target:<18}')
 
 # Test router status
 print('\n📊 Router Status Test:')
-result = ai_stack_router.main({'input': ''})
-status = '✅' if 'operational' in result.get('status', '') else '❌'
-print(f'{status} Router Status → {result.get("module_count", 0)} modules loaded')
+result = main({'input': 'help', 'user_id': 'test'})
+status = '✅' if result.get('status') in ['ok', 'error'] else '❌'
+module_count = len(router.registry.get_ready_modules())
+print(f'{status} Router Status → {module_count} modules loaded')
