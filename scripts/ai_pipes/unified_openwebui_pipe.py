@@ -1,8 +1,9 @@
 """
-AI Stack Unified Pipe Function for OpenWebUI
+AI Stack Unified Pipe Function for OpenWebUI - Refactored Architecture
 
 This is a SINGLE pipe function that replaces all individual AI Stack pipe functions.
 It provides intelligent routing to all AI Stack capabilities through one interface.
+Uses ONLY the new manifest-driven refactored modules - NO legacy formatting.
 
 SETUP INSTRUCTIONS:
 1. Go to OpenWebUI Admin → Functions
@@ -14,6 +15,7 @@ BENEFITS:
 - Only ONE pipe function needed in OpenWebUI (instead of 4-5 separate functions)
 - Intelligent routing based on user input
 - Unified management and maintenance
+- Uses new manifest-driven architecture
 - Better user experience
 """
 
@@ -26,7 +28,7 @@ import logging
 class Pipe:
     class Valves(BaseModel):
         ROUTER_SCRIPT_PATH: str = Field(
-            default="/host_scripts/ai_pipes/ai_stack_router.py",
+            default="",  # Will be set dynamically
             description="Path to the unified AI Stack router script"
         )
         TIMEOUT_SEC: int = Field(
@@ -48,6 +50,17 @@ class Pipe:
 
     def __init__(self):
         self.valves = self.Valves()
+        
+        # Dynamically determine router path (container vs host environment)
+        # This MUST be done here as OpenWebUI may not call __init__ at the right time
+        if not self.valves.ROUTER_SCRIPT_PATH:  # Only set if not already set
+            if os.path.exists('/host_project/scripts/ai_pipes'):
+                self.valves.ROUTER_SCRIPT_PATH = "/host_project/scripts/ai_pipes/ai_stack_router.py"
+            else:
+                # Host environment - use relative path
+                current_dir = os.path.dirname(os.path.abspath(__file__))
+                self.valves.ROUTER_SCRIPT_PATH = os.path.join(current_dir, "ai_stack_router.py")
+        
         self.logger = self._setup_logging()
         
         if self.valves.ENABLE_GPU_CHECK:
@@ -95,17 +108,41 @@ class Pipe:
     def _run_router(self, payload: Dict[str, Any]) -> Any:
         """Execute the unified router script"""
         try:
+            # Safety check: ensure router path is set (in case __init__ didn't run properly in OpenWebUI)
+            if not self.valves.ROUTER_SCRIPT_PATH:
+                if os.path.exists('/host_project/scripts/ai_pipes'):
+                    self.valves.ROUTER_SCRIPT_PATH = "/host_project/scripts/ai_pipes/ai_stack_router.py"
+                else:
+                    # Host environment - use relative path
+                    current_dir = os.path.dirname(os.path.abspath(__file__))
+                    self.valves.ROUTER_SCRIPT_PATH = os.path.join(current_dir, "ai_stack_router.py")
+            
             if not os.path.exists(self.valves.ROUTER_SCRIPT_PATH):
                 return {
                     "service": "AI Stack Unified Pipe",
                     "status": "error", 
                     "message": f"Router script not found: {self.valves.ROUTER_SCRIPT_PATH}",
-                    "help": "Ensure the ai_stack_router.py file exists in /host_scripts/ai_pipes/"
+                    "help": "Ensure the ai_stack_router.py file exists and is mounted correctly",
+                    "debug_info": {
+                        "checked_paths": [
+                            "/host_project/scripts/ai_pipes/ai_stack_router.py",
+                            "/host_scripts/ai_pipes/ai_stack_router.py"
+                        ],
+                        "host_project_exists": os.path.exists('/host_project'),
+                        "host_scripts_exists": os.path.exists('/host_scripts'),
+                        "current_path": self.valves.ROUTER_SCRIPT_PATH
+                    }
                 }
                 
-            # Import and execute router
-            sys.path.append('/host_scripts/ai_pipes')
-            sys.path.append('/host_scripts')
+            # Import and execute router - environment-aware path setup
+            if os.path.exists('/host_project/scripts/ai_pipes'):
+                sys.path.append('/host_project/scripts/ai_pipes')
+                sys.path.append('/host_project/scripts')
+            else:
+                # Host environment - add current directory paths
+                current_dir = os.path.dirname(os.path.abspath(__file__))
+                sys.path.append(current_dir)  # ai_pipes directory
+                sys.path.append(os.path.dirname(current_dir))  # scripts directory
             
             spec = importlib.util.spec_from_file_location("ai_stack_router", self.valves.ROUTER_SCRIPT_PATH)
             if spec is None or spec.loader is None:
@@ -150,12 +187,16 @@ class Pipe:
             }
 
     def _format_response(self, result: Any) -> str:
-        """Format the response for OpenWebUI display"""
+        """Format the response for OpenWebUI display - using refactored architecture only"""
         if isinstance(result, dict):
-            # Check for specific response types and format accordingly
             
-            # Router status response
-            if result.get("service") == "AI Stack Unified Router" and "loaded_modules" in result:
+            # Refactored module responses (manifest-driven architecture)
+            if result.get("module_id") in ["system-health", "gpu-status", "emergency-recovery", "custom-tools", "help-system", "system-orchestrator"] and "content" in result:
+                # Use the pre-formatted content from refactored modules
+                return result.get("content", "Module response unavailable")
+            
+            # Router status response (for compatibility with router)
+            elif result.get("service") == "AI Stack Unified Router" and "loaded_modules" in result:
                 modules = result.get("loaded_modules", {})
                 capabilities = result.get("capabilities", [])
                 
@@ -170,193 +211,6 @@ class Pipe:
                 response += "\n**Loaded Modules:**\n"
                 for name, desc in modules.items():
                     response += f"• **{name}**: {desc}\n"
-                
-                if "timestamp" in result:
-                    response += f"\n*Updated: {result['timestamp']}*"
-                
-                return response
-            
-            # GPU status response (actual structure from gpu_status_pipe)
-            elif "gpu_status" in result and "devices" in result.get("gpu_status", {}):
-                gpu_status = result["gpu_status"]
-                response = "**🎮 GPU Status**\n\n"
-                
-                response += f"**CUDA**: {'✅ Available' if gpu_status.get('cuda_available') else '❌ Not Available'}\n"
-                
-                if gpu_status.get("torch_info"):
-                    torch_info = gpu_status["torch_info"]
-                    response += f"**PyTorch**: {torch_info.get('version', 'Unknown')} (CUDA {torch_info.get('cuda_version', 'N/A')})\n"
-                
-                response += f"**Device Count**: {gpu_status.get('device_count', 0)}\n\n"
-                
-                if gpu_status.get("devices"):
-                    for device in gpu_status["devices"]:
-                        response += f"**GPU {device.get('device_id', 0)}**: {device.get('name', 'Unknown')}\n"
-                        response += f"**Memory**: {device.get('memory_free_gb', 0):.1f} GB free / {device.get('total_memory_gb', 0):.1f} GB total\n"
-                        response += f"**Allocated**: {device.get('memory_allocated_gb', 0):.1f} GB\n\n"
-                
-                if result.get("recommendations"):
-                    rec = result["recommendations"]
-                    response += f"**Status**: {rec.get('status', 'Unknown')}\n"
-                    
-                    if rec.get("optimization_tips"):
-                        response += "\n**Optimization Tips**:\n"
-                        for tip in rec["optimization_tips"]:
-                            response += f"• {tip}\n"
-                
-                if "timestamp" in result:
-                    response += f"\n*Updated: {result['timestamp']}*"
-                
-                return response
-            
-            # Recovery response (actual structure from emergency_recovery_pipe)
-            elif "suggested_action" in result and isinstance(result["suggested_action"], dict):
-                response = "**🔧 System Recovery**\n\n"
-                
-                suggested = result["suggested_action"]
-                response += f"**Action**: {suggested.get('action', 'Unknown').title()}\n"
-                response += f"**Description**: {suggested.get('description', 'No description')}\n"
-                response += f"**Command**: `{suggested.get('command', 'No command')}`\n"
-                response += f"**Urgency**: {suggested.get('urgency', 'Unknown').title()}\n"
-                response += f"**Success Probability**: {suggested.get('success_probability', 'Unknown').title()}\n\n"
-                
-                if result.get("user_input_analysis"):
-                    response += f"**Analysis**: {result['user_input_analysis']}\n\n"
-                
-                if result.get("next_steps"):
-                    response += "**Next Steps**:\n"
-                    for step in result["next_steps"]:
-                        response += f"• {step}\n"
-                    response += "\n"
-                
-                if result.get("warning"):
-                    response += f"**⚠️ Warning**: {result['warning']}\n"
-                
-                if "timestamp" in result:
-                    response += f"\n*Updated: {result['timestamp']}*"
-                
-                return response
-            
-            # Health status response (actual structure from system_health_pipe)
-            elif "health_summary" in result and "quick_status" in result:
-                response = "**📊 System Health**\n\n"
-                
-                health = result["health_summary"]
-                quick = result["quick_status"]
-                
-                response += f"**Overall Status**: {health.get('status_indicator', '')} {health.get('status', 'Unknown').title()} ({health.get('health_score', 0)}/100)\n\n"
-                
-                response += "**Quick Status**:\n"
-                response += f"• **Docker**: {quick.get('docker', '❓')}\n"
-                response += f"• **Services**: {quick.get('services', '❓')}\n"
-                response += f"• **GPU**: {quick.get('gpu', '❓')}\n\n"
-                
-                if health.get("issues"):
-                    response += "**Issues Found**:\n"
-                    for issue in health["issues"]:
-                        response += f"• {issue}\n"
-                    response += "\n"
-                
-                if health.get("recommendations"):
-                    response += "**Recommendations**:\n"
-                    for rec in health["recommendations"]:
-                        response += f"• {rec}\n"
-                    response += "\n"
-                
-                if result.get("detailed_info"):
-                    detailed = result["detailed_info"]
-                    if detailed.get("gpu", {}).get("cuda_available"):
-                        gpu_info = detailed["gpu"]
-                        response += f"**GPU Details**: CUDA Available ({gpu_info.get('device_count', 0)} devices)\n"
-                
-                if "timestamp" in result:
-                    response += f"\n*Updated: {result['timestamp']}*"
-                
-                return response
-            
-            # Help response (actual structure from help_pipe)
-            elif result.get("service") == "AI Stack Help System" and "overview" in result:
-                response = "**🆘 AI Stack Help**\n\n"
-                
-                if "overview" in result:
-                    overview = result["overview"]
-                    if "description" in overview:
-                        response += f"**{overview['description']}**\n\n"
-                    
-                    if "capabilities" in overview:
-                        response += "**Capabilities:**\n"
-                        for cap in overview["capabilities"]:
-                            response += f"• {cap}\n"
-                        response += "\n"
-                
-                if "quick_start" in result:
-                    quick = result["quick_start"]
-                    response += "**Quick Start:**\n"
-                    for key, value in quick.items():
-                        response += f"• {value}\n"
-                    response += "\n"
-                
-                if "pipe_functions_available" in result:
-                    functions = result["pipe_functions_available"]
-                    response += f"**Available Functions**: {len(functions)}\n"
-                    for func in functions:
-                        response += f"• {func}\n"
-                    response += "\n"
-                
-                if "usage_tip" in result:
-                    response += f"**💡 Tip**: {result['usage_tip']}\n"
-                
-                if "timestamp" in result:
-                    response += f"\n*Updated: {result['timestamp']}*"
-                
-                return response
-            
-            # Tools response (actual structure from custom_tools_pipe)  
-            elif result.get("service") == "AI Stack Custom Tools" and "tools_available" in result:
-                response = "**🛠️ Available Tools**\n\n"
-                
-                tools = result["tools_available"]["available_tools"]
-                total_tools = result["tools_available"].get("total_tools", 0)
-                total_categories = result["tools_available"].get("total_categories", 0)
-                
-                response += f"**Total**: {total_tools} tools in {total_categories} categories\n\n"
-                
-                # Recovery tools
-                if "recovery_tools" in tools:
-                    response += "**🔧 Recovery Tools:**\n"
-                    for tool_name, tool_info in tools["recovery_tools"].items():
-                        response += f"• **{tool_name}**: {tool_info.get('description', 'No description')}\n"
-                    response += "\n"
-                
-                # Monitoring tools  
-                if "monitoring_tools" in tools:
-                    response += "**📊 Monitoring Tools:**\n"
-                    for tool_name, tool_info in tools["monitoring_tools"].items():
-                        response += f"• **{tool_name}**: {tool_info.get('description', 'No description')}\n"
-                    response += "\n"
-                
-                # Utility tools
-                if "utility_tools" in tools:
-                    response += "**⚙️ Utility Tools:**\n"
-                    for tool_name, tool_info in tools["utility_tools"].items():
-                        response += f"• **{tool_name}**: {tool_info.get('description', 'No description')}\n"
-                    response += "\n"
-                
-                # Pipe tools
-                if "pipe_tools" in tools:
-                    response += "**🔗 Pipe Functions:**\n"
-                    for tool_name, tool_info in tools["pipe_tools"].items():
-                        response += f"• **{tool_name}**: {tool_info.get('description', 'No description')}\n"
-                    response += "\n"
-                
-                if result.get("usage"):
-                    response += f"**Usage**: {result['usage']}\n"
-                
-                if result.get("quick_access"):
-                    quick_access = result["quick_access"]
-                    response += "\n**Quick Access:**\n"
-                    for category, tip in quick_access.items():
-                        response += f"• **{category.title()}**: {tip}\n"
                 
                 if "timestamp" in result:
                     response += f"\n*Updated: {result['timestamp']}*"
@@ -379,7 +233,7 @@ class Pipe:
                 
                 return response
             
-            # Generic JSON response
+            # Generic JSON response for unrecognized formats
             else:
                 try:
                     # Try to format as readable JSON
