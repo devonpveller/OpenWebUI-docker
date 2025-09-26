@@ -1,420 +1,346 @@
 
-## 1) Core contracts (explicit, versioned)
+---
 
-**Single keystone contract** governs all layers:  
-Envelope → Router → Module → Router Return → Formatter.
+# Autonomous Coding Agent Guide (Refactored)
 
-### Request (Router input)
+## 1. Core Contracts (Explicit & Versioned)
 
-- `version`, `request_id` (UUID), `timestamp`
-    
-- `user` (id, roles, permissions), `session` (conversation id), `locale/timezone`
-    
-- `input` (text, structured params), `attachments` (files/urls), `context` (prior turns/system hints)
-    
-- `capabilities_allowed` (module/tool allowlist)
-    
+All communication follows a **single keystone contract**, versioned for compatibility:
 
-### Module call (Router→Module)
+**Flow:** Request Envelope → Router → Module → Router Return → Formatter
 
-- `request_id`, `module_id`, `action` (execute | help | health)
-    
-- `payload` (JSON, validated against declared schema)
-    
-- `timeout_ms`, `cancellation_token`, `trace_context`
-    
+### Request Envelope (Router Input)
 
-### Module result (Module→Router)
+* `version`, `request_id` (UUID), `timestamp`
+* `user`: id, roles, permissions
+* `session`: conversation id
+* `locale`, `timezone`
+* `input`: text or structured params
+* `attachments`: files/URLs
+* `context`: prior turns, system hints
+* `capabilities_allowed`: allowlist of modules/tools
 
-- `request_id`, `module_id`, `status` (ok | error | partial | streaming_end)
-    
-- `content` (markdown blocks + optional structured data), `artifacts`, `events`
-    
-- `usage`, `diagnostics`, `error` (code, message, retriable?)
-    
+### Module Call (Router → Module)
 
-### Error envelope (any stage)
+* `request_id`, `module_id`, `action` (`execute | help | health`)
+* `payload`: JSON validated against schema
+* `timeout_ms`, `cancellation_token`, `trace_context`
 
-- `request_id`, `where`, `error_code`, `message`, `details`, `retriable`
-    
+### Module Result (Module → Router)
 
-### Formatter output (to OpenWebUI)
+* `request_id`, `module_id`, `status` (`ok | error | partial | streaming_end`)
+* `content`: markdown blocks + optional structured data
+* `artifacts`, `events`
+* `usage`, `diagnostics`
+* `error`: code, message, retriable?
 
-- Clean markdown, optional tables/lists, stable front-matter (title, tags), `request_id`
-    
+### Error Envelope (Any Stage)
+
+* `request_id`, `where`, `error_code`, `message`, `details`, `retriable`
+
+### Formatter Output (Router → OpenWebUI)
+
+* Clean markdown with optional tables/lists
+* Stable front-matter: `title`, `tags`
+* `request_id`
 
 ---
 
-## 2) Module packaging & manifests (single source of truth)
+## 2. Module Packaging & Manifests
 
-Modules follow a strict folder pattern under `/modules`:
+Modules live under `/modules` with a strict structure:
 
 ```
 /modules/
   <module-slug>/
-    module.manifest.json   ← required
-    env/                   ← required (venv or container shim)
-    service/               ← required (module implementation)
-    artifacts/             ← optional (temp outputs, models)
-    docs/                  ← optional (HELP.md, examples)
+    module.manifest.json   # required
+    env/                   # required (venv or container)
+    service/               # required (implementation)
+    artifacts/             # optional (outputs/models)
+    docs/                  # optional (HELP.md, examples)
 ```
 
-**Manifest is king** — Router never inspects code, only the manifest.
+**Manifest is authoritative** — Router trusts manifests, not source code.
 
-### Required manifest fields
+### Required Manifest Fields
 
-- `name`, `slug`, `version` (semver)
-    
-- `entry.kind`: `cli` | `http` | `grpc`
-    
-- `entry.path`: invocation path/URL
-    
-- `schema.input` / `schema.output`: JSON Schemas (URIs or embedded)
-    
-- `capabilities`: tags (e.g., `"search"`, `"vision"`)
-    
-- `limits`: timeouts, max input size, budgets
-    
-- `auth`: required secrets (scoped, Router-brokered)
-    
-- `health`: probe definitions
-    
-- `env.kind`: `venv` | `container`
-    
-- `routerCompatibility`: accepted Router API versions
-    
-- `help.short` / `help.long`
-    
-- `permissions`: optional role allowlists
-    
-- `install`: optional warmup hooks
-    
+* Identity: `name`, `slug`, `version` (semver)
+* Entry: `entry.kind` (`cli | http | grpc`), `entry.path`
+* Schemas: `schema.input`, `schema.output` (URIs or embedded JSON Schema)
+* Capabilities: e.g. `"search"`, `"vision"`
+* Limits: timeouts, input sizes, budgets
+* Auth: required secrets (scoped, brokered by Router)
+* Health: probe definitions
+* Environment: `env.kind` (`venv | container`)
+* Compatibility: `routerCompatibility`
+* Help: `help.short`, `help.long`
+* Permissions: optional role allowlists
+* Install: optional warmup hooks
 
 ---
 
-## 3) Module isolation & execution
+## 3. Module Isolation & Execution
 
-### Isolation modes
+### Isolation Modes
 
-- **Venv (default, fast dev loop)**: local Python venv per module.
-    
-- **Container (for native/CUDA/security-sensitive)**: run via sidecar/container.
-    
+* **Venv (default)**: fast iteration in local Python environments
+* **Container**: for native/CUDA or security-sensitive workloads
 
-### Execution adapters
+### Execution Adapters
 
-- `cli`: spawn subprocess, JSON over stdin/stdout, enforce CPU/Wall timeouts, propagate cancel.
-    
-- `http/grpc`: call local/remote endpoint with `request_id` + budget headers.
-    
+* `cli`: subprocess, JSON over stdin/stdout, strict CPU/wall timeouts
+* `http/grpc`: local or remote call with `request_id` and budget headers
 
-### Interface (stable surface)
+### Stable Interface
 
-- `describe()` → metadata (schemas, limits, help)
-    
-- `health()` → readiness & dependency check
-    
-- `execute(envelope)` → produces result envelope (streamed or final)
-    
-- `validate(input)` → dry-run validation
-    
+* `describe()` → metadata (schemas, limits, help)
+* `health()` → readiness check
+* `execute(envelope)` → result envelope (streaming or final)
+* `validate(input)` → dry-run validation
 
 ---
 
-## 4) Router responsibilities (SRP & scalability)
+## 4. Router Responsibilities
 
-Split Router into:
+Router consists of modular components:
 
-- **Ingress Adapter** (Open WebUI ⇄ Request envelope)
-    
-- **Dispatcher** (routing, policy, concurrency, retries, backpressure)
-    
-- **Egress/Return** (normalization, formatter)
-    
-- **Registry** (manifest-driven discovery/metadata)
-    
+* **Ingress Adapter**: OpenWebUI ⇄ Request envelope
+* **Dispatcher**: routing, policy, concurrency, retries, backpressure
+* **Egress/Return**: normalization and formatting
+* **Registry**: manifest-driven discovery and metadata
 
 ### Discovery
 
-- Registry scans `/modules/*/module.manifest.json` on boot, file events, or admin rescan.
-    
-- Validates against manifest schema.
-    
-- Health probes from manifest.
-    
-- Hot reloadable with Ready/Degraded/Unavailable states.
-    
+* Registry scans `/modules/*/module.manifest.json` on boot/rescan
+* Validates schema, probes health, maintains states (`Ready | Degraded | Unavailable`)
+* Hot-reload support
 
-### Conflict resolution
+### Conflict Resolution
 
-- Multiple versions → keep all, pick highest compatible.
-    
-- Duplicate slug+version → quarantine if mismatch.
-    
+* Multiple versions: keep all, use highest compatible
+* Duplicate slug+version: quarantine if mismatched
 
 ---
 
-## 5) Reliability & scale techniques
+## 5. Reliability & Scalability
 
-- **Queueing**: per-module async queues with DLQs, backpressure signals.
-    
-- **Retries**: idempotent ops only, with backoff + jitter.
-    
-- **Rate limits**: per user/module/global, with friendly `retry_after`.
-    
-- **Caching**: deterministic results memoized by `<slug>@<version> + normalized input`.
-    
-- **Cold-start prep**: optional warmup hooks (model downloads, etc.).
-    
-- **Load balancing**: multiple instances per module; health-aware routing.
-    
-- **Graceful degradation**: fallback when modules unavailable.
-    
+* **Queueing**: async per-module queues with DLQ and backpressure
+* **Retries**: idempotent ops only, with backoff + jitter
+* **Rate Limits**: per-user, per-module, global (`retry_after`)
+* **Caching**: memoize results by `<slug>@<version> + normalized input`
+* **Cold-start Prep**: warmup hooks for model loads, etc.
+* **Load Balancing**: multiple instances, health-aware routing
+* **Graceful Degradation**: fallback paths when modules fail
 
 ---
 
-## 6) Formatter & UX consistency
+## 6. Formatter & UX Consistency
 
-- **Streaming**: token streams or chunked events → incremental markdown.
-    
-- **Uniform UX**: titles, summaries, diagnostics, error cards.
-    
-- **Markdown safety**: sanitize, cap large payloads, escape fences.
-    
-- **Templates**: reusable response cards, errors, confirmations.
-    
-- **Accessibility**: screen-reader friendly markup.
-    
-- **Internationalization**: multiple locales, fallback to English.
-    
+* **Streaming**: token/chunk streams → incremental markdown
+* **Uniform UX**: titles, summaries, diagnostics, error cards
+* **Markdown Safety**: sanitize, truncate large payloads, escape fences
+* **Templates**: reusable cards for errors/confirmations
+* **Accessibility**: screen-reader friendly markup
+* **Internationalization**: localized output with English fallback
 
 ---
 
-## 7) Discoverability & help
+## 7. Discoverability & Help
 
-- `help` → list Ready modules (slug, version, caps, `help.short`)
-    
-- `help <slug>` → full manifest help, schemas, limits, examples
-    
-- No introspection of source files.
-    
+* `help` → list Ready modules (slug, version, caps, `help.short`)
+* `help <slug>` → full manifest help (schemas, limits, examples)
+* No source introspection permitted
 
 ---
 
-## 8) Observability & ops
+## 8. Observability & Operations
 
-- **Logs**: structured by `request_id`, `module_id`, latency, error_code.
-    
-- **Metrics**: latency (p50/p95/p99), error rates, queue depth, cache hit rate.
-    
-- **Tracing**: W3C trace context across Router, Modules, Orchestrator.
-    
-- **Audit**: persist envelopes (sans sensitive payloads) for compliance/replay.
-    
-- **Health monitoring**: continuous probes with alerting.
-    
-- **Profiling**: CPU, memory, I/O.
-    
+* **Logs**: structured with `request_id`, `module_id`, latency, error_code
+* **Metrics**: latency (p50/p95/p99), error rates, queue depth, cache hits
+* **Tracing**: W3C trace context across components
+* **Audit**: persist envelopes (without sensitive payloads)
+* **Health Monitoring**: continuous probes with alerts
+* **Profiling**: CPU, memory, I/O
 
 ---
 
-## 9) Security & governance
+## 9. Security & Governance
 
-- **Validation**: Router enforces JSON Schema, size/type limits.
-    
-- **Least privilege**: manifest-scoped permissions and secrets.
-    
-- **Budgets**: per-request limits (time, memory, tokens).
-    
-- **Secrets**: short-lived, Router-distributed, scoped by manifest.
-    
-- **Safety classification**: module ratings (SAFE → DESTRUCTIVE).
-    
-- **Sandboxing**: containers, rollback, isolated resources.
-    
-- **Encryption**: end-to-end, including stored artifacts.
-    
+* **Validation**: JSON Schema, size/type limits enforced by Router
+* **Least Privilege**: scoped permissions/secrets per manifest
+* **Budgets**: per-request limits on time, memory, tokens
+* **Secrets**: short-lived, distributed via Router
+* **Safety Ratings**: classify modules (`SAFE → DESTRUCTIVE`)
+* **Sandboxing**: containers, rollback, resource isolation
+* **Encryption**: full end-to-end including stored artifacts
 
 ---
 
-## 10) Agent orchestration (agent-ready)
+## 10. Agent Orchestration
 
-- **Plan–Act–Observe** loop: tool selection, working memory, long-term store.
-    
-- **Tool selection**: Registry metadata + capabilities + health + cost.
-    
-- **Safety rails**: budgets, confirmation prompts, PII redaction.
-    
-- **Error recovery**: retries, alternate modules, graceful degradation.
-    
-- **Tracing**: every agent step logged for audit.
-    
-- **Learning system**: track success/fail patterns, improve policy.
-    
+* **Plan–Act–Observe Loop**: tool selection, working memory, long-term store
+* **Tool Selection**: Registry metadata + health + cost evaluation
+* **Safety Rails**: budgets, confirmations, PII redaction
+* **Error Recovery**: retries, alternate modules, graceful degradation
+* **Tracing**: log every agent step for audit
+* **Learning System**: monitor success/fail patterns to refine policies
 
 ---
 
-## 11) Data modeling & schemas
+## 11. Data Modeling & Schemas
 
-- Versioned JSON Schemas for:
-    
-    - Request envelope
-        
-    - Module manifests & `describe()` output
-        
-    - Module input/output payloads
-        
-    - Result & error envelopes
-        
-    - Agent state and memory schemas
-        
-    - Governance/policy configs
-        
-- Semantic versioning + deprecation cycles.
-    
-- Auto-doc generation + validation tools.
-    
-- Registry integration with schema-aware matching.
-    
+* Versioned JSON Schemas for:
+
+  * Request & Result envelopes
+  * Module manifests & outputs (`describe()`)
+  * Module I/O payloads
+  * Agent state & memory
+  * Governance/policy configs
+* Semantic versioning & deprecation cycles
+* Auto-doc generation & validation tools
+* Registry integration with schema matching
 
 ---
 
-## 12) Developer ergonomics
+## 12. Developer Ergonomics
 
-- **Scaffold generator**: creates folder pattern + manifest stub + health probe.
-    
-- **Local runner**: build venv, run health, launch test harness.
-    
-- **Validation CLI**: `validate-manifest`, `validate-schemas`.
-    
-- **Hot reload**: manifests watched by Registry.
-    
+* **Scaffold Generator**: auto-create module folder + manifest stub
+* **Local Runner**: venv build, health check, test harness
+* **Validation CLI**: `validate-manifest`, `validate-schemas`
+* **Hot Reload**: manifest watching in Registry
 
 ---
 
-## 13) Autonomous agent implementation guidance
+## 13. Autonomous Agent Implementation Guidance
 
-### Code generation requirements
+### Code Generation
 
-- **Manifest templates**: Provide JSON schema templates for common module types
-- **Boilerplate generation**: Auto-generate module scaffolding from manifest
-- **Validation scripts**: Create automated validation for manifest compliance
-- **Test harness**: Generate test cases based on input/output schemas
-- **Documentation**: Auto-generate module documentation from manifests
+* Provide manifest templates (JSON schema)
+* Auto-generate scaffolding from manifests
+* Generate validation/test harnesses from schemas
+* Auto-generate documentation from manifests
 
-### Migration automation
+### Migration Automation
 
-- **Discovery**: Scan existing `ai_pipes/` directory for current modules
-- **Analysis**: Extract functionality, dependencies, and interfaces
-- **Conversion**: Transform to new module format with manifest generation
-- **Validation**: Test converted modules against original behavior
-- **Integration**: Wire converted modules into new Router system
+* Scan `ai_pipes/` for existing modules
+* Extract dependencies and interfaces
+* Convert to manifest-driven format
+* Validate against original behavior
+* Integrate into Router
 
-### Safety automation
+### Safety Automation
 
-- **Risk assessment**: Automatically classify operations by safety level
-- **Confirmation flows**: Generate appropriate confirmation prompts
-- **Rollback preparation**: Create automated backup and restore procedures
-- **Monitoring**: Implement health checks and failure detection
-- **Recovery**: Automate recovery procedures for common failure modes
-
-## 14) Implementation roadmap (autonomous agent execution plan)
-
-### Phase 0 - Analysis & Planning (Foundation)
-- **Current system audit**: Inventory existing modules and dependencies
-- **Migration planning**: Create conversion matrix for each current module
-- **Risk assessment**: Identify dangerous operations requiring special handling
-- **Compatibility verification**: Ensure OpenWebUI integration remains intact
-
-### Phase 1 - Core Infrastructure (Essential foundation)
-- **Contract definitions**: Implement JSON schemas for all envelope types
-- **Router architecture**: Build Ingress, Dispatcher, Egress, Registry components
-- **Module interface**: Create base module class and execution adapters
-- **Safety framework**: Implement operation classification and confirmation flows
-- **Basic observability**: Structured logging and essential metrics
-
-### Phase 2 - Module System (Functional core)
-- **Manifest system**: Implement module discovery and validation
-- **Execution isolation**: Venv and container execution adapters
-- **Health monitoring**: Module health checks and status tracking
-- **Error handling**: Standardized error processing and recovery
-- **Basic formatter**: Markdown generation for common response types
-
-### Phase 3 - Migration & Integration (Production readiness)
-- **Module conversion**: Convert existing modules to new format
-- **OpenWebUI adapter**: Complete integration layer with streaming support
-- **Testing framework**: Comprehensive validation and regression testing
-- **Performance optimization**: Caching, connection pooling, resource management
-- **Documentation**: Complete API docs and usage guides
-
-### Phase 4 - Advanced Features (Intelligence layer)
-- **Agent orchestrator**: Plan-act-observe loop implementation
-- **Memory systems**: Working, short-term, and long-term storage
-- **Learning capabilities**: Pattern recognition and success tracking
-- **Advanced policies**: Complex safety rules and governance
-- **Full observability**: Complete metrics, tracing, and audit systems
-
-### Validation checkpoints
-- **Phase 0**: All current functionality inventoried and categorized
-- **Phase 1**: New architecture passes unit and integration tests
-- **Phase 2**: Single module successfully converted and functioning
-- **Phase 3**: All modules converted, system performance equal/better
-- **Phase 4**: Agent capabilities demonstrated, safety validated
-
-### Adapter implementation requirements
-
-- **Pipe class structure**: Maintain OpenWebUI's `Pipe` class with `Valves` for configuration
-- **Method mapping**: `pipe(body, __user__)` → Request envelope transformation
-- **Response format**: Return markdown string compatible with OpenWebUI rendering
-- **Error handling**: Convert internal errors to user-friendly markdown messages
-- **File handling**: Support OpenWebUI's file attachment system via `body.get("files", [])`
-- **Streaming**: Implement OpenWebUI's streaming interface if supported
-
-### Current system migration path
-
-- **Phase 0 - Compatibility layer**: Wrap existing functions in new module format
-- **Gradual transition**: Convert one module at a time while maintaining functionality
-- **Testing strategy**: Validate each converted module against existing behavior
-- **Rollback plan**: Maintain old system until new system is fully validated
-
-### Configuration preservation
-
-- **Docker volume mounts**: Maintain `/host_scripts` mounting pattern
-- **Environment variables**: Preserve existing `.env` file structure
-- **Security model**: Keep existing permission and access patterns
-- **GPU access**: Ensure CUDA/GPU passthrough continues working
-    
+* Classify operations by risk level
+* Generate confirmation flows
+* Prepare rollback procedures
+* Add monitoring and health checks
+* Automate recovery for common failures
 
 ---
 
-## 15) Autonomous agent validation summary
+## 14. Implementation Roadmap
 
-### Architecture completeness ✅
-- **Clear contracts**: All interfaces explicitly defined with schemas
-- **Manifest-driven**: Self-documenting modules with discoverable capabilities
-- **Safety framework**: Built-in protection against dangerous operations
-- **Migration path**: Concrete steps from current to target architecture
-- **Execution guidance**: Phase-by-phase implementation roadmap
+### Phase 0 — Analysis & Planning
 
-### Agent implementation readiness ✅
-- **Code generation**: Templates and scaffolding for rapid development
-- **Validation automation**: Automated testing and compliance checking
-- **Safety automation**: Risk assessment and confirmation flow generation
-- **Monitoring integration**: Health checks and failure detection
-- **Recovery procedures**: Automated rollback and restoration capabilities
+* Inventory current modules/dependencies
+* Create migration matrix
+* Identify risky operations
+* Verify OpenWebUI compatibility
 
-### Production deployment readiness ✅
-- **Scalability**: Stateless design, async dispatch, horizontal scaling
-- **Reliability**: Error handling, retries, graceful degradation
-- **Observability**: Comprehensive logging, metrics, and tracing
-- **Security**: Least privilege, sandboxing, audit trails
-- **Maintainability**: Schema-driven, versioned, self-documenting
+### Phase 1 — Core Infrastructure
 
-### OpenWebUI compatibility ✅
-- **Seamless integration**: Maintains existing pipe interface
-- **Response formatting**: Consistent markdown output
-- **Streaming support**: Real-time response capabilities
-- **File handling**: Upload/download compatibility
-- **Error presentation**: User-friendly error messages
+* Define JSON schemas for envelopes
+* Implement Router (Ingress, Dispatcher, Egress, Registry)
+* Build base module class + adapters
+* Add safety framework
+* Provide structured logs & basic metrics
 
-This architecture provides a complete, implementable blueprint for autonomous agent-driven refactoring of the AI Stack pipe system, with clear success criteria and validation checkpoints.
+### Phase 2 — Module System
+
+* Implement manifest discovery/validation
+* Add venv & container execution adapters
+* Add health monitoring and error handling
+* Provide basic formatter
+
+### Phase 3 — Migration & Integration
+
+* Convert modules to new format
+* Build OpenWebUI adapter with streaming
+* Add regression testing framework
+* Optimize performance (caching, pooling)
+* Finalize API docs and guides
+
+### Phase 4 — Advanced Features
+
+* Implement agent orchestrator (plan–act–observe)
+* Add memory systems (working, short/long-term)
+* Enable adaptive learning and advanced safety policies
+* Provide full observability suite
+
+### Validation Checkpoints
+
+* Phase 0: Inventory complete
+* Phase 1: Unit/integration tests pass
+* Phase 2: First module successfully converted
+* Phase 3: All modules converted, perf ≥ baseline
+* Phase 4: Agent orchestration validated
+
+### Adapter Requirements
+
+* Maintain OpenWebUI `Pipe` class + `Valves`
+* `pipe(body, __user__)` → request envelope transform
+* Return markdown-compatible output
+* Map errors → user-friendly markdown
+* Support file attachments via `body.get("files", [])`
+* Implement streaming if supported
+
+### Migration Path
+
+* Wrap existing functions in new format
+* Convert incrementally (one module at a time)
+* Validate each conversion against current behavior
+* Maintain rollback path until fully validated
+
+### Configuration Preservation
+
+* Maintain `/host_scripts` mounts
+* Keep existing `.env` patterns
+* Preserve permissions/security model
+* Ensure GPU passthrough (CUDA)
+
+---
+
+## 15. Validation Summary
+
+**Architecture Completeness ✅**
+
+* Explicit contracts with schemas
+* Manifest-driven modules
+* Safety framework baked-in
+* Concrete migration plan
+* Phased roadmap
+
+**Agent Implementation Readiness ✅**
+
+* Templates & scaffolding tools
+* Automated validation & testing
+* Safety automation & confirmation flows
+* Monitoring and recovery procedures
+
+**Production Readiness ✅**
+
+* Scalable, stateless design
+* Reliable error handling & fallback
+* Comprehensive observability
+* Secure with least privilege and audit trails
+* Schema-driven maintainability
+
+**OpenWebUI Compatibility ✅**
+
+* Pipe interface preserved
+* Markdown output guaranteed
+* Streaming supported
+* File handling compatible
+* Errors user-friendly
+
+---
