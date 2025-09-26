@@ -1,0 +1,36 @@
+{
+  "ai_stack": {
+    "name": "OpenWebUI AI Stack",
+    "version": "1.0.0",
+    "workspace_root": "d:\\Open WebUI\\ai-stack",
+    "container_scripts_path": "/host_scripts",
+    "host_scripts_path": "d:\\Open WebUI\\ai-stack\\scripts"
+  },
+  "recovery": {
+    "quick_fixes_script": "scripts\\quick-fixes.bat",
+    "emergency_recovery_script": "scripts\\emergency-recovery.ps1",
+    "available_actions": {
+      "namespace": "Network namespace reset (most common fix)",
+      "gpu": "GPU availability check and restart",
+      "status": "System overview and health check",
+      "nuclear": "Complete system restart (last resort)",
+      "tailscale": "Standard Tailscale recovery",
+      "advanced": "Advanced PowerShell recovery"
+    }
+  },
+  "gpu": {
+    "cuda_required": true,
+    "check_availability": true,
+    "log_gpu_status": true
+  },
+  "logging": {
+    "level": "INFO",
+    "format": "%(asctime)s - %(levelname)s - %(message)s",
+    "enable_execution_logs": true
+  },
+  "security": {
+    "read_only_mounts": true,
+    "localhost_only": true,
+    "no_new_privileges": true
+  }
+}
