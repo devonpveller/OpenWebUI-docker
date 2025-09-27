@@ -155,6 +155,74 @@ function Test-EntrypointHealth {
 }
 
 # Function to recover Tailscale service
+# Function to repair OpenWebUI-Ollama connectivity
+function Repair-OllamaConnectivity {
+    Write-LogEntry "Starting OpenWebUI-Ollama connectivity recovery..." "WARN"
+    
+    try {
+        # Check if Ollama container is running
+        if (-not (Test-ServiceHealth "ollama")) {
+            Write-LogEntry "Ollama container not running, starting..." "WARN"
+            docker compose up -d ollama | Out-Null
+            Start-Sleep 30
+            
+            if (-not (Test-ServiceHealth "ollama")) {
+                Write-LogEntry "Failed to start Ollama container" "ERROR"
+                return $false
+            }
+        }
+        
+        # Wait for Ollama API to become available
+        Write-LogEntry "Waiting for Ollama API to become ready..."
+        $MaxWaitTime = 120
+        $WaitTime = 0
+        
+        while ($WaitTime -lt $MaxWaitTime) {
+            try {
+                docker compose exec -T ollama curl -s -f --max-time 5 http://localhost:11434/api/version | Out-Null
+                if ($LASTEXITCODE -eq 0) {
+                    Write-LogEntry "Ollama API is now responding" "SUCCESS"
+                    break
+                }
+            } catch {}
+            
+            Start-Sleep 10
+            $WaitTime += 10
+            
+            if ($WaitTime % 30 -eq 0) {
+                Write-LogEntry "Still waiting for Ollama API... (${WaitTime}s/${MaxWaitTime}s)" "INFO"
+            }
+        }
+        
+        # Test final connectivity from OpenWebUI
+        if (Test-OllamaConnectivity) {
+            Write-LogEntry "OpenWebUI-Ollama connectivity restored" "SUCCESS"
+            return $true
+        } else {
+            Write-LogEntry "Ollama API ready but OpenWebUI still cannot connect, trying container restart" "WARN"
+            
+            # Restart both services in proper order (OpenWebUI first for network namespace)
+            docker compose restart openwebui | Out-Null
+            Start-Sleep 45  # Wait for GPU initialization
+            
+            docker compose restart ollama | Out-Null
+            Start-Sleep 30
+            
+            # Final connectivity test
+            if (Test-OllamaConnectivity) {
+                Write-LogEntry "Container restart restored OpenWebUI-Ollama connectivity" "SUCCESS"
+                return $true
+            } else {
+                Write-LogEntry "Failed to restore OpenWebUI-Ollama connectivity after restart" "ERROR"
+                return $false
+            }
+        }
+    } catch {
+        Write-LogEntry "Ollama connectivity recovery failed: $($_.Exception.Message)" "ERROR"
+        return $false
+    }
+}
+
 function Repair-TailscaleService {
     Write-LogEntry "Starting Tailscale service recovery..." "WARN"
     
@@ -206,6 +274,27 @@ function Repair-TailscaleService {
     } 
     catch {
         Write-LogEntry "Recovery failed with error: $($_.Exception.Message)" "ERROR"
+        return $false
+    }
+}
+
+# Function to test OpenWebUI-Ollama connectivity
+function Test-OllamaConnectivity {
+    try {
+        Write-LogEntry "Testing OpenWebUI-Ollama connectivity..." "DEBUG"
+        
+        # Test if Ollama service is running and accessible
+        $OllamaResponse = docker compose exec -T openwebui curl -s -f --max-time 10 http://localhost:11434/api/version 2>$null
+        
+        if ($LASTEXITCODE -eq 0 -and $OllamaResponse) {
+            Write-LogEntry "OpenWebUI-Ollama connectivity verified" "DEBUG"
+            return $true
+        } else {
+            Write-LogEntry "OpenWebUI cannot reach Ollama on localhost:11434" "WARN"
+            return $false
+        }
+    } catch {
+        Write-LogEntry "Failed to test Ollama connectivity: $($_.Exception.Message)" "ERROR"
         return $false
     }
 }
@@ -294,6 +383,15 @@ function Invoke-HealthCheck {
             Write-LogEntry "Serve configuration restored"
         } catch {
             Write-LogEntry "Failed to restore serve configuration: $($_.Exception.Message)" "ERROR"
+            return $false
+        }
+    }
+    
+    # Test OpenWebUI-Ollama connectivity
+    if (-not (Test-OllamaConnectivity)) {
+        Write-LogEntry "OpenWebUI-Ollama connectivity failed, attempting recovery..." "WARN"
+        if (-not (Repair-OllamaConnectivity)) {
+            Write-LogEntry "Failed to restore OpenWebUI-Ollama connectivity" "ERROR"
             return $false
         }
     }

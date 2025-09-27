@@ -14,6 +14,8 @@ services:
       - .:/host_project:ro  # Mount entire project for AI Stack pipe functions
     environment:
       - OLLAMA_HOST=http://localhost:11434
+      - OLLAMA_BASE_URL=http://localhost:11434  # Explicitly set to prevent routing issues
+      - OLLAMA_BASE_URLS=http://localhost:11434  # Also set the plural version
       - USE_CUDA=true
       - USE_CUDA_DOCKER=true
       - TRANSFORMERS_CACHE=/tmp/transformers_cache
