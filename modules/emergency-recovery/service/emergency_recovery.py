@@ -40,13 +40,49 @@ class EmergencyRecoveryModule:
             "recovery": {
                 "quick_fixes_script": "scripts\\quick-fixes.bat",
                 "emergency_recovery_script": "scripts\\emergency-recovery.ps1",
+                "container_startup_order": {
+                    "phase1_shutdown": ["tailscale", "ollama", "openwebui"],
+                    "phase2_cleanup_wait": 15,
+                    "phase3_startup": [
+                        {
+                            "service": "openwebui",
+                            "description": "Primary service with GPU passthrough",
+                            "wait_healthy": 240,
+                            "network_stabilization": 20
+                        },
+                        {
+                            "service": "ollama", 
+                            "description": "Depends on OpenWebUI network namespace",
+                            "wait_healthy": 60,
+                            "dependency": "openwebui"
+                        },
+                        {
+                            "service": "tailscale",
+                            "description": "Shares OpenWebUI network namespace",
+                            "wait_healthy": 90,
+                            "dependency": "openwebui"
+                        },
+                        {
+                            "service": "watchtower",
+                            "description": "Independent monitoring service",
+                            "dependency": None,
+                            "critical": False
+                        }
+                    ]
+                },
                 "available_actions": {
-                    "namespace": "Network namespace reset (most common fix)",
+                    "namespace": "Network namespace reset (most common fix for connectivity)",
                     "gpu": "GPU availability check and restart", 
                     "status": "System overview and health check",
-                    "nuclear": "Complete system restart (last resort)",
+                    "nuclear": "Complete system restart with proper container ordering",
                     "tailscale": "Standard Tailscale recovery",
-                    "advanced": "Advanced PowerShell recovery"
+                    "advanced": "Advanced PowerShell recovery with 5-phase process"
+                },
+                "critical_dependencies": {
+                    "network_sharing": "Both Ollama and Tailscale use network_mode: service:openwebui",
+                    "startup_order": "OpenWebUI must be healthy before dependent services start",
+                    "gpu_passthrough": "OpenWebUI and Ollama both require GPU device access",
+                    "stabilization_periods": "Network namespace changes require stabilization time"
                 }
             }
         }
@@ -73,6 +109,29 @@ class EmergencyRecoveryModule:
         # Default to status check if no specific action detected
         return "status"
     
+    def get_container_startup_sequence(self) -> Dict[str, Any]:
+        """Get detailed container startup sequence and dependencies"""
+        return {
+            "startup_sequence": self.config["recovery"]["container_startup_order"],
+            "critical_dependencies": self.config["recovery"]["critical_dependencies"],
+            "network_architecture": {
+                "shared_namespace": "Ollama and Tailscale share OpenWebUI's network namespace",
+                "configuration": "network_mode: service:openwebui",
+                "implications": [
+                    "OpenWebUI container restarts break network access for dependent services",
+                    "Dependent services must be restarted after OpenWebUI container changes",
+                    "Network namespace requires stabilization time after OpenWebUI starts"
+                ]
+            },
+            "recovery_phases": {
+                "1_shutdown": "Reverse dependency order to prevent orphaned connections",
+                "2_cleanup": "Allow network namespace cleanup and stabilization",
+                "3_startup": "Sequential startup with health checks and stabilization periods",
+                "4_verification": "Test connectivity between all services",
+                "5_validation": "Verify service functionality and configuration"
+            }
+        }
+
     def get_available_recovery_actions(self) -> Dict[str, Any]:
         """Get list of available recovery actions"""
         return {
@@ -112,12 +171,21 @@ class EmergencyRecoveryModule:
             if action == "namespace":
                 result.update({
                     "immediate_command": "scripts\\quick-fixes.bat namespace",
-                    "description_detailed": "Resets network namespace sharing between OpenWebUI and Tailscale containers",
+                    "description_detailed": "Resets network namespace sharing - most common fix for connectivity issues",
+                    "root_cause": "OpenWebUI container recreation breaks shared network namespace",
+                    "affected_services": ["tailscale", "ollama"],
+                    "procedure": [
+                        "1. Stop Tailscale (dependent service)",
+                        "2. Restart Tailscale to rejoin OpenWebUI network namespace",  
+                        "3. Test connectivity and wait for stabilization"
+                    ],
                     "success_indicators": [
                         "Tailscale container restarts successfully",
-                        "Network connectivity restored",
-                        "docker compose ps shows all services healthy"
-                    ]
+                        "Network connectivity restored between services",
+                        "docker compose ps shows all services healthy",
+                        "OpenWebUI can reach Ollama via localhost:11434"
+                    ],
+                    "when_to_use": "When OpenWebUI cannot reach Ollama or Tailscale connectivity fails"
                 })
             elif action == "gpu":
                 result.update({
@@ -131,13 +199,48 @@ class EmergencyRecoveryModule:
                 })
             elif action == "nuclear":
                 result.update({
-                    "immediate_command": "scripts\\quick-fixes.bat nuclear",
-                    "warning": "⚠️ This will restart all containers and may cause temporary downtime",
-                    "description_detailed": "Complete system restart as last resort",
+                    "immediate_command": "scripts\\emergency-recovery.ps1 -Action recover",
+                    "warning": "⚠️ This will restart all containers with proper dependency ordering",
+                    "description_detailed": "5-phase emergency recovery with correct container startup sequence",
+                    "procedure_phases": [
+                        "Phase 1: Graceful shutdown (reverse dependency order: tailscale → ollama → openwebui)",
+                        "Phase 2: Network namespace cleanup (15-second stabilization)",
+                        "Phase 3: Service restart with proper dependencies",
+                        "  - OpenWebUI first (with GPU support, wait for healthy status)",
+                        "  - 20-second network namespace stabilization",
+                        "  - Ollama (depends on OpenWebUI network, 60s timeout)",
+                        "  - Tailscale (shares OpenWebUI network, 90s timeout)",
+                        "  - Watchtower (independent service)",
+                        "Phase 4: Connectivity verification (25s)",
+                        "Phase 5: Service verification and status reporting"
+                    ],
+                    "critical_dependencies": {
+                        "network_sharing": "Ollama and Tailscale both use 'network_mode: service:openwebui'",
+                        "startup_order": "OpenWebUI MUST be healthy before dependent services start",
+                        "gpu_requirements": "Both OpenWebUI and Ollama require GPU device access"
+                    },
                     "prerequisites": [
                         "Backup any important temporary data",
                         "Ensure no critical operations are running",
-                        "Verify all volumes are properly mounted"
+                        "Verify all volumes are properly mounted",
+                        "Confirm GPU drivers and NVIDIA Container Toolkit are available"
+                    ]
+                })
+            elif action == "advanced":
+                result.update({
+                    "immediate_command": "scripts\\emergency-recovery.ps1 -Action recover",
+                    "description_detailed": "Comprehensive 5-phase recovery with health checks and dependency management",
+                    "container_dependencies": {
+                        "openwebui": "Primary service - provides network namespace for others",
+                        "ollama": "Dependent on OpenWebUI network namespace",
+                        "tailscale": "Dependent on OpenWebUI network namespace", 
+                        "watchtower": "Independent monitoring service"
+                    },
+                    "health_checks": [
+                        "OpenWebUI: HTTP health check + GPU availability test",
+                        "Ollama: API version endpoint + model list verification",
+                        "Tailscale: VPN status + serve configuration check",
+                        "Network: External connectivity + internal service communication"
                     ]
                 })
             
@@ -157,9 +260,9 @@ class EmergencyRecoveryModule:
             "namespace": "scripts\\quick-fixes.bat namespace",
             "gpu": "scripts\\quick-fixes.bat gpu",
             "status": "scripts\\quick-fixes.bat status", 
-            "nuclear": "scripts\\quick-fixes.bat nuclear",
-            "tailscale": ".\\scripts\\emergency-recovery.ps1 -Action recover",
-            "advanced": ".\\scripts\\emergency-recovery.ps1 -Action nuclear"
+            "nuclear": "scripts\\emergency-recovery.ps1 -Action recover",
+            "tailscale": "scripts\\emergency-recovery.ps1 -Action recover",
+            "advanced": "scripts\\emergency-recovery.ps1 -Action recover"
         }
         return templates.get(action, "scripts\\quick-fixes.bat status")
 
