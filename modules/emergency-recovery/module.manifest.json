@@ -105,6 +105,14 @@
       {
         "input": "help",
         "description": "Get help information"
+      },
+      {
+        "input": "restart ollama",
+        "description": "Restart Ollama container to fix connectivity with OpenWebUI"
+      },
+      {
+        "input": "validate gpu",
+        "description": "Test GPU availability and PyTorch installation in OpenWebUI"
       }
     ]
   },
