@@ -1,0 +1,128 @@
+{
+  "name": "Emergency Recovery System",
+  "slug": "emergency-recovery",
+  "version": "1.0.0-migrated",
+  "description": "System recovery and troubleshooting automation",
+  "author": "AI Stack Migration Tool",
+  "license": "MIT",
+  "entry": {
+    "kind": "cli",
+    "path": "service/emergency_recovery.py",
+    "function": "main"
+  },
+  "schema": {
+    "input": {
+      "type": "object",
+      "properties": {
+        "request_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "input": {
+          "oneOf": [
+            {
+              "type": "string",
+              "description": "Text query"
+            },
+            {
+              "type": "object",
+              "description": "Structured parameters"
+            }
+          ]
+        },
+        "user": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            }
+          }
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "request_id",
+        "input"
+      ]
+    },
+    "output": {
+      "type": "object",
+      "properties": {
+        "request_id": {
+          "type": "string"
+        },
+        "module_id": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "ok",
+            "error"
+          ]
+        },
+        "content": {
+          "type": "string"
+        },
+        "structured_data": {
+          "type": "object"
+        }
+      }
+    }
+  },
+  "capabilities": [
+    "admin_operations",
+    "system_monitoring"
+  ],
+  "limits": {
+    "timeout_ms": 23000,
+    "memory_mb": 512,
+    "cpu_cores": 0.5,
+    "input_size_mb": 5,
+    "concurrent_requests": 3
+  },
+  "environment": {
+    "kind": "venv",
+    "python_version": ">=3.8",
+    "dependencies": [],
+    "gpu_required": false
+  },
+  "health": {
+    "probe_interval_ms": 30000,
+    "startup_timeout_ms": 60000
+  },
+  "help": {
+    "short": "System recovery and troubleshooting automation",
+    "long": "Migrated from emergency_recovery_pipe.py. Emergency Recovery Pipe for AI Stack\n\nIntegrates with the existing emergency recovery system to provide\nAI-driven system recovery through OpenWebUI conversations.",
+    "examples": [
+      {
+        "input": "status",
+        "description": "Get module status"
+      },
+      {
+        "input": "help",
+        "description": "Get help information"
+      }
+    ]
+  },
+  "permissions": {
+    "allowed_roles": [
+      "user",
+      "admin"
+    ],
+    "safety_rating": "RESTRICTED"
+  },
+  "compatibility": {
+    "router_version": ">=1.0.0",
+    "openwebui_version": ">=0.3.0"
+  },
+  "_migration": {
+    "source_file": "emergency_recovery_pipe.py",
+    "migrated_at": "2025-09-26T15:44:07.110009",
+    "complexity_score": 23,
+    "original_functions": []
+  }
+}

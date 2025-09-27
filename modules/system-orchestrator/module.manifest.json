@@ -1,0 +1,107 @@
+{
+  "slug": "system-orchestrator",
+  "name": "system-orchestrator", 
+  "version": "1.0.0",
+  "description": "System-wide orchestrator for comprehensive health monitoring across all modules",
+  "type": "orchestration",
+  "category": "system-management",
+  "capabilities": [
+    "system_monitoring",
+    "admin_operations",
+    "data_analysis"
+  ],
+  "resources": {
+    "cpu": "medium",
+    "memory": "medium", 
+    "io": "high",
+    "network": true
+  },
+  "configuration": {
+    "timeout_seconds": 45,
+    "max_retries": 3,
+    "cache_enabled": false,
+    "coordination_enabled": true
+  },
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "request_id": {"type": "string"},
+      "input": {
+        "oneOf": [
+          {"type": "string"},
+          {
+            "type": "object", 
+            "properties": {
+              "operation": {"type": "string", "enum": ["health_check", "system_overview", "module_status", "performance_summary"]},
+              "modules": {"type": "array", "items": {"type": "string"}},
+              "include_performance": {"type": "boolean"}
+            }
+          }
+        ]
+      }
+    },
+    "required": ["request_id", "input"]
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "request_id": {"type": "string"},
+      "module_id": {"type": "string"},
+      "status": {"type": "string", "enum": ["ok", "error", "partial"]},
+      "content": {"type": "string"},
+      "structured_data": {
+        "type": "object",
+        "properties": {
+          "overall_health_score": {"type": "number"},
+          "module_statuses": {
+            "type": "object",
+            "additionalProperties": {"type": "object"}
+          },
+          "system_metrics": {"type": "object"},
+          "recommendations": {"type": "array"}
+        }
+      }
+    },
+    "required": ["request_id", "module_id", "status", "content"]
+  },
+  "entry": {
+    "kind": "cli",
+    "path": "system_orchestrator.py"
+  },
+  "schema": {
+    "input": {
+      "type": "object",
+      "properties": {
+        "operation": {"type": "string"},
+        "modules": {"type": "array"}
+      }
+    },
+    "output": {
+      "type": "object",
+      "properties": {
+        "status": {"type": "string"},
+        "content": {"type": "string"},
+        "structured_data": {"type": "object"}
+      }
+    }
+  },
+  "help": {
+    "short": "Comprehensive system health orchestration",
+    "long": "Coordinates health checks across all modules and provides comprehensive system status overview with performance metrics and recommendations."
+  },
+  "routing": {
+    "keywords": [
+      "overall health",
+      "comprehensive", 
+      "system status",
+      "all modules",
+      "orchestrat"
+    ],
+    "priority": 0
+  },
+  "maintainer": {
+    "name": "AI Stack Development Team",
+    "created_at": "2024-01-01T12:00:00Z",
+    "purpose": "Comprehensive system health coordination across all modules"
+  }
+}
