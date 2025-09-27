@@ -1,0 +1,164 @@
+{
+  "slug": "help-system",
+  "name": "help-system",
+  "version": "1.0.0-migrated",
+  "description": "Comprehensive help and documentation system for AI Stack",
+  "type": "documentation",
+  "category": "system-management",
+  "capabilities": [
+    "search",
+    "data_analysis"
+  ],
+  "resources": {
+    "cpu": "low",
+    "memory": "low",
+    "io": "minimal",
+    "network": false
+  },
+  "configuration": {
+    "timeout_seconds": 15,
+    "max_retries": 2,
+    "cache_enabled": true
+  },
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "request_id": {"type": "string"},
+      "input": {
+        "oneOf": [
+          {"type": "string"},
+          {
+            "type": "object",
+            "properties": {
+              "query": {"type": "string"},
+              "topic": {"type": "string"},
+              "search_type": {"type": "string", "enum": ["topic", "search", "overview"]}
+            }
+          }
+        ]
+      }
+    },
+    "required": ["request_id", "input"]
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "request_id": {"type": "string"},
+      "module_id": {"type": "string"},
+      "status": {"type": "string", "enum": ["ok", "error"]},
+      "content": {"type": "string"},
+      "structured_data": {"type": "object"},
+      "diagnostics": {
+        "type": "object",
+        "properties": {
+          "execution_time_ms": {"type": "integer"}
+        }
+      },
+      "error": {
+        "type": "object",
+        "properties": {
+          "code": {"type": "string"},
+          "message": {"type": "string"},
+          "retriable": {"type": "boolean"}
+        }
+      },
+      "timestamp": {"type": "string", "format": "date-time"}
+    },
+    "required": ["request_id", "module_id", "status", "content", "timestamp"]
+  },
+  "examples": [
+    {
+      "description": "Get help overview",
+      "input": {
+        "request_id": "help-001",
+        "input": "help"
+      },
+      "output": {
+        "request_id": "help-001",
+        "module_id": "help-system",
+        "status": "ok",
+        "content": "## 📚 AI Stack Help System\n\nComprehensive help and documentation for AI Stack",
+        "structured_data": {
+          "ai_stack_help_system": {
+            "description": "Comprehensive help and documentation for AI Stack",
+            "available_topics": []
+          }
+        },
+        "diagnostics": {
+          "execution_time_ms": 150
+        },
+        "timestamp": "2024-01-01T12:00:00Z"
+      }
+    }
+  ],
+  "dependencies": {
+    "python": ">=3.8",
+    "packages": []
+  },
+  "health_checks": [
+    {
+      "name": "help_database_loaded",
+      "description": "Verify help database is properly loaded",
+      "critical": true
+    }
+  ],
+  "observability": {
+    "logs": {
+      "level": "INFO",
+      "include_request_id": true,
+      "include_execution_time": true
+    },
+    "metrics": [
+      "help_requests_total",
+      "search_queries_total",
+      "execution_time_seconds"
+    ]
+  },
+  "security": {
+    "permissions": ["read"],
+    "sandboxing": true,
+    "resource_limits": {
+      "max_memory_mb": 64,
+      "max_cpu_percent": 10
+    }
+  },
+  "entry": {
+    "kind": "cli",
+    "path": "help_system.py"
+  },
+  "schema": {
+    "input": {
+      "type": "object",
+      "properties": {
+        "query": {"type": "string"},
+        "topic": {"type": "string"},
+        "search_type": {"type": "string", "enum": ["topic", "search", "overview"]}
+      }
+    },
+    "output": {
+      "type": "object",
+      "properties": {
+        "status": {"type": "string"},
+        "content": {"type": "string"},
+        "structured_data": {"type": "object"}
+      }
+    }
+  },
+  "routing": {
+    "keywords": ["help", "documentation", "guide", "manual", "how to", "explain", "what is"],
+    "patterns": [
+      "help*",
+      "*help*",
+      "show*guide",
+      "explain*",
+      "what*is*",
+      "how*to*"
+    ],
+    "priority": 1
+  },
+  "maintainer": {
+    "name": "AI Stack Migration Team",
+    "created_at": "2024-01-01T12:00:00Z",
+    "migration_source": "scripts/ai_pipes/help_pipe.py"
+  }
+}

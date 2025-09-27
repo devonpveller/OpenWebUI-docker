@@ -10,6 +10,7 @@ This project provides a complete AI chat interface with:
 - **Tailscale**: Secure VPN access for remote connections
 - **Watchtower**: Automatic container updates
 - **GPU Support**: NVIDIA GPU acceleration for both Ollama and OpenWebUI components
+- **AI Stack Pipe Functions**: Unified intelligent routing system for system management and automation
 
 ## 📁 Project Structure
 
@@ -29,10 +30,36 @@ ai-stack/
 │   ├── openwebui-models/      # Custom model definitions
 │   └── tailscale/             # Tailscale state and certificates
 ├── scripts/                   # Utility scripts
+│   ├── ai_pipes/              # AI Stack pipe function modules
+│   │   ├── ai_stack_router.py        # Unified intelligent router
+│   │   ├── unified_openwebui_pipe.py # Single OpenWebUI integration
+│   │   ├── gpu_status_pipe.py        # GPU monitoring and diagnostics
+│   │   ├── emergency_recovery_pipe.py # System recovery automation
+│   │   ├── system_health_pipe.py     # Health monitoring
+│   │   ├── custom_tools_pipe.py      # Tool discovery and automation
+│   │   └── help_pipe.py              # Help system and documentation
 │   ├── emergency-recovery.ps1 # Advanced PowerShell recovery tool
 │   ├── emergency-recovery.bat # Enhanced legacy recovery script  
 │   ├── quick-fixes.bat        # Simple targeted fixes
 │   └── ...                   # Other utility scripts
+├── core/                      # Refactored architecture (manifest-driven)
+│   ├── router.py              # Core manifest-driven router
+│   ├── openwebui_adapter.py   # OpenWebUI integration layer
+│   └── legacy_adapter.py      # Legacy pipe compatibility
+├── modules/                   # Refactored modular components
+│   └── gpu-status/            # Example refactored module
+│       ├── manifest.json      # Module capabilities definition
+│       ├── module.py          # Module implementation
+│       └── schema.json        # Input/output contracts
+├── schemas/                   # JSON Schema definitions
+│   ├── request_envelope.schema.json  # Request validation
+│   ├── module_result.schema.json     # Response validation
+│   └── module_manifest.schema.json   # Module contracts
+├── tools/                     # Development and migration tools
+│   ├── refactor_orchestrator.py      # Automated refactoring
+│   ├── migration_tool.py             # Legacy-to-manifest migration
+│   ├── scaffold_generator.py         # New module scaffolding
+│   └── validation_tool.py            # Schema and contract validation
 ├── documentation/             # Additional documentation
 └── README.md                  # This file
 ```
@@ -56,6 +83,45 @@ This installs:
 - Docker Desktop with WSL2 enabled
 - NVIDIA GPU drivers (for GPU acceleration)
 - Tailscale account and auth key
+
+### AI Stack Pipe Functions Setup
+The AI Stack includes an intelligent pipe function system that provides:
+- **Unified Interface**: Single pipe function in OpenWebUI instead of multiple separate functions
+- **Intelligent Routing**: Natural language analysis routes requests to appropriate modules
+- **System Management**: GPU monitoring, health checks, emergency recovery, and automation tools
+- **Manifest-Driven Architecture**: Modern architecture with explicit contracts and schema validation
+
+#### Pipe Function Architecture
+The system includes both legacy and refactored architectures:
+
+**Current Legacy System** (`scripts/ai_pipes/`):
+- `unified_openwebui_pipe.py`: Single OpenWebUI integration point
+- `ai_stack_router.py`: Intelligent routing based on keyword analysis
+- Individual pipe modules: `gpu_status_pipe.py`, `emergency_recovery_pipe.py`, `system_health_pipe.py`, etc.
+
+**Refactored Architecture** (`core/`, `modules/`, `schemas/`):
+- **Manifest-driven modules** with explicit capability definitions
+- **Schema validation** for all requests and responses  
+- **Comprehensive observability** and error handling
+- **Automated migration tools** from legacy to new architecture
+
+#### Setup OpenWebUI Pipe Function
+1. **Mount scripts directory** in `docker-compose.yml`:
+   ```yaml
+   openwebui:
+     volumes:
+       - ./scripts:/host_scripts:ro  # Expose pipe functions
+   ```
+
+2. **Access OpenWebUI Admin** → Functions → Create New Function
+
+3. **Paste the unified pipe function** from `scripts/ai_pipes/unified_openwebui_pipe.py`
+
+4. **Test with queries** like:
+   - "Check GPU status"
+   - "System health report"  
+   - "Run emergency recovery"
+   - "Show available tools"
 
 ## ⚙️ Configuration
 
@@ -191,7 +257,137 @@ graph TD
 - **OpenWebUI**: https://openwebui-13.tail[your-tailnet].ts.net/
 - **Secure HTTPS** with automatic certificates
 
-## ⚠️ Critical Areas & Cautions
+### AI Stack Management (via Pipe Functions)
+Once the unified pipe function is installed in OpenWebUI, you can manage the system through natural language:
+
+**GPU Management**:
+- "Check GPU status" - Monitor GPU availability and usage
+- "GPU diagnostics" - Comprehensive GPU health report
+
+**System Health**:
+- "System health" - Overall system status and diagnostics
+- "Container status" - Docker container health checks
+
+**Emergency Recovery**:
+- "Fix network issues" - Resolve Tailscale connectivity problems
+- "Restart services" - Graceful service recovery
+- "Emergency recovery" - Complete system recovery procedures
+
+**Tool Discovery**:
+- "Available tools" - List all available management functions
+- "Help" - Get assistance with system commands
+
+## 🏗️ AI Stack Pipe Function Architecture
+
+### Overview
+The AI Stack includes a sophisticated pipe function system that bridges OpenWebUI with host system management capabilities. This provides autonomous system management through natural language interfaces.
+
+### Architecture Components
+
+#### 1. Current Legacy System (`scripts/ai_pipes/`)
+**Unified OpenWebUI Integration**:
+- `unified_openwebui_pipe.py`: Single pipe function for OpenWebUI
+- `ai_stack_router.py`: Intelligent routing engine with keyword analysis
+- Modular pipe functions for specific capabilities
+
+**Available Modules**:
+- `gpu_status_pipe.py`: GPU monitoring, CUDA diagnostics, performance metrics
+- `emergency_recovery_pipe.py`: Automated recovery procedures, service restart automation
+- `system_health_pipe.py`: Container health checks, resource monitoring, connectivity testing
+- `custom_tools_pipe.py`: Tool discovery, script automation, workflow management
+- `help_pipe.py`: Interactive help system, command discovery, documentation access
+
+**Key Features**:
+- **Natural Language Processing**: Analyzes user input and routes to appropriate modules
+- **GPU Integration**: Leverages custom CUDA-enabled OpenWebUI build for GPU diagnostics
+- **Recovery Automation**: Integrates with PowerShell recovery scripts for autonomous problem resolution
+- **Security Hardened**: Read-only script mounts, container isolation, structured logging
+
+#### 2. Refactored Architecture (`core/`, `modules/`, `schemas/`)
+**Modern Manifest-Driven Design**:
+- **Explicit Contracts**: JSON Schema validation for all communications
+- **Module Isolation**: Independent modules with clear capability definitions
+- **Comprehensive Observability**: Structured logging, error handling, health monitoring
+- **Automated Testing**: Built-in validation and testing frameworks
+
+**Core Components**:
+- `core/router.py`: Advanced routing with schema validation and module registry
+- `core/openwebui_adapter.py`: OpenWebUI integration layer with backward compatibility
+- `core/legacy_adapter.py`: Bridge between legacy and refactored systems
+- `schemas/*.json`: Request/response contracts and module manifests
+- `tools/`: Migration automation, scaffolding, and validation utilities
+
+### Implementation Guide
+
+#### Quick Setup (Legacy System)
+1. **Enable pipe functions** in `docker-compose.yml`:
+   ```yaml
+   openwebui:
+     volumes:
+       - ./scripts:/host_scripts:ro
+   ```
+
+2. **Install in OpenWebUI**:
+   - Admin → Functions → Create New
+   - Copy content from `scripts/ai_pipes/unified_openwebui_pipe.py`
+   - Save and test with "Check GPU status"
+
+#### Advanced Setup (Refactored Architecture)
+```bash
+# Automated refactoring (recommended)
+python tools/refactor_orchestrator.py
+
+# Manual phase-by-phase implementation
+python tools/refactor_orchestrator.py --phase 1  # Core infrastructure
+python tools/refactor_orchestrator.py --phase 2  # Module system
+python tools/refactor_orchestrator.py --phase 3  # Migration
+python tools/refactor_orchestrator.py --phase 4  # Validation
+```
+
+### Usage Examples
+
+**System Management through Natural Language**:
+```
+"Check GPU status" → gpu_status_pipe.py → GPU diagnostics report
+"System health" → system_health_pipe.py → Container health checks
+"Fix network issues" → emergency_recovery_pipe.py → Automated recovery
+"Available tools" → custom_tools_pipe.py → Tool discovery
+"Help with commands" → help_pipe.py → Interactive assistance
+```
+
+**Advanced Capabilities**:
+- **GPU Monitoring**: Real-time CUDA diagnostics, memory usage, temperature monitoring
+- **Container Orchestration**: Health checks, dependency management, graceful restarts
+- **Network Recovery**: Automated Tailscale namespace fixes, connectivity restoration
+- **Security Monitoring**: Container isolation checks, resource usage alerts
+- **Performance Optimization**: Resource allocation recommendations, bottleneck identification
+
+### Development and Extension
+
+#### Creating New Modules (Legacy)
+1. Create new pipe module in `scripts/ai_pipes/`
+2. Implement `main(payload)` function
+3. Add routing keywords to `ai_stack_router.py`
+4. Test through unified pipe function
+
+#### Creating New Modules (Refactored)
+```bash
+# Generate module scaffold
+python tools/scaffold_generator.py --name my-module --type system-management
+
+# Implement module following manifest contract
+# Validate with schema tools
+python tools/validation_tool.py --module modules/my-module/
+```
+
+### Migration Path
+
+**Phase 1**: Use legacy system for immediate functionality  
+**Phase 2**: Gradually migrate modules to manifest-driven architecture  
+**Phase 3**: Full migration with comprehensive testing and validation  
+**Phase 4**: Deprecate legacy system, maintain only refactored architecture
+
+The system is designed for seamless migration with zero downtime and backward compatibility throughout the transition.
 
 ### 🔴 Tailscale Configuration
 **Location**: `entrypoint.sh`, `docker-compose.yml`
@@ -249,13 +445,84 @@ volumes:
 - Downloaded AI models (large files)
 - User accounts and conversations
 
+## ⚠️ Critical Areas & Cautions
+
+### 🔴 Pipe Function Integration
+**Location**: `scripts/ai_pipes/`, `docker-compose.yml`
+
+**Critical Points**:
+- **Script mount required**: `./scripts:/host_scripts:ro` volume mount enables pipe function access
+- **Read-only security**: Scripts mounted with `:ro` flag for container security
+- **Path consistency**: All pipe modules expect `/host_scripts/ai_pipes/` path structure
+- **OpenWebUI compatibility**: Use only `unified_openwebui_pipe.py` as single entry point
+- **Router dependencies**: `ai_stack_router.py` must be accessible for intelligent routing
+
+```yaml
+# ✅ CORRECT - Secure script mounting
+openwebui:
+  volumes:
+    - ./scripts:/host_scripts:ro  # Read-only access
+
+# ❌ WRONG - Don't give write access
+openwebui:
+  volumes:
+    - ./scripts:/host_scripts     # Security risk
+```
+
+### 🔴 Module Architecture Transition
+**Location**: `core/`, `modules/`, `schemas/`, `tools/`
+
+**Critical Points**:
+- **Two systems coexist**: Legacy (`scripts/ai_pipes/`) and refactored (`core/`) architectures
+- **Migration required**: Use `tools/refactor_orchestrator.py` for safe migration
+- **Schema validation**: All refactored modules require JSON Schema compliance
+- **Backward compatibility**: Legacy adapter ensures continuous operation during migration
+- **Don't mix architectures**: Use either legacy OR refactored system, not both simultaneously
+
+### 🔴 GPU Integration Dependencies
+**Location**: `Dockerfile.openwebui-gpu`, pipe function modules
+
+**Critical Points**:
+- **Custom CUDA build required**: Pipe functions rely on GPU-enabled OpenWebUI container
+- **PyTorch availability**: GPU status modules require CUDA-enabled PyTorch installation
+- **Container GPU access**: Pipe functions access GPU through shared container environment
+- **Environment variables**: `USE_CUDA=true` required for GPU module functionality
+
 ## 🐛 Debugging
 
 ### Enhanced Recovery Scripts
 
 The project includes multiple recovery tools for different scenarios:
 
-#### 1. PowerShell Advanced Recovery (`emergency-recovery.ps1`)
+#### 1. AI Stack Pipe Function Debugging
+**Test pipe function integration**:
+```bash
+# Verify script mount is working
+docker compose exec openwebui ls -la /host_scripts/ai_pipes/
+
+# Test unified pipe function directly
+docker compose exec openwebui python /host_scripts/ai_pipes/unified_openwebui_pipe.py
+
+# Check router functionality
+docker compose exec openwebui python /host_scripts/ai_pipes/ai_stack_router.py '{"input": "gpu status"}'
+
+# Validate individual modules
+docker compose exec openwebui python /host_scripts/ai_pipes/gpu_status_pipe.py '{"input": "status"}'
+```
+
+**Common Pipe Function Issues**:
+```bash
+# Module not found errors
+docker compose exec openwebui python -c "import sys; print(sys.path)"
+
+# GPU module issues
+docker compose exec openwebui python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
+
+# Router routing problems
+docker compose logs openwebui | grep -i "router\|pipe"
+```
+
+#### 2. PowerShell Advanced Recovery (`emergency-recovery.ps1`)
 Full-featured recovery with health checks and timing controls:
 ```powershell
 # Standard recovery with health monitoring
@@ -783,6 +1050,11 @@ docker compose ps && docker compose exec tailscale tailscale status
 # GPU status check
 docker compose exec openwebui python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
 
+# AI Stack pipe function testing
+docker compose exec openwebui ls /host_scripts/ai_pipes/                    # Verify script mount
+docker compose exec openwebui python /host_scripts/ai_pipes/ai_stack_router.py '{"input": "gpu status"}'  # Test router
+docker compose exec openwebui python /host_scripts/ai_pipes/unified_openwebui_pipe.py  # Test unified pipe
+
 # Full system logs
 docker compose logs --tail=100
 
@@ -794,6 +1066,11 @@ scripts\quick-fixes.bat status          # System overview
 # Advanced recovery
 .\scripts\emergency-recovery.ps1 -Action recover    # Full recovery with health checks
 .\scripts\emergency-recovery.ps1 -Action gpu-reset  # GPU-specific recovery
+
+# AI Stack pipe function development
+python tools/refactor_orchestrator.py --dry-run     # Preview refactoring changes
+python tools/migration_tool.py --analyze-only       # Analyze legacy modules
+python tools/validation_tool.py --all               # Validate all schemas and modules
 
 # Emergency restart
 docker compose restart
@@ -817,12 +1094,15 @@ docker compose down && docker compose build --no-cache && docker compose up -d
 - This setup is optimized for development and small-scale production use
 - GPU acceleration available for both Ollama and OpenWebUI components
 - Custom OpenWebUI build includes CUDA-enabled PyTorch for reranker models
+- **AI Stack Pipe Functions**: Unified intelligent system management through natural language interface
+- **Dual Architecture Support**: Both legacy pipe system and modern manifest-driven architecture available
 - Enhanced recovery scripts provide multiple repair options with health monitoring
 - Tailscale provides zero-config VPN access
 - All data persists across container restarts
 - Watchtower keeps services updated automatically (except Tailscale)
 
-**Last Updated**: September 19, 2025  
-**OpenWebUI**: Custom GPU-enabled build  
+**Last Updated**: September 26, 2025  
+**OpenWebUI**: Custom GPU-enabled build with AI Stack pipe functions  
 **Tailscale Version**: v1.84.3  
-**Docker Compose Version**: v2.x
+**Docker Compose Version**: v2.x  
+**AI Stack Architecture**: Legacy + Refactored (Manifest-driven)

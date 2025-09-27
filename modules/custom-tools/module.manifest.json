@@ -1,0 +1,127 @@
+{
+  "name": "Custom Tools Discovery",
+  "slug": "custom-tools",
+  "version": "1.0.0-migrated",
+  "description": "Tool discovery and automation management",
+  "author": "AI Stack Migration Tool",
+  "license": "MIT",
+  "entry": {
+    "kind": "cli",
+    "path": "service/custom_tools.py",
+    "function": "main"
+  },
+  "schema": {
+    "input": {
+      "type": "object",
+      "properties": {
+        "request_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "input": {
+          "oneOf": [
+            {
+              "type": "string",
+              "description": "Text query"
+            },
+            {
+              "type": "object",
+              "description": "Structured parameters"
+            }
+          ]
+        },
+        "user": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            }
+          }
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "request_id",
+        "input"
+      ]
+    },
+    "output": {
+      "type": "object",
+      "properties": {
+        "request_id": {
+          "type": "string"
+        },
+        "module_id": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "ok",
+            "error"
+          ]
+        },
+        "content": {
+          "type": "string"
+        },
+        "structured_data": {
+          "type": "object"
+        }
+      }
+    }
+  },
+  "capabilities": [
+    "system_monitoring"
+  ],
+  "limits": {
+    "timeout_ms": 28000,
+    "memory_mb": 512,
+    "cpu_cores": 0.5,
+    "input_size_mb": 5,
+    "concurrent_requests": 3
+  },
+  "environment": {
+    "kind": "venv",
+    "python_version": ">=3.8",
+    "dependencies": [],
+    "gpu_required": false
+  },
+  "health": {
+    "probe_interval_ms": 30000,
+    "startup_timeout_ms": 60000
+  },
+  "help": {
+    "short": "Tool discovery and automation management",
+    "long": "Migrated from custom_tools_pipe.py. Custom Tools Pipe for AI Stack\n\nProvides integration with custom automation scripts and tools specific\nto the AI stack environment and development workflow.",
+    "examples": [
+      {
+        "input": "status",
+        "description": "Get module status"
+      },
+      {
+        "input": "help",
+        "description": "Get help information"
+      }
+    ]
+  },
+  "permissions": {
+    "allowed_roles": [
+      "user",
+      "admin"
+    ],
+    "safety_rating": "SAFE"
+  },
+  "compatibility": {
+    "router_version": ">=1.0.0",
+    "openwebui_version": ">=0.3.0"
+  },
+  "_migration": {
+    "source_file": "custom_tools_pipe.py",
+    "migrated_at": "2025-09-26T15:44:07.115228",
+    "complexity_score": 28,
+    "original_functions": []
+  }
+}

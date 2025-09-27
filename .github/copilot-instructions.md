@@ -1,6 +1,21 @@
 # AI Agent Instructions for AI Stack Project
 
-This is a containerized AI stack with OpenWebUI, Ollama, and Tailscale VPN running via Docker Compose. The project emphasizes security hardening, autonomous recovery, and Windows/PowerShell workflows.
+This is a containerized AI stack with OpenWebUI, Ollama, and Tailscale VPN running via Docker Compose. The project emphasizes security hardening, autonomous recovery, Windows/PowerShell workflows, and **AI Stack pipe functions** for intelligent system management.
+
+## 🚨 CRITICAL CODING GUIDELINES
+
+### File Management & Architecture
+- **NEVER create "refactored_" variations** of existing files (e.g., `refactored_router.py`, `refactored_module.py`)
+- **Instead**: Directly refactor the original file in place (e.g., update `router.py` directly)
+- **NEVER create legacy placeholder files** - remove redundant files immediately
+- **Consolidate functionality** into single canonical files rather than maintaining duplicates
+- **Clean up redundant files** after refactoring (remove old versions, clean `__pycache__` directories)
+
+### Architecture Patterns
+- Use **manifest-driven architecture** with JSON Schema validation
+- Implement **single entry points** rather than multiple similar files
+- Follow **explicit contracts** with versioned schemas
+- Maintain **environment-aware paths** for container vs host operation
 
 ## Architecture Overview
 
@@ -11,10 +26,23 @@ Docker Engine → OpenWebUI (healthy) → Tailscale (shared network) → Watchto
                   Ollama
 ```
 
+**AI Stack Pipe Function Architecture:**
+```
+OpenWebUI → unified_openwebui_pipe.py → core/router.py → modules/ (manifest-driven)
+                                              ↓
+                                    [gpu-status, system-health, emergency-recovery, custom-tools, help-system]
+```
+
 **Critical Network Pattern:**
 - Tailscale uses `network_mode: service:openwebui` - shares OpenWebUI's network namespace
 - When OpenWebUI gets new container ID (restarts/updates), Tailscale loses network connectivity
 - This is the **most common recurring issue** requiring autonomous recovery
+
+**AI Stack Pipe Function Integration:**
+- Project mounted at `.:/host_project:ro` in OpenWebUI container for complete access
+- **Single unified pipe function** with manifest-driven architecture
+- Intelligent natural language routing: "Check GPU status" → `gpu-status` module
+- **Consolidated architecture**: Single `core/router.py` with modules in `/modules/` directory
 
 ## Core Components
 
@@ -23,6 +51,27 @@ Docker Engine → OpenWebUI (healthy) → Tailscale (shared network) → Watchto
 - **ollama**: LLM server (port 11434)  
 - **tailscale**: VPN access via custom build (`dockerfile.tailscale` + `entrypoint.sh`)
 - **watchtower**: Auto-updates (monitors Ollama only, OpenWebUI excluded due to custom GPU build)
+
+**⚠️ CRITICAL: AI Stack Pipe Functions Mount**
+- OpenWebUI container **MUST** have `.:/host_project:ro` volume mount
+- **Read-only security**: Project is mounted with `:ro` flag for container isolation
+- **Path dependency**: All pipe modules expect `/host_project/` structure
+- **Single entry point**: Use only `unified_openwebui_pipe.py` in OpenWebUI Functions
+
+### AI Stack Pipe Function System
+**Files**: `scripts/ai_pipes/`, `core/`, `modules/`, `schemas/`, `tools/`
+
+**Current Architecture (Production)**:
+- `unified_openwebui_pipe.py`: Single OpenWebUI integration point
+- `core/router.py`: Manifest-driven router with JSON Schema validation and DirectModuleAdapter
+- `modules/`: Independent modules with `module.manifest.json` contracts
+- `schemas/`: JSON Schema definitions for validation
+
+**Critical Architecture Patterns**:
+- **Natural Language Routing**: "Check GPU status" → keyword analysis → `gpu-status` module
+- **Manifest-Driven System**: All modules discovered via `module.manifest.json` files
+- **Container Security**: All pipe execution happens within GPU-enabled OpenWebUI container
+- **Schema Validation**: JSON Schema validation for all communications
 
 **⚠️ CRITICAL: Watchtower Limitation with Custom Builds**
 - Watchtower is configured to skip OpenWebUI - custom builds cannot be auto-updated
@@ -119,6 +168,11 @@ docker compose exec openwebui nvidia-smi
 7. Windows service (`scripts/check-tailscale-health.ps1`)
 8. Simple background monitor (`scripts/simple-monitor.ps1`)
 
+**AI Stack Pipe Function Recovery Integration**:
+- Emergency recovery pipe function accessible via "fix network issues" or "emergency recovery"
+- GPU recovery integrated with pipe function GPU monitoring
+- System health checks available through "system health" natural language queries
+
 ## Development Patterns
 
 ### PowerShell Conventions
@@ -133,6 +187,15 @@ docker compose exec openwebui nvidia-smi
 - **Dependency management**: `depends_on` with `condition: service_healthy`
 - **Custom builds only**: Never use pre-built images for `openwebui` or `tailscale` - breaks GPU and VPN functionality
 - **Network namespace sharing**: `network_mode: service:openwebui` in Tailscale service creates shared networking
+- **Pipe function mounting**: `./scripts:/host_scripts:ro` required for AI Stack pipe function access
+
+### AI Stack Pipe Function Development Patterns
+- **Legacy modules**: Implement `main(payload)` function with structured return format
+- **Router integration**: Add routing keywords to `ai_stack_router.py` for natural language detection
+- **Refactored modules**: Follow manifest-driven architecture with `module.manifest.json` contracts
+- **Schema compliance**: All refactored modules must validate against JSON Schema definitions
+- **Testing integration**: Use `tools/validation_tool.py` for comprehensive module testing
+- **Migration automation**: Use `tools/migration_tool.py` for legacy-to-refactored migration
 
 ### Configuration Management
 - **Environment variables**: `.env` file (excluded from git)
@@ -228,6 +291,24 @@ scripts\quick-fixes.bat nuclear     # Complete restart as last resort
 .\scripts\emergency-recovery.ps1 -Action gpu-reset  # GPU-specific issues
 ```
 
+### AI Stack Pipe Function Development
+```bash
+# Test pipe function system
+docker compose exec openwebui ls -la /host_scripts/ai_pipes/  # Verify script mount
+docker compose exec openwebui python /host_scripts/ai_pipes/unified_openwebui_pipe.py  # Test unified pipe
+docker compose exec openwebui python /host_scripts/ai_pipes/ai_stack_router.py '{"input": "gpu status"}'  # Test router
+
+# Refactored architecture tools
+python tools/refactor_orchestrator.py --dry-run     # Preview migration
+python tools/migration_tool.py --analyze-only       # Analyze legacy modules  
+python tools/validation_tool.py --all               # Validate schemas and modules
+python tools/scaffold_generator.py --name my-module --type system-management  # Create new module
+
+# Test individual modules (legacy)
+docker compose exec openwebui python /host_scripts/ai_pipes/gpu_status_pipe.py '{"input": "status"}'
+docker compose exec openwebui python /host_scripts/ai_pipes/system_health_pipe.py '{"input": "check"}'
+```
+
 ### Health Diagnostics
 ```bash
 # System health overview
@@ -291,6 +372,14 @@ docker compose build --no-cache; docker compose up -d
 - **Windows-specific**: All PowerShell scripts use `[CmdletBinding()]` and structured logging
 - **GPU passthrough**: `docker-compose.yml` deploy.resources.reservations.devices section required for GPU access
 
+### AI Stack Pipe Function File Structure
+- **Legacy entry point**: `scripts/ai_pipes/unified_openwebui_pipe.py` - single OpenWebUI integration
+- **Router logic**: `scripts/ai_pipes/ai_stack_router.py` - intelligent routing with natural language analysis
+- **Module contracts**: Each legacy module has `main(payload)` function returning structured JSON
+- **Refactored manifests**: `modules/*/module.manifest.json` - explicit capability definitions
+- **Schema files**: `schemas/*.json` - JSON Schema validation for requests/responses/manifests
+- **Migration path**: `tools/migration_tool.py` - automated conversion between architectures
+
 ## Common Workflow Patterns
 
 ### Emergency Response Workflow (Use This Order)
@@ -325,6 +414,8 @@ Issue → Start Here:
 ├── "CUDA not available" → scripts\quick-fixes.bat gpu  
 ├── Reranker models slow/CPU-only → Check: docker compose exec openwebui python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
 ├── OpenWebUI update broke GPU → Rebuild: docker compose build --no-cache openwebui
+├── Pipe function not working → Check: docker compose exec openwebui ls /host_scripts/ai_pipes/
+├── Router routing issues → Test: docker compose exec openwebui python /host_scripts/ai_pipes/ai_stack_router.py '{"input": "test"}'
 ├── General slowness → Check logs: docker compose logs --tail=50 openwebui
 ├── Containers not starting → docker compose ps; check dependencies
 └── Unknown/Complex → .\scripts\emergency-recovery.ps1 -Action recover
@@ -350,16 +441,19 @@ When working on this codebase, prioritize understanding the network namespace sh
 ### Most Common Issues & Solutions:
 1. **Network connectivity lost** → `scripts\quick-fixes.bat namespace`
 2. **GPU not available** → `scripts\quick-fixes.bat gpu`  
-3. **OpenWebUI needs update** → Manual rebuild process (see Manual Update Workflow above)
-4. **General system issues** → `.\scripts\emergency-recovery.ps1 -Action recover`
+3. **Pipe function not accessible** → Check mount: `docker compose exec openwebui ls /host_scripts/ai_pipes/`
+4. **OpenWebUI needs update** → Manual rebuild process (see Manual Update Workflow above)
+5. **General system issues** → `.\scripts\emergency-recovery.ps1 -Action recover`
 
 ### Key Files to Never Edit Without Understanding:
 - `Dockerfile.openwebui-gpu` - GPU PyTorch replacement logic
 - `entrypoint.sh` - Tailscale startup with line ending handling  
 - `docker-compose.yml` - Network namespace sharing configuration
 - `.env` - Contains auth keys with expiration dates
+- `scripts/ai_pipes/unified_openwebui_pipe.py` - Single OpenWebUI pipe function entry point
 
 ### Advanced Topics:
 - **Automated Update Strategy**: See `documentation/AICodeAgentGuides/hybrid-openwebui-update-approach.md`
 - **Recovery System Architecture**: 8-tier redundancy from quick fixes to Windows services
 - **Security Hardening**: Container isolation, localhost-only binding, read-only mounts
+- **AI Stack Pipe Functions**: Natural language system management through intelligent routing

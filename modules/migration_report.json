@@ -1,0 +1,31 @@
+{
+  "started_at": "2025-09-26T15:44:07.105426",
+  "modules_processed": 5,
+  "successful_migrations": 0,
+  "failed_migrations": 5,
+  "results": {
+    "gpu_status_pipe.py": {
+      "error": "name 'legacy_path' is not defined"
+    },
+    "emergency_recovery_pipe.py": {
+      "error": "name 'legacy_path' is not defined"
+    },
+    "system_health_pipe.py": {
+      "error": "name 'legacy_path' is not defined"
+    },
+    "custom_tools_pipe.py": {
+      "error": "name 'legacy_path' is not defined"
+    },
+    "help_pipe.py": {
+      "error": "name 'legacy_path' is not defined"
+    }
+  },
+  "summary": [
+    "\u274c gpu_status_pipe.py: name 'legacy_path' is not defined",
+    "\u274c emergency_recovery_pipe.py: name 'legacy_path' is not defined",
+    "\u274c system_health_pipe.py: name 'legacy_path' is not defined",
+    "\u274c custom_tools_pipe.py: name 'legacy_path' is not defined",
+    "\u274c help_pipe.py: name 'legacy_path' is not defined"
+  ],
+  "completed_at": "2025-09-26T15:44:07.119091"
+}
