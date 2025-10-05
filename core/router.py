@@ -459,7 +459,7 @@ class AIStackRouter:
         # Define routing patterns (following original design)
         if any(keyword in input_lower for keyword in ["gpu", "cuda", "graphics", "nvidia"]):
             return "gpu-status"
-        elif any(keyword in input_lower for keyword in ["recovery", "fix", "repair", "emergency"]):
+        elif any(keyword in input_lower for keyword in ["recovery", "fix", "repair", "emergency", "restart", "ollama"]):
             return "emergency-recovery"
         elif any(keyword in input_lower for keyword in ["health", "status", "monitor"]):
             return "system-health"
