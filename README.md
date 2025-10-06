@@ -7,6 +7,7 @@ A comprehensive Docker Compose setup for running OpenWebUI, Ollama, and secure r
 This project provides a complete AI chat interface with:
 - **OpenWebUI**: Modern web interface for AI models with GPU-accelerated reranker models
 - **Ollama**: Local LLM hosting and management
+- **LM Studio**: Optional integration for accessing LM Studio models via Tailscale
 - **Tailscale**: Secure VPN access for remote connections
 - **Watchtower**: Automatic container updates
 - **GPU Support**: NVIDIA GPU acceleration for both Ollama and OpenWebUI components
@@ -110,7 +111,7 @@ The system includes both legacy and refactored architectures:
    ```yaml
    openwebui:
      volumes:
-       - ./scripts:/host_scripts:ro  # Expose pipe functions
+       - .:/host_project:ro  # Expose entire project for pipe functions
    ```
 
 2. **Access OpenWebUI Admin** → Functions → Create New Function
@@ -141,6 +142,11 @@ OLLAMA_HOST=http://ollama:11434
 # OpenWebUI GPU Configuration
 USE_CUDA=true
 USE_CUDA_DOCKER=true
+
+# LM Studio Configuration (Optional)
+LMSTUDIO_HOST=host.docker.internal  # or specific IP address
+LMSTUDIO_PORT=1234                  # LM Studio server port
+LMSTUDIO_ENABLED=true               # Set to false to disable
 ```
 
 ### 3. GPU Support Configuration
@@ -178,7 +184,55 @@ docker compose exec openwebui python -c "import torch; print('CUDA available:', 
 docker compose exec openwebui python -c "import torch; print('GPU:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'No GPU')"
 ```
 
-### 2. Tailscale Auth Key
+### 2. LM Studio Integration (Optional)
+
+This project includes optional integration with LM Studio for accessing local models through your Tailscale network.
+
+#### Prerequisites
+- LM Studio installed and running on your host machine
+- Server mode enabled in LM Studio (Local Server tab)
+- Models loaded and ready to serve
+
+#### Configuration
+1. **Start LM Studio Server**: Open LM Studio → Local Server tab → Load a model → Start server
+2. **Note the port**: Default is 1234, but check LM Studio interface
+3. **Configure environment variables** in your `.env` file:
+   ```env
+   LMSTUDIO_HOST=host.docker.internal  # For localhost LM Studio
+   LMSTUDIO_PORT=1234                  # Match LM Studio port
+   LMSTUDIO_ENABLED=true               # Enable integration
+   ```
+4. **Restart Tailscale container**: `docker compose restart tailscale`
+
+#### Access LM Studio
+Once configured, LM Studio will be accessible at:
+- **Remote URL**: https://your-hostname.tail[...].ts.net/lmstudio
+- **API Endpoint**: https://your-hostname.tail[...].ts.net/lmstudio/v1
+
+#### Troubleshooting
+- **Test local connectivity**: `curl http://localhost:1234/v1/models`
+- **Fix Tailscale integration**: `scripts\quick-fixes.bat lmstudio`
+- **Check logs**: `docker compose logs tailscale | grep -i "lm studio"`
+- **Detailed setup guide**: See `documentation/LM_STUDIO_TAILSCALE_SETUP.md`
+
+#### Example Usage
+Once configured, you can test LM Studio access:
+```bash
+# Test API availability
+curl -k "https://your-hostname.tail[...].ts.net/lmstudio/v1/models"
+
+# Example chat completion
+curl -k -X POST "https://your-hostname.tail[...].ts.net/lmstudio/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "your-model-name", "messages": [{"role": "user", "content": "Hello!"}]}'
+```
+
+**Integration with OpenWebUI**: Add LM Studio as a model provider:
+- Settings → Models → Add Connection
+- API Base URL: `https://your-hostname.tail[...].ts.net/lmstudio/v1`
+- API Key: Any dummy value (LM Studio doesn't require authentication)
+
+### 3. Tailscale Auth Key
 
 1. Go to [Tailscale Admin Console](https://login.tailscale.com/admin/settings/keys)
 2. Generate a new auth key with these settings:
@@ -255,6 +309,8 @@ graph TD
 
 ### Remote Access (via Tailscale)
 - **OpenWebUI**: https://openwebui-13.tail[your-tailnet].ts.net/
+- **Ollama API**: https://openwebui-13.tail[your-tailnet].ts.net/ollama
+- **LM Studio API**: https://openwebui-13.tail[your-tailnet].ts.net/lmstudio *(if enabled)*
 - **Secure HTTPS** with automatic certificates
 
 ### AI Stack Management (via Pipe Functions)
@@ -276,6 +332,11 @@ Once the unified pipe function is installed in OpenWebUI, you can manage the sys
 **Tool Discovery**:
 - "Available tools" - List all available management functions
 - "Help" - Get assistance with system commands
+
+**LM Studio Management** *(if enabled)*:
+- "Fix LM Studio" - Resolve LM Studio Tailscale connectivity
+- "Check LM Studio status" - Verify LM Studio API accessibility
+- "Restart LM Studio proxy" - Reset socat proxy connections
 
 ## 🏗️ AI Stack Pipe Function Architecture
 
@@ -451,9 +512,9 @@ volumes:
 **Location**: `scripts/ai_pipes/`, `docker-compose.yml`
 
 **Critical Points**:
-- **Script mount required**: `./scripts:/host_scripts:ro` volume mount enables pipe function access
+- **Script mount required**: `.:/host_project:ro` volume mount enables pipe function access
 - **Read-only security**: Scripts mounted with `:ro` flag for container security
-- **Path consistency**: All pipe modules expect `/host_scripts/ai_pipes/` path structure
+- **Path consistency**: All pipe modules expect `/host_project/` path structure
 - **OpenWebUI compatibility**: Use only `unified_openwebui_pipe.py` as single entry point
 - **Router dependencies**: `ai_stack_router.py` must be accessible for intelligent routing
 
@@ -637,6 +698,52 @@ watch -n 1 'docker compose exec openwebui nvidia-smi'
 **Solutions**:
 - Reduce model size or batch size in OpenWebUI settings
 - Restart container to clear GPU memory: `docker compose restart openwebui`
+
+### LM Studio Debugging (Optional Integration)
+
+#### LM Studio Not Accessible
+**Symptoms**: LM Studio API not responding through Tailscale
+**Debug Steps**:
+```bash
+# Check if LM Studio server is running locally
+curl http://localhost:1234/v1/models
+
+# Check from container perspective
+docker compose exec tailscale wget -q -T 5 -O /dev/null http://host.docker.internal:1234/v1/models
+
+# Check Tailscale serve configuration
+docker compose exec tailscale tailscale --socket=/tmp/tailscaled.sock serve status | grep lmstudio
+
+# Test proxy connection (if using remote LM Studio)
+docker compose exec tailscale wget -q -T 5 -O /dev/null http://127.0.0.1:8234/v1/models
+```
+
+**Common Solutions**:
+```bash
+# Quick LM Studio connectivity fix
+scripts\quick-fixes.bat lmstudio
+
+# Manual proxy restart (for remote LM Studio)
+docker compose exec tailscale pkill socat
+docker compose restart tailscale
+
+# Check LM Studio logs
+docker compose logs tailscale | grep -i "lm studio"
+```
+
+#### LM Studio Proxy Issues
+**Symptoms**: Proxy connection failures, socat errors
+**Debug Steps**:
+```bash
+# Check socat process status
+docker compose exec tailscale ps aux | grep socat
+
+# View socat logs
+docker compose exec tailscale cat /tmp/socat-lmstudio.log
+
+# Check port availability
+docker compose exec tailscale netstat -ln | grep 8234
+```
 
 ### Common Issues
 
@@ -1051,9 +1158,9 @@ docker compose ps && docker compose exec tailscale tailscale status
 docker compose exec openwebui python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
 
 # AI Stack pipe function testing
-docker compose exec openwebui ls /host_scripts/ai_pipes/                    # Verify script mount
-docker compose exec openwebui python /host_scripts/ai_pipes/ai_stack_router.py '{"input": "gpu status"}'  # Test router
-docker compose exec openwebui python /host_scripts/ai_pipes/unified_openwebui_pipe.py  # Test unified pipe
+docker compose exec openwebui ls /host_project/scripts/ai_pipes/                    # Verify script mount
+docker compose exec openwebui python /host_project/core/router.py '{"input": "gpu status"}'  # Test router
+docker compose exec openwebui python /host_project/scripts/ai_pipes/unified_openwebui_pipe.py  # Test unified pipe
 
 # Full system logs
 docker compose logs --tail=100
@@ -1061,6 +1168,7 @@ docker compose logs --tail=100
 # Quick recovery options
 scripts\quick-fixes.bat namespace        # Network issues (most common)
 scripts\quick-fixes.bat gpu             # GPU issues
+scripts\quick-fixes.bat lmstudio        # LM Studio connectivity issues
 scripts\quick-fixes.bat status          # System overview
 
 # Advanced recovery
@@ -1094,15 +1202,17 @@ docker compose down && docker compose build --no-cache && docker compose up -d
 - This setup is optimized for development and small-scale production use
 - GPU acceleration available for both Ollama and OpenWebUI components
 - Custom OpenWebUI build includes CUDA-enabled PyTorch for reranker models
+- **LM Studio Integration**: Optional integration provides secure access to LM Studio models via Tailscale
 - **AI Stack Pipe Functions**: Unified intelligent system management through natural language interface
 - **Dual Architecture Support**: Both legacy pipe system and modern manifest-driven architecture available
 - Enhanced recovery scripts provide multiple repair options with health monitoring
-- Tailscale provides zero-config VPN access
+- Tailscale provides zero-config VPN access with automatic HTTPS certificates
 - All data persists across container restarts
-- Watchtower keeps services updated automatically (except Tailscale)
+- Watchtower keeps services updated automatically (except custom builds)
 
-**Last Updated**: September 26, 2025  
+**Last Updated**: October 6, 2025  
 **OpenWebUI**: Custom GPU-enabled build with AI Stack pipe functions  
+**LM Studio**: Optional Tailscale integration with proxy support  
 **Tailscale Version**: v1.84.3  
 **Docker Compose Version**: v2.x  
 **AI Stack Architecture**: Legacy + Refactored (Manifest-driven)

@@ -17,6 +17,12 @@ This is a containerized AI stack with OpenWebUI, Ollama, and Tailscale VPN runni
 - Follow **explicit contracts** with versioned schemas
 - Maintain **environment-aware paths** for container vs host operation
 
+### PowerShell & Windows-Specific Patterns
+- **Terminal commands**: Always use PowerShell syntax (`;` for command chaining, not `&&`)
+- **Path separators**: Use `\` for Windows paths in scripts and documentation
+- **Execution policy**: Scripts assume PowerShell execution policy allows script execution
+- **Error handling**: Use `$ErrorActionPreference = "Stop"` for strict error handling
+
 ## Architecture Overview
 
 **Service Dependencies Flow:**
@@ -74,10 +80,11 @@ OpenWebUI → unified_openwebui_pipe.py → core/router.py → modules/ (manifes
 - **Schema Validation**: JSON Schema validation for all communications
 
 **⚠️ CRITICAL: Watchtower Limitation with Custom Builds**
-- Watchtower is configured to skip OpenWebUI - custom builds cannot be auto-updated
+- Watchtower is configured to skip OpenWebUI, Tailscale, and Ollama - custom builds cannot be auto-updated
 - The `openwebui` service uses `build: dockerfile: Dockerfile.openwebui-gpu` (no `image:` field)
-- **All OpenWebUI updates must be manual** - edit Dockerfile base image and rebuild
-- Watchtower only monitors standard image-based services (Ollama)
+- The `tailscale` service uses `build: dockerfile: dockerfile.tailscale` (custom Alpine build)
+- **All service updates must be manual** - edit Dockerfile base images and rebuild
+- Watchtower currently monitors no services due to explicit `watchtower.enable=false` labels
 
 ### Custom OpenWebUI GPU Integration
 **Files**: `Dockerfile.openwebui-gpu`, `docker-compose.yml`
@@ -187,7 +194,7 @@ docker compose exec openwebui nvidia-smi
 - **Dependency management**: `depends_on` with `condition: service_healthy`
 - **Custom builds only**: Never use pre-built images for `openwebui` or `tailscale` - breaks GPU and VPN functionality
 - **Network namespace sharing**: `network_mode: service:openwebui` in Tailscale service creates shared networking
-- **Pipe function mounting**: `./scripts:/host_scripts:ro` required for AI Stack pipe function access
+- **Pipe function mounting**: `.:/host_project:ro` required for AI Stack pipe function access
 
 ### AI Stack Pipe Function Development Patterns
 - **Legacy modules**: Implement `main(payload)` function with structured return format
@@ -293,10 +300,10 @@ scripts\quick-fixes.bat nuclear     # Complete restart as last resort
 
 ### AI Stack Pipe Function Development
 ```bash
-# Test pipe function system
-docker compose exec openwebui ls -la /host_scripts/ai_pipes/  # Verify script mount
-docker compose exec openwebui python /host_scripts/ai_pipes/unified_openwebui_pipe.py  # Test unified pipe
-docker compose exec openwebui python /host_scripts/ai_pipes/ai_stack_router.py '{"input": "gpu status"}'  # Test router
+# Test pipe function system (corrected paths)
+docker compose exec openwebui ls -la /host_project/scripts/ai_pipes/  # Verify script mount
+docker compose exec openwebui python /host_project/scripts/ai_pipes/unified_openwebui_pipe.py  # Test unified pipe
+docker compose exec openwebui python /host_project/core/router.py '{"input": "gpu status"}'  # Test refactored router
 
 # Refactored architecture tools
 python tools/refactor_orchestrator.py --dry-run     # Preview migration
@@ -305,8 +312,8 @@ python tools/validation_tool.py --all               # Validate schemas and modul
 python tools/scaffold_generator.py --name my-module --type system-management  # Create new module
 
 # Test individual modules (legacy)
-docker compose exec openwebui python /host_scripts/ai_pipes/gpu_status_pipe.py '{"input": "status"}'
-docker compose exec openwebui python /host_scripts/ai_pipes/system_health_pipe.py '{"input": "check"}'
+docker compose exec openwebui python /host_project/scripts/ai_pipes/gpu_status_pipe.py '{"input": "status"}'
+docker compose exec openwebui python /host_project/scripts/ai_pipes/system_health_pipe.py '{"input": "check"}'
 ```
 
 ### Health Diagnostics
@@ -403,9 +410,10 @@ docker compose logs -f tailscale  # Most failure-prone service
 
 ### Safe Updates
 1. Always backup `data/` directory first
-2. Update images: `docker compose pull` (excludes custom Tailscale/OpenWebUI builds)
-3. Restart services: `docker compose up -d`
-4. **Critical**: Verify Tailscale connectivity after updates using namespace reset
+2. **Manual updates only**: All services have custom builds or are disabled in Watchtower
+3. Update base images in Dockerfiles: `Dockerfile.openwebui-gpu`, `dockerfile.tailscale`
+4. Rebuild services: `docker compose build --no-cache && docker compose up -d`
+5. **Critical**: Verify Tailscale connectivity after updates using namespace reset
 
 ### Troubleshooting Decision Tree
 ```
@@ -414,8 +422,8 @@ Issue → Start Here:
 ├── "CUDA not available" → scripts\quick-fixes.bat gpu  
 ├── Reranker models slow/CPU-only → Check: docker compose exec openwebui python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
 ├── OpenWebUI update broke GPU → Rebuild: docker compose build --no-cache openwebui
-├── Pipe function not working → Check: docker compose exec openwebui ls /host_scripts/ai_pipes/
-├── Router routing issues → Test: docker compose exec openwebui python /host_scripts/ai_pipes/ai_stack_router.py '{"input": "test"}'
+├── Pipe function not working → Check: docker compose exec openwebui ls /host_project/scripts/ai_pipes/
+├── Router routing issues → Test: docker compose exec openwebui python /host_project/core/router.py '{"input": "test"}'
 ├── General slowness → Check logs: docker compose logs --tail=50 openwebui
 ├── Containers not starting → docker compose ps; check dependencies
 └── Unknown/Complex → .\scripts\emergency-recovery.ps1 -Action recover
@@ -441,7 +449,7 @@ When working on this codebase, prioritize understanding the network namespace sh
 ### Most Common Issues & Solutions:
 1. **Network connectivity lost** → `scripts\quick-fixes.bat namespace`
 2. **GPU not available** → `scripts\quick-fixes.bat gpu`  
-3. **Pipe function not accessible** → Check mount: `docker compose exec openwebui ls /host_scripts/ai_pipes/`
+3. **Pipe function not accessible** → Check mount: `docker compose exec openwebui ls /host_project/scripts/ai_pipes/`
 4. **OpenWebUI needs update** → Manual rebuild process (see Manual Update Workflow above)
 5. **General system issues** → `.\scripts\emergency-recovery.ps1 -Action recover`
 
