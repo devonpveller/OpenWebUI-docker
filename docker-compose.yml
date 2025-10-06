@@ -13,9 +13,7 @@ services:
       - ./config:/app/config:ro  # Read-only config
       - .:/host_project:ro  # Mount entire project for AI Stack pipe functions
     environment:
-      - OLLAMA_HOST=http://localhost:11434
-      - OLLAMA_BASE_URL=http://localhost:11434  # Explicitly set to prevent routing issues
-      - OLLAMA_BASE_URLS=http://localhost:11434  # Also set the plural version
+      - OLLAMA_BASE_URL=http://localhost:11434
       - USE_CUDA=true
       - USE_CUDA_DOCKER=true
       - TRANSFORMERS_CACHE=/tmp/transformers_cache
@@ -80,6 +78,9 @@ services:
     environment:
       - TS_HOSTNAME=openwebui
       - TS_ACCEPT_DNS=false
+      - LMSTUDIO_HOST=${LMSTUDIO_HOST:-host.docker.internal}
+      - LMSTUDIO_PORT=${LMSTUDIO_PORT:-1234}
+      - LMSTUDIO_ENABLED=${LMSTUDIO_ENABLED:-true}
     volumes:
       - ./data/tailscale:/var/lib/tailscale
       - /dev/net/tun:/dev/net/tun
