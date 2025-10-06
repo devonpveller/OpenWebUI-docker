@@ -84,17 +84,24 @@ if %ERRORLEVEL% NEQ 0 (
     goto :nuclear_option
 )
 
-echo [INFO] Waiting for OpenWebUI to be healthy (may take longer with GPU initialization)...
-timeout /t 90 /nobreak >nul
+echo [INFO] Waiting for OpenWebUI to be healthy (required for Ollama network dependency)...
+:wait_openwebui
+docker compose ps openwebui | findstr "healthy" >nul 2>&1
+if %ERRORLEVEL% NEQ 0 (
+    echo [INFO] OpenWebUI not yet healthy, waiting 10 more seconds...
+    timeout /t 10 /nobreak >nul
+    goto :wait_openwebui
+)
+echo [SUCCESS] OpenWebUI is healthy - safe to start Ollama with shared network
 
-echo [INFO] Starting Ollama with GPU support...
+echo [INFO] Starting Ollama with shared network namespace (depends on OpenWebUI)...
 docker compose up -d ollama
 if %ERRORLEVEL% NEQ 0 (
     echo [ERROR] Failed to start Ollama container
     goto :nuclear_option
 )
 
-echo [INFO] Waiting for Ollama to initialize...
+echo [INFO] Waiting for Ollama to initialize on shared network...
 timeout /t 30 /nobreak >nul
 
 echo [INFO] Starting Tailscale with shared network namespace...
@@ -104,7 +111,7 @@ if %ERRORLEVEL% NEQ 0 (
     goto :nuclear_option
 )
 
-echo [INFO] Waiting for Tailscale network connectivity...
+echo [INFO] Waiting for Tailscale network connectivity and serve configuration...
 timeout /t 60 /nobreak >nul
 
 echo [INFO] Starting Watchtower monitoring service...
@@ -126,11 +133,36 @@ if %ERRORLEVEL% NEQ 0 (
 echo [INFO] ==========================================
 echo [INFO] MINIMAL RECOVERY - GENTLE RESTART
 echo [INFO] ==========================================
-echo [INFO] Attempting gentle restart without destroying containers...
-docker compose restart tailscale ollama openwebui
+echo [INFO] Restarting with proper network dependency sequence...
+
+REM Stop dependent containers first
+echo [INFO] Stopping Tailscale and Ollama (network dependents)...
+docker compose stop tailscale ollama
+
+REM Restart OpenWebUI first and wait for health
+echo [INFO] Restarting OpenWebUI...
+docker compose restart openwebui
+
+echo [INFO] Waiting for OpenWebUI to be healthy...
+:wait_openwebui_minimal
+docker compose ps openwebui | findstr "healthy" >nul 2>&1
+if %ERRORLEVEL% NEQ 0 (
+    echo [INFO] OpenWebUI not yet healthy, waiting 10 more seconds...
+    timeout /t 10 /nobreak >nul
+    goto :wait_openwebui_minimal
+)
+echo [SUCCESS] OpenWebUI healthy - restarting dependent services
+
+REM Now restart the dependent containers
+echo [INFO] Starting Ollama with fresh network namespace...
+docker compose up -d ollama
+timeout /t 15 /nobreak >nul
+
+echo [INFO] Starting Tailscale with fresh network namespace...
+docker compose up -d tailscale
+timeout /t 30 /nobreak >nul
+
 docker compose up -d watchtower
-echo [INFO] Waiting for services to stabilize...
-timeout /t 60 /nobreak >nul
 
 echo [INFO] Testing if minimal recovery worked...
 docker compose exec tailscale ping -c 1 8.8.8.8 >nul 2>&1
