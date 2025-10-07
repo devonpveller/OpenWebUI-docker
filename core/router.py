@@ -456,15 +456,18 @@ class AIStackRouter:
         # Text analysis for routing
         input_lower = str(user_input).lower()
         
-        # Define routing patterns (following original design)
+        # Define routing patterns (priority order matters)
         if any(keyword in input_lower for keyword in ["gpu", "cuda", "graphics", "nvidia"]):
             return "gpu-status"
         elif any(keyword in input_lower for keyword in ["recovery", "fix", "repair", "emergency", "restart", "ollama"]):
             return "emergency-recovery"
         elif any(keyword in input_lower for keyword in ["health", "status", "monitor"]):
             return "system-health"
-        elif any(keyword in input_lower for keyword in ["tools", "available", "commands"]):
+        elif any(keyword in input_lower for keyword in ["tools", "commands"]):
             return "custom-tools"
+        elif input_lower.strip() == "lmstudio":
+            # "lmstudio" by itself routes to help for information
+            return "help-system"
         else:
             return "help-system"
     

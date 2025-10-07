@@ -96,6 +96,14 @@ class HelpSystemModule:
                         "solution": "scripts\\quick-fixes.bat gpu",
                         "explanation": "Checks and restarts GPU services for CUDA availability"
                     },
+                    "lmstudio_connectivity": {
+                        "symptoms": ["LM Studio not accessible via Tailscale", "Port 8234 not working", "LM Studio proxy issues"],
+                        "cause": "LM Studio Tailscale serve configuration not properly set up",
+                        "solution": "Fix LM Studio connectivity - Use: 'fix lmstudio'",
+                        "explanation": "Configures socat proxy and Tailscale serve for LM Studio access",
+                        "access_url": "https://your-tailscale-url/lmstudio",
+                        "port": "8234 (local LM Studio server)"
+                    },
                     "pipe_function_not_working": {
                         "symptoms": ["Pipe function not accessible", "Module not found", "Import errors"],
                         "cause": "Scripts not mounted or incorrect volume configuration",
@@ -154,48 +162,101 @@ class HelpSystemModule:
             "related_topics": []
         }
         
-        # Search through help database
-        for topic_key, topic_data in self.help_database.items():
-            relevance_score = 0
-            match_details = []
-            
-            # Check title and description
-            if query_lower in topic_data.get("title", "").lower():
-                relevance_score += 10
-                match_details.append("title")
-            
-            if query_lower in topic_data.get("description", "").lower():
-                relevance_score += 5
-                match_details.append("description")
-            
-            # Search in nested content
-            def search_nested(obj, path=""):
-                nonlocal relevance_score, match_details
-                if isinstance(obj, dict):
-                    for key, value in obj.items():
-                        search_nested(value, f"{path}.{key}" if path else key)
-                elif isinstance(obj, list):
-                    for i, item in enumerate(obj):
-                        search_nested(item, f"{path}[{i}]" if path else f"[{i}]")
-                elif isinstance(obj, str):
-                    if query_lower in obj.lower():
-                        relevance_score += 2
-                        match_details.append(path)
-            
-            search_nested(topic_data)
-            
-            if relevance_score > 0:
-                results["matches"].append({
-                    "topic": topic_key,
-                    "title": topic_data.get("title", topic_key.replace("_", " ").title()),
-                    "description": topic_data.get("description", ""),
-                    "relevance_score": relevance_score,
-                    "match_details": match_details,
-                    "content": topic_data
-                })
+        # Enhanced keyword mapping for better example matching
+        keyword_mappings = {
+            "gpu": ["gpu", "cuda", "graphics", "nvidia", "reranker"],
+            "recovery": ["recovery", "emergency", "fix", "repair", "restart"],
+            "pipe": ["pipe", "function", "module", "system"],
+            "problems": ["problems", "issues", "solutions", "common"],
+            "architecture": ["architecture", "overview", "system", "guide"],
+            "lmstudio": ["lmstudio", "lm studio", "lms"]
+        }
         
-        # Sort by relevance
-        results["matches"].sort(key=lambda x: x["relevance_score"], reverse=True)
+        # Check for direct keyword matches first
+        for topic_key, keywords in keyword_mappings.items():
+            if any(keyword in query_lower for keyword in keywords):
+                # Special handling for lmstudio - find it in common_issues
+                if topic_key == "lmstudio":
+                    if "common_issues" in self.help_database:
+                        common_issues = self.help_database["common_issues"]
+                        lmstudio_content = common_issues.get("problems", {}).get("lmstudio_connectivity")
+                        if lmstudio_content:
+                            results["matches"].append({
+                                "topic": "lmstudio_connectivity",
+                                "title": "LM Studio Connectivity",
+                                "description": "Fix LM Studio Tailscale connectivity issues",
+                                "relevance_score": 20,  # High relevance for direct lmstudio search
+                                "match_details": ["lmstudio_keyword"],
+                                "content": {
+                                    "title": "LM Studio Connectivity",
+                                    "description": "Fix LM Studio Tailscale connectivity issues",
+                                    **lmstudio_content
+                                }
+                            })
+                else:
+                    # Find matching topics in help database
+                    for db_key, db_content in self.help_database.items():
+                        if topic_key in db_key or any(keyword in db_content.get("title", "").lower() for keyword in keywords):
+                            results["matches"].append({
+                                "topic": db_key,
+                                "title": db_content.get("title", db_key.replace("_", " ").title()),
+                                "description": db_content.get("description", ""),
+                                "relevance_score": 15,  # High relevance for keyword matches
+                                "match_details": ["keyword_match"],
+                                "content": db_content
+                            })
+        
+        # If no keyword matches, fall back to original search
+        if not results["matches"]:
+            # Search through help database
+            for topic_key, topic_data in self.help_database.items():
+                relevance_score = 0
+                match_details = []
+                
+                # Check title and description
+                if query_lower in topic_data.get("title", "").lower():
+                    relevance_score += 10
+                    match_details.append("title")
+                
+                if query_lower in topic_data.get("description", "").lower():
+                    relevance_score += 5
+                    match_details.append("description")
+                
+                # Search in nested content
+                def search_nested(obj, path=""):
+                    nonlocal relevance_score, match_details
+                    if isinstance(obj, dict):
+                        for key, value in obj.items():
+                            search_nested(value, f"{path}.{key}" if path else key)
+                    elif isinstance(obj, list):
+                        for i, item in enumerate(obj):
+                            search_nested(item, f"{path}[{i}]" if path else f"[{i}]")
+                    elif isinstance(obj, str):
+                        if query_lower in obj.lower():
+                            relevance_score += 2
+                            match_details.append(path)
+                
+                search_nested(topic_data)
+                
+                if relevance_score > 0:
+                    results["matches"].append({
+                        "topic": topic_key,
+                        "title": topic_data.get("title", topic_key.replace("_", " ").title()),
+                        "description": topic_data.get("description", ""),
+                        "relevance_score": relevance_score,
+                        "match_details": match_details,
+                        "content": topic_data
+                    })
+        
+        # Remove duplicates and sort by relevance
+        seen_topics = set()
+        unique_matches = []
+        for match in results["matches"]:
+            if match["topic"] not in seen_topics:
+                unique_matches.append(match)
+                seen_topics.add(match["topic"])
+        
+        results["matches"] = sorted(unique_matches, key=lambda x: x["relevance_score"], reverse=True)
         
         # Add related topics if few matches
         if len(results["matches"]) < 2:
@@ -253,8 +314,11 @@ class HelpSystemModule:
                     "Help with GPU issues",
                     "Show recovery procedures", 
                     "Explain pipe functions",
-                    "Common problems and solutions",
-                    "Architecture overview"
+                    "Common issues and solutions",
+                    "Architecture overview",
+                    "Fix network problems",
+                    "Emergency recovery help",
+                    "System troubleshooting"
                 ]
             }
         }
@@ -425,6 +489,18 @@ class HelpSystemModule:
                     content += "**Quick Fixes**:\n"
                     for fix in topic_content["quick_fixes"]:
                         content += f"- `{fix}`\n"
+                
+                # Special formatting for LM Studio connectivity info
+                if "symptoms" in topic_content and "solution" in topic_content:
+                    content += "**Symptoms**:\n"
+                    for symptom in topic_content.get("symptoms", []):
+                        content += f"- {symptom}\n"
+                    content += f"\n**Cause**: {topic_content.get('cause', 'Unknown')}\n\n"
+                    content += f"**Solution**: {topic_content.get('solution', 'N/A')}\n\n"
+                    if "access_url" in topic_content:
+                        content += f"**Access URL**: {topic_content['access_url']}\n\n"
+                    if "port" in topic_content:
+                        content += f"**Local Port**: {topic_content['port']}\n\n"
                 
                 if "problems" in topic_content:
                     content += "**Common Issues**:\n"
