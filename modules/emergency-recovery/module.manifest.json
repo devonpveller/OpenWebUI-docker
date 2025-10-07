@@ -95,20 +95,36 @@
     "startup_timeout_ms": 60000
   },
   "help": {
-    "short": "System recovery and troubleshooting automation",
-    "long": "Migrated from emergency_recovery_pipe.py. Emergency Recovery Pipe for AI Stack\n\nIntegrates with the existing emergency recovery system to provide\nAI-driven system recovery through OpenWebUI conversations.",
+    "short": "Emergency recovery and repair actions for AI Stack components",
+    "long": "Emergency Recovery System for AI Stack\n\nProvides automated recovery and repair actions for system issues.\nFocuses on fixing problems rather than status reporting.\n\nFor status information, use dedicated modules:\n- 'system status' → system-health module\n- 'gpu status' → gpu-status module\n- 'help' → help-system module",
     "examples": [
       {
-        "input": "status",
-        "description": "Get module status"
-      },
-      {
-        "input": "help",
-        "description": "Get help information"
+        "input": "fix network",
+        "description": "Quick network namespace reset (most common fix)"
       },
       {
         "input": "restart ollama",
         "description": "Restart Ollama container to fix connectivity with OpenWebUI"
+      },
+      {
+        "input": "fix gpu",
+        "description": "Check and restart GPU services for CUDA issues"
+      },
+      {
+        "input": "rebuild tailscale",
+        "description": "Rebuild Tailscale container for persistent issues"
+      },
+      {
+        "input": "fix lmstudio",
+        "description": "Fix LM Studio Tailscale connectivity"
+      },
+      {
+        "input": "restart openwebui",
+        "description": "Properly restart OpenWebUI with dependent containers"
+      },
+      {
+        "input": "nuclear option",
+        "description": "Complete system restart (last resort)"
       },
       {
         "input": "validate gpu",
