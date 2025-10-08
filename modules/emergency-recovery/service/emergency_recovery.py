@@ -211,9 +211,9 @@ class EmergencyRecoveryModule:
                 "action": action_name,
                 "status": status,
                 "description": f"{action_name.replace('_', ' ').title()} executed successfully" if status == "completed" else f"{action_name.replace('_', ' ').title()} failed",
-                "script_output": result.stdout if result.stdout else "No output",
-                "script_errors": result.stderr if result.stderr else None,
-                "return_code": result.returncode,
+                "output": result.stdout if result.stdout else "No output",
+                "error": result.stderr if result.stderr else None,
+                "exit_code": result.returncode,
                 "script_path": str(script_path)
             }
             
@@ -933,82 +933,79 @@ class EmergencyRecoveryModule:
             if not project_root:
                 logger.error("Project root not found - docker-compose.yml missing")
                 return self._project_root_error("lmstudio_fix")
-            
+
             logger.info(f"Using project root: {project_root}")
             
-            # Use the Python script instead of the batch file
-            script_path = os.path.join(project_root, "scripts", "lmstudio_fix.py")
-            
-            if not os.path.exists(script_path):
-                return {
-                    "action": "lmstudio_fix",
-                    "status": "error",
-                    "error": f"Python script not found: {script_path}",
-                    "recommendation": "Ensure scripts/lmstudio_fix.py exists in the project directory"
-                }
+            # Use the same _execute_python_script method as other recovery actions
+            script_name = "lmstudio_fix"  # Remove .py extension
+            action_name = "lmstudio_fix"
             
             logger.info("Executing LM Studio fix Python script...")
             
-            # Execute the Python script
             try:
-                result = subprocess.run(
-                    [sys.executable, script_path],
-                    cwd=project_root,
-                    capture_output=True,
-                    text=True,
-                    timeout=120  # 2 minute timeout
-                )
+                result = self._execute_python_script(script_name, action_name)
                 
-                logger.info(f"Script execution completed with return code: {result.returncode}")
-                
-                if result.returncode == 0:
+                if result["status"] == "completed":
                     return {
                         "action": "lmstudio_fix",
                         "status": "completed",
                         "description": "LM Studio fix executed successfully",
                         "steps_completed": [
-                            "LM Studio connectivity fix initiated",
-                            "Python script executed: scripts/lmstudio_fix.py",
-                            "LM Studio connectivity tested",
+                            "LM Studio connectivity verified",
                             "Socat proxy configured",
-                            "Tailscale serve configured for LM Studio"
+                            "Tailscale serve configured for LM Studio path",
+                            "LM Studio accessible via Tailnet"
                         ],
-                        "script_output": result.stdout,
-                        "access_url": "https://your-tailscale-url/lmstudio",
+                        "script_output": result.get("output", ""),
+                        "access_info": "LM Studio is now accessible at your-tailscale-url/lmstudio",
                         "next_steps": [
                             "Test LM Studio access through Tailscale URL",
                             "Verify model loading works through proxy"
                         ]
                     }
                 else:
-                    return {
-                        "action": "lmstudio_fix",
-                        "status": "error",
-                        "error": f"Script execution failed with return code {result.returncode}",
-                        "script_output": result.stdout if result.stdout else "No output",
-                        "script_error": result.stderr if result.stderr else "No error output",
-                        "recommendation": "Check the script output for specific error details",
-                        "debug_info": {
-                            "script_path": script_path,
-                            "working_directory": project_root,
-                            "command": f"python {script_path}"
-                        }
-                    }
+                    # Check if this is a partial success (exit code 2 or specific output patterns)
+                    output = result.get("output", "")
+                    exit_code = result.get("exit_code", 1)
                     
-            except subprocess.TimeoutExpired:
-                return {
-                    "action": "lmstudio_fix",
-                    "status": "error",
-                    "error": "Script execution timed out after 2 minutes",
-                    "recommendation": "Check if LM Studio is running and accessible, then try again"
-                }
+                    if (exit_code == 2 or 
+                        ("LM Studio proxy setup completed successfully" in output) or
+                        ("Socat proxy verified working" in output)):
+                        
+                        return {
+                            "action": "lmstudio_fix",
+                            "status": "partial_success",
+                            "description": "LM Studio proxy configured successfully - Tailscale configuration needed",
+                            "steps_completed": [
+                                "LM Studio connectivity verified",
+                                "Socat proxy configured and running on port 8234",
+                                "Proxy forwarding traffic to LM Studio"
+                            ],
+                            "container_output": output,
+                            "manual_step": {
+                                "command": "docker compose exec tailscale tailscale --socket=/tmp/tailscaled.sock serve --bg --set-path=/lmstudio 8234",
+                                "description": "Run this command on the host to complete Tailscale configuration"
+                            },
+                            "access_info": "LM Studio proxy is working on port 8234 internally",
+                            "recommendation": "The socat proxy is configured and working. Run the manual command above to enable Tailnet access."
+                        }
+                    else:
+                        return {
+                            "action": "lmstudio_fix",
+                            "status": "error",
+                            "description": "Script execution failed",
+                            "script_output": result.get("output", "No output"),
+                            "script_error": result.get("error", "No error output"),
+                            "recommendation": "Check the script output for specific error details"
+                        }
+                    
             except Exception as e:
                 logger.error(f"Error executing script: {e}")
                 return {
                     "action": "lmstudio_fix",
                     "status": "error",
                     "error": f"Failed to execute Python script: {str(e)}",
-                    "recommendation": "Ensure scripts/lmstudio_fix.py is accessible and Python has proper permissions"
+                    "recommendation": "Ensure LM Studio is running and containers are accessible"
                 }
             
         except Exception as e:
@@ -1017,9 +1014,7 @@ class EmergencyRecoveryModule:
                 "action": "lmstudio_fix",
                 "status": "error",
                 "error": f"LM Studio fix failed: {str(e)}"
-            }
-            
-            # Wait for proxy to initialize
+            }            # Wait for proxy to initialize
             logger.info("Waiting for proxy to initialize...")
             time.sleep(8)
             
