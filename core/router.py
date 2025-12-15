@@ -456,18 +456,36 @@ class AIStackRouter:
         # Text analysis for routing
         input_lower = str(user_input).lower()
         
-        # Define routing patterns (priority order matters)
-        if any(keyword in input_lower for keyword in ["gpu", "cuda", "graphics", "nvidia"]):
+        # Define routing patterns (priority order matters - most specific first)
+        
+        # Tailscale serve management (must be before general "fix" keyword)
+        if any(keyword in input_lower for keyword in ["serve", "serving", "expose", "tailscale"]) and \
+           any(keyword in input_lower for keyword in ["start", "stop", "status", "lmstudio", "service", "port"]):
+            return "custom-tools"  # Routes to custom-tools which will handle tailscale_serve_pipe
+        
+        # GPU monitoring
+        elif any(keyword in input_lower for keyword in ["gpu", "cuda", "graphics", "nvidia"]):
             return "gpu-status"
-        elif any(keyword in input_lower for keyword in ["recovery", "fix", "repair", "emergency", "restart", "ollama"]):
+        
+        # Emergency recovery (general recovery, but NOT tailscale serve)
+        elif any(keyword in input_lower for keyword in ["recovery", "fix", "repair", "emergency", "restart", "ollama"]) and \
+             not any(keyword in input_lower for keyword in ["serve", "serving", "expose"]):
             return "emergency-recovery"
-        elif any(keyword in input_lower for keyword in ["health", "status", "monitor"]):
+        
+        # Health and status monitoring
+        elif any(keyword in input_lower for keyword in ["health", "status", "monitor"]) and \
+             not any(keyword in input_lower for keyword in ["serve", "serving"]):
             return "system-health"
+        
+        # Custom tools discovery
         elif any(keyword in input_lower for keyword in ["tools", "commands"]):
             return "custom-tools"
+        
+        # LM Studio help
         elif input_lower.strip() == "lmstudio":
-            # "lmstudio" by itself routes to help for information
             return "help-system"
+        
+        # Default to help
         else:
             return "help-system"
     
