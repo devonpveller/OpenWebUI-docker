@@ -45,7 +45,7 @@ class EmergencyRecoveryModule:
                     "nuclear_option": "scripts/nuclear_option.py",
                     "status_check": "scripts/status_check.py",
                     "restart_openwebui": "scripts/restart_openwebui.py",
-                    "lmstudio_fix": "scripts/lmstudio_fix.py"
+                    "lmstudio_fix": "scripts/lmstudio_fix_v2.py"  # Updated to V2 using tailscale_serve_admin
                 },
                 "legacy_scripts": {
                     "quick_fixes_script": "scripts\\quick-fixes.bat",
