@@ -1,4 +1,4 @@
-FROM ghcr.io/open-webui/open-webui:v0.7.2
+FROM ghcr.io/open-webui/open-webui:v0.8.10
 
 # Remove CPU-only PyTorch packages
 RUN pip uninstall -y torch torchvision torchaudio

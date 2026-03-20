@@ -26,6 +26,7 @@ services:
       # Reduce OpenWebUI overhead for model requests
       - CHAT_RESPONSE_STREAM_DELTA_CHUNK_SIZE=4 # Larger chunks for better streaming performance
       - BYPASS_MODEL_ACCESS_CONTROL=true # Skip access control checks for faster requests
+      - ENABLE_OPEN_TERMINAL=true
     deploy:
       resources:
         reservations:
@@ -96,6 +97,23 @@ services:
       timeout: 10s
       retries: 3
       start_period: 60s
+
+  open-terminal:
+    image: ghcr.io/open-webui/open-terminal:main
+    container_name: open-terminal
+    network_mode: service:openwebui
+    env_file:
+      - .env
+    environment:
+      - API_KEY=${OPEN_TERMINAL_API_KEY}
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      openwebui:
+        condition: service_healthy
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
 
   ollama:
     image: ollama/ollama:latest

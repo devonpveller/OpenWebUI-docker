@@ -278,6 +278,47 @@ function Repair-TailscaleService {
     }
 }
 
+# Function to test Open Terminal health
+function Test-OpenTerminalHealth {
+    [CmdletBinding()]
+    param()
+
+    try {
+        $Response = docker compose exec -T openwebui curl -s -o /dev/null -w "%{http_code}" http://localhost:8000/health 2>$null
+        if ($LASTEXITCODE -eq 0 -and $Response -eq "200") {
+            Write-LogEntry "Open Terminal health check passed" "DEBUG"
+            return $true
+        } else {
+            Write-LogEntry "Open Terminal is not responding on localhost:8000 (HTTP $Response)" "WARN"
+            return $false
+        }
+    }
+    catch {
+        Write-LogEntry "Open Terminal health check failed: $($_.Exception.Message)" "ERROR"
+        return $false
+    }
+}
+
+# Function to recover Open Terminal service
+function Repair-OpenTerminal {
+    Write-LogEntry "Attempting to restart open-terminal container..." "WARN"
+    try {
+        docker compose up -d open-terminal | Out-Null
+        Start-Sleep 10
+        if (Test-OpenTerminalHealth) {
+            Write-LogEntry "Open Terminal recovered successfully" "SUCCESS"
+            return $true
+        } else {
+            Write-LogEntry "Open Terminal recovery failed" "ERROR"
+            return $false
+        }
+    }
+    catch {
+        Write-LogEntry "Open Terminal recovery error: $($_.Exception.Message)" "ERROR"
+        return $false
+    }
+}
+
 # Function to test OpenWebUI-Ollama connectivity
 function Test-OllamaConnectivity {
     try {
@@ -395,7 +436,16 @@ function Invoke-HealthCheck {
             return $false
         }
     }
-    
+
+    # Test Open Terminal health
+    if (-not (Test-OpenTerminalHealth)) {
+        Write-LogEntry "Open Terminal is unhealthy, attempting recovery..." "WARN"
+        if (-not (Repair-OpenTerminal)) {
+            Write-LogEntry "Open Terminal recovery failed - terminal features may be unavailable" "WARN"
+            # Non-fatal: don't return $false, system can still operate without open-terminal
+        }
+    }
+
     Write-LogEntry "All health checks passed" "SUCCESS"
     return $true
 }

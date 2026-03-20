@@ -211,6 +211,30 @@ def check_tailscale_serve():
     
     return result is not None
 
+def check_open_terminal_status():
+    """Check Open Terminal service health"""
+    project_root = find_project_root()
+    if not project_root:
+        return False
+
+    print()
+    log_info("Open Terminal Status:")
+
+    # Check container is running
+    result = run_docker_command(
+        ["docker", "compose", "exec", "-T", "openwebui", "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", "http://localhost:8000/health"],
+        project_root,
+        timeout=10
+    )
+
+    if result and result.returncode == 0 and result.stdout.strip() == "200":
+        log_success("Open Terminal health: OK")
+        return True
+    else:
+        log_error("Open Terminal health: FAILED (is the open-terminal container running?)")
+        return False
+
+
 def check_service_accessibility():
     """Check service accessibility"""
     project_root = find_project_root()
@@ -265,6 +289,7 @@ def main():
         start_missing_services,
         check_gpu_status,
         check_ollama_status,
+        check_open_terminal_status,
         check_network_connectivity,
         check_tailscale_status,
         check_tailscale_serve,
