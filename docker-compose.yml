@@ -28,6 +28,7 @@ services:
       - CHAT_RESPONSE_STREAM_DELTA_CHUNK_SIZE=4 # Larger chunks for better streaming performance
       - BYPASS_MODEL_ACCESS_CONTROL=true # Skip access control checks for faster requests
       - ENABLE_OPEN_TERMINAL=true
+      - TERMINAL_SERVER_CONNECTIONS=[{"id":"open-terminal","name":"Open Terminal","url":"http://localhost:8000","key":"${OPEN_TERMINAL_API_KEY}"}]
     deploy:
       resources:
         reservations:
@@ -100,7 +101,7 @@ services:
       start_period: 60s
 
   open-terminal:
-    image: ghcr.io/open-webui/open-terminal:main
+    image: ghcr.io/open-webui/open-terminal:latest
     container_name: open-terminal
     network_mode: service:openwebui
     env_file:
