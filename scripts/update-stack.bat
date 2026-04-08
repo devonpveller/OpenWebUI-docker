@@ -101,7 +101,7 @@ echo ========================================
 echo.
 
 REM Step 1: Backup data
-echo [STEP 1/7] Creating data backup...
+echo [STEP 1/8] Creating data backup...
 set BACKUP_DIR=..\data-backup\data-backup-%date:~-4%%date:~-7,2%%date:~-10,2%-%time:~0,2%%time:~3,2%%time:~6,2%
 set BACKUP_DIR=%BACKUP_DIR: =0%
 echo [INFO] Backup directory: %BACKUP_DIR%
@@ -143,7 +143,7 @@ if not exist "..\data\openwebui" (
 
 REM Step 2: Get version input
 echo.
-echo [STEP 2/7] Specify OpenWebUI version to update to
+echo [STEP 2/8] Specify OpenWebUI version to update to
 echo [INFO] Check releases: https://github.com/open-webui/open-webui/releases
 set /p VERSION="Enter version tag (e.g., v0.6.41): "
 
@@ -185,19 +185,23 @@ if not defined FULL_UPDATE (
 
 REM Step 3: Update Dockerfile
 echo.
-echo [STEP 3/7] Updating Dockerfile.openwebui-gpu...
+echo [STEP 3/8] Updating Dockerfile.openwebui-gpu...
 powershell -Command "(Get-Content '..\Dockerfile.openwebui-gpu') -replace 'FROM ghcr.io/open-webui/open-webui:v[0-9.]+', 'FROM ghcr.io/open-webui/open-webui:%VERSION%' | Set-Content '..\Dockerfile.openwebui-gpu'"
 echo [SUCCESS] Dockerfile updated to %VERSION%
 
-REM Step 4: Rebuild image
+REM Step 4: Rebuild custom GPU image (CRITICAL - must use custom Dockerfile)
 echo.
-echo [STEP 4/7] Rebuilding OpenWebUI with GPU support...
+echo [STEP 4/8] Rebuilding OpenWebUI with GPU support (custom CUDA PyTorch)...
+echo [INFO] This builds from Dockerfile.openwebui-gpu with CUDA-enabled PyTorch
 echo [INFO] This may take several minutes...
 cd ..
 docker compose build --no-cache openwebui
+set BUILD_RESULT=%ERRORLEVEL%
 cd scripts
-if %ERRORLEVEL% NEQ 0 (
-    echo [ERROR] Build failed - check logs above
+if %BUILD_RESULT% NEQ 0 (
+    echo [ERROR] Custom GPU image build FAILED - check logs above
+    echo [ERROR] Without this build, OpenWebUI will lack CUDA PyTorch and GPU health checks will timeout
+    echo [INFO] Common causes: network issues downloading PyTorch, invalid base image version
     echo [INFO] To rollback: Restore backup and rebuild with previous version
     set OPENWEBUI_UPDATE_SUCCESS=0
     if "%1"=="" (
@@ -209,29 +213,97 @@ if %ERRORLEVEL% NEQ 0 (
     if not defined FULL_UPDATE goto :end
     goto :eof
 )
-echo [SUCCESS] Build completed
+echo [SUCCESS] Custom GPU image built successfully
 
-REM Step 5: Restart services
+REM Step 5: Verify GPU support in built image before starting
 echo.
-echo [STEP 5/7] Restarting services...
+echo [STEP 5/8] Verifying CUDA PyTorch in built image...
+cd ..
+docker compose run --rm --no-deps --entrypoint python openwebui -c "import torch; assert torch.cuda.is_available(), 'CUDA NOT AVAILABLE'; print('CUDA available:', torch.cuda.is_available()); print('PyTorch version:', torch.__version__)"
+set CUDA_VERIFY_RESULT=%ERRORLEVEL%
+cd scripts
+if %CUDA_VERIFY_RESULT% NEQ 0 (
+    echo [ERROR] Built image does NOT have working CUDA PyTorch!
+    echo [ERROR] The health check will timeout waiting for GPU initialization
+    echo [INFO] Check Dockerfile.openwebui-gpu has correct PyTorch CUDA install commands
+    echo [INFO] Verify: pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+    set /p FORCE_CONTINUE="Continue anyway? (y/n): "
+    if /i not "!FORCE_CONTINUE!"=="y" (
+        echo [INFO] Update aborted - fix Dockerfile.openwebui-gpu and retry
+        set OPENWEBUI_UPDATE_SUCCESS=0
+        if "%1"=="" (
+            if not defined FULL_UPDATE (
+                pause
+                goto :interactive_menu
+            )
+        )
+        if not defined FULL_UPDATE goto :end
+        goto :eof
+    )
+    echo [WARNING] Continuing without verified GPU support...
+) else (
+    echo [SUCCESS] CUDA PyTorch verified in built image
+)
+
+REM Step 6: Restart services
+echo.
+echo [STEP 6/8] Restarting services...
 cd ..
 docker compose up -d openwebui
-timeout /t 15 /nobreak >nul
+echo [INFO] Waiting for OpenWebUI CUDA initialization (up to 90s)...
+timeout /t 30 /nobreak >nul
+
+REM Wait for OpenWebUI health check to pass
+set HEALTH_WAIT=0
+set HEALTH_MAX=90
+:health_loop
+cd ..
+docker compose ps openwebui --format "{{.Health}}" 2>nul | findstr /C:"healthy" >nul 2>&1
+if %ERRORLEVEL% EQU 0 (
+    cd scripts
+    echo [SUCCESS] OpenWebUI is healthy after approximately %HEALTH_WAIT%s
+    goto :health_done
+)
+cd scripts
+set /a HEALTH_WAIT+=10
+if %HEALTH_WAIT% GEQ %HEALTH_MAX% (
+    echo [WARNING] OpenWebUI not yet healthy after %HEALTH_MAX%s - continuing with dependent services
+    goto :health_done
+)
+timeout /t 10 /nobreak >nul
+goto :health_loop
+
+:health_done
+cd ..
 docker compose up -d ollama tailscale
 cd scripts
 
-REM Step 6: Verify
+REM Step 7: Final verification
 echo.
-echo [STEP 6/7] Verifying update...
-timeout /t 10 /nobreak >nul
+echo [STEP 7/8] Final verification...
+timeout /t 15 /nobreak >nul
 
-echo [INFO] Checking GPU availability...
+echo [INFO] Checking GPU availability in running container...
 cd ..
-docker compose exec -T openwebui python -c "import torch; print('CUDA available:', torch.cuda.is_available())" 2>nul
+docker compose exec -T openwebui python -c "import torch; print('CUDA available:', torch.cuda.is_available()); print('GPU count:', torch.cuda.device_count()); print('GPU name:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'None')" 2>nul
+set GPU_CHECK_RESULT=%ERRORLEVEL%
 cd scripts
-if %ERRORLEVEL% NEQ 0 (
-    echo [WARNING] GPU check failed - verify manually
+if %GPU_CHECK_RESULT% NEQ 0 (
+    echo [ERROR] GPU check failed in running container!
+    echo [ERROR] OpenWebUI may not have CUDA-enabled PyTorch
+    echo [INFO] This will cause the health monitor to timeout on GPU initialization
+    echo [INFO] Try: docker compose build --no-cache openwebui
+    set OPENWEBUI_UPDATE_SUCCESS=0
+    if "%1"=="" (
+        if not defined FULL_UPDATE (
+            pause
+            goto :interactive_menu
+        )
+    )
+    if not defined FULL_UPDATE goto :end
+    goto :eof
 )
+echo [SUCCESS] GPU verified in running container
 
 echo.
 echo [INFO] Checking service health...
@@ -239,10 +311,10 @@ cd ..
 docker compose ps
 cd scripts
 
-REM Step 7: Resume monitoring (skip if part of full update)
+REM Step 8: Resume monitoring (skip if part of full update)
 if not defined FULL_UPDATE (
     echo.
-    echo [STEP 7/7] Resuming monitoring services...
+    echo [STEP 8/8] Resuming monitoring services...
     sc query "TailscaleMonitor" >nul 2>&1
     if %ERRORLEVEL% EQU 0 (
         echo [INFO] Starting TailscaleMonitor service...
@@ -253,7 +325,7 @@ if not defined FULL_UPDATE (
 )
 
 echo.
-echo [SUCCESS] OpenWebUI update complete!
+echo [SUCCESS] OpenWebUI update complete with GPU support verified!
 echo [INFO] Access OpenWebUI at http://localhost:3000
 echo [INFO] Backup location: %BACKUP_DIR%
 set OPENWEBUI_UPDATE_SUCCESS=1
