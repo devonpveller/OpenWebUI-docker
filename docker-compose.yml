@@ -44,10 +44,11 @@ services:
     tmpfs:
       - /tmp:noexec,nosuid,size=100m
     healthcheck:
-      test: [ "CMD", "curl", "-f", "http://localhost:8080" ]
-      interval: 5s
-      timeout: 3s
+      test: [ "CMD", "curl", "-f", "--max-time", "10", "http://localhost:8080/health" ]
+      interval: 15s
+      timeout: 15s
       retries: 3
+      start_period: 60s
 
   watchtower:
     image: containrrr/watchtower:latest
