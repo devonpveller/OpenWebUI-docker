@@ -1,14 +1,14 @@
 """
 title: GitHub Repo Analyzer
 author: ai-stack
-version: 2.0.0
-description: Give any model the ability to explore GitHub repositories using the free GitHub REST API. Fetch repo overviews, read files, and search code — then the model summarizes and analyzes.
+version: 3.0.0
+description: Give any model the ability to explore GitHub repositories using the free GitHub REST API. Fetch repo overviews, read files, search code, browse commits, and validate feature implementations.
 required_open_webui_version: 0.4.0
 requirements: requests
 """
 
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Optional, List
 import requests
 import re
 import base64
@@ -380,3 +380,189 @@ class Tools:
 
         except requests.RequestException as e:
             return f"Error fetching commit detail: {str(e)}"
+
+    def validate_features(self, repo_url: str, features: List[str], max_files_per_feature: int = 3) -> str:
+        """
+        Batch-validate a list of features/requirements against a GitHub repository.
+        For each feature, searches the codebase and reads relevant files to gather evidence of implementation.
+        Returns a structured report with evidence found (or not) for every feature — in a single tool call.
+
+        Use this when a user provides a specification or feature list and asks you to verify implementation.
+        The results can be large — store them in FileShed (shed_create_file) if you need to free context, then retrieve later.
+
+        :param repo_url: GitHub repository URL (e.g. https://github.com/owner/repo) or owner/repo shorthand
+        :param features: List of feature descriptions to validate (e.g. ["JWT authentication", "rate limiting", "WebSocket support"])
+        :param max_files_per_feature: Maximum files to read per feature (default 3, max 5) to control output size
+        :return: Structured validation report with evidence per feature
+        """
+        parsed = self._parse_repo(repo_url)
+        if not parsed:
+            return "Error: Invalid repository URL."
+
+        owner, repo = parsed
+        max_files_per_feature = min(max(1, max_files_per_feature), 5)
+
+        # Step 1: Get the file tree for cross-referencing
+        tree_paths = []
+        try:
+            r = self._get(f"{GITHUB_API_BASE}/repos/{owner}/{repo}/git/trees/HEAD?recursive=1")
+            if r.status_code == 200:
+                tree_paths = [item["path"] for item in r.json().get("tree", []) if item["type"] == "blob"]
+        except requests.RequestException:
+            pass
+
+        report_sections = [f"# Feature Validation Report\n**Repository:** {owner}/{repo}\n**Features checked:** {len(features)}\n"]
+
+        for i, feature in enumerate(features, 1):
+            section = f"## {i}. {feature}\n\n"
+            evidence_files = []
+            search_error = None
+
+            # Generate search keywords from the feature description
+            keywords = self._extract_search_keywords(feature)
+
+            # Search for each keyword
+            found_paths = set()
+            for keyword in keywords[:3]:  # Limit to 3 keyword searches per feature
+                try:
+                    r = self._get(
+                        f"{GITHUB_API_BASE}/search/code?q={requests.utils.quote(keyword)}+repo:{owner}/{repo}&per_page=5"
+                    )
+                    if r.status_code == 200:
+                        for item in r.json().get("items", []):
+                            path = item.get("path", "")
+                            if path and path not in found_paths and len(found_paths) < max_files_per_feature * 2:
+                                found_paths.add(path)
+                    elif r.status_code == 403:
+                        search_error = "Rate limited"
+                        break
+                except requests.RequestException:
+                    pass
+
+            # Also check file tree for name-based matches
+            feature_lower = feature.lower()
+            for path in tree_paths:
+                name_lower = path.lower()
+                for kw in keywords[:3]:
+                    if kw.lower() in name_lower and path not in found_paths:
+                        found_paths.add(path)
+
+            if search_error:
+                section += f"**Status:** SEARCH ERROR — {search_error}\n"
+                report_sections.append(section)
+                continue
+
+            if not found_paths:
+                section += "**Status:** NOT FOUND\n**Evidence:** No matching code found in the repository.\n"
+                report_sections.append(section)
+                continue
+
+            # Read the most relevant files (limited)
+            files_to_read = sorted(found_paths)[:max_files_per_feature]
+            section += f"**Status:** EVIDENCE FOUND ({len(found_paths)} file(s) match, showing {len(files_to_read)})\n\n"
+
+            for file_path in files_to_read:
+                try:
+                    r = self._get(f"{GITHUB_API_BASE}/repos/{owner}/{repo}/contents/{file_path}")
+                    if r.status_code == 200:
+                        data = r.json()
+                        if data.get("encoding") == "base64":
+                            content = base64.b64decode(data.get("content", "")).decode("utf-8", errors="replace")
+                            # Extract relevant snippet (lines containing keywords)
+                            snippet = self._extract_relevant_snippet(content, keywords, max_lines=30)
+                            evidence_files.append(f"### `{file_path}`\n```\n{snippet}\n```")
+                        else:
+                            evidence_files.append(f"### `{file_path}`\n*Binary file — cannot display*")
+                except requests.RequestException:
+                    evidence_files.append(f"### `{file_path}`\n*Failed to read file*")
+
+            section += "\n\n".join(evidence_files) if evidence_files else "*Files matched but could not be read.*"
+            report_sections.append(section)
+
+        # Summary
+        summary_lines = ["\n---\n## Summary\n\n| # | Feature | Status |", "|----|---------|--------|"]
+        for i, feature in enumerate(features, 1):
+            section_text = report_sections[i] if i < len(report_sections) else ""
+            if "NOT FOUND" in section_text:
+                status = "Not Found"
+            elif "SEARCH ERROR" in section_text:
+                status = "Search Error"
+            elif "EVIDENCE FOUND" in section_text:
+                status = "Evidence Found"
+            else:
+                status = "Unknown"
+            summary_lines.append(f"| {i} | {feature} | {status} |")
+
+        report_sections.append("\n".join(summary_lines))
+        return "\n\n".join(report_sections)
+
+    def _extract_search_keywords(self, feature: str) -> List[str]:
+        """Extract meaningful search keywords from a feature description."""
+        # Remove common filler words
+        stop_words = {
+            "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
+            "have", "has", "had", "do", "does", "did", "will", "would", "could",
+            "should", "may", "might", "shall", "can", "need", "must", "ought",
+            "for", "and", "but", "or", "nor", "not", "so", "yet", "both", "either",
+            "neither", "each", "every", "all", "any", "few", "more", "most", "other",
+            "some", "such", "no", "only", "own", "same", "than", "too", "very",
+            "just", "because", "as", "until", "while", "of", "at", "by", "about",
+            "between", "through", "during", "before", "after", "above", "below",
+            "to", "from", "up", "down", "in", "out", "on", "off", "over", "under",
+            "with", "without", "into", "onto", "upon", "that", "this", "these",
+            "those", "it", "its", "they", "them", "their", "we", "us", "our",
+            "you", "your", "he", "him", "his", "she", "her", "support", "implementation",
+            "implement", "feature", "functionality", "system", "using", "based",
+        }
+        words = re.findall(r"[a-zA-Z_][a-zA-Z0-9_]*", feature)
+        keywords = [w for w in words if w.lower() not in stop_words and len(w) > 2]
+
+        # Also try the full phrase (hyphenated/compound terms)
+        compound = feature.strip()
+        if len(compound.split()) <= 4 and len(compound) <= 50:
+            keywords.insert(0, compound)
+
+        return keywords[:5] if keywords else [feature.strip()[:50]]
+
+    def _extract_relevant_snippet(self, content: str, keywords: List[str], max_lines: int = 30) -> str:
+        """Extract lines from content that are most relevant to the keywords."""
+        lines = content.split("\n")
+        if len(lines) <= max_lines:
+            return content[:self.valves.MAX_FILE_SIZE]
+
+        # Score each line by keyword matches
+        scored = []
+        keywords_lower = [k.lower() for k in keywords]
+        for idx, line in enumerate(lines):
+            line_lower = line.lower()
+            score = sum(1 for kw in keywords_lower if kw in line_lower)
+            if score > 0:
+                scored.append((idx, score))
+
+        if not scored:
+            # No keyword matches — return start of file
+            return "\n".join(lines[:max_lines]) + f"\n... ({len(lines) - max_lines} more lines)"
+
+        # Collect lines around the best matches with context
+        scored.sort(key=lambda x: -x[1])
+        selected_indices = set()
+        for idx, _ in scored[:max_lines // 3]:
+            for ctx in range(max(0, idx - 2), min(len(lines), idx + 3)):
+                selected_indices.add(ctx)
+            if len(selected_indices) >= max_lines:
+                break
+
+        sorted_indices = sorted(selected_indices)[:max_lines]
+        result_lines = []
+        prev = -2
+        for idx in sorted_indices:
+            if idx > prev + 1:
+                result_lines.append(f"... (line {idx + 1})")
+            result_lines.append(lines[idx])
+            prev = idx
+
+        remaining = len(lines) - len(sorted_indices)
+        if remaining > 0:
+            result_lines.append(f"... ({remaining} more lines)")
+
+        return "\n".join(result_lines)
