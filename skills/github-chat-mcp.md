@@ -1,77 +1,94 @@
 ---
-name: github-chat-mcp
-description: Instructions for using the GitHub Chat MCP tools to index and query GitHub repositories for codebase analysis
+name: github-repo-analyzer
+description: Instructions for using the GitHub Repo Analyzer tools to explore, read files, and search code in any public GitHub repository
 ---
 
-# GitHub Chat MCP — Tool Usage Guide
+# GitHub Repo Analyzer — Tool Usage Guide
 
-You have access to the **GitHub Chat MCP** tools for analyzing GitHub repositories. These tools let you index a repository and then ask detailed questions about its codebase, architecture, dependencies, and implementation details.
+You have access to the **GitHub Repo Analyzer** tools for exploring GitHub repositories. These tools use the free GitHub REST API to fetch repo metadata, read source files, and search code. You then analyze and summarize the results yourself.
 
 ## Available Tools
 
-### 1. `index_repository`
+### 1. `get_repo_overview`
 
-**Purpose:** Index a GitHub repository so it can be queried. This **must be called first** before asking any questions.
+**Purpose:** Get a comprehensive overview of a repository — metadata, languages, directory structure, and README. **Call this first** when a user asks about a repository.
 
-**Parameters:**
-
-| Parameter  | Type   | Required | Description |
-|-----------|--------|----------|-------------|
-| `repo_url` | string | Yes      | GitHub repository URL in the format `https://github.com/owner/repo` |
+| Parameter  | Type   | Required | Description                                               |
+| ---------- | ------ | -------- | --------------------------------------------------------- |
+| `repo_url` | string | Yes      | `https://github.com/owner/repo` or `owner/repo` shorthand |
 
 **Usage rules:**
-- Always index before querying. If the user provides a repo URL and a question in the same message, index first, then query.
-- The URL must start with `https://github.com/` — do not pass SSH URLs, shorthand like `owner/repo`, or URLs from other forges.
-- Indexing is idempotent — re-indexing an already-indexed repo is safe and refreshes the data.
-- Confirm successful indexing to the user before proceeding to queries.
 
-### 2. `query_repository`
+- Always start here when a user shares a repo URL.
+- Accepts both full URLs and `owner/repo` shorthand.
+- Returns the README, file tree, and metadata in one call — usually enough to answer general questions.
 
-**Purpose:** Ask a question about an already-indexed repository and get an AI-generated answer with source file references.
+### 2. `get_repo_file`
 
-**Parameters:**
+**Purpose:** Read a specific file's contents from the repository. Use this to examine source code, configs, or documentation in detail.
 
-| Parameter              | Type          | Required | Description |
-|-----------------------|---------------|----------|-------------|
-| `repo_url`            | string        | Yes      | Same GitHub URL used during indexing |
-| `question`            | string        | Yes      | The question to ask about the repository |
-| `conversation_history` | list or null  | No       | Previous conversation messages for multi-turn context |
+| Parameter   | Type   | Required | Description                                              |
+| ----------- | ------ | -------- | -------------------------------------------------------- |
+| `repo_url`  | string | Yes      | Repository URL or `owner/repo`                           |
+| `file_path` | string | Yes      | Path within the repo, e.g. `src/main.py`, `package.json` |
 
 **Usage rules:**
-- The repository **must be indexed first**. If you're unsure, index it again — it's safe.
-- Write specific, targeted questions. Instead of "tell me about this repo," ask "What web framework does this project use and how are routes organized?"
-- For follow-up questions about the same repo, pass previous Q&A pairs in `conversation_history` as `[{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}]` to maintain context.
-- The response includes source file paths — reference these when presenting findings to the user.
+
+- Use the file tree from `get_repo_overview` to identify which files to read.
+- If you pass a directory path, it lists the directory contents instead.
+- Large files are automatically truncated; focus on the most relevant files.
+
+### 3. `search_repo_code`
+
+**Purpose:** Search for code patterns, function names, class names, or keywords within the repository.
+
+| Parameter  | Type   | Required | Description                                       |
+| ---------- | ------ | -------- | ------------------------------------------------- |
+| `repo_url` | string | Yes      | Repository URL or `owner/repo`                    |
+| `query`    | string | Yes      | Search terms — function names, keywords, patterns |
+
+**Usage rules:**
+
+- Use specific terms: function names, class names, imports, config keys.
+- Combine terms for better results, e.g. `def authenticate` or `import redis`.
+- Returns matching files with code snippets.
+- Requires a GitHub token for text match snippets (without token, only file paths are returned).
 
 ## Recommended Workflow
 
-1. **User provides a repo URL** → Call `index_repository` with the URL.
-2. **Confirm indexing** → Tell the user the repo is ready.
-3. **User asks a question** → Call `query_repository` with the URL and question.
-4. **Present the answer** → Include relevant source file references from the response.
-5. **Follow-up questions** → Pass conversation history for continuity.
+### General repo analysis:
 
-## Effective Question Patterns
+1. **Call `get_repo_overview`** — get the big picture (metadata, tree, README).
+2. **Read key files** — use `get_repo_file` on entry points like `main.py`, `index.ts`, `package.json`, `Cargo.toml`, `pyproject.toml`, etc.
+3. **Summarize** — synthesize findings into a clear answer for the user.
 
-Use these question strategies for thorough analysis:
+### Answering specific questions:
 
-- **Architecture:** "What is the high-level architecture? Describe the main components and how they interact."
-- **Tech stack:** "What are the core dependencies and what versions are used?"
-- **Entry points:** "Where is the main entry point and how does the application bootstrap?"
-- **Specific feature:** "How is authentication implemented? Walk through the flow."
-- **Code patterns:** "What design patterns are used in this codebase?"
-- **Testing:** "How are tests organized and what testing frameworks are used?"
-- **Configuration:** "How is the application configured? What environment variables are required?"
+1. **Call `get_repo_overview`** — scan the file tree and README for clues.
+2. **Search** — use `search_repo_code` to find relevant code (e.g. `search_repo_code("owner/repo", "authentication")`)
+3. **Read found files** — use `get_repo_file` to examine the matches in detail.
+4. **Explain** — provide a clear answer citing the specific files you read.
+
+### Deep dive workflow:
+
+1. Overview → identify key directories
+2. Read `get_repo_file` on the directory to list contents
+3. Read individual source files
+4. Search for cross-cutting concerns (error handling, logging, config patterns)
+
+## Analysis Strategies
+
+When analyzing a repository, look for these in order:
+
+- **Purpose:** README + repo description
+- **Tech stack:** Language breakdown, dependency files (`package.json`, `requirements.txt`, `go.mod`, `Cargo.toml`)
+- **Architecture:** Directory structure, entry points, module organization
+- **Key patterns:** How routing, data models, error handling, and configuration work
+- **Quality signals:** Tests, CI configs, linting, type checking
 
 ## Error Handling
 
-- If indexing fails, verify the URL is correct and the repository is public (or accessible).
-- If a query returns an error, try re-indexing the repository first.
-- If the API is unreachable, inform the user that the GitHub Chat service may be temporarily unavailable.
-
-## Important Constraints
-
-- Only works with **public GitHub repositories** (or repos accessible to the configured API key).
-- Requires the repository to be **indexed before querying** — always index first.
-- The GitHub Chat API is a freemium service — no API key is required for basic usage.
-- Do not fabricate repository analysis results. If the tool returns an error or empty result, say so.
+- **404 Not Found** → repo doesn't exist or is private. Verify the URL.
+- **403 Rate Limit** → tell the user to add a GitHub personal access token in tool settings (raises limit from 60 to 5,000 requests/hour).
+- **Empty results** → try different search terms or read files directly.
+- Do not fabricate results. If a tool returns an error or empty data, say so.
