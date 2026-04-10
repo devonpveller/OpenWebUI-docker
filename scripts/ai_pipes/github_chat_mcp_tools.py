@@ -1,8 +1,8 @@
 """
 title: GitHub Repo Analyzer
 author: ai-stack
-version: 4.0.0
-description: Give any model the ability to explore GitHub repositories using the free GitHub REST API. Fetch repo overviews, read files (bulk or single), search code, browse commits, validate feature implementations, and delegate heavy analysis via Superpowers sub-agents.
+version: 4.1.0
+description: Give any model the ability to explore GitHub repositories using the free GitHub REST API. Supports branch selection from URLs. Fetch repo overviews, read files (bulk or single), search code, browse commits, validate feature implementations, and delegate heavy analysis via Superpowers sub-agents.
 required_open_webui_version: 0.4.0
 requirements: requests
 """
@@ -45,17 +45,56 @@ class Tools:
         return headers
 
     def _parse_repo(self, repo_url: str) -> Optional[tuple]:
-        """Extract owner/repo from a GitHub URL."""
+        """Extract owner, repo, branch, and file path from a GitHub URL.
+
+        Handles all common GitHub URL patterns:
+          https://github.com/owner/repo
+          https://github.com/owner/repo/tree/branch-name
+          https://github.com/owner/repo/blob/branch-name/path/to/file.ts
+          owner/repo  (shorthand)
+
+        Returns (owner, repo, branch_or_None, filepath_or_None) or None on failure.
+        """
+        url = repo_url.strip().rstrip("/")
+
+        # Full GitHub URL with optional /tree/branch or /blob/branch/path
         match = re.match(
-            r"https?://github\.com/([\w\-\.]+)/([\w\-\.]+)", repo_url.strip()
+            r"https?://github\.com/([\w\-\.]+)/([\w\-\.]+?)(?:\.git)?(?:/(tree|blob)/(.+))?$",
+            url,
         )
         if match:
-            return match.group(1), match.group(2)
-        # Also accept owner/repo shorthand
-        match = re.match(r"^([\w\-\.]+)/([\w\-\.]+)$", repo_url.strip())
+            owner = match.group(1)
+            repo = match.group(2)
+            url_type = match.group(3)  # "tree", "blob", or None
+            remainder = match.group(4)  # "branch" or "branch/path/to/file"
+
+            branch = None
+            file_path = None
+            if remainder:
+                if url_type == "blob":
+                    # blob URLs: first segment is branch, rest is file path
+                    # Handle multi-segment branch names by checking against known patterns
+                    parts = remainder.split("/", 1)
+                    branch = parts[0]
+                    file_path = parts[1] if len(parts) > 1 else None
+                else:
+                    # tree URLs: everything is the branch (could contain slashes)
+                    branch = remainder
+
+            return owner, repo, branch, file_path
+
+        # owner/repo shorthand (no branch info)
+        match = re.match(r"^([\w\-\.]+)/([\w\-\.]+)$", url)
         if match:
-            return match.group(1), match.group(2)
+            return match.group(1), match.group(2), None, None
+
         return None
+
+    def _ref_param(self, branch: Optional[str], prefix: str = "?") -> str:
+        """Build a ?ref=branch or &ref=branch query parameter."""
+        if branch:
+            return f"{prefix}ref={requests.utils.quote(branch, safe='')}"
+        return ""
 
     def _get(self, url: str) -> requests.Response:
         return requests.get(
@@ -64,19 +103,21 @@ class Tools:
             timeout=self.valves.REQUEST_TIMEOUT,
         )
 
-    def get_repo_overview(self, repo_url: str) -> str:
+    def get_repo_overview(self, repo_url: str, branch: Optional[str] = None) -> str:
         """
         Get a comprehensive overview of a GitHub repository including its description, stats, languages, directory structure, and README content.
         Call this first when a user asks about a GitHub repository.
 
-        :param repo_url: GitHub repository URL (e.g. https://github.com/owner/repo) or owner/repo shorthand
+        :param repo_url: GitHub repository URL (e.g. https://github.com/owner/repo or https://github.com/owner/repo/tree/branch-name) or owner/repo shorthand
+        :param branch: Branch name to inspect (optional). If omitted, uses the branch from the URL or the repo default branch.
         :return: Repository overview with metadata, file tree, and README
         """
         parsed = self._parse_repo(repo_url)
         if not parsed:
             return "Error: Invalid repository URL. Use https://github.com/owner/repo or owner/repo format."
 
-        owner, repo = parsed
+        owner, repo, url_branch, url_file = parsed
+        branch = branch or url_branch  # Explicit param overrides URL-extracted branch
         sections = []
 
         # 1. Repo metadata
@@ -89,17 +130,19 @@ class Tools:
             r.raise_for_status()
             data = r.json()
             sections.append(
-                f"# {data.get('full_name', f'{owner}/{repo}')}\n\n"
+                f"# {data.get('full_name', f'{owner}/{repo}')}" + (f" (branch: `{branch}`)" if branch else "") + f"\n\n"
                 f"**Description:** {data.get('description') or 'No description'}\n"
                 f"**Language:** {data.get('language') or 'Unknown'}\n"
                 f"**Stars:** {data.get('stargazers_count', 0)} | **Forks:** {data.get('forks_count', 0)} | **Issues:** {data.get('open_issues_count', 0)}\n"
                 f"**Default branch:** {data.get('default_branch', 'main')}\n"
+                f"**Viewing branch:** {branch or data.get('default_branch', 'main')}\n"
                 f"**License:** {data.get('license', {}).get('spdx_id', 'None') if data.get('license') else 'None'}\n"
                 f"**Topics:** {', '.join(data.get('topics', [])) or 'None'}\n"
                 f"**Created:** {data.get('created_at', 'Unknown')}\n"
                 f"**Last pushed:** {data.get('pushed_at', 'Unknown')}"
             )
             default_branch = data.get("default_branch", "main")
+            effective_branch = branch or default_branch
         except requests.RequestException as e:
             return f"Error fetching repository metadata: {str(e)}"
 
@@ -121,7 +164,7 @@ class Tools:
         # 3. File tree (root level + one level deep for key dirs)
         try:
             r = self._get(
-                f"{GITHUB_API_BASE}/repos/{owner}/{repo}/git/trees/{default_branch}?recursive=1"
+                f"{GITHUB_API_BASE}/repos/{owner}/{repo}/git/trees/{requests.utils.quote(effective_branch, safe='')}?recursive=1"
             )
             if r.status_code == 200:
                 tree_data = r.json()
@@ -149,7 +192,7 @@ class Tools:
 
         # 4. README
         try:
-            r = self._get(f"{GITHUB_API_BASE}/repos/{owner}/{repo}/readme")
+            r = self._get(f"{GITHUB_API_BASE}/repos/{owner}/{repo}/readme{self._ref_param(branch)}")
             if r.status_code == 200:
                 readme_data = r.json()
                 content = base64.b64decode(readme_data.get("content", "")).decode(
@@ -164,28 +207,35 @@ class Tools:
 
         return "\n\n---\n\n".join(sections)
 
-    def get_repo_file(self, repo_url: str, file_path: str) -> str:
+    def get_repo_file(self, repo_url: str, file_path: str, branch: Optional[str] = None) -> str:
         """
         Read the contents of a specific file from a GitHub repository.
         Use this when you need to examine a particular source file in detail.
 
-        :param repo_url: GitHub repository URL (e.g. https://github.com/owner/repo) or owner/repo shorthand
-        :param file_path: Path to the file within the repository (e.g. src/main.py, package.json)
+        :param repo_url: GitHub repository URL (e.g. https://github.com/owner/repo or https://github.com/owner/repo/blob/branch/path/to/file) or owner/repo shorthand
+        :param file_path: Path to the file within the repository (e.g. src/main.py, package.json). If the URL already contains a file path (blob URL), this can be left as an empty string.
+        :param branch: Branch name (optional). If omitted, uses the branch from the URL or the repo default branch.
         :return: The file contents
         """
         parsed = self._parse_repo(repo_url)
         if not parsed:
             return "Error: Invalid repository URL."
 
-        owner, repo = parsed
-        clean_path = file_path.strip().lstrip("/")
+        owner, repo, url_branch, url_file = parsed
+        branch = branch or url_branch
+        # If file_path is empty/not provided but URL had a file path (blob URL), use that
+        effective_path = file_path.strip().lstrip("/") if file_path and file_path.strip() else (url_file or "")
+        if not effective_path:
+            return "Error: No file path provided. Pass a file path or use a blob URL like https://github.com/owner/repo/blob/branch/path/to/file."
+        clean_path = effective_path
 
         try:
             r = self._get(
-                f"{GITHUB_API_BASE}/repos/{owner}/{repo}/contents/{clean_path}"
+                f"{GITHUB_API_BASE}/repos/{owner}/{repo}/contents/{clean_path}{self._ref_param(branch)}"
             )
             if r.status_code == 404:
-                return f"Error: File '{clean_path}' not found in {owner}/{repo}."
+                hint = f" on branch '{branch}'" if branch else ""
+                return f"Error: File '{clean_path}' not found in {owner}/{repo}{hint}."
             if r.status_code == 403:
                 return "Error: GitHub API rate limit exceeded. Add a GITHUB_TOKEN in tool settings."
             r.raise_for_status()
@@ -217,6 +267,7 @@ class Tools:
     def search_repo_code(self, repo_url: str, query: str) -> str:
         """
         Search for code within a GitHub repository. Use this to find specific functions, classes, imports, configuration, or patterns.
+        Note: GitHub code search always searches the default branch. To search other branches, use get_repo_overview to get the file tree, then bulk_read_files to check specific files.
 
         :param repo_url: GitHub repository URL (e.g. https://github.com/owner/repo) or owner/repo shorthand
         :param query: Search query — can include keywords, function names, class names, or code patterns
@@ -226,7 +277,7 @@ class Tools:
         if not parsed:
             return "Error: Invalid repository URL."
 
-        owner, repo = parsed
+        owner, repo, _, _ = parsed
 
         try:
             r = self._get(
@@ -265,24 +316,28 @@ class Tools:
         except requests.RequestException as e:
             return f"Error searching repository: {str(e)}"
 
-    def get_repo_commits(self, repo_url: str, path: Optional[str] = None, max_commits: int = 20) -> str:
+    def get_repo_commits(self, repo_url: str, path: Optional[str] = None, max_commits: int = 20, branch: Optional[str] = None) -> str:
         """
         Get recent commit history for a GitHub repository or a specific file/directory.
         Use this to understand recent changes, who contributed, and what was modified.
 
-        :param repo_url: GitHub repository URL (e.g. https://github.com/owner/repo) or owner/repo shorthand
+        :param repo_url: GitHub repository URL (e.g. https://github.com/owner/repo or https://github.com/owner/repo/tree/branch-name) or owner/repo shorthand
         :param path: Optional file or directory path to filter commits (e.g. src/main.py). Leave empty for all commits.
         :param max_commits: Maximum number of commits to return (default 20, max 100)
+        :param branch: Branch name (optional). If omitted, uses the branch from the URL or the repo default branch.
         :return: List of recent commits with authors, dates, and messages
         """
         parsed = self._parse_repo(repo_url)
         if not parsed:
             return "Error: Invalid repository URL."
 
-        owner, repo = parsed
+        owner, repo, url_branch, _ = parsed
+        branch = branch or url_branch
         max_commits = min(max(1, max_commits), 100)
 
         params = f"per_page={max_commits}"
+        if branch:
+            params += f"&sha={requests.utils.quote(branch, safe='')}"
         if path:
             params += f"&path={requests.utils.quote(path.strip().lstrip('/'))}"
 
@@ -298,9 +353,9 @@ class Tools:
             commits = r.json()
 
             if not commits:
-                return f"No commits found for {owner}/{repo}" + (f" at path '{path}'" if path else "") + "."
+                return f"No commits found for {owner}/{repo}" + (f" on branch '{branch}'" if branch else "") + (f" at path '{path}'" if path else "") + "."
 
-            header = f"**Recent commits for {owner}/{repo}**" + (f" (path: `{path}`)" if path else "") + f"\n\n"
+            header = f"**Recent commits for {owner}/{repo}**" + (f" (branch: `{branch}`)" if branch else "") + (f" (path: `{path}`)" if path else "") + f"\n\n"
             lines = []
             for c in commits:
                 sha = c.get("sha", "")[:7]
@@ -331,7 +386,7 @@ class Tools:
         if not parsed:
             return "Error: Invalid repository URL."
 
-        owner, repo = parsed
+        owner, repo, _, _ = parsed
 
         try:
             r = self._get(
@@ -381,21 +436,24 @@ class Tools:
         except requests.RequestException as e:
             return f"Error fetching commit detail: {str(e)}"
 
-    def bulk_read_files(self, repo_url: str, file_paths: str) -> str:
+    def bulk_read_files(self, repo_url: str, file_paths: str, branch: Optional[str] = None) -> str:
         """
         Read multiple files from a GitHub repository in a single tool call.
         Far more efficient than calling get_repo_file repeatedly.
         Use this after search_repo_code or get_repo_overview to read all relevant files at once.
 
-        :param repo_url: GitHub repository URL (e.g. https://github.com/owner/repo) or owner/repo shorthand
+        :param repo_url: GitHub repository URL (e.g. https://github.com/owner/repo or https://github.com/owner/repo/tree/branch-name) or owner/repo shorthand
         :param file_paths: Comma-separated list of file paths to read (e.g. "src/main.py, README.md, src/config.ts")
+        :param branch: Branch name (optional). If omitted, uses the branch from the URL or the repo default branch.
         :return: Contents of all requested files concatenated with clear separators
         """
         parsed = self._parse_repo(repo_url)
         if not parsed:
             return "Error: Invalid repository URL."
 
-        owner, repo = parsed
+        owner, repo, url_branch, _ = parsed
+        branch = branch or url_branch
+        ref_param = self._ref_param(branch)
         paths = [p.strip().lstrip("/") for p in file_paths.split(",") if p.strip()]
 
         if not paths:
@@ -415,7 +473,7 @@ class Tools:
                 break
 
             try:
-                r = self._get(f"{GITHUB_API_BASE}/repos/{owner}/{repo}/contents/{file_path}")
+                r = self._get(f"{GITHUB_API_BASE}/repos/{owner}/{repo}/contents/{file_path}{ref_param}")
                 if r.status_code == 404:
                     errors.append(f"  - `{file_path}`: Not found")
                     continue
@@ -455,7 +513,7 @@ class Tools:
 
         return "\n\n---\n\n".join(output_parts)
 
-    def validate_features(self, repo_url: str, features: List[str], max_files_per_feature: int = 3) -> str:
+    def validate_features(self, repo_url: str, features: List[str], max_files_per_feature: int = 3, branch: Optional[str] = None) -> str:
         """
         Batch-validate a list of features/requirements against a GitHub repository.
         For each feature, searches the codebase and reads relevant files to gather evidence of implementation.
@@ -464,28 +522,32 @@ class Tools:
         Use this when a user provides a specification or feature list and asks you to verify implementation.
         The results can be large — store them in FileShed (shed_create_file) if you need to free context, then retrieve later.
 
-        :param repo_url: GitHub repository URL (e.g. https://github.com/owner/repo) or owner/repo shorthand
+        :param repo_url: GitHub repository URL (e.g. https://github.com/owner/repo or https://github.com/owner/repo/tree/branch-name) or owner/repo shorthand
         :param features: List of feature descriptions to validate (e.g. ["JWT authentication", "rate limiting", "WebSocket support"])
         :param max_files_per_feature: Maximum files to read per feature (default 3, max 5) to control output size
+        :param branch: Branch name (optional). If omitted, uses the branch from the URL or the repo default branch.
         :return: Structured validation report with evidence per feature
         """
         parsed = self._parse_repo(repo_url)
         if not parsed:
             return "Error: Invalid repository URL."
 
-        owner, repo = parsed
+        owner, repo, url_branch, _ = parsed
+        branch = branch or url_branch
+        ref_param = self._ref_param(branch)
         max_files_per_feature = min(max(1, max_files_per_feature), 5)
 
         # Step 1: Get the file tree for cross-referencing
+        tree_ref = requests.utils.quote(branch, safe='') if branch else "HEAD"
         tree_paths = []
         try:
-            r = self._get(f"{GITHUB_API_BASE}/repos/{owner}/{repo}/git/trees/HEAD?recursive=1")
+            r = self._get(f"{GITHUB_API_BASE}/repos/{owner}/{repo}/git/trees/{tree_ref}?recursive=1")
             if r.status_code == 200:
                 tree_paths = [item["path"] for item in r.json().get("tree", []) if item["type"] == "blob"]
         except requests.RequestException:
             pass
 
-        report_sections = [f"# Feature Validation Report\n**Repository:** {owner}/{repo}\n**Features checked:** {len(features)}\n"]
+        report_sections = [f"# Feature Validation Report\n**Repository:** {owner}/{repo}" + (f"\n**Branch:** {branch}" if branch else "") + f"\n**Features checked:** {len(features)}\n"]
 
         for i, feature in enumerate(features, 1):
             section = f"## {i}. {feature}\n\n"
@@ -537,7 +599,7 @@ class Tools:
 
             for file_path in files_to_read:
                 try:
-                    r = self._get(f"{GITHUB_API_BASE}/repos/{owner}/{repo}/contents/{file_path}")
+                    r = self._get(f"{GITHUB_API_BASE}/repos/{owner}/{repo}/contents/{file_path}{ref_param}")
                     if r.status_code == 200:
                         data = r.json()
                         if data.get("encoding") == "base64":
