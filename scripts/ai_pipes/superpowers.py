@@ -2618,6 +2618,225 @@ Output format:
             + f"\n[SUPERPOWERS:MODE:{mode.upper()}]"
         )
 
+    # -------------------------------------------------------------------------
+    # Delegated analysis (for heavy repo/feature analysis)
+    # -------------------------------------------------------------------------
+
+    async def delegate_analysis(
+        self,
+        context_data: str,
+        analysis_instructions: str,
+        chunk_count: int = 3,
+        output_label: str = "analysis",
+        __user__: dict = None,
+        __metadata__: dict = None,
+        __event_emitter__: typing.Callable[[dict], typing.Any] = None,
+        __request__=None,
+        __model__: dict = None,
+        __event_call__=None,
+        __chat_id__: str = "",
+        __message_id__: str = "",
+        __messages__: list = None,
+    ) -> str:
+        """
+        Break a heavy analysis task into phases and delegate each to a sub-agent.
+        Use this when you have gathered a large amount of data (e.g., from the
+        GitHub Repo Analyzer tools: get_repo_overview, bulk_read_files,
+        validate_features) and need to analyze it systematically without
+        running out of context or tool calls.
+
+        Workflow:
+        1. Gather raw data using GitHub Repo Analyzer tools first
+        2. Pass the gathered data as context_data
+        3. Describe what to analyze in analysis_instructions
+        4. Sub-agents process chunks and results are aggregated
+        5. Final report is saved to Fileshed (if configured)
+
+        Trigger phrases: 'delegate analysis', 'analyze in phases', 'break down analysis'.
+
+        Args:
+            context_data: The raw gathered data to analyze (repo contents, feature lists, search results, etc.).
+            analysis_instructions: What to analyze and how to format results (e.g., "For each feature, determine if it is implemented, partially implemented, or missing. Cite specific files and line evidence.").
+            chunk_count: Number of sub-agent phases to split the work into (default 3, max 6). Higher = more granular but slower.
+            output_label: Short label for the output file (default 'analysis'). Used in the filename.
+        """
+        if __event_emitter__:
+            await __event_emitter__(
+                {
+                    "type": "status",
+                    "data": {
+                        "description": f"Delegating analysis in {chunk_count} phases...",
+                        "done": False,
+                    },
+                }
+            )
+
+        chunk_count = min(max(1, chunk_count), 6)
+
+        # Split context into roughly equal chunks by line groups
+        lines = context_data.strip().split("\n")
+        total_lines = len(lines)
+
+        if total_lines == 0:
+            return "[SUPERPOWERS:ERROR] No context data provided. Gather data first using GitHub Repo Analyzer tools (get_repo_overview, bulk_read_files, validate_features), then pass the results here."
+
+        # Intelligent chunking: try to split on section boundaries (##, ---, blank lines)
+        section_breaks = []
+        for i, line in enumerate(lines):
+            if line.startswith("## ") or line.strip() == "---" or (i > 0 and line.strip() == "" and lines[i - 1].strip() == ""):
+                section_breaks.append(i)
+
+        chunks = []
+        if len(section_breaks) >= chunk_count:
+            # Split on natural section boundaries
+            step = len(section_breaks) // chunk_count
+            indices = [0] + [section_breaks[step * (i + 1)] for i in range(chunk_count - 1)] + [total_lines]
+            for i in range(len(indices) - 1):
+                chunk = "\n".join(lines[indices[i]:indices[i + 1]]).strip()
+                if chunk:
+                    chunks.append(chunk)
+        else:
+            # Fallback: split evenly by line count
+            chunk_size = max(1, total_lines // chunk_count)
+            for i in range(0, total_lines, chunk_size):
+                chunk = "\n".join(lines[i:i + chunk_size]).strip()
+                if chunk:
+                    chunks.append(chunk)
+
+        if not chunks:
+            chunks = [context_data]
+
+        _sub_agent_kwargs = dict(
+            __request__=__request__,
+            __user__=__user__,
+            __metadata__=__metadata__,
+            __model__=__model__,
+            __event_emitter__=__event_emitter__,
+            __event_call__=__event_call__,
+            __chat_id__=__chat_id__,
+            __message_id__=__message_id__,
+        )
+
+        system_prompt = (
+            "You are a senior software analyst performing a focused review.\n"
+            "You will be given a chunk of gathered repository data and analysis instructions.\n"
+            "Analyze ONLY the data provided — do not speculate about code you cannot see.\n"
+            "Be specific: cite file names, function names, and quote relevant code.\n"
+            "Output a structured analysis in markdown. No preamble, no conclusion boilerplate.\n"
+            "If a section has no relevant data in your chunk, output: '*(No relevant data in this chunk)*'"
+        )
+
+        phase_results = []
+        for i, chunk in enumerate(chunks, 1):
+            if __event_emitter__:
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {
+                            "description": f"Phase {i}/{len(chunks)}: Analyzing...",
+                            "done": False,
+                        },
+                    }
+                )
+
+            user_prompt = (
+                f"## Analysis Instructions\n{analysis_instructions}\n\n"
+                f"## Data Chunk ({i}/{len(chunks)})\n{chunk}"
+            )
+
+            result = await self._run_sub_agent(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                description=f"Analysis phase {i}/{len(chunks)}",
+                **_sub_agent_kwargs,
+            )
+
+            if result.startswith("[SUPERPOWERS:ERROR]"):
+                phase_results.append(f"### Phase {i}\n\n*Sub-agent error: {result}*")
+            else:
+                phase_results.append(f"### Phase {i}\n\n{result}")
+
+        # Aggregate: run a final sub-agent to synthesize
+        if len(chunks) > 1:
+            if __event_emitter__:
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {
+                            "description": "Synthesizing results...",
+                            "done": False,
+                        },
+                    }
+                )
+
+            synthesis_prompt = (
+                "You are synthesizing analysis results from multiple phases into a single cohesive report.\n"
+                "Remove duplicates, resolve contradictions (later phases override earlier), and produce a clean final report.\n"
+                "Keep all specific evidence (file names, code quotes). Output markdown only."
+            )
+
+            all_phases = "\n\n---\n\n".join(phase_results)
+            synthesis_user = (
+                f"## Original Instructions\n{analysis_instructions}\n\n"
+                f"## Phase Results\n{all_phases}"
+            )
+
+            final_report = await self._run_sub_agent(
+                system_prompt=synthesis_prompt,
+                user_prompt=synthesis_user,
+                description="Synthesizing analysis",
+                **_sub_agent_kwargs,
+            )
+
+            if final_report.startswith("[SUPERPOWERS:ERROR]"):
+                # Fall back to concatenated phases
+                final_report = f"# Delegated Analysis Report\n\n*Synthesis failed — showing raw phase results:*\n\n{'---'.join(phase_results)}"
+        else:
+            final_report = phase_results[0] if phase_results else "No results."
+
+        # Save to Fileshed-compatible path
+        today = date.today().isoformat()
+        slug = re.sub(r"[^a-z0-9-]", "-", output_label.lower().strip())[:40]
+        filename = f"{today}-{slug}-report.md"
+        user_id = (__user__ or {}).get("id", "") if __user__ else ""
+        report_path, storage_mode, zone_relative_path = self._resolve_path(
+            "analysis", filename, user_id
+        )
+
+        header = (
+            f"# Delegated Analysis: {output_label}\n"
+            f"_Generated by superpowers-owui delegate_analysis_\n\n"
+            f"**Date:** {today}\n"
+            f"**Phases:** {len(chunks)}\n"
+            f"**Instructions:** {analysis_instructions[:200]}{'...' if len(analysis_instructions) > 200 else ''}\n\n---\n\n"
+        )
+
+        ok, err = self._atomic_write(report_path, header + final_report)
+
+        storage_label = (
+            "Fileshed Storage zone (superpowers/analysis/)"
+            if storage_mode == "fileshed"
+            else "Standalone path"
+        )
+
+        if __event_emitter__:
+            await __event_emitter__(
+                {"type": "status", "data": {"description": "Analysis complete.", "done": True}}
+            )
+
+        output = f"[SUPERPOWERS:PHASE:ANALYSIS_COMPLETE]\n\n"
+        if ok:
+            output += (
+                f"**Report saved:** `{report_path}`\n"
+                f"**Storage:** {storage_label}\n\n"
+            )
+        else:
+            output += f"**Warning:** Could not save report: {err}\n\n"
+
+        output += f"---\n\n{final_report}"
+
+        return output
+
     def _extract_recent_code_from_context(
         self, messages: list, user_id: str = ""
     ) -> str:

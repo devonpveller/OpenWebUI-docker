@@ -1,8 +1,8 @@
 """
 title: GitHub Repo Analyzer
 author: ai-stack
-version: 3.0.0
-description: Give any model the ability to explore GitHub repositories using the free GitHub REST API. Fetch repo overviews, read files, search code, browse commits, and validate feature implementations.
+version: 4.0.0
+description: Give any model the ability to explore GitHub repositories using the free GitHub REST API. Fetch repo overviews, read files (bulk or single), search code, browse commits, validate feature implementations, and delegate heavy analysis via Superpowers sub-agents.
 required_open_webui_version: 0.4.0
 requirements: requests
 """
@@ -380,6 +380,80 @@ class Tools:
 
         except requests.RequestException as e:
             return f"Error fetching commit detail: {str(e)}"
+
+    def bulk_read_files(self, repo_url: str, file_paths: str) -> str:
+        """
+        Read multiple files from a GitHub repository in a single tool call.
+        Far more efficient than calling get_repo_file repeatedly.
+        Use this after search_repo_code or get_repo_overview to read all relevant files at once.
+
+        :param repo_url: GitHub repository URL (e.g. https://github.com/owner/repo) or owner/repo shorthand
+        :param file_paths: Comma-separated list of file paths to read (e.g. "src/main.py, README.md, src/config.ts")
+        :return: Contents of all requested files concatenated with clear separators
+        """
+        parsed = self._parse_repo(repo_url)
+        if not parsed:
+            return "Error: Invalid repository URL."
+
+        owner, repo = parsed
+        paths = [p.strip().lstrip("/") for p in file_paths.split(",") if p.strip()]
+
+        if not paths:
+            return "Error: No file paths provided. Pass comma-separated paths."
+
+        if len(paths) > 20:
+            return f"Error: Too many files requested ({len(paths)}). Maximum is 20 per call."
+
+        results = []
+        errors = []
+        total_chars = 0
+        max_total = self.valves.MAX_FILE_SIZE * 3  # Allow 3x single file limit for bulk
+
+        for file_path in paths:
+            if total_chars >= max_total:
+                results.append(f"\n--- TRUNCATED: Remaining {len(paths) - len(results) - len(errors)} files skipped (output size limit) ---")
+                break
+
+            try:
+                r = self._get(f"{GITHUB_API_BASE}/repos/{owner}/{repo}/contents/{file_path}")
+                if r.status_code == 404:
+                    errors.append(f"  - `{file_path}`: Not found")
+                    continue
+                if r.status_code == 403:
+                    errors.append(f"  - `{file_path}`: Rate limited")
+                    continue
+                r.raise_for_status()
+                data = r.json()
+
+                if isinstance(data, list):
+                    entries = [f"{'📁' if item['type'] == 'dir' else '📄'} {item['name']}" for item in data[:30]]
+                    content_str = f"**Directory: {file_path}**\n" + "\n".join(entries)
+                elif data.get("encoding") == "base64":
+                    content = base64.b64decode(data.get("content", "")).decode("utf-8", errors="replace")
+                    remaining = max_total - total_chars
+                    per_file_limit = min(self.valves.MAX_FILE_SIZE, remaining)
+                    if len(content) > per_file_limit:
+                        content = content[:per_file_limit] + f"\n... (truncated at {per_file_limit} chars)"
+                    content_str = f"**File: {file_path}** ({data.get('size', 0)} bytes)\n\n```\n{content}\n```"
+                else:
+                    content_str = f"**File: {file_path}** — binary file, cannot display"
+
+                results.append(content_str)
+                total_chars += len(content_str)
+
+            except requests.RequestException as e:
+                errors.append(f"  - `{file_path}`: {str(e)}")
+
+        output_parts = []
+        if results:
+            output_parts.append(f"**Read {len(results)} file(s) from {owner}/{repo}**\n")
+            output_parts.extend(results)
+        if errors:
+            output_parts.append(f"\n**Errors ({len(errors)}):**\n" + "\n".join(errors))
+        if not results and not errors:
+            output_parts.append("No files could be read.")
+
+        return "\n\n---\n\n".join(output_parts)
 
     def validate_features(self, repo_url: str, features: List[str], max_files_per_feature: int = 3) -> str:
         """
