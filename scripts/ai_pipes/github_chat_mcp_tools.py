@@ -1,8 +1,8 @@
 """
 title: GitHub Repo Analyzer
 author: ai-stack
-version: 4.1.0
-description: Give any model the ability to explore GitHub repositories using the free GitHub REST API. Supports branch selection from URLs. Fetch repo overviews, read files (bulk or single), search code, browse commits, validate feature implementations, and delegate heavy analysis via Superpowers sub-agents.
+version: 4.2.0
+description: Give any model the ability to explore GitHub repositories using the free GitHub REST API. Supports branch selection from URLs. Fetch repo overviews, read files (bulk or single), search code, browse commits, list and compare branches, validate feature implementations, and delegate heavy analysis via Superpowers sub-agents.
 required_open_webui_version: 0.4.0
 requirements: requests
 """
@@ -102,6 +102,140 @@ class Tools:
             headers=self._build_headers(),
             timeout=self.valves.REQUEST_TIMEOUT,
         )
+
+    def list_branches(self, repo_url: str) -> str:
+        """
+        List all branches in a GitHub repository with their latest commit info.
+        Use this when a user asks about branches, or before comparing branches, or when
+        you need to discover which branches exist in a repository.
+
+        :param repo_url: GitHub repository URL (e.g. https://github.com/owner/repo) or owner/repo shorthand
+        :return: List of branches with their latest commit SHA and date
+        """
+        parsed = self._parse_repo(repo_url)
+        if not parsed:
+            return "Error: Invalid repository URL."
+
+        owner, repo, _, _ = parsed
+
+        try:
+            # Get default branch info first
+            r = self._get(f"{GITHUB_API_BASE}/repos/{owner}/{repo}")
+            default_branch = "main"
+            if r.status_code == 200:
+                default_branch = r.json().get("default_branch", "main")
+
+            # List branches (paginated, up to 100)
+            r = self._get(f"{GITHUB_API_BASE}/repos/{owner}/{repo}/branches?per_page=100")
+            if r.status_code == 404:
+                return f"Error: Repository {owner}/{repo} not found."
+            if r.status_code == 403:
+                return "Error: GitHub API rate limit exceeded. Add a GITHUB_TOKEN in tool settings."
+            r.raise_for_status()
+            branches = r.json()
+
+            if not branches:
+                return f"No branches found in {owner}/{repo}."
+
+            lines = [f"**Branches in {owner}/{repo}** ({len(branches)} total)\n"]
+            for b in branches:
+                name = b.get("name", "unknown")
+                sha = b.get("commit", {}).get("sha", "")[:7]
+                is_default = " ← default" if name == default_branch else ""
+                protected = " 🔒" if b.get("protected", False) else ""
+                lines.append(f"- `{name}` ({sha}){is_default}{protected}")
+
+            return "\n".join(lines)
+
+        except requests.RequestException as e:
+            return f"Error listing branches: {str(e)}"
+
+    def compare_branches(self, repo_url: str, base: str, head: str) -> str:
+        """
+        Compare two branches in a GitHub repository. Shows commits ahead/behind, changed files, and diff stats.
+        Use this when a user wants to see what changed between branches, or to compare a feature branch against main.
+
+        :param repo_url: GitHub repository URL (e.g. https://github.com/owner/repo) or owner/repo shorthand
+        :param base: Base branch name (e.g. "main") — the reference point
+        :param head: Head branch name (e.g. "feature-branch") — the branch with new changes
+        :return: Comparison summary with changed files and stats
+        """
+        parsed = self._parse_repo(repo_url)
+        if not parsed:
+            return "Error: Invalid repository URL."
+
+        owner, repo, _, _ = parsed
+
+        try:
+            base_encoded = requests.utils.quote(base.strip(), safe="")
+            head_encoded = requests.utils.quote(head.strip(), safe="")
+            r = self._get(
+                f"{GITHUB_API_BASE}/repos/{owner}/{repo}/compare/{base_encoded}...{head_encoded}"
+            )
+            if r.status_code == 404:
+                return f"Error: Could not compare '{base}' and '{head}' in {owner}/{repo}. Check that both branches exist."
+            if r.status_code == 403:
+                return "Error: GitHub API rate limit exceeded. Add a GITHUB_TOKEN in tool settings."
+            r.raise_for_status()
+            data = r.json()
+
+            status = data.get("status", "unknown")  # ahead, behind, identical, diverged
+            ahead_by = data.get("ahead_by", 0)
+            behind_by = data.get("behind_by", 0)
+            total_commits = data.get("total_commits", 0)
+
+            sections = [
+                f"## Branch Comparison: `{base}` ← `{head}` in {owner}/{repo}\n\n"
+                f"**Status:** {status}\n"
+                f"**Commits:** {head} is {ahead_by} ahead, {behind_by} behind {base}\n"
+                f"**Total unique commits:** {total_commits}"
+            ]
+
+            # List commits
+            commits = data.get("commits", [])
+            if commits:
+                commit_lines = []
+                for c in commits[:30]:  # Limit display
+                    sha = c.get("sha", "")[:7]
+                    msg = c.get("commit", {}).get("message", "").split("\n")[0]
+                    author = c.get("commit", {}).get("author", {}).get("name", "Unknown")
+                    commit_lines.append(f"- `{sha}` **{author}**: {msg}")
+                sections.append(
+                    f"**Commits on `{head}` not in `{base}` ({len(commits)}" +
+                    (f", showing 30" if len(commits) > 30 else "") + f"):**\n" +
+                    "\n".join(commit_lines)
+                )
+
+            # List changed files
+            files = data.get("files", [])
+            if files:
+                file_lines = []
+                for f in files[:50]:  # Limit display
+                    status_icon = {"added": "+", "removed": "-", "modified": "~", "renamed": ">"}.get(
+                        f.get("status", "modified"), "?"
+                    )
+                    filename = f.get("filename", "unknown")
+                    adds = f.get("additions", 0)
+                    dels = f.get("deletions", 0)
+                    file_lines.append(f"- [{status_icon}] `{filename}` (+{adds} -{dels})")
+                sections.append(
+                    f"**Changed files ({len(files)}" +
+                    (f", showing 50" if len(files) > 50 else "") + f"):**\n" +
+                    "\n".join(file_lines)
+                )
+
+            # Summary stats
+            if files:
+                total_adds = sum(f.get("additions", 0) for f in files)
+                total_dels = sum(f.get("deletions", 0) for f in files)
+                sections.append(
+                    f"**Total:** {len(files)} files changed, +{total_adds} additions, -{total_dels} deletions"
+                )
+
+            return "\n\n".join(sections)
+
+        except requests.RequestException as e:
+            return f"Error comparing branches: {str(e)}"
 
     def get_repo_overview(self, repo_url: str, branch: Optional[str] = None) -> str:
         """
