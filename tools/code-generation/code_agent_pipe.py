@@ -10,6 +10,7 @@ required_open_webui_version: 0.4.0
 import os
 import re
 import json
+import sys
 import shlex
 import subprocess
 import fnmatch
@@ -27,14 +28,43 @@ try:
 except ImportError:
     httpx = None
 
-# Module-level logger — uses print() because OWUI's loguru suppresses
-# standard Python logging. print() always hits container stdout.
+# ── Module-level load signal ────────────────────────────────────────
+# Fires when OWUI imports this file. If you don't see this in
+# docker compose logs, the function failed to load entirely.
+print(f"[CODE_AGENT] MODULE LOADED at {datetime.now().isoformat()} | httpx={'yes' if httpx else 'MISSING'}", flush=True)
+sys.stderr.write(f"[CODE_AGENT] MODULE LOADED at {datetime.now().isoformat()}\n")
+try:
+    os.makedirs("/app/backend/data/code_agent", exist_ok=True)
+    with open("/app/backend/data/code_agent/debug.log", "a") as _f:
+        _f.write(f"[CODE_AGENT] MODULE LOADED at {datetime.now().isoformat()}\n")
+except Exception:
+    pass
+
+
+# Module-level logger — triple-channel: stdout + stderr + file.
 # View with: docker compose logs -f openwebui 2>&1 | grep CODE_AGENT
 def _log_print(level: str, msg: str, **kwargs):
-    """Reliable logging via print(). OWUI's loguru suppresses stdlib logging."""
+    """Triple-channel logging: stdout + stderr + file. OWUI suppresses some channels."""
     ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
     extra = " ".join(f"{k}={v!r}" for k, v in kwargs.items()) if kwargs else ""
-    print(f"{ts} [CODE_AGENT] {level.upper()} {msg} {extra}".rstrip(), flush=True)
+    line = f"{ts} [CODE_AGENT] {level.upper()} {msg} {extra}".rstrip()
+    try:
+        print(line, flush=True)
+    except Exception:
+        pass
+    try:
+        sys.stderr.write(line + "\n")
+        sys.stderr.flush()
+    except Exception:
+        pass
+    # File log — check data/openwebui/code_agent/debug.log on Docker host
+    try:
+        _ld = "/app/backend/data/code_agent"
+        os.makedirs(_ld, exist_ok=True)
+        with open(os.path.join(_ld, "debug.log"), "a", encoding="utf-8") as _f:
+            _f.write(line + "\n")
+    except Exception:
+        pass
 
 
 # =============================================================================
@@ -687,8 +717,8 @@ class Pipe:
 
         # -- Security (mirrors Tool valves) --
         WORKSPACE_PATH: str = Field(
-            default="/app/backend/data",
-            description="Root workspace for file operations.",
+            default="/app/backend/data/code_agent/workspace",
+            description="Root workspace for file operations. Isolated from OWUI internal data.",
         )
         SECURITY_MODE: str = Field(
             default="allowlist",
@@ -733,6 +763,7 @@ class Pipe:
     def __init__(self):
         self.valves = self.Valves()
         self._engine: Optional[_ToolEngine] = None
+        self._emitter: Optional[Callable] = None
 
     def _get_engine(self) -> _ToolEngine:
         if self._engine is None:
@@ -740,10 +771,23 @@ class Pipe:
         return self._engine
 
     def _log(self, level: str, msg: str, **kwargs):
-        """Structured debug logging via print() — always hits container stdout."""
+        """Structured debug logging — stdout + stderr + file."""
         if not self.valves.DEBUG_LOG:
             return
         _log_print(level, msg, **kwargs)
+
+    async def _debug_emit(self, msg: str):
+        """Emit debug info as status message in OWUI chat UI (guaranteed visible).
+        Pattern borrowed from mnemory_tool.py which works reliably."""
+        if not self.valves.DEBUG_LOG or not self._emitter:
+            return
+        try:
+            await self._emitter({
+                "type": "status",
+                "data": {"description": f"[CA] {msg}", "done": True},
+            })
+        except Exception:
+            pass
 
     # -- Pipe registration --
 
@@ -820,8 +864,10 @@ class Pipe:
                               content_chars=content_len,
                               tool_calls=len(tc),
                               finish=choices[0].get("finish_reason", "?"))
+                    await self._debug_emit(f"LLM: {content_len}ch, {len(tc)} tools")
                 else:
                     self._log("warning", "LLM returned empty choices", raw=str(data)[:500])
+                    await self._debug_emit("LLM: empty choices!")
                 return data
         except httpx.HTTPStatusError as e:
             body_text = e.response.text[:500] if e.response else "no body"
@@ -1003,6 +1049,7 @@ class Pipe:
         __user__: dict = {},
         __event_emitter__: Callable[[dict], Any] = None,
     ) -> str:
+        self._emitter = __event_emitter__
         self._log("info", "=" * 60)
         self._log("info", "PIPE INVOKED",
                   user=(__user__ or {}).get("name", "unknown"),
@@ -1011,6 +1058,10 @@ class Pipe:
                   tool_format=self.valves.TOOL_CALL_FORMAT,
                   security=self.valves.SECURITY_MODE,
                   workspace=self.valves.WORKSPACE_PATH)
+        await self._debug_emit(
+            f"Pipe active | model={self.valves.MODEL_ID} "
+            f"fmt={self.valves.TOOL_CALL_FORMAT} url={self.valves.API_BASE_URL}"
+        )
 
         # Validate configuration
         if not self.valves.MODEL_ID:
@@ -1077,6 +1128,10 @@ class Pipe:
                       content_preview=content[:200] if content else "(empty)",
                       native_tool_calls=len(tool_calls),
                       finish_reason=finish_reason)
+            await self._debug_emit(
+                f"Step {iteration+1}: {len(content)}ch, "
+                f"{len(tool_calls)} tool_calls, finish={finish_reason}"
+            )
 
             # Handle truncated responses (model hit max_tokens mid-thought)
             if finish_reason == "length" and not tool_calls:
@@ -1110,6 +1165,7 @@ class Pipe:
                     reason = "narrating actions" if is_narrating else "no tool use on first turn"
                     self._log("info",
                               f"Agent {reason} without tool calls — nudge {nudge_count}/{MAX_NUDGES}")
+                    await self._debug_emit(f"NUDGE {nudge_count}/{MAX_NUDGES}: {reason}")
                     await self._emit(
                         __event_emitter__,
                         f"Redirecting to use tools... (nudge {nudge_count})",
@@ -1158,6 +1214,10 @@ class Pipe:
 
                 self._log("info", "No tool calls — returning final answer",
                           content_chars=len(content))
+                await self._debug_emit(
+                    f"Final answer: {len(content)}ch, "
+                    f"{nudge_count} nudges, tools_used={tools_used_this_session}"
+                )
                 await self._emit(__event_emitter__, "Done", done=True)
                 return content if content else last_content or "Done (no response content)."
 
@@ -1202,6 +1262,7 @@ class Pipe:
                           elapsed_s=round(elapsed, 2),
                           result_chars=len(result),
                           result_preview=result[:300])
+                await self._debug_emit(f"Tool {tool_name}: {len(result)}ch in {elapsed:.1f}s")
 
                 # Add result to conversation
                 if msg.get("tool_calls"):
