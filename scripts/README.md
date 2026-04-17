@@ -24,6 +24,7 @@ scripts/
 ├── emergency-recovery.ps1       # Advanced PowerShell recovery
 ├── emergency-recovery.bat       # Enhanced legacy recovery
 ├── quick-fixes.bat             # Quick targeted fixes
+├── update-stack.bat            # Manual update manager
 ├── simple-monitor.ps1          # Background monitoring
 ├── check-tailscale-health.ps1  # Tailscale health service
 └── ... (other existing scripts)
@@ -173,6 +174,53 @@ For scripts that should be imported and called as functions.
 - Complex data processing
 - GPU-accelerated operations
 - Rich Python object handling
+
+## Update Management
+
+### Update Stack Script (`update-stack.bat`)
+Manual update manager for OpenWebUI and Ollama with automatic backup and verification.
+
+**Features:**
+- Automatic data backup before updates
+- Version-specific updates with validation
+- GPU compatibility verification
+- Service coordination (restart dependent services)
+- Rollback guidance on failure
+
+**Usage:**
+```bash
+# Check current versions
+scripts\update-stack.bat check
+
+# Update OpenWebUI (interactive - prompts for version)
+scripts\update-stack.bat openwebui
+
+# Update Ollama
+scripts\update-stack.bat ollama
+
+# Update both (with confirmation)
+scripts\update-stack.bat all
+```
+
+**Update Process (OpenWebUI):**
+1. **Backup**: Creates timestamped backup of `data/openwebui/`
+2. **Version Input**: Prompts for target version (e.g., v0.6.41)
+3. **Dockerfile Update**: Modifies `Dockerfile.openwebui-gpu` base image
+4. **Rebuild**: Builds custom image with GPU support
+5. **Restart**: Coordinates restart of OpenWebUI, Ollama, and Tailscale
+6. **Verify**: Tests GPU availability and service health
+
+**Safety Features:**
+- Automatic data backup with timestamp
+- Build failure detection
+- GPU verification post-update
+- Service health checks
+- Rollback instructions on error
+
+**Docker Compose Changes:**
+- `pull_policy: build` for OpenWebUI (prevents auto-pulls on rebuild)
+- `pull_policy: never` for Ollama (manual updates only)
+- Prevents accidental version changes during `docker compose up`
 
 ## Configuration
 

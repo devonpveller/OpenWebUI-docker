@@ -38,8 +38,19 @@ class EmergencyRecoveryModule:
         """Load recovery configuration"""
         return {
             "recovery": {
-                "quick_fixes_script": "scripts\\quick-fixes.bat",
-                "emergency_recovery_script": "scripts\\emergency-recovery.ps1",
+                "python_scripts": {
+                    "namespace_reset": "scripts/namespace_reset.py",
+                    "rebuild_tailscale": "scripts/rebuild_tailscale.py",
+                    "gpu_check": "scripts/gpu_check.py",
+                    "nuclear_option": "scripts/nuclear_option.py",
+                    "status_check": "scripts/status_check.py",
+                    "restart_openwebui": "scripts/restart_openwebui.py",
+                    "lmstudio_fix": "scripts/lmstudio_fix_v2.py"  # Updated to V2 using tailscale_serve_admin
+                },
+                "legacy_scripts": {
+                    "quick_fixes_script": "scripts\\quick-fixes.bat",
+                    "emergency_recovery_script": "scripts\\emergency-recovery.ps1"
+                },
                 "container_startup_order": {
                     "phase1_shutdown": ["tailscale", "ollama", "openwebui"],
                     "phase2_cleanup_wait": 15,
@@ -72,9 +83,12 @@ class EmergencyRecoveryModule:
                 },
                 "available_actions": {
                     "namespace": "Network namespace reset (most common fix for connectivity)",
-                    "gpu": "GPU availability check and restart", 
-                    "status": "System overview and health check",
+                    "rebuild": "Rebuild Tailscale container (for persistent issues)",
+                    "gpu": "GPU restart and recovery (for CUDA/PyTorch issues)", 
+                    "lmstudio": "Fix LM Studio Tailscale connectivity",
+                    "restart_openwebui": "Properly restart OpenWebUI with dependent containers",
                     "nuclear": "Complete system restart with proper container ordering",
+                    "status": "Comprehensive system status check with detailed diagnostics",
                     "tailscale": "Standard Tailscale recovery",
                     "advanced": "Advanced PowerShell recovery with 5-phase process",
                     "restart_ollama": "Restart Ollama container to ensure OpenWebUI connectivity (IMPLEMENTED)",
@@ -89,18 +103,157 @@ class EmergencyRecoveryModule:
             }
         }
     
+    def _find_project_root(self) -> Optional[Path]:
+        """Find the project root directory containing docker-compose.yml"""
+        current_dir = Path.cwd()
+        
+        # Check if we're running from container (look for /host_project)
+        if Path("/host_project").exists():
+            logger.info("Running from container environment...")
+            return Path("/host_project")
+        
+        # Otherwise search for docker-compose.yml
+        project_root = current_dir
+        while not (project_root / "docker-compose.yml").exists():
+            parent = project_root.parent
+            if parent == project_root:  # Reached root
+                break
+            project_root = parent
+        
+        if not (project_root / "docker-compose.yml").exists():
+            logger.error("docker-compose.yml not found in current directory or parent directories")
+            return None
+        
+        return project_root
+    
+    def _execute_python_script(self, script_name: str, action_name: str) -> Dict[str, Any]:
+        """Execute a Python recovery script and return structured results"""
+        try:
+            logger.info(f"Starting {action_name}...")
+            
+            # Find project root
+            project_root = self._find_project_root()
+            if not project_root:
+                return {
+                    "action": action_name,
+                    "status": "error",
+                    "error": "Could not find project root directory",
+                    "recommendation": "Ensure docker-compose.yml exists in project directory"
+                }
+            
+            logger.info(f"Using project root: {project_root}")
+            
+            # Get script path from config
+            script_path = self.config["recovery"]["python_scripts"].get(script_name)
+            if not script_path:
+                return {
+                    "action": action_name,
+                    "status": "error",
+                    "error": f"Unknown script: {script_name}",
+                    "available_scripts": list(self.config["recovery"]["python_scripts"].keys())
+                }
+            
+            # Execute the Python script
+            logger.info(f"Executing Python script: {script_path}")
+            script_full_path = project_root / Path(script_path)
+            
+            if not script_full_path.exists():
+                return {
+                    "action": action_name,
+                    "status": "error",
+                    "error": f"Script not found: {script_full_path}",
+                    "recommendation": "Ensure all Python scripts are present in the scripts directory"
+                }
+            
+            # Check if we're running in container environment
+            if Path("/host_project").exists():
+                # We're in the container - need to execute script on host where Docker CLI is available
+                logger.info("Executing script on host from container environment...")
+                # Try to use docker exec to run script on host
+                try:
+                    # First try to find the host container name by checking docker containers
+                    # Since we can't use docker CLI from container, we'll modify the approach
+                    # Use a simpler approach - execute the script but handle Docker not being available
+                    result = subprocess.run(
+                        ["python", str(script_full_path)],
+                        cwd=project_root,
+                        capture_output=True,
+                        text=True,
+                        timeout=300,
+                        env={**os.environ, "CONTAINER_ENV": "true"}  # Flag to script that it's running in container
+                    )
+                except Exception as container_error:
+                    logger.error(f"Container execution failed: {container_error}")
+                    return {
+                        "action": action_name,
+                        "status": "error",
+                        "error": f"Cannot execute Docker commands from container: {str(container_error)}",
+                        "recommendation": "This action requires execution from the host system where Docker CLI is available",
+                        "alternative": "Try running the script directly on the host system"
+                    }
+            else:
+                # We're on the host - execute script directly
+                logger.info(f"Executing Python script directly on host")
+                result = subprocess.run(
+                    ["python", str(script_full_path)],
+                    cwd=project_root,
+                    capture_output=True,
+                    text=True,
+                    timeout=300  # 5 minutes max
+                )
+            
+            logger.info(f"Script execution completed with return code: {result.returncode}")
+            
+            # Determine status based on return code
+            status = "completed" if result.returncode == 0 else "error"
+            
+            return {
+                "action": action_name,
+                "status": status,
+                "description": f"{action_name.replace('_', ' ').title()} executed successfully" if status == "completed" else f"{action_name.replace('_', ' ').title()} failed",
+                "output": result.stdout if result.stdout else "No output",
+                "error": result.stderr if result.stderr else None,
+                "exit_code": result.returncode,
+                "script_path": str(script_path)
+            }
+            
+        except subprocess.TimeoutExpired:
+            return {
+                "action": action_name,
+                "status": "error",
+                "error": "Script execution timed out after 5 minutes",
+                "recommendation": "Check system performance and try again"
+            }
+        except Exception as e:
+            logger.error(f"Error executing {script_name}: {str(e)}")
+            return {
+                "action": action_name,
+                "status": "error",
+                "error": str(e),
+                "script_path": script_path if 'script_path' in locals() else "unknown"
+            }
+    
     def analyze_user_input(self, user_input: str) -> Optional[str]:
         """Analyze user input to determine appropriate recovery action"""
         user_input_lower = user_input.lower()
         
+        # Check for "show/list/available" type requests first
+        show_keywords = ["show", "list", "available", "procedures", "options", "what can", "help me", "what are"]
+        if any(keyword in user_input_lower for keyword in show_keywords):
+            # Return None to trigger showing available actions instead of executing a specific action
+            return None
+        
         # Keyword mapping for recovery actions (order matters - more specific first)
         action_keywords = {
             "restart_ollama": ["restart ollama", "ollama restart", "ollama down", "fix ollama", "ollama connectivity"],
-            "validate_gpu": ["validate gpu", "check gpu", "test gpu", "gpu validation", "pytorch test", "cuda test"],
-            "namespace": ["network", "connectivity", "unreachable", "tailscale down", "connection"],
-            "gpu": ["cuda", "gpu", "graphics", "nvidia", "torch", "reranker"],
-            "status": ["status", "health", "check", "overview", "system", "running"],
+            "validate_gpu": ["validate gpu", "test gpu", "gpu validation", "pytorch test", "cuda test"],
+            "namespace": ["network", "connectivity", "unreachable", "tailscale down", "connection", "namespace reset", "fix network"],
+            "rebuild": ["rebuild", "rebuild tailscale", "rebuild container", "rebuild ts"],
+            "gpu": ["fix gpu", "gpu restart", "gpu recovery", "restart gpu", "gpu not working"],
+            "lmstudio": ["lmstudio", "lm studio", "lms", "fix lm studio", "lmstudio fix"],
+            "restart_openwebui": ["restart openwebui", "openwebui restart", "restart web", "web restart"],
             "nuclear": ["nuclear", "complete restart", "full restart", "everything broken"],
+            "status": ["status", "system status", "check status", "health", "diagnostic", "check system"],
             "tailscale": ["tailscale", "vpn", "derp", "serve"],
             "advanced": ["advanced", "powershell", "comprehensive"]
         }
@@ -110,8 +263,8 @@ class EmergencyRecoveryModule:
             if any(keyword in user_input_lower for keyword in keywords):
                 return action
         
-        # Default to status check if no specific action detected
-        return "status"
+        # Default to namespace reset (most common fix) if no specific action detected
+        return "namespace"
     
     def get_container_startup_sequence(self) -> Dict[str, Any]:
         """Get detailed container startup sequence and dependencies"""
@@ -163,6 +316,20 @@ class EmergencyRecoveryModule:
                 return self._restart_ollama()
             elif action == "validate_gpu":
                 return self._validate_gpu_pytorch()
+            elif action == "namespace":
+                return self._quick_namespace_reset()
+            elif action == "rebuild":
+                return self._rebuild_tailscale()
+            elif action == "gpu":
+                return self._quick_gpu_check()
+            elif action == "lmstudio":
+                return self._fix_lmstudio()
+            elif action == "restart_openwebui":
+                return self._restart_openwebui()
+            elif action == "nuclear":
+                return self._nuclear_option()
+            elif action == "status":
+                return self._status_check()
             
             # Simulate other recovery actions (would need to be adapted for container context)
             result = {
@@ -690,20 +857,358 @@ class EmergencyRecoveryModule:
                 "error": str(e),
                 "recommendation": "Check container environment and Python installation"
             }
+
+    def _quick_namespace_reset(self) -> Dict[str, Any]:
+        """Quick namespace reset - restarting Tailscale (equivalent to quick-fixes.bat namespace)"""
+        result = self._execute_python_script("namespace_reset", "Namespace_Reset")
+        
+        # Add specific formatting for namespace reset
+        if result["status"] == "completed":
+            result.update({
+                "steps_completed": [
+                    "Namespace reset Python script executed",
+                    "Tailscale container restarted",
+                    "Network connectivity tested",
+                    "Result validated"
+                ],
+                "next_steps": [
+                    "Test OpenWebUI access through Tailscale",
+                    "Verify Ollama connectivity from OpenWebUI",
+                    "Monitor system stability"
+                ]
+            })
+        
+        return result
+
+    def _rebuild_tailscale(self) -> Dict[str, Any]:
+        """Rebuild Tailscale container (equivalent to quick-fixes.bat rebuild)"""
+        result = self._execute_python_script("rebuild_tailscale", "Rebuild_Tailscale")
+        
+        # Add specific formatting for rebuild
+        if result["status"] == "completed":
+            result.update({
+                "steps_completed": [
+                    "Rebuild Tailscale Python script executed",
+                    "Tailscale container stopped and rebuilt",
+                    "Container started with clean image",
+                    "Network connectivity verified"
+                ],
+                "next_steps": [
+                    "Test Tailscale serve configuration",
+                    "Verify VPN connectivity",
+                    "Monitor container stability"
+                ]
+            })
+        
+        return result
+
+    def _quick_gpu_check(self) -> Dict[str, Any]:
+        """Quick GPU check and restart (equivalent to quick-fixes.bat gpu)"""
+        result = self._execute_python_script("gpu_check", "Gpu_Check")
+        
+        # Add specific formatting for GPU check
+        if result["status"] == "completed":
+            result.update({
+                "steps_completed": [
+                    "GPU check Python script executed",
+                    "OpenWebUI GPU availability tested",
+                    "GPU services restarted if needed",
+                    "Ollama GPU integration verified"
+                ],
+                "next_steps": [
+                    "Test model loading in OpenWebUI",
+                    "Verify reranker models use GPU acceleration",
+                    "Monitor GPU memory usage during workloads"
+                ]
+            })
+        
+        return result
+
+    def _fix_lmstudio(self) -> Dict[str, Any]:
+        """Fix LM Studio Tailscale connectivity (equivalent to quick-fixes.bat lmstudio)"""
+        try:
+            logger.info("Starting LM Studio fix...")
+            
+            project_root = self._find_project_root()
+            if not project_root:
+                logger.error("Project root not found - docker-compose.yml missing")
+                return self._project_root_error("lmstudio_fix")
+
+            logger.info(f"Using project root: {project_root}")
+            
+            # Use the same _execute_python_script method as other recovery actions
+            script_name = "lmstudio_fix"  # Remove .py extension
+            action_name = "lmstudio_fix"
+            
+            logger.info("Executing LM Studio fix Python script...")
+            
+            try:
+                result = self._execute_python_script(script_name, action_name)
+                
+                if result["status"] == "completed":
+                    return {
+                        "action": "lmstudio_fix",
+                        "status": "completed",
+                        "description": "LM Studio fix executed successfully",
+                        "steps_completed": [
+                            "LM Studio connectivity verified",
+                            "Socat proxy configured",
+                            "Tailscale serve configured for LM Studio path",
+                            "LM Studio accessible via Tailnet"
+                        ],
+                        "script_output": result.get("output", ""),
+                        "access_info": "LM Studio is now accessible at your-tailscale-url/lmstudio",
+                        "next_steps": [
+                            "Test LM Studio access through Tailscale URL",
+                            "Verify model loading works through proxy"
+                        ]
+                    }
+                else:
+                    # Check if this is a partial success (exit code 2 or specific output patterns)
+                    output = result.get("output", "")
+                    exit_code = result.get("exit_code", 1)
+                    
+                    if (exit_code == 2 or 
+                        ("LM Studio proxy setup completed successfully" in output) or
+                        ("Socat proxy verified working" in output)):
+                        
+                        return {
+                            "action": "lmstudio_fix",
+                            "status": "partial_success",
+                            "description": "LM Studio proxy configured successfully - Tailscale configuration needed",
+                            "steps_completed": [
+                                "LM Studio connectivity verified",
+                                "Socat proxy configured and running on port 8234",
+                                "Proxy forwarding traffic to LM Studio"
+                            ],
+                            "container_output": output,
+                            "manual_step": {
+                                "command": "docker compose exec tailscale tailscale --socket=/tmp/tailscaled.sock serve --bg --set-path=/lmstudio 8234",
+                                "description": "Run this command on the host to complete Tailscale configuration"
+                            },
+                            "access_info": "LM Studio proxy is working on port 8234 internally",
+                            "recommendation": "The socat proxy is configured and working. Run the manual command above to enable Tailnet access."
+                        }
+                    else:
+                        return {
+                            "action": "lmstudio_fix",
+                            "status": "error",
+                            "description": "Script execution failed",
+                            "script_output": result.get("output", "No output"),
+                            "script_error": result.get("error", "No error output"),
+                            "recommendation": "Check the script output for specific error details"
+                        }
+                    
+            except Exception as e:
+                logger.error(f"Error executing script: {e}")
+                return {
+                    "action": "lmstudio_fix",
+                    "status": "error",
+                    "error": f"Failed to execute Python script: {str(e)}",
+                    "recommendation": "Ensure LM Studio is running and containers are accessible"
+                }
+            
+        except Exception as e:
+            logger.error(f"Error in LM Studio fix: {str(e)}")
+            return {
+                "action": "lmstudio_fix",
+                "status": "error",
+                "error": f"LM Studio fix failed: {str(e)}"
+            }            # Wait for proxy to initialize
+            logger.info("Waiting for proxy to initialize...")
+            time.sleep(8)
+            
+            # Test proxy connection
+            logger.info("Testing proxy connection...")
+            proxy_test = subprocess.run(
+                ["docker", "compose", "exec", "-T", "tailscale",
+                 "sh", "-c", "wget -q -T 5 -O /dev/null http://127.0.0.1:8234/v1/models && echo 'Proxy working' || echo 'Proxy failed'"],
+                cwd=project_root,
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            
+            proxy_working = "Proxy working" in proxy_test.stdout
+            
+            # Configure Tailscale serve
+            logger.info("Configuring Tailscale serve...")
+            serve_config = subprocess.run(
+                ["docker", "compose", "exec", "-T", "tailscale",
+                 "tailscale", "--socket=/tmp/tailscaled.sock", 
+                 "serve", "--https=443", "--set-path=/lmstudio", "--bg", "http://127.0.0.1:8234"],
+                cwd=project_root,
+                capture_output=True,
+                text=True,
+                timeout=15
+            )
+            
+            serve_configured = serve_config.returncode == 0
+            
+            lmstudio_results.update({
+                "proxy_test": {
+                    "status": "working" if proxy_working else "failed",
+                    "output": proxy_test.stdout
+                },
+                "serve_configuration": {
+                    "status": "success" if serve_configured else "failed",
+                    "output": serve_config.stdout if serve_configured else serve_config.stderr
+                },
+                "access_url": "https://openwebui-13.tail37f875.ts.net/lmstudio",
+                "next_steps": [
+                    "Test LM Studio access through Tailscale URL",
+                    "Verify model loading works through proxy"
+                ] if proxy_working and serve_configured else [
+                    "Check if LM Studio is running on host",
+                    "Verify LM Studio is accessible on 169.254.83.107:5506",
+                    "Check Tailscale configuration"
+                ]
+            })
+            
+            return lmstudio_results
+            
+        except subprocess.TimeoutExpired:
+            return {
+                "action": "lmstudio_fix",
+                "status": "error",
+                "error": "LM Studio fix timed out",
+                "recommendation": "Check LM Studio availability and try again"
+            }
+        except Exception as e:
+            logger.error(f"Error fixing LM Studio: {str(e)}")
+            return {
+                "action": "lmstudio_fix",
+                "status": "error",
+                "error": str(e)
+            }
+
+    def _restart_openwebui(self) -> Dict[str, Any]:
+        """Restart OpenWebUI with proper network dependency handling (equivalent to quick-fixes.bat restart-openwebui)"""
+        result = self._execute_python_script("restart_openwebui", "Restart_Openwebui")
+        
+        # Add specific formatting for OpenWebUI restart
+        if result["status"] == "completed":
+            result.update({
+                "steps_completed": [
+                    "OpenWebUI restart Python script executed",
+                    "Dependent containers stopped in proper order",
+                    "OpenWebUI restarted and health checked",
+                    "Dependent services restarted sequentially"
+                ],
+                "next_steps": [
+                    "Test OpenWebUI access through browser",
+                    "Verify Ollama model loading functionality",
+                    "Check Tailscale VPN connectivity",
+                    "Monitor system stability"
+                ]
+            })
+        
+        return result
+
+    def _nuclear_option(self) -> Dict[str, Any]:
+        """Nuclear option - full stack restart (equivalent to quick-fixes.bat nuclear)"""
+        result = self._execute_python_script("nuclear_option", "Nuclear_Option")
+        
+        # Add specific formatting for nuclear option
+        if result["status"] == "completed":
+            result.update({
+                "warning": "⚠️ NUCLEAR OPTION - FULL STACK RESTART ⚠️",
+                "steps_completed": [
+                    "Nuclear option Python script executed",
+                    "Pre-restart diagnostic performed", 
+                    "All containers stopped completely",
+                    "Clean shutdown wait completed",
+                    "All containers restarted",
+                    "Full stack initialization completed",
+                    "Final connectivity verified"
+                ],
+                "next_steps": [
+                    "Test all services through web interface",
+                    "Verify GPU functionality if needed",
+                    "Monitor system stability",
+                    "Check for any remaining issues"
+                ]
+            })
+        
+        return result
+
+    def _status_check(self) -> Dict[str, Any]:
+        """Comprehensive system status check (equivalent to quick-fixes.bat status)"""
+        result = self._execute_python_script("status_check", "Status_Check")
+        
+        # Add specific formatting for status check
+        if result["status"] == "completed":
+            result.update({
+                "steps_completed": [
+                    "Status check Python script executed",
+                    "Container status verified",
+                    "GPU availability checked",
+                    "Network connectivity tested",
+                    "Service accessibility validated",
+                    "Tailscale status retrieved"
+                ],
+                "next_steps": [
+                    "Review detailed status output for any issues",
+                    "Address any failed checks individually",
+                    "Monitor system performance"
+                ]
+            })
+        
+        return result
+
+    def _project_root_error(self, action: str) -> Dict[str, Any]:
+        """Helper method for project root not found errors"""
+        return {
+            "action": action,
+            "status": "error",
+            "error": "Could not find project root directory",
+            "recommendation": "Ensure docker-compose.yml exists in project directory"
+        }
+
+    def _find_project_root(self) -> Optional[str]:
+        """Find the project root directory containing docker-compose.yml"""
+        # First check if we're in a container with the project mounted at /host_project
+        if os.path.exists('/host_project/docker-compose.yml'):
+            return '/host_project'
+        
+        # Fallback to searching from current directory
+        current_dir = os.getcwd()
+        project_root = current_dir
+        
+        # Look for docker-compose.yml in current directory or parent directories
+        while not os.path.exists(os.path.join(project_root, "docker-compose.yml")):
+            parent = os.path.dirname(project_root)
+            if parent == project_root:  # Reached root directory
+                return None
+            project_root = parent
+        
+        return project_root
+
+    def _project_root_error(self, action: str) -> Dict[str, Any]:
+        """Return standardized project root error"""
+        return {
+            "action": action,
+            "status": "error",
+            "error": "docker-compose.yml not found in current directory or parent directories",
+            "recommendation": "Run this command from the AI Stack project root directory",
+            "current_directory": os.getcwd()
+        }
     
     def _get_command_template(self, action: str) -> str:
         """Get command template for action"""
         templates = {
-            "namespace": "scripts\\quick-fixes.bat namespace",
-            "gpu": "scripts\\quick-fixes.bat gpu",
-            "status": "scripts\\quick-fixes.bat status", 
-            "nuclear": "scripts\\emergency-recovery.ps1 -Action recover",
+            "namespace": "Emergency Recovery Module: _quick_namespace_reset()",
+            "rebuild": "Emergency Recovery Module: _rebuild_tailscale()",
+            "gpu": "Emergency Recovery Module: _quick_gpu_check()",
+            "lmstudio": "Emergency Recovery Module: _fix_lmstudio()",
+            "restart_openwebui": "Emergency Recovery Module: _restart_openwebui()",
+            "nuclear": "Emergency Recovery Module: _nuclear_option()",
             "tailscale": "scripts\\emergency-recovery.ps1 -Action recover",
             "restart_ollama": "Emergency Recovery Module: _restart_ollama()",
             "validate_gpu": "Emergency Recovery Module: _validate_gpu_pytorch()",
             "advanced": "scripts\\emergency-recovery.ps1 -Action recover"
         }
-        return templates.get(action, "scripts\\quick-fixes.bat status")
+        return templates.get(action, "Emergency Recovery Module: _quick_namespace_reset()")
 
     def describe(self) -> Dict[str, Any]:
         """Return module metadata"""
@@ -762,8 +1267,15 @@ class EmergencyRecoveryModule:
             else:
                 # Analyze input and execute appropriate recovery
                 action = self.analyze_user_input(user_input)
-                result_data = self.execute_recovery_action(action, user_input)
-                content = self._format_recovery_result(result_data)
+                
+                # If action is None, user wants to see available actions
+                if action is None:
+                    result_data = self.get_available_recovery_actions()
+                    content = self._format_available_actions(result_data)
+                else:
+                    # Execute the specific recovery action
+                    result_data = self.execute_recovery_action(action, user_input)
+                    content = self._format_recovery_result(result_data)
             
             execution_time = int((time.time() - start_time) * 1000)
             
@@ -826,13 +1338,67 @@ class EmergencyRecoveryModule:
         """Format recovery action result for display"""
         action = result_data.get("action", "unknown")
         status = result_data.get("status", "unknown")
-        description = result_data.get("description", "No description")
+        
+        # Handle both description and error fields
+        if "error" in result_data:
+            description = result_data["error"]
+        else:
+            description = result_data.get("description", "No description")
         
         content = f"""## 🔧 Recovery Action: {action.title()}
 
 **Status**: {status.title()}
 **Description**: {description}
 """
+        
+        # Show error details if status is error
+        if status == "error":
+            if "recommendation" in result_data:
+                content += f"\n**Recommendation**: {result_data['recommendation']}\n"
+            if "current_directory" in result_data:
+                content += f"\n**Current Directory**: {result_data['current_directory']}\n"
+            if "script_output" in result_data:
+                content += f"\n### 📤 Script Output:\n```\n{result_data['script_output']}\n```\n"
+            if "script_error" in result_data:
+                content += f"\n### ❌ Script Error:\n```\n{result_data['script_error']}\n```\n"
+            if "debug_info" in result_data:
+                debug = result_data["debug_info"]
+                content += f"\n### 🔍 Debug Information:\n"
+                for key, value in debug.items():
+                    content += f"**{key.replace('_', ' ').title()}**: {value}\n"
+            return content
+        
+        # Handle guidance_provided status (for operations that need host execution)
+        if status == "guidance_provided":
+            if "host_command" in result_data:
+                content += f"\n### 🚀 Host Command\n```\n{result_data['host_command']}\n```\n"
+            
+            if "manual_steps" in result_data:
+                content += "\n### 📋 Manual Steps:\n"
+                for step in result_data["manual_steps"]:
+                    content += f"{step}\n"
+            
+            if "what_it_does" in result_data:
+                content += "\n### 🔧 What This Does:\n"
+                for item in result_data["what_it_does"]:
+                    content += f"• {item}\n"
+            
+            if "expected_outcome" in result_data:
+                outcome = result_data["expected_outcome"]
+                content += "\n### ✅ Expected Outcome:\n"
+                if "success_message" in outcome:
+                    content += f"**Success**: {outcome['success_message']}\n"
+                if "access_url" in outcome:
+                    content += f"**Access URL**: {outcome['access_url']}\n"
+                if "test_command" in outcome:
+                    content += f"**Test**: {outcome['test_command']}\n"
+            
+            if "troubleshooting" in result_data and "if_fails" in result_data["troubleshooting"]:
+                content += "\n### 🔍 If It Fails:\n"
+                for tip in result_data["troubleshooting"]["if_fails"]:
+                    content += f"• {tip}\n"
+            
+            return content
         
         if "immediate_command" in result_data:
             content += f"\n### 🚀 Immediate Action\n```\n{result_data['immediate_command']}\n```\n"
