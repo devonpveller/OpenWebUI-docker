@@ -10,7 +10,6 @@ required_open_webui_version: 0.4.0
 import os
 import re
 import json
-import logging
 import shlex
 import subprocess
 import fnmatch
@@ -28,16 +27,14 @@ try:
 except ImportError:
     httpx = None
 
-# Module-level logger — writes to OWUI container logs (docker compose logs openwebui)
-log = logging.getLogger("code_agent")
-log.setLevel(logging.DEBUG)
-if not log.handlers:
-    _h = logging.StreamHandler()
-    _h.setFormatter(logging.Formatter(
-        "%(asctime)s [%(name)s] %(levelname)s %(message)s",
-        datefmt="%H:%M:%S",
-    ))
-    log.addHandler(_h)
+# Module-level logger — uses print() because OWUI's loguru suppresses
+# standard Python logging. print() always hits container stdout.
+# View with: docker compose logs -f openwebui 2>&1 | grep CODE_AGENT
+def _log_print(level: str, msg: str, **kwargs):
+    """Reliable logging via print(). OWUI's loguru suppresses stdlib logging."""
+    ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+    extra = " ".join(f"{k}={v!r}" for k, v in kwargs.items()) if kwargs else ""
+    print(f"{ts} [CODE_AGENT] {level.upper()} {msg} {extra}".rstrip(), flush=True)
 
 
 # =============================================================================
@@ -396,19 +393,19 @@ class _ToolEngine:
     async def execute(self, name: str, args: dict) -> str:
         fn = getattr(self, f"_t_{name}", None)
         if fn is None:
-            log.warning(f"Unknown tool requested: {name}")
+            _log_print("warning", f"Unknown tool requested: {name}")
             return f"Unknown tool: {name}"
         try:
             result = await fn(**args)
             return result
         except TypeError as e:
-            log.error(f"Tool '{name}' argument error: {e}", exc_info=True)
+            _log_print("error", f"Tool '{name}' argument error: {e}")
             return f"Tool argument error: {e}"
         except PermissionError as e:
-            log.warning(f"Tool '{name}' permission denied: {e}")
+            _log_print("warning", f"Tool '{name}' permission denied: {e}")
             return f"Error: {e}"
         except Exception as e:
-            log.error(f"Tool '{name}' unexpected error: {e}", exc_info=True)
+            _log_print("error", f"Tool '{name}' unexpected error: {e}")
             return f"Tool error ({name}): {e}"
 
     async def _t_read_file(self, file_path: str, start_line: int = 0, end_line: int = 0) -> str:
@@ -743,12 +740,10 @@ class Pipe:
         return self._engine
 
     def _log(self, level: str, msg: str, **kwargs):
-        """Structured debug logging. Only emits when DEBUG_LOG is True."""
+        """Structured debug logging via print() — always hits container stdout."""
         if not self.valves.DEBUG_LOG:
             return
-        extra = " ".join(f"{k}={v!r}" for k, v in kwargs.items()) if kwargs else ""
-        full = f"{msg} {extra}".strip()
-        getattr(log, level, log.info)(full)
+        _log_print(level, msg, **kwargs)
 
     # -- Pipe registration --
 
@@ -878,29 +873,46 @@ class Pipe:
 
     # -- Main agent loop --
 
+    # Compiled regex patterns for narration detection (class-level for performance)
+    _NARRATION_PATTERNS = re.compile(
+        r"(?:"
+        # Future intent: "I will/I'll/I am going to [verb]"
+        r"i(?:'ll|\s+will)\s+(?:now\s+)?(?:update|modify|fix|create|write|add|overwrite|rewrite|implement|change|restructure|make|replace|refactor|remove|delete|edit|save|apply)"
+        r"|"
+        # Present narration: "I am/I'm [verb]ing"
+        r"i(?:'m|\s+am)\s+(?:now\s+)?(?:implementing|overwriting|updating|fixing|creating|writing|adding|rewriting|making|replacing|restructuring|editing|saving|applying|modifying|refactoring)"
+        r"|"
+        # Past-tense false claims: "I have/I've [verb]ed" (model claims it did something)
+        r"i(?:'ve|\s+have)\s+(?:now\s+)?(?:implemented|overwritten|updated|fixed|created|written|added|rewritten|made|replaced|restructured|edited|saved|applied|modified|changed|refactored|removed|deleted)"
+        r"|"
+        # Planning narration
+        r"(?:let me|here are the changes|changes i made|implementing the following|i(?:'m|\s+am) going to)"
+        r")",
+        re.IGNORECASE,
+    )
+
     def _is_narrating_action(self, content: str) -> bool:
         """
         Detect when the model describes actions in prose instead of calling tools.
-        Returns True if the content looks like narration of intended actions.
+        Catches future intent, present narration, and past-tense false claims.
+        Also detects large code blocks presented in text (should use write_file).
         """
         if not content or len(content) < 80:
             return False
-        cl = content.lower()
-        narration_phrases = [
-            "i am implementing", "i am overwriting", "i will ",
-            "i'm going to", "let me ", "i'm implementing",
-            "i am making", "i am updating", "i am fixing",
-            "i'll now", "i am now", "i have fixed",
-            "i've added", "i've updated", "i've modified",
-            "i've changed", "here are the changes",
-            "implementing the following", "i will overwrite",
-            "i will update", "i will modify", "i will fix",
-            "i will create", "i will write", "i will add",
-            "i am adding", "changes i made", "i am rewriting",
-            "i'm overwriting", "i'm updating", "i'm fixing",
-            "i'm rewriting", "i'm adding", "i'm creating",
-        ]
-        return any(phrase in cl for phrase in narration_phrases)
+
+        # Check for narration phrases via regex
+        if self._NARRATION_PATTERNS.search(content):
+            return True
+
+        # Detect code blocks in prose — model is presenting code instead of writing it
+        code_blocks = re.findall(r"```[\w]*\n.{100,}?```", content, re.DOTALL)
+        if code_blocks and len(code_blocks) >= 1:
+            # Large code block without tool calls = presenting code in text
+            total_code_chars = sum(len(b) for b in code_blocks)
+            if total_code_chars > 200:
+                return True
+
+        return False
 
     def _needs_verification(self, conversation: list[dict]) -> bool:
         """
@@ -1025,7 +1037,8 @@ class Pipe:
 
         last_content = ""
         nudge_count = 0
-        MAX_NUDGES = 3
+        MAX_NUDGES = 5
+        tools_used_this_session = False  # Track if model ever successfully used tools
 
         for iteration in range(self.valves.MAX_ITERATIONS):
             self._log("info", f"--- Iteration {iteration + 1}/{self.valves.MAX_ITERATIONS} ---")
@@ -1149,6 +1162,7 @@ class Pipe:
                 return content if content else last_content or "Done (no response content)."
 
             last_content = content
+            tools_used_this_session = True
 
             # Append assistant message to conversation
             if msg.get("tool_calls"):
@@ -1201,6 +1215,22 @@ class Pipe:
                         "role": "user",
                         "content": f"<tool_result name=\"{tool_name}\">\n{result}\n</tool_result>",
                     })
+
+            # After all tool results: inject a brief reminder to keep using tools.
+            # This prevents the model from "forgetting" it can call tools after
+            # seeing results and switching to narrative mode.
+            tool_reminder = (
+                "Tool results above. Continue using tools for your next action. "
+                "Do NOT describe what you will do — call the tool directly. "
+                "If you need to modify a file, call edit_file or write_file now. "
+                "If you need to verify, call read_file or run_command now."
+            )
+            if msg.get("tool_calls"):
+                # For native format, use a system message (some providers support it mid-conversation)
+                conversation.append({"role": "system", "content": tool_reminder})
+            else:
+                # For XML format, use user message
+                conversation.append({"role": "user", "content": tool_reminder})
 
         # Max iterations
         self._log("warning", "Max iterations reached", max=self.valves.MAX_ITERATIONS)
