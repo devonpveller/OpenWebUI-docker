@@ -10,6 +10,7 @@ required_open_webui_version: 0.4.0
 import os
 import re
 import json
+import logging
 import shlex
 import subprocess
 import fnmatch
@@ -26,6 +27,17 @@ try:
     import httpx
 except ImportError:
     httpx = None
+
+# Module-level logger — writes to OWUI container logs (docker compose logs openwebui)
+log = logging.getLogger("code_agent")
+log.setLevel(logging.DEBUG)
+if not log.handlers:
+    _h = logging.StreamHandler()
+    _h.setFormatter(logging.Formatter(
+        "%(asctime)s [%(name)s] %(levelname)s %(message)s",
+        datefmt="%H:%M:%S",
+    ))
+    log.addHandler(_h)
 
 
 # =============================================================================
@@ -340,12 +352,19 @@ class _ToolEngine:
     async def execute(self, name: str, args: dict) -> str:
         fn = getattr(self, f"_t_{name}", None)
         if fn is None:
+            log.warning(f"Unknown tool requested: {name}")
             return f"Unknown tool: {name}"
         try:
-            return await fn(**args)
+            result = await fn(**args)
+            return result
         except TypeError as e:
+            log.error(f"Tool '{name}' argument error: {e}", exc_info=True)
             return f"Tool argument error: {e}"
+        except PermissionError as e:
+            log.warning(f"Tool '{name}' permission denied: {e}")
+            return f"Error: {e}"
         except Exception as e:
+            log.error(f"Tool '{name}' unexpected error: {e}", exc_info=True)
             return f"Tool error ({name}): {e}"
 
     async def _t_read_file(self, file_path: str, start_line: int = 0, end_line: int = 0) -> str:
@@ -613,6 +632,13 @@ class Pipe:
             default=True,
             description="Show real-time status updates in the chat.",
         )
+        DEBUG_LOG: bool = Field(
+            default=True,
+            description=(
+                "Enable detailed debug logging to container stdout. "
+                "View with: docker compose logs -f openwebui | grep code_agent"
+            ),
+        )
         REQUEST_TIMEOUT: int = Field(
             default=120,
             description="HTTP timeout in seconds for LLM API calls.",
@@ -672,6 +698,14 @@ class Pipe:
             self._engine = _ToolEngine(self.valves)
         return self._engine
 
+    def _log(self, level: str, msg: str, **kwargs):
+        """Structured debug logging. Only emits when DEBUG_LOG is True."""
+        if not self.valves.DEBUG_LOG:
+            return
+        extra = " ".join(f"{k}={v!r}" for k, v in kwargs.items()) if kwargs else ""
+        full = f"{msg} {extra}".strip()
+        getattr(log, level, log.info)(full)
+
     # -- Pipe registration --
 
     def pipes(self) -> list[dict]:
@@ -690,19 +724,24 @@ class Pipe:
                 with open(self.valves.SYSTEM_PROMPT_PATH, "r", encoding="utf-8") as f:
                     external = f.read().strip()
                 if external:
+                    self._log("debug", "Loaded external system prompt",
+                              path=self.valves.SYSTEM_PROMPT_PATH, chars=len(external))
                     fmt = self.valves.TOOL_CALL_FORMAT.lower()
                     if fmt == "xml":
                         return external + SYSTEM_PROMPT_XML.split("## Tool Calling", 1)[-1]
                     return external
-            except (OSError, IOError):
-                pass  # Fall back to built-in
+            except (OSError, IOError) as e:
+                self._log("warning", "Failed to load external prompt, using built-in",
+                          path=self.valves.SYSTEM_PROMPT_PATH, error=str(e))
         fmt = self.valves.TOOL_CALL_FORMAT.lower()
+        self._log("debug", "Using built-in system prompt", format=fmt)
         if fmt == "xml":
             return SYSTEM_PROMPT_XML
         return SYSTEM_PROMPT_NATIVE
 
     async def _call_llm(self, messages: list[dict], use_tools: bool = True) -> Optional[dict]:
         if httpx is None:
+            self._log("error", "httpx not available")
             return None
 
         headers = {"Content-Type": "application/json"}
@@ -721,32 +760,53 @@ class Pipe:
         if use_tools and fmt in ("auto", "native"):
             payload["tools"] = TOOL_DEFINITIONS
 
+        url = f"{self.valves.API_BASE_URL}/chat/completions"
+        self._log("debug", "LLM request",
+                  url=url, model=self.valves.MODEL_ID,
+                  msg_count=len(messages), use_tools=use_tools,
+                  has_tool_defs="tools" in payload)
+
         try:
             async with httpx.AsyncClient(timeout=float(self.valves.REQUEST_TIMEOUT)) as client:
-                resp = await client.post(
-                    f"{self.valves.API_BASE_URL}/chat/completions",
-                    headers=headers,
-                    json=payload,
-                )
+                resp = await client.post(url, headers=headers, json=payload)
                 resp.raise_for_status()
-                return resp.json()
+                data = resp.json()
+                # Log response summary
+                choices = data.get("choices", [])
+                if choices:
+                    m = choices[0].get("message", {})
+                    tc = m.get("tool_calls", []) or []
+                    content_len = len(m.get("content", "") or "")
+                    self._log("debug", "LLM response",
+                              content_chars=content_len,
+                              tool_calls=len(tc),
+                              finish=choices[0].get("finish_reason", "?"))
+                else:
+                    self._log("warning", "LLM returned empty choices", raw=str(data)[:500])
+                return data
         except httpx.HTTPStatusError as e:
+            body_text = e.response.text[:500] if e.response else "no body"
+            self._log("error", "LLM HTTP error",
+                      status=e.response.status_code, body=body_text)
             # If 400 with tools (model doesn't support), retry without
             if e.response.status_code == 400 and use_tools and fmt == "auto":
+                self._log("info", "Retrying without tool definitions (model may not support tools)")
                 payload.pop("tools", None)
                 try:
                     async with httpx.AsyncClient(timeout=float(self.valves.REQUEST_TIMEOUT)) as client:
-                        resp = await client.post(
-                            f"{self.valves.API_BASE_URL}/chat/completions",
-                            headers=headers,
-                            json=payload,
-                        )
+                        resp = await client.post(url, headers=headers, json=payload)
                         resp.raise_for_status()
                         return resp.json()
-                except Exception:
+                except Exception as e2:
+                    self._log("error", "LLM retry also failed", error=str(e2))
                     return None
             return None
-        except Exception:
+        except httpx.ConnectError as e:
+            self._log("error", "LLM connection failed — is the server running?",
+                      url=url, error=str(e))
+            return None
+        except Exception as e:
+            self._log("error", "LLM unexpected error", error=str(e), type=type(e).__name__)
             return None
 
     def _parse_xml_tool_calls(self, text: str) -> list[dict]:
@@ -774,33 +834,99 @@ class Pipe:
 
     # -- Main agent loop --
 
+    def _build_conversation(self, messages: list[dict]) -> list[dict]:
+        """
+        Build the conversation to send to the LLM.
+
+        Key insight: OWUI sends the FULL chat history on every request, including
+        previous assistant responses that were our final answers from prior agent
+        loops. If we replay all of them, the model sees completed work and thinks
+        there's nothing to do.
+
+        Strategy: Keep the system prompt + a summary of earlier turns + the last
+        user message, so the model has context but doesn't see stale tool results.
+        """
+        system = {"role": "system", "content": self._get_system_prompt()}
+
+        # Separate user and assistant messages
+        user_msgs = [m for m in messages if m.get("role") == "user"]
+        asst_msgs = [m for m in messages if m.get("role") == "assistant"]
+
+        self._log("debug", "Building conversation",
+                  total_msgs=len(messages),
+                  user_msgs=len(user_msgs),
+                  asst_msgs=len(asst_msgs))
+
+        if not user_msgs:
+            return [system]
+
+        conversation = [system]
+
+        # For multi-turn: include prior user/assistant pairs as brief context
+        # but only the text content (no tool call artifacts)
+        if len(user_msgs) > 1:
+            for m in messages[:-1]:  # Everything except the last message
+                role = m.get("role", "")
+                content = m.get("content", "")
+                if role in ("user", "assistant") and content:
+                    # Truncate long prior assistant answers to keep context lean
+                    if role == "assistant" and len(content) > 500:
+                        content = content[:500] + "\n... (truncated prior response)"
+                    conversation.append({"role": role, "content": content})
+
+        # Always include the full last user message
+        last = messages[-1]
+        conversation.append({"role": "user", "content": last.get("content", "")})
+
+        self._log("debug", "Conversation built",
+                  turns=len(conversation),
+                  system_chars=len(system["content"]),
+                  last_user_chars=len(last.get("content", "")))
+
+        return conversation
+
     async def pipe(
         self,
         body: dict,
         __user__: dict = {},
         __event_emitter__: Callable[[dict], Any] = None,
     ) -> str:
+        self._log("info", "=" * 60)
+        self._log("info", "PIPE INVOKED",
+                  user=(__user__ or {}).get("name", "unknown"),
+                  model_id=self.valves.MODEL_ID,
+                  api_url=self.valves.API_BASE_URL,
+                  tool_format=self.valves.TOOL_CALL_FORMAT,
+                  security=self.valves.SECURITY_MODE,
+                  workspace=self.valves.WORKSPACE_PATH)
+
         # Validate configuration
         if not self.valves.MODEL_ID:
+            self._log("error", "MODEL_ID not configured")
             return (
                 "**Code Agent Error**: `MODEL_ID` is not configured.\n\n"
                 "Go to **Admin Panel → Functions → Code Agent → Valves** and set "
                 "`MODEL_ID` to your reasoning model (e.g. `qwen2.5-coder:32b`)."
             )
         if httpx is None:
+            self._log("error", "httpx not installed")
             return "**Code Agent Error**: `httpx` library not available in this environment."
 
         engine = self._get_engine()
         messages = body.get("messages", [])
 
-        # Build conversation with system prompt
-        conversation: list[dict] = [
-            {"role": "system", "content": self._get_system_prompt()},
-        ] + [{"role": m["role"], "content": m.get("content", "")} for m in messages]
+        self._log("debug", "Incoming messages from OWUI",
+                  count=len(messages),
+                  roles=[m.get("role") for m in messages],
+                  last_content_preview=(messages[-1].get("content", "")[:200] if messages else "(empty)"))
+
+        # Build clean conversation (avoids replaying stale tool history)
+        conversation = self._build_conversation(messages)
 
         last_content = ""
 
         for iteration in range(self.valves.MAX_ITERATIONS):
+            self._log("info", f"--- Iteration {iteration + 1}/{self.valves.MAX_ITERATIONS} ---")
             await self._emit(
                 __event_emitter__,
                 f"Thinking... (step {iteration + 1}/{self.valves.MAX_ITERATIONS})",
@@ -809,6 +935,7 @@ class Pipe:
             # Call LLM
             response = await self._call_llm(conversation)
             if response is None:
+                self._log("error", "LLM returned None — call failed")
                 await self._emit(__event_emitter__, "LLM call failed", done=True)
                 if last_content:
                     return last_content + "\n\n*[LLM call failed, returning partial result]*"
@@ -821,23 +948,34 @@ class Pipe:
             # Extract assistant message
             choices = response.get("choices", [])
             if not choices:
+                self._log("error", "LLM returned no choices")
                 await self._emit(__event_emitter__, "Empty response", done=True)
                 return last_content or "Error: Empty response from model."
 
             msg = choices[0].get("message", {})
             content = msg.get("content", "") or ""
             tool_calls = msg.get("tool_calls", []) or []
+            finish_reason = choices[0].get("finish_reason", "unknown")
+
+            self._log("debug", "LLM message parsed",
+                      has_content=bool(content),
+                      content_preview=content[:200] if content else "(empty)",
+                      native_tool_calls=len(tool_calls),
+                      finish_reason=finish_reason)
 
             # Auto-detect XML tool calls if no native ones
             fmt = self.valves.TOOL_CALL_FORMAT.lower()
             if not tool_calls and content and fmt in ("auto", "xml"):
                 xml_calls = self._parse_xml_tool_calls(content)
                 if xml_calls:
+                    self._log("debug", "Parsed XML tool calls", count=len(xml_calls))
                     tool_calls = xml_calls
                     content = self._strip_xml_tool_calls(content)
 
             # If no tool calls → final answer
             if not tool_calls:
+                self._log("info", "No tool calls — returning final answer",
+                          content_chars=len(content))
                 await self._emit(__event_emitter__, "Done", done=True)
                 return content if content else last_content or "Done (no response content)."
 
@@ -845,10 +983,8 @@ class Pipe:
 
             # Append assistant message to conversation
             if msg.get("tool_calls"):
-                # Native format — include tool_calls in the message
                 conversation.append(msg)
             else:
-                # XML format — include cleaned content
                 conversation.append({"role": "assistant", "content": content})
 
             # Execute each tool call
@@ -862,31 +998,43 @@ class Pipe:
                     try:
                         tool_args = json.loads(tool_args_raw)
                     except json.JSONDecodeError:
+                        self._log("warning", "Failed to parse tool args JSON",
+                                  tool=tool_name, raw=tool_args_raw[:200])
                         tool_args = {}
                 else:
                     tool_args = tool_args_raw
 
-                await self._emit(__event_emitter__, f"→ {tool_name}({', '.join(f'{k}=' for k in tool_args)})")
+                self._log("info", f"TOOL CALL: {tool_name}", args=tool_args)
+                await self._emit(
+                    __event_emitter__,
+                    f"→ {tool_name}({', '.join(f'{k}={repr(v)[:50]}' for k, v in tool_args.items())})",
+                )
 
                 # Execute
+                t0 = time.time()
                 result = await engine.execute(tool_name, tool_args)
+                elapsed = time.time() - t0
+
+                self._log("info", f"TOOL RESULT: {tool_name}",
+                          elapsed_s=round(elapsed, 2),
+                          result_chars=len(result),
+                          result_preview=result[:300])
 
                 # Add result to conversation
                 if msg.get("tool_calls"):
-                    # Native format
                     conversation.append({
                         "role": "tool",
                         "tool_call_id": tool_id,
                         "content": result,
                     })
                 else:
-                    # XML format — tool result as user message
                     conversation.append({
                         "role": "user",
                         "content": f"<tool_result name=\"{tool_name}\">\n{result}\n</tool_result>",
                     })
 
         # Max iterations
+        self._log("warning", "Max iterations reached", max=self.valves.MAX_ITERATIONS)
         await self._emit(__event_emitter__, "Max iterations reached", done=True)
         return (
             (last_content or "")
