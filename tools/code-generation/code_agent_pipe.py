@@ -45,50 +45,94 @@ if not log.handlers:
 # =============================================================================
 
 SYSTEM_PROMPT_NATIVE = """\
-You are an expert AI coding agent. You help users with programming tasks by \
-reading, writing, searching, and executing code in their workspace.
+You are an expert AI coding agent. You operate inside a workspace and help \
+users by reading, writing, searching, and executing code — always with \
+rigorous verification.
 
-## Core Rules
+## HARD RULES — VIOLATIONS WILL PRODUCE WRONG RESULTS
 
-1. **Think before acting** — Use think() to reason through complex problems \
-before making changes. It costs nothing and improves accuracy.
-2. **Understand before changing** — Always read relevant files and search the \
-codebase before editing. Never edit a file you haven't read.
-3. **Minimal, targeted changes** — Make only the changes needed. Don't add \
-features, refactor code, or insert comments/docstrings beyond what was asked.
-4. **Verify your work** — After changes, read the modified file or run tests \
-to confirm correctness.
-5. **One step at a time** — For multi-step tasks, create a todo list and work \
-through items sequentially.
+1. **NEVER claim "fixed", "done", or "updated" without PROOF.** After ANY \
+file change you MUST read the modified file back with read_file AND run a \
+syntax check or test. Saying "I've updated the file" without doing this is a \
+critical failure.
+2. **NEVER edit a file you have not read in this conversation.** Always \
+read_file first to see the current content. No exceptions.
+3. **NEVER stop after implementing.** Implementation without verification is \
+incomplete work. You must verify before giving your final answer.
+4. **NEVER give up after one failed attempt.** If a tool call fails or gives \
+unexpected results, diagnose the problem and retry with a corrected approach.
+5. **NEVER guess file contents or structure.** Use find_files and read_file. \
+Assumptions lead to wrong edits.
+6. **NEVER DESCRIBE actions — PERFORM them.** Do not say "I will update the \
+file" or "I am implementing changes". Instead, call the tool immediately. \
+Every response you give must either contain tool calls (to do work) or be a \
+final summary with evidence (after work is verified). Writing prose about \
+what you plan to do without calling tools is a critical failure.
 
-## Workflow
+## MANDATORY WORKFLOW — Follow ALL steps for code changes
 
-For every non-trivial request:
-1. **Search** — Find relevant files with grep_search / find_files
-2. **Read** — Read the files with read_file (use line ranges for large files)
-3. **Think** — Reason through the approach with think()
-4. **Plan** — Create a todo list for multi-step work with manage_todo()
-5. **Implement** — Make changes with edit_file (preferred) or write_file (new files)
-6. **Verify** — Re-read files, run tests, check for errors
+### Step 1: INVESTIGATE (do not skip)
+- Use find_files to locate relevant files
+- Use grep_search to find patterns, imports, call sites, and tests
+- Use read_file on every file you plan to modify (and related files)
+- Read test files to understand existing test patterns
 
-## Tool Guidelines
+### Step 2: THINK (do not skip)
+- Use think() to plan your approach before any changes
+- Consider: edge cases, existing patterns, potential regressions, related code
+- For multi-step work, create a todo list with manage_todo()
 
-- **read_file**: Always specify line ranges for files > 200 lines.
-- **edit_file**: Include 2–3 context lines in old_text. Must match exactly once.
-- **write_file**: Only for new files or full rewrites. Prefer edit_file.
-- **grep_search**: Use for exact text/regex. Set include_pattern for file types.
-- **find_files**: Use to locate files by name. Supports ** recursive globs.
-- **run_command**: Check exit codes. Address errors before proceeding.
-- **think**: Free and unlimited. Use generously for complex reasoning.
-- **manage_todo**: Track multi-step progress. Mark in-progress → completed.
-- **save_memory / recall_memory**: Persist important context across sessions.
+### Step 3: IMPLEMENT
+- Use edit_file for existing files (include 2-3 context lines in old_text)
+- Use write_file only for new files
+- Make minimal, targeted changes — don't refactor unrelated code
+
+### Step 4: VERIFY (MANDATORY — do not skip or abbreviate)
+- read_file on every modified file to confirm the edit applied correctly
+- Run syntax/import check: run_command with e.g. \
+  `python -c "import ast; ast.parse(open('file.py').read()); print('OK')"`
+- Run existing tests: run_command with `python -m pytest path/to/test -x -q`
+- If no tests exist for significant logic changes, write a basic test
+- If verification fails, fix the issue and re-verify
+
+### Step 5: REPORT
+- Only after verification passes, summarize what was changed
+- Include evidence: file content snippets, test output, command results
+- If anything failed verification, say so — never hide failures
+
+## Tool Usage
+
+| Tool | When to use | Key rules |
+|------|------------|----------|
+| read_file | Before editing; after editing to verify | Use line ranges for >200 lines |
+| edit_file | Modifying existing files | Include context. Must match once |
+| write_file | Creating new files only | Never overwrite without reading first |
+| grep_search | Finding patterns in code | Set include_pattern to limit scope |
+| find_files | Locating files by name/pattern | Use before read_file |
+| run_command | Tests, syntax checks, builds | Always check exit code |
+| think | Planning, complex reasoning | Free — use before every edit |
+| manage_todo | Multi-step task tracking | Update status as you go |
+| save_memory / recall_memory | Cross-session context | Use descriptive keys |
+
+## Anti-Patterns — NEVER do these
+
+- Saying "I've updated the file" without read_file proof → WRONG
+- Editing a file based on assumptions without reading it → WRONG
+- Stopping after edit_file without read_file + run_command verification → WRONG
+- Claiming a bug is fixed without running the relevant test → WRONG
+- Making changes to files you found via search but never actually read → WRONG
+- Ignoring non-zero exit codes from run_command → WRONG
+- Writing paragraphs about what you will do instead of calling tools → WRONG
+- Saying "I am overwriting file.js" in text instead of calling write_file → WRONG
+- Describing a fix in prose without using edit_file to actually apply it → WRONG
+- Responding with a plan or analysis without any tool calls on your first turn → WRONG
 
 ## Code Quality
 
-- Follow existing patterns and conventions in the codebase.
-- Don't add type annotations or docstrings to code you didn't write.
-- Handle errors only at system boundaries. Don't over-engineer.
-- Use idiomatic patterns for the language.
+- Follow existing patterns and conventions in the codebase
+- Don't add type annotations or docstrings to code you didn't write
+- Handle errors only at system boundaries
+- Use idiomatic patterns for the language
 """
 
 SYSTEM_PROMPT_XML = (
@@ -834,6 +878,62 @@ class Pipe:
 
     # -- Main agent loop --
 
+    def _is_narrating_action(self, content: str) -> bool:
+        """
+        Detect when the model describes actions in prose instead of calling tools.
+        Returns True if the content looks like narration of intended actions.
+        """
+        if not content or len(content) < 80:
+            return False
+        cl = content.lower()
+        narration_phrases = [
+            "i am implementing", "i am overwriting", "i will ",
+            "i'm going to", "let me ", "i'm implementing",
+            "i am making", "i am updating", "i am fixing",
+            "i'll now", "i am now", "i have fixed",
+            "i've added", "i've updated", "i've modified",
+            "i've changed", "here are the changes",
+            "implementing the following", "i will overwrite",
+            "i will update", "i will modify", "i will fix",
+            "i will create", "i will write", "i will add",
+            "i am adding", "changes i made", "i am rewriting",
+            "i'm overwriting", "i'm updating", "i'm fixing",
+            "i'm rewriting", "i'm adding", "i'm creating",
+        ]
+        return any(phrase in cl for phrase in narration_phrases)
+
+    def _needs_verification(self, conversation: list[dict]) -> bool:
+        """
+        Check if the agent made file modifications during this loop but
+        hasn't verified them (no subsequent read_file or successful command).
+        Returns True if a verification nudge is warranted.
+        """
+        last_modify_idx = -1
+        verified_after = False
+
+        for i, msg in enumerate(conversation):
+            role = msg.get("role", "")
+            content = msg.get("content", "") or ""
+
+            # Detect tool results indicating file modifications
+            if role in ("tool", "user"):
+                cl = content.lower()
+                if any(kw in cl for kw in ["edited:", "created:", "updated:"]):
+                    last_modify_idx = i
+                    verified_after = False  # Need fresh verification
+                # Detect verification evidence after a modification
+                elif last_modify_idx >= 0 and i > last_modify_idx:
+                    if any(sig in content for sig in [
+                        "lines, showing",   # read_file output
+                        "[exit code: 0]",   # successful run_command
+                        "Syntax OK",        # explicit syntax check
+                        "passed",           # pytest passed
+                        "OK",               # generic success
+                    ]):
+                        verified_after = True
+
+        return last_modify_idx >= 0 and not verified_after
+
     def _build_conversation(self, messages: list[dict]) -> list[dict]:
         """
         Build the conversation to send to the LLM.
@@ -924,6 +1024,8 @@ class Pipe:
         conversation = self._build_conversation(messages)
 
         last_content = ""
+        nudge_count = 0
+        MAX_NUDGES = 3
 
         for iteration in range(self.valves.MAX_ITERATIONS):
             self._log("info", f"--- Iteration {iteration + 1}/{self.valves.MAX_ITERATIONS} ---")
@@ -963,6 +1065,17 @@ class Pipe:
                       native_tool_calls=len(tool_calls),
                       finish_reason=finish_reason)
 
+            # Handle truncated responses (model hit max_tokens mid-thought)
+            if finish_reason == "length" and not tool_calls:
+                self._log("warning", "Response truncated (max_tokens hit) — continuing")
+                if content:
+                    conversation.append({"role": "assistant", "content": content})
+                conversation.append({
+                    "role": "user",
+                    "content": "Your response was cut off due to length. Continue from where you left off.",
+                })
+                continue
+
             # Auto-detect XML tool calls if no native ones
             fmt = self.valves.TOOL_CALL_FORMAT.lower()
             if not tool_calls and content and fmt in ("auto", "xml"):
@@ -972,8 +1085,64 @@ class Pipe:
                     tool_calls = xml_calls
                     content = self._strip_xml_tool_calls(content)
 
-            # If no tool calls → final answer
+            # If no tool calls → check for narration and verification issues
             if not tool_calls:
+                # Priority 1: Detect narration (model describing actions without doing them)
+                is_narrating = self._is_narrating_action(content)
+                # Priority 2: First iteration should almost always use tools
+                is_first_with_no_action = (iteration == 0 and len(content) > 200)
+
+                if nudge_count < MAX_NUDGES and (is_narrating or is_first_with_no_action):
+                    nudge_count += 1
+                    reason = "narrating actions" if is_narrating else "no tool use on first turn"
+                    self._log("info",
+                              f"Agent {reason} without tool calls — nudge {nudge_count}/{MAX_NUDGES}")
+                    await self._emit(
+                        __event_emitter__,
+                        f"Redirecting to use tools... (nudge {nudge_count})",
+                    )
+                    if content:
+                        conversation.append({"role": "assistant", "content": content})
+                    conversation.append({
+                        "role": "user",
+                        "content": (
+                            "STOP. You wrote a description of what you intend to do, but you "
+                            "did not actually call any tools. Do NOT describe actions — perform "
+                            "them. Your response must contain actual tool calls.\n\n"
+                            "Start by investigating the current state:\n"
+                            "1. Use find_files to locate relevant files\n"
+                            "2. Use read_file to read them\n"
+                            "3. Use think() to plan your approach\n"
+                            "4. Use edit_file or write_file to make changes\n"
+                            "5. Use read_file and run_command to verify\n\n"
+                            "Do this now. Call tools — do not write prose about your plan."
+                        ),
+                    })
+                    continue
+
+                # Priority 3: Agent made file changes but didn't verify
+                if nudge_count < MAX_NUDGES and self._needs_verification(conversation):
+                    nudge_count += 1
+                    self._log("info",
+                              f"Agent stopping without verification — nudge {nudge_count}/{MAX_NUDGES}")
+                    await self._emit(
+                        __event_emitter__,
+                        f"Verifying changes... (nudge {nudge_count})",
+                    )
+                    if content:
+                        conversation.append({"role": "assistant", "content": content})
+                    conversation.append({
+                        "role": "user",
+                        "content": (
+                            "STOP. You modified files but have not verified the changes. "
+                            "Before giving your final answer you MUST:\n"
+                            "1. read_file on every file you changed to confirm the edit is correct\n"
+                            "2. run_command to do a syntax check or run relevant tests\n"
+                            "Do this now."
+                        ),
+                    })
+                    continue
+
                 self._log("info", "No tool calls — returning final answer",
                           content_chars=len(content))
                 await self._emit(__event_emitter__, "Done", done=True)
