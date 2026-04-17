@@ -19,9 +19,9 @@ services:
       - TRANSFORMERS_CACHE=/tmp/transformers_cache
       - HF_HOME=/tmp/hf_cache
       # Performance Optimizations for faster Ollama communication
-      - AIOHTTP_CLIENT_TIMEOUT=600
+      - AIOHTTP_CLIENT_TIMEOUT=3600
       - AIOHTTP_CLIENT_TIMEOUT_MODEL_LIST=60
-      - AIOHTTP_CLIENT_TIMEOUT_TOOL_CALL=600
+      - AIOHTTP_CLIENT_TIMEOUT_TOOL_CALL=3600
       - MODELS_CACHE_TTL=10 # Cache model list for 10 seconds to reduce repeated calls
       - ENABLE_BASE_MODELS_CACHE=true # Cache base models for faster loading
       # Reduce OpenWebUI overhead for model requests
