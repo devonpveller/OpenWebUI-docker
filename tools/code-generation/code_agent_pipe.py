@@ -15,6 +15,7 @@ import shlex
 import subprocess
 import fnmatch
 import hashlib
+import inspect
 import time
 import asyncio
 from datetime import datetime, timezone
@@ -429,19 +430,27 @@ class _ToolEngine:
         fn = getattr(self, f"_t_{name}", None)
         if fn is None:
             _log_print("warning", f"Unknown tool requested: {name}")
-            return f"Unknown tool: {name}"
+            return f"Error: Unknown tool: {name}"
         try:
+            # Strip unknown kwargs — models hallucinate extra parameters
+            # (e.g. required_context=True on edit_file, old_text on write_file)
+            sig = inspect.signature(fn)
+            valid_params = set(sig.parameters.keys()) - {"self"}
+            unknown = set(args.keys()) - valid_params
+            if unknown:
+                _log_print("warning", f"Tool '{name}' — stripping hallucinated args: {unknown}")
+                args = {k: v for k, v in args.items() if k in valid_params}
             result = await fn(**args)
             return result
         except TypeError as e:
             _log_print("error", f"Tool '{name}' argument error: {e}")
-            return f"Tool argument error: {e}"
+            return f"Error: {name} argument error — {e}"
         except PermissionError as e:
             _log_print("warning", f"Tool '{name}' permission denied: {e}")
             return f"Error: {e}"
         except Exception as e:
             _log_print("error", f"Tool '{name}' unexpected error: {e}")
-            return f"Tool error ({name}): {e}"
+            return f"Error: {name} failed — {e}"
 
     async def _t_read_file(self, file_path: str, start_line: int = 0, end_line: int = 0) -> str:
         resolved = self._resolve(file_path)
@@ -468,10 +477,20 @@ class _ToolEngine:
             return f"Error: Blocked: {file_path}"
         os.makedirs(os.path.dirname(resolved), exist_ok=True)
         existed = os.path.isfile(resolved)
+        old_size = os.path.getsize(resolved) if existed else 0
         with open(resolved, "w", encoding="utf-8") as f:
             f.write(content)
+        new_size = os.path.getsize(resolved)
         lc = content.count("\n") + (1 if content and not content.endswith("\n") else 0)
-        return f"{'Updated' if existed else 'Created'}: {file_path} ({lc} lines, {os.path.getsize(resolved)} bytes)"
+        result = f"{'Updated' if existed else 'Created'}: {file_path} ({lc} lines, {new_size} bytes)"
+        # Warn if overwriting with drastically smaller content (likely truncated by token limit)
+        if existed and old_size > 500 and new_size < old_size * 0.1:
+            result += (
+                f"\n\u26a0\ufe0f WARNING: File shrank from {old_size}B to {new_size}B "
+                f"({new_size*100//old_size}% of original). This may indicate your content "
+                "was truncated. Re-read the original with read_file and include ALL content."
+            )
+        return result
 
     @staticmethod
     def _strip_line_numbers(text: str) -> str:
@@ -592,6 +611,22 @@ class _ToolEngine:
         ok, reason = self._check_cmd(command)
         if not ok:
             return f"Error: {reason}"
+        # Detect anti-pattern: using Python ast.parse on non-Python files
+        if "ast.parse" in command:
+            non_py = re.search(r"open\(['\"]([^'\"]+\.(js|html|css|json|ts|jsx|tsx|vue|svelte))['\"]" , command)
+            if non_py:
+                fname, ext = non_py.group(1), non_py.group(2)
+                return (
+                    f"Error: Cannot use Python ast.parse on .{ext} files — it only works for Python.\n"
+                    f"For JavaScript: node -e \"require('fs').readFileSync('{fname}','utf8')\"\n"
+                    f"For HTML/CSS: use read_file to visually inspect the content."
+                )
+        # Detect literal example paths from system prompt
+        if "path/to/test" in command:
+            return (
+                "Error: 'path/to/test' is an example placeholder, not a real path. "
+                "Use find_files('*test*') to locate actual test files first."
+            )
         cwd = self._resolve(working_dir) if working_dir else self.v.WORKSPACE_PATH
         if not os.path.isdir(cwd):
             return f"Error: Bad directory: {working_dir}"
