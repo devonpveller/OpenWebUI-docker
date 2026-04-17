@@ -116,8 +116,11 @@ what you plan to do without calling tools is a critical failure.
 
 ### Step 4: VERIFY (MANDATORY — do not skip or abbreviate)
 - read_file on every modified file to confirm the edit applied correctly
-- Run syntax/import check: run_command with e.g. \
-  `python -c "import ast; ast.parse(open('file.py').read()); print('OK')"`
+- Run a language-appropriate syntax check:
+  - Python: `python -c "import ast; ast.parse(open('file.py').read()); print('OK')"`
+  - JavaScript: `node -c "require('fs').readFileSync('file.js','utf8')"` or `node -e "require('./file.js')"` 
+  - HTML/CSS: Use read_file to visually inspect — there is no CLI syntax checker
+  - NEVER use Python's ast.parse on non-Python files (JS, HTML, CSS, etc.)
 - Run existing tests: run_command with `python -m pytest path/to/test -x -q`
 - If no tests exist for significant logic changes, write a basic test
 - If verification fails, fix the issue and re-verify
@@ -131,7 +134,7 @@ what you plan to do without calling tools is a critical failure.
 
 | Tool | When to use | Key rules |
 |------|------------|----------|
-| read_file | Before editing; after editing to verify | Use line ranges for >200 lines |
+| read_file | Before editing; after editing to verify | Returns numbered lines — strip prefixes before using in edit_file |
 | edit_file | Modifying existing files | Include context. Must match once |
 | write_file | Creating new files only | Never overwrite without reading first |
 | grep_search | Finding patterns in code | Set include_pattern to limit scope |
@@ -149,6 +152,8 @@ what you plan to do without calling tools is a critical failure.
 - Claiming a bug is fixed without running the relevant test → WRONG
 - Making changes to files you found via search but never actually read → WRONG
 - Ignoring non-zero exit codes from run_command → WRONG
+- Using Python ast.parse to verify JavaScript, HTML, or CSS files → WRONG
+- Copying line-number prefixes from read_file into edit_file old_text → WRONG
 - Writing paragraphs about what you will do instead of calling tools → WRONG
 - Saying "I am overwriting file.js" in text instead of calling write_file → WRONG
 - Describing a fix in prose without using edit_file to actually apply it → WRONG
@@ -205,7 +210,7 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "read_file",
-            "description": "Read file contents. Use start_line/end_line for large files. Returns numbered lines.",
+            "description": "Read file contents. Use start_line/end_line for large files. Returns lines with line-number prefixes like '  42 | code here'. IMPORTANT: These prefixes are for display only — do NOT copy them into edit_file old_text/new_text.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -236,7 +241,7 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "edit_file",
-            "description": "Replace exact text in a file. old_text must match once. Include 2-3 context lines.",
+            "description": "Replace exact text in a file. old_text must match the ACTUAL file content exactly (match once). Include 2-3 context lines. CRITICAL: Do NOT include line-number prefixes from read_file output (like '  42 | '). Use the raw code only.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -468,6 +473,22 @@ class _ToolEngine:
         lc = content.count("\n") + (1 if content and not content.endswith("\n") else 0)
         return f"{'Updated' if existed else 'Created'}: {file_path} ({lc} lines, {os.path.getsize(resolved)} bytes)"
 
+    @staticmethod
+    def _strip_line_numbers(text: str) -> str:
+        """Strip read_file line-number prefixes (e.g. '  42 | code') and headers if present."""
+        lines = text.split("\n")
+        # Strip read_file header line: [filename — N lines, showing X–Y]
+        if lines and re.match(r"^\[.+ — \d+ lines", lines[0]):
+            lines = lines[1:]
+        if not lines:
+            return text
+        # Check if lines have the numbered prefix pattern — aggressive threshold
+        numbered = sum(1 for ln in lines if re.match(r"^\s*\d+\s*\|\s?", ln))
+        if numbered >= 1 and (numbered >= len(lines) * 0.3 or numbered >= 2):
+            stripped = [re.sub(r"^\s*\d+\s*\|\s?", "", ln) for ln in lines]
+            return "\n".join(stripped)
+        return text
+
     async def _t_edit_file(self, file_path: str, old_text: str, new_text: str) -> str:
         resolved = self._resolve(file_path)
         if self._blocked(resolved):
@@ -476,14 +497,24 @@ class _ToolEngine:
             return f"Error: Not found: {file_path}"
         with open(resolved, "r", encoding="utf-8", errors="replace") as f:
             content = f.read()
-        count = content.count(old_text)
+        # Auto-strip read_file line-number prefixes if the model copied them
+        old_clean = self._strip_line_numbers(old_text)
+        new_clean = self._strip_line_numbers(new_text)
+        was_stripped = old_clean != old_text or new_clean != new_text
+        count = content.count(old_clean)
         if count == 0:
-            return f"Error: old_text not found in {file_path}."
+            hint = " (line-number prefixes were auto-stripped)" if was_stripped else ""
+            # Try to find partial match for better error message
+            first_line = old_clean.split("\n")[0].strip()
+            if first_line and first_line in content:
+                return f"Error: old_text not found as exact block in {file_path}{hint}. First line exists but full match failed — check whitespace and context."
+            return f"Error: old_text not found in {file_path}{hint}. Read the file first and copy the exact text."
         if count > 1:
-            return f"Error: old_text matches {count} times. Add more context."
+            return f"Error: old_text matches {count} times in {file_path}. Add more context lines."
         with open(resolved, "w", encoding="utf-8") as f:
-            f.write(content.replace(old_text, new_text, 1))
-        return f"Edited: {file_path} ({old_text.count(chr(10))+1} → {new_text.count(chr(10))+1} lines)"
+            f.write(content.replace(old_clean, new_clean, 1))
+        note = " (auto-stripped line numbers)" if was_stripped else ""
+        return f"Edited: {file_path} ({old_clean.count(chr(10))+1} → {new_clean.count(chr(10))+1} lines){note}"
 
     async def _t_list_directory(self, path: str = ".") -> str:
         resolved = self._resolve(path)
@@ -687,8 +718,8 @@ class Pipe:
             description="LLM temperature (lower = more deterministic).",
         )
         MAX_TOKENS: int = Field(
-            default=16384,
-            description="Max tokens per LLM response.",
+            default=32768,
+            description="Max tokens per LLM response. Increase for thinking models that use tokens for reasoning.",
         )
         TOOL_CALL_FORMAT: str = Field(
             default="auto",
@@ -1090,6 +1121,9 @@ class Pipe:
         nudge_count = 0
         MAX_NUDGES = 5
         tools_used_this_session = False  # Track if model ever successfully used tools
+        edit_failures: dict[str, int] = {}  # file_path -> consecutive failure count
+        consecutive_empty_length = 0  # Track finish=length with 0 content
+        actions_taken: list[str] = []  # Brief log of tool actions for summary
 
         for iteration in range(self.valves.MAX_ITERATIONS):
             self._log("info", f"--- Iteration {iteration + 1}/{self.valves.MAX_ITERATIONS} ---")
@@ -1135,13 +1169,42 @@ class Pipe:
 
             # Handle truncated responses (model hit max_tokens mid-thought)
             if finish_reason == "length" and not tool_calls:
-                self._log("warning", "Response truncated (max_tokens hit) — continuing")
-                if content:
+                if not content:
+                    # Model's thinking/reasoning consumed ALL tokens — nothing produced
+                    consecutive_empty_length += 1
+                    self._log("warning",
+                              f"Empty length response #{consecutive_empty_length} — model thinking overflow")
+                    await self._debug_emit(f"THINKING OVERFLOW #{consecutive_empty_length}")
+                    if consecutive_empty_length >= 3:
+                        # Model is stuck in thinking loops — force simpler approach
+                        conversation.append({
+                            "role": "user",
+                            "content": (
+                                "IMPORTANT: Your previous responses were cut off because your "
+                                "reasoning used all available tokens. You MUST simplify your approach:\n"
+                                "1. Do NOT try to rewrite entire files in one edit_file call\n"
+                                "2. Make ONE small change at a time with edit_file (10-20 lines max)\n"
+                                "3. Or use write_file to create the complete new file in one call\n"
+                                "4. Call the tool NOW — do not plan or think further."
+                            ),
+                        })
+                    else:
+                        conversation.append({
+                            "role": "user",
+                            "content": (
+                                "Your response was cut off (thinking used all tokens). "
+                                "Take a SIMPLER action. Call ONE tool now — "
+                                "do not do extended reasoning, just act."
+                            ),
+                        })
+                else:
+                    consecutive_empty_length = 0
+                    self._log("warning", "Response truncated (max_tokens hit) — continuing")
                     conversation.append({"role": "assistant", "content": content})
-                conversation.append({
-                    "role": "user",
-                    "content": "Your response was cut off due to length. Continue from where you left off.",
-                })
+                    conversation.append({
+                        "role": "user",
+                        "content": "Your response was cut off due to length. Continue from where you left off.",
+                    })
                 continue
 
             # Auto-detect XML tool calls if no native ones
@@ -1264,6 +1327,32 @@ class Pipe:
                           result_preview=result[:300])
                 await self._debug_emit(f"Tool {tool_name}: {len(result)}ch in {elapsed:.1f}s")
 
+                # Track edit failures for stuck-loop detection
+                if tool_name == "edit_file":
+                    fp = tool_args.get("file_path", "")
+                    if result.startswith("Error:"):
+                        edit_failures[fp] = edit_failures.get(fp, 0) + 1
+                        actions_taken.append(f"edit_file({fp}) FAILED")
+                        if edit_failures[fp] >= 2:
+                            result += (
+                                "\n\n⚠️ edit_file has FAILED "
+                                f"{edit_failures[fp]} times on {fp}. "
+                                "STOP using edit_file for this file. Instead, use "
+                                "write_file to rewrite the COMPLETE file with all changes. "
+                                "Read the current file with read_file first, then call "
+                                "write_file with the full updated content."
+                            )
+                    else:
+                        edit_failures.pop(fp, None)  # Reset on success
+                        actions_taken.append(f"edit_file({fp}) OK")
+                elif tool_name == "write_file":
+                    actions_taken.append(f"write_file({tool_args.get('file_path', '')})")
+                elif tool_name == "run_command":
+                    cmd_preview = tool_args.get("command", "")[:40]
+                    actions_taken.append(f"run_command({cmd_preview})")
+                elif tool_name not in ("think", "read_file", "find_files", "list_directory"):
+                    actions_taken.append(f"{tool_name}()")
+
                 # Add result to conversation
                 if msg.get("tool_calls"):
                     conversation.append({
@@ -1293,10 +1382,21 @@ class Pipe:
                 # For XML format, use user message
                 conversation.append({"role": "user", "content": tool_reminder})
 
-        # Max iterations
+        # Max iterations — include action summary for context on "continue"
         self._log("warning", "Max iterations reached", max=self.valves.MAX_ITERATIONS)
         await self._emit(__event_emitter__, "Max iterations reached", done=True)
+        summary_parts = []
+        if actions_taken:
+            summary_parts.append("**Actions taken:** " + "; ".join(actions_taken[-10:]))
+        failed = {f: c for f, c in edit_failures.items() if c >= 2}
+        if failed:
+            summary_parts.append(
+                "**Stuck on:** " + ", ".join(f"`{f}` ({c} failures)" for f, c in failed.items())
+                + " — try asking me to rewrite these files from scratch."
+            )
+        summary = "\n\n".join(summary_parts) if summary_parts else ""
         return (
             (last_content or "")
             + "\n\n*[Reached maximum iterations. Continue the conversation for more steps.]*"
+            + (f"\n\n{summary}" if summary else "")
         )
