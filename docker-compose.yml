@@ -7,62 +7,66 @@ services:
       dockerfile: Dockerfile.openwebui-gpu
     container_name: openwebui
     ports:
-      - "127.0.0.1:3000:8080"  # Bind to localhost only
+      - "127.0.0.1:3000:8080" # Bind to localhost only
     volumes:
       - ./data/openwebui:/app/backend/data
-      - ./config:/app/config:ro  # Read-only config
-      - .:/host_project:ro  # Mount entire project for AI Stack pipe functions
+      - ./config:/app/config:ro # Read-only config
+      - .:/host_project:ro # Mount entire project for AI Stack pipe functions
     environment:
-      - OLLAMA_BASE_URL=http://localhost:11434
+      - OLLAMA_HOST=http://localhost:11434
       - USE_CUDA=true
       - USE_CUDA_DOCKER=true
       - TRANSFORMERS_CACHE=/tmp/transformers_cache
       - HF_HOME=/tmp/hf_cache
       # Performance Optimizations for faster Ollama communication
-      - AIOHTTP_CLIENT_TIMEOUT=300
+      - AIOHTTP_CLIENT_TIMEOUT=3600
       - AIOHTTP_CLIENT_TIMEOUT_MODEL_LIST=60
-      - MODELS_CACHE_TTL=10  # Cache model list for 10 seconds to reduce repeated calls
-      - ENABLE_BASE_MODELS_CACHE=true  # Cache base models for faster loading
+      - AIOHTTP_CLIENT_TIMEOUT_TOOL_CALL=3600
+      - MODELS_CACHE_TTL=10 # Cache model list for 10 seconds to reduce repeated calls
+      - ENABLE_BASE_MODELS_CACHE=true # Cache base models for faster loading
       # Reduce OpenWebUI overhead for model requests
-      - CHAT_RESPONSE_STREAM_DELTA_CHUNK_SIZE=4  # Larger chunks for better streaming performance
-      - BYPASS_MODEL_ACCESS_CONTROL=true  # Skip access control checks for faster requests
+      - CHAT_RESPONSE_STREAM_DELTA_CHUNK_SIZE=4 # Larger chunks for better streaming performance
+      - BYPASS_MODEL_ACCESS_CONTROL=true # Skip access control checks for faster requests
+      - ENABLE_OPEN_TERMINAL=true
+      - TERMINAL_SERVER_CONNECTIONS=[{"id":"open-terminal","name":"Open Terminal","url":"http://localhost:8000","key":"${OPEN_TERMINAL_API_KEY}"}]
     deploy:
       resources:
         reservations:
           devices:
             - driver: nvidia
               count: all
-              capabilities: [gpu]
+              capabilities: [ gpu ]
     restart: unless-stopped
-    pull_policy: always
+    pull_policy: build
     security_opt:
       - no-new-privileges:true
-    read_only: false  # OpenWebUI needs write access for temp files
+    read_only: false # OpenWebUI needs write access for temp files
     tmpfs:
       - /tmp:noexec,nosuid,size=100m
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080"]
-      interval: 5s
-      timeout: 3s
+      test: [ "CMD", "curl", "-f", "--max-time", "10", "http://localhost:8080/health" ]
+      interval: 15s
+      timeout: 15s
       retries: 3
+      start_period: 60s
 
   watchtower:
     image: containrrr/watchtower:latest
     container_name: watchtower
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro  # Read-only access
-      - ./scripts/post-update-hook.sh:/post-update-hook.sh:ro  # Post-update hook
-      - .:/compose-dir:ro  # Access to compose files for hook
+      - /var/run/docker.sock:/var/run/docker.sock:ro # Read-only access
+      - ./scripts/post-update-hook.sh:/post-update-hook.sh:ro # Post-update hook
+      - .:/compose-dir:ro # Access to compose files for hook
     environment:
-      - WATCHTOWER_CLEANUP=true            # remove old images
-      - WATCHTOWER_POLL_INTERVAL=120       # check every 2 minutes for testing
-      - WATCHTOWER_INCLUDE_STOPPED=false   # Only running containers
-      - WATCHTOWER_DEBUG=true              # Enable debug logging to verify container detection
-      - WATCHTOWER_RUN_ONCE=false          # Keep running
-      - WATCHTOWER_LIFECYCLE_HOOKS=true    # Enable lifecycle hooks
+      - WATCHTOWER_CLEANUP=true # remove old images
+      - WATCHTOWER_POLL_INTERVAL=120 # check every 2 minutes for testing
+      - WATCHTOWER_INCLUDE_STOPPED=false # Only running containers
+      - WATCHTOWER_DEBUG=true # Enable debug logging to verify container detection
+      - WATCHTOWER_RUN_ONCE=false # Keep running
+      - WATCHTOWER_LIFECYCLE_HOOKS=true # Enable lifecycle hooks
     restart: unless-stopped
     security_opt:
-      - no-new-privileges:true             # Prevent privilege escalation
+      - no-new-privileges:true # Prevent privilege escalation
 
   tailscale:
     build:
@@ -91,11 +95,28 @@ services:
     labels:
       - "com.centurylinklabs.watchtower.enable=false"
     healthcheck:
-      test: ["CMD", "sh", "-c", "tailscale --socket=/tmp/tailscaled.sock status >/dev/null 2>&1 && ping -c 1 8.8.8.8 >/dev/null 2>&1 && wget -q -T 3 -O /dev/null http://127.0.0.1:8080 && wget -q -T 3 -O /dev/null http://127.0.0.1:11434/api/version"]
+      test: [ "CMD", "sh", "-c", "tailscale --socket=/tmp/tailscaled.sock status >/dev/null 2>&1 && ping -c 1 8.8.8.8 >/dev/null 2>&1 && wget -q -T 3 -O /dev/null http://127.0.0.1:8080 && wget -q -T 3 -O /dev/null http://127.0.0.1:11434/api/version" ]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 60s
+
+  open-terminal:
+    image: ghcr.io/open-webui/open-terminal:latest
+    container_name: open-terminal
+    network_mode: service:openwebui
+    env_file:
+      - .env
+    environment:
+      - API_KEY=${OPEN_TERMINAL_API_KEY}
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      openwebui:
+        condition: service_healthy
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
 
   ollama:
     image: ollama/ollama:latest
@@ -107,21 +128,21 @@ services:
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
       # Optimized Ollama settings for faster response to OpenWebUI
-      - OLLAMA_KEEP_ALIVE=1200  # Keep models in memory longer (20 minutes in seconds)
+      - OLLAMA_KEEP_ALIVE=1200 # Keep models in memory longer (20 minutes in seconds)
       - OLLAMA_HOST=0.0.0.0:11434
       - OLLAMA_ORIGINS=*
-      - OLLAMA_MAX_LOADED_MODELS=2  # Allow multiple models to stay loaded
-      - OLLAMA_NUM_PARALLEL=2  # Allow parallel requests
-      - OLLAMA_FLASH_ATTENTION=1  # Enable flash attention for faster inference
+      - OLLAMA_MAX_LOADED_MODELS=2 # Allow multiple models to stay loaded
+      - OLLAMA_NUM_PARALLEL=2 # Allow parallel requests
+      - OLLAMA_FLASH_ATTENTION=1 # Enable flash attention for faster inference
     deploy:
       resources:
         reservations:
           devices:
             - driver: nvidia
               count: all
-              capabilities: [gpu]
+              capabilities: [ gpu ]
     restart: unless-stopped
-    pull_policy: always
+    pull_policy: never
     security_opt:
       - no-new-privileges:true
     depends_on:
@@ -130,7 +151,7 @@ services:
     labels:
       - "com.centurylinklabs.watchtower.enable=false"
     healthcheck:
-      test: ["CMD", "ollama", "list"]
+      test: [ "CMD", "ollama", "list" ]
       interval: 30s
       timeout: 10s
       retries: 3

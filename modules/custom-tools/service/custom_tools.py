@@ -244,8 +244,16 @@ class CustomToolsModule:
             
             user_input_lower = user_input.lower()
             
+            # Check if this is a Tailscale serve command
+            is_tailscale_serve = any(keyword in user_input_lower for keyword in ["serve", "serving", "expose", "tailscale"]) and \
+                                any(keyword in user_input_lower for keyword in ["start", "stop", "status", "lmstudio", "service", "health", "port"])
+            
+            if is_tailscale_serve:
+                # Route to tailscale_serve_pipe
+                return self._execute_tailscale_serve_pipe(request_data)
+            
             # Determine what the user wants
-            if not user_input.strip() or "available" in user_input_lower or "list" in user_input_lower:
+            elif not user_input.strip() or "available" in user_input_lower or "list" in user_input_lower:
                 # Show all available tools
                 result_data = self.discover_available_tools()
                 content = self._format_tools_inventory(result_data)
@@ -288,6 +296,70 @@ class CustomToolsModule:
                     "code": "EXECUTION_ERROR",
                     "message": str(e),
                     "retriable": True
+                },
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            }
+    
+    def _execute_tailscale_serve_pipe(self, request_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute tailscale serve pipe function"""
+        request_id = request_data.get("request_id", "unknown")
+        
+        try:
+            # Import and execute the tailscale_serve_pipe
+            import sys
+            import os
+            
+            # Environment-aware path setup
+            if os.path.exists('/host_project/scripts'):
+                pipe_path = '/host_project/scripts/ai_pipes/tailscale_serve_pipe.py'
+            else:
+                current_dir = os.path.dirname(os.path.abspath(__file__))
+                project_root = os.path.dirname(os.path.dirname(os.path.dirname(current_dir)))
+                pipe_path = os.path.join(project_root, 'scripts', 'ai_pipes', 'tailscale_serve_pipe.py')
+            
+            # Execute via subprocess to isolate execution
+            import subprocess
+            result = subprocess.run(
+                ["python", pipe_path, json.dumps(request_data)],
+                capture_output=True,
+                text=True,
+                timeout=60
+            )
+            
+            if result.returncode == 0:
+                pipe_result = json.loads(result.stdout)
+                
+                # Convert to module result format
+                return {
+                    "request_id": request_id,
+                    "module_id": "custom-tools",
+                    "status": "ok" if pipe_result.get("status") == "success" else "error",
+                    "content": pipe_result.get("message", ""),
+                    "structured_data": pipe_result,
+                    "timestamp": datetime.now(timezone.utc).isoformat()
+                }
+            else:
+                return {
+                    "request_id": request_id,
+                    "module_id": "custom-tools",
+                    "status": "error",
+                    "content": f"❌ Tailscale Serve execution failed:\n\n```\n{result.stderr}\n```",
+                    "error": {
+                        "code": "PIPE_EXECUTION_ERROR",
+                        "message": result.stderr
+                    },
+                    "timestamp": datetime.now(timezone.utc).isoformat()
+                }
+        except Exception as e:
+            logger.error(f"Error executing tailscale_serve_pipe: {e}")
+            return {
+                "request_id": request_id,
+                "module_id": "custom-tools",
+                "status": "error",
+                "content": f"❌ **Tailscale Serve Error**: {str(e)}",
+                "error": {
+                    "code": "EXECUTION_ERROR",
+                    "message": str(e)
                 },
                 "timestamp": datetime.now(timezone.utc).isoformat()
             }
