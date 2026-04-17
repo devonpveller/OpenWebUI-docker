@@ -654,6 +654,14 @@ class Pipe:
             description="Persistent memory directory.",
         )
         SHELL: str = Field(default="/bin/bash")
+        SYSTEM_PROMPT_PATH: str = Field(
+            default="",
+            description=(
+                "Path to an external system prompt markdown file. "
+                "If set and the file exists, its content replaces the built-in prompt. "
+                "Example: /host_project/tools/code-generation/code-agent-system-prompt.md"
+            ),
+        )
 
     def __init__(self):
         self.valves = self.Valves()
@@ -676,6 +684,18 @@ class Pipe:
             await emitter({"type": "status", "data": {"description": text, "done": done}})
 
     def _get_system_prompt(self) -> str:
+        # Try external file first
+        if self.valves.SYSTEM_PROMPT_PATH:
+            try:
+                with open(self.valves.SYSTEM_PROMPT_PATH, "r", encoding="utf-8") as f:
+                    external = f.read().strip()
+                if external:
+                    fmt = self.valves.TOOL_CALL_FORMAT.lower()
+                    if fmt == "xml":
+                        return external + SYSTEM_PROMPT_XML.split("## Tool Calling", 1)[-1]
+                    return external
+            except (OSError, IOError):
+                pass  # Fall back to built-in
         fmt = self.valves.TOOL_CALL_FORMAT.lower()
         if fmt == "xml":
             return SYSTEM_PROMPT_XML
