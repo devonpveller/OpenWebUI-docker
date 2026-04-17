@@ -866,6 +866,70 @@ class Pipe:
         if emitter and self.valves.EMIT_STATUS:
             await emitter({"type": "status", "data": {"description": text, "done": done}})
 
+    @staticmethod
+    def _describe_action(tool_name: str, tool_args: dict) -> str:
+        """Human-readable description of a tool call for status display."""
+        fp = tool_args.get("file_path", tool_args.get("path", ""))
+        if tool_name == "read_file":
+            sl, el = tool_args.get("start_line", 0), tool_args.get("end_line", 0)
+            rng = f" lines {sl}-{el}" if sl or el else ""
+            return f"Reading {fp}{rng}"
+        elif tool_name == "write_file":
+            c = tool_args.get("content", "")
+            lc = c.count("\n") + 1 if c else 0
+            return f"Writing {fp} ({lc} lines)"
+        elif tool_name == "edit_file":
+            old = tool_args.get("old_text", "")
+            new = tool_args.get("new_text", "")
+            ol = old.count("\n") + 1 if old else 0
+            nl = new.count("\n") + 1 if new else 0
+            return f"Editing {fp} ({ol}\u2192{nl} lines)"
+        elif tool_name == "run_command":
+            cmd = tool_args.get("command", "")[:80]
+            return f"Running: {cmd}"
+        elif tool_name == "find_files":
+            return f"Finding files: {tool_args.get('pattern', '')}"
+        elif tool_name == "grep_search":
+            return f"Searching: {tool_args.get('pattern', '')[:50]}"
+        elif tool_name == "list_directory":
+            return f"Listing {fp or '.'}"
+        elif tool_name == "think":
+            t = tool_args.get("thought", "")
+            preview = (t[:100] + "...") if len(t) > 100 else t
+            return f"Thinking: {preview}"
+        elif tool_name == "manage_todo":
+            act = tool_args.get("action", "")
+            title = tool_args.get("title", "")
+            return f"Todo: {act}" + (f" \u2014 {title}" if title else "")
+        return f"{tool_name}()"
+
+    @staticmethod
+    def _describe_result(tool_name: str, result: str) -> str:
+        """Brief human-readable result description for status display."""
+        if result.startswith("Error:"):
+            first = result.split("\n")[0][:100]
+            return f"\u2717 {first}"
+        if tool_name == "read_file":
+            m = re.match(r"\[.+ \u2014 (\d+) lines", result)
+            return f"\u2713 Read ({m.group(1)} lines)" if m else "\u2713 Read OK"
+        elif tool_name in ("write_file", "edit_file"):
+            return f"\u2713 {result.split(chr(10))[0][:100]}"
+        elif tool_name == "run_command":
+            m = re.match(r"\[exit code: (\d+)\]", result)
+            if m:
+                code = int(m.group(1))
+                return f"\u2713 Exit code {code}" if code == 0 else f"\u2717 Exit code {code}"
+            return "\u2713 Done"
+        elif tool_name == "find_files":
+            m = re.match(r"\[(\d+) files\]", result)
+            return f"\u2713 Found {m.group(1)} files" if m else "\u2713 Search done"
+        elif tool_name == "grep_search":
+            m = re.match(r"\[(\d+) matches", result)
+            return f"\u2713 {m.group(1)} matches" if m else "\u2713 No matches"
+        elif tool_name == "think":
+            return "\u2713 Thought recorded"
+        return f"\u2713 Done ({len(result)} chars)"
+
     def _get_system_prompt(self) -> str:
         # Try external file first
         if self.valves.SYSTEM_PROMPT_PATH:
@@ -1159,12 +1223,18 @@ class Pipe:
         edit_failures: dict[str, int] = {}  # file_path -> consecutive failure count
         consecutive_empty_length = 0  # Track finish=length with 0 content
         actions_taken: list[str] = []  # Brief log of tool actions for summary
+        last_tool_call_sig: str = ""  # For duplicate call detection
+        dup_call_count: int = 0
 
-        for iteration in range(self.valves.MAX_ITERATIONS):
+        try:
+          for iteration in range(self.valves.MAX_ITERATIONS):
             self._log("info", f"--- Iteration {iteration + 1}/{self.valves.MAX_ITERATIONS} ---")
+            # Show progress context in status
+            edits_done = sum(1 for a in actions_taken if "OK" in a or a.startswith("write_file"))
+            progress_ctx = f" [{edits_done} changes]" if edits_done else ""
             await self._emit(
                 __event_emitter__,
-                f"Thinking... (step {iteration + 1}/{self.valves.MAX_ITERATIONS})",
+                f"Step {iteration + 1}/{self.valves.MAX_ITERATIONS}{progress_ctx} \u2014 Thinking...",
             )
 
             # Call LLM
@@ -1319,6 +1389,14 @@ class Pipe:
                 await self._emit(__event_emitter__, "Done", done=True)
                 return content if content else last_content or "Done (no response content)."
 
+            # Show model's reasoning when it produces visible content alongside tool calls
+            if content and tool_calls:
+                preview = content[:200] + ("..." if len(content) > 200 else "")
+                await self._emit(
+                    __event_emitter__,
+                    f"Step {iteration+1} \u2014 Agent: {preview}",
+                )
+
             last_content = content
             tools_used_this_session = True
 
@@ -1346,21 +1424,61 @@ class Pipe:
                     tool_args = tool_args_raw
 
                 self._log("info", f"TOOL CALL: {tool_name}", args=tool_args)
+                action_desc = self._describe_action(tool_name, tool_args)
                 await self._emit(
                     __event_emitter__,
-                    f"→ {tool_name}({', '.join(f'{k}={repr(v)[:50]}' for k, v in tool_args.items())})",
+                    f"Step {iteration+1} \u2014 {action_desc}",
                 )
+
+                # Duplicate call detection — prevent wasting iterations
+                call_sig = json.dumps({"t": tool_name, "a": tool_args}, sort_keys=True)
+                if call_sig == last_tool_call_sig:
+                    dup_call_count += 1
+                    if dup_call_count >= 2:
+                        dup_guidance = (
+                            f"Error: You have called {tool_name} with identical arguments "
+                            f"{dup_call_count + 1} times in a row. STOP repeating this call. "
+                            "Move on to your next action — edit_file, write_file, or run_command."
+                        )
+                        self._log("warning", "Duplicate tool call detected",
+                                  tool=tool_name, count=dup_call_count + 1)
+                        await self._emit(
+                            __event_emitter__,
+                            f"Step {iteration+1} \u2014 \u26a0 Duplicate call blocked",
+                        )
+                        if msg.get("tool_calls"):
+                            conversation.append(msg)
+                            conversation.append({
+                                "role": "tool",
+                                "tool_call_id": tool_id,
+                                "content": dup_guidance,
+                            })
+                        else:
+                            conversation.append({"role": "assistant", "content": content or ""})
+                            conversation.append({
+                                "role": "user",
+                                "content": f"<tool_result name=\"{tool_name}\">\n{dup_guidance}\n</tool_result>",
+                            })
+                        continue
+                else:
+                    dup_call_count = 0
+                last_tool_call_sig = call_sig
 
                 # Execute
                 t0 = time.time()
                 result = await engine.execute(tool_name, tool_args)
                 elapsed = time.time() - t0
 
+                result_desc = self._describe_result(tool_name, result)
                 self._log("info", f"TOOL RESULT: {tool_name}",
                           elapsed_s=round(elapsed, 2),
                           result_chars=len(result),
                           result_preview=result[:300])
                 await self._debug_emit(f"Tool {tool_name}: {len(result)}ch in {elapsed:.1f}s")
+                await self._emit(
+                    __event_emitter__,
+                    f"Step {iteration+1} \u2014 {result_desc}",
+                )
 
                 # Track edit failures for stuck-loop detection
                 if tool_name == "edit_file":
@@ -1417,21 +1535,34 @@ class Pipe:
                 # For XML format, use user message
                 conversation.append({"role": "user", "content": tool_reminder})
 
-        # Max iterations — include action summary for context on "continue"
-        self._log("warning", "Max iterations reached", max=self.valves.MAX_ITERATIONS)
-        await self._emit(__event_emitter__, "Max iterations reached", done=True)
-        summary_parts = []
-        if actions_taken:
-            summary_parts.append("**Actions taken:** " + "; ".join(actions_taken[-10:]))
-        failed = {f: c for f, c in edit_failures.items() if c >= 2}
-        if failed:
-            summary_parts.append(
-                "**Stuck on:** " + ", ".join(f"`{f}` ({c} failures)" for f, c in failed.items())
-                + " — try asking me to rewrite these files from scratch."
+          # Max iterations — include action summary for context on "continue"
+          self._log("warning", "Max iterations reached", max=self.valves.MAX_ITERATIONS)
+          await self._emit(__event_emitter__, "Max iterations reached", done=True)
+          summary_parts = []
+          if actions_taken:
+              summary_parts.append("**Actions taken:** " + "; ".join(actions_taken[-10:]))
+          failed = {f: c for f, c in edit_failures.items() if c >= 2}
+          if failed:
+              summary_parts.append(
+                  "**Stuck on:** " + ", ".join(f"`{f}` ({c} failures)" for f, c in failed.items())
+                  + " — try asking me to rewrite these files from scratch."
+              )
+          summary = "\n\n".join(summary_parts) if summary_parts else ""
+          return (
+              (last_content or "")
+              + "\n\n*[Reached maximum iterations. Continue the conversation for more steps.]*"
+              + (f"\n\n{summary}" if summary else "")
+          )
+
+        except asyncio.CancelledError:
+            self._log("info", "Agent interrupted by user",
+                      iteration=iteration + 1, actions=len(actions_taken))
+            await self._emit(__event_emitter__, "Interrupted", done=True)
+            summary = ""
+            if actions_taken:
+                summary = "\n\n**Progress before interruption:** " + "; ".join(actions_taken[-10:])
+            return (
+                (last_content or "")
+                + "\n\n*[Interrupted. You can continue or redirect with a new message.]*"
+                + summary
             )
-        summary = "\n\n".join(summary_parts) if summary_parts else ""
-        return (
-            (last_content or "")
-            + "\n\n*[Reached maximum iterations. Continue the conversation for more steps.]*"
-            + (f"\n\n{summary}" if summary else "")
-        )
