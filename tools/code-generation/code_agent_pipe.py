@@ -166,6 +166,36 @@ what you plan to do without calling tools is a critical failure.
 - Don't add type annotations or docstrings to code you didn't write
 - Handle errors only at system boundaries
 - Use idiomatic patterns for the language
+
+## Software Engineering Principles
+
+Apply these to ALL code you write or modify:
+
+**SOLID**: Single Responsibility (one purpose per function/class), Open/Closed \
+(extend via abstraction, not modification), Liskov Substitution (subtypes honor contracts), \
+Interface Segregation (small focused interfaces), Dependency Inversion (depend on abstractions).
+
+**Clean Code**: Descriptive names (verbs for functions, nouns for variables), \
+functions under 20 lines, max 3 parameters, early returns over deep nesting, \
+no magic numbers, self-documenting code.
+
+**Encapsulation**: Hide implementation details, private by default, immutable when possible.
+
+**DRY**: Extract on third occurrence. Don't over-abstract prematurely.
+
+**YAGNI**: Build only what's needed now. Delete dead code.
+
+## .agent/ Project Memory
+
+Your workspace contains a `.agent/` folder for persistent project context:
+- `.agent/context.md` — Auto-loaded at start. Contains prior session state.
+- `.agent/skills/*.md` — Skill files loaded into your instructions.
+
+**On every conversation start**: Your context and skills are already loaded (above).
+**Creating skills**: Write new `.md` files to `.agent/skills/` when you discover reusable \
+patterns. Example: `write_file(".agent/skills/react-patterns.md", "# React Patterns\\n...")`. \
+The skill will be active in the next conversation.
+**Context is auto-saved** at the end of each session.
 """
 
 SYSTEM_PROMPT_XML = (
@@ -375,6 +405,72 @@ TOOL_DEFINITIONS = [
         },
     },
 ]
+
+
+# =============================================================================
+# DEFAULT SKILL — Seeded into .agent/skills/ on first run
+# =============================================================================
+
+_DEFAULT_CLEAN_CODE_SKILL = """\
+# Clean Code & Software Engineering Principles
+
+## Always Applies
+These principles apply to ALL code you write or modify, in any language.
+
+## SOLID Principles
+
+- **Single Responsibility**: Each function/class/module does ONE thing well. If you can't describe what it does in one sentence without "and", split it.
+- **Open/Closed**: Design for extension without modification. Use interfaces, callbacks, configuration — not editing existing working code to add features.
+- **Liskov Substitution**: Subtypes must be substitutable for their base types. Don't override methods to throw "not supported" — that violates the contract.
+- **Interface Segregation**: Don't force consumers to depend on methods they don't use. Prefer small, focused interfaces over large ones.
+- **Dependency Inversion**: Depend on abstractions, not concretions. Pass dependencies in (constructor, function params) rather than creating them internally.
+
+## Naming Conventions
+
+- **Variables**: Descriptive nouns that reveal intent. `userCount` not `n`, `isVisible` not `flag`, `maxRetries` not `num`.
+- **Functions**: Verb phrases that describe the action. `calculateTotal()` not `doStuff()`, `validateEmail()` not `check()`.
+- **Booleans**: Prefix with `is`, `has`, `can`, `should`. `isValid` not `valid`, `hasPermission` not `permission`.
+- **Constants**: UPPER_SNAKE_CASE with meaningful names. `MAX_RETRY_COUNT` not `MAX` or `CONST_3`.
+- **Classes**: PascalCase nouns. `UserRepository` not `UR` or `UserRepoManagerHelper`.
+- **Files**: Match the primary export. `user-service.js` contains `UserService`.
+- **No abbreviations** unless universally understood (`id`, `url`, `html`). Write `configuration` not `cfg`, `message` not `msg`.
+
+## Code Readability
+
+- **Functions under 20 lines** — if longer, extract sub-functions with descriptive names.
+- **Max 3 parameters** per function. Use an options/config object for more.
+- **No magic numbers** — use named constants. `if (attempts > MAX_RETRIES)` not `if (attempts > 3)`.
+- **Early returns** over deep nesting. Guard clauses at the top, happy path at the bottom.
+- **Consistent formatting** — match the existing project style exactly.
+- **Self-documenting code** — if you need a comment to explain *what* the code does, rename things instead. Comments explain *why*, not *what*.
+
+## Encapsulation
+
+- **Hide implementation details** — expose only what consumers need.
+- **Private by default** — make fields/methods public only when there's a reason.
+- **Immutable when possible** — prefer `const`/`readonly`/`final`. Mutate only when necessary.
+- **Data + behavior together** — don't create "data bags" with separate "manager" classes. Put behavior on the objects that own the data.
+
+## Error Handling
+
+- **Fail fast** — validate inputs at boundaries, not deep inside.
+- **Specific errors** — catch specific exceptions, not bare `catch`. Never swallow errors silently.
+- **Error messages that help** — include what went wrong, what was expected, and how to fix it.
+- **No error handling for impossible states** — if your types prevent it, don't check for it.
+
+## DRY & YAGNI
+
+- **Extract on the third occurrence** — first: write it, second: note it, third: extract.
+- **Don't over-abstract** — premature abstraction is worse than duplication.
+- **Build only what's needed now** — no speculative features.
+- **Delete dead code** — commented-out code and unused functions are noise.
+
+## Testing Mindset
+
+- **Write testable code** — if it's hard to test, the design needs improvement.
+- **Test behavior, not implementation** — tests should pass even if internals change.
+- **Descriptive test names** — `test_expired_coupon_returns_zero_discount` not `test_coupon_3`.
+"""
 
 
 # =============================================================================
@@ -949,8 +1045,111 @@ class Pipe:
         fmt = self.valves.TOOL_CALL_FORMAT.lower()
         self._log("debug", "Using built-in system prompt", format=fmt)
         if fmt == "xml":
-            return SYSTEM_PROMPT_XML
-        return SYSTEM_PROMPT_NATIVE
+            base = SYSTEM_PROMPT_XML
+        else:
+            base = SYSTEM_PROMPT_NATIVE
+
+        # Append .agent context and skills
+        agent_context = self._load_agent_context()
+        if agent_context:
+            base += "\n\n" + agent_context
+        return base
+
+    def _load_agent_context(self) -> str:
+        """Load .agent/context.md and .agent/skills/*.md from workspace."""
+        ws = self.valves.WORKSPACE_PATH
+        agent_dir = os.path.join(ws, ".agent")
+        parts = []
+
+        # Load context.md
+        ctx_path = os.path.join(agent_dir, "context.md")
+        if os.path.isfile(ctx_path):
+            try:
+                with open(ctx_path, "r", encoding="utf-8") as f:
+                    ctx = f.read().strip()
+                if ctx and "No prior sessions" not in ctx and "(auto-updated by Code Agent)_\n\n## Current State\n\nNew project" not in ctx:
+                    parts.append(f"## Project Context (from .agent/context.md)\n\n{ctx}")
+                    self._log("debug", "Loaded .agent/context.md", chars=len(ctx))
+            except (OSError, IOError):
+                pass
+
+        # Load skills
+        skills_dir = os.path.join(agent_dir, "skills")
+        if os.path.isdir(skills_dir):
+            skill_files = sorted(f for f in os.listdir(skills_dir) if f.endswith(".md") and f != "README.md")
+            for sf in skill_files:
+                try:
+                    with open(os.path.join(skills_dir, sf), "r", encoding="utf-8") as f:
+                        skill = f.read().strip()
+                    if skill:
+                        parts.append(f"## Skill: {sf[:-3]}\n\n{skill}")
+                        self._log("debug", f"Loaded skill: {sf}", chars=len(skill))
+                except (OSError, IOError):
+                    pass
+
+        if parts:
+            return "\n---\n\n# Agent Context & Skills\n\n" + "\n\n---\n\n".join(parts)
+        return ""
+
+    def _save_agent_context(self, actions_taken: list[str], edit_failures: dict, user_request: str = ""):
+        """Auto-update .agent/context.md with session summary."""
+        agent_dir = os.path.join(self.valves.WORKSPACE_PATH, ".agent")
+        ctx_path = os.path.join(agent_dir, "context.md")
+        try:
+            os.makedirs(agent_dir, exist_ok=True)
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+            lines = [f"# Project Context\n", f"\n_Last updated: {ts}_\n"]
+
+            if user_request:
+                lines.append(f"\n## Last Session\n\n**Request:** {user_request[:200]}\n")
+            if actions_taken:
+                lines.append("\n**Actions:**\n")
+                for a in actions_taken[-15:]:
+                    lines.append(f"- {a}\n")
+
+            failed = {f: c for f, c in edit_failures.items() if c >= 2}
+            if failed:
+                lines.append("\n## Known Issues\n")
+                for f, c in failed.items():
+                    lines.append(f"- `{f}` had {c} edit failures — may need full rewrite\n")
+
+            ws = self.valves.WORKSPACE_PATH
+            if os.path.isdir(ws):
+                all_files = []
+                for root, dirs, files in os.walk(ws):
+                    dirs[:] = [d for d in dirs if d not in ('.agent', '__pycache__', 'node_modules', '.git')]
+                    for f in files:
+                        rel = os.path.relpath(os.path.join(root, f), ws)
+                        all_files.append(rel)
+                if all_files:
+                    lines.append("\n## Workspace Files\n")
+                    for f in sorted(all_files)[:30]:
+                        lines.append(f"- {f}\n")
+                    if len(all_files) > 30:
+                        lines.append(f"- ... and {len(all_files) - 30} more\n")
+
+            with open(ctx_path, "w", encoding="utf-8") as f:
+                f.writelines(lines)
+            self._log("debug", "Saved .agent/context.md", actions=len(actions_taken))
+        except (OSError, IOError) as e:
+            self._log("warning", "Failed to save .agent/context.md", error=str(e))
+
+    def _ensure_agent_dir(self):
+        """Create .agent/ with defaults if it doesn't exist."""
+        agent_dir = os.path.join(self.valves.WORKSPACE_PATH, ".agent")
+        skills_dir = os.path.join(agent_dir, "skills")
+        if not os.path.isdir(agent_dir):
+            try:
+                os.makedirs(skills_dir, exist_ok=True)
+                with open(os.path.join(agent_dir, "context.md"), "w", encoding="utf-8") as f:
+                    f.write("# Project Context\n\n_Last updated: (auto-updated by Code Agent)_\n\n"
+                            "## Current State\n\nNew project. No prior sessions.\n")
+                # Seed default clean-code skill
+                with open(os.path.join(skills_dir, "clean-code.md"), "w", encoding="utf-8") as f:
+                    f.write(_DEFAULT_CLEAN_CODE_SKILL)
+                self._log("info", "Created .agent/ directory with default skills", path=agent_dir)
+            except (OSError, IOError) as e:
+                self._log("warning", "Failed to create .agent/", error=str(e))
 
     async def _call_llm(self, messages: list[dict], use_tools: bool = True) -> Optional[dict]:
         if httpx is None:
@@ -1193,6 +1392,9 @@ class Pipe:
             f"fmt={self.valves.TOOL_CALL_FORMAT} url={self.valves.API_BASE_URL}"
         )
 
+        # Ensure .agent/ directory exists with defaults
+        self._ensure_agent_dir()
+
         # Validate configuration
         if not self.valves.MODEL_ID:
             self._log("error", "MODEL_ID not configured")
@@ -1225,6 +1427,7 @@ class Pipe:
         actions_taken: list[str] = []  # Brief log of tool actions for summary
         last_tool_call_sig: str = ""  # For duplicate call detection
         dup_call_count: int = 0
+        user_request = messages[-1].get("content", "")[:200] if messages else ""
 
         try:
           for iteration in range(self.valves.MAX_ITERATIONS):
@@ -1387,6 +1590,7 @@ class Pipe:
                     f"{nudge_count} nudges, tools_used={tools_used_this_session}"
                 )
                 await self._emit(__event_emitter__, "Done", done=True)
+                self._save_agent_context(actions_taken, edit_failures, user_request)
                 return content if content else last_content or "Done (no response content)."
 
             # Show model's reasoning when it produces visible content alongside tool calls
@@ -1538,6 +1742,7 @@ class Pipe:
           # Max iterations — include action summary for context on "continue"
           self._log("warning", "Max iterations reached", max=self.valves.MAX_ITERATIONS)
           await self._emit(__event_emitter__, "Max iterations reached", done=True)
+          self._save_agent_context(actions_taken, edit_failures, user_request)
           summary_parts = []
           if actions_taken:
               summary_parts.append("**Actions taken:** " + "; ".join(actions_taken[-10:]))
@@ -1558,6 +1763,7 @@ class Pipe:
             self._log("info", "Agent interrupted by user",
                       iteration=iteration + 1, actions=len(actions_taken))
             await self._emit(__event_emitter__, "Interrupted", done=True)
+            self._save_agent_context(actions_taken, edit_failures, user_request)
             summary = ""
             if actions_taken:
                 summary = "\n\n**Progress before interruption:** " + "; ".join(actions_taken[-10:])
