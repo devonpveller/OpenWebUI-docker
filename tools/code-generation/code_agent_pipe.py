@@ -745,8 +745,8 @@ class Pipe:
 
         # -- Agent behaviour --
         MAX_ITERATIONS: int = Field(
-            default=25,
-            description="Maximum tool-call loop iterations per request.",
+            default=50,
+            description="Maximum tool-call loop iterations per request. Safety ceiling — agent exits naturally when done.",
         )
         TEMPERATURE: float = Field(
             default=0.1,
