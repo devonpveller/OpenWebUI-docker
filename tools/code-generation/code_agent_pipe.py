@@ -187,40 +187,46 @@ no magic numbers, self-documenting code.
 
 ## .agent/ Project Memory
 
-Your workspace contains a `.agent/` folder for persistent project context:
-- `.agent/context.md` — Auto-loaded at start. Contains prior session state.
-- `.agent/skills/*.md` — Skill files loaded into your instructions.
+Your workspace has a `.agent/` directory for persistent context across sessions. \
+This system mirrors modern agent memory patterns (similar to CLAUDE.md + auto memory).
 
-**On every conversation start**: Your context and skills are already loaded (above).
-**Creating skills**: Write new `.md` files to `.agent/skills/` when you discover reusable \
-patterns. Example: `write_file(".agent/skills/react-patterns.md", "# React Patterns\\n...")`. \
-The skill will be active in the next conversation.
-**Context is auto-saved** at the end of each session.
+### What's loaded (you already have this context):
+- `.agent/PROJECT.md` — Project overview, conventions, architecture. Updated when you \
+make structural changes. **Keep this accurate.**
+- `.agent/context.md` — Session history with recent actions. Auto-maintained.
+- `.agent/skills/*.md` — Coding patterns and reusable knowledge. Loaded every session.
+- Saved memories — Cross-session notes from `save_memory()`.
+
+### Your responsibilities:
+1. **Update PROJECT.md** when you change project architecture, add dependencies, \
+create new modules, or establish conventions. Use `edit_file` or `write_file` on \
+`.agent/PROJECT.md` to keep it current. Keep it under 200 lines.
+2. **Create skills** when you discover a reusable pattern: \
+`write_file(".agent/skills/react-patterns.md", "# React Patterns\\n...")`. \
+Skills are loaded in every future session automatically.
+3. **Save memories** for cross-session context: \
+`save_memory("api-conventions", "REST endpoints use camelCase...")`.
+4. **Context is auto-saved** — session actions are logged automatically after each session.
+
+### When to create/update:
+- New file or folder created → update PROJECT.md file listing
+- New dependency added → update PROJECT.md dependencies section
+- Pattern discovered (naming, error handling, etc.) → create a skill
+- Non-obvious decision made → save_memory("decisions", "chose X because...")
 
 ## Autonomous Documentation & Logging
 
 You are expected to proactively maintain project documentation — not just when asked.
 
 ### On EVERY new project or first conversation:
-1. Call `recall_memory()` to check for existing project notes.
-2. If the workspace has no `README.md`, **create one** with: project purpose, how to run it, \
-file structure, and key decisions.
+1. Check if `PROJECT.md` or `README.md` exists — if not, **create one** with: project purpose, \
+how to run it, file structure, and key decisions.
+2. Call `recall_memory()` to check for existing project notes.
 
 ### After completing significant work:
-1. **Update README.md** — keep it accurate. If you added files, changed architecture, \
-or added dependencies, update the README.
-2. **Save conventions** — when you discover or establish project patterns (naming, structure, \
-frameworks), call `save_memory("conventions", ...)` so future sessions follow the same patterns.
-3. **Log decisions** — for non-obvious choices (why framework X over Y, why this architecture), \
-add a brief note to `.agent/context.md` or `save_memory("decisions", ...)`.
-4. **Create skills** — when you solve a recurring problem or establish a reusable pattern, \
-write it to `.agent/skills/` so future conversations benefit. \
-Example: after building a React project, create `.agent/skills/react-patterns.md`.
-
-### Changelog discipline:
-- When modifying existing multi-file projects, maintain a brief changelog at the top of \
-README.md or in a CHANGELOG.md.
-- Format: `## [date] — Brief description` with bullet points of what changed.
+1. **Update PROJECT.md** if you changed architecture or added files.
+2. **Save conventions** — call `save_memory("conventions", ...)` for project patterns.
+3. **Create skills** — write to `.agent/skills/` for reusable patterns.
 
 ### What to document automatically (no user prompt needed):
 - Project setup instructions (how to run, build, test)
@@ -1130,19 +1136,37 @@ class Pipe:
         return base
 
     def _load_agent_context(self) -> str:
-        """Load .agent/context.md and .agent/skills/*.md from workspace."""
+        """Load .agent/PROJECT.md, context.md, and skills/*.md from workspace."""
         ws = self.valves.WORKSPACE_PATH
         agent_dir = os.path.join(ws, ".agent")
         parts = []
 
-        # Load context.md
+        # Load PROJECT.md (equivalent to CLAUDE.md — project overview and conventions)
+        project_path = os.path.join(agent_dir, "PROJECT.md")
+        if os.path.isfile(project_path):
+            try:
+                with open(project_path, "r", encoding="utf-8") as f:
+                    # Cap at 200 lines to keep context tight (matches Claude Code pattern)
+                    project_lines = f.readlines()[:200]
+                    project = "".join(project_lines).strip()
+                if project:
+                    parts.append(f"## Project (from .agent/PROJECT.md)\n\n{project}")
+                    self._log("debug", "Loaded .agent/PROJECT.md",
+                              chars=len(project), lines=len(project_lines))
+            except (OSError, IOError):
+                pass
+
+        # Load context.md (session history — equivalent to auto memory)
         ctx_path = os.path.join(agent_dir, "context.md")
         if os.path.isfile(ctx_path):
             try:
                 with open(ctx_path, "r", encoding="utf-8") as f:
                     ctx = f.read().strip()
-                if ctx and "No prior sessions" not in ctx and "(auto-updated by Code Agent)_\n\n## Current State\n\nNew project" not in ctx:
-                    parts.append(f"## Project Context (from .agent/context.md)\n\n{ctx}")
+                if ctx and "No sessions yet" not in ctx:
+                    # Only include last ~3000 chars of session history to save context
+                    if len(ctx) > 3000:
+                        ctx = "...\n" + ctx[-3000:]
+                    parts.append(f"## Recent Sessions (from .agent/context.md)\n\n{ctx}")
                     self._log("debug", "Loaded .agent/context.md", chars=len(ctx))
             except (OSError, IOError):
                 pass
@@ -1150,7 +1174,8 @@ class Pipe:
         # Load skills
         skills_dir = os.path.join(agent_dir, "skills")
         if os.path.isdir(skills_dir):
-            skill_files = sorted(f for f in os.listdir(skills_dir) if f.endswith(".md") and f != "README.md")
+            skill_files = sorted(f for f in os.listdir(skills_dir)
+                                 if f.endswith(".md") and f != "README.md")
             for sf in skill_files:
                 try:
                     with open(os.path.join(skills_dir, sf), "r", encoding="utf-8") as f:
@@ -1278,22 +1303,173 @@ class Pipe:
         except (OSError, IOError) as e:
             self._log("warning", "Failed to save .agent/context.md", error=str(e))
 
+    def _auto_save_session(self, engine, actions_taken: list[str],
+                           edit_failures: dict, user_request: str):
+        """Programmatic post-session memory save (runs synchronously, no LLM needed).
+        Saves a session summary to MEMORY_DIR and refreshes PROJECT.md file listing."""
+        try:
+            ts_key = datetime.now().strftime("%Y%m%d-%H%M")
+            edits = [a for a in actions_taken if "OK" in a or a.startswith("write_file")]
+            reads = [a for a in actions_taken if a.startswith("read_file")]
+            searches = [a for a in actions_taken if a.startswith("grep_search")]
+
+            # Build meaningful session summary
+            parts = [f"Request: {user_request[:150]}"]
+            if edits:
+                parts.append(f"Changed: {'; '.join(e[:60] for e in edits[:5])}")
+            if reads:
+                # Extract unique filenames from read actions
+                read_files = set()
+                for r in reads:
+                    m = re.match(r"read_file\((.+?)\)", r)
+                    if m:
+                        read_files.add(os.path.basename(m.group(1)))
+                if read_files:
+                    parts.append(f"Analyzed: {', '.join(sorted(read_files)[:8])}")
+            failed = {f: c for f, c in edit_failures.items() if c >= 2}
+            if failed:
+                parts.append(f"Issues: {', '.join(f'{f} ({c} failures)' for f, c in failed.items())}")
+
+            brief = "\n".join(parts)
+
+            # Save to MEMORY_DIR
+            mem_dir = self.valves.MEMORY_DIR
+            os.makedirs(mem_dir, exist_ok=True)
+            mem_path = os.path.join(mem_dir, f"session-{ts_key}.md")
+            with open(mem_path, "w", encoding="utf-8") as f:
+                f.write(f"# Session {ts_key}\n_Saved: {datetime.now(timezone.utc).isoformat()}_\n\n{brief}")
+            self._log("debug", "Auto-saved session memory", key=f"session-{ts_key}")
+
+            # Refresh PROJECT.md file listing if files were created
+            if any(a.startswith("write_file") for a in actions_taken):
+                project_md = os.path.join(self.valves.WORKSPACE_PATH, ".agent", "PROJECT.md")
+                if os.path.isfile(project_md):
+                    self._generate_project_md(project_md)
+                    self._log("debug", "Refreshed PROJECT.md after file creation")
+
+            # Prune old session memories (keep last 20)
+            if os.path.isdir(mem_dir):
+                session_files = sorted(
+                    [f for f in os.listdir(mem_dir) if f.startswith("session-") and f.endswith(".md")],
+                    reverse=True
+                )
+                for old_f in session_files[20:]:
+                    try:
+                        os.remove(os.path.join(mem_dir, old_f))
+                    except OSError:
+                        pass
+
+        except Exception as e:
+            self._log("warning", "Auto-save session failed", error=str(e))
+
     def _ensure_agent_dir(self):
-        """Create .agent/ with defaults if it doesn't exist."""
+        """Initialize .agent/ directory with project analysis on first run."""
         agent_dir = os.path.join(self.valves.WORKSPACE_PATH, ".agent")
         skills_dir = os.path.join(agent_dir, "skills")
-        if not os.path.isdir(agent_dir):
+        project_md = os.path.join(agent_dir, "PROJECT.md")
+        was_new = not os.path.isdir(agent_dir)
+
+        if was_new:
             try:
                 os.makedirs(skills_dir, exist_ok=True)
                 with open(os.path.join(agent_dir, "context.md"), "w", encoding="utf-8") as f:
-                    f.write("# Project Context\n\n_Last updated: (auto-updated by Code Agent)_\n\n"
-                            "## Current State\n\nNew project. No prior sessions.\n")
+                    f.write("# Session History\n\n_No sessions yet._\n")
                 # Seed default clean-code skill
                 with open(os.path.join(skills_dir, "clean-code.md"), "w", encoding="utf-8") as f:
                     f.write(_DEFAULT_CLEAN_CODE_SKILL)
                 self._log("info", "Created .agent/ directory with default skills", path=agent_dir)
             except (OSError, IOError) as e:
                 self._log("warning", "Failed to create .agent/", error=str(e))
+
+        # Generate or refresh PROJECT.md by scanning the workspace
+        if not os.path.isfile(project_md) or was_new:
+            self._generate_project_md(project_md)
+
+    def _generate_project_md(self, project_md_path: str):
+        """Scan workspace and generate .agent/PROJECT.md with file listing and conventions."""
+        ws = self.valves.WORKSPACE_PATH
+        if not os.path.isdir(ws):
+            return
+        try:
+            # Collect workspace structure
+            all_files: list[str] = []
+            extensions: dict[str, int] = {}
+            for root, dirs, files in os.walk(ws):
+                dirs[:] = [d for d in dirs
+                           if d not in ('.agent', '__pycache__', 'node_modules', '.git',
+                                        'venv', '.venv', 'dist', 'build')]
+                for f in files:
+                    rel = os.path.relpath(os.path.join(root, f), ws)
+                    all_files.append(rel)
+                    ext = os.path.splitext(f)[1].lower()
+                    if ext:
+                        extensions[ext] = extensions.get(ext, 0) + 1
+
+            # Detect project type from file patterns
+            project_type = "Unknown"
+            has_files = {os.path.basename(f).lower() for f in all_files}
+            if "package.json" in has_files:
+                project_type = "JavaScript/Node.js"
+            elif "requirements.txt" in has_files or "pyproject.toml" in has_files or "setup.py" in has_files:
+                project_type = "Python"
+            elif "cargo.toml" in has_files:
+                project_type = "Rust"
+            elif "go.mod" in has_files:
+                project_type = "Go"
+            elif "pom.xml" in has_files or "build.gradle" in has_files:
+                project_type = "Java"
+            elif any(f.endswith(".html") for f in all_files):
+                project_type = "Web (HTML/CSS/JS)"
+
+            # Detect common frameworks
+            frameworks: list[str] = []
+            for f in all_files:
+                bn = os.path.basename(f).lower()
+                if bn == "next.config.js" or bn == "next.config.mjs":
+                    frameworks.append("Next.js")
+                elif bn == "vite.config.js" or bn == "vite.config.ts":
+                    frameworks.append("Vite")
+                elif bn == "tailwind.config.js":
+                    frameworks.append("Tailwind CSS")
+                elif bn == "tsconfig.json":
+                    frameworks.append("TypeScript")
+                elif bn == "docker-compose.yml":
+                    frameworks.append("Docker")
+                elif bn == ".eslintrc.js" or bn == "eslint.config.js":
+                    frameworks.append("ESLint")
+
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+            lines = [
+                f"# Project Overview\n",
+                f"\n_Auto-generated: {ts} | Update this file when architecture changes._\n",
+                f"\n## Type\n\n{project_type}\n",
+            ]
+            if frameworks:
+                lines.append(f"\n## Frameworks\n\n{', '.join(sorted(set(frameworks)))}\n")
+
+            # Top extensions
+            top_ext = sorted(extensions.items(), key=lambda x: -x[1])[:8]
+            if top_ext:
+                lines.append("\n## File Types\n")
+                for ext, count in top_ext:
+                    lines.append(f"- `{ext}`: {count} files\n")
+
+            # File tree (max 40 files)
+            lines.append("\n## Files\n")
+            for f in sorted(all_files)[:40]:
+                lines.append(f"- {f}\n")
+            if len(all_files) > 40:
+                lines.append(f"- ... and {len(all_files) - 40} more\n")
+
+            lines.append("\n## Conventions\n\n_Add project conventions here as you discover them._\n")
+            lines.append("\n## How to Run\n\n_Add build/run/test commands here._\n")
+
+            with open(project_md_path, "w", encoding="utf-8") as f:
+                f.writelines(lines)
+            self._log("info", "Generated .agent/PROJECT.md",
+                      files=len(all_files), type=project_type)
+        except (OSError, IOError) as e:
+            self._log("warning", "Failed to generate PROJECT.md", error=str(e))
 
     async def _call_llm(self, messages: list[dict], use_tools: bool = True) -> Optional[dict]:
         if httpx is None:
@@ -1562,14 +1738,25 @@ class Pipe:
         # Build clean conversation (avoids replaying stale tool history)
         conversation = self._build_conversation(messages)
 
-        # Show startup context — what skills/context were loaded
-        agent_dir = os.path.join(self.valves.WORKSPACE_PATH, ".agent", "skills")
-        if os.path.isdir(agent_dir):
-            skills = [f[:-3] for f in os.listdir(agent_dir)
+        # Show startup context — what was loaded
+        agent_base = os.path.join(self.valves.WORKSPACE_PATH, ".agent")
+        startup_items: list[str] = []
+        if os.path.isfile(os.path.join(agent_base, "PROJECT.md")):
+            startup_items.append("project")
+        skills_dir = os.path.join(agent_base, "skills")
+        if os.path.isdir(skills_dir):
+            skills = [f[:-3] for f in os.listdir(skills_dir)
                       if f.endswith(".md") and f != "README.md"]
             if skills:
-                await self._emit(__event_emitter__,
-                                 f"\U0001f4da Skills: {', '.join(skills)}")
+                startup_items.append(f"skills: {', '.join(skills)}")
+        mem_dir = self.valves.MEMORY_DIR
+        if os.path.isdir(mem_dir):
+            mem_count = sum(1 for f in os.listdir(mem_dir) if f.endswith(".md"))
+            if mem_count:
+                startup_items.append(f"{mem_count} memories")
+        if startup_items:
+            await self._emit(__event_emitter__,
+                             f"\U0001f4da Loaded: {' | '.join(startup_items)}")
 
         last_content = ""
         nudge_count = 0
@@ -1754,41 +1941,40 @@ class Pipe:
 
                 # Post-completion documentation pass: nudge model to save a memory
                 # if it used tools but never called save_memory during the session
-                did_doc = any("save_memory" in a for a in actions_taken)
+                did_doc = any("save_memory" in a or ".agent/" in a for a in actions_taken)
                 if tools_used_this_session and not did_doc and not getattr(self, '_doc_nudge_done', False):
                     self._doc_nudge_done = True
                     edits = [a for a in actions_taken if "OK" in a or a.startswith("write_file")]
                     if edits:
+                        new_files = [a for a in actions_taken if a.startswith("write_file")]
                         await self._emit(__event_emitter__, "\U0001f4dd Documenting session...")
                         if content:
                             conversation.append({"role": "assistant", "content": content})
-                        conversation.append({
-                            "role": "user",
-                            "content": (
-                                "Good — your coding work is done. Now document what you did:\n"
-                                "1. Call save_memory('session-summary', '<2-3 sentence summary of "
-                                "what you changed and why>') to log this session.\n"
-                                "2. If you discovered a reusable coding pattern, create a skill: "
-                                "write_file('.agent/skills/<pattern-name>.md', '# Pattern Name\\n...')\n"
-                                "3. Then give your final answer.\n\n"
-                                "Keep it brief. Call save_memory now."
-                            ),
-                        })
+
+                        doc_instruction = (
+                            "Good — your coding work is done. Now document what you did:\n\n"
+                            "1. Call save_memory with a 2-3 sentence summary:\n"
+                            '   save_memory("summary", "Fixed settings menu bug in game.js by...'
+                            '")\n'
+                        )
+                        if new_files:
+                            doc_instruction += (
+                                "2. You created new files — update .agent/PROJECT.md to reflect "
+                                "the current file structure and any new conventions.\n"
+                            )
+                        doc_instruction += (
+                            "\n3. If you discovered a reusable pattern, create a skill:\n"
+                            '   write_file(".agent/skills/<name>.md", "# Pattern\\n...")\n\n'
+                            "Keep it brief. Call save_memory now, then give your final answer."
+                        )
+                        conversation.append({"role": "user", "content": doc_instruction})
                         continue
 
                 await self._emit(__event_emitter__, "\u2705 Complete", done=True)
                 self._save_agent_context(actions_taken, edit_failures, user_request)
-                # Auto-save a session memory programmatically as backup
+                # Programmatic auto-memory: save session summary + update PROJECT.md
                 if actions_taken and tools_used_this_session:
-                    try:
-                        edits = [a for a in actions_taken if "OK" in a or a.startswith("write_file")]
-                        ts_key = datetime.now().strftime("%Y%m%d-%H%M")
-                        brief = f"Request: {user_request[:100]}"
-                        if edits:
-                            brief += f"\nEdits: {'; '.join(e[:50] for e in edits[:5])}"
-                        await engine.execute("save_memory", {"key": f"session-{ts_key}", "content": brief})
-                    except Exception:
-                        pass  # Best effort
+                    self._auto_save_session(engine, actions_taken, edit_failures, user_request)
                 return content if content else last_content or "Done (no response content)."
 
             # Show model's intent when it produces visible content alongside tool calls
