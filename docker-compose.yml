@@ -165,7 +165,7 @@ services:
     volumes:
       - C:\Users\yamao\.lmstudio\models:/models:ro
     environment:
-      - LLAMA_ARG_MODEL=/models/lmstudio-community/Qwen3-Coder-30B-A3B-Instruct-GGUF/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf
+      - LLAMA_ARG_MODEL=/models/lmstudio-community/Qwen3.6-35B-A3B-GGUF/Qwen3.6-35B-A3B-Q4_K_M.gguf
       - LLAMA_ARG_CTX_SIZE=8192
       - LLAMA_ARG_N_GPU_LAYERS=99
       - LLAMA_ARG_HOST=0.0.0.0
