@@ -1190,27 +1190,72 @@ class Pipe:
         return ""
 
     def _save_agent_context(self, actions_taken: list[str], edit_failures: dict, user_request: str = ""):
-        """Auto-update .agent/context.md with session summary."""
+        """Auto-update .agent/context.md with accumulated session history."""
         agent_dir = os.path.join(self.valves.WORKSPACE_PATH, ".agent")
         ctx_path = os.path.join(agent_dir, "context.md")
         try:
             os.makedirs(agent_dir, exist_ok=True)
             ts = datetime.now().strftime("%Y-%m-%d %H:%M")
-            lines = [f"# Project Context\n", f"\n_Last updated: {ts}_\n"]
 
+            # Build current session entry
+            session_lines: list[str] = []
+            session_lines.append(f"\n### {ts}\n")
             if user_request:
-                lines.append(f"\n## Last Session\n\n**Request:** {user_request[:200]}\n")
+                session_lines.append(f"**Request:** {user_request[:200]}\n")
             if actions_taken:
-                lines.append("\n**Actions:**\n")
+                edits = [a for a in actions_taken if "OK" in a or a.startswith("write_file")]
+                reads = [a for a in actions_taken if a.startswith("read_file") or a.startswith("grep_search")]
+                cmds = [a for a in actions_taken if a.startswith("run_command")]
+                summary_parts = []
+                if edits:
+                    summary_parts.append(f"{len(edits)} edits")
+                if reads:
+                    summary_parts.append(f"{len(reads)} reads")
+                if cmds:
+                    summary_parts.append(f"{len(cmds)} commands")
+                if summary_parts:
+                    session_lines.append(f"**Summary:** {', '.join(summary_parts)}\n")
+                session_lines.append("**Actions:**\n")
                 for a in actions_taken[-15:]:
-                    lines.append(f"- {a}\n")
+                    session_lines.append(f"- {a}\n")
 
             failed = {f: c for f, c in edit_failures.items() if c >= 2}
             if failed:
-                lines.append("\n## Known Issues\n")
+                session_lines.append("**Issues:**\n")
                 for f, c in failed.items():
-                    lines.append(f"- `{f}` had {c} edit failures — may need full rewrite\n")
+                    session_lines.append(f"- `{f}` had {c} edit failures\n")
 
+            # Load existing context and preserve session history (keep last 10 sessions)
+            existing_sessions: list[str] = []
+            workspace_section = ""
+            if os.path.isfile(ctx_path):
+                try:
+                    with open(ctx_path, "r", encoding="utf-8") as f:
+                        old_content = f.read()
+                    # Extract previous session entries (marked by ### timestamp headers)
+                    import re as _re
+                    session_blocks = _re.split(r'(?=\n### \d{4}-\d{2}-\d{2})', old_content)
+                    for block in session_blocks:
+                        if block.strip().startswith("### 20"):
+                            existing_sessions.append(block)
+                    # Extract workspace files section if present
+                    ws_match = _re.search(r'(## Workspace Files\n.+)', old_content, _re.DOTALL)
+                    if ws_match:
+                        workspace_section = ws_match.group(1)
+                except (OSError, IOError):
+                    pass
+
+            # Keep only last 9 sessions + current = 10 total
+            existing_sessions = existing_sessions[-9:]
+
+            # Build full context file
+            lines = [f"# Project Context\n", f"\n_Last updated: {ts}_\n"]
+            lines.append("\n## Session History\n")
+            for s in existing_sessions:
+                lines.append(s)
+            lines.extend(session_lines)
+
+            # Refresh workspace file listing
             ws = self.valves.WORKSPACE_PATH
             if os.path.isdir(ws):
                 all_files = []
@@ -1228,7 +1273,8 @@ class Pipe:
 
             with open(ctx_path, "w", encoding="utf-8") as f:
                 f.writelines(lines)
-            self._log("debug", "Saved .agent/context.md", actions=len(actions_taken))
+            self._log("debug", "Saved .agent/context.md", actions=len(actions_taken),
+                      total_sessions=len(existing_sessions) + 1)
         except (OSError, IOError) as e:
             self._log("warning", "Failed to save .agent/context.md", error=str(e))
 
@@ -1516,6 +1562,15 @@ class Pipe:
         # Build clean conversation (avoids replaying stale tool history)
         conversation = self._build_conversation(messages)
 
+        # Show startup context — what skills/context were loaded
+        agent_dir = os.path.join(self.valves.WORKSPACE_PATH, ".agent", "skills")
+        if os.path.isdir(agent_dir):
+            skills = [f[:-3] for f in os.listdir(agent_dir)
+                      if f.endswith(".md") and f != "README.md"]
+            if skills:
+                await self._emit(__event_emitter__,
+                                 f"\U0001f4da Skills: {', '.join(skills)}")
+
         last_content = ""
         nudge_count = 0
         MAX_NUDGES = 5
@@ -1526,23 +1581,22 @@ class Pipe:
         last_tool_call_sig: str = ""  # For duplicate call detection
         dup_call_count: int = 0
         user_request = messages[-1].get("content", "")[:200] if messages else ""
-        last_status: str = ""  # Last action description for context in "Thinking..."
+        last_action_ctx: str = ""  # Brief "what just happened" for thinking status
+        self._doc_nudge_done = False  # Track post-completion documentation nudge
 
         try:
           for iteration in range(self.valves.MAX_ITERATIONS):
             self._log("info", f"--- Iteration {iteration + 1}/{self.valves.MAX_ITERATIONS} ---")
+            step = iteration + 1
             # Show progress with context from last action
             edits_done = sum(1 for a in actions_taken if "OK" in a or a.startswith("write_file"))
             if iteration == 0:
-                thinking_msg = f"\u23f3 Analyzing request..."
-            elif last_status:
-                # Keep thinking status concise — max ~60 chars from last action
-                short_status = last_status[:60] + ("..." if len(last_status) > 60 else "")
-                thinking_msg = f"\u23f3 {short_status}"
+                thinking_msg = "\u23f3 Analyzing request..."
+            elif last_action_ctx:
+                suffix = f" [{edits_done} edits]" if edits_done else ""
+                thinking_msg = f"\u23f3 Step {step} \u00b7 {last_action_ctx}{suffix}"
             else:
-                thinking_msg = f"\u23f3 Thinking..."
-            if edits_done:
-                thinking_msg += f" [{edits_done} edits]"
+                thinking_msg = f"\u23f3 Step {step} \u00b7 Thinking..."
             await self._emit(__event_emitter__, thinking_msg)
 
             # Call LLM
@@ -1550,6 +1604,7 @@ class Pipe:
             if response is None:
                 self._log("error", "LLM returned None — call failed")
                 await self._emit(__event_emitter__, "LLM call failed", done=True)
+                self._save_agent_context(actions_taken, edit_failures, user_request)
                 if last_content:
                     return last_content + "\n\n*[LLM call failed, returning partial result]*"
                 return (
@@ -1563,6 +1618,7 @@ class Pipe:
             if not choices:
                 self._log("error", "LLM returned no choices")
                 await self._emit(__event_emitter__, "Empty response", done=True)
+                self._save_agent_context(actions_taken, edit_failures, user_request)
                 return last_content or "Error: Empty response from model."
 
             msg = choices[0].get("message", {})
@@ -1695,8 +1751,44 @@ class Pipe:
                     f"Final answer: {len(content)}ch, "
                     f"{nudge_count} nudges, tools_used={tools_used_this_session}"
                 )
+
+                # Post-completion documentation pass: nudge model to save a memory
+                # if it used tools but never called save_memory during the session
+                did_doc = any("save_memory" in a for a in actions_taken)
+                if tools_used_this_session and not did_doc and not getattr(self, '_doc_nudge_done', False):
+                    self._doc_nudge_done = True
+                    edits = [a for a in actions_taken if "OK" in a or a.startswith("write_file")]
+                    if edits:
+                        await self._emit(__event_emitter__, "\U0001f4dd Documenting session...")
+                        if content:
+                            conversation.append({"role": "assistant", "content": content})
+                        conversation.append({
+                            "role": "user",
+                            "content": (
+                                "Good — your coding work is done. Now document what you did:\n"
+                                "1. Call save_memory('session-summary', '<2-3 sentence summary of "
+                                "what you changed and why>') to log this session.\n"
+                                "2. If you discovered a reusable coding pattern, create a skill: "
+                                "write_file('.agent/skills/<pattern-name>.md', '# Pattern Name\\n...')\n"
+                                "3. Then give your final answer.\n\n"
+                                "Keep it brief. Call save_memory now."
+                            ),
+                        })
+                        continue
+
                 await self._emit(__event_emitter__, "\u2705 Complete", done=True)
                 self._save_agent_context(actions_taken, edit_failures, user_request)
+                # Auto-save a session memory programmatically as backup
+                if actions_taken and tools_used_this_session:
+                    try:
+                        edits = [a for a in actions_taken if "OK" in a or a.startswith("write_file")]
+                        ts_key = datetime.now().strftime("%Y%m%d-%H%M")
+                        brief = f"Request: {user_request[:100]}"
+                        if edits:
+                            brief += f"\nEdits: {'; '.join(e[:50] for e in edits[:5])}"
+                        await engine.execute("save_memory", {"key": f"session-{ts_key}", "content": brief})
+                    except Exception:
+                        pass  # Best effort
                 return content if content else last_content or "Done (no response content)."
 
             # Show model's intent when it produces visible content alongside tool calls
@@ -1790,8 +1882,27 @@ class Pipe:
                           result_preview=result[:300])
                 await self._debug_emit(f"Tool {tool_name}: {len(result)}ch in {elapsed:.1f}s")
                 await self._emit(__event_emitter__, f"  {result_desc}")
-                # Track concise last action for "Thinking..." context
-                last_status = result_desc
+                # Build concise context for next "Thinking..." status
+                # e.g. "Read game.js", "Edited game.js ✓", "Searched isGameRunning"
+                fp = tool_args.get("file_path", tool_args.get("path", ""))
+                short_fp = os.path.basename(fp) if fp else ""
+                if tool_name == "read_file":
+                    last_action_ctx = f"Read {short_fp}" if short_fp else "Read file"
+                elif tool_name in ("edit_file", "write_file"):
+                    ok = "\u2713" if not result.startswith("Error:") else "\u2717"
+                    last_action_ctx = f"{'Edited' if tool_name == 'edit_file' else 'Wrote'} {short_fp} {ok}"
+                elif tool_name == "run_command":
+                    cmd_short = tool_args.get("command", "")[:30]
+                    ok = "\u2713" if "[exit code: 0]" in result else "\u2717"
+                    last_action_ctx = f"Ran {cmd_short} {ok}"
+                elif tool_name == "grep_search":
+                    last_action_ctx = f"Searched {tool_args.get('pattern', '')[:25]}"
+                elif tool_name == "find_files":
+                    last_action_ctx = f"Found files"
+                elif tool_name == "think":
+                    last_action_ctx = "Planning next step"
+                else:
+                    last_action_ctx = f"{tool_name} done"
 
                 # Track edit failures for stuck-loop detection
                 if tool_name == "edit_file":
@@ -1816,7 +1927,11 @@ class Pipe:
                 elif tool_name == "run_command":
                     cmd_preview = tool_args.get("command", "")[:40]
                     actions_taken.append(f"run_command({cmd_preview})")
-                elif tool_name not in ("think", "read_file", "find_files", "list_directory"):
+                elif tool_name == "read_file":
+                    actions_taken.append(f"read_file({tool_args.get('file_path', '')})")
+                elif tool_name == "grep_search":
+                    actions_taken.append(f"grep_search({tool_args.get('pattern', '')[:30]})")
+                elif tool_name not in ("think", "find_files", "list_directory"):
                     actions_taken.append(f"{tool_name}()")
 
                 # Add result to conversation
