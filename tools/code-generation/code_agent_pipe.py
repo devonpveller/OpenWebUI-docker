@@ -558,6 +558,182 @@ class _ToolEngine:
                 return False, f"'{base}' not in allowlist"
         return True, "OK"
 
+    # -- sandbox helpers --
+
+    @property
+    def _sandbox_active(self) -> bool:
+        return bool(self.v.SANDBOX_URL)
+
+    @property
+    def _sandbox_full(self) -> bool:
+        """True when ALL operations (files + commands) route through sandbox."""
+        return self._sandbox_active and self.v.SANDBOX_ENABLED
+
+    def _sandbox_headers(self) -> dict:
+        h = {"Content-Type": "application/json"}
+        if self.v.SANDBOX_API_KEY:
+            h["Authorization"] = f"Bearer {self.v.SANDBOX_API_KEY}"
+        return h
+
+    def _sandbox_resolve(self, file_path: str) -> str:
+        """Resolve a file path relative to the sandbox workspace root."""
+        sw = self.v.SANDBOX_WORKSPACE
+        if os.path.isabs(file_path):
+            return file_path
+        return f"{sw.rstrip('/')}/{file_path}"
+
+    async def _sandbox_exec(self, command: str, working_dir: str = "") -> dict:
+        """Execute a command in the sandbox container via HTTP POST.
+
+        Tries common API patterns in order:
+          POST {url}/execute
+          POST {url}/api/execute
+          POST {url}/api/v1/execute
+        Returns dict with keys: stdout, stderr, exit_code.
+        """
+        if httpx is None:
+            raise RuntimeError("httpx required for sandbox communication")
+
+        base = self.v.SANDBOX_URL.rstrip("/")
+        cwd = working_dir or self.v.SANDBOX_WORKSPACE
+        payload = {
+            "command": command,
+            "timeout": self.v.COMMAND_TIMEOUT,
+            "working_dir": cwd,
+        }
+        headers = self._sandbox_headers()
+        timeout = float(self.v.COMMAND_TIMEOUT + 15)
+
+        # Try multiple common API endpoint patterns
+        endpoints = [
+            f"{base}/execute",
+            f"{base}/api/execute",
+            f"{base}/api/v1/execute",
+        ]
+        last_error = None
+
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            for url in endpoints:
+                try:
+                    resp = await client.post(url, headers=headers, json=payload)
+                    if resp.status_code == 404:
+                        continue  # Try next endpoint
+                    resp.raise_for_status()
+                    data = resp.json()
+                    # Normalize response — handle both {stdout,stderr,exit_code}
+                    # and {output,exit_code} patterns
+                    return {
+                        "stdout": data.get("stdout", data.get("output", "")),
+                        "stderr": data.get("stderr", ""),
+                        "exit_code": data.get("exit_code", data.get("returncode", -1)),
+                    }
+                except httpx.HTTPStatusError as e:
+                    last_error = f"HTTP {e.response.status_code}: {e.response.text[:200]}"
+                    break  # Non-404 errors mean we found the endpoint but it failed
+                except httpx.ConnectError as e:
+                    last_error = f"Connection failed: {e}"
+                    break  # Can't reach server at all
+                except Exception as e:
+                    last_error = str(e)
+                    continue
+
+        raise ConnectionError(
+            f"Sandbox execute failed at {base}: {last_error}\n"
+            "Verify SANDBOX_URL is correct and the terminal server is running."
+        )
+
+    async def _sandbox_file_read(self, file_path: str) -> str:
+        """Read a file from the sandbox filesystem via HTTP."""
+        base = self.v.SANDBOX_URL.rstrip("/")
+        resolved = self._sandbox_resolve(file_path)
+        headers = self._sandbox_headers()
+
+        # Try dedicated file read API first
+        endpoints = [
+            (f"{base}/api/files/read", {"path": resolved}),
+            (f"{base}/files/read", {"path": resolved}),
+        ]
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            for url, payload in endpoints:
+                try:
+                    resp = await client.post(url, headers=headers, json=payload)
+                    if resp.status_code == 404:
+                        continue
+                    resp.raise_for_status()
+                    data = resp.json()
+                    return data.get("content", "")
+                except (httpx.HTTPStatusError, httpx.ConnectError):
+                    continue
+
+        # Fallback: use command execution to read the file
+        result = await self._sandbox_exec(f"cat {shlex.quote(resolved)}")
+        if result["exit_code"] != 0:
+            raise FileNotFoundError(
+                result["stderr"] or f"File not found in sandbox: {file_path}"
+            )
+        return result["stdout"]
+
+    async def _sandbox_file_write(self, file_path: str, content: str) -> str:
+        """Write a file to the sandbox filesystem via HTTP."""
+        base = self.v.SANDBOX_URL.rstrip("/")
+        resolved = self._sandbox_resolve(file_path)
+        headers = self._sandbox_headers()
+
+        # Try dedicated file write API first
+        endpoints = [
+            (f"{base}/api/files/write", {"path": resolved, "content": content}),
+            (f"{base}/files/write", {"path": resolved, "content": content}),
+        ]
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            for url, payload in endpoints:
+                try:
+                    resp = await client.post(url, headers=headers, json=payload)
+                    if resp.status_code == 404:
+                        continue
+                    resp.raise_for_status()
+                    data = resp.json()
+                    return data.get("path", resolved)
+                except (httpx.HTTPStatusError, httpx.ConnectError):
+                    continue
+
+        # Fallback: use command execution with heredoc
+        # Use base64 to safely transfer content with special characters
+        import base64
+        b64 = base64.b64encode(content.encode("utf-8")).decode("ascii")
+        mkdir_cmd = f"mkdir -p $(dirname {shlex.quote(resolved)})"
+        write_cmd = f"echo {shlex.quote(b64)} | base64 -d > {shlex.quote(resolved)}"
+        result = await self._sandbox_exec(f"{mkdir_cmd} && {write_cmd}")
+        if result["exit_code"] != 0:
+            raise IOError(result["stderr"] or f"Failed to write file in sandbox: {file_path}")
+        return resolved
+
+    async def _sandbox_list_dir(self, path: str) -> str:
+        """List directory contents in the sandbox."""
+        resolved = self._sandbox_resolve(path)
+        result = await self._sandbox_exec(
+            f"ls -la {shlex.quote(resolved)} 2>/dev/null || echo 'Error: not a directory'"
+        )
+        return result["stdout"]
+
+    async def _sandbox_grep(self, pattern: str, path: str, include_pattern: str = "") -> str:
+        """Search for patterns in sandbox files."""
+        resolved = self._sandbox_resolve(path)
+        cmd = f"grep -rni {shlex.quote(pattern)} {shlex.quote(resolved)}"
+        if include_pattern:
+            cmd += f" --include={shlex.quote(include_pattern)}"
+        cmd += " 2>/dev/null | head -50"
+        result = await self._sandbox_exec(cmd)
+        return result["stdout"] or f"No matches for '{pattern}'"
+
+    async def _sandbox_find(self, pattern: str, path: str) -> str:
+        """Find files by name in sandbox."""
+        resolved = self._sandbox_resolve(path)
+        cmd = f"find {shlex.quote(resolved)} -name {shlex.quote(pattern)} -type f 2>/dev/null | head -50"
+        result = await self._sandbox_exec(cmd)
+        return result["stdout"] or f"No files matching '{pattern}'"
+
     # -- tool implementations --
 
     async def execute(self, name: str, args: dict) -> str:
@@ -587,6 +763,24 @@ class _ToolEngine:
             return f"Error: {name} failed — {e}"
 
     async def _t_read_file(self, file_path: str, start_line: int = 0, end_line: int = 0) -> str:
+        # ── Sandbox path ──
+        if self._sandbox_full:
+            try:
+                raw = await self._sandbox_file_read(file_path)
+                lines = raw.split("\n")
+                total = len(lines)
+                s = max(0, start_line - 1) if start_line > 0 else 0
+                e = min(total, end_line) if end_line > 0 else total
+                if (e - s) > self.v.MAX_READ_LINES:
+                    e = s + self.v.MAX_READ_LINES
+                numbered = [f"{i:4d} | {ln.rstrip()}" for i, ln in enumerate(lines[s:e], start=s + 1)]
+                return f"[sandbox:{file_path} — {total} lines, showing {s+1}–{e}]\n" + "\n".join(numbered)
+            except FileNotFoundError:
+                return f"Error: Not found in sandbox: {file_path}"
+            except Exception as e:
+                return f"Error: Sandbox read failed — {e}"
+
+        # ── Local path ──
         resolved = self._resolve(file_path)
         if self._blocked(resolved):
             return f"Error: Blocked: {file_path}"
@@ -606,6 +800,16 @@ class _ToolEngine:
         return f"[{file_path} — {total} lines, showing {s+1}–{e}]\n" + "\n".join(numbered)
 
     async def _t_write_file(self, file_path: str, content: str) -> str:
+        # ── Sandbox path ──
+        if self._sandbox_full:
+            try:
+                await self._sandbox_file_write(file_path, content)
+                lc = content.count("\n") + (1 if content and not content.endswith("\n") else 0)
+                return f"Created in sandbox: {file_path} ({lc} lines, {len(content.encode('utf-8'))} bytes)"
+            except Exception as e:
+                return f"Error: Sandbox write failed — {e}"
+
+        # ── Local path ──
         resolved = self._resolve(file_path)
         if self._blocked(resolved):
             return f"Error: Blocked: {file_path}"
@@ -643,6 +847,31 @@ class _ToolEngine:
         return text
 
     async def _t_edit_file(self, file_path: str, old_text: str, new_text: str) -> str:
+        # ── Sandbox path (read via sandbox, edit in memory, write back) ──
+        if self._sandbox_full:
+            try:
+                content = await self._sandbox_file_read(file_path)
+            except FileNotFoundError:
+                return f"Error: Not found in sandbox: {file_path}"
+            except Exception as e:
+                return f"Error: Sandbox read failed — {e}"
+            old_clean = self._strip_line_numbers(old_text)
+            new_clean = self._strip_line_numbers(new_text)
+            count = content.count(old_clean)
+            if count == 0:
+                first_line = old_clean.split("\n")[0].strip()
+                if first_line and first_line in content:
+                    return f"Error: old_text not found as exact block in {file_path}. First line exists but full match failed — check whitespace."
+                return f"Error: old_text not found in {file_path}. Read the file first and copy the exact text."
+            if count > 1:
+                return f"Error: old_text matches {count} times in {file_path}. Add more context lines."
+            try:
+                await self._sandbox_file_write(file_path, content.replace(old_clean, new_clean, 1))
+                return f"Edited in sandbox: {file_path} ({old_clean.count(chr(10))+1} → {new_clean.count(chr(10))+1} lines)"
+            except Exception as e:
+                return f"Error: Sandbox write failed — {e}"
+
+        # ── Local path ──
         resolved = self._resolve(file_path)
         if self._blocked(resolved):
             return f"Error: Blocked: {file_path}"
@@ -670,6 +899,15 @@ class _ToolEngine:
         return f"Edited: {file_path} ({old_clean.count(chr(10))+1} → {new_clean.count(chr(10))+1} lines){note}"
 
     async def _t_list_directory(self, path: str = ".") -> str:
+        # ── Sandbox path ──
+        if self._sandbox_full:
+            try:
+                raw = await self._sandbox_list_dir(path)
+                return f"[sandbox:{path}]\n{raw}"
+            except Exception as e:
+                return f"Error: Sandbox list failed — {e}"
+
+        # ── Local path ──
         resolved = self._resolve(path)
         if not os.path.isdir(resolved):
             return f"Error: Not a directory: {path}"
@@ -688,6 +926,19 @@ class _ToolEngine:
         return f"[{path} — {dirs} dirs, {files} files]\n" + "\n".join(lines)
 
     async def _t_grep_search(self, pattern: str, path: str = ".", include_pattern: str = "") -> str:
+        # ── Sandbox path ──
+        if self._sandbox_full:
+            try:
+                raw = await self._sandbox_grep(pattern, path, include_pattern)
+                lines = raw.strip().split("\n") if raw.strip() else []
+                if not lines or raw.startswith("No matches"):
+                    return f"No matches for '{pattern}'"
+                trunc = " (truncated)" if len(lines) >= 50 else ""
+                return f"[{len(lines)} matches{trunc}]\n" + "\n".join(lines)
+            except Exception as e:
+                return f"Error: Sandbox search failed — {e}"
+
+        # ── Local path ──
         resolved = self._resolve(path)
         if not os.path.isdir(resolved):
             return f"Error: Not a directory: {path}"
@@ -724,6 +975,18 @@ class _ToolEngine:
         return f"[{len(results)} matches{trunc}, {searched} files]\n" + "\n".join(results)
 
     async def _t_find_files(self, pattern: str, path: str = ".") -> str:
+        # ── Sandbox path ──
+        if self._sandbox_full:
+            try:
+                raw = await self._sandbox_find(pattern, path)
+                lines = raw.strip().split("\n") if raw.strip() else []
+                if not lines or raw.startswith("No files"):
+                    return f"No files matching '{pattern}'"
+                return f"[{len(lines)} files]\n" + "\n".join(f"  {m}" for m in lines)
+            except Exception as e:
+                return f"Error: Sandbox find failed — {e}"
+
+        # ── Local path ──
         resolved = self._resolve(path)
         if not os.path.isdir(resolved):
             return f"Error: Not a directory: {path}"
@@ -761,6 +1024,33 @@ class _ToolEngine:
                 "Error: 'path/to/test' is an example placeholder, not a real path. "
                 "Use find_files('*test*') to locate actual test files first."
             )
+
+        # ── Sandbox execution path ──
+        if self._sandbox_active:
+            try:
+                cwd = working_dir or self.v.SANDBOX_WORKSPACE
+                result = await self._sandbox_exec(command, cwd)
+                parts = []
+                if result["stdout"]:
+                    parts.append(result["stdout"])
+                if result["stderr"]:
+                    parts.append(f"[stderr]\n{result['stderr']}")
+                out = "\n".join(parts) or "(no output)"
+                if len(out) > 50_000:
+                    out = out[:50_000] + "\n... (truncated)"
+                result_str = f"[sandbox · exit code: {result['exit_code']}]\n{out}"
+                if result["exit_code"] == 127:
+                    result_str += (
+                        "\n\nCommand not found in sandbox. Check that the required "
+                        "tool is installed in your sandbox container."
+                    )
+                return result_str
+            except ConnectionError as e:
+                return f"Error: Sandbox unavailable — {e}"
+            except Exception as e:
+                return f"Error: Sandbox execution failed — {e}"
+
+        # ── Local execution path ──
         cwd = self._resolve(working_dir) if working_dir else self.v.WORKSPACE_PATH
         if not os.path.isdir(cwd):
             return f"Error: Bad directory: {working_dir}"
@@ -960,6 +1250,36 @@ class Pipe:
             description="Persistent memory directory.",
         )
         SHELL: str = Field(default="/bin/bash")
+
+        # -- Sandbox / Open Terminal --
+        SANDBOX_URL: str = Field(
+            default="",
+            description=(
+                "URL of a sandbox terminal server for safe command & file operations. "
+                "When set, run_command routes through this server instead of local subprocess. "
+                "Example: http://localhost:8000"
+            ),
+        )
+        SANDBOX_API_KEY: str = Field(
+            default="",
+            description="API key for sandbox server authentication (sent as Bearer token).",
+        )
+        SANDBOX_WORKSPACE: str = Field(
+            default="/workspace",
+            description=(
+                "Root workspace path inside the sandbox container. "
+                "File operations are relative to this path when sandbox is active."
+            ),
+        )
+        SANDBOX_ENABLED: bool = Field(
+            default=False,
+            description=(
+                "When True AND SANDBOX_URL is set, ALL tool operations (commands + files) "
+                "route through the sandbox. When False, only run_command uses the sandbox "
+                "while file operations remain local."
+            ),
+        )
+
         SYSTEM_PROMPT_PATH: str = Field(
             default="",
             description=(
@@ -1132,6 +1452,27 @@ class Pipe:
         memories = self._load_saved_memories()
         if memories:
             base += "\n\n" + memories
+
+        # Append sandbox context when configured
+        if self.valves.SANDBOX_URL:
+            sandbox_note = (
+                "\n\n## Sandbox Environment\n"
+                "A sandbox terminal server is configured for safe code execution.\n"
+                "- `run_command` executes in the **sandbox container** (not the host).\n"
+            )
+            if self.valves.SANDBOX_ENABLED:
+                sandbox_note += (
+                    "- **Full sandbox mode**: ALL file operations (read, write, edit, list, "
+                    "grep, find) also use the sandbox filesystem.\n"
+                    f"- Sandbox workspace root: `{self.valves.SANDBOX_WORKSPACE}`\n"
+                    "- `.agent/` memory and context still persist locally.\n"
+                )
+            else:
+                sandbox_note += (
+                    "- File tools (read_file, write_file, etc.) still operate on the **local** workspace.\n"
+                    "- Only commands are sandboxed for safety.\n"
+                )
+            base += sandbox_note
 
         return base
 
@@ -1757,6 +2098,11 @@ class Pipe:
         if startup_items:
             await self._emit(__event_emitter__,
                              f"\U0001f4da Loaded: {' | '.join(startup_items)}")
+        # Show sandbox status
+        if self.valves.SANDBOX_URL:
+            mode = "full (commands + files)" if self.valves.SANDBOX_ENABLED else "commands only"
+            await self._emit(__event_emitter__,
+                             f"\U0001f512 Sandbox: {self.valves.SANDBOX_URL} ({mode})")
 
         last_content = ""
         nudge_count = 0
