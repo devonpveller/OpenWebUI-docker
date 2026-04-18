@@ -196,6 +196,38 @@ Your workspace contains a `.agent/` folder for persistent project context:
 patterns. Example: `write_file(".agent/skills/react-patterns.md", "# React Patterns\\n...")`. \
 The skill will be active in the next conversation.
 **Context is auto-saved** at the end of each session.
+
+## Autonomous Documentation & Logging
+
+You are expected to proactively maintain project documentation — not just when asked.
+
+### On EVERY new project or first conversation:
+1. Call `recall_memory()` to check for existing project notes.
+2. If the workspace has no `README.md`, **create one** with: project purpose, how to run it, \
+file structure, and key decisions.
+
+### After completing significant work:
+1. **Update README.md** — keep it accurate. If you added files, changed architecture, \
+or added dependencies, update the README.
+2. **Save conventions** — when you discover or establish project patterns (naming, structure, \
+frameworks), call `save_memory("conventions", ...)` so future sessions follow the same patterns.
+3. **Log decisions** — for non-obvious choices (why framework X over Y, why this architecture), \
+add a brief note to `.agent/context.md` or `save_memory("decisions", ...)`.
+4. **Create skills** — when you solve a recurring problem or establish a reusable pattern, \
+write it to `.agent/skills/` so future conversations benefit. \
+Example: after building a React project, create `.agent/skills/react-patterns.md`.
+
+### Changelog discipline:
+- When modifying existing multi-file projects, maintain a brief changelog at the top of \
+README.md or in a CHANGELOG.md.
+- Format: `## [date] — Brief description` with bullet points of what changed.
+
+### What to document automatically (no user prompt needed):
+- Project setup instructions (how to run, build, test)
+- File/folder purpose when creating project structure
+- API contracts or interfaces between modules
+- Configuration and environment requirements
+- Known limitations or TODOs for future work
 """
 
 SYSTEM_PROMPT_XML = (
@@ -738,7 +770,16 @@ class _ToolEngine:
             out = "\n".join(parts) or "(no output)"
             if len(out) > 50_000:
                 out = out[:50_000] + f"\n... (truncated)"
-            return f"[exit code: {r.returncode}]\n{out}"
+            result_str = f"[exit code: {r.returncode}]\n{out}"
+            # Add guidance for common failures
+            if r.returncode == 127:
+                result_str += (
+                    "\n\nThe command was not found. This container does not have "
+                    "node/npm installed. For JavaScript validation, use read_file "
+                    "to visually inspect the code, or write a Python script that "
+                    "checks for syntax patterns."
+                )
+            return result_str
         except subprocess.TimeoutExpired:
             return f"Error: Timed out after {self.v.COMMAND_TIMEOUT}s"
 
@@ -939,17 +980,11 @@ class Pipe:
         _log_print(level, msg, **kwargs)
 
     async def _debug_emit(self, msg: str):
-        """Emit debug info as status message in OWUI chat UI (guaranteed visible).
-        Pattern borrowed from mnemory_tool.py which works reliably."""
-        if not self.valves.DEBUG_LOG or not self._emitter:
+        """Log debug info to file/stdout only. Does NOT emit to UI status stream
+        to keep the user-facing status clean."""
+        if not self.valves.DEBUG_LOG:
             return
-        try:
-            await self._emitter({
-                "type": "status",
-                "data": {"description": f"[CA] {msg}", "done": True},
-            })
-        except Exception:
-            pass
+        _log_print("debug", msg)
 
     # -- Pipe registration --
 
@@ -966,29 +1001,30 @@ class Pipe:
     def _describe_action(tool_name: str, tool_args: dict) -> str:
         """Human-readable description of a tool call for status display."""
         fp = tool_args.get("file_path", tool_args.get("path", ""))
+        short_fp = os.path.basename(fp) if fp else ""
         if tool_name == "read_file":
             sl, el = tool_args.get("start_line", 0), tool_args.get("end_line", 0)
-            rng = f" lines {sl}-{el}" if sl or el else ""
-            return f"Reading {fp}{rng}"
+            rng = f" (lines {sl}-{el})" if sl or el else ""
+            return f"Reading {short_fp}{rng}"
         elif tool_name == "write_file":
             c = tool_args.get("content", "")
             lc = c.count("\n") + 1 if c else 0
-            return f"Writing {fp} ({lc} lines)"
+            return f"Writing {short_fp} ({lc} lines)"
         elif tool_name == "edit_file":
             old = tool_args.get("old_text", "")
             new = tool_args.get("new_text", "")
             ol = old.count("\n") + 1 if old else 0
             nl = new.count("\n") + 1 if new else 0
-            return f"Editing {fp} ({ol}\u2192{nl} lines)"
+            return f"Editing {short_fp} ({ol}\u2192{nl} lines)"
         elif tool_name == "run_command":
-            cmd = tool_args.get("command", "")[:80]
+            cmd = tool_args.get("command", "")[:60]
             return f"Running: {cmd}"
         elif tool_name == "find_files":
-            return f"Finding files: {tool_args.get('pattern', '')}"
+            return f"Scanning for {tool_args.get('pattern', '*')}"
         elif tool_name == "grep_search":
-            return f"Searching: {tool_args.get('pattern', '')[:50]}"
+            return f"Searching: {tool_args.get('pattern', '')[:40]}"
         elif tool_name == "list_directory":
-            return f"Listing {fp or '.'}"
+            return f"Listing {short_fp or 'workspace'}"
         elif tool_name == "think":
             t = tool_args.get("thought", "")
             preview = (t[:100] + "...") if len(t) > 100 else t
@@ -1000,31 +1036,63 @@ class Pipe:
         return f"{tool_name}()"
 
     @staticmethod
+    def _extract_intent(content: str) -> str:
+        """Extract a brief intent statement from model content for status display.
+        Returns first meaningful sentence, max ~80 chars."""
+        if not content:
+            return ""
+        # Strip markdown formatting
+        text = re.sub(r'[*_`#]+', '', content).strip()
+        # Get first sentence (period, newline, or colon break)
+        m = re.match(r'(.+?(?:[.!?:]\s|$))', text, re.DOTALL)
+        if m:
+            sentence = m.group(1).strip().rstrip(':')
+            if len(sentence) > 80:
+                sentence = sentence[:77] + "..."
+            return sentence
+        # Fallback: first 80 chars
+        return text[:77] + "..." if len(text) > 80 else text
+
+    @staticmethod
     def _describe_result(tool_name: str, result: str) -> str:
         """Brief human-readable result description for status display."""
         if result.startswith("Error:"):
-            first = result.split("\n")[0][:100]
+            first = result.split("\n")[0][:80]
+            # Add recovery hint based on error type
+            if "old_text not found" in result:
+                return f"\u2717 Edit failed \u2014 text mismatch, will re-read"
+            elif "not found" in result.lower() or "does not exist" in result.lower():
+                return f"\u2717 File not found"
+            elif "Permission" in result:
+                return f"\u2717 Permission denied"
             return f"\u2717 {first}"
         if tool_name == "read_file":
             m = re.match(r"\[.+ \u2014 (\d+) lines", result)
-            return f"\u2713 Read ({m.group(1)} lines)" if m else "\u2713 Read OK"
-        elif tool_name in ("write_file", "edit_file"):
-            return f"\u2713 {result.split(chr(10))[0][:100]}"
+            return f"\u2713 Read {m.group(1)} lines" if m else "\u2713 Read OK"
+        elif tool_name == "write_file":
+            return f"\u2713 Written"
+        elif tool_name == "edit_file":
+            return f"\u2713 Edit applied"
         elif tool_name == "run_command":
             m = re.match(r"\[exit code: (\d+)\]", result)
             if m:
                 code = int(m.group(1))
-                return f"\u2713 Exit code {code}" if code == 0 else f"\u2717 Exit code {code}"
+                if code == 0:
+                    return "\u2713 Passed"
+                elif code == 127:
+                    return "\u2717 Command not found \u2014 not installed in container"
+                else:
+                    return f"\u2717 Failed (exit {code})"
             return "\u2713 Done"
         elif tool_name == "find_files":
-            m = re.match(r"\[(\d+) files\]", result)
+            m = re.match(r"\[(\d+) files?\]", result)
             return f"\u2713 Found {m.group(1)} files" if m else "\u2713 Search done"
         elif tool_name == "grep_search":
-            m = re.match(r"\[(\d+) matches", result)
+            m = re.match(r"\[(\d+) match", result)
             return f"\u2713 {m.group(1)} matches" if m else "\u2713 No matches"
         elif tool_name == "think":
-            return "\u2713 Thought recorded"
-        return f"\u2713 Done ({len(result)} chars)"
+            return "\u2713 Planning complete"
+        return f"\u2713 OK"
 
     def _get_system_prompt(self) -> str:
         # Try external file first
@@ -1049,10 +1117,16 @@ class Pipe:
         else:
             base = SYSTEM_PROMPT_NATIVE
 
-        # Append .agent context and skills
+        # Append .agent context, skills, and saved memories
         agent_context = self._load_agent_context()
         if agent_context:
             base += "\n\n" + agent_context
+
+        # Append saved memories for cross-session continuity
+        memories = self._load_saved_memories()
+        if memories:
+            base += "\n\n" + memories
+
         return base
 
     def _load_agent_context(self) -> str:
@@ -1089,6 +1163,30 @@ class Pipe:
 
         if parts:
             return "\n---\n\n# Agent Context & Skills\n\n" + "\n\n---\n\n".join(parts)
+        return ""
+
+    def _load_saved_memories(self) -> str:
+        """Load saved memories from MEMORY_DIR for cross-session continuity."""
+        mem_dir = self.valves.MEMORY_DIR
+        if not os.path.isdir(mem_dir):
+            return ""
+        files = sorted(f for f in os.listdir(mem_dir) if f.endswith(".md"))
+        if not files:
+            return ""
+        parts = []
+        total_chars = 0
+        for mf in files[:10]:  # Cap at 10 memory files to avoid prompt bloat
+            try:
+                with open(os.path.join(mem_dir, mf), "r", encoding="utf-8") as f:
+                    content = f.read().strip()
+                if content and total_chars + len(content) < 4000:  # Cap total at 4k chars
+                    parts.append(f"### {mf[:-3]}\n{content}")
+                    total_chars += len(content)
+                    self._log("debug", f"Loaded memory: {mf}", chars=len(content))
+            except (OSError, IOError):
+                pass
+        if parts:
+            return "# Saved Memories (from prior sessions)\n\n" + "\n\n".join(parts)
         return ""
 
     def _save_agent_context(self, actions_taken: list[str], edit_failures: dict, user_request: str = ""):
@@ -1428,17 +1526,24 @@ class Pipe:
         last_tool_call_sig: str = ""  # For duplicate call detection
         dup_call_count: int = 0
         user_request = messages[-1].get("content", "")[:200] if messages else ""
+        last_status: str = ""  # Last action description for context in "Thinking..."
 
         try:
           for iteration in range(self.valves.MAX_ITERATIONS):
             self._log("info", f"--- Iteration {iteration + 1}/{self.valves.MAX_ITERATIONS} ---")
-            # Show progress context in status
+            # Show progress with context from last action
             edits_done = sum(1 for a in actions_taken if "OK" in a or a.startswith("write_file"))
-            progress_ctx = f" [{edits_done} changes]" if edits_done else ""
-            await self._emit(
-                __event_emitter__,
-                f"Step {iteration + 1}/{self.valves.MAX_ITERATIONS}{progress_ctx} \u2014 Thinking...",
-            )
+            if iteration == 0:
+                thinking_msg = f"\u23f3 Analyzing request..."
+            elif last_status:
+                # Keep thinking status concise — max ~60 chars from last action
+                short_status = last_status[:60] + ("..." if len(last_status) > 60 else "")
+                thinking_msg = f"\u23f3 {short_status}"
+            else:
+                thinking_msg = f"\u23f3 Thinking..."
+            if edits_done:
+                thinking_msg += f" [{edits_done} edits]"
+            await self._emit(__event_emitter__, thinking_msg)
 
             # Call LLM
             response = await self._call_llm(conversation)
@@ -1527,7 +1632,8 @@ class Pipe:
             # If no tool calls → check for narration and verification issues
             if not tool_calls:
                 # Priority 1: Detect narration (model describing actions without doing them)
-                is_narrating = self._is_narrating_action(content)
+                # BUT skip if the agent already used tools — it's likely giving a legitimate summary
+                is_narrating = (not tools_used_this_session) and self._is_narrating_action(content)
                 # Priority 2: First iteration should almost always use tools
                 is_first_with_no_action = (iteration == 0 and len(content) > 200)
 
@@ -1539,7 +1645,7 @@ class Pipe:
                     await self._debug_emit(f"NUDGE {nudge_count}/{MAX_NUDGES}: {reason}")
                     await self._emit(
                         __event_emitter__,
-                        f"Redirecting to use tools... (nudge {nudge_count})",
+                        f"\u26a0\ufe0f Agent is describing instead of acting \u2014 redirecting...",
                     )
                     if content:
                         conversation.append({"role": "assistant", "content": content})
@@ -1567,7 +1673,7 @@ class Pipe:
                               f"Agent stopping without verification — nudge {nudge_count}/{MAX_NUDGES}")
                     await self._emit(
                         __event_emitter__,
-                        f"Verifying changes... (nudge {nudge_count})",
+                        f"\U0001f50d Verifying changes before finishing...",
                     )
                     if content:
                         conversation.append({"role": "assistant", "content": content})
@@ -1589,17 +1695,15 @@ class Pipe:
                     f"Final answer: {len(content)}ch, "
                     f"{nudge_count} nudges, tools_used={tools_used_this_session}"
                 )
-                await self._emit(__event_emitter__, "Done", done=True)
+                await self._emit(__event_emitter__, "\u2705 Complete", done=True)
                 self._save_agent_context(actions_taken, edit_failures, user_request)
                 return content if content else last_content or "Done (no response content)."
 
-            # Show model's reasoning when it produces visible content alongside tool calls
+            # Show model's intent when it produces visible content alongside tool calls
             if content and tool_calls:
-                preview = content[:200] + ("..." if len(content) > 200 else "")
-                await self._emit(
-                    __event_emitter__,
-                    f"Step {iteration+1} \u2014 Agent: {preview}",
-                )
+                intent = self._extract_intent(content)
+                if intent:
+                    await self._emit(__event_emitter__, f"\U0001f4ad {intent}")
 
             last_content = content
             tools_used_this_session = True
@@ -1629,10 +1733,16 @@ class Pipe:
 
                 self._log("info", f"TOOL CALL: {tool_name}", args=tool_args)
                 action_desc = self._describe_action(tool_name, tool_args)
-                await self._emit(
-                    __event_emitter__,
-                    f"Step {iteration+1} \u2014 {action_desc}",
-                )
+                # Pick icon based on tool type
+                _tool_icons = {
+                    "read_file": "\U0001f4c4", "write_file": "\u270d\ufe0f",
+                    "edit_file": "\u270d\ufe0f", "run_command": "\u25b6",
+                    "find_files": "\U0001f50d", "grep_search": "\U0001f50d",
+                    "list_directory": "\U0001f4c2", "think": "\U0001f9e0",
+                    "manage_todo": "\u2611\ufe0f",
+                }
+                icon = _tool_icons.get(tool_name, "\u2699\ufe0f")
+                await self._emit(__event_emitter__, f"{icon} {action_desc}")
 
                 # Duplicate call detection — prevent wasting iterations
                 call_sig = json.dumps({"t": tool_name, "a": tool_args}, sort_keys=True)
@@ -1648,7 +1758,7 @@ class Pipe:
                                   tool=tool_name, count=dup_call_count + 1)
                         await self._emit(
                             __event_emitter__,
-                            f"Step {iteration+1} \u2014 \u26a0 Duplicate call blocked",
+                            f"\u26a0\ufe0f Duplicate {tool_name} blocked \u2014 moving on",
                         )
                         if msg.get("tool_calls"):
                             conversation.append(msg)
@@ -1679,10 +1789,9 @@ class Pipe:
                           result_chars=len(result),
                           result_preview=result[:300])
                 await self._debug_emit(f"Tool {tool_name}: {len(result)}ch in {elapsed:.1f}s")
-                await self._emit(
-                    __event_emitter__,
-                    f"Step {iteration+1} \u2014 {result_desc}",
-                )
+                await self._emit(__event_emitter__, f"  {result_desc}")
+                # Track concise last action for "Thinking..." context
+                last_status = result_desc
 
                 # Track edit failures for stuck-loop detection
                 if tool_name == "edit_file":
