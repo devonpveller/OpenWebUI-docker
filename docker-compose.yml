@@ -168,7 +168,7 @@ services:
     environment:
       - LLAMA_ARG_MODEL=/models/lmstudio-community/Qwen3.6-35B-A3B-GGUF/Qwen3.6-35B-A3B-Q4_K_M.gguf
       - LLAMA_ARG_CHAT_TEMPLATE_FILE=/etc/llama/chat-template.jinja
-      - LLAMA_ARG_CTX_SIZE=8192
+      - LLAMA_ARG_CTX_SIZE=16384
       - LLAMA_ARG_N_GPU_LAYERS=99
       - LLAMA_ARG_HOST=0.0.0.0
       - LLAMA_ARG_PORT=8080
