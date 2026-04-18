@@ -633,6 +633,8 @@ class _ToolEngine:
                 except httpx.ConnectError as e:
                     last_error = f"Connection failed: {e}"
                     break  # Can't reach server at all
+                except asyncio.CancelledError:
+                    raise
                 except Exception as e:
                     last_error = str(e)
                     continue
@@ -698,16 +700,45 @@ class _ToolEngine:
                 except (httpx.HTTPStatusError, httpx.ConnectError):
                     continue
 
-        # Fallback: use command execution with heredoc
-        # Use base64 to safely transfer content with special characters
-        import base64
-        b64 = base64.b64encode(content.encode("utf-8")).decode("ascii")
-        mkdir_cmd = f"mkdir -p $(dirname {shlex.quote(resolved)})"
-        write_cmd = f"echo {shlex.quote(b64)} | base64 -d > {shlex.quote(resolved)}"
-        result = await self._sandbox_exec(f"{mkdir_cmd} && {write_cmd}")
-        if result["exit_code"] != 0:
-            raise IOError(result["stderr"] or f"Failed to write file in sandbox: {file_path}")
-        return resolved
+        # Ensure parent directory exists (separate call for reliability)
+        dir_path = os.path.dirname(resolved)
+        if dir_path:
+            await self._sandbox_exec(f"mkdir -p {shlex.quote(dir_path)}")
+
+        # Fallback 1: heredoc — works in most shells, no encoding overhead
+        import hashlib as _hl
+        delim = "CODEAGENT_EOF_" + _hl.md5(content.encode()).hexdigest()[:8]
+        while delim in content:  # Ensure delimiter can't appear in content
+            delim += "X"
+        heredoc_cmd = f"cat > {shlex.quote(resolved)} << '{delim}'\n{content}\n{delim}"
+        result = await self._sandbox_exec(heredoc_cmd)
+        if result["exit_code"] == 0:
+            return resolved
+
+        # Fallback 2: printf + base64
+        import base64 as _b64
+        b64 = _b64.b64encode(content.encode("utf-8")).decode("ascii")
+        result = await self._sandbox_exec(
+            f"printf '%s' {shlex.quote(b64)} | base64 -d > {shlex.quote(resolved)}"
+        )
+        if result["exit_code"] == 0:
+            return resolved
+
+        # Fallback 3: python3 one-liner (most reliable in Docker containers)
+        py_script = (
+            "import base64,sys;"
+            "open(sys.argv[1],'wb').write(base64.b64decode(sys.argv[2]))"
+        )
+        result = await self._sandbox_exec(
+            f"python3 -c {shlex.quote(py_script)} {shlex.quote(resolved)} {shlex.quote(b64)}"
+        )
+        if result["exit_code"] == 0:
+            return resolved
+
+        raise IOError(
+            f"Failed to write {file_path} in sandbox (all methods failed). "
+            f"Last error: {result['stderr'] or 'exit code ' + str(result['exit_code'])}"
+        )
 
     async def _sandbox_list_dir(self, path: str) -> str:
         """List directory contents in the sandbox."""
@@ -752,6 +783,8 @@ class _ToolEngine:
                 args = {k: v for k, v in args.items() if k in valid_params}
             result = await fn(**args)
             return result
+        except asyncio.CancelledError:
+            raise
         except TypeError as e:
             _log_print("error", f"Tool '{name}' argument error: {e}")
             return f"Error: {name} argument error — {e}"
@@ -777,6 +810,8 @@ class _ToolEngine:
                 return f"[sandbox:{file_path} — {total} lines, showing {s+1}–{e}]\n" + "\n".join(numbered)
             except FileNotFoundError:
                 return f"Error: Not found in sandbox: {file_path}"
+            except asyncio.CancelledError:
+                raise
             except Exception as e:
                 return f"Error: Sandbox read failed — {e}"
 
@@ -806,6 +841,8 @@ class _ToolEngine:
                 await self._sandbox_file_write(file_path, content)
                 lc = content.count("\n") + (1 if content and not content.endswith("\n") else 0)
                 return f"Created in sandbox: {file_path} ({lc} lines, {len(content.encode('utf-8'))} bytes)"
+            except asyncio.CancelledError:
+                raise
             except Exception as e:
                 return f"Error: Sandbox write failed — {e}"
 
@@ -853,6 +890,8 @@ class _ToolEngine:
                 content = await self._sandbox_file_read(file_path)
             except FileNotFoundError:
                 return f"Error: Not found in sandbox: {file_path}"
+            except asyncio.CancelledError:
+                raise
             except Exception as e:
                 return f"Error: Sandbox read failed — {e}"
             old_clean = self._strip_line_numbers(old_text)
@@ -868,6 +907,8 @@ class _ToolEngine:
             try:
                 await self._sandbox_file_write(file_path, content.replace(old_clean, new_clean, 1))
                 return f"Edited in sandbox: {file_path} ({old_clean.count(chr(10))+1} → {new_clean.count(chr(10))+1} lines)"
+            except asyncio.CancelledError:
+                raise
             except Exception as e:
                 return f"Error: Sandbox write failed — {e}"
 
@@ -904,6 +945,8 @@ class _ToolEngine:
             try:
                 raw = await self._sandbox_list_dir(path)
                 return f"[sandbox:{path}]\n{raw}"
+            except asyncio.CancelledError:
+                raise
             except Exception as e:
                 return f"Error: Sandbox list failed — {e}"
 
@@ -935,6 +978,8 @@ class _ToolEngine:
                     return f"No matches for '{pattern}'"
                 trunc = " (truncated)" if len(lines) >= 50 else ""
                 return f"[{len(lines)} matches{trunc}]\n" + "\n".join(lines)
+            except asyncio.CancelledError:
+                raise
             except Exception as e:
                 return f"Error: Sandbox search failed — {e}"
 
@@ -983,6 +1028,8 @@ class _ToolEngine:
                 if not lines or raw.startswith("No files"):
                     return f"No files matching '{pattern}'"
                 return f"[{len(lines)} files]\n" + "\n".join(f"  {m}" for m in lines)
+            except asyncio.CancelledError:
+                raise
             except Exception as e:
                 return f"Error: Sandbox find failed — {e}"
 
@@ -1047,6 +1094,8 @@ class _ToolEngine:
                 return result_str
             except ConnectionError as e:
                 return f"Error: Sandbox unavailable — {e}"
+            except asyncio.CancelledError:
+                raise
             except Exception as e:
                 return f"Error: Sandbox execution failed — {e}"
 
