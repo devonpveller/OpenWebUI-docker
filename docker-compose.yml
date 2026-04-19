@@ -211,9 +211,9 @@ services:
       - ./data/models/embeddings:/models:ro
     environment:
       - LLAMA_ARG_MODEL=/models/bge-m3-f16.gguf
-      - LLAMA_ARG_CTX_SIZE=8192
+      - LLAMA_ARG_CTX_SIZE=20480
       - LLAMA_ARG_N_GPU_LAYERS=99
-      - LLAMA_ARG_N_PARALLEL=4
+      - LLAMA_ARG_N_PARALLEL=2
       - LLAMA_ARG_HOST=0.0.0.0
       - LLAMA_ARG_PORT=8080
       - LLAMA_ARG_EMBEDDINGS=true
