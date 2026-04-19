@@ -85,6 +85,9 @@ services:
       - LMSTUDIO_HOST=${LMSTUDIO_HOST:-host.docker.internal}
       - LMSTUDIO_PORT=${LMSTUDIO_PORT:-1234}
       - LMSTUDIO_ENABLED=${LMSTUDIO_ENABLED:-true}
+      - LLAMA_CPP_HOST=${LLAMA_CPP_HOST:-llama-cpp}
+      - LLAMA_CPP_PORT=${LLAMA_CPP_PORT:-8080}
+      - LLAMA_CPP_ENABLED=${LLAMA_CPP_ENABLED:-true}
     volumes:
       - ./data/tailscale:/var/lib/tailscale
       - /dev/net/tun:/dev/net/tun
@@ -168,14 +171,14 @@ services:
     environment:
       - LLAMA_ARG_MODEL=/models/lmstudio-community/Qwen3.6-35B-A3B-GGUF/Qwen3.6-35B-A3B-Q4_K_M.gguf
       - LLAMA_ARG_CHAT_TEMPLATE_FILE=/etc/llama/chat-template.jinja
-      - LLAMA_ARG_CTX_SIZE=32768
+      - LLAMA_ARG_CTX_SIZE=20480
       - LLAMA_ARG_N_GPU_LAYERS=99
       - LLAMA_ARG_N_PARALLEL=1
       - LLAMA_ARG_BATCH=2048
       - LLAMA_ARG_UBATCH=1024
       - LLAMA_ARG_CACHE_TYPE_K=q8_0
       - LLAMA_ARG_CACHE_TYPE_V=q8_0
-      - LLAMA_ARG_CACHE_RAM=2048
+      - LLAMA_ARG_CACHE_RAM=256
       - LLAMA_ARG_FLASH_ATTN=on
       - LLAMA_ARG_REASONING_BUDGET=4096
       - LLAMA_ARG_HOST=0.0.0.0

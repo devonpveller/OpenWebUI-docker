@@ -209,11 +209,85 @@ else
     echo "🔄 LM Studio integration disabled (LMSTUDIO_ENABLED=false)"
 fi
 
+# Configure llama-cpp API at /llama-cpp path
+sleep 2
+echo "🦙 Configuring llama-cpp API access..."
+
+LLAMA_CPP_HOST=${LLAMA_CPP_HOST:-llama-cpp}
+LLAMA_CPP_PORT=${LLAMA_CPP_PORT:-8080}
+LLAMA_CPP_ENABLED=${LLAMA_CPP_ENABLED:-true}
+LLAMA_CPP_LOCAL_PORT=8235  # Local port for socat proxy
+
+# Helper function to set up the llama-cpp socat proxy and tailscale serve
+setup_llama_cpp_serve() {
+    echo "🔄 Creating local proxy for llama-cpp at ${LLAMA_CPP_HOST}:${LLAMA_CPP_PORT}"
+
+    # Kill any existing socat process on this port
+    pkill -f "socat.*:${LLAMA_CPP_LOCAL_PORT}" || true
+    sleep 2
+
+    # Start socat proxy
+    echo "🚀 Starting socat proxy: 127.0.0.1:${LLAMA_CPP_LOCAL_PORT} -> ${LLAMA_CPP_HOST}:${LLAMA_CPP_PORT}"
+    socat -d -d TCP-LISTEN:${LLAMA_CPP_LOCAL_PORT},fork,reuseaddr,keepalive TCP:${LLAMA_CPP_HOST}:${LLAMA_CPP_PORT} > /tmp/socat-llama-cpp.log 2>&1 &
+    LLAMA_CPP_SOCAT_PID=$!
+    echo $LLAMA_CPP_SOCAT_PID > /tmp/socat-llama-cpp.pid
+
+    # Wait and verify socat started
+    sleep 3
+    if ! kill -0 $LLAMA_CPP_SOCAT_PID 2>/dev/null; then
+        echo "❌ ERROR: llama-cpp socat failed to start"
+        cat /tmp/socat-llama-cpp.log 2>/dev/null || echo "No log file found"
+        return 1
+    fi
+    echo "✅ llama-cpp proxy started successfully (PID: $LLAMA_CPP_SOCAT_PID)"
+
+    # Configure Tailscale serve
+    tailscale --socket=/tmp/tailscaled.sock serve \
+      --https=443 \
+      --set-path=/llama-cpp \
+      --bg \
+      http://127.0.0.1:${LLAMA_CPP_LOCAL_PORT}
+    echo "✅ llama-cpp API configured at /llama-cpp (via proxy: ${LLAMA_CPP_HOST}:${LLAMA_CPP_PORT} -> 127.0.0.1:${LLAMA_CPP_LOCAL_PORT})"
+
+    # Mark as configured so the monitoring loop knows
+    touch /tmp/llama-cpp-serve-configured
+    return 0
+}
+
+if [ "$LLAMA_CPP_ENABLED" = "true" ]; then
+    # Retry up to 3 minutes (18 x 10s) for llama-cpp to become healthy
+    # llama-cpp has a 120s start_period for model loading, so we wait patiently
+    LLAMA_CPP_ATTEMPTS=0
+    LLAMA_CPP_MAX_ATTEMPTS=18
+    LLAMA_CPP_CONFIGURED=false
+
+    while [ $LLAMA_CPP_ATTEMPTS -lt $LLAMA_CPP_MAX_ATTEMPTS ]; do
+        if wget -q -T 10 -O /dev/null http://${LLAMA_CPP_HOST}:${LLAMA_CPP_PORT}/health; then
+            if setup_llama_cpp_serve; then
+                LLAMA_CPP_CONFIGURED=true
+            fi
+            break
+        fi
+        LLAMA_CPP_ATTEMPTS=$((LLAMA_CPP_ATTEMPTS + 1))
+        echo "⏳ llama-cpp not ready yet (attempt ${LLAMA_CPP_ATTEMPTS}/${LLAMA_CPP_MAX_ATTEMPTS}), waiting 10s..."
+        sleep 10
+    done
+
+    if [ "$LLAMA_CPP_CONFIGURED" != "true" ]; then
+        echo "⚠️ llama-cpp not available after ${LLAMA_CPP_MAX_ATTEMPTS} attempts — monitoring loop will configure it when it comes online"
+    fi
+else
+    echo "🔄 llama-cpp Tailscale integration disabled (LLAMA_CPP_ENABLED=false)"
+fi
+
 echo "✅ Tailscale serve configured:"
 echo "  - OpenWebUI: HTTPS port 443 -> 127.0.0.1:8080"
 echo "  - Ollama API: HTTPS port 443/ollama -> 127.0.0.1:11434"
 if [ "$LMSTUDIO_ENABLED" = "true" ]; then
     echo "  - LM Studio API: HTTPS port 443/lmstudio -> ${LMSTUDIO_HOST}:${LMSTUDIO_PORT}"
+fi
+if [ "$LLAMA_CPP_ENABLED" = "true" ]; then
+    echo "  - llama-cpp API: HTTPS port 443/llama-cpp -> ${LLAMA_CPP_HOST}:${LLAMA_CPP_PORT}"
 fi
 
 # 8) Background monitoring loop for autonomous recovery
@@ -244,6 +318,39 @@ fi
                     else
                         echo "❌ $(date): Failed to restart LM Studio proxy"
                         cat /tmp/socat-lmstudio.log 2>/dev/null || echo "No log available"
+                    fi
+                fi
+            fi
+        fi
+
+        # Check llama-cpp: deferred setup + socat health
+        if [ "$LLAMA_CPP_ENABLED" = "true" ]; then
+            if [ ! -f /tmp/llama-cpp-serve-configured ]; then
+                # Serve was never configured — try deferred setup
+                if wget -q -T 10 -O /dev/null http://${LLAMA_CPP_HOST}:${LLAMA_CPP_PORT}/health; then
+                    echo "🦙 $(date): llama-cpp is now online, performing deferred setup..."
+                    setup_llama_cpp_serve || echo "❌ $(date): Deferred llama-cpp setup failed, will retry next cycle"
+                fi
+            elif [ -f /tmp/socat-llama-cpp.pid ]; then
+                # Serve is configured — keep the socat proxy alive
+                LLAMA_CPP_PID=$(cat /tmp/socat-llama-cpp.pid)
+                if ! kill -0 $LLAMA_CPP_PID 2>/dev/null; then
+                    echo "⚠️ $(date): llama-cpp socat proxy (PID: $LLAMA_CPP_PID) has died, restarting..."
+
+                    LLAMA_CPP_LOCAL_PORT=8235
+                    pkill -f "socat.*:${LLAMA_CPP_LOCAL_PORT}" || true
+                    sleep 2
+
+                    socat -d -d TCP-LISTEN:${LLAMA_CPP_LOCAL_PORT},fork,reuseaddr,keepalive TCP:${LLAMA_CPP_HOST}:${LLAMA_CPP_PORT} > /tmp/socat-llama-cpp.log 2>&1 &
+                    NEW_LLAMA_PID=$!
+                    echo $NEW_LLAMA_PID > /tmp/socat-llama-cpp.pid
+                    sleep 3
+
+                    if kill -0 $NEW_LLAMA_PID 2>/dev/null; then
+                        echo "✅ $(date): llama-cpp proxy restarted successfully (PID: $NEW_LLAMA_PID)"
+                    else
+                        echo "❌ $(date): Failed to restart llama-cpp proxy"
+                        cat /tmp/socat-llama-cpp.log 2>/dev/null || echo "No log available"
                     fi
                 fi
             fi
@@ -322,6 +429,13 @@ fi
                           http://${LMSTUDIO_HOST}:${LMSTUDIO_PORT} || true
                     fi
                 fi
+
+                # Reconfigure llama-cpp API if available and enabled
+                if [ "$LLAMA_CPP_ENABLED" = "true" ] && wget -q -T 10 -O /dev/null http://${LLAMA_CPP_HOST}:${LLAMA_CPP_PORT}/health; then
+                    echo "🔄 Reconfiguring llama-cpp serve after reconnection..."
+                    rm -f /tmp/llama-cpp-serve-configured
+                    setup_llama_cpp_serve || echo "❌ Failed to reconfigure llama-cpp serve"
+                fi
             elif ! echo "$serve_status" | grep -q "127.0.0.1:11434"; then
                 # Ollama serve is missing, try to add it
                 echo "🔄 $(date): Adding missing Ollama serve configuration..."
@@ -368,6 +482,13 @@ fi
                         fi
                     fi
                 fi
+            elif [ "$LLAMA_CPP_ENABLED" = "true" ] && ! echo "$serve_status" | grep -q "127.0.0.1:${LLAMA_CPP_LOCAL_PORT:-8235}"; then
+                # llama-cpp serve is missing, try to add it
+                echo "🔄 $(date): Adding missing llama-cpp serve configuration..."
+                if wget -q -T 10 -O /dev/null http://${LLAMA_CPP_HOST}:${LLAMA_CPP_PORT}/health; then
+                    rm -f /tmp/llama-cpp-serve-configured
+                    setup_llama_cpp_serve || echo "❌ Failed to add llama-cpp serve"
+                fi
             fi
         fi
     done
@@ -385,6 +506,9 @@ echo "  - OpenWebUI: https://$(tailscale --socket=/tmp/tailscaled.sock status --
 echo "  - Ollama API: https://$(tailscale --socket=/tmp/tailscaled.sock status --json | grep '\"Name\"' | cut -d'"' -f4 2>/dev/null || echo 'your-hostname').tail[...].ts.net/ollama"
 if [ "$LMSTUDIO_ENABLED" = "true" ]; then
     echo "  - LM Studio API: https://$(tailscale --socket=/tmp/tailscaled.sock status --json | grep '\"Name\"' | cut -d'"' -f4 2>/dev/null || echo 'your-hostname').tail[...].ts.net/lmstudio"
+fi
+if [ "$LLAMA_CPP_ENABLED" = "true" ]; then
+    echo "  - llama-cpp API: https://$(tailscale --socket=/tmp/tailscaled.sock status --json | grep '\"Name\"' | cut -d'"' -f4 2>/dev/null || echo 'your-hostname').tail[...].ts.net/llama-cpp/v1"
 fi
 
 # 9) Keep the container running
