@@ -208,7 +208,7 @@ cd scripts
 if %ERRORLEVEL% NEQ 0 (
     echo [WARN] GPU check failed, restarting GPU services...
     cd ..
-    docker compose restart ollama openwebui
+    docker compose restart llama-cpp llama-cpp-embed openwebui
     cd scripts
     echo [INFO] Waiting for GPU services to restart...
     timeout /t 60 /nobreak >nul
@@ -220,14 +220,14 @@ if %ERRORLEVEL% NEQ 0 (
     if %ERRORLEVEL% EQU 0 (
         echo [SUCCESS] GPU restored after restart
         echo.
-        echo [INFO] Testing Ollama availability...
+        echo [INFO] Testing llama-cpp availability...
         cd ..
-        docker compose exec ollama ollama list >nul 2>&1
+        docker compose exec llama-cpp curl -s -f http://localhost:8080/health >nul 2>&1
         cd scripts
         if %ERRORLEVEL% EQU 0 (
-            echo [SUCCESS] Ollama GPU integration working
+            echo [SUCCESS] llama-cpp GPU integration working
         ) else (
-            echo [WARN] Ollama may need additional time to initialize
+            echo [WARN] llama-cpp may need additional time to initialize
         )
     ) else (
         echo [ERROR] GPU still not available - may need full rebuild
@@ -236,20 +236,20 @@ if %ERRORLEVEL% NEQ 0 (
 ) else (
     echo [SUCCESS] OpenWebUI GPU is working correctly
     echo.
-    echo [INFO] Testing Ollama GPU integration...
+    echo [INFO] Testing llama-cpp GPU integration...
     cd ..
-    docker compose exec ollama ollama list >nul 2>&1
+    docker compose exec llama-cpp curl -s -f http://localhost:8080/health >nul 2>&1
     cd scripts
     if %ERRORLEVEL% EQU 0 (
-        echo [SUCCESS] Ollama GPU integration working
+        echo [SUCCESS] llama-cpp GPU integration working
         echo [INFO] All GPU services operational
     ) else (
-        echo [WARN] Ollama may need restart
+        echo [WARN] llama-cpp may need restart
         cd ..
-        docker compose restart ollama
+        docker compose restart llama-cpp
         cd scripts
         timeout /t 30 /nobreak >nul
-        echo [SUCCESS] Ollama restarted
+        echo [SUCCESS] llama-cpp restarted
     )
 )
 if "%1"=="" (
@@ -280,9 +280,9 @@ cd ..
 docker compose exec openwebui python -c "import torch; print('CUDA available:', torch.cuda.is_available()); print('GPU count:', torch.cuda.device_count())" 2>nul
 cd scripts
 echo.
-echo [INFO] Ollama Status:
+echo [INFO] llama-cpp Status:
 cd ..
-docker compose exec ollama ollama list 2>nul
+docker compose exec llama-cpp curl -s http://localhost:8080/health 2>nul
 cd scripts
 echo.
 echo [INFO] Network Connectivity:
@@ -315,12 +315,12 @@ if %ERRORLEVEL% EQU 0 (
     echo [ERROR] OpenWebUI accessibility: FAILED
 )
 cd ..
-docker compose exec tailscale wget -q -T 3 -O /dev/null http://127.0.0.1:11434/api/version 2>nul
+docker compose exec llama-cpp curl -s -f http://localhost:8080/health >nul 2>&1
 cd scripts
 if %ERRORLEVEL% EQU 0 (
-    echo [SUCCESS] Ollama API accessibility: OK
+    echo [SUCCESS] llama-cpp API accessibility: OK
 ) else (
-    echo [ERROR] Ollama API accessibility: FAILED
+    echo [ERROR] llama-cpp API accessibility: FAILED
 )
 echo.
 echo [INFO] Open Terminal Health:
@@ -391,11 +391,11 @@ echo   OpenWebUI Restart Sequence
 echo ========================================
 echo.
 echo [INFO] Restarting OpenWebUI with proper network dependency handling...
-echo [WARN] This will restart OpenWebUI, Ollama, and Tailscale containers
+echo [WARN] This will restart OpenWebUI, llama-cpp, llama-cpp-embed, and Tailscale containers
 echo.
 echo [INFO] Stopping dependent containers first...
 cd ..
-docker compose stop tailscale ollama
+docker compose stop tailscale llama-cpp llama-cpp-embed
 cd scripts
 echo [INFO] Restarting OpenWebUI...
 cd ..
@@ -413,15 +413,23 @@ if %ERRORLEVEL% NEQ 0 (
 )
 echo [SUCCESS] OpenWebUI healthy - restarting dependent services
 echo.
-echo [INFO] Starting Ollama...
+echo [INFO] Starting llama-cpp...
 cd ..
-docker compose start ollama
+docker compose start llama-cpp
 if %ERRORLEVEL% NEQ 0 (
-    echo [WARN] Ollama start failed, trying up -d...
-    docker compose up -d ollama
+    echo [WARN] llama-cpp start failed, trying up -d...
+    docker compose up -d llama-cpp
 )
 cd scripts
-echo [INFO] Waiting for Ollama to initialize...
+echo [INFO] Starting llama-cpp-embed...
+cd ..
+docker compose start llama-cpp-embed
+if %ERRORLEVEL% NEQ 0 (
+    echo [WARN] llama-cpp-embed start failed, trying up -d...
+    docker compose up -d llama-cpp-embed
+)
+cd scripts
+echo [INFO] Waiting for llama-cpp to initialize...
 timeout /t 15 /nobreak >nul
 echo.
 echo [INFO] Starting Tailscale...

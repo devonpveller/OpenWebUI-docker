@@ -155,33 +155,40 @@ function Test-EntrypointHealth {
 }
 
 # Function to recover Tailscale service
-# Function to repair OpenWebUI-Ollama connectivity
-function Repair-OllamaConnectivity {
-    Write-LogEntry "Starting OpenWebUI-Ollama connectivity recovery..." "WARN"
+# Function to repair OpenWebUI-llama-cpp connectivity
+function Repair-LlamaCppConnectivity {
+    Write-LogEntry "Starting OpenWebUI-llama-cpp connectivity recovery..." "WARN"
     
     try {
-        # Check if Ollama container is running
-        if (-not (Test-ServiceHealth "ollama")) {
-            Write-LogEntry "Ollama container not running, starting..." "WARN"
-            docker compose up -d ollama | Out-Null
+        # Check if llama-cpp container is running
+        if (-not (Test-ServiceHealth "llama-cpp")) {
+            Write-LogEntry "llama-cpp container not running, starting..." "WARN"
+            docker compose up -d llama-cpp | Out-Null
             Start-Sleep 30
             
-            if (-not (Test-ServiceHealth "ollama")) {
-                Write-LogEntry "Failed to start Ollama container" "ERROR"
+            if (-not (Test-ServiceHealth "llama-cpp")) {
+                Write-LogEntry "Failed to start llama-cpp container" "ERROR"
                 return $false
             }
         }
         
-        # Wait for Ollama API to become available
-        Write-LogEntry "Waiting for Ollama API to become ready..."
+        # Also check llama-cpp-embed
+        if (-not (Test-ServiceHealth "llama-cpp-embed")) {
+            Write-LogEntry "llama-cpp-embed container not running, starting..." "WARN"
+            docker compose up -d llama-cpp-embed | Out-Null
+            Start-Sleep 15
+        }
+        
+        # Wait for llama-cpp API to become available
+        Write-LogEntry "Waiting for llama-cpp API to become ready..."
         $MaxWaitTime = 120
         $WaitTime = 0
         
         while ($WaitTime -lt $MaxWaitTime) {
             try {
-                docker compose exec -T ollama curl -s -f --max-time 5 http://localhost:11434/api/version | Out-Null
+                docker compose exec -T llama-cpp curl -s -f --max-time 5 http://localhost:8080/health | Out-Null
                 if ($LASTEXITCODE -eq 0) {
-                    Write-LogEntry "Ollama API is now responding" "SUCCESS"
+                    Write-LogEntry "llama-cpp API is now responding" "SUCCESS"
                     break
                 }
             } catch {}
@@ -190,35 +197,35 @@ function Repair-OllamaConnectivity {
             $WaitTime += 10
             
             if ($WaitTime % 30 -eq 0) {
-                Write-LogEntry "Still waiting for Ollama API... (${WaitTime}s/${MaxWaitTime}s)" "INFO"
+                Write-LogEntry "Still waiting for llama-cpp API... (${WaitTime}s/${MaxWaitTime}s)" "INFO"
             }
         }
         
-        # Test final connectivity from OpenWebUI
-        if (Test-OllamaConnectivity) {
-            Write-LogEntry "OpenWebUI-Ollama connectivity restored" "SUCCESS"
+        # Test final connectivity
+        if (Test-LlamaCppConnectivity) {
+            Write-LogEntry "llama-cpp connectivity restored" "SUCCESS"
             return $true
         } else {
-            Write-LogEntry "Ollama API ready but OpenWebUI still cannot connect, trying container restart" "WARN"
+            Write-LogEntry "llama-cpp API ready but health check still failing, trying container restart" "WARN"
             
-            # Restart both services in proper order (OpenWebUI first for network namespace)
+            # Restart both services
             docker compose restart openwebui | Out-Null
             Start-Sleep 45  # Wait for GPU initialization
             
-            docker compose restart ollama | Out-Null
+            docker compose restart llama-cpp llama-cpp-embed | Out-Null
             Start-Sleep 30
             
             # Final connectivity test
-            if (Test-OllamaConnectivity) {
-                Write-LogEntry "Container restart restored OpenWebUI-Ollama connectivity" "SUCCESS"
+            if (Test-LlamaCppConnectivity) {
+                Write-LogEntry "Container restart restored llama-cpp connectivity" "SUCCESS"
                 return $true
             } else {
-                Write-LogEntry "Failed to restore OpenWebUI-Ollama connectivity after restart" "ERROR"
+                Write-LogEntry "Failed to restore llama-cpp connectivity after restart" "ERROR"
                 return $false
             }
         }
     } catch {
-        Write-LogEntry "Ollama connectivity recovery failed: $($_.Exception.Message)" "ERROR"
+        Write-LogEntry "llama-cpp connectivity recovery failed: $($_.Exception.Message)" "ERROR"
         return $false
     }
 }
@@ -319,23 +326,23 @@ function Repair-OpenTerminal {
     }
 }
 
-# Function to test OpenWebUI-Ollama connectivity
-function Test-OllamaConnectivity {
+# Function to test llama-cpp connectivity
+function Test-LlamaCppConnectivity {
     try {
-        Write-LogEntry "Testing OpenWebUI-Ollama connectivity..." "DEBUG"
+        Write-LogEntry "Testing llama-cpp connectivity..." "DEBUG"
         
-        # Test if Ollama service is running and accessible
-        $OllamaResponse = docker compose exec -T openwebui curl -s -f --max-time 10 http://localhost:11434/api/version 2>$null
+        # Test if llama-cpp service is running and accessible
+        $LlamaCppResponse = docker compose exec -T llama-cpp curl -s -f --max-time 10 http://localhost:8080/health 2>$null
         
-        if ($LASTEXITCODE -eq 0 -and $OllamaResponse) {
-            Write-LogEntry "OpenWebUI-Ollama connectivity verified" "DEBUG"
+        if ($LASTEXITCODE -eq 0 -and $LlamaCppResponse) {
+            Write-LogEntry "llama-cpp connectivity verified" "DEBUG"
             return $true
         } else {
-            Write-LogEntry "OpenWebUI cannot reach Ollama on localhost:11434" "WARN"
+            Write-LogEntry "llama-cpp not responding on localhost:8080" "WARN"
             return $false
         }
     } catch {
-        Write-LogEntry "Failed to test Ollama connectivity: $($_.Exception.Message)" "ERROR"
+        Write-LogEntry "Failed to test llama-cpp connectivity: $($_.Exception.Message)" "ERROR"
         return $false
     }
 }
@@ -428,11 +435,11 @@ function Invoke-HealthCheck {
         }
     }
     
-    # Test OpenWebUI-Ollama connectivity
-    if (-not (Test-OllamaConnectivity)) {
-        Write-LogEntry "OpenWebUI-Ollama connectivity failed, attempting recovery..." "WARN"
-        if (-not (Repair-OllamaConnectivity)) {
-            Write-LogEntry "Failed to restore OpenWebUI-Ollama connectivity" "ERROR"
+    # Test llama-cpp connectivity
+    if (-not (Test-LlamaCppConnectivity)) {
+        Write-LogEntry "llama-cpp connectivity failed, attempting recovery..." "WARN"
+        if (-not (Repair-LlamaCppConnectivity)) {
+            Write-LogEntry "Failed to restore llama-cpp connectivity" "ERROR"
             return $false
         }
     }
