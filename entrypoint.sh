@@ -280,6 +280,75 @@ else
     echo "🔄 llama-cpp Tailscale integration disabled (LLAMA_CPP_ENABLED=false)"
 fi
 
+# Configure llama-cpp-embed API at /llama-cpp-embed path
+sleep 2
+echo "🦙 Configuring llama-cpp-embed API access..."
+
+LLAMA_CPP_EMBED_HOST=${LLAMA_CPP_EMBED_HOST:-llama-cpp-embed}
+LLAMA_CPP_EMBED_PORT=${LLAMA_CPP_EMBED_PORT:-8080}
+LLAMA_CPP_EMBED_ENABLED=${LLAMA_CPP_EMBED_ENABLED:-true}
+LLAMA_CPP_EMBED_LOCAL_PORT=8236  # Local port for socat proxy
+
+# Helper function to set up the llama-cpp-embed socat proxy and tailscale serve
+setup_llama_cpp_embed_serve() {
+    echo "🔄 Creating local proxy for llama-cpp-embed at ${LLAMA_CPP_EMBED_HOST}:${LLAMA_CPP_EMBED_PORT}"
+
+    # Kill any existing socat process on this port
+    pkill -f "socat.*:${LLAMA_CPP_EMBED_LOCAL_PORT}" || true
+    sleep 2
+
+    # Start socat proxy
+    echo "🚀 Starting socat proxy: 127.0.0.1:${LLAMA_CPP_EMBED_LOCAL_PORT} -> ${LLAMA_CPP_EMBED_HOST}:${LLAMA_CPP_EMBED_PORT}"
+    socat -d -d TCP-LISTEN:${LLAMA_CPP_EMBED_LOCAL_PORT},fork,reuseaddr,keepalive TCP:${LLAMA_CPP_EMBED_HOST}:${LLAMA_CPP_EMBED_PORT} > /tmp/socat-llama-cpp-embed.log 2>&1 &
+    LLAMA_CPP_EMBED_SOCAT_PID=$!
+    echo $LLAMA_CPP_EMBED_SOCAT_PID > /tmp/socat-llama-cpp-embed.pid
+
+    # Wait and verify socat started
+    sleep 3
+    if ! kill -0 $LLAMA_CPP_EMBED_SOCAT_PID 2>/dev/null; then
+        echo "❌ ERROR: llama-cpp-embed socat failed to start"
+        cat /tmp/socat-llama-cpp-embed.log 2>/dev/null || echo "No log file found"
+        return 1
+    fi
+    echo "✅ llama-cpp-embed proxy started successfully (PID: $LLAMA_CPP_EMBED_SOCAT_PID)"
+
+    # Configure Tailscale serve
+    tailscale --socket=/tmp/tailscaled.sock serve \
+      --https=443 \
+      --set-path=/llama-cpp-embed \
+      --bg \
+      http://127.0.0.1:${LLAMA_CPP_EMBED_LOCAL_PORT}
+    echo "✅ llama-cpp-embed API configured at /llama-cpp-embed (via proxy: ${LLAMA_CPP_EMBED_HOST}:${LLAMA_CPP_EMBED_PORT} -> 127.0.0.1:${LLAMA_CPP_EMBED_LOCAL_PORT})"
+
+    # Mark as configured so the monitoring loop knows
+    touch /tmp/llama-cpp-embed-serve-configured
+    return 0
+}
+
+if [ "$LLAMA_CPP_EMBED_ENABLED" = "true" ]; then
+    LLAMA_CPP_EMBED_ATTEMPTS=0
+    LLAMA_CPP_EMBED_MAX_ATTEMPTS=12
+    LLAMA_CPP_EMBED_CONFIGURED=false
+
+    while [ $LLAMA_CPP_EMBED_ATTEMPTS -lt $LLAMA_CPP_EMBED_MAX_ATTEMPTS ]; do
+        if wget -q -T 10 -O /dev/null http://${LLAMA_CPP_EMBED_HOST}:${LLAMA_CPP_EMBED_PORT}/health; then
+            if setup_llama_cpp_embed_serve; then
+                LLAMA_CPP_EMBED_CONFIGURED=true
+            fi
+            break
+        fi
+        LLAMA_CPP_EMBED_ATTEMPTS=$((LLAMA_CPP_EMBED_ATTEMPTS + 1))
+        echo "⏳ llama-cpp-embed not ready yet (attempt ${LLAMA_CPP_EMBED_ATTEMPTS}/${LLAMA_CPP_EMBED_MAX_ATTEMPTS}), waiting 10s..."
+        sleep 10
+    done
+
+    if [ "$LLAMA_CPP_EMBED_CONFIGURED" != "true" ]; then
+        echo "⚠️ llama-cpp-embed not available after ${LLAMA_CPP_EMBED_MAX_ATTEMPTS} attempts — monitoring loop will configure it when it comes online"
+    fi
+else
+    echo "🔄 llama-cpp-embed Tailscale integration disabled (LLAMA_CPP_EMBED_ENABLED=false)"
+fi
+
 echo "✅ Tailscale serve configured:"
 echo "  - OpenWebUI: HTTPS port 443 -> 127.0.0.1:8080"
 echo "  - Ollama API: HTTPS port 443/ollama -> 127.0.0.1:11434"
@@ -288,6 +357,9 @@ if [ "$LMSTUDIO_ENABLED" = "true" ]; then
 fi
 if [ "$LLAMA_CPP_ENABLED" = "true" ]; then
     echo "  - llama-cpp API: HTTPS port 443/llama-cpp -> ${LLAMA_CPP_HOST}:${LLAMA_CPP_PORT}"
+fi
+if [ "$LLAMA_CPP_EMBED_ENABLED" = "true" ]; then
+    echo "  - llama-cpp-embed API: HTTPS port 443/llama-cpp-embed -> ${LLAMA_CPP_EMBED_HOST}:${LLAMA_CPP_EMBED_PORT}"
 fi
 
 # 8) Background monitoring loop for autonomous recovery
@@ -351,6 +423,39 @@ fi
                     else
                         echo "❌ $(date): Failed to restart llama-cpp proxy"
                         cat /tmp/socat-llama-cpp.log 2>/dev/null || echo "No log available"
+                    fi
+                fi
+            fi
+        fi
+
+        # Check llama-cpp-embed: deferred setup + socat health
+        if [ "$LLAMA_CPP_EMBED_ENABLED" = "true" ]; then
+            if [ ! -f /tmp/llama-cpp-embed-serve-configured ]; then
+                # Serve was never configured — try deferred setup
+                if wget -q -T 10 -O /dev/null http://${LLAMA_CPP_EMBED_HOST}:${LLAMA_CPP_EMBED_PORT}/health; then
+                    echo "🦙 $(date): llama-cpp-embed is now online, performing deferred setup..."
+                    setup_llama_cpp_embed_serve || echo "❌ $(date): Deferred llama-cpp-embed setup failed, will retry next cycle"
+                fi
+            elif [ -f /tmp/socat-llama-cpp-embed.pid ]; then
+                # Serve is configured — keep the socat proxy alive
+                LLAMA_CPP_EMBED_PID=$(cat /tmp/socat-llama-cpp-embed.pid)
+                if ! kill -0 $LLAMA_CPP_EMBED_PID 2>/dev/null; then
+                    echo "⚠️ $(date): llama-cpp-embed socat proxy (PID: $LLAMA_CPP_EMBED_PID) has died, restarting..."
+
+                    LLAMA_CPP_EMBED_LOCAL_PORT=8236
+                    pkill -f "socat.*:${LLAMA_CPP_EMBED_LOCAL_PORT}" || true
+                    sleep 2
+
+                    socat -d -d TCP-LISTEN:${LLAMA_CPP_EMBED_LOCAL_PORT},fork,reuseaddr,keepalive TCP:${LLAMA_CPP_EMBED_HOST}:${LLAMA_CPP_EMBED_PORT} > /tmp/socat-llama-cpp-embed.log 2>&1 &
+                    NEW_EMBED_PID=$!
+                    echo $NEW_EMBED_PID > /tmp/socat-llama-cpp-embed.pid
+                    sleep 3
+
+                    if kill -0 $NEW_EMBED_PID 2>/dev/null; then
+                        echo "✅ $(date): llama-cpp-embed proxy restarted successfully (PID: $NEW_EMBED_PID)"
+                    else
+                        echo "❌ $(date): Failed to restart llama-cpp-embed proxy"
+                        cat /tmp/socat-llama-cpp-embed.log 2>/dev/null || echo "No log available"
                     fi
                 fi
             fi
@@ -436,6 +541,13 @@ fi
                     rm -f /tmp/llama-cpp-serve-configured
                     setup_llama_cpp_serve || echo "❌ Failed to reconfigure llama-cpp serve"
                 fi
+
+                # Reconfigure llama-cpp-embed API if available and enabled
+                if [ "$LLAMA_CPP_EMBED_ENABLED" = "true" ] && wget -q -T 10 -O /dev/null http://${LLAMA_CPP_EMBED_HOST}:${LLAMA_CPP_EMBED_PORT}/health; then
+                    echo "🔄 Reconfiguring llama-cpp-embed serve after reconnection..."
+                    rm -f /tmp/llama-cpp-embed-serve-configured
+                    setup_llama_cpp_embed_serve || echo "❌ Failed to reconfigure llama-cpp-embed serve"
+                fi
             elif ! echo "$serve_status" | grep -q "127.0.0.1:11434"; then
                 # Ollama serve is missing, try to add it
                 echo "🔄 $(date): Adding missing Ollama serve configuration..."
@@ -489,6 +601,13 @@ fi
                     rm -f /tmp/llama-cpp-serve-configured
                     setup_llama_cpp_serve || echo "❌ Failed to add llama-cpp serve"
                 fi
+            elif [ "$LLAMA_CPP_EMBED_ENABLED" = "true" ] && ! echo "$serve_status" | grep -q "127.0.0.1:${LLAMA_CPP_EMBED_LOCAL_PORT:-8236}"; then
+                # llama-cpp-embed serve is missing, try to add it
+                echo "🔄 $(date): Adding missing llama-cpp-embed serve configuration..."
+                if wget -q -T 10 -O /dev/null http://${LLAMA_CPP_EMBED_HOST}:${LLAMA_CPP_EMBED_PORT}/health; then
+                    rm -f /tmp/llama-cpp-embed-serve-configured
+                    setup_llama_cpp_embed_serve || echo "❌ Failed to add llama-cpp-embed serve"
+                fi
             fi
         fi
     done
@@ -510,6 +629,8 @@ fi
 if [ "$LLAMA_CPP_ENABLED" = "true" ]; then
     echo "  - llama-cpp API: https://$(tailscale --socket=/tmp/tailscaled.sock status --json | grep '\"Name\"' | cut -d'"' -f4 2>/dev/null || echo 'your-hostname').tail[...].ts.net/llama-cpp/v1"
 fi
-
+if [ "$LLAMA_CPP_EMBED_ENABLED" = "true" ]; then
+    echo "  - llama-cpp-embed API: https://$(tailscale --socket=/tmp/tailscaled.sock status --json | grep '"Name"' | cut -d'"' -f4 2>/dev/null || echo 'your-hostname').tail[...].ts.net/llama-cpp-embed/v1"
+fi
 # 9) Keep the container running
 tail -f /dev/null
