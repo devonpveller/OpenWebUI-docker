@@ -26,10 +26,10 @@ docker compose exec openwebui curl -f -s http://localhost:8080/ >nul 2>&1
 if %ERRORLEVEL% EQU 0 (
     echo [INFO] OpenWebUI responding...
     
-    REM Test Ollama connectivity  
-    docker compose exec openwebui curl -f -s http://localhost:11434/api/version >nul 2>&1
+    REM Test llama-cpp connectivity  
+    docker compose exec llama-cpp curl -f -s http://localhost:8080/health >nul 2>&1
     if %ERRORLEVEL% EQU 0 (
-        echo [INFO] Ollama connectivity working...
+        echo [INFO] llama-cpp connectivity working...
         
         REM Test external connectivity
         docker compose exec tailscale ping -c 1 8.8.8.8 >nul 2>&1
@@ -40,7 +40,7 @@ if %ERRORLEVEL% EQU 0 (
             echo [WARN] External connectivity failed
         )
     ) else (
-        echo [WARN] Ollama connectivity failed
+        echo [WARN] llama-cpp connectivity failed
     )
 ) else (
     echo [WARN] OpenWebUI health check failed
@@ -50,7 +50,7 @@ echo [INFO] Basic checks failed - proceeding with full recovery
 
 REM Phase 1: Graceful shutdown in reverse dependency order
 echo [INFO] Phase 1: Graceful shutdown
-echo [WARN] This will restart OpenWebUI, Ollama, and Tailscale containers
+echo [WARN] This will restart OpenWebUI, llama-cpp, llama-cpp-embed, and Tailscale containers
 echo [INFO] Stopping Tailscale container...
 docker compose stop tailscale
 if %ERRORLEVEL% NEQ 0 (
@@ -58,11 +58,11 @@ if %ERRORLEVEL% NEQ 0 (
     docker compose kill tailscale
 )
 
-echo [INFO] Stopping Ollama container...
-docker compose stop ollama
+echo [INFO] Stopping llama-cpp containers...
+docker compose stop llama-cpp llama-cpp-embed
 if %ERRORLEVEL% NEQ 0 (
-    echo [WARN] Ollama stop failed, attempting force kill...
-    docker compose kill ollama
+    echo [WARN] llama-cpp stop failed, attempting force kill...
+    docker compose kill llama-cpp llama-cpp-embed
 )
 
 echo [INFO] Stopping OpenWebUI container...
@@ -84,7 +84,7 @@ if %ERRORLEVEL% NEQ 0 (
     goto :nuclear_option
 )
 
-echo [INFO] Waiting for OpenWebUI to be healthy (required for Ollama network dependency)...
+echo [INFO] Waiting for OpenWebUI to be healthy (required for Tailscale network dependency)...
 :wait_openwebui
 docker compose ps openwebui | findstr "healthy" >nul 2>&1
 if %ERRORLEVEL% NEQ 0 (
@@ -92,17 +92,20 @@ if %ERRORLEVEL% NEQ 0 (
     timeout /t 10 /nobreak >nul
     goto :wait_openwebui
 )
-echo [SUCCESS] OpenWebUI is healthy - safe to start Ollama with shared network
+echo [SUCCESS] OpenWebUI is healthy - safe to start llama-cpp services
 
-echo [INFO] Starting Ollama with shared network namespace (depends on OpenWebUI)...
-docker compose up -d ollama
+echo [INFO] Starting llama-cpp with GPU support...
+docker compose up -d llama-cpp
 if %ERRORLEVEL% NEQ 0 (
-    echo [ERROR] Failed to start Ollama container
+    echo [ERROR] Failed to start llama-cpp container
     goto :nuclear_option
 )
 
-echo [INFO] Waiting for Ollama to initialize on shared network...
+echo [INFO] Waiting for llama-cpp to initialize...
 timeout /t 30 /nobreak >nul
+
+echo [INFO] Starting llama-cpp-embed...
+docker compose up -d llama-cpp-embed
 
 echo [INFO] Starting Tailscale with shared network namespace...
 docker compose up -d tailscale
@@ -136,8 +139,8 @@ echo [INFO] ==========================================
 echo [INFO] Restarting with proper network dependency sequence...
 
 REM Stop dependent containers first
-echo [INFO] Stopping Tailscale and Ollama (network dependents)...
-docker compose stop tailscale ollama
+echo [INFO] Stopping Tailscale and llama-cpp services (network dependents)...
+docker compose stop tailscale llama-cpp llama-cpp-embed
 
 REM Restart OpenWebUI first and wait for health
 echo [INFO] Restarting OpenWebUI...
@@ -154,8 +157,12 @@ if %ERRORLEVEL% NEQ 0 (
 echo [SUCCESS] OpenWebUI healthy - restarting dependent services
 
 REM Now restart the dependent containers
-echo [INFO] Starting Ollama with fresh network namespace...
-docker compose up -d ollama
+echo [INFO] Starting llama-cpp with fresh network namespace...
+docker compose up -d llama-cpp
+timeout /t 15 /nobreak >nul
+
+echo [INFO] Starting llama-cpp-embed...
+docker compose up -d llama-cpp-embed
 timeout /t 15 /nobreak >nul
 
 echo [INFO] Starting Tailscale with fresh network namespace...
@@ -213,8 +220,8 @@ if %ERRORLEVEL% NEQ 0 (
 :verify_services
 echo.
 echo [INFO] Verifying services...
-echo [INFO] Ollama status:
-docker compose exec ollama ollama list
+echo [INFO] llama-cpp status:
+docker compose exec llama-cpp curl -s http://localhost:8080/health
 
 echo.
 echo [INFO] Tailscale status:

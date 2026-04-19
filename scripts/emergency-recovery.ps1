@@ -49,24 +49,25 @@ function Test-BasicConnectivity {
     try {
         $containers = docker compose ps --format json | ConvertFrom-Json
         $openwebuiStatus = ($containers | Where-Object { $_.Service -eq "openwebui" }).State
-        $ollamaStatus = ($containers | Where-Object { $_.Service -eq "ollama" }).State
+        $llamaCppStatus = ($containers | Where-Object { $_.Service -eq "llama-cpp" }).State
+        $llamaCppEmbedStatus = ($containers | Where-Object { $_.Service -eq "llama-cpp-embed" }).State
         $tailscaleStatus = ($containers | Where-Object { $_.Service -eq "tailscale" }).State
         
-        Write-Log "INFO" "Container states - OpenWebUI: $openwebuiStatus, Ollama: $ollamaStatus, Tailscale: $tailscaleStatus"
+        Write-Log "INFO" "Container states - OpenWebUI: $openwebuiStatus, llama-cpp: $llamaCppStatus, llama-cpp-embed: $llamaCppEmbedStatus, Tailscale: $tailscaleStatus"
         
         # If all containers are running, test basic functionality
-        if ($openwebuiStatus -eq "running" -and $ollamaStatus -eq "running" -and $tailscaleStatus -eq "running") {
+        if ($openwebuiStatus -eq "running" -and $llamaCppStatus -eq "running" -and $llamaCppEmbedStatus -eq "running" -and $tailscaleStatus -eq "running") {
             # Test OpenWebUI health
             try {
                 $response = docker compose exec openwebui curl -f -s http://localhost:8080/health 2>$null
                 if ($LASTEXITCODE -eq 0) {
                     Write-Log "INFO" "OpenWebUI health check: PASSED"
                     
-                    # Test Ollama connectivity
+                    # Test llama-cpp connectivity
                     try {
-                        docker compose exec openwebui curl -f -s http://localhost:11434/api/version 2>$null | Out-Null
+                        docker compose exec llama-cpp curl -f -s http://localhost:8080/health 2>$null | Out-Null
                         if ($LASTEXITCODE -eq 0) {
-                            Write-Log "INFO" "Ollama connectivity: PASSED"
+                            Write-Log "INFO" "llama-cpp connectivity: PASSED"
                             
                             # Test external connectivity
                             if (Test-NetworkConnectivity "tailscale") {
@@ -78,11 +79,11 @@ function Test-BasicConnectivity {
                             }
                         }
                         else {
-                            Write-Log "WARN" "Ollama connectivity failed"
+                            Write-Log "WARN" "llama-cpp connectivity failed"
                         }
                     }
                     catch {
-                        Write-Log "WARN" "Ollama connectivity test failed: $_"
+                        Write-Log "WARN" "llama-cpp connectivity test failed: $_"
                     }
                 }
                 else {
@@ -113,7 +114,7 @@ function Invoke-MinimalRecovery {
     
     # Just restart services without destroying containers
     try {
-        docker compose restart tailscale ollama openwebui
+        docker compose restart tailscale llama-cpp llama-cpp-embed openwebui
         
         # Start Watchtower if it's missing (it doesn't need restart usually)
         docker compose up -d watchtower
@@ -238,16 +239,19 @@ function Invoke-EmergencyRecovery {
     
     # Phase 1: Graceful shutdown in reverse dependency order
     Write-Log "INFO" "Phase 1: Graceful shutdown"
-    Write-Log "WARN" "This will restart OpenWebUI, Ollama, and Tailscale services"
+    Write-Log "WARN" "This will restart OpenWebUI, llama-cpp, llama-cpp-embed, and Tailscale services"
     
     # Stop Tailscale first (dependent on OpenWebUI network)
     if (-not (Stop-ServiceGracefully "tailscale" 30)) {
         Write-Log "WARN" "Tailscale stop had issues, continuing..."
     }
     
-    # Stop Ollama (dependent on OpenWebUI network)
-    if (-not (Stop-ServiceGracefully "ollama" 30)) {
-        Write-Log "WARN" "Ollama stop had issues, continuing..."
+    # Stop llama-cpp services
+    if (-not (Stop-ServiceGracefully "llama-cpp" 30)) {
+        Write-Log "WARN" "llama-cpp stop had issues, continuing..."
+    }
+    if (-not (Stop-ServiceGracefully "llama-cpp-embed" 30)) {
+        Write-Log "WARN" "llama-cpp-embed stop had issues, continuing..."
     }
     
     # Stop OpenWebUI 
@@ -287,16 +291,28 @@ function Invoke-EmergencyRecovery {
     Write-Log "INFO" "Allowing network namespace to stabilize..."
     Start-Sleep -Seconds 20
     
-    # Start Ollama (depends on OpenWebUI network)
-    Write-Log "INFO" "Starting Ollama with GPU support..."
+    # Start llama-cpp services (GPU inference)
+    Write-Log "INFO" "Starting llama-cpp with GPU support..."
     try {
-        docker compose up -d ollama
-        if (-not (Wait-ForHealthy "ollama" 60)) {
-            Write-Log "WARN" "Ollama health check failed, but continuing..."
+        docker compose up -d llama-cpp
+        if (-not (Wait-ForHealthy "llama-cpp" 120)) {
+            Write-Log "WARN" "llama-cpp health check failed, but continuing..."
         }
     }
     catch {
-        Write-Log "ERROR" "Failed to start Ollama: $_"
+        Write-Log "ERROR" "Failed to start llama-cpp: $_"
+        throw
+    }
+    
+    Write-Log "INFO" "Starting llama-cpp-embed..."
+    try {
+        docker compose up -d llama-cpp-embed
+        if (-not (Wait-ForHealthy "llama-cpp-embed" 60)) {
+            Write-Log "WARN" "llama-cpp-embed health check failed, but continuing..."
+        }
+    }
+    catch {
+        Write-Log "ERROR" "Failed to start llama-cpp-embed: $_"
         throw
     }
     
@@ -341,8 +357,8 @@ function Invoke-EmergencyRecovery {
     Write-Log "INFO" "Phase 5: Service verification"
     
     try {
-        Write-Log "INFO" "Ollama status:"
-        docker compose exec ollama ollama list
+        Write-Log "INFO" "llama-cpp status:"
+        docker compose exec llama-cpp curl -s http://localhost:8080/health
         
         Write-Log "INFO" "Tailscale status:"
         docker compose exec tailscale tailscale --socket=/tmp/tailscaled.sock status
@@ -412,7 +428,7 @@ function Invoke-GPUReset {
     Write-Log "INFO" "========================================="
     
     Write-Log "INFO" "Stopping GPU-dependent services for reset..."
-    docker compose down ollama openwebui
+    docker compose down llama-cpp llama-cpp-embed openwebui
     
     Write-Log "INFO" "Rebuilding OpenWebUI with fresh GPU configuration..."
     docker compose build --no-cache openwebui
@@ -421,20 +437,24 @@ function Invoke-GPUReset {
     docker compose up -d openwebui
     
     if (Wait-ForHealthy "openwebui" 240) {
-        Write-Log "INFO" "Starting Ollama with GPU support..."
-        docker compose up -d ollama
+        Write-Log "INFO" "Starting llama-cpp with GPU support..."
+        docker compose up -d llama-cpp
         
-        if (Wait-ForHealthy "ollama" 60) {
+        if (Wait-ForHealthy "llama-cpp" 120) {
             if (Test-GPUAvailability) {
                 Write-Log "SUCCESS" "GPU reset successful - CUDA is available"
                 
-                # Test Ollama GPU access
+                # Test llama-cpp GPU access
                 try {
-                    docker compose exec ollama ollama list
-                    Write-Log "SUCCESS" "Ollama GPU integration verified"
+                    docker compose exec llama-cpp curl -s http://localhost:8080/health
+                    Write-Log "SUCCESS" "llama-cpp GPU integration verified"
+                    
+                    # Also start embedding service
+                    docker compose up -d llama-cpp-embed
+                    Write-Log "INFO" "llama-cpp-embed started"
                 }
                 catch {
-                    Write-Log "WARN" "Ollama may need additional time to initialize"
+                    Write-Log "WARN" "llama-cpp may need additional time to initialize"
                 }
             }
             else {
@@ -443,7 +463,9 @@ function Invoke-GPUReset {
             }
         }
         else {
-            Write-Log "WARN" "Ollama startup slow but continuing..."
+            Write-Log "WARN" "llama-cpp startup slow but continuing..."
+            # Start embedding service anyway
+            docker compose up -d llama-cpp-embed
         }
     }
     else {
