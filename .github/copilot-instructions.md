@@ -1,23 +1,26 @@
 # AI Agent Instructions for AI Stack Project
 
-This is a containerized AI stack with OpenWebUI, Ollama, and Tailscale VPN running via Docker Compose. The project emphasizes security hardening, autonomous recovery, Windows/PowerShell workflows, and **AI Stack pipe functions** for intelligent system management.
+This is a containerized AI stack with OpenWebUI, Ollama, Mnemory, and Tailscale VPN running via Docker Compose. The project emphasizes security hardening, autonomous recovery, Windows/PowerShell workflows, and **AI Stack pipe functions** for intelligent system management.
 
 ## 🚨 CRITICAL CODING GUIDELINES
 
 ### File Management & Architecture
-- **NEVER create "refactored_" variations** of existing files (e.g., `refactored_router.py`, `refactored_module.py`)
+
+- **NEVER create "refactored\_" variations** of existing files (e.g., `refactored_router.py`, `refactored_module.py`)
 - **Instead**: Directly refactor the original file in place (e.g., update `router.py` directly)
 - **NEVER create legacy placeholder files** - remove redundant files immediately
 - **Consolidate functionality** into single canonical files rather than maintaining duplicates
 - **Clean up redundant files** after refactoring (remove old versions, clean `__pycache__` directories)
 
 ### Architecture Patterns
+
 - Use **manifest-driven architecture** with JSON Schema validation
 - Implement **single entry points** rather than multiple similar files
 - Follow **explicit contracts** with versioned schemas
 - Maintain **environment-aware paths** for container vs host operation
 
 ### PowerShell & Windows-Specific Patterns
+
 - **Terminal commands**: Always use PowerShell syntax (`;` for command chaining, not `&&`)
 - **Path separators**: Use `\` for Windows paths in scripts and documentation
 - **Execution policy**: Scripts assume PowerShell execution policy allows script execution
@@ -26,13 +29,17 @@ This is a containerized AI stack with OpenWebUI, Ollama, and Tailscale VPN runni
 ## Architecture Overview
 
 **Service Dependencies Flow:**
+
 ```
 Docker Engine → OpenWebUI (healthy) → Tailscale (shared network) → Watchtower
                      ↓
                   Ollama
+                  llama-cpp ← Mnemory (memory service + backup scheduler)
+                  llama-cpp-embed ←┘
 ```
 
 **AI Stack Pipe Function Architecture:**
+
 ```
 OpenWebUI → unified_openwebui_pipe.py → core/router.py → modules/ (manifest-driven)
                                               ↓
@@ -40,11 +47,13 @@ OpenWebUI → unified_openwebui_pipe.py → core/router.py → modules/ (manifes
 ```
 
 **Critical Network Pattern:**
+
 - Tailscale uses `network_mode: service:openwebui` - shares OpenWebUI's network namespace
 - When OpenWebUI gets new container ID (restarts/updates), Tailscale loses network connectivity
 - This is the **most common recurring issue** requiring autonomous recovery
 
 **AI Stack Pipe Function Integration:**
+
 - Project mounted at `.:/host_project:ro` in OpenWebUI container for complete access
 - **Single unified pipe function** with manifest-driven architecture
 - Intelligent natural language routing: "Check GPU status" → `gpu-status` module
@@ -53,33 +62,41 @@ OpenWebUI → unified_openwebui_pipe.py → core/router.py → modules/ (manifes
 ## Core Components
 
 ### Docker Compose Services
+
 - **openwebui**: AI chat interface (port 3000→8080) with GPU-accelerated reranker models
-- **ollama**: LLM server (port 11434)  
+- **ollama**: LLM server (port 11434)
 - **tailscale**: VPN access via custom build (`dockerfile.tailscale` + `entrypoint.sh`)
 - **watchtower**: Auto-updates (monitors Ollama only, OpenWebUI excluded due to custom GPU build)
+- **mnemory**: AI memory service (ports 8050→8050, 8051→8051) with MCP + REST API, backed by Qdrant vector DB
+- **mnemory-backup**: Alpine cron container for nightly mnemory data backups (7-day retention)
 
 **⚠️ CRITICAL: AI Stack Pipe Functions Mount**
+
 - OpenWebUI container **MUST** have `.:/host_project:ro` volume mount
 - **Read-only security**: Project is mounted with `:ro` flag for container isolation
 - **Path dependency**: All pipe modules expect `/host_project/` structure
 - **Single entry point**: Use only `unified_openwebui_pipe.py` in OpenWebUI Functions
 
 ### AI Stack Pipe Function System
+
 **Files**: `scripts/ai_pipes/`, `core/`, `modules/`, `schemas/`, `tools/`
 
 **Current Architecture (Production)**:
+
 - `unified_openwebui_pipe.py`: Single OpenWebUI integration point
 - `core/router.py`: Manifest-driven router with JSON Schema validation and DirectModuleAdapter
 - `modules/`: Independent modules with `module.manifest.json` contracts
 - `schemas/`: JSON Schema definitions for validation
 
 **Critical Architecture Patterns**:
+
 - **Natural Language Routing**: "Check GPU status" → keyword analysis → `gpu-status` module
 - **Manifest-Driven System**: All modules discovered via `module.manifest.json` files
 - **Container Security**: All pipe execution happens within GPU-enabled OpenWebUI container
 - **Schema Validation**: JSON Schema validation for all communications
 
 **⚠️ CRITICAL: Watchtower Limitation with Custom Builds**
+
 - Watchtower is configured to skip OpenWebUI, Tailscale, and Ollama - custom builds cannot be auto-updated
 - The `openwebui` service uses `build: dockerfile: Dockerfile.openwebui-gpu` (no `image:` field)
 - The `tailscale` service uses `build: dockerfile: dockerfile.tailscale` (custom Alpine build)
@@ -87,13 +104,16 @@ OpenWebUI → unified_openwebui_pipe.py → core/router.py → modules/ (manifes
 - Watchtower currently monitors no services due to explicit `watchtower.enable=false` labels
 
 ### Custom OpenWebUI GPU Integration
+
 **Files**: `Dockerfile.openwebui-gpu`, `docker-compose.yml`
+
 - Custom build replacing CPU-only PyTorch with CUDA-enabled version
 - GPU passthrough configuration with NVIDIA Container Toolkit
 - Environment variables: `USE_CUDA=true`, `USE_CUDA_DOCKER=true`
 - **Never use pre-built OpenWebUI images** - breaks GPU acceleration for reranker models
 
 **Critical Update Process for New OpenWebUI Versions:**
+
 1. **Check base image compatibility**: Update `FROM ghcr.io/open-webui/open-webui:latest` to specific version tag
 2. **Verify CUDA compatibility**: Ensure PyTorch CUDA version matches your NVIDIA drivers
 3. **Test GPU availability**: Always run `python -c "import torch; print('CUDA available:', torch.cuda.is_available())"` after updates
@@ -101,6 +121,7 @@ OpenWebUI → unified_openwebui_pipe.py → core/router.py → modules/ (manifes
 5. **Monitor reranker performance**: GPU acceleration should show in container logs during model loading
 
 **Manual Update Workflow (Required - Watchtower Cannot Update Custom Builds):**
+
 ```bash
 # 1. Check for new OpenWebUI releases
 curl -s https://api.github.com/repos/open-webui/open-webui/releases/latest | grep '"tag_name"'
@@ -128,6 +149,7 @@ docker compose logs openwebui | grep -i cuda
 ```
 
 **Version Pinning Strategy:**
+
 ```dockerfile
 # Pin to specific version for stability
 FROM ghcr.io/open-webui/open-webui:v0.3.21  # Replace with current stable
@@ -136,6 +158,7 @@ RUN pip install torch torchvision torchaudio --index-url https://download.pytorc
 ```
 
 **GPU Troubleshooting Commands:**
+
 ```bash
 # Verify NVIDIA runtime availability
 docker run --rm --gpus all nvidia/cuda:12.1-base-ubuntu22.04 nvidia-smi
@@ -148,14 +171,18 @@ docker compose exec openwebui nvidia-smi
 ```
 
 ### Custom Tailscale Integration
+
 **Files**: `dockerfile.tailscale`, `entrypoint.sh`
+
 - Custom Alpine build with socat
 - Network namespace sharing with OpenWebUI
 - HTTPS serve configuration: `443 → 127.0.0.1:8080`
 - **Never mix `image:` and `build:` directives** - breaks custom entrypoint
 
 ### Autonomous Recovery System
+
 **3-tier recovery redundancy** for system reliability:
+
 1. **Quick Fixes** (`scripts/quick-fixes.bat`): Simple targeted repairs
    - Network namespace reset (most common)
    - GPU availability check and restart
@@ -168,14 +195,10 @@ docker compose exec openwebui nvidia-smi
    - GPU availability testing and recovery
    - Multiple recovery modes with comprehensive error handling
 
-**Plus existing 5-tier Tailscale redundancy**:
-4. Docker health checks (`docker-compose.yml`)
-5. Internal monitoring (`entrypoint.sh`)
-6. Watchtower coordination (`docker-compose.override.yml`)
-7. Windows service (`scripts/check-tailscale-health.ps1`)
-8. Simple background monitor (`scripts/simple-monitor.ps1`)
+**Plus existing 5-tier Tailscale redundancy**: 4. Docker health checks (`docker-compose.yml`) 5. Internal monitoring (`entrypoint.sh`) 6. Watchtower coordination (`docker-compose.override.yml`) 7. Windows service (`scripts/check-tailscale-health.ps1`) 8. Simple background monitor (`scripts/simple-monitor.ps1`)
 
 **AI Stack Pipe Function Recovery Integration**:
+
 - Emergency recovery pipe function accessible via "fix network issues" or "emergency recovery"
 - GPU recovery integrated with pipe function GPU monitoring
 - System health checks available through "system health" natural language queries
@@ -183,12 +206,14 @@ docker compose exec openwebui nvidia-smi
 ## Development Patterns
 
 ### PowerShell Conventions
+
 - Use `[CmdletBinding()]` and proper parameter validation
 - Structured logging with levels: `INFO`, `WARN`, `ERROR`, `SUCCESS`
 - Error handling: `$ErrorActionPreference = "Stop"`
 - Avoid unused variables (linting enabled)
 
 ### Docker Compose Patterns
+
 - **Security-first**: `no-new-privileges:true`, localhost-only ports, read-only mounts
 - **Health checks**: All services have comprehensive health validation
 - **Dependency management**: `depends_on` with `condition: service_healthy`
@@ -197,6 +222,7 @@ docker compose exec openwebui nvidia-smi
 - **Pipe function mounting**: `.:/host_project:ro` required for AI Stack pipe function access
 
 ### AI Stack Pipe Function Development Patterns
+
 - **Legacy modules**: Implement `main(payload)` function with structured return format
 - **Router integration**: Add routing keywords to `ai_stack_router.py` for natural language detection
 - **Refactored modules**: Follow manifest-driven architecture with `module.manifest.json` contracts
@@ -205,6 +231,7 @@ docker compose exec openwebui nvidia-smi
 - **Migration automation**: Use `tools/migration_tool.py` for legacy-to-refactored migration
 
 ### Configuration Management
+
 - **Environment variables**: `.env` file (excluded from git)
 - **Secrets**: Never commit auth keys - use `.env.example` template
 - **Persistent data**: `./data/` directory for state retention
@@ -212,14 +239,17 @@ docker compose exec openwebui nvidia-smi
 ## Critical Debugging Knowledge
 
 ### GPU Integration Issues (Critical for OpenWebUI Updates)
+
 **Symptoms**: Reranker models using CPU instead of GPU, CUDA not available, slow embedding generation
-**Root causes**: 
+**Root causes**:
+
 - Default OpenWebUI images ship with CPU-only PyTorch
 - CUDA version mismatch between PyTorch and NVIDIA drivers
 - Missing `USE_CUDA=true` environment variables
 - GPU memory exhaustion from other processes
 
 **Diagnostic Commands**:
+
 ```bash
 # Check GPU availability in container (most important)
 docker compose exec openwebui python -c "import torch; print('CUDA available:', torch.cuda.is_available()); print('GPU count:', torch.cuda.device_count()); print('GPU memory:', torch.cuda.get_device_properties(0).total_memory if torch.cuda.is_available() else 'N/A')"
@@ -232,12 +262,14 @@ nvidia-smi
 ```
 
 **Recovery Steps**:
+
 1. **Immediate fix**: `.\scripts\emergency-recovery.ps1 -Action gpu-reset`
 2. **Rebuild custom image**: `docker compose build --no-cache openwebui`
 3. **Update PyTorch version**: Edit `Dockerfile.openwebui-gpu` with compatible CUDA index
 4. **Clear GPU cache**: Restart containers to free GPU memory
 
 **Manual Update Troubleshooting:**
+
 ```bash
 # Build failed with CUDA errors
 docker compose build --no-cache --progress=plain openwebui  # Verbose output
@@ -252,11 +284,12 @@ docker compose exec openwebui python -c "import torch; print('Import successful'
 
 # Rollback to previous version
 # 1. Restore data backup: rm -rf ./data && mv ./data-backup-YYYYMMDD ./data
-# 2. Revert Dockerfile.openwebui-gpu to previous base image version  
+# 2. Revert Dockerfile.openwebui-gpu to previous base image version
 # 3. Rebuild: docker compose build --no-cache openwebui && docker compose up -d
 ```
 
 **Version Update Workflow for OpenWebUI**:
+
 1. **Watchtower CANNOT update OpenWebUI** - custom builds are ignored by Watchtower
 2. **Manual updates required**: Edit `Dockerfile.openwebui-gpu` to update base image version
 3. **Rebuild process**: `docker compose build --no-cache openwebui && docker compose up -d`
@@ -264,20 +297,24 @@ docker compose exec openwebui python -c "import torch; print('Import successful'
 5. **Monitor performance**: Check embedding generation speed and reranker logs
 
 ### Network Namespace Issues (Most Common)
+
 **Symptoms**: "Network unreachable", Tailscale can't connect to DERP servers
 **Root cause**: OpenWebUI container recreation breaks shared network namespace
 **Quick fix**:
+
 ```bash
 docker compose down tailscale
 docker compose up -d tailscale
 ```
 
 ### Tailscale Service Configuration
+
 **Socket path**: `/tmp/tailscaled.sock` (consistent across all operations)
 **State directory**: `/var/lib/tailscale` (must be persistent)
 **Serve backend**: `http://127.0.0.1:8080` (not container names)
 
 ### Security Hardening Applied
+
 - Container security options (`tmpfs`, `security_opt`)
 - Docker socket read-only access
 - Localhost-only port binding (`127.0.0.1:port`)
@@ -286,6 +323,7 @@ docker compose up -d tailscale
 ## Essential Commands
 
 ### Quick Diagnostics & Recovery (Most Important)
+
 ```powershell
 # Quick targeted fixes (start here for common issues)
 scripts\quick-fixes.bat namespace    # Network namespace reset (most common)
@@ -299,6 +337,7 @@ scripts\quick-fixes.bat nuclear     # Complete restart as last resort
 ```
 
 ### AI Stack Pipe Function Development
+
 ```bash
 # Test pipe function system (corrected paths)
 docker compose exec openwebui ls -la /host_project/scripts/ai_pipes/  # Verify script mount
@@ -307,7 +346,7 @@ docker compose exec openwebui python /host_project/core/router.py '{"input": "gp
 
 # Refactored architecture tools
 python tools/refactor_orchestrator.py --dry-run     # Preview migration
-python tools/migration_tool.py --analyze-only       # Analyze legacy modules  
+python tools/migration_tool.py --analyze-only       # Analyze legacy modules
 python tools/validation_tool.py --all               # Validate schemas and modules
 python tools/scaffold_generator.py --name my-module --type system-management  # Create new module
 
@@ -317,6 +356,7 @@ docker compose exec openwebui python /host_project/scripts/ai_pipes/system_healt
 ```
 
 ### Health Diagnostics
+
 ```bash
 # System health overview
 docker compose ps
@@ -333,6 +373,7 @@ docker compose exec tailscale tailscale --socket=/tmp/tailscaled.sock serve stat
 ```
 
 ### Recovery Operations (Graduated Response)
+
 ```bash
 # 1. Simple restart (try first)
 docker compose restart tailscale
@@ -350,11 +391,13 @@ docker compose build --no-cache; docker compose up -d
 ## File Organization Patterns
 
 ### Configuration Files
+
 - `config/*.conf`: Application-specific settings
 - `.env`: Runtime environment (SECRET - never commit)
 - `docker-compose.override.yml`: Development/testing overrides
 
 ### Scripts Directory
+
 - `*.ps1`: Windows PowerShell utilities
 - `*.bat`: Quick batch fixes
 - `emergency-recovery.ps1`: Advanced recovery with health checks
@@ -363,12 +406,17 @@ docker compose build --no-cache; docker compose up -d
 - Monitoring and health check automation
 
 ### Data Persistence
+
 - `data/tailscale/`: Device identity (critical for VPN)
-- `data/ollama/`: AI models (large files)  
+- `data/ollama/`: AI models (large files)
 - `data/openwebui/`: User data and conversations
 - `data/openwebui-models/`: Custom model definitions with GPU configurations
+- `mnemory-data` (Docker volume): Mnemory vector DB, artifacts, sessions
+- `backups/mnemory/`: Nightly compressed backup tarballs (7-day retention)
+- `backup/`: Backup and restore scripts for mnemory data
 
 ### Critical File Dependencies
+
 - **Never edit**: `Dockerfile.openwebui-gpu` without understanding PyTorch CUDA requirements
   - Must uninstall CPU-only PyTorch: `pip uninstall -y torch torchvision torchaudio`
   - Must use CUDA index: `--index-url https://download.pytorch.org/whl/cu121`
@@ -380,6 +428,7 @@ docker compose build --no-cache; docker compose up -d
 - **GPU passthrough**: `docker-compose.yml` deploy.resources.reservations.devices section required for GPU access
 
 ### AI Stack Pipe Function File Structure
+
 - **Legacy entry point**: `scripts/ai_pipes/unified_openwebui_pipe.py` - single OpenWebUI integration
 - **Router logic**: `scripts/ai_pipes/ai_stack_router.py` - intelligent routing with natural language analysis
 - **Module contracts**: Each legacy module has `main(payload)` function returning structured JSON
@@ -390,6 +439,7 @@ docker compose build --no-cache; docker compose up -d
 ## Common Workflow Patterns
 
 ### Emergency Response Workflow (Use This Order)
+
 1. **Quick Assessment**: `scripts\quick-fixes.bat status` - Get system overview
 2. **Most Common Fix**: `scripts\quick-fixes.bat namespace` - Reset network namespace
 3. **GPU Issues**: `scripts\quick-fixes.bat gpu` - Check and restart GPU services
@@ -397,6 +447,7 @@ docker compose build --no-cache; docker compose up -d
 5. **Last Resort**: `scripts\quick-fixes.bat nuclear` - Complete system restart
 
 ### Development Workflow
+
 ```powershell
 # Safe testing without affecting production
 docker compose -f docker-compose.yml -f docker-compose.override.yml up -d
@@ -409,6 +460,7 @@ docker compose logs -f tailscale  # Most failure-prone service
 ```
 
 ### Safe Updates
+
 1. Always backup `data/` directory first
 2. **Manual updates only**: All services have custom builds or are disabled in Watchtower
 3. Update base images in Dockerfiles: `Dockerfile.openwebui-gpu`, `dockerfile.tailscale`
@@ -416,14 +468,16 @@ docker compose logs -f tailscale  # Most failure-prone service
 5. **Critical**: Verify Tailscale connectivity after updates using namespace reset
 
 ### Troubleshooting Decision Tree
+
 ```
 Issue → Start Here:
 ├── "Network unreachable" → scripts\quick-fixes.bat namespace
-├── "CUDA not available" → scripts\quick-fixes.bat gpu  
+├── "CUDA not available" → scripts\quick-fixes.bat gpu
 ├── Reranker models slow/CPU-only → Check: docker compose exec openwebui python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
 ├── OpenWebUI update broke GPU → Rebuild: docker compose build --no-cache openwebui
 ├── Pipe function not working → Check: docker compose exec openwebui ls /host_project/scripts/ai_pipes/
 ├── Router routing issues → Test: docker compose exec openwebui python /host_project/core/router.py '{"input": "test"}'
+├── Mnemory not responding → scripts\quick-fixes.bat mnemory
 ├── General slowness → Check logs: docker compose logs --tail=50 openwebui
 ├── Containers not starting → docker compose ps; check dependencies
 └── Unknown/Complex → .\scripts\emergency-recovery.ps1 -Action recover
@@ -432,11 +486,13 @@ Issue → Start Here:
 ## Security Considerations
 
 ### Secrets Management
+
 - **Tailscale auth keys**: Rotate before expiration (check `.env.example` for current expiry)
 - **Environment isolation**: All secrets in `.env` (create from `.env.example`), excluded from git
 - **Audit trail**: Structured logging for security events
 
 ### Container Hardening
+
 - All containers run with `no-new-privileges:true`
 - Temporary filesystems use `noexec,nosuid`
 - Network access limited to localhost only
@@ -447,20 +503,24 @@ When working on this codebase, prioritize understanding the network namespace sh
 ## Quick Reference Summary
 
 ### Most Common Issues & Solutions:
+
 1. **Network connectivity lost** → `scripts\quick-fixes.bat namespace`
-2. **GPU not available** → `scripts\quick-fixes.bat gpu`  
+2. **GPU not available** → `scripts\quick-fixes.bat gpu`
 3. **Pipe function not accessible** → Check mount: `docker compose exec openwebui ls /host_project/scripts/ai_pipes/`
 4. **OpenWebUI needs update** → Manual rebuild process (see Manual Update Workflow above)
-5. **General system issues** → `.\scripts\emergency-recovery.ps1 -Action recover`
+5. **Mnemory not responding** → `scripts\quick-fixes.bat mnemory`
+6. **General system issues** → `.\scripts\emergency-recovery.ps1 -Action recover`
 
 ### Key Files to Never Edit Without Understanding:
+
 - `Dockerfile.openwebui-gpu` - GPU PyTorch replacement logic
-- `entrypoint.sh` - Tailscale startup with line ending handling  
+- `entrypoint.sh` - Tailscale startup with line ending handling
 - `docker-compose.yml` - Network namespace sharing configuration
 - `.env` - Contains auth keys with expiration dates
 - `scripts/ai_pipes/unified_openwebui_pipe.py` - Single OpenWebUI pipe function entry point
 
 ### Advanced Topics:
+
 - **Automated Update Strategy**: See `documentation/AICodeAgentGuides/hybrid-openwebui-update-approach.md`
 - **Recovery System Architecture**: 8-tier redundancy from quick fixes to Windows services
 - **Security Hardening**: Container isolation, localhost-only binding, read-only mounts

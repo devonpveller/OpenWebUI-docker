@@ -205,6 +205,75 @@ services:
     labels:
       - "com.centurylinklabs.watchtower.enable=false"
 
+  mnemory:
+    build:
+      context: ../mnemory
+      dockerfile: Dockerfile
+    container_name: mnemory
+    ports:
+      - "127.0.0.1:8050:8050"
+      - "127.0.0.1:8051:8051"
+    environment:
+      - LLM_API_KEY=ollama
+      - LLM_BASE_URL=http://llama-cpp:8080/v1
+      - LLM_MODEL=Qwen3.6-35B-A3B-Q4_K_M.gguf
+      - EMBED_BASE_URL=http://llama-cpp-embed:8080/v1
+      - EMBED_MODEL=qllama/bge-m3:latest
+      - EMBED_DIMS=1024
+      - MCP_API_KEY=${MCP_API_KEY}
+      - MCP_API_KEYS=${MCP_API_KEYS}
+      - FIND_LLM_MODEL=gpt-oss:20b
+      - FIND_MEMORIES_QUERIES=3
+      - LLM_CONTEXT_SIZE=8192
+      - MGMT_PORT=8051
+    volumes:
+      - mnemory-data:/data
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      llama-cpp:
+        condition: service_healthy
+      llama-cpp-embed:
+        condition: service_healthy
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8051/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  mnemory-backup:
+    image: alpine:3.21
+    container_name: mnemory-backup
+    volumes:
+      - mnemory-data:/data:ro
+      - ./backups/mnemory:/backups
+      - ./backup/mnemory-backup.sh:/scripts/backup.sh:ro
+    environment:
+      - BACKUP_DIR=/backups
+      - DATA_DIR=/data
+      - RETAIN_DAYS=${BACKUP_RETAIN_DAYS:-7}
+      - BACKUP_CRON=${BACKUP_CRON:-0 2 * * *}
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        chmod +x /scripts/backup.sh
+        echo "$${BACKUP_CRON} /scripts/backup.sh >> /var/log/backup.log 2>&1" > /etc/crontabs/root
+        echo "[$(date -u +%FT%TZ)] Backup scheduler started (cron: $${BACKUP_CRON}, retain: $${RETAIN_DAYS} days)"
+        crond -f -l 2
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      mnemory:
+        condition: service_healthy
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
   llama-cpp-embed:
     image: ghcr.io/ggml-org/llama.cpp:server-cuda
     container_name: llama-cpp-embed
@@ -238,3 +307,6 @@ services:
       start_period: 60s
     labels:
       - "com.centurylinklabs.watchtower.enable=false"
+
+volumes:
+  mnemory-data:

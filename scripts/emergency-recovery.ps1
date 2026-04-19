@@ -52,8 +52,9 @@ function Test-BasicConnectivity {
         $llamaCppStatus = ($containers | Where-Object { $_.Service -eq "llama-cpp" }).State
         $llamaCppEmbedStatus = ($containers | Where-Object { $_.Service -eq "llama-cpp-embed" }).State
         $tailscaleStatus = ($containers | Where-Object { $_.Service -eq "tailscale" }).State
+        $mnemoryStatus = ($containers | Where-Object { $_.Service -eq "mnemory" }).State
         
-        Write-Log "INFO" "Container states - OpenWebUI: $openwebuiStatus, llama-cpp: $llamaCppStatus, llama-cpp-embed: $llamaCppEmbedStatus, Tailscale: $tailscaleStatus"
+        Write-Log "INFO" "Container states - OpenWebUI: $openwebuiStatus, llama-cpp: $llamaCppStatus, llama-cpp-embed: $llamaCppEmbedStatus, Tailscale: $tailscaleStatus, Mnemory: $mnemoryStatus"
         
         # If all containers are running, test basic functionality
         if ($openwebuiStatus -eq "running" -and $llamaCppStatus -eq "running" -and $llamaCppEmbedStatus -eq "running" -and $tailscaleStatus -eq "running") {
@@ -246,6 +247,11 @@ function Invoke-EmergencyRecovery {
         Write-Log "WARN" "Tailscale stop had issues, continuing..."
     }
     
+    # Stop Mnemory (dependent on llama-cpp services)
+    if (-not (Stop-ServiceGracefully "mnemory" 30)) {
+        Write-Log "WARN" "Mnemory stop had issues, continuing..."
+    }
+    
     # Stop llama-cpp services
     if (-not (Stop-ServiceGracefully "llama-cpp" 30)) {
         Write-Log "WARN" "llama-cpp stop had issues, continuing..."
@@ -329,6 +335,29 @@ function Invoke-EmergencyRecovery {
         throw
     }
     
+    # Start Mnemory (depends on llama-cpp services)
+    Write-Log "INFO" "Starting Mnemory memory service..."
+    try {
+        docker compose up -d mnemory
+        if (-not (Wait-ForHealthy "mnemory" 90)) {
+            Write-Log "WARN" "Mnemory health check failed, but continuing..."
+        }
+    }
+    catch {
+        Write-Log "WARN" "Failed to start Mnemory: $_"
+        # Don't throw - Mnemory is not critical for basic functionality
+    }
+    
+    # Start Mnemory backup scheduler
+    Write-Log "INFO" "Starting Mnemory backup scheduler..."
+    try {
+        docker compose up -d mnemory-backup
+        Write-Log "SUCCESS" "Mnemory backup scheduler started"
+    }
+    catch {
+        Write-Log "WARN" "Failed to start Mnemory backup: $_"
+    }
+    
     # Start Watchtower (independent service)
     Write-Log "INFO" "Starting Watchtower monitoring service..."
     try {
@@ -365,6 +394,9 @@ function Invoke-EmergencyRecovery {
         
         Write-Log "INFO" "Tailscale serve configuration:"
         docker compose exec tailscale tailscale --socket=/tmp/tailscaled.sock serve status
+        
+        Write-Log "INFO" "Mnemory status:"
+        docker compose exec mnemory python -c "import urllib.request; print(urllib.request.urlopen('http://localhost:8051/health').read().decode())" 2>$null
     }
     catch {
         Write-Log "WARN" "Unable to verify service configurations: $_"
@@ -428,7 +460,7 @@ function Invoke-GPUReset {
     Write-Log "INFO" "========================================="
     
     Write-Log "INFO" "Stopping GPU-dependent services for reset..."
-    docker compose down llama-cpp llama-cpp-embed openwebui
+    docker compose down llama-cpp llama-cpp-embed openwebui mnemory
     
     Write-Log "INFO" "Rebuilding OpenWebUI with fresh GPU configuration..."
     docker compose build --no-cache openwebui
@@ -452,6 +484,10 @@ function Invoke-GPUReset {
                     # Also start embedding service
                     docker compose up -d llama-cpp-embed
                     Write-Log "INFO" "llama-cpp-embed started"
+                    
+                    # Start Mnemory (depends on llama-cpp services)
+                    docker compose up -d mnemory mnemory-backup
+                    Write-Log "INFO" "Mnemory services started"
                 }
                 catch {
                     Write-Log "WARN" "llama-cpp may need additional time to initialize"
