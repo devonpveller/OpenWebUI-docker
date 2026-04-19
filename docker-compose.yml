@@ -222,7 +222,6 @@ services:
       - EMBED_DIMS=1024
       - MCP_API_KEY=${MCP_API_KEY}
       - MCP_API_KEYS=${MCP_API_KEYS}
-      - FIND_LLM_MODEL=gpt-oss:20b
       - FIND_MEMORIES_QUERIES=3
       - LLM_CONTEXT_SIZE=8192
       - MGMT_PORT=8051
