@@ -112,6 +112,48 @@ def test_ollama_availability():
         log_warn("Ollama may need additional time to initialize")
         return False
 
+def test_llama_cpp_availability():
+    """Test llama-cpp availability and GPU integration"""
+    project_root = find_project_root()
+    if not project_root:
+        return False
+    
+    log_info("Testing llama-cpp availability...")
+    result = run_docker_command(
+        ["docker", "compose", "exec", "-T", "llama-cpp", "curl", "-sf", "http://127.0.0.1:8080/health"],
+        project_root,
+        timeout=15
+    )
+    
+    if result and result.returncode == 0:
+        log_success("llama-cpp GPU service: OK")
+        print(result.stdout.strip())
+        return True
+    else:
+        log_warn("llama-cpp may need additional time to initialize")
+        return False
+
+def test_llama_cpp_embed_availability():
+    """Test llama-cpp-embed availability and GPU integration"""
+    project_root = find_project_root()
+    if not project_root:
+        return False
+    
+    log_info("Testing llama-cpp-embed availability...")
+    result = run_docker_command(
+        ["docker", "compose", "exec", "-T", "llama-cpp-embed", "curl", "-sf", "http://127.0.0.1:8080/health"],
+        project_root,
+        timeout=15
+    )
+    
+    if result and result.returncode == 0:
+        log_success("llama-cpp-embed GPU service: OK")
+        print(result.stdout.strip())
+        return True
+    else:
+        log_warn("llama-cpp-embed may need additional time to initialize")
+        return False
+
 def restart_gpu_services():
     """Restart GPU services (OpenWebUI and Ollama)"""
     project_root = find_project_root()
@@ -120,9 +162,9 @@ def restart_gpu_services():
     
     log_warn("GPU check failed, restarting GPU services...")
     
-    # Restart both OpenWebUI and Ollama
+    # Restart OpenWebUI, Ollama, llama-cpp, and llama-cpp-embed
     result = run_docker_command(
-        ["docker", "compose", "restart", "ollama", "openwebui"],
+        ["docker", "compose", "restart", "ollama", "openwebui", "llama-cpp", "llama-cpp-embed"],
         project_root,
         timeout=120
     )
@@ -170,6 +212,17 @@ def main():
                 log_success("Ollama GPU integration working")
             else:
                 log_warn("Ollama may need additional time to initialize")
+            
+            # Test llama-cpp services
+            if test_llama_cpp_availability():
+                log_success("llama-cpp GPU service working")
+            else:
+                log_warn("llama-cpp may need additional time to initialize")
+            
+            if test_llama_cpp_embed_availability():
+                log_success("llama-cpp-embed GPU service working")
+            else:
+                log_warn("llama-cpp-embed may need additional time to initialize")
         else:
             log_error("GPU still not available - may need full rebuild")
             log_info("Try: nuclear option for complete restart")
@@ -192,6 +245,35 @@ def main():
                 time.sleep(30)
                 log_info("Ollama restarted, testing again...")
                 test_ollama_availability()
+        
+        # Test llama-cpp services
+        if test_llama_cpp_availability():
+            log_success("llama-cpp GPU service working")
+        else:
+            log_warn("llama-cpp may need restart")
+            result = run_docker_command(
+                ["docker", "compose", "restart", "llama-cpp"],
+                project_root,
+                timeout=60
+            )
+            if result and result.returncode == 0:
+                time.sleep(30)
+                log_info("llama-cpp restarted, testing again...")
+                test_llama_cpp_availability()
+        
+        if test_llama_cpp_embed_availability():
+            log_success("llama-cpp-embed GPU service working")
+        else:
+            log_warn("llama-cpp-embed may need restart")
+            result = run_docker_command(
+                ["docker", "compose", "restart", "llama-cpp-embed"],
+                project_root,
+                timeout=60
+            )
+            if result and result.returncode == 0:
+                time.sleep(30)
+                log_info("llama-cpp-embed restarted, testing again...")
+                test_llama_cpp_embed_availability()
     
     log_success("GPU check completed")
     return 0

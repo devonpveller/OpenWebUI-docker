@@ -100,7 +100,7 @@ def wait_for_openwebui_healthy():
 def main():
     """Main restart OpenWebUI function"""
     log_info("Restarting OpenWebUI with proper network dependency handling...")
-    log_warn("This will restart OpenWebUI, Ollama, and Tailscale containers")
+    log_warn("This will restart OpenWebUI, llama-cpp, llama-cpp-embed, Ollama, and Tailscale containers")
     
     project_root = find_project_root()
     if not project_root:
@@ -112,7 +112,7 @@ def main():
     # Step 1: Stop dependent containers first
     log_info("Stopping dependent containers first...")
     result = run_docker_command(
-        ["docker", "compose", "stop", "tailscale", "ollama"],
+        ["docker", "compose", "stop", "tailscale", "ollama", "llama-cpp", "llama-cpp-embed"],
         project_root,
         timeout=60
     )
@@ -158,7 +158,32 @@ def main():
     # Wait for Ollama to start
     time.sleep(15)
     
-    # Step 5: Start Tailscale
+    # Step 5: Start llama-cpp services
+    log_info("Starting llama-cpp...")
+    result = run_docker_command(
+        ["docker", "compose", "up", "-d", "llama-cpp"],
+        project_root,
+        timeout=60
+    )
+    
+    if not result or result.returncode != 0:
+        log_warn("Failed to start llama-cpp")
+    
+    log_info("Starting llama-cpp-embed...")
+    result = run_docker_command(
+        ["docker", "compose", "up", "-d", "llama-cpp-embed"],
+        project_root,
+        timeout=60
+    )
+    
+    if not result or result.returncode != 0:
+        log_warn("Failed to start llama-cpp-embed")
+    
+    # Wait for llama-cpp services to initialize
+    log_info("Waiting for llama-cpp services to initialize...")
+    time.sleep(30)
+    
+    # Step 6: Start Tailscale
     log_info("Starting Tailscale...")
     result = run_docker_command(
         ["docker", "compose", "up", "-d", "tailscale"],
