@@ -15,6 +15,7 @@ if "%1"=="status" goto :status_check
 if "%1"=="lmstudio" goto :lmstudio_fix
 if "%1"=="restart-openwebui" goto :restart_openwebui
 if "%1"=="mnemory" goto :mnemory_check
+if "%1"=="smolcrawl" goto :smolcrawl_check
 goto :usage
 
 :interactive_menu
@@ -34,10 +35,11 @@ echo   5. Rebuild Tailscale container
 echo   6. Fix LM Studio connectivity
 echo   7. Nuclear option (full restart)
 echo   8. Mnemory check and restart
+echo   9. SmolCrawl pipelines check and restart
 echo.
-echo   9. Exit
+echo   0. Exit
 echo.
-set /p choice="Select option (1-9): "
+set /p choice="Select option (1-9,0): "
 
 if "%choice%"=="1" goto :namespace_reset
 if "%choice%"=="2" goto :status_check
@@ -47,7 +49,8 @@ if "%choice%"=="5" goto :rebuild_tailscale
 if "%choice%"=="6" goto :lmstudio_fix
 if "%choice%"=="7" goto :nuclear_option
 if "%choice%"=="8" goto :mnemory_check
-if "%choice%"=="9" goto :end
+if "%choice%"=="9" goto :smolcrawl_check
+if "%choice%"=="0" goto :end
 echo [ERROR] Invalid choice
 timeout /t 2 /nobreak >nul
 cls
@@ -345,6 +348,16 @@ if %ERRORLEVEL% EQU 0 (
 ) else (
     echo [ERROR] Mnemory health: FAILED - run: docker compose up -d mnemory
 )
+echo.
+echo [INFO] SmolCrawl Pipelines Health:
+cd ..
+docker compose exec smolcrawl-pipelines curl -f -s http://localhost:9099/ >nul 2>&1
+cd scripts
+if %ERRORLEVEL% EQU 0 (
+    echo [SUCCESS] SmolCrawl Pipelines health: OK
+) else (
+    echo [ERROR] SmolCrawl Pipelines health: FAILED - run: docker compose up -d smolcrawl-pipelines
+)
 if "%1"=="" (
     echo.
     pause
@@ -408,7 +421,7 @@ echo [WARN] This will restart OpenWebUI, llama-cpp, llama-cpp-embed, and Tailsca
 echo.
 echo [INFO] Stopping dependent containers first...
 cd ..
-docker compose stop tailscale llama-cpp llama-cpp-embed mnemory mnemory-backup
+docker compose stop tailscale llama-cpp llama-cpp-embed mnemory mnemory-backup smolcrawl-pipelines
 cd scripts
 echo [INFO] Restarting OpenWebUI...
 cd ..
@@ -464,6 +477,14 @@ if %ERRORLEVEL% NEQ 0 (
     docker compose up -d mnemory
 )
 docker compose up -d mnemory-backup
+cd scripts
+echo [INFO] Starting SmolCrawl Pipelines...
+cd ..
+docker compose start smolcrawl-pipelines
+if %ERRORLEVEL% NEQ 0 (
+    echo [WARN] SmolCrawl Pipelines start failed, trying up -d...
+    docker compose up -d smolcrawl-pipelines
+)
 cd scripts
 echo.
 echo [INFO] Verifying services are running...
@@ -524,6 +545,46 @@ if "%1"=="" (
 )
 goto :end
 
+:smolcrawl_check
+echo.
+echo ========================================
+echo   SmolCrawl Pipelines Health Check
+echo ========================================
+echo.
+echo [INFO] Checking SmolCrawl Pipelines service status...
+cd /d "%SCRIPT_DIR%\.."
+docker compose ps smolcrawl-pipelines --format "table {{.Service}}\t{{.Status}}"
+echo.
+echo [INFO] Testing SmolCrawl Pipelines health endpoint...
+docker compose exec smolcrawl-pipelines curl -f -s http://localhost:9099/ >nul 2>&1
+set RESULT=%ERRORLEVEL%
+cd /d "%SCRIPT_DIR%"
+if %RESULT% EQU 0 (
+    echo [SUCCESS] SmolCrawl Pipelines is healthy and running
+) else (
+    echo [WARN] SmolCrawl Pipelines health check failed, restarting...
+    cd /d "%SCRIPT_DIR%\.."
+    docker compose restart smolcrawl-pipelines
+    cd /d "%SCRIPT_DIR%"
+    echo [INFO] Waiting for SmolCrawl Pipelines to start...
+    timeout /t 30 /nobreak >nul
+    cd /d "%SCRIPT_DIR%\.."
+    docker compose exec smolcrawl-pipelines curl -f -s http://localhost:9099/ >nul 2>&1
+    set RESULT=%ERRORLEVEL%
+    cd /d "%SCRIPT_DIR%"
+    if %RESULT% EQU 0 (
+        echo [SUCCESS] SmolCrawl Pipelines restored after restart
+    ) else (
+        echo [ERROR] SmolCrawl Pipelines still not healthy - check logs: docker compose logs smolcrawl-pipelines
+    )
+)
+if "%1"=="" (
+    echo.
+    pause
+    goto :interactive_menu
+)
+goto :end
+
 :usage
 echo.
 echo ========================================
@@ -539,8 +600,7 @@ echo   gpu               - Check and restart GPU functionality
 echo   restart-openwebui - Properly restart OpenWebUI with dependent containers
 echo   rebuild           - Rebuild and restart Tailscale container
 echo   lmstudio          - Fix LM Studio Tailscale connectivity
-echo   mnemory           - Check Mnemory health and restart if needed
-echo   nuclear           - Full stack restart (use when all else fails)
+echo   mnemory           - Check Mnemory health and restart if needed  echo   smolcrawl         - Check SmolCrawl Pipelines health and restart if neededecho   nuclear           - Full stack restart (use when all else fails)
 echo.
 echo Examples:
 echo   quick-fixes.bat namespace         (most common fix)

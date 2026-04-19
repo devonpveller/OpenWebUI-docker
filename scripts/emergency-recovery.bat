@@ -58,6 +58,13 @@ if %ERRORLEVEL% NEQ 0 (
     docker compose kill tailscale
 )
 
+echo [INFO] Stopping SmolCrawl Pipelines container...
+docker compose stop smolcrawl-pipelines
+if %ERRORLEVEL% NEQ 0 (
+    echo [WARN] SmolCrawl Pipelines stop failed, attempting force kill...
+    docker compose kill smolcrawl-pipelines
+)
+
 echo [INFO] Stopping Mnemory containers...
 docker compose stop mnemory mnemory-backup
 if %ERRORLEVEL% NEQ 0 (
@@ -134,6 +141,9 @@ timeout /t 15 /nobreak >nul
 echo [INFO] Starting Mnemory backup scheduler...
 docker compose up -d mnemory-backup
 
+echo [INFO] Starting SmolCrawl Pipelines...
+docker compose up -d smolcrawl-pipelines
+
 REM Phase 3: Connectivity verification
 echo [INFO] Phase 3: Testing connectivity...
 docker compose exec tailscale ping -c 1 8.8.8.8 >nul 2>&1
@@ -154,7 +164,7 @@ echo [INFO] Restarting with proper network dependency sequence...
 
 REM Stop dependent containers first
 echo [INFO] Stopping Tailscale and llama-cpp services (network dependents)...
-docker compose stop tailscale llama-cpp llama-cpp-embed mnemory mnemory-backup
+docker compose stop tailscale llama-cpp llama-cpp-embed mnemory mnemory-backup smolcrawl-pipelines
 
 REM Restart OpenWebUI first and wait for health
 echo [INFO] Restarting OpenWebUI...
@@ -188,6 +198,9 @@ docker compose up -d watchtower
 echo [INFO] Starting Mnemory services...
 docker compose up -d mnemory mnemory-backup
 timeout /t 15 /nobreak >nul
+
+echo [INFO] Starting SmolCrawl Pipelines...
+docker compose up -d smolcrawl-pipelines
 
 echo [INFO] Testing if minimal recovery worked...
 docker compose exec tailscale ping -c 1 8.8.8.8 >nul 2>&1
@@ -256,6 +269,10 @@ docker compose exec openwebui python -c "import torch; print('CUDA available:', 
 echo.
 echo [INFO] Mnemory status:
 docker compose exec mnemory python -c "import urllib.request; print(urllib.request.urlopen('http://localhost:8051/health').read().decode())" 2>nul
+
+echo.
+echo [INFO] SmolCrawl Pipelines status:
+docker compose exec smolcrawl-pipelines curl -s http://localhost:9099/ 2>nul
 
 echo.
 echo ========================================

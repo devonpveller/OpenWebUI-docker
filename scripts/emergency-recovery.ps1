@@ -53,8 +53,9 @@ function Test-BasicConnectivity {
         $llamaCppEmbedStatus = ($containers | Where-Object { $_.Service -eq "llama-cpp-embed" }).State
         $tailscaleStatus = ($containers | Where-Object { $_.Service -eq "tailscale" }).State
         $mnemoryStatus = ($containers | Where-Object { $_.Service -eq "mnemory" }).State
+        $smolcrawlStatus = ($containers | Where-Object { $_.Service -eq "smolcrawl-pipelines" }).State
         
-        Write-Log "INFO" "Container states - OpenWebUI: $openwebuiStatus, llama-cpp: $llamaCppStatus, llama-cpp-embed: $llamaCppEmbedStatus, Tailscale: $tailscaleStatus, Mnemory: $mnemoryStatus"
+        Write-Log "INFO" "Container states - OpenWebUI: $openwebuiStatus, llama-cpp: $llamaCppStatus, llama-cpp-embed: $llamaCppEmbedStatus, Tailscale: $tailscaleStatus, Mnemory: $mnemoryStatus, SmolCrawl: $smolcrawlStatus"
         
         # If all containers are running, test basic functionality
         if ($openwebuiStatus -eq "running" -and $llamaCppStatus -eq "running" -and $llamaCppEmbedStatus -eq "running" -and $tailscaleStatus -eq "running") {
@@ -247,6 +248,11 @@ function Invoke-EmergencyRecovery {
         Write-Log "WARN" "Tailscale stop had issues, continuing..."
     }
     
+    # Stop SmolCrawl Pipelines (dependent on OpenWebUI)
+    if (-not (Stop-ServiceGracefully "smolcrawl-pipelines" 30)) {
+        Write-Log "WARN" "SmolCrawl Pipelines stop had issues, continuing..."
+    }
+    
     # Stop Mnemory (dependent on llama-cpp services)
     if (-not (Stop-ServiceGracefully "mnemory" 30)) {
         Write-Log "WARN" "Mnemory stop had issues, continuing..."
@@ -358,6 +364,19 @@ function Invoke-EmergencyRecovery {
         Write-Log "WARN" "Failed to start Mnemory backup: $_"
     }
     
+    # Start SmolCrawl Pipelines (depends on OpenWebUI)
+    Write-Log "INFO" "Starting SmolCrawl Pipelines..."
+    try {
+        docker compose up -d smolcrawl-pipelines
+        if (-not (Wait-ForHealthy "smolcrawl-pipelines" 90)) {
+            Write-Log "WARN" "SmolCrawl Pipelines health check failed, but continuing..."
+        }
+    }
+    catch {
+        Write-Log "WARN" "Failed to start SmolCrawl Pipelines: $_"
+        # Don't throw - SmolCrawl is not critical for basic functionality
+    }
+    
     # Start Watchtower (independent service)
     Write-Log "INFO" "Starting Watchtower monitoring service..."
     try {
@@ -397,6 +416,9 @@ function Invoke-EmergencyRecovery {
         
         Write-Log "INFO" "Mnemory status:"
         docker compose exec mnemory python -c "import urllib.request; print(urllib.request.urlopen('http://localhost:8051/health').read().decode())" 2>$null
+        
+        Write-Log "INFO" "SmolCrawl Pipelines status:"
+        docker compose exec smolcrawl-pipelines curl -s http://localhost:9099/ 2>$null
     }
     catch {
         Write-Log "WARN" "Unable to verify service configurations: $_"
