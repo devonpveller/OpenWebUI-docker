@@ -58,6 +58,13 @@ if %ERRORLEVEL% NEQ 0 (
     docker compose kill tailscale
 )
 
+echo [INFO] Stopping Mnemory containers...
+docker compose stop mnemory mnemory-backup
+if %ERRORLEVEL% NEQ 0 (
+    echo [WARN] Mnemory stop failed, attempting force kill...
+    docker compose kill mnemory mnemory-backup
+)
+
 echo [INFO] Stopping llama-cpp containers...
 docker compose stop llama-cpp llama-cpp-embed
 if %ERRORLEVEL% NEQ 0 (
@@ -120,6 +127,13 @@ timeout /t 60 /nobreak >nul
 echo [INFO] Starting Watchtower monitoring service...
 docker compose up -d watchtower
 
+echo [INFO] Starting Mnemory memory service...
+docker compose up -d mnemory
+timeout /t 15 /nobreak >nul
+
+echo [INFO] Starting Mnemory backup scheduler...
+docker compose up -d mnemory-backup
+
 REM Phase 3: Connectivity verification
 echo [INFO] Phase 3: Testing connectivity...
 docker compose exec tailscale ping -c 1 8.8.8.8 >nul 2>&1
@@ -140,7 +154,7 @@ echo [INFO] Restarting with proper network dependency sequence...
 
 REM Stop dependent containers first
 echo [INFO] Stopping Tailscale and llama-cpp services (network dependents)...
-docker compose stop tailscale llama-cpp llama-cpp-embed
+docker compose stop tailscale llama-cpp llama-cpp-embed mnemory mnemory-backup
 
 REM Restart OpenWebUI first and wait for health
 echo [INFO] Restarting OpenWebUI...
@@ -170,6 +184,10 @@ docker compose up -d tailscale
 timeout /t 30 /nobreak >nul
 
 docker compose up -d watchtower
+
+echo [INFO] Starting Mnemory services...
+docker compose up -d mnemory mnemory-backup
+timeout /t 15 /nobreak >nul
 
 echo [INFO] Testing if minimal recovery worked...
 docker compose exec tailscale ping -c 1 8.8.8.8 >nul 2>&1
@@ -234,6 +252,10 @@ docker compose exec tailscale tailscale --socket=/tmp/tailscaled.sock serve stat
 echo.
 echo [INFO] OpenWebUI GPU status:
 docker compose exec openwebui python -c "import torch; print('CUDA available:', torch.cuda.is_available())" 2>nul
+
+echo.
+echo [INFO] Mnemory status:
+docker compose exec mnemory python -c "import urllib.request; print(urllib.request.urlopen('http://localhost:8051/health').read().decode())" 2>nul
 
 echo.
 echo ========================================

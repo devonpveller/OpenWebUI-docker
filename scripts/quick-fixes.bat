@@ -14,6 +14,7 @@ if "%1"=="gpu" goto :gpu_check
 if "%1"=="status" goto :status_check
 if "%1"=="lmstudio" goto :lmstudio_fix
 if "%1"=="restart-openwebui" goto :restart_openwebui
+if "%1"=="mnemory" goto :mnemory_check
 goto :usage
 
 :interactive_menu
@@ -32,10 +33,11 @@ echo Advanced Fixes:
 echo   5. Rebuild Tailscale container
 echo   6. Fix LM Studio connectivity
 echo   7. Nuclear option (full restart)
+echo   8. Mnemory check and restart
 echo.
-echo   8. Exit
+echo   9. Exit
 echo.
-set /p choice="Select option (1-8): "
+set /p choice="Select option (1-9): "
 
 if "%choice%"=="1" goto :namespace_reset
 if "%choice%"=="2" goto :status_check
@@ -44,7 +46,8 @@ if "%choice%"=="4" goto :restart_openwebui
 if "%choice%"=="5" goto :rebuild_tailscale
 if "%choice%"=="6" goto :lmstudio_fix
 if "%choice%"=="7" goto :nuclear_option
-if "%choice%"=="8" goto :end
+if "%choice%"=="8" goto :mnemory_check
+if "%choice%"=="9" goto :end
 echo [ERROR] Invalid choice
 timeout /t 2 /nobreak >nul
 cls
@@ -332,6 +335,16 @@ if %ERRORLEVEL% EQU 0 (
 ) else (
     echo [ERROR] Open Terminal health: FAILED - run: docker compose up -d open-terminal
 )
+echo.
+echo [INFO] Mnemory Health:
+cd ..
+docker compose exec mnemory python -c "import urllib.request; urllib.request.urlopen('http://localhost:8051/health')" >nul 2>&1
+cd scripts
+if %ERRORLEVEL% EQU 0 (
+    echo [SUCCESS] Mnemory health: OK
+) else (
+    echo [ERROR] Mnemory health: FAILED - run: docker compose up -d mnemory
+)
 if "%1"=="" (
     echo.
     pause
@@ -395,7 +408,7 @@ echo [WARN] This will restart OpenWebUI, llama-cpp, llama-cpp-embed, and Tailsca
 echo.
 echo [INFO] Stopping dependent containers first...
 cd ..
-docker compose stop tailscale llama-cpp llama-cpp-embed
+docker compose stop tailscale llama-cpp llama-cpp-embed mnemory mnemory-backup
 cd scripts
 echo [INFO] Restarting OpenWebUI...
 cd ..
@@ -443,12 +456,67 @@ cd scripts
 echo [INFO] Waiting for Tailscale to connect...
 timeout /t 30 /nobreak >nul
 echo.
+echo [INFO] Starting Mnemory...
+cd ..
+docker compose start mnemory
+if %ERRORLEVEL% NEQ 0 (
+    echo [WARN] Mnemory start failed, trying up -d...
+    docker compose up -d mnemory
+)
+docker compose up -d mnemory-backup
+cd scripts
+echo.
 echo [INFO] Verifying services are running...
 cd ..
 docker compose ps --format "table {{.Service}}\t{{.Status}}"
 cd scripts
 echo.
 echo [SUCCESS] OpenWebUI restart sequence complete
+if "%1"=="" (
+    echo.
+    pause
+    goto :interactive_menu
+)
+goto :end
+
+:mnemory_check
+echo.
+echo ========================================
+echo   Mnemory Health Check and Recovery
+echo ========================================
+echo.
+echo [INFO] Checking Mnemory service status...
+cd /d "%SCRIPT_DIR%\.."
+docker compose ps mnemory --format "table {{.Service}}\t{{.Status}}"
+echo.
+echo [INFO] Testing Mnemory health endpoint...
+docker compose exec mnemory python -c "import urllib.request; urllib.request.urlopen('http://localhost:8051/health')" >nul 2>&1
+set RESULT=%ERRORLEVEL%
+cd /d "%SCRIPT_DIR%"
+if %RESULT% EQU 0 (
+    echo [SUCCESS] Mnemory is healthy and running
+) else (
+    echo [WARN] Mnemory health check failed, restarting...
+    cd /d "%SCRIPT_DIR%\.."
+    docker compose restart mnemory
+    cd /d "%SCRIPT_DIR%"
+    echo [INFO] Waiting for Mnemory to start...
+    timeout /t 30 /nobreak >nul
+    cd /d "%SCRIPT_DIR%\.."
+    docker compose exec mnemory python -c "import urllib.request; urllib.request.urlopen('http://localhost:8051/health')" >nul 2>&1
+    set RESULT=%ERRORLEVEL%
+    cd /d "%SCRIPT_DIR%"
+    if %RESULT% EQU 0 (
+        echo [SUCCESS] Mnemory restored after restart
+    ) else (
+        echo [ERROR] Mnemory still not healthy - check logs: docker compose logs mnemory
+    )
+)
+echo.
+echo [INFO] Mnemory backup service status:
+cd /d "%SCRIPT_DIR%\.."
+docker compose ps mnemory-backup --format "table {{.Service}}\t{{.Status}}"
+cd /d "%SCRIPT_DIR%"
 if "%1"=="" (
     echo.
     pause
@@ -471,6 +539,7 @@ echo   gpu               - Check and restart GPU functionality
 echo   restart-openwebui - Properly restart OpenWebUI with dependent containers
 echo   rebuild           - Rebuild and restart Tailscale container
 echo   lmstudio          - Fix LM Studio Tailscale connectivity
+echo   mnemory           - Check Mnemory health and restart if needed
 echo   nuclear           - Full stack restart (use when all else fails)
 echo.
 echo Examples:
