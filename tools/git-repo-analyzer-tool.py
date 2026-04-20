@@ -42,9 +42,53 @@ class Tools:
             default=50,
             description="Lines returned per file in preview mode (bulk_read_files preview=true, get_repo_file max_lines).",
         )
+        CONTEXT_BUDGET: int = Field(
+            default=60000,
+            description="Total character budget across all tool calls in a conversation. As usage approaches this limit, outputs are automatically compressed. Set to 0 to disable.",
+        )
 
     def __init__(self):
         self.valves = self.Valves()
+        self._context_used = 0
+
+    def _budget_wrap(self, result: str) -> str:
+        """Track cumulative output and auto-truncate when approaching the context budget.
+        As budget fills: 80% → warn, 90% → hard truncate, 100% → refuse with summary hint."""
+        budget = self.valves.CONTEXT_BUDGET
+        if not budget:
+            return result
+
+        ratio = self._context_used / budget
+        result_len = len(result)
+
+        # Over budget — return only a short pointer
+        if ratio >= 1.0:
+            self._context_used += 200
+            return (
+                "**Context budget exhausted.** "
+                "Your previous tool results contain all the data gathered so far. "
+                "Recall your FileShed notes with `shed_read_file` and synthesize your answer now."
+            )
+
+        # 90%+ — hard truncate to fit remaining budget
+        remaining = budget - self._context_used
+        if ratio >= 0.9 or result_len > remaining:
+            cap = max(2000, int(remaining * 0.8))
+            if result_len > cap:
+                result = result[:cap] + (
+                    f"\n\n... **[Auto-truncated: {result_len - cap} chars cut — context budget {int(ratio * 100)}% used]**\n"
+                    "*Shed your analysis notes now and synthesize your answer from FileShed.*"
+                )
+
+        # 80%+ — append a warning
+        elif ratio >= 0.8:
+            result += (
+                f"\n\n---\n*Context budget ~{int(ratio * 100)}% used. "
+                "Shed your notes now and wrap up, or remaining tool calls will be auto-truncated.*"
+            )
+
+        self._context_used += len(result)
+        return result
 
     def _build_headers(self) -> dict:
         headers = {
@@ -158,7 +202,7 @@ class Tools:
                 protected = " 🔒" if b.get("protected", False) else ""
                 lines.append(f"- `{name}` ({sha}){is_default}{protected}")
 
-            return "\n".join(lines)
+            return self._budget_wrap("\n".join(lines))
 
         except requests.RequestException as e:
             return f"Error listing branches: {str(e)}"
@@ -254,7 +298,7 @@ class Tools:
                     f"**Total:** {len(files)} files changed, +{total_adds} additions, -{total_dels} deletions"
                 )
 
-            return "\n\n".join(sections)
+            return self._budget_wrap("\n\n".join(sections))
 
         except requests.RequestException as e:
             return f"Error comparing branches: {str(e)}"
@@ -387,7 +431,7 @@ class Tools:
             f"Store large results in FileShed."
         )
 
-        return "\n\n".join(sections)
+        return self._budget_wrap("\n\n".join(sections))
 
     def get_repo_file(
         self, repo_url: str, file_path: str, branch: Optional[str] = None, max_lines: int = 0
@@ -442,7 +486,7 @@ class Tools:
                         else ""
                     )
                     entries.append(f"{prefix} {item['name']}{size}")
-                return f"**Directory: {clean_path}**\n\n" + "\n".join(entries)
+                return self._budget_wrap(f"**Directory: {clean_path}**\n\n" + "\n".join(entries))
 
             if data.get("encoding") == "base64":
                 content = base64.b64decode(data.get("content", "")).decode(
@@ -463,7 +507,17 @@ class Tools:
                     content = (
                         content[:max_len] + f"\n\n... (truncated at {max_len} chars)"
                     )
-                return f"**File: {clean_path}** ({file_size} bytes, {total_lines} lines)\n\n```\n{content}\n```"
+                result = f"**File: {clean_path}** ({file_size} bytes, {total_lines} lines)\n\n```\n{content}\n```"
+
+                # Hint: nudge shedding for large files during investigation
+                if len(result) > 8000:
+                    result += (
+                        "\n\n---\n*Large file (~"
+                        + str(len(result) // 1000)
+                        + "k chars). Analyze it now, then shed your findings with `shed_create_file` before reading more files.*"
+                    )
+
+                return self._budget_wrap(result)
             else:
                 return f"Error: File encoding '{data.get('encoding')}' not supported. File may be binary."
 
@@ -522,7 +576,7 @@ class Tools:
                     f"### {path}\n{snippet if snippet else f'*File: {name}*'}"
                 )
 
-            return "\n\n".join(results)
+            return self._budget_wrap("\n\n".join(results))
 
         except requests.RequestException as e:
             return f"Error searching repository: {str(e)}"
@@ -595,7 +649,7 @@ class Tools:
                     date = date[:10]  # Just the date portion
                 lines.append(f"- `{sha}` {date} **{author}**: {message}")
 
-            return header + "\n".join(lines)
+            return self._budget_wrap(header + "\n".join(lines))
 
         except requests.RequestException as e:
             return f"Error fetching commits: {str(e)}"
@@ -665,7 +719,7 @@ class Tools:
                     f"**Changed files ({len(files)}):**\n" + "\n".join(file_lines)
                 )
 
-            return "\n\n".join(sections)
+            return self._budget_wrap("\n\n".join(sections))
 
         except requests.RequestException as e:
             return f"Error fetching commit detail: {str(e)}"
@@ -782,10 +836,10 @@ class Tools:
             result += (
                 "\n\n---\n*Large output (~"
                 + str(total_chars // 1000)
-                + "k chars). Consider storing this in FileShed with `shed_create_file` to free context for further tool calls.*"
+                + "k chars). Write your analysis notes to FileShed with `shed_create_file` (key findings, patterns, what to read next) — then continue exploring with free context.*"
             )
 
-        return result
+        return self._budget_wrap(result)
 
     def validate_features(
         self,
@@ -949,10 +1003,10 @@ class Tools:
             result += (
                 "\n\n---\n*This report is ~"
                 + str(len(result) // 1000)
-                + "k chars. Store it with `shed_create_file` to free context, then reference it when answering the user.*"
+                + "k chars. Store your analysis notes with `shed_create_file` (status per feature, key evidence, gaps found) to free context for follow-up investigation.*"
             )
 
-        return result
+        return self._budget_wrap(result)
 
     def _extract_search_keywords(self, feature: str) -> List[str]:
         """Extract meaningful search keywords from a feature description."""
