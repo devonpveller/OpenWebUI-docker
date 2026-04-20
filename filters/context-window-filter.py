@@ -1,108 +1,141 @@
 """
 title: Context Window Manager
 author: ai-stack
-version: 1.1.0
-description: Sliding window filter that keeps conversations within token budget. Compresses old tool results first, drops oldest messages, emergency-compresses protected messages as last resort. Set MAX_CONTEXT_TOKENS to your model's limit.
+version: 2.2.0
+description: Sliding window filter that enforces token budget. Accounts for tool schemas and chat template overhead. Compresses old messages, drops oldest, emergency-compresses recent. Logs all actions. Set MAX_CONTEXT_TOKENS to your model's limit.
 required_open_webui_version: 0.4.0
 """
 
 from pydantic import BaseModel, Field
 from typing import Optional, Callable, Awaitable
 import json
-import time
+import logging
+
+log = logging.getLogger("context_window_filter")
+log.setLevel(logging.DEBUG)
+if not log.handlers:
+    log.addHandler(logging.StreamHandler())
 
 
 class Filter:
     class Valves(BaseModel):
         MAX_CONTEXT_TOKENS: int = Field(
-            default=0,
-            description="Model's context window in tokens. Set this to your model's limit (e.g. 32768, 128000). 0 = use MAX_CONTEXT_CHARS instead.",
+            default=32768,
+            description="Model's context window in tokens (e.g. 32768, 128000).",
         )
         HEADROOM_TOKENS: int = Field(
-            default=2048,
-            description="Tokens reserved for the model's response and overhead. Budget = MAX_CONTEXT_TOKENS - HEADROOM_TOKENS.",
+            default=4096,
+            description="Tokens reserved for model output. Budget = MAX_CONTEXT_TOKENS - HEADROOM - tool_overhead - template_overhead.",
+        )
+        TOKENS_PER_MESSAGE: int = Field(
+            default=20,
+            description="Estimated tokens per message for chat template overhead (role markers, special tokens, etc).",
         )
         CHARS_PER_TOKEN: float = Field(
-            default=3.0,
-            description="Estimated characters per token. 3.0 is safe for code/JSON-heavy content. 3.5-4.0 for mostly English prose.",
-        )
-        MAX_CONTEXT_CHARS: int = Field(
-            default=80000,
-            description="Fallback: max total chars if MAX_CONTEXT_TOKENS is 0. Ignored when MAX_CONTEXT_TOKENS is set.",
+            default=1.8,
+            description="Chars per token ratio. Measured: Qwen+tools = ~1.83. Use 1.8 for safety. Higher = more permissive. Lower = more aggressive.",
         )
         PRESERVE_RECENT: int = Field(
-            default=6,
-            description="Always keep the N most recent messages completely intact (no truncation).",
+            default=4,
+            description="Always keep the N most recent messages (compressed in emergency only).",
         )
         TOOL_RESULT_CAP: int = Field(
-            default=3000,
-            description="Max chars per tool result in older (non-protected) messages. Larger results are truncated with a note.",
+            default=2000,
+            description="Max chars per tool result in older messages.",
         )
         TOOL_CALL_CAP: int = Field(
             default=200,
-            description="Max chars per tool_calls JSON in older assistant messages. Old call details are noise — keep just the function names.",
+            description="Max chars per tool_calls JSON in older messages. Strips arguments, keeps function names.",
         )
         ASSISTANT_CAP: int = Field(
-            default=6000,
-            description="Max chars per assistant message in older (non-protected) messages.",
+            default=4000,
+            description="Max chars per assistant/user message in older messages.",
+        )
+        EMERGENCY_CAP: int = Field(
+            default=1000,
+            description="Max chars per message during emergency compression of recent messages.",
         )
         ENABLE_STATUS: bool = Field(
             default=True,
-            description="Show a brief status message when context is trimmed.",
+            description="Show status message in chat when context is trimmed.",
         )
         priority: int = Field(
             default=1,
-            description="Filter priority (lower = runs first). Set low so this runs before other filters.",
+            description="Filter priority (lower = runs first).",
         )
 
     def __init__(self):
         self.valves = self.Valves()
 
-    def _get_char_budget(self) -> int:
-        """Calculate the character budget from token settings or fallback."""
-        if self.valves.MAX_CONTEXT_TOKENS > 0:
-            usable_tokens = self.valves.MAX_CONTEXT_TOKENS - self.valves.HEADROOM_TOKENS
-            return max(1000, int(usable_tokens * self.valves.CHARS_PER_TOKEN))
-        return self.valves.MAX_CONTEXT_CHARS
+    def _char_budget(self, body: dict) -> int:
+        # Start with token budget minus output headroom
+        usable = self.valves.MAX_CONTEXT_TOKENS - self.valves.HEADROOM_TOKENS
 
-    def _char_count(self, messages: list) -> int:
-        """Sum character length of all message content."""
+        # Subtract tool definition overhead (schemas sent alongside messages)
+        tools = body.get("tools", [])
+        if tools:
+            tools_chars = len(json.dumps(tools))
+            tools_tokens = int(tools_chars / self.valves.CHARS_PER_TOKEN)
+            usable -= tools_tokens
+            log.info(f"[CWF] tool definitions: {tools_chars} chars (~{tools_tokens} tokens)")
+
+        # Subtract per-message chat template overhead
+        n_msgs = len(body.get("messages", []))
+        template_tokens = n_msgs * self.valves.TOKENS_PER_MESSAGE
+        usable -= template_tokens
+        log.info(f"[CWF] template overhead: {n_msgs} msgs * {self.valves.TOKENS_PER_MESSAGE} = ~{template_tokens} tokens")
+
+        return max(2000, int(usable * self.valves.CHARS_PER_TOKEN))
+
+    def _measure(self, messages: list) -> int:
         total = 0
         for m in messages:
-            content = m.get("content")
-            if isinstance(content, str):
-                total += len(content)
-            elif isinstance(content, list):
-                # Multimodal content (list of parts)
-                for part in content:
+            c = m.get("content")
+            if isinstance(c, str):
+                total += len(c)
+            elif isinstance(c, list):
+                for part in c:
                     if isinstance(part, dict) and part.get("type") == "text":
                         total += len(part.get("text", ""))
-            # Count tool_calls JSON if present (they consume tokens too)
             if m.get("tool_calls"):
                 total += len(json.dumps(m["tool_calls"]))
         return total
 
-    def _truncate_content(self, content: str, cap: int, label: str) -> str:
-        """Truncate content to cap chars with a clean break and a note."""
-        if len(content) <= cap:
-            return content
-        # Try to cut at a newline for cleaner output
-        cut = content[:cap].rfind("\n")
+    def _truncate(self, text: str, cap: int, label: str) -> str:
+        if len(text) <= cap:
+            return text
+        cut = text[:cap].rfind("\n")
         if cut < cap // 2:
             cut = cap
-        trimmed = len(content) - cut
-        return (
-            content[:cut]
-            + f"\n\n... [{label}: {trimmed} chars trimmed by context manager]"
-        )
+        removed = len(text) - cut
+        return text[:cut] + f"\n\n... [{label}: {removed} chars trimmed]"
 
-    def _is_tool_result(self, msg: dict) -> bool:
-        """Check if a message is a tool result."""
-        return msg.get("role") == "tool"
+    def _compress_msg(self, msg: dict, content_cap: int, label: str) -> tuple:
+        """Compress a single message. Returns (new_msg, chars_saved)."""
+        saved = 0
+        new_msg = msg
 
-    def _has_tool_calls(self, msg: dict) -> bool:
-        """Check if an assistant message contains tool calls."""
-        return bool(msg.get("tool_calls"))
+        content = msg.get("content", "")
+        if isinstance(content, str) and len(content) > content_cap:
+            new_content = self._truncate(content, content_cap, label)
+            saved += len(content) - len(new_content)
+            new_msg = {**new_msg, "content": new_content}
+
+        if msg.get("tool_calls"):
+            tc_json = json.dumps(msg["tool_calls"])
+            if len(tc_json) > self.valves.TOOL_CALL_CAP:
+                slim = []
+                for tc in msg["tool_calls"]:
+                    fn = tc.get("function", {})
+                    slim.append({
+                        "id": tc.get("id", ""),
+                        "type": "function",
+                        "function": {"name": fn.get("name", "?"), "arguments": "{}"},
+                    })
+                saved += len(tc_json) - len(json.dumps(slim))
+                new_msg = {**new_msg, "tool_calls": slim}
+
+        return new_msg, saved
 
     async def inlet(
         self,
@@ -111,177 +144,129 @@ class Filter:
         __event_emitter__: Optional[Callable[[dict], Awaitable[None]]] = None,
     ) -> dict:
         messages = body.get("messages", [])
-        if len(messages) <= self.valves.PRESERVE_RECENT:
+        budget = self._char_budget(body)
+        original = self._measure(messages)
+
+        log.info(
+            f"[CWF] inlet: {len(messages)} msgs, {original} chars, "
+            f"budget {budget} chars ({self.valves.MAX_CONTEXT_TOKENS}tok - "
+            f"{self.valves.HEADROOM_TOKENS}headroom @ {self.valves.CHARS_PER_TOKEN}c/t)"
+        )
+
+        if original <= budget:
+            log.info("[CWF] under budget, passing through")
             return body
 
-        # Separate system messages (always preserved in full)
-        system_msgs = []
-        conversation = []
-        for m in messages:
-            if m.get("role") == "system":
-                system_msgs.append(m)
-            else:
-                conversation.append(m)
+        log.warning(f"[CWF] OVER BUDGET by {original - budget} chars, trimming...")
 
-        if not conversation:
-            return body
+        # Split system vs conversation
+        system = [m for m in messages if m.get("role") == "system"]
+        convo = [m for m in messages if m.get("role") != "system"]
 
-        original_chars = self._char_count(messages)
-        char_budget = self._get_char_budget()
-
-        # If under budget, pass through unchanged
-        if original_chars <= char_budget:
+        if not convo:
             return body
 
         # --- Phase 1: Compress older messages ---
-        # Protected = last N messages (never touched)
-        protect_count = min(self.valves.PRESERVE_RECENT, len(conversation))
-        old_msgs = conversation[:-protect_count] if protect_count > 0 else conversation[:]
-        recent_msgs = conversation[-protect_count:] if protect_count > 0 else []
+        protect_n = min(self.valves.PRESERVE_RECENT, len(convo))
+        old = convo[:-protect_n] if protect_n else convo[:]
+        recent = convo[-protect_n:] if protect_n else []
 
-        compressed_count = 0
-        for i, msg in enumerate(old_msgs):
+        compressed = 0
+        for i, msg in enumerate(old):
             role = msg.get("role", "")
-
-            # Compress tool results most aggressively
             content = msg.get("content", "")
-            if isinstance(content, str) and self._is_tool_result(msg) and len(content) > self.valves.TOOL_RESULT_CAP:
-                old_msgs[i] = {
-                    **msg,
-                    "content": self._truncate_content(
-                        content, self.valves.TOOL_RESULT_CAP, "tool result"
-                    ),
-                }
-                compressed_count += 1
 
-            # Compress assistant messages with tool_calls — shrink the calls JSON
-            # and truncate any content
-            elif role == "assistant" and self._has_tool_calls(msg):
-                changed = False
-                tc_json = json.dumps(msg["tool_calls"])
-                if len(tc_json) > self.valves.TOOL_CALL_CAP:
-                    # Keep just function names for reference
-                    summary_calls = []
-                    for tc in msg["tool_calls"]:
-                        fn = tc.get("function", {})
-                        summary_calls.append({
-                            "id": tc.get("id", ""),
-                            "type": "function",
-                            "function": {
-                                "name": fn.get("name", "unknown"),
-                                "arguments": "{}",
-                            },
-                        })
-                    old_msgs[i] = {**msg, "tool_calls": summary_calls}
-                    changed = True
-                if isinstance(content, str) and len(content) > self.valves.ASSISTANT_CAP:
-                    old_msgs[i] = {
-                        **old_msgs[i],
-                        "content": self._truncate_content(
-                            content, self.valves.ASSISTANT_CAP, "assistant response"
-                        ),
-                    }
-                    changed = True
-                if changed:
-                    compressed_count += 1
-
-            # Compress long assistant messages without tool_calls
-            elif role == "assistant" and isinstance(content, str) and len(content) > self.valves.ASSISTANT_CAP:
-                old_msgs[i] = {
-                    **msg,
-                    "content": self._truncate_content(
-                        content, self.valves.ASSISTANT_CAP, "assistant response"
-                    ),
-                }
-                compressed_count += 1
-
-            # Compress long user messages (e.g. pasted code blocks)
+            if role == "tool" and isinstance(content, str) and len(content) > self.valves.TOOL_RESULT_CAP:
+                old[i], s = self._compress_msg(msg, self.valves.TOOL_RESULT_CAP, "tool result")
+                if s > 0:
+                    compressed += 1
+            elif role == "assistant":
+                old[i], s = self._compress_msg(msg, self.valves.ASSISTANT_CAP, "assistant")
+                if s > 0:
+                    compressed += 1
             elif role == "user" and isinstance(content, str) and len(content) > self.valves.ASSISTANT_CAP:
-                old_msgs[i] = {
-                    **msg,
-                    "content": self._truncate_content(
-                        content, self.valves.ASSISTANT_CAP, "user message"
-                    ),
-                }
-                compressed_count += 1
+                old[i], s = self._compress_msg(msg, self.valves.ASSISTANT_CAP, "user msg")
+                if s > 0:
+                    compressed += 1
 
-        conversation = old_msgs + recent_msgs
-        current_chars = self._char_count(system_msgs + conversation)
+        convo = old + recent
+        current = self._measure(system + convo)
+        log.info(f"[CWF] after phase 1 (compress old): {current} chars, compressed {compressed} msgs")
 
-        # --- Phase 2: Drop oldest messages if still over budget ---
-        dropped_count = 0
-        while (
-            len(conversation) > protect_count
-            and current_chars > char_budget
-        ):
-            # Drop from front, but handle tool call pairs:
-            # If dropping an assistant msg with tool_calls, also drop the
-            # following tool result messages that belong to it.
-            dropped = conversation.pop(0)
-            drop_chars = len(dropped.get("content", "") or "")
-            if dropped.get("tool_calls"):
-                drop_chars += len(json.dumps(dropped["tool_calls"]))
+        # --- Phase 2: Drop oldest messages ---
+        dropped = 0
+        while len(convo) > protect_n and current > budget:
+            msg = convo.pop(0)
+            drop = len(msg.get("content", "") or "")
+            if msg.get("tool_calls"):
+                drop += len(json.dumps(msg["tool_calls"]))
 
-            # Drop orphaned tool results that followed the assistant tool_call
-            while conversation and len(conversation) > protect_count:
-                if self._is_tool_result(conversation[0]):
-                    orphan = conversation.pop(0)
-                    drop_chars += len(orphan.get("content", "") or "")
-                else:
+            while convo and len(convo) > protect_n and convo[0].get("role") == "tool":
+                orphan = convo.pop(0)
+                drop += len(orphan.get("content", "") or "")
+
+            current -= drop
+            dropped += 1
+
+        log.info(f"[CWF] after phase 2 (drop old): {current} chars, dropped {dropped} exchanges")
+
+        # --- Phase 3: Emergency compress recent messages ---
+        emergency = 0
+        if current > budget:
+            log.warning(f"[CWF] EMERGENCY: recent msgs alone = {current} chars > {budget} budget")
+            for i, msg in enumerate(convo):
+                if current <= budget:
                     break
-
-            current_chars -= drop_chars
-            dropped_count += 1
-
-        # --- Phase 3: Emergency — if protected messages alone exceed budget,
-        # compress them too (better than sending an over-budget request) ---
-        if current_chars > char_budget:
-            for i, msg in enumerate(conversation):
-                if current_chars <= char_budget:
-                    break
-                content = msg.get("content", "")
-                if not isinstance(content, str):
-                    continue
                 role = msg.get("role", "")
-                if self._is_tool_result(msg) and len(content) > self.valves.TOOL_RESULT_CAP:
-                    new_content = self._truncate_content(
-                        content, self.valves.TOOL_RESULT_CAP, "tool result (emergency)"
-                    )
-                    current_chars -= len(content) - len(new_content)
-                    conversation[i] = {**msg, "content": new_content}
-                    compressed_count += 1
-                elif role == "assistant" and len(content) > self.valves.ASSISTANT_CAP:
-                    new_content = self._truncate_content(
-                        content, self.valves.ASSISTANT_CAP, "assistant (emergency)"
-                    )
-                    current_chars -= len(content) - len(new_content)
-                    conversation[i] = {**msg, "content": new_content}
-                    if self._has_tool_calls(msg):
-                        tc_json = json.dumps(msg["tool_calls"])
-                        if len(tc_json) > self.valves.TOOL_CALL_CAP:
-                            summary_calls = []
-                            for tc in msg["tool_calls"]:
-                                fn = tc.get("function", {})
-                                summary_calls.append({
-                                    "id": tc.get("id", ""),
-                                    "type": "function",
-                                    "function": {"name": fn.get("name", "unknown"), "arguments": "{}"},
-                                })
-                            current_chars -= len(tc_json) - len(json.dumps(summary_calls))
-                            conversation[i]["tool_calls"] = summary_calls
-                    compressed_count += 1
+                cap = self.valves.EMERGENCY_CAP
+                if role == "tool":
+                    cap = min(cap, self.valves.TOOL_RESULT_CAP)
+                convo[i], s = self._compress_msg(msg, cap, f"{role} (emergency)")
+                if s > 0:
+                    current -= s
+                    emergency += 1
 
-        body["messages"] = system_msgs + conversation
+        log.info(f"[CWF] after phase 3 (emergency): {current} chars, emergency-compressed {emergency} msgs")
 
-        # --- Emit status if anything was modified ---
-        if (compressed_count > 0 or dropped_count > 0) and self.valves.ENABLE_STATUS and __event_emitter__:
+        # --- Phase 4: Nuclear — if STILL over, drop conversation msgs until fits ---
+        nuked = 0
+        while len(convo) > 2 and current > budget:
+            msg = convo.pop(0)
+            drop = len(msg.get("content", "") or "")
+            if msg.get("tool_calls"):
+                drop += len(json.dumps(msg["tool_calls"]))
+            while convo and len(convo) > 2 and convo[0].get("role") == "tool":
+                orphan = convo.pop(0)
+                drop += len(orphan.get("content", "") or "")
+            current -= drop
+            nuked += 1
+
+        if nuked:
+            log.warning(f"[CWF] NUCLEAR: dropped {nuked} more exchanges, now {current} chars")
+
+        body["messages"] = system + convo
+        final = self._measure(body["messages"])
+        est_tokens = int(final / self.valves.CHARS_PER_TOKEN)
+
+        log.info(
+            f"[CWF] DONE: {len(body['messages'])} msgs, {final} chars, "
+            f"~{est_tokens} tokens (limit {self.valves.MAX_CONTEXT_TOKENS})"
+        )
+
+        # --- Emit status ---
+        if (compressed + dropped + emergency + nuked > 0) and self.valves.ENABLE_STATUS and __event_emitter__:
             parts = []
-            if compressed_count:
-                parts.append(f"{compressed_count} older messages compressed")
-            if dropped_count:
-                parts.append(f"{dropped_count} oldest exchanges dropped")
-            savings = original_chars - self._char_count(body["messages"])
+            if compressed:
+                parts.append(f"{compressed} compressed")
+            if dropped:
+                parts.append(f"{dropped} dropped")
+            if emergency:
+                parts.append(f"{emergency} emergency-trimmed")
+            if nuked:
+                parts.append(f"{nuked} force-dropped")
+            savings = original - final
             parts.append(f"~{savings // 1000}k chars freed")
+            parts.append(f"~{est_tokens}/{self.valves.MAX_CONTEXT_TOKENS} tokens")
 
             await __event_emitter__(
                 {
