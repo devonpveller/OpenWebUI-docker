@@ -1,8 +1,8 @@
 """
 title: Context Window Manager
 author: ai-stack
-version: 1.0.0
-description: Sliding window filter that keeps conversations within token budget. Compresses old tool results first, then drops oldest messages. Protects system prompts and recent messages. Works transparently with any model.
+version: 1.1.0
+description: Sliding window filter that keeps conversations within token budget. Compresses old tool results first, drops oldest messages, emergency-compresses protected messages as last resort. Set MAX_CONTEXT_TOKENS to your model's limit.
 required_open_webui_version: 0.4.0
 """
 
@@ -127,9 +127,10 @@ class Filter:
             return body
 
         original_chars = self._char_count(messages)
+        char_budget = self._get_char_budget()
 
         # If under budget, pass through unchanged
-        if original_chars <= self.valves.MAX_CONTEXT_CHARS:
+        if original_chars <= char_budget:
             return body
 
         # --- Phase 1: Compress older messages ---
@@ -211,7 +212,7 @@ class Filter:
         dropped_count = 0
         while (
             len(conversation) > protect_count
-            and current_chars > self.valves.MAX_CONTEXT_CHARS
+            and current_chars > char_budget
         ):
             # Drop from front, but handle tool call pairs:
             # If dropping an assistant msg with tool_calls, also drop the
@@ -231,6 +232,44 @@ class Filter:
 
             current_chars -= drop_chars
             dropped_count += 1
+
+        # --- Phase 3: Emergency — if protected messages alone exceed budget,
+        # compress them too (better than sending an over-budget request) ---
+        if current_chars > char_budget:
+            for i, msg in enumerate(conversation):
+                if current_chars <= char_budget:
+                    break
+                content = msg.get("content", "")
+                if not isinstance(content, str):
+                    continue
+                role = msg.get("role", "")
+                if self._is_tool_result(msg) and len(content) > self.valves.TOOL_RESULT_CAP:
+                    new_content = self._truncate_content(
+                        content, self.valves.TOOL_RESULT_CAP, "tool result (emergency)"
+                    )
+                    current_chars -= len(content) - len(new_content)
+                    conversation[i] = {**msg, "content": new_content}
+                    compressed_count += 1
+                elif role == "assistant" and len(content) > self.valves.ASSISTANT_CAP:
+                    new_content = self._truncate_content(
+                        content, self.valves.ASSISTANT_CAP, "assistant (emergency)"
+                    )
+                    current_chars -= len(content) - len(new_content)
+                    conversation[i] = {**msg, "content": new_content}
+                    if self._has_tool_calls(msg):
+                        tc_json = json.dumps(msg["tool_calls"])
+                        if len(tc_json) > self.valves.TOOL_CALL_CAP:
+                            summary_calls = []
+                            for tc in msg["tool_calls"]:
+                                fn = tc.get("function", {})
+                                summary_calls.append({
+                                    "id": tc.get("id", ""),
+                                    "type": "function",
+                                    "function": {"name": fn.get("name", "unknown"), "arguments": "{}"},
+                                })
+                            current_chars -= len(tc_json) - len(json.dumps(summary_calls))
+                            conversation[i]["tool_calls"] = summary_calls
+                    compressed_count += 1
 
         body["messages"] = system_msgs + conversation
 
