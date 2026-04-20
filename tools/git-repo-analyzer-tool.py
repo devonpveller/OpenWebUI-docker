@@ -43,8 +43,8 @@ class Tools:
             description="Lines returned per file in preview mode (bulk_read_files preview=true, get_repo_file max_lines).",
         )
         CONTEXT_BUDGET: int = Field(
-            default=60000,
-            description="Total character budget across all tool calls in a conversation. As usage approaches this limit, outputs are automatically compressed. Set to 0 to disable.",
+            default=0,
+            description="Total character budget across all tool calls in a conversation. As usage approaches this limit, outputs are automatically compressed. Set to 0 to disable. Disabled by default — the GitHelper pipe manages context overflow.",
         )
 
     def __init__(self):
