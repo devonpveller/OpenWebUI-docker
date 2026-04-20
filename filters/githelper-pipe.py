@@ -325,7 +325,13 @@ class Pipe:
 
     # ── Streaming reason + tool_call interception ──
 
-    async def _streaming_reason_act(self, url: str, payload: dict) -> AsyncGenerator:
+    async def _streaming_reason_act(
+        self,
+        url: str,
+        payload: dict,
+        __event_emitter__: Optional[Callable[[dict], Awaitable[None]]] = None,
+        context_info: str = "",
+    ) -> AsyncGenerator:
         """Stream backend response to user in real-time (thinking is visible).
         Intercept <tool_call> blocks and emit synthetic SSE tool_call events
         so OpenWebUI's middleware executes them."""
@@ -334,6 +340,13 @@ class Pipe:
 
         TOOL_TAG = "<tool_call>"
         LOOK_AHEAD = len(TOOL_TAG)  # 11 chars
+
+        async def emit_status(desc: str, done: bool = False):
+            if self.valves.ENABLE_STATUS and __event_emitter__:
+                await __event_emitter__({
+                    "type": "status",
+                    "data": {"description": desc, "done": done},
+                })
 
         def make_chunk(delta: dict, finish_reason=None) -> str:
             return "data: " + json.dumps({
@@ -350,7 +363,10 @@ class Pipe:
         buffer = ""          # Unsent content (look-ahead for <tool_call>)
         tool_detected = False
         sent_role = False
+        first_token = False
         t0 = time.monotonic()
+
+        await emit_status(f"Reasoning... {context_info}")
 
         try:
             async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -362,6 +378,7 @@ class Pipe:
                     if resp.status != 200:
                         error_text = await resp.text()
                         log.error(f"[GH] stream error {resp.status}: {error_text[:500]}")
+                        await emit_status(f"Backend error: {resp.status}", done=True)
                         yield f"Error from backend: {resp.status} — {error_text[:200]}"
                         return
 
@@ -391,6 +408,12 @@ class Pipe:
                             yield make_chunk({"role": "assistant"})
                             sent_role = True
 
+                        # First token received — update status
+                        if not first_token:
+                            first_token = True
+                            ttft = time.monotonic() - t0
+                            await emit_status(f"Generating... (first token {ttft:.1f}s) {context_info}")
+
                         full_response += content
 
                         # Already past <tool_call> — just accumulate
@@ -408,6 +431,7 @@ class Pipe:
                             if pre:
                                 yield make_chunk({"content": pre})
                             buffer = ""
+                            await emit_status(f"Tool call detected... {context_info}")
                             continue
 
                         # Look-ahead: hold back last N chars in case
@@ -422,12 +446,17 @@ class Pipe:
             if not sent_role:
                 yield make_chunk({"role": "assistant"})
 
+            if not first_token:
+                await emit_status(f"No response from backend ({elapsed:.1f}s)", done=True)
+                log.warning(f"[GH] no tokens received after {elapsed:.1f}s")
+
             # Parse full response for tool calls
             text, tool_calls = self._parse_tool_intent(full_response)
 
             if tool_calls:
                 names = [c["name"] for c in tool_calls]
                 log.info(f"[GH] → tool calls: {names} ({elapsed:.1f}s)")
+                await emit_status(f"Calling {', '.join(names)}... ({elapsed:.1f}s)", done=True)
 
                 # Emit synthetic tool_call events
                 for i, call in enumerate(tool_calls):
@@ -450,6 +479,7 @@ class Pipe:
                 yield make_chunk({}, "tool_calls")
             else:
                 log.info(f"[GH] → text ({len(full_response)} chars, {elapsed:.1f}s)")
+                await emit_status(f"Done ({elapsed:.1f}s)", done=True)
                 # Flush remaining buffer (no tool calls found)
                 if buffer:
                     yield make_chunk({"content": buffer})
@@ -459,9 +489,11 @@ class Pipe:
 
         except aiohttp.ClientError as e:
             log.error(f"[GH] connection error: {e}")
+            await emit_status(f"Connection error: {e}", done=True)
             yield f"Connection error: {e}"
         except Exception as e:
             log.error(f"[GH] error: {e}")
+            await emit_status(f"Error: {e}", done=True)
             yield f"Error: {e}"
 
     # ── Context management ──
@@ -724,10 +756,16 @@ class Pipe:
             if key in body and body[key] is not None:
                 reason_payload[key] = body[key]
 
-        log.info(f"[GH] reason call: {len(normalized)} msgs, {self._measure(normalized)} chars")
+        ctx_chars = self._measure(normalized)
+        ctx_est = int(ctx_chars / self.valves.CHARS_PER_TOKEN)
+        n_tool_results = sum(1 for m in normalized if m.get("role") == "user" and "<tool_response" in (m.get("content", "") or ""))
+        round_label = f"round {n_tool_results + 1}" if n_tool_results else "initial"
+        context_info = f"({round_label}, ~{ctx_est}/{self.valves.MAX_CONTEXT_TOKENS} tok)"
+
+        log.info(f"[GH] reason call: {len(normalized)} msgs, {ctx_chars} chars, {round_label}")
 
         # Stream response, intercept <tool_call> blocks, emit synthetic events
-        return self._streaming_reason_act(url, reason_payload)
+        return self._streaming_reason_act(url, reason_payload, __event_emitter__, context_info)
 
     # ── Backend communication ──
 
