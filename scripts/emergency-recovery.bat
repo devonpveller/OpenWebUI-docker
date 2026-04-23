@@ -255,6 +255,10 @@ echo [INFO] llama-cpp status:
 docker compose exec llama-cpp curl -s http://localhost:8080/health
 
 echo.
+echo [INFO] llama-cpp-embed status:
+docker compose exec llama-cpp-embed curl -s http://localhost:8080/health
+
+echo.
 echo [INFO] Tailscale status:
 docker compose exec tailscale tailscale --socket=/tmp/tailscaled.sock status
 

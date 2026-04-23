@@ -17,6 +17,7 @@ if "%1"=="lmstudio" goto :lmstudio_fix
 if "%1"=="restart-openwebui" goto :restart_openwebui
 if "%1"=="mnemory" goto :mnemory_check
 if "%1"=="smolcrawl" goto :smolcrawl_check
+if "%1"=="llama-cpp" goto :llama_cpp_check
 goto :usage
 
 :interactive_menu
@@ -38,10 +39,11 @@ echo   7. Fix LM Studio connectivity
 echo   8. Nuclear option (full restart)
 echo   9. Mnemory check and restart
 echo  10. SmolCrawl pipelines check and restart
+echo  11. llama-cpp / llama-cpp-embed check and restart
 echo.
 echo   0. Exit
 echo.
-set /p choice="Select option (1-10,0): "
+set /p choice="Select option (1-11,0): "
 
 if "%choice%"=="1" goto :namespace_reset
 if "%choice%"=="2" goto :status_check
@@ -53,6 +55,7 @@ if "%choice%"=="7" goto :lmstudio_fix
 if "%choice%"=="8" goto :nuclear_option
 if "%choice%"=="9" goto :mnemory_check
 if "%choice%"=="10" goto :smolcrawl_check
+if "%choice%"=="11" goto :llama_cpp_check
 if "%choice%"=="0" goto :end
 echo [ERROR] Invalid choice
 timeout /t 2 /nobreak >nul
@@ -238,6 +241,16 @@ if %ERRORLEVEL% NEQ 0 (
         ) else (
             echo [WARN] llama-cpp may need additional time to initialize
         )
+        echo.
+        echo [INFO] Testing llama-cpp-embed availability...
+        cd ..
+        docker compose exec llama-cpp-embed curl -s -f http://localhost:8080/health >nul 2>&1
+        cd scripts
+        if %ERRORLEVEL% EQU 0 (
+            echo [SUCCESS] llama-cpp-embed GPU integration working
+        ) else (
+            echo [WARN] llama-cpp-embed may need additional time to initialize
+        )
     ) else (
         echo [ERROR] GPU still not available - may need full rebuild
         echo [INFO] Consider running update-stack.bat to rebuild with GPU support
@@ -251,14 +264,29 @@ if %ERRORLEVEL% NEQ 0 (
     cd scripts
     if %ERRORLEVEL% EQU 0 (
         echo [SUCCESS] llama-cpp GPU integration working
-        echo [INFO] All GPU services operational
+        echo.
+        echo [INFO] Testing llama-cpp-embed GPU integration...
+        cd ..
+        docker compose exec llama-cpp-embed curl -s -f http://localhost:8080/health >nul 2>&1
+        cd scripts
+        if %ERRORLEVEL% EQU 0 (
+            echo [SUCCESS] llama-cpp-embed GPU integration working
+            echo [INFO] All GPU services operational
+        ) else (
+            echo [WARN] llama-cpp-embed may need restart
+            cd ..
+            docker compose restart llama-cpp-embed
+            cd scripts
+            timeout /t 30 /nobreak >nul
+            echo [SUCCESS] llama-cpp-embed restarted
+        )
     ) else (
         echo [WARN] llama-cpp may need restart
         cd ..
-        docker compose restart llama-cpp
+        docker compose restart llama-cpp llama-cpp-embed
         cd scripts
         timeout /t 30 /nobreak >nul
-        echo [SUCCESS] llama-cpp restarted
+        echo [SUCCESS] llama-cpp services restarted
     )
 )
 if "%1"=="" (
@@ -316,6 +344,11 @@ echo.
 echo [INFO] llama-cpp Status:
 cd ..
 docker compose exec llama-cpp curl -s http://localhost:8080/health 2>nul
+cd scripts
+echo.
+echo [INFO] llama-cpp-embed Status:
+cd ..
+docker compose exec llama-cpp-embed curl -s http://localhost:8080/health 2>nul
 cd scripts
 echo.
 echo [INFO] Network Connectivity:
@@ -612,6 +645,61 @@ if "%1"=="" (
 )
 goto :end
 
+:llama_cpp_check
+echo.
+echo ========================================
+echo   llama-cpp Health Check and Recovery
+echo ========================================
+echo.
+echo [INFO] Checking llama-cpp service status...
+cd /d "%SCRIPT_DIR%\.."
+docker compose ps llama-cpp llama-cpp-embed --format "table {{.Service}}\t{{.Status}}"
+echo.
+echo [INFO] Testing llama-cpp health endpoint...
+docker compose exec llama-cpp curl -s -f http://localhost:8080/health >nul 2>&1
+set RESULT=%ERRORLEVEL%
+if %RESULT% EQU 0 (
+    echo [SUCCESS] llama-cpp is healthy and running
+) else (
+    echo [WARN] llama-cpp health check failed, restarting...
+    docker compose restart llama-cpp
+    echo [INFO] Waiting for llama-cpp to start (large model, may take up to 2 minutes)...
+    timeout /t 60 /nobreak >nul
+    docker compose exec llama-cpp curl -s -f http://localhost:8080/health >nul 2>&1
+    set RESULT=%ERRORLEVEL%
+    if %RESULT% EQU 0 (
+        echo [SUCCESS] llama-cpp restored after restart
+    ) else (
+        echo [ERROR] llama-cpp still not healthy - check logs: docker compose logs llama-cpp
+    )
+)
+echo.
+echo [INFO] Testing llama-cpp-embed health endpoint...
+docker compose exec llama-cpp-embed curl -s -f http://localhost:8080/health >nul 2>&1
+set RESULT=%ERRORLEVEL%
+if %RESULT% EQU 0 (
+    echo [SUCCESS] llama-cpp-embed is healthy and running
+) else (
+    echo [WARN] llama-cpp-embed health check failed, restarting...
+    docker compose restart llama-cpp-embed
+    echo [INFO] Waiting for llama-cpp-embed to start...
+    timeout /t 30 /nobreak >nul
+    docker compose exec llama-cpp-embed curl -s -f http://localhost:8080/health >nul 2>&1
+    set RESULT=%ERRORLEVEL%
+    if %RESULT% EQU 0 (
+        echo [SUCCESS] llama-cpp-embed restored after restart
+    ) else (
+        echo [ERROR] llama-cpp-embed still not healthy - check logs: docker compose logs llama-cpp-embed
+    )
+)
+cd /d "%SCRIPT_DIR%"
+if "%1"=="" (
+    echo.
+    pause
+    goto :interactive_menu
+)
+goto :end
+
 :usage
 echo.
 echo ========================================
@@ -630,6 +718,7 @@ echo   rebuild           - Rebuild and restart Tailscale container
 echo   lmstudio          - Fix LM Studio Tailscale connectivity
 echo   mnemory           - Check Mnemory health and restart if needed
 echo   smolcrawl         - Check SmolCrawl Pipelines health and restart if needed
+echo   llama-cpp         - Check llama-cpp and llama-cpp-embed health and restart if needed
 echo   nuclear           - Full stack restart (use when all else fails)
 echo.
 echo Examples:
