@@ -104,6 +104,7 @@ To use a tool, output a tool call block immediately:
 Rules:
 - Call the tool IMMEDIATELY — don't narrate what you plan to do
 - Arguments must be valid JSON with correct parameter types
+- Include ALL required parameters (those without `?` in the signature above). Missing required args will cause an error.
 - STOP writing after the <tool_call> block — the result will appear in your next turn
 - For multiple tools, use multiple <tool_call> blocks
 - If you don't need a tool, respond with text as normal
@@ -130,11 +131,19 @@ class Pipe:
         )
         HEADROOM_TOKENS: int = Field(
             default=4096,
-            description="Tokens reserved for model output.",
+            description="Tokens reserved for model output in budget calculation.",
+        )
+        MAX_GENERATION_TOKENS: int = Field(
+            default=12288,
+            description="Max tokens for backend generation (thinking + content). Thinking models need 8-10k for reasoning + content for response. Set higher than HEADROOM_TOKENS.",
+        )
+        MAX_REASONING_CHARS: int = Field(
+            default=20000,
+            description="Max chars of reasoning before aborting and retrying with /no_think. Catches thinking loops.",
         )
         CHARS_PER_TOKEN: float = Field(
-            default=1.8,
-            description="Chars per token ratio.",
+            default=3.5,
+            description="Chars per token ratio for budget/estimation. ~3.5 for Qwen3 mixed content, ~4.0 for plain English. Verified: 35k chars = 8.5k tokens in production.",
         )
         TOKENS_PER_MESSAGE: int = Field(
             default=20,
@@ -171,6 +180,18 @@ class Pipe:
         REQUEST_TIMEOUT: int = Field(
             default=300,
             description="HTTP timeout in seconds.",
+        )
+        PRESSURE_WARN_PCT: float = Field(
+            default=0.65,
+            description="Context usage % to start informing model about capacity.",
+        )
+        PRESSURE_HIGH_PCT: float = Field(
+            default=0.80,
+            description="Context usage % to nudge model to shed notes and plan wrap-up.",
+        )
+        PRESSURE_CRITICAL_PCT: float = Field(
+            default=0.90,
+            description="Context usage % to strongly nudge synthesis. Sliding window still manages overflow.",
         )
 
     def __init__(self):
@@ -359,11 +380,17 @@ class Pipe:
                 }],
             })
 
-        full_response = ""   # Accumulated for final tool_call parsing
+        full_response = ""   # Accumulated content for tool_call parsing
+        reasoning_text = ""  # Accumulated reasoning for ticker display
+        reasoning_aborted = False  # Set True when reasoning loop detected
         buffer = ""          # Unsent content (look-ahead for <tool_call>)
         tool_detected = False
         sent_role = False
         first_token = False
+        last_status_len = 0
+        reasoning_chars = 0      # Total reasoning_content chars received
+        last_reasoning_status = 0
+        STATUS_INTERVAL = 2000  # update thinking ticker every ~2000 chars (meaningful context)
         t0 = time.monotonic()
 
         await emit_status(f"Reasoning... {context_info}")
@@ -393,6 +420,7 @@ class Pipe:
                             chunk_data = json.loads(decoded[5:].strip())
                             delta = chunk_data.get("choices", [{}])[0].get("delta", {})
                             content = delta.get("content", "")
+                            reasoning = delta.get("reasoning_content", "")
                         except (json.JSONDecodeError, IndexError, KeyError):
                             continue
 
@@ -401,7 +429,7 @@ class Pipe:
                             yield make_chunk({"role": "assistant"})
                             sent_role = True
 
-                        if not content:
+                        if not content and not reasoning:
                             continue
 
                         if not sent_role:
@@ -412,9 +440,47 @@ class Pipe:
                         if not first_token:
                             first_token = True
                             ttft = time.monotonic() - t0
-                            await emit_status(f"Generating... (first token {ttft:.1f}s) {context_info}")
+                            delta_fields = {k: type(v).__name__ for k, v in delta.items() if v}
+                            log.info(f"[GH] first token: fields={delta_fields}, ttft={ttft:.1f}s")
+                            if reasoning and not content:
+                                await emit_status(f"Thinking... (first token {ttft:.1f}s) {context_info}")
+                            else:
+                                await emit_status(f"Generating... (first token {ttft:.1f}s) {context_info}")
+
+                        # Handle reasoning_content (Qwen3 thinking via llama-cpp peg-native)
+                        if reasoning:
+                            reasoning_text += reasoning
+                            reasoning_chars += len(reasoning)
+                            # Detect reasoning loops (budget exceeded or repetition)
+                            if reasoning_chars > self.valves.MAX_REASONING_CHARS:
+                                log.warning(f"[GH] reasoning budget hit: {reasoning_chars} chars")
+                                reasoning_aborted = True
+                                break
+                            if len(reasoning_text) > 1000:
+                                tail = reasoning_text[-300:]
+                                if tail in reasoning_text[:-350]:
+                                    log.warning(f"[GH] reasoning loop at {reasoning_chars} chars")
+                                    reasoning_aborted = True
+                                    break
+
+                            if (reasoning_chars - last_reasoning_status) >= STATUS_INTERVAL:
+                                last_reasoning_status = reasoning_chars
+                                # Show accumulated reasoning tail for meaningful context
+                                snippet = reasoning_text.replace('\n', ' ').strip()
+                                if snippet:
+                                    await emit_status(f"\U0001f4ad ...{snippet[-200:]}")
+                            if not content:
+                                continue
 
                         full_response += content
+
+                        # Thinking ticker — show model's direction via status
+                        if not tool_detected and (len(full_response) - last_status_len) >= STATUS_INTERVAL:
+                            last_status_len = len(full_response)
+                            # Strip <think> tags, collapse whitespace for clean display
+                            snippet = re.sub(r'</?think>', '', full_response).replace('\n', ' ').strip()
+                            if snippet:
+                                await emit_status(f"\U0001f4ad ...{snippet[-120:]}")
 
                         # Already past <tool_call> — just accumulate
                         if tool_detected:
@@ -441,6 +507,75 @@ class Pipe:
                             yield make_chunk({"content": buffer[:safe_len]})
                             buffer = buffer[safe_len:]
 
+            # ── Retry with /no_think if reasoning loop detected ──
+            if reasoning_aborted and not full_response:
+                log.info(f"[GH] retrying with /no_think after {reasoning_chars} chars of looped reasoning")
+                await emit_status(f"Thinking loop — retrying direct... {context_info}")
+                retry_msgs = [dict(m) for m in payload["messages"]]
+                for i in range(len(retry_msgs) - 1, -1, -1):
+                    if retry_msgs[i].get("role") == "user":
+                        retry_msgs[i]["content"] = retry_msgs[i].get("content", "") + "\n/no_think"
+                        break
+
+                full_response = ""
+                buffer = ""
+                tool_detected = False
+                first_token = False
+                last_status_len = 0
+                t0 = time.monotonic()
+
+                async with aiohttp.ClientSession(timeout=timeout) as retry_session:
+                    retry_data = {**payload, "messages": retry_msgs, "stream": True}
+                    async with retry_session.post(
+                        url, json=retry_data,
+                        headers={"Content-Type": "application/json"},
+                    ) as resp:
+                        if resp.status != 200:
+                            error_text = await resp.text()
+                            log.error(f"[GH] retry error {resp.status}: {error_text[:200]}")
+                        else:
+                            async for line in resp.content:
+                                decoded = line.decode("utf-8", errors="replace").strip()
+                                if not decoded or not decoded.startswith("data:"):
+                                    continue
+                                if decoded.strip() == "data: [DONE]":
+                                    break
+                                try:
+                                    chunk_data = json.loads(decoded[5:].strip())
+                                    delta = chunk_data.get("choices", [{}])[0].get("delta", {})
+                                    content = delta.get("content", "")
+                                except (json.JSONDecodeError, IndexError, KeyError):
+                                    continue
+                                if delta.get("role") and not sent_role:
+                                    yield make_chunk({"role": "assistant"})
+                                    sent_role = True
+                                if not content:
+                                    continue
+                                if not sent_role:
+                                    yield make_chunk({"role": "assistant"})
+                                    sent_role = True
+                                if not first_token:
+                                    first_token = True
+                                    ttft = time.monotonic() - t0
+                                    await emit_status(f"Generating (direct)... ({ttft:.1f}s) {context_info}")
+                                full_response += content
+                                if tool_detected:
+                                    continue
+                                buffer += content
+                                tag_pos = buffer.find(TOOL_TAG)
+                                if tag_pos >= 0:
+                                    tool_detected = True
+                                    pre = buffer[:tag_pos].rstrip()
+                                    if pre:
+                                        yield make_chunk({"content": pre})
+                                    buffer = ""
+                                    await emit_status(f"Tool call detected... {context_info}")
+                                    continue
+                                safe_len = max(0, len(buffer) - LOOK_AHEAD)
+                                if safe_len > 0:
+                                    yield make_chunk({"content": buffer[:safe_len]})
+                                    buffer = buffer[safe_len:]
+
             elapsed = time.monotonic() - t0
 
             if not sent_role:
@@ -454,9 +589,18 @@ class Pipe:
             text, tool_calls = self._parse_tool_intent(full_response)
 
             if tool_calls:
-                names = [c["name"] for c in tool_calls]
-                log.info(f"[GH] → tool calls: {names} ({elapsed:.1f}s)")
-                await emit_status(f"Calling {', '.join(names)}... ({elapsed:.1f}s)", done=True)
+                # Log each tool call with full args for debugging
+                for c in tool_calls:
+                    args_json = json.dumps(c.get("arguments", {}))
+                    log.info(f"[GH] → {c['name']}({args_json[:300]})")
+
+                # Show thinking direction + tool call in status
+                thinking = re.sub(r'</?think>', '', text).replace('\n', ' ').strip() if text else ""
+                tool_names = ", ".join(c["name"] for c in tool_calls)
+                if thinking:
+                    await emit_status(f"\U0001f4ad {thinking[:80]}... → {tool_names} ({elapsed:.1f}s)", done=True)
+                else:
+                    await emit_status(f"→ {tool_names} ({elapsed:.1f}s)", done=True)
 
                 # Emit synthetic tool_call events
                 for i, call in enumerate(tool_calls):
@@ -477,6 +621,15 @@ class Pipe:
                         }]
                     })
                 yield make_chunk({}, "tool_calls")
+            elif not full_response and (reasoning_chars > 0 or reasoning_aborted):
+                log.warning(f"[GH] reasoning exhausted: {reasoning_chars} chars, aborted={reasoning_aborted} ({elapsed:.1f}s)")
+                if reasoning_aborted:
+                    await emit_status(f"Thinking loop — no response ({elapsed:.1f}s)", done=True)
+                    yield make_chunk({"content": "[The model got stuck in a reasoning loop and could not produce a response even after retrying. Try rephrasing your request or breaking it into smaller steps.]"})
+                else:
+                    await emit_status(f"Thinking exhausted ({reasoning_chars} chars, {elapsed:.1f}s)", done=True)
+                    yield make_chunk({"content": "[The model spent its entire generation budget on internal reasoning without producing a visible response. Try rephrasing your question or simplifying the request.]"})
+                yield make_chunk({}, "stop")
             else:
                 log.info(f"[GH] → text ({len(full_response)} chars, {elapsed:.1f}s)")
                 await emit_status(f"Done ({elapsed:.1f}s)", done=True)
@@ -756,13 +909,57 @@ class Pipe:
             if key in body and body[key] is not None:
                 reason_payload[key] = body[key]
 
+        # Cap generation — thinking models need room for both reasoning + content
+        if "max_tokens" not in reason_payload:
+            reason_payload["max_tokens"] = self.valves.MAX_GENERATION_TOKENS
+
         ctx_chars = self._measure(normalized)
         ctx_est = int(ctx_chars / self.valves.CHARS_PER_TOKEN)
+        max_tok = self.valves.MAX_CONTEXT_TOKENS
         n_tool_results = sum(1 for m in normalized if m.get("role") == "user" and "<tool_response" in (m.get("content", "") or ""))
         round_label = f"round {n_tool_results + 1}" if n_tool_results else "initial"
-        context_info = f"({round_label}, ~{ctx_est}/{self.valves.MAX_CONTEXT_TOKENS} tok)"
+        ctx_pct = ctx_est / max_tok if max_tok else 0
+        context_info = f"({round_label}, ~{ctx_est}/{max_tok} tok, {ctx_pct:.0%})"
 
-        log.info(f"[GH] reason call: {len(normalized)} msgs, {ctx_chars} chars, {round_label}")
+        log.info(f"[GH] reason call: {len(normalized)} msgs, {ctx_chars} chars, {round_label}, {ctx_pct:.0%}")
+
+        # ── Context awareness ──
+        # The sliding window (_trim_messages) keeps context within budget
+        # on every round. These signals let the model see where it stands
+        # so it can shed notes and plan synthesis at the right time.
+        pressure_msg = ""
+        remaining_tok = max_tok - ctx_est
+
+        if ctx_pct >= self.valves.PRESSURE_CRITICAL_PCT:
+            pressure_msg = (
+                "\n\n⚠️ CONTEXT: {:.0%} full (~{} tokens left). "
+                "The sliding window is compressing old messages to make room. "
+                "Your FileShed notes are safe. Shed any final analysis now, "
+                "then recall your notes with `shed_read_file` and synthesize."
+            ).format(ctx_pct, remaining_tok)
+            log.info(f"[GH] critical context: {ctx_pct:.0%}, ~{remaining_tok} tok left")
+
+        elif ctx_pct >= self.valves.PRESSURE_HIGH_PCT:
+            pressure_msg = (
+                "\n\n🟡 CONTEXT: {:.0%} full (~{} tokens left). "
+                "Old tool results are being compressed. Your FileShed notes persist. "
+                "Shed analysis notes between tool calls to keep working efficiently. "
+                "Consider wrapping up if you have enough information."
+            ).format(ctx_pct, remaining_tok)
+            log.info(f"[GH] high context: {ctx_pct:.0%}, ~{remaining_tok} tok left")
+
+        elif ctx_pct >= self.valves.PRESSURE_WARN_PCT:
+            pressure_msg = (
+                "\n\n🟢 CONTEXT: {:.0%} full (~{} tokens left). "
+                "Shed analysis notes to FileShed between tool calls to stay efficient."
+            ).format(ctx_pct, remaining_tok)
+
+        if pressure_msg:
+            for i, m in enumerate(normalized):
+                if m.get("role") == "system":
+                    normalized[i] = {**m, "content": m["content"] + pressure_msg}
+                    break
+            reason_payload["messages"] = normalized
 
         # Stream response, intercept <tool_call> blocks, emit synthetic events
         return self._streaming_reason_act(url, reason_payload, __event_emitter__, context_info)
