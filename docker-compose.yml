@@ -16,6 +16,9 @@ services:
       - OLLAMA_HOST=http://localhost:11434
       - USE_CUDA=true
       - USE_CUDA_DOCKER=true
+      - NVIDIA_VISIBLE_DEVICES=${GPU_AISTACK_DEVICE_ID:-1}
+      - CUDA_VISIBLE_DEVICES=${GPU_AISTACK_DEVICE_ID:-1}
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
       - TRANSFORMERS_CACHE=/tmp/transformers_cache
       - HF_HOME=/tmp/hf_cache
       # Performance Optimizations for faster Ollama communication
@@ -34,7 +37,7 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              count: all
+              device_ids: ["${GPU_AISTACK_DEVICE_ID:-1}"]
               capabilities: [ gpu ]
     restart: unless-stopped
     pull_policy: build
@@ -131,7 +134,8 @@ services:
     volumes:
       - ./data/ollama:/root/.ollama
     environment:
-      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_VISIBLE_DEVICES=${GPU_AISTACK_DEVICE_ID:-1}
+      - CUDA_VISIBLE_DEVICES=${GPU_AISTACK_DEVICE_ID:-1}
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
       # Optimized Ollama settings for faster response to OpenWebUI
       - OLLAMA_KEEP_ALIVE=1200 # Keep models in memory longer (20 minutes in seconds)
@@ -145,7 +149,7 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              count: all
+              device_ids: ["${GPU_AISTACK_DEVICE_ID:-1}"]
               capabilities: [ gpu ]
     restart: unless-stopped
     pull_policy: never
@@ -172,6 +176,9 @@ services:
       - C:\Users\yamao\.lmstudio\models:/models:ro
       - ./config/chat-template.jinja:/etc/llama/chat-template.jinja:ro
     environment:
+      - NVIDIA_VISIBLE_DEVICES=${GPU_LLAMA_CPP_DEVICE_ID:-0}
+      - CUDA_VISIBLE_DEVICES=${GPU_LLAMA_CPP_DEVICE_ID:-0}
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
       - LLAMA_ARG_MODEL=/models/lmstudio-community/Qwen3.6-35B-A3B-GGUF/Qwen3.6-35B-A3B-Q4_K_M.gguf
       - LLAMA_ARG_CHAT_TEMPLATE_FILE=/etc/llama/chat-template.jinja
       - LLAMA_ARG_CTX_SIZE=32768
@@ -191,7 +198,7 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              count: all
+              device_ids: ["${GPU_LLAMA_CPP_DEVICE_ID:-0}"]
               capabilities: [gpu]
     restart: unless-stopped
     security_opt:
@@ -281,6 +288,9 @@ services:
     volumes:
       - ./data/models/embeddings:/models:ro
     environment:
+      - NVIDIA_VISIBLE_DEVICES=${GPU_LLAMA_CPP_EMBED_DEVICE_ID:-1}
+      - CUDA_VISIBLE_DEVICES=${GPU_LLAMA_CPP_EMBED_DEVICE_ID:-1}
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
       - LLAMA_ARG_MODEL=/models/bge-m3-f16.gguf
       - LLAMA_ARG_CTX_SIZE=20480
       - LLAMA_ARG_N_GPU_LAYERS=99
@@ -288,6 +298,13 @@ services:
       - LLAMA_ARG_HOST=0.0.0.0
       - LLAMA_ARG_PORT=8080
       - LLAMA_ARG_EMBEDDINGS=true
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${GPU_LLAMA_CPP_EMBED_DEVICE_ID:-1}"]
+              capabilities: [gpu]
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true

@@ -1,6 +1,6 @@
 @echo off
 REM Quick Emergency Fixes for OpenWebUI AI Stack
-REM Usage: quick-fixes.bat [namespace|rebuild|nuclear|gpu|status|lmstudio|restart-openwebui]
+REM Usage: quick-fixes.bat [namespace|rebuild|nuclear|gpu|gpu-map|status|lmstudio|restart-openwebui]
 
 setlocal enabledelayedexpansion
 set "SCRIPT_DIR=%~dp0"
@@ -11,6 +11,7 @@ if "%1"=="namespace" goto :namespace_reset
 if "%1"=="rebuild" goto :rebuild_tailscale
 if "%1"=="nuclear" goto :nuclear_option
 if "%1"=="gpu" goto :gpu_check
+if "%1"=="gpu-map" goto :gpu_map
 if "%1"=="status" goto :status_check
 if "%1"=="lmstudio" goto :lmstudio_fix
 if "%1"=="restart-openwebui" goto :restart_openwebui
@@ -28,28 +29,30 @@ echo Common Fixes:
 echo   1. Network namespace reset (most common)
 echo   2. Check system status
 echo   3. GPU check and restart
-echo   4. Restart OpenWebUI properly
+echo   4. Show GPU service assignment
+echo   5. Restart OpenWebUI properly
 echo.
 echo Advanced Fixes:
-echo   5. Rebuild Tailscale container
-echo   6. Fix LM Studio connectivity
-echo   7. Nuclear option (full restart)
-echo   8. Mnemory check and restart
-echo   9. SmolCrawl pipelines check and restart
+echo   6. Rebuild Tailscale container
+echo   7. Fix LM Studio connectivity
+echo   8. Nuclear option (full restart)
+echo   9. Mnemory check and restart
+echo  10. SmolCrawl pipelines check and restart
 echo.
 echo   0. Exit
 echo.
-set /p choice="Select option (1-9,0): "
+set /p choice="Select option (1-10,0): "
 
 if "%choice%"=="1" goto :namespace_reset
 if "%choice%"=="2" goto :status_check
 if "%choice%"=="3" goto :gpu_check
-if "%choice%"=="4" goto :restart_openwebui
-if "%choice%"=="5" goto :rebuild_tailscale
-if "%choice%"=="6" goto :lmstudio_fix
-if "%choice%"=="7" goto :nuclear_option
-if "%choice%"=="8" goto :mnemory_check
-if "%choice%"=="9" goto :smolcrawl_check
+if "%choice%"=="4" goto :gpu_map
+if "%choice%"=="5" goto :restart_openwebui
+if "%choice%"=="6" goto :rebuild_tailscale
+if "%choice%"=="7" goto :lmstudio_fix
+if "%choice%"=="8" goto :nuclear_option
+if "%choice%"=="9" goto :mnemory_check
+if "%choice%"=="10" goto :smolcrawl_check
 if "%choice%"=="0" goto :end
 echo [ERROR] Invalid choice
 timeout /t 2 /nobreak >nul
@@ -258,6 +261,30 @@ if %ERRORLEVEL% NEQ 0 (
         echo [SUCCESS] llama-cpp restarted
     )
 )
+if "%1"=="" (
+    echo.
+    pause
+    goto :interactive_menu
+)
+goto :end
+
+:gpu_map
+echo.
+echo ========================================
+echo   GPU Service Assignment
+echo ========================================
+echo.
+echo [INFO] Effective container GPU environment:
+cd /d "%SCRIPT_DIR%\.."
+for %%S in (openwebui ollama llama-cpp llama-cpp-embed) do (
+    echo.
+    echo [INFO] %%S:
+    docker inspect %%S --format "{{range .Config.Env}}{{println .}}{{end}}" | findstr /R /C:"^NVIDIA_VISIBLE_DEVICES=" /C:"^NVIDIA_DRIVER_CAPABILITIES="
+    if !ERRORLEVEL! NEQ 0 (
+        echo [WARN] No NVIDIA env detected or container not available
+    )
+)
+cd /d "%SCRIPT_DIR%"
 if "%1"=="" (
     echo.
     pause
@@ -597,10 +624,13 @@ echo Options:
 echo   namespace         - Quick restart of Tailscale (fixes most network issues)
 echo   status            - Show detailed system status
 echo   gpu               - Check and restart GPU functionality
+echo   gpu-map           - Show current GPU assignment per service
 echo   restart-openwebui - Properly restart OpenWebUI with dependent containers
 echo   rebuild           - Rebuild and restart Tailscale container
 echo   lmstudio          - Fix LM Studio Tailscale connectivity
-echo   mnemory           - Check Mnemory health and restart if needed  echo   smolcrawl         - Check SmolCrawl Pipelines health and restart if neededecho   nuclear           - Full stack restart (use when all else fails)
+echo   mnemory           - Check Mnemory health and restart if needed
+echo   smolcrawl         - Check SmolCrawl Pipelines health and restart if needed
+echo   nuclear           - Full stack restart (use when all else fails)
 echo.
 echo Examples:
 echo   quick-fixes.bat namespace         (most common fix)
