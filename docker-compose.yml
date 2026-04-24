@@ -107,7 +107,7 @@ services:
     labels:
       - "com.centurylinklabs.watchtower.enable=false"
     healthcheck:
-      test: [ "CMD", "sh", "-c", "tailscale --socket=/tmp/tailscaled.sock status >/dev/null 2>&1 && ping -c 1 8.8.8.8 >/dev/null 2>&1 && wget -q -T 3 -O /dev/null http://127.0.0.1:8080 && wget -q -T 3 -O /dev/null http://127.0.0.1:11434/api/version" ]
+      test: [ "CMD", "sh", "-c", "tailscale --socket=/tmp/tailscaled.sock status >/dev/null 2>&1 && ping -c 1 8.8.8.8 >/dev/null 2>&1 && wget -q -T 3 -O /dev/null http://127.0.0.1:8080" ]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -130,45 +130,45 @@ services:
     labels:
       - "com.centurylinklabs.watchtower.enable=false"
 
-  ollama:
-    image: ollama/ollama:latest
-    container_name: ollama
-    network_mode: service:openwebui
-    volumes:
-      - ./data/ollama:/root/.ollama
-    environment:
-      - NVIDIA_VISIBLE_DEVICES=${GPU_AISTACK_DEVICE_ID:-1}
-      - CUDA_VISIBLE_DEVICES=${GPU_AISTACK_DEVICE_ID:-1}
-      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
-      # Optimized Ollama settings for faster response to OpenWebUI
-      - OLLAMA_KEEP_ALIVE=1200 # Keep models in memory longer (20 minutes in seconds)
-      - OLLAMA_HOST=0.0.0.0:11434
-      - OLLAMA_ORIGINS=*
-      - OLLAMA_MAX_LOADED_MODELS=2 # Allow multiple models to stay loaded
-      - OLLAMA_NUM_PARALLEL=2 # Allow parallel requests
-      - OLLAMA_FLASH_ATTENTION=1 # Enable flash attention for faster inference
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              device_ids: ["${GPU_AISTACK_DEVICE_ID:-1}"]
-              capabilities: [ gpu ]
-    restart: unless-stopped
-    pull_policy: never
-    security_opt:
-      - no-new-privileges:true
-    depends_on:
-      openwebui:
-        condition: service_healthy
-    labels:
-      - "com.centurylinklabs.watchtower.enable=false"
-    healthcheck:
-      test: [ "CMD", "ollama", "list" ]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
+  # ollama: # DISABLED - no longer used; llama-cpp (llama-swap) handles all LLM inference
+  #   image: ollama/ollama:latest
+  #   container_name: ollama
+  #   network_mode: service:openwebui
+  #   volumes:
+  #     - ./data/ollama:/root/.ollama
+  #   environment:
+  #     - NVIDIA_VISIBLE_DEVICES=${GPU_AISTACK_DEVICE_ID:-1}
+  #     - CUDA_VISIBLE_DEVICES=${GPU_AISTACK_DEVICE_ID:-1}
+  #     - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+  #     # Optimized Ollama settings for faster response to OpenWebUI
+  #     - OLLAMA_KEEP_ALIVE=1200 # Keep models in memory longer (20 minutes in seconds)
+  #     - OLLAMA_HOST=0.0.0.0:11434
+  #     - OLLAMA_ORIGINS=*
+  #     - OLLAMA_MAX_LOADED_MODELS=2 # Allow multiple models to stay loaded
+  #     - OLLAMA_NUM_PARALLEL=2 # Allow parallel requests
+  #     - OLLAMA_FLASH_ATTENTION=1 # Enable flash attention for faster inference
+  #   deploy:
+  #     resources:
+  #       reservations:
+  #         devices:
+  #           - driver: nvidia
+  #             device_ids: ["${GPU_AISTACK_DEVICE_ID:-1}"]
+  #             capabilities: [ gpu ]
+  #   restart: unless-stopped
+  #   pull_policy: never
+  #   security_opt:
+  #     - no-new-privileges:true
+  #   depends_on:
+  #     openwebui:
+  #       condition: service_healthy
+  #   labels:
+  #     - "com.centurylinklabs.watchtower.enable=false"
+  #   healthcheck:
+  #     test: [ "CMD", "ollama", "list" ]
+  #     interval: 30s
+  #     timeout: 10s
+  #     retries: 3
+  #     start_period: 30s
 
   llama-cpp:
     image: ghcr.io/mostlygeek/llama-swap:cuda
@@ -244,7 +244,7 @@ services:
     environment:
       - LLM_API_KEY=ollama
       - LLM_BASE_URL=http://llama-cpp:8080/v1
-      - LLM_MODEL=Qwen3.6-35B-A3B-Q4_K_M.gguf
+      - LLM_MODEL=qwen36-27b
       - EMBED_BASE_URL=http://llama-cpp-embed:8080/v1
       - EMBED_MODEL=qllama/bge-m3:latest
       - EMBED_DIMS=1024
