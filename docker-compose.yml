@@ -227,7 +227,6 @@ services:
       dockerfile: Dockerfile
     container_name: mnemory
     networks:
-      - default
       - llm-net
     ports:
       - "127.0.0.1:8050:8050"
