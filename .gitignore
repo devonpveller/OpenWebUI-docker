@@ -3,3 +3,6 @@
 data/
 logs/
 data-backup/
+backups/
+logs/
+filters/__pycache__/
