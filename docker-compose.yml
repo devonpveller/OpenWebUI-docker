@@ -8,6 +8,9 @@ services:
     container_name: openwebui
     ports:
       - "127.0.0.1:3000:8080" # Bind to localhost only
+    networks:
+      - default
+      - llm-net
     volumes:
       - ./data/openwebui:/app/backend/data
       - ./config:/app/config:ro # Read-only config
@@ -170,6 +173,8 @@ services:
   llama-cpp:
     image: ghcr.io/ggml-org/llama.cpp:server-cuda
     container_name: llama-cpp
+    networks:
+      - llm-net
     ports:
       - "127.0.0.1:8081:8080"
     volumes:
@@ -221,6 +226,9 @@ services:
       context: ../mnemory
       dockerfile: Dockerfile
     container_name: mnemory
+    networks:
+      - default
+      - llm-net
     ports:
       - "127.0.0.1:8050:8050"
       - "127.0.0.1:8051:8051"
@@ -287,6 +295,8 @@ services:
   llama-cpp-embed:
     image: ghcr.io/ggml-org/llama.cpp:server-cuda
     container_name: llama-cpp-embed
+    networks:
+      - llm-net
     ports:
       - "127.0.0.1:8082:8080"
     volumes:
@@ -351,3 +361,12 @@ services:
 volumes:
   mnemory-data:
   smolcrawl-data:
+
+networks:
+  # Internal-only network: no gateway, no internet access.
+  # llama-cpp containers are isolated here — they can only be reached
+  # by services that are also on this network (openwebui, mnemory).
+  llm-net:
+    internal: true
+  default:
+    driver: bridge
