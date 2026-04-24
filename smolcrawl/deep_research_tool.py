@@ -2297,7 +2297,7 @@ class Tools:
         max_collections: int = Field(default=5, ge=1, le=50, description="Max collections to search")
         max_domains: int = Field(default=3, ge=1, le=20, description="Max domains to discover")
         auto_approve_domains: bool = Field(default=True, description="Auto-approve all non-covered domains (skip manual approval)")
-        max_prompt_tokens: int = Field(default=28000, ge=1000, le=128000, description="Token budget for SubAgent prompts. Should be model context window minus ~4000. Default 28000 suits 32k models.")
+        max_prompt_tokens: int = Field(default=196000, ge=1000, le=262144, description="Token budget for SubAgent prompts. Should be model context window minus ~4000. Default 196000 suits Qwen3 235B/30B-A3B 200k context models (262144 max for 256k models).")
         max_chunks_per_iteration: int = Field(default=10, ge=1, le=50, description="Max RAG chunks included in LLM summarization per iteration")
         skip_verification: bool = Field(default=False, description="Skip LLM verification/remediation passes (saves 2 LLM calls, faster for small models)")
         fileshed_compatible: bool = Field(default=True, description="Write journal to Fileshed Storage zone")
