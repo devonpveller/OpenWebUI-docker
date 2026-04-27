@@ -27,9 +27,11 @@ ai-stack/
 │   └── openwebui.conf
 ├── data/                      # Persistent data storage
 │   ├── ollama/                # Ollama models and data
-│   ├── openwebui/             # OpenWebUI database and uploads
 │   ├── openwebui-models/      # Custom model definitions
 │   └── tailscale/             # Tailscale state and certificates
+├── backups/                   # Host-side backup snapshots
+│   ├── mnemory/               # Mnemory tarball backups
+│   └── openwebui/             # OpenWebUI tarball backups from the named volume
 ├── scripts/                   # Utility scripts
 │   ├── ai_pipes/              # AI Stack pipe function modules
 │   │   ├── ai_stack_router.py        # Unified intelligent router
@@ -257,6 +259,24 @@ docker compose down
 ```
 
 ### Detailed Startup Process
+
+### OpenWebUI Data Storage
+
+OpenWebUI now stores live user data on the Docker named volume `openwebui-data` instead of the host bind mount at `data/openwebui`. This removes the host filesystem from the request path while keeping recoverable backups on the host under `backups/openwebui`.
+
+The backup cadence mirrors the Mnemory pattern:
+- `openwebui-backup` mounts `openwebui-data` read-only
+- a cron job writes timestamped `openwebui-backup-*.tar.gz` snapshots to `backups/openwebui`
+- retention is controlled with `OPENWEBUI_BACKUP_RETAIN_DAYS`
+- schedule is controlled with `OPENWEBUI_BACKUP_CRON`
+
+If you need to migrate existing host data from `data/openwebui` into the named volume before first restart, stop OpenWebUI and seed the volume once:
+
+```powershell
+docker compose stop openwebui
+docker run --rm -v ai-stack_openwebui-data:/target -v "${PWD}\data\openwebui:/source:ro" alpine:3.21 sh -c "cd /source && tar cf - . | tar xf - -C /target"
+docker compose up -d openwebui openwebui-backup
+```
 
 1. **Build Custom Images** (first time only):
    ```bash

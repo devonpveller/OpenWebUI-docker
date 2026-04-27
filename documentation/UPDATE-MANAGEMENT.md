@@ -145,9 +145,12 @@ scripts\quick-fixes.bat nuclear
 # 1. Stop services
 docker compose down
 
-# 2. Restore backup (replace TIMESTAMP with your backup folder)
-rmdir /s /q data\openwebui
-xcopy /E /I data-backup-TIMESTAMP\openwebui data\openwebui
+# 2. Restore the OpenWebUI named volume from a tarball backup
+docker run --rm \
+  -v ai-stack_openwebui-data:/data \
+  -v ${PWD}/backups/openwebui:/backups:ro \
+  -v ${PWD}/backup/openwebui-restore.sh:/scripts/restore.sh:ro \
+  alpine:3.21 sh /scripts/restore.sh /backups/openwebui-backup-TIMESTAMP.tar.gz
 
 # 3. Edit Dockerfile.openwebui-gpu - change version to previous
 # Example: FROM ghcr.io/open-webui/open-webui:v0.6.40
