@@ -30,6 +30,7 @@ class Pipeline:
         max_pages: int = 1000
         upload_concurrency: int = 1
         augment_for_rag: bool = True
+        force_full_sync: bool = False
 
     def __init__(self):
         self.name = "SmolCrawl Knowledge Builder"
@@ -88,6 +89,8 @@ class Pipeline:
         yield f"**Target:** {url}\n"
         yield f"**Knowledge Base:** {kb_name}\n"
         yield f"**Max Pages:** {self.valves.max_pages}\n\n"
+        if self.valves.force_full_sync:
+            yield "**Mode:** Force full sync (ignore manifest cache)\n\n"
 
         # ── Phase 1: Crawl (runs in background thread) ──
         yield "### Phase 1: Crawling\n\n"
@@ -180,6 +183,14 @@ class Pipeline:
             upload_concurrency=self.valves.upload_concurrency,
         )
 
+        if not config.api_key.strip():
+            yield (
+                "**Upload error:** `owui_api_key` is not configured for this pipeline. "
+                "Open WebUI knowledge and file APIs require a bearer token in this stack.\n\n"
+                "Set `owui_api_key` in the SmolCrawl pipeline valves, then rerun the crawl.\n"
+            )
+            return
+
         progress_queue: queue.Queue = queue.Queue()
         result_holder: list = []
         error_holder: list = []
@@ -191,6 +202,7 @@ class Pipeline:
                         pages, kb_name,
                         on_progress=lambda cur, tot, name:
                             progress_queue.put(("progress", cur, tot, name)),
+                        force_full_sync=self.valves.force_full_sync,
                     )
                     result_holder.append(result)
             except Exception as e:
@@ -236,6 +248,11 @@ class Pipeline:
         total_elapsed = int(time.monotonic() - start_time)
         if result_holder:
             result = result_holder[0]
+            if result.errors:
+                yield f"\n**Upload error:** {result.errors[0]}\n"
+                if len(result.errors) > 1:
+                    yield f"Additional errors: {len(result.errors) - 1}\n"
+                return
             yield f"\n### ✅ Complete in {total_elapsed}s\n\n"
             yield f"| Metric | Value |\n|--------|-------|\n"
             yield f"| Pages crawled | {len(pages)} |\n"

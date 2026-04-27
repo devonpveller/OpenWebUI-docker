@@ -213,12 +213,33 @@ class OwuiKnowledgeClient:
                     detail = e.response.json().get("detail", "")
                 except Exception:
                     detail = e.response.text
-                if "duplicate" in detail.lower():
+
+                # OWUI may return detail as string/list/dict depending on version.
+                # Normalize to text so duplicate detection remains stable.
+                detail_text = detail if isinstance(detail, str) else json.dumps(detail, ensure_ascii=False)
+                detail_lower = detail_text.lower()
+                duplicate_markers = (
+                    "duplicate",
+                    "already exists",
+                    "already in knowledge",
+                    "exists in knowledge collection",
+                    "already linked",
+                )
+                if any(marker in detail_lower for marker in duplicate_markers):
                     logger.info(
-                        f"File {file_id} has duplicate content in KB {kb_id}, "
+                        f"File {file_id} already in KB {kb_id} (detail: {detail_text!r}), "
                         "treating as already indexed"
                     )
                     return {"duplicate": True}
+
+                # Some OWUI versions return 400 for duplicate/previously-linked files
+                # with inconsistent or empty detail payloads. For this endpoint, a
+                # 400 is treated as already indexed to avoid aborting large re-syncs.
+                logger.warning(
+                    f"Received 400 from file/add for file {file_id} in KB {kb_id} "
+                    f"(detail: {detail_text!r}); treating as already indexed"
+                )
+                return {"duplicate": True}
             raise
         if resp is None:
             raise RuntimeError(
@@ -259,6 +280,7 @@ class OwuiKnowledgeClient:
         pages: List[Page],
         kb_name: str,
         on_progress: Optional[Callable[[int, int, str], None]] = None,
+        force_full_sync: bool = False,
     ) -> SyncResult:
         """Full sync workflow: upload pages to a named KB with incremental dedup.
 
@@ -304,9 +326,13 @@ class OwuiKnowledgeClient:
             content_hash = self._content_hash(page.content)
             filename = self._url_to_filename(page.url)
 
-            # Check manifest for unchanged content
+            # Check manifest for unchanged content unless full sync is forced.
             existing = manifest.get("files", {}).get(page.url)
-            if existing and existing.get("content_hash") == content_hash:
+            if (
+                not force_full_sync
+                and existing
+                and existing.get("content_hash") == content_hash
+            ):
                 with self._lock:
                     new_manifest_files[page.url] = existing
                     result.skipped += 1
