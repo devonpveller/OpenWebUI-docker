@@ -361,15 +361,28 @@ class Pipeline:
         kb_name = job["kb_name"]
         job["status"] = "running"
         q = job["queue"]
+        heartbeat_stop = threading.Event()
 
         def emit(text: str) -> None:
             q.put(text)
+
+        def heartbeat_worker() -> None:
+            # Keep last_active fresh even when a single upload API call takes
+            # a long time, so cross-process `jobs` remains consistent.
+            while not heartbeat_stop.wait(20):
+                s = _load_job_state(kb_name) or {}
+                if s.get("status") not in ("running", "queued"):
+                    break
+                s["last_active"] = datetime.now(timezone.utc).isoformat()
+                _save_job_state(kb_name, s)
 
         # Mark running on disk
         state = _load_job_state(kb_name) or {}
         now_iso = datetime.now(timezone.utc).isoformat()
         state.update({"status": "running", "started_at": now_iso, "last_active": now_iso})
         _save_job_state(kb_name, state)
+        heartbeat_thread = threading.Thread(target=heartbeat_worker, daemon=True)
+        heartbeat_thread.start()
 
         def on_state_update(
             total_pages: int = 0,
@@ -423,6 +436,8 @@ class Pipeline:
             _save_job_state(kb_name, s)
 
         finally:
+            heartbeat_stop.set()
+            heartbeat_thread.join(timeout=2)
             job["finished_at"] = time.time()
             q.put(None)  # sentinel
 
@@ -673,31 +688,85 @@ class Pipeline:
         now = datetime.now(timezone.utc)
         lines: list = ["## SmolCrawl Job Registry\n\n"]
 
-        # Active in-memory jobs
-        if live:
-            lines.append("### Active\n\n")
-            for job in sorted(live.values(), key=lambda j: j["submitted_at"], reverse=True):
-                elapsed = int(time.time() - job["submitted_at"])
-                lines.append(
-                    f"- {icon.get(job['status'], '❓')} **`{job['id']}`** "
-                    f"{job['url']} → _{job['kb_name']}_ (running {elapsed}s)\n"
-                )
-            lines.append("\n")
+        def _parse_iso(ts: Optional[str]) -> Optional[datetime]:
+            if not ts:
+                return None
+            try:
+                return datetime.fromisoformat(ts)
+            except Exception:
+                return None
 
-        # Completed/interrupted states plus orphaned running/queued states from
-        # disk (e.g. process restart while a job was active).
+        # Build active rows from both in-memory jobs and fresh persisted
+        # running/queued states so output is stable across worker processes.
+        active_rows: list = []
+        for job in live.values():
+            active_rows.append(
+                {
+                    "source": "live",
+                    "status": job.get("status", "running"),
+                    "id": job.get("id", "—"),
+                    "url": job.get("url", "—"),
+                    "kb_name": job.get("kb_name", "—"),
+                    "submitted_at": float(job.get("submitted_at", 0) or 0),
+                }
+            )
+
+        # Completed/interrupted states plus stale orphaned running/queued states
+        # from disk (e.g. process restart while a job was active).
         history: Dict[str, dict] = {}
+        active_from_disk = False
         for kb_name, state in disk_states.items():
             status = state.get("status")
             if status in ("running", "queued"):
                 if kb_name in live:
                     continue
-                orphaned = dict(state)
-                orphaned["_display_status"] = "interrupted"
-                orphaned["_orphaned"] = True
-                history[kb_name] = orphaned
+                last_active_dt = _parse_iso(state.get("last_active"))
+                is_fresh = False
+                if last_active_dt is not None:
+                    is_fresh = (now - last_active_dt).total_seconds() < _STALE_LOCK_SECONDS
+
+                if is_fresh:
+                    submitted_dt = _parse_iso(state.get("submitted_at"))
+                    submitted_ts = submitted_dt.timestamp() if submitted_dt else 0.0
+                    active_rows.append(
+                        {
+                            "source": "disk",
+                            "status": status,
+                            "id": state.get("last_job_id", "—"),
+                            "url": state.get("url", "—"),
+                            "kb_name": kb_name,
+                            "submitted_at": submitted_ts,
+                            "cursor": state.get("progress_cursor", state.get("uploaded", 0)),
+                            "total": state.get("total_pages", "?"),
+                        }
+                    )
+                    active_from_disk = True
+                else:
+                    orphaned = dict(state)
+                    orphaned["_display_status"] = "interrupted"
+                    orphaned["_orphaned"] = True
+                    history[kb_name] = orphaned
                 continue
             history[kb_name] = state
+
+        if active_rows:
+            lines.append("### Active\n\n")
+            for row in sorted(active_rows, key=lambda r: r.get("submitted_at", 0), reverse=True):
+                elapsed = int(max(0, time.time() - float(row.get("submitted_at", 0) or 0)))
+                if row.get("source") == "disk":
+                    progress = f", {row.get('cursor', 0)}/{row.get('total', '?')} pages"
+                    lines.append(
+                        f"- {icon.get(row['status'], '❓')} **`{row['id']}`** "
+                        f"{row['url']} → _{row['kb_name']}_ (running {elapsed}s{progress})*\n"
+                    )
+                else:
+                    lines.append(
+                        f"- {icon.get(row['status'], '❓')} **`{row['id']}`** "
+                        f"{row['url']} → _{row['kb_name']}_ (running {elapsed}s)\n"
+                    )
+            if active_from_disk:
+                lines.append("\n*`running*` indicates activity detected from persisted state.\n")
+            lines.append("\n")
 
         if history:
             lines.append("### Collection History\n\n")
