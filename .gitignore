@@ -6,3 +6,4 @@ data-backup/
 backups/
 logs/
 filters/__pycache__/
+smolcrawl/__pycache__/
