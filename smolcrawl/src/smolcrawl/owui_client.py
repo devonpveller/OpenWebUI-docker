@@ -390,7 +390,9 @@ class OwuiKnowledgeClient:
                     on_progress(counter["current"], len(pages), filename)
                 return str(e)
 
-        # Run with thread pool
+        # Run with thread pool. Checkpoint the manifest every 10 completions so an
+        # interrupted sync can resume without re-uploading already-finished pages.
+        _checkpoint_n = 0
         with ThreadPoolExecutor(
             max_workers=self.config.upload_concurrency
         ) as executor:
@@ -399,6 +401,17 @@ class OwuiKnowledgeClient:
             }
             for future in as_completed(futures):
                 future.result()  # Propagate unexpected exceptions
+                _checkpoint_n += 1
+                if _checkpoint_n % 10 == 0:
+                    with self._lock:
+                        partial_files = dict(new_manifest_files)
+                    self._save_manifest(kb_name, {
+                        "knowledge_base_id": kb_id,
+                        "knowledge_base_name": kb_name,
+                        "last_sync": datetime.now(timezone.utc).isoformat(),
+                        "_partial": True,
+                        "files": partial_files,
+                    })
 
         # Step 4: Delete removed pages
         old_urls = set(manifest.get("files", {}).keys())
