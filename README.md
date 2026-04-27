@@ -5,6 +5,7 @@ A comprehensive Docker Compose setup for running OpenWebUI, Ollama, and secure r
 ## 🚀 Overview
 
 This project provides a complete AI chat interface with:
+
 - **OpenWebUI**: Modern web interface for AI models with GPU-accelerated reranker models
 - **Ollama**: Local LLM hosting and management
 - **LM Studio**: Optional integration for accessing LM Studio models via Tailscale
@@ -42,7 +43,7 @@ ai-stack/
 │   │   ├── custom_tools_pipe.py      # Tool discovery and automation
 │   │   └── help_pipe.py              # Help system and documentation
 │   ├── emergency-recovery.ps1 # Advanced PowerShell recovery tool
-│   ├── emergency-recovery.bat # Enhanced legacy recovery script  
+│   ├── emergency-recovery.bat # Enhanced legacy recovery script
 │   ├── quick-fixes.bat        # Simple targeted fixes
 │   └── ...                   # Other utility scripts
 ├── core/                      # Refactored architecture (manifest-driven)
@@ -70,6 +71,7 @@ ai-stack/
 ## 🔧 Prerequisites
 
 ### Windows Setup
+
 Run the automated setup script to install prerequisites:
 
 ```powershell
@@ -78,42 +80,51 @@ Run the automated setup script to install prerequisites:
 ```
 
 This installs:
+
 - Docker Desktop with WSL2 backend
 - NVIDIA Container Toolkit (if NVIDIA GPU detected)
 - Required Windows features
 
 ### Manual Prerequisites
+
 - Docker Desktop with WSL2 enabled
 - NVIDIA GPU drivers (for GPU acceleration)
 - Tailscale account and auth key
 
 ### AI Stack Pipe Functions Setup
+
 The AI Stack includes an intelligent pipe function system that provides:
+
 - **Unified Interface**: Single pipe function in OpenWebUI instead of multiple separate functions
 - **Intelligent Routing**: Natural language analysis routes requests to appropriate modules
 - **System Management**: GPU monitoring, health checks, emergency recovery, and automation tools
 - **Manifest-Driven Architecture**: Modern architecture with explicit contracts and schema validation
 
 #### Pipe Function Architecture
+
 The system includes both legacy and refactored architectures:
 
 **Current Legacy System** (`scripts/ai_pipes/`):
+
 - `unified_openwebui_pipe.py`: Single OpenWebUI integration point
 - `ai_stack_router.py`: Intelligent routing based on keyword analysis
 - Individual pipe modules: `gpu_status_pipe.py`, `emergency_recovery_pipe.py`, `system_health_pipe.py`, etc.
 
 **Refactored Architecture** (`core/`, `modules/`, `schemas/`):
+
 - **Manifest-driven modules** with explicit capability definitions
-- **Schema validation** for all requests and responses  
+- **Schema validation** for all requests and responses
 - **Comprehensive observability** and error handling
 - **Automated migration tools** from legacy to new architecture
 
 #### Setup OpenWebUI Pipe Function
+
 1. **Mount scripts directory** in `docker-compose.yml`:
+
    ```yaml
    openwebui:
      volumes:
-       - .:/host_project:ro  # Expose entire project for pipe functions
+       - .:/host_project:ro # Expose entire project for pipe functions
    ```
 
 2. **Access OpenWebUI Admin** → Functions → Create New Function
@@ -122,7 +133,7 @@ The system includes both legacy and refactored architectures:
 
 4. **Test with queries** like:
    - "Check GPU status"
-   - "System health report"  
+   - "System health report"
    - "Run emergency recovery"
    - "Show available tools"
 
@@ -156,12 +167,15 @@ LMSTUDIO_ENABLED=true               # Set to false to disable
 This project includes custom GPU support for OpenWebUI to accelerate reranker models and other AI components.
 
 #### GPU Prerequisites
+
 - NVIDIA GPU with CUDA support
 - NVIDIA drivers installed on host system
 - NVIDIA Container Toolkit installed via setup script
 
 #### Custom GPU Build
+
 The project uses a custom `Dockerfile.openwebui-gpu` that:
+
 - Removes CPU-only PyTorch packages from base OpenWebUI image
 - Installs CUDA-enabled PyTorch for GPU acceleration
 - Configures proper device selection for reranker models
@@ -174,10 +188,12 @@ RUN pip install torch torchvision torchaudio --index-url https://download.pytorc
 ```
 
 #### GPU Environment Variables
+
 - `USE_CUDA=true`: Enables CUDA support in OpenWebUI
 - `USE_CUDA_DOCKER=true`: Configures proper device selection in containerized environment
 
 #### Verify GPU Support
+
 ```bash
 # Check if GPU is detected
 docker compose exec openwebui python -c "import torch; print('CUDA available:', torch.cuda.is_available()); print('GPU count:', torch.cuda.device_count())"
@@ -191,11 +207,13 @@ docker compose exec openwebui python -c "import torch; print('GPU:', torch.cuda.
 This project includes optional integration with LM Studio for accessing local models through your Tailscale network.
 
 #### Prerequisites
+
 - LM Studio installed and running on your host machine
 - Server mode enabled in LM Studio (Local Server tab)
 - Models loaded and ready to serve
 
 #### Configuration
+
 1. **Start LM Studio Server**: Open LM Studio → Local Server tab → Load a model → Start server
 2. **Note the port**: Default is 1234, but check LM Studio interface
 3. **Configure environment variables** in your `.env` file:
@@ -207,18 +225,23 @@ This project includes optional integration with LM Studio for accessing local mo
 4. **Restart Tailscale container**: `docker compose restart tailscale`
 
 #### Access LM Studio
+
 Once configured, LM Studio will be accessible at:
+
 - **Remote URL**: https://your-hostname.tail[...].ts.net/lmstudio
 - **API Endpoint**: https://your-hostname.tail[...].ts.net/lmstudio/v1
 
 #### Troubleshooting
+
 - **Test local connectivity**: `curl http://localhost:1234/v1/models`
 - **Fix Tailscale integration**: `scripts\quick-fixes.bat lmstudio`
 - **Check logs**: `docker compose logs tailscale | grep -i "lm studio"`
 - **Detailed setup guide**: See `documentation/LM_STUDIO_TAILSCALE_SETUP.md`
 
 #### Example Usage
+
 Once configured, you can test LM Studio access:
+
 ```bash
 # Test API availability
 curl -k "https://your-hostname.tail[...].ts.net/lmstudio/v1/models"
@@ -230,6 +253,7 @@ curl -k -X POST "https://your-hostname.tail[...].ts.net/lmstudio/v1/chat/complet
 ```
 
 **Integration with OpenWebUI**: Add LM Studio as a model provider:
+
 - Settings → Models → Add Connection
 - API Base URL: `https://your-hostname.tail[...].ts.net/lmstudio/v1`
 - API Key: Any dummy value (LM Studio doesn't require authentication)
@@ -265,6 +289,7 @@ docker compose down
 OpenWebUI now stores live user data on the Docker named volume `openwebui-data` instead of the host bind mount at `data/openwebui`. This removes the host filesystem from the request path while keeping recoverable backups on the host under `backups/openwebui`.
 
 The backup cadence mirrors the Mnemory pattern:
+
 - `openwebui-backup` mounts `openwebui-data` read-only
 - a cron job writes timestamped `openwebui-backup-*.tar.gz` snapshots to `backups/openwebui`
 - retention is controlled with `OPENWEBUI_BACKUP_RETAIN_DAYS`
@@ -279,33 +304,36 @@ docker compose up -d openwebui openwebui-backup
 ```
 
 1. **Build Custom Images** (first time only):
+
    ```bash
    docker compose build
    ```
 
 2. **Start Services in Order**:
+
    ```bash
    # Start core services first
    docker compose up -d ollama openwebui
-   
+
    # Wait for services to be healthy
    docker compose ps
-   
+
    # Start Tailscale (depends on openwebui network)
    docker compose up -d tailscale
-   
+
    # Start monitoring
    docker compose up -d watchtower
    ```
 
 3. **Verify Connectivity**:
+
    ```bash
    # Check all services are running
    docker compose ps
-   
+
    # Verify Tailscale connection
    docker compose exec tailscale tailscale status
-   
+
    # Check serve configuration
    docker compose exec tailscale tailscale serve status
    ```
@@ -324,36 +352,44 @@ graph TD
 ## 🌐 Access Points
 
 ### Local Access
+
 - **OpenWebUI**: http://localhost:3000
 - **Ollama API**: http://localhost:11434
 
 ### Remote Access (via Tailscale)
+
 - **OpenWebUI**: https://openwebui-13.tail[your-tailnet].ts.net/
 - **Ollama API**: https://openwebui-13.tail[your-tailnet].ts.net/ollama
-- **LM Studio API**: https://openwebui-13.tail[your-tailnet].ts.net/lmstudio *(if enabled)*
+- **LM Studio API**: https://openwebui-13.tail[your-tailnet].ts.net/lmstudio _(if enabled)_
 - **Secure HTTPS** with automatic certificates
 
 ### AI Stack Management (via Pipe Functions)
+
 Once the unified pipe function is installed in OpenWebUI, you can manage the system through natural language:
 
 **GPU Management**:
+
 - "Check GPU status" - Monitor GPU availability and usage
 - "GPU diagnostics" - Comprehensive GPU health report
 
 **System Health**:
+
 - "System health" - Overall system status and diagnostics
 - "Container status" - Docker container health checks
 
 **Emergency Recovery**:
+
 - "Fix network issues" - Resolve Tailscale connectivity problems
 - "Restart services" - Graceful service recovery
 - "Emergency recovery" - Complete system recovery procedures
 
 **Tool Discovery**:
+
 - "Available tools" - List all available management functions
 - "Help" - Get assistance with system commands
 
-**LM Studio Management** *(if enabled)*:
+**LM Studio Management** _(if enabled)_:
+
 - "Fix LM Studio" - Resolve LM Studio Tailscale connectivity
 - "Check LM Studio status" - Verify LM Studio API accessibility
 - "Restart LM Studio proxy" - Reset socat proxy connections
@@ -361,17 +397,21 @@ Once the unified pipe function is installed in OpenWebUI, you can manage the sys
 ## 🏗️ AI Stack Pipe Function Architecture
 
 ### Overview
+
 The AI Stack includes a sophisticated pipe function system that bridges OpenWebUI with host system management capabilities. This provides autonomous system management through natural language interfaces.
 
 ### Architecture Components
 
 #### 1. Current Legacy System (`scripts/ai_pipes/`)
+
 **Unified OpenWebUI Integration**:
+
 - `unified_openwebui_pipe.py`: Single pipe function for OpenWebUI
 - `ai_stack_router.py`: Intelligent routing engine with keyword analysis
 - Modular pipe functions for specific capabilities
 
 **Available Modules**:
+
 - `gpu_status_pipe.py`: GPU monitoring, CUDA diagnostics, performance metrics
 - `emergency_recovery_pipe.py`: Automated recovery procedures, service restart automation
 - `system_health_pipe.py`: Container health checks, resource monitoring, connectivity testing
@@ -379,19 +419,23 @@ The AI Stack includes a sophisticated pipe function system that bridges OpenWebU
 - `help_pipe.py`: Interactive help system, command discovery, documentation access
 
 **Key Features**:
+
 - **Natural Language Processing**: Analyzes user input and routes to appropriate modules
 - **GPU Integration**: Leverages custom CUDA-enabled OpenWebUI build for GPU diagnostics
 - **Recovery Automation**: Integrates with PowerShell recovery scripts for autonomous problem resolution
 - **Security Hardened**: Read-only script mounts, container isolation, structured logging
 
 #### 2. Refactored Architecture (`core/`, `modules/`, `schemas/`)
+
 **Modern Manifest-Driven Design**:
+
 - **Explicit Contracts**: JSON Schema validation for all communications
 - **Module Isolation**: Independent modules with clear capability definitions
 - **Comprehensive Observability**: Structured logging, error handling, health monitoring
 - **Automated Testing**: Built-in validation and testing frameworks
 
 **Core Components**:
+
 - `core/router.py`: Advanced routing with schema validation and module registry
 - `core/openwebui_adapter.py`: OpenWebUI integration layer with backward compatibility
 - `core/legacy_adapter.py`: Bridge between legacy and refactored systems
@@ -401,7 +445,9 @@ The AI Stack includes a sophisticated pipe function system that bridges OpenWebU
 ### Implementation Guide
 
 #### Quick Setup (Legacy System)
+
 1. **Enable pipe functions** in `docker-compose.yml`:
+
    ```yaml
    openwebui:
      volumes:
@@ -414,6 +460,7 @@ The AI Stack includes a sophisticated pipe function system that bridges OpenWebU
    - Save and test with "Check GPU status"
 
 #### Advanced Setup (Refactored Architecture)
+
 ```bash
 # Automated refactoring (recommended)
 python tools/refactor_orchestrator.py
@@ -428,6 +475,7 @@ python tools/refactor_orchestrator.py --phase 4  # Validation
 ### Usage Examples
 
 **System Management through Natural Language**:
+
 ```
 "Check GPU status" → gpu_status_pipe.py → GPU diagnostics report
 "System health" → system_health_pipe.py → Container health checks
@@ -437,6 +485,7 @@ python tools/refactor_orchestrator.py --phase 4  # Validation
 ```
 
 **Advanced Capabilities**:
+
 - **GPU Monitoring**: Real-time CUDA diagnostics, memory usage, temperature monitoring
 - **Container Orchestration**: Health checks, dependency management, graceful restarts
 - **Network Recovery**: Automated Tailscale namespace fixes, connectivity restoration
@@ -446,12 +495,14 @@ python tools/refactor_orchestrator.py --phase 4  # Validation
 ### Development and Extension
 
 #### Creating New Modules (Legacy)
+
 1. Create new pipe module in `scripts/ai_pipes/`
 2. Implement `main(payload)` function
 3. Add routing keywords to `ai_stack_router.py`
 4. Test through unified pipe function
 
 #### Creating New Modules (Refactored)
+
 ```bash
 # Generate module scaffold
 python tools/scaffold_generator.py --name my-module --type system-management
@@ -471,9 +522,11 @@ python tools/validation_tool.py --module modules/my-module/
 The system is designed for seamless migration with zero downtime and backward compatibility throughout the transition.
 
 ### 🔴 Tailscale Configuration
+
 **Location**: `entrypoint.sh`, `docker-compose.yml`
 
 **Critical Points**:
+
 - **Never remove the `build:` directive** from docker-compose.yml
 - **Don't add `image:` directive** alongside `build:` (causes conflicts)
 - **Auth key must be reusable** for container restarts
@@ -495,33 +548,40 @@ tailscale:
 ```
 
 ### 🔴 Entrypoint Script
+
 **Location**: `entrypoint.sh`
 
 **Critical Points**:
+
 - **Socket path must be consistent**: `/tmp/tailscaled.sock`
 - **State directory must be persistent**: `/var/lib/tailscale`
 - **Serve backend must be localhost**: `http://127.0.0.1:8080` (not container names)
 - **Don't use `--reset` flag** in production (causes device re-registration)
 
 ### 🔴 Network Configuration
+
 **Location**: `docker-compose.yml`
 
 **Critical Points**:
+
 - Tailscale uses `network_mode: service:openwebui`
 - This shares the network namespace between containers
 - Port 8080 in Tailscale container maps to OpenWebUI
 - Don't change network modes without updating serve config
 
 ### 🔴 Volume Mounts
+
 **Persistent Data**:
+
 ```yaml
 volumes:
-  - ./data/tailscale:/var/lib/tailscale    # Device identity
-  - ./data/ollama:/root/.ollama            # Models
-  - ./data/openwebui:/app/backend/data     # User data
+  - ./data/tailscale:/var/lib/tailscale # Device identity
+  - ./data/ollama:/root/.ollama # Models
+  - ./data/openwebui:/app/backend/data # User data
 ```
 
 **⚠️ Never delete these directories** - you'll lose:
+
 - Tailscale device registration
 - Downloaded AI models (large files)
 - User accounts and conversations
@@ -529,9 +589,11 @@ volumes:
 ## ⚠️ Critical Areas & Cautions
 
 ### 🔴 Pipe Function Integration
+
 **Location**: `scripts/ai_pipes/`, `docker-compose.yml`
 
 **Critical Points**:
+
 - **Script mount required**: `.:/host_project:ro` volume mount enables pipe function access
 - **Read-only security**: Scripts mounted with `:ro` flag for container security
 - **Path consistency**: All pipe modules expect `/host_project/` path structure
@@ -551,9 +613,11 @@ openwebui:
 ```
 
 ### 🔴 Module Architecture Transition
+
 **Location**: `core/`, `modules/`, `schemas/`, `tools/`
 
 **Critical Points**:
+
 - **Two systems coexist**: Legacy (`scripts/ai_pipes/`) and refactored (`core/`) architectures
 - **Migration required**: Use `tools/refactor_orchestrator.py` for safe migration
 - **Schema validation**: All refactored modules require JSON Schema compliance
@@ -561,9 +625,11 @@ openwebui:
 - **Don't mix architectures**: Use either legacy OR refactored system, not both simultaneously
 
 ### 🔴 GPU Integration Dependencies
+
 **Location**: `Dockerfile.openwebui-gpu`, pipe function modules
 
 **Critical Points**:
+
 - **Custom CUDA build required**: Pipe functions rely on GPU-enabled OpenWebUI container
 - **PyTorch availability**: GPU status modules require CUDA-enabled PyTorch installation
 - **Container GPU access**: Pipe functions access GPU through shared container environment
@@ -576,7 +642,9 @@ openwebui:
 The project includes multiple recovery tools for different scenarios:
 
 #### 1. AI Stack Pipe Function Debugging
+
 **Test pipe function integration**:
+
 ```bash
 # Verify script mount is working
 docker compose exec openwebui ls -la /host_scripts/ai_pipes/
@@ -592,6 +660,7 @@ docker compose exec openwebui python /host_scripts/ai_pipes/gpu_status_pipe.py '
 ```
 
 **Common Pipe Function Issues**:
+
 ```bash
 # Module not found errors
 docker compose exec openwebui python -c "import sys; print(sys.path)"
@@ -604,7 +673,9 @@ docker compose logs openwebui | grep -i "router\|pipe"
 ```
 
 #### 2. PowerShell Advanced Recovery (`emergency-recovery.ps1`)
+
 Full-featured recovery with health checks and timing controls:
+
 ```powershell
 # Standard recovery with health monitoring
 .\scripts\emergency-recovery.ps1 -Action recover
@@ -617,6 +688,7 @@ Full-featured recovery with health checks and timing controls:
 ```
 
 Features:
+
 - Graceful service shutdown with timeout handling
 - Health check validation before/after operations
 - GPU availability testing and recovery
@@ -624,7 +696,9 @@ Features:
 - Multiple recovery modes with fallback options
 
 #### 2. Enhanced Legacy Recovery (`emergency-recovery.bat`)
+
 Updated batch script with GPU awareness:
+
 ```batch
 # Quick network recovery (most common fix)
 scripts\emergency-recovery.bat
@@ -633,7 +707,9 @@ scripts\emergency-recovery.bat
 ```
 
 #### 3. Quick Targeted Fixes (`quick-fixes.bat`)
+
 Simple, fast fixes for specific issues:
+
 ```batch
 # Network namespace reset (most common)
 scripts\quick-fixes.bat namespace
@@ -675,8 +751,10 @@ docker compose up -d
 ### GPU-Specific Debugging
 
 #### GPU Not Detected
+
 **Symptoms**: Reranker models running on CPU instead of GPU
 **Debug Steps**:
+
 ```bash
 # Check GPU availability in container
 docker compose exec openwebui python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
@@ -692,6 +770,7 @@ docker compose exec openwebui python -c "import torch; print('PyTorch CUDA versi
 ```
 
 **Common Solutions**:
+
 ```bash
 # Restart OpenWebUI container
 docker compose restart openwebui
@@ -705,8 +784,10 @@ docker compose up -d openwebui
 ```
 
 #### GPU Memory Issues
+
 **Symptoms**: CUDA out of memory errors
 **Debug Steps**:
+
 ```bash
 # Check GPU memory usage
 docker compose exec openwebui nvidia-smi
@@ -716,14 +797,17 @@ watch -n 1 'docker compose exec openwebui nvidia-smi'
 ```
 
 **Solutions**:
+
 - Reduce model size or batch size in OpenWebUI settings
 - Restart container to clear GPU memory: `docker compose restart openwebui`
 
 ### LM Studio Debugging (Optional Integration)
 
 #### LM Studio Not Accessible
+
 **Symptoms**: LM Studio API not responding through Tailscale
 **Debug Steps**:
+
 ```bash
 # Check if LM Studio server is running locally
 curl http://localhost:1234/v1/models
@@ -739,6 +823,7 @@ docker compose exec tailscale wget -q -T 5 -O /dev/null http://127.0.0.1:8234/v1
 ```
 
 **Common Solutions**:
+
 ```bash
 # Quick LM Studio connectivity fix
 scripts\quick-fixes.bat lmstudio
@@ -752,8 +837,10 @@ docker compose logs tailscale | grep -i "lm studio"
 ```
 
 #### LM Studio Proxy Issues
+
 **Symptoms**: Proxy connection failures, socat errors
 **Debug Steps**:
+
 ```bash
 # Check socat process status
 docker compose exec tailscale ps aux | grep socat
@@ -768,10 +855,12 @@ docker compose exec tailscale netstat -ln | grep 8234
 ### Common Issues
 
 #### Container Exit Code 137
+
 **Symptoms**: Container killed unexpectedly
 **Causes**: Out of memory, resource limits, image conflicts
 
 **Debug Steps**:
+
 ```bash
 # Check system resources
 docker system df
@@ -787,9 +876,11 @@ docker compose up -d
 ```
 
 #### OpenWebUI Not Accessible
+
 **Symptoms**: Can't reach web interface
 
 **Debug Steps**:
+
 ```bash
 # Check container health
 docker compose ps
@@ -805,6 +896,7 @@ docker port openwebui
 ## 🔧 Tailscale-Specific Debugging
 
 ### Check Connection Status
+
 ```bash
 # Basic status
 docker compose exec tailscale tailscale status
@@ -817,6 +909,7 @@ docker compose exec tailscale tailscale netcheck
 ```
 
 ### Debug Serve Configuration
+
 ```bash
 # Check serve status
 docker compose exec tailscale tailscale serve status
@@ -831,10 +924,12 @@ docker compose exec tailscale ls -la /var/lib/tailscale/certs/
 ### Common Tailscale Issues
 
 #### Device Name Incrementing
+
 **Symptoms**: Device shows as openwebui-14, openwebui-15, etc.
 **Cause**: Using `--reset` flag or losing persistent state
 
 **Solution**:
+
 ```bash
 # Check if state directory exists
 docker compose exec tailscale ls -la /var/lib/tailscale/
@@ -847,10 +942,12 @@ docker compose restart tailscale
 ```
 
 #### "No Webserver Configured" Error
+
 **Symptoms**: TLS handshake errors, serve not working
 **Cause**: Wrong backend URL in serve configuration
 
 **Debug**:
+
 ```bash
 # Check serve config
 docker compose exec tailscale tailscale serve status
@@ -863,6 +960,7 @@ docker compose exec tailscale netstat -tlnp
 ```
 
 **Fix**:
+
 ```bash
 # Reset serve config
 docker compose exec tailscale tailscale serve reset
@@ -872,9 +970,11 @@ docker compose exec tailscale tailscale serve --https=443 --bg http://127.0.0.1:
 ```
 
 #### Auth Key Issues
+
 **Symptoms**: "machine not authorized", login URLs
 
 **Debug**:
+
 ```bash
 # Check if auth key is set
 docker compose exec tailscale env | grep TAILSCALE_AUTH_KEY
@@ -884,11 +984,13 @@ docker compose exec tailscale env | grep TAILSCALE_AUTH_KEY
 ```
 
 #### Connection Drops
+
 **Symptoms**: Tailscale disconnects after some time, "Network unreachable" errors
 
 **Root Cause**: OpenWebUI container recreation breaks network namespace sharing
 
 **Debug**:
+
 ```bash
 # Check recent logs for errors
 docker compose logs tailscale --since 1h
@@ -908,12 +1010,14 @@ docker compose exec tailscale ip addr
 ```
 
 **Common Symptoms**:
+
 - Logs show: "Tailscale could not connect to relay server"
-- Logs show: "Network unreachable" 
+- Logs show: "Network unreachable"
 - `ping` fails from Tailscale container but works from OpenWebUI
 - `ip addr` in Tailscale shows only loopback interface
 
 **Fix**:
+
 ```bash
 # Quick fix - restart both containers
 docker compose down tailscale
@@ -925,12 +1029,14 @@ docker compose up -d
 ```
 
 **Prevention**: This happens when:
+
 - Watchtower updates OpenWebUI (creates new container ID)
-- Manual `docker compose restart openwebui` 
+- Manual `docker compose restart openwebui`
 - Docker daemon restarts
 - System reboots
 
 **Automated Prevention** (Add to crontab or scheduled task):
+
 ```bash
 # Daily check and fix script
 #!/bin/bash
@@ -945,16 +1051,19 @@ fi
 ### Network Namespace Issues
 
 #### Broken Network Sharing (Most Common Recurring Issue)
-**Symptoms**: 
-- Tailscale shows "Network unreachable" 
+
+**Symptoms**:
+
+- Tailscale shows "Network unreachable"
 - Can't connect to DERP servers
 - `ping` fails from Tailscale container
 - Only loopback interface visible in Tailscale container
 
-**Root Cause**: 
+**Root Cause**:
 When OpenWebUI container is recreated (new container ID), Tailscale loses its network namespace attachment.
 
 **Quick Diagnostic**:
+
 ```bash
 # Test internet from both containers
 docker compose exec openwebui curl -I http://google.com  # Should work
@@ -967,6 +1076,7 @@ docker compose exec tailscale ip addr
 ```
 
 **Immediate Fix**:
+
 ```bash
 # Restart both containers in correct order
 docker compose down tailscale
@@ -991,6 +1101,7 @@ fi
 ```
 
 **Windows Task Scheduler Setup**:
+
 ```powershell
 # Run this PowerShell command as Administrator
 schtasks /create /tn "TailscaleHealthCheck" /tr "powershell.exe -File 'C:\path\to\scripts\check-tailscale-health.ps1'" /sc minute /mo 10
@@ -999,6 +1110,7 @@ schtasks /create /tn "TailscaleHealthCheck" /tr "powershell.exe -File 'C:\path\t
 ### Advanced Debugging
 
 #### Packet Analysis
+
 ```bash
 # Install tcpdump in container
 docker compose exec tailscale apk add tcpdump
@@ -1008,6 +1120,7 @@ docker compose exec tailscale tcpdump -i any port 443
 ```
 
 #### State Inspection
+
 ```bash
 # Check tailscale state files
 docker compose exec tailscale ls -la /var/lib/tailscale/
@@ -1019,19 +1132,21 @@ docker compose exec tailscale cat /var/lib/tailscale/tailscaled.state
 ### Safe Update Process
 
 1. **Backup Critical Data**:
+
    ```bash
    # Backup Tailscale state
    cp -r data/tailscale data/tailscale.backup
-   
+
    # Backup OpenWebUI data
    cp -r data/openwebui data/openwebui.backup
    ```
 
 2. **Update Services**:
+
    ```bash
    # Pull latest images (excluding Tailscale)
    docker compose pull openwebui ollama watchtower
-   
+
    # Restart services
    docker compose up -d
    ```
@@ -1047,6 +1162,7 @@ docker compose exec tailscale cat /var/lib/tailscale/tailscaled.state
 ### Watchtower Configuration
 
 Watchtower automatically updates containers except Tailscale:
+
 ```yaml
 tailscale:
   labels:
@@ -1058,6 +1174,7 @@ This prevents breaking the custom Tailscale configuration.
 ## 📊 Monitoring
 
 ### Health Checks
+
 ```bash
 # Check all service health
 docker compose ps
@@ -1070,6 +1187,7 @@ docker system df
 ```
 
 ### Log Monitoring
+
 ```bash
 # Tail all logs
 docker compose logs -f
@@ -1116,6 +1234,7 @@ docker stats --format "table {{.Container}}\t{{.CPUPerc}}\t{{.MemUsage}}"
 ### Quick Recovery Options
 
 #### Network/Connectivity Issues (Most Common)
+
 ```bash
 # Quick namespace reset
 scripts\quick-fixes.bat namespace
@@ -1125,6 +1244,7 @@ scripts\quick-fixes.bat namespace
 ```
 
 #### GPU Issues
+
 ```bash
 # GPU-specific recovery
 scripts\quick-fixes.bat gpu
@@ -1134,6 +1254,7 @@ scripts\quick-fixes.bat gpu
 ```
 
 #### Complete System Issues
+
 ```bash
 # Nuclear option (quick)
 scripts\quick-fixes.bat nuclear
@@ -1143,6 +1264,7 @@ scripts\quick-fixes.bat nuclear
 ```
 
 ### Complete Reset
+
 ```bash
 # Stop all services
 docker compose down
@@ -1156,6 +1278,7 @@ docker compose up -d
 ```
 
 ### Recover from Tailscale Issues
+
 ```bash
 # Reset Tailscale only
 docker compose stop tailscale
@@ -1170,6 +1293,7 @@ docker compose restart tailscale
 ## 📞 Support
 
 ### Useful Commands Summary
+
 ```bash
 # Quick status check
 docker compose ps && docker compose exec tailscale tailscale status
