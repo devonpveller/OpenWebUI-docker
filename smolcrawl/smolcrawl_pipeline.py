@@ -51,6 +51,16 @@ def _kb_slug(kb_name: str) -> str:
     return re.sub(r"[^\w-]", "_", kb_name).lower()
 
 
+def _normalize_kb_name(raw_name: str) -> str:
+    """Normalize potentially noisy KB names from chat payloads."""
+    # Some UI payloads may include inline tags or markdown wrappers.
+    name = re.sub(r"<[^>]*>", " ", raw_name)
+    name = re.sub(r"[`*_#]", " ", name)
+    name = re.sub(r"\s+", " ", name).strip().strip("\"'")
+    name = name.strip(".,;:!?)]}")
+    return name
+
+
 def _load_job_state(kb_name: str) -> Optional[dict]:
     """Load persisted job state for a collection, or None if absent/corrupt."""
     path = os.path.join(_JOB_STATE_DIR, f"{_kb_slug(kb_name)}.json")
@@ -139,7 +149,7 @@ class Pipeline:
 
     # ── Job submission ─────────────────────────────────────────────────────────
 
-    def _submit_job(self, url: str, kb_name: str) -> Union[str, Generator[str, None, None]]:
+    def _submit_job(self, url: str, kb_name: str) -> str:
         """Classify the request against persisted state, then dispatch to the
         thread pool. Returns immediately — never blocks the caller's thread.
 
@@ -278,34 +288,37 @@ class Pipeline:
 
         _JOB_EXECUTOR.submit(self._run_job, job)
 
-        # ── Stream header ─────────────────────────────────────────────────────
-        yield "## SmolCrawl Pipeline\n\n"
-        yield f"**Job ID:** `{jid}`\n"
-        yield f"**Target:** {url}\n"
-        yield f"**Knowledge Base:** {kb_name}\n"
-        yield f"**Max Pages:** {self.valves.max_pages}\n\n"
+        # Return a single non-streaming response so OWUI marks the chat as
+        # complete immediately while work continues in the background thread.
+        lines = [
+            "## SmolCrawl Pipeline\n\n",
+            f"**Job ID:** `{jid}`\n",
+            f"**Target:** {url}\n",
+            f"**Knowledge Base:** {kb_name}\n",
+            f"**Max Pages:** {self.valves.max_pages}\n\n",
+        ]
 
         if mode == "resume":
             cursor = resume_stats.get("cursor", 0)
             total = resume_stats.get("total", 0)
             detail = f" ({cursor}/{total} pages already processed)" if total else ""
-            yield (
+            lines.append(
                 f"▶️ **Resuming** interrupted job{detail}. "
                 "Manifest deduplication will skip already-uploaded pages.\n\n"
             )
         elif mode == "up_to_date":
             h = resume_stats.get("age_hours", 0)
-            yield f"ℹ️ Last synced **{h}h ago** — checking for changed pages.\n\n"
+            lines.append(f"ℹ️ Last synced **{h}h ago** — checking for changed pages.\n\n")
         elif mode == "stale":
             d = resume_stats.get("age_days", 0)
-            yield (
+            lines.append(
                 f"⚠️ Last synced **{d} day(s) ago** "
                 f"(threshold: {self.valves.job_ttl_days}d) — source may have changed. "
                 "Re-crawling.\n\n"
             )
         elif mode == "url_mismatch":
             prev_url = existing.get("url", "") if existing else ""
-            yield (
+            lines.append(
                 f"⚠️ This collection was previously synced from a different URL:\n"
                 f"- Previous: `{prev_url}`\n"
                 f"- New: `{url}`\n\n"
@@ -313,11 +326,10 @@ class Pipeline:
             )
 
         if self.valves.force_full_sync:
-            yield "**Mode:** Force full sync (ignore manifest cache)\n\n"
+            lines.append("**Mode:** Force full sync (ignore manifest cache)\n\n")
 
-        yield (
-            f"🚀 Job queued. Use `jobs` to check progress.\n"
-        )
+        lines.append("🚀 Job queued. Use `jobs` to check progress.\n")
+        return "".join(lines)
 
     def _stream_job(self, job: dict) -> Generator[str, None, None]:
         """Internal: consume events from a job's queue with heartbeats.
@@ -672,18 +684,27 @@ class Pipeline:
                 )
             lines.append("\n")
 
-        # Completed / interrupted states from disk
-        history = {
-            k: v
-            for k, v in disk_states.items()
-            if v.get("status") not in ("running", "queued")
-        }
+        # Completed/interrupted states plus orphaned running/queued states from
+        # disk (e.g. process restart while a job was active).
+        history: Dict[str, dict] = {}
+        for kb_name, state in disk_states.items():
+            status = state.get("status")
+            if status in ("running", "queued"):
+                if kb_name in live:
+                    continue
+                orphaned = dict(state)
+                orphaned["_display_status"] = "interrupted"
+                orphaned["_orphaned"] = True
+                history[kb_name] = orphaned
+                continue
+            history[kb_name] = state
+
         if history:
             lines.append("### Collection History\n\n")
             lines.append("| Collection | Status | Last Sync | Progress | Source URL |\n")
             lines.append("|---|---|---|---|---|\n")
             for kb_name, s in sorted(history.items()):
-                status = s.get("status", "unknown")
+                status = s.get("_display_status", s.get("status", "unknown"))
                 ref_ts = s.get("finished_at") or s.get("last_active")
                 age_str = "—"
                 if ref_ts:
@@ -702,10 +723,12 @@ class Pipeline:
                 url_short = s.get("url", "—")
                 if len(url_short) > 45:
                     url_short = url_short[:42] + "…"
+                status_label = f"{status}*" if s.get("_orphaned") else status
                 lines.append(
-                    f"| {kb_name} | {icon.get(status, '❓')} {status} "
+                    f"| {kb_name} | {icon.get(status, '❓')} {status_label} "
                     f"| {age_str} | {cursor}/{total} | `{url_short}` |\n"
                 )
+            lines.append("\n*`interrupted*` indicates a previously active job found on disk after restart.\n")
             lines.append("\n")
 
         lines.append("_Submit a crawl: `crawl https://... into KB Name`_\n")
@@ -714,13 +737,18 @@ class Pipeline:
     @staticmethod
     def _extract_kb_name(message: str, url: str) -> str:
         """Extract knowledge base name from the message, falling back to domain."""
+        search_space = message
+        url_pos = message.find(url)
+        if url_pos >= 0:
+            search_space = message[url_pos + len(url):]
+
         for pattern in [
             r'(?:into|to|as|kb:|knowledge[- ]?base[: ])\s*["\']?(.+?)["\']?\s*$',
             r'(?:into|to|as|kb:|knowledge[- ]?base[: ])\s*["\']?(.+?)["\']?(?:\s+(?:with|using|from))',
         ]:
-            m = re.search(pattern, message, re.IGNORECASE)
+            m = re.search(pattern, search_space, re.IGNORECASE)
             if m:
-                name = m.group(1).strip().strip("\"'")
+                name = _normalize_kb_name(m.group(1))
                 if name and name != url:
                     return name
         return f"SmolCrawl - {urlparse(url).netloc}"
