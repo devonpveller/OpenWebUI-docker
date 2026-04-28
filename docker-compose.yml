@@ -317,8 +317,7 @@ services:
     command:
       - -c
       - |
-        chmod +x /scripts/backup.sh
-        echo "$${BACKUP_CRON} /scripts/backup.sh >> /var/log/backup.log 2>&1" > /etc/crontabs/root
+        echo "$${BACKUP_CRON} sh /scripts/backup.sh >> /var/log/backup.log 2>&1" > /etc/crontabs/root
         echo "[$(date -u +%FT%TZ)] Backup scheduler started (cron: $${BACKUP_CRON}, retain: $${RETAIN_DAYS} days)"
         crond -f -l 2
     restart: unless-stopped
@@ -327,6 +326,7 @@ services:
     depends_on:
       openwebui:
         condition: service_healthy
+
     labels:
       - "com.centurylinklabs.watchtower.enable=false"
 
