@@ -418,6 +418,11 @@ if %ERRORLEVEL% EQU 0 (
 ) else (
     echo [ERROR] SmolCrawl Pipelines health: FAILED - run: docker compose up -d smolcrawl-pipelines
 )
+echo.
+echo [INFO] Backup schedulers and Watchtower (no health endpoints - running state only):
+cd ..
+docker compose ps mnemory-backup openwebui-backup watchtower --format "table {{.Service}}\t{{.Status}}" 2>nul
+cd scripts
 if "%1"=="" (
     echo.
     pause
@@ -481,7 +486,7 @@ echo [WARN] This will restart OpenWebUI, llama-cpp, llama-cpp-embed, and Tailsca
 echo.
 echo [INFO] Stopping dependent containers first...
 cd ..
-docker compose stop tailscale llama-cpp llama-cpp-embed mnemory mnemory-backup smolcrawl-pipelines
+docker compose stop tailscale llama-cpp llama-cpp-embed mnemory mnemory-backup openwebui-backup smolcrawl-pipelines
 cd scripts
 echo [INFO] Restarting OpenWebUI...
 cd ..
@@ -537,6 +542,7 @@ if %ERRORLEVEL% NEQ 0 (
     docker compose up -d mnemory
 )
 docker compose up -d mnemory-backup
+docker compose up -d openwebui-backup
 cd scripts
 echo [INFO] Starting SmolCrawl Pipelines...
 cd ..

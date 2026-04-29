@@ -72,6 +72,13 @@ if %ERRORLEVEL% NEQ 0 (
     docker compose kill mnemory mnemory-backup
 )
 
+echo [INFO] Stopping OpenWebUI backup scheduler...
+docker compose stop openwebui-backup
+if %ERRORLEVEL% NEQ 0 (
+    echo [WARN] OpenWebUI backup stop failed, attempting force kill...
+    docker compose kill openwebui-backup
+)
+
 echo [INFO] Stopping llama-cpp containers...
 docker compose stop llama-cpp llama-cpp-embed
 if %ERRORLEVEL% NEQ 0 (
@@ -141,6 +148,9 @@ timeout /t 15 /nobreak >nul
 echo [INFO] Starting Mnemory backup scheduler...
 docker compose up -d mnemory-backup
 
+echo [INFO] Starting OpenWebUI backup scheduler...
+docker compose up -d openwebui-backup
+
 echo [INFO] Starting SmolCrawl Pipelines...
 docker compose up -d smolcrawl-pipelines
 
@@ -164,7 +174,7 @@ echo [INFO] Restarting with proper network dependency sequence...
 
 REM Stop dependent containers first
 echo [INFO] Stopping Tailscale and llama-cpp services (network dependents)...
-docker compose stop tailscale llama-cpp llama-cpp-embed mnemory mnemory-backup smolcrawl-pipelines
+docker compose stop tailscale llama-cpp llama-cpp-embed mnemory mnemory-backup openwebui-backup smolcrawl-pipelines
 
 REM Restart OpenWebUI first and wait for health
 echo [INFO] Restarting OpenWebUI...
@@ -198,6 +208,9 @@ docker compose up -d watchtower
 echo [INFO] Starting Mnemory services...
 docker compose up -d mnemory mnemory-backup
 timeout /t 15 /nobreak >nul
+
+echo [INFO] Starting OpenWebUI backup scheduler...
+docker compose up -d openwebui-backup
 
 echo [INFO] Starting SmolCrawl Pipelines...
 docker compose up -d smolcrawl-pipelines
@@ -277,6 +290,14 @@ docker compose exec mnemory python -c "import urllib.request; print(urllib.reque
 echo.
 echo [INFO] SmolCrawl Pipelines status:
 docker compose exec smolcrawl-pipelines curl -s http://localhost:9099/ 2>nul
+
+echo.
+echo [INFO] Backup schedulers status:
+docker compose ps mnemory-backup openwebui-backup --format "table {{.Service}}\t{{.Status}}" 2>nul
+
+echo.
+echo [INFO] Watchtower status:
+docker compose ps watchtower --format "table {{.Service}}\t{{.Status}}" 2>nul
 
 echo.
 echo ========================================

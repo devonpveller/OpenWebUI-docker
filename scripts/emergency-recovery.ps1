@@ -54,8 +54,11 @@ function Test-BasicConnectivity {
         $tailscaleStatus = ($containers | Where-Object { $_.Service -eq "tailscale" }).State
         $mnemoryStatus = ($containers | Where-Object { $_.Service -eq "mnemory" }).State
         $smolcrawlStatus = ($containers | Where-Object { $_.Service -eq "smolcrawl-pipelines" }).State
-        
-        Write-Log "INFO" "Container states - OpenWebUI: $openwebuiStatus, llama-cpp: $llamaCppStatus, llama-cpp-embed: $llamaCppEmbedStatus, Tailscale: $tailscaleStatus, Mnemory: $mnemoryStatus, SmolCrawl: $smolcrawlStatus"
+        $watchtowerStatus = ($containers | Where-Object { $_.Service -eq "watchtower" }).State
+        $mnemoryBackupStatus = ($containers | Where-Object { $_.Service -eq "mnemory-backup" }).State
+        $openwebuiBackupStatus = ($containers | Where-Object { $_.Service -eq "openwebui-backup" }).State
+
+        Write-Log "INFO" "Container states - OpenWebUI: $openwebuiStatus, llama-cpp: $llamaCppStatus, llama-cpp-embed: $llamaCppEmbedStatus, Tailscale: $tailscaleStatus, Mnemory: $mnemoryStatus, SmolCrawl: $smolcrawlStatus, Watchtower: $watchtowerStatus, mnemory-backup: $mnemoryBackupStatus, openwebui-backup: $openwebuiBackupStatus"
         
         # If all containers are running, test basic functionality
         if ($openwebuiStatus -eq "running" -and $llamaCppStatus -eq "running" -and $llamaCppEmbedStatus -eq "running" -and $tailscaleStatus -eq "running") {
@@ -117,10 +120,12 @@ function Invoke-MinimalRecovery {
     # Just restart services without destroying containers
     try {
         docker compose restart tailscale llama-cpp llama-cpp-embed openwebui
-        
-        # Start Watchtower if it's missing (it doesn't need restart usually)
-        docker compose up -d watchtower
-        
+
+        # Ensure auxiliary containers are running (cheap no-op if already up).
+        # Their `depends_on` only fires at initial compose-up, so a llama-cpp
+        # restart can leave mnemory in a degraded state without this nudge.
+        docker compose up -d watchtower mnemory smolcrawl-pipelines mnemory-backup openwebui-backup
+
         Write-Log "INFO" "Waiting for services to stabilize..."
         Start-Sleep -Seconds 60
         
@@ -257,6 +262,14 @@ function Invoke-EmergencyRecovery {
     if (-not (Stop-ServiceGracefully "mnemory" 30)) {
         Write-Log "WARN" "Mnemory stop had issues, continuing..."
     }
+
+    # Stop backup schedulers (independent cron sidecars)
+    if (-not (Stop-ServiceGracefully "mnemory-backup" 15)) {
+        Write-Log "WARN" "mnemory-backup stop had issues, continuing..."
+    }
+    if (-not (Stop-ServiceGracefully "openwebui-backup" 15)) {
+        Write-Log "WARN" "openwebui-backup stop had issues, continuing..."
+    }
     
     # Stop llama-cpp services
     if (-not (Stop-ServiceGracefully "llama-cpp" 30)) {
@@ -363,6 +376,16 @@ function Invoke-EmergencyRecovery {
     catch {
         Write-Log "WARN" "Failed to start Mnemory backup: $_"
     }
+
+    # Start OpenWebUI backup scheduler
+    Write-Log "INFO" "Starting OpenWebUI backup scheduler..."
+    try {
+        docker compose up -d openwebui-backup
+        Write-Log "SUCCESS" "OpenWebUI backup scheduler started"
+    }
+    catch {
+        Write-Log "WARN" "Failed to start OpenWebUI backup: $_"
+    }
     
     # Start SmolCrawl Pipelines (depends on OpenWebUI)
     Write-Log "INFO" "Starting SmolCrawl Pipelines..."
@@ -416,9 +439,12 @@ function Invoke-EmergencyRecovery {
         
         Write-Log "INFO" "Mnemory status:"
         docker compose exec mnemory python -c "import urllib.request; print(urllib.request.urlopen('http://localhost:8051/health').read().decode())" 2>$null
-        
+
         Write-Log "INFO" "SmolCrawl Pipelines status:"
         docker compose exec smolcrawl-pipelines curl -s http://localhost:9099/ 2>$null
+
+        Write-Log "INFO" "Backup schedulers + Watchtower status:"
+        docker compose ps mnemory-backup openwebui-backup watchtower --format "table {{.Service}}\t{{.Status}}" 2>$null
     }
     catch {
         Write-Log "WARN" "Unable to verify service configurations: $_"
