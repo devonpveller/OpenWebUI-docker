@@ -326,14 +326,46 @@ function Repair-OpenTerminal {
     }
 }
 
+# Generic helper: ensure a non-critical compose container is running.
+# Uses Test-ServiceHealth (which reads docker's compose-defined healthcheck
+# status, or just the running state for containers without a healthcheck).
+# Used for mnemory, smolcrawl-pipelines, watchtower, and the backup sidecars —
+# none are required for the core OpenWebUI/Tailscale/LLM path, so failures
+# are logged but do not fail the overall health check.
+function Confirm-AuxiliaryContainer {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$ServiceName,
+        [int]$RestartWaitSeconds = 15
+    )
+    if (Test-ServiceHealth $ServiceName) {
+        Write-LogEntry "$ServiceName container healthy" "DEBUG"
+        return $true
+    }
+    Write-LogEntry "$ServiceName is unhealthy or stopped, attempting recovery..." "WARN"
+    try {
+        docker compose up -d $ServiceName | Out-Null
+        Start-Sleep $RestartWaitSeconds
+        if (Test-ServiceHealth $ServiceName) {
+            Write-LogEntry "$ServiceName recovered successfully" "SUCCESS"
+            return $true
+        }
+        Write-LogEntry "$ServiceName recovery did not converge - feature may be degraded" "WARN"
+        return $false
+    } catch {
+        Write-LogEntry "$ServiceName recovery error: $($_.Exception.Message)" "WARN"
+        return $false
+    }
+}
+
 # Function to test llama-cpp connectivity
 function Test-LlamaCppConnectivity {
     try {
         Write-LogEntry "Testing llama-cpp connectivity..." "DEBUG"
-        
+
         # Test if llama-cpp service is running and accessible
         $LlamaCppResponse = docker compose exec -T llama-cpp curl -s -f --max-time 10 http://localhost:8080/health 2>$null
-        
+
         if ($LASTEXITCODE -eq 0 -and $LlamaCppResponse) {
             Write-LogEntry "llama-cpp connectivity verified" "DEBUG"
             return $true
@@ -343,6 +375,60 @@ function Test-LlamaCppConnectivity {
         }
     } catch {
         Write-LogEntry "Failed to test llama-cpp connectivity: $($_.Exception.Message)" "ERROR"
+        return $false
+    }
+}
+
+# Function to test llama-cpp-embed connectivity (independent of main llama-cpp).
+# Embed has its own model/process and can fail while main llama-cpp is healthy.
+function Test-LlamaCppEmbedConnectivity {
+    try {
+        Write-LogEntry "Testing llama-cpp-embed connectivity..." "DEBUG"
+        $EmbedResponse = docker compose exec -T llama-cpp-embed curl -s -f --max-time 10 http://localhost:8080/health 2>$null
+        if ($LASTEXITCODE -eq 0 -and $EmbedResponse) {
+            Write-LogEntry "llama-cpp-embed connectivity verified" "DEBUG"
+            return $true
+        } else {
+            Write-LogEntry "llama-cpp-embed not responding on localhost:8080" "WARN"
+            return $false
+        }
+    } catch {
+        Write-LogEntry "Failed to test llama-cpp-embed connectivity: $($_.Exception.Message)" "ERROR"
+        return $false
+    }
+}
+
+# Function to repair llama-cpp-embed (start if missing, restart otherwise).
+function Repair-LlamaCppEmbed {
+    Write-LogEntry "Starting llama-cpp-embed recovery..." "WARN"
+    try {
+        if (-not (Test-ServiceHealth "llama-cpp-embed")) {
+            Write-LogEntry "llama-cpp-embed container not running, starting..." "WARN"
+            docker compose up -d llama-cpp-embed | Out-Null
+        } else {
+            Write-LogEntry "llama-cpp-embed running but unresponsive, restarting..." "WARN"
+            docker compose restart llama-cpp-embed | Out-Null
+        }
+
+        # Wait for the API to come back. bge-m3 model load is fast, but allow
+        # up to 120 s to be safe.
+        $MaxWaitTime = 120
+        $WaitTime = 0
+        while ($WaitTime -lt $MaxWaitTime) {
+            Start-Sleep 10
+            $WaitTime += 10
+            if (Test-LlamaCppEmbedConnectivity) {
+                Write-LogEntry "llama-cpp-embed connectivity restored after ${WaitTime}s" "SUCCESS"
+                return $true
+            }
+            if ($WaitTime % 30 -eq 0) {
+                Write-LogEntry "Still waiting for llama-cpp-embed... (${WaitTime}s/${MaxWaitTime}s)" "INFO"
+            }
+        }
+        Write-LogEntry "llama-cpp-embed recovery did not converge - embedding/RAG features may be degraded" "ERROR"
+        return $false
+    } catch {
+        Write-LogEntry "llama-cpp-embed recovery failed: $($_.Exception.Message)" "ERROR"
         return $false
     }
 }
@@ -444,6 +530,17 @@ function Invoke-HealthCheck {
         }
     }
 
+    # Test llama-cpp-embed connectivity independently. The main llama-cpp test
+    # above does not exercise the embed endpoint, so a broken embed server can
+    # silently degrade RAG and mnemory while the rest of the stack looks fine.
+    # Non-fatal: main inference still works without embeddings.
+    if (-not (Test-LlamaCppEmbedConnectivity)) {
+        Write-LogEntry "llama-cpp-embed connectivity failed, attempting recovery..." "WARN"
+        if (-not (Repair-LlamaCppEmbed)) {
+            Write-LogEntry "Failed to restore llama-cpp-embed - embedding/RAG/mnemory features may be degraded" "WARN"
+        }
+    }
+
     # Test Open Terminal health
     if (-not (Test-OpenTerminalHealth)) {
         Write-LogEntry "Open Terminal is unhealthy, attempting recovery..." "WARN"
@@ -452,6 +549,15 @@ function Invoke-HealthCheck {
             # Non-fatal: don't return $false, system can still operate without open-terminal
         }
     }
+
+    # Verify remaining compose containers (non-critical — log + attempt recovery
+    # but do not fail the overall health check). Order matters: mnemory depends
+    # on llama-cpp + llama-cpp-embed, which are confirmed healthy above.
+    Confirm-AuxiliaryContainer -ServiceName "mnemory"            -RestartWaitSeconds 20 | Out-Null
+    Confirm-AuxiliaryContainer -ServiceName "smolcrawl-pipelines" -RestartWaitSeconds 20 | Out-Null
+    Confirm-AuxiliaryContainer -ServiceName "watchtower"          -RestartWaitSeconds 10 | Out-Null
+    Confirm-AuxiliaryContainer -ServiceName "mnemory-backup"      -RestartWaitSeconds 10 | Out-Null
+    Confirm-AuxiliaryContainer -ServiceName "openwebui-backup"    -RestartWaitSeconds 10 | Out-Null
 
     Write-LogEntry "All health checks passed" "SUCCESS"
     return $true
