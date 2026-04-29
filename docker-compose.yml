@@ -340,8 +340,11 @@ services:
     volumes:
       - ./data/models/embeddings:/models:ro
     environment:
+      # NVIDIA_VISIBLE_DEVICES selects host GPU exposed to this container.
+      # CUDA_VISIBLE_DEVICES intentionally unset: NVIDIA Container Toolkit
+      # reindexes visible GPUs starting at 0 inside the container, so setting
+      # CUDA_VISIBLE_DEVICES to the *host* index makes CUDA see no devices.
       - NVIDIA_VISIBLE_DEVICES=${GPU_LLAMA_CPP_EMBED_DEVICE_ID:-1}
-      - CUDA_VISIBLE_DEVICES=${GPU_LLAMA_CPP_EMBED_DEVICE_ID:-1}
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
       - LLAMA_ARG_MODEL=/models/bge-m3-f16.gguf
       - LLAMA_ARG_CTX_SIZE=20480

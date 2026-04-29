@@ -360,12 +360,18 @@ function Confirm-AuxiliaryContainer {
 
 # Function to test llama-cpp connectivity
 function Test-LlamaCppConnectivity {
+    # Skip the exec probe if the container isn't running — `docker compose exec`
+    # against a stopped service writes to stderr, which (with ErrorActionPreference
+    # = "Stop" at the top of this script) bubbles up as a thrown exception and
+    # lands in the catch block as a misleading [ERROR]. A stopped container is
+    # a normal transient state during recovery, not a script-level failure.
+    if (-not (Test-ServiceHealth "llama-cpp")) {
+        Write-LogEntry "llama-cpp container is not running" "DEBUG"
+        return $false
+    }
     try {
         Write-LogEntry "Testing llama-cpp connectivity..." "DEBUG"
-
-        # Test if llama-cpp service is running and accessible
         $LlamaCppResponse = docker compose exec -T llama-cpp curl -s -f --max-time 10 http://localhost:8080/health 2>$null
-
         if ($LASTEXITCODE -eq 0 -and $LlamaCppResponse) {
             Write-LogEntry "llama-cpp connectivity verified" "DEBUG"
             return $true
@@ -374,7 +380,7 @@ function Test-LlamaCppConnectivity {
             return $false
         }
     } catch {
-        Write-LogEntry "Failed to test llama-cpp connectivity: $($_.Exception.Message)" "ERROR"
+        Write-LogEntry "llama-cpp connectivity test failed: $($_.Exception.Message)" "WARN"
         return $false
     }
 }
@@ -382,6 +388,10 @@ function Test-LlamaCppConnectivity {
 # Function to test llama-cpp-embed connectivity (independent of main llama-cpp).
 # Embed has its own model/process and can fail while main llama-cpp is healthy.
 function Test-LlamaCppEmbedConnectivity {
+    if (-not (Test-ServiceHealth "llama-cpp-embed")) {
+        Write-LogEntry "llama-cpp-embed container is not running" "DEBUG"
+        return $false
+    }
     try {
         Write-LogEntry "Testing llama-cpp-embed connectivity..." "DEBUG"
         $EmbedResponse = docker compose exec -T llama-cpp-embed curl -s -f --max-time 10 http://localhost:8080/health 2>$null
@@ -393,7 +403,7 @@ function Test-LlamaCppEmbedConnectivity {
             return $false
         }
     } catch {
-        Write-LogEntry "Failed to test llama-cpp-embed connectivity: $($_.Exception.Message)" "ERROR"
+        Write-LogEntry "llama-cpp-embed connectivity test failed: $($_.Exception.Message)" "WARN"
         return $false
     }
 }

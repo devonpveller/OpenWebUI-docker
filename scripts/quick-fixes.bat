@@ -95,8 +95,8 @@ cd /d "%SCRIPT_DIR%"
 if %RESULT% EQU 0 (
     echo [SUCCESS] Namespace reset successful - network is working!
 ) else (
-    echo [ERROR] Namespace reset failed (exit code: %RESULT%)
-    echo [INFO] Try option 5 (Rebuild Tailscale) for deeper issues
+    echo [ERROR] Namespace reset failed ^(exit code: %RESULT%^)
+    echo [INFO] Try option 5 ^(Rebuild Tailscale^) for deeper issues
 )
 if "%1"=="" (
     echo.
@@ -129,7 +129,7 @@ if %ERRORLEVEL% EQU 0 (
     echo [SUCCESS] Tailscale rebuild successful - network restored!
 ) else (
     echo [ERROR] Tailscale rebuild failed
-    echo [INFO] Try option 7 (Nuclear option) if issues persist
+    echo [INFO] Try option 7 ^(Nuclear option^) if issues persist
 )
 if "%1"=="" (
     echo.
@@ -358,7 +358,7 @@ cd scripts
 if %ERRORLEVEL% EQU 0 (
     echo [SUCCESS] Network connectivity: OK
 ) else (
-    echo [ERROR] Network connectivity: FAILED - Try option 1 (namespace reset)
+    echo [ERROR] Network connectivity: FAILED - Try option 1 ^(namespace reset^)
 )
 echo.
 echo [INFO] Tailscale Status:
@@ -669,11 +669,11 @@ if %RESULT% EQU 0 (
 ) else (
     echo [WARN] llama-cpp health check failed, restarting...
     docker compose restart llama-cpp
-    echo [INFO] Waiting for llama-cpp to start (large model, may take up to 2 minutes)...
+    echo [INFO] Waiting for llama-cpp to start ^(large model, may take up to 2 minutes^)...
     timeout /t 60 /nobreak >nul
     docker compose exec llama-cpp curl -s -f http://localhost:8080/health >nul 2>&1
-    set RESULT=%ERRORLEVEL%
-    if %RESULT% EQU 0 (
+    set RESULT=!ERRORLEVEL!
+    if !RESULT! EQU 0 (
         echo [SUCCESS] llama-cpp restored after restart
     ) else (
         echo [ERROR] llama-cpp still not healthy - check logs: docker compose logs llama-cpp
@@ -691,8 +691,8 @@ if %RESULT% EQU 0 (
     echo [INFO] Waiting for llama-cpp-embed to start...
     timeout /t 30 /nobreak >nul
     docker compose exec llama-cpp-embed curl -s -f http://localhost:8080/health >nul 2>&1
-    set RESULT=%ERRORLEVEL%
-    if %RESULT% EQU 0 (
+    set RESULT=!ERRORLEVEL!
+    if !RESULT! EQU 0 (
         echo [SUCCESS] llama-cpp-embed restored after restart
     ) else (
         echo [ERROR] llama-cpp-embed still not healthy - check logs: docker compose logs llama-cpp-embed
