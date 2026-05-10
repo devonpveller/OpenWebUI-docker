@@ -26118,3 +26118,39 @@
 2025-12-16 06:47:04 [DEBUG] Testing OpenWebUI-Ollama connectivity...
 2025-12-16 06:47:05 [DEBUG] OpenWebUI-Ollama connectivity verified
 2025-12-16 06:47:05 [SUCCESS] All health checks passed
+2026-05-10 10:17:02 [INFO] Starting comprehensive health check...
+2026-05-10 10:17:08 [DEBUG] Testing llama-cpp connectivity...
+2026-05-10 10:17:11 [DEBUG] llama-cpp connectivity verified
+2026-05-10 10:17:14 [DEBUG] Testing llama-cpp-embed connectivity...
+2026-05-10 10:17:18 [DEBUG] llama-cpp-embed connectivity verified
+2026-05-10 10:17:18 [DEBUG] Open Terminal health check passed
+2026-05-10 10:17:21 [DEBUG] mnemory container healthy
+2026-05-10 10:17:22 [DEBUG] smolcrawl-pipelines container healthy
+2026-05-10 10:17:22 [DEBUG] watchtower container healthy
+2026-05-10 10:17:22 [DEBUG] mnemory-backup container healthy
+2026-05-10 10:17:22 [DEBUG] openwebui-backup container healthy
+2026-05-10 10:17:22 [SUCCESS] All health checks passed
+2026-05-10 10:27:02 [INFO] Starting comprehensive health check...
+2026-05-10 10:27:08 [DEBUG] Testing llama-cpp connectivity...
+2026-05-10 10:27:11 [DEBUG] llama-cpp connectivity verified
+2026-05-10 10:27:14 [DEBUG] Testing llama-cpp-embed connectivity...
+2026-05-10 10:27:18 [DEBUG] llama-cpp-embed connectivity verified
+2026-05-10 10:27:18 [DEBUG] Open Terminal health check passed
+2026-05-10 10:27:21 [DEBUG] mnemory container healthy
+2026-05-10 10:27:22 [DEBUG] smolcrawl-pipelines container healthy
+2026-05-10 10:27:22 [DEBUG] watchtower container healthy
+2026-05-10 10:27:22 [DEBUG] mnemory-backup container healthy
+2026-05-10 10:27:22 [DEBUG] openwebui-backup container healthy
+2026-05-10 10:27:22 [SUCCESS] All health checks passed
+2026-05-10 10:37:02 [INFO] Starting comprehensive health check...
+2026-05-10 10:37:08 [DEBUG] Testing llama-cpp connectivity...
+2026-05-10 10:37:11 [DEBUG] llama-cpp connectivity verified
+2026-05-10 10:37:14 [DEBUG] Testing llama-cpp-embed connectivity...
+2026-05-10 10:37:18 [DEBUG] llama-cpp-embed connectivity verified
+2026-05-10 10:37:18 [DEBUG] Open Terminal health check passed
+2026-05-10 10:37:21 [DEBUG] mnemory container healthy
+2026-05-10 10:37:22 [DEBUG] smolcrawl-pipelines container healthy
+2026-05-10 10:37:22 [DEBUG] watchtower container healthy
+2026-05-10 10:37:22 [DEBUG] mnemory-backup container healthy
+2026-05-10 10:37:22 [DEBUG] openwebui-backup container healthy
+2026-05-10 10:37:22 [SUCCESS] All health checks passed
