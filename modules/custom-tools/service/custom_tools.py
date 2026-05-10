@@ -243,12 +243,41 @@ class CustomToolsModule:
                 user_input = str(input_data)
             
             user_input_lower = user_input.lower()
-            
-            # Check if this is a Tailscale serve command
+            user_input_stripped = user_input_lower.strip()
+
+            # Tailscale serve commands (start/stop/health/port/etc) — explicit pairing
             is_tailscale_serve = any(keyword in user_input_lower for keyword in ["serve", "serving", "expose", "tailscale"]) and \
                                 any(keyword in user_input_lower for keyword in ["start", "stop", "status", "lmstudio", "service", "health", "port"])
-            
-            if is_tailscale_serve:
+
+            # Stack admin commands (status / inventory / show-services / scoped status of X)
+            # also dispatch to the tailscale_serve_pipe — it now owns the rich
+            # containers + GPU + processing view via the stack_status action.
+            stack_admin_phrases = (
+                "stack status", "stack-status", "show services", "list services",
+                "show tailnet", "tailnet services", "service overview", "service map",
+            )
+            is_stack_admin = (
+                user_input_stripped in {"status", "inventory", "overview", "show", "list", "stack"}
+                or any(p in user_input_lower for p in stack_admin_phrases)
+                or user_input_stripped.startswith(("status of ", "status for ", "inventory of "))
+            )
+
+            # Admin command catalog (help). Exact-match for bare "help"/"?" so
+            # topical phrasing like "help with GPU issues" still routes to the
+            # help-system module.
+            admin_help_phrases = (
+                "available commands", "list commands", "show commands",
+                "what commands", "admin commands", "stack commands",
+            )
+            is_admin_help = (
+                user_input_stripped in {
+                    "help", "?", "admin help", "stack help", "tailscale help",
+                    "commands", "admin commands", "stack commands",
+                }
+                or any(p in user_input_lower for p in admin_help_phrases)
+            )
+
+            if is_tailscale_serve or is_stack_admin or is_admin_help:
                 # Route to tailscale_serve_pipe
                 return self._execute_tailscale_serve_pipe(request_data)
             
