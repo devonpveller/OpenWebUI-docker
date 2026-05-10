@@ -65,6 +65,13 @@ if %ERRORLEVEL% NEQ 0 (
     docker compose kill smolcrawl-pipelines
 )
 
+echo [INFO] Stopping open-notebook and surrealdb containers...
+docker compose stop open_notebook surrealdb
+if %ERRORLEVEL% NEQ 0 (
+    echo [WARN] open-notebook/surrealdb stop failed, attempting force kill...
+    docker compose kill open_notebook surrealdb
+)
+
 echo [INFO] Stopping Mnemory containers...
 docker compose stop mnemory mnemory-backup
 if %ERRORLEVEL% NEQ 0 (
@@ -154,6 +161,13 @@ docker compose up -d openwebui-backup
 echo [INFO] Starting SmolCrawl Pipelines...
 docker compose up -d smolcrawl-pipelines
 
+echo [INFO] Starting surrealdb (open-notebook database)...
+docker compose up -d surrealdb
+timeout /t 10 /nobreak >nul
+
+echo [INFO] Starting open-notebook...
+docker compose up -d open_notebook
+
 REM Phase 3: Connectivity verification
 echo [INFO] Phase 3: Testing connectivity...
 docker compose exec tailscale ping -c 1 8.8.8.8 >nul 2>&1
@@ -174,7 +188,7 @@ echo [INFO] Restarting with proper network dependency sequence...
 
 REM Stop dependent containers first
 echo [INFO] Stopping Tailscale and llama-cpp services (network dependents)...
-docker compose stop tailscale llama-cpp llama-cpp-embed mnemory mnemory-backup openwebui-backup smolcrawl-pipelines
+docker compose stop tailscale llama-cpp llama-cpp-embed mnemory mnemory-backup openwebui-backup smolcrawl-pipelines open_notebook surrealdb
 
 REM Restart OpenWebUI first and wait for health
 echo [INFO] Restarting OpenWebUI...
@@ -214,6 +228,13 @@ docker compose up -d openwebui-backup
 
 echo [INFO] Starting SmolCrawl Pipelines...
 docker compose up -d smolcrawl-pipelines
+
+echo [INFO] Starting surrealdb (open-notebook database)...
+docker compose up -d surrealdb
+timeout /t 10 /nobreak >nul
+
+echo [INFO] Starting open-notebook...
+docker compose up -d open_notebook
 
 echo [INFO] Testing if minimal recovery worked...
 docker compose exec tailscale ping -c 1 8.8.8.8 >nul 2>&1
@@ -290,6 +311,14 @@ docker compose exec mnemory python -c "import urllib.request; print(urllib.reque
 echo.
 echo [INFO] SmolCrawl Pipelines status:
 docker compose exec smolcrawl-pipelines curl -s http://localhost:9099/ 2>nul
+
+echo.
+echo [INFO] open-notebook API status:
+docker compose exec open_notebook python3 -c "import urllib.request; print(urllib.request.urlopen('http://localhost:5055/api/config').read().decode())" 2>nul
+
+echo.
+echo [INFO] surrealdb running state:
+docker compose ps surrealdb --format "table {{.Service}}\t{{.Status}}" 2>nul
 
 echo.
 echo [INFO] Backup schedulers status:
