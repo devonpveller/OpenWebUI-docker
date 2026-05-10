@@ -18,6 +18,7 @@ if "%1"=="restart-openwebui" goto :restart_openwebui
 if "%1"=="mnemory" goto :mnemory_check
 if "%1"=="smolcrawl" goto :smolcrawl_check
 if "%1"=="llama-cpp" goto :llama_cpp_check
+if "%1"=="open-notebook" goto :open_notebook_check
 goto :usage
 
 :interactive_menu
@@ -40,10 +41,11 @@ echo   8. Nuclear option (full restart)
 echo   9. Mnemory check and restart
 echo  10. SmolCrawl pipelines check and restart
 echo  11. llama-cpp / llama-cpp-embed check and restart
+echo  12. open-notebook (and surrealdb) check and restart
 echo.
 echo   0. Exit
 echo.
-set /p choice="Select option (1-11,0): "
+set /p choice="Select option (1-12,0): "
 
 if "%choice%"=="1" goto :namespace_reset
 if "%choice%"=="2" goto :status_check
@@ -56,6 +58,7 @@ if "%choice%"=="8" goto :nuclear_option
 if "%choice%"=="9" goto :mnemory_check
 if "%choice%"=="10" goto :smolcrawl_check
 if "%choice%"=="11" goto :llama_cpp_check
+if "%choice%"=="12" goto :open_notebook_check
 if "%choice%"=="0" goto :end
 echo [ERROR] Invalid choice
 timeout /t 2 /nobreak >nul
@@ -419,6 +422,21 @@ if %ERRORLEVEL% EQU 0 (
     echo [ERROR] SmolCrawl Pipelines health: FAILED - run: docker compose up -d smolcrawl-pipelines
 )
 echo.
+echo [INFO] open-notebook Health (API on port 5055):
+cd ..
+docker compose exec open_notebook python3 -c "import urllib.request,sys; urllib.request.urlopen('http://localhost:5055/api/config', timeout=5); sys.exit(0)" >nul 2>&1
+cd scripts
+if %ERRORLEVEL% EQU 0 (
+    echo [SUCCESS] open-notebook health: OK
+) else (
+    echo [ERROR] open-notebook health: FAILED - run: quick-fixes.bat open-notebook
+)
+echo.
+echo [INFO] surrealdb (open-notebook DB) running state:
+cd ..
+docker compose ps surrealdb --format "table {{.Service}}\t{{.Status}}" 2>nul
+cd scripts
+echo.
 echo [INFO] Backup schedulers and Watchtower (no health endpoints - running state only):
 cd ..
 docker compose ps mnemory-backup openwebui-backup watchtower --format "table {{.Service}}\t{{.Status}}" 2>nul
@@ -486,7 +504,7 @@ echo [WARN] This will restart OpenWebUI, llama-cpp, llama-cpp-embed, and Tailsca
 echo.
 echo [INFO] Stopping dependent containers first...
 cd ..
-docker compose stop tailscale llama-cpp llama-cpp-embed mnemory mnemory-backup openwebui-backup smolcrawl-pipelines
+docker compose stop tailscale llama-cpp llama-cpp-embed mnemory mnemory-backup openwebui-backup smolcrawl-pipelines open_notebook surrealdb
 cd scripts
 echo [INFO] Restarting OpenWebUI...
 cd ..
@@ -550,6 +568,22 @@ docker compose start smolcrawl-pipelines
 if %ERRORLEVEL% NEQ 0 (
     echo [WARN] SmolCrawl Pipelines start failed, trying up -d...
     docker compose up -d smolcrawl-pipelines
+)
+cd scripts
+echo [INFO] Starting surrealdb (open-notebook DB)...
+cd ..
+docker compose start surrealdb
+if %ERRORLEVEL% NEQ 0 (
+    echo [WARN] surrealdb start failed, trying up -d...
+    docker compose up -d surrealdb
+)
+cd scripts
+echo [INFO] Starting open-notebook...
+cd ..
+docker compose start open_notebook
+if %ERRORLEVEL% NEQ 0 (
+    echo [WARN] open-notebook start failed, trying up -d...
+    docker compose up -d open_notebook
 )
 cd scripts
 echo.
@@ -706,6 +740,52 @@ if "%1"=="" (
 )
 goto :end
 
+:open_notebook_check
+echo.
+echo ========================================
+echo   open-notebook Health Check and Recovery
+echo ========================================
+echo.
+echo [INFO] Checking surrealdb (open-notebook DB) status...
+cd /d "%SCRIPT_DIR%\.."
+docker compose ps surrealdb --format "table {{.Service}}\t{{.Status}}"
+docker compose ps surrealdb --format json 2>nul | findstr /C:"\"State\":\"running\"" >nul 2>&1
+set RESULT=%ERRORLEVEL%
+if not %RESULT% EQU 0 (
+    echo [WARN] surrealdb not running, starting...
+    docker compose up -d surrealdb
+    timeout /t 10 /nobreak >nul
+)
+echo.
+echo [INFO] Checking open_notebook service status...
+docker compose ps open_notebook --format "table {{.Service}}\t{{.Status}}"
+echo.
+echo [INFO] Testing open-notebook API endpoint (port 5055)...
+docker compose exec open_notebook python3 -c "import urllib.request,sys; urllib.request.urlopen('http://localhost:5055/api/config', timeout=5); sys.exit(0)" >nul 2>&1
+set RESULT=%ERRORLEVEL%
+if %RESULT% EQU 0 (
+    echo [SUCCESS] open-notebook API is healthy and running
+) else (
+    echo [WARN] open-notebook API health check failed, restarting...
+    docker compose restart open_notebook
+    echo [INFO] Waiting for open-notebook to start ^(Next.js waits for FastAPI, may take up to 90 seconds^)...
+    timeout /t 60 /nobreak >nul
+    docker compose exec open_notebook python3 -c "import urllib.request,sys; urllib.request.urlopen('http://localhost:5055/api/config', timeout=5); sys.exit(0)" >nul 2>&1
+    set RESULT=!ERRORLEVEL!
+    if !RESULT! EQU 0 (
+        echo [SUCCESS] open-notebook restored after restart
+    ) else (
+        echo [ERROR] open-notebook still not healthy - check logs: docker compose logs open_notebook
+    )
+)
+cd /d "%SCRIPT_DIR%"
+if "%1"=="" (
+    echo.
+    pause
+    goto :interactive_menu
+)
+goto :end
+
 :usage
 echo.
 echo ========================================
@@ -725,6 +805,7 @@ echo   lmstudio          - Fix LM Studio Tailscale connectivity
 echo   mnemory           - Check Mnemory health and restart if needed
 echo   smolcrawl         - Check SmolCrawl Pipelines health and restart if needed
 echo   llama-cpp         - Check llama-cpp and llama-cpp-embed health and restart if needed
+echo   open-notebook     - Check open-notebook (and surrealdb) health and restart if needed
 echo   nuclear           - Full stack restart (use when all else fails)
 echo.
 echo Examples:

@@ -57,8 +57,10 @@ function Test-BasicConnectivity {
         $watchtowerStatus = ($containers | Where-Object { $_.Service -eq "watchtower" }).State
         $mnemoryBackupStatus = ($containers | Where-Object { $_.Service -eq "mnemory-backup" }).State
         $openwebuiBackupStatus = ($containers | Where-Object { $_.Service -eq "openwebui-backup" }).State
+        $openNotebookStatus = ($containers | Where-Object { $_.Service -eq "open_notebook" }).State
+        $surrealdbStatus = ($containers | Where-Object { $_.Service -eq "surrealdb" }).State
 
-        Write-Log "INFO" "Container states - OpenWebUI: $openwebuiStatus, llama-cpp: $llamaCppStatus, llama-cpp-embed: $llamaCppEmbedStatus, Tailscale: $tailscaleStatus, Mnemory: $mnemoryStatus, SmolCrawl: $smolcrawlStatus, Watchtower: $watchtowerStatus, mnemory-backup: $mnemoryBackupStatus, openwebui-backup: $openwebuiBackupStatus"
+        Write-Log "INFO" "Container states - OpenWebUI: $openwebuiStatus, llama-cpp: $llamaCppStatus, llama-cpp-embed: $llamaCppEmbedStatus, Tailscale: $tailscaleStatus, Mnemory: $mnemoryStatus, SmolCrawl: $smolcrawlStatus, Watchtower: $watchtowerStatus, mnemory-backup: $mnemoryBackupStatus, openwebui-backup: $openwebuiBackupStatus, open_notebook: $openNotebookStatus, surrealdb: $surrealdbStatus"
         
         # If all containers are running, test basic functionality
         if ($openwebuiStatus -eq "running" -and $llamaCppStatus -eq "running" -and $llamaCppEmbedStatus -eq "running" -and $tailscaleStatus -eq "running") {
@@ -124,7 +126,8 @@ function Invoke-MinimalRecovery {
         # Ensure auxiliary containers are running (cheap no-op if already up).
         # Their `depends_on` only fires at initial compose-up, so a llama-cpp
         # restart can leave mnemory in a degraded state without this nudge.
-        docker compose up -d watchtower mnemory smolcrawl-pipelines mnemory-backup openwebui-backup
+        # surrealdb must come up before open_notebook (open_notebook depends on it).
+        docker compose up -d watchtower mnemory smolcrawl-pipelines mnemory-backup openwebui-backup surrealdb open_notebook
 
         Write-Log "INFO" "Waiting for services to stabilize..."
         Start-Sleep -Seconds 60
@@ -257,7 +260,15 @@ function Invoke-EmergencyRecovery {
     if (-not (Stop-ServiceGracefully "smolcrawl-pipelines" 30)) {
         Write-Log "WARN" "SmolCrawl Pipelines stop had issues, continuing..."
     }
-    
+
+    # Stop open-notebook (depends on surrealdb), then surrealdb itself.
+    if (-not (Stop-ServiceGracefully "open_notebook" 30)) {
+        Write-Log "WARN" "open-notebook stop had issues, continuing..."
+    }
+    if (-not (Stop-ServiceGracefully "surrealdb" 20)) {
+        Write-Log "WARN" "surrealdb stop had issues, continuing..."
+    }
+
     # Stop Mnemory (dependent on llama-cpp services)
     if (-not (Stop-ServiceGracefully "mnemory" 30)) {
         Write-Log "WARN" "Mnemory stop had issues, continuing..."
@@ -399,6 +410,32 @@ function Invoke-EmergencyRecovery {
         Write-Log "WARN" "Failed to start SmolCrawl Pipelines: $_"
         # Don't throw - SmolCrawl is not critical for basic functionality
     }
+
+    # Start surrealdb first, then open-notebook (which depends on it).
+    # Both have no `depends_on` chain to llama-cpp, but the open-notebook
+    # frontend uses `wait-for-api.sh` to block until FastAPI is ready, so
+    # the container needs ~30-60 s to fully come up.
+    Write-Log "INFO" "Starting surrealdb (open-notebook database)..."
+    try {
+        docker compose up -d surrealdb
+        Start-Sleep -Seconds 10
+        Write-Log "SUCCESS" "surrealdb started"
+    }
+    catch {
+        Write-Log "WARN" "Failed to start surrealdb: $_"
+    }
+
+    Write-Log "INFO" "Starting open-notebook..."
+    try {
+        docker compose up -d open_notebook
+        if (-not (Wait-ForHealthy "open_notebook" 90)) {
+            Write-Log "WARN" "open-notebook health check failed, but continuing..."
+        }
+    }
+    catch {
+        Write-Log "WARN" "Failed to start open-notebook: $_"
+        # Don't throw - notebook UI is not critical for basic functionality
+    }
     
     # Start Watchtower (independent service)
     Write-Log "INFO" "Starting Watchtower monitoring service..."
@@ -442,6 +479,12 @@ function Invoke-EmergencyRecovery {
 
         Write-Log "INFO" "SmolCrawl Pipelines status:"
         docker compose exec smolcrawl-pipelines curl -s http://localhost:9099/ 2>$null
+
+        Write-Log "INFO" "open-notebook API status:"
+        docker compose exec open_notebook python3 -c "import urllib.request; print(urllib.request.urlopen('http://localhost:5055/api/config').read().decode())" 2>$null
+
+        Write-Log "INFO" "surrealdb running state:"
+        docker compose ps surrealdb --format "table {{.Service}}\t{{.Status}}" 2>$null
 
         Write-Log "INFO" "Backup schedulers + Watchtower status:"
         docker compose ps mnemory-backup openwebui-backup watchtower --format "table {{.Service}}\t{{.Status}}" 2>$null

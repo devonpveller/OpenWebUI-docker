@@ -443,6 +443,80 @@ function Repair-LlamaCppEmbed {
     }
 }
 
+# Function to test open-notebook health (FastAPI on port 5055).
+# open_notebook depends on surrealdb; if surrealdb is down, the API will report
+# dbStatus != "online" but still return 200, so we only require a 200 response
+# here and treat surrealdb as a separate auxiliary check.
+# The image ships only Python (no wget/curl), so the probe uses urllib like
+# the mnemory healthcheck pattern.
+function Test-OpenNotebookHealth {
+    [CmdletBinding()]
+    param()
+    if (-not (Test-ServiceHealth "open_notebook")) {
+        Write-LogEntry "open_notebook container is not running" "DEBUG"
+        return $false
+    }
+    try {
+        Write-LogEntry "Testing open-notebook API..." "DEBUG"
+        docker compose exec -T open_notebook python3 -c "import urllib.request,sys; urllib.request.urlopen('http://localhost:5055/api/config', timeout=5); sys.exit(0)" 2>$null | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            Write-LogEntry "open-notebook API responding on port 5055" "DEBUG"
+            return $true
+        }
+        Write-LogEntry "open-notebook API not responding on localhost:5055" "WARN"
+        return $false
+    } catch {
+        Write-LogEntry "open-notebook health check failed: $($_.Exception.Message)" "WARN"
+        return $false
+    }
+}
+
+# Function to repair open-notebook. Ensures surrealdb (its database dependency)
+# is up first, then restarts open_notebook and waits for the API.
+# `docker compose restart` writes container-state messages ("Restarting", "Started")
+# to stderr; with $ErrorActionPreference = "Stop" at the top of this script those
+# would bubble up as thrown exceptions. Redirect stderr so docker's normal
+# progress output doesn't trip the catch block.
+function Repair-OpenNotebook {
+    Write-LogEntry "Starting open-notebook recovery..." "WARN"
+    try {
+        if (-not (Test-ServiceHealth "surrealdb")) {
+            Write-LogEntry "surrealdb (open-notebook DB) not running, starting..." "WARN"
+            docker compose up -d surrealdb 2>&1 | Out-Null
+            Start-Sleep 10
+        }
+
+        if (-not (Test-ServiceHealth "open_notebook")) {
+            Write-LogEntry "open_notebook container not running, starting..." "WARN"
+            docker compose up -d open_notebook 2>&1 | Out-Null
+        } else {
+            Write-LogEntry "open_notebook running but API unresponsive, restarting..." "WARN"
+            docker compose restart open_notebook 2>&1 | Out-Null
+        }
+
+        # Frontend (Next.js) waits for FastAPI via wait-for-api.sh, so first start
+        # is slower than a plain restart. Allow up to 90 s.
+        $MaxWaitTime = 90
+        $WaitTime = 0
+        while ($WaitTime -lt $MaxWaitTime) {
+            Start-Sleep 10
+            $WaitTime += 10
+            if (Test-OpenNotebookHealth) {
+                Write-LogEntry "open-notebook recovered after ${WaitTime}s" "SUCCESS"
+                return $true
+            }
+            if ($WaitTime % 30 -eq 0) {
+                Write-LogEntry "Still waiting for open-notebook... (${WaitTime}s/${MaxWaitTime}s)" "INFO"
+            }
+        }
+        Write-LogEntry "open-notebook recovery did not converge - notebook UI may be unavailable" "WARN"
+        return $false
+    } catch {
+        Write-LogEntry "open-notebook recovery failed: $($_.Exception.Message)" "ERROR"
+        return $false
+    }
+}
+
 # Function to perform comprehensive health check
 function Invoke-HealthCheck {
     Write-LogEntry "Starting comprehensive health check..."
@@ -568,6 +642,20 @@ function Invoke-HealthCheck {
     Confirm-AuxiliaryContainer -ServiceName "watchtower"          -RestartWaitSeconds 10 | Out-Null
     Confirm-AuxiliaryContainer -ServiceName "mnemory-backup"      -RestartWaitSeconds 10 | Out-Null
     Confirm-AuxiliaryContainer -ServiceName "openwebui-backup"    -RestartWaitSeconds 10 | Out-Null
+    # surrealdb has no HTTP healthcheck (WS-only); just verify the container is up.
+    # open_notebook gets a real API probe below — surrealdb must be up first since
+    # open_notebook depends on it.
+    Confirm-AuxiliaryContainer -ServiceName "surrealdb"           -RestartWaitSeconds 10 | Out-Null
+
+    # Test open-notebook API independently (separate from running-state check —
+    # the FastAPI process can be unresponsive while the container is still up).
+    # Non-fatal: notebook UI is non-critical for the core LLM/RAG path.
+    if (-not (Test-OpenNotebookHealth)) {
+        Write-LogEntry "open-notebook API failed, attempting recovery..." "WARN"
+        if (-not (Repair-OpenNotebook)) {
+            Write-LogEntry "open-notebook recovery failed - notebook UI may be unavailable" "WARN"
+        }
+    }
 
     Write-LogEntry "All health checks passed" "SUCCESS"
     return $true
