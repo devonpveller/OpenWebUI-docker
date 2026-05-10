@@ -97,6 +97,12 @@ services:
       - LLAMA_CPP_EMBED_HOST=${LLAMA_CPP_EMBED_HOST:-llama-cpp-embed}
       - LLAMA_CPP_EMBED_PORT=${LLAMA_CPP_EMBED_PORT:-8080}
       - LLAMA_CPP_EMBED_ENABLED=${LLAMA_CPP_EMBED_ENABLED:-true}
+      - OPEN_NOTEBOOK_HOST=${OPEN_NOTEBOOK_HOST:-open_notebook}
+      - OPEN_NOTEBOOK_PORT=${OPEN_NOTEBOOK_PORT:-8502}
+      - OPEN_NOTEBOOK_ENABLED=${OPEN_NOTEBOOK_ENABLED:-true}
+      - OPEN_NOTEBOOK_TS_PORT=${OPEN_NOTEBOOK_TS_PORT:-8443}
+      - OPEN_NOTEBOOK_API_PORT=${OPEN_NOTEBOOK_API_PORT:-5055}
+      - OPEN_NOTEBOOK_API_TS_PORT=${OPEN_NOTEBOOK_API_TS_PORT:-5055}
     volumes:
       - ./data/tailscale:/var/lib/tailscale
       - /dev/net/tun:/dev/net/tun
@@ -416,6 +422,9 @@ services:
   open_notebook:
     image: lfnovo/open_notebook:v1-latest
     container_name: open_notebook
+    networks:
+      - default
+      - llm-net
     ports:
       - "8503:8502"  # Web UI
       - "5055:5055"  # REST API
