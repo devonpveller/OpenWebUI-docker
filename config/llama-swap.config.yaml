@@ -15,7 +15,7 @@
 
 listen: 0.0.0.0:8080
 healthCheckTimeout: 300
-includeAliasesInList: false
+includeAliasesInList: true
 # Never auto-unload — models stay resident until explicitly swapped.
 globalTTL: 0
 logToStdout: both
@@ -31,9 +31,6 @@ macros:
 models:
   qwen36-35b-a3b:
     name: Qwen 3.6 35B-A3B
-    aliases:
-      - Qwen3.6-35B-A3B-Q4_K_M.gguf
-      - Qwen 3.6 35B-A3B
     cmd: |
       llama-server ${common-args}
       --model        ${env.LLAMA_SWAP_QWEN36_35B_MODEL_PATH}
@@ -45,12 +42,17 @@ models:
       --cache-type-k ${env.LLAMA_SWAP_QWEN36_35B_CACHE_TYPE_K}
       --cache-type-v ${env.LLAMA_SWAP_QWEN36_35B_CACHE_TYPE_V}
       --reasoning-budget ${env.LLAMA_SWAP_QWEN36_35B_REASONING_BUDGET}
+    filters:
+      setParamsByID:
+        "${MODEL_ID}":
+          chat_template_kwargs:
+            enable_thinking: true
+        "${MODEL_ID}:nothink":
+          chat_template_kwargs:
+            enable_thinking: false
 
   qwen36-27b:
     name: Qwen 3.6 27B
-    aliases:
-      - Qwen3.6-27B-Q4_K_M.gguf
-      - Qwen 3.6 27B
     cmd: |
       llama-server ${common-args}
       --model        ${env.LLAMA_SWAP_QWEN36_27B_MODEL_PATH}
@@ -62,3 +64,11 @@ models:
       --cache-type-k ${env.LLAMA_SWAP_QWEN36_27B_CACHE_TYPE_K}
       --cache-type-v ${env.LLAMA_SWAP_QWEN36_27B_CACHE_TYPE_V}
       --reasoning-budget ${env.LLAMA_SWAP_QWEN36_27B_REASONING_BUDGET}
+    filters:
+      setParamsByID:
+        "${MODEL_ID}":
+          chat_template_kwargs:
+            enable_thinking: true
+        "${MODEL_ID}:nothink":
+          chat_template_kwargs:
+            enable_thinking: false
