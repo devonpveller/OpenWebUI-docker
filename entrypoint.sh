@@ -103,6 +103,23 @@ if [ $connection_timeout -le 0 ]; then
     echo "⚠️ Warning: Tailscale connection timeout, but continuing..."
 fi
 
+# Persist tailnet info to a shared file so other containers (the openwebui
+# admin pipe) can read the FQDN/MagicDNS suffix and render full tailnet URLs
+# without needing the tailscale CLI themselves. /var/lib/tailscale is mapped
+# to ./data/tailscale on the host, which openwebui mounts read-only.
+write_tailnet_info() {
+    if tailscale --socket=/tmp/tailscaled.sock status --json \
+        > /var/lib/tailscale/tailnet-info.json.tmp 2>/dev/null \
+    && [ -s /var/lib/tailscale/tailnet-info.json.tmp ]; then
+        mv /var/lib/tailscale/tailnet-info.json.tmp \
+           /var/lib/tailscale/tailnet-info.json
+        return 0
+    fi
+    rm -f /var/lib/tailscale/tailnet-info.json.tmp 2>/dev/null
+    return 1
+}
+write_tailnet_info && echo "📝 Wrote /var/lib/tailscale/tailnet-info.json"
+
 # 7) Configure serve for HTTPS access
 echo "🌐 Configuring Tailscale serve..."
 # Clear any existing serve config and set up fresh
@@ -639,12 +656,16 @@ fi
             fi
         fi
         
+        # Refresh tailnet-info.json so the openwebui admin pipe always sees
+        # current FQDN / peer state. Cheap (single status call) and resilient.
+        write_tailnet_info >/dev/null 2>&1 || true
+
         # Check if we can reach the internet
         if ! check_network; then
             echo "⚠️ $(date): Network connectivity lost, container may need restart"
             continue
         fi
-        
+
         # Check if Tailscale is still connected
         if ! tailscale --socket=/tmp/tailscaled.sock status >/dev/null 2>&1; then
             echo "⚠️ $(date): Tailscale disconnected, attempting reconnection..."

@@ -458,22 +458,55 @@ class AIStackRouter:
         
         # Define routing patterns (priority order matters - most specific first)
         
+        input_stripped = input_lower.strip()
+
         # Tailscale serve management (must be before general "fix" keyword)
         if any(keyword in input_lower for keyword in ["serve", "serving", "expose", "tailscale"]) and \
            any(keyword in input_lower for keyword in ["start", "stop", "status", "lmstudio", "service", "port"]):
             return "custom-tools"  # Routes to custom-tools which will handle tailscale_serve_pipe
-        
+
+        # Stack admin: bare "status" / "inventory" / "show services" / "status of X"
+        # surface the rich containers + GPU + processing view from
+        # tailscale_serve_pipe.stack_status. Must run BEFORE the generic
+        # health/status branch below.
+        elif (
+            input_stripped in {"status", "inventory", "overview", "show", "list", "stack"}
+            or any(p in input_lower for p in (
+                "stack status", "stack-status", "show services", "list services",
+                "show tailnet", "tailnet services", "service overview", "service map",
+            ))
+            or input_stripped.startswith(("status of ", "status for ", "inventory of "))
+        ):
+            return "custom-tools"
+
+        # Admin help — list available admin commands. Routed BEFORE the generic
+        # help-system fallthrough so it surfaces the tailnet/stack command set.
+        # Exact-match-only for bare "help"/"?" so phrases like
+        # "help with GPU issues" still reach the help-system module.
+        elif (
+            input_stripped in {
+                "help", "?", "admin help", "stack help", "tailscale help",
+                "commands", "admin commands", "stack commands",
+            }
+            or any(p in input_lower for p in (
+                "available commands", "list commands", "show commands",
+                "what commands", "admin commands", "stack commands",
+            ))
+        ):
+            return "custom-tools"
+
         # GPU monitoring
         elif any(keyword in input_lower for keyword in ["gpu", "cuda", "graphics", "nvidia"]):
             return "gpu-status"
-        
+
         # Emergency recovery (general recovery, but NOT tailscale serve)
         elif any(keyword in input_lower for keyword in ["recovery", "fix", "repair", "emergency", "restart", "ollama"]) and \
              not any(keyword in input_lower for keyword in ["serve", "serving", "expose"]):
             return "emergency-recovery"
-        
-        # Health and status monitoring
-        elif any(keyword in input_lower for keyword in ["health", "status", "monitor"]) and \
+
+        # Health and status monitoring (system-health) — kept for explicit
+        # "health" / "monitor" queries; bare "status" is handled above.
+        elif any(keyword in input_lower for keyword in ["health", "monitor"]) and \
              not any(keyword in input_lower for keyword in ["serve", "serving"]):
             return "system-health"
         
