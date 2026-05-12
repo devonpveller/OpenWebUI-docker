@@ -1,0 +1,29 @@
+{
+  "model": "Qwen3.6-35B-A3B-Q4_K_M.gguf",
+  "messages": [
+    {"role": "system", "content": "You are a helpful assistant. Use tools when asked to perform actions."},
+    {"role": "user", "content": "Please use edit_file to add a console.log to game.js"},
+    {"role": "assistant", "content": "I'll read the file first to understand the structure."},
+    {"role": "user", "content": "The file has a function called startGame(). Add console.log('starting') at the top of it."}
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "edit_file",
+        "description": "Replace exact text in a file",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "file_path": {"type": "string", "description": "Path to file"},
+            "old_text": {"type": "string", "description": "Text to find"},
+            "new_text": {"type": "string", "description": "Replacement text"}
+          },
+          "required": ["file_path", "old_text", "new_text"]
+        }
+      }
+    }
+  ],
+  "max_tokens": 512,
+  "stream": false
+}

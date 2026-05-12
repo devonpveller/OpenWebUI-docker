@@ -1,6 +1,6 @@
 @echo off
 REM Quick Emergency Fixes for OpenWebUI AI Stack
-REM Usage: quick-fixes.bat [namespace|rebuild|nuclear|gpu|status|lmstudio|restart-openwebui]
+REM Usage: quick-fixes.bat [namespace|rebuild|nuclear|gpu|gpu-map|status|lmstudio|restart-openwebui]
 
 setlocal enabledelayedexpansion
 set "SCRIPT_DIR=%~dp0"
@@ -11,9 +11,14 @@ if "%1"=="namespace" goto :namespace_reset
 if "%1"=="rebuild" goto :rebuild_tailscale
 if "%1"=="nuclear" goto :nuclear_option
 if "%1"=="gpu" goto :gpu_check
+if "%1"=="gpu-map" goto :gpu_map
 if "%1"=="status" goto :status_check
 if "%1"=="lmstudio" goto :lmstudio_fix
 if "%1"=="restart-openwebui" goto :restart_openwebui
+if "%1"=="mnemory" goto :mnemory_check
+if "%1"=="smolcrawl" goto :smolcrawl_check
+if "%1"=="llama-cpp" goto :llama_cpp_check
+if "%1"=="open-notebook" goto :open_notebook_check
 goto :usage
 
 :interactive_menu
@@ -26,25 +31,35 @@ echo Common Fixes:
 echo   1. Network namespace reset (most common)
 echo   2. Check system status
 echo   3. GPU check and restart
-echo   4. Restart OpenWebUI properly
+echo   4. Show GPU service assignment
+echo   5. Restart OpenWebUI properly
 echo.
 echo Advanced Fixes:
-echo   5. Rebuild Tailscale container
-echo   6. Fix LM Studio connectivity
-echo   7. Nuclear option (full restart)
+echo   6. Rebuild Tailscale container
+echo   7. Fix LM Studio connectivity
+echo   8. Nuclear option (full restart)
+echo   9. Mnemory check and restart
+echo  10. SmolCrawl pipelines check and restart
+echo  11. llama-cpp / llama-cpp-embed check and restart
+echo  12. open-notebook (and surrealdb) check and restart
 echo.
-echo   8. Exit
+echo   0. Exit
 echo.
-set /p choice="Select option (1-8): "
+set /p choice="Select option (1-12,0): "
 
 if "%choice%"=="1" goto :namespace_reset
 if "%choice%"=="2" goto :status_check
 if "%choice%"=="3" goto :gpu_check
-if "%choice%"=="4" goto :restart_openwebui
-if "%choice%"=="5" goto :rebuild_tailscale
-if "%choice%"=="6" goto :lmstudio_fix
-if "%choice%"=="7" goto :nuclear_option
-if "%choice%"=="8" goto :end
+if "%choice%"=="4" goto :gpu_map
+if "%choice%"=="5" goto :restart_openwebui
+if "%choice%"=="6" goto :rebuild_tailscale
+if "%choice%"=="7" goto :lmstudio_fix
+if "%choice%"=="8" goto :nuclear_option
+if "%choice%"=="9" goto :mnemory_check
+if "%choice%"=="10" goto :smolcrawl_check
+if "%choice%"=="11" goto :llama_cpp_check
+if "%choice%"=="12" goto :open_notebook_check
+if "%choice%"=="0" goto :end
 echo [ERROR] Invalid choice
 timeout /t 2 /nobreak >nul
 cls
@@ -83,8 +98,8 @@ cd /d "%SCRIPT_DIR%"
 if %RESULT% EQU 0 (
     echo [SUCCESS] Namespace reset successful - network is working!
 ) else (
-    echo [ERROR] Namespace reset failed (exit code: %RESULT%)
-    echo [INFO] Try option 5 (Rebuild Tailscale) for deeper issues
+    echo [ERROR] Namespace reset failed ^(exit code: %RESULT%^)
+    echo [INFO] Try option 5 ^(Rebuild Tailscale^) for deeper issues
 )
 if "%1"=="" (
     echo.
@@ -117,7 +132,7 @@ if %ERRORLEVEL% EQU 0 (
     echo [SUCCESS] Tailscale rebuild successful - network restored!
 ) else (
     echo [ERROR] Tailscale rebuild failed
-    echo [INFO] Try option 7 (Nuclear option) if issues persist
+    echo [INFO] Try option 7 ^(Nuclear option^) if issues persist
 )
 if "%1"=="" (
     echo.
@@ -208,7 +223,7 @@ cd scripts
 if %ERRORLEVEL% NEQ 0 (
     echo [WARN] GPU check failed, restarting GPU services...
     cd ..
-    docker compose restart ollama openwebui
+    docker compose restart llama-cpp llama-cpp-embed openwebui
     cd scripts
     echo [INFO] Waiting for GPU services to restart...
     timeout /t 60 /nobreak >nul
@@ -220,14 +235,24 @@ if %ERRORLEVEL% NEQ 0 (
     if %ERRORLEVEL% EQU 0 (
         echo [SUCCESS] GPU restored after restart
         echo.
-        echo [INFO] Testing Ollama availability...
+        echo [INFO] Testing llama-cpp availability...
         cd ..
-        docker compose exec ollama ollama list >nul 2>&1
+        docker compose exec llama-cpp curl -s -f http://localhost:8080/health >nul 2>&1
         cd scripts
         if %ERRORLEVEL% EQU 0 (
-            echo [SUCCESS] Ollama GPU integration working
+            echo [SUCCESS] llama-cpp GPU integration working
         ) else (
-            echo [WARN] Ollama may need additional time to initialize
+            echo [WARN] llama-cpp may need additional time to initialize
+        )
+        echo.
+        echo [INFO] Testing llama-cpp-embed availability...
+        cd ..
+        docker compose exec llama-cpp-embed curl -s -f http://localhost:8080/health >nul 2>&1
+        cd scripts
+        if %ERRORLEVEL% EQU 0 (
+            echo [SUCCESS] llama-cpp-embed GPU integration working
+        ) else (
+            echo [WARN] llama-cpp-embed may need additional time to initialize
         )
     ) else (
         echo [ERROR] GPU still not available - may need full rebuild
@@ -236,22 +261,61 @@ if %ERRORLEVEL% NEQ 0 (
 ) else (
     echo [SUCCESS] OpenWebUI GPU is working correctly
     echo.
-    echo [INFO] Testing Ollama GPU integration...
+    echo [INFO] Testing llama-cpp GPU integration...
     cd ..
-    docker compose exec ollama ollama list >nul 2>&1
+    docker compose exec llama-cpp curl -s -f http://localhost:8080/health >nul 2>&1
     cd scripts
     if %ERRORLEVEL% EQU 0 (
-        echo [SUCCESS] Ollama GPU integration working
-        echo [INFO] All GPU services operational
-    ) else (
-        echo [WARN] Ollama may need restart
+        echo [SUCCESS] llama-cpp GPU integration working
+        echo.
+        echo [INFO] Testing llama-cpp-embed GPU integration...
         cd ..
-        docker compose restart ollama
+        docker compose exec llama-cpp-embed curl -s -f http://localhost:8080/health >nul 2>&1
+        cd scripts
+        if %ERRORLEVEL% EQU 0 (
+            echo [SUCCESS] llama-cpp-embed GPU integration working
+            echo [INFO] All GPU services operational
+        ) else (
+            echo [WARN] llama-cpp-embed may need restart
+            cd ..
+            docker compose restart llama-cpp-embed
+            cd scripts
+            timeout /t 30 /nobreak >nul
+            echo [SUCCESS] llama-cpp-embed restarted
+        )
+    ) else (
+        echo [WARN] llama-cpp may need restart
+        cd ..
+        docker compose restart llama-cpp llama-cpp-embed
         cd scripts
         timeout /t 30 /nobreak >nul
-        echo [SUCCESS] Ollama restarted
+        echo [SUCCESS] llama-cpp services restarted
     )
 )
+if "%1"=="" (
+    echo.
+    pause
+    goto :interactive_menu
+)
+goto :end
+
+:gpu_map
+echo.
+echo ========================================
+echo   GPU Service Assignment
+echo ========================================
+echo.
+echo [INFO] Effective container GPU environment:
+cd /d "%SCRIPT_DIR%\.."
+for %%S in (openwebui ollama llama-cpp llama-cpp-embed) do (
+    echo.
+    echo [INFO] %%S:
+    docker inspect %%S --format "{{range .Config.Env}}{{println .}}{{end}}" | findstr /R /C:"^NVIDIA_VISIBLE_DEVICES=" /C:"^NVIDIA_DRIVER_CAPABILITIES="
+    if !ERRORLEVEL! NEQ 0 (
+        echo [WARN] No NVIDIA env detected or container not available
+    )
+)
+cd /d "%SCRIPT_DIR%"
 if "%1"=="" (
     echo.
     pause
@@ -280,9 +344,14 @@ cd ..
 docker compose exec openwebui python -c "import torch; print('CUDA available:', torch.cuda.is_available()); print('GPU count:', torch.cuda.device_count())" 2>nul
 cd scripts
 echo.
-echo [INFO] Ollama Status:
+echo [INFO] llama-cpp Status:
 cd ..
-docker compose exec ollama ollama list 2>nul
+docker compose exec llama-cpp curl -s http://localhost:8080/health 2>nul
+cd scripts
+echo.
+echo [INFO] llama-cpp-embed Status:
+cd ..
+docker compose exec llama-cpp-embed curl -s http://localhost:8080/health 2>nul
 cd scripts
 echo.
 echo [INFO] Network Connectivity:
@@ -292,7 +361,7 @@ cd scripts
 if %ERRORLEVEL% EQU 0 (
     echo [SUCCESS] Network connectivity: OK
 ) else (
-    echo [ERROR] Network connectivity: FAILED - Try option 1 (namespace reset)
+    echo [ERROR] Network connectivity: FAILED - Try option 1 ^(namespace reset^)
 )
 echo.
 echo [INFO] Tailscale Status:
@@ -315,12 +384,12 @@ if %ERRORLEVEL% EQU 0 (
     echo [ERROR] OpenWebUI accessibility: FAILED
 )
 cd ..
-docker compose exec tailscale wget -q -T 3 -O /dev/null http://127.0.0.1:11434/api/version 2>nul
+docker compose exec llama-cpp curl -s -f http://localhost:8080/health >nul 2>&1
 cd scripts
 if %ERRORLEVEL% EQU 0 (
-    echo [SUCCESS] Ollama API accessibility: OK
+    echo [SUCCESS] llama-cpp API accessibility: OK
 ) else (
-    echo [ERROR] Ollama API accessibility: FAILED
+    echo [ERROR] llama-cpp API accessibility: FAILED
 )
 echo.
 echo [INFO] Open Terminal Health:
@@ -332,6 +401,46 @@ if %ERRORLEVEL% EQU 0 (
 ) else (
     echo [ERROR] Open Terminal health: FAILED - run: docker compose up -d open-terminal
 )
+echo.
+echo [INFO] Mnemory Health:
+cd ..
+docker compose exec mnemory python -c "import urllib.request; urllib.request.urlopen('http://localhost:8051/health')" >nul 2>&1
+cd scripts
+if %ERRORLEVEL% EQU 0 (
+    echo [SUCCESS] Mnemory health: OK
+) else (
+    echo [ERROR] Mnemory health: FAILED - run: docker compose up -d mnemory
+)
+echo.
+echo [INFO] SmolCrawl Pipelines Health:
+cd ..
+docker compose exec smolcrawl-pipelines curl -f -s http://localhost:9099/ >nul 2>&1
+cd scripts
+if %ERRORLEVEL% EQU 0 (
+    echo [SUCCESS] SmolCrawl Pipelines health: OK
+) else (
+    echo [ERROR] SmolCrawl Pipelines health: FAILED - run: docker compose up -d smolcrawl-pipelines
+)
+echo.
+echo [INFO] open-notebook Health (API on port 5055):
+cd ..
+docker compose exec open_notebook python3 -c "import urllib.request,sys; urllib.request.urlopen('http://localhost:5055/api/config', timeout=5); sys.exit(0)" >nul 2>&1
+cd scripts
+if %ERRORLEVEL% EQU 0 (
+    echo [SUCCESS] open-notebook health: OK
+) else (
+    echo [ERROR] open-notebook health: FAILED - run: quick-fixes.bat open-notebook
+)
+echo.
+echo [INFO] surrealdb (open-notebook DB) running state:
+cd ..
+docker compose ps surrealdb --format "table {{.Service}}\t{{.Status}}" 2>nul
+cd scripts
+echo.
+echo [INFO] Backup schedulers and Watchtower (no health endpoints - running state only):
+cd ..
+docker compose ps mnemory-backup openwebui-backup watchtower --format "table {{.Service}}\t{{.Status}}" 2>nul
+cd scripts
 if "%1"=="" (
     echo.
     pause
@@ -391,11 +500,11 @@ echo   OpenWebUI Restart Sequence
 echo ========================================
 echo.
 echo [INFO] Restarting OpenWebUI with proper network dependency handling...
-echo [WARN] This will restart OpenWebUI, Ollama, and Tailscale containers
+echo [WARN] This will restart OpenWebUI, llama-cpp, llama-cpp-embed, and Tailscale containers
 echo.
 echo [INFO] Stopping dependent containers first...
 cd ..
-docker compose stop tailscale ollama
+docker compose stop tailscale llama-cpp llama-cpp-embed mnemory mnemory-backup openwebui-backup smolcrawl-pipelines open_notebook surrealdb
 cd scripts
 echo [INFO] Restarting OpenWebUI...
 cd ..
@@ -413,15 +522,23 @@ if %ERRORLEVEL% NEQ 0 (
 )
 echo [SUCCESS] OpenWebUI healthy - restarting dependent services
 echo.
-echo [INFO] Starting Ollama...
+echo [INFO] Starting llama-cpp...
 cd ..
-docker compose start ollama
+docker compose start llama-cpp
 if %ERRORLEVEL% NEQ 0 (
-    echo [WARN] Ollama start failed, trying up -d...
-    docker compose up -d ollama
+    echo [WARN] llama-cpp start failed, trying up -d...
+    docker compose up -d llama-cpp
 )
 cd scripts
-echo [INFO] Waiting for Ollama to initialize...
+echo [INFO] Starting llama-cpp-embed...
+cd ..
+docker compose start llama-cpp-embed
+if %ERRORLEVEL% NEQ 0 (
+    echo [WARN] llama-cpp-embed start failed, trying up -d...
+    docker compose up -d llama-cpp-embed
+)
+cd scripts
+echo [INFO] Waiting for llama-cpp to initialize...
 timeout /t 15 /nobreak >nul
 echo.
 echo [INFO] Starting Tailscale...
@@ -435,12 +552,233 @@ cd scripts
 echo [INFO] Waiting for Tailscale to connect...
 timeout /t 30 /nobreak >nul
 echo.
+echo [INFO] Starting Mnemory...
+cd ..
+docker compose start mnemory
+if %ERRORLEVEL% NEQ 0 (
+    echo [WARN] Mnemory start failed, trying up -d...
+    docker compose up -d mnemory
+)
+docker compose up -d mnemory-backup
+docker compose up -d openwebui-backup
+cd scripts
+echo [INFO] Starting SmolCrawl Pipelines...
+cd ..
+docker compose start smolcrawl-pipelines
+if %ERRORLEVEL% NEQ 0 (
+    echo [WARN] SmolCrawl Pipelines start failed, trying up -d...
+    docker compose up -d smolcrawl-pipelines
+)
+cd scripts
+echo [INFO] Starting surrealdb (open-notebook DB)...
+cd ..
+docker compose start surrealdb
+if %ERRORLEVEL% NEQ 0 (
+    echo [WARN] surrealdb start failed, trying up -d...
+    docker compose up -d surrealdb
+)
+cd scripts
+echo [INFO] Starting open-notebook...
+cd ..
+docker compose start open_notebook
+if %ERRORLEVEL% NEQ 0 (
+    echo [WARN] open-notebook start failed, trying up -d...
+    docker compose up -d open_notebook
+)
+cd scripts
+echo.
 echo [INFO] Verifying services are running...
 cd ..
 docker compose ps --format "table {{.Service}}\t{{.Status}}"
 cd scripts
 echo.
 echo [SUCCESS] OpenWebUI restart sequence complete
+if "%1"=="" (
+    echo.
+    pause
+    goto :interactive_menu
+)
+goto :end
+
+:mnemory_check
+echo.
+echo ========================================
+echo   Mnemory Health Check and Recovery
+echo ========================================
+echo.
+echo [INFO] Checking Mnemory service status...
+cd /d "%SCRIPT_DIR%\.."
+docker compose ps mnemory --format "table {{.Service}}\t{{.Status}}"
+echo.
+echo [INFO] Testing Mnemory health endpoint...
+docker compose exec mnemory python -c "import urllib.request; urllib.request.urlopen('http://localhost:8051/health')" >nul 2>&1
+set RESULT=%ERRORLEVEL%
+cd /d "%SCRIPT_DIR%"
+if %RESULT% EQU 0 (
+    echo [SUCCESS] Mnemory is healthy and running
+) else (
+    echo [WARN] Mnemory health check failed, restarting...
+    cd /d "%SCRIPT_DIR%\.."
+    docker compose restart mnemory
+    cd /d "%SCRIPT_DIR%"
+    echo [INFO] Waiting for Mnemory to start...
+    timeout /t 30 /nobreak >nul
+    cd /d "%SCRIPT_DIR%\.."
+    docker compose exec mnemory python -c "import urllib.request; urllib.request.urlopen('http://localhost:8051/health')" >nul 2>&1
+    set RESULT=%ERRORLEVEL%
+    cd /d "%SCRIPT_DIR%"
+    if %RESULT% EQU 0 (
+        echo [SUCCESS] Mnemory restored after restart
+    ) else (
+        echo [ERROR] Mnemory still not healthy - check logs: docker compose logs mnemory
+    )
+)
+echo.
+echo [INFO] Mnemory backup service status:
+cd /d "%SCRIPT_DIR%\.."
+docker compose ps mnemory-backup --format "table {{.Service}}\t{{.Status}}"
+cd /d "%SCRIPT_DIR%"
+if "%1"=="" (
+    echo.
+    pause
+    goto :interactive_menu
+)
+goto :end
+
+:smolcrawl_check
+echo.
+echo ========================================
+echo   SmolCrawl Pipelines Health Check
+echo ========================================
+echo.
+echo [INFO] Checking SmolCrawl Pipelines service status...
+cd /d "%SCRIPT_DIR%\.."
+docker compose ps smolcrawl-pipelines --format "table {{.Service}}\t{{.Status}}"
+echo.
+echo [INFO] Testing SmolCrawl Pipelines health endpoint...
+docker compose exec smolcrawl-pipelines curl -f -s http://localhost:9099/ >nul 2>&1
+set RESULT=%ERRORLEVEL%
+cd /d "%SCRIPT_DIR%"
+if %RESULT% EQU 0 (
+    echo [SUCCESS] SmolCrawl Pipelines is healthy and running
+) else (
+    echo [WARN] SmolCrawl Pipelines health check failed, restarting...
+    cd /d "%SCRIPT_DIR%\.."
+    docker compose restart smolcrawl-pipelines
+    cd /d "%SCRIPT_DIR%"
+    echo [INFO] Waiting for SmolCrawl Pipelines to start...
+    timeout /t 30 /nobreak >nul
+    cd /d "%SCRIPT_DIR%\.."
+    docker compose exec smolcrawl-pipelines curl -f -s http://localhost:9099/ >nul 2>&1
+    set RESULT=%ERRORLEVEL%
+    cd /d "%SCRIPT_DIR%"
+    if %RESULT% EQU 0 (
+        echo [SUCCESS] SmolCrawl Pipelines restored after restart
+    ) else (
+        echo [ERROR] SmolCrawl Pipelines still not healthy - check logs: docker compose logs smolcrawl-pipelines
+    )
+)
+if "%1"=="" (
+    echo.
+    pause
+    goto :interactive_menu
+)
+goto :end
+
+:llama_cpp_check
+echo.
+echo ========================================
+echo   llama-cpp Health Check and Recovery
+echo ========================================
+echo.
+echo [INFO] Checking llama-cpp service status...
+cd /d "%SCRIPT_DIR%\.."
+docker compose ps llama-cpp llama-cpp-embed --format "table {{.Service}}\t{{.Status}}"
+echo.
+echo [INFO] Testing llama-cpp health endpoint...
+docker compose exec llama-cpp curl -s -f http://localhost:8080/health >nul 2>&1
+set RESULT=%ERRORLEVEL%
+if %RESULT% EQU 0 (
+    echo [SUCCESS] llama-cpp is healthy and running
+) else (
+    echo [WARN] llama-cpp health check failed, restarting...
+    docker compose restart llama-cpp
+    echo [INFO] Waiting for llama-cpp to start ^(large model, may take up to 2 minutes^)...
+    timeout /t 60 /nobreak >nul
+    docker compose exec llama-cpp curl -s -f http://localhost:8080/health >nul 2>&1
+    set RESULT=!ERRORLEVEL!
+    if !RESULT! EQU 0 (
+        echo [SUCCESS] llama-cpp restored after restart
+    ) else (
+        echo [ERROR] llama-cpp still not healthy - check logs: docker compose logs llama-cpp
+    )
+)
+echo.
+echo [INFO] Testing llama-cpp-embed health endpoint...
+docker compose exec llama-cpp-embed curl -s -f http://localhost:8080/health >nul 2>&1
+set RESULT=%ERRORLEVEL%
+if %RESULT% EQU 0 (
+    echo [SUCCESS] llama-cpp-embed is healthy and running
+) else (
+    echo [WARN] llama-cpp-embed health check failed, restarting...
+    docker compose restart llama-cpp-embed
+    echo [INFO] Waiting for llama-cpp-embed to start...
+    timeout /t 30 /nobreak >nul
+    docker compose exec llama-cpp-embed curl -s -f http://localhost:8080/health >nul 2>&1
+    set RESULT=!ERRORLEVEL!
+    if !RESULT! EQU 0 (
+        echo [SUCCESS] llama-cpp-embed restored after restart
+    ) else (
+        echo [ERROR] llama-cpp-embed still not healthy - check logs: docker compose logs llama-cpp-embed
+    )
+)
+cd /d "%SCRIPT_DIR%"
+if "%1"=="" (
+    echo.
+    pause
+    goto :interactive_menu
+)
+goto :end
+
+:open_notebook_check
+echo.
+echo ========================================
+echo   open-notebook Health Check and Recovery
+echo ========================================
+echo.
+echo [INFO] Checking surrealdb (open-notebook DB) status...
+cd /d "%SCRIPT_DIR%\.."
+docker compose ps surrealdb --format "table {{.Service}}\t{{.Status}}"
+docker compose ps surrealdb --format json 2>nul | findstr /C:"\"State\":\"running\"" >nul 2>&1
+set RESULT=%ERRORLEVEL%
+if not %RESULT% EQU 0 (
+    echo [WARN] surrealdb not running, starting...
+    docker compose up -d surrealdb
+    timeout /t 10 /nobreak >nul
+)
+echo.
+echo [INFO] Checking open_notebook service status...
+docker compose ps open_notebook --format "table {{.Service}}\t{{.Status}}"
+echo.
+echo [INFO] Testing open-notebook API endpoint (port 5055)...
+docker compose exec open_notebook python3 -c "import urllib.request,sys; urllib.request.urlopen('http://localhost:5055/api/config', timeout=5); sys.exit(0)" >nul 2>&1
+set RESULT=%ERRORLEVEL%
+if %RESULT% EQU 0 (
+    echo [SUCCESS] open-notebook API is healthy and running
+) else (
+    echo [WARN] open-notebook API health check failed, restarting...
+    docker compose restart open_notebook
+    echo [INFO] Waiting for open-notebook to start ^(Next.js waits for FastAPI, may take up to 90 seconds^)...
+    timeout /t 60 /nobreak >nul
+    docker compose exec open_notebook python3 -c "import urllib.request,sys; urllib.request.urlopen('http://localhost:5055/api/config', timeout=5); sys.exit(0)" >nul 2>&1
+    set RESULT=!ERRORLEVEL!
+    if !RESULT! EQU 0 (
+        echo [SUCCESS] open-notebook restored after restart
+    ) else (
+        echo [ERROR] open-notebook still not healthy - check logs: docker compose logs open_notebook
+    )
+)
+cd /d "%SCRIPT_DIR%"
 if "%1"=="" (
     echo.
     pause
@@ -460,9 +798,14 @@ echo Options:
 echo   namespace         - Quick restart of Tailscale (fixes most network issues)
 echo   status            - Show detailed system status
 echo   gpu               - Check and restart GPU functionality
+echo   gpu-map           - Show current GPU assignment per service
 echo   restart-openwebui - Properly restart OpenWebUI with dependent containers
 echo   rebuild           - Rebuild and restart Tailscale container
 echo   lmstudio          - Fix LM Studio Tailscale connectivity
+echo   mnemory           - Check Mnemory health and restart if needed
+echo   smolcrawl         - Check SmolCrawl Pipelines health and restart if needed
+echo   llama-cpp         - Check llama-cpp and llama-cpp-embed health and restart if needed
+echo   open-notebook     - Check open-notebook (and surrealdb) health and restart if needed
 echo   nuclear           - Full stack restart (use when all else fails)
 echo.
 echo Examples:

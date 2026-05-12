@@ -1,0 +1,56 @@
+[project]
+name = "smolcrawl"
+version = "0.1.7"
+authors = [
+  { name="Bill Chambers", email="contact@learnbybuilding.ai" },
+]
+description = "Crawls and indexes websites for local LLM work"
+readme = "README.md"
+requires-python = ">=3.11"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+license = "MIT"
+dependencies = [
+    # Core dependencies (required)
+    "pydantic>=2.0.0,<3.0.0",
+    "requests>=2.28.0",
+    "httpx[http2]>=0.27.0",
+    "markdownify>=1.1.0",
+    "readabilipy>=0.3.0",
+    "beautifulsoup4>=4.12.0",
+    "lxml>=5.0.0",
+    "loguru>=0.7.3",
+    "typer>=0.15.2",
+    "PyYAML>=6.0",
+    "python-dotenv>=1.1.0",
+    "diskcache>=5.6.3",
+]
+
+[project.optional-dependencies]
+# Full installation with search indexing
+full = [
+    "tantivy>=0.22.2",
+]
+# OWUI integration (no extra deps needed — httpx already required)
+owui = []
+# Development dependencies
+dev = [
+    "pytest>=7.0.0",
+    "black>=23.0.0",
+    "mypy>=1.0.0",
+]
+[project.urls]
+Homepage = "https://github.com/bllchmbrs/smolcrawl"
+
+
+[project.scripts]
+smolcrawl = "smolcrawl:app"
+
+
+[[tool.uv.index]]
+name = "testpypi"
+url = "https://test.pypi.org/simple/"
+publish-url = "https://test.pypi.org/legacy/"
+explicit = true

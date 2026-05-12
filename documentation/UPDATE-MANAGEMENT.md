@@ -7,22 +7,26 @@ The AI Stack now uses **manual update management** to prevent accidental version
 ## Quick Reference
 
 ### Check Current Versions
+
 ```bash
 scripts\update-stack.bat check
 ```
 
 **Output includes:**
+
 - Current OpenWebUI version
 - Current Ollama version
 - Dockerfile base image version
 - Links to latest releases
 
 ### Update OpenWebUI
+
 ```bash
 scripts\update-stack.bat openwebui
 ```
 
 **Process:**
+
 1. Creates backup: `data-backup-YYYYMMDD-HHMMSS/`
 2. Prompts for version: `v0.6.41`
 3. Updates `Dockerfile.openwebui-gpu`
@@ -33,11 +37,13 @@ scripts\update-stack.bat openwebui
 **Time:** ~5-10 minutes (depending on image pull/build speed)
 
 ### Update Ollama
+
 ```bash
 scripts\update-stack.bat ollama
 ```
 
 **Process:**
+
 1. Pulls latest `ollama/ollama:latest` image
 2. Restarts Ollama container
 3. Verifies version
@@ -45,6 +51,7 @@ scripts\update-stack.bat ollama
 **Time:** ~1-2 minutes
 
 ### Update Both
+
 ```bash
 scripts\update-stack.bat all
 ```
@@ -56,22 +63,25 @@ Runs both OpenWebUI and Ollama updates sequentially with confirmation prompt.
 ### Docker Compose Pull Policies
 
 **Before (auto-update on every rebuild):**
+
 ```yaml
 openwebui:
-  pull_policy: always  # Pulls new base image every time
+  pull_policy: always # Pulls new base image every time
 ollama:
-  pull_policy: always  # Pulls new image every time
+  pull_policy: always # Pulls new image every time
 ```
 
 **After (manual updates only):**
+
 ```yaml
 openwebui:
-  pull_policy: build  # Only rebuilds from Dockerfile, no auto-pull
+  pull_policy: build # Only rebuilds from Dockerfile, no auto-pull
 ollama:
-  pull_policy: never  # Never auto-pulls, manual only
+  pull_policy: never # Never auto-pulls, manual only
 ```
 
 ### Benefits
+
 - ✅ Prevents accidental version changes
 - ✅ Ensures tested versions remain stable
 - ✅ Automatic backups before updates
@@ -81,6 +91,7 @@ ollama:
 ## Version History
 
 Track your updates by checking backup directories:
+
 ```bash
 dir data-backup-*
 ```
@@ -94,6 +105,7 @@ Each backup folder is timestamped: `data-backup-YYYYMMDD-HHMMSS`
 **Symptom:** `docker compose build` fails during PyTorch installation
 
 **Solution:**
+
 ```bash
 # Check build logs for CUDA version mismatch
 docker compose build --no-cache --progress=plain openwebui
@@ -110,6 +122,7 @@ nvidia-smi
 **Symptom:** `CUDA available: False` after update
 
 **Solution:**
+
 ```bash
 # Quick GPU recovery
 scripts\quick-fixes.bat gpu
@@ -128,6 +141,7 @@ docker compose exec openwebui nvidia-smi
 **Root Cause:** Network namespace sharing requires coordinated restart
 
 **Solution:**
+
 ```bash
 # Restart dependent services
 docker compose up -d ollama tailscale
@@ -141,13 +155,17 @@ scripts\quick-fixes.bat nuclear
 **Symptom:** Update caused issues, need to restore previous version
 
 **Solution:**
+
 ```bash
 # 1. Stop services
 docker compose down
 
-# 2. Restore backup (replace TIMESTAMP with your backup folder)
-rmdir /s /q data\openwebui
-xcopy /E /I data-backup-TIMESTAMP\openwebui data\openwebui
+# 2. Restore the OpenWebUI named volume from a tarball backup
+docker run --rm \
+  -v ai-stack_openwebui-data:/data \
+  -v ${PWD}/backups/openwebui:/backups:ro \
+  -v ${PWD}/backup/openwebui-restore.sh:/scripts/restore.sh:ro \
+  alpine:3.21 sh /scripts/restore.sh /backups/openwebui-backup-TIMESTAMP.tar.gz
 
 # 3. Edit Dockerfile.openwebui-gpu - change version to previous
 # Example: FROM ghcr.io/open-webui/open-webui:v0.6.40
@@ -160,19 +178,22 @@ docker compose up -d
 ## Version Compatibility Matrix
 
 ### Current Tested Configuration
+
 - **OpenWebUI**: v0.6.41
 - **PyTorch**: 2.5.1+cu121
 - **Ollama**: 0.13.3
 - **CUDA**: 12.1+ (compatible with 12.9 drivers)
 
 ### PyTorch CUDA Compatibility
-| CUDA Version | PyTorch Index URL |
-|--------------|-------------------|
-| 11.8 | `https://download.pytorch.org/whl/cu118` |
-| 12.1 | `https://download.pytorch.org/whl/cu121` |
-| 12.4 | `https://download.pytorch.org/whl/cu124` |
+
+| CUDA Version | PyTorch Index URL                        |
+| ------------ | ---------------------------------------- |
+| 11.8         | `https://download.pytorch.org/whl/cu118` |
+| 12.1         | `https://download.pytorch.org/whl/cu121` |
+| 12.4         | `https://download.pytorch.org/whl/cu124` |
 
 **Check your CUDA version:**
+
 ```bash
 nvidia-smi  # Look for "CUDA Version: XX.X"
 ```
@@ -180,17 +201,20 @@ nvidia-smi  # Look for "CUDA Version: XX.X"
 ## Best Practices
 
 ### Before Updating
+
 1. ✅ Check release notes for breaking changes
 2. ✅ Verify sufficient disk space (backups + new images ~5-10 GB)
 3. ✅ Update during low-usage time
 4. ✅ Have rollback plan ready
 
 ### During Update
+
 1. ✅ Monitor build output for errors
 2. ✅ Don't interrupt image pull/build
 3. ✅ Wait for health checks to pass
 
 ### After Update
+
 1. ✅ Test basic functionality (chat, model loading)
 2. ✅ Verify GPU acceleration (check reranker speed)
 3. ✅ Check Tailscale connectivity
@@ -201,12 +225,14 @@ nvidia-smi  # Look for "CUDA Version: XX.X"
 ### Why No Auto-Updates?
 
 **Custom builds require careful handling:**
+
 - GPU-specific PyTorch installation
 - CUDA version compatibility
 - Network namespace coordination
 - Data migration considerations
 
 **Manual updates ensure:**
+
 - Controlled version testing
 - Automatic backups
 - GPU compatibility verification
@@ -215,6 +241,7 @@ nvidia-smi  # Look for "CUDA Version: XX.X"
 ### Future: Scripted Updates
 
 For advanced users, create a scheduled task:
+
 ```powershell
 # Example: Weekly update check (manual execution still required)
 $action = New-ScheduledTaskAction -Execute "scripts\update-stack.bat" -Argument "check"
@@ -225,23 +252,27 @@ Register-ScheduledTask -TaskName "AI Stack Update Check" -Action $action -Trigge
 ## Getting Help
 
 **Check versions:**
+
 ```bash
 scripts\update-stack.bat check
 ```
 
 **Service health:**
+
 ```bash
 docker compose ps
 scripts\quick-fixes.bat status
 ```
 
 **Detailed logs:**
+
 ```bash
 docker compose logs openwebui | tail -100
 docker compose logs ollama | tail -50
 ```
 
 **GPU status:**
+
 ```bash
 scripts\quick-fixes.bat gpu
 ```

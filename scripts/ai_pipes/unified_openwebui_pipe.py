@@ -136,20 +136,40 @@ class Pipe:
                     }
                 }
                 
-            # Direct import approach instead of dynamic loading
-            if os.path.exists('/host_project/core'):
-                sys.path.append('/host_project/core')
-                from router import main as router_main
-            else:
-                # Host environment - add core directory path
-                current_dir = os.path.dirname(os.path.abspath(__file__))
-                project_root = os.path.dirname(os.path.dirname(current_dir))
-                core_dir = os.path.join(project_root, "core")
-                sys.path.append(core_dir)
-                from router import main as router_main
-            
+            # Fresh-load the router from disk on every call so edits to
+            # core/router.py take effect immediately without restarting the
+            # openwebui container. (`from router import main` would hit the
+            # sys.modules cache and pin the first-loaded version.) The module
+            # MUST be registered in sys.modules before exec_module — dataclass
+            # resolution inside router.py requires self-lookup during class
+            # construction.
+            router_module_name = "_ai_stack_router_live"
+            spec = importlib.util.spec_from_file_location(
+                router_module_name, self.valves.ROUTER_SCRIPT_PATH
+            )
+            if spec is None or spec.loader is None:
+                return {
+                    "service": "AI Stack Unified Pipe",
+                    "status": "error",
+                    "message": f"Cannot load router spec from {self.valves.ROUTER_SCRIPT_PATH}",
+                }
+            router_mod = importlib.util.module_from_spec(spec)
+            sys.modules[router_module_name] = router_mod  # register first
+            try:
+                spec.loader.exec_module(router_mod)  # then exec — reads fresh from disk
+            except Exception:
+                sys.modules.pop(router_module_name, None)
+                raise
+
+            if not hasattr(router_mod, "main"):
+                return {
+                    "service": "AI Stack Unified Pipe",
+                    "status": "error",
+                    "message": "router.py is missing a top-level main(payload) function",
+                }
+
             # Execute router main function
-            result = router_main(payload)
+            result = router_mod.main(payload)
             
             if self.valves.LOG_EXECUTION:
                 user_input = payload.get('input', '')[:50]

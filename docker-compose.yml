@@ -8,14 +8,20 @@ services:
     container_name: openwebui
     ports:
       - "127.0.0.1:3000:8080" # Bind to localhost only
+    networks:
+      - default
+      - llm-net
     volumes:
-      - ./data/openwebui:/app/backend/data
+      - openwebui-data:/app/backend/data
       - ./config:/app/config:ro # Read-only config
       - .:/host_project:ro # Mount entire project for AI Stack pipe functions
     environment:
       - OLLAMA_HOST=http://localhost:11434
       - USE_CUDA=true
       - USE_CUDA_DOCKER=true
+      - NVIDIA_VISIBLE_DEVICES=${GPU_AISTACK_DEVICE_ID:-1}
+      - CUDA_VISIBLE_DEVICES=${GPU_AISTACK_DEVICE_ID:-1}
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
       - TRANSFORMERS_CACHE=/tmp/transformers_cache
       - HF_HOME=/tmp/hf_cache
       # Performance Optimizations for faster Ollama communication
@@ -34,7 +40,7 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              count: all
+              device_ids: ["${GPU_AISTACK_DEVICE_ID:-1}"]
               capabilities: [ gpu ]
     restart: unless-stopped
     pull_policy: build
@@ -85,6 +91,18 @@ services:
       - LMSTUDIO_HOST=${LMSTUDIO_HOST:-host.docker.internal}
       - LMSTUDIO_PORT=${LMSTUDIO_PORT:-1234}
       - LMSTUDIO_ENABLED=${LMSTUDIO_ENABLED:-true}
+      - LLAMA_CPP_HOST=${LLAMA_CPP_HOST:-llama-cpp}
+      - LLAMA_CPP_PORT=${LLAMA_CPP_PORT:-8080}
+      - LLAMA_CPP_ENABLED=${LLAMA_CPP_ENABLED:-true}
+      - LLAMA_CPP_EMBED_HOST=${LLAMA_CPP_EMBED_HOST:-llama-cpp-embed}
+      - LLAMA_CPP_EMBED_PORT=${LLAMA_CPP_EMBED_PORT:-8080}
+      - LLAMA_CPP_EMBED_ENABLED=${LLAMA_CPP_EMBED_ENABLED:-true}
+      - OPEN_NOTEBOOK_HOST=${OPEN_NOTEBOOK_HOST:-open_notebook}
+      - OPEN_NOTEBOOK_PORT=${OPEN_NOTEBOOK_PORT:-8502}
+      - OPEN_NOTEBOOK_ENABLED=${OPEN_NOTEBOOK_ENABLED:-true}
+      - OPEN_NOTEBOOK_TS_PORT=${OPEN_NOTEBOOK_TS_PORT:-8443}
+      - OPEN_NOTEBOOK_API_PORT=${OPEN_NOTEBOOK_API_PORT:-5055}
+      - OPEN_NOTEBOOK_API_TS_PORT=${OPEN_NOTEBOOK_API_TS_PORT:-5055}
     volumes:
       - ./data/tailscale:/var/lib/tailscale
       - /dev/net/tun:/dev/net/tun
@@ -95,7 +113,7 @@ services:
     labels:
       - "com.centurylinklabs.watchtower.enable=false"
     healthcheck:
-      test: [ "CMD", "sh", "-c", "tailscale --socket=/tmp/tailscaled.sock status >/dev/null 2>&1 && ping -c 1 8.8.8.8 >/dev/null 2>&1 && wget -q -T 3 -O /dev/null http://127.0.0.1:8080 && wget -q -T 3 -O /dev/null http://127.0.0.1:11434/api/version" ]
+      test: [ "CMD", "sh", "-c", "tailscale --socket=/tmp/tailscaled.sock status >/dev/null 2>&1 && ping -c 1 8.8.8.8 >/dev/null 2>&1 && wget -q -T 3 -O /dev/null http://127.0.0.1:8080" ]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -118,31 +136,261 @@ services:
     labels:
       - "com.centurylinklabs.watchtower.enable=false"
 
-  ollama:
-    image: ollama/ollama:latest
-    container_name: ollama
-    network_mode: service:openwebui
+  # ollama: # DISABLED - no longer used; llama-cpp (llama-swap) handles all LLM inference
+  #   image: ollama/ollama:latest
+  #   container_name: ollama
+  #   network_mode: service:openwebui
+  #   volumes:
+  #     - ./data/ollama:/root/.ollama
+  #   environment:
+  #     - NVIDIA_VISIBLE_DEVICES=${GPU_AISTACK_DEVICE_ID:-1}
+  #     - CUDA_VISIBLE_DEVICES=${GPU_AISTACK_DEVICE_ID:-1}
+  #     - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+  #     # Optimized Ollama settings for faster response to OpenWebUI
+  #     - OLLAMA_KEEP_ALIVE=1200 # Keep models in memory longer (20 minutes in seconds)
+  #     - OLLAMA_HOST=0.0.0.0:11434
+  #     - OLLAMA_ORIGINS=*
+  #     - OLLAMA_MAX_LOADED_MODELS=2 # Allow multiple models to stay loaded
+  #     - OLLAMA_NUM_PARALLEL=2 # Allow parallel requests
+  #     - OLLAMA_FLASH_ATTENTION=1 # Enable flash attention for faster inference
+  #   deploy:
+  #     resources:
+  #       reservations:
+  #         devices:
+  #           - driver: nvidia
+  #             device_ids: ["${GPU_AISTACK_DEVICE_ID:-1}"]
+  #             capabilities: [ gpu ]
+  #   restart: unless-stopped
+  #   pull_policy: never
+  #   security_opt:
+  #     - no-new-privileges:true
+  #   depends_on:
+  #     openwebui:
+  #       condition: service_healthy
+  #   labels:
+  #     - "com.centurylinklabs.watchtower.enable=false"
+  #   healthcheck:
+  #     test: [ "CMD", "ollama", "list" ]
+  #     interval: 30s
+  #     timeout: 10s
+  #     retries: 3
+  #     start_period: 30s
+
+  llama-cpp:
+    image: ghcr.io/mostlygeek/llama-swap:cuda
+    container_name: llama-cpp
+    networks:
+      - llm-net
+    command:
+      - -config
+      - /app/config.yaml
+    ports:
+      - "127.0.0.1:8081:8080"
     volumes:
-      - ./data/ollama:/root/.ollama
+      - C:\Users\yamao\.lmstudio\models:/models:ro
+      - ./config/llama-swap.config.yaml:/app/config.yaml:ro
+      - ./config/chat-template.jinja:/etc/llama/chat-template.jinja:ro
     environment:
-      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_VISIBLE_DEVICES=${GPU_LLAMA_CPP_DEVICE_ID:-0}
+      - CUDA_VISIBLE_DEVICES=${GPU_LLAMA_CPP_DEVICE_ID:-0}
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
-      # Optimized Ollama settings for faster response to OpenWebUI
-      - OLLAMA_KEEP_ALIVE=1200 # Keep models in memory longer (20 minutes in seconds)
-      - OLLAMA_HOST=0.0.0.0:11434
-      - OLLAMA_ORIGINS=*
-      - OLLAMA_MAX_LOADED_MODELS=2 # Allow multiple models to stay loaded
-      - OLLAMA_NUM_PARALLEL=2 # Allow parallel requests
-      - OLLAMA_FLASH_ATTENTION=1 # Enable flash attention for faster inference
+      - LLAMA_CPP_TIMEOUT=${LLAMA_CPP_TIMEOUT:-300}
+      - LLAMA_CPP_CACHE_TYPE_K=${LLAMA_CPP_CACHE_TYPE_K:-q4_0}
+      - LLAMA_CPP_CACHE_TYPE_V=${LLAMA_CPP_CACHE_TYPE_V:-q4_0}
+      - LLAMA_SWAP_QWEN36_35B_MODEL_PATH=${LLAMA_SWAP_QWEN36_35B_MODEL_PATH:-/models/lmstudio-community/Qwen3.6-35B-A3B-GGUF/Qwen3.6-35B-A3B-Q4_K_M.gguf}
+      - LLAMA_SWAP_QWEN36_35B_CTX_SIZE=${LLAMA_SWAP_QWEN36_35B_CTX_SIZE:-262144}
+      - LLAMA_SWAP_QWEN36_35B_N_GPU_LAYERS=${LLAMA_SWAP_QWEN36_35B_N_GPU_LAYERS:-99}
+      - LLAMA_SWAP_QWEN36_35B_N_PARALLEL=${LLAMA_SWAP_QWEN36_35B_N_PARALLEL:-1}
+      - LLAMA_SWAP_QWEN36_35B_BATCH=${LLAMA_SWAP_QWEN36_35B_BATCH:-1024}
+      - LLAMA_SWAP_QWEN36_35B_UBATCH=${LLAMA_SWAP_QWEN36_35B_UBATCH:-512}
+      - LLAMA_SWAP_QWEN36_35B_CACHE_TYPE_K=${LLAMA_SWAP_QWEN36_35B_CACHE_TYPE_K:-q4_0}
+      - LLAMA_SWAP_QWEN36_35B_CACHE_TYPE_V=${LLAMA_SWAP_QWEN36_35B_CACHE_TYPE_V:-q4_0}
+      - LLAMA_SWAP_QWEN36_35B_REASONING_BUDGET=${LLAMA_SWAP_QWEN36_35B_REASONING_BUDGET:-4096}
+      - LLAMA_SWAP_QWEN36_27B_MODEL_PATH=${LLAMA_SWAP_QWEN36_27B_MODEL_PATH:-/models/lmstudio-community/Qwen3.6-27B-GGUF/Qwen3.6-27B-Q4_K_M.gguf}
+      - LLAMA_SWAP_QWEN36_27B_CTX_SIZE=${LLAMA_SWAP_QWEN36_27B_CTX_SIZE:-262144}
+      - LLAMA_SWAP_QWEN36_27B_N_GPU_LAYERS=${LLAMA_SWAP_QWEN36_27B_N_GPU_LAYERS:-99}
+      - LLAMA_SWAP_QWEN36_27B_N_PARALLEL=${LLAMA_SWAP_QWEN36_27B_N_PARALLEL:-1}
+      - LLAMA_SWAP_QWEN36_27B_BATCH=${LLAMA_SWAP_QWEN36_27B_BATCH:-1024}
+      - LLAMA_SWAP_QWEN36_27B_UBATCH=${LLAMA_SWAP_QWEN36_27B_UBATCH:-512}
+      - LLAMA_SWAP_QWEN36_27B_CACHE_TYPE_K=${LLAMA_SWAP_QWEN36_27B_CACHE_TYPE_K:-q4_0}
+      - LLAMA_SWAP_QWEN36_27B_CACHE_TYPE_V=${LLAMA_SWAP_QWEN36_27B_CACHE_TYPE_V:-q4_0}
+      - LLAMA_SWAP_QWEN36_27B_REASONING_BUDGET=${LLAMA_SWAP_QWEN36_27B_REASONING_BUDGET:-4096}
     deploy:
       resources:
         reservations:
           devices:
             - driver: nvidia
-              count: all
-              capabilities: [ gpu ]
+              device_ids: ["${GPU_LLAMA_CPP_DEVICE_ID:-0}"]
+              capabilities: [gpu]
     restart: unless-stopped
-    pull_policy: never
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      # Phase 1: basic liveness. Phase 2: slot watchdog — if any slot stays in
+      # "processing" state for > 15 min (900 s), kill llama-server so Docker
+      # restarts the container. Timestamp is stored in /tmp/.sb between checks.
+      test: ["CMD-SHELL", "curl -sf --max-time 5 http://localhost:8080/health || exit 1; SLOTS=$$(curl -sf --max-time 5 http://localhost:8080/slots 2>/dev/null); if echo \"$$SLOTS\" | grep -q '\"state\":[1-9]'; then [ -f /tmp/.sb ] || date +%s > /tmp/.sb; NOW=$$(date +%s); START=$$(cat /tmp/.sb 2>/dev/null || echo $$NOW); AGE=$$((NOW - START)); if [ $$AGE -gt 900 ]; then rm -f /tmp/.sb; pkill llama-server 2>/dev/null; exit 1; fi; else rm -f /tmp/.sb 2>/dev/null; fi"]
+      interval: 60s
+      timeout: 15s
+      retries: 2
+      start_period: 120s
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
+  mnemory:
+    build:
+      context: ../mnemory
+      dockerfile: Dockerfile
+    container_name: mnemory
+    networks:
+      - llm-net
+    ports:
+      - "127.0.0.1:8050:8050"
+      - "127.0.0.1:8051:8051"
+    environment:
+      - LLM_API_KEY=ollama
+      - LLM_BASE_URL=http://llama-cpp:8080/v1
+      - LLM_MODEL=qwen36-27b:nothink
+      - EMBED_BASE_URL=http://llama-cpp-embed:8080/v1
+      - EMBED_MODEL=qllama/bge-m3:latest
+      - EMBED_DIMS=1024
+      - MCP_API_KEY=${MCP_API_KEY}
+      - MCP_API_KEYS=${MCP_API_KEYS}
+      - FIND_MEMORIES_QUERIES=3
+      - LLM_CONTEXT_SIZE=${MNEMORY_LLM_CONTEXT_SIZE:-131072}
+      - MGMT_PORT=8051
+    volumes:
+      - mnemory-data:/data
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      llama-cpp:
+        condition: service_healthy
+      llama-cpp-embed:
+        condition: service_healthy
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8051/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  mnemory-backup:
+    image: alpine:3.21
+    container_name: mnemory-backup
+    volumes:
+      - mnemory-data:/data:ro
+      - ./backups/mnemory:/backups
+      - ./backup/mnemory-backup.sh:/scripts/backup.sh:ro
+    environment:
+      - BACKUP_DIR=/backups
+      - DATA_DIR=/data
+      - RETAIN_DAYS=${BACKUP_RETAIN_DAYS:-7}
+      - BACKUP_CRON=${BACKUP_CRON:-0 2 * * *}
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        chmod +x /scripts/backup.sh
+        echo "$${BACKUP_CRON} /scripts/backup.sh >> /var/log/backup.log 2>&1" > /etc/crontabs/root
+        echo "[$(date -u +%FT%TZ)] Backup scheduler started (cron: $${BACKUP_CRON}, retain: $${RETAIN_DAYS} days)"
+        crond -f -l 2
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      mnemory:
+        condition: service_healthy
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
+  openwebui-backup:
+    image: alpine:3.21
+    container_name: openwebui-backup
+    volumes:
+      - openwebui-data:/data:ro
+      - ./backups/openwebui:/backups
+      - ./backup/openwebui-backup.sh:/scripts/backup.sh:ro
+    environment:
+      - BACKUP_DIR=/backups
+      - DATA_DIR=/data
+      - RETAIN_DAYS=${OPENWEBUI_BACKUP_RETAIN_DAYS:-7}
+      - BACKUP_CRON=${OPENWEBUI_BACKUP_CRON:-0 2 * * *}
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        echo "$${BACKUP_CRON} sh /scripts/backup.sh >> /var/log/backup.log 2>&1" > /etc/crontabs/root
+        echo "[$(date -u +%FT%TZ)] Backup scheduler started (cron: $${BACKUP_CRON}, retain: $${RETAIN_DAYS} days)"
+        crond -f -l 2
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      openwebui:
+        condition: service_healthy
+
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
+  llama-cpp-embed:
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda
+    container_name: llama-cpp-embed
+    networks:
+      - llm-net
+    ports:
+      - "127.0.0.1:8082:8080"
+    volumes:
+      - ./data/models/embeddings:/models:ro
+    environment:
+      # NVIDIA_VISIBLE_DEVICES selects host GPU exposed to this container.
+      # CUDA_VISIBLE_DEVICES intentionally unset: NVIDIA Container Toolkit
+      # reindexes visible GPUs starting at 0 inside the container, so setting
+      # CUDA_VISIBLE_DEVICES to the *host* index makes CUDA see no devices.
+      - NVIDIA_VISIBLE_DEVICES=${GPU_LLAMA_CPP_EMBED_DEVICE_ID:-1}
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - LLAMA_ARG_MODEL=/models/bge-m3-f16.gguf
+      - LLAMA_ARG_CTX_SIZE=20480
+      - LLAMA_ARG_N_GPU_LAYERS=99
+      - LLAMA_ARG_N_PARALLEL=2
+      - LLAMA_ARG_HOST=0.0.0.0
+      - LLAMA_ARG_PORT=8080
+      - LLAMA_ARG_EMBEDDINGS=true
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${GPU_LLAMA_CPP_EMBED_DEVICE_ID:-1}"]
+              capabilities: [gpu]
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "curl", "-f", "--max-time", "5", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
+  smolcrawl-pipelines:
+    build:
+      context: ./smolcrawl
+      dockerfile: Dockerfile
+    container_name: smolcrawl-pipelines
+    ports:
+      - "127.0.0.1:9099:9099"
+    volumes:
+      - smolcrawl-data:/app/pipelines
+    environment:
+      - PIPELINES_DIR=/app/pipelines
+      - PIPELINES_API_KEY=${SMOLCRAWL_API_KEY:-0p3n-w3bu!}
+    restart: unless-stopped
     security_opt:
       - no-new-privileges:true
     depends_on:
@@ -151,8 +399,63 @@ services:
     labels:
       - "com.centurylinklabs.watchtower.enable=false"
     healthcheck:
-      test: [ "CMD", "ollama", "list" ]
+      test: ["CMD", "curl", "-f", "--max-time", "5", "http://localhost:9099/"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 30s
+      start_period: 60s
+
+  surrealdb:
+    image: surrealdb/surrealdb:v2
+    container_name: surrealdb
+    command: start --log info --user root --pass root rocksdb:/mydata/mydatabase.db
+    user: root  # Required for bind mounts on Linux
+    ports:
+      - "8003:8000"
+    volumes:
+      - D:\Open WebUI\open-notebook\surreal_data:/mydata
+    environment:
+      - SURREAL_EXPERIMENTAL_GRAPHQL=true
+    restart: always
+    pull_policy: always
+
+  open_notebook:
+    image: lfnovo/open_notebook:v1-latest
+    container_name: open_notebook
+    networks:
+      - default
+      - llm-net
+    ports:
+      - "8503:8502"  # Web UI
+      - "5055:5055"  # REST API
+    environment:
+      # REQUIRED: Change this to your own secret string
+      # This encrypts your API keys in the database
+      - OPEN_NOTEBOOK_ENCRYPTION_KEY=Im-a-secret-key-for-secrets-Tcd3
+
+      # Database connection (default values - no need to change)
+      - SURREAL_URL=ws://surrealdb:8000/rpc
+      - SURREAL_USER=root
+      - SURREAL_PASSWORD=root
+      - SURREAL_NAMESPACE=open_notebook
+      - SURREAL_DATABASE=open_notebook
+    volumes:
+      - D:\Open WebUI\open-notebook\notebook_data:/app/data
+    depends_on:
+      - surrealdb
+    restart: always
+    pull_policy: always
+
+volumes:
+  openwebui-data:
+  mnemory-data:
+  smolcrawl-data:
+
+networks:
+  # Internal-only network: no gateway, no internet access.
+  # llama-cpp containers are isolated here — they can only be reached
+  # by services that are also on this network (openwebui, mnemory).
+  llm-net:
+    internal: true
+  default:
+    driver: bridge

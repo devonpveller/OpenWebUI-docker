@@ -127,25 +127,76 @@ def check_gpu_status():
         log_error("GPU status check failed")
         return False
 
-def check_ollama_status():
-    """Check Ollama status"""
+def check_llama_cpp_status():
+    """Check llama-cpp server status"""
     project_root = find_project_root()
     if not project_root:
         return False
     
     print()
-    log_info("Ollama Status:")
+    log_info("llama-cpp Status:")
     result = run_docker_command(
-        ["docker", "compose", "exec", "-T", "ollama", "ollama", "list"],
+        ["docker", "compose", "exec", "-T", "tailscale", "wget", "-q", "-T", "5", "-O", "-", "http://llama-cpp:8080/health"],
         project_root,
-        timeout=30
+        timeout=15
     )
     
     if result and result.returncode == 0:
-        print(result.stdout)
+        log_success("llama-cpp health: OK")
+        print(result.stdout.strip())
+    else:
+        log_error("llama-cpp health: FAILED")
+        return False
+    
+    # Check models loaded
+    result = run_docker_command(
+        ["docker", "compose", "exec", "-T", "tailscale", "wget", "-q", "-T", "5", "-O", "-", "http://llama-cpp:8080/v1/models"],
+        project_root,
+        timeout=15
+    )
+    
+    if result and result.returncode == 0:
+        log_success("llama-cpp models endpoint: OK")
+        print(result.stdout.strip())
         return True
     else:
-        log_error("Ollama status check failed")
+        log_warn("llama-cpp models endpoint not responding")
+        return False
+
+def check_llama_cpp_embed_status():
+    """Check llama-cpp-embed server status"""
+    project_root = find_project_root()
+    if not project_root:
+        return False
+    
+    print()
+    log_info("llama-cpp-embed Status:")
+    result = run_docker_command(
+        ["docker", "compose", "exec", "-T", "tailscale", "wget", "-q", "-T", "5", "-O", "-", "http://llama-cpp-embed:8080/health"],
+        project_root,
+        timeout=15
+    )
+    
+    if result and result.returncode == 0:
+        log_success("llama-cpp-embed health: OK")
+        print(result.stdout.strip())
+    else:
+        log_error("llama-cpp-embed health: FAILED")
+        return False
+    
+    # Check embeddings endpoint
+    result = run_docker_command(
+        ["docker", "compose", "exec", "-T", "tailscale", "wget", "-q", "-T", "5", "-O", "-", "http://llama-cpp-embed:8080/v1/models"],
+        project_root,
+        timeout=15
+    )
+    
+    if result and result.returncode == 0:
+        log_success("llama-cpp-embed models endpoint: OK")
+        print(result.stdout.strip())
+        return True
+    else:
+        log_warn("llama-cpp-embed models endpoint not responding")
         return False
 
 def check_network_connectivity():
@@ -268,6 +319,30 @@ def check_service_accessibility():
     else:
         log_error("Ollama API accessibility: FAILED")
     
+    # Check llama-cpp accessibility
+    result = run_docker_command(
+        ["docker", "compose", "exec", "-T", "tailscale", "wget", "-q", "-T", "5", "-O", "/dev/null", "http://llama-cpp:8080/health"],
+        project_root,
+        timeout=10
+    )
+    
+    if result and result.returncode == 0:
+        log_success("llama-cpp accessibility: OK")
+    else:
+        log_error("llama-cpp accessibility: FAILED")
+    
+    # Check llama-cpp-embed accessibility
+    result = run_docker_command(
+        ["docker", "compose", "exec", "-T", "tailscale", "wget", "-q", "-T", "5", "-O", "/dev/null", "http://llama-cpp-embed:8080/health"],
+        project_root,
+        timeout=10
+    )
+    
+    if result and result.returncode == 0:
+        log_success("llama-cpp-embed accessibility: OK")
+    else:
+        log_error("llama-cpp-embed accessibility: FAILED")
+    
     return True
 
 def main():
@@ -288,7 +363,8 @@ def main():
         check_container_status,
         start_missing_services,
         check_gpu_status,
-        check_ollama_status,
+        check_llama_cpp_status,
+        check_llama_cpp_embed_status,
         check_open_terminal_status,
         check_network_connectivity,
         check_tailscale_status,
