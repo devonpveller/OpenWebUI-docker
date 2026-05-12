@@ -49,24 +49,32 @@ function Test-BasicConnectivity {
     try {
         $containers = docker compose ps --format json | ConvertFrom-Json
         $openwebuiStatus = ($containers | Where-Object { $_.Service -eq "openwebui" }).State
-        $ollamaStatus = ($containers | Where-Object { $_.Service -eq "ollama" }).State
+        $llamaCppStatus = ($containers | Where-Object { $_.Service -eq "llama-cpp" }).State
+        $llamaCppEmbedStatus = ($containers | Where-Object { $_.Service -eq "llama-cpp-embed" }).State
         $tailscaleStatus = ($containers | Where-Object { $_.Service -eq "tailscale" }).State
-        
-        Write-Log "INFO" "Container states - OpenWebUI: $openwebuiStatus, Ollama: $ollamaStatus, Tailscale: $tailscaleStatus"
+        $mnemoryStatus = ($containers | Where-Object { $_.Service -eq "mnemory" }).State
+        $smolcrawlStatus = ($containers | Where-Object { $_.Service -eq "smolcrawl-pipelines" }).State
+        $watchtowerStatus = ($containers | Where-Object { $_.Service -eq "watchtower" }).State
+        $mnemoryBackupStatus = ($containers | Where-Object { $_.Service -eq "mnemory-backup" }).State
+        $openwebuiBackupStatus = ($containers | Where-Object { $_.Service -eq "openwebui-backup" }).State
+        $openNotebookStatus = ($containers | Where-Object { $_.Service -eq "open_notebook" }).State
+        $surrealdbStatus = ($containers | Where-Object { $_.Service -eq "surrealdb" }).State
+
+        Write-Log "INFO" "Container states - OpenWebUI: $openwebuiStatus, llama-cpp: $llamaCppStatus, llama-cpp-embed: $llamaCppEmbedStatus, Tailscale: $tailscaleStatus, Mnemory: $mnemoryStatus, SmolCrawl: $smolcrawlStatus, Watchtower: $watchtowerStatus, mnemory-backup: $mnemoryBackupStatus, openwebui-backup: $openwebuiBackupStatus, open_notebook: $openNotebookStatus, surrealdb: $surrealdbStatus"
         
         # If all containers are running, test basic functionality
-        if ($openwebuiStatus -eq "running" -and $ollamaStatus -eq "running" -and $tailscaleStatus -eq "running") {
+        if ($openwebuiStatus -eq "running" -and $llamaCppStatus -eq "running" -and $llamaCppEmbedStatus -eq "running" -and $tailscaleStatus -eq "running") {
             # Test OpenWebUI health
             try {
                 $response = docker compose exec openwebui curl -f -s http://localhost:8080/health 2>$null
                 if ($LASTEXITCODE -eq 0) {
                     Write-Log "INFO" "OpenWebUI health check: PASSED"
                     
-                    # Test Ollama connectivity
+                    # Test llama-cpp connectivity
                     try {
-                        docker compose exec openwebui curl -f -s http://localhost:11434/api/version 2>$null | Out-Null
+                        docker compose exec llama-cpp curl -f -s http://localhost:8080/health 2>$null | Out-Null
                         if ($LASTEXITCODE -eq 0) {
-                            Write-Log "INFO" "Ollama connectivity: PASSED"
+                            Write-Log "INFO" "llama-cpp connectivity: PASSED"
                             
                             # Test external connectivity
                             if (Test-NetworkConnectivity "tailscale") {
@@ -78,11 +86,11 @@ function Test-BasicConnectivity {
                             }
                         }
                         else {
-                            Write-Log "WARN" "Ollama connectivity failed"
+                            Write-Log "WARN" "llama-cpp connectivity failed"
                         }
                     }
                     catch {
-                        Write-Log "WARN" "Ollama connectivity test failed: $_"
+                        Write-Log "WARN" "llama-cpp connectivity test failed: $_"
                     }
                 }
                 else {
@@ -113,11 +121,14 @@ function Invoke-MinimalRecovery {
     
     # Just restart services without destroying containers
     try {
-        docker compose restart tailscale ollama openwebui
-        
-        # Start Watchtower if it's missing (it doesn't need restart usually)
-        docker compose up -d watchtower
-        
+        docker compose restart tailscale llama-cpp llama-cpp-embed openwebui
+
+        # Ensure auxiliary containers are running (cheap no-op if already up).
+        # Their `depends_on` only fires at initial compose-up, so a llama-cpp
+        # restart can leave mnemory in a degraded state without this nudge.
+        # surrealdb must come up before open_notebook (open_notebook depends on it).
+        docker compose up -d watchtower mnemory smolcrawl-pipelines mnemory-backup openwebui-backup surrealdb open_notebook
+
         Write-Log "INFO" "Waiting for services to stabilize..."
         Start-Sleep -Seconds 60
         
@@ -238,16 +249,45 @@ function Invoke-EmergencyRecovery {
     
     # Phase 1: Graceful shutdown in reverse dependency order
     Write-Log "INFO" "Phase 1: Graceful shutdown"
-    Write-Log "WARN" "This will restart OpenWebUI, Ollama, and Tailscale services"
+    Write-Log "WARN" "This will restart OpenWebUI, llama-cpp, llama-cpp-embed, and Tailscale services"
     
     # Stop Tailscale first (dependent on OpenWebUI network)
     if (-not (Stop-ServiceGracefully "tailscale" 30)) {
         Write-Log "WARN" "Tailscale stop had issues, continuing..."
     }
     
-    # Stop Ollama (dependent on OpenWebUI network)
-    if (-not (Stop-ServiceGracefully "ollama" 30)) {
-        Write-Log "WARN" "Ollama stop had issues, continuing..."
+    # Stop SmolCrawl Pipelines (dependent on OpenWebUI)
+    if (-not (Stop-ServiceGracefully "smolcrawl-pipelines" 30)) {
+        Write-Log "WARN" "SmolCrawl Pipelines stop had issues, continuing..."
+    }
+
+    # Stop open-notebook (depends on surrealdb), then surrealdb itself.
+    if (-not (Stop-ServiceGracefully "open_notebook" 30)) {
+        Write-Log "WARN" "open-notebook stop had issues, continuing..."
+    }
+    if (-not (Stop-ServiceGracefully "surrealdb" 20)) {
+        Write-Log "WARN" "surrealdb stop had issues, continuing..."
+    }
+
+    # Stop Mnemory (dependent on llama-cpp services)
+    if (-not (Stop-ServiceGracefully "mnemory" 30)) {
+        Write-Log "WARN" "Mnemory stop had issues, continuing..."
+    }
+
+    # Stop backup schedulers (independent cron sidecars)
+    if (-not (Stop-ServiceGracefully "mnemory-backup" 15)) {
+        Write-Log "WARN" "mnemory-backup stop had issues, continuing..."
+    }
+    if (-not (Stop-ServiceGracefully "openwebui-backup" 15)) {
+        Write-Log "WARN" "openwebui-backup stop had issues, continuing..."
+    }
+    
+    # Stop llama-cpp services
+    if (-not (Stop-ServiceGracefully "llama-cpp" 30)) {
+        Write-Log "WARN" "llama-cpp stop had issues, continuing..."
+    }
+    if (-not (Stop-ServiceGracefully "llama-cpp-embed" 30)) {
+        Write-Log "WARN" "llama-cpp-embed stop had issues, continuing..."
     }
     
     # Stop OpenWebUI 
@@ -287,16 +327,28 @@ function Invoke-EmergencyRecovery {
     Write-Log "INFO" "Allowing network namespace to stabilize..."
     Start-Sleep -Seconds 20
     
-    # Start Ollama (depends on OpenWebUI network)
-    Write-Log "INFO" "Starting Ollama with GPU support..."
+    # Start llama-cpp services (GPU inference)
+    Write-Log "INFO" "Starting llama-cpp with GPU support..."
     try {
-        docker compose up -d ollama
-        if (-not (Wait-ForHealthy "ollama" 60)) {
-            Write-Log "WARN" "Ollama health check failed, but continuing..."
+        docker compose up -d llama-cpp
+        if (-not (Wait-ForHealthy "llama-cpp" 120)) {
+            Write-Log "WARN" "llama-cpp health check failed, but continuing..."
         }
     }
     catch {
-        Write-Log "ERROR" "Failed to start Ollama: $_"
+        Write-Log "ERROR" "Failed to start llama-cpp: $_"
+        throw
+    }
+    
+    Write-Log "INFO" "Starting llama-cpp-embed..."
+    try {
+        docker compose up -d llama-cpp-embed
+        if (-not (Wait-ForHealthy "llama-cpp-embed" 60)) {
+            Write-Log "WARN" "llama-cpp-embed health check failed, but continuing..."
+        }
+    }
+    catch {
+        Write-Log "ERROR" "Failed to start llama-cpp-embed: $_"
         throw
     }
     
@@ -311,6 +363,78 @@ function Invoke-EmergencyRecovery {
     catch {
         Write-Log "ERROR" "Failed to start Tailscale: $_"
         throw
+    }
+    
+    # Start Mnemory (depends on llama-cpp services)
+    Write-Log "INFO" "Starting Mnemory memory service..."
+    try {
+        docker compose up -d mnemory
+        if (-not (Wait-ForHealthy "mnemory" 90)) {
+            Write-Log "WARN" "Mnemory health check failed, but continuing..."
+        }
+    }
+    catch {
+        Write-Log "WARN" "Failed to start Mnemory: $_"
+        # Don't throw - Mnemory is not critical for basic functionality
+    }
+    
+    # Start Mnemory backup scheduler
+    Write-Log "INFO" "Starting Mnemory backup scheduler..."
+    try {
+        docker compose up -d mnemory-backup
+        Write-Log "SUCCESS" "Mnemory backup scheduler started"
+    }
+    catch {
+        Write-Log "WARN" "Failed to start Mnemory backup: $_"
+    }
+
+    # Start OpenWebUI backup scheduler
+    Write-Log "INFO" "Starting OpenWebUI backup scheduler..."
+    try {
+        docker compose up -d openwebui-backup
+        Write-Log "SUCCESS" "OpenWebUI backup scheduler started"
+    }
+    catch {
+        Write-Log "WARN" "Failed to start OpenWebUI backup: $_"
+    }
+    
+    # Start SmolCrawl Pipelines (depends on OpenWebUI)
+    Write-Log "INFO" "Starting SmolCrawl Pipelines..."
+    try {
+        docker compose up -d smolcrawl-pipelines
+        if (-not (Wait-ForHealthy "smolcrawl-pipelines" 90)) {
+            Write-Log "WARN" "SmolCrawl Pipelines health check failed, but continuing..."
+        }
+    }
+    catch {
+        Write-Log "WARN" "Failed to start SmolCrawl Pipelines: $_"
+        # Don't throw - SmolCrawl is not critical for basic functionality
+    }
+
+    # Start surrealdb first, then open-notebook (which depends on it).
+    # Both have no `depends_on` chain to llama-cpp, but the open-notebook
+    # frontend uses `wait-for-api.sh` to block until FastAPI is ready, so
+    # the container needs ~30-60 s to fully come up.
+    Write-Log "INFO" "Starting surrealdb (open-notebook database)..."
+    try {
+        docker compose up -d surrealdb
+        Start-Sleep -Seconds 10
+        Write-Log "SUCCESS" "surrealdb started"
+    }
+    catch {
+        Write-Log "WARN" "Failed to start surrealdb: $_"
+    }
+
+    Write-Log "INFO" "Starting open-notebook..."
+    try {
+        docker compose up -d open_notebook
+        if (-not (Wait-ForHealthy "open_notebook" 90)) {
+            Write-Log "WARN" "open-notebook health check failed, but continuing..."
+        }
+    }
+    catch {
+        Write-Log "WARN" "Failed to start open-notebook: $_"
+        # Don't throw - notebook UI is not critical for basic functionality
     }
     
     # Start Watchtower (independent service)
@@ -341,14 +465,29 @@ function Invoke-EmergencyRecovery {
     Write-Log "INFO" "Phase 5: Service verification"
     
     try {
-        Write-Log "INFO" "Ollama status:"
-        docker compose exec ollama ollama list
+        Write-Log "INFO" "llama-cpp status:"
+        docker compose exec llama-cpp curl -s http://localhost:8080/health
         
         Write-Log "INFO" "Tailscale status:"
         docker compose exec tailscale tailscale --socket=/tmp/tailscaled.sock status
         
         Write-Log "INFO" "Tailscale serve configuration:"
         docker compose exec tailscale tailscale --socket=/tmp/tailscaled.sock serve status
+        
+        Write-Log "INFO" "Mnemory status:"
+        docker compose exec mnemory python -c "import urllib.request; print(urllib.request.urlopen('http://localhost:8051/health').read().decode())" 2>$null
+
+        Write-Log "INFO" "SmolCrawl Pipelines status:"
+        docker compose exec smolcrawl-pipelines curl -s http://localhost:9099/ 2>$null
+
+        Write-Log "INFO" "open-notebook API status:"
+        docker compose exec open_notebook python3 -c "import urllib.request; print(urllib.request.urlopen('http://localhost:5055/api/config').read().decode())" 2>$null
+
+        Write-Log "INFO" "surrealdb running state:"
+        docker compose ps surrealdb --format "table {{.Service}}\t{{.Status}}" 2>$null
+
+        Write-Log "INFO" "Backup schedulers + Watchtower status:"
+        docker compose ps mnemory-backup openwebui-backup watchtower --format "table {{.Service}}\t{{.Status}}" 2>$null
     }
     catch {
         Write-Log "WARN" "Unable to verify service configurations: $_"
@@ -412,7 +551,7 @@ function Invoke-GPUReset {
     Write-Log "INFO" "========================================="
     
     Write-Log "INFO" "Stopping GPU-dependent services for reset..."
-    docker compose down ollama openwebui
+    docker compose down llama-cpp llama-cpp-embed openwebui mnemory
     
     Write-Log "INFO" "Rebuilding OpenWebUI with fresh GPU configuration..."
     docker compose build --no-cache openwebui
@@ -421,20 +560,28 @@ function Invoke-GPUReset {
     docker compose up -d openwebui
     
     if (Wait-ForHealthy "openwebui" 240) {
-        Write-Log "INFO" "Starting Ollama with GPU support..."
-        docker compose up -d ollama
+        Write-Log "INFO" "Starting llama-cpp with GPU support..."
+        docker compose up -d llama-cpp
         
-        if (Wait-ForHealthy "ollama" 60) {
+        if (Wait-ForHealthy "llama-cpp" 120) {
             if (Test-GPUAvailability) {
                 Write-Log "SUCCESS" "GPU reset successful - CUDA is available"
                 
-                # Test Ollama GPU access
+                # Test llama-cpp GPU access
                 try {
-                    docker compose exec ollama ollama list
-                    Write-Log "SUCCESS" "Ollama GPU integration verified"
+                    docker compose exec llama-cpp curl -s http://localhost:8080/health
+                    Write-Log "SUCCESS" "llama-cpp GPU integration verified"
+                    
+                    # Also start embedding service
+                    docker compose up -d llama-cpp-embed
+                    Write-Log "INFO" "llama-cpp-embed started"
+                    
+                    # Start Mnemory (depends on llama-cpp services)
+                    docker compose up -d mnemory mnemory-backup
+                    Write-Log "INFO" "Mnemory services started"
                 }
                 catch {
-                    Write-Log "WARN" "Ollama may need additional time to initialize"
+                    Write-Log "WARN" "llama-cpp may need additional time to initialize"
                 }
             }
             else {
@@ -443,7 +590,9 @@ function Invoke-GPUReset {
             }
         }
         else {
-            Write-Log "WARN" "Ollama startup slow but continuing..."
+            Write-Log "WARN" "llama-cpp startup slow but continuing..."
+            # Start embedding service anyway
+            docker compose up -d llama-cpp-embed
         }
     }
     else {

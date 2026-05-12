@@ -103,6 +103,23 @@ if [ $connection_timeout -le 0 ]; then
     echo "⚠️ Warning: Tailscale connection timeout, but continuing..."
 fi
 
+# Persist tailnet info to a shared file so other containers (the openwebui
+# admin pipe) can read the FQDN/MagicDNS suffix and render full tailnet URLs
+# without needing the tailscale CLI themselves. /var/lib/tailscale is mapped
+# to ./data/tailscale on the host, which openwebui mounts read-only.
+write_tailnet_info() {
+    if tailscale --socket=/tmp/tailscaled.sock status --json \
+        > /var/lib/tailscale/tailnet-info.json.tmp 2>/dev/null \
+    && [ -s /var/lib/tailscale/tailnet-info.json.tmp ]; then
+        mv /var/lib/tailscale/tailnet-info.json.tmp \
+           /var/lib/tailscale/tailnet-info.json
+        return 0
+    fi
+    rm -f /var/lib/tailscale/tailnet-info.json.tmp 2>/dev/null
+    return 1
+}
+write_tailnet_info && echo "📝 Wrote /var/lib/tailscale/tailnet-info.json"
+
 # 7) Configure serve for HTTPS access
 echo "🌐 Configuring Tailscale serve..."
 # Clear any existing serve config and set up fresh
@@ -209,11 +226,273 @@ else
     echo "🔄 LM Studio integration disabled (LMSTUDIO_ENABLED=false)"
 fi
 
+# Configure llama-cpp API at /llama-cpp path
+sleep 2
+echo "🦙 Configuring llama-cpp API access..."
+
+LLAMA_CPP_HOST=${LLAMA_CPP_HOST:-llama-cpp}
+LLAMA_CPP_PORT=${LLAMA_CPP_PORT:-8080}
+LLAMA_CPP_ENABLED=${LLAMA_CPP_ENABLED:-true}
+LLAMA_CPP_LOCAL_PORT=8235  # Local port for socat proxy
+
+# Helper function to set up the llama-cpp socat proxy and tailscale serve
+setup_llama_cpp_serve() {
+    echo "🔄 Creating local proxy for llama-cpp at ${LLAMA_CPP_HOST}:${LLAMA_CPP_PORT}"
+
+    # Kill any existing socat process on this port
+    pkill -f "socat.*:${LLAMA_CPP_LOCAL_PORT}" || true
+    sleep 2
+
+    # Start socat proxy
+    echo "🚀 Starting socat proxy: 127.0.0.1:${LLAMA_CPP_LOCAL_PORT} -> ${LLAMA_CPP_HOST}:${LLAMA_CPP_PORT}"
+    socat -d -d TCP-LISTEN:${LLAMA_CPP_LOCAL_PORT},fork,reuseaddr,keepalive TCP:${LLAMA_CPP_HOST}:${LLAMA_CPP_PORT} > /tmp/socat-llama-cpp.log 2>&1 &
+    LLAMA_CPP_SOCAT_PID=$!
+    echo $LLAMA_CPP_SOCAT_PID > /tmp/socat-llama-cpp.pid
+
+    # Wait and verify socat started
+    sleep 3
+    if ! kill -0 $LLAMA_CPP_SOCAT_PID 2>/dev/null; then
+        echo "❌ ERROR: llama-cpp socat failed to start"
+        cat /tmp/socat-llama-cpp.log 2>/dev/null || echo "No log file found"
+        return 1
+    fi
+    echo "✅ llama-cpp proxy started successfully (PID: $LLAMA_CPP_SOCAT_PID)"
+
+    # Configure Tailscale serve
+    tailscale --socket=/tmp/tailscaled.sock serve \
+      --https=443 \
+      --set-path=/llama-cpp \
+      --bg \
+      http://127.0.0.1:${LLAMA_CPP_LOCAL_PORT}
+    echo "✅ llama-cpp API configured at /llama-cpp (via proxy: ${LLAMA_CPP_HOST}:${LLAMA_CPP_PORT} -> 127.0.0.1:${LLAMA_CPP_LOCAL_PORT})"
+
+    # Mark as configured so the monitoring loop knows
+    touch /tmp/llama-cpp-serve-configured
+    return 0
+}
+
+if [ "$LLAMA_CPP_ENABLED" = "true" ]; then
+    # Retry up to 3 minutes (18 x 10s) for llama-cpp to become healthy
+    # llama-cpp has a 120s start_period for model loading, so we wait patiently
+    LLAMA_CPP_ATTEMPTS=0
+    LLAMA_CPP_MAX_ATTEMPTS=18
+    LLAMA_CPP_CONFIGURED=false
+
+    while [ $LLAMA_CPP_ATTEMPTS -lt $LLAMA_CPP_MAX_ATTEMPTS ]; do
+        if wget -q -T 10 -O /dev/null http://${LLAMA_CPP_HOST}:${LLAMA_CPP_PORT}/health; then
+            if setup_llama_cpp_serve; then
+                LLAMA_CPP_CONFIGURED=true
+            fi
+            break
+        fi
+        LLAMA_CPP_ATTEMPTS=$((LLAMA_CPP_ATTEMPTS + 1))
+        echo "⏳ llama-cpp not ready yet (attempt ${LLAMA_CPP_ATTEMPTS}/${LLAMA_CPP_MAX_ATTEMPTS}), waiting 10s..."
+        sleep 10
+    done
+
+    if [ "$LLAMA_CPP_CONFIGURED" != "true" ]; then
+        echo "⚠️ llama-cpp not available after ${LLAMA_CPP_MAX_ATTEMPTS} attempts — monitoring loop will configure it when it comes online"
+    fi
+else
+    echo "🔄 llama-cpp Tailscale integration disabled (LLAMA_CPP_ENABLED=false)"
+fi
+
+# Configure llama-cpp-embed API at /llama-cpp-embed path
+sleep 2
+echo "🦙 Configuring llama-cpp-embed API access..."
+
+LLAMA_CPP_EMBED_HOST=${LLAMA_CPP_EMBED_HOST:-llama-cpp-embed}
+LLAMA_CPP_EMBED_PORT=${LLAMA_CPP_EMBED_PORT:-8080}
+LLAMA_CPP_EMBED_ENABLED=${LLAMA_CPP_EMBED_ENABLED:-true}
+LLAMA_CPP_EMBED_LOCAL_PORT=8236  # Local port for socat proxy
+
+# Helper function to set up the llama-cpp-embed socat proxy and tailscale serve
+setup_llama_cpp_embed_serve() {
+    echo "🔄 Creating local proxy for llama-cpp-embed at ${LLAMA_CPP_EMBED_HOST}:${LLAMA_CPP_EMBED_PORT}"
+
+    # Kill any existing socat process on this port
+    pkill -f "socat.*:${LLAMA_CPP_EMBED_LOCAL_PORT}" || true
+    sleep 2
+
+    # Start socat proxy
+    echo "🚀 Starting socat proxy: 127.0.0.1:${LLAMA_CPP_EMBED_LOCAL_PORT} -> ${LLAMA_CPP_EMBED_HOST}:${LLAMA_CPP_EMBED_PORT}"
+    socat -d -d TCP-LISTEN:${LLAMA_CPP_EMBED_LOCAL_PORT},fork,reuseaddr,keepalive TCP:${LLAMA_CPP_EMBED_HOST}:${LLAMA_CPP_EMBED_PORT} > /tmp/socat-llama-cpp-embed.log 2>&1 &
+    LLAMA_CPP_EMBED_SOCAT_PID=$!
+    echo $LLAMA_CPP_EMBED_SOCAT_PID > /tmp/socat-llama-cpp-embed.pid
+
+    # Wait and verify socat started
+    sleep 3
+    if ! kill -0 $LLAMA_CPP_EMBED_SOCAT_PID 2>/dev/null; then
+        echo "❌ ERROR: llama-cpp-embed socat failed to start"
+        cat /tmp/socat-llama-cpp-embed.log 2>/dev/null || echo "No log file found"
+        return 1
+    fi
+    echo "✅ llama-cpp-embed proxy started successfully (PID: $LLAMA_CPP_EMBED_SOCAT_PID)"
+
+    # Configure Tailscale serve
+    tailscale --socket=/tmp/tailscaled.sock serve \
+      --https=443 \
+      --set-path=/llama-cpp-embed \
+      --bg \
+      http://127.0.0.1:${LLAMA_CPP_EMBED_LOCAL_PORT}
+    echo "✅ llama-cpp-embed API configured at /llama-cpp-embed (via proxy: ${LLAMA_CPP_EMBED_HOST}:${LLAMA_CPP_EMBED_PORT} -> 127.0.0.1:${LLAMA_CPP_EMBED_LOCAL_PORT})"
+
+    # Mark as configured so the monitoring loop knows
+    touch /tmp/llama-cpp-embed-serve-configured
+    return 0
+}
+
+if [ "$LLAMA_CPP_EMBED_ENABLED" = "true" ]; then
+    LLAMA_CPP_EMBED_ATTEMPTS=0
+    LLAMA_CPP_EMBED_MAX_ATTEMPTS=12
+    LLAMA_CPP_EMBED_CONFIGURED=false
+
+    while [ $LLAMA_CPP_EMBED_ATTEMPTS -lt $LLAMA_CPP_EMBED_MAX_ATTEMPTS ]; do
+        if wget -q -T 10 -O /dev/null http://${LLAMA_CPP_EMBED_HOST}:${LLAMA_CPP_EMBED_PORT}/health; then
+            if setup_llama_cpp_embed_serve; then
+                LLAMA_CPP_EMBED_CONFIGURED=true
+            fi
+            break
+        fi
+        LLAMA_CPP_EMBED_ATTEMPTS=$((LLAMA_CPP_EMBED_ATTEMPTS + 1))
+        echo "⏳ llama-cpp-embed not ready yet (attempt ${LLAMA_CPP_EMBED_ATTEMPTS}/${LLAMA_CPP_EMBED_MAX_ATTEMPTS}), waiting 10s..."
+        sleep 10
+    done
+
+    if [ "$LLAMA_CPP_EMBED_CONFIGURED" != "true" ]; then
+        echo "⚠️ llama-cpp-embed not available after ${LLAMA_CPP_EMBED_MAX_ATTEMPTS} attempts — monitoring loop will configure it when it comes online"
+    fi
+else
+    echo "🔄 llama-cpp-embed Tailscale integration disabled (LLAMA_CPP_EMBED_ENABLED=false)"
+fi
+
+# Configure open-notebook UI on a separate Tailscale HTTPS port (Streamlit
+# UIs do not host cleanly under a sub-path, so expose at root on a distinct
+# tailnet HTTPS port instead of using --set-path).
+sleep 2
+echo "📓 Configuring open-notebook UI access..."
+
+OPEN_NOTEBOOK_HOST=${OPEN_NOTEBOOK_HOST:-open_notebook}
+OPEN_NOTEBOOK_PORT=${OPEN_NOTEBOOK_PORT:-8502}
+OPEN_NOTEBOOK_ENABLED=${OPEN_NOTEBOOK_ENABLED:-true}
+OPEN_NOTEBOOK_TS_PORT=${OPEN_NOTEBOOK_TS_PORT:-8443}
+OPEN_NOTEBOOK_LOCAL_PORT=8237  # Local port for UI socat proxy
+OPEN_NOTEBOOK_API_PORT=${OPEN_NOTEBOOK_API_PORT:-5055}
+OPEN_NOTEBOOK_API_TS_PORT=${OPEN_NOTEBOOK_API_TS_PORT:-5055}
+OPEN_NOTEBOOK_API_LOCAL_PORT=8238  # Local port for API socat proxy
+
+# Open-notebook's frontend uses runtime auto-detection of the API URL based on
+# the request's Host/X-Forwarded-Proto headers and constructs <proto>://<host>:5055.
+# So when accessed via the tailnet, the browser expects the API to be reachable
+# at https://<tailnet-host>:5055. We therefore expose port 5055 on the tailnet
+# in addition to the UI port — without it, every API call from the browser
+# fails with "Failed to fetch".
+setup_open_notebook_api_serve() {
+    echo "🔄 Creating local proxy for open-notebook API at ${OPEN_NOTEBOOK_HOST}:${OPEN_NOTEBOOK_API_PORT}"
+
+    pkill -f "socat.*:${OPEN_NOTEBOOK_API_LOCAL_PORT}" || true
+    sleep 2
+
+    echo "🚀 Starting socat proxy: 127.0.0.1:${OPEN_NOTEBOOK_API_LOCAL_PORT} -> ${OPEN_NOTEBOOK_HOST}:${OPEN_NOTEBOOK_API_PORT}"
+    socat -d -d TCP-LISTEN:${OPEN_NOTEBOOK_API_LOCAL_PORT},fork,reuseaddr,keepalive TCP:${OPEN_NOTEBOOK_HOST}:${OPEN_NOTEBOOK_API_PORT} > /tmp/socat-open-notebook-api.log 2>&1 &
+    OPEN_NOTEBOOK_API_SOCAT_PID=$!
+    echo $OPEN_NOTEBOOK_API_SOCAT_PID > /tmp/socat-open-notebook-api.pid
+
+    sleep 3
+    if ! kill -0 $OPEN_NOTEBOOK_API_SOCAT_PID 2>/dev/null; then
+        echo "❌ ERROR: open-notebook API socat failed to start"
+        cat /tmp/socat-open-notebook-api.log 2>/dev/null || echo "No log file found"
+        return 1
+    fi
+    echo "✅ open-notebook API proxy started successfully (PID: $OPEN_NOTEBOOK_API_SOCAT_PID)"
+
+    tailscale --socket=/tmp/tailscaled.sock serve \
+      --https=${OPEN_NOTEBOOK_API_TS_PORT} \
+      --bg \
+      http://127.0.0.1:${OPEN_NOTEBOOK_API_LOCAL_PORT}
+    echo "✅ open-notebook API configured on tailnet HTTPS port ${OPEN_NOTEBOOK_API_TS_PORT} (via proxy: ${OPEN_NOTEBOOK_HOST}:${OPEN_NOTEBOOK_API_PORT} -> 127.0.0.1:${OPEN_NOTEBOOK_API_LOCAL_PORT})"
+
+    touch /tmp/open-notebook-api-serve-configured
+    return 0
+}
+
+setup_open_notebook_serve() {
+    echo "🔄 Creating local proxy for open-notebook at ${OPEN_NOTEBOOK_HOST}:${OPEN_NOTEBOOK_PORT}"
+
+    pkill -f "socat.*:${OPEN_NOTEBOOK_LOCAL_PORT}" || true
+    sleep 2
+
+    echo "🚀 Starting socat proxy: 127.0.0.1:${OPEN_NOTEBOOK_LOCAL_PORT} -> ${OPEN_NOTEBOOK_HOST}:${OPEN_NOTEBOOK_PORT}"
+    socat -d -d TCP-LISTEN:${OPEN_NOTEBOOK_LOCAL_PORT},fork,reuseaddr,keepalive TCP:${OPEN_NOTEBOOK_HOST}:${OPEN_NOTEBOOK_PORT} > /tmp/socat-open-notebook.log 2>&1 &
+    OPEN_NOTEBOOK_SOCAT_PID=$!
+    echo $OPEN_NOTEBOOK_SOCAT_PID > /tmp/socat-open-notebook.pid
+
+    sleep 3
+    if ! kill -0 $OPEN_NOTEBOOK_SOCAT_PID 2>/dev/null; then
+        echo "❌ ERROR: open-notebook socat failed to start"
+        cat /tmp/socat-open-notebook.log 2>/dev/null || echo "No log file found"
+        return 1
+    fi
+    echo "✅ open-notebook proxy started successfully (PID: $OPEN_NOTEBOOK_SOCAT_PID)"
+
+    tailscale --socket=/tmp/tailscaled.sock serve \
+      --https=${OPEN_NOTEBOOK_TS_PORT} \
+      --bg \
+      http://127.0.0.1:${OPEN_NOTEBOOK_LOCAL_PORT}
+    echo "✅ open-notebook UI configured on tailnet HTTPS port ${OPEN_NOTEBOOK_TS_PORT} (via proxy: ${OPEN_NOTEBOOK_HOST}:${OPEN_NOTEBOOK_PORT} -> 127.0.0.1:${OPEN_NOTEBOOK_LOCAL_PORT})"
+
+    touch /tmp/open-notebook-serve-configured
+    return 0
+}
+
+if [ "$OPEN_NOTEBOOK_ENABLED" = "true" ]; then
+    OPEN_NOTEBOOK_ATTEMPTS=0
+    OPEN_NOTEBOOK_MAX_ATTEMPTS=18
+    OPEN_NOTEBOOK_CONFIGURED=false
+    OPEN_NOTEBOOK_API_CONFIGURED=false
+
+    while [ $OPEN_NOTEBOOK_ATTEMPTS -lt $OPEN_NOTEBOOK_MAX_ATTEMPTS ]; do
+        if wget -q -T 10 -O /dev/null http://${OPEN_NOTEBOOK_HOST}:${OPEN_NOTEBOOK_PORT}/; then
+            if setup_open_notebook_serve; then
+                OPEN_NOTEBOOK_CONFIGURED=true
+            fi
+            if wget -q -T 10 -O /dev/null http://${OPEN_NOTEBOOK_HOST}:${OPEN_NOTEBOOK_API_PORT}/api/config; then
+                if setup_open_notebook_api_serve; then
+                    OPEN_NOTEBOOK_API_CONFIGURED=true
+                fi
+            fi
+            break
+        fi
+        OPEN_NOTEBOOK_ATTEMPTS=$((OPEN_NOTEBOOK_ATTEMPTS + 1))
+        echo "⏳ open-notebook not ready yet (attempt ${OPEN_NOTEBOOK_ATTEMPTS}/${OPEN_NOTEBOOK_MAX_ATTEMPTS}), waiting 10s..."
+        sleep 10
+    done
+
+    if [ "$OPEN_NOTEBOOK_CONFIGURED" != "true" ]; then
+        echo "⚠️ open-notebook UI not available after ${OPEN_NOTEBOOK_MAX_ATTEMPTS} attempts — monitoring loop will configure it when it comes online"
+    fi
+    if [ "$OPEN_NOTEBOOK_API_CONFIGURED" != "true" ]; then
+        echo "⚠️ open-notebook API not available — monitoring loop will configure it when it comes online"
+    fi
+else
+    echo "🔄 open-notebook Tailscale integration disabled (OPEN_NOTEBOOK_ENABLED=false)"
+fi
+
 echo "✅ Tailscale serve configured:"
 echo "  - OpenWebUI: HTTPS port 443 -> 127.0.0.1:8080"
 echo "  - Ollama API: HTTPS port 443/ollama -> 127.0.0.1:11434"
 if [ "$LMSTUDIO_ENABLED" = "true" ]; then
     echo "  - LM Studio API: HTTPS port 443/lmstudio -> ${LMSTUDIO_HOST}:${LMSTUDIO_PORT}"
+fi
+if [ "$LLAMA_CPP_ENABLED" = "true" ]; then
+    echo "  - llama-cpp API: HTTPS port 443/llama-cpp -> ${LLAMA_CPP_HOST}:${LLAMA_CPP_PORT}"
+fi
+if [ "$LLAMA_CPP_EMBED_ENABLED" = "true" ]; then
+    echo "  - llama-cpp-embed API: HTTPS port 443/llama-cpp-embed -> ${LLAMA_CPP_EMBED_HOST}:${LLAMA_CPP_EMBED_PORT}"
+fi
+if [ "$OPEN_NOTEBOOK_ENABLED" = "true" ]; then
+    echo "  - open-notebook UI: HTTPS port ${OPEN_NOTEBOOK_TS_PORT} -> ${OPEN_NOTEBOOK_HOST}:${OPEN_NOTEBOOK_PORT}"
+    echo "  - open-notebook API: HTTPS port ${OPEN_NOTEBOOK_API_TS_PORT} -> ${OPEN_NOTEBOOK_HOST}:${OPEN_NOTEBOOK_API_PORT}"
 fi
 
 # 8) Background monitoring loop for autonomous recovery
@@ -248,13 +527,145 @@ fi
                 fi
             fi
         fi
+
+        # Check llama-cpp: deferred setup + socat health
+        if [ "$LLAMA_CPP_ENABLED" = "true" ]; then
+            if [ ! -f /tmp/llama-cpp-serve-configured ]; then
+                # Serve was never configured — try deferred setup
+                if wget -q -T 10 -O /dev/null http://${LLAMA_CPP_HOST}:${LLAMA_CPP_PORT}/health; then
+                    echo "🦙 $(date): llama-cpp is now online, performing deferred setup..."
+                    setup_llama_cpp_serve || echo "❌ $(date): Deferred llama-cpp setup failed, will retry next cycle"
+                fi
+            elif [ -f /tmp/socat-llama-cpp.pid ]; then
+                # Serve is configured — keep the socat proxy alive
+                LLAMA_CPP_PID=$(cat /tmp/socat-llama-cpp.pid)
+                if ! kill -0 $LLAMA_CPP_PID 2>/dev/null; then
+                    echo "⚠️ $(date): llama-cpp socat proxy (PID: $LLAMA_CPP_PID) has died, restarting..."
+
+                    LLAMA_CPP_LOCAL_PORT=8235
+                    pkill -f "socat.*:${LLAMA_CPP_LOCAL_PORT}" || true
+                    sleep 2
+
+                    socat -d -d TCP-LISTEN:${LLAMA_CPP_LOCAL_PORT},fork,reuseaddr,keepalive TCP:${LLAMA_CPP_HOST}:${LLAMA_CPP_PORT} > /tmp/socat-llama-cpp.log 2>&1 &
+                    NEW_LLAMA_PID=$!
+                    echo $NEW_LLAMA_PID > /tmp/socat-llama-cpp.pid
+                    sleep 3
+
+                    if kill -0 $NEW_LLAMA_PID 2>/dev/null; then
+                        echo "✅ $(date): llama-cpp proxy restarted successfully (PID: $NEW_LLAMA_PID)"
+                    else
+                        echo "❌ $(date): Failed to restart llama-cpp proxy"
+                        cat /tmp/socat-llama-cpp.log 2>/dev/null || echo "No log available"
+                    fi
+                fi
+            fi
+        fi
+
+        # Check open-notebook API: deferred setup + socat health
+        if [ "$OPEN_NOTEBOOK_ENABLED" = "true" ]; then
+            if [ ! -f /tmp/open-notebook-api-serve-configured ]; then
+                if wget -q -T 10 -O /dev/null http://${OPEN_NOTEBOOK_HOST}:${OPEN_NOTEBOOK_API_PORT}/api/config; then
+                    echo "📓 $(date): open-notebook API is now online, performing deferred setup..."
+                    setup_open_notebook_api_serve || echo "❌ $(date): Deferred open-notebook API setup failed, will retry next cycle"
+                fi
+            elif [ -f /tmp/socat-open-notebook-api.pid ]; then
+                OPEN_NOTEBOOK_API_PID=$(cat /tmp/socat-open-notebook-api.pid)
+                if ! kill -0 $OPEN_NOTEBOOK_API_PID 2>/dev/null; then
+                    echo "⚠️ $(date): open-notebook API socat proxy (PID: $OPEN_NOTEBOOK_API_PID) has died, restarting..."
+
+                    OPEN_NOTEBOOK_API_LOCAL_PORT=8238
+                    pkill -f "socat.*:${OPEN_NOTEBOOK_API_LOCAL_PORT}" || true
+                    sleep 2
+
+                    socat -d -d TCP-LISTEN:${OPEN_NOTEBOOK_API_LOCAL_PORT},fork,reuseaddr,keepalive TCP:${OPEN_NOTEBOOK_HOST}:${OPEN_NOTEBOOK_API_PORT} > /tmp/socat-open-notebook-api.log 2>&1 &
+                    NEW_OPEN_NOTEBOOK_API_PID=$!
+                    echo $NEW_OPEN_NOTEBOOK_API_PID > /tmp/socat-open-notebook-api.pid
+                    sleep 3
+
+                    if kill -0 $NEW_OPEN_NOTEBOOK_API_PID 2>/dev/null; then
+                        echo "✅ $(date): open-notebook API proxy restarted successfully (PID: $NEW_OPEN_NOTEBOOK_API_PID)"
+                    else
+                        echo "❌ $(date): Failed to restart open-notebook API proxy"
+                        cat /tmp/socat-open-notebook-api.log 2>/dev/null || echo "No log available"
+                    fi
+                fi
+            fi
+        fi
+
+        # Check open-notebook: deferred setup + socat health
+        if [ "$OPEN_NOTEBOOK_ENABLED" = "true" ]; then
+            if [ ! -f /tmp/open-notebook-serve-configured ]; then
+                if wget -q -T 10 -O /dev/null http://${OPEN_NOTEBOOK_HOST}:${OPEN_NOTEBOOK_PORT}/; then
+                    echo "📓 $(date): open-notebook is now online, performing deferred setup..."
+                    setup_open_notebook_serve || echo "❌ $(date): Deferred open-notebook setup failed, will retry next cycle"
+                fi
+            elif [ -f /tmp/socat-open-notebook.pid ]; then
+                OPEN_NOTEBOOK_PID=$(cat /tmp/socat-open-notebook.pid)
+                if ! kill -0 $OPEN_NOTEBOOK_PID 2>/dev/null; then
+                    echo "⚠️ $(date): open-notebook socat proxy (PID: $OPEN_NOTEBOOK_PID) has died, restarting..."
+
+                    OPEN_NOTEBOOK_LOCAL_PORT=8237
+                    pkill -f "socat.*:${OPEN_NOTEBOOK_LOCAL_PORT}" || true
+                    sleep 2
+
+                    socat -d -d TCP-LISTEN:${OPEN_NOTEBOOK_LOCAL_PORT},fork,reuseaddr,keepalive TCP:${OPEN_NOTEBOOK_HOST}:${OPEN_NOTEBOOK_PORT} > /tmp/socat-open-notebook.log 2>&1 &
+                    NEW_OPEN_NOTEBOOK_PID=$!
+                    echo $NEW_OPEN_NOTEBOOK_PID > /tmp/socat-open-notebook.pid
+                    sleep 3
+
+                    if kill -0 $NEW_OPEN_NOTEBOOK_PID 2>/dev/null; then
+                        echo "✅ $(date): open-notebook proxy restarted successfully (PID: $NEW_OPEN_NOTEBOOK_PID)"
+                    else
+                        echo "❌ $(date): Failed to restart open-notebook proxy"
+                        cat /tmp/socat-open-notebook.log 2>/dev/null || echo "No log available"
+                    fi
+                fi
+            fi
+        fi
+
+        # Check llama-cpp-embed: deferred setup + socat health
+        if [ "$LLAMA_CPP_EMBED_ENABLED" = "true" ]; then
+            if [ ! -f /tmp/llama-cpp-embed-serve-configured ]; then
+                # Serve was never configured — try deferred setup
+                if wget -q -T 10 -O /dev/null http://${LLAMA_CPP_EMBED_HOST}:${LLAMA_CPP_EMBED_PORT}/health; then
+                    echo "🦙 $(date): llama-cpp-embed is now online, performing deferred setup..."
+                    setup_llama_cpp_embed_serve || echo "❌ $(date): Deferred llama-cpp-embed setup failed, will retry next cycle"
+                fi
+            elif [ -f /tmp/socat-llama-cpp-embed.pid ]; then
+                # Serve is configured — keep the socat proxy alive
+                LLAMA_CPP_EMBED_PID=$(cat /tmp/socat-llama-cpp-embed.pid)
+                if ! kill -0 $LLAMA_CPP_EMBED_PID 2>/dev/null; then
+                    echo "⚠️ $(date): llama-cpp-embed socat proxy (PID: $LLAMA_CPP_EMBED_PID) has died, restarting..."
+
+                    LLAMA_CPP_EMBED_LOCAL_PORT=8236
+                    pkill -f "socat.*:${LLAMA_CPP_EMBED_LOCAL_PORT}" || true
+                    sleep 2
+
+                    socat -d -d TCP-LISTEN:${LLAMA_CPP_EMBED_LOCAL_PORT},fork,reuseaddr,keepalive TCP:${LLAMA_CPP_EMBED_HOST}:${LLAMA_CPP_EMBED_PORT} > /tmp/socat-llama-cpp-embed.log 2>&1 &
+                    NEW_EMBED_PID=$!
+                    echo $NEW_EMBED_PID > /tmp/socat-llama-cpp-embed.pid
+                    sleep 3
+
+                    if kill -0 $NEW_EMBED_PID 2>/dev/null; then
+                        echo "✅ $(date): llama-cpp-embed proxy restarted successfully (PID: $NEW_EMBED_PID)"
+                    else
+                        echo "❌ $(date): Failed to restart llama-cpp-embed proxy"
+                        cat /tmp/socat-llama-cpp-embed.log 2>/dev/null || echo "No log available"
+                    fi
+                fi
+            fi
+        fi
         
+        # Refresh tailnet-info.json so the openwebui admin pipe always sees
+        # current FQDN / peer state. Cheap (single status call) and resilient.
+        write_tailnet_info >/dev/null 2>&1 || true
+
         # Check if we can reach the internet
         if ! check_network; then
             echo "⚠️ $(date): Network connectivity lost, container may need restart"
             continue
         fi
-        
+
         # Check if Tailscale is still connected
         if ! tailscale --socket=/tmp/tailscaled.sock status >/dev/null 2>&1; then
             echo "⚠️ $(date): Tailscale disconnected, attempting reconnection..."
@@ -322,6 +733,20 @@ fi
                           http://${LMSTUDIO_HOST}:${LMSTUDIO_PORT} || true
                     fi
                 fi
+
+                # Reconfigure llama-cpp API if available and enabled
+                if [ "$LLAMA_CPP_ENABLED" = "true" ] && wget -q -T 10 -O /dev/null http://${LLAMA_CPP_HOST}:${LLAMA_CPP_PORT}/health; then
+                    echo "🔄 Reconfiguring llama-cpp serve after reconnection..."
+                    rm -f /tmp/llama-cpp-serve-configured
+                    setup_llama_cpp_serve || echo "❌ Failed to reconfigure llama-cpp serve"
+                fi
+
+                # Reconfigure llama-cpp-embed API if available and enabled
+                if [ "$LLAMA_CPP_EMBED_ENABLED" = "true" ] && wget -q -T 10 -O /dev/null http://${LLAMA_CPP_EMBED_HOST}:${LLAMA_CPP_EMBED_PORT}/health; then
+                    echo "🔄 Reconfiguring llama-cpp-embed serve after reconnection..."
+                    rm -f /tmp/llama-cpp-embed-serve-configured
+                    setup_llama_cpp_embed_serve || echo "❌ Failed to reconfigure llama-cpp-embed serve"
+                fi
             elif ! echo "$serve_status" | grep -q "127.0.0.1:11434"; then
                 # Ollama serve is missing, try to add it
                 echo "🔄 $(date): Adding missing Ollama serve configuration..."
@@ -368,6 +793,34 @@ fi
                         fi
                     fi
                 fi
+            elif [ "$LLAMA_CPP_ENABLED" = "true" ] && ! echo "$serve_status" | grep -q "127.0.0.1:${LLAMA_CPP_LOCAL_PORT:-8235}"; then
+                # llama-cpp serve is missing, try to add it
+                echo "🔄 $(date): Adding missing llama-cpp serve configuration..."
+                if wget -q -T 10 -O /dev/null http://${LLAMA_CPP_HOST}:${LLAMA_CPP_PORT}/health; then
+                    rm -f /tmp/llama-cpp-serve-configured
+                    setup_llama_cpp_serve || echo "❌ Failed to add llama-cpp serve"
+                fi
+            elif [ "$LLAMA_CPP_EMBED_ENABLED" = "true" ] && ! echo "$serve_status" | grep -q "127.0.0.1:${LLAMA_CPP_EMBED_LOCAL_PORT:-8236}"; then
+                # llama-cpp-embed serve is missing, try to add it
+                echo "🔄 $(date): Adding missing llama-cpp-embed serve configuration..."
+                if wget -q -T 10 -O /dev/null http://${LLAMA_CPP_EMBED_HOST}:${LLAMA_CPP_EMBED_PORT}/health; then
+                    rm -f /tmp/llama-cpp-embed-serve-configured
+                    setup_llama_cpp_embed_serve || echo "❌ Failed to add llama-cpp-embed serve"
+                fi
+            elif [ "$OPEN_NOTEBOOK_ENABLED" = "true" ] && ! echo "$serve_status" | grep -q "127.0.0.1:${OPEN_NOTEBOOK_LOCAL_PORT:-8237}"; then
+                # open-notebook serve is missing, try to add it
+                echo "🔄 $(date): Adding missing open-notebook serve configuration..."
+                if wget -q -T 10 -O /dev/null http://${OPEN_NOTEBOOK_HOST}:${OPEN_NOTEBOOK_PORT}/; then
+                    rm -f /tmp/open-notebook-serve-configured
+                    setup_open_notebook_serve || echo "❌ Failed to add open-notebook serve"
+                fi
+            elif [ "$OPEN_NOTEBOOK_ENABLED" = "true" ] && ! echo "$serve_status" | grep -q "127.0.0.1:${OPEN_NOTEBOOK_API_LOCAL_PORT:-8238}"; then
+                # open-notebook API serve is missing, try to add it
+                echo "🔄 $(date): Adding missing open-notebook API serve configuration..."
+                if wget -q -T 10 -O /dev/null http://${OPEN_NOTEBOOK_HOST}:${OPEN_NOTEBOOK_API_PORT}/api/config; then
+                    rm -f /tmp/open-notebook-api-serve-configured
+                    setup_open_notebook_api_serve || echo "❌ Failed to add open-notebook API serve"
+                fi
             fi
         fi
     done
@@ -386,6 +839,15 @@ echo "  - Ollama API: https://$(tailscale --socket=/tmp/tailscaled.sock status -
 if [ "$LMSTUDIO_ENABLED" = "true" ]; then
     echo "  - LM Studio API: https://$(tailscale --socket=/tmp/tailscaled.sock status --json | grep '\"Name\"' | cut -d'"' -f4 2>/dev/null || echo 'your-hostname').tail[...].ts.net/lmstudio"
 fi
-
+if [ "$LLAMA_CPP_ENABLED" = "true" ]; then
+    echo "  - llama-cpp API: https://$(tailscale --socket=/tmp/tailscaled.sock status --json | grep '\"Name\"' | cut -d'"' -f4 2>/dev/null || echo 'your-hostname').tail[...].ts.net/llama-cpp/v1"
+fi
+if [ "$LLAMA_CPP_EMBED_ENABLED" = "true" ]; then
+    echo "  - llama-cpp-embed API: https://$(tailscale --socket=/tmp/tailscaled.sock status --json | grep '"Name"' | cut -d'"' -f4 2>/dev/null || echo 'your-hostname').tail[...].ts.net/llama-cpp-embed/v1"
+fi
+if [ "$OPEN_NOTEBOOK_ENABLED" = "true" ]; then
+    echo "  - open-notebook UI: https://$(tailscale --socket=/tmp/tailscaled.sock status --json | grep '"Name"' | cut -d'"' -f4 2>/dev/null || echo 'your-hostname').tail[...].ts.net:${OPEN_NOTEBOOK_TS_PORT}/"
+    echo "  - open-notebook API: https://$(tailscale --socket=/tmp/tailscaled.sock status --json | grep '"Name"' | cut -d'"' -f4 2>/dev/null || echo 'your-hostname').tail[...].ts.net:${OPEN_NOTEBOOK_API_TS_PORT}/api"
+fi
 # 9) Keep the container running
 tail -f /dev/null

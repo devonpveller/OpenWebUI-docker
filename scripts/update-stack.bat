@@ -1,13 +1,13 @@
 @echo off
 REM AI Stack Update Manager
-REM Handles manual updates for OpenWebUI and Ollama
-REM Usage: update-stack.bat [openwebui|ollama|all|check]
+REM Handles manual updates for OpenWebUI and llama-cpp services
+REM Usage: update-stack.bat [openwebui|llama-cpp|all|check]
 
 setlocal enabledelayedexpansion
 
 if "%1"=="" goto :interactive_menu
 if "%1"=="openwebui" goto :update_openwebui
-if "%1"=="ollama" goto :update_ollama
+if "%1"=="llama-cpp" goto :update_llama_cpp
 if "%1"=="all" goto :update_all
 if "%1"=="check" goto :check_versions
 goto :usage
@@ -20,15 +20,15 @@ echo ========================================
 echo.
 echo 1. Check current versions
 echo 2. Update OpenWebUI
-echo 3. Update Ollama
-echo 4. Update both OpenWebUI and Ollama
+echo 3. Update llama-cpp services
+echo 4. Update both OpenWebUI and llama-cpp
 echo 5. Exit
 echo.
 set /p choice="Select option (1-5): "
 
 if "%choice%"=="1" goto :check_versions
 if "%choice%"=="2" goto :update_openwebui
-if "%choice%"=="3" goto :update_ollama
+if "%choice%"=="3" goto :update_llama_cpp
 if "%choice%"=="4" goto :update_all
 if "%choice%"=="5" goto :end
 echo [ERROR] Invalid choice
@@ -46,8 +46,8 @@ echo.
 echo Commands:
 echo   check       - Check current versions and available updates
 echo   openwebui   - Update OpenWebUI to latest version
-echo   ollama      - Update Ollama to latest version
-echo   all         - Update both OpenWebUI and Ollama
+echo   llama-cpp   - Update llama-cpp and llama-cpp-embed to latest image
+echo   all         - Update both OpenWebUI and llama-cpp
 echo.
 echo Note: Updates require manual version specification in Dockerfile.
 echo       The script will guide you through the process.
@@ -70,17 +70,20 @@ if %ERRORLEVEL% NEQ 0 (
 )
 
 echo.
-echo [INFO] Current Ollama version:
-docker compose exec -T ollama ollama --version 2>nul
+echo [INFO] Current llama-cpp image:
+cd ..
+docker compose exec -T llama-cpp curl -s http://localhost:8080/health 2>nul
+echo.
+docker compose ps llama-cpp llama-cpp-embed --format "table {{.Name}}\t{{.Status}}" 2>nul
 
 echo.
-echo [INFO] Current Ollama image in docker-compose.yml:
-findstr "image: ollama/ollama" docker-compose.yml
+echo [INFO] Current llama-cpp image in docker-compose.yml:
+findstr "image: ghcr.io/ggml-org/llama.cpp" docker-compose.yml
 
 echo.
 echo [INFO] To check for latest versions:
 echo   - OpenWebUI: https://github.com/open-webui/open-webui/releases/latest
-echo   - Ollama: https://github.com/ollama/ollama/releases/latest
+echo   - llama.cpp: https://github.com/ggml-org/llama.cpp/releases/latest
 echo.
 echo [INFO] Current Dockerfile base image:
 findstr "FROM ghcr.io/open-webui" Dockerfile.openwebui-gpu
@@ -275,7 +278,7 @@ goto :health_loop
 
 :health_done
 cd ..
-docker compose up -d ollama tailscale
+docker compose up -d llama-cpp llama-cpp-embed tailscale
 cd scripts
 
 REM Step 7: Final verification
@@ -339,10 +342,10 @@ if "%1"=="" (
 if not defined FULL_UPDATE goto :end
 goto :eof
 
-:update_ollama
+:update_llama_cpp
 echo.
 echo ========================================
-echo   Ollama Update Process
+echo   llama-cpp Update Process
 echo ========================================
 echo.
 
@@ -358,8 +361,8 @@ if not defined FULL_UPDATE (
 )
 
 echo.
-echo [STEP 1/4] Pulling latest Ollama image...
-docker pull ollama/ollama:latest
+echo [STEP 1/3] Pulling latest llama-cpp server-cuda image...
+docker pull ghcr.io/ggml-org/llama.cpp:server-cuda
 if %ERRORLEVEL% NEQ 0 (
     echo [ERROR] Pull failed - check internet connection
     if "%1"=="" (
@@ -368,39 +371,47 @@ if %ERRORLEVEL% NEQ 0 (
     )
     goto :end
 )
+echo [SUCCESS] Latest llama-cpp image pulled
 
 echo.
-echo [STEP 2/4] Detecting Ollama version...
-for /f "tokens=*" %%i in ('docker run --rm ollama/ollama:latest ollama --version 2^>nul') do set OLLAMA_VERSION=%%i
-echo [INFO] Detected version: %OLLAMA_VERSION%
-
-REM Extract version number (format: "ollama version is X.Y.Z")
-for /f "tokens=4" %%v in ("%OLLAMA_VERSION%") do set OLLAMA_TAG=%%v
-if not defined OLLAMA_TAG (
-    echo [WARNING] Could not detect version, using 'latest' tag
-    set OLLAMA_TAG=latest
-) else (
-    echo [INFO] Pinning to version: %OLLAMA_TAG%
-    
-    REM Update docker-compose.yml to pin Ollama version
-    echo [INFO] Updating docker-compose.yml...
-    cd ..
-    powershell -Command "(Get-Content 'docker-compose.yml') -replace 'image: ollama/ollama:.*', 'image: ollama/ollama:%OLLAMA_TAG%' | Set-Content 'docker-compose.yml'"
-    cd scripts
-    echo [SUCCESS] Ollama pinned to version %OLLAMA_TAG%
-)
-
-echo.
-echo [STEP 3/4] Restarting Ollama...
+echo [STEP 2/3] Restarting llama-cpp services...
 cd ..
-docker compose up -d ollama
+docker compose up -d llama-cpp
+echo [INFO] Waiting for llama-cpp to load model (this may take a few minutes)...
+timeout /t 60 /nobreak >nul
+
+REM Wait for llama-cpp health check
+set LLAMA_WAIT=0
+set LLAMA_MAX=180
+:llama_health_loop
+docker compose ps llama-cpp --format "{{.Health}}" 2>nul | findstr /C:"healthy" >nul 2>&1
+if %ERRORLEVEL% EQU 0 (
+    cd scripts
+    echo [SUCCESS] llama-cpp is healthy after approximately %LLAMA_WAIT%s
+    goto :llama_health_done
+)
+set /a LLAMA_WAIT+=10
+if %LLAMA_WAIT% GEQ %LLAMA_MAX% (
+    cd scripts
+    echo [WARNING] llama-cpp not yet healthy after %LLAMA_MAX%s - continuing
+    goto :llama_health_done
+)
+timeout /t 10 /nobreak >nul
+goto :llama_health_loop
+
+:llama_health_done
+cd ..
+docker compose up -d llama-cpp-embed
+echo [INFO] Waiting for llama-cpp-embed to initialize...
+timeout /t 30 /nobreak >nul
 cd scripts
 
 echo.
-echo [STEP 4/4] Verifying Ollama...
-timeout /t 10 /nobreak >nul
+echo [STEP 3/3] Verifying llama-cpp services...
 cd ..
-docker compose exec -T ollama ollama --version
+docker compose exec -T llama-cpp curl -s http://localhost:8080/health 2>nul
+echo.
+docker compose ps llama-cpp llama-cpp-embed --format "table {{.Name}}\t{{.Status}}" 2>nul
 cd scripts
 
 REM Resume monitoring (skip if part of full update)
@@ -416,7 +427,7 @@ if not defined FULL_UPDATE (
 )
 
 echo.
-echo [SUCCESS] Ollama update complete!
+echo [SUCCESS] llama-cpp update complete!
 if "%1"=="" (
     if not defined FULL_UPDATE (
         echo.
@@ -433,7 +444,7 @@ echo ========================================
 echo   Full Stack Update
 echo ========================================
 echo.
-echo [WARNING] This will update both OpenWebUI and Ollama
+echo [WARNING] This will update both OpenWebUI and llama-cpp
 echo.
 set /p CONFIRM="Continue? (y/n): "
 if /i not "%CONFIRM%"=="y" (
@@ -461,14 +472,14 @@ echo.
 echo ========================================
 echo.
 
-REM Only update Ollama if OpenWebUI succeeded
+REM Only update llama-cpp if OpenWebUI succeeded
 if "%OPENWEBUI_UPDATE_SUCCESS%"=="1" (
-    echo [INFO] OpenWebUI update successful - proceeding with Ollama update...
+    echo [INFO] OpenWebUI update successful - proceeding with llama-cpp update...
     echo.
-    call :update_ollama
+    call :update_llama_cpp
 ) else (
-    echo [ERROR] OpenWebUI update failed - skipping Ollama update
-    echo [INFO] Fix OpenWebUI issues before updating Ollama
+    echo [ERROR] OpenWebUI update failed - skipping llama-cpp update
+    echo [INFO] Fix OpenWebUI issues before updating llama-cpp
 )
 
 REM Resume monitoring after full update
@@ -486,7 +497,7 @@ echo ========================================
 if "%OPENWEBUI_UPDATE_SUCCESS%"=="1" (
     echo [SUCCESS] Full stack update complete!
 ) else (
-    echo [WARNING] Partial update - OpenWebUI failed, Ollama skipped
+    echo [WARNING] Partial update - OpenWebUI failed, llama-cpp skipped
 )
 echo ========================================
 if "%1"=="" (

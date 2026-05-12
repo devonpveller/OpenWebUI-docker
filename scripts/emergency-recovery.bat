@@ -26,10 +26,10 @@ docker compose exec openwebui curl -f -s http://localhost:8080/ >nul 2>&1
 if %ERRORLEVEL% EQU 0 (
     echo [INFO] OpenWebUI responding...
     
-    REM Test Ollama connectivity  
-    docker compose exec openwebui curl -f -s http://localhost:11434/api/version >nul 2>&1
+    REM Test llama-cpp connectivity  
+    docker compose exec llama-cpp curl -f -s http://localhost:8080/health >nul 2>&1
     if %ERRORLEVEL% EQU 0 (
-        echo [INFO] Ollama connectivity working...
+        echo [INFO] llama-cpp connectivity working...
         
         REM Test external connectivity
         docker compose exec tailscale ping -c 1 8.8.8.8 >nul 2>&1
@@ -40,7 +40,7 @@ if %ERRORLEVEL% EQU 0 (
             echo [WARN] External connectivity failed
         )
     ) else (
-        echo [WARN] Ollama connectivity failed
+        echo [WARN] llama-cpp connectivity failed
     )
 ) else (
     echo [WARN] OpenWebUI health check failed
@@ -50,7 +50,7 @@ echo [INFO] Basic checks failed - proceeding with full recovery
 
 REM Phase 1: Graceful shutdown in reverse dependency order
 echo [INFO] Phase 1: Graceful shutdown
-echo [WARN] This will restart OpenWebUI, Ollama, and Tailscale containers
+echo [WARN] This will restart OpenWebUI, llama-cpp, llama-cpp-embed, and Tailscale containers
 echo [INFO] Stopping Tailscale container...
 docker compose stop tailscale
 if %ERRORLEVEL% NEQ 0 (
@@ -58,11 +58,39 @@ if %ERRORLEVEL% NEQ 0 (
     docker compose kill tailscale
 )
 
-echo [INFO] Stopping Ollama container...
-docker compose stop ollama
+echo [INFO] Stopping SmolCrawl Pipelines container...
+docker compose stop smolcrawl-pipelines
 if %ERRORLEVEL% NEQ 0 (
-    echo [WARN] Ollama stop failed, attempting force kill...
-    docker compose kill ollama
+    echo [WARN] SmolCrawl Pipelines stop failed, attempting force kill...
+    docker compose kill smolcrawl-pipelines
+)
+
+echo [INFO] Stopping open-notebook and surrealdb containers...
+docker compose stop open_notebook surrealdb
+if %ERRORLEVEL% NEQ 0 (
+    echo [WARN] open-notebook/surrealdb stop failed, attempting force kill...
+    docker compose kill open_notebook surrealdb
+)
+
+echo [INFO] Stopping Mnemory containers...
+docker compose stop mnemory mnemory-backup
+if %ERRORLEVEL% NEQ 0 (
+    echo [WARN] Mnemory stop failed, attempting force kill...
+    docker compose kill mnemory mnemory-backup
+)
+
+echo [INFO] Stopping OpenWebUI backup scheduler...
+docker compose stop openwebui-backup
+if %ERRORLEVEL% NEQ 0 (
+    echo [WARN] OpenWebUI backup stop failed, attempting force kill...
+    docker compose kill openwebui-backup
+)
+
+echo [INFO] Stopping llama-cpp containers...
+docker compose stop llama-cpp llama-cpp-embed
+if %ERRORLEVEL% NEQ 0 (
+    echo [WARN] llama-cpp stop failed, attempting force kill...
+    docker compose kill llama-cpp llama-cpp-embed
 )
 
 echo [INFO] Stopping OpenWebUI container...
@@ -84,7 +112,7 @@ if %ERRORLEVEL% NEQ 0 (
     goto :nuclear_option
 )
 
-echo [INFO] Waiting for OpenWebUI to be healthy (required for Ollama network dependency)...
+echo [INFO] Waiting for OpenWebUI to be healthy (required for Tailscale network dependency)...
 :wait_openwebui
 docker compose ps openwebui | findstr "healthy" >nul 2>&1
 if %ERRORLEVEL% NEQ 0 (
@@ -92,17 +120,20 @@ if %ERRORLEVEL% NEQ 0 (
     timeout /t 10 /nobreak >nul
     goto :wait_openwebui
 )
-echo [SUCCESS] OpenWebUI is healthy - safe to start Ollama with shared network
+echo [SUCCESS] OpenWebUI is healthy - safe to start llama-cpp services
 
-echo [INFO] Starting Ollama with shared network namespace (depends on OpenWebUI)...
-docker compose up -d ollama
+echo [INFO] Starting llama-cpp with GPU support...
+docker compose up -d llama-cpp
 if %ERRORLEVEL% NEQ 0 (
-    echo [ERROR] Failed to start Ollama container
+    echo [ERROR] Failed to start llama-cpp container
     goto :nuclear_option
 )
 
-echo [INFO] Waiting for Ollama to initialize on shared network...
+echo [INFO] Waiting for llama-cpp to initialize...
 timeout /t 30 /nobreak >nul
+
+echo [INFO] Starting llama-cpp-embed...
+docker compose up -d llama-cpp-embed
 
 echo [INFO] Starting Tailscale with shared network namespace...
 docker compose up -d tailscale
@@ -116,6 +147,26 @@ timeout /t 60 /nobreak >nul
 
 echo [INFO] Starting Watchtower monitoring service...
 docker compose up -d watchtower
+
+echo [INFO] Starting Mnemory memory service...
+docker compose up -d mnemory
+timeout /t 15 /nobreak >nul
+
+echo [INFO] Starting Mnemory backup scheduler...
+docker compose up -d mnemory-backup
+
+echo [INFO] Starting OpenWebUI backup scheduler...
+docker compose up -d openwebui-backup
+
+echo [INFO] Starting SmolCrawl Pipelines...
+docker compose up -d smolcrawl-pipelines
+
+echo [INFO] Starting surrealdb (open-notebook database)...
+docker compose up -d surrealdb
+timeout /t 10 /nobreak >nul
+
+echo [INFO] Starting open-notebook...
+docker compose up -d open_notebook
 
 REM Phase 3: Connectivity verification
 echo [INFO] Phase 3: Testing connectivity...
@@ -136,8 +187,8 @@ echo [INFO] ==========================================
 echo [INFO] Restarting with proper network dependency sequence...
 
 REM Stop dependent containers first
-echo [INFO] Stopping Tailscale and Ollama (network dependents)...
-docker compose stop tailscale ollama
+echo [INFO] Stopping Tailscale and llama-cpp services (network dependents)...
+docker compose stop tailscale llama-cpp llama-cpp-embed mnemory mnemory-backup openwebui-backup smolcrawl-pipelines open_notebook surrealdb
 
 REM Restart OpenWebUI first and wait for health
 echo [INFO] Restarting OpenWebUI...
@@ -154,8 +205,12 @@ if %ERRORLEVEL% NEQ 0 (
 echo [SUCCESS] OpenWebUI healthy - restarting dependent services
 
 REM Now restart the dependent containers
-echo [INFO] Starting Ollama with fresh network namespace...
-docker compose up -d ollama
+echo [INFO] Starting llama-cpp with fresh network namespace...
+docker compose up -d llama-cpp
+timeout /t 15 /nobreak >nul
+
+echo [INFO] Starting llama-cpp-embed...
+docker compose up -d llama-cpp-embed
 timeout /t 15 /nobreak >nul
 
 echo [INFO] Starting Tailscale with fresh network namespace...
@@ -163,6 +218,23 @@ docker compose up -d tailscale
 timeout /t 30 /nobreak >nul
 
 docker compose up -d watchtower
+
+echo [INFO] Starting Mnemory services...
+docker compose up -d mnemory mnemory-backup
+timeout /t 15 /nobreak >nul
+
+echo [INFO] Starting OpenWebUI backup scheduler...
+docker compose up -d openwebui-backup
+
+echo [INFO] Starting SmolCrawl Pipelines...
+docker compose up -d smolcrawl-pipelines
+
+echo [INFO] Starting surrealdb (open-notebook database)...
+docker compose up -d surrealdb
+timeout /t 10 /nobreak >nul
+
+echo [INFO] Starting open-notebook...
+docker compose up -d open_notebook
 
 echo [INFO] Testing if minimal recovery worked...
 docker compose exec tailscale ping -c 1 8.8.8.8 >nul 2>&1
@@ -213,8 +285,12 @@ if %ERRORLEVEL% NEQ 0 (
 :verify_services
 echo.
 echo [INFO] Verifying services...
-echo [INFO] Ollama status:
-docker compose exec ollama ollama list
+echo [INFO] llama-cpp status:
+docker compose exec llama-cpp curl -s http://localhost:8080/health
+
+echo.
+echo [INFO] llama-cpp-embed status:
+docker compose exec llama-cpp-embed curl -s http://localhost:8080/health
 
 echo.
 echo [INFO] Tailscale status:
@@ -227,6 +303,30 @@ docker compose exec tailscale tailscale --socket=/tmp/tailscaled.sock serve stat
 echo.
 echo [INFO] OpenWebUI GPU status:
 docker compose exec openwebui python -c "import torch; print('CUDA available:', torch.cuda.is_available())" 2>nul
+
+echo.
+echo [INFO] Mnemory status:
+docker compose exec mnemory python -c "import urllib.request; print(urllib.request.urlopen('http://localhost:8051/health').read().decode())" 2>nul
+
+echo.
+echo [INFO] SmolCrawl Pipelines status:
+docker compose exec smolcrawl-pipelines curl -s http://localhost:9099/ 2>nul
+
+echo.
+echo [INFO] open-notebook API status:
+docker compose exec open_notebook python3 -c "import urllib.request; print(urllib.request.urlopen('http://localhost:5055/api/config').read().decode())" 2>nul
+
+echo.
+echo [INFO] surrealdb running state:
+docker compose ps surrealdb --format "table {{.Service}}\t{{.Status}}" 2>nul
+
+echo.
+echo [INFO] Backup schedulers status:
+docker compose ps mnemory-backup openwebui-backup --format "table {{.Service}}\t{{.Status}}" 2>nul
+
+echo.
+echo [INFO] Watchtower status:
+docker compose ps watchtower --format "table {{.Service}}\t{{.Status}}" 2>nul
 
 echo.
 echo ========================================

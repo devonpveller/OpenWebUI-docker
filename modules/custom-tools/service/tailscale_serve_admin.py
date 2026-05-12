@@ -26,6 +26,19 @@ class TailscaleServeAdmin:
                 check=True
             )
             return result
+        except FileNotFoundError as e:
+            # Most common case: running inside the openwebui container where
+            # the `tailscale` binary doesn't exist. Surface a clean diagnostic
+            # rather than a Python errno trace.
+            missing = command[0] if command else "<unknown>"
+            logger.error(f"Binary not available: {missing}")
+            raise FileNotFoundError(
+                f"'{missing}' binary not available in this environment. "
+                "tailscale CLI is shipped only inside the tailscale container — "
+                "this admin action must be run from a process that has access "
+                "to it (e.g. exec'd inside the tailscale container, or via the "
+                "tailscale daemon's local API)."
+            ) from e
         except subprocess.CalledProcessError as e:
             logger.error(f"Command failed: {' '.join(command)}")
             logger.error(f"Error: {e}")
@@ -58,32 +71,55 @@ class TailscaleServeAdmin:
             return False
     
     def check_tailscale_ready(self) -> bool:
-        """Check if tailscale is ready"""
+        """Check if tailscale is ready.
+
+        Raises FileNotFoundError if the tailscale CLI is missing — callers
+        catch it and surface a TAILSCALE_CLI_MISSING response. Returns False
+        when the binary exists but reports a non-ready state.
+        """
         try:
             self.execute_command(["tailscale", "status"])
             return True
-        except FileNotFoundError:
-            # Tailscale CLI not available in this container
-            logger.error("Tailscale CLI not found - ensure tailscale is installed in OpenWebUI container or use HTTP API")
-            return False
         except subprocess.CalledProcessError:
             return False
+
+    def _no_cli_response(self) -> Dict[str, Any]:
+        """Standard response when the tailscale binary is missing."""
+        return {
+            "success": False,
+            "error_code": "TAILSCALE_CLI_MISSING",
+            "message": (
+                "tailscale CLI is not available in this environment. The "
+                "openwebui container ships without it; tailscale lives in a "
+                "separate container and exposes its API only via Unix socket "
+                "(/tmp/tailscaled.sock inside that container). Run this "
+                "command from the host or inside the tailscale container, "
+                "or fetch state from the daemon's local API."
+            ),
+            "remediation": [
+                "Host:  docker exec tailscale tailscale serve status",
+                "Inside tailscale container:  tailscale --socket=/tmp/tailscaled.sock serve status",
+            ],
+        }
     
-    def serve_start(self, path: str, target_host: str = "127.0.0.1", 
+    def serve_start(self, path: str, target_host: str = "127.0.0.1",
                    target_port: int = 5506, proxy_port: Optional[int] = None,
                    ts_hostname: Optional[str] = None,
                    require_userspace_tun: bool = True,
                    health_path: str = "/api/status") -> Dict[str, Any]:
         """Start serving a service at a specified path"""
-        
+
         # Check if tailscale is ready
-        if not self.check_tailscale_ready():
-            return {
-                "success": False,
-                "error_code": "TAILSCALE_NOT_READY",
-                "message": "Tailscale is not ready"
-            }
-            
+        try:
+            if not self.check_tailscale_ready():
+                return {
+                    "success": False,
+                    "error_code": "TAILSCALE_NOT_READY",
+                    "message": "Tailscale is not ready"
+                }
+        except FileNotFoundError:
+            return self._no_cli_response()
+
         try:
             # Health check first
             health_check_url = f"http://{target_host}:{target_port}{health_path}"
@@ -156,15 +192,17 @@ class TailscaleServeAdmin:
                 "tailscale", "serve",
                 "--remove=/" + path
             ])
-            
+
             # Remove from state file
             self._remove_from_state(path)
-            
+
             return {
                 "success": True,
                 "summary": f"Successfully stopped serving at /{path}",
                 "details": {}
             }
+        except FileNotFoundError:
+            return self._no_cli_response()
         except subprocess.CalledProcessError as e:
             return {
                 "success": False,
@@ -178,16 +216,16 @@ class TailscaleServeAdmin:
             result = self.execute_command([
                 "tailscale", "serve", "status"
             ])
-            
+
             # Parse the output (this is a simplified version)
             lines = result.stdout.strip().split('\n')
             paths = {}
-            
+
             for line in lines:
                 if ':' in line:
                     path, url = line.split(':', 1)
                     paths[path.strip()] = url.strip()
-            
+
             return {
                 "success": True,
                 "summary": "Current serve status",
@@ -195,6 +233,8 @@ class TailscaleServeAdmin:
                     "paths": paths
                 }
             }
+        except FileNotFoundError:
+            return self._no_cli_response()
         except subprocess.CalledProcessError as e:
             return {
                 "success": False,
@@ -232,10 +272,13 @@ class TailscaleServeAdmin:
             health_path = "/api/status"  # Default from guide
             health_check_url = f"http://{target_host}:{target_port}{health_path}"
             
-            self.execute_command([
-                "curl", "-f", "-s", "-o", "/dev/null", health_check_url
-            ])
-            
+            try:
+                self.execute_command([
+                    "curl", "-f", "-s", "-o", "/dev/null", health_check_url
+                ])
+            except FileNotFoundError:
+                return self._no_cli_response()
+
             return {
                 "success": True,
                 "summary": f"Service at /{path} is healthy",

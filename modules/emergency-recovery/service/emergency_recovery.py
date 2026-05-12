@@ -1339,11 +1339,12 @@ class EmergencyRecoveryModule:
         action = result_data.get("action", "unknown")
         status = result_data.get("status", "unknown")
         
-        # Handle both description and error fields
-        if "error" in result_data:
+        # Prefer the human description when present; only fall back to error
+        # when it is actually populated (the success path sets error=None).
+        if result_data.get("error"):
             description = result_data["error"]
         else:
-            description = result_data.get("description", "No description")
+            description = result_data.get("description") or "No description"
         
         content = f"""## 🔧 Recovery Action: {action.title()}
 

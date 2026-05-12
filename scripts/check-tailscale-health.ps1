@@ -155,33 +155,40 @@ function Test-EntrypointHealth {
 }
 
 # Function to recover Tailscale service
-# Function to repair OpenWebUI-Ollama connectivity
-function Repair-OllamaConnectivity {
-    Write-LogEntry "Starting OpenWebUI-Ollama connectivity recovery..." "WARN"
+# Function to repair OpenWebUI-llama-cpp connectivity
+function Repair-LlamaCppConnectivity {
+    Write-LogEntry "Starting OpenWebUI-llama-cpp connectivity recovery..." "WARN"
     
     try {
-        # Check if Ollama container is running
-        if (-not (Test-ServiceHealth "ollama")) {
-            Write-LogEntry "Ollama container not running, starting..." "WARN"
-            docker compose up -d ollama | Out-Null
+        # Check if llama-cpp container is running
+        if (-not (Test-ServiceHealth "llama-cpp")) {
+            Write-LogEntry "llama-cpp container not running, starting..." "WARN"
+            docker compose up -d llama-cpp | Out-Null
             Start-Sleep 30
             
-            if (-not (Test-ServiceHealth "ollama")) {
-                Write-LogEntry "Failed to start Ollama container" "ERROR"
+            if (-not (Test-ServiceHealth "llama-cpp")) {
+                Write-LogEntry "Failed to start llama-cpp container" "ERROR"
                 return $false
             }
         }
         
-        # Wait for Ollama API to become available
-        Write-LogEntry "Waiting for Ollama API to become ready..."
+        # Also check llama-cpp-embed
+        if (-not (Test-ServiceHealth "llama-cpp-embed")) {
+            Write-LogEntry "llama-cpp-embed container not running, starting..." "WARN"
+            docker compose up -d llama-cpp-embed | Out-Null
+            Start-Sleep 15
+        }
+        
+        # Wait for llama-cpp API to become available
+        Write-LogEntry "Waiting for llama-cpp API to become ready..."
         $MaxWaitTime = 120
         $WaitTime = 0
         
         while ($WaitTime -lt $MaxWaitTime) {
             try {
-                docker compose exec -T ollama curl -s -f --max-time 5 http://localhost:11434/api/version | Out-Null
+                docker compose exec -T llama-cpp curl -s -f --max-time 5 http://localhost:8080/health | Out-Null
                 if ($LASTEXITCODE -eq 0) {
-                    Write-LogEntry "Ollama API is now responding" "SUCCESS"
+                    Write-LogEntry "llama-cpp API is now responding" "SUCCESS"
                     break
                 }
             } catch {}
@@ -190,35 +197,35 @@ function Repair-OllamaConnectivity {
             $WaitTime += 10
             
             if ($WaitTime % 30 -eq 0) {
-                Write-LogEntry "Still waiting for Ollama API... (${WaitTime}s/${MaxWaitTime}s)" "INFO"
+                Write-LogEntry "Still waiting for llama-cpp API... (${WaitTime}s/${MaxWaitTime}s)" "INFO"
             }
         }
         
-        # Test final connectivity from OpenWebUI
-        if (Test-OllamaConnectivity) {
-            Write-LogEntry "OpenWebUI-Ollama connectivity restored" "SUCCESS"
+        # Test final connectivity
+        if (Test-LlamaCppConnectivity) {
+            Write-LogEntry "llama-cpp connectivity restored" "SUCCESS"
             return $true
         } else {
-            Write-LogEntry "Ollama API ready but OpenWebUI still cannot connect, trying container restart" "WARN"
+            Write-LogEntry "llama-cpp API ready but health check still failing, trying container restart" "WARN"
             
-            # Restart both services in proper order (OpenWebUI first for network namespace)
+            # Restart both services
             docker compose restart openwebui | Out-Null
             Start-Sleep 45  # Wait for GPU initialization
             
-            docker compose restart ollama | Out-Null
+            docker compose restart llama-cpp llama-cpp-embed | Out-Null
             Start-Sleep 30
             
             # Final connectivity test
-            if (Test-OllamaConnectivity) {
-                Write-LogEntry "Container restart restored OpenWebUI-Ollama connectivity" "SUCCESS"
+            if (Test-LlamaCppConnectivity) {
+                Write-LogEntry "Container restart restored llama-cpp connectivity" "SUCCESS"
                 return $true
             } else {
-                Write-LogEntry "Failed to restore OpenWebUI-Ollama connectivity after restart" "ERROR"
+                Write-LogEntry "Failed to restore llama-cpp connectivity after restart" "ERROR"
                 return $false
             }
         }
     } catch {
-        Write-LogEntry "Ollama connectivity recovery failed: $($_.Exception.Message)" "ERROR"
+        Write-LogEntry "llama-cpp connectivity recovery failed: $($_.Exception.Message)" "ERROR"
         return $false
     }
 }
@@ -319,23 +326,193 @@ function Repair-OpenTerminal {
     }
 }
 
-# Function to test OpenWebUI-Ollama connectivity
-function Test-OllamaConnectivity {
+# Generic helper: ensure a non-critical compose container is running.
+# Uses Test-ServiceHealth (which reads docker's compose-defined healthcheck
+# status, or just the running state for containers without a healthcheck).
+# Used for mnemory, smolcrawl-pipelines, watchtower, and the backup sidecars —
+# none are required for the core OpenWebUI/Tailscale/LLM path, so failures
+# are logged but do not fail the overall health check.
+function Confirm-AuxiliaryContainer {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$ServiceName,
+        [int]$RestartWaitSeconds = 15
+    )
+    if (Test-ServiceHealth $ServiceName) {
+        Write-LogEntry "$ServiceName container healthy" "DEBUG"
+        return $true
+    }
+    Write-LogEntry "$ServiceName is unhealthy or stopped, attempting recovery..." "WARN"
     try {
-        Write-LogEntry "Testing OpenWebUI-Ollama connectivity..." "DEBUG"
-        
-        # Test if Ollama service is running and accessible
-        $OllamaResponse = docker compose exec -T openwebui curl -s -f --max-time 10 http://localhost:11434/api/version 2>$null
-        
-        if ($LASTEXITCODE -eq 0 -and $OllamaResponse) {
-            Write-LogEntry "OpenWebUI-Ollama connectivity verified" "DEBUG"
+        docker compose up -d $ServiceName | Out-Null
+        Start-Sleep $RestartWaitSeconds
+        if (Test-ServiceHealth $ServiceName) {
+            Write-LogEntry "$ServiceName recovered successfully" "SUCCESS"
+            return $true
+        }
+        Write-LogEntry "$ServiceName recovery did not converge - feature may be degraded" "WARN"
+        return $false
+    } catch {
+        Write-LogEntry "$ServiceName recovery error: $($_.Exception.Message)" "WARN"
+        return $false
+    }
+}
+
+# Function to test llama-cpp connectivity
+function Test-LlamaCppConnectivity {
+    # Skip the exec probe if the container isn't running — `docker compose exec`
+    # against a stopped service writes to stderr, which (with ErrorActionPreference
+    # = "Stop" at the top of this script) bubbles up as a thrown exception and
+    # lands in the catch block as a misleading [ERROR]. A stopped container is
+    # a normal transient state during recovery, not a script-level failure.
+    if (-not (Test-ServiceHealth "llama-cpp")) {
+        Write-LogEntry "llama-cpp container is not running" "DEBUG"
+        return $false
+    }
+    try {
+        Write-LogEntry "Testing llama-cpp connectivity..." "DEBUG"
+        $LlamaCppResponse = docker compose exec -T llama-cpp curl -s -f --max-time 10 http://localhost:8080/health 2>$null
+        if ($LASTEXITCODE -eq 0 -and $LlamaCppResponse) {
+            Write-LogEntry "llama-cpp connectivity verified" "DEBUG"
             return $true
         } else {
-            Write-LogEntry "OpenWebUI cannot reach Ollama on localhost:11434" "WARN"
+            Write-LogEntry "llama-cpp not responding on localhost:8080" "WARN"
             return $false
         }
     } catch {
-        Write-LogEntry "Failed to test Ollama connectivity: $($_.Exception.Message)" "ERROR"
+        Write-LogEntry "llama-cpp connectivity test failed: $($_.Exception.Message)" "WARN"
+        return $false
+    }
+}
+
+# Function to test llama-cpp-embed connectivity (independent of main llama-cpp).
+# Embed has its own model/process and can fail while main llama-cpp is healthy.
+function Test-LlamaCppEmbedConnectivity {
+    if (-not (Test-ServiceHealth "llama-cpp-embed")) {
+        Write-LogEntry "llama-cpp-embed container is not running" "DEBUG"
+        return $false
+    }
+    try {
+        Write-LogEntry "Testing llama-cpp-embed connectivity..." "DEBUG"
+        $EmbedResponse = docker compose exec -T llama-cpp-embed curl -s -f --max-time 10 http://localhost:8080/health 2>$null
+        if ($LASTEXITCODE -eq 0 -and $EmbedResponse) {
+            Write-LogEntry "llama-cpp-embed connectivity verified" "DEBUG"
+            return $true
+        } else {
+            Write-LogEntry "llama-cpp-embed not responding on localhost:8080" "WARN"
+            return $false
+        }
+    } catch {
+        Write-LogEntry "llama-cpp-embed connectivity test failed: $($_.Exception.Message)" "WARN"
+        return $false
+    }
+}
+
+# Function to repair llama-cpp-embed (start if missing, restart otherwise).
+function Repair-LlamaCppEmbed {
+    Write-LogEntry "Starting llama-cpp-embed recovery..." "WARN"
+    try {
+        if (-not (Test-ServiceHealth "llama-cpp-embed")) {
+            Write-LogEntry "llama-cpp-embed container not running, starting..." "WARN"
+            docker compose up -d llama-cpp-embed | Out-Null
+        } else {
+            Write-LogEntry "llama-cpp-embed running but unresponsive, restarting..." "WARN"
+            docker compose restart llama-cpp-embed | Out-Null
+        }
+
+        # Wait for the API to come back. bge-m3 model load is fast, but allow
+        # up to 120 s to be safe.
+        $MaxWaitTime = 120
+        $WaitTime = 0
+        while ($WaitTime -lt $MaxWaitTime) {
+            Start-Sleep 10
+            $WaitTime += 10
+            if (Test-LlamaCppEmbedConnectivity) {
+                Write-LogEntry "llama-cpp-embed connectivity restored after ${WaitTime}s" "SUCCESS"
+                return $true
+            }
+            if ($WaitTime % 30 -eq 0) {
+                Write-LogEntry "Still waiting for llama-cpp-embed... (${WaitTime}s/${MaxWaitTime}s)" "INFO"
+            }
+        }
+        Write-LogEntry "llama-cpp-embed recovery did not converge - embedding/RAG features may be degraded" "ERROR"
+        return $false
+    } catch {
+        Write-LogEntry "llama-cpp-embed recovery failed: $($_.Exception.Message)" "ERROR"
+        return $false
+    }
+}
+
+# Function to test open-notebook health (FastAPI on port 5055).
+# open_notebook depends on surrealdb; if surrealdb is down, the API will report
+# dbStatus != "online" but still return 200, so we only require a 200 response
+# here and treat surrealdb as a separate auxiliary check.
+# The image ships only Python (no wget/curl), so the probe uses urllib like
+# the mnemory healthcheck pattern.
+function Test-OpenNotebookHealth {
+    [CmdletBinding()]
+    param()
+    if (-not (Test-ServiceHealth "open_notebook")) {
+        Write-LogEntry "open_notebook container is not running" "DEBUG"
+        return $false
+    }
+    try {
+        Write-LogEntry "Testing open-notebook API..." "DEBUG"
+        docker compose exec -T open_notebook python3 -c "import urllib.request,sys; urllib.request.urlopen('http://localhost:5055/api/config', timeout=5); sys.exit(0)" 2>$null | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            Write-LogEntry "open-notebook API responding on port 5055" "DEBUG"
+            return $true
+        }
+        Write-LogEntry "open-notebook API not responding on localhost:5055" "WARN"
+        return $false
+    } catch {
+        Write-LogEntry "open-notebook health check failed: $($_.Exception.Message)" "WARN"
+        return $false
+    }
+}
+
+# Function to repair open-notebook. Ensures surrealdb (its database dependency)
+# is up first, then restarts open_notebook and waits for the API.
+# `docker compose restart` writes container-state messages ("Restarting", "Started")
+# to stderr; with $ErrorActionPreference = "Stop" at the top of this script those
+# would bubble up as thrown exceptions. Redirect stderr so docker's normal
+# progress output doesn't trip the catch block.
+function Repair-OpenNotebook {
+    Write-LogEntry "Starting open-notebook recovery..." "WARN"
+    try {
+        if (-not (Test-ServiceHealth "surrealdb")) {
+            Write-LogEntry "surrealdb (open-notebook DB) not running, starting..." "WARN"
+            docker compose up -d surrealdb 2>&1 | Out-Null
+            Start-Sleep 10
+        }
+
+        if (-not (Test-ServiceHealth "open_notebook")) {
+            Write-LogEntry "open_notebook container not running, starting..." "WARN"
+            docker compose up -d open_notebook 2>&1 | Out-Null
+        } else {
+            Write-LogEntry "open_notebook running but API unresponsive, restarting..." "WARN"
+            docker compose restart open_notebook 2>&1 | Out-Null
+        }
+
+        # Frontend (Next.js) waits for FastAPI via wait-for-api.sh, so first start
+        # is slower than a plain restart. Allow up to 90 s.
+        $MaxWaitTime = 90
+        $WaitTime = 0
+        while ($WaitTime -lt $MaxWaitTime) {
+            Start-Sleep 10
+            $WaitTime += 10
+            if (Test-OpenNotebookHealth) {
+                Write-LogEntry "open-notebook recovered after ${WaitTime}s" "SUCCESS"
+                return $true
+            }
+            if ($WaitTime % 30 -eq 0) {
+                Write-LogEntry "Still waiting for open-notebook... (${WaitTime}s/${MaxWaitTime}s)" "INFO"
+            }
+        }
+        Write-LogEntry "open-notebook recovery did not converge - notebook UI may be unavailable" "WARN"
+        return $false
+    } catch {
+        Write-LogEntry "open-notebook recovery failed: $($_.Exception.Message)" "ERROR"
         return $false
     }
 }
@@ -428,12 +605,23 @@ function Invoke-HealthCheck {
         }
     }
     
-    # Test OpenWebUI-Ollama connectivity
-    if (-not (Test-OllamaConnectivity)) {
-        Write-LogEntry "OpenWebUI-Ollama connectivity failed, attempting recovery..." "WARN"
-        if (-not (Repair-OllamaConnectivity)) {
-            Write-LogEntry "Failed to restore OpenWebUI-Ollama connectivity" "ERROR"
+    # Test llama-cpp connectivity
+    if (-not (Test-LlamaCppConnectivity)) {
+        Write-LogEntry "llama-cpp connectivity failed, attempting recovery..." "WARN"
+        if (-not (Repair-LlamaCppConnectivity)) {
+            Write-LogEntry "Failed to restore llama-cpp connectivity" "ERROR"
             return $false
+        }
+    }
+
+    # Test llama-cpp-embed connectivity independently. The main llama-cpp test
+    # above does not exercise the embed endpoint, so a broken embed server can
+    # silently degrade RAG and mnemory while the rest of the stack looks fine.
+    # Non-fatal: main inference still works without embeddings.
+    if (-not (Test-LlamaCppEmbedConnectivity)) {
+        Write-LogEntry "llama-cpp-embed connectivity failed, attempting recovery..." "WARN"
+        if (-not (Repair-LlamaCppEmbed)) {
+            Write-LogEntry "Failed to restore llama-cpp-embed - embedding/RAG/mnemory features may be degraded" "WARN"
         }
     }
 
@@ -443,6 +631,29 @@ function Invoke-HealthCheck {
         if (-not (Repair-OpenTerminal)) {
             Write-LogEntry "Open Terminal recovery failed - terminal features may be unavailable" "WARN"
             # Non-fatal: don't return $false, system can still operate without open-terminal
+        }
+    }
+
+    # Verify remaining compose containers (non-critical — log + attempt recovery
+    # but do not fail the overall health check). Order matters: mnemory depends
+    # on llama-cpp + llama-cpp-embed, which are confirmed healthy above.
+    Confirm-AuxiliaryContainer -ServiceName "mnemory"            -RestartWaitSeconds 20 | Out-Null
+    Confirm-AuxiliaryContainer -ServiceName "smolcrawl-pipelines" -RestartWaitSeconds 20 | Out-Null
+    Confirm-AuxiliaryContainer -ServiceName "watchtower"          -RestartWaitSeconds 10 | Out-Null
+    Confirm-AuxiliaryContainer -ServiceName "mnemory-backup"      -RestartWaitSeconds 10 | Out-Null
+    Confirm-AuxiliaryContainer -ServiceName "openwebui-backup"    -RestartWaitSeconds 10 | Out-Null
+    # surrealdb has no HTTP healthcheck (WS-only); just verify the container is up.
+    # open_notebook gets a real API probe below — surrealdb must be up first since
+    # open_notebook depends on it.
+    Confirm-AuxiliaryContainer -ServiceName "surrealdb"           -RestartWaitSeconds 10 | Out-Null
+
+    # Test open-notebook API independently (separate from running-state check —
+    # the FastAPI process can be unresponsive while the container is still up).
+    # Non-fatal: notebook UI is non-critical for the core LLM/RAG path.
+    if (-not (Test-OpenNotebookHealth)) {
+        Write-LogEntry "open-notebook API failed, attempting recovery..." "WARN"
+        if (-not (Repair-OpenNotebook)) {
+            Write-LogEntry "open-notebook recovery failed - notebook UI may be unavailable" "WARN"
         }
     }
 

@@ -1,0 +1,74 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/mostlygeek/llama-swap/refs/heads/main/config-schema.json
+#
+# llama-swap config for ai-stack/llama-cpp container.
+#
+# Adding a new model:
+#   1. Add an env block in docker-compose.yml (or .env) for its path / tunables.
+#   2. Copy one of the model entries below and update: id, name, aliases,
+#      and the four ${env.*} references. Everything else is inherited from
+#      the `common-args` macro.
+#
+# A single GPU is shared by all models defined here. Only one model is
+# resident at a time; llama-swap unloads the previous server when a request
+# arrives for a different model id. Keep clients pinned to the same id
+# (see docker-compose.yml `LLM_MODEL` for mnemory) to avoid swap thrash.
+
+listen: 0.0.0.0:8080
+healthCheckTimeout: 300
+includeAliasesInList: true
+# Never auto-unload — models stay resident until explicitly swapped.
+globalTTL: 0
+logToStdout: both
+
+macros:
+  # Shared llama-server flags. Per-model cmd only specifies what differs
+  # (model file + per-model tuning vars).
+  common-args: >-
+    --host 0.0.0.0 --port ${PORT}
+    --chat-template-file /etc/llama/chat-template.jinja
+    --flash-attn on
+
+models:
+  qwen36-35b-a3b:
+    name: Qwen 3.6 35B-A3B
+    cmd: |
+      llama-server ${common-args}
+      --model        ${env.LLAMA_SWAP_QWEN36_35B_MODEL_PATH}
+      --ctx-size     ${env.LLAMA_SWAP_QWEN36_35B_CTX_SIZE}
+      --n-gpu-layers ${env.LLAMA_SWAP_QWEN36_35B_N_GPU_LAYERS}
+      --parallel     ${env.LLAMA_SWAP_QWEN36_35B_N_PARALLEL}
+      --batch-size   ${env.LLAMA_SWAP_QWEN36_35B_BATCH}
+      --ubatch-size  ${env.LLAMA_SWAP_QWEN36_35B_UBATCH}
+      --cache-type-k ${env.LLAMA_SWAP_QWEN36_35B_CACHE_TYPE_K}
+      --cache-type-v ${env.LLAMA_SWAP_QWEN36_35B_CACHE_TYPE_V}
+      --reasoning-budget ${env.LLAMA_SWAP_QWEN36_35B_REASONING_BUDGET}
+    filters:
+      setParamsByID:
+        "${MODEL_ID}":
+          chat_template_kwargs:
+            enable_thinking: true
+        "${MODEL_ID}:nothink":
+          chat_template_kwargs:
+            enable_thinking: false
+
+  qwen36-27b:
+    name: Qwen 3.6 27B
+    cmd: |
+      llama-server ${common-args}
+      --model        ${env.LLAMA_SWAP_QWEN36_27B_MODEL_PATH}
+      --ctx-size     ${env.LLAMA_SWAP_QWEN36_27B_CTX_SIZE}
+      --n-gpu-layers ${env.LLAMA_SWAP_QWEN36_27B_N_GPU_LAYERS}
+      --parallel     ${env.LLAMA_SWAP_QWEN36_27B_N_PARALLEL}
+      --batch-size   ${env.LLAMA_SWAP_QWEN36_27B_BATCH}
+      --ubatch-size  ${env.LLAMA_SWAP_QWEN36_27B_UBATCH}
+      --cache-type-k ${env.LLAMA_SWAP_QWEN36_27B_CACHE_TYPE_K}
+      --cache-type-v ${env.LLAMA_SWAP_QWEN36_27B_CACHE_TYPE_V}
+      --reasoning-budget ${env.LLAMA_SWAP_QWEN36_27B_REASONING_BUDGET}
+    filters:
+      setParamsByID:
+        "${MODEL_ID}":
+          chat_template_kwargs:
+            enable_thinking: true
+        "${MODEL_ID}:nothink":
+          chat_template_kwargs:
+            enable_thinking: false
