@@ -8,3 +8,6 @@ backup/
 logs/
 filters/__pycache__/
 smolcrawl/__pycache__/
+scripts/ai_pipes/__pycache__/
+modules/custom-tools/service/__pycache__/
+modules/emergency-recovery/service/__pycache__/
