@@ -245,6 +245,17 @@ class CustomToolsModule:
             user_input_lower = user_input.lower()
             user_input_stripped = user_input_lower.strip()
 
+            # First line / first word of the input — matched alongside the
+            # exact-stripped value so routing survives RAG augmentation or
+            # OpenWebUI prepending/appending retrieved context.
+            first_line = ""
+            for _line in user_input_lower.splitlines():
+                _l = _line.strip()
+                if _l:
+                    first_line = _l
+                    break
+            first_word = first_line.split()[0] if first_line else ""
+
             # Tailscale serve commands (start/stop/health/port/etc) — explicit pairing
             is_tailscale_serve = any(keyword in user_input_lower for keyword in ["serve", "serving", "expose", "tailscale"]) and \
                                 any(keyword in user_input_lower for keyword in ["start", "stop", "status", "lmstudio", "service", "health", "port"])
@@ -258,8 +269,11 @@ class CustomToolsModule:
             )
             is_stack_admin = (
                 user_input_stripped in {"status", "inventory", "overview", "show", "list", "stack"}
+                or first_line in {"status", "inventory", "overview", "show", "list", "stack"}
+                or first_word in {"status", "inventory"}
                 or any(p in user_input_lower for p in stack_admin_phrases)
                 or user_input_stripped.startswith(("status of ", "status for ", "inventory of "))
+                or first_line.startswith(("status of ", "status for ", "inventory of "))
             )
 
             # Admin command catalog (help). Exact-match for bare "help"/"?" so
@@ -271,6 +285,10 @@ class CustomToolsModule:
             )
             is_admin_help = (
                 user_input_stripped in {
+                    "help", "?", "admin help", "stack help", "tailscale help",
+                    "commands", "admin commands", "stack commands",
+                }
+                or first_line in {
                     "help", "?", "admin help", "stack help", "tailscale help",
                     "commands", "admin commands", "stack commands",
                 }
