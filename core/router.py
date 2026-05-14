@@ -460,6 +460,18 @@ class AIStackRouter:
         
         input_stripped = input_lower.strip()
 
+        # Pull the user's intent from the first non-blank line and its first
+        # word. OpenWebUI's RAG/code-interpreter features can prepend or append
+        # retrieved chunks to the user's message; matching on the head of the
+        # input keeps routing robust against that.
+        first_line = ""
+        for _line in input_lower.splitlines():
+            _stripped = _line.strip()
+            if _stripped:
+                first_line = _stripped
+                break
+        first_word = first_line.split()[0] if first_line else ""
+
         # Tailscale serve management (must be before general "fix" keyword)
         if any(keyword in input_lower for keyword in ["serve", "serving", "expose", "tailscale"]) and \
            any(keyword in input_lower for keyword in ["start", "stop", "status", "lmstudio", "service", "port"]):
@@ -471,11 +483,14 @@ class AIStackRouter:
         # health/status branch below.
         elif (
             input_stripped in {"status", "inventory", "overview", "show", "list", "stack"}
+            or first_line in {"status", "inventory", "overview", "show", "list", "stack"}
+            or first_word in {"status", "inventory"}
             or any(p in input_lower for p in (
                 "stack status", "stack-status", "show services", "list services",
                 "show tailnet", "tailnet services", "service overview", "service map",
             ))
             or input_stripped.startswith(("status of ", "status for ", "inventory of "))
+            or first_line.startswith(("status of ", "status for ", "inventory of "))
         ):
             return "custom-tools"
 
@@ -485,6 +500,10 @@ class AIStackRouter:
         # "help with GPU issues" still reach the help-system module.
         elif (
             input_stripped in {
+                "help", "?", "admin help", "stack help", "tailscale help",
+                "commands", "admin commands", "stack commands",
+            }
+            or first_line in {
                 "help", "?", "admin help", "stack help", "tailscale help",
                 "commands", "admin commands", "stack commands",
             }

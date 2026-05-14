@@ -387,25 +387,54 @@ function Test-LlamaCppConnectivity {
 
 # Function to test llama-cpp-embed connectivity (independent of main llama-cpp).
 # Embed has its own model/process and can fail while main llama-cpp is healthy.
+#
+# IMPORTANT: llama.cpp server's HTTP handler stalls /health and /v1/models while
+# embedding requests are in flight (verified: /health times out at 30s, but
+# /v1/embeddings keeps returning 200 in the logs). So a /health timeout does
+# NOT mean the container is dead — it just means it's busy. We use a two-stage
+# probe: try /health quickly; if it stalls, fall back to scanning recent logs
+# for active embedding traffic. Docker's healthcheck has the same blind spot
+# and frequently marks this container "unhealthy" while it is in fact serving.
 function Test-LlamaCppEmbedConnectivity {
-    if (-not (Test-ServiceHealth "llama-cpp-embed")) {
+    # Stage 0: container must be running. Note we deliberately DO NOT require
+    # Health -ne "unhealthy" here (Test-ServiceHealth does), because the docker
+    # healthcheck false-positives under load — see comment above.
+    $Status = $null
+    try {
+        $Status = docker compose ps llama-cpp-embed --format json 2>$null | ConvertFrom-Json
+    } catch { }
+    if (-not $Status -or $Status.State -ne "running") {
         Write-LogEntry "llama-cpp-embed container is not running" "DEBUG"
         return $false
     }
+
+    # Stage 1: quick /health probe. Short timeout — we don't want to block the
+    # monitor for 30 s on every cycle when the server is busy.
     try {
         Write-LogEntry "Testing llama-cpp-embed connectivity..." "DEBUG"
-        $EmbedResponse = docker compose exec -T llama-cpp-embed curl -s -f --max-time 10 http://localhost:8080/health 2>$null
+        $EmbedResponse = docker compose exec -T llama-cpp-embed curl -s -f --max-time 5 http://localhost:8080/health 2>$null
         if ($LASTEXITCODE -eq 0 -and $EmbedResponse) {
-            Write-LogEntry "llama-cpp-embed connectivity verified" "DEBUG"
+            Write-LogEntry "llama-cpp-embed /health OK" "DEBUG"
             return $true
-        } else {
-            Write-LogEntry "llama-cpp-embed not responding on localhost:8080" "WARN"
-            return $false
         }
-    } catch {
-        Write-LogEntry "llama-cpp-embed connectivity test failed: $($_.Exception.Message)" "WARN"
-        return $false
-    }
+    } catch { }
+
+    # Stage 2: /health didn't answer. Scan recent logs for active embedding
+    # traffic — if the server has served an embedding request in the last 2 min
+    # it is alive, just blocked on inference. Patterns match llama.cpp server's
+    # request-completion lines ("done request: POST /v1/embeddings ... 200")
+    # and slot lifecycle markers.
+    try {
+        $RecentLog = docker compose logs --tail=40 --since=2m llama-cpp-embed 2>$null | Out-String
+        if ($RecentLog -match 'POST /v1/embeddings.*\s200\b' -or
+            $RecentLog -match 'launch_slot_|done request:|slot\s+release:') {
+            Write-LogEntry "llama-cpp-embed /health unresponsive but actively serving embedding requests (busy, not dead)" "INFO"
+            return $true
+        }
+    } catch { }
+
+    Write-LogEntry "llama-cpp-embed /health unreachable AND no recent embedding activity in logs" "WARN"
+    return $false
 }
 
 # Function to repair llama-cpp-embed (start if missing, restart otherwise).
