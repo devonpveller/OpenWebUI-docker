@@ -114,6 +114,42 @@ class Valves(BaseModel):
         description="Append source references to final answer",
     )
 
+    # Research → mnemory evidence persistence (runs once on completion)
+    evidence_memory_enabled: bool = Field(
+        default=True,
+        description="On completion of a research run, persist the verified "
+                    "finding to mnemory as a self-describing EV:research "
+                    "evidence memory (with provenance header + sources "
+                    "artifact). Never writes per-iteration queries.",
+    )
+    evidence_memory_quick_research: bool = Field(
+        default=False,
+        description="Also persist evidence from quick research(). Off by "
+                    "default: only the heavier knowledge_research / "
+                    "deep_research completions are saved as evidence.",
+    )
+    mnemory_url: str = Field(
+        default="http://mnemory:8050",
+        description="mnemory base URL (reached directly on the internal "
+                    "llm-net; trusted writer path).",
+    )
+    mnemory_api_key: str = Field(
+        default="mN3m0ry!-mcp",
+        description="mnemory API key for the evidence writer. Empty "
+                    "disables persistence.",
+    )
+    mnemory_user_id: str = Field(
+        default="",
+        description="Fallback mnemory X-User-Id when the OWUI user has no "
+                    "email/id (else evidence is skipped).",
+    )
+    evidence_volatility_days: str = Field(
+        default="fast:7,medium:180,slow:1095",
+        description="Re-validation windows per volatility tier. Past the "
+                    "window the LLM downgrades the fact to an educated "
+                    "guess (re-validation due).",
+    )
+
     # Deep research specific
     top_k_per_collection: int = Field(
         default=3,

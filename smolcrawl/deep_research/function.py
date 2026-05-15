@@ -20,6 +20,7 @@ from .chat_ledger import (
     stop_payload,
 )
 from .crawl_integration import CrawlClient
+from .evidence_memory import persist_research_evidence
 from .journal import ResearchJournal
 from .knowledge_research import KnowledgeResearcher
 from .models import (
@@ -175,6 +176,15 @@ class Tools:
                 "conversation. One remains before a stop directive — make it "
                 "count, or finalize now.*"
             )
+        if self.valves.evidence_memory_quick_research:
+            try:
+                await persist_research_evidence(
+                    self.valves, sub_agent, query=query, answer=answer,
+                    user=__user__ or {}, request=__request__,
+                    kind="research", event_emitter=__event_emitter__,
+                )
+            except Exception:
+                pass
         return answer
 
     async def knowledge_research(
@@ -217,7 +227,7 @@ class Tools:
         journal = ResearchJournal(self.valves)
         researcher = KnowledgeResearcher(self.valves, sub_agent, journal)
 
-        return await researcher.run(
+        answer = await researcher.run(
             query=query,
             user_id=user_id,
             request=__request__,
@@ -226,6 +236,15 @@ class Tools:
             event_emitter=__event_emitter__,
             target_collection=collection,
         )
+        try:
+            await persist_research_evidence(
+                self.valves, sub_agent, query=query, answer=answer,
+                user=__user__ or {}, request=__request__,
+                kind="knowledge_research", event_emitter=__event_emitter__,
+            )
+        except Exception:
+            pass
+        return answer
 
     async def deep_research(
         self,
@@ -607,6 +626,14 @@ class Tools:
             done=True,
         )
 
+        try:
+            await persist_research_evidence(
+                self.valves, sub_agent, query=query, answer=answer,
+                user=__user__ or {}, request=__request__,
+                kind="deep_research", event_emitter=__event_emitter__,
+            )
+        except Exception:
+            pass
         return answer
 
     # --- Private Helpers ---
