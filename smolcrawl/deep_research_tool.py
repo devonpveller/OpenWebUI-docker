@@ -1516,6 +1516,11 @@ class _QuickResearcher:
         self._sa = sa
         self._j = j
         self._synth = synth
+        # Populated by run() so the orchestration layer (Tools.research)
+        # can maintain a per-chat coverage/gap ledger across calls.
+        self.last_covered: List[str] = []
+        self.last_gaps: List[str] = []
+        self.last_slug: str = ""
 
     async def run(self, query: str, user_id: str, request, user: Dict, model_id: str, emitter=None) -> str:
         slug = _Journal.slugify(query)
@@ -1539,6 +1544,9 @@ class _QuickResearcher:
         target = self._v.min_relevant_sources
         consecutive_misses = 0
         rel_count = 0
+        accumulated_covered: List[str] = []
+        last_gaps: List[str] = []
+        self.last_slug = slug
 
         for n in range(1, self._v.max_iterations + 1):
             # --- Step 1: Web search ---
@@ -1589,6 +1597,7 @@ class _QuickResearcher:
                 deeper = extraction.get("deeper_terms", [])
                 adjacent = extraction.get("adjacent_leads", [])
                 covered = extraction.get("covered_so_far", [])
+                accumulated_covered.extend(c for c in covered if c not in accumulated_covered)
                 summary = (f"Found {len(rel)} relevant, {len(trail)} trail, dropped {dropped}. "
                            f"Covered: {', '.join(covered[:3])}. Deeper: {', '.join(deeper[:3])}.")
                 search_terms = deeper + adjacent  # dive deeper
@@ -1620,6 +1629,11 @@ class _QuickResearcher:
                 # Have enough sources, but check for gaps before stopping
                 analysis = await self._analyze(session, request, user)
                 gaps = analysis.get("gaps", [])
+                last_gaps = gaps
+                accumulated_covered.extend(
+                    c for c in analysis.get("covered_aspects", [])
+                    if c not in accumulated_covered
+                )
                 gap_terms = analysis.get("new_terms", [])
                 has_official = analysis.get("has_official_source", True)
 
@@ -1654,6 +1668,11 @@ class _QuickResearcher:
         # --- Final analysis (only if not already done in loop) ---
         if not (rel_count >= target):
             analysis = await self._analyze(session, request, user)
+            last_gaps = analysis.get("gaps", []) or last_gaps
+            accumulated_covered.extend(
+                c for c in analysis.get("covered_aspects", [])
+                if c not in accumulated_covered
+            )
             if analysis.get("gaps"):
                 await _emit(emitter, f"\U0001f50d Remaining gaps: {', '.join(analysis['gaps'][:3])}")
 
@@ -1670,6 +1689,10 @@ class _QuickResearcher:
         if len(relevant_sources) < target:
             answer += (f"\n\n---\n\n\u26a0\ufe0f *Only {len(relevant_sources)}/{target} relevant sources found. "
                        f"Consider `deep_research()` to crawl authoritative domains.*")
+
+        # Expose this run's coverage/gap markers for the per-chat ledger.
+        self.last_covered = accumulated_covered
+        self.last_gaps = last_gaps
         return answer
 
     # --- Search helpers ---
@@ -2270,6 +2293,81 @@ async def _emit(emitter, msg: str, done: bool = False):
 
 
 # =============================================================================
+#  Per-chat research ledger — graceful, resumable cap on research() fan-out
+#
+#  research() is a single-shot tool the chat model calls via native function
+#  calling. On broad "list everything / comparison matrix" prompts the model
+#  decomposes into one research() call PER ITEM and never converges, blowing
+#  the model's context and OWUI's stream timeout. This ledger caps the number
+#  of calls per conversation and, when the cap is hit, returns a STOP
+#  directive plus a coverage/gap summary and a copy-paste continuation handle
+#  so the user can knowingly go deeper instead of silently truncating.
+# =============================================================================
+
+import re as _re
+
+_RESEARCH_LEDGER: Dict[str, Dict[str, Any]] = {}
+_CONTINUE_RE = _re.compile(r"^\s*research\s+continue\s*:\s*", _re.IGNORECASE)
+
+
+def _chat_key(chat_id: str, user: Dict) -> str:
+    return chat_id or (user or {}).get("id", "") or "default"
+
+
+def _dedup(seq: List[str], limit: Optional[int] = None) -> List[str]:
+    out: List[str] = []
+    for s in seq:
+        s = (s or "").strip()
+        if s and s not in out:
+            out.append(s)
+        if limit and len(out) >= limit:
+            break
+    return out
+
+
+def _coverage_block(ledger: Dict[str, Any], topic: str) -> str:
+    covered = _dedup(ledger.get("covered", []), 12)
+    gaps = _dedup(ledger.get("gaps", []), 12)
+    cov = "\n".join(f"- {c}" for c in covered) or "- (none recorded yet)"
+    gp = "\n".join(f"- {g}" for g in gaps) or "- (none recorded — coverage looks complete)"
+    gap_hint = "; ".join(gaps[:3]) if gaps else topic
+    cont = f"research continue: {topic} — focus: {gap_hint}"
+    return (
+        "\n\n---\n\n### 🔍 Research Coverage & Next Steps\n\n"
+        f"**Topic:** {topic}\n\n"
+        f"**Covered so far ({len(covered)}):**\n{cov}\n\n"
+        f"**Not yet researched — open gaps ({len(gaps)}):**\n{gp}\n\n"
+        "These gaps were left open to keep this response responsive rather "
+        "than looping indefinitely. You can accept the findings as-is (with "
+        "the gaps noted), or go deeper later *without re-covering the above*.\n\n"
+        "**To continue, copy-paste this as your next message:**\n\n"
+        f"```\n{cont}\n```\n"
+    )
+
+
+def _stop_payload(ledger: Dict[str, Any], topic: str, used: int, budget: int,
+                   ran: bool) -> str:
+    """Tool-result text that makes the chat model stop fanning out and
+    present a final, gap-aware answer to the user."""
+    did = (
+        "The findings gathered earlier in this turn are sufficient to answer now."
+        if not ran else
+        "This was the final research pass allowed for this conversation."
+    )
+    return (
+        f"⛔ **RESEARCH BUDGET REACHED** — {used}/{budget} research calls used "
+        f"in this conversation.\n\n"
+        "**Assistant instructions (do not echo this line to the user):** Do NOT "
+        "call the `research` tool again in this turn. " + did + " Using only the "
+        "research already returned above, write the user's final answer now "
+        "(e.g. the requested list / comparison chart). Then append the "
+        "\"Research Coverage & Next Steps\" section below verbatim so the user "
+        "can decide whether to dig deeper."
+        + _coverage_block(ledger, topic)
+    )
+
+
+# =============================================================================
 #  Tools (main entry point for OWUI)
 # =============================================================================
 
@@ -2291,6 +2389,7 @@ class Tools:
         max_iterations: int = Field(default=3, ge=1, le=15, description="Hard cap on research iterations")
         fixed_iterations: int = Field(default=1, ge=1, le=5, description="Guaranteed iterations before continue-decision")
         min_relevant_sources: int = Field(default=3, ge=1, le=30, description="Target: stop researching once this many anchor-relevant sources are found")
+        max_research_calls_per_chat: int = Field(default=5, ge=1, le=50, description="Max research() calls the chat model may make per conversation before a graceful stop directive is returned (prevents unbounded per-item fan-out on broad survey prompts). The user can resume past this with a 'research continue:' prompt.")
         max_web_results: int = Field(default=5, ge=1, le=50, description="Max web search results per query")
         include_sources: bool = Field(default=True, description="Append source references to answer")
         top_k_per_collection: int = Field(default=3, ge=1, le=20, description="Chunks per collection per query")
@@ -2314,18 +2413,96 @@ class Tools:
         __chat_id__: str = "", __message_id__: str = "",
     ) -> str:
         """Quick research on a topic using web search. Stores findings to
-        Fileshed and iteratively expands search terms. Faster than
-        deep_research — use this to scope a topic first.
+        Fileshed and iteratively expands search terms internally.
+
+        IMPORTANT — call this ONCE per distinct research need. For a broad,
+        list, survey, "all available X", or comparison-matrix request, pass
+        the ENTIRE scope as a single query (e.g. "market analysis of all
+        augmented reality headsets available today, with specs and pricing
+        for each"). Do NOT decompose into one research() call per item — the
+        tool expands search terms on its own, and a per-conversation budget
+        will return a STOP directive once the budget is reached. If that
+        directive appears, do not call research() again: answer the user
+        with what was gathered and relay the coverage/gap summary verbatim.
 
         Args:
-            query: The research question or topic to explore.
+            query: The research question or topic to explore. For broad
+                requests, state the full scope in one query.
         """
         mid = _SubAgent.resolve_model_id(__metadata__, __model__)
+        key = _chat_key(__chat_id__, __user__)
+        ledger = _RESEARCH_LEDGER.setdefault(
+            key, {"count": 0, "covered": [], "gaps": [], "topic": ""}
+        )
+        budget = self.valves.max_research_calls_per_chat
+
+        # Explicit user-driven continuation: resets the per-chat budget,
+        # retains covered markers so we don't re-research them.
+        cont = _CONTINUE_RE.match(query or "")
+        if cont:
+            query = (query[cont.end():].strip()
+                     or ledger.get("topic") or query)
+            ledger["count"] = 0
+            ledger["gaps"] = []
+            await _emit(__event_emitter__,
+                        "🔁 Resuming research — prior coverage retained")
+
+        if not ledger.get("topic"):
+            ledger["topic"] = query
+        topic = ledger.get("topic") or query
+
+        # Hard stop: budget already spent and this is not a continuation.
+        # Do NOT run another expensive pass — hand the model what it needs
+        # to finalize plus a gap-aware continuation handle.
+        if ledger["count"] >= budget:
+            await _emit(__event_emitter__,
+                        f"⛔ Research budget reached ({ledger['count']}/{budget}) "
+                        "— returning coverage summary", done=True)
+            return _stop_payload(ledger, topic, ledger["count"], budget,
+                                 ran=False)
+
+        # Bias the run away from already-covered ground.
+        effective_query = query
+        covered = _dedup(ledger.get("covered", []), 8)
+        focus = _dedup(ledger.get("gaps", []), 5)
+        if covered or focus:
+            hint = []
+            if covered:
+                hint.append("Already researched (do not repeat): "
+                            + "; ".join(covered))
+            if focus:
+                hint.append("Prioritize these open gaps: " + "; ".join(focus))
+            effective_query = f"{query}\n\n({' | '.join(hint)})"
+
         sa = _SubAgent(mid, self.valves.max_prompt_tokens)
         j = _Journal(self.valves)
         syn = _Synthesizer(self.valves, sa, j)
-        return await _QuickResearcher(self.valves, sa, j, syn).run(
-            query, (__user__ or {}).get("id", ""), __request__, __user__ or {}, mid, __event_emitter__)
+        researcher = _QuickResearcher(self.valves, sa, j, syn)
+        answer = await researcher.run(
+            effective_query, (__user__ or {}).get("id", ""),
+            __request__, __user__ or {}, mid, __event_emitter__)
+
+        # Update the per-chat ledger with this run's coverage/gaps.
+        ledger["count"] += 1
+        ledger["covered"] = _dedup(
+            ledger["covered"] + (researcher.last_covered or []))
+        ledger["gaps"] = _dedup([
+            g for g in (ledger["gaps"] + (researcher.last_gaps or []))
+            if g not in ledger["covered"]
+        ])
+
+        used = ledger["count"]
+        if used >= budget:
+            # Final allowed pass completed — append the stop directive so the
+            # model finalizes instead of calling research() again.
+            answer += "\n\n" + _stop_payload(
+                ledger, topic, used, budget, ran=True)
+        elif used == budget - 1:
+            answer += (
+                f"\n\n---\n\n*ℹ️ {used}/{budget} research calls used this "
+                "conversation. One remains before a stop directive — make it "
+                "count, or finalize now.*")
+        return answer
 
     async def knowledge_research(
         self, query: str, collection: str = "",

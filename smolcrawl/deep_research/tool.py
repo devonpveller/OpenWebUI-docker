@@ -20,6 +20,13 @@ from .models import (
     ResearchSession,
     Valves,
 )
+from .chat_ledger import (
+    CONTINUE_RE,
+    RESEARCH_LEDGER,
+    chat_key,
+    dedup,
+    stop_payload,
+)
 from .rag_research import RagResearcher
 from .research import QuickResearcher
 from .sub_agent import SubAgent, extract_anchor
@@ -64,28 +71,107 @@ class Tools:
         """Quick research on a topic using web search.
 
         Stores findings to Fileshed and iteratively expands search terms
-        to find context you might not know to search for. Faster than
-        deep_research — use this to scope a topic before committing to
-        a full crawl.
+        internally. Faster than deep_research — use this to scope a topic.
+
+        IMPORTANT — call this ONCE per distinct research need. For a broad,
+        list, survey, "all available X", or comparison-matrix request, pass
+        the ENTIRE scope as a single query (e.g. "market analysis of all
+        augmented reality headsets available today, with specs and pricing
+        for each"). Do NOT decompose into one research() call per item — the
+        tool expands search terms on its own, and a per-conversation budget
+        will return a STOP directive once the budget is reached. If that
+        directive appears, do not call research() again: answer the user
+        with what was gathered and relay the coverage/gap summary verbatim.
 
         Args:
-            query: The research question or topic to explore.
+            query: The research question or topic to explore. For broad
+                requests, state the full scope in one query.
         """
         model_id = SubAgent.resolve_model_id(__metadata__, __model__)
         user_id = (__user__ or {}).get("id", "")
+
+        key = chat_key(__chat_id__, __user__)
+        ledger = RESEARCH_LEDGER.setdefault(
+            key, {"count": 0, "covered": [], "gaps": [], "topic": ""}
+        )
+        budget = self.valves.max_research_calls_per_chat
+
+        # Explicit user-driven continuation: resets the per-chat budget,
+        # retains covered markers so we don't re-research them.
+        cont = CONTINUE_RE.match(query or "")
+        if cont:
+            query = (query[cont.end():].strip()
+                     or ledger.get("topic") or query)
+            ledger["count"] = 0
+            ledger["gaps"] = []
+            await self._emit_status(
+                __event_emitter__,
+                "🔁 Resuming research — prior coverage retained",
+            )
+
+        if not ledger.get("topic"):
+            ledger["topic"] = query
+        topic = ledger.get("topic") or query
+
+        # Hard stop: budget already spent and this is not a continuation.
+        if ledger["count"] >= budget:
+            await self._emit_status(
+                __event_emitter__,
+                f"⛔ Research budget reached ({ledger['count']}/{budget}) "
+                "— returning coverage summary",
+                done=True,
+            )
+            return stop_payload(
+                ledger, topic, ledger["count"], budget, ran=False
+            )
+
+        # Bias the run away from already-covered ground.
+        effective_query = query
+        covered = dedup(ledger.get("covered", []), 8)
+        focus = dedup(ledger.get("gaps", []), 5)
+        if covered or focus:
+            hint = []
+            if covered:
+                hint.append("Already researched (do not repeat): "
+                            + "; ".join(covered))
+            if focus:
+                hint.append("Prioritize these open gaps: " + "; ".join(focus))
+            effective_query = f"{query}\n\n({' | '.join(hint)})"
 
         sub_agent = SubAgent(model_id, self.valves.max_prompt_tokens)
         journal = ResearchJournal(self.valves)
         researcher = QuickResearcher(self.valves, sub_agent, journal)
 
-        return await researcher.run(
-            query=query,
+        answer = await researcher.run(
+            query=effective_query,
             user_id=user_id,
             request=__request__,
             user=__user__ or {},
             model_id=model_id,
             event_emitter=__event_emitter__,
         )
+
+        ledger["count"] += 1
+        ledger["covered"] = dedup(
+            ledger["covered"] + (researcher.last_covered or [])
+        )
+        ledger["gaps"] = dedup([
+            g for g in (ledger["gaps"] + (researcher.last_gaps or []))
+            if g not in ledger["covered"]
+        ])
+
+        used = ledger["count"]
+        if used >= budget:
+            answer += "\n\n" + stop_payload(
+                ledger, topic, used, budget, ran=True
+            )
+        elif used == budget - 1:
+            answer += (
+                f"\n\n---\n\n*ℹ️ {used}/{budget} research calls used this "
+                "conversation. One remains before a stop directive — make it "
+                "count, or finalize now.*"
+            )
+        return answer
 
     async def knowledge_research(
         self,
