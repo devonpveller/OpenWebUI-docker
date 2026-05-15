@@ -6,6 +6,7 @@ web search + Fileshed. Iterates until min_relevant_sources are
 accumulated, using relevance gating and topic extraction to dive deeper.
 """
 
+import asyncio
 import logging
 import os
 from datetime import datetime
@@ -189,11 +190,17 @@ class QuickResearcher:
                 break
             tried_terms.update(new_terms)
 
-            # Search each term individually — OR-joining fails on most engines
+            # Search each term individually — OR-joining fails on most
+            # engines. Terms are independent → run them concurrently.
             raw = []
-            for term in new_terms[:3]:  # cap at 3 searches per iteration
-                hits = await self._web_search(session, term, request, user)
-                raw.extend(hits)
+            search_batches = await asyncio.gather(
+                *[self._web_search(session, term, request, user)
+                  for term in new_terms[:3]],  # cap at 3 searches per iter
+                return_exceptions=True,
+            )
+            for hits in search_batches:
+                if isinstance(hits, list):
+                    raw.extend(hits)
             pre_dedup = len(raw)
             raw = [r for r in raw if r.get("url", "") not in seen_urls]
             seen_urls.update(r.get("url", "") for r in raw)

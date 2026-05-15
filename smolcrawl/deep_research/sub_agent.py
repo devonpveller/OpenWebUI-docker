@@ -23,9 +23,14 @@ class SubAgent:
     Reuses the user's selected model for all sub-agent calls.
     """
 
-    def __init__(self, model_id: str, max_prompt_tokens: int = 6000):
+    def __init__(self, model_id: str, max_prompt_tokens: int = 6000,
+                 nothink_suffix: str = ""):
         self._model_id = model_id
         self._max_prompt_chars = max_prompt_tokens * 4  # rough char-to-token ratio
+        # When set (e.g. ":nothink"), mechanical JSON calls are routed to the
+        # reasoning-disabled alias of the SAME model so llama-swap does not
+        # reload — it just disables thinking-token generation.
+        self._nothink_suffix = nothink_suffix or ""
 
     async def run(
         self,
@@ -35,6 +40,7 @@ class SubAgent:
         user: Dict,
         metadata: Optional[Dict] = None,
         json_mode: bool = False,
+        nothink: bool = False,
     ) -> str:
         """Execute a sub-agent LLM call.
 
@@ -88,22 +94,46 @@ class SubAgent:
                 self._max_prompt_chars // 4,
             )
 
-        form_data = {
-            "model": self._model_id,
-            "messages": [
-                {"role": "system", "content": sys_msg},
-                {"role": "user", "content": combined},
-            ],
-            "stream": False,
-            "metadata": {"task": "deep_research_sub_agent"},
-        }
+        # Route to the reasoning-disabled alias when requested. Same model
+        # process under llama-swap (setParamsByID filter) → no reload, just
+        # skips thinking tokens. Falls back to the base model if the alias
+        # is unavailable.
+        use_model = self._model_id
+        if (nothink and self._nothink_suffix
+                and not self._model_id.endswith(self._nothink_suffix)):
+            use_model = f"{self._model_id}{self._nothink_suffix}"
 
-        response = await generate_chat_completion(
-            request=request,
-            form_data=form_data,
-            user=UserModel(**user),
-            bypass_filter=True,
-        )
+        def _form(model_id: str) -> Dict:
+            return {
+                "model": model_id,
+                "messages": [
+                    {"role": "system", "content": sys_msg},
+                    {"role": "user", "content": combined},
+                ],
+                "stream": False,
+                "metadata": {"task": "deep_research_sub_agent"},
+            }
+
+        try:
+            response = await generate_chat_completion(
+                request=request,
+                form_data=_form(use_model),
+                user=UserModel(**user),
+                bypass_filter=True,
+            )
+        except Exception as e:
+            if use_model == self._model_id:
+                raise
+            logger.warning(
+                "nothink alias '%s' failed (%s) — retrying with base model",
+                use_model, e,
+            )
+            response = await generate_chat_completion(
+                request=request,
+                form_data=_form(self._model_id),
+                user=UserModel(**user),
+                bypass_filter=True,
+            )
 
         content = response["choices"][0]["message"]["content"]
         logger.debug("Sub-agent response length: %d chars", len(content))
@@ -125,6 +155,7 @@ class SubAgent:
             user=user,
             metadata=metadata,
             json_mode=True,
+            nothink=True,
         )
         try:
             return self._parse_json_response(raw)
