@@ -15,3 +15,4 @@ modules/emergency-recovery/service/__pycache__/
 # Local MCP config (contains Open Brain access key)
 .mcp.json
 *.pyc
+*.log
