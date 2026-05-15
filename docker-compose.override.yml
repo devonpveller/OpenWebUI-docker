@@ -24,13 +24,3 @@ services:
       timeout: 10s
       retries: 5
       start_period: 60s
-
-  # mnemory must reach llama-cpp/llama-cpp-embed on the internal-only
-  # `llm-net` (no gateway, so Docker silently drops its `ports:` mapping).
-  # Joining the non-internal `default` bridge as well makes the base
-  # `127.0.0.1:8050/8051` publish take effect so host clients (Claude Code
-  # MCP) can reach it. llama-cpp stays internal-only and unaffected.
-  mnemory:
-    networks:
-      - llm-net
-      - default
