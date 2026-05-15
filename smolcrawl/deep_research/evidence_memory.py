@@ -158,32 +158,13 @@ async def lookup_research_evidence(
             content = mem.get("memory") or mem.get("content") or ""
             hdr = parse_ev_header(content)
             claim = content.split("⟧", 1)[-1].strip() or content
-
-            report = ""
-            if mem_id:
-                try:
-                    la = await client.get(
-                        f"{base}/api/memories/{mem_id}/artifacts",
-                        headers=headers)
-                    arts = (la.json() or {}) if la.status_code == 200 else {}
-                    items = (arts.get("artifacts") or arts.get("results")
-                             or arts if isinstance(arts, list) else [])
-                    if isinstance(items, dict):
-                        items = items.get("artifacts") or []
-                    if items:
-                        aid = (items[0].get("artifact_id")
-                               or items[0].get("id"))
-                        if aid:
-                            ga = await client.get(
-                                f"{base}/api/memories/{mem_id}/artifacts/"
-                                f"{aid}", headers=headers)
-                            if ga.status_code == 200:
-                                aj = ga.json()
-                                report = (aj.get("content") or aj.get("text")
-                                          or aj.get("data") or "")
-                except Exception:
-                    pass
-            return {"id": mem_id, "claim": claim, "report": report,
+            # Deliberately do NOT fetch the full-report artifact: a cache
+            # hit must stay lean. Injecting the multi-KB report inline
+            # would re-process on every subsequent chat turn (the bloat
+            # bug). The compact claim is the answer; the full report
+            # stays archived as the artifact and refresh=True regenerates
+            # it.
+            return {"id": mem_id, "claim": claim,
                     "header": hdr, "research_key": key}
     except Exception:
         return None
@@ -196,7 +177,11 @@ def format_cached_research(cached: Dict[str, Any], tool_name: str) -> str:
     date = hdr.get("date") or "an earlier date"
     stale = bool(hdr.get("is_stale"))
     due = hdr.get("due_date")
-    body = cached.get("report") or cached.get("claim") or ""
+    # Lean: the compact claim only — never the full report (bloat fix).
+    body = (cached.get("claim") or "").strip()[:1200]
+    archived = ("\n\n*(Full prior research report is archived as a "
+                "mnemory artifact on this evidence memory; re-run with "
+                "refresh=True to regenerate it.)*")
     if stale:
         status = (f"⚠️ STALE — re-validation was due {due}"
                   + (f" ({hdr.get('age_days')}d old)"
@@ -220,7 +205,7 @@ def format_cached_research(cached: Dict[str, Any], tool_name: str) -> str:
         f"♻️ **RECALLED PRIOR RESEARCH** — this request was already "
         f"researched on {date}.\n"
         f"**Status:** {status}\n\n"
-        f"{body}\n\n"
+        f"{body}{archived}\n\n"
         "---\n"
         f"**Assistant instructions (do not echo this line to the user):** "
         f"{guidance}")
