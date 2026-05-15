@@ -374,12 +374,17 @@ def _cb_build_iteration_text(summaries: List[str], budget_chars: int) -> str:
 
 
 class _SubAgent:
-    def __init__(self, model_id: str, max_prompt_tokens: int = 6000):
+    def __init__(self, model_id: str, max_prompt_tokens: int = 6000,
+                 nothink_suffix: str = ""):
         self._model_id = model_id
         self._max_prompt_chars = max_prompt_tokens * 4
+        # When set (e.g. ":nothink"), mechanical JSON calls route to the
+        # reasoning-disabled alias of the SAME model — llama-swap does not
+        # reload, it just skips thinking-token generation.
+        self._nothink_suffix = nothink_suffix or ""
 
     async def run(self, system_prompt: str, user_prompt: str, request, user: Dict,
-                  json_mode: bool = False) -> str:
+                  json_mode: bool = False, nothink: bool = False) -> str:
         from open_webui.utils.chat import generate_chat_completion
         from open_webui.models.users import UserModel
 
@@ -415,25 +420,44 @@ class _SubAgent:
                 self._max_prompt_chars // 4,
             )
 
-        form_data = {
-            "model": self._model_id,
-            "messages": [
-                {"role": "system", "content": sys_msg},
-                {"role": "user", "content": combined},
-            ],
-            "stream": False,
-            "metadata": {"task": "deep_research_sub_agent"},
-        }
-        response = await generate_chat_completion(
-            request=request, form_data=form_data,
-            user=UserModel(**user), bypass_filter=True,
-        )
+        use_model = self._model_id
+        if (nothink and self._nothink_suffix
+                and not self._model_id.endswith(self._nothink_suffix)):
+            use_model = f"{self._model_id}{self._nothink_suffix}"
+
+        def _form(model_id: str) -> Dict:
+            return {
+                "model": model_id,
+                "messages": [
+                    {"role": "system", "content": sys_msg},
+                    {"role": "user", "content": combined},
+                ],
+                "stream": False,
+                "metadata": {"task": "deep_research_sub_agent"},
+            }
+
+        try:
+            response = await generate_chat_completion(
+                request=request, form_data=_form(use_model),
+                user=UserModel(**user), bypass_filter=True,
+            )
+        except Exception as e:
+            if use_model == self._model_id:
+                raise
+            logger.warning(
+                "nothink alias '%s' failed (%s) — retrying with base model",
+                use_model, e,
+            )
+            response = await generate_chat_completion(
+                request=request, form_data=_form(self._model_id),
+                user=UserModel(**user), bypass_filter=True,
+            )
         return response["choices"][0]["message"]["content"]
 
     async def run_json(self, system_prompt: str, user_prompt: str, request, user: Dict) -> Any:
         """Call LLM and parse response as JSON."""
         raw = await self.run(system_prompt, user_prompt, request, user,
-                             json_mode=True)
+                             json_mode=True, nothink=True)
         try:
             return _parse_json(raw)
         except ValueError:
@@ -850,22 +874,37 @@ class _RagResearcher:
                             k_override: int = None,
                             file_ids_map: Dict[str, List[str]] = None) -> IterationResult:
         all_chunks, new_chunks = [], []
-        for term in terms:
-            for cid in col_ids:
-                fids = (file_ids_map or {}).get(cid)
-                for chunk in await self.query_collection(cid, term, col_names.get(cid, cid),
-                                                         k_override=k_override, request=request,
-                                                         file_ids=fids):
-                    all_chunks.append(chunk)
-                    if session.add_seen_chunk(cid, chunk.chunk_hash):
-                        new_chunks.append(chunk)
+
+        # Query each (term × collection) pair concurrently, bounded so the
+        # single embedding server isn't overloaded. Results processed in
+        # submission order so chunk dedup stays deterministic.
+        limit = max(1, getattr(self._v, "max_parallel_queries", 5))
+        sem = asyncio.Semaphore(limit)
+        pairs = [(term, cid) for term in terms for cid in col_ids]
+
+        async def _query(term, cid):
+            async with sem:
+                return await self.query_collection(
+                    cid, term, col_names.get(cid, cid),
+                    k_override=k_override, request=request,
+                    file_ids=(file_ids_map or {}).get(cid))
+
+        results = await asyncio.gather(
+            *[_query(t, c) for t, c in pairs], return_exceptions=True)
+        for (_, cid), chunks in zip(pairs, results):
+            if not isinstance(chunks, list):
+                continue
+            for chunk in chunks:
+                all_chunks.append(chunk)
+                if session.add_seen_chunk(cid, chunk.chunk_hash):
+                    new_chunks.append(chunk)
 
         summary, concepts = "", []
         if new_chunks:
-            max_ch = getattr(self._valves, 'max_chunks_per_iteration', 10)
+            max_ch = getattr(self._v, 'max_chunks_per_iteration', 10)
             # Cap chunk text to fit within prompt budget
             chunk_budget = _cb_usable_budget_chars(
-                self._valves.max_prompt_tokens
+                self._v.max_prompt_tokens
             ) - len(session.anchor) - 1000
             chunk_parts = []
             used = 0
@@ -1556,11 +1595,17 @@ class _QuickResearcher:
                 break
             tried_terms.update(new_terms)
 
-            # Search each term individually — OR-joining fails on most engines
+            # Search each term individually — OR-joining fails on most
+            # engines. Terms are independent → run them concurrently.
             raw = []
-            for term in new_terms[:3]:  # cap at 3 searches per iteration
-                hits = await self._web_search(session, term, request, user)
-                raw.extend(hits)
+            search_batches = await asyncio.gather(
+                *[self._web_search(session, term, request, user)
+                  for term in new_terms[:3]],  # cap at 3 searches per iter
+                return_exceptions=True,
+            )
+            for hits in search_batches:
+                if isinstance(hits, list):
+                    raw.extend(hits)
             pre_dedup = len(raw)
             raw = [r for r in raw if r.get("url", "") not in seen_urls]
             seen_urls.update(r.get("url", "") for r in raw)
@@ -2167,16 +2212,25 @@ class _KnowledgeResearcher:
         if not engine:
             return {"recommendations": [], "crawl_suggestion": "No web search engine configured."}
 
-        all_results, seen = [], set()
-        for term in search_terms[:5]:
+        terms = search_terms[:5]
+
+        async def _search(term):
             try:
-                results = await run_in_threadpool(search_web, request, engine, term)
-                for r in results or []:
-                    if r.link not in seen:
-                        seen.add(r.link)
-                        all_results.append(r)
+                return await run_in_threadpool(search_web, request, engine, term)
             except Exception as e:
                 logger.warning("Web search for '%s' failed: %s", term, e)
+                return []
+
+        batches = await asyncio.gather(
+            *[_search(t) for t in terms], return_exceptions=True)
+        all_results, seen = [], set()
+        for results in batches:
+            if not isinstance(results, list):
+                continue
+            for r in results:
+                if r.link not in seen:
+                    seen.add(r.link)
+                    all_results.append(r)
         if not all_results:
             return {"recommendations": [], "crawl_suggestion": "Web search returned no results for gap topics."}
 
@@ -2391,6 +2445,9 @@ class Tools:
         min_relevant_sources: int = Field(default=3, ge=1, le=30, description="Target: stop researching once this many anchor-relevant sources are found")
         max_research_calls_per_chat: int = Field(default=5, ge=1, le=50, description="Max research() calls the chat model may make per conversation before a graceful stop directive is returned (prevents unbounded per-item fan-out on broad survey prompts). The user can resume past this with a 'research continue:' prompt.")
         max_web_results: int = Field(default=5, ge=1, le=50, description="Max web search results per query")
+        sub_agent_nothink: bool = Field(default=True, description="Route mechanical sub-agent JSON calls (anchor, relevance gate, topic extraction, gap analysis, etc.) to the reasoning-disabled model alias for speed. With llama-swap this is the SAME model process (no reload) — it only skips thinking-token generation. Falls back to base model if the alias is unavailable.")
+        nothink_suffix: str = Field(default=":nothink", description="Suffix appended to the chat model id to address its reasoning-disabled alias (matches the llama-swap setParamsByID '${MODEL_ID}:nothink' entry). Empty disables nothink routing.")
+        max_parallel_queries: int = Field(default=5, ge=1, le=32, description="Max concurrent RAG collection/file queries per iteration. Parallelizes the term×collection fan-out without overloading the single embedding server.")
         include_sources: bool = Field(default=True, description="Append source references to answer")
         top_k_per_collection: int = Field(default=3, ge=1, le=20, description="Chunks per collection per query")
         max_collections: int = Field(default=5, ge=1, le=50, description="Max collections to search")
@@ -2474,7 +2531,9 @@ class Tools:
                 hint.append("Prioritize these open gaps: " + "; ".join(focus))
             effective_query = f"{query}\n\n({' | '.join(hint)})"
 
-        sa = _SubAgent(mid, self.valves.max_prompt_tokens)
+        sa = _SubAgent(mid, self.valves.max_prompt_tokens,
+                       nothink_suffix=(self.valves.nothink_suffix
+                                       if self.valves.sub_agent_nothink else ""))
         j = _Journal(self.valves)
         syn = _Synthesizer(self.valves, sa, j)
         researcher = _QuickResearcher(self.valves, sa, j, syn)
@@ -2527,7 +2586,9 @@ class Tools:
                 this collection exclusively.
         """
         mid = _SubAgent.resolve_model_id(__metadata__, __model__)
-        sa = _SubAgent(mid, self.valves.max_prompt_tokens)
+        sa = _SubAgent(mid, self.valves.max_prompt_tokens,
+                       nothink_suffix=(self.valves.nothink_suffix
+                                       if self.valves.sub_agent_nothink else ""))
         j = _Journal(self.valves)
         syn = _Synthesizer(self.valves, sa, j)
         return await _KnowledgeResearcher(self.valves, sa, j, syn).run(
@@ -2554,7 +2615,9 @@ class Tools:
             query: The research question or topic to investigate.
         """
         mid = _SubAgent.resolve_model_id(__metadata__, __model__)
-        sa = _SubAgent(mid, self.valves.max_prompt_tokens)
+        sa = _SubAgent(mid, self.valves.max_prompt_tokens,
+                       nothink_suffix=(self.valves.nothink_suffix
+                                       if self.valves.sub_agent_nothink else ""))
         j = _Journal(self.valves)
         rag = _RagResearcher(self.valves, sa)
         crawl = _CrawlClient(self.valves)

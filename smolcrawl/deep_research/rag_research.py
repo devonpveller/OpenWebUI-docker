@@ -331,25 +331,40 @@ class RagResearcher:
         all_chunks: List[RetrievedChunk] = []
         new_chunks: List[RetrievedChunk] = []
 
-        # Query each collection with each term
-        for term in search_terms:
-            for col_id in collection_ids:
-                file_ids = (file_ids_map or {}).get(col_id)
-                chunks = await self.query_collection(
+        # Query each (term × collection) pair. Pairs are independent → run
+        # them concurrently, bounded so the single embedding server isn't
+        # overloaded. Results are processed in submission order so chunk
+        # deduplication stays deterministic.
+        limit = max(1, getattr(self._valves, "max_parallel_queries", 5))
+        sem = asyncio.Semaphore(limit)
+        pairs = [
+            (term, col_id)
+            for term in search_terms
+            for col_id in collection_ids
+        ]
+
+        async def _query(term: str, col_id: str):
+            async with sem:
+                return await self.query_collection(
                     collection_id=col_id,
                     query=term,
                     collection_name=collection_names.get(col_id, col_id),
                     k_override=k_override,
                     request=request,
-                    file_ids=file_ids,
+                    file_ids=(file_ids_map or {}).get(col_id),
                 )
-                for chunk in chunks:
-                    all_chunks.append(chunk)
-                    is_new = session.add_seen_chunk(
-                        col_id, chunk.chunk_hash
-                    )
-                    if is_new:
-                        new_chunks.append(chunk)
+
+        results = await asyncio.gather(
+            *[_query(term, col_id) for term, col_id in pairs],
+            return_exceptions=True,
+        )
+        for (_, col_id), chunks in zip(pairs, results):
+            if not isinstance(chunks, list):
+                continue
+            for chunk in chunks:
+                all_chunks.append(chunk)
+                if session.add_seen_chunk(col_id, chunk.chunk_hash):
+                    new_chunks.append(chunk)
 
         # Build context for LLM summarization — cap total chunk text
         # to fit within the prompt budget alongside the anchor and overhead

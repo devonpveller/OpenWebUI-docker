@@ -84,6 +84,31 @@ class Valves(BaseModel):
         le=50,
         description="Max web search results per query",
     )
+    sub_agent_nothink: bool = Field(
+        default=True,
+        description="Route mechanical sub-agent JSON calls (anchor, "
+                    "relevance gate, topic extraction, gap analysis, etc.) "
+                    "to the reasoning-disabled model alias for speed. With "
+                    "llama-swap this is the SAME model process (no reload) — "
+                    "it only skips thinking-token generation. Falls back to "
+                    "the base model if the alias is unavailable.",
+    )
+    nothink_suffix: str = Field(
+        default=":nothink",
+        description="Suffix appended to the chat model id to address its "
+                    "reasoning-disabled alias (matches the llama-swap "
+                    "setParamsByID '${MODEL_ID}:nothink' entry). Set empty "
+                    "to disable nothink routing regardless of "
+                    "sub_agent_nothink.",
+    )
+    max_parallel_queries: int = Field(
+        default=5,
+        ge=1,
+        le=32,
+        description="Max concurrent RAG collection/file queries per "
+                    "iteration. Parallelizes the term×collection fan-out "
+                    "without overloading the single embedding server.",
+    )
     include_sources: bool = Field(
         default=True,
         description="Append source references to final answer",
