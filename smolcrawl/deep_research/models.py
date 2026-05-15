@@ -123,10 +123,20 @@ class Valves(BaseModel):
                     "artifact). Never writes per-iteration queries.",
     )
     evidence_memory_quick_research: bool = Field(
-        default=False,
-        description="Also persist evidence from quick research(). Off by "
-                    "default: only the heavier knowledge_research / "
-                    "deep_research completions are saved as evidence.",
+        default=True,
+        description="Persist evidence from quick research() too. Default "
+                    "ON so the cache covers every research entrypoint "
+                    "(a later 'use research' on the same question hits "
+                    "the cache regardless of which tool first ran it).",
+    )
+    evidence_cache_enabled: bool = Field(
+        default=True,
+        description="Before a research run, check mnemory for a prior "
+                    "EV:research memory for the SAME request "
+                    "(research_key match). On hit, return the stored "
+                    "finding + report instead of researching (stale hits "
+                    "flagged). refresh=True bypasses the cache and "
+                    "supersedes the memory in place.",
     )
     mnemory_url: str = Field(
         default="http://mnemory:8050",

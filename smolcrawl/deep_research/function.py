@@ -20,7 +20,11 @@ from .chat_ledger import (
     stop_payload,
 )
 from .crawl_integration import CrawlClient
-from .evidence_memory import persist_research_evidence
+from .evidence_memory import (
+    format_cached_research,
+    lookup_research_evidence,
+    persist_research_evidence,
+)
 from .journal import ResearchJournal
 from .knowledge_research import KnowledgeResearcher
 from .models import (
@@ -60,6 +64,7 @@ class Tools:
     async def research(
         self,
         query: str,
+        refresh: bool = False,
         __user__: dict = None,
         __metadata__: dict = None,
         __event_emitter__=None,
@@ -84,9 +89,18 @@ class Tools:
         directive appears, do not call research() again: answer the user
         with what was gathered and relay the coverage/gap summary verbatim.
 
+        CACHE: if this exact request was researched before, the stored
+        finding is returned instead of researching again (stale results
+        are flagged). Only set refresh=True when the user explicitly asks
+        to re-research / update it — that runs a fresh pass and supersedes
+        the cached evidence in place.
+
         Args:
             query: The research question or topic to explore. For broad
                 requests, state the full scope in one query.
+            refresh: Force a fresh research run, bypassing the cache and
+                superseding any prior evidence for this request. Use only
+                on explicit user request.
         """
         model_id = SubAgent.resolve_model_id(__metadata__, __model__)
         user_id = (__user__ or {}).get("id", "")
@@ -113,6 +127,19 @@ class Tools:
         if not ledger.get("topic"):
             ledger["topic"] = query
         topic = ledger.get("topic") or query
+
+        # Cache check (skip on explicit refresh or a 'research continue:'
+        # continuation). A hit returns the stored finding without spending
+        # the per-chat budget.
+        if not refresh and not cont:
+            cached = await lookup_research_evidence(
+                self.valves, query=query, user=__user__ or {})
+            if cached:
+                await self._emit_status(
+                    __event_emitter__,
+                    "♻️ Found prior research for this request — recalling",
+                    done=True)
+                return format_cached_research(cached, "research")
 
         # Hard stop: budget already spent and this is not a continuation.
         if ledger["count"] >= budget:
@@ -191,6 +218,7 @@ class Tools:
         self,
         query: str,
         collection: str = "",
+        refresh: bool = False,
         __user__: dict = None,
         __metadata__: dict = None,
         __event_emitter__=None,
@@ -210,14 +238,30 @@ class Tools:
         Use this when you already have knowledge collections and want to
         query them deeply before resorting to web search or crawling.
 
+        CACHE: a prior result for the same request is returned instead of
+        re-querying (stale flagged). Set refresh=True only on explicit
+        user request to re-research — it supersedes the cached evidence.
+
         Args:
             query: The research question or topic to investigate.
             collection: Optional name of a specific knowledge collection
                 to query. When provided, skips auto-detection and uses
                 this collection exclusively.
+            refresh: Force a fresh run, bypassing the cache and
+                superseding prior evidence. Use only on explicit request.
         """
         model_id = SubAgent.resolve_model_id(__metadata__, __model__)
         user_id = (__user__ or {}).get("id", "")
+
+        if not refresh:
+            cached = await lookup_research_evidence(
+                self.valves, query=query, user=__user__ or {})
+            if cached:
+                await self._emit_status(
+                    __event_emitter__,
+                    "♻️ Found prior research for this request — recalling",
+                    done=True)
+                return format_cached_research(cached, "knowledge_research")
 
         sub_agent = SubAgent(
             model_id, self.valves.max_prompt_tokens,
@@ -249,6 +293,7 @@ class Tools:
     async def deep_research(
         self,
         query: str,
+        refresh: bool = False,
         __user__: dict = None,
         __metadata__: dict = None,
         __event_emitter__=None,
@@ -268,11 +313,28 @@ class Tools:
         Pipeline: knowledge_research → gap analysis → web search →
         crawl → knowledge_research → synthesize → verify.
 
+        CACHE: a prior result for the same request is returned instead of
+        re-running the (expensive) pipeline; stale results are flagged.
+        Set refresh=True only when the user explicitly asks to
+        re-research / update — it supersedes the cached evidence in place.
+
         Args:
             query: The research question or topic to investigate.
+            refresh: Force a fresh run, bypassing the cache and
+                superseding prior evidence. Use only on explicit request.
         """
         model_id = SubAgent.resolve_model_id(__metadata__, __model__)
         user_id = (__user__ or {}).get("id", "")
+
+        if not refresh:
+            cached = await lookup_research_evidence(
+                self.valves, query=query, user=__user__ or {})
+            if cached:
+                await self._emit_status(
+                    __event_emitter__,
+                    "♻️ Found prior research for this request — recalling",
+                    done=True)
+                return format_cached_research(cached, "deep_research")
 
         sub_agent = SubAgent(
             model_id, self.valves.max_prompt_tokens,
