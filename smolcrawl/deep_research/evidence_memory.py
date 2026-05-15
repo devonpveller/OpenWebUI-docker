@@ -25,10 +25,13 @@ from __future__ import annotations
 
 import datetime
 import hashlib
+import logging
 import re
 from typing import Any, Dict, Optional
 
 import httpx
+
+logger = logging.getLogger("deep_research.evidence")
 
 _URL_RE = re.compile(r"https?://[^\s\)\]\}>\"']+")
 _DEFAULT_VOL_DAYS = {"fast": 7, "medium": 180, "slow": 1095}
@@ -312,11 +315,14 @@ async def persist_research_evidence(
             except Exception:
                 pass
 
+            fail_resp = None
             if existing_id:
                 up = await client.put(
                     f"{base}/api/memories/{existing_id}",
                     headers=headers, json=body)
                 ok = up.status_code == 200
+                if not ok:
+                    fail_resp = up
                 mem_id = existing_id if ok else None
                 verb = "superseded"
                 # Drop old artifacts so the report doesn't accrete.
@@ -342,6 +348,8 @@ async def persist_research_evidence(
                 cr = await client.post(f"{base}/api/memories",
                                        headers=headers, json=body)
                 ok = cr.status_code == 200
+                if not ok:
+                    fail_resp = cr
                 verb = "saved"
                 mem_id = None
                 if ok:
@@ -354,7 +362,18 @@ async def persist_research_evidence(
                                         if isinstance(data, dict) else None)
 
             if not ok:
-                await _emit("🧠 evidence memory skipped (write failed)")
+                detail = ""
+                if fail_resp is not None:
+                    snippet = " ".join(
+                        (fail_resp.text or "").split())[:300]
+                    detail = (f" — HTTP {fail_resp.status_code} "
+                              f"at {fail_resp.request.method} "
+                              f"{fail_resp.request.url.path}: {snippet}")
+                logger.warning(
+                    "evidence memory %s failed%s", verb, detail or
+                    " (no response captured)")
+                await _emit(
+                    f"🧠 evidence memory skipped (write failed{detail[:200]})")
                 return
             if mem_id:
                 artifact = (

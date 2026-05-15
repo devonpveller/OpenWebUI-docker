@@ -197,6 +197,11 @@ services:
       - LLAMA_CPP_TIMEOUT=${LLAMA_CPP_TIMEOUT:-300}
       - LLAMA_CPP_CACHE_TYPE_K=${LLAMA_CPP_CACHE_TYPE_K:-q4_0}
       - LLAMA_CPP_CACHE_TYPE_V=${LLAMA_CPP_CACHE_TYPE_V:-q4_0}
+      # Max KV context-checkpoints per slot. Inherited by every
+      # llama-server llama-swap spawns. Build default is 32; at 256k ctx
+      # each checkpoint is ~150 MiB, so 32 wasted ~4.8 GB of churning,
+      # low-yield cache. 2 keeps recent-prefix reuse, frees ~4 GB.
+      - LLAMA_ARG_CTX_CHECKPOINTS=${LLAMA_ARG_CTX_CHECKPOINTS:-2}
       - LLAMA_SWAP_QWEN36_35B_MODEL_PATH=${LLAMA_SWAP_QWEN36_35B_MODEL_PATH:-/models/lmstudio-community/Qwen3.6-35B-A3B-GGUF/Qwen3.6-35B-A3B-Q4_K_M.gguf}
       - LLAMA_SWAP_QWEN36_35B_CTX_SIZE=${LLAMA_SWAP_QWEN36_35B_CTX_SIZE:-262144}
       - LLAMA_SWAP_QWEN36_35B_N_GPU_LAYERS=${LLAMA_SWAP_QWEN36_35B_N_GPU_LAYERS:-99}
@@ -209,7 +214,10 @@ services:
       - LLAMA_SWAP_QWEN36_27B_MODEL_PATH=${LLAMA_SWAP_QWEN36_27B_MODEL_PATH:-/models/lmstudio-community/Qwen3.6-27B-GGUF/Qwen3.6-27B-Q4_K_M.gguf}
       - LLAMA_SWAP_QWEN36_27B_CTX_SIZE=${LLAMA_SWAP_QWEN36_27B_CTX_SIZE:-262144}
       - LLAMA_SWAP_QWEN36_27B_N_GPU_LAYERS=${LLAMA_SWAP_QWEN36_27B_N_GPU_LAYERS:-99}
-      - LLAMA_SWAP_QWEN36_27B_N_PARALLEL=${LLAMA_SWAP_QWEN36_27B_N_PARALLEL:-1}
+      # parallel=2 -> two concurrent 131072-token lanes (256k / 2).
+      # Interactive chat no longer blocks behind a background mnemory
+      # extraction or a long research synthesis. Same model id.
+      - LLAMA_SWAP_QWEN36_27B_N_PARALLEL=${LLAMA_SWAP_QWEN36_27B_N_PARALLEL:-2}
       - LLAMA_SWAP_QWEN36_27B_BATCH=${LLAMA_SWAP_QWEN36_27B_BATCH:-1024}
       - LLAMA_SWAP_QWEN36_27B_UBATCH=${LLAMA_SWAP_QWEN36_27B_UBATCH:-512}
       - LLAMA_SWAP_QWEN36_27B_CACHE_TYPE_K=${LLAMA_SWAP_QWEN36_27B_CACHE_TYPE_K:-q4_0}

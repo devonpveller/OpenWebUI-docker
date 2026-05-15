@@ -2676,11 +2676,14 @@ async def _persist_research_evidence(valves, sub_agent, *, query, answer,
             except Exception:
                 pass
 
+            fail_resp = None
             if existing_id:
                 up = await client.put(
                     f"{base}/api/memories/{existing_id}",
                     headers=headers, json=payload)
                 ok = up.status_code == 200
+                if not ok:
+                    fail_resp = up
                 mem_id = existing_id if ok else None
                 verb = "superseded"
                 if ok:
@@ -2705,6 +2708,8 @@ async def _persist_research_evidence(valves, sub_agent, *, query, answer,
                 cr = await client.post(f"{base}/api/memories",
                                        headers=headers, json=payload)
                 ok = cr.status_code == 200
+                if not ok:
+                    fail_resp = cr
                 verb = "saved"
                 mem_id = None
                 if ok:
@@ -2717,8 +2722,16 @@ async def _persist_research_evidence(valves, sub_agent, *, query, answer,
                                         if isinstance(data, dict) else None)
 
             if not ok:
+                detail = ""
+                if fail_resp is not None:
+                    snippet = " ".join((fail_resp.text or "").split())[:300]
+                    detail = (f" — HTTP {fail_resp.status_code} at "
+                              f"{fail_resp.request.method} "
+                              f"{fail_resp.request.url.path}: {snippet}")
+                logger.warning("evidence memory %s failed%s", verb,
+                               detail or " (no response captured)")
                 await _emit("\U0001f9e0 evidence memory skipped "
-                            "(write failed)")
+                            f"(write failed{detail[:200]})")
                 return
             if mem_id:
                 artifact = (
@@ -2774,7 +2787,7 @@ class Tools:
         max_collections: int = Field(default=5, ge=1, le=50, description="Max collections to search")
         max_domains: int = Field(default=3, ge=1, le=20, description="Max domains to discover")
         auto_approve_domains: bool = Field(default=True, description="Auto-approve all non-covered domains (skip manual approval)")
-        max_prompt_tokens: int = Field(default=196000, ge=1000, le=262144, description="Token budget for SubAgent prompts. Should be model context window minus ~4000. Default 196000 suits Qwen3 235B/30B-A3B 200k context models (262144 max for 256k models).")
+        max_prompt_tokens: int = Field(default=120000, ge=1000, le=262144, description="Token budget for SubAgent prompts. MUST be <= the model's per-request context lane minus response headroom. llama-swap qwen36-27b runs --parallel 2 over 262144 ctx => 131072-token lane; 120000 leaves ~11k for the answer. Raise only if you also lower parallelism. Set far lower for small models (e.g. 28000 for 32k ctx).")
         max_chunks_per_iteration: int = Field(default=10, ge=1, le=50, description="Max RAG chunks included in LLM summarization per iteration")
         skip_verification: bool = Field(default=False, description="Skip LLM verification/remediation passes (saves 2 LLM calls, faster for small models)")
         fileshed_compatible: bool = Field(default=True, description="Write journal to Fileshed Storage zone")

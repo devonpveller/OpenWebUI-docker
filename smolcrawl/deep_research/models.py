@@ -186,14 +186,17 @@ class Valves(BaseModel):
 
     # Context management
     max_prompt_tokens: int = Field(
-        default=196000,
+        default=120000,
         ge=1000,
         le=262144,
-        description="Token budget for SubAgent prompts. Should be your model's "
-                    "context window minus ~4000 (response reserve). "
-                    "Default 196000 suits Qwen3 235B/30B-A3B 200k context models. "
-                    "Set lower for smaller models (e.g. 28000 for 32k context, "
-                    "4000 for 8k context). Max 262144 for 256k models.",
+        description="Token budget for SubAgent prompts. MUST be <= the "
+                    "model's per-request context lane minus response "
+                    "headroom. The llama-swap qwen36-27b runs --parallel 2 "
+                    "over a 262144 ctx, so each request lane is 131072 "
+                    "tokens; 120000 leaves ~11k for the generated answer. "
+                    "Raise toward the lane size only if you also lower "
+                    "parallelism (bigger lane). Set far lower for small "
+                    "models (e.g. 28000 for 32k ctx).",
     )
     max_chunks_per_iteration: int = Field(
         default=10,
