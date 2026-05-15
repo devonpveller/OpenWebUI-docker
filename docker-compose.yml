@@ -244,9 +244,10 @@ services:
     container_name: mnemory
     networks:
       - llm-net
-    ports:
-      - "127.0.0.1:8050:8050"
-      - "127.0.0.1:8051:8051"
+    # NO host ports: mnemory is reachable only inside llm-net (internal,
+    # no gateway). Trusted local clients (Open WebUI) talk to it directly.
+    # Cloud services must go through mnemory-gateway, which is the only
+    # host-published door and enforces the privacy policy.
     environment:
       - LLM_API_KEY=ollama
       - LLM_BASE_URL=http://llama-cpp:8080/v1
@@ -258,6 +259,7 @@ services:
       - MCP_API_KEYS=${MCP_API_KEYS}
       - FIND_MEMORIES_QUERIES=3
       - LLM_CONTEXT_SIZE=${MNEMORY_LLM_CONTEXT_SIZE:-131072}
+      - LABELS_INDEXES=origin,share,project
       - MGMT_PORT=8051
     volumes:
       - mnemory-data:/data
@@ -277,6 +279,40 @@ services:
       timeout: 10s
       retries: 3
       start_period: 60s
+
+  # Privacy-enforcing MCP proxy for CLOUD services (Claude Code, etc.).
+  # Only host-published mnemory door. Holds the real mnemory key; cloud
+  # clients use MNEMORY_GATEWAY_KEY and never see the mnemory key.
+  mnemory-gateway:
+    build:
+      context: ./mnemory-gateway
+      dockerfile: Dockerfile
+    container_name: mnemory-gateway
+    networks:
+      - llm-net      # reach mnemory:8050 internally
+      - default      # be reachable from the host (non-internal => publishable)
+    ports:
+      - "127.0.0.1:8060:8060"
+    environment:
+      - MNEMORY_URL=http://mnemory:8050
+      - MNEMORY_KEY=${MCP_API_KEY}
+      - GATEWAY_KEY=${MNEMORY_GATEWAY_KEY}
+      - BOUND_USER_ID=${MNEMORY_CLOUD_USER:-yamaoka01@gmail.com}
+      - SHARE_LABEL_VALUE=cloud
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      mnemory:
+        condition: service_healthy
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8060/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
 
   mnemory-backup:
     image: alpine:3.21
