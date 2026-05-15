@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell($ErrorActionPreference = \"Stop\"; foreach \\($f in @\\(\"d:\\\\Open WebUI\\\\ai-stack\\\\scripts\\\\check-tailscale-health.ps1\", \"d:\\\\Open WebUI\\\\ai-stack\\\\scripts\\\\emergency-recovery.ps1\"\\)\\) { $errs = $null; $tokens = [System.Management.Automation.PSParser]::Tokenize\\(\\(Get-Content -Raw $f\\), [ref]$errs\\); if \\($errs.Count -gt 0\\) { Write-Output \"FAIL: $f\"; $errs | ForEach-Object { Write-Output \\(\"  Line {0}: {1}\" -f $_.Token.StartLine, $_.Message\\) } } else { Write-Output \"OK: $f \\($\\($tokens.Count\\) tokens\\)\" } })",
+      "PowerShell($errs = $null; $tokens = [System.Management.Automation.PSParser]::Tokenize\\(\\(Get-Content -Raw \"d:\\\\Open WebUI\\\\ai-stack\\\\scripts\\\\check-tailscale-health.ps1\"\\), [ref]$errs\\); if \\($errs.Count -gt 0\\) { Write-Output \"FAIL\"; $errs | ForEach-Object { Write-Output \\(\"  Line {0}: {1}\" -f $_.Token.StartLine, $_.Message\\) } } else { Write-Output \"OK \\($\\($tokens.Count\\) tokens\\)\" })",
+      "Bash(docker compose *)",
+      "Bash(nvidia-smi --query-gpu=index,name,utilization.gpu,memory.used,memory.total,compute_mode --format=csv)",
+      "Bash(docker info *)",
+      "Bash(wsl.exe -l -v)",
+      "Bash(iconv -f UTF-16LE -t UTF-8)",
+      "Bash(docker run *)"
+    ]
+  }
+}

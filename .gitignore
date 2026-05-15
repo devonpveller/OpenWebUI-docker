@@ -12,3 +12,5 @@ scripts/ai_pipes/__pycache__/
 modules/custom-tools/service/__pycache__/
 modules/emergency-recovery/service/__pycache__/
 .../__pycache__/
+# Local MCP config (contains Open Brain access key)
+.mcp.json
