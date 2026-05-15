@@ -26,7 +26,7 @@ import re
 import time
 import uuid as _uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import urlparse
@@ -2428,6 +2428,12 @@ def _stop_payload(ledger: Dict[str, Any], topic: str, used: int, budget: int,
 
 _EV_URL_RE = re.compile(r"https?://[^\s\)\]\}>\"']+")
 _EV_DEFAULT_VOL_DAYS = {"fast": 7, "medium": 180, "slow": 1095}
+_EV_KEY_STOP = {
+    "the", "a", "an", "of", "to", "for", "is", "are", "was", "were", "what",
+    "how", "why", "when", "who", "which", "vs", "versus", "and", "or", "in",
+    "on", "at", "about", "please", "research", "use", "find", "tell", "me",
+    "do", "does", "can", "you", "give", "info", "information", "into",
+}
 _EV_CLASSIFY_SYS = (
     "You compress a completed research answer into one durable evidence "
     "record. Return STRICT JSON only:\n"
@@ -2444,6 +2450,15 @@ _EV_CLASSIFY_SYS = (
 )
 
 
+def _compute_research_key(query: str) -> str:
+    text = re.sub(r"[^a-z0-9\s]", " ", (query or "").lower())
+    toks = sorted(t for t in text.split() if t and t not in _EV_KEY_STOP)
+    if not toks:
+        toks = sorted(re.sub(r"[^a-z0-9\s]", " ",
+                             (query or "").lower()).split())
+    return hashlib.sha1(" ".join(toks).encode()).hexdigest()[:20]
+
+
 def _ev_vol_map(spec: str) -> Dict[str, int]:
     out: Dict[str, int] = {}
     for part in (spec or "").split(","):
@@ -2456,10 +2471,144 @@ def _ev_vol_map(spec: str) -> Dict[str, int]:
     return out or dict(_EV_DEFAULT_VOL_DAYS)
 
 
+def _parse_ev_header(content: str) -> Dict[str, Any]:
+    if not content:
+        return {}
+    m = re.match(r"⟦EV:research\b([^⟧]*)⟧", content.strip())
+    if not m:
+        return {}
+    body = m.group(1)
+    info: Dict[str, Any] = {"is_stale": False, "due_date": None,
+                            "age_days": None}
+    d = re.search(r"date:(\d{4}-\d{2}-\d{2})", body)
+    rv = re.search(r"revalidate:(\d+)d", body)
+    info["date"] = d.group(1) if d else None
+    info["revalidate_days"] = int(rv.group(1)) if rv else None
+    if info["date"] and info["revalidate_days"] is not None:
+        try:
+            researched = date.fromisoformat(info["date"])
+            today = date.today()
+            due = researched + timedelta(days=info["revalidate_days"])
+            info["age_days"] = (today - researched).days
+            info["due_date"] = due.isoformat()
+            info["is_stale"] = today > due
+        except ValueError:
+            pass
+    return info
+
+
+def _ev_mn_headers(valves, user_id: str) -> Dict[str, str]:
+    return {"Authorization": f"Bearer {getattr(valves, 'mnemory_api_key', '')}",
+            "Content-Type": "application/json", "X-User-Id": user_id}
+
+
+def _ev_user_id(valves, user) -> str:
+    user = user or {}
+    return (user.get("email") or user.get("id")
+            or getattr(valves, "mnemory_user_id", "") or "")
+
+
+async def _lookup_research_evidence(valves, *, query, user):
+    """Existing evidence memory for this exact request + its report, or
+    None. Best-effort: any error => None (cache miss)."""
+    if not getattr(valves, "evidence_cache_enabled", True):
+        return None
+    base = (getattr(valves, "mnemory_url", "") or "").rstrip("/")
+    api_key = getattr(valves, "mnemory_api_key", "") or ""
+    user_id = _ev_user_id(valves, user)
+    if not base or not api_key or not user_id:
+        return None
+    key = _compute_research_key(query)
+    headers = _ev_mn_headers(valves, user_id)
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            r = await client.post(
+                f"{base}/api/memories/search", headers=headers,
+                json={"query": query[:400], "limit": 3,
+                      "labels": {"evidence": "research",
+                                 "research_key": key}})
+            if r.status_code != 200:
+                return None
+            results = (r.json() or {}).get("results") or []
+            if not results:
+                return None
+            mem = results[0]
+            mem_id = mem.get("id")
+            content = mem.get("memory") or mem.get("content") or ""
+            hdr = _parse_ev_header(content)
+            claim = content.split("⟧", 1)[-1].strip() or content
+            report = ""
+            if mem_id:
+                try:
+                    la = await client.get(
+                        f"{base}/api/memories/{mem_id}/artifacts",
+                        headers=headers)
+                    arts = (la.json() or {}) if la.status_code == 200 else {}
+                    items = (arts.get("artifacts") or arts.get("results")
+                             or (arts if isinstance(arts, list) else []))
+                    if isinstance(items, dict):
+                        items = items.get("artifacts") or []
+                    if items:
+                        aid = (items[0].get("artifact_id")
+                               or items[0].get("id"))
+                        if aid:
+                            ga = await client.get(
+                                f"{base}/api/memories/{mem_id}/artifacts/"
+                                f"{aid}", headers=headers)
+                            if ga.status_code == 200:
+                                aj = ga.json()
+                                report = (aj.get("content") or aj.get("text")
+                                          or aj.get("data") or "")
+                except Exception:
+                    pass
+            return {"id": mem_id, "claim": claim, "report": report,
+                    "header": hdr, "research_key": key}
+    except Exception:
+        return None
+
+
+def _format_cached_research(cached, tool_name: str) -> str:
+    hdr = cached.get("header") or {}
+    date_s = hdr.get("date") or "an earlier date"
+    stale = bool(hdr.get("is_stale"))
+    due = hdr.get("due_date")
+    body = cached.get("report") or cached.get("claim") or ""
+    if stale:
+        status = (f"⚠️ STALE — re-validation was due {due}"
+                  + (f" ({hdr.get('age_days')}d old)"
+                     if hdr.get("age_days") is not None else ""))
+        guidance = (
+            "Present this as PRIOR research and explicitly tell the user it "
+            "is STALE (last researched " + str(date_s) + ") and may be out "
+            "of date. Recommend re-researching. If the user agrees / asks "
+            "for fresh research, call "
+            f"`{tool_name}(query=<same query>, refresh=True)` — that runs a "
+            "new pass and supersedes this memory in place.")
+    else:
+        status = f"✅ FRESH — re-validate after {due}" if due else \
+            "✅ FRESH"
+        guidance = (
+            "Present this as previously-researched findings, noting it was "
+            "researched on " + str(date_s) + " (still fresh). Do NOT "
+            "silently re-run research. If the user wants it updated/"
+            "re-researched, call "
+            f"`{tool_name}(query=<same query>, refresh=True)` — that runs a "
+            "new pass and supersedes this memory in place.")
+    return (
+        f"♻️ **RECALLED PRIOR RESEARCH** — this request was "
+        f"already researched on {date_s}.\n"
+        f"**Status:** {status}\n\n"
+        f"{body}\n\n"
+        "---\n"
+        "**Assistant instructions (do not echo this line to the user):** "
+        f"{guidance}")
+
+
 async def _persist_research_evidence(valves, sub_agent, *, query, answer,
                                      user, request, kind,
                                      event_emitter=None) -> None:
-    """Best-effort: never raises, never blocks the research result."""
+    """Persist a completed run. Supersede the prior memory with the same
+    research_key in place if it exists; else insert. Best-effort."""
     if not getattr(valves, "evidence_memory_enabled", True):
         return
     api_key = getattr(valves, "mnemory_api_key", "") or ""
@@ -2468,10 +2617,7 @@ async def _persist_research_evidence(valves, sub_agent, *, query, answer,
         return
     if not answer or len(answer.strip()) < 200:
         return  # not a real synthesis (e.g. STOP/budget directive)
-
-    user = user or {}
-    user_id = (user.get("email") or user.get("id")
-               or getattr(valves, "mnemory_user_id", "") or "")
+    user_id = _ev_user_id(valves, user)
     if not user_id:
         return
 
@@ -2489,7 +2635,7 @@ async def _persist_research_evidence(valves, sub_agent, *, query, answer,
         parsed = await sub_agent.run_json(
             _EV_CLASSIFY_SYS,
             f"RESEARCH QUESTION:\n{query}\n\nANSWER:\n{answer[:6000]}",
-            request, user)
+            request, user or {})
         if isinstance(parsed, dict):
             claim = (parsed.get("claim") or claim).strip()[:600]
             v = str(parsed.get("volatility", "")).lower().strip()
@@ -2502,7 +2648,8 @@ async def _persist_research_evidence(valves, sub_agent, *, query, answer,
     vol_days = _ev_vol_map(getattr(valves, "evidence_volatility_days", ""))
     revalidate = vol_days.get(volatility,
                               _EV_DEFAULT_VOL_DAYS.get(volatility, 180))
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = date.today().isoformat()
+    key = _compute_research_key(query)
     src_urls = list(dict.fromkeys(_EV_URL_RE.findall(answer or "")))
     q_short = re.sub(r"\s+", " ", query).strip()[:80]
 
@@ -2521,6 +2668,7 @@ async def _persist_research_evidence(valves, sub_agent, *, query, answer,
         "event_date": datetime.utcnow().isoformat(),
         "labels": {
             "evidence": "research",
+            "research_key": key,
             "volatility": volatility,
             "revalidate_days": str(revalidate),
             "share": "cloud",
@@ -2529,33 +2677,73 @@ async def _persist_research_evidence(valves, sub_agent, *, query, answer,
             "researched_on": today,
         },
     }
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-        "X-User-Id": user_id,
-    }
+    headers = _ev_mn_headers(valves, user_id)
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
-            r = await client.post(f"{base}/api/memories",
-                                   headers=headers, json=payload)
-            if r.status_code != 200:
-                await _emit(f"\U0001f9e0 evidence memory skipped "
-                            f"({r.status_code})")
+            existing_id = None
+            try:
+                s = await client.post(
+                    f"{base}/api/memories/search", headers=headers,
+                    json={"query": query[:400], "limit": 1,
+                          "labels": {"evidence": "research",
+                                     "research_key": key}})
+                if s.status_code == 200:
+                    res = (s.json() or {}).get("results") or []
+                    if res:
+                        existing_id = res[0].get("id")
+            except Exception:
+                pass
+
+            if existing_id:
+                up = await client.put(
+                    f"{base}/api/memories/{existing_id}",
+                    headers=headers, json=payload)
+                ok = up.status_code == 200
+                mem_id = existing_id if ok else None
+                verb = "superseded"
+                if ok:
+                    try:
+                        la = await client.get(
+                            f"{base}/api/memories/{existing_id}/artifacts",
+                            headers=headers)
+                        if la.status_code == 200:
+                            arts = la.json() or {}
+                            items = (arts.get("artifacts")
+                                     or arts.get("results") or [])
+                            for itx in items:
+                                aid = itx.get("artifact_id") or itx.get("id")
+                                if aid:
+                                    await client.delete(
+                                        f"{base}/api/memories/"
+                                        f"{existing_id}/artifacts/{aid}",
+                                        headers=headers)
+                    except Exception:
+                        pass
+            else:
+                cr = await client.post(f"{base}/api/memories",
+                                       headers=headers, json=payload)
+                ok = cr.status_code == 200
+                verb = "saved"
+                mem_id = None
+                if ok:
+                    data = cr.json()
+                    res = (data.get("results")
+                           if isinstance(data, dict) else None)
+                    if isinstance(res, list) and res:
+                        mem_id = res[0].get("id")
+                    mem_id = mem_id or (data.get("id")
+                                        if isinstance(data, dict) else None)
+
+            if not ok:
+                await _emit("\U0001f9e0 evidence memory skipped "
+                            "(write failed)")
                 return
-            data = r.json()
-            mem_id = None
-            res = data.get("results") if isinstance(data, dict) else None
-            if isinstance(res, list) and res:
-                mem_id = res[0].get("id")
-            mem_id = mem_id or (data.get("id") if isinstance(data, dict)
-                                else None)
             if mem_id:
                 artifact = (
                     f"# Research evidence — {q_short}\n\n"
                     f"Researched: {today} | volatility: {volatility} | "
                     f"revalidate after: {revalidate}d | run: {kind}\n\n"
-                    f"{answer}\n"
-                )
+                    f"{answer}\n")
                 try:
                     await client.post(
                         f"{base}/api/memories/{mem_id}/artifacts",
@@ -2565,7 +2753,7 @@ async def _persist_research_evidence(valves, sub_agent, *, query, answer,
                               "filename": f"research-{today}.md"})
                 except Exception:
                     pass
-            await _emit(f"\U0001f9e0 saved as research evidence "
+            await _emit(f"\U0001f9e0 research evidence {verb} "
                         f"(vol:{volatility}, revalidate {revalidate}d)")
     except Exception as exc:
         await _emit(f"\U0001f9e0 evidence memory error: "
@@ -2611,7 +2799,8 @@ class Tools:
         storage_base_path: str = Field(default="/app/backend/data/user_files", description="Fileshed storage base path")
         save_journal: bool = Field(default=True, description="Persist research journal to disk")
         evidence_memory_enabled: bool = Field(default=True, description="On completion of a research run, persist the verified finding to mnemory as a self-describing EV:research evidence memory (provenance header + sources artifact). Never writes per-iteration queries.")
-        evidence_memory_quick_research: bool = Field(default=False, description="Also persist evidence from quick research(). Off by default: only knowledge_research / deep_research completions are saved.")
+        evidence_memory_quick_research: bool = Field(default=True, description="Persist evidence from quick research() too. Default ON so the cache covers every research entrypoint regardless of which tool first ran the question.")
+        evidence_cache_enabled: bool = Field(default=True, description="Before a research run, check mnemory for a prior EV:research memory for the SAME request (research_key match). On hit, return the stored finding+report instead of researching (stale flagged). refresh=True bypasses and supersedes in place.")
         mnemory_url: str = Field(default="http://mnemory:8050", description="mnemory base URL (internal llm-net, trusted writer path).")
         mnemory_api_key: str = Field(default="mN3m0ry!-mcp", description="mnemory API key for the evidence writer. Empty disables persistence.")
         mnemory_user_id: str = Field(default="", description="Fallback mnemory X-User-Id when the OWUI user has no email/id.")
@@ -2621,13 +2810,18 @@ class Tools:
         self.valves = self.Valves()
 
     async def research(
-        self, query: str,
+        self, query: str, refresh: bool = False,
         __user__: dict = None, __metadata__: dict = None, __event_emitter__=None,
         __request__=None, __model__: dict = None, __event_call__=None,
         __chat_id__: str = "", __message_id__: str = "",
     ) -> str:
         """Quick research on a topic using web search. Stores findings to
         Fileshed and iteratively expands search terms internally.
+
+        CACHE: if this exact request was researched before, the stored
+        finding is returned instead of researching again (stale flagged).
+        Set refresh=True ONLY when the user explicitly asks to re-research
+        / update — it supersedes the cached evidence in place.
 
         IMPORTANT — call this ONCE per distinct research need. For a broad,
         list, survey, "all available X", or comparison-matrix request, pass
@@ -2642,6 +2836,8 @@ class Tools:
         Args:
             query: The research question or topic to explore. For broad
                 requests, state the full scope in one query.
+            refresh: Force a fresh run, bypassing the cache and
+                superseding prior evidence. Use only on explicit request.
         """
         mid = _SubAgent.resolve_model_id(__metadata__, __model__)
         key = _chat_key(__chat_id__, __user__)
@@ -2664,6 +2860,17 @@ class Tools:
         if not ledger.get("topic"):
             ledger["topic"] = query
         topic = ledger.get("topic") or query
+
+        # Cache check (skip on explicit refresh or a continuation). A hit
+        # returns the stored finding without spending the per-chat budget.
+        if not refresh and not cont:
+            cached = await _lookup_research_evidence(
+                self.valves, query=query, user=__user__ or {})
+            if cached:
+                await _emit(__event_emitter__,
+                            "♻️ Found prior research for this request — "
+                            "recalling", done=True)
+                return _format_cached_research(cached, "research")
 
         # Hard stop: budget already spent and this is not a continuation.
         # Do NOT run another expensive pass — hand the model what it needs
@@ -2729,12 +2936,16 @@ class Tools:
         return answer
 
     async def knowledge_research(
-        self, query: str, collection: str = "",
+        self, query: str, collection: str = "", refresh: bool = False,
         __user__: dict = None, __metadata__: dict = None, __event_emitter__=None,
         __request__=None, __model__: dict = None, __event_call__=None,
         __chat_id__: str = "", __message_id__: str = "",
     ) -> str:
         """Research a topic using existing knowledge collections.
+
+        CACHE: a prior result for the same request is returned instead of
+        re-querying (stale flagged). Set refresh=True only on explicit
+        user request to re-research — it supersedes the cached evidence.
 
         Identifies which knowledge collections are relevant to the query,
         then iteratively queries them with expanding search terms to close
@@ -2749,8 +2960,18 @@ class Tools:
             collection: Optional name of a specific knowledge collection
                 to query. When provided, skips auto-detection and uses
                 this collection exclusively.
+            refresh: Force a fresh run, bypassing the cache and
+                superseding prior evidence. Use only on explicit request.
         """
         mid = _SubAgent.resolve_model_id(__metadata__, __model__)
+        if not refresh:
+            cached = await _lookup_research_evidence(
+                self.valves, query=query, user=__user__ or {})
+            if cached:
+                await _emit(__event_emitter__,
+                            "♻️ Found prior research for this request — "
+                            "recalling", done=True)
+                return _format_cached_research(cached, "knowledge_research")
         sa = _SubAgent(mid, self.valves.max_prompt_tokens,
                        nothink_suffix=(self.valves.nothink_suffix
                                        if self.valves.sub_agent_nothink else ""))
@@ -2769,7 +2990,7 @@ class Tools:
         return answer
 
     async def deep_research(
-        self, query: str,
+        self, query: str, refresh: bool = False,
         __user__: dict = None, __metadata__: dict = None, __event_emitter__=None,
         __request__=None, __model__: dict = None, __event_call__=None,
         __chat_id__: str = "", __message_id__: str = "",
@@ -2784,10 +3005,25 @@ class Tools:
         Pipeline: knowledge_research → gap analysis → web search →
         crawl → knowledge_research → synthesize → verify.
 
+        CACHE: a prior result for the same request is returned instead of
+        re-running the (expensive) pipeline; stale results are flagged.
+        Set refresh=True only when the user explicitly asks to
+        re-research / update — it supersedes the cached evidence in place.
+
         Args:
             query: The research question or topic to investigate.
+            refresh: Force a fresh run, bypassing the cache and
+                superseding prior evidence. Use only on explicit request.
         """
         mid = _SubAgent.resolve_model_id(__metadata__, __model__)
+        if not refresh:
+            cached = await _lookup_research_evidence(
+                self.valves, query=query, user=__user__ or {})
+            if cached:
+                await _emit(__event_emitter__,
+                            "♻️ Found prior research for this request — "
+                            "recalling", done=True)
+                return _format_cached_research(cached, "deep_research")
         sa = _SubAgent(mid, self.valves.max_prompt_tokens,
                        nothink_suffix=(self.valves.nothink_suffix
                                        if self.valves.sub_agent_nothink else ""))
