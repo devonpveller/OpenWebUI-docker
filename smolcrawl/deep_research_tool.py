@@ -2422,6 +2422,157 @@ def _stop_payload(ledger: Dict[str, Any], topic: str, used: int, budget: int,
 
 
 # =============================================================================
+#  Research → mnemory evidence persistence (runs once on completion)
+#  Mirror of deep_research/evidence_memory.py — keep in sync.
+# =============================================================================
+
+_EV_URL_RE = re.compile(r"https?://[^\s\)\]\}>\"']+")
+_EV_DEFAULT_VOL_DAYS = {"fast": 7, "medium": 180, "slow": 1095}
+_EV_CLASSIFY_SYS = (
+    "You compress a completed research answer into one durable evidence "
+    "record. Return STRICT JSON only:\n"
+    '{"claim": "<=600 char standalone factual summary of the verified '
+    'finding, no hedging, no markdown>", "volatility": "fast|medium|slow", '
+    '"topic": "<2-4 word topic slug>"}\n'
+    "volatility = how fast this knowledge goes stale:\n"
+    "- fast: news, prices, releases, current status, people's current "
+    "roles, anything time-sensitive\n"
+    "- medium: tools/APIs/libraries, best practices, organisations, "
+    "evolving technical guidance\n"
+    "- slow: science, mathematics, peer-reviewed results, history, "
+    "established definitions"
+)
+
+
+def _ev_vol_map(spec: str) -> Dict[str, int]:
+    out: Dict[str, int] = {}
+    for part in (spec or "").split(","):
+        if ":" in part:
+            k, _, v = part.partition(":")
+            try:
+                out[k.strip()] = int(v.strip())
+            except ValueError:
+                pass
+    return out or dict(_EV_DEFAULT_VOL_DAYS)
+
+
+async def _persist_research_evidence(valves, sub_agent, *, query, answer,
+                                     user, request, kind,
+                                     event_emitter=None) -> None:
+    """Best-effort: never raises, never blocks the research result."""
+    if not getattr(valves, "evidence_memory_enabled", True):
+        return
+    api_key = getattr(valves, "mnemory_api_key", "") or ""
+    base = (getattr(valves, "mnemory_url", "") or "").rstrip("/")
+    if not base or not api_key:
+        return
+    if not answer or len(answer.strip()) < 200:
+        return  # not a real synthesis (e.g. STOP/budget directive)
+
+    user = user or {}
+    user_id = (user.get("email") or user.get("id")
+               or getattr(valves, "mnemory_user_id", "") or "")
+    if not user_id:
+        return
+
+    async def _emit(msg: str) -> None:
+        if event_emitter:
+            try:
+                await event_emitter({"type": "status",
+                                     "data": {"description": msg,
+                                              "done": False}})
+            except Exception:
+                pass
+
+    claim, volatility, topic = answer.strip()[:600], "medium", "research"
+    try:
+        parsed = await sub_agent.run_json(
+            _EV_CLASSIFY_SYS,
+            f"RESEARCH QUESTION:\n{query}\n\nANSWER:\n{answer[:6000]}",
+            request, user)
+        if isinstance(parsed, dict):
+            claim = (parsed.get("claim") or claim).strip()[:600]
+            v = str(parsed.get("volatility", "")).lower().strip()
+            if v in ("fast", "medium", "slow"):
+                volatility = v
+            topic = (parsed.get("topic") or topic).strip()[:40] or "research"
+    except Exception:
+        pass
+
+    vol_days = _ev_vol_map(getattr(valves, "evidence_volatility_days", ""))
+    revalidate = vol_days.get(volatility,
+                              _EV_DEFAULT_VOL_DAYS.get(volatility, 180))
+    today = datetime.now().strftime("%Y-%m-%d")
+    src_urls = list(dict.fromkeys(_EV_URL_RE.findall(answer or "")))
+    q_short = re.sub(r"\s+", " ", query).strip()[:80]
+
+    header = (
+        f"⟦EV:research | date:{today} | vol:{volatility} | "
+        f"revalidate:{revalidate}d | src:{len(src_urls)} | run:{kind} | "
+        f'q:"{q_short}"⟧'
+    )
+    payload = {
+        "content": f"{header}\n{claim}",
+        "memory_type": "fact",
+        "categories": ["technical", f"research:{topic}"],
+        "importance": "high",
+        "infer": False,
+        "role": "user",
+        "event_date": datetime.utcnow().isoformat(),
+        "labels": {
+            "evidence": "research",
+            "volatility": volatility,
+            "revalidate_days": str(revalidate),
+            "share": "cloud",
+            "source": "deep-research",
+            "run_kind": kind,
+            "researched_on": today,
+        },
+    }
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "X-User-Id": user_id,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            r = await client.post(f"{base}/api/memories",
+                                   headers=headers, json=payload)
+            if r.status_code != 200:
+                await _emit(f"\U0001f9e0 evidence memory skipped "
+                            f"({r.status_code})")
+                return
+            data = r.json()
+            mem_id = None
+            res = data.get("results") if isinstance(data, dict) else None
+            if isinstance(res, list) and res:
+                mem_id = res[0].get("id")
+            mem_id = mem_id or (data.get("id") if isinstance(data, dict)
+                                else None)
+            if mem_id:
+                artifact = (
+                    f"# Research evidence — {q_short}\n\n"
+                    f"Researched: {today} | volatility: {volatility} | "
+                    f"revalidate after: {revalidate}d | run: {kind}\n\n"
+                    f"{answer}\n"
+                )
+                try:
+                    await client.post(
+                        f"{base}/api/memories/{mem_id}/artifacts",
+                        headers=headers,
+                        json={"content": artifact,
+                              "content_type": "text/markdown",
+                              "filename": f"research-{today}.md"})
+                except Exception:
+                    pass
+            await _emit(f"\U0001f9e0 saved as research evidence "
+                        f"(vol:{volatility}, revalidate {revalidate}d)")
+    except Exception as exc:
+        await _emit(f"\U0001f9e0 evidence memory error: "
+                    f"{type(exc).__name__}")
+
+
+# =============================================================================
 #  Tools (main entry point for OWUI)
 # =============================================================================
 
@@ -2459,6 +2610,12 @@ class Tools:
         fileshed_compatible: bool = Field(default=True, description="Write journal to Fileshed Storage zone")
         storage_base_path: str = Field(default="/app/backend/data/user_files", description="Fileshed storage base path")
         save_journal: bool = Field(default=True, description="Persist research journal to disk")
+        evidence_memory_enabled: bool = Field(default=True, description="On completion of a research run, persist the verified finding to mnemory as a self-describing EV:research evidence memory (provenance header + sources artifact). Never writes per-iteration queries.")
+        evidence_memory_quick_research: bool = Field(default=False, description="Also persist evidence from quick research(). Off by default: only knowledge_research / deep_research completions are saved.")
+        mnemory_url: str = Field(default="http://mnemory:8050", description="mnemory base URL (internal llm-net, trusted writer path).")
+        mnemory_api_key: str = Field(default="mN3m0ry!-mcp", description="mnemory API key for the evidence writer. Empty disables persistence.")
+        mnemory_user_id: str = Field(default="", description="Fallback mnemory X-User-Id when the OWUI user has no email/id.")
+        evidence_volatility_days: str = Field(default="fast:7,medium:180,slow:1095", description="Re-validation windows per volatility tier; past the window the LLM downgrades the fact to an educated guess.")
 
     def __init__(self):
         self.valves = self.Valves()
@@ -2561,6 +2718,14 @@ class Tools:
                 f"\n\n---\n\n*ℹ️ {used}/{budget} research calls used this "
                 "conversation. One remains before a stop directive — make it "
                 "count, or finalize now.*")
+        if self.valves.evidence_memory_quick_research:
+            try:
+                await _persist_research_evidence(
+                    self.valves, sa, query=query, answer=answer,
+                    user=__user__ or {}, request=__request__,
+                    kind="research", event_emitter=__event_emitter__)
+            except Exception:
+                pass
         return answer
 
     async def knowledge_research(
@@ -2591,9 +2756,17 @@ class Tools:
                                        if self.valves.sub_agent_nothink else ""))
         j = _Journal(self.valves)
         syn = _Synthesizer(self.valves, sa, j)
-        return await _KnowledgeResearcher(self.valves, sa, j, syn).run(
+        answer = await _KnowledgeResearcher(self.valves, sa, j, syn).run(
             query, (__user__ or {}).get("id", ""), __request__, __user__ or {}, mid, __event_emitter__,
             target_collection=collection)
+        try:
+            await _persist_research_evidence(
+                self.valves, sa, query=query, answer=answer,
+                user=__user__ or {}, request=__request__,
+                kind="knowledge_research", event_emitter=__event_emitter__)
+        except Exception:
+            pass
+        return answer
 
     async def deep_research(
         self, query: str,
@@ -2807,4 +2980,11 @@ class Tools:
         session.phase = ResearchPhase.COMPLETE
         j.write_manifest(session)
         await _emit(__event_emitter__, f"📁 Journal: deep-research/{slug}/", done=True)
+        try:
+            await _persist_research_evidence(
+                self.valves, sa, query=query, answer=answer,
+                user=__user__ or {}, request=__request__,
+                kind="deep_research", event_emitter=__event_emitter__)
+        except Exception:
+            pass
         return answer
