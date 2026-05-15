@@ -68,6 +68,16 @@ class Valves(BaseModel):
         le=30,
         description="Target: stop researching once this many anchor-relevant sources are found",
     )
+    max_research_calls_per_chat: int = Field(
+        default=5,
+        ge=1,
+        le=50,
+        description="Max research() calls the chat model may make per "
+                    "conversation before a graceful stop directive is "
+                    "returned (prevents unbounded per-item fan-out on broad "
+                    "survey prompts). The user can resume past this with a "
+                    "'research continue:' prompt.",
+    )
     max_web_results: int = Field(
         default=5,
         ge=1,
