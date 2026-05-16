@@ -128,6 +128,8 @@ class KnowledgeResearcher:
         self._journal = journal
         self._synthesizer = Synthesizer(valves, sub_agent, journal)
         self._rag = RagResearcher(valves, sub_agent)
+        # Gathered sources for this run (open-brain `sources` persistence).
+        self.last_sources: List[Dict] = []
 
     async def run(
         self,
@@ -473,6 +475,7 @@ class KnowledgeResearcher:
             done=True,
         )
 
+        self.last_sources = rag_sources
         return answer
 
     # ------------------------------------------------------------------

@@ -134,6 +134,8 @@ class QuickResearcher:
         self.last_covered: List[str] = []
         self.last_gaps: List[str] = []
         self.last_slug: str = ""
+        # Gathered sources for this run (open-brain `sources` persistence).
+        self.last_sources: List[Dict] = []
 
     async def run(
         self,
@@ -388,6 +390,7 @@ class QuickResearcher:
         # Expose this run's coverage/gap markers for the per-chat ledger.
         self.last_covered = accumulated_covered
         self.last_gaps = last_gaps
+        self.last_sources = relevant_sources + trail_sources
         return answer
 
     # --- Search helpers ---

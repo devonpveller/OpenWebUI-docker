@@ -18,8 +18,8 @@ rule the wiki architecture itself enforces).
 
 Three layers, each owning one role; the agent routes unambiguously:
 
-1. **mnemory** — agent-facing semantic memory. Short extracted facts *about the
-   user* only. Already deployed (`mnemory` container, gateway-fronted).
+1. **mnemory** — agent-facing semantic memory. Short extracted facts _about the
+   user_ only. Already deployed (`mnemory` container, gateway-fronted).
 2. **OpenBrain (OB1)** — single source of truth for everything that is not a
    user-fact: structured records (contacts, calendar, thoughts, projects) **and**
    external source documents (papers, articles, transcripts, web pages) in a
@@ -36,12 +36,14 @@ can drift.
 
 ## 2. Decisions locked this session (2026-05-16)
 
-| # | Decision | Choice | Deviation from spec |
-|---|----------|--------|---------------------|
-| D1 | Supabase deployment | **Self-hosted** in ai-stack `docker-compose.yml`, private network, mnemory-style isolation (minimal host ports) | Spec is provider-agnostic; we commit to self-host for the local-first/privacy posture |
-| D2 | Research↔mnemory misuse fix | **Migrate when OB1 lands** — keep the mnemory evidence cache live until OpenBrain `sources` ingest exists, then repoint research persistence/cache to OpenBrain (+ wiki for synthesis) and strip `⟦EV:research⟧` from mnemory | Deviation is knowingly live through Phase 4 by design (no capability gap) |
-| D3 | LLM + embeddings provider | **Local llama-cpp.** Synthesis/extraction model = `qwen36-27b` (think) and `qwen36-27b:nothink` (no-think), routed by need through the architecture. Embeddings = `llama-cpp-embed` | Spec defaults to OpenAI (`OPENAI_API_KEY`); we override everywhere |
-| D4 | Wiki output hosting | **Git-backed directory + read-only web viewer** (Quartz/Perlite/Next), commit per successful compile | Spec §5.1 "most flexible" option |
+| #   | Decision                                  | Choice                                                                                                                                                                                                                        | Deviation from spec                                                                                                                                                                        |
+| --- | ----------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| D1  | ~~Supabase deployment~~ → **No Supabase** | **SUPERSEDED by Phase 1 finding F1.** `OB1/docker/` ships a raw **Postgres+pgvector** self-host stack (`openbrain-db`) already wired to ai-stack — no Supabase anywhere. We deploy that.                                      | Spec is Supabase-centric; the deployable fork deliberately uses direct Postgres + OpenAI-compatible local API                                                                              |
+| D5  | Wiki-compiler path                        | **Path B — extend** the existing recipe (2026-05-16)                                                                                                                                                                          | Companion §1.3; Y8/P2/N4 score                                                                                                                                                             |
+| D6  | OB1 extension tools                       | **Run full stack, wire selectively** (revised 2026-05-16): bring up `openbrain-db`+`openbrain-mcp`+`openbrain-ext`+both mcpo bridges; each client/OWUI model opts into core and/or ext explicitly                             | Ext tool-context cost is **opt-in per client** (separate ext mcpo bridge), not global bloat; life-app tools are legitimately "domain records → OpenBrain" per the v2 source-of-truth table |
+| D2  | Research↔mnemory misuse fix               | **Migrate when OB1 lands** — keep the mnemory evidence cache live until OpenBrain `sources` ingest exists, then repoint research persistence/cache to OpenBrain (+ wiki for synthesis) and strip `⟦EV:research⟧` from mnemory | Deviation is knowingly live through Phase 4 by design (no capability gap)                                                                                                                  |
+| D3  | LLM + embeddings provider                 | **Local llama-cpp.** Synthesis/extraction model = `qwen36-27b` (think) and `qwen36-27b:nothink` (no-think), routed by need through the architecture. Embeddings = `llama-cpp-embed`                                           | Spec defaults to OpenAI (`OPENAI_API_KEY`); we override everywhere                                                                                                                         |
+| D4  | Wiki output hosting                       | **Git-backed directory + read-only web viewer** (Quartz/Perlite/Next), commit per successful compile                                                                                                                          | Spec §5.1 "most flexible" option                                                                                                                                                           |
 
 ### Model routing convention (D3 detail)
 
@@ -66,14 +68,20 @@ can drift.
   `mnemory-gateway`; cloud clients never hold raw OB1/wiki keys) + OWUI direct on
   `llm-net`. Claude Desktop only if requested.
 - **A3** `open_notebook` + `surrealdb` services **stay running** until this
-  integration demonstrates *proven appropriate replacement* of Open Notebook's
+  integration demonstrates _proven appropriate replacement_ of Open Notebook's
   capabilities (user directive 2026-05-16). Only then is retirement proposed, as
   a **confirmed, user-executed** destructive step (prior OB1-teardown pattern),
   never silent. Replacement proof is a Phase 7 gate, not an assumption.
 - **A4** Research frontend (companion §4) is **deferred, not built** — per the
   doc's own guidance: run OB1 + wiki + Obsidian for a week before deciding.
-- **A5** URL/PDF/YouTube fetching reuses the existing **smolcrawl** crawl stack
-  rather than adding Firecrawl/Jina as new dependencies.
+- **A5 — REVERSED (2026-05-16, D8).** smolcrawl is **not** the sources ingest
+  backend. smolcrawl's purpose is whole-domain knowledge collections for OWUI
+  (deferred — 100s-of-URLs bloat risk into open-brain). The **sources producer
+  is `deep_research_tool.py`**: the URLs/content it already fetches + synthesizes
+  during a research run are what populate open-brain `sources`. The generic spec
+  `openbrain_ingest_url` MCP tool is **deferred**, not the primary path. Phase 3
+  (`sources` schema) and Phase 4 (repoint deep_research → sources) are one
+  coupled piece.
 
 ---
 
@@ -82,6 +90,7 @@ can drift.
 Each phase has an explicit exit condition. Phase 1 is a **hard stop**.
 
 ### Phase 0 — Prerequisites & discovery
+
 Non-destructive. Adapted spec Task 1: Docker ✓, local llama-cpp replaces
 `OPENAI_API_KEY`, ~10GB disk for Postgres/pgvector + wiki dir. Inventory the
 `open_notebook`/`surrealdb` compose blocks + volumes (scope retirement). Confirm
@@ -89,7 +98,8 @@ exactly how `evidence_memory.py` reaches mnemory today (gateway vs direct valve)
 so the Phase 4 migration is surgical.
 **Exit:** gap list produced; stop if anything blocks.
 
-### Phase 1 — Clone OB1 + VALIDATION GATE *(hard stop — companion Section 1)*
+### Phase 1 — Clone OB1 + VALIDATION GATE _(hard stop — companion Section 1)_
+
 Clone the fork @ `develop`. Read `docs/01-getting-started.md`,
 `docs/04-ai-assisted-setup.md`, inspect `recipes/` for the existing wiki recipe.
 Score it against the **14-requirement table** (companion §1.2). Record last-commit
@@ -99,13 +109,23 @@ date, model assumed, dependencies, tables added.
 with per-path effort estimate. **STOP. User picks the path. No implementation
 before that.**
 
-### Phase 2 — Self-host Supabase + OB1 base *(spec Task 3)*
-Add Supabase container set to `docker-compose.yml` on a private network. Run OB1
-base schema, edge functions, MCP server. Slack capture skipped (spec default).
-Rewire OB1 embeddings → `llama-cpp-embed` (parameterize vector dim, D3).
-**Exit:** capture a thought via MCP, read it back via semantic search.
+### Phase 2 — Stand up OB1/docker core _(reshaped by F1 — much smaller)_
 
-### Phase 3 — OpenBrain `sources` ingest *(spec Task 4)*
+**No Supabase.** Use `OB1/docker/` as-is for the core: `openbrain-db`
+(pgvector pg16, `vector(1024)` bge-m3), `openbrain-mcp` (core 4 tools, :8808).
+**Skip** `openbrain-ext` + the two `mcpo` bridges' ext path for now (D6 —
+core+sources only). Generate `.env` secrets (gitignored), join
+`ai-stack_llm-net`, confirm embeddings→`llama-cpp-embed`, chat→`qwen36-27b:nothink`.
+Decide integration shape: keep `OB1/docker/` as its own compose (prior pattern)
+vs. merge services into ai-stack `docker-compose.yml`.
+**Open verify:** does `docker/init*.sql` include the entity-extraction /
+typed-reasoning-edges / graph schemas (needed by Path B Phase 5), or only core +
+the 6 life-app ext tables?
+**Exit:** capture a thought via MCP (:8808), read it back via semantic search,
+all on local models.
+
+### Phase 3 — OpenBrain `sources` ingest _(spec Task 4)_
+
 Add `sources` table (check `recipes/`/`extensions/` for an existing one first).
 Build `openbrain_ingest_url` + `openbrain_ingest_urls` — fetch (reuse smolcrawl,
 A5), extract, embed (local), write row. Modular YouTube-transcript + PDF
@@ -113,7 +133,8 @@ extractors.
 **Exit:** ingest a URL; agent answers a factual question from that source via
 `openbrain`.
 
-### Phase 4 — Migrate research off mnemory *(resolves the D2 misuse)*
+### Phase 4 — Migrate research off mnemory _(resolves the D2 misuse)_
+
 Repoint `smolcrawl/deep_research/evidence_memory.py`: persistence →
 OpenBrain `sources`; cache lookup → OpenBrain; synthesis surfaced via wiki.
 Remove `⟦EV:research⟧` writes/cache from mnemory; one-time migrate existing
@@ -124,22 +145,34 @@ flag for OWUI re-paste (no build script — hand-mirrored; see
 **Exit:** research run persists to OpenBrain, not mnemory; mnemory holds no new
 `EV:research`; cache hit served from OpenBrain.
 
-### Phase 5 — Wiki compiler *(spec Task 5 / companion §§2–3)*
-Implement per the Phase 1 path. All extraction/synthesis on local Qwen per D3
-routing. Output → git-backed dir, commit per successful compile. Scheduled
-(daily) + on-demand `wiki_trigger_recompile`. Add read-only web viewer service to
-compose. Expose the six `wiki_*` MCP tools (companion §"MCP tools").
-**Exit:** topic-synthesis question answered from `wiki` referencing compiled
-pages; wiki rebuildable from OpenBrain alone.
+### Phase 5 — Wiki compiler _(Path B — extend; spec Task 5 / companion §2)_
 
-### Phase 6 — Wire MCP + routing skill + smoke tests *(spec Tasks 6–8)*
+Extend the existing `wiki-compiler` recipe stack. Concrete Path B work:
+
+1. Port wiki scripts' data access **PostgREST → docker Postgres**; replace the
+   Edge-Function entity-extraction-worker trigger with a local runner.
+2. Add the v2 `sources` table read path (depends on Phase 3) — reqs 2.
+3. Emit `[[wikilinks]]` + export `graph.json` (reqs 6, 7).
+4. Add six `wiki_*` MCP tools into the `openbrain-ext` Deno server (req 13).
+5. Repoint LLM local: entity/topic via `LLM_BASE_URL`→llama-cpp + patch the
+   1536→1024 embedding preflight; **port `typed-edge-classifier` off the
+   hardcoded Anthropic API** to an OpenAI-compatible local call (D3).
+6. First-class `notebook` scoping (req 10).
+   All synthesis on `qwen36-27b`, extraction/classify on `qwen36-27b:nothink`.
+   Output → git-backed dir, commit per compile; read-only web viewer (D4).
+   **Exit:** topic-synthesis question answered from `wiki` referencing compiled
+   pages; wiki rebuildable from OpenBrain alone.
+
+### Phase 6 — Wire MCP + routing skill + smoke tests _(spec Tasks 6–8)_
+
 Three gated MCP entries (mnemory / openbrain / wiki) with the verbatim
 non-overlapping descriptions. Write
 `~/.claude/skills/memory-stack-routing/SKILL.md` verbatim from spec Task 7. Run
 all 5 spec Task 8 end-to-end smoke tests.
 **Exit:** all 5 smoke tests pass; routing picks the correct lane 3/3.
 
-### Phase 7 — Retire Open Notebook *(gated on proof — confirmed, user-executed)*
+### Phase 7 — Retire Open Notebook _(gated on proof — confirmed, user-executed)_
+
 **Open Notebook stays UP until proven replaced** (user directive 2026-05-16).
 Entry gate — demonstrate the new stack appropriately covers Open Notebook's three
 real values (companion §4.1): (a) notebook-scoped source/note/chat view, (b)
@@ -154,7 +187,7 @@ converged on the three-layer model.
 ## 5. Risks & watch-items
 
 - **R1** Local-model throughput on high-volume entity/relation extraction —
-  companion §5.2's *cost* concern becomes a *latency* concern on local Qwen.
+  companion §5.2's _cost_ concern becomes a _latency_ concern on local Qwen.
   Mitigation: `:nothink` routing for extraction; incremental compile only.
 - **R2** Embedding-dim mismatch with spec SQL (`vector(1536)`) — must
   parameterize to `llama-cpp-embed`'s real dim before any pgvector index.

@@ -114,13 +114,15 @@ class Valves(BaseModel):
         description="Append source references to final answer",
     )
 
-    # Research → mnemory evidence persistence (runs once on completion)
+    # Research → open-brain `sources` persistence (runs once on
+    # completion). Research output is structured data, NOT user-personal
+    # data — it lives in open-brain, never mnemory (the misuse is retired).
     evidence_memory_enabled: bool = Field(
         default=True,
         description="On completion of a research run, persist the verified "
-                    "finding to mnemory as a self-describing EV:research "
-                    "evidence memory (with provenance header + sources "
-                    "artifact). Never writes per-iteration queries.",
+                    "finding + its gathered sources to open-brain "
+                    "`sources` (structured rows). Never writes "
+                    "per-iteration queries.",
     )
     evidence_memory_quick_research: bool = Field(
         default=True,
@@ -131,33 +133,31 @@ class Valves(BaseModel):
     )
     evidence_cache_enabled: bool = Field(
         default=True,
-        description="Before a research run, check mnemory for a prior "
-                    "EV:research memory for the SAME request "
-                    "(research_key match). On hit, return the stored "
-                    "finding + report instead of researching (stale hits "
-                    "flagged). refresh=True bypasses the cache and "
-                    "supersedes the memory in place.",
-    )
-    mnemory_url: str = Field(
-        default="http://mnemory:8050",
-        description="mnemory base URL (reached directly on the internal "
-                    "llm-net; trusted writer path).",
-    )
-    mnemory_api_key: str = Field(
-        default="mN3m0ry!-mcp",
-        description="mnemory API key for the evidence writer. Empty "
-                    "disables persistence.",
-    )
-    mnemory_user_id: str = Field(
-        default="",
-        description="Fallback mnemory X-User-Id when the OWUI user has no "
-                    "email/id (else evidence is skipped).",
+        description="Before a research run, check open-brain for prior "
+                    "research on the SAME request (research_key match). "
+                    "On hit, return the stored finding instead of "
+                    "researching (stale hits flagged). refresh=True "
+                    "bypasses the cache and supersedes in place.",
     )
     evidence_volatility_days: str = Field(
         default="fast:7,medium:180,slow:1095",
         description="Re-validation windows per volatility tier. Past the "
                     "window the LLM downgrades the fact to an educated "
                     "guess (re-validation due).",
+    )
+    # open-brain is the home for research sources + synthesis (the v2
+    # three-layer architecture). Reached from OWUI on the shared llm-net.
+    openbrain_url: str = Field(
+        default="http://openbrain-mcp:8000",
+        description="open-brain MCP server base URL (llm-net, trusted "
+                    "writer path). Research synthesis + sources persist "
+                    "here; the mnemory misuse is fully retired.",
+    )
+    openbrain_key: str = Field(
+        default="",
+        description="open-brain MCP_ACCESS_KEY (x-brain-key). MUST be set "
+                    "to the OB1 docker .env MCP_ACCESS_KEY value or "
+                    "research persistence/cache is skipped (graceful).",
     )
 
     # Deep research specific
