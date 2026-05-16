@@ -14,5 +14,7 @@ modules/emergency-recovery/service/__pycache__/
 .../__pycache__/
 # Local MCP config (contains Open Brain access key)
 .mcp.json
+# Vendored external repo (devonpveller/OB1 @ develop) — own .git, not tracked here
+OB1/
 *.pyc
 *.log

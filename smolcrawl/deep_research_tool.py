@@ -1560,6 +1560,7 @@ class _QuickResearcher:
         self.last_covered: List[str] = []
         self.last_gaps: List[str] = []
         self.last_slug: str = ""
+        self.last_sources: List[Dict] = []
 
     async def run(self, query: str, user_id: str, request, user: Dict, model_id: str, emitter=None) -> str:
         slug = _Journal.slugify(query)
@@ -1738,6 +1739,7 @@ class _QuickResearcher:
         # Expose this run's coverage/gap markers for the per-chat ledger.
         self.last_covered = accumulated_covered
         self.last_gaps = last_gaps
+        self.last_sources = relevant_sources + trail_sources
         return answer
 
     # --- Search helpers ---
@@ -1961,6 +1963,7 @@ class _KnowledgeResearcher:
         self._j = j
         self._synth = synth
         self._rag = _RagResearcher(valves, sa)
+        self.last_sources: List[Dict] = []
 
     async def run(self, query: str, user_id: str, request, user: Dict, model_id: str, emitter=None, target_collection: str = "") -> str:
         slug = _Journal.slugify(query)
@@ -2134,6 +2137,7 @@ class _KnowledgeResearcher:
         session.phase = ResearchPhase.COMPLETE
         self._j.write_manifest(session)
         await _emit(emitter, f"📁 Journal: knowledge-research/{slug}/", done=True)
+        self.last_sources = rag_sources
         return answer
 
     # --- Collection selection helpers ---
@@ -2422,11 +2426,12 @@ def _stop_payload(ledger: Dict[str, Any], topic: str, used: int, budget: int,
 
 
 # =============================================================================
-#  Research → mnemory evidence persistence (runs once on completion)
+#  Research → open-brain `sources` persistence (runs once on completion)
 #  Mirror of deep_research/evidence_memory.py — keep in sync.
+#  open-brain returns full structured rows, so the mnemory-era
+#  ⟦EV:research⟧ header / label / artifact workarounds are GONE.
 # =============================================================================
 
-_EV_URL_RE = re.compile(r"https?://[^\s\)\]\}>\"']+")
 _EV_DEFAULT_VOL_DAYS = {"fast": 7, "medium": 180, "slow": 1095}
 _EV_KEY_STOP = {
     "the", "a", "an", "of", "to", "for", "is", "are", "was", "were", "what",
@@ -2451,6 +2456,7 @@ _EV_CLASSIFY_SYS = (
 
 
 def _compute_research_key(query: str) -> str:
+    """Deterministic, order/phrasing-insensitive key for a research query."""
     text = re.sub(r"[^a-z0-9\s]", " ", (query or "").lower())
     toks = sorted(t for t in text.split() if t and t not in _EV_KEY_STOP)
     if not toks:
@@ -2471,139 +2477,120 @@ def _ev_vol_map(spec: str) -> Dict[str, int]:
     return out or dict(_EV_DEFAULT_VOL_DAYS)
 
 
-def _parse_ev_header(content: str) -> Dict[str, Any]:
-    if not content:
-        return {}
-    m = re.match(r"⟦EV:research\b([^⟧]*)⟧", content.strip())
-    if not m:
-        return {}
-    body = m.group(1)
-    info: Dict[str, Any] = {"is_stale": False, "due_date": None,
-                            "age_days": None}
-    d = re.search(r"date:(\d{4}-\d{2}-\d{2})", body)
-    rv = re.search(r"revalidate:(\d+)d", body)
-    info["date"] = d.group(1) if d else None
-    info["revalidate_days"] = int(rv.group(1)) if rv else None
-    if info["date"] and info["revalidate_days"] is not None:
-        try:
-            researched = date.fromisoformat(info["date"])
-            today = date.today()
-            due = researched + timedelta(days=info["revalidate_days"])
-            info["age_days"] = (today - researched).days
-            info["due_date"] = due.isoformat()
-            info["is_stale"] = today > due
-        except ValueError:
-            pass
-    return info
+def _ev_ob(valves):
+    base = (getattr(valves, "openbrain_url", "") or "").rstrip("/")
+    key = getattr(valves, "openbrain_key", "") or ""
+    return base, key
 
 
-def _ev_mn_headers(valves, user_id: str) -> Dict[str, str]:
-    return {"Authorization": f"Bearer {getattr(valves, 'mnemory_api_key', '')}",
-            "Content-Type": "application/json", "X-User-Id": user_id}
+def _ev_normalize_sources(sources):
+    """Pipeline source dicts -> {url,title,content,domain}. Dedup by url."""
+    out = []
+    seen = set()
+    for s in (sources or []):
+        if not isinstance(s, dict):
+            continue
+        url = (s.get("url") or "").strip()
+        content = (s.get("content") or s.get("summary") or "").strip()
+        if not url and not content:
+            continue
+        dedup = url or content[:80]
+        if dedup in seen:
+            continue
+        seen.add(dedup)
+        out.append({
+            "url": url,
+            "title": (s.get("title") or s.get("domain") or url or "")[:300],
+            "content": content,
+            "domain": s.get("domain") or "",
+        })
+    return out
 
 
-def _ev_user_id(valves, user) -> str:
-    user = user or {}
-    return (user.get("email") or user.get("id")
-            or getattr(valves, "mnemory_user_id", "") or "")
-
-
-async def _lookup_research_evidence(valves, *, query, user):
-    """Existing evidence memory for this exact request + its report, or
-    None. Best-effort: any error => None (cache miss)."""
+async def _lookup_research_evidence(valves, *, query, user=None):
+    """Current open-brain synthesis row for this request + staleness, or
+    None. Best-effort: any error → None (cache miss)."""
     if not getattr(valves, "evidence_cache_enabled", True):
         return None
-    base = (getattr(valves, "mnemory_url", "") or "").rstrip("/")
-    api_key = getattr(valves, "mnemory_api_key", "") or ""
-    user_id = _ev_user_id(valves, user)
-    if not base or not api_key or not user_id:
+    base, key = _ev_ob(valves)
+    if not base or not key:
         return None
-    key = _compute_research_key(query)
-    headers = _ev_mn_headers(valves, user_id)
+    rkey = _compute_research_key(query)
     try:
         async with httpx.AsyncClient(timeout=20.0) as client:
-            r = await client.post(
-                f"{base}/api/memories/search", headers=headers,
-                json={"query": query[:400], "limit": 3,
-                      "labels": {"evidence": "research",
-                                 "research_key": key}})
+            r = await client.get(
+                f"{base}/research/lookup",
+                params={"key": rkey},
+                headers={"x-brain-key": key})
             if r.status_code != 200:
                 return None
-            results = (r.json() or {}).get("results") or []
-            if not results:
+            data = r.json() or {}
+            if not data.get("found"):
                 return None
-            mem = results[0]
-            mem_id = mem.get("id")
-            content = mem.get("memory") or mem.get("content") or ""
-            hdr = _parse_ev_header(content)
-            claim = content.split("⟧", 1)[-1].strip() or content
-            # Lean cache hit: do NOT fetch the full-report artifact —
-            # injecting it inline would re-process every chat turn (bloat
-            # bug). Compact claim is the answer; report stays archived.
-            return {"id": mem_id, "claim": claim,
-                    "header": hdr, "research_key": key}
+            return {
+                "id": data.get("id"),
+                "claim": data.get("claim") or "",
+                "researched_on": data.get("researched_on"),
+                "is_stale": bool(data.get("is_stale")),
+                "due_date": data.get("due_date"),
+                "age_days": data.get("age_days"),
+                "research_key": rkey,
+            }
     except Exception:
         return None
 
 
 def _format_cached_research(cached, tool_name: str) -> str:
-    hdr = cached.get("header") or {}
-    date_s = hdr.get("date") or "an earlier date"
-    stale = bool(hdr.get("is_stale"))
-    due = hdr.get("due_date")
+    """Model-mediated cache-hit payload: prior finding + a directive."""
+    date = cached.get("researched_on") or "an earlier date"
+    stale = bool(cached.get("is_stale"))
+    due = cached.get("due_date")
     body = (cached.get("claim") or "").strip()[:1200]
-    archived = ("\n\n*(Full prior research report is archived as a "
-                "mnemory artifact on this evidence memory; re-run with "
-                "refresh=True to regenerate it.)*")
     if stale:
         status = (f"⚠️ STALE — re-validation was due {due}"
-                  + (f" ({hdr.get('age_days')}d old)"
-                     if hdr.get("age_days") is not None else ""))
+                  + (f" ({cached.get('age_days')}d old)"
+                     if cached.get("age_days") is not None else ""))
         guidance = (
             "Present this as PRIOR research and explicitly tell the user it "
-            "is STALE (last researched " + str(date_s) + ") and may be out "
-            "of date. Recommend re-researching. If the user agrees / asks "
-            "for fresh research, call "
+            "is STALE (last researched " + str(date) + ") and may be out of "
+            "date. Recommend re-researching. If the user agrees, call "
             f"`{tool_name}(query=<same query>, refresh=True)` — that runs a "
-            "new pass and supersedes this memory in place.")
+            "new pass and supersedes this record in place.")
     else:
-        status = f"✅ FRESH — re-validate after {due}" if due else \
-            "✅ FRESH"
+        status = f"✅ FRESH — re-validate after {due}" if due else "✅ FRESH"
         guidance = (
             "Present this as previously-researched findings, noting it was "
-            "researched on " + str(date_s) + " (still fresh). Do NOT "
-            "silently re-run research. If the user wants it updated/"
-            "re-researched, call "
+            "researched on " + str(date) + " (still fresh). Do NOT silently "
+            "re-run research. If the user wants it updated, call "
             f"`{tool_name}(query=<same query>, refresh=True)` — that runs a "
-            "new pass and supersedes this memory in place.")
+            "new pass and supersedes this record in place.")
     return (
-        f"♻️ **RECALLED PRIOR RESEARCH** — this request was "
-        f"already researched on {date_s}.\n"
+        f"♻️ **RECALLED PRIOR RESEARCH** — this request was already "
+        f"researched on {date}.\n"
         f"**Status:** {status}\n\n"
-        f"{body}{archived}\n\n"
+        f"{body}\n\n"
+        "*(Gathered sources for this question are stored in open-brain; "
+        "re-run with refresh=True to regenerate.)*\n\n"
         "---\n"
-        "**Assistant instructions (do not echo this line to the user):** "
+        f"**Assistant instructions (do not echo this line to the user):** "
         f"{guidance}")
 
 
 async def _persist_research_evidence(valves, sub_agent, *, query, answer,
-                                     user, request, kind,
-                                     event_emitter=None) -> None:
-    """Persist a completed run. Supersede the prior memory with the same
-    research_key in place if it exists; else insert. Best-effort."""
+                                     user=None, request=None, kind,
+                                     sources=None, event_emitter=None):
+    """Persist a completed run to open-brain `sources`. Server supersedes
+    the synthesis row in place + replaces per-source rows. Best-effort:
+    never raises, never blocks the research result."""
     if not getattr(valves, "evidence_memory_enabled", True):
         return
-    api_key = getattr(valves, "mnemory_api_key", "") or ""
-    base = (getattr(valves, "mnemory_url", "") or "").rstrip("/")
-    if not base or not api_key:
+    base, key = _ev_ob(valves)
+    if not base or not key:
         return
     if not answer or len(answer.strip()) < 200:
         return  # not a real synthesis (e.g. STOP/budget directive)
-    user_id = _ev_user_id(valves, user)
-    if not user_id:
-        return
 
-    async def _emit(msg: str) -> None:
+    async def _emit(msg):
         if event_emitter:
             try:
                 await event_emitter({"type": "status",
@@ -2630,129 +2617,37 @@ async def _persist_research_evidence(valves, sub_agent, *, query, answer,
     vol_days = _ev_vol_map(getattr(valves, "evidence_volatility_days", ""))
     revalidate = vol_days.get(volatility,
                               _EV_DEFAULT_VOL_DAYS.get(volatility, 180))
-    today = date.today().isoformat()
-    key = _compute_research_key(query)
-    src_urls = list(dict.fromkeys(_EV_URL_RE.findall(answer or "")))
-    q_short = re.sub(r"\s+", " ", query).strip()[:80]
-
-    header = (
-        f"⟦EV:research | date:{today} | vol:{volatility} | "
-        f"revalidate:{revalidate}d | src:{len(src_urls)} | run:{kind} | "
-        f'q:"{q_short}"⟧'
-    )
     payload = {
-        "content": f"{header}\n{claim}",
-        "memory_type": "fact",
-        "categories": ["technical", f"research:{topic}"],
-        "importance": "high",
-        "infer": False,
-        "role": "user",
-        "event_date": datetime.utcnow().isoformat(),
-        "labels": {
-            "evidence": "research",
-            "research_key": key,
-            "volatility": volatility,
-            "revalidate_days": str(revalidate),
-            "share": "cloud",
-            "source": "deep-research",
-            "run_kind": kind,
-            "researched_on": today,
-        },
+        "research_key": _compute_research_key(query),
+        "query": query[:400],
+        "claim": claim,
+        "kind": kind,
+        "volatility": volatility,
+        "revalidate_days": revalidate,
+        "notebook": topic,
+        "sources": _ev_normalize_sources(sources),
     }
-    headers = _ev_mn_headers(valves, user_id)
     try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            existing_id = None
-            try:
-                s = await client.post(
-                    f"{base}/api/memories/search", headers=headers,
-                    json={"query": query[:400], "limit": 1,
-                          "labels": {"evidence": "research",
-                                     "research_key": key}})
-                if s.status_code == 200:
-                    res = (s.json() or {}).get("results") or []
-                    if res:
-                        existing_id = res[0].get("id")
-            except Exception:
-                pass
-
-            fail_resp = None
-            if existing_id:
-                up = await client.put(
-                    f"{base}/api/memories/{existing_id}",
-                    headers=headers, json=payload)
-                ok = up.status_code == 200
-                if not ok:
-                    fail_resp = up
-                mem_id = existing_id if ok else None
-                verb = "superseded"
-                if ok:
-                    try:
-                        la = await client.get(
-                            f"{base}/api/memories/{existing_id}/artifacts",
-                            headers=headers)
-                        if la.status_code == 200:
-                            arts = la.json() or {}
-                            items = (arts.get("artifacts")
-                                     or arts.get("results") or [])
-                            for itx in items:
-                                aid = itx.get("artifact_id") or itx.get("id")
-                                if aid:
-                                    await client.delete(
-                                        f"{base}/api/memories/"
-                                        f"{existing_id}/artifacts/{aid}",
-                                        headers=headers)
-                    except Exception:
-                        pass
-            else:
-                cr = await client.post(f"{base}/api/memories",
-                                       headers=headers, json=payload)
-                ok = cr.status_code == 200
-                if not ok:
-                    fail_resp = cr
-                verb = "saved"
-                mem_id = None
-                if ok:
-                    data = cr.json()
-                    res = (data.get("results")
-                           if isinstance(data, dict) else None)
-                    if isinstance(res, list) and res:
-                        mem_id = res[0].get("id")
-                    mem_id = mem_id or (data.get("id")
-                                        if isinstance(data, dict) else None)
-
-            if not ok:
-                detail = ""
-                if fail_resp is not None:
-                    snippet = " ".join((fail_resp.text or "").split())[:300]
-                    detail = (f" — HTTP {fail_resp.status_code} at "
-                              f"{fail_resp.request.method} "
-                              f"{fail_resp.request.url.path}: {snippet}")
-                logger.warning("evidence memory %s failed%s", verb,
-                               detail or " (no response captured)")
-                await _emit("\U0001f9e0 evidence memory skipped "
-                            f"(write failed{detail[:200]})")
+        async with httpx.AsyncClient(timeout=90.0) as client:
+            r = await client.post(
+                f"{base}/research/persist",
+                headers={"x-brain-key": key,
+                         "Content-Type": "application/json"},
+                json=payload)
+            if r.status_code != 200:
+                snippet = " ".join((r.text or "").split())[:200]
+                logger.warning("research persist failed: HTTP %s %s",
+                                r.status_code, snippet)
+                await _emit(f"🧠 research persist skipped (HTTP {r.status_code})")
                 return
-            if mem_id:
-                artifact = (
-                    f"# Research evidence — {q_short}\n\n"
-                    f"Researched: {today} | volatility: {volatility} | "
-                    f"revalidate after: {revalidate}d | run: {kind}\n\n"
-                    f"{answer}\n")
-                try:
-                    await client.post(
-                        f"{base}/api/memories/{mem_id}/artifacts",
-                        headers=headers,
-                        json={"content": artifact,
-                              "content_type": "text/markdown",
-                              "filename": f"research-{today}.md"})
-                except Exception:
-                    pass
-            await _emit(f"\U0001f9e0 research evidence {verb} "
-                        f"(vol:{volatility}, revalidate {revalidate}d)")
+            data = r.json() or {}
+            await _emit(
+                f"🧠 research saved to open-brain (vol:{volatility}, "
+                f"revalidate {revalidate}d, "
+                f"{data.get('sources_written', 0)} sources)")
     except Exception as exc:
-        await _emit(f"\U0001f9e0 evidence memory error: "
-                    f"{type(exc).__name__}")
+        await _emit(f"🧠 research persist error: {type(exc).__name__}")
+
 
 
 # =============================================================================
@@ -2793,13 +2688,12 @@ class Tools:
         fileshed_compatible: bool = Field(default=True, description="Write journal to Fileshed Storage zone")
         storage_base_path: str = Field(default="/app/backend/data/user_files", description="Fileshed storage base path")
         save_journal: bool = Field(default=True, description="Persist research journal to disk")
-        evidence_memory_enabled: bool = Field(default=True, description="On completion of a research run, persist the verified finding to mnemory as a self-describing EV:research evidence memory (provenance header + sources artifact). Never writes per-iteration queries.")
+        evidence_memory_enabled: bool = Field(default=True, description="On completion of a research run, persist the verified finding + its gathered sources to open-brain `sources` (structured rows; not user-personal data). Never writes per-iteration queries.")
         evidence_memory_quick_research: bool = Field(default=True, description="Persist evidence from quick research() too. Default ON so the cache covers every research entrypoint regardless of which tool first ran the question.")
-        evidence_cache_enabled: bool = Field(default=True, description="Before a research run, check mnemory for a prior EV:research memory for the SAME request (research_key match). On hit, return the stored finding+report instead of researching (stale flagged). refresh=True bypasses and supersedes in place.")
-        mnemory_url: str = Field(default="http://mnemory:8050", description="mnemory base URL (internal llm-net, trusted writer path).")
-        mnemory_api_key: str = Field(default="mN3m0ry!-mcp", description="mnemory API key for the evidence writer. Empty disables persistence.")
-        mnemory_user_id: str = Field(default="", description="Fallback mnemory X-User-Id when the OWUI user has no email/id.")
+        evidence_cache_enabled: bool = Field(default=True, description="Before a research run, check open-brain for prior research on the SAME request (research_key match). On hit, return the stored finding instead of researching (stale flagged). refresh=True bypasses and supersedes in place.")
         evidence_volatility_days: str = Field(default="fast:7,medium:180,slow:1095", description="Re-validation windows per volatility tier; past the window the LLM downgrades the fact to an educated guess.")
+        openbrain_url: str = Field(default="http://openbrain-mcp:8000", description="open-brain MCP base URL (llm-net, trusted writer path). Research synthesis + sources persist here; the mnemory misuse is fully retired.")
+        openbrain_key: str = Field(default="", description="open-brain MCP_ACCESS_KEY (x-brain-key). MUST be set to the OB1 docker .env MCP_ACCESS_KEY or research persistence/cache is skipped (graceful).")
 
     def __init__(self):
         self.valves = self.Valves()
@@ -2925,7 +2819,9 @@ class Tools:
                 await _persist_research_evidence(
                     self.valves, sa, query=query, answer=answer,
                     user=__user__ or {}, request=__request__,
-                    kind="research", event_emitter=__event_emitter__)
+                    kind="research",
+                    sources=getattr(researcher, "last_sources", []),
+                    event_emitter=__event_emitter__)
             except Exception:
                 pass
         return answer
@@ -2972,14 +2868,17 @@ class Tools:
                                        if self.valves.sub_agent_nothink else ""))
         j = _Journal(self.valves)
         syn = _Synthesizer(self.valves, sa, j)
-        answer = await _KnowledgeResearcher(self.valves, sa, j, syn).run(
+        researcher = _KnowledgeResearcher(self.valves, sa, j, syn)
+        answer = await researcher.run(
             query, (__user__ or {}).get("id", ""), __request__, __user__ or {}, mid, __event_emitter__,
             target_collection=collection)
         try:
             await _persist_research_evidence(
                 self.valves, sa, query=query, answer=answer,
                 user=__user__ or {}, request=__request__,
-                kind="knowledge_research", event_emitter=__event_emitter__)
+                kind="knowledge_research",
+                sources=getattr(researcher, "last_sources", []),
+                event_emitter=__event_emitter__)
         except Exception:
             pass
         return answer
@@ -3215,7 +3114,8 @@ class Tools:
             await _persist_research_evidence(
                 self.valves, sa, query=query, answer=answer,
                 user=__user__ or {}, request=__request__,
-                kind="deep_research", event_emitter=__event_emitter__)
+                kind="deep_research", sources=rag_sources,
+                event_emitter=__event_emitter__)
         except Exception:
             pass
         return answer

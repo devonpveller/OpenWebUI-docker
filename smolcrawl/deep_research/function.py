@@ -208,7 +208,9 @@ class Tools:
                 await persist_research_evidence(
                     self.valves, sub_agent, query=query, answer=answer,
                     user=__user__ or {}, request=__request__,
-                    kind="research", event_emitter=__event_emitter__,
+                    kind="research",
+                    sources=getattr(researcher, "last_sources", []),
+                    event_emitter=__event_emitter__,
                 )
             except Exception:
                 pass
@@ -284,7 +286,9 @@ class Tools:
             await persist_research_evidence(
                 self.valves, sub_agent, query=query, answer=answer,
                 user=__user__ or {}, request=__request__,
-                kind="knowledge_research", event_emitter=__event_emitter__,
+                kind="knowledge_research",
+                sources=getattr(researcher, "last_sources", []),
+                event_emitter=__event_emitter__,
             )
         except Exception:
             pass
@@ -692,7 +696,8 @@ class Tools:
             await persist_research_evidence(
                 self.valves, sub_agent, query=query, answer=answer,
                 user=__user__ or {}, request=__request__,
-                kind="deep_research", event_emitter=__event_emitter__,
+                kind="deep_research", sources=rag_sources,
+                event_emitter=__event_emitter__,
             )
         except Exception:
             pass
