@@ -1,0 +1,60 @@
+[project]
+name = "private-search-gateway"
+version = "0.1.0"
+description = "Privacy-first web search gateway fronting SearXNG over Tor for the ai-stack."
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "httpx[socks]>=0.27",
+    "redis>=5.2",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "structlog>=24.4",
+    "mcp>=1.1",
+    # mcpo re-exposes the stdio MCP server as OpenAPI; same image runs both.
+    "mcpo>=0.0.10",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "respx>=0.21",
+    "ruff>=0.7",
+    "mypy>=1.13",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+markers = [
+    "integration: end-to-end test requiring the docker-compose stack (deselected by default)",
+]
+addopts = "-m 'not integration'"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC"]
+# B008: FastAPI's Depends()/Header()/Query() in argument defaults is the
+# framework's intended idiom, not a bug.
+ignore = ["B008"]
+
+[tool.ruff.lint.isort]
+known-local-folder = ["conftest"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+packages = ["gateway"]
+mypy_path = "src"

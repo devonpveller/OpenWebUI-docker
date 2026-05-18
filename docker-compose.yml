@@ -35,6 +35,12 @@ services:
       - BYPASS_MODEL_ACCESS_CONTROL=true # Skip access control checks for faster requests
       - ENABLE_OPEN_TERMINAL=true
       - TERMINAL_SERVER_CONNECTIONS=[{"id":"open-terminal","name":"Open Terminal","url":"http://localhost:8000","key":"${OPEN_TERMINAL_API_KEY}"}]
+      # Web search → Private Search Gateway (Approach B: OWUI's stock searxng
+      # engine pointed at the gateway, which routes via Tor). This also feeds
+      # smolcrawl deep_research, which calls OWUI's search_web().
+      - ENABLE_WEB_SEARCH=${ENABLE_WEB_SEARCH:-True}
+      - WEB_SEARCH_ENGINE=${WEB_SEARCH_ENGINE:-searxng}
+      - SEARXNG_QUERY_URL=${SEARXNG_QUERY_URL:-http://gateway:8080/search?q=<query>}
     deploy:
       resources:
         reservations:
@@ -490,6 +496,147 @@ services:
     restart: always
     pull_policy: always
 
+  # ---------------------------------------------------------------------
+  # Private Search Gateway (privacy-first web search over Tor).
+  # See documentation/web-search/integration-plan-private-search-gateway.md
+  #
+  # Privacy invariant enforced at the network layer: redis/searxng/gateway/
+  # mcpo sit on `search-net` (internal: true — no internet). `tor` is the
+  # ONLY service bridging to `default`, so SearXNG physically cannot egress
+  # except through Tor. `gateway` also joins `default` purely so openwebui
+  # (on `default`) can resolve http://gateway:8080.
+  # ---------------------------------------------------------------------
+  tor:
+    image: ${TOR_IMAGE:-osminogin/tor-simple:latest}
+    container_name: search-tor
+    networks:
+      - search-net
+      - default
+    volumes:
+      - ./search-gateway/tor/torrc:/etc/tor/torrc:ro
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 9050 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
+  redis:
+    image: ${SEARCH_REDIS_IMAGE:-redis:7-alpine}
+    container_name: search-redis
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    networks:
+      - search-net
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 15s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
+  searxng:
+    image: ${SEARXNG_IMAGE:-searxng/searxng:latest}
+    container_name: searxng
+    networks:
+      - search-net
+    depends_on:
+      tor:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      - SEARXNG_SECRET=${SEARXNG_SECRET_KEY}
+      - SEARXNG_REDIS_URL=redis://redis:6379/0
+    volumes:
+      - ./search-gateway/searxng:/etc/searxng:rw
+    restart: unless-stopped
+    cap_drop: [ALL]
+    cap_add: [CHOWN, SETGID, SETUID, DAC_OVERRIDE]
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:8080/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 90s   # Tor circuit build is slow on first start
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
+  gateway:
+    build:
+      context: ./search-gateway/gateway
+      dockerfile: Dockerfile
+    image: private-search-gateway:local
+    container_name: search-gateway
+    networks:
+      - search-net
+      - default
+    depends_on:
+      searxng:
+        condition: service_started
+      redis:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      - SEARXNG_URL=http://searxng:8080
+      - REDIS_URL=redis://redis:6379/1
+    ports:
+      - "127.0.0.1:8085:8080"   # native REST / Tavily shim for host tools
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "--max-time", "5", "http://localhost:8080/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
+  mcpo:
+    build:
+      context: ./search-gateway/gateway
+      dockerfile: Dockerfile
+    image: private-search-gateway:local   # same tag as gateway; built once, cached
+    container_name: search-mcpo
+    networks:
+      - search-net
+    depends_on:
+      gateway:
+        condition: service_started
+    env_file:
+      - .env
+    environment:
+      - SEARXNG_URL=http://searxng:8080
+      - REDIS_URL=redis://redis:6379/1
+    command: ["mcpo", "--port", "8001", "--", "python", "-m", "gateway.mcp_server"]
+    ports:
+      - "127.0.0.1:8001:8001"   # MCP-as-OpenAPI for REST/MCP clients
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "--max-time", "5", "http://localhost:8001/openapi.json"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
 volumes:
   openwebui-data:
   mnemory-data:
@@ -500,6 +647,10 @@ networks:
   # llama-cpp containers are isolated here — they can only be reached
   # by services that are also on this network (openwebui, mnemory).
   llm-net:
+    internal: true
+  # Internal-only network for the search stack. SearXNG/redis/gateway/mcpo
+  # have NO internet route here; only `tor` (also on `default`) can egress.
+  search-net:
     internal: true
   default:
     driver: bridge
