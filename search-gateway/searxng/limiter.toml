@@ -1,0 +1,19 @@
+# SearXNG limiter config.
+#
+# INERT BY DESIGN: server.limiter is `false` in settings.yml because this
+# instance is private (internal:true network, single trusted caller = the
+# gateway). The limiter is bot-protection for PUBLIC instances; leaving it on
+# would 403 our own JSON fan-out and re-create the very query budget we set
+# out to remove (integration plan §3.5).
+#
+# This file is kept only so the limiter can be re-tuned quickly IF the
+# instance is ever exposed beyond the gateway. It has no effect while
+# server.limiter = false.
+
+[botdetection.ip_limit]
+# If ever enabled, do not treat the gateway as a bot.
+link_token = false
+
+[botdetection.ip_lists]
+block_ip = []
+pass_ip = []

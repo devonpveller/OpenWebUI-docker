@@ -1,6 +1,8 @@
 # Private Search Gateway — ai-stack Integration Plan
 
-**Status:** plan for review (no code written yet)
+**Status:** BUILT 2026-05-18 (Approach B). Code in `search-gateway/`, 5 services
+merged into `docker-compose.yml`, 27 unit tests passing, ruff clean. Not yet
+deployed (`docker compose up -d --build`) or verified live against OWUI.
 **Source spec:** [guide-Private-Search-Gateway.md](guide-Private-Search-Gateway.md)
 **Decisions locked with user (2026-05-18):**
 
