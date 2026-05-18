@@ -60,9 +60,30 @@ git clone git@github.com:devonpveller/openbrain-wiki-data.git
 - Incremental by default; a full rebuild only happens on first run, on a
   very large delta, or a manual `--batch`.
 
+## When does it compile?
+
+- **On boot** of `openbrain-wiki` (your restarts — deterministic).
+- **Deterministic daily** at `WIKI_RECOMPILE_HOUR` *local* time (default
+  01:00). Set the service `TZ` so that hour is *your* 1am, not container
+  UTC. This replaced the old 24h-from-boot interval (which drifted and
+  could fire during work).
+- **Change-driven (event)**: a watcher polls OpenBrain every
+  `WIKI_WATCH_INTERVAL_MIN` (3m) for sources/thoughts newer than the
+  last compile; when activity *settles* (a tick with no further new
+  rows — i.e. your research burst finished), it compiles once. So
+  "research → wiki catches up" happens on its own within a few minutes,
+  with no GPU churn while nothing changed.
+- **On demand**: `wiki_trigger_recompile` MCP tool / `POST :8811/recompile`.
+
+All four go through the same incremental compile (one at a time; a
+concurrency guard prevents overlap).
+
 ## Knobs (compose env, service `openbrain-wiki`)
 
-- `RECOMPILE_INTERVAL_HOURS` (24) — scheduled compile cadence.
+- `WIKI_RECOMPILE_HOUR` (1) + `TZ` — deterministic daily compile hour.
+- `WIKI_WATCH_ENABLED` (true) / `WIKI_WATCH_INTERVAL_MIN` (3) —
+  change-driven recompile + its poll/debounce cadence.
+- `COMPILE_ON_BOOT` (true) — compile once on container start.
 - `WIKI_GIT_FORCE` (`false`) — leave off; pull-rebase keeps pushes FF.
 - `WORKER_DRAIN_MAX_MIN` (30) — cap on pre-compile extraction draining.
 - `WIKI_NOTEBOOK` ("") — optional global notebook scoping.
