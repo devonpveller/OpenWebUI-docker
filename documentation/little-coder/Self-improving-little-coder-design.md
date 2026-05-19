@@ -140,10 +140,12 @@ Building the attributor against synthetic errors usually produces something that
 - **Routing-rule exploration policy.** Pick: random-rate vs. staged-freeze.
 - ~~**Skill frontmatter schema.**~~ **Resolved** — schema and selection logic in §22.
 - ~~**Judge model identity.**~~ **Resolved** — in-stack model under adversarial framing, internal llama-cpp contract (§23). No external API.
+- **`task_abandoned` timeout policy.** §19's abandonment threshold is doing real work: too short and a legitimate 6-hour refactor gets excluded; too long and a hung loop holds a worker for days. Likely per-channel (interactive vs. validation vs. batch), tuned in preflight.
+- **Neutral test-runner for §18.** Whether to evolve step-3 toward a small shared runner that both active and candidate are clients of, removing active's orchestration control over its own successor's validation. Pragmatic first cut is active-as-driver; promotion to neutral runner is a later hardening.
 
 ## 16. Suggested build order
 
-1. Container scaffold: `agent` as an MCP server behind `lc-mcpo` (§17), client of the `llama-cpp` backend, journals on with the **full §19 schema including session/channel id** (tier-0, unrecoverable if added later). No `meta`, no git-proxy yet.
+1. Container scaffold: `agent` as an MCP server behind `lc-mcpo` (§17), client of the `llama-cpp` backend, journals on with the **full §19 schema including session/channel id**. **This field is unrecoverable if added later — journals are append-only, and the cohort/lineage math in §6/§20 cannot be retrofitted onto data that never carried session/channel attribution. Tier-0 build requirement; ship it on day one or accept that early traffic is unusable for cohort analysis.**
 2. Pin the §19 journal schema and the §17 workspace/session model _before_ taking real traffic. Run the preflight workload (§14).
 3. Draft the cluster taxonomy (§20) and the counterfactual + adversarial judge prompt (§23) against real journals. Stand up journal sanitization (§23) before the judge is ever called.
 4. Build `meta` for tier 0 only. Manual review for every artifact via the operator surface (§24). No automation past artifact drafting.
@@ -207,7 +209,7 @@ Blue/green deployment for self-modification. It converts the dangerous thing ("a
 
 1. Stage the artifact in a separate ephemeral workspace — its own open-terminal, per §17, distinct from interactive-task workspaces.
 2. Build and boot the **candidate** little-coder from the staged code in that workspace.
-3. The **active** instance drives the test as a stable, known-good harness. It is the driver, not the arbiter.
+3. The **active** instance drives the test as a stable, known-good harness. It is the driver, not the arbiter. _Residual asymmetry, acknowledged:_ active still controls which tests run, how repro is set up, and what counts as a successful candidate boot. The verdict (step 5) is external, but the orchestration is not. A neutral test-runner that both active and candidate are clients of would be cleaner; active-as-driver is a pragmatic first cut, not the final form (open follow-up below, §15).
 4. Two acceptance tests, both required:
    - **Issue fixed** — reproduce-then-fix the specific §8 cluster that justified the change.
    - **No regression** — Polyglot subset (§13), biased to the cluster's domain, score ≥ baseline.
@@ -219,7 +221,7 @@ Blue/green deployment for self-modification. It converts the dangerous thing ("a
 
 **Cost.** Both instances are MCP clients of the same `llama-cpp:8080` backend (llama-swap, `n_parallel=2`): shared inference, no second model, no extra VRAM. The only added cost is the ephemeral staged workspace during validation.
 
-**Open follow-ups.** Who owns the external supervisor and its trigger contract (named, not assumed — see §15 deploy actor); how the candidate workspace is provisioned and torn down idempotently; whether step 3's "active drives" needs a timeout/watchdog so a hung candidate can't stall the active instance's own workload.
+**Open follow-ups.** Who owns the external supervisor and its trigger contract (named, not assumed — see §15 deploy actor); how the candidate workspace is provisioned and torn down idempotently; whether step 3's "active drives" needs a timeout/watchdog so a hung candidate can't stall the active instance's own workload; whether to evolve toward a neutral test-runner that both active and candidate are clients of, removing the step-3 orchestration asymmetry.
 
 ---
 
@@ -231,7 +233,7 @@ The cohort math (§6) and clustering (§20) are only as trustworthy as the journ
 
 **Record envelope.** Every line in all three journals shares: `ts` (UTC), `task_id` (ULID), `session_id` + `channel` (§17, tier-0), `repo` + `lang`, `seq` (per-task counter). `task_id` is minted when a trigger (Flow 1/2) starts and closed by an explicit terminal record.
 
-**Task lifecycle.** `task_started` / `task_ended` records bracket every task in `outcomes.jsonl`. Interleaved sessions are legal; a task is reconstructed by `task_id`, never by adjacency. An unclosed `task_id` past a timeout is recorded `task_abandoned` — neither pass nor fail, excluded from cohorts.
+**Task lifecycle.** `task_started` / `task_ended` records bracket every task in `outcomes.jsonl`. Interleaved sessions are legal; a task is reconstructed by `task_id`, never by adjacency. An unclosed `task_id` past a timeout is recorded `task_abandoned` — neither pass nor fail, excluded from cohorts. _The timeout value is non-trivial and likely per-channel: a 6-hour legitimate hard refactor on the interactive channel must not be abandoned; a hung loop on a 5-minute validation task must not consume a worker overnight. Tunable in preflight — see §15._
 
 **Outcome label — the hard one.** Polyglot tasks have an oracle; free-form OWUI/CLI tasks usually do not. Outcome ∈ {`pass`, `fail`, `unverified`}. `pass`/`fail` only with a checkable signal (test-suite exit, the task's own acceptance command, explicit caller confirmation). Otherwise `unverified`: it feeds the acute track **only as error evidence** (a tool error is a fact regardless of final outcome), never as a success signal. This closes the §9 "inner loop reports success" ambiguity — absent an oracle, success is not asserted; the longitudinal track (§9) is the net for `unverified` work.
 
@@ -271,7 +273,7 @@ The cohort math (§6) and clustering (§20) are only as trustworthy as the journ
 
 **Frontmatter schema (closes the §15 item).** Required: `id`, `cluster_id` (§20), `tier`, `lang`, `domain`, `tool`, `task_shape`, `created`, `supersedes` (nullable), `status` ∈ {`active`, `superseded`, `retired`}. No artifact is written without all keys — enforced at draft time (§16 step 4).
 
-**Selection (the augmenter).** Hybrid: hard filter on structured tags (lang/domain/task-shape inferred from the trigger + early tool calls) → embedding rank within that set → **hard token budget**. Over budget, prefer higher-tier and cohort-proven (§21) entries. Per-task selection is logged — required by §21's in-context assertion.
+**Selection (the augmenter).** Hybrid: hard filter on structured tags (lang/domain/task-shape inferred from the trigger + early tool calls) → embedding rank within that set → **hard token budget**. Over budget, prefer **cohort-proven (§21) entries and tighter match quality**; tier is _not_ a tiebreaker on its own. A tightly-matched tier-0 knowledge entry is often more useful in-context than a loosely-matched tier-2 routing rule, and the assumption that higher tier = more general value isn't reliable. Tier governs _production discipline_ (§5–§6), not _runtime selection_. Per-task selection is logged — required by §21's in-context assertion.
 
 **Supersession, not accretion.** A new artifact on an existing `cluster_id` sets `supersedes` to the prior `id` and flips the prior to `superseded` (archived, not deleted — audit + rollback). The augmenter selects only `active`. Prevents two live entries giving contradictory advice for one cluster.
 
@@ -281,11 +283,11 @@ The cohort math (§6) and clustering (§20) are only as trustworthy as the journ
 
 ## 23. Privacy, judge independence & poisoning
 
-**Judge stays in-stack (decision).** The judge runs on the in-stack `llama-cpp` backend (e.g. the 35B lane), never egresses. This overrides §12's "different and stronger" _ideal_ in favour of the privacy mandate — no user code leaves the internal nets, consistent with the Tor / mnemory-gateway posture of the stack. The blind-spot risk is real and mitigated, not waved away:
+**Judge stays in-stack (decision).** The judge runs on the in-stack `llama-cpp` backend (e.g. the 35B lane), never egresses. This overrides §12's "different and stronger" _ideal_ in favour of the privacy mandate — no user code leaves the internal nets, consistent with the Tor / mnemory-gateway posture of the stack. The blind-spot risk is real and mitigated, not waved away. The defense has one load-bearing layer and one hygiene layer; they are not interchangeable:
 
-- **Adversarial framing, not a second model.** The judge is invoked in a contrarian/red-team role — different system framing, fresh context window, opposed priors — explicitly tasked to argue the §2 counterfactual _and then argue why it would not have helped_. Same weights, deliberately opposed perspective.
-- **Real independence is external to the model.** Same-model judging is acceptable here only because the judge is not the last line: the Polyglot oracle (§13/§21) is model-independent, the cohort proof (§6/§20) is empirical, the human gate (§12/§24) is external. The judge proposes; none of those three is the judge.
-- **Residual weakness, acknowledged.** A blind spot shared by the coding and judging passes can survive framing. The catch is §21 efficacy reversion: an artifact born of a shared blind spot won't move the cohort and is auto-retired.
+- **The three model-independent backstops do the real work.** Same-model judging is acceptable here only because the judge is not the last line: the Polyglot oracle (§13/§21) is model-independent, the cohort proof (§6/§20) is empirical, the human gate (§12/§24) is external. The judge proposes; none of those three is the judge. **These backstops are the defense.**
+- **Adversarial framing is hygiene, not a substitute.** The judge is invoked in a contrarian/red-team role — different system framing, fresh context window, opposed priors — explicitly tasked to argue the §2 counterfactual _and then argue why it would not have helped_. This reliably catches blind spots rooted in momentary stance; it reliably misses blind spots rooted in the model's training distribution. Worth doing, but it does not carry load. The three backstops above do.
+- **Residual weakness, acknowledged.** A blind spot shared by the coding and judging passes can survive framing _and_ slip past Polyglot if Polyglot doesn't exercise the right shape. The catch of last resort is §21 efficacy reversion: an artifact born of a shared blind spot won't move the cohort and is auto-retired. The system is designed to fail slowly and visibly, not silently.
 
 **Sanitization before any judge call.** Even in-stack, journals are scrubbed before entering a judge prompt: secrets/key-shaped strings redacted, large file bodies reduced to structural digests, PII stripped. The filter is pinned and tested; its failure aborts the judge run, never "send anyway." Also protects the longitudinal track and any future operator export.
 
@@ -299,9 +301,15 @@ Operational discipline the rest of the doc assumes but never states.
 
 **Single-flight.** At most one `meta` iteration in progress. A tier-3 candidate validation (§18) holds the lock for its whole lifecycle. The acute track keeps _recording_ throughout — the inner loop never blocks on the outer loop (§3); only escalation/artifact/merge actions serialize.
 
-**Budget cap.** Per-window ceilings: artifacts/iteration (one — §5), candidate validations/day, judge tokens/day, Polyglot exercise-runs/day. Exceeding a ceiling defers; it never drops evidence. Stops a runaway loop exhausting GPU/disk.
+**Budget cap.** Per-window ceilings: artifacts/iteration (one — §5), candidate validations/day, judge tokens/day, Polyglot exercise-runs/day. Exceeding a ceiling defers; it never drops _evidence_. Stops a runaway loop exhausting GPU/disk.
 
-**The operator surface _is_ the approval interface.** The §12 human gate needs somewhere to live. One surface lists: pending artifacts (text + provenance §23 + cohort §20), tier-3 §8 justifications, contradiction flags (§22), efficacy-reversion notices (§21). Approve/reject here is the merge gate. Pre-trust, everything routes here; post-trust, only tiers ≥ 1 and all flags.
+**Deferral queue is bounded — evidence is not.** "Defers, never drops evidence" is only true while the iteration queue is finite. Under sustained backlog, evidence remains durable in the journals (the cohort math reads from them on each iteration), but pending _iterations_ stack. Policy:
+
+- **Soft limit** on queue depth → alarm on the operator surface (below).
+- **Hard limit** → **coalesce, don't drop.** Coalescing is per-cluster: multiple deferred iterations for the same `cluster_id` collapse into one entry. When that entry eventually runs, cohorts and clusters are re-read fresh from the journals, so the collapsed iteration uses the latest evidence rather than stale snapshots taken at queue time. Cross-cluster iterations are FIFO; no cluster is starved by another.
+- Evidence (journals, cohort counters) is preserved throughout. Only the iteration queue is bounded; iterations are always replayable later from the journals if needed.
+
+**The operator surface _is_ the approval interface.** The §12 human gate needs somewhere to live. One surface lists: pending artifacts (text + provenance §23 + cohort §20), tier-3 §8 justifications, contradiction flags (§22), efficacy-reversion notices (§21), queue-depth alarms (above). Approve/reject here is the merge gate. Pre-trust, everything routes here; post-trust, only tiers ≥ 1 and all flags.
 
 **Failure semantics — nothing fails open.** Judge unreachable → defer, alarm, no merge. Polyglot harness won't run → "insufficient evidence" (not pass), defer. Candidate won't boot (§18 step 2) → fail closed, tear down, cluster stays at its current tier (no escalation credit for a failed deploy). Every failure journaled.
 
