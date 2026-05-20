@@ -130,9 +130,9 @@ Building the attributor against synthetic errors usually produces something that
 ## 15. Decisions still open
 
 - **Model.** "qwen3.6:27b" is not a model that exists upstream. Candidates: `qwen3:30b-a3b` (MoE), `qwen2.5-coder:32b` (dense), or stay on `qwen3.5` (which is what little-coder is actually tuned around). Larger models bypass little-coder's small-model adaptations — decide whether that's wanted. _Deployment note:_ in the ai-stack this is partly moot — `qwen36-27b` exists as a llama-swap model id at `http://llama-cpp:8080/v1`, so the "not upstream" concern is deployment-specific and resolved here. The small-model-adaptation tradeoff still stands and is the real decision.
-- **Open-terminal session model.** open-terminal is one shared workspace (`network_mode: service:openwebui`) with multiple writers: Flow 1 (OWUI), Flow 2 (CLI), and §13 Polyglot validation runs. They must not stomp each other. Minimum viable: meta-loop validation gets an ephemeral workspace separate from interactive tasks; interactive tasks serialized or per-session-scoped. Mechanism (separate volumes, per-session cwd, distinct terminal-server connection entries) — explore (cross-ref §17).
+- ~~**Open-terminal session model.**~~ **Resolved** — per-session git worktrees off a canonical clone of one focused project; per-session and per-repo serial; bounded-N validation parallelism; tier-3 escalates to a separate ephemeral container. Project switching is an explicit operator action via `/project repo: <link>`. Full mechanism in §17 (session model + project focus + persistence boundary).
 - **Fork-parent vs. self-artifact merge discipline.** How upstream pulls from `itayinbarr/little-coder` and self-authored `auto/*` artifacts coexist without colliding (cross-ref §17).
-- **Deploy actor.** What external supervisor restarts the active little-coder from a merged tagged commit (compose/watchtower-style, or `meta`), and its trigger contract — `pull` does not reload a running process (cross-ref §18 step 7).
+- ~~**Deploy actor.**~~ **Resolved** — the operator, via PR + manual `docker compose up -d --build`. Tier-3 only; tiers 0–2 do not require a restart. Full flow in §18 step 7 and the deploy-per-tier table in §16.
 - ~~**Cohort table schema.**~~ **Resolved** — schema in §19 (journal envelope) + §20 (cluster identity, split/merge lineage). Per-cluster M still tuned in preflight.
 - **Polyglot N & regression margin.** Minimum validation subset size and the noise margin that counts as a regression — tuned against measured Polyglot variance in preflight (§14, §21).
 - **Counterfactual judge prompt.** Concrete wording, few-shot examples, output format.
@@ -156,6 +156,17 @@ Building the attributor against synthetic errors usually produces something that
 9. Tier 2 only after tier 1 shows demonstrable cohort improvement (§20). Tier 3 last, and only with §18 candidate/active plus the §24 deploy actor decided.
 
 Code changes to little-coder itself (tier 3) are not a near-term deliverable. They are a possibility the architecture leaves open, not a planned feature.
+
+**Deploy flow per tier.** Not every tier needs the same merge-and-deploy path. The flow scales with blast radius:
+
+| Tier                       | Artifact form                                 | Auto-mergeable?                | Restart needed?                                                         | Flow                                                                                    |
+| -------------------------- | --------------------------------------------- | ------------------------------ | ----------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| 0 (knowledge)              | `skill/knowledge/*.md`                        | Yes, once trusted (§16 step 7) | No — read by augmenter at next task                                     | git-proxy merges to `main`, next task picks it up                                       |
+| 1 (tool-craft / plan-slot) | `skill/tools/*.md` or planner-prompt addition | Yes, once trusted              | No — same as tier-0 if file-based; verify if it touches a loaded prompt | Same as tier-0                                                                          |
+| 2 (routing rule)           | Config file or rule entry                     | Yes, once trusted              | Depends — config files no; code-path changes yes                        | Probably no restart; verify per-rule                                                    |
+| 3 (code change)            | Diff to `agent.py` / `local/`                 | **No, ever**                   | Yes                                                                     | §18 full flow: candidate validation → PR → human merge → `docker compose up -d --build` |
+
+The §18 candidate/active deploy model applies **only to tier-3**, because tier-3 is the only tier where the running container has the affected code loaded. Tiers 0–1 are data the augmenter reads each task; tier-2 is usually data the router reads each task. Building tier-3's machinery is therefore last (step 9), and the PR + manual deploy actor (§18 step 7) is sized for tier-3's expected rarity.
 
 ## 17. Service surface and workspace sharing
 
@@ -188,7 +199,32 @@ OWUI and CLI are **triggers**: they start a task and await the result. They do n
 
 **Blast radius is now open-terminal's environment.** Because open-terminal is `network_mode: service:openwebui`, anything that namespace can reach, the inner loop can reach by issuing commands into the workspace. open-terminal's own containment — capabilities, network reachability, filesystem scope, `no-new-privileges` — is therefore the de facto sandbox for the entire self-improving system and must be hardened and reviewed as such. It is no longer "just a terminal."
 
-**Workspace concurrency is the central open problem (sharpens §15).** One open-terminal workspace, multiple writers: Flow 1 and Flow 2 both trigger little-coder against it; §13 Polyglot validation runs on every artifact merge and must not stomp — or be stomped by — a live interactive task; a human attaching mid-task collides with the loop. Minimum viable separation: meta-loop validation gets its own ephemeral workspace, distinct from interactive-task workspaces; interactive tasks serialized or per-session-scoped. Mechanism is the §15 "open-terminal session model" item.
+**Session model (resolved).** open-terminal is one container, one focused project at a time. Per-task isolation is achieved with **git worktrees off a canonical clone**: each task gets `/workspace/sessions/<session_id>/` as a worktree, work happens there, push back to the canonical clone on completion, then `git worktree remove`. Concurrency:
+
+- **Per-session-id**: serial. A session never runs two things at once.
+- **Per-repo, across sessions**: serial by default. Since there is only one focused project, this reduces to "interactive tasks serialize" — predictable and matches user intuition.
+- **Validation runs**: own worktree, parallel to interactive work, bounded to N concurrent (start with N=1; §24 single-flight already enforces this at the meta level, but the merge-time Polyglot gate runs outside meta).
+- **Human attach**: read-only to a session's worktree. Mid-task writes from a human collide with the inner loop in ways no design can save; explicit read-only attach is the honest answer.
+- **Tier-3 candidate validation (§18)**: escalates to a _separate ephemeral open-terminal-shaped container_, not a worktree. Rare, important, warrants a clean room. This is the only place Option C (per-session containers) is used.
+
+**Project focus (resolved).** open-terminal hosts one focused project at a time. Switching projects is an explicit operator action via `/project repo: <link>` (OWUI slash-command or equivalent CLI), distinct from a task trigger. Behavior:
+
+```
+/project repo: <link>
+  → normalize <link> to canonical form (host + owner + repo, lowercased)
+  → if no current focus:
+      clone, set focus, journal `project_switched`, proceed
+  → if matches current focus:
+      no-op, proceed
+  → if doesn't match current focus:
+      → if any active sessions: reject with the list, suggest cancel-or-wait
+      → else: tag prior state, tear down worktrees, clone, set focus,
+              journal `project_switched`, proceed
+```
+
+URL normalization prevents spurious wipes when SSH and HTTPS forms of the same repo are used interchangeably. The in-flight guard prevents silent wipe-under-load. The `project_switched` journal record matters for §20 cohort analysis: rate changes coinciding with a switch must be visible in the data, not invisible.
+
+**Persistence boundary.** Little-coder's own state — skill library (§22), journals (§19), cohort counters (§20), the canonical Polyglot clone — lives in little-coder's container, not open-terminal's. A project switch wipes open-terminal's project workspace; it does not touch any of little-coder's accumulated expertise. Cross-project learning (a Rust lifetimes cluster discovered on project A paying off on project B) is the entire point of §6 and survives switches by container boundary, not by special handling.
 
 **Synergy with §14.** OWUI/CLI users driving little-coder on real repos through the control plane _is_ the real preflight workload — free, high-fidelity journal collection instead of synthetic, provided attribution is in place from the start:
 
@@ -214,14 +250,21 @@ Blue/green deployment for self-modification. It converts the dangerous thing ("a
    - **Issue fixed** — reproduce-then-fix the specific §8 cluster that justified the change.
    - **No regression** — Polyglot subset (§13), biased to the cluster's domain, score ≥ baseline.
 5. Verdict comes from the objective oracle: Polyglot score + §8 justification + §12 human gate. Never from the active instance's own assessment — that re-imports the self-judging blind spot §12 forbids.
-6. On pass: tear down the candidate and its staged workspace; the active instance pulls the merged, tagged commit.
-7. **Pull ≠ running new code.** An external supervisor (compose/watchtower-style, or `meta`) restarts the active container from the merged tagged commit. Rollback = restart from the prior tag; the running active instance was never mutated.
+6. On pass: tear down the candidate and its staged workspace; little-coder opens a **pull request** from `auto/<date>-<topic>` to `main`. The PR body is mechanically templated from the cohort and validation records and carries:
+   - The §8 justification (cluster history, interventions tried, structural argument).
+   - §20 cohort evidence (cluster_id, occurrences, lineage).
+   - §18 validation outputs (Polyglot exercises run, scores vs. baseline, issue-reproduces-then-fixes result).
+   - §23 provenance (journal evidence range).
+
+   Without this body, the PR is a diff with no context and review degrades into "skim and trust." The templating is mechanical, not judgment — the judgment is the reviewer's.
+
+7. **Human merge + manual deploy.** The operator reviews the PR on GitHub and merges what they choose. After merge, the operator runs `docker compose up -d --build little-coder` (or equivalent) to bring the new version up. The active instance was never mutated; the restart is a clean swap between two known-good tagged commits. Rollback is `git revert` plus the same compose command, or pinning to the prior tag. **The deploy actor is the operator** — no automated supervisor is needed at this scale, and given tier-3's expected rarity (§16 step 9), manual deploy is not a friction point. If tier-3 ever becomes frequent, a dedicated tiny supervisor service is the upgrade path; not now.
 
 **Why this is the benign version of self-modification.** The candidate is torn down by an external actor while the active instance drives, so no process kills itself mid-task. The only restart is a clean container swap between two known-good tagged commits — not a process hot-patching itself.
 
 **Cost.** Both instances are MCP clients of the same `llama-cpp:8080` backend (llama-swap, `n_parallel=2`): shared inference, no second model, no extra VRAM. The only added cost is the ephemeral staged workspace during validation.
 
-**Open follow-ups.** Who owns the external supervisor and its trigger contract (named, not assumed — see §15 deploy actor); how the candidate workspace is provisioned and torn down idempotently; whether step 3's "active drives" needs a timeout/watchdog so a hung candidate can't stall the active instance's own workload; whether to evolve toward a neutral test-runner that both active and candidate are clients of, removing the step-3 orchestration asymmetry.
+**Open follow-ups.** How the candidate workspace is provisioned and torn down idempotently; whether step 3's "active drives" needs a timeout/watchdog so a hung candidate can't stall the active instance's own workload; whether to evolve toward a neutral test-runner that both active and candidate are clients of, removing the step-3 orchestration asymmetry. (Deploy actor is resolved: the operator, via PR + manual `docker compose`.)
 
 ---
 
