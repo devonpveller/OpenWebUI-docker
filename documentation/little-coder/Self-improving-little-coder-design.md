@@ -156,14 +156,15 @@ Building the attributor against synthetic errors usually produces something that
 ## 16. Suggested build order
 
 1. Container scaffold: `agent` as an MCP server behind `lc-mcpo` (§17), client of the `llama-cpp` backend, journals on with the **full §19 schema including session/channel id**. **This field is unrecoverable if added later — journals are append-only, and the cohort/lineage math in §6/§20 cannot be retrofitted onto data that never carried session/channel attribution. Tier-0 build requirement; ship it on day one or accept that early traffic is unusable for cohort analysis.**
-2. Pin the §19 journal schema and the §17 workspace/session model _before_ taking real traffic. Run the preflight workload (§14).
+2. Pin the §19 journal schema and the §17 workspace/session model _before_ taking real traffic. Stand up the **CLI operator surface** (§24) — subcommands for `project switch`, `upstream pull`, `pending`, `approve`. CLI is near-free against little-coder's existing CLI and is sufficient for the operator gate from day one. Run the preflight workload (§14).
 3. Draft the cluster taxonomy (§20) and the counterfactual + adversarial judge prompt (§23) against real journals. Stand up journal sanitization (§23) before the judge is ever called.
 4. Build `meta` for tier 0 only. Manual review for every artifact via the operator surface (§24). No automation past artifact drafting.
 5. Add the Polyglot gate with real validation semantics (§21): measured baseline, regression margin from preflight variance, artifact-in-context assertion.
 6. Add `git-proxy` at the workspace edge (§4/§17) and branch/tag conventions (§12).
-7. Exit preflight only on the §24 checklist. Promote tier 0 to auto-merge once trusted, with efficacy reversion (§21) live. Then build tier 1.
-8. Add the longitudinal structural track (§9) in parallel with tier 1.
-9. Tier 2 only after tier 1 shows demonstrable cohort improvement (§20). Tier 3 last, and only with §18 candidate/active plus the §24 deploy actor decided.
+7. **Build the OWUI pipeline (§24).** Task triggers as chat; operator commands as slash-commands; artifact-review messages with structured rendering. Not a "later if needed" — a real implementation effort, second only to CLI because parity matters for the operator gate to feel as effective in OWUI as it does in CLI.
+8. Exit preflight only on the §24 checklist. Promote tier 0 to auto-merge once trusted, with efficacy reversion (§21) live. Then build tier 1.
+9. Add the longitudinal structural track (§9) in parallel with tier 1.
+10. Tier 2 only after tier 1 shows demonstrable cohort improvement (§20). Tier 3 last, and only with §18 candidate/active plus the §24 deploy actor decided.
 
 Code changes to little-coder itself (tier 3) are not a near-term deliverable. They are a possibility the architecture leaves open, not a planned feature.
 
@@ -171,12 +172,12 @@ Code changes to little-coder itself (tier 3) are not a near-term deliverable. Th
 
 | Tier                       | Artifact form                                 | Auto-mergeable?                | Restart needed?                                                         | Flow                                                                                    |
 | -------------------------- | --------------------------------------------- | ------------------------------ | ----------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
-| 0 (knowledge)              | `skill/knowledge/*.md`                        | Yes, once trusted (§16 step 7) | No — read by augmenter at next task                                     | git-proxy merges to `main`, next task picks it up                                       |
+| 0 (knowledge)              | `skill/knowledge/*.md`                        | Yes, once trusted (§16 step 8) | No — read by augmenter at next task                                     | git-proxy merges to `main`, next task picks it up                                       |
 | 1 (tool-craft / plan-slot) | `skill/tools/*.md` or planner-prompt addition | Yes, once trusted              | No — same as tier-0 if file-based; verify if it touches a loaded prompt | Same as tier-0                                                                          |
 | 2 (routing rule)           | Config file or rule entry                     | Yes, once trusted              | Depends — config files no; code-path changes yes                        | Probably no restart; verify per-rule                                                    |
 | 3 (code change)            | Diff to `agent.py` / `local/`                 | **No, ever**                   | Yes                                                                     | §18 full flow: candidate validation → PR → human merge → `docker compose up -d --build` |
 
-The §18 candidate/active deploy model applies **only to tier-3**, because tier-3 is the only tier where the running container has the affected code loaded. Tiers 0–1 are data the augmenter reads each task; tier-2 is usually data the router reads each task. Building tier-3's machinery is therefore last (step 9), and the PR + manual deploy actor (§18 step 7) is sized for tier-3's expected rarity.
+The §18 candidate/active deploy model applies **only to tier-3**, because tier-3 is the only tier where the running container has the affected code loaded. Tiers 0–1 are data the augmenter reads each task; tier-2 is usually data the router reads each task. Building tier-3's machinery is therefore last (step 10), and the PR + manual deploy actor (§18 step 7) is sized for tier-3's expected rarity.
 
 ## 17. Service surface and workspace sharing
 
@@ -352,7 +353,7 @@ The cohort math (§6) and clustering (§20) are only as trustworthy as the journ
 
 **Workspace-repo credentials (closes a §12 gap).** §12 scopes only the _self_ PAT. Work repos (Flow 1/2) use **least-privilege per-repo deploy tokens**, injected per task, never ambient, never the self-PAT. A task for repo A cannot reach repo B. The self-improvement PAT lives with `meta`/git-proxy, unreachable from the workspace plane (§17).
 
-**Self-poisoning is an attack surface.** Skill artifacts inject into _every_ future context (§11/§22); a hostile repo or a prompt-injected error message could steer an artifact's text. Controls: (1) provenance — each artifact records its `cluster_id` and the journal evidence range it was derived from; (2) the §12/§24 human gate reviews artifact _text_, not just the diff, until trust is earned; (3) tier-0 auto-merge (§16 step 7) is gated on §21 in-context + efficacy, so a poisoned-but-useless entry auto-retires; (4) artifacts are data — prompt context only, never eval'd or imported by little-coder.
+**Self-poisoning is an attack surface.** Skill artifacts inject into _every_ future context (§11/§22); a hostile repo or a prompt-injected error message could steer an artifact's text. Controls: (1) provenance — each artifact records its `cluster_id` and the journal evidence range it was derived from; (2) the §12/§24 human gate reviews artifact _text_, not just the diff, until trust is earned; (3) tier-0 auto-merge (§16 step 8) is gated on §21 in-context + efficacy, so a poisoned-but-useless entry auto-retires; (4) artifacts are data — prompt context only, never eval'd or imported by little-coder.
 
 ## 24. Meta-loop operations
 
@@ -369,6 +370,15 @@ Operational discipline the rest of the doc assumes but never states.
 - Evidence (journals, cohort counters) is preserved throughout. Only the iteration queue is bounded; iterations are always replayable later from the journals if needed.
 
 **The operator surface _is_ the approval interface.** The §12 human gate needs somewhere to live. One surface lists: pending artifacts (text + provenance §23 + cohort §20), tier-3 §8 justifications, contradiction flags (§22), efficacy-reversion notices (§21), queue-depth alarms (above). Approve/reject here is the merge gate. Pre-trust, everything routes here; post-trust, only tiers ≥ 1 and all flags.
+
+**Operator surface forms.** Two surfaces, same underlying control plane, built in sequence:
+
+- **CLI** — ships first. Near-free against little-coder's existing CLI. Adds operator subcommands (`lc admin project switch`, `lc admin pending`, `lc admin approve <id>`, `lc admin upstream pull`, etc.) and the approval flow. Sufficient for the operator gate from day one.
+- **OWUI pipeline** — the next real implementation effort after CLI lands. Not deferred indefinitely. An OWUI pipeline interfaces with little-coder's MCP surface (§17) so chat-shaped interactions feel as effective as the CLI. Two distinct interaction types share the surface:
+  - _Task triggers_ map naturally to chat (long, streaming, conversational).
+  - _Operator commands and approvals_ map to slash-commands (`/project repo:`, `/upstream pull`, `/approve <id>`, `/pending`) and structured renderings inside chat messages — an artifact-review message shows artifact text, §20 cohort evidence, §23 provenance, and Approve/Reject controls. This is a real UI design problem, not just text return.
+
+**Privilege separation across surfaces.** Operator commands and approvals are authenticated at the surface — CLI is gated by host shell access; OWUI is gated by whatever auth OWUI is configured with — never by the MCP server itself. The MCP server takes task triggers; operator authority is checked at the edge. A task trigger from a regular user cannot escalate into an operator action by being shaped like one.
 
 **Failure semantics — nothing fails open.** Judge unreachable → defer, alarm, no merge. Polyglot harness won't run → "insufficient evidence" (not pass), defer. Candidate won't boot (§18 step 2) → fail closed, tear down, cluster stays at its current tier (no escalation credit for a failed deploy). Every failure journaled.
 
