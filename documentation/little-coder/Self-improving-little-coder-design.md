@@ -34,7 +34,11 @@ Three processes inside the container, plus a sidecar:
 - **`agent`** — little-coder REPL exposed as an MCP server behind an `mcpo` proxy (see §17), not raw HTTP/socket. Writes append-only journals: `tool_calls.jsonl`, `errors.jsonl`, `outcomes.jsonl` (final pass/fail + tools fired + cluster tags once assigned + session/channel id — see §17, this field is a tier-0 build requirement, not a later refinement).
 - **`meta`** — the outer loop. Triggered by evidence thresholds (see §6), not a clock. Runs clustering, judge prompt, artifact drafting, validation, merge.
 - **`git-proxy`** — wraps every git call. Whitelist: `commit`, `branch`, `checkout`, `merge --no-ff`, `tag`, `revert`, `reset --hard <tag>`. Blocklist: `push --force`, `branch -D`, `filter-branch`, `gc --prune=now`, history rewrites, anything touching `.git/` directly. **Sited at the open-terminal workspace edge** (§17): git inside the workspace is the proxied binary, and little-coder has no un-proxied raw-git path it can issue into the terminal. The whitelist's guarantees hold only if it is the _only_ git path.
-- **Inference backend** — separate container, not inside. In this stack that is `llama-cpp`/llama-swap on the internal `llm-net` (Ollama is disabled in the compose). Both little-coder and the judge (§23) are clients of it. (Earlier drafts said "Ollama sidecar" — stale.)
+- **Inference backend** — separate container, not inside. In this stack that is `llama-cpp`/llama-swap at `http://llama-cpp:8080/v1` on the internal `llm-net`. Both little-coder and the judge (§23) are clients of it; no other backends configured. Two model variants serve different roles:
+  - **`qwen3.6:27b`** — the reasoning variant. Used for work where deliberation pays for its tokens: the counterfactual + adversarial judge prompt (§23), artifact drafting (§5), §8 justifications, type-selection within tiers (§5).
+  - **`qwen3.6:27b-nothink`** — the fast variant. Used for high-frequency, low-deliberation work: cluster assignment (§20), sanitization checks (§23), routing decisions, in-context augmenter selection (§22).
+
+  The split is operational, not architectural — both variants are the same family on the same backend, swapped per call by model id.
 
 ## 5. Artifact taxonomy (four types, increasing risk)
 
@@ -46,6 +50,12 @@ Outer loop produces exactly one type per iteration. The type is decided _before_
 4. **Routing rules** — when to invoke planner, deliberate mode, larger thinking budgets. Easy to write, easy to mis-tune; can suppress evidence collection (see §7).
 
 Code changes to `agent.py` / `local/` are a fifth tier, gated by §8.
+
+**Type selection within a tier (resolved).** The §6 escalation ladder controls _how much risk_ the system can take — tier-0 caps at knowledge, tier-1 at tool-craft/plan-slot, tier-2 at routing rule, tier-3 at code. _Within_ a tier that offers a choice (notably tier-1: tool-craft vs. plan-slot), the judge picks the type that best fits the cluster's signature, with the choice itself journaled.
+
+The selection prompt at tier-1 looks like: _"This cluster has persisted past tier-0. Given its signature \[occurrences, error shapes, context patterns\], is the gap better addressed by (a) a tool-use pattern in `skill/tools/`, or (b) a slot added to the planner template? Argue both, then pick."_ The argument is the journal entry and is what the §24 operator surface shows for approval.
+
+This is the same shape as §8 (judge argues, journal records, human approves), applied within a tier rather than only between tiers. The escalation ladder remains the safety mechanism; type selection is the cluster-fit mechanism. The judge never escalates risk class on its own — that requires the §6 quarantine window plus, for tier-2 → tier-3, the full §8 justification.
 
 ## 6. Evidence-based escalation
 
@@ -68,12 +78,12 @@ Each tier requires a **quarantine window** of M tasks before becoming eligible f
 
 Routing decisions can suppress their own evidence. If the agent stops invoking the planner for class X based on one round, it stops collecting new evidence about whether planner would have helped X.
 
-Two acceptable approaches:
+**Policy (resolved): both, in sequence.** The two approaches answer different questions and combine cleanly:
 
-- Keep a small random-exploration rate (e.g. 5–10%) on routing decisions, indefinitely.
-- Freeze routing-rule production until knowledge and tool-craft tiers have stabilized for that cluster.
+1. **Staged-freeze gates entry into tier-2.** No routing rule is authored for a cluster until its tier-0 (knowledge) and tier-1 (tool-craft / plan-slot) interventions have run their quarantine windows (§6) and the cluster has demonstrably resisted them. This is the same evidentiary discipline as the rest of §6's ladder — routing rules don't get to skip the queue.
+2. **Random-exploration runs against routing rules indefinitely once they exist.** Each routing rule retains a 5–10% exploration rate where the rule is _not_ applied — the system deliberately takes the path the rule says to avoid, so post-rule evidence keeps flowing. Without this, a rule that's wrong becomes self-confirming forever.
 
-Pick one and stick to it.
+Together: staged-freeze controls _when_ routing rules are born; random-exploration controls _how_ they behave once alive. The §21 efficacy track is the catch — a routing rule that exploration shows is wrong (cohort doesn't move, or moves the wrong way) is auto-retired.
 
 ## 8. The code-change justification requirement
 
@@ -129,17 +139,17 @@ Building the attributor against synthetic errors usually produces something that
 
 ## 15. Decisions still open
 
-- **Model.** "qwen3.6:27b" is not a model that exists upstream. Candidates: `qwen3:30b-a3b` (MoE), `qwen2.5-coder:32b` (dense), or stay on `qwen3.5` (which is what little-coder is actually tuned around). Larger models bypass little-coder's small-model adaptations — decide whether that's wanted. _Deployment note:_ in the ai-stack this is partly moot — `qwen36-27b` exists as a llama-swap model id at `http://llama-cpp:8080/v1`, so the "not upstream" concern is deployment-specific and resolved here. The small-model-adaptation tradeoff still stands and is the real decision.
+- ~~**Model.**~~ **Resolved** — `qwen3.6:27b` (reasoning) and `qwen3.6:27b-nothink` (fast) on `http://llama-cpp:8080/v1`. Role split in §4. No other backends.
 - ~~**Open-terminal session model.**~~ **Resolved** — per-session git worktrees off a canonical clone of one focused project; per-session and per-repo serial; bounded-N validation parallelism; tier-3 escalates to a separate ephemeral container. Project switching is an explicit operator action via `/project repo: <link>`. Full mechanism in §17 (session model + project focus + persistence boundary).
-- **Fork-parent vs. self-artifact merge discipline.** How upstream pulls from `itayinbarr/little-coder` and self-authored `auto/*` artifacts coexist without colliding (cross-ref §17).
+- ~~**Fork-parent vs. self-artifact merge discipline.**~~ **Resolved** — pin to a known-good upstream commit; pulls are operator-initiated via `/upstream pull`. Tiers 0–2 land cleanly (separate paths); tier-3 conflicts resolved on a merge branch with full §18 re-validation. Self-authored tier-3 artifacts invalidated by an upstream pull are journaled and retired. Full mechanism in §17.
 - ~~**Deploy actor.**~~ **Resolved** — the operator, via PR + manual `docker compose up -d --build`. Tier-3 only; tiers 0–2 do not require a restart. Full flow in §18 step 7 and the deploy-per-tier table in §16.
 - ~~**Cohort table schema.**~~ **Resolved** — schema in §19 (journal envelope) + §20 (cluster identity, split/merge lineage). Per-cluster M still tuned in preflight.
 - **Polyglot N & regression margin.** Minimum validation subset size and the noise margin that counts as a regression — tuned against measured Polyglot variance in preflight (§14, §21).
 - **Counterfactual judge prompt.** Concrete wording, few-shot examples, output format.
-- **Cluster → artifact-type router.** How the meta process decides which of the four artifact types fits a cluster.
-- **Routing-rule exploration policy.** Pick: random-rate vs. staged-freeze.
+- ~~**Cluster → artifact-type router.**~~ **Resolved** — escalation ladder (§6) controls risk class; judge picks the type within the tier when the tier offers a choice (notably tier-1: tool-craft vs. plan-slot). Selection is journaled. Full mechanism in §5.
+- ~~**Routing-rule exploration policy.**~~ **Resolved** — both, in sequence: staged-freeze gates tier-2 entry; 5–10% random-exploration runs against each routing rule indefinitely after authoring. §21 efficacy retires rules that don't pay off. Full mechanism in §7.
 - ~~**Skill frontmatter schema.**~~ **Resolved** — schema and selection logic in §22.
-- ~~**Judge model identity.**~~ **Resolved** — in-stack model under adversarial framing, internal llama-cpp contract (§23). No external API.
+- ~~**Judge model identity.**~~ **Resolved (in-stack now)** — in-stack `qwen3.6:27b` under adversarial framing (§23). OpenRouter to a stronger external judge is a possible future change if the privacy posture relaxes; deferred, not rejected.
 - **`task_abandoned` timeout policy.** §19's abandonment threshold is doing real work: too short and a legitimate 6-hour refactor gets excluded; too long and a hung loop holds a worker for days. Likely per-channel (interactive vs. validation vs. batch), tuned in preflight.
 - **Neutral test-runner for §18.** Whether to evolve step-3 toward a small shared runner that both active and candidate are clients of, removing active's orchestration control over its own successor's validation. Pragmatic first cut is active-as-driver; promotion to neutral runner is a later hardening.
 
@@ -235,7 +245,13 @@ URL normalization prevents spurious wipes when SSH and HTTPS forms of the same r
 - **Self-improvement** — the outer loop's `auto/<date>-<topic>` branches (§5–§12).
 - **Upstream fork-parent** — the extended fork (`devonpveller/little-coder-extended`) tracks `itayinbarr/little-coder`. Upstream pulls and self-authored artifacts can collide on the same files (skill loader, `agent.py`, planner prompt).
 
-The mitigating structure is already in the design: skill artifacts (§5 tiers 0–2) live additively under `skill/` and are orthogonal to upstream code, so they should rebase cleanly. Only tier-3 code changes risk real conflict — and §8 already makes those rare, justified, and journaled. Open question for §15: whether upstream rebases on top of `auto/*` or self-artifacts are quarantined to a path upstream never touches. Decide before tier-1.
+**Policy (resolved): pin to a known-good upstream commit; pulls are operator-initiated.** Upstream is never auto-pulled. The operator initiates a pull via `/upstream pull` (OWUI slash-command or CLI), parallel in shape to `/project repo:`. Behavior:
+
+- For tiers 0–2 (additive skill files under `skill/`), upstream pulls cannot conflict because upstream doesn't touch those paths. The pull lands cleanly. No special handling.
+- For tier-3 code (changes to `agent.py` / `local/`), a real merge conflict is possible. On conflict, the operator resolves it manually on a `upstream-merge/<date>` branch, then runs the full §18 validation flow against the merged result before it becomes the new active. A self-authored tier-3 artifact that no longer makes sense against the new upstream base is journaled as `invalidated_by_upstream` and retired (§21 efficacy track picks this up if it slips through).
+- The pull itself is journaled as `upstream_pulled` with the old and new upstream commit ids — same rationale as `project_switched`: cohort-rate changes coinciding with an upstream pull must be visible.
+
+Auto-rebasing onto a moving upstream is explicitly avoided. The class of failures it produces — an artifact that validated yesterday now sits on a subtly different base — is hard to debug and easy to prevent by making the pull an explicit operator action.
 
 ## 18. Candidate/active deploy model for tier-3
 
