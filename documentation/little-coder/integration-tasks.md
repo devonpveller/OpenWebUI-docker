@@ -22,51 +22,67 @@
 
 ### Chapter 1 progress (2026-05-22)
 
-Control-plane modules are code-complete and unit-tested (120 tests, all
-passing). Legend below: `[x]` acceptance met by code + tests; `[~]` logic
-done, full acceptance waits on a running deployment.
+Chapter 1 is **code-complete** — every Tool component is built and the
+control-plane logic is unit-tested (**134 tests, all passing**). What remains
+is **deployment + operator verification**: `docker compose up -d --build`,
+then living with it through the CLI (the chapter stop point, plan §5).
 
-**Landed and tested:**
+Legend: `[x]` code-complete (+ tested where unit-testable); `[~]` built, full
+acceptance needs a running deployment; `[ ]` not done.
 
-- Centralized typed config (1k) — pydantic model + generated JSON schema, boot validation, drift test.
-- Journals (1c) — full envelope, ULID, three writers, write-time schema validation, fsync on terminal/error, size-triggered rotation.
-- Audit log (1d) — `audit.jsonl` writer, separate from task journals.
-- Sanitization filter (1i) — secret/PII redaction + structural digests, shadow/enforcing modes, pinned test set with seeded FP/FN.
-- git-proxy (1h) — whitelist/blocklist policy + global-override guards; 55 adversarial tests.
-- URL normalization + `/project` decision table (1f) — SSH/HTTPS collapse, four-branch switch logic.
-- open-terminal client — `POST /execute` driver, output parsing, git-proxy-denial detection.
+**Built and unit-tested** (`../../little-coder/`):
 
-**Pending (this chapter):** control daemon (FIFO queue, task lifecycle,
-shutdown drain), agent integration (run the little-coder CLI, route exec to
-open-terminal), CLI operator surface, Prometheus endpoint, MCP server +
-`lc-mcpo`, Dockerfiles, compose wiring, `.env` entries.
+- Control daemon — FastAPI internal API, FIFO queue (one task at a time), task lifecycle, SIGTERM drain.
+- Agent integration — runs the upstream little-coder CLI; `ot-exec` routes its commands into open-terminal and journals each one.
+- CLI operator surface — `lc task / project / status / tasks` + `lc admin {shutdown, pending, approve, reject, project switch, task confirm}`.
+- Prometheus metrics; MCP server + `lc-mcpo` edge (built, dormant); config / journals / audit / sanitization / git-proxy / workspace foundation.
+
+**Docker + compose**: agent image (Node + Python), custom open-terminal image
+(git-proxy spliced in as `git`), `lc-egress` allowlist proxy, five named
+volumes, backup job, the `lc-net` network, the open-terminal network change.
+`.env.example` updated with all new keys + operator action items.
+
+**Deployment-gated** (operator runs `docker compose up`, then verifies):
+llama-cpp reachability, open-terminal network isolation, volume persistence
+across a rebuild, the pi-extension load (see
+`../../little-coder/pi-extension/README.md`), shadow-mode rejection baseline.
+
+**Known gap — `.git/config` read-only mount (design §3.3).** The git-proxy
+blocks `git config` writes and `remote add` at the command level, but a
+*direct file write* to `.git/config` bypasses that. The design closes this
+with a read-only mount; that is awkward for a path inside a named volume and
+is **not yet implemented** — tracked as a remaining hardening item (see 1h).
+
+**Operator action items** (cannot be automated — see `.env.example`):
+provision the private self-improvement remote + PAT (design §10.6), and add
+your git host to `little-coder/docker/egress-allowlist.txt`.
 
 ### 1a. Network + remotes (ship first; these are unrecoverable later)
 
-- [ ] Verify `http://llama-cpp:8080/v1` reachable; both `qwen3.6:27b` and `qwen3.6:27b-nothink` respond
-- [ ] **Ship open-terminal network change:**
-  - [ ] Move open-terminal off `network_mode: service:openwebui`; give it its own network
-  - [ ] Explicit egress allowlist: `llama-cpp` for inference, operator-configured git remote, private search gateway (if enabled), nothing else
-  - [ ] Verify isolation: from inside open-terminal, only allowlist endpoints reachable
-  - [ ] **Confirm OWUI no longer has direct access to open-terminal** (intended; returns in chapter 2)
-- [ ] Decide compose layout (extend `ai-stack` compose vs. new compose file); match `mcpo`/`search-mcpo` pattern
-- [ ] Pick the **private** self-improvement git remote (design §10.6); register URL
-- [ ] Provision fine-grained PAT scoped to `contents:write` on that remote only
+- [~] Verify `http://llama-cpp:8080/v1` reachable; both `qwen3.6:27b` and `qwen3.6:27b-nothink` respond — deployment check
+- [x] **Ship open-terminal network change:**
+  - [x] Move open-terminal off `network_mode: service:openwebui`; give it its own network (`lc-net` + `llm-net`)
+  - [x] Explicit egress allowlist: `llama-cpp` for inference, operator-configured git remote, nothing else — via `lc-egress` (tinyproxy default-deny host filter)
+  - [~] Verify isolation: from inside open-terminal, only allowlist endpoints reachable — deployment check
+  - [x] **Confirm OWUI no longer has direct access to open-terminal** — netns change + OWUI's `TERMINAL_SERVER_CONNECTIONS` commented out
+- [x] Decide compose layout — extended the main `docker-compose.yml` (keeps `docker compose up -d --build little-coder` working as design §11.1 specifies)
+- [~] Pick the **private** self-improvement git remote (design §10.6); register URL — operator action; `LC_SELF_REMOTE_URL` scaffolded in `.env.example`
+- [~] Provision fine-grained PAT scoped to `contents:write` on that remote only — operator action; `LC_SELF_REMOTE_PAT` scaffolded in `.env.example`
 
 ### 1b. Container scaffold
 
-- [ ] Build `little-coder` container image; pin to a known-good upstream commit
-- [ ] Run `agent` as MCP server (not raw HTTP/socket); mirror `search-mcpo` pattern
-- [ ] Build `lc-mcpo` sidecar (built but dormant in Tool — chapter 2 activates it). API-key'd at the edge (design §10.3)
-- [ ] Compose healthchecks: `agent` (MCP socket), `lc-mcpo` (`/openapi.json`)
-- [ ] LLM client default → `qwen3.6:27b-nothink`; reasoning variant via call-site selection
+- [x] Build `little-coder` container image; pin to a known-good upstream commit — `Dockerfile.agent`, `LITTLE_CODER_VERSION` build arg
+- [x] Run `agent` as MCP server (not raw HTTP/socket); mirror `search-mcpo` pattern — `mcp_server.py` behind `lc-mcpo`
+- [x] Build `lc-mcpo` sidecar (built but dormant in Tool — chapter 2 activates it). API-key'd at the edge (design §10.3)
+- [x] Compose healthchecks: `agent` (daemon `/health`), `lc-mcpo` (`/openapi.json`)
+- [x] LLM client default → fast variant; reasoning variant via call-site selection — config `inference.default`
 
 ### 1c. Journals (tier-0 build requirement — unrecoverable if missed)
 
 - [x] Implement writers for `tool_calls.jsonl`, `errors.jsonl`, `outcomes.jsonl`
 - [x] Envelope per design §4.1: `ts`, `task_id` (ULID), `session_id`, `channel`, `user_id`, `repo`, `lang`, `seq`, `schema_version: 1`
 - [x] Write-time schema validation; malformed records **rejected, not appended**
-- [~] `task_started` / `task_ended` bracket every task; reconstruct by `task_id`, never adjacency — record types + reconstruction done; lifecycle wiring lands with the daemon
+- [x] `task_started` / `task_ended` bracket every task; reconstruct by `task_id`, never adjacency — daemon brackets every task; `TaskContext` carries the per-task `seq`
 - [x] Outcome label per design §4.2: `pass` / `fail` / `unverified`
 - [x] Durability per design §4.3: append + fsync on every terminal and every error record
 - [x] Schema versioning plumbed through readers; tolerate older shapes (forward-compat for later chapters)
@@ -74,52 +90,52 @@ open-terminal), CLI operator surface, Prometheus endpoint, MCP server +
 ### 1d. Audit log
 
 - [x] `audit.jsonl` writer per design §4.4, separate from task journals
-- [~] Records emitted in Tool: `project_switched`, `task_outcome_amended`, `shutdown` — writer supports them; emission wires up with the daemon + CLI
+- [x] Records emitted in Tool: `project_switched`, `task_outcome_amended`, `shutdown` — daemon + CLI emit all three
 - [~] Longer retention than task journals; different access controls — separate file done; retention/access policy is a deploy-time concern
 
 ### 1e. Persistence (also unrecoverable if missed)
 
-- [ ] Declare all named volumes at compose time:
-  - [ ] `little-coder-skill` (used Learner+; declared now)
-  - [ ] `little-coder-journals` (used Tool)
-  - [ ] `little-coder-cohorts` (used Observer+; declared now)
-  - [ ] `little-coder-polyglot` (used Learner+; declared now)
-  - [ ] `little-coder-workspace` (used Tool; **shared with `open-terminal`** — project-scoped, wiped on `/project` switch)
-- [ ] Mount into `agent`; confirm `docker compose up -d --build little-coder` preserves all five
-- [ ] Backup job (Alpine-cron daily default; cadence + restore drill tracked as open item #7)
+- [x] Declare all named volumes at compose time:
+  - [x] `little-coder-skill` (used Learner+; declared now)
+  - [x] `little-coder-journals` (used Tool)
+  - [x] `little-coder-cohorts` (used Observer+; declared now)
+  - [x] `little-coder-polyglot` (used Learner+; declared now)
+  - [x] `little-coder-workspace` (used Tool; **shared with `open-terminal`** — project-scoped, wiped on `/project` switch)
+- [~] Mount into `agent`; confirm `docker compose up -d --build little-coder` preserves all five — mounts wired; preservation verified at deploy
+- [x] Backup job (Alpine-cron daily default; cadence + restore drill tracked as open item #7) — `little-coder-backup` service + `backup/little-coder-backup.sh`
 
 ### 1f. Workspace handling + project focus
 
-- [~] `agent` can clone a single repo directly into open-terminal — `WorkspaceManager.clone` done; daemon wiring pending
-- [ ] `agent` can edit files; run tests/commands — needs agent integration
-- [~] `/project repo: <link>` CLI subcommand per design §12.3 — `decide_switch` logic done + tested; CLI subcommand pending
+- [x] `agent` can clone a single repo directly into open-terminal — `WorkspaceManager.clone` via the daemon
+- [~] `agent` can edit files; run tests/commands — wired via `ot-exec`; the full path depends on the pi extension (see `pi-extension/README.md`)
+- [x] `/project repo: <link>` CLI subcommand per design §12.3 — `lc project` / `lc admin project switch`
 - [x] URL normalization: host + owner + repo, lowercased
-- [~] No current focus → clone, journal `project_switched` — decision + clone op done; journaling pending daemon
+- [x] No current focus → clone, journal `project_switched`
 - [x] Matches current focus → no-op
 - [x] Different focus + task in flight → reject, suggest cancel-or-wait
-- [~] Different focus + clear → tag prior state, wipe workspace, clone new repo, journal `project_switched` — `decide_switch` + `WorkspaceManager` ops done; journaling pending daemon
-- [ ] One task at a time; FIFO queue across triggers (design §12.4)
-- [ ] Human attach is read-only
+- [x] Different focus + clear → tag prior state, wipe workspace, clone new repo, journal `project_switched`
+- [x] One task at a time; FIFO queue across triggers (design §12.4) — daemon `asyncio.Queue`, single worker
+- [~] Human attach is read-only — no mid-task write surface is exposed to a second client; operational practice
 
 ### 1g. CLI operator surface
 
-- [ ] `lc admin project switch <link>` (alias of `/project repo:`)
-- [ ] `lc admin shutdown [--drain-deadline 30m]`
-- [ ] `lc admin task confirm <task_id> [pass|fail]` — outcome amendment (design §4.2); 7-day window; last-amendment-wins
-- [ ] `lc admin pending` (stub: returns empty in Tool; wired in chapter 4)
-- [ ] `lc admin approve <id>` / `lc admin reject <id>` (stubs in Tool)
+- [x] `lc admin project switch <link>` (alias of `/project repo:`)
+- [x] `lc admin shutdown [--drain-deadline 30m]`
+- [x] `lc admin task confirm <task_id> [pass|fail]` — outcome amendment (design §4.2); 7-day window
+- [x] `lc admin pending` (stub: returns empty in Tool; wired in chapter 4)
+- [x] `lc admin approve <id>` / `lc admin reject <id>` (stubs — 501 until chapter 4)
 
 ### 1h. git-proxy
 
-- [~] Build `git-proxy` wrapper; site at open-terminal workspace edge (the git binary inside the workspace IS the proxy) — wrapper (`git-proxy/git_proxy.py`) done; siting = custom open-terminal image, pending
-- [ ] No raw-git fallback reachable by the agent — closed by the custom image (real git relocated, proxy on PATH), pending
+- [x] Build `git-proxy` wrapper; site at open-terminal workspace edge (the git binary inside the workspace IS the proxy) — `git_proxy.py` spliced in as `git` by `Dockerfile.open-terminal`
+- [x] No raw-git fallback reachable by the agent — real git relocated to `/usr/bin/git.real`; the proxy is the only `git` on `$PATH`
 - [x] Whitelist per design §3.3: `commit`, `branch`, `checkout`, `merge --no-ff`, `tag`, `revert`, `reset --hard <tag>`, `fetch` (operator-pre-configured remotes only)
 - [x] Blocklist per design §3.3: `push --force`, `branch -D`, `filter-branch`, `gc --prune=now`, `remote add`, `remote set-url`, all `submodule` subcommands, all history rewrites, anything touching `.git/` directly
-- [ ] Mount `.git/config`, `.git/hooks/`, `.git/info/` **read-only to the agent** — compose-level control, pending
+- [ ] Mount `.git/config`, `.git/hooks/`, `.git/info/` **read-only to the agent** — **KNOWN GAP** (see Chapter 1 progress note): awkward for a path inside a named volume; not yet implemented. The git-proxy blocks `config` / `remote` at the command level; closing the direct-file-write bypass is a tracked hardening item (open item #9)
 - [~] Allowed remotes baked in by operator at project-switch time — proxy enforces `fetch`/`push` against the configured remote set; baking happens at clone time
-- [ ] `core.hooksPath` set to operator-controlled directory **outside** `.git/` — custom image, pending
-- [~] Branch / tag discipline (design §12.1): outer-loop changes on `auto/<date>-<topic>` branches; never direct to `main` — proxy permits the ops; daemon enforces the branch convention
-- [~] Per-repo deploy tokens per design §10.3: least-privilege, injected per task, never ambient, never the self-PAT — clone path accepts a token; injection chain completes with the daemon + compose
+- [ ] `core.hooksPath` set to operator-controlled directory **outside** `.git/` — tracked with the `.git/config` hardening item above (open item #9)
+- [~] Branch / tag discipline (design §12.1): outer-loop changes on `auto/<date>-<topic>` branches; never direct to `main` — proxy permits the ops; the `auto/<date>` convention is enforced by the outer loop, which arrives in Observer+
+- [x] Per-repo deploy tokens per design §10.3: least-privilege, injected per task, never ambient, never the self-PAT — `LC_DEPLOY_TOKEN`, injected at clone, never the self-PAT
 - [x] Adversarial tests:
   - [x] Agent attempts `remote add` → blocked + journaled (the `.git/config` read-only mount is the compose-level backstop, verified at deploy)
   - [x] Hostile `.gitmodules` → no submodule clone (`submodule` + `clone --recurse-submodules` both blocked + tested)
@@ -130,12 +146,12 @@ open-terminal), CLI operator surface, Prometheus endpoint, MCP server +
 - [x] Build filter per design §10.2: redact secrets/key-shaped strings; reduce large file bodies to structural digests; strip PII
 - [x] **Pinned and tested** against fixed test set (seeded false-positives + false-negatives)
 - [x] In Tool, **run in shadow mode**: filter records what it _would_ redact but does not block (nothing leaves the stack in Tool)
-- [~] Rejection rate metric collected on the Prometheus endpoint (feeds chapter 3 drift baseline) — counters (`processed`/`redacted`/`rejection_rate`) done; Prometheus endpoint pending
+- [x] Rejection rate metric collected on the Prometheus endpoint (feeds chapter 3 drift baseline) — `lc_sanitization_processed` / `lc_sanitization_redacted`
 
 ### 1j. Metrics endpoint
 
-- [ ] Prometheus endpoint on `agent` (design §9.3)
-- [ ] Tool-relevant metrics: queue depth; journal write rate; llama-cpp slot occupancy; sanitization rejection rate (shadow-mode counts)
+- [x] Prometheus endpoint on `agent` (design §9.3) — `metrics.py`, served on `metrics.port` (`127.0.0.1:9091`)
+- [x] Tool-relevant metrics: queue depth; journal write rate; llama-cpp slot occupancy; sanitization rejection rate (shadow-mode counts)
 - [ ] Later chapters layer additional metrics on this endpoint
 
 ### 1k. Centralized config
@@ -146,9 +162,9 @@ open-terminal), CLI operator surface, Prometheus endpoint, MCP server +
 
 ### 1l. Shutdown semantics
 
-- [ ] SIGTERM drain mode per design §12.7: refuse new triggers, allow in-flight to a configurable deadline, then SIGKILL
-- [ ] Open `task_id`s past the deadline → journaled `task_abandoned` with reason `shutdown`
-- [ ] Operator override `lc admin shutdown --drain-deadline 30m`
+- [x] SIGTERM drain mode per design §12.7: refuse new triggers, allow in-flight to a configurable deadline, then SIGKILL
+- [x] Open `task_id`s past the deadline → journaled `task_abandoned` with reason `shutdown`
+- [x] Operator override `lc admin shutdown --drain-deadline 30m`
 
 ### Tool stop point (chapter 1 → 2)
 
@@ -438,6 +454,9 @@ These run alongside multiple chapters.
 | 2026-05-22 | 1       | Upstream little-coder is a Node.js CLI on the `pi` framework, **not Python**. Control-plane wrapper (journals, config, sanitization, git-proxy, CLI, MCP edge) built in Python mirroring `search-mcpo`; the agent container is Node-based. The `agent.py` reference in design §6 is a Chapter-5 illustration only — design doc left unedited (operator's call). | design §3.1, §6           |
 | 2026-05-22 | 1       | Agent↔open-terminal integration: a fifth named volume `little-coder-workspace` is shared by both containers. The agent edits files on it directly; build/test/git execution is routed to `open-terminal`'s `POST /execute` REST API, keeping execution in the network-isolated plane. Operator-confirmed approach. | design §1.5, §3.4         |
 | 2026-05-22 | 1       | Control-plane foundation landed and unit-tested (config, journals, audit, sanitization, ULID, git-proxy, URL-norm, open-terminal client, workspace/project-focus) — 120 tests passing. Daemon, agent integration, Dockerfiles, compose pending. | plan §5                   |
+| 2026-05-22 | 1       | Chapter 1 **code-complete**: control daemon, agent integration, CLI, metrics, MCP edge + `lc-mcpo`, Dockerfiles, compose wiring (`lc-net`, 5 volumes, `lc-egress` allowlist proxy, backup job). 134 tests passing. Awaiting deployment + operator verification (the chapter stop point). | plan §5                   |
+| 2026-05-22 | 1       | open-terminal's egress allowlist implemented as `lc-egress` (tinyproxy, default-deny host filter) — mirrors the search stack's Tor-wall pattern. A precise per-host allowlist is not expressible with plain compose networks. | design §3.4               |
+| 2026-05-22 | 1       | **KNOWN GAP** — the `.git/config` read-only mount (design §3.3) is not implemented; awkward for a path inside a named volume. git-proxy blocks `config`/`remote` at the command level, but a direct file write to `.git/config` bypasses that. Tracked as open item #9. | design §3.3               |
 
 ---
 
@@ -453,6 +472,7 @@ Tuned by preflight (observed usage) unless noted.
 - [ ] **#6** Reserved-slot promotion threshold (`meta` GPU) — Learner+ if starvation observed
 - [ ] **#7** Backup cadence + restore drill (Tool: backup cadence decided; drill before Learner chapter merges first artifact)
 - [ ] **#8** `.git/config` flexibility upgrade (deferred; no current trigger)
+- [ ] **#9** `.git/config` / `.git/hooks` / `.git/info` read-only **enforcement** for the agent + `core.hooksPath` outside `.git/` (design §3.3). Known gap — the git-proxy blocks `config`/`remote` at the command level, but a direct file write to `.git/config` bypasses that. Closure is awkward for a path inside a named volume; resolve before real hostile-repo workload.
 
 ---
 
