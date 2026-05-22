@@ -36,6 +36,15 @@ _OPERATOR_CMDS = {"/project", "/confirm", "/pending", "/approve", "/reject", "/u
 _OPEN_CMDS = {"/help", "/status"}
 _TERMINAL = {"done", "abandoned", "rejected"}
 
+
+def _cmd_mark(a: dict) -> str:
+    """One-glyph status for a command the agent ran."""
+    if a.get("ok"):
+        return "✓"
+    if a.get("denied"):
+        return "⛔ blocked"
+    return f"✗ exit {a.get('exit_code')}"
+
 _HELP = """**Little Coder** — OpenWebUI surface
 
 Send a plain message to trigger a coding task against the focused project.
@@ -124,9 +133,12 @@ class Pipe:
             return f"⚠️ Could not queue the task: {detail}"
 
         task_id = data["task_id"]
-        await self._status(emit, f"Task {task_id} queued…")
+        await self._status(emit, f"Task {task_id[:12]}… queued")
 
+        # Poll the daemon. The daemon reports live `activity` (the commands the
+        # agent runs) so we can show the process unfold, not just a spinner.
         waited = 0.0
+        seen_cmds = 0
         last_status = None
         while waited < self.valves.task_timeout_seconds:
             await asyncio.sleep(self.valves.poll_seconds)
@@ -135,38 +147,65 @@ class Pipe:
             if not ok:
                 await self._status(emit, "Lost contact with the daemon", done=True)
                 return f"⚠️ Could not read task status: {state.get('detail', state)}"
+
             status = state.get("status")
-            if status != last_status:
-                await self._status(emit, f"Task {status}…")
-                last_status = status
+            activity = state.get("activity") or []
+            if len(activity) > seen_cmds:  # surface new commands as they run
+                for a in activity[seen_cmds:]:
+                    await self._status(
+                        emit, f"⚙️ {_cmd_mark(a)}  {a.get('command', '')[:72]}"
+                    )
+                seen_cmds = len(activity)
+            elif status != last_status:
+                await self._status(emit, f"Agent {status}…")
+            last_status = status
+
             if status in _TERMINAL:
-                await self._status(emit, f"Task {status}", done=True)
+                await self._status(
+                    emit, f"Done — {len(activity)} command(s)", done=True
+                )
                 return self._render_result(task_id, state)
 
         await self._status(emit, "Timed out waiting", done=True)
         return (
             f"⌛ Task `{task_id}` is still running after "
-            f"{self.valves.task_timeout_seconds}s — check back with "
-            f"`/status`, or `/confirm {task_id} …` once it lands."
+            f"{self.valves.task_timeout_seconds}s — `/status` to check, "
+            f"or `/confirm {task_id} …` once it lands."
         )
 
     @staticmethod
     def _render_result(task_id: str, state: dict) -> str:
+        """The chat reply: the agent's actual answer, then a collapsible log of
+        the commands it ran, then a one-line outcome footer."""
+        answer = (state.get("answer") or "").strip()
         outcome = state.get("outcome")
+        status = state.get("status")
         detail = state.get("detail", "")
+        activity = state.get("activity") or []
         icon = {"pass": "✅", "fail": "❌", "unverified": "🔶"}.get(outcome, "▫️")
-        lines = [
-            f"{icon} **Task `{task_id}` — {state.get('status')}**",
-            f"- outcome: `{outcome}`",
-        ]
-        if detail:
-            lines.append(f"- {detail}")
-        if outcome == "unverified":
-            lines.append(
-                f"- confirm the real outcome with "
-                f"`/confirm {task_id} pass|fail` (operator)."
+
+        parts: list[str] = []
+        if answer:
+            parts.append(answer)
+        elif status == "abandoned":
+            parts.append(f"⌛ The task was abandoned — {detail or 'see the daemon'}.")
+        else:
+            parts.append("_The agent finished but produced no text output._")
+
+        if activity:
+            rows = "\n".join(
+                f"- `{a.get('command', '')}` — {_cmd_mark(a)}" for a in activity
             )
-        return "\n".join(lines)
+            parts.append(
+                f"\n<details>\n<summary>🔧 {len(activity)} command(s) run "
+                f"in open-terminal</summary>\n\n{rows}\n\n</details>"
+            )
+
+        footer = f"{icon} `{status}` · outcome `{outcome}` · task `{task_id}`"
+        if outcome == "unverified":
+            footer += f"\n*Confirm the real outcome:* `/confirm {task_id} pass|fail`"
+        parts.append(f"\n---\n{footer}")
+        return "\n".join(parts)
 
     # -- operator commands -------------------------------------------------
 

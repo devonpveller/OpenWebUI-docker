@@ -492,6 +492,7 @@ These run alongside multiple chapters.
 | 2026-05-22 | 1       | Agent exec routing made a switch — `LC_ROUTE_EXEC` (compose env, default 1, verified working). 0 falls back to built-in bash inside the network-isolated little-coder container. | design §3.4               |
 | 2026-05-22 | 1       | `task_abandoned` default lowered to 30m for owui/cli (was 6h per the design §4.2 example) — a saner Tool default and a backstop against agent loops. Open item #3; raise for genuine long refactors. | design §4.2               |
 | 2026-05-22 | 2       | Chapter 2 implemented as an OWUI **Pipe function** ("Little Coder" model). Plain messages → task triggers (`channel=owui`, `user_id` = OWUI email); `/`-commands → operator actions gated by the OWUI user role. The Pipe calls the daemon directly over `llm-net` (mnemory trust pattern); `lc-mcpo` joins `llm-net`, registered as an OpenAPI tool exposing triggers only — privilege separation. | design §12.6              |
+| 2026-05-22 | 2       | OWUI Pipe UX reworked after first operator test (it showed only task metadata): the daemon now returns the agent's actual answer (its stdout) and a live `activity` list (commands run, read from the ot-exec event stream). The Pipe streams command progress and renders the answer as the chat reply with a collapsible process log; the `lc` CLI shows the same. | design §12.6              |
 
 ---
 

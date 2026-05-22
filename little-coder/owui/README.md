@@ -23,8 +23,13 @@ OpenWebUI integration for little-coder (design §12.6). Two pieces:
 OpenWebUI → **Admin → Functions → ➕ New Function**. Paste the contents of
 [`little_coder_pipe.py`](little_coder_pipe.py), save, and **enable** it.
 
-A "Little Coder" model then appears in the model picker. Check the function's
-**Valves**:
+A "Little Coder" model then appears in the model picker.
+
+> **Updating the Pipe:** when `little_coder_pipe.py` changes, edit the existing
+> function in **Admin → Functions → Little Coder**, replace the code, and save —
+> no need to delete and re-create it.
+
+Check the function's **Valves**:
 
 | Valve                  | Default                      | Notes                                  |
 | ---------------------- | ---------------------------- | -------------------------------------- |
