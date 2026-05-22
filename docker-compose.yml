@@ -737,7 +737,8 @@ services:
     image: little-coder:local
     container_name: lc-mcpo
     networks:
-      - lc-net
+      - lc-net    # control plane (reaches the little-coder daemon)
+      - llm-net   # OWUI reaches lc-mcpo here to register it as an OpenAPI tool
     env_file:
       - .env
     environment:

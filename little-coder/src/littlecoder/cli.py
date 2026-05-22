@@ -137,6 +137,11 @@ def cmd_admin_reject(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_admin_upstream_pull(_args: argparse.Namespace) -> int:
+    _request("POST", "/admin/upstream/pull")  # stub until Chapter 5
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="lc", description="little-coder operator CLI")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -183,6 +188,12 @@ def build_parser() -> argparse.ArgumentParser:
     cf.add_argument("task_id")
     cf.add_argument("outcome", choices=["pass", "fail", "unverified"])
     cf.set_defaults(func=cmd_admin_task_confirm)
+
+    aups = asub.add_parser("upstream", help="upstream fork-parent administration")
+    aups_sub = aups.add_subparsers(dest="upstream_cmd", required=True)
+    aups_sub.add_parser(
+        "pull", help="pull the fork-parent (operative in Chapter 5)"
+    ).set_defaults(func=cmd_admin_upstream_pull)
 
     return p
 
