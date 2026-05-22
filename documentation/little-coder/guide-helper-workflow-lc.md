@@ -10,26 +10,28 @@
 
 ---
 
+<a id="toc"></a>
+
 ## ⚡ Quick command chart
 
 Run top to bottom. The **ID** column matches the detailed section headings
 below (`A1`, `B3`, …) — jump down there only when you need the full
-explanation.
+explanation, then use the **↑ Back to chart** link to return here.
 
 | ID | What | Command(s) — copy the line you need |
 | -- | ---- | ----------------------------------- |
-| **A1** | Open cmd in the project | `cd /d "D:\Open WebUI\ai-stack"` |
-| **A2** | Token for private repos | `notepad .env` — then set `LC_DEPLOY_TOKEN=github_pat_...` |
-| **A3** | Non-GitHub host (else skip) | `notepad little-coder\docker\egress-allowlist.txt`<br>`docker compose build lc-egress`<br>`docker compose up -d lc-egress` |
-| **A4** | Build + start the stack | `docker compose build little-coder open-terminal lc-egress`<br>`docker compose up -d` |
-| **A5** | Verify healthy | `docker compose ps`<br>`docker exec little-coder lc status` |
-| **B1** | Check status / focus | `docker exec little-coder lc status` |
-| **B2** | Pick the repo | `docker exec little-coder lc project https://github.com/OWNER/REPO` |
-| **B3** | Start the agent session | `docker exec -it -u lc -w /workspace little-coder little-coder --model llamacpp/qwen36-27b` |
-| **B4** | Work with the agent | In-session: tell it to **create a branch** and to **commit**. Exit with **Ctrl+C**. |
-| **B5** | Review the work | `docker exec -w /workspace open-terminal git.real branch --show-current`<br>`docker exec -w /workspace open-terminal git.real log --oneline -10` |
-| **B6** | Push (replace `BRANCH`) | `docker exec -it -w /workspace open-terminal git.real push origin BRANCH` |
-| **B7** | Loop | Same repo → **B3** · New repo → **B2** |
+| [**A1**](#a1-open-command-prompt-in-the-project-folder) | Open cmd in the project | `cd /d "D:\Open WebUI\ai-stack"` |
+| [**A2**](#a2-private-repos-only-add-your-github-token) | Token for private repos | `notepad .env` — then set `LC_DEPLOY_TOKEN=github_pat_...` |
+| [**A3**](#a3-non-github-host-only-add-your-git-host-to-the-egress-allowlist) | Non-GitHub host (else skip) | `notepad little-coder\docker\egress-allowlist.txt`<br>`docker compose build lc-egress`<br>`docker compose up -d lc-egress` |
+| [**A4**](#a4-build-the-images-and-start-the-services) | Build + start the stack | `docker compose build little-coder open-terminal lc-egress`<br>`docker compose up -d` |
+| [**A5**](#a5-confirm-everything-is-healthy) | Verify healthy | `docker compose ps`<br>`docker exec little-coder lc status` |
+| [**B1**](#b1-check-the-stack-and-current-focus) | Check status / focus | `docker exec little-coder lc status` |
+| [**B2**](#b2-point-little-coder-at-the-repo-you-want-to-work-on) | Pick the repo | `docker exec little-coder lc project https://github.com/OWNER/REPO` |
+| [**B3**](#b3-start-an-interactive-agent-session) | Start the agent session | `docker exec -it -u lc -w /workspace little-coder little-coder --model llamacpp/qwen36-27b` |
+| [**B4**](#b4-work-with-the-agent) | Work with the agent | In-session: tell it to **create a branch** and to **commit**. Exit with **Ctrl+C**. |
+| [**B5**](#b5-review-the-agents-work) | Review the work | `docker exec -w /workspace open-terminal git.real branch --show-current`<br>`docker exec -w /workspace open-terminal git.real log --oneline -10` |
+| [**B6**](#b6-push-when-youre-satisfied) | Push (replace `BRANCH`) | `docker exec -it -w /workspace open-terminal git.real push origin BRANCH` |
+| [**B7**](#b7-continue-or-switch) | Loop | Same repo → [**B3**](#b3-start-an-interactive-agent-session) · New repo → [**B2**](#b2-point-little-coder-at-the-repo-you-want-to-work-on) |
 
 ---
 
@@ -57,6 +59,8 @@ Do this once (or again only after pulling new little-coder code).
 cd /d "D:\Open WebUI\ai-stack"
 ```
 
+<sub>[↑ Back to chart](#toc)</sub>
+
 ### A2. (Private repos only) Add your GitHub token
 
 Open the environment file:
@@ -77,6 +81,8 @@ Fine-grained tokens → scope it to **only** your repo → Repository permission
 
 > Skip A2 entirely if you only work with **public** repos.
 
+<sub>[↑ Back to chart](#toc)</sub>
+
 ### A3. (Non-GitHub host only) Add your git host to the egress allowlist
 
 GitHub is allowed by default. For GitLab / Bitbucket / self-hosted, edit:
@@ -96,6 +102,8 @@ docker compose build lc-egress
 docker compose up -d lc-egress
 ```
 
+<sub>[↑ Back to chart](#toc)</sub>
+
 ### A4. Build the images and start the services
 
 ```
@@ -105,6 +113,8 @@ docker compose build little-coder open-terminal lc-egress
 ```
 docker compose up -d
 ```
+
+<sub>[↑ Back to chart](#toc)</sub>
 
 ### A5. Confirm everything is healthy
 
@@ -121,6 +131,8 @@ docker exec little-coder lc status
 
 You should see JSON with `"status": "ok"`.
 
+<sub>[↑ Back to chart](#toc)</sub>
+
 ---
 
 # Part B — Each work session
@@ -136,6 +148,8 @@ docker exec little-coder lc status
 
 `"focus"` shows which repo is currently loaded (or `null` if none).
 
+<sub>[↑ Back to chart](#toc)</sub>
+
 ### B2. Point little-coder at the repo you want to work on
 
 ```
@@ -148,6 +162,8 @@ docker exec little-coder lc project https://github.com/OWNER/REPO
   cloned (the prior state is tagged first).
 - Private repos require the token from step A2.
 
+<sub>[↑ Back to chart](#toc)</sub>
+
 ### B3. Start an interactive agent session
 
 ```
@@ -155,6 +171,8 @@ docker exec -it -u lc -w /workspace little-coder little-coder --model llamacpp/q
 ```
 
 This drops you into the little-coder agent, working inside the focused repo.
+
+<sub>[↑ Back to chart](#toc)</sub>
 
 ### B4. Work with the agent
 
@@ -177,6 +195,8 @@ Type `/help` inside the session to see the agent's own commands.
 > ```
 > docker exec -it little-coder lc task "add a --verbose flag and commit it"
 > ```
+
+<sub>[↑ Back to chart](#toc)</sub>
 
 ### B5. Review the agent's work
 
@@ -204,6 +224,8 @@ Check for anything uncommitted:
 docker exec -w /workspace open-terminal git.real status
 ```
 
+<sub>[↑ Back to chart](#toc)</sub>
+
 ### B6. Push when you're satisfied
 
 Replace `BRANCH` with the branch name from B5:
@@ -215,11 +237,15 @@ docker exec -it -w /workspace open-terminal git.real push origin BRANCH
 With the token from A2 set, this pushes without prompting. (Operator git
 bypasses the safety proxy by design — this is the intended push path.)
 
+<sub>[↑ Back to chart](#toc)</sub>
+
 ### B7. Continue or switch
 
 - **Keep working the same repo** → go back to **B3** (start a new agent
   session) or **B4** (continue in the open one).
 - **Switch to a different repo** → go back to **B2**.
+
+<sub>[↑ Back to chart](#toc)</sub>
 
 ---
 
@@ -247,6 +273,8 @@ docker exec -it -w /workspace open-terminal git.real push origin BRANCH
 docker exec -it little-coder lc task "describe the change you want"
 ```
 
+<sub>[↑ Back to chart](#toc)</sub>
+
 ---
 
 ## Troubleshooting
@@ -261,6 +289,8 @@ docker exec -it little-coder lc task "describe the change you want"
 | See what the daemon is doing | `docker logs little-coder --tail 50` |
 | A service isn't healthy | `docker compose ps` then `docker logs SERVICE --tail 50` |
 | Restart everything cleanly | `docker compose up -d` (from the project folder) |
+
+<sub>[↑ Back to chart](#toc)</sub>
 
 ---
 
@@ -281,6 +311,8 @@ Then you can type `lc status`, `lc project ...`, or just `agent` to start a
 session. (doskey macros last only for that window — re-paste them in a new one,
 or add them to a cmd startup script.)
 
+<sub>[↑ Back to chart](#toc)</sub>
+
 ---
 
 ## What needs credentials (and what doesn't)
@@ -293,3 +325,5 @@ or add them to a cmd startup script.)
 
 The token is least-privilege (one repo, contents-only) by design — see
 `Self-improving-little-coder-design.md` §10.3.
+
+<sub>[↑ Back to chart](#toc)</sub>
