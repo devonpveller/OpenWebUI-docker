@@ -1,6 +1,16 @@
 @echo off
 REM Emergency Tailscale Network Recovery - Legacy Batch Version
 REM For PowerShell version with better GPU support, use: emergency-recovery.ps1
+REM
+REM Recovery stack scope (kept in sync with docker-compose.yml):
+REM   core    openwebui, llama-cpp, llama-cpp-embed, tailscale
+REM   memory  mnemory, mnemory-gateway, mnemory-backup
+REM   search  tor, redis, searxng, gateway, mcpo  (Private Search Gateway)
+REM   coder   open-terminal, little-coder, lc-mcpo, lc-egress, little-coder-backup
+REM   aux     smolcrawl-pipelines, surrealdb, open_notebook, openwebui-backup, watchtower
+REM   OB1     Open Brain - SEPARATE compose project (OB1\docker\docker-compose.yml)
+
+set "OB1_COMPOSE=OB1\docker\docker-compose.yml"
 
 echo ========================================
 echo EMERGENCY TAILSCALE NETWORK RECOVERY
@@ -25,12 +35,12 @@ REM Test OpenWebUI health
 docker compose exec openwebui curl -f -s http://localhost:8080/ >nul 2>&1
 if %ERRORLEVEL% EQU 0 (
     echo [INFO] OpenWebUI responding...
-    
-    REM Test llama-cpp connectivity  
+
+    REM Test llama-cpp connectivity
     docker compose exec llama-cpp curl -f -s http://localhost:8080/health >nul 2>&1
     if %ERRORLEVEL% EQU 0 (
         echo [INFO] llama-cpp connectivity working...
-        
+
         REM Test external connectivity
         docker compose exec tailscale ping -c 1 8.8.8.8 >nul 2>&1
         if %ERRORLEVEL% EQU 0 (
@@ -50,7 +60,28 @@ echo [INFO] Basic checks failed - proceeding with full recovery
 
 REM Phase 1: Graceful shutdown in reverse dependency order
 echo [INFO] Phase 1: Graceful shutdown
-echo [WARN] This will restart OpenWebUI, llama-cpp, llama-cpp-embed, and Tailscale containers
+echo [WARN] This restarts the full workspace: core, memory, search, coder planes + OB1
+
+echo [INFO] Stopping Open Brain (OB1) stack...
+if exist "%OB1_COMPOSE%" docker compose -f "%OB1_COMPOSE%" stop
+
+echo [INFO] Stopping Watchtower...
+docker compose stop watchtower
+
+echo [INFO] Stopping little-coder control plane...
+docker compose stop little-coder-backup lc-egress lc-mcpo little-coder open-terminal
+if %ERRORLEVEL% NEQ 0 (
+    echo [WARN] little-coder plane stop failed, attempting force kill...
+    docker compose kill little-coder-backup lc-egress lc-mcpo little-coder open-terminal
+)
+
+echo [INFO] Stopping Private Search Gateway...
+docker compose stop mcpo gateway searxng redis tor
+if %ERRORLEVEL% NEQ 0 (
+    echo [WARN] Search gateway stop failed, attempting force kill...
+    docker compose kill mcpo gateway searxng redis tor
+)
+
 echo [INFO] Stopping Tailscale container...
 docker compose stop tailscale
 if %ERRORLEVEL% NEQ 0 (
@@ -73,10 +104,10 @@ if %ERRORLEVEL% NEQ 0 (
 )
 
 echo [INFO] Stopping Mnemory containers...
-docker compose stop mnemory mnemory-backup
+docker compose stop mnemory-gateway mnemory mnemory-backup
 if %ERRORLEVEL% NEQ 0 (
     echo [WARN] Mnemory stop failed, attempting force kill...
-    docker compose kill mnemory mnemory-backup
+    docker compose kill mnemory-gateway mnemory mnemory-backup
 )
 
 echo [INFO] Stopping OpenWebUI backup scheduler...
@@ -152,11 +183,11 @@ echo [INFO] Starting Mnemory memory service...
 docker compose up -d mnemory
 timeout /t 15 /nobreak >nul
 
-echo [INFO] Starting Mnemory backup scheduler...
-docker compose up -d mnemory-backup
+echo [INFO] Starting Mnemory gateway (cloud MCP proxy)...
+docker compose up -d mnemory-gateway
 
-echo [INFO] Starting OpenWebUI backup scheduler...
-docker compose up -d openwebui-backup
+echo [INFO] Starting backup schedulers...
+docker compose up -d mnemory-backup openwebui-backup
 
 echo [INFO] Starting SmolCrawl Pipelines...
 docker compose up -d smolcrawl-pipelines
@@ -167,6 +198,27 @@ timeout /t 10 /nobreak >nul
 
 echo [INFO] Starting open-notebook...
 docker compose up -d open_notebook
+
+echo [INFO] Starting Private Search Gateway (tor, redis, searxng, gateway, mcpo)...
+docker compose up -d tor redis searxng gateway mcpo
+echo [INFO] Allowing Tor circuit to build...
+timeout /t 30 /nobreak >nul
+
+echo [INFO] Starting open-terminal (little-coder workspace plane)...
+docker compose up -d open-terminal
+timeout /t 20 /nobreak >nul
+
+echo [INFO] Starting little-coder control plane (daemon, MCP edge, egress)...
+docker compose up -d little-coder
+timeout /t 20 /nobreak >nul
+docker compose up -d lc-mcpo lc-egress little-coder-backup
+
+echo [INFO] Starting Open Brain (OB1) stack...
+if exist "%OB1_COMPOSE%" (
+    docker compose -f "%OB1_COMPOSE%" up -d
+) else (
+    echo [INFO] Open Brain (OB1) not deployed in this workspace - skipping
+)
 
 REM Phase 3: Connectivity verification
 echo [INFO] Phase 3: Testing connectivity...
@@ -187,8 +239,9 @@ echo [INFO] ==========================================
 echo [INFO] Restarting with proper network dependency sequence...
 
 REM Stop dependent containers first
-echo [INFO] Stopping Tailscale and llama-cpp services (network dependents)...
-docker compose stop tailscale llama-cpp llama-cpp-embed mnemory mnemory-backup openwebui-backup smolcrawl-pipelines open_notebook surrealdb
+echo [INFO] Stopping Tailscale and dependent services (network dependents)...
+docker compose stop tailscale llama-cpp llama-cpp-embed mnemory mnemory-gateway mnemory-backup openwebui-backup smolcrawl-pipelines open_notebook surrealdb mcpo gateway searxng redis tor little-coder-backup lc-egress lc-mcpo little-coder open-terminal
+if exist "%OB1_COMPOSE%" docker compose -f "%OB1_COMPOSE%" stop
 
 REM Restart OpenWebUI first and wait for health
 echo [INFO] Restarting OpenWebUI...
@@ -220,7 +273,7 @@ timeout /t 30 /nobreak >nul
 docker compose up -d watchtower
 
 echo [INFO] Starting Mnemory services...
-docker compose up -d mnemory mnemory-backup
+docker compose up -d mnemory mnemory-gateway mnemory-backup
 timeout /t 15 /nobreak >nul
 
 echo [INFO] Starting OpenWebUI backup scheduler...
@@ -236,6 +289,15 @@ timeout /t 10 /nobreak >nul
 echo [INFO] Starting open-notebook...
 docker compose up -d open_notebook
 
+echo [INFO] Starting Private Search Gateway...
+docker compose up -d tor redis searxng gateway mcpo
+
+echo [INFO] Starting little-coder control plane...
+docker compose up -d open-terminal little-coder lc-mcpo lc-egress little-coder-backup
+
+echo [INFO] Starting Open Brain (OB1) stack...
+if exist "%OB1_COMPOSE%" docker compose -f "%OB1_COMPOSE%" up -d
+
 echo [INFO] Testing if minimal recovery worked...
 docker compose exec tailscale ping -c 1 8.8.8.8 >nul 2>&1
 if %ERRORLEVEL% EQU 0 (
@@ -248,7 +310,7 @@ if %ERRORLEVEL% EQU 0 (
 
 :full_recovery
 echo [INFO] ==========================================
-echo [INFO] FULL RECOVERY - CONTAINER RESTART  
+echo [INFO] FULL RECOVERY - CONTAINER RESTART
 echo [INFO] ==========================================
 
 :nuclear_option
@@ -265,11 +327,15 @@ if %ERRORLEVEL% EQU 0 (
 
 echo [WARN] All diagnostics failed - proceeding with nuclear option
 echo [WARN] This will DESTROY and REBUILD containers - all customizations will be lost
-echo [INFO] Full stack restart with network namespace reset...
+echo [INFO] Tearing down Open Brain (OB1) first (it attaches to ai-stack_llm-net)...
+if exist "%OB1_COMPOSE%" docker compose -f "%OB1_COMPOSE%" down
+echo [INFO] Full main-stack restart with network namespace reset...
 docker compose down
 timeout /t 15 /nobreak >nul
 docker compose up -d
 timeout /t 90 /nobreak >nul
+echo [INFO] Starting Open Brain (OB1) stack...
+if exist "%OB1_COMPOSE%" docker compose -f "%OB1_COMPOSE%" up -d
 
 echo [INFO] Testing post-nuclear connectivity...
 docker compose exec tailscale ping -c 1 8.8.8.8 >nul 2>&1
@@ -317,16 +383,40 @@ echo [INFO] open-notebook API status:
 docker compose exec open_notebook python3 -c "import urllib.request; print(urllib.request.urlopen('http://localhost:5055/api/config').read().decode())" 2>nul
 
 echo.
+echo [INFO] Private Search Gateway status:
+docker compose exec gateway curl -s http://localhost:8080/healthz 2>nul
+
+echo.
+echo [INFO] open-terminal status:
+docker compose exec open-terminal curl -s http://localhost:8000/health 2>nul
+
+echo.
+echo [INFO] little-coder daemon status:
+docker compose exec little-coder curl -s http://localhost:8090/health 2>nul
+
+echo.
 echo [INFO] surrealdb running state:
 docker compose ps surrealdb --format "table {{.Service}}\t{{.Status}}" 2>nul
 
 echo.
+echo [INFO] Memory + coder plane status:
+docker compose ps mnemory-gateway lc-mcpo lc-egress --format "table {{.Service}}\t{{.Status}}" 2>nul
+
+echo.
 echo [INFO] Backup schedulers status:
-docker compose ps mnemory-backup openwebui-backup --format "table {{.Service}}\t{{.Status}}" 2>nul
+docker compose ps mnemory-backup openwebui-backup little-coder-backup --format "table {{.Service}}\t{{.Status}}" 2>nul
 
 echo.
 echo [INFO] Watchtower status:
 docker compose ps watchtower --format "table {{.Service}}\t{{.Status}}" 2>nul
+
+echo.
+echo [INFO] Open Brain (OB1) status:
+if exist "%OB1_COMPOSE%" (
+    docker compose -f "%OB1_COMPOSE%" ps --format "table {{.Service}}\t{{.Status}}" 2>nul
+) else (
+    echo [INFO] Open Brain (OB1) not deployed in this workspace
+)
 
 echo.
 echo ========================================
