@@ -21,7 +21,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 from . import __version__
-from .agent import AgentRunner, TaskTimeout
+from .agent import AgentRunner, TaskTimeout, read_activity_file
 from .audit import AuditLog
 from .config import Config, load_config
 from .journals import Journals, utc_now
@@ -371,7 +371,14 @@ def build_app(daemon: LittleCoderDaemon) -> FastAPI:
         state = daemon.tasks.get(task_id)
         if state is None:
             raise HTTPException(404, f"unknown task {task_id}")
-        return state.public()
+        data = state.public()
+        # While the task runs, surface live activity straight from the
+        # ot-exec event stream so the chat/CLI surface can show progress.
+        if state.status is TaskStatus.RUNNING and state.event_stream_path:
+            live = read_activity_file(state.event_stream_path)
+            data["activity"] = live
+            data["commands"] = len(live)
+        return data
 
     @app.post("/tasks/{task_id}/confirm")
     def confirm(task_id: str, req: ConfirmRequest) -> dict:

@@ -66,11 +66,20 @@ def cmd_task(args: argparse.Namespace) -> int:
     last = None
     while True:
         state = _request("GET", f"/tasks/{task_id}")
-        if state["status"] != last:
-            print(f"  → {state['status']}")
-            last = state["status"]
+        marker = (state["status"], state.get("commands", 0))
+        if marker != last:
+            cmds = marker[1]
+            suffix = f" · {cmds} command(s)" if cmds else ""
+            print(f"  → {state['status']}{suffix}")
+            last = marker
         if state["status"] in _TERMINAL:
-            print(f"outcome: {state.get('outcome')}  ({state.get('detail', '')})")
+            for a in state.get("activity") or []:
+                mark = "ok" if a.get("ok") else f"exit {a.get('exit_code')}"
+                print(f"    $ {a.get('command', '')}  [{mark}]")
+            answer = (state.get("answer") or "").strip()
+            if answer:
+                print("\n" + answer)
+            print(f"\noutcome: {state.get('outcome')}  ({state.get('detail', '')})")
             return 0 if state["status"] == "done" else 1
         time.sleep(2)
 

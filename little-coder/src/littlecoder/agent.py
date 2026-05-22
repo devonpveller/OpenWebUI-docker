@@ -37,6 +37,40 @@ class AgentResult:
     commands_run: int
 
 
+def _event_to_activity(ev: dict) -> dict:
+    """One ot-exec command event → a compact activity record for the UI."""
+    denied = bool(ev.get("git_proxy_denied"))
+    code = ev.get("exit_code")
+    return {
+        "command": str(ev.get("command", ""))[:240],
+        "exit_code": code,
+        "ok": code == 0 and not denied,
+        "denied": denied,
+        "duration_ms": ev.get("duration_ms"),
+        "stderr_tail": str(ev.get("stderr_tail", ""))[:500],
+    }
+
+
+def read_activity_file(path: str) -> list[dict]:
+    """Parse the ot-exec event stream into command-activity records. Safe to
+    call mid-task — a partial trailing line is skipped, so the daemon can read
+    it live to report progress."""
+    items: list[dict] = []
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    items.append(_event_to_activity(json.loads(line)))
+                except json.JSONDecodeError:
+                    continue
+    except OSError:
+        pass
+    return items
+
+
 class AgentRunner:
     """One method: `run_task`. Blocking — the daemon calls it off the event
     loop (`asyncio.to_thread`)."""
@@ -54,6 +88,8 @@ class AgentRunner:
         Raises TaskTimeout if the agent outlives `timeout`."""
         fd, event_stream = tempfile.mkstemp(suffix=".jsonl", prefix="lc-events-")
         os.close(fd)
+        # The daemon reads this path live to report progress (read_activity_file).
+        ctx.state.event_stream_path = event_stream
         try:
             env = self._build_env(ctx, event_stream)
             cmd, stdin_text = self._build_invocation(ctx.state.prompt)
@@ -62,6 +98,7 @@ class AgentRunner:
             outcome, signal = self._verdict(ctx)
             return AgentResult(outcome, signal, exit_code, commands)
         finally:
+            ctx.state.event_stream_path = None  # file is about to be removed
             try:
                 os.unlink(event_stream)
             except OSError:
@@ -131,6 +168,9 @@ class AgentRunner:
             # fault. Journal it and let the daemon end the task `unverified`.
             self.journals.write(ctx.error("agent_missing", str(exc), tool="agent"))
             return 127
+        # The agent's stdout IS its answer (`--mode text --print`). Surface it
+        # — this is what the operator actually asked to see.
+        ctx.state.answer = (proc.stdout or "").strip()
         if proc.returncode != 0:
             tail = (proc.stderr or "")[-1000:]
             self.journals.write(
@@ -139,52 +179,33 @@ class AgentRunner:
         return proc.returncode
 
     def _drain_events(self, event_stream: str, ctx: TaskContext) -> int:
-        """Convert `ot-exec`'s command events into journal records. Each
-        command becomes a `tool_call`; a non-zero exit or a git-proxy denial
-        also becomes an `error` (design §4, §9.1 acute track)."""
-        try:
-            with open(event_stream, encoding="utf-8") as fh:
-                lines = fh.readlines()
-        except OSError:
-            return 0
-        count = 0
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                ev = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            count += 1
-            denied = bool(ev.get("git_proxy_denied"))
-            ok = ev.get("exit_code") == 0 and not denied
+        """Convert `ot-exec`'s command events into the task's `activity` list
+        and journal records. Each command becomes a `tool_call`; a non-zero
+        exit or a git-proxy denial also becomes an `error` (design §4, §9.1)."""
+        activity = read_activity_file(event_stream)
+        ctx.state.activity = activity
+        for item in activity:
             self.journals.write(
                 ctx.tool_call(
                     tool="bash",
-                    ok=ok,
-                    args_digest=digest(ev.get("command", "")),
-                    duration_ms=ev.get("duration_ms"),
+                    ok=item["ok"],
+                    args_digest=digest(item["command"]),
+                    duration_ms=item.get("duration_ms"),
                 )
             )
-            if denied:
+            if item["denied"]:
                 self.journals.write(
-                    ctx.error(
-                        "git_blocked",
-                        str(ev.get("stderr_tail", ""))[:500],
-                        tool="git",
-                    )
+                    ctx.error("git_blocked", item["stderr_tail"], tool="git")
                 )
-            elif not ok:
+            elif not item["ok"]:
                 self.journals.write(
                     ctx.error(
                         "command_failed",
-                        f"exit {ev.get('exit_code')}: "
-                        f"{str(ev.get('stderr_tail', ''))[:400]}",
+                        f"exit {item['exit_code']}: {item['stderr_tail']}",
                         tool="bash",
                     )
                 )
-        return count
+        return len(activity)
 
     def _verdict(self, ctx: TaskContext) -> tuple[str, str | None]:
         """Outcome ∈ pass/fail/unverified — `pass`/`fail` only with a

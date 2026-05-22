@@ -51,12 +51,19 @@ class TaskState:
     outcome: Outcome | None = None
     signal: str | None = None
     detail: str = ""
+    # The agent's textual answer (its stdout) — what the operator actually
+    # asked to see. `activity` is the list of commands it ran (the visible
+    # process); `event_stream_path` is the live JSONL file ot-exec appends to.
+    answer: str = ""
+    activity: list = dataclasses.field(default_factory=list)
+    event_stream_path: str | None = None
     created_ts: str = dataclasses.field(default_factory=utc_now)
     started_ts: str | None = None
     ended_ts: str | None = None
 
     def public(self) -> dict:
-        """API view — a prompt preview, never the full prompt in listings."""
+        """API view — carries the agent's answer + the process it ran so the
+        chat/CLI surfaces can show what actually happened."""
         return {
             "task_id": self.task_id,
             "status": self.status.value,
@@ -71,6 +78,9 @@ class TaskState:
             "started_ts": self.started_ts,
             "ended_ts": self.ended_ts,
             "detail": self.detail,
+            "answer": self.answer,
+            "activity": self.activity,
+            "commands": len(self.activity),
         }
 
 
