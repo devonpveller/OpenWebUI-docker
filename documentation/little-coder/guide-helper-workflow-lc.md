@@ -10,6 +10,29 @@
 
 ---
 
+## ⚡ Quick command chart
+
+Run top to bottom. The **ID** column matches the detailed section headings
+below (`A1`, `B3`, …) — jump down there only when you need the full
+explanation.
+
+| ID | What | Command(s) — copy the line you need |
+| -- | ---- | ----------------------------------- |
+| **A1** | Open cmd in the project | `cd /d "D:\Open WebUI\ai-stack"` |
+| **A2** | Token for private repos | `notepad .env` — then set `LC_DEPLOY_TOKEN=github_pat_...` |
+| **A3** | Non-GitHub host (else skip) | `notepad little-coder\docker\egress-allowlist.txt`<br>`docker compose build lc-egress`<br>`docker compose up -d lc-egress` |
+| **A4** | Build + start the stack | `docker compose build little-coder open-terminal lc-egress`<br>`docker compose up -d` |
+| **A5** | Verify healthy | `docker compose ps`<br>`docker exec little-coder lc status` |
+| **B1** | Check status / focus | `docker exec little-coder lc status` |
+| **B2** | Pick the repo | `docker exec little-coder lc project https://github.com/OWNER/REPO` |
+| **B3** | Start the agent session | `docker exec -it -u lc -w /workspace little-coder little-coder --model llamacpp/qwen36-27b` |
+| **B4** | Work with the agent | In-session: tell it to **create a branch** and to **commit**. Exit with **Ctrl+C**. |
+| **B5** | Review the work | `docker exec -w /workspace open-terminal git.real branch --show-current`<br>`docker exec -w /workspace open-terminal git.real log --oneline -10` |
+| **B6** | Push (replace `BRANCH`) | `docker exec -it -w /workspace open-terminal git.real push origin BRANCH` |
+| **B7** | Loop | Same repo → **B3** · New repo → **B2** |
+
+---
+
 ## The pieces (30-second orientation)
 
 | Name | What it is |
