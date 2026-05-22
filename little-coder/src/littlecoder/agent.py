@@ -185,6 +185,12 @@ class AgentRunner:
                 "LLAMACPP_API_KEY": os.environ.get(
                     self.cfg.inference.api_key_env, "llama"
                 ),
+                # Disable little-coder's own bash command-whitelist gate: the
+                # git-proxy + open-terminal network isolation are the policy
+                # (design §3.3–§3.4). Its prefix list is redundant, blocks
+                # `cd`, and — worst — only gates `bash`, which pushed the agent
+                # to escape via ShellSession.
+                "LITTLE_CODER_PERMISSION_MODE": "accept-all",
             }
         )
         return env

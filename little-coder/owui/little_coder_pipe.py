@@ -1,7 +1,7 @@
 """
 title: Little Coder
 author: ai-stack
-version: 0.2.0
+version: 0.3.1
 license: MIT
 description: Drive little-coder from OpenWebUI chat (Chapter 2 — OWUI pipeline).
   Plain messages trigger coding tasks and stream the agent's process live —
@@ -65,15 +65,60 @@ def _cmd_mark(a: dict) -> str:
     return f"✗ exit {a.get('exit_code')}"
 
 
+def _describe_tool(tc: dict) -> str:
+    """A short one-line description of a tool call. NEVER dumps file content
+    or other large argument values into the chat — a `write` call's content
+    can be hundreds of lines."""
+    name = tc.get("name", "tool")
+    args = tc.get("arguments")
+    if not isinstance(args, dict):
+        return name
+    if "command" in args:  # bash / shell
+        cmd = str(args["command"]).replace("\n", " ⏎ ")
+        return f"{name}: {cmd[:200]}"
+    path = args.get("file_path") or args.get("path") or args.get("filePath")
+    if path:  # file tools — path + a size hint, never the content
+        if "content" in args:
+            n = str(args["content"]).count("\n") + 1
+            return f"{name}: {path}  ({n} lines)"
+        if any(k in args for k in ("old_text", "new_text", "old_string")):
+            return f"{name}: {path}  (edit)"
+        return f"{name}: {path}"
+    if "pattern" in args:
+        return f"{name}: {args['pattern']}"
+    if "query" in args:
+        return f"{name}: {str(args['query'])[:120]}"
+    if "url" in args:
+        return f"{name}: {args['url']}"
+    keys = ", ".join(sorted(str(k) for k in args))  # fallback — keys, not values
+    return f"{name}({keys})"
+
+
 class _Render:
     """Turns the agent's pi `--mode json` events into a live markdown stream.
-    Stateful across polls — it tracks the current section so headers print
-    once and a new reasoning turn re-opens the Thinking block."""
+
+    The process — thinking and tool calls — is wrapped in a `<think>` block,
+    which OpenWebUI renders as a collapsible reasoning panel that auto-collapses
+    when the answer begins. The agent's answer is the plain message body, so a
+    copied message is the clean answer, not the whole transcript."""
 
     def __init__(self, show_thinking: bool = True) -> None:
         self.show_thinking = show_thinking
-        self.section = ""  # "" | thinking | tool | answer
+        self.think_open = False
+        self.answering = False
         self._tools: set = set()
+
+    def _open_think(self) -> str:
+        if self.think_open or self.answering:
+            return ""
+        self.think_open = True
+        return "<think>\n"
+
+    def _close_think(self) -> str:
+        if not self.think_open:
+            return ""
+        self.think_open = False
+        return "\n</think>\n\n"
 
     def feed(self, ev: dict) -> str:
         if ev.get("type") != "message_update":
@@ -81,30 +126,28 @@ class _Render:
         ame = ev.get("assistantMessageEvent") or {}
         t = ame.get("type")
 
-        if t == "thinking_start":
-            if self.show_thinking and self.section != "thinking":
-                self.section = "thinking"
-                return "\n\n🧠 *Thinking…*\n\n"
-            return ""
         if t == "thinking_delta":
-            return str(ame.get("delta", "")) if self.show_thinking else ""
+            if not self.show_thinking:
+                return ""
+            return self._open_think() + str(ame.get("delta", ""))
+
         if t == "toolcall_end":
             tc = self._tool_call(ame.get("partial"))
-            if tc and tc.get("id") not in self._tools:
-                self._tools.add(tc.get("id"))
-                self.section = "tool"
-                args = tc.get("arguments") or {}
-                shown = args.get("command") or json.dumps(args, ensure_ascii=False)
-                return f"\n\n🔧 **`{tc.get('name', 'tool')}`** `{shown}`\n"
-            return ""
-        if t == "text_start":
-            if self.section != "answer":
-                self.section = "answer"
-                return "\n\n---\n\n"
-            return ""
+            if not tc or tc.get("id") in self._tools:
+                return ""
+            self._tools.add(tc.get("id"))
+            return self._open_think() + f"\n🔧 {_describe_tool(tc)}\n"
+
         if t == "text_delta":
-            return str(ame.get("delta", ""))
+            prefix = self._close_think() if not self.answering else ""
+            self.answering = True
+            return prefix + str(ame.get("delta", ""))
+
         return ""
+
+    def finish(self) -> str:
+        """Close the reasoning block if the agent produced no answer text."""
+        return self._close_think()
 
     @staticmethod
     def _tool_call(partial) -> Optional[dict]:
@@ -234,9 +277,19 @@ class Pipe:
                 if data.get("done"):
                     done = True
                     break
-                await self._status(emit, "Agent working…")
+                # Distinguish "queued behind another task" (no events yet,
+                # one task at a time) from a genuinely working agent.
+                if data.get("status") == "queued":
+                    await self._status(
+                        emit, "⏳ Queued — another task is running (one at a time)…"
+                    )
+                else:
+                    await self._status(emit, "Agent working…")
 
             ok, final = await self._call("GET", f"/tasks/{task_id}")
+            tail = renderer.finish()  # close the <think> block if still open
+            if tail:
+                yield tail
             await self._status(emit, "Done", done=True)
             if not done:
                 yield (
