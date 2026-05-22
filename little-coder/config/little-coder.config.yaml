@@ -20,7 +20,9 @@ agent:
   command: [little-coder]
   model: llamacpp/qwen36-27b
   prompt_mode: arg
-  extra_args: ["--print", "--no-session"]
+  # --mode json streams structured events (thinking / tool calls / answer
+  # deltas) so the OWUI surface can show the process live.
+  extra_args: ["--print", "--no-session", "--mode", "json"]
 
 # Workspace plane — the shared repo volume + open-terminal exec (design §3.4).
 workspace:
