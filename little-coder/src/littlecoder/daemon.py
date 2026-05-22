@@ -396,6 +396,11 @@ def build_app(daemon: LittleCoderDaemon) -> FastAPI:
     def approve_reject(artifact_id: str) -> dict:
         raise HTTPException(501, "artifact approval lands in Chapter 4 (Learner)")
 
+    @app.post("/admin/upstream/pull")
+    def upstream_pull() -> dict:
+        # Stub — operator-initiated upstream pull lands in Chapter 5 (design §12.2).
+        raise HTTPException(501, "upstream pull lands in Chapter 5 (Self-modifier)")
+
     @app.post("/admin/shutdown")
     def admin_shutdown(req: ShutdownRequest) -> dict:
         if req.drain_deadline_seconds is not None:

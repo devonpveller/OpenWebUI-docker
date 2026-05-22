@@ -8,7 +8,7 @@
 
 ## Current state
 
-- **Active chapter:** 1 (Tool) — **built, deployed, and tested end-to-end** (2026-05-22). Awaiting the operator stop-point judgment before chapter 2 (plan §5). See Chapter 1 progress below.
+- **Active chapter:** 2 (OWUI pipeline) — chapter 1 (Tool) built, deployed, tested, and operator-accepted (2026-05-22). Chapter 2 in progress; see the Chapter 2 section.
 - **Build sequence:** five chapters, gated by operator judgment (plan §2). One chapter at a time.
 - **Tier-0 build reminder:** `session_id` + `channel` + `user_id` on every journal line from line 1. Unrecoverable retroactively (design §4.1).
 - **Tool ships the open-terminal network change.** OWUI's direct access to open-terminal ends; it returns in chapter 2 via `lc-mcpo`.
@@ -197,19 +197,35 @@ Stop here as long as needed. Advance only when ready.
 
 ## Chapter 2 — OWUI pipeline
 
-> Refs: design §12.6. Plan §6. **Not active until chapter 1 stop point reached.**
+> Refs: design §12.6. Plan §6. **Active — chapter 1 stop point reached 2026-05-22.**
 
-- [ ] Register `lc-mcpo` OpenAPI as an OWUI tool. API-key authentication at the edge
-- [ ] Task triggers stream conversationally
-- [ ] Slash-commands wired to the same control-plane entries as CLI:
-  - [ ] `/project repo:`
-  - [ ] `/upstream pull` (stub — actual behavior in chapter 5)
-  - [ ] `/pending` (empty until chapter 4)
-  - [ ] `/approve <id>` (no-op until chapter 4)
-  - [ ] `/reject <id>` (no-op until chapter 4)
-  - [ ] `/confirm <task_id> pass|fail`
-- [ ] Privilege separation per design §12.6: operator commands authenticated at OWUI surface (OWUI auth); MCP server only authenticates task triggers (API key)
-- [ ] Operator smoke test: drive a task end-to-end via OWUI; verify journal records `channel = owui`, `user_id = <OWUI user>`, task completes against open-terminal with identical effect to CLI
+### Chapter 2 progress (2026-05-22)
+
+Implemented as an OWUI **Pipe function** — `little-coder/owui/little_coder_pipe.py`
+(install instructions: `owui/README.md`). It registers a "Little Coder" model:
+plain messages trigger tasks; `/`-commands are operator actions gated by the
+OWUI user role. `lc-mcpo` now joins `llm-net` so OWUI can also register it as
+an OpenAPI tool.
+
+**Backend deployed and verified (2026-05-22):** `lc-mcpo` is on `llm-net`;
+from the `openwebui` container both `http://little-coder:8090/health` and
+`http://lc-mcpo:8002/openapi.json` respond. Installing the Pipe and running
+the in-OWUI smoke test is an operator action (`owui/README.md`) — it needs an
+OWUI admin to paste the function and a logged-in user to send a chat message.
+
+Legend: `[x]` done · `[~]` built, needs the in-OWUI smoke test · `[ ]` not done.
+
+- [~] Register `lc-mcpo` OpenAPI as an OWUI tool. API-key authentication at the edge — `lc-mcpo` on `llm-net`; registration is an OWUI admin step (`owui/README.md`)
+- [x] Task triggers stream conversationally — the Pipe polls the daemon and emits status events
+- [x] Slash-commands wired to the same control-plane entries as CLI:
+  - [x] `/project repo:`
+  - [x] `/upstream pull` (stub — daemon `/admin/upstream/pull` → 501 until chapter 5)
+  - [x] `/pending` (empty until chapter 4)
+  - [x] `/approve <id>` (501 stub until chapter 4)
+  - [x] `/reject <id>` (501 stub until chapter 4)
+  - [x] `/confirm <task_id> pass|fail`
+- [x] Privilege separation per design §12.6: operator slash-commands gated by the OWUI user role inside the Pipe; `lc-mcpo` exposes only `trigger_task`/`task_status`/`project_focus` — no operator surface
+- [ ] Operator smoke test: drive a task end-to-end via OWUI; verify the journal records `channel = owui`, `user_id = <OWUI user>`
 
 ### Chapter 2 stop point (→ 3)
 
@@ -475,6 +491,7 @@ These run alongside multiple chapters.
 | 2026-05-22 | 1       | Build/test fixes: Node 22 required (not 20); clone uses the relocated real git `/usr/bin/git.real`; `git safe.directory '*'` + `umask 000` make the shared workspace volume usable across container uids; `models.json` override maps `llamacpp` to llama-swap's real model ids; pi extension API corrected against the bundled extensions. | plan §5                   |
 | 2026-05-22 | 1       | Agent exec routing made a switch — `LC_ROUTE_EXEC` (compose env, default 1, verified working). 0 falls back to built-in bash inside the network-isolated little-coder container. | design §3.4               |
 | 2026-05-22 | 1       | `task_abandoned` default lowered to 30m for owui/cli (was 6h per the design §4.2 example) — a saner Tool default and a backstop against agent loops. Open item #3; raise for genuine long refactors. | design §4.2               |
+| 2026-05-22 | 2       | Chapter 2 implemented as an OWUI **Pipe function** ("Little Coder" model). Plain messages → task triggers (`channel=owui`, `user_id` = OWUI email); `/`-commands → operator actions gated by the OWUI user role. The Pipe calls the daemon directly over `llm-net` (mnemory trust pattern); `lc-mcpo` joins `llm-net`, registered as an OpenAPI tool exposing triggers only — privilege separation. | design §12.6              |
 
 ---
 

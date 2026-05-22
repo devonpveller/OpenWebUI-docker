@@ -40,6 +40,7 @@ def trigger_task(
     prompt: str,
     acceptance_command: str | None = None,
     user_id: str = "owui",
+    session_id: str | None = None,
 ) -> str:
     """Trigger a little-coder coding task against the focused project.
 
@@ -49,6 +50,8 @@ def trigger_task(
     body: dict = {"prompt": prompt, "channel": "owui", "user_id": user_id}
     if acceptance_command:
         body["acceptance_command"] = acceptance_command
+    if session_id:
+        body["session_id"] = session_id
     return _call("POST", "/tasks", json=body)
 
 
