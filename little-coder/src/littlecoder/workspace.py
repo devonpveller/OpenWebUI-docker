@@ -92,13 +92,15 @@ class WorkspaceManager:
         self,
         ot_client: OpenTerminalClient,
         workspace_path: str = "/workspace",
-        real_git: str = "/usr/bin/git",
+        real_git: str = "/usr/bin/git.real",
         clone_timeout: int = 1800,
     ) -> None:
         self.ot = ot_client
         self.workspace_path = workspace_path
-        # The real git binary — clone/tag at project-switch time is an
-        # operator action and bypasses the proxy by design (design §3.3).
+        # The real git binary — clone at project-switch time is an operator
+        # action and bypasses the proxy by design (design §3.3). The custom
+        # open-terminal image relocates real git here; `git` on $PATH is the
+        # proxy.
         self.real_git = real_git
         self.clone_timeout = clone_timeout
 
@@ -119,8 +121,10 @@ class WorkspaceManager:
             url = url.replace(
                 "https://", f"https://x-access-token:{deploy_token}@", 1
             )
+        # umask 000 so the clone is usable from the agent's other plane too
+        # (the workspace volume is shared across two containers' uids).
         cmd = (
-            f"{shlex.quote(self.real_git)} clone --depth 1 "
+            f"umask 000; {shlex.quote(self.real_git)} clone --depth 1 "
             f"{shlex.quote(url)} {shlex.quote(self.workspace_path)}"
         )
         return self.ot.execute(cmd, cwd="/", timeout=self.clone_timeout)

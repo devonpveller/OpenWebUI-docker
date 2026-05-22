@@ -19,8 +19,8 @@ inference:
 agent:
   command: [little-coder]
   model: llamacpp/qwen36-27b
-  prompt_mode: stdin
-  extra_args: []
+  prompt_mode: arg
+  extra_args: ["--print", "--no-session"]
 
 # Workspace plane — the shared repo volume + open-terminal exec (design §3.4).
 workspace:
@@ -44,8 +44,8 @@ paths:
 # Task lifecycle (design §4.2). Timeouts are open item #3 — tune at Learner.
 tasks:
   abandoned_timeout_seconds:
-    owui: 21600 # 6h
-    cli: 21600 # 6h
+    owui: 1800 # 30m — open item #3; raise for genuine long interactive refactors
+    cli: 1800 # 30m
     validation: 1800 # 30m
     batch: 3600 # 1h
   outcome_amend_window_seconds: 604800 # 7 days

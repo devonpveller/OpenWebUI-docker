@@ -119,6 +119,9 @@ class AgentRunner:
                 capture_output=True,
                 text=True,
                 timeout=timeout,
+                # umask 000: files the agent edits must stay writable from
+                # the open-terminal plane too (shared workspace volume).
+                preexec_fn=(lambda: os.umask(0)) if os.name == "posix" else None,
             )
         except subprocess.TimeoutExpired as exc:
             self.journals.write(ctx.error("timeout", f"agent exceeded {timeout}s"))
