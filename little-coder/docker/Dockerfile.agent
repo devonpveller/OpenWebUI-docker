@@ -32,6 +32,10 @@ RUN pip install --upgrade pip && pip install .
 COPY config ./config
 ENV LC_CONFIG=/app/config/little-coder.config.yaml
 
+# Founding knowledge — the operating environment + engineering principles,
+# appended to the agent's system prompt (see agent-knowledge/README).
+COPY agent-knowledge ./agent-knowledge
+
 # pi extension routing the agent's shell tool into open-terminal — installed
 # into the agent user's pi config by the entrypoint (see pi-extension/README).
 COPY pi-extension/ /opt/little-coder/pi-extensions/

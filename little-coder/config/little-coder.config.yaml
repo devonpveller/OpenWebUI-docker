@@ -22,7 +22,18 @@ agent:
   prompt_mode: arg
   # --mode json streams structured events (thinking / tool calls / answer
   # deltas) so the OWUI surface can show the process live.
-  extra_args: ["--print", "--no-session", "--mode", "json"]
+  # --append-system-prompt seeds founding knowledge: the operating
+  # environment (so the agent doesn't rediscover the git-proxy etc. each
+  # task) + engineering principles. See little-coder/agent-knowledge/.
+  extra_args:
+    - "--print"
+    - "--no-session"
+    - "--mode"
+    - "json"
+    - "--append-system-prompt"
+    - "/app/agent-knowledge/environment.md"
+    - "--append-system-prompt"
+    - "/app/agent-knowledge/engineering-principles.md"
 
 # Workspace plane — the shared repo volume + open-terminal exec (design §3.4).
 workspace:
