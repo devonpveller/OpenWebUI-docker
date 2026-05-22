@@ -1,0 +1,12 @@
+# Hosts open-terminal is allowed to reach (design §3.4 egress allowlist).
+# tinyproxy extended-regex, one pattern per line. Everything not matched here
+# is DENIED — this is the blast-radius boundary for the inner loop.
+#
+# OPERATOR: add the host of your work git remote. GitHub is listed by default;
+# replace or extend for GitLab / Bitbucket / a self-hosted forge.
+^(.*\.)?github\.com$
+^(.*\.)?githubusercontent\.com$
+
+# The private self-improvement remote (design §10.6) — uncomment and set the
+# host when the self-improvement chapters go live.
+# ^git\.your-private-host\.example$

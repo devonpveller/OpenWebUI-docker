@@ -1,0 +1,418 @@
+"""Control daemon — the little-coder container's main process (design §3.1).
+
+Owns the FIFO task queue (one task at a time, design §12.4), the task
+lifecycle and journals, project focus (design §12.3), and SIGTERM drain
+(design §12.7). Exposes an internal HTTP API on `lc-net` — reachable by the
+`lc` CLI and, from Chapter 2, by `lc-mcpo`. It is NOT the task-trigger
+authentication surface; that is `lc-mcpo` (design §12.6).
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import os
+import signal
+import time
+from collections.abc import AsyncIterator
+
+import uvicorn
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+
+from . import __version__
+from .agent import AgentRunner, TaskTimeout
+from .audit import AuditLog
+from .config import Config, load_config
+from .journals import Journals, utc_now
+from .openterminal import OpenTerminalClient
+from .sanitize import Sanitizer
+from .tasks import TaskContext, TaskState, TaskStatus
+from .ulid import new_ulid
+from .urlnorm import NormalizedRepo, RepoUrlError, normalize_repo_url
+from .workspace import (
+    SwitchAction,
+    WorkspaceManager,
+    decide_switch,
+    detect_primary_language,
+)
+from . import metrics
+
+_VALID_CHANNELS = {"owui", "cli", "validation", "batch"}
+_VALID_OUTCOMES = {"pass", "fail", "unverified"}
+_WORKER_STOP = "\x00stop"  # sentinel pushed onto the queue to end the worker
+
+
+# --------------------------------------------------------------------------
+# Request bodies.
+# --------------------------------------------------------------------------
+
+
+class TriggerRequest(BaseModel):
+    prompt: str
+    channel: str = "cli"
+    user_id: str = "cli"
+    session_id: str | None = None
+    acceptance_command: str | None = None
+
+
+class ProjectRequest(BaseModel):
+    repo: str
+    actor: str = "cli"
+
+
+class ConfirmRequest(BaseModel):
+    outcome: str
+    actor: str = "cli"
+
+
+class ShutdownRequest(BaseModel):
+    drain_deadline_seconds: int | None = None
+
+
+# --------------------------------------------------------------------------
+# Daemon.
+# --------------------------------------------------------------------------
+
+
+class LittleCoderDaemon:
+    def __init__(self, config: Config) -> None:
+        self.cfg = config
+        self.journals = Journals(
+            config.journals.dir,
+            rotation_max_bytes=config.journals.rotation_max_bytes,
+            fsync_on_terminal=config.journals.fsync_on_terminal,
+        )
+        self.audit = AuditLog(config.journals.dir)
+        self.sanitizer = Sanitizer(
+            mode=config.sanitization.mode,
+            max_body_bytes=config.sanitization.max_body_bytes,
+        )
+        self.ot = OpenTerminalClient(
+            base_url=config.workspace.open_terminal_url,
+            api_key=os.environ.get(config.workspace.open_terminal_key_env, ""),
+            default_cwd=config.workspace.path,
+            default_timeout=config.workspace.exec_timeout_seconds,
+        )
+        self.workspace = WorkspaceManager(self.ot, workspace_path=config.workspace.path)
+        self.agent = AgentRunner(config, self.journals, self.ot)
+
+        self.queue: asyncio.Queue[str] = asyncio.Queue()
+        self.tasks: dict[str, TaskState] = {}
+        self.contexts: dict[str, TaskContext] = {}
+        self.current_focus: NormalizedRepo | None = None
+        self.in_flight: str | None = None
+        self.draining = False
+        self._drain_deadline = config.shutdown.drain_deadline_seconds
+        self._worker_task: asyncio.Task | None = None
+        self._metrics_task: asyncio.Task | None = None
+
+    # -- lifecycle ---------------------------------------------------------
+
+    async def start(self) -> None:
+        metrics.set_build_info(__version__, "Tool")
+        if self.cfg.metrics.enabled:
+            metrics.start_metrics_server(self.cfg.metrics.port)
+        self._seed_focus()
+        self._worker_task = asyncio.create_task(self._worker(), name="lc-worker")
+        self._metrics_task = asyncio.create_task(
+            self._metrics_loop(), name="lc-metrics"
+        )
+
+    def _seed_focus(self) -> None:
+        """Derive the current focus from ground truth — the actual clone in
+        the workspace — rather than carrying separate state that could drift."""
+        if not self.workspace.is_focused():
+            return
+        try:
+            res = self.ot.execute(
+                "git config --get remote.origin.url",
+                cwd=self.cfg.workspace.path,
+                timeout=30,
+            )
+            if res.ok and res.stdout.strip():
+                self.current_focus = normalize_repo_url(res.stdout.strip())
+        except Exception:  # open-terminal not up yet — corrected on first /project
+            pass
+
+    async def shutdown(self) -> None:
+        """SIGTERM drain (design §12.7): refuse new triggers, let the
+        in-flight task finish to the deadline, abandon stragglers."""
+        if self.draining:
+            return
+        self.draining = True
+        deadline = time.monotonic() + self._drain_deadline
+        while self.in_flight is not None and time.monotonic() < deadline:
+            await asyncio.sleep(0.5)
+        if self.in_flight is not None:
+            tid = self.in_flight
+            self.journals.write(self.contexts[tid].abandoned("shutdown"))
+            self.tasks[tid].status = TaskStatus.ABANDONED
+            self.tasks[tid].detail = "abandoned: drain deadline exceeded"
+        await self.queue.put(_WORKER_STOP)
+        if self._worker_task is not None:
+            with contextlib.suppress(asyncio.TimeoutError, asyncio.CancelledError):
+                await asyncio.wait_for(asyncio.shield(self._worker_task), 30)
+        if self._metrics_task is not None:
+            self._metrics_task.cancel()
+        self.audit.write(
+            "shutdown", actor="system", drain_deadline_seconds=self._drain_deadline
+        )
+
+    # -- worker ------------------------------------------------------------
+
+    async def _worker(self) -> None:
+        """Single consumer — one task at a time (design §12.4)."""
+        while True:
+            task_id = await self.queue.get()
+            try:
+                if task_id == _WORKER_STOP:
+                    return
+                state = self.tasks.get(task_id)
+                if state is None or state.status is not TaskStatus.QUEUED:
+                    continue
+                if self.draining:
+                    # Queued but unstarted when the drain began — abandon it.
+                    self.journals.write(self.contexts[task_id].abandoned("shutdown"))
+                    state.status = TaskStatus.ABANDONED
+                    state.ended_ts = utc_now()
+                    state.detail = "abandoned: shutting down"
+                    metrics.record_task("abandoned")
+                    continue
+                await self._run_task(state)
+            finally:
+                self.queue.task_done()
+
+    async def _run_task(self, state: TaskState) -> None:
+        self.in_flight = state.task_id
+        ctx = self.contexts[state.task_id]
+        state.status = TaskStatus.RUNNING
+        state.started_ts = utc_now()
+        # Detect language now that the workspace is focused (envelope reads
+        # state.lang / state.repo live).
+        state.lang = detect_primary_language(self.cfg.workspace.path)
+        timeout = self.cfg.tasks.abandoned_timeout_seconds.get(state.channel, 21600)
+        self.journals.write(ctx.started())
+        try:
+            result = await asyncio.to_thread(self.agent.run_task, ctx, timeout)
+        except TaskTimeout:
+            self.journals.write(ctx.abandoned("timeout"))
+            state.status = TaskStatus.ABANDONED
+            state.detail = f"abandoned: exceeded {timeout}s"
+            metrics.record_task("abandoned")
+        except Exception as exc:  # never let a task crash the worker
+            self.journals.write(ctx.error("daemon_error", str(exc)))
+            self.journals.write(ctx.ended("unverified"))
+            state.status = TaskStatus.DONE
+            state.outcome = "unverified"
+            state.detail = f"daemon error: {exc}"
+            metrics.record_task("unverified")
+        else:
+            if state.status is TaskStatus.ABANDONED:
+                # The drain already abandoned this task — don't double-close.
+                pass
+            else:
+                self.journals.write(ctx.ended(result.outcome, result.signal))
+                state.status = TaskStatus.DONE
+                state.outcome = result.outcome
+                state.signal = result.signal
+                state.detail = f"{result.commands_run} command(s)"
+                metrics.record_task(result.outcome)
+        finally:
+            state.ended_ts = utc_now()
+            self.in_flight = None
+
+    async def _metrics_loop(self) -> None:
+        while True:
+            metrics.refresh(
+                self.journals,
+                self.sanitizer,
+                queue_depth=self.queue.qsize(),
+                task_in_flight=self.in_flight is not None,
+            )
+            metrics.poll_llama_slots(self.cfg.inference.base_url)
+            await asyncio.sleep(10)
+
+    # -- task operations ---------------------------------------------------
+
+    @property
+    def busy(self) -> bool:
+        """A task is in flight if one is running OR queued — a project switch
+        must not wipe the workspace out from under queued work (design §12.3)."""
+        return self.in_flight is not None or self.queue.qsize() > 0
+
+    def enqueue(self, req: TriggerRequest) -> TaskState:
+        if self.draining:
+            raise HTTPException(503, "shutting down — not accepting new triggers")
+        if req.channel not in _VALID_CHANNELS:
+            raise HTTPException(422, f"channel must be one of {sorted(_VALID_CHANNELS)}")
+        if self.current_focus is None:
+            raise HTTPException(409, "no project focused — run /project first")
+        if not req.prompt.strip():
+            raise HTTPException(422, "empty prompt")
+        state = TaskState(
+            task_id=new_ulid(),
+            session_id=req.session_id or new_ulid(),
+            channel=req.channel,
+            user_id=req.user_id,
+            prompt=req.prompt,
+            repo=self.current_focus.canonical_url,
+            acceptance_command=req.acceptance_command,
+        )
+        self.tasks[state.task_id] = state
+        self.contexts[state.task_id] = TaskContext(state)
+        self.queue.put_nowait(state.task_id)
+        return state
+
+    def confirm(self, task_id: str, req: ConfirmRequest) -> TaskState:
+        """Outcome amendment (design §4.2) — 7-day window, frozen outside."""
+        if req.outcome not in _VALID_OUTCOMES:
+            raise HTTPException(422, f"outcome must be one of {sorted(_VALID_OUTCOMES)}")
+        state = self.tasks.get(task_id)
+        if state is None:
+            raise HTTPException(404, f"unknown task {task_id}")
+        if state.status not in (TaskStatus.DONE, TaskStatus.ABANDONED):
+            raise HTTPException(409, "task has not ended yet")
+        ended = state.ended_ts or state.created_ts
+        age = time.time() - _parse_ts(ended)
+        if age > self.cfg.tasks.outcome_amend_window_seconds:
+            raise HTTPException(409, "amendment window (7 days) has closed")
+        prior = state.outcome or "unverified"
+        ctx = self.contexts[task_id]
+        # The amendment lands in outcomes.jsonl (cohort math uses it from here
+        # on) AND audit.jsonl (it is an operator action) — design §4.2, §4.4.
+        self.journals.write(ctx.amended(req.outcome, prior, req.actor))
+        self.audit.write(
+            "task_outcome_amended",
+            actor=req.actor,
+            task_id=task_id,
+            outcome=req.outcome,
+            prior_outcome=prior,
+        )
+        state.outcome = req.outcome  # type: ignore[assignment]
+        state.detail = f"outcome amended {prior} → {req.outcome} by {req.actor}"
+        return state
+
+    async def switch_project(self, req: ProjectRequest) -> dict:
+        try:
+            requested = normalize_repo_url(req.repo)
+        except RepoUrlError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        decision = decide_switch(requested, self.current_focus, self.busy)
+
+        if decision.action is SwitchAction.NOOP:
+            return {"action": "noop", "focus": requested.canonical_url}
+        if decision.action is SwitchAction.REJECT:
+            raise HTTPException(409, decision.reason)
+
+        if decision.action is SwitchAction.SWITCH:
+            label = f"lc-switch-{utc_now().replace(':', '').replace('-', '')}"
+            await asyncio.to_thread(self.workspace.tag_prior_state, label)
+            await asyncio.to_thread(self.workspace.wipe)
+
+        token = os.environ.get("LC_DEPLOY_TOKEN") or None
+        result = await asyncio.to_thread(self.workspace.clone, requested, token)
+        if not result.ok:
+            raise HTTPException(
+                502, f"clone failed (exit {result.exit_code}): {result.stderr[-300:]}"
+            )
+        self.current_focus = requested
+        self.audit.write(
+            "project_switched",
+            actor=req.actor,
+            repo=requested.canonical_url,
+            action=decision.action.value,
+        )
+        return {"action": decision.action.value, "focus": requested.canonical_url}
+
+
+def _parse_ts(ts: str) -> float:
+    from datetime import datetime
+
+    return datetime.strptime(ts, "%Y-%m-%dT%H:%M:%S.%fZ").timestamp()
+
+
+# --------------------------------------------------------------------------
+# HTTP API.
+# --------------------------------------------------------------------------
+
+
+def build_app(daemon: LittleCoderDaemon) -> FastAPI:
+    @contextlib.asynccontextmanager
+    async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+        await daemon.start()
+        yield
+        await daemon.shutdown()
+
+    app = FastAPI(title="little-coder control daemon", lifespan=lifespan)
+
+    @app.get("/health")
+    def health() -> dict:
+        return {
+            "status": "draining" if daemon.draining else "ok",
+            "version": __version__,
+            "chapter": "Tool",
+            "focus": daemon.current_focus.canonical_url if daemon.current_focus else None,
+            "queue_depth": daemon.queue.qsize(),
+            "in_flight": daemon.in_flight,
+        }
+
+    @app.post("/tasks")
+    def trigger(req: TriggerRequest) -> dict:
+        state = daemon.enqueue(req)
+        return {"task_id": state.task_id, "status": state.status.value}
+
+    @app.get("/tasks")
+    def list_tasks() -> dict:
+        return {"tasks": [t.public() for t in daemon.tasks.values()]}
+
+    @app.get("/tasks/{task_id}")
+    def get_task(task_id: str) -> dict:
+        state = daemon.tasks.get(task_id)
+        if state is None:
+            raise HTTPException(404, f"unknown task {task_id}")
+        return state.public()
+
+    @app.post("/tasks/{task_id}/confirm")
+    def confirm(task_id: str, req: ConfirmRequest) -> dict:
+        return daemon.confirm(task_id, req).public()
+
+    @app.get("/focus")
+    def focus() -> dict:
+        f = daemon.current_focus
+        return {"focus": f.canonical_url if f else None}
+
+    @app.post("/project")
+    async def project(req: ProjectRequest) -> dict:
+        return await daemon.switch_project(req)
+
+    # Operator-surface stubs — wired up in Chapter 4 (design §12.6).
+    @app.get("/admin/pending")
+    def pending() -> dict:
+        return {"pending": []}
+
+    @app.post("/admin/approve/{artifact_id}")
+    @app.post("/admin/reject/{artifact_id}")
+    def approve_reject(artifact_id: str) -> dict:
+        raise HTTPException(501, "artifact approval lands in Chapter 4 (Learner)")
+
+    @app.post("/admin/shutdown")
+    def admin_shutdown(req: ShutdownRequest) -> dict:
+        if req.drain_deadline_seconds is not None:
+            daemon._drain_deadline = req.drain_deadline_seconds
+        # Trigger uvicorn's graceful path → lifespan shutdown → drain.
+        os.kill(os.getpid(), signal.SIGTERM)
+        return {"status": "draining", "drain_deadline_seconds": daemon._drain_deadline}
+
+    return app
+
+
+def main() -> None:
+    config = load_config(os.environ.get("LC_CONFIG", "/app/config/little-coder.config.yaml"))
+    daemon = LittleCoderDaemon(config)
+    app = build_app(daemon)
+    uvicorn.run(app, host=config.daemon.host, port=config.daemon.port, log_level="info")
+
+
+if __name__ == "__main__":
+    main()

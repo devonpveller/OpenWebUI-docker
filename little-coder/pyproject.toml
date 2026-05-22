@@ -23,6 +23,7 @@ dev = ["pytest>=8.0"]
 lc = "littlecoder.cli:main"
 lc-daemon = "littlecoder.daemon:main"
 lc-mcp = "littlecoder.mcp_server:main"
+ot-exec = "littlecoder.otexec:main"
 
 [build-system]
 requires = ["setuptools>=68"]

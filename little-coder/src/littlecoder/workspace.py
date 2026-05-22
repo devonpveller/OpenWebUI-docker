@@ -21,6 +21,30 @@ from .openterminal import ExecResult, OpenTerminalClient
 from .urlnorm import NormalizedRepo
 
 
+_EXT_LANG = {
+    ".py": "python", ".rs": "rust", ".go": "go", ".js": "javascript",
+    ".ts": "typescript", ".tsx": "typescript", ".jsx": "javascript",
+    ".java": "java", ".rb": "ruby", ".c": "c", ".h": "c", ".cpp": "cpp",
+    ".cc": "cpp", ".hpp": "cpp", ".cs": "csharp", ".php": "php",
+    ".swift": "swift", ".kt": "kotlin", ".scala": "scala", ".sh": "shell",
+    ".lua": "lua", ".ex": "elixir", ".exs": "elixir",
+}
+_SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "target", "dist", "build"}
+
+
+def detect_primary_language(workspace_path: str) -> str:
+    """Best-effort primary language for the journal envelope (design §4.1).
+    Counts source-file extensions; returns "" when nothing is recognizable."""
+    counts: dict[str, int] = {}
+    for root, dirs, files in os.walk(workspace_path):
+        dirs[:] = [d for d in dirs if d not in _SKIP_DIRS]
+        for name in files:
+            lang = _EXT_LANG.get(os.path.splitext(name)[1].lower())
+            if lang:
+                counts[lang] = counts.get(lang, 0) + 1
+    return max(counts, key=counts.get) if counts else ""
+
+
 class SwitchAction(str, Enum):
     CLONE = "clone"  # no current focus → clone and set focus
     NOOP = "noop"  # already focused on this repo → proceed

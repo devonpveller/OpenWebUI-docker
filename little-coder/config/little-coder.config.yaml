@@ -14,6 +14,14 @@ inference:
   model_fast: qwen36-27b:nothink
   default: fast
 
+# Upstream little-coder CLI invocation (design §3.1). INTEGRATION POINT —
+# the exact flags / prompt delivery are pinned when the agent image is built.
+agent:
+  command: [little-coder]
+  model: llamacpp/qwen36-27b
+  prompt_mode: stdin
+  extra_args: []
+
 # Workspace plane — the shared repo volume + open-terminal exec (design §3.4).
 workspace:
   path: /workspace

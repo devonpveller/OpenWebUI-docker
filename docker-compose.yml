@@ -33,8 +33,12 @@ services:
       # Reduce OpenWebUI overhead for model requests
       - CHAT_RESPONSE_STREAM_DELTA_CHUNK_SIZE=4 # Larger chunks for better streaming performance
       - BYPASS_MODEL_ACCESS_CONTROL=true # Skip access control checks for faster requests
-      - ENABLE_OPEN_TERMINAL=true
-      - TERMINAL_SERVER_CONNECTIONS=[{"id":"open-terminal","name":"Open Terminal","url":"http://localhost:8000","key":"${OPEN_TERMINAL_API_KEY}"}]
+      # open-terminal moved into the little-coder control plane (Tool chapter):
+      # it left OWUI's network namespace, so OWUI's direct terminal access
+      # ends here. It returns in chapter 2 via lc-mcpo (design §3.4, Decision
+      # Log 2026-05-20). Re-enable only when chapter 2 lands.
+      # - ENABLE_OPEN_TERMINAL=true
+      # - TERMINAL_SERVER_CONNECTIONS=[{"id":"open-terminal","name":"Open Terminal","url":"http://localhost:8000","key":"${OPEN_TERMINAL_API_KEY}"}]
       # Web search → Private Search Gateway (Approach B: OWUI's stock searxng
       # engine pointed at the gateway, which routes via Tor). This also feeds
       # smolcrawl deep_research, which calls OWUI's search_web().
@@ -125,20 +129,45 @@ services:
       retries: 3
       start_period: 60s
 
+  # open-terminal — the little-coder workspace plane (design §3.4).
+  # Tool reconfigures it: own networks (no host netns), git-proxy spliced in,
+  # egress allowlisted via lc-egress. The repo lives on the shared workspace
+  # volume; the agent edits files there, commands execute here.
   open-terminal:
-    image: ghcr.io/open-webui/open-terminal:latest
+    build:
+      context: ./little-coder
+      dockerfile: docker/Dockerfile.open-terminal
+    image: little-coder-open-terminal:local
     container_name: open-terminal
-    network_mode: service:openwebui
+    networks:
+      - lc-net      # reachable by the control plane
+      - llm-net     # llama-cpp inference
     env_file:
       - .env
     environment:
       - API_KEY=${OPEN_TERMINAL_API_KEY}
+      # All internet traffic goes through lc-egress, which permits only the
+      # operator-configured git host (design §3.4). Internal peers bypass it.
+      - HTTP_PROXY=http://lc-egress:8888
+      - HTTPS_PROXY=http://lc-egress:8888
+      - http_proxy=http://lc-egress:8888
+      - https_proxy=http://lc-egress:8888
+      - NO_PROXY=llama-cpp,little-coder,lc-mcpo,lc-egress,localhost,127.0.0.1
+      - no_proxy=llama-cpp,little-coder,lc-mcpo,lc-egress,localhost,127.0.0.1
+    volumes:
+      - little-coder-workspace:/workspace
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
     depends_on:
-      openwebui:
+      llama-cpp:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "--max-time", "5", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
     labels:
       - "com.centurylinklabs.watchtower.enable=false"
 
@@ -637,10 +666,149 @@ services:
     labels:
       - "com.centurylinklabs.watchtower.enable=false"
 
+  # =====================================================================
+  # little-coder — self-improving coding agent (Chapter 1: Tool).
+  # Docs: documentation/little-coder/. Control plane (decides) +
+  # the open-terminal workspace plane (executes) reconfigured above.
+  # =====================================================================
+  little-coder:
+    build:
+      context: ./little-coder
+      dockerfile: docker/Dockerfile.agent
+      args:
+        LITTLE_CODER_VERSION: ${LITTLE_CODER_VERSION:-latest}
+    image: little-coder:local
+    container_name: little-coder
+    networks:
+      - lc-net      # control plane ↔ open-terminal ↔ lc-mcpo
+      - llm-net     # llama-cpp inference
+    env_file:
+      - .env
+    environment:
+      - LC_CONFIG=/app/config/little-coder.config.yaml
+      - LC_LLAMA_API_KEY=${LC_LLAMA_API_KEY:-llama}
+      - OPEN_TERMINAL_API_KEY=${OPEN_TERMINAL_API_KEY}
+      - LC_DEPLOY_TOKEN=${LC_DEPLOY_TOKEN:-}
+    volumes:
+      - ./little-coder/config:/app/config:ro
+      - little-coder-journals:/var/lib/little-coder/journals
+      - little-coder-skill:/var/lib/little-coder/skill
+      - little-coder-cohorts:/var/lib/little-coder/cohorts
+      - little-coder-polyglot:/var/lib/little-coder/polyglot
+      - little-coder-workspace:/workspace
+    ports:
+      - "127.0.0.1:9091:9090"   # Prometheus metrics (loopback only)
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      llama-cpp:
+        condition: service_healthy
+      open-terminal:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "--max-time", "5", "http://localhost:8090/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
+  # MCP→OpenAPI edge. Built in Tool, DORMANT until chapter 2 registers it as
+  # an OWUI tool (design §3.1). API-key'd; carries task triggers only —
+  # operator commands authenticate elsewhere (design §12.6).
+  lc-mcpo:
+    build:
+      context: ./little-coder
+      dockerfile: docker/Dockerfile.agent
+      args:
+        LITTLE_CODER_VERSION: ${LITTLE_CODER_VERSION:-latest}
+    image: little-coder:local
+    container_name: lc-mcpo
+    networks:
+      - lc-net
+    env_file:
+      - .env
+    environment:
+      - LC_DAEMON_URL=http://little-coder:8090
+    command: ["mcpo", "--host", "0.0.0.0", "--port", "8002", "--api-key", "${LC_MCPO_API_KEY}", "--", "python", "-m", "littlecoder.mcp_server"]
+    ports:
+      - "127.0.0.1:8002:8002"   # MCP-as-OpenAPI (loopback only)
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      little-coder:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "--max-time", "5", "http://localhost:8002/openapi.json"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
+  # Egress allowlist for open-terminal — only the operator-configured git
+  # host is reachable; everything else is denied (design §3.4).
+  lc-egress:
+    build:
+      context: ./little-coder
+      dockerfile: docker/Dockerfile.egress
+    image: little-coder-egress:local
+    container_name: lc-egress
+    networks:
+      - lc-net      # reachable by open-terminal
+      - default     # the only little-coder-side service with internet
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
+  # Nightly backup of the four little-coder expertise volumes (design §3.6).
+  # The workspace volume is project-scoped and re-clonable — not backed up.
+  little-coder-backup:
+    image: alpine:3.21
+    container_name: little-coder-backup
+    volumes:
+      - little-coder-journals:/data/journals:ro
+      - little-coder-skill:/data/skill:ro
+      - little-coder-cohorts:/data/cohorts:ro
+      - little-coder-polyglot:/data/polyglot:ro
+      - ./backups/little-coder:/backups
+      - ./backup/little-coder-backup.sh:/scripts/backup.sh:ro
+    environment:
+      - BACKUP_DIR=/backups
+      - DATA_DIR=/data
+      - RETAIN_DAYS=${LC_BACKUP_RETAIN_DAYS:-7}
+      - BACKUP_CRON=${LC_BACKUP_CRON:-0 2 * * *}
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        chmod +x /scripts/backup.sh
+        echo "$${BACKUP_CRON} /scripts/backup.sh >> /var/log/backup.log 2>&1" > /etc/crontabs/root
+        echo "[$(date -u +%FT%TZ)] little-coder backup scheduler started (cron: $${BACKUP_CRON}, retain: $${RETAIN_DAYS}d)"
+        crond -f -l 2
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
 volumes:
   openwebui-data:
   mnemory-data:
   smolcrawl-data:
+  # little-coder — four expertise volumes (persistence boundary, design §3.6)
+  # plus the project-scoped workspace shared with open-terminal.
+  little-coder-journals:
+  little-coder-skill:
+  little-coder-cohorts:
+  little-coder-polyglot:
+  little-coder-workspace:
 
 networks:
   # Internal-only network: no gateway, no internet access.
@@ -651,6 +819,11 @@ networks:
   # Internal-only network for the search stack. SearXNG/redis/gateway/mcpo
   # have NO internet route here; only `tor` (also on `default`) can egress.
   search-net:
+    internal: true
+  # Internal-only network for the little-coder control plane. little-coder,
+  # open-terminal, and lc-mcpo talk here; none reaches the internet except
+  # via lc-egress, which is allowlisted to the git host (design §3.4).
+  lc-net:
     internal: true
   default:
     driver: bridge

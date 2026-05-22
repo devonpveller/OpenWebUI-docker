@@ -1,5 +1,41 @@
 {
   "$defs": {
+    "AgentConfig": {
+      "additionalProperties": false,
+      "description": "The upstream little-coder CLI invocation (design \u00a73.1).\n\nINTEGRATION POINT: little-coder is a Node.js CLI on the `pi` framework;\nthe exact flags and how the task prompt is delivered are pinned to the\nupstream version when the agent image is built. `command` is the base\nargv; the daemon appends `--model` and the prompt per `prompt_mode`.",
+      "properties": {
+        "command": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Command",
+          "type": "array"
+        },
+        "extra_args": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Extra Args",
+          "type": "array"
+        },
+        "model": {
+          "default": "llamacpp/qwen36-27b",
+          "title": "Model",
+          "type": "string"
+        },
+        "prompt_mode": {
+          "default": "stdin",
+          "enum": [
+            "stdin",
+            "arg"
+          ],
+          "title": "Prompt Mode",
+          "type": "string"
+        }
+      },
+      "title": "AgentConfig",
+      "type": "object"
+    },
     "BudgetsConfig": {
       "additionalProperties": false,
       "description": "Budget caps (design \u00a712.5). Basic caps only in Tool.",
@@ -224,6 +260,9 @@
   "additionalProperties": false,
   "description": "Top-level config. Instantiating this validates the file (boot gate).",
   "properties": {
+    "agent": {
+      "$ref": "#/$defs/AgentConfig"
+    },
     "budgets": {
       "$ref": "#/$defs/BudgetsConfig"
     },
