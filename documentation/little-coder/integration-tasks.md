@@ -13,6 +13,7 @@
 - **Tier-0 build reminder:** `session_id` + `channel` + `user_id` on every journal line from line 1. Unrecoverable retroactively (design §4.1).
 - **Tool ships the open-terminal network change.** OWUI's direct access to open-terminal ends; it returns in chapter 2 via `lc-mcpo`.
 - **Source lives in [`../../little-coder/`](../../little-coder/)** — Python control-plane package (`src/littlecoder/`), `git-proxy/`, `config/`, `tests/`.
+- **Two knowledge layers (plan §3):** founding knowledge — the operator-authored baseline in `agent-knowledge/`, built in Chapter 2 — is separate from the §7 self-improvement skill library (meta-learned, discovered per task, Chapter 4+).
 
 ---
 
@@ -227,6 +228,20 @@ Legend: `[x]` done · `[~]` built, needs the in-OWUI smoke test · `[ ]` not don
 - [x] Privilege separation per design §12.6: operator slash-commands gated by the OWUI user role inside the Pipe; `lc-mcpo` exposes only `trigger_task`/`task_status`/`project_focus` — no operator surface
 - [ ] Operator smoke test: drive a task end-to-end via OWUI; verify the journal records `channel = owui`, `user_id = <OWUI user>`
 
+### Founding knowledge (baseline knowledge layer)
+
+The operator-authored baseline appended to the agent's system prompt — distinct
+from the §7 self-improvement skill library (the meta-learned layer, Chapter 4+).
+See plan §3 "Two knowledge layers". Built during Chapter 2; not a Chapter 2
+stop-point gate.
+
+- [x] `agent-knowledge/environment.md` — operating environment: bash runs in open-terminal, git-proxy whitelist/blocklist, `/workspace`, no ShellSession/Browser, network limits. Stops the agent rediscovering its constraints each task
+- [x] `agent-knowledge/engineering-principles.md` — SOLID, encapsulation, naming/readability, patterns/standardization, DRY/YAGNI, error handling, verification
+- [x] `agent-knowledge/README.md` — documents the layer + its relationship to the §7 skill library
+- [x] Wired through `config/little-coder.config.yaml` → `agent.extra_args` → `--append-system-prompt`; baked into the agent image (`Dockerfile.agent` `COPY agent-knowledge`)
+- [x] Deployed and live (2026-05-22) — entrypoint confirms exec routing + extension removal
+- [ ] Operator-verified in a task: the agent no longer probes `cd` / `git` to rediscover its environment — _needs the next OWUI task_
+
 ### Chapter 2 stop point (→ 3)
 
 - [ ] OWUI parity confirmed; journals attributing both channels correctly
@@ -296,8 +311,14 @@ Legend: `[x]` done · `[~]` built, needs the in-OWUI smoke test · `[ ]` not don
 
 ### 4a. Skill library
 
+> Artifacts adopt the **Anthropic Agent Skills format** (Decision Log 2026-05-22)
+> layered with design §7.1 metadata. See plan §8.
+
 - [ ] Directory layout per design §7: `skill/knowledge/*.md`, `skill/tools/*.md`, `skill/plan-slots/*.md`
-- [ ] Frontmatter schema enforced at draft time (design §7.1): `id`, `cluster_id`, `tier`, `lang`, `domain`, `tool`, `task_shape`, `created`, `supersedes` (null), `status` (`active`)
+- [ ] Each artifact authored as a `SKILL.md` with `name` + `description` frontmatter (Agent Skills format): lean body, progressive disclosure (link heavy reference material rather than inlining), under ~500 lines, "explain-the-why" drafting
+- [ ] Frontmatter schema enforced at draft time — Agent Skills fields (`name`, `description`) + design §7.1 fields (`id`, `cluster_id`, `tier`, `lang`, `domain`, `tool`, `task_shape`, `created`, `supersedes` (null), `status` (`active`))
+- [ ] `description` field written for discovery — it feeds the §7.4 augmenter's tag/embedding selection
+- [ ] Judge drafting prompt instructed in the Agent Skills authoring conventions (description-driven discovery, progressive disclosure, explain-the-why)
 - [ ] Supersession (design §7.5): new artifact on existing `cluster_id` sets `supersedes`, flips prior to `superseded`
 - [ ] Atomic-rename writers (design §7.3) for all watched files: `.tmp` + `rename(2)`; readers ignore `*.tmp`
 
@@ -458,6 +479,7 @@ These run alongside multiple chapters.
   - Learner: per-cluster M; Polyglot N/margin; augmenter budget; full budget caps; coalesce thresholds
   - Self-modifier: exploration rate
 - [ ] **Metrics endpoint** (design §9.3): Prometheus on `agent` (Tool) and `meta` (Observer+); metrics added per chapter
+- [ ] **Founding knowledge upkeep** (plan §3): `agent-knowledge/` stays operator-authored and always-loaded. When the agent's environment changes (a new git-proxy rule, a network change), update `environment.md`. Never meta-authored — keeping the two knowledge layers distinct is what lets `meta` (§7) learn the subtle gaps instead of re-teaching constraints
 - [ ] **Alarms** routed to operator UI alongside artifact approvals (design §9.3) — from chapter 4 onward
 - [ ] **Golden-journal test suite** (design §12.11): from chapter 3 onward, run on each `meta` release before deploy
 - [ ] **Schema-version discipline** (design §12.9): readers tolerate older shapes; migrations are explicit operator jobs; **tier-3 self-changes cannot propose schema changes**
@@ -495,6 +517,10 @@ These run alongside multiple chapters.
 | 2026-05-22 | 2       | OWUI Pipe UX reworked after first operator test (it showed only task metadata): the daemon now returns the agent's actual answer (its stdout) and a live `activity` list (commands run, read from the ot-exec event stream). The Pipe streams command progress and renders the answer as the chat reply with a collapsible process log; the `lc` CLI shows the same. | design §12.6              |
 | 2026-05-22 | 2       | OWUI background generation calls (chat title, tags) were double-triggering real tasks — fixed: the Pipe detects `__task__`/`metadata.task` and answers them cheaply. | design §12.6              |
 | 2026-05-22 | 2       | **Live streaming + interruption.** The agent runs with pi `--mode json`; the daemon streams its events via `GET /tasks/{id}/events`. The Pipe is an async generator that renders thinking / tool calls / answer into the chat as they happen. OWUI **Stop** → `POST /tasks/{id}/cancel` → the daemon kills the agent's process group (`start_new_session` + `killpg`) — operator-triggered abandonment, consistent with design §12.4. True *mid-flight redirection* is NOT supported — §12.4 holds human attach read-only. | design §12.4, §12.6       |
+| 2026-05-22 | 2       | **ShellSession bypass closed.** The agent escaped the git-proxy via the `ShellSession` tool (which runs locally, unrouted). The `shell-session` + `browser` pi extensions are removed at image build and `permission-gate` set to `accept-all`, so `bash → ot-exec → open-terminal → git-proxy` is the sole execution path. | design §3.3 |
+| 2026-05-22 | 2       | **Founding knowledge seeded.** `little-coder/agent-knowledge/` — `environment.md` (operating environment + git-proxy policy, so the agent stops rediscovering its constraints each task) and `engineering-principles.md` (SOLID / encapsulation / naming / patterns) — appended to the agent's system prompt via little-coder's own `--append-system-prompt`. Deliberately SEPARATE from the §7 self-improvement skill library: founding knowledge is the operator-authored baseline, the §7 library is the meta-learned layer (Ch.4+). Design-consistent — uses little-coder's own flags (§3.1) and raises the baseline so meta learns subtler gaps (§13). | design §3.1, §7, §13 |
+| 2026-05-22 | 2       | Anthropic skills repo (`anthropics/skills`) reviewed: 17 skills, all domain-capability (documents / design / web / MCP) — none are general coding-craft, so nothing to vendor for little-coder's craft baseline (`engineering-principles.md` authored instead). The valuable part is `skill-creator` — the skill-authoring guidance. **Chapter-4 recommendation:** the §7 meta skill-library should adopt the Agent Skills format (`SKILL.md` + `name`/`description` frontmatter; `description` can feed the §7.4 augmenter; progressive disclosure; <500 lines; "explain-the-why" drafting), layered with §7.1's `cluster_id`/`tier` metadata. The Anthropic two-tier model (baseline always-loaded + specialized discovered-on-demand) matches founding-knowledge + §7. `webapp-testing` / `web-artifacts-builder` / `frontend-design` could be made repo-conditionally available to the agent later. | design §7, §7.4 |
+| 2026-05-22 | n/a     | Skill-development structure promoted from the Decision Log into the plan/task bodies: plan §3 gains a "Two knowledge layers" table (founding knowledge vs the §7 skill library); plan §10 adds locked decision #16; plan §6 + §8 build lists updated; Chapter 2 tasks gain a "Founding knowledge" subsection; Chapter 4 §4a tasks adopt the Anthropic Agent Skills format for §7 artifacts; a founding-knowledge upkeep rule added to cross-cutting. Founding knowledge is layered additively over design §7.1 — the design doc is left unedited (operator's call, consistent with the 2026-05-22 Node.js entry). | plan §3, §6, §8, §10 |
 
 ---
 

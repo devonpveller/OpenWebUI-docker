@@ -52,6 +52,17 @@ Two planes, kept separate.
 
 The four expertise volumes are declared in Tool so the first `docker compose up -d --build` later in the project doesn't silently wipe state that doesn't yet exist.
 
+### Two knowledge layers
+
+The agent's knowledge comes from two deliberately separate layers. Keeping them apart is what lets `meta` learn the subtle craft gaps instead of re-teaching constraints.
+
+| Layer                  | Authored by | Loaded                                                                                                          | Lives in                                              | Built     |
+| ---------------------- | ----------- | --------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------- | --------- |
+| **Founding knowledge** | Operator    | Always — appended to the system prompt via little-coder's own `--append-system-prompt` flag (inner loop stays upstream-stock, design §3.1) | `little-coder/agent-knowledge/` (baked into the image) | Chapter 2 |
+| **Skill library (§7)** | `meta`      | On demand — augmenter selects per task by tag + embedding + token budget (design §7.4)                          | `little-coder-skill/` named volume                    | Chapter 4+ |
+
+Founding knowledge is the **baseline**: the operating environment (so the agent doesn't burn tokens rediscovering the git-proxy, `/workspace`, the no-ShellSession boundary every task) and engineering principles (SOLID, encapsulation, naming, patterns). The §7 library is the **learned layer** — meta-drafted, cohort-evidenced, discovered per task. A solid baseline raises the floor so self-improvement targets the ceiling (design §13 preflight). The §7 library adopts the Anthropic Agent Skills format — see §8.
+
 ---
 
 ## 4. Tier ladder (Self-modifier context)
@@ -140,6 +151,7 @@ The last bullet is the actual trigger. Until you wish for it, don't advance.
   - `/project repo:` · `/upstream pull` (stub — actual behavior lands in chapter 5) · `/pending` (empty until chapter 4) · `/approve <id>` and `/reject <id>` (no-op until chapter 4) · `/confirm <task_id> pass|fail`
 - Privilege separation per design §12.6: operator commands authenticated at the OWUI surface (OWUI's configured auth); MCP server only authenticates task triggers (API key).
 - Operator smoke test: drive a task end-to-end via OWUI and verify the journal records `channel = owui`, `user_id = <OWUI user>`, and the task completes against open-terminal with identical effect to CLI invocation.
+- **Founding knowledge** — the baseline knowledge layer (§3). Author and bake in `agent-knowledge/environment.md` (operating environment + git-proxy whitelist/blocklist, so the agent stops rediscovering its constraints each task) and `agent-knowledge/engineering-principles.md` (SOLID / encapsulation / naming / patterns / DRY-YAGNI). Wired through `config/little-coder.config.yaml` → `agent.extra_args` → `--append-system-prompt`. Operator-maintained, always-loaded, never meta-touched.
 
 ### Stop point (chapter 2 → 3)
 
@@ -189,7 +201,7 @@ Observer reports stabilize and you trust what the system is seeing. Indicators:
 
 ### Build list
 
-- Skill library directory layout per design §7: `skill/knowledge/*.md`, `skill/tools/*.md`, `skill/plan-slots/*.md`. Frontmatter schema enforced at draft time.
+- Skill library directory layout per design §7: `skill/knowledge/*.md`, `skill/tools/*.md`, `skill/plan-slots/*.md`. Each artifact is authored in the **Anthropic Agent Skills format** — a `SKILL.md` body with `name` + `description` frontmatter, progressive disclosure (lean body; link heavier reference material rather than inlining), under ~500 lines, "explain-the-why" drafting — layered with design §7.1's `id` / `cluster_id` / `tier` / `lang` / `domain` metadata. The `description` field feeds the §7.4 augmenter's tag/embedding selection. Frontmatter schema (both metadata sets) enforced at draft time.
 - Augmenter selection logic per design §7.4: tag filter → embedding rank → token budget. Cohort-proven + tighter match wins ties.
 - Atomic-rename writers per design §7.3 for all watched files.
 - Polyglot oracle wrapper per design §8.1: `Oracle` interface, biased subset by cluster domain.
@@ -264,6 +276,7 @@ Settled in the design doc. Reproduced for plan independence.
 | 13  | Four expertise volumes declared in Tool, even though only `little-coder-journals/` actively records before Observer. A fifth volume, `little-coder-workspace/`, is shared with `open-terminal` (project-scoped). | §3.6                      |
 | 14  | Upstream little-coder is a Node.js CLI on the `pi` framework, not Python. The agent container is Node-based; the control-plane wrapper is Python, mirroring `search-mcpo`. The `agent.py` reference in design §6 is a Chapter-5 illustration only. | §3.1                      |
 | 15  | Agent reaches the workspace via a shared `little-coder-workspace` volume: it edits files directly, and routes build/test/git execution to `open-terminal`'s `POST /execute` REST API — execution stays in the network-isolated plane. | §1.5, §3.4                |
+| 16  | Two knowledge layers: **founding knowledge** (operator-authored baseline, always-loaded via `--append-system-prompt`, in `agent-knowledge/`) is distinct from the **§7 skill library** (meta-learned, discovered on demand, in `little-coder-skill/`). The §7 library adopts the Anthropic Agent Skills format (`SKILL.md` + `name`/`description` frontmatter, progressive disclosure) layered with §7.1 metadata. | §3.1, §7, §7.4, §13       |
 
 ---
 
