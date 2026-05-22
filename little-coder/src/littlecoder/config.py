@@ -41,6 +41,20 @@ class InferenceConfig(_Strict):
     default: Literal["fast", "reasoning"] = "fast"
 
 
+class AgentConfig(_Strict):
+    """The upstream little-coder CLI invocation (design §3.1).
+
+    INTEGRATION POINT: little-coder is a Node.js CLI on the `pi` framework;
+    the exact flags and how the task prompt is delivered are pinned to the
+    upstream version when the agent image is built. `command` is the base
+    argv; the daemon appends `--model` and the prompt per `prompt_mode`."""
+
+    command: list[str] = Field(default_factory=lambda: ["little-coder"])
+    model: str = "llamacpp/qwen36-27b"
+    prompt_mode: Literal["stdin", "arg"] = "stdin"
+    extra_args: list[str] = Field(default_factory=list)
+
+
 class WorkspaceConfig(_Strict):
     """Workspace plane (design §3.4). The repo lives on the shared volume."""
 
@@ -129,6 +143,7 @@ class Config(_Strict):
 
     schema_version: int = CONFIG_SCHEMA_VERSION
     inference: InferenceConfig = Field(default_factory=InferenceConfig)
+    agent: AgentConfig = Field(default_factory=AgentConfig)
     workspace: WorkspaceConfig = Field(default_factory=WorkspaceConfig)
     journals: JournalsConfig = Field(default_factory=JournalsConfig)
     paths: PathsConfig = Field(default_factory=PathsConfig)

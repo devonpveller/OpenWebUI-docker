@@ -1,0 +1,17 @@
+# lc-egress — explicit egress allowlist for open-terminal (design §3.4).
+# A forward proxy that permits ONLY the operator-configured hosts (the git
+# remote, optionally the search gateway). open-terminal has no other route
+# to the internet — this bounds the blast radius of anything the inner loop
+# executes. Same idea as the search stack's Tor wall.
+#
+# Build context: ./little-coder
+FROM alpine:3.21
+
+RUN apk add --no-cache tinyproxy
+
+COPY docker/tinyproxy.conf /etc/tinyproxy/tinyproxy.conf
+COPY docker/egress-allowlist.txt /etc/tinyproxy/egress-allowlist.txt
+
+EXPOSE 8888
+
+CMD ["tinyproxy", "-d", "-c", "/etc/tinyproxy/tinyproxy.conf"]

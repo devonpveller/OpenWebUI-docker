@@ -1,0 +1,25 @@
+# open-terminal workspace plane + git-proxy (design §3.3, §3.4).
+# The upstream open-terminal image with the git-proxy spliced in as `git`.
+#
+# Build context: ./little-coder
+FROM ghcr.io/open-webui/open-terminal:slim
+
+USER root
+
+# Relocate the real git. The proxy takes its place at /usr/local/bin/git
+# (earlier on PATH than /usr/bin). The agent has NO raw-git fallback; the
+# operator bypasses by calling /usr/bin/git.real explicitly (design §3.3).
+RUN if [ -x /usr/bin/git ]; then mv /usr/bin/git /usr/bin/git.real; fi
+
+COPY git-proxy/git_proxy.py /opt/git-proxy/git_proxy.py
+RUN printf '#!/bin/sh\nexec python3 /opt/git-proxy/git_proxy.py "$@"\n' \
+      > /usr/local/bin/git \
+ && chmod 0755 /usr/local/bin/git \
+ && : > /var/log/git-proxy.log \
+ && chmod 0666 /var/log/git-proxy.log
+
+ENV GIT_PROXY_REAL_GIT=/usr/bin/git.real \
+    GIT_PROXY_LOG=/var/log/git-proxy.log
+
+# Base image keeps its own entrypoint, user isolation, and CMD — we only
+# spliced in the proxy. compose adds `no-new-privileges` on top.
