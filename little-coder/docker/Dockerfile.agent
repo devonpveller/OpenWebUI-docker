@@ -13,7 +13,7 @@ ENV PYTHONUNBUFFERED=1 \
 # the agent. gosu: drop privileges in the entrypoint.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends curl git ca-certificates gosu \
- && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+ && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
  && apt-get install -y --no-install-recommends nodejs \
  && rm -rf /var/lib/apt/lists/*
 
@@ -37,7 +37,11 @@ ENV LC_CONFIG=/app/config/little-coder.config.yaml
 COPY pi-extension/ /opt/little-coder/pi-extensions/
 COPY docker/entrypoint-agent.sh /usr/local/bin/entrypoint-agent.sh
 RUN chmod +x /usr/local/bin/entrypoint-agent.sh \
- && useradd --create-home --uid 10002 lc
+ && useradd --create-home --uid 10002 lc \
+ && git config --system --add safe.directory '*'
+
+# gosu does not set HOME; pin it so the agent finds ~/.config + ~/.pi.
+ENV HOME=/home/lc
 
 EXPOSE 8090 9090
 

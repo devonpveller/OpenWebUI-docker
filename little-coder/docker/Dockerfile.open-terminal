@@ -11,6 +11,13 @@ USER root
 # operator bypasses by calling /usr/bin/git.real explicitly (design §3.3).
 RUN if [ -x /usr/bin/git ]; then mv /usr/bin/git /usr/bin/git.real; fi
 
+# The workspace volume is shared across containers with different uids; tell
+# git not to refuse the repo on ownership grounds. The git-proxy + network
+# isolation are the real controls (design §3.3–§3.4); this is just git's
+# CVE-2022-24765 paranoia, which does not apply inside this sandbox. System
+# config so every isolated command user honors it.
+RUN git.real config --system --add safe.directory '*'
+
 COPY git-proxy/git_proxy.py /opt/git-proxy/git_proxy.py
 RUN printf '#!/bin/sh\nexec python3 /opt/git-proxy/git_proxy.py "$@"\n' \
       > /usr/local/bin/git \

@@ -8,7 +8,7 @@
 
 ## Current state
 
-- **Active chapter:** 1 (Tool) — **in progress.** Control-plane foundation landed and unit-tested (see Chapter 1 progress below); daemon, agent integration, Dockerfiles, and compose pending.
+- **Active chapter:** 1 (Tool) — **built, deployed, and tested end-to-end** (2026-05-22). Awaiting the operator stop-point judgment before chapter 2 (plan §5). See Chapter 1 progress below.
 - **Build sequence:** five chapters, gated by operator judgment (plan §2). One chapter at a time.
 - **Tier-0 build reminder:** `session_id` + `channel` + `user_id` on every journal line from line 1. Unrecoverable retroactively (design §4.1).
 - **Tool ships the open-terminal network change.** OWUI's direct access to open-terminal ends; it returns in chapter 2 via `lc-mcpo`.
@@ -22,13 +22,17 @@
 
 ### Chapter 1 progress (2026-05-22)
 
-Chapter 1 is **code-complete** — every Tool component is built and the
-control-plane logic is unit-tested (**134 tests, all passing**). What remains
-is **deployment + operator verification**: `docker compose up -d --build`,
-then living with it through the CLI (the chapter stop point, plan §5).
+Chapter 1 is **built, deployed, and tested end-to-end** (2026-05-22). 134 unit
+tests pass; all five services (`little-coder`, `lc-mcpo`, `open-terminal`,
+`lc-egress`, `little-coder-backup`) run healthy. Verified live: `lc project`
+clones through the egress allowlist; `lc task` flows agent → LLM → journals;
+command execution routes through open-terminal and the git-proxy
+(`LC_ROUTE_EXEC=1`); journals accumulate the full envelope; volumes survive
+container recreation. What remains is the operator living with it (the chapter
+stop point, plan §5).
 
-Legend: `[x]` code-complete (+ tested where unit-testable); `[~]` built, full
-acceptance needs a running deployment; `[ ]` not done.
+Legend: `[x]` done / verified; `[~]` built, full acceptance needs more
+operator runtime; `[ ]` not done.
 
 **Built and unit-tested** (`../../little-coder/`):
 
@@ -42,10 +46,20 @@ acceptance needs a running deployment; `[ ]` not done.
 volumes, backup job, the `lc-net` network, the open-terminal network change.
 `.env.example` updated with all new keys + operator action items.
 
-**Deployment-gated** (operator runs `docker compose up`, then verifies):
-llama-cpp reachability, open-terminal network isolation, volume persistence
-across a rebuild, the pi-extension load (see
-`../../little-coder/pi-extension/README.md`), shadow-mode rejection baseline.
+**Verified on deployment (2026-05-22):** llama-cpp reachable (agent talks to
+it via the `llamacpp` provider); the egress allowlist proxy (`lc-egress`)
+permits the git host; volumes persist across container recreation (focus
+re-seeds, journals accumulate); the pi extension loads and routes the agent's
+`bash` into open-terminal through the git-proxy. Still wants operator runtime:
+exhaustive network-isolation checks and a shadow-mode rejection baseline.
+
+**Build/test fixes applied:** agent image needs Node 22 (not 20);
+`WorkspaceManager` clones with the relocated real git `/usr/bin/git.real`;
+system-wide `git safe.directory '*'` in both images (the shared workspace
+volume crosses container uids); `umask 000` on workspace writes for the same
+reason; a `models.json` override maps the `llamacpp` provider to llama-swap's
+real model ids; the pi extension API was corrected against the bundled
+extensions (`registerTool` + `execute`).
 
 **Known gap — `.git/config` read-only mount (design §3.3).** The git-proxy
 blocks `git config` writes and `remote add` at the command level, but a
@@ -59,7 +73,7 @@ your git host to `little-coder/docker/egress-allowlist.txt`.
 
 ### 1a. Network + remotes (ship first; these are unrecoverable later)
 
-- [~] Verify `http://llama-cpp:8080/v1` reachable; both `qwen3.6:27b` and `qwen3.6:27b-nothink` respond — deployment check
+- [x] Verify `http://llama-cpp:8080/v1` reachable — the agent connects via the `llamacpp` provider; model `qwen36-27b` responds
 - [x] **Ship open-terminal network change:**
   - [x] Move open-terminal off `network_mode: service:openwebui`; give it its own network (`lc-net` + `llm-net`)
   - [x] Explicit egress allowlist: `llama-cpp` for inference, operator-configured git remote, nothing else — via `lc-egress` (tinyproxy default-deny host filter)
@@ -101,13 +115,13 @@ your git host to `little-coder/docker/egress-allowlist.txt`.
   - [x] `little-coder-cohorts` (used Observer+; declared now)
   - [x] `little-coder-polyglot` (used Learner+; declared now)
   - [x] `little-coder-workspace` (used Tool; **shared with `open-terminal`** — project-scoped, wiped on `/project` switch)
-- [~] Mount into `agent`; confirm `docker compose up -d --build little-coder` preserves all five — mounts wired; preservation verified at deploy
+- [x] Mount into `agent`; `docker compose up -d --build little-coder` preserves all five — verified across multiple container recreations (journals accumulate, focus re-seeds)
 - [x] Backup job (Alpine-cron daily default; cadence + restore drill tracked as open item #7) — `little-coder-backup` service + `backup/little-coder-backup.sh`
 
 ### 1f. Workspace handling + project focus
 
 - [x] `agent` can clone a single repo directly into open-terminal — `WorkspaceManager.clone` via the daemon
-- [~] `agent` can edit files; run tests/commands — wired via `ot-exec`; the full path depends on the pi extension (see `pi-extension/README.md`)
+- [x] `agent` can edit files; run tests/commands — verified: files created on the shared volume; commands route to open-terminal via the pi extension
 - [x] `/project repo: <link>` CLI subcommand per design §12.3 — `lc project` / `lc admin project switch`
 - [x] URL normalization: host + owner + repo, lowercased
 - [x] No current focus → clone, journal `project_switched`
@@ -170,11 +184,11 @@ your git host to `little-coder/docker/egress-allowlist.txt`.
 
 Tool is "done" when:
 
-- [ ] Daily flow feels stable; no new bugs in the basic pipeline
-- [ ] Journals are accumulating with the full envelope; no fields missing
-- [ ] `audit.jsonl` records every project switch + shutdown
-- [ ] Volumes survive at least one intentional `docker compose up -d --build` rebuild
-- [ ] Sanitization rejection rate (shadow mode) has a stable baseline
+- [ ] Daily flow feels stable; no new bugs in the basic pipeline — _operator judgment over time_
+- [x] Journals are accumulating with the full envelope; no fields missing — verified on the first tasks
+- [x] `audit.jsonl` records every project switch + shutdown — verified
+- [x] Volumes survive at least one intentional `docker compose up -d --build` rebuild — verified
+- [ ] Sanitization rejection rate (shadow mode) has a stable baseline — _needs accumulated runtime_
 - [ ] **You find yourself wanting to drive little-coder from chat as well as CLI** — this is the actual trigger to advance
 
 Stop here as long as needed. Advance only when ready.
@@ -457,6 +471,10 @@ These run alongside multiple chapters.
 | 2026-05-22 | 1       | Chapter 1 **code-complete**: control daemon, agent integration, CLI, metrics, MCP edge + `lc-mcpo`, Dockerfiles, compose wiring (`lc-net`, 5 volumes, `lc-egress` allowlist proxy, backup job). 134 tests passing. Awaiting deployment + operator verification (the chapter stop point). | plan §5                   |
 | 2026-05-22 | 1       | open-terminal's egress allowlist implemented as `lc-egress` (tinyproxy, default-deny host filter) — mirrors the search stack's Tor-wall pattern. A precise per-host allowlist is not expressible with plain compose networks. | design §3.4               |
 | 2026-05-22 | 1       | **KNOWN GAP** — the `.git/config` read-only mount (design §3.3) is not implemented; awkward for a path inside a named volume. git-proxy blocks `config`/`remote` at the command level, but a direct file write to `.git/config` bypasses that. Tracked as open item #9. | design §3.3               |
+| 2026-05-22 | 1       | Chapter 1 **built, deployed, smoke-tested end-to-end** — all 5 services healthy; `lc project` clones via the egress proxy; `lc task` runs agent → LLM → journals; exec routing verified (agent commands run in open-terminal through the git-proxy). | plan §5                   |
+| 2026-05-22 | 1       | Build/test fixes: Node 22 required (not 20); clone uses the relocated real git `/usr/bin/git.real`; `git safe.directory '*'` + `umask 000` make the shared workspace volume usable across container uids; `models.json` override maps `llamacpp` to llama-swap's real model ids; pi extension API corrected against the bundled extensions. | plan §5                   |
+| 2026-05-22 | 1       | Agent exec routing made a switch — `LC_ROUTE_EXEC` (compose env, default 1, verified working). 0 falls back to built-in bash inside the network-isolated little-coder container. | design §3.4               |
+| 2026-05-22 | 1       | `task_abandoned` default lowered to 30m for owui/cli (was 6h per the design §4.2 example) — a saner Tool default and a backstop against agent loops. Open item #3; raise for genuine long refactors. | design §4.2               |
 
 ---
 

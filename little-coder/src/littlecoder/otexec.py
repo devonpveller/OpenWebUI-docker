@@ -74,8 +74,11 @@ def main(argv: list[str] | None = None) -> int:
         default_timeout=int(os.environ.get("LC_EXEC_TIMEOUT", "1800")),
     )
     started = time.monotonic()
+    # umask 000: the workspace volume is shared by two containers with
+    # different uids, so files the agent creates must be group/other-writable
+    # for the other plane to use them (integration-tasks Decision Log).
     try:
-        result = client.execute(command)
+        result = client.execute(f"umask 000; {command}")
     except OpenTerminalError as exc:
         sys.stderr.write(f"ot-exec: open-terminal unreachable: {exc}\n")
         return 125

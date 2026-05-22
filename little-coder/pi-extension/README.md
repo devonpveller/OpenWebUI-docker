@@ -1,56 +1,50 @@
 # pi extension — route the agent's shell into open-terminal
 
-This is the **one genuinely framework-dependent integration point** of the
-Tool chapter (design §1.5, §3.4).
+Routes little-coder's command execution into the `open-terminal` plane so the
+inner loop is network-isolated and every `git` call passes the git-proxy
+(design §1.5, §3.3, §3.4).
 
-## The contract
+## Status: verified working
 
-little-coder runs in the control plane. Its file tools (Read/Write/Edit) act
-on the shared `/workspace` volume directly — fine, that is not execution. Its
-**command execution** must run in `open-terminal`, the network-isolated plane,
-so that:
+`open-terminal-exec/index.ts` overrides the built-in `bash` tool. It was
+validated end-to-end on 2026-05-22: an agent task's command was confirmed
+running inside open-terminal (journaled as a `bash` tool_call sourced from the
+`ot-exec` event stream).
 
-- everything the inner loop executes is bounded by open-terminal's egress
-  allowlist (design §3.4), and
-- every `git` call passes through the git-proxy (design §3.3).
+## How it works
 
-The mechanism is the `ot-exec` shim (installed on `$PATH` in the agent image,
-`littlecoder/otexec.py`). It is a drop-in `bash -c` replacement:
+- The extension registers a tool named `bash`, overriding pi's built-in. Its
+  `execute` runs the command through `ot-exec` — the shim
+  (`littlecoder/otexec.py`) that POSTs to open-terminal's `POST /execute`.
+- The pi extension API (`pi.registerTool({ name, label, description,
+  parameters, async execute(id, args) → { content:[{type,text}], details,
+  isError } })`) matches the bundled little-coder extensions (e.g.
+  `extra-tools`). The file uses only `import type` + node builtins, so it has
+  no runtime dependency to resolve.
+- `docker/entrypoint-agent.sh` installs it into little-coder's own
+  `.pi/extensions/` directory (alongside the 21 bundled extensions) so pi
+  discovers it and module resolution works.
+
+## The switch
+
+Gated by `LC_ROUTE_EXEC` (compose env, **default 1**):
+
+- `LC_ROUTE_EXEC=1` — extension installed; the agent's commands run in
+  open-terminal, through the git-proxy.
+- `LC_ROUTE_EXEC=0` — extension not installed; the agent uses pi's built-in
+  `bash`, which runs inside the `little-coder` container. That container is on
+  internal networks only (no internet), so execution is still contained — it
+  just bypasses the open-terminal plane and the git-proxy. This is the
+  fallback if a future upstream change breaks the override.
+
+## If a future little-coder version changes the extension API
+
+Symptom: the agent loops on `bash` calls. Read a bundled extension for the
+current API:
 
 ```
-ot-exec -c "<command>"     # runs <command> in open-terminal, returns its
-                           # stdout/stderr and exit code; also appends a
-                           # JSON event to $LC_EVENT_STREAM for journaling
+docker exec little-coder sh -c 'cat $(npm root -g)/little-coder/.pi/extensions/extra-tools/index.ts'
 ```
 
-**The extension's only job:** make little-coder's shell/bash tool invoke
-`ot-exec -c "<cmd>"` instead of a local shell.
-
-## Why this is the integration point
-
-`pi` (`@earendil-works/pi-coding-agent`) auto-discovers TypeScript extensions
-from `.pi/extensions/`, but its extension API is not publicly documented. The
-exact hook used to override the built-in `bash` tool must be confirmed against
-the pinned upstream version. Everything else in the Tool chapter is
-framework-independent and already tested.
-
-[`open-terminal-exec.ts`](open-terminal-exec.ts) is a best-effort
-implementation against the most plausible `pi` extension shape. When the agent
-image is first built, verify it loads (`little-coder` logs discovered
-extensions) and adjust the registration hook if needed.
-
-## Fallbacks if the extension cannot be wired
-
-1. **Shell shim** — point `pi`'s shell at `ot-exec` via configuration or the
-   `SHELL` env var, if the pinned version honors one.
-2. **Defence in depth holds regardless** — the `little-coder` container is
-   itself on internal networks only (`lc-net` + `llm-net`, no internet). If
-   execution ever runs locally instead of in open-terminal, it still cannot
-   egress; it only loses the git-proxy and the per-command journaling. So a
-   missing extension degrades instrumentation, it does not open the network.
-
-## Discovery path
-
-The agent image installs this directory into `~/.pi/extensions/` (see
-`docker/entrypoint-agent.sh`). If the pinned little-coder version discovers
-extensions from a different location, adjust that copy step.
+Then adjust `open-terminal-exec/index.ts` to match, or set `LC_ROUTE_EXEC=0`
+while you do.
