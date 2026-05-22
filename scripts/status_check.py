@@ -271,9 +271,11 @@ def check_open_terminal_status():
     print()
     log_info("Open Terminal Status:")
 
-    # Check container is running
+    # open-terminal is the little-coder workspace plane — it left openwebui's
+    # network namespace (it is on lc-net / llm-net now), so probe it INSIDE
+    # its own container, not via openwebui's localhost:8000.
     result = run_docker_command(
-        ["docker", "compose", "exec", "-T", "openwebui", "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", "http://localhost:8000/health"],
+        ["docker", "compose", "exec", "-T", "open-terminal", "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", "http://localhost:8000/health"],
         project_root,
         timeout=10
     )

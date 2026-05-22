@@ -394,7 +394,9 @@ if %ERRORLEVEL% EQU 0 (
 echo.
 echo [INFO] Open Terminal Health:
 cd ..
-docker compose exec -T openwebui curl -s -o NUL -w "%%{http_code}" http://localhost:8000/health 2>nul | findstr /C:"200" >nul
+REM open-terminal is the little-coder workspace plane — it left openwebui's
+REM network namespace, so probe it inside its OWN container.
+docker compose exec -T open-terminal curl -s -o NUL -w "%%{http_code}" http://localhost:8000/health 2>nul | findstr /C:"200" >nul
 cd scripts
 if %ERRORLEVEL% EQU 0 (
     echo [SUCCESS] Open Terminal health: OK

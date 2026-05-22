@@ -291,12 +291,15 @@ function Test-OpenTerminalHealth {
     param()
 
     try {
-        $Response = docker compose exec -T openwebui curl -s -o /dev/null -w "%{http_code}" http://localhost:8000/health 2>$null
+        # open-terminal is the little-coder workspace plane — it left openwebui's
+        # network namespace (it is on lc-net / llm-net now), so probe it INSIDE
+        # its own container, not via openwebui's localhost:8000.
+        $Response = docker compose exec -T open-terminal curl -s -o /dev/null -w "%{http_code}" http://localhost:8000/health 2>$null
         if ($LASTEXITCODE -eq 0 -and $Response -eq "200") {
             Write-LogEntry "Open Terminal health check passed" "DEBUG"
             return $true
         } else {
-            Write-LogEntry "Open Terminal is not responding on localhost:8000 (HTTP $Response)" "WARN"
+            Write-LogEntry "Open Terminal is not responding on open-terminal:8000 (HTTP $Response)" "WARN"
             return $false
         }
     }

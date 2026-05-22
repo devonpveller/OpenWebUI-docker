@@ -26,6 +26,53 @@ def setup_logging() -> logging.Logger:
 
 logger = setup_logging()
 
+
+# ---------------------------------------------------------------------------
+# AI-Stack service roster — the key service endpoints this module probes to
+# report stack health to the end user. Each is reachable from the openwebui
+# container over the internal docker networks (default + llm-net). Grouped by
+# plane. Keep in sync with docker-compose.yml / OB1 — see the /stack-map skill.
+# ---------------------------------------------------------------------------
+_AI_STACK_SERVICES: List[Dict[str, Any]] = [
+    # Core inference — critical: the stack cannot serve chat without these.
+    {"name": "llama-cpp",       "plane": "Core",         "host": "llama-cpp",       "port": 8080, "path": "/health",                  "critical": True},
+    {"name": "llama-cpp-embed", "plane": "Core",         "host": "llama-cpp-embed", "port": 8080, "path": "/health",                  "critical": True},
+    # Memory layer.
+    {"name": "mnemory",         "plane": "Memory",       "host": "mnemory",         "port": 8051, "path": "/health",                  "critical": False},
+    {"name": "mnemory-gateway", "plane": "Memory",       "host": "mnemory-gateway", "port": 8060, "path": "/health",                  "critical": False},
+    # Private Search Gateway (`gateway` also joins the default network).
+    {"name": "gateway",         "plane": "Search",       "host": "gateway",         "port": 8080, "path": "/healthz",                 "critical": False},
+    # little-coder control plane.
+    {"name": "open-terminal",   "plane": "little-coder", "host": "open-terminal",   "port": 8000, "path": "/health",                  "critical": False},
+    {"name": "little-coder",    "plane": "little-coder", "host": "little-coder",    "port": 8090, "path": "/health",                  "critical": False},
+    {"name": "lc-mcpo",         "plane": "little-coder", "host": "lc-mcpo",         "port": 8002, "path": "/openapi.json",            "critical": False},
+    # Auxiliary.
+    {"name": "open_notebook",   "plane": "Auxiliary",    "host": "open_notebook",   "port": 5055, "path": "/api/config",              "critical": False},
+    # Open Brain (OB1) — separate compose project on the shared llm-net.
+    {"name": "openbrain-mcpo",  "plane": "Open Brain",   "host": "openbrain-mcpo",  "port": 8000, "path": "/open-brain/openapi.json", "critical": False},
+]
+
+
+def _probe_service_http(host: str, port: int, path: str, timeout: float = 3.0) -> Dict[str, Any]:
+    """HTTP GET a service health endpoint. Returns reachability and whether the
+    response code indicates health. Dependency-free (stdlib urllib)."""
+    import urllib.request
+    import urllib.error
+
+    url = f"http://{host}:{port}{path}"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "ai-stack-health/1"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            code = resp.status
+            return {"reachable": True, "http_code": code, "healthy": 200 <= code < 400}
+    except urllib.error.HTTPError as exc:
+        # The server answered — it is up, just not with a 2xx/3xx.
+        return {"reachable": True, "http_code": exc.code, "healthy": False}
+    except Exception as exc:  # URLError, timeout, DNS failure, refused, …
+        reason = getattr(exc, "reason", exc)
+        return {"reachable": False, "healthy": False, "error": str(reason)[:80]}
+
+
 class SystemHealthModule:
     """System Health Module implementing manifest-driven architecture"""
     
@@ -40,7 +87,10 @@ class SystemHealthModule:
             "ai_stack": {
                 "workspace_root": "/host_project",  # Container context  
                 "name": "OpenWebUI AI Stack",
-                "expected_services": ["openwebui", "ollama", "tailscale", "watchtower"]
+                # Core always-on containers. ollama was retired — llama-cpp is
+                # the inference backend now. Live per-service health is probed by
+                # check_ai_stack_services().
+                "expected_services": ["openwebui", "llama-cpp", "llama-cpp-embed", "tailscale"]
             },
             "monitoring": {
                 "check_docker": True,
@@ -210,44 +260,11 @@ class SystemHealthModule:
                 "details": f"Network test error: {str(e)}"
             })
         
-        # Test internal service connectivity using Python sockets
-        # Try multiple Ollama connection methods (service name, localhost, host networking)
-        ollama_tested = False
-        
-        for host_attempt in ["ollama", "localhost", "host.docker.internal"]:
-            if ollama_tested:
-                break
-                
-            try:
-                import socket
-                import time
-                
-                # Test Ollama connectivity
-                start_time = time.time()
-                sock = socket.create_connection((host_attempt, 11434), timeout=3)
-                sock.close()
-                response_time = int((time.time() - start_time) * 1000)
-                
-                connectivity_results["checks_performed"].append({
-                    "test": "Ollama service connectivity",
-                    "status": "success",
-                    "details": f"Can reach Ollama API via {host_attempt} ({response_time}ms)"
-                })
-                ollama_tested = True
-                
-            except socket.timeout:
-                continue  # Try next host
-            except Exception as e:
-                continue  # Try next host
-        
-        # If no Ollama connection succeeded, report the failure
-        if not ollama_tested:
-            connectivity_results["checks_performed"].append({
-                "test": "Ollama service connectivity",
-                "status": "warning", 
-                "details": "Cannot reach Ollama API (tried ollama, localhost, host.docker.internal)"
-            })
-        
+        # AI-Stack service reachability is checked separately, and in depth,
+        # by check_ai_stack_services() — this method now covers only internet
+        # egress. (The old Ollama socket probe here was retired with the
+        # container; llama-cpp is the inference backend now.)
+
         # Determine overall status
         successful_checks = sum(1 for check in connectivity_results["checks_performed"] if check["status"] == "success")
         warning_checks = sum(1 for check in connectivity_results["checks_performed"] if check["status"] == "warning")
@@ -263,7 +280,40 @@ class SystemHealthModule:
             connectivity_results["overall_status"] = "unhealthy"
         
         return connectivity_results
-    
+
+    def check_ai_stack_services(self) -> Dict[str, Any]:
+        """Probe the AI-Stack service endpoints reachable from this container.
+
+        HTTP-GETs each service's health endpoint in parallel over the internal
+        docker networks and reports per-service health. This is the end-user
+        "is my stack up?" view; it spans both compose projects (main + OB1).
+        """
+        from concurrent.futures import ThreadPoolExecutor
+
+        def _one(svc: Dict[str, Any]) -> Dict[str, Any]:
+            probe = _probe_service_http(svc["host"], svc["port"], svc["path"])
+            return {
+                "service": svc["name"],
+                "plane": svc["plane"],
+                "critical": svc.get("critical", False),
+                "endpoint": f"{svc['host']}:{svc['port']}{svc['path']}",
+                **probe,
+            }
+
+        try:
+            with ThreadPoolExecutor(max_workers=min(10, len(_AI_STACK_SERVICES))) as pool:
+                services = list(pool.map(_one, _AI_STACK_SERVICES))
+        except Exception as e:
+            return {"available": False, "error": str(e), "services": []}
+
+        return {
+            "available": True,
+            "total": len(services),
+            "healthy": sum(1 for s in services if s.get("healthy")),
+            "reachable": sum(1 for s in services if s.get("reachable")),
+            "services": services,
+        }
+
     def check_system_resources(self) -> Dict[str, Any]:
         """Check system resource usage"""
         resources = {
@@ -356,7 +406,10 @@ class SystemHealthModule:
         
         # Network connectivity check
         report["checks"]["network_connectivity"] = self.check_network_connectivity()
-        
+
+        # AI-Stack service health check — the per-service "is my stack up?" view
+        report["checks"]["ai_stack_services"] = self.check_ai_stack_services()
+
         # System resources check
         report["checks"]["system_resources"] = self.check_system_resources()
         
@@ -401,7 +454,21 @@ class SystemHealthModule:
             critical_issues.append("Network connectivity issues detected")
         elif network_status == "partial":
             health_score -= 20
-        
+
+        # Check AI-Stack services
+        ai_services = report["checks"].get("ai_stack_services", {})
+        if ai_services.get("available"):
+            down_critical = [s for s in ai_services["services"]
+                             if s.get("critical") and not s.get("healthy")]
+            down_other = [s for s in ai_services["services"]
+                          if not s.get("critical") and not s.get("healthy")]
+            if down_critical:
+                health_score -= min(40, 20 * len(down_critical))
+                names = ", ".join(s["service"] for s in down_critical)
+                critical_issues.append(f"Critical service(s) unavailable: {names}")
+            if down_other:
+                health_score -= min(20, 5 * len(down_other))
+
         # Determine overall status
         if health_score >= 80:
             report["overall_status"] = "healthy"
@@ -536,10 +603,18 @@ class SystemHealthModule:
             
         gpu_status = checks.get("container_environment", {})
         gpu_icon = "✅" if gpu_status.get("gpu_available") else "❌"
-        
+
+        ai_services = checks.get("ai_stack_services", {})
+        if ai_services.get("available"):
+            healthy_n, total_n = ai_services["healthy"], ai_services["total"]
+            ai_icon = "✅" if healthy_n == total_n else "⚠️" if healthy_n else "❌"
+            ai_line = f"\n• **AI-Stack services**: {ai_icon} {healthy_n}/{total_n} healthy"
+        else:
+            ai_line = ""
+
         content += f"""• **Docker**: {docker_icon}
 • **Services**: {services_icon}
-• **GPU**: {gpu_icon}
+• **GPU**: {gpu_icon}{ai_line}
 """
         
         # Add issues found
@@ -615,7 +690,33 @@ class SystemHealthModule:
             for check in net.get("checks_performed", []):
                 status_icon = "✅" if check["status"] == "success" else "❌" if check["status"] == "failed" else "⚠️"
                 content += f"- {status_icon} **{check['test']}**: {check['details']}\n"
-        
+
+        # AI Stack Services — per-service health across both compose projects
+        if "ai_stack_services" in checks:
+            ai = checks["ai_stack_services"]
+            content += "\n### 🧩 AI Stack Services\n"
+            if not ai.get("available"):
+                content += f"_Service probe unavailable — {ai.get('error', 'unknown error')}_\n"
+            else:
+                content += (
+                    f"**{ai['healthy']}/{ai['total']} healthy** "
+                    f"({ai['reachable']}/{ai['total']} reachable)\n"
+                )
+                planes: Dict[str, List[Dict[str, Any]]] = {}
+                for svc in ai["services"]:
+                    planes.setdefault(svc["plane"], []).append(svc)
+                for plane, svcs in planes.items():
+                    content += f"\n**{plane}**\n"
+                    for svc in svcs:
+                        if svc.get("healthy"):
+                            icon, detail = "✅", f"HTTP {svc.get('http_code')}"
+                        elif svc.get("reachable"):
+                            icon, detail = "⚠️", f"HTTP {svc.get('http_code')} (degraded)"
+                        else:
+                            icon, detail = "❌", svc.get("error", "unreachable")
+                        crit = " _(critical)_" if svc.get("critical") else ""
+                        content += f"- {icon} `{svc['service']}`{crit} — {detail}\n"
+
         # System Resources
         if "system_resources" in checks:
             resources = checks["system_resources"]
