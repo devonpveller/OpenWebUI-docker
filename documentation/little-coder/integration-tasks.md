@@ -1,498 +1,441 @@
-# Self-Improving Little-Coder — Task Tracker (LIVING DOCUMENT)
+# Self-Improving Little-Coder — Task Tracker
 
 > **Last updated:** 2026-05-20
-> **Plan:** [integration-plan.md](integration-plan.md) — phases, rationale, locked decisions. Update both together.
-> **Design doc:** [Self-improving-little-coder-design.md](Self-improving-little-coder-design.md) — _why_ and _what_; this tracker is _how_ and _when_. Design doc wins on conflict.
+> **Plan:** [`integration-plan.md`](integration-plan.md) — chapters, rationale, locked decisions.
+> **Design doc:** [`Self-improving-little-coder-design.md`](Self-improving-little-coder-design.md) — source of truth. Design doc wins on conflict.
 > **Legend:** `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked · `[-]` descoped
-> **Rule:** every status change → also bump _Last updated_ and add a Decision Log row if a choice changed.
+> **Rule:** every status change → bump `Last updated` and add a Decision Log row if a choice changed.
 
 ## Current state
 
-- **Active phase:** Phase 0 — Prerequisites & open-terminal hardening (not started).
-- **Build sequence:** §16 of the design doc; 11 phases gated. No phase parallelism except Phase 9 alongside Phase 8.
-- **Tier-0 build requirement reminder:** `session_id` + `channel` + `user_id` on every journal line from the very first write. Unrecoverable retroactively (§16 step 1).
-- **Phase 0 must ship the open-terminal network change** before any autonomous workload runs. Reachability bounds the blast radius from Phase 1 onward.
+- **Active chapter:** 1 (Tool) — not started.
+- **Build sequence:** five chapters, gated by operator judgment (plan §2). One chapter at a time.
+- **Tier-0 build reminder:** `session_id` + `channel` + `user_id` on every journal line from line 1. Unrecoverable retroactively (design §4.1).
+- **Tool ships the open-terminal network change.** OWUI's direct access to open-terminal ends; it returns in chapter 2 via `lc-mcpo`.
 
 ---
 
-## Phase 0 — Prerequisites & open-terminal hardening
+## Chapter 1 — Tool
 
-> **Goal:** lock prerequisites; **ship the open-terminal network change** before any autonomous workload runs. Refs: design §17, §15, §12.
+> Refs: design §3, §4, §10, §12. Plan §5.
 
-- [ ] Verify `http://llama-cpp:8080/v1` reachable from a throwaway container; confirm both `qwen3.6:27b` and `qwen3.6:27b-nothink` respond
-- [ ] **Ship open-terminal network change** (Phase 0 prerequisite, not a Phase 6 hardening):
+### 1a. Network + remotes (ship first; these are unrecoverable later)
+
+- [ ] Verify `http://llama-cpp:8080/v1` reachable; both `qwen3.6:27b` and `qwen3.6:27b-nothink` respond
+- [ ] **Ship open-terminal network change:**
   - [ ] Move open-terminal off `network_mode: service:openwebui`; give it its own network
-  - [ ] Explicit egress allowlist: `llama-cpp` for inference, operator-configured git remote, private search gateway (if web-search enabled), nothing else
-  - [ ] Verify isolation: from inside open-terminal, only the allowlist endpoints are reachable
-- [ ] Decide compose layout (extend `ai-stack` compose vs new compose file imported in). Match existing `mcpo`/`search-mcpo` pattern
-- [ ] Confirm volume conventions (named volumes, not bind mounts) and backup pattern (Alpine-cron, mirroring `mnemory-backup`)
-- [ ] Pick the **private** self-improvement git remote (per §12); register it in design doc / plan if not yet specified
-- [ ] Provision fine-grained PAT scoped to `contents:write` on that remote only (no repo deletion, no admin, no other repos)
-- [ ] Confirm where the private search gateway lives in the egress allowlist (already in stack per §17 grounding)
-- [ ] Produce gap list; pause if anything blocks
-- **Exit:** network change shipped and verified; gap list closed; inference + remote + PAT reachable from the right networks.
+  - [ ] Explicit egress allowlist: `llama-cpp` for inference, operator-configured git remote, private search gateway (if enabled), nothing else
+  - [ ] Verify isolation: from inside open-terminal, only allowlist endpoints reachable
+  - [ ] **Confirm OWUI no longer has direct access to open-terminal** (intended; returns in chapter 2)
+- [ ] Decide compose layout (extend `ai-stack` compose vs. new compose file); match `mcpo`/`search-mcpo` pattern
+- [ ] Pick the **private** self-improvement git remote (design §10.6); register URL
+- [ ] Provision fine-grained PAT scoped to `contents:write` on that remote only
 
----
+### 1b. Container scaffold
 
-## Phase 1 — Container scaffold + journals + persistence
+- [ ] Build `little-coder` container image; pin to a known-good upstream commit
+- [ ] Run `agent` as MCP server (not raw HTTP/socket); mirror `search-mcpo` pattern
+- [ ] Build `lc-mcpo` sidecar (built but dormant in Tool — chapter 2 activates it). API-key'd at the edge (design §10.3)
+- [ ] Compose healthchecks: `agent` (MCP socket), `lc-mcpo` (`/openapi.json`)
+- [ ] LLM client default → `qwen3.6:27b-nothink`; reasoning variant via call-site selection
 
-> **Goal:** `agent` as MCP server behind `lc-mcpo`; full §19 journal envelope from line 1; named volumes declared. Refs: §4, §16 step 1, §17, §19, §24.
+### 1c. Journals (tier-0 build requirement — unrecoverable if missed)
 
-### 1a. Container + MCP server
-
-- [ ] Build `little-coder` container image (base + little-coder REPL); pin to a known-good upstream commit per §17 ("upstream pulls are operator-initiated")
-- [ ] Run `agent` as an MCP server (not raw HTTP/socket) — mirror the search gateway pattern
-- [ ] Build `lc-mcpo` sidecar: MCP→OpenAPI bridge, API-key'd at the edge (per §23 MCP edge authentication)
-- [ ] Compose healthchecks: `agent` (MCP socket responding), `lc-mcpo` (`/openapi.json` reachable)
-- [ ] LLM client default → `qwen3.6:27b-nothink` for inner-loop work; reasoning variant reserved for judge/drafting (Phase 3+)
-
-### 1b. Journals (tier-0 build requirement)
-
-> **This is the §16 step 1 unrecoverable failure mode — fields not present in journals on day one cannot be retrofitted.**
-
-- [ ] Implement journal writers for `tool_calls.jsonl`, `errors.jsonl`, `outcomes.jsonl`
-- [ ] Envelope on every line (per §19): `ts` (UTC), `task_id` (ULID), `session_id`, `channel`, `user_id`, `repo`, `lang`, `seq`, `schema_version`
+- [ ] Implement writers for `tool_calls.jsonl`, `errors.jsonl`, `outcomes.jsonl`
+- [ ] Envelope per design §4.1: `ts`, `task_id` (ULID), `session_id`, `channel`, `user_id`, `repo`, `lang`, `seq`, `schema_version: 1`
 - [ ] Write-time schema validation; malformed records **rejected, not appended**
-- [ ] `task_started` / `task_ended` records in `outcomes.jsonl`; reconstruct by `task_id`, never by adjacency
-- [ ] Outcome label: `pass` / `fail` / `unverified` (no asserting `pass` without a checkable signal)
-- [ ] Durability: append + fsync on every terminal and every error record; line-buffered for the rest
-- [ ] `schema_version` plumbed through readers; tolerate older shapes (forward-compat, §24)
+- [ ] `task_started` / `task_ended` bracket every task; reconstruct by `task_id`, never adjacency
+- [ ] Outcome label per design §4.2: `pass` / `fail` / `unverified`
+- [ ] Durability per design §4.3: append + fsync on every terminal and every error record
+- [ ] Schema versioning plumbed through readers; tolerate older shapes (forward-compat for later chapters)
 
-### 1c. Persistence
+### 1d. Audit log
 
-> **This is also the §16 step 1 unrecoverable failure mode — missing volumes silently wipe months of accrued state on the first rebuild.**
-
-- [ ] Declare named volumes at compose time: `little-coder-skill`, `little-coder-journals`, `little-coder-cohorts`, `little-coder-polyglot`
-- [ ] Mount into `agent` (and later `meta`); confirm `docker compose up -d --build little-coder` preserves volumes
-- [ ] Backup job (Alpine-cron daily default; cadence + restore drill tracked as open item #7 in plan)
-
-### 1d. Minimal workspace handling (§17)
-
-- [ ] `agent` can clone a single repo directly into open-terminal
-- [ ] `agent` can edit files in the cloned repo
-- [ ] `agent` can run tests / commands in open-terminal
-- [ ] No project switching yet (Phase 2); no operator surface yet (Phase 2); just enough to make a Flow 2 trigger work end-to-end
-
-### 1e. Shutdown semantics (§24)
-
-- [ ] SIGTERM drain mode: refuse new task triggers (Flow 1/2 return "shutting down"); allow in-flight to a configurable deadline; then SIGKILL
-- [ ] Open `task_id`s past the deadline → journaled `task_abandoned` with reason `shutdown`
-- [ ] Operator override `lc admin shutdown --drain-deadline 30m` (CLI subcommand stub OK; full surface in Phase 2)
-
-- **Exit:** a Flow 2 trigger completes end-to-end against a throwaway repo cloned into open-terminal; every journal line validates; journals survive a rebuild; healthchecks green.
-
----
-
-## Phase 2 — Project focus + CLI operator surface + preflight start
-
-> **Goal:** project switching is an explicit operator action; CLI operator surface is live; preflight workload collecting attributed journals. Refs: §17, §19, §24, §14.
-
-### 2a. Project focus (§17)
-
-- [ ] `/project repo: <link>` CLI subcommand
-- [ ] URL normalization: host + owner + repo, lowercased (prevents SSH/HTTPS-form spurious wipes)
-- [ ] No current focus → clone into open-terminal, set focus, journal `project_switched`
-- [ ] Matches current focus → no-op
-- [ ] Different focus + task in flight → **reject** with what's running, suggest cancel-or-wait
-- [ ] Different focus + clear → tag prior state, wipe workspace, clone new repo, set focus, journal `project_switched`
-
-### 2b. Concurrency model (§17)
-
-- [ ] One task at a time in open-terminal (the simplest correct model)
-- [ ] FIFO queue across triggers: a Flow 2 trigger arriving during a Flow 1 task waits its turn
-- [ ] Human attach is read-only
-
-### 2c. CLI operator surface (§24)
-
-- [ ] `lc admin project switch <link>` (alias of `/project repo:`)
-- [ ] `lc admin pending` — list pending artifacts (will be empty until Phase 4)
-- [ ] `lc admin approve <id>` / `lc admin reject <id>`
-- [ ] `lc admin upstream pull` — wire the journaling now (`upstream_pulled` with old+new commit ids); tier-3 merge behavior lands in Phase 11
-- [ ] `lc admin shutdown [--drain-deadline 30m]`
-- [ ] `lc admin task confirm <task_id> [pass|fail]` — emits `task_outcome_amended` (§19); 7-day window; last-amendment-wins within window; frozen outside
-
-### 2d. Audit log (§24)
-
-- [ ] `audit.jsonl` writer, separate from the three task journals
-- [ ] Records: `project_switched`, `upstream_pulled`, `approve_decision`, `task_outcome_amended`, `artifact_retired`, deploys, preflight exit
+- [ ] `audit.jsonl` writer per design §4.4, separate from task journals
+- [ ] Records emitted in Tool: `project_switched`, `task_outcome_amended`, `shutdown`
 - [ ] Longer retention than task journals; different access controls
 
-### 2e. Preflight start (§14)
+### 1e. Persistence (also unrecoverable if missed)
 
-- [ ] Real OWUI/CLI users drive real workloads against open-terminal
-- [ ] Journals on, **meta-loop off** for ≥ 1–2 weeks
-- [ ] Begin collecting baseline metrics: cluster occurrences, sanitization rejection rate (filter exists in Phase 3 — preflight overlaps), Polyglot variance (Phase 5)
+- [ ] Declare all four named volumes at compose time:
+  - [ ] `little-coder-skill` (used Learner+; declared now)
+  - [ ] `little-coder-journals` (used Tool)
+  - [ ] `little-coder-cohorts` (used Observer+; declared now)
+  - [ ] `little-coder-polyglot` (used Learner+; declared now)
+- [ ] Mount into `agent`; confirm `docker compose up -d --build little-coder` preserves all four
+- [ ] Backup job (Alpine-cron daily default; cadence + restore drill tracked as open item #7)
 
-- **Exit:** preflight is live; project-switch wipes workspace cleanly without touching named volumes; `audit.jsonl` records every operator action.
+### 1f. Workspace handling + project focus
+
+- [ ] `agent` can clone a single repo directly into open-terminal
+- [ ] `agent` can edit files; run tests/commands
+- [ ] `/project repo: <link>` CLI subcommand per design §12.3
+- [ ] URL normalization: host + owner + repo, lowercased
+- [ ] No current focus → clone, journal `project_switched`
+- [ ] Matches current focus → no-op
+- [ ] Different focus + task in flight → reject, suggest cancel-or-wait
+- [ ] Different focus + clear → tag prior state, wipe workspace, clone new repo, journal `project_switched`
+- [ ] One task at a time; FIFO queue across triggers (design §12.4)
+- [ ] Human attach is read-only
+
+### 1g. CLI operator surface
+
+- [ ] `lc admin project switch <link>` (alias of `/project repo:`)
+- [ ] `lc admin shutdown [--drain-deadline 30m]`
+- [ ] `lc admin task confirm <task_id> [pass|fail]` — outcome amendment (design §4.2); 7-day window; last-amendment-wins
+- [ ] `lc admin pending` (stub: returns empty in Tool; wired in chapter 4)
+- [ ] `lc admin approve <id>` / `lc admin reject <id>` (stubs in Tool)
+
+### 1h. git-proxy
+
+- [ ] Build `git-proxy` wrapper; site at open-terminal workspace edge (the git binary inside the workspace IS the proxy)
+- [ ] No raw-git fallback reachable by the agent
+- [ ] Whitelist per design §3.3: `commit`, `branch`, `checkout`, `merge --no-ff`, `tag`, `revert`, `reset --hard <tag>`, `fetch` (operator-pre-configured remotes only)
+- [ ] Blocklist per design §3.3: `push --force`, `branch -D`, `filter-branch`, `gc --prune=now`, `remote add`, `remote set-url`, all `submodule` subcommands, all history rewrites, anything touching `.git/` directly
+- [ ] Mount `.git/config`, `.git/hooks/`, `.git/info/` **read-only to the agent**
+- [ ] Allowed remotes baked in by operator at project-switch time
+- [ ] `core.hooksPath` set to operator-controlled directory **outside** `.git/`
+- [ ] Branch / tag discipline (design §12.1): outer-loop changes on `auto/<date>-<topic>` branches; never direct to `main`
+- [ ] Per-repo deploy tokens per design §10.3: least-privilege, injected per task, never ambient, never the self-PAT
+- [ ] Adversarial tests:
+  - [ ] Agent attempts `remote add` via direct `.git/config` write → blocked (read-only mount)
+  - [ ] Hostile `.gitmodules` → no submodule clone on any whitelisted op
+  - [ ] Agent attempts `git push --force` → blocked; journaled
+
+### 1i. Sanitization filter (shadow mode)
+
+- [ ] Build filter per design §10.2: redact secrets/key-shaped strings; reduce large file bodies to structural digests; strip PII
+- [ ] **Pinned and tested** against fixed test set (seeded false-positives + false-negatives)
+- [ ] In Tool, **run in shadow mode**: filter records what it _would_ redact but does not block (nothing leaves the stack in Tool)
+- [ ] Rejection rate metric collected on the Prometheus endpoint (feeds chapter 3 drift baseline)
+
+### 1j. Metrics endpoint
+
+- [ ] Prometheus endpoint on `agent` (design §9.3)
+- [ ] Tool-relevant metrics: queue depth; journal write rate; llama-cpp slot occupancy; sanitization rejection rate (shadow-mode counts)
+- [ ] Later chapters layer additional metrics on this endpoint
+
+### 1k. Centralized config
+
+- [ ] Typed config (YAML + JSON schema) per design §12.8, validated at boot
+- [ ] Tool-era tunables: drain deadline default; `task_abandoned` timeout per channel; basic budget caps
+- [ ] Schema version on the config file; forward-compat for later chapters
+
+### 1l. Shutdown semantics
+
+- [ ] SIGTERM drain mode per design §12.7: refuse new triggers, allow in-flight to a configurable deadline, then SIGKILL
+- [ ] Open `task_id`s past the deadline → journaled `task_abandoned` with reason `shutdown`
+- [ ] Operator override `lc admin shutdown --drain-deadline 30m`
+
+### Tool stop point (chapter 1 → 2)
+
+Tool is "done" when:
+
+- [ ] Daily flow feels stable; no new bugs in the basic pipeline
+- [ ] Journals are accumulating with the full envelope; no fields missing
+- [ ] `audit.jsonl` records every project switch + shutdown
+- [ ] Volumes survive at least one intentional `docker compose up -d --build` rebuild
+- [ ] Sanitization rejection rate (shadow mode) has a stable baseline
+- [ ] **You find yourself wanting to drive little-coder from chat as well as CLI** — this is the actual trigger to advance
+
+Stop here as long as needed. Advance only when ready.
 
 ---
 
-## Phase 3 — Cluster taxonomy + judge prompt + sanitization
+## Chapter 2 — OWUI pipeline
 
-> **Goal:** judge path with privacy controls **before** the judge ever runs on real data. Refs: §20, §10, §23, §22.
+> Refs: design §12.6. Plan §6. **Not active until chapter 1 stop point reached.**
 
-### 3a. Cluster identity (§20)
+- [ ] Register `lc-mcpo` OpenAPI as an OWUI tool. API-key authentication at the edge
+- [ ] Task triggers stream conversationally
+- [ ] Slash-commands wired to the same control-plane entries as CLI:
+  - [ ] `/project repo:`
+  - [ ] `/upstream pull` (stub — actual behavior in chapter 5)
+  - [ ] `/pending` (empty until chapter 4)
+  - [ ] `/approve <id>` (no-op until chapter 4)
+  - [ ] `/reject <id>` (no-op until chapter 4)
+  - [ ] `/confirm <task_id> pass|fail`
+- [ ] Privilege separation per design §12.6: operator commands authenticated at OWUI surface (OWUI auth); MCP server only authenticates task triggers (API key)
+- [ ] Operator smoke test: drive a task end-to-end via OWUI; verify journal records `channel = owui`, `user_id = <OWUI user>`, task completes against open-terminal with identical effect to CLI
 
-- [ ] Immutable synthetic `cluster_id` + mutable human label
-- [ ] Cohort records key on `cluster_id`; relabel never touches cohort history
-- [ ] Ingest-time assignment: nearest existing cluster above similarity floor (embedding + judge-written discriminator); below floor → `unassigned` pool
+### Chapter 2 stop point (→ 3)
+
+- [ ] OWUI parity confirmed; journals attributing both channels correctly
+- [ ] Multi-channel journal volume accumulating
+- [ ] **You're curious what patterns the system would see in the journals** — trigger to advance
+
+---
+
+## Chapter 3 — Observer
+
+> Refs: design §5, §9.2, §10.1, §13. Plan §7. **Not active until chapter 2 stop point reached.**
+
+### 3a. Preflight exit criteria (design §13)
+
+- [ ] (a) ≥ K distinct clusters each have ≥ their M window of _observed_ occurrences (K and M derived from accumulated data; recorded in Decision Log)
+- [ ] (b) Polyglot baseline variance measured on the canonical clone (sets up chapter 4's gate)
+- [ ] (c) Counterfactual + adversarial judge prompt dry-run on real examples + human-rated
+- [ ] Transition journaled to `audit.jsonl`
+
+### 3b. `meta` process
+
+- [ ] Build `meta` as a separate process (design §3.2 sub-service seam preserved for later split)
+- [ ] **Single-flight lock** on `meta` iterations (design §12.5)
+- [ ] Triggered by **evidence thresholds**, not a clock
+
+### 3c. Cluster identity
+
+- [ ] Immutable synthetic `cluster_id` + mutable label (design §5.1)
+- [ ] Ingest-time assignment: nearest existing cluster above similarity floor; below floor → `unassigned` pool (design §5.2)
 - [ ] Judge mints new `cluster_id` only when `unassigned` forms a coherent group
-- [ ] Split/merge lineage records: parent↔child `cluster_id`s; `inherited` vs `observed` counts; escalation cannot fire on inherited counts; merge sums observed + resets quarantine
-- [ ] **Cohort scoping per `lang` + `task_shape`**, aggregated across repos (`repo` recorded for drill-down only)
+- [ ] Split/merge lineage records per design §5.3: parent↔child; `inherited` vs `observed` counts
+- [ ] Cohort scoping per `lang` + `task_shape` aggregated across repos (design §5.5)
 
-### 3b. Cohort store (§20)
+### 3d. Cohort store (derived index)
 
-- [ ] Cohort counters as event-sourced projection over journals (derived index, not primary state)
+- [ ] Cohort counters as event-sourced projection over journals (design §5.4)
 - [ ] Periodic checkpoint; **rebuildable from journals on demand**
 - [ ] `schema_version` on the cohort store; bump-and-rebuild on schema change
-- [ ] Cohort record fields per §6: occurrences before intervention, intervention timestamp, occurrences after, rate delta, quarantine window M (per cluster, not global)
 
-### 3c. Judge prompt (§23, §2)
+### 3e. Judge prompt + sanitization promotion
 
-- [ ] Draft counterfactual + adversarial system prompt: "If a single fact, heuristic, or strategy had been in the agent's context, would it have flipped the outcome — and what would that thing say?"; argue both sides; pick
-- [ ] Few-shot examples drawn from preflight journals
-- [ ] Output format: structured (cluster id, proposed type, proposed text, reasoning, why-not-other-types)
+- [ ] Draft counterfactual + adversarial system prompt per design §10.1 and §1 principles
+- [ ] Few-shot examples drawn from accumulated journals
+- [ ] Output format: structured (cluster_id, proposed type, proposed text, reasoning, why-not-other-types)
 - [ ] Dry-run against real journals; human-rate outputs
-- [ ] Resolve open item #2 (judge prompt wording) → Decision Log when settled
+- [ ] Resolve open item #2 → Decision Log
+- [ ] **Promote sanitization filter from shadow to enforcing** for judge calls (design §10.2): filter failure aborts the call
+- [ ] Set sanitization drift threshold from Tool-era baseline (open item #5 → Decision Log)
 
-### 3d. Sanitization filter (§23)
+### 3f. Observer surface
 
-- [ ] Filter: redact secrets/key-shaped strings; reduce large file bodies to structural digests; strip PII
-- [ ] **Pinned and tested** against a fixed test set (seeded false-positives and false-negatives)
-- [ ] Apply on: judge calls; PR-body assembly (§18 step 6, lands in Phase 11); any future operator-export path
-- [ ] **Filter failure aborts the call** — never "send anyway"
-- [ ] Metric: rejection rate over rolling window (feeds §23 drift trigger)
-- [ ] Audits are **evidence-triggered**, not time-based (per §23) — drift threshold tuned in preflight (open item #5)
+- [ ] `meta` produces _reports_ (clusters, occurrences, candidate craft gaps) viewable through the operator surface
+- [ ] No artifacts drafted, no merges proposed
+- [ ] Reports visible in CLI (`lc admin observe`) and OWUI (`/observe`)
 
-- **Exit:** judge prompt dry-runs pass human rating on real journals; sanitization catches the seeded test cases (both directions); cohort store correctly rebuilds from a journal replay.
+### Chapter 3 stop point (→ 4)
 
----
-
-## Phase 4 — Meta tier-0 with manual review
-
-> **Goal:** outer loop produces tier-0 knowledge artifacts only; every one routes to operator surface. Refs: §5, §22, §24, §6.
-
-### 4a. `meta` process (§4)
-
-- [ ] Build `meta` as a separate process (in same or sibling container — §24 sub-service note keeps the split-later option clean)
-- [ ] Clustering ingest → judge counterfactual call → tier-0 artifact draft
-- [ ] **Single-flight lock** on `meta` iterations
-- [ ] Triggered by **evidence thresholds (§6)**, not a clock
-
-### 4b. Tier-0 ladder (§6)
-
-- [ ] Trigger: N ≥ ~5 occurrences in a cluster, no prior intervention
-- [ ] Intervention: knowledge entry (`skill/knowledge/*.md`)
-- [ ] Quarantine window M per cluster (preflight-tuned; default placeholder until Phase 8)
-- [ ] Cohort accounting (not raw counters): before/after windows + rate delta
-
-### 4c. Artifact draft + frontmatter (§22)
-
-- [ ] Frontmatter required fields enforced at draft time: `id`, `cluster_id`, `tier`, `lang`, `domain`, `tool`, `task_shape`, `created`, `supersedes` (null), `status` = `active`
-- [ ] No artifact written without all keys
-- [ ] Supersession plumbing: new artifact on existing `cluster_id` sets `supersedes`, flips prior to `superseded`
-
-### 4d. Augmenter (§22)
-
-- [ ] Hybrid selection: hard filter on structured tags (lang/domain/task-shape from trigger + early tool calls) → embedding rank within that set → **hard token budget**
-- [ ] Over-budget tiebreaker: cohort-proven (§21) + tighter match wins; **tier is not a tiebreaker on its own**
-- [ ] Per-task augmenter selection logged (required by §21 in-context assertion)
-
-### 4e. Hot-reload discipline (§22)
-
-- [ ] Atomic-rename writers everywhere watcher-readable files exist (skill loader, plan-slots, routing rules)
-- [ ] Readers ignore `*.tmp`
-- [ ] No naive `inotify` reads of in-flight writes
-
-### 4f. Operator surface entries (§24)
-
-- [ ] Pending list rendered with: artifact text, §23 provenance (cluster_id + journal evidence range), §20 cohort evidence
-- [ ] Approve/reject = the merge gate. Approve → git-proxy merges to `auto/<date>-<topic>` (Phase 6 hardens this); pre-Phase-6 interim is a direct file write to the skill volume, journaled to `audit.jsonl` as `artifact_merged_preproxy` for later reconciliation
-- [ ] Surface contradiction flags (§22) when a periodic judge pass over the active set flags cross-cluster contradictions
-- [ ] Surface efficacy-reversion notices (§21, lands in Phase 5)
-
-### 4g. Budgets + deferral (§24)
-
-- [ ] Per-window caps: artifacts/iteration = 1; judge wall-clock minutes/day; Polyglot exercise-runs/day (placeholder until Phase 5); journal write rate
-- [ ] Exceeding → **defer**, never drop evidence
-- [ ] Deferred iterations: **coalesce per `cluster_id`** (multiple deferred for same cluster collapse into one entry); cross-cluster FIFO; no cluster starved by another
-- [ ] Soft-limit queue depth → operator alarm; hard-limit → coalesce
-- [ ] Cluster + cohort re-read fresh from journals when coalesced entry runs (avoid stale snapshots)
-
-### 4h. Resource isolation (§24)
-
-- [ ] `meta` checks llama-cpp slot occupancy before issuing inference; back off when interactive lanes busy
-- [ ] Interactive always wins
-- [ ] No llama-swap config changes required (pragmatic-first cut)
-
-- **Exit:** ≥ 1 tier-0 knowledge artifact drafted → surfaced → human-approved → merged. A relabel of an existing cluster does not reset cohort history.
+- [ ] Cluster reports stabilize; you trust what the system sees
+- [ ] Cluster labels are auditable — you can read them and they make sense
+- [ ] **You want meta to draft fixes for the patterns, not just describe them**
 
 ---
 
-## Phase 5 — Polyglot oracle + real validation semantics
+## Chapter 4 — Learner
 
-> **Goal:** turn §13/§21 "must not regress" into a real, parameterized gate. Refs: §13, §21, §22, §15.
+> Refs: design §5.6, §5.7, §7, §8, §12.6. Plan §8. **Not active until chapter 3 stop point reached.**
 
-### 5a. Polyglot harness (§13)
+### 4a. Skill library
 
-- [ ] Canonical Polyglot clone in `little-coder-polyglot/` volume
-- [ ] Wrap behind `Oracle` interface: `run_subset(cluster_id, biased_subset) → ScoredResult` (cheap DIP now; rewrite-class expensive if deferred)
-- [ ] Biased subset selection: exercises in the cluster's domain over a uniform random subset
+- [ ] Directory layout per design §7: `skill/knowledge/*.md`, `skill/tools/*.md`, `skill/plan-slots/*.md`
+- [ ] Frontmatter schema enforced at draft time (design §7.1): `id`, `cluster_id`, `tier`, `lang`, `domain`, `tool`, `task_shape`, `created`, `supersedes` (null), `status` (`active`)
+- [ ] Supersession (design §7.5): new artifact on existing `cluster_id` sets `supersedes`, flips prior to `superseded`
+- [ ] Atomic-rename writers (design §7.3) for all watched files: `.tmp` + `rename(2)`; readers ignore `*.tmp`
+
+### 4b. Augmenter
+
+- [ ] Selection per design §7.4: hard tag filter → embedding rank → hard token budget
+- [ ] Over-budget tiebreaker: cohort-proven + tighter match; **tier is not a tiebreaker on its own**
+- [ ] Per-task augmenter selection logged (required by §8.4 in-context assertion)
+
+### 4c. Polyglot oracle
+
+- [ ] Wrap behind `Oracle` interface per design §8.1: `run_subset(cluster_id, biased_subset) → ScoredResult`
+- [ ] Biased subset selection by cluster domain
 - [ ] Result schema: per-exercise pass/fail + score + duration + augmenter selections during the run
+- [ ] Set N (minimum subset) and regression margin from preflight variance (open item #1 → Decision Log)
+- [ ] Baseline per design §8.2: score at last `main` green tag, re-measured on current biased subset
+- [ ] Below N → "insufficient evidence", not pass
 
-### 5b. Baseline + regression margin (§21, open item #1)
+### 4d. Validation gates
 
-- [ ] **Measure Polyglot variance** during preflight on the current biased subset
-- [ ] Set N (minimum subset size) and regression margin from measured variance — not by guess
-- [ ] Baseline = score at the last `main` green tag (§12), **re-measured on the current biased subset** (no stale globals)
-- [ ] Successful merge sets the new baseline (policy recorded once in Decision Log; actual baseline values live in `audit.jsonl`)
-- [ ] Below N → result is **"insufficient evidence"**, not pass
+- [ ] In-context assertion (design §8.4): if augmenter didn't select the artifact during validation → gate result = **void**, not pass
+- [ ] Single-exercise flip inside noise margin is **not** a regression (design §8.3)
+- [ ] Efficacy reversion (design §8.5): post-window indistinguishability → flag `ineffective` → auto-revert next iteration. Retirement journaled to `audit.jsonl`
+- [ ] Augmenter selects only `active`
 
-### 5c. In-context assertion (§21)
+### 4e. Tier 0 and Tier 1
 
-- [ ] During validation, log augmenter selections per task
-- [ ] If the artifact was **not** in-context for any validation task, gate result = **void**, not pass
-- [ ] Without this, the gate measured nothing
+- [ ] Tier 0 trigger: N ≥ ~5 occurrences in a cluster, no prior intervention (design §5.6)
+- [ ] Tier 0 intervention: knowledge entry (`skill/knowledge/*.md`)
+- [ ] Tier 1 trigger: ~20+ new occurrences after tier-0, rate unchanged
+- [ ] Tier 1 selection prompt: judge argues both (tool-craft vs plan-slot), then picks; argument is the journal entry (design §5.7)
+- [ ] Plan-slots loaded once at planner-process boot; planner watches the file
+- [ ] Quarantine window M per cluster (preflight-tuned; default placeholder until usage informs)
 
-### 5d. Efficacy reversion (§21)
+### 4f. Operator surface (live)
 
-- [ ] After the post-merge cohort window, if post-intervention rate is statistically indistinguishable from pre → flag `ineffective`
-- [ ] Auto-revert on next iteration (revert is §4-whitelisted)
-- [ ] Retirement journaled to `audit.jsonl`
-- [ ] Augmenter selects only `active` (already enforced in Phase 4)
+- [ ] Pending artifacts list rendered with: artifact text, provenance (cluster_id + journal evidence range), cohort evidence (design §12.6)
+- [ ] `lc admin pending` / `/pending` wired up
+- [ ] `lc admin approve <id>` / `/approve <id>` performs merge via git-proxy to `auto/<date>-<topic>` branch
+- [ ] `lc admin reject <id>` / `/reject <id>` discards artifact + journals decision
+- [ ] Surface contradiction flags (design §7.5) for cross-cluster conflicts
+- [ ] Surface efficacy-reversion notices (design §8.5)
 
-### 5e. Single-exercise flip handling (§21)
+### 4g. Budgets + deferral + resource isolation
 
-- [ ] A single-exercise flip inside the noise margin is **not a regression**
-- [ ] Document the threshold inline in the validator's output
+- [ ] Per-window caps per design §12.5: artifacts/iteration = 1; judge wall-clock minutes/day; Polyglot exercise-runs/day; journal write rate
+- [ ] Exceeding → **defer**, never drop evidence
+- [ ] Deferred iterations: **coalesce per `cluster_id`**; cross-cluster FIFO
+- [ ] `meta` checks llama-cpp slot occupancy before issuing inference; backs off when interactive lanes busy
+- [ ] Cluster + cohort re-read fresh from journals when coalesced entry runs
 
-- **Exit:** an artifact that does not help its cluster auto-retires after one window; one that does pulls the rate as expected; a deliberately-noisy artifact PR is blocked by the gate.
+### 4h. Longitudinal track
 
----
+- [ ] Sample cyclomatic complexity, file size, fan-out, churn across repos (design §9.1)
+- [ ] Aggregate over time; persist trend snapshots
+- [ ] Trend miner runs on rotation events (design §4.3)
+- [ ] Surface anomalies (silent clusters) to operator UI (design §9.3); **do not auto-act**
+- [ ] Works even when `outcome=unverified`
 
-## Phase 6 — git-proxy at the workspace edge
+### 4i. Backup restore drill
 
-> **Goal:** the agent has zero un-proxied raw-git paths. Refs: §4, §12, §17, §23.
+- [ ] Tested restore from `little-coder-journals/` + `little-coder-skill/` + `little-coder-cohorts/` backups (open item #7)
+- [ ] Cohort store rebuild from journals verified
 
-### 6a. Proxy binary
+### Chapter 4 stop point (→ 5)
 
-- [ ] Build `git-proxy` wrapper; site at **open-terminal workspace edge** (the git binary inside the workspace IS the proxy)
-- [ ] No raw-git fallback reachable by the agent
-- [ ] Whitelist: `commit`, `branch`, `checkout`, `merge --no-ff`, `tag`, `revert`, `reset --hard <tag>`, `fetch` (restricted to operator-pre-configured remotes; no all-refs; no new remotes mid-task)
-- [ ] Blocklist: `push --force`, `branch -D`, `filter-branch`, `gc --prune=now`, `remote add`, `remote set-url`, **all `submodule` subcommands**, all history rewrites, anything touching `.git/` directly
-
-### 6b. `.git/` mounts (§4)
-
-- [ ] `.git/config`, `.git/hooks/`, `.git/info/` mounted **read-only to the agent**
-- [ ] Allowed remotes baked in by operator at project-switch time
-- [ ] Dynamic paths stay writable: `.git/objects/`, `.git/refs/`, `.git/index`
-- [ ] `core.hooksPath` set to operator-controlled directory **outside** `.git/` (belt-and-suspenders)
-- [ ] `.gitattributes` filter directives no-op (because `filter=foo` must be declared in read-only `.git/config`)
-- [ ] `.gitmodules` cannot trigger submodule clone (blocklist above)
-
-### 6c. Branch / tag discipline (§12)
-
-- [ ] Outer-loop changes land on `auto/<date>-<topic>` branches; never direct to `main`
-- [ ] Tag `pre-iteration-<n>` before each outer-loop attempt
-- [ ] Rollback target = active instance / last green tag
-
-### 6d. Credentials separation (§23)
-
-- [ ] **Per-repo deploy tokens** for work repos: least-privilege, injected per task, never ambient
-- [ ] Self-improvement PAT lives with `meta`/git-proxy; unreachable from workspace plane
-- [ ] A task for repo A cannot reach repo B
-
-### 6e. Adversarial tests
-
-- [ ] Synthetic test: agent attempts `remote add` via direct `.git/config` write → blocked (`.git/config` is read-only)
-- [ ] Synthetic test: hostile `.gitmodules` in a workspace repo → no submodule clone occurs on any whitelisted op
-- [ ] Synthetic test: agent attempts `git push --force` → blocked; journaled
-
-- **Exit:** every git op the agent makes goes through the proxy; the three adversarial tests pass.
+- [ ] Tier-0 and tier-1 artifacts approved through the human gate enough times to trust drafting quality
+- [ ] Efficacy reversion working as expected
+- [ ] Polyglot gate catching the regressions you'd expect
+- [ ] **You're tired of approving every tier-0 entry by hand and want auto-merge for the well-behaved ones**
 
 ---
 
-## Phase 7 — OWUI pipeline (operator parity)
+## Chapter 5 — Self-modifier
 
-> **Goal:** real OWUI implementation of the operator surface, not a chat passthrough. Refs: §17, §24, §23.
+> Refs: design §5.8, §6, §11. Plan §9. **Not active until chapter 4 stop point reached.**
 
-- [ ] Register little-coder's MCP server as an OWUI tool via `lc-mcpo` OpenAPI
-- [ ] Task triggers stream conversationally (long, streaming, chat-shaped)
-- [ ] Slash-commands wired (each maps to the same control-plane entry as the CLI):
-  - [ ] `/project repo:`
-  - [ ] `/upstream pull`
-  - [ ] `/approve <id>`
-  - [ ] `/reject <id>`
-  - [ ] `/pending`
-  - [ ] `/confirm <task_id> pass|fail`
-- [ ] Artifact-review messages: structured rendering with artifact text + cohort evidence + provenance + Approve/Reject controls
-- [ ] Privilege separation (§24): operator commands authenticated at OWUI surface (using OWUI's configured auth); MCP server only authenticates task triggers (API key)
-- [ ] Alarms surfaced inline with artifact approvals (queue-depth, sanitization-drift, candidate-validation-timeout)
-- [ ] Operator smoke test: approve one artifact end-to-end through OWUI; verify identical merge effect to the CLI path
+### 5a. Tier-0 auto-merge
 
-- **Exit:** an artifact can be fully approved from OWUI with the same effect as the CLI path; UI smoke pass by operator.
+- [ ] Flip tier-0 to auto-merge
+- [ ] Efficacy reversion (design §8.5) gate before flip — verify it has caught at least one ineffective artifact during chapter 4
+- [ ] **Sampled human-review** of auto-merged tier-0 entries continues (design §10.4 control 2)
 
----
+### 5b. Tier 2 routing rules
 
-## Phase 8 — Exit preflight → tier-0 auto-merge + tier-1
-
-> **Goal:** §24 preflight exit checklist met; trust tier-0 to auto-merge; build tier-1. Refs: §24, §14, §5, §22.
-
-### 8a. Preflight exit (§24)
-
-- [ ] (a) ≥ K distinct clusters each have ≥ their M window of **observed** occurrences (K and M derived from preflight, recorded in Decision Log)
-- [ ] (b) Polyglot baseline variance measured; N + margin set (Phase 5 closes this)
-- [ ] (c) Counterfactual + adversarial judge prompt dry-run on real examples; human-rated
-- [ ] Human decision to exit preflight; journaled to `audit.jsonl`
-- [ ] Operator backup restore drill (open item #7) completed before this exit
-
-### 8b. Tier-0 auto-merge
-
-- [ ] Flip tier-0 to auto-merge once trusted
-- [ ] Efficacy reversion (§21) live before flip
-- [ ] **Sampled human-review** of auto-merged tier-0 entries continues (§23 control 2)
-- [ ] Watch for unusual efficacy-reversion patterns; investigate if the pattern looks worth investigating (per the doc's evidence-based posture — no fixed threshold)
-
-### 8c. Tier-1 build (§5, §6)
-
-- [ ] Trigger: ~20+ new occurrences after tier-0, rate unchanged
-- [ ] Selection prompt at tier-1: judge argues both (tool-craft `skill/tools/*.md` vs plan-slot `skill/plan-slots/*.md`), then picks; argument is the journal entry
-- [ ] Plan-slots loaded once at planner-process boot; planner watches file (atomic-rename already in place)
-- [ ] Tool-craft entries flow through the same augmenter as tier-0 knowledge
-
-- **Exit:** ≥ 1 tier-1 artifact merged with cohort improvement; tier-0 auto-merge running for the M window without unusual efficacy-reversion patterns.
-
----
-
-## Phase 9 — Longitudinal structural track (parallel with Phase 8)
-
-> **Goal:** silent-cluster safety net (§9). Operates on **trends**, not error counts.
-
-- [ ] Sample cyclomatic complexity, file size, fan-out, churn across repos little-coder has worked in
-- [ ] Aggregate over time; persist trend snapshots to a volume (likely under `little-coder-cohorts/` or a new `little-coder-trends/`)
-- [ ] Trend miner runs on rotation events (§19): consumes the rotated segment before archival
-- [ ] Surface anomalies to operator UI (§24); **do not auto-act** in v1
-- [ ] Works even when `outcome=unverified` (the whole point of the longitudinal track)
-
-- **Exit:** a trend report covering ≥ preflight + Phase 8 corpus is visible on the operator surface.
-
----
-
-## Phase 10 — Tier-2 routing rules + exploration
-
-> **Goal:** routing rules only after tier-1 cohort improvement. Add the exploration policy. Refs: §7, §22, §21.
-
-- [ ] **Staged-freeze**: no routing rule authored until cluster's tier-0 and tier-1 windows have run and the cluster has demonstrably resisted them
-- [ ] Routing rule loaded once at router-process boot from config file; atomic-rename hot-reload
+- [ ] **Staged-freeze** per design §5.8: no routing rule until cluster's tier-0 and tier-1 windows have run and the cluster has demonstrably resisted them
+- [ ] Routing rule loaded once at router-process boot from `skill/routing/*.yaml`; atomic-rename hot-reload
 - [ ] Router consults rule per task; matches gated by rule's internal conditions (e.g. `lang == rust`)
-- [ ] **Random-exploration**: 5–10% of tasks where the rule applies, **don't apply it** — collect counter-evidence
-- [ ] §21 efficacy reversion auto-retires rules that don't pay off
-- [ ] Exploration rate is a config tunable (open item: not blocking; default 5%)
+- [ ] **Random-exploration** per design §5.8: 5–10% of tasks where rule applies, **don't apply it** — collect counter-evidence
+- [ ] Efficacy reversion auto-retires rules that don't pay off
+- [ ] Exploration rate is a config tunable (default 5%)
 
-- **Exit:** ≥ 1 merged routing rule with measurable cohort improvement **and** exploration evidence that the rule is correct.
+### 5c. Tier 3 §6 justification gate
 
----
-
-## Phase 11 — Tier-3 candidate/active deploy (last, gated)
-
-> **Goal:** rare code-change path with blue/green deploy. Refs: §8, §18, §12.
-
-### 11a. §8 justification gate
-
-- [ ] Judge produces written argument with required structure: cluster + persistence record; interventions tried; **explicit argument** for why no plausible knowledge/tool-craft/plan-slot/routing rule could have closed the gap; proposed structural change + expected effect
-- [ ] If §8 (3) cannot be articulated → structural change is **not justified**; write the missing skill instead
+- [ ] Judge produces written argument per design §6: cluster + persistence record; interventions tried; **explicit argument** for why no plausible knowledge/tool-craft/plan-slot/routing rule could close the gap; proposed structural change + expected effect
+- [ ] If §6(3) cannot be articulated → structural change is **not justified**; write the missing skill instead
 - [ ] Argument journaled (auditable later)
 
-### 11b. Candidate topology (§18 steps 1–2)
+### 5d. Tier 3 candidate topology
 
-- [ ] Stage artifact in a separate ephemeral open-terminal workspace
-- [ ] Provision **paired** candidate topology: `candidate-little-coder` + `candidate-open-terminal` (do NOT collapse into one container)
+- [ ] Stage artifact in separate ephemeral open-terminal workspace (design §11.1 step 1)
+- [ ] Provision **paired** candidate topology (design §11.1 step 2): `candidate-little-coder` + `candidate-open-terminal` (do NOT collapse into one container)
 - [ ] Candidate mounts active's persistent volumes as **read-only snapshot** (cannot mutate active state)
-- [ ] Candidate has writable tmpfs for ephemeral journals/state (discarded on teardown)
-- [ ] Same containment as active (capabilities, network policy, `no-new-privileges`); tier-3 is not the time to loosen sandboxing
+- [ ] Writable tmpfs for candidate's ephemeral state (discarded on teardown)
+- [ ] Same containment as active (capabilities, network policy, `no-new-privileges`)
 
-### 11c. Validation (§18 steps 3–5)
+### 5e. Tier 3 validation
 
-- [ ] **Active drives** the test (stable, known-good harness); verdict is external
-- [ ] Two acceptance tests, both required:
-  - [ ] Issue fixed: reproduce-then-fix the specific §8 cluster
-  - [ ] No regression: Polyglot biased subset score ≥ baseline (Phase 5 gate)
+- [ ] **Active drives** the test (design §11.1 step 3); verdict is external
+- [ ] Two acceptance tests, both required (design §11.1 step 4):
+  - [ ] Issue fixed: reproduce-then-fix the specific §6 cluster
+  - [ ] No regression: Polyglot biased subset score ≥ baseline
 - [ ] Stratified Polyglot subset for upstream-merge validation (broader than per-cluster bias)
-- [ ] Verdict from objective oracle: Polyglot + §8 justification + §12 human gate — **never** the active instance's own assessment
+- [ ] Verdict from objective oracle: Polyglot + §6 justification + human gate — **never** active's own assessment
 
-### 11d. Repro persistence + PR (§18 step 6)
+### 5f. Tier 3 repro persistence + PR
 
-- [ ] Before candidate teardown: write executable repro to `little-coder-cohorts/repro/<artifact_id>/` (surviving named volume)
+- [ ] Before candidate teardown: write executable repro to `little-coder-cohorts/repro/<artifact_id>/` (surviving volume)
 - [ ] Open PR from `auto/<date>-<topic>` → `main` on **private** self-improvement remote
-- [ ] PR body templated mechanically: §8 justification + §20 cohort evidence + §18 validation outputs + §23 provenance (journal evidence range)
-- [ ] **PR body passed through sanitization filter** (§23) before posting; filter failure aborts the PR
+- [ ] PR body templated mechanically per design §11.2
+- [ ] **PR body passed through sanitization filter** before posting (design §10.2); filter failure aborts the PR
 
-### 11e. Deploy + verify (§18 step 7)
+### 5g. Tier 3 deploy + verify
 
-- [ ] Operator reviews PR on private remote, merges what they choose
+- [ ] Operator reviews PR on private remote, merges what they choose (design §11.1 step 7)
 - [ ] Operator runs `docker compose up -d --build little-coder`
-- [ ] Active instance never mutated; restart is clean swap between known-good tagged commits
-- [ ] Volumes survive the rebuild (verified during Phase 1 — re-verify here)
-- [ ] Post-deploy verification: (a) healthcheck green on `agent` + `lc-mcpo`; (b) **smoke task = re-run the persisted §8 repro** against deployed-active
+- [ ] Active instance never mutated; clean swap between known-good tagged commits
+- [ ] Volumes survive the rebuild
+- [ ] Post-deploy verification: (a) healthcheck green on `agent` + `lc-mcpo`; (b) smoke task = re-run the persisted §6 repro
 - [ ] Either check fails → `git revert` + same compose command, or pin to prior tag
 
-### 11f. Rollback drill
+### 5h. Tier 3 rollback drill
 
-- [ ] At least one real rollback drill before considering this phase exited
+- [ ] At least one real rollback drill before considering this chapter operational
 - [ ] Drill journaled; restore-from-volume timing measured
 
-- **Exit:** one tier-3 artifact lands end-to-end on a non-production fork; smoke task passes; rollback drill executed.
+### 5i. Upstream pull (chapter 5 makes it live)
+
+- [ ] `/upstream pull` / `lc admin upstream pull` becomes operational per design §12.2
+- [ ] Tiers 0–2 (additive skill files) land cleanly
+- [ ] Tier-3 conflicts resolved manually on `upstream-merge/<date>` branch; run §5d–§5g flow with **stratified Polyglot subset across all live cluster domains** before becoming active
+- [ ] Pull journaled as `upstream_pulled` with old + new commit ids
+- [ ] Self-authored tier-3 artifacts invalidated by an upstream pull → journaled `invalidated_by_upstream` and retired
+
+### Chapter 5 stop point
+
+This is the endpoint. The system continues to grow but does so through tier-3 artifacts (rare), not new chapters.
 
 ---
 
-## Cross-cutting tasks (not phase-gated; tracked here)
+## Cross-cutting (not chapter-gated)
 
-These run alongside multiple phases.
+These run alongside multiple chapters.
 
-- [ ] **Config management** (§24): centralized typed config (YAML + JSON schema), validated at boot, hot-reloadable where safe; restart-required where schema-affecting
-  - Tunables to enumerate: per-cluster M; Polyglot N/margin; budget caps; `task_abandoned` timeout per channel; exploration rate; coalesce thresholds; similarity floor; augmenter budget; sanitization drift threshold; sanitization filter ruleset; drain deadline
-- [ ] **Metrics endpoint** (§24): Prometheus on `agent` and `meta`: queue depth; judge wall-clock minutes/day; GPU minutes/day; candidate-validation duration histogram; journal write rate; sanitization rejection rate; augmenter selection count per artifact; llama-cpp slot occupancy
-- [ ] **Alarms** routed to operator UI alongside artifact approvals
-- [ ] **Golden-journal test suite** (§24): synthetic journals with known cohort shapes covering cluster assignment + split/merge lineage + tier escalation + efficacy reversion + sanitization. Run on each `meta` release before deploy
-- [ ] **Schema-version discipline** (§24): journal envelope, frontmatter, cohort store, config all carry `schema_version`; readers tolerate older shapes; migrations are explicit operator jobs; **tier-3 self-changes cannot propose schema changes**
-- [ ] **Sanitization drift audit** (§23): evidence-triggered when rejection rate moves outside baseline envelope (threshold = open item #5, preflight-tuned); sample N raw journal records uniformly across `repo`/`lang`; human-review for false negatives
+- [ ] **Config management** (design §12.8): tunables added per chapter:
+  - Tool: drain deadline; `task_abandoned` timeout per channel; basic budget caps
+  - Observer: similarity floor; sanitization drift threshold
+  - Learner: per-cluster M; Polyglot N/margin; augmenter budget; full budget caps; coalesce thresholds
+  - Self-modifier: exploration rate
+- [ ] **Metrics endpoint** (design §9.3): Prometheus on `agent` (Tool) and `meta` (Observer+); metrics added per chapter
+- [ ] **Alarms** routed to operator UI alongside artifact approvals (design §9.3) — from chapter 4 onward
+- [ ] **Golden-journal test suite** (design §12.11): from chapter 3 onward, run on each `meta` release before deploy
+- [ ] **Schema-version discipline** (design §12.9): readers tolerate older shapes; migrations are explicit operator jobs; **tier-3 self-changes cannot propose schema changes**
+- [ ] **Sanitization drift audit** (design §10.2): evidence-triggered when rejection rate moves outside baseline envelope; sample N raw journal records; human-review for false negatives — from chapter 3 onward
 
 ---
 
 ## Decision Log
 
-> Append-only. Every status change or scope shift adds a row. Date is decision date, not entry date.
+> Append-only. Every status change or scope shift adds a row. Date is decision date.
 
-| Date       | Phase | Decision                                                                                                                                                                                                                         | Refs                                          |
-| ---------- | ----- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------- |
-| 2026-05-19 | n/a   | Plan + tasks docs created from `Self-improving-little-coder-design.md`. No deviations from the locked decisions in §15.                                                                                                          | plan §5                                       |
-| 2026-05-20 | 0     | Open-terminal network change promoted from "Phase 6 hardening" to "Phase 0 prerequisite." Reachability bounds the blast radius from Phase 1 onward; the change must land before any autonomous workload runs.                    | plan §4 Phase 0, design §17                   |
-| 2026-05-20 | n/a   | Removed per-task git worktrees from the session model. Simpler model: one focused project cloned directly into open-terminal, one task at a time, FIFO across triggers. `/project repo:` wipes and re-clones to switch projects. | design §17, plan §3, plan §4 Phase 1/Phase 2  |
-| 2026-05-20 | n/a   | Removed all references to a fixed-cadence "quarterly sanitization floor." Audits are evidence-triggered per §23, consistent with the doc's evidence-based posture throughout.                                                    | design §23, plan §7, tasks 3d / cross-cutting |
-| 2026-05-20 | 8     | Removed the "X% efficacy reversion" placeholder threshold from Phase 8 exit. Watch for unusual efficacy-reversion patterns qualitatively; investigate if the pattern looks worth investigating. No fixed numeric threshold.      | plan §4 Phase 8, tasks 8b                     |
+| Date       | Chapter | Decision                                                                                                                                                                                                         | Refs                      |
+| ---------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------- |
+| 2026-05-19 | n/a     | Plan + tasks docs created from the design doc.                                                                                                                                                                   | plan §10                  |
+| 2026-05-20 | 1       | Open-terminal network change promoted to a **Tool requirement**. Reachability bounds the blast radius from Tool onward.                                                                                          | design §3.4               |
+| 2026-05-20 | n/a     | Removed per-task git worktrees from the session model. One focused project cloned directly; one task at a time; FIFO. `/project repo:` wipes and re-clones.                                                      | design §3.4, §12.3, §12.4 |
+| 2026-05-20 | n/a     | Removed any "quarterly sanitization floor." Audits are evidence-triggered.                                                                                                                                       | design §10.2              |
+| 2026-05-20 | 4       | Removed numeric "X%" placeholder for tier-0 efficacy-reversion exit. Qualitative — investigate if patterns look worth investigating.                                                                             | plan §8                   |
+| 2026-05-20 | n/a     | Design doc reorganized topically (architecture → data → safety → operations → roadmap).                                                                                                                          | design — whole doc        |
+| 2026-05-20 | n/a     | Plan restructured from 11 phases into **5 chapters** with explicit stop points. Build agent stops at each chapter boundary; operator advances when ready.                                                        | plan §2                   |
+| 2026-05-20 | 1       | Sanitization filter built in Tool, run in **shadow mode**; promoted to enforcing in chapter 3 (Observer). This collects baseline drift behavior during Tool/OWUI usage so chapter 3 doesn't have to wait for it. | design §10.2, plan §5     |
+| 2026-05-20 | 1       | All four named volumes declared in Tool (even though only `little-coder-journals/` actively records before chapter 3) so later chapters don't trigger silent wipes.                                              | design §3.6               |
+| 2026-05-20 | 1       | OWUI's current direct access to open-terminal **ends in Tool**; chapter 2 restores it via `lc-mcpo`. Documented as a user-visible change.                                                                        | design §3.4, plan §5      |
 
 ---
 
-## Open items (mirror of plan §6)
+## Open items (mirror of plan §11)
 
-Tuned by preflight unless otherwise noted. Listed here so they don't get lost.
+Tuned by preflight (observed usage) unless noted.
 
-- [ ] **#1** Polyglot N + regression margin (Phase 5; preflight variance)
-- [ ] **#2** Counterfactual judge prompt wording + few-shot (Phase 3 dry-run; resolves at Decision Log entry)
-- [ ] **#3** `task_abandoned` timeout per channel (Phase 2 default; tune before Phase 8)
-- [ ] **#4** Neutral test-runner for §18 (later hardening; not blocking Phase 11)
-- [ ] **#5** Sanitization audit drift threshold (Phase 4 `meta`-on; preflight rejection-rate baseline)
-- [ ] **#6** Reserved-slot promotion threshold (Phase 8; only if starvation observed)
-- [ ] **#7** Backup cadence + restore drill (Phase 1 volumes; drill before Phase 8)
+- [ ] **#1** Polyglot N + regression margin (baseline variance collected during Tool/OWUI; computed at Observer; used in Learner)
+- [ ] **#2** Counterfactual judge prompt wording + few-shot (Observer dry-run; resolves at Decision Log entry)
+- [ ] **#3** `task_abandoned` timeout per channel (Tool default usable; tune during Tool/OWUI usage; lock by Learner)
+- [ ] **#4** Neutral test-runner for design §11.1 step 3 (later hardening; not blocking Self-modifier)
+- [ ] **#5** Sanitization audit drift threshold (Tool-era shadow-mode baseline; resolves at Observer chapter when filter goes enforcing)
+- [ ] **#6** Reserved-slot promotion threshold (`meta` GPU) — Learner+ if starvation observed
+- [ ] **#7** Backup cadence + restore drill (Tool: backup cadence decided; drill before Learner chapter merges first artifact)
 - [ ] **#8** `.git/config` flexibility upgrade (deferred; no current trigger)
 
 ---
 
 ## How to drive this
 
-1. Pick the active phase at the top.
-2. Work tasks top-to-bottom within the phase; mark `[~]` when starting, `[x]` when the **acceptance criterion** in the task is met (not just "code written").
-3. On exit-criterion satisfaction → flip phase status; add Decision Log row; bump _Last updated_.
-4. New decisions → Decision Log first, then update [integration-plan.md](integration-plan.md) lock table if the decision is permanent.
-5. Discovered scope → if it lives inside an existing phase, add a task; if it's a new gate, propose a new phase in the plan first.
-6. **Design doc still wins on conflict.** If a phase here implies something [Self-improving-little-coder-design.md](Self-improving-little-coder-design.md) forbids, fix this doc.
+1. Active chapter is at the top.
+2. Work tasks top-to-bottom within the chapter; mark `[~]` when starting, `[x]` when the **acceptance criterion** in the task is met (not just "code written").
+3. On chapter stop-point satisfaction → flip chapter status; add Decision Log row; bump `Last updated`.
+4. **The build agent stops at the chapter boundary.** Resuming work means deliberately starting the next chapter — not a hand-off the agent makes by itself.
+5. New decisions → Decision Log first, then update [`integration-plan.md`](integration-plan.md) lock table if permanent.
+6. Discovered scope → if it lives inside an existing chapter, add a task; if it's a new gate, propose a new chapter in the plan first.
+7. **Design doc wins on conflict.** If a chapter here implies something the design doc forbids, fix this doc.
