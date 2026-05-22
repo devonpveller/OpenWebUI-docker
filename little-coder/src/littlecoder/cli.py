@@ -151,6 +151,12 @@ def cmd_admin_upstream_pull(_args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_admin_task_cancel(args: argparse.Namespace) -> int:
+    res = _request("POST", f"/tasks/{args.task_id}/cancel")
+    print(res.get("status", "cancelled"))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="lc", description="little-coder operator CLI")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -197,6 +203,10 @@ def build_parser() -> argparse.ArgumentParser:
     cf.add_argument("task_id")
     cf.add_argument("outcome", choices=["pass", "fail", "unverified"])
     cf.set_defaults(func=cmd_admin_task_confirm)
+
+    cc = atask_sub.add_parser("cancel", help="interrupt a running or queued task")
+    cc.add_argument("task_id")
+    cc.set_defaults(func=cmd_admin_task_cancel)
 
     aups = asub.add_parser("upstream", help="upstream fork-parent administration")
     aups_sub = aups.add_subparsers(dest="upstream_cmd", required=True)

@@ -13,9 +13,11 @@ that points little-coder's shell tool at `ot-exec` — see `pi-extension/`.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import json
 import os
+import signal
 import subprocess
 import tempfile
 
@@ -27,6 +29,21 @@ from .tasks import TaskContext, digest
 
 class TaskTimeout(RuntimeError):
     """The agent exceeded the per-channel abandoned-timeout (design §4.2)."""
+
+
+def kill_process_group(proc) -> None:
+    """Kill the agent and ALL its descendants. The agent is started in its own
+    session (`start_new_session`), so its children — `ot-exec` and their own
+    children — share its process-group id. Killing the whole group ensures a
+    `communicate()` call is never left waiting on a surviving grandchild that
+    still holds the stderr pipe open."""
+    if proc is None:
+        return
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        with contextlib.suppress(Exception):
+            proc.kill()
 
 
 @dataclasses.dataclass
@@ -71,6 +88,42 @@ def read_activity_file(path: str) -> list[dict]:
     return items
 
 
+def extract_answer(pi_events_path: str) -> str:
+    """Pull the agent's final answer text out of the pi `--mode json` stream.
+    Prefer the `agent_end` event's final messages; fall back to the
+    concatenated `text_delta` events."""
+    deltas: list[str] = []
+    try:
+        with open(pi_events_path, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                etype = ev.get("type")
+                if etype == "agent_end":
+                    for msg in reversed(ev.get("messages") or []):
+                        if msg.get("role") != "assistant":
+                            continue
+                        text = "".join(
+                            c.get("text", "")
+                            for c in msg.get("content") or []
+                            if isinstance(c, dict) and c.get("type") == "text"
+                        )
+                        if text.strip():
+                            return text.strip()
+                elif etype == "message_update":
+                    ame = ev.get("assistantMessageEvent") or {}
+                    if ame.get("type") == "text_delta":
+                        deltas.append(str(ame.get("delta", "")))
+    except OSError:
+        pass
+    return "".join(deltas).strip()
+
+
 class AgentRunner:
     """One method: `run_task`. Blocking — the daemon calls it off the event
     loop (`asyncio.to_thread`)."""
@@ -86,23 +139,27 @@ class AgentRunner:
         """Run one task to completion. Writes `tool_call` / `error` records;
         the daemon brackets the task with `task_started` / `task_ended`.
         Raises TaskTimeout if the agent outlives `timeout`."""
-        fd, event_stream = tempfile.mkstemp(suffix=".jsonl", prefix="lc-events-")
+        fd, ot_events = tempfile.mkstemp(suffix=".jsonl", prefix="lc-ot-")
         os.close(fd)
-        # The daemon reads this path live to report progress (read_activity_file).
-        ctx.state.event_stream_path = event_stream
+        ctx.state.event_stream_path = ot_events  # ot-exec stream → journals
+        # The pi --mode json events stream live to this file; the daemon
+        # serves it to the chat surface, which reads it through to the end,
+        # so it is NOT unlinked with the task (tmpfs clears it on restart).
+        pi_events = os.path.join(
+            tempfile.gettempdir(), f"lc-pi-{ctx.state.task_id}.jsonl"
+        )
+        ctx.state.events_path = pi_events
         try:
-            env = self._build_env(ctx, event_stream)
+            env = self._build_env(ctx, ot_events)
             cmd, stdin_text = self._build_invocation(ctx.state.prompt)
-            exit_code = self._run_cli(cmd, stdin_text, env, timeout, ctx)
-            commands = self._drain_events(event_stream, ctx)
+            exit_code = self._run_cli(cmd, stdin_text, env, timeout, ctx, pi_events)
+            commands = self._drain_events(ot_events, ctx)
             outcome, signal = self._verdict(ctx)
             return AgentResult(outcome, signal, exit_code, commands)
         finally:
-            ctx.state.event_stream_path = None  # file is about to be removed
-            try:
-                os.unlink(event_stream)
-            except OSError:
-                pass
+            ctx.state.event_stream_path = None  # ot-exec file is removed
+            with contextlib.suppress(OSError):
+                os.unlink(ot_events)
 
     def _build_env(self, ctx: TaskContext, event_stream: str) -> dict[str, str]:
         st = ctx.state
@@ -146,37 +203,60 @@ class AgentRunner:
         env: dict[str, str],
         timeout: int,
         ctx: TaskContext,
+        pi_events: str,
     ) -> int | None:
+        """Run the agent, streaming its `--mode json` events to `pi_events`
+        as they are produced. The process handle is published on the task
+        state so the daemon can cancel it."""
         try:
-            proc = subprocess.run(
+            events_fh = open(pi_events, "w", encoding="utf-8")
+        except OSError as exc:
+            self.journals.write(ctx.error("daemon_error", f"events file: {exc}"))
+            return None
+        try:
+            proc = subprocess.Popen(
                 cmd,
                 cwd=self.cfg.workspace.path,
                 env=env,
-                input=stdin_text,
-                capture_output=True,
+                stdin=subprocess.PIPE if stdin_text else subprocess.DEVNULL,
+                stdout=events_fh,  # NDJSON events stream straight to the file
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=timeout,
-                # umask 000: files the agent edits must stay writable from
-                # the open-terminal plane too (shared workspace volume).
+                # Own session/process-group so cancel/timeout can kill the
+                # agent AND its descendants (kill_process_group).
+                start_new_session=True,
+                # umask 000: files the agent edits must stay writable from the
+                # open-terminal plane too (shared workspace volume).
                 preexec_fn=(lambda: os.umask(0)) if os.name == "posix" else None,
             )
-        except subprocess.TimeoutExpired as exc:
-            self.journals.write(ctx.error("timeout", f"agent exceeded {timeout}s"))
-            raise TaskTimeout(f"agent exceeded {timeout}s") from exc
         except FileNotFoundError as exc:
-            # The little-coder binary is missing — a deploy fault, not a task
-            # fault. Journal it and let the daemon end the task `unverified`.
+            events_fh.close()
             self.journals.write(ctx.error("agent_missing", str(exc), tool="agent"))
             return 127
-        # The agent's stdout IS its answer (`--mode text --print`). Surface it
-        # — this is what the operator actually asked to see.
-        ctx.state.answer = (proc.stdout or "").strip()
-        if proc.returncode != 0:
-            tail = (proc.stderr or "")[-1000:]
+
+        ctx.state.agent_process = proc  # published so the daemon can cancel
+        stderr = ""
+        try:
+            _, stderr = proc.communicate(input=stdin_text, timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            kill_process_group(proc)
+            with contextlib.suppress(Exception):
+                proc.communicate()
+            self.journals.write(ctx.error("timeout", f"agent exceeded {timeout}s"))
+            raise TaskTimeout(f"agent exceeded {timeout}s") from exc
+        finally:
+            ctx.state.agent_process = None
+            events_fh.close()
+
+        rc = proc.returncode
+        ctx.state.answer = extract_answer(pi_events)
+        # rc < 0 ⇒ the process was killed (cancel / shutdown) — not a fault.
+        if rc is not None and rc > 0:
+            tail = (stderr or "")[-1000:]
             self.journals.write(
-                ctx.error("agent_exit", f"exit {proc.returncode}: {tail}", tool="agent")
+                ctx.error("agent_exit", f"exit {rc}: {tail}", tool="agent")
             )
-        return proc.returncode
+        return rc
 
     def _drain_events(self, event_stream: str, ctx: TaskContext) -> int:
         """Convert `ot-exec`'s command events into the task's `activity` list

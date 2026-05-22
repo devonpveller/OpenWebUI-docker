@@ -51,12 +51,18 @@ class TaskState:
     outcome: Outcome | None = None
     signal: str | None = None
     detail: str = ""
-    # The agent's textual answer (its stdout) — what the operator actually
-    # asked to see. `activity` is the list of commands it ran (the visible
-    # process); `event_stream_path` is the live JSONL file ot-exec appends to.
+    # The agent's textual answer (extracted from its --mode json events).
+    # `activity` is the list of commands it ran; `event_stream_path` is the
+    # ot-exec JSONL file (journals); `events_path` is the pi --mode json
+    # stream the chat surface renders live; `agent_process` is the running
+    # subprocess handle so the daemon can cancel it.
     answer: str = ""
     activity: list = dataclasses.field(default_factory=list)
     event_stream_path: str | None = None
+    events_path: str | None = None
+    agent_process: object = dataclasses.field(
+        default=None, repr=False, compare=False
+    )
     created_ts: str = dataclasses.field(default_factory=utc_now)
     started_ts: str | None = None
     ended_ts: str | None = None

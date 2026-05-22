@@ -21,7 +21,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 from . import __version__
-from .agent import AgentRunner, TaskTimeout, read_activity_file
+from .agent import AgentRunner, TaskTimeout, kill_process_group, read_activity_file
 from .audit import AuditLog
 from .config import Config, load_config
 from .journals import Journals, utc_now
@@ -149,6 +149,7 @@ class LittleCoderDaemon:
             self.journals.write(self.contexts[tid].abandoned("shutdown"))
             self.tasks[tid].status = TaskStatus.ABANDONED
             self.tasks[tid].detail = "abandoned: drain deadline exceeded"
+            kill_process_group(self.tasks[tid].agent_process)  # free the worker
         await self.queue.put(_WORKER_STOP)
         if self._worker_task is not None:
             with contextlib.suppress(asyncio.TimeoutError, asyncio.CancelledError):
@@ -293,6 +294,29 @@ class LittleCoderDaemon:
         state.detail = f"outcome amended {prior} → {req.outcome} by {req.actor}"
         return state
 
+    def cancel(self, task_id: str) -> dict:
+        """Interrupt a task — operator-triggered abandonment (an OWUI 'stop',
+        or `lc admin task cancel`). Kills the agent if it is running. This is
+        abandonment, not a mid-task write — consistent with design §12.4."""
+        state = self.tasks.get(task_id)
+        if state is None:
+            raise HTTPException(404, f"unknown task {task_id}")
+        if state.status not in (TaskStatus.QUEUED, TaskStatus.RUNNING):
+            return {
+                "task_id": task_id,
+                "status": state.status.value,
+                "detail": "task already finished",
+            }
+        ctx = self.contexts.get(task_id)
+        if ctx is not None:
+            self.journals.write(ctx.abandoned("cancelled"))
+        kill_process_group(state.agent_process)  # agent + all descendants
+        state.status = TaskStatus.ABANDONED
+        state.detail = "cancelled by the operator"
+        state.ended_ts = utc_now()
+        metrics.record_task("abandoned")
+        return {"task_id": task_id, "status": "cancelled"}
+
     async def switch_project(self, req: ProjectRequest) -> dict:
         try:
             requested = normalize_repo_url(req.repo)
@@ -380,9 +404,36 @@ def build_app(daemon: LittleCoderDaemon) -> FastAPI:
             data["commands"] = len(live)
         return data
 
+    @app.get("/tasks/{task_id}/events")
+    def task_events(task_id: str, offset: int = 0) -> dict:
+        """Live pi `--mode json` event stream, from line `offset` onward —
+        the chat surface polls this to render the process as it unfolds."""
+        state = daemon.tasks.get(task_id)
+        if state is None:
+            raise HTTPException(404, f"unknown task {task_id}")
+        events: list[str] = []
+        if state.events_path:
+            try:
+                with open(state.events_path, encoding="utf-8") as fh:
+                    lines = fh.readlines()
+                events = [ln.rstrip("\n") for ln in lines[offset:]]
+            except OSError:
+                events = []
+        return {
+            "task_id": task_id,
+            "status": state.status.value,
+            "done": state.status.value in ("done", "abandoned", "rejected"),
+            "events": events,
+            "next_offset": offset + len(events),
+        }
+
     @app.post("/tasks/{task_id}/confirm")
     def confirm(task_id: str, req: ConfirmRequest) -> dict:
         return daemon.confirm(task_id, req).public()
+
+    @app.post("/tasks/{task_id}/cancel")
+    def cancel_task(task_id: str) -> dict:
+        return daemon.cancel(task_id)
 
     @app.get("/focus")
     def focus() -> dict:

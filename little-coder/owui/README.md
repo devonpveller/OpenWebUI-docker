@@ -49,6 +49,18 @@ Check the function's **Valves**:
 /status   /help                      open to everyone
 ```
 
+## Live streaming & interruption
+
+A plain message streams the agent's process into the chat as it happens — its
+**🧠 thinking**, each **🔧 tool call**, and the **answer**, token by token
+(the agent runs with pi `--mode json`; the daemon serves the event stream).
+Set the `show_thinking` valve to `false` to hide reasoning.
+
+Press OpenWebUI's **Stop** button to interrupt a running task — the pipe calls
+`/tasks/{id}/cancel` and the daemon kills the agent (and all its child
+processes). This is operator-triggered abandonment, consistent with design
+§12.4; it is *not* a mid-task write into the agent.
+
 ## Optional: register lc-mcpo as an OpenAPI tool
 
 OpenWebUI → **Admin → Settings → Tools → ➕**, add:
