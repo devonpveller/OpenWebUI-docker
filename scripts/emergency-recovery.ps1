@@ -6,6 +6,43 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# ──────────────────────────────────────────────────────────────────────────
+# Service inventory — every container the recovery stack maintains.
+#
+# The MAIN compose project (docker-compose.yml) holds several planes:
+#   core    openwebui, llama-cpp, llama-cpp-embed, tailscale
+#   memory  mnemory, mnemory-gateway, mnemory-backup
+#   search  tor, redis, searxng, gateway, mcpo      (Private Search Gateway)
+#   coder   open-terminal, little-coder, lc-mcpo, lc-egress, little-coder-backup
+#   aux     smolcrawl-pipelines, surrealdb, open_notebook, openwebui-backup,
+#           watchtower
+#
+# Open Brain (OB1) is a SEPARATE compose project (OB1\docker\docker-compose.yml,
+# project name "open-brain"). Its containers attach to the main stack's
+# ai-stack_llm-net as an EXTERNAL network, so OB1 is shut down first and
+# brought up last — only after llama-cpp / llama-cpp-embed are healthy.
+# ──────────────────────────────────────────────────────────────────────────
+
+$Script:OB1Compose = "OB1\docker\docker-compose.yml"
+
+# Main compose services, low-level dependency first.
+$Script:MainStackServices = @(
+    "openwebui", "llama-cpp", "llama-cpp-embed", "tailscale",
+    "mnemory", "mnemory-gateway", "mnemory-backup", "openwebui-backup",
+    "smolcrawl-pipelines", "surrealdb", "open_notebook",
+    "tor", "redis", "searxng", "gateway", "mcpo",
+    "open-terminal", "little-coder", "lc-mcpo", "lc-egress", "little-coder-backup",
+    "watchtower"
+)
+
+# Open Brain (OB1) services, low-level dependency first.
+$Script:OB1Services = @(
+    "openbrain-db", "openbrain-mcp", "openbrain-ext",
+    "openbrain-mcpo", "openbrain-mcpo-ext", "openbrain-postgrest",
+    "openbrain-rest", "openbrain-entity-worker",
+    "openbrain-wiki", "openbrain-wiki-viewer"
+)
+
 function Write-Log {
     param([string]$Level, [string]$Message)
     $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
@@ -31,6 +68,12 @@ function Test-DockerCompose {
     }
 }
 
+function Test-OB1Available {
+    # OB1 is an optional, separately-deployed stack. Recovery only drives it
+    # when its compose file is present in the workspace.
+    return Test-Path $Script:OB1Compose
+}
+
 function Test-NetworkConnectivity {
     param([string]$Container)
     try {
@@ -42,40 +85,134 @@ function Test-NetworkConnectivity {
     }
 }
 
+function Stop-ServiceGroup {
+    # Stop a set of related services in one call (best-effort, never throws).
+    param([string]$Label, [string[]]$Services)
+    Write-Log "INFO" "Stopping $Label ($($Services -join ', '))..."
+    try {
+        docker compose stop @Services
+    }
+    catch {
+        Write-Log "WARN" "${Label} stop had issues, continuing: $_"
+    }
+}
+
+function Start-ServiceGroup {
+    # Start a set of related services in one call. docker compose resolves
+    # each service's depends_on, so listed services self-order.
+    param([string]$Label, [string[]]$Services)
+    Write-Log "INFO" "Starting $Label ($($Services -join ', '))..."
+    try {
+        docker compose up -d @Services
+        Write-Log "SUCCESS" "$Label started"
+    }
+    catch {
+        Write-Log "WARN" "Failed to start ${Label}: $_"
+    }
+}
+
+function Stop-OB1Stack {
+    # Bring the Open Brain (OB1) compose project to a stop. Done FIRST in a
+    # shutdown so the main stack can later drop/recreate ai-stack_llm-net.
+    if (-not (Test-OB1Available)) { return }
+    Write-Log "INFO" "Stopping Open Brain (OB1) stack..."
+    try {
+        docker compose -f $Script:OB1Compose stop
+    }
+    catch {
+        Write-Log "WARN" "OB1 stop had issues, continuing: $_"
+    }
+}
+
+function Start-OB1Stack {
+    # Bring the Open Brain (OB1) compose project up. OB1's own depends_on
+    # handles its internal ordering; it must run AFTER the main stack so
+    # ai-stack_llm-net (external) exists and llama-cpp is reachable.
+    if (-not (Test-OB1Available)) {
+        Write-Log "INFO" "Open Brain (OB1) not deployed in this workspace - skipping"
+        return
+    }
+    Write-Log "INFO" "Starting Open Brain (OB1) stack ($($Script:OB1Services.Count) containers)..."
+    try {
+        docker compose -f $Script:OB1Compose up -d
+        Write-Log "SUCCESS" "Open Brain (OB1) stack started"
+    }
+    catch {
+        Write-Log "WARN" "Failed to start OB1 stack: $_"
+    }
+}
+
+function Reset-OB1Stack {
+    # Recreate the OB1 compose project (nuclear path).
+    if (-not (Test-OB1Available)) {
+        Write-Log "INFO" "Open Brain (OB1) not deployed - skipping OB1 recreate"
+        return
+    }
+    Write-Log "INFO" "Recreating Open Brain (OB1) stack..."
+    try {
+        docker compose -f $Script:OB1Compose down
+        Start-Sleep -Seconds 5
+        docker compose -f $Script:OB1Compose up -d
+        Write-Log "SUCCESS" "OB1 stack recreated"
+    }
+    catch {
+        Write-Log "WARN" "OB1 recreate had issues: $_"
+    }
+}
+
 function Test-BasicConnectivity {
     Write-Log "INFO" "Performing basic connectivity checks..."
-    
-    # Check if containers are running
+
     try {
         $containers = docker compose ps --format json | ConvertFrom-Json
-        $openwebuiStatus = ($containers | Where-Object { $_.Service -eq "openwebui" }).State
-        $llamaCppStatus = ($containers | Where-Object { $_.Service -eq "llama-cpp" }).State
-        $llamaCppEmbedStatus = ($containers | Where-Object { $_.Service -eq "llama-cpp-embed" }).State
-        $tailscaleStatus = ($containers | Where-Object { $_.Service -eq "tailscale" }).State
-        $mnemoryStatus = ($containers | Where-Object { $_.Service -eq "mnemory" }).State
-        $smolcrawlStatus = ($containers | Where-Object { $_.Service -eq "smolcrawl-pipelines" }).State
-        $watchtowerStatus = ($containers | Where-Object { $_.Service -eq "watchtower" }).State
-        $mnemoryBackupStatus = ($containers | Where-Object { $_.Service -eq "mnemory-backup" }).State
-        $openwebuiBackupStatus = ($containers | Where-Object { $_.Service -eq "openwebui-backup" }).State
-        $openNotebookStatus = ($containers | Where-Object { $_.Service -eq "open_notebook" }).State
-        $surrealdbStatus = ($containers | Where-Object { $_.Service -eq "surrealdb" }).State
 
-        Write-Log "INFO" "Container states - OpenWebUI: $openwebuiStatus, llama-cpp: $llamaCppStatus, llama-cpp-embed: $llamaCppEmbedStatus, Tailscale: $tailscaleStatus, Mnemory: $mnemoryStatus, SmolCrawl: $smolcrawlStatus, Watchtower: $watchtowerStatus, mnemory-backup: $mnemoryBackupStatus, openwebui-backup: $openwebuiBackupStatus, open_notebook: $openNotebookStatus, surrealdb: $surrealdbStatus"
-        
-        # If all containers are running, test basic functionality
-        if ($openwebuiStatus -eq "running" -and $llamaCppStatus -eq "running" -and $llamaCppEmbedStatus -eq "running" -and $tailscaleStatus -eq "running") {
+        # Snapshot every maintained service's state into a lookup table.
+        $states = @{}
+        foreach ($svc in $Script:MainStackServices) {
+            $s = ($containers | Where-Object { $_.Service -eq $svc }).State
+            $states[$svc] = if ($s) { $s } else { "absent" }
+        }
+
+        # Report container states grouped by plane so 20+ services stay readable.
+        Write-Log "INFO" ("Core   - openwebui: {0}, llama-cpp: {1}, llama-cpp-embed: {2}, tailscale: {3}" -f `
+            $states["openwebui"], $states["llama-cpp"], $states["llama-cpp-embed"], $states["tailscale"])
+        Write-Log "INFO" ("Memory - mnemory: {0}, mnemory-gateway: {1}, mnemory-backup: {2}" -f `
+            $states["mnemory"], $states["mnemory-gateway"], $states["mnemory-backup"])
+        Write-Log "INFO" ("Search - tor: {0}, redis: {1}, searxng: {2}, gateway: {3}, mcpo: {4}" -f `
+            $states["tor"], $states["redis"], $states["searxng"], $states["gateway"], $states["mcpo"])
+        Write-Log "INFO" ("Coder  - open-terminal: {0}, little-coder: {1}, lc-mcpo: {2}, lc-egress: {3}, little-coder-backup: {4}" -f `
+            $states["open-terminal"], $states["little-coder"], $states["lc-mcpo"], $states["lc-egress"], $states["little-coder-backup"])
+        Write-Log "INFO" ("Aux    - smolcrawl-pipelines: {0}, surrealdb: {1}, open_notebook: {2}, openwebui-backup: {3}, watchtower: {4}" -f `
+            $states["smolcrawl-pipelines"], $states["surrealdb"], $states["open_notebook"], $states["openwebui-backup"], $states["watchtower"])
+
+        # Open Brain (OB1) — separate compose project, reported as a count.
+        if (Test-OB1Available) {
+            try {
+                $ob1 = docker compose -f $Script:OB1Compose ps --format json | ConvertFrom-Json
+                $ob1Running = @($ob1 | Where-Object { $_.State -eq "running" }).Count
+                Write-Log "INFO" "OB1    - $ob1Running/$($Script:OB1Services.Count) openbrain containers running"
+            }
+            catch {
+                Write-Log "WARN" "OB1 status unavailable: $_"
+            }
+        }
+
+        # The recovery decision rests on the core plane: if it is healthy the
+        # rest is a cheap up -d nudge; if not, a real recovery is needed.
+        if ($states["openwebui"] -eq "running" -and $states["llama-cpp"] -eq "running" -and `
+            $states["llama-cpp-embed"] -eq "running" -and $states["tailscale"] -eq "running") {
             # Test OpenWebUI health
             try {
-                $response = docker compose exec openwebui curl -f -s http://localhost:8080/health 2>$null
+                docker compose exec openwebui curl -f -s http://localhost:8080/health 2>$null | Out-Null
                 if ($LASTEXITCODE -eq 0) {
                     Write-Log "INFO" "OpenWebUI health check: PASSED"
-                    
+
                     # Test llama-cpp connectivity
                     try {
                         docker compose exec llama-cpp curl -f -s http://localhost:8080/health 2>$null | Out-Null
                         if ($LASTEXITCODE -eq 0) {
                             Write-Log "INFO" "llama-cpp connectivity: PASSED"
-                            
+
                             # Test external connectivity
                             if (Test-NetworkConnectivity "tailscale") {
                                 Write-Log "SUCCESS" "All basic checks PASSED - issue may be timing/performance related"
@@ -102,13 +239,13 @@ function Test-BasicConnectivity {
             }
         }
         else {
-            Write-Log "WARN" "Not all containers are running - recovery needed"
+            Write-Log "WARN" "Not all core containers are running - recovery needed"
         }
     }
     catch {
         Write-Log "ERROR" "Failed to check container status: $_"
     }
-    
+
     return $false
 }
 
@@ -116,22 +253,30 @@ function Invoke-MinimalRecovery {
     Write-Log "INFO" "========================================="
     Write-Log "INFO" "MINIMAL RECOVERY - GENTLE RESTART"
     Write-Log "INFO" "========================================="
-    
+
     Write-Log "INFO" "Attempting gentle service restart..."
-    
+
     # Just restart services without destroying containers
     try {
         docker compose restart tailscale llama-cpp llama-cpp-embed openwebui
 
-        # Ensure auxiliary containers are running (cheap no-op if already up).
-        # Their `depends_on` only fires at initial compose-up, so a llama-cpp
-        # restart can leave mnemory in a degraded state without this nudge.
-        # surrealdb must come up before open_notebook (open_notebook depends on it).
-        docker compose up -d watchtower mnemory smolcrawl-pipelines mnemory-backup openwebui-backup surrealdb open_notebook
+        # Ensure every auxiliary container is running (cheap no-op if already
+        # up). Their depends_on only fires at the initial compose-up, so a
+        # llama-cpp restart can leave dependents (mnemory, the search gateway,
+        # the little-coder plane) degraded without this nudge. surrealdb must
+        # precede open_notebook; the search/coder planes self-order via their
+        # own depends_on.
+        docker compose up -d watchtower mnemory mnemory-gateway mnemory-backup `
+            openwebui-backup smolcrawl-pipelines surrealdb open_notebook `
+            tor redis searxng gateway mcpo `
+            open-terminal little-coder lc-mcpo lc-egress little-coder-backup
+
+        # Open Brain (OB1) — separate compose project.
+        Start-OB1Stack
 
         Write-Log "INFO" "Waiting for services to stabilize..."
         Start-Sleep -Seconds 60
-        
+
         # Test if this fixed the issue
         if (Test-BasicConnectivity) {
             Write-Log "SUCCESS" "Minimal recovery successful!"
@@ -160,11 +305,11 @@ function Test-GPUAvailability {
 
 function Stop-ServiceGracefully {
     param([string]$ServiceName, [int]$TimeoutSeconds = 30)
-    
+
     Write-Log "INFO" "Stopping $ServiceName service..."
     try {
         docker compose stop $ServiceName
-        
+
         # Wait for graceful shutdown
         $elapsed = 0
         while ($elapsed -lt $TimeoutSeconds) {
@@ -176,7 +321,7 @@ function Stop-ServiceGracefully {
             Start-Sleep -Seconds 2
             $elapsed += 2
         }
-        
+
         Write-Log "WARN" "$ServiceName did not stop gracefully, forcing stop..."
         docker compose kill $ServiceName
         return $true
@@ -189,10 +334,10 @@ function Stop-ServiceGracefully {
 
 function Wait-ForHealthy {
     param([string]$ServiceName, [int]$TimeoutSeconds = 120)
-    
+
     Write-Log "INFO" "Waiting for $ServiceName to become healthy..."
     $elapsed = 0
-    
+
     while ($elapsed -lt $TimeoutSeconds) {
         try {
             $status = docker compose ps $ServiceName --format json 2>$null | ConvertFrom-Json
@@ -205,10 +350,10 @@ function Wait-ForHealthy {
                 Write-Log "SUCCESS" "$ServiceName is running (no health check)"
                 return $true
             }
-            
+
             $healthStatus = if ($status.Health) { $status.Health } else { $status.State }
             Write-Log "INFO" "$ServiceName status: $healthStatus (${elapsed}s elapsed)"
-            
+
             Start-Sleep -Seconds 5
             $elapsed += 5
         }
@@ -218,7 +363,7 @@ function Wait-ForHealthy {
             $elapsed += 5
         }
     }
-    
+
     Write-Log "ERROR" "$ServiceName failed to become healthy within ${TimeoutSeconds}s"
     return $false
 }
@@ -227,15 +372,15 @@ function Invoke-EmergencyRecovery {
     Write-Log "INFO" "========================================="
     Write-Log "INFO" "EMERGENCY TAILSCALE NETWORK RECOVERY"
     Write-Log "INFO" "========================================="
-    
+
     if (-not (Test-DockerCompose)) {
         throw "Docker Compose is not available"
     }
-    
+
     # Check current status
     Write-Log "INFO" "Current container status:"
     docker compose ps
-    
+
     # CRITICAL: Perform diagnostics before destructive actions
     Write-Log "INFO" "Running pre-recovery diagnostics..."
     if (Test-BasicConnectivity) {
@@ -244,64 +389,61 @@ function Invoke-EmergencyRecovery {
             return  # Success, no need for destructive recovery
         }
     }
-    
+
     Write-Log "INFO" "Minimal recovery failed or basic checks failed - proceeding with full recovery"
-    
-    # Phase 1: Graceful shutdown in reverse dependency order
+
+    # ── Phase 1: Graceful shutdown in reverse dependency order ─────────────
     Write-Log "INFO" "Phase 1: Graceful shutdown"
-    Write-Log "WARN" "This will restart OpenWebUI, llama-cpp, llama-cpp-embed, and Tailscale services"
-    
-    # Stop Tailscale first (dependent on OpenWebUI network)
+    Write-Log "WARN" "This restarts the full workspace: core, memory, search, coder planes + OB1"
+
+    # Open Brain (OB1) first — it attaches to the main stack's llm-net.
+    Stop-OB1Stack
+
+    # Watchtower (independent monitor).
+    Stop-ServiceGroup "Watchtower" @("watchtower")
+
+    # little-coder control plane (reverse dependency order).
+    Stop-ServiceGroup "little-coder control plane" `
+        @("little-coder-backup", "lc-egress", "lc-mcpo", "little-coder", "open-terminal")
+
+    # Private Search Gateway (reverse dependency order).
+    Stop-ServiceGroup "Private Search Gateway" `
+        @("mcpo", "gateway", "searxng", "redis", "tor")
+
+    # Tailscale (shares the OpenWebUI network namespace).
     if (-not (Stop-ServiceGracefully "tailscale" 30)) {
         Write-Log "WARN" "Tailscale stop had issues, continuing..."
     }
-    
-    # Stop SmolCrawl Pipelines (dependent on OpenWebUI)
-    if (-not (Stop-ServiceGracefully "smolcrawl-pipelines" 30)) {
-        Write-Log "WARN" "SmolCrawl Pipelines stop had issues, continuing..."
-    }
 
-    # Stop open-notebook (depends on surrealdb), then surrealdb itself.
-    if (-not (Stop-ServiceGracefully "open_notebook" 30)) {
-        Write-Log "WARN" "open-notebook stop had issues, continuing..."
-    }
-    if (-not (Stop-ServiceGracefully "surrealdb" 20)) {
-        Write-Log "WARN" "surrealdb stop had issues, continuing..."
-    }
+    # OpenWebUI-dependent auxiliary services (open_notebook before surrealdb).
+    Stop-ServiceGroup "auxiliary services" @("smolcrawl-pipelines", "open_notebook", "surrealdb")
 
-    # Stop Mnemory (dependent on llama-cpp services)
-    if (-not (Stop-ServiceGracefully "mnemory" 30)) {
-        Write-Log "WARN" "Mnemory stop had issues, continuing..."
-    }
+    # Mnemory memory layer (gateway before mnemory).
+    Stop-ServiceGroup "Mnemory layer" @("mnemory-gateway", "mnemory", "mnemory-backup")
 
-    # Stop backup schedulers (independent cron sidecars)
-    if (-not (Stop-ServiceGracefully "mnemory-backup" 15)) {
-        Write-Log "WARN" "mnemory-backup stop had issues, continuing..."
-    }
-    if (-not (Stop-ServiceGracefully "openwebui-backup" 15)) {
-        Write-Log "WARN" "openwebui-backup stop had issues, continuing..."
-    }
-    
-    # Stop llama-cpp services
+    # OpenWebUI backup scheduler.
+    Stop-ServiceGroup "OpenWebUI backup" @("openwebui-backup")
+
+    # llama-cpp inference services.
     if (-not (Stop-ServiceGracefully "llama-cpp" 30)) {
         Write-Log "WARN" "llama-cpp stop had issues, continuing..."
     }
     if (-not (Stop-ServiceGracefully "llama-cpp-embed" 30)) {
         Write-Log "WARN" "llama-cpp-embed stop had issues, continuing..."
     }
-    
-    # Stop OpenWebUI 
+
+    # OpenWebUI last — it provides the shared network namespace.
     if (-not (Stop-ServiceGracefully "openwebui" 45)) {
         Write-Log "WARN" "OpenWebUI stop had issues, continuing..."
     }
-    
-    # Phase 2: Clean up any orphaned network namespaces
+
+    # ── Phase 2: Clean up any orphaned network namespaces ──────────────────
     Write-Log "INFO" "Phase 2: Network namespace cleanup"
     Start-Sleep -Seconds 15
-    
-    # Phase 3: Restart in correct dependency order
+
+    # ── Phase 3: Restart in correct dependency order ───────────────────────
     Write-Log "INFO" "Phase 3: Service restart"
-    
+
     # Start OpenWebUI first (with GPU passthrough)
     Write-Log "INFO" "Starting OpenWebUI with GPU support..."
     try {
@@ -314,7 +456,7 @@ function Invoke-EmergencyRecovery {
         Write-Log "ERROR" "Failed to start OpenWebUI: $_"
         throw
     }
-    
+
     # Verify GPU is working
     if (Test-GPUAvailability) {
         Write-Log "SUCCESS" "GPU acceleration is available"
@@ -322,12 +464,12 @@ function Invoke-EmergencyRecovery {
     else {
         Write-Log "WARN" "GPU acceleration may not be working"
     }
-    
+
     # Brief pause to ensure network namespace is stable
     Write-Log "INFO" "Allowing network namespace to stabilize..."
     Start-Sleep -Seconds 20
-    
-    # Start llama-cpp services (GPU inference)
+
+    # Start llama-cpp services (GPU inference) — many planes depend on these
     Write-Log "INFO" "Starting llama-cpp with GPU support..."
     try {
         docker compose up -d llama-cpp
@@ -339,7 +481,7 @@ function Invoke-EmergencyRecovery {
         Write-Log "ERROR" "Failed to start llama-cpp: $_"
         throw
     }
-    
+
     Write-Log "INFO" "Starting llama-cpp-embed..."
     try {
         docker compose up -d llama-cpp-embed
@@ -351,7 +493,7 @@ function Invoke-EmergencyRecovery {
         Write-Log "ERROR" "Failed to start llama-cpp-embed: $_"
         throw
     }
-    
+
     # Start Tailscale (depends on OpenWebUI network)
     Write-Log "INFO" "Starting Tailscale with shared network namespace..."
     try {
@@ -364,8 +506,8 @@ function Invoke-EmergencyRecovery {
         Write-Log "ERROR" "Failed to start Tailscale: $_"
         throw
     }
-    
-    # Start Mnemory (depends on llama-cpp services)
+
+    # Start Mnemory memory layer (depends on llama-cpp services)
     Write-Log "INFO" "Starting Mnemory memory service..."
     try {
         docker compose up -d mnemory
@@ -377,27 +519,13 @@ function Invoke-EmergencyRecovery {
         Write-Log "WARN" "Failed to start Mnemory: $_"
         # Don't throw - Mnemory is not critical for basic functionality
     }
-    
-    # Start Mnemory backup scheduler
-    Write-Log "INFO" "Starting Mnemory backup scheduler..."
-    try {
-        docker compose up -d mnemory-backup
-        Write-Log "SUCCESS" "Mnemory backup scheduler started"
-    }
-    catch {
-        Write-Log "WARN" "Failed to start Mnemory backup: $_"
-    }
 
-    # Start OpenWebUI backup scheduler
-    Write-Log "INFO" "Starting OpenWebUI backup scheduler..."
-    try {
-        docker compose up -d openwebui-backup
-        Write-Log "SUCCESS" "OpenWebUI backup scheduler started"
-    }
-    catch {
-        Write-Log "WARN" "Failed to start OpenWebUI backup: $_"
-    }
-    
+    # mnemory-gateway (cloud MCP proxy — depends on mnemory)
+    Start-ServiceGroup "mnemory-gateway" @("mnemory-gateway")
+
+    # Backup schedulers (independent cron sidecars)
+    Start-ServiceGroup "backup schedulers" @("mnemory-backup", "openwebui-backup")
+
     # Start SmolCrawl Pipelines (depends on OpenWebUI)
     Write-Log "INFO" "Starting SmolCrawl Pipelines..."
     try {
@@ -408,13 +536,9 @@ function Invoke-EmergencyRecovery {
     }
     catch {
         Write-Log "WARN" "Failed to start SmolCrawl Pipelines: $_"
-        # Don't throw - SmolCrawl is not critical for basic functionality
     }
 
     # Start surrealdb first, then open-notebook (which depends on it).
-    # Both have no `depends_on` chain to llama-cpp, but the open-notebook
-    # frontend uses `wait-for-api.sh` to block until FastAPI is ready, so
-    # the container needs ~30-60 s to fully come up.
     Write-Log "INFO" "Starting surrealdb (open-notebook database)..."
     try {
         docker compose up -d surrealdb
@@ -434,9 +558,41 @@ function Invoke-EmergencyRecovery {
     }
     catch {
         Write-Log "WARN" "Failed to start open-notebook: $_"
-        # Don't throw - notebook UI is not critical for basic functionality
     }
-    
+
+    # Private Search Gateway — tor -> redis -> searxng -> gateway -> mcpo.
+    # depends_on chains the internal order; the Tor circuit is slow to build.
+    Start-ServiceGroup "Private Search Gateway" @("tor", "redis", "searxng", "gateway", "mcpo")
+    if (-not (Wait-ForHealthy "gateway" 150)) {
+        Write-Log "WARN" "Search gateway slow to come up, but continuing..."
+    }
+
+    # little-coder control plane — open-terminal (workspace) before the
+    # little-coder daemon (control), then the MCP edge and egress sidecars.
+    Write-Log "INFO" "Starting open-terminal (little-coder workspace plane)..."
+    try {
+        docker compose up -d open-terminal
+        if (-not (Wait-ForHealthy "open-terminal" 90)) {
+            Write-Log "WARN" "open-terminal health check failed, but continuing..."
+        }
+    }
+    catch {
+        Write-Log "WARN" "Failed to start open-terminal: $_"
+    }
+
+    Write-Log "INFO" "Starting little-coder (control daemon)..."
+    try {
+        docker compose up -d little-coder
+        if (-not (Wait-ForHealthy "little-coder" 120)) {
+            Write-Log "WARN" "little-coder health check failed, but continuing..."
+        }
+    }
+    catch {
+        Write-Log "WARN" "Failed to start little-coder: $_"
+    }
+
+    Start-ServiceGroup "little-coder edges" @("lc-mcpo", "lc-egress", "little-coder-backup")
+
     # Start Watchtower (independent service)
     Write-Log "INFO" "Starting Watchtower monitoring service..."
     try {
@@ -445,13 +601,15 @@ function Invoke-EmergencyRecovery {
     }
     catch {
         Write-Log "WARN" "Failed to start Watchtower: $_"
-        # Don't throw - Watchtower is not critical for basic functionality
     }
-    
-    # Phase 4: Connectivity verification
+
+    # Open Brain (OB1) last — needs ai-stack_llm-net + llama-cpp healthy.
+    Start-OB1Stack
+
+    # ── Phase 4: Connectivity verification ─────────────────────────────────
     Write-Log "INFO" "Phase 4: Connectivity verification"
     Start-Sleep -Seconds 25
-    
+
     # Test external connectivity
     if (Test-NetworkConnectivity "tailscale") {
         Write-Log "SUCCESS" "External network connectivity restored"
@@ -460,20 +618,20 @@ function Invoke-EmergencyRecovery {
         Write-Log "ERROR" "External network connectivity failed"
         throw "Network connectivity test failed"
     }
-    
-    # Phase 5: Service verification
+
+    # ── Phase 5: Service verification ──────────────────────────────────────
     Write-Log "INFO" "Phase 5: Service verification"
-    
+
     try {
         Write-Log "INFO" "llama-cpp status:"
         docker compose exec llama-cpp curl -s http://localhost:8080/health
-        
+
         Write-Log "INFO" "Tailscale status:"
         docker compose exec tailscale tailscale --socket=/tmp/tailscaled.sock status
-        
+
         Write-Log "INFO" "Tailscale serve configuration:"
         docker compose exec tailscale tailscale --socket=/tmp/tailscaled.sock serve status
-        
+
         Write-Log "INFO" "Mnemory status:"
         docker compose exec mnemory python -c "import urllib.request; print(urllib.request.urlopen('http://localhost:8051/health').read().decode())" 2>$null
 
@@ -483,16 +641,33 @@ function Invoke-EmergencyRecovery {
         Write-Log "INFO" "open-notebook API status:"
         docker compose exec open_notebook python3 -c "import urllib.request; print(urllib.request.urlopen('http://localhost:5055/api/config').read().decode())" 2>$null
 
+        Write-Log "INFO" "Private Search Gateway status:"
+        docker compose exec gateway curl -s http://localhost:8080/healthz 2>$null
+
+        Write-Log "INFO" "open-terminal status:"
+        docker compose exec open-terminal curl -s http://localhost:8000/health 2>$null
+
+        Write-Log "INFO" "little-coder daemon status:"
+        docker compose exec little-coder curl -s http://localhost:8090/health 2>$null
+
         Write-Log "INFO" "surrealdb running state:"
         docker compose ps surrealdb --format "table {{.Service}}\t{{.Status}}" 2>$null
 
+        Write-Log "INFO" "Memory + coder plane status:"
+        docker compose ps mnemory-gateway lc-mcpo lc-egress --format "table {{.Service}}\t{{.Status}}" 2>$null
+
         Write-Log "INFO" "Backup schedulers + Watchtower status:"
-        docker compose ps mnemory-backup openwebui-backup watchtower --format "table {{.Service}}\t{{.Status}}" 2>$null
+        docker compose ps mnemory-backup openwebui-backup little-coder-backup watchtower --format "table {{.Service}}\t{{.Status}}" 2>$null
+
+        if (Test-OB1Available) {
+            Write-Log "INFO" "Open Brain (OB1) status:"
+            docker compose -f $Script:OB1Compose ps --format "table {{.Service}}\t{{.Status}}" 2>$null
+        }
     }
     catch {
         Write-Log "WARN" "Unable to verify service configurations: $_"
     }
-    
+
     Write-Log "SUCCESS" "========================================="
     Write-Log "SUCCESS" "EMERGENCY RECOVERY COMPLETED"
     Write-Log "SUCCESS" "========================================="
@@ -502,7 +677,7 @@ function Invoke-NuclearRecovery {
     Write-Log "WARN" "========================================="
     Write-Log "WARN" "NUCLEAR RECOVERY - FULL STACK RESTART"
     Write-Log "WARN" "========================================="
-    
+
     # CRITICAL: Last-chance diagnostic check
     Write-Log "INFO" "Performing final diagnostic before nuclear option..."
     if (Test-BasicConnectivity) {
@@ -512,32 +687,48 @@ function Invoke-NuclearRecovery {
             return
         }
     }
-    
+
     Write-Log "WARN" "All diagnostics failed - proceeding with nuclear recovery..."
     Write-Log "WARN" "This will destroy and rebuild containers..."
-    
-    Write-Log "INFO" "Performing complete stack shutdown..."
+
+    # Bring OB1 down FIRST so the main `docker compose down` can drop the
+    # ai-stack_llm-net network OB1 attaches to as an external network.
+    if (Test-OB1Available) {
+        Write-Log "INFO" "Tearing down Open Brain (OB1) stack..."
+        try { docker compose -f $Script:OB1Compose down }
+        catch { Write-Log "WARN" "OB1 teardown had issues: $_" }
+    }
+
+    Write-Log "INFO" "Performing complete main-stack shutdown..."
     docker compose down
-    
+
     Write-Log "INFO" "Cleaning up network namespaces..."
     Start-Sleep -Seconds 20
-    
-    Write-Log "INFO" "Starting full stack with proper dependency order..."
+
+    Write-Log "INFO" "Starting full main stack with proper dependency order..."
     docker compose up -d
-    
+
     Write-Log "INFO" "Waiting for complete stack initialization..."
     Start-Sleep -Seconds 90
-    
+
+    # Open Brain (OB1) last — main stack (and ai-stack_llm-net) is up now.
+    Start-OB1Stack
+
     # Test connectivity
     if (Test-NetworkConnectivity "tailscale") {
         Write-Log "SUCCESS" "Nuclear recovery successful"
-        
+
         # Test GPU
         if (Test-GPUAvailability) {
             Write-Log "SUCCESS" "GPU acceleration restored"
         }
         else {
             Write-Log "WARN" "GPU may need additional recovery"
+        }
+
+        if (Test-OB1Available) {
+            Write-Log "INFO" "Open Brain (OB1) status:"
+            docker compose -f $Script:OB1Compose ps --format "table {{.Service}}\t{{.Status}}" 2>$null
         }
     }
     else {
@@ -549,36 +740,42 @@ function Invoke-GPUReset {
     Write-Log "INFO" "========================================="
     Write-Log "INFO" "GPU RECOVERY - REBUILDING GPU SERVICES"
     Write-Log "INFO" "========================================="
-    
+
     Write-Log "INFO" "Stopping GPU-dependent services for reset..."
     docker compose down llama-cpp llama-cpp-embed openwebui mnemory
-    
+
     Write-Log "INFO" "Rebuilding OpenWebUI with fresh GPU configuration..."
     docker compose build --no-cache openwebui
-    
+
     Write-Log "INFO" "Starting OpenWebUI with GPU support..."
     docker compose up -d openwebui
-    
+
     if (Wait-ForHealthy "openwebui" 240) {
         Write-Log "INFO" "Starting llama-cpp with GPU support..."
         docker compose up -d llama-cpp
-        
+
         if (Wait-ForHealthy "llama-cpp" 120) {
             if (Test-GPUAvailability) {
                 Write-Log "SUCCESS" "GPU reset successful - CUDA is available"
-                
+
                 # Test llama-cpp GPU access
                 try {
                     docker compose exec llama-cpp curl -s http://localhost:8080/health
                     Write-Log "SUCCESS" "llama-cpp GPU integration verified"
-                    
+
                     # Also start embedding service
                     docker compose up -d llama-cpp-embed
                     Write-Log "INFO" "llama-cpp-embed started"
-                    
-                    # Start Mnemory (depends on llama-cpp services)
-                    docker compose up -d mnemory mnemory-backup
-                    Write-Log "INFO" "Mnemory services started"
+
+                    # Restart the planes that consume llama-cpp inference:
+                    # the memory layer, the little-coder plane, and OB1.
+                    docker compose up -d mnemory mnemory-gateway mnemory-backup
+                    Write-Log "INFO" "Mnemory layer started"
+
+                    docker compose up -d open-terminal little-coder lc-mcpo lc-egress little-coder-backup
+                    Write-Log "INFO" "little-coder control plane started"
+
+                    Start-OB1Stack
                 }
                 catch {
                     Write-Log "WARN" "llama-cpp may need additional time to initialize"
@@ -603,9 +800,9 @@ function Invoke-GPUReset {
 # Main execution
 try {
     switch ($Action.ToLower()) {
-        "recover" { 
+        "recover" {
             try {
-                Invoke-EmergencyRecovery 
+                Invoke-EmergencyRecovery
             }
             catch {
                 Write-Log "WARN" "Standard recovery failed, attempting nuclear option..."
@@ -614,7 +811,7 @@ try {
         }
         "nuclear" { Invoke-NuclearRecovery }
         "gpu-reset" { Invoke-GPUReset }
-        default { 
+        default {
             Write-Log "ERROR" "Unknown action: $Action"
             Write-Log "INFO" "Usage: .\emergency-recovery.ps1 -Action [recover|nuclear|gpu-reset]"
             exit 1
