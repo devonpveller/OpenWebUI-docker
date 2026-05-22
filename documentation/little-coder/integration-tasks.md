@@ -1,6 +1,6 @@
 # Self-Improving Little-Coder — Task Tracker
 
-> **Last updated:** 2026-05-20
+> **Last updated:** 2026-05-22
 > **Plan:** [`integration-plan.md`](integration-plan.md) — chapters, rationale, locked decisions.
 > **Design doc:** [`Self-improving-little-coder-design.md`](Self-improving-little-coder-design.md) — source of truth. Design doc wins on conflict.
 > **Legend:** `[ ]` todo · `[~]` in progress · `[x]` done · `[!]` blocked · `[-]` descoped
@@ -8,16 +8,38 @@
 
 ## Current state
 
-- **Active chapter:** 1 (Tool) — not started.
+- **Active chapter:** 1 (Tool) — **in progress.** Control-plane foundation landed and unit-tested (see Chapter 1 progress below); daemon, agent integration, Dockerfiles, and compose pending.
 - **Build sequence:** five chapters, gated by operator judgment (plan §2). One chapter at a time.
 - **Tier-0 build reminder:** `session_id` + `channel` + `user_id` on every journal line from line 1. Unrecoverable retroactively (design §4.1).
 - **Tool ships the open-terminal network change.** OWUI's direct access to open-terminal ends; it returns in chapter 2 via `lc-mcpo`.
+- **Source lives in [`../../little-coder/`](../../little-coder/)** — Python control-plane package (`src/littlecoder/`), `git-proxy/`, `config/`, `tests/`.
 
 ---
 
 ## Chapter 1 — Tool
 
 > Refs: design §3, §4, §10, §12. Plan §5.
+
+### Chapter 1 progress (2026-05-22)
+
+Control-plane modules are code-complete and unit-tested (120 tests, all
+passing). Legend below: `[x]` acceptance met by code + tests; `[~]` logic
+done, full acceptance waits on a running deployment.
+
+**Landed and tested:**
+
+- Centralized typed config (1k) — pydantic model + generated JSON schema, boot validation, drift test.
+- Journals (1c) — full envelope, ULID, three writers, write-time schema validation, fsync on terminal/error, size-triggered rotation.
+- Audit log (1d) — `audit.jsonl` writer, separate from task journals.
+- Sanitization filter (1i) — secret/PII redaction + structural digests, shadow/enforcing modes, pinned test set with seeded FP/FN.
+- git-proxy (1h) — whitelist/blocklist policy + global-override guards; 55 adversarial tests.
+- URL normalization + `/project` decision table (1f) — SSH/HTTPS collapse, four-branch switch logic.
+- open-terminal client — `POST /execute` driver, output parsing, git-proxy-denial detection.
+
+**Pending (this chapter):** control daemon (FIFO queue, task lifecycle,
+shutdown drain), agent integration (run the little-coder CLI, route exec to
+open-terminal), CLI operator surface, Prometheus endpoint, MCP server +
+`lc-mcpo`, Dockerfiles, compose wiring, `.env` entries.
 
 ### 1a. Network + remotes (ship first; these are unrecoverable later)
 
@@ -41,40 +63,41 @@
 
 ### 1c. Journals (tier-0 build requirement — unrecoverable if missed)
 
-- [ ] Implement writers for `tool_calls.jsonl`, `errors.jsonl`, `outcomes.jsonl`
-- [ ] Envelope per design §4.1: `ts`, `task_id` (ULID), `session_id`, `channel`, `user_id`, `repo`, `lang`, `seq`, `schema_version: 1`
-- [ ] Write-time schema validation; malformed records **rejected, not appended**
-- [ ] `task_started` / `task_ended` bracket every task; reconstruct by `task_id`, never adjacency
-- [ ] Outcome label per design §4.2: `pass` / `fail` / `unverified`
-- [ ] Durability per design §4.3: append + fsync on every terminal and every error record
-- [ ] Schema versioning plumbed through readers; tolerate older shapes (forward-compat for later chapters)
+- [x] Implement writers for `tool_calls.jsonl`, `errors.jsonl`, `outcomes.jsonl`
+- [x] Envelope per design §4.1: `ts`, `task_id` (ULID), `session_id`, `channel`, `user_id`, `repo`, `lang`, `seq`, `schema_version: 1`
+- [x] Write-time schema validation; malformed records **rejected, not appended**
+- [~] `task_started` / `task_ended` bracket every task; reconstruct by `task_id`, never adjacency — record types + reconstruction done; lifecycle wiring lands with the daemon
+- [x] Outcome label per design §4.2: `pass` / `fail` / `unverified`
+- [x] Durability per design §4.3: append + fsync on every terminal and every error record
+- [x] Schema versioning plumbed through readers; tolerate older shapes (forward-compat for later chapters)
 
 ### 1d. Audit log
 
-- [ ] `audit.jsonl` writer per design §4.4, separate from task journals
-- [ ] Records emitted in Tool: `project_switched`, `task_outcome_amended`, `shutdown`
-- [ ] Longer retention than task journals; different access controls
+- [x] `audit.jsonl` writer per design §4.4, separate from task journals
+- [~] Records emitted in Tool: `project_switched`, `task_outcome_amended`, `shutdown` — writer supports them; emission wires up with the daemon + CLI
+- [~] Longer retention than task journals; different access controls — separate file done; retention/access policy is a deploy-time concern
 
 ### 1e. Persistence (also unrecoverable if missed)
 
-- [ ] Declare all four named volumes at compose time:
+- [ ] Declare all named volumes at compose time:
   - [ ] `little-coder-skill` (used Learner+; declared now)
   - [ ] `little-coder-journals` (used Tool)
   - [ ] `little-coder-cohorts` (used Observer+; declared now)
   - [ ] `little-coder-polyglot` (used Learner+; declared now)
-- [ ] Mount into `agent`; confirm `docker compose up -d --build little-coder` preserves all four
+  - [ ] `little-coder-workspace` (used Tool; **shared with `open-terminal`** — project-scoped, wiped on `/project` switch)
+- [ ] Mount into `agent`; confirm `docker compose up -d --build little-coder` preserves all five
 - [ ] Backup job (Alpine-cron daily default; cadence + restore drill tracked as open item #7)
 
 ### 1f. Workspace handling + project focus
 
-- [ ] `agent` can clone a single repo directly into open-terminal
-- [ ] `agent` can edit files; run tests/commands
-- [ ] `/project repo: <link>` CLI subcommand per design §12.3
-- [ ] URL normalization: host + owner + repo, lowercased
-- [ ] No current focus → clone, journal `project_switched`
-- [ ] Matches current focus → no-op
-- [ ] Different focus + task in flight → reject, suggest cancel-or-wait
-- [ ] Different focus + clear → tag prior state, wipe workspace, clone new repo, journal `project_switched`
+- [~] `agent` can clone a single repo directly into open-terminal — `WorkspaceManager.clone` done; daemon wiring pending
+- [ ] `agent` can edit files; run tests/commands — needs agent integration
+- [~] `/project repo: <link>` CLI subcommand per design §12.3 — `decide_switch` logic done + tested; CLI subcommand pending
+- [x] URL normalization: host + owner + repo, lowercased
+- [~] No current focus → clone, journal `project_switched` — decision + clone op done; journaling pending daemon
+- [x] Matches current focus → no-op
+- [x] Different focus + task in flight → reject, suggest cancel-or-wait
+- [~] Different focus + clear → tag prior state, wipe workspace, clone new repo, journal `project_switched` — `decide_switch` + `WorkspaceManager` ops done; journaling pending daemon
 - [ ] One task at a time; FIFO queue across triggers (design §12.4)
 - [ ] Human attach is read-only
 
@@ -88,26 +111,26 @@
 
 ### 1h. git-proxy
 
-- [ ] Build `git-proxy` wrapper; site at open-terminal workspace edge (the git binary inside the workspace IS the proxy)
-- [ ] No raw-git fallback reachable by the agent
-- [ ] Whitelist per design §3.3: `commit`, `branch`, `checkout`, `merge --no-ff`, `tag`, `revert`, `reset --hard <tag>`, `fetch` (operator-pre-configured remotes only)
-- [ ] Blocklist per design §3.3: `push --force`, `branch -D`, `filter-branch`, `gc --prune=now`, `remote add`, `remote set-url`, all `submodule` subcommands, all history rewrites, anything touching `.git/` directly
-- [ ] Mount `.git/config`, `.git/hooks/`, `.git/info/` **read-only to the agent**
-- [ ] Allowed remotes baked in by operator at project-switch time
-- [ ] `core.hooksPath` set to operator-controlled directory **outside** `.git/`
-- [ ] Branch / tag discipline (design §12.1): outer-loop changes on `auto/<date>-<topic>` branches; never direct to `main`
-- [ ] Per-repo deploy tokens per design §10.3: least-privilege, injected per task, never ambient, never the self-PAT
-- [ ] Adversarial tests:
-  - [ ] Agent attempts `remote add` via direct `.git/config` write → blocked (read-only mount)
-  - [ ] Hostile `.gitmodules` → no submodule clone on any whitelisted op
-  - [ ] Agent attempts `git push --force` → blocked; journaled
+- [~] Build `git-proxy` wrapper; site at open-terminal workspace edge (the git binary inside the workspace IS the proxy) — wrapper (`git-proxy/git_proxy.py`) done; siting = custom open-terminal image, pending
+- [ ] No raw-git fallback reachable by the agent — closed by the custom image (real git relocated, proxy on PATH), pending
+- [x] Whitelist per design §3.3: `commit`, `branch`, `checkout`, `merge --no-ff`, `tag`, `revert`, `reset --hard <tag>`, `fetch` (operator-pre-configured remotes only)
+- [x] Blocklist per design §3.3: `push --force`, `branch -D`, `filter-branch`, `gc --prune=now`, `remote add`, `remote set-url`, all `submodule` subcommands, all history rewrites, anything touching `.git/` directly
+- [ ] Mount `.git/config`, `.git/hooks/`, `.git/info/` **read-only to the agent** — compose-level control, pending
+- [~] Allowed remotes baked in by operator at project-switch time — proxy enforces `fetch`/`push` against the configured remote set; baking happens at clone time
+- [ ] `core.hooksPath` set to operator-controlled directory **outside** `.git/` — custom image, pending
+- [~] Branch / tag discipline (design §12.1): outer-loop changes on `auto/<date>-<topic>` branches; never direct to `main` — proxy permits the ops; daemon enforces the branch convention
+- [~] Per-repo deploy tokens per design §10.3: least-privilege, injected per task, never ambient, never the self-PAT — clone path accepts a token; injection chain completes with the daemon + compose
+- [x] Adversarial tests:
+  - [x] Agent attempts `remote add` → blocked + journaled (the `.git/config` read-only mount is the compose-level backstop, verified at deploy)
+  - [x] Hostile `.gitmodules` → no submodule clone (`submodule` + `clone --recurse-submodules` both blocked + tested)
+  - [x] Agent attempts `git push --force` → blocked; journaled
 
 ### 1i. Sanitization filter (shadow mode)
 
-- [ ] Build filter per design §10.2: redact secrets/key-shaped strings; reduce large file bodies to structural digests; strip PII
-- [ ] **Pinned and tested** against fixed test set (seeded false-positives + false-negatives)
-- [ ] In Tool, **run in shadow mode**: filter records what it _would_ redact but does not block (nothing leaves the stack in Tool)
-- [ ] Rejection rate metric collected on the Prometheus endpoint (feeds chapter 3 drift baseline)
+- [x] Build filter per design §10.2: redact secrets/key-shaped strings; reduce large file bodies to structural digests; strip PII
+- [x] **Pinned and tested** against fixed test set (seeded false-positives + false-negatives)
+- [x] In Tool, **run in shadow mode**: filter records what it _would_ redact but does not block (nothing leaves the stack in Tool)
+- [~] Rejection rate metric collected on the Prometheus endpoint (feeds chapter 3 drift baseline) — counters (`processed`/`redacted`/`rejection_rate`) done; Prometheus endpoint pending
 
 ### 1j. Metrics endpoint
 
@@ -117,9 +140,9 @@
 
 ### 1k. Centralized config
 
-- [ ] Typed config (YAML + JSON schema) per design §12.8, validated at boot
-- [ ] Tool-era tunables: drain deadline default; `task_abandoned` timeout per channel; basic budget caps
-- [ ] Schema version on the config file; forward-compat for later chapters
+- [x] Typed config (YAML + JSON schema) per design §12.8, validated at boot
+- [x] Tool-era tunables: drain deadline default; `task_abandoned` timeout per channel; basic budget caps
+- [x] Schema version on the config file; forward-compat for later chapters
 
 ### 1l. Shutdown semantics
 
@@ -412,6 +435,9 @@ These run alongside multiple chapters.
 | 2026-05-20 | 1       | Sanitization filter built in Tool, run in **shadow mode**; promoted to enforcing in chapter 3 (Observer). This collects baseline drift behavior during Tool/OWUI usage so chapter 3 doesn't have to wait for it. | design §10.2, plan §5     |
 | 2026-05-20 | 1       | All four named volumes declared in Tool (even though only `little-coder-journals/` actively records before chapter 3) so later chapters don't trigger silent wipes.                                              | design §3.6               |
 | 2026-05-20 | 1       | OWUI's current direct access to open-terminal **ends in Tool**; chapter 2 restores it via `lc-mcpo`. Documented as a user-visible change.                                                                        | design §3.4, plan §5      |
+| 2026-05-22 | 1       | Upstream little-coder is a Node.js CLI on the `pi` framework, **not Python**. Control-plane wrapper (journals, config, sanitization, git-proxy, CLI, MCP edge) built in Python mirroring `search-mcpo`; the agent container is Node-based. The `agent.py` reference in design §6 is a Chapter-5 illustration only — design doc left unedited (operator's call). | design §3.1, §6           |
+| 2026-05-22 | 1       | Agent↔open-terminal integration: a fifth named volume `little-coder-workspace` is shared by both containers. The agent edits files on it directly; build/test/git execution is routed to `open-terminal`'s `POST /execute` REST API, keeping execution in the network-isolated plane. Operator-confirmed approach. | design §1.5, §3.4         |
+| 2026-05-22 | 1       | Control-plane foundation landed and unit-tested (config, journals, audit, sanitization, ULID, git-proxy, URL-norm, open-terminal client, workspace/project-focus) — 120 tests passing. Daemon, agent integration, Dockerfiles, compose pending. | plan §5                   |
 
 ---
 

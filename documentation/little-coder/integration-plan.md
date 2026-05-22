@@ -42,14 +42,15 @@ Two planes, kept separate.
 | MCP edge           | `lc-mcpo` (built in Tool, activated in OWUI)                 | MCP→OpenAPI bridge for OWUI/CLI. API-key'd.                                                                                                                                  |
 | Safety choke point | `git-proxy` (in-container wrapper, in Tool)                  | Sole git path inside the workspace. `.git/config`+hooks read-only to agent.                                                                                                  |
 
-**Persistent state** lives on four named volumes mounted into little-coder's containers. The container is ephemeral; the volumes are the persistence boundary (design §3.6):
+**Persistent state** lives on named volumes mounted into little-coder's containers. The container is ephemeral; the volumes are the persistence boundary (design §3.6):
 
 - `little-coder-skill/` — artifact library (used from Learner; declared in Tool)
 - `little-coder-journals/` — three task journals + `audit.jsonl` (used from Tool)
 - `little-coder-cohorts/` — derived counters + repro corpora (used from Observer; declared in Tool)
 - `little-coder-polyglot/` — canonical Polyglot clone (used from Learner; declared in Tool)
+- `little-coder-workspace/` — the focused project clone, **shared with `open-terminal`** (used from Tool). Project-scoped, not accumulated expertise: `/project` wipes and re-clones it (design §12.3). This volume is the agent↔open-terminal integration surface — see Decision Log 2026-05-22.
 
-All four volumes are declared in Tool so the first `docker compose up -d --build` later in the project doesn't silently wipe state that doesn't yet exist.
+The four expertise volumes are declared in Tool so the first `docker compose up -d --build` later in the project doesn't silently wipe state that doesn't yet exist.
 
 ---
 
@@ -260,7 +261,9 @@ Settled in the design doc. Reproduced for plan independence.
 | 10  | Cohort scoping: per `lang` + `task_shape`, aggregated across repos.                                                                                                             | §5.5                      |
 | 11  | Open-terminal network change is a **chapter 1 (Tool) requirement**, not a later hardening. OWUI's direct access to open-terminal ends; chapter 2 restores access via `lc-mcpo`. | §3.4                      |
 | 12  | Sanitization filter built in Tool, run in shadow mode; promoted to enforcing in Observer.                                                                                       | §10.2                     |
-| 13  | All four named volumes declared in Tool, even though only `little-coder-journals/` actively records before Observer.                                                            | §3.6                      |
+| 13  | Four expertise volumes declared in Tool, even though only `little-coder-journals/` actively records before Observer. A fifth volume, `little-coder-workspace/`, is shared with `open-terminal` (project-scoped). | §3.6                      |
+| 14  | Upstream little-coder is a Node.js CLI on the `pi` framework, not Python. The agent container is Node-based; the control-plane wrapper is Python, mirroring `search-mcpo`. The `agent.py` reference in design §6 is a Chapter-5 illustration only. | §3.1                      |
+| 15  | Agent reaches the workspace via a shared `little-coder-workspace` volume: it edits files directly, and routes build/test/git execution to `open-terminal`'s `POST /execute` REST API — execution stays in the network-isolated plane. | §1.5, §3.4                |
 
 ---
 
