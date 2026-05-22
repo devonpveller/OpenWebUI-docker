@@ -693,6 +693,12 @@ services:
       # working; default on. Set 0 to fall back to built-in bash (runs in the
       # network-isolated little-coder container). See pi-extension/README.md.
       - LC_ROUTE_EXEC=${LC_ROUTE_EXEC:-1}
+      # open-terminal exec params, exposed statically so a direct interactive
+      # `little-coder` run (docker exec) has working exec routing — not only
+      # the daemon-spawned agent (the daemon also sets these per task).
+      - LC_OPEN_TERMINAL_URL=http://open-terminal:8000
+      - LC_OPEN_TERMINAL_KEY=${OPEN_TERMINAL_API_KEY}
+      - LC_WORKSPACE=/workspace
     volumes:
       - ./little-coder/config:/app/config:ro
       - little-coder-journals:/var/lib/little-coder/journals
