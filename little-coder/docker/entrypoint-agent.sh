@@ -27,14 +27,19 @@ chown -R lc:lc /home/lc/.config
 # built-in bash, which runs in THIS container — network-isolated and contained,
 # but outside the open-terminal plane / git-proxy.
 if [ "${LC_ROUTE_EXEC:-0}" = "1" ]; then
-  PKG_EXT="$(npm root -g)/little-coder/.pi/extensions/open-terminal-exec"
-  mkdir -p "$PKG_EXT"
+  EXT_DIR="$(npm root -g)/little-coder/.pi/extensions"
+  mkdir -p "$EXT_DIR/open-terminal-exec"
   if cp /opt/little-coder/pi-extensions/open-terminal-exec/index.ts \
-        "$PKG_EXT/index.ts" 2>/dev/null; then
+        "$EXT_DIR/open-terminal-exec/index.ts" 2>/dev/null; then
     echo "[entrypoint] open-terminal exec routing ENABLED"
   else
     echo "[entrypoint] WARN: could not install open-terminal-exec extension"
   fi
+  # Remove tools that execute or egress OUTSIDE the routed path. `bash` (our
+  # override → ot-exec → open-terminal → git-proxy) must be the sole execution
+  # tool — the agent was observed escaping the git-proxy via ShellSession.
+  rm -rf "$EXT_DIR/shell-session" "$EXT_DIR/browser" 2>/dev/null || true
+  echo "[entrypoint] removed shell-session + browser extensions (no exec bypass)"
 else
   echo "[entrypoint] exec routing disabled (LC_ROUTE_EXEC!=1) — built-in bash"
 fi
