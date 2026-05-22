@@ -38,7 +38,9 @@ COPY pi-extension/ /opt/little-coder/pi-extensions/
 COPY docker/entrypoint-agent.sh /usr/local/bin/entrypoint-agent.sh
 RUN chmod +x /usr/local/bin/entrypoint-agent.sh \
  && useradd --create-home --uid 10002 lc \
- && git config --system --add safe.directory '*'
+ && git config --system --add safe.directory '*' \
+ && git config --system user.name "little-coder" \
+ && git config --system user.email "little-coder@ai-stack.local"
 
 # gosu does not set HOME; pin it so the agent finds ~/.config + ~/.pi.
 ENV HOME=/home/lc
