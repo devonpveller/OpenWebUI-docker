@@ -157,6 +157,23 @@ def cmd_admin_task_cancel(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_admin_observe(args: argparse.Namespace) -> int:
+    """`lc admin observe` — show the Observer report (design §3f).
+    With `--iterate`, run a fresh meta iteration first."""
+    from .observer import render_text
+
+    params = {"iterate": "true"} if args.iterate else {}
+    res = _request("GET", "/admin/observe", params=params)
+    if not res.get("enabled", False):
+        print(res.get("note", "Observer is disabled"))
+        return 0
+    if args.json:
+        print(json.dumps(res, indent=2))
+    else:
+        print(render_text(res))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="lc", description="little-coder operator CLI")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -213,6 +230,17 @@ def build_parser() -> argparse.ArgumentParser:
     aups_sub.add_parser(
         "pull", help="pull the fork-parent (operative in Chapter 5)"
     ).set_defaults(func=cmd_admin_upstream_pull)
+
+    obs = asub.add_parser(
+        "observe", help="show the Observer report (design §3f, Chapter 3)"
+    )
+    obs.add_argument(
+        "--iterate",
+        action="store_true",
+        help="run a fresh meta iteration before reading the report",
+    )
+    obs.add_argument("--json", action="store_true", help="raw JSON output")
+    obs.set_defaults(func=cmd_admin_observe)
 
     return p
 

@@ -25,6 +25,8 @@ from .agent import AgentRunner, TaskTimeout, kill_process_group, read_activity_f
 from .audit import AuditLog
 from .config import Config, load_config
 from .journals import Journals, utc_now
+from .meta import MetaRunner, default_similarity
+from .observer import report_dict
 from .openterminal import OpenTerminalClient
 from .sanitize import Sanitizer
 from .tasks import TaskContext, TaskState, TaskStatus
@@ -96,6 +98,19 @@ class LittleCoderDaemon:
         )
         self.workspace = WorkspaceManager(self.ot, workspace_path=config.workspace.path)
         self.agent = AgentRunner(config, self.journals, self.ot)
+
+        # Observer outer loop (design §3.2, Chapter 3). Constructed unconditionally
+        # so `/admin/observe` works even when disabled — disabled mode returns
+        # a static "Observer is off" report, never silently nothing. The judge
+        # is intentionally NOT wired here yet: Stage 3 lands `Judge` + the
+        # embedding-based similarity; wiring them into the daemon is a
+        # separate operator switch that the cli config can flip later.
+        self.meta = MetaRunner(
+            observer_cfg=config.observer,
+            journals_dir=config.journals.dir,
+            cohorts_dir=config.paths.cohorts_dir,
+            similarity=default_similarity,
+        )
 
         self.queue: asyncio.Queue[str] = asyncio.Queue()
         self.tasks: dict[str, TaskState] = {}
@@ -443,6 +458,31 @@ def build_app(daemon: LittleCoderDaemon) -> FastAPI:
     @app.post("/project")
     async def project(req: ProjectRequest) -> dict:
         return await daemon.switch_project(req)
+
+    @app.get("/admin/observe")
+    def observe(iterate: bool = False) -> dict:
+        """Observer's read-only report (design §3f, Chapter 3). Reads
+        the on-disk cohort store; with `?iterate=true` runs a fresh
+        iteration first (single-flight — second concurrent call returns
+        the existing snapshot). Disabled-Observer mode returns the
+        report skeleton with `enabled: false`."""
+        if not daemon.cfg.observer.enabled:
+            return {
+                "enabled": False,
+                "note": "Observer is disabled — set observer.enabled in the config to turn on",
+                "last_iteration": None,
+                "knowledge_gaps": [],
+                "compliance_gaps": [],
+                "unassigned": [],
+            }
+        if iterate:
+            # iterate() returns None if another iteration is in flight; that
+            # is fine — fall through to read the (older) checkpoint.
+            daemon.meta.iterate()
+        store = daemon.meta.load_store()
+        out = report_dict(store, daemon.meta.state.last_result)
+        out["enabled"] = True
+        return out
 
     # Operator-surface stubs — wired up in Chapter 4 (design §12.6).
     @app.get("/admin/pending")

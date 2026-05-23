@@ -85,6 +85,12 @@ class Cluster:
     # one (lang, task_shape) pair.
     lang: str
     task_shape: str
+    # Tier-0 vs tier-1 gate (locked decision #17): True when the
+    # founding-knowledge baseline already states what this cluster is
+    # about. A baseline-covered cluster is a COMPLIANCE gap (escalates
+    # to tier-1 enforcement) — NOT a tier-0 knowledge restatement.
+    # Set by the judge at mint time; refined on subsequent judge passes.
+    baseline_covers: bool = False
     # Lineage (§5.3). `parents` is non-empty when this cluster was created
     # by a split or merge; `inherited_count` is the number of occurrences
     # carried over from a parent (does NOT count toward escalation

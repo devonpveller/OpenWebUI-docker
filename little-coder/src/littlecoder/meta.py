@@ -39,6 +39,7 @@ from .cohorts import (
 )
 from .config import ObserverConfig
 from .journals import Envelope, utc_now
+from .judge import Judge
 
 
 def default_similarity(occurrence: Occurrence, cluster: Cluster) -> float:
@@ -63,6 +64,9 @@ class IterationResult:
     unassigned_by_scope: dict[tuple[str, str], int] = dataclasses.field(
         default_factory=dict
     )
+    # Newly-minted-this-iteration cluster ids (the judge's output). Empty
+    # when no Judge was wired in, or when the pool was too small / noisy.
+    minted_cluster_ids: tuple[str, ...] = ()
 
 
 class MetaState:
@@ -123,6 +127,7 @@ class MetaRunner:
         cohorts_dir: str | Path,
         similarity: Similarity | None = None,
         state: MetaState | None = None,
+        judge: Judge | None = None,
     ) -> None:
         self.cfg = observer_cfg
         self.journals_dir = Path(journals_dir)
@@ -130,6 +135,10 @@ class MetaRunner:
         self.cohorts_dir.mkdir(parents=True, exist_ok=True)
         self.similarity = similarity or default_similarity
         self.state = state or MetaState()
+        # Optional — Stage 2 still works with no judge wired in (every
+        # occurrence stays in the unassigned pool). Stage 3 wires a real
+        # `Judge`; tests can pass a Judge-with-MockChatClient.
+        self.judge = judge
 
     @property
     def checkpoint_path(self) -> Path:
@@ -155,8 +164,9 @@ class MetaRunner:
             return None
         try:
             store = rebuild(self.journals_dir, self.similarity, self.cfg.similarity_floor)
+            minted = self._mint_from_unassigned(store) if self.judge else ()
             checkpoint(store, self.checkpoint_path)
-            result = self._summarize(store)
+            result = self._summarize(store, minted)
             self.state.last_iteration_ts = result.ts
             self.state.last_result = result
             self.state._records_at_last_run = result.records_consumed
@@ -164,7 +174,67 @@ class MetaRunner:
         finally:
             self.state._lock.release()
 
-    def _summarize(self, store: CohortStore) -> IterationResult:
+    def _mint_from_unassigned(self, store: CohortStore) -> tuple[str, ...]:
+        """For each scope's unassigned bucket, ask the judge whether it
+        coheres. Newly-minted clusters are added to `store.clusters`;
+        consumed occurrences are removed from their bucket and counted
+        against the new cluster. The buckets that aren't ripe (judge
+        returned no clusters, or the pool was too small) are LEFT IN
+        PLACE — the next iteration sees them again with whatever new
+        evidence has accumulated."""
+        if not self.judge:
+            return ()
+        minted_ids: list[str] = []
+        # Take a snapshot of the keys — we mutate the dict below.
+        for key in list(store.unassigned.keys()):
+            bucket = store.unassigned[key]
+            if not bucket.occurrences:
+                continue
+            result = self.judge.mint_clusters(
+                bucket.occurrences,
+                lang=bucket.lang,
+                task_shape=bucket.task_shape,
+            )
+            if not result.new_clusters:
+                continue
+            consumed_keys = {(o.task_id, o.signal_text) for o in result.consumed}
+            # Add the new clusters to the store and create their counters.
+            from .cohorts import ClusterCounters
+
+            for cluster in result.new_clusters:
+                store.clusters[cluster.cluster_id] = cluster
+                store.counters[cluster.cluster_id] = ClusterCounters(cluster.cluster_id)
+                minted_ids.append(cluster.cluster_id)
+            # Route consumed occurrences from the pool onto the new
+            # clusters (in the order the judge returned them). We don't
+            # know which proposal each consumed occurrence belongs to
+            # from the materialize step's return shape, so we re-walk
+            # the judge output once.
+            consumed_routed: set[tuple[str, str]] = set()
+            for proposal, cluster in zip(result.raw_output.clusters, result.new_clusters):
+                for idx in proposal.signal_indices:
+                    if not (0 <= idx < len(bucket.occurrences)):
+                        continue
+                    occ = bucket.occurrences[idx]
+                    ckey = (occ.task_id, occ.signal_text)
+                    if ckey in consumed_routed:
+                        continue
+                    consumed_routed.add(ckey)
+                    store.counters[cluster.cluster_id].record(occ)
+            # Remove consumed occurrences from the bucket.
+            bucket.occurrences = [
+                occ
+                for occ in bucket.occurrences
+                if (occ.task_id, occ.signal_text) not in consumed_keys
+            ]
+            # An empty bucket is left in place — the dict key still
+            # signals "this scope is live", and the next iteration will
+            # refill it as new failures arrive.
+        return tuple(minted_ids)
+
+    def _summarize(
+        self, store: CohortStore, minted: tuple[str, ...] = ()
+    ) -> IterationResult:
         """Build the iteration's `IterationResult` — counts the operator
         surface (and the metrics endpoint) reads. The full store goes to
         disk; this is the cheap snapshot."""
@@ -180,6 +250,7 @@ class MetaRunner:
             occurrences_total=occurrences_total,
             unassigned_total=unassigned_total,
             unassigned_by_scope=unassigned_by_scope,
+            minted_cluster_ids=minted,
         )
 
     def _count_journal_records(self) -> int:
