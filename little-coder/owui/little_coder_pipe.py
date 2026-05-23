@@ -1,7 +1,7 @@
 """
 title: Little Coder
 author: ai-stack
-version: 0.5.1
+version: 0.6.0
 license: MIT
 description: Drive little-coder from OpenWebUI chat (Chapter 2 — OWUI pipeline).
   Plain messages trigger coding tasks and stream the agent's process live —
@@ -110,13 +110,24 @@ class _Render:
     The process — thinking and tool calls — is wrapped in a `<think>` block,
     which OpenWebUI renders as a collapsible reasoning panel that auto-collapses
     when the answer begins. The agent's answer is the plain message body, so a
-    copied message is the clean answer, not the whole transcript."""
+    copied message is the clean answer, not the whole transcript.
+
+    Compaction tracking (design §3.1 follow-up): when pi runs in
+    session mode (which little-coder does — see `agent.use_session`),
+    pi auto-compacts the session as it grows past its context budget.
+    We surface compaction events both as a status emit (operator sees
+    "Compacting context…" in OWUI's status bar) and as a small line in
+    the reasoning panel so the operator can SEE that summarization
+    happened (otherwise it looks like the agent silently forgot)."""
 
     def __init__(self, show_thinking: bool = True) -> None:
         self.show_thinking = show_thinking
         self.think_open = False
         self.answering = False
         self._tools: set = set()
+        # Track compaction events so the footer can render a count.
+        self.compactions_seen = 0
+        self.last_compaction: Optional[dict] = None
 
     def _open_think(self) -> str:
         if self.think_open or self.answering:
@@ -131,7 +142,34 @@ class _Render:
         return "\n</think>\n\n"
 
     def feed(self, ev: dict) -> str:
-        if ev.get("type") != "message_update":
+        # Compaction events — pi emits these in session mode (design
+        # §3.1 follow-up). Track them so the footer reflects what
+        # happened; render a short line in the reasoning panel so the
+        # operator SEES the summarization (otherwise the agent looks
+        # like it silently forgot earlier turns).
+        ev_type = ev.get("type")
+        if ev_type == "compaction_start":
+            reason = ev.get("reason", "?")
+            return self._open_think() + (
+                f"\n🧠 Compacting context — older turns being summarized "
+                f"(reason: {reason})…\n"
+            )
+        if ev_type == "compaction_end":
+            self.compactions_seen += 1
+            self.last_compaction = {
+                "reason": ev.get("reason"),
+                "aborted": ev.get("aborted", False),
+                "result": ev.get("result") or {},
+            }
+            if ev.get("aborted"):
+                return self._open_think() + "\n🧠 Compaction aborted.\n"
+            tokens_before = (ev.get("result") or {}).get("tokensBefore")
+            extra = (
+                f" ({tokens_before} tokens compacted)" if tokens_before else ""
+            )
+            return self._open_think() + f"\n🧠 Context compacted{extra}.\n"
+
+        if ev_type != "message_update":
             return ""
         ame = ev.get("assistantMessageEvent") or {}
         t = ame.get("type")
@@ -240,6 +278,9 @@ class Pipe:
             yield result
             return
 
+        # The daemon receives `session_id = chat_id` so the agent can
+        # use its native session-per-chat continuity (design §3.1
+        # follow-up — see daemon.py + agent.py for the wiring).
         async for chunk in self._trigger_stream(
             message, __user__ or {}, meta, __event_emitter__
         ):
@@ -290,22 +331,42 @@ class Pipe:
                     yield f"\n\n⚠️ Lost contact with the daemon: {data.get('detail', data)}"
                     return
                 offset = data.get("next_offset", offset)
+                # Track whether this batch saw a compaction so we can
+                # emit a "Compacting context…" status line that lasts
+                # for the operator to actually see in OWUI's status bar.
+                compacted_in_batch = False
+                compaction_in_flight = False
                 for raw in data.get("events", []):
                     try:
                         ev = json.loads(raw)
                     except json.JSONDecodeError:
                         continue
+                    if ev.get("type") == "compaction_start":
+                        compaction_in_flight = True
+                    elif ev.get("type") == "compaction_end":
+                        compaction_in_flight = False
+                        if not ev.get("aborted"):
+                            compacted_in_batch = True
                     chunk = renderer.feed(ev)
                     if chunk:
                         yield chunk
                 if data.get("done"):
                     done = True
                     break
-                # Distinguish "queued behind another task" (no events yet,
-                # one task at a time) from a genuinely working agent.
+                # Distinguish queued vs compacting vs running. Compaction
+                # is the noisiest of the three — show it explicitly so
+                # the operator knows pi is summarizing rather than stuck.
                 if data.get("status") == "queued":
                     await self._status(
                         emit, "⏳ Queued — another task is running (one at a time)…"
+                    )
+                elif compaction_in_flight:
+                    await self._status(
+                        emit, "🧠 Compacting session context (auto)…"
+                    )
+                elif compacted_in_batch:
+                    await self._status(
+                        emit, "🧠 Context compacted — continuing…"
                     )
                 else:
                     await self._status(emit, "Agent working…")
@@ -321,7 +382,7 @@ class Pipe:
                     f"{self.valves.task_timeout_seconds}s — `/status` to check, "
                     f"or **Stop** to interrupt."
                 )
-            yield self._footer(task_id, final if ok else {})
+            yield self._footer(task_id, final if ok else {}, renderer)
         except asyncio.CancelledError:
             # OWUI "stop" — interrupt the task (design §12.4: abandonment).
             asyncio.ensure_future(self._cancel_quietly(task_id))
@@ -333,8 +394,11 @@ class Pipe:
             await self._call("POST", f"/tasks/{task_id}/cancel")
 
     @staticmethod
-    def _footer(task_id: str, state: dict) -> str:
-        """Closing block: the command log + a one-line outcome."""
+    def _footer(task_id: str, state: dict, renderer: "_Render | None" = None) -> str:
+        """Closing block: the command log + compaction note + one-line
+        outcome. The renderer carries this-task compaction counts so
+        the operator can see whether pi summarized older turns during
+        the run (design §3.1 follow-up tracking)."""
         outcome = state.get("outcome")
         status = state.get("status", "?")
         activity = state.get("activity") or []
@@ -348,6 +412,15 @@ class Pipe:
             parts.append(
                 f"<details>\n<summary>🔧 {len(activity)} command(s) run "
                 f"in open-terminal</summary>\n\n{rows}\n\n</details>\n"
+            )
+        if renderer and renderer.compactions_seen > 0:
+            last = renderer.last_compaction or {}
+            result = last.get("result") or {}
+            tokens = result.get("tokensBefore")
+            extra = f" (last: {tokens} tokens compacted)" if tokens else ""
+            parts.append(
+                f"🧠 _Session context was compacted "
+                f"{renderer.compactions_seen}× during this task_{extra}.\n"
             )
         foot = f"{icon} `{status}` · outcome `{outcome}` · task `{task_id}`"
         if outcome == "unverified":

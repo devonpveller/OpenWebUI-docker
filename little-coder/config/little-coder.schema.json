@@ -11,6 +11,13 @@
           "title": "Command",
           "type": "array"
         },
+        "default_session_ids": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Default Session Ids",
+          "type": "object"
+        },
         "extra_args": {
           "items": {
             "type": "string"
@@ -31,6 +38,16 @@
           ],
           "title": "Prompt Mode",
           "type": "string"
+        },
+        "session_dir": {
+          "default": "/var/lib/little-coder/sessions",
+          "title": "Session Dir",
+          "type": "string"
+        },
+        "use_session": {
+          "default": true,
+          "title": "Use Session",
+          "type": "boolean"
         }
       },
       "title": "AgentConfig",

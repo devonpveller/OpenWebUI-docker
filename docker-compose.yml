@@ -705,6 +705,7 @@ services:
       - little-coder-skill:/var/lib/little-coder/skill
       - little-coder-cohorts:/var/lib/little-coder/cohorts
       - little-coder-polyglot:/var/lib/little-coder/polyglot
+      - little-coder-sessions:/var/lib/little-coder/sessions
       - little-coder-workspace:/workspace
     ports:
       - "127.0.0.1:9091:9090"   # Prometheus metrics (loopback only)
@@ -788,6 +789,7 @@ services:
       - little-coder-skill:/data/skill:ro
       - little-coder-cohorts:/data/cohorts:ro
       - little-coder-polyglot:/data/polyglot:ro
+      - little-coder-sessions:/data/sessions:ro
       - ./backups/little-coder:/backups
       - ./backup/little-coder-backup.sh:/scripts/backup.sh:ro
     environment:
@@ -813,12 +815,16 @@ volumes:
   openwebui-data:
   mnemory-data:
   smolcrawl-data:
-  # little-coder — four expertise volumes (persistence boundary, design §3.6)
+  # little-coder — five expertise volumes (persistence boundary, design §3.6)
   # plus the project-scoped workspace shared with open-terminal.
+  # `little-coder-sessions` holds pi's per-chat session files — added in
+  # the §3.1 follow-up that switched from --no-session to per-trigger
+  # `--session <id>` for OWUI in-chat continuity + native compaction.
   little-coder-journals:
   little-coder-skill:
   little-coder-cohorts:
   little-coder-polyglot:
+  little-coder-sessions:
   little-coder-workspace:
 
 networks:

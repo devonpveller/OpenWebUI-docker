@@ -58,6 +58,29 @@ class AgentConfig(_Strict):
     model: str = "llamacpp/qwen36-27b"
     prompt_mode: Literal["stdin", "arg"] = "stdin"
     extra_args: list[str] = Field(default_factory=list)
+    # Session-per-trigger continuity (design §3.1 follow-up). Each
+    # trigger carries a `session_id` (OWUI: chat_id; CLI: a stable
+    # per-CLI-channel id by default). The daemon passes `--session
+    # <id>` so pi loads the matching session (creates one on first
+    # use). pi handles compaction natively when the session exceeds
+    # its context budget. The session dir lives on a persistent
+    # named volume so sessions survive restarts.
+    session_dir: str = "/var/lib/little-coder/sessions"
+    # `True` = pass `--session <id>` per task (in-chat / cross-task
+    # continuity). `False` = pass `--no-session` (strict statelessness,
+    # the Chapter-1–3 default). Operator can flip back if needed.
+    use_session: bool = True
+    # When the trigger carries no explicit session_id (e.g. some CLI
+    # paths), this is what we use. Per channel so `cli` tasks share
+    # a session but don't pollute the OWUI chat namespace.
+    default_session_ids: dict[str, str] = Field(
+        default_factory=lambda: {
+            "cli": "cli-default",
+            "owui": "owui-default",
+            "validation": "validation-default",
+            "batch": "batch-default",
+        }
+    )
 
 
 class WorkspaceConfig(_Strict):

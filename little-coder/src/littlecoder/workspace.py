@@ -114,6 +114,13 @@ class WorkspaceManager:
         clone uses an HTTPS token URL — least-privilege, injected per switch,
         never the self-improvement PAT (design §10.3).
 
+        Full-history clone (no `--depth 1`): the agent needs all branches +
+        history to switch branches, `git log` past initial commit, and
+        inspect prior work. Disk is cheap relative to re-cloning. If
+        `repo.branch` is set (via the `#<branch>` link fragment), git's
+        `-b <branch>` checks it out as HEAD; otherwise the remote's default
+        branch is used.
+
         The returned ExecResult.command still contains the token; the caller
         MUST journal a redacted form, never the raw command."""
         url = repo.canonical_url
@@ -121,10 +128,13 @@ class WorkspaceManager:
             url = url.replace(
                 "https://", f"https://x-access-token:{deploy_token}@", 1
             )
+        branch_flag = ""
+        if repo.branch:
+            branch_flag = f" -b {shlex.quote(repo.branch)}"
         # umask 000 so the clone is usable from the agent's other plane too
         # (the workspace volume is shared across two containers' uids).
         cmd = (
-            f"umask 000; {shlex.quote(self.real_git)} clone --depth 1 "
+            f"umask 000; {shlex.quote(self.real_git)} clone{branch_flag} "
             f"{shlex.quote(url)} {shlex.quote(self.workspace_path)}"
         )
         return self.ot.execute(cmd, cwd="/", timeout=self.clone_timeout)
