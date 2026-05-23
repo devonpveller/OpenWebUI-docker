@@ -16,9 +16,19 @@ RUN if [ -x /usr/bin/git ]; then mv /usr/bin/git /usr/bin/git.real; fi
 # isolation are the real controls (design §3.3–§3.4); this is just git's
 # CVE-2022-24765 paranoia, which does not apply inside this sandbox. System
 # config so every isolated command user honors it.
+#
+# core.hooksPath points every repo's hook lookup at an empty, operator-
+# controlled directory OUTSIDE `.git/` (design §3.3, plan open item #9 —
+# partial closure). Even if a hostile repo or a residual root-bypass managed
+# to drop a script into `.git/hooks/`, git would never see it: it consults
+# `/etc/lc-git-hooks/` instead. The dir is created read-only (0555) and
+# empty; operator can add hooks by rebuilding the image with files in it.
 RUN git.real config --system --add safe.directory '*' \
  && git.real config --system user.name "little-coder" \
- && git.real config --system user.email "little-coder@ai-stack.local"
+ && git.real config --system user.email "little-coder@ai-stack.local" \
+ && git.real config --system core.hooksPath /etc/lc-git-hooks \
+ && mkdir -p /etc/lc-git-hooks \
+ && chmod 0555 /etc/lc-git-hooks
 
 COPY git-proxy/git_proxy.py /opt/git-proxy/git_proxy.py
 RUN printf '#!/bin/sh\nexec python3 /opt/git-proxy/git_proxy.py "$@"\n' \

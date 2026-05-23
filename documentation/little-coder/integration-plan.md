@@ -312,7 +312,7 @@ Settled in the design doc. Reproduced for plan independence.
 | 6   | Reserved-slot promotion threshold (`meta` GPU)                                               | Steady-state load observation                                          | Learner+ (only if starvation observed)             |
 | 7   | Backup cadence + restore drill                                                               | Decided alongside volumes in Tool; drill before Learner                | Learner                                            |
 | 8   | `.git/config` flexibility upgrade                                                            | Deferred; only if real need arises                                     | None today                                         |
-| 9   | `.git/config` read-only **enforcement** for the agent + `core.hooksPath`                     | Tool hardening — known gap, see tasks doc                              | Before hostile-repo workload                       |
+| 9   | `.git/config` read-only **enforcement** for the agent + `core.hooksPath`                     | Tool hardening — **partial closure 2026-05-22** (bash filter + hooksPath); residual root-bypass tracked, see tasks doc | Residual half: before hostile-repo workload        |
 | 10  | Journal-backed **episodic memory** for the agent (task-context assembly at the daemon layer) | Deliberate future decision; not in current design                      | None today — git-as-project-memory is the boundary |
 
 ---
