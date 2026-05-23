@@ -40,8 +40,9 @@ from .cohorts import (
 from .config import ObserverConfig
 from .journals import Envelope, utc_now
 from .judge import Judge
+from .efficacy import snapshots_from_audit
 from .skills import Skill, build_skill, iter_skills, write_skill
-from .tier_ladder import eligible_tier_0
+from .tier_ladder import eligible_tier_0, eligible_tier_1
 
 
 def default_similarity(occurrence: Occurrence, cluster: Cluster) -> float:
@@ -237,38 +238,53 @@ class MetaRunner:
 
     def _draft_eligible_clusters(self, store: CohortStore) -> tuple[str, ...]:
         """Per design §5.6 + §12.5: per-iteration draft cap is 1 by
-        default. Walk eligible clusters in observed-count-descending
-        order; draft until the cap is hit or the eligible list is
-        empty. Returns the ids of the `Skill` files written."""
+        default. Tier-1 is checked BEFORE tier-0 — when a cluster has
+        an existing tier-0 that didn't land + ≥ 20 new occurrences,
+        tier-1 enforcement is the higher-priority follow-up. Within a
+        tier, walk observed-count-descending. Returns the ids of the
+        Skill files written."""
         if not self.judge or self.skill_dir is None:
             return ()
         prior = _prior_interventions(self.skill_dir)
+
+        # Tier-1 first — only fires when there's already a tier-0
+        # snapshot to compare against (knowledge-gap path) OR the
+        # cluster is baseline-covered (compliance-gap path).
+        drafted_ids: list[str] = []
+        budget = self.drafts_per_iteration
+        if budget > 0:
+            drafted_ids.extend(
+                self._draft_tier_1_round(store, prior, budget=budget)
+            )
+            budget -= len(drafted_ids)
+        if budget <= 0:
+            return tuple(drafted_ids)
+
+        # Tier-0 fills the rest of the budget.
         eligibles = eligible_tier_0(
             list(store.clusters.values()), store.counters, prior
         )
-        if not eligibles:
-            return ()
-
-        drafted_ids: list[str] = []
-        for verdict in eligibles[: self.drafts_per_iteration]:
+        for verdict in eligibles[:budget]:
             cluster = store.clusters[verdict.cluster_id]
             counter = store.counters.get(cluster.cluster_id)
             samples = _signal_sample(store, cluster.cluster_id)
             try:
                 draft_result = self.judge.draft_tier_0_skill(cluster, counter, samples)
             except Exception:
-                # A failed draft must not poison the iteration; the
-                # cluster stays eligible for the next pass. Re-raise
-                # would also work, but evidence-triggered design
-                # tolerates one bad LLM call.
                 continue
             if draft_result.escaped_to_compliance or draft_result.output is None:
                 # Judge re-judged: this is actually a compliance gap.
                 # Flip the cluster's baseline_covers so the next ladder
-                # pass routes it to tier-1 (Stage 4+).
+                # pass routes it to tier-1.
                 cluster.baseline_covers = True
                 continue
             output = draft_result.output
+            # Chapter 5 §5a — tier-0 auto-merge. When enabled, the
+            # majority of drafts land as "active" so the augmenter
+            # picks them up immediately; a sampled fraction still
+            # land as "pending" per §10.4 control 2 — the operator
+            # catches drafting drift on those.
+            status = self._initial_status_for_draft(tier=0)
             skill = build_skill(
                 kind="knowledge",
                 cluster_id=cluster.cluster_id,
@@ -279,11 +295,144 @@ class MetaRunner:
                 name=output.name,
                 description=output.description,
                 body=output.body,
-                status="pending",  # operator approves via §4f surface
+                status=status,
             )
             write_skill(self.skill_dir, skill)
             drafted_ids.append(skill.id)
         return tuple(drafted_ids)
+
+    def _initial_status_for_draft(self, *, tier: int) -> str:
+        """Decide whether a freshly-drafted skill goes straight to
+        `active` (auto-merge, §5a) or `pending` (human gate). Rules:
+
+          - Tier > 0 NEVER auto-merges (locked design — only tier-0
+            knowledge entries are eligible).
+          - Auto-merge requires `observer.auto_merge_tier_0=True`.
+          - Sampled human-review fraction (§10.4 control 2): the
+            named fraction of auto-merge-eligible drafts STILL land
+            as pending so the operator catches drafting drift. The
+            sampling is deterministic-per-iteration (we hash the
+            iteration's cluster set length + the running drafted
+            count) so tests can pin behavior; production randomness
+            is fine because the fraction is the contract."""
+        if tier != 0:
+            return "pending"
+        if not self.cfg.auto_merge_tier_0:
+            return "pending"
+        # Deterministic sample: count how many tier-0 actives already
+        # exist for sampling-density purposes. (A simple modulus is
+        # enough — every ~1/fraction artifacts goes to pending.)
+        if self.cfg.auto_merge_sample_fraction <= 0:
+            return "active"
+        if self.cfg.auto_merge_sample_fraction >= 1.0:
+            return "pending"
+        # Count active tier-0 skills on disk; the (count+1)-th draft
+        # gets sampled if it falls on the modulus boundary.
+        active_count = 0
+        if self.skill_dir is not None:
+            for s in iter_skills(self.skill_dir, status="active"):
+                if s.frontmatter.tier == 0:
+                    active_count += 1
+        # Every 1/fraction drafts → pending. E.g. fraction=0.2 → every
+        # 5th draft is sampled.
+        period = max(1, int(round(1.0 / self.cfg.auto_merge_sample_fraction)))
+        return "pending" if (active_count + 1) % period == 0 else "active"
+
+    def _draft_tier_1_round(
+        self, store: CohortStore, prior: dict, *, budget: int
+    ) -> list[str]:
+        """Tier-1 drafting round. Reads the audit log for tier-0
+        snapshots; without snapshots the knowledge-gap path can't
+        fire (compliance-gap path still can — that doesn't depend on
+        a tier-0 ever having shipped)."""
+        tier0_snapshots = self._tier0_snapshots()
+        current_tasks = self._count_started_tasks()
+        eligibles = eligible_tier_1(
+            list(store.clusters.values()),
+            store.counters,
+            prior,
+            tier0_snapshots,
+            current_task_total=current_tasks,
+        )
+        drafted: list[str] = []
+        for verdict in eligibles[:budget]:
+            cluster = store.clusters[verdict.cluster_id]
+            counter = store.counters.get(cluster.cluster_id)
+            samples = _signal_sample(store, cluster.cluster_id)
+            try:
+                draft = self.judge.draft_tier_1_skill(cluster, counter, samples)
+            except Exception:
+                continue
+            if draft.escaped_to_compliance or draft.output is None:
+                continue
+            out = draft.output
+            skill = build_skill(
+                kind=out.kind,  # "tool_craft" or "plan_slot"
+                cluster_id=cluster.cluster_id,
+                tier=1,
+                lang=cluster.lang,
+                domain=_domain_from_cluster(cluster),
+                task_shape=cluster.task_shape,
+                name=out.name,
+                description=out.description,
+                body=out.body,
+                status="pending",
+            )
+            write_skill(self.skill_dir, skill)
+            drafted.append(skill.id)
+        return drafted
+
+    def _tier0_snapshots(self) -> dict[str, tuple[str, int, int]]:
+        """For each approved tier-0 skill, return its
+        `(cluster_id, observed_at_approve, tasks_at_approve)` triple.
+        Built by joining the audit log (snapshot per artifact) with the
+        active skill library (which gives the cluster_id per artifact).
+        """
+        audit_path = Path(self.journals_dir) / "audit.jsonl"
+        snapshots = snapshots_from_audit(audit_path)
+        if self.skill_dir is None:
+            return {}
+        out: dict[str, tuple[str, int, int]] = {}
+        for skill in iter_skills(self.skill_dir, status=None):
+            if skill.frontmatter.tier != 0:
+                continue
+            if skill.frontmatter.status not in ("active", "superseded"):
+                # Pending / retired skills are not "shipped" — they
+                # don't provide a tier-1 baseline.
+                continue
+            snap = snapshots.get(skill.id)
+            if snap is None:
+                continue
+            obs_at_approve, tasks_at_approve = snap
+            out[skill.id] = (
+                skill.frontmatter.cluster_id,
+                obs_at_approve,
+                tasks_at_approve,
+            )
+        return out
+
+    def _count_started_tasks(self) -> int:
+        """Durable task-started counter (across-restart-safe). Reads
+        outcomes.jsonl segments and counts `task_started` events."""
+        total = 0
+        import json as _json
+
+        for path in sorted(self.journals_dir.glob("outcomes*.jsonl")):
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    for line in fh:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            rec = _json.loads(line)
+                        except _json.JSONDecodeError:
+                            continue
+                        if rec.get("event") == "task_started":
+                            total += 1
+            except OSError:
+                continue
+        return total
 
     def _mint_from_unassigned(self, store: CohortStore) -> tuple[str, ...]:
         """For each scope's unassigned bucket, ask the judge whether it

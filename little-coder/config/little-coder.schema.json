@@ -169,6 +169,16 @@
           "title": "Auto Iterate On Task End",
           "type": "boolean"
         },
+        "auto_merge_sample_fraction": {
+          "default": 0.2,
+          "title": "Auto Merge Sample Fraction",
+          "type": "number"
+        },
+        "auto_merge_tier_0": {
+          "default": false,
+          "title": "Auto Merge Tier 0",
+          "type": "boolean"
+        },
         "enabled": {
           "default": false,
           "title": "Enabled",

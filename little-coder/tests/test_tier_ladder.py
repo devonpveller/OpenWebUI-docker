@@ -151,3 +151,142 @@ def test_evaluate_all_returns_one_verdict_per_cluster_with_reason():
     assert by_id["c1"].eligible is True
     assert by_id["c2"].eligible is False
     assert "baseline covers" in by_id["c2"].reason
+
+
+# --- tier-1 (Chapter 4 §4e) -------------------------------------------
+
+
+from littlecoder.tier_ladder import (
+    TIER1_MIN_NEW_OCCURRENCES,
+    eligible_tier_1,
+    evaluate_tier_1,
+)
+
+
+def test_tier1_compliance_path_fires_when_baseline_covers_and_threshold_met():
+    """Locked #17: a baseline-covered cluster with ≥ TIER0_MIN_OCCURRENCES
+    enters AT tier-1 — skipping tier-0 entirely. No tier-0 snapshot
+    needed for this path."""
+    cluster = _cluster("c-compliance", baseline_covers=True)
+    counter = _counter("c-compliance", observed=10)
+    verdict = evaluate_tier_1(cluster, counter, prior={}, tier0_snapshots={}, current_task_total=100)
+    assert verdict.eligible is True
+    assert "compliance-gap entry" in verdict.reason
+
+
+def test_tier1_compliance_path_below_threshold_ineligible():
+    cluster = _cluster("c", baseline_covers=True)
+    counter = _counter("c", observed=2)
+    verdict = evaluate_tier_1(cluster, counter, prior={}, tier0_snapshots={}, current_task_total=100)
+    assert verdict.eligible is False
+    assert "need ≥" in verdict.reason
+
+
+def test_tier1_knowledge_path_requires_prior_tier0():
+    """Knowledge-gap path needs a tier-0 to have shipped (otherwise the
+    cluster should be ESCALATING to tier-0 first, not skipping)."""
+    cluster = _cluster("c", baseline_covers=False)
+    counter = _counter("c", observed=50)
+    verdict = evaluate_tier_1(
+        cluster, counter, prior={}, tier0_snapshots={}, current_task_total=100
+    )
+    assert verdict.eligible is False
+    assert "requires a tier-0" in verdict.reason
+
+
+def test_tier1_knowledge_path_requires_snapshot():
+    """Tier-0 shipped but no audit snapshot recorded — can't compute
+    rate-unchanged. Skip with an explicit reason."""
+    cluster = _cluster("c", baseline_covers=False)
+    counter = _counter("c", observed=50)
+    prior = {"c": {0}}  # tier-0 shipped
+    verdict = evaluate_tier_1(
+        cluster, counter, prior=prior, tier0_snapshots={}, current_task_total=100
+    )
+    assert verdict.eligible is False
+    assert "audit snapshot" in verdict.reason
+
+
+def test_tier1_knowledge_path_fires_when_rate_unchanged():
+    """Pre-rate 0.20/task, post-rate 0.20/task — clearly unchanged.
+    Plus ≥ TIER1_MIN_NEW_OCCURRENCES new occurrences → tier-1."""
+    cluster = _cluster("c", baseline_covers=False)
+    counter = _counter("c", observed=30)  # 10 pre + 20 post
+    prior = {"c": {0}}
+    tier0_snapshots = {"skill-abc": ("c", 10, 50)}  # snapshot at observed=10, tasks=50
+    verdict = evaluate_tier_1(
+        cluster,
+        counter,
+        prior=prior,
+        tier0_snapshots=tier0_snapshots,
+        current_task_total=150,  # 100 tasks since snapshot
+    )
+    # pre-rate: 10/50 = 0.20; post-rate: 20/100 = 0.20; unchanged.
+    # new occurrences: 20 == TIER1_MIN_NEW_OCCURRENCES → eligible.
+    assert verdict.eligible is True
+    assert "rate unchanged" in verdict.reason
+
+
+def test_tier1_skips_when_rate_clearly_improved():
+    """Post-rate well below pre-rate → tier-0 is working; don't escalate.
+    Use ≥ TIER1_MIN_NEW_OCCURRENCES post-count so the rate check is
+    actually exercised (count threshold checked first)."""
+    cluster = _cluster("c", baseline_covers=False)
+    # pre-rate: 100/100 = 1.00. post: 20/1000 = 0.02 (huge drop).
+    counter = _counter("c", observed=120)  # 100 pre + 20 post
+    prior = {"c": {0}}
+    tier0_snapshots = {"skill-abc": ("c", 100, 100)}
+    verdict = evaluate_tier_1(
+        cluster,
+        counter,
+        prior=prior,
+        tier0_snapshots=tier0_snapshots,
+        current_task_total=1100,  # 1000 tasks since snapshot
+    )
+    assert verdict.eligible is False
+    assert "tier-0 is working" in verdict.reason
+
+
+def test_tier1_skips_when_post_occurrences_below_threshold():
+    """≥ TIER1_MIN_NEW_OCCURRENCES required — below that, defer."""
+    cluster = _cluster("c", baseline_covers=False)
+    counter = _counter("c", observed=15)  # only 5 post
+    prior = {"c": {0}}
+    tier0_snapshots = {"skill-abc": ("c", 10, 50)}
+    verdict = evaluate_tier_1(
+        cluster,
+        counter,
+        prior=prior,
+        tier0_snapshots=tier0_snapshots,
+        current_task_total=150,
+    )
+    assert verdict.eligible is False
+    assert f"need ≥ {TIER1_MIN_NEW_OCCURRENCES}" in verdict.reason
+
+
+def test_tier1_skips_when_already_shipped():
+    """A cluster with tier-1 already done doesn't get a second one."""
+    cluster = _cluster("c", baseline_covers=True)
+    counter = _counter("c", observed=50)
+    verdict = evaluate_tier_1(
+        cluster,
+        counter,
+        prior={"c": {0, 1}},  # both tiers shipped
+        tier0_snapshots={},
+        current_task_total=100,
+    )
+    assert verdict.eligible is False
+    assert "tier-1 already shipped" in verdict.reason
+
+
+def test_eligible_tier_1_sorts_by_observed_desc():
+    """Loudest cluster first — the per-iteration draft budget goes to
+    the noisiest gap."""
+    c1 = _cluster("c1", baseline_covers=True)
+    c2 = _cluster("c2", baseline_covers=True)
+    counters = {
+        "c1": _counter("c1", observed=8),
+        "c2": _counter("c2", observed=20),
+    }
+    out = eligible_tier_1([c1, c2], counters, prior={}, tier0_snapshots={}, current_task_total=100)
+    assert [v.cluster_id for v in out] == ["c2", "c1"]

@@ -517,6 +517,154 @@ def test_iterate_does_not_draft_when_baseline_covers_cluster(tmp_path):
     )
 
 
+# --- Chapter 5 §5a: tier-0 auto-merge -----------------------------------
+
+
+def test_initial_status_pending_when_auto_merge_off(tmp_path):
+    """Default config (`auto_merge_tier_0=False`) → drafts land pending.
+    The operator approval surface is the only path to active."""
+    runner = _make_runner(tmp_path)
+    runner.skill_dir = tmp_path / "skills"
+    assert runner._initial_status_for_draft(tier=0) == "pending"
+
+
+def test_initial_status_active_when_auto_merge_on_and_no_sampling(tmp_path):
+    """`auto_merge_tier_0=True` + `sample_fraction=0.0` → every draft
+    lands active. Sampling-off is a deliberate config for the
+    operator's "I trust drafts; skip the gate" mode."""
+    from littlecoder.config import ObserverConfig
+
+    runner = _make_runner(tmp_path)
+    runner.skill_dir = tmp_path / "skills"
+    runner.cfg = ObserverConfig(
+        enabled=True,
+        auto_merge_tier_0=True,
+        auto_merge_sample_fraction=0.0,
+    )
+    for _ in range(10):
+        assert runner._initial_status_for_draft(tier=0) == "active"
+
+
+def test_initial_status_tier_1_always_pending_under_auto_merge(tmp_path):
+    """Tier-1 is NEVER auto-merged — locked design. Even with
+    `auto_merge_tier_0=True`, tier-1 drafts still go through the
+    human gate."""
+    from littlecoder.config import ObserverConfig
+
+    runner = _make_runner(tmp_path)
+    runner.skill_dir = tmp_path / "skills"
+    runner.cfg = ObserverConfig(
+        enabled=True,
+        auto_merge_tier_0=True,
+        auto_merge_sample_fraction=0.0,
+    )
+    assert runner._initial_status_for_draft(tier=1) == "pending"
+    assert runner._initial_status_for_draft(tier=2) == "pending"
+
+
+def test_initial_status_samples_at_configured_fraction(tmp_path):
+    """`auto_merge_sample_fraction=0.2` → every 5th draft is sampled
+    (lands pending). The sampling counts existing active tier-0 skills
+    on disk — so a fresh library samples the first one and the 6th
+    one and the 11th one, etc."""
+    from littlecoder.config import ObserverConfig
+    from littlecoder.skills import build_skill, write_skill
+
+    runner = _make_runner(tmp_path)
+    runner.skill_dir = tmp_path / "skills"
+    runner.cfg = ObserverConfig(
+        enabled=True,
+        auto_merge_tier_0=True,
+        auto_merge_sample_fraction=0.2,
+    )
+
+    def plant(n: int) -> None:
+        for i in range(n):
+            s = build_skill(
+                kind="knowledge",
+                cluster_id=f"cl{i:04d}",
+                tier=0,
+                lang="rust",
+                domain="async",
+                task_shape="bugfix",
+                name=f"skill {i}",
+                description="when X do Y description",
+                body="# Body\n\nText.\n",
+                status="active",
+            )
+            write_skill(runner.skill_dir, s)
+
+    # No active skills yet → first draft samples (1 % 5 == ... no, 1 % 5 = 1).
+    # Period = round(1/0.2) = 5. With 0 active, next draft has index 0+1=1.
+    # 1 % 5 == 1 (not 0) → active. Land 5 actives, next is index 5+1=6.
+    # 6 % 5 == 1 → active. So sampling at every 5th draft means:
+    # active_count == 4 → next is 5 → 5%5==0 → PENDING.
+    for active_count in range(20):
+        if active_count > 0:
+            plant(1)
+        status = runner._initial_status_for_draft(tier=0)
+        # active_count is the count BEFORE the draft. Period=5: pending
+        # when (active_count + 1) % 5 == 0 → active_count == 4, 9, 14, ...
+        expected = "pending" if (active_count + 1) % 5 == 0 else "active"
+        assert status == expected, (
+            f"active_count={active_count}: expected {expected}, got {status}"
+        )
+
+
+def test_iterate_writes_active_skill_when_auto_merge_on(tmp_path):
+    """End-to-end: with auto-merge + 0% sampling, a drafted skill goes
+    straight to `active` on disk — augmenter picks it up immediately."""
+    import json
+
+    from littlecoder.cohorts import checkpoint as save_store
+    from littlecoder.clusters import Cluster, new_cluster_id
+    from littlecoder.config import ObserverConfig
+    from littlecoder.judge import Judge
+    from littlecoder.llm import ChatResponse, MockChatClient
+    from littlecoder.skills import iter_skills
+
+    runner = _make_runner(tmp_path)
+    runner.cfg = ObserverConfig(
+        enabled=True,
+        auto_merge_tier_0=True,
+        auto_merge_sample_fraction=0.0,
+    )
+    runner.similarity = lambda occ, c: 1.0
+    runner.skill_dir = tmp_path / "skills"
+    journals = Journals(tmp_path / "journals")
+    _write_failures(journals, 6)
+
+    cid = new_cluster_id()
+    seeded_store = runner.load_store()
+    seeded_store.clusters[cid] = Cluster(
+        cluster_id=cid,
+        label="seeded",
+        discriminator="d",
+        lang="rust",
+        task_shape="bugfix",
+        baseline_covers=False,
+    )
+    save_store(seeded_store, runner.checkpoint_path)
+
+    draft_payload = {
+        "name": "auto-merged knowledge",
+        "description": "Specific tip for the cluster.",
+        "body": "# Body\n\nText.\n",
+        "reasoning": "r",
+        "baseline_covers": False,
+    }
+    chat = MockChatClient(
+        [ChatResponse(content=json.dumps(draft_payload), finish_reason="stop")]
+    )
+    runner.judge = Judge(chat=chat, founding_knowledge_paths=[], min_pool_size=1)
+
+    runner.iterate()
+    active = list(iter_skills(runner.skill_dir, status="active"))
+    assert len(active) == 1
+    assert active[0].frontmatter.tier == 0
+    assert active[0].frontmatter.status == "active"
+
+
 def test_iterate_does_not_draft_when_prior_skill_exists(tmp_path):
     """If a tier-0 skill (pending OR active) already exists for the
     cluster, don't draft another. Prevents queue-up duplicates."""

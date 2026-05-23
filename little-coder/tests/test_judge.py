@@ -432,6 +432,64 @@ def test_draft_tier_0_skill_includes_founding_knowledge_in_prompt(tmp_path):
     assert fk_visible
 
 
+# --- tier-1 drafting (Chapter 4 §4e + §5.7) ----------------------------
+
+
+from littlecoder.judge import Tier1DraftOutput, parse_tier_1_response
+
+
+def _tier1_payload(**overrides) -> dict:
+    base = {
+        "kind": "tool_craft",
+        "name": "always pass --no-pager to git in headless contexts",
+        "description": "Enforce git --no-pager so paging never blocks the agent.",
+        "body": "# git --no-pager\n\nUse git --no-pager log instead of git log.\n",
+        "argument_for_tool_craft": "the gap is in the agent's flag choice",
+        "argument_for_plan_slot": "could add a plan step but flag fix is tighter",
+        "argument_for_pick": "tool-craft is the more direct fix",
+        "baseline_covers": False,
+    }
+    base.update(overrides)
+    return base
+
+
+def test_parse_tier_1_accepts_tool_craft_or_plan_slot():
+    out_tc = parse_tier_1_response(json.dumps(_tier1_payload(kind="tool_craft")))
+    out_ps = parse_tier_1_response(json.dumps(_tier1_payload(kind="plan_slot")))
+    assert out_tc.kind == "tool_craft"
+    assert out_ps.kind == "plan_slot"
+
+
+def test_parse_tier_1_rejects_unknown_kind():
+    bad = _tier1_payload(kind="invented")
+    with pytest.raises(LlmError, match="kind must be"):
+        parse_tier_1_response(json.dumps(bad))
+
+
+def test_draft_tier_1_skill_returns_output():
+    chat = MockChatClient(
+        [ChatResponse(content=json.dumps(_tier1_payload()), finish_reason="stop")]
+    )
+    judge = Judge(chat=chat, founding_knowledge_paths=[], min_pool_size=1)
+    counter = ClusterCounters("aaaaaaaaaaaaaaaa", observed=30)
+    result = judge.draft_tier_1_skill(_cluster(), counter, ["s1", "s2", "s3"])
+    assert result.escaped_to_compliance is False
+    assert result.output is not None
+    assert result.output.kind == "tool_craft"
+
+
+def test_draft_tier_1_escapes_to_compliance_when_baseline_covers():
+    payload = _tier1_payload(baseline_covers=True)
+    chat = MockChatClient(
+        [ChatResponse(content=json.dumps(payload), finish_reason="stop")]
+    )
+    judge = Judge(chat=chat, founding_knowledge_paths=[], min_pool_size=1)
+    counter = ClusterCounters("aaaaaaaaaaaaaaaa", observed=30)
+    result = judge.draft_tier_1_skill(_cluster(), counter, ["s"])
+    assert result.escaped_to_compliance is True
+    assert result.output is None
+
+
 def test_draft_tier_0_skill_windows_oversized_signal_sample():
     """`max_signals=16` (default) — caller can pass more; only the
     prefix lands in the prompt. Bounds prompt size."""
