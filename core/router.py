@@ -477,10 +477,11 @@ class AIStackRouter:
            any(keyword in input_lower for keyword in ["start", "stop", "status", "lmstudio", "service", "port"]):
             return "custom-tools"  # Routes to custom-tools which will handle tailscale_serve_pipe
 
-        # Stack admin: bare "status" / "inventory" / "show services" / "status of X"
-        # surface the rich containers + GPU + processing view from
-        # tailscale_serve_pipe.stack_status. Must run BEFORE the generic
-        # health/status branch below.
+        # Stack / server status — bare "status", "inventory", "overview",
+        # "show services", "status of X". Surfaces the rich containers +
+        # Tailnet URLs + processing + GPU view from tailscale_serve_pipe
+        # (build_stack_status). Must run BEFORE the generic health/monitor
+        # branch below.
         elif (
             input_stripped in {"status", "inventory", "overview", "show", "list", "stack"}
             or first_line in {"status", "inventory", "overview", "show", "list", "stack"}
