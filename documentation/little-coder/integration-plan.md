@@ -63,6 +63,18 @@ The agent's knowledge comes from two deliberately separate layers. Keeping them 
 
 Founding knowledge is the **baseline**: the operating environment (so the agent doesn't burn tokens rediscovering the git-proxy, `/workspace`, the no-ShellSession boundary every task) and engineering principles (SOLID, encapsulation, naming, patterns). The §7 library is the **learned layer** — meta-drafted, cohort-evidenced, discovered per task. A solid baseline raises the floor so self-improvement targets the ceiling (design §13 preflight). The §7 library adopts the Anthropic Agent Skills format — see §8.
 
+### Per-task context brief
+
+The two knowledge layers are *reusable* — craft carried across every task. Neither tells the agent **what just happened on this project**. Today every task starts cold: the agent spends turns on `git log`, `ls`, exploratory `cd` and file reads to reconstruct project state — tokens re-deriving what the journals already record.
+
+The **task-context brief** closes that gap. At task-start the daemon assembles a compact digest from the journals — scoped to the current `repo` — and injects it into the agent's prompt: the last few task outcomes, when the focus began, recent amendments. The agent starts *situated* instead of *exploring*. Like founding knowledge, the brief shapes the agent's *input* through little-coder's own prompt mechanism — the inner loop stays upstream-stock (design §3.1).
+
+Three properties keep it safe and cheap:
+
+- **No `meta` needed.** The daemon already writes the journals; the brief reads a scoped slice back. It is a Chapter 2 capability — see §6.
+- **Internal-only.** Assembled from the stack's own journals, fed to the stack's own agent, on a repo it already has full access to. Not an outbound path — the sanitization filter does not gate it.
+- **A hint, never ground truth.** The brief reflects *journal* history; the workspace filesystem and git history stay authoritative. The agent treats it as orientation — it never overrides what the agent reads directly.
+
 ---
 
 ## 4. Tier ladder (Self-modifier context)
@@ -152,6 +164,7 @@ The last bullet is the actual trigger. Until you wish for it, don't advance.
 - Privilege separation per design §12.6: operator commands authenticated at the OWUI surface (OWUI's configured auth); MCP server only authenticates task triggers (API key).
 - Operator smoke test: drive a task end-to-end via OWUI and verify the journal records `channel = owui`, `user_id = <OWUI user>`, and the task completes against open-terminal with identical effect to CLI invocation.
 - **Founding knowledge** — the baseline knowledge layer (§3). Author and bake in `agent-knowledge/environment.md` (operating environment + git-proxy whitelist/blocklist, so the agent stops rediscovering its constraints each task) and `agent-knowledge/engineering-principles.md` (SOLID / encapsulation / naming / patterns / DRY-YAGNI). Wired through `config/little-coder.config.yaml` → `agent.extra_args` → `--append-system-prompt`. Operator-maintained, always-loaded, never meta-touched.
+- **Task-context brief** — project continuity (§3). The daemon assembles a compact per-task digest from `outcomes.jsonl` + `audit.jsonl`, scoped to the current `repo`, and injects it into the agent's prompt at task-start: the last ~N task outcomes (label + prompt digest + one-line result), focus-start, recent outcome amendments. Built from structured journal fields only (not free-text concatenation). Hard token budget; task count + budget are config tunables. Internal-only — not gated by the sanitization filter. Displaces the exploratory `git log` / `ls` / `cd` round-trips that open every cold task.
 
 ### Stop point (chapter 2 → 3)
 
@@ -184,6 +197,7 @@ OWUI parity confirmed; journals attributing both channels correctly. Indicators 
 - Sanitization filter **promoted from shadow to enforcing** for judge calls (design §10.2): filter failure aborts the call, never "send anyway."
 - Observer surface: meta produces _reports_ (clusters, occurrences, candidate gaps in craft) viewable through the operator surface. No artifacts drafted, no merges proposed.
 - Drift-trigger metric on sanitization rejection rate (open item #5 resolved here using the Tool-era baseline).
+- The Chapter-2 task-context brief (§6) keeps running on raw journals — it predates `meta` and does not depend on it. Optional Observer enrichment: once the cohort store exists, the brief may add a recurring-cluster hint for the current `repo`. The brief stays functional without it.
 
 ### Stop point (chapter 3 → 4)
 
@@ -202,7 +216,7 @@ Observer reports stabilize and you trust what the system is seeing. Indicators:
 ### Build list
 
 - Skill library directory layout per design §7: `skill/knowledge/*.md`, `skill/tools/*.md`, `skill/plan-slots/*.md`. Each artifact is authored in the **Anthropic Agent Skills format** — a `SKILL.md` body with `name` + `description` frontmatter, progressive disclosure (lean body; link heavier reference material rather than inlining), under ~500 lines, "explain-the-why" drafting — layered with design §7.1's `id` / `cluster_id` / `tier` / `lang` / `domain` metadata. The `description` field feeds the §7.4 augmenter's tag/embedding selection. Frontmatter schema (both metadata sets) enforced at draft time.
-- Augmenter selection logic per design §7.4: tag filter → embedding rank → token budget. Cohort-proven + tighter match wins ties.
+- Augmenter selection logic per design §7.4: tag filter → embedding rank → token budget. Cohort-proven + tighter match wins ties. The token budget is set against the space *remaining* after founding knowledge and the task-context brief (§6) — baseline, brief, and selected skills share one context window.
 - Atomic-rename writers per design §7.3 for all watched files.
 - Polyglot oracle wrapper per design §8.1: `Oracle` interface, biased subset by cluster domain.
 - Baseline + regression margin per design §8.2–§8.3, set from preflight variance (open item #1).
@@ -242,7 +256,7 @@ Tier-0 and tier-1 artifacts have been merged through the human gate enough times
 - Tier-3 §6 justification gate: judge produces structured written argument; if §6(3) cannot be articulated, the structural change is not justified.
 - Tier-3 candidate topology per design §11.1 step 2: paired `candidate-little-coder` + `candidate-open-terminal`; active's volumes mounted read-only; writable tmpfs; same containment as active.
 - Active drives the test per design §11.1 step 3; verdict external (Polyglot + §6 + human gate).
-- Two acceptance tests per design §11.1 step 4: issue-fixed and no-regression. Stratified Polyglot subset for upstream-merge validation.
+- Two acceptance tests per design §11.1 step 4: issue-fixed and no-regression. Stratified Polyglot subset for upstream-merge validation. The task-context brief (§6) is held constant — or disabled — across candidate and baseline runs so the comparison is apples-to-apples.
 - Repro persistence per design §11.1 step 5: persisted to `little-coder-cohorts/repro/<artifact_id>/`.
 - PR per design §11.1 step 6: opened on the private remote, templated mechanically, passed through the sanitization filter before posting.
 - Human merge + manual `docker compose up -d --build little-coder` per design §11.1 step 7.
@@ -277,6 +291,7 @@ Settled in the design doc. Reproduced for plan independence.
 | 14  | Upstream little-coder is a Node.js CLI on the `pi` framework, not Python. The agent container is Node-based; the control-plane wrapper is Python, mirroring `search-mcpo`. The `agent.py` reference in design §6 is a Chapter-5 illustration only. | §3.1                      |
 | 15  | Agent reaches the workspace via a shared `little-coder-workspace` volume: it edits files directly, and routes build/test/git execution to `open-terminal`'s `POST /execute` REST API — execution stays in the network-isolated plane. | §1.5, §3.4                |
 | 16  | Two knowledge layers: **founding knowledge** (operator-authored baseline, always-loaded via `--append-system-prompt`, in `agent-knowledge/`) is distinct from the **§7 skill library** (meta-learned, discovered on demand, in `little-coder-skill/`). The §7 library adopts the Anthropic Agent Skills format (`SKILL.md` + `name`/`description` frontmatter, progressive disclosure) layered with §7.1 metadata. | §3.1, §7, §7.4, §13       |
+| 17  | **Task-context brief**: the daemon injects a per-task journal-derived digest (recent outcomes on the current `repo`, scoped + structured) into the agent's prompt at task-start — episodic project continuity, distinct from the two knowledge layers, needs no `meta`. Built in Chapter 2. Internal-only (not gated by the sanitization filter); a hint, never ground truth. | §3.1, §4, §6              |
 
 ---
 
@@ -293,6 +308,7 @@ Settled in the design doc. Reproduced for plan independence.
 | 7   | Backup cadence + restore drill                 | Decided alongside volumes in Tool; drill before Learner                | Learner                                |
 | 8   | `.git/config` flexibility upgrade              | Deferred; only if real need arises                                     | None today                             |
 | 9   | `.git/config` read-only **enforcement** for the agent + `core.hooksPath` | Tool hardening — known gap, see tasks doc | Before hostile-repo workload            |
+| 10  | Task-context brief size — task count `N` + token budget                  | Observed usage (Chapter 2 onward)         | Tool default usable; lock by Learner    |
 
 ---
 
