@@ -18,7 +18,6 @@ chmod 0777 /workspace 2>/dev/null || true
 # and registers the model ids it actually serves (see config/models.json).
 mkdir -p /home/lc/.config/little-coder
 cp /app/config/models.json /home/lc/.config/little-coder/models.json 2>/dev/null || true
-chown -R lc:lc /home/lc/.config
 
 # Route the agent's shell into open-terminal (design §1.5, §3.4): install the
 # bash-override pi extension into little-coder's OWN extensions dir, so pi
@@ -43,5 +42,13 @@ if [ "${LC_ROUTE_EXEC:-0}" = "1" ]; then
 else
   echo "[entrypoint] exec routing disabled (LC_ROUTE_EXEC!=1) — built-in bash"
 fi
+
+# `/home/lc` ownership defense — done LAST so anything earlier in the
+# entrypoint (npm cache, models.json copy, etc.) that may have written
+# into the home as root gets corrected back to lc. Also covers the case
+# where a prior `docker exec little-coder ...` run as root (operator
+# debugging) created `/home/lc/.pi/agent/` owned by root, which then
+# EACCES-blocks the lc user's next direct pi CLI run.
+chown -R lc:lc /home/lc
 
 exec gosu lc "$@"
