@@ -54,6 +54,20 @@ def test_observer_and_judge_enabled_wires_real_clients():
     paths = [str(p) for p in runner.judge.founding_knowledge_paths]
     assert any("environment.md" in p for p in paths)
     assert any("engineering-principles.md" in p for p in paths)
+    # Chapter 4 §4e — when judge is wired, drafting is too. The skill
+    # dir lands on the runner from `PathsConfig.skill_dir`.
+    assert runner.skill_dir is not None
+    assert "skill" in str(runner.skill_dir)
+
+
+def test_observer_enabled_no_judge_has_no_skill_dir():
+    """Drafting is gated on the judge being wired — `skill_dir` stays
+    None until both flags are on, so a partially-enabled Observer
+    never tries to draft into a real path."""
+    cfg = _cfg(observer_enabled=True, judge_enabled=False)
+    runner = build_meta_runner(cfg)
+    assert runner.skill_dir is None
+    assert runner.judge is None
 
 
 def test_observer_config_carries_auto_iterate_flag():

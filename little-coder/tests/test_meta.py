@@ -318,3 +318,253 @@ def test_iterate_with_judge_skips_when_pool_too_small(tmp_path):
     assert result.minted_cluster_ids == ()
     assert result.unassigned_total == 1
     assert chat.calls == []  # LLM not called
+
+
+# --- tier-0 drafting integration (Chapter 4 §4e) ------------------------
+
+
+def test_iterate_drafts_pending_skill_for_eligible_cluster(tmp_path):
+    """End-to-end: pre-seed a cluster that's tier-0 eligible, wire a
+    drafting judge, run the iteration. A `pending` skill file should
+    land on disk."""
+    import json
+
+    from littlecoder.cohorts import ClusterCounters, checkpoint as save_store
+    from littlecoder.clusters import Cluster, new_cluster_id
+    from littlecoder.judge import Judge
+    from littlecoder.llm import ChatResponse, MockChatClient
+    from littlecoder.skills import iter_skills
+
+    runner = _make_runner(tmp_path)
+    # Use an "always-match" similarity so synthetic failures route to
+    # the seeded cluster (observed count then comes from journals, as
+    # design §5.4 mandates — counters are re-derived per iteration).
+    runner.similarity = lambda occ, cluster: 1.0
+    journals = Journals(tmp_path / "journals")
+    _write_failures(journals, 6)  # ≥ TIER0_MIN_OCCURRENCES
+
+    # Pre-seed only the CLUSTER identity (label, discriminator,
+    # baseline_covers). The counter is re-derived from the journals
+    # via the always-match similarity. Cluster matches the lang +
+    # task_shape of the synthetic failures (rust + bugfix).
+    cid = new_cluster_id()
+    seeded_store = runner.load_store()
+    seeded_store.clusters[cid] = Cluster(
+        cluster_id=cid,
+        label="seeded rust bugfix cluster",
+        discriminator="seeded",
+        lang="rust",
+        task_shape="bugfix",
+        baseline_covers=False,
+    )
+    save_store(seeded_store, runner.checkpoint_path)
+
+    # All-match similarity routes every occurrence to the seeded
+    # cluster, so `unassigned` is empty and mint isn't called — the
+    # only LLM call is `draft_tier_0_skill`.
+    draft_payload = {
+        "name": "rust borrow checker tips",
+        "description": "When async Rust hits borrow errors, prefer owned values.",
+        "body": "# Borrow checker\n\nReturn owned values from async fns.\n",
+        "reasoning": "Three signals mention borrow checker.",
+        "baseline_covers": False,
+    }
+    chat = MockChatClient(
+        [ChatResponse(content=json.dumps(draft_payload), finish_reason="stop")]
+    )
+    judge = Judge(chat=chat, founding_knowledge_paths=[], min_pool_size=1)
+    runner.judge = judge
+    runner.skill_dir = tmp_path / "skills"
+
+    result = runner.iterate()
+    assert result is not None
+    assert len(result.drafted_skill_ids) == 1
+
+    drafted_id = result.drafted_skill_ids[0]
+    pending = list(iter_skills(runner.skill_dir, status="pending"))
+    assert len(pending) == 1
+    assert pending[0].id == drafted_id
+    assert pending[0].frontmatter.cluster_id == cid
+    assert pending[0].frontmatter.tier == 0
+    assert pending[0].frontmatter.kind == "knowledge"
+
+
+def test_iterate_skips_drafting_when_no_skill_dir(tmp_path):
+    """Backwards-compatible: a Chapter-3-shape runner (no skill_dir)
+    still works — drafting is gated on `skill_dir is not None`. The
+    mint step CAN run (judge wired) but the draft step does not."""
+    import json
+    from littlecoder.judge import Judge
+    from littlecoder.llm import ChatResponse, MockChatClient
+
+    runner = _make_runner(tmp_path)
+    journals = Journals(tmp_path / "journals")
+    _write_failures(journals, 5)
+    # Default similarity sends everything to unassigned, so mint fires.
+    # Return an "incoherent pool" response so mint exits cleanly with
+    # no new clusters and no further LLM calls needed.
+    empty_mint = {"clusters": [], "pool_too_small": False, "pool_too_noisy": True}
+    chat = MockChatClient(
+        [ChatResponse(content=json.dumps(empty_mint), finish_reason="stop")]
+    )
+    judge = Judge(chat=chat, founding_knowledge_paths=[], min_pool_size=1)
+    runner.judge = judge
+    # NB: no skill_dir set — drafting is gated off
+
+    result = runner.iterate()
+    assert result is not None
+    assert result.drafted_skill_ids == ()
+    # Exactly one chat call — the mint one, never the draft one.
+    assert len(chat.calls) == 1
+
+
+def test_iterate_drafting_respects_per_iteration_cap(tmp_path):
+    """Design §12.5: per-iteration draft cap is 1 by default. Two
+    eligible clusters → ONE drafted this iteration; the loudest wins."""
+    import json
+
+    from littlecoder.cohorts import ClusterCounters, checkpoint as save_store
+    from littlecoder.clusters import Cluster, new_cluster_id
+    from littlecoder.judge import Judge
+    from littlecoder.llm import ChatResponse, MockChatClient
+    from littlecoder.skills import iter_skills
+
+    runner = _make_runner(tmp_path)
+    # Custom similarity that picks the loud cluster every time, so
+    # journal-projected occurrences land there (re-derived counters
+    # then make `loud` the eligible candidate per `observed`).
+    loud_id_holder = {}
+    runner.similarity = lambda occ, cluster: 1.0 if cluster.cluster_id == loud_id_holder.get("id") else 0.5
+    journals = Journals(tmp_path / "journals")
+    _write_failures(journals, 6)
+
+    # Two clusters; only one will receive the projection's occurrences
+    # (similarity above). Both are baseline-silent so the gate is the
+    # observed count.
+    quiet_id = new_cluster_id()
+    loud_id = new_cluster_id()
+    loud_id_holder["id"] = loud_id
+    seeded_store = runner.load_store()
+    for cid in (quiet_id, loud_id):
+        seeded_store.clusters[cid] = Cluster(
+            cluster_id=cid,
+            label="L",
+            discriminator="d",
+            lang="rust",
+            task_shape="bugfix",
+            baseline_covers=False,
+        )
+    save_store(seeded_store, runner.checkpoint_path)
+
+    draft_payload = {
+        "name": "loud cluster knowledge",
+        "description": "Specific knowledge for the loudest cluster.",
+        "body": "# Body\n\nText.\n",
+        "reasoning": "r",
+        "baseline_covers": False,
+    }
+    # Custom similarity routes all occurrences to LOUD, so unassigned
+    # is empty and mint isn't called — only the draft response is used.
+    chat = MockChatClient(
+        [ChatResponse(content=json.dumps(draft_payload), finish_reason="stop")]
+    )
+    judge = Judge(chat=chat, founding_knowledge_paths=[], min_pool_size=1)
+    runner.judge = judge
+    runner.skill_dir = tmp_path / "skills"
+
+    result = runner.iterate()
+    assert len(result.drafted_skill_ids) == 1  # one per iteration cap
+    # The drafted skill is for the loudest cluster.
+    drafted = next(iter_skills(runner.skill_dir, status="pending"))
+    assert drafted.frontmatter.cluster_id == loud_id
+
+
+def test_iterate_does_not_draft_when_baseline_covers_cluster(tmp_path):
+    """A cluster the operator has marked baseline-covered (or that the
+    judge minted with `baseline_covers=true`) must NOT receive a
+    tier-0 draft — locked decision #17."""
+    from littlecoder.cohorts import ClusterCounters, checkpoint as save_store
+    from littlecoder.clusters import Cluster, new_cluster_id
+    from littlecoder.judge import Judge
+    from littlecoder.llm import MockChatClient
+
+    runner = _make_runner(tmp_path)
+    Journals(tmp_path / "journals")  # ensure dir
+    seeded_store = runner.load_store()
+    cid = new_cluster_id()
+    seeded_store.clusters[cid] = Cluster(
+        cluster_id=cid,
+        label="L",
+        discriminator="d",
+        lang="rust",
+        task_shape="bugfix",
+        baseline_covers=True,  # ← compliance gap
+    )
+    seeded_store.counters[cid] = ClusterCounters(cluster_id=cid, observed=10)
+    save_store(seeded_store, runner.checkpoint_path)
+
+    chat = MockChatClient([])  # judge MUST NOT be called for drafting
+    judge = Judge(chat=chat, founding_knowledge_paths=[], min_pool_size=1)
+    runner.judge = judge
+    runner.skill_dir = tmp_path / "skills"
+
+    result = runner.iterate()
+    assert result.drafted_skill_ids == ()
+    # No skill files exist yet — the dir may not exist.
+    assert (
+        not (runner.skill_dir / "knowledge").exists()
+        or list((runner.skill_dir / "knowledge").iterdir()) == []
+    )
+
+
+def test_iterate_does_not_draft_when_prior_skill_exists(tmp_path):
+    """If a tier-0 skill (pending OR active) already exists for the
+    cluster, don't draft another. Prevents queue-up duplicates."""
+    import json
+
+    from littlecoder.cohorts import ClusterCounters, checkpoint as save_store
+    from littlecoder.clusters import Cluster, new_cluster_id
+    from littlecoder.judge import Judge
+    from littlecoder.llm import MockChatClient
+    from littlecoder.skills import build_skill, iter_skills, write_skill
+
+    runner = _make_runner(tmp_path)
+    Journals(tmp_path / "journals")
+    seeded_store = runner.load_store()
+    cid = new_cluster_id()
+    seeded_store.clusters[cid] = Cluster(
+        cluster_id=cid,
+        label="L",
+        discriminator="d",
+        lang="rust",
+        task_shape="bugfix",
+    )
+    seeded_store.counters[cid] = ClusterCounters(cluster_id=cid, observed=10)
+    save_store(seeded_store, runner.checkpoint_path)
+
+    runner.skill_dir = tmp_path / "skills"
+    # Pre-existing pending tier-0 skill for this cluster.
+    existing = build_skill(
+        kind="knowledge",
+        cluster_id=cid,
+        tier=0,
+        lang="rust",
+        domain="dom",
+        task_shape="bugfix",
+        name="existing",
+        description="existing skill description",
+        body="existing body content here\n",
+        status="pending",
+    )
+    write_skill(runner.skill_dir, existing)
+
+    chat = MockChatClient([])  # judge MUST NOT be called
+    judge = Judge(chat=chat, founding_knowledge_paths=[], min_pool_size=1)
+    runner.judge = judge
+
+    result = runner.iterate()
+    assert result.drafted_skill_ids == ()
+    # The pre-existing skill is still the only one.
+    pending = list(iter_skills(runner.skill_dir, status="pending"))
+    assert len(pending) == 1
+    assert pending[0].id == existing.id

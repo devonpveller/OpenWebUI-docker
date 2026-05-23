@@ -1,10 +1,20 @@
-"""The judge — LLM that mints clusters from the unassigned pool (design §5.2,
-§10.1, Chapter 3 §3e).
+"""The judge — LLM that mints clusters AND drafts skill artifacts (design
+§5.2, §5.6, §10.1, Chapters 3 + 4).
 
-Observer's judge has ONE responsibility (Chapter 3 only): look at the
-unassigned pool for a (lang, task_shape) scope and decide whether the
-pool itself forms a coherent group worth minting as a new cluster. It
-emits at most a handful of proposals per call, each carrying:
+The judge has two responsibilities that share a prompt-engineering shape
+but write to different outputs:
+
+  - **Cluster minting (Chapter 3 §3e)** — `mint_clusters` looks at the
+    unassigned pool for a (lang, task_shape) scope and decides whether
+    the pool itself forms a coherent group worth minting as a new
+    cluster. Emits zero or more `ClusterProposal`s.
+  - **Tier-0 drafting (Chapter 4 §4e)** — `draft_tier_0_skill` writes
+    a knowledge entry for one already-established cluster. Emits a
+    drafted skill (Agent Skills format) that `meta` materializes via
+    `skills.build_skill` + `write_skill` with `status="pending"`. The
+    operator approval surface (§4f) is what flips it to `active`.
+
+Cluster minting:
 
   - `label`           human-readable cluster name (mutable — design §5.1)
   - `discriminator`   the boundary text future occurrences are scored
@@ -54,6 +64,7 @@ from typing import Iterable
 from pydantic import BaseModel, Field, ValidationError
 
 from .clusters import Cluster, Occurrence, new_cluster_id
+from .cohorts import ClusterCounters
 from .llm import ChatLike, ChatMessage, ChatResponse, LlmError
 
 
@@ -345,3 +356,178 @@ class Judge:
             consumed=consumed,
             raw_output=output,
         )
+
+
+# --- tier-0 drafting (Chapter 4 §4e) ------------------------------------
+
+
+_DRAFT_TIER_0_SYSTEM_PROMPT = """\
+You are the META judge in DRAFTING mode for a self-improving coding
+agent. Your job here is NOT to cluster signals — those are already
+clustered. Your job is to draft ONE knowledge entry (tier-0) that helps
+the agent avoid this specific craft gap on future tasks.
+
+The entry will be inlined into the agent's system prompt by an augmenter
+that retrieves it via tag-filter + embedding-rank on the `description`
+field — so the description must be a precise when-to-use / what-it-does
+sentence.
+
+The body follows the **Anthropic Agent Skills** authoring conventions:
+
+  - LEAN. Under 500 lines; link heavy reference rather than inlining it.
+  - PROGRESSIVE disclosure — the most-important point first.
+  - "EXPLAIN THE WHY" — state the failure mode the agent kept hitting,
+    then the rule that addresses it, then a one-paragraph rationale.
+  - SPECIFIC to this cluster — generic advice the founding knowledge
+    already gave is NOISE. (You have founding knowledge in context;
+    don't restate it.)
+  - INSTRUCTIONS in the imperative voice, addressed to the agent.
+
+You also receive the cluster's CURRENT CONTEXT:
+  - `cluster_id`, `label`, `discriminator` (what the cluster was minted
+    on, design §5.1).
+  - `lang`, `task_shape`, `observed_count`, top repos by occurrence.
+  - A sample of `signal_text` values — the actual error messages the
+    agent emitted across N occurrences in this cluster.
+
+The cluster IS NOT baseline-covered (the operator already checked) — so
+you can assume the founding knowledge does NOT address this. If reading
+the signals you realise the baseline DOES cover it, set
+`baseline_covers: true` in the response and DON'T draft; that lets the
+caller reroute to tier-1 enforcement.
+
+OUTPUT FORMAT — a single JSON object:
+
+{
+  "name": "human-readable skill name (≤ 120 chars)",
+  "description": "WHEN to retrieve this + WHAT it does. The augmenter \
+embeds this; be precise. (≤ 1000 chars)",
+  "body": "the markdown body (no frontmatter — the runtime adds it). \
+explain-the-why structure. Under 500 lines.",
+  "reasoning": "one paragraph: which signals fed this draft and why \
+this rule addresses the cluster",
+  "baseline_covers": false
+}
+
+Return ONLY the JSON. No prose before or after."""
+
+
+class DraftOutput(BaseModel):
+    """The structured output of `Judge.draft_tier_0_skill`.
+
+    `baseline_covers` is here so a judge that re-discovers in-drafting
+    that the baseline actually does cover the cluster (despite the
+    minting-time `false`) can escape and signal "don't ship this as
+    tier-0; reroute to tier-1". The Chapter-4 `meta` integration reads
+    this flag and skips drafting when true."""
+
+    name: str = Field(..., min_length=2, max_length=120)
+    description: str = Field(..., min_length=2, max_length=1000)
+    body: str = Field(..., min_length=10)
+    reasoning: str = Field(default="", max_length=4000)
+    baseline_covers: bool = Field(default=False)
+
+
+@dataclasses.dataclass
+class DraftResult:
+    """Return shape of `draft_tier_0_skill`. `output` is the parsed
+    judge response; `escaped_to_compliance` is True when the judge
+    second-guessed the baseline-covers flag and refused to draft."""
+
+    output: DraftOutput | None
+    escaped_to_compliance: bool
+
+
+def _draft_user_message(
+    cluster: Cluster,
+    counter: ClusterCounters | None,
+    sample_signals: list[str],
+) -> str:
+    observed = counter.observed if counter else 0
+    top_repos: list[tuple[str, int]] = (
+        sorted(counter.per_repo_observed.items(), key=lambda kv: kv[1], reverse=True)[:3]
+        if counter
+        else []
+    )
+    signals_block = "\n".join(f"- {s}" for s in sample_signals)
+    repos_block = (
+        ", ".join(f"{r}={n}" for r, n in top_repos) if top_repos else "(none)"
+    )
+    return (
+        f"CLUSTER\n"
+        f"  id:            {cluster.cluster_id}\n"
+        f"  label:         {cluster.label}\n"
+        f"  discriminator: {cluster.discriminator}\n"
+        f"  lang:          {cluster.lang}\n"
+        f"  task_shape:    {cluster.task_shape}\n"
+        f"  observed:      {observed}\n"
+        f"  top repos:     {repos_block}\n"
+        f"  baseline_covers (minting): {cluster.baseline_covers}\n\n"
+        f"SIGNAL SAMPLE ({len(sample_signals)})\n{signals_block}\n"
+    )
+
+
+def parse_draft_response(content: str) -> DraftOutput:
+    """Inverse of the JSON object above. Same strictness as
+    `parse_response` for minting — non-compliance is a hard fail."""
+    stripped = _strip_code_fence(content)
+    try:
+        data = json.loads(stripped)
+    except json.JSONDecodeError as exc:
+        raise LlmError(f"draft reply was not JSON: {exc.msg}") from exc
+    try:
+        return DraftOutput.model_validate(data)
+    except ValidationError as exc:
+        raise LlmError(f"draft reply did not match schema: {exc}") from exc
+
+
+# Patch Judge with the tier-0 drafting method. Done as a function so the
+# minting-only judge stays the principal class definition above and the
+# Chapter-4 extension is visually separated.
+
+
+def _draft_tier_0_skill(
+    self: "Judge",
+    cluster: Cluster,
+    counter: ClusterCounters | None,
+    sample_signals: list[str],
+    *,
+    max_signals: int = 16,
+) -> DraftResult:
+    """Draft one tier-0 knowledge entry for an established cluster.
+
+    Caller is expected to have already called `tier_ladder.evaluate_tier_0`
+    and confirmed eligibility — this method does not re-check; it drafts
+    unconditionally except for the in-prompt second-look at
+    baseline-covers (if the judge sees that founding knowledge already
+    covers the signals, it sets `baseline_covers: true` and we DON'T
+    materialize a skill, surfacing it as `escaped_to_compliance`).
+
+    The sample of signals is windowed at `max_signals` to bound prompt
+    size — same approach as `mint_clusters.max_pool_size`. The choice
+    of which signals to include is the caller's; passing the most-recent
+    is a reasonable default."""
+    windowed = sample_signals[:max_signals]
+    messages = [
+        ChatMessage(role="system", content=_DRAFT_TIER_0_SYSTEM_PROMPT),
+        ChatMessage(role="system", content=_founding_knowledge_block(self.founding_knowledge_paths)),
+        ChatMessage(
+            role="user", content=_draft_user_message(cluster, counter, windowed)
+        ),
+    ]
+    response: ChatResponse = self.chat.chat(
+        messages,
+        model=self.model,
+        temperature=0.0,
+        response_format={"type": "json_object"},
+    )
+    output = parse_draft_response(response.content)
+    if output.baseline_covers:
+        # Judge second-guessed itself: the founding knowledge actually
+        # covers this. Don't ship a tier-0 entry — let meta retry as
+        # tier-1 enforcement (Stage 4+).
+        return DraftResult(output=None, escaped_to_compliance=True)
+    return DraftResult(output=output, escaped_to_compliance=False)
+
+
+Judge.draft_tier_0_skill = _draft_tier_0_skill  # type: ignore[attr-defined]
