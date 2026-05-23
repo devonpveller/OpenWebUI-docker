@@ -40,6 +40,8 @@ from .cohorts import (
 from .config import ObserverConfig
 from .journals import Envelope, utc_now
 from .judge import Judge
+from .skills import Skill, build_skill, iter_skills, write_skill
+from .tier_ladder import eligible_tier_0
 
 
 def default_similarity(occurrence: Occurrence, cluster: Cluster) -> float:
@@ -67,6 +69,9 @@ class IterationResult:
     # Newly-minted-this-iteration cluster ids (the judge's output). Empty
     # when no Judge was wired in, or when the pool was too small / noisy.
     minted_cluster_ids: tuple[str, ...] = ()
+    # Tier-0 skills drafted this iteration. Ids of newly written `Skill`
+    # files (status="pending" — awaiting operator approval, §4f).
+    drafted_skill_ids: tuple[str, ...] = ()
 
 
 class MetaState:
@@ -128,6 +133,8 @@ class MetaRunner:
         similarity: Similarity | None = None,
         state: MetaState | None = None,
         judge: Judge | None = None,
+        skill_dir: str | Path | None = None,
+        drafts_per_iteration: int = 1,
     ) -> None:
         self.cfg = observer_cfg
         self.journals_dir = Path(journals_dir)
@@ -139,6 +146,13 @@ class MetaRunner:
         # occurrence stays in the unassigned pool). Stage 3 wires a real
         # `Judge`; tests can pass a Judge-with-MockChatClient.
         self.judge = judge
+        # Chapter-4 §4e drafting: where to write `Skill` files. When
+        # None, no drafting is attempted (Chapter-3-compatible mode).
+        self.skill_dir = Path(skill_dir) if skill_dir else None
+        # Per design §12.5: at most 1 artifact/iteration. Tunable for
+        # tests, never for production (operator catches up via the
+        # approval surface, not by raising the rate).
+        self.drafts_per_iteration = drafts_per_iteration
 
     @property
     def checkpoint_path(self) -> Path:
@@ -163,16 +177,113 @@ class MetaRunner:
         if not self.state._lock.acquire(blocking=False):
             return None
         try:
-            store = rebuild(self.journals_dir, self.similarity, self.cfg.similarity_floor)
+            store = self._rebuild_carrying_clusters()
             minted = self._mint_from_unassigned(store) if self.judge else ()
+            drafted = self._draft_eligible_clusters(store) if self._can_draft() else ()
             checkpoint(store, self.checkpoint_path)
-            result = self._summarize(store, minted)
+            result = self._summarize(store, minted, drafted)
             self.state.last_iteration_ts = result.ts
             self.state.last_result = result
             self.state._records_at_last_run = result.records_consumed
             return result
         finally:
             self.state._lock.release()
+
+    def _rebuild_carrying_clusters(self) -> CohortStore:
+        """Build a fresh `CohortStore` for this iteration, but carry
+        cluster identities + lineage forward from the prior checkpoint.
+
+        Background: design §5.4 makes cohort counters event-sourced over
+        journals (replay-deterministic). Cluster IDENTITIES, however,
+        are minted by the judge — they're not in the journals' replay
+        stream. A pure rebuild loses them. The design-correct fix would
+        be to journal cluster-minting events to `audit.jsonl`; until
+        that lands, we preserve clusters by loading the prior
+        checkpoint and re-projecting onto it.
+
+        Mechanism:
+          1. Load the prior store (carries clusters, discriminators,
+             lineage, baseline_covers flags).
+          2. Reset all counters + unassigned buckets — those are
+             derived from journals.
+          3. Re-project all journals onto the seeded store. Occurrences
+             that match an existing cluster (similarity ≥ floor) hit
+             that cluster's counter; the rest go to unassigned where
+             the judge can mint NEW clusters from them on top of the
+             existing set.
+        """
+        from .cohorts import project
+
+        prior = self.load_store()
+        prior.counters = {}
+        prior.unassigned = {}
+        # Walk the same journals `rebuild()` would, but project onto
+        # `prior` so the carried-forward clusters get matched against.
+        from .cohorts import _iter_journals
+
+        project(
+            prior,
+            _iter_journals(self.journals_dir, "tool_calls", "errors", "outcomes"),
+            self.similarity,
+            self.cfg.similarity_floor,
+        )
+        return prior
+
+    def _can_draft(self) -> bool:
+        """Tier-0 drafting needs a judge + a skill_dir + a writable
+        skill library on disk. All three optional, so a Chapter-3-shape
+        deployment continues to work."""
+        return self.judge is not None and self.skill_dir is not None
+
+    def _draft_eligible_clusters(self, store: CohortStore) -> tuple[str, ...]:
+        """Per design §5.6 + §12.5: per-iteration draft cap is 1 by
+        default. Walk eligible clusters in observed-count-descending
+        order; draft until the cap is hit or the eligible list is
+        empty. Returns the ids of the `Skill` files written."""
+        if not self.judge or self.skill_dir is None:
+            return ()
+        prior = _prior_interventions(self.skill_dir)
+        eligibles = eligible_tier_0(
+            list(store.clusters.values()), store.counters, prior
+        )
+        if not eligibles:
+            return ()
+
+        drafted_ids: list[str] = []
+        for verdict in eligibles[: self.drafts_per_iteration]:
+            cluster = store.clusters[verdict.cluster_id]
+            counter = store.counters.get(cluster.cluster_id)
+            samples = _signal_sample(store, cluster.cluster_id)
+            try:
+                draft_result = self.judge.draft_tier_0_skill(cluster, counter, samples)
+            except Exception:
+                # A failed draft must not poison the iteration; the
+                # cluster stays eligible for the next pass. Re-raise
+                # would also work, but evidence-triggered design
+                # tolerates one bad LLM call.
+                continue
+            if draft_result.escaped_to_compliance or draft_result.output is None:
+                # Judge re-judged: this is actually a compliance gap.
+                # Flip the cluster's baseline_covers so the next ladder
+                # pass routes it to tier-1 (Stage 4+).
+                cluster.baseline_covers = True
+                continue
+            output = draft_result.output
+            skill = build_skill(
+                kind="knowledge",
+                cluster_id=cluster.cluster_id,
+                tier=0,
+                lang=cluster.lang,
+                domain=_domain_from_cluster(cluster),
+                task_shape=cluster.task_shape,
+                name=output.name,
+                description=output.description,
+                body=output.body,
+                status="pending",  # operator approves via §4f surface
+            )
+            write_skill(self.skill_dir, skill)
+            drafted_ids.append(skill.id)
+        return tuple(drafted_ids)
 
     def _mint_from_unassigned(self, store: CohortStore) -> tuple[str, ...]:
         """For each scope's unassigned bucket, ask the judge whether it
@@ -233,7 +344,10 @@ class MetaRunner:
         return tuple(minted_ids)
 
     def _summarize(
-        self, store: CohortStore, minted: tuple[str, ...] = ()
+        self,
+        store: CohortStore,
+        minted: tuple[str, ...] = (),
+        drafted: tuple[str, ...] = (),
     ) -> IterationResult:
         """Build the iteration's `IterationResult` — counts the operator
         surface (and the metrics endpoint) reads. The full store goes to
@@ -251,6 +365,7 @@ class MetaRunner:
             unassigned_total=unassigned_total,
             unassigned_by_scope=unassigned_by_scope,
             minted_cluster_ids=minted,
+            drafted_skill_ids=drafted,
         )
 
     def _count_journal_records(self) -> int:
@@ -268,6 +383,57 @@ class MetaRunner:
                 except OSError:
                     continue
         return total
+
+
+# --- helpers used by the drafting wire (§4e) ----------------------------
+
+
+def _prior_interventions(skill_dir: Path) -> dict[str, set[int]]:
+    """Build the `cluster_id -> {tiers_already_shipped}` map for the
+    ladder. We read the skill library from disk so a restart re-derives
+    intervention state from ground truth — never trust an in-memory
+    cache. Includes pending drafts: a tier-0 draft awaiting operator
+    approval still BLOCKS a second tier-0 draft for the same cluster
+    (a fresh draft per iteration would queue up duplicates)."""
+    out: dict[str, set[int]] = {}
+    for skill in iter_skills(skill_dir, status=None):
+        fm = skill.frontmatter
+        if fm.status == "retired":
+            continue  # retired interventions free the cluster up
+        out.setdefault(fm.cluster_id, set()).add(int(fm.tier))
+    return out
+
+
+def _signal_sample(store: CohortStore, cluster_id: str, limit: int = 16) -> list[str]:
+    """Pick representative signal texts for the judge's drafting prompt.
+
+    The cohort store doesn't currently hold per-cluster occurrence
+    history — only counters. For now we sample from the unassigned
+    pool's matching scope (lang + task_shape) when available; in a
+    future pass this should pull the actual journal records that fed
+    the cluster's `observed` counter. Returning [] is acceptable —
+    the judge has the cluster's discriminator + label and can draft
+    from those alone."""
+    cluster = store.clusters.get(cluster_id)
+    if cluster is None:
+        return []
+    bucket = store.unassigned.get((cluster.lang, cluster.task_shape))
+    if not bucket:
+        return []
+    return [occ.signal_text for occ in bucket.occurrences[:limit]]
+
+
+def _domain_from_cluster(cluster: Cluster) -> str:
+    """Pick the `domain` for a drafted skill. The judge sees the cluster
+    label + discriminator and crafts the body; the augmenter's tag
+    filter (§7.4 step 1) keys on `domain`. The cluster doesn't carry
+    one today — until the judge starts annotating domain, use the
+    cluster id (always unique). The augmenter's `*` wildcard means a
+    skill with domain=<cluster_id> still gets retrieved when a task
+    has a matching cluster context. A follow-up pass should add an
+    explicit domain field to `Cluster` and have the judge populate it
+    at mint time."""
+    return cluster.cluster_id[:16] or "unknown"
 
 
 # --- iteration report rendering (Stage 4 lifts this into the surface) ----

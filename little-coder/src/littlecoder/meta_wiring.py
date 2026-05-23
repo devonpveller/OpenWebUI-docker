@@ -26,7 +26,8 @@ def build_meta_runner(config: Config) -> MetaRunner:
         no judge — same shape as disabled but reports the real cohort
         store. Useful for the operator's prompt-calibration window.
       - both True → embedding-based similarity + Judge wired; iteration
-        can mint clusters."""
+        can mint clusters AND draft tier-0 skills (Chapter 4 §4e —
+        skill_dir from `config.paths.skill_dir`)."""
     if not config.observer.enabled or not config.observer.judge_enabled:
         return MetaRunner(
             observer_cfg=config.observer,
@@ -65,4 +66,7 @@ def build_meta_runner(config: Config) -> MetaRunner:
         cohorts_dir=config.paths.cohorts_dir,
         similarity=similarity,
         judge=judge,
+        # Chapter 4 §4e — when the judge is wired, drafting is too.
+        # `little-coder-skill/` is declared in Tool (`PathsConfig.skill_dir`).
+        skill_dir=config.paths.skill_dir,
     )

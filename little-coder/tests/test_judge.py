@@ -329,3 +329,119 @@ def test_judge_aborts_when_chat_raises_llmerror():
     pool = [_occ("x"), _occ("y"), _occ("z")]
     with pytest.raises(LlmError, match="backend down"):
         judge.mint_clusters(pool, lang="rust", task_shape="bugfix")
+
+
+# --- tier-0 drafting (Chapter 4 §4e) ------------------------------------
+
+
+from littlecoder.clusters import Cluster
+from littlecoder.cohorts import ClusterCounters
+from littlecoder.judge import DraftOutput, parse_draft_response
+
+
+def _cluster(cid="aaaaaaaaaaaaaaaa", *, baseline_covers=False):
+    return Cluster(
+        cluster_id=cid,
+        label="async lifetime errors",
+        discriminator="borrow checker on async fns",
+        lang="rust",
+        task_shape="bugfix",
+        baseline_covers=baseline_covers,
+    )
+
+
+def _draft_payload(**overrides) -> dict:
+    base = {
+        "name": "async lifetime errors in rust",
+        "description": (
+            "When the agent writes async Rust and the borrow checker complains "
+            "about captured references, prefer owning over borrowing."
+        ),
+        "body": "# Async lifetimes\n\nReturn owned values from async fns.\n",
+        "reasoning": "Three signals mention borrow checker on async; fix is consistent.",
+        "baseline_covers": False,
+    }
+    base.update(overrides)
+    return base
+
+
+def test_parse_draft_response_accepts_canonical_shape():
+    output = parse_draft_response(json.dumps(_draft_payload()))
+    assert isinstance(output, DraftOutput)
+    assert output.baseline_covers is False
+    assert output.body.startswith("# Async")
+
+
+def test_parse_draft_response_rejects_missing_description():
+    bad = _draft_payload()
+    del bad["description"]
+    with pytest.raises(LlmError, match="schema"):
+        parse_draft_response(json.dumps(bad))
+
+
+def test_parse_draft_response_rejects_too_short_body():
+    """`min_length=10` on body — the judge can't ship an empty knowledge
+    entry."""
+    with pytest.raises(LlmError, match="schema"):
+        parse_draft_response(json.dumps(_draft_payload(body="x")))
+
+
+def test_parse_draft_response_strips_code_fence():
+    payload = "```json\n" + json.dumps(_draft_payload()) + "\n```"
+    output = parse_draft_response(payload)
+    assert output.name == "async lifetime errors in rust"
+
+
+def test_draft_tier_0_skill_returns_drafted_output():
+    """Happy path — judge writes a tier-0 entry; meta materializes."""
+    chat = MockChatClient([ChatResponse(content=json.dumps(_draft_payload()), finish_reason="stop")])
+    judge = Judge(chat=chat, founding_knowledge_paths=[], min_pool_size=1)
+    counter = ClusterCounters("aaaaaaaaaaaaaaaa", observed=8)
+    result = judge.draft_tier_0_skill(_cluster(), counter, ["borrow checker", "borrow checker", "lifetime mismatch"])
+    assert result.escaped_to_compliance is False
+    assert result.output is not None
+    assert result.output.name == "async lifetime errors in rust"
+
+
+def test_draft_tier_0_skill_escapes_when_judge_says_baseline_covers():
+    """The judge sees signals + founding knowledge in context; if it
+    realises baseline DOES cover the cluster after all, it sets
+    `baseline_covers: true`. Meta must NOT ship a tier-0 entry."""
+    payload = _draft_payload(baseline_covers=True)
+    chat = MockChatClient([ChatResponse(content=json.dumps(payload), finish_reason="stop")])
+    judge = Judge(chat=chat, founding_knowledge_paths=[], min_pool_size=1)
+    counter = ClusterCounters("aaaaaaaaaaaaaaaa", observed=8)
+    result = judge.draft_tier_0_skill(_cluster(), counter, ["x", "y"])
+    assert result.escaped_to_compliance is True
+    assert result.output is None
+
+
+def test_draft_tier_0_skill_includes_founding_knowledge_in_prompt(tmp_path):
+    """Locked decision #17 — founding knowledge MUST be in context so
+    the judge can second-guess the baseline-covers flag."""
+    fk = tmp_path / "environment.md"
+    fk.write_text("# Environment\n\nThe agent runs in open-terminal.", encoding="utf-8")
+    chat = MockChatClient([ChatResponse(content=json.dumps(_draft_payload()), finish_reason="stop")])
+    judge = Judge(chat=chat, founding_knowledge_paths=[fk], min_pool_size=1)
+    counter = ClusterCounters("aaaaaaaaaaaaaaaa", observed=8)
+    judge.draft_tier_0_skill(_cluster(), counter, ["x"])
+    # The call's messages should carry the founding knowledge.
+    fk_visible = any(
+        "Environment" in msg.content for msg in chat.calls[0]
+    )
+    assert fk_visible
+
+
+def test_draft_tier_0_skill_windows_oversized_signal_sample():
+    """`max_signals=16` (default) — caller can pass more; only the
+    prefix lands in the prompt. Bounds prompt size."""
+    chat = MockChatClient([ChatResponse(content=json.dumps(_draft_payload()), finish_reason="stop")])
+    judge = Judge(chat=chat, founding_knowledge_paths=[], min_pool_size=1)
+    counter = ClusterCounters("aaaaaaaaaaaaaaaa", observed=50)
+    many_signals = [f"signal-{i}" for i in range(50)]
+    judge.draft_tier_0_skill(_cluster(), counter, many_signals)
+    # The user message includes signal-0 but NOT signal-20 (windowed to 16).
+    user_msg = next(m for m in chat.calls[0] if m.role == "user").content
+    assert "signal-0" in user_msg
+    assert "signal-15" in user_msg
+    assert "signal-20" not in user_msg
