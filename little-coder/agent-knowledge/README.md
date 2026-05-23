@@ -7,7 +7,12 @@ appended to little-coder's system prompt via `--append-system-prompt`
 | File | Purpose |
 | --- | --- |
 | `environment.md` | The operating environment — bash runs in open-terminal, the git-proxy whitelist/blocklist, `/workspace`, no ShellSession/Browser, network limits. Stops the agent burning tokens probing its own constraints every task. |
+| `project-context.md` | Cheap project-orientation patterns — the four-command read (`git log` / `git status` / `ls` / `cat README.md`), the project-type-file shortcut, anti-patterns (`cd`, `find /`, re-orienting mid-task). Concrete answer to "how do I use git+filesystem as project memory" (design §3.1, §15). |
 | `engineering-principles.md` | SOLID, encapsulation, naming, patterns, DRY/YAGNI — the craft baseline applied to all code. |
+
+The three files are loaded in task order: `environment.md` (where you are) →
+`project-context.md` (read the project) → `engineering-principles.md` (write
+the code). Order is set in `config/little-coder.config.yaml`.
 
 ## Relationship to the design's skill library (§7)
 
