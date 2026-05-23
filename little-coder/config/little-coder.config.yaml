@@ -95,8 +95,19 @@ daemon:
 # the skill library (that lands in Chapter 4). With `enabled: true` the
 # /admin/observe endpoint produces real reports; disabled returns the
 # "Observer is off" skeleton.
+#
+# `judge_enabled` flips on the LLM-in-the-loop cluster minting. OFF
+# pending the operator's prompt-calibration dry-run (open item #2,
+# design §13). Until then the projection runs but clusters never get
+# minted — every signal lands in the unassigned pool.
+#
+# `auto_iterate_on_task_end`: re-project after each task ends if the
+# evidence threshold has been crossed since the last iteration. Cheap
+# without the judge wired; gated by single-flight.
 observer:
   enabled: true
   store_filename: cohort-store.json
   similarity_floor: 0.7
   evidence_trigger_records: 5
+  judge_enabled: false
+  auto_iterate_on_task_end: true

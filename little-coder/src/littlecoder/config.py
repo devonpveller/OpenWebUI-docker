@@ -39,6 +39,11 @@ class InferenceConfig(_Strict):
     model_reasoning: str = "qwen36-27b"  # judge, drafting, justifications
     model_fast: str = "qwen36-27b:nothink"  # cluster assignment, routing
     default: Literal["fast", "reasoning"] = "fast"
+    # Embedding backend (llama-cpp-embed, separate port from the chat
+    # backend). Used by `similarity.EmbeddingSimilarity` for the
+    # discriminator-anchored cluster matching (design §5.2).
+    embedding_base_url: str = "http://llama-cpp-embed:8080/v1"
+    embedding_model: str = "bge-m3-f16.gguf"
 
 
 class AgentConfig(_Strict):
@@ -158,6 +163,24 @@ class ObserverConfig(_Strict):
     # records have landed since the last iteration completed (design §3.2
     # — evidence-triggered, not clock-triggered).
     evidence_trigger_records: int = 5
+    # Wire the judge (LLM-in-the-loop) into the iteration. Off by default
+    # — design §13 wants the operator's dry-run pass (open item #2) before
+    # the judge auto-mints clusters. With this on, the daemon's MetaRunner
+    # constructs `judge.Judge` + `similarity.EmbeddingSimilarity` at boot.
+    judge_enabled: bool = False
+    # Auto-iterate after a task ends when the evidence threshold trips.
+    # When off, iterations are operator-triggered via `?iterate=true`
+    # against `/admin/observe` (or `lc admin observe --iterate`).
+    auto_iterate_on_task_end: bool = False
+    # Founding-knowledge files the judge receives in its context (locked
+    # decision #17 — baseline_covers depends on these). Paths inside the
+    # container. The list mirrors `agent.extra_args --append-system-prompt`.
+    founding_knowledge_paths: list[str] = Field(
+        default_factory=lambda: [
+            "/app/agent-knowledge/environment.md",
+            "/app/agent-knowledge/engineering-principles.md",
+        ]
+    )
 
 
 class Config(_Strict):

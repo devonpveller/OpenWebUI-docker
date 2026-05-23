@@ -14,8 +14,9 @@ OpenWebUI integration for little-coder (design §12.6). Two pieces:
 - **Task triggers** — any logged-in OWUI user. Journaled as `channel=owui`,
   `user_id = <the user's email>`.
 - **Operator commands** (`/project`, `/confirm`, `/pending`, `/approve`,
-  `/reject`, `/upstream`) — gated by the OWUI **user role** inside the pipe
-  (`operator_roles` valve, default `admin`). A regular user cannot escalate.
+  `/reject`, `/upstream`, `/observe`) — gated by the OWUI **user role** inside
+  the pipe (`operator_roles` valve, default `admin`). A regular user cannot
+  escalate.
 - The MCP edge (`lc-mcpo`) carries triggers only; it has no operator surface.
 
 ## Install the Pipe
@@ -46,6 +47,8 @@ Check the function's **Valves**:
 /confirm <task_id> pass|fail         amend a task outcome (operator)
 /pending /approve /reject            artifact review — operative in Chapter 4
 /upstream pull                       fork-parent pull — operative in Chapter 5
+/observe [iterate]                   Observer report (operator, Chapter 3 —
+                                     `iterate` runs a fresh meta pass first)
 /status   /help                      open to everyone
 ```
 

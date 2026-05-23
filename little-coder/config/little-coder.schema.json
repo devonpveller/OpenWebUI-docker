@@ -95,6 +95,16 @@
           "title": "Default",
           "type": "string"
         },
+        "embedding_base_url": {
+          "default": "http://llama-cpp-embed:8080/v1",
+          "title": "Embedding Base Url",
+          "type": "string"
+        },
+        "embedding_model": {
+          "default": "bge-m3-f16.gguf",
+          "title": "Embedding Model",
+          "type": "string"
+        },
         "model_fast": {
           "default": "qwen36-27b:nothink",
           "title": "Model Fast",
@@ -154,6 +164,11 @@
       "additionalProperties": false,
       "description": "The `meta` outer loop in read-only mode (design \u00a73.2, \u00a75, Chapter 3).\n\nObserver reads journals, surfaces clustered patterns, and writes\nNOTHING to the skill library (Learner adds drafting in Chapter 4).\nDisabled by default so a stale Observer build can't run automatically\non a fresh deployment that hasn't fed it real journals yet.",
       "properties": {
+        "auto_iterate_on_task_end": {
+          "default": false,
+          "title": "Auto Iterate On Task End",
+          "type": "boolean"
+        },
         "enabled": {
           "default": false,
           "title": "Enabled",
@@ -163,6 +178,18 @@
           "default": 5,
           "title": "Evidence Trigger Records",
           "type": "integer"
+        },
+        "founding_knowledge_paths": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Founding Knowledge Paths",
+          "type": "array"
+        },
+        "judge_enabled": {
+          "default": false,
+          "title": "Judge Enabled",
+          "type": "boolean"
         },
         "similarity_floor": {
           "default": 0.7,
