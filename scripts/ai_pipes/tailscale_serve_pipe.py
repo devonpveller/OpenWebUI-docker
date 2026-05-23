@@ -128,6 +128,30 @@ SERVICE_REGISTRY: Dict[str, Dict[str, Any]] = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Full container roster — every service across BOTH compose projects: the main
+# ai-stack project (docker-compose.yml) and the separate Open Brain / OB1
+# project (OB1/docker/docker-compose.yml). Drives the `status` container
+# table. Keep in sync with the compose files — see the /stack-map skill.
+# ---------------------------------------------------------------------------
+_STACK_ROSTER: List[str] = [
+    # main project — core
+    "openwebui", "tailscale", "llama-cpp", "llama-cpp-embed", "watchtower",
+    # main project — memory layer
+    "mnemory", "mnemory-gateway", "mnemory-backup",
+    # main project — Private Search Gateway
+    "tor", "redis", "searxng", "gateway", "mcpo",
+    # main project — little-coder control plane
+    "open-terminal", "little-coder", "lc-mcpo", "lc-egress", "little-coder-backup",
+    # main project — auxiliary
+    "smolcrawl-pipelines", "surrealdb", "open_notebook", "openwebui-backup",
+    # Open Brain (OB1) — separate compose project (project name "open-brain")
+    "openbrain-db", "openbrain-mcp", "openbrain-ext", "openbrain-mcpo",
+    "openbrain-mcpo-ext", "openbrain-postgrest", "openbrain-rest",
+    "openbrain-entity-worker", "openbrain-wiki", "openbrain-wiki-viewer",
+]
+
+
 def resolve_service(user_input: str) -> Optional[str]:
     """Match the input against the registry. Longest alias wins."""
     text = user_input.lower()
@@ -248,20 +272,31 @@ def parse_user_input(user_input: str) -> Tuple[Optional[str], Dict[str, Any]]:
     return None, {}
 
 
-# Names recognized for status scoping beyond the tailnet registry. Includes
-# docker-compose service names and informal aliases that admins use when
-# asking "status of X".
-_STACK_SCOPE_ALIASES: Dict[str, List[str]] = {
-    "smolcrawl-pipelines": ["smolcrawl", "smol crawl", "smol-crawl", "pipelines"],
-    "mnemory":             ["mnemory", "memory service"],
-    "open_notebook":       ["open_notebook", "open-notebook", "open notebook", "notebook"],
-    "surrealdb":           ["surrealdb", "surreal", "surreal db"],
-    "tailscale":           ["tailscale"],
-    "watchtower":          ["watchtower"],
-    "open-terminal":       ["open-terminal", "open terminal", "terminal"],
-    "openwebui-backup":    ["openwebui-backup", "owui-backup"],
-    "mnemory-backup":      ["mnemory-backup"],
-}
+# Names recognized for status scoping ("status of X"). Generated from the
+# stack roster so every container is matchable by its own name (and
+# hyphen/underscore-spaced variants), plus a few informal aliases.
+def _build_scope_aliases() -> Dict[str, List[str]]:
+    aliases: Dict[str, List[str]] = {}
+    for svc in _STACK_ROSTER:
+        variants = {svc, svc.replace("-", " "), svc.replace("_", " ")}
+        aliases[svc] = sorted(variants, key=len, reverse=True)
+    extras: Dict[str, List[str]] = {
+        "smolcrawl-pipelines": ["smolcrawl", "smol crawl", "pipelines"],
+        "mnemory":             ["memory service"],
+        "open_notebook":       ["notebook"],
+        "surrealdb":           ["surreal", "surreal db"],
+        "open-terminal":       ["terminal"],
+        "lc-egress":           ["egress"],
+        "gateway":             ["search gateway"],
+        "openwebui-backup":    ["owui-backup"],
+        "openbrain-mcp":       ["openbrain", "open brain", "ob1"],
+    }
+    for svc, extra in extras.items():
+        aliases.setdefault(svc, []).extend(extra)
+    return aliases
+
+
+_STACK_SCOPE_ALIASES: Dict[str, List[str]] = _build_scope_aliases()
 
 
 def _resolve_stack_scope(text: str) -> Optional[str]:
@@ -538,11 +573,16 @@ def _build_tailnet_urls(scope_service: Optional[str] = None) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 # Containers we know how to introspect beyond docker's own state. Each probe
-# carries the in-compose hostname/port AND a host-side localhost fallback
-# (the published port from docker-compose.yml). The pipe tries the internal
-# address first; if it isn't reachable (e.g. running on the host instead of
-# inside openwebui), it falls back to the published port. Probes use urllib
-# so the pipe stays dependency-free.
+# carries the in-compose hostname/port AND (where one exists) a host-side
+# localhost fallback (the published port from docker-compose.yml). The pipe
+# tries the internal address first; if it isn't reachable (e.g. running on the
+# host instead of inside openwebui), it falls back to the published port.
+# Probes use urllib so the pipe stays dependency-free.
+#
+# Only services REACHABLE from the openwebui container get a probe (openwebui
+# is on default + llm-net). Containers on the internal-only search-net
+# (tor/redis/searxng/mcpo) or OB1's obnet have no probe — they still appear in
+# the container table (from _STACK_ROSTER) as "registered".
 _PROBES: Dict[str, Dict[str, Any]] = {
     "llama-cpp": {
         "host": "llama-cpp", "port": 8080,
@@ -564,6 +604,11 @@ _PROBES: Dict[str, Dict[str, Any]] = {
         "host_fallback": "127.0.0.1", "host_fallback_port": 8051,
         "kind": "http_health",
     },
+    "mnemory-gateway": {
+        "host": "mnemory-gateway", "port": 8060,
+        "host_fallback": "127.0.0.1", "host_fallback_port": 8060,
+        "kind": "http_health",
+    },
     "open_notebook": {
         "host": "open_notebook", "port": 5055,
         "host_fallback": "127.0.0.1", "host_fallback_port": 5055,
@@ -571,6 +616,33 @@ _PROBES: Dict[str, Dict[str, Any]] = {
         # Streamlit/uvicorn can take >4s to respond cold, especially on
         # the API side (which is uvicorn-backed). Give it more headroom.
         "timeout": HTTP_TIMEOUT_SLOW,
+    },
+    # Private Search Gateway — `gateway` also joins `default`, so it is the
+    # one search-stack service reachable from openwebui. Health is /healthz.
+    "gateway": {
+        "host": "gateway", "port": 8080,
+        "host_fallback": "127.0.0.1", "host_fallback_port": 8085,
+        "kind": "http_health", "health_path": "/healthz",
+    },
+    # little-coder control plane — reachable over llm-net. No host-published
+    # ports for the daemon/edges, so no fallback (host runs show unreachable).
+    "open-terminal": {
+        "host": "open-terminal", "port": 8000,
+        "kind": "http_health",
+    },
+    "little-coder": {
+        "host": "little-coder", "port": 8090,
+        "kind": "http_health",
+    },
+    "lc-mcpo": {
+        "host": "lc-mcpo", "port": 8002,
+        "kind": "http_health", "health_path": "/openapi.json",
+    },
+    # Open Brain (OB1) — openbrain-mcpo joins ai-stack_llm-net, so the MCP
+    # bridge is reachable; its health endpoint is the core OpenAPI doc.
+    "openbrain-mcpo": {
+        "host": "openbrain-mcpo", "port": 8000,
+        "kind": "http_health", "health_path": "/open-brain/openapi.json",
     },
 }
 
@@ -615,31 +687,15 @@ def build_stack_status(scope_service: Optional[str] = None) -> Dict[str, Any]:
 
 
 def _registry_container_roster(processing: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
-    """Build a container list from the registry + probe outcomes.
+    """Build the full container roster from _STACK_ROSTER + probe outcomes.
 
-    Used when `docker compose ps` is unavailable (e.g. running inside the
-    openwebui container without docker.sock). Reachability via probes drives
-    the inferred state; entries without a probe show as "registered".
+    Used when `docker compose ps` is unavailable (the usual case inside the
+    openwebui container, which has no docker socket). Every container in both
+    compose projects is listed; probe-backed services get live state inferred
+    from their HTTP probe, the rest show as "registered".
     """
-    # Union of probe-known services + tailnet registry containers.
-    known_services: List[str] = []
-    seen = set()
-
-    for svc in _PROBES.keys():
-        if svc not in seen:
-            known_services.append(svc)
-            seen.add(svc)
-
-    for info in SERVICE_REGISTRY.values():
-        container = info.get("container", "")
-        # Strip "(...)" qualifiers like "llama-cpp (llama-swap, CUDA)" → "llama-cpp"
-        primary = container.split(" (")[0].strip()
-        if primary and primary not in seen and not primary.startswith("host"):
-            known_services.append(primary)
-            seen.add(primary)
-
     entries = []
-    for svc in known_services:
+    for svc in _STACK_ROSTER:
         proc = processing.get(svc)
         state, health = _infer_state_from_probe(proc)
         entries.append({
@@ -650,13 +706,12 @@ def _registry_container_roster(processing: Dict[str, Dict[str, Any]]) -> Dict[st
             "health": health,
             "image": "—",
         })
-
     entries.sort(key=lambda e: e["service"])
     return {
         "available": True,
         "source": "registry",
-        "note": "docker CLI unavailable — listing services known to the registry; "
-                "state inferred from HTTP probes",
+        "note": "docker CLI unavailable — listing the full workspace roster; "
+                "state inferred from HTTP probes where reachable",
         "entries": entries,
     }
 
@@ -720,12 +775,38 @@ def _registry_alias_for(docker_service: str) -> Optional[str]:
 # --- Container roster -----------------------------------------------------
 
 def _docker_compose_ps() -> Dict[str, Any]:
-    """Run `docker compose ps --format json`. Falls back gracefully."""
+    """Run `docker compose ps` for BOTH compose projects and merge.
+
+    The main ai-stack project plus the separate Open Brain (OB1) project, so
+    the container table covers the whole workspace when the docker CLI is
+    available. Falls back gracefully when it is not.
+    """
     workspace = _resolve_workspace_root()
+    main = _compose_ps_one(workspace, None)
+    if not main["available"]:
+        return main
+
+    entries = list(main["entries"])
+    # Open Brain (OB1) is a separate compose project — pull it via -f.
+    ob1_file = os.path.join(workspace, "OB1", "docker", "docker-compose.yml")
+    if os.path.exists(ob1_file):
+        ob1 = _compose_ps_one(workspace, ob1_file)
+        if ob1["available"]:
+            entries.extend(ob1["entries"])
+
+    entries.sort(key=lambda e: e["service"])
+    return {"available": True, "entries": entries}
+
+
+def _compose_ps_one(workspace: str, compose_file: Optional[str]) -> Dict[str, Any]:
+    """Run `docker compose ps --format json` for one project (None = main)."""
+    cmd = ["docker", "compose"]
+    if compose_file:
+        cmd += ["-f", compose_file]
+    cmd += ["ps", "--format", "json"]
     try:
         result = subprocess.run(
-            ["docker", "compose", "ps", "--format", "json"],
-            capture_output=True, text=True,
+            cmd, capture_output=True, text=True,
             timeout=DOCKER_PS_TIMEOUT, cwd=workspace,
         )
     except FileNotFoundError:
@@ -759,7 +840,6 @@ def _docker_compose_ps() -> Dict[str, Any]:
             "health": obj.get("Health", "") or "—",
             "image": obj.get("Image", "?"),
         })
-    entries.sort(key=lambda e: e["service"])
     return {"available": True, "entries": entries}
 
 
@@ -898,7 +978,7 @@ def _probe_processing(probe: Dict[str, Any]) -> Dict[str, Any]:
         return {"status": "ready", "code": code, "via": url}
 
     if kind == "http_health":
-        code, body, url, err = _try_get(probe, "/health")
+        code, body, url, err = _try_get(probe, probe.get("health_path", "/health"))
         if code == 0:
             return {"status": "unreachable", "error": err}
         return {
