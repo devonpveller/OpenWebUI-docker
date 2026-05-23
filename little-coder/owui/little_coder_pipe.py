@@ -1,7 +1,7 @@
 """
 title: Little Coder
 author: ai-stack
-version: 0.4.0
+version: 0.5.0
 license: MIT
 description: Drive little-coder from OpenWebUI chat (Chapter 2 — OWUI pipeline).
   Plain messages trigger coding tasks and stream the agent's process live —
@@ -396,7 +396,7 @@ class Pipe:
             ok, data = await self._call("GET", "/admin/pending")
             if not ok:
                 return f"⚠️ {data.get('detail', data)}"
-            return f"{len(data.get('pending', []))} pending artifact(s)."
+            return self._format_pending(data.get("pending", []))
 
         if cmd in ("/approve", "/reject"):
             if not args:
@@ -421,6 +421,39 @@ class Pipe:
             return self._format_observe(data)
 
         return f"Unknown command `{cmd}`. Try `/help`."
+
+    @staticmethod
+    def _format_pending(rows: list) -> str:
+        """Render the pending-skills list for chat. Body is truncated to
+        keep the surface scannable — operator can fetch the full body
+        via `lc admin pending --json` on the host."""
+        if not rows:
+            return "_No pending skill drafts._"
+        out = [f"## {len(rows)} pending skill draft(s)\n"]
+        for row in rows:
+            cluster = row.get("cluster") or {}
+            out.append(
+                f"### `{row['id']}` — tier-{row['tier']} {row['kind']}: "
+                f"**{row['name']}**"
+            )
+            out.append(
+                f"- lang=`{row['lang']}` domain=`{row['domain']}` "
+                f"task_shape=`{row['task_shape']}`"
+            )
+            if cluster:
+                out.append(
+                    f"- cluster: _{cluster.get('label')}_ "
+                    f"(baseline_covers={cluster.get('baseline_covers')}, "
+                    f"observed={cluster.get('observed')})"
+                )
+            out.append(f"- description: {row['description']}")
+            body_preview = row["body"][:400].replace("\n", " ")
+            out.append(f"- body preview: {body_preview}...")
+            out.append(
+                f"- review: `/approve {row['id']}` · `/reject {row['id']}`"
+            )
+            out.append("")
+        return "\n".join(out)
 
     @staticmethod
     def _format_observe(report: dict) -> str:

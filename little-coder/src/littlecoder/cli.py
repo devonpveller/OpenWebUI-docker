@@ -130,9 +130,34 @@ def cmd_admin_task_confirm(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_admin_pending(_args: argparse.Namespace) -> int:
+def cmd_admin_pending(args: argparse.Namespace) -> int:
+    """`lc admin pending` — list pending skill drafts. With `--json`,
+    dump the raw daemon response; otherwise render a human summary."""
     pending = _request("GET", "/admin/pending").get("pending", [])
-    print(f"{len(pending)} pending artifact(s)")  # empty until Chapter 4
+    if getattr(args, "json", False):
+        print(json.dumps(pending, indent=2))
+        return 0
+    if not pending:
+        print("0 pending artifact(s)")
+        return 0
+    print(f"{len(pending)} pending artifact(s):\n")
+    for row in pending:
+        print(f"  [{row['id']}] tier-{row['tier']} {row['kind']} — {row['name']}")
+        print(f"    lang={row['lang']} domain={row['domain']} task_shape={row['task_shape']}")
+        print(f"    cluster_id={row['cluster_id']}")
+        cluster = row.get("cluster") or {}
+        if cluster:
+            print(
+                f"    cluster: '{cluster.get('label')}' "
+                f"(baseline_covers={cluster.get('baseline_covers')}, "
+                f"observed={cluster.get('observed')})"
+            )
+        print(f"    description: {row['description']}")
+        body_preview = row["body"][:200].replace("\n", " ")
+        print(f"    body (first 200 chars): {body_preview}")
+        print(f"    approve: lc admin approve {row['id']}")
+        print(f"    reject:  lc admin reject {row['id']}")
+        print()
     return 0
 
 
@@ -198,9 +223,13 @@ def build_parser() -> argparse.ArgumentParser:
     sd.add_argument("--drain-deadline", help="e.g. 30m, 1h, 90s")
     sd.set_defaults(func=cmd_admin_shutdown)
 
-    asub.add_parser("pending", help="list pending artifacts (empty until Ch.4)").set_defaults(
-        func=cmd_admin_pending
+    pending_parser = asub.add_parser(
+        "pending", help="list pending skill drafts (Chapter 4)"
     )
+    pending_parser.add_argument(
+        "--json", action="store_true", help="raw JSON output"
+    )
+    pending_parser.set_defaults(func=cmd_admin_pending)
     ap = asub.add_parser("approve", help="approve an artifact (Ch.4)")
     ap.add_argument("artifact_id")
     ap.set_defaults(func=cmd_admin_approve)

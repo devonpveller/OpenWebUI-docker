@@ -562,15 +562,138 @@ def build_app(daemon: LittleCoderDaemon) -> FastAPI:
         out["enabled"] = True
         return out
 
-    # Operator-surface stubs — wired up in Chapter 4 (design §12.6).
+    # Operator approval surface (design §4f, §12.6).
     @app.get("/admin/pending")
     def pending() -> dict:
-        return {"pending": []}
+        """List pending skill drafts. Each row carries the artifact's
+        text + frontmatter + cluster provenance, so the operator can
+        decide without leaving the surface."""
+        from .skills import iter_skills
+
+        out: list[dict] = []
+        if daemon.cfg.observer.enabled:
+            store = daemon.meta.load_store()
+        else:
+            store = None
+        for skill in iter_skills(daemon.cfg.paths.skill_dir, status="pending"):
+            fm = skill.frontmatter
+            row: dict = {
+                "id": skill.id,
+                "name": fm.name,
+                "description": fm.description,
+                "body": skill.body,
+                "tier": fm.tier,
+                "kind": fm.kind,
+                "lang": fm.lang,
+                "domain": fm.domain,
+                "task_shape": fm.task_shape,
+                "cluster_id": fm.cluster_id,
+                "created": fm.created,
+            }
+            # Cluster provenance for at-a-glance review.
+            if store is not None:
+                cluster = store.clusters.get(fm.cluster_id)
+                counter = store.counters.get(fm.cluster_id)
+                row["cluster"] = (
+                    {
+                        "label": cluster.label,
+                        "discriminator": cluster.discriminator,
+                        "baseline_covers": cluster.baseline_covers,
+                        "observed": counter.observed if counter else 0,
+                        "top_repos": (
+                            sorted(
+                                counter.per_repo_observed.items(),
+                                key=lambda kv: kv[1],
+                                reverse=True,
+                            )[:3]
+                            if counter
+                            else []
+                        ),
+                    }
+                    if cluster
+                    else None
+                )
+            out.append(row)
+        return {"pending": out}
 
     @app.post("/admin/approve/{artifact_id}")
+    def approve(artifact_id: str) -> dict:
+        """Approve a pending skill — flip status pending → active so the
+        augmenter starts retrieving it. Journals to `audit.jsonl`.
+
+        Validation gate (§4d) is NOT auto-run here: the Polyglot oracle
+        runs against an operator-imported corpus that may not exist
+        yet. The operator inspects the body + cluster provenance and
+        makes the call. A separate `POST /admin/validate/{id}` (Stage
+        6 follow-up) returns the validation gate verdict on demand."""
+        from .skills import flip_status, load_skill, skill_path, SkillFormatError, iter_skills
+
+        # Locate the pending skill.
+        target_skill = None
+        for s in iter_skills(daemon.cfg.paths.skill_dir, status="pending"):
+            if s.id == artifact_id:
+                target_skill = s
+                break
+        if target_skill is None:
+            raise HTTPException(404, f"no pending skill with id={artifact_id!r}")
+        try:
+            flipped = flip_status(daemon.cfg.paths.skill_dir, artifact_id, "active")
+        except (SkillFormatError, FileNotFoundError) as exc:
+            raise HTTPException(500, f"approve failed: {exc}") from exc
+        daemon.audit.write(
+            "approve_decision",
+            actor="operator",
+            artifact_id=artifact_id,
+            cluster_id=flipped.frontmatter.cluster_id,
+            tier=flipped.frontmatter.tier,
+            kind=flipped.frontmatter.kind,
+        )
+        return {
+            "status": "approved",
+            "id": artifact_id,
+            "cluster_id": flipped.frontmatter.cluster_id,
+        }
+
     @app.post("/admin/reject/{artifact_id}")
-    def approve_reject(artifact_id: str) -> dict:
-        raise HTTPException(501, "artifact approval lands in Chapter 4 (Learner)")
+    def reject(artifact_id: str) -> dict:
+        """Reject a pending skill — flip status pending → retired (kept
+        on disk for audit; never selected by the augmenter, design
+        §8.5 retirement semantics). Journals to `audit.jsonl`.
+
+        The operator can also reject an already-active skill the same
+        way — useful when a previously-merged artifact turns out to
+        be wrong before efficacy reversion catches it."""
+        from .skills import flip_status, SkillFormatError, iter_skills
+
+        target_skill = None
+        for s in iter_skills(daemon.cfg.paths.skill_dir, status=None):
+            if s.id == artifact_id and s.frontmatter.status in ("pending", "active"):
+                target_skill = s
+                break
+        if target_skill is None:
+            raise HTTPException(
+                404,
+                f"no pending or active skill with id={artifact_id!r}",
+            )
+        prior_status = target_skill.frontmatter.status
+        try:
+            flipped = flip_status(daemon.cfg.paths.skill_dir, artifact_id, "retired")
+        except (SkillFormatError, FileNotFoundError) as exc:
+            raise HTTPException(500, f"reject failed: {exc}") from exc
+        daemon.audit.write(
+            "approve_decision",
+            actor="operator",
+            artifact_id=artifact_id,
+            decision="reject",
+            prior_status=prior_status,
+            cluster_id=flipped.frontmatter.cluster_id,
+            tier=flipped.frontmatter.tier,
+        )
+        return {
+            "status": "rejected",
+            "id": artifact_id,
+            "prior_status": prior_status,
+        }
 
     @app.post("/admin/upstream/pull")
     def upstream_pull() -> dict:
