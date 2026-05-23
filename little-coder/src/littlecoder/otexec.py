@@ -25,8 +25,42 @@ import os
 import sys
 import time
 
+from . import git_artifact_filter as artifact_filter
 from .journals import utc_now
 from .openterminal import OpenTerminalClient, OpenTerminalError
+
+
+def _emit_filter_denial(command: str, decision: artifact_filter.Decision) -> None:
+    """Journal a workspace-edge denial via the existing event stream so the
+    daemon sees it through the same path as a git-proxy denial.
+
+    Symmetric with `_emit_event`, but no real `ExecResult` exists — the
+    command never reached open-terminal. `git_proxy_denied: True` flips the
+    activity record's `denied` flag and the daemon writes a `git_blocked`
+    error (design §3.3, plan open item #9)."""
+    path = os.environ.get("LC_EVENT_STREAM")
+    if not path:
+        return
+    line = (
+        f"{artifact_filter.DENY_MARKER} (ot-exec:{decision.rule}) "
+        f"— {decision.reason}"
+    )
+    event = {
+        "ts": utc_now(),
+        "kind": "command",
+        "command": command,
+        "exit_code": artifact_filter.EXIT_DENIED,
+        "status": "done",
+        "duration_ms": 0,
+        "timed_out": False,
+        "git_proxy_denied": True,
+        "stderr_tail": line,
+    }
+    try:
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(event) + "\n")
+    except OSError:
+        pass  # journaling is best-effort; the stderr marker is the primary signal
 
 
 def _emit_event(command: str, result, duration_ms: int) -> None:
@@ -66,6 +100,21 @@ def main(argv: list[str] | None = None) -> int:
     if not command.strip():
         sys.stderr.write("ot-exec: no command given\n")
         return 2
+
+    # Workspace-edge artifact filter — symmetric with the git-proxy
+    # (design §3.3, plan open item #9). Blocks the obvious bash bypass
+    # paths to `.git/config` / `.git/hooks/` / `.git/info/` before the
+    # command crosses into open-terminal. Pure-classify; see module
+    # docstring for the residual root-bypass.
+    decision = artifact_filter.classify(command)
+    if decision.action == "deny":
+        marker = (
+            f"{artifact_filter.DENY_MARKER} (ot-exec:{decision.rule}) "
+            f"— {decision.reason}"
+        )
+        sys.stderr.write(marker + "\n")
+        _emit_filter_denial(command, decision)
+        return artifact_filter.EXIT_DENIED
 
     client = OpenTerminalClient(
         base_url=os.environ.get("LC_OPEN_TERMINAL_URL", "http://open-terminal:8000"),
