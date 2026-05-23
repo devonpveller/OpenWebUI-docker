@@ -260,6 +260,7 @@ def to_dict(store: CohortStore) -> dict:
                 "discriminator": c.discriminator,
                 "lang": c.lang,
                 "task_shape": c.task_shape,
+                "baseline_covers": c.baseline_covers,
                 "parents": list(c.parents),
                 "inherited_count": c.inherited_count,
             }
@@ -312,6 +313,7 @@ def from_dict(data: dict) -> CohortStore:
             discriminator=c["discriminator"],
             lang=c["lang"],
             task_shape=c["task_shape"],
+            baseline_covers=bool(c.get("baseline_covers", False)),
             parents=tuple(c.get("parents") or ()),
             inherited_count=int(c.get("inherited_count", 0)),
         )

@@ -89,3 +89,14 @@ metrics:
 daemon:
   host: 0.0.0.0
   port: 8090
+
+# Observer outer loop (design §3.2, Chapter 3). Read-only — meta walks
+# journals, clusters occurrences, surfaces patterns. Writes NOTHING to
+# the skill library (that lands in Chapter 4). With `enabled: true` the
+# /admin/observe endpoint produces real reports; disabled returns the
+# "Observer is off" skeleton.
+observer:
+  enabled: true
+  store_filename: cohort-store.json
+  similarity_floor: 0.7
+  evidence_trigger_records: 5

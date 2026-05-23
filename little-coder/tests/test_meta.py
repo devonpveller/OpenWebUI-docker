@@ -246,3 +246,75 @@ def test_report_lines_omits_scope_section_when_empty(tmp_path):
     result = runner.iterate()
     lines = report_lines(result)
     assert all("unassigned by scope" not in line for line in lines)
+
+
+# --- judge-wired iteration (Stage 3) ------------------------------------
+
+
+def test_iterate_with_judge_mints_clusters_and_routes_consumed(tmp_path):
+    """A wired Judge can mint clusters from the unassigned pool. Consumed
+    occurrences leave the pool and increment the new cluster's observed
+    counter; remaining occurrences stay in the pool for next iteration."""
+    import json
+
+    from littlecoder.judge import Judge
+    from littlecoder.llm import ChatResponse, MockChatClient
+
+    runner = _make_runner(tmp_path)
+    journals = Journals(tmp_path / "journals")
+    _write_failures(journals, 5)  # 5 unassigned bugfix occurrences
+
+    payload = {
+        "clusters": [
+            {
+                "label": "borrow checker errors",
+                "discriminator": "borrow checker + lifetime",
+                "signal_indices": [0, 1, 2],  # 3 of the 5 cohere
+                "baseline_covers": False,
+                "reasoning": "all three mention borrow",
+                "not_other_types": "tried to split, didn't work",
+            }
+        ],
+        "pool_too_small": False,
+        "pool_too_noisy": False,
+    }
+    chat = MockChatClient(
+        [ChatResponse(content=json.dumps(payload), finish_reason="stop")]
+    )
+    judge = Judge(chat=chat, founding_knowledge_paths=[], min_pool_size=1)
+    runner.judge = judge
+
+    result = runner.iterate()
+    assert result is not None
+    # One cluster minted; its id appears in the result.
+    assert len(result.minted_cluster_ids) == 1
+    # 3 consumed → cluster's observed = 3; 2 stayed in pool.
+    minted_id = result.minted_cluster_ids[0]
+    store = runner.load_store()
+    assert store.counters[minted_id].observed == 3
+    assert store.unassigned[("rust", "bugfix")].size == 2
+    # Cluster discriminator + lang/shape are correct.
+    assert store.clusters[minted_id].lang == "rust"
+    assert store.clusters[minted_id].task_shape == "bugfix"
+    assert store.clusters[minted_id].discriminator == "borrow checker + lifetime"
+
+
+def test_iterate_with_judge_skips_when_pool_too_small(tmp_path):
+    """A 1-occurrence pool is below default min_pool_size=3 — the judge
+    is NEVER called, so the iteration completes with no mints."""
+    from littlecoder.judge import Judge
+    from littlecoder.llm import MockChatClient
+
+    runner = _make_runner(tmp_path)
+    journals = Journals(tmp_path / "journals")
+    _write_failures(journals, 1)
+
+    chat = MockChatClient([])  # no canned responses — would raise if called
+    judge = Judge(chat=chat, founding_knowledge_paths=[])  # default min=3
+    runner.judge = judge
+
+    result = runner.iterate()
+    assert result is not None
+    assert result.minted_cluster_ids == ()
+    assert result.unassigned_total == 1
+    assert chat.calls == []  # LLM not called

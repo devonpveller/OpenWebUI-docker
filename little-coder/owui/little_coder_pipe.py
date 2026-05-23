@@ -35,7 +35,7 @@ from pydantic import BaseModel, Field
 
 # Operator slash-commands — gated by OWUI role. `/help` and `/status` are
 # open to any user (read-only) and handled before this set is checked.
-_OPERATOR_CMDS = {"/project", "/confirm", "/pending", "/approve", "/reject", "/upstream"}
+_OPERATOR_CMDS = {"/project", "/confirm", "/pending", "/approve", "/reject", "/upstream", "/observe"}
 
 _HELP = """**Little Coder** — OpenWebUI surface
 
@@ -49,6 +49,7 @@ Operator commands (require an operator account):
 - `/pending` — list pending skill artifacts (empty until Chapter 4)
 - `/approve <id>` · `/reject <id>` — artifact review (Chapter 4)
 - `/upstream pull` — pull the fork-parent (Chapter 5)
+- `/observe` — show the Observer report (`/observe iterate` runs a fresh meta pass first)
 
 Open to everyone:
 - `/status` — daemon health and focused project
@@ -408,7 +409,77 @@ class Pipe:
             ok, data = await self._call("POST", "/admin/upstream/pull")
             return f"ℹ️ {data.get('detail', data)}"
 
+        if cmd == "/observe":
+            params = {}
+            if args and args[0].lower() == "iterate":
+                params["iterate"] = "true"
+            ok, data = await self._call("GET", "/admin/observe", params=params)
+            if not ok:
+                return f"⚠️ {data.get('detail', data)}"
+            if not data.get("enabled", False):
+                return f"ℹ️ {data.get('note', 'Observer is disabled')}"
+            return self._format_observe(data)
+
         return f"Unknown command `{cmd}`. Try `/help`."
+
+    @staticmethod
+    def _format_observe(report: dict) -> str:
+        """Render the Observer report as Markdown for the chat surface.
+        Mirrors the CLI's `render_text` shape but uses Markdown so OWUI
+        renders the sections, tables, and IDs in monospace."""
+        lines = ["## Observer report"]
+        li = report.get("last_iteration")
+        if li:
+            lines.append(
+                f"_last iteration {li['ts']} — "
+                f"records={li['records_consumed']}, "
+                f"clusters={li['clusters_total']}, "
+                f"observed={li['occurrences_total']}, "
+                f"unassigned={li['unassigned_total']}_"
+            )
+            if li.get("minted_cluster_ids"):
+                lines.append(f"_minted this run: {len(li['minted_cluster_ids'])}_")
+        else:
+            lines.append("_no iteration has completed yet_")
+
+        def section(title: str, rows: list, tier_hint: str) -> None:
+            lines.append("")
+            lines.append(f"### {title} ({len(rows)}) — _{tier_hint}_")
+            if not rows:
+                lines.append("_(none)_")
+                return
+            for r in rows:
+                lines.append(
+                    f"- `{r['cluster_id'][:8]}` **{r['label']}** "
+                    f"— {r['lang']}|{r['task_shape']}, "
+                    f"observed={r['observed']}"
+                )
+                if r.get("top_repos"):
+                    repos = ", ".join(f"`{repo}`={n}" for repo, n in r["top_repos"])
+                    lines.append(f"  - top repos: {repos}")
+
+        section(
+            "Knowledge gaps",
+            report.get("knowledge_gaps") or [],
+            "baseline silent — tier-0 candidates",
+        )
+        section(
+            "Compliance gaps",
+            report.get("compliance_gaps") or [],
+            "baseline covers — tier-1 enforcement",
+        )
+
+        unassigned = report.get("unassigned") or []
+        lines.append("")
+        lines.append(f"### Unassigned scopes ({len(unassigned)})")
+        if not unassigned:
+            lines.append("_(none)_")
+        else:
+            for u in unassigned:
+                lines.append(
+                    f"- `{u['lang']}|{u['task_shape']}` — pool size **{u['size']}**"
+                )
+        return "\n".join(lines)
 
     # -- helpers -----------------------------------------------------------
 
