@@ -85,6 +85,17 @@ compose projects: main `ai-stack` + separate `open-brain`).
   Output:   GPU temperature, VRAM, utilization, per-container assignments
             (3090 Ti aistack-side · 2080 SUPER llama-cpp-side).
 
+─ GPU detail · nvidia-smi check  ────────────────── → modules/gpu-status
+  Triggers: smi · nvidia-smi · gpu processes · what is in memory ·
+            what's in memory · compute apps · pmon
+            Append "gpu 0" / "gpu 1" / "first" / "second" to scope to one GPU.
+  Output:   Per-GPU breakdown — utilization · VRAM · temp · power · clocks ·
+            encoder/decoder — PLUS the compute-process list (PID, process
+            name, VRAM per process). Answers "why is util 99%?" and
+            "what's in memory?". Shells to `nvidia-smi`; torch can't see
+            other processes' VRAM.
+  Examples: "smi" · "nvidia-smi gpu 0" · "what's in memory on gpu 1"
+
 ─ Admin help  ──────────────────────────────────── → tailscale_serve_pipe
   Triggers: help · ? · admin help · stack help · tailscale help · commands ·
             what can i do

@@ -515,8 +515,9 @@ class AIStackRouter:
         ):
             return "custom-tools"
 
-        # GPU monitoring
-        elif any(keyword in input_lower for keyword in ["gpu", "cuda", "graphics", "nvidia"]):
+        # GPU monitoring. "smi" routes here so bare "smi" hits the nvidia-smi
+        # process-detail check inside the gpu-status module.
+        elif any(keyword in input_lower for keyword in ["gpu", "cuda", "graphics", "nvidia", "smi"]):
             return "gpu-status"
 
         # Emergency recovery (general recovery, but NOT tailscale serve)
