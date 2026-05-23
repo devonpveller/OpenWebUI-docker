@@ -23,12 +23,27 @@ RUN if [ -x /usr/bin/git ]; then mv /usr/bin/git /usr/bin/git.real; fi
 # to drop a script into `.git/hooks/`, git would never see it: it consults
 # `/etc/lc-git-hooks/` instead. The dir is created read-only (0555) and
 # empty; operator can add hooks by rebuilding the image with files in it.
+#
+# core.pager=cat disables git's pager system-wide. The agent's commands run
+# through open-terminal's REST exec endpoint, which doesn't give git a real
+# tty; default `less` then prints "WARNING: terminal is not fully functional
+# / Press RETURN to continue" and blocks on stdin forever, locking the task.
+# `cat` makes every `git log`/`git diff`/`git show` stream straight to the
+# capture, no prompt. (Founding-knowledge `git log -n 10` was the symptom.)
 RUN git.real config --system --add safe.directory '*' \
  && git.real config --system user.name "little-coder" \
  && git.real config --system user.email "little-coder@ai-stack.local" \
  && git.real config --system core.hooksPath /etc/lc-git-hooks \
+ && git.real config --system core.pager cat \
  && mkdir -p /etc/lc-git-hooks \
  && chmod 0555 /etc/lc-git-hooks
+
+# Belt-and-braces for non-git pagers (man, systemctl, etc.) the agent may
+# invoke through bash. Same root cause: the exec endpoint isn't a real tty.
+ENV PAGER=cat \
+    GIT_PAGER=cat \
+    MANPAGER=cat \
+    LESS=-FRX
 
 COPY git-proxy/git_proxy.py /opt/git-proxy/git_proxy.py
 RUN printf '#!/bin/sh\nexec python3 /opt/git-proxy/git_proxy.py "$@"\n' \
