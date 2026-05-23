@@ -27,14 +27,24 @@ from .journals import utc_now
 # Known audit events. Unknown events are rejected — the audit log is a
 # disciplined record, not a free-for-all.
 TOOL_EVENTS = {"project_switched", "task_outcome_amended", "shutdown"}
+OBSERVER_EVENTS = {
+    # Chapter 3 transitions + iteration lifecycle. `chapter_advanced` is
+    # how the operator records moving between chapters (already used at
+    # the Ch2→Ch3 transition); `observer_iteration_*` are the meta
+    # outer-loop autotrigger trail (design §3.2).
+    "chapter_advanced",
+    "observer_iteration_completed",
+    "observer_iteration_failed",
+}
 LATER_EVENTS = {
     "upstream_pulled",
     "approve_decision",
     "artifact_retired",
     "deploy",
     "preflight_exit",
+    "invalidated_by_upstream",
 }
-KNOWN_EVENTS = TOOL_EVENTS | LATER_EVENTS
+KNOWN_EVENTS = TOOL_EVENTS | OBSERVER_EVENTS | LATER_EVENTS
 
 
 class AuditRecord(BaseModel):

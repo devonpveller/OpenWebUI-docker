@@ -29,6 +29,30 @@ LC_SANITIZE_REDACTED = Gauge(
 )
 LC_LLAMA_SLOTS_BUSY = Gauge("lc_llama_slots_busy", "Busy llama-cpp inference slots")
 
+# Observer outer-loop metrics (design §9.3, Chapter 3). All track the most
+# recent iteration; the operator surface shows the same numbers, but
+# Prometheus is what alarms route against (queue depth + judge wall-clock
+# are part of the §12.5 budget surface).
+LC_META_ITERATIONS = Counter(
+    "lc_meta_iterations_total", "Observer iterations completed"
+)
+LC_META_ITERATIONS_FAILED = Counter(
+    "lc_meta_iterations_failed_total", "Observer iterations that raised"
+)
+LC_META_CLUSTERS = Gauge(
+    "lc_meta_clusters", "Clusters known at last iteration (design §5.1)"
+)
+LC_META_OCCURRENCES = Gauge(
+    "lc_meta_occurrences", "Observed occurrences across all clusters at last iteration"
+)
+LC_META_UNASSIGNED = Gauge(
+    "lc_meta_unassigned",
+    "Below-floor occurrences awaiting cluster minting at last iteration",
+)
+LC_META_MINTED = Counter(
+    "lc_meta_clusters_minted_total", "Clusters minted by the judge (cumulative)"
+)
+
 
 def start_metrics_server(port: int) -> None:
     """Start the Prometheus exposition server on its own thread."""
@@ -52,6 +76,27 @@ def refresh(journals, sanitizer, queue_depth: int, task_in_flight: bool) -> None
 
 def record_task(outcome: str) -> None:
     LC_TASKS_TOTAL.labels(outcome=outcome).inc()
+
+
+def record_meta_iteration(
+    *,
+    clusters_total: int,
+    occurrences_total: int,
+    unassigned_total: int,
+    minted: int,
+) -> None:
+    """Update the Observer gauges after a successful iteration. Caller
+    increments `failed` separately when the iteration raised."""
+    LC_META_ITERATIONS.inc()
+    LC_META_CLUSTERS.set(clusters_total)
+    LC_META_OCCURRENCES.set(occurrences_total)
+    LC_META_UNASSIGNED.set(unassigned_total)
+    if minted:
+        LC_META_MINTED.inc(minted)
+
+
+def record_meta_iteration_failed() -> None:
+    LC_META_ITERATIONS_FAILED.inc()
 
 
 def poll_llama_slots(base_url: str) -> None:

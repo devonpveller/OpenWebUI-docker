@@ -1,7 +1,7 @@
 """
 title: Little Coder
 author: ai-stack
-version: 0.3.1
+version: 0.4.0
 license: MIT
 description: Drive little-coder from OpenWebUI chat (Chapter 2 — OWUI pipeline).
   Plain messages trigger coding tasks and stream the agent's process live —
@@ -530,14 +530,23 @@ class Pipe:
                 )
 
     async def _call(
-        self, method: str, path: str, body: Optional[dict] = None
+        self,
+        method: str,
+        path: str,
+        body: Optional[dict] = None,
+        params: Optional[dict] = None,
     ) -> tuple[bool, dict]:
-        """Call the control daemon. Returns (ok, json-or-error-dict)."""
+        """Call the control daemon. Returns (ok, json-or-error-dict).
+        `params` is the query-string dict — required for endpoints like
+        `/admin/observe?iterate=true` where the daemon parses a query
+        parameter, not a request body."""
         url = self.valves.daemon_url.rstrip("/") + path
         timeout = aiohttp.ClientTimeout(total=60)
         try:
             async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.request(method, url, json=body) as resp:
+                async with session.request(
+                    method, url, json=body, params=params
+                ) as resp:
                     try:
                         data = await resp.json()
                     except aiohttp.ContentTypeError:

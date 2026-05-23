@@ -15,6 +15,7 @@ import os
 import signal
 import time
 from collections.abc import AsyncIterator
+from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI, HTTPException
@@ -25,7 +26,8 @@ from .agent import AgentRunner, TaskTimeout, kill_process_group, read_activity_f
 from .audit import AuditLog
 from .config import Config, load_config
 from .journals import Journals, utc_now
-from .meta import MetaRunner, default_similarity
+from .meta import should_trigger
+from .meta_wiring import build_meta_runner
 from .observer import report_dict
 from .openterminal import OpenTerminalClient
 from .sanitize import Sanitizer
@@ -99,18 +101,15 @@ class LittleCoderDaemon:
         self.workspace = WorkspaceManager(self.ot, workspace_path=config.workspace.path)
         self.agent = AgentRunner(config, self.journals, self.ot)
 
-        # Observer outer loop (design §3.2, Chapter 3). Constructed unconditionally
-        # so `/admin/observe` works even when disabled — disabled mode returns
-        # a static "Observer is off" report, never silently nothing. The judge
-        # is intentionally NOT wired here yet: Stage 3 lands `Judge` + the
-        # embedding-based similarity; wiring them into the daemon is a
-        # separate operator switch that the cli config can flip later.
-        self.meta = MetaRunner(
-            observer_cfg=config.observer,
-            journals_dir=config.journals.dir,
-            cohorts_dir=config.paths.cohorts_dir,
-            similarity=default_similarity,
-        )
+        # Observer outer loop (design §3.2, Chapter 3). Constructed
+        # unconditionally so `/admin/observe` works even when disabled —
+        # disabled mode returns the "Observer is off" skeleton, never
+        # silently nothing. The judge (Stage 3) is wired in only when
+        # BOTH `observer.enabled` AND `observer.judge_enabled` are on —
+        # the second flag exists so the operator can flip the LLM-in-the-
+        # loop on AFTER they've dry-run-calibrated the prompt
+        # (design §13, open item #2).
+        self.meta = build_meta_runner(config)
 
         self.queue: asyncio.Queue[str] = asyncio.Queue()
         self.tasks: dict[str, TaskState] = {}
@@ -237,6 +236,60 @@ class LittleCoderDaemon:
         finally:
             state.ended_ts = utc_now()
             self.in_flight = None
+            await self._maybe_trigger_meta()
+
+    async def _maybe_trigger_meta(self) -> None:
+        """Evidence-triggered Observer iteration (design §3.2). Called once
+        per task completion; the threshold + single-flight in MetaRunner
+        keep this cheap. Errors are swallowed and journaled to `audit` —
+        a failed iteration must not affect interactive task throughput
+        (design §12.5: interactive lanes always win)."""
+        if not self.cfg.observer.enabled or not self.cfg.observer.auto_iterate_on_task_end:
+            return
+        try:
+            count = self.meta._count_journal_records()
+        except Exception:
+            return  # don't let an FS hiccup affect the worker loop
+        if not should_trigger(
+            self.meta.state, count, self.cfg.observer.evidence_trigger_records
+        ):
+            return
+        # Fire and forget — single-flight in MetaRunner means a second
+        # trigger arriving mid-iteration returns None.
+        asyncio.create_task(self._run_meta_iteration())
+
+    async def _run_meta_iteration(self) -> None:
+        try:
+            result = await asyncio.to_thread(self.meta.iterate)
+        except Exception as exc:
+            # The judge can raise LlmError on transport problems; the
+            # projection should never raise but defensive-catch keeps a
+            # bug here from killing the worker. Audit-log so the operator
+            # sees the event.
+            metrics.record_meta_iteration_failed()
+            self.audit.write(
+                "observer_iteration_failed",
+                actor="meta",
+                error=str(exc)[:500],
+            )
+            return
+        if result is None:
+            return  # single-flight dropped this trigger
+        metrics.record_meta_iteration(
+            clusters_total=result.clusters_total,
+            occurrences_total=result.occurrences_total,
+            unassigned_total=result.unassigned_total,
+            minted=len(result.minted_cluster_ids),
+        )
+        self.audit.write(
+            "observer_iteration_completed",
+            actor="meta",
+            records_consumed=result.records_consumed,
+            clusters_total=result.clusters_total,
+            occurrences_total=result.occurrences_total,
+            unassigned_total=result.unassigned_total,
+            minted_cluster_ids=list(result.minted_cluster_ids),
+        )
 
     async def _metrics_loop(self) -> None:
         while True:
@@ -476,9 +529,34 @@ def build_app(daemon: LittleCoderDaemon) -> FastAPI:
                 "unassigned": [],
             }
         if iterate:
-            # iterate() returns None if another iteration is in flight; that
-            # is fine — fall through to read the (older) checkpoint.
-            daemon.meta.iterate()
+            # Operator-triggered iteration shares the same telemetry path
+            # as the auto-trigger (single-flight, metrics, audit).
+            try:
+                result = daemon.meta.iterate()
+            except Exception as exc:
+                metrics.record_meta_iteration_failed()
+                daemon.audit.write(
+                    "observer_iteration_failed",
+                    actor="operator",
+                    error=str(exc)[:500],
+                )
+                raise HTTPException(503, f"iteration failed: {exc}") from exc
+            if result is not None:
+                metrics.record_meta_iteration(
+                    clusters_total=result.clusters_total,
+                    occurrences_total=result.occurrences_total,
+                    unassigned_total=result.unassigned_total,
+                    minted=len(result.minted_cluster_ids),
+                )
+                daemon.audit.write(
+                    "observer_iteration_completed",
+                    actor="operator",
+                    records_consumed=result.records_consumed,
+                    clusters_total=result.clusters_total,
+                    occurrences_total=result.occurrences_total,
+                    unassigned_total=result.unassigned_total,
+                    minted_cluster_ids=list(result.minted_cluster_ids),
+                )
         store = daemon.meta.load_store()
         out = report_dict(store, daemon.meta.state.last_result)
         out["enabled"] = True
