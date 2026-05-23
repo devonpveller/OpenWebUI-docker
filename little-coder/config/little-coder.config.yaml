@@ -33,6 +33,8 @@ agent:
     - "--append-system-prompt"
     - "/app/agent-knowledge/environment.md"
     - "--append-system-prompt"
+    - "/app/agent-knowledge/project-context.md"
+    - "--append-system-prompt"
     - "/app/agent-knowledge/engineering-principles.md"
 
 # Workspace plane — the shared repo volume + open-terminal exec (design §3.4).
