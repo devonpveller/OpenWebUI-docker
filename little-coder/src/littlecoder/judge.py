@@ -657,3 +657,206 @@ def _draft_tier_1_skill(
 
 
 Judge.draft_tier_1_skill = _draft_tier_1_skill  # type: ignore[attr-defined]
+
+
+# --- tier-3 §6 justification gate (Chapter 5 §5c) ----------------------
+
+
+_JUSTIFY_TIER_3_SYSTEM_PROMPT = """\
+You are the META judge in TIER-3 JUSTIFICATION mode. A tier-3 change
+modifies the agent's OWN code (Node little-coder agent and/or the
+Python control-plane wrapper) — the most invasive and dangerous
+intervention possible. Per design §6, a tier-3 change requires a
+written argument with FOUR parts, ALL required:
+
+  (1) The CLUSTER and its persistence record across tiers 0–2.
+      What is the gap? What's the rate? What tier-0 / tier-1 / tier-2
+      interventions shipped? What was their efficacy?
+
+  (2) Specific INTERVENTIONS tried. List each prior skill artifact
+      (by id when known) and why each one DID NOT close the gap.
+
+  (3) **EXPLICIT ARGUMENT for why no plausible knowledge entry,
+      tool-craft pattern, plan-slot, or routing rule could have closed
+      the gap.** This is THE KEY GATE. If (3) cannot be articulated,
+      the structural change is NOT JUSTIFIED — write the missing
+      skill instead. Be honest here.
+
+  (4) The PROPOSED structural change + expected effect. Which code
+      surface? Per locked decision #14, the agent's code is two-part:
+      the Node little-coder agent (`pi` framework) and the Python
+      control-plane wrapper. State which surface(s) the change
+      touches and the expected behavior shift.
+
+If you cannot articulate (3) — if a plausible skill COULD have closed
+the gap and you just haven't tried it — set `refused: true` and put
+the explanation in `refusal_reason`. Do NOT propose a structural
+change in that case. The caller will route the case back to the
+skill drafting path (tier-0/1/2).
+
+OUTPUT FORMAT — JSON:
+
+{
+  "cluster_persistence": "(1) — cluster + rate + interventions and \
+their efficacy",
+  "interventions_tried": [
+    {"skill_id": "abc...", "tier": 0, "kind": "knowledge", \
+"why_failed": "..."},
+    ...
+  ],
+  "no_skill_argument": "(3) — explicit argument for why no skill \
+could close the gap",
+  "proposed_change": "(4) — what to change",
+  "code_surface": "node" | "python" | "both",
+  "expected_effect": "what behavior shifts after the change",
+  "refused": false,
+  "refusal_reason": ""
+}
+
+Return ONLY the JSON. No prose before or after."""
+
+
+class InterventionRecord(BaseModel):
+    """One prior skill artifact + why it didn't close the gap. Carries
+    enough for an operator to audit the §6(2) trail."""
+
+    model_config = {"extra": "forbid"}
+    skill_id: str = Field(..., min_length=4, max_length=64)
+    tier: int = Field(..., ge=0, le=2)
+    kind: str = Field(...)
+    why_failed: str = Field(..., min_length=2, max_length=2000)
+
+
+class Tier3Justification(BaseModel):
+    """The §6 structured argument. `refused=True` is the negative
+    answer — operator should NOT proceed with a structural change."""
+
+    model_config = {"extra": "forbid"}
+    cluster_persistence: str = Field(default="", max_length=8000)
+    interventions_tried: list[InterventionRecord] = Field(default_factory=list)
+    no_skill_argument: str = Field(default="", max_length=8000)
+    proposed_change: str = Field(default="", max_length=8000)
+    code_surface: str = Field(default="")  # "node" | "python" | "both"
+    expected_effect: str = Field(default="", max_length=4000)
+    refused: bool = Field(default=False)
+    refusal_reason: str = Field(default="", max_length=4000)
+
+
+@dataclasses.dataclass
+class Tier3JustificationResult:
+    """`refused=True` means the gate denied a structural change. The
+    caller routes the cluster back to skill drafting. `justified=True`
+    means the operator can review the argument and decide whether to
+    open a §11 candidate-validation flow."""
+
+    justification: Tier3Justification
+    refused: bool
+
+    @property
+    def justified(self) -> bool:
+        return not self.refused
+
+
+def _justify_user_message(
+    cluster: Cluster,
+    counter: ClusterCounters | None,
+    sample_signals: list[str],
+    prior_interventions: list[dict],
+    code_surface_hint: str,
+) -> str:
+    observed = counter.observed if counter else 0
+    interventions_block = (
+        "\n".join(
+            f"- skill_id={i.get('skill_id', '?')}, tier={i.get('tier', '?')}, "
+            f"kind={i.get('kind', '?')}, status={i.get('status', '?')}"
+            for i in prior_interventions
+        )
+        or "(no prior interventions)"
+    )
+    signals_block = "\n".join(f"- {s}" for s in sample_signals[:8])
+    return (
+        f"CLUSTER\n"
+        f"  id:            {cluster.cluster_id}\n"
+        f"  label:         {cluster.label}\n"
+        f"  discriminator: {cluster.discriminator}\n"
+        f"  lang:          {cluster.lang}\n"
+        f"  task_shape:    {cluster.task_shape}\n"
+        f"  observed:      {observed}\n"
+        f"  baseline_covers: {cluster.baseline_covers}\n\n"
+        f"PRIOR INTERVENTIONS\n{interventions_block}\n\n"
+        f"SIGNAL SAMPLE ({len(sample_signals[:8])})\n{signals_block}\n\n"
+        f"CODE SURFACE HINT: {code_surface_hint}\n"
+    )
+
+
+def parse_justification_response(content: str) -> Tier3Justification:
+    """Parse the LLM's §6 argument. Schema-strict — a judge that omits
+    fields fails loud (design §1: nothing fails open)."""
+    stripped = _strip_code_fence(content)
+    try:
+        data = json.loads(stripped)
+    except json.JSONDecodeError as exc:
+        raise LlmError(f"justification reply was not JSON: {exc.msg}") from exc
+    try:
+        out = Tier3Justification.model_validate(data)
+    except ValidationError as exc:
+        raise LlmError(f"justification reply did not match schema: {exc}") from exc
+    # Locked decision #14: code_surface must be one of the named values
+    # WHEN not refused. A refusal doesn't need a surface (no change
+    # is being proposed).
+    if not out.refused and out.code_surface not in ("node", "python", "both"):
+        raise LlmError(
+            f"code_surface must be node|python|both (got {out.code_surface!r})"
+        )
+    # §6(3) check at the parse layer too — a non-refused justification
+    # must have a non-trivial no_skill_argument. The PROMPT asks for
+    # this; we enforce it here so the gate can't slip.
+    if not out.refused and len(out.no_skill_argument.strip()) < 50:
+        raise LlmError(
+            "non-refused justification must include a substantive "
+            "no_skill_argument (design §6(3) — the key gate)"
+        )
+    return out
+
+
+def _justify_tier_3(
+    self: "Judge",
+    cluster: Cluster,
+    counter: ClusterCounters | None,
+    sample_signals: list[str],
+    prior_interventions: list[dict],
+    *,
+    code_surface_hint: str = "either node or python — judge picks",
+) -> Tier3JustificationResult:
+    """Produce a tier-3 §6 written argument. Caller is responsible for
+    gathering `prior_interventions` (skill_id / tier / kind / status
+    rows from the active skill library + audit log) — this method
+    composes them into the prompt and parses the structured response.
+
+    A `refused=True` result is the gate firing — the operator must NOT
+    proceed with a structural change. Caller should route the cluster
+    back to skill drafting (tier-0 / tier-1 / tier-2)."""
+    messages = [
+        ChatMessage(role="system", content=_JUSTIFY_TIER_3_SYSTEM_PROMPT),
+        ChatMessage(role="system", content=_founding_knowledge_block(self.founding_knowledge_paths)),
+        ChatMessage(
+            role="user",
+            content=_justify_user_message(
+                cluster, counter, sample_signals, prior_interventions, code_surface_hint
+            ),
+        ),
+    ]
+    response: ChatResponse = self.chat.chat(
+        messages,
+        model=self.model,
+        temperature=0.0,
+        response_format={"type": "json_object"},
+    )
+    justification = parse_justification_response(response.content)
+    return Tier3JustificationResult(
+        justification=justification,
+        refused=justification.refused,
+    )
+
+
+Judge.justify_tier_3 = _justify_tier_3  # type: ignore[attr-defined]

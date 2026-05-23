@@ -171,8 +171,38 @@ def cmd_admin_reject(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_admin_upstream_pull(_args: argparse.Namespace) -> int:
-    _request("POST", "/admin/upstream/pull")  # stub until Chapter 5
+def cmd_admin_upstream_pull(args: argparse.Namespace) -> int:
+    """`lc admin upstream pull --new-commit <sha> [--old-commit <sha>]` —
+    journal an upstream pull and list tier-3 skills to review per
+    design §12.2. The actual `git fetch` + merge happens on the host
+    BEFORE calling this; the daemon just records and surfaces what
+    the operator should look at next."""
+    if not args.new_commit:
+        _err("--new-commit is required (the SHA you pulled to)")
+        return 2
+    body = {"new_commit": args.new_commit}
+    if args.old_commit:
+        body["old_commit"] = args.old_commit
+    res = _request("POST", "/admin/upstream/pull", json=body)
+    review = res.get("tier3_to_review") or []
+    print(
+        f"upstream pull journaled: {res.get('old_commit') or '?'} → "
+        f"{res.get('new_commit') or '?'}"
+    )
+    if not review:
+        print("no live tier-3 skills to review.")
+        return 0
+    print(f"{len(review)} tier-3 skill(s) to review:")
+    for row in review:
+        print(
+            f"  [{row['id']}] status={row['status']} "
+            f"cluster={row['cluster_id']} — {row['name']}"
+        )
+    print(
+        "If the upstream pull now provides any of these, retire them via "
+        "`lc admin reject <id>` (the rejection will be journaled as the "
+        "design §12.2 `invalidated_by_upstream` trail)."
+    )
     return 0
 
 
@@ -256,9 +286,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     aups = asub.add_parser("upstream", help="upstream fork-parent administration")
     aups_sub = aups.add_subparsers(dest="upstream_cmd", required=True)
-    aups_sub.add_parser(
-        "pull", help="pull the fork-parent (operative in Chapter 5)"
-    ).set_defaults(func=cmd_admin_upstream_pull)
+    pull_parser = aups_sub.add_parser(
+        "pull", help="journal an upstream pull + list tier-3 skills to review"
+    )
+    pull_parser.add_argument(
+        "--new-commit", required=True, help="the SHA you pulled to"
+    )
+    pull_parser.add_argument(
+        "--old-commit", default="", help="the SHA before the pull (optional)"
+    )
+    pull_parser.set_defaults(func=cmd_admin_upstream_pull)
 
     obs = asub.add_parser(
         "observe", help="show the Observer report (design §3f, Chapter 3)"

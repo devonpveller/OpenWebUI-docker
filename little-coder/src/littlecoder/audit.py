@@ -43,6 +43,10 @@ LATER_EVENTS = {
     "deploy",
     "preflight_exit",
     "invalidated_by_upstream",
+    # Chapter 5 §5c / §5f — tier-3 justification + PR drafting trail.
+    "tier3_justification_drafted",
+    "tier3_justification_refused",
+    "tier3_pr_drafted",
 }
 KNOWN_EVENTS = TOOL_EVENTS | OBSERVER_EVENTS | LATER_EVENTS
 
