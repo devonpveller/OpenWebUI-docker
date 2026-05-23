@@ -151,7 +151,7 @@ class AgentRunner:
         ctx.state.events_path = pi_events
         try:
             env = self._build_env(ctx, ot_events)
-            cmd, stdin_text = self._build_invocation(ctx.state.prompt)
+            cmd, stdin_text = self._build_invocation(ctx.state.prompt, ctx)
             exit_code = self._run_cli(cmd, stdin_text, env, timeout, ctx, pi_events)
             commands = self._drain_events(ot_events, ctx)
             outcome, signal = self._verdict(ctx)
@@ -195,12 +195,87 @@ class AgentRunner:
         )
         return env
 
-    def _build_invocation(self, prompt: str) -> tuple[list[str], str | None]:
+    def _build_invocation(
+        self, prompt: str, ctx: "TaskContext"
+    ) -> tuple[list[str], str | None]:
+        """Compose pi's argv.
+
+        Session handling (design §3.1 follow-up): when
+        `agent.use_session=True`, pass `--session <id>` + `--session-dir
+        <dir>` so pi loads the per-chat session and handles compaction
+        natively. When False, pass `--no-session` (Chapter-1–3 strict
+        statelessness). The session id comes from the task envelope:
+        OWUI passes the chat_id as session_id; CLI uses a per-channel
+        default. Switching channels DOES NOT cross-contaminate sessions.
+
+        IMPORTANT: any `--no-session` or `--session*` flag the operator
+        left in `extra_args` is FILTERED so the daemon's wiring wins —
+        the design lock is "the daemon owns session policy", not "any
+        config wins"."""
         a = self.cfg.agent
-        cmd = [*a.command, "--model", a.model, *a.extra_args]
+        # Strip session-related flags + their values from extra_args
+        # so we own the policy here. pi's session flags are:
+        #   --no-session   (no value)
+        #   --continue / -c (no value — we don't use)
+        #   --session / --session-dir / --fork  (each takes 1 value)
+        filtered_extra: list[str] = []
+        skip_next = False
+        for arg in a.extra_args:
+            if skip_next:
+                skip_next = False
+                continue
+            if arg in ("--no-session", "-c", "--continue"):
+                continue
+            if arg in ("--session", "--session-dir", "--fork", "-r", "--resume"):
+                skip_next = True
+                continue
+            filtered_extra.append(arg)
+
+        cmd = [*a.command, "--model", a.model, *filtered_extra]
+
+        if a.use_session:
+            session_path = self._session_path_for(ctx)
+            # Pass the FULL PATH (not a bare id) so pi's
+            # resolveSessionPath treats it as `type: path` →
+            # SessionManager.open(path) which creates the file if
+            # missing. A bare id triggers id-lookup which fails on
+            # a fresh chat with `No session found matching <id>`.
+            cmd.extend([
+                "--session-dir", a.session_dir,
+                "--session", session_path,
+            ])
+        else:
+            cmd.append("--no-session")
+
         if a.prompt_mode == "arg":
             return [*cmd, prompt], None
         return cmd, prompt  # stdin
+
+    def _session_path_for(self, ctx: "TaskContext") -> str:
+        """Resolve the session FILE PATH for this trigger.
+
+        OWUI passes the chat_id as `session_id`; CLI may pass nothing
+        and we fall back to the per-channel default. The path is
+        `<session_dir>/<safe-id>.jsonl`. Returning a path (not a bare
+        id) is what tells pi's resolveSessionPath to treat the arg as
+        a file and create-or-open it (`SessionManager.open(path)`) —
+        bare-id mode does an id-LOOKUP which fails on a fresh chat
+        with `No session found matching <id>`.
+        """
+        st = ctx.state
+        raw = (st.session_id or "").strip()
+        if not raw:
+            raw = self.cfg.agent.default_session_ids.get(
+                st.channel, f"{st.channel}-default"
+            )
+        # Path-safety: pi will use this as a filename component, so
+        # restrict to a conservative whitelist. Anything else maps to
+        # `_`. We DON'T hash — operator-readable session dirs are
+        # friendlier for debugging ("which chat is this session for?").
+        import os as _os
+        import re as _re
+        safe = _re.sub(r"[^A-Za-z0-9._-]+", "_", raw)[:128]
+        return _os.path.join(self.cfg.agent.session_dir, f"{safe}.jsonl")
 
     def _run_cli(
         self,

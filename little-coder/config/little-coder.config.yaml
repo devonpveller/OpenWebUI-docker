@@ -25,9 +25,12 @@ agent:
   # --append-system-prompt seeds founding knowledge: the operating
   # environment (so the agent doesn't rediscover the git-proxy etc. each
   # task) + engineering principles. See little-coder/agent-knowledge/.
+  # NOTE: `--no-session` and `--session*` are owned by the daemon
+  # (see agent._build_invocation) — adding them here is filtered out.
+  # `use_session: true` below routes each trigger through its own pi
+  # session (OWUI chat_id → in-chat continuity + native compaction).
   extra_args:
     - "--print"
-    - "--no-session"
     - "--mode"
     - "json"
     - "--append-system-prompt"
@@ -36,6 +39,12 @@ agent:
     - "/app/agent-knowledge/project-context.md"
     - "--append-system-prompt"
     - "/app/agent-knowledge/engineering-principles.md"
+  # Session continuity (design §3.1 follow-up). `--session <id>` makes
+  # pi load/create a per-chat session; compaction is automatic when
+  # the session grows past pi's context budget. Sessions live on the
+  # `little-coder-sessions` named volume so they survive restarts.
+  use_session: true
+  session_dir: /var/lib/little-coder/sessions
 
 # Workspace plane — the shared repo volume + open-terminal exec (design §3.4).
 workspace:
