@@ -138,6 +138,28 @@ class DaemonConfig(_Strict):
     port: int = 8090
 
 
+class ObserverConfig(_Strict):
+    """The `meta` outer loop in read-only mode (design §3.2, §5, Chapter 3).
+
+    Observer reads journals, surfaces clustered patterns, and writes
+    NOTHING to the skill library (Learner adds drafting in Chapter 4).
+    Disabled by default so a stale Observer build can't run automatically
+    on a fresh deployment that hasn't fed it real journals yet."""
+
+    enabled: bool = False
+    # Cohort store on disk (design §5.4). Lives on `little-coder-cohorts/`
+    # which is declared in Tool (see `PathsConfig.cohorts_dir`).
+    store_filename: str = "cohort-store.json"
+    # Similarity floor for cluster assignment (design §5.2). Stage 3
+    # wires the real (embedding + judge-discriminator) similarity; this
+    # threshold is the floor the assignment function uses.
+    similarity_floor: float = 0.7
+    # Evidence trigger: re-run an iteration only after this many *new*
+    # records have landed since the last iteration completed (design §3.2
+    # — evidence-triggered, not clock-triggered).
+    evidence_trigger_records: int = 5
+
+
 class Config(_Strict):
     """Top-level config. Instantiating this validates the file (boot gate)."""
 
@@ -153,6 +175,7 @@ class Config(_Strict):
     sanitization: SanitizationConfig = Field(default_factory=SanitizationConfig)
     metrics: MetricsConfig = Field(default_factory=MetricsConfig)
     daemon: DaemonConfig = Field(default_factory=DaemonConfig)
+    observer: ObserverConfig = Field(default_factory=ObserverConfig)
 
 
 class ConfigError(RuntimeError):

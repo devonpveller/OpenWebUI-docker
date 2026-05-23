@@ -274,24 +274,24 @@ stop-point gate.
 
 ### 3b. `meta` process
 
-- [ ] Build `meta` as a separate process (design §3.2 sub-service seam preserved for later split)
-- [ ] **Single-flight lock** on `meta` iterations (design §12.5)
-- [ ] Triggered by **evidence thresholds**, not a clock
-- [ ] `meta` consumes journals via `iter_records` (the reader built in Chapter 1, never called from the agent path)
+- [x] Build `meta` as a separate process (design §3.2 sub-service seam preserved for later split) — `meta.MetaRunner` lives in its own module with a clean seam (it only sees `journals_dir`, `cohorts_dir`, and an injectable similarity function). Currently colocated with the daemon process; can be lifted to its own container in a later chapter without architectural rework
+- [x] **Single-flight lock** on `meta` iterations (design §12.5) — `MetaState._lock` is acquired non-blocking; a second trigger arriving mid-iteration returns `None` and is DROPPED (not queued). Tested with a parallel-threads case
+- [x] Triggered by **evidence thresholds**, not a clock — `meta.should_trigger(state, current_record_count, threshold)`. Threshold lives in `ObserverConfig.evidence_trigger_records` (default 5). No timer code in this module at all
+- [x] `meta` consumes journals via `iter_records` (the reader built in Chapter 1, never called from the agent path) — `cohorts._iter_journals` extends the live-segment-only reader to walk rotated segments too (necessary because clusters outlive a single segment); built on the same envelope-validation contract
 
 ### 3c. Cluster identity
 
-- [ ] Immutable synthetic `cluster_id` + mutable label (design §5.1)
-- [ ] Ingest-time assignment: nearest existing cluster above similarity floor; below floor → `unassigned` pool (design §5.2)
-- [ ] Judge mints new `cluster_id` only when `unassigned` forms a coherent group
-- [ ] Split/merge lineage records per design §5.3: parent↔child; `inherited` vs `observed` counts
-- [ ] Cohort scoping per `lang` + `task_shape` aggregated across repos (design §5.5)
+- [x] Immutable synthetic `cluster_id` + mutable label (design §5.1) — `clusters.Cluster` carries 16-char-hex id (`new_cluster_id()`), label + discriminator are mutable fields; cohort counters key on `cluster_id` so relabels never touch history
+- [x] Ingest-time assignment: nearest existing cluster above similarity floor; below floor → `unassigned` pool (design §5.2) — `clusters.assign` is a pure function; similarity is injectable so the data model unit-tests without an LLM, judge wires the real similarity in Stage 3
+- [ ] Judge mints new `cluster_id` only when `unassigned` forms a coherent group — Stage 3 work (judge integration)
+- [x] Split/merge lineage records per design §5.3: parent↔child; `inherited` vs `observed` counts — `clusters.SplitEvent` / `MergeEvent` data shapes; `cohorts.apply_split` / `apply_merge` enforce the don't-escalate-on-inherited rule (children's `observed` stays 0 on split)
+- [x] Cohort scoping per `lang` + `task_shape` aggregated across repos (design §5.5) — `clusters.assign` filters in-scope first, never cross-scope; `cohorts.UnassignedBucket` keyed by `(lang, task_shape)`; `ClusterCounters.per_repo_observed` for drill-down. Task shape inferred from per-task records via `task_shape.classify_records` (heuristic; judge refines later)
 
 ### 3d. Cohort store (derived index)
 
-- [ ] Cohort counters as event-sourced projection over journals (design §5.4)
-- [ ] Periodic checkpoint; **rebuildable from journals on demand**
-- [ ] `schema_version` on the cohort store; bump-and-rebuild on schema change
+- [x] Cohort counters as event-sourced projection over journals (design §5.4) — `cohorts.project` rolls records into the store; `cohorts.rebuild` re-derives from disk; the projection only emits occurrences from `error` records and `task_ended(fail)` (passing tasks produce zero cluster events). Walks all three journals (tool_calls included) because task_shape inference needs the full per-task trace
+- [x] Periodic checkpoint; **rebuildable from journals on demand** — `cohorts.checkpoint` writes atomically (`.tmp` + `rename(2)` per design §7.3); `cohorts.rebuild` is deterministic (test pins replay equivalence) and walks rotated segments via `_iter_journals`
+- [x] `schema_version` on the cohort store; bump-and-rebuild on schema change — `CohortStore.schema_version` enforced; `from_dict` refuses any newer-than-build version per design §12.9
 
 ### 3e. Judge prompt + sanitization promotion
 
@@ -556,6 +556,7 @@ These run alongside multiple chapters.
 | 2026-05-22 | 1       | **Open item #9 partially closed.** Two-layer hardening landed: (1) `core.hooksPath` set system-wide in the open-terminal image to `/etc/lc-git-hooks` (empty, 0555, baked in), so git's hook lookup never reads `.git/hooks/` — even if a hostile repo or residual bypass drops a script there. (2) A workspace-edge bash filter (`git_artifact_filter.py`) wired into `ot-exec` blocks the obvious direct-write bypasses to `.git/config|hooks/|info/` (redirects, `cp`/`mv`/`install`/`truncate`/`dd of=`, `sed -i`/`awk -i inplace`/`perl -i`) — symmetric with the git-proxy, same `git-proxy: DENIED` marker, journaled as `git_blocked`. 49 unit tests including three documented residual-gap shapes (`python -c`, base64, renamed util) that pass through. **Residual**: open-terminal still runs commands as root; full closure needs `CAP_DAC_OVERRIDE` dropped or a uid split, both bigger and deferred. Acceptable for friendly-upstream workload (current state); the residual gap is tracked on open item #9 and must close before any genuinely hostile-repo workload. | design §3.3, plan §11 (#9)           |
 | 2026-05-22 | 2       | **Pager hang fix (OWUI smoke).** The first real OWUI task (`what can you see in your workspace?`) drove the agent's founding-knowledge orientation pattern, and the first command — `git log -n 10` — hung forever, leaving the chat at "Agent working…" until the operator clicked Stop. Root cause: open-terminal's `/execute` endpoint hands commands a pseudo-tty that `less` rejects with "WARNING: terminal is not fully functional / Press RETURN to continue", then blocks on stdin that never arrives. Fix in `Dockerfile.open-terminal`: `git.real config --system core.pager cat` (system-wide; mirrors the existing `core.hooksPath` line) plus `PAGER=cat GIT_PAGER=cat MANPAGER=cat LESS=-FRX` env. Verified post-rebuild: `git log -n 5` returns `status: done` in 0.23s, all four founding-knowledge orientation commands (`git log` / `git status` / `ls` / `cat README.md`) return cleanly. No design/principle change — Chapter 2 stop-point bug surfaced exactly as the design predicted (operator smoke test catching real behavior). | design §3.4                          |
 | 2026-05-23 | 2→3     | **Chapter 2 closed; chapter 3 (Observer) opened.** Post-pager-fix the operator's prompt completed cleanly through the Pipe: task `01KS9E1APPV2KVPDWQGDW2FFDD` ran the founding-knowledge orientation (three bash calls, no probing of `cd`/`git`) and produced a coherent answer including the project-type-file shortcut from `project-context.md`. Journal envelope verified for both channels (cli + owui) — `channel`, `user_id`, `session_id`, `repo`, `lang`, `seq`, `schema_version` all present from line 1. Stop-point triggered by the operator's "let's move onto chapter 3" — exactly the qualitative signal the plan §6 names. Note: `lc-mcpo` OpenAPI registration in OWUI is still operator-pending (admin paste), but the Pipe path is the primary surface; mcpo is the alternate-trigger surface and gated by a known operator action, not chapter-3 work. | plan §6, design §13                  |
+| 2026-05-23 | 3       | **Observer Stages 1 + 2 landed: data foundations + iteration runner.** Three new modules — `task_shape.py` (heuristic per-task shape classifier, conservative `unknown` fallback per design §5.5), `clusters.py` (immutable `cluster_id`, mutable label, injectable similarity, split/merge lineage per §5.1–§5.3), `cohorts.py` (event-sourced projection over journals per §5.4; atomic-rename checkpoint, deterministic rebuild walking rotated segments; refuses newer-than-build schema_version per §12.9). Then `meta.py` (single-flight `MetaRunner` per §12.5, `should_trigger` evidence threshold per §3.2 — no clock code, `default_similarity` stub returns 0.0 so every occurrence lands in the unassigned pool until Stage 3 wires the judge). `config.ObserverConfig` added (disabled by default), JSON schema regenerated. 49 new tests; 232 passing total. Discovered + fixed: `rebuild()` must walk all three journals (including `tool_calls`) because `task_shape.classify_records` needs the full per-task trace — errors-only walks were producing `unknown` shape for what were really bugfix tasks. Stages 3 (judge prompt + sanitization promotion, LLM-in-the-loop) and 4 (operator surface — `lc admin observe` + `/observe` Pipe command) still to come. | design §3.2, §5, §12.5               |
 
 ---
 
