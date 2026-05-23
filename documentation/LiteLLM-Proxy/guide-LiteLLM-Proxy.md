@@ -574,6 +574,247 @@ caller appears in the ledger before moving on.
   start the ledger at cutover? (Operator value judgment — bulk import is
   doable but the IP-resolution is fuzzy for already-rotated containers.)
 
+## 15. Backpressure & queue feedback — capacity-planning signal
+
+A second-order motivation for the gateway: **measure how often the inference
+plane is genuinely saturated so capacity decisions ("do I need a second
+3090?") are evidence-driven rather than vibes-driven.** The OpenAI-compatible
+API contract has no native "you're in queue, position 3" response, so the
+honest options are bounded.
+
+### 15.1 What the OpenAI contract allows
+
+- `200 OK` (sync) / `200 OK` SSE stream
+- `429 Too Many Requests` with `Retry-After: <seconds>` header
+- `503 Service Unavailable`
+
+There is no `202 Accepted, queued` for chat completions. Anything that
+returns a synthetic "servers are busy" string inside a `200 OK` completion
+body will corrupt downstream parsers (entity-worker writes garbage to
+Postgres, OWUI displays it as the chat response). Do not do that.
+
+### 15.2 Adopted pattern
+
+**429 + `Retry-After`, driven by llama.cpp's `/slots` endpoint, plus per-key
+TPM/RPM limits.** Three knobs the gateway provides:
+
+1. **Slot-aware admission control** — a LiteLLM `async_pre_call_hook`
+   polls `http://llama-cpp:8080/slots` and `http://llama-cpp-embed:8080/slots`
+   (the same endpoints `little-coder` already queries via `metrics.poll_llama_slots`).
+   When every slot is busy, the hook short-circuits the request and returns
+   429 with `Retry-After: <estimate>`. Estimate = mean recent latency × queue
+   depth ahead of the caller, capped at the caller's existing timeout.
+2. **Per-key TPM/RPM caps** — set via `/key/update` on each virtual key.
+   Prevents `openbrain-entity-worker` (which today retries aggressively into
+   60s timeouts) from drowning `openwebui` interactive chat. Suggested
+   starting caps in §15.4.
+3. **Streaming SSE comments for OWUI** (optional, nice-to-have) — for the
+   one caller that streams to a human (OWUI chat), emit SSE comments like
+   `: queued, position 2` before the `data:` events start. OWUI's
+   streaming consumer renders these as in-progress UI; entity-worker and
+   other sync callers never see them.
+
+### 15.3 What the data unlocks — capacity-planning queries
+
+Every 429 is a Postgres row. With the spend-log schema in §6 plus the 429
+events, the OWUI pipe module (§9) gains views like:
+
+| Query | What it answers |
+|---|---|
+| `SELECT date_trunc('day', created_at), count(*) FROM "LiteLLM_SpendLogs" WHERE response_status = 429 GROUP BY 1` | "How often is the GPU genuinely saturated per day?" |
+| `SELECT api_key, count(*) FROM "LiteLLM_SpendLogs" WHERE response_status = 429 GROUP BY api_key ORDER BY 2 DESC` | "Which caller is hitting the wall most?" |
+| `SELECT extract(hour from created_at), count(*) FROM "LiteLLM_SpendLogs" WHERE response_status = 429 GROUP BY 1` | "Are saturation events clustered around predictable hours?" → suggests scheduling vs scale-up decision |
+| `SELECT model, percentile_cont(0.95) WITHIN GROUP (ORDER BY end_user_response_time_ms) FROM "LiteLLM_SpendLogs" WHERE created_at > now() - interval '7 days' GROUP BY 1` | "What's the p95 latency per model over the last week?" |
+| `SELECT date_trunc('week', created_at), sum(total_tokens) FROM "LiteLLM_SpendLogs" GROUP BY 1` | Weekly token-volume trend → demand growth curve |
+
+The pipe-module trigger `llm demand last month`, `llm saturation`, or
+`scale signal` materializes these as markdown tables in OWUI.
+
+### 15.4 Recommended starting caps
+
+To be tuned after a week of baseline data — these are intentionally
+conservative to absorb the first cycle of real load without surprise:
+
+| Virtual key | RPM cap | TPM cap | Notes |
+|---|---|---|---|
+| `sk-owui-chat` | 60 | 200_000 | Human-interactive, lowest-latency priority |
+| `sk-owui-embed` | 120 | 400_000 | Embeddings are short; high RPM, modest TPM |
+| `sk-lc-coder` | 30 | 150_000 | Inner-loop drafting; bursty but bounded by queue depth |
+| `sk-ob-entity` | 20 | 100_000 | The current heavy hitter; intentionally throttled below interactive caps to prevent starvation |
+| `sk-ob-wiki` | 10 | 80_000 | Scheduled at 01:00 — bursts to the wall by design; cap protects the rest of the day |
+| `sk-ob-mcp` | 30 | 80_000 | Sporadic tool calls |
+| `sk-mnemory` | 30 | 80_000 | Low volume, mixed chat + embed |
+
+Caps live in the gateway's Postgres alongside the keys — adjustable via
+`/key/update` without restarting anything. The pipe module exposes a `llm
+caps` trigger that prints the current values so an operator can spot drift.
+
+### 15.5 Caller-side compliance check
+
+For the 429 + `Retry-After` pattern to actually work, callers must honor the
+header. Audit per caller:
+
+| Caller | HTTP client | Honors `Retry-After`? | Action |
+|---|---|---|---|
+| `openbrain-entity-worker` | Deno `fetch` | No (Deno fetch doesn't auto-retry) | Add manual retry-with-backoff loop in the worker — small upstream patch |
+| `openbrain-wiki` | Node SDK (`openai` / `@anthropic-ai/sdk`?) | TBD — verify in `wiki-service` source | Patch if missing |
+| `openbrain-mcp` | TBD | TBD | Verify |
+| `mnemory` | Python `openai`-style client (per `LLM_API_KEY=ollama` pattern) | The official OpenAI Python SDK ≥1.0 honors `Retry-After` natively | No change |
+| `little-coder` | pi CLI's internal client | TBD — verify in upstream | Patch if missing |
+| `openwebui` | Internal aiohttp / openai-python | Honors via SDK | No change |
+| `filters/githelper-pipe.py` (OWUI filter) | `requests` | No (requests doesn't auto-retry) | Add wrapper in the pipe |
+
+Compliance gaps are listed as deferred tasks in the plan document — they
+don't block phase 1, because LiteLLM will still log every 429 and the data
+remains useful even if non-compliant callers ignore the header.
+
+## 16. Comprehensive audit — every file touched
+
+Every file in the workspace that mentions `llama-cpp` or `llama-cpp-embed`
+was inventoried (36 files total). They sort into six categories below. The
+plan document derived from this guide must walk each category in order.
+
+### 16.1 Category A — direct API callers (MUST change)
+
+These are the only files where inference traffic is actually emitted. Every
+line listed is a target for the §8.1 substitution rules.
+
+| File | Lines | Field | Current | After |
+|---|---|---|---|---|
+| [docker-compose.yml:295-299](docker-compose.yml#L295) | 295 / 296 / 298 / 299 | `mnemory.environment` block | `LLM_API_KEY=ollama`, `LLM_BASE_URL=http://llama-cpp:8080/v1`, `EMBED_BASE_URL=http://llama-cpp-embed:8080/v1`, `EMBED_MODEL=qllama/bge-m3:latest` | LiteLLM key + `http://llm-gateway:4000/v1` ×2 + `EMBED_MODEL=bge-m3` |
+| [docker-compose.yml:313-316](docker-compose.yml#L313) | 313 / 315 | `mnemory.depends_on` | `llama-cpp` + `llama-cpp-embed` | `llm-gateway` |
+| [OB1/docker/docker-compose.yml:57-63](OB1/docker/docker-compose.yml#L57) | 57 / 58 / 61 / 62 | `openbrain-mcp.environment` | chat/embed base + `not-needed` keys | gateway URL + `${LITELLM_KEY_OB_MCP}` |
+| [OB1/docker/docker-compose.yml:224-230](OB1/docker/docker-compose.yml#L224) | 224 / 225 / 228 / 229 | `openbrain-entity-worker.environment` | identical | gateway URL + `${LITELLM_KEY_OB_ENTITY}` |
+| [OB1/docker/docker-compose.yml:261-266](OB1/docker/docker-compose.yml#L261) | 261 / 262 / 264 / 265 | `openbrain-wiki.environment` | `LLM_BASE_URL`, `LLM_API_KEY`, `EMBEDDING_BASE_URL`, `EMBEDDING_API_KEY` | gateway URL + `${LITELLM_KEY_OB_WIKI}` |
+| [little-coder/config/little-coder.config.yaml:11](little-coder/config/little-coder.config.yaml#L11) | 11 | `inference.base_url` | `http://llama-cpp:8080/v1` | `http://llm-gateway:4000/v1` |
+| [little-coder/config/models.json:6](little-coder/config/models.json#L6) | 6 | `models[].baseUrl` | `http://llama-cpp:8080/v1` | `http://llm-gateway:4000/v1` |
+| [little-coder/config/little-coder.schema.json:102](little-coder/config/little-coder.schema.json#L102) | 102 / 116 | `inference.base_url.default`, embeddings default | `http://llama-cpp:8080/v1`, `http://llama-cpp-embed:8080/v1` | gateway defaults |
+| [docker-compose.yml:716](docker-compose.yml#L716) | 716 | `little-coder.depends_on` | `llama-cpp` | `llm-gateway` |
+
+### 16.2 Category B — OWUI filter pipes with hardcoded base URL (MUST change)
+
+These are Python files loaded into OWUI as filter pipes (Admin → Functions).
+The `TARGET_BASE_URL` Valve is overridable per-deployment in the OWUI UI,
+but the file default is hardcoded and ships into new pipe instances.
+
+| File | Lines | Field | Note |
+|---|---|---|---|
+| [filters/githelper-pipe.py:117-118](filters/githelper-pipe.py#L117) | 117-118 | `Valves.TARGET_BASE_URL` default | Change default to `http://llm-gateway:4000/v1`. Operator should also update any already-deployed instance via OWUI Admin → Functions → githelper → Valves. Will need a virtual key here too — issue `sk-owui-githelper` if this filter sees real traffic. |
+| [filters/githelper-pipe-v1-backup.py:94-95](filters/githelper-pipe-v1-backup.py#L94) | 94-95 | same as above (historical backup) | **Leave as-is** — backup files preserve prior state. Document the divergence. |
+
+### 16.3 Category C — OWUI runtime configuration (UI step, no code change)
+
+OWUI's chat + embedding endpoints are stored in `openwebui-data` (the OWUI
+SQLite/Postgres DB), not in compose env. Cutover is via Admin UI. Restated
+from §8.2 for audit completeness:
+
+- Admin → Settings → Connections → OpenAI API → base URL + key
+- Admin → Settings → Documents → Embedding base URL + key
+
+`open_notebook` has the same UI-driven pattern; operator action when ready.
+
+### 16.4 Category D — tailscale serve registration (DECISION NEEDED)
+
+The current entrypoint script provisions tailnet-served paths
+(`/llama-cpp`, `/llama-cpp-embed`) so off-host clients can reach inference
+over Tailscale. After the gateway, the question is: do off-host clients
+talk to the gateway too (so virtual keys + spend tracking apply) or do
+they keep hitting llama-cpp directly?
+
+| File | Lines | What it does |
+|---|---|---|
+| [entrypoint.sh:229-297](entrypoint.sh#L229) | 229-297 | First-pass setup of `/llama-cpp` tailnet path + socat proxy |
+| [entrypoint.sh:300-366](entrypoint.sh#L300) | 300-366 | Same for `/llama-cpp-embed` |
+| [entrypoint.sh:488-491, 843-846](entrypoint.sh#L488) | several | URL announcement in setup banner |
+| [entrypoint.sh:531-558, 626-653, 737-748, 797-808](entrypoint.sh#L531) | several | Deferred setup + reconnection re-setup loops |
+| [docker-compose.yml:104-109](docker-compose.yml#L104) | 104-109 | `tailscale.environment` — `LLAMA_CPP_HOST` / `LLAMA_CPP_PORT` / enabled flags |
+| [scripts/ai_pipes/tailscale_serve_pipe.py:73-94](scripts/ai_pipes/tailscale_serve_pipe.py#L73) | 73-94 | Service registry for tailnet-served services |
+| [scripts/ai_pipes/tailscale_serve_pipe.py:139,361,380-395,432-433,587-593](scripts/ai_pipes/tailscale_serve_pipe.py#L139) | scattered | Help text, registry duplicates |
+
+**Recommendation:** add a `/llm-gateway` tailnet path **in addition to** the
+existing ones — don't remove the direct llama-cpp paths yet. Off-host
+clients (Claude Code on a second machine, Codex, etc.) migrate to the
+gateway path opportunistically; the direct paths remain for emergency
+debugging and for clients that need to bypass the gateway. Phase 2 can
+deprecate the direct paths once nothing legitimate uses them.
+
+Changes implied: add `llm-gateway` block to `tailscale_serve_pipe.py`
+registry; add `LLM_GATEWAY_*` env vars to `tailscale` service in compose;
+add a corresponding `setup_llm_gateway_serve` function in `entrypoint.sh`
+mirroring the existing pair.
+
+### 16.5 Category E — recovery / health / smoke scripts (MUST add to inventory; do NOT redirect existing checks)
+
+These scripts probe inference plane health directly so they can detect
+inference-plane failures independent of the gateway. The existing
+llama-cpp references stay; the new `llm-gateway` + `llm-gateway-db` are
+**added** to the inventory and the startup/shutdown ordering.
+
+| File | Existing llama-cpp refs (preserve) | Additions needed |
+|---|---|---|
+| [scripts/emergency-recovery.ps1:30](scripts/emergency-recovery.ps1#L30) | line 30 `MainStackServices`; lines 177-178, 202-203, 261, 428-432, 472-493, 626-627, 745, 754-792 (startup/shutdown/probes) | Add `"llm-gateway", "llm-gateway-db", "llm-gateway-backup"` to `MainStackServices`; insert startup between `llama-cpp-embed` healthy and the consumer planes (mnemory, openwebui, OB1); insert shutdown as the inverse |
+| [scripts/emergency-recovery.bat:6](scripts/emergency-recovery.bat#L6) | line 6 header; lines 39-42, 120-124, 156-167, 243, 261-266, 354-359 | Mirror the .ps1 additions linearly |
+| [scripts/quick-fixes.bat:20](scripts/quick-fixes.bat#L20) | lines 20, 43, 226, 238-292, 310, 347-354, 387-392, 505-543, 693-729 | Add `llm-gateway` to menu option 11; new probe + restart helpers paralleling the llama-cpp pair |
+| [scripts/check-tailscale-health.ps1:158](scripts/check-tailscale-health.ps1#L158) | lines 158-228 (OpenWebUI↔llama-cpp connectivity recovery), 364-470, 640-671 (test/repair functions) | Optional: add a `Test-LlmGatewayConnectivity` function + `Repair-LlmGateway`. Non-blocking — the gateway has its own healthcheck. |
+| [scripts/gpu_check.py:116](scripts/gpu_check.py#L116) | lines 116-167 (llama-cpp probes inside `docker compose exec`), 216-275 | No change — probes inference plane directly, which is correct |
+| [scripts/update-stack.bat:10](scripts/update-stack.bat#L10) | lines 10, 23-24, 49-50, 73-296, 348-502 (update flow for llama-cpp image) | Add an `llm-gateway` update menu item — LiteLLM updates separately from llama-cpp |
+| [scripts/status_check.py](scripts/status_check.py) | (file checked separately) | Add `llm-gateway` row to whatever service table it prints |
+| [modules/system-health/service/system_health.py:38-39](modules/system-health/service/system_health.py#L38) | lines 38-39 probe definitions, line 93 `expected_services`, line 266 narrative | Add probe row: `{"name": "llm-gateway", "plane": "Core", "host": "llm-gateway", "port": 4000, "path": "/health/liveliness", "critical": True}`. Add `"llm-gateway"` to `expected_services`. |
+| [modules/gpu-status/service/gpu_status.py:239-318](modules/gpu-status/service/gpu_status.py#L239) | lines 239-240 container→GPU mapping, lines 315-318 hostname mapping | No change — gateway has no GPU; metric reads stay against the inference servers |
+| [scripts/ai_pipes/unified_openwebui_pipe.py:302](scripts/ai_pipes/unified_openwebui_pipe.py#L302) | `_format_response()` module-id allowlist | Add `"llm-traffic"` to the allowlist (§9.4). Update the COMMAND LIST docstring header per §9.1. |
+
+### 16.6 Category F — documentation (MUST update; semantic, not mechanical)
+
+These files describe the stack and will read incorrectly after the gateway
+lands. The plan document will sequence these — most can wait until after
+phase 1 cutover so they describe the post-state in one pass.
+
+| File | Lines | What needs to change |
+|---|---|---|
+| [CLAUDE.md:15](CLAUDE.md#L15), [CLAUDE.md:20](CLAUDE.md#L20) | 15, 20 | Add `llm-gateway` to the "core" plane listing in the stacks-at-a-glance table; mention the gateway in the OB1 bring-up dependency note |
+| [.claude/skills/stack-map/SKILL.md:75](.claude/skills/stack-map/SKILL.md#L75) | 75 | Add `llm-gateway`, `llm-gateway-db` to the "Main · core" listing |
+| [.claude/skills/stack-map/references/workspace-stacks.md:21](.claude/skills/stack-map/references/workspace-stacks.md#L21) | 21, 33-34, 85-86, 93, 137 | New core-plane rows; updated cross-stack dependency order (`llm-gateway-db → llm-gateway` between step 2 and step 3); volume `llm-gateway-db-data` |
+| [.github/copilot-instructions.md:37-38](.github/copilot-instructions.md#L37) | 37-38 | Add `llm-gateway ← (all callers)` arrow above the existing llama-cpp arrows in the ASCII dependency diagram |
+| [documentation/little-coder/Self-improving-little-coder-design.md:47,78,120,124,391,401,535](documentation/little-coder/Self-improving-little-coder-design.md#L47) | scattered | Update the design narrative — "little-coder talks to llama-cpp" becomes "little-coder talks to the gateway, which routes to llama-cpp"; slot-occupancy gating still polls `/slots` directly (§15.2) |
+| [documentation/little-coder/integration-plan.md:41,106,114,138,280](documentation/little-coder/integration-plan.md#L41) | scattered | Same recasting |
+| [documentation/little-coder/integration-tasks.md:58,85,88,183,398,568,581](documentation/little-coder/integration-tasks.md#L58) | scattered | Update the "verified working" notes — the verification needs to be re-done post-cutover and the verification target shifts to the gateway |
+| [documentation/Systems-of-structured-data/INTEGRATION-PLAN.md:45,56,94,118,157,193](documentation/Systems-of-structured-data/INTEGRATION-PLAN.md#L45) | scattered | OB1 integration plan — `LLM_BASE_URL→llama-cpp` becomes `→llm-gateway` |
+| [documentation/Systems-of-structured-data/INTEGRATION-TASKS.md:14,30,52,85,133,148,162,172](documentation/Systems-of-structured-data/INTEGRATION-TASKS.md#L14) | scattered | Same recasting |
+| [documentation/implementation-guide/open-source authentication front ends for ai stack/plan-internet-exposed-front-end.md:94,196,1147,1452](documentation/implementation-guide/open-source%20authentication%20front%20ends%20for%20ai%20stack/plan-internet-exposed-front-end.md#L94) | scattered | Security audit doc: `llm-gateway` joins the "must NOT be internet-exposed" list alongside llama-cpp |
+| [scripts/ai_pipes/unified_openwebui_pipe.py:36,61-62,86](scripts/ai_pipes/unified_openwebui_pipe.py#L36) | header docstring | Add `llm-gateway`, `llm-gateway-db` to the core-services line in the COMMAND LIST docstring (separate from the §9.4 code change) |
+
+### 16.7 Category G — not-actually-callers (verify-only, no change)
+
+Listed for audit completeness so a future maintainer doesn't mistakenly
+edit them. These mention llama-cpp as a string but don't talk to it.
+
+| File | Lines | Why no change |
+|---|---|---|
+| [.env.example:11,72,124](.env.example#L11) | 11, 72, 124 | Comment headers; `LC_LLAMA_API_KEY` env (kept; populated with virtual key after cutover) |
+| [docker-compose.yml:144,155-156,684,832](docker-compose.yml#L144) | 144 / 155-156 / 684 / 832 | Network comments, open-terminal `NO_PROXY` (proxies internal addresses — adding `llm-gateway` here is optional; the agent doesn't egress) |
+| [docker-compose.yml:174](docker-compose.yml#L174) | 174 | Disabled `ollama` block comment |
+| [config/llama-swap.config.yaml:3](config/llama-swap.config.yaml#L3) | 3 | llama-swap's own config — upstream of LiteLLM, unchanged |
+| [little-coder/src/littlecoder/agent.py:183](little-coder/src/littlecoder/agent.py#L183) | 183 | Inline comment in agent code |
+| [little-coder/tests/test_similarity.py:6](little-coder/tests/test_similarity.py#L6) | 6 | Comment in a test docstring |
+| [filters/githelper-pipe.py:450](filters/githelper-pipe.py#L450) | 450 | Inline comment about Qwen3 thinking — not a URL |
+
+### 16.8 Summary counts
+
+| Category | Files | Action |
+|---|---|---|
+| A — direct API callers | 9 (5 compose entries + 4 little-coder files) | Code change required |
+| B — OWUI filter pipes | 1 (+ 1 backup) | Code change required; backup left as-is |
+| C — OWUI runtime UI | 1 (OWUI) + 1 (open_notebook) | Admin-UI step |
+| D — tailscale serve | 3 (entrypoint.sh, compose, pipe) | Decision needed; optional addition |
+| E — recovery / probes | 10 | Additive changes (inventory + probes for the new services) |
+| F — documentation | 9 (CLAUDE.md, skills, design docs, integration docs, security doc) | Semantic rewrites, post-cutover |
+| G — verify-only | 7 | No change |
+| **Total touched files** | **36** (some span multiple categories) | |
+
+The plan document derived from this guide will sequence these as: A → B
+→ E (so the new services exist and are probed) → C (UI flip) → §15 caps
+applied → F (docs catch up). Category D is parallel and optional.
+
 ---
 
 **Next document** (to be generated from this guide):
