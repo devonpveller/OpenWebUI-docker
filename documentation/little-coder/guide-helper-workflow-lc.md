@@ -18,32 +18,32 @@ Run top to bottom. The **ID** column matches the detailed section headings
 below (`A1`, `B3`, …) — jump down there only when you need the full
 explanation, then use the **↑ Back to chart** link to return here.
 
-| ID | What | Command(s) — copy the line you need |
-| -- | ---- | ----------------------------------- |
-| [**A1**](#a1-open-command-prompt-in-the-project-folder) | Open cmd in the project | `cd /d "D:\Open WebUI\ai-stack"` |
-| [**A2**](#a2-private-repos-only-add-your-github-token) | Token for private repos | `notepad .env` — then set `LC_DEPLOY_TOKEN=github_pat_...` |
-| [**A3**](#a3-non-github-host-only-add-your-git-host-to-the-egress-allowlist) | Non-GitHub host (else skip) | `notepad little-coder\docker\egress-allowlist.txt`<br>`docker compose build lc-egress`<br>`docker compose up -d lc-egress` |
-| [**A4**](#a4-build-the-images-and-start-the-services) | Build + start the stack | `docker compose build little-coder open-terminal lc-egress`<br>`docker compose up -d` |
-| [**A5**](#a5-confirm-everything-is-healthy) | Verify healthy | `docker compose ps`<br>`docker exec little-coder lc status` |
-| [**B1**](#b1-check-the-stack-and-current-focus) | Check status / focus | `docker exec little-coder lc status` |
-| [**B2**](#b2-point-little-coder-at-the-repo-you-want-to-work-on) | Pick the repo | `docker exec little-coder lc project https://github.com/OWNER/REPO` |
-| [**B3**](#b3-start-an-interactive-agent-session) | Start the agent session | `docker exec -it -u lc -w /workspace little-coder little-coder --model llamacpp/qwen36-27b` |
-| [**B4**](#b4-work-with-the-agent) | Work with the agent | In-session: tell it to **create a branch** and to **commit**. Exit with **Ctrl+C**. |
-| [**B5**](#b5-review-the-agents-work) | Review the work | `docker exec -w /workspace open-terminal git.real branch --show-current`<br>`docker exec -w /workspace open-terminal git.real log --oneline -10` |
-| [**B6**](#b6-push-when-youre-satisfied) | Push (replace `BRANCH`) | `docker exec -it -w /workspace open-terminal git.real push origin BRANCH` |
-| [**B7**](#b7-continue-or-switch) | Loop | Same repo → [**B3**](#b3-start-an-interactive-agent-session) · New repo → [**B2**](#b2-point-little-coder-at-the-repo-you-want-to-work-on) |
+| ID                                                                           | What                        | Command(s) — copy the line you need                                                                                                              |
+| ---------------------------------------------------------------------------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| [**A1**](#a1-open-command-prompt-in-the-project-folder)                      | Open cmd in the project     | `cd /d "D:\Open WebUI\ai-stack"`                                                                                                                 |
+| [**A2**](#a2-private-repos-only-add-your-github-token)                       | Token for private repos     | `notepad .env` — then set `LC_DEPLOY_TOKEN=github_pat_...`                                                                                       |
+| [**A3**](#a3-non-github-host-only-add-your-git-host-to-the-egress-allowlist) | Non-GitHub host (else skip) | `notepad little-coder\docker\egress-allowlist.txt`<br>`docker compose build lc-egress`<br>`docker compose up -d lc-egress`                       |
+| [**A4**](#a4-build-the-images-and-start-the-services)                        | Build + start the stack     | `docker compose build little-coder open-terminal lc-egress`<br>`docker compose up -d`                                                            |
+| [**A5**](#a5-confirm-everything-is-healthy)                                  | Verify healthy              | `docker compose ps`<br>`docker exec little-coder lc status`                                                                                      |
+| [**B1**](#b1-check-the-stack-and-current-focus)                              | Check status / focus        | `docker exec little-coder lc status`                                                                                                             |
+| [**B2**](#b2-point-little-coder-at-the-repo-you-want-to-work-on)             | Pick the repo               | `docker exec little-coder lc project https://github.com/OWNER/REPO`                                                                              |
+| [**B3**](#b3-start-an-interactive-agent-session)                             | Start the agent session     | `docker exec -it -u lc -w /workspace little-coder little-coder --model llamacpp/qwen36-27b`                                                      |
+| [**B4**](#b4-work-with-the-agent)                                            | Work with the agent         | In-session: tell it to **create a branch** and to **commit**. Exit with **Ctrl+C**.                                                              |
+| [**B5**](#b5-review-the-agents-work)                                         | Review the work             | `docker exec -w /workspace open-terminal git.real branch --show-current`<br>`docker exec -w /workspace open-terminal git.real log --oneline -10` |
+| [**B6**](#b6-push-when-youre-satisfied)                                      | Push (replace `BRANCH`)     | `docker exec -it -w /workspace open-terminal git.real push origin BRANCH`                                                                        |
+| [**B7**](#b7-continue-or-switch)                                             | Loop                        | Same repo → [**B3**](#b3-start-an-interactive-agent-session) · New repo → [**B2**](#b2-point-little-coder-at-the-repo-you-want-to-work-on)       |
 
 ---
 
 ## The pieces (30-second orientation)
 
-| Name | What it is |
-| ---- | ---------- |
-| **`little-coder`** (container) | Runs the AI coding agent + the control daemon. |
-| **`little-coder`** (command) | The AI coding agent itself — you chat with it. |
-| **`lc`** (command) | The operator wrapper — pick a repo, check status, fire tracked tasks. |
-| **`open-terminal`** (container) | Where the agent's commands actually run (network-isolated). |
-| **workspace** | One git repo at a time, cloned inside the stack. The agent only ever works here. |
+| Name                            | What it is                                                                       |
+| ------------------------------- | -------------------------------------------------------------------------------- |
+| **`little-coder`** (container)  | Runs the AI coding agent + the control daemon.                                   |
+| **`little-coder`** (command)    | The AI coding agent itself — you chat with it.                                   |
+| **`lc`** (command)              | The operator wrapper — pick a repo, check status, fire tracked tasks.            |
+| **`open-terminal`** (container) | Where the agent's commands actually run (network-isolated).                      |
+| **workspace**                   | One git repo at a time, cloned inside the stack. The agent only ever works here. |
 
 **The flow:** pick a repo with `lc project` → chat with `little-coder` → review → push.
 
@@ -111,7 +111,7 @@ docker compose build little-coder open-terminal lc-egress
 ```
 
 ```
-docker compose up -d
+docker compose up -d little-coder
 ```
 
 <sub>[↑ Back to chart](#toc)</sub>
@@ -279,16 +279,16 @@ docker exec -it little-coder lc task "describe the change you want"
 
 ## Troubleshooting
 
-| Symptom | Fix |
-| ------- | --- |
-| `409: no project focused` | Run **B2** (`lc project ...`) first. |
+| Symptom                                                | Fix                                                                                        |
+| ------------------------------------------------------ | ------------------------------------------------------------------------------------------ |
+| `409: no project focused`                              | Run **B2** (`lc project ...`) first.                                                       |
 | `lc: error: the following arguments are required: cmd` | You ran `lc` with no subcommand — add one (`status`, `project`, `task`, `tasks`, `admin`). |
-| Push asks for a password / fails auth | Token missing — redo **A2**, then `docker compose up -d little-coder`. |
-| Private repo won't clone | Same as above — the token must be set before `lc project`. |
-| Agent seems stuck / looping | Stop it: `docker kill little-coder` then `docker compose up -d little-coder lc-mcpo`. |
-| See what the daemon is doing | `docker logs little-coder --tail 50` |
-| A service isn't healthy | `docker compose ps` then `docker logs SERVICE --tail 50` |
-| Restart everything cleanly | `docker compose up -d` (from the project folder) |
+| Push asks for a password / fails auth                  | Token missing — redo **A2**, then `docker compose up -d little-coder`.                     |
+| Private repo won't clone                               | Same as above — the token must be set before `lc project`.                                 |
+| Agent seems stuck / looping                            | Stop it: `docker kill little-coder` then `docker compose up -d little-coder lc-mcpo`.      |
+| See what the daemon is doing                           | `docker logs little-coder --tail 50`                                                       |
+| A service isn't healthy                                | `docker compose ps` then `docker logs SERVICE --tail 50`                                   |
+| Restart everything cleanly                             | `docker compose up -d` (from the project folder)                                           |
 
 <sub>[↑ Back to chart](#toc)</sub>
 
@@ -317,10 +317,10 @@ or add them to a cmd startup script.)
 
 ## What needs credentials (and what doesn't)
 
-| Action | Credential? |
-| ------ | ----------- |
-| Agent edits / reads / writes files | No |
-| Agent runs builds, tests, `git commit` | No — commits are local |
+| Action                                              | Credential?                              |
+| --------------------------------------------------- | ---------------------------------------- |
+| Agent edits / reads / writes files                  | No                                       |
+| Agent runs builds, tests, `git commit`              | No — commits are local                   |
 | Cloning a **private** repo, `git push`, `git fetch` | Yes — the `LC_DEPLOY_TOKEN` from step A2 |
 
 The token is least-privilege (one repo, contents-only) by design — see
