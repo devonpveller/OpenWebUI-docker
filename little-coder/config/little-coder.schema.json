@@ -150,6 +150,34 @@
       "title": "MetricsConfig",
       "type": "object"
     },
+    "ObserverConfig": {
+      "additionalProperties": false,
+      "description": "The `meta` outer loop in read-only mode (design \u00a73.2, \u00a75, Chapter 3).\n\nObserver reads journals, surfaces clustered patterns, and writes\nNOTHING to the skill library (Learner adds drafting in Chapter 4).\nDisabled by default so a stale Observer build can't run automatically\non a fresh deployment that hasn't fed it real journals yet.",
+      "properties": {
+        "enabled": {
+          "default": false,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "evidence_trigger_records": {
+          "default": 5,
+          "title": "Evidence Trigger Records",
+          "type": "integer"
+        },
+        "similarity_floor": {
+          "default": 0.7,
+          "title": "Similarity Floor",
+          "type": "number"
+        },
+        "store_filename": {
+          "default": "cohort-store.json",
+          "title": "Store Filename",
+          "type": "string"
+        }
+      },
+      "title": "ObserverConfig",
+      "type": "object"
+    },
     "PathsConfig": {
       "additionalProperties": false,
       "description": "Named-volume mount points. Declared in Tool, populated from Observer+.",
@@ -277,6 +305,9 @@
     },
     "metrics": {
       "$ref": "#/$defs/MetricsConfig"
+    },
+    "observer": {
+      "$ref": "#/$defs/ObserverConfig"
     },
     "paths": {
       "$ref": "#/$defs/PathsConfig"
