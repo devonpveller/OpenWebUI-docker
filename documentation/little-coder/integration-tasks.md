@@ -8,7 +8,7 @@
 
 ## Current state
 
-- **Active chapter:** 2 (OWUI pipeline) — chapter 1 (Tool) built, deployed, tested, and operator-accepted (2026-05-22). Chapter 2 in progress; see the Chapter 2 section.
+- **Active chapter:** 3 (Observer) — chapter 2 (OWUI pipeline) closed 2026-05-23 after the pager-hang fix unblocked the operator smoke test (Decision Log 2026-05-23). Chapter 1 (Tool) built, deployed, tested, and operator-accepted (2026-05-22). Chapter 3 not yet started; see the Chapter 3 section.
 - **Build sequence:** five chapters, gated by operator judgment (plan §2). One chapter at a time.
 - **Tier-0 build reminder:** `session_id` + `channel` + `user_id` on every journal line from line 1. Unrecoverable retroactively (design §4.1).
 - **Tool ships the open-terminal network change.** OWUI's direct access to open-terminal ends; it returns in chapter 2 via `lc-mcpo`.
@@ -192,12 +192,12 @@ your git host to `little-coder/docker/egress-allowlist.txt`.
 
 Tool is "done" when:
 
-- [ ] Daily flow feels stable; no new bugs in the basic pipeline — _operator judgment over time_
+- [x] Daily flow feels stable; no new bugs in the basic pipeline — operator-confirmed across CLI + OWUI runtime; only regression caught was the pager-hang, fixed 2026-05-23 (Decision Log)
 - [x] Journals are accumulating with the full envelope; no fields missing — verified on the first tasks
 - [x] `audit.jsonl` records every project switch + shutdown — verified
 - [x] Volumes survive at least one intentional `docker compose up -d --build` rebuild — verified
-- [ ] Sanitization rejection rate (shadow mode) has a stable baseline — _needs accumulated runtime_
-- [ ] **You find yourself wanting to drive little-coder from chat as well as CLI** — this is the actual trigger to advance
+- [-] Sanitization rejection rate (shadow mode) has a stable baseline — **stop-point item was design-impossible**: per design §10.2 the filter runs on outbound, and Tool/OWUI has no outbound (no judge, no PR). Confirmed: `lc_sanitization_processed = 0` at chapter-2 close. The baseline forms when judge calls begin in Chapter 3 (Observer); tracked at open item #5
+- [x] **You find yourself wanting to drive little-coder from chat as well as CLI** — operator triggered the advance to OWUI on 2026-05-22 (Decision Log)
 
 Stop here as long as needed. Advance only when ready.
 
@@ -233,7 +233,7 @@ Legend: `[x]` done · `[~]` built, needs the in-OWUI smoke test · `[ ]` not don
   - [x] `/reject <id>` (501 stub until chapter 4)
   - [x] `/confirm <task_id> pass|fail`
 - [x] Privilege separation per design §12.6: operator slash-commands gated by the OWUI user role inside the Pipe; `lc-mcpo` exposes only `trigger_task`/`task_status`/`project_focus` — no operator surface
-- [ ] Operator smoke test: drive a task end-to-end via OWUI; verify the journal records `channel = owui`, `user_id = <OWUI user>`
+- [x] Operator smoke test: drive a task end-to-end via OWUI; verify the journal records `channel = owui`, `user_id = <OWUI user>` — **verified 2026-05-23 post-pager-fix**: task `01KS9E1APPV2KVPDWQGDW2FFDD` (prompt: "what can you see in your workspace?") completed in 26s with `channel=owui`, `user_id=yamaoka01@gmail.com`, 3 successful bash tool calls, `outcome=unverified`. Full envelope (`session_id`, `repo`, `lang`, `seq`, `schema_version`) present on every record
 
 > **Statelessness note (plan §3):** the Pipe sends only the latest user message (`_last_user_text`); earlier turns in the same chat are not passed. "refactor X" then "now also do Y" runs the second task fresh — it sees the workspace as X left it (filesystem + git), not the intent behind X. This is the intended boundary; journal-backed episodic memory is open item #10, not built.
 
@@ -250,14 +250,14 @@ stop-point gate.
 - [x] `agent-knowledge/README.md` — documents the layer + its relationship to the §7 skill library; enumerates the three files and the load order (environment → project-context → engineering-principles)
 - [x] Wired through `config/little-coder.config.yaml` → `agent.extra_args` → three `--append-system-prompt` flags; baked into the agent image (`Dockerfile.agent` `COPY agent-knowledge`)
 - [x] Deployed and live — `environment.md` + `engineering-principles.md` deployed 2026-05-22; `project-context.md` added 2026-05-22, image rebuilt + container recreated the same day, verified present in `/app/agent-knowledge/` inside the running container, focus preserved across the rebuild
-- [ ] Operator-verified in a task: the agent no longer probes `cd` / `git` to rediscover its environment, AND uses the four-command orientation pattern (one `git log`, one `git status`, one `ls`, one `cat README.md`) then stops — instead of cat-ing every file or running redundant probes — _needs the next OWUI task_
-- [ ] **`engineering-principles.md` SOLID/code-craft content is the instruction half of a pair** — the measurement half is the §9.1 longitudinal track (Chapter 4 §4h). When authoring principles, keep them phrased so the longitudinal metrics (complexity, fan-out, churn) can later detect decay against them. No build action in Chapter 2 beyond awareness; the link is wired in Chapter 4.
+- [x] Operator-verified in a task: the agent no longer probes `cd` / `git` to rediscover its environment, AND uses the four-command orientation pattern — **verified on the 2026-05-23 smoke task**: agent ran exactly `git log --oneline -n 10` + `git status -sb` + `ls -la` (skipped `cat README.md` because `ls` already revealed contents — acceptable optimization on a trivial repo), produced a coherent answer, **and** noted the absence of `package.json`/`pyproject.toml`/`Cargo.toml` — i.e. it followed the `project-context.md` project-type-file shortcut. No `cd`, no `find /`, no mid-task re-orient
+- [x] **`engineering-principles.md` SOLID/code-craft content is the instruction half of a pair** — the file is phrased so each principle is structurally measurable (function length, parameters, fan-out, churn, dependency direction), giving the §9.1 longitudinal track concrete shapes to detect decay against (verified 2026-05-23 at chapter close). The Chapter-2 awareness half is done; the Chapter-4 wiring half tracks at §4h below.
 
 ### Chapter 2 stop point (→ 3)
 
-- [ ] OWUI parity confirmed; journals attributing both channels correctly
-- [ ] Multi-channel journal volume accumulating
-- [ ] **You're curious what patterns the system would see in the journals** — trigger to advance
+- [x] OWUI parity confirmed; journals attributing both channels correctly — `owui` and `cli` channel records both verified in `outcomes.jsonl` / `tool_calls.jsonl` (2026-05-23)
+- [x] Multi-channel journal volume accumulating — 121 lines across the four journals at chapter close (53 outcomes, 48 tool_calls, 15 audit, 5 errors)
+- [x] **You're curious what patterns the system would see in the journals** — operator triggered the advance to chapter 3 on 2026-05-23 ("if we've completed chapter 2, then lets move onto chapter 3")
 
 ---
 
@@ -555,6 +555,7 @@ These run alongside multiple chapters.
 | 2026-05-22 | 2       | **Third founding-knowledge file added: `project-context.md`.** Operator feedback ("journaling/context continuity saves a lot of tokens on each agent engagement") motivated a design-aligned response — instead of journal-backed episodic memory (rejected per design §15 / locked #20), teach the agent the cheap git+filesystem inspection patterns it should run at task start. Four-command orientation (`git log` / `git status` / `ls` / `cat README.md`), project-type-file shortcut, and anti-patterns (no `cd`, no `find /`, no mid-task re-orient). Loaded in task order via `extra_args`: environment → project-context → engineering-principles. Extends locked #16 (two knowledge layers) without changing the architecture; statelessness boundary (locked #20) preserved.                                                                                                                | plan §3, §6, design §3.1, §3.7, §15  |
 | 2026-05-22 | 1       | **Open item #9 partially closed.** Two-layer hardening landed: (1) `core.hooksPath` set system-wide in the open-terminal image to `/etc/lc-git-hooks` (empty, 0555, baked in), so git's hook lookup never reads `.git/hooks/` — even if a hostile repo or residual bypass drops a script there. (2) A workspace-edge bash filter (`git_artifact_filter.py`) wired into `ot-exec` blocks the obvious direct-write bypasses to `.git/config|hooks/|info/` (redirects, `cp`/`mv`/`install`/`truncate`/`dd of=`, `sed -i`/`awk -i inplace`/`perl -i`) — symmetric with the git-proxy, same `git-proxy: DENIED` marker, journaled as `git_blocked`. 49 unit tests including three documented residual-gap shapes (`python -c`, base64, renamed util) that pass through. **Residual**: open-terminal still runs commands as root; full closure needs `CAP_DAC_OVERRIDE` dropped or a uid split, both bigger and deferred. Acceptable for friendly-upstream workload (current state); the residual gap is tracked on open item #9 and must close before any genuinely hostile-repo workload. | design §3.3, plan §11 (#9)           |
 | 2026-05-22 | 2       | **Pager hang fix (OWUI smoke).** The first real OWUI task (`what can you see in your workspace?`) drove the agent's founding-knowledge orientation pattern, and the first command — `git log -n 10` — hung forever, leaving the chat at "Agent working…" until the operator clicked Stop. Root cause: open-terminal's `/execute` endpoint hands commands a pseudo-tty that `less` rejects with "WARNING: terminal is not fully functional / Press RETURN to continue", then blocks on stdin that never arrives. Fix in `Dockerfile.open-terminal`: `git.real config --system core.pager cat` (system-wide; mirrors the existing `core.hooksPath` line) plus `PAGER=cat GIT_PAGER=cat MANPAGER=cat LESS=-FRX` env. Verified post-rebuild: `git log -n 5` returns `status: done` in 0.23s, all four founding-knowledge orientation commands (`git log` / `git status` / `ls` / `cat README.md`) return cleanly. No design/principle change — Chapter 2 stop-point bug surfaced exactly as the design predicted (operator smoke test catching real behavior). | design §3.4                          |
+| 2026-05-23 | 2→3     | **Chapter 2 closed; chapter 3 (Observer) opened.** Post-pager-fix the operator's prompt completed cleanly through the Pipe: task `01KS9E1APPV2KVPDWQGDW2FFDD` ran the founding-knowledge orientation (three bash calls, no probing of `cd`/`git`) and produced a coherent answer including the project-type-file shortcut from `project-context.md`. Journal envelope verified for both channels (cli + owui) — `channel`, `user_id`, `session_id`, `repo`, `lang`, `seq`, `schema_version` all present from line 1. Stop-point triggered by the operator's "let's move onto chapter 3" — exactly the qualitative signal the plan §6 names. Note: `lc-mcpo` OpenAPI registration in OWUI is still operator-pending (admin paste), but the Pipe path is the primary surface; mcpo is the alternate-trigger surface and gated by a known operator action, not chapter-3 work. | plan §6, design §13                  |
 
 ---
 
@@ -566,7 +567,7 @@ Tuned by preflight (observed usage) unless noted.
 - [ ] **#2** Counterfactual judge prompt wording + few-shot (Observer dry-run; resolves at Decision Log entry)
 - [ ] **#3** `task_abandoned` timeout per channel (Tool default usable; tune during Tool/OWUI usage; lock by Learner). **Observer must cluster `task_abandoned` distinctly from `fail`.**
 - [ ] **#4** Neutral test-runner for design §11.1 step 3 (later hardening; not blocking Self-modifier)
-- [ ] **#5** Sanitization audit drift threshold (Tool-era shadow-mode baseline; resolves at Observer chapter when filter goes enforcing)
+- [ ] **#5** Sanitization audit drift threshold — **rephrased 2026-05-23**: at chapter-2 close `lc_sanitization_processed = 0` because Tool/OWUI has no outbound (judge + PRs only start in Observer+). The "Tool-era shadow baseline" the design §10.2 / plan §5 envisaged never accumulated. Baseline forms during Chapter 3 once judge calls begin; the drift threshold gets set from that real Observer-era data, not a synthetic Tool placeholder.
 - [ ] **#6** Reserved-slot promotion threshold (`meta` GPU) — Learner+ if starvation observed
 - [ ] **#7** Backup cadence + restore drill (Tool: backup cadence decided; drill before Learner chapter merges first artifact)
 - [ ] **#8** `.git/config` flexibility upgrade (deferred; no current trigger)
