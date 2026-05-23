@@ -181,6 +181,19 @@ class ObserverConfig(_Strict):
             "/app/agent-knowledge/engineering-principles.md",
         ]
     )
+    # Tier-0 auto-merge (Chapter 5 §5a). When True, freshly drafted
+    # tier-0 knowledge skills land with status="active" instead of
+    # "pending" — they go straight into the augmenter's rotation
+    # without operator approval. Operator flips this on AFTER trust is
+    # built in Chapter 4 (efficacy reversion has caught ≥ 1 ineffective
+    # artifact; drafts read well; gate working). Tier-1+ NEVER
+    # auto-merge — they always require the human gate.
+    auto_merge_tier_0: bool = False
+    # Sampled human-review fraction (design §10.4 control 2). Even when
+    # auto-merge is on, this fraction of drafts STILL land as `pending`
+    # — the operator catches drift in the LLM's drafting quality.
+    # 0.0 disables sampling; 1.0 effectively disables auto-merge.
+    auto_merge_sample_fraction: float = 0.2
 
 
 class Config(_Strict):

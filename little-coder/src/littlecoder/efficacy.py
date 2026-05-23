@@ -29,6 +29,7 @@ journals) is what makes the windows non-trivial.
 from __future__ import annotations
 
 import dataclasses
+import json
 from pathlib import Path
 
 from .cohorts import ClusterCounters, CohortStore
@@ -239,6 +240,46 @@ def evaluate_active_skills(
             )
         )
     return decisions
+
+
+def snapshots_from_audit(audit_path: str | Path) -> dict[str, tuple[int, int]]:
+    """Read `(observed_at_approve, tasks_at_approve)` per skill from the
+    audit log. The daemon's approve endpoint writes the snapshot per
+    design §8.5; this reader is what `meta`'s retirement walk consumes.
+
+    Only `approve_decision` events with `decision != 'reject'` and a
+    valid snapshot count. A skill that was rejected and never
+    re-approved is silently absent from the result — no window to
+    measure against."""
+    path = Path(audit_path)
+    if not path.exists():
+        return {}
+    out: dict[str, tuple[int, int]] = {}
+    with open(path, encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if rec.get("event") != "approve_decision":
+                continue
+            detail = rec.get("detail") or {}
+            if detail.get("decision") == "reject":
+                # Rejects share the event name but are not approvals.
+                continue
+            artifact_id = detail.get("artifact_id")
+            if not artifact_id:
+                continue
+            observed = detail.get("observed_at_approve")
+            tasks = detail.get("tasks_at_approve")
+            if observed is None or tasks is None:
+                # Pre-snapshot audit row (legacy). Skip silently.
+                continue
+            out[artifact_id] = (int(observed), int(tasks))
+    return out
 
 
 def retire_ineffective_skills(

@@ -531,3 +531,129 @@ def _draft_tier_0_skill(
 
 
 Judge.draft_tier_0_skill = _draft_tier_0_skill  # type: ignore[attr-defined]
+
+
+# --- tier-1 drafting (Chapter 4 §4e + §5.7 type selection) -------------
+
+
+_DRAFT_TIER_1_SYSTEM_PROMPT = """\
+You are the META judge in TIER-1 DRAFTING mode for a self-improving
+coding agent. A tier-0 knowledge entry has been live for this cluster
+and the cluster is STILL recurring — OR the cluster is baseline-
+covered, and the agent isn't following the founding-knowledge
+instruction it already has. Either way, INSTRUCTION isn't enough: the
+gap needs ENFORCEMENT.
+
+You must pick ONE of two intervention types (design §5.7) and argue
+both sides before choosing:
+
+  - **tool_craft** — a skill that shapes HOW the agent calls a tool
+    in this domain. Example: "always pass `--no-pager` to git in
+    headless contexts" or "use `cargo fmt --check` before declaring
+    a refactor complete". Use this when the gap is in the agent's
+    tool-call shape (wrong flags, wrong order, wrong command choice).
+
+  - **plan_slot** — a slot the agent's planner loads at boot, that
+    inserts a fixed plan step. Example: "before any refactor in a
+    repo with tests, run the test suite to capture the baseline".
+    Use this when the gap is in the plan's STRUCTURE (a missing
+    step the agent keeps skipping).
+
+The plan §5.7 rule: argue BOTH for tool_craft and BOTH for plan_slot,
+then pick. The argument is the journal entry — operators read it on the
+pending-artifacts surface.
+
+You also receive founding knowledge in context. If reading the signals
+you realise the agent IS following the baseline and the cluster is
+something different than you thought, set `baseline_covers: true` and
+DON'T draft — the caller will skip materialization (same escape as
+tier-0 drafting).
+
+OUTPUT FORMAT — JSON:
+
+{
+  "kind": "tool_craft" | "plan_slot",
+  "name": "human-readable skill name (≤ 120 chars)",
+  "description": "WHEN to retrieve + WHAT it enforces (≤ 1000 chars)",
+  "body": "markdown body — no frontmatter; ≤ 500 lines",
+  "argument_for_tool_craft": "why this could be tool_craft",
+  "argument_for_plan_slot": "why this could be plan_slot",
+  "argument_for_pick": "why the chosen kind beats the other",
+  "baseline_covers": false
+}
+
+Return ONLY the JSON."""
+
+
+class Tier1DraftOutput(BaseModel):
+    """Structured response for tier-1 drafting. `kind` constrains the
+    judge to one of the two §5.7 intervention types; the three argument
+    fields are required so the operator surface can render the §5.7
+    "argue both then pick" trail."""
+
+    kind: str = Field(...)  # "tool_craft" | "plan_slot"
+    name: str = Field(..., min_length=2, max_length=120)
+    description: str = Field(..., min_length=2, max_length=1000)
+    body: str = Field(..., min_length=10)
+    argument_for_tool_craft: str = Field(default="", max_length=4000)
+    argument_for_plan_slot: str = Field(default="", max_length=4000)
+    argument_for_pick: str = Field(default="", max_length=4000)
+    baseline_covers: bool = Field(default=False)
+
+
+@dataclasses.dataclass
+class Tier1DraftResult:
+    output: Tier1DraftOutput | None
+    escaped_to_compliance: bool
+
+
+def parse_tier_1_response(content: str) -> Tier1DraftOutput:
+    stripped = _strip_code_fence(content)
+    try:
+        data = json.loads(stripped)
+    except json.JSONDecodeError as exc:
+        raise LlmError(f"tier-1 reply was not JSON: {exc.msg}") from exc
+    try:
+        out = Tier1DraftOutput.model_validate(data)
+    except ValidationError as exc:
+        raise LlmError(f"tier-1 reply did not match schema: {exc}") from exc
+    if out.kind not in ("tool_craft", "plan_slot"):
+        raise LlmError(
+            f"tier-1 reply.kind must be tool_craft|plan_slot, got {out.kind!r}"
+        )
+    return out
+
+
+def _draft_tier_1_skill(
+    self: "Judge",
+    cluster: Cluster,
+    counter: ClusterCounters | None,
+    sample_signals: list[str],
+    *,
+    max_signals: int = 16,
+) -> Tier1DraftResult:
+    """Draft one tier-1 intervention. Same shape as tier-0 drafting —
+    counterfactual+adversarial framing, founding-knowledge in context,
+    judge can refuse (escape to compliance). Output picks tool_craft
+    vs plan_slot per design §5.7."""
+    windowed = sample_signals[:max_signals]
+    messages = [
+        ChatMessage(role="system", content=_DRAFT_TIER_1_SYSTEM_PROMPT),
+        ChatMessage(role="system", content=_founding_knowledge_block(self.founding_knowledge_paths)),
+        ChatMessage(
+            role="user", content=_draft_user_message(cluster, counter, windowed)
+        ),
+    ]
+    response: ChatResponse = self.chat.chat(
+        messages,
+        model=self.model,
+        temperature=0.0,
+        response_format={"type": "json_object"},
+    )
+    output = parse_tier_1_response(response.content)
+    if output.baseline_covers:
+        return Tier1DraftResult(output=None, escaped_to_compliance=True)
+    return Tier1DraftResult(output=output, escaped_to_compliance=False)
+
+
+Judge.draft_tier_1_skill = _draft_tier_1_skill  # type: ignore[attr-defined]

@@ -47,6 +47,34 @@ _VALID_OUTCOMES = {"pass", "fail", "unverified"}
 _WORKER_STOP = "\x00stop"  # sentinel pushed onto the queue to end the worker
 
 
+def _count_started_tasks(journals_dir: str) -> int:
+    """Count `task_started` records across all `outcomes.jsonl` segments.
+    Used as a durable "tasks observed since the journal began" counter
+    for efficacy snapshots (design §8.5). Cheap line-scan; the actual
+    JSON parse is only for the event field."""
+    import json as _json
+    from pathlib import Path as _Path
+
+    total = 0
+    root = _Path(journals_dir)
+    for path in sorted(root.glob("outcomes*.jsonl")):
+        try:
+            with open(path, encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = _json.loads(line)
+                    except _json.JSONDecodeError:
+                        continue
+                    if rec.get("event") == "task_started":
+                        total += 1
+        except OSError:
+            continue
+    return total
+
+
 # --------------------------------------------------------------------------
 # Request bodies.
 # --------------------------------------------------------------------------
@@ -619,16 +647,19 @@ def build_app(daemon: LittleCoderDaemon) -> FastAPI:
     @app.post("/admin/approve/{artifact_id}")
     def approve(artifact_id: str) -> dict:
         """Approve a pending skill — flip status pending → active so the
-        augmenter starts retrieving it. Journals to `audit.jsonl`.
+        augmenter starts retrieving it. Journals to `audit.jsonl` WITH
+        a snapshot of `(observed_at_approve, tasks_at_approve)` per
+        design §8.5 — efficacy reversion compares post-merge rate
+        against this snapshot, so the snapshot MUST be captured at
+        merge time. Without it, tier-1 escalation + retirement can
+        never run on this artifact.
 
         Validation gate (§4d) is NOT auto-run here: the Polyglot oracle
         runs against an operator-imported corpus that may not exist
         yet. The operator inspects the body + cluster provenance and
-        makes the call. A separate `POST /admin/validate/{id}` (Stage
-        6 follow-up) returns the validation gate verdict on demand."""
-        from .skills import flip_status, load_skill, skill_path, SkillFormatError, iter_skills
+        makes the call."""
+        from .skills import flip_status, SkillFormatError, iter_skills
 
-        # Locate the pending skill.
         target_skill = None
         for s in iter_skills(daemon.cfg.paths.skill_dir, status="pending"):
             if s.id == artifact_id:
@@ -640,6 +671,19 @@ def build_app(daemon: LittleCoderDaemon) -> FastAPI:
             flipped = flip_status(daemon.cfg.paths.skill_dir, artifact_id, "active")
         except (SkillFormatError, FileNotFoundError) as exc:
             raise HTTPException(500, f"approve failed: {exc}") from exc
+
+        # Capture the §8.5 snapshot. `observed_at_approve` reads the
+        # cluster's current counter; `tasks_at_approve` is derived
+        # from journals (durable across restarts; metric counters
+        # reset on bounce).
+        observed_at_approve = 0
+        if daemon.cfg.observer.enabled:
+            store = daemon.meta.load_store()
+            counter = store.counters.get(flipped.frontmatter.cluster_id)
+            if counter:
+                observed_at_approve = counter.observed
+        tasks_at_approve = _count_started_tasks(daemon.cfg.journals.dir)
+
         daemon.audit.write(
             "approve_decision",
             actor="operator",
@@ -647,11 +691,17 @@ def build_app(daemon: LittleCoderDaemon) -> FastAPI:
             cluster_id=flipped.frontmatter.cluster_id,
             tier=flipped.frontmatter.tier,
             kind=flipped.frontmatter.kind,
+            observed_at_approve=observed_at_approve,
+            tasks_at_approve=tasks_at_approve,
         )
         return {
             "status": "approved",
             "id": artifact_id,
             "cluster_id": flipped.frontmatter.cluster_id,
+            "snapshot": {
+                "observed_at_approve": observed_at_approve,
+                "tasks_at_approve": tasks_at_approve,
+            },
         }
 
     @app.post("/admin/reject/{artifact_id}")

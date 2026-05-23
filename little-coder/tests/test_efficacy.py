@@ -238,6 +238,87 @@ def test_retire_flips_status_for_ineffective(tmp_path):
     assert retired[0].id == skill.id
 
 
+def test_snapshots_from_audit_reads_approve_decisions(tmp_path):
+    """The audit log has approve_decision rows; the reader pulls
+    (observed_at_approve, tasks_at_approve) per artifact."""
+    import json
+
+    from littlecoder.efficacy import snapshots_from_audit
+
+    audit = tmp_path / "audit.jsonl"
+    rows = [
+        {
+            "ts": "t1",
+            "event": "approve_decision",
+            "actor": "operator",
+            "detail": {
+                "artifact_id": "skill-1",
+                "cluster_id": "c1",
+                "tier": 0,
+                "kind": "knowledge",
+                "observed_at_approve": 7,
+                "tasks_at_approve": 100,
+            },
+            "schema_version": 1,
+        },
+        {
+            "ts": "t2",
+            "event": "shutdown",  # noise row
+            "actor": "system",
+            "detail": {},
+            "schema_version": 1,
+        },
+        {
+            "ts": "t3",
+            "event": "approve_decision",
+            "actor": "operator",
+            "detail": {
+                "artifact_id": "skill-2",
+                "decision": "reject",  # rejects must be excluded
+                "prior_status": "active",
+                "observed_at_approve": 50,
+                "tasks_at_approve": 200,
+            },
+            "schema_version": 1,
+        },
+    ]
+    audit.write_text("\n".join(json.dumps(r) for r in rows), encoding="utf-8")
+
+    out = snapshots_from_audit(audit)
+    assert out == {"skill-1": (7, 100)}
+
+
+def test_snapshots_from_audit_empty_when_no_audit_log(tmp_path):
+    from littlecoder.efficacy import snapshots_from_audit
+
+    assert snapshots_from_audit(tmp_path / "missing.jsonl") == {}
+
+
+def test_snapshots_from_audit_skips_legacy_rows_without_snapshot(tmp_path):
+    """Approve rows written before Stage-8 don't carry the snapshot
+    fields — the reader must skip them silently (they can't be measured
+    against, but they shouldn't crash the read)."""
+    import json
+
+    from littlecoder.efficacy import snapshots_from_audit
+
+    audit = tmp_path / "audit.jsonl"
+    audit.write_text(
+        json.dumps(
+            {
+                "ts": "t",
+                "event": "approve_decision",
+                "actor": "operator",
+                "detail": {"artifact_id": "old-skill"},  # no snapshot fields
+                "schema_version": 1,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    assert snapshots_from_audit(audit) == {}
+
+
 def test_retire_no_op_when_no_snapshots(tmp_path):
     """Without snapshots, nothing gets retired — the safe default."""
     skill = build_skill(
