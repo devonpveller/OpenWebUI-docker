@@ -14,6 +14,7 @@
 - **Tool ships the open-terminal network change.** OWUI's direct access to open-terminal ends; it returns in chapter 2 via `lc-mcpo`.
 - **Source lives in [`../../little-coder/`](../../little-coder/)** — Python control-plane package (`src/littlecoder/`), `git-proxy/`, `config/`, `tests/`.
 - **Two knowledge layers (plan §3):** founding knowledge — the operator-authored baseline in `agent-knowledge/`, built in Chapter 2 — is separate from the §7 self-improvement skill library (meta-learned, discovered per task, Chapter 4+).
+- **Task-context brief (plan §3, §6):** a journal-derived project-continuity digest the daemon injects into the agent's prompt at task-start — episodic project state, distinct from the knowledge layers, needs no `meta`. Planned for Chapter 2; not yet built.
 
 ---
 
@@ -242,6 +243,24 @@ stop-point gate.
 - [x] Deployed and live (2026-05-22) — entrypoint confirms exec routing + extension removal
 - [ ] Operator-verified in a task: the agent no longer probes `cd` / `git` to rediscover its environment — _needs the next OWUI task_
 
+### Task-context brief (project continuity)
+
+A compact journal-derived digest injected into the agent's prompt at task-start
+so it starts *situated* instead of burning turns on exploratory `git log` / `ls`
+/ `cd`. Episodic project state — distinct from the knowledge layers (plan §3,
+§6). Needs no `meta`: the daemon already writes the journals; it reads a scoped
+slice back. Built during Chapter 2; not a Chapter 2 stop-point gate.
+
+- [ ] Daemon assembles the brief at task-start from `outcomes.jsonl` + `audit.jsonl`, **filtered to the current `repo`**
+- [ ] Brief content: last ~N task outcomes (label + prompt digest + one-line result), focus-start (`project_switched`), recent outcome amendments
+- [ ] Assembled from **structured journal fields only** — not free-text concatenation (a hostile repo's task data must not become a prompt-injection vector)
+- [ ] Injected at task-start as a prompt prefix or a per-task `--append-system-prompt` temp file — distinct from the static founding-knowledge append; the inner loop stays upstream-stock (design §3.1)
+- [ ] Hard token budget on the brief; oldest entries dropped first (open item #10)
+- [ ] Config tunables — brief task count `N`, token budget, on/off switch — schema-versioned with the rest of the config
+- [ ] Internal-only: **not** routed through the sanitization filter (no outbound path; same-repo data the agent already has)
+- [ ] Empty-history case — a fresh repo with no prior tasks yields no brief (or a one-line "no prior tasks"), never a malformed/empty injection
+- [ ] Efficacy check: `tool_calls.jsonl` shows first-turn exploratory commands drop once the brief lands — the journals measure the brief's own payoff
+
 ### Chapter 2 stop point (→ 3)
 
 - [ ] OWUI parity confirmed; journals attributing both channels correctly
@@ -280,6 +299,7 @@ stop-point gate.
 - [ ] Cohort counters as event-sourced projection over journals (design §5.4)
 - [ ] Periodic checkpoint; **rebuildable from journals on demand**
 - [ ] `schema_version` on the cohort store; bump-and-rebuild on schema change
+- [ ] Confirm the Chapter-2 task-context brief still runs after the cohort store lands; optional enrichment — add a recurring-cluster hint for the current `repo` to the brief (it stays functional without it)
 
 ### 3e. Judge prompt + sanitization promotion
 
@@ -325,6 +345,7 @@ stop-point gate.
 ### 4b. Augmenter
 
 - [ ] Selection per design §7.4: hard tag filter → embedding rank → hard token budget
+- [ ] Token budget set against the space **remaining** after founding knowledge + the task-context brief (Chapter 2) — baseline, brief, and selected skills share one context window
 - [ ] Over-budget tiebreaker: cohort-proven + tighter match; **tier is not a tiebreaker on its own**
 - [ ] Per-task augmenter selection logged (required by §8.4 in-context assertion)
 
@@ -431,6 +452,7 @@ stop-point gate.
 - [ ] Two acceptance tests, both required (design §11.1 step 4):
   - [ ] Issue fixed: reproduce-then-fix the specific §6 cluster
   - [ ] No regression: Polyglot biased subset score ≥ baseline
+- [ ] Task-context brief (Chapter 2) held constant — or disabled — across candidate and baseline runs so the comparison is apples-to-apples
 - [ ] Stratified Polyglot subset for upstream-merge validation (broader than per-cluster bias)
 - [ ] Verdict from objective oracle: Polyglot + §6 justification + human gate — **never** active's own assessment
 
@@ -475,6 +497,7 @@ These run alongside multiple chapters.
 
 - [ ] **Config management** (design §12.8): tunables added per chapter:
   - Tool: drain deadline; `task_abandoned` timeout per channel; basic budget caps
+  - OWUI: task-context brief — task count `N`, token budget, on/off
   - Observer: similarity floor; sanitization drift threshold
   - Learner: per-cluster M; Polyglot N/margin; augmenter budget; full budget caps; coalesce thresholds
   - Self-modifier: exploration rate
@@ -521,6 +544,7 @@ These run alongside multiple chapters.
 | 2026-05-22 | 2       | **Founding knowledge seeded.** `little-coder/agent-knowledge/` — `environment.md` (operating environment + git-proxy policy, so the agent stops rediscovering its constraints each task) and `engineering-principles.md` (SOLID / encapsulation / naming / patterns) — appended to the agent's system prompt via little-coder's own `--append-system-prompt`. Deliberately SEPARATE from the §7 self-improvement skill library: founding knowledge is the operator-authored baseline, the §7 library is the meta-learned layer (Ch.4+). Design-consistent — uses little-coder's own flags (§3.1) and raises the baseline so meta learns subtler gaps (§13). | design §3.1, §7, §13 |
 | 2026-05-22 | 2       | Anthropic skills repo (`anthropics/skills`) reviewed: 17 skills, all domain-capability (documents / design / web / MCP) — none are general coding-craft, so nothing to vendor for little-coder's craft baseline (`engineering-principles.md` authored instead). The valuable part is `skill-creator` — the skill-authoring guidance. **Chapter-4 recommendation:** the §7 meta skill-library should adopt the Agent Skills format (`SKILL.md` + `name`/`description` frontmatter; `description` can feed the §7.4 augmenter; progressive disclosure; <500 lines; "explain-the-why" drafting), layered with §7.1's `cluster_id`/`tier` metadata. The Anthropic two-tier model (baseline always-loaded + specialized discovered-on-demand) matches founding-knowledge + §7. `webapp-testing` / `web-artifacts-builder` / `frontend-design` could be made repo-conditionally available to the agent later. | design §7, §7.4 |
 | 2026-05-22 | n/a     | Skill-development structure promoted from the Decision Log into the plan/task bodies: plan §3 gains a "Two knowledge layers" table (founding knowledge vs the §7 skill library); plan §10 adds locked decision #16; plan §6 + §8 build lists updated; Chapter 2 tasks gain a "Founding knowledge" subsection; Chapter 4 §4a tasks adopt the Anthropic Agent Skills format for §7 artifacts; a founding-knowledge upkeep rule added to cross-cutting. Founding knowledge is layered additively over design §7.1 — the design doc is left unedited (operator's call, consistent with the 2026-05-22 Node.js entry). | plan §3, §6, §8, §10 |
+| 2026-05-22 | 2       | **Task-context brief added to the plan.** The daemon will inject a journal-derived project-continuity digest (recent outcomes on the current `repo`, scoped + structured) into the agent's prompt at task-start — episodic project state, distinct from the two knowledge layers, needing no `meta`. Motivation: every task starts cold and burns turns on exploratory `git log` / `ls` / `cd`; a pre-assembled brief front-loads that for a few hundred prompt tokens. Built in Chapter 2 (daemon + journals both exist); threaded through Observer (optional cohort-store enrichment), Learner (augmenter shares the prompt budget), and Self-modifier (brief held constant during tier-3 validation). Plan §10 locked decision #17, open item #10. Internal-only — not gated by the sanitization filter; a hint, never ground truth (workspace + git stay authoritative). Design doc left unedited (operator's call). | plan §3, §6, §10 |
 
 ---
 
@@ -537,6 +561,7 @@ Tuned by preflight (observed usage) unless noted.
 - [ ] **#7** Backup cadence + restore drill (Tool: backup cadence decided; drill before Learner chapter merges first artifact)
 - [ ] **#8** `.git/config` flexibility upgrade (deferred; no current trigger)
 - [ ] **#9** `.git/config` / `.git/hooks` / `.git/info` read-only **enforcement** for the agent + `core.hooksPath` outside `.git/` (design §3.3). Known gap — the git-proxy blocks `config`/`remote` at the command level, but a direct file write to `.git/config` bypasses that. Closure is awkward for a path inside a named volume; resolve before real hostile-repo workload.
+- [ ] **#10** Task-context brief size — default task count `N` + token budget. Default usable in Chapter 2; tune from observed usage (`tool_calls.jsonl` shows whether the brief actually displaces the exploratory commands); lock by Learner.
 
 ---
 
