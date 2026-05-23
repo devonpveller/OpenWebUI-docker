@@ -429,6 +429,14 @@ class LittleCoderDaemon:
             label = f"lc-switch-{utc_now().replace(':', '').replace('-', '')}"
             await asyncio.to_thread(self.workspace.tag_prior_state, label)
             await asyncio.to_thread(self.workspace.wipe)
+        elif decision.action is SwitchAction.CLONE:
+            # Design §12.3 assumes "no current focus" implies an empty
+            # workspace, but a prior failed clone can leave a stale
+            # `.git/` behind — which then makes the next `git clone`
+            # fail with exit 128 "destination path already exists and
+            # is not an empty directory". Wipe defensively. The wipe
+            # is a no-op when the workspace is genuinely empty.
+            await asyncio.to_thread(self.workspace.wipe)
 
         token = os.environ.get("LC_DEPLOY_TOKEN") or None
         result = await asyncio.to_thread(self.workspace.clone, requested, token)
@@ -746,9 +754,65 @@ def build_app(daemon: LittleCoderDaemon) -> FastAPI:
         }
 
     @app.post("/admin/upstream/pull")
-    def upstream_pull() -> dict:
-        # Stub — operator-initiated upstream pull lands in Chapter 5 (design §12.2).
-        raise HTTPException(501, "upstream pull lands in Chapter 5 (Self-modifier)")
+    def upstream_pull(req: dict = None) -> dict:
+        """Operator-initiated upstream pull (design §12.2, Chapter 5 §5i).
+
+        The actual `git fetch` + merge happens on the HOST (the operator
+        runs it against the little-coder source checkout — the daemon
+        container doesn't own the source). This endpoint:
+          1. Journals `upstream_pulled` with old + new commit ids.
+          2. Lists the cluster ids of all live self-authored tier-3
+             artifacts so the operator can review which (if any) the
+             upstream now provides — those should be retired via the
+             existing `/admin/reject/<id>` endpoint, and the rejection
+             journaled as `invalidated_by_upstream`.
+
+        Body (POST): `{old_commit: str, new_commit: str}`. Both are
+        free-text (the operator supplies them from `git rev-parse`)
+        — we don't try to verify them inside the container."""
+        from .skills import iter_skills
+
+        req = req or {}
+        old_commit = str(req.get("old_commit") or "").strip()
+        new_commit = str(req.get("new_commit") or "").strip()
+        if not new_commit:
+            raise HTTPException(
+                422,
+                "new_commit required — supply the SHA you pulled to "
+                "(typically `git rev-parse HEAD`)",
+            )
+
+        tier3_review: list[dict] = []
+        if daemon.cfg.paths.skill_dir:
+            for skill in iter_skills(daemon.cfg.paths.skill_dir, status=None):
+                if skill.frontmatter.tier == 3:
+                    tier3_review.append(
+                        {
+                            "id": skill.id,
+                            "cluster_id": skill.frontmatter.cluster_id,
+                            "status": skill.frontmatter.status,
+                            "name": skill.frontmatter.name,
+                        }
+                    )
+        daemon.audit.write(
+            "upstream_pulled",
+            actor="operator",
+            old_commit=old_commit,
+            new_commit=new_commit,
+            tier3_to_review_count=len(tier3_review),
+        )
+        return {
+            "status": "journaled",
+            "old_commit": old_commit,
+            "new_commit": new_commit,
+            "tier3_to_review": tier3_review,
+            "note": (
+                "operator must inspect the tier3_to_review list — for each "
+                "self-authored tier-3 skill the upstream now provides, "
+                "call /admin/reject/<id> and that retirement will be "
+                "journaled per design §12.2"
+            ),
+        }
 
     @app.post("/admin/shutdown")
     def admin_shutdown(req: ShutdownRequest) -> dict:

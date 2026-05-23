@@ -490,6 +490,126 @@ def test_draft_tier_1_escapes_to_compliance_when_baseline_covers():
     assert result.output is None
 
 
+# --- tier-3 §6 justification gate (Chapter 5 §5c) ----------------------
+
+
+from littlecoder.judge import (
+    InterventionRecord,
+    Tier3Justification,
+    parse_justification_response,
+)
+
+
+def _justify_payload(**overrides) -> dict:
+    base = {
+        "cluster_persistence": "cluster has persisted across tier-0 and tier-1 with rate unchanged at 0.20/task",
+        "interventions_tried": [
+            {
+                "skill_id": "skill-abc",
+                "tier": 0,
+                "kind": "knowledge",
+                "why_failed": "agent ignored the guidance under load",
+            },
+            {
+                "skill_id": "skill-def",
+                "tier": 1,
+                "kind": "tool_craft",
+                "why_failed": "tool-craft only catches one shape; cluster has multiple",
+            },
+        ],
+        "no_skill_argument": (
+            "No additional skill could close this: the cluster manifests in "
+            "the agent's INNER LOOP control flow — specifically in how the "
+            "fast-path planner decides to skip the test-running step. No "
+            "knowledge entry, tool-craft, plan-slot, or routing rule can "
+            "alter the inner loop's decision-tree shape from outside."
+        ),
+        "proposed_change": "modify the planner's fast-path to consult a routing-rule-evaluator before skipping test-running",
+        "code_surface": "node",
+        "expected_effect": "the cluster's failure rate drops because planner now consults routing rules before skipping",
+        "refused": False,
+        "refusal_reason": "",
+    }
+    base.update(overrides)
+    return base
+
+
+def test_parse_justification_accepts_full_argument():
+    out = parse_justification_response(json.dumps(_justify_payload()))
+    assert isinstance(out, Tier3Justification)
+    assert out.refused is False
+    assert out.code_surface == "node"
+    assert len(out.interventions_tried) == 2
+
+
+def test_parse_justification_rejects_bad_code_surface():
+    bad = _justify_payload(code_surface="wasm")
+    with pytest.raises(LlmError, match="code_surface"):
+        parse_justification_response(json.dumps(bad))
+
+
+def test_parse_justification_rejects_thin_no_skill_argument():
+    """Design §6(3) is THE KEY GATE — a non-refused justification with
+    a weak `no_skill_argument` must fail. We require ≥ 50 chars."""
+    bad = _justify_payload(no_skill_argument="dunno")
+    with pytest.raises(LlmError, match="no_skill_argument"):
+        parse_justification_response(json.dumps(bad))
+
+
+def test_parse_justification_accepts_refused_without_code_surface():
+    """A REFUSED justification doesn't need code_surface — no change is
+    being proposed."""
+    payload = _justify_payload(
+        refused=True,
+        refusal_reason="a routing-rule could close this without touching code",
+        code_surface="",  # blank is OK when refused
+        no_skill_argument="",  # also blank — same reason
+    )
+    out = parse_justification_response(json.dumps(payload))
+    assert out.refused is True
+    assert out.refusal_reason.startswith("a routing-rule")
+
+
+def test_justify_tier_3_returns_refused_when_judge_refuses():
+    """The gate: refused means operator MUST NOT proceed; caller routes
+    the cluster back to skill drafting."""
+    payload = _justify_payload(
+        refused=True,
+        refusal_reason="skill could close this",
+        code_surface="",
+        no_skill_argument="",
+    )
+    chat = MockChatClient(
+        [ChatResponse(content=json.dumps(payload), finish_reason="stop")]
+    )
+    judge = Judge(chat=chat, founding_knowledge_paths=[])
+    result = judge.justify_tier_3(
+        _cluster(),
+        ClusterCounters("aaaaaaaaaaaaaaaa", observed=100),
+        ["sig1", "sig2"],
+        [{"skill_id": "skill-abc", "tier": 0, "kind": "knowledge", "status": "active"}],
+    )
+    assert result.refused is True
+    assert result.justified is False
+
+
+def test_justify_tier_3_full_justification_marks_justified():
+    payload = _justify_payload()
+    chat = MockChatClient(
+        [ChatResponse(content=json.dumps(payload), finish_reason="stop")]
+    )
+    judge = Judge(chat=chat, founding_knowledge_paths=[])
+    result = judge.justify_tier_3(
+        _cluster(),
+        ClusterCounters("aaaaaaaaaaaaaaaa", observed=100),
+        ["sig1"],
+        [{"skill_id": "x", "tier": 0, "kind": "knowledge", "status": "active"}],
+    )
+    assert result.refused is False
+    assert result.justified is True
+    assert result.justification.code_surface == "node"
+
+
 def test_draft_tier_0_skill_windows_oversized_signal_sample():
     """`max_signals=16` (default) — caller can pass more; only the
     prefix lands in the prompt. Bounds prompt size."""

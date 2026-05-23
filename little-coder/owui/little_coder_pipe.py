@@ -1,7 +1,7 @@
 """
 title: Little Coder
 author: ai-stack
-version: 0.5.0
+version: 0.5.1
 license: MIT
 description: Drive little-coder from OpenWebUI chat (Chapter 2 — OWUI pipeline).
   Plain messages trigger coding tasks and stream the agent's process live —
@@ -36,6 +36,15 @@ from pydantic import BaseModel, Field
 # Operator slash-commands — gated by OWUI role. `/help` and `/status` are
 # open to any user (read-only) and handled before this set is checked.
 _OPERATOR_CMDS = {"/project", "/confirm", "/pending", "/approve", "/reject", "/upstream", "/observe"}
+
+# Slash-commands that may block the chat for many seconds — these get a
+# "doing…" status emit before the daemon call so OWUI's status bar shows
+# the operator the work is in progress. Map: cmd → status label.
+_LONG_RUNNING_CMDS: dict[str, str] = {
+    "/project": "Cloning project — this may take a while…",
+    "/upstream": "Pulling fork-parent…",
+    "/observe": "Running Observer iteration…",
+}
 
 _HELP = """**Little Coder** — OpenWebUI surface
 
@@ -214,7 +223,21 @@ class Pipe:
             return
 
         if message.lstrip().startswith("/"):
-            yield await self._operator(message.strip(), __user__ or {})
+            # Long-running operator commands need a status indicator —
+            # otherwise the chat freezes for the whole clone / pull
+            # with no feedback. Emit a "doing…" status before the
+            # daemon call and a "done" after, so OWUI's status bar
+            # shows the operator something is happening.
+            cmd_name = message.strip().split(None, 1)[0].lower()
+            if cmd_name in _LONG_RUNNING_CMDS:
+                label = _LONG_RUNNING_CMDS[cmd_name]
+                await self._status(__event_emitter__, label)
+            try:
+                result = await self._operator(message.strip(), __user__ or {})
+            finally:
+                if cmd_name in _LONG_RUNNING_CMDS:
+                    await self._status(__event_emitter__, "Done", done=True)
+            yield result
             return
 
         async for chunk in self._trigger_stream(
@@ -372,11 +395,17 @@ class Pipe:
             ok, data = await self._call(
                 "POST", "/project", {"repo": link, "actor": actor}
             )
-            return (
-                f"✅ {data.get('action')}: focus = `{data.get('focus')}`"
-                if ok
-                else f"⚠️ {data.get('detail', data)}"
-            )
+            if not ok:
+                return f"⚠️ {data.get('detail', data)}"
+            action = data.get("action", "?")
+            focus = data.get("focus", "?")
+            if action == "clone":
+                return f"✅ Cloned `{focus}` — workspace ready."
+            if action == "switch":
+                return f"✅ Switched focus to `{focus}` — workspace ready."
+            if action == "noop":
+                return f"ℹ️ Already focused on `{focus}`."
+            return f"✅ {action}: focus = `{focus}`"
 
         if cmd == "/confirm":
             if len(args) < 2 or args[1] not in ("pass", "fail", "unverified"):
