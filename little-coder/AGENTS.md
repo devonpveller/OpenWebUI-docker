@@ -184,13 +184,47 @@ docker compose build open-terminal
 docker compose up -d open-terminal
 ```
 
-### Keep this file in sync after changes
+### Keep this file in sync after changes (REQUIRED — not optional)
+
+If your task adds/removes a `.py` file under `src/littlecoder/`, OR
+changes any module's docstring (first sentence / design `§N(.N)` refs
+/ `Chapter N` refs), you MUST regenerate the auto module index before
+declaring the task complete. The file is the cross-session memory
+for anyone working on this codebase next; a stale index tells future
+sessions a lie about a codebase you just reshaped.
+
+**From inside the agent's workspace** (the normal task-execution
+context — no installed `lc` CLI here, run the script directly):
+
+```bash
+python little-coder/src/littlecoder/docs_sync.py \
+  --source little-coder/src/littlecoder \
+  --agents-md little-coder/AGENTS.md
+```
+
+The script is pure-stdlib Python — no `pip install` needed. Output:
+
+- `AGENTS.md updated: little-coder/AGENTS.md` → file rewritten.
+- `AGENTS.md already up to date.` → no-op, nothing to commit.
+
+Add `--check` to make it non-destructive (exit 1 on drift, write
+nothing) — use this if you want to detect-before-acting.
+
+**From the host** (operator / dev terminal, with the `lc` CLI):
 
 ```powershell
 cd little-coder
-lc admin docs sync           # update the module index
-lc admin docs sync --check   # CI / pre-commit mode — exits 1 on drift
+lc admin docs sync           # update
+lc admin docs sync --check   # CI / pre-commit mode
 ```
 
-The auto-section is regenerated from each module's docstring; the
-hand-authored sections (this one included) stay verbatim.
+Both paths regenerate ONLY the content between
+`<!-- BEGIN AUTO MODULE INDEX -->` and `<!-- END AUTO MODULE INDEX -->`;
+everything outside those markers (this section included) stays
+verbatim.
+
+If your structural change is BIGGER than a module's docstring — a new
+subsystem, a chapter-stage boundary moving, a new safety boundary —
+also update the hand-authored sections above by hand: "What this
+codebase is", "Where to find what", "Common workflows". The auto
+section won't catch those; the doc lies until you fix it.
