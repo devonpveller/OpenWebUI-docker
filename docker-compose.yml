@@ -16,6 +16,7 @@ services:
       - ./config:/app/config:ro # Read-only config
       - .:/host_project:ro # Mount entire project for AI Stack pipe functions
     environment:
+      - TZ=America/New_York
       - OLLAMA_HOST=http://localhost:11434
       - USE_CUDA=true
       - USE_CUDA_DOCKER=true
