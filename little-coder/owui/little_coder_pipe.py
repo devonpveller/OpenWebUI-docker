@@ -1,7 +1,7 @@
 """
 title: Little Coder
 author: ai-stack
-version: 0.6.0
+version: 0.7.0
 license: MIT
 description: Drive little-coder from OpenWebUI chat (Chapter 2 — OWUI pipeline).
   Plain messages trigger coding tasks and stream the agent's process live —
@@ -35,7 +35,7 @@ from pydantic import BaseModel, Field
 
 # Operator slash-commands — gated by OWUI role. `/help` and `/status` are
 # open to any user (read-only) and handled before this set is checked.
-_OPERATOR_CMDS = {"/project", "/confirm", "/pending", "/approve", "/reject", "/upstream", "/observe"}
+_OPERATOR_CMDS = {"/project", "/confirm", "/pending", "/approve", "/reject", "/upstream", "/observe", "/bootstrap-agents"}
 
 # Slash-commands that may block the chat for many seconds — these get a
 # "doing…" status emit before the daemon call so OWUI's status bar shows
@@ -59,6 +59,7 @@ Operator commands (require an operator account):
 - `/approve <id>` · `/reject <id>` — artifact review (Chapter 4)
 - `/upstream pull` — pull the fork-parent (Chapter 5)
 - `/observe` — show the Observer report (`/observe iterate` runs a fresh meta pass first)
+- `/bootstrap-agents [mode]` — explicitly trigger an AGENTS.md bootstrap for the focused repo. Modes: empty/`commit` (default — bootstrap + separate commit), `nocommit` (bootstrap, leave uncommitted; you commit or discard from a host shell), `revert` (undo bootstrap + drop `.no-agents-md` opt-out marker)
 
 Open to everyone:
 - `/status` — daemon health and focused project
@@ -261,12 +262,21 @@ class Pipe:
             return
 
         if message.lstrip().startswith("/"):
-            # Long-running operator commands need a status indicator —
-            # otherwise the chat freezes for the whole clone / pull
-            # with no feedback. Emit a "doing…" status before the
-            # daemon call and a "done" after, so OWUI's status bar
-            # shows the operator something is happening.
             cmd_name = message.strip().split(None, 1)[0].lower()
+            # `/bootstrap-agents` spawns a real task and STREAMS the
+            # agent's progress like a normal chat trigger — it can't
+            # be a single-string return. Route it through the
+            # streaming path directly. Operator-role gating happens
+            # in `_dispatch_bootstrap` before the trigger.
+            if cmd_name == "/bootstrap-agents":
+                async for chunk in self._dispatch_bootstrap(
+                    message.strip(), __user__ or {}, meta, __event_emitter__
+                ):
+                    yield chunk
+                return
+            # Other slash-commands return a single chat reply.
+            # Long-running ones get a status indicator so the chat
+            # doesn't appear frozen during the daemon call.
             if cmd_name in _LONG_RUNNING_CMDS:
                 label = _LONG_RUNNING_CMDS[cmd_name]
                 await self._status(__event_emitter__, label)
@@ -288,31 +298,50 @@ class Pipe:
 
     # -- task triggers — live streaming ------------------------------------
 
-    async def _trigger_stream(self, prompt: str, user: dict, metadata: dict, emit):
-        await self._status(emit, "Queueing task…")
-        ok, data = await self._call(
-            "POST",
-            "/tasks",
-            {
-                "prompt": prompt,
-                "channel": "owui",
-                "user_id": user.get("email") or user.get("id") or "owui",
-                "session_id": metadata.get("chat_id"),
-            },
-        )
-        if not ok:
-            await self._status(emit, "Failed", done=True)
-            detail = str(data.get("detail", data))
-            if "no project focused" in detail:
-                yield (
-                    "⚠️ No project is focused. An operator must run "
-                    "`/project <repo-url>` first."
-                )
-            else:
-                yield f"⚠️ Could not queue the task: {detail}"
-            return
+    async def _trigger_stream(
+        self,
+        prompt: str,
+        user: dict,
+        metadata: dict,
+        emit,
+        *,
+        existing_task_id: Optional[str] = None,
+    ):
+        """Trigger a task (or stream an already-triggered one) and
+        render its progress into the chat.
 
-        task_id = data["task_id"]
+        `existing_task_id` lets operator-action slash-commands
+        (`/bootstrap-agents`, …) reuse the streaming machinery
+        without re-triggering — they call the admin endpoint that
+        spawns the task, then pass the returned task_id here. When
+        None, behaves the original way: POST /tasks with `prompt`,
+        then stream."""
+        if existing_task_id is not None:
+            task_id = existing_task_id
+        else:
+            await self._status(emit, "Queueing task…")
+            ok, data = await self._call(
+                "POST",
+                "/tasks",
+                {
+                    "prompt": prompt,
+                    "channel": "owui",
+                    "user_id": user.get("email") or user.get("id") or "owui",
+                    "session_id": metadata.get("chat_id"),
+                },
+            )
+            if not ok:
+                await self._status(emit, "Failed", done=True)
+                detail = str(data.get("detail", data))
+                if "no project focused" in detail:
+                    yield (
+                        "⚠️ No project is focused. An operator must run "
+                        "`/project <repo-url>` first."
+                    )
+                else:
+                    yield f"⚠️ Could not queue the task: {detail}"
+                return
+            task_id = data["task_id"]
         await self._status(emit, "Agent starting…")
 
         renderer = _Render(self.valves.show_thinking)
@@ -427,6 +456,67 @@ class Pipe:
             foot += f"\n*Confirm the real outcome:* `/confirm {task_id} pass|fail`"
         parts.append(foot)
         return "\n".join(parts)
+
+    # -- operator-triggered bootstrap (slash command + task streaming) ----
+
+    async def _dispatch_bootstrap(
+        self, message: str, user: dict, metadata: dict, emit
+    ):
+        """`/bootstrap-agents [mode]` — operator-triggered AGENTS.md
+        bootstrap (design §3.7 layer 3). Three modes — empty (default
+        `commit`), `nocommit`, `revert`. Operator-role gated; routes
+        through `/admin/bootstrap-agents` which spawns a task with
+        the matching server-side prompt. We then stream the spawned
+        task back to the chat via `_trigger_stream(existing_task_id=…)`."""
+        parts = message.split()
+        args = parts[1:]
+        mode = (args[0].lower() if args else "commit").strip()
+        if mode not in ("commit", "nocommit", "revert"):
+            yield (
+                f"⚠️ Unknown mode `{mode}`. Valid: "
+                f"`commit` (default — bootstrap + separate commit), "
+                f"`nocommit` (bootstrap, leave uncommitted), "
+                f"`revert` (undo bootstrap + drop `.no-agents-md` opt-out)."
+            )
+            return
+
+        # Operator-role gate (same posture as the other slash commands).
+        roles = {r.strip() for r in self.valves.operator_roles.split(",")}
+        if (user.get("role") or "") not in roles:
+            yield (
+                f"⛔ `/bootstrap-agents` is an operator command. Your "
+                f"account (`{user.get('role') or 'unknown'}`) is not an "
+                f"operator."
+            )
+            return
+
+        actor = user.get("email") or user.get("id") or "owui"
+        await self._status(emit, f"Triggering bootstrap-agents (mode={mode})…")
+        ok, data = await self._call(
+            "POST",
+            "/admin/bootstrap-agents",
+            {"mode": mode, "actor": actor},
+        )
+        if not ok:
+            await self._status(emit, "Failed", done=True)
+            detail = str(data.get("detail", data))
+            if "no project focused" in detail:
+                yield "⚠️ No project is focused. Run `/project <repo-url>` first."
+            else:
+                yield f"⚠️ Could not trigger bootstrap: {detail}"
+            return
+
+        task_id = data["task_id"]
+        # Render a one-line preamble so the operator sees the mode +
+        # task id even if the agent is slow to produce first output.
+        yield f"**🚀 Bootstrap triggered** (mode `{mode}`, task `{task_id}`)\n\n"
+        # Reuse the normal task-streaming machinery — same renderer,
+        # same status emits, same footer.
+        async for chunk in self._trigger_stream(
+            prompt="", user=user, metadata=metadata, emit=emit,
+            existing_task_id=task_id,
+        ):
+            yield chunk
 
     # -- operator commands -------------------------------------------------
 
