@@ -212,6 +212,23 @@ def cmd_admin_task_cancel(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_admin_docs_sync(args: argparse.Namespace) -> int:
+    """`lc admin docs sync` — regenerate the auto module index in
+    AGENTS.md. Runs LOCALLY against the source checkout (does NOT
+    talk to the daemon — the daemon container's source mount is
+    read-only, so the write target is the host checkout)."""
+    from .docs_sync import main as docs_sync_main
+
+    forwarded: list[str] = []
+    if args.source:
+        forwarded.extend(["--source", args.source])
+    if args.agents_md:
+        forwarded.extend(["--agents-md", args.agents_md])
+    if args.check:
+        forwarded.append("--check")
+    return docs_sync_main(forwarded)
+
+
 def cmd_admin_observe(args: argparse.Namespace) -> int:
     """`lc admin observe` — show the Observer report (design §3f).
     With `--iterate`, run a fresh meta iteration first."""
@@ -296,6 +313,34 @@ def build_parser() -> argparse.ArgumentParser:
         "--old-commit", default="", help="the SHA before the pull (optional)"
     )
     pull_parser.set_defaults(func=cmd_admin_upstream_pull)
+
+    docs_parser = asub.add_parser(
+        "docs", help="documentation utilities (e.g. AGENTS.md sync)"
+    )
+    docs_sub = docs_parser.add_subparsers(dest="docs_cmd", required=True)
+    sync_parser = docs_sub.add_parser(
+        "sync",
+        help=(
+            "regenerate the auto module index in AGENTS.md. Runs LOCALLY "
+            "against the host checkout — does not talk to the daemon."
+        ),
+    )
+    sync_parser.add_argument(
+        "--source",
+        default="src/littlecoder",
+        help="path to the src/littlecoder dir (default: src/littlecoder)",
+    )
+    sync_parser.add_argument(
+        "--agents-md",
+        default="AGENTS.md",
+        help="path to AGENTS.md (default: AGENTS.md)",
+    )
+    sync_parser.add_argument(
+        "--check",
+        action="store_true",
+        help="exit 1 when AGENTS.md is out of date; don't write (pre-commit mode)",
+    )
+    sync_parser.set_defaults(func=cmd_admin_docs_sync)
 
     obs = asub.add_parser(
         "observe", help="show the Observer report (design §3f, Chapter 3)"
