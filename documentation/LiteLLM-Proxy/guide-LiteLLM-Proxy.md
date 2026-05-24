@@ -815,6 +815,280 @@ The plan document derived from this guide will sequence these as: A → B
 → E (so the new services exist and are probed) → C (UI flip) → §15 caps
 applied → F (docs catch up). Category D is parallel and optional.
 
+## 17. Human-required changes — operator actions that cannot be diffed
+
+Every action below is hands-on: it lives in a service admin UI, a database
+column, an external client config, or as a one-shot operator command. None
+of these can be captured in a git diff or applied by `docker compose up`,
+so the plan document treats them as explicit checklist items with operator
+sign-off.
+
+Numbered groups follow the cutover order in §11.
+
+### 17.1 Pre-cutover — backups & dry-run (one operator session, ~15 min)
+
+These run on the host. None of them changes runtime state; they just create
+restore points so the cutover is reversible.
+
+- [ ] **OWUI data snapshot** — run the on-demand path of the existing
+      `openwebui-backup` sidecar to produce a fresh dump *before* the chat
+      and embedding endpoints are repointed. Default location:
+      `./backups/openwebui/`.
+- [ ] **OB1 database dump** — `docker exec openbrain-db pg_dump -U postgres
+      openbrain > backups/openbrain/pre-litellm.sql`. The OB1 DB is the
+      authority for thoughts, sources, the wiki graph — losing it would be
+      catastrophic, gateway or no gateway.
+- [ ] **mnemory data snapshot** — manual trigger of the `mnemory-backup`
+      cron (or `tar -czf backups/mnemory/pre-litellm.tar.gz` over the
+      `mnemory-data` volume).
+- [ ] **little-coder sessions snapshot** — same pattern over
+      `little-coder-sessions` volume. The volume is small; cheap insurance.
+- [ ] **Note the current OWUI admin settings** — operator records the
+      *exact* current values of OpenAI base URL, embedding base URL,
+      embedding model id, and embedding dimension into a scratch file.
+      These are needed as the rollback values if step 17.5 has to be
+      reversed.
+- [ ] **Verify the workspace `.env` is git-ignored** — the LiteLLM virtual
+      keys land here; confirm before populating in 17.3.
+
+### 17.2 LiteLLM admin — one-time setup (operator on host)
+
+After `docker compose up -d llm-gateway-db llm-gateway` has succeeded and
+`/health/liveliness` returns 200:
+
+- [ ] **Verify upstream connectivity from inside the gateway:**
+      ```
+      docker exec llm-gateway curl -fsS http://llama-cpp:8080/health
+      docker exec llm-gateway curl -fsS http://llama-cpp-embed:8080/health
+      ```
+- [ ] **Confirm the gateway sees the configured models:**
+      ```
+      curl -fsS http://127.0.0.1:4000/v1/models \
+        -H "Authorization: Bearer $LITELLM_MASTER_KEY"
+      ```
+      Expect to see `qwen36-27b`, `qwen36-27b:nothink`, `qwen36-35b-a3b`,
+      `bge-m3`.
+- [ ] **Generate every virtual key** via `/key/generate` (one curl per
+      key, names matching §7). Operator pastes each returned `key` value
+      into the matching `.env` variable. Example for the entity-worker
+      key:
+      ```
+      curl -sX POST http://127.0.0.1:4000/key/generate \
+        -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
+        -H "Content-Type: application/json" \
+        -d '{"key_alias":"sk-ob-entity","metadata":{"caller":"openbrain-entity-worker","plane":"ob1"}}'
+      ```
+- [ ] **Apply starting TPM/RPM caps from §15.4** via `/key/update` for
+      each key. (LiteLLM's admin UI at `http://127.0.0.1:4000/ui` can also
+      do this if the operator prefers point-and-click.)
+- [ ] **Verify spend-log writes work** by issuing a test request through
+      `sk-admin` and confirming a row appears in Postgres:
+      ```
+      docker exec llm-gateway-db psql -U litellm -d litellm \
+        -c 'SELECT api_key, model, total_tokens FROM "LiteLLM_SpendLogs" ORDER BY created_at DESC LIMIT 5'
+      ```
+
+### 17.3 Per-service key population in `.env` files
+
+Two `.env` files in two directories. **Operator must update both.**
+
+- [ ] **Main stack `.env`** at the workspace root — populate:
+      `LITELLM_MASTER_KEY`, `LITELLM_DB_PASSWORD`, `LITELLM_KEY_LC_CODER`,
+      `LITELLM_KEY_MNEMORY`, `LITELLM_KEY_OWUI_CHAT`,
+      `LITELLM_KEY_OWUI_EMBED`, `LITELLM_KEY_ADMIN`,
+      `LITELLM_BACKUP_RETAIN_DAYS`, `LITELLM_BACKUP_CRON`. Replace
+      `LC_LLAMA_API_KEY=llama` with the virtual key for little-coder.
+- [ ] **OB1 stack `.env`** at `OB1/docker/.env` — populate:
+      `LITELLM_KEY_OB_MCP`, `LITELLM_KEY_OB_ENTITY`, `LITELLM_KEY_OB_WIKI`.
+- [ ] **(If githelper-pipe sees traffic)** generate `sk-owui-githelper`
+      and record it for the OWUI UI step in 17.5.
+- [ ] **Confirm `.env.example` was updated** with the new key names
+      (file diff covered in §8.4) so the schema is documented for future
+      contributors.
+
+### 17.4 OWUI runtime configuration — the largest set of UI clicks
+
+All actions are in Open WebUI Admin (gear icon top-right → "Admin
+Panel"). The operator should be logged in as an admin user. Each
+sub-step changes a value persisted in the `openwebui-data` volume — no
+container restart required, but **a hard browser refresh** is needed
+after each save for the change to take effect for in-progress chats.
+
+#### 17.4.1 Chat endpoint repoint
+- [ ] **Admin Panel → Settings → Connections** → expand the existing
+      "OpenAI API" entry currently pointed at `http://llama-cpp:8080/v1`.
+- [ ] Change **API Base URL** to `http://llm-gateway:4000/v1`.
+- [ ] Change **API Key** to the value of `LITELLM_KEY_OWUI_CHAT`.
+- [ ] Click "Verify connection" — confirm the green checkmark and that
+      the model list dropdown returns `qwen36-27b`, `qwen36-27b:nothink`,
+      `qwen36-35b-a3b`.
+- [ ] Save.
+
+#### 17.4.2 Embedding endpoint repoint
+- [ ] **Admin Panel → Settings → Documents** → Embedding Model Engine
+      should already be set to **"OpenAI"** (if not, set it now).
+- [ ] Change **OpenAI API Base URL** (the embedding-specific one,
+      separate from 17.4.1) to `http://llm-gateway:4000/v1`.
+- [ ] Change **OpenAI API Key** for embeddings to the value of
+      `LITELLM_KEY_OWUI_EMBED`.
+- [ ] Confirm **Embedding Model** is `bge-m3` (must match LiteLLM's
+      `model_name` from §6 — *not* the legacy `qllama/bge-m3:latest`).
+- [ ] Confirm **Embedding Dimension** is `1024`. If it shows anything
+      else, the previously-ingested documents may have been embedded at
+      a different dimension — see 17.8 for the re-embed decision.
+- [ ] Save.
+
+#### 17.4.3 Web Search embedding endpoint (separate panel, easy to miss)
+- [ ] **Admin Panel → Settings → Web Search** → if "Embedding Model Engine"
+      is overridden separately for web search ingestion, repoint it to
+      `http://llm-gateway:4000/v1` + `LITELLM_KEY_OWUI_EMBED`. If it
+      inherits from 17.4.2, no action.
+
+#### 17.4.4 Per-model overrides (every custom model registered in Admin → Models)
+- [ ] **Admin Panel → Models** → for every entry, open it and check if
+      the **Base Model** has a custom **Base URL** override. If yes,
+      repoint that override to the gateway. If the model inherits from
+      the global connection, no action.
+- [ ] Particular attention: any model whose name contains "GitHelper",
+      "deep_research", or a custom workflow name — these often carry
+      their own base-URL overrides.
+
+#### 17.4.5 Filter / pipe functions — Valves overrides
+- [ ] **Admin Panel → Functions** → for each filter and pipe, click into
+      it and open its **Valves** panel. Any Valve whose default is
+      `http://llama-cpp:8080/v1` (the live-deployed copy may differ from
+      the file default) must be updated to the gateway URL + a virtual
+      key. Known cases:
+      - `githelper-pipe` → `TARGET_BASE_URL` + new `TARGET_API_KEY`
+      - Any deep_research pipe variants the operator has deployed
+      - The unified AI Stack pipe — verify it doesn't have a hardcoded
+        Valve pointing at llama-cpp (it shouldn't; it routes by
+        keyword, not by base URL)
+- [ ] Save each.
+
+#### 17.4.6 Tool functions — same Valves review
+- [ ] **Admin Panel → Tools** → same Valves audit as 17.4.5. Less
+      common to find hardcoded base URLs here, but operator should still
+      open each tool once.
+
+#### 17.4.7 Post-flip smoke tests in OWUI
+- [ ] Start a new chat with the default model — confirm a reply streams
+      and the spend-log shows a row for `sk-owui-chat`.
+- [ ] Upload a small document → trigger RAG retrieval → confirm
+      embedding row appears for `sk-owui-embed`.
+- [ ] Run a web search query → confirm both the search call (not via
+      gateway) and the summarization call (via gateway) succeed.
+- [ ] If githelper-pipe is in use, run a known-good GitHelper prompt and
+      confirm `sk-owui-githelper` logs appear.
+
+### 17.5 open_notebook (independent timeline)
+
+`open_notebook` ships with its own admin UI for provider configuration.
+Operator can defer this indefinitely without affecting the rest of the
+stack. When ready:
+
+- [ ] Open the open_notebook UI at `http://127.0.0.1:8503`.
+- [ ] Navigate to Settings → Models / Providers (exact path varies by
+      version).
+- [ ] If a provider points at `http://llama-cpp:8080/v1` or
+      `http://llama-cpp-embed:8080/v1`, repoint it to the gateway URL.
+      Generate a `sk-open-notebook` virtual key if attribution is
+      wanted; otherwise reuse `sk-owui-chat`/`sk-owui-embed`.
+- [ ] Save and run a known-good notebook to verify.
+
+### 17.6 Off-host client migrations (optional, parallel to main cutover)
+
+These are clients running outside the workspace that reach the inference
+plane over Tailscale Serve paths. Migration to `/llm-gateway` is
+recommended (so virtual-key attribution applies) but not required.
+
+- [ ] **Claude Code on the host (Windows)** — uses MCP servers
+      (`mnemory-gateway`, `openbrain-mcpo*`, `lc-mcpo`). These are
+      upstream of the gateway and do not change. No action.
+- [ ] **Claude Code / Codex / external chat clients on other machines**
+      — if any are configured against
+      `https://<host>.tail<…>.ts.net/llama-cpp/v1` or
+      `…/llama-cpp-embed/v1`, the operator decides whether to migrate
+      them to `…/llm-gateway/v1`. If yes: update the client config and
+      issue a per-client virtual key. The legacy paths remain
+      functional during phase 1 — see §16.4.
+- [ ] **The shared workspace's `MEMORY.md` reference cards** (operator's
+      personal notes outside this repo) — if any cite the llama-cpp
+      tailnet URL, update them for muscle-memory hygiene.
+
+### 17.7 Caller-side retry-loop patches (deferred, can ship after phase 1)
+
+§15.5 audits which callers honor `Retry-After`. The patches below are
+small upstream fixes that should land in those repos *before* aggressive
+TPM/RPM caps are applied — without them, throttled callers will see
+their existing timeout-storm behavior instead of well-behaved backoff.
+
+- [ ] **openbrain-entity-worker** (Deno `fetch`) — wrap inference calls
+      in a `for (let attempt = 0; attempt < 5; attempt++)` loop that
+      reads `Retry-After` from any 429 response and `await
+      new Promise(r => setTimeout(r, parseInt(retryAfter) * 1000))`
+      before retrying. Upstream patch.
+- [ ] **openbrain-wiki** (Node SDK) — same pattern; verify whether the
+      `openai` Node SDK ≥ 4.x already does this; patch only if not.
+- [ ] **openbrain-mcp** — verify Deno client, patch if needed.
+- [ ] **little-coder** — defer to upstream pi behavior; if pi's
+      llama-cpp provider doesn't honor `Retry-After`, file an issue
+      rather than fork.
+- [ ] **filters/githelper-pipe.py** — wrap `requests.post` in a small
+      retry helper. One file, ~10 lines.
+
+### 17.8 Embedding compatibility (verify, then decide)
+
+Both before and after the cutover, the embedding model is **bge-m3** at
+**1024 dimensions** (§3 / §17.4.2). Pgvector indices on `openbrain-db`
+and OWUI's RAG store expect 1024-dim vectors. If §17.4.2 surfaces a
+different dimension in OWUI's UI, *something is misconfigured* — stop
+and investigate before completing the cutover. Otherwise no re-embedding
+is required.
+
+- [ ] **Confirm `EMBED_MODEL` was renamed** from `qllama/bge-m3:latest`
+      → `bge-m3` in `mnemory.environment` (§8.1 risk row). Without
+      this, mnemory will request a model alias the gateway doesn't
+      publish.
+- [ ] **Spot-check a known document in OWUI** — re-trigger retrieval and
+      confirm results match pre-cutover. If they don't, the dimensions
+      differ and a re-embed is required.
+
+### 17.9 Operator sign-off (final, after all groups complete)
+
+- [ ] Pipe-module triggers `llm traffic`, `llm caps`, `llm saturation`
+      all render correctly in OWUI.
+- [ ] Spend-log has rows for every issued virtual key (no caller silent).
+- [ ] No source IP on `llm-net` is making inference requests *without*
+      a virtual key — query:
+      ```
+      docker logs llama-cpp --tail 200 | \
+        grep '"POST /v1/' | awk '{print $3}' | sort -u
+      ```
+      The only address should be the gateway's IP on `llm-net`. Any
+      other client IP indicates a missed cutover.
+- [ ] Recovery script update (Category E in §16) has been exercised at
+      least once — `scripts/emergency-recovery.ps1 recover` brings the
+      gateway up in the correct order without errors.
+- [ ] Documentation updates (Category F in §16) are queued as a single
+      follow-up PR rather than dripped across the cutover.
+
+### 17.10 Rollback playbook (if any step regresses)
+
+Per-step revert, in the reverse order taken:
+
+| Step that broke | Revert action |
+|---|---|
+| 17.4.* (OWUI repoint) | Restore the URL/key values noted in 17.1; hard refresh browser. The DB change persists, so no container restart needed. |
+| 17.3 (`.env` repoint of a service) | Revert the one env var; `docker compose up -d <service>` |
+| 17.2 (gateway broken) | `docker compose down llm-gateway` — all callers immediately revert to direct llama-cpp because the env still points at the gateway, but the gateway being down means callers fail. Quick fix: per-service env revert. Slow fix: debug the gateway. |
+| Catastrophic (DB corruption etc.) | Restore the backups from 17.1; `docker compose down llm-gateway llm-gateway-db -v` to wipe gateway state; re-run from 17.2. |
+
+The strength of this design is that **every caller is independently
+revertible** — there is no single moment where the whole stack is in a
+half-migrated state with no rollback. The most expensive revert is the
+OWUI UI step, which is two minutes of clicking.
+
 ---
 
 **Next document** (to be generated from this guide):
