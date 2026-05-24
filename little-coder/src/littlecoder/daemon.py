@@ -753,6 +753,63 @@ def build_app(daemon: LittleCoderDaemon) -> FastAPI:
             "prior_status": prior_status,
         }
 
+    @app.post("/admin/bootstrap-agents")
+    def bootstrap_agents(req: dict = None) -> dict:
+        """Operator-triggered AGENTS.md bootstrap (design §3.7 layer 3).
+
+        Three modes — `commit` (default: write + separate commit),
+        `nocommit` (write but leave uncommitted), `revert` (find +
+        revert the bootstrap commit OR delete the file + drop the
+        `.no-agents-md` opt-out marker).
+
+        The endpoint validates the mode, builds the matching prompt
+        from `bootstrap_agents.prompt_for(mode)`, and triggers a task
+        via the existing `enqueue` path so the agent does the actual
+        work. Returns `{task_id, mode}` — the caller streams the task
+        with `/tasks/{task_id}/events` like any normal trigger."""
+        from .bootstrap_agents import VALID_MODES, prompt_for
+
+        req = req or {}
+        mode = str(req.get("mode") or "commit").strip().lower()
+        actor = str(req.get("actor") or "operator").strip() or "operator"
+
+        if mode not in VALID_MODES:
+            raise HTTPException(
+                422,
+                f"invalid mode {mode!r}; valid: {sorted(VALID_MODES)}",
+            )
+        if daemon.current_focus is None:
+            raise HTTPException(
+                409,
+                "no project focused — run `/project repo: <url>` first; "
+                "bootstrap needs a workspace to act on",
+            )
+
+        try:
+            prompt = prompt_for(mode)  # type: ignore[arg-type]
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+        trigger = TriggerRequest(
+            prompt=prompt,
+            channel="cli",
+            user_id=actor,
+            session_id=None,
+        )
+        state = daemon.enqueue(trigger)
+        daemon.audit.write(
+            "bootstrap_agents_triggered",
+            actor=actor,
+            mode=mode,
+            task_id=state.task_id,
+            focus=daemon.current_focus.canonical_url if daemon.current_focus else None,
+        )
+        return {
+            "task_id": state.task_id,
+            "status": state.status.value,
+            "mode": mode,
+        }
+
     @app.post("/admin/upstream/pull")
     def upstream_pull(req: dict = None) -> dict:
         """Operator-initiated upstream pull (design §12.2, Chapter 5 §5i).

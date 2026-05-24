@@ -171,6 +171,41 @@ def cmd_admin_reject(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_admin_bootstrap_agents(args: argparse.Namespace) -> int:
+    """`lc admin bootstrap-agents [--mode commit|nocommit|revert]` —
+    explicit operator-trigger for the §3.7 layer-3 cycle. Routes
+    through `/admin/bootstrap-agents` so the prompt strings stay in
+    ONE place (the daemon's `bootstrap_agents` module) — CLI and OWUI
+    Pipe both go through the same endpoint."""
+    body = {"mode": args.mode, "actor": "cli"}
+    res = _request("POST", "/admin/bootstrap-agents", json=body)
+    task_id = res["task_id"]
+    print(f"bootstrap-agents (mode={res['mode']}): task {task_id} {res['status']}")
+    if args.no_wait:
+        return 0
+    # Same streaming shape as `cmd_task` so the operator can watch
+    # the agent's work without reaching for `lc tasks`.
+    last = None
+    while True:
+        state = _request("GET", f"/tasks/{task_id}")
+        marker = (state["status"], state.get("commands", 0))
+        if marker != last:
+            cmds = marker[1]
+            suffix = f" · {cmds} command(s)" if cmds else ""
+            print(f"  → {state['status']}{suffix}")
+            last = marker
+        if state["status"] in _TERMINAL:
+            for a in state.get("activity") or []:
+                mark = "ok" if a.get("ok") else f"exit {a.get('exit_code')}"
+                print(f"    $ {a.get('command', '')}  [{mark}]")
+            answer = (state.get("answer") or "").strip()
+            if answer:
+                print("\n" + answer)
+            print(f"\noutcome: {state.get('outcome')}  ({state.get('detail', '')})")
+            return 0 if state["status"] == "done" else 1
+        time.sleep(2)
+
+
 def cmd_admin_upstream_pull(args: argparse.Namespace) -> int:
     """`lc admin upstream pull --new-commit <sha> [--old-commit <sha>]` —
     journal an upstream pull and list tier-3 skills to review per
@@ -300,6 +335,28 @@ def build_parser() -> argparse.ArgumentParser:
     cc = atask_sub.add_parser("cancel", help="interrupt a running or queued task")
     cc.add_argument("task_id")
     cc.set_defaults(func=cmd_admin_task_cancel)
+
+    boot = asub.add_parser(
+        "bootstrap-agents",
+        help=(
+            "operator-trigger an AGENTS.md bootstrap for the focused repo "
+            "(design §3.7 layer 3). Three modes: commit (default — bootstrap "
+            "+ separate commit), nocommit (bootstrap but leave uncommitted), "
+            "revert (undo bootstrap + drop .no-agents-md opt-out marker)."
+        ),
+    )
+    boot.add_argument(
+        "--mode",
+        choices=["commit", "nocommit", "revert"],
+        default="commit",
+        help="bootstrap mode (default: commit)",
+    )
+    boot.add_argument(
+        "--no-wait",
+        action="store_true",
+        help="return after queueing the task; don't stream progress",
+    )
+    boot.set_defaults(func=cmd_admin_bootstrap_agents)
 
     aups = asub.add_parser("upstream", help="upstream fork-parent administration")
     aups_sub = aups.add_subparsers(dest="upstream_cmd", required=True)

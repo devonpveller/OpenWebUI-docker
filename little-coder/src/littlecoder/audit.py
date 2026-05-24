@@ -47,6 +47,11 @@ LATER_EVENTS = {
     "tier3_justification_drafted",
     "tier3_justification_refused",
     "tier3_pr_drafted",
+    # Operator-triggered AGENTS.md bootstrap (the explicit-trigger path
+    # for the §3.7 layer-3 cycle). Records the requested mode + the
+    # task_id the daemon spawned, so the trigger trail is auditable
+    # even when the task itself fails / is cancelled.
+    "bootstrap_agents_triggered",
 }
 KNOWN_EVENTS = TOOL_EVENTS | OBSERVER_EVENTS | LATER_EVENTS
 
