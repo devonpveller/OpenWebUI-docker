@@ -37,10 +37,148 @@ The agent must:
 
 ---
 
-## Phase 0 — Pre-flight
+## Phase 0.0 — Pre-flight assumption verification (NEW — run first)
+
+These assertions verify that the codebase still matches what the audit in
+Guide §16/§18 captured. Any failure here means the audit needs revision
+*before* any backups or edits happen.
+
+### T0.0.1 — Verify llama-swap model list `[AGENT]` (Guide A1)
+- **Depends on:** none
+- **Action:**
+  ```powershell
+  $models = (Invoke-RestMethod http://127.0.0.1:8081/v1/models).data | ForEach-Object { $_.id } | Sort-Object
+  $expected = @("qwen36-27b", "qwen36-27b:nothink", "qwen36-35b-a3b", "qwen36-35b-a3b:nothink") | Sort-Object
+  if (Compare-Object $models $expected) {
+    Write-Error "Model list drift: actual=$($models -join ',') expected=$($expected -join ',')"
+    exit 1
+  }
+  ```
+- **Acceptance:** no error; sets match exactly. **Failure → stop and update
+  Guide §6 model_list before proceeding.**
+
+### T0.0.2 — Verify llama-cpp-embed exposes exactly one model `[AGENT]` (Guide A2)
+- **Depends on:** none
+- **Action:**
+  ```powershell
+  $count = (Invoke-RestMethod http://127.0.0.1:8082/v1/models).data.Count
+  if ($count -ne 1) { Write-Error "Expected 1 embedding model, got $count"; exit 1 }
+  ```
+- **Acceptance:** exits 0.
+
+### T0.0.3 — Verify no undiscovered hardcoded llama-cpp URLs `[AGENT]` (Guide A3)
+- **Depends on:** none
+- **Action:** grep all source files; expected hits are the files listed in
+  Guide §16.1 (Category A — 12 files) + §16.7 (Category G — verify-only)
+  + §18.2 (confirmed-not-callers). Any other file is a NEW caller.
+  ```powershell
+  $expected = @(
+    "docker-compose.yml",
+    "OB1\docker\docker-compose.yml",
+    "little-coder\config\little-coder.config.yaml",
+    "little-coder\config\models.json",
+    "little-coder\config\little-coder.schema.json",
+    "little-coder\src\littlecoder\config.py",
+    "OB1\recipes\email-history-import\pull-gmail.ts",
+    "OB1\recipes\google-activity-import\import-google-activity.mjs",
+    "filters\githelper-pipe.py",
+    "filters\githelper-pipe-v1-backup.py",
+    "scripts\status_check.py",
+    "scripts\check-tailscale-health.ps1",
+    "scripts\emergency-recovery.ps1",
+    "scripts\emergency-recovery.bat",
+    "scripts\quick-fixes.bat",
+    "scripts\update-stack.bat",
+    "scripts\gpu_check.py",
+    "modules\system-health\service\system_health.py",
+    "modules\gpu-status\service\gpu_status.py",
+    "config\llama-swap.config.yaml",
+    "scripts\ai_pipes\unified_openwebui_pipe.py",
+    "scripts\ai_pipes\tailscale_serve_pipe.py",
+    "entrypoint.sh",
+    "CLAUDE.md",
+    ".env.example",
+    ".github\copilot-instructions.md",
+    ".claude\skills\stack-map\SKILL.md",
+    ".claude\skills\stack-map\references\workspace-stacks.md"
+  )
+  $found = (Get-ChildItem -Recurse -File -Include *.py,*.ts,*.mjs,*.json,*.yaml,*.yml,*.ps1,*.bat,*.sh,*.md |
+    Select-String -Pattern "http://llama-cpp(-embed)?:8080" -List).Path |
+    ForEach-Object { $_.Replace((Get-Location).Path + "\", "") }
+  $surprises = $found | Where-Object { $_ -notin $expected -and $_ -notlike "documentation\*" -and $_ -notlike "little-coder\src\littlecoder\agent.py" -and $_ -notlike "little-coder\tests\*" }
+  if ($surprises) {
+    Write-Error "Undiscovered llama-cpp callers: $($surprises -join '; ')"
+    exit 1
+  }
+  ```
+- **Acceptance:** `$surprises` is empty. **Failure → audit the new file(s),
+  add to Guide §16.1 or §16.7, then re-run.**
+
+### T0.0.4 — (deferred to T0.7) Operator confirms OWUI embedding settings `[OPERATOR]` (Guide A4)
+- Coverage merged into T0.7.
+
+### T0.0.5 — Verify no NEW OB1 recipes have llama-cpp defaults `[AGENT]` (Guide A5)
+- **Depends on:** none
+- **Action:**
+  ```powershell
+  $hits = (Get-ChildItem -Recurse -File OB1\recipes -Include *.ts,*.mjs,*.py |
+    Select-String -Pattern "http://llama-cpp" -List).Path |
+    ForEach-Object { $_.Replace((Get-Location).Path + "\", "") }
+  $expected = @(
+    "OB1\recipes\email-history-import\pull-gmail.ts",
+    "OB1\recipes\google-activity-import\import-google-activity.mjs"
+  )
+  $surprises = $hits | Where-Object { $_ -notin $expected }
+  if ($surprises) {
+    Write-Error "New OB1 recipes with llama-cpp defaults: $($surprises -join '; ')"
+    exit 1
+  }
+  ```
+- **Acceptance:** `$surprises` is empty.
+
+### T0.0.6 — Verify little-coder schema.json is in sync with config.py `[AGENT]` (Guide A6)
+- **Depends on:** none
+- **Action:**
+  ```powershell
+  $expected = docker exec little-coder python -m littlecoder.config --schema 2>$null
+  $actual = Get-Content -Raw little-coder\config\little-coder.schema.json
+  # Compare normalized JSON (key-order + whitespace tolerant)
+  $expectedNorm = ($expected | ConvertFrom-Json | ConvertTo-Json -Depth 100)
+  $actualNorm = ($actual | ConvertFrom-Json | ConvertTo-Json -Depth 100)
+  if ($expectedNorm -ne $actualNorm) {
+    Write-Error "little-coder schema.json is OUT OF SYNC with config.py. Run: docker exec little-coder python -m littlecoder.config --schema > little-coder/config/little-coder.schema.json; commit; then re-run cutover."
+    exit 1
+  }
+  ```
+- **Acceptance:** no error. **Failure → operator regenerates the schema
+  and commits BEFORE cutover so the regeneration commit doesn't tangle
+  with our edits.**
+
+### T0.0.7 — Operator reviews tailnet sessions `[OPERATOR]` (Guide A7)
+- **Depends on:** none
+- **Prompt:**
+  > Run: `docker exec tailscale tailscale --socket=/tmp/tailscaled.sock status`
+  > Check for any active sessions from machines you don't recognize. If
+  > any unknown clients are present, they may be using the
+  > `/llama-cpp` or `/llama-cpp-embed` tailnet paths and will need to
+  > migrate (or be documented as known-direct callers). Reply
+  > "tailnet reviewed" or "found <description of unknown client>".
+- **Acceptance:** operator replies "tailnet reviewed" — anything else
+  prompts a Guide §16.4 update before continuing.
+
+### G-pre — Pre-flight passed `[GATE]`
+- **Depends on:** T0.0.1–T0.0.7
+- **Prompt to operator:**
+  > All seven pre-flight assertions passed (or were resolved). Proceed
+  > to Phase 0 backups? Reply "proceed" or "pause".
+- **Acceptance:** operator replies "proceed".
+
+---
+
+## Phase 0 — Pre-flight (backups)
 
 ### T0.1 — Verify clean working tree `[AGENT]`
-- **Depends on:** none
+- **Depends on:** G-pre
 - **Action:**
   ```powershell
   git status --porcelain
@@ -370,17 +508,45 @@ The agent must:
 
 ## Phase 2 — Heavy-hitter cutover
 
-### T2.1 — Edit little-coder config files `[AGENT]`
+### T2.1 — Edit little-coder Python source defaults `[AGENT]` (NEW)
 - **Depends on:** T1.13
-- **Action:** three `Edit` operations:
+- **Action:** **Critical** — `little-coder/config/little-coder.schema.json`
+  is GENERATED from `little-coder/src/littlecoder/config.py`. Edit the
+  Python source FIRST; the schema will be regenerated in T2.1.5.
+  Three edits in [little-coder/src/littlecoder/config.py:37-46](little-coder/src/littlecoder/config.py#L37):
+  - Line 37 `base_url: str = "http://llama-cpp:8080/v1"` →
+    `base_url: str = "http://llm-gateway:4000/v1"`
+  - Line 45 `embedding_base_url: str = "http://llama-cpp-embed:8080/v1"` →
+    `embedding_base_url: str = "http://llm-gateway:4000/v1"`
+  - Line 46 `embedding_model: str = "bge-m3-f16.gguf"` — **leave as-is**
+    (LiteLLM §6 model_list registers this alias; changing it would
+    require re-embedding any prior content that used this id).
+- **Acceptance:**
+  ```powershell
+  Select-String little-coder\src\littlecoder\config.py -Pattern "llama-cpp(-embed)?:8080" -Quiet
+  ```
+  returns `False`.
+
+### T2.1.5 — Regenerate little-coder schema.json `[AGENT]` (NEW)
+- **Depends on:** T2.1
+- **Action:**
+  ```powershell
+  docker exec little-coder python -m littlecoder.config --schema > little-coder\config\little-coder.schema.json
+  ```
+- **Acceptance:**
+  ```powershell
+  Select-String little-coder\config\little-coder.schema.json -Pattern "llm-gateway:4000" -Quiet
+  ```
+  returns `True`. **And** the schema content matches what the Python
+  produces (sanity-check by diffing against another regeneration).
+
+### T2.1.6 — Edit little-coder runtime config files `[AGENT]`
+- **Depends on:** T2.1.5
+- **Action:** two `Edit` operations (the schema.json was already updated by T2.1.5):
   - `little-coder/config/little-coder.config.yaml:11` —
     `base_url: http://llama-cpp:8080/v1` → `base_url: http://llm-gateway:4000/v1`
   - `little-coder/config/models.json:6` —
     `"baseUrl": "http://llama-cpp:8080/v1"` → `"baseUrl": "http://llm-gateway:4000/v1"`
-  - `little-coder/config/little-coder.schema.json:102` — `"default":
-    "http://llama-cpp:8080/v1"` → `"default": "http://llm-gateway:4000/v1"`
-  - `little-coder/config/little-coder.schema.json:116` — `"default":
-    "http://llama-cpp-embed:8080/v1"` → `"default": "http://llm-gateway:4000/v1"`
 - **Acceptance:**
   ```powershell
   Select-String -Path little-coder\config\* -Pattern "llama-cpp:8080" -Quiet
@@ -389,7 +555,7 @@ The agent must:
   both return `False`.
 
 ### T2.2 — Edit docker-compose.yml little-coder block `[AGENT]`
-- **Depends on:** T2.1
+- **Depends on:** T2.1.6
 - **Action:** two edits in `docker-compose.yml`:
   - line 689 (`LC_LLAMA_API_KEY=${LC_LLAMA_API_KEY:-llama}`) — confirm
     `.env` `LC_LLAMA_API_KEY` was overwritten by Phase 1; no edit if so.
@@ -628,8 +794,46 @@ The agent must:
   > not deployed in OWUI.
 - **Acceptance:** operator replies "valves updated" or "skip."
 
-### T3.10 — Dark-traffic verification `[AGENT]`
+### T3.9.5 — Edit OB1 operator-run recipe defaults `[AGENT]` (NEW)
 - **Depends on:** T3.9
+- **Action:** edit the two ad-hoc recipe scripts so future operator runs
+  default to the gateway (rather than requiring `LOCAL_LLM_BASE=…`
+  overrides each time):
+  - [OB1/recipes/email-history-import/pull-gmail.ts:68](OB1/recipes/email-history-import/pull-gmail.ts#L68) —
+    `"http://llama-cpp:8080/v1"` → `"http://llm-gateway:4000/v1"`
+  - [OB1/recipes/email-history-import/pull-gmail.ts:70](OB1/recipes/email-history-import/pull-gmail.ts#L70) —
+    `"http://llama-cpp-embed:8080/v1"` → `"http://llm-gateway:4000/v1"`
+  - [OB1/recipes/google-activity-import/import-google-activity.mjs:33](OB1/recipes/google-activity-import/import-google-activity.mjs#L33) —
+    same swap on `LLM_BASE` default
+  - [OB1/recipes/google-activity-import/import-google-activity.mjs:35](OB1/recipes/google-activity-import/import-google-activity.mjs#L35) —
+    same swap on `EMBED_BASE` default
+- **Note:** these recipes are operator-run ad-hoc, not container services
+  — no restart required. The next time the operator invokes them they
+  pick up the new defaults. The operator should also be told they can
+  pass `LOCAL_LLM_KEY=<sk-...>` env to attribute these runs to a
+  per-recipe virtual key if desired (otherwise traffic shows up as the
+  unkeyed `sk-admin` or anonymous, which is acceptable for ad-hoc).
+- **Acceptance:**
+  ```powershell
+  Select-String -Path OB1\recipes\email-history-import\pull-gmail.ts,OB1\recipes\google-activity-import\import-google-activity.mjs -Pattern "llama-cpp(-embed)?:8080" -Quiet
+  ```
+  returns `False`.
+
+### T3.9.6 — Prompt operator about OB1 recipe attribution (optional) `[OPERATOR]` (NEW)
+- **Depends on:** T3.9.5
+- **Prompt:**
+  > Want per-recipe attribution for the OB1 gmail / google-activity
+  > imports? If yes, I can generate `sk-ob-recipe-gmail` and
+  > `sk-ob-recipe-google` virtual keys and document the
+  > `LOCAL_LLM_KEY=<...>` env var to pass at invocation. If no, ad-hoc
+  > runs will show up under `sk-admin` or no key (still gateway-routed,
+  > just not attributed by recipe). Reply "generate keys" or "skip".
+- **Acceptance:** operator decides. If "generate keys", agent runs the
+  `/key/generate` calls from T1.8 with these two extra aliases, updates
+  the `.env`, and prints the operator-side env-var snippet to use.
+
+### T3.10 — Dark-traffic verification `[AGENT]`
+- **Depends on:** T3.9.6
 - **Action:**
   ```powershell
   docker logs llama-cpp --tail 500 | Select-String "POST /v1/" | ForEach-Object { ($_ -split ' ')[2] } | Sort-Object -Unique

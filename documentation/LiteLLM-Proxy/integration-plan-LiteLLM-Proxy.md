@@ -52,10 +52,11 @@ cutover than a fast restore-from-backup.
 
 | Phase | What | Agent autonomy | Ends with gate |
 |---|---|---|---|
-| **0 — Pre-flight** | Backups, branch creation, `.env` scaffolding | Full | G1 (master key + DB password) |
-| **1 — Standup** | LiteLLM config, compose additions, gateway up, virtual keys, spend-log verification | Full (after G1) | G2 (review issued keys before they're used) |
-| **2 — Heavy-hitter cutover** | little-coder + OWUI + openbrain-entity-worker | Mixed (file edits + restarts agent-side; OWUI UI flips operator-side) | G3 (OWUI UI flip) |
-| **3 — Remaining callers (optional, deferrable)** | mnemory + openbrain-mcp + openbrain-wiki + githelper-pipe | Full | None — additive |
+| **0.0 — Pre-flight verification (added in re-audit)** | Run Guide §18 assertions A1–A7: confirm model list, no undiscovered callers, OB1 recipe inventory unchanged, little-coder schema in sync, tailnet sessions reviewed | Full (one operator review at A7) | G-pre (operator approves to begin Phase 0) |
+| **0 — Pre-flight backups** | Backups, branch creation, `.env` scaffolding | Full | G1 (master key + DB password) |
+| **1 — Standup** | LiteLLM config (with ALL model aliases per re-audit §6), compose additions, gateway up, virtual keys, spend-log verification | Full (after G1) | G2 (review issued keys before they're used) |
+| **2 — Heavy-hitter cutover** | little-coder (Python source → schema regen → runtime configs) + OWUI + openbrain-entity-worker | Mixed (file edits + restarts agent-side; OWUI UI flips operator-side) | G3 (OWUI UI flip) |
+| **3 — Remaining callers (optional, deferrable)** | mnemory + openbrain-mcp + openbrain-wiki + githelper-pipe + **OB1 operator-run recipes** (gmail + google-activity imports — added in re-audit) | Full | None — additive |
 | **4 — Observability** | Pipe module, TPM/RPM caps, retry-loop patches | Mixed (module agent-side; cap values operator-set) | None — additive |
 | **5 — Recovery + docs** | emergency-recovery scripts, stack-map, CLAUDE.md, all Category F docs | Full | None |
 | **6 — Soak + sign-off** | 7-day baseline, dark-traffic query, capacity-planning queries materialize | Operator-driven | G5 (final sign-off) |
@@ -68,7 +69,38 @@ production use.
 
 ## 4. Phase details
 
-### Phase 0 — Pre-flight (≈30 min agent + 5 min operator)
+### Phase 0.0 — Pre-flight verification (≈10 min agent + 5 min operator, added in re-audit)
+
+**Goal:** Confirm the codebase state still matches what Guide §16/§18
+captured during the audit. Any drift caught here prevents wasted backup
+time and unsafe edits.
+
+**Agent actions** (Guide §18.1 A1–A7, implemented as tasks T0.0.1–T0.0.7):
+- A1 — `curl http://127.0.0.1:8081/v1/models` returns exactly the four
+  expected model IDs (`qwen36-27b`, `qwen36-27b:nothink`,
+  `qwen36-35b-a3b`, `qwen36-35b-a3b:nothink`).
+- A2 — `curl http://127.0.0.1:8082/v1/models` returns exactly 1 embedding
+  model.
+- A3 — Repository grep for `http://llama-cpp(-embed)?:8080` returns only
+  files listed in Guide §16.1 / §16.7 / §18.2. No new file = no missed
+  caller.
+- A5 — `OB1/recipes/` grep returns only the two known recipes
+  (`email-history-import`, `google-activity-import`).
+- A6 — little-coder `python -m littlecoder.config --schema` matches the
+  committed `little-coder.schema.json`.
+- A7 — Operator reviews `tailscale status` for surprising off-host
+  sessions.
+
+**Acceptance criteria:**
+- All seven assertions pass without intervention, OR every failure is
+  resolved (Guide §6 updated, new caller added to §16.1, schema
+  regenerated, etc.) before proceeding.
+
+**Gate G-pre — operator approves to begin Phase 0.** Any A1–A7 failure
+that required mid-flight resolution is acknowledged. Operator confirms
+readiness to begin backups.
+
+### Phase 0 — Pre-flight backups (≈30 min agent + 5 min operator)
 
 **Goal:** Reach a state where the agent has a clean working tree, backups
 exist, and the only thing blocking standup is the operator providing two
@@ -194,23 +226,39 @@ need the known-direct-callers allowlist populated; document this in
 **Goal:** All inference traffic flows through the gateway. The
 dark-traffic query in §17.9 returns only the gateway IP.
 
+**Note on mnemory `EMBED_MODEL` change:** Guide §6 now registers
+`qllama/bge-m3:latest` as a LiteLLM alias for the bge-m3 upstream, so
+this rename is no longer strictly required for cutover safety — mnemory
+will work with the original `qllama/bge-m3:latest` value pointed at the
+gateway. The rename to `bge-m3` is still preferred for long-term
+normalization but can be deferred to a Phase 7 cleanup if it complicates
+the cutover window.
+
 **Agent actions, in order (each is one substep, agent restarts the
 service and verifies before moving to the next):**
-- 3A: `mnemory` — edit `docker-compose.yml:295-299, 313-316`; verify the
-  `EMBED_MODEL` rename from `qllama/bge-m3:latest` → `bge-m3` (critical —
-  see §17.8); restart.
+- 3A: `mnemory` — edit `docker-compose.yml:295-299, 313-316`; either
+  rename `EMBED_MODEL` to `bge-m3` (preferred) or leave as
+  `qllama/bge-m3:latest` (works because §6 registers the alias); restart.
 - 3B: `openbrain-mcp` — edit `OB1/docker/docker-compose.yml:57-63`; restart.
 - 3C: `openbrain-wiki` — edit `OB1/docker/docker-compose.yml:261-266`; restart.
 - 3D: `filters/githelper-pipe.py:117-118` — edit file default; agent
   prompts operator to also update the deployed Valves in OWUI Admin →
-  Functions → githelper (since the file default doesn't override an
-  already-deployed pipe's stored config — this is a small operator
-  micro-action, not a full gate).
+  Functions → githelper.
+- **3E (re-audit addition):** edit OB1 operator-run recipes —
+  `OB1/recipes/email-history-import/pull-gmail.ts:68,70` and
+  `OB1/recipes/google-activity-import/import-google-activity.mjs:33,35`
+  — file defaults swap to the gateway. No restart required (these are
+  ad-hoc scripts, not container services).
+- **3F (re-audit addition, optional):** operator decides whether to
+  generate per-recipe virtual keys (`sk-ob-recipe-gmail`,
+  `sk-ob-recipe-google`) for attribution, or let ad-hoc runs land under
+  `sk-admin` / unattributed.
 
 **Acceptance criteria:**
-- All four callers appear in the spend-log within 1 hour of restart
-  (mcp and wiki are sparse — may not see traffic immediately; operator
-  may need to trigger a known workload for mcp).
+- All four service callers appear in the spend-log within 1 hour of
+  restart (mcp and wiki are sparse — may not see traffic immediately;
+  operator may need to trigger a known workload for mcp).
+- OB1 recipe defaults grep-clean of `llama-cpp(-embed)?:8080`.
 - Dark-traffic query returns ONLY the gateway IP.
 
 ### Phase 4 — Observability (≈45 min agent + 15 min operator)
