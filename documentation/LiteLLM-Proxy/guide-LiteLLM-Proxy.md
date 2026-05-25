@@ -180,9 +180,18 @@ inference plane health independent of LiteLLM.
 
 ## 6. LiteLLM configuration sketch (`config/litellm.config.yaml`)
 
+**Model-alias coverage** — re-audit found three different embedding model
+IDs are sent to `llama-cpp-embed` today (`bge-m3` from OB1, `qllama/bge-m3:latest`
+from mnemory, `bge-m3-f16.gguf` from little-coder's source default).
+llama-cpp-embed ignores the `model` field and serves whatever GGUF was loaded,
+so this works today. **LiteLLM routes by model name** — every alias clients
+actually send must be registered or the gateway returns "model not found."
+Same for the qwen `:nothink` variants — register all four chat variants
+llama-swap can serve (the 35B-A3B `:nothink` was previously omitted).
+
 ```yaml
 model_list:
-  # Chat — Qwen 3.6 27B, both variants share the same upstream slot
+  # ─── Chat — Qwen 3.6 27B (both variants share the same upstream slot) ───
   - model_name: qwen36-27b
     litellm_params:
       model: openai/qwen36-27b
@@ -194,15 +203,32 @@ model_list:
       api_base: http://llama-cpp:8080/v1
       api_key: ${LC_LLAMA_API_KEY}
 
-  # Chat — Qwen 3.6 35B-A3B (registered for completeness)
+  # ─── Chat — Qwen 3.6 35B-A3B (both variants) ───
   - model_name: qwen36-35b-a3b
     litellm_params:
       model: openai/qwen36-35b-a3b
       api_base: http://llama-cpp:8080/v1
       api_key: ${LC_LLAMA_API_KEY}
+  - model_name: qwen36-35b-a3b:nothink
+    litellm_params:
+      model: openai/qwen36-35b-a3b:nothink
+      api_base: http://llama-cpp:8080/v1
+      api_key: ${LC_LLAMA_API_KEY}
 
-  # Embeddings — bge-m3, 1024-dim
+  # ─── Embeddings — bge-m3, 1024-dim. THREE aliases for the same upstream. ───
+  # See model-alias coverage note above. Phase 3+ can normalize callers to a
+  # single canonical name; for cutover safety, all three are routed.
   - model_name: bge-m3
+    litellm_params:
+      model: openai/bge-m3
+      api_base: http://llama-cpp-embed:8080/v1
+      api_key: not-needed
+  - model_name: bge-m3-f16.gguf            # little-coder default in config.py
+    litellm_params:
+      model: openai/bge-m3
+      api_base: http://llama-cpp-embed:8080/v1
+      api_key: not-needed
+  - model_name: qllama/bge-m3:latest       # mnemory's current EMBED_MODEL value
     litellm_params:
       model: openai/bge-m3
       api_base: http://llama-cpp-embed:8080/v1
@@ -689,7 +715,10 @@ line listed is a target for the §8.1 substitution rules.
 | [little-coder/config/little-coder.config.yaml:11](little-coder/config/little-coder.config.yaml#L11) | 11 | `inference.base_url` | `http://llama-cpp:8080/v1` | `http://llm-gateway:4000/v1` |
 | [little-coder/config/models.json:6](little-coder/config/models.json#L6) | 6 | `models[].baseUrl` | `http://llama-cpp:8080/v1` | `http://llm-gateway:4000/v1` |
 | [little-coder/config/little-coder.schema.json:102](little-coder/config/little-coder.schema.json#L102) | 102 / 116 | `inference.base_url.default`, embeddings default | `http://llama-cpp:8080/v1`, `http://llama-cpp-embed:8080/v1` | gateway defaults |
+| [little-coder/src/littlecoder/config.py:37, 45-46](little-coder/src/littlecoder/config.py#L37) | 37 / 45 / 46 | `InferenceConfig` pydantic class defaults — **`schema.json` is GENERATED from this file** via `python -m littlecoder.config --schema`. Edit BOTH or the schema change gets reverted on next regeneration. | `base_url`, `embedding_base_url`, `embedding_model="bge-m3-f16.gguf"` | gateway URLs; embedding_model stays (LiteLLM registers the alias per §6) |
 | [docker-compose.yml:716](docker-compose.yml#L716) | 716 | `little-coder.depends_on` | `llama-cpp` | `llm-gateway` |
+| [OB1/recipes/email-history-import/pull-gmail.ts:68-71](OB1/recipes/email-history-import/pull-gmail.ts#L68) | 68 / 70 | Operator-run recipe — **bypasses compose env entirely**. Hardcoded `LLM_BASE` and `EMBED_BASE` defaults. Operator can override via `LOCAL_LLM_BASE` / `LOCAL_EMBED_BASE` env on invocation, but the defaults must change so an `lc` run without explicit env still routes through the gateway. | `http://llama-cpp:8080/v1` / `http://llama-cpp-embed:8080/v1` | `http://llm-gateway:4000/v1` |
+| [OB1/recipes/google-activity-import/import-google-activity.mjs:33-36](OB1/recipes/google-activity-import/import-google-activity.mjs#L33) | 33 / 35 | Same shape as the gmail recipe; operator-run, hardcoded defaults | `http://llama-cpp:8080/v1` / `http://llama-cpp-embed:8080/v1` | `http://llm-gateway:4000/v1` |
 
 ### 16.2 Category B — OWUI filter pipes with hardcoded base URL (MUST change)
 
@@ -798,22 +827,23 @@ edit them. These mention llama-cpp as a string but don't talk to it.
 | [little-coder/tests/test_similarity.py:6](little-coder/tests/test_similarity.py#L6) | 6 | Comment in a test docstring |
 | [filters/githelper-pipe.py:450](filters/githelper-pipe.py#L450) | 450 | Inline comment about Qwen3 thinking — not a URL |
 
-### 16.8 Summary counts
+### 16.8 Summary counts (updated after re-audit)
 
 | Category | Files | Action |
 |---|---|---|
-| A — direct API callers | 9 (5 compose entries + 4 little-coder files) | Code change required |
+| A — direct API callers | **12** (5 compose entries + 5 little-coder files including the Python source + 2 OB1 operator recipes) | Code change required |
 | B — OWUI filter pipes | 1 (+ 1 backup) | Code change required; backup left as-is |
 | C — OWUI runtime UI | 1 (OWUI) + 1 (open_notebook) | Admin-UI step |
 | D — tailscale serve | 3 (entrypoint.sh, compose, pipe) | Decision needed; optional addition |
-| E — recovery / probes | 10 | Additive changes (inventory + probes for the new services) |
+| E — recovery / probes | 11 (re-audit added `scripts/status_check.py` lines 139/153/175/189/326/338) | Additive changes (inventory + probes for the new services) |
 | F — documentation | 9 (CLAUDE.md, skills, design docs, integration docs, security doc) | Semantic rewrites, post-cutover |
 | G — verify-only | 7 | No change |
-| **Total touched files** | **36** (some span multiple categories) | |
+| **Total touched files** | **40+** (some span multiple categories) | |
 
-The plan document derived from this guide will sequence these as: A → B
-→ E (so the new services exist and are probed) → C (UI flip) → §15 caps
-applied → F (docs catch up). Category D is parallel and optional.
+The plan document derived from this guide will sequence these as: §18
+pre-flight verification → A → B → E (so the new services exist and are
+probed) → C (UI flip) → §15 caps applied → F (docs catch up). Category D
+is parallel and optional.
 
 ## 17. Human-required changes — operator actions that cannot be diffed
 
@@ -1088,6 +1118,128 @@ The strength of this design is that **every caller is independently
 revertible** — there is no single moment where the whole stack is in a
 half-migrated state with no rollback. The most expensive revert is the
 OWUI UI step, which is two minutes of clicking.
+
+### 17.11 Operator-run OB1 recipes (file edits, not service restarts)
+
+The two recipes added in §16.1 (`pull-gmail.ts`, `import-google-activity.mjs`)
+are ad-hoc scripts the operator runs to backfill data — they are not
+container services. They have **hardcoded `http://llama-cpp:8080/v1`
+defaults** that bypass compose env entirely. Two cutover paths:
+
+- **Edit the file defaults** (recommended for one-shot cleanness). One-time
+  change; future operator runs route through the gateway by default. Plan
+  Phase 3 covers this.
+- **Override at invocation** via `LOCAL_LLM_BASE=http://llm-gateway:4000/v1
+  deno run …`. No file edit, but every future invocation must remember
+  the override. Footgun.
+
+The plan defaults to "edit the file defaults" because the user's stated
+goal is one-shot replacement with no surprises — overrides-only leaves a
+trip wire for future-you.
+
+## 18. Verified assumptions & pre-flight assertions
+
+The re-audit surfaced four gaps the first pass missed:
+1. Model-alias mismatch — three different embedding model IDs in flight
+   (`bge-m3`, `bge-m3-f16.gguf`, `qllama/bge-m3:latest`) plus the
+   previously-omitted `qwen36-35b-a3b:nothink` chat variant. §6 now
+   registers all of them.
+2. **Operator-run OB1 recipes** with hardcoded `http://llama-cpp:8080/v1`
+   defaults that bypass compose env. §16.1 / §17.11 added.
+3. **little-coder's schema.json is generated** from `src/littlecoder/config.py`.
+   Editing the JSON without the Python source means the next regeneration
+   reverts your change. §16.1 row added.
+4. `scripts/status_check.py` probe lines (139, 153, 175, 189, 326, 338)
+   — Category E, no action required, but listed for completeness.
+
+To prevent further surprises, the agent runs assertions A1–A7 below as a
+Phase 0.0 pre-flight before any backups or edits. Each is a runnable
+command with a pass/fail expectation; any failure stops the cutover and
+surfaces the discrepancy.
+
+### 18.1 Pre-flight assertions (run before Phase 0)
+
+The full set is implemented as Phase 0.0 tasks in
+[integration-tasks-LiteLLM-Proxy.md](integration-tasks-LiteLLM-Proxy.md)
+(T-0.0.1 through T-0.0.7). Summary:
+
+| # | Assertion | Pass criterion | Failure means |
+|---|---|---|---|
+| A1 | Every model ID llama-swap exposes is registered in §6 | `curl -s http://127.0.0.1:8081/v1/models \| jq -r '.data[].id' \| sort` returns exactly `qwen36-27b`, `qwen36-27b:nothink`, `qwen36-35b-a3b`, `qwen36-35b-a3b:nothink` | A new model was added since the guide was written → add to §6 before cutover |
+| A2 | llama-cpp-embed exposes exactly one model | `curl -s http://127.0.0.1:8082/v1/models \| jq -r '.data \| length'` returns `1` | Multi-model embedding setup not anticipated → revise §6 |
+| A3 | No undiscovered hardcoded llama-cpp URLs | `Grep -r "http://llama-cpp(-embed)?:8080" --include='*.{py,ts,mjs,json,yaml,yml}' .` returns only the file list in §16.1 + the audit-only references in §16.7 / §18.2 | New caller introduced since audit → audit it before cutover |
+| A4 | OWUI current settings match §17.1 expectations | Operator confirms (T0.7) that embedding model id is `bge-m3` and dimension is `1024` | OWUI was re-configured between audit and cutover → re-snapshot, revise §17.4 if needed |
+| A5 | No NEW hardcoded llama-cpp URLs in OB1 recipes | `Grep -r "http://llama-cpp" OB1/recipes/` returns only `email-history-import/pull-gmail.ts` and `google-activity-import/import-google-activity.mjs` | A new recipe was added → audit before cutover |
+| A6 | little-coder schema is in sync with config.py | `python -m littlecoder.config --schema \| diff - little-coder/config/little-coder.schema.json` is empty | Schema is stale; regenerate before cutover so the diff doesn't tangle with our edits |
+| A7 | No surprising off-host tailnet sessions | `docker exec tailscale tailscale --socket=/tmp/tailscaled.sock status` is reviewed by operator | An undocumented off-host caller exists → document in §16.4 |
+
+### 18.2 Files confirmed NOT to be callers (verified during re-audit)
+
+These appeared in the broad `llama-cpp` grep but inspection confirmed
+they don't make inference requests. Listed so a future maintainer
+doesn't re-audit them:
+
+- `filters/context-window-filter.py` — sliding-window message-trim
+  filter; operates on the body, no outbound calls.
+- `OB1/dashboards/open-brain-dashboard-next/app/api/**/*` — Next.js API
+  routes; DB CRUD against PostgREST. Grep for `llama|qwen|bge|embed`
+  returns zero files.
+- `OB1/dashboards/open-brain-dashboard/src/**/*` — Svelte dashboard;
+  Supabase client only.
+- `OB1/recipes/local-ollama-embeddings/` — targets Ollama at
+  `localhost:11434`, not llama-cpp.
+- `OB1/recipes/wiki-synthesis/`, operator-run `OB1/recipes/entity-wiki/`,
+  `OB1/recipes/x-twitter-import/`, `OB1/recipes/grok-export-import/`,
+  `OB1/recipes/journals-blogger-import/`, `OB1/recipes/instagram-import/`
+  — all default to **cloud** providers (OpenRouter / OpenAI). The
+  container-run `openbrain-wiki` overrides them via compose env (§16.1
+  E4 / C4 covers it).
+- `OB1/integrations/entity-extraction-worker/_shared/config.ts` and
+  `_shared/helpers.ts` — read `CHAT_API_BASE` / `EMBEDDING_API_BASE`
+  env vars; covered via compose env edits in §16.1.
+- `OB1/integrations/kubernetes-deployment/index.ts` — defaults to cloud;
+  overridden by compose env (this is the source for `openbrain-mcp`).
+- `scripts/ai_pipes/fileshed.py` — `http://localhost:8080` is OWUI's
+  own port, not llama-cpp.
+- `smolcrawl/deep_research/{models.py, rag_research.py}`,
+  `smolcrawl/deep_research_tool.py` — `owui_base_url` defaults to
+  `http://openwebui:8080`; calls into OWUI, not llama-cpp.
+- `search-gateway/gateway/src/gateway/config.py` — port 8080 is the
+  gateway's own port, not llama-cpp.
+
+### 18.3 Honest limits — what this audit cannot guarantee
+
+100% certainty against a live system is hard. Things this audit cannot
+verify with full confidence (and the mitigations):
+
+| # | Unknowable | Mitigation |
+|---|---|---|
+| L1 | OWUI's database contents — custom model entries in Admin → Models may hold their own Base URL overrides invisible to grep | §17.4.4 operator audit + §17.9 dark-traffic acceptance test catches any missed entry empirically |
+| L2 | `open_notebook`'s database contents | §17.5 is operator-driven; no automated audit |
+| L3 | Off-host clients on the tailnet (Claude Code on other machines, etc.) | Pre-flight A7; existing `/llama-cpp` tailnet paths remain functional during phase 1 so unknown clients keep working (just stay unattributed) |
+| L4 | OWUI Functions/Tools the operator developed locally (not in `filters/` or `scripts/ai_pipes/`) — live only in OWUI's data volume | §17.4.5 / §17.4.6 operator audit + dark-traffic check |
+| L5 | Watchtower-triggered image updates between audit time and cutover time | Pre-flight A3 grep is run at cutover time, not audit time, so catches drift |
+| L6 | Future-added callers during the cutover window itself | Cutover is short (~2 hours active work); operator must not merge other branches during the window |
+
+The agent surfaces any of these uncertainties to the operator at the G0
+gate so the operator can decide whether to proceed or pause for a manual
+sweep.
+
+### 18.4 What guarantees the cutover is complete
+
+Despite the limits above, three converging signals together give very
+high confidence (close to 100%) that nothing was missed:
+
+1. **Pre-flight A1–A7 pass** — no new state since the audit.
+2. **Every caller listed in §16.1 has a spend-log row tagged with its
+   virtual key** — checked at each substep, not just at the end.
+3. **§17.9 dark-traffic acceptance test returns ONLY the gateway IP** —
+   the empirical answer to "is anything else still talking to llama-cpp
+   directly." This is the ground-truth check no audit can substitute for.
+
+If all three converge, residual risk is bounded to a future caller
+appearing AFTER cutover — which would show up in the dark-traffic
+query the next time it runs.
 
 ---
 
