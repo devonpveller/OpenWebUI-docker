@@ -20,3 +20,4 @@ OB1/
 secrets/
 *.pyc
 *.log
+/backups
