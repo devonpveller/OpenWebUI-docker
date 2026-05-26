@@ -1,8 +1,8 @@
 """
 title: GitHelper
 author: ai-stack
-version: 2.0.0
-description: GitHub repo investigation agent with two-phase architecture. Phase 1 (Reason): full conversation context + compact tool catalog, no JSON schemas — model decides what to do. Phase 2 (Act): pipe synthesizes tool_call events from the model's output. OpenWebUI middleware executes tools and loops back. FileShed bridges context across steps.
+version: 1.0.0
+description: GitHub repo investigation agent with built-in context window management. Proxies to llama-cpp with sliding window trimming on EVERY call — including tool-call retries. Assign your git-repo-analyzer tool to this model in the OpenWebUI model editor. System prompt is built in.
 required_open_webui_version: 0.4.0
 """
 
@@ -10,10 +10,7 @@ from pydantic import BaseModel, Field
 from typing import Optional, Union, Callable, Awaitable, AsyncGenerator
 import json
 import logging
-import re
-import uuid
 import aiohttp
-import time
 
 log = logging.getLogger("githelper_pipe")
 log.setLevel(logging.DEBUG)
@@ -90,26 +87,6 @@ Use FileShed as working memory throughout your investigation:
 - Summarizing a tool result and stopping without calling the next obvious tool.
 """
 
-# ── Tool call format injected when tools are available ──
-
-TOOL_CALL_FORMAT = """
-## How to Call Tools
-
-To use a tool, output a tool call block immediately:
-
-<tool_call>
-{"name": "function_name", "arguments": {"param1": "value1"}}
-</tool_call>
-
-Rules:
-- Call the tool IMMEDIATELY — don't narrate what you plan to do
-- Arguments must be valid JSON with correct parameter types
-- Include ALL required parameters (those without `?` in the signature above). Missing required args will cause an error.
-- STOP writing after the <tool_call> block — the result will appear in your next turn
-- For multiple tools, use multiple <tool_call> blocks
-- If you don't need a tool, respond with text as normal
-"""
-
 
 class Pipe:
     class Valves(BaseModel):
@@ -123,7 +100,7 @@ class Pipe:
         )
         SYSTEM_PROMPT_FILE: str = Field(
             default="/host_project/system-prompts/git-helper-system-prompt.md",
-            description="Path to system prompt file inside container.",
+            description="Path to system prompt file inside container. Falls back to built-in prompt if not found.",
         )
         MAX_CONTEXT_TOKENS: int = Field(
             default=32768,
@@ -131,19 +108,11 @@ class Pipe:
         )
         HEADROOM_TOKENS: int = Field(
             default=4096,
-            description="Tokens reserved for model output in budget calculation.",
-        )
-        MAX_GENERATION_TOKENS: int = Field(
-            default=12288,
-            description="Max tokens for backend generation (thinking + content). Thinking models need 8-10k for reasoning + content for response. Set higher than HEADROOM_TOKENS.",
-        )
-        MAX_REASONING_CHARS: int = Field(
-            default=20000,
-            description="Max chars of reasoning before aborting and retrying with /no_think. Catches thinking loops.",
+            description="Tokens reserved for model output.",
         )
         CHARS_PER_TOKEN: float = Field(
-            default=3.5,
-            description="Chars per token ratio for budget/estimation. ~3.5 for Qwen3 mixed content, ~4.0 for plain English. Verified: 35k chars = 8.5k tokens in production.",
+            default=1.8,
+            description="Chars per token. Measured: Qwen+tools ~1.83.",
         )
         TOKENS_PER_MESSAGE: int = Field(
             default=20,
@@ -169,29 +138,21 @@ class Pipe:
             default=1000,
             description="Max chars per message during emergency compression.",
         )
-        MAX_CATALOG_CHARS: int = Field(
-            default=12000,
-            description="Max chars for tool catalog in system prompt. Tools mentioned in the system prompt are prioritized.",
+        MAX_TOOL_SCHEMA_CHARS: int = Field(
+            default=16000,
+            description="Max total chars for tool schemas sent to backend. Schemas are compacted (descriptions truncated, examples stripped) to fit. 0 = no limit.",
+        )
+        TOOL_DESC_CAP: int = Field(
+            default=80,
+            description="Max chars per parameter/function description when compacting tool schemas.",
         )
         ENABLE_STATUS: bool = Field(
             default=True,
-            description="Show status messages.",
+            description="Show status message when context is trimmed.",
         )
         REQUEST_TIMEOUT: int = Field(
             default=300,
-            description="HTTP timeout in seconds.",
-        )
-        PRESSURE_WARN_PCT: float = Field(
-            default=0.65,
-            description="Context usage % to start informing model about capacity.",
-        )
-        PRESSURE_HIGH_PCT: float = Field(
-            default=0.80,
-            description="Context usage % to nudge model to shed notes and plan wrap-up.",
-        )
-        PRESSURE_CRITICAL_PCT: float = Field(
-            default=0.90,
-            description="Context usage % to strongly nudge synthesis. Sliding window still manages overflow.",
+            description="HTTP request timeout in seconds.",
         )
 
     def __init__(self):
@@ -218,446 +179,143 @@ class Pipe:
         self._system_prompt_cache = SYSTEM_PROMPT
         return self._system_prompt_cache
 
-    # ── Tool catalog (replaces JSON schemas — ~100 chars/tool vs ~800) ──
+    def _ensure_system_prompt(self, messages: list) -> list:
+        """Inject system prompt if not already present."""
+        if messages and messages[0].get("role") == "system":
+            return messages
+        return [{"role": "system", "content": self._get_system_prompt()}] + messages
 
-    def _build_tool_catalog(self, tools: list) -> str:
-        """Build compact function signatures from tool schemas.
-        The model uses these to decide WHICH tool to call.
-        Actual tool execution is handled by OpenWebUI's middleware."""
+    # ── Tool schema compaction ──
+
+    def _compact_tools(self, tools: list) -> list:
+        """Compact tool schemas to fit within MAX_TOOL_SCHEMA_CHARS.
+
+        Design principle: the model needs function descriptions to reason about
+        WHICH tool to call next.  Parameter descriptions and schema noise are
+        expendable — the model can infer param usage from names and types.
+
+        Compaction phases (each only runs if still over cap):
+          1. Truncate function descriptions to TOOL_DESC_CAP, strip examples/defaults/long enums
+          2. Strip parameter-level descriptions
+          3. Strip required arrays, flatten nested objects to bare types
+          4. Drop fattest tools first (survivors keep their function descriptions)
+        Function-level descriptions are NEVER removed."""
         if not tools:
-            return ""
+            return tools
 
-        tool_lines = []
+        cap = self.valves.MAX_TOOL_SCHEMA_CHARS
+        if not cap:
+            return tools
+
+        original_size = len(json.dumps(tools))
+        if original_size <= cap:
+            return tools
+
+        desc_cap = self.valves.TOOL_DESC_CAP
+
+        def compact_desc(d: str) -> str:
+            if not d or not isinstance(d, str):
+                return d or ""
+            if len(d) <= desc_cap:
+                return d
+            return d[:desc_cap].rstrip() + "…"
+
+        def compact_schema(schema: dict) -> dict:
+            """Recursively compact a JSON Schema object."""
+            if not isinstance(schema, dict):
+                return schema
+            out = {}
+            for k, v in schema.items():
+                if k == "description":
+                    out[k] = compact_desc(v)
+                elif k in ("examples", "example", "default"):
+                    continue
+                elif k == "enum" and isinstance(v, list) and len(v) > 5:
+                    out[k] = v[:5]
+                elif k == "properties" and isinstance(v, dict):
+                    out[k] = {pk: compact_schema(pv) for pk, pv in v.items()}
+                elif k == "items" and isinstance(v, dict):
+                    out[k] = compact_schema(v)
+                else:
+                    out[k] = v
+            return out
+
+        # Phase 1: Truncate descriptions, strip examples/defaults
+        compacted = []
         for tool in tools:
-            fn = tool.get("function", {})
-            name = fn.get("name", "")
-            if not name:
+            if not isinstance(tool, dict):
+                compacted.append(tool)
                 continue
-            desc = fn.get("description", "")
-            if len(desc) > 120:
-                desc = desc[:117] + "..."
-
-            params = fn.get("parameters", {})
-            props = params.get("properties", {})
-            required = set(params.get("required", []))
-
-            parts = []
-            for pname, pinfo in props.items():
-                ptype = pinfo.get("type", "str") if isinstance(pinfo, dict) else "any"
-                opt = "" if pname in required else "?"
-                parts.append(f"{pname}{opt}: {ptype}")
-
-            sig = ", ".join(parts)
-            tool_lines.append((name, f"- `{name}({sig})` — {desc}"))
-
-        # Prioritize tools mentioned in system prompt
-        prompt = self._get_system_prompt()
-        priority = []
-        rest = []
-        for name, line in tool_lines:
-            if name in prompt:
-                priority.append(line)
-            else:
-                rest.append(line)
-
-        lines = ["## Available Tools\n"] + priority + rest
-        catalog = "\n".join(lines)
-
-        cap = self.valves.MAX_CATALOG_CHARS
-        if cap and len(catalog) > cap:
-            catalog = catalog[:cap].rsplit("\n", 1)[0]
-            catalog += f"\n... ({len(tool_lines)} tools total, catalog truncated)"
-            log.info(f"[GH] catalog truncated to {len(catalog)} chars")
-
-        log.info(f"[GH] tool catalog: {len(catalog)} chars ({len(priority)} priority + {len(rest)} other)")
-        return catalog
-
-    # ── Message normalization ──
-
-    def _normalize_messages(self, messages: list) -> list:
-        """Convert tool_calls and tool-result messages to plain text.
-        Without the `tools` parameter, the Jinja template won't render
-        role:tool or tool_calls properly. This converts them to formats
-        the model recognizes from training (<tool_call>, <tool_response>)."""
-        out = []
-        for msg in messages:
-            role = msg.get("role", "")
-
-            if role == "assistant" and msg.get("tool_calls"):
-                calls_text = []
-                for tc in msg["tool_calls"]:
-                    fn = tc.get("function", {})
-                    name = fn.get("name", "unknown")
-                    args = fn.get("arguments", "{}")
-                    if isinstance(args, str):
-                        try:
-                            args = json.dumps(json.loads(args))
-                        except (json.JSONDecodeError, TypeError):
-                            pass
-                    calls_text.append(
-                        f'<tool_call>\n{{"name": "{name}", "arguments": {args}}}\n</tool_call>'
-                    )
-                content = msg.get("content", "") or ""
-                full = content + ("\n\n" if content else "") + "\n".join(calls_text)
-                out.append({"role": "assistant", "content": full})
-
-            elif role == "tool":
-                content = msg.get("content", "") or ""
-                name = msg.get("name", "tool")
-                out.append({
-                    "role": "user",
-                    "content": f'<tool_response name="{name}">\n{content}\n</tool_response>',
-                })
-
-            else:
-                out.append(msg)
-
-        return out
-
-    # ── Response parsing ──
-
-    _TOOL_CALL_RE = re.compile(r'<tool_call>\s*(\{.*?\})\s*</tool_call>', re.DOTALL)
-
-    def _parse_tool_intent(self, response: str) -> tuple:
-        """Parse <tool_call> blocks from model response.
-        Returns (text_before_tools, list_of_tool_call_dicts)."""
-        calls = []
-        for match in self._TOOL_CALL_RE.finditer(response):
-            try:
-                call = json.loads(match.group(1))
-                if isinstance(call, dict) and "name" in call:
-                    args = call.get("arguments", {})
-                    if isinstance(args, str):
-                        try:
-                            args = json.loads(args)
-                        except (json.JSONDecodeError, TypeError):
-                            args = {}
-                    calls.append({"name": str(call["name"]), "arguments": args})
-            except json.JSONDecodeError as e:
-                log.warning(f"[GH] malformed tool_call JSON: {e}")
-
-        if calls:
-            first = self._TOOL_CALL_RE.search(response)
-            text = response[:first.start()].rstrip() if first else response
-        else:
-            text = response
-
-        return text, calls
-
-    # ── Streaming reason + tool_call interception ──
-
-    async def _streaming_reason_act(
-        self,
-        url: str,
-        payload: dict,
-        __event_emitter__: Optional[Callable[[dict], Awaitable[None]]] = None,
-        context_info: str = "",
-    ) -> AsyncGenerator:
-        """Stream backend response to user in real-time (thinking is visible).
-        Intercept <tool_call> blocks and emit synthetic SSE tool_call events
-        so OpenWebUI's middleware executes them."""
-        chat_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
-        timeout = aiohttp.ClientTimeout(total=self.valves.REQUEST_TIMEOUT)
-
-        TOOL_TAG = "<tool_call>"
-        LOOK_AHEAD = len(TOOL_TAG)  # 11 chars
-
-        async def emit_status(desc: str, done: bool = False):
-            if self.valves.ENABLE_STATUS and __event_emitter__:
-                await __event_emitter__({
-                    "type": "status",
-                    "data": {"description": desc, "done": done},
-                })
-
-        def make_chunk(delta: dict, finish_reason=None) -> str:
-            return "data: " + json.dumps({
-                "id": chat_id,
-                "object": "chat.completion.chunk",
-                "choices": [{
-                    "index": 0,
-                    "delta": delta,
-                    "finish_reason": finish_reason,
-                }],
+            fn = tool.get("function", {})
+            compacted.append({
+                "type": tool.get("type", "function"),
+                "function": {
+                    "name": fn.get("name", ""),
+                    "description": compact_desc(fn.get("description", "")),
+                    **({"parameters": compact_schema(fn["parameters"])} if "parameters" in fn else {}),
+                },
             })
 
-        full_response = ""   # Accumulated content for tool_call parsing
-        reasoning_text = ""  # Accumulated reasoning for ticker display
-        reasoning_aborted = False  # Set True when reasoning loop detected
-        buffer = ""          # Unsent content (look-ahead for <tool_call>)
-        tool_detected = False
-        sent_role = False
-        first_token = False
-        last_status_len = 0
-        reasoning_chars = 0      # Total reasoning_content chars received
-        last_reasoning_status = 0
-        STATUS_INTERVAL = 2000  # update thinking ticker every ~2000 chars (meaningful context)
-        t0 = time.monotonic()
+        result_size = len(json.dumps(compacted))
+        log.info(f"[GH] phase1 compact: {original_size} → {result_size} chars ({len(compacted)} tools)")
 
-        await emit_status(f"Reasoning... {context_info}")
+        # Phase 2: Strip parameter descriptions (keep function descriptions!)
+        if result_size > cap:
+            for t in compacted:
+                params = t.get("function", {}).get("parameters", {})
+                for prop in params.get("properties", {}).values():
+                    if isinstance(prop, dict):
+                        prop.pop("description", None)
+            result_size = len(json.dumps(compacted))
+            log.info(f"[GH] phase2 strip param desc → {result_size} chars")
 
-        try:
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                stream_payload = {**payload, "stream": True}
-                async with session.post(
-                    url, json=stream_payload,
-                    headers={"Content-Type": "application/json"},
-                ) as resp:
-                    if resp.status != 200:
-                        error_text = await resp.text()
-                        log.error(f"[GH] stream error {resp.status}: {error_text[:500]}")
-                        await emit_status(f"Backend error: {resp.status}", done=True)
-                        yield f"Error from backend: {resp.status} — {error_text[:200]}"
-                        return
-
-                    async for line in resp.content:
-                        decoded = line.decode("utf-8", errors="replace").strip()
-                        if not decoded or not decoded.startswith("data:"):
-                            continue
-                        if decoded.strip() == "data: [DONE]":
-                            break
-
-                        try:
-                            chunk_data = json.loads(decoded[5:].strip())
-                            delta = chunk_data.get("choices", [{}])[0].get("delta", {})
-                            content = delta.get("content", "")
-                            reasoning = delta.get("reasoning_content", "")
-                        except (json.JSONDecodeError, IndexError, KeyError):
-                            continue
-
-                        # Handle role assignment from backend
-                        if delta.get("role") and not sent_role:
-                            yield make_chunk({"role": "assistant"})
-                            sent_role = True
-
-                        if not content and not reasoning:
-                            continue
-
-                        if not sent_role:
-                            yield make_chunk({"role": "assistant"})
-                            sent_role = True
-
-                        # First token received — update status
-                        if not first_token:
-                            first_token = True
-                            ttft = time.monotonic() - t0
-                            delta_fields = {k: type(v).__name__ for k, v in delta.items() if v}
-                            log.info(f"[GH] first token: fields={delta_fields}, ttft={ttft:.1f}s")
-                            if reasoning and not content:
-                                await emit_status(f"Thinking... (first token {ttft:.1f}s) {context_info}")
-                            else:
-                                await emit_status(f"Generating... (first token {ttft:.1f}s) {context_info}")
-
-                        # Handle reasoning_content (Qwen3 thinking via llama-cpp peg-native)
-                        if reasoning:
-                            reasoning_text += reasoning
-                            reasoning_chars += len(reasoning)
-                            # Detect reasoning loops (budget exceeded or repetition)
-                            if reasoning_chars > self.valves.MAX_REASONING_CHARS:
-                                log.warning(f"[GH] reasoning budget hit: {reasoning_chars} chars")
-                                reasoning_aborted = True
-                                break
-                            if len(reasoning_text) > 1000:
-                                tail = reasoning_text[-300:]
-                                if tail in reasoning_text[:-350]:
-                                    log.warning(f"[GH] reasoning loop at {reasoning_chars} chars")
-                                    reasoning_aborted = True
-                                    break
-
-                            if (reasoning_chars - last_reasoning_status) >= STATUS_INTERVAL:
-                                last_reasoning_status = reasoning_chars
-                                # Show accumulated reasoning tail for meaningful context
-                                snippet = reasoning_text.replace('\n', ' ').strip()
-                                if snippet:
-                                    await emit_status(f"\U0001f4ad ...{snippet[-200:]}")
-                            if not content:
-                                continue
-
-                        full_response += content
-
-                        # Thinking ticker — show model's direction via status
-                        if not tool_detected and (len(full_response) - last_status_len) >= STATUS_INTERVAL:
-                            last_status_len = len(full_response)
-                            # Strip <think> tags, collapse whitespace for clean display
-                            snippet = re.sub(r'</?think>', '', full_response).replace('\n', ' ').strip()
-                            if snippet:
-                                await emit_status(f"\U0001f4ad ...{snippet[-120:]}")
-
-                        # Already past <tool_call> — just accumulate
-                        if tool_detected:
-                            continue
-
-                        buffer += content
-
-                        # Check for <tool_call> in buffer
-                        tag_pos = buffer.find(TOOL_TAG)
-                        if tag_pos >= 0:
-                            tool_detected = True
-                            # Send everything before the tag
-                            pre = buffer[:tag_pos].rstrip()
-                            if pre:
-                                yield make_chunk({"content": pre})
-                            buffer = ""
-                            await emit_status(f"Tool call detected... {context_info}")
-                            continue
-
-                        # Look-ahead: hold back last N chars in case
-                        # <tool_call> spans chunk boundaries
-                        safe_len = max(0, len(buffer) - LOOK_AHEAD)
-                        if safe_len > 0:
-                            yield make_chunk({"content": buffer[:safe_len]})
-                            buffer = buffer[safe_len:]
-
-            # ── Retry with /no_think if reasoning loop detected ──
-            if reasoning_aborted and not full_response:
-                log.info(f"[GH] retrying with /no_think after {reasoning_chars} chars of looped reasoning")
-                await emit_status(f"Thinking loop — retrying direct... {context_info}")
-                retry_msgs = [dict(m) for m in payload["messages"]]
-                for i in range(len(retry_msgs) - 1, -1, -1):
-                    if retry_msgs[i].get("role") == "user":
-                        retry_msgs[i]["content"] = retry_msgs[i].get("content", "") + "\n/no_think"
-                        break
-
-                full_response = ""
-                buffer = ""
-                tool_detected = False
-                first_token = False
-                last_status_len = 0
-                t0 = time.monotonic()
-
-                async with aiohttp.ClientSession(timeout=timeout) as retry_session:
-                    retry_data = {**payload, "messages": retry_msgs, "stream": True}
-                    async with retry_session.post(
-                        url, json=retry_data,
-                        headers={"Content-Type": "application/json"},
-                    ) as resp:
-                        if resp.status != 200:
-                            error_text = await resp.text()
-                            log.error(f"[GH] retry error {resp.status}: {error_text[:200]}")
+        # Phase 3: Strip required arrays, flatten nested objects to bare types
+        if result_size > cap:
+            for t in compacted:
+                params = t.get("function", {}).get("parameters", {})
+                params.pop("required", None)
+                for pname, prop in list(params.get("properties", {}).items()):
+                    if isinstance(prop, dict):
+                        ptype = prop.get("type", "string")
+                        if ptype == "object" or "properties" in prop:
+                            params["properties"][pname] = {"type": "object"}
+                        elif ptype == "array":
+                            params["properties"][pname] = {"type": "array"}
                         else:
-                            async for line in resp.content:
-                                decoded = line.decode("utf-8", errors="replace").strip()
-                                if not decoded or not decoded.startswith("data:"):
-                                    continue
-                                if decoded.strip() == "data: [DONE]":
-                                    break
-                                try:
-                                    chunk_data = json.loads(decoded[5:].strip())
-                                    delta = chunk_data.get("choices", [{}])[0].get("delta", {})
-                                    content = delta.get("content", "")
-                                except (json.JSONDecodeError, IndexError, KeyError):
-                                    continue
-                                if delta.get("role") and not sent_role:
-                                    yield make_chunk({"role": "assistant"})
-                                    sent_role = True
-                                if not content:
-                                    continue
-                                if not sent_role:
-                                    yield make_chunk({"role": "assistant"})
-                                    sent_role = True
-                                if not first_token:
-                                    first_token = True
-                                    ttft = time.monotonic() - t0
-                                    await emit_status(f"Generating (direct)... ({ttft:.1f}s) {context_info}")
-                                full_response += content
-                                if tool_detected:
-                                    continue
-                                buffer += content
-                                tag_pos = buffer.find(TOOL_TAG)
-                                if tag_pos >= 0:
-                                    tool_detected = True
-                                    pre = buffer[:tag_pos].rstrip()
-                                    if pre:
-                                        yield make_chunk({"content": pre})
-                                    buffer = ""
-                                    await emit_status(f"Tool call detected... {context_info}")
-                                    continue
-                                safe_len = max(0, len(buffer) - LOOK_AHEAD)
-                                if safe_len > 0:
-                                    yield make_chunk({"content": buffer[:safe_len]})
-                                    buffer = buffer[safe_len:]
+                            params["properties"][pname] = {"type": ptype}
+            result_size = len(json.dumps(compacted))
+            log.info(f"[GH] phase3 flatten → {result_size} chars ({len(compacted)} tools)")
 
-            elapsed = time.monotonic() - t0
+        # Phase 4: Drop fattest tools first (survivors keep descriptions)
+        if result_size > cap:
+            sized = [(len(json.dumps(t)), i, t) for i, t in enumerate(compacted)]
+            sized.sort(key=lambda x: x[0], reverse=True)
+            while len(sized) > 1 and result_size > cap:
+                removed = sized.pop(0)
+                result_size -= removed[0] + 2
+            sized.sort(key=lambda x: x[1])
+            compacted = [t for _, _, t in sized]
+            result_size = len(json.dumps(compacted))
+            log.info(f"[GH] phase4 dropped to {len(compacted)} tools → {result_size} chars")
 
-            if not sent_role:
-                yield make_chunk({"role": "assistant"})
-
-            if not first_token:
-                await emit_status(f"No response from backend ({elapsed:.1f}s)", done=True)
-                log.warning(f"[GH] no tokens received after {elapsed:.1f}s")
-
-            # Parse full response for tool calls
-            text, tool_calls = self._parse_tool_intent(full_response)
-
-            if tool_calls:
-                # Log each tool call with full args for debugging
-                for c in tool_calls:
-                    args_json = json.dumps(c.get("arguments", {}))
-                    log.info(f"[GH] → {c['name']}({args_json[:300]})")
-
-                # Show thinking direction + tool call in status
-                thinking = re.sub(r'</?think>', '', text).replace('\n', ' ').strip() if text else ""
-                tool_names = ", ".join(c["name"] for c in tool_calls)
-                if thinking:
-                    await emit_status(f"\U0001f4ad {thinking[:80]}... → {tool_names} ({elapsed:.1f}s)", done=True)
-                else:
-                    await emit_status(f"→ {tool_names} ({elapsed:.1f}s)", done=True)
-
-                # Emit synthetic tool_call events
-                for i, call in enumerate(tool_calls):
-                    call_id = f"call_{uuid.uuid4().hex[:12]}"
-                    args_str = json.dumps(call.get("arguments", {}))
-                    yield make_chunk({
-                        "tool_calls": [{
-                            "index": i,
-                            "id": call_id,
-                            "type": "function",
-                            "function": {"name": call["name"], "arguments": ""},
-                        }]
-                    })
-                    yield make_chunk({
-                        "tool_calls": [{
-                            "index": i,
-                            "function": {"arguments": args_str},
-                        }]
-                    })
-                yield make_chunk({}, "tool_calls")
-            elif not full_response and (reasoning_chars > 0 or reasoning_aborted):
-                log.warning(f"[GH] reasoning exhausted: {reasoning_chars} chars, aborted={reasoning_aborted} ({elapsed:.1f}s)")
-                if reasoning_aborted:
-                    await emit_status(f"Thinking loop — no response ({elapsed:.1f}s)", done=True)
-                    yield make_chunk({"content": "[The model got stuck in a reasoning loop and could not produce a response even after retrying. Try rephrasing your request or breaking it into smaller steps.]"})
-                else:
-                    await emit_status(f"Thinking exhausted ({reasoning_chars} chars, {elapsed:.1f}s)", done=True)
-                    yield make_chunk({"content": "[The model spent its entire generation budget on internal reasoning without producing a visible response. Try rephrasing your question or simplifying the request.]"})
-                yield make_chunk({}, "stop")
-            else:
-                log.info(f"[GH] → text ({len(full_response)} chars, {elapsed:.1f}s)")
-                await emit_status(f"Done ({elapsed:.1f}s)", done=True)
-                # Flush remaining buffer (no tool calls found)
-                if buffer:
-                    yield make_chunk({"content": buffer})
-                yield make_chunk({}, "stop")
-
-            yield "data: [DONE]"
-
-        except aiohttp.ClientError as e:
-            log.error(f"[GH] connection error: {e}")
-            await emit_status(f"Connection error: {e}", done=True)
-            yield f"Connection error: {e}"
-        except Exception as e:
-            log.error(f"[GH] error: {e}")
-            await emit_status(f"Error: {e}", done=True)
-            yield f"Error: {e}"
+        return compacted
 
     # ── Context management ──
 
     def _char_budget(self, body: dict) -> int:
-        """Calculate char budget. Tool schemas aren't sent — the compact catalog
-        is part of the system message and counted by _measure automatically."""
         usable = self.valves.MAX_CONTEXT_TOKENS - self.valves.HEADROOM_TOKENS
+
+        tools = body.get("tools", [])
+        if tools:
+            tools_chars = len(json.dumps(tools))
+            tools_tokens = int(tools_chars / self.valves.CHARS_PER_TOKEN)
+            usable -= tools_tokens
+            log.debug(f"[GH] tool defs: {tools_chars} chars (~{tools_tokens} tok)")
+
         n_msgs = len(body.get("messages", []))
         template_tokens = n_msgs * self.valves.TOKENS_PER_MESSAGE
         usable -= template_tokens
+
         return max(2000, int(usable * self.valves.CHARS_PER_TOKEN))
 
     def _measure(self, messages: list) -> int:
@@ -749,9 +407,10 @@ class Pipe:
         current = self._measure(system + convo)
         log.info(f"[GH] phase1: {current} chars, {compressed} compressed")
 
-        # Phase 2: Drop oldest (protect last user message)
+        # Phase 2: Drop oldest (but never the last user message)
         dropped = 0
         while len(convo) > protect_n and current > budget:
+            # Protect last user message
             if convo[0].get("role") == "user":
                 remaining_users = sum(1 for m in convo if m.get("role") == "user")
                 if remaining_users <= 1:
@@ -760,7 +419,6 @@ class Pipe:
             drop = len(msg.get("content", "") or "")
             if msg.get("tool_calls"):
                 drop += len(json.dumps(msg["tool_calls"]))
-            # Drop orphaned tool results
             while convo and len(convo) > protect_n and convo[0].get("role") == "tool":
                 orphan = convo.pop(0)
                 drop += len(orphan.get("content", "") or "")
@@ -773,23 +431,23 @@ class Pipe:
         emergency = 0
         if current > budget:
             for i, msg in enumerate(convo):
-                if current <= budget:
-                    break
+                if current <= budget: break
                 cap = self.valves.EMERGENCY_CAP
                 if msg.get("role") == "tool":
                     cap = min(cap, self.valves.TOOL_RESULT_CAP)
-                convo[i], s = self._compress_msg(msg, cap, f"{msg.get('role', '')} (emergency)")
+                convo[i], s = self._compress_msg(msg, cap, f"{msg.get('role','')} (emergency)")
                 if s > 0:
                     current -= s
                     emergency += 1
 
-        # Phase 4: Nuclear (protect last user message)
+        # Phase 4: Nuclear — but NEVER drop the last user message
         nuked = 0
         while len(convo) > 2 and current > budget:
+            # Don't drop if it's the last user message
             if convo[0].get("role") == "user":
                 remaining_users = sum(1 for m in convo if m.get("role") == "user")
                 if remaining_users <= 1:
-                    break
+                    break  # protect last user message
             msg = convo.pop(0)
             drop = len(msg.get("content", "") or "")
             if msg.get("tool_calls"):
@@ -815,187 +473,85 @@ class Pipe:
         __event_emitter__: Optional[Callable[[dict], Awaitable[None]]] = None,
         __task__: Optional[str] = None,
     ) -> Union[str, AsyncGenerator]:
-        url = f"{self.valves.TARGET_BASE_URL.rstrip('/')}/chat/completions"
-        target_model = self.valves.TARGET_MODEL_ID or body.get("model", "")
-        if "." in target_model and not self.valves.TARGET_MODEL_ID:
-            target_model = ""
+        # 1. Ensure system prompt is present (skip for tasks like title gen)
+        if not __task__:
+            body["messages"] = self._ensure_system_prompt(body.get("messages", []))
 
-        # ── Tasks (title gen, etc.) — direct passthrough, no tools ──
-        if __task__:
-            payload = {
-                "model": target_model,
-                "messages": body["messages"],
-                "stream": body.get("stream", True),
-            }
-            if body.get("stream", True):
-                return self._stream_response(url, payload)
-            else:
-                return await self._reason_call(url, {**payload, "stream": False})
-
-        # ── Regular conversation ──
-        tools = body.get("tools", [])
-        messages = list(body.get("messages", []))
-
-        # Build system message: base prompt + tool catalog (if tools available)
-        sys_content = self._get_system_prompt()
-        if tools:
-            catalog = self._build_tool_catalog(tools)
-            sys_content += "\n\n" + catalog + TOOL_CALL_FORMAT
-
-        # Set/replace system message (avoids catalog duplication on retries)
-        if messages and messages[0].get("role") == "system":
-            messages[0] = {"role": "system", "content": sys_content}
-        else:
-            messages = [{"role": "system", "content": sys_content}] + messages
-
-        # Debug logging
-        roles = [m.get("role", "?") for m in messages]
+        # Debug: log message structure for every call
+        roles = [m.get("role", "?") for m in body.get("messages", [])]
+        has_tools = bool(body.get("tools"))
         has_user = any(r == "user" for r in roles)
-        log.info(f"[GH] pipe(): roles={roles}, tools={len(tools)}, has_user={has_user}")
+        log.info(f"[GH] pipe() called: task={__task__}, roles={roles}, has_tools={has_tools}, has_user={has_user}")
+        if not has_user:
+            log.warning(f"[GH] NO USER MESSAGE — will strip tools to avoid template error")
 
-        # Trim context (generous budget — no tool schema overhead in payload)
-        body_trimmed = {**body, "messages": messages}
-        body_trimmed.pop("tools", None)
-        original = self._measure(messages)
-        body_trimmed = self._trim_messages(body_trimmed)
-        trimmed = self._measure(body_trimmed["messages"])
+        # 2. Compact tool schemas BEFORE budget calculation
+        if body.get("tools"):
+            body["tools"] = self._compact_tools(body["tools"])
 
-        if trimmed < original and self.valves.ENABLE_STATUS and __event_emitter__:
-            saved = original - trimmed
-            est = int(trimmed / self.valves.CHARS_PER_TOKEN)
+        # 3. Trim context (runs on EVERY call including tool retries)
+        original_count = self._measure(body.get("messages", []))
+        body = self._trim_messages(body)
+        trimmed_count = self._measure(body.get("messages", []))
+
+        if trimmed_count < original_count and self.valves.ENABLE_STATUS and __event_emitter__:
+            saved = original_count - trimmed_count
+            est = int(trimmed_count / self.valves.CHARS_PER_TOKEN)
             await __event_emitter__({
                 "type": "status",
                 "data": {
-                    "description": f"Context: ~{est}/{self.valves.MAX_CONTEXT_TOKENS} tok (~{saved // 1000}k freed)",
+                    "description": f"Context trimmed: ~{saved // 1000}k chars freed, ~{est}/{self.valves.MAX_CONTEXT_TOKENS} tok",
                     "done": True,
                 },
             })
 
-        # ── No tools: stream directly ──
-        if not tools:
-            payload = {
-                "model": target_model,
-                "messages": body_trimmed["messages"],
-                "stream": True,
-            }
-            for key in ("temperature", "top_p", "top_k", "max_tokens", "stop",
-                         "frequency_penalty", "presence_penalty", "seed"):
-                if key in body and body[key] is not None:
-                    payload[key] = body[key]
-            return self._stream_response(url, payload)
+        # 4. Build backend payload
+        target_model = self.valves.TARGET_MODEL_ID or body.get("model", "")
+        # Strip pipe prefix (e.g. "githelper.githelper" -> use configured model)
+        if "." in target_model and not self.valves.TARGET_MODEL_ID:
+            target_model = ""
 
-        # ══════════════════════════════════════════════════════════════
-        # Two-phase: Reason → Act
-        #
-        # Phase 1 (Reason): Full conversation context + compact tool
-        #   catalog in system prompt. No JSON tool schemas in payload.
-        #   The model decides: call a tool or give a text answer.
-        #
-        # Phase 2 (Act): Parse the model's <tool_call> blocks and emit
-        #   synthetic OpenAI tool_call SSE events. OpenWebUI's middleware
-        #   executes the tool and loops back to pipe() with the result.
-        # ══════════════════════════════════════════════════════════════
-
-        # Normalize: convert tool_calls/tool messages to plain text
-        # so the backend can render them without the tool Jinja template
-        normalized = self._normalize_messages(body_trimmed["messages"])
-
-        # Streaming reason call — model output visible in real-time
-        reason_payload = {
+        payload = {
             "model": target_model,
-            "messages": normalized,
+            "messages": body["messages"],
+            "stream": body.get("stream", True),
         }
-        for key in ("temperature", "top_p", "max_tokens"):
+
+        # Forward optional fields
+        for key in ("temperature", "top_p", "top_k", "max_tokens", "stop",
+                     "frequency_penalty", "presence_penalty", "seed",
+                     "tools", "tool_choice", "response_format"):
             if key in body and body[key] is not None:
-                reason_payload[key] = body[key]
+                payload[key] = body[key]
 
-        # Cap generation — thinking models need room for both reasoning + content
-        if "max_tokens" not in reason_payload:
-            reason_payload["max_tokens"] = self.valves.MAX_GENERATION_TOKENS
+        # Safety: Qwen's Jinja template raises "No user query found" if tools
+        # are present but messages have no user role (e.g. task calls like title
+        # generation). Strip tools to fall back to the non-tool template path.
+        has_user = any(m.get("role") == "user" for m in payload["messages"])
+        if not has_user and "tools" in payload:
+            log.info("[GH] stripping tools from payload (no user message)")
+            payload.pop("tools", None)
+            payload.pop("tool_choice", None)
 
-        ctx_chars = self._measure(normalized)
-        ctx_est = int(ctx_chars / self.valves.CHARS_PER_TOKEN)
-        max_tok = self.valves.MAX_CONTEXT_TOKENS
-        n_tool_results = sum(1 for m in normalized if m.get("role") == "user" and "<tool_response" in (m.get("content", "") or ""))
-        round_label = f"round {n_tool_results + 1}" if n_tool_results else "initial"
-        ctx_pct = ctx_est / max_tok if max_tok else 0
-        context_info = f"({round_label}, ~{ctx_est}/{max_tok} tok, {ctx_pct:.0%})"
+        url = f"{self.valves.TARGET_BASE_URL.rstrip('/')}/chat/completions"
 
-        log.info(f"[GH] reason call: {len(normalized)} msgs, {ctx_chars} chars, {round_label}, {ctx_pct:.0%}")
-
-        # ── Context awareness ──
-        # The sliding window (_trim_messages) keeps context within budget
-        # on every round. These signals let the model see where it stands
-        # so it can shed notes and plan synthesis at the right time.
-        pressure_msg = ""
-        remaining_tok = max_tok - ctx_est
-
-        if ctx_pct >= self.valves.PRESSURE_CRITICAL_PCT:
-            pressure_msg = (
-                "\n\n⚠️ CONTEXT: {:.0%} full (~{} tokens left). "
-                "The sliding window is compressing old messages to make room. "
-                "Your FileShed notes are safe. Shed any final analysis now, "
-                "then recall your notes with `shed_read_file` and synthesize."
-            ).format(ctx_pct, remaining_tok)
-            log.info(f"[GH] critical context: {ctx_pct:.0%}, ~{remaining_tok} tok left")
-
-        elif ctx_pct >= self.valves.PRESSURE_HIGH_PCT:
-            pressure_msg = (
-                "\n\n🟡 CONTEXT: {:.0%} full (~{} tokens left). "
-                "Old tool results are being compressed. Your FileShed notes persist. "
-                "Shed analysis notes between tool calls to keep working efficiently. "
-                "Consider wrapping up if you have enough information."
-            ).format(ctx_pct, remaining_tok)
-            log.info(f"[GH] high context: {ctx_pct:.0%}, ~{remaining_tok} tok left")
-
-        elif ctx_pct >= self.valves.PRESSURE_WARN_PCT:
-            pressure_msg = (
-                "\n\n🟢 CONTEXT: {:.0%} full (~{} tokens left). "
-                "Shed analysis notes to FileShed between tool calls to stay efficient."
-            ).format(ctx_pct, remaining_tok)
-
-        if pressure_msg:
-            for i, m in enumerate(normalized):
-                if m.get("role") == "system":
-                    normalized[i] = {**m, "content": m["content"] + pressure_msg}
-                    break
-            reason_payload["messages"] = normalized
-
-        # Stream response, intercept <tool_call> blocks, emit synthetic events
-        return self._streaming_reason_act(url, reason_payload, __event_emitter__, context_info)
-
-    # ── Backend communication ──
-
-    async def _reason_call(self, url: str, payload: dict) -> str:
-        """Sync call to backend. Returns full text response."""
-        timeout = aiohttp.ClientTimeout(total=self.valves.REQUEST_TIMEOUT)
-        try:
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.post(url, json=payload,
-                                        headers={"Content-Type": "application/json"}) as resp:
-                    if resp.status != 200:
-                        error_text = await resp.text()
-                        log.error(f"[GH] reason error {resp.status}: {error_text[:500]}")
-                        return f"Error from backend: {resp.status} — {error_text[:200]}"
-                    result = await resp.json()
-                    choices = result.get("choices", [])
-                    if choices:
-                        return choices[0].get("message", {}).get("content", "") or ""
-                    return ""
-        except Exception as e:
-            log.error(f"[GH] reason error: {e}")
-            return f"Error: {e}"
+        # 5. Forward to backend
+        if body.get("stream", True):
+            return self._stream_response(url, payload)
+        else:
+            return await self._sync_response(url, payload)
 
     async def _stream_response(self, url: str, payload: dict) -> AsyncGenerator:
-        """Yield raw SSE lines for direct passthrough (tasks, no-tool conversations)."""
+        """Yield raw SSE lines (prefixed with 'data: ') so OpenWebUI's
+        process_line passes them through unchanged — preserving tool_calls
+        in the delta instead of flattening them into text content."""
         timeout = aiohttp.ClientTimeout(total=self.valves.REQUEST_TIMEOUT)
         try:
             async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.post(url, json=payload,
-                                        headers={"Content-Type": "application/json"}) as resp:
+                async with session.post(url, json=payload, headers={"Content-Type": "application/json"}) as resp:
                     if resp.status != 200:
                         error_text = await resp.text()
-                        log.error(f"[GH] stream error {resp.status}: {error_text[:500]}")
+                        log.error(f"[GH] backend error {resp.status}: {error_text[:500]}")
                         yield f"Error from backend: {resp.status} — {error_text[:200]}"
                         return
 
@@ -1004,10 +560,30 @@ class Pipe:
                         if not decoded:
                             continue
                         if decoded.startswith("data:"):
+                            # Pass SSE lines through verbatim so OpenWebUI's
+                            # stream_body_handler can parse tool_calls from
+                            # choices[0].delta.tool_calls properly.
                             yield decoded
         except aiohttp.ClientError as e:
             log.error(f"[GH] connection error: {e}")
             yield f"Connection error: {e}"
         except Exception as e:
-            log.error(f"[GH] error: {e}")
+            log.error(f"[GH] unexpected error: {e}")
             yield f"Error: {e}"
+
+    async def _sync_response(self, url: str, payload: dict) -> str:
+        timeout = aiohttp.ClientTimeout(total=self.valves.REQUEST_TIMEOUT)
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(url, json=payload, headers={"Content-Type": "application/json"}) as resp:
+                    if resp.status != 200:
+                        error_text = await resp.text()
+                        return f"Error from backend: {resp.status} — {error_text[:200]}"
+                    result = await resp.json()
+                    choices = result.get("choices", [])
+                    if choices:
+                        return choices[0].get("message", {}).get("content", "")
+                    return "No response from backend"
+        except Exception as e:
+            log.error(f"[GH] error: {e}")
+            return f"Error: {e}"
