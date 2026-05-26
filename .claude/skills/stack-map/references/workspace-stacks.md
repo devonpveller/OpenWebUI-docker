@@ -96,8 +96,9 @@ Run with: `docker compose -f OB1/docker/docker-compose.yml ...`.
 | Container | Role | Host port | Networks |
 |-----------|------|-----------|----------|
 | `openbrain-db` | PostgreSQL 16 + pgvector | — | obnet |
-| `openbrain-mcp` | Core MCP server | 127.0.0.1:8808 | obnet, llm-net |
-| `openbrain-ext` | Extensions MCP server (39 tools) | 127.0.0.1:8809 | obnet |
+| `openbrain-mcp` | Core MCP server | — (internal only) | obnet, llm-net |
+| `openbrain-ext` | Extensions MCP server (39 tools) | — (internal only) | obnet |
+| `openbrain-gateway` | Privacy-enforcing MCP proxy for cloud clients | 127.0.0.1:8061 | obnet |
 | `openbrain-mcpo` | MCP→OpenAPI bridge (core) | — | obnet, llm-net |
 | `openbrain-mcpo-ext` | MCP→OpenAPI bridge (extensions) | — | obnet, llm-net |
 | `openbrain-postgrest` | PostgREST API over openbrain-db | — | obnet |
@@ -105,6 +106,16 @@ Run with: `docker compose -f OB1/docker/docker-compose.yml ...`.
 | `openbrain-entity-worker` | Entity-extraction worker | 127.0.0.1:8810 | obnet, llm-net |
 | `openbrain-wiki` | Wiki compiler + scheduler | 127.0.0.1:8811 | obnet, llm-net |
 | `openbrain-wiki-viewer` | Quartz 4 read-only wiki viewer | 127.0.0.1:8812 | obnet |
+
+**Cloud privacy split:** `openbrain-mcp` and `openbrain-ext` no longer publish
+host ports — cloud services (Claude Code, ChatGPT) must enter through
+`openbrain-gateway` at `127.0.0.1:8061`. Gateway forces
+`metadata.share=cloud` on reads and stamps `metadata.origin=cloud,
+share=cloud` on writes; the 39 extension tools are blocked entirely.
+Mirrors the mnemory-gateway pattern (`mnemory-gateway/app.py`). Local
+trusted clients (OWUI via the mcpo bridges, recipes on obnet, the
+entity worker, the wiki compiler) keep talking to `openbrain-mcp` /
+`openbrain-ext` directly on internal networks and are unaffected.
 
 ### Volumes
 `openbrain-db-data`, `openbrain-wiki-data`.
