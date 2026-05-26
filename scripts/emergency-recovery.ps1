@@ -38,6 +38,7 @@ $Script:MainStackServices = @(
 # Open Brain (OB1) services, low-level dependency first.
 $Script:OB1Services = @(
     "openbrain-db", "openbrain-mcp", "openbrain-ext",
+    "openbrain-gateway",
     "openbrain-mcpo", "openbrain-mcpo-ext", "openbrain-postgrest",
     "openbrain-rest", "openbrain-entity-worker",
     "openbrain-wiki", "openbrain-wiki-viewer"
