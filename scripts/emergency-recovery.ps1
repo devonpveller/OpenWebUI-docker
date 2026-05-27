@@ -36,12 +36,17 @@ $Script:MainStackServices = @(
 )
 
 # Open Brain (OB1) services, low-level dependency first.
+# The trailing block (cron + 3 HTTP-triggered scheduled services) lives
+# in docker-compose.scheduled.yml; compose includes it so a single
+# `docker compose up -d` brings everything. They depend on openbrain-rest
+# (PostgREST proxy) so they sort after it.
 $Script:OB1Services = @(
     "openbrain-db", "openbrain-mcp", "openbrain-ext",
     "openbrain-gateway",
     "openbrain-mcpo", "openbrain-mcpo-ext", "openbrain-postgrest",
     "openbrain-rest", "openbrain-entity-worker",
-    "openbrain-wiki", "openbrain-wiki-viewer"
+    "openbrain-wiki", "openbrain-wiki-viewer",
+    "openbrain-cron", "openbrain-gmail-pull", "openbrain-gmail-prune", "openbrain-digest"
 )
 
 function Write-Log {
