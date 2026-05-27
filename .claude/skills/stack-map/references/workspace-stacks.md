@@ -106,6 +106,20 @@ Run with: `docker compose -f OB1/docker/docker-compose.yml ...`.
 | `openbrain-entity-worker` | Entity-extraction worker | 127.0.0.1:8810 | obnet, llm-net |
 | `openbrain-wiki` | Wiki compiler + scheduler | 127.0.0.1:8811 | obnet, llm-net |
 | `openbrain-wiki-viewer` | Quartz 4 read-only wiki viewer | 127.0.0.1:8812 | obnet |
+| `openbrain-cron` | supercronic + curl; fires HTTP-trigger chain (no docker.sock) | — (internal only) | obnet |
+| `openbrain-gmail-pull` | HTTP-triggered Gmail ingest; chains to prune on success | — (internal only) | obnet, llm-net |
+| `openbrain-gmail-prune` | HTTP-triggered short-term prune; chains to digest + wiki recompile | — (internal only) | obnet, llm-net |
+| `openbrain-digest` | HTTP-triggered daily digest; mechanical formatting, Gmail send | — (internal only) | obnet |
+
+**Scheduled-job slice:** the four trailing services (`openbrain-cron` + the
+three HTTP-triggered jobs) live in [`OB1/docker/docker-compose.scheduled.yml`](../../../OB1/docker/docker-compose.scheduled.yml),
+included from the main OB1 compose file. Trigger model is event-chained:
+cron fires `openbrain-gmail-pull` at 01:00; pull→prune→digest is wired
+via `NEXT_TRIGGER_URL` env vars, not multiple cron entries. Schedules
+live in [`OB1/docker/cron/crontab`](../../../OB1/docker/cron/crontab)
+(bind-mounted; edit + `docker compose restart openbrain-cron` to reload).
+No docker.sock anywhere — chain hops are HTTP `POST /run` calls on
+`obnet` between long-running services.
 
 **Cloud privacy split:** `openbrain-mcp` and `openbrain-ext` no longer publish
 host ports — cloud services (Claude Code, ChatGPT) must enter through
