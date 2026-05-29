@@ -1,6 +1,6 @@
 # scripts/portal-status.ps1
 #
-# Read-only liveness check for the internet-exposed portal (plan §12.9).
+# Read-only liveness check for the internet-exposed portal (plan sec.12.9).
 # One line per check, color-coded. Does not modify anything.
 #
 # Usage:
@@ -95,12 +95,12 @@ if ($alerterRunning) {
 
 Write-Host ""
 Write-Host "==> Tailnet path (canary)" -ForegroundColor Cyan
-# This check is intentionally vague — the user knows their tailnet hostname;
+# This check is intentionally vague -- the user knows their tailnet hostname;
 # we just confirm the local openwebui container is up so the tailnet path
 # would succeed.
 $owui = Container-State 'openwebui'
 if ($owui -eq 'running') {
-  Write-Check 'openwebui' ok 'running — tailnet path still serves'
+  Write-Check 'openwebui' ok 'running -- tailnet path still serves'
 } else {
   Write-Check 'openwebui' down "state=$owui (tailnet path affected)"
 }
@@ -116,9 +116,9 @@ if ($alerterRunning) {
     Write-Check 'digest-latest.md' ok $latest
   }
 } else {
-  Write-Check 'digest-latest.md' warn 'alerter not running — cannot inspect'
+  Write-Check 'digest-latest.md' warn 'alerter not running -- cannot inspect'
 }
 
 Write-Host ""
 Write-Host "==> Hint: reach the Cloudflare tunnel dashboard for live edge metrics." -ForegroundColor DarkGray
-Write-Host "    https://one.dash.cloudflare.com/  (Zero Trust → Tunnels → ai-stack)" -ForegroundColor DarkGray
+Write-Host "    https://one.dash.cloudflare.com/  (Zero Trust -> Tunnels -> ai-stack)" -ForegroundColor DarkGray

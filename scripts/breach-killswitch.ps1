@@ -1,6 +1,6 @@
 # scripts/breach-killswitch.ps1
 #
-# Emergency stop for the internet-exposed portal (plan §8 Step 6, §12.6).
+# Emergency stop for the internet-exposed portal (plan sec.8 Step 6, sec.12.6).
 # Distinct from portal-off.ps1:
 #   1. Sends a "killswitch fired" email FIRST (so the operator inbox has a
 #      final record before the alerter goes down).
@@ -8,7 +8,7 @@
 #   3. Snapshots Caddy + Authelia logs to ./incident/<UTC-timestamp>/.
 #   4. Rotates AUTHELIA_JWT_SECRET + AUTHELIA_SESSION_SECRET in .env (preserves
 #      old values commented out for the IR record).
-#   5. Prints recovery steps and EXITS — does NOT auto-restart anything.
+#   5. Prints recovery steps and EXITS -- does NOT auto-restart anything.
 #
 # Usage:
 #   .\scripts\breach-killswitch.ps1            # do it for real
@@ -53,7 +53,7 @@ try {
         http://127.0.0.1:8080/alert 2>&1 | Out-Null
       Write-Host "    Final alert dispatched." -ForegroundColor Green
     } catch {
-      Write-Warning "    Final alert failed: $_ — continuing with shutdown."
+      Write-Warning "    Final alert failed: $_ -- continuing with shutdown."
     }
   }
 
@@ -75,7 +75,7 @@ try {
     Write-Host "    [DRY RUN] would: docker compose --profile internet stop $($services -join ' ')"
   } else {
     docker compose --profile internet stop @services
-    if ($LASTEXITCODE -ne 0) { Write-Warning "compose stop returned $LASTEXITCODE — review state" }
+    if ($LASTEXITCODE -ne 0) { Write-Warning "compose stop returned $LASTEXITCODE -- review state" }
   }
 
   # Sanity check: NEVER touch these
@@ -101,7 +101,7 @@ try {
   Write-Host "==> Step 4: rotate Authelia secrets in .env" -ForegroundColor Cyan
   $envPath = Join-Path $projectRoot '.env'
   if (-not (Test-Path $envPath)) {
-    Write-Warning "    .env not found at $envPath — skipping rotation. Rotate manually."
+    Write-Warning "    .env not found at $envPath -- skipping rotation. Rotate manually."
   } else {
     if ($DryRun) {
       Write-Host "    [DRY RUN] would generate new JWT + SESSION secrets via 'docker run --rm authelia/authelia:4.39 authelia crypto rand --length 64' and patch .env (commenting old values for IR record)"
@@ -116,8 +116,8 @@ try {
       $envText = Get-Content $envPath -Raw
       # Comment old values and append new ones; do not delete in case manual
       # review is needed.
-      $envText = $envText -replace '(?m)^(AUTHELIA_JWT_SECRET=.*)$', "# rotated-$ts: `$1"
-      $envText = $envText -replace '(?m)^(AUTHELIA_SESSION_SECRET=.*)$', "# rotated-$ts: `$1"
+      $envText = $envText -replace '(?m)^(AUTHELIA_JWT_SECRET=.*)$', "# rotated-${ts}: `$1"
+      $envText = $envText -replace '(?m)^(AUTHELIA_SESSION_SECRET=.*)$', "# rotated-${ts}: `$1"
       $envText += "`n# killswitch rotation $ts`n"
       $envText += "AUTHELIA_JWT_SECRET=$newJwt`n"
       $envText += "AUTHELIA_SESSION_SECRET=$newSession`n"
@@ -128,15 +128,15 @@ try {
 
   # --- Step 5: Recovery instructions. ---
   Write-Host ""
-  Write-Host "==> NEXT STEPS — read documentation/incident-response.md before restarting" -ForegroundColor Red
+  Write-Host "==> NEXT STEPS -- read documentation/incident-response.md before restarting" -ForegroundColor Red
   Write-Host "    - Tailnet path is still up. Reach OpenWebUI via https://<tailnet-host>.ts.net/" -ForegroundColor Yellow
   Write-Host "    - Snapshot $incidentDir to an off-host destination NOW (before any restart)." -ForegroundColor Yellow
   Write-Host "    - Restore authelia-data from YESTERDAY'S backup before restarting (today's may be poisoned)." -ForegroundColor Yellow
   Write-Host "    - Re-enroll WebAuthn keys via https://auth.<your-domain>/settings/two-factor after recovery." -ForegroundColor Yellow
   Write-Host "    - If the tunnel container appeared compromised, rotate CLOUDFLARE_TUNNEL_TOKEN." -ForegroundColor Yellow
   Write-Host "    - If the open-brain-email OAuth client is suspected compromised, revoke at" -ForegroundColor Yellow
-  Write-Host "      https://myaccount.google.com/permissions — but doing so ALSO breaks OB1's daily digest" -ForegroundColor Yellow
-  Write-Host "      until a new client is provisioned. See plan §6.9 coupling caveat." -ForegroundColor Yellow
+  Write-Host "      https://myaccount.google.com/permissions -- but doing so ALSO breaks OB1's daily digest" -ForegroundColor Yellow
+  Write-Host "      until a new client is provisioned. See plan sec.6.9 coupling caveat." -ForegroundColor Yellow
   Write-Host ""
   Write-Host "==> This script does NOT auto-restart. Bringing the portal back online is a human decision." -ForegroundColor Red
 } finally {

@@ -1,6 +1,6 @@
 # scripts/portal-off.ps1
 #
-# Planned-downtime toggle for the portal (plan §12.9). Stops every container
+# Planned-downtime toggle for the portal (plan sec.12.9). Stops every container
 # tagged `profiles: [internet]` but preserves their volumes, .env, and
 # configuration. Tailnet access remains unaffected.
 #
@@ -36,7 +36,7 @@ try {
   }
 
   Write-Host ""
-  Write-Host "==> Running status check…" -ForegroundColor Green
+  Write-Host "==> Running status check..." -ForegroundColor Green
   & (Join-Path $PSScriptRoot 'portal-status.ps1')
 } finally {
   Pop-Location

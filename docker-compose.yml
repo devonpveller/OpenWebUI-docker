@@ -837,6 +837,64 @@ services:
   # front ends for ai stack/plan-internet-exposed-front-end.md (§8 Step 1).
   # =====================================================================
 
+  # ---------------------------------------------------------------------
+  # portal-init — one-shot volume permission setter.
+  # Docker creates named volumes owned by root:root by default; our
+  # hardened services run as non-root UIDs and cannot write to them.
+  # This init container runs as root, chowns each volume to its owning
+  # UID, then exits. Other services depend on its successful completion
+  # via `depends_on: portal-init: service_completed_successfully`.
+  # No persistent processes; no host port; no network attachment beyond
+  # what's needed to mount volumes.
+  # ---------------------------------------------------------------------
+  portal-init:
+    image: alpine:3.21
+    container_name: portal-init
+    profiles: [internet]
+    user: "0:0"   # root — required to chown volumes
+    volumes:
+      - authelia-data:/vols/authelia
+      - caddy-data:/vols/caddy
+      - caddy-config:/vols/caddy-config
+      - tripwire-data:/vols/tripwire
+    # No networks — this container doesn't need any network access
+    network_mode: none
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN          # only capability needed
+      - FOWNER
+      - DAC_OVERRIDE   # let root write where it needs even with bind-mount quirks
+    restart: "no"
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        set -e
+        echo "[portal-init] chowning portal volumes..."
+        # Authelia (UID 10001) — writes /data/db.sqlite3 + /data/authelia.log + /data/notification.txt
+        # mode 0755 so portal-alerter (UID 10006) can READ authelia.log for the digest function.
+        chown -R 10001:10001 /vols/authelia
+        chmod 0755 /vols/authelia
+        touch /vols/authelia/authelia.log
+        chown 10001:10001 /vols/authelia/authelia.log
+        chmod 0644 /vols/authelia/authelia.log
+        # Caddy (UID 10000) — writes /data (access logs + ACME state if used) + /config (runtime config).
+        # mode 0755 so portal-alerter can READ caddy-access.log for the digest function.
+        chown -R 10000:10000 /vols/caddy /vols/caddy-config
+        chmod 0755 /vols/caddy /vols/caddy-config
+        touch /vols/caddy/caddy-access.log
+        chown 10000:10000 /vols/caddy/caddy-access.log
+        chmod 0644 /vols/caddy/caddy-access.log
+        # Integrity-tripwire (UID 10003) — writes /state/baseline.sha256
+        chown -R 10003:10003 /vols/tripwire
+        chmod 0700 /vols/tripwire
+        echo "[portal-init] done. UIDs: authelia=10001 caddy=10000 tripwire=10003"
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
   portal-alerter:
     image: denoland/deno:alpine
     container_name: portal-alerter
@@ -860,13 +918,13 @@ services:
       - ALERT_RATE_LIMIT_PER_MIN=${ALERT_RATE_LIMIT_PER_MIN:-20}
       - PUBLIC_DOMAIN=${PUBLIC_DOMAIN}
       - TZ=UTC
-    user: "10006:10006"
+    user: "10006:10006"      # plan §2 hardening floor — non-root UID
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
     cap_drop:
       - ALL
-    read_only: true
+    read_only: true          # plan §2 hardening floor — read-only root FS
     tmpfs:
       - /tmp:noexec,nosuid,size=32m
     deploy:
@@ -877,6 +935,9 @@ services:
           pids: 100
     entrypoint: ["deno", "run", "--allow-net", "--allow-read", "--allow-write", "--allow-env", "alerter.ts"]
     command: []
+    depends_on:
+      portal-init:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/health"]
       interval: 30s
@@ -901,13 +962,13 @@ services:
       - AUTHELIA_JWT_SECRET=${AUTHELIA_JWT_SECRET}
       - AUTHELIA_SESSION_SECRET=${AUTHELIA_SESSION_SECRET}
       - AUTHELIA_STORAGE_ENCRYPTION_KEY=${AUTHELIA_STORAGE_ENCRYPTION_KEY}
-    user: "10001:10001"
+    user: "10001:10001"      # plan §2 hardening floor — non-root UID
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
     cap_drop:
       - ALL
-    read_only: true
+    read_only: true          # plan §2 hardening floor — read-only root FS
     tmpfs:
       - /tmp:noexec,nosuid,size=32m
     deploy:
@@ -916,6 +977,9 @@ services:
           cpus: '1.0'
           memory: 256M
           pids: 100
+    depends_on:
+      portal-init:
+        condition: service_completed_successfully
     labels:
       - "com.centurylinklabs.watchtower.enable=false"
     healthcheck:
@@ -942,7 +1006,7 @@ services:
     environment:
       - PUBLIC_DOMAIN=${PUBLIC_DOMAIN}
       - ACME_EMAIL=${ACME_EMAIL}
-    user: "10000:10000"
+    user: "10000:10000"      # plan §2 hardening floor — non-root UID
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
@@ -950,7 +1014,7 @@ services:
       - ALL
     cap_add:
       - NET_BIND_SERVICE   # binds :80 inside the container; not exposed on host
-    read_only: true
+    read_only: true          # plan §2 hardening floor — read-only root FS
     tmpfs:
       - /tmp:noexec,nosuid,size=64m
     deploy:
@@ -962,6 +1026,8 @@ services:
     depends_on:
       authelia:
         condition: service_started
+      portal-init:
+        condition: service_completed_successfully
     labels:
       - "com.centurylinklabs.watchtower.enable=false"
     healthcheck:
@@ -1045,6 +1111,8 @@ services:
     depends_on:
       portal-alerter:
         condition: service_started
+      portal-init:
+        condition: service_completed_successfully
     entrypoint: /bin/sh
     command:
       - -c

@@ -1,6 +1,6 @@
 # scripts/portal-on.ps1
 #
-# Routine on/off lifecycle for the internet-exposed portal (plan §12.9).
+# Routine on/off lifecycle for the internet-exposed portal (plan sec.12.9).
 # Starts only the containers tagged `profiles: [internet]`. The rest of the
 # ai-stack is unaffected.
 #
@@ -8,10 +8,10 @@
 #   .\scripts\portal-on.ps1              # bring portal up
 #   .\scripts\portal-on.ps1 -WhatIf      # print intended actions, do nothing
 #   .\scripts\portal-on.ps1 -SkipTunnel  # bring everything up EXCEPT cloudflared
-#                                        # (useful during local dev — portal exists
+#                                        # (useful during local dev -- portal exists
 #                                        # but is not exposed to the internet)
 #
-# Distinct from `breach-killswitch.ps1` — that is for incidents.
+# Distinct from `breach-killswitch.ps1` -- that is for incidents.
 
 [CmdletBinding(SupportsShouldProcess=$true)]
 param(
@@ -26,7 +26,7 @@ try {
   Write-Host "    Project root: $projectRoot"
   Write-Host ""
 
-  # Ordered groups — each group is brought up together, then we wait for
+  # Ordered groups -- each group is brought up together, then we wait for
   # health before starting the next group.
   $groups = @(
     @{ Name = 'alerter';   Services = @('portal-alerter') },
@@ -45,7 +45,7 @@ try {
   }
 
   foreach ($group in $groups) {
-    Write-Host "==> Group: $($group.Name) — $($group.Services -join ', ')" -ForegroundColor Cyan
+    Write-Host "==> Group: $($group.Name) -- $($group.Services -join ', ')" -ForegroundColor Cyan
     $svcArgs = $group.Services
     if ($PSCmdlet.ShouldProcess(($svcArgs -join ', '), 'docker compose --profile internet up -d')) {
       docker compose --profile internet up -d @svcArgs
@@ -55,7 +55,7 @@ try {
   }
 
   Write-Host ""
-  Write-Host "==> Portal is up. Running status check…" -ForegroundColor Green
+  Write-Host "==> Portal is up. Running status check..." -ForegroundColor Green
   & (Join-Path $PSScriptRoot 'portal-status.ps1')
 } finally {
   Pop-Location

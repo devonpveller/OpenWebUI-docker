@@ -28,7 +28,8 @@ totp:
 webauthn:
   display_name: AI Stack
   attestation_conveyance_preference: indirect
-  user_verification: preferred
+  selection_criteria:
+    user_verification: preferred
 
 # Password reset is disabled (no SMTP).
 # The identity_validation block is omitted to avoid the contradiction flagged in audit §H.12.
@@ -76,14 +77,14 @@ access_control:
         # via a Docker network would be classified as LAN.
   rules:
     # LAN: one factor is enough
-    - domain: '{{ env "PUBLIC_DOMAIN" }}'
+    - domain: 'devinveller.ai'
       policy: one_factor
       networks: ['home_lan']
     # Internet: enforce 2FA
-    - domain: '{{ env "PUBLIC_DOMAIN" }}'
+    - domain: 'devinveller.ai'
       policy: two_factor
     # Authelia portal itself: bypass (it does its own auth)
-    - domain: 'auth.{{ env "PUBLIC_DOMAIN" }}'
+    - domain: 'auth.devinveller.ai'
       policy: bypass
 
 session:
@@ -93,9 +94,9 @@ session:
   expiration: 8h
   remember_me: 1M
   cookies:
-    - domain: '{{ env "PUBLIC_DOMAIN" }}'
-      authelia_url: 'https://auth.{{ env "PUBLIC_DOMAIN" }}'
-      default_redirection_url: 'https://{{ env "PUBLIC_DOMAIN" }}/'
+    - domain: 'devinveller.ai'
+      authelia_url: 'https://auth.devinveller.ai'
+      default_redirection_url: 'https://devinveller.ai/'
 
 # Account-level lockout (per-username). Per-IP banning is v2 CrowdSec.
 regulation:
