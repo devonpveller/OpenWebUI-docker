@@ -1,0 +1,166 @@
+{
+    email {$ACME_EMAIL}
+    # Under Cloudflare Tunnel, ACME is unnecessary if Cloudflare provides the
+    # public cert. Leave email present so a future revert to direct exposure
+    # works without further config changes.
+    # acme_ca https://acme-staging-v02.api.letsencrypt.org/directory  # uncomment for staging
+
+    servers {
+        # Trust cloudflared's container IP range for X-Forwarded-* and
+        # CF-Connecting-IP. Without this, every client appears to come from
+        # cloudflared's IP and the access_control / regulation rules misfire.
+        # Adjust the CIDR to your edge-net subnet — `docker network inspect
+        # edge-net` will show the actual range. Typical Docker default is
+        # 172.16.0.0/12.
+        trusted_proxies static 172.16.0.0/12 10.0.0.0/8 192.168.0.0/16
+        client_ip_headers CF-Connecting-IP X-Forwarded-For
+        protocols h1 h2
+        strict_sni_host on
+    }
+}
+
+# ─── Snippets ─────────────────────────────────────────────────────────────
+
+# TLS policy — only meaningful if Caddy ever serves TLS directly. Under
+# Cloudflare Tunnel, Cloudflare handles TLS at the edge; this snippet is kept
+# so reverting to direct exposure is one config change away.
+(tls_strong) {
+    tls {
+        protocols tls1.2 tls1.3
+        ciphers TLS_AES_256_GCM_SHA384 TLS_CHACHA20_POLY1305_SHA256 TLS_AES_128_GCM_SHA256 TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384 TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384 TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305 TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305
+        curves x25519 secp384r1 secp256r1
+    }
+}
+
+# Security response headers shared by every site.
+# HSTS without the `preload` keyword — list submission is irreversible for years
+# (see plan §H.1). Enable preload by hand only after 90+ days of stable operation.
+(security_headers) {
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options    "nosniff"
+        X-Frame-Options           "DENY"
+        Referrer-Policy           "strict-origin-when-cross-origin"
+        Permissions-Policy        "geolocation=(), microphone=(), camera=(), usb=()"
+        Cross-Origin-Opener-Policy   "same-origin"
+        Cross-Origin-Resource-Policy "same-site"
+        -Server
+        -X-Powered-By
+    }
+}
+
+# Sanitize incoming proxy headers.
+# - Strip client-supplied X-Forwarded-Host / X-Real-IP (CF-Connecting-IP is the
+#   source of truth via the global trusted_proxies block; Caddy will rewrite
+#   X-Forwarded-For from it before passing upstream).
+# - Strip client-supplied Remote-* — Authelia is the ONLY source. Even though
+#   trusted-header SSO is not enabled (plan §6.7), this stays as defense in depth.
+(sanitize_proxy_headers) {
+    request_header -X-Forwarded-Host
+    request_header -X-Real-IP
+    request_header -Remote-User
+    request_header -Remote-Groups
+    request_header -Remote-Name
+    request_header -Remote-Email
+    # X-Forwarded-For and X-Forwarded-Proto are set by Caddy itself from
+    # trusted_proxies — do NOT strip them here.
+}
+
+# Access log to a rolling JSON file in /data
+(access_log) {
+    log {
+        output file /data/caddy-access.log {
+            roll_size 100MiB
+            roll_keep 7
+            roll_keep_for 720h
+        }
+        format json
+        level INFO
+    }
+}
+
+# ─── Authelia portal ──────────────────────────────────────────────────────
+http://auth.{$PUBLIC_DOMAIN} {
+    import security_headers
+    import sanitize_proxy_headers
+    import access_log
+    encode zstd gzip
+
+    request_body {
+        max_size 1MB
+    }
+
+    reverse_proxy authelia:9091
+}
+
+# ─── Main app domain ──────────────────────────────────────────────────────
+http://{$PUBLIC_DOMAIN} {
+    import security_headers
+    import sanitize_proxy_headers
+    import access_log
+    encode zstd gzip
+
+    # Health endpoint — restricted to container-local sources only so it does
+    # not leak liveness to internet scanners.
+    @internal_health {
+        path /healthz
+        remote_ip 127.0.0.1/32 172.16.0.0/12
+    }
+    handle @internal_health {
+        respond "ok" 200
+    }
+    handle /healthz {
+        respond 404
+    }
+
+    # Per-route request body caps
+    @uploads path /openwebui/* /notebook/* /api/notebook/*
+    request_body @uploads {
+        max_size 100MB
+    }
+    request_body {
+        max_size 2MB
+    }
+
+    # Forward-auth: every request below this point flows through Authelia.
+    # copy_headers omitted intentionally — trusted-header SSO is NOT enabled.
+    forward_auth authelia:9091 {
+        uri /api/verify?rd=http://auth.{$PUBLIC_DOMAIN}/
+    }
+
+    # ─── Routes ──────────────────────────────────────────────────────────
+
+    handle_path /openwebui/* {
+        reverse_proxy openwebui:8080 {
+            header_up Host {upstream_hostport}
+            header_up X-Forwarded-Proto https
+        }
+    }
+
+    handle_path /notebook/* {
+        reverse_proxy open_notebook:8502 {
+            header_up Host {upstream_hostport}
+            header_up X-Forwarded-Proto https
+        }
+    }
+
+    handle_path /api/notebook/* {
+        reverse_proxy open_notebook:5055 {
+            header_up Host {upstream_hostport}
+            header_up X-Forwarded-Proto https
+        }
+    }
+
+    handle {
+        header Content-Security-Policy "default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+        root * /srv/site
+        templates
+        try_files {path} /index.html
+        file_server
+    }
+}
+
+# Default-deny stub for any other Host header reaching this Caddy
+:80 {
+    respond 421
+}

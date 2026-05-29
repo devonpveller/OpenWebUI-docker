@@ -46,6 +46,16 @@ services:
       - ENABLE_WEB_SEARCH=${ENABLE_WEB_SEARCH:-True}
       - WEB_SEARCH_ENGINE=${WEB_SEARCH_ENGINE:-searxng}
       - SEARXNG_QUERY_URL=${SEARXNG_QUERY_URL:-http://gateway:8080/search?q=<query>}
+      # Built-in code interpreter disabled: the default Pyodide engine runs
+      # via `await __event_call__({"type": "execute:python"})` with no timeout
+      # (backend/open_webui/tools/builtin.py execute_code), so when the
+      # browser tab is backgrounded or the WS round-trip stalls, the tool
+      # call hangs forever and the chat model stays stuck waiting. The fix
+      # is still absent on OWUI main as of 2026-05-09. Re-enable only after
+      # standing up the Jupyter engine — see
+      # documentation/implementation-guide/Jupyter/.
+      - ENABLE_CODE_INTERPRETER=${ENABLE_CODE_INTERPRETER:-False}
+      - ENABLE_CODE_EXECUTION=${ENABLE_CODE_EXECUTION:-False}
     deploy:
       resources:
         reservations:

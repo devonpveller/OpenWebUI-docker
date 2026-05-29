@@ -1,0 +1,103 @@
+:root {
+  --bg: #0f1115;
+  --fg: #e6e7eb;
+  --muted: #9ca3af;
+  --card: #1a1d23;
+  --card-hover: #232730;
+  --accent: #4f8df9;
+  --accent-fg: #ffffff;
+  --border: #2a2f38;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.hub-header {
+  padding: 48px 24px 24px;
+  text-align: center;
+}
+
+.hub-header h1 {
+  margin: 0 0 8px;
+  font-size: 32px;
+  letter-spacing: -0.02em;
+}
+
+.hub-header .hint {
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.5;
+  margin: 0;
+}
+
+.hub-grid {
+  flex: 1;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 16px;
+  max-width: 880px;
+  margin: 24px auto;
+  padding: 0 24px;
+  width: 100%;
+}
+
+.hub-card {
+  display: block;
+  padding: 24px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  color: var(--fg);
+  text-decoration: none;
+  transition: background 0.15s ease, transform 0.15s ease, border-color 0.15s ease;
+}
+
+.hub-card:hover,
+.hub-card:focus {
+  background: var(--card-hover);
+  border-color: var(--accent);
+  transform: translateY(-1px);
+}
+
+.hub-card.primary {
+  border-color: var(--accent);
+}
+
+.hub-card h2 {
+  margin: 0 0 8px;
+  font-size: 20px;
+}
+
+.hub-card p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.hub-footer {
+  padding: 24px;
+  text-align: center;
+  border-top: 1px solid var(--border);
+}
+
+.hub-footer a {
+  color: var(--muted);
+  font-size: 13px;
+  text-decoration: none;
+}
+
+.hub-footer a:hover {
+  color: var(--fg);
+}

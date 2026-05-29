@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI Stack</title>
+  <link rel="stylesheet" href="/hub.css">
+  <meta http-equiv="refresh" content="3; url=/openwebui/">
+</head>
+<body>
+  <header class="hub-header">
+    <h1>AI Stack</h1>
+    <p class="hint">Redirecting to Open WebUI in 3 seconds &mdash; or pick a service below.<br>
+       You will be prompted to sign in once more at the service you choose.</p>
+  </header>
+  <main class="hub-grid">
+    <a class="hub-card primary" href="/openwebui/">
+      <h2>Open WebUI</h2>
+      <p>Chat, models, and tools &mdash; sign in with your OpenWebUI account.</p>
+    </a>
+    <a class="hub-card" href="/notebook/">
+      <h2>Open Notebook</h2>
+      <p>Documents and notebooks &mdash; protected by the Authelia gate only.</p>
+    </a>
+  </main>
+  <footer class="hub-footer">
+    <a href="https://auth.{{ env "PUBLIC_DOMAIN" }}/logout">Sign out of Authelia</a>
+  </footer>
+  <script>
+    document.querySelectorAll('.hub-card').forEach(c => {
+      c.addEventListener('mouseenter', () => {
+        const meta = document.querySelector('meta[http-equiv="refresh"]');
+        if (meta) meta.remove();
+      });
+    });
+  </script>
+</body>
+</html>

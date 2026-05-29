@@ -45,7 +45,9 @@ The Tailscale container, its serve configuration, and its network namespace shar
 | Inbound exposure mode | **Cloudflare Tunnel (mandatory)** | Hides home IP, absorbs DDoS, removes router port-forwarding, removes the Windows Defender inbound-rule surface. Trade-off: Cloudflare can read decrypted traffic (see §9 callout). Port-forward mode was removed from the plan during the post-audit revision; baseline route is no longer offered. |
 | Internal Docker network layout | **Three networks: `edge-net`, `auth-net` (`internal: true`), `app-net`** | A Caddy compromise no longer grants direct L3 to all backends. Authelia is on an `internal: true` network — no internet egress from the auth service. ([audit §C.1](./audit-plan-internet-exposed-front-end.md#c1--network-segmentation-inside-docker)) |
 | Container hardening floor | **Read-only root FS + non-root UID + `cap_drop: ALL` + `pids_limit` + tmpfs `/tmp`** on every new container | Standard Docker boundary hardening. Caddy adds `NET_BIND_SERVICE` for 80/443 binding inside the container; everything else drops all caps. |
-| Breach detection (v1) | **`authelia-watcher` sidecar → Pushover** | Tails `authelia.log` + Caddy access log + config-file hashes; pushes alerts on regulation bans, new-IP logins, credential enrollments, config drift, repeated failures. Pushover chosen for reliability and acknowledgment support. ([audit §D](./audit-plan-internet-exposed-front-end.md#d-breach-detection--v1-must-not-defer-this-to-v2)) |
+| Breach detection (v1) | **`authelia-watcher` + `integrity-tripwire` sidecars → `portal-alerter` → Gmail (self-send)** | Watchers tail `authelia.log` + Caddy access log + config-file hashes and POST internal JSON to `portal-alerter`. The alerter is a Deno sidecar that mirrors OB1's [send-digest.ts](../../../OB1/recipes/daily-digest/send-digest.ts) pattern: reuses the existing `open-brain-email` OAuth client to send `gmail.send`-scoped emails to the operator's own inbox. Single egress point for alerts; watchers stay credential-free. ([audit §D](./audit-plan-internet-exposed-front-end.md#d-breach-detection--v1-must-not-defer-this-to-v2)) |
+| Periodic traffic digest (v1) | **`portal-alerter` `/run` endpoint fired by `portal-cron`** | Scheduled summary of request counts, top source IPs, regulation bans, 401/403 spikes, integrity-tripwire status. Same Gmail egress as alerts. Mirrors OB1's daily-digest design pattern (HTTP-triggered Deno service + supercronic cron container). |
+| Portal lifecycle control | **Docker Compose `internet` profile + `scripts/portal-on.ps1` / `portal-off.ps1` / `portal-status.ps1`** | Every portal service is tagged `profiles: [internet]` so it does NOT start with a plain `docker compose up -d`. One PowerShell command toggles the entire portal on or off without touching the rest of the ai-stack; tailnet access is unaffected by either state. Distinct from `breach-killswitch.ps1` (incident response — rotates secrets, snapshots logs). |
 | Breach response (v1) | **`scripts/breach-killswitch.ps1` + `documentation/incident-response.md`** | Killswitch stops only the internet-exposed path (caddy + cloudflared + authelia), snapshots logs, rotates secrets. Tailnet path stays alive so admin retains access during incident. ([audit §E](./audit-plan-internet-exposed-front-end.md#e-incident-response--what-happens-when-a-breach-is-detected)) |
 | Open Notebook auth | **Authelia-only at the edge; no native auth behind it** | Open Notebook has no native auth — Authelia is mandatory. On the tailnet, the pre-existing trust model is unchanged ([§6.6](#66-tailnet-trust-posture-statement-open-notebook)). |
 | Watchtower | **Disabled for all new containers** | Match the existing pattern at [docker-compose.yml:114, 238, 273, 308](../../../docker-compose.yml#L114). Pin tags, update manually. |
@@ -67,7 +69,7 @@ Maps each top-level item in [security-considerations-internet-facing-02.md](./se
 | 6 | Brute force / DDoS mitigation | v1 partial, v2 full | §8 Caddyfile rate-limit (commented in v1) + §9 Cloudflare Tunnel (mandatory) + §10 CrowdSec |
 | 7 | Identity provider selection | v1 | §2 decision: Authelia |
 | 8 | Host & OS hardening | v1 partial | §6.5 Windows firewall + §12.1 update policy; §13 for Linux-host migration discussion |
-| 9 | Logging, monitoring, IR | **v1 (detection + IR baked in)** | §8 Step 8 `authelia-watcher` + `integrity-tripwire` sidecars; §12.4 log retention; §12.6 killswitch ops; deliverable `documentation/incident-response.md` (§7.1, §13.6) |
+| 9 | Logging, monitoring, IR | **v1 (detection + IR + scheduled digest baked in)** | §8 Step 1 `authelia-watcher` + `integrity-tripwire` + `portal-alerter` + `portal-cron` sidecars; §8 Step 9 periodic traffic digest spec; §12.4 log retention + grep cookbook; §12.6 killswitch ops; §12.9 portal on/off lifecycle; deliverable `documentation/incident-response.md` (§7.1, §13.6) |
 | 10 | Application security (OWASP) | v1 partial, v2 WAF | §8 Step 2 Caddyfile CSP + input limits + `Remote-*` sanitization; §10 v2 CrowdSec AppSec |
 | 11 | Architecture & ops (zero-trust, secrets) | v1 partial | §6 pre-flight secrets to `.env`; §8 Step 1 read-only FS / non-root UID / `cap_drop: ALL` / `pids_limit`; §12.5 secrets-management posture |
 
@@ -82,9 +84,9 @@ Maps each top-level item in [security-considerations-internet-facing-02.md](./se
 - Hardened Caddyfile (TLS pinning, CSP, body limits, `X-Forwarded-For` rewrite from `CF-Connecting-IP`, `Remote-*` header strip, JSON access log, rate-limit hooks commented for v2)
 - Authelia config (single user, WebAuthn-preferred + TOTP fallback, Argon2id, regulation, `access_control.networks`, no password reset)
 - Launcher hub static page (with explicit "you will be prompted to sign in to each service" copy, since SSO is not enabled)
-- `.env.example` patch (Cloudflare Tunnel token, Pushover keys, Authelia secrets, pre-flight secrets)
+- `.env.example` patch (Cloudflare Tunnel token, Authelia secrets, pre-flight secrets, Gmail digest vars — no Pushover keys; Gmail is the only notifier)
 - Backup containers for `caddy-data` and `authelia-data` (cron env-passing fix from [audit §B.4](./audit-plan-internet-exposed-front-end.md#b4--backup-containers-do-not-run-their-secrets-through-the-cron-environment))
-- **Breach detection (new in v1):** `authelia-watcher` sidecar tailing Authelia + Caddy logs → Pushover; `integrity-tripwire` sidecar hashing config files
+- **Breach detection + traffic digest (new in v1):** `authelia-watcher` and `integrity-tripwire` sidecars POST JSON over `auth-net` to `portal-alerter` (Deno sidecar, mirrors OB1 send-digest.ts pattern) → Gmail to operator inbox via reused `open-brain-email` OAuth client. `portal-cron` fires `POST /run` on cadence for the periodic traffic/blocks/threats digest.
 - **Incident response (new in v1):** `scripts/breach-killswitch.ps1` + `documentation/incident-response.md` deliverables (drafted by implementing agent; outline in §7.1, §13.6)
 
 ### Out of scope (do NOT include in v1 or v2)
@@ -170,15 +172,50 @@ Internet
                  OpenWebUI's
                  native form)
 
-       [Detection sidecars — all on auth-net, internal: true]
+       [Detection sidecars — credential-free, all on auth-net (internal: true)]
        ┌───────────────────────────────┐  ┌─────────────────────────────┐
        │ authelia-watcher (new)        │  │ integrity-tripwire (new)    │
        │  tails authelia.log,          │  │  nightly checksum of        │
        │  caddy-access.log;            │  │  Caddyfile, configuration.  │
-       │  POSTs Pushover on ban /      │  │  yml, users_database.yml;   │
-       │  new-IP / credential change / │  │  POSTs Pushover on drift    │
-       │  config reload                │  │                             │
-       └───────────────────────────────┘  └─────────────────────────────┘
+       │  POSTs JSON to                │  │  yml, users_database.yml;   │
+       │  portal-alerter:8080/alert    │  │  POSTs JSON to              │
+       │  on ban / new-IP / cred       │  │  portal-alerter:8080/alert  │
+       │  change / config reload       │  │  on drift                   │
+       └─────────────┬─────────────────┘  └──────────────┬──────────────┘
+                     │                                   │
+                     └───────────┬───────────────────────┘
+                                 ▼
+            ┌──────────────────────────────────────────────┐
+            │ portal-alerter (new)                         │
+            │  Deno HTTP service modeled on OB1's          │
+            │  send-digest.ts. Networks: auth-net          │
+            │  (receives alerts) + notify-net (egress).    │
+            │  Owns the gmail.send OAuth token             │
+            │  (mounted from secrets/google/portal-        │
+            │  alerter/token.json). Endpoints:             │
+            │   POST /alert  → instant email               │
+            │   POST /run    → log-scan digest email       │
+            │   GET  /health → liveness                    │
+            └──────────────────────┬───────────────────────┘
+                                   │ HTTPS → Gmail API
+                                   ▼ (notify-net only)
+                            ┌──────────────┐
+                            │ Gmail        │
+                            │ (operator's  │
+                            │  own inbox)  │
+                            └──────────────┘
+
+            [Scheduler — fires digest on cadence]
+            ┌──────────────────────────────────────────────┐
+            │ portal-cron (new)                            │
+            │  supercronic + curl, mirrors OB1's           │
+            │  openbrain-cron pattern. Crontab fires       │
+            │  POST http://portal-alerter:8080/run         │
+            │  on the configured cadence (daily 07:00      │
+            │  default). No docker socket, no privileges.  │
+            │  Network: notify-net (no internet egress     │
+            │  itself — only curls the alerter).           │
+            └──────────────────────────────────────────────┘
 
 Tailscale path (unchanged — completely separate ingress):
   tailnet  →  tailscale container (shared netns with openwebui)
@@ -188,12 +225,13 @@ Tailscale path (unchanged — completely separate ingress):
 
 **Docker network topology:**
 - `edge-net` (bridge): `cloudflared`, `caddy`. Only path between cloudflared and caddy.
-- `auth-net` (bridge, `internal: true`): `caddy`, `authelia`, `authelia-watcher`, `integrity-tripwire`. **No internet egress.** Authelia cannot reach SMTP, NTP, ACME, or external WebAuthn attestation servers — fine because notifier is `filesystem`, time comes from the host, ACME runs in Caddy on `edge-net`.
+- `auth-net` (bridge, `internal: true`): `caddy`, `authelia`, `authelia-watcher`, `integrity-tripwire`, `portal-alerter`. **No internet egress from this network.** Authelia + watchers + the alerter's *receive* side all sit here.
+- `notify-net` (bridge, NOT internal): `portal-alerter` (egress to Gmail), `portal-cron` (curls the alerter). This is the **only** network with internet egress in the portal slice, and only the alerter actually dials out.
 - `app-net` (bridge): `caddy`, `openwebui`, `open_notebook`. Backends reachable only from Caddy.
 - `llm-net` (bridge, `internal: true` — existing): unchanged, never exposed to Caddy.
 - The existing `default` bridge keeps everything else. `caddy` is **not** placed on `default`.
 
-If `caddy` is compromised, the attacker has L3 reach to Authelia and the two backends — but **not** to llama-cpp/mnemory/surrealdb, and Authelia's container cannot dial out to the internet to exfiltrate.
+If `caddy` is compromised, the attacker has L3 reach to Authelia and the two backends — but **not** to llama-cpp/mnemory/surrealdb, and Authelia's container cannot dial out to the internet to exfiltrate. If `portal-alerter` is compromised, the OAuth token's scope is restricted to `gmail.send` (write-only) — the attacker can send mail from your address but cannot read your inbox or other Google data.
 
 ---
 
@@ -277,6 +315,31 @@ Authelia's `password_reset.disable: true` means losing all 2FA enrollments + for
 
 This is a v1 pre-deploy checklist item (§11) but called out here so it isn't missed.
 
+### 6.9 Pre-deployment `portal-alerter` OAuth bootstrap (Gmail)
+The `portal-alerter` reuses OB1's `open-brain-email` OAuth client (`secrets/google/open-brain-email/client_secret_*.json` — already on disk, already consented for the `gmail.send` scope by OB1). The alerter does **not** share OB1's `token.json` — it gets its own at `secrets/google/portal-alerter/token.json` so revocation is granular. Before bringing the portal up:
+
+1. Copy or symlink the OB1 OAuth client secret to `config/alerter/credentials.json` for the bootstrap step (the running container reads it from a bind-mount, not from this path; this copy is only for `setup-token.ts`).
+2. On the Windows host (NOT in a container), run:
+   ```powershell
+   deno run --allow-net --allow-read --allow-write --allow-env config/alerter/setup-token.ts
+   ```
+   Mirrors OB1's [setup-token.ts](../../../OB1/recipes/daily-digest/setup-token.ts). It opens the Google consent screen, captures the redirect on `http://127.0.0.1:8765`, and writes `secrets/google/portal-alerter/token.json` with a long-lived refresh token.
+3. Confirm `secrets/google/portal-alerter/token.json` exists and is gitignored (entry in `.gitignore`).
+4. Send a test email by running the alerter once outside the stack:
+   ```powershell
+   docker run --rm `
+     -v "${PWD}/config/alerter:/app:ro" `
+     -v "${PWD}/secrets/google/open-brain-email/client_secret_140943225735-jlldopci4llqu5i1ag7j08ks44a269jq.apps.googleusercontent.com.json:/app/credentials.json:ro" `
+     -v "${PWD}/secrets/google/portal-alerter/token.json:/app/token.json" `
+     -e DIGEST_TO=$env:DIGEST_TO `
+     -e DIGEST_FROM=$env:DIGEST_FROM `
+     denoland/deno:alpine `
+     deno run --allow-net --allow-read --allow-write --allow-env /app/alerter.ts --selftest
+   ```
+   Email arrives in the operator's inbox with subject `Portal alerter self-test`.
+
+**Coupling caveat:** if the OB1 `open-brain-email` OAuth client is ever revoked (Google Cloud Console), **both OB1's daily digest AND this portal's alerts break together.** v1 accepts this coupling for delivery speed. A follow-up issue should provision a dedicated OAuth client for the portal once the system is stable. See §15 STOP-list.
+
 ---
 
 ## 7. v1 file changes
@@ -293,26 +356,40 @@ config/
     configuration.yml
     users_database.yml            # gitignored after template
     .gitignore
+  alerter/
+    alerter.ts                    # Deno HTTP sidecar — /alert + /run + /health; mirrors OB1 send-digest.ts
+    setup-token.ts                # one-time host-side OAuth consent bootstrap (mirrors OB1 setup-token.ts)
+    .env.example                  # DIGEST_TO, DIGEST_FROM, DIGEST_WINDOW_HOURS, ALERT_RATE_LIMIT, etc.
   watcher/
-    authelia-watch.sh             # Pushover sidecar — tails authelia.log + caddy-access.log
+    authelia-watch.sh             # tails authelia.log + caddy-access.log; POSTs JSON to portal-alerter:8080/alert
     known-ips.txt                 # seed file of known source IPs (one per line; empty initially)
   tripwire/
     integrity-tripwire.sh         # nightly hash check on Caddyfile / configuration.yml / users_database.yml
     baseline.sha256               # generated on first run by the script
+  portal-cron/
+    crontab                       # supercronic crontab; one line fires POST /run on the alerter
+    Dockerfile                    # tiny alpine + supercronic + curl image (mirrors OB1 openbrain-cron)
+secrets/
+  google/
+    portal-alerter/
+      .gitkeep                    # token.json lands here from setup-token.ts; gitignored
 backup/
   caddy-backup.sh
   authelia-backup.sh
 scripts/
-  breach-killswitch.ps1           # emergency stop for internet-exposed path only
+  portal-on.ps1                   # docker compose --profile internet up -d (with health-wait)
+  portal-off.ps1                  # docker compose --profile internet stop (preserves volumes)
+  portal-status.ps1               # one-shot report: which portal containers are up + last alert + tunnel state
+  breach-killswitch.ps1           # emergency stop for internet-exposed path only — distinct from portal-off
 documentation/
   incident-response.md            # v1 IR playbook (outline in §13.6; full content written by implementing agent)
 ```
 
 ### 7.2 Modified files
 ```
-docker-compose.yml                # add cloudflared, caddy, authelia, watcher, tripwire, backups + 3 new networks + named volumes
-.env.example                      # add Cloudflare Tunnel token, Pushover keys, Authelia secrets, pre-flight secrets
-.gitignore                        # ensure config/authelia/users_database.yml + config/tripwire/baseline.sha256 are ignored
+docker-compose.yml                # add cloudflared, caddy, authelia, watcher, tripwire, portal-alerter, portal-cron, backups + 4 new networks (edge-net, auth-net, app-net, notify-net) + named volumes; every new service tagged profiles: [internet]
+.env.example                      # add Cloudflare Tunnel token, Authelia secrets, pre-flight secrets, DIGEST_TO/DIGEST_FROM, PORTAL_DIGEST_CRON (no Pushover vars — Gmail is the only notifier)
+.gitignore                        # ensure config/authelia/users_database.yml, config/tripwire/baseline.sha256, secrets/google/portal-alerter/token.json, and config/alerter/credentials.json are ignored
 ```
 
 ### 7.3 Volumes added to [docker-compose.yml](../../../docker-compose.yml)
@@ -331,9 +408,11 @@ networks:
     driver: bridge        # cloudflared + caddy
   auth-net:
     driver: bridge
-    internal: true        # caddy + authelia + watcher + tripwire; NO internet egress
+    internal: true        # caddy + authelia + watcher + tripwire + portal-alerter (receive side); NO internet egress
   app-net:
     driver: bridge        # caddy + openwebui + open_notebook
+  notify-net:
+    driver: bridge        # portal-alerter (egress to Gmail) + portal-cron (curls the alerter). NOT internal.
   # llm-net stays as-is (internal: true)
   # default stays as-is (other services unchanged)
 ```
@@ -355,6 +434,7 @@ The only modification to existing services is **attaching `openwebui` and `open_
 - `pids_limit: 100`
 - explicit `cpus`/`memory` deploy limits
 - `labels: ["com.centurylinklabs.watchtower.enable=false"]`
+- **`profiles: [internet]`** on every new container so plain `docker compose up -d` does NOT start the portal. Lifecycle is driven by `scripts/portal-on.ps1` / `portal-off.ps1` (§12.9). This is the one-switch on/off mechanism.
 
 Append to the `networks:` block:
 ```yaml
@@ -363,9 +443,11 @@ networks:
     driver: bridge
   auth-net:
     driver: bridge
-    internal: true        # no internet egress for authelia + watcher + tripwire
+    internal: true        # no internet egress for authelia + watcher + tripwire + portal-alerter (receive side)
   app-net:
     driver: bridge
+  notify-net:
+    driver: bridge        # NOT internal — portal-alerter egress to Gmail; portal-cron curls the alerter
   # llm-net and default keep their current definitions
 ```
 
@@ -390,6 +472,7 @@ Append to the `services:` block:
   cloudflared:
     image: cloudflare/cloudflared:2024.10.0       # pin, do not use :latest in prod
     container_name: cloudflared
+    profiles: [internet]                          # portal lifecycle — see §12.9
     networks:
       - edge-net
     command: tunnel --no-autoupdate run
@@ -419,6 +502,7 @@ Append to the `services:` block:
   caddy:
     image: caddy:2.8.4-alpine                     # pin patch; v2 uses custom build (§10.4)
     container_name: caddy
+    profiles: [internet]                          # portal lifecycle — see §12.9
     networks:
       - edge-net          # cloudflared → caddy
       - auth-net          # caddy → authelia (forward_auth)
@@ -464,6 +548,7 @@ Append to the `services:` block:
   authelia:
     image: authelia/authelia:4.39
     container_name: authelia
+    profiles: [internet]                          # portal lifecycle — see §12.9
     networks:
       - auth-net          # internal: true — no internet egress
     volumes:
@@ -502,16 +587,16 @@ Append to the `services:` block:
   authelia-watcher:
     image: alpine:3.21
     container_name: authelia-watcher
+    profiles: [internet]                          # portal lifecycle — see §12.9
     networks:
-      - auth-net          # internal: true — relies on Pushover via... see note below
+      - auth-net          # internal: true — only talks to portal-alerter:8080 over auth-net; no internet
     volumes:
       - authelia-data:/logs/authelia:ro
       - caddy-data:/logs/caddy:ro
       - ./config/watcher/authelia-watch.sh:/scripts/watch.sh:ro
       - ./config/watcher/known-ips.txt:/data/known-ips.txt
     environment:
-      - PUSHOVER_USER_KEY=${PUSHOVER_USER_KEY}
-      - PUSHOVER_API_TOKEN=${PUSHOVER_API_TOKEN}
+      - ALERTER_URL=http://portal-alerter:8080/alert
       - ALERT_BASE_URL=${PUBLIC_DOMAIN}
     user: "10002:10002"
     restart: unless-stopped
@@ -531,6 +616,8 @@ Append to the `services:` block:
     depends_on:
       authelia:
         condition: service_started
+      portal-alerter:
+        condition: service_started
     entrypoint: /bin/sh
     command:
       - -c
@@ -544,8 +631,9 @@ Append to the `services:` block:
   integrity-tripwire:
     image: alpine:3.21
     container_name: integrity-tripwire
+    profiles: [internet]                          # portal lifecycle — see §12.9
     networks:
-      - auth-net          # internal: true
+      - auth-net          # internal: true — only talks to portal-alerter:8080 over auth-net
     volumes:
       - ./config/caddy/Caddyfile:/watch/Caddyfile:ro
       - ./config/authelia/configuration.yml:/watch/configuration.yml:ro
@@ -553,8 +641,7 @@ Append to the `services:` block:
       - ./config/tripwire/integrity-tripwire.sh:/scripts/tripwire.sh:ro
       - tripwire-data:/state
     environment:
-      - PUSHOVER_USER_KEY=${PUSHOVER_USER_KEY}
-      - PUSHOVER_API_TOKEN=${PUSHOVER_API_TOKEN}
+      - ALERTER_URL=http://portal-alerter:8080/alert
       - CHECK_CRON=${TRIPWIRE_CRON:-0 4 * * *}
     user: "10003:10003"
     restart: unless-stopped
@@ -568,6 +655,9 @@ Append to the `services:` block:
         limits:
           cpus: '0.25'
           memory: 64M
+    depends_on:
+      portal-alerter:
+        condition: service_started
     entrypoint: /bin/sh
     command:
       - -c
@@ -577,15 +667,106 @@ Append to the `services:` block:
         # Run once at startup to establish or verify baseline
         /scripts/tripwire.sh init || true
         # Then schedule via crond; export env into the cron environment
-        printenv | grep -E '^(PUSHOVER_|CHECK_)' > /etc/profile.d/tripwire-env.sh
+        printenv | grep -E '^(ALERTER_|CHECK_)' > /etc/profile.d/tripwire-env.sh
         echo "$${CHECK_CRON} . /etc/profile.d/tripwire-env.sh; /scripts/tripwire.sh check >> /var/log/tripwire.log 2>&1" > /etc/crontabs/root
         crond -f -l 2
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
+  portal-alerter:
+    image: denoland/deno:alpine                   # match OB1's openbrain-digest image choice
+    container_name: portal-alerter
+    profiles: [internet]                          # portal lifecycle — see §12.9
+    networks:
+      - auth-net          # internal: true — receives /alert from watcher + tripwire here
+      - notify-net        # outbound to oauth2.googleapis.com + gmail.googleapis.com
+    working_dir: /app
+    volumes:
+      - ./config/alerter:/app:ro
+      # Reuse OB1's open-brain-email OAuth client (already consented for gmail.send).
+      # Path matches OB1's docker-compose.scheduled.yml so future credential rotation
+      # is one place. If you provision a separate OAuth client later, change both paths.
+      - ./secrets/google/open-brain-email/client_secret_140943225735-jlldopci4llqu5i1ag7j08ks44a269jq.apps.googleusercontent.com.json:/app/credentials.json:ro
+      - ./secrets/google/portal-alerter/token.json:/app/token.json
+      # Read-only access to both log streams for the /run digest endpoint.
+      - authelia-data:/logs/authelia:ro
+      - caddy-data:/logs/caddy:ro
+    environment:
+      - DIGEST_TO=${DIGEST_TO}
+      - DIGEST_FROM=${DIGEST_FROM}
+      - DIGEST_WINDOW_HOURS=${DIGEST_WINDOW_HOURS:-24}
+      - ALERT_RATE_LIMIT_PER_MIN=${ALERT_RATE_LIMIT_PER_MIN:-20}
+      - PUBLIC_DOMAIN=${PUBLIC_DOMAIN}
+      - TZ=UTC
+    user: "10006:10006"
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=32m
+    pids_limit: 100
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 192M
+    entrypoint: ["deno", "run", "--allow-net", "--allow-read", "--allow-write", "--allow-env", "alerter.ts"]
+    command: []
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
+  portal-cron:
+    # Mirrors OB1's openbrain-cron pattern: supercronic + curl in a small alpine
+    # image. Reads a bind-mounted crontab so schedule changes don't require an
+    # image rebuild. No docker socket. The single canonical line in the crontab
+    # is: <PORTAL_DIGEST_CRON> curl -fsS -X POST http://portal-alerter:8080/run
+    image: portal-cron:local
+    build:
+      context: ./config/portal-cron
+      dockerfile: Dockerfile
+    container_name: portal-cron
+    profiles: [internet]                          # portal lifecycle — see §12.9
+    networks:
+      - notify-net        # only reaches portal-alerter (also on notify-net); no internet egress used by cron itself
+    volumes:
+      - ./config/portal-cron/crontab:/etc/portal-crontab:ro
+    environment:
+      - PORTAL_DIGEST_CRON=${PORTAL_DIGEST_CRON:-0 7 * * *}
+      - TZ=UTC
+    user: "10007:10007"
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=16m
+    pids_limit: 50
+    deploy:
+      resources:
+        limits:
+          cpus: '0.1'
+          memory: 32M
+    depends_on:
+      portal-alerter:
+        condition: service_healthy
     labels:
       - "com.centurylinklabs.watchtower.enable=false"
 
   caddy-backup:
     image: alpine:3.21
     container_name: caddy-backup
+    profiles: [internet]                          # portal lifecycle — see §12.9
     volumes:
       - caddy-data:/data:ro
       - ./backups/caddy:/backups
@@ -621,6 +802,7 @@ Append to the `services:` block:
   authelia-backup:
     image: alpine:3.21
     container_name: authelia-backup
+    profiles: [internet]                          # portal lifecycle — see §12.9
     volumes:
       - authelia-data:/data:ro
       - ./backups/authelia:/backups
@@ -653,28 +835,9 @@ Append to the `services:` block:
       - "com.centurylinklabs.watchtower.enable=false"
 ```
 
-**On `authelia-watcher` and the `internal: true` network for Pushover:** Pushover requires an HTTPS POST to `api.pushover.net`. A network with `internal: true` blocks that. Two options — the implementing agent must pick one and apply:
+**On `auth-net` egress and the alerter chokepoint:** the watchers (`authelia-watcher`, `integrity-tripwire`) stay on `auth-net` only and have **no internet egress**. They POST JSON over the internal bridge to `http://portal-alerter:8080/alert`. Only `portal-alerter` is dual-homed (`auth-net` + `notify-net`); `notify-net` is the single point where Gmail egress occurs. This is the post-audit replacement for the prior Pushover note — watchers are now credential-free and one container holds the OAuth token. If `portal-alerter` ever fails, the alerter's `/health` endpoint returns non-200 and `portal-status.ps1` (§12.9) surfaces that.
 
-1. **Move `authelia-watcher` to a separate `notify-net` (bridge, NOT internal)** dedicated to outbound notifications. The watcher keeps `auth-net` as well so it can read the log volumes via shared bind mounts. Pushover is the only egress allowed.
-2. **Keep `auth-net` internal** and proxy outbound Pushover calls through Caddy (`reverse_proxy` to `api.pushover.net`). Adds Caddy as a notification bottleneck — if Caddy is the compromise, alerts about that compromise can't be delivered. Not recommended.
-
-**Preferred:** option 1. The plan's §8 Step 1 example above assumes option 1; add the second network attachment:
-
-```yaml
-  authelia-watcher:
-    networks:
-      - auth-net
-      - notify-net      # add this; notify-net is a new non-internal bridge for Pushover
-```
-
-And:
-```yaml
-networks:
-  notify-net:
-    driver: bridge      # NOT internal: true
-```
-
-Same applies to `integrity-tripwire` (it also needs to POST to Pushover).
+`portal-cron` joins `notify-net` only — it issues `curl POST http://portal-alerter:8080/run` on cadence and never dials the internet itself.
 
 Then append to the `volumes:` block:
 ```yaml
@@ -1106,45 +1269,90 @@ The `{{ env "PUBLIC_DOMAIN" }}` token is substituted by Caddy's `templates` dire
 
 This plan **does not include the script bodies** — the implementing agent writes them as part of v1 deliverables (see [integration-task-document.md](./integration-task-document.md)). The specifications below pin behavior the scripts must implement.
 
-**`config/watcher/authelia-watch.sh` (Pushover sidecar):**
+**`config/watcher/authelia-watch.sh` (log-watcher sidecar — POSTs to the alerter, not Gmail directly):**
 
-| Trigger | Source | Pushover priority |
+| Trigger | Source | Alert `severity` field |
 |---|---|---|
-| `authentication.failed` repeats × ≥ 5 within 5 min from same IP | `/logs/authelia/authelia.log` JSON `time` + `remote_ip` | 1 (high) |
-| `authentication.success` from an IP not in `/data/known-ips.txt` | same | 1 (high) |
-| `regulation` ban applied | same | 0 (normal) |
-| WebAuthn / TOTP credential added or removed | same | 1 (high) |
-| Authelia config reload (`config_file_loaded` event) | same | 0 (normal) |
-| Caddy access log shows ≥ 10 × 401 from same IP within 1 min | `/logs/caddy/caddy-access.log` JSON | 0 (normal) |
+| `authentication.failed` repeats × ≥ 5 within 5 min from same IP | `/logs/authelia/authelia.log` JSON `time` + `remote_ip` | `high` |
+| `authentication.success` from an IP not in `/data/known-ips.txt` | same | `high` |
+| `regulation` ban applied | same | `medium` |
+| WebAuthn / TOTP credential added or removed | same | `high` |
+| Authelia config reload (`config_file_loaded` event) | same | `medium` |
+| Caddy access log shows ≥ 10 × 401 from same IP within 1 min | `/logs/caddy/caddy-access.log` JSON | `medium` |
 
-Each alert message includes: timestamp (UTC), event type, username (if known), source IP, the relevant log line trimmed to 200 chars. The script reads `PUSHOVER_USER_KEY` and `PUSHOVER_API_TOKEN` from env and POSTs to `https://api.pushover.net/1/messages.json`. The script must use `inotifywait` (from `inotify-tools`) for log rotation safety, not naïve `tail -F`.
+For each trigger the watcher composes a JSON envelope and POSTs to `$ALERTER_URL` (default `http://portal-alerter:8080/alert`):
+
+```json
+{
+  "severity": "high",
+  "event": "authentication.failed.burst",
+  "source_ip": "203.0.113.42",
+  "username": null,
+  "timestamp_utc": "2026-05-28T14:03:11Z",
+  "log_line": "...trimmed to 200 chars..."
+}
+```
+
+The watcher has **no Gmail credentials and no PUSHOVER_* env**. If the alerter is down, the watcher logs the failed POST to stderr (visible via `docker logs authelia-watcher`) and moves on — repeated alerter outage is itself a signal the operator should notice via `portal-status.ps1` (§12.9). The script must use `inotifywait` (from `inotify-tools`) for log rotation safety, not naïve `tail -F`.
 
 **`config/tripwire/integrity-tripwire.sh`:**
 
 | Mode | Behavior |
 |---|---|
-| `init` | If `/state/baseline.sha256` doesn't exist, compute SHA-256 of each `/watch/*` file and write to baseline. On every subsequent `init` (container start), verify current hashes against baseline; alert via Pushover on mismatch. |
-| `check` (cron) | Verify current hashes against baseline; alert via Pushover on mismatch. Do NOT auto-update the baseline. Updating requires manual ack: an operator must `docker exec integrity-tripwire /scripts/tripwire.sh accept` to re-baseline after a deliberate config change. |
+| `init` | If `/state/baseline.sha256` doesn't exist, compute SHA-256 of each `/watch/*` file and write to baseline. On every subsequent `init` (container start), verify current hashes against baseline; on mismatch POST `{severity:"critical", event:"config.drift", ...}` to `$ALERTER_URL`. |
+| `check` (cron) | Verify current hashes against baseline; on mismatch POST `{severity:"critical", event:"config.drift", ...}` to `$ALERTER_URL`. Do NOT auto-update the baseline. Updating requires manual ack: an operator must `docker exec integrity-tripwire /scripts/tripwire.sh accept` to re-baseline after a deliberate config change. |
 | `accept` | Re-compute and overwrite `/state/baseline.sha256`. Used after intentional changes to Caddyfile, configuration.yml, or users_database.yml. |
 
 The "accept" mode is intentionally manual so any config change that bypasses the operator's awareness fires an alert.
+
+**`config/alerter/alerter.ts` (Deno HTTP service — single Gmail egress point):**
+
+Mirrors OB1's [send-digest.ts](../../../OB1/recipes/daily-digest/send-digest.ts) structure. Endpoints:
+
+| Method + path | Purpose | Auth | Body |
+|---|---|---|---|
+| `POST /alert` | Instant email for a discrete event from a watcher | none (auth-net only) | `{severity, event, source_ip, username, timestamp_utc, log_line}` as above |
+| `POST /run` | Scheduled traffic + threats digest covering the last `DIGEST_WINDOW_HOURS` | none (notify-net, only `portal-cron` can reach it on that net) | empty (`{}`) |
+| `GET /health` | Liveness for `portal-status.ps1`, the alerter's own healthcheck, and `breach-killswitch.ps1` to confirm the alerter is up before snapshotting | none | — |
+
+OAuth behavior: identical to OB1's pattern — read `credentials.json` + `token.json` from `/app`, refresh access token on demand (`oauth2.googleapis.com/token`), send via `gmail.googleapis.com/gmail/v1/users/me/messages/send` with a base64url-encoded RFC 2822 payload. The container's `read_only: true` root FS means token refresh writes to `/app/token.json` only — that bind mount is the **only** writable path.
+
+Rate-limit: at most `ALERT_RATE_LIMIT_PER_MIN` emails sent per rolling minute (default 20). Excess alerts within the window are coalesced into one summary email at the end of the minute. Prevents a log-flood attack from generating a Gmail quota burst.
+
+Self-test mode: `deno run ... alerter.ts --selftest` sends one email with subject `Portal alerter self-test` and exits 0. Used by §6.9 step 4.
+
+The `/run` digest content (full spec in §8 Step 9 below) scans `/logs/authelia/authelia.log` + `/logs/caddy/caddy-access.log` over `DIGEST_WINDOW_HOURS`.
+
+**`config/alerter/setup-token.ts`:** copies OB1's [setup-token.ts](../../../OB1/recipes/daily-digest/setup-token.ts) with two differences: (a) writes the token to `secrets/google/portal-alerter/token.json` instead of the OB1 path, and (b) the comment block calls out that this is the portal alerter's token, separate from the OB1 digest's token. Scope is `https://www.googleapis.com/auth/gmail.send`.
+
+**`config/portal-cron/crontab`:** one canonical line, copied at container start to supercronic's crontab location:
+
+```
+${PORTAL_DIGEST_CRON} curl -fsS -X POST http://portal-alerter:8080/run >/dev/null 2>&1 || echo "[$(date -u +%FT%TZ)] portal-cron: alerter unreachable"
+```
+
+`${PORTAL_DIGEST_CRON}` is substituted at container start via the cron container's entrypoint shim (`envsubst < /etc/portal-crontab > /etc/portal-crontab.rendered`); supercronic loads the rendered file. Default cadence is daily 07:00 UTC. Add additional lines for higher cadences (hourly summaries, etc.) — each one is a separate curl to `/run`. No docker socket, no privileges. Mirrors OB1's `openbrain-cron`.
 
 **`scripts/breach-killswitch.ps1`:**
 
 Single PowerShell script the operator runs from the Windows host (or via Tailscale-reachable RDP) when the watcher / tripwire fires an alert deemed credible. Behaviors required:
 
-1. Stop the internet-exposed path only: `docker stop cloudflared caddy authelia authelia-watcher integrity-tripwire`
-2. Snapshot logs to `./incident/<UTC-timestamp>/`:
+1. **Send a "killswitch fired" email FIRST** via `Invoke-WebRequest -Method POST http://localhost:8080/alert` (or via `docker exec portal-alerter wget -q -O- --post-data='...' http://127.0.0.1:8080/alert`) before stopping the alerter. This guarantees the operator's inbox gets a final record of the trip.
+2. Stop the internet-exposed path only: `docker compose --profile internet stop cloudflared caddy authelia authelia-watcher integrity-tripwire portal-alerter portal-cron`
+3. Snapshot logs to `./incident/<UTC-timestamp>/`:
    - `docker cp caddy:/data/caddy-access.log ./incident/<ts>/`
    - `docker cp authelia:/data/authelia.log ./incident/<ts>/`
-3. Rotate `AUTHELIA_JWT_SECRET` and `AUTHELIA_SESSION_SECRET` in `.env` (preserve old values commented out for the IR record)
-4. Print recovery steps (referencing `documentation/incident-response.md`) to the console:
+4. Rotate `AUTHELIA_JWT_SECRET` and `AUTHELIA_SESSION_SECRET` in `.env` (preserve old values commented out for the IR record).
+5. Print recovery steps (referencing `documentation/incident-response.md`) to the console:
    - "Tailnet path is still up — reach OpenWebUI via your tailnet host"
    - "Restore Authelia from yesterday's backup before restarting (today's may be poisoned)"
    - "Re-enroll WebAuthn keys via `https://auth.<your-domain>/settings/two-factor` after recovery"
-5. **Do not** automatically restart anything. Bringing the portal back online is a human decision.
+   - "If the `open-brain-email` OAuth client is suspected compromised, revoke it in Google Cloud Console — but doing so ALSO breaks OB1's daily digest until a new client is provisioned (§6.9 coupling caveat)"
+6. **Do not** automatically restart anything. Bringing the portal back online is a human decision.
 
-The script must NOT touch: `tailscale`, `openwebui`, `open_notebook`, `surrealdb`, `llama-cpp`, `llama-cpp-embed`, `mnemory`, `smolcrawl`, `open-terminal`, or any backup container. Tailnet access must survive the killswitch.
+The script must NOT touch: `tailscale`, `openwebui`, `open_notebook`, `surrealdb`, `llama-cpp`, `llama-cpp-embed`, `mnemory`, `smolcrawl`, `open-terminal`, any OB1 container, or any non-portal backup container. Tailnet access must survive the killswitch.
+
+**Killswitch vs `portal-off.ps1` (don't confuse them):** `portal-off.ps1` is the planned-downtime toggle — stop the profile, preserve everything, no secret rotation, no log snapshot. `breach-killswitch.ps1` is the incident response — same stop semantics PLUS log snapshot, secret rotation, and the "do not auto-restart" warning. The killswitch is the one-way door; portal-off is the light switch.
 
 **`documentation/incident-response.md`:** see §13.6 for the required outline. The implementing agent writes the full document; this plan reviews it before merge.
 
@@ -1199,10 +1407,22 @@ AUTHELIA_JWT_SECRET=
 AUTHELIA_SESSION_SECRET=
 AUTHELIA_STORAGE_ENCRYPTION_KEY=
 
-# Pushover (breach detection — required for v1)
-# Sign up at https://pushover.net; create an Application to get the API token.
-PUSHOVER_USER_KEY=
-PUSHOVER_API_TOKEN=
+# === Portal-alerter (Gmail self-send via reused OB1 OAuth client) ===
+# DIGEST_TO is where alerts AND scheduled digests land. Use your own Gmail.
+# DIGEST_FROM defaults to DIGEST_TO if blank; should match the Google account
+# that consented to the open-brain-email OAuth client. Mismatches produce
+# Gmail "Sent from address you do not own" errors.
+DIGEST_TO=
+DIGEST_FROM=
+DIGEST_WINDOW_HOURS=24
+
+# Rate-limit on instant /alert emails (per rolling minute). Excess events
+# in the same minute are coalesced into one summary email at minute close.
+ALERT_RATE_LIMIT_PER_MIN=20
+
+# Scheduled digest cadence (cron in UTC). Default = daily 07:00 UTC.
+# Multiple schedules = additional lines in config/portal-cron/crontab.
+PORTAL_DIGEST_CRON=0 7 * * *
 
 # Integrity tripwire schedule (cron in UTC)
 TRIPWIRE_CRON=0 4 * * *
@@ -1221,9 +1441,45 @@ AUTHELIA_BACKUP_RETAIN_DAYS=14
 AUTHELIA_BACKUP_CRON=0 3 * * *
 ```
 
+**Note:** no `PUSHOVER_*` vars. The portal uses Gmail as the only notifier. If you previously had Pushover entries in `.env` from an earlier draft, delete them — they are unused.
+
 Set `.env` file permissions on Windows: right-click → Properties → Security → remove inherited permissions, allow only the current user. Verify with:
 ```powershell
 icacls .env
+```
+
+### Step 9 — Periodic traffic digest (`portal-alerter` `/run` endpoint)
+
+When `POST /run` is called (by `portal-cron` on cadence, or ad-hoc by the operator), the alerter scans both log streams for the `DIGEST_WINDOW_HOURS` window and assembles a single email. This is the routine "current traffic, blocks, threat attempts" summary the operator wants in their inbox without having to log in.
+
+**Sources consumed:**
+- `/logs/caddy/caddy-access.log` (JSON, one event per line) — covers every HTTP request and its response status, source IP, route, latency.
+- `/logs/authelia/authelia.log` (JSON) — covers login attempts, MFA events, regulation bans, credential changes, config reloads.
+
+**Sections of the digest email** (omit empty sections so a quiet day produces a short email):
+
+| Section | Content |
+|---|---|
+| **Window** | "Last 24h (2026-05-28 07:00 UTC → 2026-05-29 07:00 UTC)" header + portal up/down state |
+| **Traffic** | Total requests; 2xx / 3xx / 4xx / 5xx counts; requests/hour sparkline (text, ASCII bars) |
+| **Top source IPs** | Top 10 by request count. Each row: IP, count, country (from `cf-ipcountry` header that Cloudflare adds — Caddy passes it through), did-they-authenticate (yes/no/regulated), %-of-window-requests |
+| **Routes** | Per-route request count + per-route 401 count: `/openwebui/*`, `/notebook/*`, `/api/notebook/*`, hub `/`, Authelia `/api/*` |
+| **Authentication summary** | Successful logins (count + per-user); failed logins (count + top source IPs); regulation bans triggered; new credentials enrolled; new IPs seeing successful login (compare to `known-ips.txt`) |
+| **Threats / anomalies** | IPs with > 50 requests in the window with no successful auth; top 401 source IPs; top 403 source IPs; ASNs/countries that appeared for the first time |
+| **Integrity** | `integrity-tripwire` last-check status; any drift detected (and timestamp) |
+| **Portal lifecycle** | `cloudflared` uptime in window; restart count; alerter `/alert` POST count (cross-check against watcher reports) |
+| **Footer** | Link to Cloudflare Security Events dashboard URL; reminder of `portal-status.ps1` for live state |
+
+**Implementation note for the agent:** the formatter mirrors OB1's `renderHtml()` pattern (sender-grouped digest cards) — adapt the same HTML/CSS style for the traffic/threats sections so the visual language matches OB1 emails. The audit-trail markdown copy (per OB1's `writeReport()`) goes to a `digest-reports` volume in v1 — same guaranteed-paper-trail pattern even if Gmail delivery fails.
+
+**v1 vs v2 threat tagging:** v1 reports raw counts (e.g., "top 401 source IP: 203.0.113.42, 47 hits"). It does NOT tag the *type* of attack (SQLi probe, dirbuster, etc.) — that requires CrowdSec scenarios and lands in v2 (§10). The v1 digest is descriptive, not diagnostic.
+
+**Manual trigger** (useful for testing or for the operator to ask "what happened in the last hour"):
+```powershell
+# From an auth-net-attached container or the host with docker:
+docker exec portal-cron curl -fsS -X POST http://portal-alerter:8080/run
+# Or ad-hoc with a custom window:
+docker exec portal-alerter wget -q -O- --post-data='{"window_hours":1}' http://127.0.0.1:8080/run
 ```
 
 ---
@@ -1379,7 +1635,7 @@ docker exec crowdsec cscli collections install crowdsecurity/base-http-scenarios
 ```
 
 ### 10.8 Relationship to v1 detection
-- The v1 `authelia-watcher` sidecar (§8 Step 1) overlaps with CrowdSec's Authelia parser. In v2, the watcher can be **retired** once CrowdSec's notification profile is wired to Pushover via the `http` notification plugin — or kept as a redundant alert path. Decide at v2 design time.
+- The v1 `authelia-watcher` sidecar (§8 Step 1) overlaps with CrowdSec's Authelia parser. In v2, the watcher can be **retired** once CrowdSec's notification profile is wired to `portal-alerter:8080/alert` via the `http` notification plugin — keeping the Gmail egress unified — or kept as a redundant alert path. Decide at v2 design time.
 - The v1 `integrity-tripwire` is **complementary** and remains in v2: CrowdSec does not monitor config-file integrity.
 
 ### 10.9 v2 validation
@@ -1399,7 +1655,7 @@ docker exec crowdsec cscli collections install crowdsecurity/base-http-scenarios
 ## 11. v1 validation checklist
 
 ### Pre-deploy
-- [ ] `.env` has all new vars populated (random 64-char strings for Authelia secrets; Pushover keys; Cloudflare Tunnel token)
+- [ ] `.env` has all new vars populated (random 64-char strings for Authelia secrets; Cloudflare Tunnel token; `DIGEST_TO` + `DIGEST_FROM`; pre-flight secrets). No `PUSHOVER_*` vars exist — Gmail is the only notifier.
 - [ ] `.env` file permissions locked to current user (`icacls .env`)
 - [ ] `users_database.yml` has at least one user with an Argon2id-hashed password ≥14 chars
 - [ ] Password verified NOT in haveibeenpwned.com (https://haveibeenpwned.com/Passwords)
@@ -1407,18 +1663,21 @@ docker exec crowdsec cscli collections install crowdsecurity/base-http-scenarios
 - [ ] `PUBLIC_DOMAIN` is in a Cloudflare-managed zone; nameservers verified with `dig NS ${PUBLIC_DOMAIN}`
 - [ ] CAA records published (§9.3 step 2)
 - [ ] Cloudflare Tunnel created in dashboard; token in `.env`; public hostnames `${PUBLIC_DOMAIN}` and `auth.${PUBLIC_DOMAIN}` both point to `http://caddy:80`
-- [ ] Pushover application created; user-key and API token in `.env`; test message verified received
-- [ ] Pre-flight §6.1–§6.8 all complete
+- [ ] **`portal-alerter` token bootstrapped** (§6.9): `secrets/google/portal-alerter/token.json` exists; self-test email received in `DIGEST_TO` inbox
+- [ ] Pre-flight §6.1–§6.9 all complete
 - [ ] Windows Defender Firewall: Public profile default-deny inbound (§6.5)
 
-### Deploy
-- [ ] `docker compose pull && docker compose up -d authelia caddy cloudflared authelia-watcher integrity-tripwire caddy-backup authelia-backup`
+### Deploy (driven by `portal-on.ps1` — uses the `internet` profile)
+- [ ] `scripts/portal-on.ps1` runs without error: brings up `portal-alerter` → `authelia` → `caddy` → `authelia-watcher` + `integrity-tripwire` → `portal-cron` → `cloudflared` → backups, in order, each waiting on `service_healthy` where defined
 - [ ] `docker logs caddy --tail 100` shows no errors, listening on `:80`
 - [ ] `docker logs authelia --tail 100` shows "Authelia is listening on tcp://0.0.0.0:9091"
 - [ ] `docker logs cloudflared --tail 100` shows "Connection registered" against Cloudflare edge
-- [ ] `docker logs authelia-watcher --tail 100` shows "Watching authelia.log and caddy-access.log"
+- [ ] `docker logs portal-alerter --tail 100` shows "openbrain-style alerter listening on :8080" (or equivalent startup line); `/health` returns 200
+- [ ] `docker logs authelia-watcher --tail 100` shows "Watching authelia.log and caddy-access.log; alerter target: http://portal-alerter:8080/alert"
 - [ ] `docker logs integrity-tripwire --tail 100` shows "Baseline established" (first run) or "Baseline verified" (later runs)
+- [ ] `docker logs portal-cron --tail 100` shows the rendered crontab line and "starting supercronic"
 - [ ] Backup containers running (`docker ps | grep backup`)
+- [ ] `scripts/portal-status.ps1` reports all expected containers up + tunnel healthy + alerter `/health` returning 200
 
 ### Functional
 - [ ] `https://auth.${PUBLIC_DOMAIN}/` loads Authelia login screen (Cloudflare cert at the edge)
@@ -1463,10 +1722,14 @@ docker exec crowdsec cscli collections install crowdsecurity/base-http-scenarios
 - [ ] **Backup integrity:** extract one backup to a scratch dir; for `authelia`, open the SQLite DB and run `SELECT COUNT(*) FROM webauthn_credentials;` — non-zero count proves the tarball isn't a corrupt stub (§H.11)
 
 ### Breach detection / IR validation
-- [ ] **Pushover end-to-end test:** trigger a synthetic ban — 4 failed logins from one IP. Pushover phone notification arrives within 60 s. Message includes timestamp, event type, source IP.
-- [ ] **New-IP alert:** log in from a previously-unseen source IP. Pushover notification arrives with "new IP" event.
-- [ ] **Config-drift alert:** edit `config/caddy/Caddyfile` (any cosmetic change), run `docker exec integrity-tripwire /scripts/tripwire.sh check`. Pushover notification arrives reporting drift. Restore file; run `docker exec integrity-tripwire /scripts/tripwire.sh accept` to re-baseline.
-- [ ] **Killswitch dry-run:** review `scripts/breach-killswitch.ps1` end-to-end with the user. Run in a maintenance window: confirm only caddy/cloudflared/authelia/watchers stop, logs snapshot to `./incident/...`, and `.env` secret rotation is offered (do NOT commit the rotation in the dry-run unless you intend to). Confirm tailnet path remains alive throughout: `curl https://<tailnet-host>.ts.net/` succeeds during the killswitch state.
+- [ ] **Gmail end-to-end (instant /alert):** trigger a synthetic ban — 4 failed logins from one IP. Email arrives in the `DIGEST_TO` inbox within 60 s with subject containing the event type and source IP. Body includes timestamp (UTC), severity, username (if known), source IP, and the trimmed log line.
+- [ ] **Gmail end-to-end (scheduled /run digest):** force `docker exec portal-cron curl -fsS -X POST http://portal-alerter:8080/run`. Digest email arrives covering the configured `DIGEST_WINDOW_HOURS`. Verify all expected sections present (Traffic, Top source IPs, Routes, Authentication summary, Threats, Integrity, Portal lifecycle).
+- [ ] **New-IP alert:** log in from a previously-unseen source IP. Email arrives with event `authentication.success.new_ip`.
+- [ ] **Config-drift alert:** edit `config/caddy/Caddyfile` (any cosmetic change), run `docker exec integrity-tripwire /scripts/tripwire.sh check`. Email arrives reporting drift (severity `critical`). Restore file; run `docker exec integrity-tripwire /scripts/tripwire.sh accept` to re-baseline.
+- [ ] **Rate-limit behavior:** flood the alerter with > `ALERT_RATE_LIMIT_PER_MIN` events in one minute (synthetic logins). Verify only `ALERT_RATE_LIMIT_PER_MIN` individual emails arrive plus one trailing "coalesced summary" email at minute close; no Gmail quota error in `docker logs portal-alerter`.
+- [ ] **Audit-trail markdown copy:** verify `/reports` (the alerter's mount) contains a markdown copy of the most recent digest, mirroring OB1's `openbrain-digest-latest.md` pattern.
+- [ ] **`portal-off.ps1` lifecycle check:** run `scripts/portal-off.ps1`. Verify (a) `https://${PUBLIC_DOMAIN}/` is unreachable (Cloudflare tunnel goes to "down"), (b) tailnet path still serves OpenWebUI native login at `https://<tailnet-host>.ts.net/`, (c) `docker ps` shows none of `cloudflared/caddy/authelia/authelia-watcher/integrity-tripwire/portal-alerter/portal-cron/caddy-backup/authelia-backup` running, (d) all non-portal containers (openwebui, llama-cpp, mnemory, OB1 stack, etc.) untouched and still running. Then `scripts/portal-on.ps1` brings it all back.
+- [ ] **Killswitch dry-run:** review `scripts/breach-killswitch.ps1` end-to-end with the user. Run in a maintenance window: confirm a "killswitch fired" email arrives BEFORE shutdown, only portal services stop, logs snapshot to `./incident/...`, and `.env` secret rotation is offered (do NOT commit the rotation in the dry-run unless you intend to). Confirm tailnet path remains alive throughout: `curl https://<tailnet-host>.ts.net/` succeeds during the killswitch state.
 - [ ] **`documentation/incident-response.md` exists** and has been walked through end-to-end at least once by the user.
 
 ### Recovery test (do once, then document the procedure)
@@ -1482,7 +1745,8 @@ docker exec crowdsec cscli collections install crowdsecurity/base-http-scenarios
 - **Authelia:** historically renames config fields between minors. **Always read the changelog** before bumping past `4.39`. Stay on a pinned minor.
 - **CrowdSec (v2):** safe to bump minors; scenarios update independently via `cscli`.
 - **cloudflared:** pin a dated tag (e.g., `2024.10.0`). Do not run `:latest` in production — Cloudflare can ship breaking config changes. Bump in a deliberate PR.
-- **Alpine sidecars (`authelia-watcher`, `integrity-tripwire`, backups):** bump minor releases together with the Caddy/Authelia PR cadence. Alpine patches are usually safe but verify `inotify-tools` / `curl` are still present after a bump.
+- **Alpine sidecars (`authelia-watcher`, `integrity-tripwire`, `portal-cron`, backups):** bump minor releases together with the Caddy/Authelia PR cadence. Alpine patches are usually safe but verify `inotify-tools` / `curl` are still present after a bump.
+- **`portal-alerter` (Deno):** pin `denoland/deno:alpine` to a specific digest. Deno minor bumps are usually safe but the `fetch` and `Deno.serve` APIs do change occasionally — run the self-test (`alerter.ts --selftest`) after any bump before relying on alerts.
 
 ### 12.2 Backup discipline (v1 required, not deferred)
 - `authelia-data` — losing this means re-enrolling TOTP/WebAuthn for every user. Backed up nightly by `authelia-backup` (§8 Step 7).
@@ -1507,29 +1771,63 @@ $cert = (Invoke-WebRequest -Uri "https://$env:PUBLIC_DOMAIN" -UseBasicParsing).B
 # agent expands this in scripts/check-portal-health.ps1
 ```
 
-### 12.4 Log retention
+### 12.4 Log retention and access
 - Authelia logs to `/data/authelia.log` (JSON) inside `authelia-data`. Caddy access log → `/data/caddy-access.log` inside `caddy-data`. Both roll at 100 MiB / 7 files / 30 days (Caddy's roller; Authelia rotates manually).
+- The `portal-alerter` writes a markdown audit copy of each scheduled `/run` digest to its `/reports` mount (same pattern as OB1's digest). One file per run + a `digest-latest.md` symlink. Useful when Gmail is unreachable.
 - Manually rotate Authelia logs:
   ```sh
   docker exec authelia find /data -name 'authelia.log.*' -mtime +30 -delete
   ```
 - These logs are forensic evidence — keep at least 30 days, prefer 90.
 
+**Operator log-grep cookbook** (v1 has no Loki — these are the on-the-box queries that answer the common questions):
+
+```powershell
+# Every 401 in the last hour, grouped by source IP
+docker exec caddy sh -c "tail -n 20000 /data/caddy-access.log" | `
+  jq -r 'select(.status==401) | .request.headers."X-Forwarded-For"[0]' | `
+  Sort-Object | Group-Object | Sort-Object Count -Descending | Select-Object -First 20
+
+# All failed login attempts in the last 24h, with usernames tried
+docker exec authelia cat /data/authelia.log | `
+  jq -r 'select(.msg=="Unsuccessful 1FA authentication attempt by user") | {time, username, ip:.remote_ip}'
+
+# Every regulation ban applied in the last 24h
+docker exec authelia cat /data/authelia.log | jq 'select(.msg | contains("Banned"))'
+
+# Top 10 source IPs by request count in the last hour (correlates with Cloudflare's view)
+docker exec caddy sh -c "tail -n 50000 /data/caddy-access.log" | `
+  jq -r '.request.headers."X-Forwarded-For"[0]' | `
+  Sort-Object | Group-Object | Sort-Object Count -Descending | Select-Object -First 10
+
+# Re-send the alerter's last digest right now without waiting for cron
+docker exec portal-cron curl -fsS -X POST http://portal-alerter:8080/run
+```
+
+**Cloudflare-side review cadence (weekly minimum):**
+- Cloudflare Zero Trust → Tunnels → `ai-stack` → connectivity history (look for unexpected disconnect bursts)
+- Cloudflare Security → Events (free tier dashboard) — every blocked request CF saw before it reached the tunnel. The portal's own logs only show what survived CF; CF's view shows what was filtered.
+- If Cloudflare Bot Fight Mode or WAF is on (recommended at the free tier — toggle in dashboard), the Events tab is where you see what those rules did.
+
+`portal-status.ps1` prints a one-line summary of the most recent Cloudflare-side metric the operator should glance at; for anything deeper, click through to the dashboard.
+
 ### 12.5 Secrets management posture (v1 acceptance)
 - `.env` stores all secrets; permissions locked to the current user.
 - `.env` is in [.gitignore](../../../.gitignore).
 - Argon2id hashes in `users_database.yml` are not committed.
-- Pushover tokens, Cloudflare Tunnel token, Authelia secrets — all in `.env`.
+- Cloudflare Tunnel token, Authelia secrets, `DIGEST_TO`/`DIGEST_FROM` — all in `.env`.
+- Google OAuth credentials (`credentials.json`) are bind-mounted from `secrets/google/open-brain-email/` (the OB1 OAuth client, shared by design — see §6.9 coupling caveat and §15 STOP-list). The portal-alerter's refresh token lives at `secrets/google/portal-alerter/token.json` and is gitignored.
 - **No Vault, no SOPS.** Acceptable for single-user home stack. If multi-user ever happens, revisit (§13 Tier 2).
 
 ### 12.6 Breach response operations
-- **Killswitch:** `scripts/breach-killswitch.ps1` (spec in §8 Step 6) stops only the internet-exposed path. Tailnet access survives. Run it the moment a Pushover alert looks credible — false-positive cost is low (5 minutes of downtime), missed-true-positive cost is high.
+- **Killswitch:** `scripts/breach-killswitch.ps1` (spec in §8 Step 6) stops only the internet-exposed path. Tailnet access survives. Run it the moment a Gmail alert looks credible — false-positive cost is low (5 minutes of downtime), missed-true-positive cost is high. Alert routing destination is the `DIGEST_TO` Gmail inbox; if the inbox itself is suspected compromised, swap `DIGEST_TO` to a secondary address in `.env` and `portal-on.ps1` reload.
 - **After killswitch:**
   - Read `documentation/incident-response.md` end to end
   - Snapshot `./incident/<UTC-timestamp>/` to an off-host destination before any further mutation
   - Restore from yesterday's backup (not today's) before restarting
   - Re-enroll WebAuthn / TOTP credentials
   - Rotate `CLOUDFLARE_TUNNEL_TOKEN` if the tunnel container appeared compromised
+  - If `portal-alerter` itself is suspected compromised: revoke the refresh token at https://myaccount.google.com/permissions, delete `secrets/google/portal-alerter/token.json`, re-run `setup-token.ts` to mint a new one. The `open-brain-email` OAuth *client* stays — only the portal's token gets rotated. If a full client rotation is needed (true secret leak), see §6.9 coupling caveat: OB1's digest also breaks until reconnected.
 - **Password reset (no SMTP):** admin manually edits `users_database.yml` and re-hashes via `docker run --rm authelia/authelia:4.39 authelia crypto hash generate argon2 --password <new>`. Then `docker restart authelia` (the file is watched but a restart guarantees pickup).
 
 ### 12.7 User-facing notes
@@ -1547,6 +1845,42 @@ $cert = (Invoke-WebRequest -Uri "https://$env:PUBLIC_DOMAIN" -UseBasicParsing).B
 - Tailscale serve operates inside the openwebui container's network namespace; the new Caddy is on `edge-net`/`auth-net`/`app-net` — they never see each other directly, which is exactly what we want
 - The `Remote-*` strip in `sanitize_proxy_headers` is **defense in depth even though trusted-header SSO is disabled.** Do not remove it. If a future change re-enables trusted-header SSO without re-evaluating §6.7, the strip prevents the internet path from forging headers — though the tailnet path would still need to be addressed separately.
 - Under Cloudflare Tunnel, Caddy's `:80` is reached over the Docker `edge-net` bridge only. The container does not bind any host port. `netstat -an` on the Windows host should show **no** new listeners.
+
+### 12.9 Portal lifecycle — routine on/off without touching the rest of the stack
+
+The portal is the only piece of the ai-stack that exposes anything to the internet. The rest of the stack (OpenWebUI native, llama-cpp, mnemory, OB1, search gateway, little-coder, etc.) keeps running 24/7 over the tailnet. The portal should be toggled on only when you want it.
+
+**Mechanism:** every new container in §8 Step 1 is tagged `profiles: [internet]`. Docker Compose **does not** start profile-tagged services on a plain `docker compose up -d` — they only come up when the profile is explicitly activated. This is the one-switch on/off control.
+
+**Three scripts in `scripts/`:**
+
+| Script | Purpose | Touches `.env`? | Snapshots logs? |
+|---|---|---|---|
+| `portal-on.ps1` | Start every portal container in dependency order, wait on each healthcheck, print a green/red status summary at end. | No | No |
+| `portal-off.ps1` | `docker compose --profile internet stop` (preserves volumes). Then re-runs `portal-status.ps1` to confirm everything is down. | No | No |
+| `portal-status.ps1` | Read-only check: which portal containers are up, alerter `/health`, last alert timestamp from `digest-latest.md`, Cloudflare tunnel state, tailnet path still serving. One-line output per check. | No | No |
+
+**Day-to-day usage:**
+
+```powershell
+# Bring it up (e.g., for the duration of a trip)
+.\scripts\portal-on.ps1
+
+# Take it down at the end of the day
+.\scripts\portal-off.ps1
+
+# Sanity-check anytime
+.\scripts\portal-status.ps1
+```
+
+**What stays running while the portal is off:**
+- Every container NOT in the `internet` profile: `openwebui`, `tailscale`, `llama-cpp`, `llama-cpp-embed`, `watchtower`, `mnemory*`, `search-*`, `little-coder*`, `smolcrawl-pipelines`, `surrealdb`, `open_notebook`, `openwebui-backup`, and the entire OB1 stack.
+- Tailnet access: full. Reach OpenWebUI via `https://<tailnet-host>.ts.net/` exactly as today.
+- Volumes for portal containers: preserved. `authelia-data`, `caddy-data`, etc. survive a `stop`; you don't lose enrollments or logs by toggling off.
+
+**Two-state Cloudflare alternative (no Docker change):** if you want a faster "pause for an hour" without stopping the alerter or the watcher, **pause the tunnel** in the Cloudflare Zero Trust dashboard. The tunnel goes from `HEALTHY` to `INACTIVE`; the portal containers stay running. Caddy still answers Caddy's own healthcheck internally; just nothing from the internet reaches the tunnel. Better for short pauses; `portal-off.ps1` is better for longer ones because it also frees CPU/memory.
+
+**Killswitch vs portal-off — restating from §8 Step 6:** the killswitch is for incidents. It does the `portal-off` work PLUS emails a final "killswitch fired" notice, snapshots logs to `./incident/<ts>/`, and rotates Authelia secrets. `portal-off` is the light switch. The killswitch is the breaker.
 
 ---
 
@@ -1568,12 +1902,16 @@ These items from [security-considerations-internet-facing-02.md](./security-cons
 ### 13.2 Centralized log aggregation
 **Considerations §9.** Recommends Grafana Loki / ELK for aggregation, alerting on geographic anomalies, cert expiry, etc.
 
-**v1 partial mitigation:** the `authelia-watcher` sidecar (§8 Step 1) provides real-time alerting via Pushover for the high-value events: regulation bans, new-IP logins, credential enrollment changes, config reloads, repeated 401s. This is **alerting**, not aggregation — long-form analytics (geographic heatmaps, multi-day trend lines) still require centralized logs.
+**v1 partial mitigation:** two layers cover the home-stack case without Loki:
+1. **Real-time alerting** via `authelia-watcher` + `integrity-tripwire` → `portal-alerter` → Gmail (§8 Step 6) for the high-value events: regulation bans, new-IP logins, credential enrollment changes, config reloads, repeated 401s, config drift.
+2. **Periodic aggregation digest** via `portal-cron` → `portal-alerter` `/run` → Gmail (§8 Step 9) for the descriptive layer: request counts, top source IPs, route/status breakdowns, threat indicators, integrity status. Audit-trail markdown copy lands at `/reports/digest-*.md` per OB1's pattern.
+
+Together these reduce the urgency of full log aggregation: the digest is "the dashboard, mailed to you." Long-form analytics (geographic heatmaps, multi-day trend lines, multi-source correlation) still benefit from centralized logs, but the operator can answer most day-to-day questions from the Gmail digest + the §12.4 grep cookbook without standing up Loki.
 
 **Tier 2 upgrade path:**
 - Add Grafana + Loki + Promtail containers
 - Ship Authelia + Caddy + CrowdSec logs to Loki
-- Migrate Pushover alerts to Alertmanager → webhook → Pushover (consolidating the notification path)
+- Wire the existing `portal-alerter` notification path into Alertmanager (Alertmanager → webhook → `portal-alerter:8080/alert`) so Loki-derived alerts use the same Gmail egress and the operator only ever has one inbox.
 
 ### 13.3 Web Application Firewall in v1
 **Considerations §4, §10.** Recommends ModSecurity + OWASP CRS.
@@ -1601,7 +1939,7 @@ These items from [security-considerations-internet-facing-02.md](./security-cons
 
 **v1 posture (NEW — moved from Tier 2 during audit revision):** the implementing agent writes `documentation/incident-response.md` as part of v1. Required outline:
 
-1. **Detection signals** — Pushover alert types from §8 Step 6 and what each maps to
+1. **Detection signals** — Gmail alert types from §8 Step 6 (events emitted by `authelia-watcher` and `integrity-tripwire` into `portal-alerter`) and what each maps to. Include: subject-line conventions, severity field interpretation, the scheduled `/run` digest sections, and the markdown audit-trail copy at `/reports/digest-*.md` as a fallback when Gmail is unreachable.
 2. **Containment** — run `scripts/breach-killswitch.ps1`; confirm tailnet still serves OpenWebUI; snapshot logs
 3. **Eradication** — rotate `AUTHELIA_JWT_SECRET`, `AUTHELIA_SESSION_SECRET`, `AUTHELIA_STORAGE_ENCRYPTION_KEY`, `CLOUDFLARE_TUNNEL_TOKEN`; regenerate Argon2 hashes; wipe and re-enroll WebAuthn
 4. **Recovery** — restore Authelia from yesterday's backup (today's may be poisoned); validate user list; bring `caddy`, `cloudflared`, `authelia` back up one at a time
@@ -1647,7 +1985,11 @@ These items from [security-considerations-internet-facing-02.md](./security-cons
 - Cloudflare Tunnel quick start: https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/
 - Cloudflare CF-Connecting-IP header: https://developers.cloudflare.com/fundamentals/reference/http-request-headers/#cf-connecting-ip
 - Cloudflare TLS SSL/TLS modes: https://developers.cloudflare.com/ssl/origin-configuration/ssl-modes/
-- Pushover API: https://pushover.net/api
+- Gmail API `users.messages.send`: https://developers.google.com/gmail/api/reference/rest/v1/users.messages/send
+- Google OAuth 2.0 installed-app flow: https://developers.google.com/identity/protocols/oauth2/native-app
+- Reference implementation (this plan's alerter is modeled on it): [OB1 send-digest.ts](../../../OB1/recipes/daily-digest/send-digest.ts) + [setup-token.ts](../../../OB1/recipes/daily-digest/setup-token.ts)
+- supercronic (cron container without docker socket): https://github.com/aptible/supercronic
+- Docker Compose profiles: https://docs.docker.com/compose/profiles/
 - OWASP Top 10 (current): https://owasp.org/www-project-top-ten/
 - OWASP password-storage cheat sheet (Argon2 params): https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html
 - Mozilla SSL Configuration Generator: https://ssl-config.mozilla.org/
@@ -1660,26 +2002,27 @@ These items from [security-considerations-internet-facing-02.md](./security-cons
 ## 15. Handoff notes for the implementing agent
 
 **Order of operations:**
-1. Read [docker-compose.yml](../../../docker-compose.yml), [entrypoint.sh](../../../entrypoint.sh), `SECURITY.md`, [audit-plan-internet-exposed-front-end.md](./audit-plan-internet-exposed-front-end.md), and [integration-task-document.md](./integration-task-document.md) end-to-end. Confirm your mental model matches §5.
+1. Read [docker-compose.yml](../../../docker-compose.yml), [entrypoint.sh](../../../entrypoint.sh), `SECURITY.md`, [audit-plan-internet-exposed-front-end.md](./audit-plan-internet-exposed-front-end.md), [integration-task-document.md](./integration-task-document.md), and [OB1 send-digest.ts](../../../OB1/recipes/daily-digest/send-digest.ts) end-to-end. Confirm your mental model matches §5.
 2. **Confirm Cloudflare Tunnel is acceptable** to the user given §9.1 privacy callout. If not, this plan does not apply — escalate.
 3. **Decide tailnet trust posture** (§6.6) — Option A / B / C. Document in the PR description. Note: trusted-header SSO into OpenWebUI is NOT enabled (§6.7), so the tailnet posture question is reduced to Open Notebook only.
-4. Land **§6 pre-flight fixes** in the same PR. The exposure they close is unsafe to leave once Caddy is reachable.
-5. Generate secrets (`AUTHELIA_*`, `SURREAL_PASSWORD`, `OPEN_NOTEBOOK_ENCRYPTION_KEY`, `CLOUDFLARE_TUNNEL_TOKEN`, `PUSHOVER_*`) and have the user paste them into their `.env`. Do not commit `.env`. Lock file permissions with `icacls`.
-6. Configure Cloudflare side first (§9.3): DNS migration, CAA records, tunnel creation, public hostnames. Confirm `dig` results before starting any containers.
-7. Bring containers up in order: `authelia` → `caddy` → `cloudflared` → `authelia-watcher` + `integrity-tripwire` → backups. Confirm health at each step.
-8. Walk the §11 validation checklist. Every box. The **"Tailscale path still works"** and **"Pushover end-to-end test"** checks are the canaries — neither may be skipped.
-9. v2 (CrowdSec) is a **separate PR**. Do not bundle.
+4. Land **§6 pre-flight fixes** in the same PR (or as a preceding PR — they are valuable even if the portal is delayed). The exposure they close is unsafe to leave once Caddy is reachable.
+5. Generate secrets (`AUTHELIA_*`, `SURREAL_PASSWORD`, `OPEN_NOTEBOOK_ENCRYPTION_KEY`, `CLOUDFLARE_TUNNEL_TOKEN`, `DIGEST_TO`/`DIGEST_FROM`) and have the user paste them into their `.env`. Do not commit `.env`. Lock file permissions with `icacls`.
+6. Bootstrap the `portal-alerter` Gmail token on the host (§6.9). Confirm a self-test email arrives in `DIGEST_TO` before any service is brought up.
+7. Configure Cloudflare side (§9.3): DNS migration, CAA records, tunnel creation, public hostnames. Confirm `dig` results before starting any portal containers.
+8. Bring containers up via `scripts/portal-on.ps1` (uses the `internet` profile). Order: `portal-alerter` → `authelia` → `caddy` → `authelia-watcher` + `integrity-tripwire` → `portal-cron` → `cloudflared` → backups. Confirm health at each step. (You CAN run everything except `cloudflared` first and test the portal locally over `app-net` before exposing it.)
+9. Walk the §11 validation checklist. Every box. The **"Tailscale path still works"**, **"Gmail end-to-end (instant /alert)"**, **"portal-off.ps1 lifecycle check"** are the canaries — none may be skipped.
+10. v2 (CrowdSec) is a **separate PR**. Do not bundle.
 
 **When to STOP and ASK the user:**
 - Before destroying `D:\Open WebUI\open-notebook\surreal_data` (pre-flight §6.3)
 - Before changing `OPEN_NOTEBOOK_ENCRYPTION_KEY` if Open Notebook has stored API keys (pre-flight §6.4)
 - Before settling on tailnet trust posture (§6.6 Option A/B/C)
+- **Before reusing the OB1 `open-brain-email` OAuth client for the portal alerter (§6.9)** — explain the coupling: revoking it kills both OB1's daily digest AND portal alerts. Offer the alternative of provisioning a dedicated OAuth client (cleaner, ~10 min in Google Cloud Console). Default = reuse, document, switch later.
 - If subpath routing for Open Notebook / OpenWebUI doesn't work and the fallback is subdomain — confirm the user owns/controls the subdomains and wants to add Cloudflare public hostnames
 - Before applying `--server.baseUrlPath=/notebook` to Open Notebook (subpath Fallback B in §8 Step 2) — this is a touch to Open Notebook's behavior and conflicts with the "untouched" rule
-- If the **`auth-net internal: true` network blocks Pushover** (§8 Step 1 note) — confirm with the user whether to add the dedicated `notify-net` network or to proxy via Caddy
 - If any §11 security smoke test fails — diagnose and fix, do not declare done
 - Before submitting `${PUBLIC_DOMAIN}` to the HSTS preload list (§H.1) — this is irreversible for years
 - Before applying any container-level change to `openwebui`, `open_notebook`, or `surrealdb` beyond what is explicitly documented in §6 / §7.4
 
 **Definition of done for v1:**
-A fresh device, NOT on the user's tailnet, can browse to `https://${PUBLIC_DOMAIN}/`, authenticate via Authelia with WebAuthn (or TOTP fallback), land on the hub, auto-redirect to OpenWebUI, complete OpenWebUI's native login, use OpenWebUI normally, navigate back to the hub, switch to Open Notebook, use it normally without a second login (Authelia is its only gate). Concurrently, a separate device on the tailnet reaches `https://<tailnet-host>.ts.net/` without ever seeing Authelia, and lands on OpenWebUI's native login as today. Every §11 box is checked. The Pushover end-to-end test produced a real phone notification. The killswitch dry-run completed and tailnet stayed alive. Backup containers have produced at least one archive with valid `.sha256` sentinel.
+A fresh device, NOT on the user's tailnet, can browse to `https://${PUBLIC_DOMAIN}/`, authenticate via Authelia with WebAuthn (or TOTP fallback), land on the hub, auto-redirect to OpenWebUI, complete OpenWebUI's native login, use OpenWebUI normally, navigate back to the hub, switch to Open Notebook, use it normally without a second login (Authelia is its only gate). Concurrently, a separate device on the tailnet reaches `https://<tailnet-host>.ts.net/` without ever seeing Authelia, and lands on OpenWebUI's native login as today. Every §11 box is checked. The Gmail end-to-end tests (instant `/alert` AND scheduled `/run` digest) each delivered a real email to the operator's inbox. The `portal-off.ps1` / `portal-on.ps1` cycle stopped and resumed only the portal services; the rest of the ai-stack ran undisturbed throughout and the tailnet path stayed alive. The killswitch dry-run completed and emitted its final email before shutdown. Backup containers have produced at least one archive with valid `.sha256` sentinel.

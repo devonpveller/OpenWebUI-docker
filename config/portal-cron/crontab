@@ -1,0 +1,6 @@
+# portal-cron — supercronic crontab.
+# The ${PORTAL_DIGEST_CRON} placeholder is substituted at container start by
+# entrypoint.sh. Add additional lines for higher cadences if needed; each line
+# must end in a newline.
+
+${PORTAL_DIGEST_CRON} curl -fsS -X POST http://portal-alerter:8080/run >/dev/null 2>&1 || echo "[$(date -u +%FT%TZ)] portal-cron: alerter unreachable"
