@@ -691,7 +691,12 @@ Append to the `services:` block:
       - notify-net        # outbound to oauth2.googleapis.com + gmail.googleapis.com
     working_dir: /app
     volumes:
-      - ./config/alerter:/app:ro
+      # NOT :ro — Docker can't create the /app/token.json mount target inside
+      # a read-only parent. Matches OB1's openbrain-digest pattern. The
+      # container's root FS stays read_only: true at the container level
+      # (line below); /app being writable just means the running script can
+      # write to /app/token.json on token refresh.
+      - ./config/alerter:/app
       # Dedicated OAuth client for the portal (separate from OB1's
       # open-brain-email). Both files gitignored via the top-level secrets/ rule.
       - ./secrets/google/portal-alerter/credentials.json:/app/credentials.json:ro
