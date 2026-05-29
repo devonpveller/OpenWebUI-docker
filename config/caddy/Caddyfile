@@ -123,9 +123,21 @@ http://{$PUBLIC_DOMAIN} {
     }
 
     # Forward-auth: every request below this point flows through Authelia.
-    # copy_headers omitted intentionally — trusted-header SSO is NOT enabled.
+    # Authelia 4.39 with AuthRequest implementation: endpoint is
+    # /api/authz/auth-request (not the legacy /api/verify). X-Original-URL
+    # is required by AuthRequest implementation; we set it explicitly because
+    # our sanitize_proxy_headers snippet strips X-Forwarded-Host (defense
+    # against client-supplied values) which Authelia would otherwise use.
+    # copy_headers omitted intentionally — trusted-header SSO is NOT enabled
+    # (plan sec.6.7).
     forward_auth authelia:9091 {
-        uri /api/verify?rd=http://auth.{$PUBLIC_DOMAIN}/
+        uri /api/authz/auth-request
+        # Hardcode https in X-Original-URL: the portal is HTTPS-only at the
+        # Cloudflare edge by design, and Authelia 4.39 rejects http schemes
+        # (insecure cookie transport). Inside the tunnel + Docker, traffic
+        # appears as http, but the client-facing scheme is always https.
+        header_up X-Original-URL https://{host}{uri}
+        header_up X-Original-Method {method}
     }
 
     # ─── Routes ──────────────────────────────────────────────────────────
