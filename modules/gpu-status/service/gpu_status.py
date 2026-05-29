@@ -9,10 +9,12 @@ Provides comprehensive GPU monitoring with structured contracts.
 import json
 import logging
 import os
+import re
+import subprocess
 import sys
 import time
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 # Try to import torch - it should be available in the OpenWebUI container
 try:
@@ -194,6 +196,375 @@ class GPUStatusModule:
         
         return result
 
+    # ── nvidia-smi process-level detail ─────────────────────────────────
+    # torch.cuda can't see which processes hold VRAM or why utilization is
+    # high — only nvidia-smi can. This subset of the module shells out to
+    # nvidia-smi to answer "why is GPU util 99%?" and "what is in memory?"
+
+    @staticmethod
+    def _parse_gpu_index(text: str) -> Optional[int]:
+        """Parse a GPU index from text: 'gpu 0', 'gpu1', 'first gpu', etc.
+        Returns None when no scope is given (show all GPUs)."""
+        m = re.search(r"\bgpu\s*(\d+)\b", text)
+        if m:
+            return int(m.group(1))
+        if "first" in text:
+            return 0
+        if "second" in text:
+            return 1
+        return None
+
+    @staticmethod
+    def _int(s, default: int = 0) -> int:
+        try:
+            return int(float(s))
+        except (ValueError, TypeError):
+            return default
+
+    @staticmethod
+    def _float(s) -> Optional[float]:
+        try:
+            return float(s)
+        except (ValueError, TypeError):
+            return None
+
+    # Map compose env var → (container, description, compose default). Tracks
+    # which container claims which GPU index. Drives the "Assigned containers"
+    # section of the smi report — useful because NVIDIA's consumer drivers on
+    # WSL2 mask per-process names ([Not Found] / [Insufficient Permissions]),
+    # so the assignment + live workload below ARE the real answer to "what is
+    # in memory?".
+    _GPU_ENV_MAP: Dict[str, Dict[str, str]] = {
+        "GPU_AISTACK_DEVICE_ID":         {"container": "openwebui",       "description": "Open WebUI + reranker (torch)", "default": "1"},
+        "GPU_LLAMA_CPP_DEVICE_ID":       {"container": "llama-cpp",       "description": "llama-swap CUDA inference",     "default": "0"},
+        "GPU_LLAMA_CPP_EMBED_DEVICE_ID": {"container": "llama-cpp-embed", "description": "BGE-M3 embeddings",             "default": "1"},
+    }
+
+    def _get_gpu_assignments(self) -> Dict[int, List[Dict[str, str]]]:
+        """Map GPU index → list of containers assigned to it via compose env."""
+        out: Dict[int, List[Dict[str, str]]] = {}
+        for env_var, meta in self._GPU_ENV_MAP.items():
+            device_id = os.environ.get(env_var, meta["default"])
+            if not str(device_id).isdigit():
+                continue
+            out.setdefault(int(device_id), []).append({
+                "container": meta["container"],
+                "description": meta["description"],
+                "env_var": env_var,
+            })
+        return out
+
+    def _probe_llama_workload(self, base_url: str) -> Optional[Dict[str, Any]]:
+        """Probe a llama-swap server for the running model + slot state — the
+        most actionable answer to "what is in memory?" when nvidia-smi's
+        process list is driver-masked. Returns None when unreachable."""
+        import urllib.request
+        import urllib.error
+        workload: Dict[str, Any] = {}
+
+        # Currently loaded model (llama-swap unloads idle models).
+        try:
+            with urllib.request.urlopen(f"{base_url}/v1/models", timeout=3) as r:
+                data = json.loads(r.read().decode("utf-8", errors="replace"))
+                models = data.get("data") or []
+                if models and isinstance(models[0], dict):
+                    workload["model"] = models[0].get("id")
+        except (urllib.error.URLError, urllib.error.HTTPError,
+                json.JSONDecodeError, OSError, TimeoutError):
+            return None
+
+        # Slot occupancy — what is actively processing.
+        try:
+            with urllib.request.urlopen(f"{base_url}/slots", timeout=3) as r:
+                slots = json.loads(r.read().decode("utf-8", errors="replace"))
+            if isinstance(slots, list):
+                active = [
+                    s for s in slots
+                    if isinstance(s, dict)
+                    and s.get("state", 0) not in (0, "0", False, None)
+                ]
+                workload["slots_total"] = len(slots)
+                workload["slots_active"] = len(active)
+                workload["slots_detail"] = [
+                    {
+                        "id": s.get("id"),
+                        "state": s.get("state"),
+                        "prompt_tokens": s.get(
+                            "n_prompt_tokens", s.get("n_prompt_tokens_processed")
+                        ),
+                        "decoded": s.get("n_decoded", s.get("n_predict")),
+                    }
+                    for s in active[:3]
+                ]
+            else:
+                workload["model_status"] = "model_unloaded"
+        except (urllib.error.URLError, urllib.error.HTTPError,
+                json.JSONDecodeError, OSError, TimeoutError):
+            # /slots 404s / is unavailable when no model is loaded.
+            workload.setdefault("model_status", "model_unloaded")
+
+        return workload
+
+    def _get_gpu_workload(self, containers: List[Dict[str, str]]) -> List[Dict[str, Any]]:
+        """For each assigned container with a known API, probe what is loaded
+        and the slot state."""
+        workloads: List[Dict[str, Any]] = []
+        for c in containers:
+            name = c["container"]
+            api: Optional[str] = None
+            if name == "llama-cpp":
+                api = "http://llama-cpp:8080"
+            elif name == "llama-cpp-embed":
+                api = "http://llama-cpp-embed:8080"
+            if not api:
+                continue
+            workload = self._probe_llama_workload(api)
+            if workload is not None:
+                workloads.append({"container": name, **workload})
+        return workloads
+
+    def _nvidia_smi_detail(self, gpu_index: Optional[int] = None) -> Dict[str, Any]:
+        """Run nvidia-smi for per-GPU detail + the compute-process list.
+
+        Returns per-GPU stats (utilization, VRAM, clocks, power, temperature,
+        encoder/decoder) joined with the list of compute processes (PID,
+        process name, VRAM use) from `--query-compute-apps`. Optionally
+        scoped to one GPU via `gpu N` in the input. Dependency-free.
+        """
+        gpu_query = (
+            "index,uuid,name,temperature.gpu,utilization.gpu,utilization.memory,"
+            "utilization.encoder,utilization.decoder,memory.used,memory.free,"
+            "memory.total,power.draw,power.limit,clocks.current.sm,"
+            "clocks.current.memory,compute_mode,pstate,fan.speed"
+        )
+        cmd_gpu = [
+            "nvidia-smi", f"--query-gpu={gpu_query}",
+            "--format=csv,noheader,nounits",
+        ]
+        if gpu_index is not None:
+            cmd_gpu.extend(["-i", str(gpu_index)])
+
+        proc_query = "pid,process_name,used_memory,gpu_uuid"
+        cmd_proc = [
+            "nvidia-smi", f"--query-compute-apps={proc_query}",
+            "--format=csv,noheader,nounits",
+        ]
+        if gpu_index is not None:
+            cmd_proc.extend(["-i", str(gpu_index)])
+
+        try:
+            gpu_result = subprocess.run(cmd_gpu, capture_output=True, text=True, timeout=8)
+            proc_result = subprocess.run(cmd_proc, capture_output=True, text=True, timeout=8)
+        except FileNotFoundError:
+            return {"available": False, "reason": "nvidia-smi not available in this environment"}
+        except subprocess.TimeoutExpired:
+            return {"available": False, "reason": "nvidia-smi timed out"}
+        except Exception as exc:
+            return {"available": False, "reason": f"nvidia-smi failed: {exc}"}
+
+        if gpu_result.returncode != 0:
+            return {"available": False, "reason": (gpu_result.stderr or "nvidia-smi error").strip()}
+
+        gpus_by_uuid: Dict[str, Dict[str, Any]] = {}
+        gpus: List[Dict[str, Any]] = []
+        for line in gpu_result.stdout.splitlines():
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) < 16:
+                continue
+            gpu = {
+                "index": self._int(parts[0]),
+                "uuid": parts[1],
+                "name": parts[2],
+                "temp_c": self._int(parts[3]),
+                "util_gpu_pct": self._int(parts[4]),
+                "util_mem_pct": self._int(parts[5]),
+                "util_enc_pct": self._int(parts[6]),
+                "util_dec_pct": self._int(parts[7]),
+                "vram_used_mib": self._int(parts[8]),
+                "vram_free_mib": self._int(parts[9]),
+                "vram_total_mib": self._int(parts[10]),
+                "power_draw_w": self._float(parts[11]),
+                "power_limit_w": self._float(parts[12]),
+                "clock_sm_mhz": self._int(parts[13]),
+                "clock_mem_mhz": self._int(parts[14]),
+                "compute_mode": parts[15] if len(parts) > 15 else "?",
+                "pstate": parts[16] if len(parts) > 16 else "?",
+                "fan_speed_pct": self._int(parts[17]) if len(parts) > 17 else None,
+                "processes": [],
+            }
+            gpus.append(gpu)
+            gpus_by_uuid[gpu["uuid"]] = gpu
+
+        # Join processes to GPUs by uuid. --query-compute-apps may return
+        # "[Not Supported]" on consumer drivers — that's an empty list, not
+        # an error.
+        if proc_result.returncode == 0:
+            for line in proc_result.stdout.splitlines():
+                parts = [p.strip() for p in line.split(",")]
+                if len(parts) < 4:
+                    continue
+                target = gpus_by_uuid.get(parts[3])
+                if target is None:
+                    continue
+                target["processes"].append({
+                    "pid": self._int(parts[0]),
+                    "name": parts[1],
+                    "vram_mib": self._int(parts[2]),
+                })
+
+        # Attach container assignments (from env) and live workload (from
+        # llama-swap APIs) so the report answers "what is in memory?" even
+        # when the driver masks per-process names ([Not Found] /
+        # [Insufficient Permissions] on consumer GeForce + WSL2/Docker).
+        assignments = self._get_gpu_assignments()
+        for gpu in gpus:
+            gpu_containers = assignments.get(gpu["index"], [])
+            gpu["assigned_containers"] = gpu_containers
+            gpu["workload"] = self._get_gpu_workload(gpu_containers)
+
+        return {"available": True, "gpus": gpus, "scope": gpu_index}
+
+    def _format_smi_detail(self, data: Dict[str, Any]) -> str:
+        """Render the nvidia-smi detail report as markdown."""
+        if not data.get("available"):
+            return f"❌ **nvidia-smi check failed** — {data.get('reason', 'unknown')}"
+        gpus = data.get("gpus", [])
+        if not gpus:
+            return "_No GPUs reported._"
+
+        scope = data.get("scope")
+        title = "## 🔬 GPU Detail — `nvidia-smi`"
+        if scope is not None:
+            title += f" (scoped to GPU {scope})"
+        lines = [title, ""]
+
+        for gpu in gpus:
+            total = gpu["vram_total_mib"]
+            vram_pct = round(100 * gpu["vram_used_mib"] / total, 1) if total else 0
+            vram_used_gb = round(gpu["vram_used_mib"] / 1024, 1)
+            vram_total_gb = round(total / 1024, 1)
+
+            lines.append(f"### GPU {gpu['index']} — {gpu['name']}")
+            lines.append("")
+            lines.append("| Metric | Value |")
+            lines.append("|---|---|")
+            lines.append(f"| Utilization | GPU **{gpu['util_gpu_pct']}%** · Memory **{gpu['util_mem_pct']}%** |")
+            lines.append(f"| VRAM | {vram_used_gb} / {vram_total_gb} GB ({vram_pct}% used) |")
+            lines.append(f"| Temperature | {gpu['temp_c']}°C |")
+            if gpu.get("power_draw_w") is not None:
+                p = f"{gpu['power_draw_w']:.0f} W"
+                if gpu.get("power_limit_w"):
+                    p += f" / {gpu['power_limit_w']:.0f} W"
+                lines.append(f"| Power | {p} |")
+            if gpu.get("clock_sm_mhz"):
+                lines.append(
+                    f"| Clocks | SM {gpu['clock_sm_mhz']} MHz · Mem {gpu['clock_mem_mhz']} MHz |"
+                )
+            if gpu.get("compute_mode"):
+                lines.append(
+                    f"| Compute mode | {gpu['compute_mode']} (pstate {gpu.get('pstate', '?')}) |"
+                )
+            if gpu.get("util_enc_pct") or gpu.get("util_dec_pct"):
+                lines.append(
+                    f"| Encoder / Decoder | {gpu['util_enc_pct']}% / {gpu['util_dec_pct']}% |"
+                )
+            if gpu.get("fan_speed_pct") is not None:
+                lines.append(f"| Fan | {gpu['fan_speed_pct']}% |")
+            lines.append("")
+
+            # Assigned containers — from compose env vars. This is the
+            # "what container is on this GPU" answer regardless of driver
+            # process-name restrictions.
+            assignments = gpu.get("assigned_containers", [])
+            if assignments:
+                lines.append("**Assigned containers** (per `GPU_*_DEVICE_ID` env):")
+                for c in assignments:
+                    lines.append(f"- `{c['container']}` — {c['description']}")
+                lines.append("")
+
+            # Live workload — the real answer to "what is loaded?" / "why
+            # 99%?" via the container APIs (model + slot state).
+            workloads = gpu.get("workload", [])
+            for w in workloads:
+                container = w.get("container", "?")
+                model = w.get("model")
+                slots_total = w.get("slots_total")
+                slots_active = w.get("slots_active")
+                if model and slots_total is not None:
+                    state = (
+                        f"{slots_active}/{slots_total} slot(s) active — **processing**"
+                        if slots_active
+                        else f"idle ({slots_total} slot(s))"
+                    )
+                    lines.append(
+                        f"**Workload on `{container}`**: model `{model}` — {state}"
+                    )
+                    for s in w.get("slots_detail", []):
+                        tok = ""
+                        if s.get("prompt_tokens") is not None or s.get("decoded") is not None:
+                            tok = (
+                                f" prompt={s.get('prompt_tokens')}, "
+                                f"decoded={s.get('decoded')}"
+                            )
+                        lines.append(
+                            f"  - slot `{s.get('id')}` state=`{s.get('state')}`{tok}"
+                        )
+                elif model:
+                    lines.append(
+                        f"**Workload on `{container}`**: model `{model}` loaded "
+                        f"(/slots endpoint unavailable)"
+                    )
+                elif w.get("model_status") == "model_unloaded":
+                    lines.append(
+                        f"**Workload on `{container}`**: idle — no model loaded "
+                        f"(llama-swap unloads idle models)"
+                    )
+                lines.append("")
+
+            # Compute processes — driver-masked on consumer/WSL2; collapse
+            # to a one-liner when every name is "[Not Found]" or similar.
+            processes = gpu.get("processes", [])
+            masked_tokens = {"[Not Found]", "[Insufficient Permissions]", "[N/A]", ""}
+            masked = sum(
+                1 for p in processes
+                if p.get("name") in masked_tokens or p.get("vram_mib", 0) == 0
+            )
+            if processes and masked == len(processes):
+                lines.append(
+                    f"**Processes on GPU {gpu['index']}**: {len(processes)} running — "
+                    f"names/VRAM masked by NVIDIA driver "
+                    f"(consumer GeForce + WSL2/Docker restriction). "
+                    f"See **Workload** above for what is actually loaded."
+                )
+                lines.append("")
+            elif processes:
+                lines.append(
+                    f"**Processes on GPU {gpu['index']}** "
+                    f"({len(processes)} running, sorted by VRAM):"
+                )
+                lines.append("")
+                lines.append("| PID | Process | VRAM |")
+                lines.append("|---|---|---|")
+                for p in sorted(processes, key=lambda x: -x["vram_mib"]):
+                    if p["vram_mib"] >= 512:
+                        vram_str = f"{round(p['vram_mib']/1024, 1)} GB"
+                    else:
+                        vram_str = f"{p['vram_mib']} MiB"
+                    lines.append(f"| {p['pid']} | `{p['name']}` | {vram_str} |")
+                lines.append("")
+            else:
+                lines.append(f"_No compute processes reported on GPU {gpu['index']}._")
+                lines.append("")
+
+        lines.append(
+            "> _Source: `nvidia-smi` (in-container view) + container API probes. "
+            "When the per-process VRAM is masked (consumer GeForce on WSL2/Docker), "
+            "the **Assigned containers** and **Workload** sections above carry the "
+            "actionable answer — which container is on the GPU and what model it "
+            "has loaded._"
+        )
+        return "\n".join(lines)
+
     def describe(self) -> Dict[str, Any]:
         """Return module metadata"""
         return {
@@ -250,13 +621,26 @@ class GPUStatusModule:
                     "quick_status": gpu_status.get("status", "Unknown"),
                     "cuda_available": gpu_status.get("cuda_available", False),
                     "torch_available": TORCH_AVAILABLE,
-                    "usage_tip": "Ask for 'detailed gpu status' or 'gpu diagnostics' for comprehensive information"
+                    "usage_tip": "Ask for 'detailed gpu status', 'gpu diagnostics', or 'smi' for the nvidia-smi process check"
                 }
                 content = self._format_basic_status(result_data)
             else:
-                # Run comprehensive diagnostics
-                result_data = self.run_gpu_diagnostics(user_input)
-                content = self._format_diagnostic_content(result_data)
+                # nvidia-smi process-level check — answers "why is util 99%?"
+                # and "what's in memory?" by shelling to nvidia-smi (torch
+                # can't see other processes' VRAM).
+                input_lower = user_input.lower()
+                smi_triggers = (
+                    "smi", "nvidia-smi", "processes", "what's in memory",
+                    "what is in memory", "compute apps", "pmon",
+                )
+                if any(kw in input_lower for kw in smi_triggers):
+                    gpu_index = self._parse_gpu_index(input_lower)
+                    result_data = self._nvidia_smi_detail(gpu_index)
+                    content = self._format_smi_detail(result_data)
+                else:
+                    # Run comprehensive diagnostics (torch-based)
+                    result_data = self.run_gpu_diagnostics(user_input)
+                    content = self._format_diagnostic_content(result_data)
             
             execution_time = int((time.time() - start_time) * 1000)
             

@@ -1,0 +1,15 @@
+# Minimal Tor client config — SOCKS5 anonymizing proxy for SearXNG outbound.
+# Bound inside the docker network only; never published to host.
+SOCKSPort 0.0.0.0:9050
+# 127.0.0.1: the tor-simple image forwards the SOCKS port internally, so
+# SearXNG's requests arrive at tor from loopback. Safe to accept — the port
+# is never host-published, only reachable inside the docker network.
+SOCKSPolicy accept 127.0.0.1
+SOCKSPolicy accept 172.16.0.0/12
+SOCKSPolicy accept 10.0.0.0/8
+SOCKSPolicy accept 192.168.0.0/16
+SOCKSPolicy reject *
+Log notice stdout
+# Client only — never act as a relay or exit.
+ExitRelay 0
+ClientOnly 1

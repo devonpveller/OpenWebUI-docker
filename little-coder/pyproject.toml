@@ -1,0 +1,37 @@
+# little-coder control-plane wrapper.
+# Pinned base; rebuilt explicitly (Watchtower disabled for this service).
+[project]
+name = "littlecoder"
+version = "0.1.0"
+description = "Self-improving little-coder — control-plane wrapper (Chapter 1: Tool)"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.110",
+  "uvicorn[standard]>=0.29",
+  "httpx>=0.27",
+  "pydantic>=2.6",
+  "pyyaml>=6.0",
+  "prometheus-client>=0.20",
+  "mcp>=1.1",
+  "mcpo>=0.0.10",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+lc = "littlecoder.cli:main"
+lc-daemon = "littlecoder.daemon:main"
+lc-mcp = "littlecoder.mcp_server:main"
+lc-docs-sync = "littlecoder.docs_sync:main"
+ot-exec = "littlecoder.otexec:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

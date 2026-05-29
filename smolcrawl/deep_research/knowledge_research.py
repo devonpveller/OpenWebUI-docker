@@ -9,6 +9,7 @@ Single Responsibility: Orchestrates RAG-only research across existing collection
 Dependency Inversion: Composes RagResearcher, SubAgent, Journal, Synthesizer.
 """
 
+import asyncio
 import logging
 from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import urlparse
@@ -127,6 +128,8 @@ class KnowledgeResearcher:
         self._journal = journal
         self._synthesizer = Synthesizer(valves, sub_agent, journal)
         self._rag = RagResearcher(valves, sub_agent)
+        # Gathered sources for this run (open-brain `sources` persistence).
+        self.last_sources: List[Dict] = []
 
     async def run(
         self,
@@ -472,6 +475,7 @@ class KnowledgeResearcher:
             done=True,
         )
 
+        self.last_sources = rag_sources
         return answer
 
     # ------------------------------------------------------------------
@@ -646,20 +650,30 @@ class KnowledgeResearcher:
                 ),
             }
 
-        # Search for each gap term
-        all_results = []
-        seen_urls: set = set()
-        for term in search_terms[:5]:
+        # Search for each gap term — terms are independent, run concurrently.
+        terms = search_terms[:5]
+
+        async def _search(term):
             try:
-                results = await run_in_threadpool(
+                return await run_in_threadpool(
                     search_web, request, engine, term
                 )
-                for r in results or []:
-                    if r.link not in seen_urls:
-                        seen_urls.add(r.link)
-                        all_results.append(r)
             except Exception as e:
                 logger.warning("Web search for '%s' failed: %s", term, e)
+                return []
+
+        batches = await asyncio.gather(
+            *[_search(t) for t in terms], return_exceptions=True
+        )
+        all_results = []
+        seen_urls: set = set()
+        for results in batches:
+            if not isinstance(results, list):
+                continue
+            for r in results:
+                if r.link not in seen_urls:
+                    seen_urls.add(r.link)
+                    all_results.append(r)
 
         if not all_results:
             return {

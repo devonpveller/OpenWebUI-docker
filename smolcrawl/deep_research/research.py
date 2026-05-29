@@ -6,6 +6,7 @@ web search + Fileshed. Iterates until min_relevant_sources are
 accumulated, using relevance gating and topic extraction to dive deeper.
 """
 
+import asyncio
 import logging
 import os
 from datetime import datetime
@@ -128,6 +129,13 @@ class QuickResearcher:
         self._sub_agent = sub_agent
         self._journal = journal
         self._synthesizer = Synthesizer(valves, sub_agent, journal)
+        # Populated by run() so the orchestration layer (Tools.research)
+        # can maintain a per-chat coverage/gap ledger across calls.
+        self.last_covered: List[str] = []
+        self.last_gaps: List[str] = []
+        self.last_slug: str = ""
+        # Gathered sources for this run (open-brain `sources` persistence).
+        self.last_sources: List[Dict] = []
 
     async def run(
         self,
@@ -169,6 +177,9 @@ class QuickResearcher:
         target = self._valves.min_relevant_sources
         consecutive_misses = 0
         rel_count = 0
+        accumulated_covered: List[str] = []
+        last_gaps: List[str] = []
+        self.last_slug = slug
 
         for n in range(1, self._valves.max_iterations + 1):
             # --- Step 1: Web search ---
@@ -181,11 +192,17 @@ class QuickResearcher:
                 break
             tried_terms.update(new_terms)
 
-            # Search each term individually — OR-joining fails on most engines
+            # Search each term individually — OR-joining fails on most
+            # engines. Terms are independent → run them concurrently.
             raw = []
-            for term in new_terms[:3]:  # cap at 3 searches per iteration
-                hits = await self._web_search(session, term, request, user)
-                raw.extend(hits)
+            search_batches = await asyncio.gather(
+                *[self._web_search(session, term, request, user)
+                  for term in new_terms[:3]],  # cap at 3 searches per iter
+                return_exceptions=True,
+            )
+            for hits in search_batches:
+                if isinstance(hits, list):
+                    raw.extend(hits)
             pre_dedup = len(raw)
             raw = [r for r in raw if r.get("url", "") not in seen_urls]
             seen_urls.update(r.get("url", "") for r in raw)
@@ -233,6 +250,9 @@ class QuickResearcher:
                 deeper = extraction.get("deeper_terms", [])
                 adjacent = extraction.get("adjacent_leads", [])
                 covered = extraction.get("covered_so_far", [])
+                accumulated_covered.extend(
+                    c for c in covered if c not in accumulated_covered
+                )
                 summary = (
                     f"Found {len(rel)} relevant, {len(trail)} trail, dropped {dropped}. "
                     f"Covered: {', '.join(covered[:3])}. Deeper: {', '.join(deeper[:3])}."
@@ -277,6 +297,11 @@ class QuickResearcher:
                 # Have enough sources, but check for gaps before stopping
                 analysis = await self._analyze_sources(session, request, user)
                 gaps = analysis.get("gaps", [])
+                last_gaps = gaps
+                accumulated_covered.extend(
+                    c for c in analysis.get("covered_aspects", [])
+                    if c not in accumulated_covered
+                )
                 gap_terms = analysis.get("new_terms", [])
                 has_official = analysis.get("has_official_source", True)
 
@@ -326,6 +351,11 @@ class QuickResearcher:
         # --- Final analysis (only if not already done in loop) ---
         if not (rel_count >= target):
             analysis = await self._analyze_sources(session, request, user)
+            last_gaps = analysis.get("gaps", []) or last_gaps
+            accumulated_covered.extend(
+                c for c in analysis.get("covered_aspects", [])
+                if c not in accumulated_covered
+            )
             if analysis.get("gaps"):
                 await self._emit_status(
                     event_emitter,
@@ -356,6 +386,11 @@ class QuickResearcher:
                 f"relevant sources found. Consider `deep_research()` to crawl "
                 f"authoritative domains.*"
             )
+
+        # Expose this run's coverage/gap markers for the per-chat ledger.
+        self.last_covered = accumulated_covered
+        self.last_gaps = last_gaps
+        self.last_sources = relevant_sources + trail_sources
         return answer
 
     # --- Search helpers ---

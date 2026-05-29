@@ -1,0 +1,20 @@
+{
+  "name": "Stack Map",
+  "description": "Identifies and maps the Docker stacks, compose projects, container planes, networks, and ports across this ai-stack workspace, and keeps the recovery scripts and reference doc in sync.",
+  "category": "skills",
+  "author": {
+    "name": "ai-stack",
+    "github": "ProfNovice"
+  },
+  "version": "1.0.0",
+  "requires": {
+    "open_brain": false,
+    "services": [],
+    "tools": ["Claude Code or similar AI client with reusable skills"]
+  },
+  "tags": ["skill", "docker", "compose", "infrastructure", "topology", "recovery", "workspace"],
+  "difficulty": "beginner",
+  "estimated_time": "2 minutes",
+  "created": "2026-05-22",
+  "updated": "2026-05-22"
+}

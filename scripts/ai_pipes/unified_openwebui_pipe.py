@@ -1,22 +1,124 @@
 """
 AI Stack Unified Pipe Function for OpenWebUI - Refactored Architecture
 
-This is a SINGLE pipe function that replaces all individual AI Stack pipe functions.
-It provides intelligent routing to all AI Stack capabilities through one interface.
-Uses ONLY the new manifest-driven refactored modules - NO legacy formatting.
+A SINGLE pipe function that replaces all individual AI Stack pipe functions.
+Intelligent routing to all AI Stack capabilities through one interface; uses
+the manifest-driven refactored modules.
 
-SETUP INSTRUCTIONS:
-1. Go to OpenWebUI Admin → Functions
+SETUP
+=====
+1. Open WebUI Admin → Functions
 2. Create new function (delete any existing AI Stack pipe functions)
 3. Paste this ENTIRE file as the function code
-4. Save and test with queries like "Check GPU status" or "System health"
+4. Save. Test with queries from the COMMAND LIST below.
 
-BENEFITS:
+BENEFITS
+========
 - Only ONE pipe function needed in OpenWebUI (instead of 4-5 separate functions)
 - Intelligent routing based on user input
 - Unified management and maintenance
 - Uses new manifest-driven architecture
-- Better user experience
+
+COMMAND LIST
+============
+Every command this pipe responds to, and the containers each function covers.
+Commands are matched by keywords in your message; routing is in core/router.py.
+"★ ALL containers" means every container in the workspace roster (both
+compose projects: main `ai-stack` + separate `open-brain`).
+
+─ Stack / server status  ──────────────────────── → tailscale_serve_pipe
+  Triggers: status · overview · stack · stack status · stack-status
+            status of <service> · status for <service>
+  Output:   Full stack view — Containers table, Tailnet URLs, Processing
+            detail, GPU temp/VRAM panel.
+  Coverage: ★ ALL containers across BOTH compose projects (32 services).
+            Scopable to any container below:
+    core    openwebui · tailscale · llama-cpp · llama-cpp-embed · watchtower
+    memory  mnemory · mnemory-gateway · mnemory-backup
+    search  tor · redis · searxng · gateway · mcpo
+    coder   open-terminal · little-coder · lc-mcpo · lc-egress ·
+            little-coder-backup
+    aux     smolcrawl-pipelines · surrealdb · open_notebook · openwebui-backup
+    OB1     openbrain-db · openbrain-mcp · openbrain-ext · openbrain-mcpo ·
+            openbrain-mcpo-ext · openbrain-postgrest · openbrain-rest ·
+            openbrain-entity-worker · openbrain-wiki · openbrain-wiki-viewer
+  Examples: "status" · "status of mnemory-gateway" · "status of openbrain-mcpo"
+
+─ System health  ──────────────────────────────── → modules/system-health
+  Triggers: system health · health · monitor
+  Output:   System Health Report — Docker services, network connectivity,
+            AI Stack Services (live HTTP probes grouped by plane), system
+            resources, container environment.
+  Coverage: 10 probe-backed services across every plane (core, memory,
+            search, little-coder, aux, OB1).
+
+─ Tailnet inventory  ──────────────────────────── → tailscale_serve_pipe
+  Triggers: inventory · show services · list services · show tailnet ·
+            tailnet services · service map · service overview · inventory of X
+  Output:   Tailnet-exposed services — host:port, tailnet HTTPS port,
+            GPU env mapping, public URL.
+  Coverage: Tailnet-served services only (by design — only services exposed
+            via `tailscale serve` appear): openwebui · lmstudio · llama-cpp ·
+            llama-cpp-embed · open-notebook · open-notebook-api
+
+─ Tailscale serve admin  ──────────────────────── → tailscale_serve_pipe
+  Triggers: tailscale serve status · serve status
+            start serving <service> · serve <service> ·
+              expose <service> [on port N]
+            stop serving <service> · unserve <service>
+            health check <service> · ping <service>
+  Coverage: Tailnet-registered services (same set as Tailnet inventory).
+            Internal-only containers (search-net, lc-net, OB1's obnet)
+            cannot be tailnet-exposed by design.
+
+─ Emergency recovery  ────────────────────── → modules/emergency-recovery
+  Triggers: fix network · fix gpu · rebuild tailscale · restart openwebui ·
+            nuclear option · validate gpu · fix lmstudio · recovery · repair
+  Output:   Diagnostics + corrective action; for hard issues, the host
+            scripts at scripts/emergency-recovery.{ps1,bat}.
+  Coverage: ★ ALL containers across both compose projects — graceful
+            shutdown in reverse dependency order, dependency-ordered startup,
+            OB1 stack brought up after main stack is healthy.
+
+─ GPU status  ────────────────────────────────────── → modules/gpu-status
+  Triggers: gpu · gpu status · cuda · graphics · nvidia
+  Output:   GPU temperature, VRAM, utilization, per-container assignments
+            (3090 Ti aistack-side · 2080 SUPER llama-cpp-side).
+
+─ GPU detail · nvidia-smi check  ────────────────── → modules/gpu-status
+  Triggers: smi · nvidia-smi · gpu processes · what is in memory ·
+            what's in memory · compute apps · pmon
+            Append "gpu 0" / "gpu 1" / "first" / "second" to scope to one GPU.
+  Output:   Per-GPU breakdown — utilization · VRAM · temp · power · clocks ·
+            encoder/decoder — PLUS the compute-process list (PID, process
+            name, VRAM per process). Answers "why is util 99%?" and
+            "what's in memory?". Shells to `nvidia-smi`; torch can't see
+            other processes' VRAM.
+  Examples: "smi" · "nvidia-smi gpu 0" · "what's in memory on gpu 1"
+
+─ Admin help  ──────────────────────────────────── → tailscale_serve_pipe
+  Triggers: help · ? · admin help · stack help · tailscale help · commands ·
+            what can i do
+  Output:   Admin command catalog with example phrasings.
+
+─ LM Studio  ───────────────────────────────────────── → modules/help-system
+  Triggers: lmstudio
+  Output:   LM Studio integration help.
+
+─ Default fallthrough  ───────────────────────────── → modules/help-system
+  Any query not matching the above keywords routes here.
+
+NOTES ON "ALL CONTAINERS"
+=========================
+- "Scoped status" (`status of <X>`) and "Emergency recovery" cover EVERY
+  container in the workspace roster, both compose projects.
+- "Tailnet inventory" and `serve start/stop` cover only the tailnet-served
+  subset (six services) — internal-only containers (search-net, lc-net,
+  OB1's obnet) cannot be exposed on the tailnet by design.
+- "System health" probes reachable services over the docker networks; the
+  comprehensive per-container view is in `status`.
+- Containers in the roster but not currently probed appear in `status` as
+  "🗒️ registered (no probe)" — they are tracked, just not deep-introspected.
 """
 
 from __future__ import annotations

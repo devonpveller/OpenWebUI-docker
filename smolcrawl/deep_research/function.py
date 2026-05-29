@@ -12,7 +12,19 @@ import logging
 import uuid
 from typing import Any, Callable, Dict, Optional
 
+from .chat_ledger import (
+    CONTINUE_RE,
+    RESEARCH_LEDGER,
+    chat_key,
+    dedup,
+    stop_payload,
+)
 from .crawl_integration import CrawlClient
+from .evidence_memory import (
+    format_cached_research,
+    lookup_research_evidence,
+    persist_research_evidence,
+)
 from .journal import ResearchJournal
 from .knowledge_research import KnowledgeResearcher
 from .models import (
@@ -52,6 +64,7 @@ class Tools:
     async def research(
         self,
         query: str,
+        refresh: bool = False,
         __user__: dict = None,
         __metadata__: dict = None,
         __event_emitter__=None,
@@ -64,22 +77,105 @@ class Tools:
         """Quick research on a topic using web search.
 
         Stores findings to Fileshed and iteratively expands search terms
-        to find context you might not know to search for. Faster than
-        deep_research — use this to scope a topic before committing to
-        a full crawl.
+        internally. Faster than deep_research — use this to scope a topic.
+
+        IMPORTANT — call this ONCE per distinct research need. For a broad,
+        list, survey, "all available X", or comparison-matrix request, pass
+        the ENTIRE scope as a single query (e.g. "market analysis of all
+        augmented reality headsets available today, with specs and pricing
+        for each"). Do NOT decompose into one research() call per item — the
+        tool expands search terms on its own, and a per-conversation budget
+        will return a STOP directive once the budget is reached. If that
+        directive appears, do not call research() again: answer the user
+        with what was gathered and relay the coverage/gap summary verbatim.
+
+        CACHE: if this exact request was researched before, the stored
+        finding is returned instead of researching again (stale results
+        are flagged). Only set refresh=True when the user explicitly asks
+        to re-research / update it — that runs a fresh pass and supersedes
+        the cached evidence in place.
 
         Args:
-            query: The research question or topic to explore.
+            query: The research question or topic to explore. For broad
+                requests, state the full scope in one query.
+            refresh: Force a fresh research run, bypassing the cache and
+                superseding any prior evidence for this request. Use only
+                on explicit user request.
         """
         model_id = SubAgent.resolve_model_id(__metadata__, __model__)
         user_id = (__user__ or {}).get("id", "")
 
-        sub_agent = SubAgent(model_id, self.valves.max_prompt_tokens)
+        key = chat_key(__chat_id__, __user__)
+        ledger = RESEARCH_LEDGER.setdefault(
+            key, {"count": 0, "covered": [], "gaps": [], "topic": ""}
+        )
+        budget = self.valves.max_research_calls_per_chat
+
+        # Explicit user-driven continuation: resets the per-chat budget,
+        # retains covered markers so we don't re-research them.
+        cont = CONTINUE_RE.match(query or "")
+        if cont:
+            query = (query[cont.end():].strip()
+                     or ledger.get("topic") or query)
+            ledger["count"] = 0
+            ledger["gaps"] = []
+            await self._emit_status(
+                __event_emitter__,
+                "🔁 Resuming research — prior coverage retained",
+            )
+
+        if not ledger.get("topic"):
+            ledger["topic"] = query
+        topic = ledger.get("topic") or query
+
+        # Cache check (skip on explicit refresh or a 'research continue:'
+        # continuation). A hit returns the stored finding without spending
+        # the per-chat budget.
+        if not refresh and not cont:
+            cached = await lookup_research_evidence(
+                self.valves, query=query, user=__user__ or {})
+            if cached:
+                await self._emit_status(
+                    __event_emitter__,
+                    "♻️ Found prior research for this request — recalling",
+                    done=True)
+                return format_cached_research(cached, "research")
+
+        # Hard stop: budget already spent and this is not a continuation.
+        if ledger["count"] >= budget:
+            await self._emit_status(
+                __event_emitter__,
+                f"⛔ Research budget reached ({ledger['count']}/{budget}) "
+                "— returning coverage summary",
+                done=True,
+            )
+            return stop_payload(
+                ledger, topic, ledger["count"], budget, ran=False
+            )
+
+        # Bias the run away from already-covered ground.
+        effective_query = query
+        covered = dedup(ledger.get("covered", []), 8)
+        focus = dedup(ledger.get("gaps", []), 5)
+        if covered or focus:
+            hint = []
+            if covered:
+                hint.append("Already researched (do not repeat): "
+                            + "; ".join(covered))
+            if focus:
+                hint.append("Prioritize these open gaps: " + "; ".join(focus))
+            effective_query = f"{query}\n\n({' | '.join(hint)})"
+
+        sub_agent = SubAgent(
+            model_id, self.valves.max_prompt_tokens,
+            nothink_suffix=(self.valves.nothink_suffix
+                            if self.valves.sub_agent_nothink else ""),
+        )
         journal = ResearchJournal(self.valves)
         researcher = QuickResearcher(self.valves, sub_agent, journal)
 
-        return await researcher.run(
-            query=query,
+        answer = await researcher.run(
+            query=effective_query,
             user_id=user_id,
             request=__request__,
             user=__user__ or {},
@@ -87,10 +183,44 @@ class Tools:
             event_emitter=__event_emitter__,
         )
 
+        ledger["count"] += 1
+        ledger["covered"] = dedup(
+            ledger["covered"] + (researcher.last_covered or [])
+        )
+        ledger["gaps"] = dedup([
+            g for g in (ledger["gaps"] + (researcher.last_gaps or []))
+            if g not in ledger["covered"]
+        ])
+
+        used = ledger["count"]
+        if used >= budget:
+            answer += "\n\n" + stop_payload(
+                ledger, topic, used, budget, ran=True
+            )
+        elif used == budget - 1:
+            answer += (
+                f"\n\n---\n\n*ℹ️ {used}/{budget} research calls used this "
+                "conversation. One remains before a stop directive — make it "
+                "count, or finalize now.*"
+            )
+        if self.valves.evidence_memory_quick_research:
+            try:
+                await persist_research_evidence(
+                    self.valves, sub_agent, query=query, answer=answer,
+                    user=__user__ or {}, request=__request__,
+                    kind="research",
+                    sources=getattr(researcher, "last_sources", []),
+                    event_emitter=__event_emitter__,
+                )
+            except Exception:
+                pass
+        return answer
+
     async def knowledge_research(
         self,
         query: str,
         collection: str = "",
+        refresh: bool = False,
         __user__: dict = None,
         __metadata__: dict = None,
         __event_emitter__=None,
@@ -110,20 +240,40 @@ class Tools:
         Use this when you already have knowledge collections and want to
         query them deeply before resorting to web search or crawling.
 
+        CACHE: a prior result for the same request is returned instead of
+        re-querying (stale flagged). Set refresh=True only on explicit
+        user request to re-research — it supersedes the cached evidence.
+
         Args:
             query: The research question or topic to investigate.
             collection: Optional name of a specific knowledge collection
                 to query. When provided, skips auto-detection and uses
                 this collection exclusively.
+            refresh: Force a fresh run, bypassing the cache and
+                superseding prior evidence. Use only on explicit request.
         """
         model_id = SubAgent.resolve_model_id(__metadata__, __model__)
         user_id = (__user__ or {}).get("id", "")
 
-        sub_agent = SubAgent(model_id, self.valves.max_prompt_tokens)
+        if not refresh:
+            cached = await lookup_research_evidence(
+                self.valves, query=query, user=__user__ or {})
+            if cached:
+                await self._emit_status(
+                    __event_emitter__,
+                    "♻️ Found prior research for this request — recalling",
+                    done=True)
+                return format_cached_research(cached, "knowledge_research")
+
+        sub_agent = SubAgent(
+            model_id, self.valves.max_prompt_tokens,
+            nothink_suffix=(self.valves.nothink_suffix
+                            if self.valves.sub_agent_nothink else ""),
+        )
         journal = ResearchJournal(self.valves)
         researcher = KnowledgeResearcher(self.valves, sub_agent, journal)
 
-        return await researcher.run(
+        answer = await researcher.run(
             query=query,
             user_id=user_id,
             request=__request__,
@@ -132,10 +282,22 @@ class Tools:
             event_emitter=__event_emitter__,
             target_collection=collection,
         )
+        try:
+            await persist_research_evidence(
+                self.valves, sub_agent, query=query, answer=answer,
+                user=__user__ or {}, request=__request__,
+                kind="knowledge_research",
+                sources=getattr(researcher, "last_sources", []),
+                event_emitter=__event_emitter__,
+            )
+        except Exception:
+            pass
+        return answer
 
     async def deep_research(
         self,
         query: str,
+        refresh: bool = False,
         __user__: dict = None,
         __metadata__: dict = None,
         __event_emitter__=None,
@@ -155,13 +317,34 @@ class Tools:
         Pipeline: knowledge_research → gap analysis → web search →
         crawl → knowledge_research → synthesize → verify.
 
+        CACHE: a prior result for the same request is returned instead of
+        re-running the (expensive) pipeline; stale results are flagged.
+        Set refresh=True only when the user explicitly asks to
+        re-research / update — it supersedes the cached evidence in place.
+
         Args:
             query: The research question or topic to investigate.
+            refresh: Force a fresh run, bypassing the cache and
+                superseding prior evidence. Use only on explicit request.
         """
         model_id = SubAgent.resolve_model_id(__metadata__, __model__)
         user_id = (__user__ or {}).get("id", "")
 
-        sub_agent = SubAgent(model_id, self.valves.max_prompt_tokens)
+        if not refresh:
+            cached = await lookup_research_evidence(
+                self.valves, query=query, user=__user__ or {})
+            if cached:
+                await self._emit_status(
+                    __event_emitter__,
+                    "♻️ Found prior research for this request — recalling",
+                    done=True)
+                return format_cached_research(cached, "deep_research")
+
+        sub_agent = SubAgent(
+            model_id, self.valves.max_prompt_tokens,
+            nothink_suffix=(self.valves.nothink_suffix
+                            if self.valves.sub_agent_nothink else ""),
+        )
         journal = ResearchJournal(self.valves)
         rag = RagResearcher(self.valves, sub_agent)
         crawl_client = CrawlClient(self.valves)
@@ -509,6 +692,15 @@ class Tools:
             done=True,
         )
 
+        try:
+            await persist_research_evidence(
+                self.valves, sub_agent, query=query, answer=answer,
+                user=__user__ or {}, request=__request__,
+                kind="deep_research", sources=rag_sources,
+                event_emitter=__event_emitter__,
+            )
+        except Exception:
+            pass
         return answer
 
     # --- Private Helpers ---

@@ -1,0 +1,77 @@
+# SearXNG settings for the Private Search Gateway.
+#
+# Inherits SearXNG's shipped defaults and only overrides what matters here.
+# Privacy invariants (see integration plan §6 / spec §8):
+#   - ALL outbound traffic is forced through Tor (socks5h:// => DNS via Tor too).
+#   - This instance is private, on an internal:true docker network; its only
+#     route off-box is tor:9050. It physically cannot reach the internet
+#     except via Tor, so a misconfig cannot leak.
+#   - Tor-hostile engines (Google/Bing/Yandex) are disabled by default.
+use_default_settings: true
+
+general:
+  instance_name: "private-search-gateway"
+  donation_url: false
+  contact_url: false
+  privacypolicy_url: false
+  enable_metrics: false        # no telemetry (spec §8)
+
+server:
+  # Read from the SEARXNG_SECRET env var (compose injects it). Never hardcode.
+  secret_key: "placeholder-overridden-by-SEARXNG_SECRET-env"
+  limiter: false               # plan §3.5: private single-client instance —
+  public_instance: false       #   do NOT rate-limit our own gateway fan-out.
+  image_proxy: false
+  method: "GET"                # allow GET /search (limiter off => safe)
+
+search:
+  # JSON is REQUIRED — the gateway consumes JSON; SearXNG 403s without it.
+  formats:
+    - html
+    - json
+  safe_search: 0
+  autocomplete: ""
+
+outgoing:
+  request_timeout: 15.0        # Tor adds latency
+  max_request_timeout: 20.0
+  pool_connections: 100
+  pool_maxsize: 20
+  useragent_suffix: ""
+  # Every upstream engine request egresses via Tor. socks5h => remote DNS.
+  proxies:
+    all://:
+      - socks5h://tor:9050
+
+redis:
+  url: redis://redis:6379/0
+
+# Engine policy: disable engines that captcha/block Tor exits aggressively;
+# keep the Tor-tolerant set. Names merge into SearXNG defaults by engine name.
+engines:
+  - name: google
+    disabled: true
+  - name: bing
+    disabled: true
+  - name: yandex
+    disabled: true
+  - name: duckduckgo
+    disabled: false
+  - name: brave
+    disabled: false
+  - name: mojeek
+    disabled: false
+  - name: qwant
+    disabled: false
+  - name: startpage
+    disabled: false
+  - name: wikipedia
+    disabled: false
+  - name: wikidata
+    disabled: false
+  - name: github
+    disabled: false
+  - name: stackoverflow
+    disabled: false
+  - name: arxiv
+    disabled: false

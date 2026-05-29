@@ -26,7 +26,7 @@ import re
 import time
 import uuid as _uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import urlparse
@@ -374,12 +374,17 @@ def _cb_build_iteration_text(summaries: List[str], budget_chars: int) -> str:
 
 
 class _SubAgent:
-    def __init__(self, model_id: str, max_prompt_tokens: int = 6000):
+    def __init__(self, model_id: str, max_prompt_tokens: int = 6000,
+                 nothink_suffix: str = ""):
         self._model_id = model_id
         self._max_prompt_chars = max_prompt_tokens * 4
+        # When set (e.g. ":nothink"), mechanical JSON calls route to the
+        # reasoning-disabled alias of the SAME model — llama-swap does not
+        # reload, it just skips thinking-token generation.
+        self._nothink_suffix = nothink_suffix or ""
 
     async def run(self, system_prompt: str, user_prompt: str, request, user: Dict,
-                  json_mode: bool = False) -> str:
+                  json_mode: bool = False, nothink: bool = False) -> str:
         from open_webui.utils.chat import generate_chat_completion
         from open_webui.models.users import UserModel
 
@@ -415,25 +420,44 @@ class _SubAgent:
                 self._max_prompt_chars // 4,
             )
 
-        form_data = {
-            "model": self._model_id,
-            "messages": [
-                {"role": "system", "content": sys_msg},
-                {"role": "user", "content": combined},
-            ],
-            "stream": False,
-            "metadata": {"task": "deep_research_sub_agent"},
-        }
-        response = await generate_chat_completion(
-            request=request, form_data=form_data,
-            user=UserModel(**user), bypass_filter=True,
-        )
+        use_model = self._model_id
+        if (nothink and self._nothink_suffix
+                and not self._model_id.endswith(self._nothink_suffix)):
+            use_model = f"{self._model_id}{self._nothink_suffix}"
+
+        def _form(model_id: str) -> Dict:
+            return {
+                "model": model_id,
+                "messages": [
+                    {"role": "system", "content": sys_msg},
+                    {"role": "user", "content": combined},
+                ],
+                "stream": False,
+                "metadata": {"task": "deep_research_sub_agent"},
+            }
+
+        try:
+            response = await generate_chat_completion(
+                request=request, form_data=_form(use_model),
+                user=UserModel(**user), bypass_filter=True,
+            )
+        except Exception as e:
+            if use_model == self._model_id:
+                raise
+            logger.warning(
+                "nothink alias '%s' failed (%s) — retrying with base model",
+                use_model, e,
+            )
+            response = await generate_chat_completion(
+                request=request, form_data=_form(self._model_id),
+                user=UserModel(**user), bypass_filter=True,
+            )
         return response["choices"][0]["message"]["content"]
 
     async def run_json(self, system_prompt: str, user_prompt: str, request, user: Dict) -> Any:
         """Call LLM and parse response as JSON."""
         raw = await self.run(system_prompt, user_prompt, request, user,
-                             json_mode=True)
+                             json_mode=True, nothink=True)
         try:
             return _parse_json(raw)
         except ValueError:
@@ -850,22 +874,37 @@ class _RagResearcher:
                             k_override: int = None,
                             file_ids_map: Dict[str, List[str]] = None) -> IterationResult:
         all_chunks, new_chunks = [], []
-        for term in terms:
-            for cid in col_ids:
-                fids = (file_ids_map or {}).get(cid)
-                for chunk in await self.query_collection(cid, term, col_names.get(cid, cid),
-                                                         k_override=k_override, request=request,
-                                                         file_ids=fids):
-                    all_chunks.append(chunk)
-                    if session.add_seen_chunk(cid, chunk.chunk_hash):
-                        new_chunks.append(chunk)
+
+        # Query each (term × collection) pair concurrently, bounded so the
+        # single embedding server isn't overloaded. Results processed in
+        # submission order so chunk dedup stays deterministic.
+        limit = max(1, getattr(self._v, "max_parallel_queries", 5))
+        sem = asyncio.Semaphore(limit)
+        pairs = [(term, cid) for term in terms for cid in col_ids]
+
+        async def _query(term, cid):
+            async with sem:
+                return await self.query_collection(
+                    cid, term, col_names.get(cid, cid),
+                    k_override=k_override, request=request,
+                    file_ids=(file_ids_map or {}).get(cid))
+
+        results = await asyncio.gather(
+            *[_query(t, c) for t, c in pairs], return_exceptions=True)
+        for (_, cid), chunks in zip(pairs, results):
+            if not isinstance(chunks, list):
+                continue
+            for chunk in chunks:
+                all_chunks.append(chunk)
+                if session.add_seen_chunk(cid, chunk.chunk_hash):
+                    new_chunks.append(chunk)
 
         summary, concepts = "", []
         if new_chunks:
-            max_ch = getattr(self._valves, 'max_chunks_per_iteration', 10)
+            max_ch = getattr(self._v, 'max_chunks_per_iteration', 10)
             # Cap chunk text to fit within prompt budget
             chunk_budget = _cb_usable_budget_chars(
-                self._valves.max_prompt_tokens
+                self._v.max_prompt_tokens
             ) - len(session.anchor) - 1000
             chunk_parts = []
             used = 0
@@ -1516,6 +1555,12 @@ class _QuickResearcher:
         self._sa = sa
         self._j = j
         self._synth = synth
+        # Populated by run() so the orchestration layer (Tools.research)
+        # can maintain a per-chat coverage/gap ledger across calls.
+        self.last_covered: List[str] = []
+        self.last_gaps: List[str] = []
+        self.last_slug: str = ""
+        self.last_sources: List[Dict] = []
 
     async def run(self, query: str, user_id: str, request, user: Dict, model_id: str, emitter=None) -> str:
         slug = _Journal.slugify(query)
@@ -1539,6 +1584,9 @@ class _QuickResearcher:
         target = self._v.min_relevant_sources
         consecutive_misses = 0
         rel_count = 0
+        accumulated_covered: List[str] = []
+        last_gaps: List[str] = []
+        self.last_slug = slug
 
         for n in range(1, self._v.max_iterations + 1):
             # --- Step 1: Web search ---
@@ -1548,11 +1596,17 @@ class _QuickResearcher:
                 break
             tried_terms.update(new_terms)
 
-            # Search each term individually — OR-joining fails on most engines
+            # Search each term individually — OR-joining fails on most
+            # engines. Terms are independent → run them concurrently.
             raw = []
-            for term in new_terms[:3]:  # cap at 3 searches per iteration
-                hits = await self._web_search(session, term, request, user)
-                raw.extend(hits)
+            search_batches = await asyncio.gather(
+                *[self._web_search(session, term, request, user)
+                  for term in new_terms[:3]],  # cap at 3 searches per iter
+                return_exceptions=True,
+            )
+            for hits in search_batches:
+                if isinstance(hits, list):
+                    raw.extend(hits)
             pre_dedup = len(raw)
             raw = [r for r in raw if r.get("url", "") not in seen_urls]
             seen_urls.update(r.get("url", "") for r in raw)
@@ -1589,6 +1643,7 @@ class _QuickResearcher:
                 deeper = extraction.get("deeper_terms", [])
                 adjacent = extraction.get("adjacent_leads", [])
                 covered = extraction.get("covered_so_far", [])
+                accumulated_covered.extend(c for c in covered if c not in accumulated_covered)
                 summary = (f"Found {len(rel)} relevant, {len(trail)} trail, dropped {dropped}. "
                            f"Covered: {', '.join(covered[:3])}. Deeper: {', '.join(deeper[:3])}.")
                 search_terms = deeper + adjacent  # dive deeper
@@ -1620,6 +1675,11 @@ class _QuickResearcher:
                 # Have enough sources, but check for gaps before stopping
                 analysis = await self._analyze(session, request, user)
                 gaps = analysis.get("gaps", [])
+                last_gaps = gaps
+                accumulated_covered.extend(
+                    c for c in analysis.get("covered_aspects", [])
+                    if c not in accumulated_covered
+                )
                 gap_terms = analysis.get("new_terms", [])
                 has_official = analysis.get("has_official_source", True)
 
@@ -1654,6 +1714,11 @@ class _QuickResearcher:
         # --- Final analysis (only if not already done in loop) ---
         if not (rel_count >= target):
             analysis = await self._analyze(session, request, user)
+            last_gaps = analysis.get("gaps", []) or last_gaps
+            accumulated_covered.extend(
+                c for c in analysis.get("covered_aspects", [])
+                if c not in accumulated_covered
+            )
             if analysis.get("gaps"):
                 await _emit(emitter, f"\U0001f50d Remaining gaps: {', '.join(analysis['gaps'][:3])}")
 
@@ -1670,6 +1735,11 @@ class _QuickResearcher:
         if len(relevant_sources) < target:
             answer += (f"\n\n---\n\n\u26a0\ufe0f *Only {len(relevant_sources)}/{target} relevant sources found. "
                        f"Consider `deep_research()` to crawl authoritative domains.*")
+
+        # Expose this run's coverage/gap markers for the per-chat ledger.
+        self.last_covered = accumulated_covered
+        self.last_gaps = last_gaps
+        self.last_sources = relevant_sources + trail_sources
         return answer
 
     # --- Search helpers ---
@@ -1893,6 +1963,7 @@ class _KnowledgeResearcher:
         self._j = j
         self._synth = synth
         self._rag = _RagResearcher(valves, sa)
+        self.last_sources: List[Dict] = []
 
     async def run(self, query: str, user_id: str, request, user: Dict, model_id: str, emitter=None, target_collection: str = "") -> str:
         slug = _Journal.slugify(query)
@@ -2066,6 +2137,7 @@ class _KnowledgeResearcher:
         session.phase = ResearchPhase.COMPLETE
         self._j.write_manifest(session)
         await _emit(emitter, f"📁 Journal: knowledge-research/{slug}/", done=True)
+        self.last_sources = rag_sources
         return answer
 
     # --- Collection selection helpers ---
@@ -2144,16 +2216,25 @@ class _KnowledgeResearcher:
         if not engine:
             return {"recommendations": [], "crawl_suggestion": "No web search engine configured."}
 
-        all_results, seen = [], set()
-        for term in search_terms[:5]:
+        terms = search_terms[:5]
+
+        async def _search(term):
             try:
-                results = await run_in_threadpool(search_web, request, engine, term)
-                for r in results or []:
-                    if r.link not in seen:
-                        seen.add(r.link)
-                        all_results.append(r)
+                return await run_in_threadpool(search_web, request, engine, term)
             except Exception as e:
                 logger.warning("Web search for '%s' failed: %s", term, e)
+                return []
+
+        batches = await asyncio.gather(
+            *[_search(t) for t in terms], return_exceptions=True)
+        all_results, seen = [], set()
+        for results in batches:
+            if not isinstance(results, list):
+                continue
+            for r in results:
+                if r.link not in seen:
+                    seen.add(r.link)
+                    all_results.append(r)
         if not all_results:
             return {"recommendations": [], "crawl_suggestion": "Web search returned no results for gap topics."}
 
@@ -2270,6 +2351,306 @@ async def _emit(emitter, msg: str, done: bool = False):
 
 
 # =============================================================================
+#  Per-chat research ledger — graceful, resumable cap on research() fan-out
+#
+#  research() is a single-shot tool the chat model calls via native function
+#  calling. On broad "list everything / comparison matrix" prompts the model
+#  decomposes into one research() call PER ITEM and never converges, blowing
+#  the model's context and OWUI's stream timeout. This ledger caps the number
+#  of calls per conversation and, when the cap is hit, returns a STOP
+#  directive plus a coverage/gap summary and a copy-paste continuation handle
+#  so the user can knowingly go deeper instead of silently truncating.
+# =============================================================================
+
+import re as _re
+
+_RESEARCH_LEDGER: Dict[str, Dict[str, Any]] = {}
+_CONTINUE_RE = _re.compile(r"^\s*research\s+continue\s*:\s*", _re.IGNORECASE)
+
+
+def _chat_key(chat_id: str, user: Dict) -> str:
+    return chat_id or (user or {}).get("id", "") or "default"
+
+
+def _dedup(seq: List[str], limit: Optional[int] = None) -> List[str]:
+    out: List[str] = []
+    for s in seq:
+        s = (s or "").strip()
+        if s and s not in out:
+            out.append(s)
+        if limit and len(out) >= limit:
+            break
+    return out
+
+
+def _coverage_block(ledger: Dict[str, Any], topic: str) -> str:
+    covered = _dedup(ledger.get("covered", []), 12)
+    gaps = _dedup(ledger.get("gaps", []), 12)
+    cov = "\n".join(f"- {c}" for c in covered) or "- (none recorded yet)"
+    gp = "\n".join(f"- {g}" for g in gaps) or "- (none recorded — coverage looks complete)"
+    gap_hint = "; ".join(gaps[:3]) if gaps else topic
+    cont = f"research continue: {topic} — focus: {gap_hint}"
+    return (
+        "\n\n---\n\n### 🔍 Research Coverage & Next Steps\n\n"
+        f"**Topic:** {topic}\n\n"
+        f"**Covered so far ({len(covered)}):**\n{cov}\n\n"
+        f"**Not yet researched — open gaps ({len(gaps)}):**\n{gp}\n\n"
+        "These gaps were left open to keep this response responsive rather "
+        "than looping indefinitely. You can accept the findings as-is (with "
+        "the gaps noted), or go deeper later *without re-covering the above*.\n\n"
+        "**To continue, copy-paste this as your next message:**\n\n"
+        f"```\n{cont}\n```\n"
+    )
+
+
+def _stop_payload(ledger: Dict[str, Any], topic: str, used: int, budget: int,
+                   ran: bool) -> str:
+    """Tool-result text that makes the chat model stop fanning out and
+    present a final, gap-aware answer to the user."""
+    did = (
+        "The findings gathered earlier in this turn are sufficient to answer now."
+        if not ran else
+        "This was the final research pass allowed for this conversation."
+    )
+    return (
+        f"⛔ **RESEARCH BUDGET REACHED** — {used}/{budget} research calls used "
+        f"in this conversation.\n\n"
+        "**Assistant instructions (do not echo this line to the user):** Do NOT "
+        "call the `research` tool again in this turn. " + did + " Using only the "
+        "research already returned above, write the user's final answer now "
+        "(e.g. the requested list / comparison chart). Then append the "
+        "\"Research Coverage & Next Steps\" section below verbatim so the user "
+        "can decide whether to dig deeper."
+        + _coverage_block(ledger, topic)
+    )
+
+
+# =============================================================================
+#  Research → open-brain `sources` persistence (runs once on completion)
+#  Mirror of deep_research/evidence_memory.py — keep in sync.
+#  open-brain returns full structured rows, so the mnemory-era
+#  ⟦EV:research⟧ header / label / artifact workarounds are GONE.
+# =============================================================================
+
+_EV_DEFAULT_VOL_DAYS = {"fast": 7, "medium": 180, "slow": 1095}
+_EV_KEY_STOP = {
+    "the", "a", "an", "of", "to", "for", "is", "are", "was", "were", "what",
+    "how", "why", "when", "who", "which", "vs", "versus", "and", "or", "in",
+    "on", "at", "about", "please", "research", "use", "find", "tell", "me",
+    "do", "does", "can", "you", "give", "info", "information", "into",
+}
+_EV_CLASSIFY_SYS = (
+    "You compress a completed research answer into one durable evidence "
+    "record. Return STRICT JSON only:\n"
+    '{"claim": "<=600 char standalone factual summary of the verified '
+    'finding, no hedging, no markdown>", "volatility": "fast|medium|slow", '
+    '"topic": "<2-4 word topic slug>"}\n'
+    "volatility = how fast this knowledge goes stale:\n"
+    "- fast: news, prices, releases, current status, people's current "
+    "roles, anything time-sensitive\n"
+    "- medium: tools/APIs/libraries, best practices, organisations, "
+    "evolving technical guidance\n"
+    "- slow: science, mathematics, peer-reviewed results, history, "
+    "established definitions"
+)
+
+
+def _compute_research_key(query: str) -> str:
+    """Deterministic, order/phrasing-insensitive key for a research query."""
+    text = re.sub(r"[^a-z0-9\s]", " ", (query or "").lower())
+    toks = sorted(t for t in text.split() if t and t not in _EV_KEY_STOP)
+    if not toks:
+        toks = sorted(re.sub(r"[^a-z0-9\s]", " ",
+                             (query or "").lower()).split())
+    return hashlib.sha1(" ".join(toks).encode()).hexdigest()[:20]
+
+
+def _ev_vol_map(spec: str) -> Dict[str, int]:
+    out: Dict[str, int] = {}
+    for part in (spec or "").split(","):
+        if ":" in part:
+            k, _, v = part.partition(":")
+            try:
+                out[k.strip()] = int(v.strip())
+            except ValueError:
+                pass
+    return out or dict(_EV_DEFAULT_VOL_DAYS)
+
+
+def _ev_ob(valves):
+    base = (getattr(valves, "openbrain_url", "") or "").rstrip("/")
+    key = getattr(valves, "openbrain_key", "") or ""
+    return base, key
+
+
+def _ev_normalize_sources(sources):
+    """Pipeline source dicts -> {url,title,content,domain}. Dedup by url."""
+    out = []
+    seen = set()
+    for s in (sources or []):
+        if not isinstance(s, dict):
+            continue
+        url = (s.get("url") or "").strip()
+        content = (s.get("content") or s.get("summary") or "").strip()
+        if not url and not content:
+            continue
+        dedup = url or content[:80]
+        if dedup in seen:
+            continue
+        seen.add(dedup)
+        out.append({
+            "url": url,
+            "title": (s.get("title") or s.get("domain") or url or "")[:300],
+            "content": content,
+            "domain": s.get("domain") or "",
+        })
+    return out
+
+
+async def _lookup_research_evidence(valves, *, query, user=None):
+    """Current open-brain synthesis row for this request + staleness, or
+    None. Best-effort: any error → None (cache miss)."""
+    if not getattr(valves, "evidence_cache_enabled", True):
+        return None
+    base, key = _ev_ob(valves)
+    if not base or not key:
+        return None
+    rkey = _compute_research_key(query)
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            r = await client.get(
+                f"{base}/research/lookup",
+                params={"key": rkey},
+                headers={"x-brain-key": key})
+            if r.status_code != 200:
+                return None
+            data = r.json() or {}
+            if not data.get("found"):
+                return None
+            return {
+                "id": data.get("id"),
+                "claim": data.get("claim") or "",
+                "researched_on": data.get("researched_on"),
+                "is_stale": bool(data.get("is_stale")),
+                "due_date": data.get("due_date"),
+                "age_days": data.get("age_days"),
+                "research_key": rkey,
+            }
+    except Exception:
+        return None
+
+
+def _format_cached_research(cached, tool_name: str) -> str:
+    """Model-mediated cache-hit payload: prior finding + a directive."""
+    date = cached.get("researched_on") or "an earlier date"
+    stale = bool(cached.get("is_stale"))
+    due = cached.get("due_date")
+    body = (cached.get("claim") or "").strip()[:1200]
+    if stale:
+        status = (f"⚠️ STALE — re-validation was due {due}"
+                  + (f" ({cached.get('age_days')}d old)"
+                     if cached.get("age_days") is not None else ""))
+        guidance = (
+            "Present this as PRIOR research and explicitly tell the user it "
+            "is STALE (last researched " + str(date) + ") and may be out of "
+            "date. Recommend re-researching. If the user agrees, call "
+            f"`{tool_name}(query=<same query>, refresh=True)` — that runs a "
+            "new pass and supersedes this record in place.")
+    else:
+        status = f"✅ FRESH — re-validate after {due}" if due else "✅ FRESH"
+        guidance = (
+            "Present this as previously-researched findings, noting it was "
+            "researched on " + str(date) + " (still fresh). Do NOT silently "
+            "re-run research. If the user wants it updated, call "
+            f"`{tool_name}(query=<same query>, refresh=True)` — that runs a "
+            "new pass and supersedes this record in place.")
+    return (
+        f"♻️ **RECALLED PRIOR RESEARCH** — this request was already "
+        f"researched on {date}.\n"
+        f"**Status:** {status}\n\n"
+        f"{body}\n\n"
+        "*(Gathered sources for this question are stored in open-brain; "
+        "re-run with refresh=True to regenerate.)*\n\n"
+        "---\n"
+        f"**Assistant instructions (do not echo this line to the user):** "
+        f"{guidance}")
+
+
+async def _persist_research_evidence(valves, sub_agent, *, query, answer,
+                                     user=None, request=None, kind,
+                                     sources=None, event_emitter=None):
+    """Persist a completed run to open-brain `sources`. Server supersedes
+    the synthesis row in place + replaces per-source rows. Best-effort:
+    never raises, never blocks the research result."""
+    if not getattr(valves, "evidence_memory_enabled", True):
+        return
+    base, key = _ev_ob(valves)
+    if not base or not key:
+        return
+    if not answer or len(answer.strip()) < 200:
+        return  # not a real synthesis (e.g. STOP/budget directive)
+
+    async def _emit(msg):
+        if event_emitter:
+            try:
+                await event_emitter({"type": "status",
+                                     "data": {"description": msg,
+                                              "done": False}})
+            except Exception:
+                pass
+
+    claim, volatility, topic = answer.strip()[:600], "medium", "research"
+    try:
+        parsed = await sub_agent.run_json(
+            _EV_CLASSIFY_SYS,
+            f"RESEARCH QUESTION:\n{query}\n\nANSWER:\n{answer[:6000]}",
+            request, user or {})
+        if isinstance(parsed, dict):
+            claim = (parsed.get("claim") or claim).strip()[:600]
+            v = str(parsed.get("volatility", "")).lower().strip()
+            if v in ("fast", "medium", "slow"):
+                volatility = v
+            topic = (parsed.get("topic") or topic).strip()[:40] or "research"
+    except Exception:
+        pass
+
+    vol_days = _ev_vol_map(getattr(valves, "evidence_volatility_days", ""))
+    revalidate = vol_days.get(volatility,
+                              _EV_DEFAULT_VOL_DAYS.get(volatility, 180))
+    payload = {
+        "research_key": _compute_research_key(query),
+        "query": query[:400],
+        "claim": claim,
+        "kind": kind,
+        "volatility": volatility,
+        "revalidate_days": revalidate,
+        "notebook": topic,
+        "sources": _ev_normalize_sources(sources),
+    }
+    try:
+        async with httpx.AsyncClient(timeout=90.0) as client:
+            r = await client.post(
+                f"{base}/research/persist",
+                headers={"x-brain-key": key,
+                         "Content-Type": "application/json"},
+                json=payload)
+            if r.status_code != 200:
+                snippet = " ".join((r.text or "").split())[:200]
+                logger.warning("research persist failed: HTTP %s %s",
+                                r.status_code, snippet)
+                await _emit(f"🧠 research persist skipped (HTTP {r.status_code})")
+                return
+            data = r.json() or {}
+            await _emit(
+                f"🧠 research saved to open-brain (vol:{volatility}, "
+                f"revalidate {revalidate}d, "
+                f"{data.get('sources_written', 0)} sources)")
+    except Exception as exc:
+        await _emit(f"🧠 research persist error: {type(exc).__name__}")
+
+
+
+# =============================================================================
 #  Tools (main entry point for OWUI)
 # =============================================================================
 
@@ -2291,49 +2672,171 @@ class Tools:
         max_iterations: int = Field(default=3, ge=1, le=15, description="Hard cap on research iterations")
         fixed_iterations: int = Field(default=1, ge=1, le=5, description="Guaranteed iterations before continue-decision")
         min_relevant_sources: int = Field(default=3, ge=1, le=30, description="Target: stop researching once this many anchor-relevant sources are found")
+        max_research_calls_per_chat: int = Field(default=5, ge=1, le=50, description="Max research() calls the chat model may make per conversation before a graceful stop directive is returned (prevents unbounded per-item fan-out on broad survey prompts). The user can resume past this with a 'research continue:' prompt.")
         max_web_results: int = Field(default=5, ge=1, le=50, description="Max web search results per query")
+        sub_agent_nothink: bool = Field(default=True, description="Route mechanical sub-agent JSON calls (anchor, relevance gate, topic extraction, gap analysis, etc.) to the reasoning-disabled model alias for speed. With llama-swap this is the SAME model process (no reload) — it only skips thinking-token generation. Falls back to base model if the alias is unavailable.")
+        nothink_suffix: str = Field(default=":nothink", description="Suffix appended to the chat model id to address its reasoning-disabled alias (matches the llama-swap setParamsByID '${MODEL_ID}:nothink' entry). Empty disables nothink routing.")
+        max_parallel_queries: int = Field(default=5, ge=1, le=32, description="Max concurrent RAG collection/file queries per iteration. Parallelizes the term×collection fan-out without overloading the single embedding server.")
         include_sources: bool = Field(default=True, description="Append source references to answer")
         top_k_per_collection: int = Field(default=3, ge=1, le=20, description="Chunks per collection per query")
         max_collections: int = Field(default=5, ge=1, le=50, description="Max collections to search")
         max_domains: int = Field(default=3, ge=1, le=20, description="Max domains to discover")
         auto_approve_domains: bool = Field(default=True, description="Auto-approve all non-covered domains (skip manual approval)")
-        max_prompt_tokens: int = Field(default=196000, ge=1000, le=262144, description="Token budget for SubAgent prompts. Should be model context window minus ~4000. Default 196000 suits Qwen3 235B/30B-A3B 200k context models (262144 max for 256k models).")
+        max_prompt_tokens: int = Field(default=120000, ge=1000, le=262144, description="Token budget for SubAgent prompts. MUST be <= the model's per-request context lane minus response headroom. llama-swap qwen36-27b runs --parallel 2 over 262144 ctx => 131072-token lane; 120000 leaves ~11k for the answer. Raise only if you also lower parallelism. Set far lower for small models (e.g. 28000 for 32k ctx).")
         max_chunks_per_iteration: int = Field(default=10, ge=1, le=50, description="Max RAG chunks included in LLM summarization per iteration")
         skip_verification: bool = Field(default=False, description="Skip LLM verification/remediation passes (saves 2 LLM calls, faster for small models)")
         fileshed_compatible: bool = Field(default=True, description="Write journal to Fileshed Storage zone")
         storage_base_path: str = Field(default="/app/backend/data/user_files", description="Fileshed storage base path")
         save_journal: bool = Field(default=True, description="Persist research journal to disk")
+        evidence_memory_enabled: bool = Field(default=True, description="On completion of a research run, persist the verified finding + its gathered sources to open-brain `sources` (structured rows; not user-personal data). Never writes per-iteration queries.")
+        evidence_memory_quick_research: bool = Field(default=True, description="Persist evidence from quick research() too. Default ON so the cache covers every research entrypoint regardless of which tool first ran the question.")
+        evidence_cache_enabled: bool = Field(default=True, description="Before a research run, check open-brain for prior research on the SAME request (research_key match). On hit, return the stored finding instead of researching (stale flagged). refresh=True bypasses and supersedes in place.")
+        evidence_volatility_days: str = Field(default="fast:7,medium:180,slow:1095", description="Re-validation windows per volatility tier; past the window the LLM downgrades the fact to an educated guess.")
+        openbrain_url: str = Field(default="http://openbrain-mcp:8000", description="open-brain MCP base URL (llm-net, trusted writer path). Research synthesis + sources persist here; the mnemory misuse is fully retired.")
+        openbrain_key: str = Field(default="", description="open-brain MCP_ACCESS_KEY (x-brain-key). MUST be set to the OB1 docker .env MCP_ACCESS_KEY or research persistence/cache is skipped (graceful).")
 
     def __init__(self):
         self.valves = self.Valves()
 
     async def research(
-        self, query: str,
+        self, query: str, refresh: bool = False,
         __user__: dict = None, __metadata__: dict = None, __event_emitter__=None,
         __request__=None, __model__: dict = None, __event_call__=None,
         __chat_id__: str = "", __message_id__: str = "",
     ) -> str:
         """Quick research on a topic using web search. Stores findings to
-        Fileshed and iteratively expands search terms. Faster than
-        deep_research — use this to scope a topic first.
+        Fileshed and iteratively expands search terms internally.
+
+        CACHE: if this exact request was researched before, the stored
+        finding is returned instead of researching again (stale flagged).
+        Set refresh=True ONLY when the user explicitly asks to re-research
+        / update — it supersedes the cached evidence in place.
+
+        IMPORTANT — call this ONCE per distinct research need. For a broad,
+        list, survey, "all available X", or comparison-matrix request, pass
+        the ENTIRE scope as a single query (e.g. "market analysis of all
+        augmented reality headsets available today, with specs and pricing
+        for each"). Do NOT decompose into one research() call per item — the
+        tool expands search terms on its own, and a per-conversation budget
+        will return a STOP directive once the budget is reached. If that
+        directive appears, do not call research() again: answer the user
+        with what was gathered and relay the coverage/gap summary verbatim.
 
         Args:
-            query: The research question or topic to explore.
+            query: The research question or topic to explore. For broad
+                requests, state the full scope in one query.
+            refresh: Force a fresh run, bypassing the cache and
+                superseding prior evidence. Use only on explicit request.
         """
         mid = _SubAgent.resolve_model_id(__metadata__, __model__)
-        sa = _SubAgent(mid, self.valves.max_prompt_tokens)
+        key = _chat_key(__chat_id__, __user__)
+        ledger = _RESEARCH_LEDGER.setdefault(
+            key, {"count": 0, "covered": [], "gaps": [], "topic": ""}
+        )
+        budget = self.valves.max_research_calls_per_chat
+
+        # Explicit user-driven continuation: resets the per-chat budget,
+        # retains covered markers so we don't re-research them.
+        cont = _CONTINUE_RE.match(query or "")
+        if cont:
+            query = (query[cont.end():].strip()
+                     or ledger.get("topic") or query)
+            ledger["count"] = 0
+            ledger["gaps"] = []
+            await _emit(__event_emitter__,
+                        "🔁 Resuming research — prior coverage retained")
+
+        if not ledger.get("topic"):
+            ledger["topic"] = query
+        topic = ledger.get("topic") or query
+
+        # Cache check (skip on explicit refresh or a continuation). A hit
+        # returns the stored finding without spending the per-chat budget.
+        if not refresh and not cont:
+            cached = await _lookup_research_evidence(
+                self.valves, query=query, user=__user__ or {})
+            if cached:
+                await _emit(__event_emitter__,
+                            "♻️ Found prior research for this request — "
+                            "recalling", done=True)
+                return _format_cached_research(cached, "research")
+
+        # Hard stop: budget already spent and this is not a continuation.
+        # Do NOT run another expensive pass — hand the model what it needs
+        # to finalize plus a gap-aware continuation handle.
+        if ledger["count"] >= budget:
+            await _emit(__event_emitter__,
+                        f"⛔ Research budget reached ({ledger['count']}/{budget}) "
+                        "— returning coverage summary", done=True)
+            return _stop_payload(ledger, topic, ledger["count"], budget,
+                                 ran=False)
+
+        # Bias the run away from already-covered ground.
+        effective_query = query
+        covered = _dedup(ledger.get("covered", []), 8)
+        focus = _dedup(ledger.get("gaps", []), 5)
+        if covered or focus:
+            hint = []
+            if covered:
+                hint.append("Already researched (do not repeat): "
+                            + "; ".join(covered))
+            if focus:
+                hint.append("Prioritize these open gaps: " + "; ".join(focus))
+            effective_query = f"{query}\n\n({' | '.join(hint)})"
+
+        sa = _SubAgent(mid, self.valves.max_prompt_tokens,
+                       nothink_suffix=(self.valves.nothink_suffix
+                                       if self.valves.sub_agent_nothink else ""))
         j = _Journal(self.valves)
         syn = _Synthesizer(self.valves, sa, j)
-        return await _QuickResearcher(self.valves, sa, j, syn).run(
-            query, (__user__ or {}).get("id", ""), __request__, __user__ or {}, mid, __event_emitter__)
+        researcher = _QuickResearcher(self.valves, sa, j, syn)
+        answer = await researcher.run(
+            effective_query, (__user__ or {}).get("id", ""),
+            __request__, __user__ or {}, mid, __event_emitter__)
+
+        # Update the per-chat ledger with this run's coverage/gaps.
+        ledger["count"] += 1
+        ledger["covered"] = _dedup(
+            ledger["covered"] + (researcher.last_covered or []))
+        ledger["gaps"] = _dedup([
+            g for g in (ledger["gaps"] + (researcher.last_gaps or []))
+            if g not in ledger["covered"]
+        ])
+
+        used = ledger["count"]
+        if used >= budget:
+            # Final allowed pass completed — append the stop directive so the
+            # model finalizes instead of calling research() again.
+            answer += "\n\n" + _stop_payload(
+                ledger, topic, used, budget, ran=True)
+        elif used == budget - 1:
+            answer += (
+                f"\n\n---\n\n*ℹ️ {used}/{budget} research calls used this "
+                "conversation. One remains before a stop directive — make it "
+                "count, or finalize now.*")
+        if self.valves.evidence_memory_quick_research:
+            try:
+                await _persist_research_evidence(
+                    self.valves, sa, query=query, answer=answer,
+                    user=__user__ or {}, request=__request__,
+                    kind="research",
+                    sources=getattr(researcher, "last_sources", []),
+                    event_emitter=__event_emitter__)
+            except Exception:
+                pass
+        return answer
 
     async def knowledge_research(
-        self, query: str, collection: str = "",
+        self, query: str, collection: str = "", refresh: bool = False,
         __user__: dict = None, __metadata__: dict = None, __event_emitter__=None,
         __request__=None, __model__: dict = None, __event_call__=None,
         __chat_id__: str = "", __message_id__: str = "",
     ) -> str:
         """Research a topic using existing knowledge collections.
+
+        CACHE: a prior result for the same request is returned instead of
+        re-querying (stale flagged). Set refresh=True only on explicit
+        user request to re-research — it supersedes the cached evidence.
 
         Identifies which knowledge collections are relevant to the query,
         then iteratively queries them with expanding search terms to close
@@ -2348,17 +2851,40 @@ class Tools:
             collection: Optional name of a specific knowledge collection
                 to query. When provided, skips auto-detection and uses
                 this collection exclusively.
+            refresh: Force a fresh run, bypassing the cache and
+                superseding prior evidence. Use only on explicit request.
         """
         mid = _SubAgent.resolve_model_id(__metadata__, __model__)
-        sa = _SubAgent(mid, self.valves.max_prompt_tokens)
+        if not refresh:
+            cached = await _lookup_research_evidence(
+                self.valves, query=query, user=__user__ or {})
+            if cached:
+                await _emit(__event_emitter__,
+                            "♻️ Found prior research for this request — "
+                            "recalling", done=True)
+                return _format_cached_research(cached, "knowledge_research")
+        sa = _SubAgent(mid, self.valves.max_prompt_tokens,
+                       nothink_suffix=(self.valves.nothink_suffix
+                                       if self.valves.sub_agent_nothink else ""))
         j = _Journal(self.valves)
         syn = _Synthesizer(self.valves, sa, j)
-        return await _KnowledgeResearcher(self.valves, sa, j, syn).run(
+        researcher = _KnowledgeResearcher(self.valves, sa, j, syn)
+        answer = await researcher.run(
             query, (__user__ or {}).get("id", ""), __request__, __user__ or {}, mid, __event_emitter__,
             target_collection=collection)
+        try:
+            await _persist_research_evidence(
+                self.valves, sa, query=query, answer=answer,
+                user=__user__ or {}, request=__request__,
+                kind="knowledge_research",
+                sources=getattr(researcher, "last_sources", []),
+                event_emitter=__event_emitter__)
+        except Exception:
+            pass
+        return answer
 
     async def deep_research(
-        self, query: str,
+        self, query: str, refresh: bool = False,
         __user__: dict = None, __metadata__: dict = None, __event_emitter__=None,
         __request__=None, __model__: dict = None, __event_call__=None,
         __chat_id__: str = "", __message_id__: str = "",
@@ -2373,11 +2899,28 @@ class Tools:
         Pipeline: knowledge_research → gap analysis → web search →
         crawl → knowledge_research → synthesize → verify.
 
+        CACHE: a prior result for the same request is returned instead of
+        re-running the (expensive) pipeline; stale results are flagged.
+        Set refresh=True only when the user explicitly asks to
+        re-research / update — it supersedes the cached evidence in place.
+
         Args:
             query: The research question or topic to investigate.
+            refresh: Force a fresh run, bypassing the cache and
+                superseding prior evidence. Use only on explicit request.
         """
         mid = _SubAgent.resolve_model_id(__metadata__, __model__)
-        sa = _SubAgent(mid, self.valves.max_prompt_tokens)
+        if not refresh:
+            cached = await _lookup_research_evidence(
+                self.valves, query=query, user=__user__ or {})
+            if cached:
+                await _emit(__event_emitter__,
+                            "♻️ Found prior research for this request — "
+                            "recalling", done=True)
+                return _format_cached_research(cached, "deep_research")
+        sa = _SubAgent(mid, self.valves.max_prompt_tokens,
+                       nothink_suffix=(self.valves.nothink_suffix
+                                       if self.valves.sub_agent_nothink else ""))
         j = _Journal(self.valves)
         rag = _RagResearcher(self.valves, sa)
         crawl = _CrawlClient(self.valves)
@@ -2567,4 +3110,12 @@ class Tools:
         session.phase = ResearchPhase.COMPLETE
         j.write_manifest(session)
         await _emit(__event_emitter__, f"📁 Journal: deep-research/{slug}/", done=True)
+        try:
+            await _persist_research_evidence(
+                self.valves, sa, query=query, answer=answer,
+                user=__user__ or {}, request=__request__,
+                kind="deep_research", sources=rag_sources,
+                event_emitter=__event_emitter__)
+        except Exception:
+            pass
         return answer

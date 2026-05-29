@@ -1,0 +1,389 @@
+{
+  "$defs": {
+    "AgentConfig": {
+      "additionalProperties": false,
+      "description": "The upstream little-coder CLI invocation (design \u00a73.1).\n\nINTEGRATION POINT: little-coder is a Node.js CLI on the `pi` framework;\nthe exact flags and how the task prompt is delivered are pinned to the\nupstream version when the agent image is built. `command` is the base\nargv; the daemon appends `--model` and the prompt per `prompt_mode`.",
+      "properties": {
+        "command": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Command",
+          "type": "array"
+        },
+        "default_session_ids": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Default Session Ids",
+          "type": "object"
+        },
+        "extra_args": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Extra Args",
+          "type": "array"
+        },
+        "model": {
+          "default": "llamacpp/qwen36-27b",
+          "title": "Model",
+          "type": "string"
+        },
+        "prompt_mode": {
+          "default": "stdin",
+          "enum": [
+            "stdin",
+            "arg"
+          ],
+          "title": "Prompt Mode",
+          "type": "string"
+        },
+        "session_dir": {
+          "default": "/var/lib/little-coder/sessions",
+          "title": "Session Dir",
+          "type": "string"
+        },
+        "use_session": {
+          "default": true,
+          "title": "Use Session",
+          "type": "boolean"
+        }
+      },
+      "title": "AgentConfig",
+      "type": "object"
+    },
+    "BudgetsConfig": {
+      "additionalProperties": false,
+      "description": "Budget caps (design \u00a712.5). Basic caps only in Tool.",
+      "properties": {
+        "queue_depth_hard": {
+          "default": 200,
+          "title": "Queue Depth Hard",
+          "type": "integer"
+        },
+        "queue_depth_soft": {
+          "default": 50,
+          "title": "Queue Depth Soft",
+          "type": "integer"
+        }
+      },
+      "title": "BudgetsConfig",
+      "type": "object"
+    },
+    "DaemonConfig": {
+      "additionalProperties": false,
+      "description": "Control-daemon HTTP API (internal \u2014 reachable by lc-mcpo + the CLI).",
+      "properties": {
+        "host": {
+          "default": "0.0.0.0",
+          "title": "Host",
+          "type": "string"
+        },
+        "port": {
+          "default": 8090,
+          "title": "Port",
+          "type": "integer"
+        }
+      },
+      "title": "DaemonConfig",
+      "type": "object"
+    },
+    "InferenceConfig": {
+      "additionalProperties": false,
+      "description": "llama-cpp backend (design \u00a73.5). Two variants of the same model id.",
+      "properties": {
+        "api_key_env": {
+          "default": "LC_LLAMA_API_KEY",
+          "title": "Api Key Env",
+          "type": "string"
+        },
+        "base_url": {
+          "default": "http://llama-cpp:8080/v1",
+          "title": "Base Url",
+          "type": "string"
+        },
+        "default": {
+          "default": "fast",
+          "enum": [
+            "fast",
+            "reasoning"
+          ],
+          "title": "Default",
+          "type": "string"
+        },
+        "embedding_base_url": {
+          "default": "http://llama-cpp-embed:8080/v1",
+          "title": "Embedding Base Url",
+          "type": "string"
+        },
+        "embedding_model": {
+          "default": "bge-m3-f16.gguf",
+          "title": "Embedding Model",
+          "type": "string"
+        },
+        "model_fast": {
+          "default": "qwen36-27b:nothink",
+          "title": "Model Fast",
+          "type": "string"
+        },
+        "model_reasoning": {
+          "default": "qwen36-27b",
+          "title": "Model Reasoning",
+          "type": "string"
+        }
+      },
+      "title": "InferenceConfig",
+      "type": "object"
+    },
+    "JournalsConfig": {
+      "additionalProperties": false,
+      "description": "Append-only task journals (design \u00a74).",
+      "properties": {
+        "dir": {
+          "default": "/var/lib/little-coder/journals",
+          "title": "Dir",
+          "type": "string"
+        },
+        "fsync_on_terminal": {
+          "default": true,
+          "title": "Fsync On Terminal",
+          "type": "boolean"
+        },
+        "rotation_max_bytes": {
+          "default": 134217728,
+          "title": "Rotation Max Bytes",
+          "type": "integer"
+        }
+      },
+      "title": "JournalsConfig",
+      "type": "object"
+    },
+    "MetricsConfig": {
+      "additionalProperties": false,
+      "description": "Prometheus endpoint (design \u00a79.3).",
+      "properties": {
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "port": {
+          "default": 9090,
+          "title": "Port",
+          "type": "integer"
+        }
+      },
+      "title": "MetricsConfig",
+      "type": "object"
+    },
+    "ObserverConfig": {
+      "additionalProperties": false,
+      "description": "The `meta` outer loop in read-only mode (design \u00a73.2, \u00a75, Chapter 3).\n\nObserver reads journals, surfaces clustered patterns, and writes\nNOTHING to the skill library (Learner adds drafting in Chapter 4).\nDisabled by default so a stale Observer build can't run automatically\non a fresh deployment that hasn't fed it real journals yet.",
+      "properties": {
+        "auto_iterate_on_task_end": {
+          "default": false,
+          "title": "Auto Iterate On Task End",
+          "type": "boolean"
+        },
+        "auto_merge_sample_fraction": {
+          "default": 0.2,
+          "title": "Auto Merge Sample Fraction",
+          "type": "number"
+        },
+        "auto_merge_tier_0": {
+          "default": false,
+          "title": "Auto Merge Tier 0",
+          "type": "boolean"
+        },
+        "enabled": {
+          "default": false,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "evidence_trigger_records": {
+          "default": 5,
+          "title": "Evidence Trigger Records",
+          "type": "integer"
+        },
+        "founding_knowledge_paths": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Founding Knowledge Paths",
+          "type": "array"
+        },
+        "judge_enabled": {
+          "default": false,
+          "title": "Judge Enabled",
+          "type": "boolean"
+        },
+        "similarity_floor": {
+          "default": 0.7,
+          "title": "Similarity Floor",
+          "type": "number"
+        },
+        "store_filename": {
+          "default": "cohort-store.json",
+          "title": "Store Filename",
+          "type": "string"
+        }
+      },
+      "title": "ObserverConfig",
+      "type": "object"
+    },
+    "PathsConfig": {
+      "additionalProperties": false,
+      "description": "Named-volume mount points. Declared in Tool, populated from Observer+.",
+      "properties": {
+        "cohorts_dir": {
+          "default": "/var/lib/little-coder/cohorts",
+          "title": "Cohorts Dir",
+          "type": "string"
+        },
+        "polyglot_dir": {
+          "default": "/var/lib/little-coder/polyglot",
+          "title": "Polyglot Dir",
+          "type": "string"
+        },
+        "skill_dir": {
+          "default": "/var/lib/little-coder/skill",
+          "title": "Skill Dir",
+          "type": "string"
+        }
+      },
+      "title": "PathsConfig",
+      "type": "object"
+    },
+    "SanitizationConfig": {
+      "additionalProperties": false,
+      "description": "Outbound sanitization filter (design \u00a710.2). Shadow mode in Tool.",
+      "properties": {
+        "max_body_bytes": {
+          "default": 8192,
+          "title": "Max Body Bytes",
+          "type": "integer"
+        },
+        "mode": {
+          "default": "shadow",
+          "enum": [
+            "shadow",
+            "enforcing"
+          ],
+          "title": "Mode",
+          "type": "string"
+        }
+      },
+      "title": "SanitizationConfig",
+      "type": "object"
+    },
+    "ShutdownConfig": {
+      "additionalProperties": false,
+      "description": "SIGTERM drain mode (design \u00a712.7).",
+      "properties": {
+        "drain_deadline_seconds": {
+          "default": 1800,
+          "title": "Drain Deadline Seconds",
+          "type": "integer"
+        }
+      },
+      "title": "ShutdownConfig",
+      "type": "object"
+    },
+    "TasksConfig": {
+      "additionalProperties": false,
+      "description": "Task lifecycle tunables (design \u00a74.2). Timeouts are open item #3 \u2014\nTool defaults are usable; tune against observed channel p95.",
+      "properties": {
+        "abandoned_timeout_seconds": {
+          "additionalProperties": {
+            "type": "integer"
+          },
+          "title": "Abandoned Timeout Seconds",
+          "type": "object"
+        },
+        "outcome_amend_window_seconds": {
+          "default": 604800,
+          "title": "Outcome Amend Window Seconds",
+          "type": "integer"
+        }
+      },
+      "title": "TasksConfig",
+      "type": "object"
+    },
+    "WorkspaceConfig": {
+      "additionalProperties": false,
+      "description": "Workspace plane (design \u00a73.4). The repo lives on the shared volume.",
+      "properties": {
+        "exec_timeout_seconds": {
+          "default": 1800,
+          "title": "Exec Timeout Seconds",
+          "type": "integer"
+        },
+        "open_terminal_key_env": {
+          "default": "OPEN_TERMINAL_API_KEY",
+          "title": "Open Terminal Key Env",
+          "type": "string"
+        },
+        "open_terminal_url": {
+          "default": "http://open-terminal:8000",
+          "title": "Open Terminal Url",
+          "type": "string"
+        },
+        "path": {
+          "default": "/workspace",
+          "title": "Path",
+          "type": "string"
+        }
+      },
+      "title": "WorkspaceConfig",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Top-level config. Instantiating this validates the file (boot gate).",
+  "properties": {
+    "agent": {
+      "$ref": "#/$defs/AgentConfig"
+    },
+    "budgets": {
+      "$ref": "#/$defs/BudgetsConfig"
+    },
+    "daemon": {
+      "$ref": "#/$defs/DaemonConfig"
+    },
+    "inference": {
+      "$ref": "#/$defs/InferenceConfig"
+    },
+    "journals": {
+      "$ref": "#/$defs/JournalsConfig"
+    },
+    "metrics": {
+      "$ref": "#/$defs/MetricsConfig"
+    },
+    "observer": {
+      "$ref": "#/$defs/ObserverConfig"
+    },
+    "paths": {
+      "$ref": "#/$defs/PathsConfig"
+    },
+    "sanitization": {
+      "$ref": "#/$defs/SanitizationConfig"
+    },
+    "schema_version": {
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "shutdown": {
+      "$ref": "#/$defs/ShutdownConfig"
+    },
+    "tasks": {
+      "$ref": "#/$defs/TasksConfig"
+    },
+    "workspace": {
+      "$ref": "#/$defs/WorkspaceConfig"
+    }
+  },
+  "title": "Config",
+  "type": "object"
+}

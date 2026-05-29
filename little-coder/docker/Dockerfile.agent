@@ -1,0 +1,57 @@
+# little-coder agent + control-plane wrapper (design §3.1).
+# Node.js runs the upstream little-coder CLI; Python runs the control daemon.
+# Pinned base; rebuilt explicitly (Watchtower disabled for this service).
+#
+# Build context: ./little-coder
+FROM python:3.12-slim-bookworm
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1
+
+# curl: compose healthcheck + NodeSource. git/ca-certificates: npm install of
+# the agent. gosu: drop privileges in the entrypoint.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends curl git ca-certificates gosu \
+ && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+ && apt-get install -y --no-install-recommends nodejs \
+ && rm -rf /var/lib/apt/lists/*
+
+# Upstream little-coder — a Node.js CLI on the `pi` framework.
+# INTEGRATION POINT: pin to a known-good version for reproducible builds
+# (plan §5). Override LITTLE_CODER_VERSION via the compose build arg.
+ARG LITTLE_CODER_VERSION=latest
+RUN npm install -g "little-coder@${LITTLE_CODER_VERSION}"
+
+WORKDIR /app
+COPY pyproject.toml ./
+COPY src ./src
+RUN pip install --upgrade pip && pip install .
+
+# Config (mounted read-only at runtime; copied so the image is self-contained).
+COPY config ./config
+ENV LC_CONFIG=/app/config/little-coder.config.yaml
+
+# Founding knowledge — the operating environment + engineering principles,
+# appended to the agent's system prompt (see agent-knowledge/README).
+COPY agent-knowledge ./agent-knowledge
+
+# pi extension routing the agent's shell tool into open-terminal — installed
+# into the agent user's pi config by the entrypoint (see pi-extension/README).
+COPY pi-extension/ /opt/little-coder/pi-extensions/
+COPY docker/entrypoint-agent.sh /usr/local/bin/entrypoint-agent.sh
+RUN chmod +x /usr/local/bin/entrypoint-agent.sh \
+ && useradd --create-home --uid 10002 lc \
+ && git config --system --add safe.directory '*' \
+ && git config --system user.name "little-coder" \
+ && git config --system user.email "little-coder@ai-stack.local"
+
+# gosu does not set HOME; pin it so the agent finds ~/.config + ~/.pi.
+ENV HOME=/home/lc
+
+EXPOSE 8090 9090
+
+# The entrypoint chowns the named volumes, installs the pi extension, then
+# drops to the unprivileged `lc` user. CMD is the daemon; lc-mcpo overrides it.
+ENTRYPOINT ["/usr/local/bin/entrypoint-agent.sh"]
+CMD ["lc-daemon"]

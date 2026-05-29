@@ -1,0 +1,122 @@
+# little-coder centralized config (design §12.8).
+# Validated at boot against the pydantic model in src/littlecoder/config.py.
+# Unknown keys are rejected. Mounted read-only into the container.
+#
+# Tool-era tunables only. Later chapters add fields; bump schema_version when
+# a change is schema-affecting (design §12.9).
+schema_version: 1
+
+# Inference backend — llama-cpp / llama-swap (design §3.5).
+inference:
+  base_url: http://llama-cpp:8080/v1
+  api_key_env: LC_LLAMA_API_KEY
+  model_reasoning: qwen36-27b
+  model_fast: qwen36-27b:nothink
+  default: fast
+
+# Upstream little-coder CLI invocation (design §3.1). INTEGRATION POINT —
+# the exact flags / prompt delivery are pinned when the agent image is built.
+agent:
+  command: [little-coder]
+  model: llamacpp/qwen36-27b
+  prompt_mode: arg
+  # --mode json streams structured events (thinking / tool calls / answer
+  # deltas) so the OWUI surface can show the process live.
+  # --append-system-prompt seeds founding knowledge: the operating
+  # environment (so the agent doesn't rediscover the git-proxy etc. each
+  # task) + engineering principles. See little-coder/agent-knowledge/.
+  # NOTE: `--no-session` and `--session*` are owned by the daemon
+  # (see agent._build_invocation) — adding them here is filtered out.
+  # `use_session: true` below routes each trigger through its own pi
+  # session (OWUI chat_id → in-chat continuity + native compaction).
+  extra_args:
+    - "--print"
+    - "--mode"
+    - "json"
+    - "--append-system-prompt"
+    - "/app/agent-knowledge/environment.md"
+    - "--append-system-prompt"
+    - "/app/agent-knowledge/project-context.md"
+    - "--append-system-prompt"
+    - "/app/agent-knowledge/engineering-principles.md"
+  # Session continuity (design §3.1 follow-up). `--session <id>` makes
+  # pi load/create a per-chat session; compaction is automatic when
+  # the session grows past pi's context budget. Sessions live on the
+  # `little-coder-sessions` named volume so they survive restarts.
+  use_session: true
+  session_dir: /var/lib/little-coder/sessions
+
+# Workspace plane — the shared repo volume + open-terminal exec (design §3.4).
+workspace:
+  path: /workspace
+  open_terminal_url: http://open-terminal:8000
+  open_terminal_key_env: OPEN_TERMINAL_API_KEY
+  exec_timeout_seconds: 1800
+
+# Append-only task journals (design §4).
+journals:
+  dir: /var/lib/little-coder/journals
+  rotation_max_bytes: 134217728 # 128 MiB
+  fsync_on_terminal: true
+
+# Named-volume mount points (declared in Tool, populated from Observer+).
+paths:
+  skill_dir: /var/lib/little-coder/skill
+  cohorts_dir: /var/lib/little-coder/cohorts
+  polyglot_dir: /var/lib/little-coder/polyglot
+
+# Task lifecycle (design §4.2). Timeouts are open item #3 — tune at Learner.
+tasks:
+  abandoned_timeout_seconds:
+    owui: 1800 # 30m — open item #3; raise for genuine long interactive refactors
+    cli: 1800 # 30m
+    validation: 1800 # 30m
+    batch: 3600 # 1h
+  outcome_amend_window_seconds: 604800 # 7 days
+
+# SIGTERM drain mode (design §12.7).
+shutdown:
+  drain_deadline_seconds: 1800 # 30m
+
+# Budget caps (design §12.5). Basic caps only in Tool.
+budgets:
+  queue_depth_soft: 50
+  queue_depth_hard: 200
+
+# Outbound sanitization filter (design §10.2). Shadow mode in Tool —
+# records what it would redact, blocks nothing (nothing leaves the stack).
+sanitization:
+  mode: shadow
+  max_body_bytes: 8192
+
+# Prometheus metrics endpoint (design §9.3).
+metrics:
+  enabled: true
+  port: 9090
+
+# Control-daemon internal HTTP API (reachable by lc-mcpo and the lc CLI).
+daemon:
+  host: 0.0.0.0
+  port: 8090
+
+# Observer outer loop (design §3.2, Chapter 3). Read-only — meta walks
+# journals, clusters occurrences, surfaces patterns. Writes NOTHING to
+# the skill library (that lands in Chapter 4). With `enabled: true` the
+# /admin/observe endpoint produces real reports; disabled returns the
+# "Observer is off" skeleton.
+#
+# `judge_enabled` flips on the LLM-in-the-loop cluster minting. OFF
+# pending the operator's prompt-calibration dry-run (open item #2,
+# design §13). Until then the projection runs but clusters never get
+# minted — every signal lands in the unassigned pool.
+#
+# `auto_iterate_on_task_end`: re-project after each task ends if the
+# evidence threshold has been crossed since the last iteration. Cheap
+# without the judge wired; gated by single-flight.
+observer:
+  enabled: true
+  store_filename: cohort-store.json
+  similarity_floor: 0.7
+  evidence_trigger_records: 5
+  judge_enabled: false
+  auto_iterate_on_task_end: true

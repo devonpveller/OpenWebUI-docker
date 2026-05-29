@@ -1,0 +1,296 @@
+"""Centralized typed config (design §12.8).
+
+All tunables live in one YAML file, validated at boot. Unknown keys are
+rejected (`extra="forbid"`) — prose-as-config does not survive contact with
+operations. The pydantic model below is the single source of truth; the
+committed `config/little-coder.schema.json` is generated from it (see
+`python -m littlecoder.config --schema`) and a test guards against drift.
+
+Tool-era tunables only. Later chapters add fields; readers tolerate older
+shapes via `schema_version` (forward-compat, design §12.9).
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+from typing import Literal
+
+import yaml
+from pydantic import BaseModel, Field
+
+CONFIG_SCHEMA_VERSION = 1
+
+# Default config path inside the container (mounted read-only from the repo).
+DEFAULT_CONFIG_PATH = "/app/config/little-coder.config.yaml"
+
+
+class _Strict(BaseModel):
+    model_config = {"extra": "forbid"}
+
+
+class InferenceConfig(_Strict):
+    """llama-cpp backend (design §3.5). Two variants of the same model id."""
+
+    base_url: str = "http://llama-cpp:8080/v1"
+    api_key_env: str = "LC_LLAMA_API_KEY"
+    model_reasoning: str = "qwen36-27b"  # judge, drafting, justifications
+    model_fast: str = "qwen36-27b:nothink"  # cluster assignment, routing
+    default: Literal["fast", "reasoning"] = "fast"
+    # Embedding backend (llama-cpp-embed, separate port from the chat
+    # backend). Used by `similarity.EmbeddingSimilarity` for the
+    # discriminator-anchored cluster matching (design §5.2).
+    embedding_base_url: str = "http://llama-cpp-embed:8080/v1"
+    embedding_model: str = "bge-m3-f16.gguf"
+
+
+class AgentConfig(_Strict):
+    """The upstream little-coder CLI invocation (design §3.1).
+
+    INTEGRATION POINT: little-coder is a Node.js CLI on the `pi` framework;
+    the exact flags and how the task prompt is delivered are pinned to the
+    upstream version when the agent image is built. `command` is the base
+    argv; the daemon appends `--model` and the prompt per `prompt_mode`."""
+
+    command: list[str] = Field(default_factory=lambda: ["little-coder"])
+    model: str = "llamacpp/qwen36-27b"
+    prompt_mode: Literal["stdin", "arg"] = "stdin"
+    extra_args: list[str] = Field(default_factory=list)
+    # Session-per-trigger continuity (design §3.1 follow-up). Each
+    # trigger carries a `session_id` (OWUI: chat_id; CLI: a stable
+    # per-CLI-channel id by default). The daemon passes `--session
+    # <id>` so pi loads the matching session (creates one on first
+    # use). pi handles compaction natively when the session exceeds
+    # its context budget. The session dir lives on a persistent
+    # named volume so sessions survive restarts.
+    session_dir: str = "/var/lib/little-coder/sessions"
+    # `True` = pass `--session <id>` per task (in-chat / cross-task
+    # continuity). `False` = pass `--no-session` (strict statelessness,
+    # the Chapter-1–3 default). Operator can flip back if needed.
+    use_session: bool = True
+    # When the trigger carries no explicit session_id (e.g. some CLI
+    # paths), this is what we use. Per channel so `cli` tasks share
+    # a session but don't pollute the OWUI chat namespace.
+    default_session_ids: dict[str, str] = Field(
+        default_factory=lambda: {
+            "cli": "cli-default",
+            "owui": "owui-default",
+            "validation": "validation-default",
+            "batch": "batch-default",
+        }
+    )
+
+
+class WorkspaceConfig(_Strict):
+    """Workspace plane (design §3.4). The repo lives on the shared volume."""
+
+    path: str = "/workspace"
+    open_terminal_url: str = "http://open-terminal:8000"
+    open_terminal_key_env: str = "OPEN_TERMINAL_API_KEY"
+    # Exec timeout for a single command sent into open-terminal.
+    exec_timeout_seconds: int = 1800
+
+
+class JournalsConfig(_Strict):
+    """Append-only task journals (design §4)."""
+
+    dir: str = "/var/lib/little-coder/journals"
+    # Size-triggered rotation (design §4.3). 128 MiB per segment.
+    rotation_max_bytes: int = 128 * 1024 * 1024
+    # Append + fsync on every terminal and every error record (design §4.3).
+    fsync_on_terminal: bool = True
+
+
+class PathsConfig(_Strict):
+    """Named-volume mount points. Declared in Tool, populated from Observer+."""
+
+    skill_dir: str = "/var/lib/little-coder/skill"
+    cohorts_dir: str = "/var/lib/little-coder/cohorts"
+    polyglot_dir: str = "/var/lib/little-coder/polyglot"
+
+
+class TasksConfig(_Strict):
+    """Task lifecycle tunables (design §4.2). Timeouts are open item #3 —
+    Tool defaults are usable; tune against observed channel p95."""
+
+    # `task_abandoned` timeout per channel, seconds. Non-trivial: a long
+    # interactive refactor must not be abandoned; a hung validation must not
+    # consume a worker overnight.
+    abandoned_timeout_seconds: dict[str, int] = Field(
+        default_factory=lambda: {
+            "owui": 21600,  # 6h
+            "cli": 21600,  # 6h
+            "validation": 1800,  # 30m
+            "batch": 3600,  # 1h
+        }
+    )
+    # Outcome-amendment window (design §4.2). 7 days; frozen outside.
+    outcome_amend_window_seconds: int = 604800
+
+
+class ShutdownConfig(_Strict):
+    """SIGTERM drain mode (design §12.7)."""
+
+    # Drain deadline default — shorter than the shortest channel p95.
+    drain_deadline_seconds: int = 1800
+
+
+class BudgetsConfig(_Strict):
+    """Budget caps (design §12.5). Basic caps only in Tool."""
+
+    queue_depth_soft: int = 50  # → operator alarm
+    queue_depth_hard: int = 200  # → coalesce per cluster (from Learner)
+
+
+class SanitizationConfig(_Strict):
+    """Outbound sanitization filter (design §10.2). Shadow mode in Tool."""
+
+    mode: Literal["shadow", "enforcing"] = "shadow"
+    # File bodies larger than this are reduced to a structural digest.
+    max_body_bytes: int = 8192
+
+
+class MetricsConfig(_Strict):
+    """Prometheus endpoint (design §9.3)."""
+
+    enabled: bool = True
+    port: int = 9090
+
+
+class DaemonConfig(_Strict):
+    """Control-daemon HTTP API (internal — reachable by lc-mcpo + the CLI)."""
+
+    host: str = "0.0.0.0"
+    port: int = 8090
+
+
+class ObserverConfig(_Strict):
+    """The `meta` outer loop in read-only mode (design §3.2, §5, Chapter 3).
+
+    Observer reads journals, surfaces clustered patterns, and writes
+    NOTHING to the skill library (Learner adds drafting in Chapter 4).
+    Disabled by default so a stale Observer build can't run automatically
+    on a fresh deployment that hasn't fed it real journals yet."""
+
+    enabled: bool = False
+    # Cohort store on disk (design §5.4). Lives on `little-coder-cohorts/`
+    # which is declared in Tool (see `PathsConfig.cohorts_dir`).
+    store_filename: str = "cohort-store.json"
+    # Similarity floor for cluster assignment (design §5.2). Stage 3
+    # wires the real (embedding + judge-discriminator) similarity; this
+    # threshold is the floor the assignment function uses.
+    similarity_floor: float = 0.7
+    # Evidence trigger: re-run an iteration only after this many *new*
+    # records have landed since the last iteration completed (design §3.2
+    # — evidence-triggered, not clock-triggered).
+    evidence_trigger_records: int = 5
+    # Wire the judge (LLM-in-the-loop) into the iteration. Off by default
+    # — design §13 wants the operator's dry-run pass (open item #2) before
+    # the judge auto-mints clusters. With this on, the daemon's MetaRunner
+    # constructs `judge.Judge` + `similarity.EmbeddingSimilarity` at boot.
+    judge_enabled: bool = False
+    # Auto-iterate after a task ends when the evidence threshold trips.
+    # When off, iterations are operator-triggered via `?iterate=true`
+    # against `/admin/observe` (or `lc admin observe --iterate`).
+    auto_iterate_on_task_end: bool = False
+    # Founding-knowledge files the judge receives in its context (locked
+    # decision #17 — baseline_covers depends on these). Paths inside the
+    # container. The list mirrors `agent.extra_args --append-system-prompt`.
+    founding_knowledge_paths: list[str] = Field(
+        default_factory=lambda: [
+            "/app/agent-knowledge/environment.md",
+            "/app/agent-knowledge/engineering-principles.md",
+        ]
+    )
+    # Tier-0 auto-merge (Chapter 5 §5a). When True, freshly drafted
+    # tier-0 knowledge skills land with status="active" instead of
+    # "pending" — they go straight into the augmenter's rotation
+    # without operator approval. Operator flips this on AFTER trust is
+    # built in Chapter 4 (efficacy reversion has caught ≥ 1 ineffective
+    # artifact; drafts read well; gate working). Tier-1+ NEVER
+    # auto-merge — they always require the human gate.
+    auto_merge_tier_0: bool = False
+    # Sampled human-review fraction (design §10.4 control 2). Even when
+    # auto-merge is on, this fraction of drafts STILL land as `pending`
+    # — the operator catches drift in the LLM's drafting quality.
+    # 0.0 disables sampling; 1.0 effectively disables auto-merge.
+    auto_merge_sample_fraction: float = 0.2
+
+
+class Config(_Strict):
+    """Top-level config. Instantiating this validates the file (boot gate)."""
+
+    schema_version: int = CONFIG_SCHEMA_VERSION
+    inference: InferenceConfig = Field(default_factory=InferenceConfig)
+    agent: AgentConfig = Field(default_factory=AgentConfig)
+    workspace: WorkspaceConfig = Field(default_factory=WorkspaceConfig)
+    journals: JournalsConfig = Field(default_factory=JournalsConfig)
+    paths: PathsConfig = Field(default_factory=PathsConfig)
+    tasks: TasksConfig = Field(default_factory=TasksConfig)
+    shutdown: ShutdownConfig = Field(default_factory=ShutdownConfig)
+    budgets: BudgetsConfig = Field(default_factory=BudgetsConfig)
+    sanitization: SanitizationConfig = Field(default_factory=SanitizationConfig)
+    metrics: MetricsConfig = Field(default_factory=MetricsConfig)
+    daemon: DaemonConfig = Field(default_factory=DaemonConfig)
+    observer: ObserverConfig = Field(default_factory=ObserverConfig)
+
+
+class ConfigError(RuntimeError):
+    """Raised when the config file is missing, unparseable, or invalid."""
+
+
+def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> Config:
+    """Load and validate the config file. Raises ConfigError on any problem —
+    a bad config fails the boot, it does not fall back to defaults silently."""
+    p = Path(path)
+    if not p.exists():
+        raise ConfigError(f"config file not found: {p}")
+    try:
+        data = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+    except yaml.YAMLError as exc:
+        raise ConfigError(f"config file is not valid YAML: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ConfigError("config file must be a YAML mapping at the top level")
+
+    version = data.get("schema_version", CONFIG_SCHEMA_VERSION)
+    if version > CONFIG_SCHEMA_VERSION:
+        # Forward-compat goes one way: a newer file cannot be safely read by
+        # older code. Refuse rather than silently mis-parse.
+        raise ConfigError(
+            f"config schema_version {version} is newer than this build "
+            f"supports ({CONFIG_SCHEMA_VERSION}); upgrade little-coder"
+        )
+    try:
+        return Config.model_validate(data)
+    except Exception as exc:  # pydantic ValidationError and friends
+        raise ConfigError(f"config validation failed: {exc}") from exc
+
+
+def _main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="littlecoder.config")
+    parser.add_argument(
+        "--schema", action="store_true", help="print the JSON schema and exit"
+    )
+    parser.add_argument(
+        "--check", metavar="PATH", help="validate a config file and exit"
+    )
+    args = parser.parse_args(argv)
+    if args.schema:
+        print(json.dumps(Config.model_json_schema(), indent=2, sort_keys=True))
+        return 0
+    if args.check:
+        try:
+            load_config(args.check)
+        except ConfigError as exc:
+            print(f"INVALID: {exc}", file=sys.stderr)
+            return 1
+        print("OK")
+        return 0
+    parser.print_help()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main())

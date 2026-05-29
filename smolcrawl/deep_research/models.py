@@ -68,15 +68,96 @@ class Valves(BaseModel):
         le=30,
         description="Target: stop researching once this many anchor-relevant sources are found",
     )
+    max_research_calls_per_chat: int = Field(
+        default=5,
+        ge=1,
+        le=50,
+        description="Max research() calls the chat model may make per "
+                    "conversation before a graceful stop directive is "
+                    "returned (prevents unbounded per-item fan-out on broad "
+                    "survey prompts). The user can resume past this with a "
+                    "'research continue:' prompt.",
+    )
     max_web_results: int = Field(
         default=5,
         ge=1,
         le=50,
         description="Max web search results per query",
     )
+    sub_agent_nothink: bool = Field(
+        default=True,
+        description="Route mechanical sub-agent JSON calls (anchor, "
+                    "relevance gate, topic extraction, gap analysis, etc.) "
+                    "to the reasoning-disabled model alias for speed. With "
+                    "llama-swap this is the SAME model process (no reload) — "
+                    "it only skips thinking-token generation. Falls back to "
+                    "the base model if the alias is unavailable.",
+    )
+    nothink_suffix: str = Field(
+        default=":nothink",
+        description="Suffix appended to the chat model id to address its "
+                    "reasoning-disabled alias (matches the llama-swap "
+                    "setParamsByID '${MODEL_ID}:nothink' entry). Set empty "
+                    "to disable nothink routing regardless of "
+                    "sub_agent_nothink.",
+    )
+    max_parallel_queries: int = Field(
+        default=5,
+        ge=1,
+        le=32,
+        description="Max concurrent RAG collection/file queries per "
+                    "iteration. Parallelizes the term×collection fan-out "
+                    "without overloading the single embedding server.",
+    )
     include_sources: bool = Field(
         default=True,
         description="Append source references to final answer",
+    )
+
+    # Research → open-brain `sources` persistence (runs once on
+    # completion). Research output is structured data, NOT user-personal
+    # data — it lives in open-brain, never mnemory (the misuse is retired).
+    evidence_memory_enabled: bool = Field(
+        default=True,
+        description="On completion of a research run, persist the verified "
+                    "finding + its gathered sources to open-brain "
+                    "`sources` (structured rows). Never writes "
+                    "per-iteration queries.",
+    )
+    evidence_memory_quick_research: bool = Field(
+        default=True,
+        description="Persist evidence from quick research() too. Default "
+                    "ON so the cache covers every research entrypoint "
+                    "(a later 'use research' on the same question hits "
+                    "the cache regardless of which tool first ran it).",
+    )
+    evidence_cache_enabled: bool = Field(
+        default=True,
+        description="Before a research run, check open-brain for prior "
+                    "research on the SAME request (research_key match). "
+                    "On hit, return the stored finding instead of "
+                    "researching (stale hits flagged). refresh=True "
+                    "bypasses the cache and supersedes in place.",
+    )
+    evidence_volatility_days: str = Field(
+        default="fast:7,medium:180,slow:1095",
+        description="Re-validation windows per volatility tier. Past the "
+                    "window the LLM downgrades the fact to an educated "
+                    "guess (re-validation due).",
+    )
+    # open-brain is the home for research sources + synthesis (the v2
+    # three-layer architecture). Reached from OWUI on the shared llm-net.
+    openbrain_url: str = Field(
+        default="http://openbrain-mcp:8000",
+        description="open-brain MCP server base URL (llm-net, trusted "
+                    "writer path). Research synthesis + sources persist "
+                    "here; the mnemory misuse is fully retired.",
+    )
+    openbrain_key: str = Field(
+        default="",
+        description="open-brain MCP_ACCESS_KEY (x-brain-key). MUST be set "
+                    "to the OB1 docker .env MCP_ACCESS_KEY value or "
+                    "research persistence/cache is skipped (graceful).",
     )
 
     # Deep research specific
@@ -105,14 +186,17 @@ class Valves(BaseModel):
 
     # Context management
     max_prompt_tokens: int = Field(
-        default=196000,
+        default=120000,
         ge=1000,
         le=262144,
-        description="Token budget for SubAgent prompts. Should be your model's "
-                    "context window minus ~4000 (response reserve). "
-                    "Default 196000 suits Qwen3 235B/30B-A3B 200k context models. "
-                    "Set lower for smaller models (e.g. 28000 for 32k context, "
-                    "4000 for 8k context). Max 262144 for 256k models.",
+        description="Token budget for SubAgent prompts. MUST be <= the "
+                    "model's per-request context lane minus response "
+                    "headroom. The llama-swap qwen36-27b runs --parallel 2 "
+                    "over a 262144 ctx, so each request lane is 131072 "
+                    "tokens; 120000 leaves ~11k for the generated answer. "
+                    "Raise toward the lane size only if you also lower "
+                    "parallelism (bigger lane). Set far lower for small "
+                    "models (e.g. 28000 for 32k ctx).",
     )
     max_chunks_per_iteration: int = Field(
         default=10,

@@ -12,3 +12,13 @@ scripts/ai_pipes/__pycache__/
 modules/custom-tools/service/__pycache__/
 modules/emergency-recovery/service/__pycache__/
 .../__pycache__/
+# Local MCP config (contains Open Brain access key)
+.mcp.json
+# Vendored external repo (devonpveller/OB1 @ develop) — own .git, not tracked here
+OB1/
+# Deploy keys / mounted secrets (e.g. openbrain-wiki private remote key)
+secrets/
+*.pyc
+*.log
+/backups
+/backups
