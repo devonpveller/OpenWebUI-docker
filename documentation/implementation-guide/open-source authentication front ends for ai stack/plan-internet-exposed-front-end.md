@@ -316,20 +316,29 @@ Authelia's `password_reset.disable: true` means losing all 2FA enrollments + for
 This is a v1 pre-deploy checklist item (§11) but called out here so it isn't missed.
 
 ### 6.9 Pre-deployment `portal-alerter` OAuth bootstrap (Gmail)
-The `portal-alerter` reuses OB1's `open-brain-email` OAuth client (`secrets/google/open-brain-email/client_secret_*.json` — already on disk, already consented for the `gmail.send` scope by OB1). The alerter does **not** share OB1's `token.json` — it gets its own at `secrets/google/portal-alerter/token.json` so revocation is granular. Before bringing the portal up:
+The `portal-alerter` uses a **dedicated** Google OAuth client (separate from OB1's `open-brain-email`). This keeps revocation granular: revoking the portal's client does not affect OB1's daily digest, and vice versa. Both the client secret and the refresh token live under `secrets/google/portal-alerter/`, gitignored via the top-level `secrets/` rule. Before bringing the portal up:
 
-1. Copy or symlink the OB1 OAuth client secret to `config/alerter/credentials.json` for the bootstrap step (the running container reads it from a bind-mount, not from this path; this copy is only for `setup-token.ts`).
-2. On the Windows host (NOT in a container), run:
+1. Provision the OAuth client in Google Cloud Console (~10 min, one-time). Recommended path: **same GCP project as OB1, new OAuth 2.0 Client ID**. This reuses the project's already-configured consent screen but gives the portal its own identity. Steps:
+   - Google Cloud Console → APIs & Services → Credentials → "+ Create credentials" → OAuth client ID
+   - Application type: **Desktop app**
+   - Name: `portal-alerter`
+   - Download JSON → save as `secrets/google/portal-alerter/credentials.json`
+   - The consent screen already lists `https://www.googleapis.com/auth/gmail.send` (OB1's daily-digest uses it); no scope changes needed.
+2. Copy that credentials.json next to the bootstrap script so `setup-token.ts` can read it:
+   ```powershell
+   Copy-Item secrets/google/portal-alerter/credentials.json config/alerter/credentials.json
+   ```
+3. On the Windows host (NOT in a container), run:
    ```powershell
    deno run --allow-net --allow-read --allow-write --allow-env config/alerter/setup-token.ts
    ```
    Mirrors OB1's [setup-token.ts](../../../OB1/recipes/daily-digest/setup-token.ts). It opens the Google consent screen, captures the redirect on `http://127.0.0.1:8765`, and writes `secrets/google/portal-alerter/token.json` with a long-lived refresh token.
-3. Confirm `secrets/google/portal-alerter/token.json` exists and is gitignored (entry in `.gitignore`).
-4. Send a test email by running the alerter once outside the stack:
+4. Confirm both files exist. They are gitignored via the top-level `secrets/` rule and `config/alerter/credentials.json` rule.
+5. Send a test email by running the alerter once outside the stack:
    ```powershell
    docker run --rm `
      -v "${PWD}/config/alerter:/app:ro" `
-     -v "${PWD}/secrets/google/open-brain-email/client_secret_140943225735-jlldopci4llqu5i1ag7j08ks44a269jq.apps.googleusercontent.com.json:/app/credentials.json:ro" `
+     -v "${PWD}/secrets/google/portal-alerter/credentials.json:/app/credentials.json:ro" `
      -v "${PWD}/secrets/google/portal-alerter/token.json:/app/token.json" `
      -e DIGEST_TO=$env:DIGEST_TO `
      -e DIGEST_FROM=$env:DIGEST_FROM `
@@ -338,7 +347,7 @@ The `portal-alerter` reuses OB1's `open-brain-email` OAuth client (`secrets/goog
    ```
    Email arrives in the operator's inbox with subject `Portal alerter self-test`.
 
-**Coupling caveat:** if the OB1 `open-brain-email` OAuth client is ever revoked (Google Cloud Console), **both OB1's daily digest AND this portal's alerts break together.** v1 accepts this coupling for delivery speed. A follow-up issue should provision a dedicated OAuth client for the portal once the system is stable. See §15 STOP-list.
+**Independence from OB1:** the portal's OAuth client + token are entirely separate from OB1's `open-brain-email` client. Revoking either side at https://myaccount.google.com/permissions does not affect the other. This is the "cleaner separation" choice — the earlier reuse-OB1 option has been retired from this plan.
 
 ---
 
@@ -683,10 +692,9 @@ Append to the `services:` block:
     working_dir: /app
     volumes:
       - ./config/alerter:/app:ro
-      # Reuse OB1's open-brain-email OAuth client (already consented for gmail.send).
-      # Path matches OB1's docker-compose.scheduled.yml so future credential rotation
-      # is one place. If you provision a separate OAuth client later, change both paths.
-      - ./secrets/google/open-brain-email/client_secret_140943225735-jlldopci4llqu5i1ag7j08ks44a269jq.apps.googleusercontent.com.json:/app/credentials.json:ro
+      # Dedicated OAuth client for the portal (separate from OB1's
+      # open-brain-email). Both files gitignored via the top-level secrets/ rule.
+      - ./secrets/google/portal-alerter/credentials.json:/app/credentials.json:ro
       - ./secrets/google/portal-alerter/token.json:/app/token.json
       # Read-only access to both log streams for the /run digest endpoint.
       - authelia-data:/logs/authelia:ro
@@ -1816,7 +1824,7 @@ docker exec portal-cron curl -fsS -X POST http://portal-alerter:8080/run
 - `.env` is in [.gitignore](../../../.gitignore).
 - Argon2id hashes in `users_database.yml` are not committed.
 - Cloudflare Tunnel token, Authelia secrets, `DIGEST_TO`/`DIGEST_FROM` — all in `.env`.
-- Google OAuth credentials (`credentials.json`) are bind-mounted from `secrets/google/open-brain-email/` (the OB1 OAuth client, shared by design — see §6.9 coupling caveat and §15 STOP-list). The portal-alerter's refresh token lives at `secrets/google/portal-alerter/token.json` and is gitignored.
+- Google OAuth credentials (`credentials.json`) and refresh token (`token.json`) both live under `secrets/google/portal-alerter/` — a **dedicated** OAuth client, separate from OB1's. Both files are gitignored via the top-level `secrets/` rule.
 - **No Vault, no SOPS.** Acceptable for single-user home stack. If multi-user ever happens, revisit (§13 Tier 2).
 
 ### 12.6 Breach response operations
@@ -2017,7 +2025,7 @@ Together these reduce the urgency of full log aggregation: the digest is "the da
 - Before destroying `D:\Open WebUI\open-notebook\surreal_data` (pre-flight §6.3)
 - Before changing `OPEN_NOTEBOOK_ENCRYPTION_KEY` if Open Notebook has stored API keys (pre-flight §6.4)
 - Before settling on tailnet trust posture (§6.6 Option A/B/C)
-- **Before reusing the OB1 `open-brain-email` OAuth client for the portal alerter (§6.9)** — explain the coupling: revoking it kills both OB1's daily digest AND portal alerts. Offer the alternative of provisioning a dedicated OAuth client (cleaner, ~10 min in Google Cloud Console). Default = reuse, document, switch later.
+- The OAuth client choice is locked: **dedicated client at `secrets/google/portal-alerter/`** (decided in Phase 0; the earlier reuse-OB1 option is retired). If a future revision wants to share, both the compose mount and the bootstrap path need to change together.
 - If subpath routing for Open Notebook / OpenWebUI doesn't work and the fallback is subdomain — confirm the user owns/controls the subdomains and wants to add Cloudflare public hostnames
 - Before applying `--server.baseUrlPath=/notebook` to Open Notebook (subpath Fallback B in §8 Step 2) — this is a touch to Open Notebook's behavior and conflicts with the "untouched" rule
 - If any §11 security smoke test fails — diagnose and fix, do not declare done

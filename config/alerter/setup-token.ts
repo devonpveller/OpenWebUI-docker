@@ -13,19 +13,18 @@
  * unattended — it only needs to refresh the access token (the refresh
  * token persists in token.json).
  *
- * Prereq: credentials.json next to this file. The recommended path is to
- * copy or symlink the OB1 OAuth client secret:
+ * Prereq: credentials.json next to this file. Provision a DEDICATED OAuth
+ * client in Google Cloud Console (separate from OB1's open-brain-email
+ * client) and save the JSON to secrets/google/portal-alerter/credentials.json,
+ * then copy it here:
  *   Copy-Item `
- *     secrets/google/open-brain-email/client_secret_*.json `
+ *     secrets/google/portal-alerter/credentials.json `
  *     config/alerter/credentials.json
  *
- * The OAuth consent screen for that client must include the gmail.send scope
- * (it does — OB1's daily digest already uses it).
- *
- * Coupling caveat (plan §6.9): reusing OB1's OAuth client means revoking it
- * breaks BOTH the portal alerter AND OB1's daily digest. If granular control
- * is required, provision a separate OAuth client in Google Cloud Console and
- * use its credentials.json here instead.
+ * The OAuth consent screen for that client must include the gmail.send scope.
+ * If you provision the client in OB1's existing GCP project (recommended),
+ * the consent screen already lists gmail.send because OB1's daily-digest
+ * uses it — no scope changes needed.
  *
  * Usage (PowerShell, from the workspace root):
  *   deno run --allow-net --allow-read --allow-write --allow-env config/alerter/setup-token.ts
