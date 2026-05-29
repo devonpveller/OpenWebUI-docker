@@ -1208,7 +1208,11 @@ services:
       context: ./backup
       dockerfile: Dockerfile
       args:
-        BACKUP_UID: "10004"
+        # UID 10000 matches Caddy's UID so the backup process can read all
+        # of Caddy's state files (instance.uuid, locks/, last_clean.json
+        # are mode 0600). Audit 2026-05-29 finding F.1 — earlier UID 10004
+        # silently excluded these from the tarball.
+        BACKUP_UID: "10000"
         BACKUP_USER: caddybak
     image: portal-backup-caddy:local
     container_name: caddy-backup
@@ -1222,7 +1226,7 @@ services:
       - DATA_DIR=/data
       - RETAIN_DAYS=${CADDY_BACKUP_RETAIN_DAYS:-7}
       - BACKUP_CRON=${CADDY_BACKUP_CRON:-0 3 * * *}
-    user: "10004:10004"
+    user: "10000:10000"
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -1253,7 +1257,11 @@ services:
       context: ./backup
       dockerfile: Dockerfile
       args:
-        BACKUP_UID: "10005"
+        # UID 10001 matches Authelia's UID so the backup process can read
+        # Authelia state files (notification.txt is mode 0600).
+        # Audit 2026-05-29 finding F.1 — earlier UID 10005 silently excluded
+        # these from the tarball.
+        BACKUP_UID: "10001"
         BACKUP_USER: authbak
     image: portal-backup-authelia:local
     container_name: authelia-backup
@@ -1267,7 +1275,7 @@ services:
       - DATA_DIR=/data
       - RETAIN_DAYS=${AUTHELIA_BACKUP_RETAIN_DAYS:-14}
       - BACKUP_CRON=${AUTHELIA_BACKUP_CRON:-0 3 * * *}
-    user: "10005:10005"
+    user: "10001:10001"
     security_opt:
       - no-new-privileges:true
     cap_drop:

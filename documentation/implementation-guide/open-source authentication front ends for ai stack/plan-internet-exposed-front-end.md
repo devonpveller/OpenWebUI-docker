@@ -365,33 +365,44 @@ config/
     configuration.yml
     users_database.yml            # gitignored after template
     .gitignore
+    .healthcheck.env              # writable bind-mount placeholder (Authelia
+                                  # writes X_AUTHELIA_HEALTHCHECK_* here at
+                                  # startup; needed so read_only:true works)
   alerter/
     alerter.ts                    # Deno HTTP sidecar — /alert + /run + /health; mirrors OB1 send-digest.ts
     setup-token.ts                # one-time host-side OAuth consent bootstrap (mirrors OB1 setup-token.ts)
     .env.example                  # DIGEST_TO, DIGEST_FROM, DIGEST_WINDOW_HOURS, ALERT_RATE_LIMIT, etc.
   watcher/
+    Dockerfile                    # alpine + curl/jq/inotify-tools + tini, USER 10002 (non-root)
     authelia-watch.sh             # tails authelia.log + caddy-access.log; POSTs JSON to portal-alerter:8080/alert
     known-ips.txt                 # seed file of known source IPs (one per line; empty initially)
   tripwire/
+    Dockerfile                    # alpine + curl + supercronic + tini, USER 10003
     integrity-tripwire.sh         # nightly hash check on Caddyfile / configuration.yml / users_database.yml
-    baseline.sha256               # generated on first run by the script
+    baseline.sha256               # generated on first run by the script (in tripwire-data volume)
   portal-cron/
     crontab                       # supercronic crontab; one line fires POST /run on the alerter
-    Dockerfile                    # tiny alpine + supercronic + curl image (mirrors OB1 openbrain-cron)
+    entrypoint.sh                 # envsubst-renders crontab from $PORTAL_DIGEST_CRON, exec supercronic
+    Dockerfile                    # tiny alpine + supercronic + curl, USER 10007
+backup/
+  Dockerfile                      # shared image for caddy-backup + authelia-backup, parameterized
+                                  # by BACKUP_UID build arg (10000 / 10001 — matches data owners)
+  caddy-backup.sh
+  authelia-backup.sh
 secrets/
   google/
     portal-alerter/
-      .gitkeep                    # token.json lands here from setup-token.ts; gitignored
-backup/
-  caddy-backup.sh
-  authelia-backup.sh
+      .gitkeep                    # credentials.json + token.json land here from setup-token.ts; gitignored
 scripts/
-  portal-on.ps1                   # docker compose --profile internet up -d (with health-wait)
-  portal-off.ps1                  # docker compose --profile internet stop (preserves volumes)
-  portal-status.ps1               # one-shot report: which portal containers are up + last alert + tunnel state
+  portal-on.ps1                   # `-Test` flag toggles local-test profile + override; default = production (+cloudflared)
+  portal-off.ps1                  # explicit-list stop (NEVER `docker compose down`; that's project-wide)
+  portal-status.ps1               # read-only check: containers, alerter /health, last digest, tunnel state
   breach-killswitch.ps1           # emergency stop for internet-exposed path only — distinct from portal-off
 documentation/
   incident-response.md            # v1 IR playbook (outline in §13.6; full content written by implementing agent)
+
+# Repo-root files added alongside docker-compose.yml:
+docker-compose.local-test.override.yml  # adds 127.0.0.1:8443:80 to caddy in -Test mode only
 ```
 
 ### 7.2 Modified files
@@ -475,13 +486,63 @@ Append two new attachments to existing services (this is the **only** change to 
       - app-net     # NEW — required for caddy to reach :8502 and :5055
 ```
 
-Append to the `services:` block:
+Append to the `services:` block.
+
+**Lifecycle note — `profiles:`.** Most services below are tagged `profiles: [internet, local-test]` so they participate in both the production (full-stack including cloudflared) and the local-test (no cloudflared, Caddy bound to 127.0.0.1) lifecycle modes. `cloudflared` is tagged `profiles: [internet]` only — local-test mode never exposes the portal to the internet. See §12.9.
+
+**`portal-init` — one-shot volume permission setter.** Docker creates named volumes owned by `root:root`. Our hardened services run non-root and would fail to write `/data`. This init container runs as root, chowns each named volume to its owning UID, exits. All data-writing services `depends_on: portal-init: service_completed_successfully`.
 
 ```yaml
+  portal-init:
+    image: alpine:3.21
+    container_name: portal-init
+    profiles: [internet, local-test]
+    user: "0:0"                  # root — required to chown
+    network_mode: none           # no network needed for chown
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - FOWNER
+      - DAC_OVERRIDE
+    restart: "no"                # one-shot
+    volumes:
+      - authelia-data:/vols/authelia
+      - caddy-data:/vols/caddy
+      - caddy-config:/vols/caddy-config
+      - tripwire-data:/vols/tripwire
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        set -e
+        # Authelia (UID 10001) — mode 0755 so portal-alerter (UID 10006)
+        # can READ authelia.log for the /run digest function.
+        chown -R 10001:10001 /vols/authelia
+        chmod 0755 /vols/authelia
+        touch /vols/authelia/authelia.log
+        chown 10001:10001 /vols/authelia/authelia.log
+        chmod 0644 /vols/authelia/authelia.log
+        # Caddy (UID 10000) — same mode-0755 rationale for caddy-access.log.
+        chown -R 10000:10000 /vols/caddy /vols/caddy-config
+        chmod 0755 /vols/caddy /vols/caddy-config
+        touch /vols/caddy/caddy-access.log
+        chown 10000:10000 /vols/caddy/caddy-access.log
+        chmod 0644 /vols/caddy/caddy-access.log
+        # Integrity-tripwire (UID 10003) — mode 0700 (state is sensitive
+        # baseline hashes, no need for cross-container read).
+        chown -R 10003:10003 /vols/tripwire
+        chmod 0700 /vols/tripwire
+        echo "[portal-init] done"
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
   cloudflared:
     image: cloudflare/cloudflared:2024.10.0       # pin, do not use :latest in prod
     container_name: cloudflared
-    profiles: [internet]                          # portal lifecycle — see §12.9
+    profiles: [internet]                          # cloudflared NEVER runs in -Test mode
     networks:
       - edge-net
     command: tunnel --no-autoupdate run
@@ -511,7 +572,7 @@ Append to the `services:` block:
   caddy:
     image: caddy:2.8.4-alpine                     # pin patch; v2 uses custom build (§10.4)
     container_name: caddy
-    profiles: [internet]                          # portal lifecycle — see §12.9
+    profiles: [internet, local-test]              # see §12.9 lifecycle (-Test runs local-test)
     networks:
       - edge-net          # cloudflared → caddy
       - auth-net          # caddy → authelia (forward_auth)
@@ -548,7 +609,12 @@ Append to the `services:` block:
     labels:
       - "com.centurylinklabs.watchtower.enable=false"
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:80/healthz"]
+      # Use Caddy's admin API at 127.0.0.1:2019 rather than :80/healthz.
+      # The :80/healthz path matches @internal_health by `remote_ip`, but the
+      # Host header on a localhost healthcheck is `127.0.0.1` which doesn't
+      # match any site block in the Caddyfile and trips the `:80 { respond 421 }`
+      # catch-all. Admin API at :2019/config/ returns 200 whenever Caddy is up.
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:2019/config/"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -557,13 +623,19 @@ Append to the `services:` block:
   authelia:
     image: authelia/authelia:4.39
     container_name: authelia
-    profiles: [internet]                          # portal lifecycle — see §12.9
+    profiles: [internet, local-test]              # see §12.9 lifecycle (-Test runs local-test)
     networks:
       - auth-net          # internal: true — no internet egress
     volumes:
       - ./config/authelia:/config:ro
       - authelia-data:/data
-    environment:
+      # Authelia 4.39 writes /app/.healthcheck.env at startup. With
+      # read_only: true on the container's root FS, this single write would
+      # fail; bind-mount an empty placeholder file from the host to satisfy
+      # it. Authelia populates the file with X_AUTHELIA_HEALTHCHECK_* env
+      # vars that its healthcheck shim reads. File stays on the host so a
+      # container restart doesn't lose the state.
+      - ./config/authelia/.healthcheck.env:/app/.healthcheck.env
       - TZ=UTC
       - PUBLIC_DOMAIN=${PUBLIC_DOMAIN}
       - AUTHELIA_JWT_SECRET=${AUTHELIA_JWT_SECRET}
@@ -594,9 +666,15 @@ Append to the `services:` block:
       start_period: 30s
 
   authelia-watcher:
-    image: alpine:3.21
+    # Custom image so curl/jq/inotify-tools are baked in at build time and
+    # the container can run as non-root. Plan §2 hardening floor requires
+    # non-root UID; `apk add` at startup as UID 10002 would fail.
+    build:
+      context: ./config/watcher
+      dockerfile: Dockerfile
+    image: portal-watcher:local
     container_name: authelia-watcher
-    profiles: [internet]                          # portal lifecycle — see §12.9
+    profiles: [internet, local-test]              # see §12.9 lifecycle
     networks:
       - auth-net          # internal: true — only talks to portal-alerter:8080 over auth-net; no internet
     volumes:
@@ -627,20 +705,20 @@ Append to the `services:` block:
         condition: service_started
       portal-alerter:
         condition: service_started
-    entrypoint: /bin/sh
-    command:
-      - -c
-      - |
-        apk add --no-cache curl jq inotify-tools >/dev/null 2>&1
-        chmod +x /scripts/watch.sh
-        exec /scripts/watch.sh
+    # No runtime entrypoint override — the Dockerfile's tini + CMD
+    # ["/scripts/watch.sh"] runs; deps baked at build time.
     labels:
       - "com.centurylinklabs.watchtower.enable=false"
 
   integrity-tripwire:
-    image: alpine:3.21
+    # Custom image with curl + supercronic baked in. busybox crond requires
+    # root; supercronic runs as any user with a bind-mounted crontab.
+    build:
+      context: ./config/tripwire
+      dockerfile: Dockerfile
+    image: portal-tripwire:local
     container_name: integrity-tripwire
-    profiles: [internet]                          # portal lifecycle — see §12.9
+    profiles: [internet, local-test]              # see §12.9 lifecycle
     networks:
       - auth-net          # internal: true — only talks to portal-alerter:8080 over auth-net
     volumes:
@@ -667,25 +745,30 @@ Append to the `services:` block:
     depends_on:
       portal-alerter:
         condition: service_started
-    entrypoint: /bin/sh
+      portal-init:
+        condition: service_completed_successfully
     command:
+      - sh
       - -c
       - |
-        apk add --no-cache curl >/dev/null 2>&1
-        chmod +x /scripts/tripwire.sh
-        # Run once at startup to establish or verify baseline
+        # Init once at startup; ignore drift on init (the alert fires but
+        # the container should still proceed to run scheduled checks).
         /scripts/tripwire.sh init || true
-        # Then schedule via crond; export env into the cron environment
-        printenv | grep -E '^(ALERTER_|CHECK_)' > /etc/profile.d/tripwire-env.sh
-        echo "$${CHECK_CRON} . /etc/profile.d/tripwire-env.sh; /scripts/tripwire.sh check >> /var/log/tripwire.log 2>&1" > /etc/crontabs/root
-        crond -f -l 2
+        # supercronic inherits env naturally — no /etc/profile.d shim.
+        printf '%s /scripts/tripwire.sh check\n' "$$CHECK_CRON" > /tmp/crontab.rendered
+        exec /usr/local/bin/supercronic /tmp/crontab.rendered
     labels:
       - "com.centurylinklabs.watchtower.enable=false"
 
   portal-alerter:
     image: denoland/deno:alpine                   # match OB1's openbrain-digest image choice
+    # TODO pin to a sha256 digest (plan §12.1) — `denoland/deno:alpine` is
+    # a moving tag and was flagged in audit-post-implementation-2026-05-29 §F.3.
     container_name: portal-alerter
-    profiles: [internet]                          # portal lifecycle — see §12.9
+    profiles: [internet, local-test]              # see §12.9 lifecycle
+    depends_on:
+      portal-init:
+        condition: service_completed_successfully
     networks:
       - auth-net          # internal: true — receives /alert from watcher + tripwire here
       - notify-net        # outbound to oauth2.googleapis.com + gmail.googleapis.com
@@ -777,9 +860,20 @@ Append to the `services:` block:
       - "com.centurylinklabs.watchtower.enable=false"
 
   caddy-backup:
-    image: alpine:3.21
+    # Custom image with supercronic baked in. Original plan used busybox crond
+    # + apk-add at startup as UID 10004; that combination wouldn't run as
+    # non-root AND failed to read Caddy's mode-0600 state files (audit
+    # 2026-05-29 finding F.1). UID 10000 matches Caddy's data owner so the
+    # backup process can read all state files.
+    build:
+      context: ./backup
+      dockerfile: Dockerfile
+      args:
+        BACKUP_UID: "10000"
+        BACKUP_USER: caddybak
+    image: portal-backup-caddy:local
     container_name: caddy-backup
-    profiles: [internet]                          # portal lifecycle — see §12.9
+    profiles: [internet, local-test]              # see §12.9 lifecycle
     volumes:
       - caddy-data:/data:ro
       - ./backups/caddy:/backups
@@ -789,22 +883,25 @@ Append to the `services:` block:
       - DATA_DIR=/data
       - RETAIN_DAYS=${CADDY_BACKUP_RETAIN_DAYS:-7}
       - BACKUP_CRON=${CADDY_BACKUP_CRON:-0 3 * * *}
-    user: "10004:10004"
+    user: "10000:10000"
     security_opt:
       - no-new-privileges:true
     cap_drop:
       - ALL
-    pids_limit: 50
-    entrypoint: /bin/sh
+    read_only: true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=16m
+    deploy:
+      resources:
+        limits:
+          pids: 50
     command:
+      - sh
       - -c
       - |
-        chmod +x /scripts/backup.sh
-        # Export compose env into cron's environment (audit §B.4 fix)
-        printenv | grep -E '^(BACKUP_|DATA_|RETAIN_)' > /etc/profile.d/backup-env.sh
-        echo "$${BACKUP_CRON} . /etc/profile.d/backup-env.sh; sh /scripts/backup.sh >> /var/log/backup.log 2>&1" > /etc/crontabs/root
-        echo "[$(date -u +%FT%TZ)] Caddy backup scheduler started"
-        crond -f -l 2
+        printf '%s sh /scripts/backup.sh\n' "$$BACKUP_CRON" > /tmp/crontab.rendered
+        echo "[$$(date -u +%FT%TZ)] Caddy backup scheduler started"
+        exec /usr/local/bin/supercronic /tmp/crontab.rendered
     restart: unless-stopped
     depends_on:
       caddy:
@@ -813,9 +910,18 @@ Append to the `services:` block:
       - "com.centurylinklabs.watchtower.enable=false"
 
   authelia-backup:
-    image: alpine:3.21
+    # Same pattern as caddy-backup — custom image + UID matching the data
+    # owner (10001 = Authelia) so all state files (including mode-0600
+    # notification.txt) get into the tarball.
+    build:
+      context: ./backup
+      dockerfile: Dockerfile
+      args:
+        BACKUP_UID: "10001"
+        BACKUP_USER: authbak
+    image: portal-backup-authelia:local
     container_name: authelia-backup
-    profiles: [internet]                          # portal lifecycle — see §12.9
+    profiles: [internet, local-test]              # see §12.9 lifecycle
     volumes:
       - authelia-data:/data:ro
       - ./backups/authelia:/backups
@@ -825,21 +931,25 @@ Append to the `services:` block:
       - DATA_DIR=/data
       - RETAIN_DAYS=${AUTHELIA_BACKUP_RETAIN_DAYS:-14}
       - BACKUP_CRON=${AUTHELIA_BACKUP_CRON:-0 3 * * *}
-    user: "10005:10005"
+    user: "10001:10001"
     security_opt:
       - no-new-privileges:true
     cap_drop:
       - ALL
-    pids_limit: 50
-    entrypoint: /bin/sh
+    read_only: true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=16m
+    deploy:
+      resources:
+        limits:
+          pids: 50
     command:
+      - sh
       - -c
       - |
-        chmod +x /scripts/backup.sh
-        printenv | grep -E '^(BACKUP_|DATA_|RETAIN_)' > /etc/profile.d/backup-env.sh
-        echo "$${BACKUP_CRON} . /etc/profile.d/backup-env.sh; sh /scripts/backup.sh >> /var/log/backup.log 2>&1" > /etc/crontabs/root
-        echo "[$(date -u +%FT%TZ)] Authelia backup scheduler started"
-        crond -f -l 2
+        printf '%s sh /scripts/backup.sh\n' "$$BACKUP_CRON" > /tmp/crontab.rendered
+        echo "[$$(date -u +%FT%TZ)] Authelia backup scheduler started"
+        exec /usr/local/bin/supercronic /tmp/crontab.rendered
     restart: unless-stopped
     depends_on:
       authelia:
@@ -1011,8 +1121,17 @@ http://{$PUBLIC_DOMAIN} {
     # NOTE: copy_headers omitted intentionally — trusted-header SSO is NOT
     # enabled (§6.7). Authelia only returns 200/401 here; we do not propagate
     # Remote-* upstream.
+    #
+    # Authelia 4.39 AuthRequest implementation endpoint:
+    #   - /api/authz/auth-request (NOT the legacy /api/verify)
+    #   - Requires X-Original-URL + X-Original-Method headers
+    #   - Hardcoded https:// in X-Original-URL because Authelia 4.39 rejects
+    #     http schemes (insecure cookie transport). Inside the tunnel + Docker
+    #     traffic is http, but client-facing scheme is always https.
     forward_auth authelia:9091 {
-        uri /api/verify?rd=http://auth.{$PUBLIC_DOMAIN}/
+        uri /api/authz/auth-request
+        header_up X-Original-URL https://{host}{uri}
+        header_up X-Original-Method {method}
     }
 
     # ─── Routes ──────────────────────────────────────────────────────────
@@ -1859,11 +1978,29 @@ docker exec portal-cron curl -fsS -X POST http://portal-alerter:8080/run
 - The `Remote-*` strip in `sanitize_proxy_headers` is **defense in depth even though trusted-header SSO is disabled.** Do not remove it. If a future change re-enables trusted-header SSO without re-evaluating §6.7, the strip prevents the internet path from forging headers — though the tailnet path would still need to be addressed separately.
 - Under Cloudflare Tunnel, Caddy's `:80` is reached over the Docker `edge-net` bridge only. The container does not bind any host port. `netstat -an` on the Windows host should show **no** new listeners.
 
-### 12.9 Portal lifecycle — routine on/off without touching the rest of the stack
+### 12.9 Portal lifecycle — routine on/off + a safe development mode
 
-The portal is the only piece of the ai-stack that exposes anything to the internet. The rest of the stack (OpenWebUI native, llama-cpp, mnemory, OB1, search gateway, little-coder, etc.) keeps running 24/7 over the tailnet. The portal should be toggled on only when you want it.
+The portal is the only piece of the ai-stack that exposes anything to the internet. The rest of the stack (OpenWebUI native, llama-cpp, mnemory, OB1, search gateway, little-coder, etc.) keeps running 24/7 over the tailnet. The portal should be toggled on only when you want it, and developed in a safe non-exposed mode in between.
 
-**Mechanism:** every new container in §8 Step 1 is tagged `profiles: [internet]`. Docker Compose **does not** start profile-tagged services on a plain `docker compose up -d` — they only come up when the profile is explicitly activated. This is the one-switch on/off control.
+**Mechanism — two compose profiles:**
+
+| Profile | Services that join | When activated | Used for |
+|---|---|---|---|
+| `internet` | ALL portal services (including `cloudflared`) | `portal-on.ps1` (no flag) | Production / live |
+| `local-test` | All portal services EXCEPT `cloudflared` | `portal-on.ps1 -Test` | Development / validating routing + auth + sidecars without ever exposing to the internet |
+
+`cloudflared` is tagged `profiles: [internet]` only. Every other portal service is `profiles: [internet, local-test]` — it participates in both modes. This means **the same config, the same hardening, the same containers** are running in both modes; the only difference is the tunnel.
+
+**`docker-compose.local-test.override.yml`** at the repo root adds a single Caddy port mapping for the `local-test` profile only:
+
+```yaml
+services:
+  caddy:
+    ports:
+      - "127.0.0.1:8443:80"   # localhost-only — never reachable from LAN or internet
+```
+
+`portal-on.ps1 -Test` passes `-f docker-compose.local-test.override.yml` when calling compose; without the flag, the override isn't applied and Caddy has no host port at all (Cloudflare Tunnel is the only ingress).
 
 **Three scripts in `scripts/`:**
 
