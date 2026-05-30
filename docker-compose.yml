@@ -379,7 +379,8 @@ services:
     environment:
       - BACKUP_DIR=/backups
       - DATA_DIR=/data
-      - RETAIN_DAYS=${BACKUP_RETAIN_DAYS:-7}
+      - RETAIN_COUNT=${BACKUP_RETAIN_COUNT:-2}
+      - HEALTH_TCP=mnemory-gateway:8080
       - BACKUP_CRON=${BACKUP_CRON:-0 2 * * *}
     entrypoint: /bin/sh
     command:
@@ -387,7 +388,7 @@ services:
       - |
         chmod +x /scripts/backup.sh
         echo "$${BACKUP_CRON} /scripts/backup.sh >> /var/log/backup.log 2>&1" > /etc/crontabs/root
-        echo "[$(date -u +%FT%TZ)] Backup scheduler started (cron: $${BACKUP_CRON}, retain: $${RETAIN_DAYS} days)"
+        echo "[$(date -u +%FT%TZ)] Backup scheduler started (cron: $${BACKUP_CRON}, retain: $${RETAIN_COUNT} most recent)"
         crond -f -l 2
     restart: unless-stopped
     security_opt:
@@ -408,14 +409,15 @@ services:
     environment:
       - BACKUP_DIR=/backups
       - DATA_DIR=/data
-      - RETAIN_DAYS=${OPENWEBUI_BACKUP_RETAIN_DAYS:-7}
+      - RETAIN_COUNT=${OPENWEBUI_BACKUP_RETAIN_COUNT:-2}
+      - HEALTH_TCP=openwebui:8080
       - BACKUP_CRON=${OPENWEBUI_BACKUP_CRON:-0 2 * * *}
     entrypoint: /bin/sh
     command:
       - -c
       - |
         echo "$${BACKUP_CRON} sh /scripts/backup.sh >> /var/log/backup.log 2>&1" > /etc/crontabs/root
-        echo "[$(date -u +%FT%TZ)] Backup scheduler started (cron: $${BACKUP_CRON}, retain: $${RETAIN_DAYS} days)"
+        echo "[$(date -u +%FT%TZ)] Backup scheduler started (cron: $${BACKUP_CRON}, retain: $${RETAIN_COUNT} most recent)"
         crond -f -l 2
     restart: unless-stopped
     security_opt:
@@ -811,7 +813,7 @@ services:
     environment:
       - BACKUP_DIR=/backups
       - DATA_DIR=/data
-      - RETAIN_DAYS=${LC_BACKUP_RETAIN_DAYS:-7}
+      - RETAIN_COUNT=${LC_BACKUP_RETAIN_COUNT:-2}
       - BACKUP_CRON=${LC_BACKUP_CRON:-0 2 * * *}
     entrypoint: /bin/sh
     command:
@@ -819,7 +821,7 @@ services:
       - |
         chmod +x /scripts/backup.sh
         echo "$${BACKUP_CRON} /scripts/backup.sh >> /var/log/backup.log 2>&1" > /etc/crontabs/root
-        echo "[$(date -u +%FT%TZ)] little-coder backup scheduler started (cron: $${BACKUP_CRON}, retain: $${RETAIN_DAYS}d)"
+        echo "[$(date -u +%FT%TZ)] little-coder backup scheduler started (cron: $${BACKUP_CRON}, retain: $${RETAIN_COUNT} most recent)"
         crond -f -l 2
     restart: unless-stopped
     security_opt:
@@ -858,7 +860,7 @@ services:
       - POSTGRES_USER=postgres        # matches OB1 docker-compose.yml line 24
       - POSTGRES_DB=openbrain          # matches OB1 docker-compose.yml line 23
       - BACKUP_DIR=/backups
-      - RETAIN_DAYS=${OPENBRAIN_DB_BACKUP_RETAIN_DAYS:-14}
+      - RETAIN_COUNT=${OPENBRAIN_DB_BACKUP_RETAIN_COUNT:-2}
       - BACKUP_CRON=${OPENBRAIN_DB_BACKUP_CRON:-0 2 * * *}
       - TZ=UTC
     volumes:
@@ -888,7 +890,7 @@ services:
         # Render supercronic crontab from $BACKUP_CRON. supercronic
         # inherits env naturally so no profile.d shim needed.
         printf '%s sh /scripts/backup.sh\n' "$$BACKUP_CRON" > /tmp/crontab.rendered
-        echo "[$$(date -u +%FT%TZ)] openbrain-db-backup scheduler started (cron: $$BACKUP_CRON, retain: $${RETAIN_DAYS}d)"
+        echo "[$$(date -u +%FT%TZ)] openbrain-db-backup scheduler started (cron: $$BACKUP_CRON, retain: $${RETAIN_COUNT} most recent)"
         exec /usr/local/bin/supercronic /tmp/crontab.rendered
     labels:
       - "com.centurylinklabs.watchtower.enable=false"
@@ -907,7 +909,7 @@ services:
     environment:
       - BACKUP_DIR=/backups
       - DATA_DIR=/data
-      - RETAIN_DAYS=${OPENBRAIN_WIKI_BACKUP_RETAIN_DAYS:-7}
+      - RETAIN_COUNT=${OPENBRAIN_WIKI_BACKUP_RETAIN_COUNT:-2}
       - BACKUP_CRON=${OPENBRAIN_WIKI_BACKUP_CRON:-15 2 * * *}
       - TZ=UTC
     entrypoint: /bin/sh
@@ -916,7 +918,7 @@ services:
       - |
         chmod +x /scripts/backup.sh
         echo "$${BACKUP_CRON} /scripts/backup.sh >> /var/log/backup.log 2>&1" > /etc/crontabs/root
-        echo "[$(date -u +%FT%TZ)] openbrain-wiki-backup scheduler started (cron: $${BACKUP_CRON}, retain: $${RETAIN_DAYS}d)"
+        echo "[$(date -u +%FT%TZ)] openbrain-wiki-backup scheduler started (cron: $${BACKUP_CRON}, retain: $${RETAIN_COUNT} most recent)"
         crond -f -l 2
     restart: unless-stopped
     security_opt:
@@ -954,7 +956,7 @@ services:
       - SURREAL_DB=open_notebook
       - NOTEBOOK_DATA_DIR=/notebook-data
       - BACKUP_DIR=/backups
-      - RETAIN_DAYS=${OPEN_NOTEBOOK_BACKUP_RETAIN_DAYS:-14}
+      - RETAIN_COUNT=${OPEN_NOTEBOOK_BACKUP_RETAIN_COUNT:-2}
       - BACKUP_CRON=${OPEN_NOTEBOOK_BACKUP_CRON:-20 2 * * *}
       - TZ=UTC
     volumes:
@@ -980,7 +982,7 @@ services:
       - -c
       - |
         printf '%s sh /scripts/backup.sh\n' "$$BACKUP_CRON" > /tmp/crontab.rendered
-        echo "[$$(date -u +%FT%TZ)] open-notebook-backup scheduler started (cron: $$BACKUP_CRON, retain: $${RETAIN_DAYS}d)"
+        echo "[$$(date -u +%FT%TZ)] open-notebook-backup scheduler started (cron: $$BACKUP_CRON, retain: $${RETAIN_COUNT} most recent)"
         exec /usr/local/bin/supercronic /tmp/crontab.rendered
     labels:
       - "com.centurylinklabs.watchtower.enable=false"
@@ -999,7 +1001,8 @@ services:
       - DATA_DIR=/data
       - BACKUP_DIR=/backups
       - PREFIX=smolcrawl
-      - RETAIN_DAYS=${SMOLCRAWL_BACKUP_RETAIN_DAYS:-7}
+      - RETAIN_COUNT=${SMOLCRAWL_BACKUP_RETAIN_COUNT:-2}
+      - HEALTH_TCP=${SMOLCRAWL_BACKUP_HEALTH_TCP:-smolcrawl-pipelines:9099}
       - BACKUP_CRON=${SMOLCRAWL_BACKUP_CRON:-25 2 * * *}
       - TZ=UTC
     entrypoint: /bin/sh
@@ -1008,7 +1011,7 @@ services:
       - |
         chmod +x /scripts/backup.sh
         echo "$${BACKUP_CRON} sh /scripts/backup.sh >> /var/log/backup.log 2>&1" > /etc/crontabs/root
-        echo "[$(date -u +%FT%TZ)] smolcrawl-backup scheduler started (cron: $${BACKUP_CRON}, retain: $${RETAIN_DAYS}d)"
+        echo "[$(date -u +%FT%TZ)] smolcrawl-backup scheduler started (cron: $${BACKUP_CRON}, retain: $${RETAIN_COUNT} most recent)"
         crond -f -l 2
     restart: unless-stopped
     security_opt:
@@ -1032,7 +1035,12 @@ services:
       - DATA_DIR=/data
       - BACKUP_DIR=/backups
       - PREFIX=tailscale
-      - RETAIN_DAYS=${TAILSCALE_BACKUP_RETAIN_DAYS:-7}
+      - RETAIN_COUNT=${TAILSCALE_BACKUP_RETAIN_COUNT:-2}
+      # tailscale-backup has no network attachment (the bind mount is the
+      # only source). HEALTH_TCP intentionally empty -- dir-nonempty is the
+      # only precheck. Set HEALTH_TCP=tailscale:41641 etc if you wire it
+      # onto a shared network later.
+      - HEALTH_TCP=
       - BACKUP_CRON=${TAILSCALE_BACKUP_CRON:-25 2 * * *}
       - TZ=UTC
     entrypoint: /bin/sh
@@ -1041,7 +1049,7 @@ services:
       - |
         chmod +x /scripts/backup.sh
         echo "$${BACKUP_CRON} sh /scripts/backup.sh >> /var/log/backup.log 2>&1" > /etc/crontabs/root
-        echo "[$(date -u +%FT%TZ)] tailscale-backup scheduler started (cron: $${BACKUP_CRON}, retain: $${RETAIN_DAYS}d)"
+        echo "[$(date -u +%FT%TZ)] tailscale-backup scheduler started (cron: $${BACKUP_CRON}, retain: $${RETAIN_COUNT} most recent)"
         crond -f -l 2
     restart: unless-stopped
     security_opt:
@@ -1068,7 +1076,11 @@ services:
       - DATA_DIR=/data
       - BACKUP_DIR=/backups
       - PREFIX=lm-models
-      - RETAIN_DAYS=${LM_MODELS_BACKUP_RETAIN_DAYS:-28}
+      - RETAIN_COUNT=${LM_MODELS_BACKUP_RETAIN_COUNT:-2}
+      # llama-cpp serves models from this directory; backup runs when the
+      # service is reachable. Empty HEALTH_TCP disables the probe (e.g., if
+      # you keep llama-cpp paused most of the time).
+      - HEALTH_TCP=${LM_MODELS_BACKUP_HEALTH_TCP:-llama-cpp:8080}
       - BACKUP_CRON=${LM_MODELS_BACKUP_CRON:-0 1 * * 0}     # Sunday 01:00 UTC
       - TZ=UTC
     entrypoint: /bin/sh
@@ -1081,7 +1093,7 @@ services:
         fi
         chmod +x /scripts/backup.sh
         echo "$${BACKUP_CRON} sh /scripts/backup.sh >> /var/log/backup.log 2>&1" > /etc/crontabs/root
-        echo "[$(date -u +%FT%TZ)] lm-models-backup scheduler started (cron: $${BACKUP_CRON}, retain: $${RETAIN_DAYS}d)"
+        echo "[$(date -u +%FT%TZ)] lm-models-backup scheduler started (cron: $${BACKUP_CRON}, retain: $${RETAIN_COUNT} most recent)"
         crond -f -l 2
     restart: unless-stopped
     security_opt:
@@ -1498,7 +1510,8 @@ services:
     environment:
       - BACKUP_DIR=/backups
       - DATA_DIR=/data
-      - RETAIN_DAYS=${CADDY_BACKUP_RETAIN_DAYS:-7}
+      - RETAIN_COUNT=${CADDY_BACKUP_RETAIN_COUNT:-2}
+      - HEALTH_TCP=${CADDY_BACKUP_HEALTH_TCP:-caddy:80}
       - BACKUP_CRON=${CADDY_BACKUP_CRON:-0 3 * * *}
     user: "10000:10000"
     security_opt:
@@ -1547,7 +1560,8 @@ services:
     environment:
       - BACKUP_DIR=/backups
       - DATA_DIR=/data
-      - RETAIN_DAYS=${AUTHELIA_BACKUP_RETAIN_DAYS:-14}
+      - RETAIN_COUNT=${AUTHELIA_BACKUP_RETAIN_COUNT:-2}
+      - HEALTH_TCP=${AUTHELIA_BACKUP_HEALTH_TCP:-authelia:9091}
       - BACKUP_CRON=${AUTHELIA_BACKUP_CRON:-0 3 * * *}
     user: "10001:10001"
     security_opt:

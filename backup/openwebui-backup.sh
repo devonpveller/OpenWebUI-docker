@@ -1,28 +1,59 @@
 #!/bin/sh
-set -eu
-
 # OpenWebUI nightly backup script
-# Creates a compressed tarball of the /app/backend/data volume and prunes old backups.
+# Creates a compressed tarball of the /app/backend/data volume and
+# prunes old backups (count-based retention).
+#
+# Precheck: openwebui must be answering on its API port; otherwise we
+# may capture a partial chat DB write or an in-progress migration.
+#
+# Inputs:
+#   DATA_DIR        (default /data)
+#   BACKUP_DIR      (default /backups)
+#   RETAIN_COUNT    (default 2)
+#   HEALTH_TCP      (default openwebui:8080; empty to skip)
+
+set -eu
 
 BACKUP_DIR="${BACKUP_DIR:-/backups}"
 DATA_DIR="${DATA_DIR:-/data}"
-RETAIN_DAYS="${RETAIN_DAYS:-7}"
-TIMESTAMP="$(date -u +%Y%m%d-%H%M%S)"
-BACKUP_FILE="${BACKUP_DIR}/openwebui-backup-${TIMESTAMP}.tar.gz"
+RETAIN_COUNT="${RETAIN_COUNT:-2}"
+HEALTH_TCP="${HEALTH_TCP:-openwebui:8080}"
 
 echo "[$(date -u +%FT%TZ)] Starting OpenWebUI backup..."
 
 mkdir -p "${BACKUP_DIR}"
 
+# --- precheck ---------------------------------------------------------
+if [ ! -d "${DATA_DIR}" ] || [ -z "$(ls -A "${DATA_DIR}" 2>/dev/null)" ]; then
+  echo "[$(date -u +%FT%TZ)] openwebui PRECHECK SKIP: ${DATA_DIR} missing/empty"
+  exit 0
+fi
+if [ -n "${HEALTH_TCP}" ]; then
+  host="${HEALTH_TCP%:*}"
+  port="${HEALTH_TCP##*:}"
+  if ! nc -z -w 5 "${host}" "${port}" 2>/dev/null; then
+    echo "[$(date -u +%FT%TZ)] openwebui PRECHECK SKIP: ${HEALTH_TCP} unreachable -- service unhealthy or down"
+    exit 0
+  fi
+fi
+
+# --- backup -----------------------------------------------------------
+TIMESTAMP="$(date -u +%Y%m%d-%H%M%S)"
+BACKUP_FILE="${BACKUP_DIR}/openwebui-backup-${TIMESTAMP}.tar.gz"
+
 tar czf "${BACKUP_FILE}" -C "${DATA_DIR}" .
+sha256sum "${BACKUP_FILE}" > "${BACKUP_FILE}.sha256"
 
 BACKUP_SIZE="$(du -h "${BACKUP_FILE}" | cut -f1)"
 echo "[$(date -u +%FT%TZ)] Backup created: ${BACKUP_FILE} (${BACKUP_SIZE})"
 
-find "${BACKUP_DIR}" -name "openwebui-backup-*.tar.gz" -mtime "+${RETAIN_DAYS}" -type f | while read -r old; do
-    rm -f "${old}"
-    echo "[$(date -u +%FT%TZ)] Pruned old backup: ${old}"
-done
+# --- retention: keep N most recent ------------------------------------
+ls -1t "${BACKUP_DIR}/openwebui-backup-"*.tar.gz 2>/dev/null \
+  | tail -n +$((RETAIN_COUNT + 1)) \
+  | while IFS= read -r old; do
+      rm -f "${old}" "${old}.sha256"
+      echo "[$(date -u +%FT%TZ)] Pruned old backup: ${old}"
+    done
 
-TOTAL="$(find "${BACKUP_DIR}" -name "openwebui-backup-*.tar.gz" -type f | wc -l)"
-echo "[$(date -u +%FT%TZ)] Backup complete. ${TOTAL} backup(s) retained."
+TOTAL="$(ls -1 "${BACKUP_DIR}/openwebui-backup-"*.tar.gz 2>/dev/null | wc -l)"
+echo "[$(date -u +%FT%TZ)] Backup complete. ${TOTAL} backup(s) retained (retain=${RETAIN_COUNT})."

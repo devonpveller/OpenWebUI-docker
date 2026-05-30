@@ -49,11 +49,23 @@ Every backup container, regardless of shape, must have:
    automatically mirrors every subdir of `./backups/` — no NAS-side
    change needed.
 
-4. **Retention** via `find -mtime +N -delete` on both the archive and its
-   sentinel, where N comes from a configurable env var
-   (`<SERVICE>_BACKUP_RETAIN_DAYS`).
+4. **Retention** via `ls -1t ... | tail -n +$((RETAIN_COUNT + 1))` (keep N
+   most recent archives + sentinels), where N comes from a configurable
+   env var `<SERVICE>_BACKUP_RETAIN_COUNT` (default 2). Count-based, not
+   days-based, so a failed run for 3 days doesn't leave you with zero
+   archives if your old retention was tight.
 
-5. **Schedule** via `BACKUP_CRON` env var (cron format, UTC) — operator
+5. **Health gate (precheck)**: before doing anything destructive, the
+   script must check that the source data is sane AND, where applicable,
+   that the source service is reachable. Skip cleanly (`exit 0` + log
+   message) on precheck fail -- never capture a torn snapshot from a
+   crashing service. The two probes available:
+   - `nc -z -w 5 <host> <port>` if the backup container shares a network
+     with the source. The host:port comes from a configurable env var
+     `HEALTH_TCP` (e.g. `openwebui:8080`); empty value = skip the probe.
+   - Data-existence: directory exists + is non-empty. Always required.
+
+6. **Schedule** via `BACKUP_CRON` env var (cron format, UTC) — operator
    can override in `.env`. Schedule conventions:
    - **02:00 UTC** — large or DB-dump jobs (longest run window)
    - **02:15 / 02:20 / 02:25 UTC** — small tar jobs
@@ -61,10 +73,10 @@ Every backup container, regardless of shape, must have:
    - **04:00 UTC Sunday** — NAS sync (after all nightlies)
    - **Custom (weekly Sunday 01:00 UTC)** — multi-GB jobs that don't need daily cadence (lm-models)
 
-6. **Entry in [restore-from-snapshot.md](./restore-from-snapshot.md)**
+7. **Entry in [restore-from-snapshot.md](./restore-from-snapshot.md)**
    describing how to restore from one of the produced archives.
 
-7. **Pre-created bind-mount target**: the `./backups/<service>/` directory
+8. **Pre-created bind-mount target**: the `./backups/<service>/` directory
    must exist before the container starts (Docker creates it as root if
    missing, which then blocks a non-root container from writing). The
    easiest way is to add it to the
@@ -91,7 +103,8 @@ database under active writes," copy this block into
       - DATA_DIR=/data
       - BACKUP_DIR=/backups
       - PREFIX=<service>                        # <-- prefix for filename
-      - RETAIN_DAYS=${<SERVICE>_BACKUP_RETAIN_DAYS:-7}
+      - RETAIN_COUNT=${<SERVICE>_BACKUP_RETAIN_COUNT:-2}
+      - HEALTH_TCP=<source-service-host>:<source-service-port>   # <-- service to probe
       - BACKUP_CRON=${<SERVICE>_BACKUP_CRON:-30 2 * * *}   # <-- pick a slot
       - TZ=UTC
     entrypoint: /bin/sh
@@ -100,7 +113,7 @@ database under active writes," copy this block into
       - |
         chmod +x /scripts/backup.sh
         echo "$${BACKUP_CRON} sh /scripts/backup.sh >> /var/log/backup.log 2>&1" > /etc/crontabs/root
-        echo "[$(date -u +%FT%TZ)] <SERVICE>-backup scheduler started (cron: $${BACKUP_CRON}, retain: $${RETAIN_DAYS}d)"
+        echo "[$(date -u +%FT%TZ)] <SERVICE>-backup scheduler started (cron: $${BACKUP_CRON}, retain: $${RETAIN_COUNT} most recent)"
         crond -f -l 2
     restart: unless-stopped
     security_opt:
@@ -113,7 +126,7 @@ database under active writes," copy this block into
 
 Then:
 
-1. Add `<SERVICE>_BACKUP_RETAIN_DAYS=` and `<SERVICE>_BACKUP_CRON=` to
+1. Add `<SERVICE>_BACKUP_RETAIN_COUNT=2` and `<SERVICE>_BACKUP_CRON=` to
    [`.env.example`](../.env.example).
 2. Add `./backups/<SERVICE>/` to the inventory in
    [`scripts/check-backup-coverage.ps1`](../scripts/check-backup-coverage.ps1).
