@@ -896,7 +896,12 @@ services:
       - "com.centurylinklabs.watchtower.enable=false"
 
   portal-alerter:
-    image: denoland/deno:alpine
+    # Digest-pinned (plan §12.1, audit 2026-05-29 §F.3). Bump by:
+    #   1. docker pull denoland/deno:alpine
+    #   2. docker inspect denoland/deno:alpine --format '{{index .RepoDigests 0}}'
+    #   3. paste the new sha256 below
+    #   4. recreate portal-alerter and run alerter.ts --selftest before relying on it
+    image: denoland/deno@sha256:a40c899f6aca244a3f0a116c05f6dec0a29f9898d2f004d60ec57c1514f87349
     container_name: portal-alerter
     profiles: [internet, local-test]
     networks:
@@ -963,7 +968,12 @@ services:
     environment:
       - TZ=UTC
       - PUBLIC_DOMAIN=${PUBLIC_DOMAIN}
-      - AUTHELIA_JWT_SECRET=${AUTHELIA_JWT_SECRET}
+      # Renamed from AUTHELIA_JWT_SECRET to its 4.39 home (the old name auto-maps
+      # but emits a deprecation warning on every startup; will become an error
+      # in Authelia 5.0). The .env key stays as AUTHELIA_JWT_SECRET so the
+      # operator doesn't need to rotate; only the env-var name Authelia sees
+      # inside the container changes.
+      - AUTHELIA_IDENTITY_VALIDATION_RESET_PASSWORD_JWT_SECRET=${AUTHELIA_JWT_SECRET}
       - AUTHELIA_SESSION_SECRET=${AUTHELIA_SESSION_SECRET}
       - AUTHELIA_STORAGE_ENCRYPTION_KEY=${AUTHELIA_STORAGE_ENCRYPTION_KEY}
     user: "10001:10001"      # plan §2 hardening floor — non-root UID
