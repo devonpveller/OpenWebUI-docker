@@ -90,29 +90,23 @@ function Write-LogLine {
   Add-Content -Path $logFile -Value $line
 }
 
+# Source the shared portal-alerter client. Provides Send-PortalAlert which
+# (a) builds the JSON body via ConvertTo-Json -- avoiding the double-escape
+# bug that the inline implementation had with UNC paths, and (b) actually
+# checks wget's exit code + the alerter's response body, so we know whether
+# the email truly dispatched. See scripts/lib/portal-alerter-client.ps1.
+. (Join-Path $PSScriptRoot 'lib\portal-alerter-client.ps1')
+
 function Send-AlerterFailure {
   param([string]$Reason)
-  $alerterContainer = 'portal-alerter'
-  $running = docker inspect $alerterContainer --format '{{.State.Running}}' 2>$null
-  if ($running -ne 'true') {
-    Write-LogLine "portal-alerter not running; cannot dispatch alert" 'WARN'
-    return
-  }
-  $bodyHash = @{
-    severity      = 'high'
-    event         = 'nas-backup.failure'
-    timestamp_utc = (Get-Date -AsUTC -Format 'yyyy-MM-ddTHH:mm:ssZ')
-    log_line      = "nas-sync to $nasDest failed: $Reason"
-  }
-  $body = $bodyHash | ConvertTo-Json -Compress
-  try {
-    docker exec $alerterContainer wget -q -O- --post-data="$body" `
-      --header='Content-Type: application/json' `
-      http://127.0.0.1:8080/alert 2>&1 | Out-Null
-    Write-LogLine "alert dispatched to portal-alerter" 'INFO'
-  }
-  catch {
-    Write-LogLine "failed to dispatch alert: $_" 'WARN'
+  $logLine = "nas-sync to $nasDest failed: $Reason"
+  $result = Send-PortalAlert -Severity 'high' `
+    -Event 'nas-backup.failure' `
+    -LogLine $logLine
+  if ($result.Ok) {
+    Write-LogLine "alert dispatched to portal-alerter (Gmail send confirmed)" 'INFO'
+  } else {
+    Write-LogLine "alert dispatch FAILED: $($result.Reason)" 'WARN'
   }
 }
 

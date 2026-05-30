@@ -828,6 +828,270 @@ services:
       - "com.centurylinklabs.watchtower.enable=false"
 
   # =====================================================================
+  # Unified snapshot backups (post-2026-05-29 plan).
+  # Six new containers covering the gaps from the post-implementation
+  # audit: OB1 PostgreSQL + wiki, Open Notebook (SurrealDB + notebook_data),
+  # smolcrawl pipelines, Tailscale state, LM Studio models. All write
+  # under ./backups/<service>/ with .sha256 sentinels and configurable
+  # retention. The existing weekly NAS sync (scripts/backup-to-nas.ps1)
+  # picks them up automatically.
+  # =====================================================================
+
+  # openbrain-db-backup -- pg_dump nightly of the openbrain PostgreSQL DB.
+  # Joins the open-brain compose project's obnet to reach openbrain-db:5432
+  # over TCP. Requires the OB1 stack to be UP.
+  openbrain-db-backup:
+    build:
+      context: ./backup
+      dockerfile: Dockerfile.postgres
+    image: openbrain-db-backup:local
+    container_name: openbrain-db-backup
+    env_file:
+      # OB1's .env carries POSTGRES_PASSWORD; user + db are hardcoded in
+      # OB1's compose (postgres / openbrain) so we mirror them as static
+      # environment vars below. Rotating the password in OB1's .env
+      # propagates here automatically.
+      - ./OB1/docker/.env
+    environment:
+      - PGHOST=openbrain-db
+      - PGPORT=5432
+      - POSTGRES_USER=postgres        # matches OB1 docker-compose.yml line 24
+      - POSTGRES_DB=openbrain          # matches OB1 docker-compose.yml line 23
+      - BACKUP_DIR=/backups
+      - RETAIN_DAYS=${OPENBRAIN_DB_BACKUP_RETAIN_DAYS:-14}
+      - BACKUP_CRON=${OPENBRAIN_DB_BACKUP_CRON:-0 2 * * *}
+      - TZ=UTC
+    volumes:
+      - ./backups/openbrain-db:/backups
+      - ./backup/openbrain-db-backup.sh:/scripts/backup.sh:ro
+    networks:
+      - obnet           # external -- reaches openbrain-db
+    user: "10008:10008"
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=16m
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+          pids: 50
+    command:
+      - sh
+      - -c
+      - |
+        # Render supercronic crontab from $BACKUP_CRON. supercronic
+        # inherits env naturally so no profile.d shim needed.
+        printf '%s sh /scripts/backup.sh\n' "$$BACKUP_CRON" > /tmp/crontab.rendered
+        echo "[$$(date -u +%FT%TZ)] openbrain-db-backup scheduler started (cron: $$BACKUP_CRON, retain: $${RETAIN_DAYS}d)"
+        exec /usr/local/bin/supercronic /tmp/crontab.rendered
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
+  # openbrain-wiki-backup -- tar of the openbrain-wiki-data volume.
+  # Source files are root-owned (openbrain-wiki runs as root), so the
+  # backup container runs as root too -- the pre-portal pattern. Other
+  # hardening (cap_drop ALL, no-new-privileges) still applies.
+  openbrain-wiki-backup:
+    image: alpine:3.21
+    container_name: openbrain-wiki-backup
+    volumes:
+      - openbrain-wiki-data:/data:ro
+      - ./backups/openbrain-wiki:/backups
+      - ./backup/openbrain-wiki-backup.sh:/scripts/backup.sh:ro
+    environment:
+      - BACKUP_DIR=/backups
+      - DATA_DIR=/data
+      - RETAIN_DAYS=${OPENBRAIN_WIKI_BACKUP_RETAIN_DAYS:-7}
+      - BACKUP_CRON=${OPENBRAIN_WIKI_BACKUP_CRON:-15 2 * * *}
+      - TZ=UTC
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        chmod +x /scripts/backup.sh
+        echo "$${BACKUP_CRON} /scripts/backup.sh >> /var/log/backup.log 2>&1" > /etc/crontabs/root
+        echo "[$(date -u +%FT%TZ)] openbrain-wiki-backup scheduler started (cron: $${BACKUP_CRON}, retain: $${RETAIN_DAYS}d)"
+        crond -f -l 2
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
+  # open-notebook-backup -- two-phase:
+  #   (1) SurrealDB logical export via the `surreal` CLI over the WebSocket
+  #       RPC endpoint. NEVER tar /mydata directly -- RocksDB corrupts.
+  #   (2) tarball of the host bind mount D:\Open WebUI\open-notebook\notebook_data
+  #       (application-layer files; small).
+  # Hot-safe: no surrealdb container stop needed.
+  open-notebook-backup:
+    build:
+      context: ./backup
+      dockerfile: Dockerfile.surreal
+    image: open-notebook-backup:local
+    container_name: open-notebook-backup
+    networks:
+      - default     # surrealdb is on default; we reach it via DNS name 'surrealdb'
+    environment:
+      # SurrealDB v2 accepts a built-in root/root login regardless of the
+      # --user/--pass passed to surreal start. We use it here so the backup
+      # is independent of any operator-defined runtime credential rotation
+      # in open_notebook's SURREAL_USER/SURREAL_PASSWORD. The "real" auth
+      # boundary is the network isolation (surrealdb is only on the default
+      # bridge with localhost-only host port).
+      - SURREAL_URL=http://surrealdb:8000
+      - SURREAL_USER=root
+      - SURREAL_PASSWORD=root
+      - SURREAL_NS=open_notebook
+      - SURREAL_DB=open_notebook
+      - NOTEBOOK_DATA_DIR=/notebook-data
+      - BACKUP_DIR=/backups
+      - RETAIN_DAYS=${OPEN_NOTEBOOK_BACKUP_RETAIN_DAYS:-14}
+      - BACKUP_CRON=${OPEN_NOTEBOOK_BACKUP_CRON:-20 2 * * *}
+      - TZ=UTC
+    volumes:
+      - D:\Open WebUI\open-notebook\notebook_data:/notebook-data:ro
+      - ./backups/open-notebook:/backups
+      - ./backup/open-notebook-backup.sh:/scripts/backup.sh:ro
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=256m       # large enough for the surreal export staging file
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+          pids: 50
+    command:
+      - sh
+      - -c
+      - |
+        printf '%s sh /scripts/backup.sh\n' "$$BACKUP_CRON" > /tmp/crontab.rendered
+        echo "[$$(date -u +%FT%TZ)] open-notebook-backup scheduler started (cron: $$BACKUP_CRON, retain: $${RETAIN_DAYS}d)"
+        exec /usr/local/bin/supercronic /tmp/crontab.rendered
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
+  # smolcrawl-backup -- tar of smolcrawl-data named volume (deep_research
+  # pipelines + crawl outputs). Hot-safe: pipelines are JSON definitions,
+  # outputs are append-only files. Uses the generic-tar-backup.sh script.
+  smolcrawl-backup:
+    image: alpine:3.21
+    container_name: smolcrawl-backup
+    volumes:
+      - smolcrawl-data:/data:ro
+      - ./backups/smolcrawl:/backups
+      - ./backup/generic-tar-backup.sh:/scripts/backup.sh:ro
+    environment:
+      - DATA_DIR=/data
+      - BACKUP_DIR=/backups
+      - PREFIX=smolcrawl
+      - RETAIN_DAYS=${SMOLCRAWL_BACKUP_RETAIN_DAYS:-7}
+      - BACKUP_CRON=${SMOLCRAWL_BACKUP_CRON:-25 2 * * *}
+      - TZ=UTC
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        chmod +x /scripts/backup.sh
+        echo "$${BACKUP_CRON} sh /scripts/backup.sh >> /var/log/backup.log 2>&1" > /etc/crontabs/root
+        echo "[$(date -u +%FT%TZ)] smolcrawl-backup scheduler started (cron: $${BACKUP_CRON}, retain: $${RETAIN_DAYS}d)"
+        crond -f -l 2
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
+  # tailscale-backup -- tar of the Tailscale state directory bind mount.
+  # Small (~100 KB): device identity, derpmap cache, log files. Restore
+  # avoids re-authenticating the device to your tailnet.
+  tailscale-backup:
+    image: alpine:3.21
+    container_name: tailscale-backup
+    volumes:
+      - ./data/tailscale:/data:ro
+      - ./backups/tailscale:/backups
+      - ./backup/generic-tar-backup.sh:/scripts/backup.sh:ro
+    environment:
+      - DATA_DIR=/data
+      - BACKUP_DIR=/backups
+      - PREFIX=tailscale
+      - RETAIN_DAYS=${TAILSCALE_BACKUP_RETAIN_DAYS:-7}
+      - BACKUP_CRON=${TAILSCALE_BACKUP_CRON:-25 2 * * *}
+      - TZ=UTC
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        chmod +x /scripts/backup.sh
+        echo "$${BACKUP_CRON} sh /scripts/backup.sh >> /var/log/backup.log 2>&1" > /etc/crontabs/root
+        echo "[$(date -u +%FT%TZ)] tailscale-backup scheduler started (cron: $${BACKUP_CRON}, retain: $${RETAIN_DAYS}d)"
+        crond -f -l 2
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
+  # lm-models-backup -- tar of the LM Studio models directory.
+  # CAVEAT: this directory can be 50+ GB. The two-slot NAS mirror means
+  # ~100+ GB on the NAS. WEEKLY (Sundays 01:00 UTC) by default to limit
+  # disk churn; set LM_MODELS_BACKUP_CRON= (empty) in .env to disable
+  # if NAS storage becomes tight. Models are re-downloadable from
+  # HuggingFace if you choose to skip backup.
+  lm-models-backup:
+    image: alpine:3.21
+    container_name: lm-models-backup
+    volumes:
+      - C:\Users\yamao\.lmstudio\models:/data:ro
+      - ./backups/lm-models:/backups
+      - ./backup/generic-tar-backup.sh:/scripts/backup.sh:ro
+    environment:
+      - DATA_DIR=/data
+      - BACKUP_DIR=/backups
+      - PREFIX=lm-models
+      - RETAIN_DAYS=${LM_MODELS_BACKUP_RETAIN_DAYS:-28}
+      - BACKUP_CRON=${LM_MODELS_BACKUP_CRON:-0 1 * * 0}     # Sunday 01:00 UTC
+      - TZ=UTC
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        if [ -z "$${BACKUP_CRON}" ]; then
+          echo "[$(date -u +%FT%TZ)] lm-models-backup DISABLED (LM_MODELS_BACKUP_CRON is empty). Container will exit."
+          exit 0
+        fi
+        chmod +x /scripts/backup.sh
+        echo "$${BACKUP_CRON} sh /scripts/backup.sh >> /var/log/backup.log 2>&1" > /etc/crontabs/root
+        echo "[$(date -u +%FT%TZ)] lm-models-backup scheduler started (cron: $${BACKUP_CRON}, retain: $${RETAIN_DAYS}d)"
+        crond -f -l 2
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
+  # =====================================================================
   # Internet-exposed front-end (PORTAL).
   # Every service below tagged `profiles: [internet]` — does NOT start
   # with a plain `docker compose up -d`. Lifecycle is driven by
@@ -1331,6 +1595,12 @@ volumes:
   caddy-config:
   authelia-data:
   tripwire-data:
+  # Cross-project named volume from the open-brain compose project,
+  # referenced by openbrain-wiki-backup. ai-stack does not own this;
+  # it must already exist (it does, when OB1 is up).
+  openbrain-wiki-data:
+    external: true
+    name: open-brain_openbrain-wiki-data
 
 networks:
   # Internal-only network: no gateway, no internet access.
@@ -1365,3 +1635,11 @@ networks:
   # NOT internal — this is the single chokepoint with internet egress in the portal slice.
   notify-net:
     driver: bridge
+  # ----- Cross-project networks (declared external) ----------------------
+  # obnet: the open-brain compose project's own bridge. openbrain-db-backup
+  # (defined below) joins it to reach openbrain-db over TCP. The OB1 stack
+  # must be UP for backups to succeed -- consistent with the existing
+  # cross-project dependency (OB1 depends on ai-stack_llm-net).
+  obnet:
+    external: true
+    name: open-brain_obnet

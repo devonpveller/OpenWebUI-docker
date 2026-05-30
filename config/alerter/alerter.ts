@@ -676,10 +676,18 @@ Deno.serve({ port: PORT, hostname: "0.0.0.0" }, async (req) => {
     let payload: AlertPayload;
     try {
       payload = await req.json();
-    } catch {
+    } catch (e) {
+      // Log 400s too. The original implementation only logged 500s, which
+      // made it impossible to see why client requests (e.g., malformed JSON
+      // from a script with backslash-escaping bugs) were being rejected.
+      // Surface via stderr so `docker logs portal-alerter` shows it.
+      const ip = req.headers.get("x-forwarded-for") ?? "(local)";
+      console.error(`/alert 400 invalid JSON from ${ip}: ${e instanceof Error ? e.message : e}`);
       return json({ error: "invalid JSON" }, 400);
     }
     if (!payload.severity || !payload.event) {
+      const ip = req.headers.get("x-forwarded-for") ?? "(local)";
+      console.error(`/alert 400 missing required fields from ${ip}: severity=${payload.severity} event=${payload.event}`);
       return json({ error: "severity and event required" }, 400);
     }
     try {

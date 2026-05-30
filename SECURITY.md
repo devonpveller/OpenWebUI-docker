@@ -105,9 +105,12 @@ Authelia 4.39 logs warnings; auto-mapped to `AUTHELIA_IDENTITY_VALIDATION_RESET_
 - Scheduled traffic digest: `portal-cron` fires `POST /run` on the alerter daily 07:00 UTC by default
 
 ### Backup state
-- `caddy-backup` and `authelia-backup` write nightly tarballs to `./backups/caddy/` and `./backups/authelia/` with `.sha256` sentinels
-- Post-2026-05-29: tarballs now include all state files (UIDs match data owners)
-- ⚠️ Backups are on the same host as the data. Recommended: sync `./backups/` to ≥1 off-host destination daily (rclone / OneDrive / B2 / NAS / USB)
+- **Full-stack coverage** (post-2026-05-30): nightly logical/tar backups for caddy, authelia, openwebui, mnemory, little-coder (5 volumes), smolcrawl, tailscale, openbrain-db (`pg_dump -Fc`), openbrain-wiki (volume tar), open-notebook (surreal export + notebook_data tar) — plus weekly lm-models tar (Sundays 01:00 UTC)
+- Every backup writes a `.sha256` sentinel beside the archive; restore tooling verifies before touching anything
+- Convention for new services: [documentation/backup-conventions.md](documentation/backup-conventions.md). Coverage check: `.\scripts\check-backup-coverage.ps1`
+- Restore workflow: per-service in [documentation/restore-from-snapshot.md](documentation/restore-from-snapshot.md); disaster recovery via `.\scripts\restore-from-snapshot.ps1 -SnapshotRoot ... -Date ... -Apply`
+- Off-host sync: `scripts/backup-to-nas.ps1` runs weekly (Sundays 04:00 UTC), alternating slot-A/slot-B on the NAS using DPAPI-encrypted credentials (LocalMachine scope). Failures are now reported via portal-alerter (2026-05-30 alerter wiring fix — silent-failure bug closed)
+- SurrealDB note: backups authenticate as `root/root` regardless of the `--user`/`--pass` startup args; SurrealDB v2 grants any caller these credentials when no `DEFINE USER` exists. This is acceptable because the surrealdb port is bound to 127.0.0.1 (not LAN-reachable)
 
 ---
 
@@ -165,11 +168,12 @@ Distinct from `portal-off.ps1` (planned downtime, no secret rotation). See [docu
 In approximate priority order:
 
 1. **HIGH:** Enroll second WebAuthn credential or print TOTP recovery secret offline (§6.8). Requires production mode.
-2. **MEDIUM:** Sync `./backups/` off-host (daily) — currently same-host only.
+2. ~~**MEDIUM:** Sync `./backups/` off-host (daily)~~ ✅ DONE 2026-05-30 — NAS sync via two-slot weekly rotation; alerter silent-failure bug fixed.
 3. **LOW:** Pin `denoland/deno:alpine` to a digest (§5.2).
 4. **LOW:** Rename `AUTHELIA_JWT_SECRET` env to `AUTHELIA_IDENTITY_VALIDATION_RESET_PASSWORD_JWT_SECRET` (§5.3).
 5. **LOW:** Make Windows firewall Public profile explicit Block (§6.5).
-6. **LOW (~90 days post-launch):** Evaluate HSTS preload submission per plan §H.1.
+6. **LOW:** Clean up 4 orphaned Docker volumes (`openwebui_data`, `openwebui_sessions`, `tailscale_state`, `tailscale-state`) flagged by `check-backup-coverage.ps1`. Confirm contents are not needed, then `docker volume rm <name>`.
+7. **LOW (~90 days post-launch):** Evaluate HSTS preload submission per plan §H.1.
 
 ---
 
@@ -178,5 +182,7 @@ In approximate priority order:
 - Implementation plan: [documentation/implementation-guide/open-source authentication front ends for ai stack/plan-internet-exposed-front-end.md](documentation/implementation-guide/open-source%20authentication%20front%20ends%20for%20ai%20stack/plan-internet-exposed-front-end.md)
 - Post-implementation audit (2026-05-29): [documentation/implementation-guide/open-source authentication front ends for ai stack/audit-post-implementation-2026-05-29.md](documentation/implementation-guide/open-source%20authentication%20front%20ends%20for%20ai%20stack/audit-post-implementation-2026-05-29.md)
 - Incident response playbook: [documentation/incident-response.md](documentation/incident-response.md)
+- Backup conventions (new services): [documentation/backup-conventions.md](documentation/backup-conventions.md)
+- Restore workflow: [documentation/restore-from-snapshot.md](documentation/restore-from-snapshot.md) + [scripts/restore-from-snapshot.ps1](scripts/restore-from-snapshot.ps1)
 - Active compose: [docker-compose.yml](docker-compose.yml)
 - Live Caddyfile: [config/caddy/Caddyfile](config/caddy/Caddyfile)
