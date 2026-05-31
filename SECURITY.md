@@ -97,6 +97,12 @@ Authelia 4.39 logs warnings; auto-mapped to `AUTHELIA_IDENTITY_VALIDATION_RESET_
 - Authelia structured JSON log at `/data/authelia.log` (in `authelia-data` volume)
 - Caddy JSON access log at `/data/caddy-access.log` (in `caddy-data` volume); rolls at 100 MiB / 7 files / 30 days
 
+### Access monitoring (single source of truth)
+- Full reference: [documentation/monitoring-access.md](documentation/monitoring-access.md)
+- Operator tool: [scripts/access-query.ps1](scripts/access-query.ps1) for interactive review of recent activity (filters: Hours, Subdomain, Status, IP, UniqueIPs)
+- `config/watcher/known-ips.txt` is the "trusted source IP" list. Auto-populated by `authelia-watcher` after the first new-IP alert; edit by hand to remove stale entries
+- `tunnel-watcher` polls `cloudflared:2000/ready` every 30s and alerts HIGH after 3 consecutive failures (~90s default); INFO on recovery; hourly heartbeat to docker logs
+
 ### Real-time alerting (Gmail via portal-alerter)
 - All operator alerts land in **`Yamaoka01@gmail.com`** via the `portal-alerter` Deno sidecar
 - OAuth client: **dedicated** GCP OAuth 2.0 client (`portal-alerter`), separate from OB1's `open-brain-email` client. Revoking either side at https://myaccount.google.com/permissions does NOT affect the other.

@@ -674,15 +674,20 @@ Deno.serve({ port: PORT, hostname: "0.0.0.0" }, async (req) => {
 
   if (req.method === "POST" && url.pathname === "/alert") {
     let payload: AlertPayload;
+    // Read body as text first so we can log a prefix on parse failure --
+    // makes it possible to identify which sender (script, watcher, etc.)
+    // is POSTing malformed JSON. Without this, the 400 is silent about
+    // who's at fault.
+    const raw = await req.text();
     try {
-      payload = await req.json();
+      payload = JSON.parse(raw);
     } catch (e) {
-      // Log 400s too. The original implementation only logged 500s, which
-      // made it impossible to see why client requests (e.g., malformed JSON
-      // from a script with backslash-escaping bugs) were being rejected.
-      // Surface via stderr so `docker logs portal-alerter` shows it.
       const ip = req.headers.get("x-forwarded-for") ?? "(local)";
-      console.error(`/alert 400 invalid JSON from ${ip}: ${e instanceof Error ? e.message : e}`);
+      const ua = req.headers.get("user-agent") ?? "(no UA)";
+      const prefix = raw.slice(0, 200).replace(/\n/g, "\\n").replace(/\r/g, "\\r");
+      console.error(
+        `/alert 400 invalid JSON from ${ip} ua="${ua}" body[0..200]="${prefix}" err=${e instanceof Error ? e.message : e}`,
+      );
       return json({ error: "invalid JSON" }, 400);
     }
     if (!payload.severity || !payload.event) {

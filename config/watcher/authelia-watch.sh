@@ -97,6 +97,15 @@ handle_authelia_event() {
     *"successful 1fa"*|*"successful 2fa"*)
       if [ -n "$ip" ] && ! ip_is_known "$ip"; then
         post_alert high authentication.success.new_ip "$ip" "$user" "$line"
+        # Auto-record the new IP so subsequent logins from the same
+        # device/network don't re-alert. File is mounted RW for this
+        # watcher only.
+        if [ -w "$KNOWN_IPS_FILE" ]; then
+          echo "$ip" >> "$KNOWN_IPS_FILE"
+          echo "[$(now_iso)] recorded new IP: $ip" >&2
+        else
+          echo "[$(now_iso)] CANNOT record IP $ip -- $KNOWN_IPS_FILE not writable" >&2
+        fi
       fi
       ;;
     *"banned"*)

@@ -1204,6 +1204,10 @@ services:
       - ./secrets/google/portal-alerter/token.json:/app/token.json
       - authelia-data:/logs/authelia:ro
       - caddy-data:/logs/caddy:ro
+      # Daily digest markdown reports. Persists to host so the operator
+      # can browse via documentation/portal-digest/ (see also
+      # portal-status.ps1's "Most recent digest" probe).
+      - ./reports/portal-digest:/reports
     environment:
       - DIGEST_TO=${DIGEST_TO}
       - DIGEST_FROM=${DIGEST_FROM}
@@ -1356,7 +1360,11 @@ services:
       - authelia-data:/logs/authelia:ro
       - caddy-data:/logs/caddy:ro
       - ./config/watcher/authelia-watch.sh:/scripts/watch.sh:ro
-      - ./config/watcher/known-ips.txt:/data/known-ips.txt:ro
+      # RW so the watcher can append a new IP after firing the first
+      # new_ip alert (so subsequent logins from the same device/network
+      # don't re-alert). Lives in config/watcher/ so the operator can
+      # also edit it (e.g. remove a stale carrier IP).
+      - ./config/watcher/known-ips.txt:/data/known-ips.txt
     environment:
       - ALERTER_URL=http://portal-alerter:8080/alert
       - ALERT_BASE_URL=${PUBLIC_DOMAIN}
@@ -1524,7 +1532,10 @@ services:
     profiles: [internet]
     networks:
       - edge-net
-    command: tunnel --no-autoupdate run
+    # --metrics exposes /ready and /healthcheck on port 2000 (bound to
+    # the edge-net only -- no host port). tunnel-watcher probes this to
+    # detect tunnel disconnects and alert via portal-alerter.
+    command: tunnel --no-autoupdate --metrics 0.0.0.0:2000 run
     environment:
       - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}
     user: "65532:65532"
@@ -1545,6 +1556,49 @@ services:
     depends_on:
       caddy:
         condition: service_healthy
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
+  # tunnel-watcher -- HTTP-probes cloudflared:2000/ready every 30s and
+  # alerts (HIGH) if the tunnel is down for >=3 consecutive checks
+  # (default 90s). Fires an INFO event when the tunnel recovers.
+  tunnel-watcher:
+    build:
+      context: ./config/tunnel-watcher
+      dockerfile: Dockerfile
+    image: portal-tunnel-watcher:local
+    container_name: tunnel-watcher
+    profiles: [internet]
+    networks:
+      - edge-net          # reaches cloudflared:2000
+      - auth-net          # reaches portal-alerter:8080 (it sits on both nets)
+    volumes:
+      - ./config/tunnel-watcher/tunnel-watch.sh:/scripts/watch.sh:ro
+    environment:
+      - CLOUDFLARED_URL=http://cloudflared:2000/ready
+      - ALERTER_URL=http://portal-alerter:8080/alert
+      - POLL_SEC=${TUNNEL_WATCHER_POLL_SEC:-30}
+      - FAILURES_BEFORE_ALERT=${TUNNEL_WATCHER_FAILURES_BEFORE_ALERT:-3}
+    user: "10003:10003"
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=4m
+    deploy:
+      resources:
+        limits:
+          cpus: '0.10'
+          memory: 32M
+          pids: 30
+    depends_on:
+      cloudflared:
+        condition: service_started
+      portal-alerter:
+        condition: service_started
     labels:
       - "com.centurylinklabs.watchtower.enable=false"
 
