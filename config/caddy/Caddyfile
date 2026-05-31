@@ -170,6 +170,18 @@ http://notebook.{$PUBLIC_DOMAIN} {
     }
     redir /notebook / 308
 
+    # Intercept the Next.js runtime-config endpoint and return the public
+    # apiUrl directly. Upstream's auto-detect would construct
+    # https://notebook.devinveller.ai:5055 (port 5055 isn't on Cloudflare,
+    # would 404). Setting API_URL env on the container fixes public but
+    # breaks tailnet -- where the auto-detect IS correct (entrypoint.sh
+    # tailscale-serves the API on :5055). So override here, NOT in the
+    # container: tailnet path unchanged, public path correct.
+    handle /config {
+        header Content-Type application/json
+        respond "{\"apiUrl\":\"https://notebook.{$PUBLIC_DOMAIN}\"}" 200
+    }
+
     # FastAPI lives on :5055 and exposes its routes UNDER /api/* itself
     # (e.g. /api/config). Do NOT strip the prefix -- upstream wants the
     # full path. Pass {host} so the frontend's auto-detect picks the

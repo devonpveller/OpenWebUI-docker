@@ -537,16 +537,18 @@ services:
       - SURREAL_NAMESPACE=open_notebook
       - SURREAL_DATABASE=open_notebook
 
-      # Public URL the Next.js frontend tells the BROWSER to call for the
-      # FastAPI. Without this, the runtime-config auto-detector reads the
-      # incoming Host header and constructs e.g. https://<host>:5055,
-      # which 1) isn't reachable from outside the LAN (port 5055 not on
-      # Cloudflare) and 2) leaks the in-Docker hostname when no
-      # X-Forwarded-Host is set. Caddy routes notebook.<domain>/api/* to
-      # the FastAPI on :5055 (see Caddyfile).
-      - API_URL=${OPEN_NOTEBOOK_PUBLIC_URL:-https://notebook.devinveller.ai}
-      # INTERNAL_API_URL is Next.js server-side calls to FastAPI -- stays
-      # in-container (127.0.0.1:5055 is the default).
+      # DO NOT set API_URL here. The Next.js runtime-config auto-detect
+      # logic (frontend/src/app/config/route.ts) constructs
+      # {proto}://{hostname}:5055 from incoming Host/X-Forwarded-Proto
+      # headers -- this is exactly what the tailscale-serve dual-port
+      # pattern in entrypoint.sh expects (UI on :8443, API on :5055).
+      # Setting API_URL forces ONE static URL for everyone and breaks
+      # tailnet access.
+      #
+      # For the public path (https://notebook.devinveller.ai), Caddy
+      # intercepts /config and returns the correct apiUrl directly --
+      # see Caddyfile. The browser uses same-origin /api/* and Caddy
+      # routes those to FastAPI.
       - INTERNAL_API_URL=http://127.0.0.1:5055
     volumes:
       - D:\Open WebUI\open-notebook\notebook_data:/app/data
