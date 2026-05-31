@@ -110,6 +110,16 @@ http://openwebui.{$PUBLIC_DOMAIN} {
         uri /api/authz/auth-request
         header_up X-Original-URL https://{host}{uri}
         header_up X-Original-Method {method}
+
+        # Authelia's AuthRequest implementation returns 401 + Location +
+        # a single-link HTML body when unauthenticated. Browsers do NOT
+        # follow Location on 401, so without this users see a bare
+        # "401 Unauthorized" link. Convert to a proper 302 so the browser
+        # bounces straight to Authelia and back after sign-in.
+        @denied status 401 403
+        handle_response @denied {
+            redir https://auth.{$PUBLIC_DOMAIN}/?rd=https://{host}{uri}&rm={method} 302
+        }
     }
 
     # Defensive: strip a leftover /openwebui/ prefix the browser may still
@@ -142,6 +152,16 @@ http://notebook.{$PUBLIC_DOMAIN} {
         uri /api/authz/auth-request
         header_up X-Original-URL https://{host}{uri}
         header_up X-Original-Method {method}
+
+        # Authelia's AuthRequest implementation returns 401 + Location +
+        # a single-link HTML body when unauthenticated. Browsers do NOT
+        # follow Location on 401, so without this users see a bare
+        # "401 Unauthorized" link. Convert to a proper 302 so the browser
+        # bounces straight to Authelia and back after sign-in.
+        @denied status 401 403
+        handle_response @denied {
+            redir https://auth.{$PUBLIC_DOMAIN}/?rd=https://{host}{uri}&rm={method} 302
+        }
     }
 
     # Defensive: strip a leftover /notebook/ prefix from cached browsers.
@@ -214,6 +234,14 @@ http://{$PUBLIC_DOMAIN} {
         # appears as http, but the client-facing scheme is always https.
         header_up X-Original-URL https://{host}{uri}
         header_up X-Original-Method {method}
+
+        # Convert Authelia's 401 + Location into a proper 302 so browsers
+        # follow it automatically (they don't follow Location on 401).
+        # Without this, the user sees a bare "401 Unauthorized" link.
+        @denied status 401 403
+        handle_response @denied {
+            redir https://auth.{$PUBLIC_DOMAIN}/?rd=https://{host}{uri}&rm={method} 302
+        }
     }
 
     # ─── Routes ──────────────────────────────────────────────────────────
