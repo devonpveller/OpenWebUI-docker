@@ -93,6 +93,82 @@ http://auth.{$PUBLIC_DOMAIN} {
     reverse_proxy authelia:9091
 }
 
+# ─── Open WebUI on its own subdomain ──────────────────────────────────────
+# OpenWebUI generates root-relative URLs (`/static/...`, `/api/...`) that
+# don't survive a subpath deployment, so each app gets its own subdomain.
+http://openwebui.{$PUBLIC_DOMAIN} {
+    import security_headers
+    import sanitize_proxy_headers
+    import access_log
+    encode zstd gzip
+
+    request_body {
+        max_size 100MB
+    }
+
+    forward_auth authelia:9091 {
+        uri /api/authz/auth-request
+        header_up X-Original-URL https://{host}{uri}
+        header_up X-Original-Method {method}
+    }
+
+    # Defensive: strip a leftover /openwebui/ prefix the browser may still
+    # have cached from before the subdomain switch.
+    handle_path /openwebui/* {
+        redir * {uri} 308
+    }
+    redir /openwebui / 308
+
+    reverse_proxy openwebui:8080 {
+        header_up Host {upstream_hostport}
+        header_up X-Forwarded-Proto https
+    }
+}
+
+# ─── Open Notebook on its own subdomain ───────────────────────────────────
+# Streamlit (port 8502) + FastAPI (port 5055) split. Browser-side calls
+# to /api/notebook/* route to FastAPI; everything else to Streamlit.
+http://notebook.{$PUBLIC_DOMAIN} {
+    import security_headers
+    import sanitize_proxy_headers
+    import access_log
+    encode zstd gzip
+
+    request_body {
+        max_size 100MB
+    }
+
+    forward_auth authelia:9091 {
+        uri /api/authz/auth-request
+        header_up X-Original-URL https://{host}{uri}
+        header_up X-Original-Method {method}
+    }
+
+    # Defensive: strip a leftover /notebook/ prefix from cached browsers.
+    handle_path /notebook/* {
+        redir * {uri} 308
+    }
+    redir /notebook / 308
+
+    # FastAPI lives on :5055 and exposes its routes UNDER /api/* itself
+    # (e.g. /api/config). Do NOT strip the prefix -- upstream wants the
+    # full path. Pass {host} so the frontend's auto-detect picks the
+    # public hostname, not the in-Docker container name.
+    handle /api/* {
+        reverse_proxy open_notebook:5055 {
+            header_up Host {host}
+            header_up X-Forwarded-Proto https
+        }
+    }
+
+    # Next.js frontend on :8502. Same {host} fix here so the runtime-config
+    # auto-detector sees the public hostname.
+    reverse_proxy open_notebook:8502 {
+        header_up Host {host}
+        header_up X-Forwarded-Proto https
+    }
+}
+
 # ─── Main app domain ──────────────────────────────────────────────────────
 http://{$PUBLIC_DOMAIN} {
     import security_headers
@@ -142,25 +218,22 @@ http://{$PUBLIC_DOMAIN} {
 
     # ─── Routes ──────────────────────────────────────────────────────────
 
+    # Legacy subpath routes: redirect to the proper subdomain so old
+    # bookmarks still land somewhere useful. handle_path strips the
+    # prefix before {uri} is evaluated, so /openwebui/foo becomes
+    # https://openwebui.devinveller.ai/foo (not /openwebui/foo).
     handle_path /openwebui/* {
-        reverse_proxy openwebui:8080 {
-            header_up Host {upstream_hostport}
-            header_up X-Forwarded-Proto https
-        }
+        redir * https://openwebui.{$PUBLIC_DOMAIN}{uri} 308
     }
+    redir /openwebui https://openwebui.{$PUBLIC_DOMAIN}/ 308
 
     handle_path /notebook/* {
-        reverse_proxy open_notebook:8502 {
-            header_up Host {upstream_hostport}
-            header_up X-Forwarded-Proto https
-        }
+        redir * https://notebook.{$PUBLIC_DOMAIN}{uri} 308
     }
+    redir /notebook https://notebook.{$PUBLIC_DOMAIN}/ 308
 
     handle_path /api/notebook/* {
-        reverse_proxy open_notebook:5055 {
-            header_up Host {upstream_hostport}
-            header_up X-Forwarded-Proto https
-        }
+        redir * https://notebook.{$PUBLIC_DOMAIN}/api/notebook{uri} 308
     }
 
     handle {

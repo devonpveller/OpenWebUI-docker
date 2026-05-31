@@ -76,16 +76,23 @@ access_control:
         # by Docker bridges. If we whitelisted it, anyone reaching Authelia
         # via a Docker network would be classified as LAN.
   rules:
-    # LAN: one factor is enough
-    - domain: 'devinveller.ai'
-      policy: one_factor
-      networks: ['home_lan']
-    # Internet: enforce 2FA
-    - domain: 'devinveller.ai'
-      policy: two_factor
-    # Authelia portal itself: bypass (it does its own auth)
+    # Authelia portal itself: bypass (it does its own auth).
+    # MUST come before the wildcard rules below -- otherwise the wildcard
+    # captures auth.devinveller.ai first and creates a circular auth loop.
     - domain: 'auth.devinveller.ai'
       policy: bypass
+    # LAN: one factor is enough (apex + all app subdomains).
+    - domain:
+        - 'devinveller.ai'
+        - '*.devinveller.ai'
+      policy: one_factor
+      networks: ['home_lan']
+    # Internet: enforce 2FA on the apex AND every app subdomain
+    # (openwebui.devinveller.ai, notebook.devinveller.ai, ...).
+    - domain:
+        - 'devinveller.ai'
+        - '*.devinveller.ai'
+      policy: two_factor
 
 session:
   name: authelia_session

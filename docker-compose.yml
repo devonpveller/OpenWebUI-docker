@@ -536,6 +536,18 @@ services:
       - SURREAL_PASSWORD=${SURREAL_PASSWORD}
       - SURREAL_NAMESPACE=open_notebook
       - SURREAL_DATABASE=open_notebook
+
+      # Public URL the Next.js frontend tells the BROWSER to call for the
+      # FastAPI. Without this, the runtime-config auto-detector reads the
+      # incoming Host header and constructs e.g. https://<host>:5055,
+      # which 1) isn't reachable from outside the LAN (port 5055 not on
+      # Cloudflare) and 2) leaks the in-Docker hostname when no
+      # X-Forwarded-Host is set. Caddy routes notebook.<domain>/api/* to
+      # the FastAPI on :5055 (see Caddyfile).
+      - API_URL=${OPEN_NOTEBOOK_PUBLIC_URL:-https://notebook.devinveller.ai}
+      # INTERNAL_API_URL is Next.js server-side calls to FastAPI -- stays
+      # in-container (127.0.0.1:5055 is the default).
+      - INTERNAL_API_URL=http://127.0.0.1:5055
     volumes:
       - D:\Open WebUI\open-notebook\notebook_data:/app/data
     depends_on:
@@ -1373,6 +1385,53 @@ services:
     labels:
       - "com.centurylinklabs.watchtower.enable=false"
 
+  # authelia-notif-bridge -- tails Authelia's filesystem notifier and
+  # forwards each user-facing record (2FA OTP, password reset, account
+  # change) to portal-alerter so they reach Gmail. Without this, the OTP
+  # for 2FA enrollment lives only at /data/notification.txt -- unreachable
+  # when you're off the LAN, which defeats the point of the public portal.
+  authelia-notif-bridge:
+    build:
+      context: ./config/auth-notification-bridge
+      dockerfile: Dockerfile
+    image: portal-authnotif-bridge:local
+    container_name: authelia-notif-bridge
+    profiles: [internet, local-test]
+    networks:
+      - auth-net          # portal-alerter is on auth-net; bridge talks to it here
+    volumes:
+      - authelia-data:/data:ro
+      - ./config/auth-notification-bridge/bridge.sh:/scripts/bridge.sh:ro
+    environment:
+      - NOTIF_FILE=/data/notification.txt
+      - ALERTER_URL=http://portal-alerter:8080/alert
+      - ALERT_SEVERITY=info
+      - ALERT_EVENT=authelia.user-notification
+    # Same UID as authelia (10001) so we can read /data/notification.txt
+    # (mode 0600). Read-only mount + read_only fs constrain further.
+    user: "10001:10001"
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=4m
+    deploy:
+      resources:
+        limits:
+          cpus: '0.10'
+          memory: 32M
+          pids: 30
+    depends_on:
+      authelia:
+        condition: service_started
+      portal-alerter:
+        condition: service_started
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
   integrity-tripwire:
     build:
       context: ./config/tripwire
@@ -1514,6 +1573,12 @@ services:
       - HEALTH_TCP=${CADDY_BACKUP_HEALTH_TCP:-caddy:80}
       - BACKUP_CRON=${CADDY_BACKUP_CRON:-0 3 * * *}
     user: "10000:10000"
+    # edge-net membership exists only so the precheck can TCP-probe
+    # caddy:80. cap_drop ALL + read_only + no-new-privileges + non-root UID
+    # constrain what a compromised backup container could do on the net.
+    networks:
+      - default
+      - edge-net
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -1564,6 +1629,12 @@ services:
       - HEALTH_TCP=${AUTHELIA_BACKUP_HEALTH_TCP:-authelia:9091}
       - BACKUP_CRON=${AUTHELIA_BACKUP_CRON:-0 3 * * *}
     user: "10001:10001"
+    # auth-net membership exists only so the precheck can TCP-probe
+    # authelia:9091. Hardening still applies (cap_drop ALL, read_only,
+    # no-new-privileges, non-root UID).
+    networks:
+      - default
+      - auth-net
     security_opt:
       - no-new-privileges:true
     cap_drop:
