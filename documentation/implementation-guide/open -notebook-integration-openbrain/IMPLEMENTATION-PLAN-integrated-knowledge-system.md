@@ -35,7 +35,7 @@ The concept was written against upstream OB1's vocabulary. The self-hosted stack
 | `thoughts`, entities, knowledge graph, wiki compiler | **All exist and run live** (`init.sql`, `init-graph.sql`, entity-extraction-worker, `openbrain-wiki`). | Concept §3.1, the entity/graph/wiki layers are **done**. Do not rebuild them. **Never alter the `thoughts` table structure** (OB1 guardrail). |
 | Obsidian + LLM Wiki, `notes/` vs `content/` separation, git sync, note→OB1 tethering | **~95% built and live** (`openbrain-wiki-data` repo, `notes/` user folder, `content/` generated, deploy key at `secrets/openbrain-wiki-deploy_key`). | Concept §3.2 / §6.5 are **done**. The only missing piece is the Open Notebook "send to Obsidian inbox" stub → **Phase 7**. |
 | `threads`, `thread_sources`, `sessions`, `session_sources` | **Do not exist.** | **Phase 1** — the core net-new schema. |
-| OWUI research pushes sources to OB1 | **Already does** via `POST /research/persist` (custom REST on the MCP server) with `x-brain-key`. **But: no session provenance, no thread linkage.** Sessions live only in local Fileshed (`smolcrawl/deep_research/journal.py`). | **Phase 3** adds session records + thread linkage, not the capture path itself. |
+| OWUI research pushes sources to OB1 | **Already does** via `POST /research/persist` (custom REST on the MCP server) with `x-brain-key`. **But: no session provenance, no thread linkage.** Sessions live only in local Fileshed (`smolcrawl/deep_research/journal.py`). **⚠️ The handler hard-`DELETE`s and re-inserts the per-source rows for a `research_key` on every re-run (`index.ts` ~L890–894), so source `id`s are NOT stable across runs.** | **Phase 3** adds session records + thread linkage — but must **first** make source rows durable (dedup-and-relink, not delete-and-reinsert) so thread/session FKs survive a re-run. See audit **C1** (§11) and **Phase 3.0**. |
 | 11 thread/suggestion MCP tools (concept §9) | **None exist.** Today's tools: `search`, `fetch`, `search_thoughts`, `list_thoughts`, `thought_stats`, `capture_thought`, `ingest_url(s)`. | **Phase 2.** |
 | Cross-thread suggestion engine | **Does not exist.** | **Phase 5** — a new worker modeled on `entity-extraction-worker`. |
 
@@ -52,7 +52,9 @@ The concept was written against upstream OB1's vocabulary. The self-hosted stack
 | OB1 compose (add worker service here) | `OB1/docker/docker-compose.yml`, `OB1/docker/docker-compose.scheduled.yml` |
 | Cloud gateway (allow-list; keep thread tools OFF by default) | `openbrain-gateway/app.py` |
 | OWUI research persistence | `smolcrawl/deep_research/evidence_memory.py`, `smolcrawl/deep_research_tool.py` |
-| ON storage layer (repoint) | `d:\Open WebUI\open-notebook\open_notebook\database\repository.py`, `.../sources_service.py`, `.../routers/`, `.../database/migrations/` |
+| ON source surface — **domain models (primary repoint target)** | `d:\Open WebUI\open-notebook\open_notebook\domain\notebook.py` (`Source`, `Notebook`, `SourceEmbedding`, `SourceInsight`; `table_name="source"`; all `repo_query(...)` calls) |
+| ON source surface — DB driver + migrations | `open_notebook\database\repository.py` (`repo_query`/`repo_create`, `AsyncSurreal`), `open_notebook\database\migrations\*.surrealql` |
+| ON source surface — service + routers + ingest graph | `api\sources_service.py`, `api\routers\sources.py`, `api\routers\notebooks.py`, `open_notebook\graphs\source.py` — **NB: services and routers live under `api\`, not `open_notebook\`** |
 | ON compose wiring (image vs build) | `ai-stack/docker-compose.yml` (services `open_notebook`, `surrealdb`) |
 | Recovery scripts (three-places rule) | `scripts/emergency-recovery.ps1`, `scripts/emergency-recovery.bat` |
 | Stack-map reference (three-places rule) | `.claude/skills/stack-map/references/workspace-stacks.md` |
@@ -167,7 +169,7 @@ Phase 0 (sandbox) ─► Phase 1 (schema) ─► Phase 2 (MCP tools) ─┬─�
   - `capture_with_thread` = existing capture/ingest path + `thread_id` → one transaction: write source (via `find_or_create_source`) + `thread_sources(automatic, confirmed)` + optional `session_sources`.
   - `accept/hide/restore` = `set_thread_source_status` transitions per the §4.3 state machine (`pending→confirmed`, `pending→hidden`, `hidden→pending`). Nothing is destroyed.
 - **2.2** **Gateway policy (guardrail 5):** do **not** add these to `openbrain-gateway/app.py`'s allow-list. Add a code comment + a line in the promotion runbook explaining the personal/local posture and how to expose read-only thread tools later if wanted.
-- **2.3** Expose the new tools through the existing mcpo bridge config so OWUI and the ON fork can call them as OpenAPI (mirror `OB1/docker/mcpo.config.json` template; real config is gitignored — document the needed entry, don't invent secrets).
+- **2.3** Expose the new tools as OpenAPI for OWUI/ON. **No mcpo config entry is needed (audit C3):** `OB1/docker/mcpo.config.json` points the `open-brain` bridge at the **whole server URL** (`http://openbrain-mcp:8000/`), so every tool registered on `openbrain-mcp` is auto-proxied. To surface the 11 new tools: restart `openbrain-mcpo` (the **core** bridge — distinct from `openbrain-mcpo-ext`, which fronts the 39-tool extensions server) so it re-reads `tools/list`, then re-import the OpenAPI schema in OWUI. In the sandbox this is `iks-mcpo` (or call `iks-mcp` directly over MCP). Document this in the runbook; do not invent secrets.
 
 **DoD (sandbox `iks-mcp`):** tools/list shows all 11; `create_thread` → row; `capture_with_thread(thread)` → source + `thread_sources(automatic,confirmed)` + (if session passed) `session_sources`; `get_thread_sources` returns only `status='confirmed'`; `accept/hide/restore` move a seeded suggestion through the exact §4.3 states; `remove_from_thread` sets `inactive` (recoverable), never deletes.
 
@@ -178,11 +180,12 @@ Phase 0 (sandbox) ─► Phase 1 (schema) ─► Phase 2 (MCP tools) ─┬─�
 **Goal:** research runs create a `session`, link discovered sources to it, and (when a thread is active) auto-link them to that thread; otherwise they land in the unthreaded inbox.
 
 **Tasks**
-- **3.1** Extend the persistence payload + handler: `smolcrawl/deep_research/evidence_memory.py` (build the payload) and the `/research/persist` handler in `index.ts` (consume it). On persist: create a `sessions` row (`origin_tool='owui'`, `query_text`, `thread_id` nullable); insert `session_sources` for each gathered source; if `thread_id` present, `thread_sources(automatic, confirmed)`; stamp session/provenance into `sources.metadata` (timestamp, originating query, model).
+- **3.0 — PREREQUISITE (audit C1): make research source rows durable.** Today `/research/persist` **hard-`DELETE`s** the per-source rows for a `research_key` and re-inserts them on every run (`index.ts` ~L890–894), minting fresh source `id`s each time. A `thread_sources`/`session_sources` FK to `sources(id)` would be orphaned (or blocked/cascaded) on the next run of the same query — so this path is **not** additive as written. **Before adding any session/thread linkage, refactor the per-source replace to use `find_or_create_source` (Phase 1.3):** match on `url`/`content_hash`, keep the existing row + `id`, update its content in place, and insert only genuinely new sources. The synthesis row already upserts in place via `uq_sources_synthesis_key`; extend the same stability to its source rows. Validate: re-running a `research_key` keeps source `id`s stable and preserves existing `thread_sources`/`session_sources`.
+- **3.1** Extend the persistence payload + handler: `smolcrawl/deep_research/evidence_memory.py` (build the payload — `persist_research_evidence`, ~L188) and the `/research/persist` handler in `index.ts` (consume it, ~L853). On persist: create a `sessions` row (`origin_tool='owui'`, `query_text`, `thread_id` nullable); insert `session_sources` for each gathered source; if `thread_id` present, `thread_sources(automatic, confirmed)`; stamp session/provenance into `sources.metadata` (timestamp, originating query, model).
 - **3.2** Surface an **active thread** to the tool: add a valve / tool parameter (`active_thread_id`) in `smolcrawl/deep_research_tool.py`. No thread ⇒ unthreaded inbox (no `thread_sources` row), still recorded as a session.
-- **3.3** Preserve today's behavior: research-synthesis upsert-in-place (`uq_sources_synthesis_key`) and `volatility/revalidate` stay intact. New work is additive.
+- **3.3** Preserve today's behavior: research-synthesis upsert-in-place (`uq_sources_synthesis_key`) and `volatility/revalidate` stay intact. New work is additive — note "additive" now **requires** the 3.0 refactor (the current per-source DELETE is *not* additive and must be replaced, not merely preserved).
 
-**DoD (sandbox):** simulated persist **with** `thread_id` → one `sessions` row + N `session_sources` + N `thread_sources(automatic)`; **without** `thread_id` → `sessions` row + `session_sources`, **no** thread link (inbox); existing synthesis caching still supersedes-in-place.
+**DoD (sandbox):** simulated persist **with** `thread_id` → one `sessions` row + N `session_sources` + N `thread_sources(automatic)`; **without** `thread_id` → `sessions` row + `session_sources`, **no** thread link (inbox); existing synthesis caching still supersedes-in-place; **re-running the same `research_key` leaves source `id`s and any existing `thread_sources`/`session_sources` rows intact** (no orphaned links — audit C1).
 
 ---
 
@@ -191,7 +194,7 @@ Phase 0 (sandbox) ─► Phase 1 (schema) ─► Phase 2 (MCP tools) ─┬─�
 **Goal:** Open Notebook reads/writes **source data** to OB1 Postgres; SurrealDB keeps only UI/queue/chat/cache state (concept §7). Notebooks become thread views.
 
 **Tasks**
-- **4.1** Inventory the SurrealDB source surface in the fork: every read/write touching source records — `open_notebook/database/repository.py`, `.../sources_service.py`, source routers, and the source-related `database/migrations/*.surrealql`. Produce `iks-dev/on-source-surface.md` listing each call site.
+- **4.1** Inventory the SurrealDB source surface in the fork: every read/write touching source records. **Real layout (audit C2):** start at `open_notebook/domain/notebook.py` (the `Source`/`Notebook` models — `table_name="source"` — which issue the `repo_query` calls), then `open_notebook/database/repository.py` (the SurrealDB driver), the service layer `api/sources_service.py`, the routers `api/routers/sources.py` + `api/routers/notebooks.py`, the ingestion graph `open_notebook/graphs/source.py`, and the source-related `open_notebook/database/migrations/*.surrealql`. (Domain + database live under `open_notebook/`; services + routers under `api/`.) Produce `iks-dev/on-source-surface.md` listing each call site.
 - **4.2** Add an **OB1 data-access module** in the fork (direct `pg` async client **or** PostgREST via the `/rest/v1` proxy — pick `pg` for transactional upload+link; document the choice). Implement the same data shapes the ON UI already consumes, so UI code changes stay minimal (concept §7.3).
 - **4.3** Repoint source operations:
   - **Upload** (concept §6.2): write to OB1 via `find_or_create_source` + `thread_sources(automatic, confirmed)` to the active thread — in one operation. Dedup notifies "already exists, added to this thread" (concept §5.2).
@@ -214,9 +217,9 @@ Phase 0 (sandbox) ─► Phase 1 (schema) ─► Phase 2 (MCP tools) ─┬─�
 **Goal:** a background worker proposes (never auto-creates) cross-thread links by semantic similarity.
 
 **Tasks**
-- **5.1** New worker `OB1/integrations/suggestion-worker/index.ts`, modeled on `entity-extraction-worker`: drains a queue of new/updated sources; for each, compare its embedding against **other** threads' source clusters (per-source cosine via `match_sources`, scoped per thread, or a thread centroid); when similarity > `SUGGESTION_THRESHOLD` (env, default tunable) **and** the source is not already linked to that thread, insert `thread_sources(link_type='suggested', status='pending', suggestion_reason=…)`.
+- **5.1** New worker `OB1/integrations/suggestion-worker/index.ts`, modeled on `entity-extraction-worker`: drains a queue of new/updated sources; for each, compare its embedding against **other** threads' source clusters (per-source cosine via `match_sources`, scoped per thread, or a thread centroid); when similarity > `SUGGESTION_THRESHOLD` (env, default tunable) **and** the source is not already linked to that thread, insert `thread_sources(link_type='suggested', status='pending', suggestion_reason=…)`. **Note (audit C4): a `source_extraction_queue` already exists** (created and drained by `entity-extraction-worker`, auto-filled by a trigger on `sources`). Reuse it as the work feed, or add a sibling `suggestion_queue` mirroring it — do not invent a new triggering mechanism.
 - **5.2** **Critical rule (concept §4.2):** research in one thread is **never** auto-added to another. The worker only ever writes `suggested/pending`. Confirmation is a deliberate user act (Phase 6).
-- **5.3** Trigger model like the entity worker: queue + on-demand `POST /run`, debounced. Add `SUGGESTION_THRESHOLD`, dedup against existing `thread_sources` of any status (don't re-suggest a hidden/rejected pair — it stays in the hidden pool, concept §3 principle 5 / §4.3).
+- **5.3** Trigger model like the entity worker: queue-drain on an HTTP POST, debounced. (The entity worker uses `POST /` for the thought queue and `POST /sources` for the source queue — mirror that route convention, e.g. `POST /suggest`; there is no `/run` route, audit C4.) Add `SUGGESTION_THRESHOLD`, dedup against existing `thread_sources` of any status (don't re-suggest a hidden/rejected pair — it stays in the hidden pool, concept §3 principle 5 / §4.3).
 - **5.4** **Three-places rule (guardrail 6):** this new container must be added to the OB1 compose **and** the recovery scripts' inventory + sequences **and** the stack-map reference doc. Do this in Phase 8's drift step, but note it here so it isn't missed.
 
 **DoD (sandbox):** seed two threads with overlapping sources → `suggested/pending` rows appear with populated `suggestion_reason`; **no** `automatic`/`confirmed` cross-links created; a previously `hidden` pair is **not** re-suggested; threshold is env-tunable and logged.
@@ -272,6 +275,7 @@ Phase 0 (sandbox) ─► Phase 1 (schema) ─► Phase 2 (MCP tools) ─┬─�
 
 | Risk | Severity | Mitigation |
 |------|----------|------------|
+| `/research/persist` hard-DELETE orphans thread/session FKs (audit C1) | High | **Phase 3.0 prerequisite:** replace the per-source DELETE+INSERT with `find_or_create_source` (dedup-and-relink) so FKs target stable `id`s; sandbox DoD re-runs a `research_key` and asserts links survive. |
 | ON repoint breaks the UI or loses data | High | Full fork build validated in sandbox first; one-time migration has dry-run + dedup; SurrealDB source data is left in place during migration (additive), so rollback is non-destructive. |
 | Upstream Open Notebook drift post-fork (concept open-Q #4) | Medium | Isolate OB1 access behind one new module (Task 4.2) so future upstream merges touch a small surface. Record the fork point. |
 | Suggestion noise / threshold wrong (concept open-Q #1) | Medium | `SUGGESTION_THRESHOLD` env-tunable; validate against the deliberately-overlapping seed set; suggestions are non-destructive and hideable. |
@@ -334,6 +338,7 @@ Resolved by operator decisions: **#2 triage UX → inside Open Notebook (D2).** 
 | 2 | 2.1 11 MCP tools | ☐ todo | ☐ | |
 | 2 | 2.2 gateway stays closed | ☐ todo | — | |
 | 2 | 2.3 mcpo exposure | ☐ todo | ☐ | |
+| 3 | 3.0 durable source rows (find_or_create) | ☐ todo | ☐ | **prereq (audit C1)** |
 | 3 | 3.1 session + link on persist | ☐ todo | ☐ | |
 | 3 | 3.2 active_thread valve | ☐ todo | ☐ | |
 | 3 | 3.3 preserve synthesis cache | ☐ todo | ☐ | |
@@ -366,4 +371,27 @@ Legend: ☐ todo · ◐ in-progress · ☑ done · ✗ blocked.
 | Date | Phase/Task | Decision / deviation | Why |
 |------|-----------|----------------------|-----|
 | 2026-06-01 | plan | D1–D4 locked (full repoint · triage-in-ON · isolated validation · edit-no-commit) | operator |
-| | | | |
+| 2026-06-01 | audit | Plan audited against live code. **Verified accurate:** sources schema, MCP server + 8 tools, allow-list gateway (guardrail 5 holds), compose images, recovery OB1 inventory, wiki notes/content split. **Corrected:** C1 persist hard-DELETE vs FKs (new Phase 3.0 + risk row), C2 ON paths (services/routers under `api/`; added `domain/notebook.py` as primary surface), C3 mcpo proxies whole server (no per-tool entry), C4 worker route + existing `source_extraction_queue`. Full detail in §11. | audit pass |
+
+---
+
+## 11. Audit findings (2026-06-01) — plan vs. live code
+
+Verified against the actual workspace before execution.
+
+**Confirmed accurate (no change):**
+- `sources` schema (`OB1/docker/init-sources.sql`): `VECTOR(1024)` (bge-m3), `content_type` CHECK enum, `notebook`/`domain`/research-linkage columns, **no `content_hash`**, `uq_sources_synthesis_key` partial-unique index, `match_sources()` SQL fn + `sources_touch_updated_at` trigger. Phase 1.2's additive `content_hash` is right; Phase 1.3's `find_or_create_source` matches the existing convention.
+- MCP server is `openbrain-mcp`, built from `OB1/integrations/kubernetes-deployment/index.ts`; `POST /research/persist` exists with `x-brain-key` auth. Current tools (**8**): `search`, `fetch`, `search_thoughts`, `list_thoughts`, `thought_stats`, `capture_thought`, `ingest_url`, `ingest_urls`.
+- Gateway `openbrain-gateway/app.py` is an **allow-list** (`ALLOWED_TOOLS`, default-deny; `tools/list` is filtered to it). **Guardrail 5 holds** — new thread tools stay private unless explicitly added. ✔
+- Compose: `open_notebook` = `lfnovo/open_notebook:v1-latest`, `surrealdb` = `surrealdb/surrealdb:v2`, `SURREAL_URL=ws://surrealdb:8000/rpc`. `repository.py` is the SurrealDB driver. Migrations at `open_notebook/database/migrations/*.surrealql`.
+- Recovery script `scripts/emergency-recovery.ps1` carries the OB1 service inventory (`$Script:OB1Services` — **15** services incl. scheduled `cron`/`gmail-pull`/`gmail-prune`/`digest`) + ordered start/stop → the three-places rule (guardrail 6) is real. The Phase 5 worker is ~16th.
+- Deploy key `secrets/openbrain-wiki-deploy_key` + volume `openbrain-wiki-data` + `notes/` vs `content/` split (`WIKI_OUT_DIR=/wiki/content`) are all live. `extensions-server/index.ts`, `init-graph.sql`, `init-source-graph.sql` exist.
+
+**Corrections (applied inline above):**
+
+| ID | Sev | Finding | Fix location |
+|----|-----|---------|--------------|
+| **C1** | High | `/research/persist` hard-`DELETE`s per-source rows per run (`index.ts` ~L890–894) → would orphan Phase-1 `thread_sources`/`session_sources` FKs. The OWUI path is **not** additive as written. | New **Phase 3.0** (refactor to `find_or_create_source`); §1 reality map; risk register; Phase 3.3 + DoD. |
+| **C2** | Med | ON file paths wrong: `sources_service.py` is at `api/`, routers at `api/routers/` (not `open_notebook/`). The real primary source surface — `open_notebook/domain/notebook.py` (`Source`/`Notebook`, `table_name="source"`) — was missing. | §1.1 load-bearing table; Phase 4.1. |
+| **C3** | Med | mcpo proxies the **whole** MCP server URL (`http://openbrain-mcp:8000/`), not per-tool — no config entry is needed. Two mcpo instances exist: `openbrain-mcpo` (core) and `openbrain-mcpo-ext` (extensions). | Task 2.3. |
+| **C4** | Low | A `source_extraction_queue` already exists (entity worker drains it, trigger-filled). Worker route is `POST /` / `POST /sources`, not `/run`. | Phase 5.1, 5.3. |
