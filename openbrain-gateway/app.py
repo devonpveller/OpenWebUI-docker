@@ -50,6 +50,17 @@ READ_TOOLS = {"search", "fetch", "search_thoughts", "list_thoughts"}
 WRITE_TOOLS = {"capture_thought", "ingest_url", "ingest_urls"}
 ALLOWED_TOOLS = READ_TOOLS | WRITE_TOOLS
 
+# NB (Integrated Knowledge System / guardrail 5): the research-thread and
+# suggestion tools (create_thread, list_threads, get_thread_sources,
+# add_to_thread, remove_from_thread, get_suggestions, accept_suggestion,
+# hide_suggestion, get_hidden_suggestions, restore_suggestion,
+# capture_with_thread) are intentionally ABSENT from ALLOWED_TOOLS. They
+# are personal/local like the extensions server and stay off the cloud
+# surface by default. This is an allow-list (default-deny + tools/list is
+# filtered to it), so adding tools on openbrain-mcp does NOT expose them to
+# cloud — they only appear here if explicitly listed. To expose a read
+# thread tool later, add it to READ_TOOLS so it gets the metadata_filter.
+
 
 def _force_read_filter(args: dict) -> dict:
     md = dict(args.get("metadata_filter") or {})

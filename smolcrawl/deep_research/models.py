@@ -159,6 +159,15 @@ class Valves(BaseModel):
                     "to the OB1 docker .env MCP_ACCESS_KEY value or "
                     "research persistence/cache is skipped (graceful).",
     )
+    active_thread_id: str = Field(
+        default="",
+        description="Optional open-brain research thread UUID. When set, "
+                    "sources gathered by a research run are auto-linked to "
+                    "this thread (link_type=automatic, confirmed); empty = "
+                    "sources land in the unthreaded inbox (still recorded as "
+                    "a session). Manage threads via the open-brain "
+                    "create_thread / list_threads MCP tools.",
+    )
 
     # Deep research specific
     top_k_per_collection: int = Field(

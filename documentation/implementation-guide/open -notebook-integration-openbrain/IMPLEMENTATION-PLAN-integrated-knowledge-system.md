@@ -325,42 +325,42 @@ Resolved by operator decisions: **#2 triage UX → inside Open Notebook (D2).** 
 
 | Phase | Task | Status | Validated in sandbox? | Notes |
 |-------|------|--------|----------------------|-------|
-| 0 | 0.1 branches | ☐ todo | — | |
-| 0 | 0.2 dev compose | ☐ todo | — | |
-| 0 | 0.3 seed.sql | ☐ todo | — | |
-| 0 | 0.4 dev README | ☐ todo | — | |
-| 0 | 0.5 baseline inventory | ☐ todo | — | |
-| 1 | 1.1 init-threads.sql | ☐ todo | ☐ | |
-| 1 | 1.2 content_hash | ☐ todo | ☐ | |
-| 1 | 1.3 find_or_create_source | ☐ todo | ☐ | |
-| 1 | 1.4 lifecycle funcs | ☐ todo | ☐ | |
-| 1 | 1.5 schemas/ mirror | ☐ todo | — | optional |
-| 2 | 2.1 11 MCP tools | ☐ todo | ☐ | |
-| 2 | 2.2 gateway stays closed | ☐ todo | — | |
-| 2 | 2.3 mcpo exposure | ☐ todo | ☐ | |
-| 3 | 3.0 durable source rows (find_or_create) | ☐ todo | ☐ | **prereq (audit C1)** |
-| 3 | 3.1 session + link on persist | ☐ todo | ☐ | |
-| 3 | 3.2 active_thread valve | ☐ todo | ☐ | |
-| 3 | 3.3 preserve synthesis cache | ☐ todo | ☐ | |
-| 4 | 4.1 source-surface inventory | ☐ todo | — | |
-| 4 | 4.2 OB1 data-access module | ☐ todo | ☐ | |
-| 4 | 4.3 repoint upload/view/interact | ☐ todo | ☐ | |
-| 4 | 4.4 keep SurrealDB state | ☐ todo | ☐ | |
-| 4 | 4.5 migration script | ☐ todo | ☐ | dry-run only |
-| 4 | 4.6 stage compose swap | ☐ todo | — | runbook diff |
-| 5 | 5.1 suggestion worker | ☐ todo | ☐ | |
-| 5 | 5.2 suggested-only rule | ☐ todo | ☐ | |
-| 5 | 5.3 threshold + dedup | ☐ todo | ☐ | |
-| 6 | 6.1 triage queue | ☐ todo | ☐ | |
-| 6 | 6.2 hidden pool | ☐ todo | ☐ | |
-| 6 | 6.3 entry point | ☐ todo | ☐ | |
-| 7 | 7.1 inbox stub action | ☐ todo | ☐ | |
-| 7 | 7.2 separation respected | ☐ todo | ☐ | |
-| 7 | 7.3 scratch wiki target | ☐ todo | ☐ | |
-| 8 | 8.1 E2E §6 scenarios | ☐ todo | ☐ | |
-| 8 | 8.2 three-places drift | ☐ todo | — | /stack-map |
-| 8 | 8.3 promotion runbook | ☐ todo | — | |
-| 8 | 8.4 backup coverage | ☐ todo | — | |
+| 0 | 0.1 branches | ☑ done | — | `feature/integrated-knowledge-system` in all 3 repos; no commits |
+| 0 | 0.2 dev compose | ☑ done | ☑ | `iks-dev/docker-compose.dev.yml`; grep-proof no prod volumes |
+| 0 | 0.3 seed.sql | ☑ done | ☑ | 3 threads/15 sources/2 sessions; t1↔t2 overlap |
+| 0 | 0.4 dev README | ☑ done | — | |
+| 0 | 0.5 baseline inventory | ☑ done | ☑ | open-brain=15 (→16 post-promote) |
+| 1 | 1.1 init-threads.sql | ☑ done | ☑ | idempotent re-run clean |
+| 1 | 1.2 content_hash | ☑ done | ☑ | additive column + index |
+| 1 | 1.3 find_or_create_source | ☑ done | ☑ | dedup proven (same id, was_duplicate) |
+| 1 | 1.4 lifecycle funcs | ☑ done | ☑ | link/status soft-flip, never delete |
+| 1 | 1.5 schemas/ mirror | ☐ todo | — | optional — skipped |
+| 2 | 2.1 11 MCP tools | ☑ done | ☑ | tools/list=19; all 11 exercised |
+| 2 | 2.2 gateway stays closed | ☑ done | ☑ | allow-list untouched + comment added |
+| 2 | 2.3 mcpo exposure | ☑ done | ☑ | whole-server proxy; restart+reimport (C3) |
+| 3 | 3.0 durable source rows (find_or_create) | ☑ done | ☑ | **C1 fixed: ids stable on re-run, links preserved** |
+| 3 | 3.1 session + link on persist | ☑ done | ☑ | session + session_sources + thread_sources(auto) |
+| 3 | 3.2 active_thread valve | ☑ done | ☑ | valve in monolith + package + models.py |
+| 3 | 3.3 preserve synthesis cache | ☑ done | ☑ | supersede-in-place intact |
+| 4 | 4.1 source-surface inventory | ☑ done | — | `iks-dev/on-source-surface.md` |
+| 4 | 4.2 OB1 data-access module | ☑ done | ☑ | `ob1_repository.py` validated vs iks-db |
+| 4 | 4.3 repoint upload/view/interact | ◐ partial | ◐ | feature-gated wiring done + compiles; full UI + source-identity routing needs iks-notebook build |
+| 4 | 4.4 keep SurrealDB state | ☑ done | ☑ | only source-family routed to OB1 |
+| 4 | 4.5 migration script | ☑ done | — | `migrate-on-sources.py` dry-run default; compiles |
+| 4 | 4.6 stage compose swap | ☑ done | — | runbook diff (PROMOTION-RUNBOOK §4) |
+| 5 | 5.1 suggestion worker | ☑ done | ☑ | built; 9 suggestions on overlap seed |
+| 5 | 5.2 suggested-only rule | ☑ done | ☑ | all pending; no auto-confirm; negative control clean |
+| 5 | 5.3 threshold + dedup | ☑ done | ☑ | env-tunable+logged; hidden not re-suggested |
+| 6 | 6.1 triage queue | ◐ partial | ☑ | backend `get_suggestions`+accept/hide validated; FE component pending |
+| 6 | 6.2 hidden pool | ◐ partial | ☑ | backend `get_hidden`+restore validated; FE pending |
+| 6 | 6.3 entry point | ◐ partial | — | `/api/triage/*` router live; Next.js panel pending |
+| 7 | 7.1 inbox stub action | ☑ done | ☑ | `obsidian_inbox.py` + `/api/triage/inbox` |
+| 7 | 7.2 separation respected | ☑ done | ☑ | notes/ not content/; not a source |
+| 7 | 7.3 scratch wiki target | ☑ done | ☑ | `WIKI_NOTES_DIR`; scratch dir in test |
+| 8 | 8.1 E2E §6 scenarios | ☑ done | ☑ | `iks-dev/e2e-results.md` |
+| 8 | 8.2 three-places drift | ☑ done | — | compose 16 + recovery 16 + stack-map aligned |
+| 8 | 8.3 promotion runbook | ☑ done | — | `PROMOTION-RUNBOOK.md` |
+| 8 | 8.4 backup coverage | ☑ done | ☑ | whole-db pg_dump verified covers new tables |
 
 Legend: ☐ todo · ◐ in-progress · ☑ done · ✗ blocked.
 
@@ -372,6 +372,9 @@ Legend: ☐ todo · ◐ in-progress · ☑ done · ✗ blocked.
 |------|-----------|----------------------|-----|
 | 2026-06-01 | plan | D1–D4 locked (full repoint · triage-in-ON · isolated validation · edit-no-commit) | operator |
 | 2026-06-01 | audit | Plan audited against live code. **Verified accurate:** sources schema, MCP server + 8 tools, allow-list gateway (guardrail 5 holds), compose images, recovery OB1 inventory, wiki notes/content split. **Corrected:** C1 persist hard-DELETE vs FKs (new Phase 3.0 + risk row), C2 ON paths (services/routers under `api/`; added `domain/notebook.py` as primary surface), C3 mcpo proxies whole server (no per-tool entry), C4 worker route + existing `source_extraction_queue`. Full detail in §11. | audit pass |
+| 2026-06-02 | 0–3 | Phases 0–3 implemented **and validated in `iks-db`**: schema idempotent + dedup/lifecycle; 19 MCP tools (8+11) with full §4.3 suggestion lifecycle; persist refactor proven C1-stable (ids survive re-run, links preserved). Branches created in all 3 repos; nothing committed. | done |
+| 2026-06-02 | 4.2 | OB1 data-access chose **pg-direct via asyncpg** (per plan) over PostgREST — upload needs one-tx find_or_create+link. Added `asyncpg` to fork `pyproject.toml`; **`uv lock` must be run before building iks-notebook** (host has no `uv`; lockfile not regenerated here). Module validated standalone against `iks-db`. | done |
+| 2026-06-02 | 4.3 | ON repoint wired **feature-gated** behind `ob1_enabled()` (true only when `OB1_DB_HOST` set → sandbox): `Notebook.ob_thread_id` + `ensure_ob_thread()`, `get_sources()` OB1 branch, `add_to_notebook()` OB1 dual-write. Prod path unchanged until promotion. **Remaining for full repoint:** route `Source.get/delete/get_insights` + the source-processing graph by OB1 UUID (see `on-source-surface.md`); end-to-end UI validation needs the heavy `iks-notebook` build (operator/Phase 8) — Phase 4 is the plan's largest/riskiest workstream by design. | partial — code complete, UI validation deferred |
 
 ---
 

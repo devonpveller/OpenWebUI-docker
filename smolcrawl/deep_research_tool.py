@@ -2617,6 +2617,9 @@ async def _persist_research_evidence(valves, sub_agent, *, query, answer,
     vol_days = _ev_vol_map(getattr(valves, "evidence_volatility_days", ""))
     revalidate = vol_days.get(volatility,
                               _EV_DEFAULT_VOL_DAYS.get(volatility, 180))
+    # Phase 3.2: an active thread (if the operator set one) auto-links the
+    # gathered sources to that thread; empty => unthreaded inbox.
+    active_thread = (getattr(valves, "active_thread_id", "") or "").strip() or None
     payload = {
         "research_key": _compute_research_key(query),
         "query": query[:400],
@@ -2625,6 +2628,9 @@ async def _persist_research_evidence(valves, sub_agent, *, query, answer,
         "volatility": volatility,
         "revalidate_days": revalidate,
         "notebook": topic,
+        "thread_id": active_thread,
+        "model": (getattr(valves, "research_model", "")
+                  or getattr(valves, "model", "") or None),
         "sources": _ev_normalize_sources(sources),
     }
     try:
@@ -2641,10 +2647,12 @@ async def _persist_research_evidence(valves, sub_agent, *, query, answer,
                 await _emit(f"🧠 research persist skipped (HTTP {r.status_code})")
                 return
             data = r.json() or {}
+            where = (f"thread {data.get('thread_id')}" if data.get("threaded")
+                     else "inbox (no active thread)")
             await _emit(
                 f"🧠 research saved to open-brain (vol:{volatility}, "
                 f"revalidate {revalidate}d, "
-                f"{data.get('sources_written', 0)} sources)")
+                f"{data.get('sources_written', 0)} sources -> {where})")
     except Exception as exc:
         await _emit(f"🧠 research persist error: {type(exc).__name__}")
 
@@ -2694,6 +2702,7 @@ class Tools:
         evidence_volatility_days: str = Field(default="fast:7,medium:180,slow:1095", description="Re-validation windows per volatility tier; past the window the LLM downgrades the fact to an educated guess.")
         openbrain_url: str = Field(default="http://openbrain-mcp:8000", description="open-brain MCP base URL (llm-net, trusted writer path). Research synthesis + sources persist here; the mnemory misuse is fully retired.")
         openbrain_key: str = Field(default="", description="open-brain MCP_ACCESS_KEY (x-brain-key). MUST be set to the OB1 docker .env MCP_ACCESS_KEY or research persistence/cache is skipped (graceful).")
+        active_thread_id: str = Field(default="", description="Optional open-brain research thread UUID. When set, sources gathered by a research run are auto-linked to this thread (link_type=automatic, confirmed); empty = sources land in the unthreaded inbox (still recorded as a session). Create/list threads via the open-brain create_thread/list_threads MCP tools.")
 
     def __init__(self):
         self.valves = self.Valves()

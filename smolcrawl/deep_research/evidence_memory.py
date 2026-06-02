@@ -236,6 +236,9 @@ async def persist_research_evidence(
     vol_days = _vol_map(getattr(valves, "evidence_volatility_days", ""))
     revalidate = vol_days.get(volatility,
                               _DEFAULT_VOL_DAYS.get(volatility, 180))
+    # Phase 3.2: an active thread (if the operator set one) auto-links the
+    # gathered sources to that thread; empty => unthreaded inbox.
+    active_thread = (getattr(valves, "active_thread_id", "") or "").strip() or None
     payload = {
         "research_key": compute_research_key(query),
         "query": query[:400],
@@ -244,6 +247,9 @@ async def persist_research_evidence(
         "volatility": volatility,
         "revalidate_days": revalidate,
         "notebook": topic,
+        "thread_id": active_thread,
+        "model": (getattr(valves, "research_model", "")
+                  or getattr(valves, "model", "") or None),
         "sources": _normalize_sources(sources),
     }
     try:
@@ -260,9 +266,11 @@ async def persist_research_evidence(
                 await _emit(f"🧠 research persist skipped (HTTP {r.status_code})")
                 return
             data = r.json() or {}
+            where = (f"thread {data.get('thread_id')}" if data.get("threaded")
+                     else "inbox (no active thread)")
             await _emit(
                 f"🧠 research saved to open-brain (vol:{volatility}, "
                 f"revalidate {revalidate}d, "
-                f"{data.get('sources_written', 0)} sources)")
+                f"{data.get('sources_written', 0)} sources -> {where})")
     except Exception as exc:
         await _emit(f"🧠 research persist error: {type(exc).__name__}")

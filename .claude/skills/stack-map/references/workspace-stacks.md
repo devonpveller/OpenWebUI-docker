@@ -104,6 +104,7 @@ Run with: `docker compose -f OB1/docker/docker-compose.yml ...`.
 | `openbrain-postgrest` | PostgREST API over openbrain-db | — | obnet |
 | `openbrain-rest` | Caddy `/rest/v1` path-stripping proxy | 127.0.0.1:3001 | obnet |
 | `openbrain-entity-worker` | Entity-extraction worker | 127.0.0.1:8810 | obnet, llm-net |
+| `openbrain-suggestion-worker` | Cross-thread suggestion worker (Integrated Knowledge System; `POST /suggest`) | 127.0.0.1:8813 | obnet, llm-net |
 | `openbrain-wiki` | Wiki compiler + scheduler | 127.0.0.1:8811 | obnet, llm-net |
 | `openbrain-wiki-viewer` | Quartz 4 read-only wiki viewer | 127.0.0.1:8812 | obnet |
 | `openbrain-cron` | supercronic + curl; fires HTTP-trigger chain (no docker.sock) | — (internal only) | obnet |
