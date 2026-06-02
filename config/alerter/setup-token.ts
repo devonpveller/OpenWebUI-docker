@@ -30,10 +30,11 @@
  *   deno run --allow-net --allow-read --allow-write --allow-env config/alerter/setup-token.ts
  */
 
-const SCRIPT_DIR = new URL(".", import.meta.url).pathname;
-const CREDENTIALS_PATH = `${SCRIPT_DIR}credentials.json`;
-const TOKEN_OUT_DIR = `${SCRIPT_DIR}../../secrets/google/portal-alerter`;
-const TOKEN_PATH = `${TOKEN_OUT_DIR}/token.json`;
+// URL objects work across Windows + Linux without URL-encoding bugs.
+// Deno.readTextFile / writeTextFile / mkdir all accept URL directly.
+const CREDENTIALS_URL = new URL("./credentials.json", import.meta.url);
+const TOKEN_OUT_URL = new URL("../../secrets/google/portal-alerter/", import.meta.url);
+const TOKEN_URL = new URL("token.json", TOKEN_OUT_URL);
 const SCOPES = ["https://www.googleapis.com/auth/gmail.send"];
 const REDIRECT_PORT = 8765;
 const REDIRECT_URI = `http://127.0.0.1:${REDIRECT_PORT}`;
@@ -46,12 +47,12 @@ interface OAuthCredentials {
 async function main() {
   let creds: OAuthCredentials;
   try {
-    creds = JSON.parse(await Deno.readTextFile(CREDENTIALS_PATH));
+    creds = JSON.parse(await Deno.readTextFile(CREDENTIALS_URL));
   } catch {
     console.error(
-      `\nNo credentials.json at ${CREDENTIALS_PATH}.\n` +
-        `Copy or symlink your OAuth client secret here, then re-run.\n` +
-        `Recommended source: secrets/google/open-brain-email/client_secret_*.json\n`,
+      `\nNo credentials.json at ${CREDENTIALS_URL}.\n` +
+        `Copy your DEDICATED portal-alerter OAuth client secret here, then re-run:\n` +
+        `  Copy-Item secrets/google/portal-alerter/credentials.json config/alerter/credentials.json\n`,
     );
     Deno.exit(1);
   }
@@ -132,9 +133,9 @@ async function main() {
     expiry_date: Date.now() + tokenData.expires_in * 1000,
   };
 
-  await Deno.mkdir(TOKEN_OUT_DIR, { recursive: true });
-  await Deno.writeTextFile(TOKEN_PATH, JSON.stringify(token, null, 2));
-  console.log(`\nWrote ${TOKEN_PATH}.`);
+  await Deno.mkdir(TOKEN_OUT_URL, { recursive: true });
+  await Deno.writeTextFile(TOKEN_URL, JSON.stringify(token, null, 2));
+  console.log(`\nWrote ${TOKEN_URL}.`);
   console.log(`Next: run the alerter self-test to confirm Gmail delivery (plan §6.9 step 4).`);
 }
 
