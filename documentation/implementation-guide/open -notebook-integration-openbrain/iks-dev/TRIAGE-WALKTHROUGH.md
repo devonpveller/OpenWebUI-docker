@@ -1,8 +1,15 @@
-# Triage walkthrough (sandbox demo) — popover-behind-a-button design
+# Triage walkthrough (sandbox demo) — modal-behind-a-button design
 
-Suggestions live **behind a button** (a floating popover), in two places —
-no inline panels, no broken layout, easy to re-add after upstream updates.
-Open **http://127.0.0.1:18502** (hard-refresh). Synthetic data; prod untouched.
+Suggestions live **behind a button** that opens a centered **modal** (shadow
+box) — responsive, scrollable, with Suggested/Hidden tabs. No inline panels,
+no broken layout, easy to re-add after upstream updates. Open
+**http://127.0.0.1:18502** (hard-refresh). Synthetic data; prod untouched.
+
+The modal: centered + dimmed backdrop, `max-h-80vh` with internal scroll
+(scales with the window), **Suggested** tab (Add / Hide, plus a `NN% match →
+why?` that expands to the most-similar existing sources with scores) and a
+**Hidden** tab (Restore — hiding is never a dead end; the Hide toast also has
+Undo).
 
 ## The setup
 
