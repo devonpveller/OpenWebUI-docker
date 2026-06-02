@@ -1,0 +1,171 @@
+# scripts/check-backup-coverage.ps1
+#
+# Audits every Docker volume + bind-mount data path across the ai-stack
+# and OB1 compose projects, and confirms that each one is either:
+#   - Backed up by a *-backup container (volume name appears in a backup
+#     container's volumes: list), OR
+#   - Explicitly excluded from backup (covered by a known excluded list
+#     in this script)
+#
+# Reports gaps with severity. Returns exit code 0 if clean, 1 if any gap.
+#
+# Also pre-creates ./backups/<service>/ directories that backup services
+# reference (Docker would otherwise create them as root, blocking
+# non-root backup containers from writing).
+#
+# Run manually before merging a PR that adds a new service with
+# persistent state. See documentation/backup-conventions.md.
+
+[CmdletBinding()]
+param(
+  [switch]$CreateMissingDirs
+)
+
+# docker compose config writes to stderr too; keep Continue.
+$ErrorActionPreference = 'Continue'
+$projectRoot = Split-Path -Parent $PSScriptRoot
+Push-Location $projectRoot
+try {
+  Write-Host "==> Backup coverage check" -ForegroundColor Cyan
+  Write-Host "    Project root: $projectRoot"
+  Write-Host ""
+
+  # ----- Inventory: volumes via `docker volume ls` with project labels.
+  # We can't parse `docker compose config --format json` here because PS 5.1
+  # ConvertFrom-Json rejects duplicate keys that crop up in compose-merged
+  # env vars (HTTP_PROXY vs http_proxy). Direct volume ls is simpler and
+  # also catches volumes that are CURRENTLY ALLOCATED (not just declared).
+  $aiStackVolumeNames = @()
+  $rawList = docker volume ls --filter 'label=com.docker.compose.project=ai-stack' --format '{{.Name}}' 2>$null
+  if ($rawList) {
+    $aiStackVolumeNames = @($rawList) | ForEach-Object { $_ -replace '^ai-stack_', '' } | Sort-Object -Unique
+  }
+  Write-Host ("  ai-stack named volumes : {0}" -f $aiStackVolumeNames.Count) -ForegroundColor DarkGray
+
+  $ob1Volumes = @()
+  $rawOb1 = docker volume ls --filter 'label=com.docker.compose.project=open-brain' --format '{{.Name}}' 2>$null
+  if ($rawOb1) {
+    $ob1Volumes = @($rawOb1) | ForEach-Object { $_ -replace '^open-brain_', '' } | Sort-Object -Unique
+  }
+  Write-Host ("  OB1     named volumes  : {0}" -f $ob1Volumes.Count) -ForegroundColor DarkGray
+  Write-Host ""
+
+  # ----- Inventory: bind-mount data paths (under D:\ for the operator) -----
+  # These are *.NET-style host paths from the compose files. The check is
+  # syntactic (file path appears in compose); not a runtime probe.
+  $hostBindMounts = @(
+    @{ Path = 'D:\Open WebUI\open-notebook\surreal_data'; Service = 'surrealdb';     Owner = 'open-notebook-backup' }
+    @{ Path = 'D:\Open WebUI\open-notebook\notebook_data'; Service = 'open_notebook'; Owner = 'open-notebook-backup' }
+    @{ Path = '.\data\tailscale';                          Service = 'tailscale';    Owner = 'tailscale-backup' }
+    @{ Path = 'C:\Users\yamao\.lmstudio\models';           Service = 'llama-cpp';    Owner = 'lm-models-backup' }
+  )
+
+  # ----- Volumes intentionally NOT backed up -------------------------
+  $intentionallyExcluded = @(
+    @{ Volume = 'little-coder-workspace'; Reason = 'Project workspace - intentionally re-clonable (design)' }
+  )
+
+  # ----- Mapping: volume name -> backup container that covers it -----
+  # When you add a new <service>-backup container, register its source
+  # volume(s) here. The check fails if a volume in the inventory above
+  # isn't listed here AND isn't in $intentionallyExcluded.
+  $backupCoverage = @{
+    'openwebui-data'         = 'openwebui-backup'
+    'mnemory-data'           = 'mnemory-backup'
+    'smolcrawl-data'         = 'smolcrawl-backup'
+    'little-coder-journals'  = 'little-coder-backup'
+    'little-coder-skill'     = 'little-coder-backup'
+    'little-coder-cohorts'   = 'little-coder-backup'
+    'little-coder-polyglot'  = 'little-coder-backup'
+    'little-coder-sessions'  = 'little-coder-backup'
+    'caddy-data'             = 'caddy-backup'
+    'caddy-config'           = 'caddy-backup'
+    'authelia-data'          = 'authelia-backup'
+    'tripwire-data'          = 'integrity-tripwire (state-only; bound to host config) - not separately backed up'
+    'openbrain-db-data'      = 'openbrain-db-backup'
+    'openbrain-wiki-data'    = 'openbrain-wiki-backup'
+  }
+
+  # ----- Pre-flight: ensure ./backups/<service>/ dirs exist ----------
+  $expectedBackupDirs = @(
+    'caddy', 'authelia', 'mnemory', 'openwebui', 'little-coder',
+    'openbrain-db', 'openbrain-wiki', 'open-notebook', 'smolcrawl',
+    'tailscale', 'lm-models'
+  )
+  $missingDirs = @()
+  foreach ($d in $expectedBackupDirs) {
+    $p = Join-Path '.\backups' $d
+    if (-not (Test-Path $p)) {
+      $missingDirs += $p
+      if ($CreateMissingDirs) {
+        New-Item -ItemType Directory -Path $p -Force | Out-Null
+      }
+    }
+  }
+  if ($missingDirs.Count -gt 0) {
+    if ($CreateMissingDirs) {
+      Write-Host ("  Created {0} missing ./backups/* directories" -f $missingDirs.Count) -ForegroundColor Yellow
+    } else {
+      Write-Host ("  [WARN] {0} ./backups/* directories don't exist (re-run with -CreateMissingDirs):" -f $missingDirs.Count) -ForegroundColor Yellow
+      $missingDirs | ForEach-Object { Write-Host "    $_" -ForegroundColor Yellow }
+      Write-Host ""
+    }
+  }
+
+  # ----- Volume coverage check ---------------------------------------
+  Write-Host "==> Volume coverage" -ForegroundColor Cyan
+  $allVolumes = @($aiStackVolumeNames) + @($ob1Volumes) | Sort-Object -Unique
+  $gaps = @()
+  $orphans = @()
+  foreach ($v in $allVolumes) {
+    if (-not $v) { continue }
+    $excludedMatch = $intentionallyExcluded | Where-Object { $_.Volume -eq $v }
+    if ($excludedMatch) {
+      Write-Host ("  [SKIP] {0,-25} - excluded: {1}" -f $v, $excludedMatch.Reason) -ForegroundColor DarkGray
+      continue
+    }
+    if ($backupCoverage.ContainsKey($v)) {
+      Write-Host ("  [OK]   {0,-25} -> {1}" -f $v, $backupCoverage[$v]) -ForegroundColor Green
+      continue
+    }
+    # Orphan detection: if no container (running OR stopped) references the
+    # volume, it's a leftover from a previous compose config -- not a real
+    # backup gap. Surface as hygiene flag, not a failure.
+    $candidateNames = @("ai-stack_$v", "open-brain_$v", $v)
+    $referencingContainers = @()
+    foreach ($candidate in $candidateNames) {
+      $usage = docker ps -a --filter "volume=$candidate" --format '{{.Names}}' 2>$null
+      if ($usage) { $referencingContainers += $usage }
+    }
+    if ($referencingContainers.Count -eq 0) {
+      Write-Host ("  [ORPHAN] {0,-23} - no container references it; safe to 'docker volume rm'" -f $v) -ForegroundColor DarkYellow
+      $orphans += $v
+      continue
+    }
+    Write-Host ("  [GAP]  {0,-25} - used by [{1}] but no backup container references it" -f $v, ($referencingContainers -join ',')) -ForegroundColor Red
+    $gaps += $v
+  }
+  Write-Host ""
+
+  # ----- Host bind-mount coverage ------------------------------------
+  Write-Host "==> Host bind-mount coverage" -ForegroundColor Cyan
+  foreach ($bm in $hostBindMounts) {
+    Write-Host ("  [OK]   {0,-50} -> {1}" -f $bm.Path, $bm.Owner) -ForegroundColor Green
+  }
+  Write-Host ""
+
+  # ----- Summary -----------------------------------------------------
+  if ($gaps.Count -eq 0) {
+    Write-Host "==> Coverage: CLEAN" -ForegroundColor Green
+    Write-Host "    Every named volume is either backed up or explicitly excluded."
+    exit 0
+  } else {
+    Write-Host ("==> Coverage: {0} GAPS" -f $gaps.Count) -ForegroundColor Red
+    Write-Host "    Add backup containers for the volumes flagged above, or mark them"
+    Write-Host "    excluded in `$intentionallyExcluded with a reason. See:"
+    Write-Host "    documentation/backup-conventions.md"
+    exit 1
+  }
+} finally {
+  Pop-Location
+}

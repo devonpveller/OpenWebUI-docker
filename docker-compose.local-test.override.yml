@@ -1,0 +1,29 @@
+# docker-compose.local-test.override.yml
+#
+# Compose overlay activated ONLY by `portal-on.ps1 -Test`. Adds a
+# localhost-bound host port to Caddy so the operator can hit the portal
+# from a browser on the same machine without ever exposing it to the
+# internet. Does NOT modify Authelia or Cloudflare wiring.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.local-test.override.yml `
+#                  --profile local-test up -d
+#
+# The lifecycle scripts handle this — you should not need to invoke
+# directly.
+#
+# Cookie / login UX caveat:
+#   Authelia is configured with cookie domain `devinveller.ai` and
+#   authelia_url=https://...  Local browser test via http://127.0.0.1:8443/
+#   will see Authelia render the login UI but cookies will NOT persist
+#   because the URL doesn't match the cookie domain and isn't HTTPS.
+#   This mode is for validating REVERSE-PROXY routing and SERVICE HEALTH;
+#   for the full login flow, switch to production mode via `portal-on.ps1`
+#   (without -Test) so cloudflared is up and the real domain serves over
+#   HTTPS at the Cloudflare edge.
+
+services:
+  caddy:
+    ports:
+      # Localhost only — NEVER reachable from LAN or internet.
+      - "127.0.0.1:8443:80"

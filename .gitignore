@@ -1,10 +1,14 @@
 # .gitignore
 .env
+.env.killswitch-*.bak
 data/
 logs/
 data-backup/
 backups/
-backup/
+# Use glob form so the `!backup/<script>.sh` re-includes below work.
+# (Git won't re-include files inside an excluded *directory*, but it WILL
+# re-include files matched by an excluded *glob*.)
+backup/*
 logs/
 filters/__pycache__/
 smolcrawl/__pycache__/
@@ -22,3 +26,22 @@ secrets/
 *.log
 /backups
 /backups
+
+# --- Re-include backup scripts under backup/ that ARE meant to be tracked ---
+# The `backup/` line above hides everything; selectively un-ignore the scripts
+# the plan ships. Generated tarballs / restore artifacts stay ignored.
+!backup/mnemory-backup.sh
+!backup/mnemory-restore.sh
+!backup/openwebui-backup.sh
+!backup/openwebui-restore.sh
+!backup/little-coder-backup.sh
+!backup/caddy-backup.sh
+!backup/authelia-backup.sh
+
+# --- Portal-specific paths from plan §7.2 ---
+config/authelia/users_database.yml
+config/tripwire/baseline.sha256
+config/alerter/credentials.json
+# Incident-response snapshot directories produced by breach-killswitch.ps1
+/incident/
+/reports

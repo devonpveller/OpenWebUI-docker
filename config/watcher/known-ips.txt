@@ -1,0 +1,8 @@
+# Known source IPs — one per line, full IP addresses (no CIDR ranges).
+# Lines starting with # are comments and ignored.
+# This list is the "have I logged in from here before" check that drives
+# the new-IP alert.
+#
+# Pre-seed with your typical LAN/tailnet IPs and any mobile carrier blocks
+# you regularly use. The authelia-watcher exact-matches against this file;
+# if you want CIDR support, change the matching logic in authelia-watch.sh.

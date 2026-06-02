@@ -1,0 +1,291 @@
+{
+    email {$ACME_EMAIL}
+    # Under Cloudflare Tunnel, ACME is unnecessary if Cloudflare provides the
+    # public cert. Leave email present so a future revert to direct exposure
+    # works without further config changes.
+    # acme_ca https://acme-staging-v02.api.letsencrypt.org/directory  # uncomment for staging
+
+    servers {
+        # Trust cloudflared's container IP range for X-Forwarded-* and
+        # CF-Connecting-IP. Without this, every client appears to come from
+        # cloudflared's IP and the access_control / regulation rules misfire.
+        # Adjust the CIDR to your edge-net subnet — `docker network inspect
+        # edge-net` will show the actual range. Typical Docker default is
+        # 172.16.0.0/12.
+        trusted_proxies static 172.16.0.0/12 10.0.0.0/8 192.168.0.0/16
+        client_ip_headers CF-Connecting-IP X-Forwarded-For
+        protocols h1 h2
+        strict_sni_host on
+    }
+}
+
+# ─── Snippets ─────────────────────────────────────────────────────────────
+
+# TLS policy — only meaningful if Caddy ever serves TLS directly. Under
+# Cloudflare Tunnel, Cloudflare handles TLS at the edge; this snippet is kept
+# so reverting to direct exposure is one config change away.
+(tls_strong) {
+    tls {
+        protocols tls1.2 tls1.3
+        ciphers TLS_AES_256_GCM_SHA384 TLS_CHACHA20_POLY1305_SHA256 TLS_AES_128_GCM_SHA256 TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384 TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384 TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305 TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305
+        curves x25519 secp384r1 secp256r1
+    }
+}
+
+# Security response headers shared by every site.
+# HSTS without the `preload` keyword — list submission is irreversible for years
+# (see plan §H.1). Enable preload by hand only after 90+ days of stable operation.
+(security_headers) {
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options    "nosniff"
+        X-Frame-Options           "DENY"
+        Referrer-Policy           "strict-origin-when-cross-origin"
+        Permissions-Policy        "geolocation=(), microphone=(), camera=(), usb=()"
+        Cross-Origin-Opener-Policy   "same-origin"
+        Cross-Origin-Resource-Policy "same-site"
+        -Server
+        -X-Powered-By
+    }
+}
+
+# Sanitize incoming proxy headers.
+# - Strip client-supplied X-Forwarded-Host / X-Real-IP (CF-Connecting-IP is the
+#   source of truth via the global trusted_proxies block; Caddy will rewrite
+#   X-Forwarded-For from it before passing upstream).
+# - Strip client-supplied Remote-* — Authelia is the ONLY source. Even though
+#   trusted-header SSO is not enabled (plan §6.7), this stays as defense in depth.
+(sanitize_proxy_headers) {
+    request_header -X-Forwarded-Host
+    request_header -X-Real-IP
+    request_header -Remote-User
+    request_header -Remote-Groups
+    request_header -Remote-Name
+    request_header -Remote-Email
+    # X-Forwarded-For and X-Forwarded-Proto are set by Caddy itself from
+    # trusted_proxies — do NOT strip them here.
+}
+
+# Access log to a rolling JSON file in /data
+(access_log) {
+    log {
+        output file /data/caddy-access.log {
+            roll_size 100MiB
+            roll_keep 7
+            roll_keep_for 720h
+        }
+        format json
+        level INFO
+    }
+}
+
+# ─── Authelia portal ──────────────────────────────────────────────────────
+http://auth.{$PUBLIC_DOMAIN} {
+    import security_headers
+    import sanitize_proxy_headers
+    import access_log
+    encode zstd gzip
+
+    request_body {
+        max_size 1MB
+    }
+
+    reverse_proxy authelia:9091
+}
+
+# ─── Open WebUI on its own subdomain ──────────────────────────────────────
+# OpenWebUI generates root-relative URLs (`/static/...`, `/api/...`) that
+# don't survive a subpath deployment, so each app gets its own subdomain.
+http://openwebui.{$PUBLIC_DOMAIN} {
+    import security_headers
+    import sanitize_proxy_headers
+    import access_log
+    encode zstd gzip
+
+    request_body {
+        max_size 100MB
+    }
+
+    forward_auth authelia:9091 {
+        uri /api/authz/auth-request
+        header_up X-Original-URL https://{host}{uri}
+        header_up X-Original-Method {method}
+
+        # Authelia's AuthRequest implementation returns 401 + Location +
+        # a single-link HTML body when unauthenticated. Browsers do NOT
+        # follow Location on 401, so without this users see a bare
+        # "401 Unauthorized" link. Convert to a proper 302 so the browser
+        # bounces straight to Authelia and back after sign-in.
+        @denied status 401 403
+        handle_response @denied {
+            redir https://auth.{$PUBLIC_DOMAIN}/?rd=https://{host}{uri}&rm={method} 302
+        }
+    }
+
+    # Defensive: strip a leftover /openwebui/ prefix the browser may still
+    # have cached from before the subdomain switch.
+    handle_path /openwebui/* {
+        redir * {uri} 308
+    }
+    redir /openwebui / 308
+
+    reverse_proxy openwebui:8080 {
+        header_up Host {upstream_hostport}
+        header_up X-Forwarded-Proto https
+    }
+}
+
+# ─── Open Notebook on its own subdomain ───────────────────────────────────
+# Streamlit (port 8502) + FastAPI (port 5055) split. Browser-side calls
+# to /api/notebook/* route to FastAPI; everything else to Streamlit.
+http://notebook.{$PUBLIC_DOMAIN} {
+    import security_headers
+    import sanitize_proxy_headers
+    import access_log
+    encode zstd gzip
+
+    request_body {
+        max_size 100MB
+    }
+
+    forward_auth authelia:9091 {
+        uri /api/authz/auth-request
+        header_up X-Original-URL https://{host}{uri}
+        header_up X-Original-Method {method}
+
+        # Authelia's AuthRequest implementation returns 401 + Location +
+        # a single-link HTML body when unauthenticated. Browsers do NOT
+        # follow Location on 401, so without this users see a bare
+        # "401 Unauthorized" link. Convert to a proper 302 so the browser
+        # bounces straight to Authelia and back after sign-in.
+        @denied status 401 403
+        handle_response @denied {
+            redir https://auth.{$PUBLIC_DOMAIN}/?rd=https://{host}{uri}&rm={method} 302
+        }
+    }
+
+    # Defensive: strip a leftover /notebook/ prefix from cached browsers.
+    handle_path /notebook/* {
+        redir * {uri} 308
+    }
+    redir /notebook / 308
+
+    # Intercept the Next.js runtime-config endpoint and return the public
+    # apiUrl directly. Upstream's auto-detect would construct
+    # https://notebook.devinveller.ai:5055 (port 5055 isn't on Cloudflare,
+    # would 404). Setting API_URL env on the container fixes public but
+    # breaks tailnet -- where the auto-detect IS correct (entrypoint.sh
+    # tailscale-serves the API on :5055). So override here, NOT in the
+    # container: tailnet path unchanged, public path correct.
+    handle /config {
+        header Content-Type application/json
+        respond "{\"apiUrl\":\"https://notebook.{$PUBLIC_DOMAIN}\"}" 200
+    }
+
+    # FastAPI lives on :5055 and exposes its routes UNDER /api/* itself
+    # (e.g. /api/config). Do NOT strip the prefix -- upstream wants the
+    # full path. Pass {host} so the frontend's auto-detect picks the
+    # public hostname, not the in-Docker container name.
+    handle /api/* {
+        reverse_proxy open_notebook:5055 {
+            header_up Host {host}
+            header_up X-Forwarded-Proto https
+        }
+    }
+
+    # Next.js frontend on :8502. Same {host} fix here so the runtime-config
+    # auto-detector sees the public hostname.
+    reverse_proxy open_notebook:8502 {
+        header_up Host {host}
+        header_up X-Forwarded-Proto https
+    }
+}
+
+# ─── Main app domain ──────────────────────────────────────────────────────
+http://{$PUBLIC_DOMAIN} {
+    import security_headers
+    import sanitize_proxy_headers
+    import access_log
+    encode zstd gzip
+
+    # Health endpoint — restricted to container-local sources only so it does
+    # not leak liveness to internet scanners.
+    @internal_health {
+        path /healthz
+        remote_ip 127.0.0.1/32 172.16.0.0/12
+    }
+    handle @internal_health {
+        respond "ok" 200
+    }
+    handle /healthz {
+        respond 404
+    }
+
+    # Per-route request body caps
+    @uploads path /openwebui/* /notebook/* /api/notebook/*
+    request_body @uploads {
+        max_size 100MB
+    }
+    request_body {
+        max_size 2MB
+    }
+
+    # Forward-auth: every request below this point flows through Authelia.
+    # Authelia 4.39 with AuthRequest implementation: endpoint is
+    # /api/authz/auth-request (not the legacy /api/verify). X-Original-URL
+    # is required by AuthRequest implementation; we set it explicitly because
+    # our sanitize_proxy_headers snippet strips X-Forwarded-Host (defense
+    # against client-supplied values) which Authelia would otherwise use.
+    # copy_headers omitted intentionally — trusted-header SSO is NOT enabled
+    # (plan sec.6.7).
+    forward_auth authelia:9091 {
+        uri /api/authz/auth-request
+        # Hardcode https in X-Original-URL: the portal is HTTPS-only at the
+        # Cloudflare edge by design, and Authelia 4.39 rejects http schemes
+        # (insecure cookie transport). Inside the tunnel + Docker, traffic
+        # appears as http, but the client-facing scheme is always https.
+        header_up X-Original-URL https://{host}{uri}
+        header_up X-Original-Method {method}
+
+        # Convert Authelia's 401 + Location into a proper 302 so browsers
+        # follow it automatically (they don't follow Location on 401).
+        # Without this, the user sees a bare "401 Unauthorized" link.
+        @denied status 401 403
+        handle_response @denied {
+            redir https://auth.{$PUBLIC_DOMAIN}/?rd=https://{host}{uri}&rm={method} 302
+        }
+    }
+
+    # ─── Routes ──────────────────────────────────────────────────────────
+
+    # Legacy subpath routes: redirect to the proper subdomain so old
+    # bookmarks still land somewhere useful. handle_path strips the
+    # prefix before {uri} is evaluated, so /openwebui/foo becomes
+    # https://openwebui.devinveller.ai/foo (not /openwebui/foo).
+    handle_path /openwebui/* {
+        redir * https://openwebui.{$PUBLIC_DOMAIN}{uri} 308
+    }
+    redir /openwebui https://openwebui.{$PUBLIC_DOMAIN}/ 308
+
+    handle_path /notebook/* {
+        redir * https://notebook.{$PUBLIC_DOMAIN}{uri} 308
+    }
+    redir /notebook https://notebook.{$PUBLIC_DOMAIN}/ 308
+
+    handle_path /api/notebook/* {
+        redir * https://notebook.{$PUBLIC_DOMAIN}/api/notebook{uri} 308
+    }
+
+    handle {
+        header Content-Security-Policy "default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+        root * /srv/site
+        templates
+        try_files {path} /index.html
+        file_server
+    }
+}
+
+# Default-deny stub for any other Host header reaching this Caddy
+:80 {
+    respond 421
+}

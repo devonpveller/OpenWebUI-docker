@@ -107,18 +107,134 @@ function Test-TailscaleConnection {
     }
 }
 
-# Function to test serve configuration
+# Inventory of expected `tailscale serve` mappings inside the tailscale
+# container. Each entry is what entrypoint.sh's setup_*_serve functions
+# put in place at container startup. The health check verifies all of
+# these are present; the repair re-adds only the missing ones (never
+# resets the full config, which would clobber working mappings).
+#
+# Fields:
+#   Name           Human-readable identifier
+#   TailscalePort  The :PORT exposed on the tailnet
+#   TailscalePath  Path prefix (use "/" for root)
+#   LocalPort      The socat-listening port inside tailscale container
+#                  that the mapping forwards to
+$ExpectedTailscaleServes = @(
+    @{ Name = 'openwebui';            TailscalePort = 443;  TailscalePath = '/';                LocalPort = 8080 }
+    @{ Name = 'llama-cpp';            TailscalePort = 443;  TailscalePath = '/llama-cpp';       LocalPort = 8235 }
+    @{ Name = 'llama-cpp-embed';      TailscalePort = 443;  TailscalePath = '/llama-cpp-embed'; LocalPort = 8236 }
+    @{ Name = 'open-notebook-ui';     TailscalePort = 8443; TailscalePath = '/';                LocalPort = 8237 }
+    @{ Name = 'open-notebook-api';    TailscalePort = 5055; TailscalePath = '/';                LocalPort = 8238 }
+)
+
+# Function to test serve configuration.
+# Returns an array of @{Name; TailscalePort; TailscalePath; LocalPort}
+# for any expected mapping that is NOT present in the live config.
+# Returns empty array when fully configured.
+#
+# Note the `,` unary prefix on returns -- without it, PowerShell unwraps
+# single-element arrays to a scalar (hashtable), making `.Count` return
+# the hashtable's key count instead of 1. Verified bite 2026-05-31.
+function Get-MissingTailscaleServes {
+    [CmdletBinding()]
+    param()
+
+    try {
+        $RawResult = docker exec tailscale sh -c 'tailscale --socket=/tmp/tailscaled.sock serve status' 2>$null
+        $Result = ($RawResult -join "`n")
+        if (-not $Result) {
+            return ,@($ExpectedTailscaleServes)
+        }
+        $missing = @()
+        foreach ($exp in $ExpectedTailscaleServes) {
+            # Two-axis check:
+            #   - the per-port header exists ("xxx.ts.net (tailnet only)" for 443
+            #     or "xxx.ts.net:N (tailnet only)" for other ports)
+            #   - the target local port string "127.0.0.1:NNNN" appears
+            # That avoids spurious matches across unrelated port blocks.
+            $hasLocalPort = $Result -like "*127.0.0.1:$($exp.LocalPort)*"
+            if (-not $hasLocalPort) {
+                $missing += $exp
+            }
+        }
+        return ,$missing
+    }
+    catch {
+        return ,@($ExpectedTailscaleServes)
+    }
+}
+
+# Back-compat: old call sites that just want a bool. Returns $true when
+# nothing is missing.
 function Test-ServeConfiguration {
     [CmdletBinding()]
     param()
-    
+    $m = Get-MissingTailscaleServes
+    return (@($m).Count -eq 0)
+}
+
+# Probe a local socat listener inside tailscale container. Returns $true
+# if it accepts a TCP connection (any response, including HTTP errors).
+# Used so we don't try to add a tailscale-serve mapping pointing at a
+# dead socat -- that would just shadow the real (broken) state.
+function Test-TailscaleLocalPort {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][int]$Port)
     try {
-        $Result = docker compose exec -T tailscale tailscale --socket=/tmp/tailscaled.sock serve status 2>$null
-        return ($Result -like "*127.0.0.1:8080*")
-    }
-    catch {
+        # Single sh -c with the port baked in via PowerShell interpolation.
+        # Connection-refused / no-route returns non-zero; any HTTP response
+        # (200, 307, 404, 502) returns zero. We treat any zero as "alive".
+        $cmd = "wget -q --spider -T 3 http://127.0.0.1:$Port/ 2>/dev/null"
+        docker exec tailscale sh -c $cmd 2>$null | Out-Null
+        return ($LASTEXITCODE -eq 0)
+    } catch {
         return $false
     }
+}
+
+# Repair: add any missing `tailscale serve` mappings. ADDITIVE only --
+# never calls `serve reset`, never removes working mappings. Skips any
+# mapping whose local socat listener is dead (logged as WARN so the
+# operator/loop can address the deeper root cause).
+function Repair-TailscaleServes {
+    [CmdletBinding()]
+    param()
+    $missing = Get-MissingTailscaleServes
+    if ($missing.Count -eq 0) {
+        Write-LogEntry "All expected tailscale serve mappings present ($($ExpectedTailscaleServes.Count) checked)" "DEBUG"
+        return $true
+    }
+    Write-LogEntry "tailscale serve drift: $($missing.Count)/$($ExpectedTailscaleServes.Count) mappings missing" "WARN"
+    $allOk = $true
+    foreach ($m in $missing) {
+        Write-LogEntry "  missing: $($m.Name) :$($m.TailscalePort)$($m.TailscalePath) -> http://127.0.0.1:$($m.LocalPort)" "WARN"
+        if (-not (Test-TailscaleLocalPort -Port $m.LocalPort)) {
+            Write-LogEntry "  skipping repair: 127.0.0.1:$($m.LocalPort) is not accepting connections (socat dead or upstream gone) -- entrypoint.sh handles socat restart" "WARN"
+            $allOk = $false
+            continue
+        }
+        try {
+            # Tailscale CLI flags:
+            #   --https=PORT   the tailnet-exposed port
+            #   --set-path     for non-root path prefixes (llama-cpp, llama-cpp-embed)
+            #   --bg           leave the proxy running in the background
+            if ($m.TailscalePath -eq '/') {
+                docker compose exec -T tailscale tailscale --socket=/tmp/tailscaled.sock serve --https=$($m.TailscalePort) --bg "http://127.0.0.1:$($m.LocalPort)" | Out-Null
+            } else {
+                docker compose exec -T tailscale tailscale --socket=/tmp/tailscaled.sock serve --https=$($m.TailscalePort) --set-path=$($m.TailscalePath) --bg "http://127.0.0.1:$($m.LocalPort)" | Out-Null
+            }
+            if ($LASTEXITCODE -eq 0) {
+                Write-LogEntry "  added: $($m.Name) :$($m.TailscalePort)$($m.TailscalePath)" "SUCCESS"
+            } else {
+                Write-LogEntry "  add FAILED (exit $LASTEXITCODE): $($m.Name)" "ERROR"
+                $allOk = $false
+            }
+        } catch {
+            Write-LogEntry "  add FAILED ($($m.Name)): $($_.Exception.Message)" "ERROR"
+            $allOk = $false
+        }
+    }
+    return $allOk
 }
 
 # Function to validate entrypoint and detect common issues
@@ -624,17 +740,14 @@ function Invoke-HealthCheck {
         }
     }
     
-    # Test serve configuration
-    if (-not (Test-ServeConfiguration)) {
-        Write-LogEntry "Serve configuration missing, reconfiguring..." "WARN"
-        try {
-            docker compose exec -T tailscale tailscale --socket=/tmp/tailscaled.sock serve reset | Out-Null
-            docker compose exec -T tailscale tailscale --socket=/tmp/tailscaled.sock serve --https=443 --bg http://127.0.0.1:8080 | Out-Null
-            Write-LogEntry "Serve configuration restored"
-        } catch {
-            Write-LogEntry "Failed to restore serve configuration: $($_.Exception.Message)" "ERROR"
-            return $false
-        }
+    # Test serve configuration. Additive repair: re-add only missing
+    # mappings (never `serve reset`, which would wipe working ones --
+    # including the per-service mappings the old code didn't know about).
+    if (-not (Repair-TailscaleServes)) {
+        Write-LogEntry "Some tailscale serve mappings could not be restored (see prior WARN/ERROR lines)" "WARN"
+        # Non-fatal: openwebui main path may still work even if open_notebook
+        # serves are missing; downstream checks (LlamaCpp, OpenTerminal) will
+        # exercise their own paths.
     }
     
     # Test llama-cpp connectivity
