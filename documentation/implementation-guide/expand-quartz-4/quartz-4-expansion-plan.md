@@ -122,7 +122,7 @@ So a sourceless page arises three ways:
 
 > **Provenance read is not workbench-backed (Phase 1 redesign).** The `provenance` item in the workbench box and the `ProvenancePanel` `fetch()` arrow above are superseded *for read*: P1 serves provenance as **static `thought/<id>` & `source/<id>` leaf pages** emitted at compile and reached via ordinary wikilinks (native popover + SPA). The workbench's provenance role shrinks to the **optional** `ProvenancePanel` summary; its load-bearing jobs remain the **write** paths (sources CRUD/versioning, threads, notes, import) plus the P6 deliberate-link write. See [§4 Phase 1](#4-feature-phases).
 
-- **`openbrain-workbench`** (Deno+Hono, `:8814`) — browser-facing read/write API, kept **off** the MCP server + cloud-gateway (limited to 8 tools) so the multipart/auth surface is isolated.
+- **`openbrain-workbench`** (Deno+Hono) — browser-facing read/write API, kept **off** the MCP server + cloud-gateway (limited to 8 tools) so the multipart/auth surface is isolated. **Port/convention (audit):** every OB1 service listens on internal `PORT=8000` and (optionally) publishes a distinct loopback host port; follow that — internal `:8000`, optional debug publish `127.0.0.1:8814:8000`. The `:8814` used throughout this doc denotes that **host** debug port, not a second internal port. Networks: **`obnet` + `llm-net` + `app-net`** (app-net is required for portal-Caddy reachability — see [§2.3](#23-routing-exposure-auth)). **DB access:** for atomic multi-row writes (import = source + chunks + links in one unit) the workbench should talk to `openbrain-db` **directly via deno-postgres with transactions** — mirroring `openbrain-suggestion-worker` ([docker-compose.yml:299-325](OB1/docker/docker-compose.yml#L299-L325)) — rather than firing several non-atomic PostgREST calls through `openbrain-rest`. Read paths may still use PostgREST.
 - **`openbrain-extract`** (Python/FastAPI) — wraps `content-core`; `POST /extract` → `{ markdown, title, metadata, pages, images[] }`; OCR for scans/images.
 - **Existing TTS/STT** at `host.docker.internal:8000/v1` — STT used at import for audio/video sources (P5); TTS for podcasts (P7, deferred). No new container until P7 (and even then likely just a thin caller, not a TTS engine).
 
@@ -137,8 +137,12 @@ binaries from the git vault per D-I):
 
 ### 2.3 Routing, exposure, auth
 
-- Caddy `/workbench/*` → `openbrain-workbench:8814`, **same origin** as the wiki (no CORS): [config/caddy/Caddyfile](config/caddy/Caddyfile) + OB1 [Caddyfile](OB1/docker/Caddyfile).
-- Portal-only reach + bearer/shared-secret (reuse `MCP_ACCESS_KEY` pattern). New `/workbench` route may need a Tailscale serve entry ([recipe](C:\Users\yamao\.claude\projects\d--Open-WebUI-ai-stack\memory\tailscale-serve-restore-recipe.md)).
+**⚠️ Corrected against the live Caddy config (audit).** The wiki is fronted by the **portal** Caddy on its own subdomain `wiki.{$PUBLIC_DOMAIN}` ([config/caddy/Caddyfile:210-257](config/caddy/Caddyfile#L210-L257)), which `reverse_proxy openbrain-wiki-viewer:8080`. The OB1 [Caddyfile](OB1/docker/Caddyfile) is **only** the internal PostgREST `/rest/v1` proxy (`openbrain-rest`, port 80, obnet) — it does **not** front the viewer, so adding `/workbench/*` there does nothing for same-origin browser routing. The earlier "both Caddyfiles" instruction was wrong.
+
+- **Same-origin route:** add `handle_path /workbench/* { reverse_proxy openbrain-workbench:8000 … }` to the **`wiki.{$PUBLIC_DOMAIN}` block in [config/caddy/Caddyfile](config/caddy/Caddyfile)** (above the catch-all `reverse_proxy` to the viewer) **and** the equivalent Tailscale `serve` path ([recipe](C:\Users\yamao\.claude\projects\d--Open-WebUI-ai-stack\memory\tailscale-serve-restore-recipe.md)). `/workbench/*` is a distinct prefix from Quartz's root-relative assets, so it coexists on the same subdomain cleanly.
+- **Network reachability:** for the portal Caddy to resolve `openbrain-workbench` by name it **must join `app-net`** (the external `ai-stack_app-net`), exactly as `openbrain-wiki-viewer` does ([docker-compose.yml:417-423](OB1/docker/docker-compose.yml#L417-L423)). So the workbench's networks are **`obnet` + `llm-net` + `app-net`** — the P0.1 "obnet+llm-net" list is incomplete.
+- **Upload body cap:** the wiki subdomain currently enforces `request_body { max_size 1MB }` ([config/caddy/Caddyfile:216-218](config/caddy/Caddyfile#L216-L218)). Every P5 import (PDF/DOCX/PPTX/image/audio) exceeds 1 MB, so the `/workbench/import` route needs its **own raised `request_body` cap** (e.g. a `@import` matcher with `max_size 100MB`) — and the workbench must independently enforce its own ceiling.
+- **Auth — secret stays server-side (audit):** the subdomain is already gated by **Authelia `forward_auth`** ([config/caddy/Caddyfile:220-231](config/caddy/Caddyfile#L220-L231)), so the browser is an authenticated operator before any `/workbench` call. A static Quartz page **cannot safely hold a bearer** — embedding `MCP_ACCESS_KEY` in client JS leaks it. So **do not** send the shared secret from the browser. Instead, let Caddy **inject** the shared secret server-side when proxying to the workbench (`header_up X-Brain-Key {$WORKBENCH_KEY}`), mirroring how `openbrain-rest` strips/rewrites auth headers ([OB1/docker/Caddyfile:14-17](OB1/docker/Caddyfile#L14-L17)). The workbench trusts that header on `app-net` and is never host-published. (Reusing the `MCP_ACCESS_KEY` *value* is fine; the correction is *where it lives* — Caddy, not client code.)
 
 ### 2.4 The visibility loop (no new sync)
 
@@ -156,8 +160,8 @@ patched `quartz.layout.ts`/`quartz.config.ts`) `COPY`'d over the pinned clone af
 
 ## 3. Cross-cutting foundations (Phase 0)
 
-- **P0.1** `openbrain-workbench` skeleton (Deno+Hono, health, bearer auth, `obnet`+`llm-net`, `:8814`) → compose **+ recovery scripts + stack-map**.
-- **P0.2** Caddy `/workbench/*` proxy (both Caddyfiles), same-origin.
+- **P0.1** `openbrain-workbench` skeleton (Deno+Hono, internal `:8000`, health, Caddy-injected `X-Brain-Key` trust, networks `obnet`+`llm-net`+`app-net`, optional debug publish `127.0.0.1:8814:8000`) → compose **+ recovery scripts + stack-map**.
+- **P0.2** Caddy `/workbench/*` proxy in the **`wiki.{$PUBLIC_DOMAIN}` block of [config/caddy/Caddyfile](config/caddy/Caddyfile)** + the Tailscale `serve` path, same-origin; raised `request_body` cap on the import sub-route; Caddy injects the shared secret (see [§2.3](#23-routing-exposure-auth)).
 - **P0.3** Quartz overlay scaffold + asset config; no-op component proving overlay + client `fetch()` to `/workbench/health`; confirm `assets/` served, not paginated.
 - **P0.4** `wiki-assets` volume wired to workbench + viewer.
 - **P0.5** Shared TS types for source/thread/membership/provenance shapes mirrored from [init-sources.sql](OB1/docker/init-sources.sql)/[init-threads.sql](OB1/docker/init-threads.sql).
@@ -179,8 +183,9 @@ Both citation forms come from the generator's system prompt ([generate-wiki.mjs:
 - **Compiler (the load-bearing change — [wiki-service.mjs](OB1/docker/wiki-service/wiki-service.mjs) + [generate-wiki.mjs](OB1/recipes/entity-wiki/generate-wiki.mjs)):**
   - **Emit bounded leaf pages** — `content/thought/<id>.md` and `content/source/<id>.md`, **only for ids actually cited** this compile (collected from the `provenance.linked_ids`/`semantic_ids`/`source_ids` sets the generator already builds, [generate-wiki.mjs:542-544](OB1/recipes/entity-wiki/generate-wiki.mjs#L542-L544)). Bounded by *citations*, not the DB — 800 cited thoughts → 800 leaves, not 50k.
   - **Batch-fetch full content** by id (`thoughts?id=in.(…)` / `sources?id=in.(…)`) for the leaf bodies — the synthesis payload only carries 300-char snippets. Leaf frontmatter: `type: thought|source`, date, `metadata.type`; sources add `url`/`title`/`content_type`/`notebook`.
-  - **Rewrite inline citations into wikilinks** — post-process generated pages: `[#11173]` → `[[thought/11173|#11173]]`, `[S:4521]` → `[[source/4521|S:4521]]`. An id with no emitted leaf (uncited / model mis-cite) is **left as plain text**, mirroring broken-`[[wikilink]]` handling. The citation now *is* a wikilink — same object, same behavior as the rest of the wiki.
-  - **Orphan-sweep** leaves whose id is no longer cited anywhere (reuse the existing sweep) so the set stays bounded.
+  - **Rewrite inline citations into wikilinks** — post-process generated pages: `[#11173]` → `[[thought/11173|#11173]]`, `[S:<uuid>]` → `[[source/<uuid>|S:<uuid>]]`. An id with no emitted leaf (uncited / model mis-cite) is **left as plain text**, mirroring broken-`[[wikilink]]` handling. The citation now *is* a wikilink — same object, same behavior as the rest of the wiki.
+    - **⚠️ Id-shape reality (audit):** `thoughts.id` is **`BIGSERIAL`** ([init.sql:9](OB1/docker/init.sql#L9)) — small integers an LLM reproduces reliably, so `[#id]` rewriting is robust. **`sources.id` is `UUID`** ([init-sources.sql:23](OB1/docker/init-sources.sql#L23)) — the example `[S:4521]` is fictitious; a real source citation is `[S:a1b2c3d4-e5f6-…]`. Two consequences the rewrite must handle: (1) the citation regex must match a **36-char UUID with hyphens**, not `\d+`; (2) an LLM transcribing a full UUID verbatim has a high error rate, so the `[S:…]`→plain-text fallback will fire often and source-leaf coverage will be lossy. **Mitigation:** in `buildSynthesisInput`/`synthesize`, present sources to the model under a **short stable per-page token** (e.g. `S1,S2,…` mapped to the real UUIDs in the structure payload) and resolve the token→UUID during the deterministic rewrite, rather than asking the model to echo UUIDs. Thought ids stay as-is.
+  - **Orphan-sweep — dedicated leaf sweep, NOT the existing entity sweep (audit — data-loss bug otherwise):** the current `sweepOrphanEntityPages` ([wiki-service.mjs:457-506](OB1/docker/wiki-service/wiki-service.mjs#L457-L506)) builds its kept-set from **entity slugs only** and `listEntityFiles` ([wiki-service.mjs:424-450](OB1/docker/wiki-service/wiki-service.mjs#L424-L450)) walks **every** `content/<dir>/` except `topic/`. So if leaves land in `content/thought/` and `content/source/`, the existing sweep would delete **every leaf on the very next compile** (no leaf id is in the entity kept-set). Required: (a) add `thought/` and `source/` to the `listEntityFiles` skip-list exactly as `topic/` is skipped, and (b) add a **new `sweepOrphanLeafPages`** keyed on the set of ids actually cited this compile (the union of `provenance` id sets across all generated pages), removing only leaves whose id is no longer cited. "Reuse the existing sweep" is incorrect.
   - **Untrusted-content guard** — leaf bodies render captured / external text: keep the scrub ([generate-wiki.mjs:597-610](OB1/recipes/entity-wiki/generate-wiki.mjs#L597-L610)) and rely on Quartz's markdown→HTML sanitization; this text is untrusted at *render* time, not just as LLM input.
 - **Quartz (mostly native — no custom interaction component):**
   - Hover-popover + click-navigate come **free** from stock Quartz (this v4.5.1 build runs SPA + popovers). Citations also gain graph nodes, **backlinks** ("which wiki pages cite this record"), and full-text search automatically.
@@ -219,7 +224,9 @@ Both citation forms come from the generator's system prompt ([generate-wiki.mjs:
 **Goal:** drag-and-drop / picker upload of PDF, DOC/DOCX, PPT/PPTX, MD, TXT, **images** (and **audio/video** via STT) → extract → chunk → embed → land as first-class sources, linked to a chosen thread, with progress + errors; images render in Quartz.
 - **`openbrain-extract` sidecar (correctness-first, all formats — §12.3):** stable `POST /extract` → `{ markdown, title, metadata, pages, images[] }` with best-of-breed per-format extractors (PDF: PyMuPDF/Docling-class; DOCX/PPTX: python-docx/-pptx; images: Pillow+Tesseract OCR; audio/video: STT at `host.docker.internal:8000/v1`); content-core where it extracts most faithfully. **Per-format extraction-quality acceptance gate** (text fidelity, tables, headings, image refs). Add to compose **+ recovery + stack-map**.
 - **Workbench `POST /workbench/import` (async):** store upload → extract → write images to `assets/<source-id>/` + rewrite refs → chunk (semantic/sentence-boundary default, fixed+overlap fallback, `bge-m3`-tuned) → embed → `find_or_create_source()` (dedup) → `link_source_to_thread(..., 'deliberate')` to the selected thread → `job_id`; `GET /workbench/jobs/:id` for progress.
-- **Schema (additive — §12.2):** widen `content_type` CHECK to add `'image'`, `'docx'`, `'pptx'`, `'audio'`; **`source_chunks(source_id, idx, content, embedding VECTOR(1024))`** (confirmed — long-doc retrieval *and* the source list podcasts build from) + a chunk-aware `match_sources` variant.
+- **Schema (additive — §12.2):** widen the `content_type` CHECK and **`source_chunks`** + a chunk search RPC. Two corrections from the audit:
+  - **Reconcile the CHECK with the import format list.** The live CHECK ([init-sources.sql:27-30](OB1/docker/init-sources.sql#L27-L30)) is `web_article,pdf,youtube_transcript,podcast_transcript,paper,manual,research_synthesis`. The import set (PDF, DOC/DOCX, PPT/PPTX, MD, TXT, images, audio/video) introduces types with **no enum value** — `docx,pptx,image,audio` plus `txt,md` (and legacy `doc,ppt`). Either add **all** of them to the CHECK or pin an explicit mapping (e.g. `txt`/`md`→`manual`, `doc`→`docx`, `ppt`→`pptx`). `pdf` already exists. A TXT/MD upload that maps to no allowed value will fail the CHECK at insert — pick the mapping now.
+  - **`source_chunks(source_id UUID, idx INT, content TEXT, embedding VECTOR(1024), PRIMARY KEY(source_id, idx))`** (confirmed — long-doc retrieval *and* the source list podcasts build from), `source_id … REFERENCES sources(id) ON DELETE CASCADE`. Name the search RPC explicitly **`match_source_chunks`** (don't overload `match_sources`, which returns source-level rows — see [init-sources.sql:78](OB1/docker/init-sources.sql#L78)).
 - **Quartz:** `ImportDropzone.tsx` (validation, per-file progress, errors) + `ImportStatus.tsx`; thread selector reuses `MembershipPicker`.
 - **Gate:** drop a PDF, DOCX, PNG (and an MP3) → all extract/transcribe, chunk, embed, dedupe, link to the chosen thread, entity-extract, surface via P1 provenance and on the P2 thread page; images render inline; corrupt files fail clearly.
 
@@ -234,7 +241,10 @@ an authoritative hint the next generation honors.
   - `ProvenancePanel` (P1) shows a grounding badge: **"N sources"** / **"thought-only — no sources yet"** / **"⏳ sources pending extraction"**.
   - `GET /workbench/grounding` surfaces `source_extraction_queue` health (pending/started/`last_error` counts) so a **backlog** page (cause 2) is never mislabeled as **by-design** (cause 1).
   - Compiler policy knob: **badge** thought-only pages (recommended) rather than suppress them — they still carry graph value.
-- **Deliberate source→page link (the core feature):** from the provenance panel and the P4 source editor, **"Link this source to ‹wiki page›"** writes a marked `source_entities` row — `mention_role='user_linked'`, `confidence=1.0`, `evidence='manual: <operator/when>'`, plus a `metadata` flag so re-extraction **never clobbers** it. Next compile: the entity becomes/stays a candidate and `fetchLinkedSources` includes it → the page **regenerates citing that source** and flips to "grounded". (Mirrors `thread_sources` `link_type='deliberate'`, but on the source↔entity edge that drives wiki pages.)
+- **Deliberate source→page link (the core feature):** from the provenance panel and the P4 source editor, **"Link this source to ‹wiki page›"** writes a marked `source_entities` row. Next compile: the entity becomes/stays a candidate and `fetchLinkedSources` includes it → the page **regenerates citing that source** and flips to "grounded". (Mirrors `thread_sources` `link_type='deliberate'`, but on the source↔entity edge that drives wiki pages.)
+  - **⚠️ Schema reality (audit):** `source_entities` ([init-source-graph.sql:27-35](OB1/docker/init-source-graph.sql#L27-L35)) has columns `source_id, entity_id, mention_role, confidence, evidence, created_at` and **PK `(source_id, entity_id)`** — there is **no `metadata` column**, so "plus a `metadata` flag" as written is impossible. Two additive fixes, both in scope under the additive-only guardrail:
+    1. **Marker:** `mention_role='user_linked'`, `confidence=1.0`, `evidence='manual:<operator>@<iso8601>'`. Optionally `ALTER TABLE public.source_entities ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}'::jsonb` if a richer flag is wanted — but `mention_role` alone suffices and avoids a column.
+    2. **PK-collision decision (must be stated):** because the PK is `(source_id, entity_id)`, a manual `user_linked` row and an auto `mentioned` row for the **same pair cannot coexist**. Policy: **`user_linked` wins** — the worker's re-extraction upsert must `ON CONFLICT (source_id,entity_id) DO NOTHING` (or merge) when the existing row is `user_linked`, never overwriting the manual mention_role back to `mentioned`.
 - **Upload-and-link entry point:** the P5 `ImportDropzone` gains a **"link to wiki page(s) / thread"** target field, so a *new* source is ingested **and** linked to chosen entities/threads in one action → it feeds the next generation for those pages. This is exactly the "upload a new source while simultaneously linking it for wiki review/generation" path.
 - **Worker change (required):** the entity-extraction worker must **upsert without deleting `user_linked` rows** (preserve manual links across re-extraction of a source). Note in the worker + a guard test.
 - **Quartz:** `SourceLinker.tsx` (entity/page picker on a source view + in the editor), grounding badges in `ProvenancePanel`, "link targets" field in `ImportDropzone`.
@@ -336,8 +346,9 @@ source of truth.
 - **Caddy:** [config/caddy/Caddyfile](config/caddy/Caddyfile), [OB1/docker/Caddyfile](OB1/docker/Caddyfile) — `/workbench/*` + `assets/`.
 - **Quartz overlay:** `OB1/docker/wiki-viewer/quartz-overlay/` — leaf-page template (`type: thought|source` layout; native popover + SPA + backlinks do the interaction, no custom linkifier), optional `ProvenancePanel` (consolidated per-page provenance index), `ThreadIndex`, `ThreadPage`, `MembershipPicker`, `NotesEditor`, `SourceEditor`, `SourceRetractor`, `ImportDropzone`, `ImportStatus`, `[PodcastPanel]`, `.inline.ts`, layout/config.
 - **Wiki compiler:** [wiki-service.mjs](OB1/docker/wiki-service/wiki-service.mjs) + [generate-wiki.mjs](OB1/recipes/entity-wiki/generate-wiki.mjs) — emit cited-only `thought/<id>.md` + `source/<id>.md` leaf pages (batch-fetch full content by id), rewrite inline `[#id]`/`[S:id]` citations into `[[thought/…|#id]]`/`[[source/…|S:id]]` wikilinks, orphan-sweep uncited leaves (P1); thread-page generation + graph (P2); notes write interplay (P3); confirm orphan sweep covers hard-deletes + uncited leaves (P4).
-- **Schema (additive only):** `source_revisions` (`init-source-revisions.sql`); widen `content_type` CHECK + `source_chunks` (`init-source-chunks.sql`); `user_linked` rows in `source_entities` (P6, marked via `mention_role`/`metadata`); `podcasts` (P7); retraction audit in `metadata`.
-- **Search:** chunk-aware `match_sources` variant.
+- **Schema (additive only):** `source_revisions` (`init-source-revisions.sql`); widen `content_type` CHECK + `source_chunks` + `match_source_chunks` (`init-source-chunks.sql`); `user_linked` rows in `source_entities` (P6, marked via `mention_role='user_linked'`, optional additive `metadata` column); `podcasts` (P7); retraction audit (additive `retracted_by`/`retracted_at` columns or a `source_revisions` tombstone — `sources` has no `metadata`-for-audit convention to lean on).
+  - **⚠️ Migration path (audit — two places, not one):** `/docker-entrypoint-initdb.d` scripts run **only on a fresh `openbrain-db-data` volume** ([docker-compose.yml:36-37](OB1/docker/docker-compose.yml#L36-L37)). So each new SQL file must be **(a)** mounted with an ordering prefix after `70-init-threads.sql` — `80-init-source-revisions.sql`, `90-init-source-chunks.sql`, `95-…` for the `content_type`/`source_entities` widening — for fresh installs, **and (b)** applied to the **live** DB via the existing psql promotion runbook (the same path `init-threads.sql` took). A file that is only added to compose silently no-ops on the running stack.
+- **Search:** `match_source_chunks` (new RPC; do not overload `match_sources`).
 
 ---
 
@@ -396,7 +407,7 @@ destination: **Quartz becomes the workbench**; ON is retired **in stages**.
 - **OB1 guard rails:** additive schema only (widening a CHECK = drop+re-add, values only added); never alter/drop existing `thoughts`/`sources` columns; no secrets in files. (OB1's "MCP servers must be remote Edge Functions" rule is the public-contribution contract; this is local infra under `OB1/docker/`, like the existing `openbrain-mcp` — keep out of upstream PR scope.)
 - **Destructive hard-delete (D-D):** irreversible + cascades (incl. `source_revisions`); require explicit confirm, show affected pages/links, audit `retracted_by`/`retracted_at`, default UI to soft. Don't expose to non-operators.
 - **`host.docker.internal` reach:** containers on `obnet` need host gateway access (Docker Desktop provides it); confirm it's reachable from the extract/workbench containers, and that the TTS/STT service is up before P5/P7 depend on it.
-- **Manual links surviving re-extraction (P6):** the entity worker re-runs on source fingerprint change; it must **not** delete `user_linked` `source_entities` rows or deliberate links vanish on the next ingest. Guard + test this explicitly.
+- **Manual links surviving re-extraction (P6) — concrete code change:** the worker today does a **full wipe-and-reinsert per source** — `await supabase.from("source_entities").delete().eq("source_id", item.source_id)` ([entity-extraction-worker/index.ts:748](OB1/integrations/entity-extraction-worker/index.ts#L748)) — so on the next fingerprint-change re-extraction it **deletes every `user_linked` row**. Required change: scope the delete to exclude manual links (`.delete().eq("source_id", …).neq("mention_role","user_linked")`) and make the subsequent insert an upsert that yields to `user_linked` per the §Phase-6 PK-collision policy. Guard + test this explicitly (a re-extraction cycle must leave the manual link intact).
 - **Don't suppress graph pages (D-J):** badging thought-only pages as "ungrounded" is fine; *removing* them would break cross-entity `[[wikilinks]]` and graph nodes. Surface, don't delete.
 - **New browser-facing write surface:** bearer auth, portal-only, validate/normalize note + asset paths (no `../` escape), cap upload size, **sandbox `openbrain-extract`** (untrusted file/image parsing = classic RCE vector; run unprivileged, no extra network).
 - **Membership confusion:** keep "remove from thread" (soft, M:N status) visually distinct from "delete source" (global, cascading) so users don't nuke a shared source when they meant to unlink it from one thread.
@@ -440,3 +451,80 @@ grounding gap can be triaged on the live stack right now — query
 sourceless entities for `source_entities` vs `thought_entities` counts — to learn
 how much of the "no sources" problem is extraction backlog (fixable now) vs
 thought-only-by-design (needs P6). Worth doing before committing P6 scope.
+
+---
+
+## 14. Engineering-fundamentals corrections (from codebase audit)
+
+Cross-cutting issues found auditing this plan against the live code. The
+phase-specific factual fixes are inlined above (flagged **⚠️ audit**); these are
+the SOLID / DRY / naming / durability items that span phases.
+
+### 14.1 DRY — one slug module, not a fourth hand-synced copy
+
+Slug derivation is **already duplicated**: `slugify()` in
+[generate-wiki.mjs:706](OB1/recipes/entity-wiki/generate-wiki.mjs#L706) and the
+hand-synced `slugifyEntity()`/`slugifyNotebook()` in
+[wiki-service.mjs:401-420](OB1/docker/wiki-service/wiki-service.mjs#L401-L420)
+(the comment literally says *"kept in sync by hand; the recipe owns the canonical
+version"*). This plan adds **thread slugs** (P2) and **leaf-page ids** (P1), which
+would create a 4th/5th divergent copy. **Fix:** extract one shared
+`slug.mjs`/`slug.ts` (normalize → lowercase → `[^a-z0-9]+`→`-` → trim) imported by
+the recipe, the compiler, and the workbench, and the **shared TS types** already
+called for in P0.5. A drifting slug function silently breaks `[[wikilink]]`
+resolution across layers — the highest-leverage cleanup here.
+
+### 14.2 Thread slugs must be **pinned** (mirror the entity `wiki_slug` pattern)
+
+Entity pages go to real lengths to **pin a slug for life**
+(`entities.metadata.wiki_slug`, [generate-wiki.mjs:719-741](OB1/recipes/entity-wiki/generate-wiki.mjs#L719-L741))
+so a rename never breaks links. Threads, by contrast, have a **UUID PK and a
+mutable `name`** ([init-threads.sql:44-52](OB1/docker/init-threads.sql#L44-L52))
+and **no slug column**. If P2 derives `content/thread/<slug>.md` from the name on
+every compile, **renaming a thread orphans its page and breaks every
+`[[thread/<old-slug>]]`** and the §5.3 Option-B note-linking. **Fix:** pin a thread
+slug on first generation (additive `threads.metadata jsonb` or a `slug` column),
+reuse forever, alias the display name — exactly the entity pattern. Add this to
+the P2 schema/compiler work; it's currently unaddressed.
+
+### 14.3 SRP — the workbench is becoming a god-service
+
+`openbrain-workbench` is specced to own provenance + sources CRUD + versioning +
+retract + threads + membership + notes + import jobs + (later) podcast jobs. That
+is fine as **one deployable**, but the handler file must not be one flat switch.
+**Fix:** structure it as Hono **sub-routers per resource** (`/sources`, `/threads`,
+`/notes`, `/import`, …) over a thin **service → repository** layering, so the DB
+access (14.5) and validation live behind interfaces and each route stays
+single-responsibility. Encapsulation point: path/asset normalization (no `../`
+escape — already a §11 guardrail) belongs in one shared validator, not per-handler.
+
+### 14.4 Durability — import job state must outlive a restart
+
+P5 returns a `job_id` and exposes `GET /workbench/jobs/:id`. If job state is
+in-memory (as `lastStatus` is in
+[wiki-service.mjs:89](OB1/docker/wiki-service/wiki-service.mjs#L89)), a workbench
+restart **orphans every in-flight import** and the UI polls a 404 forever. **Fix:**
+persist jobs in a small additive `import_jobs(id, status, source_id, error,
+created_at, updated_at)` table (it also gives the `ImportStatus.tsx` history view
+something durable to read) — or explicitly document jobs as ephemeral and have the
+client treat a missing job as "ask the source list whether it landed."
+
+### 14.5 DB access path — pick one, transactionally
+
+Stated above ([§2.1](#21-the-unavoidable-backends)) but repeated as a fundamental:
+an import inserts a `source` **and** N `source_chunks` **and** `source_entities` /
+`thread_sources` links. Across separate PostgREST calls that is **non-atomic** — a
+mid-sequence failure leaves a source with no chunks/links (a silently-degraded
+"grounded" page). Use **deno-postgres with a transaction** for write paths
+(precedent: `openbrain-suggestion-worker` talks to `openbrain-db` directly). Keep
+read paths on PostgREST if convenient.
+
+### 14.6 Naming — say what each new symbol is
+
+- `match_source_chunks`, not "a chunk-aware `match_sources` variant" (overloading
+  the name hides the row-shape difference).
+- Leaf page classes `thought/` and `source/` are a **distinct page class**, not
+  entity types — keep them out of the entity orphan-sweep kept-set (14.1's sibling
+  bug, fixed in P1 above) and out of `graph.json`/`entities.md` candidate logic.
+- Workbench routes are **resources** (`/workbench/sources/:id/revisions`), not
+  verbs — the REST surface in P2/P4/P6 already mostly follows this; keep it.
