@@ -120,6 +120,8 @@ So a sourceless page arises three ways:
 
 `*` = deferred podcast phase (P7).
 
+> **Provenance read is not workbench-backed (Phase 1 redesign).** The `provenance` item in the workbench box and the `ProvenancePanel` `fetch()` arrow above are superseded *for read*: P1 serves provenance as **static `thought/<id>` & `source/<id>` leaf pages** emitted at compile and reached via ordinary wikilinks (native popover + SPA). The workbench's provenance role shrinks to the **optional** `ProvenancePanel` summary; its load-bearing jobs remain the **write** paths (sources CRUD/versioning, threads, notes, import) plus the P6 deliberate-link write. See [§4 Phase 1](#4-feature-phases).
+
 - **`openbrain-workbench`** (Deno+Hono, `:8814`) — browser-facing read/write API, kept **off** the MCP server + cloud-gateway (limited to 8 tools) so the multipart/auth surface is isolated.
 - **`openbrain-extract`** (Python/FastAPI) — wraps `content-core`; `POST /extract` → `{ markdown, title, metadata, pages, images[] }`; OCR for scans/images.
 - **Existing TTS/STT** at `host.docker.internal:8000/v1` — STT used at import for audio/video sources (P5); TTS for podcasts (P7, deferred). No new container until P7 (and even then likely just a thin caller, not a TTS engine).
@@ -168,20 +170,24 @@ renders; an image under `assets/` renders in a page. No `sources` writes yet.
 ## 4. Feature phases
 
 ### Phase 1 — Provenance: Source **and** Thought Visibility
-**Goal:** every entity/topic page surfaces its full provenance — both the **`[S:id]` external sources** *and* the **`[#id]` captured thoughts** the generator cited — with click-through from each inline citation to a read view of the underlying record.
+**Goal:** every inline citation on an entity/topic page — both **`[S:id]` external sources** *and* **`[#id]` captured thoughts** — behaves like every other link in the wiki: **hover → native popover preview, click → SPA navigation** to a read page for that record. The mechanism is to make each citation a *real internal link* to a compiled **leaf page**, so Quartz's built-in popover + SPA — plus graph nodes, backlinks, and full-text search — all apply with **no custom interaction code**.
 
-Both citation forms come straight from the generator's system prompt ([generate-wiki.mjs:556-566](OB1/recipes/entity-wiki/generate-wiki.mjs#L556-L566)): **`[#id]`** = a row in `thoughts` (the user's own captured record, linked via `thought_entities`); **`[S:id]`** = a row in `sources` (an external document, linked via `source_entities`). They are *equally* part of the provenance trail and must be treated symmetrically. In fact, because a **thought-only page** ([§1.4](#14-why-wiki-pages-appear-without-sources-the-grounding-gap), the majority of pages) has **no `[S:id]` sources at all**, resolving `[#id]` thoughts is the *higher-value* half of this phase — for those pages it is the page's entire provenance, not an add-on.
+Both citation forms come from the generator's system prompt ([generate-wiki.mjs:556-566](OB1/recipes/entity-wiki/generate-wiki.mjs#L556-L566)): **`[#id]`** = a row in `thoughts` (the user's own captured record, linked via `thought_entities`); **`[S:id]`** = a row in `sources` (an external document, linked via `source_entities`). Treated symmetrically. Because a **thought-only page** ([§1.4](#14-why-wiki-pages-appear-without-sources-the-grounding-gap), the majority of pages) has **no `[S:id]` sources at all**, the `[#id]` half is the higher-value one — for those pages it *is* the entire provenance trail.
 
-- **Backend (read):**
-  - `GET /workbench/provenance?entity=<id>` — returns **both** sides: `source_entities`→`sources` (id, url, title, content_type, notebook, tags) **and** `thought_entities`→`thoughts` (id, created_at, `metadata.type`, content preview). Cached per entity on `last_compile_iso`.
-  - `GET /workbench/sources/:id` — full source record.
-  - `GET /workbench/thoughts/:id` — **NEW, the symmetry fix** — full thought record (`content`, `created_at`, `updated_at`, `metadata`) via PostgREST `thoughts?id=eq.:id`. Read-only. Thought content renders as **escaped plain text**, never executed markdown/HTML — it is untrusted user-captured data, the same "data only" stance the generator's scrub enforces ([generate-wiki.mjs:597-610](OB1/recipes/entity-wiki/generate-wiki.mjs#L597-L610)).
-- **Compiler:** emit a provenance sidecar at compile (`<slug>.provenance.json`) carrying the cited ids for **both** kinds. The generator *already assembles exactly this* — `provenance.linked_ids` + `provenance.semantic_ids` (both surface as `[#id]` thoughts) and `provenance.source_ids` (→ `[S:id]`) are built in `buildSynthesisInput` ([generate-wiki.mjs:542-544](OB1/recipes/entity-wiki/generate-wiki.mjs#L542-L544)) — so the sidecar is a dump of data the compile already holds, with **no extra DB hit and no generator prompt change**. (Both `linked` and `semantic` thoughts are cited as `[#id]`, so include *both* thought id sets, not just linked.)
-- **Quartz:**
-  - `ProvenancePanel.tsx` — two grouped lists, **Thoughts (`[#id]`)** and **Sources (`[S:id]`)**, each row linking to its read view, with per-row metadata (date + `type` for thoughts; type/url/notebook for sources).
-  - **Citation linkifier** (`.inline.ts`) — rewrites the inline `[#id]` / `[S:id]` markers the generator emitted *in the page body* into anchors that open the thought-/source-view, resolving ids against the sidecar. Unknown ids (the model cited something not in the payload) stay plain text — graceful degradation mirroring broken-`[[wikilink]]` handling. Done client-side so the raw markdown stays clean and Obsidian-portable (generator output unchanged).
-  - Thought-view + source-view routes (or modals); wiki↔source toggle.
-- **Gate:** open a **thought-only** page → its `[#id]` markers are clickable → each opens the real captured thought (content + date), rendered as inert text; open a **sourced** page → `[S:id]` markers resolve to the source view; an id the model cited but the payload didn't carry stays plain text (no broken link). No DB query on hot loads (sidecar-served).
+> **Page-class note (reconciles [§1.4](#14-why-wiki-pages-appear-without-sources-the-grounding-gap)):** these leaf pages are a *distinct page class* — read-only provenance records, **not** entities. They don't enter the entity graph or candidate selection, so the "pages come from the entity graph" model is untouched; this only gives each cited record a viewable address.
+
+- **Compiler (the load-bearing change — [wiki-service.mjs](OB1/docker/wiki-service/wiki-service.mjs) + [generate-wiki.mjs](OB1/recipes/entity-wiki/generate-wiki.mjs)):**
+  - **Emit bounded leaf pages** — `content/thought/<id>.md` and `content/source/<id>.md`, **only for ids actually cited** this compile (collected from the `provenance.linked_ids`/`semantic_ids`/`source_ids` sets the generator already builds, [generate-wiki.mjs:542-544](OB1/recipes/entity-wiki/generate-wiki.mjs#L542-L544)). Bounded by *citations*, not the DB — 800 cited thoughts → 800 leaves, not 50k.
+  - **Batch-fetch full content** by id (`thoughts?id=in.(…)` / `sources?id=in.(…)`) for the leaf bodies — the synthesis payload only carries 300-char snippets. Leaf frontmatter: `type: thought|source`, date, `metadata.type`; sources add `url`/`title`/`content_type`/`notebook`.
+  - **Rewrite inline citations into wikilinks** — post-process generated pages: `[#11173]` → `[[thought/11173|#11173]]`, `[S:4521]` → `[[source/4521|S:4521]]`. An id with no emitted leaf (uncited / model mis-cite) is **left as plain text**, mirroring broken-`[[wikilink]]` handling. The citation now *is* a wikilink — same object, same behavior as the rest of the wiki.
+  - **Orphan-sweep** leaves whose id is no longer cited anywhere (reuse the existing sweep) so the set stays bounded.
+  - **Untrusted-content guard** — leaf bodies render captured / external text: keep the scrub ([generate-wiki.mjs:597-610](OB1/recipes/entity-wiki/generate-wiki.mjs#L597-L610)) and rely on Quartz's markdown→HTML sanitization; this text is untrusted at *render* time, not just as LLM input.
+- **Quartz (mostly native — no custom interaction component):**
+  - Hover-popover + click-navigate come **free** from stock Quartz (this v4.5.1 build runs SPA + popovers). Citations also gain graph nodes, **backlinks** ("which wiki pages cite this record"), and full-text search automatically.
+  - **Leaf-page template** — a small overlay layout keyed on `type: thought|source` (metadata header + body + backlinks) so leaves read as records, not orphans.
+  - **`ProvenancePanel.tsx` is now optional** — a consolidated per-page provenance index on top of the generator's existing `## Sources` section; a nice-to-have, no longer load-bearing since inline links + backlinks already deliver traceability.
+- **Backend (read) — not required in P1:** the static leaf pages serve the read view, so P1 needs **no** workbench endpoint on its hot path. `GET /workbench/thoughts/:id` / `…/sources/:id` are still built for the **write/live** phases (P4 edit, P6 linking) but aren't a P1 dependency — **P1 is essentially a compiler-only feature.**
+- **Gate:** open a **thought-only** page → its `[#id]` markers are real links → hover shows a native popover of the captured thought, click navigates to its `thought/<id>` leaf (showing "cited by" backlinks); a **sourced** page → `[S:id]` does the same to a `source/<id>` leaf; an uncited/unknown id stays plain text (no broken link); after a citation is removed, the next compile sweeps the now-orphan leaf. Behavior is indistinguishable from any `[[wikilink]]`.
 
 ### Phase 2 — Threads & Membership (research groups)
 *The core organizing axis — see [§5](#5-threads--research-groups-the-core-organizing-axis) for the full design.*
@@ -328,8 +334,8 @@ source of truth.
 - **Recovery (required):** `scripts/emergency-recovery.ps1` + `.bat` inventory + start/stop order.
 - **Stack map (required):** [.claude/skills/stack-map/references/workspace-stacks.md](.claude/skills/stack-map/references/workspace-stacks.md).
 - **Caddy:** [config/caddy/Caddyfile](config/caddy/Caddyfile), [OB1/docker/Caddyfile](OB1/docker/Caddyfile) — `/workbench/*` + `assets/`.
-- **Quartz overlay:** `OB1/docker/wiki-viewer/quartz-overlay/` — `ProvenancePanel` (thought + source lists) + **citation linkifier** `.inline.ts` (rewrites inline `[#id]`/`[S:id]` into anchors) + thought-view & source-view routes, `ThreadIndex`, `ThreadPage`, `MembershipPicker`, `NotesEditor`, `SourceEditor`, `SourceRetractor`, `ImportDropzone`, `ImportStatus`, `[PodcastPanel]`, `.inline.ts`, layout/config.
-- **Wiki compiler:** [wiki-service.mjs](OB1/docker/wiki-service/wiki-service.mjs) — provenance sidecar `<slug>.provenance.json` carrying **both** `[#id]` thought + `[S:id]` source ids, dumped from the payload `buildSynthesisInput` already builds (P1); thread-page generation + graph (P2); notes write interplay (P3); confirm orphan sweep covers hard-deletes (P4).
+- **Quartz overlay:** `OB1/docker/wiki-viewer/quartz-overlay/` — leaf-page template (`type: thought|source` layout; native popover + SPA + backlinks do the interaction, no custom linkifier), optional `ProvenancePanel` (consolidated per-page provenance index), `ThreadIndex`, `ThreadPage`, `MembershipPicker`, `NotesEditor`, `SourceEditor`, `SourceRetractor`, `ImportDropzone`, `ImportStatus`, `[PodcastPanel]`, `.inline.ts`, layout/config.
+- **Wiki compiler:** [wiki-service.mjs](OB1/docker/wiki-service/wiki-service.mjs) + [generate-wiki.mjs](OB1/recipes/entity-wiki/generate-wiki.mjs) — emit cited-only `thought/<id>.md` + `source/<id>.md` leaf pages (batch-fetch full content by id), rewrite inline `[#id]`/`[S:id]` citations into `[[thought/…|#id]]`/`[[source/…|S:id]]` wikilinks, orphan-sweep uncited leaves (P1); thread-page generation + graph (P2); notes write interplay (P3); confirm orphan sweep covers hard-deletes + uncited leaves (P4).
 - **Schema (additive only):** `source_revisions` (`init-source-revisions.sql`); widen `content_type` CHECK + `source_chunks` (`init-source-chunks.sql`); `user_linked` rows in `source_entities` (P6, marked via `mention_role`/`metadata`); `podcasts` (P7); retraction audit in `metadata`.
 - **Search:** chunk-aware `match_sources` variant.
 
@@ -338,16 +344,17 @@ source of truth.
 ## 8. Sequencing & dependencies
 
 ```
-P0 Foundations ─┬─> P1 Provenance ─┬─> P4 Source Lifecycle (edit+retract) ─┐
-                ├─> P2 Threads ─────┤                                       ├─> P6 Grounding &
-                ├─> P3 Notes ───────┘                                       │   Deliberate Linking
-                └──────────────────────────> P5 Import ─────────────────────┘        │
-                                                                                      ▼
-                                                                        [P7 Podcasts — DEFERRED]
+P1 Provenance (compiler-only) ──> P4 Source Lifecycle (edit+retract) ─┐
+                                                                      ├─> P6 Grounding &
+P0 Foundations ─┬─> P2 Threads                                        │   Deliberate Linking
+ (workbench +   ├─> P3 Notes                                          │            │
+  extract)      └─> P5 Import ─────────────────────────────────────────┘            ▼
+                                                                       [P7 Podcasts — DEFERRED]
 ```
 
-- P0 unblocks all; P1/P2/P3 parallelize after it.
-- P4 depends on P1's source view. P5 depends on P2 (thread linking) + P0; uses P4 conventions.
+- **P1 is compiler-only and lands independently of P0** — it emits `thought/<id>`/`source/<id>` leaf pages + rewrites citations into wikilinks ([generate-wiki.mjs](OB1/recipes/entity-wiki/generate-wiki.mjs) / [wiki-service.mjs](OB1/docker/wiki-service/wiki-service.mjs)); only its *optional* leaf-template polish + `ProvenancePanel` touch the P0.3 overlay scaffold.
+- **P0 unblocks the workbench-backed phases** — P2/P3/P5 parallelize after it; P4/P6 add their write paths on top.
+- P4 depends on **P1's source leaf page** (the read view it edits) **+ P0** (the workbench write API). P5 depends on P2 (thread linking) + P0; uses P4 conventions.
 - **P6** (grounding + deliberate linking) depends on P1 (provenance), P4 (source edit options), P5 (import entry point) — it stitches them together.
 - **P7 deferred**; ON stays for podcasts until it ships → **full ON retirement happens after P7, not P5** ([§10](#10-relationship-to-iks--retiring-open-notebook)).
 
@@ -418,11 +425,14 @@ All six resolved with the operator. These are now binding for implementation.
 All gating questions are resolved, so the next action is **Phase 0** — stand up
 the `openbrain-workbench` skeleton (Deno+Hono, `:8814`, bearer auth), the Caddy
 `/workbench/*` same-origin route, the Quartz overlay scaffold + asset config, and
-the `wiki-assets` volume. P0 unblocks every phase and proves the
-in-Quartz-components + thin-API + extract-sidecar architecture end-to-end before
-any schema (`source_revisions`, `source_chunks`, `content_type` widening),
-extractor, or thread-surface work. Podcasts (P7) wait; ON keeps serving them in
-the meantime.
+the `wiki-assets` volume. P0 unblocks every **workbench-backed** phase (P2–P7)
+and proves the in-Quartz-components + thin-API + extract-sidecar architecture
+end-to-end before any schema (`source_revisions`, `source_chunks`, `content_type`
+widening), extractor, or thread-surface work. **One exception:** P1 (provenance)
+is now **compiler-only** — it emits `thought/<id>`/`source/<id>` leaf pages and
+rewrites `[#id]`/`[S:id]` citations into wikilinks — so it depends on neither the
+workbench nor the schema work and can ship **in parallel with, or before, P0** as
+a low-cost early win. Podcasts (P7) wait; ON keeps serving them in the meantime.
 
 **Independent of the workbench build**, the [§1.4](#14-why-wiki-pages-appear-without-sources-the-grounding-gap)
 grounding gap can be triaged on the live stack right now — query
