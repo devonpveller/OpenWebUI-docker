@@ -201,6 +201,61 @@ http://notebook.{$PUBLIC_DOMAIN} {
     }
 }
 
+# ─── OB1 Quartz wiki viewer on its own subdomain ──────────────────────────
+# Quartz emits root-relative URLs (`/static/...`, `/index.css`), so — like
+# OpenWebUI — it gets its own subdomain rather than a subpath. Upstream is the
+# openbrain-wiki-viewer container on the OB1 (open-brain) stack, reachable here
+# because that container joins ai-stack_app-net. Read-only static site, still
+# gated behind Authelia like every other app subdomain.
+http://wiki.{$PUBLIC_DOMAIN} {
+    import security_headers
+    import sanitize_proxy_headers
+    import access_log
+    encode zstd gzip
+
+    request_body {
+        max_size 1MB
+    }
+
+    forward_auth authelia:9091 {
+        uri /api/authz/auth-request
+        header_up X-Original-URL https://{host}{uri}
+        header_up X-Original-Method {method}
+
+        # Convert Authelia's 401 + Location into a proper 302 so browsers
+        # follow it automatically (they don't follow Location on 401).
+        @denied status 401 403
+        handle_response @denied {
+            redir https://auth.{$PUBLIC_DOMAIN}/?rd=https://{host}{uri}&rm={method} 302
+        }
+    }
+
+    reverse_proxy openbrain-wiki-viewer:8080 {
+        header_up X-Forwarded-Proto https
+    }
+
+    # While the Quartz viewer is (re)building it isn't listening yet, so the
+    # proxy dial fails. Serve a friendly auto-refreshing "rebuilding" page
+    # instead of a raw 502 / Cloudflare host-error. Status 200 so Cloudflare
+    # passes the body through unchanged. The page is a self-contained static
+    # file in the already-mounted site dir (config/caddy/site → /srv/site).
+    handle_errors {
+        # no-store + stripped validators are REQUIRED. Otherwise the browser
+        # caches the page, the 15s meta-refresh sends a conditional request,
+        # file_server answers 304 (empty body), and the `status 200` override
+        # turns that into "200 + empty body" — a blank white screen on refresh.
+        # Forcing no-cache makes every request return the full body.
+        header Cache-Control "no-store"
+        header -Etag
+        header -Last-Modified
+        root * /srv/site
+        rewrite * /wiki-building.html
+        file_server {
+            status 200
+        }
+    }
+}
+
 # ─── Main app domain ──────────────────────────────────────────────────────
 http://{$PUBLIC_DOMAIN} {
     import security_headers

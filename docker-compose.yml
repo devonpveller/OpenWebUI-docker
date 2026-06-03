@@ -125,6 +125,14 @@ services:
       - OPEN_NOTEBOOK_TS_PORT=${OPEN_NOTEBOOK_TS_PORT:-8443}
       - OPEN_NOTEBOOK_API_PORT=${OPEN_NOTEBOOK_API_PORT:-5055}
       - OPEN_NOTEBOOK_API_TS_PORT=${OPEN_NOTEBOOK_API_TS_PORT:-5055}
+      # OB1 Quartz wiki viewer (openbrain-wiki-viewer on the open-brain stack).
+      # Reachable here because it joins ai-stack_app-net, which openwebui — whose
+      # netns this container shares — is also on. Served at root on its own
+      # tailnet HTTPS port (Quartz, like Streamlit, doesn't host under a subpath).
+      - QUARTZ_HOST=${QUARTZ_HOST:-openbrain-wiki-viewer}
+      - QUARTZ_PORT=${QUARTZ_PORT:-8080}
+      - QUARTZ_ENABLED=${QUARTZ_ENABLED:-true}
+      - QUARTZ_TS_PORT=${QUARTZ_TS_PORT:-8444}
     volumes:
       - ./data/tailscale:/var/lib/tailscale
       - /dev/net/tun:/dev/net/tun
