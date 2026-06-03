@@ -10,18 +10,21 @@
 
 ## 0. Decisions locked for this plan
 
-These were confirmed by the operator before drafting and drive everything below.
+Confirmed by the operator before drafting; these drive everything below.
 
 | # | Decision | Consequence |
 |---|----------|-------------|
-| D-A | **Interactive layer = in-Quartz client components.** | Add Preact components + client-side scripts to the Quartz viewer; back them with a thin write-API on Open Brain (the one unavoidable backend — Quartz can't write Postgres from a static page). |
-| D-B | **Borrow from Open Notebook, then retire it.** ON is ~80% redundant to existing infra. | Harvest ON's reusable pieces (content-core extraction pipeline, source/notes UX patterns) into the Quartz+OB1 stack. Decommission `open_notebook` + its SurrealDB usage at the end. |
-| D-C | **All four features, phased**, in the idea doc's order: Provenance → Notes → Editing → Import. | Four phases, each with its own ship gate. Import lands last because it reuses the chunking/embedding/edit plumbing built in P1–P3. |
+| D-A | **Interactive layer = in-Quartz client components.** | Add Preact components + client scripts to the Quartz viewer; back them with a thin write-API on Open Brain (Quartz can't write Postgres from a static page). |
+| D-B | **Borrow from Open Notebook, then retire it.** ON is ~80% redundant. | Harvest ON's reusable pieces — content-core extraction (incl. **images**), **podcast generation** (`podcast-creator`), source/notes UX — into the Quartz+OB1 stack. Decommission `open_notebook` + its SurrealDB usage at the end. |
+| D-C | **Features, phased**, idea-doc order then extensions: Provenance → Notes → Source Retraction → Import → Podcasts. | Each phase has its own ship gate. |
+| D-D | **Sources are immutable source-of-truth (read-only).** | No source-content editing. The only corrective action is **retraction/removal** of a wrong or accidentally-ingested source (P3). Re-ingest to "fix." |
+| D-E | **User notes are the editable, additive layer.** | Notes are created/edited by the user and written additively into the Open Brain DB (via the existing tethered-notes mechanism). This is the one read-write content layer. |
+| D-F | **Images are first-class.** Quartz must display images; document ingestion must accept/extract them. | Comes with the content-core borrow + Quartz asset handling + a widened `content_type`. |
+| D-G | **Podcasts are an extended service.** | Generated **on request** (as ON does now); shown in their own section with **playback**; organized **by thread**; transcripts can be saved as **user notes**. |
 
-The "outgrown Open Notebook" framing is the spine of this plan: Quartz already
-mimics Obsidian and is *already wired directly to Open Brain*. The cost of
-making it a workbench is feature development + borrowed implementations, not a
-new architecture.
+The spine remains: Quartz already mimics Obsidian and is *already wired directly
+to Open Brain*, so the cost of making it a workbench is feature development +
+borrowed implementations, not a new architecture.
 
 ---
 
@@ -46,6 +49,10 @@ The vault is a **git repo on the `openbrain-wiki-data` volume**:
   notes/              ← HUMAN-OWNED, compiler never edits (already exists!)
 ```
 
+> Quartz renders standard markdown, so **images already display** once the image
+> files live in the vault and are referenced (`![alt](path)`); the gap is that
+> nothing currently *puts* images in the vault. D-F closes that in [Phase 4](#phase-4--direct-source-import-pipeline-incl-images).
+
 ### 1.2 What Open Brain already gives us (the foundation)
 
 Most of the ingestion machinery the idea doc asks for **already exists** — this
@@ -55,325 +62,317 @@ plan mostly wires UI to it, not builds it from scratch.
 |------------|----------------|-------|
 | `sources` table (url, title, content, content_type, tags, notebook, embedding `VECTOR(1024)`, metadata jsonb, research linkage) | [OB1/docker/init-sources.sql](OB1/docker/init-sources.sql) | ✅ live |
 | `find_or_create_source()` — dedup on url/content-hash, returns `was_duplicate` | [OB1/docker/init-threads.sql](OB1/docker/init-threads.sql) | ✅ live |
-| `threads`, `thread_sources` (link_type auto/suggested/deliberate, status), `sessions`, `session_sources` | [OB1/docker/init-threads.sql](OB1/docker/init-threads.sql) | ✅ live |
+| `threads`, `thread_sources` (link_type auto/suggested/deliberate, **status confirmed/pending/hidden/inactive**), `sessions`, `session_sources` | [OB1/docker/init-threads.sql](OB1/docker/init-threads.sql) | ✅ live |
+| `set_thread_source_status()` — soft flag flips (never deletes) | [OB1/docker/init-threads.sql](OB1/docker/init-threads.sql) | ✅ live — basis for retraction (P3) |
 | `source_extraction_queue` + auto-enqueue trigger on insert/update (fingerprint-gated) | [OB1/docker/init-source-graph.sql](OB1/docker/init-source-graph.sql) | ✅ live |
-| Entity extraction worker → `source_entities` | `openbrain-entity-worker` ([compose](OB1/docker/docker-compose.yml)) | ✅ live |
+| Entity extraction worker → `source_entities` (`ON DELETE CASCADE`) | `openbrain-entity-worker` ([compose](OB1/docker/docker-compose.yml)) | ✅ live |
 | Embeddings — `bge-m3`, 1024-dim, via `llama-cpp-embed` | MCP server `getEmbedding()` | ✅ live |
 | `match_sources()` vector search RPC | [OB1/docker/init-sources.sql](OB1/docker/init-sources.sql) | ✅ live |
-| MCP/HTTP server (Hono on Deno) — `ingest_url`, `ingest_urls`, `search`, `capture_thought`… | [OB1/integrations/kubernetes-deployment/index.ts](OB1/integrations/kubernetes-deployment/index.ts) (`Deno.serve(... app.fetch)` at the tail) | ✅ live |
-| Wiki compiler with change-watch (3-min debounce), notes ingest, orphan sweep, on-demand `POST /recompile` | [OB1/docker/wiki-service/wiki-service.mjs](OB1/docker/wiki-service/wiki-service.mjs) | ✅ live |
-| **Tethered notes** — `notes/<notebook>/file.md` ⇄ one OpenBrain thought, by `metadata.note_path`; diff-based upsert/delete on compile | `ingestNotes()` in [wiki-service.mjs](OB1/docker/wiki-service/wiki-service.mjs) | ✅ live |
+| MCP/HTTP server (Hono on Deno) — `ingest_url`, `search`, `capture_thought`… | [OB1/integrations/kubernetes-deployment/index.ts](OB1/integrations/kubernetes-deployment/index.ts) (`Deno.serve(... app.fetch)` at tail) | ✅ live |
+| Wiki compiler: change-watch (3-min debounce), notes ingest, **orphan sweep** (deletes pages whose source entities were removed), on-demand `POST /recompile` | [OB1/docker/wiki-service/wiki-service.mjs](OB1/docker/wiki-service/wiki-service.mjs) | ✅ live |
+| **Tethered notes** — `notes/<notebook>/file.md` ⇄ one OpenBrain thought, by `metadata.note_path`; diff-based upsert/delete + extraction enqueue | `ingestNotes()` in [wiki-service.mjs](OB1/docker/wiki-service/wiki-service.mjs) | ✅ live — basis for the editable notes layer (P2) |
 
-### 1.3 The gaps the idea doc actually targets
+### 1.3 The gaps this plan closes
 
-1. **No write path from the browser.** Quartz pages are static; there's no upload, edit, or note-authoring endpoint.
-2. **PDF/DOCX/PPTX text extraction is a stub.** `ingest_url` returns `[PDF source not text-extracted: …]`; no multipart file upload exists at all.
-3. **Provenance isn't surfaced.** Entity pages are synthesized from sources, but the reader can't see *which* sources, or click through to them.
-4. **Source editing has no UI and no versioning.** `original` vs `edited` snapshots don't exist; re-embed is implicit via the fingerprint trigger.
+1. **No write path from the browser** — no upload, note-authoring, retraction, or podcast-request endpoint.
+2. **PDF/DOCX/PPTX text + image extraction is a stub** — `ingest_url` returns `[PDF source not text-extracted: …]`; no multipart upload; no image handling.
+3. **Provenance isn't surfaced** — pages are synthesized from sources, but readers can't see *which* sources or click through.
+4. **No way to retract a bad/accidental source** — sources are write-only today; the user needs a removal path (D-D).
+5. **No podcast capability** — ON has it; the stack doesn't (D-G).
 
 ### 1.4 What we borrow from Open Notebook (D-B)
 
 ON's reusable IP, to be ported — **not kept running**:
 
-- **`content-core`** (PyPI) — ON's parser matrix for PDF/DOCX/PPTX/MD/URL/audio→markdown. This is the single most valuable borrow; it replaces the PDF stub. (See [§6 / Phase 4](#phase-4--direct-source-import-pipeline).)
-- **Source-card + notebook-view UX** — how ON lists sources with type/date/insight chips and lets you open a source. We mirror this as Quartz components, reading from OB1 instead of SurrealDB.
-- **Token-based chunking + per-chunk embedding** patterns (ON uses LangChain `tiktoken`); we re-implement against `bge-m3` 1024-dim and pgvector, which OB1 already standardises on.
+- **`content-core`** (PyPI) — ON's parser matrix for PDF/DOCX/PPTX/MD/TXT/URL/**image**/audio→markdown. Single most valuable borrow; replaces the PDF stub and brings image extraction (D-F). → [Phase 4](#phase-4--direct-source-import-pipeline-incl-images).
+- **`podcast-creator`** (PyPI, ON dep ≥0.12.0) + its LangGraph script→TTS flow — multi-speaker (1–4), voice profiles, generated script + audio. → [Phase 5](#phase-5--podcast-service-extended). **Caveat:** ON drives TTS through cloud providers (esperanto: OpenAI/ElevenLabs/Google). This stack is local-runtime-only, so we must back it with a **local TTS engine** — a real open decision ([§10](#10-open-questions)).
+- **Source-card + notebook-view UX** and ON's **podcast panel/player UX** — mirrored as Quartz components reading from OB1 instead of SurrealDB.
+- **Token-based chunking** patterns — re-implemented against `bge-m3` 1024-dim + pgvector.
 
-Everything else ON offers (podcast generation, multi-speaker TTS, chat sessions,
-SurrealDB job queue) is **out of scope** and dropped with ON.
+Dropped with ON: SurrealDB-as-store, ON's chat sessions, ON's job queue, ON's
+own UI/auth. (Podcast generation is **kept**, contrary to the prior draft.)
 
 ---
 
 ## 2. Target architecture
 
-### 2.1 The one unavoidable backend
+### 2.1 The unavoidable backends
 
-D-A ("in-Quartz components") still needs a place to write to, because a static
-site cannot mutate Postgres. The smallest honest addition is a **thin write-API**
-that the Quartz client scripts call:
+D-A ("in-Quartz components") needs somewhere to write, because a static site
+can't mutate Postgres or run Python parsers/TTS. Three new services:
 
 ```
-        ┌──────────────────────── Quartz viewer (static + hydrated) ───────────────────────┐
-        │  ProvenancePanel   NotesEditor   SourceEditor   ImportDropzone   (Preact + .inline.ts)│
-        └───────────────┬───────────────────────────────────────────────────────────────────┘
+        ┌───────────────────────── Quartz viewer (static + hydrated) ─────────────────────────┐
+        │ ProvenancePanel  NotesEditor  SourceRetractor  ImportDropzone  PodcastPanel(player)   │
+        └───────────────┬──────────────────────────────────────────────────────────────────────┘
                         │  fetch()  (same-origin /workbench/* via Caddy)
                         ▼
-        ┌──────────────────────── openbrain-workbench API ─────────────────────────┐
-        │  POST /workbench/import   (multipart → content-core → find_or_create_source)│
-        │  GET  /workbench/sources/:id     PATCH /workbench/sources/:id  (edit+version)│
-        │  GET  /workbench/provenance?entity=…   (sources behind a wiki page)         │
-        │  PUT  /workbench/notes/<path>    (write notes/ markdown + commit)           │
-        │  GET  /workbench/jobs/:id        (import/embed progress)                    │
-        └───────────────┬───────────────────────────────────────────────────────────┘
-                        │
-        ┌───────────────┼───────────────────────────────────────────────┐
-        ▼               ▼                                               ▼
-  OB1 Postgres     llama-cpp-embed (bge-m3)                     openbrain-wiki (recompile)
-  sources/threads  embeddings                                   change-watch picks it up
-  source_extraction_queue → entity-worker → source_entities → wiki regenerates pages
+        ┌───────────────────────── openbrain-workbench  (Deno+Hono, :8814) ───────────────────────┐
+        │  POST  /workbench/import         (multipart → extract → chunk → embed → find_or_create)   │
+        │  GET   /workbench/sources/:id    (raw source view)                                        │
+        │  DELETE/POST /workbench/sources/:id/retract  (soft-hide | hard-delete; D-D)               │
+        │  GET   /workbench/provenance?entity=…        (sources behind a wiki page)                 │
+        │  GET/PUT /workbench/notes/<path>             (read/write notes/ markdown + commit; D-E)   │
+        │  POST  /workbench/podcasts        (request gen for a thread)   GET .../podcasts/:id        │
+        │  POST  /workbench/podcasts/:id/transcript-to-note  (save transcript as a user note)       │
+        │  GET   /workbench/jobs/:id        (import/podcast progress)                               │
+        └───────┬─────────────────────────┬───────────────────────────┬───────────────────────────┘
+                ▼                          ▼                           ▼
+   openbrain-extract (Py/FastAPI)   openbrain-podcast (Py/FastAPI)   OB1 Postgres
+   content-core: docs+images+OCR    podcast-creator + LOCAL TTS      sources / threads / thread_sources
+        │                                  │  audio files                podcasts (NEW) / source_chunks (NEW)
+        ▼                                  ▼                              │
+   markdown + extracted images        wiki-assets volume (audio + imgs)  │ change-watch + queue trigger
+        └──────────────► OB1 sources + vault assets ◄────────────────────┘
+                                       │
+                              openbrain-wiki recompile → Quartz file watcher reloads
 ```
 
-**Build vs. extend decision for the API:** two viable homes —
+- **`openbrain-workbench`** (Deno+Hono, `:8814`) — the browser-facing write/read API. Kept **off** the MCP server + cloud-gateway path (which is deliberately limited to 8 tools), so the multipart/cookie/auth surface stays isolated.
+- **`openbrain-extract`** (Python/FastAPI) — wraps `content-core`; `POST /extract` (multipart) → `{ markdown, title, metadata, pages, images[] }`. OCR (Tesseract/Pillow) for scanned PDFs/images. Fallback: in-repo [heavy-file-ingestion](OB1/skills/heavy-file-ingestion/) `convert_heavy_file.py` / `PyMuPDF`+`python-docx`+`python-pptx`.
+- **`openbrain-podcast`** (Python/FastAPI) — wraps `podcast-creator`; script via local Qwen (`llama-cpp`), audio via a **local TTS** backend; writes audio to a shared `wiki-assets` volume and a row to `podcasts`.
 
-- **(Recommended) New `openbrain-workbench` service** (Deno+Hono, mirrors the existing MCP server style) on `obnet`/`llm-net`, published `127.0.0.1:8814`. Keeps the write-surface that browsers touch isolated from the MCP/cloud-gateway path (which is deliberately limited to 8 tools). Cleaner auth story, independent restart, no risk to the MCP contract.
-- **(Alternative) Extend the existing Hono app** in [index.ts](OB1/integrations/kubernetes-deployment/index.ts) with `/workbench/*` routes. Less new infra, but mixes a browser-facing, multipart, session-cookie surface into the machine-to-machine MCP server. **Not recommended.**
+> All three new containers must be added to compose **+** recovery scripts **+**
+> stack-map together (workspace convention — [§8](#8-risks--guardrails)).
 
-> The `content-core` extractor is Python; the Deno API shells out to / HTTP-calls
-> a small **`openbrain-extract`** Python sidecar (FastAPI wrapping `content-core`).
-> This is the cleanest way to reuse ON's library without putting Python parsers in
-> the Deno process. Decided in [Phase 4](#phase-4--direct-source-import-pipeline).
+### 2.2 Asset handling (audio + images)
 
-### 2.2 Routing & exposure
+A new **`wiki-assets`** volume (or a subtree of the wiki vault, e.g.
+`/wiki/content/assets/`) holds binary files Quartz serves statically:
 
-- Caddy gains a `/workbench/*` reverse-proxy to `openbrain-workbench:8814`, same host/origin as the wiki so client `fetch()` is same-origin (no CORS). Touch [config/caddy/Caddyfile](config/caddy/Caddyfile) and the OB1 [Caddyfile](OB1/docker/Caddyfile).
-- **Auth:** the workbench is reachable only via the Tailscale portal (already the wiki's only public path). Add a shared-secret/bearer check (reuse `MCP_ACCESS_KEY` pattern) so the write endpoints aren't open on the tailnet to non-operators. Confirm in [§8](#8-risks--guardrails).
+- **Images:** extraction returns embedded images; the workbench writes them under `content/assets/<source-id>/…` and rewrites the source markdown to `![alt](assets/<source-id>/img-n.png)` so Quartz renders them inline. Standalone image uploads become a `source` (`content_type='image'`, `content` = OCR text + caption for embedding) with the image as its asset.
+- **Audio:** podcast renders write `assets/podcasts/<podcast-id>.mp3`; the `PodcastPanel` `<audio>` element streams it same-origin.
+- Quartz already copies static assets in `content/`; confirm `ignorePatterns`/asset config in the overlay so `assets/` is served but not treated as pages.
 
-### 2.3 How writes become visible (the loop)
+### 2.3 Routing, exposure, auth
 
-Every write lands in OB1 Postgres → the existing `source_extraction_queue`
-trigger and the wiki **change-watch** (3-min debounce) already pick it up and
-recompile → Quartz's file watcher reloads. **We add no new sync mechanism** — we
-feed the loop that already runs. The only new wiki-compiler work is *displaying*
-provenance and round-tripping notes edits (Phases 1–2).
+- Caddy gains `/workbench/*` → `openbrain-workbench:8814`, **same host/origin** as the wiki (no CORS). Touch [config/caddy/Caddyfile](config/caddy/Caddyfile) and OB1 [Caddyfile](OB1/docker/Caddyfile).
+- Reachable only via the Tailscale portal (the wiki's only public path). Add a bearer/shared-secret check (reuse `MCP_ACCESS_KEY` pattern) so write/retract/delete aren't open to non-operators. New `/workbench` portal route may need a Tailscale serve entry — see [Tailscale serve restore recipe](C:\Users\yamao\.claude\projects\d--Open-WebUI-ai-stack\memory\tailscale-serve-restore-recipe.md).
 
-### 2.4 Quartz customization model
+### 2.4 How writes become visible (the loop)
 
-Quartz is fetched fresh at image build (pinned `v4.5.1`), so our changes must be
-**layered on, not forked in place**:
+Every write lands in OB1 Postgres / the vault → the existing
+`source_extraction_queue` trigger and the wiki **change-watch** (3-min debounce)
+recompile → Quartz's file watcher reloads. **We add no new sync mechanism.**
+Retraction reuses the compiler's existing **orphan sweep** (pages drop when their
+source entities are removed).
 
-- Add a `quartz-overlay/` dir in [OB1/docker/wiki-viewer/](OB1/docker/wiki-viewer/) with our components (`quartz/components/*.tsx`), client scripts (`*.inline.ts`), and a patched `quartz.layout.ts` / `quartz.config.ts`.
-- The Dockerfile `COPY`s the overlay over the cloned Quartz tree after `git clone`, before `npm ci` (so any new deps install). `entrypoint.sh` keeps patching `ignorePatterns`.
-- This keeps the Quartz upgrade path sane: bump `QUARTZ_REF`, re-apply overlay, diff.
+### 2.5 Quartz customization model
+
+Quartz is fetched fresh at image build (pinned `v4.5.1`), so changes are
+**layered, not forked**: add `OB1/docker/wiki-viewer/quartz-overlay/` (components
+`*.tsx`, client `*.inline.ts`, patched `quartz.layout.ts`/`quartz.config.ts`).
+The Dockerfile `COPY`s the overlay over the cloned Quartz tree after `git clone`,
+before `npm ci`. Keeps `QUARTZ_REF` upgradeable (bump → re-apply overlay → diff).
 
 ---
 
 ## 3. Cross-cutting foundations (Phase 0)
 
-Do these once, before feature phases. They are the "infrastructure" the idea doc
-deliberately stripped out but which D-A forces us to own.
-
-- **P0.1 — `openbrain-workbench` service skeleton.** Deno+Hono, health check, bearer auth, `obnet`+`llm-net`, published `127.0.0.1:8814`. Add to [compose](OB1/docker/docker-compose.yml). **Per the workspace convention, also update the recovery scripts' service inventory + startup/shutdown order and the stack-map reference** — see [§8](#8-risks--guardrails).
+- **P0.1 — `openbrain-workbench` skeleton.** Deno+Hono, health check, bearer auth, `obnet`+`llm-net`, `127.0.0.1:8814`. Add to [compose](OB1/docker/docker-compose.yml) **+ recovery scripts + stack-map**.
 - **P0.2 — Caddy `/workbench/*` proxy** (both Caddyfiles), same-origin with the wiki.
-- **P0.3 — Quartz overlay scaffold.** `quartz-overlay/` + Dockerfile `COPY`; a no-op custom component that renders to prove the layering + client `fetch()` to `/workbench/health` works end-to-end through the portal.
-- **P0.4 — Shared TypeScript types** for the source/thread/provenance shapes, generated from or hand-mirrored against the SQL in [init-sources.sql](OB1/docker/init-sources.sql) / [init-threads.sql](OB1/docker/init-threads.sql).
+- **P0.3 — Quartz overlay scaffold + asset config.** `quartz-overlay/` + Dockerfile `COPY`; a no-op component proving overlay layering + client `fetch()` to `/workbench/health` through the portal; confirm `content/assets/` is served (images/audio) but not paginated.
+- **P0.4 — `wiki-assets` volume** wired to workbench + viewer (+ podcast/extract later).
+- **P0.5 — Shared TS types** for source/thread/provenance/podcast shapes, mirrored against [init-sources.sql](OB1/docker/init-sources.sql)/[init-threads.sql](OB1/docker/init-threads.sql).
 
-**P0 ship gate:** a custom Quartz component, served through the portal, can call
-the authed workbench API and render the response. Nothing touches `sources` yet.
+**P0 gate:** a custom Quartz component, served through the portal, calls the
+authed workbench API and renders the response; an image dropped under
+`content/assets/` renders in a page. Nothing touches `sources` yet.
 
 ---
 
 ## 4. Feature phases
 
-Each phase: **Goal → Components/touchpoints → Ship gate.** Order per D-C.
-
 ### Phase 1 — Source Visibility & Provenance
 
-*Lowest risk, establishes the source→wiki link pattern reused everywhere later.*
+**Goal:** On any entity/topic page, show the underlying sources (type, capture
+date, title/URL, notebook/tags) with click-through to a raw source view.
 
-**Goal:** On any entity/topic wiki page, show the underlying sources (type,
-capture date, title/URL, notebook/tags) with click-through to a source view.
+- **Backend (read-only):** `GET /workbench/provenance?entity=<id>` (join `source_entities`→`sources`), cached per entity keyed on `last_compile_iso`; `GET /workbench/sources/:id`.
+- **Wiki compiler:** emit a provenance sidecar at compile time (`content/<type>/<slug>.sources.json` or front-matter `sources:`) so panels render with no hot-path DB hit; the compiler already knows linked sources ([generate-wiki.mjs](OB1/recipes/entity-wiki/generate-wiki.mjs), `WIKI_MAX_SOURCES`).
+- **Quartz:** `ProvenancePanel.tsx` (collapsible "Sources" on entity pages), source-view route, "wiki ↔ source" toggle.
 
-**Backend (read-only):**
-- `GET /workbench/provenance?entity=<id>` → joins `source_entities` → `sources` for that page's entity (and topic pages: the thoughts/sources the synthesis used). Cache per entity keyed on `last_compile_iso` to avoid per-page-load vector/DB latency (the idea doc's caching note).
-- `GET /workbench/sources/:id` → single source raw view.
-
-**Wiki compiler:** emit a machine-readable provenance sidecar during compile
-(e.g. `content/<type>/<slug>.sources.json`, or front-matter `sources:` keys) so
-the panel can render instantly without a live DB hit. The compiler already knows
-the linked sources when it builds a page ([generate-wiki.mjs](OB1/recipes/entity-wiki/generate-wiki.mjs), `WIKI_MAX_SOURCES`).
-
-**Quartz components:**
-- `ProvenancePanel.tsx` — collapsible "Sources" section on entity pages, fed by front-matter/sidecar (build-time) with a client `.inline.ts` fallback to the live API for freshness.
-- Source-view route/component — raw source content + metadata; the read-side of the Phase-3 editor.
-- "Wiki view ↔ Source view" toggle.
-
-**Ship gate:** open any person/org/tool page → see its real sources with metadata
-→ click through to the raw source. No DB query on hot page loads (served from
-compiled sidecar/cache).
+**Gate:** open any person/org/tool page → see real sources w/ metadata → click
+through to raw source. No DB query on hot page loads.
 
 ---
 
-### Phase 2 — User Notes System
+### Phase 2 — User Notes System (the editable, additive layer — D-E)
 
-*Self-contained; validates the write loop end-to-end with the lowest blast radius
-because the `notes/` layer and its tether already exist.*
+**Goal:** Author Obsidian-style markdown notes **in Quartz** — live preview,
+`[[wikilinks]]`, tags, notebook/folder grouping — stored in the human-owned
+`notes/` layer and written **additively into the Open Brain DB**.
 
-**Goal:** Author Obsidian-style markdown notes **in Quartz**, with live preview,
-`[[wikilinks]]` to entities/topics/other notes, tags, and folder/notebook
-grouping — stored in the human-owned `notes/` layer, tethered into OpenBrain.
+- **Reuse, don't reinvent:** `ingestNotes()` already maps `notes/<notebook>/file.md` ⇄ one thought via `metadata.note_path`, diff-based upsert/delete + extraction enqueue. We add a **browser editor that writes those files**.
+- **Backend:** `PUT /workbench/notes/<path>` (validate path under `notes/`, write, `git add/commit`; optimistic concurrency via content-hash / `If-Match` for multi-session safety); `GET` + notes index.
+- **Quartz:** `NotesEditor.tsx` + `.inline.ts` — editor w/ live preview, `[[…]]` autocomplete from `entities.md`/notes index, tag input; notebook = first folder under `notes/` (matches `ingestNotes()` `parts[1]`).
+- **Decision (idea-doc Q1):** notes stay in the `notes/` git layer tethered to thoughts — **not** a separate `user_notes` collection. Already isolated; reuses the tether; no second storage model. This is the single read-write content layer (D-E).
 
-**Reuse, don't reinvent:** notes already round-trip —
-`ingestNotes()` in [wiki-service.mjs](OB1/docker/wiki-service/wiki-service.mjs)
-maps `notes/<notebook>/file.md` ⇄ one thought via `metadata.note_path`, with
-diff-based upsert/delete and extraction enqueue. We are adding a **browser editor
-that writes those files**, not a new storage model.
-
-**Backend:**
-- `PUT /workbench/notes/<path>` — validate path under `notes/`, write file, `git add/commit` (the compiler's `git pull --rebase` before compile keeps it FF — mind the multi-session conflict note in the idea doc; use optimistic concurrency via content hash / `If-Match`).
-- `GET /workbench/notes/<path>` and a notes index endpoint.
-
-**Quartz components:**
-- `NotesEditor.tsx` + `.inline.ts` — markdown editor with live preview, `[[…]]` autocomplete sourced from `entities.md` / notes index (link resolver), tag input.
-- "New note / Edit note" affordance; notebook = first folder under `notes/` (matches `ingestNotes()`'s `parts[1]` convention).
-
-**Design answer (idea doc Q1 — notes vs sources storage):** notes stay in the
-**`notes/` git layer tethered to thoughts** (their current home), *not* a separate
-`user_notes` source collection. This is already isolated from `content/` and from
-`sources`, gives query isolation for free, and avoids a second storage model. The
-idea doc's "separate collection" recommendation is satisfied by the existing
-thought-tether, so we keep it.
-
-**Ship gate:** create + edit a note in the browser → it appears in the vault,
-`[[wikilinks]]` resolve in Quartz, and the next compile tethers it to a thought
-and runs entity extraction. Edit conflict from two sessions is detected, not
-silently lost.
+**Gate:** create/edit a note in the browser → appears in vault, `[[links]]`
+resolve, next compile tethers it to a thought + extracts entities; two-session
+edit conflict is detected, not lost.
 
 ---
 
-### Phase 3 — Source Editing Interface
+### Phase 3 — Source Retraction & Correction (D-D)
 
-*Builds on Phase 1's source view; produces the versioning + re-embed logic Phase 4
-reuses.*
+*Reframed from "source editing": sources are immutable source-of-truth, so the
+corrective action is **removal**, not content edits.*
 
-**Goal:** Correct/annotate captured sources without losing the original; edit
-metadata (tags, notebook, collection, confidence/notes); re-embed on meaningful
-change.
+**Goal:** Let the user remove a source that was wrong or ingested by accident,
+with a safe two-tier model and clear consequences.
 
-**Schema (additive — never alter existing `sources` columns, per OB1 guard rails):**
-- Add `original_content TEXT` (nullable; populated on first edit), `edited_at TIMESTAMPTZ`, `edited_by TEXT`. Keep `content` as the live/edited text so `match_sources()` and extraction need no change.
-- **Versioning (idea doc Q2):** start with **dual-field** `original_content` / `content`. Add a lightweight `source_revisions` append-only log only if revision history is later demanded. Decided: dual-field now.
+- **Two tiers:**
+  - **Soft retract (default, reversible):** flip `thread_sources.status → hidden`/`inactive` via the existing `set_thread_source_status()`. Source stays in DB, drops out of that thread's provenance/search surface; restorable. No re-embed, no data loss.
+  - **Hard delete (operator-confirmed, irreversible):** `DELETE FROM sources WHERE id=…`; `source_entities`/`thread_sources`/`session_sources` cascade; next compile's **orphan sweep** removes now-unsupported wiki pages. Used for accidental/garbage ingests.
+- **No content editing:** source `content` is never mutated (D-D). To "correct" a source, retract + re-ingest a corrected copy. (Drops the prior draft's `original_content`/`edited_text` dual-field schema — not needed.) Tag/notebook *organization* is handled by `thread_sources` links, not by editing source rows.
+- **Backend:** `POST /workbench/sources/:id/retract {scope: thread|global, mode: hide|delete}`; restore endpoint for soft-hidden. Guard hard-delete behind explicit confirmation + audit (`metadata.retracted_by`, `retracted_at`).
+- **Quartz:** `SourceRetractor.tsx` on the source view — "Hide from thread" vs "Delete permanently" with a confirm dialog showing what pages/links will be affected.
 
-**Backend:**
-- `PATCH /workbench/sources/:id` — update `content` and/or metadata; on first edit snapshot `original_content`; recompute `content_hash`.
-- **Re-embed trigger (idea doc Q3):** the `source_extraction_queue` trigger already re-enqueues on `content` change *only when the fingerprint differs* ([init-source-graph.sql](OB1/docker/init-source-graph.sql)) — so re-embedding is automatic and delta-gated for free. Add an explicit **"Re-embed now"** button for operator override. Threshold-based (20% delta) auto-reembed is **not** needed given fingerprint gating; metadata-only edits must **not** bump the content fingerprint (so a tag change doesn't trigger re-embed). Verify the trigger keys on content only.
-
-**Quartz components:**
-- `SourceEditor.tsx` + `.inline.ts` — inline editor over the Phase-1 source view; metadata form; "view original ↔ edited" diff; "Re-embed" action; audit line (`edited_at`/`edited_by`).
-
-**Ship gate:** edit a source's text → `original_content` preserved, `content`
-updated, re-embed enqueued automatically, entity links + dependent wiki pages
-refresh on next compile. Editing only tags does **not** trigger re-embed.
+**Gate:** soft-hide removes a source from a thread's provenance and restores
+cleanly; hard-delete purges it, cascades links, and the dependent wiki page is
+swept on next compile. A delete always requires explicit confirmation.
 
 ---
 
-### Phase 4 — Direct Source Import Pipeline
+### Phase 4 — Direct Source Import Pipeline (incl. images — D-F)
 
-*Heaviest; reuses chunking/embedding/edit/provenance from P1–P3. This is the
-headline ask and where Open Notebook's `content-core` is harvested.*
+**Goal:** Drag-and-drop / picker upload of PDF, DOC/DOCX, PPT/PPTX, MD, TXT,
+**images** → extract (text + embedded images, OCR where needed) → chunk → embed →
+land as first-class read-only `sources`, with progress + error handling, and
+images rendered in Quartz.
 
-**Goal:** Drag-and-drop / file-picker upload of PDF, DOC/DOCX, PPT/PPTX, MD, TXT
-(images via OCR as a fast-follow) → parse → chunk → embed → land as first-class
-`sources` in Open Brain, with progress + error handling.
+- **`openbrain-extract` sidecar (the content-core borrow):** `POST /extract` (multipart) → `{ markdown, title, metadata{author,date,page_refs}, pages, images[] }`. OCR via Tesseract/Pillow for scanned PDFs and standalone images. Add to compose **+ recovery + stack-map**.
+- **Workbench `POST /workbench/import` (async):** store upload → `openbrain-extract` → write extracted images to `content/assets/<source-id>/` and rewrite markdown image refs → chunk (semantic/sentence-boundary default, fixed+overlap fallback, tuned for `bge-m3`) → embed → `find_or_create_source()` (dedup) → `link_source_to_thread(..., 'deliberate')` → return `job_id`. `GET /workbench/jobs/:id` for progress (async queue avoids blocking on large files).
+- **Schema (additive):**
+  - **Widen `content_type` CHECK** to add `'image'` (and `'docx'`/`'pptx'` or keep file docs as `'manual'`) — drop+re-add constraint, **values only widened**, never removed.
+  - **New `source_chunks(source_id, idx, content, embedding VECTOR(1024))`** for long-doc retrieval granularity + a chunk-aware `match_sources` variant. Largest new schema item — gate explicitly (see [§10 Q2](#10-open-questions)).
+- **Images in Quartz:** once assets land in the vault and markdown references them, Quartz renders them inline (no Quartz code change beyond the P0 asset config). Source-view shows the image + OCR text.
+- **Quartz:** `ImportDropzone.tsx` (drag/drop + picker, format validation, per-file progress, corrupt/unsupported errors) + `ImportStatus.tsx` (job dashboard).
 
-**`openbrain-extract` Python sidecar (the ON borrow):**
-- FastAPI service wrapping **`content-core`** (PDF/DOCX/PPTX/MD/URL→markdown). Falls back to / can be swapped for `PyMuPDF` + `python-docx` + `python-pptx` if we want to drop the heaviest deps. The in-repo [heavy-file-ingestion](OB1/skills/heavy-file-ingestion/) `convert_heavy_file.py` is the fallback reference implementation if `content-core` proves too heavy.
-- `POST /extract` (multipart) → `{ markdown, title, metadata: {author, date, page_refs…}, pages }`.
-- New service in [compose](OB1/docker/docker-compose.yml) on `obnet`; **also update recovery scripts + stack-map** (convention).
-
-**Workbench API:**
-- `POST /workbench/import` (multipart, async) → store upload → call `openbrain-extract` → chunk (token-based, overlap tuned for `bge-m3`; **semantic/sentence-boundary chunking** per idea doc Q4 as the default, fixed-size as fallback) → embed each chunk via `llama-cpp-embed` → `find_or_create_source()` (dedup) → link to a thread via `link_source_to_thread(..., 'deliberate')` → return a `job_id`.
-- `GET /workbench/jobs/:id` → progress/status for the dashboard (queue avoids blocking UI on large files).
-- **Chunking model note:** OB1 currently stores one row per source with a single `embedding`. Multi-chunk import needs a decision: (a) one `sources` row + a new `source_chunks(source_id, idx, content, embedding)` table for retrieval granularity, or (b) keep one row, embed a representative window (today's behavior). **Recommend (a)** — add `source_chunks` (additive) so large docs retrieve well; `match_sources()` gains a chunk-aware variant. This is the largest new schema item; gate it explicitly.
-
-**Quartz components:**
-- `ImportDropzone.tsx` + `.inline.ts` — drag/drop + picker, format validation, per-file progress, error surfacing (corrupt/unsupported).
-- `ImportStatus.tsx` — job dashboard polling `/workbench/jobs/:id`.
-
-**Ship gate:** drop a real PDF and a DOCX → both extract to text, chunk, embed,
-appear as `sources` (deduped), link to the chosen notebook/thread, get entity-
-extracted, and surface on the relevant wiki pages via Phase-1 provenance — with
-visible progress and a clear error on a corrupt file.
+**Gate:** drop a PDF, a DOCX, and a PNG → all extract, chunk, embed, dedupe,
+link to a thread, get entity-extracted, and surface via Phase-1 provenance; the
+PNG and any images embedded in the PDF render inline in Quartz; corrupt files
+fail with a clear message.
 
 ---
 
-## 5. Design decisions — answering the idea doc's "lock before coding"
+### Phase 5 — Podcast Service (extended — D-G)
 
-| Idea-doc question | Decision for this stack | Rationale |
+**Goal:** Generate a podcast **on request** from a thread's sources, show it in a
+dedicated section with **playback**, organize **by thread**, and let the user
+save the transcript as a note.
+
+- **`openbrain-podcast` sidecar (the podcast-creator borrow):** `POST /generate {thread_id, speakers:1–4, voice_profiles, style}` → pulls the thread's sources from OB1 → script via local Qwen (`llama-cpp`) → audio via **local TTS** → writes `assets/podcasts/<id>.mp3` + transcript → upserts `podcasts` row. Async w/ `job_id`. Add to compose **+ recovery + stack-map**.
+  - ⚠️ **Local TTS is an open decision ([§10 Q1](#10-open-questions)).** `podcast-creator`/esperanto default to cloud TTS (OpenAI/ElevenLabs/Google), which violates the local-runtime rule. Candidates: **Kokoro-82M**, **Piper**, **XTTS-v2** (voice cloning, heavier). May require adding a local TTS provider to / forking `podcast-creator`'s synthesis step.
+- **Schema (additive):** **`podcasts(id, thread_id FK, title, status, audio_path, transcript, speaker_config jsonb, created_at)`** — `thread_id` gives the "organized by thread" requirement directly.
+- **Transcript → note:** `POST /workbench/podcasts/:id/transcript-to-note` reuses the Phase-2 notes write path (transcript becomes an editable, tethered user note). The `'podcast_transcript'` `content_type` already exists if we ever also want it as a source.
+- **Quartz:** `PodcastPanel.tsx` — a "Podcasts" section (global + per-thread view) listing podcasts with an `<audio>` player streaming from `assets/podcasts/…`; "Generate podcast for this thread" action; "Save transcript as note" button.
+
+**Gate:** request a podcast for a thread → script + audio generate locally, the
+episode appears in the Podcasts section under its thread, plays back in-browser,
+and its transcript can be saved as an editable note.
+
+---
+
+## 5. Design decisions — answering the idea doc + new asks
+
+| Question | Decision | Rationale |
 |---|---|---|
-| **Q1 Notes vs sources storage** | Notes stay in the `notes/` git layer, tethered to thoughts (existing). No `user_notes` source collection. | Already isolated from `content/` and `sources`; reuses `ingestNotes()`; zero new storage model. |
-| **Q2 Source editing versioning** | Dual-field `original_content` / `content` now; append-only `source_revisions` only if demanded. | Matches idea doc's own recommendation; additive to `sources` (respects OB1 guard rail against altering columns). |
-| **Q3 Re-embed threshold** | No % threshold. Rely on the existing fingerprint-gated `source_extraction_queue` trigger (auto delta-reembed) + an explicit "Re-embed now" button. Metadata-only edits must not bump the content fingerprint. | The trigger already does delta-gated re-embed; a threshold would duplicate it. |
-| **Q4 Import chunking** | Semantic/sentence-boundary chunking as default, fixed-size+overlap fallback, tuned for `bge-m3` (1024-dim). New `source_chunks` table for retrieval granularity. | Better retrieval; the only sizeable new schema, gated in P4. |
-| **(New) Where does the write-API live** | New `openbrain-workbench` Deno+Hono service, not the MCP server. | Keeps browser-facing/multipart/auth surface off the limited MCP + cloud-gateway contract. |
-| **(New) Extraction engine** | Borrow `content-core` in a Python `openbrain-extract` sidecar; `convert_heavy_file.py` / PyMuPDF as fallback. | Reuses ON's best IP without Python parsers in Deno; lets us retire ON. |
-| **(New) Quartz customization** | `quartz-overlay/` COPY'd over the pinned Quartz clone; not an in-place fork. | Keeps `QUARTZ_REF` upgradeable. |
+| **Q1 Notes vs sources storage** | Notes in `notes/` git layer tethered to thoughts; no `user_notes` collection. | Isolated already; reuses `ingestNotes()`; no new storage model (D-E). |
+| **Q2 Source "versioning"** | **None — sources are immutable (D-D).** Correction = retract + re-ingest. Soft-hide via `thread_sources.status`; hard-delete cascades + orphan-sweeps. | Read-only source-of-truth; the prior dual-field edit model is dropped. |
+| **Q3 Re-embed threshold** | N/A for sources (no edits). Imports embed once; re-ingest creates a fresh source. | No edit path to re-embed. |
+| **Q4 Import chunking** | Semantic/sentence-boundary default, fixed+overlap fallback, `bge-m3`-tuned; new `source_chunks` table. | Better long-doc retrieval; only sizeable new schema, gated in P4. |
+| **(New) Images** | content-core extracts them; workbench writes to `content/assets/`; Quartz renders inline; `content_type` widened to `'image'`. | Closes D-F with the ingestion borrow + a vault asset convention. |
+| **(New) Podcast TTS** | Local TTS engine required (Kokoro/Piper/XTTS) behind `podcast-creator`; script via local Qwen. **Engine choice open.** | Local-runtime rule forbids cloud TTS; ON's default providers are cloud. |
+| **(New) Podcast storage/org** | `podcasts` table w/ `thread_id`; audio on `wiki-assets`; transcript→note via P2. | Direct "organized by thread" + "transcript as note" mapping. |
+| **(New) Write-API home** | New `openbrain-workbench`, not the MCP server. | Keeps browser/multipart/auth surface off the limited MCP + cloud-gateway contract. |
+| **(New) Extraction/podcast engines** | Python sidecars (`openbrain-extract`, `openbrain-podcast`) wrapping content-core / podcast-creator. | Reuse ON's best IP without Python in the Deno process; lets us retire ON. |
+| **(New) Quartz customization** | `quartz-overlay/` COPY'd over the pinned clone; not in-place fork. | Keeps `QUARTZ_REF` upgradeable. |
 
 ---
 
-## 6. File / touchpoint index (where work lands)
+## 6. File / touchpoint index
 
-- **New service:** `OB1/docker/workbench/` (Deno+Hono API) + `OB1/docker/extract/` (FastAPI + content-core).
-- **Compose:** [OB1/docker/docker-compose.yml](OB1/docker/docker-compose.yml) — add `openbrain-workbench`, `openbrain-extract`.
-- **Recovery (convention — required):** `scripts/emergency-recovery.ps1` + `.bat` service inventory + start/stop order.
+- **New services:** `OB1/docker/workbench/` (Deno+Hono), `OB1/docker/extract/` (FastAPI+content-core), `OB1/docker/podcast/` (FastAPI+podcast-creator+local TTS).
+- **Compose:** [OB1/docker/docker-compose.yml](OB1/docker/docker-compose.yml) — add `openbrain-workbench`, `openbrain-extract`, `openbrain-podcast`, `wiki-assets` volume.
+- **Recovery (convention — required):** `scripts/emergency-recovery.ps1` + `.bat` inventory + start/stop order.
 - **Stack map (convention — required):** [.claude/skills/stack-map/references/workspace-stacks.md](.claude/skills/stack-map/references/workspace-stacks.md).
-- **Caddy:** [config/caddy/Caddyfile](config/caddy/Caddyfile), [OB1/docker/Caddyfile](OB1/docker/Caddyfile) — `/workbench/*`.
-- **Quartz overlay:** `OB1/docker/wiki-viewer/quartz-overlay/` (+ Dockerfile COPY) — components, `.inline.ts`, `quartz.layout.ts`.
-- **Wiki compiler:** [OB1/docker/wiki-service/wiki-service.mjs](OB1/docker/wiki-service/wiki-service.mjs) — provenance sidecar emit (P1); notes write path interplay (P2).
-- **Schema (additive only):** `OB1/docker/init-sources.sql` patch or new `init-source-edits.sql` (`original_content`, `edited_at/by`), new `init-source-chunks.sql` (`source_chunks`).
-- **Embeddings/search:** chunk-aware `match_sources` variant.
+- **Caddy:** [config/caddy/Caddyfile](config/caddy/Caddyfile), [OB1/docker/Caddyfile](OB1/docker/Caddyfile) — `/workbench/*` + `assets/` serving.
+- **Quartz overlay:** `OB1/docker/wiki-viewer/quartz-overlay/` (+ Dockerfile COPY) — `ProvenancePanel`, `NotesEditor`, `SourceRetractor`, `ImportDropzone`, `ImportStatus`, `PodcastPanel`, `.inline.ts`, layout/config.
+- **Wiki compiler:** [OB1/docker/wiki-service/wiki-service.mjs](OB1/docker/wiki-service/wiki-service.mjs) — provenance sidecar (P1); notes write interplay (P2); confirm orphan sweep covers hard-deletes (P3).
+- **Schema (additive only):** widen `content_type` CHECK + `source_chunks` (`init-source-chunks.sql`), `podcasts` (`init-podcasts.sql`), retraction audit columns in `metadata`.
+- **Search:** chunk-aware `match_sources` variant.
 
 ---
 
 ## 7. Sequencing & dependencies
 
 ```
-P0 Foundations ─┬─> P1 Provenance ──┬─> P3 Editing ──┐
-                │                    │                ├─> P4 Import
-                └─> P2 Notes ────────┘ (P3 versioning + re-embed reused by P4)
+P0 Foundations ─┬─> P1 Provenance ──┬─> P3 Retraction
+                │                    │
+                ├─> P2 Notes ────────┼──────────────┐
+                │                    │              ▼
+                └────────────────────┴─> P4 Import ─┴─> P5 Podcasts
 ```
 
-- P0 unblocks all. P1 and P2 can proceed in parallel after P0 (read vs notes-write).
-- P3 depends on P1's source view. P4 depends on P3 (versioning/re-embed) and P1 (provenance display) and adds the extract sidecar + `source_chunks`.
-- **ON decommission happens only after P4 ships and is verified** ([§9](#9-relationship-to-iks--retiring-open-notebook)).
+- P0 unblocks all. P1 (read) and P2 (notes-write) parallelize after P0.
+- P3 (retraction) depends on P1's source view.
+- P4 (import + images) depends on P0/P1; adds the extract sidecar + assets + `source_chunks`. **No longer depends on P3** (no source-editing/versioning).
+- P5 (podcasts) depends on P4 (sources to summarize), P2 (transcript→note), and threads; adds the podcast sidecar + local TTS + `podcasts`.
+- **ON decommission only after P4 *and* P5 ship + verified** ([§9](#9-relationship-to-iks--retiring-open-notebook)).
 
 ---
 
 ## 8. Risks & guardrails
 
-- **Three-place change convention (CLAUDE.md):** every new container (`openbrain-workbench`, `openbrain-extract`) must update compose **+** recovery scripts **+** stack-map together. The `/stack-map` skill checks this drift — run it before/after compose edits.
-- **OB1 guard rails:** never alter/drop existing `thoughts`/`sources` columns — all schema work is additive. No secrets in files; reuse env-var/`MCP_ACCESS_KEY` patterns. (The OB1 "MCP servers must be remote Edge Functions" rule is the *public contribution* contract; this is local deployment infra under `OB1/docker/`, consistent with the already-local `openbrain-mcp` — keep it out of any upstream PR scope.)
-- **Browser-facing write surface = new attack surface.** Auth the workbench (bearer/shared-secret), keep it reachable only via the Tailscale portal, validate/normalize note paths (no `../` escape out of `notes/`), cap upload size, sandbox the extractor (untrusted file parsing).
-- **Static-build friction (D-A):** interactive components fight Quartz's model. Keep heavy logic in `.inline.ts` calling the API; keep build-time components thin. Don't let the overlay block `QUARTZ_REF` upgrades.
-- **GPU/compile churn:** large imports → many embeddings + extraction + recompile. The change-watch debounce (3 min) already coalesces; respect [llama-swap perf tuning](C:\Users\yamao\.claude\projects\d--Open-WebUI-ai-stack\memory\llama-swap-perf-tuning.md) lane budgets — batch imports, don't fan out unbounded embedding calls.
-- **Multi-session note/source edits:** optimistic concurrency (content-hash / `If-Match`); the compiler's `pull --rebase` keeps git FF but the editor must detect a stale base.
-- **Never commit/push on the operator's behalf** ([git-handling-boundaries](C:\Users\yamao\.claude\projects\d--Open-WebUI-ai-stack\memory\git-handling-boundaries.md)) — except the workbench's own programmatic commits **inside** the `/wiki` vault repo (that *is* the notes write mechanism), which stay local (no remote push; D16).
-- **Tailscale serve drift:** new `/workbench` portal route may need a serve entry — see [Tailscale serve restore recipe](C:\Users\yamao\.claude\projects\d--Open-WebUI-ai-stack\memory\tailscale-serve-restore-recipe.md).
+- **Three-place change convention (CLAUDE.md):** each new container (`openbrain-workbench`, `openbrain-extract`, `openbrain-podcast`) updates compose **+** recovery scripts **+** stack-map together. Run `/stack-map` before/after compose edits.
+- **OB1 guard rails:** never alter/drop existing `thoughts`/`sources` columns — all schema work additive (widening a CHECK = drop+re-add with values only added). No secrets in files; reuse env-var/`MCP_ACCESS_KEY`. (OB1's "MCP servers must be remote Edge Functions" rule is the *public-contribution* contract; this is local deployment infra under `OB1/docker/`, like the already-local `openbrain-mcp` — keep out of upstream PR scope.)
+- **Local-runtime rule for podcasts:** no cloud TTS. Pick a local engine ([§10 Q1](#10-open-questions)); GPU contention with `llama-cpp` matters — see [llama-swap perf tuning](C:\Users\yamao\.claude\projects\d--Open-WebUI-ai-stack\memory\llama-swap-perf-tuning.md). Prefer a CPU-capable TTS (Piper/Kokoro) so podcast renders don't starve inference.
+- **Destructive action (D-D hard delete):** irreversible + cascades. Require explicit confirm, show affected pages/links, audit `retracted_by`/`retracted_at`, default the UI to soft-hide. Don't expose hard-delete to non-operators.
+- **New browser-facing write surface:** auth (bearer), portal-only reach, validate/normalize note + asset paths (no `../` escape from `notes/`/`assets/`), cap upload size, **sandbox the extractor** (untrusted file + image parsing is a classic RCE vector — run `openbrain-extract` unprivileged, no extra network).
+- **Static-build friction (D-A):** heavy logic in `.inline.ts` calling the API; thin build-time components; overlay must not block `QUARTZ_REF` upgrades.
+- **GPU/compile churn:** large imports + podcast gen + recompile. Change-watch debounce (3 min) coalesces; batch embeddings, don't fan out unbounded.
+- **Asset volume growth:** audio + extracted images accumulate on `wiki-assets`; ensure backups cover it and add a retention/cleanup story (hard-deleted sources should drop their assets too).
+- **Never commit/push on the operator's behalf** ([git-handling-boundaries](C:\Users\yamao\.claude\projects\d--Open-WebUI-ai-stack\memory\git-handling-boundaries.md)) — except the workbench's own programmatic commits **inside** the `/wiki` vault repo (that *is* the notes write mechanism), staying local (no remote push; D16).
 
 ---
 
 ## 9. Relationship to IKS & retiring Open Notebook
 
-The in-flight Integrated Knowledge System work (current branch) was repointing
-**Open Notebook's** sources onto OB1 Postgres so ON, OWUI, and the wiki share one
-`sources`/`threads` store. D-B changes the destination: instead of repointing ON,
-**Quartz becomes the workbench and ON is retired.** What carries over and what changes:
+IKS was repointing **Open Notebook's** sources onto OB1 Postgres so ON/OWUI/wiki
+share one store. D-B changes the destination: **Quartz becomes the workbench and
+ON is retired.**
 
-- **Keep (already built, reused here):** the unified OB1 schema — `sources`, `threads`, `thread_sources`, `sessions`, `session_sources`, `find_or_create_source()`. This plan builds *directly* on it. See [IMPLEMENTATION-PLAN-integrated-knowledge-system.md](documentation/implementation-guide/open%20-notebook-integration-openbrain/IMPLEMENTATION-PLAN-integrated-knowledge-system.md) and [Integrated-knowledge-system-concept.md](documentation/implementation-guide/open%20-notebook-integration-openbrain/Integrated-knowledge-system-concept.md).
-- **Drop:** the ON-repoint phases (ON reading/writing OB1), the ON triage UI, the SurrealDB-as-ON-store layer. The triage/suggestion concept (suggestion-worker → `thread_sources` pending) can later resurface **as a Quartz component**, not in ON.
-- **Decommission steps (post-P4, gated on verification):**
-  1. Confirm P1–P4 cover ON's still-wanted features (import, source view/edit, notes). Podcast/TTS/chat explicitly dropped.
-  2. Migrate any ON-only source data still in SurrealDB into OB1 `sources` via `find_or_create_source()` (one-shot script).
-  3. Remove `open_notebook` + its `surrealdb` dependency from [docker-compose.yml](docker-compose.yml), the recovery scripts, the stack-map, and the Tailscale serves for `:8443/:5055` ([entrypoint.sh](entrypoint.sh) / serve recipe).
-  4. Update memory: this plan **reverses** the "repoint ON" direction recorded in [three-layer-memory-stack-integration](C:\Users\yamao\.claude\projects\d--Open-WebUI-ai-stack\memory\three-layer-memory-stack-integration.md).
+- **Keep (built, reused here):** the unified OB1 schema — `sources`, `threads`, `thread_sources`, `sessions`, `session_sources`, `find_or_create_source()`, `set_thread_source_status()`. See [IMPLEMENTATION-PLAN-integrated-knowledge-system.md](documentation/implementation-guide/open%20-notebook-integration-openbrain/IMPLEMENTATION-PLAN-integrated-knowledge-system.md), [Integrated-knowledge-system-concept.md](documentation/implementation-guide/open%20-notebook-integration-openbrain/Integrated-knowledge-system-concept.md).
+- **Drop:** the ON-repoint phases, ON triage UI, SurrealDB-as-ON-store. (Suggestion-worker triage can later resurface as a Quartz component, not in ON.)
+- **Decommission (post-P5, gated on verification):**
+  1. Confirm P1–P5 cover ON's wanted features: import (P4, incl. images), provenance (P1), notes (P2), retraction (P3), **podcasts (P5)**. ON's chat sessions are intentionally dropped.
+  2. Migrate ON-only source data still in SurrealDB into OB1 `sources` via `find_or_create_source()` (one-shot script).
+  3. Remove `open_notebook` + its `surrealdb` dependency from [docker-compose.yml](docker-compose.yml), recovery scripts, stack-map, and the Tailscale serves for `:8443/:5055` ([entrypoint.sh](entrypoint.sh) / serve recipe).
+  4. Update memory: this reverses the "repoint ON" direction in [three-layer-memory-stack-integration](C:\Users\yamao\.claude\projects\d--Open-WebUI-ai-stack\memory\three-layer-memory-stack-integration.md).
 
-> ⚠️ SurrealDB is also used by other things — verify `open_notebook` is its only
-> consumer before removing the `surrealdb` service. (See the [SurrealDB v2 user gotcha](C:\Users\yamao\.claude\projects\d--Open-WebUI-ai-stack\memory\surrealdb-v2-define-user-gotcha.md) if re-provisioning is needed.)
+> ⚠️ Verify `open_notebook` is SurrealDB's only consumer before removing the
+> `surrealdb` service. (See [SurrealDB v2 user gotcha](C:\Users\yamao\.claude\projects\d--Open-WebUI-ai-stack\memory\surrealdb-v2-define-user-gotcha.md) if re-provisioning.)
 
 ---
 
-## 10. Open questions to resolve before P0
+## 10. Open questions
 
-1. **Workbench auth model** — shared bearer (operator-only) now, or per-user later if the tailnet has multiple humans? (Affects edit attribution `edited_by`.)
-2. **`source_chunks` adoption (P4)** — add the chunk table for retrieval granularity (recommended), or keep one-row-per-source and embed a representative window (no schema change, weaker retrieval on long docs)?
-3. **`content-core` weight** — accept its dependency footprint in the `openbrain-extract` image, or start with the lighter `PyMuPDF`/`python-docx`/`python-pptx` set (reusing `convert_heavy_file.py`) and add `content-core` only for formats those miss?
-4. **OCR scope** — images/scanned PDFs in P4, or fast-follow? (Adds Tesseract/Pillow to the extractor.)
-5. **SurrealDB sole-consumer check** — does anything besides `open_notebook` use it before §9 removal?
+1. **Local TTS engine for podcasts (blocking P5):** Kokoro-82M (quality, GPU/CPU), Piper (fast CPU, lighter voices), or XTTS-v2 (voice cloning, heavy/GPU)? Drives quality, latency, and GPU contention with inference. Does `podcast-creator` accept a custom local provider, or must we patch its synthesis step?
+2. **`source_chunks` adoption (P4):** add the chunk table for long-doc retrieval (recommended), or keep one-row-per-source + representative-window embedding (no schema change, weaker retrieval)?
+3. **`content-core` weight:** accept its dependency footprint in `openbrain-extract`, or start with lighter `PyMuPDF`/`python-docx`/`python-pptx` (+ `convert_heavy_file.py`) and add content-core only for formats those miss?
+4. **Assets location:** keep audio/images inside the wiki git vault (`content/assets/`, versioned, bloats the repo) or a separate `wiki-assets` volume served by Caddy (cleaner, but a second thing to back up)? Affects backup + git size.
+5. **Workbench auth model:** single operator bearer now, or per-user later (affects note/retraction attribution)?
+6. **Podcast voice profiles:** fixed house voices, or user-configurable per request/thread? (Depends on the TTS engine's capabilities.)
+7. **SurrealDB sole-consumer check** before §9 removal.
 
 ---
 
 ## 11. Suggested next step
 
-Lock the five open questions in [§10](#10-open-questions-to-resolve-before-p0),
-then start **Phase 0** (workbench skeleton + Caddy route + Quartz overlay proof),
-since it unblocks all four feature phases and validates the in-Quartz-components
-+ thin-API architecture end-to-end before any schema or extractor work.
+Resolve **Q1 (local TTS)** and **Q2 (`source_chunks`)** — the two that gate the
+new scope — then start **Phase 0** (workbench skeleton + Caddy route + Quartz
+overlay + asset config + assets volume), since it unblocks all phases and proves
+the in-Quartz-components + thin-API + sidecar architecture end-to-end before any
+schema, extractor, or TTS work.
