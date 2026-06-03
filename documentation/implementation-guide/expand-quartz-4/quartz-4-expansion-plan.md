@@ -183,9 +183,9 @@ renders; an image under `assets/` renders in a page. No `sources` writes yet.
 
 ### Phase 5 — Direct Source Import Pipeline (incl. images — D-F)
 **Goal:** drag-and-drop / picker upload of PDF, DOC/DOCX, PPT/PPTX, MD, TXT, **images** (and **audio/video** via STT) → extract → chunk → embed → land as first-class sources, linked to a chosen thread, with progress + errors; images render in Quartz.
-- **`openbrain-extract` sidecar (content-core borrow):** `POST /extract` → markdown + metadata + images; OCR via Tesseract/Pillow. Audio/video → transcript via STT at `host.docker.internal:8000/v1`. Add to compose **+ recovery + stack-map**.
+- **`openbrain-extract` sidecar (correctness-first, all formats — §12.3):** stable `POST /extract` → `{ markdown, title, metadata, pages, images[] }` with best-of-breed per-format extractors (PDF: PyMuPDF/Docling-class; DOCX/PPTX: python-docx/-pptx; images: Pillow+Tesseract OCR; audio/video: STT at `host.docker.internal:8000/v1`); content-core where it extracts most faithfully. **Per-format extraction-quality acceptance gate** (text fidelity, tables, headings, image refs). Add to compose **+ recovery + stack-map**.
 - **Workbench `POST /workbench/import` (async):** store upload → extract → write images to `assets/<source-id>/` + rewrite refs → chunk (semantic/sentence-boundary default, fixed+overlap fallback, `bge-m3`-tuned) → embed → `find_or_create_source()` (dedup) → `link_source_to_thread(..., 'deliberate')` to the selected thread → `job_id`; `GET /workbench/jobs/:id` for progress.
-- **Schema (additive):** widen `content_type` CHECK to add `'image'` (+ `'docx'`/`'pptx'` or keep as `'manual'`); **`source_chunks(source_id, idx, content, embedding VECTOR(1024))`** (confirmed needed — long-doc retrieval *and* the source list podcasts build from) + a chunk-aware `match_sources` variant.
+- **Schema (additive — §12.2):** widen `content_type` CHECK to add `'image'`, `'docx'`, `'pptx'`, `'audio'`; **`source_chunks(source_id, idx, content, embedding VECTOR(1024))`** (confirmed — long-doc retrieval *and* the source list podcasts build from) + a chunk-aware `match_sources` variant.
 - **Quartz:** `ImportDropzone.tsx` (validation, per-file progress, errors) + `ImportStatus.tsx`; thread selector reuses `MembershipPicker`.
 - **Gate:** drop a PDF, DOCX, PNG (and an MP3) → all extract/transcribe, chunk, embed, dedupe, link to the chosen thread, entity-extract, surface via P1 provenance and on the P2 thread page; images render inline; corrupt files fail clearly.
 
@@ -251,16 +251,16 @@ source of truth.
 | Question | Decision | Rationale |
 |---|---|---|
 | Notes vs sources storage | Notes in `notes/` tethered to thoughts; notebook folder = thread slug. | Isolated, reuses `ingestNotes()`, unifies notes↔threads. |
-| Source editing/versioning (D-D) | **Editable with append-only `source_revisions` history** (edit = new version supersedes; old preserved). | Operator wants edits *with* history, not immutability. |
+| Source editing/versioning (D-D) | **Editable; one canonical row (head) + append-only `source_revisions` history** — `source_id` never changes (§12.1). | Operator wants edits *with* history; stable id keeps thread links/search valid. |
 | Source removal (D-D) | Soft = thread status flip; hard = cascade delete + orphan sweep, operator-confirmed. | Non-exclusive M:N means "remove from thread" ≠ "delete". |
 | Re-embed | Automatic via fingerprint-gated queue trigger on content change; metadata-only edits don't bump fingerprint. | Already built; no threshold needed. |
 | Import chunking + `source_chunks` (confirmed) | Semantic/sentence-boundary default, `bge-m3`-tuned; `source_chunks` table. | Long-doc retrieval **and** the source list podcasts build from. |
-| Images (D-F) | content-core extracts → `assets/` → Quartz renders inline; `content_type` widened to `'image'`. | Closes the no-images gap with the ingestion borrow. |
-| Audio/video sources | Transcribe via existing **STT** at `host.docker.internal:8000/v1`. | Reuses the local service; no new dependency. |
+| Images (D-F) | content-core/Pillow extracts → `assets/` → Quartz renders inline; `content_type` gains `'image'`. | Closes the no-images gap with the ingestion borrow. |
+| Audio/video sources | Transcribe via existing **STT** at `host.docker.internal:8000/v1`; `content_type='audio'`. | Reuses the local service; no new dependency. |
 | Podcast TTS (D-H) | Existing local **TTS** at `host.docker.internal:8000/v1`; settings via ON-style config panel. **Deferred (P6).** | No engine decision needed; ON covers podcasts meanwhile. |
-| Threads (D-G) | Existing `threads`/`thread_sources` M:N; Quartz adds index + thread pages + hybrid membership (§5). | Schema ready; only the surface is missing. |
-| Write-API home | New `openbrain-workbench`, not the MCP server. | Keeps browser/multipart/auth off the limited MCP + cloud-gateway contract. |
-| Extraction engine | Python `openbrain-extract` wrapping content-core (fallback PyMuPDF/python-docx/python-pptx + `convert_heavy_file.py`). | Reuse ON's best IP without Python in Deno. |
+| Threads (D-G) | Existing `threads`/`thread_sources` M:N; Quartz adds index + stub+live thread pages + hybrid membership (§5, §12.4). | Schema ready; only the surface is missing. |
+| Write-API home / auth | New `openbrain-workbench`, not the MCP server; single operator bearer (§12.6). | Keeps browser/multipart/auth off the limited MCP + cloud-gateway contract. |
+| Extraction engine | Python `openbrain-extract` with correctness-first per-format extractors behind a stable interface; quality acceptance gate per format (§12.3). | Faithful extraction of all listed formats over minimal footprint. |
 | Quartz customization | `quartz-overlay/` COPY'd over the pinned clone. | Keeps `QUARTZ_REF` upgradeable. |
 | Storage direction (D-I) | `wiki-assets` volume now; self-hosted git vault later; Quartz primary. | Decouple binaries from git; roadmap target = self-hosted git server. |
 
@@ -340,22 +340,26 @@ destination: **Quartz becomes the workbench**; ON is retired **in stages**.
 
 ---
 
-## 12. Open questions
+## 12. Resolved decisions (formerly open questions)
 
-1. **`source_revisions` shape:** append-only revision log (recommended) vs `supersedes`/`superseded_by` self-reference chaining new source rows? Both preserve history; the log is simpler, the chain keeps each version independently linkable to threads.
-2. **`content_type` widening:** add `'image'` only, or also `'docx'`/`'pptx'`/`'audio'` for clearer provenance vs. keeping file docs as `'manual'`?
-3. **content-core weight:** accept its footprint in `openbrain-extract`, or start lighter (PyMuPDF/python-docx/python-pptx + `convert_heavy_file.py`) and add content-core only for formats those miss?
-4. **Thread page generation:** fully compiler-generated markdown (works offline, but membership edits wait for recompile) vs. a thin compiled stub hydrated live from the API (instant, but needs the API at view time)? Likely stub-for-shell + live-for-membership.
-5. **Notebook↔thread naming:** unify the `notes/` `notebook` folder name with the thread slug now (cleaner), or keep them separate and map?
-6. **Workbench auth:** single operator bearer now, or per-user later (affects edit/retraction/note attribution)?
+All six resolved with the operator. These are now binding for implementation.
+
+1. **Source edit-history = append-only revision log.** Keep one canonical `sources` row (current = head); each edit snapshots prior `content`/`title` into `source_revisions(source_id, revision, content, title, edited_at, edited_by)`. The `source_id` never changes, so `thread_sources`/`source_entities`/search stay valid; diff = head vs revision N. *(Not the supersedes-chain variant.)* → P4.
+2. **`content_type` widened to specific types:** add `'image'`, `'docx'`, `'pptx'`, `'audio'` (+ keep existing). Per-format badges/filters in provenance; an `'audio'` source is its STT transcript. → P5.
+3. **Extractor = correctness-first, all formats, clean/industry-standard.** Engine chosen on **extraction quality**, not footprint. `openbrain-extract` exposes a stable `/extract` interface with **best-of-breed per-format extractors** (e.g. PyMuPDF/Docling-class for PDF fidelity, python-docx/-pptx, Pillow+Tesseract for image OCR, STT for audio/video); content-core may back any format where it extracts most correctly. **Every supported format gets an explicit extraction-quality acceptance gate** (faithful text, tables, headings, image refs) — coverage of *all* listed types is in scope for this effort. → P5.
+4. **Thread pages = compiled stub + live hydration.** Compiler emits a thin shell (title, description, static graph); `ThreadPage.inline.ts` fetches live sources/notes/membership/suggestions from the workbench API, so add/remove reflects instantly with no recompile wait; degrades to the shell if the API is down. → P2/§5.
+5. **Unify notebook = thread slug now.** Notes live under `notes/<thread-slug>/`; a note's folder *is* its thread, so the thread page auto-shows `notes/<slug>/*` and `[[thread/x]]` lines up. Align the `ingestNotes()` `notebook = parts[1]` mapping to the thread slug. → P3/§5.
+6. **Workbench auth = single operator bearer now.** One shared secret (reuse the `MCP_ACCESS_KEY` pattern); `edited_by`/`retracted_by` stamped `'operator'`. Per-user identities deferred until the tailnet has more humans. → §2.3.
 
 ---
 
 ## 13. Suggested next step
 
-Resolve **Q1 (`source_revisions` shape)** and **Q4 (thread page generation)** —
-the two that gate P2/P4 — then start **Phase 0** (workbench skeleton + Caddy route
-+ overlay + asset config + assets volume). It unblocks every phase and proves the
+All gating questions are resolved, so the next action is **Phase 0** — stand up
+the `openbrain-workbench` skeleton (Deno+Hono, `:8814`, bearer auth), the Caddy
+`/workbench/*` same-origin route, the Quartz overlay scaffold + asset config, and
+the `wiki-assets` volume. P0 unblocks every phase and proves the
 in-Quartz-components + thin-API + extract-sidecar architecture end-to-end before
-any schema, extractor, or thread-surface work. Podcasts (P6) wait; ON keeps
-serving them in the meantime.
+any schema (`source_revisions`, `source_chunks`, `content_type` widening),
+extractor, or thread-surface work. Podcasts (P6) wait; ON keeps serving them in
+the meantime.
