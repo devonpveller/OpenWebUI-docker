@@ -16,13 +16,14 @@ Confirmed with the operator across two rounds.
 |---|----------|-------------|
 | D-A | **Interactive layer = in-Quartz client components.** | Preact components + client scripts in the Quartz viewer, backed by a thin write-API on Open Brain (Quartz can't write Postgres from a static page). |
 | D-B | **Borrow from Open Notebook, then retire it — but ON stays running for podcasts until that feature is ported.** | Harvest content-core (docs + **images** + OCR), the **podcast** flow (deferred), and source/notes/notebook UX into the Quartz+OB1 stack. Full ON decommission waits for the deferred podcast phase ([§10](#10-relationship-to-iks--retiring-open-notebook)). |
-| D-C | **Features, phased:** Provenance → Threads → Notes → Source Lifecycle → Import → (deferred) Podcasts. | Each phase has its own ship gate. |
+| D-C | **Features, phased:** Provenance → Threads → Notes → Source Lifecycle → Import → Source-Grounding & Deliberate Linking → (deferred) Podcasts. | Each phase has its own ship gate. |
 | D-D | **Sources are added as-is, are editable with a preserved edit history, and are removable with cascade.** | An edit creates a **new version / supersedes** the prior (history kept), it never silently mutates the record of truth. Removal cascades links + orphan-sweeps pages. (P4) |
 | D-E | **User notes are the freely editable, additive layer**, written into the Open Brain DB. | The tethered-notes mechanism, surfaced with an in-Quartz editor. (P3) |
 | D-F | **Images are first-class** — Quartz must display them; ingestion must extract/accept them. | Comes with the content-core borrow + Quartz vault-asset handling + a widened `content_type`. (P5) |
 | D-G | **Threads = research groups = ON notebooks; M:N, non-exclusive.** Surfaced in Quartz with a thread index, per-thread pages, and membership management. | Schema already supports this; the work is the Quartz surface + UX. (P2, [§5](#5-threads--research-groups-the-core-organizing-axis)) |
-| D-H | **Podcasts use the existing local TTS/STT service** at `host.docker.internal:8000/v1` (OpenAI-compatible, several voices; STT too). Settings via a **config panel mirroring ON's UI.** | No new TTS engine decision; STT also enables audio/video source ingestion. **Podcast phase is deferred** (large feature; ON covers it meanwhile). (P6) |
+| D-H | **Podcasts use the existing local TTS/STT service** at `host.docker.internal:8000/v1` (OpenAI-compatible, several voices; STT too). Settings via a **config panel mirroring ON's UI.** | No new TTS engine decision; STT also enables audio/video source ingestion. **Podcast phase is deferred** (large feature; ON covers it meanwhile). (P7) |
 | D-I | **Storage direction: move off the current git-vault-on-volume toward a self-hosted git vault (later); Quartz 4 is the primary surface.** | Near-term: a separate `wiki-assets` volume for binaries; notes stay in the current vault but the roadmap target is a self-hosted git server. ([§9](#9-storage--the-vault-direction)) |
+| D-J | **Wiki pages are generated from the entity graph (thoughts + sources + edges), not from sources alone — so sourceless pages are *expected* for thought-only entities, not a generator bug.** Treat grounding as a *surfaced state* fixed by user-driven **deliberate source→page linking** + **upload-and-link**, and distinguish by-design sourcelessness from extraction-queue backlog. | Closes the operator-observed "many entries without sources" gap without suppressing graph-connectivity pages. ([§1.4](#14-why-wiki-pages-appear-without-sources-the-grounding-gap), P6) |
 
 Spine unchanged: Quartz already mimics Obsidian and is *already wired directly to
 Open Brain*, so this is feature development + borrowed implementations, not a new
@@ -60,7 +61,7 @@ once they're in the vault** — the gap is nothing puts them there yet (D-F).
 | Embeddings `bge-m3` 1024-dim via `llama-cpp-embed`; `match_sources()` RPC | MCP server / [init-sources.sql](OB1/docker/init-sources.sql) | ✅ |
 | Wiki compiler: change-watch (3-min debounce), notes ingest, **orphan sweep**, `POST /recompile` | [wiki-service.mjs](OB1/docker/wiki-service/wiki-service.mjs) | ✅ |
 | **Tethered notes** — `notes/<notebook>/file.md` ⇄ one thought via `metadata.note_path`, diff-based upsert/delete + extraction enqueue | `ingestNotes()` in [wiki-service.mjs](OB1/docker/wiki-service/wiki-service.mjs) | ✅ — basis for P3 |
-| **Local TTS + STT** (OpenAI-compatible, several voices) | `host.docker.internal:8000/v1` | ✅ — basis for P6 + audio ingest |
+| **Local TTS + STT** (OpenAI-compatible, several voices) | `host.docker.internal:8000/v1` | ✅ — basis for P7 + audio ingest |
 
 ### 1.3 The gaps this plan closes
 
@@ -69,7 +70,25 @@ once they're in the vault** — the gap is nothing puts them there yet (D-F).
 3. Provenance isn't surfaced on pages.
 4. **Threads have no Quartz surface** — no index, no per-thread view, no membership UI (the core organizing axis is invisible).
 5. No source edit-with-history or removal path.
-6. No podcast capability in-stack (deferred; ON covers it for now).
+6. **Many wiki pages have no sources, and there's no way to fix that from the UI** — see [§1.4](#14-why-wiki-pages-appear-without-sources-the-grounding-gap); no user path to link an existing source, or upload+link one, as a hint for the next generation.
+7. No podcast capability in-stack (deferred; ON covers it for now).
+
+### 1.4 Why wiki pages appear without sources (the grounding gap)
+
+The operator observed many wiki entries with no sources, which seems wrong if
+"wikis are generated from sources." Reading the generator settles it: **pages are
+generated from the *entity graph*, not from sources directly.**
+
+- **Candidate selection** ([generate-wiki.mjs](OB1/recipes/entity-wiki/generate-wiki.mjs) `listBatchCandidates`, ~L302–335): an entity gets a page if it has ≥ `WIKI_BATCH_MIN_LINKED` links — counting **`thought_entities` first, then `source_entities`**. So thought mentions alone qualify an entity.
+- **Source attachment** (`fetchLinkedSources`, ~L435–459, gated by `--include-sources` + `WIKI_MAX_SOURCES`): sources are joined via `source_entities!inner`. If an entity has **zero `source_entities` rows**, the page renders with **no `## Sources` section** (the system prompt omits it when nothing was cited).
+
+So a sourceless page arises three ways:
+
+1. **Thought-only entity — *by design, not a bug*.** The entity was mentioned in a captured thought (`capture_thought`) but in no source document → `thought_entities > 0`, `source_entities = 0`. The page exists so cross-entity `[[wikilinks]]` and graph nodes resolve; it legitimately has no sources. *This reads as "ungrounded" and is what the operator is mostly seeing.*
+2. **Extraction backlog / worker failure — *operational bug*.** Sources exist but `source_extraction_queue` rows are stuck `pending`/`started` or carry `last_error`, or the pre-compile drain ([wiki-service.mjs](OB1/docker/wiki-service/wiki-service.mjs) `drainWorkerQueues`, ~L280) gave up (worker unreachable). The page compiles *before* its sources are linked.
+3. **Misconfiguration — *guard against regression*.** `--include-sources` not passed or `WIKI_MAX_SOURCES=0`. The service currently passes the flag ([wiki-service.mjs](OB1/docker/wiki-service/wiki-service.mjs) ~L589/L594), so this is only a watch-for-drift case.
+
+**Implication:** "fix sourceless pages" is two jobs — (a) *distinguish* by-design (1) from backlog (2) via queue health, and (b) give the user a way to **deliberately attach a source** (existing or freshly uploaded) so thought-only pages become grounded on the next compile. Both are [Phase 6](#phase-6--source-grounding--deliberate-wiki-linking-d-j).
 
 ---
 
@@ -99,11 +118,11 @@ once they're in the vault** — the gap is nothing puts them there yet (D-F).
                           openbrain-wiki recompile → Quartz file watcher reloads
 ```
 
-`*` = deferred podcast phase (P6).
+`*` = deferred podcast phase (P7).
 
 - **`openbrain-workbench`** (Deno+Hono, `:8814`) — browser-facing read/write API, kept **off** the MCP server + cloud-gateway (limited to 8 tools) so the multipart/auth surface is isolated.
 - **`openbrain-extract`** (Python/FastAPI) — wraps `content-core`; `POST /extract` → `{ markdown, title, metadata, pages, images[] }`; OCR for scans/images.
-- **Existing TTS/STT** at `host.docker.internal:8000/v1` — STT used at import for audio/video sources (P5); TTS for podcasts (P6, deferred). No new container until P6 (and even then likely just a thin caller, not a TTS engine).
+- **Existing TTS/STT** at `host.docker.internal:8000/v1` — STT used at import for audio/video sources (P5); TTS for podcasts (P7, deferred). No new container until P7 (and even then likely just a thin caller, not a TTS engine).
 
 ### 2.2 Asset handling (images now; audio later)
 
@@ -111,7 +130,7 @@ New **`wiki-assets`** volume for binaries Quartz serves statically (decouples
 binaries from the git vault per D-I):
 
 - **Images:** extraction returns embedded images → workbench writes `assets/<source-id>/img-n.png` and rewrites source markdown to `![alt](assets/<source-id>/img-n.png)` → Quartz renders inline. Standalone image upload → a `source` (`content_type='image'`, content = OCR/caption text for embedding) with the image as its asset.
-- **Audio (P6):** `assets/podcasts/<id>.mp3`, streamed by the player.
+- **Audio (P7):** `assets/podcasts/<id>.mp3`, streamed by the player.
 - Confirm Quartz asset config in the overlay so `assets/` is served but not paginated.
 
 ### 2.3 Routing, exposure, auth
@@ -148,12 +167,21 @@ renders; an image under `assets/` renders in a page. No `sources` writes yet.
 
 ## 4. Feature phases
 
-### Phase 1 — Source Visibility & Provenance
-**Goal:** every entity/topic page shows its underlying sources (type, date, title/URL, notebook/tags) with click-through to a raw source view.
-- **Backend (read):** `GET /workbench/provenance?entity=<id>` (join `source_entities`→`sources`), cached per entity on `last_compile_iso`; `GET /workbench/sources/:id`.
-- **Compiler:** emit a provenance sidecar at compile (`<slug>.sources.json` or front-matter) so panels render with no hot-path DB hit ([generate-wiki.mjs](OB1/recipes/entity-wiki/generate-wiki.mjs), `WIKI_MAX_SOURCES`).
-- **Quartz:** `ProvenancePanel.tsx`, source-view route, wiki↔source toggle.
-- **Gate:** open any page → real sources w/ metadata → click through. No DB query on hot loads.
+### Phase 1 — Provenance: Source **and** Thought Visibility
+**Goal:** every entity/topic page surfaces its full provenance — both the **`[S:id]` external sources** *and* the **`[#id]` captured thoughts** the generator cited — with click-through from each inline citation to a read view of the underlying record.
+
+Both citation forms come straight from the generator's system prompt ([generate-wiki.mjs:556-566](OB1/recipes/entity-wiki/generate-wiki.mjs#L556-L566)): **`[#id]`** = a row in `thoughts` (the user's own captured record, linked via `thought_entities`); **`[S:id]`** = a row in `sources` (an external document, linked via `source_entities`). They are *equally* part of the provenance trail and must be treated symmetrically. In fact, because a **thought-only page** ([§1.4](#14-why-wiki-pages-appear-without-sources-the-grounding-gap), the majority of pages) has **no `[S:id]` sources at all**, resolving `[#id]` thoughts is the *higher-value* half of this phase — for those pages it is the page's entire provenance, not an add-on.
+
+- **Backend (read):**
+  - `GET /workbench/provenance?entity=<id>` — returns **both** sides: `source_entities`→`sources` (id, url, title, content_type, notebook, tags) **and** `thought_entities`→`thoughts` (id, created_at, `metadata.type`, content preview). Cached per entity on `last_compile_iso`.
+  - `GET /workbench/sources/:id` — full source record.
+  - `GET /workbench/thoughts/:id` — **NEW, the symmetry fix** — full thought record (`content`, `created_at`, `updated_at`, `metadata`) via PostgREST `thoughts?id=eq.:id`. Read-only. Thought content renders as **escaped plain text**, never executed markdown/HTML — it is untrusted user-captured data, the same "data only" stance the generator's scrub enforces ([generate-wiki.mjs:597-610](OB1/recipes/entity-wiki/generate-wiki.mjs#L597-L610)).
+- **Compiler:** emit a provenance sidecar at compile (`<slug>.provenance.json`) carrying the cited ids for **both** kinds. The generator *already assembles exactly this* — `provenance.linked_ids` + `provenance.semantic_ids` (both surface as `[#id]` thoughts) and `provenance.source_ids` (→ `[S:id]`) are built in `buildSynthesisInput` ([generate-wiki.mjs:542-544](OB1/recipes/entity-wiki/generate-wiki.mjs#L542-L544)) — so the sidecar is a dump of data the compile already holds, with **no extra DB hit and no generator prompt change**. (Both `linked` and `semantic` thoughts are cited as `[#id]`, so include *both* thought id sets, not just linked.)
+- **Quartz:**
+  - `ProvenancePanel.tsx` — two grouped lists, **Thoughts (`[#id]`)** and **Sources (`[S:id]`)**, each row linking to its read view, with per-row metadata (date + `type` for thoughts; type/url/notebook for sources).
+  - **Citation linkifier** (`.inline.ts`) — rewrites the inline `[#id]` / `[S:id]` markers the generator emitted *in the page body* into anchors that open the thought-/source-view, resolving ids against the sidecar. Unknown ids (the model cited something not in the payload) stay plain text — graceful degradation mirroring broken-`[[wikilink]]` handling. Done client-side so the raw markdown stays clean and Obsidian-portable (generator output unchanged).
+  - Thought-view + source-view routes (or modals); wiki↔source toggle.
+- **Gate:** open a **thought-only** page → its `[#id]` markers are clickable → each opens the real captured thought (content + date), rendered as inert text; open a **sourced** page → `[S:id]` markers resolve to the source view; an id the model cited but the payload didn't carry stays plain text (no broken link). No DB query on hot loads (sidecar-served).
 
 ### Phase 2 — Threads & Membership (research groups)
 *The core organizing axis — see [§5](#5-threads--research-groups-the-core-organizing-axis) for the full design.*
@@ -189,14 +217,39 @@ renders; an image under `assets/` renders in a page. No `sources` writes yet.
 - **Quartz:** `ImportDropzone.tsx` (validation, per-file progress, errors) + `ImportStatus.tsx`; thread selector reuses `MembershipPicker`.
 - **Gate:** drop a PDF, DOCX, PNG (and an MP3) → all extract/transcribe, chunk, embed, dedupe, link to the chosen thread, entity-extract, surface via P1 provenance and on the P2 thread page; images render inline; corrupt files fail clearly.
 
-### Phase 6 — Podcast Service (DEFERRED — D-B/D-H)
+### Phase 6 — Source Grounding & Deliberate Wiki Linking (D-J)
+*Closes the [§1.4](#14-why-wiki-pages-appear-without-sources-the-grounding-gap) gap. Builds on P1 (provenance), P4 (source edit options), P5 (import).*
+
+**Goal:** make a page's grounding state visible and explainable, and let the user
+**deliberately link a source — existing or freshly uploaded — to a wiki page** as
+an authoritative hint the next generation honors.
+
+- **Grounding visibility:**
+  - `ProvenancePanel` (P1) shows a grounding badge: **"N sources"** / **"thought-only — no sources yet"** / **"⏳ sources pending extraction"**.
+  - `GET /workbench/grounding` surfaces `source_extraction_queue` health (pending/started/`last_error` counts) so a **backlog** page (cause 2) is never mislabeled as **by-design** (cause 1).
+  - Compiler policy knob: **badge** thought-only pages (recommended) rather than suppress them — they still carry graph value.
+- **Deliberate source→page link (the core feature):** from the provenance panel and the P4 source editor, **"Link this source to ‹wiki page›"** writes a marked `source_entities` row — `mention_role='user_linked'`, `confidence=1.0`, `evidence='manual: <operator/when>'`, plus a `metadata` flag so re-extraction **never clobbers** it. Next compile: the entity becomes/stays a candidate and `fetchLinkedSources` includes it → the page **regenerates citing that source** and flips to "grounded". (Mirrors `thread_sources` `link_type='deliberate'`, but on the source↔entity edge that drives wiki pages.)
+- **Upload-and-link entry point:** the P5 `ImportDropzone` gains a **"link to wiki page(s) / thread"** target field, so a *new* source is ingested **and** linked to chosen entities/threads in one action → it feeds the next generation for those pages. This is exactly the "upload a new source while simultaneously linking it for wiki review/generation" path.
+- **Worker change (required):** the entity-extraction worker must **upsert without deleting `user_linked` rows** (preserve manual links across re-extraction of a source). Note in the worker + a guard test.
+- **Quartz:** `SourceLinker.tsx` (entity/page picker on a source view + in the editor), grounding badges in `ProvenancePanel`, "link targets" field in `ImportDropzone`.
+- **Scope note:** entity pages first (the common case). Topic-synthesis pages (e.g. autobiography) are generated differently — deliberate linking for those is a follow-up.
+
+**Gate:** link a source to a previously sourceless ("thought-only") page → next
+compile regenerates it with the source cited and a "grounded" badge; the manual
+link survives a re-extraction cycle; a backlog page shows "⏳ pending", not a
+false "ungrounded"; upload-and-link lands a new source already attached to its
+target page.
+
+---
+
+### Phase 7 — Podcast Service (DEFERRED — D-B/D-H)
 *Large feature; built later. **Open Notebook remains available and provides podcasts until this ships.*** Recorded here so the architecture leaves room.
 - **Generation on request, per thread:** pull the thread's sources (via `source_chunks`) → script via local Qwen (`llama-cpp`) → audio via **existing TTS** at `host.docker.internal:8000/v1` (several voices) → `assets/podcasts/<id>.mp3` + transcript.
 - **Schema (additive):** `podcasts(id, thread_id FK, title, status, audio_path, transcript, speaker_config jsonb, created_at)` — "organized by thread" for free.
 - **Settings:** a **config options panel mirroring ON's UI** (speaker count 1–4, voice selection from the TTS service, style/length). Stored per-thread or global default.
 - **Transcript → note:** reuses the P3 notes write path (editable, tethered).
 - **Quartz:** `PodcastPanel.tsx` — Podcasts section (global + per-thread) with an `<audio>` player; "Generate podcast for this thread"; "Save transcript as note".
-- **Deferral note:** because ON covers podcasts meanwhile, no `openbrain-podcast` container is built in P1–P5. When P6 starts, prefer a thin caller of the existing TTS over a heavy `podcast-creator` dependency unless multi-speaker scripting needs it.
+- **Deferral note:** because ON covers podcasts meanwhile, no `openbrain-podcast` container is built in P1–P6. When P7 starts, prefer a thin caller of the existing TTS over a heavy `podcast-creator` dependency unless multi-speaker scripting needs it.
 
 ---
 
@@ -220,7 +273,7 @@ the cross-thread suggestion worker all already exist ([§1.2](#12-what-open-brai
   - its **notes** (`notes/<thread-slug>/…`, grouped by the unified notebook=thread slug),
   - a **scoped graph** (thread node + its sources/entities, from an extended `graph.json`) and a **backlinks** panel — *this is where Quartz earns its keep*,
   - a **suggestion triage** strip (pending cross-thread links → accept/hide),
-  - later, its **podcasts** (P6).
+  - later, its **podcasts** (P7).
 - Compiler generates the page from `threads` + confirmed `thread_sources`; client components hydrate live membership actions on top.
 
 ### 5.3 Add / subtract membership — options explored (operator's Q3)
@@ -257,7 +310,8 @@ source of truth.
 | Import chunking + `source_chunks` (confirmed) | Semantic/sentence-boundary default, `bge-m3`-tuned; `source_chunks` table. | Long-doc retrieval **and** the source list podcasts build from. |
 | Images (D-F) | content-core/Pillow extracts → `assets/` → Quartz renders inline; `content_type` gains `'image'`. | Closes the no-images gap with the ingestion borrow. |
 | Audio/video sources | Transcribe via existing **STT** at `host.docker.internal:8000/v1`; `content_type='audio'`. | Reuses the local service; no new dependency. |
-| Podcast TTS (D-H) | Existing local **TTS** at `host.docker.internal:8000/v1`; settings via ON-style config panel. **Deferred (P6).** | No engine decision needed; ON covers podcasts meanwhile. |
+| Podcast TTS (D-H) | Existing local **TTS** at `host.docker.internal:8000/v1`; settings via ON-style config panel. **Deferred (P7).** | No engine decision needed; ON covers podcasts meanwhile. |
+| Wiki grounding gap (D-J) | Pages come from the entity graph; thought-only pages are sourceless by design. Surface grounding state + **deliberate source→page linking** + **upload-and-link**; distinguish backlog via queue health. | Fixes the observed "no sources" gap without suppressing graph pages (§1.4, P6). |
 | Threads (D-G) | Existing `threads`/`thread_sources` M:N; Quartz adds index + stub+live thread pages + hybrid membership (§5, §12.4). | Schema ready; only the surface is missing. |
 | Write-API home / auth | New `openbrain-workbench`, not the MCP server; single operator bearer (§12.6). | Keeps browser/multipart/auth off the limited MCP + cloud-gateway contract. |
 | Extraction engine | Python `openbrain-extract` with correctness-first per-format extractors behind a stable interface; quality acceptance gate per format (§12.3). | Faithful extraction of all listed formats over minimal footprint. |
@@ -268,14 +322,15 @@ source of truth.
 
 ## 7. File / touchpoint index
 
-- **New services:** `OB1/docker/workbench/` (Deno+Hono); `OB1/docker/extract/` (FastAPI+content-core). *(P6 later: a thin podcast caller, not necessarily its own heavy service.)*
+- **New services:** `OB1/docker/workbench/` (Deno+Hono); `OB1/docker/extract/` (FastAPI+content-core). *(P7 later: a thin podcast caller, not necessarily its own heavy service.)*
+- **Wiki generator + worker (P6):** [generate-wiki.mjs](OB1/recipes/entity-wiki/generate-wiki.mjs) (honor `user_linked` source_entities; grounding state), entity-extraction worker (upsert without clobbering `user_linked` rows), [wiki-service.mjs](OB1/docker/wiki-service/wiki-service.mjs) (queue-health endpoint feed).
 - **Compose:** [OB1/docker/docker-compose.yml](OB1/docker/docker-compose.yml) — add `openbrain-workbench`, `openbrain-extract`, `wiki-assets` volume, `host.docker.internal` reachability for STT/TTS.
 - **Recovery (required):** `scripts/emergency-recovery.ps1` + `.bat` inventory + start/stop order.
 - **Stack map (required):** [.claude/skills/stack-map/references/workspace-stacks.md](.claude/skills/stack-map/references/workspace-stacks.md).
 - **Caddy:** [config/caddy/Caddyfile](config/caddy/Caddyfile), [OB1/docker/Caddyfile](OB1/docker/Caddyfile) — `/workbench/*` + `assets/`.
-- **Quartz overlay:** `OB1/docker/wiki-viewer/quartz-overlay/` — `ProvenancePanel`, `ThreadIndex`, `ThreadPage`, `MembershipPicker`, `NotesEditor`, `SourceEditor`, `SourceRetractor`, `ImportDropzone`, `ImportStatus`, `[PodcastPanel]`, `.inline.ts`, layout/config.
-- **Wiki compiler:** [wiki-service.mjs](OB1/docker/wiki-service/wiki-service.mjs) — provenance sidecar (P1); thread-page generation + graph (P2); notes write interplay (P3); confirm orphan sweep covers hard-deletes (P4).
-- **Schema (additive only):** `source_revisions` (`init-source-revisions.sql`); widen `content_type` CHECK + `source_chunks` (`init-source-chunks.sql`); `podcasts` (P6); retraction audit in `metadata`.
+- **Quartz overlay:** `OB1/docker/wiki-viewer/quartz-overlay/` — `ProvenancePanel` (thought + source lists) + **citation linkifier** `.inline.ts` (rewrites inline `[#id]`/`[S:id]` into anchors) + thought-view & source-view routes, `ThreadIndex`, `ThreadPage`, `MembershipPicker`, `NotesEditor`, `SourceEditor`, `SourceRetractor`, `ImportDropzone`, `ImportStatus`, `[PodcastPanel]`, `.inline.ts`, layout/config.
+- **Wiki compiler:** [wiki-service.mjs](OB1/docker/wiki-service/wiki-service.mjs) — provenance sidecar `<slug>.provenance.json` carrying **both** `[#id]` thought + `[S:id]` source ids, dumped from the payload `buildSynthesisInput` already builds (P1); thread-page generation + graph (P2); notes write interplay (P3); confirm orphan sweep covers hard-deletes (P4).
+- **Schema (additive only):** `source_revisions` (`init-source-revisions.sql`); widen `content_type` CHECK + `source_chunks` (`init-source-chunks.sql`); `user_linked` rows in `source_entities` (P6, marked via `mention_role`/`metadata`); `podcasts` (P7); retraction audit in `metadata`.
 - **Search:** chunk-aware `match_sources` variant.
 
 ---
@@ -283,15 +338,18 @@ source of truth.
 ## 8. Sequencing & dependencies
 
 ```
-P0 Foundations ─┬─> P1 Provenance ─┬─> P4 Source Lifecycle (edit+retract)
-                ├─> P2 Threads ─────┼──────────────┐
-                ├─> P3 Notes ───────┘              ▼
-                └──────────────────────> P5 Import ──> [P6 Podcasts — DEFERRED]
+P0 Foundations ─┬─> P1 Provenance ─┬─> P4 Source Lifecycle (edit+retract) ─┐
+                ├─> P2 Threads ─────┤                                       ├─> P6 Grounding &
+                ├─> P3 Notes ───────┘                                       │   Deliberate Linking
+                └──────────────────────────> P5 Import ─────────────────────┘        │
+                                                                                      ▼
+                                                                        [P7 Podcasts — DEFERRED]
 ```
 
 - P0 unblocks all; P1/P2/P3 parallelize after it.
 - P4 depends on P1's source view. P5 depends on P2 (thread linking) + P0; uses P4 conventions.
-- **P6 deferred**; ON stays for podcasts until it ships → **full ON retirement happens after P6, not P5** ([§10](#10-relationship-to-iks--retiring-open-notebook)).
+- **P6** (grounding + deliberate linking) depends on P1 (provenance), P4 (source edit options), P5 (import entry point) — it stitches them together.
+- **P7 deferred**; ON stays for podcasts until it ships → **full ON retirement happens after P7, not P5** ([§10](#10-relationship-to-iks--retiring-open-notebook)).
 
 ---
 
@@ -313,9 +371,9 @@ destination: **Quartz becomes the workbench**; ON is retired **in stages**.
 
 - **Keep (built, reused):** the unified OB1 schema — `sources`, `threads`, `thread_sources`, `sessions`, `session_sources`, `find_or_create_source()`, `set_thread_source_status()`, suggestion worker. See [IMPLEMENTATION-PLAN-integrated-knowledge-system.md](documentation/implementation-guide/open%20-notebook-integration-openbrain/IMPLEMENTATION-PLAN-integrated-knowledge-system.md), [Integrated-knowledge-system-concept.md](documentation/implementation-guide/open%20-notebook-integration-openbrain/Integrated-knowledge-system-concept.md).
 - **Drop (after P5):** ON's repoint phases, its source import/notes role, SurrealDB-as-ON-store **for those functions**.
-- **Keep running until P6:** ON as the **podcast** tool. ON stays available so podcasts work during the deferral.
-- **Full decommission (after the deferred P6, gated on verification):**
-  1. Confirm P1–P6 cover ON's wanted features (provenance, threads/notebooks, notes, source edit/remove, import incl. images, **podcasts**). ON chat sessions intentionally dropped.
+- **Keep running until P7:** ON as the **podcast** tool. ON stays available so podcasts work during the deferral.
+- **Full decommission (after the deferred P7, gated on verification):**
+  1. Confirm P1–P7 cover ON's wanted features (provenance, threads/notebooks, notes, source edit/remove, import incl. images, source grounding, **podcasts**). ON chat sessions intentionally dropped.
   2. Migrate ON-only source data still in SurrealDB into OB1 `sources` via `find_or_create_source()` (one-shot).
   3. Remove `open_notebook` + `surrealdb` dep from [docker-compose.yml](docker-compose.yml), recovery scripts, stack-map, and the `:8443/:5055` Tailscale serves ([entrypoint.sh](entrypoint.sh)).
   4. Update memory: reverses the "repoint ON" direction in [three-layer-memory-stack-integration](C:\Users\yamao\.claude\projects\d--Open-WebUI-ai-stack\memory\three-layer-memory-stack-integration.md).
@@ -330,7 +388,9 @@ destination: **Quartz becomes the workbench**; ON is retired **in stages**.
 - **Three-place change convention (CLAUDE.md):** each new container updates compose **+** recovery scripts **+** stack-map together. Run `/stack-map` before/after compose edits.
 - **OB1 guard rails:** additive schema only (widening a CHECK = drop+re-add, values only added); never alter/drop existing `thoughts`/`sources` columns; no secrets in files. (OB1's "MCP servers must be remote Edge Functions" rule is the public-contribution contract; this is local infra under `OB1/docker/`, like the existing `openbrain-mcp` — keep out of upstream PR scope.)
 - **Destructive hard-delete (D-D):** irreversible + cascades (incl. `source_revisions`); require explicit confirm, show affected pages/links, audit `retracted_by`/`retracted_at`, default UI to soft. Don't expose to non-operators.
-- **`host.docker.internal` reach:** containers on `obnet` need host gateway access (Docker Desktop provides it); confirm it's reachable from the extract/workbench containers, and that the TTS/STT service is up before P5/P6 depend on it.
+- **`host.docker.internal` reach:** containers on `obnet` need host gateway access (Docker Desktop provides it); confirm it's reachable from the extract/workbench containers, and that the TTS/STT service is up before P5/P7 depend on it.
+- **Manual links surviving re-extraction (P6):** the entity worker re-runs on source fingerprint change; it must **not** delete `user_linked` `source_entities` rows or deliberate links vanish on the next ingest. Guard + test this explicitly.
+- **Don't suppress graph pages (D-J):** badging thought-only pages as "ungrounded" is fine; *removing* them would break cross-entity `[[wikilinks]]` and graph nodes. Surface, don't delete.
 - **New browser-facing write surface:** bearer auth, portal-only, validate/normalize note + asset paths (no `../` escape), cap upload size, **sandbox `openbrain-extract`** (untrusted file/image parsing = classic RCE vector; run unprivileged, no extra network).
 - **Membership confusion:** keep "remove from thread" (soft, M:N status) visually distinct from "delete source" (global, cascading) so users don't nuke a shared source when they meant to unlink it from one thread.
 - **GPU/compile churn:** large imports + recompile; STT/TTS contend with `llama-cpp` — see [llama-swap perf tuning](C:\Users\yamao\.claude\projects\d--Open-WebUI-ai-stack\memory\llama-swap-perf-tuning.md). Batch embeddings; lean on the 3-min change-watch debounce.
@@ -361,5 +421,12 @@ the `openbrain-workbench` skeleton (Deno+Hono, `:8814`, bearer auth), the Caddy
 the `wiki-assets` volume. P0 unblocks every phase and proves the
 in-Quartz-components + thin-API + extract-sidecar architecture end-to-end before
 any schema (`source_revisions`, `source_chunks`, `content_type` widening),
-extractor, or thread-surface work. Podcasts (P6) wait; ON keeps serving them in
+extractor, or thread-surface work. Podcasts (P7) wait; ON keeps serving them in
 the meantime.
+
+**Independent of the workbench build**, the [§1.4](#14-why-wiki-pages-appear-without-sources-the-grounding-gap)
+grounding gap can be triaged on the live stack right now — query
+`source_extraction_queue` for stuck/`pending`/`last_error` rows and sample a few
+sourceless entities for `source_entities` vs `thought_entities` counts — to learn
+how much of the "no sources" problem is extraction backlog (fixable now) vs
+thought-only-by-design (needs P6). Worth doing before committing P6 scope.
