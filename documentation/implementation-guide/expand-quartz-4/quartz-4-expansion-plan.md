@@ -17,10 +17,10 @@ Confirmed with the operator across two rounds.
 | D-A | **Interactive layer = in-Quartz client components.** | Preact components + client scripts in the Quartz viewer, backed by a thin write-API on Open Brain (Quartz can't write Postgres from a static page). |
 | D-B | **Borrow from Open Notebook, then retire it — but ON stays running for podcasts until that feature is ported.** | Harvest content-core (docs + **images** + OCR), the **podcast** flow (deferred), and source/notes/notebook UX into the Quartz+OB1 stack. Full ON decommission waits for the deferred podcast phase ([§10](#10-relationship-to-iks--retiring-open-notebook)). |
 | D-C | **Features, phased:** Provenance → Threads → Notes → Source Lifecycle → Import → Source-Grounding & Deliberate Linking → (deferred) Podcasts. | Each phase has its own ship gate. |
-| D-D | **Sources are added as-is, are editable with a preserved edit history, and are removable with cascade.** | An edit creates a **new version / supersedes** the prior (history kept), it never silently mutates the record of truth. Removal cascades links + orphan-sweeps pages. (P4) |
+| D-D | **Sources are added as-is, editable with preserved history, and removed via a reversible global tombstone (retained, restorable) — not destroyed by default.** | An edit snapshots the prior into `source_revisions` (history kept). "Remove" = **retract** (set `retracted_at`; the row + content survive, invisible to all wiki generation, restorable). Irreversible **purge** (`DELETE`) is a rare, explicit operator escape hatch. Per-notebook **unlink** is a separate membership flip. (P4) |
 | D-E | **User notes are the freely editable, additive layer**, written into the Open Brain DB. | The tethered-notes mechanism, surfaced with an in-Quartz editor. (P3) |
 | D-F | **Images are first-class** — Quartz must display them; ingestion must extract/accept them. | Comes with the content-core borrow + Quartz vault-asset handling + a widened `content_type`. (P5) |
-| D-G | **Threads = research groups = ON notebooks; M:N, non-exclusive.** Surfaced in Quartz with a thread index, per-thread pages, and membership management. | Schema already supports this; the work is the Quartz surface + UX. (P2, [§5](#5-threads--research-groups-the-core-organizing-axis)) |
+| D-G | **Notebook = research group = ON notebook; M:N, non-exclusive.** "**Notebook**" is the user-facing noun (UI, pages, routes); the `threads`/`thread_sources` table keeps its name **internally**. One **notebook hub page** per notebook merges synthesis + sources + notes + triage; the slug is **pinned** (renameable name). | Schema already supports membership; the work is the Quartz surface + a pinned `slug` column + folding the old `topic/` synthesis into the hub. (P2, [§5](#5-notebooks--research-groups-the-core-organizing-axis)) |
 | D-H | **Podcasts use the existing local TTS/STT service** at `host.docker.internal:8000/v1` (OpenAI-compatible, several voices; STT too). Settings via a **config panel mirroring ON's UI.** | No new TTS engine decision; STT also enables audio/video source ingestion. **Podcast phase is deferred** (large feature; ON covers it meanwhile). (P7) |
 | D-I | **Storage direction: move off the current git-vault-on-volume toward a self-hosted git vault (later); Quartz 4 is the primary surface.** | Near-term: a separate `wiki-assets` volume for binaries; notes stay in the current vault but the roadmap target is a self-hosted git server. ([§9](#9-storage--the-vault-direction)) |
 | D-J | **Wiki pages are generated from the entity graph (thoughts + sources + edges), not from sources alone — so sourceless pages are *expected* for thought-only entities, not a generator bug.** Treat grounding as a *surfaced state* fixed by user-driven **deliberate source→page linking** + **upload-and-link**, and distinguish by-design sourcelessness from extraction-queue backlog. | Closes the operator-observed "many entries without sources" gap without suppressing graph-connectivity pages. ([§1.4](#14-why-wiki-pages-appear-without-sources-the-grounding-gap), P6) |
@@ -42,10 +42,12 @@ serving static HTML it rebuilds from markdown:
 - [OB1/docker/wiki-viewer/entrypoint.sh](OB1/docker/wiki-viewer/entrypoint.sh) — symlinks `/wiki` → `/quartz/content`, patches `ignorePatterns`, then `npx quartz build --serve --port 8080`.
 - [OB1/docker/docker-compose.yml](OB1/docker/docker-compose.yml) — on `obnet` + `app-net`, `127.0.0.1:8812:8080`, public via the Caddy/Tailscale portal.
 
-Vault = a **git repo on the `openbrain-wiki-data` volume**: compiler-owned
-`content/` (entity/topic pages, `entities.md`, `graph.json`), human-owned
-`notes/`, and `index.md`. Quartz renders standard markdown, so **images display
-once they're in the vault** — the gap is nothing puts them there yet (D-F).
+Vault = a **git repo on the `openbrain-wiki-data` volume**, two ownership layers:
+- **`content/`** — **compiler-owned**, regenerated every compile, never hand-edited: entity pages (+ P1 `thought/`/`source/` leaves), `entities.md`, `graph.json`, and — post-P2 — the **notebook hub pages** (`content/notebook/<slug>.md`, which absorb the old `topic/` synthesis).
+- **`notes/`** — the **authored** layer the compiler is forbidden to write ([wiki-service.mjs:132-140](OB1/docker/wiki-service/wiki-service.mjs#L132-L140)). Authored by **humans *and* AI assistants** (research pipelines, Open WebUI, other chat services emit notes here for the human to build on); each note tethers to one thought via `ingestNotes()`. Note provenance (`metadata.source = user_note | ai_note`, plus which agent) distinguishes them.
+- **`index.md`** — vault-root home.
+
+Quartz renders standard markdown, so **images display once they're in the vault** — the gap is nothing puts them there yet (D-F).
 
 ### 1.2 What Open Brain already gives us (the foundation)
 
@@ -68,7 +70,7 @@ once they're in the vault** — the gap is nothing puts them there yet (D-F).
 1. No browser write path (upload, note authoring, source edit/remove, thread membership, podcast request).
 2. PDF/DOCX/PPTX text + **image** extraction is a stub.
 3. Provenance isn't surfaced on pages.
-4. **Threads have no Quartz surface** — no index, no per-thread view, no membership UI (the core organizing axis is invisible).
+4. **Notebooks have no Quartz surface** — no index, no hub page, no membership UI (the core organizing axis is invisible).
 5. No source edit-with-history or removal path.
 6. **Many wiki pages have no sources, and there's no way to fix that from the UI** — see [§1.4](#14-why-wiki-pages-appear-without-sources-the-grounding-gap); no user path to link an existing source, or upload+link one, as a hint for the next generation.
 7. No podcast capability in-stack (deferred; ON covers it for now).
@@ -98,8 +100,8 @@ So a sourceless page arises three ways:
 
 ```
         ┌──────────────────── Quartz viewer (static + hydrated) ─────────────────────┐
-        │ ProvenancePanel  ThreadIndex/ThreadPage  MembershipPicker  NotesEditor      │
-        │ SourceEditor(versioned)  SourceRetractor  ImportDropzone  [PodcastPanel*]   │
+        │ ProvenancePanel  NotebookIndex/NotebookPage  MembershipPicker  NotesEditor  │
+        │ SourceEditor(versioned)  SourceRetractor  SourceLinker  ImportDropzone      │
         └───────────────┬─────────────────────────────────────────────────────────────┘
                         │  fetch()  (same-origin /workbench/* via Caddy)
                         ▼
@@ -194,67 +196,102 @@ Both citation forms come from the generator's system prompt ([generate-wiki.mjs:
 - **Backend (read) — not required in P1:** the static leaf pages serve the read view, so P1 needs **no** workbench endpoint on its hot path. `GET /workbench/thoughts/:id` / `…/sources/:id` are still built for the **write/live** phases (P4 edit, P6 linking) but aren't a P1 dependency — **P1 is essentially a compiler-only feature.**
 - **Gate:** open a **thought-only** page → its `[#id]` markers are real links → hover shows a native popover of the captured thought, click navigates to its `thought/<id>` leaf (showing "cited by" backlinks); a **sourced** page → `[S:id]` does the same to a `source/<id>` leaf; an uncited/unknown id stays plain text (no broken link); after a citation is removed, the next compile sweeps the now-orphan leaf. Behavior is indistinguishable from any `[[wikilink]]`.
 
-### Phase 2 — Threads & Membership (research groups)
-*The core organizing axis — see [§5](#5-threads--research-groups-the-core-organizing-axis) for the full design.*
-**Goal:** surface threads as the notebook layer — a thread index, per-thread pages (sources + provenance + notes + scoped graph + suggestion triage), and add/subtract membership (M:N, non-exclusive).
-- **Backend:** thread CRUD (`GET/POST/PATCH /workbench/threads`), `POST /workbench/threads/:id/sources` (link via `link_source_to_thread`), `DELETE` (subtract via `set_thread_source_status → hidden`), suggestion triage (`accept`/`hide`).
-- **Compiler:** generate `content/thread/<slug>.md` per active thread from `threads` + `thread_sources(status=confirmed)`; thread nodes into `graph.json`.
-- **Quartz:** `ThreadIndex.tsx`, `ThreadPage.tsx`, `MembershipPicker.tsx` (+ `.inline.ts`); backlinks/graph leveraged (see §5).
-- **Gate:** create a thread, add a source from two different threads (proves non-exclusive), subtract it from one (still in the other), accept a worker suggestion — all reflected on the thread page after recompile.
+### Phase 2 — Notebooks & Membership (research groups)
+*The core organizing axis — see [§5](#5-notebooks--research-groups-the-core-organizing-axis) for the full design.*
+**Goal:** surface **notebooks** (user-facing name for `threads` rows) as the organizing layer — a notebook index, one **notebook hub page** per notebook, and add/subtract membership (M:N, non-exclusive).
 
-### Phase 3 — User Notes System (editable, additive — D-E)
-**Goal:** author Obsidian-style notes **in Quartz** (live preview, `[[wikilinks]]`, tags, notebook=thread grouping), written additively into OB1.
-- **Reuse:** `ingestNotes()` already maps `notes/<notebook>/file.md` ⇄ a thought; we add the **browser editor that writes those files**. Align `notebook` folder = thread slug so notes group under threads ([§5](#5-threads--research-groups-the-core-organizing-axis)).
-- **Backend:** `PUT/GET /workbench/notes/<path>` (path validated under `notes/`, write+`git commit`, optimistic concurrency via content-hash/`If-Match`); notes index.
-- **Quartz:** `NotesEditor.tsx` + `.inline.ts` — editor, `[[…]]` autocomplete from `entities.md` + notes/thread index, tags.
+- **Naming:** user-facing surfaces (pages, UI labels, routes) say **"Notebook"**; the persistence layer keeps `threads`/`thread_sources` (a renaming of a live table with a suggestion worker + sessions FK pointed at it buys nothing). One documented seam: *a Notebook **is** a `threads` row.*
+- **Schema (additive — pin the slug):** `ALTER TABLE public.threads ADD COLUMN IF NOT EXISTS slug TEXT;` + `CREATE UNIQUE INDEX IF NOT EXISTS uq_threads_slug ON public.threads(slug);`. The workbench generates the slug **once at create time** (shared slug module §14.1), de-collides on the `UNIQUE` violation (`-1/-2`, mirroring [`resolveOutputPath`](OB1/recipes/entity-wiki/generate-wiki.mjs#L815)), and **never recomputes it** — rename touches `name` only, and the hub page emits `aliases: [name]` so `[[Notebook Display Name]]` keeps resolving. (Same pin-for-life contract entity `wiki_slug` has.)
+- **One hub page per notebook (folds in the old `topic/`):** the compiler emits `content/notebook/<slug>.md` carrying **(1)** a `## Synthesis` section — the existing notebook synthesis ([synthesize-notebooks.mjs](OB1/recipes/wiki-synthesis/scripts/synthesize-notebooks.mjs)) writes *here* instead of a separate `topic/<slug>.md`; **(2)** `## Sources` (`thread_sources.status=confirmed`, with P1 provenance); **(3)** `## Notes` listing/linking `notes/<slug>/*`; **(4)** a `## Suggestions` triage strip; plus a scoped graph + backlinks. This is the discovery hub — opening it surfaces the user's own `notes/<slug>/` folder, and every note backlinks `[[notebook/<slug>]]` (see [§5.2](#52-how-notebooks-appear-in-quartz)).
+- **Backfill (unifies the two notebook populations):** for every distinct `metadata.notebook` string on a source/thought with **no matching `threads` row**, the compiler auto-creates one (slug pinned). Guarantees every notebook — whether born from a research run's free-text tag or a user-created `notes/` folder — has exactly one discoverable hub. No hidden parallel notebooks.
+- **Backend:** notebook CRUD (`GET/POST/PATCH /workbench/notebooks` → `threads`), `POST /workbench/notebooks/:id/sources` (link via `link_source_to_thread`), `DELETE` (unlink via `set_thread_source_status → hidden`), suggestion triage (`accept`/`hide`).
+- **Compiler:** generate `content/notebook/<slug>.md` per active notebook from `threads` + `thread_sources(status=confirmed)` + backfill; notebook nodes into `graph.json`. Add `notebook/` to the `listEntityFiles` sweep skip-list (it has its own kept-set, like `topic/` did).
+- **Quartz:** `NotebookIndex.tsx`, `NotebookPage.tsx`, `MembershipPicker.tsx` (+ `.inline.ts`); backlinks/graph leveraged (see §5).
+- **Gate:** create a notebook (slug pinned), rename it (page + links survive), add a source from two notebooks (proves non-exclusive), unlink from one (still in the other), accept a worker suggestion, and confirm a hand-created `notes/<slug>/` folder shows under the hub's `## Notes` — all reflected after recompile.
+
+### Phase 3 — Notes System (authored layer: human + AI — D-E)
+**Goal:** author Obsidian-style notes **in Quartz** (live preview, `[[wikilinks]]`, tags, notebook grouping), written additively into OB1 — and accept notes **emitted by AI assistants** (research pipelines, Open WebUI, other chat services) into the same layer for the human to build on.
+- **Reuse:** `ingestNotes()` already maps `notes/<notebook>/file.md` ⇄ a thought; we add the **browser editor that writes those files**. Align the `notes/<notebook>/` folder = the pinned **notebook slug** so notes group under their notebook hub ([§5](#5-notebooks--research-groups-the-core-organizing-axis)).
+- **AI notes from Open WebUI research chats (the concrete case):** OWUI conversations are where much of the research that *derives sources* happens; the **synthesized response of a research chat is an AI note on its subject**. P3 lets those synthesized responses land as `ai_note`s **attached to the relevant notebook** (`notes/<notebook-slug>/…`), so a notebook accumulates both the user's hand notes and the assistant's synthesis on that subject. (A small OWUI→workbench `PUT /workbench/notes` hand-off writes the synthesis into the notebook folder; the existing notes ingest tethers it.)
+- **Provenance:** stamp `metadata.source = user_note | ai_note` (+ originating agent/chat for AI notes) so the hub and search can distinguish human vs assistant authorship; both tether to thoughts identically.
+- **Backend:** `PUT/GET /workbench/notes/<path>` (path validated under `notes/` — one shared no-`../`-escape validator per §14.3, write+`git commit`, optimistic concurrency via content-hash/`If-Match`); notes index. AI-emitted notes use the **same write path** (one ingestion surface, not a parallel one).
+- **Quartz:** `NotesEditor.tsx` + `.inline.ts` — editor, `[[…]]` autocomplete from `entities.md` + the notebook index (so authors pick an **existing** notebook rather than fat-finger a near-duplicate slug), tags.
 - **Decision (idea-doc Q1):** notes stay in the `notes/` layer tethered to thoughts — not a separate `user_notes` collection.
-- **Gate:** create/edit a note → appears in vault, links resolve, next compile tethers + extracts; two-session conflict detected.
+- **Gate:** create/edit a note (human and AI-authored) → appears in vault under its notebook, links resolve, next compile tethers + extracts and the note shows under the notebook hub's `## Notes`; two-session conflict detected.
 
-### Phase 4 — Source Lifecycle: Edit-with-history + Retraction (D-D)
-**Goal:** sources are added as-is but the user can **edit them (history preserved)** and **remove them (cascade)**.
-- **Edit, versioned (the "replacement / updated source" model):** an edit snapshots the prior content into an append-only **`source_revisions(source_id, revision, content, title, edited_at, edited_by)`**, then updates `sources.content` to the new version (current = head; history = revisions). Re-embed is automatic via the existing fingerprint-gated queue trigger; metadata-only edits must not bump the content fingerprint. The source view shows version history + diff. *(This supersedes the earlier "read-only, no edits" stance.)*
-- **Remove, two-tier:**
-  - **Soft (reversible):** subtract from a thread = `set_thread_source_status → hidden/inactive` (source survives in other threads — distinct from deletion; see §5).
-  - **Hard (operator-confirmed, irreversible):** `DELETE FROM sources` → `source_entities`/`thread_sources`/`session_sources`/`source_revisions` cascade → next compile's orphan sweep removes unsupported pages.
-- **Backend:** `PATCH /workbench/sources/:id` (versioned edit), `GET …/revisions`, `POST …/:id/retract {mode: hide|delete, scope: thread|global}`, restore.
-- **Quartz:** `SourceEditor.tsx` (inline editor + version history/diff), `SourceRetractor.tsx` (hide-from-thread vs delete-permanently, confirm dialog showing affected pages/links).
-- **Gate:** edit a source → new revision recorded, old preserved, re-embed enqueued, dependent pages refresh; hard-delete cascades + sweeps; delete always needs explicit confirmation.
+### Phase 4 — Source Lifecycle: Edit-with-history + Retract/Restore (D-D)
+**Goal:** sources are added as-is but the user can **edit them (history preserved)** and **remove them reversibly (retain + restore)** — removal must not contaminate future wiki generation, but the data is kept so the user can bring a source back later.
+- **Edit, versioned:** an edit snapshots the prior content into an append-only **`source_revisions(source_id, revision, content, title, edited_at, edited_by)`**, then updates `sources.content` to the new version (current = head; history = revisions). Re-embed is automatic via the existing fingerprint-gated queue trigger; metadata-only edits must not bump the content fingerprint. The source view shows version history + diff.
+- **Three distinct removal verbs (keep them visually separate so the user never confuses scope):**
+  1. **Unlink from notebook** (membership, per-notebook) — `set_thread_source_status → hidden`. Source stays in its other notebooks and in generation. *Not* a deletion.
+  2. **Retract** (global, **reversible — the default "remove"**) — additive `sources.retracted_at TIMESTAMPTZ` + `retracted_by TEXT`. The **row and content are retained and restorable**, but the source becomes **invisible to all wiki generation/linking** so it can't contaminate future generations. **Restore** = clear `retracted_at`; its `source_entities`/`thread_sources` rows are still intact, so it lights straight back up.
+  3. **Purge** (global, **irreversible**) — `DELETE FROM sources` → `source_entities`/`thread_sources`/`session_sources`/`source_revisions`/`source_chunks` cascade → orphan sweep removes unsupported pages + assets. A rare, explicit operator escape hatch, **not** the normal remove.
+- **⚠️ Tombstone filtering — every generation read-path must exclude `retracted_at IS NULL` (audit; miss one and tombs resurface):**
+  - `fetchLinkedSources` ([generate-wiki.mjs:435](OB1/recipes/entity-wiki/generate-wiki.mjs#L435)) — the main source→page join
+  - `listBatchCandidates` source-count ([generate-wiki.mjs:324](OB1/recipes/entity-wiki/generate-wiki.mjs#L324)) — so a tomb can't keep a page alive
+  - `match_sources` + new `match_source_chunks` RPCs ([init-sources.sql:78](OB1/docker/init-sources.sql#L78)) — `AND s.retracted_at IS NULL`
+  - notebook synthesis source pulls ([synthesize-notebooks.mjs](OB1/recipes/wiki-synthesis/scripts/synthesize-notebooks.mjs))
+  - P1 source-leaf emission + the leaf-sweep (a retracted source's `source/<uuid>` leaf is swept)
+  - the extraction queue (don't re-extract a tomb — it must stop producing fresh `source_entities`)
+  - *This list is the P4 regression-test checklist.*
+- **Backend:** `PATCH /workbench/sources/:id` (versioned edit), `GET …/revisions`, `POST …/:id/retract {scope: notebook|global}` (notebook→status flip, global→`retracted_at`), `POST …/:id/restore`, `DELETE …/:id` (purge, operator-confirmed).
+- **Quartz:** `SourceEditor.tsx` (inline editor + version history/diff), `SourceRetractor.tsx` (unlink-from-notebook vs retract-globally vs purge, confirm dialog showing affected pages/links; default to retract, purge gated behind explicit confirm).
+- **Gate:** edit → new revision recorded, old preserved, re-embed enqueued, dependent pages refresh; **retract → the source vanishes from every generation read-path but the row survives; restore → it returns with links intact**; purge cascades + sweeps; purge always needs explicit confirmation.
 
 ### Phase 5 — Direct Source Import Pipeline (incl. images — D-F)
 **Goal:** drag-and-drop / picker upload of PDF, DOC/DOCX, PPT/PPTX, MD, TXT, **images** (and **audio/video** via STT) → extract → chunk → embed → land as first-class sources, linked to a chosen thread, with progress + errors; images render in Quartz.
-- **`openbrain-extract` sidecar (correctness-first, all formats — §12.3):** stable `POST /extract` → `{ markdown, title, metadata, pages, images[] }` with best-of-breed per-format extractors (PDF: PyMuPDF/Docling-class; DOCX/PPTX: python-docx/-pptx; images: Pillow+Tesseract OCR; audio/video: STT at `host.docker.internal:8000/v1`); content-core where it extracts most faithfully. **Per-format extraction-quality acceptance gate** (text fidelity, tables, headings, image refs). Add to compose **+ recovery + stack-map**.
-- **Workbench `POST /workbench/import` (async):** store upload → extract → write images to `assets/<source-id>/` + rewrite refs → chunk (semantic/sentence-boundary default, fixed+overlap fallback, `bge-m3`-tuned) → embed → `find_or_create_source()` (dedup) → `link_source_to_thread(..., 'deliberate')` to the selected thread → `job_id`; `GET /workbench/jobs/:id` for progress.
-- **Schema (additive — §12.2):** widen the `content_type` CHECK and **`source_chunks`** + a chunk search RPC. Two corrections from the audit:
-  - **Reconcile the CHECK with the import format list.** The live CHECK ([init-sources.sql:27-30](OB1/docker/init-sources.sql#L27-L30)) is `web_article,pdf,youtube_transcript,podcast_transcript,paper,manual,research_synthesis`. The import set (PDF, DOC/DOCX, PPT/PPTX, MD, TXT, images, audio/video) introduces types with **no enum value** — `docx,pptx,image,audio` plus `txt,md` (and legacy `doc,ppt`). Either add **all** of them to the CHECK or pin an explicit mapping (e.g. `txt`/`md`→`manual`, `doc`→`docx`, `ppt`→`pptx`). `pdf` already exists. A TXT/MD upload that maps to no allowed value will fail the CHECK at insert — pick the mapping now.
-  - **`source_chunks(source_id UUID, idx INT, content TEXT, embedding VECTOR(1024), PRIMARY KEY(source_id, idx))`** (confirmed — long-doc retrieval *and* the source list podcasts build from), `source_id … REFERENCES sources(id) ON DELETE CASCADE`. Name the search RPC explicitly **`match_source_chunks`** (don't overload `match_sources`, which returns source-level rows — see [init-sources.sql:78](OB1/docker/init-sources.sql#L78)).
-- **Quartz:** `ImportDropzone.tsx` (validation, per-file progress, errors) + `ImportStatus.tsx`; thread selector reuses `MembershipPicker`.
-- **Gate:** drop a PDF, DOCX, PNG (and an MP3) → all extract/transcribe, chunk, embed, dedupe, link to the chosen thread, entity-extract, surface via P1 provenance and on the P2 thread page; images render inline; corrupt files fail clearly.
+- **`openbrain-extract` sidecar (correctness-first, all formats — §12.3) — built to expand:** stable `POST /extract` → `{ markdown, title, metadata, pages, images[] }` over a **format→extractor registry** (PDF: PyMuPDF/Docling-class; DOCX/PPTX: python-docx/-pptx; images: Pillow+Tesseract OCR; audio/video: STT at `host.docker.internal:8000/v1`; content-core where it extracts most faithfully). The registry shape matters: **a future format (epub, html, eml, spreadsheets…) is a new registry entry behind the unchanged `/extract` contract, not a caller change** (the import pipeline, workbench, and Quartz never learn about new formats). **Per-format extraction-quality acceptance gate** (text fidelity, tables, headings, image refs). Add to compose **+ recovery + stack-map**.
+- **Workbench `POST /workbench/import` (async, transactional):** store upload → extract → write images to `assets/<source-id>/` + rewrite refs → chunk (semantic/sentence-boundary default, fixed+overlap fallback, `bge-m3`-tuned) → embed → `find_or_create_source()` (dedup) → `link_source_to_thread(..., 'deliberate')` to the selected notebook → `job_id`; `GET /workbench/jobs/:id` for progress. Source + chunks + links land in **one deno-postgres transaction** (§14.5) so a mid-sequence failure can't leave a source with no chunks/links.
+- **Schema (additive — §12.2):** a `content_types` reference table, **`source_chunks`**, a chunk search RPC, and durable **`import_jobs`**:
+  - **`content_type` → reference table (not a CHECK), for expandability.** Replace the inline CHECK ([init-sources.sql:27-30](OB1/docker/init-sources.sql#L27-L30)) with `content_types(value TEXT PRIMARY KEY, label TEXT, category TEXT, created_at TIMESTAMPTZ DEFAULT now())` and an FK `sources.content_type → content_types(value)`. A new format becomes **one `INSERT`, no DDL**. Migration order on the **live** DB matters: create table → **seed every value already in `sources`** (the existing 7) **+ the new ones** (`docx,pptx,image,audio,txt,md`) → drop the old CHECK → add the FK (FK-add fails if any existing value is unseeded). `find_or_create_source`'s `'web_article'` default stays valid.
+  - **`source_chunks(source_id UUID, idx INT, content TEXT, embedding VECTOR(1024), PRIMARY KEY(source_id, idx))`** (confirmed — long-doc retrieval *and* the source list podcasts build from), `source_id … REFERENCES sources(id) ON DELETE CASCADE`. Search RPC named **`match_source_chunks`** (don't overload `match_sources` — [init-sources.sql:78](OB1/docker/init-sources.sql#L78)).
+  - **`import_jobs(id, status, source_id, target_entity_ids, target_notebook, error, created_at, updated_at)`** (§14.4) — persists job state so a workbench restart doesn't orphan in-flight imports, backs `ImportStatus.tsx` history, and (per P6) records the **target links + terminal error** of an upload-and-link / grounding attempt for the later alerts surface.
+- **Quartz:** `ImportDropzone.tsx` (validation, per-file progress, errors) + `ImportStatus.tsx`; notebook selector reuses `MembershipPicker`.
+- **Gate:** drop a PDF, DOCX, PNG (and an MP3) → all extract/transcribe, chunk, embed, dedupe, link to the chosen notebook, entity-extract, surface via P1 provenance and on the P2 notebook hub; images render inline; corrupt files fail clearly.
 
 ### Phase 6 — Source Grounding & Deliberate Wiki Linking (D-J)
 *Closes the [§1.4](#14-why-wiki-pages-appear-without-sources-the-grounding-gap) gap. Builds on P1 (provenance), P4 (source edit options), P5 (import).*
 
-**Goal:** make a page's grounding state visible and explainable, and let the user
-**deliberately link a source — existing or freshly uploaded — to a wiki page** as
-an authoritative hint the next generation honors.
+**Goal:** turn a **thought-only page** (a "mental model" resting solely on the
+user's captured beliefs) into a **source-grounded entity** by attaching a source
+*from the page being read*, regenerating it so source-backed facts carry the
+claims and the prior beliefs are reframed as unverified.
 
-- **Grounding visibility:**
-  - `ProvenancePanel` (P1) shows a grounding badge: **"N sources"** / **"thought-only — no sources yet"** / **"⏳ sources pending extraction"**.
-  - `GET /workbench/grounding` surfaces `source_extraction_queue` health (pending/started/`last_error` counts) so a **backlog** page (cause 2) is never mislabeled as **by-design** (cause 1).
-  - Compiler policy knob: **badge** thought-only pages (recommended) rather than suppress them — they still carry graph value.
-- **Deliberate source→page link (the core feature):** from the provenance panel and the P4 source editor, **"Link this source to ‹wiki page›"** writes a marked `source_entities` row. Next compile: the entity becomes/stays a candidate and `fetchLinkedSources` includes it → the page **regenerates citing that source** and flips to "grounded". (Mirrors `thread_sources` `link_type='deliberate'`, but on the source↔entity edge that drives wiki pages.)
+> **Conceptual frame (so the mechanism is unambiguous):** a wiki page is an
+> **entity** synthesized from many thoughts/edges/sources — not a single thought.
+> "Grounding" attaches a source to **that entity**; regeneration re-synthesizes the
+> whole page, now able to assert source-backed facts and demote the earlier
+> belief. *Example:* "Project Aurora" is thought-only and says *"launches Q2"* (your
+> belief). You ground it with the project doc (*"launches Q3"*); regeneration →
+> the page asserts **"Launches Q3 [S:doc]"** and the *Q2* belief is shown as a
+> superseded assumption. The **evolution** view records the transition.
+
+- **Grounding state is LIVE, read at the moment of reading (hydrated, not baked):** because the user is reading the page *right now*, the badge must reflect the true current state, accurate between compiles. The in-Quartz component hydrates from the workbench and shows one of:
+  - **"Mental model — thought-only"** (no sources; rests on beliefs),
+  - **"⏳ Grounding pending"** (a source is linked/ingesting; page not yet regenerated),
+  - **"Grounded by N source(s)"** (regenerated and citing ≥1 source),
+  - **"⚠ Ingest failed"** (a grounding attempt failed — see failure handling below).
+  - `GET /workbench/grounding` also surfaces `source_extraction_queue` health so a **backlog** page (§1.4 cause 2) is never mislabeled as **by-design** (cause 1).
+  - Compiler policy: **badge** thought-only pages, never suppress them — they still carry graph value (D-J).
+- **Ground-from-the-page (the core feature):** on the live wiki page the user sees **"Provide grounding with a new source"** and supplies **a document (upload) or a URL (ingest)**. The source is ingested (reusing the P5 import pipeline) and linked to **this page's entity** — a marked `source_entities` row (entity-level grounding; this is distinct from notebook-level `thread_sources` membership, which is P2). On success the entity is marked to regenerate; `fetchLinkedSources` includes the new source → the page **regenerates and flips to "Grounded."**
+  - **Generation policy on a grounded page (decision: sources = facts, thoughts = demoted, not deleted):** once the page has ≥1 source, the regenerated page lets **sources carry the asserted facts** and reframes the thought-derived claims under a clearly-labeled *"Working hypotheses / unverified"* framing rather than dropping them. This honors "the original belief is a mental model no longer valid" **without** destroying information — important because thought-only entities (with possibly many thoughts) are the majority of pages (§1.4). *(Not the lossy "suppress thoughts entirely" variant.)*
   - **⚠️ Schema reality (audit):** `source_entities` ([init-source-graph.sql:27-35](OB1/docker/init-source-graph.sql#L27-L35)) has columns `source_id, entity_id, mention_role, confidence, evidence, created_at` and **PK `(source_id, entity_id)`** — there is **no `metadata` column**, so "plus a `metadata` flag" as written is impossible. Two additive fixes, both in scope under the additive-only guardrail:
     1. **Marker:** `mention_role='user_linked'`, `confidence=1.0`, `evidence='manual:<operator>@<iso8601>'`. Optionally `ALTER TABLE public.source_entities ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}'::jsonb` if a richer flag is wanted — but `mention_role` alone suffices and avoids a column.
     2. **PK-collision decision (must be stated):** because the PK is `(source_id, entity_id)`, a manual `user_linked` row and an auto `mentioned` row for the **same pair cannot coexist**. Policy: **`user_linked` wins** — the worker's re-extraction upsert must `ON CONFLICT (source_id,entity_id) DO NOTHING` (or merge) when the existing row is `user_linked`, never overwriting the manual mention_role back to `mentioned`.
-- **Upload-and-link entry point:** the P5 `ImportDropzone` gains a **"link to wiki page(s) / thread"** target field, so a *new* source is ingested **and** linked to chosen entities/threads in one action → it feeds the next generation for those pages. This is exactly the "upload a new source while simultaneously linking it for wiki review/generation" path.
-- **Worker change (required):** the entity-extraction worker must **upsert without deleting `user_linked` rows** (preserve manual links across re-extraction of a source). Note in the worker + a guard test.
-- **Quartz:** `SourceLinker.tsx` (entity/page picker on a source view + in the editor), grounding badges in `ProvenancePanel`, "link targets" field in `ImportDropzone`.
-- **Scope note:** entity pages first (the common case). Topic-synthesis pages (e.g. autobiography) are generated differently — deliberate linking for those is a follow-up.
+- **Failure handling (ingest can fail — bad URL, unparseable doc):** on failure, **do not regenerate the entity** (nothing new to cite). Instead the live component marks the attempt on the page **client-side** (the "⚠ Ingest failed" state, hydrated — no recompile), and the failure is recorded durably in `import_jobs` (terminal `status=failed` + `error` + `target_entity_ids`). That captured data feeds a later **alerts/indicator surface** (a "grounding attempts that failed" list) — *capture now, surface later*; only a **successful** ingest triggers the entity's regeneration.
+- **Evolution / timeline (P6b — derive, don't snapshot):** the entity's grounding history is **derived for free** from existing timestamps — each `source_entities.created_at` (when each grounding source attached) plus the entity's first-seen — rendered as a `## Evolution` section, complemented by the **vault's git history** (every compile is a commit, so each page already carries a full diff trail). **No new storage.** This works on **today's** vault git (the `openbrain-wiki-data` volume repo) **right now** — it does **not** depend on the self-hosted git server, which isn't built yet; when D-I later migrates the vault to a locally-owned git host ([§9](#9-storage--the-vault-direction)) the same derivation keeps working unchanged. *(Per-version page-body snapshots are deferred future scope.)*
+- **Upload-and-link entry point:** the same flow is also reachable from the P5 `ImportDropzone` with a **"link to wiki page(s) / notebook"** target field, so a *new* source is ingested **and** linked to chosen entities/notebooks in one action.
+- **Worker change (required):** the entity-extraction worker must **not delete `user_linked` `source_entities` rows** on re-extraction (see [§11](#11-risks--guardrails) for the concrete `index.ts:748` change + the `user_linked`-wins PK policy). Guard + test: a re-extraction cycle must leave the manual link intact.
+- **Quartz:** `SourceLinker.tsx` (entity/page picker on a source view + in the editor), the live grounding-state badge + `## Evolution` in `ProvenancePanel`, "Provide grounding with a new source" on the entity page, "link targets" field in `ImportDropzone`.
+- **Scope note:** entity pages first (the common case). Notebook-hub synthesis pages (e.g. autobiography) are generated differently — grounding for those is a follow-up.
 
-**Gate:** link a source to a previously sourceless ("thought-only") page → next
-compile regenerates it with the source cited and a "grounded" badge; the manual
-link survives a re-extraction cycle; a backlog page shows "⏳ pending", not a
-false "ungrounded"; upload-and-link lands a new source already attached to its
-target page.
+**Gate:** from a thought-only page, "provide grounding" with a URL/doc → it
+ingests, links to the entity, the page regenerates citing it with sources-as-facts
+/ thoughts demoted, and the badge flips **Mental model → Grounded**; a **failed**
+ingest shows "⚠ Ingest failed" on the page **without** recompiling it and lands a
+`failed` `import_jobs` row; the manual link survives a re-extraction cycle; a
+backlog page shows "⏳ pending", not a false "ungrounded"; the `## Evolution`
+section shows the grounding transition.
 
 ---
 
@@ -262,55 +299,77 @@ target page.
 *Large feature; built later. **Open Notebook remains available and provides podcasts until this ships.*** Recorded here so the architecture leaves room.
 - **Generation on request, per thread:** pull the thread's sources (via `source_chunks`) → script via local Qwen (`llama-cpp`) → audio via **existing TTS** at `host.docker.internal:8000/v1` (several voices) → `assets/podcasts/<id>.mp3` + transcript.
 - **Schema (additive):** `podcasts(id, thread_id FK, title, status, audio_path, transcript, speaker_config jsonb, created_at)` — "organized by thread" for free.
-- **Settings:** a **config options panel mirroring ON's UI** (speaker count 1–4, voice selection from the TTS service, style/length). Stored per-thread or global default.
+- **Settings:** a **config options panel mirroring ON's UI** (speaker count 1–4, voice selection from the TTS service, style/length). Stored per-notebook or global default.
 - **Transcript → note:** reuses the P3 notes write path (editable, tethered).
-- **Quartz:** `PodcastPanel.tsx` — Podcasts section (global + per-thread) with an `<audio>` player; "Generate podcast for this thread"; "Save transcript as note".
+- **Quartz:** `PodcastPanel.tsx` — Podcasts section (global + per-notebook) with an `<audio>` player; "Generate podcast for this notebook"; "Save transcript as note".
 - **Deferral note:** because ON covers podcasts meanwhile, no `openbrain-podcast` container is built in P1–P6. When P7 starts, prefer a thin caller of the existing TTS over a heavy `podcast-creator` dependency unless multi-speaker scripting needs it.
 
 ---
 
-## 5. Threads / research groups — the core organizing axis
+## 5. Notebooks / research groups — the core organizing axis
 
-*Answers the operator's questions on how threads are organized and how membership is managed.*
+*Answers the operator's questions on how notebooks are organized and how membership is managed. "**Notebook**" is the user-facing noun; the backing table is `threads`/`thread_sources` (see [Phase 2](#phase-2--notebooks--membership-research-groups)).*
 
 ### 5.1 Model (already in the DB — D-G)
 
-A **thread = a research group = an ON notebook**: a named grouping of relatable
-information. Membership lives in `thread_sources` as an **M:N join**, so a source
-is **non-exclusive** — it can sit in many threads at once (linking, not
-ownership), exactly like ON. Threads, the link primitives, soft-status flips, and
-the cross-thread suggestion worker all already exist ([§1.2](#12-what-open-brain-already-gives-us-the-foundation)); the work is the Quartz surface.
+A **notebook = a research group = an ON notebook**: a named grouping of relatable
+information, persisted as a `threads` row. Membership lives in `thread_sources` as
+an **M:N join**, so a source is **non-exclusive** — it can sit in many notebooks at
+once (linking, not ownership), exactly like ON. The rows, link primitives,
+soft-status flips, and the cross-thread suggestion worker all already exist
+([§1.2](#12-what-open-brain-already-gives-us-the-foundation)); the work is the
+Quartz surface + a pinned `slug` column (Phase 2).
 
-### 5.2 How threads appear in Quartz
+### 5.2 How notebooks appear in Quartz
 
-- **Thread index** (`content/thread/` + `ThreadIndex.tsx`): all active research groups, with size/recency, in the nav.
-- **Per-thread page** (`content/thread/<slug>.md` + `ThreadPage.tsx`) = the **notebook view**:
-  - its **sources** (`thread_sources.status=confirmed`) with P1 provenance,
-  - its **notes** (`notes/<thread-slug>/…`, grouped by the unified notebook=thread slug),
-  - a **scoped graph** (thread node + its sources/entities, from an extended `graph.json`) and a **backlinks** panel — *this is where Quartz earns its keep*,
-  - a **suggestion triage** strip (pending cross-thread links → accept/hide),
-  - later, its **podcasts** (P7).
-- Compiler generates the page from `threads` + confirmed `thread_sources`; client components hydrate live membership actions on top.
+One **notebook hub page** per notebook — `content/notebook/<slug>.md` +
+`NotebookPage.tsx` — is the single surface that merges the previously-separate
+`topic/` synthesis with membership/notes/triage:
+
+- a `## Synthesis` section (the folded-in notebook synthesis, formerly `topic/<slug>.md`),
+- its **sources** (`thread_sources.status=confirmed`) with P1 provenance,
+- its **notes** — `notes/<slug>/…`, both human and AI-authored — listed/linked under `## Notes`,
+- a **scoped graph** (notebook node + its sources/entities) and a **backlinks** panel — *this is where Quartz earns its keep*,
+- a **suggestion triage** strip (pending cross-notebook links → accept/hide),
+- later, its **podcasts** (P7).
+
+Plus a **notebook index** (`NotebookIndex.tsx`) of all active notebooks in the nav.
+Compiler generates the hub from `threads` + confirmed `thread_sources` (+ backfill);
+client components hydrate live membership actions on top.
+
+**Discovery — how the user finds that their `notes/<slug>/` folder and the
+auto-generated hub are the same notebook** (the two live in different,
+oppositely-owned folders by design — `content/` is compiler-owned, `notes/` is
+author-owned, and the compiler may not write into `notes/`). The **shared slug**
+is the identity binding them, surfaced four native ways: (1) the hub's `## Notes`
+section enumerates `notes/<slug>/*`, so opening the hub shows the user's own notes;
+(2) each note carries `[[notebook/<slug>]]`, so Quartz **backlinks** point home;
+(3) the **graph** clusters hub + notes + sources/entities; (4) the notes editor's
+notebook picker autocompletes from existing notebooks so authors select the
+existing one instead of forking a near-duplicate slug. There is no "automated
+notebook vs. my notebook" — one slug, one hub, aggregating everything that carries
+it (backfill guarantees a hub even for legacy free-text notebook strings).
 
 ### 5.3 Add / subtract membership — options explored (operator's Q3)
 
 | Option | How it works | Best for | Trade-off |
 |--------|--------------|----------|-----------|
-| **A — ON-style picker** | `MembershipPicker` on a source view / thread page; multi-select threads; calls `link_source_to_thread` (add) / `set_thread_source_status→hidden` (subtract). | **Sources** (read-mostly DB rows with no markdown body to link in). | Explicit, familiar, but a separate UI gesture. |
-| **B — Obsidian-style wikilinks** | A **note** contains `[[thread/<name>]]`; the compiler materializes the membership and Quartz's backlinks/graph show it. Optionally a `thread:` tag bulk-links. | **Notes** (real markdown files; native to Quartz). | Indirect for sources (you can't edit a wikilink into an immutable-ish source row), so not sufficient alone. |
-| **C — Hybrid + triage (recommended)** | Picker for sources, wikilinks/tags for notes, **plus** the suggestion-worker proposing links (status `pending`) surfaced as a triage queue on the thread page (accept→confirmed, hide→hidden). | Everything. | Slightly more UI, but matches how each object type actually behaves and uses Quartz's graph/backlinks where they're strongest. |
+| **A — ON-style picker** | `MembershipPicker` on a source view / notebook hub; multi-select notebooks; calls `link_source_to_thread` (add) / `set_thread_source_status→hidden` (subtract). | **Sources** (read-mostly DB rows with no markdown body to link in). | Explicit, familiar, but a separate UI gesture. |
+| **B — Obsidian-style wikilinks** | A **note** contains `[[notebook/<slug>]]`; the compiler materializes the membership and Quartz's backlinks/graph show it. Optionally a `notebook:` tag bulk-links. | **Notes** (real markdown files; native to Quartz). | Indirect for sources (you can't edit a wikilink into an immutable-ish source row), so not sufficient alone. |
+| **C — Hybrid + triage (recommended)** | Picker for sources, wikilinks/tags for notes, **plus** the suggestion-worker proposing links (status `pending`) surfaced as a triage queue on the notebook hub (accept→confirmed, hide→hidden). | Everything. | Slightly more UI, but matches how each object type actually behaves and uses Quartz's graph/backlinks where they're strongest. |
 
 **Recommendation: C.** Sources get the explicit picker; notes get Obsidian-native
-`[[thread/x]]` linking with the thread page's backlinks panel as the live view of
+`[[notebook/x]]` linking with the hub's backlinks panel as the live view of
 membership; the suggestion worker fills the long tail and the user triages.
-"Subtract from thread" is always a **soft status flip** (the source stays in its
-other threads) — categorically different from the **hard source deletion** in P4.
+"Unlink from notebook" is always a **soft status flip** (the source stays in its
+other notebooks) — categorically different from a global **retract** or **purge**
+(P4).
 
 ### 5.4 Where Quartz is uniquely helpful here
 
-Graph view (thread + source/entity nodes), backlinks (every note referencing a
-thread), thread-scoped full-text search, and `[[ ]]` autocomplete make threads
-feel like Obsidian notebooks while membership stays in Postgres as the single
+Graph view (notebook + source/entity nodes), backlinks (every note referencing a
+notebook), notebook-scoped full-text search, and `[[ ]]` autocomplete make
+notebooks feel like Obsidian while membership stays in Postgres as the single
 source of truth.
 
 ---
@@ -319,16 +378,20 @@ source of truth.
 
 | Question | Decision | Rationale |
 |---|---|---|
-| Notes vs sources storage | Notes in `notes/` tethered to thoughts; notebook folder = thread slug. | Isolated, reuses `ingestNotes()`, unifies notes↔threads. |
+| Notes vs sources storage | Notes (human + AI-authored) in `notes/<notebook-slug>/` tethered to thoughts; OWUI research-chat syntheses land as `ai_note`s on the notebook. | Isolated, reuses `ingestNotes()`, unifies notes↔notebooks. |
+| Notebook = thread (naming) | User-facing noun **Notebook**; backing table stays `threads`. One **hub page** per notebook folds in the old `topic/` synthesis; slug **pinned**, name renameable; legacy free-text notebooks **backfilled** to rows. | "Notebook" reads better; renaming a live table buys nothing; one hub = discoverable. |
 | Source editing/versioning (D-D) | **Editable; one canonical row (head) + append-only `source_revisions` history** — `source_id` never changes (§12.1). | Operator wants edits *with* history; stable id keeps thread links/search valid. |
-| Source removal (D-D) | Soft = thread status flip; hard = cascade delete + orphan sweep, operator-confirmed. | Non-exclusive M:N means "remove from thread" ≠ "delete". |
+| Source removal (D-D) | Three verbs: **unlink** (per-notebook status flip) · **retract** (global, reversible tombstone via `retracted_at`; retained + restorable; invisible to generation) · **purge** (irreversible `DELETE`, rare). Retract is the default. | Removed sources must not contaminate future generations but stay restorable; M:N means unlink ≠ remove. |
+| Grounded-page generation policy (P6) | Sources carry asserted **facts**; thought-derived claims demoted to a labeled **"working hypotheses / unverified"** framing — not deleted. | Honors "belief is a superseded mental model" without losing the majority thought-only content (§1.4). |
+| Entity evolution (P6b) | **Derived** from `source_entities.created_at` + vault git history; no new storage. Works on today's volume git; survives the D-I self-hosted-git migration. | Free timeline; doesn't block on the not-yet-built local git. |
 | Re-embed | Automatic via fingerprint-gated queue trigger on content change; metadata-only edits don't bump fingerprint. | Already built; no threshold needed. |
 | Import chunking + `source_chunks` (confirmed) | Semantic/sentence-boundary default, `bge-m3`-tuned; `source_chunks` table. | Long-doc retrieval **and** the source list podcasts build from. |
-| Images (D-F) | content-core/Pillow extracts → `assets/` → Quartz renders inline; `content_type` gains `'image'`. | Closes the no-images gap with the ingestion borrow. |
+| Images (D-F) | content-core/Pillow extracts → `assets/` → Quartz renders inline; `content_type='image'` (a row in the new `content_types` table). | Closes the no-images gap with the ingestion borrow. |
 | Audio/video sources | Transcribe via existing **STT** at `host.docker.internal:8000/v1`; `content_type='audio'`. | Reuses the local service; no new dependency. |
+| `content_type` storage | **Reference table** `content_types` + FK (not an inline CHECK). | New formats = one `INSERT`, no DDL — import is built to expand. |
 | Podcast TTS (D-H) | Existing local **TTS** at `host.docker.internal:8000/v1`; settings via ON-style config panel. **Deferred (P7).** | No engine decision needed; ON covers podcasts meanwhile. |
 | Wiki grounding gap (D-J) | Pages come from the entity graph; thought-only pages are sourceless by design. Surface grounding state + **deliberate source→page linking** + **upload-and-link**; distinguish backlog via queue health. | Fixes the observed "no sources" gap without suppressing graph pages (§1.4, P6). |
-| Threads (D-G) | Existing `threads`/`thread_sources` M:N; Quartz adds index + stub+live thread pages + hybrid membership (§5, §12.4). | Schema ready; only the surface is missing. |
+| Notebooks (D-G) | Existing `threads`/`thread_sources` M:N + a new pinned `slug` column; Quartz adds the notebook index + hub pages + hybrid membership (§5, §12.4). | Membership schema ready; the surface + pinned slug are the work. |
 | Write-API home / auth | New `openbrain-workbench`, not the MCP server; single operator bearer (§12.6). | Keeps browser/multipart/auth off the limited MCP + cloud-gateway contract. |
 | Extraction engine | Python `openbrain-extract` with correctness-first per-format extractors behind a stable interface; quality acceptance gate per format (§12.3). | Faithful extraction of all listed formats over minimal footprint. |
 | Quartz customization | `quartz-overlay/` COPY'd over the pinned clone. | Keeps `QUARTZ_REF` upgradeable. |
@@ -344,9 +407,9 @@ source of truth.
 - **Recovery (required):** `scripts/emergency-recovery.ps1` + `.bat` inventory + start/stop order.
 - **Stack map (required):** [.claude/skills/stack-map/references/workspace-stacks.md](.claude/skills/stack-map/references/workspace-stacks.md).
 - **Caddy:** [config/caddy/Caddyfile](config/caddy/Caddyfile), [OB1/docker/Caddyfile](OB1/docker/Caddyfile) — `/workbench/*` + `assets/`.
-- **Quartz overlay:** `OB1/docker/wiki-viewer/quartz-overlay/` — leaf-page template (`type: thought|source` layout; native popover + SPA + backlinks do the interaction, no custom linkifier), optional `ProvenancePanel` (consolidated per-page provenance index), `ThreadIndex`, `ThreadPage`, `MembershipPicker`, `NotesEditor`, `SourceEditor`, `SourceRetractor`, `ImportDropzone`, `ImportStatus`, `[PodcastPanel]`, `.inline.ts`, layout/config.
-- **Wiki compiler:** [wiki-service.mjs](OB1/docker/wiki-service/wiki-service.mjs) + [generate-wiki.mjs](OB1/recipes/entity-wiki/generate-wiki.mjs) — emit cited-only `thought/<id>.md` + `source/<id>.md` leaf pages (batch-fetch full content by id), rewrite inline `[#id]`/`[S:id]` citations into `[[thought/…|#id]]`/`[[source/…|S:id]]` wikilinks, orphan-sweep uncited leaves (P1); thread-page generation + graph (P2); notes write interplay (P3); confirm orphan sweep covers hard-deletes + uncited leaves (P4).
-- **Schema (additive only):** `source_revisions` (`init-source-revisions.sql`); widen `content_type` CHECK + `source_chunks` + `match_source_chunks` (`init-source-chunks.sql`); `user_linked` rows in `source_entities` (P6, marked via `mention_role='user_linked'`, optional additive `metadata` column); `podcasts` (P7); retraction audit (additive `retracted_by`/`retracted_at` columns or a `source_revisions` tombstone — `sources` has no `metadata`-for-audit convention to lean on).
+- **Quartz overlay:** `OB1/docker/wiki-viewer/quartz-overlay/` — leaf-page template (`type: thought|source` layout; native popover + SPA + backlinks do the interaction, no custom linkifier), `ProvenancePanel` (per-page provenance index + live grounding-state badge + `## Evolution`), `NotebookIndex`, `NotebookPage`, `MembershipPicker`, `SourceLinker`, `NotesEditor`, `SourceEditor`, `SourceRetractor`, `ImportDropzone`, `ImportStatus`, `[PodcastPanel]`, `.inline.ts`, layout/config.
+- **Wiki compiler:** [wiki-service.mjs](OB1/docker/wiki-service/wiki-service.mjs) + [generate-wiki.mjs](OB1/recipes/entity-wiki/generate-wiki.mjs) — emit cited-only `thought/<id>.md` + `source/<uuid>.md` leaf pages (batch-fetch full content by id; UUID-aware), rewrite inline `[#id]`/`[S:…]` citations into wikilinks, **dedicated leaf-sweep** + `thought/`+`source/` added to the `listEntityFiles` skip-list (P1); **notebook hub generation** (`content/notebook/<slug>.md`, folding in `topic/` synthesis) + pinned-slug + backfill + graph (P2); notes write interplay (P3); **tombstone filtering** on every source read-path (P4); honor `user_linked` source_entities + grounded-page generation policy (P6).
+- **Schema (additive only):** `threads.slug` pinned column + `uq_threads_slug` (P2); `source_revisions` (`init-source-revisions.sql`); `content_types` reference table + FK replacing the `content_type` CHECK, `source_chunks` + `match_source_chunks` (`init-source-chunks.sql`); `sources.retracted_at`/`retracted_by` retract columns (P4); `import_jobs` durable job table (P5/P6); `user_linked` rows in `source_entities` (P6, marked via `mention_role='user_linked'`); `podcasts` (P7).
   - **⚠️ Migration path (audit — two places, not one):** `/docker-entrypoint-initdb.d` scripts run **only on a fresh `openbrain-db-data` volume** ([docker-compose.yml:36-37](OB1/docker/docker-compose.yml#L36-L37)). So each new SQL file must be **(a)** mounted with an ordering prefix after `70-init-threads.sql` — `80-init-source-revisions.sql`, `90-init-source-chunks.sql`, `95-…` for the `content_type`/`source_entities` widening — for fresh installs, **and (b)** applied to the **live** DB via the existing psql promotion runbook (the same path `init-threads.sql` took). A file that is only added to compose silently no-ops on the running stack.
 - **Search:** `match_source_chunks` (new RPC; do not overload `match_sources`).
 
@@ -357,7 +420,7 @@ source of truth.
 ```
 P1 Provenance (compiler-only) ──> P4 Source Lifecycle (edit+retract) ─┐
                                                                       ├─> P6 Grounding &
-P0 Foundations ─┬─> P2 Threads                                        │   Deliberate Linking
+P0 Foundations ─┬─> P2 Notebooks                                      │   Deliberate Linking
  (workbench +   ├─> P3 Notes                                          │            │
   extract)      └─> P5 Import ─────────────────────────────────────────┘            ▼
                                                                        [P7 Podcasts — DEFERRED]
@@ -378,7 +441,7 @@ there and the compiler pulls. Direction:
 
 - **Now:** binaries move out of git into a `wiki-assets` volume; notes stay in the current vault (the P3 write path still `git commit`s there).
 - **Later (roadmap, not this plan):** replace the volume-git with a **self-hosted git server** (e.g. a Gitea-class service) as the durable vault; the compiler pushes/pulls there; **Quartz 4 remains the primary read/render surface**. The P3 notes API already commits to a git remote-agnostic location, so the migration is a remote/clone change, not an app rewrite.
-- Backups must cover `wiki-assets`; hard-deleted sources should drop their assets too ([§11](#11-risks--guardrails)).
+- Backups must cover `wiki-assets`; purged sources should drop their assets too (retracted sources keep theirs, since they're restorable) ([§11](#11-risks--guardrails)).
 
 ---
 
@@ -405,14 +468,14 @@ destination: **Quartz becomes the workbench**; ON is retired **in stages**.
 
 - **Three-place change convention (CLAUDE.md):** each new container updates compose **+** recovery scripts **+** stack-map together. Run `/stack-map` before/after compose edits.
 - **OB1 guard rails:** additive schema only (widening a CHECK = drop+re-add, values only added); never alter/drop existing `thoughts`/`sources` columns; no secrets in files. (OB1's "MCP servers must be remote Edge Functions" rule is the public-contribution contract; this is local infra under `OB1/docker/`, like the existing `openbrain-mcp` — keep out of upstream PR scope.)
-- **Destructive hard-delete (D-D):** irreversible + cascades (incl. `source_revisions`); require explicit confirm, show affected pages/links, audit `retracted_by`/`retracted_at`, default UI to soft. Don't expose to non-operators.
+- **Removal scope (D-D):** the default "remove" is a **reversible retract** (`retracted_at`; retained + restorable, invisible to generation). Only **purge** (`DELETE`) is irreversible + cascades (incl. `source_revisions`/`source_chunks`); gate it behind explicit confirm, show affected pages/links, stamp `retracted_by`/`retracted_at`, default the UI to retract, and don't expose purge to non-operators.
 - **`host.docker.internal` reach:** containers on `obnet` need host gateway access (Docker Desktop provides it); confirm it's reachable from the extract/workbench containers, and that the TTS/STT service is up before P5/P7 depend on it.
 - **Manual links surviving re-extraction (P6) — concrete code change:** the worker today does a **full wipe-and-reinsert per source** — `await supabase.from("source_entities").delete().eq("source_id", item.source_id)` ([entity-extraction-worker/index.ts:748](OB1/integrations/entity-extraction-worker/index.ts#L748)) — so on the next fingerprint-change re-extraction it **deletes every `user_linked` row**. Required change: scope the delete to exclude manual links (`.delete().eq("source_id", …).neq("mention_role","user_linked")`) and make the subsequent insert an upsert that yields to `user_linked` per the §Phase-6 PK-collision policy. Guard + test this explicitly (a re-extraction cycle must leave the manual link intact).
 - **Don't suppress graph pages (D-J):** badging thought-only pages as "ungrounded" is fine; *removing* them would break cross-entity `[[wikilinks]]` and graph nodes. Surface, don't delete.
 - **New browser-facing write surface:** bearer auth, portal-only, validate/normalize note + asset paths (no `../` escape), cap upload size, **sandbox `openbrain-extract`** (untrusted file/image parsing = classic RCE vector; run unprivileged, no extra network).
-- **Membership confusion:** keep "remove from thread" (soft, M:N status) visually distinct from "delete source" (global, cascading) so users don't nuke a shared source when they meant to unlink it from one thread.
+- **Membership confusion:** keep the three verbs visually distinct — **unlink from notebook** (soft, M:N status) vs **retract** (global, reversible) vs **purge** (global, irreversible cascade) — so users don't retract/nuke a shared source when they meant to unlink it from one notebook.
 - **GPU/compile churn:** large imports + recompile; STT/TTS contend with `llama-cpp` — see [llama-swap perf tuning](C:\Users\yamao\.claude\projects\d--Open-WebUI-ai-stack\memory\llama-swap-perf-tuning.md). Batch embeddings; lean on the 3-min change-watch debounce.
-- **Asset volume growth:** audio + images accumulate on `wiki-assets`; backup coverage + retention/cleanup (hard-deletes drop assets).
+- **Asset volume growth:** audio + images accumulate on `wiki-assets`; backup coverage + retention/cleanup (purge drops assets; retract keeps them).
 - **Static-build friction (D-A):** heavy logic in `.inline.ts`; thin build-time components; overlay must not block `QUARTZ_REF` upgrades.
 - **Never commit/push on the operator's behalf** ([git-handling-boundaries](C:\Users\yamao\.claude\projects\d--Open-WebUI-ai-stack\memory\git-handling-boundaries.md)) — except the workbench's own programmatic commits **inside** the vault repo (that *is* the notes write mechanism), staying local (no remote push; D16) until the self-hosted vault exists (D-I).
 
@@ -420,23 +483,31 @@ destination: **Quartz becomes the workbench**; ON is retired **in stages**.
 
 ## 12. Resolved decisions (formerly open questions)
 
-All six resolved with the operator. These are now binding for implementation.
+All resolved with the operator across four rounds. These are now binding for implementation.
 
 1. **Source edit-history = append-only revision log.** Keep one canonical `sources` row (current = head); each edit snapshots prior `content`/`title` into `source_revisions(source_id, revision, content, title, edited_at, edited_by)`. The `source_id` never changes, so `thread_sources`/`source_entities`/search stay valid; diff = head vs revision N. *(Not the supersedes-chain variant.)* → P4.
-2. **`content_type` widened to specific types:** add `'image'`, `'docx'`, `'pptx'`, `'audio'` (+ keep existing). Per-format badges/filters in provenance; an `'audio'` source is its STT transcript. → P5.
+2. **`content_type` → reference table `content_types` + FK** (replaces the inline CHECK), seeded with the existing 7 + `image,docx,pptx,audio,txt,md`. A new format is one `INSERT`, no DDL. Per-format badges/filters in provenance; an `'audio'` source is its STT transcript. → P5.
 3. **Extractor = correctness-first, all formats, clean/industry-standard.** Engine chosen on **extraction quality**, not footprint. `openbrain-extract` exposes a stable `/extract` interface with **best-of-breed per-format extractors** (e.g. PyMuPDF/Docling-class for PDF fidelity, python-docx/-pptx, Pillow+Tesseract for image OCR, STT for audio/video); content-core may back any format where it extracts most correctly. **Every supported format gets an explicit extraction-quality acceptance gate** (faithful text, tables, headings, image refs) — coverage of *all* listed types is in scope for this effort. → P5.
-4. **Thread pages = compiled stub + live hydration.** Compiler emits a thin shell (title, description, static graph); `ThreadPage.inline.ts` fetches live sources/notes/membership/suggestions from the workbench API, so add/remove reflects instantly with no recompile wait; degrades to the shell if the API is down. → P2/§5.
-5. **Unify notebook = thread slug now.** Notes live under `notes/<thread-slug>/`; a note's folder *is* its thread, so the thread page auto-shows `notes/<slug>/*` and `[[thread/x]]` lines up. Align the `ingestNotes()` `notebook = parts[1]` mapping to the thread slug. → P3/§5.
-6. **Workbench auth = single operator bearer now.** One shared secret (reuse the `MCP_ACCESS_KEY` pattern); `edited_by`/`retracted_by` stamped `'operator'`. Per-user identities deferred until the tailnet has more humans. → §2.3.
+4. **Notebook hub pages = compiled stub + live hydration.** Compiler emits a thin shell (title, description, synthesis, static graph); `NotebookPage.inline.ts` fetches live sources/notes/membership/suggestions from the workbench API, so add/remove reflects instantly with no recompile wait; degrades to the shell if the API is down. → P2/§5.
+5. **Notebook = thread, one hub, pinned slug.** User-facing noun **Notebook**; backing table stays `threads` (+ a pinned `slug` column). One `content/notebook/<slug>.md` hub folds in the old `topic/` synthesis and surfaces sources + `notes/<slug>/*` + triage; legacy free-text notebooks are **backfilled** to rows. Notes live under `notes/<notebook-slug>/`; `[[notebook/x]]` lines up; align `ingestNotes()` `notebook = parts[1]` to the slug. → P2/P3/§5.
+6. **Workbench auth = Authelia (browser) + Caddy-injected secret (server-side).** The wiki subdomain's existing Authelia `forward_auth` authenticates the operator; Caddy injects the shared secret (reuse the `MCP_ACCESS_KEY` value) when proxying to the workbench — **never** embedded in static client JS. `edited_by`/`retracted_by` stamped `'operator'`; per-user identities deferred. → §2.3.
+7. **Source removal = three verbs.** unlink (per-notebook flip) · **retract** (global, reversible `retracted_at` tombstone — retained, restorable, invisible to all generation read-paths) as the default · purge (`DELETE`, irreversible, rare). → P4.
+8. **Grounded-page generation policy.** Once a page has ≥1 source: sources carry asserted facts; thought-derived claims are demoted to a labeled "working hypotheses / unverified" framing, not deleted. → P6.
+9. **Ground-from-the-page + failure handling.** "Provide grounding with a new source" lives on the entity page; user supplies a document or URL; success → regenerate; failure → client-marked "⚠ Ingest failed" with **no recompile** + a durable `failed` `import_jobs` row feeding a later alerts surface. → P6.
+10. **Entity evolution = derived, no new storage.** From `source_entities.created_at` + vault git history (works on today's volume git; survives the D-I self-hosted migration, which isn't built yet). → P6b.
+11. **Source citations use a short per-page token** (`S1/S2…` → UUID map), not echoed UUIDs (`sources.id` is UUID; LLMs mis-transcribe them). Thought ids (`BIGSERIAL`) stay literal. → P1.
+12. **One shared slug module**, canonical = the NFKD-normalizing algorithm; entity slugs already pinned so no data migration. → §14.1.
+13. **Workbench writes via deno-postgres transactions** (atomic import); reads may use PostgREST. → §14.5.
 
 ---
 
 ## 13. Suggested next step
 
 All gating questions are resolved, so the next action is **Phase 0** — stand up
-the `openbrain-workbench` skeleton (Deno+Hono, `:8814`, bearer auth), the Caddy
-`/workbench/*` same-origin route, the Quartz overlay scaffold + asset config, and
-the `wiki-assets` volume. P0 unblocks every **workbench-backed** phase (P2–P7)
+the `openbrain-workbench` skeleton (Deno+Hono, internal `:8000`, on
+`obnet`+`llm-net`+`app-net`, Authelia-fronted + Caddy-injected secret), the Caddy
+`/workbench/*` same-origin route in the `wiki.` block, the Quartz overlay scaffold
++ asset config, and the `wiki-assets` volume. P0 unblocks every **workbench-backed** phase (P2–P7)
 and proves the in-Quartz-components + thin-API + extract-sidecar architecture
 end-to-end before any schema (`source_revisions`, `source_chunks`, `content_type`
 widening), extractor, or thread-surface work. **One exception:** P1 (provenance)
@@ -480,12 +551,13 @@ Entity pages go to real lengths to **pin a slug for life**
 (`entities.metadata.wiki_slug`, [generate-wiki.mjs:719-741](OB1/recipes/entity-wiki/generate-wiki.mjs#L719-L741))
 so a rename never breaks links. Threads, by contrast, have a **UUID PK and a
 mutable `name`** ([init-threads.sql:44-52](OB1/docker/init-threads.sql#L44-L52))
-and **no slug column**. If P2 derives `content/thread/<slug>.md` from the name on
-every compile, **renaming a thread orphans its page and breaks every
-`[[thread/<old-slug>]]`** and the §5.3 Option-B note-linking. **Fix:** pin a thread
-slug on first generation (additive `threads.metadata jsonb` or a `slug` column),
-reuse forever, alias the display name — exactly the entity pattern. Add this to
-the P2 schema/compiler work; it's currently unaddressed.
+and **no slug column**. If P2 derived `content/notebook/<slug>.md` from the name on
+every compile, **renaming a notebook would orphan its page and break every
+`[[notebook/<old-slug>]]`** and the §5.3 Option-B note-linking. **Resolved (now in
+P2):** an additive pinned `threads.slug TEXT UNIQUE` column, generated once at
+create time, immutable on rename, display name aliased — exactly the entity
+`wiki_slug` pattern. Because entity slugs are already pinned in metadata, existing
+pages need no migration.
 
 ### 14.3 SRP — the workbench is becoming a god-service
 
@@ -503,11 +575,13 @@ escape — already a §11 guardrail) belongs in one shared validator, not per-ha
 P5 returns a `job_id` and exposes `GET /workbench/jobs/:id`. If job state is
 in-memory (as `lastStatus` is in
 [wiki-service.mjs:89](OB1/docker/wiki-service/wiki-service.mjs#L89)), a workbench
-restart **orphans every in-flight import** and the UI polls a 404 forever. **Fix:**
-persist jobs in a small additive `import_jobs(id, status, source_id, error,
-created_at, updated_at)` table (it also gives the `ImportStatus.tsx` history view
-something durable to read) — or explicitly document jobs as ephemeral and have the
-client treat a missing job as "ask the source list whether it landed."
+restart **orphans every in-flight import** and the UI polls a 404 forever.
+**Resolved:** persist `import_jobs(id, status, source_id, target_entity_ids,
+target_notebook, error, created_at, updated_at)`. Beyond surviving restarts and
+backing `ImportStatus.tsx`, this table is **load-bearing for P6**: a failed
+ground-from-the-page attempt records its `target_entity_ids` + terminal `error`
+here, which is exactly the data the later "failed grounding attempts" alerts
+surface reads.
 
 ### 14.5 DB access path — pick one, transactionally
 
