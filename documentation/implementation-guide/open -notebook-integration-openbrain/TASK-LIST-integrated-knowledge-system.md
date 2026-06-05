@@ -72,7 +72,7 @@ Do not start a phase whose dependencies' DoD is unmet. All validation runs in th
 
 - [ ] **4.1** Inventory ON source surface (real layout, C2): `open_notebook/domain/notebook.py` (`Source`/`Notebook`, `table_name="source"`) → `open_notebook/database/repository.py` → `api/sources_service.py` → `api/routers/sources.py` + `notebooks.py` → `open_notebook/graphs/source.py` → `database/migrations/*.surrealql`. Output `iks-dev/on-source-surface.md`
 - [ ] **4.2** OB1 data-access module in fork (`pg` async; document choice)
-- [ ] **4.3** Repoint upload (`find_or_create_source`+`thread_sources`), notebook-view = thread-view (1:1 thread↔notebook), interaction reads from OB1
+- [~] **4.3** Repoint upload (`find_or_create_source`+`thread_sources`), notebook-view = thread-view (1:1 thread↔notebook), interaction reads from OB1 — **upload+view DONE & validated E2E** (`save_source`→`sync_extracted_source`: extracted content+bge-m3 embedding+thread link in OB1; no empty pre-extraction rows; notebook⇄thread persists). **Interact/Q&A read still on SurrealDB `source_embedding` → point at `search_sources` next.**
 - [ ] **4.4** Keep SurrealDB for UI prefs / job queues / chat / cache only
 - [ ] **4.5** One-time migration script `iks-dev/migrate-on-sources.*` (idempotent, dedup-aware, dry-run; agent never runs vs prod)
 - [ ] **4.6** Stage (not apply) compose swap `image: lfnovo/open_notebook:v1-latest` → built fork; capture as runbook diff
@@ -94,9 +94,9 @@ Do not start a phase whose dependencies' DoD is unmet. All validation runs in th
 
 ## Phase 6 — Triage UI inside Open Notebook (D2)  *(needs 4)*
 
-- [ ] **6.1** Triage queue view: `get_suggestions` + Accept (`accept_suggestion`→confirmed) / Hide (`hide_suggestion`→hidden)
-- [ ] **6.2** Hidden/rejected pool view: `get_hidden_suggestions` + Restore (`restore_suggestion`→pending)
-- [ ] **6.3** Entry point: triage panel/badge in ON nav (per-thread + global)
+- [x] **6.1** Triage queue view: `get_suggestions` + Accept (`accept_suggestion`→confirmed) / Hide (`hide_suggestion`→hidden) — `SuggestionsDialog`, operator-approved
+- [x] **6.2** Hidden/rejected pool view: `get_hidden_suggestions` + Restore (`restore_suggestion`→pending) — Hidden tab + undo toast
+- [x] **6.3** Entry point: triage panel/badge in ON nav (per-thread + global) — thread-mode in `NotebookHeader`, source-mode popover on `/sources`
 
 **DoD:** pending suggestion shows with reason; Accept → appears as linked source; Hide → leaves queue, retrievable from pool; Restore → pending. Transitions match §4.3.
 

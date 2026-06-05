@@ -1,6 +1,6 @@
 # Quartz 4 Expansion Plan — Quartz as the Open Brain Workbench
 
-> **Status:** Plan / pre-implementation
+> **Status:** In implementation (2026-06-05). **Landed & locally validated:** P1 provenance compiler; P0 foundations (workbench Deno+Hono skeleton, Caddy route `caddy validate` ✅, compose+`wiki-assets` volume, 3-place change, shared slug module, shared TS types, frontmatter-id contract, overlay scaffold); the **entire additive schema layer** — 6 migrations (`threads.slug`, `source_revisions`, retract cols, `content_types`+FK, `source_chunks`+RPC, `import_jobs`) validated end-to-end on a throwaway pgvector; P4 tombstone filtering (compiler read-paths + both RPCs); P2 `/workbench/notebooks` route; P5 `openbrain-extract` FastAPI sidecar (+3-place). **Remaining:** the compiler notebook-hub rewrite (P2.2/2.3/2.4/2.6), the workbench `/notes`·`/sources`·`/import`·`/grounding` routes (P3–P6), the P6 worker change + grounded-page policy, the ~15 Quartz overlay components, and the cross-cutting closeout — these need the live stack (build/migrate) to exercise their gates. Per-task detail in [TASKS-quartz-4-expansion.md](documentation/implementation-guide/expand-quartz-4/TASKS-quartz-4-expansion.md).
 > **Branch context:** `feature/integrated-knowledge-system`
 > **Reframes:** the Open Notebook repoint phases of the in-flight Integrated
 > Knowledge System (IKS) work — see [§10](#10-relationship-to-iks--retiring-open-notebook).

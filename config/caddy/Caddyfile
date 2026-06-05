@@ -213,7 +213,16 @@ http://wiki.{$PUBLIC_DOMAIN} {
     import access_log
     encode zstd gzip
 
-    request_body {
+    # Upload body cap. The default 1MB fits the read-only viewer, but every P5
+    # import (PDF/DOCX/PPTX/image/audio) exceeds it — so the workbench import
+    # route gets its own 100MB cap. Both upload flows (P5 import AND P6
+    # ground-from-the-page) POST to /workbench/import so they share this cap.
+    @import path /workbench/import /workbench/import/*
+    @notimport not path /workbench/import /workbench/import/*
+    request_body @import {
+        max_size 100MB
+    }
+    request_body @notimport {
         max_size 1MB
     }
 
@@ -230,8 +239,23 @@ http://wiki.{$PUBLIC_DOMAIN} {
         }
     }
 
-    reverse_proxy openbrain-wiki-viewer:8080 {
-        header_up X-Forwarded-Proto https
+    # Workbench write-API (same-origin, P0.2). MUST be above the viewer
+    # catch-all. `handle` (NOT handle_path) PRESERVES the /workbench prefix, so
+    # the workbench receives /workbench/import, /workbench/sources/:id, etc.
+    # Caddy injects the shared secret server-side (G7) — never in client JS;
+    # set WORKBENCH_KEY (= the MCP_ACCESS_KEY value) in the portal Caddy env.
+    handle /workbench/* {
+        reverse_proxy openbrain-workbench:8000 {
+            header_up X-Forwarded-Proto https
+            header_up X-Brain-Key {$WORKBENCH_KEY}
+        }
+    }
+
+    # Everything else → the read-only Quartz viewer (catch-all).
+    handle {
+        reverse_proxy openbrain-wiki-viewer:8080 {
+            header_up X-Forwarded-Proto https
+        }
     }
 
     # While the Quartz viewer is (re)building it isn't listening yet, so the

@@ -1322,6 +1322,11 @@ services:
     environment:
       - PUBLIC_DOMAIN=${PUBLIC_DOMAIN}
       - ACME_EMAIL=${ACME_EMAIL}
+      # Server-side secret Caddy injects as X-Brain-Key when proxying
+      # /workbench/* to openbrain-workbench (G7). Set this in the main .env to
+      # the SAME value as OB1's MCP_ACCESS_KEY. Empty = the workbench rejects
+      # every /workbench call (fail closed).
+      - WORKBENCH_KEY=${WORKBENCH_KEY}
     user: "10000:10000"      # plan §2 hardening floor — non-root UID
     restart: unless-stopped
     security_opt:

@@ -344,16 +344,16 @@ Resolved by operator decisions: **#2 triage UX → inside Open Notebook (D2).** 
 | 3 | 3.3 preserve synthesis cache | ☑ done | ☑ | supersede-in-place intact |
 | 4 | 4.1 source-surface inventory | ☑ done | — | `iks-dev/on-source-surface.md` |
 | 4 | 4.2 OB1 data-access module | ☑ done | ☑ | `ob1_repository.py` validated vs iks-db |
-| 4 | 4.3 repoint upload/view/interact | ◐ partial | ◐ | feature-gated wiring done + compiles; full UI + source-identity routing needs iks-notebook build |
+| 4 | 4.3 repoint upload/view/interact | ◐ partial | ☑ | **upload+view repointed & validated E2E** (06-05): `save_source`→`sync_extracted_source` writes extracted content+bge-m3 embedding+`thread_sources(auto,confirmed)` to OB1; `add_to_notebook` no longer mints empty pre-extraction rows; notebook⇄thread 1:1 persists. **Remaining: interact/Q&A still reads SurrealDB `source_embedding`** (not yet pointed at `search_sources`) |
 | 4 | 4.4 keep SurrealDB state | ☑ done | ☑ | only source-family routed to OB1 |
 | 4 | 4.5 migration script | ☑ done | — | `migrate-on-sources.py` dry-run default; compiles |
 | 4 | 4.6 stage compose swap | ☑ done | — | runbook diff (PROMOTION-RUNBOOK §4) |
 | 5 | 5.1 suggestion worker | ☑ done | ☑ | built; 9 suggestions on overlap seed |
 | 5 | 5.2 suggested-only rule | ☑ done | ☑ | all pending; no auto-confirm; negative control clean |
 | 5 | 5.3 threshold + dedup | ☑ done | ☑ | env-tunable+logged; hidden not re-suggested |
-| 6 | 6.1 triage queue | ◐ partial | ☑ | backend `get_suggestions`+accept/hide validated; FE component pending |
-| 6 | 6.2 hidden pool | ◐ partial | ☑ | backend `get_hidden`+restore validated; FE pending |
-| 6 | 6.3 entry point | ◐ partial | — | `/api/triage/*` router live; Next.js panel pending |
+| 6 | 6.1 triage queue | ☑ done | ☑ | FE `SuggestionsDialog` (Suggested tab, Add/Hide, why-% explain) built + **operator-approved UX** (06-05) |
+| 6 | 6.2 hidden pool | ☑ done | ☑ | FE Hidden tab + Restore+undo toast; operator-approved |
+| 6 | 6.3 entry point | ☑ done | ☑ | thread-mode button in `NotebookHeader`; source-mode popover on `/sources` rows; `/api/triage/*` router live |
 | 7 | 7.1 inbox stub action | ☑ done | ☑ | `obsidian_inbox.py` + `/api/triage/inbox` |
 | 7 | 7.2 separation respected | ☑ done | ☑ | notes/ not content/; not a source |
 | 7 | 7.3 scratch wiki target | ☑ done | ☑ | `WIKI_NOTES_DIR`; scratch dir in test |
@@ -375,6 +375,8 @@ Legend: ☐ todo · ◐ in-progress · ☑ done · ✗ blocked.
 | 2026-06-02 | 0–3 | Phases 0–3 implemented **and validated in `iks-db`**: schema idempotent + dedup/lifecycle; 19 MCP tools (8+11) with full §4.3 suggestion lifecycle; persist refactor proven C1-stable (ids survive re-run, links preserved). Branches created in all 3 repos; nothing committed. | done |
 | 2026-06-02 | 4.2 | OB1 data-access chose **pg-direct via asyncpg** (per plan) over PostgREST — upload needs one-tx find_or_create+link. Added `asyncpg` to fork `pyproject.toml`; **`uv lock` must be run before building iks-notebook** (host has no `uv`; lockfile not regenerated here). Module validated standalone against `iks-db`. | done |
 | 2026-06-02 | 4.3 | ON repoint wired **feature-gated** behind `ob1_enabled()` (true only when `OB1_DB_HOST` set → sandbox): `Notebook.ob_thread_id` + `ensure_ob_thread()`, `get_sources()` OB1 branch, `add_to_notebook()` OB1 dual-write. Prod path unchanged until promotion. **Remaining for full repoint:** route `Source.get/delete/get_insights` + the source-processing graph by OB1 UUID (see `on-source-surface.md`); end-to-end UI validation needs the heavy `iks-notebook` build (operator/Phase 8) — Phase 4 is the plan's largest/riskiest workstream by design. | partial — code complete, UI validation deferred |
+| 2026-06-05 | 4.3 | **Ingestion write-path repoint landed & validated E2E in `iks-dev`.** Root issue found: the only OB1 write hook (`add_to_notebook`) fired *before* content extraction, so it created **empty** OB1 rows for URL uploads (and `find_or_create_source` deliberately never backfills content on a dup) — the actual extraction graph wrote nothing to OB1. Fix: (1) new `ob1_repository.sync_extracted_source()` — find-or-create + **UPDATE content/title/embedding on the canonical row** + link to each notebook's thread, in one tx; (2) called it from `graphs/source.py::save_source` (post-extraction — first point real text exists), embedding via bge-m3; (3) tightened `add_to_notebook` to only write when `full_text` is already present (re-linking an existing source), so fresh uploads no longer mint empty rows. Smoke test: text upload → OB1 row with real content, `has_embedding=t`, `content_hash`, `metadata.on_source_id` cross-id map, `content_type='manual'` (no-URL default), `thread_sources(automatic,confirmed)` to the notebook's thread; notebook⇄thread 1:1 (`ob_thread_id`) persisted; no orphan threads. Also fixed `GET /notebooks` list endpoint to serialize `ob_thread_id` (single-get already did). **Still open in 4.3:** interact/Q&A reads (`graphs/ask.py` → SurrealDB `source_embedding`) not yet pointed at `ob1_repository.search_sources`. | done (upload+view) — interact/Q&A pending |
+| 2026-06-05 | 6 | **Phase 6 triage UI complete & operator-approved.** `SuggestionsDialog` (thread-mode button in `NotebookHeader`; source-mode popover on `/sources` rows): Suggested/Hidden tabs, Add (names target thread), Hide, Restore+undo, collapsible why-% (explain endpoint = nearest confirmed sources w/ cosine), subject header card. Ledger 6.1–6.3 → done. | done |
 
 ---
 

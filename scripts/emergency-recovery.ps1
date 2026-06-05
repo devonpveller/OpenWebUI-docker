@@ -46,7 +46,7 @@ $Script:OB1Services = @(
     "openbrain-mcpo", "openbrain-mcpo-ext", "openbrain-postgrest",
     "openbrain-rest", "openbrain-entity-worker",
     "openbrain-suggestion-worker",
-    "openbrain-wiki", "openbrain-wiki-viewer",
+    "openbrain-wiki", "openbrain-wiki-viewer", "openbrain-workbench", "openbrain-extract",
     "openbrain-cron", "openbrain-gmail-pull", "openbrain-gmail-prune", "openbrain-digest"
 )
 

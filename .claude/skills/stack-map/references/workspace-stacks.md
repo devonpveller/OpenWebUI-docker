@@ -107,6 +107,8 @@ Run with: `docker compose -f OB1/docker/docker-compose.yml ...`.
 | `openbrain-suggestion-worker` | Cross-thread suggestion worker (Integrated Knowledge System; `POST /suggest`) | 127.0.0.1:8813 | obnet, llm-net |
 | `openbrain-wiki` | Wiki compiler + scheduler | 127.0.0.1:8811 | obnet, llm-net |
 | `openbrain-wiki-viewer` | Quartz 4 read-only wiki viewer (also tailnet HTTPS `:8444` + Caddy `wiki.${PUBLIC_DOMAIN}`) | 127.0.0.1:8812 | obnet, app-net |
+| `openbrain-workbench` | Deno+Hono read/write API behind the viewer (`/workbench/*` via portal Caddy `handle`, X-Brain-Key injected); deno-postgres writes + PostgREST reads | 127.0.0.1:8814 (debug only) | obnet, llm-net, app-net |
+| `openbrain-extract` | FastAPI content-extraction sidecar (`POST /extract`: PDF/DOCX/PPTX/image-OCR/audio-STT registry); sandboxed (non-root, cap_drop, read-only FS); reaches host STT via `host.docker.internal` | 127.0.0.1:8815 (debug only) | obnet |
 | `openbrain-cron` | supercronic + curl; fires HTTP-trigger chain (no docker.sock) | — (internal only) | obnet |
 | `openbrain-gmail-pull` | HTTP-triggered Gmail ingest; chains to prune on success | — (internal only) | obnet, llm-net |
 | `openbrain-gmail-prune` | HTTP-triggered short-term prune; chains to digest + wiki recompile | — (internal only) | obnet, llm-net |
@@ -133,7 +135,10 @@ entity worker, the wiki compiler) keep talking to `openbrain-mcp` /
 `openbrain-ext` directly on internal networks and are unaffected.
 
 ### Volumes
-`openbrain-db-data`, `openbrain-wiki-data`.
+`openbrain-db-data`, `openbrain-wiki-data`, `wiki-assets` (binary assets —
+images now, audio later — written by `openbrain-workbench`, served read-only by
+`openbrain-wiki-viewer`; deliberately NOT mounted into `openbrain-wiki` so
+binaries never enter the vault git history).
 
 ---
 
