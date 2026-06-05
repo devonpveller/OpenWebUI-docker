@@ -22,6 +22,30 @@ $PROJECT_DIR = Split-Path -Parent $SCRIPT_DIR
 $LOG_FILE = Join-Path $PROJECT_DIR "logs\tailscale-health.log"
 $SERVICE_NAME = "TailscaleHealthMonitor"
 
+# --- docker compose stderr guard (added 2026-06-05) ---------------------------
+# The caddy service references ${WORKBENCH_KEY} (docker-compose.yml). When that
+# variable is absent from THIS process's environment, every `docker compose ...`
+# call prints "The \"WORKBENCH_KEY\" variable is not set..." to stderr. Combined
+# with $ErrorActionPreference='Stop' above, the first docker call that redirects
+# stderr (e.g. `docker compose logs ... 2>$null` in Test-EntrypointHealth) turns
+# that benign warning into a TERMINATING error (PS 5.1 native-stderr gotcha) and
+# the whole health check aborts at step 1 — the window just flashes and exits 1,
+# checking/repairing nothing. Defining the var here silences the warning at the
+# source for every docker invocation this script makes. This only
+# affects this script's own process env; it does NOT modify .env or any container.
+#
+# The value is a non-empty PLACEHOLDER, not the real key: Windows cannot store an
+# empty env var (PowerShell deletes it on `=''`), and docker only suppresses the
+# "is not set" warning for a DEFINED, non-empty value. This monitor never creates
+# or recreates the caddy service (the sole consumer of WORKBENCH_KEY — it is not
+# in the monitor's managed-service list), so this placeholder never reaches caddy;
+# and even if it somehow did, a wrong key makes caddy reject /workbench (fail
+# closed). A real value present in the environment (e.g. a manual run from a
+# configured shell) is preserved and takes precedence.
+if (-not (Test-Path Env:\WORKBENCH_KEY) -or [string]::IsNullOrEmpty($env:WORKBENCH_KEY)) {
+    $env:WORKBENCH_KEY = 'healthcheck-noop-placeholder'
+}
+
 # Create logs directory if it doesn't exist
 $LogDir = Split-Path -Parent $LOG_FILE
 if (-not (Test-Path $LogDir)) {
@@ -255,14 +279,22 @@ function Test-EntrypointHealth {
             }
         }
         
-        # Check for common Docker build issues in logs
-        $Logs = docker compose logs tailscale --tail=5 2>$null
-        if ($Logs -match "no such file or directory" -and $Logs -match "entrypoint") {
-            Write-LogEntry "CRITICAL: Entrypoint script not found in container. Rebuild required." "ERROR"
-            Write-LogEntry "Run: docker compose build --no-cache tailscale" "INFO"
-            return $false
+        # Check for common Docker build issues in logs. Isolated in its own
+        # try/catch: a failure to READ the logs (docker stderr, daemon hiccup)
+        # must NOT be misread as "entrypoint invalid" and abort the whole health
+        # check — that exact misclassification (a docker stderr warning bubbling
+        # up under -Stop) is what crashed every run before 2026-06-05.
+        try {
+            $Logs = docker compose logs tailscale --tail=5 2>$null
+            if ($Logs -match "no such file or directory" -and $Logs -match "entrypoint") {
+                Write-LogEntry "CRITICAL: Entrypoint script not found in container. Rebuild required." "ERROR"
+                Write-LogEntry "Run: docker compose build --no-cache tailscale" "INFO"
+                return $false
+            }
+        } catch {
+            Write-LogEntry "Could not read tailscale logs for entrypoint check (non-fatal): $($_.Exception.Message)" "WARN"
         }
-        
+
         return $true
     }
     catch {
