@@ -42,6 +42,11 @@ services:
       - "D:/Open WebUI/ai-stack/OB1/docker/init-source-graph.sql:/docker-entrypoint-initdb.d/60-init-source-graph.sql:ro"
       - "D:/Open WebUI/ai-stack/OB1/docker/init-threads.sql:/docker-entrypoint-initdb.d/70-init-threads.sql:ro"
       - "./seed.sql:/docker-entrypoint-initdb.d/80-seed.sql:ro"
+      # Source retract + chunk index (passage-level retrieval). Mirror prod
+      # ordering (retract 82 < chunks 86); chunks RPC depends on the retract
+      # column. Populated by the iks-chunk-worker below.
+      - "D:/Open WebUI/ai-stack/OB1/docker/init-source-retract.sql:/docker-entrypoint-initdb.d/82-init-source-retract.sql:ro"
+      - "D:/Open WebUI/ai-stack/OB1/docker/init-source-chunks.sql:/docker-entrypoint-initdb.d/86-init-source-chunks.sql:ro"
     ports:
       - "127.0.0.1:18432:5432"
     networks:
@@ -172,6 +177,37 @@ services:
       PORT: "8000"
     ports:
       - "127.0.0.1:18810:8000"
+    networks:
+      - iks-net
+      - llm-net
+
+  # ── Canonical chunk-embedding worker (passage-level retrieval) ───────
+  # Writer-agnostic: chunks ANY OB1 source into source_chunks (workbench
+  # contract: 1200/150 + bge-m3) so every frontend's retrieval works. Scans
+  # on an interval; also drainable via POST /chunks.
+  iks-chunk-worker:
+    build:
+      context: "D:/Open WebUI/ai-stack/OB1/integrations/chunk-embedding-worker"
+      dockerfile: Dockerfile
+    image: iks-chunk-worker:local
+    container_name: iks-chunk-worker
+    depends_on:
+      iks-db:
+        condition: service_healthy
+    environment:
+      DB_HOST: iks-db
+      DB_PORT: "5432"
+      DB_NAME: openbrain
+      DB_USER: postgres
+      DB_PASSWORD: iks_dev_only
+      EMBEDDING_API_BASE: http://llama-cpp-embed:8080/v1
+      EMBEDDING_API_KEY: not-needed
+      EMBEDDING_MODEL: bge-m3
+      CHUNK_BATCH: "25"
+      CHUNK_INTERVAL_MS: "15000"
+      PORT: "8000"
+    ports:
+      - "127.0.0.1:18815:8000"
     networks:
       - iks-net
       - llm-net
