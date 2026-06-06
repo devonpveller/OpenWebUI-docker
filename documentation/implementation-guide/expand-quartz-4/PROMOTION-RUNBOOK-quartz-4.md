@@ -3,12 +3,26 @@
 **Audience:** the operator. The coding agent **authors** this; it never runs a
 destructive migration against prod (G10). Mirrors the IKS promotion pattern.
 
-The 6 additive migrations are mounted in
+The additive migrations are mounted in
 [OB1/docker/docker-compose.yml](../../../OB1/docker/docker-compose.yml) at
 `/docker-entrypoint-initdb.d` — but **initdb scripts run ONLY on a fresh
 `openbrain-db-data` volume**. On the existing live volume they are no-ops, so
 they must be applied by hand here (G3). All are additive + idempotent (safe to
 re-run).
+
+> **⚠ PROD BASELINE FINDING (2026-06-06, verified read-only against live
+> `openbrain-db`):** prod is at the **pre-IKS-Phase-1 baseline**. It has the core
+> memory/source/entity schema (`sources` 777, `thoughts` 520, `entities` 25 330,
+> `source_entities` 1 935, `thought_entities` 47 108) **but NOT the
+> threads/notebooks substrate** — `threads`, `thread_sources`, `sessions`,
+> `session_sources`, `sources.content_hash`, and `find_or_create_source` are all
+> **absent**. So `init-threads-slug.sql` (step 1 below) would fail immediately
+> with `relation "threads" does not exist`. **`init-threads.sql` is therefore a
+> required STEP 0** (added below). Roles `service_role` + `authenticated` exist,
+> so its RLS grants apply cleanly. Net effect: this promotion also lands **IKS
+> Phase-1 schema**, and the **Notebooks feature is net-new to prod** (empty
+> `threads` + a **38-notebook** free-text backfill, done by the compiler/workbench
+> at rollout, not by SQL).
 
 ## 0. Preconditions
 
@@ -31,12 +45,17 @@ etc. Run from the repo root:
 
 ```powershell
 $files = @(
+  "init-threads.sql",            # STEP 0 (IKS-P1 prereq, MISSING on prod) — threads,
+                                 #   thread_sources, sessions, session_sources,
+                                 #   sources.content_hash, find_or_create_source +
+                                 #   lifecycle helpers. WITHOUT THIS, step 1 fails.
   "init-threads-slug.sql",       # P2  — threads.slug + uq_threads_slug
   "init-source-revisions.sql",   # P4  — source_revisions
   "init-source-retract.sql",     # P4  — retract cols + match_sources redefine
   "init-content-types.sql",      # P5  — content_types + FK (seed→drop CHECK→FK)
   "init-source-chunks.sql",      # P5  — source_chunks + match_source_chunks
-  "init-import-jobs.sql"         # P5  — import_jobs
+  "init-import-jobs.sql",        # P5  — import_jobs
+  "init-source-editing.sql"      # P4.7 — sources.last_edited_by/at (working head)
 )
 foreach ($f in $files) {
   Write-Host "applying $f"
@@ -48,7 +67,10 @@ foreach ($f in $files) {
 
 ```powershell
 docker exec openbrain-db psql -U postgres -d openbrain -tA -c "
-SELECT 'threads.slug',          count(*) FROM information_schema.columns WHERE table_name='threads' AND column_name='slug'
+SELECT 'threads tbl (STEP 0)',  count(*) FROM information_schema.tables  WHERE table_name='threads'
+UNION ALL SELECT 'thread_sources tbl (STEP 0)', count(*) FROM information_schema.tables WHERE table_name='thread_sources'
+UNION ALL SELECT 'find_or_create_source (STEP 0)', count(*) FROM pg_proc WHERE proname='find_or_create_source'
+UNION ALL SELECT 'threads.slug',          count(*) FROM information_schema.columns WHERE table_name='threads' AND column_name='slug'
 UNION ALL SELECT 'source_revisions',         count(*) FROM information_schema.tables  WHERE table_name='source_revisions'
 UNION ALL SELECT 'sources.retraction_committed_at', count(*) FROM information_schema.columns WHERE table_name='sources' AND column_name='retraction_committed_at'
 UNION ALL SELECT 'content_types rows',        count(*) FROM content_types

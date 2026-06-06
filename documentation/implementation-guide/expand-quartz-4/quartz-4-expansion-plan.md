@@ -637,6 +637,75 @@ All resolved with the operator across multiple rounds. These are now binding for
 
 ---
 
+## 12.5 OPEN decisions (UNRESOLVED — operator to decide before the dependent build)
+
+These surfaced while scoping a **read-only wiki-history MCP** (let LLMs read
+revisions/history for analytics). They are **not yet decided**; the dependent
+build is **parked and gated** on them.
+
+### OD-1 — Purge semantics: suppression vs. true erasure (the keystone)
+
+**Question:** when an operator **purges** a source (the irreversible verb, §7/§11),
+is it *suppression* or *true erasure*?
+
+**Why it's hard:** "erase" and "immutable audit log" are in direct opposition,
+and history honesty (which we want — OD adjacent) makes the conflict sharper.
+The tractable framing is **where the content physically lives**:
+
+- A source's **content + revisions live in Postgres** (`sources`,
+  `source_revisions`) — **not git**. A DB `DELETE` (purge cascade) genuinely
+  removes them; the `source_revisions` analytics read simply finds nothing.
+  **No leakage on the DB side.**
+- The leakage is entirely **git-side residue**: the leaf page
+  (`content/source/<uuid>.md`) in old commits, synthesized **entity-page text
+  that quoted** the source, and the **`Changes`-log naming it**. Git is
+  append-only, so prior commits retain all of this.
+
+**The name is itself leakage** (operator's point): even a tombstone "source *X*
+was deleted" leaks *X*. Resolution candidate — **separate identity from shape**:
+keep an *anonymous* tombstone ("a source existed here, contributed to these
+claims, removed `<date>`, reason `<category>`") so historics don't develop holes,
+but **strip identity** (no title/url/content). Leaf pages are **already named by
+opaque uuid**, not title — the right foundation; destroy the DB row and the uuid
+dereferences to nothing (an anonymous marker, not a named gap).
+
+**The fork (undecided):**
+- **(a) Suppression** — gone from DB + UI + analytics projection; raw git still
+  holds it under lock for recovery/audit. Cheap, emergency-reversible, **not**
+  true erasure. Fine for cleanup; **not** for legal/privacy.
+- **(b) True erasure** — actually scrub it. Clean technique: **crypto-shredding**
+  — store erasable content encrypted with a per-source key; "true delete" =
+  destroy the key. Ciphertext can sit in immutable git forever, now unreadable —
+  **no history rewrite, no broken hashes**. Catch: must encrypt **from the
+  start**, so this is an **architecture decision, not a retrofit**.
+
+This is an unsolved-in-industry tension (right-to-erasure vs. immutable log) —
+not an oversight. **Everything downstream follows from this one policy.**
+
+### OD-2 — Wiki-history MCP shape (gated on OD-1)
+
+Direction is settled even though it's parked: **don't build a parallel history
+tool taxonomy — extend `thought search`** (OB1's existing grep/semantic search).
+Search is the interface; each hit carries an **optional `history`/`provenance`
+expansion** (the page's git log, on demand). `git grep`/`git log -G` over the
+vault gives "every page that *ever* mentioned X" — incl. **history**.
+
+**The coupling that gates it:** grep-over-history is *exactly* the OD-1 leakage
+vector. The moment search can read history, a purged source's old content is
+reachable **unless the purge policy filters it**. So search-with-history must
+enforce the OD-1 decision at the read layer. **Read-only, no write tools
+registered, read-scoped key** (structural enforcement, not "we won't call
+write"). LLM **writes stay at the input layer** (thoughts/memory, AI notes,
+compile trigger) — never the derived wiki or the human-only sources. The one
+write that *complements* read without violating provenance is an **annotation /
+LLM-review layer** (attach analysis to a revision, never content) → possible
+fast-follow, also gated on OD-1.
+
+**Status:** UNRESOLVED. Build of the wiki-history MCP (call it **P8**) does not
+start until OD-1 is decided.
+
+---
+
 ## 13. Suggested next step
 
 All gating questions are resolved, so the next action is **Phase 0** — stand up
