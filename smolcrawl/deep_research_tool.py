@@ -19,6 +19,7 @@ requirements: httpx, pydantic
 
 import asyncio
 import hashlib
+import html as _html
 import json
 import logging
 import os
@@ -348,8 +349,9 @@ def _cb_cap_sources(sources: List[Dict], budget_chars: int) -> tuple:
     sorted_src = sorted(sources, key=lambda s: s.get("authority", 0.5), reverse=True)
     selected, used = [], 0
     for s in sorted_src:
+        body = s.get("content") or s.get("summary", "")
         entry_len = (len(s.get("title", "")) + len(s.get("url", ""))
-                     + len(s.get("domain", "")) + len(s.get("summary", "")) + 80)
+                     + len(s.get("domain", "")) + len(body) + 80)
         if used + entry_len > budget_chars and selected:
             break
         selected.append(s)
@@ -452,7 +454,16 @@ class _SubAgent:
                 request=request, form_data=_form(self._model_id),
                 user=UserModel(**user), bypass_filter=True,
             )
-        return response["choices"][0]["message"]["content"]
+        content = response["choices"][0]["message"]["content"] or ""
+        # Defensive: strip any chain-of-thought the model leaked into the answer
+        # body. A reasoning model can emit <think>…</think> (or <reasoning>…)
+        # before the real output; that is the "thinking leading up to" the answer,
+        # never the final result, and must never be stored/displayed.
+        content = re.sub(
+            r"<\s*(think|thinking|reasoning)\b[^>]*>.*?<\s*/\s*\1\s*>",
+            "", content, flags=re.DOTALL | re.IGNORECASE,
+        )
+        return content.strip()
 
     async def run_json(self, system_prompt: str, user_prompt: str, request, user: Dict) -> Any:
         """Call LLM and parse response as JSON."""
@@ -1055,6 +1066,10 @@ class _Synthesizer:
 
         all_sources = (relevant_sources or []) + (trail_sources or [])
         known_urls, known_domains = self._extract_known_urls(all_sources)
+        # The source list actually shown to the model (with [Source N] numbers);
+        # populated below. Used after synthesis to record which sources were CITED.
+        selected: List[Dict] = []
+        self.cited_sources = []
 
         # --- Budget-aware synthesis prompt construction ---
         budget_chars = _cb_usable_budget_chars(self._v.max_prompt_tokens)
@@ -1100,7 +1115,7 @@ class _Synthesizer:
                         f"[Source {i}] **{s.get('title', 'Untitled')}**\n"
                         f"   - URL: {s.get('url', 'N/A')}\n"
                         f"   - Domain: {s.get('domain', '')}\n"
-                        f"   - Summary: {s.get('summary', '')}\n"
+                        f"   - Content: {(s.get('content') or s.get('summary') or '')}\n"
                     )
                 if omitted > 0:
                     src_entries.append(
@@ -1131,6 +1146,9 @@ class _Synthesizer:
             parts.append(source_section)
 
         try:
+            # Synthesis keeps reasoning ENABLED — thinking improves the final
+            # write-up, and the <think>…</think> block is stripped from the
+            # stored/returned content by _SubAgent.run() so it never bleeds in.
             answer = await self._sa.run(_SYNTHESIS_PROMPT, "\n\n".join(parts), request, user)
 
             # Post-synthesis: programmatic URL scrubbing
@@ -1187,6 +1205,13 @@ class _Synthesizer:
                 await _emit(event_emitter, f"\U0001f9f9 Removing {len(critical_issues)} fabricated/unsupported claim(s) from synthesis...")
                 answer = await self._remediate_synthesis(answer, critical_issues + warning_issues, request, user)
                 await _emit(event_emitter, "\u2705 Synthesis cleaned \u2014 fabricated content removed")
+
+            # Record which sources the FINAL synthesis actually CITED ([Source N]),
+            # so only USED sources are persisted/linked downstream — not the ones
+            # gathered-but-unused or invalidated (caller reads self.cited_sources).
+            cited_nums = _cited_source_numbers(answer)
+            self.cited_sources = [selected[n - 1] for n in sorted(cited_nums)
+                                  if 1 <= n <= len(selected)]
 
             # Append credibility report
             report = self._credibility_report(verification, scrubbed, all_sources)
@@ -1277,12 +1302,30 @@ class _Synthesizer:
             f"# Synthesis to Clean\n\n{synthesis}"
         )
         try:
-            cleaned = await self._sa.run(
-                _REMEDIATION_PROMPT, user_prompt, request, user
+            # nothink: remediation must return ONLY the corrected synthesis. With
+            # reasoning enabled this model narrates its edit process ("the prompt
+            # says…", "I deleted them", "Self-Correction…") straight into the
+            # output — the exact thinking-bleed we must not store.
+            cleaned = (await self._sa.run(
+                _REMEDIATION_PROMPT, user_prompt, request, user, nothink=True
+            ) or "").strip()
+            # Robustness guard: the model sometimes ECHOES THE PROMPT back (the
+            # "# Issues Found by Reviewer" / "# Synthesis to Clean" blocks) or
+            # mangles the doc instead of returning the cleaned synthesis. Storing
+            # that corrupts the knowledge base. Reject any output that looks like
+            # the prompt, or that collapsed to far shorter than the original, and
+            # keep the original synthesis instead (remediation is best-effort).
+            echoes_prompt = (
+                "# Issues Found by Reviewer" in cleaned
+                or "# Synthesis to Clean" in cleaned
+                or cleaned.lstrip().lower().startswith("# issues found")
             )
-            if cleaned and len(cleaned) > 100:
+            too_short = len(cleaned) < max(150, int(len(synthesis) * 0.4))
+            if cleaned and not echoes_prompt and not too_short:
                 return cleaned
-            logger.warning("Remediation returned too-short result, keeping original")
+            logger.warning(
+                "Remediation output rejected (echoes_prompt=%s too_short=%s); "
+                "keeping original synthesis", echoes_prompt, too_short)
             return synthesis
         except Exception as e:
             logger.warning("Remediation pass failed: %s", e)
@@ -1538,6 +1581,61 @@ Return JSON:
 """
 
 
+# --- Full-page content fetch (grounds synthesis on real text, not snippets) ---
+# OWUI's search_web() returns only short result snippets (~150 chars). A proper
+# synthesis must be grounded in the actual page text, so we fetch + extract the
+# full body of the sources we keep. Best-effort: blocked/JS-only/slow pages fall
+# back to the snippet, never stalling the run.
+_FETCH_UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+             "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
+_FETCH_DROP = re.compile(
+    r"(?is)<(script|style|head|nav|footer|svg|noscript|form|aside|header)\b.*?</\1>")
+_FETCH_TAGS = re.compile(r"(?s)<[^>]+>")
+_FETCH_SPACES = re.compile(r"[ \t]{2,}")
+
+
+def _extract_text_from_html(raw: str, max_chars: int) -> str:
+    """Strip a fetched HTML document to readable body text (no extra deps)."""
+    if not raw:
+        return ""
+    body = _FETCH_DROP.sub(" ", raw)
+    # Keep paragraph/heading breaks as newlines so structure survives.
+    body = re.sub(r"(?i)</(p|div|li|h[1-6]|tr|br|section|article)\s*>", "\n", body)
+    body = re.sub(r"(?i)<br\s*/?>", "\n", body)
+    text = _FETCH_TAGS.sub(" ", body)
+    text = _html.unescape(text)
+    text = _FETCH_SPACES.sub(" ", text)
+    text = re.sub(r"\n[ \t]+", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    return text[:max_chars]
+
+
+async def _fetch_page_text(client: "httpx.AsyncClient", url: str,
+                           max_chars: int = 8000, timeout: float = 15.0) -> str:
+    """Fetch one URL and return extracted body text, or '' on any failure."""
+    try:
+        r = await client.get(url, timeout=timeout, follow_redirects=True,
+                             headers={"User-Agent": _FETCH_UA,
+                                      "Accept": "text/html,application/xhtml+xml"})
+        if r.status_code != 200:
+            return ""
+        ctype = (r.headers.get("content-type") or "").lower()
+        if "html" not in ctype and "text" not in ctype and ctype:
+            return ""  # PDFs/binaries — not handled here
+        return _extract_text_from_html(r.text, max_chars)
+    except Exception:
+        return ""
+
+
+# Citations the synthesis prompt emits look like "[Source 3]" / "[Source 3, Source 7]".
+_CITE_RE = re.compile(r"\[\s*Source\s+(\d+)", re.IGNORECASE)
+
+
+def _cited_source_numbers(answer: str) -> set:
+    """1-based source numbers actually referenced in the final synthesis."""
+    return {int(m) for m in _CITE_RE.findall(answer or "")}
+
+
 class _QuickResearcher:
     """Goal-driven research: iterate until min_relevant_sources are found.
 
@@ -1722,6 +1820,12 @@ class _QuickResearcher:
             if analysis.get("gaps"):
                 await _emit(emitter, f"\U0001f50d Remaining gaps: {', '.join(analysis['gaps'][:3])}")
 
+        # --- Ground on full page text (not search snippets) ---
+        if getattr(self._v, "fetch_full_content", True):
+            n = await self._enrich_full_content(relevant_sources + trail_sources, emitter)
+            if n:
+                await _emit(emitter, f"\U0001f4c4 Fetched full content for {n} source(s)")
+
         # --- Synthesize ---
         session.phase = ResearchPhase.SYNTHESIZING
         await _emit(emitter, f"\U0001f9e0 Synthesizing ({len(relevant_sources)} relevant + {len(trail_sources)} trail sources)...")
@@ -1739,8 +1843,41 @@ class _QuickResearcher:
         # Expose this run's coverage/gap markers for the per-chat ledger.
         self.last_covered = accumulated_covered
         self.last_gaps = last_gaps
-        self.last_sources = relevant_sources + trail_sources
+        # Persist ONLY the sources the synthesis actually cited (used). Fall back
+        # to the relevant set if citation parsing found nothing, so we never lose
+        # provenance entirely \u2014 but never persist gathered-but-unused/trail noise.
+        self.last_sources = self._synth.cited_sources or relevant_sources
         return answer
+
+    async def _enrich_full_content(self, sources, emitter=None) -> int:
+        """Fetch + extract full page text for each source into s['content'].
+
+        Bounded-parallel, per-source timeout, snippet-fallback (a blocked or
+        JS-only page just keeps its snippet). Returns the count enriched.
+        """
+        targets = [s for s in (sources or []) if s.get("url")]
+        if not targets:
+            return 0
+        max_chars = int(getattr(self._v, "fetch_max_chars", 8000))
+        timeout = float(getattr(self._v, "fetch_timeout", 15))
+        sem = asyncio.Semaphore(max(1, int(getattr(self._v, "max_parallel_queries", 5))))
+        enriched = 0
+
+        async def _one(client, s):
+            nonlocal enriched
+            async with sem:
+                text = await _fetch_page_text(client, s["url"], max_chars, timeout)
+            if text and len(text) > len(s.get("summary", "")):
+                s["content"] = text
+                enriched += 1
+
+        try:
+            async with httpx.AsyncClient() as client:
+                await asyncio.gather(*[_one(client, s) for s in targets],
+                                     return_exceptions=True)
+        except Exception as e:
+            logger.warning("full-content enrichment failed (non-fatal): %s", e)
+        return enriched
 
     # --- Search helpers ---
 
@@ -2602,6 +2739,14 @@ async def _persist_research_evidence(valves, sub_agent, *, query, answer,
             except Exception:
                 pass
 
+    # Don't persist an evidence-less synthesis (a run where web/RAG search
+    # returned nothing). It is not a knowledge artifact — just clutter that
+    # accumulates as low-value "0 sources collected" rows on the thread.
+    norm_sources = _ev_normalize_sources(sources)
+    if not norm_sources:
+        await _emit("🧠 research not persisted — no sources gathered")
+        return
+
     claim, volatility, topic = answer.strip()[:600], "medium", "research"
     try:
         parsed = await sub_agent.run_json(
@@ -2645,7 +2790,7 @@ async def _persist_research_evidence(valves, sub_agent, *, query, answer,
         "thread_id": active_thread,
         "model": (getattr(valves, "research_model", "")
                   or getattr(valves, "model", "") or None),
-        "sources": _ev_normalize_sources(sources),
+        "sources": norm_sources,
     }
 
     async def _direct_persist():
@@ -2737,6 +2882,9 @@ class Tools:
         sub_agent_nothink: bool = Field(default=True, description="Route mechanical sub-agent JSON calls (anchor, relevance gate, topic extraction, gap analysis, etc.) to the reasoning-disabled model alias for speed. With llama-swap this is the SAME model process (no reload) — it only skips thinking-token generation. Falls back to base model if the alias is unavailable.")
         nothink_suffix: str = Field(default=":nothink", description="Suffix appended to the chat model id to address its reasoning-disabled alias (matches the llama-swap setParamsByID '${MODEL_ID}:nothink' entry). Empty disables nothink routing.")
         max_parallel_queries: int = Field(default=5, ge=1, le=32, description="Max concurrent RAG collection/file queries per iteration. Parallelizes the term×collection fan-out without overloading the single embedding server.")
+        fetch_full_content: bool = Field(default=True, description="Before synthesizing a quick research() run, fetch + extract the FULL page text of the kept sources instead of grounding on the ~150-char search snippet. Makes the synthesis rich AND evidence-grounded (and the full text is what gets stored in open-brain). Best-effort: blocked/JS-only/slow pages fall back to the snippet. Disable to revert to snippet-only.")
+        fetch_max_chars: int = Field(default=8000, ge=500, le=50000, description="Max characters of extracted body text kept per fetched source (caps prompt + stored size).")
+        fetch_timeout: int = Field(default=15, ge=3, le=60, description="Per-source full-content fetch timeout (seconds). A slow page is skipped (keeps its snippet) rather than stalling the run.")
         include_sources: bool = Field(default=True, description="Append source references to answer")
         top_k_per_collection: int = Field(default=3, ge=1, le=20, description="Chunks per collection per query")
         max_collections: int = Field(default=5, ge=1, le=50, description="Max collections to search")

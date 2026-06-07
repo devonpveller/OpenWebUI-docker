@@ -13,7 +13,7 @@ for the full inventory — networks, ports, dependency order.
 | Stack | Driven with | Contents |
 |-------|-------------|----------|
 | **Main** (`ai-stack`) | `docker compose ...` | core (`openwebui`, `tailscale`, `llama-cpp`, `llama-cpp-embed`, `watchtower`), memory (`mnemory`, `mnemory-gateway`, `mnemory-backup`), search (`tor`, `redis`, `searxng`, `gateway`, `mcpo`), coder (`open-terminal`, `little-coder`, `lc-mcpo`, `lc-egress`, `little-coder-backup`), aux (`smolcrawl-pipelines`, `surrealdb`, `open_notebook`, `openwebui-backup`) |
-| **Open Brain** (`open-brain`) | `docker compose -f OB1/docker/docker-compose.yml ...` | 10 `openbrain-*` containers — a **separate** project that attaches to the main stack's `ai-stack_llm-net` as an external network |
+| **Open Brain** (`open-brain`) | `docker compose -f OB1/docker/docker-compose.yml ...` | 20 `openbrain-*` containers (incl. a 4-job scheduled slice) — a **separate** project that attaches to the main stack's `ai-stack_llm-net` as an external network |
 | **Recovery stack** | `scripts/emergency-recovery.ps1` (or `.bat`) | Ordered restart/repair across **both** compose projects — `recover` / `nuclear` / `gpu-reset` |
 
 A plain `docker compose` command never touches Open Brain — it is its own

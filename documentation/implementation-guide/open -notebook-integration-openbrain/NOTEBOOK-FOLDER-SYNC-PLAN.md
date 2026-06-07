@@ -78,6 +78,16 @@ ON-side only; no OB1/compiler change. **This is the first deliverable.**
 ---
 
 ## 5. Status
+
+> **PROMOTED TO PROD 2026-06-07.** Live `open_notebook` runs the fork on
+> `openbrain-db`. Reconcile validated against the real registry:
+> `created=0 updated=8 removed=0 folder_count=36` → **36 ON notebooks, all
+> `ob_thread_id`-linked, no duplicates.** Migration + nightly wiki recompile had
+> produced duplicate folder-synced "twins" for 7 names; merged into the user's
+> originals (chat preserved) — reconcile keys on `ob_thread_id`, so twins do not
+> regenerate. Sources/notes partition confirmed live (Voya 401k: 111 sources + 5
+> syntheses). See [PROMOTION-EXECUTED-2026-06-07.md](PROMOTION-EXECUTED-2026-06-07.md).
+
 - [x] **B1/B4 read-sync** — built + validated in `iks-dev`. 38 wiki notebooks → 38 ON notebooks (`folder_synced=true`, persisted via **migration 16** — notebook table is SCHEMAFULL); idempotent (re-run created/updated/removed = 0); exclude-one → that ON notebook removed with **no OB1 unlink** (thread/sources preserved) → restore re-creates. Mount `openbrain-wiki-data:/wiki:ro` + `WIKI_NOTEBOOKS_DIR`. **NB:** sandbox ON points at `iks-db` (6 threads), so source/name-from-thread resolution fully exercises only in prod (ON → `openbrain-db`, the 38 threads); creation/idempotency/removal validated here. Build is cp'd — image rebuild + compose mount + migration 16 owed at promotion.
 - [x] **B3 add / source-remove** — already implemented (OB1 `thread_sources` link / set-inactive; source row never deleted).
 - [x] **B2 create = thread** — built + validated: `POST /notebooks` now eagerly `ensure_ob_thread()` → OB1 thread created (verified: ob_thread_id set, iks-db threads +1, thread named after the notebook). The compiler renders the folder later; read-sync reconciles `folder_synced`.

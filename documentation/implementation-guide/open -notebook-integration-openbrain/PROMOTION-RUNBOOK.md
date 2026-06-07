@@ -1,5 +1,14 @@
 # Promotion Runbook — Integrated Knowledge System
 
+> ⚠️ **SUPERSEDED for the live cutover (2026-06-07).** This is the *pre-execution
+> plan*. The promotion was carried out with several deliberate divergences
+> (HTTP-API migration via `migrate-prod-on-api.py`, `env_file` secret handling
+> instead of `POSTGRES_PASSWORD` in `.env`, the `openbrain-chunk-worker` add, and
+> a notebook-twin merge). For the authoritative **as-built record + per-repo
+> commit handoff**, see
+> [PROMOTION-EXECUTED-2026-06-07.md](PROMOTION-EXECUTED-2026-06-07.md). Keep this
+> file for the rationale/checklist scaffolding it documents.
+
 **For the operator.** The implementing agent never runs this (guardrail D3).
 Everything below was built and validated in the `iks-dev` sandbox; this
 moves it to prod. All schema is **additive** and all removals are **soft**, so

@@ -530,12 +530,17 @@ services:
     pull_policy: always
 
   open_notebook:
-    image: lfnovo/open_notebook:v1-latest
+    # IKS fork (open-notebook repo, Dockerfile.single) — OB1 Postgres is the
+    # canonical source-of-truth. Locally built + tagged; never pulled.
+    # Build/tag at promotion: docker build -t open_notebook:iks ...; see
+    # documentation/implementation-guide/open -notebook-integration-openbrain/.
+    image: open_notebook:iks
     container_name: open_notebook
     networks:
       - default
       - llm-net
       - app-net               # pre-flight §7.4 — added so portal Caddy can reach :8502 / :5055
+      - obnet                  # IKS — reach openbrain-db (canonical OB1 store)
     ports:
       - "127.0.0.1:8503:8502" # pre-flight §6.1 — was "8503:8502" (LAN-exposed)
       - "127.0.0.1:5055:5055" # pre-flight §6.1 — was "5055:5055" (LAN-exposed)
@@ -564,12 +569,40 @@ services:
       # see Caddyfile. The browser uses same-origin /api/* and Caddy
       # routes those to FastAPI.
       - INTERNAL_API_URL=http://127.0.0.1:5055
+
+      # ----- IKS: OpenBrain (OB1) is the canonical source-of-truth ---------
+      # SurrealDB above stays as the local UI/queue/chat/cache store (D1, a
+      # thin regenerable mirror). Sources/threads live in openbrain-db.
+      # The OB1 password is NOT set here: it is injected as POSTGRES_PASSWORD
+      # via the `env_file: OB1/docker/.env` directive below (read automatically
+      # by `docker compose up` — no --env-file flag, no secret duplicated into
+      # ai-stack/.env). ob1_repository._cfg() falls back OB1_DB_PASSWORD →
+      # POSTGRES_PASSWORD, so the env_file value is what's used.
+      - OB1_DB_HOST=openbrain-db
+      - OB1_DB_PORT=5432
+      - OB1_DB_NAME=openbrain
+      - OB1_DB_USER=postgres
+      # bge-m3 (1024-dim) so OB1 source embeddings match every other writer.
+      - EMBEDDING_API_BASE=http://llama-cpp-embed:8080/v1
+      - EMBEDDING_API_KEY=not-needed
+      - EMBEDDING_MODEL=bge-m3
+      # Wiki notebooks/ folder = the notebook registry (B1 folder sync), RO.
+      - WIKI_NOTEBOOKS_DIR=/wiki/content/notebooks
+      - NOTEBOOK_SYNC_INTERVAL_S=900
+    # Supplies POSTGRES_PASSWORD (the OB1 store secret) into the container
+    # without writing it into ai-stack/.env. Other keys in this file are
+    # harmless to ON (ignored). Same secret the OB1 stack already uses.
+    env_file:
+      - OB1/docker/.env
     volumes:
       - D:\Open WebUI\open-notebook\notebook_data:/app/data
+      # Read-only view of the live wiki tree so ON reconciles the notebooks
+      # folder → ON notebooks (folder is authority). External open-brain volume.
+      - openbrain-wiki-data:/wiki:ro
     depends_on:
       - surrealdb
     restart: always
-    pull_policy: always
+    pull_policy: never
 
   # ---------------------------------------------------------------------
   # Private Search Gateway (privacy-first web search over Tor).
