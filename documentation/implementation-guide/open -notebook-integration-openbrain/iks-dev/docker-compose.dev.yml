@@ -133,12 +133,15 @@ services:
       SURREAL_PASSWORD: root
       SURREAL_NAMESPACE: open_notebook
       SURREAL_DATABASE: open_notebook
-      # Source-of-truth -> scratch OB1 Postgres (Phase 4 data-access module)
-      OB1_DB_HOST: iks-db
+      # Source-of-truth -> OB1 Postgres. Defaults to the scratch iks-db
+      # (isolated). To point the sandbox at the LIVE openbrain-db for testing,
+      # recreate with: OB1_DB_HOST=openbrain-db and --env-file <open-brain .env>
+      # (which supplies POSTGRES_PASSWORD). Default keeps prod untouched.
+      OB1_DB_HOST: ${OB1_DB_HOST:-iks-db}
       OB1_DB_PORT: "5432"
       OB1_DB_NAME: openbrain
       OB1_DB_USER: postgres
-      OB1_DB_PASSWORD: iks_dev_only
+      OB1_DB_PASSWORD: ${POSTGRES_PASSWORD:-iks_dev_only}
       # bge-m3 (1024-dim) so OB1 source embeddings match every other writer.
       # Reached over llm-net (read-only inference).
       EMBEDDING_API_BASE: http://llama-cpp-embed:8080/v1
