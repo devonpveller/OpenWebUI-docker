@@ -144,8 +144,15 @@ services:
       EMBEDDING_API_BASE: http://llama-cpp-embed:8080/v1
       EMBEDDING_API_KEY: not-needed
       EMBEDDING_MODEL: bge-m3
+      # Wiki notebooks/ folder is the notebook registry (B1 sync). Read-only.
+      WIKI_NOTEBOOKS_DIR: /wiki/content/notebooks
+      NOTEBOOK_SYNC_INTERVAL_S: "900"
     volumes:
       - iks-notebook-data:/app/data
+      # Read-only view of the live wiki tree so ON can reconcile the notebooks
+      # folder → ON notebooks (folder is authority). External volume from the
+      # open-brain project.
+      - openbrain-wiki-data:/wiki:ro
     ports:
       - "127.0.0.1:18502:8502"   # Web UI
       - "127.0.0.1:15055:5055"   # REST API
@@ -216,6 +223,11 @@ volumes:
   iks-db-data:
   iks-surreal-data:
   iks-notebook-data:
+  # Live wiki tree (notebooks/ registry), read-only. Created by the open-brain
+  # compose project; referenced here as external so the sandbox never owns it.
+  openbrain-wiki-data:
+    external: true
+    name: open-brain_openbrain-wiki-data
 
 networks:
   # Dedicated throwaway bridge for the sandbox.
