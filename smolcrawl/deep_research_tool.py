@@ -2545,7 +2545,10 @@ def _format_cached_research(cached, tool_name: str) -> str:
     date = cached.get("researched_on") or "an earlier date"
     stale = bool(cached.get("is_stale"))
     due = cached.get("due_date")
-    body = (cached.get("claim") or "").strip()[:1200]
+    # `claim` here is the stored synthesis source content — i.e. the FULL
+    # detailed research result (the persist endpoint stores the full synthesis
+    # as content). Return it in full on recall; do NOT truncate.
+    body = (cached.get("claim") or "").strip()
     if stale:
         status = (f"⚠️ STALE — re-validation was due {due}"
                   + (f" ({cached.get('age_days')}d old)"
@@ -2623,7 +2626,12 @@ async def _persist_research_evidence(valves, sub_agent, *, query, answer,
     payload = {
         "research_key": _compute_research_key(query),
         "query": query[:400],
+        # `claim` = short standalone summary (for the topical embedding + cache
+        # display). `synthesis` = the FULL detailed research result, stored as
+        # the open-brain source content (so robust findings are preserved, not a
+        # one-paragraph summary).
         "claim": claim,
+        "synthesis": (answer or "").strip(),
         "kind": kind,
         "volatility": volatility,
         "revalidate_days": revalidate,
