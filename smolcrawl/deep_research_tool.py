@@ -2627,13 +2627,21 @@ async def _persist_research_evidence(valves, sub_agent, *, query, answer,
         "kind": kind,
         "volatility": volatility,
         "revalidate_days": revalidate,
+        # `notebook` is the legacy label the direct /research/persist still
+        # stamps; `topic_hint` is the same value, named for the curator (which
+        # treats it only as a HINT — the thread DECISION is the curator's).
         "notebook": topic,
+        "topic_hint": topic,
+        # An explicit active_thread_id is honored as-is; the curator bypasses
+        # its resolver when a thread_id is supplied (deliberate placement).
         "thread_id": active_thread,
         "model": (getattr(valves, "research_model", "")
                   or getattr(valves, "model", "") or None),
         "sources": _ev_normalize_sources(sources),
     }
-    try:
+
+    async def _direct_persist():
+        """Fallback: write straight to /research/persist (pre-curator path)."""
         async with httpx.AsyncClient(timeout=90.0) as client:
             r = await client.post(
                 f"{base}/research/persist",
@@ -2653,6 +2661,42 @@ async def _persist_research_evidence(valves, sub_agent, *, query, answer,
                 f"🧠 research saved to open-brain (vol:{volatility}, "
                 f"revalidate {revalidate}d, "
                 f"{data.get('sources_written', 0)} sources -> {where})")
+
+    # Curator-first: when the managed thread inlet is enabled, hand the package
+    # to the curator so OB1 resolves the thread (de-fragmentation). Fall back to
+    # a direct persist on ANY failure (or when disabled) so research output is
+    # never lost (best-effort, never blocks the result).
+    use_curator = getattr(valves, "use_managed_thread_inlet", True)
+    curator = (getattr(valves, "curator_url", "") or "").rstrip("/")
+    if use_curator and curator:
+        try:
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                r = await client.post(
+                    f"{curator}/ingest/research-package",
+                    headers={"x-brain-key": key,
+                             "Content-Type": "application/json"},
+                    json=payload)
+                if r.status_code == 200:
+                    data = r.json() or {}
+                    p = data.get("persist") or {}
+                    decision = data.get("thread_decision", "?")
+                    tname = data.get("thread_name") or data.get("thread_id")
+                    await _emit(
+                        f"🧠 research curated into open-brain (vol:{volatility}, "
+                        f"revalidate {revalidate}d, "
+                        f"{p.get('sources_written', 0)} sources -> "
+                        f"thread '{tname}' [{decision}])")
+                    return
+                snippet = " ".join((r.text or "").split())[:200]
+                logger.warning("research curate failed: HTTP %s %s -> "
+                               "falling back to direct persist",
+                               r.status_code, snippet)
+        except Exception as exc:
+            logger.warning("research curate error: %s -> falling back to "
+                           "direct persist", type(exc).__name__)
+
+    try:
+        await _direct_persist()
     except Exception as exc:
         await _emit(f"🧠 research persist error: {type(exc).__name__}")
 
@@ -2702,6 +2746,8 @@ class Tools:
         evidence_volatility_days: str = Field(default="fast:7,medium:180,slow:1095", description="Re-validation windows per volatility tier; past the window the LLM downgrades the fact to an educated guess.")
         openbrain_url: str = Field(default="http://openbrain-mcp:8000", description="open-brain MCP base URL (llm-net, trusted writer path). Research synthesis + sources persist here; the mnemory misuse is fully retired.")
         openbrain_key: str = Field(default="", description="open-brain MCP_ACCESS_KEY (x-brain-key). MUST be set to the OB1 docker .env MCP_ACCESS_KEY or research persistence/cache is skipped (graceful).")
+        use_managed_thread_inlet: bool = Field(default=True, description="Route completed research through the OB1 research-thread inlet service (the curator) so threads are MANAGED — each run is resolved onto the best existing thread (de-fragmentation) before the write. Set FALSE to use the original unmanaged OB1 inlet instead (a direct /research/persist; sources land in the unthreaded inbox / whatever notebook string the run produced). Default TRUE. When TRUE but the curator is unreachable, the run still falls back to the direct inlet so research output is never blocked.")
+        curator_url: str = Field(default="http://openbrain-curator:8000", description="open-brain research-curator (managed thread inlet) base URL, used when use_managed_thread_inlet is TRUE. A completed run is POSTed here as a 'package'; the curator resolves it onto the best existing thread and delegates the write to /research/persist. On any failure the run falls back to a direct /research/persist. Reuses openbrain_key as x-brain-key.")
         active_thread_id: str = Field(default="", description="Optional open-brain research thread UUID. When set, sources gathered by a research run are auto-linked to this thread (link_type=automatic, confirmed); empty = sources land in the unthreaded inbox (still recorded as a session). Create/list threads via the open-brain create_thread/list_threads MCP tools.")
 
     def __init__(self):
