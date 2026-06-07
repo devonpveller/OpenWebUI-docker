@@ -182,7 +182,9 @@ reuse what's deployed.)
 | Need | Existing piece |
 |------|----------------|
 | Source discovery | SearXNG-over-Tor private gateway (search stack) |
-| Full fetch + extraction | SmolCrawl (`smolcrawl-pipelines`) + `openbrain-extract` + `ingest_url`/`ingest_urls` |
+| Per-source fetch + extraction | direct page fetch (HTTP) + HTML→text extract (the tool's stopgap path) — single pages, not whole sites |
+| **Deep whole-domain ingest** (optional, distinct mode) | **SmolCrawl** (`smolcrawl-pipelines`) — for exhaustively crawling an entire documentation site / framework, NOT ordinary per-source gather. Invoked only when a gap is "ingest all of <domain>". |
+| Upload/file extraction (PDF/Office/audio) | `openbrain-extract` (multipart upload → markdown; not a URL fetcher) |
 | Candidate staging | `sessions` / `session_sources` |
 | Dedup + linking | `find_or_create_source`, `link_source_to_thread` |
 | Thread placement + storage | the deployed **curator** + `/research/persist` |
