@@ -11,6 +11,17 @@
 
 > **UX-CARD — operator-set design requirement (2026-06-06).** Every source/citation/grounding interaction surface is a **full-width card in the center column** (`sharedPageComponents.afterBody`), NOT a widget crammed into the narrow right rail. The card has: a title + a live state/impact line, a one-paragraph **plain-language explanation of what the action does**, the live list it manages, and its action button(s); destructive/irreversible actions get an explicit confirm. Shared look across [NotebookPage](../../../OB1/docker/wiki-viewer/quartz-overlay/quartz/components/NotebookPage.tsx) (hub sources/suggestions/notes), [GroundingPanel](../../../OB1/docker/wiki-viewer/quartz-overlay/quartz/components/GroundingPanel.tsx) (entity grounding), [SourceRetractor](../../../OB1/docker/wiki-viewer/quartz-overlay/quartz/components/SourceRetractor.tsx) (source lifecycle), [NoteReferences](../../../OB1/docker/wiki-viewer/quartz-overlay/quartz/components/NoteReferences.tsx) (note refs). **Apply this pattern to any future source/citation component** (SourceEditor, SourceLinker, ImportStatus, NotebookIndex). The old rail GroundingBadge was retired in favour of GroundingPanel.
 
+> **🚀 DEPLOYED TO PRODUCTION — 2026-06-06.** The entire Quartz-4 expansion (P0–P6 + all operator-iterated features) is **live in the production `ai-stack`** on `feature/integrated-knowledge-system` (**NO** main merge — "merge" = deploy-to-live). 8 migrations applied (data intact: `sources` 777 / `thoughts` 11,574), 5 OB1 containers rolled, **38 notebooks** backfilled + hub-synthesized, **portal AND tailnet `/workbench`** live + security-verified, and a pre-existing worker **poison-queue bug fixed**. **Full deployment record → [IMPLEMENTATION-OUTCOMES-quartz-4.md](IMPLEMENTATION-OUTCOMES-quartz-4.md).** Treat every P0–P6 line below as built **and now DEPLOYED** — the detailed ticks remain the implementation record.
+>
+> **OUTSTANDING (safe to continue):**
+> 1. **Full wiki recompile finishing** (running 2026-06-06) — regenerates all entity pages with new compiler features + clears retired `/topic/*` links. Verify a sample page + that `/topic/*` 404s resolve.
+> 2. **Commit the uncommitted changes** (operator, G1): `config/caddy/Caddyfile`, `docker-compose.yml`, OB1 worker/component edits, docs. Nothing pushed.
+> 3. **Tear down `ob-preview`** — `docker compose -f OB1/docker/docker-compose.preview.yml down -v` (keep unit tests).
+> 4. **`source_chunks` backfill** (IKS-side) — `source_chunks=0`; ON retrieval empty until the chunk-embedding worker runs on prod.
+> 5. **OD-1 purge semantics** (plan §12.5) — suppression vs crypto-shred; **gates the P8 read-only wiki-history MCP**.
+> 6. **X.2 backups** — add the `wiki-assets` volume to the backup set.
+> 7. **P7 podcasts** — still DEFERRED.
+
 ---
 
 ## 0. Working agreements (read before touching anything)

@@ -1,8 +1,21 @@
 # Quartz 4 Expansion Plan — Quartz as the Open Brain Workbench
 
-> **Status:** In implementation (2026-06-05). **Backend/compiler/schema for ALL phases landed & locally validated; the frontend tail remains.**
-> - **Validated offline:** P1 provenance compiler (logic-tested); P0 foundations (workbench skeleton, Caddy route `caddy validate` ✅, compose+`wiki-assets`, 3-place, slug module, TS types, frontmatter contract, overlay scaffold); the **entire 6-migration schema** (validated end-to-end on throwaway pgvector); the **whole `openbrain-workbench` backend** — `/notebooks`·`/notes`·`/sources`·`/import`·`/jobs`·`/grounding` routes over the repository/transaction layering — **`deno check` passes**; the P2 compiler notebook-hub rewrite (hubs + backfill + topic-retire + sweep, `node --check`); P4 tombstone filtering; P5 `openbrain-extract` FastAPI sidecar (`py_compile`); the P6 worker change + grounded-page policy; the Changes-log; the operator **promotion runbook**; 4 representative Quartz components (probe, grounding badge, import dropzone, source retractor).
-> - **Remaining (needs the live stack):** the Quartz components still owed — `NotebookIndex`/`NotebookPage.inline`/`MembershipPicker`/`SourceEditor`/`SourceLinker`/`ImportStatus`/leaf template + `ProvenancePanel` (built so far against the `ob-preview` stack: probe, grounding badge, import dropzone/upload modal, source retractor, **`NotesEditor`**); the `## Evolution` derivation (P6.7) + notebook `graph.json` nodes (P2.6 polish); X.2 backup-job wiring; and running every phase's **gate** + the migrations against the running stack.
+> **Status:** ✅ **DEPLOYED TO PRODUCTION (2026-06-06).** The full Quartz-4
+> expansion (P0–P6 + every operator-iterated feature) is **live in the production
+> `ai-stack`** on `feature/integrated-knowledge-system` — **NO main merge** ("merge"
+> here = *deploy the validated work to the live stack*). 8 migrations applied (data
+> intact: `sources` 777 / `thoughts` 11,574), 5 OB1 containers rolled (workbench +
+> extract net-new), **38 notebooks** backfilled + hub-synthesized, **portal AND
+> tailnet `/workbench`** live + security-verified, a pre-existing worker
+> **poison-queue bug** found & fixed, and a **full wiki recompile running**.
+> **→ Full deployment record: [IMPLEMENTATION-OUTCOMES-quartz-4.md](documentation/implementation-guide/expand-quartz-4/IMPLEMENTATION-OUTCOMES-quartz-4.md).**
+> - **Outstanding (safe to continue):** full recompile finishing (clears retired
+>   `/topic/*` links + applies new compiler features to all pages); **commit** the
+>   uncommitted `config/caddy/Caddyfile` + `docker-compose.yml` + OB1 edits
+>   (operator, G1); tear down `ob-preview` (`down -v`); `source_chunks` backfill
+>   (IKS-side; ON retrieval empty until the chunk worker runs); **OD-1 purge
+>   semantics** (§12.5 — gates the P8 read-only wiki-history MCP); X.2 `wiki-assets`
+>   backup job; P7 podcasts still DEFERRED.
 >
 > Per-task detail in [TASKS-quartz-4-expansion.md](documentation/implementation-guide/expand-quartz-4/TASKS-quartz-4-expansion.md); migration/rollout steps in [PROMOTION-RUNBOOK-quartz-4.md](documentation/implementation-guide/expand-quartz-4/PROMOTION-RUNBOOK-quartz-4.md).
 > **Branch context:** `feature/integrated-knowledge-system`
