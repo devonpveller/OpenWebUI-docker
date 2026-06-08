@@ -82,45 +82,70 @@ operator-applied for live schema (G2/G10), backup first.
   claim; `ungrounded_claims` stays empty; re-run is idempotent. The poisoning
   case is now structurally impossible.
 
-## P3 — Staging (`/research/stage`)
-- ⬜ **P3.1** New OB endpoint: `{query, gap_terms?, session_id?}` → SearXNG search
-  → shortlist → **per-source fetch+extract** (direct page fetch + HTML→text;
-  NOT SmolCrawl — SmolCrawl is the separate whole-domain ingest mode below),
-  parallel-bounded + per-source timeout + dedupe-by-url.
+## P3 — Staging (gather, in `openbrain-research`) ✅ authored + tested (2026-06-07)
+- ✅ **P3.1** Gather (`harness.ts` loop): SearXNG search → **per-source**
+  fetch+extract (`lib.ts` `extractTextFromHtml`; NOT SmolCrawl) → bounded-parallel
+  (`mapLimit`/`FETCH_CONCURRENCY`) + per-source timeout (`FETCH_TIMEOUT_MS`) +
+  dedupe-by-url. Gated to GAP needs only (cost discipline).
   - *Optional deep-domain mode (later):* when a gap is "ingest all of
     <docs-site>", a gather step may invoke **SmolCrawl** for exhaustive crawl —
     a distinct, heavier path, not the default per-source fetch.
-- ⬜ **P3.2** Stage candidates into a `sessions`/`session_sources` pool; return
-  staged sources **with full text** + ids.
-- ⬜ **P3.3** Freshness/dedup: a URL already a fresh source in OB is reused, not
-  re-fetched.
+- ✅ **P3.2** `kb.ts` `createStagingSession` + `stageSource`: candidates deduped
+  into OB (`find_or_create_source`, stable id) and linked to a `sessions` pool
+  via `session_sources`; full text retained. NOT thread-linked here — promotion
+  (cited+grounded) happens at curator ingest (P2). Verified by orchestrator.test.ts.
+- ✅ **P3.3** `kb.ts` `existingFreshSource`: a URL already fresh in OB is reused,
+  not re-fetched.
 
-## P4 — Research service (the harness, OB-side)
-- ⬜ **P4.1** New service `openbrain-research` (Deno/Node; obnet+llm-net) — 3-place
-  change (compose + recovery + stack-map).
-- ⬜ **P4.2** Lift `smolcrawl/deep_research/` modules into the service.
-- ⬜ **P4.3** Seam swaps: `search_web`→SearXNG gateway; sub-agent LLM→llama-cpp;
-  OWUI-KB RAG→OB grounded-claim KB query.
-- ⬜ **P4.4** `POST /research` with streamed progress; reuse loop = retrieve
-  grounded claims → gap analysis vs KB → stage gaps only (P3) → synthesize
-  verbatim → enforce grounding → delegate placement to the curator.
-- ⬜ **P4.5** Reuse metric: emit `claims_reused / claims_freshly_gathered` +
-  gap-ratio per run; persist for trend tracking.
-- ⬜ **P4.6** Cost guardrail (OD-6): adaptive-by-coverage — free reuse pass →
-  deep gather of remaining gaps → hard backstop (wall-time + max-fetch). On
-  backstop-with-open-gaps, emit grounded claims + explicit `[GAP]`s + record the
-  gaps (next-run targets); NEVER hallucinate-fill (GROUNDING-MODEL §6.7).
-- 🧪 **P4.7** Quality test vs the in-tool stopgap (grounded richness, fewer gaps).
+## P4 — Research service (the harness, OB-side) ✅ authored + tested (2026-06-07)
+- ✅ **P4.1** New service `openbrain-research` (Deno; obnet+llm-net), loopback
+  **8818** — 3-place change done (compose + `emergency-recovery.ps1` inventory +
+  stack-map). `init-research-jobs.sql` (async job+poll, OD-3) tested on a fresh
+  pgvector volume. NOTE: the `.bat` doesn't enumerate OB1 services (wraps compose).
+- 🟡 **P4.2** Harness is a Deno PORT (not a verbatim lift): the Python
+  `deep_research/` modules are OWUI-runtime-coupled (`request`/`user`/
+  `generate_chat_completion`/`search_web`), so a clean import is impossible. The
+  flow + prompts are reproduced in `harness.ts` against stack-native seams. The
+  in-OWUI heavy bundle stays the unmanaged fallback until P5 is deployed.
+- ✅ **P4.3** Seam swaps: search→SearXNG gateway (`searchWeb`); sub-agent LLM→
+  llama-cpp (`chat`); OWUI-KB RAG→OB grounded-claim KB (`kb.ts`
+  `retrieveRelevantClaims` over `claims`).
+- ✅ **P4.4** `POST /research` (async job+poll OD-3, + optional SSE
+  `/research/jobs/:id/stream`); reuse loop = retrieve grounded claims → decompose
+  → coverage/gap → stage gaps only (P3) → synthesize verbatim → cited-only →
+  delegate to curator. Verified end-to-end in `orchestrator.test.ts` (mocked
+  seams, real schema).
+- ✅ **P4.5** Reuse metric (`lib.ts` `reuseMetric`): `claims_reused /
+  claims_freshly_gathered / gap_ratio` persisted to `research_jobs.metrics`;
+  `research_run_metrics` view exposes the trend.
+- ✅ **P4.6** Cost guardrail (`lib.ts` `backstopDecision`): free reuse pass →
+  gap-only gather → hard backstop (`MAX_WALL_MS` + `MAX_FETCH`). The synthesizer
+  prompt forbids hallucination-fill; unsupported needs become explicit `[GAP]`s
+  (GROUNDING-MODEL §6.7). `backstop` reason is reported per run.
+- 🧪 **P4.7** Quality test vs the in-tool stopgap — **needs a live stack**
+  (llama-cpp + SearXNG). Deferred to post-deploy; the harness is structured + the
+  orchestration verified with mocks, but grounded-richness comparison is an
+  operator test once deployed.
 
 ## P5 — Repoint OWUI as a thin client
-- ⬜ **P5.1** `deep_research_tool.py` → thin client of `/research` (submit, stream,
-  render); retire the in-tool harness + the stopgap fetch.
-- 🚀 **P5.2** Operator re-paste the slimmed bundle into OWUI.
+- ✅ **P5.1** Thin client authored: `smolcrawl/deep_research_thin_client.py` —
+  submits to `/research`, polls the job (streams progress via the event emitter),
+  renders the grounded synthesis + cited sources + gaps + coverage. Carries NO
+  harness logic. Compiles clean. Authored as a NEW file (does not destroy the
+  working 3200-line tool, which stays the unmanaged fallback + stopgap until the
+  service is deployed) — the heavy bundle is retired by swapping to this once
+  openbrain-research is live.
+- 🚀 **P5.2** Operator: deploy openbrain-research (+ schema P1/P4 applied, search
+  seam wired), set the thin client's `research_url`/`brain_key` valves, then paste
+  it into OWUI Tools to replace the heavy bundle.
 
 ## P6 — Onboard other inlets
-- ⬜ **P6.1** Autonomous-agent client of `/research` (when agent orchestration lands).
-- ⬜ **P6.2** Open Notebook (or successor inlet) → call `/research`; retire its
-  redundant research code.
+- ✅ **P6.1** Autonomous-agent client: contract + curl/agent example documented in
+  `OB1/integrations/research-service/README.md` (`origin:"agent"`); same
+  `/research` API, no harness logic. Wiring lands with agent orchestration.
+- 🟡 **P6.2** Open Notebook → call `/research` (same API), retiring ON's redundant
+  research code. **Gated** on the ON-vs-Quartz-workbench decision (memory
+  `quartz-workbench-retire-on`); whichever inlet survives consumes the service.
 
 ---
 

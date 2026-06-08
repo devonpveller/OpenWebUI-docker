@@ -1,6 +1,8 @@
 # Plan — Research Engine for Open Brain
 
-**Status:** 📐 DESIGN → (build pending)
+**Status:** 🔨 BUILT (P1–P6 authored + tested 2026-06-07) — pending operator
+deploy: live schema apply (P1.5), build/run `openbrain-research`, wire the
+SearXNG cross-stack seam, paste the thin OWUI client (P5.2). Nothing committed (G1).
 **Owner:** ai-stack / Open Brain (OB1)
 **Branch:** `feature/integrated-knowledge-system` (no `main` merge)
 **Companion specs:** [GROUNDING-MODEL.md](GROUNDING-MODEL.md) (governing rubric) ·
