@@ -965,11 +965,13 @@ services:
     container_name: openbrain-wiki-backup
     volumes:
       - openbrain-wiki-data:/data:ro
+      - wiki-assets:/assets:ro          # X.2 — gitignored binary uploads (separate tar)
       - ./backups/openbrain-wiki:/backups
       - ./backup/openbrain-wiki-backup.sh:/scripts/backup.sh:ro
     environment:
       - BACKUP_DIR=/backups
       - DATA_DIR=/data
+      - ASSETS_DIR=/assets
       - RETAIN_COUNT=${OPENBRAIN_WIKI_BACKUP_RETAIN_COUNT:-2}
       - BACKUP_CRON=${OPENBRAIN_WIKI_BACKUP_CRON:-15 2 * * *}
       - TZ=UTC
@@ -1794,6 +1796,12 @@ volumes:
   openbrain-wiki-data:
     external: true
     name: open-brain_openbrain-wiki-data
+  # X.2 — OB1's gitignored binary-asset volume (uploaded images/PDFs), so the
+  # wiki-backup can snapshot it (it's not in the git vault). External: owned by
+  # the open-brain project.
+  wiki-assets:
+    external: true
+    name: open-brain_wiki-assets
 
 networks:
   # Internal-only network: no gateway, no internet access.

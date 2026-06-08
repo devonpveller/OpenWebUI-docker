@@ -1,8 +1,11 @@
 # Plan — Research Engine for Open Brain
 
-**Status:** 🔨 BUILT (P1–P6 authored + tested 2026-06-07) — pending operator
-deploy: live schema apply (P1.5), build/run `openbrain-research`, wire the
-SearXNG cross-stack seam, paste the thin OWUI client (P5.2). Nothing committed (G1).
+**Status:** 🟢 DEPLOYED (P1–P6 built + tested + live 2026-06-07). Live DB
+migrated (init-claims + init-research-jobs, backup first); openbrain-mcp +
+openbrain-curator rebuilt (P2); **openbrain-research** built + running (:8818),
+reaching the SearXNG gateway via Tor (search-gw-net). 3 live runs → 9 grounded
+claims / 42 edges / 0 ungrounded. Remaining: paste the thin OWUI client (P5.2 —
+needs OWUI admin UI). Nothing committed (G1).
 **Owner:** ai-stack / Open Brain (OB1)
 **Branch:** `feature/integrated-knowledge-system` (no `main` merge)
 **Companion specs:** [GROUNDING-MODEL.md](GROUNDING-MODEL.md) (governing rubric) ·
