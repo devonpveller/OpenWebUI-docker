@@ -70,11 +70,13 @@ operator-applied for live schema (G2/G10), backup first.
   grounded ∧ fresh ∧ ≥0.50), guarded to degrade to `null` pre-migration. The
   reuse path consuming this flag (refuse to re-serve a synthesis with no
   grounded claims) is wired tool-side in **P5**.
-- 🟡 **P2.4** Conflict handling: the MECHANISM is in place — `contradicts` edges
-  cap confidence at 0.30 + set `contradicted`, and `retract_claim()` records a
-  retraction (never silent cache preference). AUTOMATIC contradiction detection
-  (new evidence vs a stored claim) is deferred to the **P4** reuse loop, where
-  staged evidence is compared against existing grounded claims.
+- ✅ **P2.4** Conflict handling — now AUTOMATIC. `claims.ts` `detectConflicts`
+  runs at curator ingest: each new claim's nearest existing thread claim (diff
+  synthesis, within `CONFLICT_DISTANCE`) is judged by the LLM; on "contradict"
+  reciprocal `contradicts` edges cap BOTH claims at 0.30 + flag `contradicted`
+  (neither silently preferred — GROUNDING-MODEL §6.5). `retract_claim()` remains
+  for explicit retraction. Verified in `claims.integration.ts` (1 conflict → both
+  flagged + capped) and live (agreeing re-runs do NOT false-flag).
 - ✅ **P2.5** Verified: `claims.integration.ts` runs the real `writeClaims` path
   against the real schema — the fabricated unsourced `1-800` line is dropped by
   the parser gate, a `[Source 9]` phantom-citation line is dropped by the writer
@@ -102,11 +104,16 @@ operator-applied for live schema (G2/G10), backup first.
   **8818** — 3-place change done (compose + `emergency-recovery.ps1` inventory +
   stack-map). `init-research-jobs.sql` (async job+poll, OD-3) tested on a fresh
   pgvector volume. NOTE: the `.bat` doesn't enumerate OB1 services (wraps compose).
-- 🟡 **P4.2** Harness is a Deno PORT (not a verbatim lift): the Python
+- 🟢 **P4.2** Harness is a Deno PORT (not a verbatim lift): the Python
   `deep_research/` modules are OWUI-runtime-coupled (`request`/`user`/
   `generate_chat_completion`/`search_web`), so a clean import is impossible. The
-  flow + prompts are reproduced in `harness.ts` against stack-native seams. The
-  in-OWUI heavy bundle stays the unmanaged fallback until P5 is deployed.
+  flow + prompts are reproduced in `harness.ts` against stack-native seams. NOW
+  with **iterative deepening** (#1): multi-round relevance-gated gather —
+  coverage-vs-staged check + query refinement (`MAX_ROUNDS`) until needs are
+  covered or the backstop trips. Plus reuse distance threshold (#5,
+  `REUSE_MAX_DISTANCE`) so unscoped runs don't reuse irrelevant claims. Live:
+  simple queries clean; a hard CRISPR multi-hop grounded 10 claims even at the
+  fetch backstop. The in-OWUI heavy bundle stays the fallback until P5 is pasted.
 - ✅ **P4.3** Seam swaps: search→SearXNG gateway (`searchWeb`); sub-agent LLM→
   llama-cpp (`chat`); OWUI-KB RAG→OB grounded-claim KB (`kb.ts`
   `retrieveRelevantClaims` over `claims`).
