@@ -2,6 +2,21 @@
 
 > **Status:** Raw idea / brain-dump for later distillation into a proper plan.
 > **Date:** 2026-06-03
+> **Revised:** 2026-06-08 — see **[Part II](#part-ii)** at the bottom. The
+> 2026-06-07 stack cutover changed the foundation under this doc: Open Notebook is
+> now **OB1-Postgres-backed** (not SurrealDB-only), and three OB1-side services that
+> this idea needed are **already live** — the `openbrain-curator` (the "Research
+> Thread Assigner"), the grounded-**claims** layer (the substrate for a "Wikipedia
+> Backfiller"), and the shared `openbrain-research` harness. Part II re-frames the
+> whole thing as **four general agentic services** (this podcast being their first
+> chained consumer), maps each to what already exists vs. what is genuinely new, and
+> supersedes the stale parts of §1.3, §1.4, and §3.4 below. Read §1–§8 as the
+> original thinking; read Part II for the current-state reconciliation.
+>
+> **Distilled into a plan (2026-06-08):** the feasibility pass + locked decisions now
+> live in [PLAN-digest-podcast-services.md](PLAN-digest-podcast-services.md) and the
+> phased [TASKS-digest-podcast-services.md](TASKS-digest-podcast-services.md). Start
+> there for implementation; this doc is the idea-of-record.
 > **Author intent (operator):** keep sending the daily digest email exactly as it
 > is today, **and additionally** generate a short morning podcast built from the
 > same curated digest material — calendar (today + tomorrow + long-horizon
@@ -77,13 +92,21 @@ auto-discovered — nothing hard-codes the label set.
 
 ### 1.3 The podcast engine — Open Notebook, already running
 
-Open Notebook is a **separate app** (`open_notebook`, SurrealDB-backed) with a
-REST API at `:5055/api` (UI `:8502`, Tailnet `:8443`). It does source ingestion,
-multi-source Q&A, and **podcast generation** (episode profiles + speaker profiles
-+ `podcast_config`, audio via a TTS backend). The Quartz-4 plan keeps ON alive as
-the podcast tool **specifically until the deferred P7 in-stack podcast service
-exists**, so leaning on ON now is consistent with the locked roadmap (D-B / D-H),
-not a detour.
+Open Notebook is a **separate app** (`open_notebook`) with a REST API at `:5055/api`
+(UI `:8502`, Tailnet `:8443`). It does source ingestion, multi-source Q&A, and
+**podcast generation** (episode profiles + speaker profiles + `podcast_config`,
+audio via a TTS backend). The Quartz-4 plan keeps ON alive as the podcast tool
+**specifically until the deferred P7 in-stack podcast service exists**, so leaning
+on ON now is consistent with the locked roadmap (D-B / D-H), not a detour.
+
+> ⚠️ **Stale as of 2026-06-07 (IKS cutover LIVE).** ON is **no longer SurrealDB-only**.
+> The prod container now runs the fork image `open_notebook:iks` with **OB1 Postgres
+> (`openbrain-db`) as the canonical store for sources + threads**; SurrealDB survives
+> only as ON's local UI/queue/chat/cache store. This is a *big* simplification for
+> this idea: an ON source and an OB1 source are now **the same row** — no cross-store
+> sync, and a podcast ON generates can be linked straight onto OB1 threads. ON's
+> podcast API is now **OB1-thread-aware** (it can build an evidence-validated briefing
+> from a thread). See [[iks-cutover-live]] and **Part II §A**.
 
 There is also a **local OpenAI-compatible TTS/STT service at
 `host.docker.internal:8000/v1`** that Quartz-4 P7 intends to call directly later.
@@ -101,6 +124,20 @@ Following + ingesting newsletter links does **not** need a new engine:
 - New sources auto-enqueue into `source_extraction_queue` → entity worker → wiki
   compile, so ingested link content **also grounds the wiki**, not just the
   podcast (compounds with Quartz-4 P6 grounding).
+
+> ➕ **New since 2026-06-07 — three live OB1-side services this idea can stand on
+> (full detail in Part II):**
+> - **`openbrain-curator`** (`POST /ingest/research-package`) — LLM-resolves new
+>   knowledge onto the **best existing thread** (pgvector shortlist → LLM decision,
+>   conservative-merge bias) instead of spawning a fresh thread per ingest. This **is**
+>   the "Research Thread Assigner" the new workflow proposes — already built + deployed.
+> - **Grounded-claims layer** (`init-claims.sql`: `claims` + typed `claim_sources`
+>   edges + `ungrounded_claims`/`reusable_claims` views + `claim_confidence`). Every
+>   stored claim is anchored to a source; the `ungrounded_claims` view is exactly the
+>   worklist a **"Wikipedia Backfiller"** would drain.
+> - **`openbrain-research`** (`:8818`, `POST /research`) — the shared "one research
+>   brain, many thin inlets" harness. The service-abstraction the new workflow asks for
+>   already has a home here. See [[research-engine-plan]], [[research-curator-inlet-service]].
 
 ---
 
@@ -357,3 +394,260 @@ so the eventual full ON decommission (Quartz-4 §10) isn't blocked by this featu
 
 That sequence de-risks the two unknowns (link-extraction quality §3.2, ON podcast
 API §7.8) before automating anything, and every step is additive and reversible.
+
+---
+---
+
+<a id="part-ii"></a>
+
+# Part II — Revised against the live stack + the general-services framing (2026-06-08)
+
+> This part folds in the operator's expanded workflow ("Daily Digest Podcast
+> Generation & Research Thread Management") **and** the 2026-06-07 stack changes.
+> The framing shift the operator asked for: the four components below are **not
+> podcast-specific**. They are **general agentic services** — the podcast is simply
+> the *first chained use case* that exercises all of them end-to-end. Build them so
+> any future agent (deep research, the OWUI tool, Open Notebook, a scheduled job)
+> can call the same front doors.
+
+## A. What changed under this doc since it was written
+
+Three 2026-06-07 changes rewrite the foundation. **Most of the new workflow is
+already built** — the work is *wiring*, not *inventing*.
+
+| New-workflow component | Status on the live stack | Where it lives |
+|---|---|---|
+| **C1 — Research Thread Assigner** | ✅ **Built + deployed** as `openbrain-curator` | `OB1/integrations/research-curator/` — `POST /ingest/research-package` |
+| **C2 — Wikipedia Backfiller** | 🟡 **Substrate live, worker not built** — the grounded-claims layer + `ungrounded_claims` view exist; the draining worker does not | `OB1/docker/init-claims.sql`; new worker TBD |
+| **C3 — Daily Digest Link Processor** | 🟡 **§3 of this doc, partly re-pointed** — link enrichment is sketched here; it now routes through C1 instead of a static label→thread map | `OB1/recipes/daily-digest/` + new enrich stage |
+| **C4 — Podcast Generator & Ingestor** | 🟡 **API surface live, orchestration not built** — ON's podcast API is OB1-thread-aware; the digest→podcast→ingest→close loop is not wired | ON `POST /api/podcasts/generate`; new chain step |
+
+**The single most important correction to §1–§8:** because Open Notebook is now
+**OB1-Postgres-backed** (canonical sources + threads in `openbrain-db`; SurrealDB
+demoted to ON's local UI/queue/cache), the "close the loop" steps stop being a
+cross-store sync problem. An ON-ingested source, an OB1 thread, a curator decision,
+a grounded claim, and the final podcast note **all live in one Postgres**. "Link the
+note to the thread" is one row, not an integration.
+
+## B. The Service-Abstraction requirement (operator's "Core Architectural Requirement")
+
+The operator's requirement — *"each component must support abstraction, allowing
+different services to be swapped in when adding information to the brain"* — already
+has an established pattern in this workspace, and it should govern all four
+components:
+
+- **Thin inlet → shared OB1-side service.** This is the [[research-engine-plan]]
+  doctrine: "one research brain, many thin inlets." A component is an **OB1-side
+  service with a clean HTTP/queue contract**; callers (OWUI tool, the digest, ON, a
+  future agent) are thin clients. The curator and `openbrain-research` already follow
+  this shape — new components must too.
+- **Backend behind an interface.** §6 already commits to this for audio (ON podcast
+  API today → P7 in-stack TTS later, one seam). Generalize it: the *fetch/extract*
+  engine (`ingest_url` / smolcrawl / `openbrain-extract`), the *thread-resolution*
+  engine (curator), and the *grounding-source* engine (Wikipedia → later any
+  authoritative corpus) each sit behind a swappable interface.
+- **Best-effort, section-omit, never block the email.** The failure philosophy of
+  §3.6 / §5 is itself an abstraction contract: every component is independently
+  failing and never delays the one thing that must arrive on time.
+
+## C. Component 1 — Research Thread Assigner  ⟶  **use the live `openbrain-curator`**
+
+**Do not build this.** It exists and is deployed. The operator's description — *"an
+LLM decision step for every deep-research job; the LLM evaluates the new research and
+suggests the highest-probability existing thread it belongs to, or determines a new
+thread should be created"* — is a verbatim description of the curator's two-stage
+resolver:
+
+- **Stage 1:** pgvector shortlist over `threads.embedding` (top-K candidate threads).
+- **Stage 2:** LLM decision with a **conservative-merge bias** → attach to an existing
+  thread or create a new one; an explicit `thread_id` bypasses the resolver.
+- It then **delegates the write** to `openbrain-mcp`'s `/research/persist` with the
+  resolved thread injected, and refreshes the thread's description + embedding.
+- It already folded the live brain from **38 → 25 threads** (de-fragmentation proven),
+  and `deep_research` routes through it **by default**. See [[research-curator-inlet-service]].
+
+**Contract:** `POST /ingest/research-package` (header `x-brain-key`):
+```
+{ claim, synthesis?, query?, sources:[{url,title,content,summary,domain}],
+  volatility?, thread_id?(explicit override), topic_hint? }
+→ { thread_id, thread_decision:"explicit"|"existing"|"new",
+    thread_confidence, thread_name, shortlist:[...], persist:{...}, claims:{...} }
+```
+
+**The one real gap — and a correction (2026-06-08).** The curator parses grounded
+claims **only** from tag-cited synthesis (`[SOURCED] … [Source N]`, see
+[claims.ts](../../OB1/integrations/research-curator/claims.ts)); **untagged prose
+yields zero claims** (an uncited claim is dropped at the gate). A digest link is a
+**raw crawled article** — so dumping its extracted body in as `synthesis` would
+persist the article as a source but produce **no claims**, silently bypassing the
+grounding layer. The correct path (D4/D5) is to run each link through an **LLM
+extraction pass** that emits `[SOURCED] … [Source 1]` claims **citing the article**,
+then POST *that* as the research package — each link is a **one-source mini-research
+run**. A "bare source, skip the synthesis" shortcut (the earlier `source-package`
+idea) is **rejected**: a source with no claims is invisible to the podcast's grounded
+briefing (which reads `reusable_claims`), so skipping grounding doesn't save work — it
+makes the link pointless. The "too heavy" lever is **fewer links / batch / cheaper
+model**, never skipping claims.
+
+This **supersedes §3.4's static `brain/slow-ai → "Slow AI" thread` map.** Static
+label→thread mapping is the v0 fallback; the curator is the real assigner. (A label
+can still seed a `topic_hint` to bias the resolver.)
+
+## D. Component 2 — Wikipedia Backfiller  ⟶  **new worker on the live claims layer**
+
+This is the **most genuinely new** component, and the most general — it grounds the
+**whole brain**, not just podcast material. It is the *active remediation arm* of the
+grounding model's Rule #1 ("no ungrounded claim is stored/served/reused").
+
+**It already has its worklist.** `init-claims.sql` ships the `ungrounded_claims`
+view = active claims whose grounding chain never terminates in a primary source
+(`claim_min_depth(id) IS NULL`). In a healthy KB it should be empty; the backfiller's
+job is to keep it that way.
+
+**Proposed worker** (sibling to `openbrain-entity-worker` / `openbrain-chunk-worker`):
+```
+loop / on-event:
+  for claim in ungrounded_claims (optionally scoped to today's digest threads first):
+    entity/assertion ← extract the ungrounded reference from claim.text
+    page             ← Wikipedia lookup for that entity
+    source_id        ← ingest_url(page)                 # find_or_create_source dedups
+    link_claim_to_source(claim, source_id, 'corroborates', weight)
+    # claim_confidence trigger recomputes automatically → claim leaves the view
+```
+
+**Design decisions to settle (call these out in the plan):**
+- **Edge type + authority.** The confidence model scores `.gov/.edu/.mil` at authority
+  1.0, everything else 0.85 — Wikipedia lands at 0.85. Wikipedia is a **tertiary**
+  source, so prefer `edge_type='corroborates'` at a modest weight (supplementary
+  grounding) over `'states'` (primary). Optionally chase Wikipedia's own cited
+  references for stronger primaries (a v2).
+- **Trigger model.** Event-driven (fire when a new ungrounded claim appears) **plus**
+  a bounded scheduled sweep. For the podcast loop, run it as a **post-enrichment step
+  scoped to the day's new claims** so the episode narrates grounded material; a global
+  sweep can run off-peak.
+- **Budget / loop-safety.** Cap pages/claim and total Wikipedia calls per run; a claim
+  with no plausible Wikipedia entity is **left ungrounded and logged**, not retried in
+  a storm (mirrors §3.6).
+- **Abstraction.** "Wikipedia" is the first **grounding-source backend** behind the
+  interface; later swap/add authoritative corpora (docs, .gov, the brain's own
+  reusable claims) without touching the worker's drain loop.
+
+## E. Component 3 — Daily Digest Link Processor (Step 1)  ⟶  **§3 enrichment, re-pointed through C1**
+
+This is the §3 link-enrichment stage, kept almost entirely — extraction, redirect
+unwrapping, hygiene/keep-drop (§3.2), the chosen fetch engine (§3.3), and the
+**audible completeness status** `enriched`/`email-only`/`partial` (§3.5) are all
+still correct. **What changes:** the per-link "association" step (§3.4) now calls the
+**curator** instead of writing a static label→thread link.
+
+**Revised Step-1 workflow** (operator's outline, reconciled):
+1. The 01:00 chain reaches the `digest` step; email goes out **unchanged** (§5).
+2. On the **podcast side of the chain only**, extract + unwrap + filter candidate
+   links from each label email (§3.2), capped per email.
+3. For each surviving link: fetch+extract → **POST it to the curator as a research
+   package** (C1, recommended option) → curator resolves the thread, persists the
+   source linked to that thread, and (via the claims path) records grounded claims.
+4. Stamp `gmail_id`/`gmail_thread_id`/`gmail_labels`/`email_date` on each source
+   (§3.4) so the podcast can join sources back onto the originating email.
+5. Record the per-link enrichment **status** for the audible caveat (§3.5).
+6. Iterate until all candidates are evaluated.
+7. **Output — the day's source report:** every source gained today + its
+   **resolved `thread_id`/`thread_name`** + enrichment status. This report is the
+   **required input to Step 2** (C4).
+
+(Optional, off the same report: kick C2 to backfill the new threads' ungrounded
+claims before the script is written.)
+
+## F. Component 4 — Podcast Generator & Ingestor (Step 2)  ⟶  **§4, leveraging the OB1-thread-aware ON API**
+
+§4's pieces (`PodcastScriptRenderer`, the morning-show structure, audio-via-ON, the
+email link-back) stand. The cutover **upgrades the back half**: closing the loop is
+now native because everything is one store.
+
+**ON podcast API surface (verified, OB1-aware):**
+```
+POST /api/podcasts/generate
+  { episode_profile, speaker_profile, episode_name,
+    content?         # direct script/text  (the PodcastScriptRenderer output)
+    notebook_id?     # OR an OB1-thread-linked notebook → ON builds an
+                     #   evidence-VALIDATED briefing from that thread (grounded)
+    briefing_suffix? }
+  → { job_id, status, ... }
+GET /api/podcasts/jobs/{job_id}        # poll
+GET /api/podcasts/episodes/{id}/audio  # retrieve audio
+```
+> ⚠️ **Verify the operator's "June-6 podcast mods."** Exploration found the
+> OB1-thread-aware podcast path (the relevant capability) but **no podcast code
+> commits dated 2026-06-06** — last podcast-specific commits were ~Feb 2026. Confirm
+> what actually changed on the 6th before relying on a specific new feature.
+
+**Revised Step-2 workflow** (operator's outline, reconciled):
+1. Take Step-1's source report. Either (a) render a script from the enriched
+   `SectionData` and POST as `content`, or (b) pass a `notebook_id` for the relevant
+   OB1 thread and let ON build the grounded briefing — **(b) becomes viable now** that
+   ON reads OB1 threads. (For a multi-thread day, (a) is simpler; revisit per-thread
+   episodes later — §6 thread-scoped podcasts.)
+2. Poll the job; retrieve the audio.
+3. **Ingest the produced podcast as an AI note** into Open Brain: body = the
+   transcript, referencing **both** the source set **and** the audio file.
+4. **Thread closure:** link that note to **all threads** the Step-1 sources resolved
+   to (from the report). Because ON↔OB1 share Postgres, this is `link_source_to_thread`
+   rows; the note becomes a first-class thread member, **visible to the wiki compiler**
+   — so the episode also grounds the wiki, closing the research loop the operator
+   described.
+
+## G. How the four compound (why this is a services proposal, not a feature)
+
+The operator's key point: this is the **first chained consumer** of a reusable set.
+The compounding (the [[research-engine-plan]] third pillar):
+
+```
+ link → [C1 assigner] → thread + grounded claims → [C2 backfiller] → fewer gaps
+        → [C3 report] → [C4 podcast note] → linked back onto the same threads
+        → next day's research reuses those grounded claims (cheaper) → repeat
+```
+
+- **C1 (assigner)** is the general **front door for any new knowledge** —
+  de-fragmentation for research, links, agent output, ON imports alike.
+- **C2 (backfiller)** is general **brain-health** — every ungrounded claim it drains
+  raises the brain's reusable-claim ratio, making *all* future research cheaper, not
+  just this podcast.
+- **C3/C4** are the **podcast-shaped composition** of C1+C2 over the daily digest —
+  the proof that the services chain.
+
+## H. Revised smallest-viable first cut (supersedes §8)
+
+1. **Wire C3 → C1 (no new services):** in a standalone script, extract+unwrap+filter
+   one day's label-email links (§3.2), POST each as a research package to the **live
+   curator**, and eyeball the thread decisions (`existing` vs `new`) + the source
+   report. *De-risks the assigner-as-link-router assumption — the alt `source-package`
+   inlet only gets built if this proves too heavy.*
+2. **C2 spike:** point a throwaway script at the live `ungrounded_claims` view, ground
+   **one** claim via Wikipedia + `link_claim_to_source`, and confirm the confidence
+   trigger drops it from the view. *De-risks the backfiller before it's a worker.*
+3. **C4 by hand:** feed one day's report to ON `POST /api/podcasts/generate`, ingest
+   the result as an AI note, and link it to the report's threads manually. *De-risks
+   the ON API surface + the loop-closure write.*
+4. Only then wire the automated `digest → enrich(C3) → backfill(C2) → podcast(C4)`
+   chain step and the email link-back (§4.4 / §5).
+
+Every step is additive, reversible, and leans on already-deployed services — the new
+build surface is **one worker (C2) + one chain step (C3/C4 orchestration)**, not four
+components from scratch.
+
+## I. Open questions the new framing adds (extend §7)
+
+16. **Link-as-research-package vs. source-package inlet** (C1 §C) — does each digest
+    link become a one-shot synthesis (full claims participation) or a bare source
+    (lighter, weaker compounding)? Recommended: research-package.
+17. **Backfiller edge-type/authority + corpus policy** (C2 §D) — `corroborates` @ 0.85
+    for Wikipedia; chase its cited primaries later? Which corpora behind the interface?
+18. **Backfiller trigger + scope** (C2 §D) — event-driven vs. swept; today's-threads-first
+    vs. whole-brain; per-run budget.
+19. **C4 input mode** — render a `content` script (multi-thread day) vs. `notebook_id`
+    grounded briefing (single thread) — and when to split into **per-thread episodes**
+    (the §6 thread-scoped-podcast endgame).
+20. **Verify the 2026-06-06 ON podcast changes** (§F warning) before depending on them.
+21. **Curator load** — routing every digest link through the curator's LLM Stage-2 adds
+    N decisions/night; confirm against the off-peak GPU budget ([[llama-swap-perf-tuning]])
+    and consider batching the shortlist.
