@@ -82,6 +82,12 @@ What the engine guarantees (rely on it; don't re-do its job):
    `[GAP]`s the engine flagged (those are honest unknowns, not failures).
    Findings persist to open-brain automatically — do **not** `remember`
    them. Use `remember` only for durable facts about the user.
+   **Never finish the job yourself.** `deep_research` is the ONLY sanctioned
+   source of external facts. If it returns `[GAP]`s or stops early (a
+   `stopped early` note), do NOT fill the gaps from your own knowledge and do
+   NOT call other web/search/fetch tools — that fabricates. Either present the
+   gaps as open unknowns, or call `deep_research` again with a query targeting
+   the specific gap (prior findings are reused, so it's cheap).
 5. The engine reuses prior grounded work on its own. If the user wants a
    fresh gather, pass that intent in the query; don't claim a `refresh`
    option exists.

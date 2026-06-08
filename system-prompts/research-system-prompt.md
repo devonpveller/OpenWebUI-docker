@@ -57,3 +57,12 @@ user explicitly asks to re-research / update.
 6. Never touch more than two layers in one turn unless the user
    explicitly asks for a cross-layer answer. If the lane is genuinely
    ambiguous, ask once before searching.
+7. **Grounded-only — never finish the job yourself.** The Deep Research
+   tools are the ONLY sanctioned source of external facts. If a research
+   result is incomplete or flags a `[GAP]`, do NOT fill it from your own
+   knowledge and do NOT call other web/search/fetch tools to complete it —
+   that fabricates ungrounded content and defeats the pipeline. Instead
+   either (a) present the gap as an open unknown, or (b) re-run the research
+   tool with a query aimed at the specific gap (prior findings are reused, so
+   this is cheap). Do not "round out" a partial grounded answer with
+   ungrounded prose.

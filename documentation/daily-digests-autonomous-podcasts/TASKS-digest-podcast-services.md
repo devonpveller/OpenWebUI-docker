@@ -36,20 +36,23 @@ The single thing that silently breaks the first automated run if skipped (PLAN �
 
 ---
 
-## P1 — S3 Digest Link Processor (standalone, eyeball-first)  *(agent)*
+## P1 — S3 Digest Link Processor (standalone, eyeball-first)  *(agent)*  ✅ BUILT + DRY-RUN VALIDATED 2026-06-08
 
 Reuses the live curator (S1) — no new service yet; run as a standalone script against one real day.
+Code: [`OB1/recipes/daily-digest/link-enrich.ts`](../../OB1/recipes/daily-digest/link-enrich.ts) (runner, **dry-run by default**) + [`src/enrich/`](../../OB1/recipes/daily-digest/src/enrich/) (`types`, `email-body`, `links`, `extract`, `synthesize`, `curator`, `egress`). All `deno check --unstable-net` clean. Nothing committed (G1).
 
-- [ ] **P1.1** `byLabel` grouping on [AiNewsSection](../../OB1/recipes/daily-digest/src/sections/ai-news.ts) (additive map next to `bySender`; email unchanged). Map `brain/slow-ai → "Slow AI"`, etc.; auto-discover new `brain/*` labels.
-- [ ] **P1.2** Link extraction + hygiene per label email: extract candidate URLs, **unwrap redirect/tracker wrappers** to the real destination, drop noise (unsubscribe/view-in-browser/social/mailto/assets/ads), dedup, **cap per email** (~5).
-- [ ] **P1.3** Fetch/extract each surviving link via `ingest_url` (behind the swappable fetch interface). Time-box (~60s/link), bounded total.
-- [ ] **P1.4** **Synthesis-then-package (D4/D5 — mandatory; this is the step that puts the link into the claim pipeline).** Raw article body yields **0 claims** — the curator parses claims only from `[SOURCED]/[Source N]`-tagged text ([claims.ts](../../OB1/integrations/research-curator/claims.ts); uncited claims dropped at [claims.ts:138](../../OB1/integrations/research-curator/claims.ts#L138)/[207](../../OB1/integrations/research-curator/claims.ts#L207)). Per link: **(a)** run an LLM extraction pass over the extracted content → tagged claims `[SOURCED]/[INFERRED] … [Source 1]` citing **this article** (reuse the research-service SYNTH prompt — one-claim-per-line, tag-first); **(b)** assemble `{claim:title/summary, synthesis:<tagged>, sources:[link], topic_hint:label}` and `POST /ingest/research-package` (`x-brain-key`); **(c)** confirm the response `claims` stats show grounded claims written (**not** all `ungroundedSkipped`). Capture `thread_id`/`thread_decision`/`thread_name`. *No claims-free shortcut — a bare source is invisible to S4 (D5).*
-- [ ] **P1.5** Stamp `gmail_id`/`gmail_thread_id`/`gmail_labels`/`email_date` on each ingested source (§3.4 keys — the same `AiNewsSection` groups on).
-- [ ] **P1.6** Record per-link enrichment status `enriched | email-only | partial` (§3.5).
-- [ ] **P1.7** Emit the **DAY REPORT**: `[{source_id, url, label, thread_id, thread_name, status}]` to `/reports`.
-- [ ] **P1.8** Respect robots; paywall/403/stub → `email-only`, **no retry storm**. Re-shared link (dedup hit) still listed, flagged "previously seen."
+- [x] **P1.1** `byLabel` grouping on [AiNewsSection](../../OB1/recipes/daily-digest/src/sections/ai-news.ts) (additive map next to `bySender`; email unchanged). Labels come through as readable names (`brain/ai/nate b jones`); new `brain/*` auto-discovered. Label→display prettify deferred to S4.
+- [x] **P1.2** Link extraction + hygiene + redirect unwrap ([links.ts](../../OB1/recipes/daily-digest/src/enrich/links.ts)): extract inline URLs, unwrap Substack/beehiiv `/redirect/` wrappers to the real destination, drop noise (unsubscribe/`/action/`/`/subscribe`/social/mailto/assets), dedup on final URL, cap per email. *Eyeball-tuned: `/action/disable_email` + `/subscribe` now dropped pre-fetch.*
+- [x] **P1.3** Fetch/extract ([extract.ts](../../OB1/recipes/daily-digest/src/enrich/extract.ts)) — self-contained `extractTextFromHtml` + `<title>`, time-boxed (~60s). **Egress through Tor** (see note below), not `ingest_url`, so fetch stays decoupled from a brain write.
+- [x] **P1.4** **Synthesis-then-package (D4/D5/D6).** [synthesize.ts](../../OB1/recipes/daily-digest/src/enrich/synthesize.ts) runs a single-source extraction pass (`SINGLE_SOURCE_SYNTH_SYS`, nothink) → tagged `[SOURCED] … [Source 1]` claims; package POSTed via [curator.ts](../../OB1/recipes/daily-digest/src/enrich/curator.ts). **Validated:** real articles produced 13–19 well-formed grounded claims + correct uncited `[GAP]` lines, no fabrication. *Curator POST is commit-only (operator-gated); dry-run previews the package.*
+- [x] **P1.5** Stamp `gmail_id`/`gmail_thread_id`/`gmail_labels`/`email_date` on each ingested source — **commit-only** via `BrainClient.mergeSourceMetadata` (curator package has no metadata passthrough). ⚠️ Assumes a writable `sources.metadata` jsonb — **verify live schema before relying on the join.**
+- [x] **P1.6** Per-link status `enriched | email-only | previously-seen` recorded on the report.
+- [x] **P1.7** **DAY REPORT** (`DayReportEntry[]` + totals) written to `/reports` as JSON + markdown.
+- [x] **P1.8** Respect robots (Substack `/p/` allowed, `/action/`+`/subscribe` blocked — robots does NOT cost real content); paywall/403/stub → `email-only`, no retry storm. *Dedup-across-days (`previously-seen`) relies on curator `find_or_create_source`; explicit pre-check deferred.*
 
-**Acceptance:** run against one real day; eyeball the report — sensible thread decisions (existing vs new), clean extracted content, **non-empty grounded `claims` stats per link**, correct status flags. **Gate R3 before automating.** If per-link synthesis+curator proves too heavy (R1), the lever is **fewer links / batch / cheaper model** — **not** skipping the synthesis: a claims-free link is invisible to S4's grounded briefing (D5), so dropping grounding saves nothing and breaks the episode.
+**Acceptance — PASSED (dry-run, 2026-06-08):** 2 real Substack newsletters → both article links enriched (18/15 grounded claims), all noise correctly `email-only`/dropped, `no-links=0` (text/plain carried URLs). Report at `OB1/recipes/daily-digest/.eyeball/` (scratch, untracked). **R3 gate cleared.** Remaining before COMMIT: verify `sources.metadata` schema (P1.5); exercise the curator POST on one link with operator approval (writes to live brain).
+
+> **NEW capability added in P1 — page-fetch through Tor.** The stack previously Tor-routed only *search* (SearXNG); page fetches went direct. P1 adds [egress.ts](../../OB1/recipes/daily-digest/src/enrich/egress.ts): external article/robots/redirect fetches go through the existing `tor` SOCKS5 proxy (`socks5://tor:9050`) via `Deno.createHttpClient` (needs `--unstable-net`). **Privacy-by-default + fail-closed** (Tor unreachable → `email-only`, never a direct leak; proven: direct fetch fails on internal `search-net`, Tor fetch returns `IsTor:true`). The runner container must join `ai-stack_search-net` + `open-brain_obnet` + `ai-stack_llm-net`. This is the general "private page fetch" seam the rest of the stack lacked.
 
 ---
 
@@ -126,5 +129,11 @@ Now automate; everything above ran by hand.
 | D3 | One daily episode, segments per label | locked 2026-06-08 |
 | D4 | Each link ingested as a full research package | locked 2026-06-08 |
 | D5 | Briefing assembled externally via claims pipeline; ON = content-only renderer | locked 2026-06-08 |
-| D6 | Each link enters the claim pipeline via a mandatory **LLM extraction pass** (tagged `[Source 1]` claims) before the curator — raw body yields 0 claims | locked 2026-06-08 |
-| — | ~~source-package (claims-free) inlet fallback~~ | **rejected 2026-06-08** — bypasses the claims layer; a claims-free link is invisible to S4's grounded briefing (D5). Load lever = volume/batch/model, not skip-grounding. |
+| D6 | Each link enters the claim pipeline via a mandatory **LLM extraction pass** (tagged `[Source 1]` claims) before the curator — raw body yields 0 claims | superseded by D7 |
+| **D7** | **Route through the proper research channel.** S3 does NOT synthesize ad-hoc; it submits each link to the shared `openbrain-research` service (grounds + delegates to curator). Supersedes D6's in-recipe synthesis. | locked 2026-06-08 (audit) |
+| **D8** | **Article mode.** The article is the **seed + primary subject**; corroboration from **existing OB claims** (harness reuse pass), not topic web-search. New `mode=article` + `seed_sources`. | locked 2026-06-08 (audit) |
+| **D9** | **Async wait-gate (paramount).** S3 awaits ALL research jobs to terminal `done` before any claim feeds the podcast; a job that times out → `email-only`. | locked 2026-06-08 (audit) |
+| **D10** | **Tor-route ALL external fetches** (`socks5h://tor:9050` — DNS through Tor, matching SearXNG). Digest link stage AND `openbrain-research` `fetchPage`. Fixes the `socks5://` DNS leak + identifying UA. | locked 2026-06-08 (audit) |
+| **D11** | **Gap handling.** Solve gaps from the article/OB where possible; else surface as POI **and** allow **bounded PRELIMINARY web research** → tentative `[UNCERTAIN] "preliminary research suggests…"` (lower confidence). Unsolved gaps stay `[GAP]`. New `gap_research=preliminary`. | locked 2026-06-08 (audit) |
+| — | ~~source-package (claims-free) inlet fallback~~ | **rejected 2026-06-08** — bypasses the claims layer (D5/D7). |
+| — | ~~in-recipe single-source synthesis (`synthesize.ts`/`curator.ts`)~~ | **retired 2026-06-08** by D7 → replaced by `research-client.ts` → `openbrain-research`. Files deleted. |

@@ -134,12 +134,27 @@ def _render(result: dict[str, Any]) -> str:
         parts.append("\n".join(lines))
 
     gaps = result.get("gaps") or []
+    backstop = result.get("backstop")
+    incomplete = bool(gaps) or (backstop and backstop != "complete")
+
     if gaps:
-        parts.append("\n\n**Open gaps** (not yet grounded — recorded for a future run):\n"
+        parts.append("\n\n**Open gaps** (NOT grounded — recorded for a future run):\n"
                      + "\n".join(f"- {g}" for g in gaps))
 
+    # Directive to the calling model — keeps it from "finishing" with fabricated
+    # content. The engine is the only grounded path; gaps are pursued by calling
+    # it again, never filled from the model's own knowledge or other tools.
+    if incomplete:
+        reason = f"stopped early ({backstop})" if backstop and backstop != "complete" else "left gaps open"
+        parts.append(
+            f"\n\n> ⚠ This research is grounded but INCOMPLETE — it {reason}. The open "
+            f"gaps above are not answered by any source. Do NOT fill them from your own "
+            f"knowledge or other web/fetch tools (that fabricates). To pursue a gap, call "
+            f"deep_research again with a query targeting it; otherwise present the gaps as "
+            f"open unknowns."
+        )
+
     reuse_ratio = result.get("reuse_ratio")
-    backstop = result.get("backstop")
     foot = []
     if reuse_ratio is not None:
         foot.append(f"coverage {round(float(reuse_ratio) * 100)}%")
