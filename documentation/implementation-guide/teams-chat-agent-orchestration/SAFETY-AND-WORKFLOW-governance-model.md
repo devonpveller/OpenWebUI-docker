@@ -107,7 +107,7 @@ finding, not the OPUS-4.5 best case. Implications:
 - **Open decision:** consider routing the **PM/monitor role specifically to the strongest
   available aligned model** (even a metered cloud Claude via the existing openbrain cloud
   gateway), since the monitor is the single highest-leverage alignment point. Workers can
-  stay local; the *watcher* should be as aligned as we can afford. (Added to §7.)
+  stay local; the *watcher* should be as aligned as we can afford. (Added to §8.)
 - This also argues for keeping the human PO genuinely in the loop rather than trusting the
   PM to self-police — a weaker PM model is a weaker monitor.
 
@@ -334,9 +334,45 @@ lenses** (correctness, security, scope-creep, ethics), the perspective-diverse p
 several lenses catch failure modes one reviewer can't. Scale reviewer count/lenses to the
 risk of the deliverable; cheap deliverables get one, irreversible ones get a panel.
 
-> Note the layering: **self-report (§4.3 #8) catches drift *early*, in flight; peer review
-> (§4.4) catches it *at the deliverable*, before it lands.** Different stages, both feeding
-> the PM monitor.
+> Note the layering: **self-report (§4.3, on the §4.5 checkpoint cadence) catches drift
+> *early*, in flight; peer review (§4.4) catches it *at the deliverable*, before it lands.**
+> Different stages, both feeding the PM monitor.
+
+### 4.5 Plan/task docs as stop-gates ("explain, then continue")
+
+**PO's design:** the per-worker plan/task doc isn't just a to-do list — it is the
+**stop-gate schedule.** Each implementation plan carries explicit checkpoints; the worker
+**must halt at each one and engage a reviewer before continuing.** This makes the gate (§3)
+and peer review (§4.4) fire at *predefined milestones*, not only on exceptions — and because
+the stop is encoded in the **document structure**, it's deterministic and hard to skip,
+exactly the kind of enforcement the paper says you need (prompt-level norms get optimized
+away; a checkpoint in the plan does not).
+
+How it works:
+
+- **Checkpoints live in the plan artifact.** The plan doc encodes "⛔ STOP — review required"
+  between phases; the bridge/harness enforces the halt (a worker cannot proceed past a
+  checkpoint without a cleared review). This is the deterministic-enforcement principle
+  (§4.2 hooks) applied to plan structure rather than tool calls.
+- **At each stop the worker EXPLAINS its work *and its intent*.** Not just "what I did" but
+  *"what I understood the goal to be, and why I built it this way."* That explanation is the
+  artifact the reviewer + PM evaluate.
+- **Explaining surfaces intent-misalignment.** The gap between the worker's *stated intent*
+  and the canonical objective (§4.3) is precisely the tunnel-vision drift we're hunting —
+  and articulating intent makes it legible far more cheaply than inferring it from a diff.
+  This is self-report (§4.3) given a fixed cadence.
+- **Re-ground → refactor → continue.** If the explanation reveals drift, the PM expresses
+  the needed changes (re-grounds the goal, §4.3) and the worker **refactors the work so far
+  before resuming the plan.** Catch-and-correct mid-plan, not at the end.
+- **Separate enforcement docs = the floor (mirrors §4.2).** The gate/stop rules can live in
+  a *separate* enforcement doc so a single editable plan can't silently drop them: plan doc =
+  steering (what to do), enforcement doc = floor (where you *must* stop). Same floor/steering
+  split as the rules layer.
+
+> This is the connective tissue: plan-stop-gates are the **scheduled form of the gate (§3)**,
+> the **trigger for peer review (§4.4)**, and the **delivery surface for self-report and
+> re-grounding (§4.3)** — all at once. And it is literally the PLAN + TASKS docs we're about
+> to write, so the governance is partly enforced by the *structure of those docs*.
 
 ## 5. Organizational-level constraints (the bridge enforces these)
 
@@ -356,7 +392,42 @@ The paper's "organizational-level constraints" mitigation, made concrete in `age
 
 ---
 
-## 6. How it lands on the chat platform
+## 6. System-wide learning loop (intent feedback over time)
+
+Everything above governs a *single* work effort *in the moment*. This is the **temporal
+dimension**: the org learning from its own alignment hits and misses so that recurring
+patterns drive systemic change. It's the paper's call for *multi-agent-specific evals and
+mitigations*, grown from our own operational history.
+
+- **All communication outcomes are signal.** Every alignment success and failure — CONCERNs
+  raised, objections, re-groundings, review catches, escalations, and the PO decisions on
+  them (all already in the audit trail, §5) — feeds the loop. The system mines it for
+  *patterns*, not just incidents.
+- **Patterns justify systemic change.** A failure that recurs across efforts is evidence to
+  harden the system: tighten a charter (§4), add a hard rule, fix a default goal template
+  (§4.3), or pre-clear/retire a role from the catalog (§4.1). **One incident is noise; a
+  pattern is a mandate.**
+- **Worker suggestion pool — bottom-up intent signal.** Workers can drop suggestions into a
+  pool for consideration. Recurring suggestions are a powerful **inlet for detecting
+  intent-misalignment**: if many workers keep requesting the same scope, or keep flagging the
+  same constraint as wrong, the *goals/rules* are probably misaligned with reality — not the
+  workers. The pool makes that visible.
+- **⚠️ Propose vs. dispose stays PO-gated (the critical boundary).** The loop *proposes*
+  changes; it **never auto-applies them.** A self-modifying ruleset is a dangerous surface —
+  left unchecked it could erode the §4.2 floor over time, which is the slow-motion version of
+  F3. So the flow is: pattern detection + suggestion pool → PM synthesizes a *proposed*
+  change → **PO approves** → it lands via the versioned floor/steering update (§4.2). The
+  loop accelerates the PO's judgment; it does not replace it.
+- **Reuse the existing stack.** This is the "compounding reuse" pillar — route it through
+  **Open Brain** (capture/search prior incidents + patterns) and the **claudeception** skill
+  (extract recurring lessons into skills/charters). Don't build a parallel memory.
+
+> Net: §3–§4 keep one effort honest *now*; §6 keeps the *whole system* honest *over time* —
+> and both terminate at the same place, a **PO decision.**
+
+---
+
+## 7. How it lands on the chat platform
 
 Mapping to the companion doc's tooling (Mattermost primitives shown):
 
@@ -372,7 +443,7 @@ Mapping to the companion doc's tooling (Mattermost primitives shown):
 
 ---
 
-## 7. Open decisions (resolve before build phase P3)
+## 8. Open decisions (resolve before build phase P3)
 
 1. **PM autonomy boundary.** Exactly which decisions can the PM make alone vs. must
    up-level? Draft default (conservative, per paper): PM may *delegate and integrate*
@@ -405,10 +476,19 @@ Mapping to the companion doc's tooling (Mattermost primitives shown):
    → single reviewer or none)? How many lenses (correctness/security/scope/ethics) and at
    what cost ceiling? Reviewer count should scale to deliverable risk, but the line needs
    setting so review doesn't become its own wake-storm.
+10. **Plan-stop-gate cadence (§4.5).** How granular are checkpoints — per phase, per file,
+    per acceptance-criterion? And is the worker's *explanation* free-form or a structured
+    template (intent / goal-as-understood / tradeoffs hit / what I'd flag)? A template makes
+    drift easier to diff against the canonical objective. Confirm the floor/steering doc split
+    (enforcement doc vs. editable plan).
+11. **Learning-loop scope & suggestion-pool governance (§6).** What's in scope for the loop
+    (which signals, how patterns are detected — manual PM synthesis vs. assisted) and how does
+    the suggestion pool get triaged (PM batches → PO reviews on a cadence)? Reaffirm the hard
+    boundary: **the loop proposes, the PO disposes** — no auto-applied rule changes.
 
 ---
 
-## 8. Bottom line
+## 9. Bottom line
 
 - The paper says this org shape trades alignment for capability **by default**; our
   workflow (PO-final-say, PM-as-monitor, mandatory up-level, **pause-until-cleared**) is
@@ -423,6 +503,13 @@ Mapping to the companion doc's tooling (Mattermost primitives shown):
   deliverable, before it lands* (§4.4). Peer review only works because reviewers have a
   *different (ethics) goal* and are *advisory to the PM, never a self-approve merge gate* —
   same-goal self-approval is exactly what rubber-stamped misalignment in the paper.
+- **The plan/task docs are themselves the enforcement (§4.5).** Doc-structured stop-gates
+  make the gate + review fire at predefined milestones; at each stop the worker *explains its
+  intent*, which surfaces drift cheaply, then re-grounds and refactors before continuing.
+  Deterministic structure beats advisory prompting.
+- **The system learns over time (§6).** Alignment hits/misses and a worker suggestion pool
+  feed a loop that detects recurring patterns and proposes systemic hardening — but **the
+  loop proposes, the PO disposes**; rules never self-modify, or the floor erodes (slow F3).
 - The **escalation gate (§3)** is the single most important thing to get right — and its
   fail-safe default (no progress by routing around or dropping a brake) is the direct
   structural answer to the paper's most dangerous finding (F3, dropped objections).
