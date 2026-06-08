@@ -143,8 +143,11 @@ operator-applied for live schema (G2/G10), backup first.
   service is deployed) — the heavy bundle is retired by swapping to this once
   openbrain-research is live.
 - 🚀 **P5.2** Operator: deploy openbrain-research (+ schema P1/P4 applied, search
-  seam wired), set the thin client's `research_url`/`brain_key` valves, then paste
-  it into OWUI Tools to replace the heavy bundle.
+  seam wired — all done), set the thin client's `research_url`/`brain_key` valves,
+  then paste it into OWUI Tools to replace the heavy bundle. **Also paste the v2
+  system prompt** `system-prompts/research-system-prompt-engine.md` at the same
+  time (single `deep_research` tool, no `refresh`, claim-level reuse + grounding) —
+  keep `research-system-prompt.md` until the swap.
 
 ## P6 — Onboard other inlets
 - ✅ **P6.1** Autonomous-agent client: contract + curl/agent example documented in
