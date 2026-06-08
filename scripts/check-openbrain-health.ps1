@@ -13,6 +13,17 @@
 # "Broken pipe (os error 32)" -> mcpo surfaced HTTP 500 -- while `docker ps` showed
 # openbrain-mcp healthy. See memory: openbrain-mcp-stale-db-connection.
 #
+# A second instance of the same "green but functionally dead" class (2026-06-07):
+# openbrain-mcpo-ext (mcpo :latest) entered an async read-loop CPU busy-spin and
+# pinned a FULL CORE for ~13 days (top host CPU consumer via vmmemwsl). Its
+# healthcheck only fetches the CACHED /open-brain-extensions/openapi.json, so it
+# reported healthy the whole time. Remediation: `docker restart openbrain-mcpo-ext`
+# (100% -> ~0.2% instantly). NOT triggered by a graceful upstream restart/pause --
+# it's a latent no-backoff spin in mcpo's streamable-http client, tripped by an
+# ungraceful disconnect (netns break / hard kill). This probe still only checks
+# liveness for mcpo-ext (no CPU-spin guard yet -- declined 2026-06-07).
+# See memory: openbrain-mcpo-ext-cpu-spin.
+#
 # Probes (by container NAME, project-agnostic — never `docker compose`):
 #   - openbrain-db          running               (the dependency)
 #   - openbrain-mcp         running + STALE-POOL guard (db started after mcp -> restart)

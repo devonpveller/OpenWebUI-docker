@@ -433,6 +433,16 @@ services:
         echo "$${BACKUP_CRON} sh /scripts/backup.sh >> /var/log/backup.log 2>&1" > /etc/crontabs/root
         echo "[$(date -u +%FT%TZ)] Backup scheduler started (cron: $${BACKUP_CRON}, retain: $${RETAIN_COUNT} most recent)"
         crond -f -l 2
+    # Cap memory so the nightly `tar` of the (large) /data volume cannot
+    # balloon the WSL VM with reclaimable page cache. The kernel evicts this
+    # cgroup's own file cache to stay under the limit, so the backup streams
+    # through a small cache window instead of parking tens of GB until the
+    # next `wsl --shutdown`. tar/gzip stream sequentially (no re-reads) so
+    # capping costs nothing; anon RSS is a few MB, so no OOM risk.
+    deploy:
+      resources:
+        limits:
+          memory: 1g
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
