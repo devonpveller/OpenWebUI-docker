@@ -47,7 +47,8 @@ $Script:OB1Services = @(
     "openbrain-rest", "openbrain-entity-worker",
     "openbrain-suggestion-worker", "openbrain-curator", "openbrain-research", "openbrain-chunk-worker",
     "openbrain-wiki", "openbrain-wiki-viewer", "openbrain-workbench", "openbrain-extract",
-    "openbrain-cron", "openbrain-gmail-pull", "openbrain-gmail-prune", "openbrain-digest"
+    "openbrain-cron", "openbrain-gmail-pull", "openbrain-gmail-prune", "openbrain-digest",
+    "openbrain-podcast"
 )
 
 function Write-Log {

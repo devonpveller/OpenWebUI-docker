@@ -115,10 +115,11 @@ Run with: `docker compose -f OB1/docker/docker-compose.yml ...`.
 | `openbrain-cron` | supercronic + curl; fires HTTP-trigger chain (no docker.sock) | — (internal only) | obnet |
 | `openbrain-gmail-pull` | HTTP-triggered Gmail ingest; chains to prune on success | — (internal only) | obnet, llm-net |
 | `openbrain-gmail-prune` | HTTP-triggered short-term prune; chains to digest + wiki recompile | — (internal only) | obnet, llm-net |
-| `openbrain-digest` | HTTP-triggered daily digest; mechanical formatting, Gmail send | — (internal only) | obnet |
+| `openbrain-digest` | HTTP-triggered daily digest; mechanical formatting, Gmail send; chains to podcast after delivery | — (internal only) | obnet |
+| `openbrain-podcast` | HTTP-triggered chain tail (digest → podcast); spawns the link-enrich pipeline — follow newsletter links (Tor) → grounded research via openbrain-research (article mode) → two-host script → Open Notebook audio → loop-close (episode source linked to the day's threads); best-effort, never blocks the email | — (internal only) | obnet, llm-net, search-net (Tor) |
 
-**Scheduled-job slice:** the four trailing services (`openbrain-cron` + the
-three HTTP-triggered jobs) live in [`OB1/docker/docker-compose.scheduled.yml`](../../../OB1/docker/docker-compose.scheduled.yml),
+**Scheduled-job slice:** the five trailing services (`openbrain-cron` + the
+four HTTP-triggered jobs) live in [`OB1/docker/docker-compose.scheduled.yml`](../../../OB1/docker/docker-compose.scheduled.yml),
 included from the main OB1 compose file. Trigger model is event-chained:
 cron fires `openbrain-gmail-pull` at 01:00; pull→prune→digest is wired
 via `NEXT_TRIGGER_URL` env vars, not multiple cron entries. Schedules
