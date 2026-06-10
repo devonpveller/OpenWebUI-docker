@@ -56,18 +56,19 @@ Code: [`OB1/recipes/daily-digest/link-enrich.ts`](../../OB1/recipes/daily-digest
 
 ---
 
-## P2 — S2 Grounding Backfiller worker  *(agent + operator for deploy)*
+## P2 — S2 Grounding Backfiller worker  *(agent + operator for deploy)*  ✅ BUILT + DEPLOYED + VERIFIED 2026-06-10
 
 New worker on the live claims layer. General brain-health, not podcast-specific.
+Code: [`OB1/integrations/grounding-backfiller/`](../../OB1/integrations/grounding-backfiller/) (`index.ts` + `deno.json` + `Dockerfile`). Deployed as `openbrain-grounding-backfiller` (loopback `127.0.0.1:8819`). Nothing committed (G1).
 
-- [ ] **P2.1** Worker scaffold (Deno service/worker, sibling to entity/chunk workers), loopback port; reads `ungrounded_claims` ([init-claims.sql](../../OB1/docker/init-claims.sql)).
-- [ ] **P2.2** Drain loop: for each ungrounded claim → extract the entity/assertion → Wikipedia lookup (grounding-corpus backend, swappable) → `ingest_url` the page (dedup) → `link_claim_to_source(claim, src, 'corroborates', weight)`. Confirm the `claim_confidence` trigger recomputes and the claim **leaves** `ungrounded_claims`.
-- [ ] **P2.3** Scope control: **today's-digest-threads first** (invoked by S3's report `thread_id`s, pre-script), then a **bounded off-peak global sweep**. Per-run budget caps (pages/claim, total calls).
-- [ ] **P2.4** No-entity / no-Wikipedia-match → leave ungrounded + log; never retry-storm. Idempotent (edge upsert).
-- [ ] **P2.5** **3-place change** for the new worker: OB1 compose + `emergency-recovery.ps1` inventory + `/stack-map`.
-- [ ] **P2.6** Operator: deploy (build image, bring up). No schema change needed (claims layer already live).
+- [x] **P2.1** Worker scaffold (Deno + deno-postgres `Pool`, sibling to chunk-worker), loopback `:8819`; reads `ungrounded_claims` ([init-claims.sql](../../OB1/docker/init-claims.sql)). Routes: `GET /health`, `POST /backfill?limit=N {thread_ids?}`.
+- [x] **P2.2** Drain loop: per ungrounded claim → **entity extraction (one local `:nothink` LLM call)** → Wikipedia search + REST summary (grounding-corpus backend, swappable; **via Tor**, D10) → `find_or_create_source` (dedup) → `link_claim_to_source(claim, src, 'corroborates', 0.7)`. Verified: `claim_confidence` trigger recomputed (0 → 0.765, authority 0.85) and the claim **left** `ungrounded_claims` (`claim_min_depth` 0).
+- [x] **P2.3** Scope control: `thread_ids` (scoped) + global; budget caps (`BACKFILL_BATCH`, `?limit`, `BACKFILL_CONCURRENCY`). **Off-peak GLOBAL sweep wired in cron** (07:00 UTC, after the daily chain). **NOTE / deliberate deviation:** the podcast-scoped *pre-script* trigger was **skipped** — the episode renders from the research **synthesis**, not a `reusable_claims` re-query, so backfilling wouldn't change it; the global sweep covers today's threads anyway, so a scoped trigger would be a redundant no-op in the hot path.
+- [x] **P2.4** No-entity / no-Wikipedia-match → stamp `metadata.backfill_skip=true` + log; **never retry-storm** (the drain query excludes `backfill_skip` claims; clear the flag to retry). Idempotent (grounded claims leave the view).
+- [x] **P2.5** **3-place change**: OB1 compose (`docker-compose.yml`, search-gw-net for Tor) + `emergency-recovery.ps1` inventory + `/stack-map` ref doc.
+- [x] **P2.6** Operator: deployed (built `:local` image, brought up, healthy). No schema change needed (claims layer already live).
 
-**Acceptance:** seed/identify one ungrounded claim, run the worker, confirm it gains a Wikipedia `corroborates` edge and drops out of `ungrounded_claims` with recomputed confidence.
+**Acceptance — PASSED (2026-06-10):** seeded one ungrounded test claim ("Anthropic is an AI safety and research company…") → ran the worker → entity "Anthropic" → Wikipedia page linked as `corroborates` (weight 0.7, `en.wikipedia.org`) → confidence `0 → 0.765`, `claim_min_depth` `NULL → 0`, dropped out of `ungrounded_claims`. Test claim + source cleaned up (brain back to 0 ungrounded).
 
 ---
 
