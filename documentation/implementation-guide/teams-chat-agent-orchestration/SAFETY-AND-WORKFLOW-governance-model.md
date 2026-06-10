@@ -97,19 +97,29 @@ result was measured on **constitutionally-aligned frontier Claude models**. The 
 study found that **GPT-4.1, which lacks that alignment, had low baseline ethics for both
 single agents *and* organizations** — i.e. the floor itself was lower.
 
-Our `little-coder` fleet currently runs on **local llama-cpp models**, not Opus. So we
-should assume our org sits closer to the *worse* end of the paper's model-dependence
-finding, not the OPUS-4.5 best case. Implications:
+Our `little-coder` fleet runs on **local llama-cpp models**, not Opus. So we sit closer to
+the *worse* end of the paper's model-dependence finding. The paper's weak-model data makes
+this concrete: **GPT-5-MINI's org was *less* effective than a single agent** (couldn't follow
+the coordination protocol), and **GPT-4.1 held a low ethics floor** for both single and org.
+We risk **both**. Implications:
 
 - **Do not rely on model alignment to carry safety here.** The governance gate (§3) and
-  org-level constraints (§5) are doing the load-bearing work, *because* the constituent
-  models are weaker than the ones that closed the gap.
-- **Open decision:** consider routing the **PM/monitor role specifically to the strongest
-  available aligned model** (even a metered cloud Claude via the existing openbrain cloud
-  gateway), since the monitor is the single highest-leverage alignment point. Workers can
-  stay local; the *watcher* should be as aligned as we can afford. (Added to §8.)
-- This also argues for keeping the human PO genuinely in the loop rather than trusting the
-  PM to self-police — a weaker PM model is a weaker monitor.
+  org-level constraints (§5) — and the **deterministic floor** (§4.2) — do the load-bearing
+  work, *because* the constituent models are weaker than the ones that closed the gap.
+
+**Decided model stance (operator, 2026-06-10): local-first, OpenRouter-where-mandatory.**
+- **Default everything local.** Workers (`WORKER_MODEL`) are **always local**.
+- **Judgment roles** (PM/monitor, reviewer, goal-grounding) are the highest-leverage alignment
+  point and where small models fail worst — so `JUDGE_MODEL` is **local first**, and escalates
+  to a **larger model via OpenRouter *only if* the P0 capability-floor test shows local judgment
+  is insufficient.**
+- **The larger model is OpenRouter, never a mainstream consumer frontier service** (which
+  collects user data/queries). OpenRouter is privacy-respecting *when configured so* — pin it to
+  **no-log / zero-data-retention** providers and prefer **open-weight** large models.
+- **Privacy boundary:** anything sent to OpenRouter is a **governance-level summary** (claim /
+  goal / deviation / options), **never raw proprietary code or secrets** (§8 #6/#13).
+- **If local judgment is too weak and OpenRouter isn't wired, the human PO carries more** — never
+  trust a weak local monitor by default. A weaker monitor model is a weaker monitor.
 
 ---
 
@@ -117,6 +127,17 @@ finding, not the OPUS-4.5 best case. Implications:
 
 A small state machine the `agent-bridge` enforces. This is what "work is paused until
 decisions are cleared" means concretely.
+
+> **Framing (scholarly corrective): the gate is the *escalation arm of continuous supervision*,
+> not a standalone checkpoint.** The AI-org governance literature is blunt that *episodic,
+> top-down approval gates are insufficient* — agents drift *between* gates. So the substrate is
+> **continuous supervision**, and the gate is **what continuous supervision does when it detects
+> something**. Continuous supervision is **cost-tiered** (important for a local/weak fleet):
+> - **Cheap-continuous, always on:** deterministic floor hooks on every tool call (§4.2),
+>   bus-level observability (§5), rate caps. Near-zero marginal cost.
+> - **Expensive-continuous, sampled/triggered + full at checkpoints:** the LLM **monitor's
+>   judgment**, which runs on `JUDGE_MODEL` (§2.1). Necessary *because* workers are weak, costly
+>   *because* judgment needs the larger model — so it's sampled/triggered, not run on every token.
 
 **Triggers — any of these freezes the affected work effort and up-levels to the PO:**
 
@@ -197,13 +218,24 @@ role *expansion* is a governed act, not a free one:
 - **New role = new handoff seam = new constraint contract (F5).** Each added domain must
   come with explicit scope boundaries and handoff contracts to its neighbours, or it
   becomes the ambiguous-decomposition failure the paper describes.
-- **Decomposition has a cost.** More roles → more compartmentalization (F1). Prefer the
-  *fewest* roles that cover the work; don't shard a task across agents just because you
-  can. Each split should earn its keep.
+- **Decomposition has a cost — doubly so on weak models.** More roles → more
+  compartmentalization (F1) **and** more coordination load the small models may not bear (the
+  paper's GPT-5-MINI inversion). Prefer the *fewest* roles that cover the work; each split must
+  earn its keep. Coordination lives in the bridge, not in agent negotiation (PLAN §3.5).
+- **Stream-aligned-first, right-sized to the model (TT borrow + small-model limit).** Default to
+  giving a worker a meaningful **end-to-end** slice that holds its own constraints inline (§4.3)
+  — that's the F1 antidote. **But** a local model can't hold as much coherent context as a
+  frontier model, so size the slice to the model's *coherent window*: decompose **just enough**
+  to fit, **no further** (over-shooting → F1/F5; over-stuffing → the model loses the plot).
+  Cognitive-load budgeting is therefore **tight and mandatory** here, not advisory (§8 #12).
+- **Lifecycle includes retirement (SC-NLP-LMF gap).** A role/worker isn't only spawned and run —
+  it must be **decommissioned**: revoke its scope from the ledger (§5), retire the role from the
+  catalog if no longer needed, expire stale goals/rules, archive the effort's artifacts. Every
+  retirement is logged. Don't leave orphaned scope or zombie workers holding authority.
 
 > Net: dynamic expansion is supported and expected — but **"add a new kind of agent" is a
-> PO decision, "add another of an approved kind" is a PM decision.** That line is the
-> control.
+> PO decision, "add another of an approved kind" is a PM decision**, and **every role is
+> right-sized to the model and eventually retired.** Those lines are the control.
 
 ### 4.2 Grounding: rules-as-skills, steerable in flight
 
@@ -242,6 +274,11 @@ system):**
   it with a harness hook / tool-permission gate. **Prompt for steering; hook for
   enforcement** — a prompt-level norm is advisory, and the paper shows agents route around
   advisory norms (F3).
+  - *This is "asymmetric neurosymbolic coupling" (FAOS, scholarly analysis):* the symbolic floor
+    (hooks/ledger) constrains the neural workers, and the coupling is **asymmetric** — the floor
+    can override the model, never the reverse. **The weaker the model, the more the floor
+    carries**, so on our local-first fleet the coupling skews *further* toward symbolic. Don't
+    push enforcement work onto a weak model's judgment.
 
 **In-flight propagation (ties to the wake mechanic, companion §5.2):**
 
@@ -334,6 +371,19 @@ lenses** (correctness, security, scope-creep, ethics), the perspective-diverse p
 several lenses catch failure modes one reviewer can't. Scale reviewer count/lenses to the
 risk of the deliverable; cheap deliverables get one, irreversible ones get a panel.
 
+**Small-model caveat (review is judgment → use `JUDGE_MODEL`).** A reviewer's job is exactly the
+nuanced judgment small local models are worst at — and the paper's rubber-stamp failure happened
+on *Opus*, so a weak local reviewer would be worse. So reviewers run on the **judgment model**
+(§2.1: local-first, OpenRouter if the P0 floor test mandates it), and small-model review is
+**paired with deterministic checks** (tests, lints, scope-diff) rather than trusted alone.
+
+**Lateral concern channel (scholarly: lateral + upward, not just top-down).** A worker must
+always be able to **raise a cross-domain concern laterally** (to a peer / reviewer) — but it
+surfaces **on the observable bus and routes to the PM for disposition**; it is **never** a
+private peer-to-peer resolution and **never** peer *authority* to approve/merge (that's the
+paper's F3/F4). Lateral concern-*raising* = required and good; lateral *authority* = forbidden.
+This channel is **sacred — exempt from any flow/rate minimization (§5).**
+
 > Note the layering: **self-report (§4.3, on the §4.5 checkpoint cadence) catches drift
 > *early*, in flight; peer review (§4.4) catches it *at the deliverable*, before it lands.**
 > Different stages, both feeding the PM monitor.
@@ -357,6 +407,10 @@ How it works:
 - **At each stop the worker EXPLAINS its work *and its intent*.** Not just "what I did" but
   *"what I understood the goal to be, and why I built it this way."* That explanation is the
   artifact the reviewer + PM evaluate.
+  - **Verify, don't trust, the explanation (small-model caveat).** A small local model may
+    *confabulate* a plausible explanation that doesn't match what it actually did. So the bridge /
+    judgment-model reviewer **cross-checks the explanation against the actual diff/actions** (the
+    audit trail, §5) — the words are a lead, the actions are ground truth.
 - **Explaining surfaces intent-misalignment.** The gap between the worker's *stated intent*
   and the canonical objective (§4.3) is precisely the tunnel-vision drift we're hunting —
   and articulating intent makes it legible far more cheaply than inferring it from a diff.
@@ -379,11 +433,21 @@ How it works:
 The paper's "organizational-level constraints" mitigation, made concrete in `agent-bridge`:
 
 - **Wake-storm cap:** bounded auto-hand-offs per work effort per window (mirrors the
-  existing `research-tool-fanout-cap` instinct) — exceeding it is a §3 trigger.
+  existing `research-tool-fanout-cap` instinct) — exceeding it is a §3 trigger. **Applies to
+  work chatter only.**
+- **⚠️ The brake channel is sacred — exempt from all flow/rate minimization.** Objections,
+  refusals, ethical concerns, and escalations are **never** rate-capped, dropped, or
+  flow-optimized away. This is the reconciliation with both Team Topologies ("minimize
+  communication") and the scholarly "minimize bureaucracy" instincts: minimize **dependency
+  chatter**, never the **objection/escalation** channel. Minimizing the brake channel *is* the
+  paper's F3.
 - **Scope ledger:** who is authorized for what path/domain; requests are logged; grants
-  follow hard-rule #2.
-- **Bus-only comms:** agents have no channel to each other except the chat server, so
-  *every* hand-off is human-visible and audit-logged.
+  follow hard-rule #2. Scope is **revoked on retirement** (§4.1 lifecycle).
+- **Bus-only, mediated comms — by deliberate choice.** Agents have no channel to each other
+  except the chat server, so *every* hand-off is human-visible and audit-logged. This is a chosen
+  position on the comms-architecture axis (mediated/context-oriented over direct agent-to-agent) —
+  for **observability (safety)** and because **weak local models botch direct A2A** anyway. The
+  bridge does the coordinating (PLAN §3.5).
 - **Full audit trail:** the event stream (who woke whom, what changed, every CONCERN and
   PO decision) is persisted; mirror critical hand-offs + decisions to **Open Brain** for
   durable, queryable provenance.
@@ -456,11 +520,12 @@ Mapping to the companion doc's tooling (Mattermost primitives shown):
    ever want a "red-team" agent, it runs **isolated**, never in the live fleet (F5).
 5. **What counts as "irreversible/external"** for hard-rule #4 — the deploy/push/delete/
    spend/send list needs to be explicit and enforced at the tool-permission layer too.
-6. **Model assignment by role (F7/§2.1).** Confirm: route the **PM/monitor role to the
-   strongest aligned model we can afford** (metered cloud Claude via the openbrain cloud
-   gateway is on the table) while workers stay local llama-cpp. The monitor is the
-   highest-leverage alignment point, and our local worker models sit on the *worse* end of
-   the paper's model-dependence finding — so the gate, not the models, carries safety.
+6. **Model assignment by role — RESOLVED (F7/§2.1).** **Local-first; OpenRouter where
+   mandatory.** `WORKER_MODEL` always local; `JUDGE_MODEL` (PM/monitor, reviewer, grounding)
+   local-first, escalating to a larger model **via OpenRouter only if the P0 capability-floor
+   test (#13) proves local judgment insufficient**. The larger model is **OpenRouter, never a
+   mainstream consumer frontier service**; pin to no-log/ZDR providers, prefer open-weight. The
+   gate + deterministic floor carry safety, not the models. *(Remaining sub-questions live in #13.)*
 7. **Role-expansion authority line (§4.1).** Confirm the proposed split: PM may spin up
    more instances of an **approved** role freely; introducing a **new role/domain type** is
    PO-gated. Open sub-question: do you want a lightweight "approved role catalog" the PM
@@ -485,6 +550,21 @@ Mapping to the companion doc's tooling (Mattermost primitives shown):
     (which signals, how patterns are detected — manual PM synthesis vs. assisted) and how does
     the suggestion pool get triaged (PM batches → PO reviews on a cadence)? Reaffirm the hard
     boundary: **the loop proposes, the PO disposes** — no auto-applied rule changes.
+12. **Per-worker cognitive-load budget (§4.1, small-model limit).** How to estimate a worker's
+    load and what threshold triggers a (reluctant) split. With local models the window between
+    "too much to hold coherently" and "fragmented (F1)" is **narrow** — needs a working heuristic
+    (files touched / scope breadth / context size) so right-sizing isn't guesswork.
+13. **Capability-floor test + OpenRouter privacy boundary (§2.1, PLAN P0/OD-6) — prerequisite.**
+    (a) Before trusting the local fleet, **measure** our actual local models on instruction-
+    following, structured-output reliability, and coordination — and decide which judgment roles
+    (if any) must use OpenRouter. (b) Per task, ask **"org vs. single agent?"** given the
+    GPT-5-MINI inversion — don't assume multi-agent wins. (c) Define the **OpenRouter egress
+    payload**: governance-level summaries only (claim/goal/deviation/options), **never raw
+    proprietary code or secrets**; pin no-log/ZDR providers; reuse `lc-egress`-style control if it
+    fits.
+14. **Retirement/decommission specifics (§4.1 lifecycle).** The concrete steps + triggers for
+    retiring a worker/role: scope revocation, catalog removal, goal/rule expiry, artifact
+    archival — and who authorizes each (PM vs PO).
 
 ---
 
@@ -513,10 +593,19 @@ Mapping to the companion doc's tooling (Mattermost primitives shown):
 - The **escalation gate (§3)** is the single most important thing to get right — and its
   fail-safe default (no progress by routing around or dropping a brake) is the direct
   structural answer to the paper's most dangerous finding (F3, dropped objections).
-- **Our local-model fleet is a higher-risk configuration than the paper's best case
-  (F7/§2.1).** The OPUS-4.5 result that nearly closed the gap doesn't apply to local
-  llama-cpp workers — so we lean on the gate, not the models, and should consider putting
-  the **PM/monitor on the strongest aligned model we can afford.**
+- **Continuous supervision is the substrate; the gate is its escalation arm (§3).** The
+  governance literature says episodic checkpoints are insufficient — so cheap-continuous controls
+  (hooks, observability, caps) run always, and the LLM monitor's judgment runs sampled/triggered
+  + full at checkpoints. Gate = what continuous supervision *does*, not a standalone bureaucracy.
+- **Local-first, OpenRouter-where-mandatory (RESOLVED, F7/§2.1).** Workers always local; judgment
+  roles local-first and escalate to a larger model **via OpenRouter only if the P0 capability-floor
+  test proves local judgment too weak** — never a mainstream data-collecting frontier service. Our
+  weak fleet risks **both** of the paper's weak-model failures (GPT-5-MINI coordination loss +
+  GPT-4.1 low floor), so: coordination lives in the **deterministic bridge**, the **symbolic floor
+  carries more**, and we **don't assume multi-agent beats a single agent** for a given task.
+- **Stream-aligned, but right-sized to the model (§4.1).** Prefer fewer end-to-end workers that
+  hold their constraints inline (F1 antidote) — but sized to the local model's coherent window;
+  the decompose-vs-overload window is narrow on small models, so cognitive-load budgeting is tight.
 - Build order: **charters (§4) + escalation gate (§3) + bus-only comms (§5)** come *before*
   any throughput optimization. Capability is cheap; the margin is in the governance.
 
