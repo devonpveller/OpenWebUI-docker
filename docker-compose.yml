@@ -524,8 +524,15 @@ services:
         aliases:
           - llama-cpp           # transparent flip: callers' http://llama-cpp:8080 land here
           - llama-cpp-embed     # transparent flip: callers' http://llama-cpp-embed:8080 land here
-    ports:
-      - "127.0.0.1:4000:8080"   # host admin / out-of-band only (no caller uses this)
+    # NO host port: the gateway sits ONLY on the internal-only `llm-net`, so
+    # Docker silently suppresses any host publish (a `ports:` mapping here would
+    # show in `docker inspect .HostConfig.PortBindings` but NEVER bind — verified:
+    # NetworkSettings.Ports is empty and 127.0.0.1:4000 is unreachable). Keeping
+    # the gateway off any internet-capable bridge is the supply-chain posture
+    # (guide §19 — no outbound). Admin / spend-ledger access is IN-NETWORK only:
+    #   docker exec llm-gateway python -c "...urllib... http://localhost:8080/..."
+    #   docker exec llm-gateway-db psql -U litellm -d litellm -c '...'
+    # The llm-traffic OWUI module reaches it the same way (OWUI is on llm-net).
     volumes:
       - ./config/litellm.config.yaml:/app/config.yaml:ro
     command: ["--config", "/app/config.yaml", "--port", "8080"]
@@ -1256,10 +1263,12 @@ services:
       - BACKUP_DIR=/backups
       - PREFIX=lm-models
       - RETAIN_COUNT=${LM_MODELS_BACKUP_RETAIN_COUNT:-2}
-      # llama-cpp serves models from this directory; backup runs when the
-      # service is reachable. Empty HEALTH_TCP disables the probe (e.g., if
-      # you keep llama-cpp paused most of the time).
-      - HEALTH_TCP=${LM_MODELS_BACKUP_HEALTH_TCP:-llama-cpp:8080}
+      # llama-cpp-upstream serves models from this directory; backup runs when
+      # that REAL inference server is reachable. Probe the upstream by name, NOT
+      # the bare `llama-cpp` alias (which now resolves to llm-gateway and would
+      # report "reachable" even while the model server is down/paused). Empty
+      # HEALTH_TCP disables the probe (e.g., if you keep the upstream paused).
+      - HEALTH_TCP=${LM_MODELS_BACKUP_HEALTH_TCP:-llama-cpp-upstream:8080}
       - BACKUP_CRON=${LM_MODELS_BACKUP_CRON:-0 1 * * 0}     # Sunday 01:00 UTC
       - TZ=UTC
     entrypoint: /bin/sh

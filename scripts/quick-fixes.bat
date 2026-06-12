@@ -20,6 +20,7 @@ if "%1"=="smolcrawl" goto :smolcrawl_check
 if "%1"=="llama-cpp" goto :llama_cpp_check
 if "%1"=="open-notebook" goto :open_notebook_check
 if "%1"=="openbrain" goto :openbrain_check
+if "%1"=="llm-gateway" goto :llm_gateway_check
 goto :usage
 
 :interactive_menu
@@ -44,10 +45,11 @@ echo  10. SmolCrawl pipelines check and restart
 echo  11. llama-cpp / llama-cpp-embed check and restart
 echo  12. open-notebook (and surrealdb) check and restart
 echo  13. Open Brain (mcp/mcpo/db/gateway/wiki) check and restart
+echo  14. llm-gateway (LiteLLM front door) check and restart
 echo.
 echo   0. Exit
 echo.
-set /p choice="Select option (1-13,0): "
+set /p choice="Select option (1-14,0): "
 
 if "%choice%"=="1" goto :namespace_reset
 if "%choice%"=="2" goto :status_check
@@ -62,6 +64,7 @@ if "%choice%"=="10" goto :smolcrawl_check
 if "%choice%"=="11" goto :llama_cpp_check
 if "%choice%"=="12" goto :open_notebook_check
 if "%choice%"=="13" goto :openbrain_check
+if "%choice%"=="14" goto :llm_gateway_check
 if "%choice%"=="0" goto :end
 echo [ERROR] Invalid choice
 timeout /t 2 /nobreak >nul
@@ -754,6 +757,48 @@ if %RESULT% EQU 0 (
         echo [ERROR] llama-cpp-embed-upstream still not healthy - check logs: docker compose logs llama-cpp-embed-upstream
     )
 )
+cd /d "%SCRIPT_DIR%"
+if "%1"=="" (
+    echo.
+    pause
+    goto :interactive_menu
+)
+goto :end
+
+:llm_gateway_check
+echo.
+echo ========================================
+echo   llm-gateway (LiteLLM) Health Check and Recovery
+echo ========================================
+echo.
+echo [INFO] Checking llm-gateway / llm-gateway-db status...
+cd /d "%SCRIPT_DIR%\.."
+docker compose ps llm-gateway llm-gateway-db --format "table {{.Service}}\t{{.Status}}"
+echo.
+echo [INFO] Testing gateway liveliness (the wolfi image has no curl - use python)...
+docker compose exec llm-gateway python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8080/health/liveliness').status==200 else 1)" >nul 2>&1
+set RESULT=%ERRORLEVEL%
+if %RESULT% EQU 0 (
+    echo [SUCCESS] llm-gateway is healthy ^(front door is up^)
+) else (
+    echo [WARN] llm-gateway liveliness failed, restarting db then gateway...
+    docker compose up -d llm-gateway-db
+    timeout /t 5 /nobreak >nul
+    docker compose restart llm-gateway
+    echo [INFO] Waiting for gateway ^(first boot runs prisma migrations, ~60-90s^)...
+    timeout /t 60 /nobreak >nul
+    docker compose exec llm-gateway python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8080/health/liveliness').status==200 else 1)" >nul 2>&1
+    set RESULT=!ERRORLEVEL!
+    if !RESULT! EQU 0 (
+        echo [SUCCESS] llm-gateway restored after restart
+    ) else (
+        echo [ERROR] llm-gateway still not healthy - check logs: docker compose logs llm-gateway
+        echo [HINT] The gateway needs llama-cpp-upstream + llama-cpp-embed-upstream healthy first ^(option 11^).
+    )
+)
+echo.
+echo [INFO] Recent spend-ledger rows (confirms callers are routing through the gateway):
+docker compose exec llm-gateway-db psql -U litellm -d litellm -c "SELECT api_key, model, count(*) FROM \"LiteLLM_SpendLogs\" GROUP BY 1,2 ORDER BY 3 DESC LIMIT 5;" 2>nul
 cd /d "%SCRIPT_DIR%"
 if "%1"=="" (
     echo.

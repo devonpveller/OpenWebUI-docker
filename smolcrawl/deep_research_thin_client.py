@@ -27,8 +27,8 @@ from pydantic import BaseModel, Field
 class Tools:
     class Valves(BaseModel):
         research_url: str = Field(
-            default="http://host.docker.internal:8818",
-            description="Base URL of the openbrain-research service (loopback 8818 on the OB1 host, or http://openbrain-research:8000 if OWUI shares its network).",
+            default="http://openbrain-research:8000",
+            description="Base URL of the openbrain-research service. OWUI shares ai-stack_llm-net / ai-stack_default with openbrain-research, so reach it BY CONTAINER NAME (http://openbrain-research:8000). Do NOT use http://host.docker.internal:8818 — the :8818 host port is bound to 127.0.0.1 (host loopback) and is unreachable from a container via host.docker.internal (resolves to the host bridge IP), which surfaces as 'Server disconnected'.",
         )
         brain_key: str = Field(
             default="",

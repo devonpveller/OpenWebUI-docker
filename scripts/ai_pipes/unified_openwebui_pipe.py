@@ -96,6 +96,18 @@ compose projects: main `ai-stack` + separate `open-brain`).
             other processes' VRAM.
   Examples: "smi" · "nvidia-smi gpu 0" · "what's in memory on gpu 1"
 
+─ LLM traffic · GPU-demand attribution  ─────────── → modules/llm-traffic
+  Triggers: llm traffic · who is using gpu · who's using gpu · gpu demand ·
+            gpu traffic · llm demand · llm spend · llm cost · gateway traffic ·
+            llama traffic
+            Append "today" / "last 24h" / "last week" / "since boot" to scope
+            the time window (default last 1h).
+  Output:   Per-caller breakdown from the LiteLLM gateway spend ledger —
+            requests · tokens in/out · failures · avg latency · models ·
+            last-seen. In permissive mode the presented key string IS the
+            caller identity (friendly-named to services).
+  Coverage: Every caller that routes inference through the gateway.
+
 ─ Admin help  ──────────────────────────────────── → tailscale_serve_pipe
   Triggers: help · ? · admin help · stack help · tailscale help · commands ·
             what can i do
@@ -299,7 +311,7 @@ class Pipe:
         if isinstance(result, dict):
             
             # Refactored module responses (manifest-driven architecture)
-            if result.get("module_id") in ["system-health", "gpu-status", "emergency-recovery", "custom-tools", "help-system", "system-orchestrator"] and "content" in result:
+            if result.get("module_id") in ["system-health", "gpu-status", "emergency-recovery", "custom-tools", "help-system", "system-orchestrator", "llm-traffic"] and "content" in result:
                 # Use the pre-formatted content from refactored modules
                 return result.get("content", "Module response unavailable")
             

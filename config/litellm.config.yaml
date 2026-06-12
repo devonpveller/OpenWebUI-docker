@@ -5,9 +5,13 @@
 # under the key string presented (proven by the T0 spike, 2026-06-12 — distinct
 # keys => distinct LiteLLM_SpendLogs rows, plaintext key).
 #
-# api_base points at the CURRENT real-server names. At the cut-in (flip), these
-# become llama-cpp-upstream / llama-cpp-embed-upstream and the gateway takes the
-# llama-cpp / llama-cpp-embed aliases (guide §1A.7 / §8.3-revised).
+# AS-FLIPPED (cut-in applied 2026-06-12, guide §1A.7 / §8.3-revised): api_base
+# below points at the renamed real servers (llama-cpp-upstream /
+# llama-cpp-embed-upstream). The gateway itself holds the llama-cpp /
+# llama-cpp-embed network aliases on :8080, so every caller's
+# http://llama-cpp:8080 lands here and is forwarded by model name to the
+# upstreams. Never point api_base back at the bare alias — the gateway would
+# loop onto itself.
 #
 # DATABASE_URL is injected via compose env (expands ${LITELLM_DB_PASSWORD}); the
 # spend ledger + store_model_in_db use it. master_key intentionally absent.

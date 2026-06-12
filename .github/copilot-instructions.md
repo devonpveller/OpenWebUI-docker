@@ -33,10 +33,17 @@ This is a containerized AI stack with OpenWebUI, Ollama, Mnemory, and Tailscale 
 ```
 Docker Engine → OpenWebUI (healthy) → Tailscale (shared network) → Watchtower
                      ↓
-                  Ollama
-                  llama-cpp ← Mnemory (memory service + backup scheduler)
-                  llama-cpp-embed ←┘
+                  llm-gateway ← (ALL inference callers: OWUI, mnemory, little-coder, OB1, …)
+                  (LiteLLM front door; holds the llama-cpp / llama-cpp-embed
+                   aliases on :8080; permissive spend ledger in llm-gateway-db)
+                     ↓ routes by model name
+                  llama-cpp-upstream        (real llama-swap inference, device 0)
+                  llama-cpp-embed-upstream  (bge-m3 embeddings, device 1)
 ```
+Inference plane (since 2026-06-12): callers reach `http://llama-cpp:8080` /
+`http://llama-cpp-embed:8080`, which are network aliases on `llm-gateway`
+(LiteLLM). Never route inference around the gateway. Health/GPU/recovery probes
+target the real `*-upstream` servers, not the alias.
 
 **AI Stack Pipe Function Architecture:**
 

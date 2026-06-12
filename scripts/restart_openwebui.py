@@ -100,7 +100,7 @@ def wait_for_openwebui_healthy():
 def main():
     """Main restart OpenWebUI function"""
     log_info("Restarting OpenWebUI with proper network dependency handling...")
-    log_warn("This will restart OpenWebUI, llama-cpp, llama-cpp-embed, Ollama, and Tailscale containers")
+    log_warn("This will restart OpenWebUI, llama-cpp, llama-cpp-embed, and Tailscale containers")
     
     project_root = find_project_root()
     if not project_root:
@@ -109,10 +109,12 @@ def main():
     
     log_info(f"Using project root: {project_root}")
     
-    # Step 1: Stop dependent containers first
+    # Step 1: Stop dependent containers first. tailscale MUST stop before
+    # openwebui — it shares openwebui's network namespace (network_mode:
+    # service:openwebui), so it cannot outlive the namespace owner.
     log_info("Stopping dependent containers first...")
     result = run_docker_command(
-        ["docker", "compose", "stop", "tailscale", "ollama", "llama-cpp-upstream", "llama-cpp-embed-upstream"],
+        ["docker", "compose", "stop", "tailscale", "llama-cpp-upstream", "llama-cpp-embed-upstream"],
         project_root,
         timeout=60
     )
@@ -141,24 +143,13 @@ def main():
         log_error("OpenWebUI did not become healthy")
         return 1
     
-    # Step 4: Start Ollama
-    log_info("Starting Ollama...")
-    result = run_docker_command(
-        ["docker", "compose", "up", "-d", "ollama"],
-        project_root,
-        timeout=60
-    )
-    
-    if not result or result.returncode != 0:
-        log_error("Failed to start Ollama")
-        if result:
-            log_error(f"Error: {result.stderr}")
-        return 1
-    
-    # Wait for Ollama to start
-    time.sleep(15)
-    
-    # Step 5: Start llama-cpp services
+    # NOTE: the `ollama` service is DISABLED in this stack (llama-cpp/llama-swap
+    # handles all inference — see CLAUDE.md). The old Step 4 here ran
+    # `docker compose up -d ollama`, which fails ("no such service") and used to
+    # `return 1` BEFORE Tailscale was restarted — leaving tailscale orphaned in a
+    # half-recreated netns (the "OWUI down over the tailnet" symptom). Removed.
+
+    # Step 4: Start llama-cpp services
     log_info("Starting llama-cpp...")
     result = run_docker_command(
         ["docker", "compose", "up", "-d", "llama-cpp-upstream"],
@@ -183,7 +174,8 @@ def main():
     log_info("Waiting for llama-cpp services to initialize...")
     time.sleep(30)
     
-    # Step 6: Start Tailscale
+    # Step 5: Start Tailscale LAST — it shares openwebui's netns, so it must
+    # re-attach only after openwebui is healthy (done above).
     log_info("Starting Tailscale...")
     result = run_docker_command(
         ["docker", "compose", "up", "-d", "tailscale"],

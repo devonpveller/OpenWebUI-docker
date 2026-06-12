@@ -295,9 +295,28 @@ function Invoke-MinimalRecovery {
 
     Write-Log "INFO" "Attempting gentle service restart..."
 
-    # Just restart services without destroying containers
+    # Just restart services without destroying containers.
     try {
-        docker compose restart tailscale llama-cpp-upstream llama-cpp-embed-upstream openwebui
+        # NETNS ORDERING (critical): `tailscale` runs `network_mode:
+        # service:openwebui`, so it lives INSIDE openwebui's network namespace.
+        # Restarting openwebui recreates that namespace and orphans tailscale
+        # (it stays "Up" but loses all connectivity / serve config). Therefore
+        # NEVER restart them in one `docker compose restart` call — that restarts
+        # tailscale first (or without waiting), then openwebui pulls the netns out
+        # from under it. The order MUST be: inference (netns-independent) → restart
+        # openwebui → WAIT until it is healthy → only THEN restart tailscale so it
+        # re-attaches to the new, stable namespace.
+        docker compose restart llama-cpp-upstream llama-cpp-embed-upstream
+
+        docker compose restart openwebui
+        if (-not (Wait-ForHealthy "openwebui" 240)) {
+            Write-Log "WARN" "OpenWebUI not healthy after restart; restarting tailscale anyway so it is not left orphaned..."
+        }
+
+        # Tailscale LAST — re-attaches to openwebui's (now stable) netns and
+        # re-applies its serve config via entrypoint.sh.
+        docker compose restart tailscale
+        Wait-ForHealthy "tailscale" 90 | Out-Null
 
         # Ensure every auxiliary container is running (cheap no-op if already
         # up). Their depends_on only fires at the initial compose-up, so a

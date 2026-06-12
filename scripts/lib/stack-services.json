@@ -23,6 +23,8 @@
     "core": [
       { "container": "openwebui",       "project": "ai-stack", "critical": true,  "host_health": "http://127.0.0.1:3000/health" },
       { "container": "tailscale",       "project": "ai-stack", "critical": true },
+      { "container": "llm-gateway",     "project": "ai-stack", "critical": true,  "note": "LiteLLM front door (holds the llama-cpp / llama-cpp-embed aliases). No host_health: llm-net is internal so host :4000 is inert; liveliness is in-network (http://llm-gateway:8080/health/liveliness)." },
+      { "container": "llm-gateway-db",   "project": "ai-stack", "critical": true,  "note": "Postgres spend-log ledger backing llm-gateway." },
       { "container": "llama-cpp-upstream",       "project": "ai-stack", "critical": true,  "host_health": "http://127.0.0.1:8081/health" },
       { "container": "llama-cpp-embed-upstream", "project": "ai-stack", "critical": false, "host_health": "http://127.0.0.1:8082/health" },
       { "container": "watchtower",      "project": "ai-stack", "critical": false }
