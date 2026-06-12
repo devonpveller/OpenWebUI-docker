@@ -56,11 +56,19 @@ general_settings:
   store_model_in_db: true
   success_callback: ["postgres"]   # proven to populate LiteLLM_SpendLogs (T0 spike)
   failure_callback: ["postgres"]
-  # CRITICAL (2026-06-12 incident): LiteLLM's model health-check sends a real
-  # completion to EVERY registered model. On a single-GPU llama-swap backend that
-  # forces a model LOAD per probe -> 27B<->35B swap thrash that starved chat.
-  # Disable it; the gateway's own liveness is /health/liveliness (no model probe).
+  # LiteLLM's active model health-check sends a real completion to EVERY registered
+  # model. On a single-GPU llama-swap backend that forces a model LOAD per probe
+  # -> swap thrash. This is the documented LiteLLM+llama-swap pattern: turn the
+  # active probe OFF here. Inference-plane uptime is monitored the side-effect-free
+  # way by modules/system-health: gateway /health/liveliness + each upstream's
+  # /health (llama-swap router liveness — 200 without loading a model) + GPU.
   background_health_checks: false
+  # NOTE: little-coder GETs /slots for a (best-effort, non-gating) GPU-occupancy
+  # metric, but llama-swap returns 404 for /slots even with a model loaded — this
+  # metric was already dead before the gateway (not a flip regression). To revive
+  # it: enable /slots on the llama.cpp server (--slots in llama-swap.config.yaml
+  # common-args) AND add a LiteLLM pass_through_endpoints entry forwarding /slots
+  # -> llama-cpp-upstream. Keep LiteLLM the front door; never route around it.
 
 litellm_settings:
   drop_params: true        # tolerate caller params llama.cpp doesn't recognize

@@ -145,8 +145,8 @@ function Test-TailscaleConnection {
 #                  that the mapping forwards to
 $ExpectedTailscaleServes = @(
     @{ Name = 'openwebui';            TailscalePort = 443;  TailscalePath = '/';                LocalPort = 8080 }
-    @{ Name = 'llama-cpp';            TailscalePort = 443;  TailscalePath = '/llama-cpp';       LocalPort = 8235 }
-    @{ Name = 'llama-cpp-embed';      TailscalePort = 443;  TailscalePath = '/llama-cpp-embed'; LocalPort = 8236 }
+    @{ Name = 'llama-cpp-upstream';       TailscalePort = 443;  TailscalePath = '/llama-cpp';       LocalPort = 8235 }
+    @{ Name = 'llama-cpp-embed-upstream'; TailscalePort = 443;  TailscalePath = '/llama-cpp-embed'; LocalPort = 8236 }
     @{ Name = 'open-notebook-ui';     TailscalePort = 8443; TailscalePath = '/';                LocalPort = 8237 }
     @{ Name = 'open-notebook-api';    TailscalePort = 5055; TailscalePath = '/';                LocalPort = 8238 }
     @{ Name = 'quartz-wiki-viewer';   TailscalePort = 8444; TailscalePath = '/';                LocalPort = 8239 }
@@ -309,22 +309,22 @@ function Repair-LlamaCppConnectivity {
     Write-LogEntry "Starting OpenWebUI-llama-cpp connectivity recovery..." "WARN"
     
     try {
-        # Check if llama-cpp container is running
-        if (-not (Test-ServiceHealth "llama-cpp")) {
-            Write-LogEntry "llama-cpp container not running, starting..." "WARN"
-            docker compose up -d llama-cpp | Out-Null
+        # Check if llama-cpp-upstream container is running
+        if (-not (Test-ServiceHealth "llama-cpp-upstream")) {
+            Write-LogEntry "llama-cpp-upstream container not running, starting..." "WARN"
+            docker compose up -d llama-cpp-upstream | Out-Null
             Start-Sleep 30
-            
-            if (-not (Test-ServiceHealth "llama-cpp")) {
-                Write-LogEntry "Failed to start llama-cpp container" "ERROR"
+
+            if (-not (Test-ServiceHealth "llama-cpp-upstream")) {
+                Write-LogEntry "Failed to start llama-cpp-upstream container" "ERROR"
                 return $false
             }
         }
-        
-        # Also check llama-cpp-embed
-        if (-not (Test-ServiceHealth "llama-cpp-embed")) {
-            Write-LogEntry "llama-cpp-embed container not running, starting..." "WARN"
-            docker compose up -d llama-cpp-embed | Out-Null
+
+        # Also check llama-cpp-embed-upstream
+        if (-not (Test-ServiceHealth "llama-cpp-embed-upstream")) {
+            Write-LogEntry "llama-cpp-embed-upstream container not running, starting..." "WARN"
+            docker compose up -d llama-cpp-embed-upstream | Out-Null
             Start-Sleep 15
         }
         
@@ -335,7 +335,7 @@ function Repair-LlamaCppConnectivity {
         
         while ($WaitTime -lt $MaxWaitTime) {
             try {
-                docker compose exec -T llama-cpp curl -s -f --max-time 5 http://localhost:8080/health | Out-Null
+                docker compose exec -T llama-cpp-upstream curl -s -f --max-time 5 http://localhost:8080/health | Out-Null
                 if ($LASTEXITCODE -eq 0) {
                     Write-LogEntry "llama-cpp API is now responding" "SUCCESS"
                     break

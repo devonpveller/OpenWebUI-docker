@@ -57,7 +57,7 @@ try {
     @{ Path = 'D:\Open WebUI\open-notebook\surreal_data'; Service = 'surrealdb';     Owner = 'open-notebook-backup' }
     @{ Path = 'D:\Open WebUI\open-notebook\notebook_data'; Service = 'open_notebook'; Owner = 'open-notebook-backup' }
     @{ Path = '.\data\tailscale';                          Service = 'tailscale';    Owner = 'tailscale-backup' }
-    @{ Path = 'C:\Users\yamao\.lmstudio\models';           Service = 'llama-cpp';    Owner = 'lm-models-backup' }
+    @{ Path = 'C:\Users\yamao\.lmstudio\models';           Service = 'llama-cpp-upstream'; Owner = 'lm-models-backup' }
   )
 
   # ----- Volumes intentionally NOT backed up -------------------------

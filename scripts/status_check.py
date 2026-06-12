@@ -137,7 +137,7 @@ def check_llama_cpp_status():
     print()
     log_info("llama-cpp Status:")
     result = run_docker_command(
-        ["docker", "compose", "exec", "-T", "tailscale", "wget", "-q", "-T", "5", "-O", "-", "http://llama-cpp:8080/health"],
+        ["docker", "compose", "exec", "-T", "tailscale", "wget", "-q", "-T", "5", "-O", "-", "http://llama-cpp-upstream:8080/health"],
         project_root,
         timeout=15
     )
@@ -151,7 +151,7 @@ def check_llama_cpp_status():
     
     # Check models loaded
     result = run_docker_command(
-        ["docker", "compose", "exec", "-T", "tailscale", "wget", "-q", "-T", "5", "-O", "-", "http://llama-cpp:8080/v1/models"],
+        ["docker", "compose", "exec", "-T", "tailscale", "wget", "-q", "-T", "5", "-O", "-", "http://llama-cpp-upstream:8080/v1/models"],
         project_root,
         timeout=15
     )
@@ -173,7 +173,7 @@ def check_llama_cpp_embed_status():
     print()
     log_info("llama-cpp-embed Status:")
     result = run_docker_command(
-        ["docker", "compose", "exec", "-T", "tailscale", "wget", "-q", "-T", "5", "-O", "-", "http://llama-cpp-embed:8080/health"],
+        ["docker", "compose", "exec", "-T", "tailscale", "wget", "-q", "-T", "5", "-O", "-", "http://llama-cpp-embed-upstream:8080/health"],
         project_root,
         timeout=15
     )
@@ -187,7 +187,7 @@ def check_llama_cpp_embed_status():
     
     # Check embeddings endpoint
     result = run_docker_command(
-        ["docker", "compose", "exec", "-T", "tailscale", "wget", "-q", "-T", "5", "-O", "-", "http://llama-cpp-embed:8080/v1/models"],
+        ["docker", "compose", "exec", "-T", "tailscale", "wget", "-q", "-T", "5", "-O", "-", "http://llama-cpp-embed-upstream:8080/v1/models"],
         project_root,
         timeout=15
     )
@@ -315,7 +315,7 @@ def check_service_accessibility():
 
     # Check llama-cpp accessibility
     result = run_docker_command(
-        ["docker", "compose", "exec", "-T", "tailscale", "wget", "-q", "-T", "5", "-O", "/dev/null", "http://llama-cpp:8080/health"],
+        ["docker", "compose", "exec", "-T", "tailscale", "wget", "-q", "-T", "5", "-O", "/dev/null", "http://llama-cpp-upstream:8080/health"],
         project_root,
         timeout=10
     )
@@ -327,7 +327,7 @@ def check_service_accessibility():
     
     # Check llama-cpp-embed accessibility
     result = run_docker_command(
-        ["docker", "compose", "exec", "-T", "tailscale", "wget", "-q", "-T", "5", "-O", "/dev/null", "http://llama-cpp-embed:8080/health"],
+        ["docker", "compose", "exec", "-T", "tailscale", "wget", "-q", "-T", "5", "-O", "/dev/null", "http://llama-cpp-embed-upstream:8080/health"],
         project_root,
         timeout=10
     )

@@ -120,7 +120,7 @@ def test_llama_cpp_availability():
     
     log_info("Testing llama-cpp availability...")
     result = run_docker_command(
-        ["docker", "compose", "exec", "-T", "llama-cpp", "curl", "-sf", "http://127.0.0.1:8080/health"],
+        ["docker", "compose", "exec", "-T", "llama-cpp-upstream", "curl", "-sf", "http://127.0.0.1:8080/health"],
         project_root,
         timeout=15
     )
@@ -141,7 +141,7 @@ def test_llama_cpp_embed_availability():
     
     log_info("Testing llama-cpp-embed availability...")
     result = run_docker_command(
-        ["docker", "compose", "exec", "-T", "llama-cpp-embed", "curl", "-sf", "http://127.0.0.1:8080/health"],
+        ["docker", "compose", "exec", "-T", "llama-cpp-embed-upstream", "curl", "-sf", "http://127.0.0.1:8080/health"],
         project_root,
         timeout=15
     )
@@ -164,7 +164,7 @@ def restart_gpu_services():
     
     # Restart OpenWebUI, Ollama, llama-cpp, and llama-cpp-embed
     result = run_docker_command(
-        ["docker", "compose", "restart", "ollama", "openwebui", "llama-cpp", "llama-cpp-embed"],
+        ["docker", "compose", "restart", "ollama", "openwebui", "llama-cpp-upstream", "llama-cpp-embed-upstream"],
         project_root,
         timeout=120
     )
@@ -252,7 +252,7 @@ def main():
         else:
             log_warn("llama-cpp may need restart")
             result = run_docker_command(
-                ["docker", "compose", "restart", "llama-cpp"],
+                ["docker", "compose", "restart", "llama-cpp-upstream"],
                 project_root,
                 timeout=60
             )
@@ -266,7 +266,7 @@ def main():
         else:
             log_warn("llama-cpp-embed may need restart")
             result = run_docker_command(
-                ["docker", "compose", "restart", "llama-cpp-embed"],
+                ["docker", "compose", "restart", "llama-cpp-embed-upstream"],
                 project_root,
                 timeout=60
             )
