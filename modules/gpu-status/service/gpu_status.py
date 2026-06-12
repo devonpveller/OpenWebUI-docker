@@ -236,8 +236,8 @@ class GPUStatusModule:
     # in memory?".
     _GPU_ENV_MAP: Dict[str, Dict[str, str]] = {
         "GPU_AISTACK_DEVICE_ID":         {"container": "openwebui",       "description": "Open WebUI + reranker (torch)", "default": "1"},
-        "GPU_LLAMA_CPP_DEVICE_ID":       {"container": "llama-cpp",       "description": "llama-swap CUDA inference",     "default": "0"},
-        "GPU_LLAMA_CPP_EMBED_DEVICE_ID": {"container": "llama-cpp-embed", "description": "BGE-M3 embeddings",             "default": "1"},
+        "GPU_LLAMA_CPP_DEVICE_ID":       {"container": "llama-cpp-upstream",       "description": "llama-swap CUDA inference",     "default": "0"},
+        "GPU_LLAMA_CPP_EMBED_DEVICE_ID": {"container": "llama-cpp-embed-upstream", "description": "BGE-M3 embeddings",             "default": "1"},
     }
 
     def _get_gpu_assignments(self) -> Dict[int, List[Dict[str, str]]]:
@@ -312,10 +312,10 @@ class GPUStatusModule:
         for c in containers:
             name = c["container"]
             api: Optional[str] = None
-            if name == "llama-cpp":
-                api = "http://llama-cpp:8080"
-            elif name == "llama-cpp-embed":
-                api = "http://llama-cpp-embed:8080"
+            if name == "llama-cpp-upstream":
+                api = "http://llama-cpp-upstream:8080"
+            elif name == "llama-cpp-embed-upstream":
+                api = "http://llama-cpp-embed-upstream:8080"
             if not api:
                 continue
             workload = self._probe_llama_workload(api)
