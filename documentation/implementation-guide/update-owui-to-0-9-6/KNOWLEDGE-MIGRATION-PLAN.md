@@ -9,21 +9,38 @@ collections. No OWUI deletion, no OWUI→OB1 retrieval rewire in this plan.
 Ingestion is a **cautionary, staged promotion** — nothing is written to OB1 until an
 operator has reviewed the filtered manifest.
 
-## Source schema (grounded in the live `webui.db`)
+## Source schema (verified against the live `webui.db`, 2026-06-12)
 
-- **`knowledge`** = the collections (snapshot: ~34). Columns: `id`, `name`,
-  `description`, `data` (JSON, holds `{"file_ids": [...]}`), `user_id`, timestamps.
-- **`file`** = uploaded docs (snapshot: ~2120). Columns: `id`, `filename`,
+- **`knowledge`** = the collections (live: **40**). Columns: `id`, `name`,
+  `description`, `data`, `user_id`, timestamps.
+- **`file`** = uploaded docs (live: **7645** total). Columns: `id`, `filename`,
   `data` (JSON `{"content": "<extracted text>"}`), `meta` (JSON
   `{name, content_type, size, data, collection_name}`), `user_id`, timestamps.
-- **Membership** is recoverable two ways: `knowledge.data.file_ids` (authoritative)
-  and `file.meta.collection_name`. Use `file_ids` as primary, reconcile with
-  `collection_name` to catch orphans.
+- **Membership — IMPORTANT, differs from the stale snapshot:** in the live DB
+  `knowledge.data` is **empty (`{}`)**; there is **no `file_ids` list**. A file
+  belongs to a collection iff **`file.meta.collection_name == knowledge.id`**.
+  (The audit script was corrected to use this linkage.)
+- **Noise filter:** there are ~1100 distinct `collection_name` values but only 40
+  knowledge collections — the other ~1060 are **per-chat file uploads** (transient
+  collections), correctly excluded by requiring `collection_name ∈ knowledge.id`.
+  After linkage: **6327 files across the 40 collections**; 1066 chat-upload files
+  excluded.
 - The **extracted text is already in `file.data.content`** — Route B needs no
   re-extraction and does not touch OWUI's `vector_db/` at all.
 
-> The numbers above are from a stale snapshot. **Step 1 re-counts against a fresh
-> read-only copy of the live DB** — do not hardcode counts.
+### Origin classification (the curation axis)
+
+Collections fall into three origins by `knowledge.description`:
+
+| origin | rule | live counts | meaning |
+|---|---|---|---|
+| `smolcrawl` | desc starts `Auto-synced by SmolCrawl` | 7 colls / 4731 files / 106M chars | reproducible web-scrape mirrors (GitHub/NVIDIA/Tauri docs) |
+| `appsync` | desc contains `Auto-synced` | 1 coll / 1131 files | GAPS Task Manager auto-sync |
+| `authored` | everything else | 25 colls / 93 files / 168M chars | human-curated knowledge |
+
+**Decision (2026-06-12): scope = `authored` only.** The SmolCrawl mirrors are
+reproducible and would bloat OB1; GAPS-app is an app sync best handled at its
+source. `filter.py --origins=authored` enforces this.
 
 ## Target model in OB1
 
@@ -105,110 +122,103 @@ Run `filter.py` to split `manifest.csv` into:
 contract for Step 3. Nothing outside `promote.csv` gets written.
 
 ### Step 3 — Promote (dry-run, then apply)
-Run `promote.py` on the `ai-stack_llm-net` network so it can reach
-`http://openbrain-mcp:8000`:
+`promote.py` is a **stdlib-only MCP client** (no `pip`): it does the Streamable-HTTP
+handshake (`initialize` → `notifications/initialized` → `tools/call`), sends
+`accept: application/json, text/event-stream`, and parses the `result.content[0].text`
+envelope (and SSE). Run it on `ai-stack_llm-net` so `http://openbrain-mcp:8000` resolves.
+The MCP key is the `MCP_ACCESS_KEY` baked into the `openbrain-mcp` container.
+
 ```powershell
-docker run --rm --network ai-stack_llm-net `
-  -e MCP_ACCESS_KEY=$env:MCP_ACCESS_KEY `
-  -v ${PWD}\migration:/work -w /work python:3.12-slim `
-  sh -c "pip install -q requests && python promote.py --input promote.csv --dry-run"
-# review the planned thread/source actions, then re-run without --dry-run
+$dir = "<...>\migration"
+$key = (docker exec openbrain-mcp printenv MCP_ACCESS_KEY).Trim()
+# dry-run is OFFLINE (no network); review the plan first:
+docker run --rm -v "${dir}:/work" -w /work python:3.12-slim python promote.py --dry-run
+# then apply (real writes to OB1):
+docker run --rm --network ai-stack_llm-net -e MCP_ACCESS_KEY="$key" `
+  -v "${dir}:/work" -w /work python:3.12-slim python promote.py
 ```
-`promote.py`:
-1. Groups `promote.csv` by collection.
-2. `list_threads` → reuse a thread if one already carries the
-   `owui_collection_id` marker (idempotent); else `create_thread(name, description)`.
-3. For each file: `capture_with_thread(thread_id, content, title=filename,
-   content_type="manual", metadata_extra={...provenance...})`.
-4. Logs `created / linked / deduped / failed` per row to `promote.log`.
+Behaviour: groups `promote.csv` by collection; **reuse-or-create** a thread keyed by
+an `[owui_collection_id:<id>]` marker in the thread description (idempotent); then
+`capture_with_thread(thread_id, content=<read from webui.live.db by file_id>,
+title=filename, content_type="manual", metadata_extra={provenance})` per file.
+Every row is logged to `promote.log`; **re-runs skip file_ids already logged ok**, so
+it is fully resumable.
 
 ### Step 4 — Verify
-- For each thread: `get_thread_sources(thread_id)` count == survivors for that
-  collection in `promote.csv` (allowing for cross-collection dedup).
-- Let `openbrain-chunk-worker` drain (or `POST http://openbrain-chunk-worker:8817/chunks`),
-  then spot-check `search` / `match_source_chunks` returns migrated content.
-- Record results in `VERIFY-RESULTS.md`. Only after this do we proceed to the upgrade.
+- `verify.py` lists the marker threads + `source_count` and totals them.
+- DB-level proof (the real check): `source_chunks` exist and are embedded for the
+  migrated sources — confirms full-document embedding regardless of the coarse
+  source vector. (Don't rely on the `search` MCP tool for this — see the known
+  BigInt bug in the run log below.)
 
-## Script skeletons
+## Scripts (live, in `migration/`)
 
-> Skeletons, not finished tooling — kept deliberately small. `audit.py`/`filter.py`
-> are pure-Python stdlib; `promote.py` needs `requests` and the OB1 network.
+The skeletons were replaced by working scripts during the run. All stdlib-only;
+container runs go through **PowerShell** (the Bash tool mangles Windows `-v` mounts):
 
-**`audit.py`** (read-only)
-```python
-import sqlite3, json, hashlib, csv, collections
-db = sqlite3.connect("webui.live.db"); db.row_factory = sqlite3.Row
-files = {}
-for r in db.execute("SELECT id, filename, data, meta FROM file"):
-    content = (json.loads(r["data"] or "{}") or {}).get("content") or ""
-    meta = json.loads(r["meta"] or "{}") or {}
-    files[r["id"]] = {
-        "filename": r["filename"], "chars": len(content.strip()),
-        "md5": hashlib.md5(content.encode("utf-8", "ignore")).hexdigest() if content.strip() else "",
-        "ctype": meta.get("content_type", ""), "content": content,
-    }
-rows, percoll = [], collections.defaultdict(list)
-for k in db.execute("SELECT id, name, description, data FROM knowledge"):
-    fids = (json.loads(k["data"] or "{}") or {}).get("file_ids", []) or []
-    for fid in fids:
-        f = files.get(fid)
-        if not f:  # orphan id in collection
-            continue
-        rows.append({"collection_id": k["id"], "collection_name": k["name"],
-                     "file_id": fid, "filename": f["filename"],
-                     "content_chars": f["chars"], "content_md5": f["md5"],
-                     "owui_content_type": f["ctype"]})
-        percoll = percoll  # see summary below
-        perColl = None
-# write manifest.csv from `rows`; build histogram + dup counts for summary.txt
-with open("manifest.csv", "w", newline="", encoding="utf-8") as fh:
-    w = csv.DictWriter(fh, fieldnames=list(rows[0].keys())); w.writeheader(); w.writerows(rows)
-print(f"{len(rows)} file-links across "
-      f"{len({r['collection_id'] for r in rows})} collections")
-```
+| script | role |
+|---|---|
+| `audit.py` | read-only; manifest.csv / collections.csv / orphans.csv / summary.txt; linkage = `meta.collection_name==knowledge.id`; tags `origin` |
+| `filter.py` | gates → promote.csv / rejected.csv / review.csv; `--origins=authored[,appsync,smolcrawl]` `[MIN_CHARS] [MIN_FILES]` |
+| `promote.py` | stdlib MCP client; `--dry-run` (offline) / `--check` / apply; resumable via promote.log |
+| `verify.py` | marker-thread source counts + (buggy) search spot-check |
 
-**`filter.py`** (pure transform over `manifest.csv` → `promote.csv` / `rejected.csv` / `review.csv`)
-```python
-import csv, collections
-MIN_CHARS, MIN_FILES = 200, 2
-rows = list(csv.DictReader(open("manifest.csv", encoding="utf-8")))
-seen, promote, rejected = set(), [], []
-by_coll = collections.defaultdict(list)
-for r in rows:
-    n = int(r["content_chars"])
-    if n == 0:                         rejected.append({**r, "reason": "empty"}); continue
-    if n < MIN_CHARS:                  rejected.append({**r, "reason": "low_context"}); continue
-    dup = r["content_md5"] in seen;    seen.add(r["content_md5"])
-    r2 = {**r, "duplicate": dup}; by_coll[r["collection_id"]].append(r2)
-review = []
-for cid, fs in by_coll.items():
-    if len(fs) < MIN_FILES:
-        for f in fs: review.append({**f, "reason": "low_volume_collection"})
-    promote.extend(fs)              # promote anyway; review.csv is advisory
-# write promote.csv / rejected.csv / review.csv
-```
+`webui.live.db`, all `*.csv`, `*.log`, `summary.txt` are gitignored (size / churn).
 
-**`promote.py`** (calls OB1 MCP `capture_with_thread`)
-```python
-import csv, os, json, requests
-URL = os.environ.get("OPENBRAIN_MCP_URL", "http://openbrain-mcp:8000")
-KEY = os.environ["MCP_ACCESS_KEY"]
-H = {"x-brain-key": KEY, "content-type": "application/json"}
-def call(name, args):
-    r = requests.post(URL, headers=H, json={"jsonrpc":"2.0","id":1,
-        "method":"tools/call","params":{"name":name,"arguments":args}}, timeout=120)
-    r.raise_for_status(); return r.json()
-# 1) map collection -> thread_id (reuse via list_threads marker, else create_thread)
-# 2) for each promote.csv row -> capture_with_thread(thread_id, content=<from webui.db>,
-#       title=filename, content_type="manual", metadata_extra={provenance...})
-# NB: promote.csv carries ids+filenames; re-open webui.live.db (read-only) to pull content.
-```
-> `promote.py` re-reads `content` from the read-only `webui.live.db` by `file_id`
-> (kept out of the CSVs to avoid giant manifests).
+## ACTUAL RUN — 2026-06-12 (scope A, authored)
+
+**Result: complete & verified — 25 threads, 93 sources, 19,624 chunks (all embedded).**
+
+Pipeline numbers (MIN_CONTENT_CHARS=200):
+- audit: 6327 file-links / 40 collections (1066 chat-upload files excluded).
+- filter `--origins=authored`: **93 promoted / 25 collections**; rejected 6234
+  (4766 smolcrawl, 1468 appsync, plus empty/low_context/dup within authored).
+- 7 empty collections + 13 single-file collections handled (empties dropped, singles
+  flagged in review.csv but kept).
+- promote: 25 threads created, 93 sources, 0 dedup, **0 failed** (after the fix below).
+
+### Deviation: embedding-size failure + fix (44 of 93 failed on first apply)
+
+`llama-cpp-embed` has a **512-token physical batch** and hard-rejects any single
+input above it (`input (575 tokens) is too large ... batch size: 512`). OB1's
+`getEmbedding()` ([OB1/integrations/kubernetes-deployment/index.ts](../../../OB1/integrations/kubernetes-deployment/index.ts))
+sent the **whole document** as one input, so 44 larger sources failed on the first run.
+
+**Fix (durable, zero-GPU):** truncate the embedding input to a bounded prefix
+(`MAX_EMBED_CHARS=1500`, halve-and-retry on "too large"). This loses **no retrievable
+information** — full text is stored in `source.content` and the chunk-worker embeds
+every 1200-char chunk (19,624 of them here), so deep retrieval covers the whole
+document; only the coarse source-level vector is prefix-bounded. Raising the embed
+batch was rejected — the embed GPU (2080) is maxed until a hardware upgrade.
+
+Applied as: repo edit (durable) → `docker cp index.ts openbrain-mcp:/app/index.ts`
+→ `docker restart openbrain-mcp` (interpreted `deno run`, so no image rebuild needed
+to go live). Re-ran `promote.py` → the 44 completed, 49 skipped via resume.
+
+> **Durability — RESOLVED (2026-06-12):** the `openbrain-mcp-server:local` image was
+> rebuilt and the container recreated so the fix survives `--force-recreate` / recovery:
+> `docker compose --project-name open-brain --project-directory OB1/docker `
+> `-f OB1/docker/docker-compose.yml up -d --build --no-deps openbrain-mcp`.
+> Verified `MAX_EMBED_CHARS` present in the running image's `/app/index.ts`.
+
+### Discovered issue: `search`/`fetch` BigInt serialization — FIXED (2026-06-12)
+
+The `search` MCP tool errored `Do not know how to serialize a BigInt`: it selected
+`thoughts.id` (BIGSERIAL → BigInt) and `JSON.stringify`'d it; `fetch` had the same
+latent bug. Fixed in the same OB1 file + rebuild:
+- `search`/`fetch` now emit `id: String(...)` (the ChatGPT search/fetch contract wants
+  string ids), and
+- a global `BigInt.prototype.toJSON → Number` backstop covers any other int8 column
+  that reaches JSON.
+
+Verified post-rebuild: `search` returns `isError:false` with string ids
+(`{"results":[{"id":"7343",...}]}`). (Migrated docs live in `sources`/threads, not
+`thoughts`, so the thoughts-only `search` tool won't surface them — browse via
+`get_thread_sources`; the research/curator stack reaches them through chunk search.)
 
 ## Sequencing into the upgrade
 
-1. Steps 0–4 here, **fully verified in OB1**.
+1. Migration **done & verified** (above).
 2. Then run `UPGRADE-PLAN.md`. After upgrade, simply don't use OWUI knowledge —
    §5 of the upgrade plan (KB access enforcement) becomes a non-issue.
 

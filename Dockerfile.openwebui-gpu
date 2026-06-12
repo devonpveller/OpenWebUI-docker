@@ -1,4 +1,4 @@
-FROM ghcr.io/open-webui/open-webui:v0.8.10
+FROM ghcr.io/open-webui/open-webui:v0.9.6
 
 # Remove CPU-only PyTorch packages
 RUN pip uninstall -y torch torchvision torchaudio
@@ -11,5 +11,12 @@ RUN python -c "import torch; print('PyTorch version:', torch.__version__); print
 
 # Built-in timestamp tools hardcode UTC; convert ISO strings to the container's
 # local zone (TZ env) so models stop mis-rendering them. Epoch ints unchanged.
+# Verified against v0.9.6: bare `now.isoformat()` / `adjusted.isoformat()` patterns
+# still present (the `astimezone(user_tz)` lines are untouched by these substitutions).
 RUN sed -i 's/now\.isoformat()/now.astimezone().isoformat()/g; s/adjusted\.isoformat()/adjusted.astimezone().isoformat()/g' \
     /app/backend/open_webui/tools/builtin.py
+# Fail the build LOUDLY if the substitution silently no-ops (e.g. a future base
+# image renames/moves the file), instead of shipping the UTC-mis-rendering bug.
+RUN grep -q 'now.astimezone().isoformat()' /app/backend/open_webui/tools/builtin.py \
+ && grep -q 'adjusted.astimezone().isoformat()' /app/backend/open_webui/tools/builtin.py \
+ || (echo "FATAL: builtin.py timezone patch did not apply (pattern not found post-sed)" && exit 1)

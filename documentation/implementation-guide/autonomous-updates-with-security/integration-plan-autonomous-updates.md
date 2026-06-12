@@ -60,6 +60,7 @@ Before Phase 0:
 | **5 — Apply engine + human-approval gate (S1, interim approval)** | Build the apply path: backup → **edit original file → git commit** → recreate → health-gate → **git-revert** on fail. Apply fires **only on an explicit human go-ahead** (interim manual trigger, e.g. `POST /approve/<run>`). Still never auto. | Mixed | G5 (verdicts + apply/rollback drill reviewed) |
 | **6 — Recovery + docs (three-place rule)** | emergency-recovery, stack-map, system-health probe, CLAUDE.md | Full | None |
 | **7 — Teams-chat approval channel (S2)** | Swap the interim manual go-ahead for the **governed teams-chat** approval (D10); message security updates for awareness. The end-state delivery channel — not a new autonomy level. | Mixed | depends on `../teams-chat-agent-orchestration/` being built |
+| **8 — Weekly cadence + field-report research + digest loop (D12–D18)** | Daily detection as a step in the 01:00 chain; **job C** user/community field-report research; **maturity delay** (7d); weekly **accumulation → Friday teams-chat recommendation** (go / security-only / nogo); **daily digest loops in** the findings and **gates the podcast** on completion | Mixed | depends on Phase 7 (teams-chat sink) + the OB1 digest chain |
 
 The operator can **stop after Phase 4** with a fully-useful system: it watches
 for updates, researches every one, records grounded claims, and emails a
@@ -162,6 +163,32 @@ changes.
   seam so this is an adapter, not a rewrite. An operator who wants no apply
   before teams-chat simply never enables the Phase-5 interim approval and waits
   for this phase.
+
+### Phase 8 — Weekly cadence + field reports + digest loop (guide §5A, D12–D18)
+**Goal:** Move from per-event "research + notify" to the operator's
+**daily-detect → weekly-Friday-recommend** model, add the user-feedback research
+dimension, and wire the daily digest in. Layers over Phases 2–7; changes *timing
+and inputs*, not the per-update gate.
+- **Daily detection step (D12):** the detector (T3.x) runs once daily as a step
+  in the OB1 `pull → prune → digest` cron (05:00 UTC = 01:00 EDT) rather than
+  reacting to watchtower's 2-min poll; watchtower stays a continuous secondary feed.
+- **Job C — field reports (D15):** add the third research job (r/OpenWebUI,
+  GitHub issues, forums); re-run it on each daily pass while a candidate is parked.
+- **Maturity delay (D13):** `maturity_days` (default 7) per manifest entry; a
+  candidate is researched immediately but only becomes `eligible` after the soak.
+- **Accumulation queue + Friday recommendation (D14/D16):** persist eligible
+  candidates; on Friday, synthesize the week's research into one PM-composed
+  recommendation posted through the **Phase-7 teams-chat sink**, offering
+  **GO / GO-security-only / NOGO**; NOGO postpones the batch.
+- **Urgent security (D17):** high/critical findings break the batch — immediate
+  out-of-band alert + a standalone security-only plan.
+- **Digest loop + podcast gate (D18):** hand the day's update findings to the
+  daily-digest briefing; gate the autonomous podcast on the update-research step
+  completing (coordinate with `../../daily-digests-autonomous-podcasts/`).
+- **Autonomy:** Mixed. **Depends on** Phase 7 (the teams-chat sink delivers the
+  Friday recommendation) and the OB1 digest chain. Until Phase 7 exists, the
+  Friday recommendation can ship as the `🗓️` batch **email** (guide §8) as an
+  interim delivery, with apply still via the §13 S1 interim approval.
 
 ## 6. Gate semantics
 

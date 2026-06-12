@@ -37,7 +37,102 @@ The agent must:
 
 ---
 
+## Transparent-mode task sequence (2026-06-12) — READ FIRST
+
+> Architecture changed to **transparent interposition** (guide §1A, plan §0).
+> The per-caller phases (0.0 → 6) below are **superseded** — they are the
+> fallback if **TT0** fails. Execute the TT-tasks here instead. Tasks marked
+> `[reuse]` reuse a per-caller task body unchanged.
+
+### TT0 — Permissive-logging pre-check `[AGENT]` **(OPTIONAL — guide §1A.3/§1A.8)**
+- **Optional:** the TT3 live canary tests this same fact under real load with an
+  invisible rollback, so run TT0 only to confirm the LiteLLM-config behaviour at
+  **zero outage** before the canary. Skippable if going straight to the canary.
+- **Action:** stand a throwaway LiteLLM container pointed at the live llama-cpp,
+  with **no `master_key`**, `database_url` to a scratch Postgres,
+  `success_callback: ["postgres"]`. Send two requests carrying **different** key
+  strings (e.g. `-H "Authorization: Bearer aaa"` and `... bbb`). Query
+  `LiteLLM_SpendLogs`.
+- **Acceptance:** two rows, with **distinct `api_key` values** reflecting `aaa`
+  vs `bbb`. If it FAILS here (or in the TT3 canary), fall back to the per-caller
+  plan (Phase 0.0+ below).
+- Also run the §19 digest-resolve check (T1.3.5 body) here.
+
+### TT0.1 — Model-id coverage assertion `[AGENT]` [reuse T0.0.1/T0.0.2]
+- Confirm the live model ids (`qwen36-27b`, `…:nothink`, `qwen36-35b-a3b`,
+  `…:nothink`, the one embed model) — every id ANY caller sends must be in §6.
+- **Acceptance:** §6 `model_list` covers all live ids (mandatory in transparent
+  mode — callers can't be fixed).
+
+### GT0 — Spike reviewed `[GATE] [OPERATOR]`
+- Operator reviews TT0 result; replies "proceed transparent" or "fall back".
+
+### TT1 — Backups + branch + .env `[AGENT]` [reuse T0.1–T0.10]
+- Same backups + branch as Phase 0, **but `.env` gets only `LITELLM_DB_PASSWORD`**
+  (no per-caller `LITELLM_KEY_*`; no `master_key` unless enforcing later).
+- **GT1 — operator supplies `LITELLM_DB_PASSWORD`.**
+
+### TT2 — Standup, no aliases `[AGENT]`
+- Write `config/litellm.config.yaml` from §6 **with the transparent deltas**:
+  `master_key` commented out (permissive); api_base still the **current**
+  `llama-cpp`/`llama-cpp-embed` (pre-flip). Add `llm-gateway` + `llm-gateway-db`
+  (digest-pinned, `--port 8080`) per §8.3; **no aliases yet**.
+- Bring up; verify `/v1/models` lists every id; send a request with a junk key
+  and confirm a `LiteLLM_SpendLogs` row carrying that key.
+- **Acceptance:** gateway healthy; serves all model ids; logs the presented key.
+- **GT2 — operator confirms ledger + model coverage.**
+
+### TT3 — THE FLIP (one commit) `[AGENT]` (guide §8.3-revised / §1A.7)
+- In one git commit: rename `llama-cpp`→`llama-cpp-upstream` and
+  `llama-cpp-embed`→`llama-cpp-embed-upstream` (keep their host ports 8081/8082
+  + healthchecks); set the gateway config api_base → `*-upstream:8080`; add
+  gateway `networks.llm-net.aliases: [llama-cpp, llama-cpp-embed]`; change
+  gateway `depends_on` → `*-upstream`; **repoint every observability ref to
+  `*-upstream`**: `modules/system-health`, `modules/gpu-status/service/gpu_status.py`,
+  `scripts/status_check.py`, `scripts/gpu_check.py`, tailscale `LLAMA_CPP_HOST`/
+  `LLAMA_CPP_EMBED_*` (`entrypoint.sh`), `scripts/emergency-recovery.{ps1,bat}`.
+- **GT3 — operator eyeballs the single flip commit before recreate.**
+- **Apply as a live canary (maintenance window, guide §1A.8):** free the old
+  names, then bring up the renamed upstreams + aliased gateway together:
+  ```powershell
+  docker compose stop llama-cpp llama-cpp-embed
+  docker compose rm -f llama-cpp llama-cpp-embed
+  docker compose up -d --remove-orphans
+  ```
+  Then **watch** (see Acceptance). The upstream MUST come up — never leave the
+  gateway with no backend.
+- **Acceptance (watch live):** every caller still healthy; `LiteLLM_SpendLogs`
+  fills from multiple source IPs/keys (this confirms permissive logging in situ);
+  `docker logs llama-cpp-upstream` shows the gateway as its only client (no caller
+  bypasses); observability probes resolve to `*-upstream` and pass. Nudge any
+  sticky caller holding an old connection pool with a single `docker restart
+  <caller>` (no config change).
+- **Rollback drill / worst case:** `git revert <flip-commit>; docker compose up -d
+  --remove-orphans` → originals reclaim `llama-cpp`/`llama-cpp-embed`, gateway
+  gone, **callers never knew**. Confirm all healthy on the originals.
+
+### TT4 — Verify + soak `[AGENT/OPERATOR]`
+- Dark-traffic check inverted: confirm **no** caller hits `*-upstream` directly
+  (only the gateway IP does). Soak on source-key/IP attribution.
+
+### TT5 — Lazy keys (optional, ongoing) `[AGENT]` [reuse §7 roster]
+- Per caller, on the operator's schedule: change ONLY its key env var to a
+  distinct string/virtual key (guide §1A.4); restart that one service; confirm
+  its rows separate in the ledger. URL never changes. Optionally, once all keyed:
+  set `master_key`, `/key/generate`, apply §15.4 caps.
+
+### TT6 — Pipe module + recovery + docs `[AGENT]` [reuse Phase 4/5 bodies]
+- `llm-traffic` module (Phase 4 tasks). Three-place rule (Phase 5) **plus** the
+  `*-upstream` renames in recovery scripts + stack-map. Category-F docs.
+
+---
+
 ## Phase 0.0 — Pre-flight assumption verification (NEW — run first)
+
+> **⚠️ SUPERSEDED for transparent mode** by the TT-task sequence above. Execute
+> the phases below only as the **fallback** if spike **TT0** fails. Their
+> backup, standup, pipe-module, and recovery bodies are reused by the TT-tasks
+> via `[reuse]` references.
 
 These assertions verify that the codebase still matches what the audit in
 Guide §16/§18 captured. Any failure here means the audit needs revision

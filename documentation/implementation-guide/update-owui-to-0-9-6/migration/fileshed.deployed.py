@@ -2119,7 +2119,7 @@ shed_exec(zone="storage", cmd="some_cmd", args=["..."],
                 return "unknown"  # Contains control characters
         return conv_id if conv_id else "unknown"
 
-    async def _resolve_zone(
+    def _resolve_zone(
         self,
         zone: str,
         group: Optional[str],
@@ -2213,8 +2213,8 @@ shed_exec(zone="storage", cmd="some_cmd", args=["..."],
                     "Use: shed_xxx(zone='group', group='team-name', ...)",
                 )
 
-            group_id = await self._validate_group_id(group)
-            await self._check_group_access(__user__, group_id)
+            group_id = self._validate_group_id(group)
+            self._check_group_access(__user__, group_id)
             zone_path = self._ensure_group_space(group_id)
 
             return ZoneContext(
@@ -2358,7 +2358,7 @@ shed_exec(zone="storage", cmd="some_cmd", args=["..."],
 
         return cleaned_path
 
-    async def _validate_group_id(self, group_id: str) -> str:
+    def _validate_group_id(self, group_id: str) -> str:
         """
         Validates and resolves a group identifier.
         Accepts either a group ID (UUID) or a group name (case-sensitive).
@@ -2393,7 +2393,7 @@ shed_exec(zone="storage", cmd="some_cmd", args=["..."],
         if GROUPS_AVAILABLE:
             try:
                 # Search for group by name
-                groups = await Groups.get_all_groups()
+                groups = Groups.get_all_groups()
                 case_insensitive_matches = []
 
                 for g in groups:
@@ -3738,21 +3738,21 @@ shed_exec(zone="storage", cmd="some_cmd", args=["..."],
                 except Exception:
                     pass
 
-    async def _get_user_groups(self, user_id: str) -> list:
+    def _get_user_groups(self, user_id: str) -> list:
         """Get groups the user belongs to via Open WebUI API."""
         if not GROUPS_AVAILABLE:
             return []
         try:
-            return await Groups.get_groups_by_member_id(user_id)
+            return Groups.get_groups_by_member_id(user_id)
         except Exception:
             return []
 
-    async def _is_group_member(self, user_id: str, group_id: str) -> bool:
+    def _is_group_member(self, user_id: str, group_id: str) -> bool:
         """Check if user is member of group."""
-        user_groups = await self._get_user_groups(user_id)
+        user_groups = self._get_user_groups(user_id)
         return any(g.id == group_id for g in user_groups)
 
-    async def _check_group_access(self, __user__: dict, group_id: str) -> None:
+    def _check_group_access(self, __user__: dict, group_id: str) -> None:
         """Verify user has access to group. Raises error if not."""
         if not GROUPS_AVAILABLE:
             raise StorageError(
@@ -3762,7 +3762,7 @@ shed_exec(zone="storage", cmd="some_cmd", args=["..."],
             )
 
         # Check if group exists first
-        group_obj = await Groups.get_group_by_id(group_id)
+        group_obj = Groups.get_group_by_id(group_id)
         if group_obj is None:
             raise StorageError(
                 "GROUP_NOT_FOUND",
@@ -3774,7 +3774,7 @@ shed_exec(zone="storage", cmd="some_cmd", args=["..."],
         if __user__ is None:
             __user__ = {}
         user_id = __user__.get("id", "")
-        if not await self._is_group_member(user_id, group_id):
+        if not self._is_group_member(user_id, group_id):
             raise StorageError(
                 "GROUP_ACCESS_DENIED",
                 f"You are not a member of group '{group_id}'",
@@ -4337,8 +4337,8 @@ Note: stdout/stderr are truncated at 50KB to prevent context overflow.
         elif zone_lower == "group":
             if not group:
                 raise StorageError("MISSING_PARAMETER", "Group parameter required")
-            group_id = await self._validate_group_id(group)
-            await self._check_group_access(__user__, group_id)
+            group_id = self._validate_group_id(group)
+            self._check_group_access(__user__, group_id)
             zone_root = self._ensure_group_space(group_id)
             editzone_base = self._get_groups_root() / group_id
             git_commit = True
@@ -4813,8 +4813,8 @@ Note: stdout/stderr are truncated at 50KB to prevent context overflow.
         elif zone_lower == "group":
             if not group:
                 raise StorageError("MISSING_PARAMETER", "Group parameter required")
-            group_id = await self._validate_group_id(group)
-            await self._check_group_access(__user__, group_id)
+            group_id = self._validate_group_id(group)
+            self._check_group_access(__user__, group_id)
             zone_root = self._ensure_group_space(group_id)
             editzone_base = self._get_groups_root() / group_id
             git_commit = True
@@ -5275,7 +5275,7 @@ class Tools:
         """
         try:
             args = args or []  # Handle None default
-            ctx = await self._core._resolve_zone(zone, group, __user__, __metadata__)
+            ctx = self._core._resolve_zone(zone, group, __user__, __metadata__)
 
             # Validate command against zone whitelist
             self._core._validate_command(cmd, ctx.whitelist, args)
@@ -5687,7 +5687,7 @@ class Tools:
                 dek = self._core._get_user_dek(user_id, encryption_key)
 
             # Resolve zone
-            ctx = await self._core._resolve_zone(zone, group, __user__, __metadata__)
+            ctx = self._core._resolve_zone(zone, group, __user__, __metadata__)
 
             # Validate and resolve path
             path = self._core._validate_relative_path(
@@ -5797,7 +5797,7 @@ class Tools:
                 )
 
             # Resolve zone
-            ctx = await self._core._resolve_zone(zone, group, __user__, __metadata__)
+            ctx = self._core._resolve_zone(zone, group, __user__, __metadata__)
 
             # Validate and resolve path
             path = self._core._validate_relative_path(
@@ -5901,7 +5901,7 @@ class Tools:
             if __user__ is None:
                 __user__ = {}
             # uploads allows delete even though readonly for other ops
-            ctx = await self._core._resolve_zone(
+            ctx = self._core._resolve_zone(
                 zone, group, __user__, __metadata__, require_write=False
             )
 
@@ -6022,7 +6022,7 @@ class Tools:
                     "MISSING_PARAMETER", "new_path parameter is required"
                 )
 
-            ctx = await self._core._resolve_zone(
+            ctx = self._core._resolve_zone(
                 zone, group, __user__, __metadata__, require_write=True
             )
 
@@ -6139,7 +6139,7 @@ class Tools:
                     hint="Specify the file to edit: shed_lockedit_open(zone, path)",
                 )
 
-            ctx = await self._core._resolve_zone(
+            ctx = self._core._resolve_zone(
                 zone, group, __user__, __metadata__, require_write=True
             )
 
@@ -6248,7 +6248,7 @@ class Tools:
             if __user__ is None:
                 __user__ = {}
             args = args or []  # Handle None default
-            ctx = await self._core._resolve_zone(
+            ctx = self._core._resolve_zone(
                 zone, group, __user__, __metadata__, require_write=True
             )
 
@@ -6347,7 +6347,7 @@ class Tools:
         try:
             if __user__ is None:
                 __user__ = {}
-            ctx = await self._core._resolve_zone(
+            ctx = self._core._resolve_zone(
                 zone, group, __user__, __metadata__, require_write=True
             )
 
@@ -6445,7 +6445,7 @@ class Tools:
         try:
             if __user__ is None:
                 __user__ = {}
-            ctx = await self._core._resolve_zone(
+            ctx = self._core._resolve_zone(
                 zone, group, __user__, __metadata__, require_write=True
             )
 
@@ -6551,7 +6551,7 @@ class Tools:
         try:
             if __user__ is None:
                 __user__ = {}
-            ctx = await self._core._resolve_zone(
+            ctx = self._core._resolve_zone(
                 zone, group, __user__, __metadata__, require_write=True
             )
 
@@ -7668,7 +7668,7 @@ class Tools:
         """
         try:
             # Resolve zone using standard helper
-            ctx = await self._core._resolve_zone(
+            ctx = self._core._resolve_zone(
                 zone, group, __user__, __metadata__, require_write=False
             )
             zone_root = ctx.zone_root
@@ -7804,7 +7804,7 @@ class Tools:
         """
         try:
             # Resolve zone using standard helper
-            ctx = await self._core._resolve_zone(
+            ctx = self._core._resolve_zone(
                 zone, group, __user__, __metadata__, require_write=False
             )
             zone_root = ctx.zone_root
@@ -7924,7 +7924,7 @@ class Tools:
         """
         try:
             # Resolve zone using standard helper
-            ctx = await self._core._resolve_zone(
+            ctx = self._core._resolve_zone(
                 zone, group, __user__, __metadata__, require_write=False
             )
             zone_root = ctx.zone_root
@@ -8054,7 +8054,7 @@ class Tools:
         """
         try:
             # Resolve zone using standard helper (require_write=True rejects uploads)
-            ctx = await self._core._resolve_zone(
+            ctx = self._core._resolve_zone(
                 zone, group, __user__, __metadata__, require_write=True
             )
             zone_root = ctx.zone_root
@@ -8185,7 +8185,7 @@ class Tools:
         """
         try:
             # Resolve zone using standard helper
-            ctx = await self._core._resolve_zone(
+            ctx = self._core._resolve_zone(
                 zone, group, __user__, __metadata__, require_write=False
             )
             zone_root = ctx.zone_root
@@ -8408,7 +8408,7 @@ class Tools:
         """
         try:
             # Use centralized zone resolution
-            ctx = await self._core._resolve_zone(
+            ctx = self._core._resolve_zone(
                 zone, group, __user__, __metadata__, require_write=False
             )
             zone_root = ctx.zone_root
@@ -9229,7 +9229,7 @@ class Tools:
                 __user__ = {}
 
             # Resolve zone using standard helper
-            ctx = await self._core._resolve_zone(
+            ctx = self._core._resolve_zone(
                 zone, group, __user__, __metadata__, require_write=False
             )
             zone_root = ctx.zone_root
@@ -9948,8 +9948,8 @@ shed_tree(zone="storage") # Directory tree
             # Determine if group or personal zone
             if group:
                 # Group mode
-                group = await self._core._validate_group_id(group)
-                await self._core._check_group_access(__user__, group)
+                group = self._core._validate_group_id(group)
+                self._core._check_group_access(__user__, group)
                 zone_name = f"Group:{group}"
 
                 # Validate path with zone_name
@@ -10113,7 +10113,7 @@ shed_tree(zone="storage") # Directory tree
 
             # Clean group zones (for groups the user belongs to)
             user_id = __user__.get("id", "")
-            user_groups = await self._core._get_user_groups(user_id)
+            user_groups = self._core._get_user_groups(user_id)
             groups_root = self._core._get_groups_root()
 
             for group in user_groups:
@@ -10566,14 +10566,14 @@ shed_tree(zone="storage") # Directory tree
                 )
 
             user_id = __user__.get("id", "")
-            groups = await self._core._get_user_groups(user_id)
+            groups = self._core._get_user_groups(user_id)
 
             result = []
             for g in groups:
                 # Use dedicated API method to get member count
                 member_count = 0
                 try:
-                    member_count = await Groups.get_group_member_count_by_id(g.id) or 0
+                    member_count = Groups.get_group_member_count_by_id(g.id) or 0
                 except Exception:
                     pass
 
@@ -10612,13 +10612,13 @@ shed_tree(zone="storage") # Directory tree
         """
         try:
             # Validate group_id
-            group = await self._core._validate_group_id(group)
-            await self._core._check_group_access(__user__, group)
+            group = self._core._validate_group_id(group)
+            self._core._check_group_access(__user__, group)
 
             # Get group info and member list using dedicated API methods
-            group_obj = await Groups.get_group_by_id(group)
+            group_obj = Groups.get_group_by_id(group)
             try:
-                member_ids = await Groups.get_group_user_ids_by_id(group) or []
+                member_ids = Groups.get_group_user_ids_by_id(group) or []
             except Exception:
                 member_ids = []
 
@@ -10721,8 +10721,8 @@ shed_tree(zone="storage") # Directory tree
             if __user__ is None:
                 __user__ = {}
             # Validate group_id
-            group = await self._core._validate_group_id(group)
-            await self._core._check_group_access(__user__, group)
+            group = self._core._validate_group_id(group)
+            self._core._check_group_access(__user__, group)
             user_id = __user__.get("id", "")
             zone_name = f"Group:{group}"
 
@@ -10788,8 +10788,8 @@ shed_tree(zone="storage") # Directory tree
             if __user__ is None:
                 __user__ = {}
             # Validate group_id
-            group = await self._core._validate_group_id(group)
-            await self._core._check_group_access(__user__, group)
+            group = self._core._validate_group_id(group)
+            self._core._check_group_access(__user__, group)
             user_id = __user__.get("id", "")
             zone_name = f"Group:{group}"
 
@@ -10825,7 +10825,7 @@ shed_tree(zone="storage") # Directory tree
                 )
 
             # Check new owner is group member
-            if not await self._core._is_group_member(new_owner, group):
+            if not self._core._is_group_member(new_owner, group):
                 raise StorageError(
                     "INVALID_OWNER", f"User '{new_owner}' is not a member of this group"
                 )
@@ -10883,8 +10883,8 @@ shed_tree(zone="storage") # Directory tree
             if __metadata__ is None:
                 __metadata__ = {}
             # Validate group_id
-            group = await self._core._validate_group_id(group)
-            await self._core._check_group_access(__user__, group)
+            group = self._core._validate_group_id(group)
+            self._core._check_group_access(__user__, group)
             user_id = __user__.get("id", "")
             conv_id = self._core._get_conv_id(__metadata__)
 

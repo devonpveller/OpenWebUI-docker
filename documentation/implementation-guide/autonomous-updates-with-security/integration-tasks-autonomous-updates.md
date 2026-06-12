@@ -281,6 +281,90 @@ rewrite — and it is the end-state delivery channel, not a new autonomy level.
 
 ---
 
+## Phase 8 — Weekly cadence + field reports + digest loop (Guide §5A, D12–D18)
+
+Layers the operator's timing model over Phases 2–7. Changes *when* the
+recommendation/apply happen and *what* feeds the verdict — not the per-update gate.
+
+### T8.1 — Job C: user/community field-report research `[AGENT]` (Guide §6.5/D15)
+- **Action:** add a third research job per candidate — query r/OpenWebUI, the
+  image's GitHub issues, and forums for reported bugs/regressions on the
+  candidate version. Fold its synthesis into the validation claim (§7) and the
+  verdict's `field_report_concerns` (§6.4). Optional per-service source hints in
+  the manifest (issue-tracker URL).
+- **Acceptance:** a `/check` of a real service returns a verdict whose
+  `field_report_concerns` is populated from sourced community results (or empty
+  with a `[GAP]` note when none are found); a cluster of unresolved reports
+  drives `blocked`/`needs-human`.
+
+### T8.2 — Maturity delay + eligibility `[AGENT]` (D13)
+- **Action:** add `maturity_days` (default 7) to manifest entries; resolve each
+  candidate's version publish date; compute `eligible_after`. A researched-but-
+  ineligible candidate is **parked** (kept in `/runs`, job C re-run daily) and
+  never enters the Friday queue until eligible.
+- **Acceptance:** a freshly-released candidate is researched immediately but
+  reported `eligible:false` until `maturity_days` elapse; a per-service override
+  shortens/lengthens it.
+
+### T8.3 — Daily detection step on the 01:00 chain `[AGENT]` (D12)
+- **Action:** invoke the detection+research sweep once daily as a step in the OB1
+  `pull → prune → digest` chain (`OB1/docker/cron/crontab`, 05:00 UTC) — e.g. a
+  chained POST to the orchestrator — rather than reacting to watchtower's poll.
+  Watchtower remains a continuous secondary feed into `/hook`.
+- **Acceptance:** one daily sweep runs in the 01:00 window; `/runs` shows a dated
+  daily batch of detections/research; no apply fires from the daily step.
+
+### T8.4 — Accumulation queue `[AGENT]` (D14)
+- **Action:** persist eligible candidates in a **pending-updates queue** in the
+  state volume; re-evaluate parked items daily (a new field report can flip
+  `clear`→`needs-human`). Expose `GET /pending`.
+- **Acceptance:** eligible candidates accumulate across days; `GET /pending`
+  lists the week's queue with each item's latest verdict.
+
+### T8.5 — Friday recommendation synthesizer `[AGENT]` (D16)
+- **Action:** on Friday, collect the queue + all research, evaluate feasibility
+  as a batch (conflicts, ordering, caution tiers), and synthesize **one**
+  recommendation presenting **GO (full) / GO (security-only) / NOGO**. Deliver
+  via the Phase-7 teams-chat sink; interim, via the `🗓️` batch email (Guide §8).
+- **Acceptance:** a Friday run produces a single recommendation artifact with the
+  three selectable options and the per-item rationale; apply waits on the selection.
+
+### T8.6 — Go / security-only / nogo handling `[AGENT]` (D14/D16/D17)
+- **Action:** parse the human selection: **GO** applies the full `clear` set
+  (serialized, §12); **security-only** applies just the security-motivated/
+  blocked-by-vuln subset and rolls the rest to next Friday; **NOGO** postpones the
+  whole batch to next Friday (queue persists, re-evaluated).
+- **Acceptance:** each selection produces the correct apply set + the correct
+  carry-over; a NOGO leaves the stack untouched and the queue intact.
+
+### T8.7 — Urgent security override `[AGENT]` (D17)
+- **Action:** when a candidate carries a high/critical `security-vulnerability`
+  finding, surface it **immediately** (out-of-band `🚨` email + teams-chat), allow
+  it to **bypass the maturity delay** (operator-tunable), and always include a
+  **standalone security-only plan** in the next recommendation.
+- **Acceptance:** an injected critical CVE finding fires an immediate urgent alert
+  the same day (not held for Friday) and appears as an independently-approvable
+  security-only option.
+
+### T8.8 — Daily-digest loop + podcast gate `[AGENT]` (D18)
+- **Action:** publish the day's update findings (validation + security claims) to
+  the daily-digest briefing inputs; make the autonomous podcast step **wait** for
+  the update-research step (and the digest's other required inputs) to complete
+  before it renders — best-effort with a timeout so a slow research run can't
+  indefinitely block the morning podcast. Coordinate with
+  `../../daily-digests-autonomous-podcasts/`.
+- **Acceptance:** the digest briefing includes the day's update findings; the
+  podcast does not render until the update-research step reports complete (or the
+  timeout fires, logged).
+
+### G8 — Operator confirms the cadence + recommendation flow `[GATE] [OPERATOR]`
+- **Prompt:** present a dry-run Friday recommendation (go/security-only/nogo) +
+  the daily-digest entry + the urgent-security path. Confirm `maturity_days`,
+  the Friday apply time, and the podcast-gate timeout. Operator replies
+  "cadence approved".
+
+---
+
 ## Appendix — Fail-closed invariant (applies to every phase)
 
 Any error, unreachable dependency, low-confidence verdict, or high research

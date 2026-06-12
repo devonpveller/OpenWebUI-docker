@@ -166,3 +166,62 @@ if it breaks.
 
 **Rollback:** stop → restore `openwebui-preupgrade-0910.tar.gz` into the volume →
 revert Dockerfile base tag → rebuild → re-paste original functions.
+
+---
+
+## EXECUTED — 2026-06-12 (SUCCESS, OWUI now on v0.9.6)
+
+**Outcome:** upgrade complete; `{"version":"0.9.6"}`; containers healthy; **0 errors**.
+
+**Backups taken (in `backups/openwebui/manual/`):**
+- `webui-20260612-preupgrade.db` — consistent (SQLite backup API), 860 chats, `integrity ok`
+- `webui-final-premigration.db` — exact post-stop state (860 chats)
+- `openwebui-20260612-preupgrade.tar.gz` — full volume, 18.9 GB + `.sha256`
+
+**Prep deviations / discoveries:**
+- **`WEBUI_SECRET_KEY` was ephemeral, not pinned** — auto-generated into the container
+  layer (`/app/backend/.webui_secret_key`, outside the volume). *Any* recreate would
+  have rotated it and broken encrypted-at-rest data. Extracted the live value →
+  pinned in `.env` + referenced in compose. **Verified post-upgrade: container key ==
+  pinned value (continuity held).**
+- **No `.dockerignore` existed** — a rebuild would have shipped the whole ~35 GB
+  workspace as build context. Added a minimal one (`*` + `!entrypoint.sh`); only
+  `openwebui` (no COPY) and `tailscale` (needs `entrypoint.sh`) use the root context.
+- Pinned `CHAT_RESPONSE_MAX_TOOL_CALL_ITERATIONS=40` (0.9.6 default jumps to 256).
+- Dockerfile: base → `v0.9.6`; the `builtin.py` timezone sed still matches; added a
+  **fail-loud build assertion**. Build validated (cache-warm), patch confirmed live
+  (4 `astimezone` occurrences in the running container).
+
+**Custom-code async port (verified against the *real* 0.9.6 source, deployed code as
+source of truth — a full 28-model rescan, not the repo files):**
+- **FileShed** (tool) — 5 helpers → `async`, 38 call-sites + 6 `Groups.*` awaited
+  (AST-complete, py_compile clean). Re-deployed by swapping `tool.content` in the
+  migrated DB; reloaded with 0 errors. Verified: 6 `await Groups.`, 0 bare.
+- **Copy Research Note** (function) — `Chats` **and** `Notes` awaited (`_get_chat`/
+  `_get_note` → async). Re-deployed via `function.content`; verified 0 bare.
+- **Add Web Sources** — already 0.9.6-safe (defensive `hasattr`; primary method
+  `get_file_metadatas_by_id` still exists; the removed `get_knowledge_files_by_id`
+  was only its guarded fallback). No change.
+- **superpowers** — `generate_chat_completion`/`UserModel` unchanged; imports resolve.
+  No change.
+- Pre-swap content backed up to `migration/*.preswap.py`.
+
+**Migration:** Alembic ran forward cleanly (automation/calendar/shared_chat/
+knowledge_directory/pinned_note tables, legacy-PK fixes). **Data preserved:** 860 chats
+= 855 `chat` + 5 `shared_chat` (the "migrate existing shares" migration moved shares
+into the new table — not data loss). functions=10, tools=6, users=1 intact.
+
+**Post-flight verified:** v0.9.6 banner; healthy; secret-key continuity; GPU
+`CUDA available: True`; embeddings endpoint live; timezone patch live; 3 MCP tool
+servers re-initialized; patched FileShed + Copy Research Note loaded clean.
+
+**Re-deploy mechanism (note for future):** functions/tools were re-deployed by direct
+`UPDATE function/tool SET content=…` in the migrated `webui.db` (inside the container;
+`/tmp` is a noexec tmpfs — use `/app`), then `docker restart openwebui` + `tailscale`
+(shared netns) to reload. The async port is **0.9.x-only** (awaits now-async model
+methods) — must not be pasted back into 0.8.x.
+
+**Leftover artifacts:** `ai-stack-openwebui:v0.9.6-validate` image (12.8 GB, a cache-warm
+duplicate — safe to `docker rmi`); the prior 0.8.10 image is retained as rollback aid.
+Repo changes are **uncommitted** (Dockerfile, docker-compose.yml, .dockerignore,
+scripts/ai_pipes/fileshed.py; `.env` is gitignored).
