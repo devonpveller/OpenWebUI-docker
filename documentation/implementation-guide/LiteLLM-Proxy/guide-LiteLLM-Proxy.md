@@ -1,9 +1,22 @@
 # Guide — LiteLLM Proxy for the ai-stack inference plane
 
-**Status:** Source of truth (design + audit). Plan and task documents will be
-generated from this file later — keep it authoritative.
+**Status:** Source of truth (design + audit). Plan and task documents are
+generated from this file — keep it authoritative.
 
 **Last verified against the live stack:** 2026-05-23.
+
+**⚠️ ARCHITECTURE REVISION — 2026-06-12.** The deployment approach changed from a
+**per-caller migration** to **transparent interposition** (network-alias). Read
+**§1A first** — it is now the authoritative architecture and supersedes the
+per-caller cutover described in §4 (edit tables), §7, §8.1/§8.2, §11, §16.1, and
+§17 (OWUI UI flips). Those sections are retained: their model-id inventory still
+defines what the gateway must serve (§6), and they become the optional
+**lazy-key roster** (§1A.4), not a required big-bang. The supply-chain hardening
+(§19), model-alias coverage (§6), pipe module (§9), and capacity-planning (§15)
+are unchanged. The trigger for the revision: a 2026-06-12 re-audit found the
+per-caller inventory had already gone stale (five new OB1 inference callers since
+2026-05-23 — see §1A.1), proving the per-caller model can't keep up with stack
+drift.
 
 ---
 
@@ -31,6 +44,214 @@ The pattern (gateway-in-front-of-OpenAI-compatible-backend) is the industry
 standard for self-hosted LLM observability and matches the same architectural
 shape already used elsewhere in this workspace (`mnemory-gateway`,
 `search-gateway`, `mcpo`, `lc-mcpo`).
+
+## 1A. Architecture revision — Transparent interposition (2026-06-12)
+
+**This section is authoritative.** Where it conflicts with the per-caller
+migration described later, this section wins.
+
+### 1A.1 Why the per-caller plan was abandoned
+
+The original design (§4–§8, §11, §16–§17) migrated each caller individually:
+edit its `base_url` from `http://llama-cpp:8080/v1` to `http://llm-gateway:4000/v1`,
+swap its key, restart, verify — across ~10 callers in two compose projects plus
+OWUI admin-UI flips, in a gated window.
+
+A re-audit on **2026-06-12** found the caller inventory had **already drifted**.
+The research-engine + IKS work added **five new direct inference callers** since
+the 2026-05-23 baseline, none of them in the §4 inventory:
+
+| New caller (since 2026-05-23) | Calls | Loopback | In §4? |
+|---|---|---|---|
+| `openbrain-curator` | `llama-cpp` (chat) + `llama-cpp-embed` | :8816 | ❌ |
+| `openbrain-research` | `llama-cpp` (chat) + `llama-cpp-embed` | :8818 | ❌ |
+| `openbrain-suggestion-worker` | `llama-cpp-embed` | :8813 | ❌ |
+| `openbrain-chunk-worker` | `llama-cpp-embed` | :8817 | ❌ |
+| `openbrain-workbench` | `llama-cpp-embed` | (via Caddy) | ❌ |
+
+The OB1 side roughly **doubled** its direct callers (4 → 9) in three weeks. A
+per-caller migration is structurally a moving target: the inventory is stale the
+moment another service ships, and a missed caller is silent **dark traffic**
+(bypasses the ledger). This is unacceptable for a system whose entire purpose is
+*complete* attribution.
+
+### 1A.2 The transparent-interposition model
+
+Instead of changing callers, **make the gateway answer at the names the callers
+already use.** Callers are never touched; they cannot tell the gateway from the
+inference servers.
+
+Mechanism — **Docker network aliases** on `llm-net`:
+
+1. **Rename the real servers** (internal only): `llama-cpp` → `llama-cpp-upstream`,
+   `llama-cpp-embed` → `llama-cpp-embed-upstream`. Their host ports (:8081
+   llama-swap admin, :8082 embed) move with them.
+2. **The single LiteLLM gateway** is given the network aliases **`llama-cpp`**
+   and **`llama-cpp-embed`** and listens on **`:8080`** (the port callers use).
+   Both aliases resolve to the one gateway; it routes by **model name**
+   (chat models → upstream chat, `bge-m3` → upstream embed) and forwards to the
+   renamed upstreams.
+
+```
+  every caller (unchanged)                         ┌──────────────────────────┐
+  ─────────────────────────                        │   LiteLLM gateway         │
+  http://llama-cpp:8080/v1 ──────┐   llm-net DNS    │   listens :8080           │
+  http://llama-cpp-embed:8080/v1 ┤   aliases ──────►│   aliases:                │
+                                 │                  │     llama-cpp             │
+   (mnemory, little-coder,       │                  │     llama-cpp-embed       │
+    all 9 OB1 callers, OWUI,     │                  │   routes by model name    │
+    recipes, future callers)     │                  └───────┬───────────┬──────┘
+                                 │              chat models  │           │  bge-m3
+                                 │                           ▼           ▼
+                                 │              ┌──────────────────┐  ┌──────────────────────┐
+                                 │              │ llama-cpp-       │  │ llama-cpp-embed-      │
+                                 │              │   upstream :8080 │  │   upstream :8080      │
+                                 │              │ (llama-swap)     │  │ (bge-m3 embeddings)   │
+                                 │              └──────────────────┘  └──────────────────────┘
+```
+
+**Result:** zero caller edits; the five un-inventoried callers (and any future
+caller) are captured automatically; the dark-traffic problem (§12, old §17.9)
+**cannot occur** — there is no direct path left to bypass.
+
+### 1A.3 Attribution: permissive auth + the SQL ledger
+
+LiteLLM tags every logged row by the **API key in the request header**, not the
+URL. Callers send junk keys today (`ollama`, `llama`, `not-needed`). To accept
+them transparently the gateway runs **permissive** — no enforced `master_key`
+(see §6) — and still writes a `LiteLLM_SpendLogs` row per request (model, tokens
+in/out, latency, timestamp, **and the key string presented**).
+
+So on day one you get the **persistent SQL request ledger** — the historical
+demand + capacity goal (§1, §15) — with attribution at **source-key / source-IP**
+granularity. That is already strictly more than today's ephemeral llama.cpp
+stdout logs.
+
+> **⚠️ Linchpin spike (gates everything — see plan Phase 0).** This rests on one
+> unverified assumption: that LiteLLM in **permissive mode** (no `master_key`)
+> still writes a spend-log row per request carrying the **presented key string**.
+> LiteLLM auth is generally all-or-nothing, so this must be proven before
+> committing. If it does **not** log distinct keys permissively, fall back to
+> running keyed from the start — which reintroduces a coordinated cutover (the
+> per-caller plan below becomes the path again).
+
+### 1A.4 Lazy keys — incremental clean attribution, no migration
+
+Because the URL never changes, a caller gets **clean** attribution by changing
+**only its key env var** — one line, one restart, independent of every other
+caller, on no schedule:
+
+```diff
+  LLM_BASE_URL=http://llama-cpp:8080/v1     # ← unchanged, forever
+- LLM_API_KEY=ollama                         # ← junk, blurs with other callers
++ LLM_API_KEY=mnemory                        # ← distinct string → its own ledger bucket
+```
+
+- A **distinct plain string** (`mnemory`, `lc-coder`) → attribution only; zero
+  setup.
+- A **real virtual key** (`/key/generate` → `sk-…`, requires `master_key`) →
+  attribution **plus** budgets / rate-limits / revocation (§15.4).
+
+The **per-caller tables in §4 / §8.1 / §16.1 are not deleted — they become this
+lazy-key roster**: the list of callers, their key env-var names, and their
+files, to work through opportunistically. The §15.4 cap table is the target
+end-state once callers carry real virtual keys.
+
+### 1A.5 What changes, vs the per-caller plan
+
+| Concern | Per-caller plan (superseded) | Transparent interposition (now) |
+|---|---|---|
+| Caller `base_url` edits | ~10 callers, 2 compose projects | **none** |
+| OWUI admin-UI flips (old §8.2/§16.3/§17) | required, operator-gated | **none** — OWUI is just another unchanged caller |
+| Coverage of new/unknown callers | manual re-audit each time | **automatic** |
+| What you edit instead | the callers | **rename 2 upstream services + add 2 gateway aliases** (§8.3 revised) + **repoint observability** (§16.4, health/GPU/tailscale/recovery refs that must watch the *real* servers, now `*-upstream`) |
+| Attribution at cutover | full per-key (after big-bang) | ledger + source-key/IP; clean per-key added **lazily** (§1A.4) |
+| Gateway role | one caller at a time routes through | **100% of inference** flows through immediately |
+| Rollback | per-caller env revert | **rename the aliases back** onto the real servers — one `git revert` + recreate |
+
+### 1A.6 The new trade — and its mitigations
+
+Transparent interposition makes the gateway **critical path for all inference at
+once** (big-bang, not incremental). Honest consequences + mitigations:
+
+- **Blast radius:** a gateway outage stops *all* chat + embed, not just
+  attribution. Mitigate: `restart: unless-stopped`, health-gating, digest-pin
+  (§19), and the upstreams remain intact so rollback is just removing the
+  aliases (§1A.5).
+- **No per-caller revertibility:** rollback is all-or-nothing — but it's a single
+  `git revert` (move the aliases back), which is simpler than unwinding N
+  per-caller edits.
+- **Model-id coverage is now mandatory, not best-effort:** since callers can't be
+  fixed, the gateway **must** register every model id any caller sends or that
+  caller gets "model not found." §6's alias coverage (all qwen variants + all
+  three bge-m3 aliases) is a hard requirement here. The audit confirms the five
+  new callers send only already-covered ids (`qwen36-27b:nothink`, `bge-m3`).
+- **Observability must be repointed, not the callers:** health probes, GPU
+  diagnostics, `tailscale serve` (`LLAMA_CPP_HOST`), `emergency-recovery`,
+  `status_check.py`, `gpu_status.py` must watch the **real** servers — now
+  `llama-cpp-upstream` / `llama-cpp-embed-upstream` — *not* the gateway. This is
+  the one set of files that genuinely must change (§16.4-revised in the plan).
+
+### 1A.7 High-level cutover (replaces §11 for transparent mode)
+
+1. **Phase 0 spike** — prove permissive-mode per-key logging (§1A.3) **and** the
+   §19 digest-pin/watchtower questions. If the spike fails, revert to the
+   per-caller path.
+2. **Stand up the gateway** (digest-pinned, permissive, `--port 8080`,
+   `config` api_base → the *current* `llama-cpp` / `llama-cpp-embed`), **without
+   aliases yet** — verify it serves every model id (§6) and writes spend logs.
+3. **The flip (one commit):** rename the two real services to `*-upstream`,
+   point the gateway config api_base at the `*-upstream` names, add the
+   `llama-cpp` + `llama-cpp-embed` aliases to the gateway, repoint the
+   observability refs (§1A.6) to `*-upstream`, recreate. All callers are now
+   transparently proxied; verify the ledger fills and every healthcheck passes.
+4. **Soak** on the ledger (attribution by source-key/IP).
+5. **Lazy keys (optional, ongoing):** flip caller key env vars one at a time
+   (§1A.4) for clean attribution; once all carry real virtual keys, optionally
+   enable `master_key` enforcement + caps (§15.4).
+6. **Three-place rule + docs** (§10 / §16 / stack-map) — the gateway and the
+   `*-upstream` renames must land in recovery scripts + stack-map.
+
+Rollback at any point: `git revert` the flip commit (aliases move back to the
+real servers, which never stopped existing) + recreate.
+
+### 1A.8 Validation = reversible live canary (operator's strategy, 2026-06-12)
+
+The transparency *is* the safety net, so the flip doubles as its own test: in a
+maintenance window, **perform the flip for real and watch the live services**. If
+anything misbehaves, **`git revert` + `compose up` brings the originals back and
+the callers never knew** — because no caller config ever changed, the rollback is
+invisible to them. This is lower-risk than a synthetic harness and tests the real
+integration (routing, model-name matching, streaming, embedding dimensions,
+timeouts) end-to-end.
+
+Mechanics that make it clean (and the one trap to avoid):
+
+- **The upstream must stay running.** Don't literally stop `llama-cpp` and leave
+  the gateway with no backend — the gateway *forwards* to the real server. The
+  flip brings the real server back up **renamed** (`llama-cpp-upstream`) in the
+  same `compose up`, and the gateway claims the `llama-cpp` alias.
+- **Free the name + container_name.** The real services set
+  `container_name: llama-cpp`. Renaming the service means stopping/removing the
+  old container so the name *and* the `llama-cpp` network alias are free for the
+  gateway: `docker compose stop llama-cpp llama-cpp-embed && docker compose rm -f
+  llama-cpp llama-cpp-embed`, then `docker compose up -d --remove-orphans` with
+  the flip definitions.
+- **Watch during the canary:** every caller's healthcheck; `LiteLLM_SpendLogs`
+  filling from multiple source IPs/keys (this also confirms the §1A.3 permissive
+  logging in situ — the live canary subsumes the offline spike); `docker logs
+  llama-cpp-upstream` showing the gateway as its only client; and any caller
+  holding a **long-lived connection pool** to the old container IP — it will
+  reconnect through the gateway on the next request, but a sticky caller can be
+  nudged with a single `docker restart <caller>` (no config change).
+- **Rollback drill:** `git revert <flip-commit> && docker compose up -d
+  --remove-orphans`. The originals reclaim `llama-cpp`/`llama-cpp-embed`, the
+  gateway is gone, callers are unaffected. **Worst case for a harder issue:** the
+  same revert — bring the originals back, services none the wiser, regroup.
+
+Because rollback is this clean, the offline permissive-logging spike (§1A.3)
+becomes an *optional* pre-check rather than a hard prerequisite — the canary
+tests the same fact under real load with an instant, invisible undo.
 
 ## 2. Industry-standard pattern alignment
 
@@ -182,6 +403,21 @@ inference plane health independent of LiteLLM.
 
 ## 6. LiteLLM configuration sketch (`config/litellm.config.yaml`)
 
+> **Transparent-mode deltas (§1A) — apply on top of the sketch below:**
+> 1. **`api_base` targets the renamed real servers.** After the flip the gateway
+>    *is* `llama-cpp`/`llama-cpp-embed`, so every `api_base` in `model_list`
+>    must point at `http://llama-cpp-upstream:8080/v1` /
+>    `http://llama-cpp-embed-upstream:8080/v1` (not `llama-cpp` — that would be a
+>    self-loop). During pre-flip standup (before the rename) they stay at the
+>    current `llama-cpp`/`llama-cpp-embed` names.
+> 2. **Permissive auth during the lazy-key period.** Leave `master_key` **unset**
+>    so the gateway accepts the junk/empty keys callers send today and logs each
+>    request under the key string presented (§1A.3/§1A.4). Re-enable `master_key`
+>    + caps only at the end-state, once callers carry real virtual keys.
+> 3. **Model-id coverage is mandatory** (callers can't be fixed) — every id any
+>    caller sends must be registered (all qwen variants + all three bge-m3
+>    aliases below).
+
 **Model-alias coverage** — re-audit found three different embedding model
 IDs are sent to `llama-cpp-embed` today (`bge-m3` from OB1, `qllama/bge-m3:latest`
 from mnemory, `bge-m3-f16.gguf` from little-coder's source default).
@@ -237,7 +473,10 @@ model_list:
       api_key: not-needed
 
 general_settings:
-  master_key: ${LITELLM_MASTER_KEY}
+  # TRANSPARENT MODE (§1A.3): leave master_key UNSET during the lazy-key period so
+  # the gateway accepts the junk keys callers send and logs each one. Re-enable
+  # (uncomment) only at the end-state once all callers carry real virtual keys.
+  # master_key: ${LITELLM_MASTER_KEY}
   database_url: postgres://litellm:${LITELLM_DB_PASSWORD}@llm-gateway-db:5432/litellm
   store_model_in_db: true
   # Phase 1: log every successful + failed request to Postgres
@@ -263,6 +502,12 @@ litellm_settings:
 
 ## 7. Virtual-key scheme
 
+> **§1A note:** In transparent mode keys are **not** issued up-front or
+> required. This table is the **lazy-key roster** (§1A.4) — the target end-state
+> if/when you enable `master_key` enforcement + caps. During the permissive
+> period a caller's "key" can be a plain distinct string; full virtual keys are
+> an opt-in upgrade per caller.
+
 Generated **once** during cutover via the gateway's `/key/generate` admin
 endpoint. Each key is named for the caller, gets a metadata dict for grouping,
 and is injected into the caller's existing API-key env var.
@@ -287,6 +532,16 @@ A one-page `documentation/LiteLLM-Proxy/key-rotation.md` is added in phase 2 —
 not blocking.
 
 ## 8. Concrete change list — per caller
+
+> **⚠️ SUPERSEDED by §1A (transparent interposition).** In transparent mode the
+> caller edits in §8.1 and the OWUI UI flips in §8.2 are **not performed at
+> cutover** — callers are untouched. This table is retained as the **lazy-key
+> roster** (§1A.4): the per-caller key env-var names + files to work through
+> *opportunistically* for clean attribution, never as a gated big-bang. The
+> compose **services** in §8.3 are still added (the gateway), but with the
+> transparent deltas of §8.3-revised below (aliases, `--port 8080`, permissive,
+> upstream api_base). What you actually edit at cutover is the **two upstream
+> renames + gateway aliases + observability repoint** (§1A.5/§1A.7).
 
 Each row is one git-trackable change. Variables marked **(no change)** are
 listed so the diff reviewer can confirm the field stays as-is.
@@ -411,6 +666,48 @@ nightly at 02:00 — run it once on demand right before the change).
 ```
 
 Add to the top-level `volumes:` block: `llm-gateway-db-data:`.
+
+#### 8.3-revised — transparent-mode compose deltas (§1A)
+
+The gateway block above is the *standup* form (admin on :4000, no aliases). To
+make it **transparent**, apply these deltas at the flip (§1A.7 step 3):
+
+```yaml
+  # 1. RENAME the two real inference servers (internal name only). Their host
+  #    ports (:8081 llama-swap admin, :8082 embed) and healthchecks move with
+  #    them. Every observability ref that must watch the REAL server is repointed
+  #    to these names (§16.4-revised): health probes, gpu_status, status_check,
+  #    tailscale LLAMA_CPP_HOST, emergency-recovery inventory.
+  llama-cpp-upstream:        # was: llama-cpp        (llama-swap, GPU 0)
+    networks: { llm-net: {} }
+  llama-cpp-embed-upstream:  # was: llama-cpp-embed  (bge-m3, GPU 1)
+    networks: { llm-net: {} }
+
+  # 2. The gateway ANSWERS as the old names via network aliases, and listens on
+  #    :8080 (the port callers already use). It routes by model name to the
+  #    upstreams (config api_base → *-upstream:8080, see §6 delta 1).
+  llm-gateway:
+    command: ["--config", "/app/config.yaml", "--port", "8080"]   # was 4000
+    ports:
+      - "127.0.0.1:4000:8080"   # host admin/out-of-band (probe /spend/logs etc.)
+    networks:
+      llm-net:
+        aliases:
+          - llama-cpp           # callers' http://llama-cpp:8080/v1 land here
+          - llama-cpp-embed     # callers' http://llama-cpp-embed:8080/v1 land here
+    depends_on:                 # was llama-cpp / llama-cpp-embed
+      llama-cpp-upstream: { condition: service_healthy }
+      llama-cpp-embed-upstream: { condition: service_healthy }
+      llm-gateway-db: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "--max-time", "5", "http://localhost:8080/health/liveliness"]
+```
+
+Notes: a single gateway with two aliases serves both chat and embed (it routes by
+model name) — no second container needed. `master_key` stays unset (§6 delta 2).
+The §19 digest-pin + `LITELLM_LOCAL_MODEL_COST_MAP=True` + watchtower-exclusion
+are unchanged and still apply (the gateway is now the most load-bearing container
+in the stack — 100% of inference — so the hardening matters *more*).
 
 ### 8.4 `.env.example` additions
 
@@ -547,6 +844,13 @@ equivalent; keep the two scripts in lock-step.
 
 ## 11. Cutover plan (high-level — task doc will expand)
 
+> **⚠️ SUPERSEDED by §1A.7** for transparent mode. The per-caller cutover below
+> (steps 4–7: cut over little-coder, mnemory, the OB1 trio, OWUI) does **not**
+> happen — there are no per-caller flips. The transparent cutover is: spike →
+> stand up gateway → the rename+alias+repoint flip (one commit) → soak → lazy
+> keys. Steps 1 (backups), 2 (stand up gateway), 8 (pipe module), 9 (recovery +
+> stack-map), 10 (soak) still apply. Use §1A.7 as the cutover of record.
+
 Each step is independently reversible. After every step, hit
 `http://llm-gateway:4000/spend/logs?api_key=<that-key>` and confirm the new
 caller appears in the ledger before moving on.
@@ -580,7 +884,11 @@ caller appears in the ledger before moving on.
 | Added latency on inference critical path | Low (LiteLLM is ~5–10 ms; inference dominates) | Per-step measurement during cutover. Per-caller revert = one env var. |
 | LiteLLM bug or restart drops requests in flight | Medium | All callers already retry on transport error (verified for entity-worker via the `fetch timeout after 60000ms` log behavior); `restart: unless-stopped` recovers within seconds. |
 | Postgres outage on `llm-gateway-db` | Low — Postgres is the most boring component in the stack | Gateway falls back to in-memory accounting when DB is down (LiteLLM behavior — confirm in cutover step 2). Backup sidecar restores from nightly dump. |
-| Operator forgets to re-point one caller, leaves a dark traffic stream | Medium | Pipe-module's "live snapshot" view shows any source IP **not** holding a known key — surfaces drift immediately. Also covered by the §4.1/§4.2 audit checklist in the task doc. |
+| Operator forgets to re-point one caller, leaves a dark traffic stream | ~~Medium~~ **N/A in transparent mode (§1A)** | Transparent interposition makes this **impossible** — callers are never re-pointed; the gateway answers at the names they already use, so there is no direct path left to leave behind. This was the single strongest reason for the §1A revision. |
+| **Permissive-mode logging assumption is wrong** (§1A.3 linchpin) | Medium until spiked | The whole transparent approach assumes LiteLLM logs distinct presented keys with `master_key` unset. **Phase 0 spike proves it first.** If false → fall back to the keyed per-caller plan (§4–§8). |
+| **Gateway is now critical-path for 100% of inference** (big-bang) | Medium | `restart: unless-stopped`, healthcheck, digest-pin (§19); the `*-upstream` servers never stop existing, so failure is recoverable. Latency is the same ~5–10 ms, now universal. |
+| Transparent flip breaks something | Low/Medium | Rollback is one `git revert` of the flip commit (aliases move back to the real servers) + recreate — simpler than unwinding N per-caller edits. |
+| Observability ref left pointing at the gateway instead of `*-upstream` | Medium | Health/GPU/tailscale/recovery probes must follow the real servers to `*-upstream` (§1A.6/§16.4). A probe pointing at the gateway would mis-report inference-plane health. Task-doc checklist + a post-flip verification that probes hit `*-upstream`. |
 | Virtual key leak via .env commit | Low — .env is gitignored | Keys can be rotated via `/key/regenerate` without touching anything else. |
 | LiteLLM image version drift | Medium | **Digest-pin from day one** (decision D9 — `ghcr.io/berriai/litellm@sha256:…`), not a floating tag. Bumps are deliberate operator actions with the procedure in §8.3 / §19. |
 | **Supply-chain compromise of the LiteLLM image** (CVE-2025-55182 class) | Low per-event, High blast-radius | LiteLLM is a proven supply-chain target and the gateway holds all key material. Mitigations are stacked: digest-pin (D9), watchtower-excluded (no silent auto-pull), internal-only `llm-net` (no exfil egress), `telemetry: false` + `LITELLM_LOCAL_MODEL_COST_MAP=True` (zero outbound calls), per-caller virtual keys (single-key revocation), and master-key/DB-password gated behind G1/G2. Full threat model + response runbook in §19. |
@@ -723,6 +1031,16 @@ was inventoried (36 files total). They sort into six categories below. The
 plan document derived from this guide must walk each category in order.
 
 ### 16.1 Category A — direct API callers (MUST change)
+
+> **⚠️ SUPERSEDED by §1A for transparent mode.** These callers are **not edited**
+> at cutover — they keep hitting `llama-cpp` / `llama-cpp-embed`, which now
+> resolve to the gateway. This table is now the **lazy-key roster** (§1A.4) +
+> the **model-id coverage source** (§6). It is also **incomplete** as an edit
+> list (it predates the five 2026-06-12 callers in §1A.1) — which is exactly why
+> transparent interposition replaced it. The files that genuinely change at
+> cutover are the **two upstream renames + gateway aliases** (§8.3-revised) and
+> the **observability refs** (§16.4 + the health/GPU/recovery refs that must
+> follow the real servers to `*-upstream`).
 
 These are the only files where inference traffic is actually emitted. Every
 line listed is a target for the §8.1 substitution rules.
@@ -868,6 +1186,14 @@ probed) → C (UI flip) → §15 caps applied → F (docs catch up). Category D
 is parallel and optional.
 
 ## 17. Human-required changes — operator actions that cannot be diffed
+
+> **⚠️ Largely SUPERSEDED by §1A.** Transparent interposition **eliminates the
+> OWUI admin-UI flips** (17.4) and the per-caller secret wiring — OWUI and every
+> caller are untouched. The operator actions that remain: provide the
+> `LITELLM_DB_PASSWORD` (and `master_key` only if/when enforcement is enabled),
+> run the §19.3 digest-pin bump, and — at the flip — eyeball that the rename +
+> alias + observability-repoint commit is correct before recreate. The
+> `Retry-After` compliance patches (§15.5) still apply if/when caps are enabled.
 
 Every action below is hands-on: it lives in a service admin UI, a database
 column, an external client config, or as a one-shot operator command. None

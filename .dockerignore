@@ -1,0 +1,10 @@
+# Root (context: .) is consumed by only two images:
+#   - openwebui (Dockerfile.openwebui-gpu): no COPY, needs nothing from context
+#   - tailscale (dockerfile.tailscale): COPY entrypoint.sh only
+# Without this, `docker compose build` ships the ENTIRE workspace
+# (backups/, data/, models/, OB1/ — tens of GB) to the daemon as build context.
+# Exclude everything, then re-include only the file tailscale copies.
+# NOTE: every other service builds from a subdirectory context (./little-coder,
+# ./backup, ./config/*, ../mnemory, ...), which this root .dockerignore does NOT affect.
+*
+!entrypoint.sh

@@ -18,6 +18,11 @@ services:
       - .:/host_project:ro # Mount entire project for AI Stack pipe functions
     environment:
       - TZ=America/New_York
+      # Pinned session/encryption key (value in .env). 0.9.6 hard-requires this; and the
+      # key was previously auto-generated into the container's EPHEMERAL layer
+      # (/app/backend/.webui_secret_key, outside the data volume), so a recreate would
+      # rotate it and break every encrypted-at-rest value in webui.db + all sessions.
+      - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY}
       - OLLAMA_HOST=http://localhost:11434
       - USE_CUDA=true
       - USE_CUDA_DOCKER=true
@@ -35,6 +40,10 @@ services:
       # Reduce OpenWebUI overhead for model requests
       - CHAT_RESPONSE_STREAM_DELTA_CHUNK_SIZE=4 # Larger chunks for better streaming performance
       - BYPASS_MODEL_ACCESS_CONTROL=true # Skip access control checks for faster requests
+      # 0.9.6 renamed CHAT_RESPONSE_MAX_TOOL_CALL_RETRIES -> _ITERATIONS and raised the
+      # default 30 -> 256. Pin a sane bound so deep_research / little-coder tool loops
+      # don't run away on latency/cost. (Ignored by 0.8.10, which uses the old name.)
+      - CHAT_RESPONSE_MAX_TOOL_CALL_ITERATIONS=40
       # open-terminal moved into the little-coder control plane (Tool chapter):
       # it left OWUI's network namespace, so OWUI's direct terminal access
       # ends here. It returns in chapter 2 via lc-mcpo (design §3.4, Decision

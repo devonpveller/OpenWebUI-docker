@@ -11,6 +11,56 @@ conflict surfaces during execution, the guide wins and this plan is updated.
 
 ---
 
+## 0. Transparent-mode execution (2026-06-12) — READ FIRST, supersedes §1–§6
+
+The architecture changed to **transparent interposition** (guide **§1A**). The
+phased per-caller cutover in §3–§4 below is **superseded** — there is no
+per-caller migration. Use the phases here as the execution path of record; the
+old phases are retained as the fallback if the Phase-T0 spike fails.
+
+**The pivot in one line:** rename the two real inference servers to `*-upstream`,
+give the LiteLLM gateway the network aliases `llama-cpp` + `llama-cpp-embed` on
+`:8080`, run it permissive. Every caller (current, future, and the five
+un-inventoried ones from guide §1A.1) is proxied with **zero caller edits**.
+
+### Phases (transparent)
+
+| Phase | What | Autonomy | Ends with |
+|---|---|---|---|
+| **T0 — Pre-checks (optional)** | Offline scratch test of permissive-mode key logging (guide §1A.3) + §19 digest resolve. **Optional** — the T3 live canary subsumes the logging check under real load with an invisible rollback (guide §1A.8). Run T0 only if you want the LiteLLM-config fact confirmed at zero outage before the canary. | Full | GT0 (optional) |
+| **T1 — Backups + branch + .env** | OWUI/OB1/mnemory backups; branch; `.env` (`LITELLM_DB_PASSWORD` only — no per-caller keys) | Full | GT1 (DB password; master key only if enforcing later) |
+| **T2 — Standup (no aliases yet)** | Add `llm-gateway` + `llm-gateway-db` digest-pinned + **permissive**, `--port 8080`, config api_base → the *current* `llama-cpp`/`llama-cpp-embed`. Verify it serves **every** model id (guide §6) and **writes a spend-log row carrying the presented key**. Nothing routes through it yet. | Full | GT2 (operator confirms ledger + model coverage) |
+| **T3 — THE FLIP, as a live canary (one commit)** | In a maintenance window: rename `llama-cpp`→`llama-cpp-upstream`, `llama-cpp-embed`→`llama-cpp-embed-upstream`; point gateway api_base at `*-upstream`; add gateway aliases `llama-cpp`+`llama-cpp-embed`; **repoint observability refs** (health, gpu_status, status_check, tailscale `LLAMA_CPP_HOST`, emergency-recovery) to `*-upstream`. `compose up -d --remove-orphans` and **watch the live services** (guide §1A.8). The transparency makes this safe: **any issue → `git revert` + `compose up` brings the originals back and no caller ever knew.** Worst case for a harder problem: the same revert. | Mixed | GT3 (operator eyeballs the flip commit before recreate) |
+| **T4 — Verify + soak** | All callers now transparently proxied: confirm the ledger fills from multiple callers, every healthcheck passes, probes hit `*-upstream`. Soak on source-key/IP attribution. | Operator-driven | None |
+| **T5 — Lazy keys (optional, ongoing)** | Flip caller key env vars one at a time (guide §1A.4) for clean attribution. Optionally, once all callers carry real virtual keys: enable `master_key`, issue keys, apply §15.4 caps. | Per-caller, additive | None |
+| **T6 — Pipe module + recovery + docs** | `llm-traffic` module (§9); three-place rule (recovery scripts + stack-map) including the `*-upstream` renames; Category-F docs | Full | None |
+
+The operator can **stop after T4** with the full ledger (the §1/§15 goal) and
+zero per-caller work. T5 (clean per-key attribution) and T6 (pipe UI + docs) are
+additive.
+
+### Gate semantics (transparent)
+
+| Gate | Agent must NOT, without approval |
+|---|---|
+| GT0 | Build anything before the permissive-logging spike is proven (or the per-caller fallback is chosen) |
+| GT1 | Generate/use the DB password (and master key, only if enforcing) until the operator provides it |
+| GT2 | Proceed to the flip before the standup gateway demonstrably serves every model id **and** logs the presented key |
+| GT3 | Run the rename+alias+repoint recreate before the operator has eyeballed the single flip commit |
+
+### Rollback (transparent)
+
+Every phase boundary is stable. The flip (T3) is **one git commit**; rollback is
+`git revert` of it + `docker compose up -d --remove-orphans` — the aliases move
+off the gateway and the original `llama-cpp`/`llama-cpp-embed` reclaim their
+names. **Because no caller config ever changed, this rollback is invisible to
+every caller** (guide §1A.8) — which is what makes running the flip as a live
+canary safe. No per-caller unwinding. If the (optional) T0 pre-check **or** the
+T3 canary shows permissive logging doesn't work / the integration misbehaves
+unfixably, the per-caller plan (§3–§4) is the documented fallback path.
+
+---
+
 ## 1. Purpose & "one-shot" honesty
 
 This plan is structured so an autonomous agent can drive the *codeable*
@@ -49,6 +99,13 @@ improvise. This is a production stack with valuable data — better a slow
 cutover than a fast restore-from-backup.
 
 ## 3. Phases overview
+
+> **⚠️ SUPERSEDED by §0 (transparent mode).** The per-caller phases below (heavy-
+> hitter cutover, remaining callers, OWUI UI flips) are **not executed** in
+> transparent mode — they are the fallback path used only if the §0 Phase-T0
+> permissive-logging spike fails. Backups (Phase 0), gateway standup (Phase 1),
+> observability/pipe module (Phase 4), and recovery+docs (Phase 5) carry over
+> into the §0 phases. Use §0 as the path of record.
 
 | Phase | What | Agent autonomy | Ends with gate |
 |---|---|---|---|
