@@ -76,6 +76,8 @@ tracking + reflection later) without bolting on a custom pipeline.
 | D6 | OWUI's chat + embedding wiring is **re-pointed via OWUI Admin → Connections** (UI step, persisted in OWUI's database), not via compose env | OWUI's compose file does not currently set `OPENAI_API_BASE_URLS`; the configuration lives in OWUI's data volume. This is a documented operator action in the cutover, not a code change. |
 | D7 | Prometheus + Grafana dashboards are **phase 2** | The LiteLLM REST API + pipe module covers the immediate need ("who is using the GPU and how much"). Dashboards add value but also infrastructure cost; defer until the request ledger has accumulated something worth charting. |
 | D8 | llama-swap stays in place behind LiteLLM | llama-swap is a model-swap router, not a request gateway. The hop chain `caller → LiteLLM → llama-swap → llama-server` adds ~5–10 ms total and preserves the model-swap behavior callers already rely on. |
+| D9 | The `llm-gateway` image is **digest-pinned** (`ghcr.io/berriai/litellm@sha256:…`), **never** the floating `:main-stable` tag | LiteLLM was the target of a supply-chain compromise (CVE-2025-55182, Mar 2026 — poisoned PyPI `1.82.7`/`1.82.8` carrying a credential-stealer + backdoor). A floating tag means any future `docker compose pull` / recreate silently adopts whatever ghcr serves; a digest pins exactly the image the operator reviewed. Mirrors the existing `portal-alerter` digest-pin convention (and its documented bump procedure). See §19. |
+| D10 | The gateway runs **fully offline** — `LITELLM_LOCAL_MODEL_COST_MAP=True` + `telemetry: false` — and stays on the internal `llm-net` (no internet route) | The gateway is the credential-richest service in the stack: it holds the master key, every per-caller virtual key, and the DB password. Keeping it on `internal: true` `llm-net` means even a fully compromised image cannot exfiltrate those secrets. The two settings stop LiteLLM's startup model-cost-map fetch (from GitHub) and its anonymous telemetry, so the gateway makes **zero** outbound calls and boots cleanly with no internet — making the no-beacon property independent of any future network change. See §19. |
 
 ## 4. Caller inventory — complete audit
 
@@ -247,7 +249,17 @@ litellm_settings:
   drop_params: true       # tolerate caller params llama.cpp doesn't recognize
   set_verbose: false
   request_timeout: 600    # match LLAMA_CPP_TIMEOUT headroom for long completions
+  telemetry: false        # §19/D10 — no anonymous outbound telemetry beacon
 ```
+
+> **Offline operation (§19/D10):** `telemetry: false` above stops LiteLLM's
+> anonymous usage beacon. The companion setting — `LITELLM_LOCAL_MODEL_COST_MAP=True`
+> — is an **environment variable** (set in the §8.3 compose block, not this
+> YAML) that tells LiteLLM to use its *bundled* model-price map instead of
+> fetching `model_prices_and_context_window.json` from GitHub at startup.
+> Together they mean the gateway makes no outbound internet calls, which is
+> both a supply-chain hardening (no exfil channel) and a correctness fix for
+> living on the internal-only `llm-net` (no failed-fetch hang/log-noise on boot).
 
 ## 7. Virtual-key scheme
 
@@ -317,7 +329,15 @@ nightly at 02:00 — run it once on demand right before the change).
 
 ```yaml
   llm-gateway:
-    image: ghcr.io/berriai/litellm:main-stable
+    # Digest-pinned — supply-chain hardening (decision D9, see §19). LiteLLM was
+    # the target of CVE-2025-55182 (poisoned PyPI 1.82.7/1.82.8). Do NOT track
+    # the floating :main-stable tag. Bump deliberately (mirrors portal-alerter):
+    #   1. docker pull ghcr.io/berriai/litellm:main-stable
+    #   2. docker inspect ghcr.io/berriai/litellm:main-stable --format '{{index .RepoDigests 0}}'
+    #   3. confirm the resolved release is OUTSIDE any known LiteLLM compromise window
+    #      (check github.com/BerriAI/litellm security advisories before pinning)
+    #   4. paste the new sha256 below; recreate llm-gateway; re-run the §17.2 checks
+    image: ghcr.io/berriai/litellm@sha256:__RESOLVED_AT_STANDUP__   # resolved + pinned in task T1.3.5
     container_name: llm-gateway
     networks:
       - llm-net
@@ -332,6 +352,7 @@ nightly at 02:00 — run it once on demand right before the change).
       - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
       - LITELLM_DB_PASSWORD=${LITELLM_DB_PASSWORD}
       - LC_LLAMA_API_KEY=${LC_LLAMA_API_KEY}
+      - LITELLM_LOCAL_MODEL_COST_MAP=True   # §19/D10 — use bundled cost map; no GitHub fetch at boot
     depends_on:
       llama-cpp:
         condition: service_healthy
@@ -561,7 +582,8 @@ caller appears in the ledger before moving on.
 | Postgres outage on `llm-gateway-db` | Low — Postgres is the most boring component in the stack | Gateway falls back to in-memory accounting when DB is down (LiteLLM behavior — confirm in cutover step 2). Backup sidecar restores from nightly dump. |
 | Operator forgets to re-point one caller, leaves a dark traffic stream | Medium | Pipe-module's "live snapshot" view shows any source IP **not** holding a known key — surfaces drift immediately. Also covered by the §4.1/§4.2 audit checklist in the task doc. |
 | Virtual key leak via .env commit | Low — .env is gitignored | Keys can be rotated via `/key/regenerate` without touching anything else. |
-| LiteLLM image version drift | Medium | Pin to a specific `litellm:main-stable-vYY.MM.DD` tag once cutover stabilizes (matches the `LITTLE_CODER_VERSION` discipline). |
+| LiteLLM image version drift | Medium | **Digest-pin from day one** (decision D9 — `ghcr.io/berriai/litellm@sha256:…`), not a floating tag. Bumps are deliberate operator actions with the procedure in §8.3 / §19. |
+| **Supply-chain compromise of the LiteLLM image** (CVE-2025-55182 class) | Low per-event, High blast-radius | LiteLLM is a proven supply-chain target and the gateway holds all key material. Mitigations are stacked: digest-pin (D9), watchtower-excluded (no silent auto-pull), internal-only `llm-net` (no exfil egress), `telemetry: false` + `LITELLM_LOCAL_MODEL_COST_MAP=True` (zero outbound calls), per-caller virtual keys (single-key revocation), and master-key/DB-password gated behind G1/G2. Full threat model + response runbook in §19. |
 | Embedding model id mismatch (`bge-m3` vs `qllama/bge-m3:latest`) | High if not handled | LiteLLM `model_name: bge-m3` is the public alias; the upstream `model: openai/bge-m3` resolves to whatever llama-cpp-embed exposes. mnemory currently uses `qllama/bge-m3:latest` — must change to `bge-m3` to match LiteLLM's published alias. Called out explicitly in §8.1. |
 
 ## 13. Out of scope (phase 2)
@@ -1197,6 +1219,88 @@ doesn't re-audit them:
 - `OB1/integrations/entity-extraction-worker/_shared/config.ts` and
   `_shared/helpers.ts` — read `CHAT_API_BASE` / `EMBEDDING_API_BASE`
   env vars; covered via compose env edits in §16.1.
+
+## 19. Supply-chain & security posture
+
+**Why this section exists.** Putting LiteLLM in front of llama-swap means
+adding a third-party gateway onto the **credential-richest seam in the stack**:
+it holds `LITELLM_MASTER_KEY`, every per-caller virtual key, and the
+`llm-gateway-db` password, and it sits on `llm-net` with reach to every
+inference caller. LiteLLM is also a *proven* supply-chain target, so this
+component warrants explicit hardening rather than the default "pull the latest
+image and go."
+
+### 19.1 The incident that motivated this (CVE-2025-55182)
+
+On **2026-03-24**, attackers compromised a Trivy dependency in LiteLLM's CI,
+used the leaked PyPI publishing token to push malicious **PyPI** packages
+`litellm==1.82.7` and `1.82.8` (live ~3 hours before PyPI quarantine). The
+payload was an auto-executing `litellm_init.pth` that ran on Python startup
+and delivered three stages: a credential harvester (50+ secret categories), a
+Kubernetes lateral-movement toolkit, and a persistent RCE backdoor. Safe
+versions: ≤ `1.82.6` and anything after the cleanup. The maintainer reported
+**"limited impact on proxy docker."**
+
+**Why it does not directly hit this deployment as designed:**
+
+1. **We deploy the prebuilt Docker image, not the pip package.** The poisoning
+   lived in the PyPI distribution channel (a stolen PyPI token), not the ghcr
+   build pipeline. This stack never `pip install litellm==1.82.7/8`.
+2. **The dangerous payload stages are largely inert here.** Cloud-credential
+   harvesting (AWS/GCP metadata endpoints) and Kubernetes cluster lateral
+   movement do not map to a single Windows + WSL Docker Desktop host with no
+   cloud IAM and no cluster. Only generic secret-scraping would partially apply.
+3. **The blast radius is contained by design** (see §19.2).
+
+The standing risk is therefore not *this* CVE — it is the **next** compromised
+image. §19.2 is built around that threat model.
+
+### 19.2 Layered mitigations (all enforced in §6 / §8.3)
+
+| # | Control | What it stops | Where |
+|---|---|---|---|
+| M1 | **Digest-pin** `ghcr.io/berriai/litellm@sha256:…` (never `:main-stable`) | A future poisoned image being adopted by a `docker compose pull` / recreate. Converts "trust whatever ghcr serves" into "trust exactly the image I reviewed." | D9, §8.3 image line, task T1.3.5 |
+| M2 | **Watchtower-excluded** (`com.centurylinklabs.watchtower.enable=false`) | The stack's auto-updater silently pulling a new `:main-stable`. (Already the universal convention on every service in this compose.) | §8.3 labels |
+| M3 | **Internal-only `llm-net`** (`internal: true` — no internet route) | A compromised image phoning home / exfiltrating the master key, virtual keys, or DB password. This is the strongest control: even full RCE in the container has no egress path. | §5, compose `networks:` block |
+| M4 | **No outbound calls** — `telemetry: false` + `LITELLM_LOCAL_MODEL_COST_MAP=True` | LiteLLM's startup GitHub cost-map fetch and anonymous telemetry beacon — so the no-egress property holds even if M3 were ever relaxed, and the gateway boots cleanly offline. | D10, §6, §8.3 env |
+| M5 | **Per-caller virtual keys** (not one shared key) | A single key leak forcing a stack-wide rotation. Any one key is revocable via `/key/regenerate` without touching the others. | §7, §12 |
+| M6 | **Secrets gated behind G1/G2** + `.env` (gitignored), `no-new-privileges:true`, host port bound to `127.0.0.1:4000` only | Key material entering the agent's reading context, leaking via git, privilege escalation, or LAN exposure of the admin API. | plan §3, §8.3 |
+
+The net posture: a hypothetical future compromised `llm-gateway` image lands on
+an island — no internet egress (M3/M4), no auto-deployment (M1/M2), and the
+keys it could read are independently revocable (M5). That is the difference
+between "telemetry incident" and "stack-wide credential breach."
+
+### 19.3 Operator runbook — keeping the pin current
+
+The digest pin is not "set and forget" — security fixes ship in new releases,
+so the pin must be **bumped deliberately**, not auto-followed:
+
+1. `docker pull ghcr.io/berriai/litellm:main-stable`
+2. `docker inspect ghcr.io/berriai/litellm:main-stable --format '{{index .RepoDigests 0}}'`
+3. **Before pinning,** check
+   [github.com/BerriAI/litellm security advisories](https://github.com/BerriAI/litellm/security/advisories)
+   and confirm the resolved release is outside any known compromise window.
+4. Paste the new `sha256` into the §8.3 `image:` line; recreate `llm-gateway`;
+   re-run the §17.2 upstream-connectivity + model-list checks.
+5. Subscribe to the LiteLLM GitHub security advisories feed so a future
+   incident is a notification, not a surprise.
+
+`scripts/update-stack.bat` is updated (task T5.5) to follow this digest-bump
+procedure rather than blindly pulling `:main-stable`.
+
+### 19.4 If a LiteLLM compromise is announced while this is deployed
+
+1. **Do not pull.** Leave the pinned digest in place (M1 means you are not on
+   the bad image unless you explicitly bumped to it).
+2. Confirm the deployed digest: `docker inspect llm-gateway --format '{{.Image}}'`
+   and compare against the announced bad digests/versions.
+3. If the deployed digest is implicated: stop `llm-gateway`, rotate
+   `LITELLM_MASTER_KEY` + `LITELLM_DB_PASSWORD` + **every** virtual key
+   (`/key/regenerate` per caller, then re-inject), and restore
+   `llm-gateway-db` from the nightly backup if integrity is in doubt. M3 means
+   exfiltration was blocked at the network layer, but rotate regardless.
+4. Re-pin to a known-good digest per §19.3 and bring the gateway back up.
 - `OB1/integrations/kubernetes-deployment/index.ts` — defaults to cloud;
   overridden by compose env (this is the source for `openbrain-mcp`).
 - `scripts/ai_pipes/fileshed.py` — `http://localhost:8080` is OWUI's

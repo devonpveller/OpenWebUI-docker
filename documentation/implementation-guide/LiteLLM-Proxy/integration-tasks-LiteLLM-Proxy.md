@@ -328,9 +328,13 @@ Guide §16/§18 captured. Any failure here means the audit needs revision
 - **Action:** write `config/litellm.config.yaml` with the content from
   Guide §6. Note: the file uses env-var interpolation (`${LITELLM_MASTER_KEY}`,
   `${LITELLM_DB_PASSWORD}`, `${LC_LLAMA_API_KEY}`) — these resolve at
-  container start via the compose `env_file` directive.
+  container start via the compose `env_file` directive. The §6
+  `litellm_settings` block includes `telemetry: false` (guide §19/D10 — no
+  anonymous outbound beacon); the companion `LITELLM_LOCAL_MODEL_COST_MAP=True`
+  is set as a compose env in §8.3, not here.
 - **Acceptance:** `Test-Path config/litellm.config.yaml` is `True`.
   `Get-Content config/litellm.config.yaml | Select-String "model_name: bge-m3"`
+  returns one match. `Get-Content config/litellm.config.yaml | Select-String "telemetry: false"`
   returns one match.
 
 ### T1.2 — Write LiteLLM backup script `[AGENT]`
@@ -355,6 +359,34 @@ Guide §16/§18 captured. Any failure here means the audit needs revision
   returns three lines (`llm-gateway`, `llm-gateway-db`,
   `llm-gateway-backup`).
 
+### T1.3.5 — Resolve and digest-pin the gateway image `[AGENT]` (NEW — supply-chain hardening, Guide §19/D9)
+- **Depends on:** T1.3
+- **Action:** the §8.3 block ships the gateway `image:` line with an
+  `__RESOLVED_AT_STANDUP__` digest placeholder so it can never be brought up on
+  the floating `:main-stable` tag. Resolve the current stable digest and pin it:
+  ```powershell
+  docker pull ghcr.io/berriai/litellm:main-stable
+  $digest = (docker inspect ghcr.io/berriai/litellm:main-stable --format '{{index .RepoDigests 0}}')
+  # $digest looks like: ghcr.io/berriai/litellm@sha256:<64-hex>
+  Write-Host "Resolved gateway digest: $digest"
+  ```
+  **Before pinning,** confirm the resolved release is outside any known LiteLLM
+  compromise window — check
+  https://github.com/BerriAI/litellm/security/advisories . Then `Edit` the
+  `docker-compose.yml` `llm-gateway` `image:` line, replacing
+  `ghcr.io/berriai/litellm@sha256:__RESOLVED_AT_STANDUP__` with `$digest`.
+  Leave the bump-procedure comment block above the `image:` line intact.
+- **Acceptance:**
+  ```powershell
+  $img = (docker compose config | Select-String "ghcr.io/berriai/litellm").Line.Trim()
+  if ($img -notmatch "@sha256:[0-9a-f]{64}") { Write-Error "gateway image not digest-pinned: $img"; exit 1 }
+  if ($img -match ":main-stable") { Write-Error "gateway still on a floating tag: $img"; exit 1 }
+  Select-String -Path docker-compose.yml -Pattern "__RESOLVED_AT_STANDUP__" -Quiet  # must be False
+  ```
+  (`docker compose config` renders the resolved image with comments stripped,
+  so the bump-procedure comment that mentions `:main-stable` does not trip the
+  check.) **Failure → stop; do not bring up the gateway on an unpinned image.**
+
 ### T1.4 — Bring up DB first `[AGENT]`
 - **Depends on:** T1.3
 - **Action:**
@@ -373,7 +405,7 @@ Guide §16/§18 captured. Any failure here means the audit needs revision
   llm-gateway-db` returns `healthy`.
 
 ### T1.5 — Bring up gateway `[AGENT]`
-- **Depends on:** T1.4
+- **Depends on:** T1.4, T1.3.5 (image must be digest-pinned before first run)
 - **Action:**
   ```powershell
   docker compose up -d llm-gateway
@@ -476,6 +508,11 @@ Guide §16/§18 captured. Any failure here means the audit needs revision
   > - sk-owui-embed   → caller=openwebui-embed            plane=core
   > - sk-owui-githelper → caller=openwebui-githelper-pipe plane=core
   > - sk-admin        → caller=admin                      plane=admin
+  >
+  > **Pinned gateway image digest** (supply-chain sanity check, Guide §19.3):
+  > `<docker inspect llm-gateway --format '{{.Image}}'>`
+  > Confirm this `@sha256:` digest is the one you intended and is outside any
+  > known LiteLLM compromise window.
   >
   > Reply "approved" to persist these to `.env` files and proceed to
   > Phase 2 (heavy-hitter cutover).
@@ -1008,10 +1045,17 @@ Guide §16/§18 captured. Any failure here means the audit needs revision
 
 ### T5.5 — Update update-stack.bat `[AGENT]`
 - **Depends on:** T5.4
-- **Action:** add an `llm-gateway` menu choice; pull `litellm:main-stable`
-  image; recreate container; same shape as the existing `llama-cpp`
-  block.
-- **Acceptance:** menu shows the new option.
+- **Action:** add an `llm-gateway` menu choice that follows the **digest-bump**
+  procedure (Guide §19.3 / D9), **not** a blind `:main-stable` pull-and-run.
+  The option must: `docker pull ghcr.io/berriai/litellm:main-stable`, resolve
+  the new digest via
+  `docker inspect ghcr.io/berriai/litellm:main-stable --format "{{index .RepoDigests 0}}"`,
+  print it for the operator to confirm against the BerriAI/litellm security
+  advisories, update the `image:` digest in `docker-compose.yml`, then recreate
+  `llm-gateway` and re-run its health check. Mirror the documented
+  `portal-alerter` bump discipline already in the compose file.
+- **Acceptance:** menu shows the new option, and the option's logic updates the
+  pinned `@sha256:` digest rather than leaving `image:` on a floating tag.
 
 ### T5.6 — Update status_check.py `[AGENT]`
 - **Depends on:** T5.5
