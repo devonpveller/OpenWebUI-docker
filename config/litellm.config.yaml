@@ -1,0 +1,69 @@
+# LiteLLM gateway config — transparent interposition (guide §1A).
+#
+# PERMISSIVE during the lazy-key period: no master_key (general_settings) so the
+# gateway accepts the junk/empty keys callers send today and logs each request
+# under the key string presented (proven by the T0 spike, 2026-06-12 — distinct
+# keys => distinct LiteLLM_SpendLogs rows, plaintext key).
+#
+# api_base points at the CURRENT real-server names. At the cut-in (flip), these
+# become llama-cpp-upstream / llama-cpp-embed-upstream and the gateway takes the
+# llama-cpp / llama-cpp-embed aliases (guide §1A.7 / §8.3-revised).
+#
+# DATABASE_URL is injected via compose env (expands ${LITELLM_DB_PASSWORD}); the
+# spend ledger + store_model_in_db use it. master_key intentionally absent.
+
+model_list:
+  # ─── Chat — Qwen 3.6 27B (both variants share one upstream slot) ───
+  - model_name: qwen36-27b
+    litellm_params:
+      model: openai/qwen36-27b
+      api_base: http://llama-cpp:8080/v1
+      api_key: dummy            # llama-swap ignores this; must be non-empty
+  - model_name: qwen36-27b:nothink
+    litellm_params:
+      model: openai/qwen36-27b:nothink
+      api_base: http://llama-cpp:8080/v1
+      api_key: dummy
+
+  # ─── Chat — Qwen 3.6 35B-A3B (both variants) ───
+  - model_name: qwen36-35b-a3b
+    litellm_params:
+      model: openai/qwen36-35b-a3b
+      api_base: http://llama-cpp:8080/v1
+      api_key: dummy
+  - model_name: qwen36-35b-a3b:nothink
+    litellm_params:
+      model: openai/qwen36-35b-a3b:nothink
+      api_base: http://llama-cpp:8080/v1
+      api_key: dummy
+
+  # ─── Embeddings — bge-m3 (1024-dim). THREE aliases for the same upstream. ───
+  # Every id any caller sends must be registered (transparent mode: callers can't
+  # be fixed). llama-cpp-embed ignores the model field and serves the loaded GGUF.
+  - model_name: bge-m3
+    litellm_params:
+      model: openai/bge-m3
+      api_base: http://llama-cpp-embed:8080/v1
+      api_key: dummy
+  - model_name: bge-m3-f16.gguf            # little-coder source default
+    litellm_params:
+      model: openai/bge-m3
+      api_base: http://llama-cpp-embed:8080/v1
+      api_key: dummy
+  - model_name: qllama/bge-m3:latest       # mnemory's current EMBED_MODEL value
+    litellm_params:
+      model: openai/bge-m3
+      api_base: http://llama-cpp-embed:8080/v1
+      api_key: dummy
+
+general_settings:
+  # NO master_key — permissive (guide §1A.3). DATABASE_URL comes from compose env.
+  store_model_in_db: true
+  success_callback: ["postgres"]   # proven to populate LiteLLM_SpendLogs (T0 spike)
+  failure_callback: ["postgres"]
+
+litellm_settings:
+  drop_params: true        # tolerate caller params llama.cpp doesn't recognize
+  set_verbose: false
+  telemetry: false         # no anonymous outbound beacon (guide §19/D10)
+  request_timeout: 600     # match LLAMA_CPP_TIMEOUT headroom for long completions

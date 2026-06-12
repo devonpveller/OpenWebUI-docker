@@ -504,6 +504,102 @@ services:
     labels:
       - "com.centurylinklabs.watchtower.enable=false"
 
+  # =====================================================================
+  # LiteLLM gateway — transparent interposition (guide §1A). STANDUP FORM:
+  # stands up ALONGSIDE the running llama-cpp / llama-cpp-embed with NO aliases
+  # yet — nothing routes through it until the cut-in (flip) renames the real
+  # servers to *-upstream and gives the gateway the llama-cpp / llama-cpp-embed
+  # aliases. See documentation/implementation-guide/LiteLLM-Proxy/CUT-IN-READY.md.
+  # PERMISSIVE (no master_key) — attribution by the key string each caller sends
+  # (proven by the T0 spike, 2026-06-12). Forwards by model name to llama-cpp.
+  # =====================================================================
+  llm-gateway:
+    # Digest-pinned — supply-chain hardening (guide §19/D9; CVE-2025-55182).
+    # Bump deliberately: docker pull ghcr.io/berriai/litellm:main-stable;
+    #   docker inspect ... --format '{{index .RepoDigests 0}}'; confirm the
+    #   release is outside any known compromise window; paste sha256; recreate;
+    #   re-run the model-list + spend-log verification.
+    image: ghcr.io/berriai/litellm@sha256:c98c9395c56a35b7abacff8269d43ff99aabacb62bbf42a04cc1514fcb9bde4a
+    container_name: llm-gateway
+    networks:
+      - llm-net
+    ports:
+      - "127.0.0.1:4000:8080"   # host admin / out-of-band only (no caller uses this)
+    volumes:
+      - ./config/litellm.config.yaml:/app/config.yaml:ro
+    command: ["--config", "/app/config.yaml", "--port", "8080"]
+    environment:
+      # DATABASE_URL expands ${LITELLM_DB_PASSWORD} from .env at compose-parse time.
+      - DATABASE_URL=postgres://litellm:${LITELLM_DB_PASSWORD}@llm-gateway-db:5432/litellm
+      - LITELLM_LOCAL_MODEL_COST_MAP=True   # bundled cost map; no GitHub fetch at boot (guide §19/D10)
+    depends_on:
+      llama-cpp:
+        condition: service_healthy
+      llama-cpp-embed:
+        condition: service_healthy
+      llm-gateway-db:
+        condition: service_healthy
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      # The litellm image is wolfi-based and has NO curl (T0 finding) — use python.
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8080/health/liveliness').status==200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s   # first boot runs prisma migrations (~60-90s, T0 finding)
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
+  llm-gateway-db:
+    image: postgres:16-alpine
+    container_name: llm-gateway-db
+    networks:
+      - llm-net
+    environment:
+      - POSTGRES_DB=litellm
+      - POSTGRES_USER=litellm
+      - POSTGRES_PASSWORD=${LITELLM_DB_PASSWORD}
+    volumes:
+      - llm-gateway-db-data:/var/lib/postgresql/data
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U litellm -d litellm"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
+  llm-gateway-backup:
+    image: postgres:16-alpine
+    container_name: llm-gateway-backup
+    depends_on:
+      llm-gateway-db:
+        condition: service_healthy
+    networks:
+      - llm-net
+    environment:
+      - BACKUP_DIR=/backups
+      - PGHOST=llm-gateway-db
+      - PGUSER=litellm
+      - PGDATABASE=litellm
+      - PGPASSWORD=${LITELLM_DB_PASSWORD}
+      - RETAIN_DAYS=${LITELLM_BACKUP_RETAIN_DAYS:-7}
+    volumes:
+      - ./backups/llm-gateway:/backups
+      - ./backup/llm-gateway-backup.sh:/scripts/backup.sh:ro
+    entrypoint: ["/bin/sh", "-c", "while true; do /scripts/backup.sh || true; sleep 86400; done"]
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
   smolcrawl-pipelines:
     build:
       context: ./smolcrawl
@@ -1793,6 +1889,7 @@ volumes:
   openwebui-data:
   mnemory-data:
   smolcrawl-data:
+  llm-gateway-db-data:   # LiteLLM spend-log DB (transparent gateway, guide §1A)
   # little-coder — five expertise volumes (persistence boundary, design §3.6)
   # plus the project-scoped workspace shared with open-terminal.
   # `little-coder-sessions` holds pi's per-chat session files — added in
