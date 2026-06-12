@@ -112,7 +112,7 @@ def main():
     # Step 1: Stop dependent containers first
     log_info("Stopping dependent containers first...")
     result = run_docker_command(
-        ["docker", "compose", "stop", "tailscale", "ollama", "llama-cpp", "llama-cpp-embed"],
+        ["docker", "compose", "stop", "tailscale", "ollama", "llama-cpp-upstream", "llama-cpp-embed-upstream"],
         project_root,
         timeout=60
     )
@@ -161,7 +161,7 @@ def main():
     # Step 5: Start llama-cpp services
     log_info("Starting llama-cpp...")
     result = run_docker_command(
-        ["docker", "compose", "up", "-d", "llama-cpp"],
+        ["docker", "compose", "up", "-d", "llama-cpp-upstream"],
         project_root,
         timeout=60
     )
@@ -171,7 +171,7 @@ def main():
     
     log_info("Starting llama-cpp-embed...")
     result = run_docker_command(
-        ["docker", "compose", "up", "-d", "llama-cpp-embed"],
+        ["docker", "compose", "up", "-d", "llama-cpp-embed-upstream"],
         project_root,
         timeout=60
     )

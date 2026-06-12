@@ -226,7 +226,7 @@ cd scripts
 if %ERRORLEVEL% NEQ 0 (
     echo [WARN] GPU check failed, restarting GPU services...
     cd ..
-    docker compose restart llama-cpp llama-cpp-embed openwebui
+    docker compose restart llama-cpp-upstream llama-cpp-embed-upstream openwebui
     cd scripts
     echo [INFO] Waiting for GPU services to restart...
     timeout /t 60 /nobreak >nul
@@ -240,7 +240,7 @@ if %ERRORLEVEL% NEQ 0 (
         echo.
         echo [INFO] Testing llama-cpp availability...
         cd ..
-        docker compose exec llama-cpp curl -s -f http://localhost:8080/health >nul 2>&1
+        docker compose exec llama-cpp-upstream curl -s -f http://localhost:8080/health >nul 2>&1
         cd scripts
         if %ERRORLEVEL% EQU 0 (
             echo [SUCCESS] llama-cpp GPU integration working
@@ -250,7 +250,7 @@ if %ERRORLEVEL% NEQ 0 (
         echo.
         echo [INFO] Testing llama-cpp-embed availability...
         cd ..
-        docker compose exec llama-cpp-embed curl -s -f http://localhost:8080/health >nul 2>&1
+        docker compose exec llama-cpp-embed-upstream curl -s -f http://localhost:8080/health >nul 2>&1
         cd scripts
         if %ERRORLEVEL% EQU 0 (
             echo [SUCCESS] llama-cpp-embed GPU integration working
@@ -266,14 +266,14 @@ if %ERRORLEVEL% NEQ 0 (
     echo.
     echo [INFO] Testing llama-cpp GPU integration...
     cd ..
-    docker compose exec llama-cpp curl -s -f http://localhost:8080/health >nul 2>&1
+    docker compose exec llama-cpp-upstream curl -s -f http://localhost:8080/health >nul 2>&1
     cd scripts
     if %ERRORLEVEL% EQU 0 (
         echo [SUCCESS] llama-cpp GPU integration working
         echo.
         echo [INFO] Testing llama-cpp-embed GPU integration...
         cd ..
-        docker compose exec llama-cpp-embed curl -s -f http://localhost:8080/health >nul 2>&1
+        docker compose exec llama-cpp-embed-upstream curl -s -f http://localhost:8080/health >nul 2>&1
         cd scripts
         if %ERRORLEVEL% EQU 0 (
             echo [SUCCESS] llama-cpp-embed GPU integration working
@@ -281,7 +281,7 @@ if %ERRORLEVEL% NEQ 0 (
         ) else (
             echo [WARN] llama-cpp-embed may need restart
             cd ..
-            docker compose restart llama-cpp-embed
+            docker compose restart llama-cpp-embed-upstream
             cd scripts
             timeout /t 30 /nobreak >nul
             echo [SUCCESS] llama-cpp-embed restarted
@@ -289,7 +289,7 @@ if %ERRORLEVEL% NEQ 0 (
     ) else (
         echo [WARN] llama-cpp may need restart
         cd ..
-        docker compose restart llama-cpp llama-cpp-embed
+        docker compose restart llama-cpp-upstream llama-cpp-embed-upstream
         cd scripts
         timeout /t 30 /nobreak >nul
         echo [SUCCESS] llama-cpp services restarted
@@ -310,7 +310,7 @@ echo ========================================
 echo.
 echo [INFO] Effective container GPU environment:
 cd /d "%SCRIPT_DIR%\.."
-for %%S in (openwebui ollama llama-cpp llama-cpp-embed) do (
+for %%S in (openwebui ollama llama-cpp-upstream llama-cpp-embed-upstream) do (
     echo.
     echo [INFO] %%S:
     docker inspect %%S --format "{{range .Config.Env}}{{println .}}{{end}}" | findstr /R /C:"^NVIDIA_VISIBLE_DEVICES=" /C:"^NVIDIA_DRIVER_CAPABILITIES="
@@ -349,12 +349,12 @@ cd scripts
 echo.
 echo [INFO] llama-cpp Status:
 cd ..
-docker compose exec llama-cpp curl -s http://localhost:8080/health 2>nul
+docker compose exec llama-cpp-upstream curl -s http://localhost:8080/health 2>nul
 cd scripts
 echo.
 echo [INFO] llama-cpp-embed Status:
 cd ..
-docker compose exec llama-cpp-embed curl -s http://localhost:8080/health 2>nul
+docker compose exec llama-cpp-embed-upstream curl -s http://localhost:8080/health 2>nul
 cd scripts
 echo.
 echo [INFO] Network Connectivity:
@@ -387,7 +387,7 @@ if %ERRORLEVEL% EQU 0 (
     echo [ERROR] OpenWebUI accessibility: FAILED
 )
 cd ..
-docker compose exec llama-cpp curl -s -f http://localhost:8080/health >nul 2>&1
+docker compose exec llama-cpp-upstream curl -s -f http://localhost:8080/health >nul 2>&1
 cd scripts
 if %ERRORLEVEL% EQU 0 (
     echo [SUCCESS] llama-cpp API accessibility: OK
@@ -526,7 +526,7 @@ echo [WARN] This will restart OpenWebUI, llama-cpp, llama-cpp-embed, and Tailsca
 echo.
 echo [INFO] Stopping dependent containers first...
 cd ..
-docker compose stop tailscale llama-cpp llama-cpp-embed mnemory mnemory-backup openwebui-backup smolcrawl-pipelines open_notebook surrealdb
+docker compose stop tailscale llama-cpp-upstream llama-cpp-embed-upstream mnemory mnemory-backup openwebui-backup smolcrawl-pipelines open_notebook surrealdb
 cd scripts
 echo [INFO] Restarting OpenWebUI...
 cd ..
@@ -546,18 +546,18 @@ echo [SUCCESS] OpenWebUI healthy - restarting dependent services
 echo.
 echo [INFO] Starting llama-cpp...
 cd ..
-docker compose start llama-cpp
+docker compose start llama-cpp-upstream
 if %ERRORLEVEL% NEQ 0 (
     echo [WARN] llama-cpp start failed, trying up -d...
-    docker compose up -d llama-cpp
+    docker compose up -d llama-cpp-upstream
 )
 cd scripts
 echo [INFO] Starting llama-cpp-embed...
 cd ..
-docker compose start llama-cpp-embed
+docker compose start llama-cpp-embed-upstream
 if %ERRORLEVEL% NEQ 0 (
     echo [WARN] llama-cpp-embed start failed, trying up -d...
-    docker compose up -d llama-cpp-embed
+    docker compose up -d llama-cpp-embed-upstream
 )
 cd scripts
 echo [INFO] Waiting for llama-cpp to initialize...
@@ -715,43 +715,43 @@ echo ========================================
 echo.
 echo [INFO] Checking llama-cpp service status...
 cd /d "%SCRIPT_DIR%\.."
-docker compose ps llama-cpp llama-cpp-embed --format "table {{.Service}}\t{{.Status}}"
+docker compose ps llama-cpp-upstream llama-cpp-embed-upstream --format "table {{.Service}}\t{{.Status}}"
 echo.
 echo [INFO] Testing llama-cpp health endpoint...
-docker compose exec llama-cpp curl -s -f http://localhost:8080/health >nul 2>&1
+docker compose exec llama-cpp-upstream curl -s -f http://localhost:8080/health >nul 2>&1
 set RESULT=%ERRORLEVEL%
 if %RESULT% EQU 0 (
     echo [SUCCESS] llama-cpp is healthy and running
 ) else (
     echo [WARN] llama-cpp health check failed, restarting...
-    docker compose restart llama-cpp
+    docker compose restart llama-cpp-upstream
     echo [INFO] Waiting for llama-cpp to start ^(large model, may take up to 2 minutes^)...
     timeout /t 60 /nobreak >nul
-    docker compose exec llama-cpp curl -s -f http://localhost:8080/health >nul 2>&1
+    docker compose exec llama-cpp-upstream curl -s -f http://localhost:8080/health >nul 2>&1
     set RESULT=!ERRORLEVEL!
     if !RESULT! EQU 0 (
         echo [SUCCESS] llama-cpp restored after restart
     ) else (
-        echo [ERROR] llama-cpp still not healthy - check logs: docker compose logs llama-cpp
+        echo [ERROR] llama-cpp-upstream still not healthy - check logs: docker compose logs llama-cpp-upstream
     )
 )
 echo.
 echo [INFO] Testing llama-cpp-embed health endpoint...
-docker compose exec llama-cpp-embed curl -s -f http://localhost:8080/health >nul 2>&1
+docker compose exec llama-cpp-embed-upstream curl -s -f http://localhost:8080/health >nul 2>&1
 set RESULT=%ERRORLEVEL%
 if %RESULT% EQU 0 (
     echo [SUCCESS] llama-cpp-embed is healthy and running
 ) else (
     echo [WARN] llama-cpp-embed health check failed, restarting...
-    docker compose restart llama-cpp-embed
+    docker compose restart llama-cpp-embed-upstream
     echo [INFO] Waiting for llama-cpp-embed to start...
     timeout /t 30 /nobreak >nul
-    docker compose exec llama-cpp-embed curl -s -f http://localhost:8080/health >nul 2>&1
+    docker compose exec llama-cpp-embed-upstream curl -s -f http://localhost:8080/health >nul 2>&1
     set RESULT=!ERRORLEVEL!
     if !RESULT! EQU 0 (
         echo [SUCCESS] llama-cpp-embed restored after restart
     ) else (
-        echo [ERROR] llama-cpp-embed still not healthy - check logs: docker compose logs llama-cpp-embed
+        echo [ERROR] llama-cpp-embed-upstream still not healthy - check logs: docker compose logs llama-cpp-embed-upstream
     )
 )
 cd /d "%SCRIPT_DIR%"

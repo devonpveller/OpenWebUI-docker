@@ -355,23 +355,16 @@ function Repair-LlamaCppConnectivity {
             Write-LogEntry "llama-cpp connectivity restored" "SUCCESS"
             return $true
         } else {
-            Write-LogEntry "llama-cpp API ready but health check still failing, trying container restart" "WARN"
-            
-            # Restart both services
-            docker compose restart openwebui | Out-Null
-            Start-Sleep 45  # Wait for GPU initialization
-            
-            docker compose restart llama-cpp llama-cpp-embed | Out-Null
-            Start-Sleep 30
-            
-            # Final connectivity test
-            if (Test-LlamaCppConnectivity) {
-                Write-LogEntry "Container restart restored llama-cpp connectivity" "SUCCESS"
-                return $true
-            } else {
-                Write-LogEntry "Failed to restore llama-cpp connectivity after restart" "ERROR"
-                return $false
-            }
+            # SAFETY GUARD (2026-06-12): never restart openwebui from here. openwebui
+            # owns the network namespace that `tailscale` shares (network_mode:
+            # service:openwebui), so restarting openwebui orphans tailscale and takes
+            # the tailnet down -- the exact cascade this block used to cause. The rest
+            # of this script is deliberately netns-safe (see Repair-TailscaleService,
+            # which refuses to auto-restart openwebui for the same reason). An inference
+            # problem is repaired by restarting the inference upstream/gateway, never the
+            # netns anchor -- leave it for operator review rather than break the tailnet.
+            Write-LogEntry "llama-cpp upstream API responded but connectivity check still failing -- NOT restarting openwebui (would orphan tailscale netns); leaving for operator review" "ERROR"
+            return $false
         }
     } catch {
         Write-LogEntry "llama-cpp connectivity recovery failed: $($_.Exception.Message)" "ERROR"
@@ -517,13 +510,13 @@ function Test-LlamaCppConnectivity {
     # = "Stop" at the top of this script) bubbles up as a thrown exception and
     # lands in the catch block as a misleading [ERROR]. A stopped container is
     # a normal transient state during recovery, not a script-level failure.
-    if (-not (Test-ServiceHealth "llama-cpp")) {
-        Write-LogEntry "llama-cpp container is not running" "DEBUG"
+    if (-not (Test-ServiceHealth "llama-cpp-upstream")) {
+        Write-LogEntry "llama-cpp-upstream container is not running" "DEBUG"
         return $false
     }
     try {
-        Write-LogEntry "Testing llama-cpp connectivity..." "DEBUG"
-        $LlamaCppResponse = docker compose exec -T llama-cpp curl -s -f --max-time 10 http://localhost:8080/health 2>$null
+        Write-LogEntry "Testing llama-cpp-upstream connectivity..." "DEBUG"
+        $LlamaCppResponse = docker compose exec -T llama-cpp-upstream curl -s -f --max-time 10 http://localhost:8080/health 2>$null
         if ($LASTEXITCODE -eq 0 -and $LlamaCppResponse) {
             Write-LogEntry "llama-cpp connectivity verified" "DEBUG"
             return $true
@@ -553,7 +546,7 @@ function Test-LlamaCppEmbedConnectivity {
     # healthcheck false-positives under load — see comment above.
     $Status = $null
     try {
-        $Status = docker compose ps llama-cpp-embed --format json 2>$null | ConvertFrom-Json
+        $Status = docker compose ps llama-cpp-embed-upstream --format json 2>$null | ConvertFrom-Json
     } catch { }
     if (-not $Status -or $Status.State -ne "running") {
         Write-LogEntry "llama-cpp-embed container is not running" "DEBUG"
@@ -564,7 +557,7 @@ function Test-LlamaCppEmbedConnectivity {
     # monitor for 30 s on every cycle when the server is busy.
     try {
         Write-LogEntry "Testing llama-cpp-embed connectivity..." "DEBUG"
-        $EmbedResponse = docker compose exec -T llama-cpp-embed curl -s -f --max-time 5 http://localhost:8080/health 2>$null
+        $EmbedResponse = docker compose exec -T llama-cpp-embed-upstream curl -s -f --max-time 5 http://localhost:8080/health 2>$null
         if ($LASTEXITCODE -eq 0 -and $EmbedResponse) {
             Write-LogEntry "llama-cpp-embed /health OK" "DEBUG"
             return $true
@@ -577,7 +570,7 @@ function Test-LlamaCppEmbedConnectivity {
     # request-completion lines ("done request: POST /v1/embeddings ... 200")
     # and slot lifecycle markers.
     try {
-        $RecentLog = docker compose logs --tail=40 --since=2m llama-cpp-embed 2>$null | Out-String
+        $RecentLog = docker compose logs --tail=40 --since=2m llama-cpp-embed-upstream 2>$null | Out-String
         if ($RecentLog -match 'POST /v1/embeddings.*\s200\b' -or
             $RecentLog -match 'launch_slot_|done request:|slot\s+release:') {
             Write-LogEntry "llama-cpp-embed /health unresponsive but actively serving embedding requests (busy, not dead)" "INFO"
@@ -593,12 +586,12 @@ function Test-LlamaCppEmbedConnectivity {
 function Repair-LlamaCppEmbed {
     Write-LogEntry "Starting llama-cpp-embed recovery..." "WARN"
     try {
-        if (-not (Test-ServiceHealth "llama-cpp-embed")) {
-            Write-LogEntry "llama-cpp-embed container not running, starting..." "WARN"
-            docker compose up -d llama-cpp-embed | Out-Null
+        if (-not (Test-ServiceHealth "llama-cpp-embed-upstream")) {
+            Write-LogEntry "llama-cpp-embed-upstream container not running, starting..." "WARN"
+            docker compose up -d llama-cpp-embed-upstream | Out-Null
         } else {
-            Write-LogEntry "llama-cpp-embed running but unresponsive, restarting..." "WARN"
-            docker compose restart llama-cpp-embed | Out-Null
+            Write-LogEntry "llama-cpp-embed-upstream running but unresponsive, restarting..." "WARN"
+            docker compose restart llama-cpp-embed-upstream | Out-Null
         }
 
         # Wait for the API to come back. bge-m3 model load is fast, but allow

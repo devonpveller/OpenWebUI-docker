@@ -72,9 +72,9 @@ if %ERRORLEVEL% NEQ 0 (
 echo.
 echo [INFO] Current llama-cpp image:
 cd ..
-docker compose exec -T llama-cpp curl -s http://localhost:8080/health 2>nul
+docker compose exec -T llama-cpp-upstream curl -s http://localhost:8080/health 2>nul
 echo.
-docker compose ps llama-cpp llama-cpp-embed --format "table {{.Name}}\t{{.Status}}" 2>nul
+docker compose ps llama-cpp-upstream llama-cpp-embed-upstream --format "table {{.Name}}\t{{.Status}}" 2>nul
 
 echo.
 echo [INFO] Current llama-cpp image in docker-compose.yml:
@@ -278,7 +278,7 @@ goto :health_loop
 
 :health_done
 cd ..
-docker compose up -d llama-cpp llama-cpp-embed tailscale
+docker compose up -d llama-cpp-upstream llama-cpp-embed-upstream tailscale
 cd scripts
 
 REM Step 7: Final verification
@@ -376,7 +376,7 @@ echo [SUCCESS] Latest llama-cpp image pulled
 echo.
 echo [STEP 2/3] Restarting llama-cpp services...
 cd ..
-docker compose up -d llama-cpp
+docker compose up -d llama-cpp-upstream
 echo [INFO] Waiting for llama-cpp to load model (this may take a few minutes)...
 timeout /t 60 /nobreak >nul
 
@@ -384,7 +384,7 @@ REM Wait for llama-cpp health check
 set LLAMA_WAIT=0
 set LLAMA_MAX=180
 :llama_health_loop
-docker compose ps llama-cpp --format "{{.Health}}" 2>nul | findstr /C:"healthy" >nul 2>&1
+docker compose ps llama-cpp-upstream --format "{{.Health}}" 2>nul | findstr /C:"healthy" >nul 2>&1
 if %ERRORLEVEL% EQU 0 (
     cd scripts
     echo [SUCCESS] llama-cpp is healthy after approximately %LLAMA_WAIT%s
@@ -401,7 +401,7 @@ goto :llama_health_loop
 
 :llama_health_done
 cd ..
-docker compose up -d llama-cpp-embed
+docker compose up -d llama-cpp-embed-upstream
 echo [INFO] Waiting for llama-cpp-embed to initialize...
 timeout /t 30 /nobreak >nul
 cd scripts
@@ -409,9 +409,9 @@ cd scripts
 echo.
 echo [STEP 3/3] Verifying llama-cpp services...
 cd ..
-docker compose exec -T llama-cpp curl -s http://localhost:8080/health 2>nul
+docker compose exec -T llama-cpp-upstream curl -s http://localhost:8080/health 2>nul
 echo.
-docker compose ps llama-cpp llama-cpp-embed --format "table {{.Name}}\t{{.Status}}" 2>nul
+docker compose ps llama-cpp-upstream llama-cpp-embed-upstream --format "table {{.Name}}\t{{.Status}}" 2>nul
 cd scripts
 
 REM Resume monitoring (skip if part of full update)
