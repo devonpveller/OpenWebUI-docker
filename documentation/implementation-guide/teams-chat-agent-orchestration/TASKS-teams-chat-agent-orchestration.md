@@ -17,15 +17,20 @@ Status keys: ⬜ todo · 🔧 in progress · ✅ done · 🧪 needs test · 🚀
   (`@pm`) with an access token.
 - ⬜ **P0.3** `agent-bridge` skeleton: **Python (FastAPI + Pydantic + Instructor)**; persistent
   **WebSocket** client (consume events) + REST poster; `/health`; config from env; Postgres state.
-- ⬜ **P0.3b** `litellm` gateway: route `WORKER_MODEL`→local llama-swap; one **GBNF/JSON-schema
-  constrained** structured call validated by Instructor (prove constrained decoding works on
-  `qwen3.6-27b`). `JUDGE_MODEL` alias defined but local until P0.5 says otherwise.
+- ⬜ **P0.0** **Prerequisites (audit §0):** (a) **LiteLLM** is up (delivered by
+  `documentation/LiteLLM-Proxy/` — *not built here*; P0 is blocked on it); (b) ✅ `workspace-stacks.md`
+  refreshed 2026-06-11 — when registering agent-org, also check the **recovery scripts** + **CLAUDE.md
+  "stacks at a glance"** table for the same drift.
+- ⬜ **P0.3b** Via **LiteLLM** (prereq): one **GBNF/JSON-schema constrained** structured call
+  validated by Instructor on **`qwen36-27b`** (prove constrained decoding holds). Both
+  `WORKER_MODEL` and `JUDGE_MODEL` aliases = `qwen36-27b` locally (same model, no swap thrash).
 - ⬜ **P0.4** Echo test: bridge sees an @mention event and posts a reply in the same thread
   (proves post→event→bridge→post). (PLAN §7 P0)
-- ⬜ **P0.5** **Capability-floor test (prerequisite, §8 #13):** measure our local models on
-  (i) instruction/charter-following, (ii) structured-output reliability, (iii) coordination.
-  Output a go/no-go per judgment role: stays local vs. must use OpenRouter. Also record the
-  per-task "org vs. single agent?" guidance (GPT-5-MINI inversion). Workers stay local regardless.
+- ⬜ **P0.5** **Capability-floor test (§8 #13):** measure **`qwen36-27b`** on (i) instruction/
+  charter-following, (ii) structured-output reliability (with GBNF), (iii) coordination. Decide the
+  **binary** judge question (OD-10): is **27B-as-judge** good enough, or must `JUDGE_MODEL` go to
+  **OpenRouter** (off-GPU)? **Local 35B is not an option** (swap thrash, audit §0). Also record the
+  per-task "org vs. single agent?" guidance. Workers stay local regardless.
 
 ## P1 — Wake mechanic
 
@@ -136,9 +141,11 @@ Status keys: ⬜ todo · 🔧 in progress · ✅ done · 🧪 needs test · 🚀
 
 ## 3-place change (per new container)
 
-- ⬜ **R.1** `agent-org` compose — `mattermost`, `mattermost-db`, `agent-bridge`, `litellm`, and
-  the **pooled `little-coder`/`open-terminal` worker instances** (env, networks incl. external
-  `ai-stack_llm-net`, host ports, depends_on, restart). (PLAN §3.2, §3.6)
+- ⬜ **R.1** `agent-org` compose (`name: agent-org`) — `mattermost`, `mattermost-db`,
+  `agent-bridge`, **`ao-egress`** (OpenRouter allowlist proxy), the **pooled
+  `little-coder`/`open-terminal` worker instances** + a shared git-allowlist egress; `ao-net`
+  (internal) + external **`ai-stack_llm-net`**; host ports on `127.0.0.1`; depends_on; restart.
+  **LiteLLM is NOT added here** (prerequisite plan). (PLAN §3.2, §3.6, §3.7)
 - ⬜ **R.2** `scripts/emergency-recovery.ps1` + `.bat` — add all the above to the inventory
   and startup/shutdown sequences (after `llama-cpp` healthy on start; before main stack on stop).
 - ⬜ **R.3** `.claude/skills/stack-map/references/workspace-stacks.md` — add the new project +

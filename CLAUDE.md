@@ -12,13 +12,14 @@ for the full inventory — networks, ports, dependency order.
 
 | Stack | Driven with | Contents |
 |-------|-------------|----------|
-| **Main** (`ai-stack`) | `docker compose ...` | core (`openwebui`, `tailscale`, `llama-cpp`, `llama-cpp-embed`, `watchtower`), memory (`mnemory`, `mnemory-gateway`, `mnemory-backup`), search (`tor`, `redis`, `searxng`, `gateway`, `mcpo`), coder (`open-terminal`, `little-coder`, `lc-mcpo`, `lc-egress`, `little-coder-backup`), aux (`smolcrawl-pipelines`, `surrealdb`, `open_notebook`, `openwebui-backup`) |
-| **Open Brain** (`open-brain`) | `docker compose -f OB1/docker/docker-compose.yml ...` | 20 `openbrain-*` containers (incl. a 4-job scheduled slice) — a **separate** project that attaches to the main stack's `ai-stack_llm-net` as an external network |
-| **Recovery stack** | `scripts/emergency-recovery.ps1` (or `.bat`) | Ordered restart/repair across **both** compose projects — `recover` / `nuclear` / `gpu-reset` |
+| **Main** (`ai-stack`) | `docker compose ...` | core (`openwebui`, `tailscale`, `llama-cpp`, `llama-cpp-embed`, `watchtower`), memory (`mnemory`, `mnemory-gateway`), search (`tor`, `redis`, `searxng`, `gateway`, `mcpo`), coder (`open-terminal`, `little-coder`, `lc-mcpo`, `lc-egress`), aux (`smolcrawl-pipelines`, `surrealdb`, `open_notebook`), backups (9 cron sidecars incl. `*-backup` + `openbrain-db/wiki-backup`) |
+| **Main — Portal** (`profiles: [internet]`) | `scripts/portal-on.ps1` / `portal-off.ps1` | **profile-gated, NOT in a default `up`:** `caddy`, `authelia`, `cloudflared`, `portal-init`, `portal-alerter`, `authelia-watcher`, `authelia-notif-bridge`, `integrity-tripwire`, `portal-cron`, `tunnel-watcher` (+ `caddy-backup`, `authelia-backup`). Internet-exposed auth front-end. |
+| **Open Brain** (`open-brain`) | `docker compose -f OB1/docker/docker-compose.yml ...` | ~23 `openbrain-*` containers (incl. a 5-container scheduled slice: `cron` + 4 HTTP-triggered jobs) — a **separate** project that attaches to the main stack's `ai-stack_llm-net` as an external network |
+| **Recovery stack** | `scripts/emergency-recovery.ps1` (or `.bat`) | Ordered restart/repair across **both** compose projects — `recover` / `nuclear` / `gpu-reset`. Does **not** manage the profile-gated Portal. |
 
-A plain `docker compose` command never touches Open Brain — it is its own
-project. Bring OB1 up after `llama-cpp` is healthy; tear it down before the
-main stack.
+A plain `docker compose` command never touches Open Brain (its own project) **or
+the Portal** (profile-gated). Bring OB1 up after `llama-cpp` is healthy; tear it
+down before the main stack. The Portal has its own lifecycle (`portal-on/off.ps1`).
 
 ## Conventions
 

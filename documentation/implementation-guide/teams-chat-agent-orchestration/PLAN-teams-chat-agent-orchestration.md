@@ -1,6 +1,6 @@
 # Plan — Teams-style Chat for Agent Orchestration (governed multi-agent org)
 
-**Status:** 📝 DESIGN (initial — expect change during build)
+**Status:** 📝 DESIGN — **audited against the live compose 2026-06-11** (see §0).
 **Owner:** ai-stack
 **Branch:** TBD new feature branch; **no `main` merge** without explicit ask (G1).
 **Companion docs:**
@@ -10,6 +10,48 @@
 
 > **Read order:** the governance doc is the spec. This plan is *how we build it*. Where they
 > disagree, the governance doc wins and this plan gets corrected.
+
+---
+
+## 0. Workspace audit (2026-06-11)
+
+Audited the PLAN against the live `docker-compose.yml` + `docker-compose.override.yml` +
+`config/llama-swap.config.yaml` + OB1 compose. Confirmed, corrected, and newly-found:
+
+**Confirmed accurate**
+- External-network pattern: a separate project (OB1 is `name: open-brain`) attaches to
+  **`ai-stack_llm-net`** as `external: true`. agent-org will do the same.
+- `little-coder` + `open-terminal` + `lc-mcpo` + **`lc-egress`** all present; little-coder calls
+  `llama-cpp` directly over `llm-net`, uses the 6 named volumes incl. `little-coder-sessions`.
+- llama-swap: `qwen36-27b` at **`N_PARALLEL=2`, ctx 262144 (256k), KV @ `q4_0`** → 2×128k lanes.
+  Exactly the §3.6 budget. Single GPU (device 0).
+- LiteLLM is **not yet running** (docs-only under `documentation/LiteLLM-Proxy/`).
+
+**Corrected (load-bearing)**
+1. **`llm-net` is `internal: true` — NO internet.** The PLAN had the bridge/LiteLLM reaching
+   OpenRouter, which is impossible over `llm-net`. **Fix:** OpenRouter egress goes through a
+   dedicated **allowlist proxy** (`ao-egress`, mirroring `lc-egress`), and **LiteLLM is the only
+   component with that egress path** — making it the literal single egress chokepoint (§3.7).
+2. **No local 35B judge — it would cause swap thrash.** The config has a second model
+   (`qwen36-35b-a3b`) **but llama-swap keeps only ONE model resident and the stack deliberately
+   pins services to the same model "to avoid swap thrash"** (config L12–19). So `JUDGE_MODEL`
+   local = **the same `qwen36-27b` as workers** (no swap); if that's too weak, escalate to
+   **OpenRouter** (off-GPU) — *not* local 35B. (§3.4 revised.)
+3. **LiteLLM is a prerequisite, not part of this build.** Per operator: it'll be delivered by the
+   existing `documentation/LiteLLM-Proxy/` plan *before* agent-org. agent-org **consumes** it.
+
+**Newly found (folded in)**
+- **Stale stack-map — ✅ REFRESHED 2026-06-11.** The live compose had a whole **Authelia + Caddy +
+  Cloudflared auth portal** (`edge-net`/`auth-net`/`notify-net`, `integrity-tripwire`, `portal-*`)
+  + many backup sidecars + the 35B model, none of which were in
+  `.claude/skills/stack-map/references/workspace-stacks.md`. Now reconciled, so the agent-org
+  3-place change adds onto an accurate baseline.
+- **Mattermost mobile push is a privacy surface** (HPNS relay vs self-hosted push proxy) — new
+  OD-9. The existing portal is an alt exposure path but Team Edition is dropping SSO, so **tailnet
+  (tailscale serve) stays the v1 path** (OD-9).
+- **Worker-pool container math:** each pooled worker ≈ a full `(little-coder + open-terminal)`
+  pair; `lc-egress` (git allowlist) can be **shared** across the pool, but each `open-terminal`
+  must stay per-instance (it *is* the isolated workspace). Reinforces small N (§3.6).
 
 ---
 
@@ -91,11 +133,16 @@ bolting onto the main `ai-stack` compose, so it has its own lifecycle and resour
 It attaches to the main stack's `ai-stack_llm-net` (external) for local-model access, exactly
 as OB1 does (CLAUDE.md "Stacks at a glance").
 
-- New containers: `mattermost`, `mattermost-db` (Postgres), `agent-bridge`, `litellm`
-  (model gateway, §3.4), and a **bounded pool of worker instances** — N ×
-  `(little-coder + open-terminal)` pairs (§3.6).
-  (Reuse existing `little-coder`/`open-terminal` images + `tailscale`; **no new inference
-  containers** — workers share the existing `llama-cpp`/llama-swap backend.)
+- New containers (project `name: agent-org`): `mattermost`, `mattermost-db` (Postgres),
+  `agent-bridge`, **`ao-egress`** (OpenRouter allowlist proxy, mirrors `lc-egress`, §3.7), and a
+  **bounded pool of worker instances** — N × `(little-coder + open-terminal)` pairs (§3.6), with a
+  **shared** `lc-egress`-style git-allowlist proxy across the pool.
+- **Prerequisite (not built here):** **LiteLLM** — delivered by the existing
+  `documentation/LiteLLM-Proxy/` plan *before* agent-org; agent-org consumes it as the model
+  gateway (§3.4). If LiteLLM isn't up at build time, P0 is blocked on it.
+- Attach to external **`ai-stack_llm-net`** (reach `llama-cpp`); reuse existing
+  `little-coder`/`open-terminal` images + `tailscale`. **No new inference containers** — workers +
+  judge share the existing single-GPU `llama-cpp`/llama-swap backend.
 - **3-place change** applies for every container: compose **+** `emergency-recovery.ps1`/`.bat`
   inventory & sequences **+** stack-map reference (run `/stack-map`). G-convention.
 - Bring up after `llama-cpp` healthy; tear down before main stack (same rule as OB1).
@@ -135,9 +182,17 @@ Independent config knobs from day one:
 
 | Knob | Default | Notes |
 |------|---------|-------|
-| `WORKER_MODEL` | **local `llama-cpp`** | execution layer; always local |
-| `JUDGE_MODEL` (PM/monitor, reviewer, goal-grounding) | **local first**; **OpenRouter** large model **only if the capability-floor test (P0) shows local is insufficient** | privacy-respecting external; see routing rules below |
-| `OPENROUTER_*` | unset until needed | API key + **provider routing pinned to no-log / ZDR**, prefer **open-weight** large models |
+| `WORKER_MODEL` | **`qwen36-27b` (local)** | execution layer; always local |
+| `JUDGE_MODEL` (PM/monitor, reviewer, goal-grounding) | **`qwen36-27b` (same model, local) first**; **OpenRouter** large model **only if the P0 capability-floor test shows 27B judgment is insufficient** | see swap-thrash note below |
+| `OPENROUTER_*` | unset until needed | API key + **provider routing pinned to no-log / ZDR**, prefer **open-weight** large models; reached only via `ao-egress` (§3.7) |
+
+> **⚠️ Single-GPU swap-thrash constraint (audit §0).** llama-swap keeps **one model resident at a
+> time** and the stack deliberately pins services to the **same** model to avoid swap thrash
+> (`config/llama-swap.config.yaml` L12–19). A second model (`qwen36-35b-a3b`) exists locally but
+> **cannot co-reside** with the 27B workers — using it for judgment would thrash the GPU. So the
+> local judge is **the same `qwen36-27b` as the workers** (zero swap). If 27B-as-judge proves too
+> weak (P0), the next step is **OpenRouter (off-GPU)** — *not* local 35B. This makes the model
+> decision binary: **all-local same-model, or OpenRouter for judgment.**
 
 **Why a larger model may be *mandatory* (not merely nice):** the small-vs-frontier analysis +
 the paper's weak-model data (GPT-5-MINI lost the org capability benefit to coordination
@@ -152,13 +207,15 @@ operate on **governance-level summaries** (the claim, the goal, the deviation, c
 options), **not raw proprietary code or secrets**, so the off-box surface is minimal. The bridge
 constructs and logs exactly what leaves. OpenRouter routing is pinned to no-log/ZDR providers.
 
-**Routing mechanism — LiteLLM (resolves how, TOOLING §3.3).** A `litellm` proxy is the single
-OpenAI-compatible endpoint: `WORKER_MODEL` → local llama-swap, `JUDGE_MODEL` → local-first then
-**OpenRouter** by alias. It gives us **fallback chains, per-role spend caps** (these *are* the
-cost-tiered continuous-supervision budget, governance §3), **usage logging** (audit), and a
-**single egress chokepoint** for the OpenRouter privacy boundary. This activates the stack's
-plan-only `documentation/LiteLLM-Proxy/` (memory: `litellm-proxy-status`). The OpenRouter
-provider is pinned to **no-log/ZDR**, preferring **open-weight** large models.
+**Routing mechanism — LiteLLM (prerequisite, audit §0).** LiteLLM is the single
+OpenAI-compatible endpoint: `WORKER_MODEL`/`JUDGE_MODEL` (both `qwen36-27b` locally) → llama-swap;
+`JUDGE_MODEL` → **OpenRouter** by alias only if P0 mandates. It gives us **fallback chains,
+per-role spend caps** (these *are* the cost-tiered continuous-supervision budget, governance §3),
+**usage logging** (audit), and — combined with `ao-egress` (§3.7) — the **single egress
+chokepoint** for the OpenRouter privacy boundary. **LiteLLM is not built yet**; it is delivered by
+the existing `documentation/LiteLLM-Proxy/` plan *before* agent-org (memory: `litellm-proxy-status`),
+so it's a **build prerequisite**, not part of this plan. OpenRouter routing is pinned to
+**no-log/ZDR**, preferring **open-weight** large models.
 
 **Reliable structured output — constrained decoding.** Worker/judge structured calls use
 **GBNF / JSON-schema constrained decoding** (llama.cpp via llama-swap) so a small model *cannot*
@@ -216,8 +273,43 @@ tokens):**
   interactive → the agent-org fleet runs **~1–2 concurrent workers**. Bumping to **4 @ 64k** for a
   burst yields **~2–3**. The bridge enforces this as a **configurable semaphore
   (`MAX_CONCURRENT_WORKERS`)** that honors interactive backoff — never a hard pin to slot count.
+- **No second local model in the loop (audit §0).** Because llama-swap keeps one model resident
+  and swapping thrashes the GPU, the judge runs on the **same `qwen36-27b`** as workers — so judge
+  calls and worker calls contend for the *same* parallel slots (no separate model, no swap). If
+  judgment goes to OpenRouter, it leaves the GPU budget entirely (off-box).
+- **Worker-pool container math (audit §0).** Each pooled worker ≈ a `(little-coder + open-terminal)`
+  pair (open-terminal is the per-instance isolated workspace — cannot be shared); a single
+  `lc-egress`-style git-allowlist proxy can be **shared** across the pool. So N=2 workers ≈ 4–5
+  worker containers + bridge + mattermost(+db) + ao-egress. The container/volume cost is another
+  reason to keep N tiny.
 - **This is the GPU enforcing "keep the org small" (governance §4.1)** and the "org vs. single
   agent?" discipline (§3.5). The inference budget *is* the org-size budget. (Open decision OD-8.)
+
+### 3.7 Networks & egress (corrected against live compose, audit §0)
+
+`ai-stack_llm-net` is **`internal: true` — no internet.** OpenRouter (the only external
+dependency) must reach the internet through a **controlled chokepoint**, exactly as the stack
+already does for every other egress (`lc-egress` → git host, `tor` → search, `notify-net` →
+Gmail, `cloudflared` → portal). So:
+
+```
+ PO (tailnet) ──tailscale serve──▶ mattermost ─┐
+                                                │ ao-net (internal)
+   agent-bridge ◀─WebSocket/REST─▶ mattermost   │
+   agent-bridge ──▶ LiteLLM ──local──▶ ai-stack_llm-net ──▶ llama-cpp (qwen36-27b)
+                       └──OpenRouter──▶ ao-egress ──default──▶ openrouter.ai (allowlisted, no-log/ZDR)
+   workers (little-coder pool) ──▶ ai-stack_llm-net ──▶ llama-cpp ; git via shared lc-egress
+```
+
+- **`ao-net`** (internal, no internet): bridge ↔ Mattermost ↔ workers ↔ LiteLLM.
+- **`ai-stack_llm-net`** (external): LiteLLM + workers reach `llama-cpp`.
+- **`ao-egress`** (on `ao-net` + `default`): the **only** component with an internet route, an
+  allowlist proxy pinned to `openrouter.ai`. **LiteLLM is the only client of it** → single,
+  audited egress point for the privacy boundary (§3.4). Nothing else in agent-org touches the
+  internet.
+- **Mattermost exposure:** tailnet via **`tailscale serve`** (operator step, mirrors the
+  open_notebook :8443 serve pattern) — *not* the Cloudflared/Authelia portal in v1 (Mattermost
+  Team Edition is dropping SSO; tailnet is simpler and private). Host-published on `127.0.0.1`.
 
 ---
 
@@ -260,8 +352,9 @@ local monitor.
   validation ecosystem (critical for weak models) + same language as little-coder's control-plane
   wrapper. Persistent WebSocket client to Mattermost + REST client + state DB (Postgres).
   (Diverges from OB1's Deno+Hono convention — accepted; recovery/3-place patterns still apply.)
-- **Networks:** `agent-org` internal + external `ai-stack_llm-net` (reach `litellm`/llama-swap) +
-  reach to Mattermost. No browser/app-net.
+- **Networks:** `ao-net` (internal) + external `ai-stack_llm-net` (reach LiteLLM/llama-swap).
+  **No direct internet** — the bridge never calls OpenRouter itself; all model calls go through
+  LiteLLM, whose OpenRouter path is the only egress (via `ao-egress`, §3.7). No app-net.
 - **Model calls:** all via the `litellm` gateway (`WORKER_MODEL`/`JUDGE_MODEL` aliases, §3.4);
   structured calls use GBNF/JSON-schema constrained decoding + Instructor validation.
 - **State (Postgres):** channel↔effort↔session map; **worker-instance pool registry**; scope
@@ -326,6 +419,13 @@ governance §8 (#1–#11) and are not duplicated here.
 - **OD-7 — Coordination glue scope.** How much the bridge does deterministically (routing, format
   repair, handoff state) vs. what little is left to model judgment, given small-model fragility
   (§3.5). Lean maximal-deterministic.
+- **OD-9 — Mattermost mobile push privacy (§3.7).** Mobile push uses either Mattermost's public
+  **HPNS relay** (leaks notification metadata off-box) or a **self-hosted push proxy**, or neither
+  (tailnet, open-app-to-see). For the privacy posture: prefer **self-hosted push proxy** or
+  **tailnet-only manual** in v1; decide at P7.
+- **OD-10 — Judge model is binary (§3.4) — direction set.** Local judge = **same `qwen36-27b`**
+  (no swap thrash) **or** **OpenRouter** (off-GPU) — *never* local 35B. P0 capability-floor decides
+  which. Confirm acceptable OpenRouter spend ceiling if it's needed.
 - **OD-8 — Worker concurrency budget (§3.6) — direction set, value to confirm at P0.** Backend:
   **3 parallel @ ~83k** preferred (operator: best long-run headroom for OWUI/OB1/other services);
   **4 @ 64k** as a burst config; **never 32k** (operator-confirmed unmanageable). Aggregate KV ≈
@@ -359,8 +459,13 @@ governance §8 (#1–#11) and are not duplicated here.
 
 - **G1** — never commit/push (or merge to `main`) on the user's behalf without an explicit ask.
 - **3-place change** — each new container (`mattermost`, `mattermost-db`, `agent-bridge`,
-  `litellm`, and each pooled `little-coder`/`open-terminal` worker instance) updates compose **+**
-  recovery scripts **+** stack-map together (`/stack-map` checks drift).
+  `ao-egress`, and each pooled `little-coder`/`open-terminal` worker instance) updates compose **+**
+  recovery scripts **+** stack-map together (`/stack-map` checks drift). **LiteLLM** is registered
+  by its own (prerequisite) plan, not here.
+- **Stack-map baseline — ✅ refreshed 2026-06-11 (audit §0).** `workspace-stacks.md` now reflects
+  the live portal/auth slice, backup sidecars, and the `qwen36-35b-a3b` model — so the agent-org
+  3-place change adds onto an accurate baseline. (Note: the **recovery scripts** and **CLAUDE.md
+  "stacks at a glance"** table may still lag — verify those when registering agent-org.)
 - **No secrets in files** — bot tokens, admin keys, model keys via env only.
 - **Governance-first** — gate + bus-only comms + charters before throughput (governance §9).
 - **Operator owns deploy/exposure** — tailnet/mobile exposure and any cloud-model wiring are
