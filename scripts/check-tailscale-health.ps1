@@ -22,6 +22,30 @@ $PROJECT_DIR = Split-Path -Parent $SCRIPT_DIR
 $LOG_FILE = Join-Path $PROJECT_DIR "logs\tailscale-health.log"
 $SERVICE_NAME = "TailscaleHealthMonitor"
 
+# --- docker compose stderr guard (added 2026-06-05) ---------------------------
+# The caddy service references ${WORKBENCH_KEY} (docker-compose.yml). When that
+# variable is absent from THIS process's environment, every `docker compose ...`
+# call prints "The \"WORKBENCH_KEY\" variable is not set..." to stderr. Combined
+# with $ErrorActionPreference='Stop' above, the first docker call that redirects
+# stderr (e.g. `docker compose logs ... 2>$null` in Test-EntrypointHealth) turns
+# that benign warning into a TERMINATING error (PS 5.1 native-stderr gotcha) and
+# the whole health check aborts at step 1 — the window just flashes and exits 1,
+# checking/repairing nothing. Defining the var here silences the warning at the
+# source for every docker invocation this script makes. This only
+# affects this script's own process env; it does NOT modify .env or any container.
+#
+# The value is a non-empty PLACEHOLDER, not the real key: Windows cannot store an
+# empty env var (PowerShell deletes it on `=''`), and docker only suppresses the
+# "is not set" warning for a DEFINED, non-empty value. This monitor never creates
+# or recreates the caddy service (the sole consumer of WORKBENCH_KEY — it is not
+# in the monitor's managed-service list), so this placeholder never reaches caddy;
+# and even if it somehow did, a wrong key makes caddy reject /workbench (fail
+# closed). A real value present in the environment (e.g. a manual run from a
+# configured shell) is preserved and takes precedence.
+if (-not (Test-Path Env:\WORKBENCH_KEY) -or [string]::IsNullOrEmpty($env:WORKBENCH_KEY)) {
+    $env:WORKBENCH_KEY = 'healthcheck-noop-placeholder'
+}
+
 # Create logs directory if it doesn't exist
 $LogDir = Split-Path -Parent $LOG_FILE
 if (-not (Test-Path $LogDir)) {
@@ -125,6 +149,7 @@ $ExpectedTailscaleServes = @(
     @{ Name = 'llama-cpp-embed';      TailscalePort = 443;  TailscalePath = '/llama-cpp-embed'; LocalPort = 8236 }
     @{ Name = 'open-notebook-ui';     TailscalePort = 8443; TailscalePath = '/';                LocalPort = 8237 }
     @{ Name = 'open-notebook-api';    TailscalePort = 5055; TailscalePath = '/';                LocalPort = 8238 }
+    @{ Name = 'quartz-wiki-viewer';   TailscalePort = 8444; TailscalePath = '/';                LocalPort = 8239 }
 )
 
 # Function to test serve configuration.
@@ -254,14 +279,22 @@ function Test-EntrypointHealth {
             }
         }
         
-        # Check for common Docker build issues in logs
-        $Logs = docker compose logs tailscale --tail=5 2>$null
-        if ($Logs -match "no such file or directory" -and $Logs -match "entrypoint") {
-            Write-LogEntry "CRITICAL: Entrypoint script not found in container. Rebuild required." "ERROR"
-            Write-LogEntry "Run: docker compose build --no-cache tailscale" "INFO"
-            return $false
+        # Check for common Docker build issues in logs. Isolated in its own
+        # try/catch: a failure to READ the logs (docker stderr, daemon hiccup)
+        # must NOT be misread as "entrypoint invalid" and abort the whole health
+        # check — that exact misclassification (a docker stderr warning bubbling
+        # up under -Stop) is what crashed every run before 2026-06-05.
+        try {
+            $Logs = docker compose logs tailscale --tail=5 2>$null
+            if ($Logs -match "no such file or directory" -and $Logs -match "entrypoint") {
+                Write-LogEntry "CRITICAL: Entrypoint script not found in container. Rebuild required." "ERROR"
+                Write-LogEntry "Run: docker compose build --no-cache tailscale" "INFO"
+                return $false
+            }
+        } catch {
+            Write-LogEntry "Could not read tailscale logs for entrypoint check (non-fatal): $($_.Exception.Message)" "WARN"
         }
-        
+
         return $true
     }
     catch {
@@ -665,6 +698,69 @@ function Repair-OpenNotebook {
     }
 }
 
+# ---------------------------------------------------------------------------
+# Extended-plane checks (added 2026-06-05): the private web-search gateway,
+# little-coder, mnemory-gateway, and the SEPARATE "open-brain" compose project
+# (including the openbrain-mcp stale-DB-pool guard that caused Open WebUI tool
+# 500s / "Broken pipe" on 2026-06-05).
+# ---------------------------------------------------------------------------
+
+# search-gateway /healthz is fast process liveness (always 200 if the event loop
+# is serving). We gate restarts on THIS, not /readyz: /readyz does a deep check
+# (SearXNG through the Tor chain) that is slow and Tor-flaky, so it would
+# false-trigger plane restarts on a 60s loop. /readyz is probed informationally
+# (longer timeout, logged only) below.
+function Test-SearchGatewayHealth {
+    try {
+        $r = Invoke-WebRequest -Uri 'http://127.0.0.1:8085/healthz' -UseBasicParsing -TimeoutSec 5
+        return ($r.StatusCode -eq 200)
+    } catch {
+        return $false
+    }
+}
+
+# Informational only: is the full web-search path actually ready (redis + tor +
+# searxng reachable)? Slow/Tor-dependent, so logged but never used to restart.
+function Get-SearchGatewayReady {
+    try {
+        $r = Invoke-WebRequest -Uri 'http://127.0.0.1:8085/readyz' -UseBasicParsing -TimeoutSec 15
+        return ($r.StatusCode -eq 200)
+    } catch {
+        return $false
+    }
+}
+
+# Open Brain is a SEPARATE compose project (project=open-brain); this monitor's
+# `docker compose` commands (ai-stack project) cannot see it. Delegate to the
+# canonical by-name probe scripts\check-openbrain-health.ps1, which includes the
+# stale-DB-pool guard: after openbrain-db restarts, openbrain-mcp keeps a dead
+# connection and every MCP tool call (OWUI tools + Claude connector) returns
+# "Broken pipe (os error 32)" -> mcpo HTTP 500, while the container still shows
+# "Up". -Repair makes the fix `docker restart openbrain-mcp`.
+function Invoke-OpenBrainHealth {
+    $obScript = Join-Path $SCRIPT_DIR 'check-openbrain-health.ps1'
+    if (-not (Test-Path $obScript)) {
+        Write-LogEntry "Open Brain probe not found: $obScript" "WARN"
+        return
+    }
+    try {
+        # Run via the call operator (not dot-source) so the child's `exit` does
+        # not terminate this daemon. -Repair auto-restarts broken pieces; -Quiet
+        # keeps per-OK lines out of the loop; -LogPath routes the child's
+        # WARN/FIX/DOWN detail straight into this monitor's log (its Write-Host
+        # output is otherwise not capturable via 2>&1).
+        & $obScript -Repair -Quiet -LogPath $LOG_FILE | Out-Null
+        $code = $LASTEXITCODE
+        if ($code -eq 0) {
+            Write-LogEntry "Open Brain stack healthy" "DEBUG"
+        } else {
+            Write-LogEntry "Open Brain stack reported unresolved fault(s) (exit $code) - see OpenBrain WARN/ERROR lines above" "WARN"
+        }
+    } catch {
+        Write-LogEntry "Open Brain probe error: $($_.Exception.Message)" "WARN"
+    }
+}
+
 # Function to perform comprehensive health check
 function Invoke-HealthCheck {
     Write-LogEntry "Starting comprehensive health check..."
@@ -801,6 +897,39 @@ function Invoke-HealthCheck {
             Write-LogEntry "open-notebook recovery failed - notebook UI may be unavailable" "WARN"
         }
     }
+
+    # --- Private web-search gateway plane (SearXNG-over-Tor) — non-critical ---
+    # Compose SERVICE keys differ from container names here: service tor ->
+    # search-tor, redis -> search-redis, gateway -> search-gateway, mcpo ->
+    # search-mcpo. Probe /readyz first (covers the whole plane); only ensure the
+    # individual containers if it is not ready.
+    if (Test-SearchGatewayHealth) {
+        Write-LogEntry "search-gateway /healthz OK" "DEBUG"
+        # Deep readiness is informational only (slow/Tor-flaky); never drives a restart.
+        if (-not (Get-SearchGatewayReady)) {
+            Write-LogEntry "search-gateway up but /readyz not ready (tor/searxng/redis warming or degraded)" "INFO"
+        }
+    } else {
+        Write-LogEntry "search-gateway /healthz down, ensuring web-search plane containers..." "WARN"
+        Confirm-AuxiliaryContainer -ServiceName "tor"     -RestartWaitSeconds 15 | Out-Null
+        Confirm-AuxiliaryContainer -ServiceName "redis"   -RestartWaitSeconds 10 | Out-Null
+        Confirm-AuxiliaryContainer -ServiceName "searxng" -RestartWaitSeconds 15 | Out-Null
+        Confirm-AuxiliaryContainer -ServiceName "gateway" -RestartWaitSeconds 15 | Out-Null
+        Confirm-AuxiliaryContainer -ServiceName "mcpo"    -RestartWaitSeconds 10 | Out-Null
+    }
+
+    # --- little-coder plane (autonomous coding agent) — non-critical ---
+    # open-terminal (checked above) is its workspace; these are the agent + its
+    # MCP-as-OpenAPI bridge + the egress proxy.
+    Confirm-AuxiliaryContainer -ServiceName "little-coder" -RestartWaitSeconds 15 | Out-Null
+    Confirm-AuxiliaryContainer -ServiceName "lc-mcpo"      -RestartWaitSeconds 10 | Out-Null
+    Confirm-AuxiliaryContainer -ServiceName "lc-egress"    -RestartWaitSeconds 10 | Out-Null
+
+    # --- mnemory MCP gateway (the bridge clients reach; mnemory itself above) ---
+    Confirm-AuxiliaryContainer -ServiceName "mnemory-gateway" -RestartWaitSeconds 10 | Out-Null
+
+    # --- Open Brain stack (SEPARATE compose project) incl. mcp stale-pool guard ---
+    Invoke-OpenBrainHealth
 
     Write-LogEntry "All health checks passed" "SUCCESS"
     return $true

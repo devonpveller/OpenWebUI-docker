@@ -1,0 +1,206 @@
+[
+  {
+    "key": "selfhost",
+    "thread": {
+      "name": "Self-hosting AI on a home server",
+      "guiding_question": "How do I run capable AI models on my own hardware instead of paying for cloud APIs?"
+    },
+    "sources": [
+      {
+        "title": "A Practical Guide to Running Open-Weight LLMs on a Single Consumer GPU",
+        "url": "https://hardwarecorner.dev/blog/local-llm-single-gpu-guide",
+        "domain": "hardwarecorner.dev",
+        "content": "This guide walks through the realistic hardware envelope for running open-weight large language models at home, focusing on what a single 24GB consumer GPU can and cannot do. It explains how quantization formats such as GGUF Q4 and Q5 trade a small amount of output quality for dramatic reductions in VRAM, making 7B to 14B parameter models comfortable and 30B models reachable. The author benchmarks tokens-per-second across several cards and shows how context length, batch size, and KV-cache size interact to determine real throughput. The piece closes with a recommended starter configuration and notes on when an additional GPU or system RAM offload becomes worthwhile.",
+        "is_bridge": false
+      },
+      {
+        "title": "Ollama vs llama.cpp vs vLLM: Choosing a Local Inference Runtime",
+        "url": "https://infra-notes.io/posts/local-inference-runtime-comparison",
+        "domain": "infra-notes.io",
+        "content": "A side-by-side comparison of three popular self-hosted inference engines, aimed at people setting up their first home AI server. It contrasts Ollama's one-command model pulls and friendly defaults against llama.cpp's fine-grained control and broad hardware support, and against vLLM's high-throughput batched serving for multi-user workloads. The article covers OpenAI-compatible API endpoints, model hot-swapping, and how each runtime handles concurrent requests so existing client apps keep working. It recommends Ollama for solo experimentation, llama.cpp for constrained or exotic hardware, and vLLM once you need to serve a small team or agent fleet.",
+        "is_bridge": false
+      },
+      {
+        "title": "Why I Moved My AI Workloads In-House to Keep Data Off the Cloud",
+        "url": "https://privacyfirst.blog/articles/local-ai-data-stays-home",
+        "domain": "privacyfirst.blog",
+        "content": "This piece argues that the strongest reason to self-host language models is not cost but control: when inference runs on hardware you own, prompts and documents never leave your network and are never logged by a third party. It examines how cloud API terms of service handle retention, training reuse, and subpoena exposure, and contrasts that with an air-gapped or LAN-only deployment where no data egress occurs. The author details a setup that blocks outbound traffic from the model container entirely, ensuring sensitive notes, code, and personal records are processed on-premises. It frames local hosting as a concrete data-residency and confidentiality strategy rather than a hobbyist preference.",
+        "is_bridge": true
+      },
+      {
+        "title": "The Real Cost Math: Self-Hosted GPU vs Pay-Per-Token API Pricing",
+        "url": "https://costofcompute.net/analysis/self-host-vs-api-token-economics",
+        "domain": "costofcompute.net",
+        "content": "A detailed break-even analysis comparing a one-time home GPU investment against the recurring per-token fees of hosted model APIs. The author models amortized hardware cost, electricity at typical residential rates, and idle-time overhead, then plots them against monthly token volume to find the crossover point where owning hardware becomes cheaper. The analysis shows that light, bursty usage often favors metered APIs, while sustained high-volume or agentic workloads tip decisively toward self-hosting within months. It also accounts for hidden cloud costs such as rate-limit upgrades and egress, and offers a simple spreadsheet to estimate your own break-even threshold.",
+        "is_bridge": true
+      },
+      {
+        "title": "Building a Quiet, Always-On Home AI Server That Sips Power",
+        "url": "https://homelab-weekly.com/guides/always-on-ai-server-build",
+        "domain": "homelab-weekly.com",
+        "content": "This hardware build log documents assembling a compact, low-noise server dedicated to round-the-clock local inference. It covers GPU selection for performance-per-watt, undervolting to cut heat and electricity draw, and configuring the runtime to unload models from VRAM during idle periods. The author measures real wall-power consumption under load and at rest, then tunes fan curves and case airflow for near-silent operation in a living space. The result is a machine that exposes an OpenAI-compatible endpoint on the home network and stays responsive without dominating the power bill.",
+        "is_bridge": false
+      },
+      {
+        "title": "Exposing Your Local Model Safely: Reverse Proxies, Auth, and Remote Access",
+        "url": "https://selfhosted-security.dev/posts/secure-remote-access-local-llm",
+        "domain": "selfhosted-security.dev",
+        "content": "A security-focused walkthrough of how to reach your home AI server from outside the LAN without exposing it to the open internet. It compares a hardened reverse proxy with TLS and token authentication against zero-config mesh VPNs like Tailscale that keep the endpoint off the public web entirely. The article explains how to add per-client API keys, rate limiting, and request logging in front of an otherwise open inference runtime. It concludes with a layered recommendation: VPN-first access for personal use, with an authenticated proxy reserved for sharing a model with trusted collaborators.",
+        "is_bridge": false
+      }
+    ]
+  },
+  {
+    "key": "privacy",
+    "thread": {
+      "name": "Private AI for small business",
+      "guiding_question": "How do we use AI tools without sending customer data to third parties?"
+    },
+    "sources": [
+      {
+        "title": "AI Without the Leak: A Small-Business Guide to Keeping Customer Data In-House",
+        "url": "https://www.smbtechjournal.com/guides/ai-customer-data-privacy",
+        "domain": "smbtechjournal.com",
+        "content": "Small businesses adopting AI for support, marketing, and bookkeeping often paste customer records straight into public chatbots, unknowingly handing names, emails, and order histories to vendors who may retain or train on them. This guide walks through a practical risk model: classify which data is sensitive, identify which AI workflows touch it, and decide where inference is allowed to run. It recommends a tiered approach where low-risk tasks can use cloud APIs with data-retention opt-outs, while anything containing personally identifiable information stays on infrastructure the business controls. The piece closes with a one-page checklist for vetting any AI tool before it sees a single customer field.",
+        "is_bridge": false
+      },
+      {
+        "title": "Reading the Fine Print: What 'We Don't Train On Your Data' Actually Means",
+        "url": "https://privacyledger.io/posts/ai-vendor-data-retention-terms",
+        "domain": "privacyledger.io",
+        "content": "Vendor marketing pages promise that customer data is never used for training, but the binding terms often tell a more complicated story involving temporary retention, abuse-monitoring access, and sub-processor sharing. This article dissects the data-processing addenda of several popular AI platforms, highlighting the gap between the headline promise and the enforceable contract. It explains the difference between zero-retention API tiers and default consumer endpoints, and why the same provider can be safe in one configuration and risky in another. Readers learn which clauses to search for, what a Data Processing Agreement must contain under common privacy regimes, and when a written assurance is not enough.",
+        "is_bridge": false
+      },
+      {
+        "title": "Run It Yourself: Self-Hosting Open-Source LLMs to Stop Cloud Data Egress",
+        "url": "https://selfhostedhub.dev/blog/local-llm-inference-for-business",
+        "domain": "selfhostedhub.dev",
+        "content": "The strongest guarantee that customer data never reaches a third party is simple: never send it off your own machines. This walkthrough covers running open-weight language models locally with tools like llama.cpp and a single consumer GPU, sizing hardware to realistic small-business workloads, and exposing the model through a private internal API. It compares quantized model options on the quality-versus-cost curve and shows how an on-prem setup eliminates per-token fees and per-request data exposure at the same time. The author is candid about the tradeoffs in maintenance and raw capability, framing self-hosting as a deliberate sovereignty choice rather than a free lunch.",
+        "is_bridge": true
+      },
+      {
+        "title": "Your Notes Are Not Their Product: Keeping an Internal Knowledge Base Off Third-Party SaaS",
+        "url": "https://knowledgeops.blog/articles/private-knowledge-base-no-saas",
+        "domain": "knowledgeops.blog",
+        "content": "Every internal wiki, meeting note, and customer playbook stored in a hosted SaaS tool is a copy of your business living on someone else's servers, increasingly feeding that vendor's own AI features. This article makes the case for owning your knowledge base, surveying self-hostable and local-first options that keep notes searchable without uploading them to a cloud index. It details how to wire a private knowledge store into AI assistants through retrieval so the model can answer questions without the underlying documents ever leaving your network. Practical sections cover backup discipline, access control, and how to migrate off a SaaS note tool without losing structure.",
+        "is_bridge": true
+      },
+      {
+        "title": "A Private Search and Retrieval Gateway for AI Assistants",
+        "url": "https://infra-notes.tech/private-rag-gateway-customer-data",
+        "domain": "infra-notes.tech",
+        "content": "When an AI assistant needs context from customer records, the dangerous moment is the lookup itself, which can leak queries and results to external services. This piece describes building a gateway that sits between your AI tooling and your data, performing retrieval against a private store and returning only the minimum context the model needs. It covers redacting identifiers before they ever reach an external model, logging every access for audit, and enforcing scope so one customer's data cannot surface in another's session. The architecture lets a business benefit from AI-assisted answers while keeping the raw customer database firmly behind its own walls.",
+        "is_bridge": false
+      },
+      {
+        "title": "On-Device and Edge AI: Inference That Never Phones Home",
+        "url": "https://edgeaireport.com/features/on-device-inference-privacy",
+        "domain": "edgeaireport.com",
+        "content": "Edge and on-device inference is reframing privacy from a policy promise into a physical property: if the computation happens on the laptop or in-store device, there is no network round trip to intercept. This feature surveys the current state of small, capable models that run on modest hardware and the frameworks that make them practical for point-of-sale, kiosk, and mobile scenarios. It quantifies the privacy and latency gains while being honest about model-size limits and update logistics. For small businesses, the takeaway is that a meaningful slice of AI work can now run entirely offline, removing third-party exposure by construction.",
+        "is_bridge": false
+      }
+    ]
+  },
+  {
+    "key": "secondbrain",
+    "thread": {
+      "name": "Building a private second brain",
+      "guiding_question": "How do I capture and connect what I learn into a searchable personal knowledge base?"
+    },
+    "sources": [
+      {
+        "title": "The Second Brain Method: Turning Scattered Notes Into a Connected Knowledge System",
+        "url": "https://www.thoughtdepot.io/blog/second-brain-method-connected-notes",
+        "domain": "thoughtdepot.io",
+        "content": "A second brain is an external, durable store for the ideas, references, and insights you accumulate faster than memory can hold them. This article walks through a capture-organize-distill-express loop, arguing that the value of a personal knowledge base comes not from hoarding notes but from linking them so retrieval surfaces connections you forgot you made. It contrasts folder-based filing with bidirectional links and tags, showing why an associative structure scales better as a collection grows past a few thousand notes. The piece closes with a lightweight daily workflow for capturing fleeting thoughts and promoting the durable ones into evergreen notes.",
+        "is_bridge": false
+      },
+      {
+        "title": "Atomic Notes and Backlinks: Designing a Knowledge Graph You Can Actually Search",
+        "url": "https://notesonnotes.dev/atomic-notes-knowledge-graph",
+        "domain": "notesonnotes.dev",
+        "content": "Searchability is a design property, not a feature you bolt on later. This article makes the case for atomic notes, one idea per note, written in your own words and given a stable title, as the unit that makes a personal knowledge graph navigable. It explains how explicit backlinks and a handful of high-level index notes create entry points so you can traverse from a vague memory to the exact source. Practical examples cover naming conventions, linking discipline, and avoiding the orphan-note problem where captured material is never connected to anything and effectively disappears.",
+        "is_bridge": false
+      },
+      {
+        "title": "From Read-It-Later to Recall: A Capture Pipeline for Everything You Learn",
+        "url": "https://www.knowledgestack.blog/capture-pipeline-read-later-recall",
+        "domain": "knowledgestack.blog",
+        "content": "Most people capture far more than they ever revisit, and the gap is a pipeline problem. This article lays out an end-to-end flow from web clipper and highlight export to inbox triage and final placement in a permanent note, with clear rules for what earns a place in the knowledge base. It emphasizes processing highlights into your own summaries rather than storing raw quotes, since paraphrased notes are what later become searchable and reusable. Readers get a checklist for keeping the capture inbox from becoming a graveyard of unread saves.",
+        "is_bridge": false
+      },
+      {
+        "title": "Self-Hosting Local RAG: Semantic Search Over Your Own Notes With a Vector Database",
+        "url": "https://selfhostlab.net/local-rag-vector-search-notes",
+        "domain": "selfhostlab.net",
+        "content": "Keyword search misses notes that use different words for the same idea, which is where local retrieval-augmented generation earns its keep. This walkthrough shows how to embed a personal note collection with an open-source embedding model and index the vectors in a self-hosted store so semantic queries run entirely on your own hardware. It covers chunking markdown sensibly, keeping the index in sync as notes change, and wiring a small local model so you can ask natural-language questions and get answers grounded in your own writing. The guide stresses that running the whole pipeline yourself means no per-query fees and no documents leaving your machine.",
+        "is_bridge": true
+      },
+      {
+        "title": "Keep Your Knowledge Base Private: Avoiding Cloud Leakage in a Personal Note System",
+        "url": "https://privacyfirstnotes.org/keep-knowledge-base-private",
+        "domain": "privacyfirstnotes.org",
+        "content": "A personal knowledge base is one of the most sensitive datasets you own, a long-term map of what you think and what you are working on. This article examines how notes quietly leak to third parties through sync services, AI assistant integrations, telemetry, and web clippers that phone home, and what to audit to stop it. It compares local-first and end-to-end-encrypted approaches, explaining the tradeoffs between convenient cross-device sync and keeping plaintext off other people's servers. The piece offers a practical privacy checklist covering storage location, encryption at rest, and scrutinizing which features upload content for processing.",
+        "is_bridge": true
+      },
+      {
+        "title": "Maintaining a Personal Knowledge Base Without Burning Out on Upkeep",
+        "url": "https://www.evergreennotes.co/maintaining-pkb-without-burnout",
+        "domain": "evergreennotes.co",
+        "content": "The hardest part of a second brain is not starting it but keeping it alive once the novelty fades. This article argues for low-friction maintenance rituals, a brief weekly review, periodic link cleanup, and pruning notes that no longer earn their place, so the system stays trustworthy rather than turning into clutter. It warns against over-engineering elaborate tagging schemes that demand more discipline than anyone sustains, recommending conventions simple enough to follow on a bad day. The throughline is that a knowledge base only stays searchable if you keep tending the connections between what you have captured.",
+        "is_bridge": false
+      }
+    ]
+  },
+  {
+    "key": "cloudcost",
+    "thread": {
+      "name": "Cutting cloud and SaaS costs",
+      "guiding_question": "How do I reduce recurring cloud, API, and subscription spend for a small setup?"
+    },
+    "sources": [
+      {
+        "title": "FinOps for Small Teams: A Practical Framework to Cut Cloud Bills by 40%",
+        "url": "https://www.cloudcostjournal.com/finops-small-teams-cut-cloud-bills",
+        "domain": "cloudcostjournal.com",
+        "content": "This guide adapts enterprise FinOps principles for teams running a handful of servers rather than thousands. It walks through tagging resources, setting per-project budgets, and using committed-use discounts and reserved instances only after right-sizing on-demand workloads. The author shares a worked example where consolidating idle dev environments and scheduling non-production instances to shut down overnight reduced a monthly bill from roughly $1,800 to $1,050. The piece stresses that visibility, not negotiation, delivers the first and largest wins for small setups.",
+        "is_bridge": false
+      },
+      {
+        "title": "Audit Your SaaS Stack: Finding and Killing Subscription Sprawl",
+        "url": "https://blog.spendwise.io/saas-stack-audit-subscription-sprawl",
+        "domain": "blog.spendwise.io",
+        "content": "Subscription sprawl creeps in when every team adds a $15-per-seat tool that nobody later cancels. This article lays out a quarterly audit ritual: export all recurring charges from your card and accounting statements, map each line item to an owner and a use case, and flag anything with fewer than two active users. It recommends downgrading annual-but-underused plans, consolidating overlapping tools, and renegotiating at renewal using usage data as leverage. The author reports trimming a 31-tool stack to 19 and saving about $9,400 a year without losing meaningful functionality.",
+        "is_bridge": false
+      },
+      {
+        "title": "Replacing Paid SaaS with Self-Hosted Open Source: What Actually Pays Off",
+        "url": "https://selfhostdigest.com/replacing-paid-saas-self-hosted-open-source",
+        "domain": "selfhostdigest.com",
+        "content": "Self-hosting open-source alternatives can eliminate per-seat SaaS fees, but only some swaps clear the total-cost bar once you account for time and infrastructure. This piece compares candidates like Nextcloud for file sync, Plausible for analytics, and a self-managed password manager against their commercial counterparts, scoring each on setup effort, maintenance burden, and break-even seat count. The takeaway is that tools with high per-seat pricing and low operational complexity are the strongest self-hosting candidates, while anything requiring constant patching or compliance overhead often costs more than the subscription it replaces. It closes with a decision checklist for deciding when to migrate.",
+        "is_bridge": true
+      },
+      {
+        "title": "The Hidden Costs of Cloud AI APIs at Scale",
+        "url": "https://www.aiinfrareview.com/hidden-costs-cloud-ai-apis-at-scale",
+        "domain": "aiinfrareview.com",
+        "content": "Token-based pricing for hosted LLM and embedding APIs looks cheap per call but compounds quickly under production traffic. This analysis breaks down the line items teams routinely underestimate: retries and timeouts billed as full requests, oversized context windows, redundant re-embedding of unchanged documents, and egress charges on retrieved data. Using a sample RAG workload, the author models how a $300-per-month proof of concept balloons past $4,000 once real usage and prompt bloat arrive. It recommends caching, prompt compression, batching, and benchmarking a self-hosted inference path before committing to a single vendor's API.",
+        "is_bridge": true
+      },
+      {
+        "title": "Storage and Egress: The Cloud Charges Nobody Reads Until the Invoice",
+        "url": "https://docs.bytecellar.dev/guides/storage-egress-cost-control",
+        "domain": "docs.bytecellar.dev",
+        "content": "Object storage feels nearly free until data-transfer and request-operation fees stack up on top of it. This reference guide explains the difference between storage-at-rest pricing, per-request charges, and egress bandwidth fees, then shows how lifecycle policies, infrequent-access tiers, and a CDN in front of hot objects can cut the bill. It includes a worked migration that moved cold backups to an archive tier and routed downloads through cached edge nodes, lowering a media library's monthly cost by 62%. The guide warns that egress between regions and providers is the single most common surprise on a small team's invoice.",
+        "is_bridge": false
+      },
+      {
+        "title": "Annual vs. Monthly, Reserved vs. On-Demand: Right-Sizing Commitments Without Overbuying",
+        "url": "https://news.frugalstack.com/right-sizing-cloud-commitments-without-overbuying",
+        "domain": "news.frugalstack.com",
+        "content": "Long-term commitments offer real discounts but punish teams whose usage is still changing month to month. This article gives a framework for deciding how much capacity to lock in: commit only to the stable baseline revealed by several months of usage data, keep burst capacity on-demand, and ladder commitment terms so they never all expire at once. It covers the same logic for SaaS, where annual prepayment makes sense for proven tools but traps cash in anything still being evaluated. The author argues that the optimal strategy for a small setup is a conservative committed floor plus flexible headroom, not maximizing the headline discount rate.",
+        "is_bridge": false
+      }
+    ]
+  }
+]

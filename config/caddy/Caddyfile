@@ -79,6 +79,50 @@
     }
 }
 
+# Wiki app routing — the "reverse proxy (same)" shared by BOTH front-ends:
+#   Authelia > Caddy > (wiki_app)   on the public subdomain (forward_auth gates)
+#   Tailnet  > Caddy > (wiki_app)   on :8446 (no Authelia; tailnet is trusted)
+# Only the auth front differs; these backends are byte-identical. Upload
+# body-cap, /workbench/* gets the injected X-Brain-Key (server-side, never in
+# client JS), everything else → the read-only Quartz viewer, and a friendly
+# auto-refreshing "rebuilding" page while the viewer regenerates.
+(wiki_app) {
+    encode zstd gzip
+
+    @import path /workbench/import /workbench/import/* /workbench/sources/*/replace-from-upload
+    @notimport not path /workbench/import /workbench/import/* /workbench/sources/*/replace-from-upload
+    request_body @import {
+        max_size 100MB
+    }
+    request_body @notimport {
+        max_size 1MB
+    }
+
+    handle /workbench/* {
+        reverse_proxy openbrain-workbench:8000 {
+            header_up X-Forwarded-Proto https
+            header_up X-Brain-Key {$WORKBENCH_KEY}
+        }
+    }
+
+    handle {
+        reverse_proxy openbrain-wiki-viewer:8080 {
+            header_up X-Forwarded-Proto https
+        }
+    }
+
+    handle_errors {
+        header Cache-Control "no-store"
+        header -Etag
+        header -Last-Modified
+        root * /srv/site
+        rewrite * /wiki-building.html
+        file_server {
+            status 200
+        }
+    }
+}
+
 # ─── Authelia portal ──────────────────────────────────────────────────────
 http://auth.{$PUBLIC_DOMAIN} {
     import security_headers
@@ -199,6 +243,49 @@ http://notebook.{$PUBLIC_DOMAIN} {
         header_up Host {host}
         header_up X-Forwarded-Proto https
     }
+}
+
+# ─── OB1 Quartz wiki viewer on its own subdomain ──────────────────────────
+# Quartz emits root-relative URLs (`/static/...`, `/index.css`), so — like
+# OpenWebUI — it gets its own subdomain rather than a subpath. Upstream is the
+# openbrain-wiki-viewer container on the OB1 (open-brain) stack, reachable here
+# because that container joins ai-stack_app-net. Read-only static site, still
+# gated behind Authelia like every other app subdomain.
+http://wiki.{$PUBLIC_DOMAIN} {
+    import security_headers
+    import sanitize_proxy_headers
+    import access_log
+
+    forward_auth authelia:9091 {
+        uri /api/authz/auth-request
+        header_up X-Original-URL https://{host}{uri}
+        header_up X-Original-Method {method}
+
+        # Convert Authelia's 401 + Location into a proper 302 so browsers
+        # follow it automatically (they don't follow Location on 401).
+        @denied status 401 403
+        handle_response @denied {
+            redir https://auth.{$PUBLIC_DOMAIN}/?rd=https://{host}{uri}&rm={method} 302
+        }
+    }
+
+    # Authelia > Caddy > app. Backends (body-cap, /workbench key-inject, viewer,
+    # rebuilding page) live in (wiki_app), shared verbatim with the tailnet
+    # listener below.
+    import wiki_app
+}
+
+# Tailnet wiki — Tailnet > Caddy > app, the SAME (wiki_app) backends, just no
+# Authelia (Tailscale device-approval is the trust boundary). The Quartz socat
+# in the tailscale container forwards tailnet :8444 → caddy:8446 (set
+# QUARTZ_HOST=caddy, QUARTZ_PORT=8446 on the tailscale service). Edits made via
+# the tailnet carry no Remote-User, so authorship falls back to "operator";
+# portal edits keep the Authelia identity.
+:8446 {
+    import security_headers
+    import sanitize_proxy_headers
+    import access_log
+    import wiki_app
 }
 
 # ─── Main app domain ──────────────────────────────────────────────────────

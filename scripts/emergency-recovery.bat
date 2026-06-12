@@ -4,11 +4,18 @@ REM For PowerShell version with better GPU support, use: emergency-recovery.ps1
 REM
 REM Recovery stack scope (kept in sync with docker-compose.yml):
 REM   core    openwebui, llama-cpp, llama-cpp-embed, tailscale
-REM   memory  mnemory, mnemory-gateway, mnemory-backup
+REM   memory  mnemory, mnemory-gateway
 REM   search  tor, redis, searxng, gateway, mcpo  (Private Search Gateway)
-REM   coder   open-terminal, little-coder, lc-mcpo, lc-egress, little-coder-backup
-REM   aux     smolcrawl-pipelines, surrealdb, open_notebook, openwebui-backup, watchtower
+REM   coder   open-terminal, little-coder, lc-mcpo, lc-egress
+REM   aux     smolcrawl-pipelines, surrealdb, open_notebook, watchtower
+REM   backup  mnemory-backup, openwebui-backup, little-coder-backup, smolcrawl-backup,
+REM           tailscale-backup, lm-models-backup, open-notebook-backup,
+REM           openbrain-db-backup, openbrain-wiki-backup (last two need OB1 up)
 REM   OB1     Open Brain - SEPARATE compose project (OB1\docker\docker-compose.yml)
+REM   PORTAL  caddy/authelia/cloudflared/portal-*/integrity-tripwire (+ caddy-backup,
+REM           authelia-backup) are PROFILE-GATED (profiles: [internet]) and NOT
+REM           managed here; use scripts\portal-on.ps1 / portal-off.ps1. A nuclear
+REM           `docker compose down` stops a running portal; it is not auto-restored.
 
 set "OB1_COMPOSE=OB1\docker\docker-compose.yml"
 
@@ -186,8 +193,8 @@ timeout /t 15 /nobreak >nul
 echo [INFO] Starting Mnemory gateway (cloud MCP proxy)...
 docker compose up -d mnemory-gateway
 
-echo [INFO] Starting backup schedulers...
-docker compose up -d mnemory-backup openwebui-backup
+echo [INFO] Starting backup schedulers (main/host resources)...
+docker compose up -d mnemory-backup openwebui-backup smolcrawl-backup tailscale-backup lm-models-backup open-notebook-backup
 
 echo [INFO] Starting SmolCrawl Pipelines...
 docker compose up -d smolcrawl-pipelines
@@ -216,6 +223,8 @@ docker compose up -d lc-mcpo lc-egress little-coder-backup
 echo [INFO] Starting Open Brain (OB1) stack...
 if exist "%OB1_COMPOSE%" (
     docker compose -f "%OB1_COMPOSE%" up -d
+    echo [INFO] Starting OB1-attached backups (obnet + open-brain volumes now exist)...
+    docker compose up -d openbrain-db-backup openbrain-wiki-backup
 ) else (
     echo [INFO] Open Brain (OB1) not deployed in this workspace - skipping
 )
@@ -276,8 +285,8 @@ echo [INFO] Starting Mnemory services...
 docker compose up -d mnemory mnemory-gateway mnemory-backup
 timeout /t 15 /nobreak >nul
 
-echo [INFO] Starting OpenWebUI backup scheduler...
-docker compose up -d openwebui-backup
+echo [INFO] Starting backup schedulers (main/host resources)...
+docker compose up -d openwebui-backup smolcrawl-backup tailscale-backup lm-models-backup open-notebook-backup
 
 echo [INFO] Starting SmolCrawl Pipelines...
 docker compose up -d smolcrawl-pipelines
@@ -296,7 +305,10 @@ echo [INFO] Starting little-coder control plane...
 docker compose up -d open-terminal little-coder lc-mcpo lc-egress little-coder-backup
 
 echo [INFO] Starting Open Brain (OB1) stack...
-if exist "%OB1_COMPOSE%" docker compose -f "%OB1_COMPOSE%" up -d
+if exist "%OB1_COMPOSE%" (
+    docker compose -f "%OB1_COMPOSE%" up -d
+    docker compose up -d openbrain-db-backup openbrain-wiki-backup
+)
 
 echo [INFO] Testing if minimal recovery worked...
 docker compose exec tailscale ping -c 1 8.8.8.8 >nul 2>&1
@@ -327,6 +339,8 @@ if %ERRORLEVEL% EQU 0 (
 
 echo [WARN] All diagnostics failed - proceeding with nuclear option
 echo [WARN] This will DESTROY and REBUILD containers - all customizations will be lost
+echo [WARN] NOTE: if the internet portal is running, 'compose down' stops it; it is
+echo [WARN]       profile-gated and NOT auto-restored - re-run scripts\portal-on.ps1.
 echo [INFO] Tearing down Open Brain (OB1) first (it attaches to ai-stack_llm-net)...
 if exist "%OB1_COMPOSE%" docker compose -f "%OB1_COMPOSE%" down
 echo [INFO] Full main-stack restart with network namespace reset...
@@ -335,7 +349,10 @@ timeout /t 15 /nobreak >nul
 docker compose up -d
 timeout /t 90 /nobreak >nul
 echo [INFO] Starting Open Brain (OB1) stack...
-if exist "%OB1_COMPOSE%" docker compose -f "%OB1_COMPOSE%" up -d
+if exist "%OB1_COMPOSE%" (
+    docker compose -f "%OB1_COMPOSE%" up -d
+    docker compose up -d openbrain-db-backup openbrain-wiki-backup
+)
 
 echo [INFO] Testing post-nuclear connectivity...
 docker compose exec tailscale ping -c 1 8.8.8.8 >nul 2>&1
@@ -404,7 +421,7 @@ docker compose ps mnemory-gateway lc-mcpo lc-egress --format "table {{.Service}}
 
 echo.
 echo [INFO] Backup schedulers status:
-docker compose ps mnemory-backup openwebui-backup little-coder-backup --format "table {{.Service}}\t{{.Status}}" 2>nul
+docker compose ps mnemory-backup openwebui-backup little-coder-backup smolcrawl-backup tailscale-backup lm-models-backup open-notebook-backup openbrain-db-backup openbrain-wiki-backup --format "table {{.Service}}\t{{.Status}}" 2>nul
 
 echo.
 echo [INFO] Watchtower status:

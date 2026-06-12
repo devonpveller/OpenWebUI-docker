@@ -37,8 +37,16 @@ compute_hashes() {
 post_alert() {
   event="$1"
   detail="$2"
+  # JSON-escape detail before embedding it in log_line. The diff output is
+  # multi-line; a literal newline inside a JSON string is an invalid control
+  # character and the alerter rejects the whole POST with 400 "Bad control
+  # character in string literal" (silently dropping the drift alert). Escape
+  # backslash and quote first, then fold tab/CR/newline to their \x escapes.
+  escaped=$(printf '%s' "$detail" | head -c 800 \
+    | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/\t/\\t/g' -e 's/\r//g' \
+    | awk 'BEGIN{ORS=""} NR>1{printf "\\n"} {print}')
   body=$(printf '{"severity":"critical","event":"%s","timestamp_utc":"%s","log_line":"%s"}' \
-    "$event" "$(now_iso)" "$(echo "$detail" | head -c 800 | sed 's/"/\\"/g')")
+    "$event" "$(now_iso)" "$escaped")
   if ! curl -fsS -X POST -H 'Content-Type: application/json' --data "$body" "$ALERTER_URL" >/dev/null 2>&1; then
     echo "[$(now_iso)] alerter POST failed for event=$event" >&2
   fi

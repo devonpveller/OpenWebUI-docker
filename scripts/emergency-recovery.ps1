@@ -11,11 +11,21 @@ $ErrorActionPreference = "Stop"
 #
 # The MAIN compose project (docker-compose.yml) holds several planes:
 #   core    openwebui, llama-cpp, llama-cpp-embed, tailscale
-#   memory  mnemory, mnemory-gateway, mnemory-backup
+#   memory  mnemory, mnemory-gateway
 #   search  tor, redis, searxng, gateway, mcpo      (Private Search Gateway)
-#   coder   open-terminal, little-coder, lc-mcpo, lc-egress, little-coder-backup
-#   aux     smolcrawl-pipelines, surrealdb, open_notebook, openwebui-backup,
-#           watchtower
+#   coder   open-terminal, little-coder, lc-mcpo, lc-egress
+#   aux     smolcrawl-pipelines, surrealdb, open_notebook, watchtower
+#   backup  mnemory-backup, openwebui-backup, little-coder-backup,
+#           smolcrawl-backup, tailscale-backup, lm-models-backup,
+#           open-notebook-backup, openbrain-db-backup, openbrain-wiki-backup
+#
+# PORTAL plane (caddy, authelia, cloudflared, portal-init, portal-alerter,
+# authelia-watcher, authelia-notif-bridge, integrity-tripwire, portal-cron,
+# tunnel-watcher, caddy-backup, authelia-backup) is PROFILE-GATED
+# (`profiles: [internet]`) — it does NOT start with a plain `docker compose up -d`
+# and is deliberately NOT managed here. It is driven by scripts/portal-on.ps1 /
+# portal-off.ps1. A nuclear `docker compose down` WILL stop a running portal; it
+# is not auto-restored (see Invoke-NuclearRecovery's detect-and-warn).
 #
 # Open Brain (OB1) is a SEPARATE compose project (OB1\docker\docker-compose.yml,
 # project name "open-brain"). Its containers attach to the main stack's
@@ -26,14 +36,28 @@ $ErrorActionPreference = "Stop"
 $Script:OB1Compose = "OB1\docker\docker-compose.yml"
 
 # Main compose services, low-level dependency first.
+# (Portal plane omitted on purpose — profile-gated; see the header note.)
 $Script:MainStackServices = @(
     "openwebui", "llama-cpp", "llama-cpp-embed", "tailscale",
-    "mnemory", "mnemory-gateway", "mnemory-backup", "openwebui-backup",
+    "mnemory", "mnemory-gateway",
     "smolcrawl-pipelines", "surrealdb", "open_notebook",
     "tor", "redis", "searxng", "gateway", "mcpo",
-    "open-terminal", "little-coder", "lc-mcpo", "lc-egress", "little-coder-backup",
-    "watchtower"
+    "open-terminal", "little-coder", "lc-mcpo", "lc-egress",
+    "watchtower",
+    # Backup cron sidecars (see helper arrays below).
+    "mnemory-backup", "openwebui-backup", "little-coder-backup",
+    "smolcrawl-backup", "tailscale-backup", "lm-models-backup", "open-notebook-backup",
+    "openbrain-db-backup", "openbrain-wiki-backup"
 )
+
+# Backup sidecars touching only main-stack/host resources — safe to nudge anytime.
+$Script:MainBackups = @(
+    "mnemory-backup", "openwebui-backup", "little-coder-backup",
+    "smolcrawl-backup", "tailscale-backup", "lm-models-backup", "open-notebook-backup"
+)
+# Backup sidecars that attach to OB1-owned external network/volumes — start only
+# AFTER the OB1 stack is up (open-brain_obnet + open-brain_* volumes must exist).
+$Script:OB1Backups = @("openbrain-db-backup", "openbrain-wiki-backup")
 
 # Open Brain (OB1) services, low-level dependency first.
 # The trailing block (cron + 3 HTTP-triggered scheduled services) lives
@@ -45,8 +69,11 @@ $Script:OB1Services = @(
     "openbrain-gateway",
     "openbrain-mcpo", "openbrain-mcpo-ext", "openbrain-postgrest",
     "openbrain-rest", "openbrain-entity-worker",
-    "openbrain-wiki", "openbrain-wiki-viewer",
-    "openbrain-cron", "openbrain-gmail-pull", "openbrain-gmail-prune", "openbrain-digest"
+    "openbrain-suggestion-worker", "openbrain-curator", "openbrain-research", "openbrain-chunk-worker",
+    "openbrain-grounding-backfiller",
+    "openbrain-wiki", "openbrain-wiki-viewer", "openbrain-workbench", "openbrain-extract",
+    "openbrain-cron", "openbrain-gmail-pull", "openbrain-gmail-prune", "openbrain-digest",
+    "openbrain-podcast"
 )
 
 function Write-Log {
@@ -182,14 +209,18 @@ function Test-BasicConnectivity {
         # Report container states grouped by plane so 20+ services stay readable.
         Write-Log "INFO" ("Core   - openwebui: {0}, llama-cpp: {1}, llama-cpp-embed: {2}, tailscale: {3}" -f `
             $states["openwebui"], $states["llama-cpp"], $states["llama-cpp-embed"], $states["tailscale"])
-        Write-Log "INFO" ("Memory - mnemory: {0}, mnemory-gateway: {1}, mnemory-backup: {2}" -f `
-            $states["mnemory"], $states["mnemory-gateway"], $states["mnemory-backup"])
+        Write-Log "INFO" ("Memory - mnemory: {0}, mnemory-gateway: {1}" -f `
+            $states["mnemory"], $states["mnemory-gateway"])
         Write-Log "INFO" ("Search - tor: {0}, redis: {1}, searxng: {2}, gateway: {3}, mcpo: {4}" -f `
             $states["tor"], $states["redis"], $states["searxng"], $states["gateway"], $states["mcpo"])
-        Write-Log "INFO" ("Coder  - open-terminal: {0}, little-coder: {1}, lc-mcpo: {2}, lc-egress: {3}, little-coder-backup: {4}" -f `
-            $states["open-terminal"], $states["little-coder"], $states["lc-mcpo"], $states["lc-egress"], $states["little-coder-backup"])
-        Write-Log "INFO" ("Aux    - smolcrawl-pipelines: {0}, surrealdb: {1}, open_notebook: {2}, openwebui-backup: {3}, watchtower: {4}" -f `
-            $states["smolcrawl-pipelines"], $states["surrealdb"], $states["open_notebook"], $states["openwebui-backup"], $states["watchtower"])
+        Write-Log "INFO" ("Coder  - open-terminal: {0}, little-coder: {1}, lc-mcpo: {2}, lc-egress: {3}" -f `
+            $states["open-terminal"], $states["little-coder"], $states["lc-mcpo"], $states["lc-egress"])
+        Write-Log "INFO" ("Aux    - smolcrawl-pipelines: {0}, surrealdb: {1}, open_notebook: {2}, watchtower: {3}" -f `
+            $states["smolcrawl-pipelines"], $states["surrealdb"], $states["open_notebook"], $states["watchtower"])
+        Write-Log "INFO" ("Backup - mnemory: {0}, owui: {1}, lc: {2}, smolcrawl: {3}, tailscale: {4}, lm-models: {5}, on: {6}, ob1-db: {7}, ob1-wiki: {8}" -f `
+            $states["mnemory-backup"], $states["openwebui-backup"], $states["little-coder-backup"], `
+            $states["smolcrawl-backup"], $states["tailscale-backup"], $states["lm-models-backup"], `
+            $states["open-notebook-backup"], $states["openbrain-db-backup"], $states["openbrain-wiki-backup"])
 
         # Open Brain (OB1) — separate compose project, reported as a count.
         if (Test-OB1Available) {
@@ -272,13 +303,19 @@ function Invoke-MinimalRecovery {
         # the little-coder plane) degraded without this nudge. surrealdb must
         # precede open_notebook; the search/coder planes self-order via their
         # own depends_on.
-        docker compose up -d watchtower mnemory mnemory-gateway mnemory-backup `
-            openwebui-backup smolcrawl-pipelines surrealdb open_notebook `
+        docker compose up -d watchtower mnemory mnemory-gateway `
+            smolcrawl-pipelines surrealdb open_notebook `
             tor redis searxng gateway mcpo `
-            open-terminal little-coder lc-mcpo lc-egress little-coder-backup
+            open-terminal little-coder lc-mcpo lc-egress
+
+        # Backup cron sidecars touching only main/host resources (safe anytime).
+        Start-ServiceGroup "main backups" $Script:MainBackups
 
         # Open Brain (OB1) — separate compose project.
         Start-OB1Stack
+
+        # OB1-attached backups — only after OB1 (obnet + open-brain volumes exist).
+        Start-ServiceGroup "OB1 backups" $Script:OB1Backups
 
         Write-Log "INFO" "Waiting for services to stabilize..."
         Start-Sleep -Seconds 60
@@ -529,8 +566,9 @@ function Invoke-EmergencyRecovery {
     # mnemory-gateway (cloud MCP proxy — depends on mnemory)
     Start-ServiceGroup "mnemory-gateway" @("mnemory-gateway")
 
-    # Backup schedulers (independent cron sidecars)
-    Start-ServiceGroup "backup schedulers" @("mnemory-backup", "openwebui-backup")
+    # Backup schedulers (independent cron sidecars, main/host resources).
+    # OB1-attached backups (openbrain-db/wiki) start later, after Start-OB1Stack.
+    Start-ServiceGroup "backup schedulers" $Script:MainBackups
 
     # Start SmolCrawl Pipelines (depends on OpenWebUI)
     Write-Log "INFO" "Starting SmolCrawl Pipelines..."
@@ -612,6 +650,9 @@ function Invoke-EmergencyRecovery {
     # Open Brain (OB1) last — needs ai-stack_llm-net + llama-cpp healthy.
     Start-OB1Stack
 
+    # OB1-attached backups — only now that obnet + open-brain volumes exist.
+    Start-ServiceGroup "OB1 backups" $Script:OB1Backups
+
     # ── Phase 4: Connectivity verification ─────────────────────────────────
     Write-Log "INFO" "Phase 4: Connectivity verification"
     Start-Sleep -Seconds 25
@@ -663,7 +704,9 @@ function Invoke-EmergencyRecovery {
         docker compose ps mnemory-gateway lc-mcpo lc-egress --format "table {{.Service}}\t{{.Status}}" 2>$null
 
         Write-Log "INFO" "Backup schedulers + Watchtower status:"
-        docker compose ps mnemory-backup openwebui-backup little-coder-backup watchtower --format "table {{.Service}}\t{{.Status}}" 2>$null
+        docker compose ps mnemory-backup openwebui-backup little-coder-backup `
+            smolcrawl-backup tailscale-backup lm-models-backup open-notebook-backup `
+            openbrain-db-backup openbrain-wiki-backup watchtower --format "table {{.Service}}\t{{.Status}}" 2>$null
 
         if (Test-OB1Available) {
             Write-Log "INFO" "Open Brain (OB1) status:"
@@ -697,6 +740,19 @@ function Invoke-NuclearRecovery {
     Write-Log "WARN" "All diagnostics failed - proceeding with nuclear recovery..."
     Write-Log "WARN" "This will destroy and rebuild containers..."
 
+    # Detect whether the (profile-gated) internet portal is running. `docker
+    # compose down` will stop it, and recovery does NOT auto-restore it (bringing
+    # the internet front-end back up must stay a deliberate operator action).
+    $portalWasUp = $false
+    try {
+        $pc = docker compose ps caddy --format json 2>$null | ConvertFrom-Json
+        if ($pc -and $pc.State -eq "running") { $portalWasUp = $true }
+    }
+    catch {}
+    if ($portalWasUp) {
+        Write-Log "WARN" "Internet portal (caddy/authelia/cloudflared) is running; 'compose down' will stop it. It will NOT be auto-restored."
+    }
+
     # Bring OB1 down FIRST so the main `docker compose down` can drop the
     # ai-stack_llm-net network OB1 attaches to as an external network.
     if (Test-OB1Available) {
@@ -719,6 +775,14 @@ function Invoke-NuclearRecovery {
 
     # Open Brain (OB1) last — main stack (and ai-stack_llm-net) is up now.
     Start-OB1Stack
+
+    # OB1-attached backups — the main `up -d` above could not start
+    # openbrain-db-backup while obnet was down; nudge them now that OB1 is up.
+    Start-ServiceGroup "OB1 backups" $Script:OB1Backups
+
+    if ($portalWasUp) {
+        Write-Log "WARN" "Portal was running before recovery. Re-run scripts/portal-on.ps1 to restore the internet front-end (recovery does not auto-start it)."
+    }
 
     # Test connectivity
     if (Test-NetworkConnectivity "tailscale") {

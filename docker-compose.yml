@@ -125,6 +125,20 @@ services:
       - OPEN_NOTEBOOK_TS_PORT=${OPEN_NOTEBOOK_TS_PORT:-8443}
       - OPEN_NOTEBOOK_API_PORT=${OPEN_NOTEBOOK_API_PORT:-5055}
       - OPEN_NOTEBOOK_API_TS_PORT=${OPEN_NOTEBOOK_API_TS_PORT:-5055}
+      # OB1 Quartz wiki — routed through the portal Caddy's tailnet listener
+      # (caddy:8446 → the shared (wiki_app) snippet) so the tailnet gets the SAME
+      # /workbench key-injected routing as the external vhost: Tailnet > Caddy >
+      # app (Authelia skipped — Tailscale device-auth is the trust boundary; the
+      # workbench's X-Brain-Key is injected by Caddy). caddy is on ai-stack_app-net,
+      # which openwebui — whose netns this container shares — is also on, so
+      # caddy:8446 resolves here. (Pre-Caddy this pointed straight at
+      # openbrain-wiki-viewer:8080, which had NO /workbench routing → 404 on tailnet.)
+      # ORDER: caddy must be up before this serve configures at boot; if it isn't,
+      # entrypoint.sh's monitor loop does deferred setup once caddy appears.
+      - QUARTZ_HOST=${QUARTZ_HOST:-caddy}
+      - QUARTZ_PORT=${QUARTZ_PORT:-8446}
+      - QUARTZ_ENABLED=${QUARTZ_ENABLED:-true}
+      - QUARTZ_TS_PORT=${QUARTZ_TS_PORT:-8444}
     volumes:
       - ./data/tailscale:/var/lib/tailscale
       - /dev/net/tun:/dev/net/tun
@@ -419,6 +433,16 @@ services:
         echo "$${BACKUP_CRON} sh /scripts/backup.sh >> /var/log/backup.log 2>&1" > /etc/crontabs/root
         echo "[$(date -u +%FT%TZ)] Backup scheduler started (cron: $${BACKUP_CRON}, retain: $${RETAIN_COUNT} most recent)"
         crond -f -l 2
+    # Cap memory so the nightly `tar` of the (large) /data volume cannot
+    # balloon the WSL VM with reclaimable page cache. The kernel evicts this
+    # cgroup's own file cache to stay under the limit, so the backup streams
+    # through a small cache window instead of parking tens of GB until the
+    # next `wsl --shutdown`. tar/gzip stream sequentially (no re-reads) so
+    # capping costs nothing; anon RSS is a few MB, so no OOM risk.
+    deploy:
+      resources:
+        limits:
+          memory: 1g
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
@@ -516,12 +540,17 @@ services:
     pull_policy: always
 
   open_notebook:
-    image: lfnovo/open_notebook:v1-latest
+    # IKS fork (open-notebook repo, Dockerfile.single) — OB1 Postgres is the
+    # canonical source-of-truth. Locally built + tagged; never pulled.
+    # Build/tag at promotion: docker build -t open_notebook:iks ...; see
+    # documentation/implementation-guide/open -notebook-integration-openbrain/.
+    image: open_notebook:iks
     container_name: open_notebook
     networks:
       - default
       - llm-net
       - app-net               # pre-flight §7.4 — added so portal Caddy can reach :8502 / :5055
+      - obnet                  # IKS — reach openbrain-db (canonical OB1 store)
     ports:
       - "127.0.0.1:8503:8502" # pre-flight §6.1 — was "8503:8502" (LAN-exposed)
       - "127.0.0.1:5055:5055" # pre-flight §6.1 — was "5055:5055" (LAN-exposed)
@@ -550,12 +579,40 @@ services:
       # see Caddyfile. The browser uses same-origin /api/* and Caddy
       # routes those to FastAPI.
       - INTERNAL_API_URL=http://127.0.0.1:5055
+
+      # ----- IKS: OpenBrain (OB1) is the canonical source-of-truth ---------
+      # SurrealDB above stays as the local UI/queue/chat/cache store (D1, a
+      # thin regenerable mirror). Sources/threads live in openbrain-db.
+      # The OB1 password is NOT set here: it is injected as POSTGRES_PASSWORD
+      # via the `env_file: OB1/docker/.env` directive below (read automatically
+      # by `docker compose up` — no --env-file flag, no secret duplicated into
+      # ai-stack/.env). ob1_repository._cfg() falls back OB1_DB_PASSWORD →
+      # POSTGRES_PASSWORD, so the env_file value is what's used.
+      - OB1_DB_HOST=openbrain-db
+      - OB1_DB_PORT=5432
+      - OB1_DB_NAME=openbrain
+      - OB1_DB_USER=postgres
+      # bge-m3 (1024-dim) so OB1 source embeddings match every other writer.
+      - EMBEDDING_API_BASE=http://llama-cpp-embed:8080/v1
+      - EMBEDDING_API_KEY=not-needed
+      - EMBEDDING_MODEL=bge-m3
+      # Wiki notebooks/ folder = the notebook registry (B1 folder sync), RO.
+      - WIKI_NOTEBOOKS_DIR=/wiki/content/notebooks
+      - NOTEBOOK_SYNC_INTERVAL_S=900
+    # Supplies POSTGRES_PASSWORD (the OB1 store secret) into the container
+    # without writing it into ai-stack/.env. Other keys in this file are
+    # harmless to ON (ignored). Same secret the OB1 stack already uses.
+    env_file:
+      - OB1/docker/.env
     volumes:
       - D:\Open WebUI\open-notebook\notebook_data:/app/data
+      # Read-only view of the live wiki tree so ON reconciles the notebooks
+      # folder → ON notebooks (folder is authority). External open-brain volume.
+      - openbrain-wiki-data:/wiki:ro
     depends_on:
       - surrealdb
     restart: always
-    pull_policy: always
+    pull_policy: never
 
   # ---------------------------------------------------------------------
   # Private Search Gateway (privacy-first web search over Tor).
@@ -918,11 +975,13 @@ services:
     container_name: openbrain-wiki-backup
     volumes:
       - openbrain-wiki-data:/data:ro
+      - wiki-assets:/assets:ro          # X.2 — gitignored binary uploads (separate tar)
       - ./backups/openbrain-wiki:/backups
       - ./backup/openbrain-wiki-backup.sh:/scripts/backup.sh:ro
     environment:
       - BACKUP_DIR=/backups
       - DATA_DIR=/data
+      - ASSETS_DIR=/assets
       - RETAIN_COUNT=${OPENBRAIN_WIKI_BACKUP_RETAIN_COUNT:-2}
       - BACKUP_CRON=${OPENBRAIN_WIKI_BACKUP_CRON:-15 2 * * *}
       - TZ=UTC
@@ -1314,6 +1373,11 @@ services:
     environment:
       - PUBLIC_DOMAIN=${PUBLIC_DOMAIN}
       - ACME_EMAIL=${ACME_EMAIL}
+      # Server-side secret Caddy injects as X-Brain-Key when proxying
+      # /workbench/* to openbrain-workbench (G7). Set this in the main .env to
+      # the SAME value as OB1's MCP_ACCESS_KEY. Empty = the workbench rejects
+      # every /workbench call (fail closed).
+      - WORKBENCH_KEY=${WORKBENCH_KEY}
     user: "10000:10000"      # plan §2 hardening floor — non-root UID
     restart: unless-stopped
     security_opt:
@@ -1742,6 +1806,12 @@ volumes:
   openbrain-wiki-data:
     external: true
     name: open-brain_openbrain-wiki-data
+  # X.2 — OB1's gitignored binary-asset volume (uploaded images/PDFs), so the
+  # wiki-backup can snapshot it (it's not in the git vault). External: owned by
+  # the open-brain project.
+  wiki-assets:
+    external: true
+    name: open-brain_wiki-assets
 
 networks:
   # Internal-only network: no gateway, no internet access.

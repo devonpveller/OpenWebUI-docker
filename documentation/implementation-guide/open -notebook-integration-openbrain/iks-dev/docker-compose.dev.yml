@@ -1,0 +1,244 @@
+# Integrated Knowledge System — DISPOSABLE DEV SANDBOX (project: iks-dev)
+#
+# Mirrors the real topology (OB1 Postgres + MCP server + SurrealDB + the
+# Open Notebook fork) WITHOUT touching any prod container or volume.
+# Guardrail 1 (plan §2): nothing here references openbrain-db-data,
+# open-notebook/surreal_data, or any running prod service.
+#
+#   Bring up:  docker compose -p iks-dev -f docker-compose.dev.yml up -d
+#   Tear down: docker compose -p iks-dev -f docker-compose.dev.yml down
+#   Nuke data: docker compose -p iks-dev -f docker-compose.dev.yml down -v
+#
+# Host ports are deliberately in the 18xxx range so they never collide
+# with prod (8000/8443/8502/5055/8061/3001/8810…) or the fork's own
+# compose (8003/8503/5055). See iks-dev/README.md.
+#
+# The init SQL is mounted READ-ONLY straight from OB1/docker so the
+# sandbox always reflects the real schema (a live "copy" with zero drift,
+# per Task 0.2). Fresh named volumes only.
+
+name: iks-dev
+
+services:
+  # ── Scratch Open Brain Postgres ──────────────────────────────────────
+  # pgvector, initialised from the REAL init*.sql (read-only) + the new
+  # init-threads.sql + synthetic seed. Fresh volume iks-db-data.
+  iks-db:
+    image: pgvector/pgvector:pg16
+    container_name: iks-db
+    environment:
+      POSTGRES_DB: openbrain
+      POSTGRES_USER: postgres
+      # Sandbox-only password. Synthetic data, throwaway volume — NOT a
+      # secret, intentionally inline so the sandbox needs no .env.
+      POSTGRES_PASSWORD: iks_dev_only
+    volumes:
+      - iks-db-data:/var/lib/postgresql/data
+      - "D:/Open WebUI/ai-stack/OB1/docker/init.sql:/docker-entrypoint-initdb.d/10-init.sql:ro"
+      - "D:/Open WebUI/ai-stack/OB1/docker/init-extensions.sql:/docker-entrypoint-initdb.d/20-init-extensions.sql:ro"
+      - "D:/Open WebUI/ai-stack/OB1/docker/init-sources.sql:/docker-entrypoint-initdb.d/30-init-sources.sql:ro"
+      - "D:/Open WebUI/ai-stack/OB1/docker/init-graph.sql:/docker-entrypoint-initdb.d/40-init-graph.sql:ro"
+      - "D:/Open WebUI/ai-stack/OB1/docker/init-grants.sql:/docker-entrypoint-initdb.d/50-init-grants.sql:ro"
+      - "D:/Open WebUI/ai-stack/OB1/docker/init-source-graph.sql:/docker-entrypoint-initdb.d/60-init-source-graph.sql:ro"
+      - "D:/Open WebUI/ai-stack/OB1/docker/init-threads.sql:/docker-entrypoint-initdb.d/70-init-threads.sql:ro"
+      - "./seed.sql:/docker-entrypoint-initdb.d/80-seed.sql:ro"
+      # Source retract + chunk index (passage-level retrieval). Mirror prod
+      # ordering (retract 82 < chunks 86); chunks RPC depends on the retract
+      # column. Populated by the iks-chunk-worker below.
+      - "D:/Open WebUI/ai-stack/OB1/docker/init-source-retract.sql:/docker-entrypoint-initdb.d/82-init-source-retract.sql:ro"
+      - "D:/Open WebUI/ai-stack/OB1/docker/init-source-chunks.sql:/docker-entrypoint-initdb.d/86-init-source-chunks.sql:ro"
+    ports:
+      - "127.0.0.1:18432:5432"
+    networks:
+      - iks-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d openbrain"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  # ── Scratch OB1 MCP server (built from source) ───────────────────────
+  # Points at iks-db; uses the LIVE local models on ai-stack_llm-net for
+  # embeddings/chat (read-only inference — acceptable, Task 0.2).
+  iks-mcp:
+    build:
+      context: "D:/Open WebUI/ai-stack/OB1/integrations/kubernetes-deployment"
+      dockerfile: Dockerfile
+    image: iks-mcp-server:local
+    container_name: iks-mcp
+    depends_on:
+      iks-db:
+        condition: service_healthy
+    environment:
+      DB_HOST: iks-db
+      DB_PORT: "5432"
+      DB_NAME: openbrain
+      DB_USER: postgres
+      DB_PASSWORD: iks_dev_only
+      MCP_ACCESS_KEY: iks-dev-key
+      PORT: "8000"
+      EMBEDDING_API_BASE: http://llama-cpp-embed:8080/v1
+      EMBEDDING_API_KEY: not-needed
+      EMBEDDING_MODEL: bge-m3
+      CHAT_API_BASE: http://llama-cpp:8080/v1
+      CHAT_API_KEY: not-needed
+      CHAT_MODEL: qwen36-27b:nothink
+    ports:
+      - "127.0.0.1:18000:8000"
+    networks:
+      - iks-net
+      - llm-net
+    restart: unless-stopped
+
+  # ── Scratch SurrealDB (ON UI/queue/chat/cache state only) ────────────
+  iks-surreal:
+    image: surrealdb/surrealdb:v2
+    container_name: iks-surreal
+    command: start --log info --user root --pass root rocksdb:/mydata/iks.db
+    user: root
+    volumes:
+      - iks-surreal-data:/mydata
+    ports:
+      - "127.0.0.1:18003:8000"
+    networks:
+      - iks-net
+    restart: unless-stopped
+
+  # ── Open Notebook built FROM THE FORK ────────────────────────────────
+  # Source data goes to iks-db (Phase 4); SurrealDB keeps only UI/queue/
+  # chat/cache state. OB1_DB_* env is consumed by the Phase-4 data-access
+  # module; SURREAL_* keeps the operational state local.
+  iks-notebook:
+    build:
+      context: "D:/Open WebUI/open-notebook"
+      dockerfile: Dockerfile.single
+    image: iks-notebook:local
+    container_name: iks-notebook
+    depends_on:
+      - iks-surreal
+      - iks-db
+    environment:
+      OPEN_NOTEBOOK_ENCRYPTION_KEY: iks-dev-encryption-key-not-secret
+      # Browser-facing API base. The config route would otherwise auto-detect
+      # http://<host>:5055, but the sandbox publishes the backend on 15055,
+      # not 5055. Point the browser at the FRONTEND origin so its /api calls
+      # are proxied server-side by Next.js (same-origin, no CORS, no port
+      # mismatch). INTERNAL_API_URL stays the in-container localhost:5055.
+      API_URL: http://127.0.0.1:18502
+      # Operational state -> scratch SurrealDB
+      SURREAL_URL: ws://iks-surreal:8000/rpc
+      SURREAL_USER: root
+      SURREAL_PASSWORD: root
+      SURREAL_NAMESPACE: open_notebook
+      SURREAL_DATABASE: open_notebook
+      # Source-of-truth -> OB1 Postgres. Defaults to the scratch iks-db
+      # (isolated). To point the sandbox at the LIVE openbrain-db for testing,
+      # recreate with: OB1_DB_HOST=openbrain-db and --env-file <open-brain .env>
+      # (which supplies POSTGRES_PASSWORD). Default keeps prod untouched.
+      OB1_DB_HOST: ${OB1_DB_HOST:-iks-db}
+      OB1_DB_PORT: "5432"
+      OB1_DB_NAME: openbrain
+      OB1_DB_USER: postgres
+      OB1_DB_PASSWORD: ${POSTGRES_PASSWORD:-iks_dev_only}
+      # bge-m3 (1024-dim) so OB1 source embeddings match every other writer.
+      # Reached over llm-net (read-only inference).
+      EMBEDDING_API_BASE: http://llama-cpp-embed:8080/v1
+      EMBEDDING_API_KEY: not-needed
+      EMBEDDING_MODEL: bge-m3
+      # Wiki notebooks/ folder is the notebook registry (B1 sync). Read-only.
+      WIKI_NOTEBOOKS_DIR: /wiki/content/notebooks
+      NOTEBOOK_SYNC_INTERVAL_S: "900"
+    volumes:
+      - iks-notebook-data:/app/data
+      # Read-only view of the live wiki tree so ON can reconcile the notebooks
+      # folder → ON notebooks (folder is authority). External volume from the
+      # open-brain project.
+      - openbrain-wiki-data:/wiki:ro
+    ports:
+      - "127.0.0.1:18502:8502"   # Web UI
+      - "127.0.0.1:15055:5055"   # REST API
+    networks:
+      - iks-net
+      - llm-net   # reach llama-cpp-embed for bge-m3 source embeddings
+    restart: unless-stopped
+
+  # ── (Phase 5) Cross-thread suggestion worker ─────────────────────────
+  iks-suggestion-worker:
+    build:
+      context: "D:/Open WebUI/ai-stack/OB1/integrations/suggestion-worker"
+      dockerfile: Dockerfile
+    image: iks-suggestion-worker:local
+    container_name: iks-suggestion-worker
+    depends_on:
+      iks-db:
+        condition: service_healthy
+    environment:
+      DB_HOST: iks-db
+      DB_PORT: "5432"
+      DB_NAME: openbrain
+      DB_USER: postgres
+      DB_PASSWORD: iks_dev_only
+      EMBEDDING_API_BASE: http://llama-cpp-embed:8080/v1
+      EMBEDDING_API_KEY: not-needed
+      EMBEDDING_MODEL: bge-m3
+      SUGGESTION_THRESHOLD: "0.50"
+      PORT: "8000"
+    ports:
+      - "127.0.0.1:18810:8000"
+    networks:
+      - iks-net
+      - llm-net
+
+  # ── Canonical chunk-embedding worker (passage-level retrieval) ───────
+  # Writer-agnostic: chunks ANY OB1 source into source_chunks (workbench
+  # contract: 1200/150 + bge-m3) so every frontend's retrieval works. Scans
+  # on an interval; also drainable via POST /chunks.
+  iks-chunk-worker:
+    build:
+      context: "D:/Open WebUI/ai-stack/OB1/integrations/chunk-embedding-worker"
+      dockerfile: Dockerfile
+    image: iks-chunk-worker:local
+    container_name: iks-chunk-worker
+    depends_on:
+      iks-db:
+        condition: service_healthy
+    environment:
+      DB_HOST: iks-db
+      DB_PORT: "5432"
+      DB_NAME: openbrain
+      DB_USER: postgres
+      DB_PASSWORD: iks_dev_only
+      EMBEDDING_API_BASE: http://llama-cpp-embed:8080/v1
+      EMBEDDING_API_KEY: not-needed
+      EMBEDDING_MODEL: bge-m3
+      CHUNK_BATCH: "25"
+      CHUNK_INTERVAL_MS: "15000"
+      PORT: "8000"
+    ports:
+      - "127.0.0.1:18815:8000"
+    networks:
+      - iks-net
+      - llm-net
+
+volumes:
+  iks-db-data:
+  iks-surreal-data:
+  iks-notebook-data:
+  # Live wiki tree (notebooks/ registry), read-only. Created by the open-brain
+  # compose project; referenced here as external so the sandbox never owns it.
+  openbrain-wiki-data:
+    external: true
+    name: open-brain_openbrain-wiki-data
+
+networks:
+  # Dedicated throwaway bridge for the sandbox.
+  iks-net:
+    driver: bridge
+  # The main stack's internal model network — reached by name for
+  # read-only inference (embeddings/chat). External: created by the
+  # ai-stack compose project, NOT by this sandbox.
+  llm-net:
+    external: true
+    name: ai-stack_llm-net

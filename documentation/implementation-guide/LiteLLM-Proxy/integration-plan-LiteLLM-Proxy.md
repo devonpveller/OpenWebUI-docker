@@ -54,7 +54,7 @@ cutover than a fast restore-from-backup.
 |---|---|---|---|
 | **0.0 — Pre-flight verification (added in re-audit)** | Run Guide §18 assertions A1–A7: confirm model list, no undiscovered callers, OB1 recipe inventory unchanged, little-coder schema in sync, tailnet sessions reviewed | Full (one operator review at A7) | G-pre (operator approves to begin Phase 0) |
 | **0 — Pre-flight backups** | Backups, branch creation, `.env` scaffolding | Full | G1 (master key + DB password) |
-| **1 — Standup** | LiteLLM config (with ALL model aliases per re-audit §6), compose additions, gateway up, virtual keys, spend-log verification | Full (after G1) | G2 (review issued keys before they're used) |
+| **1 — Standup** | LiteLLM config (with ALL model aliases per re-audit §6), compose additions, **image digest-pin + offline hardening (guide §19)**, gateway up, virtual keys, spend-log verification | Full (after G1) | G2 (review issued keys + pinned digest before they're used) |
 | **2 — Heavy-hitter cutover** | little-coder (Python source → schema regen → runtime configs) + OWUI + openbrain-entity-worker | Mixed (file edits + restarts agent-side; OWUI UI flips operator-side) | G3 (OWUI UI flip) |
 | **3 — Remaining callers (optional, deferrable)** | mnemory + openbrain-mcp + openbrain-wiki + githelper-pipe + **OB1 operator-run recipes** (gmail + google-activity imports — added in re-audit) | Full | None — additive |
 | **4 — Observability** | Pipe module, TPM/RPM caps, retry-loop patches | Mixed (module agent-side; cap values operator-set) | None — additive |
@@ -150,6 +150,15 @@ models. **No callers route through it yet.**
   (`llm-gateway`, `llm-gateway-db`, `llm-gateway-backup`) from §8.3 of
   the guide between the existing `llama-cpp-embed` and `smolcrawl-pipelines`
   blocks. Add `llm-gateway-db-data` to the `volumes:` block.
+- **Resolve and digest-pin the gateway image (supply-chain hardening, guide
+  §19 / D9):** pull `ghcr.io/berriai/litellm:main-stable`, resolve its
+  `sha256` digest, and replace the `__RESOLVED_AT_STANDUP__` placeholder in
+  the §8.3 `image:` line with `ghcr.io/berriai/litellm@sha256:<resolved>`.
+  Confirm the resolved release is outside any known LiteLLM compromise window
+  (check the BerriAI/litellm security advisories) before pinning. The §6
+  config already sets `telemetry: false` and the §8.3 env sets
+  `LITELLM_LOCAL_MODEL_COST_MAP=True`, so the gateway — on the internal-only
+  `llm-net` — makes no outbound internet calls.
 - `docker compose up -d llm-gateway-db` → wait healthy.
 - `docker compose up -d llm-gateway` → wait healthy.
 - Run the §17.2 upstream-connectivity checks.
@@ -161,6 +170,8 @@ models. **No callers route through it yet.**
   row appears.
 
 **Acceptance criteria:**
+- `docker compose config` for `llm-gateway` shows an `@sha256:` image
+  reference (digest-pinned), **not** the floating `:main-stable` tag.
 - `docker ps` shows both `llm-gateway` and `llm-gateway-db` healthy.
 - `curl -fsS http://127.0.0.1:4000/health/liveliness` returns 200.
 - `curl http://127.0.0.1:4000/v1/models -H "Authorization: Bearer
@@ -168,10 +179,13 @@ models. **No callers route through it yet.**
   `qwen36-35b-a3b`, `bge-m3`.
 - Test request produces a spend-log row.
 
-**Gate G2 — operator reviews issued keys.** Agent prints the alias names
-and metadata of every issued key (NOT the key values). Operator confirms
-the list is complete and the metadata matches §7. On confirmation, agent
-writes the key values into the appropriate `.env` files atomically.
+**Gate G2 — operator reviews issued keys + pinned digest.** Agent prints the
+alias names and metadata of every issued key (NOT the key values), plus the
+**pinned image digest** (`docker inspect llm-gateway --format '{{.Image}}'`)
+for a supply-chain sanity check. Operator confirms the list is complete, the
+metadata matches §7, and the digest is the one they intended (guide §19.3). On
+confirmation, agent writes the key values into the appropriate `.env` files
+atomically.
 
 ### Phase 2 — Heavy-hitter cutover (≈45 min agent + 15 min operator)
 

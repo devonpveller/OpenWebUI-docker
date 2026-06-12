@@ -478,6 +478,63 @@ else
     echo "🔄 open-notebook Tailscale integration disabled (OPEN_NOTEBOOK_ENABLED=false)"
 fi
 
+# Configure the OB1 Quartz wiki viewer on its own Tailscale HTTPS port.
+# Quartz (like Streamlit) serves a site at root and does not host cleanly
+# under a sub-path, so expose it at root on a distinct tailnet HTTPS port.
+# The viewer is the openbrain-wiki-viewer container on the OB1 stack; it
+# joins ai-stack_app-net so this netns (shared with openwebui) reaches it
+# by name. OB1 starts AFTER the main stack, so the viewer is usually not up
+# yet at boot — the monitoring loop performs deferred setup when it appears.
+sleep 2
+echo "📚 Configuring OB1 Quartz wiki viewer access..."
+
+QUARTZ_HOST=${QUARTZ_HOST:-openbrain-wiki-viewer}
+QUARTZ_PORT=${QUARTZ_PORT:-8080}
+QUARTZ_ENABLED=${QUARTZ_ENABLED:-true}
+QUARTZ_TS_PORT=${QUARTZ_TS_PORT:-8444}
+QUARTZ_LOCAL_PORT=8239  # Local port for socat proxy
+
+setup_quartz_serve() {
+    echo "🔄 Creating local proxy for Quartz wiki viewer at ${QUARTZ_HOST}:${QUARTZ_PORT}"
+
+    pkill -f "socat.*:${QUARTZ_LOCAL_PORT}" || true
+    sleep 2
+
+    echo "🚀 Starting socat proxy: 127.0.0.1:${QUARTZ_LOCAL_PORT} -> ${QUARTZ_HOST}:${QUARTZ_PORT}"
+    socat -d -d TCP-LISTEN:${QUARTZ_LOCAL_PORT},fork,reuseaddr,keepalive TCP:${QUARTZ_HOST}:${QUARTZ_PORT} > /tmp/socat-quartz.log 2>&1 &
+    QUARTZ_SOCAT_PID=$!
+    echo $QUARTZ_SOCAT_PID > /tmp/socat-quartz.pid
+
+    sleep 3
+    if ! kill -0 $QUARTZ_SOCAT_PID 2>/dev/null; then
+        echo "❌ ERROR: Quartz wiki viewer socat failed to start"
+        cat /tmp/socat-quartz.log 2>/dev/null || echo "No log file found"
+        return 1
+    fi
+    echo "✅ Quartz wiki viewer proxy started successfully (PID: $QUARTZ_SOCAT_PID)"
+
+    tailscale --socket=/tmp/tailscaled.sock serve \
+      --https=${QUARTZ_TS_PORT} \
+      --bg \
+      http://127.0.0.1:${QUARTZ_LOCAL_PORT}
+    echo "✅ Quartz wiki viewer configured on tailnet HTTPS port ${QUARTZ_TS_PORT} (via proxy: ${QUARTZ_HOST}:${QUARTZ_PORT} -> 127.0.0.1:${QUARTZ_LOCAL_PORT})"
+
+    touch /tmp/quartz-serve-configured
+    return 0
+}
+
+if [ "$QUARTZ_ENABLED" = "true" ]; then
+    # Single boot attempt — OB1 usually isn't up yet, so don't block startup
+    # on a long retry; the monitoring loop's deferred setup handles it.
+    if wget -q -T 10 -O /dev/null http://${QUARTZ_HOST}:${QUARTZ_PORT}/; then
+        setup_quartz_serve || echo "⚠️ Quartz wiki viewer setup failed — monitoring loop will retry"
+    else
+        echo "⚠️ Quartz wiki viewer not reachable yet (OB1 starts after the main stack) — monitoring loop will configure it when it comes online"
+    fi
+else
+    echo "🔄 Quartz wiki viewer Tailscale integration disabled (QUARTZ_ENABLED=false)"
+fi
+
 echo "✅ Tailscale serve configured:"
 echo "  - OpenWebUI: HTTPS port 443 -> 127.0.0.1:8080"
 echo "  - Ollama API: HTTPS port 443/ollama -> 127.0.0.1:11434"
@@ -493,6 +550,9 @@ fi
 if [ "$OPEN_NOTEBOOK_ENABLED" = "true" ]; then
     echo "  - open-notebook UI: HTTPS port ${OPEN_NOTEBOOK_TS_PORT} -> ${OPEN_NOTEBOOK_HOST}:${OPEN_NOTEBOOK_PORT}"
     echo "  - open-notebook API: HTTPS port ${OPEN_NOTEBOOK_API_TS_PORT} -> ${OPEN_NOTEBOOK_HOST}:${OPEN_NOTEBOOK_API_PORT}"
+fi
+if [ "$QUARTZ_ENABLED" = "true" ]; then
+    echo "  - Quartz wiki viewer: HTTPS port ${QUARTZ_TS_PORT} -> ${QUARTZ_HOST}:${QUARTZ_PORT}"
 fi
 
 # 8) Background monitoring loop for autonomous recovery
@@ -656,6 +716,39 @@ fi
             fi
         fi
         
+        # Check Quartz wiki viewer: deferred setup + socat health
+        if [ "$QUARTZ_ENABLED" = "true" ]; then
+            if [ ! -f /tmp/quartz-serve-configured ]; then
+                # Serve was never configured (OB1 starts after the main stack) —
+                # try deferred setup once the viewer is reachable.
+                if wget -q -T 10 -O /dev/null http://${QUARTZ_HOST}:${QUARTZ_PORT}/; then
+                    echo "📚 $(date): Quartz wiki viewer is now online, performing deferred setup..."
+                    setup_quartz_serve || echo "❌ $(date): Deferred Quartz setup failed, will retry next cycle"
+                fi
+            elif [ -f /tmp/socat-quartz.pid ]; then
+                QUARTZ_PID=$(cat /tmp/socat-quartz.pid)
+                if ! kill -0 $QUARTZ_PID 2>/dev/null; then
+                    echo "⚠️ $(date): Quartz wiki viewer socat proxy (PID: $QUARTZ_PID) has died, restarting..."
+
+                    QUARTZ_LOCAL_PORT=8239
+                    pkill -f "socat.*:${QUARTZ_LOCAL_PORT}" || true
+                    sleep 2
+
+                    socat -d -d TCP-LISTEN:${QUARTZ_LOCAL_PORT},fork,reuseaddr,keepalive TCP:${QUARTZ_HOST}:${QUARTZ_PORT} > /tmp/socat-quartz.log 2>&1 &
+                    NEW_QUARTZ_PID=$!
+                    echo $NEW_QUARTZ_PID > /tmp/socat-quartz.pid
+                    sleep 3
+
+                    if kill -0 $NEW_QUARTZ_PID 2>/dev/null; then
+                        echo "✅ $(date): Quartz wiki viewer proxy restarted successfully (PID: $NEW_QUARTZ_PID)"
+                    else
+                        echo "❌ $(date): Failed to restart Quartz wiki viewer proxy"
+                        cat /tmp/socat-quartz.log 2>/dev/null || echo "No log available"
+                    fi
+                fi
+            fi
+        fi
+
         # Refresh tailnet-info.json so the openwebui admin pipe always sees
         # current FQDN / peer state. Cheap (single status call) and resilient.
         write_tailnet_info >/dev/null 2>&1 || true
@@ -821,6 +914,13 @@ fi
                     rm -f /tmp/open-notebook-api-serve-configured
                     setup_open_notebook_api_serve || echo "❌ Failed to add open-notebook API serve"
                 fi
+            elif [ "$QUARTZ_ENABLED" = "true" ] && ! echo "$serve_status" | grep -q "127.0.0.1:${QUARTZ_LOCAL_PORT:-8239}"; then
+                # Quartz wiki viewer serve is missing, try to add it
+                echo "🔄 $(date): Adding missing Quartz wiki viewer serve configuration..."
+                if wget -q -T 10 -O /dev/null http://${QUARTZ_HOST}:${QUARTZ_PORT}/; then
+                    rm -f /tmp/quartz-serve-configured
+                    setup_quartz_serve || echo "❌ Failed to add Quartz wiki viewer serve"
+                fi
             fi
         fi
     done
@@ -848,6 +948,9 @@ fi
 if [ "$OPEN_NOTEBOOK_ENABLED" = "true" ]; then
     echo "  - open-notebook UI: https://$(tailscale --socket=/tmp/tailscaled.sock status --json | grep '"Name"' | cut -d'"' -f4 2>/dev/null || echo 'your-hostname').tail[...].ts.net:${OPEN_NOTEBOOK_TS_PORT}/"
     echo "  - open-notebook API: https://$(tailscale --socket=/tmp/tailscaled.sock status --json | grep '"Name"' | cut -d'"' -f4 2>/dev/null || echo 'your-hostname').tail[...].ts.net:${OPEN_NOTEBOOK_API_TS_PORT}/api"
+fi
+if [ "$QUARTZ_ENABLED" = "true" ]; then
+    echo "  - Quartz wiki viewer: https://$(tailscale --socket=/tmp/tailscaled.sock status --json | grep '"Name"' | cut -d'"' -f4 2>/dev/null || echo 'your-hostname').tail[...].ts.net:${QUARTZ_TS_PORT}/"
 fi
 # 9) Keep the container running
 tail -f /dev/null

@@ -5,6 +5,7 @@ Status Check - Python equivalent of quick-fixes.bat status
 Comprehensive system status check with detailed diagnostics.
 """
 
+import json
 import os
 import subprocess
 import sys
@@ -308,19 +309,10 @@ def check_service_accessibility():
         log_success("OpenWebUI accessibility: OK")
     else:
         log_error("OpenWebUI accessibility: FAILED")
-    
-    # Check Ollama API accessibility
-    result = run_docker_command(
-        ["docker", "compose", "exec", "-T", "tailscale", "wget", "-q", "-T", "3", "-O", "/dev/null", "http://127.0.0.1:11434/api/version"],
-        project_root,
-        timeout=10
-    )
-    
-    if result and result.returncode == 0:
-        log_success("Ollama API accessibility: OK")
-    else:
-        log_error("Ollama API accessibility: FAILED")
-    
+
+    # NOTE: the Ollama API check was removed — the ollama container is disabled
+    # in this stack (see CLAUDE.md). Inference is direct to llama-cpp.
+
     # Check llama-cpp accessibility
     result = run_docker_command(
         ["docker", "compose", "exec", "-T", "tailscale", "wget", "-q", "-T", "5", "-O", "/dev/null", "http://llama-cpp:8080/health"],
@@ -347,6 +339,89 @@ def check_service_accessibility():
     
     return True
 
+def load_inventory():
+    """Load the canonical service inventory (lib/stack-services.json)."""
+    inv_path = Path(__file__).resolve().parent / "lib" / "stack-services.json"
+    try:
+        with open(inv_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        log_error(f"Could not load service inventory {inv_path}: {e}")
+        return None
+
+
+def _container_state(name):
+    """docker inspect a container's state BY NAME (project-agnostic — works for
+    both the ai-stack and open-brain compose projects)."""
+    try:
+        r = subprocess.run(
+            ["docker", "inspect", "-f", "{{.State.Status}}", name],
+            capture_output=True, text=True, timeout=10
+        )
+        return r.stdout.strip() if r.returncode == 0 else "absent"
+    except Exception:
+        return "error"
+
+
+def _container_started_at(name):
+    """Raw ISO-8601 UTC start time. UTC ISO strings sort lexicographically, so a
+    plain string compare is a safe 'started after' test."""
+    try:
+        r = subprocess.run(
+            ["docker", "inspect", "-f", "{{.State.StartedAt}}", name],
+            capture_output=True, text=True, timeout=10
+        )
+        return r.stdout.strip() if r.returncode == 0 else None
+    except Exception:
+        return None
+
+
+def check_extended_planes():
+    """Liveness across ALL planes — including the SEPARATE open-brain project that
+    `docker compose` (ai-stack) cannot see — plus the openbrain-mcp stale-DB-pool
+    guard. Data-driven from lib/stack-services.json so this stays in sync with the
+    single canonical inventory instead of drifting like the old hard-coded lists."""
+    print()
+    log_info("Extended Plane Liveness (all planes incl. Open Brain):")
+    inv = load_inventory()
+    if not inv:
+        return False
+
+    ok = True
+    planes = inv.get("planes", {})
+    for plane_name, services in planes.items():
+        down = []
+        for svc in services:
+            name = svc["container"]
+            state = _container_state(name)
+            if state != "running":
+                down.append(f"{name}={state}")
+        if down:
+            ok = False
+            log_error(f"  {plane_name}: " + ", ".join(down))
+        else:
+            log_success(f"  {plane_name}: all {len(services)} running")
+
+    # Stale-pool guard: a service holding a long-lived DB connection that died
+    # when its DB restarted. Signature case: openbrain-db restarts AFTER
+    # openbrain-mcp -> every MCP tool call returns 'Broken pipe' -> OWUI tool 500s,
+    # while the container still shows 'Up'. See memory: openbrain-mcp-stale-db-connection.
+    for services in planes.values():
+        for svc in services:
+            guard = svc.get("stale_pool_guard")
+            if not guard:
+                continue
+            mcp = svc["container"]
+            mcp_started = _container_started_at(mcp)
+            db_started = _container_started_at(guard)
+            if mcp_started and db_started and db_started > mcp_started:
+                ok = False
+                log_warn(f"  {mcp}: STALE DB POOL — {guard} started {db_started} > {mcp} {mcp_started}")
+                log_warn(f"     fix: docker restart {mcp}   (or: quick-fixes.bat openbrain)")
+
+    return ok
+
+
 def main():
     """Main status check function"""
     log_info("==========================================")
@@ -368,6 +443,7 @@ def main():
         check_llama_cpp_status,
         check_llama_cpp_embed_status,
         check_open_terminal_status,
+        check_extended_planes,
         check_network_connectivity,
         check_tailscale_status,
         check_tailscale_serve,

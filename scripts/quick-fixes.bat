@@ -19,6 +19,7 @@ if "%1"=="mnemory" goto :mnemory_check
 if "%1"=="smolcrawl" goto :smolcrawl_check
 if "%1"=="llama-cpp" goto :llama_cpp_check
 if "%1"=="open-notebook" goto :open_notebook_check
+if "%1"=="openbrain" goto :openbrain_check
 goto :usage
 
 :interactive_menu
@@ -42,10 +43,11 @@ echo   9. Mnemory check and restart
 echo  10. SmolCrawl pipelines check and restart
 echo  11. llama-cpp / llama-cpp-embed check and restart
 echo  12. open-notebook (and surrealdb) check and restart
+echo  13. Open Brain (mcp/mcpo/db/gateway/wiki) check and restart
 echo.
 echo   0. Exit
 echo.
-set /p choice="Select option (1-12,0): "
+set /p choice="Select option (1-13,0): "
 
 if "%choice%"=="1" goto :namespace_reset
 if "%choice%"=="2" goto :status_check
@@ -59,6 +61,7 @@ if "%choice%"=="9" goto :mnemory_check
 if "%choice%"=="10" goto :smolcrawl_check
 if "%choice%"=="11" goto :llama_cpp_check
 if "%choice%"=="12" goto :open_notebook_check
+if "%choice%"=="13" goto :openbrain_check
 if "%choice%"=="0" goto :end
 echo [ERROR] Invalid choice
 timeout /t 2 /nobreak >nul
@@ -439,6 +442,23 @@ cd ..
 docker compose ps surrealdb --format "table {{.Service}}\t{{.Status}}" 2>nul
 cd scripts
 echo.
+echo [INFO] Web-search gateway health (:8085/healthz):
+curl -s -f -m 5 http://127.0.0.1:8085/healthz >nul 2>&1
+if %ERRORLEVEL% EQU 0 (
+    echo [SUCCESS] search-gateway healthz: OK
+) else (
+    echo [ERROR] search-gateway healthz: FAILED - run: docker compose up -d tor redis searxng gateway mcpo
+)
+echo.
+echo [INFO] Extended planes running state (search / little-coder / mnemory-gateway):
+echo        ^(compose service keys: tor=search-tor, gateway=search-gateway, mcpo=search-mcpo^)
+cd ..
+docker compose ps tor redis searxng gateway mcpo little-coder lc-mcpo lc-egress mnemory-gateway --format "table {{.Service}}\t{{.Status}}" 2>nul
+cd scripts
+echo.
+echo [INFO] Open Brain stack (mcp/mcpo/db/gateway/wiki - SEPARATE compose project):
+powershell -ExecutionPolicy Bypass -NoProfile -File "%SCRIPT_DIR%check-openbrain-health.ps1"
+echo.
 echo [INFO] Backup schedulers and Watchtower (no health endpoints - running state only):
 cd ..
 docker compose ps mnemory-backup openwebui-backup watchtower --format "table {{.Service}}\t{{.Status}}" 2>nul
@@ -788,6 +808,29 @@ if "%1"=="" (
 )
 goto :end
 
+:openbrain_check
+echo.
+echo ========================================
+echo   Open Brain Health Check and Recovery
+echo ========================================
+echo.
+echo [INFO] Open Brain is a SEPARATE compose project (open-brain) - a plain
+echo [INFO] 'docker compose' from this stack cannot see it.
+echo [INFO] Running canonical probe with auto-repair (incl. the openbrain-mcp
+echo [INFO] stale-DB-pool guard that fixes OWUI tool 500s / 'Broken pipe')...
+echo.
+powershell -ExecutionPolicy Bypass -NoProfile -File "%SCRIPT_DIR%check-openbrain-health.ps1" -Repair
+echo.
+echo [INFO] If mcp/mcpo tools still 500 in Open WebUI after this, check logs:
+echo [INFO]   docker logs --tail 50 openbrain-mcp
+echo [INFO]   docker logs --tail 50 openbrain-mcpo
+if "%1"=="" (
+    echo.
+    pause
+    goto :interactive_menu
+)
+goto :end
+
 :usage
 echo.
 echo ========================================
@@ -808,6 +851,7 @@ echo   mnemory           - Check Mnemory health and restart if needed
 echo   smolcrawl         - Check SmolCrawl Pipelines health and restart if needed
 echo   llama-cpp         - Check llama-cpp and llama-cpp-embed health and restart if needed
 echo   open-notebook     - Check open-notebook (and surrealdb) health and restart if needed
+echo   openbrain         - Check Open Brain (mcp/mcpo/db/gateway/wiki) health and restart if needed
 echo   nuclear           - Full stack restart (use when all else fails)
 echo.
 echo Examples:
