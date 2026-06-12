@@ -253,6 +253,64 @@ Because rollback is this clean, the offline permissive-logging spike (§1A.3)
 becomes an *optional* pre-check rather than a hard prerequisite — the canary
 tests the same fact under real load with an instant, invisible undo.
 
+## 1B. As-deployed (2026-06-12) — live reality + decisions
+
+**Status: LIVE.** The flip was executed; chat + embeddings + OWUI verified. This
+section is the authoritative "what's actually running and why." Where it differs
+from §1A's design, **this section wins**.
+
+### Topology (operator's framing — LiteLLM is the analytics front door)
+```
+Service → LiteLLM (llm-gateway) → llama-swap → llama.cpp + embedding
+Service → LiteLLM (llm-gateway) → <other backends, e.g. OpenRouter — planned>
+              └── analytics: per-caller stats + per-model demand + over-time
+```
+LiteLLM is **THE front door** — its purpose is analytics (and the future
+multi-backend router). **Never route inference around it.** The container always
+called `llama-cpp` is actually **llama-swap** (`mostlygeek/llama-swap`), renamed
+`llama-cpp-upstream`; it swaps models on demand and proxies to `llama-server`
+(llama.cpp). So the real chain is **LiteLLM → llama-swap → llama.cpp**.
+
+### What was built
+- `llm-gateway` (LiteLLM, digest-pinned, **permissive — no master_key**) holds the
+  `llama-cpp` + `llama-cpp-embed` **network aliases** on `:8080`; routes `/v1/*` by
+  model name. `llm-gateway-db` (spend ledger) + `llm-gateway-backup`.
+- Real servers renamed `llama-cpp-upstream` / `llama-cpp-embed-upstream`; gateway
+  `api_base` → those. Callers are **unchanged** (still hit `llama-cpp:8080`).
+- Every health/recovery/diagnostic system repointed to `*-upstream` + gateway
+  added (system_health, gpu_status, status_check, gpu_check, check-tailscale-health,
+  check-backup-coverage, emergency-recovery.{ps1,bat}, tailscale env).
+
+### Decisions / hard-won findings (the WHY — do not regress)
+1. **`background_health_checks: false`** — LiteLLM's `/health` sends a real
+   completion to *every* registered model → on single-GPU llama-swap that forces a
+   model **load per probe → 27B⇄35B thrash** that starved chat. Uptime is monitored
+   side-effect-free instead by `modules/system-health` probing the **upstream**
+   `/health` (llama-swap router liveness — 200 without loading a model) + gateway
+   `/health/liveliness` + GPU. (LiteLLM is a router, not a health monitor.)
+2. **`--no-mmap`** in `config/llama-swap.config.yaml` — mmap of the ~16–21 GB GGUF
+   over the Windows `C:\…\.lmstudio\models` bind mount **hangs** on cold-load
+   (reads the header, then stalls). Regular reads load fine.
+3. **35B removed from the gateway model_list** (operator call — no service uses it;
+   safe to re-add now that health-checks are off → no probe → no thrash).
+4. **`/slots` is a pre-existing llama-swap gap, not LiteLLM** — llama-swap returns
+   404 for `/slots` even with a model loaded, so little-coder's GPU-occupancy
+   metric (best-effort, non-gating) was already dead before the gateway. To revive:
+   `--slots` on the llama.cpp server **and** a LiteLLM `pass_through_endpoints` entry
+   (`/slots → llama-cpp-upstream`; pass_through works but needs `up --force-recreate`,
+   not `restart`, to register). **Never** fix it by editing little-coder (SOLID) or
+   by fronting/bypassing LiteLLM (analytics blind spot).
+5. **Analytics verified** — `LiteLLM_SpendLogs` captures per-caller (by the key each
+   sends), per-model, over-time. Clean per-caller virtual keys = the lazy §1A.4
+   enhancement (flip one caller's key env at a time; URL never changes).
+
+### Source-of-truth config
+- `config/litellm.config.yaml` — model_list, permissive `general_settings`,
+  `background_health_checks: false`, the `/slots` note.
+- `config/llama-swap.config.yaml` — `--no-mmap`.
+- `docker-compose.yml` — `llm-gateway*` services + the `*-upstream` renames + the
+  gateway's `llama-cpp`/`llama-cpp-embed` aliases.
+
 ## 2. Industry-standard pattern alignment
 
 For "OpenAI-compatible inference + per-caller attribution + persistent

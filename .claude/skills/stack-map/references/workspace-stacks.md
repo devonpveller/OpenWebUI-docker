@@ -44,8 +44,10 @@ Run with: `docker compose ...` from the workspace root.
 |-----------|------|-----------|----------|-----|
 | `openwebui` | Open WebUI chat surface | 127.0.0.1:3000 | default, llm-net, app-net | yes |
 | `tailscale` | Tailnet VPN; shares openwebui netns; serves ON :8443/:5055 + wiki :8444 (via caddy:8446) | — (`network_mode: service:openwebui`) | — | no |
-| `llama-cpp` | llama-swap inference — `qwen36-27b` (∥2) **+** `qwen36-35b-a3b` (∥1); **one model resident at a time** (swap thrash avoided by pinning same model) | 127.0.0.1:8081 | llm-net | yes (device 0) |
-| `llama-cpp-embed` | bge-m3 embeddings server | 127.0.0.1:8082 | llm-net | yes (device 1) |
+| `llm-gateway` | **LiteLLM analytics front door** (holds the `llama-cpp` + `llama-cpp-embed` network aliases on :8080; all callers reach inference through it). Routes `/v1/*` by model name to the `*-upstream` servers; permissive (no master_key) per-caller spend ledger; `background_health_checks:false` (a model health-probe forces a llama-swap load → thrash) | 127.0.0.1:4000 (admin only) | llm-net | no |
+| `llm-gateway-db` | Postgres for the LiteLLM spend-log ledger (`llm-gateway-db-data` volume) | — | llm-net | no |
+| `llama-cpp-upstream` | llama-swap inference (was `llama-cpp`) — `qwen36-27b` (∥2); 35B is in llama-swap config but **not registered in the gateway**; one model resident at a time; `--no-mmap` (mmap over the C: bind mount hangs) | 127.0.0.1:8081 | llm-net | yes (device 0) |
+| `llama-cpp-embed-upstream` | bge-m3 embeddings server (was `llama-cpp-embed`) | 127.0.0.1:8082 | llm-net | yes (device 1) |
 | `watchtower` | container auto-update monitor | — | default | no |
 
 **Memory (mnemory)**
@@ -125,8 +127,9 @@ Run with: `docker compose -f OB1/docker/docker-compose.yml ...`.
 
 > **Why separate:** OB1 is its own compose project (`name: open-brain`). It
 > attaches to the main stack's `ai-stack_llm-net` as an **external** network,
-> so it depends on the main stack being up. Bring OB1 up *after* `llama-cpp`
-> and `llama-cpp-embed` are healthy; tear it down *before* the main stack so
+> so it depends on the main stack being up. Bring OB1 up *after* `llm-gateway`
+> (the inference front door; its `llama-cpp-upstream` / `llama-cpp-embed-upstream`
+> servers must be healthy first) is up; tear it down *before* the main stack so
 > `docker compose down` can drop `llm-net`.
 
 ### Networks
@@ -221,7 +224,10 @@ A nuclear `docker compose down` stops a running portal; recovery detects this an
 Bottom-up (start in this order; stop in reverse):
 
 1. `openwebui` (provides the network namespace for `tailscale`)
-2. `llama-cpp`, `llama-cpp-embed` (inference — consumed by mnemory, coder, OB1)
+2. `llama-cpp-upstream`, `llama-cpp-embed-upstream` (real inference = llama-swap → llama.cpp)
+2.5. `llm-gateway-db` → `llm-gateway` (the LiteLLM front door — all callers reach
+    inference through its `llama-cpp`/`llama-cpp-embed` aliases; starts AFTER the
+    `*-upstream` servers, BEFORE the callers)
 3. `tailscale`
 4. `mnemory` → `mnemory-gateway` → `mnemory-backup`
 5. `openwebui-backup`, `smolcrawl-pipelines`
@@ -231,9 +237,9 @@ Bottom-up (start in this order; stop in reverse):
 9. `watchtower`
 10. **Backup sidecars** — each starts after its target is healthy; idle cron otherwise
     (`mnemory-backup`, `openwebui-backup`, `little-coder-backup`, `smolcrawl-backup`,
-    `tailscale-backup`, `lm-models-backup`, and — needs OB1 up — `openbrain-db-backup`,
-    `openbrain-wiki-backup`, `open-notebook-backup`).
-11. **OB1** (`docker compose -f OB1/docker/docker-compose.yml up -d`) — after `llama-cpp`.
+    `tailscale-backup`, `lm-models-backup`, `llm-gateway-backup`, and — needs OB1 up —
+    `openbrain-db-backup`, `openbrain-wiki-backup`, `open-notebook-backup`).
+11. **OB1** (`docker compose -f OB1/docker/docker-compose.yml up -d`) — after `llm-gateway`.
 12. **Portal** (profile-gated, **separate lifecycle**): `scripts/portal-on.ps1` →
     `portal-init` → `authelia` → `caddy` → `cloudflared`, plus `portal-alerter` and the
     watchers/tripwire/cron + `caddy-backup`/`authelia-backup`. Not part of the default `up`;

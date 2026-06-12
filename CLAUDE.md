@@ -12,14 +12,28 @@ for the full inventory — networks, ports, dependency order.
 
 | Stack | Driven with | Contents |
 |-------|-------------|----------|
-| **Main** (`ai-stack`) | `docker compose ...` | core (`openwebui`, `tailscale`, `llama-cpp`, `llama-cpp-embed`, `watchtower`), memory (`mnemory`, `mnemory-gateway`), search (`tor`, `redis`, `searxng`, `gateway`, `mcpo`), coder (`open-terminal`, `little-coder`, `lc-mcpo`, `lc-egress`), aux (`smolcrawl-pipelines`, `surrealdb`, `open_notebook`), backups (9 cron sidecars incl. `*-backup` + `openbrain-db/wiki-backup`) |
+| **Main** (`ai-stack`) | `docker compose ...` | core (`openwebui`, `tailscale`, `llm-gateway` + `llm-gateway-db` — LiteLLM analytics **front door**, holds the `llama-cpp`/`llama-cpp-embed` aliases since 2026-06-12; `llama-cpp-upstream`, `llama-cpp-embed-upstream` — real inference (llama-swap) behind the gateway; `watchtower`), memory (`mnemory`, `mnemory-gateway`), search (`tor`, `redis`, `searxng`, `gateway`, `mcpo`), coder (`open-terminal`, `little-coder`, `lc-mcpo`, `lc-egress`), aux (`smolcrawl-pipelines`, `surrealdb`, `open_notebook`), backups (10 cron sidecars incl. `*-backup` + `llm-gateway-backup` + `openbrain-db/wiki-backup`) |
 | **Main — Portal** (`profiles: [internet]`) | `scripts/portal-on.ps1` / `portal-off.ps1` | **profile-gated, NOT in a default `up`:** `caddy`, `authelia`, `cloudflared`, `portal-init`, `portal-alerter`, `authelia-watcher`, `authelia-notif-bridge`, `integrity-tripwire`, `portal-cron`, `tunnel-watcher` (+ `caddy-backup`, `authelia-backup`). Internet-exposed auth front-end. |
 | **Open Brain** (`open-brain`) | `docker compose -f OB1/docker/docker-compose.yml ...` | ~23 `openbrain-*` containers (incl. a 5-container scheduled slice: `cron` + 4 HTTP-triggered jobs) — a **separate** project that attaches to the main stack's `ai-stack_llm-net` as an external network |
 | **Recovery stack** | `scripts/emergency-recovery.ps1` (or `.bat`) | Ordered restart/repair across **both** compose projects — `recover` / `nuclear` / `gpu-reset`. Does **not** manage the profile-gated Portal. |
 
 A plain `docker compose` command never touches Open Brain (its own project) **or
-the Portal** (profile-gated). Bring OB1 up after `llama-cpp` is healthy; tear it
+the Portal** (profile-gated). Bring OB1 up after `llm-gateway` (and its
+`llama-cpp-upstream` / `llama-cpp-embed-upstream` servers) is healthy; tear it
 down before the main stack. The Portal has its own lifecycle (`portal-on/off.ps1`).
+
+**Inference plane (since 2026-06-12):** every service reaches inference through
+`http://llama-cpp:8080` / `http://llama-cpp-embed:8080`, which are now **network
+aliases on `llm-gateway` (LiteLLM)** — the analytics front door. It forwards by
+model name to `llama-cpp-upstream` (llama-swap → llama.cpp) and
+`llama-cpp-embed-upstream`. **Never route inference around LiteLLM** (it's the
+analytics inlet + the future multi-backend router). Health/GPU/recovery probes
+target the **real** servers (`*-upstream`), not the gateway. Config gotchas:
+`config/litellm.config.yaml` runs **permissive (no master_key)** with
+`background_health_checks: false` (a model health-probe forces a llama-swap
+load → thrash); `config/llama-swap.config.yaml` uses `--no-mmap` (mmap of the big
+GGUF over the Windows `C:` bind mount hangs). See `litellm-proxy-status` memory +
+`documentation/implementation-guide/LiteLLM-Proxy/`.
 
 ## Conventions
 
