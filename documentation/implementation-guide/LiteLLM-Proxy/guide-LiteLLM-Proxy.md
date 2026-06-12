@@ -582,6 +582,21 @@ nightly at 02:00 — run it once on demand right before the change).
 
 ### 8.3 New compose services — `docker-compose.yml` additions
 
+> **✅ DEPLOYED + VERIFIED 2026-06-12 — the live `docker-compose.yml` is canonical.**
+> The standup gateway is running alongside the live servers (no aliases yet) and
+> verified (serves all 7 model ids; chat + embeddings proxy 200; permissive mode
+> logs distinct per-key rows). The **verified form differs from the sketch below**:
+> - listens on **`--port 8080`** (not 4000); host map `127.0.0.1:4000:8080`.
+> - **no `master_key`** (permissive, guide §1A.3); `LITELLM_MASTER_KEY`/`LC_LLAMA_API_KEY`
+>   env removed; DB via `DATABASE_URL=postgres://litellm:${LITELLM_DB_PASSWORD}@llm-gateway-db:5432/litellm`.
+> - healthcheck uses **python** (`urllib`), not `curl` — the litellm image is
+>   wolfi-based with no curl; `start_period: 120s` for first-boot prisma migrations.
+> - image digest resolved: `ghcr.io/berriai/litellm@sha256:c98c9395c56a35b7abacff8269d43ff99aabacb62bbf42a04cc1514fcb9bde4a`.
+> - `llm-gateway-backup` uses `postgres:16-alpine` (needs `pg_dump`) on a daily
+>   sleep-loop, not `alpine`.
+> The sketch below is kept for design intent; for the exact deployed spec read
+> the `llm-gateway*` blocks in `docker-compose.yml`.
+
 ```yaml
   llm-gateway:
     # Digest-pinned — supply-chain hardening (decision D9, see §19). LiteLLM was
