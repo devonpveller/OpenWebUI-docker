@@ -195,14 +195,26 @@ Applied as: repo edit (durable) → `docker cp index.ts openbrain-mcp:/app/index
 → `docker restart openbrain-mcp` (interpreted `deno run`, so no image rebuild needed
 to go live). Re-ran `promote.py` → the 44 completed, 49 skipped via resume.
 
-> **Durability caveat:** the running container has the fix via `docker cp`, and the
-> repo source has it, but the **`openbrain-mcp-server:local` image does not** until
-> rebuilt (`docker compose -f OB1/docker/docker-compose.yml up -d --build openbrain-mcp`).
-> Until that rebuild, a `--force-recreate` / recovery-script restart reverts the fix.
+> **Durability — RESOLVED (2026-06-12):** the `openbrain-mcp-server:local` image was
+> rebuilt and the container recreated so the fix survives `--force-recreate` / recovery:
+> `docker compose --project-name open-brain --project-directory OB1/docker `
+> `-f OB1/docker/docker-compose.yml up -d --build --no-deps openbrain-mcp`.
+> Verified `MAX_EMBED_CHARS` present in the running image's `/app/index.ts`.
 
-> **Found (not fixed):** the `search` MCP tool errors `Do not know how to serialize a
-> BigInt` — a pre-existing serialization bug in the thoughts-search path, unrelated to
-> this migration. Logged for a later OB1 fix.
+### Discovered issue: `search`/`fetch` BigInt serialization — FIXED (2026-06-12)
+
+The `search` MCP tool errored `Do not know how to serialize a BigInt`: it selected
+`thoughts.id` (BIGSERIAL → BigInt) and `JSON.stringify`'d it; `fetch` had the same
+latent bug. Fixed in the same OB1 file + rebuild:
+- `search`/`fetch` now emit `id: String(...)` (the ChatGPT search/fetch contract wants
+  string ids), and
+- a global `BigInt.prototype.toJSON → Number` backstop covers any other int8 column
+  that reaches JSON.
+
+Verified post-rebuild: `search` returns `isError:false` with string ids
+(`{"results":[{"id":"7343",...}]}`). (Migrated docs live in `sources`/threads, not
+`thoughts`, so the thoughts-only `search` tool won't surface them — browse via
+`get_thread_sources`; the research/curator stack reaches them through chunk search.)
 
 ## Sequencing into the upgrade
 
