@@ -45,12 +45,23 @@ This guide specifies a pipeline that, **before any upgrade is applied**:
 
 The trigger is **watchtower** detecting that a newer image is available. The
 "autonomous" part of this system is everything *up to* the apply — detection,
-two-dimensional research, the pass/stop verdict, claim ingestion, notification,
+three-dimensional research, the pass/stop verdict, claim ingestion, notification,
 and staging the exact file change. The apply itself is **human-gated**: updates
 are STOPPED until the operator gives the go-ahead via team messaging. Once
 approved, the apply (file edit + recreate) and any rollback (git) run
 autonomously. Security-relevant updates are messaged to the operator for
 awareness regardless of decision.
+
+**Cadence (added 2026-06-12 — see §3 D12–D18 and §5A).** Detection runs **daily**
+as a step in the existing 01:00 scheduled chain; each candidate is researched on
+three dimensions — security + impact + **user/community field reports** — and held
+by a **maturity delay** (default 7 days) so follow-up bug-fix releases and
+real-world reports can surface. Eligible updates **accumulate through the week and
+are recommended as a batch on Friday** (the weekend is the buffer for any
+regressions) through the teams-chat orchestration, where the operator chooses
+**go / security-only / nogo**. Security vulnerabilities are flagged **urgent** and
+surfaced immediately. The per-update safety gate below is unchanged — only the
+*timing* of the recommendation and apply is batched.
 
 This system is the **automation of the manual per-service digest-bump runbook**
 already written for the LiteLLM gateway (LiteLLM guide §19.3). That runbook —
@@ -89,6 +100,13 @@ an orchestration layer over live services, not a green-field build.
 | D9 | **The apply capability is gated on a human go-ahead delivered via teams-chat** (`../teams-chat-agent-orchestration/`). Until that channel exists the system runs **research + claim + email + STOP** — it applies nothing; the email carries a pre-filled manual bump command for the operator to apply by hand if they choose. | Operator directive. The research/notify value lands immediately at zero apply-risk; the apply path lights up only when the human-approval channel is wired (or via the interim manual approval of §13). |
 | D10 | **The approval sink is human-in-the-loop, delivered via teams-chat.** It is pluggable only to allow an **interim approval mode** (manual operator trigger / email) while teams-chat is unbuilt. There is **no** autonomous-apply sink. | The operator's end-state is human approval via team messaging, security updates messaged for awareness. The pluggable seam keeps the interim manual path and the future teams-chat path as a config choice, not a rewrite — but neither is ever auto. |
 | D11 | **Watched services are digest-pinned**; the tracked floating tag is recorded per service for *detection only*. | Detection compares "what the floating tag points to now" against "the pinned digest we run." Deployment stays on the immutable digest. See §9 for the watchtower/digest-pin interaction. |
+| D12 | **Detection runs daily on the existing 01:00 scheduled chain**, not on watchtower's 2-min poll. Watchtower stays monitor-only as a continuous secondary feed; the authoritative once-daily sweep is a step in the OB1 `pull → prune → digest` cron (`OB1/docker/cron/crontab`, 05:00 UTC = 01:00 EDT). | One off-peak batch/day aligns detection with the slice that already runs the digest, and lets the day's findings feed it (D18). |
+| D13 | **Maturity delay — a candidate is not *eligible* until its version has been published ≥ `maturity_days` (default 7).** Detection + research happen immediately; only *eligibility for recommendation/apply* is age-gated. Per-service override; urgent security may bypass (D17). | A fresh release often gets a fast follow-up bug-fix; ~1 week lets those land and lets field reports (D15) accumulate before we touch the stack. |
+| D14 | **Weekly accumulation with a Friday apply window.** Eligible updates queue through the week; the recommendation + apply happens **Friday**, with the weekend as the regression buffer. NOGO postpones the whole batch to the next Friday. | A single, predictable weekly change window with slack to fix anything that breaks — not mutating the stack on random weekdays. |
+| D15 | **A third research dimension — user/community field reports** (Open WebUI subreddit, GitHub issues, forums) for reported bugs/regressions on the candidate. Joins job A (security) + job B (impact). | Real-world breakage often shows up in community reports before changelogs; the maturity delay (D13) is what makes those reports exist to find. |
+| D16 | **The Friday recommendation is synthesized and delivered through the teams-chat orchestration** (PM-composed), presenting selectable options: **GO (full) / GO (security-only) / NOGO**. Apply waits on the human selection. | The batched form of the S2 human-approval sink (D10): one weekly, whole-picture recommendation, not N per-event prompts. |
+| D17 | **Security vulnerabilities are urgent.** A high/critical `security-vulnerability` finding (esp. `security_motivated` — running version known-vulnerable) is surfaced **immediately** (out-of-band email + teams-chat), may **bypass the maturity delay** (operator-tunable), and is **always offered as a standalone "security-only" plan** approvable on its own. | A known-exploited CVE should not wait for Friday or a 7-day soak; and the operator must be able to ship *only* the security fixes without taking the rest of the batch. |
+| D18 | **The daily digest loops in the day's update findings; the podcast is gated on completion.** Update-validation + security claims become inputs to the digest briefing; the autonomous podcast step does **not** render until all required inputs (incl. the update-research step) are complete for that cycle. | Operator directive: "always delay podcasts until all requirements are met." Reuses the digest's claim-based briefing (ON = pure audio renderer, digest-podcast-services D5). |
 
 ## 4. Architecture
 
@@ -165,20 +183,91 @@ For one watched service `S` when watchtower reports an available update:
 10. **Audit.** Append a run record (service, versions, digests, decision,
     claim ids, job ids, apply outcome) to the orchestrator's run log.
 
+> **Cadence note (§5A):** steps 1–8 run **daily** for newly-detected candidates;
+> step 9 (recommend + apply) is **batched to Friday** and the apply waits on the
+> human's go / security-only / nogo selection. Urgent security findings (D17)
+> break the batch and surface immediately.
+
+## 5A. Cadence, accumulation & the weekly batch (daily detect → Friday recommend)
+
+This section specifies the timing model layered over §5 (D12–D18). It changes
+*when* the recommendation and apply happen; it changes **nothing** about the
+per-update gate (§6–§14) — every update is still individually researched,
+claim-backed, human-approved, health-gated, and git-revertible.
+
+**Daily (01:00 EDT / 05:00 UTC)** — a step in the existing OB1 cron chain
+(`pull → prune → digest`, `OB1/docker/cron/crontab`):
+
+1. **Detect** available updates (D12): the watchtower monitor-only feed plus a
+   `tag-digest-detector` sweep over the `managed` set.
+2. For each *newly-detected* candidate, run the **three research jobs** — A
+   (security), B (impact), **C (user/community field reports, §6.5)** — and
+   **ingest claims** (§6/§7), exactly as today.
+3. **Maturity filter (D13):** mark a candidate `eligible` once
+   `version_publish_date + maturity_days` (default 7) has passed. Ineligible
+   candidates stay researched-but-parked; their job-C research keeps refreshing
+   as more field reports land during the wait.
+4. **Enqueue** eligible candidates into the week's **pending-updates queue**
+   (persisted in the orchestrator state volume alongside the run log).
+5. **Feed the digest (D18):** the day's update findings (validation + any
+   security claims) are handed to the daily-digest briefing; the autonomous
+   podcast step is **gated** — it does not render until the update-research step
+   (and the digest's other required inputs) have completed for that cycle.
+6. **Urgent security (D17):** if any candidate carries a high/critical
+   `security-vulnerability` finding, surface it **immediately** (out-of-band
+   email + teams-chat) — do not wait for Friday.
+
+**Friday (same 01:00 chain, Friday branch):**
+
+1. **Collect** the week's accumulated eligible candidates + all their research
+   (security / impact / field-report syntheses + claims).
+2. **Evaluate feasibility as a batch** — cross-service conflicts, apply ordering
+   (caution tiers, §11), and which items are `clear` vs `blocked`/`needs-human`.
+3. **Synthesize a recommendation** and post it through the **teams-chat
+   orchestration** (D16), PM-composed, presenting three selectable options:
+   - **GO (full)** — apply the full `clear` set.
+   - **GO (security-only)** — apply only the security-motivated / blocked-by-vuln
+     subset (the standalone security plan of D17); the rest roll to next Friday.
+   - **NOGO** — postpone the whole batch to next Friday.
+4. **STOP and wait** for the human's selection (the §13 S2 gate, batched).
+5. **On GO / security-only:** apply the selected set **serialized + health-gated**
+   (§12), within the Friday→weekend window so the weekend is the buffer to catch
+   and `git revert` any regression.
+6. **On NOGO:** postpone; the queue **continues to accumulate** and re-evaluates
+   next Friday as more field reports arrive (a parked item may flip
+   `clear`→`needs-human` if new field reports surface a regression).
+
+```
+ Mon ─ Tue ─ Wed ─ Thu ─── FRIDAY ─────────── Sat · Sun
+  └ daily: detect → research(A/B/C) → maturity-park → enqueue → feed digest
+                                       │
+                    (urgent security → immediate teams-chat, any day)
+                                       ▼
+                        collect week · feasibility · PM recommendation
+                          → teams-chat: GO / SECURITY-ONLY / NOGO
+                                       │ GO
+                                       ▼
+                        serialized health-gated apply ──► weekend = regression buffer
+```
+
 ## 6. The security & impact research gate
 
-### 6.1 Why two jobs
+### 6.1 Why three research dimensions
 
-A "clear to update" verdict requires answering two independent questions:
+A "clear to update" verdict requires answering three independent questions:
 
-- **Security:** does the candidate introduce a known vulnerability (and does it
-  fix one the running version has)?
-- **Impact:** will the candidate break or change behavior that a dependent
-  service relies on?
+- **Security (job A):** does the candidate introduce a known vulnerability (and
+  does it fix one the running version has)?
+- **Impact (job B):** will the candidate break or change behavior that a
+  dependent service relies on?
+- **Field reports (job C, D15):** are real users reporting bugs/regressions on
+  this candidate version (Open WebUI subreddit, GitHub issues, forums)?
 
 A single query blurs them; the sources differ (NVD / advisories / GitHub
-security vs changelogs / release notes / migration guides). D3 keeps them
-separate so the verdict can cite each independently.
+security vs changelogs / release notes / migration guides vs community threads
+and issue trackers). D3 + D15 keep them separate so the verdict can cite each
+independently. The maturity delay (D13) is what gives job C something to find —
+field reports accrue in the days after a release, which is exactly why we wait.
 
 ### 6.2 Invoking `openbrain-research`
 
@@ -221,8 +310,10 @@ return a structured object:
   "security_motivated": false,
   "severity": "none | low | medium | high | critical",
   "blocking_findings": [ { "summary": "...", "source": "https://..." } ],
-  "rationale": "one paragraph, citing the syntheses",
-  "confidence": 0.0
+  "field_report_concerns": [ { "summary": "...", "source": "https://..." } ],
+  "rationale": "one paragraph, citing the three syntheses",
+  "confidence": 0.0,
+  "eligible_after": "<ISO date — version_publish + maturity_days (D13)>"
 }
 ```
 
@@ -232,13 +323,18 @@ Decision rules (encoded, not left to prose):
   `blocked`.
 - Any **breaking change** that touches the service's usage profile →
   `blocked` (or `needs-human` if ambiguous).
+- A **cluster of unresolved field-reported regressions** (D15, job C) on the
+  candidate → `blocked` (or `needs-human` if the reports are thin/contested).
 - Research `gap_ratio` above a threshold, or verdict `confidence` below a
   floor → `needs-human` (never auto-clear on thin evidence).
 - Otherwise → `clear`.
 
 The verdict is **advisory input to the human decision** (§11), not the final
 action: a `clear` verdict on a `managed` service still STOPS for a human
-go-ahead before anything is applied.
+go-ahead before anything is applied. **Eligibility is separate from the verdict**
+— a `clear` update is not *recommended* until it is `eligible` (maturity delay
+D13) and the **Friday** window (D14, §5A); urgent security findings (D17)
+override both the delay and the batch.
 
 ## 7. Claim ingestion
 
@@ -278,6 +374,24 @@ upgrade leaves both the validation verdict **and** the vulnerability itself as
 searchable, grounded claims (`memory-stack-routing` / `search` will surface them
 later).
 
+### 6.5 Research dimension C — user/community field reports (D15)
+
+Job C runs alongside A and B for each candidate: a `POST /research` query like
+*"User-reported bugs, regressions, and breakage with `<image>` `<candidate>` —
+check the Open WebUI subreddit (r/OpenWebUI), the project's GitHub issues, and
+community forums; are people reporting problems after upgrading to this
+version?"* The engine's Tor-routed web search reaches Reddit / GitHub / forum
+threads; grounding still applies (ungrounded claims are dropped), so a field
+report only counts if it's sourced.
+
+Job C is **why the maturity delay exists** (D13): on release day there is nothing
+to find, but over the following ~week the regression reports (or the reassuring
+absence of them) accumulate. The orchestrator **re-runs job C on each daily pass
+while a candidate is parked**, so the Friday recommendation reflects the *latest*
+field signal, not the release-day snapshot. A field-report synthesis is ingested
+into the validation claim (§7) and feeds the verdict's `field_report_concerns`
+(§6.4); a cluster of unresolved reports blocks or escalates the candidate.
+
 ## 8. Email notification mechanism
 
 A small mailer bundled into the orchestrator, copied from the proven
@@ -293,11 +407,17 @@ A small mailer bundled into the orchestrator, copied from the proven
   `gmail.googleapis.com` only — mirror the `notify-net` pattern used by
   `portal-alerter` (a narrow egress network), **not** broad internet access.
 - **Subjects encode the decision** so the inbox is triage-able:
-  - `✅ [auto-applied] <service> <to_version>` (clear + applied)
-  - `🟡 [needs approval] <service> <to_version>` (clear but human-gated)
+  - `🗓️ [weekly update recommendation] <N> updates — go / security-only / nogo` (the **Friday batch**, D14/D16 — the primary operator touchpoint)
+  - `🚨 [URGENT security] <service> <to_version>` (D17 — immediate, breaks the batch)
   - `⛔ [blocked: <severity>] <service> <to_version>` (vulnerability/break)
+  - `🟡 [needs approval] <service> <to_version>` (clear but human-gated, interim per-event mode)
   - `🔐 [security update available] <service> <to_version>` (security_motivated)
-- **Body:** decision + rationale, the two syntheses (collapsed), cited sources,
+- **Cadence (D12/D14/D18):** per-event "would-apply" emails are largely **folded
+  into the daily digest** (D18) and the **Friday weekly recommendation** (the
+  `🗓️` subject), so the operator gets one daily summary + one weekly decision
+  rather than an email per detected update. **Blocks and urgent security
+  (`🚨`/`⛔`) still send immediately**, independent of the batch.
+- **Body:** decision + rationale, the three syntheses (collapsed), cited sources,
   the claim ids written, and — for `needs-human` — the exact bump command the
   operator would run to apply manually (the LiteLLM §19.3 recipe, pre-filled).
 
@@ -539,6 +659,22 @@ a glance" gains a row.
 - **Q6 — Scope of the impact research.** How rich should each service's
   `usage_profile` be? Richer profiles = better breaking-change detection but
   more manifest maintenance.
+- **Q7 — Maturity delay (D13).** Confirm the 7-day default; which services want
+  a longer soak (high-caution: `tailscale`, `llm-gateway`) or shorter? And the
+  policy when an urgent security fix lands inside the window — auto-bypass the
+  delay (D17), or still require the operator to opt in on the immediate alert?
+- **Q8 — Friday window specifics (D14/D16).** Exact apply time on Friday (early,
+  to maximize weekend buffer)? When a batch is NOGO'd, does each item re-prompt
+  automatically next Friday, or does a NOGO'd item need a fresh research refresh
+  first? How long may an eligible item sit in the queue before it's force-escalated?
+- **Q9 — Digest/podcast gating (D18).** Which update outputs go into the daily
+  digest briefing (just decisions, or the field-report highlights too)? And the
+  exact "all requirements met" set that releases the podcast — is the
+  update-research step a hard gate, or best-effort with a timeout so a slow
+  research run can't indefinitely block the morning podcast?
+- **Q10 — Field-report sources (D15).** Confirm the job-C source set (r/OpenWebUI,
+  GitHub issues, forums) and whether per-service source hints belong in the
+  manifest (e.g. a service's issue tracker URL) to focus the search.
 
 ## 18. References
 
