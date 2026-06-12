@@ -27,6 +27,7 @@ macros:
     --host 0.0.0.0 --port ${PORT}
     --chat-template-file /etc/llama/chat-template.jinja
     --flash-attn on
+    --no-mmap
 
 models:
   qwen36-35b-a3b:
