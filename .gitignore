@@ -45,3 +45,4 @@ config/alerter/credentials.json
 # Incident-response snapshot directories produced by breach-killswitch.ps1
 /incident/
 /reports
+config/alerter/token.json
