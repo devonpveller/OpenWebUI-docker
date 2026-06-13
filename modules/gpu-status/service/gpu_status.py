@@ -312,10 +312,16 @@ class GPUStatusModule:
         for c in containers:
             name = c["container"]
             api: Optional[str] = None
+            # The real servers are isolated on llm-backend-net (2026-06-13) and
+            # unreachable by DNS from here; this module runs where nvidia-smi
+            # lives (the host), so probe their host-published loopback ports.
+            # Best-effort: _probe_llama_workload returns None on failure and GPU
+            # device info still reports. Never point these at the `llama-cpp`
+            # alias -- that is the gateway, not the real inference server.
             if name == "llama-cpp-upstream":
-                api = "http://llama-cpp-upstream:8080"
+                api = "http://127.0.0.1:8081"
             elif name == "llama-cpp-embed-upstream":
-                api = "http://llama-cpp-embed-upstream:8080"
+                api = "http://127.0.0.1:8082"
             if not api:
                 continue
             workload = self._probe_llama_workload(api)

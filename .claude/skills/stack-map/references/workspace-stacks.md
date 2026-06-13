@@ -4,9 +4,11 @@ Authoritative inventory of the Docker stacks in this `ai-stack` workspace.
 Cross-check against the live compose files before relying on it — the files
 are the source of truth; this doc is the curated summary.
 
-**Last reconciled against live compose: 2026-06-11** — added the portal/auth slice
-(Authelia/Caddy/Cloudflared + watchers/tripwire), the unified-backup sidecars, the
-`qwen36-35b-a3b` model, and the portal networks (`edge/auth/app/notify-net`).
+**Last reconciled against live compose: 2026-06-13** — the **LiteLLM `llm-gateway` flip**
+(`llama-cpp`/`llama-cpp-embed` → `*-upstream`; the gateway now holds those aliases; +
+`llm-gateway-db` / `llm-gateway-backup` / `llm-gateway-db-data`). Prior (2026-06-11): the
+portal/auth slice (Authelia/Caddy/Cloudflared + watchers/tripwire), the unified-backup sidecars,
+and the portal networks (`edge/auth/app/notify-net`).
 
 Source files:
 - `docker-compose.yml` + `docker-compose.override.yml` — the **main** project
@@ -27,7 +29,8 @@ Run with: `docker compose ...` from the workspace root.
 ### Networks
 | Network      | Type            | Purpose |
 |--------------|-----------------|---------|
-| `llm-net`    | internal (no internet) | llama-cpp inference reachable only by peers on this net |
+| `llm-net`    | internal (no internet) | **caller plane**: every inference consumer sits here and reaches inference ONLY via the `llama-cpp` / `llama-cpp-embed` aliases on **`llm-gateway`** (LiteLLM). The `*-upstream` real servers are NOT here (isolated on `llm-backend-net`, 2026-06-13) so callers cannot route around LiteLLM |
+| `llm-backend-net` | internal (no internet) | **backend plane**: the `*-upstream` real inference servers + the sole ingress `llm-gateway` + the `lm-models-backup` liveness probe. Nothing else attaches → inference is reachable only through the gateway. Enforced by `scripts/check-llm-gateway-routing.ps1` |
 | `search-net` | internal (no internet) | search gateway isolation — only `tor` bridges out |
 | `lc-net`     | internal (no internet) | little-coder control plane isolation |
 | `auth-net`   | bridge, **internal** | portal: caddy ↔ authelia ↔ portal-alerter ↔ watchers (no internet) |
@@ -44,10 +47,10 @@ Run with: `docker compose ...` from the workspace root.
 |-----------|------|-----------|----------|-----|
 | `openwebui` | Open WebUI chat surface | 127.0.0.1:3000 | default, llm-net, app-net | yes |
 | `tailscale` | Tailnet VPN; shares openwebui netns; serves ON :8443/:5055 + wiki :8444 (via caddy:8446) | — (`network_mode: service:openwebui`) | — | no |
-| `llm-gateway` | **LiteLLM analytics front door** (holds the `llama-cpp` + `llama-cpp-embed` network aliases on :8080; all callers reach inference through it). Routes `/v1/*` by model name to the `*-upstream` servers; permissive (no master_key) per-caller spend ledger; `background_health_checks:false` (a model health-probe forces a llama-swap load → thrash) | — (internal-only; admin/ledger via `docker exec`, not host :4000 — `llm-net` is `internal:true` so host publish is inert) | llm-net | no |
+| `llm-gateway` | **LiteLLM analytics front door** (holds the `llama-cpp` + `llama-cpp-embed` network aliases on :8080; all callers reach inference through it). Routes `/v1/*` by model name to the `*-upstream` servers; permissive (no master_key) per-caller spend ledger; `background_health_checks:false` (a model health-probe forces a llama-swap load → thrash) | — (internal-only; admin/ledger via `docker exec`, not host :4000 — `llm-net` is `internal:true` so host publish is inert) | llm-net, llm-backend-net (sole bridge) | no |
 | `llm-gateway-db` | Postgres for the LiteLLM spend-log ledger (`llm-gateway-db-data` volume) | — | llm-net | no |
-| `llama-cpp-upstream` | llama-swap inference (was `llama-cpp`) — `qwen36-27b` (∥2); 35B is in llama-swap config but **not registered in the gateway**; one model resident at a time; `--no-mmap` (mmap over the C: bind mount hangs) | 127.0.0.1:8081 | llm-net | yes (device 0) |
-| `llama-cpp-embed-upstream` | bge-m3 embeddings server (was `llama-cpp-embed`) | 127.0.0.1:8082 | llm-net | yes (device 1) |
+| `llama-cpp-upstream` | llama-swap inference (was `llama-cpp`) — `qwen36-27b` (∥2); 35B is in llama-swap config but **not registered in the gateway**; one model resident at a time; `--no-mmap` (mmap over the C: bind mount hangs) | 127.0.0.1:8081 | llm-backend-net (isolated) | yes (device 0) |
+| `llama-cpp-embed-upstream` | bge-m3 embeddings server (was `llama-cpp-embed`) | 127.0.0.1:8082 | llm-backend-net (isolated) | yes (device 1) |
 | `watchtower` | container auto-update monitor | — | default | no |
 
 **Memory (mnemory)**
@@ -86,12 +89,13 @@ Run with: `docker compose ...` from the workspace root.
 | `mnemory-backup` | mnemory-data | — | default |
 | `openwebui-backup` | openwebui-data (mem-capped 1g) | — | default |
 | `little-coder-backup` | the little-coder expertise volumes | — | default |
+| `llm-gateway-backup` | nightly `pg_dump` of the LiteLLM spend ledger (`llm-gateway-db`) | llm-net | default |
 | `openbrain-db-backup` | `pg_dump` of OB1 Postgres | obnet (external) | default |
 | `openbrain-wiki-backup` | openbrain-wiki-data + wiki-assets | — | default |
 | `open-notebook-backup` | SurrealDB logical export + notebook_data | default | default |
 | `smolcrawl-backup` | smolcrawl-data | — | default |
 | `tailscale-backup` | tailscale state dir | — | default |
-| `lm-models-backup` | LM Studio models (**WEEKLY**; disableable) | — | default |
+| `lm-models-backup` | LM Studio models (**WEEKLY**; disableable) | — | llm-backend-net (HEALTH_TCP liveness probe to `llama-cpp-upstream`) |
 | `caddy-backup` | caddy-data | default, edge-net | internet, local-test |
 | `authelia-backup` | authelia-data | default, auth-net | internet, local-test |
 
@@ -113,7 +117,7 @@ Run with: `docker compose ...` from the workspace root.
 `openwebui-data`, `mnemory-data`, `smolcrawl-data`,
 `little-coder-journals`, `little-coder-skill`, `little-coder-cohorts`,
 `little-coder-polyglot`, `little-coder-sessions`, `little-coder-workspace`,
-`caddy-data`, `caddy-config`, `authelia-data`, `tripwire-data`.
+`caddy-data`, `caddy-config`, `authelia-data`, `tripwire-data`, `llm-gateway-db-data`.
 **External** (owned by the open-brain project): `openbrain-wiki-data`
 (= `open-brain_openbrain-wiki-data`), `wiki-assets` (= `open-brain_wiki-assets`).
 

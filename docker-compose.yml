@@ -122,10 +122,16 @@ services:
       - LMSTUDIO_HOST=${LMSTUDIO_HOST:-host.docker.internal}
       - LMSTUDIO_PORT=${LMSTUDIO_PORT:-1234}
       - LMSTUDIO_ENABLED=${LMSTUDIO_ENABLED:-true}
-      - LLAMA_CPP_HOST=${LLAMA_CPP_HOST:-llama-cpp-upstream}
+      # MUST be the GATEWAY alias (llama-cpp / llama-cpp-embed), NOT the *-upstream
+      # real servers. entrypoint.sh proxies the tailnet /llama-cpp + /llama-cpp-embed
+      # serve routes here; pointing at *-upstream would expose inference on the
+      # tailnet BYPASSING LiteLLM (no ledger, no routing). Gateway-only policy —
+      # see scripts/check-llm-gateway-routing.ps1. (Was *-upstream after the
+      # 2026-06-12 rename; corrected 2026-06-13.)
+      - LLAMA_CPP_HOST=${LLAMA_CPP_HOST:-llama-cpp}
       - LLAMA_CPP_PORT=${LLAMA_CPP_PORT:-8080}
       - LLAMA_CPP_ENABLED=${LLAMA_CPP_ENABLED:-true}
-      - LLAMA_CPP_EMBED_HOST=${LLAMA_CPP_EMBED_HOST:-llama-cpp-embed-upstream}
+      - LLAMA_CPP_EMBED_HOST=${LLAMA_CPP_EMBED_HOST:-llama-cpp-embed}
       - LLAMA_CPP_EMBED_PORT=${LLAMA_CPP_EMBED_PORT:-8080}
       - LLAMA_CPP_EMBED_ENABLED=${LLAMA_CPP_EMBED_ENABLED:-true}
       - OPEN_NOTEBOOK_HOST=${OPEN_NOTEBOOK_HOST:-open_notebook}
@@ -249,8 +255,12 @@ services:
   llama-cpp-upstream:
     image: ghcr.io/mostlygeek/llama-swap:cuda
     container_name: llama-cpp-upstream
+    # Isolated behind the gateway (2026-06-13): only llm-gateway (+ the
+    # lm-models-backup liveness probe) can reach this real inference server.
+    # Callers reach inference via the `llama-cpp` alias on llm-gateway and
+    # cannot route around LiteLLM. See the llm-backend-net definition below.
     networks:
-      - llm-net
+      - llm-backend-net
     command:
       - -config
       - /app/config.yaml
@@ -463,8 +473,9 @@ services:
   llama-cpp-embed-upstream:
     image: ghcr.io/ggml-org/llama.cpp:server-cuda
     container_name: llama-cpp-embed-upstream
+    # Isolated behind the gateway (2026-06-13) — see llama-cpp-upstream.
     networks:
-      - llm-net
+      - llm-backend-net
     ports:
       - "127.0.0.1:8082:8080"
     volumes:
@@ -524,6 +535,11 @@ services:
         aliases:
           - llama-cpp           # transparent flip: callers' http://llama-cpp:8080 land here
           - llama-cpp-embed     # transparent flip: callers' http://llama-cpp-embed:8080 land here
+      # The gateway is the ONLY member of both planes: it faces callers on
+      # llm-net (aliases above) and reaches the isolated real servers on
+      # llm-backend-net (below). This is what makes it the sole ingress to
+      # *-upstream — callers on llm-net cannot reach the upstreams directly.
+      llm-backend-net: {}
     # NO host port: the gateway sits ONLY on the internal-only `llm-net`, so
     # Docker silently suppresses any host publish (a `ports:` mapping here would
     # show in `docker inspect .HostConfig.PortBindings` but NEVER bind — verified:
@@ -1254,6 +1270,12 @@ services:
   lm-models-backup:
     image: alpine:3.21
     container_name: lm-models-backup
+    # On llm-backend-net so its HEALTH_TCP liveness probe can reach the real
+    # inference server (llama-cpp-upstream:8080). Probe-only member with no
+    # inference client (cap_drop ALL) — it does NOT bypass the gateway. (Before
+    # isolation it sat on `default` and the cross-network probe never resolved.)
+    networks:
+      - llm-backend-net
     volumes:
       - C:\Users\yamao\.lmstudio\models:/data:ro
       - ./backups/lm-models:/backups
@@ -1930,10 +1952,19 @@ volumes:
     name: open-brain_wiki-assets
 
 networks:
-  # Internal-only network: no gateway, no internet access.
-  # llama-cpp containers are isolated here — they can only be reached
-  # by services that are also on this network (openwebui, mnemory).
+  # Internal-only CALLER plane: no internet access. Every service that consumes
+  # inference sits here and reaches it ONLY via the `llama-cpp` /
+  # `llama-cpp-embed` aliases on llm-gateway. The real inference servers are NOT
+  # here (moved to llm-backend-net, 2026-06-13), so callers physically cannot
+  # route around LiteLLM.
   llm-net:
+    internal: true
+  # Internal-only BACKEND plane: the real inference servers
+  # (llama-cpp-upstream, llama-cpp-embed-upstream) + the single ingress
+  # (llm-gateway) + the lm-models-backup liveness probe. Nothing else attaches,
+  # so inference is reachable only through the gateway. Enforced at change time
+  # by scripts/check-llm-gateway-routing.ps1; see CLAUDE.md "Inference plane".
+  llm-backend-net:
     internal: true
   # Internal-only network for the search stack. SearXNG/redis/gateway/mcpo
   # have NO internet route here; only `tor` (also on `default`) can egress.

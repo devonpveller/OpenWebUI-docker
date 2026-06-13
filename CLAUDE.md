@@ -27,8 +27,13 @@ down before the main stack. The Portal has its own lifecycle (`portal-on/off.ps1
 aliases on `llm-gateway` (LiteLLM)** — the analytics front door. It forwards by
 model name to `llama-cpp-upstream` (llama-swap → llama.cpp) and
 `llama-cpp-embed-upstream`. **Never route inference around LiteLLM** (it's the
-analytics inlet + the future multi-backend router). Health/GPU/recovery probes
-target the **real** servers (`*-upstream`), not the gateway. Config gotchas:
+analytics inlet + the future multi-backend router) — this includes tailnet serve
+routes (`/llama-cpp`, `/llama-cpp-embed`), which must proxy to the `llama-cpp`
+alias, **not** `*-upstream`. Only health/GPU/recovery probes may target the
+**real** servers (`*-upstream`) directly, not the gateway. Enforced at change
+time by `scripts/check-llm-gateway-routing.ps1` (fails if any inference/serve
+endpoint points at a `*-upstream` server); the durable goal is network isolation
+so callers physically cannot reach `*-upstream`. Config gotchas:
 `config/litellm.config.yaml` runs **permissive (no master_key)** with
 `background_health_checks: false` (a model health-probe forces a llama-swap
 load → thrash); `config/llama-swap.config.yaml` uses `--no-mmap` (mmap of the big
