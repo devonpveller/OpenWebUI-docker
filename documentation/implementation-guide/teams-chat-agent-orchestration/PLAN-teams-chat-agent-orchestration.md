@@ -7,6 +7,7 @@ workspace **2026-06-13** (LiteLLM `llm-gateway` is now LIVE — see §0).
 **Companion docs:**
 - [OUTLINE-teams-chat-agent-orchestration.md](OUTLINE-teams-chat-agent-orchestration.md) — platform/tooling selection
 - [SAFETY-AND-WORKFLOW-governance-model.md](SAFETY-AND-WORKFLOW-governance-model.md) — **the governing spec; this plan implements it**
+- [UX-FLOW.md](UX-FLOW.md) — **the user journey** (intake → readiness-gate → plan → ground/dry-run → execute → escalate) + the intent thread, idle-wait DAG, and CONCERN schema
 - [Ai-Organizations-Are-More-Effective-But-Less-Aligned-Than-Individual-Agents.md](Ai-Organizations-Are-More-Effective-But-Less-Aligned-Than-Individual-Agents.md) — source paper (arXiv:2604.10290)
 
 > **Read order:** the governance doc is the spec. This plan is *how we build it*. Where they
@@ -219,10 +220,20 @@ decision **C1 = option B**: separate cloud and local access):
 
 **Roles are profiles, not gateway models (C4 — operator's framing).** The gateways only know
 *underlying model names* (`qwen36-27b` local; OpenRouter model ids on the cloud gateway). The
-**PM/monitor, `worker-<domain>`, `reviewer-<lens>` distinctions are agent-org "model profiles"**
-(§5.4): a profile binds {system prompt = charter, temperature, tool access = scope, caller-key} to
-a gateway model name. **Adding a role = adding a profile** — never a gateway change. Only a
-genuinely new *underlying model* touches a gateway config.
+**PM/monitor, planner, `reviewer-<lens>`, `worker-<domain>` distinctions are agent-org "model
+profiles"** (§5.4): a profile binds {system prompt = charter, temperature, tool access = scope,
+caller-key, **lane**} to a gateway model name. **Adding a role = adding a profile** — never a
+gateway change. Only a genuinely new *underlying model* touches a gateway config.
+
+**Judgment roles are the cloud-lane candidates — including plan generation (operator).** The
+**PO (Project Overseer agent), the PM, the planner, and the reviewer** are judgment-heavy; in
+particular **plan generation is a cloud-lane task**, because a weak planner caps the *productivity
+ceiling* of everything the org builds downstream — so it earns the cloud spend even though we'd
+prefer all-local. **Workers stay local.** ⚠️ **The exact reach is a per-profile `lane` setting,
+tuned empirically** (start judgment-heavy-roles-cloud / workers-local, then stretch the local
+boundary as practice shows what `qwen36-27b` can hold). Idle-wait (§3.6) keeps idle cloud agents
+from burning OpenRouter tokens; the cloud budget caps the rest. (The **human (you)** is the tier
+*above* the PO — no model; final authority on the §3 hard-gate triggers. See governance §1 / UX-FLOW §1.)
 
 > **Swap-thrash constraint still holds (audit §0 / as-built).** The local gateway exposes only
 > `qwen36-27b` — the operator **removed `qwen36-35b-a3b`** to stop 27B⇄35B swap thrash and unmask
@@ -320,6 +331,25 @@ tokens):**
 - **This is the GPU enforcing "keep the org small" (governance §4.1)** and the "org vs. single
   agent?" discipline (§3.5). The inference budget *is* the org-size budget. (Open decision OD-8.)
 
+**Idle-wait — agents hold a slot only while *actively computing* (the keystone, UX-FLOW §5).**
+The bounded budget only works because a waiting agent **releases its slot**. Three bridge states:
+
+| State | Holds a slot? | Entered when | Woken by |
+|-------|---------------|--------------|----------|
+| **active** | ✅ | doing work | — |
+| **waiting** | ❌ (slot freed) | voluntarily yields while a dependency is pending — PO decision, dry-run, build, **or another agent's effort** | a **`finish` event** or a **timeout** |
+| **frozen** | ❌ | the safety gate freezes the effort (§3 / governance §3) | PO clears the CONCERN |
+
+- **Dependency DAG (operator):** an agent blocked on another's output goes **waiting** (slot
+  freed) and wakes on that effort's `finish` — so dependent efforts run **"linearly"** (waiter
+  idle, not spinning) while **independent efforts parallelize** up to the slot budget.
+- **"Together when their work touches":** overlapping efforts (same files/area) coordinate via the
+  bus + handoff contract; a true collision is an **F4 cross-effort conflict → pause + escalate**,
+  never blind parallel edits.
+- **Reuses** Claude Code's wait/`ScheduleWakeup` + little-coder `--session` suspend/resume (a parked
+  session costs no inference). The bridge owns the wait registry + wake-on-event. It also keeps
+  **idle cloud (PM/judge) agents from burning OpenRouter tokens** while they wait.
+
 ### 3.7 Networks & egress (corrected against live compose, audit §0)
 
 Two model lanes (§3.4) → two network paths. **Local stays air-gapped through the existing
@@ -366,6 +396,13 @@ comms, and charters land before we scale the fleet or optimize.
 
 P0–P2 are the spine (prove the loop *and* that we can stop it). P3–P4 are the alignment
 core. P5–P6 add scale + the temporal loop. P7 makes it operable from your phone.
+
+> **These are *build* phases, not the runtime UX.** The user journey (intake → readiness-gate →
+> plan presentation → ground/dry-run → execute → escalate) is in **[UX-FLOW.md](UX-FLOW.md)**. Its
+> stages are *built* across these phases: the **readiness-gate / clarify-loop** and **plan
+> presentation** land with grounding in **P3**; **ground + dry-run** (research + isolated rehearsal
+> before any real change) lands with the stop-gates in **P4**; the **idle-wait DAG** with the pool
+> scheduler in **P5**.
 
 **P0 capability-floor gate:** the local-model measurement in P0 is a prerequisite, not a nicety
 — it decides whether `JUDGE_MODEL` can stay local or must escalate to OpenRouter for judgment
@@ -453,6 +490,9 @@ governance charter + scope:
   `tool_access` = its scope (§4.1); the profile is what the bridge injects on spawn/wake (§4.3).
 - **Switching a role local↔cloud is a one-field edit** (`lane` + `model`) — e.g. promote the judge
   to a cloud OpenRouter model if P0 says local judgment is too weak, without touching any worker.
+  **Defaults:** PM/monitor, **planner**, reviewer → `cloud` (judgment, incl. plan generation —
+  §3.4); workers → `local`. ⚠️ **Tune the local↔cloud boundary empirically** (operator) — stretch
+  local as `qwen36-27b` proves capable; the cloud budget caps the rest.
 - **Profile changes are versioned/audited** like rules (governance §4.2) — a profile *is* part of
   the floor/steering surface.
 

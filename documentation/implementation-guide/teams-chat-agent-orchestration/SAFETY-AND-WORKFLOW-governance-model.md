@@ -36,40 +36,50 @@ it, not the other way around.
 
 ## 1. Roles & the intended workflow
 
-Corrected role model (supersedes the "you = PM" framing in the outline's first draft):
+> **Terminology (updated 2026-06-13, operator) — read this first.** "**PO**" now means
+> **Project Overseer**, an *agent* — **not** the human, and not "Primary Operator" (an earlier
+> mislabel). The **human (you)** is a distinct tier *above* the PO. So throughout these docs:
+> read any bare "**PO**" as the **Overseer agent**, and read **final-authority / hard-gate
+> language as the human (you)**. PO and PM are **two agents with deliberately different
+> perspectives** — a separation of concerns that makes the PO a *differently-goaled check* on the
+> PM (the org-tier version of §4.4, anti-rubber-stamp).
 
-| Role | Who | Mandate |
-|------|-----|---------|
-| **PO — Primary Operator** | **You (human)** | Final authority. You talk *primarily to the PM*, not to workers. You make the final call on every escalated concern. Nothing irreversible happens around you. |
-| **PM — Orchestrator agent** | Agent | Your single point of contact. Decomposes goals, delegates to workers, **monitors for concerns/deviations, and up-levels them to the PO**. Does *not* have authority to clear its own escalations. |
-| **Workers** | `little-coder` agents | Domain-scoped execution, spun up on demand. Communicate only through the chat bus. Escalate up, never around. |
+| Tier | Who | Mandate | Model lane |
+|------|-----|---------|------------|
+| **Human (you)** | the person | **Final authority.** Sets the request; approves plans; **clears the §3 hard-gate triggers** (irreversible/external action, unresolved ethics, refusal). Primary contact = the PO. Can read/join anything. | — |
+| **PO — Project Overseer** | agent | The **big picture**: UX vision, the intent thread (§4.3), security/ethics. The human's point of contact. Resolves most steering; the PM up-levels security/ethics here; **escalates only hard-gate triggers to the human.** A differently-goaled check on the PM. | cloud (large) |
+| **PM — Project Manager** | agent | **Practical implementation** + action-to-action alignment *to the PO*. Decomposes, delegates, monitors workers; up-levels concerns (esp. security/ethics) to the PO. Does *not* clear its own escalations. | cloud (large) |
+| **Workers** | `little-coder` | Domain-scoped execution, spun up on demand. Communicate only through the bus. Escalate up, never around. | local |
 
 **The loop:**
 
 ```
-  PO ⇄ PM            (you direct the PM; PM reports up)
-       │  delegate ↓        ↑ escalate concern/deviation
-   Workers (domain-scoped, on demand)
+  You (human) ⇄ PO          (you steer the PO on vision/UX/intent; PO reports up)
+                 │  direction ↓        ↑ PO escalates ONLY hard-gate triggers
+             PM                        (execution; action-to-action alignment to the PO)
+                 │  delegate ↓     ↑ PM up-levels concerns (esp. security/ethics)
+             Workers (domain-scoped, on demand)
 
-  Normal flow:   PO → PM → workers → results → PM → PO
-  Concern flow:  worker/PM detects deviation
-                 → PM FREEZES affected work
-                 → PM up-levels to PO with context + recommendation
-                 → WORK STAYS PAUSED
-                 → PO decides (approve / modify / abort)
-                 → PM propagates decision, unfreezes
+  Normal flow:  You → PO → PM → workers → results → PM → PO → You
+  Concern flow: worker/PM detects deviation
+                → PM FREEZES affected work, up-levels to the PO
+                → PO resolves the big-picture/UX/ethics steering it can
+                → on a §3 HARD-GATE trigger → PO escalates to YOU; WORK STAYS PAUSED
+                → You decide (approve / modify / abort) → propagates down, unfreezes
 ```
 
-Three properties make this safe-by-construction:
+Properties that make this safe-by-construction:
 
-1. **Single throat to choke.** You converse with the PM; the org runs underneath like a
-   normal company. You are not in every channel by default — but you *can* enter any of
-   them (hard requirement, see companion §5.3), and the PM is *obligated* to surface what
-   matters.
-2. **Mandatory up-level on deviation.** Any concern or observed deviation from your intent
-   is escalated to you, the PO, for the final decision. The PM cannot decide to ignore it.
-3. **Pause-until-cleared.** When something is escalated, the affected work **stops and
-   stays stopped** until you clear it. Fail-safe, not fail-open (see §3).
+1. **Separation of concerns at the top (new).** The PO (goal/ethics/big-picture) and the PM
+   (execution) are *differently-goaled agents*, so the orchestrator is never its own
+   ethics-monitor — the org-tier guard against the paper's rubber-stamp failure (F2/F4).
+2. **Single throat to choke.** You converse with the **PO**; the org runs underneath like a
+   normal company. You're not in every channel by default — but you *can* enter any of them
+   (hard requirement, companion §5.3), and the ladder is *obligated* to surface what matters.
+3. **Mandatory up-level on deviation.** Concerns ride the ladder (worker → PM → PO → you); the
+   §3 hard-gate triggers reach **you**. No level clears its own escalation.
+4. **Pause-until-cleared.** On a hard-gate trigger the affected work **stops and stays stopped
+   until you clear it.** Fail-safe, not fail-open (see §3).
 
 ---
 
@@ -148,7 +158,8 @@ decisions are cleared" means concretely.
 >   budgets) — *that* is where the cost-tier is actually enforced. Either way it's sampled/
 >   triggered, not run on every token, and **never via a model health-probe** (C5 — that = a load).
 
-**Triggers — any of these freezes the affected work effort and up-levels to the PO:**
+**Triggers — any of these freezes the affected work effort and up-levels the ladder (PM → PO →
+human); the human clears the hard-gate ones:**
 
 - A worker **refuses**, **raises an ethical/safety objection**, or hits a
   **safety/scope/permission boundary** (F3). An objection is never "not forwarded."
@@ -162,20 +173,30 @@ decisions are cleared" means concretely.
 - A **wake-storm / loop** trips a rate cap (§5).
 
 **On trigger:**
-1. PM **freezes** the affected work effort *and its dependents* (no further worker actions).
-2. PM posts a **CONCERN** to the PO: what happened, why it tripped, options, and the PM's
-   recommendation.
+1. PM **freezes** the affected work effort *and its dependents* (no further worker actions);
+   frozen/waiting agents **release their inference slot** (idle, not spinning — PLAN §3.6).
+2. PM posts an **intent-framed CONCERN** to the PO. **No bare technical choice reaches the PO** —
+   the CONCERN carries the **intent thread**, *why the issue matters to the outcome* (intent of
+   change), and **options each with their effect-on-outcome** + the PM's recommendation. Full
+   schema in **UX-FLOW §3**.
 3. Work **stays paused.**
 
-**Resume:** only the **PO** can clear a CONCERN (approve / modify scope / abort). The PM
-propagates the decision and unfreezes. The decision is logged.
+**Escalation is a ladder (UX-FLOW §4):** worker → PM → **PO** → **human (you)**. Each level
+resolves what it can and passes up **only** what it can't; intent is attached at every hop. The
+**PO (Overseer agent) resolves big-picture/UX/ethics *steering*** and is the PM's up-level target;
+the **hard-gate triggers reach the human**. (A flatter org is just this ladder with fewer rungs.)
 
-**Fail-safe default:** if the PO is unavailable, work **stays paused**. There is no
-timeout that auto-resumes, and there is no "ask a different agent." This is the structural
-answer to F3 (refusal avoidance) — the system cannot make progress by routing around a
+**Resume:** the **PO** may clear *steering* CONCERNs it's authorized for, but a **hard-gate
+trigger (irreversible/external action, unresolved ethics, refusal) can be cleared only by the
+human** (approve / modify scope / abort). The decision propagates down and unfreezes; it is logged.
+
+**Fail-safe default:** if the human is unavailable, a hard-gate effort **stays paused**. There is
+no timeout that auto-resumes, and there is no "ask a different agent" — and the PO **cannot
+self-clear** a hard-gate trigger. This is the structural answer to F3 (refusal avoidance) — the
+system cannot make progress by routing around a
 brake; it can only make progress through you.
 
-**Global kill switch:** the PO (you) can freeze the entire fleet at once from the chat
+**Global kill switch:** the **human (you)** can freeze the entire fleet at once from the chat
 client.
 
 ---
