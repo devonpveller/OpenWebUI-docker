@@ -150,13 +150,21 @@ recommendation state *how they affect the outcome relative to the intent* (opera
 ## 5. Concurrency as a DAG with idle-waits (Stage 7 — the keystone)
 
 The bounded GPU budget (~1–2 slots, §3.6) only works because **agents hold a slot only while
-actively computing.** Three bridge states:
+actively computing.** This is the **scheduler FSM (machine B)** — one of **two orthogonal state
+machines** (governance §3.0). **Canonical table: [PLAN §3.6](PLAN-teams-chat-agent-orchestration.md);
+summarized:**
 
-| State | Holds a slot? | Entered when | Woken by |
-|-------|---------------|--------------|----------|
-| **active** | ✅ yes | doing work | — |
+| Scheduler state | Holds a slot? | Entered when | Woken by |
+|-----------------|---------------|--------------|----------|
+| **computing** | ✅ yes | doing work | — |
 | **waiting** (idle) | ❌ **releases slot** | voluntarily yields while a dependency is pending — an operator decision, dry-run, build, **or another agent's effort** | a **`finish` event** or a **timeout** |
-| **frozen** | ❌ no work | the safety gate freezes the effort (§3) | the Human Operator clears the CONCERN (PO may clear steering) |
+| **suspended** | ❌ | parked `--session`, no work queued | a new assignment / @mention |
+
+> **`frozen` is a *separate* machine — the governance gate (machine A, governance §3.0), NOT a
+> scheduler state.** `waiting`/`suspended` are ordinary idleness; only `frozen` is a safety brake.
+> An agent can be `waiting` while its effort is perfectly `active`. A `frozen` effort's agents are
+> forced out of `computing` and the **Human Operator** (hard-gate) or **PO** (steering) must clear
+> the gate before the scheduler re-admits them.
 
 - **Dependency DAG (operator, pt 7):** an agent blocked on another's output goes **waiting**
   (slot freed), and wakes on that effort's `finish`. So efforts run **"linearly" by dependency**
@@ -191,14 +199,15 @@ actively computing.** Three bridge states:
 |-------|--------------------------------|
 | 0 Intake | PLAN §5.2 (Mattermost channels); governance §1 |
 | 1 Anchor + draft | governance §4.3 (goal-grounding); §4.5 (plan doc); PLAN §3.4 (cloud planner) |
-| 2 Readiness gate | governance F5; §4.3; **🆕 new phase — fold into PLAN phases** |
-| 3 Plan + approve | governance §4.5 (top stop-gate) + §3 (Human-Operator approval); PLAN §3.6 (delegation budget) |
-| 4 Ground + dry-run | `openbrain-research`; **🆕 new phase — fold into PLAN phases**; governance "verify before claiming" |
+| 2 Readiness gate | governance F5; §4.3; ✅ **folded → TASKS P3.8** |
+| 3 Plan + approve | governance §4.5 (top stop-gate) + §3 (Human-Operator approval); PLAN §3.6 (delegation budget); ✅ **folded → TASKS P3.9** |
+| 4 Ground + dry-run | `openbrain-research`; ✅ **folded → TASKS P4.0 (risk-gated)**; governance "verify before claiming" |
 | 5 Execution | governance §3–§6 (the main loop) |
 | 6 Escalation | governance §3 (gate) + §3.x CONCERN schema (this doc) + §4.4 |
-| 7 Idle-wait DAG | PLAN §3.6 (concurrency) — **🆕 add the three-state model** |
+| 7 Idle-wait DAG | PLAN §3.6 (canonical scheduler FSM) + governance §3.0 (orthogonal to the gate) — ✅ **folded** |
 
-> **Folds owed into PLAN/governance** (so this doc stays the journey, not the spec): intake +
-> readiness-gate + ground/dry-run as explicit phases; the idle-wait three-state model into §3.6;
-> the CONCERN intent-schema + ladder into governance §3; plan-generation = cloud + role-lane
-> tuning into §3.4/§5.4.
+> **Folds completed (2026-06-13 audit pass)** — this doc stays the *journey*, the others hold the
+> spec: readiness-gate → **TASKS P3.8**; plan presentation/approval → **P3.9**; ground+dry-run
+> (risk-gated) → **P4.0**; the scheduler FSM is canonical in **PLAN §3.6** and explicitly separated
+> from the governance gate in **governance §3.0**; the CONCERN intent-schema + ladder live here (§3–§4)
+> and governance §3 references them; plan-generation = cloud + role-lane tuning in PLAN §3.4/§5.4.

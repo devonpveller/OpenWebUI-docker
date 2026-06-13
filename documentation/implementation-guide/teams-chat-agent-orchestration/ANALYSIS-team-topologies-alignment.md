@@ -156,7 +156,9 @@ afford to gate handoffs heavily *because* you have few of them.
 
 ## 5. Recommended changes to fold into PLAN / governance
 
-(Proposed — not yet applied. Each cites where it lands.)
+> ✅ **Status: folded (2026-06-13 audit pass).** Recommendations (a)–(f) below are now reflected in
+> the governance/PLAN/TASKS docs. See the **[README.md](README.md) traceability matrix** for the
+> exact landing site of each. Kept here as the rationale of record.
 
 - **(a) Stream-aligned-first principle → governance §4.1 + §4.3.** Bias toward fewer,
   end-to-end workers; hyper-decomposition is a last resort with an explicit cognitive-load

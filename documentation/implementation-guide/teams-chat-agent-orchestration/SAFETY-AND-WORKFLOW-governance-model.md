@@ -1,8 +1,12 @@
 # Safety & Workflow Governance Model — Agent Chat Orchestration
 
-**Status:** foundation / design discussion. This is the *first* thing we build the
-chat-orchestration system around — capability comes after the governance shape is set.
-**Date:** 2026-06-08
+**Status:** 📐 **the governing spec** — design, not yet built. This is the *first* thing we build the
+chat-orchestration system around; capability comes after the governance shape is set. Where any
+companion doc disagrees with this one, **this doc wins.**
+**Date:** 2026-06-08 · **last substantive revision 2026-06-13** (role rename PO=Project Overseer
+agent; as-built LiteLLM reconciliation; continuous-supervision reframe; lateral-channel,
+retirement-lifecycle & neurosymbolic folds from the ANALYSIS docs — see
+[README.md](README.md) traceability matrix).
 **Companion doc:** [OUTLINE-teams-chat-agent-orchestration.md](OUTLINE-teams-chat-agent-orchestration.md) (platform/tooling choices)
 **Primary source:** full paper text at
 [Ai-Organizations-Are-More-Effective-But-Less-Aligned-Than-Individual-Agents.md](Ai-Organizations-Are-More-Effective-But-Less-Aligned-Than-Individual-Agents.md)
@@ -144,6 +148,39 @@ air-gapped gateway; cloud via a *separate* LiteLLM, only where mandatory.** See 
 
 A small state machine the `agent-bridge` enforces. This is what "work is paused until
 decisions are cleared" means concretely.
+
+### 3.0 The two orthogonal state machines (canonical — resolve before build)
+
+**There are *two* separate state machines, and conflating them is a safety bug.** Earlier drafts
+mixed a scheduler state (`waiting`) into the gate, producing the `{active, frozen}` vs
+`{active, waiting, frozen}` disagreement across docs. The canonical model is **two orthogonal
+FSMs** owned by different layers:
+
+**(A) Governance gate — per *work effort*, owned by the safety layer. This is the FSM that carries
+safety.** Keep it minimal so it can be unit-tested and reasoned about in isolation.
+
+| State | Meaning | Transition | On event |
+|-------|---------|-----------|----------|
+| `active` | effort may dispatch/wake workers | `active → frozen` | any §3 trigger fires (below) |
+| `frozen` | no worker action proceeds for this effort **+ its dependents** | `frozen → active` | a cleared decision (PO clears *steering*; **Human Operator** clears a **hard-gate** trigger) |
+
+- **Fail-safe invariants (must hold in code + tests):** (i) `frozen` **persists across an
+  `agent-bridge` restart** (persisted in Postgres, default-deny on unknown state); (ii) there is
+  **no timeout that auto-resumes** a hard-gate `frozen`; (iii) a refusal/objection **cannot** be
+  cleared by routing to another worker (F3); (iv) the PO **cannot self-clear** a hard-gate trigger.
+- The **global kill switch** freezes *every* effort at once.
+
+**(B) Scheduler / inference-slot state — per *agent*, owned by the scheduler (NOT a safety state).**
+This is the idle-wait optimization that makes a ~1–2-slot GPU budget run a multi-agent org. **Canonical table lives in [PLAN §3.6](PLAN-teams-chat-agent-orchestration.md); summarized here:** `computing`
+(holds a slot) → `waiting` (slot released, blocked on a dependency/decision/build, woken by a
+`finish` event or timeout) → `suspended` (parked `--session`, no inference cost).
+
+**Composition rule (how the two relate):** freezing an effort (A) forces its agents to release
+slots — i.e. a `frozen` effort's agents are never `computing` (B). But `waiting`/`suspended` are
+*ordinary scheduling*, **not** a safety pause: an agent can be `waiting` on a peer's `finish` while
+its effort is perfectly `active`. **Only `frozen` is a brake; `waiting` is just idle.** The
+scheduler may not move an agent of a `frozen` effort to `computing`; clearing the gate (A) is what
+re-admits it to the scheduler (B).
 
 > **Framing (scholarly corrective): the gate is the *escalation arm of continuous supervision*,
 > not a standalone checkpoint.** The AI-org governance literature is blunt that *episodic,

@@ -1,7 +1,7 @@
 # Tooling Selection — what to borrow to build this
 
 **Status:** tooling analysis / build input (2026-06-10)
-**Reads against:** [PLAN](PLAN-teams-chat-agent-orchestration.md) · [SAFETY-AND-WORKFLOW-governance-model.md](SAFETY-AND-WORKFLOW-governance-model.md) · the three ANALYSIS docs · this workspace's stack-map + [little-coder design](../../little-coder/Self-improving-little-coder-design.md)
+**Reads against:** [PLAN](PLAN-teams-chat-agent-orchestration.md) · [SAFETY-AND-WORKFLOW-governance-model.md](SAFETY-AND-WORKFLOW-governance-model.md) · the three ANALYSIS docs · this workspace's stack-map + [little-coder design](../little-coder/Self-improving-little-coder-design.md)
 
 ---
 

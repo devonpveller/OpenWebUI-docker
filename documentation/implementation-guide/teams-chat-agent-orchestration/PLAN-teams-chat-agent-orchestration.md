@@ -49,7 +49,7 @@ work), so the boundary is unambiguous. Baselined against the live `docker-compos
 | **Worker pool** — N × `(little-coder + open-terminal)` + concurrency scheduler | NEW (extends today's single-worker little-coder) | P5 |
 | **Role/model profiles** registry (§5.4) | NEW | P5/P7 |
 | **Governance enforcement** — charters via profiles/skills, hooks, stop-gates, review, learning-loop *extension* | NEW / extend existing | P3–P6 |
-| **Cloud lane** — separate `llm-gateway-cloud` + `ao-egress` + OpenRouter + budgets (the *planned OpenRouter extension of LiteLLM*) | **CONDITIONAL — built only if the P0 capability-floor test shows local judgment is too weak** | P7 |
+| **Cloud lane** — separate `llm-gateway-cloud` + `ao-egress` + OpenRouter + budgets (the *planned OpenRouter extension of LiteLLM*) | **CONDITIONAL — built only if the P0.5 capability-floor test shows local judgment is too weak** | **Pc** (fires right after P0 if mandated; §4) |
 
 **Local inference needs zero new model-layer work** — agent-org's bridge + workers just call
 `http://llama-cpp:8080` (the existing gateway) and get analytics for free. The *only* model-layer
@@ -141,6 +141,39 @@ fabric for a fleet of coding agents**, organized as a company:
   trigger), threads (hand-offs), channels (work efforts), and the mobile apps.
 - **little-coder** workers are unchanged in spirit — woken via session resume; they receive
   goals + skills (charters) as injected context; they post via the bridge.
+
+#### 3.1.1 agent-bridge internal modules (SRP — keep the Thinnest Viable Platform thin)
+
+The bridge is the **TVP / Platform** (TT analysis §4) **and** the safety-critical component, so it
+must **not** be a god-service. v1 decomposes into modules with explicit interfaces, so the
+**governance-gate FSM can be unit-tested and reasoned about in isolation** from WebSocket plumbing:
+
+| Module | Single responsibility | Talks to |
+|--------|----------------------|----------|
+| **event-gateway** | Mattermost WS consume + REST post; **idempotent, at-least-once** event handling (below) | Mattermost ↔ router |
+| **governance-gate** | the gate FSM (machine A, governance §3.0): freeze/CONCERN/clear; fail-safe persistence | scope-ledger, audit-sink |
+| **scheduler** | worker-pool registry + `MAX_CONCURRENT_WORKERS` semaphore + idle-wait FSM (machine B, §3.6) | model-router, little-coder |
+| **scope-ledger** | who-may-touch-what; grant/revoke per hard-rule #2; retirement (§4.1) | governance-gate |
+| **router/waker** | channel↔effort↔session map; resolve target; wake/resume sessions | scheduler, event-gateway |
+| **model-router** | local-vs-cloud lane selection (§3.4) + profile→model binding (§5.4) + GBNF/Instructor validation | gateways |
+| **audit-sink** | append-only event log + Open Brain mirror (§5, §6) | everything (write-only) |
+
+> **Why this matters most for the gate:** the gate is the one module whose correctness is
+> load-bearing for safety. Isolating it (no direct WS/REST coupling) is what lets P2's safety
+> tests target it deterministically — and keeps the "make the safe path the default path" platform
+> minimal rather than letting features accrete into the brake.
+
+**Event-delivery semantics (the wake bus must be reliable — industry-standard pattern).** The whole
+system hinges on "wake on @mention," so event-gateway is built for **at-least-once delivery with
+idempotency**, not best-effort:
+- **Idempotency keys:** every Mattermost event carries a post id; the bridge dedupes on
+  `(event_id)` so a redelivered event never double-wakes/double-spawns.
+- **Reconnect catch-up:** Mattermost's WS does **not** replay missed events. On reconnect (or after
+  a bridge restart) the event-gateway **polls the REST API for posts since the last-processed
+  timestamp** per active channel, replays them through the idempotent path, *then* resumes the WS.
+- **Effect:** a missed wake (bridge was down) is recovered on reconnect; a duplicate wake is a
+  no-op. A wake that still can't be delivered (target unreachable past a bound) is itself a §3
+  trigger, not a silent stall.
 
 ### 3.2 Deployment shape — new compose project
 
@@ -331,14 +364,22 @@ tokens):**
 - **This is the GPU enforcing "keep the org small" (governance §4.1)** and the "org vs. single
   agent?" discipline (§3.5). The inference budget *is* the org-size budget. (Open decision OD-8.)
 
-**Idle-wait — agents hold a slot only while *actively computing* (the keystone, UX-FLOW §5).**
-The bounded budget only works because a waiting agent **releases its slot**. Three bridge states:
+**Idle-wait — the scheduler / inference-slot FSM (CANONICAL home; UX-FLOW §5 and governance §3.0(B)
+reference this table).** Agents hold a slot only while *actively computing*; the bounded budget
+only works because a blocked agent **releases its slot**. This is **machine (B) of the two
+orthogonal state machines** (governance §3.0) — a *scheduling* state, **not** a safety state.
 
-| State | Holds a slot? | Entered when | Woken by |
-|-------|---------------|--------------|----------|
-| **active** | ✅ | doing work | — |
+| Scheduler state | Holds a slot? | Entered when | Woken by |
+|-----------------|---------------|--------------|----------|
+| **computing** | ✅ | doing work | — |
 | **waiting** | ❌ (slot freed) | voluntarily yields while a dependency is pending — an operator decision, dry-run, build, **or another agent's effort** | a **`finish` event** or a **timeout** |
-| **frozen** | ❌ | the safety gate freezes the effort (§3 / governance §3) | the Human Operator clears the CONCERN (PO may clear steering) |
+| **suspended** | ❌ | parked `--session` (no current work queued) | a new assignment / @mention wake |
+
+> **`frozen` is NOT in this table — it belongs to the *governance gate* (machine A, governance
+> §3.0).** Freezing is a **brake**; `waiting`/`suspended` are **ordinary idleness**. Composition
+> rule (governance §3.0): a `frozen` effort's agents are forced out of `computing` and the
+> scheduler may not re-admit them until the **Human Operator** (hard-gate) or **PO** (steering)
+> clears the gate. An agent can be `waiting` while its effort is perfectly `active`.
 
 - **Dependency DAG (operator):** an agent blocked on another's output goes **waiting** (slot
   freed) and wakes on that effort's `finish` — so dependent efforts run **"linearly"** (waiter
@@ -386,16 +427,25 @@ comms, and charters land before we scale the fleet or optimize.
 | Phase | Title | Output | Risk | Run by |
 |-------|-------|--------|------|--------|
 | **P0** | Platform spike **+ capability-floor test** | Mattermost + db + one bot up; a **GBNF-constrained** structured call to the **existing `llm-gateway`** (via `http://llama-cpp:8080`, no new gateway); `agent-bridge` echoes a mention; **measure `qwen36-27b` on instruction-following / structured-output / coordination → decide if a cloud judge is needed** (no model health-probes — C5) | low | dev build |
+| **Pc** *(conditional)* | **Cloud lane — fires only if P0.5 mandates a cloud judge** | stand up the **separate** `llm-gateway-cloud` (+ spend DB) with `master_key`/per-role virtual keys/budgets + OpenRouter models + **`ao-egress`** (allowlist `openrouter.ai`, no-log/ZDR); flip judge/reviewer **profiles** `lane: cloud`; bridge builds + logs the **governance-summary-only** egress payload. **Leave the local `llm-gateway` air-gap untouched.** | med | author + operator |
 | **P1** | Wake mechanic | bridge resumes a dormant `little-coder` session on @mention; one A→B hand-off in a thread, end-to-end | med | dev build |
 | **P2** | **Escalation gate (core safety)** | CONCERN type, freeze/pause-until-cleared, operator-decision parse, **kill switch**, fail-safe default | **high value** | dev build |
 | **P3** | Charters + grounding | charters as skills (floor/steering split); **hooks** enforce hard-rule #4; goal-injection on spawn/wake; versioned rule/goal store | med | dev build |
 | **P4** | Plan-stop-gates + review | checkpoints in worker plan docs; **explain-intent** at each stop; differently-goaled reviewer → report to PM; self-report cadence | med | dev build |
 | **P5** | Dynamic roles + **worker pool** + routing | **worker-instance pool + `MAX_CONCURRENT_WORKERS` scheduler w/ interactive backoff (§3.6)**; scope ledger; role-type (Human-Operator-gated) vs instance (PM) authority; "last-owner" provenance (git-blame v1 → ledger); channel taxonomy | med-high | dev build |
 | **P6** | Audit + learning loop | full event log → Open Brain; suggestion pool; pattern surfacing; **propose-not-dispose** Human-Operator approval flow | med | dev build |
-| **P7** | Mobile + hardening **+ cloud LiteLLM (if mandated)** | Human-Operator mobile flow (join any channel, decide CONCERNs, kill switch); rate caps; tailnet exposure; **stand up `llm-gateway-cloud` (OpenRouter + master_key/keys/budgets) + `ao-egress`** *only if* P0 showed local judgment insufficient | med | author + operator |
+| **P7** | Mobile + hardening | Human-Operator mobile flow (join any channel, decide CONCERNs, kill switch); rate caps; tailnet exposure; CONCERN-card UX. *(Cloud LiteLLM moved to the conditional **Pc** phase so the alignment core isn't blocked on it — see below.)* | med | author + operator |
 
 P0–P2 are the spine (prove the loop *and* that we can stop it). P3–P4 are the alignment
 core. P5–P6 add scale + the temporal loop. P7 makes it operable from your phone.
+
+> **Why `Pc` is its own conditional phase, not part of P7 (audit fix 2026-06-13).** The governance
+> model runs the **PM/PO/reviewer on the cloud lane** (governance §1, UX-FLOW §1). If the **P0.5
+> capability-floor test mandates a cloud judge**, the **alignment core (P3 charters/monitor, P4
+> differently-goaled review) depends on cloud infra** — so building the cloud lane only at the very
+> end (old P7) would block or silently degrade P3/P4. `Pc` therefore fires **immediately after P0**,
+> *only when P0.5 mandates it*, so judgment infra exists before the alignment core needs it. If P0.5
+> shows local 27B judgment is sufficient, **`Pc` is skipped entirely** and everything stays local.
 
 > **These are *build* phases, not the runtime UX.** The user journey (intake → readiness-gate →
 > plan presentation → ground/dry-run → execute → escalate) is in **[UX-FLOW.md](UX-FLOW.md)**. Its
@@ -420,6 +470,9 @@ local monitor.
 
 ### 5.1 `agent-bridge` (service)
 
+- **Internal modules (SRP, §3.1.1):** event-gateway · governance-gate (FSM A) · scheduler (FSM B) ·
+  scope-ledger · router/waker · model-router · audit-sink. The **governance-gate is isolated from
+  WS/REST plumbing** so P2's safety tests target it deterministically.
 - **Stack: Python (FastAPI + Pydantic + Instructor)** — resolves OD-2. Best structured-output/
   validation ecosystem (critical for weak models) + same language as little-coder's control-plane
   wrapper. Persistent WebSocket client to Mattermost + REST client + state DB (Postgres).
@@ -529,6 +582,12 @@ governance §8 (#1–#11) and are not duplicated here.
 - **OD-7 — Coordination glue scope.** How much the bridge does deterministically (routing, format
   repair, handoff state) vs. what little is left to model judgment, given small-model fragility
   (§3.5). Lean maximal-deterministic.
+- **OD-8 — Worker concurrency budget (§3.6) — direction set, value to confirm at P0.** Backend:
+  **3 parallel @ ~83k** preferred (operator: best long-run headroom for OWUI/OB1/other services);
+  **4 @ 64k** as a burst config; **never 32k** (operator-confirmed unmanageable). Aggregate KV ≈
+  250–260k @ Q4 on `qwen3.6-27b`. Fleet `MAX_CONCURRENT_WORKERS` = slots − interactive reserve →
+  **~1–2 workers at 3-parallel, ~2–3 at 4-parallel**, semaphore-enforced with interactive backoff.
+  Confirm the exact reserve + whether the agent-org may request a temporary bump to 4-parallel.
 - **OD-9 — Mattermost mobile push privacy (§3.7).** Mobile push uses either Mattermost's public
   **HPNS relay** (leaks notification metadata off-box) or a **self-hosted push proxy**, or neither
   (tailnet, open-app-to-see). For the privacy posture: prefer **self-hosted push proxy** or
@@ -536,12 +595,6 @@ governance §8 (#1–#11) and are not duplicated here.
 - **OD-10 — Judge model is binary (§3.4) — direction set.** Local judge = **same `qwen36-27b`**
   (no swap thrash) **or** **OpenRouter** (off-GPU) — *never* local 35B. P0 capability-floor decides
   which. Confirm acceptable OpenRouter spend ceiling if it's needed.
-- **OD-8 — Worker concurrency budget (§3.6) — direction set, value to confirm at P0.** Backend:
-  **3 parallel @ ~83k** preferred (operator: best long-run headroom for OWUI/OB1/other services);
-  **4 @ 64k** as a burst config; **never 32k** (operator-confirmed unmanageable). Aggregate KV ≈
-  250–260k @ Q4 on `qwen3.6-27b`. Fleet `MAX_CONCURRENT_WORKERS` = slots − interactive reserve →
-  **~1–2 workers at 3-parallel, ~2–3 at 4-parallel**, semaphore-enforced with interactive backoff.
-  Confirm the exact reserve + whether the agent-org may request a temporary bump to 4-parallel.
 
 ---
 

@@ -192,7 +192,9 @@ tension the literature doesn't price.
 
 ## 6. Recommended changes to fold in (combined with the TT analysis's §5)
 
-(Proposed — not yet applied.)
+> ✅ **Status: folded (2026-06-13 audit pass).** Recommendations (g)–(l) below are now reflected in
+> the governance/PLAN/TASKS docs. See the **[README.md](README.md) traceability matrix** for the
+> exact landing site of each. Kept here as the rationale of record.
 
 - **(g) Reframe: continuous supervision primary, gate = its escalation arm → governance §3 + §9.**
   *(T-S1 — the most important change.)*
