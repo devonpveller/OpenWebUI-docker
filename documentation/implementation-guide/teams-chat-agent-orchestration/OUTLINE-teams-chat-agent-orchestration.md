@@ -15,18 +15,21 @@ The org model (governance/roles detailed in
 [SAFETY-AND-WORKFLOW-governance-model.md](SAFETY-AND-WORKFLOW-governance-model.md)):
 
 ```
-            (You) — PO / Primary Operator — final authority, human-in-the-loop
-                         |  talk primarily to the PM; concerns up-level back to you
-                  PM — Orchestrator agent  (monitor + delegator, can't clear own escalations)
-                  /       |        \
+        Human Operator (you) — final authority, human-in-the-loop
+                 |  steer the PO; hard-gate triggers up-level back to you
+        PO — Project Overseer (agent)  — big picture / UX vision / ethics; your contact
+                 |  sets direction; differently-goaled check on the PM
+        PM — Project Manager (agent)   — execution + action-to-action alignment; can't clear own escalations
+                 /       |        \
             Worker     Worker     Worker      ... domain-scoped, spun up on demand
           (little-coder instances, per work effort)
 ```
 
-> **Workflow:** you (PO) converse primarily with the **PM orchestrator agent**;
-> delegation flows down. Any concern or deviation the PM observes is **up-leveled to you
-> for the final decision, and the affected work pauses until you clear it.** Full model in
-> the governance doc.
+> **Workflow:** you (the **Human Operator**) converse primarily with the **PO (Project Overseer
+> agent)**, which sets direction for the **PM (Project Manager agent)**; delegation flows down.
+> Concerns ride the ladder (worker → PM → PO → you); the PO resolves most steering, and **§3
+> hard-gate triggers up-level to you and pause until you clear them.** Full model in the
+> governance doc (§1). *(Note: "PO" = Project Overseer agent as of 2026-06-13 — not the human.)*
 
 The behaviours we need from the chat layer:
 

@@ -76,10 +76,10 @@ build is the **conditional cloud lane** (§3.4, OD-6).
 Stand up a self-hosted, mobile-accessible chat platform that doubles as the **coordination
 fabric for a fleet of coding agents**, organized as a company:
 
-- **PO (you, human)** ⇄ **PM orchestrator agent** ⇄ **domain workers** (`little-coder`).
+- **Human Operator (you)** ⇄ **PO (Project Overseer agent)** ⇄ **PM (Project Manager agent)** ⇄ **domain workers** (`little-coder`). (Role taxonomy: governance §1.)
 - Agents are first-class chat participants; a worker that hits an error outside its scope
   **messages the last owner**, which **wakes** that worker to fix it and **reply in-thread**.
-- Every agent exchange is **observable** and the **PO can join any channel/DM** to correct
+- Every agent exchange is **observable** and the **Human Operator can join any channel/DM** to correct
   direction in real time.
 - The whole thing is governed so it doesn't fall into the paper's failure mode (more capable
   but **less aligned**): mandatory escalation, **pause-until-cleared**, goal-grounded workers,
@@ -97,11 +97,11 @@ fabric for a fleet of coding agents**, organized as a company:
   plugins) as the chat layer — see OUTLINE §3 for why over Matrix/Zulip.
 - Build **`agent-bridge`**: persistent WebSocket consumer + REST poster that maps
   `channel/thread ↔ work-effort ↔ little-coder session`, owns **wake**, and **enforces the
-  governance gate** (escalation, freeze, PO-decision).
+  governance gate** (escalation, freeze, operator decision).
 - Reuse `little-coder`'s existing `--session <id>` per-chat resume — the session id becomes
   the chat **thread id** (memory: `little-coder-per-chat-sessions`).
 - Implement governance as **skills + hooks** (reuse `.claude/skills/`), not a parallel system.
-- Full **observability + audit** (mirror to Open Brain), PO **kill switch**, fail-safe pause.
+- Full **observability + audit** (mirror to Open Brain), Human-Operator **kill switch**, fail-safe pause.
 - **Local-first model posture.** Everything runs on local `llama-cpp` by default. A larger
   model is used **only where a step is *mandatorily* beyond local capability** (judgment roles —
   see §3.4), and only via **OpenRouter** (privacy-respecting external routing), **never** a
@@ -112,7 +112,7 @@ fabric for a fleet of coding agents**, organized as a company:
 - No public/cloud exposure of the chat server in v1 (tailnet/LAN only; reuse tailscale).
 - No E2EE on agent channels (observability is a safety requirement, governance §5/§7).
 - Not throughput-optimizing before the governance shape works (governance §9 build order).
-- No autonomous rule self-modification — the learning loop **proposes**, the PO disposes.
+- No autonomous rule self-modification — the learning loop **proposes**, the Human Operator disposes.
 - **No mainstream data-collecting frontier LLM service.** Any cloud touch is OpenRouter only,
   routed to **no-log / zero-data-retention** providers (prefer open-weight large models), and
   only for steps that are mandatorily beyond local capability. Default is always local.
@@ -128,7 +128,7 @@ fabric for a fleet of coding agents**, organized as a company:
   │  Mattermost  │ ──────────────────▶ │   agent-bridge     │ ──────────────▶ │ little-coder │
   │ (chat + app) │ ◀────────────────── │  router · waker ·  │ ◀────────────── │  workers    │
   └──────────────┘   REST: post/thread │  GOVERNANCE GATE   │  result/explain └─────────────┘
-        ▲  PO joins any channel (mobile)└─────────┬──────────┘
+        ▲  Human Op joins any channel (mobile)└──────┬──────────┘
         │                                         │ audit + learning
         │                                         ▼
         └────────────────────────────  Open Brain (audit trail, patterns, suggestion pool)
@@ -136,7 +136,7 @@ fabric for a fleet of coding agents**, organized as a company:
 
 - **agent-bridge** is the new heart: it holds the channel↔effort↔session map, the **scope
   ledger**, the **rule/goal version store**, and the **escalation-gate state machine**
-  (freeze / CONCERN / PO-decision / resume). Governance §3, §5.
+  (freeze / CONCERN / operator decision / resume). Governance §3, §5.
 - **Mattermost** supplies identities (bot accounts per agent), the real-time event bus (wake
   trigger), threads (hand-offs), channels (work efforts), and the mobile apps.
 - **little-coder** workers are unchanged in spirit — woken via session resume; they receive
@@ -176,7 +176,7 @@ This plan exists to make the governance doc real. The mapping:
 | Governance control | Where it's enforced |
 |--------------------|---------------------|
 | Escalation gate / pause-until-cleared (§3) | `agent-bridge` state machine; freeze = stop dispatch/wake for an effort |
-| CONCERN + PO decision (§3, §7) | structured Mattermost post type + bridge parser; PO replies from mobile |
+| CONCERN + operator decision (§3) | structured Mattermost post type + bridge parser; the Human Operator replies from mobile (PO resolves steering; hard-gate → Human Operator) |
 | Bus-only comms (§5) | workers have **no** channel but Mattermost; bridge is the only transport |
 | Rules-as-skills, floor/steering split (§4.2) | charters = little-coder **Agent Skills** + founding knowledge; floor **already enforced** by existing `git-proxy` + `lc-egress` + sanitization filter + two-plane split (extend, don't reinvent — TOOLING §2) |
 | Worker harness + wake | **reuse** little-coder/`pi` + `--session <thread_id>` (TOOLING §2) |
@@ -185,7 +185,7 @@ This plan exists to make the governance doc real. The mapping:
 | Goal grounding, constraints-inline (§4.3) | PM composes worker goals; bridge injects on spawn/wake; versioned |
 | Plan-stop-gates + explain-intent (§4.5) | checkpoints in the worker's plan doc; bridge blocks past a checkpoint until review cleared |
 | Peer review by differently-goaled agents (§4.4) | bridge spawns reviewer(s) with an ethics/whole-picture goal → report to PM, not self-approve |
-| Scope ledger / role-expansion authority (§4.1) | bridge ledger; new role *type* = PO-gated, new *instance* = PM |
+| Scope ledger / role-expansion authority (§4.1) | bridge ledger; new role *type* = Human-Operator-gated (PO proposes), new *instance* = PM |
 | Audit trail + learning loop (§5, §6) | bridge logs every event; mirror to Open Brain; suggestion pool; **propose-not-dispose** |
 | Kill switch / model-by-role (§3, §7) | bridge global freeze; **local lane** via existing air-gapped `llm-gateway`; **cloud lane** (judge, if mandated) via separate `llm-gateway-cloud` → `ao-egress` (§3.4) |
 | Roles = model profiles (C4) | a profile binds {charter/system-prompt, temp, tool-scope, caller-key} → a gateway model name; adding a role = adding a profile, not a gateway change (§5.4) |
@@ -232,8 +232,8 @@ ceiling* of everything the org builds downstream — so it earns the cloud spend
 prefer all-local. **Workers stay local.** ⚠️ **The exact reach is a per-profile `lane` setting,
 tuned empirically** (start judgment-heavy-roles-cloud / workers-local, then stretch the local
 boundary as practice shows what `qwen36-27b` can hold). Idle-wait (§3.6) keeps idle cloud agents
-from burning OpenRouter tokens; the cloud budget caps the rest. (The **human (you)** is the tier
-*above* the PO — no model; final authority on the §3 hard-gate triggers. See governance §1 / UX-FLOW §1.)
+from burning OpenRouter tokens; the cloud budget caps the rest. (The **Human Operator (you)** is the
+tier *above* the PO — no model; final authority on the §3 hard-gate triggers. See governance §1 / UX-FLOW §1.)
 
 > **Swap-thrash constraint still holds (audit §0 / as-built).** The local gateway exposes only
 > `qwen36-27b` — the operator **removed `qwen36-35b-a3b`** to stop 27B⇄35B swap thrash and unmask
@@ -337,8 +337,8 @@ The bounded budget only works because a waiting agent **releases its slot**. Thr
 | State | Holds a slot? | Entered when | Woken by |
 |-------|---------------|--------------|----------|
 | **active** | ✅ | doing work | — |
-| **waiting** | ❌ (slot freed) | voluntarily yields while a dependency is pending — PO decision, dry-run, build, **or another agent's effort** | a **`finish` event** or a **timeout** |
-| **frozen** | ❌ | the safety gate freezes the effort (§3 / governance §3) | PO clears the CONCERN |
+| **waiting** | ❌ (slot freed) | voluntarily yields while a dependency is pending — an operator decision, dry-run, build, **or another agent's effort** | a **`finish` event** or a **timeout** |
+| **frozen** | ❌ | the safety gate freezes the effort (§3 / governance §3) | the Human Operator clears the CONCERN (PO may clear steering) |
 
 - **Dependency DAG (operator):** an agent blocked on another's output goes **waiting** (slot
   freed) and wakes on that effort's `finish` — so dependent efforts run **"linearly"** (waiter
@@ -356,7 +356,7 @@ Two model lanes (§3.4) → two network paths. **Local stays air-gapped through 
 `llm-gateway`; only the separate `llm-gateway-cloud` touches the internet, through `ao-egress`.**
 
 ```
- PO (tailnet) ──tailscale serve──▶ mattermost ─┐
+ Human Op (tailnet) ──tailscale serve──▶ mattermost ─┐
                                                 │ ao-net (internal, no internet)
    agent-bridge ◀─WebSocket/REST─▶ mattermost   │
    LOCAL  bridge + workers ──▶ ai-stack_llm-net ──▶ llama-cpp:8080 (alias) ──▶ llm-gateway
@@ -387,12 +387,12 @@ comms, and charters land before we scale the fleet or optimize.
 |-------|-------|--------|------|--------|
 | **P0** | Platform spike **+ capability-floor test** | Mattermost + db + one bot up; a **GBNF-constrained** structured call to the **existing `llm-gateway`** (via `http://llama-cpp:8080`, no new gateway); `agent-bridge` echoes a mention; **measure `qwen36-27b` on instruction-following / structured-output / coordination → decide if a cloud judge is needed** (no model health-probes — C5) | low | dev build |
 | **P1** | Wake mechanic | bridge resumes a dormant `little-coder` session on @mention; one A→B hand-off in a thread, end-to-end | med | dev build |
-| **P2** | **Escalation gate (core safety)** | CONCERN type, freeze/pause-until-cleared, PO-decision parse, **kill switch**, fail-safe default | **high value** | dev build |
+| **P2** | **Escalation gate (core safety)** | CONCERN type, freeze/pause-until-cleared, operator-decision parse, **kill switch**, fail-safe default | **high value** | dev build |
 | **P3** | Charters + grounding | charters as skills (floor/steering split); **hooks** enforce hard-rule #4; goal-injection on spawn/wake; versioned rule/goal store | med | dev build |
 | **P4** | Plan-stop-gates + review | checkpoints in worker plan docs; **explain-intent** at each stop; differently-goaled reviewer → report to PM; self-report cadence | med | dev build |
-| **P5** | Dynamic roles + **worker pool** + routing | **worker-instance pool + `MAX_CONCURRENT_WORKERS` scheduler w/ interactive backoff (§3.6)**; scope ledger; role-type (PO) vs instance (PM) authority; "last-owner" provenance (git-blame v1 → ledger); channel taxonomy | med-high | dev build |
-| **P6** | Audit + learning loop | full event log → Open Brain; suggestion pool; pattern surfacing; **propose-not-dispose** PO approval flow | med | dev build |
-| **P7** | Mobile + hardening **+ cloud LiteLLM (if mandated)** | PO mobile flow (join any channel, decide CONCERNs, kill switch); rate caps; tailnet exposure; **stand up `llm-gateway-cloud` (OpenRouter + master_key/keys/budgets) + `ao-egress`** *only if* P0 showed local judgment insufficient | med | author + operator |
+| **P5** | Dynamic roles + **worker pool** + routing | **worker-instance pool + `MAX_CONCURRENT_WORKERS` scheduler w/ interactive backoff (§3.6)**; scope ledger; role-type (Human-Operator-gated) vs instance (PM) authority; "last-owner" provenance (git-blame v1 → ledger); channel taxonomy | med-high | dev build |
+| **P6** | Audit + learning loop | full event log → Open Brain; suggestion pool; pattern surfacing; **propose-not-dispose** Human-Operator approval flow | med | dev build |
+| **P7** | Mobile + hardening **+ cloud LiteLLM (if mandated)** | Human-Operator mobile flow (join any channel, decide CONCERNs, kill switch); rate caps; tailnet exposure; **stand up `llm-gateway-cloud` (OpenRouter + master_key/keys/budgets) + `ao-egress`** *only if* P0 showed local judgment insufficient | med | author + operator |
 
 P0–P2 are the spine (prove the loop *and* that we can stop it). P3–P4 are the alignment
 core. P5–P6 add scale + the temporal loop. P7 makes it operable from your phone.
@@ -407,7 +407,7 @@ core. P5–P6 add scale + the temporal loop. P7 makes it operable from your phon
 **P0 capability-floor gate:** the local-model measurement in P0 is a prerequisite, not a nicety
 — it decides whether `JUDGE_MODEL` can stay local or must escalate to OpenRouter for judgment
 roles (§3.4). Workers stay local regardless. If local judgment is too weak *and* OpenRouter is
-not yet wired, judgment defaults to the **human PO** carrying more, never to trusting a weak
+not yet wired, judgment defaults to the **Human Operator** carrying more, never to trusting a weak
 local monitor.
 
 > **Gate before scale:** do **not** start P5 (multiple roles, fan-out) until P2 (stop) and
@@ -440,15 +440,15 @@ local monitor.
   - `assign_effort(effort)` → acquire a pool instance under the `MAX_CONCURRENT_WORKERS`
     semaphore (honors interactive backoff, §3.6); queue if none free.
   - `on_mention(post)` → resolve target worker → wake/resume its session → deliver context.
-  - `on_concern(...)` → freeze effort(+dependents) → post CONCERN to `#mgmt` → await PO.
-  - `on_po_decision(reply)` → parse approve/modify/abort → propagate → unfreeze.
+  - `on_concern(...)` → freeze effort(+dependents) → post CONCERN to `#mgmt` → await decision (PO for steering, Human Operator for hard-gate).
+  - `on_operator_decision(reply)` → parse approve/modify/abort → propagate → unfreeze.
   - `enforce_checkpoint(worker, plan)` → block past a stop-gate until review cleared (P4).
   - `kill_switch()` → freeze entire fleet.
 
 ### 5.2 Mattermost config
 
-- Bot account per agent (`@pm`, `@worker-*`, `@reviewer-*`); PO = system admin (join any).
-- Channel taxonomy: `#mgmt` (PO⇄PM), `#effort-<name>` per work effort, `#incidents`,
+- Bot account per agent (`@po`, `@pm`, `@worker-*`, `@reviewer-*`); the **Human Operator** = system admin (join any).
+- Channel taxonomy: `#mgmt` (Human Operator ⇄ PO ⇄ PM), `#effort-<name>` per work effort, `#incidents`,
   `#suggestions` (pool, §6), DMs for targeted fixes.
 - No E2EE. CONCERN/decision rendered via a custom post type or attachment (plugin, P2/P7).
 
@@ -550,15 +550,15 @@ governance §8 (#1–#11) and are not duplicated here.
 - **P0:** post a mention → assert bridge receives the WS event and posts a reply.
 - **P1:** dormant worker session is resumed by a mention; A→B hand-off lands in one thread.
 - **P2 (safety-critical):** a CONCERN freezes the effort; no worker action proceeds while
-  frozen; PO `approve/modify/abort` resumes correctly; **bridge restart keeps a frozen effort
+  frozen; Human-Operator `approve/modify/abort` resumes correctly; **bridge restart keeps a frozen effort
   frozen**; kill switch halts all. Negative test: a refusal/objection **cannot** be routed to
   another worker (F3).
 - **P3:** hard-rule #4 hook blocks an irreversible action without a cleared decision; a
-  steering update reaches a worker on next turn; a floor change requires PO + version bump.
+  steering update reaches a worker on next turn; a floor change requires Human-Operator approval + version bump.
 - **P4:** worker halts at a plan checkpoint; explanation surfaces an injected goal-drift case;
   re-ground → refactor → continue; a **same-goal** reviewer is rejected by config (must be
   differently-goaled).
-- **P5:** new role *instance* by PM succeeds; new role *type* requires PO; scope ledger denies
+- **P5:** new role *instance* by PM succeeds; new role *type* requires Human Operator (PO proposes); scope ledger denies
   self-granted scope.
 - **P6:** every gate event lands in the audit trail + Open Brain; a suggestion enters the pool;
   a pattern produces a *proposal* that does **not** auto-apply.

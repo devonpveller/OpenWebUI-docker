@@ -55,11 +55,11 @@ Status keys: ⬜ todo · 🔧 in progress · ✅ done · 🧪 needs test · 🚀
   conflict, irreversible/external action, unresolved disagreement, wake-storm cap. (§3 triggers)
 - ⬜ **P2.3** **CONCERN** message: bridge posts a structured CONCERN to `#mgmt` (what/why/
   options/recommendation) and freezes the effort **+ dependents**. (§3)
-- ⬜ **P2.4** **PO decision** parse: PO reply → approve / modify-scope / abort → propagate →
-  unfreeze; decision logged. (§3)
-- ⬜ **P2.5** **Fail-safe default**: PO unavailable → stays paused, **no auto-resume, no
-  ask-another-agent**. Negative test: refusal cannot be re-routed to a second worker (F3).
-- ⬜ **P2.6** **Global kill switch**: PO command freezes the entire fleet. (§3)
+- ⬜ **P2.4** **Operator-decision** parse: the Human Operator's reply → approve / modify-scope /
+  abort → propagate → unfreeze; decision logged. (PO may clear steering; hard-gate → Human Operator.) (§3)
+- ⬜ **P2.5** **Fail-safe default**: Human Operator unavailable → stays paused, **no auto-resume, no
+  ask-another-agent, PO cannot self-clear a hard-gate**. Negative test: refusal cannot be re-routed to a second worker (F3).
+- ⬜ **P2.6** **Global kill switch**: Human-Operator command freezes the entire fleet. (§3)
 - 🧪 **P2.7** Safety tests per PLAN §7 P2 (freeze holds, restart-keeps-frozen, no F3 reroute).
 
 ## P3 — Charters + grounding (rules-as-skills, floor/steering, goals)
@@ -69,8 +69,8 @@ Status keys: ⬜ todo · 🔧 in progress · ✅ done · 🧪 needs test · 🚀
 - ⬜ **P3.2** **Floor vs steering split**: hard rules = always-on non-overridable skill;
   steering layer = mutable per-session inject. (§4.2)
 - ⬜ **P3.3** **Hooks enforce the floor**: a PreToolUse-style hook blocks irreversible/external
-  actions (push/deploy/delete/spend/send) without a cleared PO decision (hard-rule #4). (§4.2)
-- ⬜ **P3.4** Rule/goal **version store** in the bridge; a floor change requires PO + version
+  actions (push/deploy/delete/spend/send) without a cleared Human-Operator decision (hard-rule #4). (§4.2)
+- ⬜ **P3.4** Rule/goal **version store** in the bridge; a floor change requires Human-Operator approval + version
   bump + audit entry; workers report which version they run. (§4.2)
 - ⬜ **P3.5** **Goal injection**: bridge delivers the worker's goal with **constraints inline**
   on spawn/wake; PM-owned canonical objective → scoped slices. (§4.3)
@@ -116,7 +116,7 @@ Status keys: ⬜ todo · 🔧 in progress · ✅ done · 🧪 needs test · 🚀
 - ⬜ **P5.1** **Scope ledger**: who's authorized for what path/domain; requests logged; deny
   self-granted scope (hard-rule #2). (§5, §4.1)
 - ⬜ **P5.2** **Role authority split**: PM may spin up another **instance** of an approved role;
-  a **new role type** is PO-gated via the §3 gate (proposed charter + scope). (§4.1)
+  a **new role type** is Human-Operator-gated (PO proposes) via the §3 gate (charter + scope). (§4.1)
 - ⬜ **P5.3** Optional **approved-role catalog** (auth/DB/frontend/infra pre-cleared); only
   novel domains escalate. (§8 #7)
 - ⬜ **P5.4** **Last-owner provenance**: resolve "who last touched this area" — git-blame/last
@@ -128,7 +128,7 @@ Status keys: ⬜ todo · 🔧 in progress · ✅ done · 🧪 needs test · 🚀
   constraints inline (§4.3), sized to the local model's coherent window; cognitive-load heuristic
   triggers a (reluctant) split. (§4.1, §8 #12)
 - ⬜ **P5.8** **Retirement/decommission**: revoke scope from the ledger, retire role from the
-  catalog, expire stale goals/rules, archive effort artifacts — all logged; PM vs PO authority per
+  catalog, expire stale goals/rules, archive effort artifacts — all logged; PM vs PO vs Human-Operator authority per
   step. (§4.1 lifecycle, §8 #14)
 
 ## P6 — Audit trail + learning loop (propose-not-dispose)
@@ -141,8 +141,8 @@ Status keys: ⬜ todo · 🔧 in progress · ✅ done · 🧪 needs test · 🚀
   for consideration. (§6)
 - ⬜ **P6.4** **Pattern surfacing**: detect recurring failure/suggestion patterns across efforts
   (manual PM synthesis v1; assisted later) — route via Open Brain + claudeception. (§6)
-- ⬜ **P6.5** **Propose-not-dispose flow**: pattern → PM synthesizes a *proposed* change → **PO
-  approves** → lands via versioned floor/steering update (P3.4). **No auto-apply.** (§6)
+- ⬜ **P6.5** **Propose-not-dispose flow**: pattern → PM synthesizes a *proposed* change → **the Human
+  Operator approves** → lands via versioned floor/steering update (P3.4). **No auto-apply.** (§6)
 
 ## 3-place change (per new container)
 
@@ -159,7 +159,7 @@ Status keys: ⬜ todo · 🔧 in progress · ✅ done · 🧪 needs test · 🚀
 
 ## P7 — Mobile + hardening (author here; exposure = operator)
 
-- ⬜ **P7.1** PO mobile flow: install Mattermost app, PO = system admin (join any channel/DM),
+- ⬜ **P7.1** Human-Operator mobile flow: install Mattermost app, the Human Operator = system admin (join any channel/DM),
   decide CONCERNs and trigger kill switch from phone. (§1, §3)
 - ⬜ **P7.2** **Cloud LiteLLM (only if P0.5 mandates) — the planned OpenRouter extension.** Stand
   up a **separate `llm-gateway-cloud`** (+ its own spend DB) with **`master_key` + per-role virtual

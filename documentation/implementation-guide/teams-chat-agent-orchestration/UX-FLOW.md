@@ -1,7 +1,7 @@
 # UX Flow — the user journey & the intent thread
 
 **Status:** 📝 DESIGN (2026-06-13). The user-facing lifecycle that ties the governance spine
-(PO↔PM↔workers, gate, grounding, stop-gates, review) into one journey.
+(Human Operator↔PO↔PM↔workers, gate, grounding, stop-gates, review) into one journey.
 **Companion docs:** [PLAN](PLAN-teams-chat-agent-orchestration.md) · [SAFETY-AND-WORKFLOW-governance-model.md](SAFETY-AND-WORKFLOW-governance-model.md) · the ANALYSIS docs.
 **Tag key:** ✅ already in the plan · 🆕 added here · ⚠️ tension/tunable.
 
@@ -34,7 +34,7 @@ The UX exists to do two things to that thread, and nothing else:
 
 | Tier / role | Who | Model lane | Why |
 |-------------|-----|-----------|-----|
-| **Human (you)** | the person | — | top of the ladder; sets the request, approves plans, clears §3 hard-gate triggers; primary contact = the PO |
+| **Human Operator (you)** | the person | — | top of the ladder; sets the request, approves plans, clears §3 hard-gate triggers; primary contact = the PO |
 | **PO — Project Overseer** | agent | **cloud (larger, OpenRouter)** | big picture / UX vision / **owner of the intent thread** / security-ethics; your point of contact; differently-goaled check on the PM |
 | **PM — Project Manager** | agent | **cloud** | practical implementation + action-to-action alignment to the PO; decomposes/delegates/monitors workers |
 | **Planner** | agent (PO/PM or a dedicated profile) | **cloud** | **plan generation is a judgment task** — a weak planner caps the productivity ceiling of everything downstream, so it earns the cloud spend (operator, pt 2) |
@@ -70,9 +70,9 @@ The UX exists to do two things to that thread, and nothing else:
 The planner asks: *is this plan clear AND safe to execute against this codebase?*
 - **`false`** (gaps, or the request implies cascading refactors): **generate clarifying questions**
   derived from (a) plan gaps and (b) implementation-safety (how it fits existing code; blast
-  radius). Ask the PO; **iterate**; the plan stays `draft` until coherent.
+  radius). The PO asks **you (the Human Operator)**; **iterate**; the plan stays `draft` until coherent.
 - **`true`** → proceed to Stage 3.
-- **Intent op:** *disambiguate* — every question is a fork in the intent thread resolved by the PO.
+- **Intent op:** *disambiguate* — every question is a fork in the intent thread resolved by you (the Human Operator).
 - **Why it matters:** this is the **cheapest place to catch misalignment — before any worker
   spawns** (paper's goal-problem-first; governance F5 "don't guess, surface it").
 - ⚠️ **Capability-gated:** judging clarity+safety is exactly where local 27B is weakest (F7) → a
@@ -101,11 +101,11 @@ The main loop: workers wake on @mention hand-offs, halt at plan stop-gates to **
 errors. The intent thread rides along as each worker's grounded goal.
 
 ### Stage 6 — Escalation (when a level can't resolve)  ✅ladder / 🆕framing
-- **Ladder:** worker → PM → (next-level lead, if the org has one for that domain) → **PO**. Each
-  level resolves what it can and passes up only what it can't.
-- **Framing (the rule):** an escalation to the PO is **intent-framed** — see §3 below.
-- **Intent op:** *fork* — present the branch in the intent thread and let the PO choose; work
-  **pauses (idle-wait, §5)** until cleared.
+- **Ladder:** worker → PM → **PO** → **human (you)**. Each level resolves what it can and passes
+  up only what it can't (PO resolves steering; hard-gate triggers reach you).
+- **Framing (the rule):** an escalation is **intent-framed** — see §3 below.
+- **Intent op:** *fork* — present the branch in the intent thread and let the decider choose (the
+  PO for steering, **you** for hard-gate); work **pauses (idle-wait, §5)** until cleared.
 
 ---
 
@@ -155,8 +155,8 @@ actively computing.** Three bridge states:
 | State | Holds a slot? | Entered when | Woken by |
 |-------|---------------|--------------|----------|
 | **active** | ✅ yes | doing work | — |
-| **waiting** (idle) | ❌ **releases slot** | voluntarily yields while a dependency is pending — PO decision, dry-run, build, **or another agent's effort** | a **`finish` event** or a **timeout** |
-| **frozen** | ❌ no work | the safety gate freezes the effort (§3) | PO clears the CONCERN |
+| **waiting** (idle) | ❌ **releases slot** | voluntarily yields while a dependency is pending — an operator decision, dry-run, build, **or another agent's effort** | a **`finish` event** or a **timeout** |
+| **frozen** | ❌ no work | the safety gate freezes the effort (§3) | the Human Operator clears the CONCERN (PO may clear steering) |
 
 - **Dependency DAG (operator, pt 7):** an agent blocked on another's output goes **waiting**
   (slot freed), and wakes on that effort's `finish`. So efforts run **"linearly" by dependency**
@@ -192,7 +192,7 @@ actively computing.** Three bridge states:
 | 0 Intake | PLAN §5.2 (Mattermost channels); governance §1 |
 | 1 Anchor + draft | governance §4.3 (goal-grounding); §4.5 (plan doc); PLAN §3.4 (cloud planner) |
 | 2 Readiness gate | governance F5; §4.3; **🆕 new phase — fold into PLAN phases** |
-| 3 Plan + approve | governance §4.5 (top stop-gate) + §3 (PO decision); PLAN §3.6 (delegation budget) |
+| 3 Plan + approve | governance §4.5 (top stop-gate) + §3 (Human-Operator approval); PLAN §3.6 (delegation budget) |
 | 4 Ground + dry-run | `openbrain-research`; **🆕 new phase — fold into PLAN phases**; governance "verify before claiming" |
 | 5 Execution | governance §3–§6 (the main loop) |
 | 6 Escalation | governance §3 (gate) + §3.x CONCERN schema (this doc) + §4.4 |
