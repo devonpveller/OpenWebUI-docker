@@ -107,19 +107,26 @@ We risk **both**. Implications:
   org-level constraints (§5) — and the **deterministic floor** (§4.2) — do the load-bearing
   work, *because* the constituent models are weaker than the ones that closed the gap.
 
-**Decided model stance (operator, 2026-06-10): local-first, OpenRouter-where-mandatory.**
-- **Default everything local.** Workers (`WORKER_MODEL`) are **always local**.
+**Decided model stance (operator; updated 2026-06-13 to the as-built LiteLLM): local via the
+air-gapped gateway; cloud via a *separate* LiteLLM, only where mandatory.** See PLAN §3.4.
+- **Default everything local.** Workers are **always local**, reached through the **existing,
+  air-gapped `llm-gateway`** (transparent `llama-cpp:8080` alias). Local inference is **free → no
+  spend caps / no `master_key`** on that gateway (C2).
 - **Judgment roles** (PM/monitor, reviewer, goal-grounding) are the highest-leverage alignment
-  point and where small models fail worst — so `JUDGE_MODEL` is **local first**, and escalates
-  to a **larger model via OpenRouter *only if* the P0 capability-floor test shows local judgment
-  is insufficient.**
-- **The larger model is OpenRouter, never a mainstream consumer frontier service** (which
-  collects user data/queries). OpenRouter is privacy-respecting *when configured so* — pin it to
-  **no-log / zero-data-retention** providers and prefer **open-weight** large models.
-- **Privacy boundary:** anything sent to OpenRouter is a **governance-level summary** (claim /
-  goal / deviation / options), **never raw proprietary code or secrets** (§8 #6/#13).
-- **If local judgment is too weak and OpenRouter isn't wired, the human PO carries more** — never
-  trust a weak local monitor by default. A weaker monitor model is a weaker monitor.
+  point and where small models fail worst — so the local judge is the **same `qwen36-27b`**, and
+  escalates to a **larger model via OpenRouter *only if* the P0 capability-floor test shows local
+  judgment insufficient.**
+- **Cloud = a separate sibling `llm-gateway-cloud`, never the air-gapped local gateway and never a
+  mainstream data-collecting frontier service.** It holds OpenRouter + `master_key` + virtual keys
+  + **per-role budgets** (the cost-tiered cap, §3), egress only via `ao-egress` (no-log/ZDR,
+  open-weight). The local gateway's air-gap is preserved (operator C1 = option B).
+- **Privacy boundary:** anything sent to the cloud is a **governance-level summary** (claim / goal
+  / deviation / options), **never raw proprietary code or secrets** (§8 #6/#13).
+- **⚠️ Never probe model health** (C5): an active probe = a real completion = a llama-swap load =
+  thrash (this forced the local `qwen36-35b-a3b` removal). Monitor via bounded completions +
+  side-effect-free upstream `/health`; keep `background_health_checks: false`.
+- **If local judgment is too weak and the cloud gateway isn't wired, the human PO carries more** —
+  never trust a weak local monitor by default. A weaker monitor model is a weaker monitor.
 
 ---
 
@@ -136,8 +143,10 @@ decisions are cleared" means concretely.
 > - **Cheap-continuous, always on:** deterministic floor hooks on every tool call (§4.2),
 >   bus-level observability (§5), rate caps. Near-zero marginal cost.
 > - **Expensive-continuous, sampled/triggered + full at checkpoints:** the LLM **monitor's
->   judgment**, which runs on `JUDGE_MODEL` (§2.1). Necessary *because* workers are weak, costly
->   *because* judgment needs the larger model — so it's sampled/triggered, not run on every token.
+>   judgment** (§2.1). On the **local** lane it's free (uncapped, air-gapped gateway); on the
+>   **cloud** lane its **per-role budget cap lives on `llm-gateway-cloud`** (LiteLLM virtual-key
+>   budgets) — *that* is where the cost-tier is actually enforced. Either way it's sampled/
+>   triggered, not run on every token, and **never via a model health-probe** (C5 — that = a load).
 
 **Triggers — any of these freezes the affected work effort and up-levels to the PO:**
 
@@ -520,12 +529,13 @@ Mapping to the companion doc's tooling (Mattermost primitives shown):
    ever want a "red-team" agent, it runs **isolated**, never in the live fleet (F5).
 5. **What counts as "irreversible/external"** for hard-rule #4 — the deploy/push/delete/
    spend/send list needs to be explicit and enforced at the tool-permission layer too.
-6. **Model assignment by role — RESOLVED (F7/§2.1).** **Local-first; OpenRouter where
-   mandatory.** `WORKER_MODEL` always local; `JUDGE_MODEL` (PM/monitor, reviewer, grounding)
-   local-first, escalating to a larger model **via OpenRouter only if the P0 capability-floor
-   test (#13) proves local judgment insufficient**. The larger model is **OpenRouter, never a
-   mainstream consumer frontier service**; pin to no-log/ZDR providers, prefer open-weight. The
-   gate + deterministic floor carry safety, not the models. *(Remaining sub-questions live in #13.)*
+6. **Model assignment by role — RESOLVED (F7/§2.1; reconciled to as-built LiteLLM 2026-06-13).**
+   **Local via the air-gapped `llm-gateway`; cloud via a separate `llm-gateway-cloud` (operator
+   C1 = option B).** Workers + local judge = `qwen36-27b` through the existing gateway (free, no
+   budgets). Judgment escalates to **OpenRouter on the separate cloud gateway only if P0 (#13)
+   proves local judgment insufficient** — never the air-gapped local gateway, never a mainstream
+   data-collecting service; cloud holds `master_key`/keys/**budgets** (the cost cap) + egress via
+   `ao-egress`. **Roles = profiles (C4), not gateway models** (PLAN §5.4). *(Sub-questions in #13.)*
 7. **Role-expansion authority line (§4.1).** Confirm the proposed split: PM may spin up
    more instances of an **approved** role freely; introducing a **new role/domain type** is
    PO-gated. Open sub-question: do you want a lightweight "approved role catalog" the PM

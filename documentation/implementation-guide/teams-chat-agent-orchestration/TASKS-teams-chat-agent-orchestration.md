@@ -17,20 +17,24 @@ Status keys: ⬜ todo · 🔧 in progress · ✅ done · 🧪 needs test · 🚀
   (`@pm`) with an access token.
 - ⬜ **P0.3** `agent-bridge` skeleton: **Python (FastAPI + Pydantic + Instructor)**; persistent
   **WebSocket** client (consume events) + REST poster; `/health`; config from env; Postgres state.
-- ⬜ **P0.0** **Prerequisites (audit §0):** (a) **LiteLLM** is up (delivered by
-  `documentation/LiteLLM-Proxy/` — *not built here*; P0 is blocked on it); (b) ✅ `workspace-stacks.md`
-  refreshed 2026-06-11 — when registering agent-org, also check the **recovery scripts** + **CLAUDE.md
-  "stacks at a glance"** table for the same drift.
-- ⬜ **P0.3b** Via **LiteLLM** (prereq): one **GBNF/JSON-schema constrained** structured call
-  validated by Instructor on **`qwen36-27b`** (prove constrained decoding holds). Both
-  `WORKER_MODEL` and `JUDGE_MODEL` aliases = `qwen36-27b` locally (same model, no swap thrash).
+- ⬜ **P0.0** **Prerequisites (audit §0, updated 2026-06-13):** (a) ✅ **Local LiteLLM is LIVE** —
+  the existing air-gapped `llm-gateway` (reach via `http://llama-cpp:8080`); agent-org consumes it,
+  builds nothing on it. The **cloud** LiteLLM (`llm-gateway-cloud`) is a *separate* P7 add-on, only
+  if P0.5 mandates. (b) ✅ `workspace-stacks.md` reconciled 2026-06-13 (portal/backups **and** the
+  `llama-cpp`→`*-upstream` + `llm-gateway` flip); recovery scripts + CLAUDE.md already synced by
+  the LiteLLM work. Baseline is accurate for the agent-org 3-place change.
+- ⬜ **P0.3b** One **GBNF/JSON-schema constrained** structured call validated by Instructor on
+  **`qwen36-27b`** **via the existing `llm-gateway`** (`http://llama-cpp:8080`) — prove constrained
+  decoding holds through the gateway. Worker + local-judge profiles both bind `qwen36-27b` (same
+  model, no swap thrash). **No model health-probes** (C5).
 - ⬜ **P0.4** Echo test: bridge sees an @mention event and posts a reply in the same thread
   (proves post→event→bridge→post). (PLAN §7 P0)
 - ⬜ **P0.5** **Capability-floor test (§8 #13):** measure **`qwen36-27b`** on (i) instruction/
-  charter-following, (ii) structured-output reliability (with GBNF), (iii) coordination. Decide the
-  **binary** judge question (OD-10): is **27B-as-judge** good enough, or must `JUDGE_MODEL` go to
-  **OpenRouter** (off-GPU)? **Local 35B is not an option** (swap thrash, audit §0). Also record the
-  per-task "org vs. single agent?" guidance. Workers stay local regardless.
+  charter-following, (ii) structured-output reliability (with GBNF), (iii) coordination — using
+  **bounded real completions, never health-probes** (C5). Decide the **binary** judge question
+  (OD-10): is **27B-as-judge** good enough, or must the judge profile move to the **cloud lane**
+  (OpenRouter via `llm-gateway-cloud`, off-GPU)? **Local 35B is not an option** (removed from the
+  gateway; swap thrash). Also record the per-task "org vs. single agent?" guidance. Workers stay local.
 
 ## P1 — Wake mechanic
 
@@ -104,10 +108,11 @@ Status keys: ⬜ todo · 🔧 in progress · ✅ done · 🧪 needs test · 🚀
 
 - ⬜ **P5.0** **Worker pool + concurrency scheduler (the real lift, PLAN §3.6)**: stand up N
   `(little-coder + open-terminal)` instance pairs; bridge instance registry; `assign_effort`
-  acquires an instance under a **`MAX_CONCURRENT_WORKERS` semaphore** that honors
-  **interactive-always-wins backoff** (little-coder §3.5/§12.5). Default backend **3 parallel @
-  ~83k** (burst 4 @ 64k; never 32k); fleet cap = slots − interactive reserve (~1–2 workers).
-  Queue efforts when no instance is free. (OD-8)
+  acquires an instance under a **`MAX_CONCURRENT_WORKERS` semaphore**. ⚠️ **`/slots` is dead on
+  llama-swap (404, C6)** — there is **no live GPU-occupancy signal**, so use a **static,
+  conservatively-sized semaphore** (interactive reserve held by *config*, not by probing), never a
+  model health-probe. Default backend **3 parallel @ ~83k** (burst 4 @ 64k; never 32k); fleet cap =
+  slots − interactive reserve (~1–2 workers). Queue efforts when no instance is free. (OD-8)
 - ⬜ **P5.1** **Scope ledger**: who's authorized for what path/domain; requests logged; deny
   self-granted scope (hard-rule #2). (§5, §4.1)
 - ⬜ **P5.2** **Role authority split**: PM may spin up another **instance** of an approved role;
@@ -142,10 +147,11 @@ Status keys: ⬜ todo · 🔧 in progress · ✅ done · 🧪 needs test · 🚀
 ## 3-place change (per new container)
 
 - ⬜ **R.1** `agent-org` compose (`name: agent-org`) — `mattermost`, `mattermost-db`,
-  `agent-bridge`, **`ao-egress`** (OpenRouter allowlist proxy), the **pooled
-  `little-coder`/`open-terminal` worker instances** + a shared git-allowlist egress; `ao-net`
-  (internal) + external **`ai-stack_llm-net`**; host ports on `127.0.0.1`; depends_on; restart.
-  **LiteLLM is NOT added here** (prerequisite plan). (PLAN §3.2, §3.6, §3.7)
+  `agent-bridge`, the **pooled `little-coder`/`open-terminal` worker instances** + a shared
+  git-allowlist egress; `ao-net` (internal) + external **`ai-stack_llm-net`**; host ports on
+  `127.0.0.1`; depends_on; restart. **The local `llm-gateway` is NOT added here** (already live,
+  reached via the `llama-cpp` alias). The **cloud `llm-gateway-cloud` + `ao-egress` are added only
+  in P7.2**, if a cloud judge is mandated. (PLAN §3.2, §3.6, §3.7)
 - ⬜ **R.2** `scripts/emergency-recovery.ps1` + `.bat` — add all the above to the inventory
   and startup/shutdown sequences (after `llama-cpp` healthy on start; before main stack on stop).
 - ⬜ **R.3** `.claude/skills/stack-map/references/workspace-stacks.md` — add the new project +
@@ -155,11 +161,17 @@ Status keys: ⬜ todo · 🔧 in progress · ✅ done · 🧪 needs test · 🚀
 
 - ⬜ **P7.1** PO mobile flow: install Mattermost app, PO = system admin (join any channel/DM),
   decide CONCERNs and trigger kill switch from phone. (§1, §3)
-- ⬜ **P7.2** **Model-by-role (local-first, OpenRouter-where-mandatory)**: `WORKER_MODEL` local;
-  `JUDGE_MODEL` local-first → **OpenRouter** large model only where the P0 floor test mandates.
-  Wire OpenRouter egress: API key via env; **pin no-log/ZDR providers, prefer open-weight**;
-  bridge builds + logs the **governance-summary-only** egress payload (no raw code/secrets);
-  reuse `lc-egress`-style control if it fits. (§2.1 / §8 #6, #13)
+- ⬜ **P7.2** **Cloud LiteLLM (only if P0.5 mandates) — the planned OpenRouter extension.** Stand
+  up a **separate `llm-gateway-cloud`** (+ its own spend DB) with **`master_key` + per-role virtual
+  keys + budgets** (the cost-tier cap), OpenRouter models in its `model_list`, egress **only** via
+  **`ao-egress`** (allowlist `openrouter.ai`; pin no-log/ZDR, prefer open-weight). Flip the judge/
+  reviewer **profiles** (§5.4) `lane: cloud`. Bridge builds + logs the **governance-summary-only**
+  egress payload (no raw code/secrets). **Leave the local `llm-gateway` air-gap untouched.** Plan to
+  **join local+cloud analytics later, tagged by lane.** (C1=B / OD-6, §2.1, §8 #6/#13)
+- ⬜ **P7.2b** **Role/model profiles (C4, PLAN §5.4)**: a versioned profile registry the bridge
+  reads — {lane, model, system_prompt_ref=charter, temperature, tool_access=scope, caller_key}.
+  Adding a role = adding a profile; distinct **caller-keys per profile** (C7) for gateway analytics
+  attribution. (Consider OWUI's workspace-model schema as the shape.)
 - ⬜ **P7.3** CONCERN UX: optional Mattermost plugin for rich CONCERN/decision cards (else
   structured plain posts). (PLAN OD-5)
 - 🚀 **P7.4** Operator: tailnet exposure (reuse `tailscale`); no public exposure; confirm no
