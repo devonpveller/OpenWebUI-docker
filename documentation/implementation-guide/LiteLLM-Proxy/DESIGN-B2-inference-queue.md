@@ -181,35 +181,76 @@ an admission controller for one backend (generalise later).
 1. **Concurrency semaphore, release-on-completion** — the primitive nothing
    upstream has. Admit ≤ N in-flight (N ≈ slots + headroom, configurable); release
    a permit when a request *finishes*, not on a timer.
-2. **Bounded priority wait-queue** — waiting requests held in a priority heap.
-   Configurable `max_depth`; only when *full* does it return a bounded 429
-   (honest degradation — never a fake `200`, per §15.1).
-3. **Priority classes** — per caller / per virtual-key (interactive OWUI chat >
+2. **Priority wait-queue with time-based admission** — waiting requests held in a
+   priority heap. Admission is gated by **projected wait vs the caller's
+   acceptable-wait budget** (§8b), not a fixed depth, with depth ≈ 24 as a coarse
+   backstop. Reject *before* enqueuing when over budget — honest degradation,
+   never a fake `200` (cf. §15.1), with an informative body (§4.5).
+3. **Rolling completion-time metric** — per model, the mean/EWMA duration of the
+   last ~5 completed requests (`T`). Feeds the wait estimate
+   `ceil(position_ahead / P) × T`. The single most load-adaptive signal in the
+   service — exposed on the queue API and in response headers.
+4. **Priority classes** — per caller / per virtual-key (interactive OWUI chat >
    batch entity-worker > scheduled wiki). Default policy + per-key overrides.
-4. **Live state** — the authoritative view of `{running:[…], waiting:[…]}` with
-   per-key counts, enqueue time, and wait duration.
-5. **Control API** (the future vision) — read the queue, re-sort, bump/drop
+5. **Live state** — the authoritative view of `{running:[…], waiting:[…]}` with
+   per-key counts, enqueue time, wait duration, and current wait estimate.
+6. **Control API** (the future vision) — read the queue, re-sort, bump/drop
    priority of a waiting request, pause/drain a key.
-6. **Analytics events** — emit admit/start/finish/reject/wait events (into the
-   LiteLLM Postgres or its own table) for evals over time.
-7. **Transparent proxy** — for everything else it is a pass-through reverse proxy
+7. **Analytics events** — emit admit/start/finish/reject/wait events with the
+   measured duration and estimate-vs-actual (into the LiteLLM Postgres or its own
+   table) for evals over time.
+8. **Transparent proxy** — for everything else it is a pass-through reverse proxy
    (streaming SSE preserved end-to-end; it must not buffer token streams).
 
 ### 4.2 API sketch (control plane is the differentiator)
 
 ```
-POST /v1/chat/completions      # data plane — enqueue, await dispatch, proxy upstream
+POST /v1/chat/completions      # data plane — enqueue (or reject if over budget), await dispatch, proxy
 GET  /v1/models                # pass-through
-GET  /queue                    # {running:[{id,key,model,started,elapsed}], waiting:[{id,key,prio,waited}]}
-GET  /queue/stats              # depth, admit rate, reject count, p50/p95 wait, per-key shares
+GET  /queue                    # {running:[{id,key,model,started,elapsed}],
+                               #  waiting:[{id,key,prio,waited,est_wait_s}], avg_T_s, P}
+GET  /queue/stats              # depth, admit/reject rate, p50/p95 wait, est-vs-actual error, per-key shares
+GET  /queue/estimate?key=…     # projected wait for a hypothetical request from this key (pre-flight)
 POST /queue/{id}/priority      # dynamic re-prioritise a waiting request
 POST /queue/{id}/cancel        # drop a waiting request
-POST /keys/{key}/policy        # set priority class / max-concurrency for a caller
+POST /keys/{key}/policy        # set priority class / max-concurrency / acceptable_wait_s for a caller
 GET  /healthz                  # liveness (no model load — like llama-swap router liveness)
 ```
 
 `GET /queue` + `GET /queue/stats` are what the §9 `llm-traffic` OWUI pipe (and a
 future dashboard) render — and what lets "LiteLLM understand live model state".
+Each `POST /v1/chat/completions` response also carries `X-Queue-Wait`,
+`X-Queue-Position`, `X-Queue-Avg-T` headers so a caller can see what it waited for.
+
+### 4.5 Honest, informative rejection (replaces the bare `Too many requests`)
+
+When a request is rejected (projected wait > budget, or the depth-24 backstop),
+`llm-queue` returns a **real** `429`/`503` (per §15.1 — never a fake `200`) but
+with a **structured, actionable body** and a `Retry-After` set from the live
+estimate — the opposite of today's opaque `Too many requests` / `Fallbacks=None`:
+
+```json
+{
+  "error": {
+    "type": "queue_over_budget",
+    "message": "qwen36-27b saturated: projected wait ~95s exceeds this service's 30s budget.",
+    "model": "qwen36-27b",
+    "projected_wait_s": 95,
+    "acceptable_wait_s": 30,
+    "queue_depth": 18,
+    "avg_completion_s": 16,
+    "slots": 3,
+    "retry_after_s": 95
+  }
+}
+```
+
+`Retry-After: 95` rides in the header too. **LiteLLM must relay this body
+faithfully** rather than re-wrapping it as a generic `RateLimitError` — verify in
+P1 whether LiteLLM passes the upstream error body through (it should, with no
+fallbacks configured); if it mangles it, add a thin LiteLLM exception mapping so
+the caller sees the real reason. This is what the operator asked for: an error
+that "better suits what's going on."
 
 ### 4.3 Implementation options
 
@@ -252,9 +293,9 @@ analytics over time" = the emitted events joined against the ledger.
 | Phase | Scope | Done when |
 |---|---|---|
 | **P0 — Spec** | This doc + operator decisions in §8 | Architecture + open questions agreed |
-| **P1 — Minimal hold-and-dispatch** | `llm-queue` as a transparent proxy with a release-on-completion semaphore (N configurable) + bounded wait + 429-only-when-full. Repoint LiteLLM `api_base` → `llm-queue`; set llama-swap `concurrencyLimit: 0`. Single model (`qwen36-27b`). SSE passthrough verified. | A 48-burst → **0 × 429** (all queued+served) up to `max_depth`; SSE chat still streams; revert is one config line |
-| **P2 — Priority + readout** | Per-key priority classes; `GET /queue` + `/queue/stats`. Interactive > batch proven (a chat jumps ahead of queued entity-worker load). | Live board shows running/waiting; priority ordering observable |
-| **P3 — Dynamic control + analytics** | `POST /queue/{id}/priority`, `/keys/{key}/policy`, `/cancel`; emit events → Postgres; wire the §9 pipe / dashboard. | Operator can re-sort live; saturation/latency views populated |
+| **P1 — Hold-and-dispatch + time estimate** | `llm-queue` as a transparent proxy: release-on-completion semaphore (N), rolling completion-`T` metric, projected-wait estimate, soft depth-24 backstop, and the informative 429 body + `Retry-After`/`X-Queue-*` headers (§4.5). Repoint LiteLLM `api_base` → `llm-queue`; set llama-swap `concurrencyLimit: 0`. Single model (`qwen36-27b`). SSE passthrough verified. | A 48-burst → **0 × 429** below backstop (all queued+served); rejections carry the structured body; SSE chat still streams; revert is one config line |
+| **P2 — Priority + per-service budgets + readout** | Per-key priority classes (§8c); per-service `acceptable_wait_s` budgets gating admission (§8b); per-key max-concurrency (§8d); `GET /queue` + `/queue/stats` + `/queue/estimate`. | Interactive chat jumps ahead of queued entity-worker load; an over-budget batch request is rejected with its estimate; live board shows running/waiting + est_wait |
+| **P3 — Dynamic control + analytics** | `POST /queue/{id}/priority`, `/keys/{key}/policy`, `/cancel`; emit admit/start/finish/reject events with estimate-vs-actual → Postgres; wire the §9 pipe / dashboard; audit caller timeouts ≥ their budget (§8b contract). | Operator can re-sort live; saturation/latency + estimate-accuracy views populated |
 | **P4 — Generalise** | Embed upstream (`llama-cpp-embed`, also default cap 10); multi-model/swap-aware admission; eval harness over the event log. | Both upstreams fronted; swap latency accounted for |
 
 Each phase is independently revertible (the gate is one LiteLLM `api_base` line +
@@ -269,10 +310,16 @@ the llama-swap cap). P1 alone removes the user-facing 429 with ordering deferred
    proxy logic), and **fail-open** decision explicit (§8). A hang here = inference
    down. Mitigation: tiny codebase, `restart: unless-stopped`, healthz, and the
    one-line revert (api_base back to `*-upstream`).
-2. **Tail latency vs caller timeouts.** A bounded queue still means waits. Tune
-   `max_depth` against (3 slots × typical request seconds) so the deepest waiter
-   stays under the tightest caller timeout. Long deep-research requests are the
-   stress case — consider a separate low-priority lane with its own depth.
+2. **Tail latency, starvation & the caller-timeout contract.** The time-based
+   budget (§8b) is the primary control: a request is admitted only if its
+   *projected* wait fits its service's budget, and rejected-with-reason otherwise —
+   so nothing silently starves, even as dynamic re-prioritisation pushes
+   low-priority items back. Two follow-ons: (i) the **caller's HTTP timeout must
+   be ≥ its budget** or it'll abandon a request the queue intended to serve — audit
+   in P3; (ii) the rolling `T` is only as good as its window — a single 9-minute
+   deep-research request can skew `T` and over-reject the next arrivals; consider
+   per-priority-class `T` or trimming outliers. Long deep-research is the stress
+   case — likely its own low-priority class with a generous budget.
 3. **SSE streaming passthrough.** The queue must not buffer token streams (would
    break OWUI's live render and add latency). httpx streaming + careful
    backpressure; covered by a P1 streaming test.
@@ -289,24 +336,47 @@ the llama-swap cap). P1 alone removes the user-facing 429 with ordering deferred
 
 ---
 
-## 8. Open questions for the operator
+## 8. Operator decisions (settled 2026-06-14)
 
-- **(a) Fail-open or fail-closed** if `llm-queue` crashes/hangs? Fail-open
-  (callers briefly hit the upstream directly via a fallback alias) preserves
-  uptime but punches the isolation/ordering; fail-closed (hard 503, lean on
-  restart) is simpler and matches how the search gateway behaves. *Recommend
-  fail-closed for v1 — small, restart-fast component.*
-- **(b) Admission N and `max_depth`?** Start N = 3 (slots) + 1 headroom, depth ≈
-  24? Or N a touch higher to keep slots warm. Tunable; needs a first load cycle.
-- **(c) Priority policy** — concrete classes/order. Proposed: `owui-chat` (interactive)
-  > `mnemory` / `ob-mcp` (semi-interactive) > `lc-coder` > `ob-entity` / `ob-wiki`
-  (batch). Reuses the §15.4 key taxonomy — but as **ordering**, not hard rpm caps.
-- **(d) Per-key max-concurrency** (e.g. cap entity-worker at 1–2 in-flight so it
-  can't own all 3 slots) in addition to global N? Cheap to add; strong starvation
-  guard.
-- **(e) Build language** — Python (matches the modules / LiteLLM ecosystem, fast
-  to write) vs Go (matches llama-swap, lower overhead in the hot path)? *Recommend
-  Python for v1 velocity; the hot path is I/O-bound proxying, not CPU.*
+- **(a) Fail-closed.** If `llm-queue` crashes/hangs it returns a hard error and
+  leans on `restart: unless-stopped` — no fallback alias around it. Matches the
+  search-gateway behaviour; keeps isolation/ordering intact. The component is
+  small and restart-fast (stateless proxy logic, no model load), so the blast
+  radius of a restart is seconds.
+
+- **(b) Admission is TIME-based, not a fixed count.** The gate is a projected
+  **wait budget per service**, not a hard depth. Mechanics:
+  - **Rolling completion metric** — track the mean (or EWMA) duration of the last
+    ~5 completed requests *per model*, call it `T`. This adapts to whatever the
+    backend is actually doing (a `T` of 5s vs 90s changes everything).
+  - **Projected wait for a new request** = `ceil(position_ahead / P) × T`, where
+    `P` = parallel slots (3) and `position_ahead` = requests that will run *before*
+    it given current queue + its priority class. Example: 24 ahead, P=3, T=5s →
+    `24/3 × 5 = 40s`.
+  - **Per-service acceptable-wait budget** — each caller/key declares a tolerable
+    wait (interactive `owui-chat` short, e.g. 15–30s; batch `ob-wiki`/`ob-entity`
+    long, minutes). At **enqueue**, if `projected_wait > budget` → **reject now**
+    with an informative error (see §4.5) rather than enqueue-and-starve. This is
+    also the **anti-starvation guard**: dynamic re-prioritisation pushes
+    lower-priority items further back, so their projected wait *grows* — the budget
+    check rejects them honestly instead of letting them rot behind newer
+    high-priority arrivals.
+  - **Soft backstop depth ≈ 24** for now — a coarse ceiling while the time-based
+    model is the real gate; revisit once `T` distributions are observed.
+  - **Two-sided contract:** a caller's HTTP timeout should be ≥ its declared
+    acceptable-wait budget, so the service honours the wait it asked for instead
+    of timing out mid-queue. Audit per caller during P2/P3.
+
+- **(c) Priority policy** — `owui-chat` (interactive) > `mnemory` / `ob-mcp`
+  (semi-interactive) > `lc-coder` > `ob-entity` / `ob-wiki` (batch). Reuses the
+  §15.4 key taxonomy as **ordering**, not hard rpm caps.
+
+- **(d) Per-key max-concurrency — yes.** Cap batch callers (e.g. `ob-entity`) at
+  1–2 in-flight so they can't own all 3 slots. Layers on top of global admission;
+  strong starvation guard alongside (b).
+
+- **(e) Python.** For codebase consistency (the `modules/` services + LiteLLM
+  ecosystem). Hot path is I/O-bound proxying, so the language overhead is moot.
 
 ---
 
