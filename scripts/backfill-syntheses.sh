@@ -65,8 +65,11 @@ printf '%s\n' "$ITEMS" | while IFS='|' read -r SID QB64 TID; do
     [ "$attempt" -gt 0 ] && log "  retry $attempt (previous run empty)"
     JID=$(RESEARCH_POST "$QB64" "$TID" | tr -d '\r')
     if [ -z "$JID" ]; then log "  research POST failed"; sleep 10; continue; fi
-    # poll up to ~12 min
-    for i in $(seq 1 48); do
+    # poll up to ~20 min (raised from 12 min 2026-06-14: the llm-queue admission
+    # controller serializes a research job's many LLM calls behind ~57s waits, so
+    # a single job can take ~11-15 min under contention; the old 12-min cutoff
+    # risked abandoning jobs that were about to succeed → wasteful retries).
+    for i in $(seq 1 80); do
       ST=$(JOB_STATUS "$JID" | tr -d '\r')
       [ "$ST" = "done" ] && break
       [ "$ST" = "error" ] && break
