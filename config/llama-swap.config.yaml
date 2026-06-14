@@ -54,6 +54,13 @@ models:
 
   qwen36-27b:
     name: Qwen 3.6 27B
+    # Stopgap (2026-06-14): raise llama-swap's per-model admission cap from its
+    # default 10 to 32 so deep-research fan-out bursts QUEUE inside llama.cpp
+    # (3 slots + internal FIFO) instead of getting a flat `429 Too many requests`.
+    # Trade: queued long requests add tail latency (no VRAM cost — KV isn't
+    # allocated until a slot frees). Interim until the B2 front-ended priority
+    # queue lands. See memory llm-429-llama-swap-concurrency / LiteLLM-Proxy docs.
+    concurrencyLimit: 32
     cmd: |
       llama-server ${common-args}
       --model        ${env.LLAMA_SWAP_QWEN36_27B_MODEL_PATH}
