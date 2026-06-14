@@ -147,13 +147,20 @@ callers ─> llama-cpp:8080 (alias)
 ```
 
 Two config changes make the queue the **sole gatekeeper**:
-1. LiteLLM `api_base` for `qwen36-27b` → `http://llm-queue:8080/v1` (was
-   `llama-cpp-upstream`).
+1. LiteLLM `api_base` → `http://llm-queue:8080/v1` (was `llama-cpp-upstream`).
+   **Both** `qwen36-27b` **and** `qwen36-27b:nothink` carry this `api_base`
+   ([`config/litellm.config.yaml`](../../../config/litellm.config.yaml) lines
+   24/29) and share the one upstream slot — repoint **both** entries or the
+   `nothink` variant bypasses the queue.
 2. llama-swap `concurrencyLimit: 0` (unlimited) — llama.cpp's internal FIFO stays,
-   but the *admission decision* now belongs entirely to `llm-queue`, which admits
-   only ~`slots + small headroom` at a time so **our** ordered queue holds the
-   depth, not llama.cpp's opaque FIFO. (If llama-swap held a queue too, our
-   priority ordering would be meaningless past the first few.)
+   but the *admission decision* now belongs entirely to `llm-queue`. **Headroom
+   discipline (reconciles with §7.4):** admit `N = slots` (3), or at most
+   `slots + 1`. Anything admitted beyond a free slot sits in llama.cpp's
+   *unordered* internal FIFO — so headroom is a deliberate, minimal trade
+   (one in-flight extra to mask the completion→dispatch gap and keep slots from
+   idling), **not** a buffer. Keep `N ≤ slots + 1` or the priority ordering is a
+   no-op for everything past the first few. The real depth lives in **our**
+   ordered heap.
 
 ### 3.2 Isolation & routing-guard implications (must address)
 
@@ -167,7 +174,47 @@ The two-plane isolation (memory `gateway-only-llm-routing-enforced`) makes
 - `scripts/check-llm-gateway-routing.ps1` fails if an inference endpoint points at
   a `*-upstream`. After B2, **LiteLLM's** api_base points at `llm-queue` (guard
   still green); only `llm-queue`'s own forward target is `*-upstream`. The guard
-  needs a one-line allowance for `llm-queue` as a sanctioned upstream caller.
+  needs a one-line allowance for `llm-queue` as a sanctioned upstream caller —
+  add the queue's compose service path to `$allowPathLike` (or, better, narrow the
+  allowance to the specific `*.config` file that holds `llm-queue`'s forward
+  target, so the queue's *other* files still get scanned).
+
+### 3.3 Network reachability — the read & analytics plane (GAP to resolve in P1)
+
+The isolation that makes B2 clean also creates a reachability hole the design
+must close, because **the live board and the analytics sink sit on the wrong
+side of the bridge**:
+
+| Flow | Source net | Target net | Reachable today? |
+|---|---|---|---|
+| LiteLLM → `llm-queue` (data plane) | `llm-backend-net` | `llm-backend-net` | ✅ |
+| `llm-queue` → `*-upstream` (forward) | `llm-backend-net` | `llm-backend-net` | ✅ |
+| OWUI `llm-traffic` pipe → `GET /queue` (live board, §5/§9) | `llm-net` | `llm-backend-net` | ❌ **no route** |
+| `llm-queue` → `llm-gateway-db` (analytics events, §4.1.7/§4.4) | `llm-backend-net` | `llm-net` (db is `llm-net`-only) | ❌ **no route** |
+
+Putting `llm-queue` on **both** nets would fix reachability but **re-exposes the
+mutating control API** (`POST /queue/{id}/priority`, `/cancel`,
+`/keys/{key}/policy`) to every caller on `llm-net` — breaking the
+"LiteLLM is the front door / callers can't reach the backend plane" invariant.
+**Resolution (recommended, keeps `llm-queue` on `llm-backend-net` only):**
+
+1. **Read-only state via LiteLLM pass-through.** Surface `GET /queue`,
+   `/queue/stats`, `/queue/estimate` to `llm-net` consumers through a LiteLLM
+   `pass_through_endpoints` entry forwarding to `llm-queue` — the *exact* pattern
+   the gateway config already documents for reviving `/slots`
+   ([`config/litellm.config.yaml`](../../../config/litellm.config.yaml) §general_settings
+   note). This keeps LiteLLM the single front door and never exposes the mutating
+   verbs.
+2. **Mutating control endpoints stay un-bridged.** They are reachable only from
+   `llm-backend-net` (i.e. operator via `docker exec` for now). When a dashboard
+   needs them, add them as *authenticated* pass-throughs later — never as open
+   `llm-net` routes.
+3. **Analytics sink decision (settle in P1).** Either (a) give `llm-queue` a
+   read/write foot to the Postgres *only* — but the db is on `llm-net`, so this
+   reopens (1)'s exposure; or (b) **preferred:** `llm-queue` writes to its **own
+   table** in its **own** small store and the join in §5 happens at query time, or
+   it ships events to LiteLLM via a callback. Do **not** write into LiteLLM's
+   `LiteLLM_SpendLogs` (LiteLLM owns that schema and migrates it — see §10).
 
 ---
 
@@ -197,8 +244,9 @@ an admission controller for one backend (generalise later).
 6. **Control API** (the future vision) — read the queue, re-sort, bump/drop
    priority of a waiting request, pause/drain a key.
 7. **Analytics events** — emit admit/start/finish/reject/wait events with the
-   measured duration and estimate-vs-actual (into the LiteLLM Postgres or its own
-   table) for evals over time.
+   measured duration and estimate-vs-actual into **`llm-queue`'s own table**
+   (same Postgres instance is fine; **not** LiteLLM's `LiteLLM_SpendLogs` — that
+   schema is LiteLLM-owned and migrated, §10) for evals over time.
 8. **Transparent proxy** — for everything else it is a pass-through reverse proxy
    (streaming SSE preserved end-to-end; it must not buffer token streams).
 
@@ -266,9 +314,16 @@ own API, swappable.
 ### 4.4 State store
 
 In-memory is correct for **v1** (single instance, single backend). The live queue
-is ephemeral by nature — a crash should *drain to upstream / fail open*, not
-replay stale requests. Persist only the **analytics events** (append to LiteLLM
-Postgres). Redis/multi-instance is a non-goal until there's a second gateway.
+is ephemeral by nature: on crash, in-flight and waiting requests die with the
+process — the caller sees the **fail-closed** hard error of §8(a) and
+`restart: unless-stopped` brings the queue back in seconds. State is **never**
+persisted and replayed (that would dispatch stale requests against callers that
+already timed out). *(Earlier drafts said "fail open" here — that conflicts with
+the settled §8(a) fail-**closed** decision; the only thing that "fails open" is
+durability, i.e. we deliberately drop live state, not routing.)* Persist only the
+**analytics events**, and to **`llm-queue`'s own table**, not LiteLLM's
+schema-managed `LiteLLM_SpendLogs` (§10). Redis/multi-instance is a non-goal until
+there's a second gateway.
 
 ---
 
@@ -394,3 +449,107 @@ the llama-swap cap). P1 alone removes the user-facing 429 with ordering deferred
 - **Memory** — `llm-429-llama-swap-concurrency` (the diagnosis),
   `gateway-only-llm-routing-enforced` (isolation/guard), `litellm-proxy-status`
   (front-door topology), `llama-swap-perf-tuning` (slots/VRAM).
+
+---
+
+## 10. Audit — SOLID / architecture / security (2026-06-14)
+
+Audited against the live workspace (compose, `litellm.config.yaml`,
+`llama-swap.config.yaml`, the routing guard). **Verdict: the B2 architecture is
+correct and well-grounded** — admission-control-behind-the-gateway is the right
+pattern, the LiteLLM-source analysis (§2.1) is verified, and the time-based gate
+(§8b) is a genuine improvement over the §15 `Retry-After` model. The fixes below
+were folded into §3–§4 above; the rest are recommendations for P1/P2.
+
+### 10.1 Corrections applied inline
+
+- **Fail-open ↔ fail-closed contradiction (fixed §4.4).** §4.4 said a crash should
+  "fail open"; §8(a), the *settled* operator decision, says **fail-closed**.
+  Reconciled: only durability "fails open" (live state is dropped, never
+  replayed); routing is fail-closed.
+- **`:nothink` variant would have bypassed the queue (fixed §3.1).** The repoint
+  named only `qwen36-27b`, but `qwen36-27b:nothink` carries its own `api_base`
+  to the same upstream. Both must move.
+- **Headroom vs no-double-queue (fixed §3.1).** §3.1 ("slots + small headroom")
+  lightly contradicted §7.4 ("don't double-queue"). Pinned to `N ≤ slots + 1`
+  with the trade made explicit.
+- **Analytics table coupling (fixed §4.1.7/§4.4).** Writing into LiteLLM's
+  `LiteLLM_SpendLogs` couples `llm-queue` to a schema LiteLLM **owns and
+  migrates** — a Liskov/encapsulation violation that will break on a LiteLLM
+  upgrade. Use `llm-queue`'s **own** table.
+- **Reachability gap (added §3.3).** The live board (OWUI→queue) and analytics
+  sink (queue→`llm-gateway-db`) both cross the `llm-net`↔`llm-backend-net`
+  boundary with **no route**. Resolved via LiteLLM read-only pass-through + own
+  store, keeping the queue on `llm-backend-net` only.
+
+### 10.2 SOLID / encapsulation / expandability
+
+- **Decompose `llm-queue` internally (SRP within the service).** §4.1 lists 8
+  responsibilities; they cohere as "admission + observability of one backend,"
+  but the *implementation* should split into clear modules so each varies
+  independently: **(i) transport** (httpx streaming reverse-proxy, SSE
+  passthrough), **(ii) admission/scheduler** (semaphore + priority heap +
+  time-budget gate), **(iii) policy** (priority classes, per-key budgets/caps),
+  **(iv) metrics** (rolling `T`, event emission), **(v) control API**. P1 needs
+  only (i)+(ii)+(iv-lite); the split keeps P2/P3 additive.
+- **Make priority a Strategy (Open/Closed).** Encode the ordering (§8c) behind a
+  `PriorityPolicy` interface resolving `(key, model, request) → class`, loaded
+  from config. New callers/classes then plug in via config, not code edits —
+  directly serves "dynamically adjust priority" (§5) and P4 generalisation.
+- **Key the in-flight set and `T` by model *now*, even with one model.** P4
+  generalises to the embed upstream and swap-aware admission. If v1 hardcodes a
+  single semaphore and a single `T`, P4 is a rewrite; if v1 uses a
+  `model → {semaphore, T, heap}` registry (with exactly one entry), P4 is
+  configuration. Cheap insurance for the stated expandability requirement.
+- **Single-source `slots`/`P`.** The projected-wait math hardcodes `P=3`, but
+  `--parallel` lives in `llama-swap.config.yaml` and `N`/`concurrencyLimit` there
+  too. Duplicating these as queue env invites drift. Prefer reading
+  `n_parallel`/slot count from the upstream's `/props` (llama.cpp exposes it) at
+  startup, or document the three-place coupling (`--parallel` ↔ queue `N` ↔ queue
+  `P`) as a tuning invariant.
+
+### 10.3 Security concerns
+
+1. **Control plane is unauthenticated — keep it un-bridged.** `POST /queue/{id}/priority`,
+   `/cancel`, `/keys/{key}/policy` mutate scheduling for *all* callers. There is no
+   auth in the design. This is **acceptable only** while the queue lives on
+   `llm-backend-net` and the mutating verbs are **not** pass-through'd (§3.3) —
+   i.e. reachable solely by `docker exec`. **Invariant to state in the doc:** the
+   mutating control API must never be exposed on `llm-net` or a host port without
+   authentication. (Read-only state may be pass-through'd; mutation may not.)
+2. **Priority is cooperative, not a trust boundary.** The gateway runs
+   **permissive (no `master_key`)** and callers self-assert plaintext keys
+   (`litellm-proxy-status`). So a caller can present a high-priority key string
+   (e.g. `owui-chat`) to **jump the queue** or set its own `acceptable_wait_s`.
+   Document this explicitly: priority/budget ordering is an **optimization among
+   trusted internal callers**, not a security control. It tightens automatically
+   when `master_key` + real virtual keys land. Until then, derive priority
+   **server-side from the attributed key**, and **never** from a client-supplied
+   `X-Priority`-style request header (header-trust = injection).
+3. **Connection-exhaustion / hold-and-dispatch DoS.** Holding waiters open means
+   LiteLLM and `llm-queue` each pin one socket per waiting request. The §8(b)
+   time-budget reject and the depth-24 backstop are the mitigations — but frame
+   the backstop as also bounding **held FDs/sockets**, not just wait time, and add
+   a hard absolute cap on total concurrent connections (independent of per-service
+   budget) as a safety valve.
+4. **Client-disconnect eviction (correctness *and* resource safety).** If a caller
+   (or LiteLLM) drops while queued, the queue must detect the closed connection
+   and **evict the entry / abort the upstream forward** — otherwise it dispatches
+   a dead request and burns a slot. Starlette/httpx expose disconnect; make this a
+   P1 requirement (and a test), not an afterthought.
+
+### 10.4 Operational gaps to fold into the plan
+
+- **Graceful drain on `SIGTERM`.** On `docker compose stop`/recreate, stop
+  admitting, let in-flight finish within a short grace window, then exit — standard
+  for an in-path proxy and cheap. Pair with the §7.6 recovery ordering.
+- **SSE keep-alive during the wait.** A streaming request can sit in queue for tens
+  of seconds with **zero bytes**, risking idle-read timeouts in OWUI/intermediaries
+  even when the caller's *total* timeout is generous (§8b). Emit periodic SSE
+  comments (`: queued, position N` / heartbeat) while waiting — this also revives
+  guide §15.2's "queue position" UI nicety for free. Non-streaming callers can't
+  receive partial bytes, so for them the §8b budget/timeout contract is the only
+  lever (already covered).
+- **Estimate-accuracy as an explicit eval (P3).** The emitted estimate-vs-actual
+  (§4.1.7) should drive a tuning loop on `T`'s window size and outlier trimming
+  (§7.2) — call it out as a P3 acceptance signal, not just data collected.
