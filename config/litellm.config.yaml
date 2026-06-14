@@ -18,15 +18,23 @@
 
 model_list:
   # ─── Chat — Qwen 3.6 27B (both variants share one upstream slot) ───
+  # B2 (2026-06-14): api_base points at the llm-queue ADMISSION CONTROLLER, NOT
+  # the *-upstream server. LiteLLM stays the caller-facing front door + ledger;
+  # llm-queue holds-and-dispatches behind it (semaphore + priority + wait
+  # estimate), forwarding to llama-cpp-upstream. BOTH variants must point here —
+  # they share one upstream slot, so a stray *-upstream api_base on `:nothink`
+  # would bypass the queue (design §3.1). Revert = point both back at
+  # llama-cpp-upstream + set llama-swap concurrencyLimit back to 32.
+  # See documentation/implementation-guide/LiteLLM-Proxy/DESIGN-B2-inference-queue.md.
   - model_name: qwen36-27b
     litellm_params:
       model: openai/qwen36-27b
-      api_base: http://llama-cpp-upstream:8080/v1
+      api_base: http://llm-queue:8080/v1
       api_key: dummy            # llama-swap ignores this; must be non-empty
   - model_name: qwen36-27b:nothink
     litellm_params:
       model: openai/qwen36-27b:nothink
-      api_base: http://llama-cpp-upstream:8080/v1
+      api_base: http://llm-queue:8080/v1
       api_key: dummy
 
   # ─── Qwen 3.6 35B-A3B — REMOVED 2026-06-12 (operator diagnostic) ───
@@ -39,13 +47,20 @@ model_list:
   # ─── Embeddings — bge-m3 (1024-dim). THREE aliases for the same upstream. ───
   # Every id any caller sends must be registered (transparent mode: callers can't
   # be fixed). llama-cpp-embed ignores the model field and serves the loaded GGUF.
+  # B2/P4 (2026-06-14): embeddings now route through llm-queue too (api_base →
+  # llm-queue). The embed upstream is PLAIN llama.cpp (no llama-swap cap, unbounded
+  # FIFO) so it never 429'd; the queue fronts it for uniform observability + the
+  # multi-model registry, with a GENEROUS embed backstop (256) and NO budget gate
+  # so high-volume embedding bursts (OB1 chunk-worker backfill) behave as before
+  # (held + processed 2-at-a-time), never rejected. llm-queue routes bge-m3* to the
+  # embed upstream. Revert = point these three back at llama-cpp-embed-upstream.
   - model_name: bge-m3
     litellm_params:
       # hosted_vllm (NOT openai/): llama.cpp is a self-hosted OpenAI-compatible server. The openai
       # provider rejects bge-m3's `dimensions` param (UnsupportedParamsError) and drop_params does
       # NOT suppress it in this LiteLLM build; hosted_vllm passes it through (bge-m3 = native 1024-dim).
       model: hosted_vllm/bge-m3
-      api_base: http://llama-cpp-embed-upstream:8080/v1
+      api_base: http://llm-queue:8080/v1
       api_key: dummy
   - model_name: bge-m3-f16.gguf            # little-coder source default
     litellm_params:
@@ -53,7 +68,7 @@ model_list:
       # provider rejects bge-m3's `dimensions` param (UnsupportedParamsError) and drop_params does
       # NOT suppress it in this LiteLLM build; hosted_vllm passes it through (bge-m3 = native 1024-dim).
       model: hosted_vllm/bge-m3
-      api_base: http://llama-cpp-embed-upstream:8080/v1
+      api_base: http://llm-queue:8080/v1
       api_key: dummy
   - model_name: qllama/bge-m3:latest       # mnemory's current EMBED_MODEL value
     litellm_params:
@@ -61,7 +76,7 @@ model_list:
       # provider rejects bge-m3's `dimensions` param (UnsupportedParamsError) and drop_params does
       # NOT suppress it in this LiteLLM build; hosted_vllm passes it through (bge-m3 = native 1024-dim).
       model: hosted_vllm/bge-m3
-      api_base: http://llama-cpp-embed-upstream:8080/v1
+      api_base: http://llm-queue:8080/v1
       api_key: dummy
 
 general_settings:
@@ -76,6 +91,29 @@ general_settings:
   # way by modules/system-health: gateway /health/liveliness + each upstream's
   # /health (llama-swap router liveness — 200 without loading a model) + GPU.
   background_health_checks: false
+  # B2/P2 attribution note (2026-06-14, VERIFIED): LiteLLM's permissive
+  # model-routing path rebuilds the upstream request through its OpenAI client and
+  # sends `Authorization: Bearer <litellm_params.api_key>` (= `dummy`) — the
+  # caller's real key (owui-chat / ollama / llama, visible in the spend ledger) is
+  # NOT forwarded downstream. `forward_client_headers_to_llm_api` does NOT change
+  # this for the openai-client path (tested: headers at llm-queue were all
+  # x-stainless-* + `Bearer dummy`). So per-caller priority THROUGH the gateway
+  # currently attributes to the default class unless the caller sets the OpenAI
+  # `user` body field (which LiteLLM DOES forward — llm-queue reads it as a
+  # fallback). Direct (non-gateway) callers and `user`-setting callers attribute
+  # correctly today; full per-caller priority tightens when master_key + virtual
+  # keys land (design §10.3.2). The priority MECHANISM is live and proven.
+  # B2/P2: read-only queue state to llm-net consumers (the §9 llm-traffic OWUI
+  # pipe / a dashboard) WITHOUT exposing the mutating control verbs. Only the
+  # GET-only /observe/* namespace is bridged (the mutating /queue/{id}/priority,
+  # /cancel, /keys/{key}/policy stay on llm-backend-net, operator-only — §10.3.1).
+  pass_through_endpoints:
+    - path: "/observe/queue"
+      target: "http://llm-queue:8080/observe/queue"
+    - path: "/observe/queue/stats"
+      target: "http://llm-queue:8080/observe/queue/stats"
+    - path: "/observe/queue/estimate"
+      target: "http://llm-queue:8080/observe/queue/estimate"
   # NOTE: little-coder GETs /slots for a (best-effort, non-gating) GPU-occupancy
   # metric, but llama-swap returns 404 for /slots even with a model loaded — this
   # metric was already dead before the gateway (not a flip regression). To revive
@@ -88,3 +126,18 @@ litellm_settings:
   set_verbose: false
   telemetry: false         # no anonymous outbound beacon (guide §19/D10)
   request_timeout: 600     # match LLAMA_CPP_TIMEOUT headroom for long completions
+  # B2 (2026-06-14): on a queue 429 (over backstop), LiteLLM RETRIES the request.
+  # This is desirable here — it turns a transient over-backstop burst back into
+  # hold-and-dispatch: the rejected request is retried until llm-queue admits it,
+  # so a deep-research fan-out (the original 429 cause) resolves to all-200 instead
+  # of dropping the overflow. VERIFIED 2026-06-14: a 48-burst through the gateway →
+  # 0×429 (all served), while a 48-burst DIRECT to llm-queue (no retry layer) →
+  # the structured §4.5 body. On SUSTAINED saturation (retries exhausted) LiteLLM
+  # surfaces a 429 whose message EMBEDS the queue's reason ("…saturated: N waiting,
+  # backstop M…") — it re-wraps the structured fields into its RateLimitError
+  # envelope (the §4.5 caveat), but the actionable reason survives. Full live state
+  # (projected_wait, depth, slots) stays available via the X-Queue-* response
+  # headers and GET /queue (P2 read-only pass-through). A thin LiteLLM
+  # exception-mapping hook could restore the full JSON later if wanted — deferred
+  # to avoid coupling to LiteLLM internals (design §4.3c).
+  num_retries: 3

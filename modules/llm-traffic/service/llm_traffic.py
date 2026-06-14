@@ -151,6 +151,60 @@ class LLMTrafficModule:
                 out.append(r)
         return out
 
+    def _fetch_queue_live(self) -> Optional[Dict[str, Any]]:
+        """B2 live board (design §9): the llm-queue admission controller's
+        real-time {running, waiting, avg_T, depth} state, surfaced to llm-net via
+        the gateway's read-only /observe/* pass-through. Returns None (board
+        skipped) if the queue isn't fronted/reachable — degrades gracefully."""
+        try:
+            board = _http_get_json(f"{GATEWAY_URL}/observe/queue", timeout=4.0)
+            stats = _http_get_json(f"{GATEWAY_URL}/observe/queue/stats", timeout=4.0)
+            return {"board": board, "stats": stats}
+        except Exception:
+            return None
+
+    def _render_live_board(self, live_queue: Optional[Dict[str, Any]]) -> List[str]:
+        """The live queue board — what's running/waiting RIGHT NOW (complements
+        the historical ledger table below it)."""
+        if not live_queue:
+            return []
+        board = live_queue.get("board") or {}
+        models = board.get("models") or {}
+        if not models:
+            return []
+        lines = [
+            "### Live queue (llm-queue admission controller)",
+            "",
+            "| Model | Running | Waiting | Free slots | Avg T (s) | P | In-flight by key |",
+            "|---|--:|--:|--:|--:|--:|---|",
+        ]
+        for name, m in models.items():
+            running = len(m.get("running") or [])
+            waiting = len(m.get("waiting") or [])
+            ikey = m.get("inflight_by_key") or {}
+            ikey_s = ", ".join(f"{_friendly(k).split('  ')[0]}×{v}" for k, v in ikey.items()) or "—"
+            lines.append(
+                f"| `{name}` | {running} | {waiting} | {m.get('permits_free', '?')} | "
+                f"{m.get('avg_T_s', '?')} | {m.get('P', '?')} | {ikey_s} |"
+            )
+        # Surface the longest-waiting entries with their live wait estimate.
+        waiters = []
+        for name, m in models.items():
+            for w in (m.get("waiting") or []):
+                waiters.append((w.get("waited_s", 0), name, w))
+        waiters.sort(reverse=True)
+        if waiters:
+            lines += ["", "_Longest-waiting now:_ " + ", ".join(
+                f"`{w['key']}` (waited {w['waited_s']}s, est {w['est_wait_s']}s, prio {w['prio']})"
+                for _ws, _n, w in waiters[:3]
+            )]
+        held = board.get("held_total")
+        cap = board.get("max_total_connections")
+        if held is not None:
+            lines.append(f"\n_Held connections: {held}/{cap}._")
+        lines.append("")
+        return lines
+
     # ------------------------------------------------------------- aggregation
     def _aggregate(self, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         agg: Dict[str, Dict[str, Any]] = {}
@@ -189,7 +243,7 @@ class LLMTrafficModule:
         return result
 
     # --------------------------------------------------------------- rendering
-    def _render(self, window_label: str, live: Dict[str, Any], agg: List[Dict[str, Any]], raw_count: int) -> str:
+    def _render(self, window_label: str, live: Dict[str, Any], agg: List[Dict[str, Any]], raw_count: int, live_queue: Optional[Dict[str, Any]] = None) -> str:
         head = "🟢 healthy" if live.get("healthy") else ("🟡 reachable" if live.get("reachable") else "🔴 UNREACHABLE")
         lines = [
             "## LLM Traffic — GPU demand attribution",
@@ -197,6 +251,10 @@ class LLMTrafficModule:
             f"**Gateway:** `{GATEWAY_URL}` — {head}  ·  **Window:** {window_label}  ·  **Requests:** {raw_count}",
             "",
         ]
+        # B2 live board first (real-time), then the historical ledger table.
+        lines += self._render_live_board(live_queue)
+        if live_queue:
+            lines += ["### Historical demand (ledger)", ""]
         if not live.get("reachable"):
             lines += [
                 f"> Could not reach the LiteLLM gateway: {live.get('error', 'unknown')}",
@@ -246,7 +304,8 @@ class LLMTrafficModule:
                     logger.error(f"spend/logs fetch failed: {exc}")
                     live["log_error"] = str(exc)[:120]
             agg = self._aggregate(rows)
-            content = self._render(window_label, live, agg, len(rows))
+            live_queue = self._fetch_queue_live()
+            content = self._render(window_label, live, agg, len(rows), live_queue)
 
             return {
                 "request_id": request_id,
@@ -259,6 +318,7 @@ class LLMTrafficModule:
                     "liveness": live,
                     "callers": agg,
                     "request_count": len(rows),
+                    "live_queue": (live_queue or {}).get("board"),
                 },
                 "diagnostics": {"execution_time_ms": int((time.time() - start) * 1000)},
                 "timestamp": datetime.now(timezone.utc).isoformat(),

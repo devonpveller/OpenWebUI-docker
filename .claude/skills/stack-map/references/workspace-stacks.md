@@ -4,7 +4,9 @@ Authoritative inventory of the Docker stacks in this `ai-stack` workspace.
 Cross-check against the live compose files before relying on it — the files
 are the source of truth; this doc is the curated summary.
 
-**Last reconciled against live compose: 2026-06-13** — the **LiteLLM `llm-gateway` flip**
+**Last reconciled against live compose: 2026-06-14** — added **`llm-queue`** (B2 front-ended
+inference admission controller between the `*-upstream` servers and LiteLLM; chat `api_base`
+now points at it, llama-swap `concurrencyLimit: 0`). Prior (2026-06-13): the **LiteLLM `llm-gateway` flip**
 (`llama-cpp`/`llama-cpp-embed` → `*-upstream`; the gateway now holds those aliases; +
 `llm-gateway-db` / `llm-gateway-backup` / `llm-gateway-db-data`). Prior (2026-06-11): the
 portal/auth slice (Authelia/Caddy/Cloudflared + watchers/tripwire), the unified-backup sidecars,
@@ -30,7 +32,7 @@ Run with: `docker compose ...` from the workspace root.
 | Network      | Type            | Purpose |
 |--------------|-----------------|---------|
 | `llm-net`    | internal (no internet) | **caller plane**: every inference consumer sits here and reaches inference ONLY via the `llama-cpp` / `llama-cpp-embed` aliases on **`llm-gateway`** (LiteLLM). The `*-upstream` real servers are NOT here (isolated on `llm-backend-net`, 2026-06-13) so callers cannot route around LiteLLM |
-| `llm-backend-net` | internal (no internet) | **backend plane**: the `*-upstream` real inference servers + the sole ingress `llm-gateway` + the `lm-models-backup` liveness probe. Nothing else attaches → inference is reachable only through the gateway. Enforced by `scripts/check-llm-gateway-routing.ps1` |
+| `llm-backend-net` | internal (no internet) | **backend plane**: the `*-upstream` real inference servers + the sole ingress `llm-gateway` + the `llm-queue` admission controller (downstream of the gateway) + the `lm-models-backup` liveness probe. Nothing else attaches → inference is reachable only through the gateway. Enforced by `scripts/check-llm-gateway-routing.ps1` |
 | `search-net` | internal (no internet) | search gateway isolation — only `vpn` (search egress) + `tor` (fetch egress) bridge out |
 | `lc-net`     | internal (no internet) | little-coder control plane isolation |
 | `auth-net`   | bridge, **internal** | portal: caddy ↔ authelia ↔ portal-alerter ↔ watchers (no internet) |
@@ -47,7 +49,8 @@ Run with: `docker compose ...` from the workspace root.
 |-----------|------|-----------|----------|-----|
 | `openwebui` | Open WebUI chat surface | 127.0.0.1:3000 | default, llm-net, app-net | yes |
 | `tailscale` | Tailnet VPN; shares openwebui netns; serves ON :8443/:5055 + wiki :8444 (via caddy:8446) | — (`network_mode: service:openwebui`) | — | no |
-| `llm-gateway` | **LiteLLM analytics front door** (holds the `llama-cpp` + `llama-cpp-embed` network aliases on :8080; all callers reach inference through it). Routes `/v1/*` by model name to the `*-upstream` servers; permissive (no master_key) per-caller spend ledger; `background_health_checks:false` (a model health-probe forces a llama-swap load → thrash) | — (internal-only; admin/ledger via `docker exec`, not host :4000 — `llm-net` is `internal:true` so host publish is inert) | llm-net, llm-backend-net (sole bridge) | no |
+| `llm-gateway` | **LiteLLM analytics front door** (holds the `llama-cpp` + `llama-cpp-embed` network aliases on :8080; all callers reach inference through it). Routes `/v1/*` by model name; **both chat AND embed** forward to **`llm-queue`** (api_base, since B2/P4); `num_retries:3` (a queue 429 → retry → hold-and-dispatch); read-only `/observe/*` pass-through to `llm-queue` for the live board; permissive (no master_key) per-caller spend ledger; `background_health_checks:false` (a model health-probe forces a llama-swap load → thrash) | — (internal-only; admin/ledger via `docker exec`, not host :4000 — `llm-net` is `internal:true` so host publish is inert) | llm-net, llm-backend-net (sole bridge) | no |
+| `llm-queue` | **B2 front-ended inference admission controller** (`llm-queue/`, design `DESIGN-B2-inference-queue.md`). Sits between LiteLLM and the `*-upstream` servers (chat + embed): holds-and-dispatches (release-on-completion semaphore, priority heap w/ per-key caps, rolling-T wait estimate, per-model depth backstop — chat 24, embed 256) instead of llama-swap dropping overflow with a flat `429`. Replaces the bare `Too many requests` with a structured 429 + `Retry-After`; `enforce_budget:true` (per-service wait budgets §8b). Read-only state reachable from `llm-net` via the gateway's `/observe/*` pass-through; the **mutating** control API (`POST /queue/{id}/priority`/`cancel`, `/keys/{key}/policy`) is operator-only (`docker exec`, never `llm-net`). Analytics events → own SQLite (`llm-queue-data` volume). Tuning invariant: `LLM_QUEUE_SLOTS` == llama-swap `--parallel` (3) and llama-swap `concurrencyLimit: 0` | — (internal-only) | llm-backend-net | no |
 | `llm-gateway-db` | Postgres for the LiteLLM spend-log ledger (`llm-gateway-db-data` volume) | — | llm-net | no |
 | `llama-cpp-upstream` | llama-swap inference (was `llama-cpp`) — `qwen36-27b` (∥2); 35B is in llama-swap config but **not registered in the gateway**; one model resident at a time; `--no-mmap` (mmap over the C: bind mount hangs) | 127.0.0.1:8081 | llm-backend-net (isolated) | yes (device 0) |
 | `llama-cpp-embed-upstream` | bge-m3 embeddings server (was `llama-cpp-embed`) | 127.0.0.1:8082 | llm-backend-net (isolated) | yes (device 1) |
@@ -118,7 +121,8 @@ Run with: `docker compose ...` from the workspace root.
 `openwebui-data`, `mnemory-data`, `smolcrawl-data`,
 `little-coder-journals`, `little-coder-skill`, `little-coder-cohorts`,
 `little-coder-polyglot`, `little-coder-sessions`, `little-coder-workspace`,
-`caddy-data`, `caddy-config`, `authelia-data`, `tripwire-data`, `llm-gateway-db-data`.
+`caddy-data`, `caddy-config`, `authelia-data`, `tripwire-data`, `llm-gateway-db-data`,
+`llm-queue-data` (llm-queue's own analytics event store — SQLite, NOT LiteLLM's schema).
 **External** (owned by the open-brain project): `openbrain-wiki-data`
 (= `open-brain_openbrain-wiki-data`), `wiki-assets` (= `open-brain_wiki-assets`).
 
@@ -230,9 +234,12 @@ Bottom-up (start in this order; stop in reverse):
 
 1. `openwebui` (provides the network namespace for `tailscale`)
 2. `llama-cpp-upstream`, `llama-cpp-embed-upstream` (real inference = llama-swap → llama.cpp)
+2.4. `llm-queue` (B2 admission controller — between the upstreams and LiteLLM;
+    starts AFTER the `*-upstream` servers are healthy, BEFORE the gateway that
+    forwards chat through it; restart-fast, no model load)
 2.5. `llm-gateway-db` → `llm-gateway` (the LiteLLM front door — all callers reach
-    inference through its `llama-cpp`/`llama-cpp-embed` aliases; starts AFTER the
-    `*-upstream` servers, BEFORE the callers)
+    inference through its `llama-cpp`/`llama-cpp-embed` aliases; chat forwards via
+    `llm-queue`; starts AFTER `llm-queue`, BEFORE the callers)
 3. `tailscale`
 4. `mnemory` → `mnemory-gateway` → `mnemory-backup`
 5. `openwebui-backup`, `smolcrawl-pipelines`

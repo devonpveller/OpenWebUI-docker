@@ -10,7 +10,9 @@ $ErrorActionPreference = "Stop"
 # Service inventory — every container the recovery stack maintains.
 #
 # The MAIN compose project (docker-compose.yml) holds several planes:
-#   core    openwebui, llama-cpp-upstream, llama-cpp-embed-upstream, tailscale
+#   core    openwebui, llama-cpp-upstream, llama-cpp-embed-upstream, llm-queue,
+#           llm-gateway-db, llm-gateway, tailscale
+#           (llm-queue = B2 admission controller between the upstreams and LiteLLM)
 #   memory  mnemory, mnemory-gateway
 #   search  vpn, tor, redis, searxng, gateway, mcpo (Private Search Gateway)
 #   coder   open-terminal, little-coder, lc-mcpo, lc-egress
@@ -39,7 +41,7 @@ $Script:OB1Compose = "OB1\docker\docker-compose.yml"
 # (Portal plane omitted on purpose — profile-gated; see the header note.)
 $Script:MainStackServices = @(
     "openwebui", "llama-cpp-upstream", "llama-cpp-embed-upstream",
-    "llm-gateway-db", "llm-gateway", "tailscale",
+    "llm-queue", "llm-gateway-db", "llm-gateway", "tailscale",
     "mnemory", "mnemory-gateway",
     "smolcrawl-pipelines", "surrealdb", "open_notebook",
     "vpn", "tor", "redis", "searxng", "gateway", "mcpo",
@@ -324,6 +326,12 @@ function Invoke-MinimalRecovery {
         # the little-coder plane) degraded without this nudge. surrealdb must
         # precede open_notebook; the search/coder planes self-order via their
         # own depends_on.
+        # Inference admission plane first (llm-queue sits between the upstreams
+        # and LiteLLM; both must be up before callers — design B2). A
+        # llama-cpp-upstream restart drops nothing here (httpx reconnects), but
+        # nudge them so a cold dependent comes back.
+        docker compose up -d llm-queue llm-gateway
+
         docker compose up -d watchtower mnemory mnemory-gateway `
             smolcrawl-pipelines surrealdb open_notebook `
             vpn tor redis searxng gateway mcpo `
@@ -492,6 +500,12 @@ function Invoke-EmergencyRecovery {
     # (callers reach inference through it; the upstreams must outlive it).
     Stop-ServiceGroup "LiteLLM gateway" @("llm-gateway-backup", "llm-gateway", "llm-gateway-db")
 
+    # llm-queue (B2 admission controller) — stops after the gateway (which
+    # forwards through it), before the upstreams it forwards to.
+    if (-not (Stop-ServiceGracefully "llm-queue" 30)) {
+        Write-Log "WARN" "llm-queue stop had issues, continuing..."
+    }
+
     # llama-cpp-upstream inference services.
     if (-not (Stop-ServiceGracefully "llama-cpp-upstream" 30)) {
         Write-Log "WARN" "llama-cpp-upstream stop had issues, continuing..."
@@ -562,8 +576,22 @@ function Invoke-EmergencyRecovery {
         throw
     }
 
+    # llm-queue (B2 admission controller) — between the upstreams and LiteLLM.
+    # Starts AFTER the upstreams are healthy, BEFORE the gateway (which forwards
+    # chat through it). Restart-fast (stateless proxy, no model load).
+    Write-Log "INFO" "Starting llm-queue (inference admission controller)..."
+    try {
+        docker compose up -d llm-queue
+        if (-not (Wait-ForHealthy "llm-queue" 60)) {
+            Write-Log "WARN" "llm-queue health check failed, but continuing..."
+        }
+    }
+    catch {
+        Write-Log "ERROR" "Failed to start llm-queue: $_"
+    }
+
     # LiteLLM gateway — the front door every caller reaches inference through.
-    # Starts after BOTH upstream inference servers are healthy; before any caller.
+    # Starts after BOTH upstream inference servers + llm-queue are healthy; before any caller.
     Write-Log "INFO" "Starting LiteLLM gateway (db, then gateway)..."
     try {
         docker compose up -d llm-gateway-db
@@ -878,6 +906,11 @@ function Invoke-GPUReset {
                     # Also start embedding service
                     docker compose up -d llama-cpp-embed-upstream
                     Write-Log "INFO" "llama-cpp-embed-upstream started"
+
+                    # Inference admission plane (B2): llm-queue then LiteLLM, so
+                    # callers reach inference through the gateway → queue → upstream.
+                    docker compose up -d llm-queue llm-gateway
+                    Write-Log "INFO" "llm-queue + LiteLLM gateway started"
 
                     # Restart the planes that consume llama-cpp-upstream inference:
                     # the memory layer, the little-coder plane, and OB1.

@@ -3,7 +3,8 @@ REM Emergency Tailscale Network Recovery - Legacy Batch Version
 REM For PowerShell version with better GPU support, use: emergency-recovery.ps1
 REM
 REM Recovery stack scope (kept in sync with docker-compose.yml):
-REM   core    openwebui, llama-cpp-upstream, llama-cpp-embed-upstream, tailscale
+REM   core    openwebui, llama-cpp-upstream, llama-cpp-embed-upstream, llm-queue,
+REM           llm-gateway-db, llm-gateway, tailscale (llm-queue = B2 admission controller)
 REM   memory  mnemory, mnemory-gateway
 REM   search  vpn, tor, redis, searxng, gateway, mcpo  (Private Search Gateway)
 REM   coder   open-terminal, little-coder, lc-mcpo, lc-egress
@@ -127,6 +128,9 @@ if %ERRORLEVEL% NEQ 0 (
 echo [INFO] Stopping LiteLLM gateway (before the upstream inference servers)...
 docker compose stop llm-gateway-backup llm-gateway llm-gateway-db
 
+echo [INFO] Stopping llm-queue (B2 admission controller, after the gateway)...
+docker compose stop llm-queue
+
 echo [INFO] Stopping llama-cpp-upstream containers...
 docker compose stop llama-cpp-upstream llama-cpp-embed-upstream
 if %ERRORLEVEL% NEQ 0 (
@@ -175,6 +179,10 @@ timeout /t 30 /nobreak >nul
 
 echo [INFO] Starting llama-cpp-embed-upstream...
 docker compose up -d llama-cpp-embed-upstream
+
+echo [INFO] Starting llm-queue (B2 admission controller, between upstreams and LiteLLM)...
+docker compose up -d llm-queue
+timeout /t 5 /nobreak >nul
 
 echo [INFO] Starting LiteLLM gateway (db, then gateway) - the front door all callers use...
 docker compose up -d llm-gateway-db
@@ -284,6 +292,10 @@ timeout /t 15 /nobreak >nul
 echo [INFO] Starting llama-cpp-embed-upstream...
 docker compose up -d llama-cpp-embed-upstream
 timeout /t 15 /nobreak >nul
+
+echo [INFO] Starting llm-queue + LiteLLM gateway (admission plane, before callers)...
+docker compose up -d llm-queue llm-gateway
+timeout /t 5 /nobreak >nul
 
 echo [INFO] Starting Tailscale with fresh network namespace...
 docker compose up -d tailscale

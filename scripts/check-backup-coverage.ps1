@@ -63,6 +63,7 @@ try {
   # ----- Volumes intentionally NOT backed up -------------------------
   $intentionallyExcluded = @(
     @{ Volume = 'little-coder-workspace'; Reason = 'Project workspace - intentionally re-clonable (design)' }
+    @{ Volume = 'llm-queue-data'; Reason = 'B2 queue analytics events (SQLite) - non-critical, regenerable observability data' }
   )
 
   # ----- Mapping: volume name -> backup container that covers it -----

@@ -48,6 +48,15 @@ if (-not $Root) {
 # The bypass smell: an inference/serve host or base-url variable set to an upstream.
 $badPattern = '(?i)(_HOST|_BASE|API_BASE|BASE_URL|api_base|CHAT_API_BASE|OPENAI[A-Z_]*BASE|EMBED[A-Z_]*BASE|LLM_BASE)\b[^\r\n]*[:=][^\r\n]*(llama-cpp-upstream|llama-cpp-embed-upstream)'
 
+# SANCTIONED upstream caller (B2, design §3.2): the llm-queue admission controller
+# sits BEHIND LiteLLM and forwards to *-upstream. Its forward target is carried in
+# the LLM_QUEUE_UPSTREAM_BASE_URL / LLM_QUEUE_EMBED_UPSTREAM_BASE_URL vars. This is
+# the queue's ONE legitimate *-upstream reference (LiteLLM's api_base now points at
+# llm-queue, not the upstream — guard stays green there). Narrowly allow exactly
+# these vars wherever they appear (compose env or the queue's own config); every
+# OTHER *-upstream base/host still flags, so the queue's other files stay scanned.
+$queueUpstreamAllow = '(?i)LLM_QUEUE(_EMBED)?_UPSTREAM_BASE_URL'
+
 # Legit direct-upstream references (NOT bypasses): the gateway's own forwarding
 # config, recovery/health probe scripts, host monitor modules, docs, this guard.
 $allowPathLike = @(
@@ -94,6 +103,8 @@ foreach ($f in $files) {
         $n++
         $trimmed = $line.TrimStart()
         if ($trimmed.StartsWith('#') -or $trimmed.StartsWith('//')) { continue }   # comments
+        # Sanctioned: the llm-queue admission controller's forward target (§3.2).
+        if ($line -match $queueUpstreamAllow) { continue }
         if ($line -match $badPattern) {
             $rel = $f.FullName.Substring($Root.Length).TrimStart('\')
             $violations.Add([pscustomobject]@{ File = $rel; Line = $n; Text = $line.Trim() })
