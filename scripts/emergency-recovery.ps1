@@ -12,7 +12,7 @@ $ErrorActionPreference = "Stop"
 # The MAIN compose project (docker-compose.yml) holds several planes:
 #   core    openwebui, llama-cpp-upstream, llama-cpp-embed-upstream, tailscale
 #   memory  mnemory, mnemory-gateway
-#   search  tor, redis, searxng, gateway, mcpo      (Private Search Gateway)
+#   search  vpn, tor, redis, searxng, gateway, mcpo (Private Search Gateway)
 #   coder   open-terminal, little-coder, lc-mcpo, lc-egress
 #   aux     smolcrawl-pipelines, surrealdb, open_notebook, watchtower
 #   backup  mnemory-backup, openwebui-backup, little-coder-backup,
@@ -42,7 +42,7 @@ $Script:MainStackServices = @(
     "llm-gateway-db", "llm-gateway", "tailscale",
     "mnemory", "mnemory-gateway",
     "smolcrawl-pipelines", "surrealdb", "open_notebook",
-    "tor", "redis", "searxng", "gateway", "mcpo",
+    "vpn", "tor", "redis", "searxng", "gateway", "mcpo",
     "open-terminal", "little-coder", "lc-mcpo", "lc-egress",
     "watchtower",
     # Backup cron sidecars (see helper arrays below).
@@ -213,8 +213,8 @@ function Test-BasicConnectivity {
             $states["openwebui"], $states["llama-cpp-upstream"], $states["llama-cpp-embed-upstream"], $states["tailscale"])
         Write-Log "INFO" ("Memory - mnemory: {0}, mnemory-gateway: {1}" -f `
             $states["mnemory"], $states["mnemory-gateway"])
-        Write-Log "INFO" ("Search - tor: {0}, redis: {1}, searxng: {2}, gateway: {3}, mcpo: {4}" -f `
-            $states["tor"], $states["redis"], $states["searxng"], $states["gateway"], $states["mcpo"])
+        Write-Log "INFO" ("Search - vpn: {0}, tor: {1}, redis: {2}, searxng: {3}, gateway: {4}, mcpo: {5}" -f `
+            $states["vpn"], $states["tor"], $states["redis"], $states["searxng"], $states["gateway"], $states["mcpo"])
         Write-Log "INFO" ("Coder  - open-terminal: {0}, little-coder: {1}, lc-mcpo: {2}, lc-egress: {3}" -f `
             $states["open-terminal"], $states["little-coder"], $states["lc-mcpo"], $states["lc-egress"])
         Write-Log "INFO" ("Aux    - smolcrawl-pipelines: {0}, surrealdb: {1}, open_notebook: {2}, watchtower: {3}" -f `
@@ -326,7 +326,7 @@ function Invoke-MinimalRecovery {
         # own depends_on.
         docker compose up -d watchtower mnemory mnemory-gateway `
             smolcrawl-pipelines surrealdb open_notebook `
-            tor redis searxng gateway mcpo `
+            vpn tor redis searxng gateway mcpo `
             open-terminal little-coder lc-mcpo lc-egress
 
         # Backup cron sidecars touching only main/host resources (safe anytime).
@@ -472,7 +472,7 @@ function Invoke-EmergencyRecovery {
 
     # Private Search Gateway (reverse dependency order).
     Stop-ServiceGroup "Private Search Gateway" `
-        @("mcpo", "gateway", "searxng", "redis", "tor")
+        @("mcpo", "gateway", "searxng", "redis", "tor", "vpn")
 
     # Tailscale (shares the OpenWebUI network namespace).
     if (-not (Stop-ServiceGracefully "tailscale" 30)) {
@@ -645,9 +645,10 @@ function Invoke-EmergencyRecovery {
         Write-Log "WARN" "Failed to start open-notebook: $_"
     }
 
-    # Private Search Gateway — tor -> redis -> searxng -> gateway -> mcpo.
-    # depends_on chains the internal order; the Tor circuit is slow to build.
-    Start-ServiceGroup "Private Search Gateway" @("tor", "redis", "searxng", "gateway", "mcpo")
+    # Private Search Gateway — vpn -> tor -> redis -> searxng -> gateway -> mcpo.
+    # depends_on chains the internal order; vpn (Mullvad) is searxng's egress and
+    # the WireGuard tunnel is slow to build; tor stays as the page-fetch egress.
+    Start-ServiceGroup "Private Search Gateway" @("vpn", "tor", "redis", "searxng", "gateway", "mcpo")
     if (-not (Wait-ForHealthy "gateway" 150)) {
         Write-Log "WARN" "Search gateway slow to come up, but continuing..."
     }

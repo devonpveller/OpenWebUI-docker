@@ -2,11 +2,13 @@
 #
 # Inherits SearXNG's shipped defaults and only overrides what matters here.
 # Privacy invariants (see integration plan §6 / spec §8):
-#   - ALL outbound traffic is forced through Tor (socks5h:// => DNS via Tor too).
+#   - ALL engine queries egress through the Mullvad WireGuard tunnel
+#     (http://vpn:8888; HTTPS CONNECT => remote DNS through the tunnel). Swapped
+#     from Tor 2026-06-14: engines blocklist Tor exit IPs, killing aggregation.
 #   - This instance is private, on an internal:true docker network; its only
-#     route off-box is tor:9050. It physically cannot reach the internet
-#     except via Tor, so a misconfig cannot leak.
-#   - Tor-hostile engines (Google/Bing/Yandex) are disabled by default.
+#     route off-box is the `vpn` proxy. It physically cannot reach the internet
+#     except through that tunnel (gluetun kill-switch), so a misconfig can't leak.
+#   - Captcha/Tor-hostile engines (Google/Bing/Yandex) are disabled by default.
 use_default_settings: true
 
 general:
@@ -33,38 +35,50 @@ search:
   autocomplete: ""
 
 outgoing:
-  request_timeout: 15.0        # Tor adds latency
-  max_request_timeout: 20.0
+  request_timeout: 20.0        # Tor circuit setup can exceed 15s under load;
+  max_request_timeout: 30.0    # give slow circuits room to connect (was 15/20)
   pool_connections: 100
   pool_maxsize: 20
   useragent_suffix: ""
-  # Every upstream engine request egresses via Tor. socks5h => remote DNS.
+  # Every upstream engine request egresses via the Mullvad WireGuard tunnel
+  # (gluetun HTTP proxy). HTTPS targets use CONNECT, so the hostname is resolved
+  # at gluetun THROUGH the tunnel — remote DNS, no local leak (same guarantee
+  # socks5h gave). Engines blocklist Tor exit IPs; a clean Mullvad IP restores
+  # SearXNG's multi-engine aggregation. Page-fetch still uses Tor (see compose).
   proxies:
     all://:
-      - socks5h://tor:9050
+      - http://vpn:8888
 
 redis:
   url: redis://redis:6379/0
 
-# Engine policy: disable engines that captcha/block Tor exits aggressively;
-# keep the Tor-tolerant set. Names merge into SearXNG defaults by engine name.
+# Engine policy (INVERTED 2026-06-14 with the Mullvad egress swap). Empirically,
+# via a Mullvad exit IP: google/bing/mojeek RETURN results (9-10 each), while the
+# privacy trio duckduckgo/brave/startpage CAPTCHA the VPN/datacenter IP range and
+# return nothing. That's the exact opposite of the Tor era (when google/bing were
+# disabled as Tor-hostile and we leaned on ddg/brave/startpage). So: enable the
+# engines that actually work behind Mullvad; disable the three that block it.
+# Queries exit via Mullvad (untraceable to the operator), so google/bing here
+# leak nothing about identity. Names merge into SearXNG defaults by engine name.
 engines:
   - name: google
-    disabled: true
+    disabled: false      # works via Mullvad (9 results); best general engine
   - name: bing
-    disabled: true
+    disabled: false      # works via Mullvad (10 results)
   - name: yandex
-    disabled: true
+    disabled: true       # still flaky/captcha-prone; google+bing+mojeek suffice
+  # ddg/brave/startpage CAPTCHA Mullvad's VPN-IP range — disabled to avoid the
+  # 180s suspension churn + unresponsive-engine noise they'd otherwise add.
   - name: duckduckgo
-    disabled: false
+    disabled: true
   - name: brave
-    disabled: false
+    disabled: true
   - name: mojeek
-    disabled: false
+    disabled: false      # works via Mullvad (10 results)
   - name: qwant
-    disabled: false
+    disabled: true
   - name: startpage
-    disabled: false
+    disabled: true
   - name: wikipedia
     disabled: false
   - name: wikidata

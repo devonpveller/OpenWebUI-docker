@@ -5,7 +5,7 @@ REM
 REM Recovery stack scope (kept in sync with docker-compose.yml):
 REM   core    openwebui, llama-cpp-upstream, llama-cpp-embed-upstream, tailscale
 REM   memory  mnemory, mnemory-gateway
-REM   search  tor, redis, searxng, gateway, mcpo  (Private Search Gateway)
+REM   search  vpn, tor, redis, searxng, gateway, mcpo  (Private Search Gateway)
 REM   coder   open-terminal, little-coder, lc-mcpo, lc-egress
 REM   aux     smolcrawl-pipelines, surrealdb, open_notebook, watchtower
 REM   backup  mnemory-backup, openwebui-backup, little-coder-backup, smolcrawl-backup,
@@ -83,10 +83,10 @@ if %ERRORLEVEL% NEQ 0 (
 )
 
 echo [INFO] Stopping Private Search Gateway...
-docker compose stop mcpo gateway searxng redis tor
+docker compose stop mcpo gateway searxng redis tor vpn
 if %ERRORLEVEL% NEQ 0 (
     echo [WARN] Search gateway stop failed, attempting force kill...
-    docker compose kill mcpo gateway searxng redis tor
+    docker compose kill mcpo gateway searxng redis tor vpn
 )
 
 echo [INFO] Stopping Tailscale container...
@@ -216,9 +216,9 @@ timeout /t 10 /nobreak >nul
 echo [INFO] Starting open-notebook...
 docker compose up -d open_notebook
 
-echo [INFO] Starting Private Search Gateway (tor, redis, searxng, gateway, mcpo)...
-docker compose up -d tor redis searxng gateway mcpo
-echo [INFO] Allowing Tor circuit to build...
+echo [INFO] Starting Private Search Gateway (vpn, tor, redis, searxng, gateway, mcpo)...
+docker compose up -d vpn tor redis searxng gateway mcpo
+echo [INFO] Allowing VPN tunnel + Tor circuit to build...
 timeout /t 30 /nobreak >nul
 
 echo [INFO] Starting open-terminal (little-coder workspace plane)...
@@ -259,7 +259,7 @@ echo [INFO] Restarting with proper network dependency sequence...
 
 REM Stop dependent containers first
 echo [INFO] Stopping Tailscale and dependent services (network dependents)...
-docker compose stop tailscale llama-cpp-upstream llama-cpp-embed-upstream mnemory mnemory-gateway mnemory-backup openwebui-backup smolcrawl-pipelines open_notebook surrealdb mcpo gateway searxng redis tor little-coder-backup lc-egress lc-mcpo little-coder open-terminal
+docker compose stop tailscale llama-cpp-upstream llama-cpp-embed-upstream mnemory mnemory-gateway mnemory-backup openwebui-backup smolcrawl-pipelines open_notebook surrealdb mcpo gateway searxng redis tor vpn little-coder-backup lc-egress lc-mcpo little-coder open-terminal
 if exist "%OB1_COMPOSE%" docker compose -f "%OB1_COMPOSE%" stop
 
 REM Restart OpenWebUI first and wait for health
@@ -309,7 +309,7 @@ echo [INFO] Starting open-notebook...
 docker compose up -d open_notebook
 
 echo [INFO] Starting Private Search Gateway...
-docker compose up -d tor redis searxng gateway mcpo
+docker compose up -d vpn tor redis searxng gateway mcpo
 
 echo [INFO] Starting little-coder control plane...
 docker compose up -d open-terminal little-coder lc-mcpo lc-egress little-coder-backup

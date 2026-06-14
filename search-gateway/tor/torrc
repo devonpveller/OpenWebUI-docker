@@ -13,3 +13,11 @@ Log notice stdout
 # Client only — never act as a relay or exit.
 ExitRelay 0
 ClientOnly 1
+
+# Search-reliability tuning (2026-06-14). General engines (brave/ddg/startpage/
+# mojeek) 429/403/CAPTCHA our Tor exit IP, then SearXNG benches them 180s. Rotate
+# circuits often so fresh streams land on different (hopefully un-flagged) exits
+# instead of staying stuck on a burned one.
+MaxCircuitDirtiness 45          # new exit for fresh streams every 45s (def 600)
+# NOTE: deliberately NOT setting a fixed CircuitBuildTimeout — Tor's adaptive
+# timeout keeps the widest pool of usable exits, which we want for diversity.

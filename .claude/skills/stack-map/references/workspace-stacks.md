@@ -31,7 +31,7 @@ Run with: `docker compose ...` from the workspace root.
 |--------------|-----------------|---------|
 | `llm-net`    | internal (no internet) | **caller plane**: every inference consumer sits here and reaches inference ONLY via the `llama-cpp` / `llama-cpp-embed` aliases on **`llm-gateway`** (LiteLLM). The `*-upstream` real servers are NOT here (isolated on `llm-backend-net`, 2026-06-13) so callers cannot route around LiteLLM |
 | `llm-backend-net` | internal (no internet) | **backend plane**: the `*-upstream` real inference servers + the sole ingress `llm-gateway` + the `lm-models-backup` liveness probe. Nothing else attaches → inference is reachable only through the gateway. Enforced by `scripts/check-llm-gateway-routing.ps1` |
-| `search-net` | internal (no internet) | search gateway isolation — only `tor` bridges out |
+| `search-net` | internal (no internet) | search gateway isolation — only `vpn` (search egress) + `tor` (fetch egress) bridge out |
 | `lc-net`     | internal (no internet) | little-coder control plane isolation |
 | `auth-net`   | bridge, **internal** | portal: caddy ↔ authelia ↔ portal-alerter ↔ watchers (no internet) |
 | `app-net`    | bridge          | caddy ↔ openwebui / open_notebook (backends reached only via caddy) |
@@ -59,10 +59,11 @@ Run with: `docker compose ...` from the workspace root.
 | `mnemory` | Unified memory layer (mgmt :8051) | — (internal only) | llm-net |
 | `mnemory-gateway` | Privacy-enforcing MCP proxy for cloud clients | 127.0.0.1:8060 | llm-net, default |
 
-**Search (Private Search Gateway — SearXNG over Tor)**
+**Search (Private Search Gateway — SearXNG engine queries over Mullvad WireGuard; page-fetch over Tor)**
 | Container | Compose service | Role | Host port | Networks |
 |-----------|-----------------|------|-----------|----------|
-| `search-tor` | `tor` | Tor egress — only service bridging out | — | search-net, default |
+| `search-vpn` | `vpn` | Mullvad WireGuard (gluetun) — SearXNG's engine-query egress + kill-switch | — | search-net, default |
+| `search-tor` | `tor` | Tor egress — page-FETCH leg (openbrain-research/digest/podcast `FETCH_PROXY_URL`); bridges out | — | search-net, default |
 | `search-redis` | `redis` | SearXNG cache | — | search-net |
 | `searxng` | `searxng` | Metasearch engine | — | search-net |
 | `search-gateway` | `gateway` | REST / Tavily-shim API | 127.0.0.1:8085 | search-net, default |
@@ -236,7 +237,7 @@ Bottom-up (start in this order; stop in reverse):
 4. `mnemory` → `mnemory-gateway` → `mnemory-backup`
 5. `openwebui-backup`, `smolcrawl-pipelines`
 6. `surrealdb` → `open_notebook`
-7. Search: `tor` → `redis` → `searxng` → `gateway` → `mcpo`
+7. Search: `vpn` → `tor` → `redis` → `searxng` → `gateway` → `mcpo`
 8. Coder: `open-terminal` → `little-coder` → `lc-mcpo` / `lc-egress`
 9. `watchtower`
 10. **Backup sidecars** — each starts after its target is healthy; idle cron otherwise

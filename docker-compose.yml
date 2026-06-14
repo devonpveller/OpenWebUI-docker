@@ -773,6 +773,61 @@ services:
     labels:
       - "com.centurylinklabs.watchtower.enable=false"
 
+  # ---------------------------------------------------------------------
+  # vpn (Mullvad WireGuard via gluetun) — SearXNG's engine-query egress
+  # (2026-06-14). Replaces Tor for the SEARCH leg ONLY: search engines
+  # blocklist Tor exit IPs by reputation (brave/ddg/startpage/mojeek all
+  # 403/429/CAPTCHA on sight), which neutralises SearXNG's multi-engine
+  # aggregation. Mullvad gives a clean, non-Tor exit IP so aggregation works
+  # again. Page FETCH still egresses via `tor` (openbrain-research et al.'s
+  # FETCH_PROXY_URL) — arbitrary pages aren't engine-blocked, and Tor keeps
+  # "what you actually read" private.
+  #
+  # Privacy invariant preserved: like `tor`, `vpn` is the ONLY search-net
+  # member that ALSO joins `default`, so SearXNG stays internal-only and can
+  # egress solely through this HTTP proxy. gluetun's firewall is a KILL-SWITCH
+  # — if the WireGuard tunnel drops, all egress is blocked (no clear-IP leak).
+  # Secrets (MULLVAD_WG_*) live in .env and are NEVER committed.
+  # ---------------------------------------------------------------------
+  vpn:
+    image: ${VPN_IMAGE:-qmcgaw/gluetun:latest}
+    container_name: search-vpn
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    networks:
+      - search-net
+      - default
+    environment:
+      - VPN_SERVICE_PROVIDER=mullvad
+      - VPN_TYPE=wireguard
+      - WIREGUARD_PRIVATE_KEY=${MULLVAD_WG_PRIVATE_KEY}
+      - WIREGUARD_ADDRESSES=${MULLVAD_WG_ADDRESSES}
+      - SERVER_COUNTRIES=${MULLVAD_COUNTRIES:-Netherlands}
+      # HTTP forward-proxy for SearXNG. HTTPS targets use CONNECT, so DNS is
+      # resolved at gluetun THROUGH the tunnel (no local DNS leak, matching the
+      # old socks5h behaviour).
+      - HTTPPROXY=on
+      - HTTPPROXY_LISTENING_ADDRESS=:8888
+      # Allow the LAN-side (docker search-net) to reach the proxy through the
+      # kill-switch firewall. 172.16/12 covers Docker's default subnet pool.
+      - FIREWALL_OUTBOUND_SUBNETS=${SEARCH_NET_SUBNET:-172.16.0.0/12}
+      # DNS: leave gluetun's default DNS-over-TLS ON — engine hostnames resolve
+      # via DoT through the tunnel (no DNS leak). NOTE: WIREGUARD_ADDRESSES must
+      # be IPv4-only unless the Docker host has IPv6 (gluetun rejects v6 addrs).
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "/gluetun-entrypoint", "healthcheck"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
   redis:
     image: ${SEARCH_REDIS_IMAGE:-redis:7-alpine}
     container_name: search-redis
@@ -797,7 +852,7 @@ services:
     networks:
       - search-net
     depends_on:
-      tor:
+      vpn:
         condition: service_healthy
       redis:
         condition: service_healthy
@@ -816,7 +871,7 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 90s   # Tor circuit build is slow on first start
+      start_period: 90s   # WireGuard tunnel build can be slow on first start
     labels:
       - "com.centurylinklabs.watchtower.enable=false"
 
