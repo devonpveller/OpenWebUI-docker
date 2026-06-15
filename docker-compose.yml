@@ -701,6 +701,58 @@ services:
     labels:
       - "com.centurylinklabs.watchtower.enable=false"
 
+  # =====================================================================
+  # llm-gateway-ui — LiteLLM ADMIN-UI sidecar (analytics dashboard). Added
+  # 2026-06-14. A SECOND LiteLLM instance whose ONLY job is to serve the Admin
+  # UI at /ui. LiteLLM 1.88.1 REQUIRES a master_key for the UI to log in; setting
+  # one on the permissive main gateway would 401 every junk-key caller. So the
+  # master_key is ISOLATED here. This instance:
+  #   - serves NO inference — it deliberately carries NO llama-cpp /
+  #     llama-cpp-embed network alias (those stay on llm-gateway), and no caller
+  #     points at it. The gateway-only routing policy is unaffected.
+  #   - shares llm-gateway-db (same DATABASE_URL) so the dashboard reads the SAME
+  #     spend ledger the main gateway writes.
+  #   - is reached ONLY via the tailnet :8445 serve route (entrypoint.sh) — no
+  #     host port, internal-only net, same supply-chain posture as llm-gateway.
+  # Remove = delete this service + config/litellm.ui.config.yaml + the :8445
+  # serve block in entrypoint.sh + the .env LITELLM_UI_* vars.
+  # =====================================================================
+  llm-gateway-ui:
+    # Same digest-pinned image as llm-gateway (keep them in lockstep on bumps so
+    # the shared Postgres schema/prisma migrations never diverge).
+    image: ghcr.io/berriai/litellm@sha256:c98c9395c56a35b7abacff8269d43ff99aabacb62bbf42a04cc1514fcb9bde4a
+    container_name: llm-gateway-ui
+    # llm-net ONLY (reaches llm-gateway-db). NO aliases — must never be an
+    # inference path. NOT on llm-backend-net (can't reach the upstreams).
+    networks:
+      - llm-net
+    volumes:
+      - ./config/litellm.ui.config.yaml:/app/config.yaml:ro
+    command: ["--config", "/app/config.yaml", "--port", "8080"]
+    environment:
+      - DATABASE_URL=postgres://litellm:${LITELLM_DB_PASSWORD}@llm-gateway-db:5432/litellm
+      - LITELLM_LOCAL_MODEL_COST_MAP=True   # bundled cost map; no GitHub fetch (guide §19/D10)
+      # master_key UNLOCKS the Admin UI (and is enforced on THIS instance's API
+      # only — which has no callers). UI_USERNAME/PASSWORD set the dashboard login.
+      - LITELLM_MASTER_KEY=${LITELLM_UI_MASTER_KEY}
+      - UI_USERNAME=${LITELLM_UI_USERNAME}
+      - UI_PASSWORD=${LITELLM_UI_PASSWORD}
+    depends_on:
+      llm-gateway-db:
+        condition: service_healthy
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      # wolfi-based image has no curl (T0 finding) — use python.
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8080/health/liveliness').status==200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 90s
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
   smolcrawl-pipelines:
     build:
       context: ./smolcrawl

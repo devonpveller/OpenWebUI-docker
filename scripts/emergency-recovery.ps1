@@ -11,8 +11,9 @@ $ErrorActionPreference = "Stop"
 #
 # The MAIN compose project (docker-compose.yml) holds several planes:
 #   core    openwebui, llama-cpp-upstream, llama-cpp-embed-upstream, llm-queue,
-#           llm-gateway-db, llm-gateway, tailscale
-#           (llm-queue = B2 admission controller between the upstreams and LiteLLM)
+#           llm-gateway-db, llm-gateway, llm-gateway-ui, tailscale
+#           (llm-queue = B2 admission controller between the upstreams and LiteLLM;
+#            llm-gateway-ui = master-key'd Admin-UI sidecar / analytics dashboard)
 #   memory  mnemory, mnemory-gateway
 #   search  vpn, tor, redis, searxng, gateway, mcpo (Private Search Gateway)
 #   coder   open-terminal, little-coder, lc-mcpo, lc-egress
@@ -41,7 +42,7 @@ $Script:OB1Compose = "OB1\docker\docker-compose.yml"
 # (Portal plane omitted on purpose — profile-gated; see the header note.)
 $Script:MainStackServices = @(
     "openwebui", "llama-cpp-upstream", "llama-cpp-embed-upstream",
-    "llm-queue", "llm-gateway-db", "llm-gateway", "tailscale",
+    "llm-queue", "llm-gateway-db", "llm-gateway", "llm-gateway-ui", "tailscale",
     "mnemory", "mnemory-gateway",
     "smolcrawl-pipelines", "surrealdb", "open_notebook",
     "vpn", "tor", "redis", "searxng", "gateway", "mcpo",
@@ -498,7 +499,7 @@ function Invoke-EmergencyRecovery {
 
     # LiteLLM gateway — stops after callers, before the upstream inference servers
     # (callers reach inference through it; the upstreams must outlive it).
-    Stop-ServiceGroup "LiteLLM gateway" @("llm-gateway-backup", "llm-gateway", "llm-gateway-db")
+    Stop-ServiceGroup "LiteLLM gateway" @("llm-gateway-backup", "llm-gateway-ui", "llm-gateway", "llm-gateway-db")
 
     # llm-queue (B2 admission controller) — stops after the gateway (which
     # forwards through it), before the upstreams it forwards to.
@@ -601,6 +602,10 @@ function Invoke-EmergencyRecovery {
             Write-Log "WARN" "llm-gateway health check failed, but continuing..."
         }
         docker compose up -d llm-gateway-backup
+        # llm-gateway-ui: master-key'd Admin-UI sidecar (analytics dashboard).
+        # Depends only on llm-gateway-db (already healthy) — serves no inference,
+        # so it is non-critical to the recovery path; start it best-effort.
+        docker compose up -d llm-gateway-ui
     }
     catch {
         Write-Log "ERROR" "Failed to start LiteLLM gateway: $_"

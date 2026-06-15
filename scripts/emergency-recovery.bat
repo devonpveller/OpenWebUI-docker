@@ -4,7 +4,8 @@ REM For PowerShell version with better GPU support, use: emergency-recovery.ps1
 REM
 REM Recovery stack scope (kept in sync with docker-compose.yml):
 REM   core    openwebui, llama-cpp-upstream, llama-cpp-embed-upstream, llm-queue,
-REM           llm-gateway-db, llm-gateway, tailscale (llm-queue = B2 admission controller)
+REM           llm-gateway-db, llm-gateway, llm-gateway-ui, tailscale
+REM           (llm-queue = B2 admission controller; llm-gateway-ui = Admin-UI sidecar)
 REM   memory  mnemory, mnemory-gateway
 REM   search  vpn, tor, redis, searxng, gateway, mcpo  (Private Search Gateway)
 REM   coder   open-terminal, little-coder, lc-mcpo, lc-egress
@@ -126,7 +127,7 @@ if %ERRORLEVEL% NEQ 0 (
 )
 
 echo [INFO] Stopping LiteLLM gateway (before the upstream inference servers)...
-docker compose stop llm-gateway-backup llm-gateway llm-gateway-db
+docker compose stop llm-gateway-backup llm-gateway-ui llm-gateway llm-gateway-db
 
 echo [INFO] Stopping llm-queue (B2 admission controller, after the gateway)...
 docker compose stop llm-queue
@@ -190,6 +191,9 @@ timeout /t 10 /nobreak >nul
 docker compose up -d llm-gateway
 timeout /t 10 /nobreak >nul
 docker compose up -d llm-gateway-backup
+REM llm-gateway-ui: master-key'd Admin-UI sidecar (analytics dashboard), shares
+REM llm-gateway-db; serves no inference, non-critical — start it best-effort.
+docker compose up -d llm-gateway-ui
 
 echo [INFO] Starting Tailscale with shared network namespace...
 docker compose up -d tailscale

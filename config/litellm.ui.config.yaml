@@ -1,0 +1,33 @@
+# LiteLLM ADMIN-UI sidecar config (llm-gateway-ui) — added 2026-06-14.
+#
+# This instance serves the Admin UI / analytics dashboard ONLY. It handles NO
+# inference: no caller is configured to point at it, and (in compose) it carries
+# NO `llama-cpp` / `llama-cpp-embed` network alias, so it can never become an
+# inference front door. The gateway-only routing policy is unaffected.
+#
+# WHY a separate instance: LiteLLM 1.88.1 hard-requires a master_key for the
+# Admin UI to log in (GET /login → "Master Key not set ... to use Admin UI").
+# Setting a master_key on the PERMISSIVE main gateway would enforce auth on every
+# request and 401 the junk-key callers (owui-chat / ollama / not-needed / a
+# no-key path — see the spend ledger). Isolating the master_key in this sidecar
+# gives a fully working UI while llm-gateway stays permissive and untouched.
+#
+# DATA: DATABASE_URL (compose env) points at the SAME llm-gateway-db that the
+# main gateway writes its spend ledger to, so the dashboard's Usage / Logs /
+# Spend views show real traffic. master_key + UI creds come from env
+# (LITELLM_MASTER_KEY / UI_USERNAME / UI_PASSWORD).
+#
+# No model_list here on purpose: the Models page may show DB-stored models only
+# (empty if none) — analytics is the goal, and omitting the list avoids drift
+# with config/litellm.config.yaml (the single source of truth for inference).
+
+general_settings:
+  store_model_in_db: true
+  # NO success/failure callbacks: this instance handles no requests, so it writes
+  # no spend rows — it only READS the ledger the main gateway populates.
+  # NO background_health_checks (would try to load models it can't reach anyway).
+  background_health_checks: false
+
+litellm_settings:
+  telemetry: false        # no anonymous outbound beacon (guide §19/D10)
+  set_verbose: false
