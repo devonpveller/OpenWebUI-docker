@@ -1,0 +1,80 @@
+{
+  "name": "LLM Traffic Attribution",
+  "slug": "llm-traffic",
+  "version": "1.0.0",
+  "description": "Per-caller LLM / GPU demand attribution from the LiteLLM gateway spend ledger",
+  "author": "ai-stack / LiteLLM-Proxy integration",
+  "license": "MIT",
+  "entry": {
+    "kind": "cli",
+    "path": "service/llm_traffic.py",
+    "function": "main"
+  },
+  "schema": {
+    "input": {
+      "type": "object",
+      "properties": {
+        "request_id": { "type": "string", "format": "uuid" },
+        "input": {
+          "oneOf": [
+            { "type": "string", "description": "Text query (optionally a time qualifier: today / last 24h / last week / since boot)" },
+            { "type": "object", "description": "Structured parameters" }
+          ]
+        },
+        "user": {
+          "type": "object",
+          "properties": { "id": { "type": "string" } }
+        },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["request_id", "input"]
+    },
+    "output": {
+      "type": "object",
+      "properties": {
+        "request_id": { "type": "string" },
+        "module_id": { "type": "string" },
+        "status": { "type": "string", "enum": ["ok", "error"] },
+        "content": { "type": "string" },
+        "structured_data": { "type": "object" }
+      }
+    }
+  },
+  "capabilities": [
+    "system_monitoring"
+  ],
+  "limits": {
+    "timeout_ms": 20000,
+    "memory_mb": 256,
+    "cpu_cores": 0.5,
+    "input_size_mb": 1,
+    "concurrent_requests": 3
+  },
+  "environment": {
+    "kind": "venv",
+    "python_version": ">=3.8",
+    "dependencies": [],
+    "gpu_required": false
+  },
+  "health": {
+    "probe_interval_ms": 30000,
+    "startup_timeout_ms": 20000
+  },
+  "help": {
+    "short": "Who is using the GPU / LLMs — per-caller spend ledger from the LiteLLM gateway",
+    "long": "Reads the LiteLLM gateway spend ledger (/spend/logs) and renders a per-caller breakdown: requests, tokens in/out, failures, average latency, models, last-seen. In permissive mode the presented API key string is the caller identity; friendly names map the known junk/empty keys to services. Append a time qualifier (today / last 24h / last week / since boot) to scope the window; default is last 1h.",
+    "examples": [
+      { "input": "llm traffic", "description": "Per-caller breakdown, last 1h" },
+      { "input": "llm traffic last week", "description": "Per-caller breakdown over the last 7 days" },
+      { "input": "who is using the gpu today", "description": "Attribution for today" }
+    ]
+  },
+  "permissions": {
+    "allowed_roles": ["user", "admin"],
+    "safety_rating": "SAFE"
+  },
+  "compatibility": {
+    "router_version": ">=1.0.0",
+    "openwebui_version": ">=0.3.0"
+  }
+}

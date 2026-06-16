@@ -1,8 +1,18 @@
 # Teams-style Chat for Agent Orchestration — Tooling Outline
 
-**Status:** rough outline / discovery. Not a build plan yet.
-**Date:** 2026-06-08
-**Author of brief:** Operator (Project Manager role in the target system)
+**Status:** platform/tooling selection (historical). Governance content here is **superseded** by
+[SAFETY-AND-WORKFLOW-governance-model.md](SAFETY-AND-WORKFLOW-governance-model.md); read this doc
+for the **platform comparison (§3–§4)** only.
+**Date:** 2026-06-08 · **terminology reconciled** 2026-06-13.
+**Author of brief:** Operator (the **Human Operator** in the target system).
+
+> **⚠️ Terminology (reconciled 2026-06-13 — read before §1.4/§5.3).** This doc predates the role
+> rename. Throughout the **original** text, "PM"/"Operator" sometimes meant **the human admin**.
+> Under the current model that role is the **Human Operator (you)**, and **"PM" now means the
+> *Project Manager agent*** — a *subordinate* of the PO, **not** an org admin. Where this doc's
+> human-in-the-loop / admin / "can join any channel" language says "PM", read **Human Operator**.
+> Canonical roles: [SAFETY §1](SAFETY-AND-WORKFLOW-governance-model.md) and
+> [UX-FLOW §1](UX-FLOW.md). The most-misleading spots (§1.4, §5.3) are corrected in place below.
 
 ---
 
@@ -15,18 +25,21 @@ The org model (governance/roles detailed in
 [SAFETY-AND-WORKFLOW-governance-model.md](SAFETY-AND-WORKFLOW-governance-model.md)):
 
 ```
-            (You) — PO / Primary Operator — final authority, human-in-the-loop
-                         |  talk primarily to the PM; concerns up-level back to you
-                  PM — Orchestrator agent  (monitor + delegator, can't clear own escalations)
-                  /       |        \
+        Human Operator (you) — final authority, human-in-the-loop
+                 |  steer the PO; hard-gate triggers up-level back to you
+        PO — Project Overseer (agent)  — big picture / UX vision / ethics; your contact
+                 |  sets direction; differently-goaled check on the PM
+        PM — Project Manager (agent)   — execution + action-to-action alignment; can't clear own escalations
+                 /       |        \
             Worker     Worker     Worker      ... domain-scoped, spun up on demand
           (little-coder instances, per work effort)
 ```
 
-> **Workflow:** you (PO) converse primarily with the **PM orchestrator agent**;
-> delegation flows down. Any concern or deviation the PM observes is **up-leveled to you
-> for the final decision, and the affected work pauses until you clear it.** Full model in
-> the governance doc.
+> **Workflow:** you (the **Human Operator**) converse primarily with the **PO (Project Overseer
+> agent)**, which sets direction for the **PM (Project Manager agent)**; delegation flows down.
+> Concerns ride the ladder (worker → PM → PO → you); the PO resolves most steering, and **§3
+> hard-gate triggers up-level to you and pause until you clear them.** Full model in the
+> governance doc (§1). *(Note: "PO" = Project Overseer agent as of 2026-06-13 — not the human.)*
 
 The behaviours we need from the chat layer:
 
@@ -39,7 +52,7 @@ The behaviours we need from the chat layer:
    observable — anyone in the group/DM sees the exchange as it happens. This is the
    "shared situational awareness" goal.
 4. **Human can join any conversation, any time.** For *every* private or group chat
-   that exists, the Operator (PM) must be able to drop in live to correct direction.
+   that exists, the **Human Operator (you)** must be able to drop in live to correct direction.
    This is a hard requirement and rules out platforms where DMs are opaque/E2EE in a
    way that locks out an org admin (see §6 / §4 notes on Matrix E2EE).
 5. **Org behaves like a normal company otherwise.** Management agents field and route
@@ -208,11 +221,14 @@ pattern on any Tier-1 platform; named with Mattermost primitives below.
 
 ### 5.3 Human-in-the-loop (R7)
 
-- PM account is a **system admin / org owner** on the chat server → can open, read, and
-  post in **any** channel or DM. On mobile this is just the native app.
-- Agents treat a message from the PM as **highest-priority steering input** — the bridge
-  tags PM messages so the agent prompt clearly distinguishes "operator override" from
-  peer-agent chatter.
+> *(Terminology: every "PM" in this subsection means the **Human Operator (you)** — the admin
+> tier — per the banner at the top. The PM *agent* is a subordinate and is **not** an org admin.)*
+
+- The **Human Operator** account is a **system admin / org owner** on the chat server → can open,
+  read, and post in **any** channel or DM. On mobile this is just the native app.
+- Agents treat a message from the **Human Operator** as **highest-priority steering input** — the
+  bridge tags Human-Operator messages so the agent prompt clearly distinguishes "operator override"
+  from peer-agent chatter.
 - **No E2EE for agent channels** (or PM is a keyed member everywhere) so observability is
   guaranteed — this is the main reason Matrix needs an explicit encryption-posture decision.
 

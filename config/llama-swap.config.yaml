@@ -27,6 +27,7 @@ macros:
     --host 0.0.0.0 --port ${PORT}
     --chat-template-file /etc/llama/chat-template.jinja
     --flash-attn on
+    --no-mmap
 
 models:
   qwen36-35b-a3b:
@@ -53,6 +54,18 @@ models:
 
   qwen36-27b:
     name: Qwen 3.6 27B
+    # B2 LANDED (2026-06-14): concurrencyLimit 0 = UNLIMITED here. The admission
+    # decision now belongs ENTIRELY to the `llm-queue` controller in front of this
+    # server (LiteLLM api_base → llm-queue → here). llama-swap must NOT also cap,
+    # or the ordered depth would split between our priority heap and llama.cpp's
+    # opaque internal FIFO and priority past the first few would be a no-op
+    # (design §3.1/§7.4 "don't double-queue"). The queue admits N≤slots+1 (4), so
+    # at most one request sits in llama.cpp's FIFO to mask the dispatch gap.
+    # Stopgap of record was `concurrencyLimit: 32` (2026-06-14, pre-B2).
+    # Revert (B2 off): set this back to 32 AND point LiteLLM api_base back at
+    # llama-cpp-upstream. See DESIGN-B2-inference-queue.md / memory
+    # llm-429-llama-swap-concurrency.
+    concurrencyLimit: 0
     cmd: |
       llama-server ${common-args}
       --model        ${env.LLAMA_SWAP_QWEN36_27B_MODEL_PATH}

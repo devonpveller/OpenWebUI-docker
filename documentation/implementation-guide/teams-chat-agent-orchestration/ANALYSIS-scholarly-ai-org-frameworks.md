@@ -75,7 +75,7 @@ layer.
 
 **C. Authenticated delegation (arXiv 2501.09674) ↔ our scope-grant rules (§4.1, hard-rule #2).**
 "Delegation must be authenticated" = our "no self-granted scope; grants come only from PM, and
-irreversible scope only from PO," carried by per-agent bot identities. The literature says
+irreversible scope only from the Human Operator (PO proposes)," carried by per-agent bot identities. The literature says
 delegation needs authentication; our ledger + identities provide it.
 
 **D. Agent visibility / operational visibility (arXiv 2401.13138) ↔ our audit trail +
@@ -98,7 +98,7 @@ set) converge: **make the safe path the default path, designed in from the start
 
 **T-S1 ⚠️ "Episodic top-down approval gates are insufficient → need continuous, integrated
 supervision." (the important one)**
-Our plan's headline is the **escalation gate** + **pause-until-cleared** + **PO approval** —
+Our plan's headline is the **escalation gate** + **pause-until-cleared** + **Human-Operator approval** —
 which reads as exactly the "episodic top-down approval gate" the literature calls insufficient.
 - **Why they're right:** an agent can drift, optimize, or cause harm *between* gates. A gate that
   only fires at checkpoints (§4.5) or on explicit triggers (§3) leaves the inter-checkpoint
@@ -180,8 +180,8 @@ tension the literature doesn't price.
   synthesis: minimize **dependency** chatter, maximize **observability + concern/escalation**
   comms. The brake/concern channel is sacred (TT-analysis T1 + T-S2).
 - **Central authority.** TT: *minimize* a coordinator. Scholarly + Anthropic: keep strong,
-  *continuous* oversight. → We keep the PM monitor + PO, **because agents are less aligned than
-  the human teams TT assumes** (TT-analysis T2). Scholarly set backs the oversight; TT is the
+  *continuous* oversight. → We keep the PM + PO (overseer) + Human Operator, **because agents are
+  less aligned than the human teams TT assumes** (TT-analysis T2). Scholarly set backs the oversight; TT is the
   outlier here, for a reason (it assumes trusted humans).
 - **Structure's importance.** Anthropic: structure barely matters, prompts do. Scholarly:
   structure/lifecycle matter a lot. → Reconcile as in the TT analysis: they mean different axes.
@@ -192,7 +192,9 @@ tension the literature doesn't price.
 
 ## 6. Recommended changes to fold in (combined with the TT analysis's §5)
 
-(Proposed — not yet applied.)
+> ✅ **Status: folded (2026-06-13 audit pass).** Recommendations (g)–(l) below are now reflected in
+> the governance/PLAN/TASKS docs. See the **[README.md](README.md) traceability matrix** for the
+> exact landing site of each. Kept here as the rationale of record.
 
 - **(g) Reframe: continuous supervision primary, gate = its escalation arm → governance §3 + §9.**
   *(T-S1 — the most important change.)*

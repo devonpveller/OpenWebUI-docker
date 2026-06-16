@@ -20,6 +20,7 @@ if "%1"=="smolcrawl" goto :smolcrawl_check
 if "%1"=="llama-cpp" goto :llama_cpp_check
 if "%1"=="open-notebook" goto :open_notebook_check
 if "%1"=="openbrain" goto :openbrain_check
+if "%1"=="llm-gateway" goto :llm_gateway_check
 goto :usage
 
 :interactive_menu
@@ -44,10 +45,11 @@ echo  10. SmolCrawl pipelines check and restart
 echo  11. llama-cpp / llama-cpp-embed check and restart
 echo  12. open-notebook (and surrealdb) check and restart
 echo  13. Open Brain (mcp/mcpo/db/gateway/wiki) check and restart
+echo  14. llm-gateway (LiteLLM front door) check and restart
 echo.
 echo   0. Exit
 echo.
-set /p choice="Select option (1-13,0): "
+set /p choice="Select option (1-14,0): "
 
 if "%choice%"=="1" goto :namespace_reset
 if "%choice%"=="2" goto :status_check
@@ -62,6 +64,7 @@ if "%choice%"=="10" goto :smolcrawl_check
 if "%choice%"=="11" goto :llama_cpp_check
 if "%choice%"=="12" goto :open_notebook_check
 if "%choice%"=="13" goto :openbrain_check
+if "%choice%"=="14" goto :llm_gateway_check
 if "%choice%"=="0" goto :end
 echo [ERROR] Invalid choice
 timeout /t 2 /nobreak >nul
@@ -226,7 +229,7 @@ cd scripts
 if %ERRORLEVEL% NEQ 0 (
     echo [WARN] GPU check failed, restarting GPU services...
     cd ..
-    docker compose restart llama-cpp llama-cpp-embed openwebui
+    docker compose restart llama-cpp-upstream llama-cpp-embed-upstream openwebui
     cd scripts
     echo [INFO] Waiting for GPU services to restart...
     timeout /t 60 /nobreak >nul
@@ -240,7 +243,7 @@ if %ERRORLEVEL% NEQ 0 (
         echo.
         echo [INFO] Testing llama-cpp availability...
         cd ..
-        docker compose exec llama-cpp curl -s -f http://localhost:8080/health >nul 2>&1
+        docker compose exec llama-cpp-upstream curl -s -f http://localhost:8080/health >nul 2>&1
         cd scripts
         if %ERRORLEVEL% EQU 0 (
             echo [SUCCESS] llama-cpp GPU integration working
@@ -250,7 +253,7 @@ if %ERRORLEVEL% NEQ 0 (
         echo.
         echo [INFO] Testing llama-cpp-embed availability...
         cd ..
-        docker compose exec llama-cpp-embed curl -s -f http://localhost:8080/health >nul 2>&1
+        docker compose exec llama-cpp-embed-upstream curl -s -f http://localhost:8080/health >nul 2>&1
         cd scripts
         if %ERRORLEVEL% EQU 0 (
             echo [SUCCESS] llama-cpp-embed GPU integration working
@@ -266,14 +269,14 @@ if %ERRORLEVEL% NEQ 0 (
     echo.
     echo [INFO] Testing llama-cpp GPU integration...
     cd ..
-    docker compose exec llama-cpp curl -s -f http://localhost:8080/health >nul 2>&1
+    docker compose exec llama-cpp-upstream curl -s -f http://localhost:8080/health >nul 2>&1
     cd scripts
     if %ERRORLEVEL% EQU 0 (
         echo [SUCCESS] llama-cpp GPU integration working
         echo.
         echo [INFO] Testing llama-cpp-embed GPU integration...
         cd ..
-        docker compose exec llama-cpp-embed curl -s -f http://localhost:8080/health >nul 2>&1
+        docker compose exec llama-cpp-embed-upstream curl -s -f http://localhost:8080/health >nul 2>&1
         cd scripts
         if %ERRORLEVEL% EQU 0 (
             echo [SUCCESS] llama-cpp-embed GPU integration working
@@ -281,7 +284,7 @@ if %ERRORLEVEL% NEQ 0 (
         ) else (
             echo [WARN] llama-cpp-embed may need restart
             cd ..
-            docker compose restart llama-cpp-embed
+            docker compose restart llama-cpp-embed-upstream
             cd scripts
             timeout /t 30 /nobreak >nul
             echo [SUCCESS] llama-cpp-embed restarted
@@ -289,7 +292,7 @@ if %ERRORLEVEL% NEQ 0 (
     ) else (
         echo [WARN] llama-cpp may need restart
         cd ..
-        docker compose restart llama-cpp llama-cpp-embed
+        docker compose restart llama-cpp-upstream llama-cpp-embed-upstream
         cd scripts
         timeout /t 30 /nobreak >nul
         echo [SUCCESS] llama-cpp services restarted
@@ -310,7 +313,7 @@ echo ========================================
 echo.
 echo [INFO] Effective container GPU environment:
 cd /d "%SCRIPT_DIR%\.."
-for %%S in (openwebui ollama llama-cpp llama-cpp-embed) do (
+for %%S in (openwebui ollama llama-cpp-upstream llama-cpp-embed-upstream) do (
     echo.
     echo [INFO] %%S:
     docker inspect %%S --format "{{range .Config.Env}}{{println .}}{{end}}" | findstr /R /C:"^NVIDIA_VISIBLE_DEVICES=" /C:"^NVIDIA_DRIVER_CAPABILITIES="
@@ -349,12 +352,12 @@ cd scripts
 echo.
 echo [INFO] llama-cpp Status:
 cd ..
-docker compose exec llama-cpp curl -s http://localhost:8080/health 2>nul
+docker compose exec llama-cpp-upstream curl -s http://localhost:8080/health 2>nul
 cd scripts
 echo.
 echo [INFO] llama-cpp-embed Status:
 cd ..
-docker compose exec llama-cpp-embed curl -s http://localhost:8080/health 2>nul
+docker compose exec llama-cpp-embed-upstream curl -s http://localhost:8080/health 2>nul
 cd scripts
 echo.
 echo [INFO] Network Connectivity:
@@ -387,7 +390,7 @@ if %ERRORLEVEL% EQU 0 (
     echo [ERROR] OpenWebUI accessibility: FAILED
 )
 cd ..
-docker compose exec llama-cpp curl -s -f http://localhost:8080/health >nul 2>&1
+docker compose exec llama-cpp-upstream curl -s -f http://localhost:8080/health >nul 2>&1
 cd scripts
 if %ERRORLEVEL% EQU 0 (
     echo [SUCCESS] llama-cpp API accessibility: OK
@@ -526,7 +529,7 @@ echo [WARN] This will restart OpenWebUI, llama-cpp, llama-cpp-embed, and Tailsca
 echo.
 echo [INFO] Stopping dependent containers first...
 cd ..
-docker compose stop tailscale llama-cpp llama-cpp-embed mnemory mnemory-backup openwebui-backup smolcrawl-pipelines open_notebook surrealdb
+docker compose stop tailscale llama-cpp-upstream llama-cpp-embed-upstream mnemory mnemory-backup openwebui-backup smolcrawl-pipelines open_notebook surrealdb
 cd scripts
 echo [INFO] Restarting OpenWebUI...
 cd ..
@@ -546,18 +549,18 @@ echo [SUCCESS] OpenWebUI healthy - restarting dependent services
 echo.
 echo [INFO] Starting llama-cpp...
 cd ..
-docker compose start llama-cpp
+docker compose start llama-cpp-upstream
 if %ERRORLEVEL% NEQ 0 (
     echo [WARN] llama-cpp start failed, trying up -d...
-    docker compose up -d llama-cpp
+    docker compose up -d llama-cpp-upstream
 )
 cd scripts
 echo [INFO] Starting llama-cpp-embed...
 cd ..
-docker compose start llama-cpp-embed
+docker compose start llama-cpp-embed-upstream
 if %ERRORLEVEL% NEQ 0 (
     echo [WARN] llama-cpp-embed start failed, trying up -d...
-    docker compose up -d llama-cpp-embed
+    docker compose up -d llama-cpp-embed-upstream
 )
 cd scripts
 echo [INFO] Waiting for llama-cpp to initialize...
@@ -715,45 +718,87 @@ echo ========================================
 echo.
 echo [INFO] Checking llama-cpp service status...
 cd /d "%SCRIPT_DIR%\.."
-docker compose ps llama-cpp llama-cpp-embed --format "table {{.Service}}\t{{.Status}}"
+docker compose ps llama-cpp-upstream llama-cpp-embed-upstream --format "table {{.Service}}\t{{.Status}}"
 echo.
 echo [INFO] Testing llama-cpp health endpoint...
-docker compose exec llama-cpp curl -s -f http://localhost:8080/health >nul 2>&1
+docker compose exec llama-cpp-upstream curl -s -f http://localhost:8080/health >nul 2>&1
 set RESULT=%ERRORLEVEL%
 if %RESULT% EQU 0 (
     echo [SUCCESS] llama-cpp is healthy and running
 ) else (
     echo [WARN] llama-cpp health check failed, restarting...
-    docker compose restart llama-cpp
+    docker compose restart llama-cpp-upstream
     echo [INFO] Waiting for llama-cpp to start ^(large model, may take up to 2 minutes^)...
     timeout /t 60 /nobreak >nul
-    docker compose exec llama-cpp curl -s -f http://localhost:8080/health >nul 2>&1
+    docker compose exec llama-cpp-upstream curl -s -f http://localhost:8080/health >nul 2>&1
     set RESULT=!ERRORLEVEL!
     if !RESULT! EQU 0 (
         echo [SUCCESS] llama-cpp restored after restart
     ) else (
-        echo [ERROR] llama-cpp still not healthy - check logs: docker compose logs llama-cpp
+        echo [ERROR] llama-cpp-upstream still not healthy - check logs: docker compose logs llama-cpp-upstream
     )
 )
 echo.
 echo [INFO] Testing llama-cpp-embed health endpoint...
-docker compose exec llama-cpp-embed curl -s -f http://localhost:8080/health >nul 2>&1
+docker compose exec llama-cpp-embed-upstream curl -s -f http://localhost:8080/health >nul 2>&1
 set RESULT=%ERRORLEVEL%
 if %RESULT% EQU 0 (
     echo [SUCCESS] llama-cpp-embed is healthy and running
 ) else (
     echo [WARN] llama-cpp-embed health check failed, restarting...
-    docker compose restart llama-cpp-embed
+    docker compose restart llama-cpp-embed-upstream
     echo [INFO] Waiting for llama-cpp-embed to start...
     timeout /t 30 /nobreak >nul
-    docker compose exec llama-cpp-embed curl -s -f http://localhost:8080/health >nul 2>&1
+    docker compose exec llama-cpp-embed-upstream curl -s -f http://localhost:8080/health >nul 2>&1
     set RESULT=!ERRORLEVEL!
     if !RESULT! EQU 0 (
         echo [SUCCESS] llama-cpp-embed restored after restart
     ) else (
-        echo [ERROR] llama-cpp-embed still not healthy - check logs: docker compose logs llama-cpp-embed
+        echo [ERROR] llama-cpp-embed-upstream still not healthy - check logs: docker compose logs llama-cpp-embed-upstream
     )
 )
+cd /d "%SCRIPT_DIR%"
+if "%1"=="" (
+    echo.
+    pause
+    goto :interactive_menu
+)
+goto :end
+
+:llm_gateway_check
+echo.
+echo ========================================
+echo   llm-gateway (LiteLLM) Health Check and Recovery
+echo ========================================
+echo.
+echo [INFO] Checking llm-gateway / llm-gateway-db status...
+cd /d "%SCRIPT_DIR%\.."
+docker compose ps llm-gateway llm-gateway-db --format "table {{.Service}}\t{{.Status}}"
+echo.
+echo [INFO] Testing gateway liveliness (the wolfi image has no curl - use python)...
+docker compose exec llm-gateway python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8080/health/liveliness').status==200 else 1)" >nul 2>&1
+set RESULT=%ERRORLEVEL%
+if %RESULT% EQU 0 (
+    echo [SUCCESS] llm-gateway is healthy ^(front door is up^)
+) else (
+    echo [WARN] llm-gateway liveliness failed, restarting db then gateway...
+    docker compose up -d llm-gateway-db
+    timeout /t 5 /nobreak >nul
+    docker compose restart llm-gateway
+    echo [INFO] Waiting for gateway ^(first boot runs prisma migrations, ~60-90s^)...
+    timeout /t 60 /nobreak >nul
+    docker compose exec llm-gateway python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8080/health/liveliness').status==200 else 1)" >nul 2>&1
+    set RESULT=!ERRORLEVEL!
+    if !RESULT! EQU 0 (
+        echo [SUCCESS] llm-gateway restored after restart
+    ) else (
+        echo [ERROR] llm-gateway still not healthy - check logs: docker compose logs llm-gateway
+        echo [HINT] The gateway needs llama-cpp-upstream + llama-cpp-embed-upstream healthy first ^(option 11^).
+    )
+)
+echo.
+echo [INFO] Recent spend-ledger rows (confirms callers are routing through the gateway):
+docker compose exec llm-gateway-db psql -U litellm -d litellm -c "SELECT api_key, model, count(*) FROM \"LiteLLM_SpendLogs\" GROUP BY 1,2 ORDER BY 3 DESC LIMIT 5;" 2>nul
 cd /d "%SCRIPT_DIR%"
 if "%1"=="" (
     echo.

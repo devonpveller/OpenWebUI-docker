@@ -34,9 +34,16 @@ logger = setup_logging()
 # plane. Keep in sync with docker-compose.yml / OB1 — see the /stack-map skill.
 # ---------------------------------------------------------------------------
 _AI_STACK_SERVICES: List[Dict[str, Any]] = [
-    # Core inference — critical: the stack cannot serve chat without these.
-    {"name": "llama-cpp",       "plane": "Core",         "host": "llama-cpp",       "port": 8080, "path": "/health",                  "critical": True},
-    {"name": "llama-cpp-embed", "plane": "Core",         "host": "llama-cpp-embed", "port": 8080, "path": "/health",                  "critical": True},
+    # Core inference (caller plane). The gateway is the single ingress, so from
+    # this network its liveness IS the "can the stack serve inference" signal.
+    # The real servers (llama-cpp-upstream / llama-cpp-embed-upstream) are
+    # isolated on llm-backend-net (2026-06-13) and intentionally NOT reachable
+    # from here; their detailed health is owned by the recovery plane
+    # (check-tailscale-health.ps1 probes them via `docker exec ... localhost:8080`
+    # + each container's docker healthcheck + host ports 127.0.0.1:8081/8082).
+    # Do NOT add direct *-upstream probes here -- that routes around the gateway
+    # (see scripts/check-llm-gateway-routing.ps1).
+    {"name": "llm-gateway",              "plane": "Core", "host": "llm-gateway",              "port": 8080, "path": "/health/liveliness",       "critical": True},
     # Memory layer.
     {"name": "mnemory",         "plane": "Memory",       "host": "mnemory",         "port": 8051, "path": "/health",                  "critical": False},
     {"name": "mnemory-gateway", "plane": "Memory",       "host": "mnemory-gateway", "port": 8060, "path": "/health",                  "critical": False},
@@ -90,7 +97,7 @@ class SystemHealthModule:
                 # Core always-on containers. ollama was retired — llama-cpp is
                 # the inference backend now. Live per-service health is probed by
                 # check_ai_stack_services().
-                "expected_services": ["openwebui", "llama-cpp", "llama-cpp-embed", "tailscale"]
+                "expected_services": ["openwebui", "llm-gateway", "llama-cpp-upstream", "llama-cpp-embed-upstream", "tailscale"]
             },
             "monitoring": {
                 "check_docker": True,

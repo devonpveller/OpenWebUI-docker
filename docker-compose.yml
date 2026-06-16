@@ -122,6 +122,12 @@ services:
       - LMSTUDIO_HOST=${LMSTUDIO_HOST:-host.docker.internal}
       - LMSTUDIO_PORT=${LMSTUDIO_PORT:-1234}
       - LMSTUDIO_ENABLED=${LMSTUDIO_ENABLED:-true}
+      # MUST be the GATEWAY alias (llama-cpp / llama-cpp-embed), NOT the *-upstream
+      # real servers. entrypoint.sh proxies the tailnet /llama-cpp + /llama-cpp-embed
+      # serve routes here; pointing at *-upstream would expose inference on the
+      # tailnet BYPASSING LiteLLM (no ledger, no routing). Gateway-only policy —
+      # see scripts/check-llm-gateway-routing.ps1. (Was *-upstream after the
+      # 2026-06-12 rename; corrected 2026-06-13.)
       - LLAMA_CPP_HOST=${LLAMA_CPP_HOST:-llama-cpp}
       - LLAMA_CPP_PORT=${LLAMA_CPP_PORT:-8080}
       - LLAMA_CPP_ENABLED=${LLAMA_CPP_ENABLED:-true}
@@ -195,7 +201,7 @@ services:
     security_opt:
       - no-new-privileges:true
     depends_on:
-      llama-cpp:
+      llm-gateway:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-fsS", "--max-time", "5", "http://localhost:8000/health"]
@@ -246,11 +252,15 @@ services:
   #     retries: 3
   #     start_period: 30s
 
-  llama-cpp:
+  llama-cpp-upstream:
     image: ghcr.io/mostlygeek/llama-swap:cuda
-    container_name: llama-cpp
+    container_name: llama-cpp-upstream
+    # Isolated behind the gateway (2026-06-13): only llm-gateway (+ the
+    # lm-models-backup liveness probe) can reach this real inference server.
+    # Callers reach inference via the `llama-cpp` alias on llm-gateway and
+    # cannot route around LiteLLM. See the llm-backend-net definition below.
     networks:
-      - llm-net
+      - llm-backend-net
     command:
       - -config
       - /app/config.yaml
@@ -345,9 +355,7 @@ services:
     security_opt:
       - no-new-privileges:true
     depends_on:
-      llama-cpp:
-        condition: service_healthy
-      llama-cpp-embed:
+      llm-gateway:
         condition: service_healthy
     labels:
       - "com.centurylinklabs.watchtower.enable=false"
@@ -462,11 +470,12 @@ services:
     labels:
       - "com.centurylinklabs.watchtower.enable=false"
 
-  llama-cpp-embed:
+  llama-cpp-embed-upstream:
     image: ghcr.io/ggml-org/llama.cpp:server-cuda
-    container_name: llama-cpp-embed
+    container_name: llama-cpp-embed-upstream
+    # Isolated behind the gateway (2026-06-13) — see llama-cpp-upstream.
     networks:
-      - llm-net
+      - llm-backend-net
     ports:
       - "127.0.0.1:8082:8080"
     volumes:
@@ -501,6 +510,246 @@ services:
       timeout: 10s
       retries: 3
       start_period: 60s
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
+  # =====================================================================
+  # llm-queue — B2 front-ended inference ADMISSION CONTROLLER.
+  # Sits BETWEEN LiteLLM (the caller-facing front door) and the *-upstream real
+  # servers, on llm-backend-net only. It holds-and-dispatches requests instead of
+  # letting llama-swap drop the overflow with a flat `429 Too many requests`:
+  #   callers → llama-cpp:8080 → llm-gateway (LiteLLM) → llm-queue → *-upstream
+  # LiteLLM stays the front door + ledger; the queue is the admission/scheduling
+  # layer it forwards through (design B2, NOT B1). It is a SECOND member of the
+  # backend plane, DOWNSTREAM of the gateway, so "LiteLLM is the front door" holds.
+  # The mutating control API is NEVER exposed on llm-net or a host port (design
+  # §10.3.1) — read-only state reaches llm-net via a LiteLLM pass-through (P2).
+  # Tuning invariant (design §10.2): LLM_QUEUE_SLOTS == llama-swap --parallel (3),
+  # LLM_QUEUE_MAX_IN_FLIGHT <= SLOTS+1, and llama-swap concurrencyLimit == 0 so
+  # the ordered depth lives in OUR heap, not llama.cpp's opaque FIFO.
+  # Docs: documentation/implementation-guide/LiteLLM-Proxy/DESIGN-B2-inference-queue.md
+  # =====================================================================
+  llm-queue:
+    build:
+      context: ./llm-queue
+      dockerfile: Dockerfile
+    image: llm-queue:local
+    container_name: llm-queue
+    # llm-backend-net ONLY: reachable by llm-gateway, reaches *-upstream. Keeping
+    # it off llm-net is what keeps the mutating control API operator-only (§3.3).
+    networks:
+      - llm-backend-net
+    environment:
+      # Forward targets — the ONLY sanctioned *-upstream references outside the
+      # gateway config. check-llm-gateway-routing.ps1 sanctions the
+      # LLM_QUEUE_UPSTREAM token specifically (§3.2).
+      - LLM_QUEUE_UPSTREAM_BASE_URL=http://llama-cpp-upstream:8080
+      - LLM_QUEUE_EMBED_UPSTREAM_BASE_URL=http://llama-cpp-embed-upstream:8080
+      # Admission sizing — MUST track llama-swap.config.yaml (--parallel 3).
+      - LLM_QUEUE_SLOTS=${LLM_QUEUE_SLOTS:-3}
+      - LLM_QUEUE_MAX_IN_FLIGHT=${LLM_QUEUE_MAX_IN_FLIGHT:-4}
+      - LLM_QUEUE_BACKSTOP_DEPTH=${LLM_QUEUE_BACKSTOP_DEPTH:-24}
+      - LLM_QUEUE_MAX_TOTAL_CONNECTIONS=${LLM_QUEUE_MAX_TOTAL_CONNECTIONS:-128}
+      # Rolling completion-T metric.
+      - LLM_QUEUE_T_WINDOW=${LLM_QUEUE_T_WINDOW:-5}
+      - LLM_QUEUE_T_INITIAL_S=${LLM_QUEUE_T_INITIAL_S:-30}
+      # P2 (2026-06-14): budget enforcement ON. Admission gated by per-service
+      # projected-wait budgets (§8b) on top of the depth backstop; priority
+      # classes (§8c) order dispatch; per-key max-concurrency (§8d) caps batch
+      # callers. Budgets are generous (owui-chat 30s … batch 600s) so normal load
+      # passes; only genuine saturation rejects-with-estimate. Set to false to
+      # revert to P1 depth-only admission.
+      - LLM_QUEUE_ENFORCE_BUDGET=${LLM_QUEUE_ENFORCE_BUDGET:-true}
+      - LLM_QUEUE_UPSTREAM_TIMEOUT_S=${LLM_QUEUE_UPSTREAM_TIMEOUT_S:-600}
+      - LLM_QUEUE_LOG_LEVEL=${LLM_QUEUE_LOG_LEVEL:-INFO}
+      # P3 analytics: admit/finish/reject events with estimate-vs-actual →
+      # llm-queue's OWN SQLite store (NOT LiteLLM's schema-managed Postgres, §4.4).
+      # The db is on llm-net (unreachable from llm-backend-net), so the queue keeps
+      # its own store and the §5 join happens at query time.
+      - LLM_QUEUE_EVENTS_DB_PATH=${LLM_QUEUE_EVENTS_DB_PATH:-/data/events.db}
+    volumes:
+      - llm-queue-data:/data
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      llama-cpp-upstream:
+        condition: service_healthy
+    healthcheck:
+      # Liveness only — NEVER probes the upstream (a probe would force a
+      # llama-swap model load → swap thrash, design §4.2).
+      test: ["CMD", "curl", "-fsS", "--max-time", "5", "http://localhost:8080/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
+  # =====================================================================
+  # LiteLLM gateway — transparent interposition (guide §1A). STANDUP FORM:
+  # stands up ALONGSIDE the running llama-cpp / llama-cpp-embed with NO aliases
+  # yet — nothing routes through it until the cut-in (flip) renames the real
+  # servers to *-upstream and gives the gateway the llama-cpp / llama-cpp-embed
+  # aliases. See documentation/implementation-guide/LiteLLM-Proxy/CUT-IN-READY.md.
+  # PERMISSIVE (no master_key) — attribution by the key string each caller sends
+  # (proven by the T0 spike, 2026-06-12). Forwards by model name to llama-cpp.
+  # =====================================================================
+  llm-gateway:
+    # Digest-pinned — supply-chain hardening (guide §19/D9; CVE-2025-55182).
+    # Bump deliberately: docker pull ghcr.io/berriai/litellm:main-stable;
+    #   docker inspect ... --format '{{index .RepoDigests 0}}'; confirm the
+    #   release is outside any known compromise window; paste sha256; recreate;
+    #   re-run the model-list + spend-log verification.
+    image: ghcr.io/berriai/litellm@sha256:c98c9395c56a35b7abacff8269d43ff99aabacb62bbf42a04cc1514fcb9bde4a
+    container_name: llm-gateway
+    networks:
+      llm-net:
+        aliases:
+          - llama-cpp           # transparent flip: callers' http://llama-cpp:8080 land here
+          - llama-cpp-embed     # transparent flip: callers' http://llama-cpp-embed:8080 land here
+      # The gateway is the ONLY member of both planes: it faces callers on
+      # llm-net (aliases above) and reaches the isolated real servers on
+      # llm-backend-net (below). This is what makes it the sole ingress to
+      # *-upstream — callers on llm-net cannot reach the upstreams directly.
+      llm-backend-net: {}
+    # NO host port: the gateway sits ONLY on the internal-only `llm-net`, so
+    # Docker silently suppresses any host publish (a `ports:` mapping here would
+    # show in `docker inspect .HostConfig.PortBindings` but NEVER bind — verified:
+    # NetworkSettings.Ports is empty and 127.0.0.1:4000 is unreachable). Keeping
+    # the gateway off any internet-capable bridge is the supply-chain posture
+    # (guide §19 — no outbound). Admin / spend-ledger access is IN-NETWORK only:
+    #   docker exec llm-gateway python -c "...urllib... http://localhost:8080/..."
+    #   docker exec llm-gateway-db psql -U litellm -d litellm -c '...'
+    # The llm-traffic OWUI module reaches it the same way (OWUI is on llm-net).
+    volumes:
+      - ./config/litellm.config.yaml:/app/config.yaml:ro
+    command: ["--config", "/app/config.yaml", "--port", "8080"]
+    environment:
+      # DATABASE_URL expands ${LITELLM_DB_PASSWORD} from .env at compose-parse time.
+      - DATABASE_URL=postgres://litellm:${LITELLM_DB_PASSWORD}@llm-gateway-db:5432/litellm
+      - LITELLM_LOCAL_MODEL_COST_MAP=True   # bundled cost map; no GitHub fetch at boot (guide §19/D10)
+    depends_on:
+      llama-cpp-upstream:
+        condition: service_healthy
+      llama-cpp-embed-upstream:
+        condition: service_healthy
+      # B2: LiteLLM forwards chat through llm-queue (api_base), so the queue must
+      # be up first. The embed plane still goes direct to *-upstream until P4.
+      llm-queue:
+        condition: service_healthy
+      llm-gateway-db:
+        condition: service_healthy
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      # The litellm image is wolfi-based and has NO curl (T0 finding) — use python.
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8080/health/liveliness').status==200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s   # first boot runs prisma migrations (~60-90s, T0 finding)
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
+  llm-gateway-db:
+    image: postgres:16-alpine
+    container_name: llm-gateway-db
+    networks:
+      - llm-net
+    environment:
+      - POSTGRES_DB=litellm
+      - POSTGRES_USER=litellm
+      - POSTGRES_PASSWORD=${LITELLM_DB_PASSWORD}
+    volumes:
+      - llm-gateway-db-data:/var/lib/postgresql/data
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U litellm -d litellm"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
+  llm-gateway-backup:
+    image: postgres:16-alpine
+    container_name: llm-gateway-backup
+    depends_on:
+      llm-gateway-db:
+        condition: service_healthy
+    networks:
+      - llm-net
+    environment:
+      - BACKUP_DIR=/backups
+      - PGHOST=llm-gateway-db
+      - PGUSER=litellm
+      - PGDATABASE=litellm
+      - PGPASSWORD=${LITELLM_DB_PASSWORD}
+      - RETAIN_DAYS=${LITELLM_BACKUP_RETAIN_DAYS:-7}
+    volumes:
+      - ./backups/llm-gateway:/backups
+      - ./backup/llm-gateway-backup.sh:/scripts/backup.sh:ro
+    entrypoint: ["/bin/sh", "-c", "while true; do /scripts/backup.sh || true; sleep 86400; done"]
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
+  # =====================================================================
+  # llm-gateway-ui — LiteLLM ADMIN-UI sidecar (analytics dashboard). Added
+  # 2026-06-14. A SECOND LiteLLM instance whose ONLY job is to serve the Admin
+  # UI at /ui. LiteLLM 1.88.1 REQUIRES a master_key for the UI to log in; setting
+  # one on the permissive main gateway would 401 every junk-key caller. So the
+  # master_key is ISOLATED here. This instance:
+  #   - serves NO inference — it deliberately carries NO llama-cpp /
+  #     llama-cpp-embed network alias (those stay on llm-gateway), and no caller
+  #     points at it. The gateway-only routing policy is unaffected.
+  #   - shares llm-gateway-db (same DATABASE_URL) so the dashboard reads the SAME
+  #     spend ledger the main gateway writes.
+  #   - is reached ONLY via the tailnet :8445 serve route (entrypoint.sh) — no
+  #     host port, internal-only net, same supply-chain posture as llm-gateway.
+  # Remove = delete this service + config/litellm.ui.config.yaml + the :8445
+  # serve block in entrypoint.sh + the .env LITELLM_UI_* vars.
+  # =====================================================================
+  llm-gateway-ui:
+    # Same digest-pinned image as llm-gateway (keep them in lockstep on bumps so
+    # the shared Postgres schema/prisma migrations never diverge).
+    image: ghcr.io/berriai/litellm@sha256:c98c9395c56a35b7abacff8269d43ff99aabacb62bbf42a04cc1514fcb9bde4a
+    container_name: llm-gateway-ui
+    # llm-net ONLY (reaches llm-gateway-db). NO aliases — must never be an
+    # inference path. NOT on llm-backend-net (can't reach the upstreams).
+    networks:
+      - llm-net
+    volumes:
+      - ./config/litellm.ui.config.yaml:/app/config.yaml:ro
+    command: ["--config", "/app/config.yaml", "--port", "8080"]
+    environment:
+      - DATABASE_URL=postgres://litellm:${LITELLM_DB_PASSWORD}@llm-gateway-db:5432/litellm
+      - LITELLM_LOCAL_MODEL_COST_MAP=True   # bundled cost map; no GitHub fetch (guide §19/D10)
+      # master_key UNLOCKS the Admin UI (and is enforced on THIS instance's API
+      # only — which has no callers). UI_USERNAME/PASSWORD set the dashboard login.
+      - LITELLM_MASTER_KEY=${LITELLM_UI_MASTER_KEY}
+      - UI_USERNAME=${LITELLM_UI_USERNAME}
+      - UI_PASSWORD=${LITELLM_UI_PASSWORD}
+    depends_on:
+      llm-gateway-db:
+        condition: service_healthy
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      # wolfi-based image has no curl (T0 finding) — use python.
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8080/health/liveliness').status==200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 90s
     labels:
       - "com.centurylinklabs.watchtower.enable=false"
 
@@ -653,6 +902,61 @@ services:
     labels:
       - "com.centurylinklabs.watchtower.enable=false"
 
+  # ---------------------------------------------------------------------
+  # vpn (Mullvad WireGuard via gluetun) — SearXNG's engine-query egress
+  # (2026-06-14). Replaces Tor for the SEARCH leg ONLY: search engines
+  # blocklist Tor exit IPs by reputation (brave/ddg/startpage/mojeek all
+  # 403/429/CAPTCHA on sight), which neutralises SearXNG's multi-engine
+  # aggregation. Mullvad gives a clean, non-Tor exit IP so aggregation works
+  # again. Page FETCH still egresses via `tor` (openbrain-research et al.'s
+  # FETCH_PROXY_URL) — arbitrary pages aren't engine-blocked, and Tor keeps
+  # "what you actually read" private.
+  #
+  # Privacy invariant preserved: like `tor`, `vpn` is the ONLY search-net
+  # member that ALSO joins `default`, so SearXNG stays internal-only and can
+  # egress solely through this HTTP proxy. gluetun's firewall is a KILL-SWITCH
+  # — if the WireGuard tunnel drops, all egress is blocked (no clear-IP leak).
+  # Secrets (MULLVAD_WG_*) live in .env and are NEVER committed.
+  # ---------------------------------------------------------------------
+  vpn:
+    image: ${VPN_IMAGE:-qmcgaw/gluetun:latest}
+    container_name: search-vpn
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    networks:
+      - search-net
+      - default
+    environment:
+      - VPN_SERVICE_PROVIDER=mullvad
+      - VPN_TYPE=wireguard
+      - WIREGUARD_PRIVATE_KEY=${MULLVAD_WG_PRIVATE_KEY}
+      - WIREGUARD_ADDRESSES=${MULLVAD_WG_ADDRESSES}
+      - SERVER_COUNTRIES=${MULLVAD_COUNTRIES:-Netherlands}
+      # HTTP forward-proxy for SearXNG. HTTPS targets use CONNECT, so DNS is
+      # resolved at gluetun THROUGH the tunnel (no local DNS leak, matching the
+      # old socks5h behaviour).
+      - HTTPPROXY=on
+      - HTTPPROXY_LISTENING_ADDRESS=:8888
+      # Allow the LAN-side (docker search-net) to reach the proxy through the
+      # kill-switch firewall. 172.16/12 covers Docker's default subnet pool.
+      - FIREWALL_OUTBOUND_SUBNETS=${SEARCH_NET_SUBNET:-172.16.0.0/12}
+      # DNS: leave gluetun's default DNS-over-TLS ON — engine hostnames resolve
+      # via DoT through the tunnel (no DNS leak). NOTE: WIREGUARD_ADDRESSES must
+      # be IPv4-only unless the Docker host has IPv6 (gluetun rejects v6 addrs).
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "/gluetun-entrypoint", "healthcheck"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
   redis:
     image: ${SEARCH_REDIS_IMAGE:-redis:7-alpine}
     container_name: search-redis
@@ -677,7 +981,7 @@ services:
     networks:
       - search-net
     depends_on:
-      tor:
+      vpn:
         condition: service_healthy
       redis:
         condition: service_healthy
@@ -696,7 +1000,7 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 90s   # Tor circuit build is slow on first start
+      start_period: 90s   # WireGuard tunnel build can be slow on first start
     labels:
       - "com.centurylinklabs.watchtower.enable=false"
 
@@ -811,7 +1115,7 @@ services:
     security_opt:
       - no-new-privileges:true
     depends_on:
-      llama-cpp:
+      llm-gateway:
         condition: service_healthy
       open-terminal:
         condition: service_healthy
@@ -1150,6 +1454,12 @@ services:
   lm-models-backup:
     image: alpine:3.21
     container_name: lm-models-backup
+    # On llm-backend-net so its HEALTH_TCP liveness probe can reach the real
+    # inference server (llama-cpp-upstream:8080). Probe-only member with no
+    # inference client (cap_drop ALL) — it does NOT bypass the gateway. (Before
+    # isolation it sat on `default` and the cross-network probe never resolved.)
+    networks:
+      - llm-backend-net
     volumes:
       - C:\Users\yamao\.lmstudio\models:/data:ro
       - ./backups/lm-models:/backups
@@ -1159,10 +1469,12 @@ services:
       - BACKUP_DIR=/backups
       - PREFIX=lm-models
       - RETAIN_COUNT=${LM_MODELS_BACKUP_RETAIN_COUNT:-2}
-      # llama-cpp serves models from this directory; backup runs when the
-      # service is reachable. Empty HEALTH_TCP disables the probe (e.g., if
-      # you keep llama-cpp paused most of the time).
-      - HEALTH_TCP=${LM_MODELS_BACKUP_HEALTH_TCP:-llama-cpp:8080}
+      # llama-cpp-upstream serves models from this directory; backup runs when
+      # that REAL inference server is reachable. Probe the upstream by name, NOT
+      # the bare `llama-cpp` alias (which now resolves to llm-gateway and would
+      # report "reachable" even while the model server is down/paused). Empty
+      # HEALTH_TCP disables the probe (e.g., if you keep the upstream paused).
+      - HEALTH_TCP=${LM_MODELS_BACKUP_HEALTH_TCP:-llama-cpp-upstream:8080}
       - BACKUP_CRON=${LM_MODELS_BACKUP_CRON:-0 1 * * 0}     # Sunday 01:00 UTC
       - TZ=UTC
     entrypoint: /bin/sh
@@ -1793,6 +2105,8 @@ volumes:
   openwebui-data:
   mnemory-data:
   smolcrawl-data:
+  llm-gateway-db-data:   # LiteLLM spend-log DB (transparent gateway, guide §1A)
+  llm-queue-data:        # llm-queue's OWN analytics event store (B2/P3 SQLite, NOT LiteLLM's schema)
   # little-coder — five expertise volumes (persistence boundary, design §3.6)
   # plus the project-scoped workspace shared with open-terminal.
   # `little-coder-sessions` holds pi's per-chat session files — added in
@@ -1823,10 +2137,19 @@ volumes:
     name: open-brain_wiki-assets
 
 networks:
-  # Internal-only network: no gateway, no internet access.
-  # llama-cpp containers are isolated here — they can only be reached
-  # by services that are also on this network (openwebui, mnemory).
+  # Internal-only CALLER plane: no internet access. Every service that consumes
+  # inference sits here and reaches it ONLY via the `llama-cpp` /
+  # `llama-cpp-embed` aliases on llm-gateway. The real inference servers are NOT
+  # here (moved to llm-backend-net, 2026-06-13), so callers physically cannot
+  # route around LiteLLM.
   llm-net:
+    internal: true
+  # Internal-only BACKEND plane: the real inference servers
+  # (llama-cpp-upstream, llama-cpp-embed-upstream) + the single ingress
+  # (llm-gateway) + the lm-models-backup liveness probe. Nothing else attaches,
+  # so inference is reachable only through the gateway. Enforced at change time
+  # by scripts/check-llm-gateway-routing.ps1; see CLAUDE.md "Inference plane".
+  llm-backend-net:
     internal: true
   # Internal-only network for the search stack. SearXNG/redis/gateway/mcpo
   # have NO internet route here; only `tor` (also on `default`) can egress.

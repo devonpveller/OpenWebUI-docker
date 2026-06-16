@@ -27,8 +27,8 @@ from pydantic import BaseModel, Field
 class Tools:
     class Valves(BaseModel):
         research_url: str = Field(
-            default="http://host.docker.internal:8818",
-            description="Base URL of the openbrain-research service (loopback 8818 on the OB1 host, or http://openbrain-research:8000 if OWUI shares its network).",
+            default="http://openbrain-research:8000",
+            description="Base URL of the openbrain-research service. OWUI shares ai-stack_llm-net / ai-stack_default with openbrain-research, so reach it BY CONTAINER NAME (http://openbrain-research:8000). Do NOT use http://host.docker.internal:8818 — the :8818 host port is bound to 127.0.0.1 (host loopback) and is unreachable from a container via host.docker.internal (resolves to the host bridge IP), which surfaces as 'Server disconnected'.",
         )
         brain_key: str = Field(
             default="",
@@ -145,7 +145,19 @@ def _render(result: dict[str, Any]) -> str:
     # content. The engine is the only grounded path; gaps are pursued by calling
     # it again, never filled from the model's own knowledge or other tools.
     if incomplete:
-        reason = f"stopped early ({backstop})" if backstop and backstop != "complete" else "left gaps open"
+        # Name the stop reason in plain terms. max_timeouts is NOT the source
+        # budget — it means the network/Tor was too flaky to retrieve pages, so
+        # widening MAX_FETCH would not help (the lever is Tor reliability /
+        # FETCH_TIMEOUT_MS), whereas max_fetch/wall_time ARE budget caps.
+        reason_map = {
+            "max_fetch": "stopped at the source budget (MAX_FETCH) — raise it to go deeper",
+            "wall_time": "stopped at the time budget (MAX_WALL_MS) — raise it to go deeper",
+            "max_timeouts": "stopped after too many fetch TIMEOUTS (the network/Tor was flaky — not the source budget)",
+        }
+        if backstop and backstop != "complete":
+            reason = reason_map.get(backstop, f"stopped early ({backstop})")
+        else:
+            reason = "left gaps open"
         parts.append(
             f"\n\n> ⚠ This research is grounded but INCOMPLETE — it {reason}. The open "
             f"gaps above are not answered by any source. Do NOT fill them from your own "
@@ -158,8 +170,20 @@ def _render(result: dict[str, Any]) -> str:
     foot = []
     if reuse_ratio is not None:
         foot.append(f"coverage {round(float(reuse_ratio) * 100)}%")
+    # Fetch yield vs waste — distinct metrics, surfaced separately so a thin
+    # report from flaky fetches reads differently from one that hit the budget.
+    fs = result.get("fetch_stats") or {}
+    if fs:
+        bits = [f"{fs.get('sources', 0)} sources"]
+        if fs.get("timeouts"):
+            bits.append(f"{fs['timeouts']} timeouts")
+        if fs.get("errors"):
+            bits.append(f"{fs['errors']} errors")
+        if fs.get("reused"):
+            bits.append(f"{fs['reused']} reused")
+        foot.append("fetched " + ", ".join(bits))
     if backstop and backstop != "complete":
-        foot.append(f"stopped early: {backstop}")
+        foot.append(f"stopped: {backstop}")
     if foot:
         parts.append(f"\n\n_— {' · '.join(foot)}_")
 

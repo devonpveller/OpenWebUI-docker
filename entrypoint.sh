@@ -535,6 +535,75 @@ else
     echo "🔄 Quartz wiki viewer Tailscale integration disabled (QUARTZ_ENABLED=false)"
 fi
 
+# Configure the LiteLLM Admin-UI sidecar (llm-gateway-ui) on its own Tailscale
+# HTTPS port. This is the SEPARATE master-key'd LiteLLM instance that serves the
+# analytics dashboard at /ui (the permissive main gateway can't — LiteLLM 1.88.1
+# requires a master_key for the UI to log in). Like Quartz/Streamlit it serves
+# at root, so expose it at root on a distinct tailnet HTTPS port. The container
+# is on the main stack (starts with us) so it's usually up; a short retry plus
+# the monitoring loop's deferred setup handle any lag.
+sleep 2
+echo "🔑 Configuring LiteLLM Admin UI (llm-gateway-ui) access..."
+
+LITELLM_UI_HOST=${LITELLM_UI_HOST:-llm-gateway-ui}
+LITELLM_UI_PORT=${LITELLM_UI_PORT:-8080}
+LITELLM_UI_ENABLED=${LITELLM_UI_ENABLED:-true}
+LITELLM_UI_TS_PORT=${LITELLM_UI_TS_PORT:-8445}
+LITELLM_UI_LOCAL_PORT=8240  # Local port for socat proxy
+
+setup_litellm_ui_serve() {
+    echo "🔄 Creating local proxy for LiteLLM Admin UI at ${LITELLM_UI_HOST}:${LITELLM_UI_PORT}"
+
+    pkill -f "socat.*:${LITELLM_UI_LOCAL_PORT}" || true
+    sleep 2
+
+    echo "🚀 Starting socat proxy: 127.0.0.1:${LITELLM_UI_LOCAL_PORT} -> ${LITELLM_UI_HOST}:${LITELLM_UI_PORT}"
+    socat -d -d TCP-LISTEN:${LITELLM_UI_LOCAL_PORT},fork,reuseaddr,keepalive TCP:${LITELLM_UI_HOST}:${LITELLM_UI_PORT} > /tmp/socat-litellm-ui.log 2>&1 &
+    LITELLM_UI_SOCAT_PID=$!
+    echo $LITELLM_UI_SOCAT_PID > /tmp/socat-litellm-ui.pid
+
+    sleep 3
+    if ! kill -0 $LITELLM_UI_SOCAT_PID 2>/dev/null; then
+        echo "❌ ERROR: LiteLLM Admin UI socat failed to start"
+        cat /tmp/socat-litellm-ui.log 2>/dev/null || echo "No log file found"
+        return 1
+    fi
+    echo "✅ LiteLLM Admin UI proxy started successfully (PID: $LITELLM_UI_SOCAT_PID)"
+
+    tailscale --socket=/tmp/tailscaled.sock serve \
+      --https=${LITELLM_UI_TS_PORT} \
+      --bg \
+      http://127.0.0.1:${LITELLM_UI_LOCAL_PORT}
+    echo "✅ LiteLLM Admin UI configured on tailnet HTTPS port ${LITELLM_UI_TS_PORT} (via proxy: ${LITELLM_UI_HOST}:${LITELLM_UI_PORT} -> 127.0.0.1:${LITELLM_UI_LOCAL_PORT})"
+
+    touch /tmp/litellm-ui-serve-configured
+    return 0
+}
+
+if [ "$LITELLM_UI_ENABLED" = "true" ]; then
+    LITELLM_UI_ATTEMPTS=0
+    LITELLM_UI_MAX_ATTEMPTS=12
+    LITELLM_UI_CONFIGURED=false
+
+    while [ $LITELLM_UI_ATTEMPTS -lt $LITELLM_UI_MAX_ATTEMPTS ]; do
+        if wget -q -T 10 -O /dev/null http://${LITELLM_UI_HOST}:${LITELLM_UI_PORT}/health/liveliness; then
+            if setup_litellm_ui_serve; then
+                LITELLM_UI_CONFIGURED=true
+            fi
+            break
+        fi
+        LITELLM_UI_ATTEMPTS=$((LITELLM_UI_ATTEMPTS + 1))
+        echo "⏳ llm-gateway-ui not ready yet (attempt ${LITELLM_UI_ATTEMPTS}/${LITELLM_UI_MAX_ATTEMPTS}), waiting 10s..."
+        sleep 10
+    done
+
+    if [ "$LITELLM_UI_CONFIGURED" != "true" ]; then
+        echo "⚠️ llm-gateway-ui not available after ${LITELLM_UI_MAX_ATTEMPTS} attempts — monitoring loop will configure it when it comes online"
+    fi
+else
+    echo "🔄 LiteLLM Admin UI Tailscale integration disabled (LITELLM_UI_ENABLED=false)"
+fi
+
 echo "✅ Tailscale serve configured:"
 echo "  - OpenWebUI: HTTPS port 443 -> 127.0.0.1:8080"
 echo "  - Ollama API: HTTPS port 443/ollama -> 127.0.0.1:11434"
@@ -553,6 +622,9 @@ if [ "$OPEN_NOTEBOOK_ENABLED" = "true" ]; then
 fi
 if [ "$QUARTZ_ENABLED" = "true" ]; then
     echo "  - Quartz wiki viewer: HTTPS port ${QUARTZ_TS_PORT} -> ${QUARTZ_HOST}:${QUARTZ_PORT}"
+fi
+if [ "$LITELLM_UI_ENABLED" = "true" ]; then
+    echo "  - LiteLLM Admin UI: HTTPS port ${LITELLM_UI_TS_PORT} -> ${LITELLM_UI_HOST}:${LITELLM_UI_PORT}"
 fi
 
 # 8) Background monitoring loop for autonomous recovery
@@ -749,6 +821,39 @@ fi
             fi
         fi
 
+        # Check LiteLLM Admin UI: deferred setup + socat health
+        if [ "$LITELLM_UI_ENABLED" = "true" ]; then
+            if [ ! -f /tmp/litellm-ui-serve-configured ]; then
+                # Serve was never configured — try deferred setup
+                if wget -q -T 10 -O /dev/null http://${LITELLM_UI_HOST}:${LITELLM_UI_PORT}/health/liveliness; then
+                    echo "🔑 $(date): llm-gateway-ui is now online, performing deferred setup..."
+                    setup_litellm_ui_serve || echo "❌ $(date): Deferred LiteLLM Admin UI setup failed, will retry next cycle"
+                fi
+            elif [ -f /tmp/socat-litellm-ui.pid ]; then
+                # Serve is configured — keep the socat proxy alive
+                LITELLM_UI_PID=$(cat /tmp/socat-litellm-ui.pid)
+                if ! kill -0 $LITELLM_UI_PID 2>/dev/null; then
+                    echo "⚠️ $(date): LiteLLM Admin UI socat proxy (PID: $LITELLM_UI_PID) has died, restarting..."
+
+                    LITELLM_UI_LOCAL_PORT=8240
+                    pkill -f "socat.*:${LITELLM_UI_LOCAL_PORT}" || true
+                    sleep 2
+
+                    socat -d -d TCP-LISTEN:${LITELLM_UI_LOCAL_PORT},fork,reuseaddr,keepalive TCP:${LITELLM_UI_HOST}:${LITELLM_UI_PORT} > /tmp/socat-litellm-ui.log 2>&1 &
+                    NEW_LITELLM_UI_PID=$!
+                    echo $NEW_LITELLM_UI_PID > /tmp/socat-litellm-ui.pid
+                    sleep 3
+
+                    if kill -0 $NEW_LITELLM_UI_PID 2>/dev/null; then
+                        echo "✅ $(date): LiteLLM Admin UI proxy restarted successfully (PID: $NEW_LITELLM_UI_PID)"
+                    else
+                        echo "❌ $(date): Failed to restart LiteLLM Admin UI proxy"
+                        cat /tmp/socat-litellm-ui.log 2>/dev/null || echo "No log available"
+                    fi
+                fi
+            fi
+        fi
+
         # Refresh tailnet-info.json so the openwebui admin pipe always sees
         # current FQDN / peer state. Cheap (single status call) and resilient.
         write_tailnet_info >/dev/null 2>&1 || true
@@ -921,6 +1026,13 @@ fi
                     rm -f /tmp/quartz-serve-configured
                     setup_quartz_serve || echo "❌ Failed to add Quartz wiki viewer serve"
                 fi
+            elif [ "$LITELLM_UI_ENABLED" = "true" ] && ! echo "$serve_status" | grep -q "127.0.0.1:${LITELLM_UI_LOCAL_PORT:-8240}"; then
+                # LiteLLM Admin UI serve is missing, try to add it
+                echo "🔄 $(date): Adding missing LiteLLM Admin UI serve configuration..."
+                if wget -q -T 10 -O /dev/null http://${LITELLM_UI_HOST}:${LITELLM_UI_PORT}/health/liveliness; then
+                    rm -f /tmp/litellm-ui-serve-configured
+                    setup_litellm_ui_serve || echo "❌ Failed to add LiteLLM Admin UI serve"
+                fi
             fi
         fi
     done
@@ -951,6 +1063,9 @@ if [ "$OPEN_NOTEBOOK_ENABLED" = "true" ]; then
 fi
 if [ "$QUARTZ_ENABLED" = "true" ]; then
     echo "  - Quartz wiki viewer: https://$(tailscale --socket=/tmp/tailscaled.sock status --json | grep '"Name"' | cut -d'"' -f4 2>/dev/null || echo 'your-hostname').tail[...].ts.net:${QUARTZ_TS_PORT}/"
+fi
+if [ "$LITELLM_UI_ENABLED" = "true" ]; then
+    echo "  - LiteLLM Admin UI: https://$(tailscale --socket=/tmp/tailscaled.sock status --json | grep '"Name"' | cut -d'"' -f4 2>/dev/null || echo 'your-hostname').tail[...].ts.net:${LITELLM_UI_TS_PORT}/ui"
 fi
 # 9) Keep the container running
 tail -f /dev/null

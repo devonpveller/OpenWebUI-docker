@@ -37,6 +37,7 @@ secrets/
 !backup/little-coder-backup.sh
 !backup/caddy-backup.sh
 !backup/authelia-backup.sh
+!backup/llm-gateway-backup.sh
 
 # --- Portal-specific paths from plan §7.2 ---
 config/authelia/users_database.yml

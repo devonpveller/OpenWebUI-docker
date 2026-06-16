@@ -56,7 +56,7 @@ try {
 
   Write-Host ""
   Write-Host "==> Sanity check: confirm non-portal stack is untouched" -ForegroundColor Cyan
-  $expectedRunning = @('openwebui', 'llama-cpp', 'mnemory', 'tailscale')
+  $expectedRunning = @('openwebui', 'llama-cpp-upstream', 'mnemory', 'tailscale')
   foreach ($svc in $expectedRunning) {
     $state = docker inspect --format '{{.State.Status}}' $svc 2>$null
     if ($LASTEXITCODE -eq 0 -and $state -eq 'running') {

@@ -3,9 +3,11 @@ REM Emergency Tailscale Network Recovery - Legacy Batch Version
 REM For PowerShell version with better GPU support, use: emergency-recovery.ps1
 REM
 REM Recovery stack scope (kept in sync with docker-compose.yml):
-REM   core    openwebui, llama-cpp, llama-cpp-embed, tailscale
+REM   core    openwebui, llama-cpp-upstream, llama-cpp-embed-upstream, llm-queue,
+REM           llm-gateway-db, llm-gateway, llm-gateway-ui, tailscale
+REM           (llm-queue = B2 admission controller; llm-gateway-ui = Admin-UI sidecar)
 REM   memory  mnemory, mnemory-gateway
-REM   search  tor, redis, searxng, gateway, mcpo  (Private Search Gateway)
+REM   search  vpn, tor, redis, searxng, gateway, mcpo  (Private Search Gateway)
 REM   coder   open-terminal, little-coder, lc-mcpo, lc-egress
 REM   aux     smolcrawl-pipelines, surrealdb, open_notebook, watchtower
 REM   backup  mnemory-backup, openwebui-backup, little-coder-backup, smolcrawl-backup,
@@ -43,10 +45,10 @@ docker compose exec openwebui curl -f -s http://localhost:8080/ >nul 2>&1
 if %ERRORLEVEL% EQU 0 (
     echo [INFO] OpenWebUI responding...
 
-    REM Test llama-cpp connectivity
-    docker compose exec llama-cpp curl -f -s http://localhost:8080/health >nul 2>&1
+    REM Test llama-cpp-upstream connectivity
+    docker compose exec llama-cpp-upstream curl -f -s http://localhost:8080/health >nul 2>&1
     if %ERRORLEVEL% EQU 0 (
-        echo [INFO] llama-cpp connectivity working...
+        echo [INFO] llama-cpp-upstream connectivity working...
 
         REM Test external connectivity
         docker compose exec tailscale ping -c 1 8.8.8.8 >nul 2>&1
@@ -57,7 +59,7 @@ if %ERRORLEVEL% EQU 0 (
             echo [WARN] External connectivity failed
         )
     ) else (
-        echo [WARN] llama-cpp connectivity failed
+        echo [WARN] llama-cpp-upstream connectivity failed
     )
 ) else (
     echo [WARN] OpenWebUI health check failed
@@ -83,10 +85,10 @@ if %ERRORLEVEL% NEQ 0 (
 )
 
 echo [INFO] Stopping Private Search Gateway...
-docker compose stop mcpo gateway searxng redis tor
+docker compose stop mcpo gateway searxng redis tor vpn
 if %ERRORLEVEL% NEQ 0 (
     echo [WARN] Search gateway stop failed, attempting force kill...
-    docker compose kill mcpo gateway searxng redis tor
+    docker compose kill mcpo gateway searxng redis tor vpn
 )
 
 echo [INFO] Stopping Tailscale container...
@@ -124,11 +126,17 @@ if %ERRORLEVEL% NEQ 0 (
     docker compose kill openwebui-backup
 )
 
-echo [INFO] Stopping llama-cpp containers...
-docker compose stop llama-cpp llama-cpp-embed
+echo [INFO] Stopping LiteLLM gateway (before the upstream inference servers)...
+docker compose stop llm-gateway-backup llm-gateway-ui llm-gateway llm-gateway-db
+
+echo [INFO] Stopping llm-queue (B2 admission controller, after the gateway)...
+docker compose stop llm-queue
+
+echo [INFO] Stopping llama-cpp-upstream containers...
+docker compose stop llama-cpp-upstream llama-cpp-embed-upstream
 if %ERRORLEVEL% NEQ 0 (
-    echo [WARN] llama-cpp stop failed, attempting force kill...
-    docker compose kill llama-cpp llama-cpp-embed
+    echo [WARN] llama-cpp-upstream stop failed, attempting force kill...
+    docker compose kill llama-cpp-upstream llama-cpp-embed-upstream
 )
 
 echo [INFO] Stopping OpenWebUI container...
@@ -158,20 +166,34 @@ if %ERRORLEVEL% NEQ 0 (
     timeout /t 10 /nobreak >nul
     goto :wait_openwebui
 )
-echo [SUCCESS] OpenWebUI is healthy - safe to start llama-cpp services
+echo [SUCCESS] OpenWebUI is healthy - safe to start llama-cpp-upstream services
 
-echo [INFO] Starting llama-cpp with GPU support...
-docker compose up -d llama-cpp
+echo [INFO] Starting llama-cpp-upstream with GPU support...
+docker compose up -d llama-cpp-upstream
 if %ERRORLEVEL% NEQ 0 (
-    echo [ERROR] Failed to start llama-cpp container
+    echo [ERROR] Failed to start llama-cpp-upstream container
     goto :nuclear_option
 )
 
-echo [INFO] Waiting for llama-cpp to initialize...
+echo [INFO] Waiting for llama-cpp-upstream to initialize...
 timeout /t 30 /nobreak >nul
 
-echo [INFO] Starting llama-cpp-embed...
-docker compose up -d llama-cpp-embed
+echo [INFO] Starting llama-cpp-embed-upstream...
+docker compose up -d llama-cpp-embed-upstream
+
+echo [INFO] Starting llm-queue (B2 admission controller, between upstreams and LiteLLM)...
+docker compose up -d llm-queue
+timeout /t 5 /nobreak >nul
+
+echo [INFO] Starting LiteLLM gateway (db, then gateway) - the front door all callers use...
+docker compose up -d llm-gateway-db
+timeout /t 10 /nobreak >nul
+docker compose up -d llm-gateway
+timeout /t 10 /nobreak >nul
+docker compose up -d llm-gateway-backup
+REM llm-gateway-ui: master-key'd Admin-UI sidecar (analytics dashboard), shares
+REM llm-gateway-db; serves no inference, non-critical — start it best-effort.
+docker compose up -d llm-gateway-ui
 
 echo [INFO] Starting Tailscale with shared network namespace...
 docker compose up -d tailscale
@@ -206,9 +228,9 @@ timeout /t 10 /nobreak >nul
 echo [INFO] Starting open-notebook...
 docker compose up -d open_notebook
 
-echo [INFO] Starting Private Search Gateway (tor, redis, searxng, gateway, mcpo)...
-docker compose up -d tor redis searxng gateway mcpo
-echo [INFO] Allowing Tor circuit to build...
+echo [INFO] Starting Private Search Gateway (vpn, tor, redis, searxng, gateway, mcpo)...
+docker compose up -d vpn tor redis searxng gateway mcpo
+echo [INFO] Allowing VPN tunnel + Tor circuit to build...
 timeout /t 30 /nobreak >nul
 
 echo [INFO] Starting open-terminal (little-coder workspace plane)...
@@ -249,7 +271,7 @@ echo [INFO] Restarting with proper network dependency sequence...
 
 REM Stop dependent containers first
 echo [INFO] Stopping Tailscale and dependent services (network dependents)...
-docker compose stop tailscale llama-cpp llama-cpp-embed mnemory mnemory-gateway mnemory-backup openwebui-backup smolcrawl-pipelines open_notebook surrealdb mcpo gateway searxng redis tor little-coder-backup lc-egress lc-mcpo little-coder open-terminal
+docker compose stop tailscale llama-cpp-upstream llama-cpp-embed-upstream mnemory mnemory-gateway mnemory-backup openwebui-backup smolcrawl-pipelines open_notebook surrealdb mcpo gateway searxng redis tor vpn little-coder-backup lc-egress lc-mcpo little-coder open-terminal
 if exist "%OB1_COMPOSE%" docker compose -f "%OB1_COMPOSE%" stop
 
 REM Restart OpenWebUI first and wait for health
@@ -267,13 +289,17 @@ if %ERRORLEVEL% NEQ 0 (
 echo [SUCCESS] OpenWebUI healthy - restarting dependent services
 
 REM Now restart the dependent containers
-echo [INFO] Starting llama-cpp with fresh network namespace...
-docker compose up -d llama-cpp
+echo [INFO] Starting llama-cpp-upstream with fresh network namespace...
+docker compose up -d llama-cpp-upstream
 timeout /t 15 /nobreak >nul
 
-echo [INFO] Starting llama-cpp-embed...
-docker compose up -d llama-cpp-embed
+echo [INFO] Starting llama-cpp-embed-upstream...
+docker compose up -d llama-cpp-embed-upstream
 timeout /t 15 /nobreak >nul
+
+echo [INFO] Starting llm-queue + LiteLLM gateway (admission plane, before callers)...
+docker compose up -d llm-queue llm-gateway
+timeout /t 5 /nobreak >nul
 
 echo [INFO] Starting Tailscale with fresh network namespace...
 docker compose up -d tailscale
@@ -299,7 +325,7 @@ echo [INFO] Starting open-notebook...
 docker compose up -d open_notebook
 
 echo [INFO] Starting Private Search Gateway...
-docker compose up -d tor redis searxng gateway mcpo
+docker compose up -d vpn tor redis searxng gateway mcpo
 
 echo [INFO] Starting little-coder control plane...
 docker compose up -d open-terminal little-coder lc-mcpo lc-egress little-coder-backup
@@ -368,12 +394,12 @@ if %ERRORLEVEL% NEQ 0 (
 :verify_services
 echo.
 echo [INFO] Verifying services...
-echo [INFO] llama-cpp status:
-docker compose exec llama-cpp curl -s http://localhost:8080/health
+echo [INFO] llama-cpp-upstream status:
+docker compose exec llama-cpp-upstream curl -s http://localhost:8080/health
 
 echo.
-echo [INFO] llama-cpp-embed status:
-docker compose exec llama-cpp-embed curl -s http://localhost:8080/health
+echo [INFO] llama-cpp-embed-upstream status:
+docker compose exec llama-cpp-embed-upstream curl -s http://localhost:8080/health
 
 echo.
 echo [INFO] Tailscale status:

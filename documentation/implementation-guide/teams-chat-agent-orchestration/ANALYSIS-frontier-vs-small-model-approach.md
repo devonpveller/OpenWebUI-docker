@@ -152,7 +152,10 @@ Everything above converges on a **tiered, deterministic-heavy** shape:
 
 ## 6. Recommended changes / new open decisions
 
-(Proposed — not yet applied; extend the combined (a)–(l) set.)
+> ✅ **Status: folded (2026-06-13 audit pass).** Recommendations (m)–(r) below are now reflected in
+> the governance/PLAN/TASKS docs (tiered model assignment, right-size-to-model, verify-self-report,
+> deterministic-bridge coordination, capability-floor test P0.5, cloud privacy boundary). See the
+> **[README.md](README.md) traceability matrix** for the exact landing site of each.
 
 - **(m) Make tiered model assignment a stated architecture decision, not an open question →
   PLAN §3.4 + governance §2.1.** Judgment layer = strong/cloud; execution = local. Resolves

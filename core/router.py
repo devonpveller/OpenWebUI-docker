@@ -515,6 +515,18 @@ class AIStackRouter:
         ):
             return "custom-tools"
 
+        # LLM traffic / GPU-demand attribution — per-caller spend ledger from the
+        # LiteLLM gateway. MUST precede the gpu-status branch: phrases like
+        # "who is using gpu" / "gpu demand" / "gpu traffic" contain "gpu" but want
+        # the attribution view (who is driving load), not the nvidia-smi check.
+        elif any(p in input_lower for p in (
+            "llm traffic", "llm demand", "llm spend", "llm cost", "llm usage",
+            "gateway traffic", "gateway usage", "llama traffic", "gpu demand",
+            "gpu traffic", "who is using gpu", "who's using gpu", "whos using gpu",
+            "who is using the gpu", "who is driving", "what is using the gpu",
+        )):
+            return "llm-traffic"
+
         # GPU monitoring. "smi" routes here so bare "smi" hits the nvidia-smi
         # process-detail check inside the gpu-status module.
         elif any(keyword in input_lower for keyword in ["gpu", "cuda", "graphics", "nvidia", "smi"]):

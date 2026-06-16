@@ -144,8 +144,8 @@ $catalog = [ordered]@{
   }
   'lm-models' = @{
     Archives = @(@{ Pattern = "lm-models-*.tar.gz"; Target = 'C:\Users\yamao\.lmstudio\models'; Type = 'bind-tar' })
-    Stop    = @('llama-cpp','llama-cpp-embed')
-    Start   = @('llama-cpp','llama-cpp-embed')
+    Stop    = @('llama-cpp-upstream','llama-cpp-embed-upstream')
+    Start   = @('llama-cpp-upstream','llama-cpp-embed-upstream')
   }
 }
 

@@ -8,6 +8,7 @@ setlocal enabledelayedexpansion
 if "%1"=="" goto :interactive_menu
 if "%1"=="openwebui" goto :update_openwebui
 if "%1"=="llama-cpp" goto :update_llama_cpp
+if "%1"=="llm-gateway" goto :update_llm_gateway
 if "%1"=="all" goto :update_all
 if "%1"=="check" goto :check_versions
 goto :usage
@@ -22,15 +23,17 @@ echo 1. Check current versions
 echo 2. Update OpenWebUI
 echo 3. Update llama-cpp services
 echo 4. Update both OpenWebUI and llama-cpp
-echo 5. Exit
+echo 5. Update llm-gateway (LiteLLM, digest-bump)
+echo 6. Exit
 echo.
-set /p choice="Select option (1-5): "
+set /p choice="Select option (1-6): "
 
 if "%choice%"=="1" goto :check_versions
 if "%choice%"=="2" goto :update_openwebui
 if "%choice%"=="3" goto :update_llama_cpp
 if "%choice%"=="4" goto :update_all
-if "%choice%"=="5" goto :end
+if "%choice%"=="5" goto :update_llm_gateway
+if "%choice%"=="6" goto :end
 echo [ERROR] Invalid choice
 timeout /t 2 /nobreak >nul
 goto :interactive_menu
@@ -72,9 +75,9 @@ if %ERRORLEVEL% NEQ 0 (
 echo.
 echo [INFO] Current llama-cpp image:
 cd ..
-docker compose exec -T llama-cpp curl -s http://localhost:8080/health 2>nul
+docker compose exec -T llama-cpp-upstream curl -s http://localhost:8080/health 2>nul
 echo.
-docker compose ps llama-cpp llama-cpp-embed --format "table {{.Name}}\t{{.Status}}" 2>nul
+docker compose ps llama-cpp-upstream llama-cpp-embed-upstream --format "table {{.Name}}\t{{.Status}}" 2>nul
 
 echo.
 echo [INFO] Current llama-cpp image in docker-compose.yml:
@@ -278,7 +281,7 @@ goto :health_loop
 
 :health_done
 cd ..
-docker compose up -d llama-cpp llama-cpp-embed tailscale
+docker compose up -d llama-cpp-upstream llama-cpp-embed-upstream tailscale
 cd scripts
 
 REM Step 7: Final verification
@@ -376,7 +379,7 @@ echo [SUCCESS] Latest llama-cpp image pulled
 echo.
 echo [STEP 2/3] Restarting llama-cpp services...
 cd ..
-docker compose up -d llama-cpp
+docker compose up -d llama-cpp-upstream
 echo [INFO] Waiting for llama-cpp to load model (this may take a few minutes)...
 timeout /t 60 /nobreak >nul
 
@@ -384,7 +387,7 @@ REM Wait for llama-cpp health check
 set LLAMA_WAIT=0
 set LLAMA_MAX=180
 :llama_health_loop
-docker compose ps llama-cpp --format "{{.Health}}" 2>nul | findstr /C:"healthy" >nul 2>&1
+docker compose ps llama-cpp-upstream --format "{{.Health}}" 2>nul | findstr /C:"healthy" >nul 2>&1
 if %ERRORLEVEL% EQU 0 (
     cd scripts
     echo [SUCCESS] llama-cpp is healthy after approximately %LLAMA_WAIT%s
@@ -401,7 +404,7 @@ goto :llama_health_loop
 
 :llama_health_done
 cd ..
-docker compose up -d llama-cpp-embed
+docker compose up -d llama-cpp-embed-upstream
 echo [INFO] Waiting for llama-cpp-embed to initialize...
 timeout /t 30 /nobreak >nul
 cd scripts
@@ -409,9 +412,9 @@ cd scripts
 echo.
 echo [STEP 3/3] Verifying llama-cpp services...
 cd ..
-docker compose exec -T llama-cpp curl -s http://localhost:8080/health 2>nul
+docker compose exec -T llama-cpp-upstream curl -s http://localhost:8080/health 2>nul
 echo.
-docker compose ps llama-cpp llama-cpp-embed --format "table {{.Name}}\t{{.Status}}" 2>nul
+docker compose ps llama-cpp-upstream llama-cpp-embed-upstream --format "table {{.Name}}\t{{.Status}}" 2>nul
 cd scripts
 
 REM Resume monitoring (skip if part of full update)
@@ -505,6 +508,61 @@ if "%1"=="" (
     pause
     goto :interactive_menu
 )
+goto :end
+
+:update_llm_gateway
+echo.
+echo ========================================
+echo   llm-gateway (LiteLLM) Digest-Bump
+echo ========================================
+echo.
+echo [INFO] The gateway image is DIGEST-PINNED in docker-compose.yml (supply-chain
+echo        hardening, guide section 19/D9). This does a DELIBERATE bump: pull the
+echo        floating tag, resolve its new sha256, you confirm it against the BerriAI
+echo        security advisories, paste it into compose, then recreate. It does NOT
+echo        blindly run :main-stable.
+echo.
+echo [INFO] Currently pinned digest in docker-compose.yml:
+findstr /C:"ghcr.io/berriai/litellm@sha256:" "%SCRIPT_DIR%\..\docker-compose.yml"
+echo.
+set /p GW_CONFIRM="Pull ghcr.io/berriai/litellm:main-stable and resolve its current digest? (y/n): "
+if /i not "%GW_CONFIRM%"=="y" (
+    echo [INFO] Bump cancelled.
+    if "%1"=="" ( pause & goto :interactive_menu )
+    goto :end
+)
+echo [INFO] Pulling ghcr.io/berriai/litellm:main-stable...
+docker pull ghcr.io/berriai/litellm:main-stable
+if %ERRORLEVEL% NEQ 0 (
+    echo [ERROR] Pull failed - aborting bump.
+    if "%1"=="" ( pause & goto :interactive_menu )
+    goto :end
+)
+set "NEW_DIGEST="
+for /f "delims=" %%i in ('docker inspect ghcr.io/berriai/litellm:main-stable --format "{{index .RepoDigests 0}}"') do set "NEW_DIGEST=%%i"
+echo.
+echo [RESOLVED] %NEW_DIGEST%
+echo.
+echo [ACTION REQUIRED] Before using this:
+echo   1. Confirm the release is OUTSIDE any known compromise window:
+echo        https://github.com/BerriAI/litellm/security/advisories
+echo   2. Edit docker-compose.yml -> llm-gateway -> image: and paste the line above
+echo      (replace the existing ghcr.io/berriai/litellm@sha256:... value).
+echo   3. Re-run this option and choose recreate, or run:
+echo        docker compose up -d llm-gateway
+echo      then verify: docker compose exec llm-gateway python -c "import urllib.request,sys;sys.exit(0 if urllib.request.urlopen('http://localhost:8080/health/liveliness').status==200 else 1)"
+echo.
+set /p GW_RECREATE="Recreate llm-gateway NOW with whatever digest is currently in compose? (y/n): "
+if /i "%GW_RECREATE%"=="y" (
+    cd /d "%SCRIPT_DIR%\.."
+    docker compose up -d llm-gateway
+    echo [INFO] Waiting for gateway (first boot runs prisma migrations, ~60-90s)...
+    timeout /t 60 /nobreak >nul
+    docker compose exec llm-gateway python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8080/health/liveliness').status==200 else 1)" >nul 2>&1
+    if %ERRORLEVEL% EQU 0 ( echo [SUCCESS] llm-gateway healthy ) else ( echo [ERROR] gateway not healthy - docker compose logs llm-gateway )
+    cd /d "%SCRIPT_DIR%"
+)
+if "%1"=="" ( pause & goto :interactive_menu )
 goto :end
 
 :end

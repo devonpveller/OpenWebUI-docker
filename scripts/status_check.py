@@ -128,6 +128,32 @@ def check_gpu_status():
         log_error("GPU status check failed")
         return False
 
+def check_llm_gateway_status():
+    """Check the LiteLLM gateway — the front door every caller reaches inference
+    through. Probed from inside the `tailscale` container (also on llm-net), since
+    llm-net is internal-only (no host port). The wolfi-based litellm image has no
+    curl, but we probe over the network with wget here, not inside the container."""
+    project_root = find_project_root()
+    if not project_root:
+        return False
+
+    print()
+    log_info("llm-gateway (LiteLLM front door) Status:")
+    result = run_docker_command(
+        ["docker", "compose", "exec", "-T", "tailscale", "wget", "-q", "-T", "5", "-O", "-", "http://llm-gateway:8080/health/liveliness"],
+        project_root,
+        timeout=15
+    )
+
+    if result and result.returncode == 0:
+        log_success("llm-gateway liveliness: OK")
+        print(result.stdout.strip())
+        return True
+    else:
+        log_error("llm-gateway liveliness: FAILED (callers cannot reach inference — check llama-cpp-upstream first)")
+        return False
+
+
 def check_llama_cpp_status():
     """Check llama-cpp server status"""
     project_root = find_project_root()
@@ -137,7 +163,7 @@ def check_llama_cpp_status():
     print()
     log_info("llama-cpp Status:")
     result = run_docker_command(
-        ["docker", "compose", "exec", "-T", "tailscale", "wget", "-q", "-T", "5", "-O", "-", "http://llama-cpp:8080/health"],
+        ["docker", "compose", "exec", "-T", "tailscale", "wget", "-q", "-T", "5", "-O", "-", "http://llama-cpp-upstream:8080/health"],
         project_root,
         timeout=15
     )
@@ -151,7 +177,7 @@ def check_llama_cpp_status():
     
     # Check models loaded
     result = run_docker_command(
-        ["docker", "compose", "exec", "-T", "tailscale", "wget", "-q", "-T", "5", "-O", "-", "http://llama-cpp:8080/v1/models"],
+        ["docker", "compose", "exec", "-T", "tailscale", "wget", "-q", "-T", "5", "-O", "-", "http://llama-cpp-upstream:8080/v1/models"],
         project_root,
         timeout=15
     )
@@ -173,7 +199,7 @@ def check_llama_cpp_embed_status():
     print()
     log_info("llama-cpp-embed Status:")
     result = run_docker_command(
-        ["docker", "compose", "exec", "-T", "tailscale", "wget", "-q", "-T", "5", "-O", "-", "http://llama-cpp-embed:8080/health"],
+        ["docker", "compose", "exec", "-T", "tailscale", "wget", "-q", "-T", "5", "-O", "-", "http://llama-cpp-embed-upstream:8080/health"],
         project_root,
         timeout=15
     )
@@ -187,7 +213,7 @@ def check_llama_cpp_embed_status():
     
     # Check embeddings endpoint
     result = run_docker_command(
-        ["docker", "compose", "exec", "-T", "tailscale", "wget", "-q", "-T", "5", "-O", "-", "http://llama-cpp-embed:8080/v1/models"],
+        ["docker", "compose", "exec", "-T", "tailscale", "wget", "-q", "-T", "5", "-O", "-", "http://llama-cpp-embed-upstream:8080/v1/models"],
         project_root,
         timeout=15
     )
@@ -315,7 +341,7 @@ def check_service_accessibility():
 
     # Check llama-cpp accessibility
     result = run_docker_command(
-        ["docker", "compose", "exec", "-T", "tailscale", "wget", "-q", "-T", "5", "-O", "/dev/null", "http://llama-cpp:8080/health"],
+        ["docker", "compose", "exec", "-T", "tailscale", "wget", "-q", "-T", "5", "-O", "/dev/null", "http://llama-cpp-upstream:8080/health"],
         project_root,
         timeout=10
     )
@@ -327,7 +353,7 @@ def check_service_accessibility():
     
     # Check llama-cpp-embed accessibility
     result = run_docker_command(
-        ["docker", "compose", "exec", "-T", "tailscale", "wget", "-q", "-T", "5", "-O", "/dev/null", "http://llama-cpp-embed:8080/health"],
+        ["docker", "compose", "exec", "-T", "tailscale", "wget", "-q", "-T", "5", "-O", "/dev/null", "http://llama-cpp-embed-upstream:8080/health"],
         project_root,
         timeout=10
     )
@@ -440,6 +466,7 @@ def main():
         check_container_status,
         start_missing_services,
         check_gpu_status,
+        check_llm_gateway_status,
         check_llama_cpp_status,
         check_llama_cpp_embed_status,
         check_open_terminal_status,

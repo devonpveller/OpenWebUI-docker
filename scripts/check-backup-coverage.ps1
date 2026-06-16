@@ -57,12 +57,13 @@ try {
     @{ Path = 'D:\Open WebUI\open-notebook\surreal_data'; Service = 'surrealdb';     Owner = 'open-notebook-backup' }
     @{ Path = 'D:\Open WebUI\open-notebook\notebook_data'; Service = 'open_notebook'; Owner = 'open-notebook-backup' }
     @{ Path = '.\data\tailscale';                          Service = 'tailscale';    Owner = 'tailscale-backup' }
-    @{ Path = 'C:\Users\yamao\.lmstudio\models';           Service = 'llama-cpp';    Owner = 'lm-models-backup' }
+    @{ Path = 'C:\Users\yamao\.lmstudio\models';           Service = 'llama-cpp-upstream'; Owner = 'lm-models-backup' }
   )
 
   # ----- Volumes intentionally NOT backed up -------------------------
   $intentionallyExcluded = @(
     @{ Volume = 'little-coder-workspace'; Reason = 'Project workspace - intentionally re-clonable (design)' }
+    @{ Volume = 'llm-queue-data'; Reason = 'B2 queue analytics events (SQLite) - non-critical, regenerable observability data' }
   )
 
   # ----- Mapping: volume name -> backup container that covers it -----

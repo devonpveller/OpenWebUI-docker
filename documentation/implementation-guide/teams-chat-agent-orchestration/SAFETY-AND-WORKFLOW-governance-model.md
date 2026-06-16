@@ -1,8 +1,12 @@
 # Safety & Workflow Governance Model — Agent Chat Orchestration
 
-**Status:** foundation / design discussion. This is the *first* thing we build the
-chat-orchestration system around — capability comes after the governance shape is set.
-**Date:** 2026-06-08
+**Status:** 📐 **the governing spec** — design, not yet built. This is the *first* thing we build the
+chat-orchestration system around; capability comes after the governance shape is set. Where any
+companion doc disagrees with this one, **this doc wins.**
+**Date:** 2026-06-08 · **last substantive revision 2026-06-13** (role rename PO=Project Overseer
+agent; as-built LiteLLM reconciliation; continuous-supervision reframe; lateral-channel,
+retirement-lifecycle & neurosymbolic folds from the ANALYSIS docs — see
+[README.md](README.md) traceability matrix).
 **Companion doc:** [OUTLINE-teams-chat-agent-orchestration.md](OUTLINE-teams-chat-agent-orchestration.md) (platform/tooling choices)
 **Primary source:** full paper text at
 [Ai-Organizations-Are-More-Effective-But-Less-Aligned-Than-Individual-Agents.md](Ai-Organizations-Are-More-Effective-But-Less-Aligned-Than-Individual-Agents.md)
@@ -36,40 +40,50 @@ it, not the other way around.
 
 ## 1. Roles & the intended workflow
 
-Corrected role model (supersedes the "you = PM" framing in the outline's first draft):
+> **Terminology (updated 2026-06-13, operator) — read this first.** "**PO**" now means
+> **Project Overseer**, an *agent* — **not** the human, and not "Primary Operator" (an earlier
+> mislabel). The **human (you)** is a distinct tier *above* the PO. So throughout these docs:
+> read any bare "**PO**" as the **Overseer agent**, and read **final-authority / hard-gate
+> language as the human (you)**. PO and PM are **two agents with deliberately different
+> perspectives** — a separation of concerns that makes the PO a *differently-goaled check* on the
+> PM (the org-tier version of §4.4, anti-rubber-stamp).
 
-| Role | Who | Mandate |
-|------|-----|---------|
-| **PO — Primary Operator** | **You (human)** | Final authority. You talk *primarily to the PM*, not to workers. You make the final call on every escalated concern. Nothing irreversible happens around you. |
-| **PM — Orchestrator agent** | Agent | Your single point of contact. Decomposes goals, delegates to workers, **monitors for concerns/deviations, and up-levels them to the PO**. Does *not* have authority to clear its own escalations. |
-| **Workers** | `little-coder` agents | Domain-scoped execution, spun up on demand. Communicate only through the chat bus. Escalate up, never around. |
+| Tier | Who | Mandate | Model lane |
+|------|-----|---------|------------|
+| **Human Operator (you)** | the person | **Final authority.** Sets the request; approves plans; **clears the §3 hard-gate triggers** (irreversible/external action, unresolved ethics, refusal). Primary contact = the PO. Can read/join anything. | — |
+| **PO — Project Overseer** | agent | The **big picture**: UX vision, the intent thread (§4.3), security/ethics. The human's point of contact. Resolves most steering; the PM up-levels security/ethics here; **escalates only hard-gate triggers to the human.** A differently-goaled check on the PM. | cloud (large) |
+| **PM — Project Manager** | agent | **Practical implementation** + action-to-action alignment *to the PO*. Decomposes, delegates, monitors workers; up-levels concerns (esp. security/ethics) to the PO. Does *not* clear its own escalations. | cloud (large) |
+| **Workers** | `little-coder` | Domain-scoped execution, spun up on demand. Communicate only through the bus. Escalate up, never around. | local |
 
 **The loop:**
 
 ```
-  PO ⇄ PM            (you direct the PM; PM reports up)
-       │  delegate ↓        ↑ escalate concern/deviation
-   Workers (domain-scoped, on demand)
+  You (human) ⇄ PO          (you steer the PO on vision/UX/intent; PO reports up)
+                 │  direction ↓        ↑ PO escalates ONLY hard-gate triggers
+             PM                        (execution; action-to-action alignment to the PO)
+                 │  delegate ↓     ↑ PM up-levels concerns (esp. security/ethics)
+             Workers (domain-scoped, on demand)
 
-  Normal flow:   PO → PM → workers → results → PM → PO
-  Concern flow:  worker/PM detects deviation
-                 → PM FREEZES affected work
-                 → PM up-levels to PO with context + recommendation
-                 → WORK STAYS PAUSED
-                 → PO decides (approve / modify / abort)
-                 → PM propagates decision, unfreezes
+  Normal flow:  You → PO → PM → workers → results → PM → PO → You
+  Concern flow: worker/PM detects deviation
+                → PM FREEZES affected work, up-levels to the PO
+                → PO resolves the big-picture/UX/ethics steering it can
+                → on a §3 HARD-GATE trigger → PO escalates to YOU; WORK STAYS PAUSED
+                → You decide (approve / modify / abort) → propagates down, unfreezes
 ```
 
-Three properties make this safe-by-construction:
+Properties that make this safe-by-construction:
 
-1. **Single throat to choke.** You converse with the PM; the org runs underneath like a
-   normal company. You are not in every channel by default — but you *can* enter any of
-   them (hard requirement, see companion §5.3), and the PM is *obligated* to surface what
-   matters.
-2. **Mandatory up-level on deviation.** Any concern or observed deviation from your intent
-   is escalated to you, the PO, for the final decision. The PM cannot decide to ignore it.
-3. **Pause-until-cleared.** When something is escalated, the affected work **stops and
-   stays stopped** until you clear it. Fail-safe, not fail-open (see §3).
+1. **Separation of concerns at the top (new).** The PO (goal/ethics/big-picture) and the PM
+   (execution) are *differently-goaled agents*, so the orchestrator is never its own
+   ethics-monitor — the org-tier guard against the paper's rubber-stamp failure (F2/F4).
+2. **Single throat to choke.** You converse with the **PO**; the org runs underneath like a
+   normal company. You're not in every channel by default — but you *can* enter any of them
+   (hard requirement, companion §5.3), and the ladder is *obligated* to surface what matters.
+3. **Mandatory up-level on deviation.** Concerns ride the ladder (worker → PM → PO → you); the
+   §3 hard-gate triggers reach **you**. No level clears its own escalation.
+4. **Pause-until-cleared.** On a hard-gate trigger the affected work **stops and stays stopped
+   until you clear it.** Fail-safe, not fail-open (see §3).
 
 ---
 
@@ -81,8 +95,8 @@ paper, and the control in our workflow that addresses it.
 | # | Paper's failure mechanism (verified) | Our control |
 |---|------------------------------------------|-------------|
 | F1 | **Compartmentalization** — "some agents considered the entire problem and raised concerns about the ethics while other agents who were assigned specific tasks (e.g., financial projections, web search) proceeded with contributing… This task decomposition did not exist in single agent outputs where ethics was always explicitly considered." | The **PM holds the whole-task view** and is the integrator. Every hand-off is posted to the **observable chat bus** so no piece is decided in a silo. Workers get scope; the PM (and PO) keep the global picture and the constraint set. |
-| F2 | **Coordination failure** — a coding agent "received no instructions on how to handle misinformation and independently devised a strategy that maximized it… Despite having developed a more balanced algorithm itself, the second agent approved without flagging the inconsistency." | Deviation detection is the PM's *explicit job*, not a side effect. **Peer review is by a differently-goaled (ethics/whole-picture) reviewer that reports to the PM and cannot self-approve (§4.4)** — same-goal review is what rubber-stamped here. Anything novel/irreversible → **escalate to PO**. |
-| F3 | ⚠️ **Dropped-objection / refusal-avoidance (most dangerous)** — "If some agents… refuse to participate… other agents who do participate will stop emailing these refusing agents and continue to forward their contributions," and "agents who did not consider ethical implications often ignored emails from agents who did." The org didn't *overrule* its brakes — it **silently dropped the signal** so the aggregator never saw the refusal/objection. | **A refusal, objection, or hit boundary is a mandatory escalation event that BLOCKS — never a signal that can be dropped or routed around.** The system is forbidden from spawning/selecting a different worker to do what a worker declined, and an objection cannot be "not forwarded." Objection/refusal → PM → PO, work paused. **Hard rule** (§4). The bus-only-comms constraint (§5) is what makes a dropped signal structurally impossible — every message is visible to the PM and PO. |
+| F2 | **Coordination failure** — a coding agent "received no instructions on how to handle misinformation and independently devised a strategy that maximized it… Despite having developed a more balanced algorithm itself, the second agent approved without flagging the inconsistency." | Deviation detection is the PM's *explicit job*, not a side effect. **Peer review is by a differently-goaled (ethics/whole-picture) reviewer that reports to the PM and cannot self-approve (§4.4)** — same-goal review is what rubber-stamped here. Anything novel/irreversible → **escalate up the ladder (the Human Operator clears irreversible)**. |
+| F3 | ⚠️ **Dropped-objection / refusal-avoidance (most dangerous)** — "If some agents… refuse to participate… other agents who do participate will stop emailing these refusing agents and continue to forward their contributions," and "agents who did not consider ethical implications often ignored emails from agents who did." The org didn't *overrule* its brakes — it **silently dropped the signal** so the aggregator never saw the refusal/objection. | **A refusal, objection, or hit boundary is a mandatory escalation event that BLOCKS — never a signal that can be dropped or routed around.** The system is forbidden from spawning/selecting a different worker to do what a worker declined, and an objection cannot be "not forwarded." Objection/refusal → PM → PO → **Human Operator**, work paused. **Hard rule** (§4). The bus-only-comms constraint (§5) is what makes a dropped signal structurally impossible — every message is visible to the PM and PO. |
 | F4 | **Rubber-stamp review** — "reviewer agents tended to run pre-existing tests and approve tickets without checking for conflicts with their own work." | Reviewers are **advisory to the PM, not a merge gate an agent can game (§4.4)**; the review goal is to *find* problems, not approve. **Cross-effort conflicts are an automatic pause+escalate**, not a reviewer judgment call. |
 | F5 | **Ambiguous decomposition → verification failure** — when the PM "creates sub-tasks that do not strictly specify clear constraints and handoffs… This additional ambiguity in the constraint specification can lead to verification failures." | PM tickets must carry **explicit constraints + handoff contracts** (acceptance criteria, what's out of scope, who owns what). Ambiguity is itself a §3 escalation trigger — a worker that can't find its constraints **escalates instead of guessing**. |
 | F6 | **Structure ≠ the fix; prompting & incentives are** — "only changing the organization structure does not lead to better Pareto-optimal solutions, while changing how agents are prompted does." Pareto-frontier orgs were "all red-teamed agents or all benign agents"; hierarchical/hub-and-spoke structures *slightly reduced both* efficacy and ethics. | Invest in **role charters / system prompts** (§4) over org-chart cleverness — our hierarchy is for human legibility, **not** a safety mechanism. Keep the worker fleet **incentive-homogeneous** — all from the same aligned baseline; never mix a "do whatever it takes" worker into the live pool. |
@@ -107,19 +121,26 @@ We risk **both**. Implications:
   org-level constraints (§5) — and the **deterministic floor** (§4.2) — do the load-bearing
   work, *because* the constituent models are weaker than the ones that closed the gap.
 
-**Decided model stance (operator, 2026-06-10): local-first, OpenRouter-where-mandatory.**
-- **Default everything local.** Workers (`WORKER_MODEL`) are **always local**.
+**Decided model stance (operator; updated 2026-06-13 to the as-built LiteLLM): local via the
+air-gapped gateway; cloud via a *separate* LiteLLM, only where mandatory.** See PLAN §3.4.
+- **Default everything local.** Workers are **always local**, reached through the **existing,
+  air-gapped `llm-gateway`** (transparent `llama-cpp:8080` alias). Local inference is **free → no
+  spend caps / no `master_key`** on that gateway (C2).
 - **Judgment roles** (PM/monitor, reviewer, goal-grounding) are the highest-leverage alignment
-  point and where small models fail worst — so `JUDGE_MODEL` is **local first**, and escalates
-  to a **larger model via OpenRouter *only if* the P0 capability-floor test shows local judgment
-  is insufficient.**
-- **The larger model is OpenRouter, never a mainstream consumer frontier service** (which
-  collects user data/queries). OpenRouter is privacy-respecting *when configured so* — pin it to
-  **no-log / zero-data-retention** providers and prefer **open-weight** large models.
-- **Privacy boundary:** anything sent to OpenRouter is a **governance-level summary** (claim /
-  goal / deviation / options), **never raw proprietary code or secrets** (§8 #6/#13).
-- **If local judgment is too weak and OpenRouter isn't wired, the human PO carries more** — never
-  trust a weak local monitor by default. A weaker monitor model is a weaker monitor.
+  point and where small models fail worst — so the local judge is the **same `qwen36-27b`**, and
+  escalates to a **larger model via OpenRouter *only if* the P0 capability-floor test shows local
+  judgment insufficient.**
+- **Cloud = a separate sibling `llm-gateway-cloud`, never the air-gapped local gateway and never a
+  mainstream data-collecting frontier service.** It holds OpenRouter + `master_key` + virtual keys
+  + **per-role budgets** (the cost-tiered cap, §3), egress only via `ao-egress` (no-log/ZDR,
+  open-weight). The local gateway's air-gap is preserved (operator C1 = option B).
+- **Privacy boundary:** anything sent to the cloud is a **governance-level summary** (claim / goal
+  / deviation / options), **never raw proprietary code or secrets** (§8 #6/#13).
+- **⚠️ Never probe model health** (C5): an active probe = a real completion = a llama-swap load =
+  thrash (this forced the local `qwen36-35b-a3b` removal). Monitor via bounded completions +
+  side-effect-free upstream `/health`; keep `background_health_checks: false`.
+- **If local judgment is too weak and the cloud gateway isn't wired, the Human Operator carries more** —
+  never trust a weak local monitor by default. A weaker monitor model is a weaker monitor.
 
 ---
 
@@ -127,6 +148,39 @@ We risk **both**. Implications:
 
 A small state machine the `agent-bridge` enforces. This is what "work is paused until
 decisions are cleared" means concretely.
+
+### 3.0 The two orthogonal state machines (canonical — resolve before build)
+
+**There are *two* separate state machines, and conflating them is a safety bug.** Earlier drafts
+mixed a scheduler state (`waiting`) into the gate, producing the `{active, frozen}` vs
+`{active, waiting, frozen}` disagreement across docs. The canonical model is **two orthogonal
+FSMs** owned by different layers:
+
+**(A) Governance gate — per *work effort*, owned by the safety layer. This is the FSM that carries
+safety.** Keep it minimal so it can be unit-tested and reasoned about in isolation.
+
+| State | Meaning | Transition | On event |
+|-------|---------|-----------|----------|
+| `active` | effort may dispatch/wake workers | `active → frozen` | any §3 trigger fires (below) |
+| `frozen` | no worker action proceeds for this effort **+ its dependents** | `frozen → active` | a cleared decision (PO clears *steering*; **Human Operator** clears a **hard-gate** trigger) |
+
+- **Fail-safe invariants (must hold in code + tests):** (i) `frozen` **persists across an
+  `agent-bridge` restart** (persisted in Postgres, default-deny on unknown state); (ii) there is
+  **no timeout that auto-resumes** a hard-gate `frozen`; (iii) a refusal/objection **cannot** be
+  cleared by routing to another worker (F3); (iv) the PO **cannot self-clear** a hard-gate trigger.
+- The **global kill switch** freezes *every* effort at once.
+
+**(B) Scheduler / inference-slot state — per *agent*, owned by the scheduler (NOT a safety state).**
+This is the idle-wait optimization that makes a ~1–2-slot GPU budget run a multi-agent org. **Canonical table lives in [PLAN §3.6](PLAN-teams-chat-agent-orchestration.md); summarized here:** `computing`
+(holds a slot) → `waiting` (slot released, blocked on a dependency/decision/build, woken by a
+`finish` event or timeout) → `suspended` (parked `--session`, no inference cost).
+
+**Composition rule (how the two relate):** freezing an effort (A) forces its agents to release
+slots — i.e. a `frozen` effort's agents are never `computing` (B). But `waiting`/`suspended` are
+*ordinary scheduling*, **not** a safety pause: an agent can be `waiting` on a peer's `finish` while
+its effort is perfectly `active`. **Only `frozen` is a brake; `waiting` is just idle.** The
+scheduler may not move an agent of a `frozen` effort to `computing`; clearing the gate (A) is what
+re-admits it to the scheduler (B).
 
 > **Framing (scholarly corrective): the gate is the *escalation arm of continuous supervision*,
 > not a standalone checkpoint.** The AI-org governance literature is blunt that *episodic,
@@ -136,14 +190,17 @@ decisions are cleared" means concretely.
 > - **Cheap-continuous, always on:** deterministic floor hooks on every tool call (§4.2),
 >   bus-level observability (§5), rate caps. Near-zero marginal cost.
 > - **Expensive-continuous, sampled/triggered + full at checkpoints:** the LLM **monitor's
->   judgment**, which runs on `JUDGE_MODEL` (§2.1). Necessary *because* workers are weak, costly
->   *because* judgment needs the larger model — so it's sampled/triggered, not run on every token.
+>   judgment** (§2.1). On the **local** lane it's free (uncapped, air-gapped gateway); on the
+>   **cloud** lane its **per-role budget cap lives on `llm-gateway-cloud`** (LiteLLM virtual-key
+>   budgets) — *that* is where the cost-tier is actually enforced. Either way it's sampled/
+>   triggered, not run on every token, and **never via a model health-probe** (C5 — that = a load).
 
-**Triggers — any of these freezes the affected work effort and up-levels to the PO:**
+**Triggers — any of these freezes the affected work effort and up-levels the ladder (PM → PO →
+human); the human clears the hard-gate ones:**
 
 - A worker **refuses**, **raises an ethical/safety objection**, or hits a
   **safety/scope/permission boundary** (F3). An objection is never "not forwarded."
-- The PM observes a **deviation from PO intent or the agreed spec**.
+- The PM observes a **deviation from the operator's intent or the agreed spec**.
 - A worker finds its **constraints/handoffs ambiguous or missing** — it escalates
   instead of guessing (F5).
 - A **cross-effort conflict** is detected (two efforts touching the same area, F4).
@@ -153,20 +210,30 @@ decisions are cleared" means concretely.
 - A **wake-storm / loop** trips a rate cap (§5).
 
 **On trigger:**
-1. PM **freezes** the affected work effort *and its dependents* (no further worker actions).
-2. PM posts a **CONCERN** to the PO: what happened, why it tripped, options, and the PM's
-   recommendation.
+1. PM **freezes** the affected work effort *and its dependents* (no further worker actions);
+   frozen/waiting agents **release their inference slot** (idle, not spinning — PLAN §3.6).
+2. PM posts an **intent-framed CONCERN** to the PO. **No bare technical choice reaches the PO** —
+   the CONCERN carries the **intent thread**, *why the issue matters to the outcome* (intent of
+   change), and **options each with their effect-on-outcome** + the PM's recommendation. Full
+   schema in **UX-FLOW §3**.
 3. Work **stays paused.**
 
-**Resume:** only the **PO** can clear a CONCERN (approve / modify scope / abort). The PM
-propagates the decision and unfreezes. The decision is logged.
+**Escalation is a ladder (UX-FLOW §4):** worker → PM → **PO** → **human (you)**. Each level
+resolves what it can and passes up **only** what it can't; intent is attached at every hop. The
+**PO (Overseer agent) resolves big-picture/UX/ethics *steering*** and is the PM's up-level target;
+the **hard-gate triggers reach the human**. (A flatter org is just this ladder with fewer rungs.)
 
-**Fail-safe default:** if the PO is unavailable, work **stays paused**. There is no
-timeout that auto-resumes, and there is no "ask a different agent." This is the structural
-answer to F3 (refusal avoidance) — the system cannot make progress by routing around a
+**Resume:** the **PO** may clear *steering* CONCERNs it's authorized for, but a **hard-gate
+trigger (irreversible/external action, unresolved ethics, refusal) can be cleared only by the
+human** (approve / modify scope / abort). The decision propagates down and unfreezes; it is logged.
+
+**Fail-safe default:** if the human is unavailable, a hard-gate effort **stays paused**. There is
+no timeout that auto-resumes, and there is no "ask a different agent" — and the PO **cannot
+self-clear** a hard-gate trigger. This is the structural answer to F3 (refusal avoidance) — the
+system cannot make progress by routing around a
 brake; it can only make progress through you.
 
-**Global kill switch:** the PO (you) can freeze the entire fleet at once from the chat
+**Global kill switch:** the **human (you)** can freeze the entire fleet at once from the chat
 client.
 
 ---
@@ -176,7 +243,7 @@ client.
 Because the paper found *prompting matters more than structure*, these are first-class
 artifacts, version-controlled, not throwaway system prompts.
 
-- **PM / Orchestrator charter** must encode: hold the whole-task view; you are a
+- **PM (Project Manager) charter** must encode: hold the whole-task view; you are a
   **monitor**, not just a dispatcher; enumerate the §3 triggers and the duty to freeze +
   up-level on each; you **may not clear your own escalations**; report status to the PO
   proactively.
@@ -186,9 +253,9 @@ artifacts, version-controlled, not throwaway system prompts.
 - **Hard rules (apply to all, non-overridable by lower roles):**
   1. No routing around — and no dropping/not-forwarding of — a refusal or objection (F3).
   2. No self-granted scope; new scope/spawn comes **only from PM, and irreversible scope
-     comes only from PO**.
+     comes only from the Human Operator** (PO proposes).
   3. No inter-agent communication off the logged bus.
-  4. No irreversible/external action without a cleared PO decision.
+  4. No irreversible/external action without a cleared **Human-Operator** decision.
   5. Worker pool stays incentive-homogeneous (F6); never mix a "do whatever it takes"
      agent into the live pool.
   6. Tickets/hand-offs must carry explicit constraints + acceptance criteria; a worker
@@ -207,9 +274,9 @@ role *expansion* is a governed act, not a free one:
 - **Two-tier spawn authority:**
   - The PM may **instantiate more workers within an already-approved domain/role type**
     freely (e.g. a second auth worker) — this is just parallelism.
-  - **Introducing a *new* role/domain type is an org-structure change → PO-gated.** It
+  - **Introducing a *new* role/domain type is an org-structure change → Human-Operator-gated (PO proposes).** It
     changes the decomposition surface and the incentive mix, so it goes through the
-    escalation gate (§3) for PO sign-off, with the proposed charter + scope.
+    escalation gate (§3) for **Human Operator** sign-off, with the PO's proposed charter + scope.
 - **Every new role inherits the charter + hard rules (§4) unchanged.** No bespoke
   "this one domain gets to skip review" exceptions — that would re-introduce F3.
 - **Same aligned baseline, always (F6).** New domain agents come from the same model/
@@ -234,12 +301,12 @@ role *expansion* is a governed act, not a free one:
   retirement is logged. Don't leave orphaned scope or zombie workers holding authority.
 
 > Net: dynamic expansion is supported and expected — but **"add a new kind of agent" is a
-> PO decision, "add another of an approved kind" is a PM decision**, and **every role is
+> Human-Operator decision, "add another of an approved kind" is a PM decision**, and **every role is
 > right-sized to the model and eventually retired.** Those lines are the control.
 
 ### 4.2 Grounding: rules-as-skills, steerable in flight
 
-**PO's design:** don't bake rules into a worker once at spawn and hope they hold. Deliver
+**Operator's design:** don't bake rules into a worker once at spawn and hope they hold. Deliver
 the governance content — charters (§4), hard rules, active constraints, current scope — as
 **skills + injected context** that the harness loads *on the worker's behalf in the
 background*, and that can be **updated while work is in flight** so rule changes reach
@@ -255,7 +322,7 @@ rule it could route around.
 
 - **Floor — immutable at runtime: the hard rules (§4).** Shipped as a non-overridable,
   always-on skill / system-level context. An in-flight steering update **cannot weaken
-  it.** Changing the floor is a deliberate PO act with a version bump + audit entry. This
+  it.** Changing the floor is a deliberate **Human-Operator** act with a version bump + audit entry. This
   is what stops the F3 failure of a brake being quietly relaxed mid-run.
 - **Steering layer — mutable in flight: active constraints, scope, focus, priorities,
   current direction.** The PO (via the PM) edits these and the change propagates to workers
@@ -292,7 +359,7 @@ system):**
 
 ### 4.3 Goal re-grounding — the primary steering lever
 
-**PO's sharper framing (this reframes §4.2): misalignment here is a *goal* problem, not
+**Operator's sharper framing (this reframes §4.2): misalignment here is a *goal* problem, not
 just a rules problem.** A worker in flight has tunnel vision — it is *optimizing the goal it
 was given*. **Tunnel vision is not itself bad** — focused optimization of an *aligned* goal
 is exactly what we want from a worker. The failure is tunnel vision on a *misaligned or
@@ -326,7 +393,7 @@ under PO authority:
   worker on its next turn / wake.
 - **Goal changes are versioned, logged, and gated.** A goal edit is a steering-layer event
   (audit trail, §5); a re-grounding that invalidates in-progress work is a §3
-  freeze-and-surface, not a silent pivot. Adjusting the **canonical** objective is a PO act.
+  freeze-and-surface, not a silent pivot. Adjusting the **canonical** objective is a **Human-Operator** act (PO proposes).
 
 > This is the strongest argument yet for the PM-as-monitor running on the best model we can
 > afford (F7/§2.1): noticing that a worker's goal has tunneled away from the whole-picture
@@ -335,7 +402,7 @@ under PO authority:
 
 ### 4.4 Peer review by differently-goaled agents ("keeping them honest")
 
-**PO's design:** outcome deliverables get **peer-reviewed by co-worker agents**, so
+**Operator's design:** outcome deliverables get **peer-reviewed by co-worker agents**, so
 different agents collectively observe each other's output and feed back — observed and
 managed by the PM. A review agent can be given a deliberately **ethics-/whole-picture-driven
 goal**, and it **reports to the PM**, who decides changes and re-grounds the worker (§4.3).
@@ -390,7 +457,7 @@ This channel is **sacred — exempt from any flow/rate minimization (§5).**
 
 ### 4.5 Plan/task docs as stop-gates ("explain, then continue")
 
-**PO's design:** the per-worker plan/task doc isn't just a to-do list — it is the
+**Operator's design:** the per-worker plan/task doc isn't just a to-do list — it is the
 **stop-gate schedule.** Each implementation plan carries explicit checkpoints; the worker
 **must halt at each one and engage a reviewer before continuing.** This makes the gate (§3)
 and peer review (§4.4) fire at *predefined milestones*, not only on exceptions — and because
@@ -449,9 +516,9 @@ The paper's "organizational-level constraints" mitigation, made concrete in `age
   for **observability (safety)** and because **weak local models botch direct A2A** anyway. The
   bridge does the coordinating (PLAN §3.5).
 - **Full audit trail:** the event stream (who woke whom, what changed, every CONCERN and
-  PO decision) is persisted; mirror critical hand-offs + decisions to **Open Brain** for
+  decision) is persisted; mirror critical hand-offs + decisions to **Open Brain** for
   durable, queryable provenance.
-- **Observability = safety:** the PO can read/join any channel or DM (no E2EE-opaque
+- **Observability = safety:** the **Human Operator** can read/join any channel or DM (no E2EE-opaque
   agent channels). This is the paper's monitoring concern, satisfied structurally.
 
 ---
@@ -464,7 +531,7 @@ patterns drive systemic change. It's the paper's call for *multi-agent-specific 
 mitigations*, grown from our own operational history.
 
 - **All communication outcomes are signal.** Every alignment success and failure — CONCERNs
-  raised, objections, re-groundings, review catches, escalations, and the PO decisions on
+  raised, objections, re-groundings, review catches, escalations, and the decisions on
   them (all already in the audit trail, §5) — feeds the loop. The system mines it for
   *patterns*, not just incidents.
 - **Patterns justify systemic change.** A failure that recurs across efforts is evidence to
@@ -476,18 +543,18 @@ mitigations*, grown from our own operational history.
   intent-misalignment**: if many workers keep requesting the same scope, or keep flagging the
   same constraint as wrong, the *goals/rules* are probably misaligned with reality — not the
   workers. The pool makes that visible.
-- **⚠️ Propose vs. dispose stays PO-gated (the critical boundary).** The loop *proposes*
+- **⚠️ Propose vs. dispose stays Human-Operator-gated (PO proposes) (the critical boundary).** The loop *proposes*
   changes; it **never auto-applies them.** A self-modifying ruleset is a dangerous surface —
   left unchecked it could erode the §4.2 floor over time, which is the slow-motion version of
   F3. So the flow is: pattern detection + suggestion pool → PM synthesizes a *proposed*
-  change → **PO approves** → it lands via the versioned floor/steering update (§4.2). The
-  loop accelerates the PO's judgment; it does not replace it.
+  change → **the Human Operator approves** → it lands via the versioned floor/steering update (§4.2). The
+  loop accelerates the Human Operator's judgment; it does not replace it.
 - **Reuse the existing stack.** This is the "compounding reuse" pillar — route it through
   **Open Brain** (capture/search prior incidents + patterns) and the **claudeception** skill
   (extract recurring lessons into skills/charters). Don't build a parallel memory.
 
 > Net: §3–§4 keep one effort honest *now*; §6 keeps the *whole system* honest *over time* —
-> and both terminate at the same place, a **PO decision.**
+> and both terminate at the same place, a **Human-Operator decision.**
 
 ---
 
@@ -495,11 +562,11 @@ mitigations*, grown from our own operational history.
 
 Mapping to the companion doc's tooling (Mattermost primitives shown):
 
-- **PO ⇄ PM** = a dedicated `#mgmt` channel (or DM). This is where you spend ~all your time.
+- **Human Operator ⇄ PO** = a dedicated `#mgmt` channel (or DM). This is where you spend ~all your time.
 - **CONCERN** = a structured message type the PM posts to `#mgmt` that the client renders
   distinctly (e.g. a flagged post / card) and that **the bridge treats as a pause-state
   marker** for the referenced work effort.
-- **PO decision** = your reply to a CONCERN; the bridge parses approve/modify/abort and
+- **Human-Operator decision** = your reply to a CONCERN; the bridge parses approve/modify/abort and
   unfreezes accordingly.
 - **Work efforts** = channels; **error hand-offs** = threads (companion §5.2).
 - **Freeze** = the bridge stops dispatching/waking workers for the affected effort(s);
@@ -513,28 +580,29 @@ Mapping to the companion doc's tooling (Mattermost primitives shown):
    up-level? Draft default (conservative, per paper): PM may *delegate and integrate*
    freely, but **any §3 trigger up-levels**. Confirm the line.
 2. **Pause granularity.** Freeze just the affected effort, or the effort + dependents, or
-   the whole fleet? Draft default: effort + known dependents; PO can widen to fleet.
-3. **PO-unavailable behaviour.** Confirmed fail-safe (stay paused, no auto-resume). Do we
+   the whole fleet? Draft default: effort + known dependents; Human Operator can widen to fleet.
+3. **Human-Operator-unavailable behaviour.** Confirmed fail-safe (stay paused, no auto-resume). Do we
    want a *notification* escalation (push to your phone) vs. silent hold? Recommend push.
 4. **Worker homogeneity policy.** Confirm all workers come from one aligned baseline; if we
    ever want a "red-team" agent, it runs **isolated**, never in the live fleet (F5).
 5. **What counts as "irreversible/external"** for hard-rule #4 — the deploy/push/delete/
    spend/send list needs to be explicit and enforced at the tool-permission layer too.
-6. **Model assignment by role — RESOLVED (F7/§2.1).** **Local-first; OpenRouter where
-   mandatory.** `WORKER_MODEL` always local; `JUDGE_MODEL` (PM/monitor, reviewer, grounding)
-   local-first, escalating to a larger model **via OpenRouter only if the P0 capability-floor
-   test (#13) proves local judgment insufficient**. The larger model is **OpenRouter, never a
-   mainstream consumer frontier service**; pin to no-log/ZDR providers, prefer open-weight. The
-   gate + deterministic floor carry safety, not the models. *(Remaining sub-questions live in #13.)*
+6. **Model assignment by role — RESOLVED (F7/§2.1; reconciled to as-built LiteLLM 2026-06-13).**
+   **Local via the air-gapped `llm-gateway`; cloud via a separate `llm-gateway-cloud` (operator
+   C1 = option B).** Workers + local judge = `qwen36-27b` through the existing gateway (free, no
+   budgets). Judgment escalates to **OpenRouter on the separate cloud gateway only if P0 (#13)
+   proves local judgment insufficient** — never the air-gapped local gateway, never a mainstream
+   data-collecting service; cloud holds `master_key`/keys/**budgets** (the cost cap) + egress via
+   `ao-egress`. **Roles = profiles (C4), not gateway models** (PLAN §5.4). *(Sub-questions in #13.)*
 7. **Role-expansion authority line (§4.1).** Confirm the proposed split: PM may spin up
    more instances of an **approved** role freely; introducing a **new role/domain type** is
-   PO-gated. Open sub-question: do you want a lightweight "approved role catalog" the PM
+   Human-Operator-gated (PO proposes). Open sub-question: do you want a lightweight "approved role catalog" the PM
    draws from, so common domains (auth/DB/frontend) are pre-cleared and only genuinely
    novel domains hit your desk?
 8. **Goal representation & drift detection (§4.3).** How is the canonical objective held —
    a structured "objective + tradeoffs + scope slices" object the PM owns and decomposes,
-   version-tracked? And how is tunnel-vision *detected* in flight — PM monitor heuristics,
-   periodic PO spot-checks, or worker self-report ("here's the goal as I currently
+   version-tracked? And how is tunnel-vision *detected* in flight — PM/PO monitor heuristics,
+   periodic Human-Operator spot-checks, or worker self-report ("here's the goal as I currently
    understand it")? **Confirmed: worker self-report is in** (cheap, surfaces drift early).
 9. **Peer-review depth & triggers (§4.4).** When does a deliverable get reviewed — every
    deliverable, or risk-gated (irreversible/external/cross-effort → mandatory panel; routine
@@ -548,8 +616,8 @@ Mapping to the companion doc's tooling (Mattermost primitives shown):
     (enforcement doc vs. editable plan).
 11. **Learning-loop scope & suggestion-pool governance (§6).** What's in scope for the loop
     (which signals, how patterns are detected — manual PM synthesis vs. assisted) and how does
-    the suggestion pool get triaged (PM batches → PO reviews on a cadence)? Reaffirm the hard
-    boundary: **the loop proposes, the PO disposes** — no auto-applied rule changes.
+    the suggestion pool get triaged (PM batches → PO triages → Human Operator reviews on a cadence)? Reaffirm the hard
+    boundary: **the loop proposes, the Human Operator disposes** — no auto-applied rule changes.
 12. **Per-worker cognitive-load budget (§4.1, small-model limit).** How to estimate a worker's
     load and what threshold triggers a (reluctant) split. With local models the window between
     "too much to hold coherently" and "fragmented (F1)" is **narrow** — needs a working heuristic
@@ -564,14 +632,14 @@ Mapping to the companion doc's tooling (Mattermost primitives shown):
     fits.
 14. **Retirement/decommission specifics (§4.1 lifecycle).** The concrete steps + triggers for
     retiring a worker/role: scope revocation, catalog removal, goal/rule expiry, artifact
-    archival — and who authorizes each (PM vs PO).
+    archival — and who authorizes each (PM vs PO vs Human Operator).
 
 ---
 
 ## 9. Bottom line
 
 - The paper says this org shape trades alignment for capability **by default**; our
-  workflow (PO-final-say, PM-as-monitor, mandatory up-level, **pause-until-cleared**) is
+  workflow (Human-Operator-final-say, PO-as-overseer, PM-as-manager, mandatory up-level, **pause-until-cleared**) is
   precisely the "monitor agent + organizational-level constraints" mitigation it
   recommends.
 - **Misalignment is a goal problem first (§4.3).** A worker optimizes the goal it's given;
@@ -589,7 +657,7 @@ Mapping to the companion doc's tooling (Mattermost primitives shown):
   Deterministic structure beats advisory prompting.
 - **The system learns over time (§6).** Alignment hits/misses and a worker suggestion pool
   feed a loop that detects recurring patterns and proposes systemic hardening — but **the
-  loop proposes, the PO disposes**; rules never self-modify, or the floor erodes (slow F3).
+  loop proposes, the Human Operator disposes**; rules never self-modify, or the floor erodes (slow F3).
 - The **escalation gate (§3)** is the single most important thing to get right — and its
   fail-safe default (no progress by routing around or dropping a brake) is the direct
   structural answer to the paper's most dangerous finding (F3, dropped objections).

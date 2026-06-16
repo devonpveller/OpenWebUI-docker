@@ -119,7 +119,7 @@ objections/escalations.
 *less aligned* than individuals.**
 TT is anti-command-and-control — its goal is teams so well-bounded they barely need a
 coordinating authority. Our model is deliberately the opposite: a PM monitor, mandatory
-escalation, pause-until-cleared, PO final say. **This is an intentional divergence:** TT was
+escalation, pause-until-cleared, Human-Operator final say. **This is an intentional divergence:** TT was
 written for human professionals presumed competent and aligned; the paper shows our "teams"
 (agents) are *less* trustworthy than individuals, so we keep **more** oversight than TT would
 prescribe. **Do not cargo-cult TT's low-oversight autonomy.**
@@ -156,7 +156,9 @@ afford to gate handoffs heavily *because* you have few of them.
 
 ## 5. Recommended changes to fold into PLAN / governance
 
-(Proposed — not yet applied. Each cites where it lands.)
+> ✅ **Status: folded (2026-06-13 audit pass).** Recommendations (a)–(f) below are now reflected in
+> the governance/PLAN/TASKS docs. See the **[README.md](README.md) traceability matrix** for the
+> exact landing site of each. Kept here as the rationale of record.
 
 - **(a) Stream-aligned-first principle → governance §4.1 + §4.3.** Bias toward fewer,
   end-to-end workers; hyper-decomposition is a last resort with an explicit cognitive-load
@@ -187,8 +189,8 @@ org (T1, T2).
 | **`agent-bridge`** | **Platform Team** (TVP) | strong | The self-service substrate + the safe default path (the gate/floor baked in). Keep it thin. |
 | **Reviewer / learning loop (§4.4/§6)** | **Enabling Team** | good | Force-multiplier: raises capability, facilitates, then backs off. Reviewer's *different goal* is the twist TT doesn't need (human reviewers aren't optimizing a conflicting metric). |
 | **Deep-domain worker (§4.1)** | **Complicated-Subsystem Team** | good | Rare, specialist (e.g. crypto/security). TT agrees: the exception, not the default. |
-| **PM / Orchestrator** | *(no clean TT equivalent)* | **intentional divergence** | TT minimizes a central coordinator; we keep a monitor + escalation authority **because agents are less aligned than humans** (paper). Accept the divergence; mitigate by investing in the platform so the PM does judgment, not mechanics. |
-| **PO (you)** | *(outside TT scope)* | n/a | TT assumes aligned humans throughout; the PO-as-final-authority layer exists because the org underneath is *not* presumed aligned. |
+| **PM + PO** (orchestration agents) | *(no clean TT equivalent)* | **intentional divergence** | TT minimizes a central coordinator; we keep a PM (execution) **and** a PO (Project Overseer — big-picture/ethics, a differently-goaled check on the PM) **because agents are less aligned than humans** (paper). |
+| **Human Operator (you)** | *(outside TT scope)* | n/a | TT assumes aligned humans throughout; the human-final-authority layer (above the PO agent) exists because the org underneath is *not* presumed aligned. |
 
 ---
 

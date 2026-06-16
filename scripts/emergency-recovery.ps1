@@ -10,9 +10,12 @@ $ErrorActionPreference = "Stop"
 # Service inventory — every container the recovery stack maintains.
 #
 # The MAIN compose project (docker-compose.yml) holds several planes:
-#   core    openwebui, llama-cpp, llama-cpp-embed, tailscale
+#   core    openwebui, llama-cpp-upstream, llama-cpp-embed-upstream, llm-queue,
+#           llm-gateway-db, llm-gateway, llm-gateway-ui, tailscale
+#           (llm-queue = B2 admission controller between the upstreams and LiteLLM;
+#            llm-gateway-ui = master-key'd Admin-UI sidecar / analytics dashboard)
 #   memory  mnemory, mnemory-gateway
-#   search  tor, redis, searxng, gateway, mcpo      (Private Search Gateway)
+#   search  vpn, tor, redis, searxng, gateway, mcpo (Private Search Gateway)
 #   coder   open-terminal, little-coder, lc-mcpo, lc-egress
 #   aux     smolcrawl-pipelines, surrealdb, open_notebook, watchtower
 #   backup  mnemory-backup, openwebui-backup, little-coder-backup,
@@ -30,7 +33,7 @@ $ErrorActionPreference = "Stop"
 # Open Brain (OB1) is a SEPARATE compose project (OB1\docker\docker-compose.yml,
 # project name "open-brain"). Its containers attach to the main stack's
 # ai-stack_llm-net as an EXTERNAL network, so OB1 is shut down first and
-# brought up last — only after llama-cpp / llama-cpp-embed are healthy.
+# brought up last — only after llama-cpp-upstream / llama-cpp-embed-upstream are healthy.
 # ──────────────────────────────────────────────────────────────────────────
 
 $Script:OB1Compose = "OB1\docker\docker-compose.yml"
@@ -38,15 +41,17 @@ $Script:OB1Compose = "OB1\docker\docker-compose.yml"
 # Main compose services, low-level dependency first.
 # (Portal plane omitted on purpose — profile-gated; see the header note.)
 $Script:MainStackServices = @(
-    "openwebui", "llama-cpp", "llama-cpp-embed", "tailscale",
+    "openwebui", "llama-cpp-upstream", "llama-cpp-embed-upstream",
+    "llm-queue", "llm-gateway-db", "llm-gateway", "llm-gateway-ui", "tailscale",
     "mnemory", "mnemory-gateway",
     "smolcrawl-pipelines", "surrealdb", "open_notebook",
-    "tor", "redis", "searxng", "gateway", "mcpo",
+    "vpn", "tor", "redis", "searxng", "gateway", "mcpo",
     "open-terminal", "little-coder", "lc-mcpo", "lc-egress",
     "watchtower",
     # Backup cron sidecars (see helper arrays below).
     "mnemory-backup", "openwebui-backup", "little-coder-backup",
     "smolcrawl-backup", "tailscale-backup", "lm-models-backup", "open-notebook-backup",
+    "llm-gateway-backup",
     "openbrain-db-backup", "openbrain-wiki-backup"
 )
 
@@ -160,7 +165,7 @@ function Stop-OB1Stack {
 function Start-OB1Stack {
     # Bring the Open Brain (OB1) compose project up. OB1's own depends_on
     # handles its internal ordering; it must run AFTER the main stack so
-    # ai-stack_llm-net (external) exists and llama-cpp is reachable.
+    # ai-stack_llm-net (external) exists and llama-cpp-upstream is reachable.
     if (-not (Test-OB1Available)) {
         Write-Log "INFO" "Open Brain (OB1) not deployed in this workspace - skipping"
         return
@@ -207,12 +212,12 @@ function Test-BasicConnectivity {
         }
 
         # Report container states grouped by plane so 20+ services stay readable.
-        Write-Log "INFO" ("Core   - openwebui: {0}, llama-cpp: {1}, llama-cpp-embed: {2}, tailscale: {3}" -f `
-            $states["openwebui"], $states["llama-cpp"], $states["llama-cpp-embed"], $states["tailscale"])
+        Write-Log "INFO" ("Core   - openwebui: {0}, llama-cpp-upstream: {1}, llama-cpp-embed-upstream: {2}, tailscale: {3}" -f `
+            $states["openwebui"], $states["llama-cpp-upstream"], $states["llama-cpp-embed-upstream"], $states["tailscale"])
         Write-Log "INFO" ("Memory - mnemory: {0}, mnemory-gateway: {1}" -f `
             $states["mnemory"], $states["mnemory-gateway"])
-        Write-Log "INFO" ("Search - tor: {0}, redis: {1}, searxng: {2}, gateway: {3}, mcpo: {4}" -f `
-            $states["tor"], $states["redis"], $states["searxng"], $states["gateway"], $states["mcpo"])
+        Write-Log "INFO" ("Search - vpn: {0}, tor: {1}, redis: {2}, searxng: {3}, gateway: {4}, mcpo: {5}" -f `
+            $states["vpn"], $states["tor"], $states["redis"], $states["searxng"], $states["gateway"], $states["mcpo"])
         Write-Log "INFO" ("Coder  - open-terminal: {0}, little-coder: {1}, lc-mcpo: {2}, lc-egress: {3}" -f `
             $states["open-terminal"], $states["little-coder"], $states["lc-mcpo"], $states["lc-egress"])
         Write-Log "INFO" ("Aux    - smolcrawl-pipelines: {0}, surrealdb: {1}, open_notebook: {2}, watchtower: {3}" -f `
@@ -236,19 +241,19 @@ function Test-BasicConnectivity {
 
         # The recovery decision rests on the core plane: if it is healthy the
         # rest is a cheap up -d nudge; if not, a real recovery is needed.
-        if ($states["openwebui"] -eq "running" -and $states["llama-cpp"] -eq "running" -and `
-            $states["llama-cpp-embed"] -eq "running" -and $states["tailscale"] -eq "running") {
+        if ($states["openwebui"] -eq "running" -and $states["llama-cpp-upstream"] -eq "running" -and `
+            $states["llama-cpp-embed-upstream"] -eq "running" -and $states["tailscale"] -eq "running") {
             # Test OpenWebUI health
             try {
                 docker compose exec openwebui curl -f -s http://localhost:8080/health 2>$null | Out-Null
                 if ($LASTEXITCODE -eq 0) {
                     Write-Log "INFO" "OpenWebUI health check: PASSED"
 
-                    # Test llama-cpp connectivity
+                    # Test llama-cpp-upstream connectivity
                     try {
-                        docker compose exec llama-cpp curl -f -s http://localhost:8080/health 2>$null | Out-Null
+                        docker compose exec llama-cpp-upstream curl -f -s http://localhost:8080/health 2>$null | Out-Null
                         if ($LASTEXITCODE -eq 0) {
-                            Write-Log "INFO" "llama-cpp connectivity: PASSED"
+                            Write-Log "INFO" "llama-cpp-upstream connectivity: PASSED"
 
                             # Test external connectivity
                             if (Test-NetworkConnectivity "tailscale") {
@@ -260,11 +265,11 @@ function Test-BasicConnectivity {
                             }
                         }
                         else {
-                            Write-Log "WARN" "llama-cpp connectivity failed"
+                            Write-Log "WARN" "llama-cpp-upstream connectivity failed"
                         }
                     }
                     catch {
-                        Write-Log "WARN" "llama-cpp connectivity test failed: $_"
+                        Write-Log "WARN" "llama-cpp-upstream connectivity test failed: $_"
                     }
                 }
                 else {
@@ -293,19 +298,44 @@ function Invoke-MinimalRecovery {
 
     Write-Log "INFO" "Attempting gentle service restart..."
 
-    # Just restart services without destroying containers
+    # Just restart services without destroying containers.
     try {
-        docker compose restart tailscale llama-cpp llama-cpp-embed openwebui
+        # NETNS ORDERING (critical): `tailscale` runs `network_mode:
+        # service:openwebui`, so it lives INSIDE openwebui's network namespace.
+        # Restarting openwebui recreates that namespace and orphans tailscale
+        # (it stays "Up" but loses all connectivity / serve config). Therefore
+        # NEVER restart them in one `docker compose restart` call — that restarts
+        # tailscale first (or without waiting), then openwebui pulls the netns out
+        # from under it. The order MUST be: inference (netns-independent) → restart
+        # openwebui → WAIT until it is healthy → only THEN restart tailscale so it
+        # re-attaches to the new, stable namespace.
+        docker compose restart llama-cpp-upstream llama-cpp-embed-upstream
+
+        docker compose restart openwebui
+        if (-not (Wait-ForHealthy "openwebui" 240)) {
+            Write-Log "WARN" "OpenWebUI not healthy after restart; restarting tailscale anyway so it is not left orphaned..."
+        }
+
+        # Tailscale LAST — re-attaches to openwebui's (now stable) netns and
+        # re-applies its serve config via entrypoint.sh.
+        docker compose restart tailscale
+        Wait-ForHealthy "tailscale" 90 | Out-Null
 
         # Ensure every auxiliary container is running (cheap no-op if already
         # up). Their depends_on only fires at the initial compose-up, so a
-        # llama-cpp restart can leave dependents (mnemory, the search gateway,
+        # llama-cpp-upstream restart can leave dependents (mnemory, the search gateway,
         # the little-coder plane) degraded without this nudge. surrealdb must
         # precede open_notebook; the search/coder planes self-order via their
         # own depends_on.
+        # Inference admission plane first (llm-queue sits between the upstreams
+        # and LiteLLM; both must be up before callers — design B2). A
+        # llama-cpp-upstream restart drops nothing here (httpx reconnects), but
+        # nudge them so a cold dependent comes back.
+        docker compose up -d llm-queue llm-gateway
+
         docker compose up -d watchtower mnemory mnemory-gateway `
             smolcrawl-pipelines surrealdb open_notebook `
-            tor redis searxng gateway mcpo `
+            vpn tor redis searxng gateway mcpo `
             open-terminal little-coder lc-mcpo lc-egress
 
         # Backup cron sidecars touching only main/host resources (safe anytime).
@@ -451,7 +481,7 @@ function Invoke-EmergencyRecovery {
 
     # Private Search Gateway (reverse dependency order).
     Stop-ServiceGroup "Private Search Gateway" `
-        @("mcpo", "gateway", "searxng", "redis", "tor")
+        @("mcpo", "gateway", "searxng", "redis", "tor", "vpn")
 
     # Tailscale (shares the OpenWebUI network namespace).
     if (-not (Stop-ServiceGracefully "tailscale" 30)) {
@@ -467,12 +497,22 @@ function Invoke-EmergencyRecovery {
     # OpenWebUI backup scheduler.
     Stop-ServiceGroup "OpenWebUI backup" @("openwebui-backup")
 
-    # llama-cpp inference services.
-    if (-not (Stop-ServiceGracefully "llama-cpp" 30)) {
-        Write-Log "WARN" "llama-cpp stop had issues, continuing..."
+    # LiteLLM gateway — stops after callers, before the upstream inference servers
+    # (callers reach inference through it; the upstreams must outlive it).
+    Stop-ServiceGroup "LiteLLM gateway" @("llm-gateway-backup", "llm-gateway-ui", "llm-gateway", "llm-gateway-db")
+
+    # llm-queue (B2 admission controller) — stops after the gateway (which
+    # forwards through it), before the upstreams it forwards to.
+    if (-not (Stop-ServiceGracefully "llm-queue" 30)) {
+        Write-Log "WARN" "llm-queue stop had issues, continuing..."
     }
-    if (-not (Stop-ServiceGracefully "llama-cpp-embed" 30)) {
-        Write-Log "WARN" "llama-cpp-embed stop had issues, continuing..."
+
+    # llama-cpp-upstream inference services.
+    if (-not (Stop-ServiceGracefully "llama-cpp-upstream" 30)) {
+        Write-Log "WARN" "llama-cpp-upstream stop had issues, continuing..."
+    }
+    if (-not (Stop-ServiceGracefully "llama-cpp-embed-upstream" 30)) {
+        Write-Log "WARN" "llama-cpp-embed-upstream stop had issues, continuing..."
     }
 
     # OpenWebUI last — it provides the shared network namespace.
@@ -512,29 +552,63 @@ function Invoke-EmergencyRecovery {
     Write-Log "INFO" "Allowing network namespace to stabilize..."
     Start-Sleep -Seconds 20
 
-    # Start llama-cpp services (GPU inference) — many planes depend on these
-    Write-Log "INFO" "Starting llama-cpp with GPU support..."
+    # Start llama-cpp-upstream services (GPU inference) — many planes depend on these
+    Write-Log "INFO" "Starting llama-cpp-upstream with GPU support..."
     try {
-        docker compose up -d llama-cpp
-        if (-not (Wait-ForHealthy "llama-cpp" 120)) {
-            Write-Log "WARN" "llama-cpp health check failed, but continuing..."
+        docker compose up -d llama-cpp-upstream
+        if (-not (Wait-ForHealthy "llama-cpp-upstream" 120)) {
+            Write-Log "WARN" "llama-cpp-upstream health check failed, but continuing..."
         }
     }
     catch {
-        Write-Log "ERROR" "Failed to start llama-cpp: $_"
+        Write-Log "ERROR" "Failed to start llama-cpp-upstream: $_"
         throw
     }
 
-    Write-Log "INFO" "Starting llama-cpp-embed..."
+    Write-Log "INFO" "Starting llama-cpp-embed-upstream..."
     try {
-        docker compose up -d llama-cpp-embed
-        if (-not (Wait-ForHealthy "llama-cpp-embed" 60)) {
-            Write-Log "WARN" "llama-cpp-embed health check failed, but continuing..."
+        docker compose up -d llama-cpp-embed-upstream
+        if (-not (Wait-ForHealthy "llama-cpp-embed-upstream" 60)) {
+            Write-Log "WARN" "llama-cpp-embed-upstream health check failed, but continuing..."
         }
     }
     catch {
-        Write-Log "ERROR" "Failed to start llama-cpp-embed: $_"
+        Write-Log "ERROR" "Failed to start llama-cpp-embed-upstream: $_"
         throw
+    }
+
+    # llm-queue (B2 admission controller) — between the upstreams and LiteLLM.
+    # Starts AFTER the upstreams are healthy, BEFORE the gateway (which forwards
+    # chat through it). Restart-fast (stateless proxy, no model load).
+    Write-Log "INFO" "Starting llm-queue (inference admission controller)..."
+    try {
+        docker compose up -d llm-queue
+        if (-not (Wait-ForHealthy "llm-queue" 60)) {
+            Write-Log "WARN" "llm-queue health check failed, but continuing..."
+        }
+    }
+    catch {
+        Write-Log "ERROR" "Failed to start llm-queue: $_"
+    }
+
+    # LiteLLM gateway — the front door every caller reaches inference through.
+    # Starts after BOTH upstream inference servers + llm-queue are healthy; before any caller.
+    Write-Log "INFO" "Starting LiteLLM gateway (db, then gateway)..."
+    try {
+        docker compose up -d llm-gateway-db
+        Wait-ForHealthy "llm-gateway-db" 60 | Out-Null
+        docker compose up -d llm-gateway
+        if (-not (Wait-ForHealthy "llm-gateway" 150)) {
+            Write-Log "WARN" "llm-gateway health check failed, but continuing..."
+        }
+        docker compose up -d llm-gateway-backup
+        # llm-gateway-ui: master-key'd Admin-UI sidecar (analytics dashboard).
+        # Depends only on llm-gateway-db (already healthy) — serves no inference,
+        # so it is non-critical to the recovery path; start it best-effort.
+        docker compose up -d llm-gateway-ui
+    }
+    catch {
+        Write-Log "ERROR" "Failed to start LiteLLM gateway: $_"
     }
 
     # Start Tailscale (depends on OpenWebUI network)
@@ -550,7 +624,7 @@ function Invoke-EmergencyRecovery {
         throw
     }
 
-    # Start Mnemory memory layer (depends on llama-cpp services)
+    # Start Mnemory memory layer (depends on llama-cpp-upstream services)
     Write-Log "INFO" "Starting Mnemory memory service..."
     try {
         docker compose up -d mnemory
@@ -604,9 +678,10 @@ function Invoke-EmergencyRecovery {
         Write-Log "WARN" "Failed to start open-notebook: $_"
     }
 
-    # Private Search Gateway — tor -> redis -> searxng -> gateway -> mcpo.
-    # depends_on chains the internal order; the Tor circuit is slow to build.
-    Start-ServiceGroup "Private Search Gateway" @("tor", "redis", "searxng", "gateway", "mcpo")
+    # Private Search Gateway — vpn -> tor -> redis -> searxng -> gateway -> mcpo.
+    # depends_on chains the internal order; vpn (Mullvad) is searxng's egress and
+    # the WireGuard tunnel is slow to build; tor stays as the page-fetch egress.
+    Start-ServiceGroup "Private Search Gateway" @("vpn", "tor", "redis", "searxng", "gateway", "mcpo")
     if (-not (Wait-ForHealthy "gateway" 150)) {
         Write-Log "WARN" "Search gateway slow to come up, but continuing..."
     }
@@ -647,7 +722,7 @@ function Invoke-EmergencyRecovery {
         Write-Log "WARN" "Failed to start Watchtower: $_"
     }
 
-    # Open Brain (OB1) last — needs ai-stack_llm-net + llama-cpp healthy.
+    # Open Brain (OB1) last — needs ai-stack_llm-net + llama-cpp-upstream healthy.
     Start-OB1Stack
 
     # OB1-attached backups — only now that obnet + open-brain volumes exist.
@@ -670,8 +745,8 @@ function Invoke-EmergencyRecovery {
     Write-Log "INFO" "Phase 5: Service verification"
 
     try {
-        Write-Log "INFO" "llama-cpp status:"
-        docker compose exec llama-cpp curl -s http://localhost:8080/health
+        Write-Log "INFO" "llama-cpp-upstream status:"
+        docker compose exec llama-cpp-upstream curl -s http://localhost:8080/health
 
         Write-Log "INFO" "Tailscale status:"
         docker compose exec tailscale tailscale --socket=/tmp/tailscaled.sock status
@@ -812,7 +887,7 @@ function Invoke-GPUReset {
     Write-Log "INFO" "========================================="
 
     Write-Log "INFO" "Stopping GPU-dependent services for reset..."
-    docker compose down llama-cpp llama-cpp-embed openwebui mnemory
+    docker compose down llama-cpp-upstream llama-cpp-embed-upstream openwebui mnemory
 
     Write-Log "INFO" "Rebuilding OpenWebUI with fresh GPU configuration..."
     docker compose build --no-cache openwebui
@@ -821,23 +896,28 @@ function Invoke-GPUReset {
     docker compose up -d openwebui
 
     if (Wait-ForHealthy "openwebui" 240) {
-        Write-Log "INFO" "Starting llama-cpp with GPU support..."
-        docker compose up -d llama-cpp
+        Write-Log "INFO" "Starting llama-cpp-upstream with GPU support..."
+        docker compose up -d llama-cpp-upstream
 
-        if (Wait-ForHealthy "llama-cpp" 120) {
+        if (Wait-ForHealthy "llama-cpp-upstream" 120) {
             if (Test-GPUAvailability) {
                 Write-Log "SUCCESS" "GPU reset successful - CUDA is available"
 
-                # Test llama-cpp GPU access
+                # Test llama-cpp-upstream GPU access
                 try {
-                    docker compose exec llama-cpp curl -s http://localhost:8080/health
-                    Write-Log "SUCCESS" "llama-cpp GPU integration verified"
+                    docker compose exec llama-cpp-upstream curl -s http://localhost:8080/health
+                    Write-Log "SUCCESS" "llama-cpp-upstream GPU integration verified"
 
                     # Also start embedding service
-                    docker compose up -d llama-cpp-embed
-                    Write-Log "INFO" "llama-cpp-embed started"
+                    docker compose up -d llama-cpp-embed-upstream
+                    Write-Log "INFO" "llama-cpp-embed-upstream started"
 
-                    # Restart the planes that consume llama-cpp inference:
+                    # Inference admission plane (B2): llm-queue then LiteLLM, so
+                    # callers reach inference through the gateway → queue → upstream.
+                    docker compose up -d llm-queue llm-gateway
+                    Write-Log "INFO" "llm-queue + LiteLLM gateway started"
+
+                    # Restart the planes that consume llama-cpp-upstream inference:
                     # the memory layer, the little-coder plane, and OB1.
                     docker compose up -d mnemory mnemory-gateway mnemory-backup
                     Write-Log "INFO" "Mnemory layer started"
@@ -848,7 +928,7 @@ function Invoke-GPUReset {
                     Start-OB1Stack
                 }
                 catch {
-                    Write-Log "WARN" "llama-cpp may need additional time to initialize"
+                    Write-Log "WARN" "llama-cpp-upstream may need additional time to initialize"
                 }
             }
             else {
@@ -857,9 +937,9 @@ function Invoke-GPUReset {
             }
         }
         else {
-            Write-Log "WARN" "llama-cpp startup slow but continuing..."
+            Write-Log "WARN" "llama-cpp-upstream startup slow but continuing..."
             # Start embedding service anyway
-            docker compose up -d llama-cpp-embed
+            docker compose up -d llama-cpp-embed-upstream
         }
     }
     else {

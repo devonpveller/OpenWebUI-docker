@@ -1,7 +1,7 @@
 # Tooling Selection — what to borrow to build this
 
 **Status:** tooling analysis / build input (2026-06-10)
-**Reads against:** [PLAN](PLAN-teams-chat-agent-orchestration.md) · [SAFETY-AND-WORKFLOW-governance-model.md](SAFETY-AND-WORKFLOW-governance-model.md) · the three ANALYSIS docs · this workspace's stack-map + [little-coder design](../../little-coder/Self-improving-little-coder-design.md)
+**Reads against:** [PLAN](PLAN-teams-chat-agent-orchestration.md) · [SAFETY-AND-WORKFLOW-governance-model.md](SAFETY-AND-WORKFLOW-governance-model.md) · the three ANALYSIS docs · this workspace's stack-map + [little-coder design](../little-coder/Self-improving-little-coder-design.md)
 
 ---
 
@@ -104,14 +104,15 @@ and JSON-schema→grammar natively. This is the direct structural fix for the GP
   retry/repair; **Zod** if the bridge is Deno/TS. (Constrained decoding does the heavy lifting;
   these add typed validation + ergonomics.)
 
-### 3.3 LiteLLM (proxy) — the local-first / OpenRouter gateway
-One **OpenAI-compatible** endpoint that routes by alias: `WORKER_MODEL`→local llama-swap,
-`JUDGE_MODEL`→**OpenRouter** (only where the P0 floor test mandates). Gives us **fallback
-chains, per-role spend caps** (directly serves the *cost-tiered continuous supervision* in
-governance §3), **usage logging** (audit), and a **single egress chokepoint** for the OpenRouter
-privacy boundary. This finally justifies the stack's *plan-only* `documentation/LiteLLM-Proxy/`
-(memory: `litellm-proxy-status` — not yet built). Configure the OpenRouter provider to **pin
-no-log / ZDR providers** and prefer **open-weight** large models.
+### 3.3 LiteLLM (proxy) — two lanes (UPDATED 2026-06-13: local gateway is LIVE)
+LiteLLM is the **OpenAI-compatible** front door. **Local lane is already deployed** as the
+air-gapped `llm-gateway` (`documentation/LiteLLM-Proxy/`, memory `litellm-proxy-status`): callers
+hit `http://llama-cpp:8080` → gateway → `llama-cpp-upstream`; permissive, **no egress**, analytics
+only. agent-org consumes it as-is. **Cloud lane is the planned extension** — a *separate*
+`llm-gateway-cloud` (only if P0 mandates) routing `JUDGE_MODEL`→**OpenRouter**, where the **`master_key`
++ per-role budgets** (the *cost-tiered supervision* cap, governance §3) and the **single egress
+chokepoint** (`ao-egress`, no-log/ZDR, open-weight) live — keeping the local gateway air-gapped
+(PLAN §3.4 / OD-6).
 
 ### 3.4 `agent-bridge` — runtime recommendation (resolves PLAN OD-2)
 **Recommend Python (FastAPI + Pydantic + Instructor).** Rationale: the **structured-output /
