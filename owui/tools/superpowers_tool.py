@@ -2683,23 +2683,31 @@ Output format:
         # Intelligent chunking: try to split on section boundaries (##, ---, blank lines)
         section_breaks = []
         for i, line in enumerate(lines):
-            if line.startswith("## ") or line.strip() == "---" or (i > 0 and line.strip() == "" and lines[i - 1].strip() == ""):
+            if (
+                line.startswith("## ")
+                or line.strip() == "---"
+                or (i > 0 and line.strip() == "" and lines[i - 1].strip() == "")
+            ):
                 section_breaks.append(i)
 
         chunks = []
         if len(section_breaks) >= chunk_count:
             # Split on natural section boundaries
             step = len(section_breaks) // chunk_count
-            indices = [0] + [section_breaks[step * (i + 1)] for i in range(chunk_count - 1)] + [total_lines]
+            indices = (
+                [0]
+                + [section_breaks[step * (i + 1)] for i in range(chunk_count - 1)]
+                + [total_lines]
+            )
             for i in range(len(indices) - 1):
-                chunk = "\n".join(lines[indices[i]:indices[i + 1]]).strip()
+                chunk = "\n".join(lines[indices[i] : indices[i + 1]]).strip()
                 if chunk:
                     chunks.append(chunk)
         else:
             # Fallback: split evenly by line count
             chunk_size = max(1, total_lines // chunk_count)
             for i in range(0, total_lines, chunk_size):
-                chunk = "\n".join(lines[i:i + chunk_size]).strip()
+                chunk = "\n".join(lines[i : i + chunk_size]).strip()
                 if chunk:
                     chunks.append(chunk)
 
@@ -2821,7 +2829,10 @@ Output format:
 
         if __event_emitter__:
             await __event_emitter__(
-                {"type": "status", "data": {"description": "Analysis complete.", "done": True}}
+                {
+                    "type": "status",
+                    "data": {"description": "Analysis complete.", "done": True},
+                }
             )
 
         output = f"[SUPERPOWERS:PHASE:ANALYSIS_COMPLETE]\n\n"

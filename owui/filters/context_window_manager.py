@@ -77,13 +77,17 @@ class Filter:
             tools_chars = len(json.dumps(tools))
             tools_tokens = int(tools_chars / self.valves.CHARS_PER_TOKEN)
             usable -= tools_tokens
-            log.info(f"[CWF] tool definitions: {tools_chars} chars (~{tools_tokens} tokens)")
+            log.info(
+                f"[CWF] tool definitions: {tools_chars} chars (~{tools_tokens} tokens)"
+            )
 
         # Subtract per-message chat template overhead
         n_msgs = len(body.get("messages", []))
         template_tokens = n_msgs * self.valves.TOKENS_PER_MESSAGE
         usable -= template_tokens
-        log.info(f"[CWF] template overhead: {n_msgs} msgs * {self.valves.TOKENS_PER_MESSAGE} = ~{template_tokens} tokens")
+        log.info(
+            f"[CWF] template overhead: {n_msgs} msgs * {self.valves.TOKENS_PER_MESSAGE} = ~{template_tokens} tokens"
+        )
 
         return max(2000, int(usable * self.valves.CHARS_PER_TOKEN))
 
@@ -127,11 +131,16 @@ class Filter:
                 slim = []
                 for tc in msg["tool_calls"]:
                     fn = tc.get("function", {})
-                    slim.append({
-                        "id": tc.get("id", ""),
-                        "type": "function",
-                        "function": {"name": fn.get("name", "?"), "arguments": "{}"},
-                    })
+                    slim.append(
+                        {
+                            "id": tc.get("id", ""),
+                            "type": "function",
+                            "function": {
+                                "name": fn.get("name", "?"),
+                                "arguments": "{}",
+                            },
+                        }
+                    )
                 saved += len(tc_json) - len(json.dumps(slim))
                 new_msg = {**new_msg, "tool_calls": slim}
 
@@ -176,22 +185,38 @@ class Filter:
             role = msg.get("role", "")
             content = msg.get("content", "")
 
-            if role == "tool" and isinstance(content, str) and len(content) > self.valves.TOOL_RESULT_CAP:
-                old[i], s = self._compress_msg(msg, self.valves.TOOL_RESULT_CAP, "tool result")
+            if (
+                role == "tool"
+                and isinstance(content, str)
+                and len(content) > self.valves.TOOL_RESULT_CAP
+            ):
+                old[i], s = self._compress_msg(
+                    msg, self.valves.TOOL_RESULT_CAP, "tool result"
+                )
                 if s > 0:
                     compressed += 1
             elif role == "assistant":
-                old[i], s = self._compress_msg(msg, self.valves.ASSISTANT_CAP, "assistant")
+                old[i], s = self._compress_msg(
+                    msg, self.valves.ASSISTANT_CAP, "assistant"
+                )
                 if s > 0:
                     compressed += 1
-            elif role == "user" and isinstance(content, str) and len(content) > self.valves.ASSISTANT_CAP:
-                old[i], s = self._compress_msg(msg, self.valves.ASSISTANT_CAP, "user msg")
+            elif (
+                role == "user"
+                and isinstance(content, str)
+                and len(content) > self.valves.ASSISTANT_CAP
+            ):
+                old[i], s = self._compress_msg(
+                    msg, self.valves.ASSISTANT_CAP, "user msg"
+                )
                 if s > 0:
                     compressed += 1
 
         convo = old + recent
         current = self._measure(system + convo)
-        log.info(f"[CWF] after phase 1 (compress old): {current} chars, compressed {compressed} msgs")
+        log.info(
+            f"[CWF] after phase 1 (compress old): {current} chars, compressed {compressed} msgs"
+        )
 
         # --- Phase 2: Drop oldest messages ---
         dropped = 0
@@ -208,12 +233,16 @@ class Filter:
             current -= drop
             dropped += 1
 
-        log.info(f"[CWF] after phase 2 (drop old): {current} chars, dropped {dropped} exchanges")
+        log.info(
+            f"[CWF] after phase 2 (drop old): {current} chars, dropped {dropped} exchanges"
+        )
 
         # --- Phase 3: Emergency compress recent messages ---
         emergency = 0
         if current > budget:
-            log.warning(f"[CWF] EMERGENCY: recent msgs alone = {current} chars > {budget} budget")
+            log.warning(
+                f"[CWF] EMERGENCY: recent msgs alone = {current} chars > {budget} budget"
+            )
             for i, msg in enumerate(convo):
                 if current <= budget:
                     break
@@ -226,7 +255,9 @@ class Filter:
                     current -= s
                     emergency += 1
 
-        log.info(f"[CWF] after phase 3 (emergency): {current} chars, emergency-compressed {emergency} msgs")
+        log.info(
+            f"[CWF] after phase 3 (emergency): {current} chars, emergency-compressed {emergency} msgs"
+        )
 
         # --- Phase 4: Nuclear — if STILL over, drop conversation msgs until fits ---
         nuked = 0
@@ -242,7 +273,9 @@ class Filter:
             nuked += 1
 
         if nuked:
-            log.warning(f"[CWF] NUCLEAR: dropped {nuked} more exchanges, now {current} chars")
+            log.warning(
+                f"[CWF] NUCLEAR: dropped {nuked} more exchanges, now {current} chars"
+            )
 
         body["messages"] = system + convo
         final = self._measure(body["messages"])
@@ -254,7 +287,11 @@ class Filter:
         )
 
         # --- Emit status ---
-        if (compressed + dropped + emergency + nuked > 0) and self.valves.ENABLE_STATUS and __event_emitter__:
+        if (
+            (compressed + dropped + emergency + nuked > 0)
+            and self.valves.ENABLE_STATUS
+            and __event_emitter__
+        ):
             parts = []
             if compressed:
                 parts.append(f"{compressed} compressed")

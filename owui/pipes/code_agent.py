@@ -32,7 +32,10 @@ except ImportError:
 # ── Module-level load signal ────────────────────────────────────────
 # Fires when OWUI imports this file. If you don't see this in
 # docker compose logs, the function failed to load entirely.
-print(f"[CODE_AGENT] MODULE LOADED at {datetime.now().isoformat()} | httpx={'yes' if httpx else 'MISSING'}", flush=True)
+print(
+    f"[CODE_AGENT] MODULE LOADED at {datetime.now().isoformat()} | httpx={'yes' if httpx else 'MISSING'}",
+    flush=True,
+)
 sys.stderr.write(f"[CODE_AGENT] MODULE LOADED at {datetime.now().isoformat()}\n")
 try:
     os.makedirs("/app/backend/data/code_agent", exist_ok=True)
@@ -236,9 +239,7 @@ how to run it, file structure, and key decisions.
 - Known limitations or TODOs for future work
 """
 
-SYSTEM_PROMPT_XML = (
-    SYSTEM_PROMPT_NATIVE
-    + """
+SYSTEM_PROMPT_XML = SYSTEM_PROMPT_NATIVE + """
 ## Tool Calling
 
 To use a tool, output a tool_call block:
@@ -268,7 +269,6 @@ When you are done and have the final answer, respond normally without any \
 - save_memory(key, content) — Save persistent note
 - recall_memory(key?) — Recall note or list all
 """
-)
 
 # =============================================================================
 # TOOL DEFINITIONS — OpenAI function-calling format
@@ -283,9 +283,20 @@ TOOL_DEFINITIONS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "file_path": {"type": "string", "description": "Path to file (relative to workspace or absolute)"},
-                    "start_line": {"type": "integer", "description": "First line (1-based, 0=beginning)", "default": 0},
-                    "end_line": {"type": "integer", "description": "Last line (1-based, 0=end)", "default": 0},
+                    "file_path": {
+                        "type": "string",
+                        "description": "Path to file (relative to workspace or absolute)",
+                    },
+                    "start_line": {
+                        "type": "integer",
+                        "description": "First line (1-based, 0=beginning)",
+                        "default": 0,
+                    },
+                    "end_line": {
+                        "type": "integer",
+                        "description": "Last line (1-based, 0=end)",
+                        "default": 0,
+                    },
                 },
                 "required": ["file_path"],
             },
@@ -300,7 +311,10 @@ TOOL_DEFINITIONS = [
                 "type": "object",
                 "properties": {
                     "file_path": {"type": "string", "description": "Destination path"},
-                    "content": {"type": "string", "description": "Complete file content"},
+                    "content": {
+                        "type": "string",
+                        "description": "Complete file content",
+                    },
                 },
                 "required": ["file_path", "content"],
             },
@@ -315,7 +329,10 @@ TOOL_DEFINITIONS = [
                 "type": "object",
                 "properties": {
                     "file_path": {"type": "string", "description": "Path to file"},
-                    "old_text": {"type": "string", "description": "Exact text to find (must match once)"},
+                    "old_text": {
+                        "type": "string",
+                        "description": "Exact text to find (must match once)",
+                    },
                     "new_text": {"type": "string", "description": "Replacement text"},
                 },
                 "required": ["file_path", "old_text", "new_text"],
@@ -330,7 +347,11 @@ TOOL_DEFINITIONS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "Directory path (default: workspace root)", "default": "."},
+                    "path": {
+                        "type": "string",
+                        "description": "Directory path (default: workspace root)",
+                        "default": ".",
+                    },
                 },
                 "required": [],
             },
@@ -344,9 +365,20 @@ TOOL_DEFINITIONS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "pattern": {"type": "string", "description": "Text or regex pattern"},
-                    "path": {"type": "string", "description": "Search directory (default: workspace root)", "default": "."},
-                    "include_pattern": {"type": "string", "description": "File glob filter (e.g. '*.py')", "default": ""},
+                    "pattern": {
+                        "type": "string",
+                        "description": "Text or regex pattern",
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "Search directory (default: workspace root)",
+                        "default": ".",
+                    },
+                    "include_pattern": {
+                        "type": "string",
+                        "description": "File glob filter (e.g. '*.py')",
+                        "default": "",
+                    },
                 },
                 "required": ["pattern"],
             },
@@ -360,8 +392,15 @@ TOOL_DEFINITIONS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "pattern": {"type": "string", "description": "Glob pattern (e.g. '*.py', '**/test_*.js')"},
-                    "path": {"type": "string", "description": "Search directory", "default": "."},
+                    "pattern": {
+                        "type": "string",
+                        "description": "Glob pattern (e.g. '*.py', '**/test_*.js')",
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "Search directory",
+                        "default": ".",
+                    },
                 },
                 "required": ["pattern"],
             },
@@ -375,8 +414,15 @@ TOOL_DEFINITIONS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "command": {"type": "string", "description": "Shell command to execute"},
-                    "working_dir": {"type": "string", "description": "Working directory (default: workspace root)", "default": ""},
+                    "command": {
+                        "type": "string",
+                        "description": "Shell command to execute",
+                    },
+                    "working_dir": {
+                        "type": "string",
+                        "description": "Working directory (default: workspace root)",
+                        "default": "",
+                    },
                 },
                 "required": ["command"],
             },
@@ -390,7 +436,10 @@ TOOL_DEFINITIONS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "thought": {"type": "string", "description": "Your reasoning and analysis"},
+                    "thought": {
+                        "type": "string",
+                        "description": "Your reasoning and analysis",
+                    },
                 },
                 "required": ["thought"],
             },
@@ -404,10 +453,25 @@ TOOL_DEFINITIONS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "action": {"type": "string", "enum": ["add", "update", "list", "clear"]},
-                    "task_id": {"type": "integer", "description": "Task ID for update", "default": 0},
-                    "title": {"type": "string", "description": "Task title for add", "default": ""},
-                    "status": {"type": "string", "enum": ["not-started", "in-progress", "completed"], "default": "not-started"},
+                    "action": {
+                        "type": "string",
+                        "enum": ["add", "update", "list", "clear"],
+                    },
+                    "task_id": {
+                        "type": "integer",
+                        "description": "Task ID for update",
+                        "default": 0,
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "Task title for add",
+                        "default": "",
+                    },
+                    "status": {
+                        "type": "string",
+                        "enum": ["not-started", "in-progress", "completed"],
+                        "default": "not-started",
+                    },
                 },
                 "required": ["action"],
             },
@@ -421,7 +485,10 @@ TOOL_DEFINITIONS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "key": {"type": "string", "description": "Memory key (alphanumeric, hyphens)"},
+                    "key": {
+                        "type": "string",
+                        "description": "Memory key (alphanumeric, hyphens)",
+                    },
                     "content": {"type": "string", "description": "Content to store"},
                 },
                 "required": ["key", "content"],
@@ -436,7 +503,11 @@ TOOL_DEFINITIONS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "key": {"type": "string", "description": "Memory key (empty = list all)", "default": ""},
+                    "key": {
+                        "type": "string",
+                        "description": "Memory key (empty = list all)",
+                        "default": "",
+                    },
                 },
                 "required": [],
             },
@@ -542,7 +613,9 @@ class _ToolEngine:
         return any(fnmatch.fnmatch(path, p) or fnmatch.fnmatch(bn, p) for p in patterns)
 
     def _check_cmd(self, command: str) -> tuple:
-        dangerous = [p.strip().lower() for p in self.v.DANGEROUS_PATTERNS.split(",") if p.strip()]
+        dangerous = [
+            p.strip().lower() for p in self.v.DANGEROUS_PATTERNS.split(",") if p.strip()
+        ]
         if any(d in command.lower() for d in dangerous):
             return False, "Blocked dangerous pattern"
         try:
@@ -553,7 +626,9 @@ class _ToolEngine:
             return False, "Empty command"
         base = os.path.basename(parts[0])
         if self.v.SECURITY_MODE == "allowlist":
-            allowed = {c.strip() for c in self.v.ALLOWED_COMMANDS.split(",") if c.strip()}
+            allowed = {
+                c.strip() for c in self.v.ALLOWED_COMMANDS.split(",") if c.strip()
+            }
             if base not in allowed:
                 return False, f"'{base}' not in allowlist"
         return True, "OK"
@@ -617,7 +692,7 @@ class _ToolEngine:
                 # open-terminal returns output as list of {type, data} entries
                 stdout_parts: list[str] = []
                 stderr_parts: list[str] = []
-                for entry in (data.get("output") or []):
+                for entry in data.get("output") or []:
                     stream = entry.get("type", "output")
                     text = entry.get("data", "")
                     if stream == "stderr":
@@ -667,7 +742,8 @@ class _ToolEngine:
 
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(
-                url, headers=headers,
+                url,
+                headers=headers,
                 json={"path": resolved, "content": content},
             )
             resp.raise_for_status()
@@ -685,12 +761,11 @@ class _ToolEngine:
 
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(
-                url, headers=headers,
+                url,
+                headers=headers,
                 json={
                     "path": resolved,
-                    "replacements": [
-                        {"target": old_text, "replacement": new_text}
-                    ],
+                    "replacements": [{"target": old_text, "replacement": new_text}],
                 },
             )
             if resp.status_code == 404:
@@ -706,7 +781,9 @@ class _ToolEngine:
         url = f"{base}/files/list"
 
         async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.get(url, headers=headers, params={"directory": resolved})
+            resp = await client.get(
+                url, headers=headers, params={"directory": resolved}
+            )
             resp.raise_for_status()
             data = resp.json()
 
@@ -721,14 +798,19 @@ class _ToolEngine:
                 dirs_count += 1
             else:
                 sz = e.get("size", 0)
-                h = (f"{sz/(1024*1024):.1f}M" if sz >= 1024*1024
-                     else f"{sz/1024:.1f}K" if sz >= 1024 else f"{sz}B")
+                h = (
+                    f"{sz/(1024*1024):.1f}M"
+                    if sz >= 1024 * 1024
+                    else f"{sz/1024:.1f}K" if sz >= 1024 else f"{sz}B"
+                )
                 lines.append(f"  {name}  ({h})")
                 files_count += 1
         header = f"[{data.get('dir', path)} — {dirs_count} dirs, {files_count} files]"
         return header + "\n" + "\n".join(lines)
 
-    async def _sandbox_grep(self, pattern: str, path: str, include_pattern: str = "") -> str:
+    async def _sandbox_grep(
+        self, pattern: str, path: str, include_pattern: str = ""
+    ) -> str:
         """GET /files/grep?query=...&path=..."""
         base = self.v.SANDBOX_URL.rstrip("/")
         resolved = self._sandbox_resolve(path)
@@ -789,7 +871,9 @@ class _ToolEngine:
         lines = []
         for m in matches:
             name = m.get("path", m) if isinstance(m, dict) else str(m)
-            suffix = "/" if (isinstance(m, dict) and m.get("type") == "directory") else ""
+            suffix = (
+                "/" if (isinstance(m, dict) and m.get("type") == "directory") else ""
+            )
             lines.append(f"  {name}{suffix}")
         return f"[{len(lines)} files]\n" + "\n".join(lines)
 
@@ -807,7 +891,9 @@ class _ToolEngine:
             valid_params = set(sig.parameters.keys()) - {"self"}
             unknown = set(args.keys()) - valid_params
             if unknown:
-                _log_print("warning", f"Tool '{name}' — stripping hallucinated args: {unknown}")
+                _log_print(
+                    "warning", f"Tool '{name}' — stripping hallucinated args: {unknown}"
+                )
                 args = {k: v for k, v in args.items() if k in valid_params}
             result = await fn(**args)
             return result
@@ -823,7 +909,9 @@ class _ToolEngine:
             _log_print("error", f"Tool '{name}' unexpected error: {e}")
             return f"Error: {name} failed — {e}"
 
-    async def _t_read_file(self, file_path: str, start_line: int = 0, end_line: int = 0) -> str:
+    async def _t_read_file(
+        self, file_path: str, start_line: int = 0, end_line: int = 0
+    ) -> str:
         # ── Sandbox path ──
         if self._sandbox_full:
             try:
@@ -834,8 +922,14 @@ class _ToolEngine:
                 e = min(total, end_line) if end_line > 0 else total
                 if (e - s) > self.v.MAX_READ_LINES:
                     e = s + self.v.MAX_READ_LINES
-                numbered = [f"{i:4d} | {ln.rstrip()}" for i, ln in enumerate(lines[s:e], start=s + 1)]
-                return f"[sandbox:{file_path} — {total} lines, showing {s+1}–{e}]\n" + "\n".join(numbered)
+                numbered = [
+                    f"{i:4d} | {ln.rstrip()}"
+                    for i, ln in enumerate(lines[s:e], start=s + 1)
+                ]
+                return (
+                    f"[sandbox:{file_path} — {total} lines, showing {s+1}–{e}]\n"
+                    + "\n".join(numbered)
+                )
             except FileNotFoundError:
                 return f"Error: Not found in sandbox: {file_path}"
             except asyncio.CancelledError:
@@ -859,15 +953,21 @@ class _ToolEngine:
         e = min(total, end_line) if end_line > 0 else total
         if (e - s) > self.v.MAX_READ_LINES:
             e = s + self.v.MAX_READ_LINES
-        numbered = [f"{i:4d} | {ln.rstrip()}" for i, ln in enumerate(lines[s:e], start=s + 1)]
-        return f"[{file_path} — {total} lines, showing {s+1}–{e}]\n" + "\n".join(numbered)
+        numbered = [
+            f"{i:4d} | {ln.rstrip()}" for i, ln in enumerate(lines[s:e], start=s + 1)
+        ]
+        return f"[{file_path} — {total} lines, showing {s+1}–{e}]\n" + "\n".join(
+            numbered
+        )
 
     async def _t_write_file(self, file_path: str, content: str) -> str:
         # ── Sandbox path ──
         if self._sandbox_full:
             try:
                 await self._sandbox_file_write(file_path, content)
-                lc = content.count("\n") + (1 if content and not content.endswith("\n") else 0)
+                lc = content.count("\n") + (
+                    1 if content and not content.endswith("\n") else 0
+                )
                 return f"Created in sandbox: {file_path} ({lc} lines, {len(content.encode('utf-8'))} bytes)"
             except asyncio.CancelledError:
                 raise
@@ -917,10 +1017,14 @@ class _ToolEngine:
             old_clean = self._strip_line_numbers(old_text)
             new_clean = self._strip_line_numbers(new_text)
             try:
-                result = await self._sandbox_file_replace(file_path, old_clean, new_clean)
+                result = await self._sandbox_file_replace(
+                    file_path, old_clean, new_clean
+                )
                 old_lines = old_clean.count(chr(10)) + 1
                 new_lines = new_clean.count(chr(10)) + 1
-                return f"Edited in sandbox: {file_path} ({old_lines} → {new_lines} lines)"
+                return (
+                    f"Edited in sandbox: {file_path} ({old_lines} → {new_lines} lines)"
+                )
             except FileNotFoundError:
                 return f"Error: Not found in sandbox: {file_path}"
             except asyncio.CancelledError:
@@ -985,12 +1089,18 @@ class _ToolEngine:
                 dirs += 1
             else:
                 sz = os.path.getsize(full)
-                h = f"{sz/(1024*1024):.1f}M" if sz >= 1024*1024 else f"{sz/1024:.1f}K" if sz >= 1024 else f"{sz}B"
+                h = (
+                    f"{sz/(1024*1024):.1f}M"
+                    if sz >= 1024 * 1024
+                    else f"{sz/1024:.1f}K" if sz >= 1024 else f"{sz}B"
+                )
                 lines.append(f"  {e}  ({h})")
                 files += 1
         return f"[{path} — {dirs} dirs, {files} files]\n" + "\n".join(lines)
 
-    async def _t_grep_search(self, pattern: str, path: str = ".", include_pattern: str = "") -> str:
+    async def _t_grep_search(
+        self, pattern: str, path: str = ".", include_pattern: str = ""
+    ) -> str:
         # ── Sandbox path ──
         if self._sandbox_full:
             try:
@@ -1022,7 +1132,9 @@ class _ToolEngine:
                         searched += 1
                         for num, line in enumerate(f, 1):
                             if rx.search(line):
-                                results.append(f"{os.path.relpath(fp, resolved)}:{num}: {line.rstrip()}")
+                                results.append(
+                                    f"{os.path.relpath(fp, resolved)}:{num}: {line.rstrip()}"
+                                )
                                 if len(results) >= limit:
                                     break
                 except (UnicodeDecodeError, PermissionError, OSError):
@@ -1034,7 +1146,9 @@ class _ToolEngine:
         if not results:
             return f"No matches for '{pattern}' ({searched} files searched)"
         trunc = f" (truncated)" if len(results) >= limit else ""
-        return f"[{len(results)} matches{trunc}, {searched} files]\n" + "\n".join(results)
+        return f"[{len(results)} matches{trunc}, {searched} files]\n" + "\n".join(
+            results
+        )
 
     async def _t_find_files(self, pattern: str, path: str = ".") -> str:
         # ── Sandbox path ──
@@ -1051,7 +1165,12 @@ class _ToolEngine:
         if not os.path.isdir(resolved):
             return f"Error: Not a directory: {path}"
         import glob as gm
-        gp = os.path.join(resolved, pattern) if "**" in pattern else os.path.join(resolved, "**", pattern)
+
+        gp = (
+            os.path.join(resolved, pattern)
+            if "**" in pattern
+            else os.path.join(resolved, "**", pattern)
+        )
         matches = []
         for m in gm.glob(gp, recursive=True):
             rel = os.path.relpath(m, resolved)
@@ -1062,7 +1181,9 @@ class _ToolEngine:
                 break
         if not matches:
             return f"No files matching '{pattern}'"
-        return f"[{len(matches)} files]\n" + "\n".join(f"  {m}" for m in sorted(matches))
+        return f"[{len(matches)} files]\n" + "\n".join(
+            f"  {m}" for m in sorted(matches)
+        )
 
     async def _t_run_command(self, command: str, working_dir: str = "") -> str:
         ok, reason = self._check_cmd(command)
@@ -1070,7 +1191,10 @@ class _ToolEngine:
             return f"Error: {reason}"
         # Detect anti-pattern: using Python ast.parse on non-Python files
         if "ast.parse" in command:
-            non_py = re.search(r"open\(['\"]([^'\"]+\.(js|html|css|json|ts|jsx|tsx|vue|svelte))['\"]" , command)
+            non_py = re.search(
+                r"open\(['\"]([^'\"]+\.(js|html|css|json|ts|jsx|tsx|vue|svelte))['\"]",
+                command,
+            )
             if non_py:
                 fname, ext = non_py.group(1), non_py.group(2)
                 return (
@@ -1118,8 +1242,15 @@ class _ToolEngine:
             return f"Error: Bad directory: {working_dir}"
         shell = self.v.SHELL if os.path.exists(self.v.SHELL) else None
         try:
-            r = subprocess.run(command, shell=True, executable=shell, capture_output=True,
-                               text=True, timeout=self.v.COMMAND_TIMEOUT, cwd=cwd)
+            r = subprocess.run(
+                command,
+                shell=True,
+                executable=shell,
+                capture_output=True,
+                text=True,
+                timeout=self.v.COMMAND_TIMEOUT,
+                cwd=cwd,
+            )
             parts = []
             if r.stdout:
                 parts.append(r.stdout)
@@ -1144,12 +1275,20 @@ class _ToolEngine:
     async def _t_think(self, thought: str) -> str:
         return f"Thought recorded ({len(thought)} chars). Proceed with your plan."
 
-    async def _t_manage_todo(self, action: str, task_id: int = 0, title: str = "", status: str = "not-started") -> str:
+    async def _t_manage_todo(
+        self,
+        action: str,
+        task_id: int = 0,
+        title: str = "",
+        status: str = "not-started",
+    ) -> str:
         if action == "add":
             if not title:
                 return "Error: title required"
             self._todo_counter += 1
-            self._todo_list.append({"id": self._todo_counter, "title": title, "status": "not-started"})
+            self._todo_list.append(
+                {"id": self._todo_counter, "title": title, "status": "not-started"}
+            )
         elif action == "update":
             if status not in ("not-started", "in-progress", "completed"):
                 return f"Error: bad status '{status}'"
@@ -1170,9 +1309,16 @@ class _ToolEngine:
         if not self._todo_list:
             return "No tasks."
         icons = {"not-started": "○", "in-progress": "◐", "completed": "●"}
-        lines = [f"  {icons.get(t['status'],'?')} [{t['id']}] {t['title']} ({t['status']})" for t in self._todo_list]
+        lines = [
+            f"  {icons.get(t['status'],'?')} [{t['id']}] {t['title']} ({t['status']})"
+            for t in self._todo_list
+        ]
         done = sum(1 for t in self._todo_list if t["status"] == "completed")
-        return f"Tasks:\n" + "\n".join(lines) + f"\n\nProgress: {done}/{len(self._todo_list)}"
+        return (
+            f"Tasks:\n"
+            + "\n".join(lines)
+            + f"\n\nProgress: {done}/{len(self._todo_list)}"
+        )
 
     async def _t_save_memory(self, key: str, content: str) -> str:
         safe = re.sub(r"[^a-zA-Z0-9_-]", "-", key).strip("-")
@@ -1184,7 +1330,9 @@ class _ToolEngine:
         if not os.path.realpath(p).startswith(os.path.realpath(d)):
             return "Error: invalid key"
         with open(p, "w", encoding="utf-8") as f:
-            f.write(f"# {key}\n_Updated: {datetime.now(timezone.utc).isoformat()}_\n\n{content}")
+            f.write(
+                f"# {key}\n_Updated: {datetime.now(timezone.utc).isoformat()}_\n\n{content}"
+            )
         return f"Saved: '{key}' ({len(content)} chars)"
 
     async def _t_recall_memory(self, key: str = "") -> str:
@@ -1384,7 +1532,9 @@ class Pipe:
 
     async def _emit(self, emitter, text: str, done: bool = False):
         if emitter and self.valves.EMIT_STATUS:
-            await emitter({"type": "status", "data": {"description": text, "done": done}})
+            await emitter(
+                {"type": "status", "data": {"description": text, "done": done}}
+            )
 
     @staticmethod
     def _describe_action(tool_name: str, tool_args: dict) -> str:
@@ -1431,11 +1581,11 @@ class Pipe:
         if not content:
             return ""
         # Strip markdown formatting
-        text = re.sub(r'[*_`#]+', '', content).strip()
+        text = re.sub(r"[*_`#]+", "", content).strip()
         # Get first sentence (period, newline, or colon break)
-        m = re.match(r'(.+?(?:[.!?:]\s|$))', text, re.DOTALL)
+        m = re.match(r"(.+?(?:[.!?:]\s|$))", text, re.DOTALL)
         if m:
-            sentence = m.group(1).strip().rstrip(':')
+            sentence = m.group(1).strip().rstrip(":")
             if len(sentence) > 80:
                 sentence = sentence[:77] + "..."
             return sentence
@@ -1490,15 +1640,25 @@ class Pipe:
                 with open(self.valves.SYSTEM_PROMPT_PATH, "r", encoding="utf-8") as f:
                     external = f.read().strip()
                 if external:
-                    self._log("debug", "Loaded external system prompt",
-                              path=self.valves.SYSTEM_PROMPT_PATH, chars=len(external))
+                    self._log(
+                        "debug",
+                        "Loaded external system prompt",
+                        path=self.valves.SYSTEM_PROMPT_PATH,
+                        chars=len(external),
+                    )
                     fmt = self.valves.TOOL_CALL_FORMAT.lower()
                     if fmt == "xml":
-                        return external + SYSTEM_PROMPT_XML.split("## Tool Calling", 1)[-1]
+                        return (
+                            external + SYSTEM_PROMPT_XML.split("## Tool Calling", 1)[-1]
+                        )
                     return external
             except (OSError, IOError) as e:
-                self._log("warning", "Failed to load external prompt, using built-in",
-                          path=self.valves.SYSTEM_PROMPT_PATH, error=str(e))
+                self._log(
+                    "warning",
+                    "Failed to load external prompt, using built-in",
+                    path=self.valves.SYSTEM_PROMPT_PATH,
+                    error=str(e),
+                )
         fmt = self.valves.TOOL_CALL_FORMAT.lower()
         self._log("debug", "Using built-in system prompt", format=fmt)
         if fmt == "xml":
@@ -1555,8 +1715,12 @@ class Pipe:
                     project = "".join(project_lines).strip()
                 if project:
                     parts.append(f"## Project (from .agent/PROJECT.md)\n\n{project}")
-                    self._log("debug", "Loaded .agent/PROJECT.md",
-                              chars=len(project), lines=len(project_lines))
+                    self._log(
+                        "debug",
+                        "Loaded .agent/PROJECT.md",
+                        chars=len(project),
+                        lines=len(project_lines),
+                    )
             except (OSError, IOError):
                 pass
 
@@ -1570,7 +1734,9 @@ class Pipe:
                     # Only include last ~3000 chars of session history to save context
                     if len(ctx) > 3000:
                         ctx = "...\n" + ctx[-3000:]
-                    parts.append(f"## Recent Sessions (from .agent/context.md)\n\n{ctx}")
+                    parts.append(
+                        f"## Recent Sessions (from .agent/context.md)\n\n{ctx}"
+                    )
                     self._log("debug", "Loaded .agent/context.md", chars=len(ctx))
             except (OSError, IOError):
                 pass
@@ -1578,8 +1744,11 @@ class Pipe:
         # Load skills
         skills_dir = os.path.join(agent_dir, "skills")
         if os.path.isdir(skills_dir):
-            skill_files = sorted(f for f in os.listdir(skills_dir)
-                                 if f.endswith(".md") and f != "README.md")
+            skill_files = sorted(
+                f
+                for f in os.listdir(skills_dir)
+                if f.endswith(".md") and f != "README.md"
+            )
             for sf in skill_files:
                 try:
                     with open(os.path.join(skills_dir, sf), "r", encoding="utf-8") as f:
@@ -1608,7 +1777,9 @@ class Pipe:
             try:
                 with open(os.path.join(mem_dir, mf), "r", encoding="utf-8") as f:
                     content = f.read().strip()
-                if content and total_chars + len(content) < 4000:  # Cap total at 4k chars
+                if (
+                    content and total_chars + len(content) < 4000
+                ):  # Cap total at 4k chars
                     parts.append(f"### {mf[:-3]}\n{content}")
                     total_chars += len(content)
                     self._log("debug", f"Loaded memory: {mf}", chars=len(content))
@@ -1618,7 +1789,9 @@ class Pipe:
             return "# Saved Memories (from prior sessions)\n\n" + "\n\n".join(parts)
         return ""
 
-    def _save_agent_context(self, actions_taken: list[str], edit_failures: dict, user_request: str = ""):
+    def _save_agent_context(
+        self, actions_taken: list[str], edit_failures: dict, user_request: str = ""
+    ):
         """Auto-update .agent/context.md with accumulated session history."""
         agent_dir = os.path.join(self.valves.WORKSPACE_PATH, ".agent")
         ctx_path = os.path.join(agent_dir, "context.md")
@@ -1632,8 +1805,14 @@ class Pipe:
             if user_request:
                 session_lines.append(f"**Request:** {user_request[:200]}\n")
             if actions_taken:
-                edits = [a for a in actions_taken if "OK" in a or a.startswith("write_file")]
-                reads = [a for a in actions_taken if a.startswith("read_file") or a.startswith("grep_search")]
+                edits = [
+                    a for a in actions_taken if "OK" in a or a.startswith("write_file")
+                ]
+                reads = [
+                    a
+                    for a in actions_taken
+                    if a.startswith("read_file") or a.startswith("grep_search")
+                ]
                 cmds = [a for a in actions_taken if a.startswith("run_command")]
                 summary_parts = []
                 if edits:
@@ -1663,12 +1842,17 @@ class Pipe:
                         old_content = f.read()
                     # Extract previous session entries (marked by ### timestamp headers)
                     import re as _re
-                    session_blocks = _re.split(r'(?=\n### \d{4}-\d{2}-\d{2})', old_content)
+
+                    session_blocks = _re.split(
+                        r"(?=\n### \d{4}-\d{2}-\d{2})", old_content
+                    )
                     for block in session_blocks:
                         if block.strip().startswith("### 20"):
                             existing_sessions.append(block)
                     # Extract workspace files section if present
-                    ws_match = _re.search(r'(## Workspace Files\n.+)', old_content, _re.DOTALL)
+                    ws_match = _re.search(
+                        r"(## Workspace Files\n.+)", old_content, _re.DOTALL
+                    )
                     if ws_match:
                         workspace_section = ws_match.group(1)
                 except (OSError, IOError):
@@ -1689,7 +1873,11 @@ class Pipe:
             if os.path.isdir(ws):
                 all_files = []
                 for root, dirs, files in os.walk(ws):
-                    dirs[:] = [d for d in dirs if d not in ('.agent', '__pycache__', 'node_modules', '.git')]
+                    dirs[:] = [
+                        d
+                        for d in dirs
+                        if d not in (".agent", "__pycache__", "node_modules", ".git")
+                    ]
                     for f in files:
                         rel = os.path.relpath(os.path.join(root, f), ws)
                         all_files.append(rel)
@@ -1702,18 +1890,25 @@ class Pipe:
 
             with open(ctx_path, "w", encoding="utf-8") as f:
                 f.writelines(lines)
-            self._log("debug", "Saved .agent/context.md", actions=len(actions_taken),
-                      total_sessions=len(existing_sessions) + 1)
+            self._log(
+                "debug",
+                "Saved .agent/context.md",
+                actions=len(actions_taken),
+                total_sessions=len(existing_sessions) + 1,
+            )
         except (OSError, IOError) as e:
             self._log("warning", "Failed to save .agent/context.md", error=str(e))
 
-    def _auto_save_session(self, engine, actions_taken: list[str],
-                           edit_failures: dict, user_request: str):
+    def _auto_save_session(
+        self, engine, actions_taken: list[str], edit_failures: dict, user_request: str
+    ):
         """Programmatic post-session memory save (runs synchronously, no LLM needed).
         Saves a session summary to MEMORY_DIR and refreshes PROJECT.md file listing."""
         try:
             ts_key = datetime.now().strftime("%Y%m%d-%H%M")
-            edits = [a for a in actions_taken if "OK" in a or a.startswith("write_file")]
+            edits = [
+                a for a in actions_taken if "OK" in a or a.startswith("write_file")
+            ]
             reads = [a for a in actions_taken if a.startswith("read_file")]
             searches = [a for a in actions_taken if a.startswith("grep_search")]
 
@@ -1732,7 +1927,9 @@ class Pipe:
                     parts.append(f"Analyzed: {', '.join(sorted(read_files)[:8])}")
             failed = {f: c for f, c in edit_failures.items() if c >= 2}
             if failed:
-                parts.append(f"Issues: {', '.join(f'{f} ({c} failures)' for f, c in failed.items())}")
+                parts.append(
+                    f"Issues: {', '.join(f'{f} ({c} failures)' for f, c in failed.items())}"
+                )
 
             brief = "\n".join(parts)
 
@@ -1741,12 +1938,16 @@ class Pipe:
             os.makedirs(mem_dir, exist_ok=True)
             mem_path = os.path.join(mem_dir, f"session-{ts_key}.md")
             with open(mem_path, "w", encoding="utf-8") as f:
-                f.write(f"# Session {ts_key}\n_Saved: {datetime.now(timezone.utc).isoformat()}_\n\n{brief}")
+                f.write(
+                    f"# Session {ts_key}\n_Saved: {datetime.now(timezone.utc).isoformat()}_\n\n{brief}"
+                )
             self._log("debug", "Auto-saved session memory", key=f"session-{ts_key}")
 
             # Refresh PROJECT.md file listing if files were created
             if any(a.startswith("write_file") for a in actions_taken):
-                project_md = os.path.join(self.valves.WORKSPACE_PATH, ".agent", "PROJECT.md")
+                project_md = os.path.join(
+                    self.valves.WORKSPACE_PATH, ".agent", "PROJECT.md"
+                )
                 if os.path.isfile(project_md):
                     self._generate_project_md(project_md)
                     self._log("debug", "Refreshed PROJECT.md after file creation")
@@ -1754,8 +1955,12 @@ class Pipe:
             # Prune old session memories (keep last 20)
             if os.path.isdir(mem_dir):
                 session_files = sorted(
-                    [f for f in os.listdir(mem_dir) if f.startswith("session-") and f.endswith(".md")],
-                    reverse=True
+                    [
+                        f
+                        for f in os.listdir(mem_dir)
+                        if f.startswith("session-") and f.endswith(".md")
+                    ],
+                    reverse=True,
                 )
                 for old_f in session_files[20:]:
                     try:
@@ -1776,12 +1981,20 @@ class Pipe:
         if was_new:
             try:
                 os.makedirs(skills_dir, exist_ok=True)
-                with open(os.path.join(agent_dir, "context.md"), "w", encoding="utf-8") as f:
+                with open(
+                    os.path.join(agent_dir, "context.md"), "w", encoding="utf-8"
+                ) as f:
                     f.write("# Session History\n\n_No sessions yet._\n")
                 # Seed default clean-code skill
-                with open(os.path.join(skills_dir, "clean-code.md"), "w", encoding="utf-8") as f:
+                with open(
+                    os.path.join(skills_dir, "clean-code.md"), "w", encoding="utf-8"
+                ) as f:
                     f.write(_DEFAULT_CLEAN_CODE_SKILL)
-                self._log("info", "Created .agent/ directory with default skills", path=agent_dir)
+                self._log(
+                    "info",
+                    "Created .agent/ directory with default skills",
+                    path=agent_dir,
+                )
             except (OSError, IOError) as e:
                 self._log("warning", "Failed to create .agent/", error=str(e))
 
@@ -1799,9 +2012,21 @@ class Pipe:
             all_files: list[str] = []
             extensions: dict[str, int] = {}
             for root, dirs, files in os.walk(ws):
-                dirs[:] = [d for d in dirs
-                           if d not in ('.agent', '__pycache__', 'node_modules', '.git',
-                                        'venv', '.venv', 'dist', 'build')]
+                dirs[:] = [
+                    d
+                    for d in dirs
+                    if d
+                    not in (
+                        ".agent",
+                        "__pycache__",
+                        "node_modules",
+                        ".git",
+                        "venv",
+                        ".venv",
+                        "dist",
+                        "build",
+                    )
+                ]
                 for f in files:
                     rel = os.path.relpath(os.path.join(root, f), ws)
                     all_files.append(rel)
@@ -1814,7 +2039,11 @@ class Pipe:
             has_files = {os.path.basename(f).lower() for f in all_files}
             if "package.json" in has_files:
                 project_type = "JavaScript/Node.js"
-            elif "requirements.txt" in has_files or "pyproject.toml" in has_files or "setup.py" in has_files:
+            elif (
+                "requirements.txt" in has_files
+                or "pyproject.toml" in has_files
+                or "setup.py" in has_files
+            ):
                 project_type = "Python"
             elif "cargo.toml" in has_files:
                 project_type = "Rust"
@@ -1849,7 +2078,9 @@ class Pipe:
                 f"\n## Type\n\n{project_type}\n",
             ]
             if frameworks:
-                lines.append(f"\n## Frameworks\n\n{', '.join(sorted(set(frameworks)))}\n")
+                lines.append(
+                    f"\n## Frameworks\n\n{', '.join(sorted(set(frameworks)))}\n"
+                )
 
             # Top extensions
             top_ext = sorted(extensions.items(), key=lambda x: -x[1])[:8]
@@ -1865,17 +2096,25 @@ class Pipe:
             if len(all_files) > 40:
                 lines.append(f"- ... and {len(all_files) - 40} more\n")
 
-            lines.append("\n## Conventions\n\n_Add project conventions here as you discover them._\n")
+            lines.append(
+                "\n## Conventions\n\n_Add project conventions here as you discover them._\n"
+            )
             lines.append("\n## How to Run\n\n_Add build/run/test commands here._\n")
 
             with open(project_md_path, "w", encoding="utf-8") as f:
                 f.writelines(lines)
-            self._log("info", "Generated .agent/PROJECT.md",
-                      files=len(all_files), type=project_type)
+            self._log(
+                "info",
+                "Generated .agent/PROJECT.md",
+                files=len(all_files),
+                type=project_type,
+            )
         except (OSError, IOError) as e:
             self._log("warning", "Failed to generate PROJECT.md", error=str(e))
 
-    async def _call_llm(self, messages: list[dict], use_tools: bool = True) -> Optional[dict]:
+    async def _call_llm(
+        self, messages: list[dict], use_tools: bool = True
+    ) -> Optional[dict]:
         if httpx is None:
             self._log("error", "httpx not available")
             return None
@@ -1897,13 +2136,20 @@ class Pipe:
             payload["tools"] = TOOL_DEFINITIONS
 
         url = f"{self.valves.API_BASE_URL}/chat/completions"
-        self._log("debug", "LLM request",
-                  url=url, model=self.valves.MODEL_ID,
-                  msg_count=len(messages), use_tools=use_tools,
-                  has_tool_defs="tools" in payload)
+        self._log(
+            "debug",
+            "LLM request",
+            url=url,
+            model=self.valves.MODEL_ID,
+            msg_count=len(messages),
+            use_tools=use_tools,
+            has_tool_defs="tools" in payload,
+        )
 
         try:
-            async with httpx.AsyncClient(timeout=float(self.valves.REQUEST_TIMEOUT)) as client:
+            async with httpx.AsyncClient(
+                timeout=float(self.valves.REQUEST_TIMEOUT)
+            ) as client:
                 resp = await client.post(url, headers=headers, json=payload)
                 resp.raise_for_status()
                 data = resp.json()
@@ -1913,25 +2159,36 @@ class Pipe:
                     m = choices[0].get("message", {})
                     tc = m.get("tool_calls", []) or []
                     content_len = len(m.get("content", "") or "")
-                    self._log("debug", "LLM response",
-                              content_chars=content_len,
-                              tool_calls=len(tc),
-                              finish=choices[0].get("finish_reason", "?"))
+                    self._log(
+                        "debug",
+                        "LLM response",
+                        content_chars=content_len,
+                        tool_calls=len(tc),
+                        finish=choices[0].get("finish_reason", "?"),
+                    )
                     await self._debug_emit(f"LLM: {content_len}ch, {len(tc)} tools")
                 else:
-                    self._log("warning", "LLM returned empty choices", raw=str(data)[:500])
+                    self._log(
+                        "warning", "LLM returned empty choices", raw=str(data)[:500]
+                    )
                     await self._debug_emit("LLM: empty choices!")
                 return data
         except httpx.HTTPStatusError as e:
             body_text = e.response.text[:500] if e.response else "no body"
-            self._log("error", "LLM HTTP error",
-                      status=e.response.status_code, body=body_text)
+            self._log(
+                "error", "LLM HTTP error", status=e.response.status_code, body=body_text
+            )
             # If 400 with tools (model doesn't support), retry without
             if e.response.status_code == 400 and use_tools and fmt == "auto":
-                self._log("info", "Retrying without tool definitions (model may not support tools)")
+                self._log(
+                    "info",
+                    "Retrying without tool definitions (model may not support tools)",
+                )
                 payload.pop("tools", None)
                 try:
-                    async with httpx.AsyncClient(timeout=float(self.valves.REQUEST_TIMEOUT)) as client:
+                    async with httpx.AsyncClient(
+                        timeout=float(self.valves.REQUEST_TIMEOUT)
+                    ) as client:
                         resp = await client.post(url, headers=headers, json=payload)
                         resp.raise_for_status()
                         return resp.json()
@@ -1940,35 +2197,47 @@ class Pipe:
                     return None
             return None
         except httpx.ConnectError as e:
-            self._log("error", "LLM connection failed — is the server running?",
-                      url=url, error=str(e))
+            self._log(
+                "error",
+                "LLM connection failed — is the server running?",
+                url=url,
+                error=str(e),
+            )
             return None
         except Exception as e:
-            self._log("error", "LLM unexpected error", error=str(e), type=type(e).__name__)
+            self._log(
+                "error", "LLM unexpected error", error=str(e), type=type(e).__name__
+            )
             return None
 
     def _parse_xml_tool_calls(self, text: str) -> list[dict]:
         """Parse <tool_call>...</tool_call> blocks from text."""
         calls = []
-        for match in re.finditer(r"<tool_call>\s*(.*?)\s*</tool_call>", text, re.DOTALL):
+        for match in re.finditer(
+            r"<tool_call>\s*(.*?)\s*</tool_call>", text, re.DOTALL
+        ):
             try:
                 data = json.loads(match.group(1))
                 name = data.get("name", "")
                 args = data.get("arguments", {})
                 if name:
                     call_id = f"xml_{hashlib.md5(f'{name}{time.time()}'.encode()).hexdigest()[:8]}"
-                    calls.append({
-                        "id": call_id,
-                        "type": "function",
-                        "function": {"name": name, "arguments": json.dumps(args)},
-                    })
+                    calls.append(
+                        {
+                            "id": call_id,
+                            "type": "function",
+                            "function": {"name": name, "arguments": json.dumps(args)},
+                        }
+                    )
             except (json.JSONDecodeError, AttributeError):
                 continue
         return calls
 
     def _strip_xml_tool_calls(self, text: str) -> str:
         """Remove <tool_call> blocks from text, keeping surrounding content."""
-        return re.sub(r"<tool_call>\s*.*?\s*</tool_call>", "", text, flags=re.DOTALL).strip()
+        return re.sub(
+            r"<tool_call>\s*.*?\s*</tool_call>", "", text, flags=re.DOTALL
+        ).strip()
 
     # -- Main agent loop --
 
@@ -2034,13 +2303,16 @@ class Pipe:
                     verified_after = False  # Need fresh verification
                 # Detect verification evidence after a modification
                 elif last_modify_idx >= 0 and i > last_modify_idx:
-                    if any(sig in content for sig in [
-                        "lines, showing",   # read_file output
-                        "[exit code: 0]",   # successful run_command
-                        "Syntax OK",        # explicit syntax check
-                        "passed",           # pytest passed
-                        "OK",               # generic success
-                    ]):
+                    if any(
+                        sig in content
+                        for sig in [
+                            "lines, showing",  # read_file output
+                            "[exit code: 0]",  # successful run_command
+                            "Syntax OK",  # explicit syntax check
+                            "passed",  # pytest passed
+                            "OK",  # generic success
+                        ]
+                    ):
                         verified_after = True
 
         return last_modify_idx >= 0 and not verified_after
@@ -2063,10 +2335,13 @@ class Pipe:
         user_msgs = [m for m in messages if m.get("role") == "user"]
         asst_msgs = [m for m in messages if m.get("role") == "assistant"]
 
-        self._log("debug", "Building conversation",
-                  total_msgs=len(messages),
-                  user_msgs=len(user_msgs),
-                  asst_msgs=len(asst_msgs))
+        self._log(
+            "debug",
+            "Building conversation",
+            total_msgs=len(messages),
+            user_msgs=len(user_msgs),
+            asst_msgs=len(asst_msgs),
+        )
 
         if not user_msgs:
             return [system]
@@ -2089,10 +2364,13 @@ class Pipe:
         last = messages[-1]
         conversation.append({"role": "user", "content": last.get("content", "")})
 
-        self._log("debug", "Conversation built",
-                  turns=len(conversation),
-                  system_chars=len(system["content"]),
-                  last_user_chars=len(last.get("content", "")))
+        self._log(
+            "debug",
+            "Conversation built",
+            turns=len(conversation),
+            system_chars=len(system["content"]),
+            last_user_chars=len(last.get("content", "")),
+        )
 
         return conversation
 
@@ -2104,13 +2382,16 @@ class Pipe:
     ) -> str:
         self._emitter = __event_emitter__
         self._log("info", "=" * 60)
-        self._log("info", "PIPE INVOKED",
-                  user=(__user__ or {}).get("name", "unknown"),
-                  model_id=self.valves.MODEL_ID,
-                  api_url=self.valves.API_BASE_URL,
-                  tool_format=self.valves.TOOL_CALL_FORMAT,
-                  security=self.valves.SECURITY_MODE,
-                  workspace=self.valves.WORKSPACE_PATH)
+        self._log(
+            "info",
+            "PIPE INVOKED",
+            user=(__user__ or {}).get("name", "unknown"),
+            model_id=self.valves.MODEL_ID,
+            api_url=self.valves.API_BASE_URL,
+            tool_format=self.valves.TOOL_CALL_FORMAT,
+            security=self.valves.SECURITY_MODE,
+            workspace=self.valves.WORKSPACE_PATH,
+        )
         await self._debug_emit(
             f"Pipe active | model={self.valves.MODEL_ID} "
             f"fmt={self.valves.TOOL_CALL_FORMAT} url={self.valves.API_BASE_URL}"
@@ -2134,10 +2415,15 @@ class Pipe:
         engine = self._get_engine()
         messages = body.get("messages", [])
 
-        self._log("debug", "Incoming messages from OWUI",
-                  count=len(messages),
-                  roles=[m.get("role") for m in messages],
-                  last_content_preview=(messages[-1].get("content", "")[:200] if messages else "(empty)"))
+        self._log(
+            "debug",
+            "Incoming messages from OWUI",
+            count=len(messages),
+            roles=[m.get("role") for m in messages],
+            last_content_preview=(
+                messages[-1].get("content", "")[:200] if messages else "(empty)"
+            ),
+        )
 
         # Build clean conversation (avoids replaying stale tool history)
         conversation = self._build_conversation(messages)
@@ -2149,8 +2435,11 @@ class Pipe:
             startup_items.append("project")
         skills_dir = os.path.join(agent_base, "skills")
         if os.path.isdir(skills_dir):
-            skills = [f[:-3] for f in os.listdir(skills_dir)
-                      if f.endswith(".md") and f != "README.md"]
+            skills = [
+                f[:-3]
+                for f in os.listdir(skills_dir)
+                if f.endswith(".md") and f != "README.md"
+            ]
             if skills:
                 startup_items.append(f"skills: {', '.join(skills)}")
         mem_dir = self.valves.MEMORY_DIR
@@ -2159,13 +2448,20 @@ class Pipe:
             if mem_count:
                 startup_items.append(f"{mem_count} memories")
         if startup_items:
-            await self._emit(__event_emitter__,
-                             f"\U0001f4da Loaded: {' | '.join(startup_items)}")
+            await self._emit(
+                __event_emitter__, f"\U0001f4da Loaded: {' | '.join(startup_items)}"
+            )
         # Show sandbox status
         if self.valves.SANDBOX_URL:
-            mode = "full (commands + files)" if self.valves.SANDBOX_ENABLED else "commands only"
-            await self._emit(__event_emitter__,
-                             f"\U0001f512 Sandbox: {self.valves.SANDBOX_URL} ({mode})")
+            mode = (
+                "full (commands + files)"
+                if self.valves.SANDBOX_ENABLED
+                else "commands only"
+            )
+            await self._emit(
+                __event_emitter__,
+                f"\U0001f512 Sandbox: {self.valves.SANDBOX_URL} ({mode})",
+            )
 
         last_content = ""
         nudge_count = 0
@@ -2181,411 +2477,540 @@ class Pipe:
         self._doc_nudge_done = False  # Track post-completion documentation nudge
 
         try:
-          for iteration in range(self.valves.MAX_ITERATIONS):
-            self._log("info", f"--- Iteration {iteration + 1}/{self.valves.MAX_ITERATIONS} ---")
-            step = iteration + 1
-            # Show progress with context from last action
-            edits_done = sum(1 for a in actions_taken if "OK" in a or a.startswith("write_file"))
-            if iteration == 0:
-                thinking_msg = "\u23f3 Analyzing request..."
-            elif last_action_ctx:
-                suffix = f" [{edits_done} edits]" if edits_done else ""
-                thinking_msg = f"\u23f3 Step {step} \u00b7 {last_action_ctx}{suffix}"
-            else:
-                thinking_msg = f"\u23f3 Step {step} \u00b7 Thinking..."
-            await self._emit(__event_emitter__, thinking_msg)
-
-            # Call LLM
-            response = await self._call_llm(conversation)
-            if response is None:
-                self._log("error", "LLM returned None — call failed")
-                await self._emit(__event_emitter__, "LLM call failed", done=True)
-                self._save_agent_context(actions_taken, edit_failures, user_request)
-                if last_content:
-                    return last_content + "\n\n*[LLM call failed, returning partial result]*"
-                return (
-                    "**Code Agent Error**: Failed to reach the reasoning model.\n\n"
-                    f"Check that `{self.valves.API_BASE_URL}` is reachable and "
-                    f"`{self.valves.MODEL_ID}` is a valid model."
+            for iteration in range(self.valves.MAX_ITERATIONS):
+                self._log(
+                    "info",
+                    f"--- Iteration {iteration + 1}/{self.valves.MAX_ITERATIONS} ---",
                 )
-
-            # Extract assistant message
-            choices = response.get("choices", [])
-            if not choices:
-                self._log("error", "LLM returned no choices")
-                await self._emit(__event_emitter__, "Empty response", done=True)
-                self._save_agent_context(actions_taken, edit_failures, user_request)
-                return last_content or "Error: Empty response from model."
-
-            msg = choices[0].get("message", {})
-            content = msg.get("content", "") or ""
-            tool_calls = msg.get("tool_calls", []) or []
-            finish_reason = choices[0].get("finish_reason", "unknown")
-
-            self._log("debug", "LLM message parsed",
-                      has_content=bool(content),
-                      content_preview=content[:200] if content else "(empty)",
-                      native_tool_calls=len(tool_calls),
-                      finish_reason=finish_reason)
-            await self._debug_emit(
-                f"Step {iteration+1}: {len(content)}ch, "
-                f"{len(tool_calls)} tool_calls, finish={finish_reason}"
-            )
-
-            # Handle truncated responses (model hit max_tokens mid-thought)
-            if finish_reason == "length" and not tool_calls:
-                if not content:
-                    # Model's thinking/reasoning consumed ALL tokens — nothing produced
-                    consecutive_empty_length += 1
-                    self._log("warning",
-                              f"Empty length response #{consecutive_empty_length} — model thinking overflow")
-                    await self._debug_emit(f"THINKING OVERFLOW #{consecutive_empty_length}")
-                    if consecutive_empty_length >= 3:
-                        # Model is stuck in thinking loops — force simpler approach
-                        conversation.append({
-                            "role": "user",
-                            "content": (
-                                "IMPORTANT: Your previous responses were cut off because your "
-                                "reasoning used all available tokens. You MUST simplify your approach:\n"
-                                "1. Do NOT try to rewrite entire files in one edit_file call\n"
-                                "2. Make ONE small change at a time with edit_file (10-20 lines max)\n"
-                                "3. Or use write_file to create the complete new file in one call\n"
-                                "4. Call the tool NOW — do not plan or think further."
-                            ),
-                        })
-                    else:
-                        conversation.append({
-                            "role": "user",
-                            "content": (
-                                "Your response was cut off (thinking used all tokens). "
-                                "Take a SIMPLER action. Call ONE tool now — "
-                                "do not do extended reasoning, just act."
-                            ),
-                        })
+                step = iteration + 1
+                # Show progress with context from last action
+                edits_done = sum(
+                    1 for a in actions_taken if "OK" in a or a.startswith("write_file")
+                )
+                if iteration == 0:
+                    thinking_msg = "\u23f3 Analyzing request..."
+                elif last_action_ctx:
+                    suffix = f" [{edits_done} edits]" if edits_done else ""
+                    thinking_msg = (
+                        f"\u23f3 Step {step} \u00b7 {last_action_ctx}{suffix}"
+                    )
                 else:
-                    consecutive_empty_length = 0
-                    self._log("warning", "Response truncated (max_tokens hit) — continuing")
-                    conversation.append({"role": "assistant", "content": content})
-                    conversation.append({
-                        "role": "user",
-                        "content": "Your response was cut off due to length. Continue from where you left off.",
-                    })
-                continue
+                    thinking_msg = f"\u23f3 Step {step} \u00b7 Thinking..."
+                await self._emit(__event_emitter__, thinking_msg)
 
-            # Auto-detect XML tool calls if no native ones
-            fmt = self.valves.TOOL_CALL_FORMAT.lower()
-            if not tool_calls and content and fmt in ("auto", "xml"):
-                xml_calls = self._parse_xml_tool_calls(content)
-                if xml_calls:
-                    self._log("debug", "Parsed XML tool calls", count=len(xml_calls))
-                    tool_calls = xml_calls
-                    content = self._strip_xml_tool_calls(content)
-
-            # If no tool calls → check for narration and verification issues
-            if not tool_calls:
-                # Priority 1: Detect narration (model describing actions without doing them)
-                # BUT skip if the agent already used tools — it's likely giving a legitimate summary
-                is_narrating = (not tools_used_this_session) and self._is_narrating_action(content)
-                # Priority 2: First iteration should almost always use tools
-                is_first_with_no_action = (iteration == 0 and len(content) > 200)
-
-                if nudge_count < MAX_NUDGES and (is_narrating or is_first_with_no_action):
-                    nudge_count += 1
-                    reason = "narrating actions" if is_narrating else "no tool use on first turn"
-                    self._log("info",
-                              f"Agent {reason} without tool calls — nudge {nudge_count}/{MAX_NUDGES}")
-                    await self._debug_emit(f"NUDGE {nudge_count}/{MAX_NUDGES}: {reason}")
-                    await self._emit(
-                        __event_emitter__,
-                        f"\u26a0\ufe0f Agent is describing instead of acting \u2014 redirecting...",
+                # Call LLM
+                response = await self._call_llm(conversation)
+                if response is None:
+                    self._log("error", "LLM returned None — call failed")
+                    await self._emit(__event_emitter__, "LLM call failed", done=True)
+                    self._save_agent_context(actions_taken, edit_failures, user_request)
+                    if last_content:
+                        return (
+                            last_content
+                            + "\n\n*[LLM call failed, returning partial result]*"
+                        )
+                    return (
+                        "**Code Agent Error**: Failed to reach the reasoning model.\n\n"
+                        f"Check that `{self.valves.API_BASE_URL}` is reachable and "
+                        f"`{self.valves.MODEL_ID}` is a valid model."
                     )
-                    if content:
-                        conversation.append({"role": "assistant", "content": content})
-                    conversation.append({
-                        "role": "user",
-                        "content": (
-                            "STOP. You wrote a description of what you intend to do, but you "
-                            "did not actually call any tools. Do NOT describe actions — perform "
-                            "them. Your response must contain actual tool calls.\n\n"
-                            "Start by investigating the current state:\n"
-                            "1. Use find_files to locate relevant files\n"
-                            "2. Use read_file to read them\n"
-                            "3. Use think() to plan your approach\n"
-                            "4. Use edit_file or write_file to make changes\n"
-                            "5. Use read_file and run_command to verify\n\n"
-                            "Do this now. Call tools — do not write prose about your plan."
-                        ),
-                    })
-                    continue
 
-                # Priority 3: Agent made file changes but didn't verify
-                if nudge_count < MAX_NUDGES and self._needs_verification(conversation):
-                    nudge_count += 1
-                    self._log("info",
-                              f"Agent stopping without verification — nudge {nudge_count}/{MAX_NUDGES}")
-                    await self._emit(
-                        __event_emitter__,
-                        f"\U0001f50d Verifying changes before finishing...",
-                    )
-                    if content:
-                        conversation.append({"role": "assistant", "content": content})
-                    conversation.append({
-                        "role": "user",
-                        "content": (
-                            "STOP. You modified files but have not verified the changes. "
-                            "Before giving your final answer you MUST:\n"
-                            "1. read_file on every file you changed to confirm the edit is correct\n"
-                            "2. run_command to do a syntax check or run relevant tests\n"
-                            "Do this now."
-                        ),
-                    })
-                    continue
+                # Extract assistant message
+                choices = response.get("choices", [])
+                if not choices:
+                    self._log("error", "LLM returned no choices")
+                    await self._emit(__event_emitter__, "Empty response", done=True)
+                    self._save_agent_context(actions_taken, edit_failures, user_request)
+                    return last_content or "Error: Empty response from model."
 
-                self._log("info", "No tool calls — returning final answer",
-                          content_chars=len(content))
+                msg = choices[0].get("message", {})
+                content = msg.get("content", "") or ""
+                tool_calls = msg.get("tool_calls", []) or []
+                finish_reason = choices[0].get("finish_reason", "unknown")
+
+                self._log(
+                    "debug",
+                    "LLM message parsed",
+                    has_content=bool(content),
+                    content_preview=content[:200] if content else "(empty)",
+                    native_tool_calls=len(tool_calls),
+                    finish_reason=finish_reason,
+                )
                 await self._debug_emit(
-                    f"Final answer: {len(content)}ch, "
-                    f"{nudge_count} nudges, tools_used={tools_used_this_session}"
+                    f"Step {iteration+1}: {len(content)}ch, "
+                    f"{len(tool_calls)} tool_calls, finish={finish_reason}"
                 )
 
-                # Post-completion documentation pass: nudge model to save a memory
-                # if it used tools but never called save_memory during the session
-                did_doc = any("save_memory" in a or ".agent/" in a for a in actions_taken)
-                if tools_used_this_session and not did_doc and not getattr(self, '_doc_nudge_done', False):
-                    self._doc_nudge_done = True
-                    edits = [a for a in actions_taken if "OK" in a or a.startswith("write_file")]
-                    if edits:
-                        new_files = [a for a in actions_taken if a.startswith("write_file")]
-                        await self._emit(__event_emitter__, "\U0001f4dd Documenting session...")
-                        if content:
-                            conversation.append({"role": "assistant", "content": content})
-
-                        doc_instruction = (
-                            "Good — your coding work is done. Now document what you did:\n\n"
-                            "1. Call save_memory with a 2-3 sentence summary:\n"
-                            '   save_memory("summary", "Fixed settings menu bug in game.js by...'
-                            '")\n'
+                # Handle truncated responses (model hit max_tokens mid-thought)
+                if finish_reason == "length" and not tool_calls:
+                    if not content:
+                        # Model's thinking/reasoning consumed ALL tokens — nothing produced
+                        consecutive_empty_length += 1
+                        self._log(
+                            "warning",
+                            f"Empty length response #{consecutive_empty_length} — model thinking overflow",
                         )
-                        if new_files:
-                            doc_instruction += (
-                                "2. You created new files — update .agent/PROJECT.md to reflect "
-                                "the current file structure and any new conventions.\n"
+                        await self._debug_emit(
+                            f"THINKING OVERFLOW #{consecutive_empty_length}"
+                        )
+                        if consecutive_empty_length >= 3:
+                            # Model is stuck in thinking loops — force simpler approach
+                            conversation.append(
+                                {
+                                    "role": "user",
+                                    "content": (
+                                        "IMPORTANT: Your previous responses were cut off because your "
+                                        "reasoning used all available tokens. You MUST simplify your approach:\n"
+                                        "1. Do NOT try to rewrite entire files in one edit_file call\n"
+                                        "2. Make ONE small change at a time with edit_file (10-20 lines max)\n"
+                                        "3. Or use write_file to create the complete new file in one call\n"
+                                        "4. Call the tool NOW — do not plan or think further."
+                                    ),
+                                }
                             )
-                        doc_instruction += (
-                            "\n3. If you discovered a reusable pattern, create a skill:\n"
-                            '   write_file(".agent/skills/<name>.md", "# Pattern\\n...")\n\n'
-                            "Keep it brief. Call save_memory now, then give your final answer."
+                        else:
+                            conversation.append(
+                                {
+                                    "role": "user",
+                                    "content": (
+                                        "Your response was cut off (thinking used all tokens). "
+                                        "Take a SIMPLER action. Call ONE tool now — "
+                                        "do not do extended reasoning, just act."
+                                    ),
+                                }
+                            )
+                    else:
+                        consecutive_empty_length = 0
+                        self._log(
+                            "warning",
+                            "Response truncated (max_tokens hit) — continuing",
                         )
-                        conversation.append({"role": "user", "content": doc_instruction})
-                        continue
-
-                await self._emit(__event_emitter__, "\u2705 Complete", done=True)
-                self._save_agent_context(actions_taken, edit_failures, user_request)
-                # Programmatic auto-memory: save session summary + update PROJECT.md
-                if actions_taken and tools_used_this_session:
-                    self._auto_save_session(engine, actions_taken, edit_failures, user_request)
-                return content if content else last_content or "Done (no response content)."
-
-            # Show model's intent when it produces visible content alongside tool calls
-            if content and tool_calls:
-                intent = self._extract_intent(content)
-                if intent:
-                    await self._emit(__event_emitter__, f"\U0001f4ad {intent}")
-
-            last_content = content
-            tools_used_this_session = True
-
-            # Append assistant message to conversation
-            if msg.get("tool_calls"):
-                conversation.append(msg)
-            else:
-                conversation.append({"role": "assistant", "content": content})
-
-            # Execute each tool call
-            for tc in tool_calls:
-                func = tc.get("function", {})
-                tool_name = func.get("name", "")
-                tool_args_raw = func.get("arguments", "{}")
-                tool_id = tc.get("id", "")
-
-                if isinstance(tool_args_raw, str):
-                    try:
-                        tool_args = json.loads(tool_args_raw)
-                    except json.JSONDecodeError:
-                        self._log("warning", "Failed to parse tool args JSON",
-                                  tool=tool_name, raw=tool_args_raw[:200])
-                        tool_args = {}
-                else:
-                    tool_args = tool_args_raw
-
-                self._log("info", f"TOOL CALL: {tool_name}", args=tool_args)
-                action_desc = self._describe_action(tool_name, tool_args)
-                # Pick icon based on tool type
-                _tool_icons = {
-                    "read_file": "\U0001f4c4", "write_file": "\u270d\ufe0f",
-                    "edit_file": "\u270d\ufe0f", "run_command": "\u25b6",
-                    "find_files": "\U0001f50d", "grep_search": "\U0001f50d",
-                    "list_directory": "\U0001f4c2", "think": "\U0001f9e0",
-                    "manage_todo": "\u2611\ufe0f",
-                }
-                icon = _tool_icons.get(tool_name, "\u2699\ufe0f")
-                await self._emit(__event_emitter__, f"{icon} {action_desc}")
-
-                # Duplicate call detection — prevent wasting iterations
-                call_sig = json.dumps({"t": tool_name, "a": tool_args}, sort_keys=True)
-                if call_sig == last_tool_call_sig:
-                    dup_call_count += 1
-                    if dup_call_count >= 2:
-                        dup_guidance = (
-                            f"Error: You have called {tool_name} with identical arguments "
-                            f"{dup_call_count + 1} times in a row. STOP repeating this call. "
-                            "Move on to your next action — edit_file, write_file, or run_command."
+                        conversation.append({"role": "assistant", "content": content})
+                        conversation.append(
+                            {
+                                "role": "user",
+                                "content": "Your response was cut off due to length. Continue from where you left off.",
+                            }
                         )
-                        self._log("warning", "Duplicate tool call detected",
-                                  tool=tool_name, count=dup_call_count + 1)
+                    continue
+
+                # Auto-detect XML tool calls if no native ones
+                fmt = self.valves.TOOL_CALL_FORMAT.lower()
+                if not tool_calls and content and fmt in ("auto", "xml"):
+                    xml_calls = self._parse_xml_tool_calls(content)
+                    if xml_calls:
+                        self._log(
+                            "debug", "Parsed XML tool calls", count=len(xml_calls)
+                        )
+                        tool_calls = xml_calls
+                        content = self._strip_xml_tool_calls(content)
+
+                # If no tool calls → check for narration and verification issues
+                if not tool_calls:
+                    # Priority 1: Detect narration (model describing actions without doing them)
+                    # BUT skip if the agent already used tools — it's likely giving a legitimate summary
+                    is_narrating = (
+                        not tools_used_this_session
+                    ) and self._is_narrating_action(content)
+                    # Priority 2: First iteration should almost always use tools
+                    is_first_with_no_action = iteration == 0 and len(content) > 200
+
+                    if nudge_count < MAX_NUDGES and (
+                        is_narrating or is_first_with_no_action
+                    ):
+                        nudge_count += 1
+                        reason = (
+                            "narrating actions"
+                            if is_narrating
+                            else "no tool use on first turn"
+                        )
+                        self._log(
+                            "info",
+                            f"Agent {reason} without tool calls — nudge {nudge_count}/{MAX_NUDGES}",
+                        )
+                        await self._debug_emit(
+                            f"NUDGE {nudge_count}/{MAX_NUDGES}: {reason}"
+                        )
                         await self._emit(
                             __event_emitter__,
-                            f"\u26a0\ufe0f Duplicate {tool_name} blocked \u2014 moving on",
+                            f"\u26a0\ufe0f Agent is describing instead of acting \u2014 redirecting...",
                         )
-                        if msg.get("tool_calls"):
-                            conversation.append(msg)
-                            conversation.append({
+                        if content:
+                            conversation.append(
+                                {"role": "assistant", "content": content}
+                            )
+                        conversation.append(
+                            {
+                                "role": "user",
+                                "content": (
+                                    "STOP. You wrote a description of what you intend to do, but you "
+                                    "did not actually call any tools. Do NOT describe actions — perform "
+                                    "them. Your response must contain actual tool calls.\n\n"
+                                    "Start by investigating the current state:\n"
+                                    "1. Use find_files to locate relevant files\n"
+                                    "2. Use read_file to read them\n"
+                                    "3. Use think() to plan your approach\n"
+                                    "4. Use edit_file or write_file to make changes\n"
+                                    "5. Use read_file and run_command to verify\n\n"
+                                    "Do this now. Call tools — do not write prose about your plan."
+                                ),
+                            }
+                        )
+                        continue
+
+                    # Priority 3: Agent made file changes but didn't verify
+                    if nudge_count < MAX_NUDGES and self._needs_verification(
+                        conversation
+                    ):
+                        nudge_count += 1
+                        self._log(
+                            "info",
+                            f"Agent stopping without verification — nudge {nudge_count}/{MAX_NUDGES}",
+                        )
+                        await self._emit(
+                            __event_emitter__,
+                            f"\U0001f50d Verifying changes before finishing...",
+                        )
+                        if content:
+                            conversation.append(
+                                {"role": "assistant", "content": content}
+                            )
+                        conversation.append(
+                            {
+                                "role": "user",
+                                "content": (
+                                    "STOP. You modified files but have not verified the changes. "
+                                    "Before giving your final answer you MUST:\n"
+                                    "1. read_file on every file you changed to confirm the edit is correct\n"
+                                    "2. run_command to do a syntax check or run relevant tests\n"
+                                    "Do this now."
+                                ),
+                            }
+                        )
+                        continue
+
+                    self._log(
+                        "info",
+                        "No tool calls — returning final answer",
+                        content_chars=len(content),
+                    )
+                    await self._debug_emit(
+                        f"Final answer: {len(content)}ch, "
+                        f"{nudge_count} nudges, tools_used={tools_used_this_session}"
+                    )
+
+                    # Post-completion documentation pass: nudge model to save a memory
+                    # if it used tools but never called save_memory during the session
+                    did_doc = any(
+                        "save_memory" in a or ".agent/" in a for a in actions_taken
+                    )
+                    if (
+                        tools_used_this_session
+                        and not did_doc
+                        and not getattr(self, "_doc_nudge_done", False)
+                    ):
+                        self._doc_nudge_done = True
+                        edits = [
+                            a
+                            for a in actions_taken
+                            if "OK" in a or a.startswith("write_file")
+                        ]
+                        if edits:
+                            new_files = [
+                                a for a in actions_taken if a.startswith("write_file")
+                            ]
+                            await self._emit(
+                                __event_emitter__, "\U0001f4dd Documenting session..."
+                            )
+                            if content:
+                                conversation.append(
+                                    {"role": "assistant", "content": content}
+                                )
+
+                            doc_instruction = (
+                                "Good — your coding work is done. Now document what you did:\n\n"
+                                "1. Call save_memory with a 2-3 sentence summary:\n"
+                                '   save_memory("summary", "Fixed settings menu bug in game.js by...'
+                                '")\n'
+                            )
+                            if new_files:
+                                doc_instruction += (
+                                    "2. You created new files — update .agent/PROJECT.md to reflect "
+                                    "the current file structure and any new conventions.\n"
+                                )
+                            doc_instruction += (
+                                "\n3. If you discovered a reusable pattern, create a skill:\n"
+                                '   write_file(".agent/skills/<name>.md", "# Pattern\\n...")\n\n'
+                                "Keep it brief. Call save_memory now, then give your final answer."
+                            )
+                            conversation.append(
+                                {"role": "user", "content": doc_instruction}
+                            )
+                            continue
+
+                    await self._emit(__event_emitter__, "\u2705 Complete", done=True)
+                    self._save_agent_context(actions_taken, edit_failures, user_request)
+                    # Programmatic auto-memory: save session summary + update PROJECT.md
+                    if actions_taken and tools_used_this_session:
+                        self._auto_save_session(
+                            engine, actions_taken, edit_failures, user_request
+                        )
+                    return (
+                        content
+                        if content
+                        else last_content or "Done (no response content)."
+                    )
+
+                # Show model's intent when it produces visible content alongside tool calls
+                if content and tool_calls:
+                    intent = self._extract_intent(content)
+                    if intent:
+                        await self._emit(__event_emitter__, f"\U0001f4ad {intent}")
+
+                last_content = content
+                tools_used_this_session = True
+
+                # Append assistant message to conversation
+                if msg.get("tool_calls"):
+                    conversation.append(msg)
+                else:
+                    conversation.append({"role": "assistant", "content": content})
+
+                # Execute each tool call
+                for tc in tool_calls:
+                    func = tc.get("function", {})
+                    tool_name = func.get("name", "")
+                    tool_args_raw = func.get("arguments", "{}")
+                    tool_id = tc.get("id", "")
+
+                    if isinstance(tool_args_raw, str):
+                        try:
+                            tool_args = json.loads(tool_args_raw)
+                        except json.JSONDecodeError:
+                            self._log(
+                                "warning",
+                                "Failed to parse tool args JSON",
+                                tool=tool_name,
+                                raw=tool_args_raw[:200],
+                            )
+                            tool_args = {}
+                    else:
+                        tool_args = tool_args_raw
+
+                    self._log("info", f"TOOL CALL: {tool_name}", args=tool_args)
+                    action_desc = self._describe_action(tool_name, tool_args)
+                    # Pick icon based on tool type
+                    _tool_icons = {
+                        "read_file": "\U0001f4c4",
+                        "write_file": "\u270d\ufe0f",
+                        "edit_file": "\u270d\ufe0f",
+                        "run_command": "\u25b6",
+                        "find_files": "\U0001f50d",
+                        "grep_search": "\U0001f50d",
+                        "list_directory": "\U0001f4c2",
+                        "think": "\U0001f9e0",
+                        "manage_todo": "\u2611\ufe0f",
+                    }
+                    icon = _tool_icons.get(tool_name, "\u2699\ufe0f")
+                    await self._emit(__event_emitter__, f"{icon} {action_desc}")
+
+                    # Duplicate call detection — prevent wasting iterations
+                    call_sig = json.dumps(
+                        {"t": tool_name, "a": tool_args}, sort_keys=True
+                    )
+                    if call_sig == last_tool_call_sig:
+                        dup_call_count += 1
+                        if dup_call_count >= 2:
+                            dup_guidance = (
+                                f"Error: You have called {tool_name} with identical arguments "
+                                f"{dup_call_count + 1} times in a row. STOP repeating this call. "
+                                "Move on to your next action — edit_file, write_file, or run_command."
+                            )
+                            self._log(
+                                "warning",
+                                "Duplicate tool call detected",
+                                tool=tool_name,
+                                count=dup_call_count + 1,
+                            )
+                            await self._emit(
+                                __event_emitter__,
+                                f"\u26a0\ufe0f Duplicate {tool_name} blocked \u2014 moving on",
+                            )
+                            if msg.get("tool_calls"):
+                                conversation.append(msg)
+                                conversation.append(
+                                    {
+                                        "role": "tool",
+                                        "tool_call_id": tool_id,
+                                        "content": dup_guidance,
+                                    }
+                                )
+                            else:
+                                conversation.append(
+                                    {"role": "assistant", "content": content or ""}
+                                )
+                                conversation.append(
+                                    {
+                                        "role": "user",
+                                        "content": f'<tool_result name="{tool_name}">\n{dup_guidance}\n</tool_result>',
+                                    }
+                                )
+                            continue
+                    else:
+                        dup_call_count = 0
+                    last_tool_call_sig = call_sig
+
+                    # Execute
+                    t0 = time.time()
+                    result = await engine.execute(tool_name, tool_args)
+                    elapsed = time.time() - t0
+
+                    result_desc = self._describe_result(tool_name, result)
+                    self._log(
+                        "info",
+                        f"TOOL RESULT: {tool_name}",
+                        elapsed_s=round(elapsed, 2),
+                        result_chars=len(result),
+                        result_preview=result[:300],
+                    )
+                    await self._debug_emit(
+                        f"Tool {tool_name}: {len(result)}ch in {elapsed:.1f}s"
+                    )
+                    await self._emit(__event_emitter__, f"  {result_desc}")
+                    # Build concise context for next "Thinking..." status
+                    # e.g. "Read game.js", "Edited game.js ✓", "Searched isGameRunning"
+                    fp = tool_args.get("file_path", tool_args.get("path", ""))
+                    short_fp = os.path.basename(fp) if fp else ""
+                    if tool_name == "read_file":
+                        last_action_ctx = (
+                            f"Read {short_fp}" if short_fp else "Read file"
+                        )
+                    elif tool_name in ("edit_file", "write_file"):
+                        ok = "\u2713" if not result.startswith("Error:") else "\u2717"
+                        last_action_ctx = f"{'Edited' if tool_name == 'edit_file' else 'Wrote'} {short_fp} {ok}"
+                    elif tool_name == "run_command":
+                        cmd_short = tool_args.get("command", "")[:30]
+                        ok = "\u2713" if "[exit code: 0]" in result else "\u2717"
+                        last_action_ctx = f"Ran {cmd_short} {ok}"
+                    elif tool_name == "grep_search":
+                        last_action_ctx = (
+                            f"Searched {tool_args.get('pattern', '')[:25]}"
+                        )
+                    elif tool_name == "find_files":
+                        last_action_ctx = f"Found files"
+                    elif tool_name == "think":
+                        last_action_ctx = "Planning next step"
+                    else:
+                        last_action_ctx = f"{tool_name} done"
+
+                    # Track edit failures for stuck-loop detection
+                    if tool_name == "edit_file":
+                        fp = tool_args.get("file_path", "")
+                        if result.startswith("Error:"):
+                            edit_failures[fp] = edit_failures.get(fp, 0) + 1
+                            actions_taken.append(f"edit_file({fp}) FAILED")
+                            if edit_failures[fp] >= 2:
+                                result += (
+                                    "\n\n⚠️ edit_file has FAILED "
+                                    f"{edit_failures[fp]} times on {fp}. "
+                                    "STOP using edit_file for this file. Instead, use "
+                                    "write_file to rewrite the COMPLETE file with all changes. "
+                                    "Read the current file with read_file first, then call "
+                                    "write_file with the full updated content."
+                                )
+                        else:
+                            edit_failures.pop(fp, None)  # Reset on success
+                            actions_taken.append(f"edit_file({fp}) OK")
+                    elif tool_name == "write_file":
+                        actions_taken.append(
+                            f"write_file({tool_args.get('file_path', '')})"
+                        )
+                    elif tool_name == "run_command":
+                        cmd_preview = tool_args.get("command", "")[:40]
+                        actions_taken.append(f"run_command({cmd_preview})")
+                    elif tool_name == "read_file":
+                        actions_taken.append(
+                            f"read_file({tool_args.get('file_path', '')})"
+                        )
+                    elif tool_name == "grep_search":
+                        actions_taken.append(
+                            f"grep_search({tool_args.get('pattern', '')[:30]})"
+                        )
+                    elif tool_name not in ("think", "find_files", "list_directory"):
+                        actions_taken.append(f"{tool_name}()")
+
+                    # Add result to conversation
+                    if msg.get("tool_calls"):
+                        conversation.append(
+                            {
                                 "role": "tool",
                                 "tool_call_id": tool_id,
-                                "content": dup_guidance,
-                            })
-                        else:
-                            conversation.append({"role": "assistant", "content": content or ""})
-                            conversation.append({
-                                "role": "user",
-                                "content": f"<tool_result name=\"{tool_name}\">\n{dup_guidance}\n</tool_result>",
-                            })
-                        continue
-                else:
-                    dup_call_count = 0
-                last_tool_call_sig = call_sig
-
-                # Execute
-                t0 = time.time()
-                result = await engine.execute(tool_name, tool_args)
-                elapsed = time.time() - t0
-
-                result_desc = self._describe_result(tool_name, result)
-                self._log("info", f"TOOL RESULT: {tool_name}",
-                          elapsed_s=round(elapsed, 2),
-                          result_chars=len(result),
-                          result_preview=result[:300])
-                await self._debug_emit(f"Tool {tool_name}: {len(result)}ch in {elapsed:.1f}s")
-                await self._emit(__event_emitter__, f"  {result_desc}")
-                # Build concise context for next "Thinking..." status
-                # e.g. "Read game.js", "Edited game.js ✓", "Searched isGameRunning"
-                fp = tool_args.get("file_path", tool_args.get("path", ""))
-                short_fp = os.path.basename(fp) if fp else ""
-                if tool_name == "read_file":
-                    last_action_ctx = f"Read {short_fp}" if short_fp else "Read file"
-                elif tool_name in ("edit_file", "write_file"):
-                    ok = "\u2713" if not result.startswith("Error:") else "\u2717"
-                    last_action_ctx = f"{'Edited' if tool_name == 'edit_file' else 'Wrote'} {short_fp} {ok}"
-                elif tool_name == "run_command":
-                    cmd_short = tool_args.get("command", "")[:30]
-                    ok = "\u2713" if "[exit code: 0]" in result else "\u2717"
-                    last_action_ctx = f"Ran {cmd_short} {ok}"
-                elif tool_name == "grep_search":
-                    last_action_ctx = f"Searched {tool_args.get('pattern', '')[:25]}"
-                elif tool_name == "find_files":
-                    last_action_ctx = f"Found files"
-                elif tool_name == "think":
-                    last_action_ctx = "Planning next step"
-                else:
-                    last_action_ctx = f"{tool_name} done"
-
-                # Track edit failures for stuck-loop detection
-                if tool_name == "edit_file":
-                    fp = tool_args.get("file_path", "")
-                    if result.startswith("Error:"):
-                        edit_failures[fp] = edit_failures.get(fp, 0) + 1
-                        actions_taken.append(f"edit_file({fp}) FAILED")
-                        if edit_failures[fp] >= 2:
-                            result += (
-                                "\n\n⚠️ edit_file has FAILED "
-                                f"{edit_failures[fp]} times on {fp}. "
-                                "STOP using edit_file for this file. Instead, use "
-                                "write_file to rewrite the COMPLETE file with all changes. "
-                                "Read the current file with read_file first, then call "
-                                "write_file with the full updated content."
-                            )
+                                "content": result,
+                            }
+                        )
                     else:
-                        edit_failures.pop(fp, None)  # Reset on success
-                        actions_taken.append(f"edit_file({fp}) OK")
-                elif tool_name == "write_file":
-                    actions_taken.append(f"write_file({tool_args.get('file_path', '')})")
-                elif tool_name == "run_command":
-                    cmd_preview = tool_args.get("command", "")[:40]
-                    actions_taken.append(f"run_command({cmd_preview})")
-                elif tool_name == "read_file":
-                    actions_taken.append(f"read_file({tool_args.get('file_path', '')})")
-                elif tool_name == "grep_search":
-                    actions_taken.append(f"grep_search({tool_args.get('pattern', '')[:30]})")
-                elif tool_name not in ("think", "find_files", "list_directory"):
-                    actions_taken.append(f"{tool_name}()")
+                        conversation.append(
+                            {
+                                "role": "user",
+                                "content": f'<tool_result name="{tool_name}">\n{result}\n</tool_result>',
+                            }
+                        )
 
-                # Add result to conversation
+                # After all tool results: inject a brief reminder to keep using tools.
+                # This prevents the model from "forgetting" it can call tools after
+                # seeing results and switching to narrative mode.
+                tool_reminder = (
+                    "Tool results above. Continue using tools for your next action. "
+                    "Do NOT describe what you will do — call the tool directly. "
+                    "If you need to modify a file, call edit_file or write_file now. "
+                    "If you need to verify, call read_file or run_command now."
+                )
                 if msg.get("tool_calls"):
-                    conversation.append({
-                        "role": "tool",
-                        "tool_call_id": tool_id,
-                        "content": result,
-                    })
+                    # For native format, use a system message (some providers support it mid-conversation)
+                    conversation.append({"role": "system", "content": tool_reminder})
                 else:
-                    conversation.append({
-                        "role": "user",
-                        "content": f"<tool_result name=\"{tool_name}\">\n{result}\n</tool_result>",
-                    })
+                    # For XML format, use user message
+                    conversation.append({"role": "user", "content": tool_reminder})
 
-            # After all tool results: inject a brief reminder to keep using tools.
-            # This prevents the model from "forgetting" it can call tools after
-            # seeing results and switching to narrative mode.
-            tool_reminder = (
-                "Tool results above. Continue using tools for your next action. "
-                "Do NOT describe what you will do — call the tool directly. "
-                "If you need to modify a file, call edit_file or write_file now. "
-                "If you need to verify, call read_file or run_command now."
+            # Max iterations — include action summary for context on "continue"
+            self._log(
+                "warning", "Max iterations reached", max=self.valves.MAX_ITERATIONS
             )
-            if msg.get("tool_calls"):
-                # For native format, use a system message (some providers support it mid-conversation)
-                conversation.append({"role": "system", "content": tool_reminder})
-            else:
-                # For XML format, use user message
-                conversation.append({"role": "user", "content": tool_reminder})
-
-          # Max iterations — include action summary for context on "continue"
-          self._log("warning", "Max iterations reached", max=self.valves.MAX_ITERATIONS)
-          await self._emit(__event_emitter__, "Max iterations reached", done=True)
-          self._save_agent_context(actions_taken, edit_failures, user_request)
-          summary_parts = []
-          if actions_taken:
-              summary_parts.append("**Actions taken:** " + "; ".join(actions_taken[-10:]))
-          failed = {f: c for f, c in edit_failures.items() if c >= 2}
-          if failed:
-              summary_parts.append(
-                  "**Stuck on:** " + ", ".join(f"`{f}` ({c} failures)" for f, c in failed.items())
-                  + " — try asking me to rewrite these files from scratch."
-              )
-          summary = "\n\n".join(summary_parts) if summary_parts else ""
-          return (
-              (last_content or "")
-              + "\n\n*[Reached maximum iterations. Continue the conversation for more steps.]*"
-              + (f"\n\n{summary}" if summary else "")
-          )
+            await self._emit(__event_emitter__, "Max iterations reached", done=True)
+            self._save_agent_context(actions_taken, edit_failures, user_request)
+            summary_parts = []
+            if actions_taken:
+                summary_parts.append(
+                    "**Actions taken:** " + "; ".join(actions_taken[-10:])
+                )
+            failed = {f: c for f, c in edit_failures.items() if c >= 2}
+            if failed:
+                summary_parts.append(
+                    "**Stuck on:** "
+                    + ", ".join(f"`{f}` ({c} failures)" for f, c in failed.items())
+                    + " — try asking me to rewrite these files from scratch."
+                )
+            summary = "\n\n".join(summary_parts) if summary_parts else ""
+            return (
+                (last_content or "")
+                + "\n\n*[Reached maximum iterations. Continue the conversation for more steps.]*"
+                + (f"\n\n{summary}" if summary else "")
+            )
 
         except asyncio.CancelledError:
-            self._log("info", "Agent interrupted by user",
-                      iteration=iteration + 1, actions=len(actions_taken))
+            self._log(
+                "info",
+                "Agent interrupted by user",
+                iteration=iteration + 1,
+                actions=len(actions_taken),
+            )
             await self._emit(__event_emitter__, "Interrupted", done=True)
             self._save_agent_context(actions_taken, edit_failures, user_request)
             summary = ""
             if actions_taken:
-                summary = "\n\n**Progress before interruption:** " + "; ".join(actions_taken[-10:])
+                summary = "\n\n**Progress before interruption:** " + "; ".join(
+                    actions_taken[-10:]
+                )
             return (
                 (last_content or "")
                 + "\n\n*[Interrupted. You can continue or redirect with a new message.]*"

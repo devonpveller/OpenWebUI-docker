@@ -5,6 +5,10 @@ Two coupled tracks, **run in this order**:
 1. **[KNOWLEDGE-MIGRATION-PLAN.md](KNOWLEDGE-MIGRATION-PLAN.md)** — copy the existing
    OWUI knowledge collections into Open Brain (OB1) as `threads` + `sources`,
    **before** touching the OWUI version. Read-only against OWUI; additive into OB1.
+   > The `migration/` scripts have been **generalized and relocated** to the
+   > reusable tool [`tools/owui-knowledge-to-openbrain/`](../../../tools/owui-knowledge-to-openbrain/)
+   > (entry = any OWUI `webui.db`, endpoint = Open Brain). This plan remains as the
+   > historical record of the 2026-06 run; the staging artifacts were removed.
 2. **[UPGRADE-PLAN.md](UPGRADE-PLAN.md)** — the 0.9.6 prep/breaking-change runbook.
 
 ## Why migrate first

@@ -12,9 +12,22 @@ this stack's own capabilities instead of OWUI primitives.
 
 1. [CONCEPT-ai-stack-user-created-automations.md](CONCEPT-ai-stack-user-created-automations.md)
    — the full concept: vocabulary (node / format node / automation / run),
-   architecture (`automations-ui` + `automations-engine`), node catalogue grounded
-   in live services, the flagship Research-fan-out example, tailnet+cloudflared
-   exposure, risks, and the **feasibility verdict** (§10).
+   architecture, node catalogue grounded in live services, the flagship
+   Research-fan-out example, tailnet+cloudflared exposure, risks, and the
+   **feasibility verdict** (§10).
+2. [PLAN-integration-automations.md](PLAN-integration-automations.md) — the v1
+   integration plan, grounded in live ports/endpoints. **Supersedes the concept's
+   bespoke `automations-engine`: v1 adopts n8n as the engine+UI.** Covers the
+   cross-project network seam, exact Research/ON/Podcast contracts, the OWUI-sink
+   gap, tailnet serve wiring, and compose/recovery discipline.
+3. [TASKS-integration-automations.md](TASKS-integration-automations.md) — the
+   phased build checklist (P0 tailnet spike → P1 fan-out → P2 deferred), each task
+   with a done-when.
+
+### Locked decisions (2026-06-13)
+Fold into **main stack** · **single-user, tailnet-first** (no cloudflared in v1) ·
+adopt **n8n** (recommended: run full n8n + nodes, *not* fork the editor — see
+PLAN §2) · v1 scope = **Research fan-out only**.
 
 ## One-line verdict
 

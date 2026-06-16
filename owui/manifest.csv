@@ -1,0 +1,17 @@
+id,type,name,bytes
+add_web_sources_to_knowledge,action,Add Web Sources to Knowledge,22306
+copy_research_note,action,Copy Research Note,13178
+copy_sources,action,Copy Sources,7728
+context_window_manager,filter,Context Window Manager,11902
+mnemory_persistent_memory,filter,Mnemory Persistent Memory,41836
+ai_stack_unified_pipe_function,pipe,Server Status,18863
+code_agent,pipe,Code Agent,133419
+githelper,pipe,GitHelper,27607
+github_chat_mcp,pipe,GitHub Chat MCP,10953
+little_coder,pipe,Little Coder,32467
+code_agent_tools,tool,Code Agent Tools,33235
+deep_research,tool,Deep Research,8105
+fileshed,tool,FileShed,438768
+github_chat_mcp_tools,tool,GitHub Repo Analyzer,50690
+mnemory,tool,mnemory,23789
+superpowers_tool,tool,superpowers_tool,149450

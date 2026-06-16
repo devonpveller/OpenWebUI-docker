@@ -2,9 +2,16 @@
 
 A modular, expandable toolset that replicates Claude Code's chain-of-thought reasoning and tool-calling workflow inside Open WebUI. Works with any OpenAI-compatible model (Ollama, LM Studio, vLLM, etc.).
 
+> **Deploy-by-paste sources are centralized** in [`owui/`](../../owui/) (canonical,
+> == live deployment): the Tool is [`owui/tools/code_agent_tools.py`](../../owui/tools/code_agent_tools.py)
+> and the Pipe is [`owui/pipes/code_agent.py`](../../owui/pipes/code_agent.py)
+> *(currently inactive in OWUI)*. This folder holds the design docs, system
+> prompt, and `.agent/` skills. References to `code_agent_*.py` below mean those
+> centralized files.
+
 ## Files
 
-| File                  | Type          | Purpose                                                                  |
+| File (in `owui/`)     | Type          | Purpose                                                                  |
 | --------------------- | ------------- | ------------------------------------------------------------------------ |
 | `code_agent_tools.py` | **OWUI Tool** | Individual tool functions the model calls via native function calling    |
 | `code_agent_pipe.py`  | **OWUI Pipe** | Full agentic loop — wraps any model with Claude Code-style orchestration |

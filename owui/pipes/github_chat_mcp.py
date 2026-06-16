@@ -12,7 +12,6 @@ from typing import Optional, List, Dict, Any
 import requests
 import json
 
-
 GITHUB_CHAT_API_BASE = "https://api.github-chat.com"
 
 
@@ -44,7 +43,9 @@ class Pipe:
         user_message = self._get_last_user_message(messages)
 
         if not user_message:
-            return "Please provide a message with a GitHub repository URL or a question."
+            return (
+                "Please provide a message with a GitHub repository URL or a question."
+            )
 
         if "github-chat-index" in model_id:
             return self._handle_index(user_message)
@@ -68,6 +69,7 @@ class Pipe:
 
     def _extract_repo_url(self, text: str) -> Optional[str]:
         import re
+
         match = re.search(r"https://github\.com/[\w\-\.]+/[\w\-\.]+", text)
         if match:
             url = match.group(0).rstrip("/.")
@@ -100,12 +102,18 @@ class Pipe:
                     "error": f"API returned status {response.status_code}: {response.text[:500]}",
                 }
         except requests.Timeout:
-            return {"success": False, "error": "Request timed out. The repository may be very large — try again."}
+            return {
+                "success": False,
+                "error": "Request timed out. The repository may be very large — try again.",
+            }
         except requests.RequestException as e:
             return {"success": False, "error": f"Network error: {str(e)}"}
 
     def _query_repository(
-        self, repo_url: str, question: str, conversation_history: Optional[List[Dict[str, str]]] = None
+        self,
+        repo_url: str,
+        question: str,
+        conversation_history: Optional[List[Dict[str, str]]] = None,
     ) -> dict:
         messages = conversation_history or []
         messages.append({"role": "user", "content": question})
@@ -126,7 +134,10 @@ class Pipe:
                     "error": f"API returned status {response.status_code}: {response.text[:500]}",
                 }
         except requests.Timeout:
-            return {"success": False, "error": "Query timed out. Try a more specific question."}
+            return {
+                "success": False,
+                "error": "Query timed out. Try a more specific question.",
+            }
         except requests.RequestException as e:
             return {"success": False, "error": f"Network error: {str(e)}"}
 
@@ -140,7 +151,11 @@ class Pipe:
                 meta = ctx.get("meta_data", {})
                 file_path = meta.get("file_path", "unknown")
                 formatted += f"{i}. `{file_path}`\n"
-        return formatted.strip() if formatted.strip() else "No answer returned from the API."
+        return (
+            formatted.strip()
+            if formatted.strip()
+            else "No answer returned from the API."
+        )
 
     def _build_conversation_history(self, messages: list) -> List[Dict[str, str]]:
         history = []
@@ -150,7 +165,9 @@ class Pipe:
             if role in ("user", "assistant") and content:
                 if isinstance(content, list):
                     text_parts = [
-                        p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text"
+                        p.get("text", "")
+                        for p in content
+                        if isinstance(p, dict) and p.get("type") == "text"
                     ]
                     content = " ".join(text_parts)
                 history.append({"role": role, "content": str(content)})
@@ -228,9 +245,18 @@ class Pipe:
         # Build the question
         question = user_message.replace(repo_url, "").strip()
         # Clean up common preamble words left after URL removal
-        for prefix in ("analyze", "index", "check", "look at", "review", "examine", "and", "then"):
+        for prefix in (
+            "analyze",
+            "index",
+            "check",
+            "look at",
+            "review",
+            "examine",
+            "and",
+            "then",
+        ):
             if question.lower().startswith(prefix):
-                question = question[len(prefix):].strip()
+                question = question[len(prefix) :].strip()
 
         if not question:
             question = "Provide a high-level overview of this repository including its purpose, architecture, tech stack, and main components."
