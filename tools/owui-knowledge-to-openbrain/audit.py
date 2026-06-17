@@ -14,7 +14,10 @@ Never writes to OWUI. Pure stdlib.
 """
 import sqlite3, json, hashlib, csv, collections, sys, os
 
-DB = sys.argv[1] if len(sys.argv) > 1 else "webui.live.db"
+# Entry point: a READ-ONLY copy of any OWUI version's webui.db. Pass the path as
+# argv[1] (or set WEBUI_DB). Take a copy first — never point this at the live DB
+# a running container holds open.
+DB = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("WEBUI_DB", "webui.db")
 THRESHOLD_PREVIEW = [0, 50, 100, 200, 500, 1000]  # for the survival preview only
 MIN_FILES_PER_COLLECTION = 2                       # low-volume flag (advisory)
 

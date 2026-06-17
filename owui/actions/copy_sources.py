@@ -188,9 +188,11 @@ class Action:
             return "\n".join(s["url"] for s in sources if s.get("url"))
 
         if fmt == "json":
-            payload = sources if self.valves.include_excerpts else [
-                {"title": s["title"], "url": s["url"]} for s in sources
-            ]
+            payload = (
+                sources
+                if self.valves.include_excerpts
+                else [{"title": s["title"], "url": s["url"]} for s in sources]
+            )
             return json.dumps(payload, indent=2, ensure_ascii=False)
 
         lines = []

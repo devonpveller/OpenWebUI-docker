@@ -72,28 +72,55 @@ The flagship node — **Research** — has:
 - Output: a `research_result` object = `{ synthesis, cited_sources, gaps,
   thread_id, metrics }` — the **raw** result, *before* formatting.
 
-### 3.2 Output / Format node
-The user is right that "each output is really just a formatting." So Research's
-three outputs are **not** three different research runs — they are three
-**Format nodes** that consume the same `research_result`:
+### 3.2 Output node — store vs. surface (corrected model)
 
-- **Format → OWUI chat**: render `synthesis` + `cited_sources` into a new OWUI
-  chat (or push as a message). Mirrors `deep_research_thin_client.py` rendering.
-- **Format → Open Notebook chat**: same JSON contract, rendered in ON.
-- **Format → Podcast**: feed grounded claims into the podcast script generator,
-  then render audio via Open Notebook `/api/podcasts/generate` →
-  `GET /api/podcasts/episodes/{id}/audio`.
+The user is right that "each output is really just a formatting." But there's a
+distinction the first draft blurred (corrected 2026-06-17):
 
-This separation matters: it means **any** node producing a compatible payload can
-fan out to **any** Format node. Formatting is a node category, not a property of
-Research.
+- **Canonical store = Open Brain.** Open Brain is the knowledge store. The Research
+  node **already writes its result there** (via the curator: thread placement +
+  grounded claims). **Open Notebook is *not* a store — it's a viewer over Open
+  Brain.** So you never "write to Open Notebook"; you write to Open Brain and ON
+  *displays* it.
+- **Outputs are therefore mostly *surfacings*** of a result that (when it's
+  knowledge) already lives in Open Brain — not separate stores:
+
+| Output | Nature | Note |
+|--------|--------|------|
+| **Open Brain** | canonical store | default for knowledge; **automatic** for research (curator) |
+| **Open Notebook** | a *view* of Open Brain | free once it's in Open Brain — no write |
+| **Podcast** | an audio *rendering* | reuses ON's podcast renderer/TTS |
+| **OWUI chat** | a *surfacing/notification* into OWUI | unverified (PLAN §5.2) |
+| **Teams-chat (Mattermost)** | a *surfacing* into the orchestration chat | **leading future candidate**, governance-gated (PLAN §5.5) |
+
+Two consequences: (1) **any** node producing a compatible payload can fan out to
+**any** surfacing destination — surfacing is a node category, not a property of
+Research; (2) **output destinations are an open design area** — Open Brain is the
+sensible default *where the result is knowledge*, but not every automation fits
+that, so the surfacing palette (OWUI / podcast / teams-chat / …) is explored as the
+stack grows.
+
+**Most outputs terminate *outside* the ai-stack (operator, 2026-06-17).** n8n's
+gravity is its **native integration catalog** — Slack, Discord, Etsy, Sheets,
+email, hundreds more. The common case is an automation whose result reaches its
+**natural external endpoint and ends there** (a Slack message, a Discord post, an
+Etsy listing). Feeding a result **back into the ai-stack** — Open Brain or
+Mattermost — is a **deliberate, opt-in connection the user wires**, not the default.
+So the ai-stack custom nodes are best understood as the **bridge between the
+private stack and the outside automation world**: *Research* as an input/source,
+*Open Brain* / *Mattermost* as deliberate ai-stack output destinations, living
+**alongside** n8n's external outputs rather than replacing them. Exactly how the
+Open-Brain and Mattermost outputs should behave is **deferred until n8n is
+hands-on** (PLAN §10b) — the native catalog + data-passing model has to be felt
+first.
 
 ### 3.3 Automation (the graph)
 An **automation** is a directed graph of nodes with:
 - **An input/trigger** (required): manual "Run" button, a schedule (cron), a
   webhook, or an upstream event.
-- **An output/sink** (required): OWUI chat, ON, podcast, Open Brain capture,
-  email digest, wiki, or a file.
+- **An output** (required): the canonical store (Open Brain — often written by the
+  producing node itself) and/or a *surfacing* destination (Open Notebook view,
+  podcast, OWUI chat, teams-chat, email, wiki). See §3.2 — store vs. surface.
 - **Edges**: an edge from node A's output port to node B's input port means
   "when A completes, pass its output and trigger B." This is the UI-level
   generalization of the existing `NEXT_TRIGGER_URL` chain.
@@ -174,10 +201,11 @@ needs a thin wrapper; **BUILD** = needs new work.
 
 | Node | Backing service | Trigger | Contract | Maturity |
 |------|-----------------|---------|----------|----------|
-| **Research** | `openbrain-research` | `POST /research` → poll `GET /research/jobs/:id` (+ SSE) | async | **READY** |
-| **Format → OWUI chat** | `openwebui` REST API | `POST /api/v1/chat/...` | sync | **ADAPTER** (render + push) |
-| **Format → Open Notebook** | `open_notebook` REST | `/api/...` | sync | **ADAPTER** |
-| **Format → Podcast** | `openbrain-podcast` + ON `/api/podcasts/generate` | `POST /run` → poll `/health`; fetch audio | async | **ADAPTER** (decouple from digest chain) |
+| **Research** | `openbrain-research` | `POST /research` → poll `GET /research/jobs/:id` (+ SSE); **auto-persists to Open Brain via curator** | async | **READY** |
+| **Open Brain (canonical output)** | `openbrain-curator` / `openbrain-mcp` | written *by* the research harness; ON *displays* it (no ON write) | — | **automatic** for research |
+| **Surface → Podcast** | ON `/api/podcasts/generate` (bypass `openbrain-podcast`) | `POST /generate` → poll `/jobs/:id`; fetch audio | async | **ADAPTER** (decouple from digest chain) |
+| **Surface → OWUI chat** | `openwebui` REST API | `POST /api/v1/chats/...` (create chat) | sync | **ADAPTER — unverified** (PLAN §5.2) |
+| **Surface → Teams-chat** | Mattermost via `agent-bridge` (teams-chat project) | governance-gated post | async | **BUILD** (future, PLAN §5.5) |
 | **Web search** | `search-gateway` (SearXNG/Tor) | `GET /search?q=` | sync | **READY** |
 | **Open Brain capture** | `openbrain-mcp` | MCP `capture_thought` | sync | **READY** |
 | **Open Brain search** | `openbrain-mcp` | MCP `search` / `search_thoughts` / `search_claims` | sync | **READY** |
@@ -205,25 +233,26 @@ backend services.
             │
             ▼
    ┌──────────────────┐
-   │  Research node   │  POST /research {query, origin:"automation"}
-   │  (async, polled) │  → waits until status==done
-   └────────┬─────────┘
-            │  research_result { synthesis, cited_sources, gaps, thread_id }
-            ├───────────────┬───────────────────┐
-            ▼               ▼                   ▼
-   ┌──────────────┐  ┌──────────────┐   ┌───────────────────┐
-   │ Format→OWUI  │  │ Format→ON    │   │ Format→Podcast    │
-   │ (chat)       │  │ (chat)       │   │ (audio episode)   │
-   └──────┬───────┘  └──────┬───────┘   └─────────┬─────────┘
-          ▼                 ▼                     ▼
-   OWUI chat created   ON notebook entry    MP3 + transcript
-                                            (+ optional email sink)
+   │  Research node   │  POST /research → poll until done
+   │  (async, polled) │  ──curator──▶  ★ Open Brain (canonical store)
+   └────────┬─────────┘                  └─ visible in Open Notebook (a view; no write)
+            │  research_result { synthesis, prose, cited_sources, gaps, thread_id }
+            │  (optional SURFACING fan-out — additive, not stores)
+            ├───────────────────┬───────────────────┐
+            ▼                   ▼                   ▼
+   ┌──────────────┐    ┌───────────────────┐  ┌──────────────────────┐
+   │ Surface→OWUI │    │ Surface→Podcast   │  │ Surface→Teams-chat   │
+   │ (unverified) │    │ (audio episode)   │  │ (future, gated)      │
+   └──────┬───────┘    └─────────┬─────────┘  └──────────┬───────────┘
+          ▼                      ▼                       ▼
+   OWUI chat (spike)      MP3 + transcript        Mattermost post (P-future)
 ```
 
-One research run **fans out** to three Format nodes — proving the user's "output
-is just formatting" model. This exact graph already exists in spirit (the podcast
-pipeline runs research-per-link then renders audio); the builder makes it
-*editable* and lets the *same* research feed all three sinks at once.
+The canonical output (**Open Brain**, shown in Open Notebook) happens **inside the
+Research node** — no fan-out needed for it. The fan-out is over optional
+**surfacing** destinations. This proves the user's "output is just formatting"
+intuition *and* the corrected store-vs-surface model (§3.2): one research run, one
+canonical home, many optional renderings.
 
 ---
 

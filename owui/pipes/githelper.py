@@ -172,10 +172,14 @@ class Pipe:
             if path:
                 with open(path, "r", encoding="utf-8") as f:
                     self._system_prompt_cache = f.read()
-                    log.info(f"[GH] loaded system prompt from {path} ({len(self._system_prompt_cache)} chars)")
+                    log.info(
+                        f"[GH] loaded system prompt from {path} ({len(self._system_prompt_cache)} chars)"
+                    )
                     return self._system_prompt_cache
         except (FileNotFoundError, PermissionError, OSError) as e:
-            log.warning(f"[GH] could not load {self.valves.SYSTEM_PROMPT_FILE}: {e}, using built-in")
+            log.warning(
+                f"[GH] could not load {self.valves.SYSTEM_PROMPT_FILE}: {e}, using built-in"
+            )
         self._system_prompt_cache = SYSTEM_PROMPT
         return self._system_prompt_cache
 
@@ -247,17 +251,25 @@ class Pipe:
                 compacted.append(tool)
                 continue
             fn = tool.get("function", {})
-            compacted.append({
-                "type": tool.get("type", "function"),
-                "function": {
-                    "name": fn.get("name", ""),
-                    "description": compact_desc(fn.get("description", "")),
-                    **({"parameters": compact_schema(fn["parameters"])} if "parameters" in fn else {}),
-                },
-            })
+            compacted.append(
+                {
+                    "type": tool.get("type", "function"),
+                    "function": {
+                        "name": fn.get("name", ""),
+                        "description": compact_desc(fn.get("description", "")),
+                        **(
+                            {"parameters": compact_schema(fn["parameters"])}
+                            if "parameters" in fn
+                            else {}
+                        ),
+                    },
+                }
+            )
 
         result_size = len(json.dumps(compacted))
-        log.info(f"[GH] phase1 compact: {original_size} → {result_size} chars ({len(compacted)} tools)")
+        log.info(
+            f"[GH] phase1 compact: {original_size} → {result_size} chars ({len(compacted)} tools)"
+        )
 
         # Phase 2: Strip parameter descriptions (keep function descriptions!)
         if result_size > cap:
@@ -284,7 +296,9 @@ class Pipe:
                         else:
                             params["properties"][pname] = {"type": ptype}
             result_size = len(json.dumps(compacted))
-            log.info(f"[GH] phase3 flatten → {result_size} chars ({len(compacted)} tools)")
+            log.info(
+                f"[GH] phase3 flatten → {result_size} chars ({len(compacted)} tools)"
+            )
 
         # Phase 4: Drop fattest tools first (survivors keep descriptions)
         if result_size > cap:
@@ -296,7 +310,9 @@ class Pipe:
             sized.sort(key=lambda x: x[1])
             compacted = [t for _, _, t in sized]
             result_size = len(json.dumps(compacted))
-            log.info(f"[GH] phase4 dropped to {len(compacted)} tools → {result_size} chars")
+            log.info(
+                f"[GH] phase4 dropped to {len(compacted)} tools → {result_size} chars"
+            )
 
         return compacted
 
@@ -357,11 +373,16 @@ class Pipe:
                 slim = []
                 for tc in msg["tool_calls"]:
                     fn = tc.get("function", {})
-                    slim.append({
-                        "id": tc.get("id", ""),
-                        "type": "function",
-                        "function": {"name": fn.get("name", "?"), "arguments": "{}"},
-                    })
+                    slim.append(
+                        {
+                            "id": tc.get("id", ""),
+                            "type": "function",
+                            "function": {
+                                "name": fn.get("name", "?"),
+                                "arguments": "{}",
+                            },
+                        }
+                    )
                 saved += len(tc_json) - len(json.dumps(slim))
                 new_msg = {**new_msg, "tool_calls": slim}
 
@@ -393,15 +414,32 @@ class Pipe:
         for i, msg in enumerate(old):
             role = msg.get("role", "")
             content = msg.get("content", "")
-            if role == "tool" and isinstance(content, str) and len(content) > self.valves.TOOL_RESULT_CAP:
-                old[i], s = self._compress_msg(msg, self.valves.TOOL_RESULT_CAP, "tool result")
-                if s > 0: compressed += 1
+            if (
+                role == "tool"
+                and isinstance(content, str)
+                and len(content) > self.valves.TOOL_RESULT_CAP
+            ):
+                old[i], s = self._compress_msg(
+                    msg, self.valves.TOOL_RESULT_CAP, "tool result"
+                )
+                if s > 0:
+                    compressed += 1
             elif role == "assistant":
-                old[i], s = self._compress_msg(msg, self.valves.ASSISTANT_CAP, "assistant")
-                if s > 0: compressed += 1
-            elif role == "user" and isinstance(content, str) and len(content) > self.valves.ASSISTANT_CAP:
-                old[i], s = self._compress_msg(msg, self.valves.ASSISTANT_CAP, "user msg")
-                if s > 0: compressed += 1
+                old[i], s = self._compress_msg(
+                    msg, self.valves.ASSISTANT_CAP, "assistant"
+                )
+                if s > 0:
+                    compressed += 1
+            elif (
+                role == "user"
+                and isinstance(content, str)
+                and len(content) > self.valves.ASSISTANT_CAP
+            ):
+                old[i], s = self._compress_msg(
+                    msg, self.valves.ASSISTANT_CAP, "user msg"
+                )
+                if s > 0:
+                    compressed += 1
 
         convo = old + recent
         current = self._measure(system + convo)
@@ -431,11 +469,14 @@ class Pipe:
         emergency = 0
         if current > budget:
             for i, msg in enumerate(convo):
-                if current <= budget: break
+                if current <= budget:
+                    break
                 cap = self.valves.EMERGENCY_CAP
                 if msg.get("role") == "tool":
                     cap = min(cap, self.valves.TOOL_RESULT_CAP)
-                convo[i], s = self._compress_msg(msg, cap, f"{msg.get('role','')} (emergency)")
+                convo[i], s = self._compress_msg(
+                    msg, cap, f"{msg.get('role','')} (emergency)"
+                )
                 if s > 0:
                     current -= s
                     emergency += 1
@@ -481,9 +522,13 @@ class Pipe:
         roles = [m.get("role", "?") for m in body.get("messages", [])]
         has_tools = bool(body.get("tools"))
         has_user = any(r == "user" for r in roles)
-        log.info(f"[GH] pipe() called: task={__task__}, roles={roles}, has_tools={has_tools}, has_user={has_user}")
+        log.info(
+            f"[GH] pipe() called: task={__task__}, roles={roles}, has_tools={has_tools}, has_user={has_user}"
+        )
         if not has_user:
-            log.warning(f"[GH] NO USER MESSAGE — will strip tools to avoid template error")
+            log.warning(
+                f"[GH] NO USER MESSAGE — will strip tools to avoid template error"
+            )
 
         # 2. Compact tool schemas BEFORE budget calculation
         if body.get("tools"):
@@ -494,16 +539,22 @@ class Pipe:
         body = self._trim_messages(body)
         trimmed_count = self._measure(body.get("messages", []))
 
-        if trimmed_count < original_count and self.valves.ENABLE_STATUS and __event_emitter__:
+        if (
+            trimmed_count < original_count
+            and self.valves.ENABLE_STATUS
+            and __event_emitter__
+        ):
             saved = original_count - trimmed_count
             est = int(trimmed_count / self.valves.CHARS_PER_TOKEN)
-            await __event_emitter__({
-                "type": "status",
-                "data": {
-                    "description": f"Context trimmed: ~{saved // 1000}k chars freed, ~{est}/{self.valves.MAX_CONTEXT_TOKENS} tok",
-                    "done": True,
-                },
-            })
+            await __event_emitter__(
+                {
+                    "type": "status",
+                    "data": {
+                        "description": f"Context trimmed: ~{saved // 1000}k chars freed, ~{est}/{self.valves.MAX_CONTEXT_TOKENS} tok",
+                        "done": True,
+                    },
+                }
+            )
 
         # 4. Build backend payload
         target_model = self.valves.TARGET_MODEL_ID or body.get("model", "")
@@ -518,9 +569,19 @@ class Pipe:
         }
 
         # Forward optional fields
-        for key in ("temperature", "top_p", "top_k", "max_tokens", "stop",
-                     "frequency_penalty", "presence_penalty", "seed",
-                     "tools", "tool_choice", "response_format"):
+        for key in (
+            "temperature",
+            "top_p",
+            "top_k",
+            "max_tokens",
+            "stop",
+            "frequency_penalty",
+            "presence_penalty",
+            "seed",
+            "tools",
+            "tool_choice",
+            "response_format",
+        ):
             if key in body and body[key] is not None:
                 payload[key] = body[key]
 
@@ -548,10 +609,14 @@ class Pipe:
         timeout = aiohttp.ClientTimeout(total=self.valves.REQUEST_TIMEOUT)
         try:
             async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.post(url, json=payload, headers={"Content-Type": "application/json"}) as resp:
+                async with session.post(
+                    url, json=payload, headers={"Content-Type": "application/json"}
+                ) as resp:
                     if resp.status != 200:
                         error_text = await resp.text()
-                        log.error(f"[GH] backend error {resp.status}: {error_text[:500]}")
+                        log.error(
+                            f"[GH] backend error {resp.status}: {error_text[:500]}"
+                        )
                         yield f"Error from backend: {resp.status} — {error_text[:200]}"
                         return
 
@@ -575,7 +640,9 @@ class Pipe:
         timeout = aiohttp.ClientTimeout(total=self.valves.REQUEST_TIMEOUT)
         try:
             async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.post(url, json=payload, headers={"Content-Type": "application/json"}) as resp:
+                async with session.post(
+                    url, json=payload, headers={"Content-Type": "application/json"}
+                ) as resp:
                     if resp.status != 200:
                         error_text = await resp.text()
                         return f"Error from backend: {resp.status} — {error_text[:200]}"

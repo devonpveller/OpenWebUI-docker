@@ -35,7 +35,16 @@ from pydantic import BaseModel, Field
 
 # Operator slash-commands — gated by OWUI role. `/help` and `/status` are
 # open to any user (read-only) and handled before this set is checked.
-_OPERATOR_CMDS = {"/project", "/confirm", "/pending", "/approve", "/reject", "/upstream", "/observe", "/bootstrap-agents"}
+_OPERATOR_CMDS = {
+    "/project",
+    "/confirm",
+    "/pending",
+    "/approve",
+    "/reject",
+    "/upstream",
+    "/observe",
+    "/bootstrap-agents",
+}
 
 # Slash-commands that may block the chat for many seconds — these get a
 # "doing…" status emit before the daemon call so OWUI's status bar shows
@@ -165,9 +174,7 @@ class _Render:
             if ev.get("aborted"):
                 return self._open_think() + "\n🧠 Compaction aborted.\n"
             tokens_before = (ev.get("result") or {}).get("tokensBefore")
-            extra = (
-                f" ({tokens_before} tokens compacted)" if tokens_before else ""
-            )
+            extra = f" ({tokens_before} tokens compacted)" if tokens_before else ""
             return self._open_think() + f"\n🧠 Context compacted{extra}.\n"
 
         if ev_type != "message_update":
@@ -390,13 +397,9 @@ class Pipe:
                         emit, "⏳ Queued — another task is running (one at a time)…"
                     )
                 elif compaction_in_flight:
-                    await self._status(
-                        emit, "🧠 Compacting session context (auto)…"
-                    )
+                    await self._status(emit, "🧠 Compacting session context (auto)…")
                 elif compacted_in_batch:
-                    await self._status(
-                        emit, "🧠 Context compacted — continuing…"
-                    )
+                    await self._status(emit, "🧠 Context compacted — continuing…")
                 else:
                     await self._status(emit, "Agent working…")
 
@@ -459,9 +462,7 @@ class Pipe:
 
     # -- operator-triggered bootstrap (slash command + task streaming) ----
 
-    async def _dispatch_bootstrap(
-        self, message: str, user: dict, metadata: dict, emit
-    ):
+    async def _dispatch_bootstrap(self, message: str, user: dict, metadata: dict, emit):
         """`/bootstrap-agents [mode]` — operator-triggered AGENTS.md
         bootstrap (design §3.7 layer 3). Three modes — empty (default
         `commit`), `nocommit`, `revert`. Operator-role gated; routes
@@ -513,7 +514,10 @@ class Pipe:
         # Reuse the normal task-streaming machinery — same renderer,
         # same status emits, same footer.
         async for chunk in self._trigger_stream(
-            prompt="", user=user, metadata=metadata, emit=emit,
+            prompt="",
+            user=user,
+            metadata=metadata,
+            emit=emit,
             existing_task_id=task_id,
         ):
             yield chunk
@@ -641,9 +645,7 @@ class Pipe:
             out.append(f"- description: {row['description']}")
             body_preview = row["body"][:400].replace("\n", " ")
             out.append(f"- body preview: {body_preview}...")
-            out.append(
-                f"- review: `/approve {row['id']}` · `/reject {row['id']}`"
-            )
+            out.append(f"- review: `/approve {row['id']}` · `/reject {row['id']}`")
             out.append("")
         return "\n".join(out)
 

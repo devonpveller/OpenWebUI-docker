@@ -2,9 +2,12 @@
 
 OpenWebUI integration for little-coder (design §12.6). Two pieces:
 
-1. **`little_coder_pipe.py`** — an OWUI **Pipe function**. Registers a
+1. **Little Coder Pipe** — an OWUI **Pipe function**. Registers a
    "Little Coder" model. Plain chat messages trigger coding tasks; `/`-commands
    are operator actions. This is the primary surface.
+   > The deploy-by-paste source is centralized at
+   > [`owui/pipes/little_coder.py`](../../owui/pipes/little_coder.py) (canonical,
+   > == live deployment). This folder holds the little-coder **service** docs.
 2. **`lc-mcpo` as an OpenAPI tool** — optional. Lets any tool-calling OWUI
    model trigger tasks. It exposes only `trigger_task` / `task_status` /
    `project_focus` — never operator actions.
@@ -22,11 +25,11 @@ OpenWebUI integration for little-coder (design §12.6). Two pieces:
 ## Install the Pipe
 
 OpenWebUI → **Admin → Functions → ➕ New Function**. Paste the contents of
-[`little_coder_pipe.py`](little_coder_pipe.py), save, and **enable** it.
+[`owui/pipes/little_coder.py`](../../owui/pipes/little_coder.py), save, and **enable** it.
 
 A "Little Coder" model then appears in the model picker.
 
-> **Updating the Pipe:** when `little_coder_pipe.py` changes, edit the existing
+> **Updating the Pipe:** when `owui/pipes/little_coder.py` changes, edit the existing
 > function in **Admin → Functions → Little Coder**, replace the code, and save —
 > no need to delete and re-create it.
 

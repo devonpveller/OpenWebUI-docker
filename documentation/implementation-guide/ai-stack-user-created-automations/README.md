@@ -12,9 +12,37 @@ this stack's own capabilities instead of OWUI primitives.
 
 1. [CONCEPT-ai-stack-user-created-automations.md](CONCEPT-ai-stack-user-created-automations.md)
    — the full concept: vocabulary (node / format node / automation / run),
-   architecture (`automations-ui` + `automations-engine`), node catalogue grounded
-   in live services, the flagship Research-fan-out example, tailnet+cloudflared
-   exposure, risks, and the **feasibility verdict** (§10).
+   architecture, node catalogue grounded in live services, the flagship
+   Research-fan-out example, tailnet+cloudflared exposure, risks, and the
+   **feasibility verdict** (§10).
+2. [PLAN-integration-automations.md](PLAN-integration-automations.md) — the v1
+   integration plan, grounded in live ports/endpoints. **Supersedes the concept's
+   bespoke `automations-engine`: v1 adopts n8n as the engine+UI.** Covers the
+   separate-project setup, cross-project network seam, exact Research/ON/Podcast
+   contracts, the OWUI-sink gap, tailnet serve wiring, the custom-node package, and
+   compose/recovery discipline.
+3. [TASKS-integration-automations.md](TASKS-integration-automations.md) — the
+   phased build checklist (P0 tailnet spike + node scaffold → P1 fan-out → P2
+   deferred), each task with a done-when.
+
+### Locked decisions (2026-06-13)
+- **Separate `automations` compose project** (not folded into main) — isolates
+  n8n's fair-code license from the open-source/custom ai-stack; attaches to
+  `ai-stack_default` + `open-brain_obnet` as external. Mirrors the OB1 precedent.
+- **Single-user, tailnet-first** — no cloudflared/Authelia in v1.
+- **Own the n8n deployment + first-party custom nodes** — keep n8n's engine, run
+  our own built image, grow an `n8n-nodes-ai-stack` package. The **Research** node
+  ships as a custom node in P0 so extensibility is built in from the start.
+  (This is "fork the *deployment* + extend with nodes," **not** fork the editor
+  onto a bespoke engine — see PLAN §2.)
+- v1 scope = **Research fan-out only**.
+- **Output model = store vs. surface** (corrected 2026-06-17): **Open Brain is the
+  canonical store; Open Notebook only *displays* it** (no "write to ON"). Research
+  auto-persists to Open Brain via the curator, so the canonical output is automatic.
+  "Format" nodes are *surfacings* (podcast / OWUI / teams-chat), not stores —
+  and the destination set is an **open design area**. The **teams-chat (Mattermost)
+  orchestration UI** is the leading future surfacing target (governance-gated;
+  blocked on that project being built). See PLAN §5.0/§5.5.
 
 ## One-line verdict
 

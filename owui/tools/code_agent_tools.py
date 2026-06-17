@@ -140,10 +140,14 @@ class Tools:
         return resolved
 
     def _is_blocked(self, file_path: str) -> bool:
-        patterns = [p.strip() for p in self.valves.BLOCKED_PATHS.split(",") if p.strip()]
+        patterns = [
+            p.strip() for p in self.valves.BLOCKED_PATHS.split(",") if p.strip()
+        ]
         basename = os.path.basename(file_path)
         for pattern in patterns:
-            if fnmatch.fnmatch(file_path, pattern) or fnmatch.fnmatch(basename, pattern):
+            if fnmatch.fnmatch(file_path, pattern) or fnmatch.fnmatch(
+                basename, pattern
+            ):
                 return True
         return False
 
@@ -166,9 +170,14 @@ class Tools:
         base_cmd = os.path.basename(parts[0])
         mode = self._get_security_mode(__user__)
         if mode == "allowlist":
-            allowed = [c.strip() for c in self.valves.ALLOWED_COMMANDS.split(",") if c.strip()]
+            allowed = [
+                c.strip() for c in self.valves.ALLOWED_COMMANDS.split(",") if c.strip()
+            ]
             if base_cmd not in allowed:
-                return False, f"Command '{base_cmd}' not in allowlist. Allowed: {', '.join(sorted(allowed))}"
+                return (
+                    False,
+                    f"Command '{base_cmd}' not in allowlist. Allowed: {', '.join(sorted(allowed))}",
+                )
         return True, "OK"
 
     async def _emit(self, emitter, description: str, done: bool = False):
@@ -228,7 +237,10 @@ class Tools:
             if (e - s) > self.valves.MAX_READ_LINES:
                 e = s + self.valves.MAX_READ_LINES
 
-            numbered = [f"{i:4d} | {ln.rstrip()}" for i, ln in enumerate(lines[s:e], start=s + 1)]
+            numbered = [
+                f"{i:4d} | {ln.rstrip()}"
+                for i, ln in enumerate(lines[s:e], start=s + 1)
+            ]
             info = f"[{file_path} — {total} lines, showing {s + 1}–{e}]"
 
             await self._emit(__event_emitter__, f"Read {e - s} lines", done=True)
@@ -272,7 +284,9 @@ class Tools:
                 f.write(content)
 
             size = os.path.getsize(resolved)
-            line_count = content.count("\n") + (1 if content and not content.endswith("\n") else 0)
+            line_count = content.count("\n") + (
+                1 if content and not content.endswith("\n") else 0
+            )
             action = "Updated" if existed else "Created"
 
             await self._emit(__event_emitter__, f"{action} {file_path}", done=True)
@@ -438,13 +452,24 @@ class Tools:
                 await self._emit(__event_emitter__, "Invalid regex", done=True)
                 return f"Error: Invalid regex pattern: {e}"
 
-            skip_dirs = {".git", "node_modules", "__pycache__", "venv", ".venv", "dist", "build", ".tox"}
+            skip_dirs = {
+                ".git",
+                "node_modules",
+                "__pycache__",
+                "venv",
+                ".venv",
+                "dist",
+                "build",
+                ".tox",
+            }
             results = []
             files_searched = 0
             limit = self.valves.MAX_SEARCH_RESULTS
 
             for root, dirs, files in os.walk(resolved):
-                dirs[:] = [d for d in dirs if d not in skip_dirs and not d.startswith(".")]
+                dirs[:] = [
+                    d for d in dirs if d not in skip_dirs and not d.startswith(".")
+                ]
                 for fname in files:
                     if include_pattern and not fnmatch.fnmatch(fname, include_pattern):
                         continue
@@ -506,7 +531,11 @@ class Tools:
 
             import glob as glob_mod
 
-            glob_path = os.path.join(resolved, pattern) if "**" in pattern else os.path.join(resolved, "**", pattern)
+            glob_path = (
+                os.path.join(resolved, pattern)
+                if "**" in pattern
+                else os.path.join(resolved, "**", pattern)
+            )
             matches = []
             for match in glob_mod.glob(glob_path, recursive=True):
                 rel = os.path.relpath(match, resolved)
@@ -521,7 +550,11 @@ class Tools:
                 await self._emit(__event_emitter__, "No files found", done=True)
                 return f"No files matching '{pattern}' in {path}"
 
-            trunc = f" (truncated at {self.valves.MAX_SEARCH_RESULTS})" if len(matches) >= self.valves.MAX_SEARCH_RESULTS else ""
+            trunc = (
+                f" (truncated at {self.valves.MAX_SEARCH_RESULTS})"
+                if len(matches) >= self.valves.MAX_SEARCH_RESULTS
+                else ""
+            )
             header = f"[{len(matches)} files{trunc}]"
             await self._emit(__event_emitter__, f"{len(matches)} files", done=True)
             return header + "\n" + "\n".join(f"  {m}" for m in sorted(matches))
@@ -558,7 +591,9 @@ class Tools:
                 return f"Error: {reason}"
 
             workspace = self._get_workspace(__user__)
-            cwd = self._resolve_path(working_dir, __user__) if working_dir else workspace
+            cwd = (
+                self._resolve_path(working_dir, __user__) if working_dir else workspace
+            )
             if not os.path.isdir(cwd):
                 await self._emit(__event_emitter__, "Bad directory", done=True)
                 return f"Error: Working directory not found: {working_dir}"
@@ -585,7 +620,10 @@ class Tools:
 
                 max_chars = 50_000
                 if len(output) > max_chars:
-                    output = output[:max_chars] + f"\n... (truncated, {len(output)} total chars)"
+                    output = (
+                        output[:max_chars]
+                        + f"\n... (truncated, {len(output)} total chars)"
+                    )
 
                 await self._emit(
                     __event_emitter__,
@@ -675,7 +713,9 @@ class Tools:
         icons = {"not-started": "○", "in-progress": "◐", "completed": "●"}
         lines = ["Tasks:"]
         for t in self._todo_list:
-            lines.append(f"  {icons.get(t['status'], '?')} [{t['id']}] {t['title']} ({t['status']})")
+            lines.append(
+                f"  {icons.get(t['status'], '?')} [{t['id']}] {t['title']} ({t['status']})"
+            )
         done = sum(1 for t in self._todo_list if t["status"] == "completed")
         lines.append(f"\nProgress: {done}/{len(self._todo_list)} completed")
 
