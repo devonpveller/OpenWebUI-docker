@@ -6,14 +6,20 @@
 
 ## Phase 0 — Tailnet spike: Manual → Research → Format→ON
 
-### 0.A Confirm decisions
-- [ ] **0.A1** Operator confirms **platform-not-fork** (PLAN §2). *Done-when:* a one-line yes/no recorded here. *Default if silent:* platform.
-- [ ] **0.A2** Operator confirms n8n may join `open-brain_obnet` external network (PLAN §4/§10b). *Done-when:* recorded.
+### 0.A Decisions (settled 2026-06-13)
+- [x] **0.A1** Deployment = **separate `automations` compose project** (license isolation), attaching to `ai-stack_default` + `open-brain_obnet` as external (PLAN §1/§4).
+- [x] **0.A2** UI = **own n8n deployment + first-party `n8n-nodes-ai-stack` custom-node package**, keeping n8n's engine; Research ships as a custom node in P0 (PLAN §2).
 
-### 0.B Compose + secrets
-- [ ] **0.B1** Add `.env` keys: `N8N_DB_PASSWORD`, `N8N_ENCRYPTION_KEY`, `N8N_HOST`, `N8N_WEBHOOK_URL`. *Done-when:* present in `.env`; `N8N_ENCRYPTION_KEY` is a pinned random value.
-- [ ] **0.B2** Add `n8n` + `n8n-db` services, `n8n-data`/`n8n-db-data` volumes, and the `obnet` external-network block to `docker-compose.yml` (PLAN §7). *Done-when:* `docker compose config` validates.
-- [ ] **0.B3** `docker compose up -d n8n-db n8n`; complete n8n owner-account setup at `http://127.0.0.1:5678`. *Done-when:* editor loads, owner account created.
+### 0.B New project + secrets
+- [ ] **0.B1** Create `automations/docker/docker-compose.yml` (project `name: automations`) with `n8n` (build, own image) + `n8n-db`, `n8n-data`/`n8n-db-data` volumes, and external `ai-stack_default` + `obnet` network blocks (PLAN §7). *Done-when:* `docker compose -f automations/docker/docker-compose.yml config` validates (main + OB1 up so the external nets exist).
+- [ ] **0.B2** Add `automations/docker/Dockerfile.n8n` (`FROM docker.n8n.io/n8nio/n8n:<pinned>`) that installs/copies the `n8n-nodes-ai-stack` package. *Done-when:* image builds.
+- [ ] **0.B3** Add `automations` env keys: `N8N_DB_PASSWORD`, `N8N_ENCRYPTION_KEY` (pinned random), `N8N_HOST`, `N8N_WEBHOOK_URL`, shared `MCP_ACCESS_KEY`. *Done-when:* present; encryption key pinned.
+- [ ] **0.B4** Bring up *after* main + OB1: `docker compose -f automations/docker/docker-compose.yml up -d`; complete n8n owner-account setup at `http://127.0.0.1:5678`. *Done-when:* editor loads, owner account created, our custom nodes appear in the palette search.
+
+### 0.X Node package scaffold + Research node (the extensibility seam)
+- [ ] **0.X1** Scaffold `automations/n8n-nodes-ai-stack/` from the `n8n-nodes-starter` template (TypeScript, declarative SDK). *Done-when:* `npm run build` produces a loadable package.
+- [ ] **0.X2** Implement the **Research** custom node: input `prompt` (+ optional `confidence_floor`); calls `POST openbrain-research:8000/research` with `x-brain-key`; encapsulates the poll loop on `GET /research/jobs/:id` until terminal; output = `research_result` (`synthesis`, `prose`, `cited_sources`, `gaps`, `thread_id`, `backstop`). *Done-when:* dropping the node in a flow and running it returns a real result object.
+- [ ] **0.X3** Bake the package into the image (0.B2) for durability; document the dev loop (mounted `N8N_CUSTOM_EXTENSIONS` → rebuild image). *Done-when:* a fresh `up` shows the Research node with no manual install.
 
 ### 0.C Tailnet exposure
 - [ ] **0.C1** Add n8n env vars to the `tailscale` service (PLAN §6): `N8N_SERVE_ENABLED`, `N8N_TS_PORT=8446`, `N8N_LOCAL_PORT=8241`, `N8N_HOST_INTERNAL`, `N8N_PORT_INTERNAL`.
@@ -21,27 +27,29 @@
 - [ ] **0.C3** Add deferred-setup + socat-health block for n8n to the monitoring loop (~L696-725). *Done-when:* killing the socat proxy self-heals within one loop.
 - [ ] **0.C4** Restart `tailscale` after n8n healthy (respect the OWUI→tailscale netns ordering). *Done-when:* `https://<tailnet-host>:8446/` loads the n8n editor.
 
-### 0.D The workflow (built-in nodes only)
-- [ ] **0.D1** Research submit: HTTP Request node `POST openbrain-research:8000/research` with `x-brain-key` header + body `{query, origin:"manual", options:{confidence_floor:0.5}}`. *Done-when:* returns a `job_id`.
-- [ ] **0.D2** Poll loop: Do-While/Wait on `GET /research/jobs/:id` until `status∈{done,error,cancelled}`. *Done-when:* loop exits with a `result` object on a real query.
-- [ ] **0.D3** Format→ON: create source via `POST open_notebook:5055/api/sources` carrying `result.prose`, link to an "Automations" notebook. *Done-when:* the synthesis appears as a source in ON.
-- [ ] **0.D4** Graceful failure: if `openbrain-research` is unreachable (OB1 down), the workflow errors cleanly (no hang). *Done-when:* verified by stopping OB1.
+### 0.D The workflow
+- [ ] **0.D1** Build the flow: **Manual trigger → Research (custom node, 0.X2) → Format→ON**. *Done-when:* the Research node runs from a manual trigger and emits `research_result`.
+- [ ] **0.D2** Format→ON: create source via `POST open_notebook:5055/api/sources` carrying `result.prose`, link to an "Automations" notebook (built-in HTTP node OK in P0). *Done-when:* the synthesis appears as a source in ON.
+- [ ] **0.D3** Graceful failure: if `openbrain-research` is unreachable (OB1 down), the flow errors cleanly (no hang). *Done-when:* verified by stopping OB1.
 
-### 0.E Stack discipline
-- [ ] **0.E1** Register `n8n` + `n8n-db` in `scripts/emergency-recovery.ps1` **and** `.bat` (inventory + shutdown/startup order). *Done-when:* both scripts list both containers.
-- [ ] **0.E2** Add `n8n-db-backup` cron sidecar (existing `*-backup` pattern). *Done-when:* a backup artifact is produced once.
-- [ ] **0.E3** Run `/stack-map`; update `workspace-stacks.md`. *Done-when:* skill reports no drift.
+### 0.E Stack discipline (new project lifecycle)
+- [ ] **0.E1** Teach `scripts/emergency-recovery.ps1` **and** `.bat` the third project: inventory `n8n` + `n8n-db`; bring `automations` up *after* main + OB1, tear down *before* them (PLAN §8). *Done-when:* both scripts manage the project in the right order.
+- [ ] **0.E2** Update `CLAUDE.md` "Stacks at a glance" to add `automations` as a third compose project (own lifecycle, like OB1/Portal). *Done-when:* table lists it.
+- [ ] **0.E3** Add `n8n-db-backup` cron sidecar *inside the `automations` project* (existing `*-backup` pattern). *Done-when:* a backup artifact is produced once.
+- [ ] **0.E4** Run `/stack-map`; update `workspace-stacks.md` to list the `automations` project + its external network attachments. *Done-when:* skill reports no drift.
 
-**P0 exit criteria:** from a tailnet device, run the workflow by hand and see a
-grounded research synthesis land in Open Notebook; recovery scripts + stack-map updated.
+**P0 exit criteria:** from a tailnet device, run the flow by hand and see a
+grounded research synthesis land in Open Notebook — delivered by the **custom
+Research node** (proving the `n8n-nodes-ai-stack` extension seam); recovery
+scripts + CLAUDE.md + stack-map updated.
 
-## Phase 1 — Fan-out (Podcast + OWUI spike)
+## Phase 1 — Fan-out (Podcast + OWUI spike), as first-party nodes
 
-- [ ] **1.A** Script-render step: wrap a single `result.synthesis` as `EpisodeInput{segments:[{label,items:[{title,url,synthesis}]}]}` (n8n Code node or thin custom node). *Done-when:* produces a valid script string.
-- [ ] **1.B** Format→Podcast: `POST open_notebook:5055/api/podcasts/generate` → poll `/api/podcasts/jobs/{id}` → fetch `/api/podcasts/episodes/{id}/audio`. **Bypass `openbrain-podcast`.** *Done-when:* an mp3 episode is produced from one research run.
+- [ ] **1.A** **Format→Podcast** node in `n8n-nodes-ai-stack`: render a single `result.synthesis` into `EpisodeInput{segments:[{label,items:[{title,url,synthesis}]}]}`, then `POST open_notebook:5055/api/podcasts/generate` → poll `/api/podcasts/jobs/{id}` → fetch `/api/podcasts/episodes/{id}/audio`. **Bypass `openbrain-podcast`.** *Done-when:* an mp3 episode is produced from one research run via the node.
+- [ ] **1.B** Promote **Format→ON** from the built-in HTTP node (0.D2) to a custom `n8n-nodes-ai-stack` node. *Done-when:* it's a palette item with typed input.
 - [ ] **1.C** Fan-out wiring: one Research node feeds Format→ON **and** Format→Podcast in parallel. *Done-when:* a single run yields both a source and an episode.
 - [ ] **1.D** OWUI sink spike (PLAN §5.2 option a): verify OWUI 0.9.x REST chat-create + message-insert with an API key. *Done-when:* either a synthesis appears as a new OWUI chat, **or** the spike is documented as not-worth-it and OWUI is dropped from v1.
-- [ ] **1.E** (if 1.D passes) Add Format→OWUI as the third fan-out branch.
+- [ ] **1.E** (if 1.D passes) Add **Format→OWUI** as a custom node + third fan-out branch.
 
 **P1 exit criteria:** the CONCEPT §6 graph runs — one research result fans out to
 Open Notebook + Podcast (+ OWUI if the spike passed).

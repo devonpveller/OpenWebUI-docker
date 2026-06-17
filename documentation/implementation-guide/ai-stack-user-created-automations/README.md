@@ -18,16 +18,24 @@ this stack's own capabilities instead of OWUI primitives.
 2. [PLAN-integration-automations.md](PLAN-integration-automations.md) — the v1
    integration plan, grounded in live ports/endpoints. **Supersedes the concept's
    bespoke `automations-engine`: v1 adopts n8n as the engine+UI.** Covers the
-   cross-project network seam, exact Research/ON/Podcast contracts, the OWUI-sink
-   gap, tailnet serve wiring, and compose/recovery discipline.
+   separate-project setup, cross-project network seam, exact Research/ON/Podcast
+   contracts, the OWUI-sink gap, tailnet serve wiring, the custom-node package, and
+   compose/recovery discipline.
 3. [TASKS-integration-automations.md](TASKS-integration-automations.md) — the
-   phased build checklist (P0 tailnet spike → P1 fan-out → P2 deferred), each task
-   with a done-when.
+   phased build checklist (P0 tailnet spike + node scaffold → P1 fan-out → P2
+   deferred), each task with a done-when.
 
 ### Locked decisions (2026-06-13)
-Fold into **main stack** · **single-user, tailnet-first** (no cloudflared in v1) ·
-adopt **n8n** (recommended: run full n8n + nodes, *not* fork the editor — see
-PLAN §2) · v1 scope = **Research fan-out only**.
+- **Separate `automations` compose project** (not folded into main) — isolates
+  n8n's fair-code license from the open-source/custom ai-stack; attaches to
+  `ai-stack_default` + `open-brain_obnet` as external. Mirrors the OB1 precedent.
+- **Single-user, tailnet-first** — no cloudflared/Authelia in v1.
+- **Own the n8n deployment + first-party custom nodes** — keep n8n's engine, run
+  our own built image, grow an `n8n-nodes-ai-stack` package. The **Research** node
+  ships as a custom node in P0 so extensibility is built in from the start.
+  (This is "fork the *deployment* + extend with nodes," **not** fork the editor
+  onto a bespoke engine — see PLAN §2.)
+- v1 scope = **Research fan-out only** (Research → ON / Podcast / OWUI formats).
 
 ## One-line verdict
 

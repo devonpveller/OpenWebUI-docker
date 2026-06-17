@@ -11,37 +11,50 @@
 
 | Decision | Choice | Consequence for this plan |
 |----------|--------|---------------------------|
-| Deployment | **Fold into main stack** | `n8n` + `n8n-db` added to the main `docker-compose.yml`; managed by plain `docker compose`. |
+| Deployment | **Separate compose project** (`automations`) | n8n lives in its **own** compose project that attaches to ai-stack + OB1 networks as *external*. Keeps the fair-code/source-available n8n **isolated** from the open-source/custom ai-stack (clean license boundary). Own lifecycle. Mirrors the OB1 / agent-org precedent. |
 | Audience / exposure | **Single-user, tailnet-first** | v1 is tailnet-only (tailscale serve). **No** cloudflared/Authelia, **no** privileged-sink auth boundary yet. |
-| UI platform | **Adopt n8n** (operator said "fork/adapt n8n editor") | See §2 — grounded recommendation is *run full n8n + custom nodes*, **not** fork the editor. |
-| v1 node scope | **Research fan-out only** | Research node → 3 Format nodes (OWUI / Open Notebook / Podcast) + manual trigger. No search/memory/LLM/email/coder nodes in v1. |
+| UI platform | **Own n8n deployment + first-party custom nodes** | We run *our* build of n8n (keeping its engine), and grow an `n8n-nodes-ai-stack` node package as ai-stack integrations expand. Extensibility is built in from P0. See §2. |
+| v1 node scope | **Research fan-out only** | Research node → 3 Format nodes (OWUI / Open Notebook / Podcast) + manual trigger. No search/memory/LLM/email/coder nodes in v1. **But each is built as a custom node**, not a raw HTTP node (§2). |
 
 ---
 
-## 2. Headline architecture decision: n8n *as platform*, not a forked editor
+## 2. Headline architecture decision: own n8n deployment + first-party nodes
 
 The concept doc proposed a bespoke `automations-engine` + `automations-ui`. **That
-is now superseded for v1.** Grounded finding (n8n docs, verified):
+is superseded for v1** — n8n already *is* the engine + editor. Grounded finding
+(n8n docs, verified):
 
-- The official n8n Docker image (`docker.n8n.io/n8nio/n8n`) ships the **execution
-  engine *and* the node editor together**. It also provides Postgres persistence,
-  Manual/Schedule/Webhook triggers, an HTTP Request node (custom headers, JSON),
-  and **Do-While / Wait nodes for async polling** — i.e. *everything* the bespoke
-  engine was going to be.
-- **Forking only the editor** (the literal option chosen) would mean re-pointing
-  it at a backend we'd have to *build* — re-implementing scheduling, credential
-  storage, run history, and the executor. That throws away n8n's single biggest
-  asset.
+- The n8n Docker image ships the **execution engine *and* the node editor
+  together**, plus Postgres persistence, Manual/Schedule/Webhook triggers, an HTTP
+  Request node, and **Do-While / Wait nodes for async polling** — i.e. *everything*
+  the bespoke engine was going to be. **We keep n8n's engine. We do not rebuild it.**
 
-**Recommendation (please confirm):** run **full n8n** and express ai-stack
-capabilities as **n8n nodes**, starting with n8n's *built-in HTTP Request node*
-(zero custom code for v1), then optionally packaging thin **custom nodes**
-(`N8N_CUSTOM_EXTENSIONS`, ~50–100 lines TS each) for nicer UX once the flows work.
+**Two senses of "fork" — we want the right one (operator, 2026-06-13):**
+- ❌ *Fork the editor frontend onto a custom backend* — would force us to
+  re-implement scheduling, the executor, credential storage, run history. Throws
+  away n8n's biggest asset. **Not this.**
+- ✅ *Own the n8n **deployment** and **extend it with our own custom nodes*** —
+  keep n8n's engine, run **our** build of the image, and grow a first-party
+  `n8n-nodes-ai-stack` node library as ai-stack integrations expand. **This.**
 
-This honors the n8n direction, eliminates a whole service we'd otherwise build,
-and is dramatically less work. The rest of this plan assumes the platform
-approach. *(If you specifically want the forked-editor path, say so — it roughly
-triples v1 effort and re-introduces `automations-engine`; not recommended.)*
+**What this means concretely:**
+- **Own image, not the stock one.** The `automations` project builds n8n from a
+  thin `Dockerfile` (`FROM docker.n8n.io/n8nio/n8n:<pinned>`) that bakes in our
+  custom node package — so extensibility is first-class and reproducible, not a
+  side-mount. (During dev you may iterate via a mounted `N8N_CUSTOM_EXTENSIONS`
+  dir, then bake for durability — same "deployed image is source of truth" habit
+  as the rest of the stack.)
+- **First-party node package** `n8n-nodes-ai-stack` (TypeScript, n8n declarative
+  node SDK, ~50–100 lines per simple node). It starts with the **Research** node
+  in P0 and is the seam every future ai-stack capability plugs into.
+- **Build the node, don't just call HTTP.** Even though n8n's built-in HTTP
+  Request node *could* call `/research`, P0 ships Research as a **custom node**
+  (typed `prompt` input, a `research_result` output, the poll loop encapsulated)
+  so the user gets a clean palette item and we establish the extension pattern
+  from the start.
+
+This honors the "build in extensibility from the beginning" intent, keeps n8n's
+engine, and still eliminates the bespoke `automations-engine`/`automations-ui`.
 
 > **Licensing:** n8n is under the Sustainable Use License (fair-code).
 > Self-hosting for internal/personal use is permitted free of charge. Embedding
@@ -49,26 +62,31 @@ triples v1 effort and re-introduces `automations-engine`; not recommended.)*
 
 ---
 
-## 3. Target architecture (v1, folded into main stack)
+## 3. Target architecture (v1, separate `automations` project)
 
 ```
    Tailnet device ──HTTPS :8446──▶ tailscale serve ──socat :8241──▶ n8n:5678
-                                                                      │
-   ┌──────────────────────────────────────────────────────────────┐ │
-   │  n8n  (engine + editor + triggers)         n8n-db (Postgres)  │◀┘
-   │   workflow: "Research fan-out"                                 │
-   └───┬───────────────┬───────────────────────┬──────────────────┘
+   (tailscale is in MAIN stack; reaches n8n via ai-stack_default — see §6)        │
+                                                                                   │
+   ╔═══ project: automations (separate compose) ════════════════════════════════╗ │
+   ║  n8n  (engine + editor + triggers)              n8n-db (Postgres)           ║◀┘
+   ║   workflow: "Research fan-out"                                              ║
+   ╚═══╤═══════════════╤═══════════════════════╤════════════════════════════════╝
        │ HTTP          │ HTTP                   │ HTTP
        ▼               ▼                        ▼
  openbrain-research  open_notebook         open_notebook
  POST /research      /api/sources          /api/podcasts/generate
  (poll job)          (Format→ON)           (Format→Podcast)
- [obnet seam]                              + OWUI delivery (see §5.2 gap)
+ [open-brain_obnet]  [ai-stack_default]    [ai-stack_default]
 ```
 
-Two new containers only: **`n8n`** and **`n8n-db`**. Everything they call already
-runs. No `automations-ui` / `automations-engine` / `automations-db` (the concept's
-trio collapses into n8n + its DB).
+Two new containers, in a **new compose project** named `automations`: **`n8n`** and
+**`n8n-db`**. They attach to existing ai-stack + OB1 networks as **external** — they
+own no new networks of consequence and serve no inference. Everything they call
+already runs. No `automations-ui` / `automations-engine` / `automations-db` (the
+concept's trio collapses into n8n + its DB). **License boundary:** the fair-code
+n8n image stays inside the `automations` project; the main `ai-stack` /
+`open-brain` projects remain all-open-source/custom.
 
 ---
 
@@ -80,36 +98,40 @@ in a *different compose project*:
 - **`openbrain-research` is an OB1 (`open-brain`) container**, on networks
   `obnet`, `llm-net`, `search-gw-net` — published to host at `127.0.0.1:8818:8000`.
   It is **not** on the main stack's default networks.
-- For n8n (main stack) to reach it **by container name**, n8n must join OB1's
-  network as an **external** network — the documented precedent is `open_notebook`
-  and `openbrain-db-backup`, which already join `open-brain_obnet`:
+- Because n8n is now its **own** project, **every** network it uses is declared
+  **external** (the OB1 precedent: OB1 attaches to `ai-stack_llm-net` / `app-net`
+  this way; `open_notebook` and `openbrain-db-backup` likewise join
+  `open-brain_obnet`):
 
 ```yaml
-# main docker-compose.yml — n8n network attachments
+# automations/docker/docker-compose.yml — networks block (all external)
 networks:
+  ai-stack_default:
+    external: true
+    name: ai-stack_default       # reach open_notebook:5055, openwebui:8080; reachable by tailscale
   obnet:
     external: true
-    name: open-brain_obnet      # reach openbrain-research:8000
-  # plus a main-stack net to reach open_notebook (it's on llm-net/app-net/default)
+    name: open-brain_obnet       # reach openbrain-research:8000
 ```
 
-- **`open_notebook` is a main-stack container** (API on `open_notebook:5055`,
-  published `127.0.0.1:5055`). n8n reaches it over a shared main-stack network
-  (e.g. `default` or `app-net`).
+- **`open_notebook` / `openwebui` are main-stack containers.** n8n reaches them
+  over `ai-stack_default` (the host-reachable main bridge they sit on).
+- **`openbrain-research` is an OB1 container** — reached over `open-brain_obnet`.
 
 **Reachability matrix for v1:**
 
-| n8n must call | Host:port (by container name) | Network n8n needs |
-|---------------|-------------------------------|-------------------|
-| Research submit/poll | `openbrain-research:8000` | `open-brain_obnet` (external) |
-| Open Notebook (ON + Podcast) | `open_notebook:5055` | shared main net (`default`/`app-net`) |
-| OWUI (Format→OWUI, see §5.2) | `openwebui:8080` | shared main net |
+| n8n must call | Host:port (by container name) | External network n8n joins |
+|---------------|-------------------------------|----------------------------|
+| Research submit/poll | `openbrain-research:8000` | `open-brain_obnet` |
+| Open Notebook (ON + Podcast) | `open_notebook:5055` | `ai-stack_default` |
+| OWUI (Format→OWUI, see §5.2) | `openwebui:8080` | `ai-stack_default` |
+| (reached *by* tailscale serve) | `n8n:5678` | `ai-stack_default` (so the main-stack tailscale socat can resolve it — §6) |
 
-> **Bring-up order:** n8n depends on OB1 being up (for the research seam). Since
-> OB1 is a separate project started *after* the main stack, n8n must tolerate
-> `openbrain-research` being absent at boot (a workflow simply errors until OB1
-> is healthy). Don't add a hard `depends_on` across projects — it can't span
-> compose projects anyway.
+> **Bring-up order (mirrors OB1):** the `automations` project starts **after** the
+> main stack *and* OB1 are up (its external networks must already exist), and is
+> torn down **before** them. n8n must tolerate `openbrain-research` being absent
+> (workflows simply error until OB1 is healthy). No cross-project `depends_on` —
+> compose can't express it; rely on n8n's per-run error handling instead.
 
 ---
 
@@ -213,9 +235,13 @@ flagged in CONCEPT §9.4), and it's small because we reuse ON's renderer/TTS.
 
 ## 6. Tailnet exposure (tailscale serve)
 
-n8n listens on **:5678**. Follow the exact open-notebook pattern in
-`entrypoint.sh` (Streamlit-style: served at **root on a distinct TS port**, via a
-socat proxy, with deferred setup + monitoring-loop self-heal).
+n8n listens on **:5678**. The `tailscale` container lives in the **main** stack
+(it shares `openwebui`'s netns), so for its socat proxy to resolve `n8n:5678`
+across the project boundary, **n8n must be on `ai-stack_default`** (the network
+`openwebui`/tailscale can see) — already required by §4. Then follow the exact
+open-notebook pattern in `entrypoint.sh` (Streamlit-style: served at **root on a
+distinct TS port**, via a socat proxy, with deferred setup + monitoring-loop
+self-heal).
 
 **Allocated ports (next free, verified against entrypoint.sh):**
 - socat local port: **8241** (8234–8240 already used)
@@ -249,11 +275,22 @@ single user on the tailnet. No Authelia in v1.
 
 ---
 
-## 7. Compose integration (services to add)
+## 7. Compose integration (new `automations` project)
+
+New file: **`automations/docker/docker-compose.yml`** (project name `automations`,
+the OB1 layout). Driven with `docker compose -f automations/docker/docker-compose.yml ...`
+— a plain `docker compose` in the workspace root never touches it (same isolation
+as OB1).
 
 ```yaml
+name: automations
+
+services:
   n8n:
-    image: docker.n8n.io/n8nio/n8n:latest
+    build:
+      context: ..                              # automations/ — bakes in n8n-nodes-ai-stack
+      dockerfile: docker/Dockerfile.n8n        # FROM docker.n8n.io/n8nio/n8n:<pinned>
+    image: ai-stack/n8n:local                  # our owned build
     container_name: n8n
     restart: unless-stopped
     environment:
@@ -273,7 +310,7 @@ single user on the tailnet. No Authelia in v1.
     ports:
       - "127.0.0.1:5678:5678"                        # loopback only; tailscale/socat is the proxy
     networks:
-      - default            # reach open_notebook, openwebui
+      - ai-stack_default   # reach open_notebook, openwebui; reachable by main-stack tailscale
       - obnet              # reach openbrain-research (external: open-brain_obnet)
     depends_on:
       - n8n-db
@@ -289,39 +326,64 @@ single user on the tailnet. No Authelia in v1.
     volumes:
       - n8n-db-data:/var/lib/postgresql/data
     networks:
-      - default
+      - ai-stack_default
+
+networks:
+  ai-stack_default:
+    external: true
+    name: ai-stack_default
+  obnet:
+    external: true
+    name: open-brain_obnet
+
+volumes:
+  n8n-data:
+  n8n-db-data:
 ```
-Plus: `obnet` external network block (§4), `n8n-data` + `n8n-db-data` volumes,
-and new `.env` keys: `N8N_DB_PASSWORD`, `N8N_ENCRYPTION_KEY`, `N8N_HOST`,
-`N8N_WEBHOOK_URL`. **Pin `N8N_ENCRYPTION_KEY` in `.env`** (like `WEBUI_SECRET_KEY`)
-— if it rotates on recreate, stored credentials become undecryptable.
+New `.env` keys (in the `automations` project's env): `N8N_DB_PASSWORD`,
+`N8N_ENCRYPTION_KEY`, `N8N_HOST`, `N8N_WEBHOOK_URL` — plus `MCP_ACCESS_KEY` must be
+shared in (it's the research `x-brain-key`). **Pin `N8N_ENCRYPTION_KEY`** (like
+`WEBUI_SECRET_KEY`) — if it rotates on recreate, stored credentials become
+undecryptable.
 
 ---
 
-## 8. Stack discipline (mandatory — the "three places" rule)
+## 8. Stack discipline (mandatory)
 
-Adding `n8n` + `n8n-db` means updating, together:
-1. **compose** — `docker-compose.yml` (services, networks, volumes).
-2. **recovery scripts** — `scripts/emergency-recovery.ps1` **and** `.bat`: add both
-   containers to the service inventory and the shutdown/startup sequences.
-3. **stack-map** — run `/stack-map` and update
-   `.claude/skills/stack-map/references/workspace-stacks.md`.
-4. **backups** — `n8n-db` is stateful: add an `n8n-db-backup` cron sidecar
-   following the existing `*-backup` convention (workflows live in the DB).
+This adds a **new compose project**, not just containers — so the discipline is
+project-level (mirrors how OB1 is handled):
+1. **new compose file** — `automations/docker/docker-compose.yml` (§7).
+2. **recovery scripts** — `scripts/emergency-recovery.ps1` **and** `.bat`: teach
+   them the third project. Bring `automations` up **after** main + OB1, tear it
+   down **before** them (it depends on their external networks). Add `n8n` +
+   `n8n-db` to the inventory + ordered startup/shutdown, alongside the existing
+   per-project handling.
+3. **stack-map** — run `/stack-map`; update
+   `.claude/skills/stack-map/references/workspace-stacks.md` to list the new
+   `automations` project (and note it joins `ai-stack_default` + `open-brain_obnet`).
+4. **CLAUDE.md** — the "Stacks at a glance" table currently names *two* compose
+   projects + recovery; add `automations` as a third project (own lifecycle, like
+   OB1/Portal).
+5. **backups** — `n8n-db` is stateful: add an `n8n-db-backup` cron sidecar (inside
+   the `automations` project) following the existing `*-backup` convention
+   (workflows + credentials live in the DB).
 
 ---
 
 ## 9. Phasing
 
-- **P0 — Tailnet spike (the proof):**
-  n8n + n8n-db in compose; tailnet serve on :8446; one workflow:
-  **Manual → Research → Format→ON**. Proves the research async contract + a
-  verified sink end-to-end, all on the tailnet. Uses **built-in HTTP Request +
-  Do-While nodes only** — zero custom code.
-- **P1 — Fan-out:**
+- **P0 — Tailnet spike + node-package scaffold (the proof + the seam):**
+  the `automations` project (own n8n image) + n8n-db; tailnet serve on :8446;
+  scaffold the **`n8n-nodes-ai-stack`** package and ship the **Research** node in
+  it; one workflow: **Manual → Research → Format→ON**. Proves the research async
+  contract, a verified sink, *and* the custom-node extension path end-to-end on
+  the tailnet. (Format→ON may start as a built-in HTTP node and graduate to a
+  custom node in P1 — Research is the one that must be custom in P0.)
+- **P1 — Fan-out (more first-party nodes):**
   Add **Format→Podcast** (the ON podcast-API render path, §5.4) and **spike
-  Format→OWUI** (§5.2 option a — verify OWUI REST chat creation). Goal: one
-  research result → up to three sinks (the CONCEPT §6 graph).
+  Format→OWUI** (§5.2 option a — verify OWUI REST chat creation), both as nodes in
+  `n8n-nodes-ai-stack`. Goal: one research result → up to three sinks (the
+  CONCEPT §6 graph), all as first-party palette items.
 - **P2 (future, out of v1 scope):** read-palette nodes (search/OB/memory/LLM),
   schedule trigger, then — only behind the §9 auth boundary — cloudflared exposure
   and privileged sinks (email/wiki/little-coder). Tracked in CONCEPT §10.
@@ -340,17 +402,25 @@ Adding `n8n` + `n8n-db` means updating, together:
 4. **Inference routing** (future nodes only). Any LLM node must hit
    `llm-gateway`/`llama-cpp`, never `*-upstream`; `check-llm-gateway-routing.ps1`
    applies. Not in v1, but note before P2.
-5. **Recovery drift** (§8). Two containers + a backup sidecar across two scripts —
-   easy to half-do. The `/stack-map` skill check catches it.
-6. **n8n scheduling jitter** (~1–2 min under load) — irrelevant for v1 (manual
+5. **Recovery drift** (§8). A whole new project + a backup sidecar across two
+   recovery scripts + CLAUDE.md + stack-map — more places than a fold-in. The
+   `/stack-map` skill check catches container/network drift; the project lifecycle
+   ordering is on the recovery scripts.
+6. **External-network ordering** (§4). The `automations` project will fail to
+   start if `ai-stack_default` or `open-brain_obnet` don't exist yet — bring it up
+   strictly after main + OB1.
+7. **n8n scheduling jitter** (~1–2 min under load) — irrelevant for v1 (manual
    trigger), note for P2 schedule nodes.
 
 **Open items to confirm with operator:**
-- (a) Confirm **platform-not-fork** (§2). Default assumption: platform.
-- (b) OK to **add `obnet` external attach** to the main stack for n8n? (Precedent
-  exists; it's the only cross-project coupling.)
-- (c) For v1, is **Open Notebook the acceptable primary sink** if the OWUI-chat
+- (a) For v1, is **Open Notebook the acceptable primary sink** if the OWUI-chat
   spike (§5.2) proves costly?
+
+*(Resolved 2026-06-13: (1) n8n runs as its own `automations` compose project —
+license isolation — attaching to `ai-stack_default` + `open-brain_obnet` as
+external. (2) We own the n8n **deployment** (custom-built image) and extend it with
+a first-party `n8n-nodes-ai-stack` package, keeping n8n's engine; the Research node
+ships as a custom node in P0.)*
 
 ---
 
@@ -359,5 +429,7 @@ Adding `n8n` + `n8n-db` means updating, together:
 To hold scope (CONCEPT §9.6 "don't build another n8n" — ironically we *are* using
 n8n, so the discipline is "don't build *nodes/sinks* we don't need yet"):
 no cloudflared/Authelia, no schedule/webhook triggers, no search/memory/LLM/
-extract nodes, no email/wiki/little-coder sinks, no custom-node packages (built-in
-HTTP nodes first), no multi-user. All deferred to P2+.
+extract nodes, no email/wiki/little-coder sinks, no multi-user. All deferred to
+P2+. **Note:** the `n8n-nodes-ai-stack` custom-node package *is* in v1 (the
+extensibility seam) — but only the Research + Format nodes live in it for now;
+additional nodes land as the palette grows.
