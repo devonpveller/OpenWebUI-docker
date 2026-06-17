@@ -35,7 +35,14 @@ this stack's own capabilities instead of OWUI primitives.
   ships as a custom node in P0 so extensibility is built in from the start.
   (This is "fork the *deployment* + extend with nodes," **not** fork the editor
   onto a bespoke engine — see PLAN §2.)
-- v1 scope = **Research fan-out only** (Research → ON / Podcast / OWUI formats).
+- v1 scope = **Research fan-out only**.
+- **Output model = store vs. surface** (corrected 2026-06-17): **Open Brain is the
+  canonical store; Open Notebook only *displays* it** (no "write to ON"). Research
+  auto-persists to Open Brain via the curator, so the canonical output is automatic.
+  "Format" nodes are *surfacings* (podcast / OWUI / teams-chat), not stores —
+  and the destination set is an **open design area**. The **teams-chat (Mattermost)
+  orchestration UI** is the leading future surfacing target (governance-gated;
+  blocked on that project being built). See PLAN §5.0/§5.5.
 
 ## One-line verdict
 

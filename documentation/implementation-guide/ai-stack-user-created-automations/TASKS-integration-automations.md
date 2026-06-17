@@ -28,8 +28,8 @@
 - [ ] **0.C4** Restart `tailscale` after n8n healthy (respect the OWUI→tailscale netns ordering). *Done-when:* `https://<tailnet-host>:8446/` loads the n8n editor.
 
 ### 0.D The workflow
-- [ ] **0.D1** Build the flow: **Manual trigger → Research (custom node, 0.X2) → Format→ON**. *Done-when:* the Research node runs from a manual trigger and emits `research_result`.
-- [ ] **0.D2** Format→ON: create source via `POST open_notebook:5055/api/sources` carrying `result.prose`, link to an "Automations" notebook (built-in HTTP node OK in P0). *Done-when:* the synthesis appears as a source in ON.
+- [ ] **0.D1** Build the flow: **Manual trigger → Research (custom node, 0.X2)**. *Done-when:* the Research node runs from a manual trigger and emits `research_result`.
+- [ ] **0.D2** Verify the **canonical Open Brain output** (no write node — it's the curator step inside research, PLAN §5.0/§5.3): confirm `result.curator.thread_id` is set and the synthesis/claims are persisted in Open Brain, **and** the thread is visible in the Open Notebook viewer. *Done-when:* the research result is in Open Brain and shows up in Open Notebook with no extra HTTP call.
 - [ ] **0.D3** Graceful failure: if `openbrain-research` is unreachable (OB1 down), the flow errors cleanly (no hang). *Done-when:* verified by stopping OB1.
 
 ### 0.E Stack discipline (new project lifecycle)
@@ -38,18 +38,17 @@
 - [ ] **0.E3** Add `n8n-db-backup` cron sidecar *inside the `automations` project* (existing `*-backup` pattern). *Done-when:* a backup artifact is produced once.
 - [ ] **0.E4** Run `/stack-map`; update `workspace-stacks.md` to list the `automations` project + its external network attachments. *Done-when:* skill reports no drift.
 
-**P0 exit criteria:** from a tailnet device, run the flow by hand and see a
-grounded research synthesis land in Open Notebook — delivered by the **custom
-Research node** (proving the `n8n-nodes-ai-stack` extension seam); recovery
-scripts + CLAUDE.md + stack-map updated.
+**P0 exit criteria:** from a tailnet device, run the flow by hand; the **custom
+Research node** (proving the `n8n-nodes-ai-stack` extension seam) produces a
+grounded synthesis that lands in **Open Brain** and is visible in Open Notebook;
+recovery scripts + CLAUDE.md + stack-map updated.
 
-## Phase 1 — Fan-out (Podcast + OWUI spike), as first-party nodes
+## Phase 1 — Surfacing outputs (Podcast + OWUI spike), as first-party nodes
 
 - [ ] **1.A** **Format→Podcast** node in `n8n-nodes-ai-stack`: render a single `result.synthesis` into `EpisodeInput{segments:[{label,items:[{title,url,synthesis}]}]}`, then `POST open_notebook:5055/api/podcasts/generate` → poll `/api/podcasts/jobs/{id}` → fetch `/api/podcasts/episodes/{id}/audio`. **Bypass `openbrain-podcast`.** *Done-when:* an mp3 episode is produced from one research run via the node.
-- [ ] **1.B** Promote **Format→ON** from the built-in HTTP node (0.D2) to a custom `n8n-nodes-ai-stack` node. *Done-when:* it's a palette item with typed input.
-- [ ] **1.C** Fan-out wiring: one Research node feeds Format→ON **and** Format→Podcast in parallel. *Done-when:* a single run yields both a source and an episode.
-- [ ] **1.D** OWUI sink spike (PLAN §5.2 option a): verify OWUI 0.9.x REST chat-create + message-insert with an API key. *Done-when:* either a synthesis appears as a new OWUI chat, **or** the spike is documented as not-worth-it and OWUI is dropped from v1.
-- [ ] **1.E** (if 1.D passes) Add **Format→OWUI** as a custom node + third fan-out branch.
+- [ ] **1.B** Fan-out wiring: one Research run (already in Open Brain) drives Format→Podcast as an additive surfacing branch. *Done-when:* a single run yields the Open Brain thread **and** an episode.
+- [ ] **1.C** OWUI surfacing spike (PLAN §5.2 option a): verify OWUI 0.9.x REST chat-create + message-insert with an API key. *Done-when:* either a synthesis appears as a new OWUI chat, **or** the spike is documented as not-worth-it and OWUI surfacing is dropped from v1.
+- [ ] **1.D** (if 1.C passes) Add **Format→OWUI** as a custom node + surfacing branch.
 
 **P1 exit criteria:** the CONCEPT §6 graph runs — one research result fans out to
 Open Notebook + Podcast (+ OWUI if the spike passed).
@@ -60,5 +59,6 @@ Open Notebook + Podcast (+ OWUI if the spike passed).
 - [ ] Schedule + Webhook triggers.
 - [ ] Action-authorization boundary (CONCEPT §9.2) — required **before** any privileged sink.
 - [ ] cloudflared + Authelia exposure (CONCEPT §10 P3).
+- [ ] **Teams-chat (Mattermost) surfacing output** (PLAN §5.5) — `agent-bridge`-mediated, governance-gated; blocked on the teams-chat project reaching its platform spike (P0).
 - [ ] Privileged sinks: email/digest, wiki recompile, little-coder.
 - [ ] Optional: package thin custom n8n nodes for the READY surfaces (nicer UX than raw HTTP nodes).

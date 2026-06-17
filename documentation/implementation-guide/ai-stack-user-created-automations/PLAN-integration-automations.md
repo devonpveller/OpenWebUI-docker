@@ -71,14 +71,16 @@ engine, and still eliminates the bespoke `automations-engine`/`automations-ui`.
    ╔═══ project: automations (separate compose) ════════════════════════════════╗ │
    ║  n8n  (engine + editor + triggers)              n8n-db (Postgres)           ║◀┘
    ║   workflow: "Research fan-out"                                              ║
-   ╚═══╤═══════════════╤═══════════════════════╤════════════════════════════════╝
-       │ HTTP          │ HTTP                   │ HTTP
-       ▼               ▼                        ▼
- openbrain-research  open_notebook         open_notebook
- POST /research      /api/sources          /api/podcasts/generate
- (poll job)          (Format→ON)           (Format→Podcast)
- [open-brain_obnet]  [ai-stack_default]    [ai-stack_default]
+   ╚═══╤═══════════════════════════════════════╤════════════════════════════════╝
+       │ HTTP                                   │ HTTP (optional surfacing)
+       ▼                                        ▼
+ openbrain-research ──curator──▶ Open Brain   open_notebook
+ POST /research      (canonical store;        /api/podcasts/generate
+ (poll job)           ON *displays* it)       (Format→Podcast, optional)
+ [open-brain_obnet]                           [ai-stack_default]
 ```
+*Research auto-persists to Open Brain (visible in Open Notebook). Podcast/OWUI/
+teams-chat are optional **surfacing** outputs, not stores — see §5.0.*
 
 Two new containers, in a **new compose project** named `automations`: **`n8n`** and
 **`n8n-db`**. They attach to existing ai-stack + OB1 networks as **external** — they
@@ -122,10 +124,13 @@ networks:
 
 | n8n must call | Host:port (by container name) | External network n8n joins |
 |---------------|-------------------------------|----------------------------|
-| Research submit/poll | `openbrain-research:8000` | `open-brain_obnet` |
-| Open Notebook (ON + Podcast) | `open_notebook:5055` | `ai-stack_default` |
-| OWUI (Format→OWUI, see §5.2) | `openwebui:8080` | `ai-stack_default` |
+| Research submit/poll (auto-persists to Open Brain) | `openbrain-research:8000` | `open-brain_obnet` |
+| Podcast surfacing (ON podcast API) | `open_notebook:5055` | `ai-stack_default` |
+| OWUI surfacing (P1 spike, §5.2) | `openwebui:8080` | `ai-stack_default` |
 | (reached *by* tailscale serve) | `n8n:5678` | `ai-stack_default` (so the main-stack tailscale socat can resolve it — §6) |
+
+> Note: there is **no** "write to Open Notebook" call — the canonical write is the
+> curator step *inside* the research service (§5.0/§5.3); ON only displays it.
 
 > **Bring-up order (mirrors OB1):** the `automations` project starts **after** the
 > main stack *and* OB1 are up (its external networks must already exist), and is
@@ -137,8 +142,40 @@ networks:
 
 ## 5. The v1 automation: "Research fan-out" — exact contracts
 
-A single n8n workflow: **Manual trigger → Research → {Format→OWUI, Format→ON,
-Format→Podcast}**. All three Format nodes consume the *same* research result.
+### 5.0 Output model — store vs. surface (important correction)
+
+An earlier draft mis-modelled outputs as "write to Open Notebook." Corrected:
+
+- **Open Brain is the canonical knowledge store.** **Open Notebook does not store
+  anything — it is a *viewer* over Open Brain** (via IKS). You don't "write to ON";
+  you write to Open Brain, and ON *displays* it.
+- **The Research node already persists to Open Brain by itself.** When a research
+  job completes (not `dry_run`), the harness delegates to `openbrain-curator`
+  (`/ingest/research-package`) → thread placement + grounded-claim ingestion into
+  Open Brain. That's `result.curator.{thread_id, claims, persist}`. So for a
+  research automation, **the canonical output is already done** before any "format"
+  node runs — Open Brain is the default home, and Open Notebook surfaces it for
+  free (the thread shows up in ON).
+
+So the "format/output" nodes are **not stores** — they are **surfacing /
+rendering / notification** destinations for a result that (when it's knowledge)
+already lives in Open Brain. Reframed v1 outputs:
+
+| Output | What it really is | v1 status |
+|--------|-------------------|-----------|
+| **Open Brain (canonical)** | the store; research writes here via the curator | **automatic** — no node needed for research |
+| **Open Notebook view** | a *display* of the Open Brain thread; nothing to write | **free** once it's in Open Brain |
+| **Podcast** | a *rendering* (audio) of the synthesis | build (§5.4) |
+| **OWUI chat** | a *notification/surfacing* into OWUI | unverified spike (§5.2) |
+| **Teams-chat (Mattermost) UI** | a *surfacing* into the orchestration chat — **candidate, needs exploration** | future (§5.5) |
+
+> **Open design area (operator, 2026-06-17):** Open Brain is the sensible default
+> output *where it makes sense*, but not every automation's result is knowledge to
+> store there. Output destinations are deliberately **left to explore** — see §5.5.
+
+A single n8n workflow for v1: **Manual trigger → Research** (→ Open Brain
+automatically; visible in Open Notebook) **→ optional surfacing nodes**
+(Podcast / OWUI / teams-chat). The "fan-out" is over *surfacing*, not storage.
 
 ### 5.1 Research node (HTTP Request + poll)
 
@@ -178,29 +215,34 @@ mechanism only works **inside** an OWUI tool call — an n8n workflow runs *outs
 OWUI and has no live turn to return into. There is **no code in the repo** that
 creates an OWUI chat programmatically.
 
-So "Format → OWUI chat" from an automation requires one of:
+"Format → OWUI chat" (a *surfacing*, not a store) from an automation requires one of:
 - **(a)** Call OWUI's REST API to create a chat and insert the synthesis as a
   message (OWUI 0.9.x exposes `/api/v1/chats/...` + an API-key auth). **Feasible
   but unverified in this repo — must be spiked** before promising it.
 - **(b)** Deliver to OWUI as a *Knowledge* entry instead of a chat
   (`/api/v1/knowledge/...`) — different UX, also unverified.
-- **(c)** Drop the OWUI sink from v1 and deliver to Open Notebook only (ON is the
-  cleaner, verified write path — §5.3).
+- **(c)** Drop the OWUI surfacing from v1 — the result is already in Open Brain and
+  visible in Open Notebook (§5.0), so v1 loses nothing essential.
 
-**Plan:** P0 ships **Format→ON** (verified). The OWUI sink is a **P1 spike**
-(option a), demoted from "READY" to "ADAPTER — needs verification." This corrects
-the concept doc's optimistic READY rating for the OWUI format.
+**Plan:** P0 relies on the **automatic Open Brain output** (§5.0/§5.3); OWUI
+surfacing is a **P1 spike** (option a). This corrects the concept doc's optimistic
+"READY" rating for the OWUI format.
 
-### 5.3 Format → Open Notebook (verified write path)
+### 5.3 Open Brain output (canonical) + Open Notebook view — already done
 
-ON API at `open_notebook:5055`. Add the synthesis as a source/note:
-```
-POST http://open_notebook:5055/api/sources          (create source)
-POST http://open_notebook:5055/api/notebooks/{id}/sources/{srcId}   (link to notebook/thread)
-```
-(The IKS integration uses exactly these routes; `link_source_to_thread(...)` is
-the underlying op.) v1: create one source carrying `result.prose`, link it to a
-designated "Automations" notebook.
+There is **no "write to Open Notebook" node.** The research result lands in **Open
+Brain** through the curator step that the harness already performs
+(`result.curator.thread_id`, claims, `persist.source_ids`), and **Open Notebook
+displays that thread** because ON is a viewer over Open Brain (IKS).
+
+So for v1 the "output" is satisfied **for free**: run Research, and the synthesis is
+in Open Brain and visible in the corresponding Open Notebook thread — no extra HTTP
+call. (If we later want an automation to *put a specific note* somewhere, that too
+is an Open Brain write — via `openbrain-mcp` / the curator — **not** an ON write.)
+
+> Earlier draft error (now corrected): it claimed `POST open_notebook:5055/api/sources`
+> "writes a source to Open Notebook." ON's API ultimately persists to the Open
+> Brain substrate; ON is not the store. Treat Open Brain as the write target.
 
 ### 5.4 Format → Podcast (verified — bypass openbrain-podcast)
 
@@ -230,6 +272,33 @@ single research result we wrap it as one segment with one item — a small,
 self-contained render step (n8n Function/Code node, or a thin custom node).
 This is the **one piece of genuinely new glue** in v1 (the "podcast decouple"
 flagged in CONCEPT §9.4), and it's small because we reuse ON's renderer/TTS.
+
+### 5.5 Teams-chat (Mattermost) surfacing — candidate, to explore (NOT v1)
+
+The operator flagged the **teams-chat orchestration UI** as a likely future output
+destination. That project
+([`../teams-chat-agent-orchestration/`](../teams-chat-agent-orchestration/)) is a
+self-hosted, Teams-style **Mattermost** platform that doubles as the coordination
+fabric for a governed agent fleet (Human → PO → PM → little-coder workers) — a
+large, **not-yet-built** design with a governance gate as its spine.
+
+Why it's a natural automation output: Mattermost is a chat surface a human (and
+agents) actually watch, so "post the result / a notification into a channel or
+thread" is a clean delivery target — and it ties automations into the broader
+orchestration story (an automation run could surface its result, or escalate, into
+the org's chat).
+
+**But it's explicitly out of v1 scope and dependency-blocked:**
+- The teams-chat platform **does not exist yet** (its own P0→P7 build).
+- Its governance model gates what may post where; an automations→Mattermost output
+  must respect that **escalation/CONCERN** discipline, not bypass it. That's a
+  design conversation to have *with* the teams-chat governance spec, not a v1 HTTP
+  call.
+
+**Action for now:** record it as the leading **future surfacing destination**
+(this section + §9 open items). Revisit once teams-chat reaches its platform spike
+(P0) and `agent-bridge` exists; the integration would likely be an
+`agent-bridge`-mediated post rather than n8n talking to Mattermost directly.
 
 ---
 
@@ -375,15 +444,18 @@ project-level (mirrors how OB1 is handled):
 - **P0 — Tailnet spike + node-package scaffold (the proof + the seam):**
   the `automations` project (own n8n image) + n8n-db; tailnet serve on :8446;
   scaffold the **`n8n-nodes-ai-stack`** package and ship the **Research** node in
-  it; one workflow: **Manual → Research → Format→ON**. Proves the research async
-  contract, a verified sink, *and* the custom-node extension path end-to-end on
-  the tailnet. (Format→ON may start as a built-in HTTP node and graduate to a
-  custom node in P1 — Research is the one that must be custom in P0.)
-- **P1 — Fan-out (more first-party nodes):**
+  it; one workflow: **Manual → Research**. Output is satisfied by the **automatic
+  Open Brain write** (curator) — verify the result lands in Open Brain and is
+  visible in the Open Notebook thread (§5.0/§5.3). Proves the research async
+  contract, the canonical output, *and* the custom-node extension path end-to-end.
+- **P1 — Surfacing outputs (more first-party nodes):**
   Add **Format→Podcast** (the ON podcast-API render path, §5.4) and **spike
-  Format→OWUI** (§5.2 option a — verify OWUI REST chat creation), both as nodes in
-  `n8n-nodes-ai-stack`. Goal: one research result → up to three sinks (the
-  CONCEPT §6 graph), all as first-party palette items.
+  Format→OWUI** (§5.2 option a), both as nodes in `n8n-nodes-ai-stack`. Goal: one
+  research result, already in Open Brain, fans out to optional surfacing
+  destinations (podcast + OWUI).
+- **P-future — Teams-chat surfacing (§5.5):** once the teams-chat platform exists,
+  add an `agent-bridge`-mediated output that posts/escalates into Mattermost under
+  its governance rules. Not before that project's P0.
 - **P2 (future, out of v1 scope):** read-palette nodes (search/OB/memory/LLM),
   schedule trigger, then — only behind the §9 auth boundary — cloudflared exposure
   and privileged sinks (email/wiki/little-coder). Tracked in CONCEPT §10.
@@ -412,9 +484,44 @@ project-level (mirrors how OB1 is handled):
 7. **n8n scheduling jitter** (~1–2 min under load) — irrelevant for v1 (manual
    trigger), note for P2 schedule nodes.
 
-**Open items to confirm with operator:**
-- (a) For v1, is **Open Notebook the acceptable primary sink** if the OWUI-chat
-  spike (§5.2) proves costly?
+**Open items / open design area:**
+- (a) **Output destinations are deliberately open** (§5.0/§5.5). Open Brain is the
+  canonical default *where the result is knowledge*; not every automation fits
+  that. Candidate human-facing surfaces — OWUI chat (unverified), podcast (build),
+  **teams-chat/Mattermost (future, governance-gated)** — to be explored as the
+  palette and the teams-chat project mature. v1 leans on the automatic Open Brain
+  output and treats surfacing as additive.
+- (b) **🚩 DECISION GATE — surfacing design is deferred until a hands-on n8n
+  evaluation** (operator, 2026-06-17). Exactly *how* results surface in Open Brain
+  vs. Mattermost is **not decided from the design** — the operator wants to see
+  n8n's node model, native connection catalog, and data-passing in the actual
+  workflow first. **Working assumption to validate:** most automations terminate at
+  **external** endpoints (n8n's native Slack/Discord/Etsy/… catalog) and end there;
+  **Open Brain and Mattermost are deliberate, opt-in ai-stack outputs**, not the
+  default — the ai-stack nodes (Research in; Open Brain/Mattermost out) are a
+  *bridge*, not a closed loop (CONCEPT §3.2). So: do a low-risk n8n spike (see
+  "Evaluation path" below), confirm that model, then revisit §5.0/§5.5 surfacing
+  with real ergonomics. Nothing downstream of surfacing is locked until then.
+
+### Evaluation path (do this before committing surfacing design)
+
+Three ways to "see how n8n works + fits," lowest-risk first — none require locking
+the surfacing decision:
+1. **Isolated sandbox (localhost):** one throwaway n8n container, SQLite, bound to
+   `127.0.0.1:5678`, attached to **no** stack networks. Pure UX exploration of the
+   editor, nodes, triggers, and the HTTP Request + poll-loop pattern. Touches **no**
+   stack files; `docker rm` to dispose.
+2. **Sandbox + real Research call:** same throwaway container but attached to
+   `open-brain_obnet` (read-only intent) so it can actually `POST openbrain-research:8000/research`
+   and watch a real job complete + land in Open Brain. Proves the workflow fit
+   against the real flagship node. Still **no** edits to compose/entrypoint/recovery;
+   the container is transient.
+3. **Full P0 spike (§9):** the real integration — own image, custom node, tailnet
+   serve, recovery wiring. Only worth doing once (1)/(2) confirm n8n is the right
+   tool and the surfacing direction is clearer.
+
+Recommended: **(2)** — enough to feel the node model *and* see a real result land,
+with zero changes to any tracked stack file.
 
 *(Resolved 2026-06-13: (1) n8n runs as its own `automations` compose project —
 license isolation — attaching to `ai-stack_default` + `open-brain_obnet` as
