@@ -28,6 +28,7 @@
 #   - openbrain-db          running               (the dependency)
 #   - openbrain-mcp         running + STALE-POOL guard (db started after mcp -> restart)
 #   - openbrain-mcpo[-ext]  running               (the Open WebUI tool bridge)
+#   - openbrain-research    http://127.0.0.1:8818/health "db":true  (STALE-POOL guard, same class as mcp)
 #   - openbrain-gateway     http://127.0.0.1:8061/health == "ok"   (functional, no secret)
 #   - openbrain-rest        http://127.0.0.1:3001/   (PostgREST proxy reachable)
 #   - openbrain-postgrest / -wiki / -wiki-viewer / -entity-worker  running
@@ -157,6 +158,33 @@ Confirm-ObContainer 'openbrain-mcpo'     | Out-Null
 Confirm-ObContainer 'openbrain-mcpo-ext' | Out-Null
 
 # ---- 4. Functional probes on host-published endpoints (no secret needed) ----
+# openbrain-research /health does a live `SELECT 1` and returns 503 when its
+# Postgres pool has gone stale after an openbrain-db restart -- the SAME
+# "green but functionally dead" stale-pool class as openbrain-mcp above. It
+# surfaces to callers as a research 500 (the OWUI deep_research tool reports
+# "Research engine error polling job: 500") while web search/SearXNG is fine.
+# The 503 is a direct functional signal, so we probe /health rather than
+# compare StartedAt. See memory: openbrain-mcp-stale-db-connection.
+if ((Get-CState 'openbrain-research') -eq 'running') {
+  if (Test-HttpOk 'http://127.0.0.1:8818/health' 5 '"db":true') {
+    Write-Ob 'openbrain-research' ok '/health db ok (:8818)'
+  } else {
+    Write-Ob 'openbrain-research' warn 'STALE DB POOL: /health not db-ok on :8818'
+    if ($Repair) {
+      Write-Ob 'openbrain-research' fix 'docker restart openbrain-research (re-open DB pool)'
+      docker restart openbrain-research 2>&1 | Out-Null
+      Start-Sleep 5
+      if (Test-HttpOk 'http://127.0.0.1:8818/health' 5 '"db":true') { Write-Ob 'openbrain-research' ok '/health recovered' }
+      else { Write-Ob 'openbrain-research' down '/health still failing'; $script:Faults++ }
+    } else {
+      Write-Ob 'openbrain-research' warn 'run with -Repair to restart (fixes research 500 / stale pool)'
+      $script:Faults++
+    }
+  }
+} else {
+  Confirm-ObContainer 'openbrain-research' | Out-Null
+}
+
 # Gateway /health is the privacy proxy Claude/cloud clients reach at :8061.
 if ((Get-CState 'openbrain-gateway') -eq 'running') {
   if (Test-HttpOk 'http://127.0.0.1:8061/health' 5 'ok') {

@@ -48,7 +48,11 @@ _AI_STACK_SERVICES: List[Dict[str, Any]] = [
     {"name": "mnemory",         "plane": "Memory",       "host": "mnemory",         "port": 8051, "path": "/health",                  "critical": False},
     {"name": "mnemory-gateway", "plane": "Memory",       "host": "mnemory-gateway", "port": 8060, "path": "/health",                  "critical": False},
     # Private Search Gateway (`gateway` also joins the default network).
-    {"name": "gateway",         "plane": "Search",       "host": "gateway",         "port": 8080, "path": "/healthz",                 "critical": False},
+    # Probe /readyz (NOT /healthz): /healthz is liveness-only and returns 200
+    # whenever the event loop serves, so a dead Redis or an unreachable SearXNG
+    # (Tor chain down, all engines failing) stays invisible. /readyz is 503
+    # unless Redis answers AND at least one provider is actually healthy.
+    {"name": "gateway",         "plane": "Search",       "host": "gateway",         "port": 8080, "path": "/readyz",                  "critical": False},
     # little-coder control plane.
     {"name": "open-terminal",   "plane": "little-coder", "host": "open-terminal",   "port": 8000, "path": "/health",                  "critical": False},
     {"name": "little-coder",    "plane": "little-coder", "host": "little-coder",    "port": 8090, "path": "/health",                  "critical": False},
@@ -57,6 +61,12 @@ _AI_STACK_SERVICES: List[Dict[str, Any]] = [
     {"name": "open_notebook",   "plane": "Auxiliary",    "host": "open_notebook",   "port": 5055, "path": "/api/config",              "critical": False},
     # Open Brain (OB1) — separate compose project on the shared llm-net.
     {"name": "openbrain-mcpo",  "plane": "Open Brain",   "host": "openbrain-mcpo",  "port": 8000, "path": "/open-brain/openapi.json", "critical": False},
+    # openbrain-research (shared research engine, on ai-stack_llm-net). Its
+    # /health does a live `SELECT 1`, returning 503 when the Postgres pool has
+    # gone stale (e.g. after an openbrain-db restart the Deno pool never
+    # reconnects) — the exact failure that surfaces to callers as a research
+    # 500 while web search is fine. Without this probe that outage was invisible.
+    {"name": "openbrain-research", "plane": "Open Brain", "host": "openbrain-research", "port": 8000, "path": "/health",            "critical": False},
 ]
 
 
