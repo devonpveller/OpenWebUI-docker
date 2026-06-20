@@ -20,7 +20,10 @@
       "PowerShell(docker exec openbrain-research deno eval --allow-net --allow-env $script)",
       "PowerShell(docker exec openbrain-research deno eval -A $script)",
       "PowerShell(docker exec openbrain-research deno eval $script)",
-      "Bash(docker build *)"
+      "Bash(docker build *)",
+      "Bash(docker rmi *)",
+      "PowerShell(& python -m py_compile \"d:\\\\Open WebUI\\\\ai-stack\\\\owui\\\\tools\\\\deep_research.py\"; \"py_compile exit: $LASTEXITCODE\")",
+      "Bash(echo \"exit=$?\")"
     ]
   }
 }

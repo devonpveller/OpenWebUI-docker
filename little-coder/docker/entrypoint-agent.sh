@@ -34,11 +34,24 @@ if [ "${LC_ROUTE_EXEC:-0}" = "1" ]; then
   else
     echo "[entrypoint] WARN: could not install open-terminal-exec extension"
   fi
-  # Remove tools that execute or egress OUTSIDE the routed path. `bash` (our
-  # override → ot-exec → open-terminal → git-proxy) must be the sole execution
-  # tool — the agent was observed escaping the git-proxy via ShellSession.
-  rm -rf "$EXT_DIR/shell-session" "$EXT_DIR/browser" 2>/dev/null || true
-  echo "[entrypoint] removed shell-session + browser extensions (no exec bypass)"
+  # Remove extensions whose execution/egress would land OUTSIDE the open-terminal
+  # workspace plane (control-plane→workspace invariant). `bash` (our override →
+  # ot-exec → open-terminal → git-proxy) must be the sole execution path — the
+  # agent was observed escaping the git-proxy via ShellSession.
+  #   shell-session            — in-container shell (git-proxy bypass)
+  #   browser / browser-extract-retention — playwright launches chromium
+  #                              IN-PROCESS here (1.9.x), not in open-terminal;
+  #                              also egress. Excluded until/unless routed.
+  # The `--exclude-tools` denylist in config/little-coder.config.yaml is the
+  # declarative backstop (survives an upstream dir rename); this rm is the
+  # belt-and-braces. Removal is logged per-dir so a silent miss is visible.
+  for ext in shell-session browser browser-extract-retention; do
+    if [ -d "$EXT_DIR/$ext" ]; then
+      rm -rf "$EXT_DIR/$ext" && echo "[entrypoint] removed extension: $ext"
+    else
+      echo "[entrypoint] NOTE: extension '$ext' not present (renamed upstream? check --exclude-tools)"
+    fi
+  done
 else
   echo "[entrypoint] exec routing disabled (LC_ROUTE_EXEC!=1) — built-in bash"
 fi

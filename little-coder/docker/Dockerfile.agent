@@ -20,8 +20,17 @@ RUN apt-get update \
 # Upstream little-coder — a Node.js CLI on the `pi` framework.
 # INTEGRATION POINT: pin to a known-good version for reproducible builds
 # (plan §5). Override LITTLE_CODER_VERSION via the compose build arg.
+#
+# PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: since 1.9.x, little-coder depends on
+# `playwright` (its `browser` extension launches chromium IN-PROCESS). That
+# violates our control-plane→workspace-plane invariant (execution/egress must
+# live in open-terminal, not here), so the browser extension is removed at
+# runtime by the entrypoint and excluded by config. Skip the ~chromium download
+# entirely — it would only bloat the image with a browser we never launch. If a
+# future chapter routes the browser into open-terminal, install playwright there
+# (Dockerfile.open-terminal), not here. See documentation/little-coder/UPDATE-NOTES.md.
 ARG LITTLE_CODER_VERSION=latest
-RUN npm install -g "little-coder@${LITTLE_CODER_VERSION}"
+RUN PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm install -g "little-coder@${LITTLE_CODER_VERSION}"
 
 WORKDIR /app
 COPY pyproject.toml ./

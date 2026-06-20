@@ -1101,6 +1101,12 @@ services:
       - LC_OPEN_TERMINAL_URL=http://open-terminal:8000
       - LC_OPEN_TERMINAL_KEY=${OPEN_TERMINAL_API_KEY}
       - LC_WORKSPACE=/workspace
+      # 1.9.x llama-cpp-provider probes the server's /props at startup to detect
+      # the live context window. Our base_url is the LiteLLM gateway, which does
+      # not forward llama.cpp's /props — the probe just fails (silently) on every
+      # task and falls back to models.json's declared window (131072), which is
+      # what we want anyway. Skip the futile probe + its log noise.
+      - LITTLE_CODER_NO_CTX_PROBE=1
     volumes:
       - ./little-coder/config:/app/config:ro
       - little-coder-journals:/var/lib/little-coder/journals

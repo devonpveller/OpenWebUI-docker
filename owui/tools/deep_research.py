@@ -1,15 +1,19 @@
 """
 title: Deep Research (thin client)
 author: ai-stack / Open Brain
-version: 1.1.0
+version: 1.2.0
 description: >
   Thin OWUI client for the shared Open Brain research engine (Research Engine
-  P5). Submits the query to openbrain-research `POST /research`, polls the job,
-  streams progress, and renders the GROUNDED synthesis. ALL the harness logic
-  (discover → stage full content → reuse grounded claims → gap analysis →
-  synthesize → enforce grounding → curate) lives server-side; this tool carries
-  none of it. Replaces the heavy in-tool harness once openbrain-research is
-  deployed and reachable from OWUI.
+  P5). Submits the query to openbrain-research `POST /research`, then waits a
+  SHORT bounded window for it to finish and renders the GROUNDED synthesis
+  inline. The engine SERIALIZES research jobs (one at a time, so a burst can't
+  flood the inference plane), so a job may sit in a queue behind others — far
+  longer than a chat should block. When the job doesn't finish within the inline
+  window, this tool returns a TICKET (job id + queue position + ETA) and ends the
+  turn; the job keeps running server-side and its result is saved to Open Brain.
+  Retrieve it later with the companion `research_status` tool (no args = list your
+  recent jobs; pass a job id = fetch that result). ALL harness logic lives
+  server-side; this tool carries none of it.
 
   Grounding guarantees (enforced server-side, see GROUNDING-MODEL.md): the stored
   synthesis is verbatim, only cited sources are linked, and nothing ungrounded is
@@ -37,13 +41,9 @@ class Tools:
         poll_interval_sec: float = Field(
             default=2.0, description="How often to poll the job for progress."
         )
-        max_wait_sec: int = Field(
-            default=600,
-            description="Give up waiting after this many seconds of a job actually RUNNING (the job keeps running server-side). Queue-wait time is budgeted separately.",
-        )
-        max_queue_wait_sec: int = Field(
-            default=1800,
-            description="The engine serializes research jobs, so a request may WAIT in a queue before it runs. Wait up to this many seconds while still queued before giving up (the job stays queued and runs server-side when its turn comes).",
+        inline_wait_sec: int = Field(
+            default=90,
+            description="How long to block the chat waiting for the job to finish before handing back a ticket. Covers the fast paths (cache/reuse hits, or a job at the front of an empty queue). Past this the job keeps running server-side and is retrieved later with research_status — the chat is never held open for a long queue wait.",
         )
         confidence_floor: float = Field(
             default=0.50,
@@ -104,18 +104,17 @@ class Tools:
                         f"Research engine returned no job id: {json.dumps(job)[:300]}"
                     )
 
-                # 2. Poll until terminal. A job may now WAIT in a queue before it
-                # runs — the engine serializes research so a burst can't flood the
-                # shared inference plane. The queued phase gets its own generous
-                # budget; the run-phase max_wait only starts ticking once the job
-                # is actually running, so a request is never abandoned just for
-                # waiting in line.
-                queue_waited = 0.0
-                run_waited = 0.0
+                # 2. Wait a SHORT bounded window. The engine serializes jobs, so a
+                # job may queue behind others for far longer than a chat should
+                # block; we only wait out the fast paths here. If it doesn't finish
+                # in time, hand back a ticket (below) instead of holding the turn.
+                waited = 0.0
                 result = None
-                last_queue_msg = None
-                while True:
+                last_msg = None
+                st: dict[str, Any] = {}
+                while waited < v.inline_wait_sec:
                     await asyncio.sleep(v.poll_interval_sec)
+                    waited += v.poll_interval_sec
                     async with session.get(
                         f"{base}/research/jobs/{job_id}", headers=headers
                     ) as r:
@@ -131,36 +130,35 @@ class Tools:
                     if status == "cancelled":
                         return "Research was cancelled."
                     if status == "queued":
-                        # Still behind other jobs — surface position, don't charge
-                        # the run-phase budget. queue_position/queue_depth are absent
-                        # on an un-upgraded backend → fall back to a generic message.
-                        queue_waited += v.poll_interval_sec
-                        pos, depth = st.get("queue_position"), st.get("queue_depth")
+                        # Behind other jobs — surface position/ETA (fields absent on
+                        # an un-upgraded backend → generic message).
+                        pos, depth, eta = (
+                            st.get("queue_position"),
+                            st.get("queue_depth"),
+                            st.get("eta_seconds"),
+                        )
                         msg = (
-                            f"Queued — position {pos} of {depth}; waiting for the current research to finish…"
+                            f"Queued — position {pos} of {depth}"
+                            + (f" (est. {_fmt_eta(eta)})" if eta else "")
+                            + "…"
                             if pos
                             else "Queued — waiting for the current research to finish…"
                         )
-                        if msg != last_queue_msg:
+                        if msg != last_msg:
                             await emit(msg)
-                            last_queue_msg = msg
-                        if queue_waited >= v.max_queue_wait_sec:
-                            return (
-                                f"Research is still queued (job {job_id}) after {int(queue_waited)}s; "
-                                f"it will run server-side when the queue clears. Poll again later."
-                            )
-                        continue
-                    # running (or any other non-terminal state) — tick run budget.
-                    run_waited += v.poll_interval_sec
-                    prog = st.get("progress") or {}
-                    if prog.get("message"):
-                        await emit(f"{prog.get('phase', 'working')}: {prog['message']}")
-                    if run_waited >= v.max_wait_sec:
-                        break
-                if result is None:
-                    return f"Research is still running (job {job_id}); it will finish server-side. Poll again later."
+                            last_msg = msg
+                    else:  # running
+                        prog = st.get("progress") or {}
+                        if prog.get("message"):
+                            await emit(f"{prog.get('phase', 'working')}: {prog['message']}")
 
-            # 3. Render the grounded synthesis.
+            # 3a. Didn't finish within the inline window → return a ticket; the job
+            # keeps running server-side and is retrieved later with research_status.
+            if result is None:
+                await emit("Still running server-side — returning a ticket.", done=True)
+                return _ticket(job_id, st)
+
+            # 3b. Finished in time → render the grounded synthesis inline.
             await emit("Done.", done=True)
             return _render(result)
 
@@ -172,6 +170,107 @@ class Tools:
             )
         except Exception as e:  # noqa: BLE001 — surface, never crash the chat
             return f"Unexpected error talking to the research engine: {e}"
+
+    async def research_status(
+        self,
+        job_id: str = "",
+        __event_emitter__: Optional[Callable[[dict], Awaitable[None]]] = None,
+        __user__: Optional[dict] = None,
+    ) -> str:
+        """
+        Check on research submitted earlier. The engine serializes long research
+        jobs, so deep_research may hand back a ticket instead of waiting; use this
+        to retrieve the result once it has finished server-side.
+
+        :param job_id: A specific research job id (from a ticket) to fetch. Leave empty to LIST your recent jobs and their status.
+        :return: The grounded synthesis if the job is done; otherwise its queue status; or a list of recent jobs.
+        """
+        v = self.valves
+        base = v.research_url.rstrip("/")
+        headers = {"Content-Type": "application/json", "x-brain-key": v.brain_key}
+        jid = (job_id or "").strip()
+        try:
+            async with aiohttp.ClientSession() as session:
+                if jid and jid.lower() != "latest":
+                    async with session.get(
+                        f"{base}/research/jobs/{jid}", headers=headers
+                    ) as r:
+                        if r.status == 404:
+                            return f"No research job `{jid}` found."
+                        if r.status >= 400:
+                            return f"Research engine error {r.status} fetching job {jid}."
+                        st = await r.json()
+                    status = st.get("status")
+                    if status == "done":
+                        return _render(st.get("result") or {})
+                    if status == "error":
+                        return f"Research job `{jid}` failed: {st.get('error', 'unknown error')}"
+                    if status == "cancelled":
+                        return f"Research job `{jid}` was cancelled."
+                    return _ticket(jid, st)  # still queued/running
+                # No id (or "latest") → list recent jobs so the user can pick one.
+                async with session.get(
+                    f"{base}/research/jobs?limit=10", headers=headers
+                ) as r:
+                    if r.status >= 400:
+                        return f"Research engine error {r.status} listing jobs."
+                    data = await r.json()
+                return _render_list(data.get("jobs") or [])
+        except aiohttp.ClientError as e:
+            return (
+                f"Could not reach the research engine at {base} ({e}). "
+                f"Is openbrain-research deployed and reachable from OWUI?"
+            )
+        except Exception as e:  # noqa: BLE001 — surface, never crash the chat
+            return f"Unexpected error talking to the research engine: {e}"
+
+
+def _fmt_eta(seconds: Any) -> str:
+    """Humanize an ETA in seconds → '~7m' / '~2h 10m' ('' if unknown)."""
+    try:
+        s = int(seconds)
+    except (TypeError, ValueError):
+        return ""
+    if s <= 0:
+        return ""
+    m = s // 60
+    return f"~{m // 60}h {m % 60}m" if m >= 60 else f"~{m}m"
+
+
+def _ticket(job_id: str, st: dict[str, Any]) -> str:
+    """A short receipt for a job that didn't finish inline — it runs server-side."""
+    status = st.get("status") or "running"
+    pos, depth, eta = st.get("queue_position"), st.get("queue_depth"), st.get("eta_seconds")
+    where = f"queued — position {pos} of {depth}" if pos else status
+    eta_s = f" · est. {_fmt_eta(eta)}" if eta else ""
+    return (
+        f"🔬 Research accepted (job `{job_id}`) — {where}{eta_s}.\n\n"
+        f"It's running server-side and its grounded result will be saved to Open Brain "
+        f"when complete; this chat won't wait. To retrieve it, call **research_status** "
+        f"(no arguments lists recent jobs; pass `{job_id}` for this one).\n\n"
+        f"> Do NOT answer the question from your own knowledge or other web/fetch tools — "
+        f"that fabricates. Only the grounded Open Brain result counts."
+    )
+
+
+def _render_list(jobs: list[dict[str, Any]]) -> str:
+    """Render a compact list of recent research jobs for the pull tool."""
+    if not jobs:
+        return "No recent research jobs."
+    icon = {"done": "✅", "running": "⏳", "queued": "🕒", "error": "❌", "cancelled": "⚪"}
+    lines = ["**Recent research jobs:**"]
+    for j in jobs:
+        st = j.get("status") or "?"
+        short_id = (j.get("id") or "")[:8]
+        query = (j.get("query") or "").strip().replace("\n", " ")
+        tail = ""
+        if st == "queued" and j.get("queue_position"):
+            tail = f" · position {j['queue_position']}"
+        elif st == "done" and j.get("finished_at"):
+            tail = f" · {j['finished_at'][:16].replace('T', ' ')}"
+        lines.append(f"- {icon.get(st, '•')} `{short_id}` {query}{tail}")
+    lines.append("\n_Pass a job id to **research_status** to fetch its grounded result._")
+    return "\n".join(lines)
 
 
 def _render(result: dict[str, Any]) -> str:
