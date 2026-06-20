@@ -1,7 +1,7 @@
 """
 title: Deep Research (thin client)
 author: ai-stack / Open Brain
-version: 1.0.0
+version: 1.1.0
 description: >
   Thin OWUI client for the shared Open Brain research engine (Research Engine
   P5). Submits the query to openbrain-research `POST /research`, polls the job,
@@ -39,7 +39,11 @@ class Tools:
         )
         max_wait_sec: int = Field(
             default=600,
-            description="Give up waiting after this many seconds (the job keeps running server-side).",
+            description="Give up waiting after this many seconds of a job actually RUNNING (the job keeps running server-side). Queue-wait time is budgeted separately.",
+        )
+        max_queue_wait_sec: int = Field(
+            default=1800,
+            description="The engine serializes research jobs, so a request may WAIT in a queue before it runs. Wait up to this many seconds while still queued before giving up (the job stays queued and runs server-side when its turn comes).",
         )
         confidence_floor: float = Field(
             default=0.50,
@@ -100,12 +104,18 @@ class Tools:
                         f"Research engine returned no job id: {json.dumps(job)[:300]}"
                     )
 
-                # 2. Poll until terminal (or max_wait).
-                waited = 0.0
+                # 2. Poll until terminal. A job may now WAIT in a queue before it
+                # runs — the engine serializes research so a burst can't flood the
+                # shared inference plane. The queued phase gets its own generous
+                # budget; the run-phase max_wait only starts ticking once the job
+                # is actually running, so a request is never abandoned just for
+                # waiting in line.
+                queue_waited = 0.0
+                run_waited = 0.0
                 result = None
-                while waited < v.max_wait_sec:
+                last_queue_msg = None
+                while True:
                     await asyncio.sleep(v.poll_interval_sec)
-                    waited += v.poll_interval_sec
                     async with session.get(
                         f"{base}/research/jobs/{job_id}", headers=headers
                     ) as r:
@@ -113,9 +123,6 @@ class Tools:
                             return f"Research engine error polling job {job_id}: {r.status}"
                         st = await r.json()
                     status = st.get("status")
-                    prog = st.get("progress") or {}
-                    if prog.get("message"):
-                        await emit(f"{prog.get('phase', 'working')}: {prog['message']}")
                     if status == "done":
                         result = st.get("result") or {}
                         break
@@ -123,6 +130,33 @@ class Tools:
                         return f"Research failed: {st.get('error', 'unknown error')}"
                     if status == "cancelled":
                         return "Research was cancelled."
+                    if status == "queued":
+                        # Still behind other jobs — surface position, don't charge
+                        # the run-phase budget. queue_position/queue_depth are absent
+                        # on an un-upgraded backend → fall back to a generic message.
+                        queue_waited += v.poll_interval_sec
+                        pos, depth = st.get("queue_position"), st.get("queue_depth")
+                        msg = (
+                            f"Queued — position {pos} of {depth}; waiting for the current research to finish…"
+                            if pos
+                            else "Queued — waiting for the current research to finish…"
+                        )
+                        if msg != last_queue_msg:
+                            await emit(msg)
+                            last_queue_msg = msg
+                        if queue_waited >= v.max_queue_wait_sec:
+                            return (
+                                f"Research is still queued (job {job_id}) after {int(queue_waited)}s; "
+                                f"it will run server-side when the queue clears. Poll again later."
+                            )
+                        continue
+                    # running (or any other non-terminal state) — tick run budget.
+                    run_waited += v.poll_interval_sec
+                    prog = st.get("progress") or {}
+                    if prog.get("message"):
+                        await emit(f"{prog.get('phase', 'working')}: {prog['message']}")
+                    if run_waited >= v.max_wait_sec:
+                        break
                 if result is None:
                     return f"Research is still running (job {job_id}); it will finish server-side. Poll again later."
 
