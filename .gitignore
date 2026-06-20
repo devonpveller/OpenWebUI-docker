@@ -5,17 +5,14 @@ data/
 logs/
 data-backup/
 backups/
+# Tailscale runtime logs (keep tailscaled.log.conf, drop rotated logs)
+tailscale-state/*.txt
+tailscale-state/*.log*
 # Use glob form so the `!backup/<script>.sh` re-includes below work.
 # (Git won't re-include files inside an excluded *directory*, but it WILL
 # re-include files matched by an excluded *glob*.)
 backup/*
-logs/
-filters/__pycache__/
-smolcrawl/__pycache__/
-scripts/ai_pipes/__pycache__/
-modules/custom-tools/service/__pycache__/
-modules/emergency-recovery/service/__pycache__/
-.../__pycache__/
+__pycache__/
 # Local MCP config (contains Open Brain access key)
 .mcp.json
 # Vendored external repo (devonpveller/OB1 @ develop) — own .git, not tracked here
@@ -24,7 +21,6 @@ OB1/
 secrets/
 *.pyc
 *.log
-/backups
 /backups
 
 # --- Re-include backup scripts under backup/ that ARE meant to be tracked ---
