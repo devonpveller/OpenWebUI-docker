@@ -70,6 +70,15 @@ _DEFAULT_CLASSES: dict[str, PriorityClass] = {
     "lc-coder": PriorityClass("lc-coder", rank=2, acceptable_wait_s=120.0),
     "ob-entity": PriorityClass("ob-entity", rank=3, acceptable_wait_s=600.0, max_concurrency=2),
     "ob-wiki": PriorityClass("ob-wiki", rank=3, acceptable_wait_s=600.0, max_concurrency=2),
+    # Overnight deep-research / daily-digest podcast lane (callers set the OpenAI
+    # `user` field — research-service sends "ob-research"). This is an ASYNC fan-out
+    # that is happy to wait a long time for a deep dive, so it gets the most generous
+    # acceptable-wait budget — the queue HOLDS its requests through a saturation
+    # window instead of 429-ing them (which under sustained load blew past LiteLLM's
+    # 3 retries and killed the job). max_concurrency caps it at 2 of the 3 slots so a
+    # research burst can never starve interactive owui-chat (rank 0 preempts anyway).
+    "ob-research": PriorityClass("ob-research", rank=3, acceptable_wait_s=1800.0, max_concurrency=2),
+    "ob-podcast": PriorityClass("ob-research", rank=3, acceptable_wait_s=1800.0, max_concurrency=2),
 }
 
 
