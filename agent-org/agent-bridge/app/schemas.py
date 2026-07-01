@@ -1,0 +1,131 @@
+"""Pydantic wire/validation schemas.
+
+The CONCERN schema is the canonical intent-framed escalation payload (UX-FLOW §3);
+the explanation schema is the plan-stop-gate artifact (§4.5); the structured-output
+schemas are what the model-router validates with Instructor + GBNF (small-model
+reliability, TOOLING §3.2).
+"""
+
+from __future__ import annotations
+
+from enum import Enum
+from typing import Literal
+
+from pydantic import BaseModel, Field
+
+
+# ── Escalation levels & triggers (governance §3) ────────────────────────────
+class Level(str, Enum):
+    steering = "steering"        # PO may clear
+    hard_gate = "hard_gate"      # ONLY the Human Operator may clear
+
+
+class Trigger(str, Enum):
+    refusal = "refusal"                       # F3 — never routed around/dropped
+    objection = "objection"                   # F3
+    deviation = "deviation"                   # PM sees drift from intent/spec
+    ambiguous_scope = "ambiguous_scope"       # F5 — escalate, don't guess
+    cross_effort_conflict = "cross_effort_conflict"  # F4
+    irreversible_action = "irreversible_action"      # push/deploy/delete/spend/send
+    unresolved_disagreement = "unresolved_disagreement"
+    wake_storm = "wake_storm"                 # rate cap tripped
+    undeliverable_wake = "undeliverable_wake"  # PLAN §3.1.1 — not a silent stall
+
+
+# Which triggers are hard-gate (reach the human) vs steering (PO can clear).
+HARD_GATE_TRIGGERS = {
+    Trigger.refusal,
+    Trigger.objection,
+    Trigger.irreversible_action,
+}
+
+
+class ConcernOption(BaseModel):
+    action: str
+    effect_on_outcome: str            # how THIS option changes the outcome vs. the intent
+    risk: str = ""
+
+
+class Concern(BaseModel):
+    """The intent-framed CONCERN (UX-FLOW §3). No bare technical choice reaches the PO."""
+
+    intent_thread: str
+    what_surfaced: str
+    intent_of_change: str             # WHY it matters to the intent/outcome
+    options: list[ConcernOption] = Field(default_factory=list)
+    pm_recommendation: str = ""
+    blocked_efforts: list[str] = Field(default_factory=list)
+
+
+class Decision(BaseModel):
+    """Human Operator / PO reply to a CONCERN (§3)."""
+
+    decision: Literal["approve", "modify", "abort"]
+    note: str = ""
+    modify_scope: str | None = None
+
+
+# ── Plan-stop-gate explanation (§4.5, P4.3) ─────────────────────────────────
+class Explanation(BaseModel):
+    intent: str                       # what I understood the goal to be
+    goal_as_understood: str
+    tradeoffs_hit: str
+    what_id_flag: str
+
+
+# ── Readiness gate (UX-FLOW Stage 2, P3.8) ──────────────────────────────────
+class ReadinessVerdict(BaseModel):
+    clear_and_safe: bool
+    clarifying_questions: list[str] = Field(default_factory=list)
+    blast_radius: Literal["routine", "cross_effort", "cascading_refactor"] = "routine"
+    reasoning: str = ""
+
+
+# ── Plan presentation (UX-FLOW Stage 3, P3.9) ───────────────────────────────
+class DelegationStep(BaseModel):
+    role: str
+    task: str
+    depends_on: list[str] = Field(default_factory=list)  # DAG, not wide fan-out
+
+
+class Plan(BaseModel):
+    intent_thread: str
+    feature_overview: str
+    implementation_steps: list[str]
+    stop_gates: list[str] = Field(default_factory=list)
+    delegation: list[DelegationStep] = Field(default_factory=list)
+    estimate: str = "unknown (cold-start — from dry-run)"
+    status: Literal["draft", "approved"] = "draft"
+
+
+# ── Review verdict (§4.4, P4.4) ─────────────────────────────────────────────
+class ReviewVerdict(BaseModel):
+    verdict: Literal["pass", "flag"]
+    lens: str
+    findings: list[str] = Field(default_factory=list)
+    reasoning: str = ""
+
+
+# ── Monitor / deviation judgment (§3, P3.7) ─────────────────────────────────
+class MonitorVerdict(BaseModel):
+    deviates: bool
+    trigger: Trigger | None = None
+    level: Level | None = None
+    rationale: str = ""
+
+
+# ── Explanation-vs-diff cross-check (§4.5, P4.3b) ───────────────────────────
+class ExplanationCheck(BaseModel):
+    consistent: bool
+    mismatch_detail: str = ""
+
+
+# ── Profile (C4, PLAN §5.4) ─────────────────────────────────────────────────
+class ProfileSchema(BaseModel):
+    profile: str
+    lane: Literal["local", "cloud"] = "local"
+    model: str = "qwen36-27b"
+    system_prompt_ref: str
+    temperature: float = 0.2
+    tool_access: list[str] = Field(default_factory=list)
+    caller_key: str

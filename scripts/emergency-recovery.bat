@@ -14,12 +14,19 @@ REM   backup  mnemory-backup, openwebui-backup, little-coder-backup, smolcrawl-b
 REM           tailscale-backup, lm-models-backup, open-notebook-backup,
 REM           openbrain-db-backup, openbrain-wiki-backup (last two need OB1 up)
 REM   OB1     Open Brain - SEPARATE compose project (OB1\docker\docker-compose.yml)
+REM   AGORG   agent-org - SEPARATE compose project (agent-org\docker\docker-compose.yml);
+REM           default plane only (mattermost, mattermost-db, agent-bridge, agent-bridge-db);
+REM           workers/cloud profiles are gated + NOT managed here
 REM   PORTAL  caddy/authelia/cloudflared/portal-*/integrity-tripwire (+ caddy-backup,
 REM           authelia-backup) are PROFILE-GATED (profiles: [internet]) and NOT
 REM           managed here; use scripts\portal-on.ps1 / portal-off.ps1. A nuclear
 REM           `docker compose down` stops a running portal; it is not auto-restored.
 
 set "OB1_COMPOSE=OB1\docker\docker-compose.yml"
+REM agent-org (teams-chat orchestration) — ALSO a separate compose project; like OB1 it
+REM attaches to ai-stack_llm-net. Stopped first (before OB1), started last (after OB1).
+REM The workers/cloud profiles are gated + NOT managed here (default plane only).
+set "AGENTORG_COMPOSE=agent-org\docker\docker-compose.yml"
 
 echo ========================================
 echo EMERGENCY TAILSCALE NETWORK RECOVERY
@@ -70,6 +77,9 @@ echo [INFO] Basic checks failed - proceeding with full recovery
 REM Phase 1: Graceful shutdown in reverse dependency order
 echo [INFO] Phase 1: Graceful shutdown
 echo [WARN] This restarts the full workspace: core, memory, search, coder planes + OB1
+
+echo [INFO] Stopping agent-org stack (downstream of OB1)...
+if exist "%AGENTORG_COMPOSE%" docker compose -f "%AGENTORG_COMPOSE%" stop
 
 echo [INFO] Stopping Open Brain (OB1) stack...
 if exist "%OB1_COMPOSE%" docker compose -f "%OB1_COMPOSE%" stop
@@ -251,6 +261,13 @@ if exist "%OB1_COMPOSE%" (
     echo [INFO] Open Brain (OB1) not deployed in this workspace - skipping
 )
 
+echo [INFO] Starting agent-org stack (default plane, downstream of OB1)...
+if exist "%AGENTORG_COMPOSE%" (
+    docker compose -f "%AGENTORG_COMPOSE%" up -d
+) else (
+    echo [INFO] agent-org not deployed in this workspace - skipping
+)
+
 REM Phase 3: Connectivity verification
 echo [INFO] Phase 3: Testing connectivity...
 docker compose exec tailscale ping -c 1 8.8.8.8 >nul 2>&1
@@ -335,6 +352,7 @@ if exist "%OB1_COMPOSE%" (
     docker compose -f "%OB1_COMPOSE%" up -d
     docker compose up -d openbrain-db-backup openbrain-wiki-backup
 )
+if exist "%AGENTORG_COMPOSE%" docker compose -f "%AGENTORG_COMPOSE%" up -d
 
 echo [INFO] Testing if minimal recovery worked...
 docker compose exec tailscale ping -c 1 8.8.8.8 >nul 2>&1
@@ -367,7 +385,9 @@ echo [WARN] All diagnostics failed - proceeding with nuclear option
 echo [WARN] This will DESTROY and REBUILD containers - all customizations will be lost
 echo [WARN] NOTE: if the internet portal is running, 'compose down' stops it; it is
 echo [WARN]       profile-gated and NOT auto-restored - re-run scripts\portal-on.ps1.
-echo [INFO] Tearing down Open Brain (OB1) first (it attaches to ai-stack_llm-net)...
+echo [INFO] Tearing down agent-org first (downstream of OB1)...
+if exist "%AGENTORG_COMPOSE%" docker compose -f "%AGENTORG_COMPOSE%" down
+echo [INFO] Tearing down Open Brain (OB1) next (it attaches to ai-stack_llm-net)...
 if exist "%OB1_COMPOSE%" docker compose -f "%OB1_COMPOSE%" down
 echo [INFO] Full main-stack restart with network namespace reset...
 docker compose down
@@ -379,6 +399,7 @@ if exist "%OB1_COMPOSE%" (
     docker compose -f "%OB1_COMPOSE%" up -d
     docker compose up -d openbrain-db-backup openbrain-wiki-backup
 )
+if exist "%AGENTORG_COMPOSE%" docker compose -f "%AGENTORG_COMPOSE%" up -d
 
 echo [INFO] Testing post-nuclear connectivity...
 docker compose exec tailscale ping -c 1 8.8.8.8 >nul 2>&1
@@ -459,6 +480,14 @@ if exist "%OB1_COMPOSE%" (
     docker compose -f "%OB1_COMPOSE%" ps --format "table {{.Service}}\t{{.Status}}" 2>nul
 ) else (
     echo [INFO] Open Brain (OB1) not deployed in this workspace
+)
+
+echo.
+echo [INFO] agent-org status:
+if exist "%AGENTORG_COMPOSE%" (
+    docker compose -f "%AGENTORG_COMPOSE%" ps --format "table {{.Service}}\t{{.Status}}" 2>nul
+) else (
+    echo [INFO] agent-org not deployed in this workspace
 )
 
 echo.

@@ -1,0 +1,18 @@
+# agent-org — local/dev artifacts (never commit)
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+.venv/
+venv/
+
+# Local state stores (SQLite dev DB) + secrets
+*.db
+*.sqlite3
+docker/.env
+.env
+
+# Bridge default SQLite file
+agent-bridge/agent_bridge.db

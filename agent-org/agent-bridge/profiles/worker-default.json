@@ -1,0 +1,9 @@
+{
+  "profile": "worker-default",
+  "lane": "local",
+  "model": "qwen36-27b",
+  "system_prompt_ref": "charters/worker-default.md",
+  "temperature": 0.2,
+  "tool_access": ["read", "edit", "bash", "grep"],
+  "caller_key": "agent-org-worker"
+}

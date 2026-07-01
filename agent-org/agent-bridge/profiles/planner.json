@@ -1,0 +1,9 @@
+{
+  "profile": "planner",
+  "lane": "local",
+  "model": "qwen36-27b",
+  "system_prompt_ref": "charters/planner.md",
+  "temperature": 0.3,
+  "tool_access": ["read", "grep"],
+  "caller_key": "agent-org-planner"
+}

@@ -6,8 +6,15 @@ chat platform that doubles as the coordination fabric for a governed fleet of co
 *"AI Organizations are More Effective but Less Aligned than Individual Agents"* (arXiv:2604.10290)
 and three supporting framework analyses.
 
-**Status:** 📝 **DESIGN — nothing here is built yet.** Baselined against the live workspace
-**2026-06-13**. This index was added in the 2026-06-13 audit pass.
+**Status:** 🛠️ **v1 BUILT (2026-07-01).** The design below is now implemented as the
+**`agent-org` compose project** at [`agent-org/`](../../../agent-org/) — the `agent-bridge`
+service (all §3.1.1 modules incl. the P2 gate), charters/floor/hooks/profiles, the compose
+project, and 55 passing tests. See
+[`agent-org/IMPLEMENTATION-NOTES.md`](../../../agent-org/IMPLEMENTATION-NOTES.md) for the
+task-by-task build record + what remains **operator-gated** (Mattermost bot token, the P0.5
+capability-floor decision, the conditional cloud lane, worker-pool bring-up, tailnet exposure).
+Design baselined against the live workspace **2026-06-13**; the build's 3-place change
+reconciled the stack-map + recovery scripts **2026-07-01**.
 
 ---
 

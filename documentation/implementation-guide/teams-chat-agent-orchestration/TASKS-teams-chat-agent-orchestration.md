@@ -5,6 +5,16 @@ and the governing [SAFETY-AND-WORKFLOW-governance-model.md](SAFETY-AND-WORKFLOW-
 New reader? Start at [README.md](README.md) for read-order + precedence.
 Status keys: ⬜ todo · 🔧 in progress · ✅ done · 🧪 needs test · 🚀 deploy/operator · 🚩 **decision-gate** (stop, decide with operator — not a build task).
 
+> **🛠️ v1 BUILT (2026-07-01).** These tasks are implemented as the **`agent-org`** project.
+> The **authoritative, up-to-date per-task status** (✅ built + tested / 🧩 needs a live stack /
+> 🚀 operator / 🚩 decision-gate) lives in
+> [`agent-org/IMPLEMENTATION-NOTES.md`](../../../agent-org/IMPLEMENTATION-NOTES.md) — the single
+> source of truth for build status (kept there, not duplicated here, so it can't drift). The ⬜
+> markers below are the *original design checklist*; read them against IMPLEMENTATION-NOTES.
+> **Still operator-gated:** P0.2 (Mattermost bot token), **P0.5** (capability-floor decision →
+> gates Pc), Pc (conditional cloud lane), P5 worker-pool bring-up, P6.2 OB mirror wiring, P7
+> (mobile + tailnet exposure).
+
 > **Conventions for autonomous execution (added 2026-06-13):**
 > - **Governance refs** in parentheses (e.g. §3, F3) point to the governance doc — each task traces
 >   to a control it implements.

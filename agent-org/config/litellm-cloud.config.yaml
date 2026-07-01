@@ -1,0 +1,53 @@
+# llm-gateway-cloud — the SEPARATE, CONDITIONAL cloud LiteLLM for OpenRouter (Pc.1).
+#
+# Stood up ONLY if the P0.5 capability-floor test shows local 27B judgment is too weak.
+# This is where master_key + per-role virtual keys + per-role BUDGETS live (the cost-tiered
+# supervision cap — governance §3). It is the ONLY agent-org component with an egress, and
+# only through ao-egress -> openrouter.ai (no-log/ZDR providers, prefer open-weight).
+#
+# ⚠️ The LOCAL llm-gateway is a DIFFERENT, air-gapped instance (config/litellm.config.yaml).
+# Do NOT add OpenRouter to it; do NOT add these models to it. Two lanes, two gateways
+# (PLAN §3.4 / OD-6). "Never route around LiteLLM" holds for cloud too (this IS the front
+# door for cloud), and the local air-gap stays intact.
+
+model_list:
+  # Judgment roles only (PM/monitor, PO, planner, reviewer). Workers NEVER use this lane.
+  # Prefer open-weight large models on no-log / zero-data-retention providers. The exact
+  # model ids are operator-chosen at Pc.1; these are placeholders to make the file valid.
+  - model_name: judge-large
+    litellm_params:
+      model: openrouter/qwen/qwen-2.5-72b-instruct
+      api_key: os.environ/OPENROUTER_API_KEY
+      # Route to no-log/ZDR providers only (operator pins the provider allowlist).
+      # See https://openrouter.ai/docs/provider-routing
+      extra_body:
+        provider:
+          data_collection: "deny"
+  - model_name: planner-large
+    litellm_params:
+      model: openrouter/qwen/qwen-2.5-72b-instruct
+      api_key: os.environ/OPENROUTER_API_KEY
+      extra_body:
+        provider:
+          data_collection: "deny"
+
+general_settings:
+  # master_key REQUIRED here (unlike the permissive local gateway). Virtual keys + budgets
+  # are provisioned via the LiteLLM admin API after boot (one key per role profile, each
+  # with a per-role budget = the cost cap). See agent-org/README.md "Pc — cloud lane".
+  master_key: os.environ/LITELLM_MASTER_KEY
+  database_url: os.environ/DATABASE_URL
+  store_model_in_db: true
+  # NEVER active-probe model health (C5) — a probe = a real completion = spend (and, for
+  # any local backend, a swap-thrash). Same rule as the local gateway.
+  background_health_checks: false
+
+litellm_settings:
+  drop_params: true
+  set_verbose: false
+  telemetry: false
+  # Privacy boundary (§3.4/OD-6): the bridge sends only GOVERNANCE-LEVEL SUMMARIES
+  # (claim/goal/deviation/options) here — never raw proprietary code or secrets. The bridge
+  # builds + logs that egress payload (Pc.2); this gateway just routes it out via ao-egress.
+  request_timeout: 300
+  num_retries: 2

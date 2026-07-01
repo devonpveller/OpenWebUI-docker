@@ -38,6 +38,15 @@ $ErrorActionPreference = "Stop"
 
 $Script:OB1Compose = "OB1\docker\docker-compose.yml"
 
+# agent-org (teams-chat agent orchestration) is ALSO a separate compose project
+# (project name "agent-org", agent-org\docker\docker-compose.yml). Like OB1 it attaches
+# to the main stack's ai-stack_llm-net (external) for local inference, and it optionally
+# reaches OB1's openbrain-gateway (audit mirror). So it is shut down FIRST (before OB1)
+# and brought up LAST (after OB1). The `workers` + `cloud` profiles are gated
+# (profiles: [workers|cloud]) and — like the Portal plane — are NOT managed here; the
+# default plane (mattermost + agent-bridge + their DBs) is.
+$Script:AgentOrgCompose = "agent-org\docker\docker-compose.yml"
+
 # Main compose services, low-level dependency first.
 # (Portal plane omitted on purpose — profile-gated; see the header note.)
 $Script:MainStackServices = @(
@@ -79,6 +88,12 @@ $Script:OB1Services = @(
     "openbrain-wiki", "openbrain-wiki-viewer", "openbrain-workbench", "openbrain-extract",
     "openbrain-cron", "openbrain-gmail-pull", "openbrain-gmail-prune", "openbrain-digest",
     "openbrain-podcast"
+)
+
+# agent-org services, default plane only (workers/cloud profiles are gated + excluded,
+# same treatment as the profile-gated Portal). Low-level dependency first.
+$Script:AgentOrgServices = @(
+    "mattermost-db", "mattermost", "agent-bridge-db", "agent-bridge"
 )
 
 function Write-Log {
@@ -198,6 +213,60 @@ function Reset-OB1Stack {
     }
 }
 
+function Test-AgentOrgAvailable {
+    # agent-org is an optional, separately-deployed stack. Recovery only drives it
+    # when its compose file is present in the workspace.
+    return Test-Path $Script:AgentOrgCompose
+}
+
+function Stop-AgentOrgStack {
+    # Stop agent-org FIRST (before OB1 and the main stack): it attaches to
+    # ai-stack_llm-net (external) and optionally reaches OB1's gateway.
+    if (-not (Test-AgentOrgAvailable)) { return }
+    Write-Log "INFO" "Stopping agent-org stack..."
+    try {
+        docker compose -f $Script:AgentOrgCompose stop
+    }
+    catch {
+        Write-Log "WARN" "agent-org stop had issues, continuing: $_"
+    }
+}
+
+function Start-AgentOrgStack {
+    # Bring agent-org up LAST (after the main stack + OB1). Its own depends_on handles
+    # internal ordering; the default plane only (workers/cloud profiles are operator-driven).
+    if (-not (Test-AgentOrgAvailable)) {
+        Write-Log "INFO" "agent-org not deployed in this workspace - skipping"
+        return
+    }
+    Write-Log "INFO" "Starting agent-org stack ($($Script:AgentOrgServices.Count) containers, default plane)..."
+    try {
+        docker compose -f $Script:AgentOrgCompose up -d
+        Write-Log "SUCCESS" "agent-org stack started"
+    }
+    catch {
+        Write-Log "WARN" "Failed to start agent-org stack: $_"
+    }
+}
+
+function Reset-AgentOrgStack {
+    # Recreate the agent-org compose project (nuclear path).
+    if (-not (Test-AgentOrgAvailable)) {
+        Write-Log "INFO" "agent-org not deployed - skipping agent-org recreate"
+        return
+    }
+    Write-Log "INFO" "Recreating agent-org stack..."
+    try {
+        docker compose -f $Script:AgentOrgCompose down
+        Start-Sleep -Seconds 5
+        docker compose -f $Script:AgentOrgCompose up -d
+        Write-Log "SUCCESS" "agent-org stack recreated"
+    }
+    catch {
+        Write-Log "WARN" "agent-org recreate had issues: $_"
+    }
+}
+
 function Test-BasicConnectivity {
     Write-Log "INFO" "Performing basic connectivity checks..."
 
@@ -236,6 +305,18 @@ function Test-BasicConnectivity {
             }
             catch {
                 Write-Log "WARN" "OB1 status unavailable: $_"
+            }
+        }
+
+        # agent-org — separate compose project, reported as a count (default plane).
+        if (Test-AgentOrgAvailable) {
+            try {
+                $ao = docker compose -f $Script:AgentOrgCompose ps --format json | ConvertFrom-Json
+                $aoRunning = @($ao | Where-Object { $_.State -eq "running" }).Count
+                Write-Log "INFO" "AgOrg  - $aoRunning/$($Script:AgentOrgServices.Count) agent-org containers running"
+            }
+            catch {
+                Write-Log "WARN" "agent-org status unavailable: $_"
             }
         }
 
@@ -346,6 +427,9 @@ function Invoke-MinimalRecovery {
 
         # OB1-attached backups — only after OB1 (obnet + open-brain volumes exist).
         Start-ServiceGroup "OB1 backups" $Script:OB1Backups
+
+        # agent-org — separate compose project, brought up last (downstream of OB1).
+        Start-AgentOrgStack
 
         Write-Log "INFO" "Waiting for services to stabilize..."
         Start-Sleep -Seconds 60
@@ -469,7 +553,10 @@ function Invoke-EmergencyRecovery {
     Write-Log "INFO" "Phase 1: Graceful shutdown"
     Write-Log "WARN" "This restarts the full workspace: core, memory, search, coder planes + OB1"
 
-    # Open Brain (OB1) first — it attaches to the main stack's llm-net.
+    # agent-org first (downstream of OB1 + the main stack's llm-net).
+    Stop-AgentOrgStack
+
+    # Open Brain (OB1) next — it attaches to the main stack's llm-net.
     Stop-OB1Stack
 
     # Watchtower (independent monitor).
@@ -728,6 +815,9 @@ function Invoke-EmergencyRecovery {
     # OB1-attached backups — only now that obnet + open-brain volumes exist.
     Start-ServiceGroup "OB1 backups" $Script:OB1Backups
 
+    # agent-org — separate compose project, brought up last (downstream of OB1).
+    Start-AgentOrgStack
+
     # ── Phase 4: Connectivity verification ─────────────────────────────────
     Write-Log "INFO" "Phase 4: Connectivity verification"
     Start-Sleep -Seconds 25
@@ -851,6 +941,10 @@ function Invoke-NuclearRecovery {
     # Open Brain (OB1) last — main stack (and ai-stack_llm-net) is up now.
     Start-OB1Stack
 
+    # agent-org — separate compose project, downstream of OB1 (started after the
+    # OB1 backups nudge below).
+    Start-AgentOrgStack
+
     # OB1-attached backups — the main `up -d` above could not start
     # openbrain-db-backup while obnet was down; nudge them now that OB1 is up.
     Start-ServiceGroup "OB1 backups" $Script:OB1Backups
@@ -926,6 +1020,7 @@ function Invoke-GPUReset {
                     Write-Log "INFO" "little-coder control plane started"
 
                     Start-OB1Stack
+                    Start-AgentOrgStack
                 }
                 catch {
                     Write-Log "WARN" "llama-cpp-upstream may need additional time to initialize"

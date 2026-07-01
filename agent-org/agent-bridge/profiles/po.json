@@ -1,0 +1,9 @@
+{
+  "profile": "po",
+  "lane": "local",
+  "model": "qwen36-27b",
+  "system_prompt_ref": "charters/po.md",
+  "temperature": 0.4,
+  "tool_access": ["read", "grep"],
+  "caller_key": "agent-org-po"
+}

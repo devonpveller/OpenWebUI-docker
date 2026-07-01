@@ -4,9 +4,12 @@ Authoritative inventory of the Docker stacks in this `ai-stack` workspace.
 Cross-check against the live compose files before relying on it — the files
 are the source of truth; this doc is the curated summary.
 
-**Last reconciled against live compose: 2026-06-14** — added **`llm-queue`** (B2 front-ended
-inference admission controller between the `*-upstream` servers and LiteLLM; chat `api_base`
-now points at it, llama-swap `concurrencyLimit: 0`). Prior (2026-06-13): the **LiteLLM `llm-gateway` flip**
+**Last reconciled against live compose: 2026-07-01** — added the **`agent-org`** project
+(teams-chat agent orchestration: `mattermost` + `mattermost-db` + `agent-bridge` +
+`agent-bridge-db`, plus the profile-gated `workers`/`cloud` planes — see §3). Prior
+(2026-06-14): added **`llm-queue`** (B2 front-ended inference admission controller between the
+`*-upstream` servers and LiteLLM; chat `api_base` now points at it, llama-swap
+`concurrencyLimit: 0`). Prior (2026-06-13): the **LiteLLM `llm-gateway` flip**
 (`llama-cpp`/`llama-cpp-embed` → `*-upstream`; the gateway now holds those aliases; +
 `llm-gateway-db` / `llm-gateway-backup` / `llm-gateway-db-data`). Prior (2026-06-11): the
 portal/auth slice (Authelia/Caddy/Cloudflared + watchers/tripwire), the unified-backup sidecars,
@@ -16,6 +19,7 @@ Source files:
 - `docker-compose.yml` + `docker-compose.override.yml` — the **main** project
 - `docker-compose.local-test.override.yml` — portal `local-test` profile (no Cloudflare)
 - `OB1/docker/docker-compose.yml` (+ `docker-compose.scheduled.yml`) — the **open-brain** project (separate)
+- `agent-org/docker/docker-compose.yml` — the **agent-org** project (separate; teams-chat orchestration)
 
 ---
 
@@ -205,7 +209,59 @@ binaries never enter the vault git history).
 
 ---
 
-## 3. Recovery stack
+## 3. agent-org — compose project `agent-org` (SEPARATE)
+
+File: `agent-org/docker/docker-compose.yml`. Run with:
+`docker compose -f agent-org/docker/docker-compose.yml ...`. `.env` lives next to the file at
+`agent-org/docker/.env` (template: `.env.example`). Design corpus:
+`documentation/implementation-guide/teams-chat-agent-orchestration/`.
+
+> **Why separate:** like OB1, `agent-org` is its own compose project (`name: agent-org`). It
+> attaches to the main stack's `ai-stack_llm-net` as an **external** network for LOCAL
+> inference (via the `llama-cpp` alias on `llm-gateway` — never around LiteLLM), and optionally
+> reaches OB1's `openbrain-gateway` for the audit mirror. Bring it up **after** OB1 (last); tear
+> it down **before** OB1 (first). The recovery scripts manage the **default plane only**; the
+> `workers` and `cloud` profiles are gated (like the Portal) and operator-driven.
+
+### Planes / profiles
+| Plane | Profile | Brought up by |
+|-------|---------|---------------|
+| default (mattermost + bridge) | — | `docker compose ... up -d` / recovery scripts |
+| worker pool | `--profile workers` | operator (P5 — after the main stack builds the little-coder images) |
+| cloud lane | `--profile cloud` | operator (**Pc — CONDITIONAL**, only if the P0.5 capability-floor test mandates a cloud judge) |
+
+### Networks
+| Network | Type | Purpose |
+|---------|------|---------|
+| `ao-net` | bridge | control plane — host-publishable (like OB1's obnet); "no cloud" enforced at the app layer |
+| `ao-worker-net` | internal (no internet) | worker pool isolation (mirrors `lc-net`); egress only via `ao-git-egress` |
+| `ao-cloud-egress-net` | internal | cloud egress isolation — only `llm-gateway-cloud` + `ao-egress` attach |
+| `llm-net` | external (`ai-stack_llm-net`) | reach the existing air-gapped `llm-gateway` (`llama-cpp` alias) for local inference |
+| `default` | bridge | the single internet egress point (`ao-git-egress` git host; `ao-egress` → openrouter.ai) |
+
+### Containers
+| Container | Role | Host port | Networks | Profile |
+|-----------|------|-----------|----------|---------|
+| `mattermost-db` | Postgres for Mattermost | — | ao-net | default |
+| `mattermost` | Chat platform + mobile (Team Edition); tailnet-exposed via `tailscale serve` (P7.4) | 127.0.0.1:8065 | ao-net | default |
+| `agent-bridge` | Orchestration + the governance gate (FastAPI); WebSocket consumer + REST poster; floor-hook endpoint | 127.0.0.1:8830 | ao-net, llm-net | default |
+| `agent-bridge-db` | Postgres — the bridge's fail-safe state store (gate/effort/scope/audit) | — | ao-net | default |
+| `ao-worker-1` / `ao-worker-2` | Pooled `little-coder` control daemons (reuse `little-coder:local`) | — | ao-worker-net, llm-net | workers |
+| `ao-ot-1` / `ao-ot-2` | Per-worker `open-terminal` workspace planes (reuse `little-coder-open-terminal:local`) | — | ao-worker-net, llm-net | workers |
+| `ao-git-egress` | Shared git-allowlist egress for the worker pool (mirrors `lc-egress`) | — | ao-worker-net, default | workers |
+| `llm-gateway-cloud` | **CONDITIONAL** separate LiteLLM for OpenRouter (master_key + per-role budgets); the only egress, via `ao-egress` | — | ao-net, ao-cloud-egress-net | cloud |
+| `llm-gateway-cloud-db` | Postgres for the cloud LiteLLM spend ledger | — | ao-net | cloud |
+| `ao-egress` | Allowlist egress proxy pinned to `openrouter.ai` (mirrors `lc-egress`); the ONLY agent-org internet path | — | ao-cloud-egress-net, default | cloud |
+
+### Volumes
+`mattermost-db-data`, `mattermost-data`, `mattermost-config`, `mattermost-logs`,
+`mattermost-plugins`, `mattermost-client-plugins`, `agent-bridge-db-data`,
+`ao-worker-1-workspace`, `ao-worker-1-sessions`, `ao-worker-2-workspace`,
+`ao-worker-2-sessions`, `llm-gateway-cloud-db-data`.
+
+---
+
+## 4. Recovery stack
 
 The **recovery stack** keeps every container above runnable after a crash,
 update, or network-namespace break.
@@ -217,10 +273,12 @@ update, or network-namespace break.
 | `modules/emergency-recovery/` | OWUI guidance module — **stale**: its startup config still names the disabled `ollama` container |
 
 The recovery scripts hold a service inventory (`MainStackServices` — now incl. the
-backup sidecars, `OB1Services`) plus `$MainBackups` / `$OB1Backups` helper groups
-(OB1-attached backups start only after OB1 is up). **When you add a container to
-either compose file, add it to that inventory and to the shutdown/startup
-sequences** so the recovery stack stays complete.
+backup sidecars, `OB1Services`, `AgentOrgServices`) plus `$MainBackups` / `$OB1Backups`
+helper groups (OB1-attached backups start only after OB1 is up). agent-org is driven as a
+separate project (`Start-/Stop-/Reset-AgentOrgStack`, `$AgentOrgCompose`), stopped first and
+started last (downstream of OB1). **When you add a container to any of the three compose
+files, add it to that inventory and to the shutdown/startup sequences** so the recovery stack
+stays complete.
 
 **The Portal plane is deliberately excluded** from recovery: it is profile-gated
 (`profiles: [internet]`) and managed by `scripts/portal-on.ps1` / `portal-off.ps1`.
@@ -255,6 +313,10 @@ Bottom-up (start in this order; stop in reverse):
     `tailscale-backup`, `lm-models-backup`, `llm-gateway-backup`, and — needs OB1 up —
     `openbrain-db-backup`, `openbrain-wiki-backup`, `open-notebook-backup`).
 11. **OB1** (`docker compose -f OB1/docker/docker-compose.yml up -d`) — after `llm-gateway`.
+11.5. **agent-org** (`docker compose -f agent-org/docker/docker-compose.yml up -d`) — after OB1
+    (downstream of it: attaches to `ai-stack_llm-net`, optionally mirrors audit to OB1's
+    gateway). Default plane only; `workers`/`cloud` profiles are operator-driven. Stop it
+    first (before OB1) on the way down.
 12. **Portal** (profile-gated, **separate lifecycle**): `scripts/portal-on.ps1` →
     `portal-init` → `authelia` → `caddy` → `cloudflared`, plus `portal-alerter` and the
     watchers/tripwire/cron + `caddy-backup`/`authelia-backup`. Not part of the default `up`;
