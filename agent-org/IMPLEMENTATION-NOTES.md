@@ -17,7 +17,7 @@ exercise · 🚀 operator step · 🚩 decision-gate.
 
 > **What "fully implemented" means here.** Everything that is *code / config / docs* is built,
 > wired, and — where it can run without a live GPU/Mattermost/Docker stack — covered by
-> deterministic tests (**114 passing** as of 2026-07-02). The remaining items are inherently operator-only: bringing
+> deterministic tests (**116 passing** as of 2026-07-02). The remaining items are inherently operator-only: bringing
 > up containers, creating a Mattermost bot token, running the capability-floor test against the
 > live GPU, deciding OpenRouter spend, and tailnet exposure. Those are authored + runnable, and
 > marked 🚀/🚩 below. The build makes them a switch-flip, not new work.
@@ -42,18 +42,21 @@ hand-off. Root cause — the floor lumped **push** with deploy/delete as "irreve
   `agent/<effort>` on completion (`orchestrator._publish_effort`: `checkout -b`/`add -A`/`commit`/
   `push -u origin agent/<effort>`), and the completion summary reports the branch + `git fetch`
   hint. Work is durable, visible, and hand-off-able; merge-to-`main`/deploy stay human-gated.
-  `test_projects.py::test_repo_effort_commits_and_pushes_a_feature_branch`. **114 tests green.**
+  `test_projects.py::test_repo_effort_commits_and_pushes_a_feature_branch`. **116 tests green.**
 - **Per-agent commit identity.** Publish commits carry the agent's **role identity**
   (`GIT_AUTHOR_NAME/EMAIL = <role>@<AO_AGENT_EMAIL_DOMAIN>`, via an env prefix — git-proxy-safe since
   `-c` is blocked), not the baked `little-coder`. So `git blame` + hand-off provenance (P5.4) show
   *which* agent did what. When per-domain roles land, each commits under its own identity.
-- **Per-project deploy tokens (multi-PAT).** `Project.token_env` stores the **NAME** of the env var
-  holding a project's PAT (secrets stay in env). `/project add <name> <repo> [AO_TOKEN_X]` (+ `POST
-  /projects {token_env}`); the bridge resolves it and threads it to the worker's `/project` clone
-  (`_project_token` → `router.wake(repo_token=…)` → `harness.set_project(token=…)`). Requires a
-  **2-line little-coder change** — `ProjectRequest.token` (falls back to the pool's `LC_DEPLOY_TOKEN`);
-  **rebuild `little-coder:local`**. `test_projects.py` (identity + per-project token). So one repo can
-  use a personal PAT and another an org PAT. The pool's `LC_DEPLOY_TOKEN` stays the default.
+- **Deploy tokens by owner/org (multi-PAT).** A repo's token is resolved automatically at clone time
+  (`orchestrator._project_token`): (1) an explicit `Project.token_env` override; else (2) the
+  **per-owner convention `LC_<OWNER>_TOKEN`** (`projects.owner_token_env` — e.g.
+  `github.com/PolyshDesign/*` → `LC_POLYSHDESIGN_TOKEN`) used only if set; else (3) the pool's
+  `LC_DEPLOY_TOKEN` (your own repos). So onboarding an org repo needs **no per-project token config** —
+  just set `LC_<ORG>_TOKEN` on the bridge; scaling to a new org = add one env var. The resolved token
+  threads to the worker's `/project` clone (`router.wake(repo_token=…)` → `harness.set_project(token=…)`);
+  `/project list` shows which token applies. Secrets stay env-only (DB stores the var NAME). Requires
+  a **2-line little-coder change** — `ProjectRequest.token` (falls back to `LC_DEPLOY_TOKEN`); **rebuild
+  `little-coder:local`**. `test_projects.py` (owner convention + explicit override + threading).
 - **The rest of the delivery pipeline** (PR → autonomous test series incl. AI-browser for web →
   human-gated merge → deploy → human testing) is designed in
   [`DELIVERY-PIPELINE.md`](../documentation/implementation-guide/teams-chat-agent-orchestration/DELIVERY-PIPELINE.md)
@@ -80,7 +83,7 @@ Three connected fixes from live use, so the PO surface is coherent (all tested):
 ## Live-loop integration (2026-07-02) — the alignment core, now WIRED
 
 The proactive governance controls were module-only; they are now threaded through the live
-operator→worker path (`orchestrator.delegate` → the Stage-5 loop). **114 tests green.** The heavy
+operator→worker path (`orchestrator.delegate` → the Stage-5 loop). **116 tests green.** The heavy
 controls are **risk-gated** (like the dry-run + review-depth already were) so routine one-liners
 stay fast; set `AO_PLAN_APPROVAL=all` / `AO_REVIEW_MODE=all` for the strict-spec reading (every
 effort). What now runs:
@@ -336,7 +339,7 @@ default plane is what recovery manages). Stack-map §3 already lists the pool co
 
 ### Intake clarify-loop + readiness→risk + tailnet reachability (2026-07-02, from live feedback)
 
-Fixes from the first real conversational tests (**114 tests green**):
+Fixes from the first real conversational tests (**116 tests green**):
 
 1. **PO asked a question but dispatched anyway (F5 violation).** `nl_intake` used to dispatch the
    instant `kind=="request"`. Now a request runs the **readiness gate (P3.8)** first
@@ -386,7 +389,7 @@ Fixes from the first real conversational tests (**114 tests green**):
 
 `AO_DEFAULT_REPO` read as "the org only works on one hardcoded repo" — wrong for a multi-project
 orchestrator. It was always meant as a **fallback** (COMMS-MODEL §4 says "AO_DEFAULT_REPO **or
-per-effort**"), but the per-project selection was never built. Now it is (**114 tests green**):
+per-effort**"), but the per-project selection was never built. Now it is (**116 tests green**):
 
 - **Project registry** (`modules/projects.py`, `Project` table): `channel = project = repo`. Onboard
   any repo with **`/project add <name> <repo-url>`** (also `/project list|remove`, `POST /projects`)

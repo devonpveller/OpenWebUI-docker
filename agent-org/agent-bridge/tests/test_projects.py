@@ -13,7 +13,7 @@ from app.db import Database
 from app.modules.audit_sink import AuditSink
 from app.modules.egress import EgressAllowlist
 from app.modules.model_router import FakeModelClient
-from app.modules.projects import ProjectRegistry, host_of
+from app.modules.projects import ProjectRegistry, host_of, owner_of, owner_token_env
 from app.orchestrator import Orchestrator
 from app.schemas import OperatorIntent, ReadinessVerdict
 from app.worker.harness import FakeHarness
@@ -29,6 +29,16 @@ def test_host_of_parses_all_git_url_forms():
     assert host_of("ssh://git@code.internal:2222/x/y.git") == "code.internal"
     assert host_of("git://bitbucket.org/x/y.git") == "bitbucket.org"
     assert host_of("") == ""
+
+
+def test_owner_and_token_env_convention():
+    # owner parsing + the per-owner deploy-token env-var convention (LC_<OWNER>_TOKEN)
+    assert owner_of("https://github.com/PolyshDesign/foo.git") == "PolyshDesign"
+    assert owner_of("git@github.com:PolyshDesign/foo.git") == "PolyshDesign"
+    assert owner_of("https://github.com/me") == ""                            # no owner/repo pair
+    assert owner_token_env("https://github.com/PolyshDesign/foo") == "LC_POLYSHDESIGN_TOKEN"
+    assert owner_token_env("git@github.com:profnovice/bar.git") == "LC_PROFNOVICE_TOKEN"
+    assert owner_token_env("") == ""
 
 
 # ── ProjectRegistry ──────────────────────────────────────────────────────────
@@ -176,6 +186,38 @@ async def test_per_project_deploy_token_threaded_to_clone(db_url, monkeypatch):
         await orch.delegate(eid, chan, root, "do it")
         # the per-project token was passed to the worker's clone (not the global one)
         assert "ghp_secret_acme_123" in orch.harness.tokens.values()
+    finally:
+        await db.dispose()
+
+
+async def test_token_resolves_by_owner_convention(db_url, monkeypatch):
+    """A repo's org auto-selects its token (LC_<OWNER>_TOKEN) with no per-project config; a repo
+    whose owner has no such env var falls back to the pool LC_DEPLOY_TOKEN default."""
+    monkeypatch.setenv("LC_POLYSHDESIGN_TOKEN", "ghp_org_polysh")
+    settings = Settings(
+        _env_file=None, chat_adapter="fake",
+        profiles_dir=str(ROOT / "profiles"), charters_dir=str(ROOT / "charters"),
+        floor_dir=str(ROOT / "floor"), database_url=db_url, project_survey_enabled=False,
+    )
+    db = Database(db_url)
+    orch = Orchestrator(settings, db, FakeChatAdapter(),
+                        model_client=FakeModelClient(), harness=FakeHarness())
+    await orch.setup()
+    try:
+        # PolyshDesign org repo → LC_POLYSHDESIGN_TOKEN by convention (no explicit token_env)
+        await orch.projects.add("psd-foo", "https://github.com/PolyshDesign/foo.git")
+        eid, _, _ = await orch.router.open_effort("a", project="psd-foo")
+        assert await orch._project_token(eid) == "ghp_org_polysh"
+        # a personal repo (owner has no LC_<owner>_TOKEN set) → None → pool LC_DEPLOY_TOKEN default
+        await orch.projects.add("mine", "https://github.com/profnovice/bar.git")
+        eid2, _, _ = await orch.router.open_effort("b", project="mine")
+        assert await orch._project_token(eid2) is None
+        # explicit token_env still overrides the convention
+        monkeypatch.setenv("AO_TOKEN_SPECIAL", "ghp_explicit")
+        await orch.projects.add("psd-bar", "https://github.com/PolyshDesign/bar.git",
+                                token_env="AO_TOKEN_SPECIAL")
+        eid3, _, _ = await orch.router.open_effort("c", project="psd-bar")
+        assert await orch._project_token(eid3) == "ghp_explicit"
     finally:
         await db.dispose()
 

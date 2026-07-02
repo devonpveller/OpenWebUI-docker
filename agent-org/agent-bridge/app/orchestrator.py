@@ -261,11 +261,29 @@ class Orchestrator:
                 return repo
         return self.s.default_repo or None
 
-    async def _project_token(self, effort_id: str) -> str | None:
-        """The per-project deploy token for this effort's clone/push (multi-PAT): resolved from the
-        env var named on the project (`token_env`). None ⇒ the pool's ambient LC_DEPLOY_TOKEN is used
-        (little-coder's fallback). Secrets live in env only — the DB stores the var NAME, not the token."""
+    def _project_token_label(self, p: dict) -> str:
+        """Human-readable label for which deploy token a project resolves to (for `/project list`)."""
         import os
+
+        from .modules.projects import owner_token_env
+
+        if p.get("token_env"):
+            return f"`${p['token_env']}`" + ("" if os.environ.get(p["token_env"]) else " ⚠️ **unset**")
+        cand = owner_token_env(p.get("repo_url", ""))
+        if cand and os.environ.get(cand):
+            return f"`${cand}` (by org)"
+        return "`$LC_DEPLOY_TOKEN` (default)"
+
+    async def _project_token(self, effort_id: str) -> str | None:
+        """The deploy token for this effort's clone/push (multi-PAT). Resolution, in order:
+          1. the project's EXPLICIT `token_env` (from `/project add … TOKEN_ENV`), if set;
+          2. the per-OWNER convention `LC_<OWNER>_TOKEN` (e.g. PolyshDesign → LC_POLYSHDESIGN_TOKEN),
+             used only if that env var is actually set — so any repo under an org auto-picks its PAT;
+          3. else None ⇒ the pool's ambient `LC_DEPLOY_TOKEN` (little-coder's fallback = your own repos).
+        Secrets live in env only; the DB stores the var NAME, never the token."""
+        import os
+
+        from .modules.projects import owner_token_env
 
         async with self.db.session_factory() as s:
             e = await s.get(Effort, effort_id)
@@ -273,13 +291,21 @@ class Orchestrator:
         if not proj:
             return None
         p = await self.projects.get(proj)
-        env_name = (p or {}).get("token_env")
-        if not env_name:
+        if not p:
             return None
-        tok = os.environ.get(env_name)
-        if not tok:
-            log.warning("project %s token env %r is unset — falling back to the pool token", proj, env_name)
-        return tok or None
+        # 1) explicit override — warn if it's named but unset (a misconfiguration).
+        env_name = p.get("token_env")
+        if env_name:
+            tok = os.environ.get(env_name)
+            if not tok:
+                log.warning("project %s token env %r is unset — falling back to the pool token", proj, env_name)
+            return tok or None
+        # 2) per-owner convention — used only if the env var is set (else silent fall-through).
+        cand = owner_token_env(p.get("repo_url", ""))
+        if cand and os.environ.get(cand):
+            return os.environ[cand]
+        # 3) pool default (LC_DEPLOY_TOKEN, on the worker pool).
+        return None
 
     async def _track_operator(self, user_id: str | None) -> None:
         """Remember an operator seen in #mgmt and pull them into the function channels so those
@@ -1319,7 +1345,10 @@ class Orchestrator:
             elif sub == "list":
                 ps = await self.projects.list()
                 await reply(
-                    "**Projects:**\n" + "\n".join(f"- `{p['slug']}` → {p['repo_url']}" for p in ps)
+                    "**Projects:**\n" + "\n".join(
+                        f"- `{p['slug']}` → {p['repo_url']} · token {self._project_token_label(p)}"
+                        for p in ps
+                    )
                     if ps else "no projects yet — `/project add <name> <repo-url>`"
                 )
             elif sub == "remove" and len(args) >= 2:
