@@ -118,6 +118,14 @@ class MattermostAdapter:
             )
         return r.json()["id"]
 
+    async def add_member(self, channel_id: str, user_id: str) -> None:
+        try:
+            await self._client.post(
+                f"/channels/{channel_id}/members", json={"user_id": user_id}
+            )
+        except Exception as exc:  # noqa: BLE001 - already a member / benign
+            log.debug("add_member(%s,%s): %s", channel_id, user_id, exc)
+
     async def posts_since(self, channel_id: str, since_ms: int) -> list[dict[str, Any]]:
         # Mattermost's `?since=0` returns nothing (it expects a real ms timestamp), so on the
         # first connect (no cursor yet) fetch the recent page instead — the idempotency ledger

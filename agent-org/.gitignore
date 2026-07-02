@@ -20,3 +20,6 @@ agent-bridge/agent_bridge.db
 # P0.5 capability-floor result artifacts (the decision is recorded in IMPLEMENTATION-NOTES)
 p0_5*.json
 agent-bridge/p0_5*.json
+
+# Generated per-instance worker configs (regenerate via scripts/gen-worker-configs.py)
+agent-bridge/worker-configs/

@@ -8,6 +8,7 @@ sampled monitor, and route inbound chat events to wakes/decisions. Keeping it th
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import random
 import re
@@ -112,6 +113,13 @@ class Orchestrator:
         self._mgmt_channel_id: str | None = None
         self._bot_name: str | None = None
         self._mgmt_warned = False
+        self._bg_tasks: set[asyncio.Task] = set()  # in-flight delegations
+
+    def _spawn(self, coro) -> None:
+        """Run a coroutine in the background, keeping a reference so it isn't GC'd."""
+        task = asyncio.create_task(coro)
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
 
     # ── lifecycle ─────────────────────────────────────────────────────────────
     async def setup(self) -> None:
@@ -123,6 +131,9 @@ class Orchestrator:
         await self.profiles.load_from_disk()
         await self.charters.seed_floor_from_disk()
         await self.scheduler.register_from_urls(self.s.worker_instance_urls)
+        stale = await self.scheduler.reset_stale()  # clear any wedged 'computing' from a crash
+        if stale:
+            log.info("reset %d stale worker(s) to idle on startup", stale)
         self._bot_name = getattr(self.chat, "username", None)
         # #mgmt is where the Human Operator <-> PO <-> PM converse (§7); track it for events.
         mgmt = await self.mgmt_channel_id()
@@ -226,7 +237,7 @@ class Orchestrator:
         return verdict
 
     # ── natural-language intake (the conversational PO surface) ───────────────
-    async def nl_intake(self, message: str, channel_id: str) -> None:
+    async def nl_intake(self, message: str, channel_id: str, *, user_id: str | None = None) -> None:
         """Route a natural-language operator message to the PO agent, which interprets intent
         and replies conversationally. Non-destructive actions (open an effort, apply steering,
         report status) are executed; safety decisions are NOT auto-run from fuzzy NL — the PO
@@ -252,7 +263,17 @@ class Orchestrator:
             try:
                 eid, chan = await self.router.ensure_effort_channel(intent.effort_name)
                 self.events.track_channel(chan)
-                reply += f"\n\n_Opened effort `{eid}` → `#effort-{intent.effort_name}`._"
+                # Add the requester to the effort channel so it appears in their sidebar and
+                # they can watch the work live (public channels you haven't joined are hidden).
+                if user_id:
+                    await self.chat.add_member(chan, user_id)
+                # Dispatch a worker in the BACKGROUND so the PO replies immediately; the
+                # worker's result streams to the effort channel; completion reports back here.
+                self._spawn(self.delegate(eid, chan, message))
+                reply += (
+                    f"\n\n_Opened **#effort-{intent.effort_name}** (added to your channels) and "
+                    f"dispatched a worker — watch it live there; I'll summarize back here when done._"
+                )
             except Exception as exc:  # noqa: BLE001
                 reply += f"\n\n_(couldn't open that effort: {exc})_"
         elif intent.kind == "steering" and intent.effort_id and intent.steering:
@@ -274,6 +295,46 @@ class Orchestrator:
             )
 
         await self.chat.post(channel_id, reply or "…")
+
+    async def delegate(self, effort_id: str, channel_id: str, goal: str, *, repo: str | None = None) -> None:
+        """Set the effort's goal (constraints inline, §4.3) and dispatch a worker; the worker's
+        result posts to the effort channel. Runs as a background task. `repo` focuses the worker
+        first (real projects); omit for a pre-focused/throwaway pool (default `AO_DEFAULT_REPO`)."""
+        repo = repo or (self.s.default_repo or None)
+        try:
+            await self.charters.set_goal(effort_id, goal, created_by="po")
+            await self.chat.post(channel_id, f"⏳ **{effort_id}** — worker dispatched. Working…")
+            result = await self.router.wake(
+                effort_id, role="worker-default", thread_id=None, channel_id=channel_id,
+                session_id=effort_id, instruction=goal, repo=repo,
+            )
+            if result is None:
+                await self.chat.post(
+                    channel_id, "⚠️ couldn't dispatch a worker (effort frozen or no free slot)."
+                )
+            else:
+                await self.chat.post(
+                    channel_id,
+                    f"✅ worker finished (**{result.status}**). Review the changes in the "
+                    f"worker's workspace; nothing is pushed (the floor blocks irreversible actions)."
+                    if result.ok else
+                    f"⚠️ worker ended with **{result.status}** — {(result.output or '')[:200]}",
+                )
+            # Report completion back to #mgmt so the operator sees it where they're watching.
+            mgmt = await self.mgmt_channel_id()
+            if mgmt and mgmt != channel_id:
+                if result is None:
+                    await self.chat.post(mgmt, f"⚠️ **{effort_id}**: couldn't dispatch a worker.")
+                else:
+                    head = (result.output or "").strip().splitlines()[0][:200] if result.output else result.status
+                    await self.chat.post(
+                        mgmt,
+                        f"✅ **{effort_id}** finished (**{result.status}**): {head}\n"
+                        f"_Full trace in that effort's channel._",
+                    )
+        except Exception as exc:  # noqa: BLE001
+            log.exception("delegate failed for %s: %s", effort_id, exc)
+            await self.chat.post(channel_id, f"⚠️ delegation error on `{effort_id}`: {exc}")
 
     # ── inbound event routing (P1/P2) ─────────────────────────────────────────
     async def handle_event(self, event: dict) -> None:
@@ -297,13 +358,14 @@ class Orchestrator:
 
         # Control surface — privileged (only the human posts; bot posts are filtered upstream).
         if _CONTROL_RE.match(stripped):
-            await self._handle_command(stripped, channel_id, thread_id)
+            await self._handle_command(stripped, channel_id, thread_id, user_id=event.get("user_id"))
             return
 
         mgmt = await self.mgmt_channel_id()
         if channel_id == mgmt:
             if stripped:
-                await self.nl_intake(stripped, channel_id)  # talk to the PO in plain language
+                # talk to the PO in plain language; user_id lets it add the requester to efforts
+                await self.nl_intake(stripped, channel_id, user_id=event.get("user_id"))
             return
 
         # Effort channel: resolve the effort + wake a worker on the referenced thread.
@@ -330,7 +392,9 @@ class Orchestrator:
             instruction=stripped,
         )
 
-    async def _handle_command(self, text: str, channel_id: str | None, thread_id: str | None) -> None:
+    async def _handle_command(
+        self, text: str, channel_id: str | None, thread_id: str | None, *, user_id: str | None = None
+    ) -> None:
         """Parse + execute an operator command; ALWAYS replies to the originating channel so the
         operator gets feedback (even usage errors). `text` has the @mention prefix stripped."""
         async def reply(msg: str) -> None:
@@ -355,7 +419,9 @@ class Orchestrator:
             try:
                 effort_id, chan = await self.router.ensure_effort_channel(name)
                 self.events.track_channel(chan)
-                await reply(f"✅ created effort `{effort_id}` → channel `#effort-{name}`")
+                if user_id:
+                    await self.chat.add_member(chan, user_id)
+                await reply(f"✅ created effort `{effort_id}` → `#effort-{name}` (added to your channels)")
             except Exception as exc:  # noqa: BLE001
                 await reply(f"⚠️ could not create effort `{name}`: {exc}")
         elif cmd == "status":

@@ -29,6 +29,10 @@ class ChatAdapter(Protocol):
         """Create-or-get a channel by name; returns its id."""
         ...
 
+    async def add_member(self, channel_id: str, user_id: str) -> None:
+        """Add a user to a channel (so effort channels appear in the operator's sidebar)."""
+        ...
+
     async def posts_since(self, channel_id: str, since_ms: int) -> list[dict[str, Any]]:
         """REST catch-up: posts in a channel after `since_ms` (PLAN §3.1.1)."""
         ...
@@ -49,6 +53,7 @@ class FakeChatAdapter:
         self._queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self.posted: list[dict[str, Any]] = []
         self.channels: dict[str, str] = {}
+        self.members: list[tuple[str, str]] = []
         self.username = "bot-pm"
         self._post_seq = 0
         self._closed = False
@@ -79,6 +84,9 @@ class FakeChatAdapter:
             cid = f"chan-{name}"
             self.channels[name] = cid
         return cid
+
+    async def add_member(self, channel_id: str, user_id: str) -> None:
+        self.members.append((channel_id, user_id))
 
     async def posts_since(self, channel_id: str, since_ms: int) -> list[dict[str, Any]]:
         return []  # tests drive delivery via inject()

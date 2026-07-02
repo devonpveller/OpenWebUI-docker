@@ -61,6 +61,9 @@ class Settings(BaseSettings):
     worker_instance_urls: str = ""
     worker_poll_interval_s: float = 3.0
     worker_poll_timeout_s: float = 1800.0
+    # If set, the bridge focuses a worker on this repo (clone via /project) before a delegation.
+    # Empty = the pool is pre-focused (e.g. the throwaway test repo) and no /project is issued.
+    default_repo: str = ""
 
     # ── Wake bus reliability (event-gateway — PLAN §3.1.1) ──────────────────
     wake_undeliverable_bound_s: float = 300.0   # past this, an undelivered wake is a §3 trigger

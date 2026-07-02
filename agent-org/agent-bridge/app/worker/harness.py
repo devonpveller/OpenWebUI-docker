@@ -18,9 +18,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from typing import Any, Protocol
 
 import httpx
+
+# Called with each worker update so the bridge can stream it to the chat bus (observability,
+# governance §5/§7). kind ∈ {"command","answer"}; payload is the activity record / final answer.
+OnUpdate = Callable[[str, dict], Awaitable[None]]
 
 log = logging.getLogger("agent_bridge.worker")
 
@@ -36,11 +41,28 @@ class WorkResult:
         return self.status == "done"
 
 
+# little-coder's daemon validates `channel` against a fixed trigger-surface enum
+# (batch/cli/owui/validation) — it is NOT the chat channel. The bridge is an automated
+# trigger, so it uses "batch".
+LC_TRIGGER_CHANNEL = "batch"
+
+
 class WorkerHarness(Protocol):
     async def wake(
-        self, base_url: str, session_id: str, prompt: str, *, channel: str = "agent-org"
+        self, base_url: str, session_id: str, prompt: str, *,
+        channel: str = LC_TRIGGER_CHANNEL, on_update: OnUpdate | None = None,
     ) -> WorkResult:
-        """Resume a session and run one turn to completion; return the result."""
+        """Resume a session and run one turn to completion; return the result. `on_update`
+        streams the worker's commands + answer to the bus as it works (observability)."""
+        ...
+
+    async def set_project(self, base_url: str, repo: str) -> bool:
+        """Focus the worker on a repo (little-coder clones it, bypassing the git-proxy).
+        Returns True on success. A no-op path exists for pre-focused/throwaway workers."""
+        ...
+
+    async def current_focus(self, base_url: str) -> str | None:
+        """The repo the worker is currently focused on, or None."""
         ...
 
 
@@ -53,7 +75,8 @@ class LittleCoderHarness:
         self.poll_timeout = poll_timeout_s
 
     async def wake(
-        self, base_url: str, session_id: str, prompt: str, *, channel: str = "agent-org"
+        self, base_url: str, session_id: str, prompt: str, *,
+        channel: str = LC_TRIGGER_CHANNEL, on_update: OnUpdate | None = None,
     ) -> WorkResult:
         async with httpx.AsyncClient(base_url=base_url.rstrip("/"), timeout=60.0) as c:
             r = await c.post(
@@ -67,17 +90,46 @@ class LittleCoderHarness:
             )
             r.raise_for_status()
             task_id = r.json()["task_id"]
-            # Poll to terminal state (little-coder is async; the scheduler treats
-            # this whole call as the agent's `computing` window — machine B §3.6).
+            # Poll to terminal state (little-coder is async; the scheduler treats this whole
+            # call as the agent's `computing` window — machine B §3.6). Stream each new command
+            # the worker runs to the bus as it happens (observability — governance §5/§7).
+            seen = 0
             waited = 0.0
             while waited < self.poll_timeout:
                 await asyncio.sleep(self.poll_interval)
                 waited += self.poll_interval
                 s = (await c.get(f"/tasks/{task_id}")).json()
+                activity = s.get("activity") or []
+                if on_update and len(activity) > seen:
+                    for item in activity[seen:]:
+                        try:
+                            await on_update("command", item)
+                        except Exception:  # noqa: BLE001 - streaming must never break the poll
+                            pass
+                    seen = len(activity)
                 status = s.get("status", "")
-                if status in ("done", "abandoned", "rejected"):
-                    return WorkResult(status, task_id, s.get("result", ""))
+                # Terminal = anything not still in-flight (done/abandoned/rejected/cancelled/…).
+                if status not in ("queued", "running", "pending", ""):
+                    answer = s.get("answer") or s.get("result", "")
+                    if on_update:
+                        try:
+                            await on_update("answer", {"status": status, "answer": answer})
+                        except Exception:  # noqa: BLE001
+                            pass
+                    return WorkResult(status, task_id, answer)
             return WorkResult("error", task_id, "poll timeout")
+
+    async def set_project(self, base_url: str, repo: str) -> bool:
+        # little-coder clones via the REAL git binary (bypasses the git-proxy) — the
+        # supported "operator action" workspace-setup path (§12.3). Clone can be slow.
+        async with httpx.AsyncClient(base_url=base_url.rstrip("/"), timeout=1800.0) as c:
+            r = await c.post("/project", json={"repo": repo, "actor": "agent-bridge"})
+            return r.status_code < 400
+
+    async def current_focus(self, base_url: str) -> str | None:
+        async with httpx.AsyncClient(base_url=base_url.rstrip("/"), timeout=30.0) as c:
+            h = (await c.get("/health")).json()
+            return h.get("focus")
 
 
 class FakeHarness:
@@ -86,11 +138,22 @@ class FakeHarness:
     def __init__(self, result_status: str = "done") -> None:
         self.result_status = result_status
         self.wakes: list[dict[str, Any]] = []
+        self.projects: dict[str, str] = {}
 
     async def wake(
-        self, base_url: str, session_id: str, prompt: str, *, channel: str = "agent-org"
+        self, base_url: str, session_id: str, prompt: str, *,
+        channel: str = LC_TRIGGER_CHANNEL, on_update: OnUpdate | None = None,
     ) -> WorkResult:
         self.wakes.append(
             {"base_url": base_url, "session_id": session_id, "prompt": prompt}
         )
+        if on_update:
+            await on_update("answer", {"status": self.result_status, "answer": "ok"})
         return WorkResult(self.result_status, task_id=f"fake-{len(self.wakes)}", output="ok")
+
+    async def set_project(self, base_url: str, repo: str) -> bool:
+        self.projects[base_url] = repo
+        return True
+
+    async def current_focus(self, base_url: str) -> str | None:
+        return self.projects.get(base_url)

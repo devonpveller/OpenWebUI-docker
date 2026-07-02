@@ -70,6 +70,25 @@ class Scheduler:
         for i, url in enumerate(u.strip() for u in urls_csv.split(",") if u.strip()):
             await self.register(f"worker-{i + 1}", url)
 
+    async def reset_stale(self) -> int:
+        """On bridge startup, any `computing`/`waiting` instance is stale — the bridge lost its
+        poll loop on the last shutdown, so nothing is actually driving that worker. Reset to
+        idle so a crash/restart can't wedge the pool with a permanently-'busy' worker."""
+        async with self.db.session_factory() as s:
+            rows = (
+                await s.execute(
+                    select(WorkerInstance).where(
+                        WorkerInstance.sched_state.in_([SCHED_COMPUTING, SCHED_WAITING])
+                    )
+                )
+            ).scalars().all()
+            for r in rows:
+                r.sched_state = SCHED_IDLE
+                r.effort_id = None
+                r.waiting_on_effort = None
+            await s.commit()
+            return len(rows)
+
     async def _computing_count(self, s) -> int:
         return int(
             (

@@ -3,6 +3,7 @@ prove the loop *and* that we can stop it (governance §9 build order)."""
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -139,6 +140,10 @@ async def test_nl_request_opens_effort(db_url):
         )
         assert await orch.gate.state_of("effort-dark-mode") == "active"  # effort opened from NL
         assert any("dark-mode" in p["message"] for p in chat.posted)
+        # a background delegation was spawned; let it finish (FakeHarness completes instantly).
+        if orch._bg_tasks:
+            await asyncio.gather(*orch._bg_tasks)
+        assert len(harness.wakes) == 1  # the worker was dispatched
     finally:
         await db.dispose()
 

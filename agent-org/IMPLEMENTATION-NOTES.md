@@ -173,6 +173,74 @@ is viable locally. Re-run any time: `docker exec agent-bridge python -m app.eval
 (writes `/app/p0_5-result.json` inside the container; `docker cp` it out — the harness now prints
 the exact command). Quick smoke first-observed 2026-07-01 (13/13, 4/4, 2/2+1/1) — full run above.
 
+## P5 worker-pool bring-up (2026-07-02) — pool LIVE, wake seam validated
+
+Stood up the `workers` profile against the live stack. Both `(little-coder + open-terminal)`
+pairs (`ao-worker-1/2` + `ao-ot-1/2` + shared `ao-git-egress`) are **healthy**, both registered
+in the scheduler (cap=1), and the bridge drives them through the production wake path. Findings +
+fixes (all applied):
+
+1. **Per-instance config required** — little-coder's config loader is plain `yaml.safe_load` (no
+   env substitution/layering) and `workspace.open_terminal_url` is the only lever the daemon +
+   agent use, so the shared config would route a pooled worker's exec to the MAIN open-terminal.
+   Fixed with `agent-org/scripts/gen-worker-configs.py`: generates per-instance config dirs
+   (`worker-configs/worker-N/`) from the canonical config, rewriting only that one line. The
+   compose mounts the per-instance dir; regenerate when the canonical config changes.
+2. **Pool open-terminal key** — the daemon reads the OT key from `OPEN_TERMINAL_API_KEY`
+   (config `open_terminal_key_env`); the pool now uses its OWN `AO_OPEN_TERMINAL_KEY` (compose
+   `environment` overrides the env_file) so it's independent of the main stack.
+3. **`channel` is the trigger-surface enum, not the chat channel** — the daemon `POST /tasks`
+   validates `channel ∈ {batch,cli,owui,validation}`; the harness was passing the Mattermost
+   channel → 422. Fixed: the bridge sends `channel="batch"` (automated trigger). Verified the
+   daemon then accepts the task.
+4. **Workers need a project** — a woken worker with no focus returns
+   *"no project focused — run /project first"* (expected little-coder behavior; it works on a
+   repo). So actual **delegation** needs a step the bridge doesn't do yet: set a project on the
+   assigned instance (`POST /project {repo}`) before waking, which requires an operator decision
+   (which repo(s) the org works on + the `ao-git-egress` git allowlist). This is the next P5
+   increment (`P5-delegation`), gated on that decision. The pool + wake seam themselves are done.
+
+5. **Pool open-terminal key var** — the open-terminal *server* reads `OPEN_TERMINAL_API_KEY`
+   (the little-coder layer/git-proxy reads `API_KEY`); the main OT gets it via its `env_file`. The
+   pool OTs only had `API_KEY` → the server 401'd every exec. Fixed: set BOTH
+   `OPEN_TERMINAL_API_KEY` and `API_KEY` to `AO_OPEN_TERMINAL_KEY` on `ao-ot-N`.
+
+### Delegation LIVE + validated end-to-end (2026-07-02)
+
+The full conversational delegation loop is wired and proven on the live stack with a **throwaway
+test repo**:
+- **PO NL → intent** (live `qwen36-27b`): "add a subtract function" → `kind=request,
+  effort_name=add-subtract-function`; "what's going on" → `status`; "hey there" → `chitchat`.
+- **Bridge delegation**: `orchestrator.delegate` (background task) sets the effort goal
+  (constraints inline, §4.3), dispatches a worker via `router.wake` (optional `set_project` for
+  real repos; pre-focused pool otherwise), and posts the result to the effort channel. NL
+  requests auto-spawn a delegation; the PO replies immediately (`_spawn`), the result follows.
+- **Worker does real work** (proven): a wake with *"add subtract(a,b) to calculator.py"* →
+  little-coder on 27B edited the file correctly (`subtract` added in the right place, matching
+  style), status `done` in ~20s, no push (floor intact).
+- Harness gained `set_project` / `current_focus`; the daemon `channel` must be `batch`
+  (trigger-surface enum). 65 tests green.
+
+**Throwaway test-repo setup (reproducible).** little-coder needs a focused repo; the git-proxy
+blocks `git init` (workspace setup is an operator action, §12.3), so seed with the REAL git
+(`/usr/bin/git.real`, which `/project` also uses) into the worker's workspace via its
+open-terminal, then restart the worker so `_seed_focus` adopts it:
+```bash
+docker exec ao-ot-1 sh -c 'cd /workspace && umask 000 && /usr/bin/git.real init -q && \
+  /usr/bin/git.real config user.email t@a.local && /usr/bin/git.real config user.name t && \
+  printf "def add(a,b):\n    return a+b\n" > calculator.py && /usr/bin/git.real add -A && \
+  /usr/bin/git.real commit -qm initial && \
+  /usr/bin/git.real remote add origin https://github.com/agent-org/throwaway-test.git'
+docker restart ao-worker-1   # _seed_focus adopts it; GET :8090/health shows focus set
+```
+For a REAL project instead, set `AO_DEFAULT_REPO` (or pass a repo per effort) and the bridge
+issues `/project` (clone via real git) before waking — plus add the repo's host to the
+`ao-git-egress` allowlist.
+
+Recovery scripts are unchanged for the pool by design: the `workers`/`cloud` profiles are gated
+(like the Portal) and operator-driven, so they're excluded from the recovery inventory (the
+default plane is what recovery manages). Stack-map §3 already lists the pool containers.
+
 ## P0.5 procedure (the one decision-gate that blocks Pc)
 
 Run these **bounded real completions** (never a model health-probe — C5) against the live

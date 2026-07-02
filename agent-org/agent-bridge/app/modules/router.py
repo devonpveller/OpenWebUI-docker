@@ -110,9 +110,12 @@ class Router:
         *,
         session_id: str | None = None,
         instruction: str = "",
+        repo: str | None = None,
     ) -> WorkResult | None:
         """Wake a worker on an effort and post its reply in-thread. Returns None if the
-        effort is frozen (the composition rule refuses to dispatch) or no capacity."""
+        effort is frozen (the composition rule refuses to dispatch) or no capacity. If `repo`
+        is given, the worker is focused on it first (clone via /project); if omitted, the
+        worker is assumed already focused (pre-seeded/throwaway)."""
         session_id = session_id or thread_id
         try:
             inst = await self.scheduler.acquire(effort_id, role, session_id)
@@ -128,15 +131,45 @@ class Router:
             return None
 
         try:
+            if repo:
+                ok = await self.harness.set_project(inst.base_url, repo)
+                await self.audit.log(
+                    "worker_project_set", effort_id=effort_id, actor=inst.id,
+                    payload={"repo": repo, "ok": ok},
+                )
+                if not ok:
+                    await self.chat.post(
+                        channel_id, f"⚠️ couldn't focus the worker on `{repo}`.",
+                        thread_id=thread_id,
+                    )
+                    return WorkResult("error", task_id="", output="set_project failed")
+            # Stream the worker's activity to the bus as it happens (observability = safety,
+            # governance §5/§7) — the user + PM can watch the work + see failures live.
+            async def _stream(kind: str, item: dict) -> None:
+                if kind == "command":
+                    cmd = (item.get("command") or "").strip()
+                    if not cmd:
+                        return
+                    icon = "🚫" if item.get("denied") else ("✅" if item.get("ok") else "❌")
+                    line = f"{icon} `$ {cmd[:200]}`"
+                    tail = (item.get("stderr_tail") or "").strip()
+                    if not item.get("ok") and tail:
+                        line += f"\n> {tail[:300]}"
+                    await self.chat.post(channel_id, line, thread_id=thread_id)
+                elif kind == "answer":
+                    ans = (item.get("answer") or "").strip()
+                    if ans:
+                        await self.chat.post(
+                            channel_id, f"💬 **{role}@{inst.id}:** {ans[:1500]}",
+                            thread_id=thread_id,
+                        )
+
             context = await self.build_context(effort_id, role)
             prompt = f"{context}\n\n{instruction}".strip()
+            # `channel` here is little-coder's trigger-surface enum, NOT the Mattermost
+            # channel — the harness defaults it to "batch" (automated trigger).
             result = await self.harness.wake(
-                inst.base_url, session_id, prompt, channel=channel_id
-            )
-            await self.chat.post(
-                channel_id,
-                f"[{role}@{inst.id}] {result.output or result.status}",
-                thread_id=thread_id,
+                inst.base_url, session_id, prompt, on_update=_stream
             )
             await self.audit.log(
                 "wake_done",
