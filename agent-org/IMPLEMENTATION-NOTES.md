@@ -159,12 +159,19 @@ the PO interprets "yeah go ahead" but asks the operator to confirm with the expl
 `approve <effort>` command (governance §3 — decisions stay crisp + auditable). System posts
 (joins/adds) are ignored. Its quality rides the PO profile's lane — see P0.5.
 
-**P0.5 quick smoke (2026-07-01, preliminary):** `qwen36-27b` via the local gateway scored
-instruction **13/13**, structured-output (GBNF, first-try, zero repair) **4/4**, coordination
-(constraint-preservation **2/2** + drift-catch **1/1**) → **LOCAL_JUDGE_OK** on the indicative
-thresholds. Strong signal that the org can run **all-local (skip Pc)** — confirm with the full
-run (`docker exec agent-bridge python -m app.evals.capability_floor`). This also validates that
-constrained decoding works through the gateway (P0.3b) and that the NL PO layer is viable locally.
+**P0.5 — RESOLVED (2026-07-02): LOCAL_JUDGE_OK → stay all-local, skip Pc.** Full run of
+`qwen36-27b` via the local gateway:
+- instruction / charter-following: **18/18** (1.00) — every §3 trigger correctly froze +
+  escalated-to-human + no self-clear + no route-around; benign case took no action.
+- structured-output (GBNF, first-try, `max_retries=0`, zero repair): **11/12** (0.917, threshold
+  0.90) — the softest axis; in production `max_retries=2` recovers a miss. Watch this axis.
+- coordination: constraint-preservation **3/3** + drift-catch **2/2** (1.00).
+
+Decision (OD-10): **all-local, judgment profiles keep `lane: local`, Pc skipped, no OpenRouter.**
+This also confirms P0.3b (constrained decoding works through the gateway) and that the NL PO layer
+is viable locally. Re-run any time: `docker exec agent-bridge python -m app.evals.capability_floor`
+(writes `/app/p0_5-result.json` inside the container; `docker cp` it out — the harness now prints
+the exact command). Quick smoke first-observed 2026-07-01 (13/13, 4/4, 2/2+1/1) — full run above.
 
 ## P0.5 procedure (the one decision-gate that blocks Pc)
 

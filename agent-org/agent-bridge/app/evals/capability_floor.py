@@ -323,7 +323,8 @@ async def run(args) -> dict:
     if args.json_out:
         with open(args.json_out, "w", encoding="utf-8") as f:
             json.dump(result, f, indent=2)
-        print(f"\nresult written to {args.json_out}")
+        print(f"\nresult written to {args.json_out} (inside the container if run via docker exec)")
+        print(f"  retrieve it on the host with:  docker cp agent-bridge:/app/{args.json_out} ./")
     return result
 
 
