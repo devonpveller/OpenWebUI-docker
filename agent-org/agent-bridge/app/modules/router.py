@@ -219,11 +219,12 @@ class Router:
         session_id: str | None = None,
         instruction: str = "",
         repo: str | None = None,
+        repo_token: str | None = None,
     ) -> WorkResult | None:
         """Wake a worker on an effort and post its reply in-thread. Returns None if the
         effort is frozen (the composition rule refuses to dispatch) or no capacity. If `repo`
-        is given, the worker is focused on it first (clone via /project); if omitted, the
-        worker is assumed already focused (pre-seeded/throwaway)."""
+        is given, the worker is focused on it first (clone via /project, using `repo_token` if the
+        project has a per-project deploy token); if omitted, the worker is assumed already focused."""
         session_id = session_id or thread_id
         try:
             inst = await self.scheduler.acquire(effort_id, role, session_id)
@@ -240,7 +241,7 @@ class Router:
 
         try:
             if repo:
-                ok = await self.harness.set_project(inst.base_url, repo)
+                ok = await self.harness.set_project(inst.base_url, repo, token=repo_token)
                 await self.audit.log(
                     "worker_project_set", effort_id=effort_id, actor=inst.id,
                     payload={"repo": repo, "ok": ok},

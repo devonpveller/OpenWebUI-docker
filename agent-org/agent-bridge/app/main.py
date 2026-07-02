@@ -83,6 +83,7 @@ class PrepareIn(BaseModel):
 class ProjectIn(BaseModel):
     name: str
     repo_url: str
+    token_env: str | None = None  # NAME of the env var holding this project's deploy token
 
 
 class EgressIn(BaseModel):
@@ -229,7 +230,9 @@ def create_app(orch: Orchestrator | None = None) -> FastAPI:
 
     @app.post("/projects")
     async def add_project(body: ProjectIn) -> dict:
-        proj = await orch.projects.add(body.name, body.repo_url, created_by="operator")
+        proj = await orch.projects.add(
+            body.name, body.repo_url, created_by="operator", token_env=body.token_env
+        )
         chan = await orch.router.ensure_project_channel(proj["slug"])
         await orch.projects.set_channel(proj["slug"], chan)
         orch.events.track_channel(chan)

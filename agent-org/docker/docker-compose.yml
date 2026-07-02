@@ -100,6 +100,10 @@ services:
         condition: service_healthy
       agent-bridge-db:
         condition: service_healthy
+    # Per-project deploy tokens (AO_TOKEN_<PROJECT>=<PAT>) live here so the bridge can resolve
+    # them per project (multi-PAT). Secrets via env only; the DB stores just the var NAME.
+    env_file:
+      - .env
     environment:
       # State store — fail-safe persistence (a frozen effort stays frozen across a bounce).
       AO_DATABASE_URL: postgresql+asyncpg://bridge:${AO_DB_PASSWORD}@agent-bridge-db:5432/agent_bridge
@@ -148,6 +152,8 @@ services:
       # char-budgeted so it never overwhelms the model window. Raise for a larger-context model.
       AO_CONTEXT_THREAD_CHARS: ${AO_CONTEXT_THREAD_CHARS:-2500}
       AO_CONTEXT_CHANNEL_CHARS: ${AO_CONTEXT_CHANNEL_CHARS:-1500}
+      # Commit attribution: agents commit as <role>@<domain> (blame/provenance, P5.4).
+      AO_AGENT_EMAIL_DOMAIN: ${AO_AGENT_EMAIL_DOMAIN:-agent-org.local}
     volumes:
       - ao-egress-config:/egress    # shared with ao-git-egress (bridge writes, proxy reads)
     networks:

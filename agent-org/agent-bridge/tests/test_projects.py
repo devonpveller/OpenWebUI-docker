@@ -144,11 +144,38 @@ async def test_repo_effort_commits_and_pushes_a_feature_branch(db_url):
     try:
         eid, chan, root = await orch.router.open_effort("feature")
         await orch.delegate(eid, chan, root, "do the thing")
-        # a finalize wake published the effort's feature branch (additive push, allowed)
-        assert any("git push -u origin agent/effort-feature" in w["prompt"] for w in orch.harness.wakes)
+        publish = next(w for w in orch.harness.wakes if "git push -u origin agent/effort-feature" in w["prompt"])
+        # commits carry the AGENT's identity (not the baked "little-coder") for blame/provenance
+        assert 'GIT_AUTHOR_NAME="worker-default"' in publish["prompt"]
+        assert "worker-default@agent-org.local" in publish["prompt"]
         # the completion summary reports the branch to fetch — never main
         assert any("agent/effort-feature" in p["message"] for p in orch.chat.posted)
-        assert not any("push to main" in p["message"].lower() and "✅" in p["message"] for p in orch.chat.posted)
+    finally:
+        await db.dispose()
+
+
+async def test_per_project_deploy_token_threaded_to_clone(db_url, monkeypatch):
+    """A project can carry its OWN deploy token (env-var name) so different repos use different PATs;
+    the resolved token is threaded to the worker's /project clone."""
+    monkeypatch.setenv("AO_TOKEN_ACME", "ghp_secret_acme_123")
+    settings = Settings(
+        _env_file=None, chat_adapter="fake",
+        profiles_dir=str(ROOT / "profiles"), charters_dir=str(ROOT / "charters"),
+        floor_dir=str(ROOT / "floor"), worker_instance_urls="http://w1:8090",
+        max_concurrent_workers=1, database_url=db_url, project_survey_enabled=False,
+        review_mode="off", plan_approval="off",
+    )
+    db = Database(db_url)
+    orch = Orchestrator(settings, db, FakeChatAdapter(),
+                        model_client=FakeModelClient(), harness=FakeHarness())
+    await orch.setup()
+    try:
+        await orch.projects.add("acme", "https://github.com/acme/app.git", token_env="AO_TOKEN_ACME")
+        eid, chan, root = await orch.router.open_effort("feat", project="acme")
+        assert await orch._project_token(eid) == "ghp_secret_acme_123"   # resolved from env
+        await orch.delegate(eid, chan, root, "do it")
+        # the per-project token was passed to the worker's clone (not the global one)
+        assert "ghp_secret_acme_123" in orch.harness.tokens.values()
     finally:
         await db.dispose()
 

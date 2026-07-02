@@ -88,6 +88,9 @@ class Settings(BaseSettings):
     # Path the bridge writes the tinyproxy egress allowlist to (a volume the ao-git-egress proxy
     # mounts + reloads on change). Empty = don't manage the file (dev/tests).
     egress_allowlist_file: str = ""
+    # Commit attribution: agents commit as `<role>@<domain>` (not the baked "little-coder") so
+    # `git blame` + hand-off provenance identify WHICH agent did what (P5.4).
+    agent_email_domain: str = "agent-org.local"
 
     # ── Wake bus reliability (event-gateway — PLAN §3.1.1) ──────────────────
     wake_undeliverable_bound_s: float = 300.0   # past this, an undelivered wake is a §3 trigger

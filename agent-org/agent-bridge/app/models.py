@@ -313,6 +313,9 @@ class Project(Base):
     name: Mapped[str] = mapped_column(String(200))
     repo_url: Mapped[str] = mapped_column(String(512))
     git_host: Mapped[str | None] = mapped_column(String(200), index=True)  # for the egress allowlist
+    # NAME of the env var holding this project's deploy token (NOT the token — secrets stay in env).
+    # Lets different projects use different PATs (personal vs org). Empty ⇒ the pool's LC_DEPLOY_TOKEN.
+    token_env: Mapped[str | None] = mapped_column(String(64))
     channel_id: Mapped[str | None] = mapped_column(String(64))
     created_by: Mapped[str] = mapped_column(String(64), default="operator")
     active: Mapped[bool] = mapped_column(Boolean, default=True)

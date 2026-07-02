@@ -68,6 +68,8 @@ class Database:
         # P4.0 risk-gated dry-run execution gate.
         ("efforts", "risk", "VARCHAR(24) DEFAULT 'routine'"),
         ("efforts", "dry_run_status", "VARCHAR(16) DEFAULT 'none'"),
+        # Per-project deploy-token env-var name (multi-PAT support).
+        ("projects", "token_env", "VARCHAR(64)"),
     ]
 
     async def create_all(self) -> None:

@@ -91,6 +91,11 @@ class TriggerRequest(BaseModel):
 class ProjectRequest(BaseModel):
     repo: str
     actor: str = "cli"
+    # Optional per-request deploy token (overrides the global LC_DEPLOY_TOKEN). Lets a caller (the
+    # agent-org bridge) supply a DIFFERENT token per project — e.g. a personal PAT for one repo and
+    # an org PAT for another — instead of one ambient token for everything. Env only on the caller;
+    # transits the internal network per request; never journaled raw (clone redacts the token).
+    token: str | None = None
 
 
 class ConfirmRequest(BaseModel):
@@ -438,7 +443,9 @@ class LittleCoderDaemon:
             # is a no-op when the workspace is genuinely empty.
             await asyncio.to_thread(self.workspace.wipe)
 
-        token = os.environ.get("LC_DEPLOY_TOKEN") or None
+        # Per-request token (from the caller) overrides the global LC_DEPLOY_TOKEN, so different
+        # projects can use different PATs (personal vs org). Falls back to the ambient token.
+        token = req.token or os.environ.get("LC_DEPLOY_TOKEN") or None
         result = await asyncio.to_thread(self.workspace.clone, requested, token)
         if not result.ok:
             raise HTTPException(

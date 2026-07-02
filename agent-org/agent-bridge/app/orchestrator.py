@@ -261,6 +261,26 @@ class Orchestrator:
                 return repo
         return self.s.default_repo or None
 
+    async def _project_token(self, effort_id: str) -> str | None:
+        """The per-project deploy token for this effort's clone/push (multi-PAT): resolved from the
+        env var named on the project (`token_env`). None ⇒ the pool's ambient LC_DEPLOY_TOKEN is used
+        (little-coder's fallback). Secrets live in env only — the DB stores the var NAME, not the token."""
+        import os
+
+        async with self.db.session_factory() as s:
+            e = await s.get(Effort, effort_id)
+            proj = e.project if e else None
+        if not proj:
+            return None
+        p = await self.projects.get(proj)
+        env_name = (p or {}).get("token_env")
+        if not env_name:
+            return None
+        tok = os.environ.get(env_name)
+        if not tok:
+            log.warning("project %s token env %r is unset — falling back to the pool token", proj, env_name)
+        return tok or None
+
     async def _track_operator(self, user_id: str | None) -> None:
         """Remember an operator seen in #mgmt and pull them into the function channels so those
         appear in their sidebar (public channels you haven't joined are hidden). Best-effort."""
@@ -748,6 +768,7 @@ class Orchestrator:
         escalates (P4.6/§3). Routine efforts take the light path (wake → done). Runs in the background.
         `repo` focuses the worker; omit to resolve from the effort's project (registry → fallback)."""
         repo = repo or await self._effort_repo(effort_id)
+        repo_token = await self._project_token(effort_id) if repo else None
         try:
             await self.charters.set_goal(effort_id, goal, created_by="po")
             # P4.0 gate: a high-blast-radius effort may not reach REAL-code execution until its
@@ -772,7 +793,7 @@ class Orchestrator:
             last = None
             for i, step in enumerate(steps, 1):
                 last = await self._run_step(
-                    effort_id, channel_id, root_post_id, step, i, len(steps), repo, heavy
+                    effort_id, channel_id, root_post_id, step, i, len(steps), repo, heavy, repo_token
                 )
                 if last is None:   # stopped (failure / flagged / frozen) — handlers already posted
                     return
@@ -787,7 +808,7 @@ class Orchestrator:
             )
             await self.router.update_effort_card(effort_id, "error")
 
-    async def _run_step(self, effort_id, channel_id, root, step, i, n, repo, heavy):
+    async def _run_step(self, effort_id, channel_id, root, step, i, n, repo, heavy, repo_token=None):
         """Run one plan step = one checkpoint. Returns the WorkResult to continue, or None to STOP
         (the failure/flag/deviation handler has already posted + frozen where required)."""
         header = f"▶ **step {i}/{n}**: {step[:180]}" if n > 1 else "⏳ worker dispatched. Working…"
@@ -797,7 +818,7 @@ class Orchestrator:
             await self.stop_gates.add_checkpoint(cp_id, effort_id, f"step {i}", i)
         result = await self.router.wake(
             effort_id, role="worker-default", thread_id=root, channel_id=channel_id,
-            session_id=effort_id, instruction=step, repo=repo,
+            session_id=effort_id, instruction=step, repo=repo, repo_token=repo_token,
         )
         if result is None:
             await self._report_completion(effort_id, None)
@@ -814,17 +835,30 @@ class Orchestrator:
         """The feature branch an effort's work is published to (never main/master)."""
         return f"agent/{effort_id}"
 
+    def _agent_identity(self, role: str = "worker-default") -> tuple[str, str]:
+        """(name, email) the agent commits as — its ROLE, not the baked 'little-coder', so blame +
+        hand-off provenance identify who did what (P5.4). When named per-domain roles land (P5.2),
+        each role commits under its own identity automatically."""
+        return role, f"{role}@{self.s.agent_email_domain}"
+
     async def _publish_effort(self, effort_id: str, channel_id: str, root: str, repo: str) -> None:
         """Commit + push the effort's work to its feature branch so it's DURABLE (survives a
         /project wipe), VISIBLE to the team, and fetchable for A→B hand-off. Additive push to a
         feature branch is routine (floor); push-to-main/deploy stay human-gated. Deterministic
-        finalize wake — not a reviewable deliverable, so it skips the review gate."""
+        finalize wake — not a reviewable deliverable, so it skips the review gate. Commits carry the
+        AGENT's identity (via GIT_AUTHOR/COMMITTER env — git-proxy-safe, since `-c` is blocked)."""
         branch = self._effort_branch(effort_id)
+        name, email = self._agent_identity("worker-default")
+        ident = (
+            f'GIT_AUTHOR_NAME="{name}" GIT_AUTHOR_EMAIL="{email}" '
+            f'GIT_COMMITTER_NAME="{name}" GIT_COMMITTER_EMAIL="{email}"'
+        )
         instruction = (
-            f"PUBLISH YOUR WORK so the team can see it (additive, allowed). Run these git steps:\n"
+            f"PUBLISH YOUR WORK so the team can see it (additive, allowed). Run these git steps "
+            f"EXACTLY (the env prefix on the commit attributes it to you, `{name}`):\n"
             f"  git checkout -b {branch} 2>/dev/null || git checkout {branch}\n"
             f"  git add -A\n"
-            f'  git commit -m "{effort_id}: <one-line summary of your changes>"   # skip if nothing to commit\n'
+            f'  {ident} git commit -m "{effort_id}: <one-line summary of your changes>"   # skip if nothing to commit\n'
             f"  git push -u origin {branch}\n"
             f"Do NOT push to main/master. Do NOT force-push or delete anything. "
             f"Then reply with the branch name and the pushed commit hash."
@@ -1260,8 +1294,11 @@ class Orchestrator:
             sub = args[0].lower() if args else ""
             if sub == "add" and len(args) >= 3:
                 name, repo = args[1], args[2]
+                token_env = args[3] if len(args) >= 4 else None   # optional per-project token env var
                 try:
-                    proj = await self.projects.add(name, repo, created_by="operator")
+                    proj = await self.projects.add(
+                        name, repo, created_by="operator", token_env=token_env
+                    )
                     chan = await self.router.ensure_project_channel(proj["slug"])
                     await self.projects.set_channel(proj["slug"], chan)
                     self.events.track_channel(chan)
@@ -1272,9 +1309,10 @@ class Orchestrator:
                         await self.egress.allow(proj["git_host"], added_by="operator", source="project")
                         await self.egress.sync()
                         note = f" · egress host `{proj['git_host']}` allowed"
+                    tok = f" · deploy token from env `{token_env}`" if token_env else ""
                     await reply(
                         f"✅ project `{proj['slug']}` → `{repo}` (post in `#proj-{proj['slug']}` "
-                        f"to work on it, or say _\"in {proj['slug']}, …\"_ here){note}"
+                        f"to work on it, or say _\"in {proj['slug']}, …\"_ here){note}{tok}"
                     )
                 except Exception as exc:  # noqa: BLE001
                     await reply(f"⚠️ could not add project: {exc}")
@@ -1290,7 +1328,9 @@ class Orchestrator:
                 await reply(f"{'✅ removed' if ok else '⚠️ no such'} project `{args[1]}`")
             else:
                 await reply(
-                    "usage: `/project add <name> <repo-url>` · `/project list` · `/project remove <name>`"
+                    "usage: `/project add <name> <repo-url> [TOKEN_ENV]` · `/project list` · "
+                    "`/project remove <name>`  _(TOKEN_ENV = the env var holding this repo's PAT, "
+                    "e.g. `AO_TOKEN_ACME`; omit to use the pool's default token)_"
                 )
         elif cmd == "egress":
             sub = args[0].lower() if args else ""

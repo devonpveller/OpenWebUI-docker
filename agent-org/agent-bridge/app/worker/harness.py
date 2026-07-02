@@ -56,9 +56,9 @@ class WorkerHarness(Protocol):
         streams the worker's commands + answer to the bus as it works (observability)."""
         ...
 
-    async def set_project(self, base_url: str, repo: str) -> bool:
-        """Focus the worker on a repo (little-coder clones it, bypassing the git-proxy).
-        Returns True on success. A no-op path exists for pre-focused/throwaway workers."""
+    async def set_project(self, base_url: str, repo: str, *, token: str | None = None) -> bool:
+        """Focus the worker on a repo (little-coder clones it, bypassing the git-proxy). `token` is
+        an optional per-project deploy token (multi-PAT). Returns True on success."""
         ...
 
     async def current_focus(self, base_url: str) -> str | None:
@@ -119,11 +119,15 @@ class LittleCoderHarness:
                     return WorkResult(status, task_id, answer)
             return WorkResult("error", task_id, "poll timeout")
 
-    async def set_project(self, base_url: str, repo: str) -> bool:
+    async def set_project(self, base_url: str, repo: str, *, token: str | None = None) -> bool:
         # little-coder clones via the REAL git binary (bypasses the git-proxy) — the
-        # supported "operator action" workspace-setup path (§12.3). Clone can be slow.
+        # supported "operator action" workspace-setup path (§12.3). Clone can be slow. A per-request
+        # `token` (if given) overrides the pool's global LC_DEPLOY_TOKEN for this project.
+        body: dict[str, Any] = {"repo": repo, "actor": "agent-bridge"}
+        if token:
+            body["token"] = token
         async with httpx.AsyncClient(base_url=base_url.rstrip("/"), timeout=1800.0) as c:
-            r = await c.post("/project", json={"repo": repo, "actor": "agent-bridge"})
+            r = await c.post("/project", json=body)
             return r.status_code < 400
 
     async def current_focus(self, base_url: str) -> str | None:
@@ -139,6 +143,7 @@ class FakeHarness:
         self.result_status = result_status
         self.wakes: list[dict[str, Any]] = []
         self.projects: dict[str, str] = {}
+        self.tokens: dict[str, str] = {}
 
     async def wake(
         self, base_url: str, session_id: str, prompt: str, *,
@@ -151,8 +156,10 @@ class FakeHarness:
             await on_update("answer", {"status": self.result_status, "answer": "ok"})
         return WorkResult(self.result_status, task_id=f"fake-{len(self.wakes)}", output="ok")
 
-    async def set_project(self, base_url: str, repo: str) -> bool:
+    async def set_project(self, base_url: str, repo: str, *, token: str | None = None) -> bool:
         self.projects[base_url] = repo
+        if token:
+            self.tokens[base_url] = token
         return True
 
     async def current_focus(self, base_url: str) -> str | None:

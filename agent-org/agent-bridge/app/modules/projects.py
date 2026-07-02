@@ -53,6 +53,7 @@ def _row(p: Project) -> dict:
     return {
         "slug": p.slug, "name": p.name, "repo_url": p.repo_url, "git_host": p.git_host,
         "channel_id": p.channel_id, "created_by": p.created_by, "active": p.active,
+        "token_env": p.token_env,
     }
 
 
@@ -63,26 +64,30 @@ class ProjectRegistry:
 
     async def add(
         self, name: str, repo_url: str, *, channel_id: str | None = None,
-        created_by: str = "operator",
+        created_by: str = "operator", token_env: str | None = None,
     ) -> dict:
-        """Register (or update) a project. Slug is derived from `name`. Returns the row dict."""
+        """Register (or update) a project. Slug is derived from `name`. `token_env` = the NAME of the
+        env var holding this project's deploy token (multi-PAT). Returns the row dict."""
         slug = slugify(name)
         host = host_of(repo_url)
         async with self.db.session_factory() as s:
             p = await s.get(Project, slug)
             if p is None:
                 p = Project(slug=slug, name=name, repo_url=repo_url, git_host=host,
-                            channel_id=channel_id, created_by=created_by, active=True)
+                            channel_id=channel_id, created_by=created_by, active=True,
+                            token_env=token_env)
                 s.add(p)
             else:
                 p.name, p.repo_url, p.git_host, p.active = name, repo_url, host, True
                 if channel_id:
                     p.channel_id = channel_id
+                if token_env is not None:
+                    p.token_env = token_env
             await s.commit()
             await s.refresh(p)
             row = _row(p)
         await self.audit.log("project_added", actor=created_by,
-                             payload={"slug": slug, "repo": repo_url, "host": host})
+                             payload={"slug": slug, "repo": repo_url, "host": host, "token_env": token_env})
         return row
 
     async def set_channel(self, slug: str, channel_id: str) -> None:
