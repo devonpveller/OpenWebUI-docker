@@ -17,17 +17,35 @@ exercise · 🚀 operator step · 🚩 decision-gate.
 
 > **What "fully implemented" means here.** Everything that is *code / config / docs* is built,
 > wired, and — where it can run without a live GPU/Mattermost/Docker stack — covered by
-> deterministic tests (**103 passing** as of 2026-07-02). The remaining items are inherently operator-only: bringing
+> deterministic tests (**111 passing** as of 2026-07-02). The remaining items are inherently operator-only: bringing
 > up containers, creating a Mattermost bot token, running the capability-floor test against the
 > live GPU, deciding OpenRouter spend, and tailnet exposure. Those are authored + runnable, and
 > marked 🚀/🚩 below. The build makes them a switch-flip, not new work.
 
 ---
 
+## Conversational PO — threading, memory, hierarchical context (2026-07-02)
+
+Three connected fixes from live use, so the PO surface is coherent (all tested):
+
+- **In-thread replies.** The bot posted top-level everywhere, so a multi-turn #mgmt exchange
+  scattered across threads. Now every bot reply threads **in the operator's message thread**
+  (`reply_thread = root_id or post_id`), and an effort's dispatch reply / completion summary /
+  CONCERN thread back under the **originating request** (`_effort_mgmt_thread`). Works on any channel.
+- **Conversation memory.** Each `nl_intake` was stateless → the PO lost context + **hallucinated**
+  (invented `localhost:3000`) + made empty promises ("I'll check…" then nothing). Fixed with a
+  conversation memory + a hardened PO prompt: *use the conversation; don't invent URLs/ports/paths;
+  never promise to check something and do nothing — open an effort so a worker actually checks.*
+- **Hierarchical, bounded, relevant context** (`modules/context_manager.py`). The PO's context is
+  now layered — **THIS THREAD** (immediate) + **relevant background from the channel** — each
+  **char-budgeted** (`AO_CONTEXT_*`) so it never overwhelms the model window, and the channel layer
+  is **relevance-prioritized** (query term-overlap) then recency-filled. Deterministic (no embed
+  call). `test_context_manager.py` + `test_end_to_end.py` (threading/memory).
+
 ## Live-loop integration (2026-07-02) — the alignment core, now WIRED
 
 The proactive governance controls were module-only; they are now threaded through the live
-operator→worker path (`orchestrator.delegate` → the Stage-5 loop). **103 tests green.** The heavy
+operator→worker path (`orchestrator.delegate` → the Stage-5 loop). **111 tests green.** The heavy
 controls are **risk-gated** (like the dry-run + review-depth already were) so routine one-liners
 stay fast; set `AO_PLAN_APPROVAL=all` / `AO_REVIEW_MODE=all` for the strict-spec reading (every
 effort). What now runs:
@@ -283,7 +301,7 @@ default plane is what recovery manages). Stack-map §3 already lists the pool co
 
 ### Intake clarify-loop + readiness→risk + tailnet reachability (2026-07-02, from live feedback)
 
-Fixes from the first real conversational tests (**103 tests green**):
+Fixes from the first real conversational tests (**111 tests green**):
 
 1. **PO asked a question but dispatched anyway (F5 violation).** `nl_intake` used to dispatch the
    instant `kind=="request"`. Now a request runs the **readiness gate (P3.8)** first
@@ -333,7 +351,7 @@ Fixes from the first real conversational tests (**103 tests green**):
 
 `AO_DEFAULT_REPO` read as "the org only works on one hardcoded repo" — wrong for a multi-project
 orchestrator. It was always meant as a **fallback** (COMMS-MODEL §4 says "AO_DEFAULT_REPO **or
-per-effort**"), but the per-project selection was never built. Now it is (**103 tests green**):
+per-effort**"), but the per-project selection was never built. Now it is (**111 tests green**):
 
 - **Project registry** (`modules/projects.py`, `Project` table): `channel = project = repo`. Onboard
   any repo with **`/project add <name> <repo-url>`** (also `/project list|remove`, `POST /projects`)

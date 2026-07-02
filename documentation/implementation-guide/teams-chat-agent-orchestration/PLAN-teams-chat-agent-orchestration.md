@@ -3,7 +3,7 @@
 **Status:** 🛠️ **BUILT (v1 2026-07-01; comms model + P4.0 ground/dry-run 2026-07-02).** This plan
 is implemented as the **`agent-org`** compose project (`agent-bridge` + all §3.1.1 modules, the P2
 gate, the deterministic [comms router](COMMS-MODEL-deterministic-routing.md), and the P4.0
-risk-gated dry-run gate + grounding client). **103 passing tests.** Per-task build status is the
+risk-gated dry-run gate + grounding client). **111 passing tests.** Per-task build status is the
 single source of truth in [`agent-org/IMPLEMENTATION-NOTES.md`](../../../agent-org/IMPLEMENTATION-NOTES.md);
 what remains is **operator-gated** (Mattermost bot [done], OB-mirror env wiring, mobile, tailnet
 exposure) and the **conditional cloud lane Pc** (skipped — P0.5 resolved LOCAL_JUDGE_OK). Baselined

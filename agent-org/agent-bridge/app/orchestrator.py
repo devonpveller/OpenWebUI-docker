@@ -19,6 +19,7 @@ from .db import Database
 from .modules.audit_sink import AuditSink
 from .modules.charters import Charters
 from .modules.comms_router import CommsRouter, Intent
+from .modules.context_manager import ContextManager
 from .modules.egress import EgressAllowlist
 from .modules.event_gateway import EventGateway
 from .modules.execution_gate import ExecutionGate
@@ -70,7 +71,15 @@ _PO_NL_SYS = (
     "it; the human still confirms with an explicit command — never claim you executed it).\n"
     "- question / chitchat otherwise.\n"
     "Only set action fields when clearly warranted. Never claim to have taken an irreversible "
-    "action. Keep replies short and human."
+    "action. Keep replies short and human.\n\n"
+    "USE THE CONVERSATION SO FAR — the operator is continuing one thread; don't treat each message "
+    "as new or ask them to repeat context you were already given.\n"
+    "DO NOT INVENT FACTS you don't actually have: URLs, ports, host addresses, file paths, where "
+    "something runs, or whether a server is up. You do NOT know these unless they're in the "
+    "conversation or effort/project context. If you don't know, say so plainly. NEVER promise to "
+    "'check', 'look up', 'find', or 'investigate' something and then do nothing — if answering "
+    "requires inspecting a workspace/codebase, open an effort (kind=request, a worker actually "
+    "checks); otherwise just say you don't have that information and suggest how they can find it."
 )
 
 _HELP = (
@@ -154,6 +163,16 @@ class Orchestrator:
         self._bot_name: str | None = None
         self._mgmt_warned = False
         self._operator_ids: set[str] = set()  # operators seen in #mgmt (for channel invites)
+        # Hierarchical, bounded, relevance-selected conversation memory (thread = immediate,
+        # channel = higher-level background) so the PO stays coherent without overflowing the window.
+        self.context = ContextManager(
+            thread_chars=settings.context_thread_chars,
+            channel_chars=settings.context_channel_chars,
+            max_thread_turns=settings.context_max_thread_turns,
+        )
+        # The #mgmt thread each effort was requested in, so completion summaries + CONCERNs thread
+        # back under that conversation instead of scattering as new top-level posts.
+        self._effort_mgmt_thread: dict[str, str] = {}
         # Efforts opened but HELD at the readiness gate awaiting operator clarification (P3.8);
         # the operator's next answer resolves them → dispatch. {effort_id: {proj_channel, root, request}}
         self._pending: dict[str, dict] = {}
@@ -315,7 +334,9 @@ class Orchestrator:
             f"echoed back there on decision._\n"
             f"_Reply `approve|modify|abort {effort_id} [note]` to decide (state={lvl})._"
         )
-        posted = await self.comms.post(Intent.concern, body, effort_id=effort_id)
+        posted = await self.comms.post(
+            Intent.concern, body, effort_id=effort_id, thread_id=self._mgmt_thread_of(effort_id)
+        )
         if posted is None:
             # The freeze already happened + is audited; we just can't surface it to chat yet
             # (#mgmt unresolved — e.g. bot not on a team). The effort stays frozen (fail-safe).
@@ -369,8 +390,24 @@ class Orchestrator:
             )
         return verdict
 
+    # ── conversation memory (hierarchical thread+channel, bounded, relevant) ──
+    def _remember(self, channel_id: str, thread_id: str | None, role: str, text: str) -> None:
+        """Log a turn (role ∈ {operator, po}) under its thread so the PO can build thread-immediate
+        + channel-background context on the next query."""
+        self.context.remember(channel_id, thread_id, role, text)
+
+    async def _mgmt_remember(self, effort_id: str, text: str) -> None:
+        """Record a bridge→#mgmt line (e.g. a completion summary) into the PO's memory, under the
+        effort's originating thread, so follow-ups about that work have its context."""
+        mgmt = await self.mgmt_channel_id()
+        if mgmt:
+            self._remember(mgmt, self._mgmt_thread_of(effort_id), "po", text)
+
     # ── natural-language intake (the conversational PO surface) ───────────────
-    async def nl_intake(self, message: str, channel_id: str, *, user_id: str | None = None) -> None:
+    async def nl_intake(
+        self, message: str, channel_id: str, *, user_id: str | None = None,
+        thread_id: str | None = None,
+    ) -> None:
         """Route a natural-language operator message to the PO agent, which interprets intent
         and replies conversationally. Non-destructive actions (open an effort, apply steering,
         report status) are executed; safety decisions are NOT auto-run from fuzzy NL — the PO
@@ -381,22 +418,31 @@ class Orchestrator:
         pending_ctx = ", ".join(self._pending.keys()) or "none"
         projects = await self.projects.list()
         projects_ctx = ", ".join(f"{p['slug']} ({p['repo_url']})" for p in projects) or "none"
+        # Hierarchical + bounded + relevance-selected: this thread (immediate) + relevant channel
+        # background, filtered to the query so it never overwhelms the model window.
+        history = self.context.build(channel_id, thread_id, query=message)
         try:
             intent = await self.models.structured(
                 "po", _PO_NL_SYS,
-                f"OPERATOR MESSAGE:\n{message}\n\nCURRENT EFFORTS: {ctx}\n"
+                f"CONVERSATION SO FAR (most recent last):\n{history}\n\n"
+                f"LATEST OPERATOR MESSAGE:\n{message}\n\nCURRENT EFFORTS: {ctx}\n"
                 f"AWAITING CLARIFICATION: {pending_ctx}\nKNOWN PROJECTS: {projects_ctx}",
                 OperatorIntent,
             )
         except Exception as exc:  # noqa: BLE001 - degrade gracefully, never crash the loop
             log.warning("nl_intake model call failed: %s", exc)
+            self._remember(channel_id, thread_id, "operator", message)
             await self.chat.post(
                 channel_id,
                 "I couldn't parse that just now — you can also use `/help` for commands.",
+                thread_id=thread_id,
             )
             return
 
         reply = (intent.reply or "").strip()
+        # Remember this turn (under its thread) so the next message keeps context.
+        self._remember(channel_id, thread_id, "operator", message)
+        self._remember(channel_id, thread_id, "po", reply)
         if intent.kind == "request" and intent.effort_name:
             try:
                 # Resolve WHICH project this works on: a named/onboarded project, else the fallback.
@@ -406,17 +452,23 @@ class Orchestrator:
                     intent.effort_name, project=project, goal=message
                 )
                 self.events.track_channel(chan)
+                # Remember the #mgmt thread this effort was requested in, so its summaries + CONCERNs
+                # thread back under this conversation instead of scattering as new top-level posts.
+                if thread_id:
+                    self._effort_mgmt_thread[eid] = thread_id
                 # Add the requester to the PROJECT channel ONCE (not per effort).
                 if user_id:
                     await self.chat.add_member(chan, user_id)
                 # Stage 2 readiness gate (P3.8): DON'T guess — if under-specified, ask + HOLD;
                 # only dispatch when the request is clear (F5). This replies itself + returns.
                 await self._intake_or_dispatch(
-                    eid, chan, root, message, reply_prefix=reply, mgmt_channel=channel_id
+                    eid, chan, root, message, reply_prefix=reply, mgmt_channel=channel_id,
+                    mgmt_thread=thread_id,
                 )
             except Exception as exc:  # noqa: BLE001
                 await self.chat.post(
-                    channel_id, (reply + f"\n\n_(couldn't open that effort: {exc})_").strip()
+                    channel_id, (reply + f"\n\n_(couldn't open that effort: {exc})_").strip(),
+                    thread_id=thread_id,
                 )
             return
         elif intent.effort_id and intent.kind in ("clarification", "steering"):
@@ -427,9 +479,12 @@ class Orchestrator:
             loc = await self.router.effort_thread(eid)
             if loc is None:
                 await self.chat.post(
-                    channel_id, (reply + f"\n\n_(couldn't find effort `{eid}` to update)_").strip()
+                    channel_id, (reply + f"\n\n_(couldn't find effort `{eid}` to update)_").strip(),
+                    thread_id=thread_id,
                 )
                 return
+            if thread_id:
+                self._effort_mgmt_thread[eid] = thread_id   # keep summaries in this conversation
             proj_channel, root = loc
             addition = (intent.steering or message).strip()
             try:  # record the direction change as a versioned steering edit (audit, §4.2)
@@ -439,7 +494,8 @@ class Orchestrator:
             # Fold the answer (+ held recommendations) into the goal and dispatch — no second
             # readiness pass (the operator has spoken; don't re-interrogate).
             await self._resume_after_clarification(
-                eid, proj_channel, root, addition, reply_prefix=reply, mgmt_channel=channel_id
+                eid, proj_channel, root, addition, reply_prefix=reply, mgmt_channel=channel_id,
+                mgmt_thread=thread_id,
             )
             return
         elif intent.kind == "decision" and intent.effort_id and intent.decision:
@@ -454,7 +510,11 @@ class Orchestrator:
                 if efforts else "_No efforts yet — tell me what you'd like built._"
             )
 
-        await self.chat.post(channel_id, reply or "…")
+        await self.chat.post(channel_id, reply or "…", thread_id=thread_id)
+
+    def _mgmt_thread_of(self, effort_id: str | None) -> str | None:
+        """The #mgmt thread an effort was requested in (for threading its summaries/CONCERNs)."""
+        return self._effort_mgmt_thread.get(effort_id) if effort_id else None
 
     @staticmethod
     def _risk_from_blast(blast_radius: str) -> str:
@@ -480,7 +540,7 @@ class Orchestrator:
 
     async def _resume_after_clarification(
         self, effort_id: str, proj_channel: str, root: str, answer: str,
-        *, reply_prefix: str, mgmt_channel: str,
+        *, reply_prefix: str, mgmt_channel: str, mgmt_thread: str | None = None,
     ) -> None:
         """The operator answered a held question (or added scope). Fold their answer + the held
         questions' recommended defaults into the goal and DISPATCH — no second readiness pass, so
@@ -506,11 +566,12 @@ class Orchestrator:
             mgmt_channel,
             (f"{reply_prefix}\n\n_Got it — dispatching a worker on **{effort_id}** with your "
              f"clarification. I'll summarize back here when done._").strip(),
+            thread_id=mgmt_thread,
         )
 
     async def _intake_or_dispatch(
         self, effort_id: str, proj_channel: str, root: str, request: str,
-        *, reply_prefix: str, mgmt_channel: str,
+        *, reply_prefix: str, mgmt_channel: str, mgmt_thread: str | None = None,
     ) -> None:
         """Stage 2→4 for a request: run the readiness gate (P3.8), auto-classify blast radius →
         dry-run risk (P4.0), then either HOLD for operator clarification (F5 — don't guess) or
@@ -563,6 +624,7 @@ class Orchestrator:
                 mgmt_channel,
                 (f"{reply_prefix}\n\n**Before I start `{effort_id}` I need to clarify:**\n"
                  f"{numbered}{footer}").strip(),
+                thread_id=mgmt_thread,
             )
             return
 
@@ -572,7 +634,8 @@ class Orchestrator:
         # approval before ANY execution; routine efforts (or plan_approval=off) proceed directly.
         if await self._plan_required(effort_id):
             await self._present_plan(
-                effort_id, proj_channel, root, request, reply_prefix, mgmt_channel, workspace_ctx
+                effort_id, proj_channel, root, request, reply_prefix, mgmt_channel, workspace_ctx,
+                mgmt_thread=mgmt_thread,
             )
             return
         self._spawn(self.delegate(effort_id, proj_channel, root, request))
@@ -580,6 +643,7 @@ class Orchestrator:
             mgmt_channel,
             (f"{reply_prefix}\n\n_Readiness ✓ — dispatched a worker on **{effort_id}**; watch it "
              f"live in its project thread. I'll summarize back here when done._").strip(),
+            thread_id=mgmt_thread,
         )
 
     async def _plan_required(self, effort_id: str) -> bool:
@@ -594,7 +658,7 @@ class Orchestrator:
 
     async def _present_plan(
         self, effort_id: str, proj_channel: str, root: str, request: str,
-        reply_prefix: str, mgmt_channel: str, workspace_ctx: str,
+        reply_prefix: str, mgmt_channel: str, workspace_ctx: str, *, mgmt_thread: str | None = None,
     ) -> None:
         """UX-FLOW Stage 3: draft a plan, present it to #mgmt as the top-level stop-gate, and HOLD
         until the operator approves (`approve <effort>`). No execution happens before approval."""
@@ -606,7 +670,8 @@ class Orchestrator:
             log.warning("draft_plan failed for %s (dispatching without plan gate): %s", effort_id, exc)
             self._spawn(self.delegate(effort_id, proj_channel, root, request))
             await self.chat.post(
-                mgmt_channel, f"{reply_prefix}\n\n_(couldn't draft a plan — dispatched directly.)_"
+                mgmt_channel, f"{reply_prefix}\n\n_(couldn't draft a plan — dispatched directly.)_",
+                thread_id=mgmt_thread,
             )
             return
         self._pending_plan[effort_id] = {
@@ -622,7 +687,7 @@ class Orchestrator:
             f"**Estimate:** {getattr(plan, 'estimate', 'unknown')}\n\n"
             f"_Reply `approve {effort_id}` to execute, or `abort {effort_id}` to cancel._"
         )
-        await self.chat.post(mgmt_channel, body.strip())
+        await self.chat.post(mgmt_channel, body.strip(), thread_id=mgmt_thread)
         await self.comms.post(
             Intent.effort_dispatch,
             "📋 Plan drafted — awaiting operator approval before execution (Stage 3).",
@@ -694,7 +759,8 @@ class Orchestrator:
                     effort_id=effort_id,
                 )
                 await self.comms.post(
-                    Intent.operator_reply, f"⛔ **{effort_id}** held before execution — {reason}."
+                    Intent.operator_reply, f"⛔ **{effort_id}** held before execution — {reason}.",
+                    thread_id=self._mgmt_thread_of(effort_id),
                 )
                 return
             # P5.1/5.2: grant the worker its (non-irreversible) scope + confirm its role is approved.
@@ -770,6 +836,7 @@ class Orchestrator:
             await self.comms.post(
                 Intent.operator_reply,
                 f"⚠️ **{effort_id}**: couldn't dispatch a worker (frozen or no free slot).",
+                thread_id=self._mgmt_thread_of(effort_id),
             )
 
     async def _finish_effort(self, effort_id: str, result) -> None:
@@ -786,7 +853,9 @@ class Orchestrator:
         await self.comms.post(
             Intent.operator_reply,
             f"✅ **{effort_id}** finished (**done**): {head}\n_Full trace in its project-channel thread._",
+            thread_id=self._mgmt_thread_of(effort_id),
         )
+        await self._mgmt_remember(effort_id, f"[effort {effort_id} finished] {head}")
 
     async def _escalate_worker_failure(self, effort_id: str, result) -> None:
         """A worker that ended non-`done` climbs the escalation ladder (CM.3). A refusal/rejection
@@ -813,6 +882,7 @@ class Orchestrator:
         await self.comms.post(
             Intent.operator_reply,
             f"⚠️ **{effort_id}** ended **{result.status}** — see its project-channel thread. {head}",
+            thread_id=self._mgmt_thread_of(effort_id),
         )
 
     # ── Stage-5 governance helpers (scope / risk-gating / review-flag / learning) ─
@@ -972,11 +1042,14 @@ class Orchestrator:
         user_id = event.get("user_id")
         stripped = _MENTION_RE.sub("", raw).strip()
         mentioned = bool(self._bot_name and f"@{self._bot_name}" in raw)
+        # Reply IN the operator's thread (root_id for a threaded message, else the message's own id
+        # so a top-level message starts a coherent thread). Keeps the #mgmt conversation together.
+        reply_thread = thread_id or post_id
 
         # Control surface — privileged (only the human posts; bot posts are filtered upstream).
         if _CONTROL_RE.match(stripped):
             await self._track_operator(user_id)
-            await self._handle_command(stripped, channel_id, thread_id, user_id=user_id)
+            await self._handle_command(stripped, channel_id, reply_thread, user_id=user_id)
             return
 
         mgmt = await self.mgmt_channel_id()
@@ -984,7 +1057,7 @@ class Orchestrator:
             await self._track_operator(user_id)
             if stripped:
                 # talk to the PO in plain language; user_id lets it add the requester to projects
-                await self.nl_intake(stripped, channel_id, user_id=user_id)
+                await self.nl_intake(stripped, channel_id, user_id=user_id, thread_id=reply_thread)
             return
 
         # A reply inside a known effort thread wakes that effort's worker (continuation/steering).
@@ -1046,11 +1119,10 @@ class Orchestrator:
         """Parse + execute an operator command; ALWAYS replies to the originating channel so the
         operator gets feedback (even usage errors). `text` has the @mention prefix stripped."""
         async def reply(msg: str) -> None:
-            # Top-level channel post (NOT a thread reply): operator command responses must be
-            # visible inline in #mgmt. Threading is reserved for effort work hand-offs (§7);
-            # a threaded reply is hidden under Collapsed Reply Threads (needs a click/refresh).
+            # Reply IN the operator's thread so the #mgmt conversation stays coherent (the operator
+            # uses threads; a top-level reply to a threaded command scatters the exchange).
             if channel_id:
-                await self.chat.post(channel_id, msg)
+                await self.chat.post(channel_id, msg, thread_id=thread_id)
 
         body = text[1:] if text.startswith("/") else text
         parts = body.split()

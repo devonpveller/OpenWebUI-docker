@@ -48,6 +48,14 @@ class Settings(BaseSettings):
     # thread post to keep effort threads readable. Failures/denials always post immediately.
     activity_batch: int = 5
 
+    # ── Conversation context (hierarchical + bounded — the PO's memory) ──────
+    # A reply builds thread-level context; the channel is a higher-level background. Both are
+    # char-budgeted so they never overwhelm the model window, and the channel layer is filtered to
+    # what's RELEVANT to the current query (lexical overlap). Tune the budgets to the model's window.
+    context_thread_chars: int = 2500       # immediate: the current thread's recent turns
+    context_channel_chars: int = 1500      # background: relevant turns from elsewhere in the channel
+    context_max_thread_turns: int = 14
+
     # ── Local model lane (existing air-gapped llm-gateway — PLAN §3.4) ──────
     # Callers reach inference transparently via the `llama-cpp` alias. We add
     # nothing to this gateway; we only consume it. NEVER probe model health (C5).

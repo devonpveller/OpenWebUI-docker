@@ -144,6 +144,10 @@ services:
       # set to `all` for the strict-spec reading (plan-approval + review on EVERY effort), `off` to skip.
       AO_PLAN_APPROVAL: ${AO_PLAN_APPROVAL:-risky}      # always | risky | off — Stage-3 plan gate (P3.9)
       AO_REVIEW_MODE: ${AO_REVIEW_MODE:-risky}          # all | risky | off — Stage-5 stop-gates/review (P4)
+      # Conversation context (the PO's memory): thread = immediate, channel = relevant background,
+      # char-budgeted so it never overwhelms the model window. Raise for a larger-context model.
+      AO_CONTEXT_THREAD_CHARS: ${AO_CONTEXT_THREAD_CHARS:-2500}
+      AO_CONTEXT_CHANNEL_CHARS: ${AO_CONTEXT_CHANNEL_CHARS:-1500}
     volumes:
       - ao-egress-config:/egress    # shared with ao-git-egress (bridge writes, proxy reads)
     networks:

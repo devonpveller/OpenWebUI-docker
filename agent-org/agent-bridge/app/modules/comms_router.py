@@ -104,15 +104,19 @@ class CommsRouter:
         raise ValueError(f"unknown intent {intent!r}")
 
     async def post(
-        self, intent: Intent, message: str, *, effort_id: str | None = None
+        self, intent: Intent, message: str, *, effort_id: str | None = None,
+        thread_id: str | None = None,
     ) -> dict | None:
         """Resolve + post. Returns the created post (or None if no destination is reachable —
-        e.g. #mgmt not yet resolvable because the bot isn't on a team)."""
-        channel_id, thread_id = await self.resolve(intent, effort_id=effort_id)
+        e.g. #mgmt not yet resolvable because the bot isn't on a team). `thread_id` overrides the
+        resolved thread — used to keep #mgmt replies/summaries IN the operator's conversation
+        thread instead of scattering them across new top-level posts."""
+        channel_id, resolved_thread = await self.resolve(intent, effort_id=effort_id)
+        thread = thread_id if thread_id is not None else resolved_thread
         if not channel_id:
             log.warning("comms: no destination for intent=%s effort=%s — dropped", intent.value, effort_id)
             return None
-        return await self.chat.post(channel_id, message, thread_id=thread_id)
+        return await self.chat.post(channel_id, message, thread_id=thread)
 
     # ── function channels (#incidents / #suggestions) ────────────────────────
     async def ensure_function_channels(self) -> list[str]:

@@ -240,6 +240,70 @@ async def test_nl_request_holds_for_clarification_then_dispatches(db_url):
         await db.dispose()
 
 
+async def test_po_carries_conversation_context(db_url):
+    """The PO must follow a multi-turn #mgmt thread (the reported bug: it lost context + replied
+    to each message as if new). Turn 2's prompt must carry turn 1 (operator + PO reply)."""
+    from app.schemas import OperatorIntent
+
+    orch, chat, harness, db = await _orch(db_url)
+    try:
+        mgmt = await orch.mgmt_channel_id()
+        orch.models._client.queue_structured(
+            OperatorIntent(kind="chitchat",
+                           reply="The calculator is a script in the worker's workspace, not a served app."))
+        await orch.handle_event(
+            {"id": "c1", "channel_id": mgmt, "message": "what is the localhost for the calculator?",
+             "is_bot": False, "ts": 1})
+        orch.models._client.queue_structured(OperatorIntent(kind="chitchat", reply="Right, no server."))
+        await orch.handle_event(
+            {"id": "c2", "channel_id": mgmt, "message": "so where do I find it?", "is_bot": False, "ts": 2})
+        # the SECOND PO call carried the first turn (operator message + PO reply) as context
+        po_calls = [c for c in orch.models._client.calls if "CONVERSATION SO FAR" in (c.get("user") or "")]
+        last = po_calls[-1]["user"]
+        assert "what is the localhost for the calculator" in last
+        assert "script in the worker's workspace" in last
+    finally:
+        await db.dispose()
+
+
+async def test_po_reply_threads_under_operator_message(db_url):
+    """The PO must reply IN the operator's thread (not spawn a new top-level post each time) so the
+    #mgmt conversation stays coherent — the reported threading bug."""
+    from app.schemas import OperatorIntent
+
+    orch, chat, harness, db = await _orch(db_url)
+    try:
+        mgmt = await orch.mgmt_channel_id()
+        orch.models._client.queue_structured(OperatorIntent(kind="chitchat", reply="Hi there!"))
+        await orch.handle_event(
+            {"id": "m1", "channel_id": mgmt, "message": "hello", "is_bot": False, "ts": 1})
+        po = [p for p in chat.posted if "Hi there" in p["message"]]
+        assert po and po[0]["thread_id"] == "m1"   # threaded under the operator's message, not top-level
+    finally:
+        await db.dispose()
+
+
+async def test_effort_summaries_thread_under_the_request(db_url):
+    """A request's dispatch reply AND its completion summary thread back under the operator's
+    original #mgmt message, so the whole exchange stays in one thread."""
+    from app.schemas import OperatorIntent, ReadinessVerdict
+
+    orch, chat, harness, db = await _orch(db_url)   # routine → light path (review_mode=risky default)
+    try:
+        mgmt = await orch.mgmt_channel_id()
+        orch.models._client.queue_structured(OperatorIntent(kind="request", effort_name="calc", reply="On it"))
+        orch.models._client.queue_structured(ReadinessVerdict(clear_and_safe=True, blast_radius="routine"))
+        await orch.handle_event(
+            {"id": "req1", "channel_id": mgmt, "message": "add a thing", "is_bot": False, "ts": 1})
+        if orch._bg_tasks:
+            await asyncio.gather(*orch._bg_tasks)
+        mgmt_posts = [p for p in chat.posted if p["channel_id"] == mgmt and "effort-calc" in p["message"]]
+        assert mgmt_posts                                    # dispatch reply + completion summary
+        assert all(p.get("thread_id") == "req1" for p in mgmt_posts)
+    finally:
+        await db.dispose()
+
+
 async def test_nl_decision_requires_explicit_confirmation(db_url):
     from app.schemas import OperatorIntent
 
