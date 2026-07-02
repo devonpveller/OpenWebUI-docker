@@ -62,8 +62,13 @@ class GovernanceGate:
     # ── effort lifecycle ────────────────────────────────────────────────────
     async def ensure_effort(
         self, effort_id: str, name: str, channel_id: str | None = None,
-        parent_effort_id: str | None = None,
+        parent_effort_id: str | None = None, *,
+        project: str | None = None, root_post_id: str | None = None,
     ) -> None:
+        """Create-or-get an effort. Under the comms model `channel_id` is the shared PROJECT
+        channel and `root_post_id` is the effort's thread root (COMMS-MODEL §4). If the effort
+        already exists we backfill project/thread fields if they were previously unset (so an
+        old row created before the taxonomy change still gets a thread)."""
         async with self.db.session_factory() as s:
             row = await s.get(Effort, effort_id)
             if row is None:
@@ -71,11 +76,18 @@ class GovernanceGate:
                     Effort(
                         id=effort_id,
                         name=name,
+                        project=project,
                         channel_id=channel_id,
+                        root_post_id=root_post_id,
                         parent_effort_id=parent_effort_id,
                         state=GATE_ACTIVE,
                     )
                 )
+                await s.commit()
+            elif root_post_id and not row.root_post_id:
+                row.project = project or row.project
+                row.channel_id = channel_id or row.channel_id
+                row.root_post_id = root_post_id
                 await s.commit()
 
     async def _dependent_closure(self, s, effort_id: str) -> list[str]:

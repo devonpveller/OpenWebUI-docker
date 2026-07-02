@@ -37,6 +37,17 @@ class Settings(BaseSettings):
     mattermost_ws_url: str = ""             # derived from mattermost_url if empty
     mgmt_channel: str = "mgmt"              # Human Operator <-> PO <-> PM (§7)
 
+    # ── Comms model (COMMS-MODEL — channel = project, effort = thread) ───────
+    # One stable channel per project (#proj-<slug>); efforts are THREADS inside it, so
+    # the sidebar never grows with task volume. Two permanent function channels carry
+    # cross-cutting operational signal (the §2 routing table).
+    default_project: str = "sandbox"        # #proj-sandbox for throwaway/unassigned work
+    incidents_channel: str = "incidents"    # wake-storm / undeliverable / crash notices
+    suggestions_channel: str = "suggestions"  # worker suggestion pool -> learning loop (§6)
+    # Notification discipline (CM.6): coalesce this many rapid worker commands into one
+    # thread post to keep effort threads readable. Failures/denials always post immediately.
+    activity_batch: int = 5
+
     # ── Local model lane (existing air-gapped llm-gateway — PLAN §3.4) ──────
     # Callers reach inference transparently via the `llama-cpp` alias. We add
     # nothing to this gateway; we only consume it. NEVER probe model health (C5).

@@ -18,6 +18,7 @@ from .config import Settings
 from .db import Database
 from .modules.audit_sink import AuditSink
 from .modules.charters import Charters
+from .modules.comms_router import CommsRouter, Intent
 from .modules.event_gateway import EventGateway
 from .modules.floor_guard import FloorGuard
 from .modules.governance_gate import GovernanceGate
@@ -26,7 +27,7 @@ from .modules.model_router import ModelRouter
 from .modules.planner import Planner
 from .modules.profiles import ProfileRegistry
 from .modules.roles import RoleAuthority
-from .modules.router import Router
+from .modules.router import Router, slugify
 from .modules.scheduler import Scheduler
 from .modules.scope_ledger import ScopeLedger
 from .modules.stop_gates import StopGates
@@ -49,7 +50,8 @@ _PO_NL_SYS = (
     "You are the PO (Project Overseer) — the human operator's conversational counterpart in a "
     "governed multi-agent coding org. Read the operator's natural-language message and reply "
     "helpfully and concisely in the first person (you own the 'intent thread'). Classify it:\n"
-    "- request: they want new work done → set effort_name to a short kebab-case slug. If the "
+    "- request: they want new work done → set effort_name to a short kebab-case slug (it becomes "
+    "a thread in the project channel). If the "
     "request is vague or high-blast-radius, ASK a clarifying question in your reply instead of "
     "guessing (governance F5 — surfacing a question is cheaper than a misaligned worker).\n"
     "- status: they're asking what's going on.\n"
@@ -65,11 +67,13 @@ _HELP = (
     "**agent-bridge** — governed multi-agent orchestration. You can talk to me in **plain "
     "language** (I'm your PO — tell me what you want built and I'll scope it), or use commands:\n"
     "- `/help` — this message\n"
-    "- `/effort <name>` — create a work effort + its `#effort-<name>` channel\n"
+    "- `/effort <name>` — open a work effort as a **thread** in its project channel\n"
     "- `/status [effort_id]` — gate state of all efforts (or one)\n"
     "- `approve|modify|abort <effort_id> [note]` — decide an open CONCERN\n"
     "- `/kill` / `/unkill` — global kill switch (freeze/release the whole fleet)\n"
-    "Post a plain message in an `#effort-*` channel to wake a worker on that effort."
+    "Each effort is a **thread** in its `#proj-<project>` channel — reply in the thread to wake "
+    "its worker; watch the work stream there. Escalations come to **#mgmt** and their resolution "
+    "is echoed back into the effort thread so you get closure."
 )
 
 
@@ -110,9 +114,18 @@ class Orchestrator:
             context_builder=self.charters.build_context,
         )
         self.events = EventGateway(db, chat, self.handle_event)
+        # Deterministic intent -> destination routing (COMMS-MODEL §2). Every bridge-emitted
+        # message goes through here so no module picks a channel inline (governance §3.5).
+        self.comms = CommsRouter(
+            chat, settings,
+            mgmt_resolver=self.mgmt_channel_id,
+            effort_thread_resolver=self.router.effort_thread,
+            on_channel=self.events.track_channel,
+        )
         self._mgmt_channel_id: str | None = None
         self._bot_name: str | None = None
         self._mgmt_warned = False
+        self._operator_ids: set[str] = set()  # operators seen in #mgmt (for channel invites)
         self._bg_tasks: set[asyncio.Task] = set()  # in-flight delegations
 
     def _spawn(self, coro) -> None:
@@ -137,12 +150,37 @@ class Orchestrator:
         self._bot_name = getattr(self.chat, "username", None)
         # #mgmt is where the Human Operator <-> PO <-> PM converse (§7); track it for events.
         mgmt = await self.mgmt_channel_id()
+        # The permanent function channels (#incidents, #suggestions) exist for the org's lifetime
+        # (COMMS-MODEL §4 / CM.5). Create-or-get them at boot; comms tracks them for catch-up.
+        try:
+            await self.comms.ensure_function_channels()
+        except Exception as exc:  # noqa: BLE001 - platform may not be ready yet; retried lazily
+            log.warning("function channels not ready at boot (will retry): %s", exc)
         if mgmt and self.s.chat_adapter != "fake":
             # A one-line boot ack so the operator can see the bridge is live (best-effort).
             try:
                 await self.chat.post(mgmt, "✅ agent-bridge online — try `/help`")
             except Exception:  # noqa: BLE001
                 pass
+
+    def _project_for(self, repo: str | None = None) -> str:
+        """The project slug an effort belongs to = its repo (COMMS-MODEL §4 project resolution).
+        Falls back to AO_DEFAULT_REPO, then to the sandbox project for throwaway work."""
+        target = repo or (self.s.default_repo or "")
+        return slugify(target) if target else self.s.default_project
+
+    async def _track_operator(self, user_id: str | None) -> None:
+        """Remember an operator seen in #mgmt and pull them into the function channels so those
+        appear in their sidebar (public channels you haven't joined are hidden). Best-effort."""
+        if not user_id or user_id in self._operator_ids:
+            return
+        self._operator_ids.add(user_id)
+        for name in (self.s.incidents_channel, self.s.suggestions_channel):
+            try:
+                cid = await self.chat.ensure_channel(name)
+                await self.chat.add_member(cid, user_id)
+            except Exception as exc:  # noqa: BLE001
+                log.debug("add operator %s to %s failed: %s", user_id, name, exc)
 
     async def mgmt_channel_id(self) -> str | None:
         """Resolve #mgmt lazily. Returns None (not raising) if the chat platform isn't ready
@@ -170,20 +208,26 @@ class Orchestrator:
         actor: str = "pm",
         level: Level | None = None,
     ) -> Concern:
-        """Freeze the effort (machine A), force its agents out of computing (machine B),
-        and post the intent-framed CONCERN to #mgmt."""
+        """Freeze the effort (machine A), force its agents out of computing (machine B), post
+        the intent-framed CONCERN to #mgmt (decision surface), and raise the up-signal into the
+        effort thread (escalation ladder, COMMS-MODEL §3 rule 1)."""
         result = await self.gate.freeze(effort_id, trigger, concern, actor=actor, level=level)
         await self.scheduler.enforce_freeze(effort_id)
+        await self.router.update_effort_card(effort_id, "frozen")  # CM.6 live card status
         await self._post_concern(effort_id, trigger, result)
+        # Escalation ladder (CM.3): the RECORD is decided in #mgmt, but the effort thread's
+        # followers get the pointer that it was escalated — the "decide-private/record-public"
+        # split (§3 rule 2). The resolution comes back down here on clear (CM.4).
+        await self.comms.post(
+            Intent.escalation,
+            f"🚩 **Escalated** — this effort is **frozen** pending an operator decision "
+            f"(`{trigger.value}`). ↑ routed up the ladder to **#mgmt**; the decision will be "
+            f"posted back here when it's made.",
+            effort_id=effort_id,
+        )
         return result
 
     async def _post_concern(self, effort_id: str, trigger: Trigger, concern: Concern) -> None:
-        mgmt = await self.mgmt_channel_id()
-        if mgmt is None:
-            # The freeze already happened + is audited; we just can't surface it to chat yet
-            # (mgmt unresolved — e.g. bot not on a team). The effort stays frozen (fail-safe).
-            log.warning("effort %s frozen but #mgmt unresolved — CONCERN not posted (logged only)", effort_id)
-            return
         lvl = await self.gate.state_of(effort_id)
         body = (
             f"🚩 **CONCERN** — effort `{effort_id}` FROZEN ({trigger.value})\n"
@@ -196,17 +240,35 @@ class Orchestrator:
             )
             + f"\n**PM recommends:** {concern.pm_recommendation}\n"
             f"**Blocked:** {', '.join(concern.blocked_efforts)}\n"
+            f"_Context: this effort's live thread is in its project channel; the resolution is "
+            f"echoed back there on decision._\n"
             f"_Reply `approve|modify|abort {effort_id} [note]` to decide (state={lvl})._"
         )
-        await self.chat.post(mgmt, body)
+        posted = await self.comms.post(Intent.concern, body, effort_id=effort_id)
+        if posted is None:
+            # The freeze already happened + is audited; we just can't surface it to chat yet
+            # (#mgmt unresolved — e.g. bot not on a team). The effort stays frozen (fail-safe).
+            log.warning("effort %s frozen but #mgmt unresolved — CONCERN not posted (logged only)", effort_id)
 
-    # ── operator decision (§3) ────────────────────────────────────────────────
+    # ── operator decision (§3) + bring-the-audience-back-down closure (CM.4) ──
     async def apply_operator_decision(
         self, effort_id: str, decision: Decision, *, actor_role: str = "human"
     ) -> None:
         await self.gate.clear(effort_id, decision, actor_role=actor_role)
         # On resume, wake any dependency-waiters of this effort (idle-wait DAG).
         await self.scheduler.wake_finished(effort_id)
+        # ⭐ "Always bring the audience back down" (COMMS-MODEL §3 rule 3): echo the resolution
+        # into the ORIGINATING effort thread so anyone following the work gets closure without
+        # opening #mgmt. The decision RECORD already lives in #mgmt + the audit trail (§3 rule 2).
+        aborted = decision.decision == "abort"
+        note = f" — _{decision.note}_" if decision.note else ""
+        closure = (
+            f"⛔ **Aborted** by the operator{note}. This effort will not resume."
+            if aborted else
+            f"✅ **Operator {decision.decision}d** — resuming{note}."
+        )
+        await self.comms.post(Intent.closure, closure, effort_id=effort_id)
+        await self.router.update_effort_card(effort_id, "aborted" if aborted else "active")
 
     # ── cost-tiered supervision (P3.7) — the LLM monitor, SAMPLED ─────────────
     async def monitor_sampled(
@@ -261,18 +323,24 @@ class Orchestrator:
         reply = (intent.reply or "").strip()
         if intent.kind == "request" and intent.effort_name:
             try:
-                eid, chan = await self.router.ensure_effort_channel(intent.effort_name)
+                project = self._project_for()
+                # An effort is a THREAD in its project channel (COMMS-MODEL §4) — no per-effort
+                # channel, so the sidebar never grows with task volume.
+                eid, chan, root = await self.router.open_effort(
+                    intent.effort_name, project=project, goal=message
+                )
                 self.events.track_channel(chan)
-                # Add the requester to the effort channel so it appears in their sidebar and
-                # they can watch the work live (public channels you haven't joined are hidden).
+                # Add the requester to the PROJECT channel ONCE (not per effort) so it appears in
+                # their sidebar and they can follow the threads they care about.
                 if user_id:
                     await self.chat.add_member(chan, user_id)
-                # Dispatch a worker in the BACKGROUND so the PO replies immediately; the
-                # worker's result streams to the effort channel; completion reports back here.
-                self._spawn(self.delegate(eid, chan, message))
+                # Dispatch a worker in the BACKGROUND so the PO replies immediately; the worker's
+                # activity streams into the effort THREAD; completion reports back to #mgmt.
+                self._spawn(self.delegate(eid, chan, root, message))
                 reply += (
-                    f"\n\n_Opened **#effort-{intent.effort_name}** (added to your channels) and "
-                    f"dispatched a worker — watch it live there; I'll summarize back here when done._"
+                    f"\n\n_Opened **{eid}** as a thread in **#proj-{project}** (added to your "
+                    f"channels) and dispatched a worker — watch it live in that thread; I'll "
+                    f"summarize back here when done._"
                 )
             except Exception as exc:  # noqa: BLE001
                 reply += f"\n\n_(couldn't open that effort: {exc})_"
@@ -296,101 +364,197 @@ class Orchestrator:
 
         await self.chat.post(channel_id, reply or "…")
 
-    async def delegate(self, effort_id: str, channel_id: str, goal: str, *, repo: str | None = None) -> None:
-        """Set the effort's goal (constraints inline, §4.3) and dispatch a worker; the worker's
-        result posts to the effort channel. Runs as a background task. `repo` focuses the worker
-        first (real projects); omit for a pre-focused/throwaway pool (default `AO_DEFAULT_REPO`)."""
+    async def delegate(
+        self, effort_id: str, channel_id: str, root_post_id: str, goal: str,
+        *, repo: str | None = None,
+    ) -> None:
+        """Set the effort's goal (constraints inline, §4.3) and dispatch a worker; all activity
+        streams into the effort THREAD (`root_post_id`). Runs as a background task. `repo` focuses
+        the worker first (real projects); omit for a pre-focused/throwaway pool (`AO_DEFAULT_REPO`)."""
         repo = repo or (self.s.default_repo or None)
         try:
             await self.charters.set_goal(effort_id, goal, created_by="po")
-            await self.chat.post(channel_id, f"⏳ **{effort_id}** — worker dispatched. Working…")
+            await self.comms.post(
+                Intent.effort_dispatch, f"⏳ **{effort_id}** — worker dispatched. Working…",
+                effort_id=effort_id,
+            )
             result = await self.router.wake(
-                effort_id, role="worker-default", thread_id=None, channel_id=channel_id,
+                effort_id, role="worker-default", thread_id=root_post_id, channel_id=channel_id,
                 session_id=effort_id, instruction=goal, repo=repo,
             )
-            if result is None:
-                await self.chat.post(
-                    channel_id, "⚠️ couldn't dispatch a worker (effort frozen or no free slot)."
-                )
-            else:
-                await self.chat.post(
-                    channel_id,
-                    f"✅ worker finished (**{result.status}**). Review the changes in the "
-                    f"worker's workspace; nothing is pushed (the floor blocks irreversible actions)."
-                    if result.ok else
-                    f"⚠️ worker ended with **{result.status}** — {(result.output or '')[:200]}",
-                )
-            # Report completion back to #mgmt so the operator sees it where they're watching.
-            mgmt = await self.mgmt_channel_id()
-            if mgmt and mgmt != channel_id:
-                if result is None:
-                    await self.chat.post(mgmt, f"⚠️ **{effort_id}**: couldn't dispatch a worker.")
-                else:
-                    head = (result.output or "").strip().splitlines()[0][:200] if result.output else result.status
-                    await self.chat.post(
-                        mgmt,
-                        f"✅ **{effort_id}** finished (**{result.status}**): {head}\n"
-                        f"_Full trace in that effort's channel._",
-                    )
+            await self._report_completion(effort_id, result)
         except Exception as exc:  # noqa: BLE001
             log.exception("delegate failed for %s: %s", effort_id, exc)
-            await self.chat.post(channel_id, f"⚠️ delegation error on `{effort_id}`: {exc}")
+            await self.comms.post(
+                Intent.worker_activity, f"⚠️ delegation error on `{effort_id}`: {exc}",
+                effort_id=effort_id,
+            )
+            await self.router.update_effort_card(effort_id, "error")
 
-    # ── inbound event routing (P1/P2) ─────────────────────────────────────────
+    async def _report_completion(self, effort_id: str, result) -> None:
+        """Route a finished effort per the §2 closure row: closure DOWN into the effort thread
+        (bring the audience back down) + a summary UP to #mgmt. A non-`done` end escalates."""
+        if result is None:
+            await self.comms.post(
+                Intent.worker_activity,
+                "⚠️ couldn't dispatch a worker (effort frozen or no free slot).",
+                effort_id=effort_id,
+            )
+            await self.comms.post(
+                Intent.operator_reply,
+                f"⚠️ **{effort_id}**: couldn't dispatch a worker (frozen or no free slot).",
+            )
+            return
+        head = (result.output or "").strip().splitlines()[0][:200] if result.output else result.status
+        if result.ok:
+            await self.comms.post(
+                Intent.closure,
+                "✅ worker finished (**done**). Review the changes in the worker's workspace; "
+                "nothing is pushed (the floor blocks irreversible actions).",
+                effort_id=effort_id,
+            )
+            await self.router.update_effort_card(effort_id, "done")
+            await self.comms.post(
+                Intent.operator_reply,
+                f"✅ **{effort_id}** finished (**done**): {head}\n"
+                f"_Full trace in its project-channel thread._",
+            )
+        else:
+            await self._escalate_worker_failure(effort_id, result)
+
+    async def _escalate_worker_failure(self, effort_id: str, result) -> None:
+        """A worker that ended non-`done` climbs the escalation ladder (CM.3). A refusal/rejection
+        is a hard-gate trigger reaching the human (F3 — never routed around); other non-`done`
+        ends are raised up the ladder but don't hard-freeze (no gate thrash on ordinary failure)."""
+        head = (result.output or "").strip()[:200] or result.status
+        if result.status == "rejected":
+            concern = Concern(
+                intent_thread=f"effort {effort_id}",
+                what_surfaced=f"worker refused/rejected the task: {head}",
+                intent_of_change="a refusal must block and reach the human, never be routed around (F3)",
+                pm_recommendation="review the refusal with the operator",
+                blocked_efforts=[effort_id],
+            )
+            # raise_concern posts the in-thread escalation + #mgmt CONCERN + freezes + sets card.
+            await self.raise_concern(effort_id, Trigger.refusal, concern, actor="bridge")
+            return
+        await self.comms.post(
+            Intent.escalation,
+            f"❌ worker ended **{result.status}** — {head}\n↑ raised to the PM/operator.",
+            effort_id=effort_id,
+        )
+        await self.router.update_effort_card(effort_id, "error")
+        await self.comms.post(
+            Intent.operator_reply,
+            f"⚠️ **{effort_id}** ended **{result.status}** — see its project-channel thread. {head}",
+        )
+
+    async def record_suggestion(
+        self, worker: str, text: str, effort_id: str | None = None
+    ) -> str:
+        """Record a worker suggestion (learning loop, §6) AND surface it in #suggestions (CM.5).
+        The learning loop stays chat-agnostic; the surfacing is the router's job."""
+        sig = await self.learning.add_suggestion(worker, text, effort_id)
+        tag = f" (effort `{effort_id}`)" if effort_id else ""
+        await self.comms.post(
+            Intent.suggestion, f"💡 **suggestion** from `{worker}`{tag}:\n> {text[:800]}"
+        )
+        return sig
+
+    def _effort_name_from(self, text: str) -> str:
+        """Derive a short effort slug from a free-text request (for a top-level project post)."""
+        parts = slugify(text).split("-")
+        return "-".join(parts[:4]) or "task"
+
+    # ── inbound event routing (P1/P2 + COMMS-MODEL §4 taxonomy) ───────────────
     async def handle_event(self, event: dict) -> None:
-        """Route an inbound (non-bot) chat event.
+        """Route an inbound (non-bot) chat event under the comms model (channel = project,
+        effort = thread):
 
         - **System posts** (joins/adds/etc.) are ignored.
-        - A **control message** (slash command or a bare decision/kill verb) is handled and
-          answered wherever the operator sends it — the deterministic, auditable surface.
-        - In **#mgmt**, any other natural-language message goes to the **PO agent** (`nl_intake`)
-          — this is the primary, conversational interface (UX-FLOW: the human converses with
-          the PO). In an **effort channel** a plain message wakes a worker; a mention elsewhere
-          gets a help reply.
+        - A **control message** (slash command / bare decision/kill verb) is handled and answered
+          wherever the operator sends it — the deterministic, auditable surface.
+        - In **#mgmt**, any other natural-language message goes to the **PO agent** (`nl_intake`).
+        - A **reply inside a known effort thread** wakes that effort's worker (continuation).
+        - A **top-level @mention in a `#proj-<slug>` channel** opens a NEW effort in that project.
+        - A mention anywhere else gets a help reply.
         """
         if str(event.get("type") or "").startswith("system"):
             return  # channel joins/leaves/etc. — not a message to act on
         channel_id = event.get("channel_id")
         raw = event.get("message", "")
         thread_id = event.get("thread_id")
+        post_id = event.get("id")
+        user_id = event.get("user_id")
         stripped = _MENTION_RE.sub("", raw).strip()
         mentioned = bool(self._bot_name and f"@{self._bot_name}" in raw)
 
         # Control surface — privileged (only the human posts; bot posts are filtered upstream).
         if _CONTROL_RE.match(stripped):
-            await self._handle_command(stripped, channel_id, thread_id, user_id=event.get("user_id"))
+            await self._track_operator(user_id)
+            await self._handle_command(stripped, channel_id, thread_id, user_id=user_id)
             return
 
         mgmt = await self.mgmt_channel_id()
         if channel_id == mgmt:
+            await self._track_operator(user_id)
             if stripped:
-                # talk to the PO in plain language; user_id lets it add the requester to efforts
-                await self.nl_intake(stripped, channel_id, user_id=event.get("user_id"))
+                # talk to the PO in plain language; user_id lets it add the requester to projects
+                await self.nl_intake(stripped, channel_id, user_id=user_id)
             return
 
-        # Effort channel: resolve the effort + wake a worker on the referenced thread.
-        effort_id = await self.router.resolve_effort_by_channel(channel_id) if channel_id else None
-        if not effort_id:
-            if mentioned:
-                await self.chat.post(channel_id, _HELP)  # top-level, visible inline
-            return
-        thread = thread_id or event.get("id")
-        # Wake-storm guard on WORK chatter (brake channel is exempt).
-        await self.router.record_wake(effort_id, target="worker", kind="work")
-        if await self.router.wake_storm_tripped(effort_id):
-            concern = Concern(
-                intent_thread=f"effort {effort_id}",
-                what_surfaced="wake-storm rate cap exceeded on work chatter",
-                intent_of_change="a runaway hand-off loop threatens the org's stability (§5)",
-                pm_recommendation="pause and inspect the loop",
-                blocked_efforts=[effort_id],
+        # A reply inside a known effort thread wakes that effort's worker (continuation/steering).
+        is_reply = bool(thread_id) and thread_id != post_id
+        effort_id = await self.router.resolve_effort_by_thread(thread_id) if is_reply else None
+        if effort_id:
+            loc = await self.router.effort_thread(effort_id)
+            if not loc:
+                return
+            proj_channel, root = loc
+            # Wake-storm guard on WORK chatter (brake channel is exempt).
+            await self.router.record_wake(effort_id, target="worker", kind="work")
+            if await self.router.wake_storm_tripped(effort_id):
+                # Operational event -> #incidents (CM.5), AND freeze + surface the CONCERN (§3).
+                await self.comms.post(
+                    Intent.incident,
+                    f"🌩️ **wake-storm** on `{effort_id}` — work-chatter rate cap exceeded; "
+                    f"freezing the effort to inspect the loop.",
+                )
+                concern = Concern(
+                    intent_thread=f"effort {effort_id}",
+                    what_surfaced="wake-storm rate cap exceeded on work chatter",
+                    intent_of_change="a runaway hand-off loop threatens the org's stability (§5)",
+                    pm_recommendation="pause and inspect the loop",
+                    blocked_efforts=[effort_id],
+                )
+                await self.raise_concern(effort_id, Trigger.wake_storm, concern, actor="bridge")
+                return
+            # Keep --session continuity: the effort thread's session id is stable (== effort id),
+            # not the individual reply's post id.
+            sess = await self.router.resolve_session(root)
+            session_id = sess[1] if sess else effort_id
+            await self.router.wake(
+                effort_id, role="worker-default", thread_id=root, channel_id=proj_channel,
+                session_id=session_id, instruction=stripped,
             )
-            await self.raise_concern(effort_id, Trigger.wake_storm, concern, actor="bridge")
             return
-        await self.router.wake(
-            effort_id, role="worker-default", thread_id=thread, channel_id=channel_id,
-            instruction=stripped,
-        )
+
+        # A top-level @mention in a project channel opens a NEW effort in that project.
+        project = await self.router.resolve_project_by_channel(channel_id) if channel_id else None
+        if mentioned and project and stripped:
+            try:
+                eid, chan, root = await self.router.open_effort(
+                    self._effort_name_from(stripped), project=project, goal=stripped
+                )
+                self.events.track_channel(chan)
+                if user_id:
+                    await self.chat.add_member(chan, user_id)
+                self._spawn(self.delegate(eid, chan, root, stripped))
+            except Exception as exc:  # noqa: BLE001
+                await self.chat.post(channel_id, f"⚠️ couldn't open an effort here: {exc}")
+            return
+        if mentioned:
+            await self.chat.post(channel_id, _HELP)  # top-level, visible inline
 
     async def _handle_command(
         self, text: str, channel_id: str | None, thread_id: str | None, *, user_id: str | None = None
@@ -417,11 +581,15 @@ class Orchestrator:
                 return
             name = args[0]
             try:
-                effort_id, chan = await self.router.ensure_effort_channel(name)
+                project = self._project_for()
+                effort_id, chan, _root = await self.router.open_effort(name, project=project)
                 self.events.track_channel(chan)
                 if user_id:
                     await self.chat.add_member(chan, user_id)
-                await reply(f"✅ created effort `{effort_id}` → `#effort-{name}` (added to your channels)")
+                await reply(
+                    f"✅ opened effort `{effort_id}` as a thread in `#proj-{project}` "
+                    f"(added to your channels) — reply in that thread to wake its worker"
+                )
             except Exception as exc:  # noqa: BLE001
                 await reply(f"⚠️ could not create effort `{name}`: {exc}")
         elif cmd == "status":

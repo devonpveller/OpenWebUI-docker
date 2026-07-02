@@ -38,29 +38,51 @@ async def _orch(db_url):
     return orch, chat, harness, db
 
 
-async def test_wake_on_mention_posts_reply(db_url):
+async def test_wake_in_effort_thread_posts_reply(db_url):
     orch, chat, harness, db = await _orch(db_url)
     try:
-        effort_id, channel_id = await orch.router.ensure_effort_channel("demo")
+        # An effort is a THREAD in its project channel (COMMS-MODEL §4 / CM.1).
+        effort_id, channel_id, root = await orch.router.open_effort("demo")
         orch.events.track_channel(channel_id)
-        # An inbound @mention in the effort channel wakes a worker (P0.4/P1.3).
+        # A reply IN the effort thread (root_id = the effort-card post id) wakes the worker.
         await orch.handle_event(
-            {"id": "p1", "channel_id": channel_id, "thread_id": "t1",
+            {"id": "p1", "channel_id": channel_id, "thread_id": root,
              "message": "@worker please start", "is_bot": False, "ts": 1}
         )
         assert len(harness.wakes) == 1
-        assert harness.wakes[0]["session_id"] == "t1"
-        # the worker's reply was posted back on the bus (bus-only comms).
-        assert any(p["channel_id"] == channel_id for p in chat.posted)
+        # --session continuity: the session id is the effort id (stable across replies), not the
+        # individual reply post id.
+        assert harness.wakes[0]["session_id"] == effort_id
+        # the worker's reply streamed back into the SAME thread (bus-only comms, threaded).
+        assert any(
+            p["channel_id"] == channel_id and p.get("thread_id") == root for p in chat.posted
+        )
     finally:
         await db.dispose()
 
 
-async def test_concern_freezes_and_operator_clears(db_url):
+async def test_two_efforts_share_one_project_channel(db_url):
+    """CM.1 done-when: two efforts in the same project appear as two THREADS in one
+    #proj-<slug> channel — no per-effort channel, so the sidebar count is stable."""
     orch, chat, harness, db = await _orch(db_url)
     try:
-        effort_id, channel_id = await orch.router.ensure_effort_channel("demo")
-        # PM raises a hard-gate CONCERN -> effort frozen + CONCERN posted to #mgmt.
+        e1, ch1, root1 = await orch.router.open_effort("alpha")
+        e2, ch2, root2 = await orch.router.open_effort("beta")
+        assert ch1 == ch2                 # one shared project channel
+        assert root1 != root2             # two distinct effort threads
+        assert e1 != e2
+        # exactly one project channel was created (plus #mgmt/#incidents/#suggestions).
+        assert list(chat.channels).count("proj-sandbox") == 1
+    finally:
+        await db.dispose()
+
+
+async def test_concern_freezes_escalates_and_closure_comes_back_down(db_url):
+    orch, chat, harness, db = await _orch(db_url)
+    try:
+        effort_id, channel_id, root = await orch.router.open_effort("demo")
+        # PM raises a hard-gate CONCERN -> effort frozen + CONCERN posted to #mgmt + escalation
+        # raised into the effort thread (CM.3 escalation ladder).
         concern = Concern(
             intent_thread="ship X aligned",
             what_surfaced="worker refused an unsafe step",
@@ -72,11 +94,15 @@ async def test_concern_freezes_and_operator_clears(db_url):
         assert await orch.gate.can_dispatch(effort_id) is False
         mgmt = await orch.mgmt_channel_id()
         assert any("CONCERN" in p["message"] and p["channel_id"] == mgmt for p in chat.posted)
+        # CM.3: the up-signal is visible IN the effort thread (not just #mgmt).
+        assert any(
+            p.get("thread_id") == root and "Escalated" in p["message"] for p in chat.posted
+        )
 
-        # While frozen, a wake is refused (composition rule — no compute while frozen).
+        # While frozen, a thread reply is refused (composition rule — no compute while frozen).
         pre = len(harness.wakes)
         await orch.handle_event(
-            {"id": "p2", "channel_id": channel_id, "thread_id": "t1",
+            {"id": "p2", "channel_id": channel_id, "thread_id": root,
              "message": "keep going", "is_bot": False, "ts": 2}
         )
         assert len(harness.wakes) == pre  # no wake happened
@@ -87,6 +113,11 @@ async def test_concern_freezes_and_operator_clears(db_url):
              "message": f"approve {effort_id} looks fine", "is_bot": False, "ts": 3}
         )
         assert await orch.gate.can_dispatch(effort_id) is True
+        # ⭐ CM.4 "bring the audience back down": the resolution is echoed into the effort thread.
+        assert any(
+            p.get("thread_id") == root and "resuming" in p["message"].lower()
+            for p in chat.posted
+        )
     finally:
         await db.dispose()
 
@@ -100,7 +131,7 @@ async def test_slash_effort_command_creates_and_replies(db_url):
              "is_bot": False, "ts": 1}
         )
         assert await orch.gate.state_of("effort-demo") == "active"
-        assert any("created effort" in p["message"] for p in chat.posted)
+        assert any("opened effort" in p["message"].lower() for p in chat.posted)
     finally:
         await db.dispose()
 

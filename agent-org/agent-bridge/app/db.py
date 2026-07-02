@@ -55,12 +55,45 @@ class Database:
             self.engine, expire_on_commit=False, class_=AsyncSession
         )
 
+    # Columns added AFTER a table may already exist in a long-lived prod DB. `create_all` only
+    # CREATEs missing tables — it never ALTERs an existing one — so an additive column would be
+    # absent and every query 500s. This idempotent, additive-only migration self-heals that (the
+    # same posture as the scheduler's reset_stale / lazy team resolution). ADD COLUMN only —
+    # never drop/rename (that stays a deliberate, reviewed operator act).
+    _ADDITIVE_COLUMNS = [
+        # (table, column, ddl_type) — introduced by COMMS-MODEL CM.1 (channel = project,
+        # effort = thread): an effort now carries its project + effort-card thread root.
+        ("efforts", "project", "VARCHAR(64)"),
+        ("efforts", "root_post_id", "VARCHAR(64)"),
+    ]
+
     async def create_all(self) -> None:
         # Import models so metadata is populated before create_all.
         from . import models  # noqa: F401
 
         async with self.engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+            await self._add_missing_columns(conn)
+
+    async def _add_missing_columns(self, conn) -> None:
+        dialect = conn.engine.dialect.name  # 'sqlite' (tests) | 'postgresql' (prod)
+        for table, col, ddl in self._ADDITIVE_COLUMNS:
+            try:
+                if dialect == "postgresql":
+                    # One idempotent statement; safe if the column is already present.
+                    await conn.exec_driver_sql(
+                        f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {ddl}"
+                    )
+                elif dialect == "sqlite":
+                    # SQLite has no ADD COLUMN IF NOT EXISTS — probe first. On a fresh test DB the
+                    # column already exists via create_all, so this is a no-op there.
+                    rows = (
+                        await conn.exec_driver_sql(f"PRAGMA table_info({table})")
+                    ).fetchall()
+                    if col not in {r[1] for r in rows}:
+                        await conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
+            except Exception:  # noqa: BLE001 - a migration probe must never block startup
+                pass
 
     async def dispose(self) -> None:
         await self.engine.dispose()

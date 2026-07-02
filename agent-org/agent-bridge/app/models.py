@@ -40,13 +40,19 @@ SCHED_IDLE = "idle"  # unassigned pool instance
 
 
 class Effort(Base):
-    """A unit of work (= a Mattermost channel/thread). Carries gate state."""
+    """A unit of work. Under the comms model (COMMS-MODEL §4) an effort is a **thread**
+    (`root_post_id`) inside its **project channel** (`channel_id` = `#proj-<slug>`), NOT a
+    channel of its own — this kills the per-effort channel sprawl. Carries gate state."""
 
     __tablename__ = "efforts"
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     name: Mapped[str] = mapped_column(String(200))
+    # channel_id = the shared PROJECT channel (many efforts share one); root_post_id = the
+    # effort-card root post whose id IS the effort's thread (COMMS-MODEL §4 / CM.1).
+    project: Mapped[str | None] = mapped_column(String(64), index=True)
     channel_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    root_post_id: Mapped[str | None] = mapped_column(String(64), index=True)
     parent_effort_id: Mapped[str | None] = mapped_column(
         ForeignKey("efforts.id"), index=True
     )  # dependents freeze with the parent (§3 pause granularity)

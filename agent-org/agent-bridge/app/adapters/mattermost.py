@@ -87,6 +87,12 @@ class MattermostAdapter:
         r.raise_for_status()
         return r.json()
 
+    async def update_post(self, post_id: str, message: str) -> dict[str, Any]:
+        # Mattermost PUT /posts/{id} full-updates; message + id is enough to edit text (CM.6).
+        r = await self._client.put(f"/posts/{post_id}", json={"id": post_id, "message": message})
+        r.raise_for_status()
+        return r.json()
+
     async def ensure_channel(self, name: str) -> str:
         team_id = await self._ensure_team()
         # 1) Exact URL-slug match.

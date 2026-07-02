@@ -25,6 +25,10 @@ class ChatAdapter(Protocol):
         """Post a message; returns the created post (incl. its id)."""
         ...
 
+    async def update_post(self, post_id: str, message: str) -> dict[str, Any]:
+        """Edit an existing post (e.g. the effort-card root post's live status, CM.6)."""
+        ...
+
     async def ensure_channel(self, name: str) -> str:
         """Create-or-get a channel by name; returns its id."""
         ...
@@ -52,6 +56,7 @@ class FakeChatAdapter:
     def __init__(self) -> None:
         self._queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self.posted: list[dict[str, Any]] = []
+        self.edited: list[dict[str, Any]] = []
         self.channels: dict[str, str] = {}
         self.members: list[tuple[str, str]] = []
         self.username = "bot-pm"
@@ -76,6 +81,15 @@ class FakeChatAdapter:
             "is_bot": True,
         }
         self.posted.append(post)
+        return post
+
+    async def update_post(self, post_id: str, message: str) -> dict[str, Any]:
+        post = {"id": post_id, "message": message, "is_bot": True}
+        self.edited.append(post)
+        # Reflect the edit on the recorded post so tests can assert final card state.
+        for p in self.posted:
+            if p.get("id") == post_id:
+                p["message"] = message
         return post
 
     async def ensure_channel(self, name: str) -> str:

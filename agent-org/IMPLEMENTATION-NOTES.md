@@ -94,7 +94,7 @@ operator decision).
 | P5.2 role authority split | ✅ | `modules/roles.py` — PM instantiates approved roles; a new role TYPE routes through the §3 gate for human sign-off. |
 | P5.3 approved-role catalog | ✅ | `scope_ledger.catalog_add`/`is_role_approved` — `test_role_catalog_approval`. |
 | P5.4 last-owner provenance | ✅(logic) 🧩(live) | `router.last_owner` (git-blame v1). Needs a real workspace clone to exercise. |
-| P5.5 channel taxonomy | ✅ | `router.ensure_effort_channel` creates `#effort-<name>`; `#mgmt`/`#incidents`/`#suggestions` per the design. |
+| P5.5 channel taxonomy | ✅ | **Superseded by the comms model (CM.1, built 2026-07-02): channel = project (`#proj-<slug>`), effort = thread.** `router.open_effort` posts an effort-card root post; activity threads under it; `#mgmt`/`#incidents`/`#suggestions` are the permanent function channels. See the CM.1–CM.6 record below. |
 | P5.6 wake-storm cap (brake exempt) | ✅ | `router.wake_storm_tripped` (work chatter only) → §3 trigger in `orchestrator.handle_event`. |
 | P5.7 stream-aligned, right-sized scoping | ✅(policy) | Encoded in the PM/worker charters + goal-injection; a cognitive-load heuristic hook is a v1.5 refinement (documented). |
 | P5.8 retirement/decommission | ✅ | `scheduler.retire` + `scope_ledger.revoke_subject` + `retire_role` — `test_retire_leaves_no_assignment` / `test_revoke_leaves_no_authority`. |
@@ -241,16 +241,56 @@ Recovery scripts are unchanged for the pool by design: the `workers`/`cloud` pro
 (like the Portal) and operator-driven, so they're excluded from the recovery inventory (the
 default plane is what recovery manages). Stack-map §3 already lists the pool containers.
 
-### Channel taxonomy — SUPERSEDED by the comms model (next build, 2026-07-02)
+### Comms model (CM.1–CM.6) — BUILT + tested (2026-07-02)
 
-The as-built **channel-per-effort** (`#effort-<name>`) is superseded by
-[`COMMS-MODEL-deterministic-routing.md`](../documentation/implementation-guide/teams-chat-agent-orchestration/COMMS-MODEL-deterministic-routing.md):
-**channel = project (`#proj-<slug>`), effort = thread**, plus a deterministic *intent → destination*
-router and the "bring the audience back down" closure behavior. Driven by real sprawl feedback +
-the human teams-comms research; converges with OUTLINE §4 (topic-threading) and Team Topologies.
-Interim discoverability fixes already shipped (operator auto-added to effort channels; completion
-reported to `#mgmt`; worker activity streamed). The refactor is planned as **CM.1–CM.6** in that doc;
-it's bridge-internal (no 3-place change). Until built, efforts remain channels.
+Implemented [`COMMS-MODEL-deterministic-routing.md`](../documentation/implementation-guide/teams-chat-agent-orchestration/COMMS-MODEL-deterministic-routing.md)
+in full — the deterministic *audience × intent → destination* model that replaces the
+channel-per-effort sprawl. Bridge-internal (no 3-place change); only the `agent-bridge` image is
+rebuilt. **73 tests green** (was 65; +8 for the comms model). What landed, per phase:
+
+- **CM.1 — channel = project, effort = thread.** `Effort` gained `project` + `root_post_id`;
+  `router.open_effort(name, project=…)` posts an **effort-card root post** in `#proj-<slug>` and
+  its id becomes the effort's thread. All effort activity (dispatch, worker stream, review,
+  closure) posts as **replies** under it. The operator is added to the **project channel once**,
+  not per effort. `resolve_effort_by_thread` replaces channel-keyed lookup (a channel is now a
+  project = many efforts). *Result:* two efforts in one project = two threads in one channel; the
+  sidebar never grows with task volume. `ensure_effort_channel` kept as a thin shim (default
+  project). Test: `test_two_efforts_share_one_project_channel`, `test_wake_in_effort_thread_posts_reply`.
+- **CM.2 — deterministic router.** New `modules/comms_router.py`: `resolve(intent, effort_id) →
+  (channel_id, thread_id|None)` is the §2 table as one pure function; every posting flow goes
+  through `comms.post(intent, …)` — no module picks a channel inline. Test:
+  `test_routing_table_resolves_each_intent`, `test_thread_intent_requires_effort_id`.
+- **CM.3 — escalation ladder + CONCERN routing.** `raise_concern` posts the CONCERN to `#mgmt`
+  (decide-private) **and** raises the up-signal into the effort thread (record-public pointer). A
+  worker that ends `rejected` → hard-gate CONCERN (F3); other non-`done` ends → thread escalation
+  + `#mgmt` summary without a hard freeze (`_escalate_worker_failure`).
+- **CM.4 — "bring the audience back down" ⭐.** `apply_operator_decision` echoes the resolution
+  into the originating effort thread (`✅ resuming` / `⛔ aborted`) in addition to the `#mgmt`
+  record + audit — the closure the earlier build lacked. Test:
+  `test_concern_freezes_escalates_and_closure_comes_back_down`.
+- **CM.5 — function channels.** `#incidents` + `#suggestions` are created-or-got at boot and the
+  operator is pulled in when first seen in `#mgmt`. Worker suggestions surface in `#suggestions`
+  (`orchestrator.record_suggestion`, wired to `POST /suggestion`); wake-storm/undeliverable/crash
+  notices go to `#incidents` (and still freeze per §3). Tests:
+  `test_suggestion_surfaces_in_suggestions_channel`, `test_wake_storm_posts_incident_and_freezes`.
+- **CM.6 — effort-card status + notification discipline.** `ChatAdapter.update_post`
+  (Mattermost `PUT /posts/{id}`; Fake records it) keeps the effort-card root post's status live
+  (`active → frozen → active/done/aborted`). Worker-activity streaming **batches** successful
+  commands (`AO_ACTIVITY_BATCH`, default 5) into one thread post; failures/denials always flush +
+  post immediately with context. Tests: `test_effort_card_status_updates_on_freeze`,
+  `test_activity_stream_batches_successful_commands`.
+
+**DB migration (self-healing):** `Effort` gained two columns. `Database.create_all` now runs an
+idempotent, **additive-only** migration (`ADD COLUMN IF NOT EXISTS` on Postgres; PRAGMA-probe on
+SQLite) so a rebuilt image doesn't 500 on the existing live `efforts` table — no manual ALTER
+needed. New config: `AO_DEFAULT_PROJECT` (`sandbox`), `AO_INCIDENTS_CHANNEL`,
+`AO_SUGGESTIONS_CHANNEL`, `AO_ACTIVITY_BATCH`.
+
+*Alignment guard:* nothing here weakens governance §3/§5 — the escalation gate, mandatory
+up-level, pause-until-cleared, and no-reroute invariants are untouched; the comms model only makes
+*where each message lands* deterministic. **Operator step:** rebuild + restart `agent-bridge`
+(`docker compose ... up -d --build agent-bridge`) to pick up the taxonomy; existing `#effort-*`
+channels can be archived by hand once efforts run as threads.
 
 ## P0.5 procedure (the one decision-gate that blocks Pc)
 

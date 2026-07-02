@@ -149,6 +149,11 @@ the channel is `#proj-<repo-slug>`. One project channel per repo the org touches
 
 # PART B — Implementation plan
 
+**Status: ✅ BUILT + tested 2026-07-02** (73 agent-bridge tests green; +8 for the comms model).
+Build record in [`agent-org/IMPLEMENTATION-NOTES.md`](../../../agent-org/IMPLEMENTATION-NOTES.md)
+("Comms model (CM.1–CM.6) — BUILT"). **Operator step:** rebuild + restart `agent-bridge` to pick
+up the taxonomy; the DB migration is additive + self-healing (no manual ALTER).
+
 Phases **CM.1 → CM.6** (Comms Model). This is a **delta** over the *built* system (effort = channel,
 worker streaming, `#mgmt` summaries, operator-added-to-channels). Status keys mirror TASKS:
 ⬜ todo · ✅ done · 🧪 needs test · 🚀 operator. Target paths are the live modules.
@@ -157,7 +162,7 @@ worker streaming, `#mgmt` summaries, operator-added-to-channels). Status keys mi
 > centralizes routing so CM.3–CM.5 are config, not scattered edits; CM.4 (bring-back-down) is the
 > highest-value *behavior* gap. CM.6 is polish.
 
-### CM.1 — Project channels + effort-as-thread (supersede per-effort channels)
+### CM.1 ✅ — Project channels + effort-as-thread (supersede per-effort channels)
 - ⬜ Add project resolution: `effort → project → channel` (`#proj-<slug>`; default `#proj-sandbox`).
   → `agent-org/agent-bridge/app/modules/router.py`, `config.py` (`default_project` / repo-slug).
 - ⬜ Replace `ensure_effort_channel` with `ensure_project_channel(project)` + `open_effort_thread(effort)`:
@@ -170,7 +175,7 @@ worker streaming, `#mgmt` summaries, operator-added-to-channels). Status keys mi
 - *Done-when:* two efforts in the same project appear as **two threads in one `#proj-<slug>` channel**;
   no new channel is created per effort; the sidebar count is stable across many tasks.
 
-### CM.2 — Deterministic comms router (the §2 table as one primitive)
+### CM.2 ✅ — Deterministic comms router (the §2 table as one primitive)
 - ⬜ New `modules/comms_router.py`: `resolve(intent, effort_id=…, …) -> (channel_id, thread_id|None)`
   implementing the §2 table. All posting flows (orchestrator, router, gate, learning loop) call it
   instead of choosing channels inline.
@@ -179,7 +184,7 @@ worker streaming, `#mgmt` summaries, operator-added-to-channels). Status keys mi
 - *Done-when:* a unit test asserts each intent resolves to the destination in the §2 table; no module
   posts to a hard-coded channel outside the router.
 
-### CM.3 — Escalation ladder + CONCERN routing (worker → PM → PO → Human)
+### CM.3 ✅ — Escalation ladder + CONCERN routing (worker → PM → PO → Human)
 - ⬜ A worker that ends non-`done`, hits a **floor/git-proxy denial**, or reports a block → the bridge
   posts an **escalation** in the effort thread `@mention`-ing the PM (lateral raise, §4.8), and if it's
   a §3 hard-gate trigger, raises a **CONCERN to `#mgmt`** (existing `gate.freeze` + `raise_concern`).
@@ -187,7 +192,7 @@ worker streaming, `#mgmt` summaries, operator-added-to-channels). Status keys mi
 - *Done-when:* an injected worker failure surfaces as a thread escalation **and** (for a hard-gate case)
   a `#mgmt` CONCERN that references the effort thread; the effort is frozen (gate unchanged).
 
-### CM.4 — "Bring the audience back down" — decision closure ⭐
+### CM.4 ✅ — "Bring the audience back down" — decision closure ⭐
 - ⬜ On `gate.clear` (operator decision), the bridge **echoes the resolution into the originating effort
   thread** ("✅ Operator approved — resuming" / "⛔ Aborted") in addition to the `#mgmt` + audit records.
   → `orchestrator.apply_operator_decision`.
@@ -196,14 +201,14 @@ worker streaming, `#mgmt` summaries, operator-added-to-channels). Status keys mi
 - *Done-when:* clearing a CONCERN posts closure to the effort thread; a follower of that thread sees the
   outcome without opening `#mgmt`.
 
-### CM.5 — Function channels (`#incidents`, `#suggestions`)
+### CM.5 ✅ — Function channels (`#incidents`, `#suggestions`)
 - ⬜ Ensure `#incidents` + `#suggestions` exist (create-or-get on boot); add the operator.
 - ⬜ Route `learning.add_suggestion` posts to `#suggestions`; route wake-storm / undeliverable-wake /
   crash notices to `#incidents` (currently DB-only / `#mgmt`).
 - *Done-when:* a worker suggestion appears in `#suggestions`; a tripped wake-storm cap posts to
   `#incidents` (and still freezes per §3).
 
-### CM.6 — Effort-card status + polish (optional)
+### CM.6 ✅ — Effort-card status + polish (optional)
 - ⬜ Add `ChatAdapter.update_post(post_id, message)` (Mattermost `PUT /posts/{id}`; Fake records it) so
   the effort-card root post reflects live status; pin the card optionally.
 - ⬜ Throttle worker-activity streaming (batch rapid commands) if a task is command-heavy, to keep

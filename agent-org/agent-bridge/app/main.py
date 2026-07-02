@@ -160,10 +160,10 @@ def create_app(orch: Orchestrator | None = None) -> FastAPI:
         await orch.profiles.set_lane(body.name, body.lane)
         return {"profile": orch.profiles.get(body.name).model_dump()}
 
-    # ── suggestion pool (P6.3) ─────────────────────────────────────────────────
+    # ── suggestion pool (P6.3) — recorded AND surfaced to #suggestions (CM.5) ───
     @app.post("/suggestion")
     async def suggestion(body: SuggestionIn) -> dict:
-        sig = await orch.learning.add_suggestion(body.worker, body.text, body.effort_id)
+        sig = await orch.record_suggestion(body.worker, body.text, body.effort_id)
         return {"signature": sig}
 
     @app.get("/suggestions")
