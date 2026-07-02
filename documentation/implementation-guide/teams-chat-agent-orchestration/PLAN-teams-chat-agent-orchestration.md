@@ -1,7 +1,15 @@
 # Plan — Teams-style Chat for Agent Orchestration (governed multi-agent org)
 
-**Status:** 📝 DESIGN — **nothing in this plan is built yet.** Baselined against the live
-workspace **2026-06-13** (LiteLLM `llm-gateway` is now LIVE — see §0).
+**Status:** 🛠️ **BUILT (v1 2026-07-01; comms model + P4.0 ground/dry-run 2026-07-02).** This plan
+is implemented as the **`agent-org`** compose project (`agent-bridge` + all §3.1.1 modules, the P2
+gate, the deterministic [comms router](COMMS-MODEL-deterministic-routing.md), and the P4.0
+risk-gated dry-run gate + grounding client). **80 passing tests.** Per-task build status is the
+single source of truth in [`agent-org/IMPLEMENTATION-NOTES.md`](../../../agent-org/IMPLEMENTATION-NOTES.md);
+what remains is **operator-gated** (Mattermost bot [done], OB-mirror env wiring, mobile, tailnet
+exposure) and the **conditional cloud lane Pc** (skipped — P0.5 resolved LOCAL_JUDGE_OK). Baselined
+against the live workspace **2026-06-13** (LiteLLM `llm-gateway` is LIVE — see §0). §§1–8 below are
+the design of record (kept as authored; where the build refined a shape, IMPLEMENTATION-NOTES + the
+COMMS-MODEL doc note it).
 **Owner:** ai-stack
 **Branch:** TBD new feature branch; **no `main` merge** without explicit ask (G1).
 **Companion docs:**

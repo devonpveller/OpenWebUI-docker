@@ -6,11 +6,12 @@ chat platform that doubles as the coordination fabric for a governed fleet of co
 *"AI Organizations are More Effective but Less Aligned than Individual Agents"* (arXiv:2604.10290)
 and three supporting framework analyses.
 
-**Status:** 🛠️ **v1 BUILT (2026-07-01); comms model CM.1–CM.6 BUILT (2026-07-02).** The design
-below is implemented as the **`agent-org` compose project** at [`agent-org/`](../../../agent-org/)
-— the `agent-bridge` service (all §3.1.1 modules incl. the P2 gate + the deterministic
-[comms router](COMMS-MODEL-deterministic-routing.md): channel = project, effort = thread),
-charters/floor/hooks/profiles, the compose project, and **73 passing tests**. See
+**Status:** 🛠️ **v1 BUILT (2026-07-01); comms model CM.1–CM.6 + P4.0 ground/dry-run BUILT
+(2026-07-02).** The design below is implemented as the **`agent-org` compose project** at
+[`agent-org/`](../../../agent-org/) — the `agent-bridge` service (all §3.1.1 modules incl. the P2
+gate, the deterministic [comms router](COMMS-MODEL-deterministic-routing.md): channel = project,
+effort = thread, and the P4.0 risk-gated dry-run gate + grounding client),
+charters/floor/hooks/profiles, the compose project, and **80 passing tests**. See
 [`agent-org/IMPLEMENTATION-NOTES.md`](../../../agent-org/IMPLEMENTATION-NOTES.md) for the
 task-by-task build record + what remains **operator-gated** (Mattermost bot token, the P0.5
 capability-floor decision, the conditional cloud lane, worker-pool bring-up, tailnet exposure).

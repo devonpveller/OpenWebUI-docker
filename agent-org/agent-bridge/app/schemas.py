@@ -133,6 +133,17 @@ class OperatorIntent(BaseModel):
     decision: Literal["approve", "modify", "abort"] | None = None  # interpreted, NOT auto-run
 
 
+# ── Grounding result (UX-FLOW Stage 4, P4.0) ────────────────────────────────
+class GroundingResult(BaseModel):
+    """What the grounding step returns: prior grounded claims to inject before execution.
+    Best-effort — `grounded=False` means research was unavailable/timed out (advisory, not a gate)."""
+
+    grounded: bool = False
+    claims: list[str] = Field(default_factory=list)
+    summary: str = ""
+    job_id: str | None = None
+
+
 # ── Profile (C4, PLAN §5.4) ─────────────────────────────────────────────────
 class ProfileSchema(BaseModel):
     profile: str

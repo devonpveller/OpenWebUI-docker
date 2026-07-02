@@ -64,6 +64,22 @@ class SuggestionIn(BaseModel):
     effort_id: str | None = None
 
 
+class RiskIn(BaseModel):
+    effort_id: str
+    risk: str  # routine | irreversible | cross_effort | cascading_refactor
+
+
+class DryRunIn(BaseModel):
+    effort_id: str
+    passed: bool = True
+
+
+class PrepareIn(BaseModel):
+    effort_id: str
+    request: str
+    risk: str = "routine"
+
+
 def build_chat(settings):
     if settings.chat_adapter == "mattermost":
         return MattermostAdapter(
@@ -159,6 +175,31 @@ def create_app(orch: Orchestrator | None = None) -> FastAPI:
     async def set_lane(body: LaneIn) -> dict:
         await orch.profiles.set_lane(body.name, body.lane)
         return {"profile": orch.profiles.get(body.name).model_dump()}
+
+    # ── ground + dry-run, risk-gated (P4.0) ────────────────────────────────────
+    @app.post("/effort/risk")
+    async def set_risk(body: RiskIn) -> dict:
+        try:
+            st = await orch.exec_gate.set_risk(body.effort_id, body.risk)
+        except KeyError as exc:
+            raise HTTPException(404, f"unknown effort {exc}") from exc
+        return {"effort_id": body.effort_id, "risk": body.risk, "dry_run_status": st}
+
+    @app.post("/effort/dry-run")
+    async def record_dry_run(body: DryRunIn) -> dict:
+        try:
+            await orch.exec_gate.record_dry_run(body.effort_id, passed=body.passed)
+        except KeyError as exc:
+            raise HTTPException(404, f"unknown effort {exc}") from exc
+        return await orch.exec_gate.status(body.effort_id)
+
+    @app.post("/effort/prepare")
+    async def prepare_execution(body: PrepareIn) -> dict:
+        return await orch.prepare_execution(body.effort_id, body.request, risk=body.risk)
+
+    @app.get("/execution/{effort_id}")
+    async def execution_status(effort_id: str) -> dict:
+        return await orch.exec_gate.status(effort_id)
 
     # ── suggestion pool (P6.3) — recorded AND surfaced to #suggestions (CM.5) ───
     @app.post("/suggestion")

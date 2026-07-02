@@ -62,6 +62,10 @@ class Effort(Base):
     freeze_level: Mapped[str | None] = mapped_column(String(16))  # steering | hard_gate
     frozen_by: Mapped[str | None] = mapped_column(String(64))
     plan_status: Mapped[str] = mapped_column(String(16), default="none")  # none|draft|approved
+    # Risk-gated dry-run execution gate (P4.0): risk classifies blast radius; dry_run_status
+    # gates REAL-code execution for risky efforts (none|skipped|required|running|passed|failed).
+    risk: Mapped[str] = mapped_column(String(24), default="routine")
+    dry_run_status: Mapped[str] = mapped_column(String(16), default="none")
     created_at: Mapped[str] = mapped_column(default=now_iso)
     updated_at: Mapped[str] = mapped_column(default=now_iso, onupdate=now_iso)
 

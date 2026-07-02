@@ -20,8 +20,10 @@ from .modules.audit_sink import AuditSink
 from .modules.charters import Charters
 from .modules.comms_router import CommsRouter, Intent
 from .modules.event_gateway import EventGateway
+from .modules.execution_gate import ExecutionGate
 from .modules.floor_guard import FloorGuard
 from .modules.governance_gate import GovernanceGate
+from .modules.grounding import Grounding, build_grounding
 from .modules.learning_loop import LearningLoop
 from .modules.model_router import ModelRouter
 from .modules.planner import Planner
@@ -70,6 +72,9 @@ _HELP = (
     "- `/effort <name>` — open a work effort as a **thread** in its project channel\n"
     "- `/status [effort_id]` — gate state of all efforts (or one)\n"
     "- `approve|modify|abort <effort_id> [note]` — decide an open CONCERN\n"
+    "- `/risk <effort_id> <routine|irreversible|cross_effort|cascading_refactor>` — set blast radius "
+    "(risky ⇒ a dry-run is required before real-code execution)\n"
+    "- `/dry-run <effort_id> <pass|fail>` — record the isolated dry-run outcome\n"
     "- `/kill` / `/unkill` — global kill switch (freeze/release the whole fleet)\n"
     "Each effort is a **thread** in its `#proj-<project>` channel — reply in the thread to wake "
     "its worker; watch the work stream there. Escalations come to **#mgmt** and their resolution "
@@ -86,6 +91,7 @@ class Orchestrator:
         *,
         model_client=None,
         harness: WorkerHarness | None = None,
+        grounding: Grounding | None = None,
     ) -> None:
         self.s = settings
         self.db = db
@@ -101,6 +107,8 @@ class Orchestrator:
         self.floor_guard = FloorGuard(self.scope)
         self.planner = Planner(db, self.models, self.audit)
         self.stop_gates = StopGates(db, self.models, self.audit)
+        self.exec_gate = ExecutionGate(db, self.audit)          # P4.0 risk-gated dry-run gate
+        self.grounding: Grounding = grounding or build_grounding(settings)
         self.learning = LearningLoop(db, self.audit)
         self.roles = RoleAuthority(self.gate, self.scope)
 
@@ -364,6 +372,31 @@ class Orchestrator:
 
         await self.chat.post(channel_id, reply or "…")
 
+    # ── ground + dry-run prep (UX-FLOW Stage 4, P4.0) ─────────────────────────
+    async def prepare_execution(
+        self, effort_id: str, request: str, *, risk: str = "routine"
+    ) -> dict:
+        """Classify the effort's blast radius (sets the dry-run requirement, P4.0b) and — if
+        grounding is enabled and the effort is risky — ground its assumptions via
+        openbrain-research and inject the grounded claims as steering (P4.0a). Grounding is
+        best-effort/advisory; it never blocks. Returns the execution-gate status."""
+        await self.exec_gate.set_risk(effort_id, risk)
+        if self.s.grounding_enabled and self.exec_gate.dry_run_required(risk):
+            res = await self.grounding.ground(request)
+            if res.grounded and (res.claims or res.summary):
+                body = "# GROUNDED CONTEXT (openbrain-research — verify before relying)\n"
+                if res.summary:
+                    body += res.summary.strip() + "\n"
+                for c in res.claims[:20]:
+                    body += f"- {c}\n"
+                await self.charters.set_steering(effort_id, body, actor="grounding")
+                await self.comms.post(
+                    Intent.worker_activity,
+                    f"🔎 grounded {len(res.claims)} claim(s) into the effort context (P4.0).",
+                    effort_id=effort_id,
+                )
+        return await self.exec_gate.status(effort_id)
+
     async def delegate(
         self, effort_id: str, channel_id: str, root_post_id: str, goal: str,
         *, repo: str | None = None,
@@ -374,6 +407,20 @@ class Orchestrator:
         repo = repo or (self.s.default_repo or None)
         try:
             await self.charters.set_goal(effort_id, goal, created_by="po")
+            # P4.0 gate: a high-blast-radius effort may not reach REAL-code execution until its
+            # isolated dry-run is recorded complete. Routine efforts pass immediately.
+            ok, reason = await self.exec_gate.may_execute(effort_id)
+            if not ok:
+                await self.comms.post(
+                    Intent.escalation,
+                    f"⛔ execution held — {reason}. Complete the isolated dry-run first, then "
+                    f"record it (`/dry-run {effort_id} pass`).",
+                    effort_id=effort_id,
+                )
+                await self.comms.post(
+                    Intent.operator_reply, f"⛔ **{effort_id}** held before execution — {reason}."
+                )
+                return
             await self.comms.post(
                 Intent.effort_dispatch, f"⏳ **{effort_id}** — worker dispatched. Working…",
                 effort_id=effort_id,
@@ -620,5 +667,32 @@ class Orchestrator:
                 await reply(f"✅ `{effort_id}` {cmd} applied — state now `{await self.gate.state_of(effort_id)}`")
             except Exception as exc:  # noqa: BLE001
                 await reply(f"⚠️ could not {cmd} `{effort_id}`: {exc}")
+        elif cmd == "risk":
+            if len(args) < 2:
+                await reply(
+                    "usage: `/risk <effort_id> <routine|irreversible|cross_effort|cascading_refactor>`"
+                )
+                return
+            eff, risk = args[0], args[1]
+            try:
+                st = await self.exec_gate.set_risk(eff, risk)
+                await reply(f"✅ `{eff}` risk=`{risk}` → dry_run_status=`{st}`")
+            except Exception as exc:  # noqa: BLE001
+                await reply(f"⚠️ could not set risk for `{eff}`: {exc}")
+        elif cmd == "dry-run":
+            if not args:
+                await reply("usage: `/dry-run <effort_id> <pass|fail>`")
+                return
+            eff = args[0]
+            passed = len(args) < 2 or args[1].lower() in ("pass", "passed", "ok", "true")
+            try:
+                await self.exec_gate.record_dry_run(eff, passed=passed)
+                ok, reason = await self.exec_gate.may_execute(eff)
+                await reply(
+                    f"✅ `{eff}` dry-run {'passed' if passed else 'failed'} — may_execute={ok}"
+                    + (f" ({reason})" if reason else "")
+                )
+            except Exception as exc:  # noqa: BLE001
+                await reply(f"⚠️ could not record dry-run for `{eff}`: {exc}")
         else:
             await reply(f"unknown command `/{cmd}` — try `/help`")

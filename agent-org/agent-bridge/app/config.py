@@ -92,6 +92,17 @@ class Settings(BaseSettings):
     # ── Cost-tiered supervision (governance §3, P3.7) ───────────────────────
     monitor_sample_rate: float = 0.25      # expensive-continuous LLM monitor sampling (0..1)
 
+    # ── Ground + dry-run, risk-gated (UX-FLOW Stage 4, P4.0) ────────────────
+    # Grounding submits an effort's assumptions to the shared openbrain-research service
+    # (reach it BY CONTAINER NAME on ai-stack_llm-net; :8818 host loopback is unreachable from
+    # a container). Best-effort + OFF by default (like the OB mirror) — advisory context, never a
+    # gate. The risk-gated DRY-RUN is the actual execution gate (§4.0/§4.5).
+    grounding_enabled: bool = False
+    research_url: str = "http://openbrain-research:8000"
+    research_key: str = ""                  # env only (if the service requires one)
+    grounding_timeout_s: float = 300.0      # bound the poll; on timeout grounding is skipped
+    grounding_poll_interval_s: float = 5.0
+
     # ── Charters / rule store (P3) ──────────────────────────────────────────
     charters_dir: str = "charters"
     floor_dir: str = "floor"

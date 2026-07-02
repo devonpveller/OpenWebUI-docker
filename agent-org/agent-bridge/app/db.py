@@ -65,6 +65,9 @@ class Database:
         # effort = thread): an effort now carries its project + effort-card thread root.
         ("efforts", "project", "VARCHAR(64)"),
         ("efforts", "root_post_id", "VARCHAR(64)"),
+        # P4.0 risk-gated dry-run execution gate.
+        ("efforts", "risk", "VARCHAR(24) DEFAULT 'routine'"),
+        ("efforts", "dry_run_status", "VARCHAR(16) DEFAULT 'none'"),
     ]
 
     async def create_all(self) -> None:

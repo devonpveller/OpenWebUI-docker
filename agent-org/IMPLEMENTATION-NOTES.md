@@ -10,7 +10,7 @@ operator decision).
 
 > **What "fully implemented" means here.** Everything that is *code / config / docs* is built,
 > wired, and — where it can run without a live GPU/Mattermost/Docker stack — covered by
-> deterministic tests (55 passing). The remaining items are inherently operator-only: bringing
+> deterministic tests (**80 passing** as of 2026-07-02). The remaining items are inherently operator-only: bringing
 > up containers, creating a Mattermost bot token, running the capability-floor test against the
 > live GPU, deciding OpenRouter spend, and tailnet exposure. Those are authored + runnable, and
 > marked 🚀/🚩 below. The build makes them a switch-flip, not new work.
@@ -75,7 +75,7 @@ operator decision).
 ### P4 — Plan-stop-gates + review
 | Task | Status | Landing site / note |
 |------|--------|---------------------|
-| P4.0 ground + dry-run (risk-gated) | 🧩 | Policy encoded (risk gate mirrors P4.5); grounding via `openbrain-research` + isolated dry-run is a worker-execution step (needs the worker profile + OB1). |
+| P4.0 ground + dry-run (risk-gated) | ✅(gate) 🧩(dry-run exec) | **BUILT 2026-07-02.** `modules/execution_gate.py` — `set_risk`/`record_dry_run`/`may_execute`: a high-blast-radius effort (`irreversible`/`cross_effort`/`cascading_refactor`) can't reach real-code execution until its dry-run is recorded (`Effort.risk`/`dry_run_status`); routine efforts pass. `delegate` consults `may_execute` before dispatch (holds risky efforts). `modules/grounding.py` — `openbrain-research` client (`POST /research` + poll, best-effort, OFF by default) + `FakeGrounding`; `orchestrator.prepare_execution` grounds risky efforts and injects claims as steering. Ops: `/risk`/`/dry-run` chat commands + `POST /effort/{risk,dry-run,prepare}` + `GET /execution/{id}`. Tests: `test_execution_gate.py` (7). The **dry-run *execution*** (isolated branch) stays a live-worker step. |
 | P4.1 plan-doc checkpoints (separate floor doc) | ✅ | [`floor/stop-gate-enforcement.md`](agent-bridge/floor/stop-gate-enforcement.md); enforced halt is the `Checkpoint` row, independent of plan markers. |
 | P4.2 block past checkpoint | ✅ | `stop_gates.may_proceed`/`assert_may_proceed` — `test_checkpoint_blocks_until_cleared`. |
 | P4.3 explain-intent | ✅ | `stop_gates.submit_explanation` (4-field `Explanation`). |
@@ -246,7 +246,7 @@ default plane is what recovery manages). Stack-map §3 already lists the pool co
 Implemented [`COMMS-MODEL-deterministic-routing.md`](../documentation/implementation-guide/teams-chat-agent-orchestration/COMMS-MODEL-deterministic-routing.md)
 in full — the deterministic *audience × intent → destination* model that replaces the
 channel-per-effort sprawl. Bridge-internal (no 3-place change); only the `agent-bridge` image is
-rebuilt. **73 tests green** (was 65; +8 for the comms model). What landed, per phase:
+rebuilt. **80 tests green** (65 → 73 comms model → 80 with P4.0). What landed, per phase:
 
 - **CM.1 — channel = project, effort = thread.** `Effort` gained `project` + `root_post_id`;
   `router.open_effort(name, project=…)` posts an **effort-card root post** in `#proj-<slug>` and
