@@ -25,14 +25,20 @@ reconciled the stack-map + recovery scripts **2026-07-01**.
    formal **§3.0 two-FSM model**), charters, goal-grounding, the learning loop. **Read this first.**
 2. **[UX-FLOW.md](UX-FLOW.md)** — the user journey (intake → readiness-gate → plan → ground/dry-run
    → execute → escalate), the intent thread, the CONCERN schema, the idle-wait DAG.
-3. **[PLAN-teams-chat-agent-orchestration.md](PLAN-teams-chat-agent-orchestration.md)** — *how we
+3. **[COMMS-MODEL-deterministic-routing.md](COMMS-MODEL-deterministic-routing.md)** — 📐 **spec
+   refinement (2026-07-02):** the deterministic *audience × intent → destination* routing table, the
+   flow rules (ladder, decide-private/record-public, bring-back-down), and the taxonomy
+   **channel = project, effort = thread** — which **supersedes PLAN §5.2's per-effort channels** and
+   refines governance §7. Includes its own implementation plan (CM.1–CM.6).
+4. **[PLAN-teams-chat-agent-orchestration.md](PLAN-teams-chat-agent-orchestration.md)** — *how we
    build it*: workspace baseline (§0), architecture, the `agent-bridge` module map (§3.1.1), phases
-   **P0 → Pc → P7**, component contracts, open decisions.
-4. **[TASKS-teams-chat-agent-orchestration.md](TASKS-teams-chat-agent-orchestration.md)** — the
+   **P0 → Pc → P7**, component contracts, open decisions. *(Channel taxonomy in §5.2 is superseded by
+   the COMMS-MODEL doc.)*
+5. **[TASKS-teams-chat-agent-orchestration.md](TASKS-teams-chat-agent-orchestration.md)** — the
    executable checklist (paths + done-when per task; 🚩 = decision-gate).
-5. **[TOOLING-selection.md](TOOLING-selection.md)** — what to reuse vs. build (most worker substrate
+6. **[TOOLING-selection.md](TOOLING-selection.md)** — what to reuse vs. build (most worker substrate
    already exists in this workspace).
-6. **Background / rationale of record** (read when you need the *why*):
+7. **Background / rationale of record** (read when you need the *why*):
    - [OUTLINE-teams-chat-agent-orchestration.md](OUTLINE-teams-chat-agent-orchestration.md) —
      platform comparison (Mattermost vs Matrix vs Zulip). *Governance content here is superseded.*
    - [ANALYSIS-team-topologies-alignment.md](ANALYSIS-team-topologies-alignment.md) — TT × the paper.
@@ -77,7 +83,8 @@ P7  Mobile + hardening (operator-deployed)
 | **Governance gate FSM (machine A)** {active⇄frozen} | **governance §3.0** | PLAN §3.6, TASKS P2.1, UX-FLOW §5 |
 | **Scheduler / idle-wait FSM (machine B)** {computing,waiting,suspended} | **PLAN §3.6** | governance §3.0(B), UX-FLOW §5, TASKS P5.0 |
 | Model lanes (local air-gapped / cloud) | PLAN §3.4 | governance §1/§2.1, UX-FLOW §1, TOOLING §3.3 |
-| CONCERN schema (intent-framed) | UX-FLOW §3 | governance §3 |
+| **Channel/comms taxonomy + routing** | **COMMS-MODEL §2/§4** | PLAN §5.2 (**superseded**), governance §7 (refined), OUTLINE §4 |
+| CONCERN schema (intent-framed) | UX-FLOW §3 | governance §3, COMMS-MODEL §2 (routing) |
 | Role = model profile | PLAN §5.4 | TASKS Pc.3, governance §8 #6 |
 | `agent-bridge` internal modules (SRP) | PLAN §3.1.1 | PLAN §5.1, TASKS P0.3 |
 

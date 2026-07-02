@@ -241,6 +241,17 @@ Recovery scripts are unchanged for the pool by design: the `workers`/`cloud` pro
 (like the Portal) and operator-driven, so they're excluded from the recovery inventory (the
 default plane is what recovery manages). Stack-map §3 already lists the pool containers.
 
+### Channel taxonomy — SUPERSEDED by the comms model (next build, 2026-07-02)
+
+The as-built **channel-per-effort** (`#effort-<name>`) is superseded by
+[`COMMS-MODEL-deterministic-routing.md`](../documentation/implementation-guide/teams-chat-agent-orchestration/COMMS-MODEL-deterministic-routing.md):
+**channel = project (`#proj-<slug>`), effort = thread**, plus a deterministic *intent → destination*
+router and the "bring the audience back down" closure behavior. Driven by real sprawl feedback +
+the human teams-comms research; converges with OUTLINE §4 (topic-threading) and Team Topologies.
+Interim discoverability fixes already shipped (operator auto-added to effort channels; completion
+reported to `#mgmt`; worker activity streamed). The refactor is planned as **CM.1–CM.6** in that doc;
+it's bridge-internal (no 3-place change). Until built, efforts remain channels.
+
 ## P0.5 procedure (the one decision-gate that blocks Pc)
 
 Run these **bounded real completions** (never a model health-probe — C5) against the live
