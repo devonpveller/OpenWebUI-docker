@@ -17,12 +17,36 @@ exercise · 🚀 operator step · 🚩 decision-gate.
 
 > **What "fully implemented" means here.** Everything that is *code / config / docs* is built,
 > wired, and — where it can run without a live GPU/Mattermost/Docker stack — covered by
-> deterministic tests (**111 passing** as of 2026-07-02). The remaining items are inherently operator-only: bringing
+> deterministic tests (**113 passing** as of 2026-07-02). The remaining items are inherently operator-only: bringing
 > up containers, creating a Mattermost bot token, running the capability-floor test against the
 > live GPU, deciding OpenRouter spend, and tailnet exposure. Those are authored + runnable, and
 > marked 🚀/🚩 below. The build makes them a switch-flip, not new work.
 
 ---
+
+## Delivery: additive-push correction + commit/push-on-done (2026-07-02)
+
+Fixes a framing bug the operator caught: workers that can't commit/push produce **nothing durable**
+(little-coder wipes the workspace on `/project` switch), can't collaborate, and break the A→B
+hand-off. Root cause — the floor lumped **push** with deploy/delete as "irreversible." It isn't.
+
+- **Corrected floor** (`floor_guard.py` + `hooks/pretooluse_floor.py` mirror + `floor/hard-rules.md`
+  + governance §8 #5). Irreversible/human-gated = **destructive/external only**: publish to
+  `main`/`master` (`publish-main`), `destructive-git` (force-push, ref/branch/tag delete, history
+  rewrite, `reset --hard`), deploy, delete (`rm -rf`/drop/truncate), spend, send-outside. **Additive
+  = routine:** `commit`, `checkout -b`, **push to a feature branch**, fetch, `merge --no-ff` into a
+  feature branch. This matches what the little-coder **git-proxy already enforced** (additive push
+  allowed; destructive blocked) — the bridge floor was the one out of step. `scope_ledger` irreversible
+  set updated to match. `test_scope_and_floor.py` (feature-push routine; main/force/delete gated).
+- **Commit + push on done (Stage D0).** A real-project effort now publishes its work to
+  `agent/<effort>` on completion (`orchestrator._publish_effort`: `checkout -b`/`add -A`/`commit`/
+  `push -u origin agent/<effort>`), and the completion summary reports the branch + `git fetch`
+  hint. Work is durable, visible, and hand-off-able; merge-to-`main`/deploy stay human-gated.
+  `test_projects.py::test_repo_effort_commits_and_pushes_a_feature_branch`. **113 tests green.**
+- **The rest of the delivery pipeline** (PR → autonomous test series incl. AI-browser for web →
+  human-gated merge → deploy → human testing) is designed in
+  [`DELIVERY-PIPELINE.md`](../documentation/implementation-guide/teams-chat-agent-orchestration/DELIVERY-PIPELINE.md)
+  (DP.1–DP.6, not yet built; the AI-browser lane is the largest new build + a decision-gate).
 
 ## Conversational PO — threading, memory, hierarchical context (2026-07-02)
 
@@ -45,7 +69,7 @@ Three connected fixes from live use, so the PO surface is coherent (all tested):
 ## Live-loop integration (2026-07-02) — the alignment core, now WIRED
 
 The proactive governance controls were module-only; they are now threaded through the live
-operator→worker path (`orchestrator.delegate` → the Stage-5 loop). **111 tests green.** The heavy
+operator→worker path (`orchestrator.delegate` → the Stage-5 loop). **113 tests green.** The heavy
 controls are **risk-gated** (like the dry-run + review-depth already were) so routine one-liners
 stay fast; set `AO_PLAN_APPROVAL=all` / `AO_REVIEW_MODE=all` for the strict-spec reading (every
 effort). What now runs:
@@ -301,7 +325,7 @@ default plane is what recovery manages). Stack-map §3 already lists the pool co
 
 ### Intake clarify-loop + readiness→risk + tailnet reachability (2026-07-02, from live feedback)
 
-Fixes from the first real conversational tests (**111 tests green**):
+Fixes from the first real conversational tests (**113 tests green**):
 
 1. **PO asked a question but dispatched anyway (F5 violation).** `nl_intake` used to dispatch the
    instant `kind=="request"`. Now a request runs the **readiness gate (P3.8)** first
@@ -351,7 +375,7 @@ Fixes from the first real conversational tests (**111 tests green**):
 
 `AO_DEFAULT_REPO` read as "the org only works on one hardcoded repo" — wrong for a multi-project
 orchestrator. It was always meant as a **fallback** (COMMS-MODEL §4 says "AO_DEFAULT_REPO **or
-per-effort**"), but the per-project selection was never built. Now it is (**111 tests green**):
+per-effort**"), but the per-project selection was never built. Now it is (**113 tests green**):
 
 - **Project registry** (`modules/projects.py`, `Project` table): `channel = project = repo`. Onboard
   any repo with **`/project add <name> <repo-url>`** (also `/project list|remove`, `POST /projects`)

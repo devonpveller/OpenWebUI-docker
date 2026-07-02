@@ -20,9 +20,15 @@ optimized away by weak models; a hook does not.
 3. **No inter-agent communication off the logged bus.** No hidden side-channels; every
    hand-off is human-visible and audit-logged.
 
-4. **No irreversible/external action without a cleared Human-Operator decision.** The
-   deploy / push / delete / spend / send-outside list is enforced at the tool-permission
+4. **No irreversible/external action without a cleared Human-Operator decision.** Irreversible =
+   **destructive or external**: publishing to `main`/`master` (the merge moment), force-push,
+   deleting branches/tags/refs, history rewrite (`rebase`/`filter-branch`/`reflog`/`reset --hard`),
+   deploy, delete (`rm -rf`/drop/truncate), spend, send-outside. Enforced at the tool-permission
    layer (the PreToolUse floor hook), not merely prompted.
+   **NOT irreversible — routine, expected of every worker:** `commit`, `checkout -b`, and **`push`
+   to your own feature branch** (`agent/<effort>`), plus `fetch`/`merge --no-ff` into a feature
+   branch. Committing + pushing your work is how it is preserved (a `/project` wipe destroys
+   anything unpushed), shared, and handed off — DO it when your work is done.
 
 5. **The worker pool stays incentive-homogeneous.** Every agent comes from the same aligned
    baseline; never mix a "do whatever it takes" agent into the live pool (paper F6). A

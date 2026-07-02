@@ -127,6 +127,32 @@ async def test_project_add_command_onboards_and_allows_host(db_url):
         await db.dispose()
 
 
+async def test_repo_effort_commits_and_pushes_a_feature_branch(db_url):
+    """An effort against a real repo publishes its work to a feature branch on completion (commit +
+    push are additive/routine) — so the work is durable, visible, and hand-off-able."""
+    settings = Settings(
+        _env_file=None, chat_adapter="fake",
+        profiles_dir=str(ROOT / "profiles"), charters_dir=str(ROOT / "charters"),
+        floor_dir=str(ROOT / "floor"), worker_instance_urls="http://w1:8090",
+        max_concurrent_workers=1, database_url=db_url, project_survey_enabled=False,
+        review_mode="off", plan_approval="off", default_repo="https://github.com/acme/app.git",
+    )
+    db = Database(db_url)
+    orch = Orchestrator(settings, db, FakeChatAdapter(),
+                        model_client=FakeModelClient(), harness=FakeHarness())
+    await orch.setup()
+    try:
+        eid, chan, root = await orch.router.open_effort("feature")
+        await orch.delegate(eid, chan, root, "do the thing")
+        # a finalize wake published the effort's feature branch (additive push, allowed)
+        assert any("git push -u origin agent/effort-feature" in w["prompt"] for w in orch.harness.wakes)
+        # the completion summary reports the branch to fetch — never main
+        assert any("agent/effort-feature" in p["message"] for p in orch.chat.posted)
+        assert not any("push to main" in p["message"].lower() and "✅" in p["message"] for p in orch.chat.posted)
+    finally:
+        await db.dispose()
+
+
 async def test_default_repo_auto_registered_as_project(db_url):
     settings = Settings(
         _env_file=None, chat_adapter="fake",

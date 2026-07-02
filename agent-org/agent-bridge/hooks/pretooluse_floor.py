@@ -23,13 +23,20 @@ import re
 import sys
 import urllib.request
 
-# Mirror of app.modules.floor_guard.IRREVERSIBLE_PATTERNS so the hook can classify
-# offline (fail-closed) without importing the bridge package.
+# Mirror of app.modules.floor_guard.IRREVERSIBLE_PATTERNS so the hook can classify offline
+# (fail-closed) without importing the bridge package. Additive push to a feature branch matches
+# NONE of these — it's reversible/routine (the fix for "workers can't share/preserve their work").
 _IRR = {
-    "push": r"\bgit\s+push\b",
+    "publish-main": r"\bgit\s+push\b[^|;&\n]*?\b(main|master|trunk)(?:\s|$)",
+    "destructive-git": (
+        r"\bgit\s+push\b[^|;&\n]*(--force\b|--force-with-lease\b|-f\b|--mirror\b|--delete\b|\s:\S)"
+        r"|\bgit\s+(rebase|filter-branch|filter-repo|reflog|update-ref)\b"
+        r"|\bgit\s+reset\s+--hard\b"
+        r"|\bgit\s+(branch|tag)\s+(-D|--delete|-d)\b"
+    ),
     "deploy": r"\b(deploy|docker\s+compose\s+up|kubectl\s+apply|helm\s+install)\b",
     "delete": r"\b(rm\s+-rf|drop\s+(table|database)|truncate)\b",
-    "spend": r"\b(purchase|checkout|charge|stripe|billing)\b",
+    "spend": r"\b(purchase|charge|stripe|billing|payment|paypal|invoice)\b",
     "send-outside": r"\b(send(mail)?|smtp)\b",
 }
 

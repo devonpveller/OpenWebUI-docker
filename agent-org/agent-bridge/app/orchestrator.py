@@ -173,6 +173,8 @@ class Orchestrator:
         # The #mgmt thread each effort was requested in, so completion summaries + CONCERNs thread
         # back under that conversation instead of scattering as new top-level posts.
         self._effort_mgmt_thread: dict[str, str] = {}
+        # Feature branch each effort's work was published to (commit + push on done).
+        self._published_branch: dict[str, str] = {}
         # Efforts opened but HELD at the readiness gate awaiting operator clarification (P3.8);
         # the operator's next answer resolves them → dispatch. {effort_id: {proj_channel, root, request}}
         self._pending: dict[str, dict] = {}
@@ -774,6 +776,8 @@ class Orchestrator:
                 )
                 if last is None:   # stopped (failure / flagged / frozen) — handlers already posted
                     return
+            if repo:  # commit + push the effort's branch so the work is durable + shared
+                await self._publish_effort(effort_id, channel_id, root_post_id, repo)
             await self._finish_effort(effort_id, last)
         except Exception as exc:  # noqa: BLE001
             log.exception("delegate failed for %s: %s", effort_id, exc)
@@ -804,6 +808,36 @@ class Orchestrator:
         if heavy and not await self._gate_deliverable(effort_id, result, cp_id):
             return None
         return result
+
+    @staticmethod
+    def _effort_branch(effort_id: str) -> str:
+        """The feature branch an effort's work is published to (never main/master)."""
+        return f"agent/{effort_id}"
+
+    async def _publish_effort(self, effort_id: str, channel_id: str, root: str, repo: str) -> None:
+        """Commit + push the effort's work to its feature branch so it's DURABLE (survives a
+        /project wipe), VISIBLE to the team, and fetchable for A→B hand-off. Additive push to a
+        feature branch is routine (floor); push-to-main/deploy stay human-gated. Deterministic
+        finalize wake — not a reviewable deliverable, so it skips the review gate."""
+        branch = self._effort_branch(effort_id)
+        instruction = (
+            f"PUBLISH YOUR WORK so the team can see it (additive, allowed). Run these git steps:\n"
+            f"  git checkout -b {branch} 2>/dev/null || git checkout {branch}\n"
+            f"  git add -A\n"
+            f'  git commit -m "{effort_id}: <one-line summary of your changes>"   # skip if nothing to commit\n'
+            f"  git push -u origin {branch}\n"
+            f"Do NOT push to main/master. Do NOT force-push or delete anything. "
+            f"Then reply with the branch name and the pushed commit hash."
+        )
+        result = await self.router.wake(
+            effort_id, role="worker-default", thread_id=root, channel_id=channel_id,
+            session_id=effort_id, instruction=instruction, repo=None,  # already focused; no re-clone
+        )
+        self._published_branch[effort_id] = branch if (result and result.ok) else ""
+        await self.audit.log(
+            "effort_published", effort_id=effort_id,
+            payload={"branch": branch, "ok": bool(result and result.ok)},
+        )
 
     async def _gate_deliverable(self, effort_id: str, result, cp_id: str) -> bool:
         """Stage-5 gates on a step's deliverable (risky efforts): sampled monitor (P3.7) + a
@@ -843,19 +877,26 @@ class Orchestrator:
         """All steps cleared → closure DOWN into the effort thread + a summary UP to #mgmt (§2)."""
         head = ((result.output or "").strip().splitlines()[0][:200]
                 if result and result.output else "done")
+        branch = self._published_branch.pop(effort_id, None)
+        where = (
+            f"pushed to branch **`{branch}`** — `git fetch origin {branch}` to see it"
+            if branch else
+            "changes are in the worker's workspace (no repo to publish to)"
+        )
         await self.comms.post(
             Intent.closure,
-            "✅ worker finished (**done**). Review the changes in the worker's workspace; "
-            "nothing is pushed (the floor blocks irreversible actions).",
+            f"✅ worker finished (**done**) — {where}. Merge to `main`/deploy stay human-gated.",
             effort_id=effort_id,
         )
         await self.router.update_effort_card(effort_id, "done")
         await self.comms.post(
             Intent.operator_reply,
-            f"✅ **{effort_id}** finished (**done**): {head}\n_Full trace in its project-channel thread._",
+            f"✅ **{effort_id}** finished (**done**): {head}\n_{where[0].upper() + where[1:]}._",
             thread_id=self._mgmt_thread_of(effort_id),
         )
-        await self._mgmt_remember(effort_id, f"[effort {effort_id} finished] {head}")
+        await self._mgmt_remember(
+            effort_id, f"[effort {effort_id} finished] {head}" + (f" (branch {branch})" if branch else "")
+        )
 
     async def _escalate_worker_failure(self, effort_id: str, result) -> None:
         """A worker that ended non-`done` climbs the escalation ladder (CM.3). A refusal/rejection

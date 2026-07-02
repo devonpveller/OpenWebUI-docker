@@ -11,7 +11,7 @@ and three supporting framework analyses.
 [`agent-org/`](../../../agent-org/) — the `agent-bridge` service (all §3.1.1 modules incl. the P2
 gate, the deterministic [comms router](COMMS-MODEL-deterministic-routing.md): channel = project,
 effort = thread, and the P4.0 risk-gated dry-run gate + grounding client),
-charters/floor/hooks/profiles, the compose project, and **111 passing tests**. See
+charters/floor/hooks/profiles, the compose project, and **113 passing tests**. See
 [`agent-org/IMPLEMENTATION-NOTES.md`](../../../agent-org/IMPLEMENTATION-NOTES.md) for the
 task-by-task build record + what remains **operator-gated** (Mattermost bot token, the P0.5
 capability-floor decision, the conditional cloud lane, worker-pool bring-up, tailnet exposure).
@@ -87,6 +87,7 @@ P7  Mobile + hardening (operator-deployed)
 | Model lanes (local air-gapped / cloud) | PLAN §3.4 | governance §1/§2.1, UX-FLOW §1, TOOLING §3.3 |
 | **Channel/comms taxonomy + routing** | **COMMS-MODEL §2/§4** | PLAN §5.2 (**superseded**), governance §7 (refined), OUTLINE §4 |
 | CONCERN schema (intent-framed) | UX-FLOW §3 | governance §3, COMMS-MODEL §2 (routing) |
+| **Irreversible/additive line + delivery pipeline** | **DELIVERY-PIPELINE §3** | governance §8 #5 (corrected 2026-07-02), hard-rules #4; D0 built, D1–D6 designed |
 | Role = model profile | PLAN §5.4 | TASKS Pc.3, governance §8 #6 |
 | `agent-bridge` internal modules (SRP) | PLAN §3.1.1 | PLAN §5.1, TASKS P0.3 |
 

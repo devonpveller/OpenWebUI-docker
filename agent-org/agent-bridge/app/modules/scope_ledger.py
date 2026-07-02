@@ -23,8 +23,9 @@ log = logging.getLogger("agent_bridge.scope")
 # Roles allowed to grant scope (hard-rule #2). A worker (subject) granting to itself
 # is a self-grant => denied.
 _GRANTORS = {"pm", "po", "human"}
-# Only the human may grant irreversible/external scope.
-_IRREVERSIBLE_RESOURCES = {"deploy", "push", "delete", "spend", "send-outside"}
+# Only the human may grant irreversible/external scope. Additive push to a feature branch is NOT
+# here (it's reversible/routine); the gate is on publishing to main + destructive/external ops.
+_IRREVERSIBLE_RESOURCES = {"publish-main", "destructive-git", "deploy", "delete", "spend", "send-outside"}
 
 
 class ScopeDenied(Exception):

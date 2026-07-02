@@ -30,9 +30,20 @@ async def test_pm_grant_recorded(db):
 async def test_irreversible_scope_needs_human(db):
     ledger = await _ledger(db)
     with pytest.raises(ScopeDenied):
-        await ledger.grant("worker-1", "push", granted_by="pm")  # PM cannot grant irreversible
-    await ledger.grant("worker-1", "push", granted_by="human")   # human can
-    assert await ledger.authorized("worker-1", "push") is True
+        await ledger.grant("worker-1", "publish-main", granted_by="pm")  # PM cannot grant irreversible
+    await ledger.grant("worker-1", "publish-main", granted_by="human")   # human can
+    assert await ledger.authorized("worker-1", "publish-main") is True
+
+
+async def test_additive_push_is_reversible_and_pm_grantable(db):
+    """A feature-branch push is NOT irreversible — the PM can grant 'write' and the floor lets an
+    additive push through, so workers can commit + push their work (the correction)."""
+    ledger = await _ledger(db)
+    await ledger.grant("worker-1", "write", granted_by="pm")   # reversible → PM may grant
+    assert await ledger.authorized("worker-1", "write") is True
+    guard = FloorGuard(ledger)
+    ok, reason = await guard.allowed("worker-1", "git push -u origin agent/effort-hello")
+    assert ok is True and reason == "reversible"               # feature-branch push is routine
 
 
 async def test_revoke_leaves_no_authority(db):
@@ -52,11 +63,18 @@ async def test_role_catalog_approval(db):
 
 # ── floor guard (hard-rule #4) ──────────────────────────────────────────────
 def test_floor_classify():
-    assert FloorGuard.classify("git push origin main") == "push"
+    # Publishing to main + destructive ops are gated; additive commit/push are NOT.
+    assert FloorGuard.classify("git push origin main") == "publish-main"
+    assert FloorGuard.classify("git push -f origin agent/x") == "destructive-git"
+    assert FloorGuard.classify("git push origin :oldbranch") == "destructive-git"
+    assert FloorGuard.classify("git reset --hard HEAD~3") == "destructive-git"
+    assert FloorGuard.classify("git branch -D feature") == "destructive-git"
     assert FloorGuard.classify("rm -rf /workspace/x") == "delete"
     assert FloorGuard.classify("docker compose up -d") == "deploy"
     assert FloorGuard.classify("cat file.txt") is None
-    assert FloorGuard.classify("git commit -m x") is None  # local, reversible
+    assert FloorGuard.classify("git commit -m x") is None            # local, reversible
+    assert FloorGuard.classify("git push -u origin agent/effort-hi") is None  # feature-branch push
+    assert FloorGuard.classify("git checkout -b agent/effort-hi") is None
 
 
 async def test_floor_blocks_uncleared_irreversible(db):
@@ -69,7 +87,7 @@ async def test_floor_blocks_uncleared_irreversible(db):
 async def test_floor_allows_after_human_grant(db):
     ledger = await _ledger(db)
     guard = FloorGuard(ledger)
-    await ledger.grant("worker-1", "push", granted_by="human")
+    await ledger.grant("worker-1", "publish-main", granted_by="human")
     ok, _ = await guard.allowed("worker-1", "git push origin main")
     assert ok is True
 
