@@ -103,6 +103,13 @@ class Settings(BaseSettings):
     grounding_timeout_s: float = 300.0      # bound the poll; on timeout grounding is skipped
     grounding_poll_interval_s: float = 5.0
 
+    # ── Project-context anchor (UX-FLOW Stage 1, P3.8) ──────────────────────
+    # Before the readiness gate, run a ONE-TIME read-only worker survey of the repo (languages,
+    # structure, conventions) and cache it per project, so the gate ANCHORS to the real codebase
+    # instead of guessing (and stops asking placement/language/pattern questions). Only fires when
+    # a real repo is focused (default_repo / per-project repo); the sandbox has nothing to survey.
+    project_survey_enabled: bool = True
+
     # ── Charters / rule store (P3) ──────────────────────────────────────────
     charters_dir: str = "charters"
     floor_dir: str = "floor"

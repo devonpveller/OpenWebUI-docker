@@ -134,6 +134,9 @@ services:
       AO_GROUNDING_ENABLED: ${AO_GROUNDING_ENABLED:-false}
       AO_RESEARCH_URL: ${AO_RESEARCH_URL:-http://openbrain-research:8000}
       AO_RESEARCH_KEY: ${AO_RESEARCH_KEY:-}
+      # Stage-1 anchor: one-time read-only repo survey feeds the readiness gate (only fires when a
+      # repo is focused; the sandbox has nothing to survey).
+      AO_PROJECT_SURVEY_ENABLED: ${AO_PROJECT_SURVEY_ENABLED:-true}
     networks:
       - ao-net
       - llm-net       # reach the existing llm-gateway via the llama-cpp alias

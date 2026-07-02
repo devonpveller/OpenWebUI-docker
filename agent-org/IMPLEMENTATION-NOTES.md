@@ -10,7 +10,7 @@ operator decision).
 
 > **What "fully implemented" means here.** Everything that is *code / config / docs* is built,
 > wired, and — where it can run without a live GPU/Mattermost/Docker stack — covered by
-> deterministic tests (**81 passing** as of 2026-07-02). The remaining items are inherently operator-only: bringing
+> deterministic tests (**87 passing** as of 2026-07-02). The remaining items are inherently operator-only: bringing
 > up containers, creating a Mattermost bot token, running the capability-floor test against the
 > live GPU, deciding OpenRouter spend, and tailnet exposure. Those are authored + runnable, and
 > marked 🚀/🚩 below. The build makes them a switch-flip, not new work.
@@ -69,7 +69,7 @@ operator decision).
 | P3.5 goal injection (constraints inline) | ✅ | `charters.build_context` — `test_goal_constraints_inline_in_context`. |
 | P3.6 re-ground in flight | ✅ | `charters.set_goal(invalidates_in_progress=...)`; the invalidating case is a §3 freeze at the call site. |
 | P3.7 cost-tiered supervision | ✅(logic) | `orchestrator.monitor_sampled` — sampled LLM monitor (never per-token, never health-probe); cheap-continuous = hooks/bus-logging/caps always on. |
-| P3.8 readiness gate + clarify-loop | ✅ | `modules/planner.py::readiness_gate` + **wired into the live conversational path** (2026-07-02): a NL request runs the readiness gate; if under-specified it **HOLDS** (posts clarifying questions, no worker) until the operator answers, then dispatches (`orchestrator._intake_or_dispatch`). `blast_radius` auto-maps to the P4.0 dry-run risk. |
+| P3.8 readiness gate + clarify-loop | ✅ | `modules/planner.py::readiness_gate` + **wired into the live conversational path** (2026-07-02): a NL request is **anchored** to a cached read-only project survey (Stage 1, `modules/project_context.py` + `router.survey_project`), then the readiness gate runs; if a genuine blocker remains it **HOLDS** (numbered questions w/ recommended defaults, no worker) until the operator answers, then dispatches (`orchestrator._intake_or_dispatch`). `blast_radius` auto-maps to the P4.0 dry-run risk. |
 | P3.9 plan presentation + approval | ✅ | `planner.draft_plan` + `approve_plan` (human-only) + `Effort.plan_status`. |
 
 ### P4 — Plan-stop-gates + review
@@ -243,7 +243,7 @@ default plane is what recovery manages). Stack-map §3 already lists the pool co
 
 ### Intake clarify-loop + readiness→risk + tailnet reachability (2026-07-02, from live feedback)
 
-Three fixes from the first real conversational tests (**81 tests green**):
+Fixes from the first real conversational tests (**87 tests green**):
 
 1. **PO asked a question but dispatched anyway (F5 violation).** `nl_intake` used to dispatch the
    instant `kind=="request"`. Now a request runs the **readiness gate (P3.8)** first
@@ -271,6 +271,23 @@ Three fixes from the first real conversational tests (**81 tests green**):
    footer. On the operator's answer the bridge folds their reply + the held recommendations into
    the goal and dispatches **without re-interrogating** (`_resume_after_clarification`). The gate is
    passed a `workspace_ctx` of the project/repo so it anchors rather than guesses.
+
+   **Stage-1 project anchor (so the gate reasons from the ACTUAL codebase, not the request alone).**
+   When a real repo is focused (`AO_DEFAULT_REPO` / per-project), the bridge runs a **one-time
+   read-only worker survey** of the repo (`router.survey_project` — a bounded, scheduler-slotted
+   worker pass that lists languages/structure/conventions/test setup, floor-enforced read-only),
+   caches it per project (`modules/project_context.py`), and injects it into the readiness gate's
+   `workspace_ctx`. So the gate resolves placement/conventions from real files instead of asking.
+   Best-effort + cached (survey failure → conventions-only; empty result cached so it isn't retried
+   per request; `invalidate` forces a refresh). Off for the sandbox (nothing to survey). New setting
+   `AO_PROJECT_SURVEY_ENABLED` (default true; only fires with a repo). Tests: `test_project_context.py` (6).
+
+   *Model-capability note (answering the operator's P0.5 question):* P0.5 measured **three** batteries
+   — instruction/charter-following (18/18, incl. a benign "no-escalate" case), structured-output
+   (11/12), coordination (5/5) — not just the judge; local `qwen36-27b` passed all. The earlier
+   over-asking was a *prompt* gap (now grounded in F5/UX-FLOW) + a missing anchor (now added), not a
+   model-capability failure. If it recurs, the lever is the P0.5 escape hatch (flip
+   `planner`/`pm`/`po` to `lane: cloud`), but P0.5 says local judgment is sufficient.
 3. **Tailnet `tailscale serve` fix (P7.4).** Two gotchas corrected in `docs/P7-mobile-and-exposure.md`:
    the socket is **`/tmp/tailscaled.sock`** (not the default path — that was the operator's *"not
    running?"* error), and Mattermost (ao-net) was unreachable from the `tailscale` netns

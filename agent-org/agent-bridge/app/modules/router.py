@@ -49,6 +49,19 @@ def slugify(name: str) -> str:
     s = re.sub(r"[^a-z0-9]+", "-", name.strip().lower()).strip("-")
     return s or "untitled"
 
+
+# Reserved effort id for the read-only project survey (UX-FLOW Stage 1 anchor). It exists only so
+# the survey respects the scheduler's concurrency semaphore (surveys yield to real work).
+SURVEY_EFFORT = "__survey__"
+_SURVEY_PROMPT = (
+    "PROJECT SURVEY (READ-ONLY — do not modify, create, or delete any files; do not run tests that "
+    "mutate state). In 8–12 terse lines, give a FACTUAL summary of THIS repository so future work "
+    "can anchor to it: primary language(s) + framework; top-level structure (key directories); the "
+    "build/deps manifest; the test framework + how tests are run; the naming + code conventions you "
+    "actually observe; and where a new small feature or utility would conventionally live. Facts "
+    "only — no recommendations, no changes."
+)
+
 # A context builder returns the full prompt injected into a worker on wake
 # (goal + floor + steering + plan). Wired to charters.build_context by the
 # orchestrator; a trivial default keeps the router testable in isolation.
@@ -294,6 +307,37 @@ class Router:
             # A finished effort wakes its dependency waiters (idle-wait DAG).
             await self.scheduler.wake_finished(effort_id)
             return result
+        finally:
+            await self.scheduler.release(inst.id)
+
+    # ── project survey — read-only Stage-1 anchor for the readiness gate (P3.8) ─
+    async def survey_project(self, repo: str) -> str:
+        """Run a ONE-TIME read-only survey of `repo` on a pooled worker and return its factual
+        summary (languages/structure/conventions). Best-effort: returns "" if no repo, no free
+        slot, or the survey fails — the caller degrades to conventions-only anchoring. Respects the
+        concurrency semaphore via a reserved survey effort so it yields to real work."""
+        if not repo:
+            return ""
+        await self.gate.ensure_effort(SURVEY_EFFORT, "project survey")
+        try:
+            inst = await self.scheduler.acquire(SURVEY_EFFORT, "worker-default", SURVEY_EFFORT)
+        except (FrozenEffortError, NoCapacityError):
+            return ""
+        try:
+            if not await self.harness.set_project(inst.base_url, repo):
+                return ""
+            result = await self.harness.wake(
+                inst.base_url, f"survey-{slugify(repo)}", _SURVEY_PROMPT
+            )
+            summary = (result.output or "").strip() if result else ""
+            await self.audit.log(
+                "project_survey", actor=inst.id,
+                payload={"repo": repo, "ok": bool(result and result.ok), "len": len(summary)},
+            )
+            return summary if (result and result.ok) else ""
+        except Exception as exc:  # noqa: BLE001 - survey is advisory; never block intake
+            log.warning("project survey failed for %s: %s", repo, exc)
+            return ""
         finally:
             await self.scheduler.release(inst.id)
 

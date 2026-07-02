@@ -28,6 +28,7 @@ from .modules.learning_loop import LearningLoop
 from .modules.model_router import ModelRouter
 from .modules.planner import Planner
 from .modules.profiles import ProfileRegistry
+from .modules.project_context import ProjectContext
 from .modules.roles import RoleAuthority
 from .modules.router import Router, slugify
 from .modules.scheduler import Scheduler
@@ -124,6 +125,11 @@ class Orchestrator:
         self.router = Router(
             db, settings, self.gate, self.scheduler, self.harness, chat, self.audit,
             context_builder=self.charters.build_context,
+        )
+        # Stage-1 anchor: a cached read-only repo survey feeds the readiness gate (P3.8) so it
+        # reasons from the real codebase instead of guessing. Only surveys when a repo is focused.
+        self.project_context = ProjectContext(
+            self.router.survey_project, enabled=settings.project_survey_enabled
         )
         self.events = EventGateway(db, chat, self.handle_event)
         # Deterministic intent -> destination routing (COMMS-MODEL §2). Every bridge-emitted
@@ -459,9 +465,15 @@ class Orchestrator:
         dispatch a worker. Owns its own #mgmt reply so the caller just returns."""
         await self.charters.set_goal(effort_id, request, created_by="po")
         # Anchor the readiness gate to the existing project (UX-FLOW Stage 1) so it resolves
-        # conventions/placement/language itself instead of asking about them.
+        # conventions/placement/language itself instead of asking about them. When a real repo is
+        # focused, inject a cached read-only survey of the actual codebase; else conventions-only.
+        project = self._project_for()
         repo = self.s.default_repo or ""
-        workspace_ctx = f"existing project: #{self._project_for()}" + (f" (repo: {repo})" if repo else "")
+        workspace_ctx = f"existing project: #{project}" + (f" (repo: {repo})" if repo else "")
+        if repo:
+            summary = await self.project_context.ensure(project, repo)
+            if summary:
+                workspace_ctx += f"\n\nPROJECT SUMMARY (survey of the actual codebase):\n{summary}"
         verdict = None
         try:
             verdict = await self.planner.readiness_gate(effort_id, request, workspace_ctx)
