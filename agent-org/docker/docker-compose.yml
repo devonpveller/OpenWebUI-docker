@@ -140,6 +140,10 @@ services:
       # Multi-project egress allowlist: the bridge writes this tinyproxy filter (shared volume) as
       # projects/hosts are onboarded; ao-git-egress reloads it (remotely-managed worker scope, §5).
       AO_EGRESS_ALLOWLIST_FILE: /egress/egress-allowlist.txt
+      # Proactive alignment controls (UX-FLOW Stage 3/5). Risk-gated by default (fast for routine);
+      # set to `all` for the strict-spec reading (plan-approval + review on EVERY effort), `off` to skip.
+      AO_PLAN_APPROVAL: ${AO_PLAN_APPROVAL:-risky}      # always | risky | off — Stage-3 plan gate (P3.9)
+      AO_REVIEW_MODE: ${AO_REVIEW_MODE:-risky}          # all | risky | off — Stage-5 stop-gates/review (P4)
     volumes:
       - ao-egress-config:/egress    # shared with ao-git-egress (bridge writes, proxy reads)
     networks:

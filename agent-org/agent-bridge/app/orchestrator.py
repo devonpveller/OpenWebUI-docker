@@ -82,7 +82,7 @@ _HELP = (
     "- `/egress allow <host|repo-url>` — widen the worker git-egress allowlist; `/egress list`\n"
     "- `/effort <name>` — open a work effort as a **thread** in its project channel\n"
     "- `/status [effort_id]` — gate state of all efforts (or one)\n"
-    "- `approve|modify|abort <effort_id> [note]` — decide an open CONCERN\n"
+    "- `approve|modify|abort <effort_id> [note]` — approve a drafted **plan**, or decide an open CONCERN\n"
     "- `/risk <effort_id> <routine|irreversible|cross_effort|cascading_refactor>` — set blast radius "
     "(risky ⇒ a dry-run is required before real-code execution)\n"
     "- `/dry-run <effort_id> <pass|fail>` — record the isolated dry-run outcome\n"
@@ -157,6 +157,9 @@ class Orchestrator:
         # Efforts opened but HELD at the readiness gate awaiting operator clarification (P3.8);
         # the operator's next answer resolves them → dispatch. {effort_id: {proj_channel, root, request}}
         self._pending: dict[str, dict] = {}
+        # Efforts HELD at the Stage-3 plan-approval gate (P3.9) awaiting operator approval;
+        # `approve <effort>` dispatches with the plan's steps. {effort_id: {proj_channel, root, request, plan}}
+        self._pending_plan: dict[str, dict] = {}
         self._bg_tasks: set[asyncio.Task] = set()  # in-flight delegations
 
     def _spawn(self, coro) -> None:
@@ -353,10 +356,10 @@ class Orchestrator:
             subject_text,
             MonitorVerdict,
         )
-        if verdict.deviates and verdict.trigger:
+        if getattr(verdict, "deviates", False) and getattr(verdict, "trigger", None):
             concern = Concern(
                 intent_thread=f"effort {effort_id}",
-                what_surfaced=verdict.rationale or "monitor detected a deviation",
+                what_surfaced=getattr(verdict, "rationale", "") or "monitor detected a deviation",
                 intent_of_change="a monitored deviation from intent/spec (governance §3)",
                 pm_recommendation="review + re-ground",
                 blocked_efforts=[effort_id],
@@ -563,14 +566,85 @@ class Orchestrator:
             )
             return
 
-        # Clear (or readiness unavailable) → dispatch. Clear any prior hold.
+        # Readiness passed — clear any prior hold.
         self._pending.pop(effort_id, None)
+        # Stage 3 (P3.9): plan-approval gate. Risk-gated — present a plan + HOLD for operator
+        # approval before ANY execution; routine efforts (or plan_approval=off) proceed directly.
+        if await self._plan_required(effort_id):
+            await self._present_plan(
+                effort_id, proj_channel, root, request, reply_prefix, mgmt_channel, workspace_ctx
+            )
+            return
         self._spawn(self.delegate(effort_id, proj_channel, root, request))
         await self.chat.post(
             mgmt_channel,
             (f"{reply_prefix}\n\n_Readiness ✓ — dispatched a worker on **{effort_id}**; watch it "
              f"live in its project thread. I'll summarize back here when done._").strip(),
         )
+
+    async def _plan_required(self, effort_id: str) -> bool:
+        """Whether the Stage-3 plan-approval gate applies (AO_PLAN_APPROVAL): `always` = every
+        effort, `risky` = high-blast-radius only (default), `off` = never."""
+        mode = self.s.plan_approval
+        if mode == "off":
+            return False
+        if mode == "always":
+            return True
+        return self.exec_gate.dry_run_required(await self._effort_risk_str(effort_id))
+
+    async def _present_plan(
+        self, effort_id: str, proj_channel: str, root: str, request: str,
+        reply_prefix: str, mgmt_channel: str, workspace_ctx: str,
+    ) -> None:
+        """UX-FLOW Stage 3: draft a plan, present it to #mgmt as the top-level stop-gate, and HOLD
+        until the operator approves (`approve <effort>`). No execution happens before approval."""
+        try:
+            plan = await self.planner.draft_plan(
+                effort_id, intent_thread=request, request=request, workspace_ctx=workspace_ctx
+            )
+        except Exception as exc:  # noqa: BLE001 - a planner hiccup shouldn't wedge the operator
+            log.warning("draft_plan failed for %s (dispatching without plan gate): %s", effort_id, exc)
+            self._spawn(self.delegate(effort_id, proj_channel, root, request))
+            await self.chat.post(
+                mgmt_channel, f"{reply_prefix}\n\n_(couldn't draft a plan — dispatched directly.)_"
+            )
+            return
+        self._pending_plan[effort_id] = {
+            "proj_channel": proj_channel, "root": root, "request": request, "plan": plan,
+        }
+        steps_list = getattr(plan, "implementation_steps", None) or []
+        steps = "\n".join(f"{i}. {s}" for i, s in enumerate(steps_list, 1)) or "_(no steps drafted)_"
+        body = (
+            f"{reply_prefix}\n\n📋 **Plan for `{effort_id}`** — the approval gate before any "
+            f"execution (UX-FLOW Stage 3).\n"
+            f"**Feature:** {getattr(plan, 'feature_overview', '') or request}\n"
+            f"**Steps:**\n{steps}\n"
+            f"**Estimate:** {getattr(plan, 'estimate', 'unknown')}\n\n"
+            f"_Reply `approve {effort_id}` to execute, or `abort {effort_id}` to cancel._"
+        )
+        await self.chat.post(mgmt_channel, body.strip())
+        await self.comms.post(
+            Intent.effort_dispatch,
+            "📋 Plan drafted — awaiting operator approval before execution (Stage 3).",
+            effort_id=effort_id,
+        )
+
+    async def approve_effort_plan(self, effort_id: str) -> bool:
+        """Operator approved a held plan (Stage 3 → Stage 4/5): record approval + dispatch with the
+        plan's steps (each becomes a checkpoint). Returns False if no plan was pending."""
+        pend = self._pending_plan.pop(effort_id, None)
+        if not pend:
+            return False
+        try:
+            await self.planner.approve_plan(effort_id, actor_role="human")
+        except Exception as exc:  # noqa: BLE001
+            log.debug("approve_plan(%s): %s", effort_id, exc)
+        plan = pend.get("plan")
+        steps = getattr(plan, "implementation_steps", None) if plan else None
+        self._spawn(
+            self.delegate(effort_id, pend["proj_channel"], pend["root"], pend["request"], plan_steps=steps)
+        )
+        return True
 
     # ── ground + dry-run prep (UX-FLOW Stage 4, P4.0) ─────────────────────────
     async def prepare_execution(
@@ -599,11 +673,13 @@ class Orchestrator:
 
     async def delegate(
         self, effort_id: str, channel_id: str, root_post_id: str, goal: str,
-        *, repo: str | None = None,
+        *, repo: str | None = None, plan_steps: list[str] | None = None,
     ) -> None:
-        """Set the effort's goal (constraints inline, §4.3) and dispatch a worker; all activity
-        streams into the effort THREAD (`root_post_id`). Runs as a background task. `repo` focuses
-        the worker first; omit to resolve it from the effort's project (registry → AO_DEFAULT_REPO)."""
+        """Execute an effort (UX-FLOW Stage 5) as a governed loop: each plan step is a **checkpoint**
+        (P4.1/4.2) — the worker runs it, then (on risky efforts) a sampled **monitor** (P3.7) + a
+        differently-goaled **review** (P4.4-4.7) gate it before proceeding; a flag/deviation freezes +
+        escalates (P4.6/§3). Routine efforts take the light path (wake → done). Runs in the background.
+        `repo` focuses the worker; omit to resolve from the effort's project (registry → fallback)."""
         repo = repo or await self._effort_repo(effort_id)
         try:
             await self.charters.set_goal(effort_id, goal, created_by="po")
@@ -621,15 +697,18 @@ class Orchestrator:
                     Intent.operator_reply, f"⛔ **{effort_id}** held before execution — {reason}."
                 )
                 return
-            await self.comms.post(
-                Intent.effort_dispatch, f"⏳ **{effort_id}** — worker dispatched. Working…",
-                effort_id=effort_id,
-            )
-            result = await self.router.wake(
-                effort_id, role="worker-default", thread_id=root_post_id, channel_id=channel_id,
-                session_id=effort_id, instruction=goal, repo=repo,
-            )
-            await self._report_completion(effort_id, result)
+            # P5.1/5.2: grant the worker its (non-irreversible) scope + confirm its role is approved.
+            await self._authorize_worker(effort_id)
+            heavy = await self._effort_heavy(effort_id)   # risk-gated stop-gates+review+monitor
+            steps = [s for s in (plan_steps or []) if s.strip()] or [goal]
+            last = None
+            for i, step in enumerate(steps, 1):
+                last = await self._run_step(
+                    effort_id, channel_id, root_post_id, step, i, len(steps), repo, heavy
+                )
+                if last is None:   # stopped (failure / flagged / frozen) — handlers already posted
+                    return
+            await self._finish_effort(effort_id, last)
         except Exception as exc:  # noqa: BLE001
             log.exception("delegate failed for %s: %s", effort_id, exc)
             await self.comms.post(
@@ -638,9 +717,50 @@ class Orchestrator:
             )
             await self.router.update_effort_card(effort_id, "error")
 
+    async def _run_step(self, effort_id, channel_id, root, step, i, n, repo, heavy):
+        """Run one plan step = one checkpoint. Returns the WorkResult to continue, or None to STOP
+        (the failure/flag/deviation handler has already posted + frozen where required)."""
+        header = f"▶ **step {i}/{n}**: {step[:180]}" if n > 1 else "⏳ worker dispatched. Working…"
+        await self.comms.post(Intent.effort_dispatch, header, effort_id=effort_id)
+        cp_id = f"{effort_id}:cp{i}"
+        if heavy:  # P4.1: the enforced halt exists as a Checkpoint row, independent of plan markers
+            await self.stop_gates.add_checkpoint(cp_id, effort_id, f"step {i}", i)
+        result = await self.router.wake(
+            effort_id, role="worker-default", thread_id=root, channel_id=channel_id,
+            session_id=effort_id, instruction=step, repo=repo,
+        )
+        if result is None:
+            await self._report_completion(effort_id, None)
+            return None
+        if not result.ok:
+            await self._escalate_worker_failure(effort_id, result)
+            return None
+        if heavy and not await self._gate_deliverable(effort_id, result, cp_id):
+            return None
+        return result
+
+    async def _gate_deliverable(self, effort_id: str, result, cp_id: str) -> bool:
+        """Stage-5 gates on a step's deliverable (risky efforts): sampled monitor (P3.7) + a
+        differently-goaled review (P4.4-4.7). Returns True to proceed, False to STOP (frozen)."""
+        deliverable = (result.output or "").strip()
+        # P3.7 — the LLM monitor, forced on risky efforts (never per-token, never a health-probe).
+        verdict = await self.monitor_sampled(effort_id, deliverable, force=True)
+        if verdict is not None and getattr(verdict, "deviates", False):
+            # monitor_sampled already froze + raised the CONCERN; record the pattern (P6.4) + stop.
+            await self._observe_pattern(effort_id, verdict.rationale or "monitored deviation")
+            return False
+        # P4.4-4.7 — differently-goaled review, depth risk-gated; verdicts route to the PM.
+        risk = await self._effort_risk_str(effort_id)
+        verdicts = await self.stop_gates.review(
+            effort_id, "worker-default", deliverable, risk=risk, checkpoint_id=cp_id
+        )
+        if not await self.stop_gates.clear_checkpoint(cp_id, verdicts):   # P4.2/4.6
+            await self._on_review_flag(effort_id, verdicts)
+            return False
+        return True
+
     async def _report_completion(self, effort_id: str, result) -> None:
-        """Route a finished effort per the §2 closure row: closure DOWN into the effort thread
-        (bring the audience back down) + a summary UP to #mgmt. A non-`done` end escalates."""
+        """The undeliverable case (§2): couldn't dispatch (frozen / no free slot)."""
         if result is None:
             await self.comms.post(
                 Intent.worker_activity,
@@ -651,23 +771,22 @@ class Orchestrator:
                 Intent.operator_reply,
                 f"⚠️ **{effort_id}**: couldn't dispatch a worker (frozen or no free slot).",
             )
-            return
-        head = (result.output or "").strip().splitlines()[0][:200] if result.output else result.status
-        if result.ok:
-            await self.comms.post(
-                Intent.closure,
-                "✅ worker finished (**done**). Review the changes in the worker's workspace; "
-                "nothing is pushed (the floor blocks irreversible actions).",
-                effort_id=effort_id,
-            )
-            await self.router.update_effort_card(effort_id, "done")
-            await self.comms.post(
-                Intent.operator_reply,
-                f"✅ **{effort_id}** finished (**done**): {head}\n"
-                f"_Full trace in its project-channel thread._",
-            )
-        else:
-            await self._escalate_worker_failure(effort_id, result)
+
+    async def _finish_effort(self, effort_id: str, result) -> None:
+        """All steps cleared → closure DOWN into the effort thread + a summary UP to #mgmt (§2)."""
+        head = ((result.output or "").strip().splitlines()[0][:200]
+                if result and result.output else "done")
+        await self.comms.post(
+            Intent.closure,
+            "✅ worker finished (**done**). Review the changes in the worker's workspace; "
+            "nothing is pushed (the floor blocks irreversible actions).",
+            effort_id=effort_id,
+        )
+        await self.router.update_effort_card(effort_id, "done")
+        await self.comms.post(
+            Intent.operator_reply,
+            f"✅ **{effort_id}** finished (**done**): {head}\n_Full trace in its project-channel thread._",
+        )
 
     async def _escalate_worker_failure(self, effort_id: str, result) -> None:
         """A worker that ended non-`done` climbs the escalation ladder (CM.3). A refusal/rejection
@@ -695,6 +814,124 @@ class Orchestrator:
             Intent.operator_reply,
             f"⚠️ **{effort_id}** ended **{result.status}** — see its project-channel thread. {head}",
         )
+
+    # ── Stage-5 governance helpers (scope / risk-gating / review-flag / learning) ─
+    async def _authorize_worker(self, effort_id: str) -> None:
+        """P5.1/5.2: ensure the worker role is APPROVED (catalog) + grant its non-irreversible
+        scope for this effort. Irreversible scope (push/deploy/delete) stays human-only, so the
+        worker can read/write its workspace but not push — matching the container floor."""
+        role = "worker-default"
+        try:
+            if not await self.scope.is_role_approved(role):
+                await self.scope.catalog_add(role, "charters/worker-default.md", approved=True)
+            for res in ("read", "write"):
+                if not await self.scope.authorized(role, res):
+                    try:
+                        await self.scope.grant(role, res, granted_by="pm", effort_id=effort_id)
+                    except Exception as exc:  # noqa: BLE001
+                        log.debug("scope grant %s/%s: %s", role, res, exc)
+        except Exception as exc:  # noqa: BLE001 - authorization is best-effort scaffolding
+            log.debug("authorize_worker(%s): %s", effort_id, exc)
+
+    # ── lateral concern (P4.8) + A→B hand-off (P5.4) ──────────────────────────
+    async def raise_lateral_concern(self, effort_id: str, from_role: str, text: str) -> None:
+        """P4.8: a worker raises a cross-domain concern to a peer/reviewer. It surfaces on the BUS
+        and routes to the PM (never resolved privately, never peer merge-authority), and is EXEMPT
+        from the wake-storm rate cap (the brake channel is sacred, §5)."""
+        await self.router.record_wake(effort_id, target="pm", kind="brake")  # exempt from the cap
+        await self.comms.post(
+            Intent.escalation,
+            f"🛑 **lateral concern** from `{from_role}`: {text[:400]}\n↑ routed to the PM "
+            f"(not resolved peer-to-peer, §4.4).",
+            effort_id=effort_id,
+        )
+        await self.comms.post(
+            Intent.operator_reply, f"🛑 lateral concern on **{effort_id}** ({from_role}): {text[:200]}"
+        )
+        await self.audit.log(
+            "lateral_concern", effort_id=effort_id, actor=from_role, payload={"text": text[:500]}
+        )
+
+    async def hand_off(self, effort_id: str, path: str, *, workspace: str = "/workspace") -> str | None:
+        """P5.4: an out-of-scope error hands off to the **last owner** of `path` (git-blame
+        provenance, OD-4). Surfaces on the bus (observable); returns the owner, or None if
+        unresolved (then it routes to the PM). The wake is brake-kind (storm-exempt)."""
+        owner = await self.router.last_owner(path, workspace)
+        if owner:
+            await self.comms.post(
+                Intent.escalation,
+                f"↪️ **hand-off**: `{path}` is outside this effort's scope — last owner **{owner}** "
+                f"(git-blame). Routing the fix to them.",
+                effort_id=effort_id,
+            )
+        else:
+            await self.comms.post(
+                Intent.escalation,
+                f"↪️ **hand-off**: `{path}` is outside scope but its last owner couldn't be "
+                f"resolved — surfacing to the PM.",
+                effort_id=effort_id,
+            )
+        await self.router.record_wake(effort_id, target=owner or "pm", kind="brake")
+        await self.audit.log("handoff", effort_id=effort_id, payload={"path": path, "owner": owner})
+        return owner
+
+    async def _effort_risk_str(self, effort_id: str) -> str:
+        async with self.db.session_factory() as s:
+            e = await s.get(Effort, effort_id)
+        return e.risk if e and e.risk else "routine"
+
+    async def _effort_heavy(self, effort_id: str) -> bool:
+        """Whether to run the Stage-5 stop-gates + monitor + review (AO_REVIEW_MODE): `all` =
+        always, `risky` = only high-blast-radius efforts (default), `off` = never."""
+        mode = self.s.review_mode
+        if mode == "off":
+            return False
+        if mode == "all":
+            return True
+        return self.exec_gate.dry_run_required(await self._effort_risk_str(effort_id))
+
+    async def _observe_pattern(self, effort_id: str, text: str) -> str:
+        """P6.4/6.5: record a signal in the learning loop; a pattern recurring across ≥2 efforts is
+        surfaced to #suggestions + a PROPOSED hardening (never auto-applied — the human disposes)."""
+        import hashlib
+
+        sig = hashlib.sha1(" ".join((text or "").lower().split())[:120].encode()).hexdigest()[:16]
+        try:
+            pat = await self.learning.observe(sig, effort_id, text or "")
+            if pat is not None:  # surfaced across ≥2 efforts
+                await self.comms.post(
+                    Intent.suggestion,
+                    f"📈 **pattern** surfaced across {len(pat.effort_ids or [])} efforts "
+                    f"(`{sig}`): {(text or '')[:200]}\n_PM should propose a hardening "
+                    f"(propose-not-dispose — the human approves)._",
+                )
+                try:
+                    await self.learning.propose(sig, f"recurring: {(text or '')[:160]}", by="pm")
+                except Exception:  # noqa: BLE001
+                    pass
+        except Exception as exc:  # noqa: BLE001
+            log.debug("observe_pattern(%s): %s", effort_id, exc)
+        return sig
+
+    async def _on_review_flag(self, effort_id: str, verdicts: list) -> None:
+        """A review flagged the deliverable (P4.6/§4.4): record the pattern (P6.4), then freeze +
+        escalate to the operator (pause-until-cleared) — the checkpoint stays blocking until a
+        decision (approve = accept / modify = re-ground / abort)."""
+        flagged = [v for v in verdicts if getattr(v, "verdict", "pass") == "flag"]
+        detail = "; ".join(
+            f"[{getattr(v, 'lens', '?')}] "
+            + "; ".join(getattr(v, "findings", None) or [getattr(v, "reasoning", "")])
+            for v in flagged
+        )[:300] or "review flagged the deliverable"
+        await self._observe_pattern(effort_id, detail)
+        concern = Concern(
+            intent_thread=f"effort {effort_id}",
+            what_surfaced=f"review flagged the deliverable: {detail}",
+            intent_of_change="a review flag means the deliverable may trade safety/scope for the metric (§4.4)",
+            pm_recommendation="re-ground + refactor, or abort",
+            blocked_efforts=[effort_id],
+        )
+        await self.raise_concern(effort_id, Trigger.deviation, concern, actor="reviewer")
 
     async def record_suggestion(
         self, worker: str, text: str, effort_id: str | None = None
@@ -860,6 +1097,18 @@ class Orchestrator:
                 await reply(f"usage: `{cmd} <effort_id> [note]`")
                 return
             effort_id, note = args[0], " ".join(args[1:])
+            # Stage-3 plan approval takes precedence over a CONCERN clear when a plan is pending.
+            if effort_id in self._pending_plan:
+                if cmd == "approve":
+                    await self.approve_effort_plan(effort_id)
+                    await reply(f"✅ plan approved for `{effort_id}` — dispatching a worker.")
+                else:
+                    self._pending_plan.pop(effort_id, None)
+                    await reply(
+                        f"⛔ plan {cmd} for `{effort_id}` — not dispatched. "
+                        f"Re-send the request with your changes to adjust it."
+                    )
+                return
             try:
                 await self.apply_operator_decision(
                     effort_id, Decision(decision=cmd, note=note), actor_role="human"

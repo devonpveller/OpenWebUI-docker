@@ -89,6 +89,18 @@ class EgressIn(BaseModel):
     host: str  # a bare host or a repo URL
 
 
+class LateralIn(BaseModel):
+    effort_id: str
+    from_role: str
+    text: str
+
+
+class HandoffIn(BaseModel):
+    effort_id: str
+    path: str
+    workspace: str = "/workspace"
+
+
 def build_chat(settings):
     if settings.chat_adapter == "mattermost":
         return MattermostAdapter(
@@ -236,6 +248,17 @@ def create_app(orch: Orchestrator | None = None) -> FastAPI:
         host = await orch.egress.allow(body.host, added_by="operator", source="manual")
         await orch.egress.sync()
         return {"allowed": host, "hosts": await orch.egress.hosts()}
+
+    # ── lateral concern (P4.8) + A→B hand-off (P5.4) — worker/role signals ──────
+    @app.post("/lateral-concern")
+    async def lateral_concern(body: LateralIn) -> dict:
+        await orch.raise_lateral_concern(body.effort_id, body.from_role, body.text)
+        return {"ok": True}
+
+    @app.post("/handoff")
+    async def handoff(body: HandoffIn) -> dict:
+        owner = await orch.hand_off(body.effort_id, body.path, workspace=body.workspace)
+        return {"owner": owner}
 
     # ── suggestion pool (P6.3) — recorded AND surfaced to #suggestions (CM.5) ───
     @app.post("/suggestion")

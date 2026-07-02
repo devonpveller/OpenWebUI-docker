@@ -97,6 +97,13 @@ class Settings(BaseSettings):
     # ── Cost-tiered supervision (governance §3, P3.7) ───────────────────────
     monitor_sample_rate: float = 0.25      # expensive-continuous LLM monitor sampling (0..1)
 
+    # ── Stage 3 plan-approval + Stage 5 stop-gates/review (UX-FLOW, P3.9/P4) ─
+    # These are the proactive alignment controls. Risk-gated by default (like the dry-run + review
+    # depth) so routine one-liners stay fast; set to `all` for the strict-spec reading (every effort
+    # gets a plan-approval gate + review), or `off` to skip.
+    plan_approval: str = "risky"           # always | risky | off — Stage-3 plan-approval gate (P3.9)
+    review_mode: str = "risky"             # all | risky | off — Stage-5 checkpoints+monitor+review (P4)
+
     # ── Ground + dry-run, risk-gated (UX-FLOW Stage 4, P4.0) ────────────────
     # Grounding submits an effort's assumptions to the shared openbrain-research service
     # (reach it BY CONTAINER NAME on ai-stack_llm-net; :8818 host loopback is unreachable from
