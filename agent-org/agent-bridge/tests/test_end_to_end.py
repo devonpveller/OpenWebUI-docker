@@ -185,19 +185,28 @@ async def test_nl_request_opens_effort(db_url):
 
 async def test_nl_request_holds_for_clarification_then_dispatches(db_url):
     """The reported bug: the PO asked a question but dispatched anyway. Now an under-specified
-    request HOLDS at the readiness gate (no worker), and the operator's answer dispatches it."""
-    from app.schemas import OperatorIntent, ReadinessVerdict
+    request HOLDS at the readiness gate (no worker); the operator's answer dispatches it — and the
+    held question is a NUMBERED item with its recommended default (no re-interrogation on resume)."""
+    from app.schemas import ClarifyingQuestion, OperatorIntent, ReadinessVerdict
 
     orch, chat, harness, db = await _orch(db_url)
     try:
         mgmt = await orch.mgmt_channel_id()
-        # 1) vague request → readiness says NOT clear and asks a question → HOLD.
+        # 1) vague request → readiness elevates ONE genuine feature-intent question → HOLD.
         orch.models._client.queue_structured(
             OperatorIntent(kind="request", effort_name="hello-fn", reply="Sure — scoping that.")
         )
         orch.models._client.queue_structured(
-            ReadinessVerdict(clear_and_safe=False, blast_radius="routine",
-                             clarifying_questions=["Should hello() return the string 'Hello'?"])
+            ReadinessVerdict(
+                clear_and_safe=False, blast_radius="routine",
+                clarifying_questions=[
+                    ClarifyingQuestion(
+                        question="What should hello() return?",
+                        recommendation="return the string 'Hello, World!'",
+                        category="feature_intent",
+                    )
+                ],
+            )
         )
         await orch.handle_event(
             {"id": "q1", "channel_id": mgmt, "message": "add a hello function",
@@ -207,15 +216,15 @@ async def test_nl_request_holds_for_clarification_then_dispatches(db_url):
             await asyncio.gather(*orch._bg_tasks)
         assert len(harness.wakes) == 0                      # NOT dispatched — held
         assert "effort-hello-fn" in orch._pending           # awaiting clarification
-        assert any("clarify" in p["message"].lower() for p in chat.posted)
+        held = next(p for p in chat.posted if "need to clarify" in p["message"].lower())
+        assert "1. " in held["message"]                     # NUMBERED, not a bullet
+        assert "Recommended:" in held["message"]            # carries a default answer
+        assert "need an answer before I start" in held["message"]  # all-required is explicit
 
-        # 2) operator answers → clarification → readiness now clear → dispatch.
+        # 2) operator answers → clarification → dispatch (NO second readiness pass queued).
         orch.models._client.queue_structured(
             OperatorIntent(kind="clarification", effort_id="effort-hello-fn",
                            steering="yes, return Hello and add a help list", reply="Got it.")
-        )
-        orch.models._client.queue_structured(
-            ReadinessVerdict(clear_and_safe=True, blast_radius="routine")
         )
         await orch.handle_event(
             {"id": "q2", "channel_id": mgmt, "message": "yes, return Hello and add a help list",
@@ -225,6 +234,8 @@ async def test_nl_request_holds_for_clarification_then_dispatches(db_url):
             await asyncio.gather(*orch._bg_tasks)
         assert len(harness.wakes) == 1                      # NOW the worker runs
         assert "effort-hello-fn" not in orch._pending       # hold cleared
+        # the worker prompt carried the operator's answer AND the recommended default.
+        assert "return Hello and add a help list" in harness.wakes[0]["prompt"]
     finally:
         await db.dispose()
 

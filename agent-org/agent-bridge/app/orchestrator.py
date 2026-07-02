@@ -374,15 +374,14 @@ class Orchestrator:
                 return
             proj_channel, root = loc
             addition = (intent.steering or message).strip()
-            pend = self._pending.get(eid)
-            base = pend["request"] if pend else (await self.charters.current_goal(eid))[1]
-            combined = f"{base}\n\nOperator adds: {addition}".strip() if base else addition
             try:  # record the direction change as a versioned steering edit (audit, §4.2)
                 await self.charters.set_steering(eid, addition, actor="po")
             except Exception as exc:  # noqa: BLE001
                 log.debug("set_steering(%s) failed: %s", eid, exc)
-            await self._intake_or_dispatch(
-                eid, proj_channel, root, combined, reply_prefix=reply, mgmt_channel=channel_id
+            # Fold the answer (+ held recommendations) into the goal and dispatch — no second
+            # readiness pass (the operator has spoken; don't re-interrogate).
+            await self._resume_after_clarification(
+                eid, proj_channel, root, addition, reply_prefix=reply, mgmt_channel=channel_id
             )
             return
         elif intent.kind == "decision" and intent.effort_id and intent.decision:
@@ -405,6 +404,52 @@ class Orchestrator:
         cross_effort / cascading_refactor ⇒ a dry-run is required; routine ⇒ none."""
         return blast_radius if blast_radius in ("cross_effort", "cascading_refactor") else "routine"
 
+    @staticmethod
+    def _render_questions(questions) -> str:
+        """A NUMBERED list the operator can address item-by-item; security/ethics questions are
+        flagged with their specific concern, others carry the recommended default (operator can
+        accept it wholesale). Tolerant of a bare-string question (degraded model output)."""
+        lines: list[str] = []
+        for i, q in enumerate(questions[:6], 1):
+            text = getattr(q, "question", None) or str(q)
+            rec = getattr(q, "recommendation", "") or ""
+            cat = getattr(q, "category", "feature_intent")
+            if cat in ("security", "ethics"):
+                lines.append(f"{i}. ⚠️ **[{cat}]** {text}" + (f"\n   _Concern: {rec}_" if rec else ""))
+            else:
+                lines.append(f"{i}. {text}" + (f"\n   _Recommended: {rec}_" if rec else ""))
+        return "\n".join(lines)
+
+    async def _resume_after_clarification(
+        self, effort_id: str, proj_channel: str, root: str, answer: str,
+        *, reply_prefix: str, mgmt_channel: str,
+    ) -> None:
+        """The operator answered a held question (or added scope). Fold their answer + the held
+        questions' recommended defaults into the goal and DISPATCH — no second readiness pass, so
+        we don't re-interrogate once the operator has spoken (respects 'don't over-ask')."""
+        pend = self._pending.pop(effort_id, None)
+        base = pend["request"] if pend else ((await self.charters.current_goal(effort_id))[1] or "")
+        parts = [base] if base else []
+        parts.append(f"Operator clarification: {answer}")
+        if pend and pend.get("questions"):
+            recs = [
+                f"- {getattr(q, 'question', str(q))} → {getattr(q, 'recommendation', '')}"
+                for q in pend["questions"] if getattr(q, "recommendation", "")
+            ]
+            if recs:
+                parts.append(
+                    "Apply these recommended defaults for anything the operator did not override:\n"
+                    + "\n".join(recs)
+                )
+        combined = "\n\n".join(parts).strip()
+        await self.charters.set_goal(effort_id, combined, created_by="po")
+        self._spawn(self.delegate(effort_id, proj_channel, root, combined))
+        await self.chat.post(
+            mgmt_channel,
+            (f"{reply_prefix}\n\n_Got it — dispatching a worker on **{effort_id}** with your "
+             f"clarification. I'll summarize back here when done._").strip(),
+        )
+
     async def _intake_or_dispatch(
         self, effort_id: str, proj_channel: str, root: str, request: str,
         *, reply_prefix: str, mgmt_channel: str,
@@ -413,33 +458,45 @@ class Orchestrator:
         dry-run risk (P4.0), then either HOLD for operator clarification (F5 — don't guess) or
         dispatch a worker. Owns its own #mgmt reply so the caller just returns."""
         await self.charters.set_goal(effort_id, request, created_by="po")
+        # Anchor the readiness gate to the existing project (UX-FLOW Stage 1) so it resolves
+        # conventions/placement/language itself instead of asking about them.
+        repo = self.s.default_repo or ""
+        workspace_ctx = f"existing project: #{self._project_for()}" + (f" (repo: {repo})" if repo else "")
         verdict = None
         try:
-            verdict = await self.planner.readiness_gate(effort_id, request)
+            verdict = await self.planner.readiness_gate(effort_id, request, workspace_ctx)
         except Exception as exc:  # noqa: BLE001 - a model hiccup must not wedge intake
             log.warning("readiness gate failed for %s (proceeding to dispatch): %s", effort_id, exc)
         blast = getattr(verdict, "blast_radius", "routine") or "routine"
         await self.exec_gate.set_risk(effort_id, self._risk_from_blast(blast))
 
         # Fail toward dispatch if readiness is unavailable/partial (don't wedge the operator on a
-        # model glitch); HOLD only on an explicit not-clear verdict WITH questions to ask.
+        # model glitch); HOLD only on an explicit not-clear verdict WITH genuine blockers to ask.
         clear = getattr(verdict, "clear_and_safe", True)
         questions = getattr(verdict, "clarifying_questions", None) or []
         if verdict is not None and clear is False and questions:
-            # HOLD at the readiness gate — surface the questions, do NOT dispatch (governance F5).
+            # HOLD at the readiness gate — surface ONLY genuine blockers (F5), each with a
+            # recommended default; do NOT dispatch until answered (UX-FLOW Stage 2).
             self._pending[effort_id] = {
                 "proj_channel": proj_channel, "root": root, "request": request,
+                "questions": questions,
             }
-            qs = "\n".join(f"- {q}" for q in questions[:5])
+            numbered = self._render_questions(questions)
+            n = len(questions)
+            footer = (
+                f"\n\n**All {n} question{'s' if n != 1 else ''} need an answer before I start** — "
+                f"reply with your answers, or say _“use your recommendations”_ and I'll apply the "
+                f"suggested defaults."
+            )
             await self.comms.post(
                 Intent.effort_dispatch,
-                f"⏸️ Awaiting operator clarification before dispatch:\n{qs}",
+                f"⏸️ Awaiting operator clarification before dispatch:\n{numbered}",
                 effort_id=effort_id,
             )
             await self.chat.post(
                 mgmt_channel,
-                (f"{reply_prefix}\n\n**Before I start `{effort_id}` I need to clarify:**\n{qs}\n\n"
-                 f"_Answer here and I'll proceed._").strip(),
+                (f"{reply_prefix}\n\n**Before I start `{effort_id}` I need to clarify:**\n"
+                 f"{numbered}{footer}").strip(),
             )
             return
 

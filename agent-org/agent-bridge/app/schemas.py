@@ -74,9 +74,22 @@ class Explanation(BaseModel):
 
 
 # ── Readiness gate (UX-FLOW Stage 2, P3.8) ──────────────────────────────────
+class ClarifyingQuestion(BaseModel):
+    """A question the readiness gate elevates to the operator — ONLY a genuine blocker a
+    competent engineer couldn't resolve from the existing project + standard practice (F5).
+    Each carries a `recommendation` so the operator can accept the default (or research it),
+    and a `category` so security/ethics concerns are surfaced with their specific stakes."""
+
+    question: str
+    # For feature_intent/missing_info: the sensible default applied if unanswered.
+    # For security/ethics: the SPECIFIC concern + why it matters to the intent.
+    recommendation: str = ""
+    category: Literal["feature_intent", "missing_info", "security", "ethics"] = "feature_intent"
+
+
 class ReadinessVerdict(BaseModel):
     clear_and_safe: bool
-    clarifying_questions: list[str] = Field(default_factory=list)
+    clarifying_questions: list[ClarifyingQuestion] = Field(default_factory=list)
     blast_radius: Literal["routine", "cross_effort", "cascading_refactor"] = "routine"
     reasoning: str = ""
 

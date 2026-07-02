@@ -258,6 +258,19 @@ Three fixes from the first real conversational tests (**81 tests green**):
    (`cross_effort`/`cascading_refactor`) now auto-sets the effort's dry-run risk
    (`_risk_from_blast` → `exec_gate.set_risk`), so a high-blast-radius request automatically
    requires a dry-run before real-code execution — no manual `/risk`.
+
+   **Readiness-quality pass (from operator feedback — the gate asked frivolous questions).** The
+   gate was manufacturing generic integration questions (language? file placement? integrate vs
+   standalone?). Grounded the prompt in F5 + UX-FLOW Stage 1/2: **anchor to the existing project**
+   and resolve conventions/placement/language/patterns YOURSELF (match the project + SOLID +
+   industry-standard patterns); **elevate ONLY genuine blockers** — feature-intent ambiguity,
+   missing info only the operator has, security, or ethics. `ClarifyingQuestion` is now structured
+   `{question, recommendation, category}`: each carries a **recommended default** (feature/missing)
+   or the **specific concern** (security/ethics). Rendered as a **numbered** list with the
+   recommendation shown + an explicit *"all N need an answer — or say 'use your recommendations'"*
+   footer. On the operator's answer the bridge folds their reply + the held recommendations into
+   the goal and dispatches **without re-interrogating** (`_resume_after_clarification`). The gate is
+   passed a `workspace_ctx` of the project/repo so it anchors rather than guesses.
 3. **Tailnet `tailscale serve` fix (P7.4).** Two gotchas corrected in `docs/P7-mobile-and-exposure.md`:
    the socket is **`/tmp/tailscaled.sock`** (not the default path — that was the operator's *"not
    running?"* error), and Mattermost (ao-net) was unreachable from the `tailscale` netns

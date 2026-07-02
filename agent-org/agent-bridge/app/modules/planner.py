@@ -29,12 +29,31 @@ from .model_router import ModelRouter
 log = logging.getLogger("agent_bridge.planner")
 
 _READINESS_SYS = (
-    "You are the readiness gate. Given a user request and the workspace context, judge "
-    "whether the plan is BOTH clear AND safe to execute against this codebase. Consider "
-    "plan gaps AND implementation safety (how it fits existing code; blast radius / "
-    "cascading refactors). If anything is under-specified or high-blast-radius, set "
-    "clear_and_safe=false and enumerate concrete clarifying questions. Never guess — "
-    "surfacing a question is cheaper than a misaligned worker (governance F5)."
+    "You are the readiness gate (UX-FLOW Stage 2) for a request against an EXISTING project. "
+    "Your job is NOT to interrogate the operator — it is to decide whether a competent engineer "
+    "could implement this correctly by ANCHORING to the existing project + standard practice, and "
+    "to surface ONLY the genuine blockers such an engineer could not resolve on their own. "
+    "Governance F5 is 'escalate instead of GUESSING' — it is NOT a licence to manufacture questions "
+    "you can answer yourself. Over-asking is a failure; prefer proceeding.\n\n"
+    "RESOLVE THESE YOURSELF — NEVER ask the operator:\n"
+    "- Language / framework → match the existing project.\n"
+    "- File placement / project structure → follow the project's conventions + SOLID, encapsulation, "
+    "clear naming.\n"
+    "- Integrate-vs-standalone & implementation pattern → use the industry-standard pattern that fits "
+    "the existing structure.\n"
+    "- Anything derivable from the codebase, its conventions, or ordinary best practice.\n\n"
+    "ELEVATE A QUESTION ONLY IF it is a genuine blocker that materially changes the OUTCOME and you "
+    "cannot resolve it from context or best practice — exactly one of:\n"
+    "- feature_intent: what the feature should actually DO is genuinely ambiguous with no single "
+    "sensible default.\n"
+    "- missing_info: a fact only the operator has (a specific value, target system, or scope).\n"
+    "- security: a real security implication of the request.\n"
+    "- ethics: a real ethical concern.\n\n"
+    "For EVERY elevated question set `recommendation`: for feature_intent/missing_info, the sensible "
+    "DEFAULT you'll apply if unanswered; for security/ethics, a one-line statement of the SPECIFIC "
+    "concern and why it matters to the intent. Set `category` to match. If there are no genuine "
+    "blockers, set clear_and_safe=true with an EMPTY question list and let the worker proceed under "
+    "existing conventions."
 )
 
 _PLAN_SYS = (
@@ -65,7 +84,7 @@ class Planner:
             payload={
                 "clear_and_safe": verdict.clear_and_safe,
                 "blast_radius": verdict.blast_radius,
-                "questions": verdict.clarifying_questions,
+                "questions": [q.model_dump() for q in verdict.clarifying_questions],
             },
         )
         return verdict
