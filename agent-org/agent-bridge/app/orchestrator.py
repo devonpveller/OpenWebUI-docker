@@ -52,12 +52,16 @@ _PO_NL_SYS = (
     "You are the PO (Project Overseer) — the human operator's conversational counterpart in a "
     "governed multi-agent coding org. Read the operator's natural-language message and reply "
     "helpfully and concisely in the first person (you own the 'intent thread'). Classify it:\n"
-    "- request: they want new work done → set effort_name to a short kebab-case slug (it becomes "
-    "a thread in the project channel). If the "
-    "request is vague or high-blast-radius, ASK a clarifying question in your reply instead of "
-    "guessing (governance F5 — surfacing a question is cheaper than a misaligned worker).\n"
+    "- request: they want NEW work done → set effort_name to a short kebab-case slug (it becomes "
+    "a thread in the project channel). Write a brief friendly acknowledgement, but do NOT ask "
+    "clarifying questions yourself and do NOT claim you started/dispatched anything — a readiness "
+    "check runs next and will pause to ask the operator if the request is under-specified "
+    "(governance F5 — a question is cheaper than a misaligned worker).\n"
+    "- clarification: the operator is ANSWERING a question or ADDING detail to an effort that is "
+    "awaiting clarification or already in progress → set kind=clarification, effort_id to that "
+    "effort (see AWAITING CLARIFICATION / CURRENT EFFORTS), and put their words in `steering`.\n"
     "- status: they're asking what's going on.\n"
-    "- steering: adjusting the direction of an existing effort → set effort_id + steering.\n"
+    "- steering: explicitly changing the direction/scope of an existing effort → set effort_id + steering.\n"
     "- decision: approve/modify/abort a paused effort → set effort_id + decision (you interpret "
     "it; the human still confirms with an explicit command — never claim you executed it).\n"
     "- question / chitchat otherwise.\n"
@@ -134,6 +138,9 @@ class Orchestrator:
         self._bot_name: str | None = None
         self._mgmt_warned = False
         self._operator_ids: set[str] = set()  # operators seen in #mgmt (for channel invites)
+        # Efforts opened but HELD at the readiness gate awaiting operator clarification (P3.8);
+        # the operator's next answer resolves them → dispatch. {effort_id: {proj_channel, root, request}}
+        self._pending: dict[str, dict] = {}
         self._bg_tasks: set[asyncio.Task] = set()  # in-flight delegations
 
     def _spawn(self, coro) -> None:
@@ -315,9 +322,12 @@ class Orchestrator:
         (local qwen36-27b by default; cloud if P0.5 mandated)."""
         efforts = await self.gate.snapshot()
         ctx = "; ".join(f"{e['id']}={e['state']}" for e in efforts) or "none"
+        pending_ctx = ", ".join(self._pending.keys()) or "none"
         try:
             intent = await self.models.structured(
-                "po", _PO_NL_SYS, f"OPERATOR MESSAGE:\n{message}\n\nCURRENT EFFORTS: {ctx}",
+                "po", _PO_NL_SYS,
+                f"OPERATOR MESSAGE:\n{message}\n\nCURRENT EFFORTS: {ctx}\n"
+                f"AWAITING CLARIFICATION: {pending_ctx}",
                 OperatorIntent,
             )
         except Exception as exc:  # noqa: BLE001 - degrade gracefully, never crash the loop
@@ -338,26 +348,43 @@ class Orchestrator:
                     intent.effort_name, project=project, goal=message
                 )
                 self.events.track_channel(chan)
-                # Add the requester to the PROJECT channel ONCE (not per effort) so it appears in
-                # their sidebar and they can follow the threads they care about.
+                # Add the requester to the PROJECT channel ONCE (not per effort).
                 if user_id:
                     await self.chat.add_member(chan, user_id)
-                # Dispatch a worker in the BACKGROUND so the PO replies immediately; the worker's
-                # activity streams into the effort THREAD; completion reports back to #mgmt.
-                self._spawn(self.delegate(eid, chan, root, message))
-                reply += (
-                    f"\n\n_Opened **{eid}** as a thread in **#proj-{project}** (added to your "
-                    f"channels) and dispatched a worker — watch it live in that thread; I'll "
-                    f"summarize back here when done._"
+                # Stage 2 readiness gate (P3.8): DON'T guess — if under-specified, ask + HOLD;
+                # only dispatch when the request is clear (F5). This replies itself + returns.
+                await self._intake_or_dispatch(
+                    eid, chan, root, message, reply_prefix=reply, mgmt_channel=channel_id
                 )
             except Exception as exc:  # noqa: BLE001
-                reply += f"\n\n_(couldn't open that effort: {exc})_"
-        elif intent.kind == "steering" and intent.effort_id and intent.steering:
-            try:
-                await self.charters.set_steering(intent.effort_id, intent.steering, actor="po")
-                reply += f"\n\n_Steering updated for `{intent.effort_id}`._"
+                await self.chat.post(
+                    channel_id, (reply + f"\n\n_(couldn't open that effort: {exc})_").strip()
+                )
+            return
+        elif intent.effort_id and intent.kind in ("clarification", "steering"):
+            # The operator answered a held question OR added scope to an existing effort. Merge it
+            # into the effort's goal and re-run the readiness gate → dispatch when clear. This is
+            # the fix for "clarification only updated steering but never did the work".
+            eid = intent.effort_id
+            loc = await self.router.effort_thread(eid)
+            if loc is None:
+                await self.chat.post(
+                    channel_id, (reply + f"\n\n_(couldn't find effort `{eid}` to update)_").strip()
+                )
+                return
+            proj_channel, root = loc
+            addition = (intent.steering or message).strip()
+            pend = self._pending.get(eid)
+            base = pend["request"] if pend else (await self.charters.current_goal(eid))[1]
+            combined = f"{base}\n\nOperator adds: {addition}".strip() if base else addition
+            try:  # record the direction change as a versioned steering edit (audit, §4.2)
+                await self.charters.set_steering(eid, addition, actor="po")
             except Exception as exc:  # noqa: BLE001
-                reply += f"\n\n_(couldn't update steering: {exc})_"
+                log.debug("set_steering(%s) failed: %s", eid, exc)
+            await self._intake_or_dispatch(
+                eid, proj_channel, root, combined, reply_prefix=reply, mgmt_channel=channel_id
+            )
+            return
         elif intent.kind == "decision" and intent.effort_id and intent.decision:
             # SAFETY: never auto-clear a gate from fuzzy NL — require the explicit command (§3).
             reply += (
@@ -371,6 +398,59 @@ class Orchestrator:
             )
 
         await self.chat.post(channel_id, reply or "…")
+
+    @staticmethod
+    def _risk_from_blast(blast_radius: str) -> str:
+        """Map the readiness gate's blast_radius (UX-FLOW Stage 2) to the P4.0 dry-run risk class.
+        cross_effort / cascading_refactor ⇒ a dry-run is required; routine ⇒ none."""
+        return blast_radius if blast_radius in ("cross_effort", "cascading_refactor") else "routine"
+
+    async def _intake_or_dispatch(
+        self, effort_id: str, proj_channel: str, root: str, request: str,
+        *, reply_prefix: str, mgmt_channel: str,
+    ) -> None:
+        """Stage 2→4 for a request: run the readiness gate (P3.8), auto-classify blast radius →
+        dry-run risk (P4.0), then either HOLD for operator clarification (F5 — don't guess) or
+        dispatch a worker. Owns its own #mgmt reply so the caller just returns."""
+        await self.charters.set_goal(effort_id, request, created_by="po")
+        verdict = None
+        try:
+            verdict = await self.planner.readiness_gate(effort_id, request)
+        except Exception as exc:  # noqa: BLE001 - a model hiccup must not wedge intake
+            log.warning("readiness gate failed for %s (proceeding to dispatch): %s", effort_id, exc)
+        blast = getattr(verdict, "blast_radius", "routine") or "routine"
+        await self.exec_gate.set_risk(effort_id, self._risk_from_blast(blast))
+
+        # Fail toward dispatch if readiness is unavailable/partial (don't wedge the operator on a
+        # model glitch); HOLD only on an explicit not-clear verdict WITH questions to ask.
+        clear = getattr(verdict, "clear_and_safe", True)
+        questions = getattr(verdict, "clarifying_questions", None) or []
+        if verdict is not None and clear is False and questions:
+            # HOLD at the readiness gate — surface the questions, do NOT dispatch (governance F5).
+            self._pending[effort_id] = {
+                "proj_channel": proj_channel, "root": root, "request": request,
+            }
+            qs = "\n".join(f"- {q}" for q in questions[:5])
+            await self.comms.post(
+                Intent.effort_dispatch,
+                f"⏸️ Awaiting operator clarification before dispatch:\n{qs}",
+                effort_id=effort_id,
+            )
+            await self.chat.post(
+                mgmt_channel,
+                (f"{reply_prefix}\n\n**Before I start `{effort_id}` I need to clarify:**\n{qs}\n\n"
+                 f"_Answer here and I'll proceed._").strip(),
+            )
+            return
+
+        # Clear (or readiness unavailable) → dispatch. Clear any prior hold.
+        self._pending.pop(effort_id, None)
+        self._spawn(self.delegate(effort_id, proj_channel, root, request))
+        await self.chat.post(
+            mgmt_channel,
+            (f"{reply_prefix}\n\n_Readiness ✓ — dispatched a worker on **{effort_id}**; watch it "
+             f"live in its project thread. I'll summarize back here when done._").strip(),
+        )
 
     # ── ground + dry-run prep (UX-FLOW Stage 4, P4.0) ─────────────────────────
     async def prepare_execution(

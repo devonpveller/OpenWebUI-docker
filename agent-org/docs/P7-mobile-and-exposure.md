@@ -34,15 +34,29 @@ Mattermost is host-published on `127.0.0.1:8065` only. Expose it on the **tailne
 Cloudflared/Authelia portal (Mattermost Team Edition is dropping SSO; tailnet is simpler and
 private — PLAN §3.7).
 
+**Two gotchas (both handled below):**
+1. **Socket path.** This stack's `tailscaled` listens on **`/tmp/tailscaled.sock`**, not the
+   default `/var/run/tailscale/tailscaled.sock` — you MUST pass `--socket=/tmp/tailscaled.sock`
+   or you get *"Failed to connect to local Tailscale daemon … not running?"*.
+2. **Reachability.** The `tailscale` container shares **openwebui's** netns (on `ai-stack_llm-net`),
+   so `127.0.0.1:8065` inside it is *not* Mattermost. The compose now also attaches `mattermost`
+   to `llm-net`, so `tailscale serve` reaches it **by container name**: `http://mattermost:8065`.
+   (Recreate `mattermost` once to pick up the new network — see below.)
+
 ```bash
-# The tailscale container shares openwebui's netns. Mattermost is on ao-net (a bridge), so
-# expose it through the host loopback publish the compose file already provides:
-docker exec tailscale tailscale serve --bg --https 8446 http://127.0.0.1:8065
-#   (choose a free tailnet port; 8443/8444/8445 are already taken — see the stack-map)
+# 0) one-time: recreate mattermost so it joins llm-net (compose change already applied).
+docker compose -f agent-org/docker/docker-compose.yml up -d mattermost
+
+# 1) serve it on the tailnet (pick a FREE port; 8443/8444/8445 are taken — see the stack-map).
+docker exec tailscale tailscale --socket=/tmp/tailscaled.sock \
+  serve --bg --https 8446 http://mattermost:8065
+
+# verify:
+docker exec tailscale tailscale --socket=/tmp/tailscaled.sock serve status
 ```
 
 Then set `MM_SITE_URL` in `agent-org/docker/.env` to the tailnet URL
-(`https://openwebui.<tailnet>.ts.net:8446`) and recreate `mattermost`.
+(`https://openwebui.<tailnet>.ts.net:8446`) and recreate `mattermost` again to apply it.
 
 *Done-when:* Mattermost is reachable on the tailnet only (not public) and agent channels are
 non-E2EE.

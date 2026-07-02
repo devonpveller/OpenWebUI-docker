@@ -69,6 +69,10 @@ services:
       - mattermost-client-plugins:/mattermost/client/plugins
     networks:
       - ao-net
+      # Also on the shared external llm-net so the `tailscale` container (which shares
+      # openwebui's netns, on ai-stack_llm-net) can reach it by name for `tailscale serve`
+      # (P7.4). llm-net is internal (no internet) — this is NOT public exposure.
+      - llm-net
     # Loopback publish only; tailnet exposure is a `tailscale serve` operator step (P7.4).
     ports:
       - "127.0.0.1:8065:8065"
@@ -120,6 +124,16 @@ services:
       AO_OPENBRAIN_MIRROR_ENABLED: ${AO_OPENBRAIN_MIRROR_ENABLED:-false}
       AO_OPENBRAIN_URL: ${AO_OPENBRAIN_URL:-http://openbrain-gateway:8061}
       AO_OPENBRAIN_KEY: ${AO_OPENBRAIN_KEY:-}
+      # Comms model (COMMS-MODEL — channel = project, effort = thread). Defaults are safe;
+      # set AO_DEFAULT_REPO to point efforts at a real project channel (#proj-<repo-slug>).
+      AO_DEFAULT_PROJECT: ${AO_DEFAULT_PROJECT:-sandbox}
+      AO_DEFAULT_REPO: ${AO_DEFAULT_REPO:-}
+      AO_ACTIVITY_BATCH: ${AO_ACTIVITY_BATCH:-5}
+      # Ground + dry-run (P4.0). Grounding is best-effort + OFF by default; reach openbrain-research
+      # BY CONTAINER NAME on llm-net (the :8818 host port is loopback-only, unreachable here).
+      AO_GROUNDING_ENABLED: ${AO_GROUNDING_ENABLED:-false}
+      AO_RESEARCH_URL: ${AO_RESEARCH_URL:-http://openbrain-research:8000}
+      AO_RESEARCH_KEY: ${AO_RESEARCH_KEY:-}
     networks:
       - ao-net
       - llm-net       # reach the existing llm-gateway via the llama-cpp alias

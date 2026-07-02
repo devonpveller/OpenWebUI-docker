@@ -10,7 +10,7 @@ operator decision).
 
 > **What "fully implemented" means here.** Everything that is *code / config / docs* is built,
 > wired, and — where it can run without a live GPU/Mattermost/Docker stack — covered by
-> deterministic tests (**80 passing** as of 2026-07-02). The remaining items are inherently operator-only: bringing
+> deterministic tests (**81 passing** as of 2026-07-02). The remaining items are inherently operator-only: bringing
 > up containers, creating a Mattermost bot token, running the capability-floor test against the
 > live GPU, deciding OpenRouter spend, and tailnet exposure. Those are authored + runnable, and
 > marked 🚀/🚩 below. The build makes them a switch-flip, not new work.
@@ -69,7 +69,7 @@ operator decision).
 | P3.5 goal injection (constraints inline) | ✅ | `charters.build_context` — `test_goal_constraints_inline_in_context`. |
 | P3.6 re-ground in flight | ✅ | `charters.set_goal(invalidates_in_progress=...)`; the invalidating case is a §3 freeze at the call site. |
 | P3.7 cost-tiered supervision | ✅(logic) | `orchestrator.monitor_sampled` — sampled LLM monitor (never per-token, never health-probe); cheap-continuous = hooks/bus-logging/caps always on. |
-| P3.8 readiness gate + clarify-loop | ✅(logic) 🧩(live) | `modules/planner.py::readiness_gate` (structured `ReadinessVerdict`; cloud lane if Pc). |
+| P3.8 readiness gate + clarify-loop | ✅ | `modules/planner.py::readiness_gate` + **wired into the live conversational path** (2026-07-02): a NL request runs the readiness gate; if under-specified it **HOLDS** (posts clarifying questions, no worker) until the operator answers, then dispatches (`orchestrator._intake_or_dispatch`). `blast_radius` auto-maps to the P4.0 dry-run risk. |
 | P3.9 plan presentation + approval | ✅ | `planner.draft_plan` + `approve_plan` (human-only) + `Effort.plan_status`. |
 
 ### P4 — Plan-stop-gates + review
@@ -241,12 +241,35 @@ Recovery scripts are unchanged for the pool by design: the `workers`/`cloud` pro
 (like the Portal) and operator-driven, so they're excluded from the recovery inventory (the
 default plane is what recovery manages). Stack-map §3 already lists the pool containers.
 
+### Intake clarify-loop + readiness→risk + tailnet reachability (2026-07-02, from live feedback)
+
+Three fixes from the first real conversational tests (**81 tests green**):
+
+1. **PO asked a question but dispatched anyway (F5 violation).** `nl_intake` used to dispatch the
+   instant `kind=="request"`. Now a request runs the **readiness gate (P3.8)** first
+   (`orchestrator._intake_or_dispatch`): if `clear_and_safe=false` with questions, it **HOLDS**
+   (posts the clarifying questions to `#mgmt` + a `⏸️ awaiting clarification` note in the effort
+   thread, tracks the effort in `self._pending`, **no worker dispatched**). The operator's answer
+   (PO `kind=clarification`, or a `steering` follow-up) merges into the goal, re-runs readiness, and
+   dispatches when clear. Fixes both the premature dispatch **and** the bug where a follow-up only
+   recorded steering and never did the work. `_PO_NL_SYS` updated so the PO acknowledges but does
+   **not** ask questions itself (the readiness gate owns clarification) or claim it dispatched.
+2. **readiness→risk auto-wiring (P4.0).** The readiness gate's `blast_radius`
+   (`cross_effort`/`cascading_refactor`) now auto-sets the effort's dry-run risk
+   (`_risk_from_blast` → `exec_gate.set_risk`), so a high-blast-radius request automatically
+   requires a dry-run before real-code execution — no manual `/risk`.
+3. **Tailnet `tailscale serve` fix (P7.4).** Two gotchas corrected in `docs/P7-mobile-and-exposure.md`:
+   the socket is **`/tmp/tailscaled.sock`** (not the default path — that was the operator's *"not
+   running?"* error), and Mattermost (ao-net) was unreachable from the `tailscale` netns
+   (openwebui's, on `ai-stack_llm-net`) — so `mattermost` is now **also on `llm-net`** and the serve
+   target is `http://mattermost:8065`. Stack-map row updated (mattermost networks → ao-net, llm-net).
+
 ### Comms model (CM.1–CM.6) — BUILT + tested (2026-07-02)
 
 Implemented [`COMMS-MODEL-deterministic-routing.md`](../documentation/implementation-guide/teams-chat-agent-orchestration/COMMS-MODEL-deterministic-routing.md)
 in full — the deterministic *audience × intent → destination* model that replaces the
 channel-per-effort sprawl. Bridge-internal (no 3-place change); only the `agent-bridge` image is
-rebuilt. **80 tests green** (65 → 73 comms model → 80 with P4.0). What landed, per phase:
+rebuilt. **81 tests green** (65 → 73 comms model → 80 P4.0 → 81 intake clarify-loop). What landed, per phase:
 
 - **CM.1 — channel = project, effort = thread.** `Effort` gained `project` + `root_post_id`;
   `router.open_effort(name, project=…)` posts an **effort-card root post** in `#proj-<slug>` and

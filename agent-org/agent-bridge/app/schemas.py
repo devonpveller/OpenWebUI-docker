@@ -125,11 +125,13 @@ class OperatorIntent(BaseModel):
     """The PO's structured interpretation of a natural-language operator message. All fields
     default so a weak/partial model response still parses (the bridge degrades gracefully)."""
 
-    kind: Literal["request", "status", "steering", "decision", "question", "chitchat"] = "chitchat"
+    kind: Literal[
+        "request", "clarification", "status", "steering", "decision", "question", "chitchat"
+    ] = "chitchat"
     reply: str = ""                       # the PO's conversational, first-person response
     effort_name: str | None = None        # kebab-case slug for a NEW request
-    effort_id: str | None = None          # target for status/steering/decision
-    steering: str | None = None           # the steering/direction update text
+    effort_id: str | None = None          # target for clarification/status/steering/decision
+    steering: str | None = None           # the clarification / steering / direction text
     decision: Literal["approve", "modify", "abort"] | None = None  # interpreted, NOT auto-run
 
 

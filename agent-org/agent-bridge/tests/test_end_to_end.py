@@ -156,7 +156,7 @@ async def test_nl_message_routes_to_po(db_url):
 
 
 async def test_nl_request_opens_effort(db_url):
-    from app.schemas import OperatorIntent
+    from app.schemas import OperatorIntent, ReadinessVerdict
 
     orch, chat, harness, db = await _orch(db_url)
     try:
@@ -164,6 +164,10 @@ async def test_nl_request_opens_effort(db_url):
         orch.models._client.queue_structured(
             OperatorIntent(kind="request", effort_name="dark-mode",
                            reply="On it — I'll scope a dark-mode effort.")
+        )
+        # readiness gate: clear + safe → dispatch immediately (no clarification needed).
+        orch.models._client.queue_structured(
+            ReadinessVerdict(clear_and_safe=True, blast_radius="routine")
         )
         await orch.handle_event(
             {"id": "r1", "channel_id": mgmt, "message": "can you add a dark mode toggle?",
@@ -175,6 +179,52 @@ async def test_nl_request_opens_effort(db_url):
         if orch._bg_tasks:
             await asyncio.gather(*orch._bg_tasks)
         assert len(harness.wakes) == 1  # the worker was dispatched
+    finally:
+        await db.dispose()
+
+
+async def test_nl_request_holds_for_clarification_then_dispatches(db_url):
+    """The reported bug: the PO asked a question but dispatched anyway. Now an under-specified
+    request HOLDS at the readiness gate (no worker), and the operator's answer dispatches it."""
+    from app.schemas import OperatorIntent, ReadinessVerdict
+
+    orch, chat, harness, db = await _orch(db_url)
+    try:
+        mgmt = await orch.mgmt_channel_id()
+        # 1) vague request → readiness says NOT clear and asks a question → HOLD.
+        orch.models._client.queue_structured(
+            OperatorIntent(kind="request", effort_name="hello-fn", reply="Sure — scoping that.")
+        )
+        orch.models._client.queue_structured(
+            ReadinessVerdict(clear_and_safe=False, blast_radius="routine",
+                             clarifying_questions=["Should hello() return the string 'Hello'?"])
+        )
+        await orch.handle_event(
+            {"id": "q1", "channel_id": mgmt, "message": "add a hello function",
+             "is_bot": False, "ts": 1}
+        )
+        if orch._bg_tasks:
+            await asyncio.gather(*orch._bg_tasks)
+        assert len(harness.wakes) == 0                      # NOT dispatched — held
+        assert "effort-hello-fn" in orch._pending           # awaiting clarification
+        assert any("clarify" in p["message"].lower() for p in chat.posted)
+
+        # 2) operator answers → clarification → readiness now clear → dispatch.
+        orch.models._client.queue_structured(
+            OperatorIntent(kind="clarification", effort_id="effort-hello-fn",
+                           steering="yes, return Hello and add a help list", reply="Got it.")
+        )
+        orch.models._client.queue_structured(
+            ReadinessVerdict(clear_and_safe=True, blast_radius="routine")
+        )
+        await orch.handle_event(
+            {"id": "q2", "channel_id": mgmt, "message": "yes, return Hello and add a help list",
+             "is_bot": False, "ts": 2}
+        )
+        if orch._bg_tasks:
+            await asyncio.gather(*orch._bg_tasks)
+        assert len(harness.wakes) == 1                      # NOW the worker runs
+        assert "effort-hello-fn" not in orch._pending       # hold cleared
     finally:
         await db.dispose()
 

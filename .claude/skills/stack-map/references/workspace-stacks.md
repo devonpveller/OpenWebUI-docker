@@ -243,7 +243,7 @@ File: `agent-org/docker/docker-compose.yml`. Run with:
 | Container | Role | Host port | Networks | Profile |
 |-----------|------|-----------|----------|---------|
 | `mattermost-db` | Postgres for Mattermost | — | ao-net | default |
-| `mattermost` | Chat platform + mobile (Team Edition); tailnet-exposed via `tailscale serve` (P7.4) | 127.0.0.1:8065 | ao-net | default |
+| `mattermost` | Chat platform + mobile (Team Edition); on llm-net too so the `tailscale` netns can reach it for `tailscale serve` (P7.4) | 127.0.0.1:8065 | ao-net, llm-net | default |
 | `agent-bridge` | Orchestration + the governance gate (FastAPI); WebSocket consumer + REST poster; floor-hook endpoint | 127.0.0.1:8830 | ao-net, llm-net | default |
 | `agent-bridge-db` | Postgres — the bridge's fail-safe state store (gate/effort/scope/audit) | — | ao-net | default |
 | `ao-worker-1` / `ao-worker-2` | Pooled `little-coder` control daemons (reuse `little-coder:local`) | — | ao-worker-net, llm-net | workers |
