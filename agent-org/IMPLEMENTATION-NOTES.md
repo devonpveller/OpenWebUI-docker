@@ -10,7 +10,7 @@ operator decision).
 
 > **What "fully implemented" means here.** Everything that is *code / config / docs* is built,
 > wired, and — where it can run without a live GPU/Mattermost/Docker stack — covered by
-> deterministic tests (**87 passing** as of 2026-07-02). The remaining items are inherently operator-only: bringing
+> deterministic tests (**93 passing** as of 2026-07-02). The remaining items are inherently operator-only: bringing
 > up containers, creating a Mattermost bot token, running the capability-floor test against the
 > live GPU, deciding OpenRouter spend, and tailnet exposure. Those are authored + runnable, and
 > marked 🚀/🚩 below. The build makes them a switch-flip, not new work.
@@ -243,7 +243,7 @@ default plane is what recovery manages). Stack-map §3 already lists the pool co
 
 ### Intake clarify-loop + readiness→risk + tailnet reachability (2026-07-02, from live feedback)
 
-Fixes from the first real conversational tests (**87 tests green**):
+Fixes from the first real conversational tests (**93 tests green**):
 
 1. **PO asked a question but dispatched anyway (F5 violation).** `nl_intake` used to dispatch the
    instant `kind=="request"`. Now a request runs the **readiness gate (P3.8)** first
@@ -288,6 +288,32 @@ Fixes from the first real conversational tests (**87 tests green**):
    over-asking was a *prompt* gap (now grounded in F5/UX-FLOW) + a missing anchor (now added), not a
    model-capability failure. If it recurs, the lever is the P0.5 escape hatch (flip
    `planner`/`pm`/`po` to `lane: cloud`), but P0.5 says local judgment is sufficient.
+
+### Multi-project model — work on ANY repo, onboarded from Mattermost (2026-07-02, operator feedback)
+
+`AO_DEFAULT_REPO` read as "the org only works on one hardcoded repo" — wrong for a multi-project
+orchestrator. It was always meant as a **fallback** (COMMS-MODEL §4 says "AO_DEFAULT_REPO **or
+per-effort**"), but the per-project selection was never built. Now it is (**93 tests green**):
+
+- **Project registry** (`modules/projects.py`, `Project` table): `channel = project = repo`. Onboard
+  any repo with **`/project add <name> <repo-url>`** (also `/project list|remove`, `POST /projects`)
+  — creates `#proj-<slug>`, parses the git host, and allowlists it. `AO_DEFAULT_REPO` is demoted to
+  the fallback for a `#mgmt` request that names no project, and is auto-registered as a project on
+  boot so it's visible/uniform.
+- **Dispatch-time resolution** (`orchestrator._resolve_project_slug` / `_effort_repo`): a request in
+  `#proj-acme`, or *"in acme, …"* to the PO (it sets `intent.project` from the KNOWN PROJECTS list),
+  resolves to acme's repo; the worker is focused on **that** repo (`/project` clone), not a global
+  default. The readiness-gate survey + `delegate` both use the resolved repo.
+- **Remotely-managed worker git-egress scope** (operator's ask — "a task for bot-pm/a role"):
+  `modules/egress.py` renders `seed(github) ∪ project-hosts ∪ manually-allowed − suppressed` to a
+  **tinyproxy filter file the bridge writes** on a shared volume (`ao-egress-config`); `ao-git-egress`
+  runs `docker/egress/egress-reload.sh` (custom `tinyproxy.conf` → the shared file + a poll-and-SIGHUP
+  reloader) so onboarding a new git host **takes effect live, no rebuild**. Manage from chat:
+  `/project add` auto-allows the repo's host; `/egress allow|remove|list` (+ `GET/POST /egress`) for
+  explicit control. Default-deny is preserved (governance §5 — scope is operator-controlled + audited).
+  **3-place:** the new `ao-egress-config` volume + the `ao-git-egress` command/mount override are
+  compose-only (no new container); stack-map updated. **Operator step:** rebuild the `workers` profile
+  (`up -d --build --profile workers`) for the reload wrapper to take effect.
 3. **Tailnet `tailscale serve` fix (P7.4).** Two gotchas corrected in `docs/P7-mobile-and-exposure.md`:
    the socket is **`/tmp/tailscaled.sock`** (not the default path — that was the operator's *"not
    running?"* error), and Mattermost (ao-net) was unreachable from the `tailscale` netns

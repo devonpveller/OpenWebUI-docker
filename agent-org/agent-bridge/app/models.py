@@ -302,6 +302,38 @@ class WakeLog(Base):
     ts: Mapped[str] = mapped_column(default=now_iso, index=True)
 
 
+class Project(Base):
+    """A repo the org works on (COMMS-MODEL §4: channel = project = repo). Operators onboard
+    projects via `/project add` (Mattermost); efforts resolve their worker's repo from here.
+    `AO_DEFAULT_REPO` is only a FALLBACK for requests that don't name a project."""
+
+    __tablename__ = "projects"
+
+    slug: Mapped[str] = mapped_column(String(64), primary_key=True)  # = #proj-<slug>
+    name: Mapped[str] = mapped_column(String(200))
+    repo_url: Mapped[str] = mapped_column(String(512))
+    git_host: Mapped[str | None] = mapped_column(String(200), index=True)  # for the egress allowlist
+    channel_id: Mapped[str | None] = mapped_column(String(64))
+    created_by: Mapped[str] = mapped_column(String(64), default="operator")
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[str] = mapped_column(default=now_iso)
+
+
+class EgressHost(Base):
+    """A git host the worker egress proxy is allowed to reach — the scope boundary for what
+    workers can clone/push. Onboarded projects add theirs automatically; a role can add/remove
+    hosts remotely via `/egress` (Mattermost). Rendered to the tinyproxy filter file the
+    `ao-git-egress` proxy reloads on change (governance §5 — scope is operator-controlled)."""
+
+    __tablename__ = "egress_hosts"
+
+    host: Mapped[str] = mapped_column(String(200), primary_key=True)
+    added_by: Mapped[str] = mapped_column(String(64), default="operator")
+    source: Mapped[str] = mapped_column(String(16), default="project")  # project | manual | seed
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[str] = mapped_column(default=now_iso)
+
+
 class GlobalState(Base):
     """Singleton — the global kill switch (§3). One row, id=1."""
 

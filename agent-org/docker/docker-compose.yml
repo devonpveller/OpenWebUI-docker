@@ -137,6 +137,11 @@ services:
       # Stage-1 anchor: one-time read-only repo survey feeds the readiness gate (only fires when a
       # repo is focused; the sandbox has nothing to survey).
       AO_PROJECT_SURVEY_ENABLED: ${AO_PROJECT_SURVEY_ENABLED:-true}
+      # Multi-project egress allowlist: the bridge writes this tinyproxy filter (shared volume) as
+      # projects/hosts are onboarded; ao-git-egress reloads it (remotely-managed worker scope, §5).
+      AO_EGRESS_ALLOWLIST_FILE: /egress/egress-allowlist.txt
+    volumes:
+      - ao-egress-config:/egress    # shared with ao-git-egress (bridge writes, proxy reads)
     networks:
       - ao-net
       - llm-net       # reach the existing llm-gateway via the llama-cpp alias
@@ -321,8 +326,10 @@ services:
     labels:
       - "com.centurylinklabs.watchtower.enable=false"
 
-  # Shared git-allowlist egress for the worker pool (mirrors lc-egress). The ONLY
-  # worker-side path to the internet, pinned to the git host.
+  # Shared git-allowlist egress for the worker pool (mirrors lc-egress). The ONLY worker-side path
+  # to the internet, pinned to the allowlisted git hosts. The allowlist is the SHARED file the
+  # agent-bridge writes (multi-project onboarding), reloaded on change — so the org can work on any
+  # repo the operator adds via Mattermost with no rebuild (governance §5, remotely-managed scope).
   ao-git-egress:
     build:
       context: ../../little-coder
@@ -330,6 +337,11 @@ services:
     image: little-coder-egress:local
     container_name: ao-git-egress
     profiles: ["workers"]
+    volumes:
+      - ao-egress-config:/egress                              # bridge-written allowlist file
+      - ./egress/tinyproxy.conf:/etc/tinyproxy/tinyproxy.conf:ro   # Filter -> /egress/…
+      - ./egress/egress-reload.sh:/egress-reload.sh:ro
+    command: ["/bin/sh", "/egress-reload.sh"]                 # run tinyproxy + reload-on-change
     networks:
       - ao-worker-net
       - default
@@ -426,6 +438,7 @@ volumes:
   ao-worker-1-sessions:
   ao-worker-2-workspace:
   ao-worker-2-sessions:
+  ao-egress-config:        # bridge-written git-egress allowlist, shared with ao-git-egress
   llm-gateway-cloud-db-data:
 
 networks:

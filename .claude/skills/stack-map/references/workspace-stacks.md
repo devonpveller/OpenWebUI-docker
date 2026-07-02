@@ -248,7 +248,7 @@ File: `agent-org/docker/docker-compose.yml`. Run with:
 | `agent-bridge-db` | Postgres — the bridge's fail-safe state store (gate/effort/scope/audit) | — | ao-net | default |
 | `ao-worker-1` / `ao-worker-2` | Pooled `little-coder` control daemons (reuse `little-coder:local`) | — | ao-worker-net, llm-net | workers |
 | `ao-ot-1` / `ao-ot-2` | Per-worker `open-terminal` workspace planes (reuse `little-coder-open-terminal:local`) | — | ao-worker-net, llm-net | workers |
-| `ao-git-egress` | Shared git-allowlist egress for the worker pool (mirrors `lc-egress`) | — | ao-worker-net, default | workers |
+| `ao-git-egress` | Shared git-allowlist egress for the worker pool (mirrors `lc-egress`); allowlist is the **bridge-written** `ao-egress-config` file, reloaded on change (custom `docker/egress/tinyproxy.conf` + `egress-reload.sh` command override) so the org can work on any onboarded repo | — | ao-worker-net, default | workers |
 | `llm-gateway-cloud` | **CONDITIONAL** separate LiteLLM for OpenRouter (master_key + per-role budgets); the only egress, via `ao-egress` | — | ao-net, ao-cloud-egress-net | cloud |
 | `llm-gateway-cloud-db` | Postgres for the cloud LiteLLM spend ledger | — | ao-net | cloud |
 | `ao-egress` | Allowlist egress proxy pinned to `openrouter.ai` (mirrors `lc-egress`); the ONLY agent-org internet path | — | ao-cloud-egress-net, default | cloud |
@@ -257,7 +257,8 @@ File: `agent-org/docker/docker-compose.yml`. Run with:
 `mattermost-db-data`, `mattermost-data`, `mattermost-config`, `mattermost-logs`,
 `mattermost-plugins`, `mattermost-client-plugins`, `agent-bridge-db-data`,
 `ao-worker-1-workspace`, `ao-worker-1-sessions`, `ao-worker-2-workspace`,
-`ao-worker-2-sessions`, `llm-gateway-cloud-db-data`.
+`ao-worker-2-sessions`, `ao-egress-config` (bridge-written git-egress allowlist, shared with
+`ao-git-egress`), `llm-gateway-cloud-db-data`.
 
 ---
 

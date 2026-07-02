@@ -19,6 +19,7 @@ from .db import Database
 from .modules.audit_sink import AuditSink
 from .modules.charters import Charters
 from .modules.comms_router import CommsRouter, Intent
+from .modules.egress import EgressAllowlist
 from .modules.event_gateway import EventGateway
 from .modules.execution_gate import ExecutionGate
 from .modules.floor_guard import FloorGuard
@@ -29,12 +30,13 @@ from .modules.model_router import ModelRouter
 from .modules.planner import Planner
 from .modules.profiles import ProfileRegistry
 from .modules.project_context import ProjectContext
+from .modules.projects import ProjectRegistry
 from .modules.roles import RoleAuthority
 from .modules.router import Router, slugify
 from .modules.scheduler import Scheduler
 from .modules.scope_ledger import ScopeLedger
 from .modules.stop_gates import StopGates
-from .models import GlobalState
+from .models import Effort, GlobalState
 from .schemas import Concern, Decision, Level, MonitorVerdict, OperatorIntent, Trigger
 from .worker.harness import FakeHarness, LittleCoderHarness, WorkerHarness
 
@@ -54,7 +56,8 @@ _PO_NL_SYS = (
     "governed multi-agent coding org. Read the operator's natural-language message and reply "
     "helpfully and concisely in the first person (you own the 'intent thread'). Classify it:\n"
     "- request: they want NEW work done → set effort_name to a short kebab-case slug (it becomes "
-    "a thread in the project channel). Write a brief friendly acknowledgement, but do NOT ask "
+    "a thread in the project channel). If they name a project/repo to work on, set `project` to it "
+    "(match a KNOWN PROJECT if listed). Write a brief friendly acknowledgement, but do NOT ask "
     "clarifying questions yourself and do NOT claim you started/dispatched anything — a readiness "
     "check runs next and will pause to ask the operator if the request is under-specified "
     "(governance F5 — a question is cheaper than a misaligned worker).\n"
@@ -74,6 +77,9 @@ _HELP = (
     "**agent-bridge** — governed multi-agent orchestration. You can talk to me in **plain "
     "language** (I'm your PO — tell me what you want built and I'll scope it), or use commands:\n"
     "- `/help` — this message\n"
+    "- `/project add <name> <repo-url>` — onboard a repo the org can work on (creates "
+    "`#proj-<name>` + allows its git host); `/project list` · `/project remove <name>`\n"
+    "- `/egress allow <host|repo-url>` — widen the worker git-egress allowlist; `/egress list`\n"
     "- `/effort <name>` — open a work effort as a **thread** in its project channel\n"
     "- `/status [effort_id]` — gate state of all efforts (or one)\n"
     "- `approve|modify|abort <effort_id> [note]` — decide an open CONCERN\n"
@@ -116,6 +122,10 @@ class Orchestrator:
         self.grounding: Grounding = grounding or build_grounding(settings)
         self.learning = LearningLoop(db, self.audit)
         self.roles = RoleAuthority(self.gate, self.scope)
+        # Multi-project registry (COMMS-MODEL §4: channel = project = repo) + the worker git-egress
+        # allowlist it drives (remotely managed via /project + /egress in Mattermost).
+        self.projects = ProjectRegistry(db, self.audit)
+        self.egress = EgressAllowlist(db, self.audit, self.projects, settings.egress_allowlist_file)
 
         self.harness: WorkerHarness = harness or (
             FakeHarness()
@@ -177,6 +187,17 @@ class Orchestrator:
             await self.comms.ensure_function_channels()
         except Exception as exc:  # noqa: BLE001 - platform may not be ready yet; retried lazily
             log.warning("function channels not ready at boot (will retry): %s", exc)
+        # Fallback repo (AO_DEFAULT_REPO) → auto-register as a project so it's in the registry +
+        # gets a #proj channel; then render the egress allowlist file from all registered hosts.
+        if self.s.default_repo:
+            try:
+                await self.projects.add(self._project_for(), self.s.default_repo, created_by="boot")
+            except Exception as exc:  # noqa: BLE001
+                log.warning("could not auto-register default repo: %s", exc)
+        try:
+            await self.egress.sync()  # seed + project hosts → the mounted tinyproxy filter
+        except Exception as exc:  # noqa: BLE001
+            log.warning("egress allowlist sync failed at boot: %s", exc)
         if mgmt and self.s.chat_adapter != "fake":
             # A one-line boot ack so the operator can see the bridge is live (best-effort).
             try:
@@ -185,10 +206,36 @@ class Orchestrator:
                 pass
 
     def _project_for(self, repo: str | None = None) -> str:
-        """The project slug an effort belongs to = its repo (COMMS-MODEL §4 project resolution).
-        Falls back to AO_DEFAULT_REPO, then to the sandbox project for throwaway work."""
+        """The FALLBACK project slug for a request that names no project: the AO_DEFAULT_REPO slug
+        if set, else the sandbox. Named/onboarded projects are resolved via the registry
+        (`_resolve_project_slug`); this is only the default."""
         target = repo or (self.s.default_repo or "")
         return slugify(target) if target else self.s.default_project
+
+    async def _resolve_project_slug(self, named: str | None, channel_id: str | None = None) -> str:
+        """Resolve which project a request belongs to: an explicitly named/onboarded project wins;
+        else the originating #proj-<slug> channel's project; else the fallback (default/sandbox)."""
+        if named:
+            p = await self.projects.resolve(named)
+            if p:
+                return p["slug"]
+        if channel_id:
+            slug = await self.router.resolve_project_by_channel(channel_id)
+            if slug:
+                return slug
+        return self._project_for()
+
+    async def _effort_repo(self, effort_id: str) -> str | None:
+        """The repo a worker should be focused on for this effort = its project's repo (registry),
+        falling back to AO_DEFAULT_REPO. None ⇒ pre-focused/throwaway pool (no /project clone)."""
+        async with self.db.session_factory() as s:
+            e = await s.get(Effort, effort_id)
+            proj = e.project if e else None
+        if proj:
+            repo = await self.projects.repo_for(proj)
+            if repo:
+                return repo
+        return self.s.default_repo or None
 
     async def _track_operator(self, user_id: str | None) -> None:
         """Remember an operator seen in #mgmt and pull them into the function channels so those
@@ -329,11 +376,13 @@ class Orchestrator:
         efforts = await self.gate.snapshot()
         ctx = "; ".join(f"{e['id']}={e['state']}" for e in efforts) or "none"
         pending_ctx = ", ".join(self._pending.keys()) or "none"
+        projects = await self.projects.list()
+        projects_ctx = ", ".join(f"{p['slug']} ({p['repo_url']})" for p in projects) or "none"
         try:
             intent = await self.models.structured(
                 "po", _PO_NL_SYS,
                 f"OPERATOR MESSAGE:\n{message}\n\nCURRENT EFFORTS: {ctx}\n"
-                f"AWAITING CLARIFICATION: {pending_ctx}",
+                f"AWAITING CLARIFICATION: {pending_ctx}\nKNOWN PROJECTS: {projects_ctx}",
                 OperatorIntent,
             )
         except Exception as exc:  # noqa: BLE001 - degrade gracefully, never crash the loop
@@ -347,9 +396,9 @@ class Orchestrator:
         reply = (intent.reply or "").strip()
         if intent.kind == "request" and intent.effort_name:
             try:
-                project = self._project_for()
-                # An effort is a THREAD in its project channel (COMMS-MODEL §4) — no per-effort
-                # channel, so the sidebar never grows with task volume.
+                # Resolve WHICH project this works on: a named/onboarded project, else the fallback.
+                # An effort is a THREAD in its project channel (COMMS-MODEL §4).
+                project = await self._resolve_project_slug(intent.project, channel_id)
                 eid, chan, root = await self.router.open_effort(
                     intent.effort_name, project=project, goal=message
                 )
@@ -467,8 +516,10 @@ class Orchestrator:
         # Anchor the readiness gate to the existing project (UX-FLOW Stage 1) so it resolves
         # conventions/placement/language itself instead of asking about them. When a real repo is
         # focused, inject a cached read-only survey of the actual codebase; else conventions-only.
-        project = self._project_for()
-        repo = self.s.default_repo or ""
+        async with self.db.session_factory() as s:
+            e = await s.get(Effort, effort_id)
+            project = (e.project if e and e.project else None) or self._project_for()
+        repo = await self._effort_repo(effort_id) or ""
         workspace_ctx = f"existing project: #{project}" + (f" (repo: {repo})" if repo else "")
         if repo:
             summary = await self.project_context.ensure(project, repo)
@@ -552,8 +603,8 @@ class Orchestrator:
     ) -> None:
         """Set the effort's goal (constraints inline, §4.3) and dispatch a worker; all activity
         streams into the effort THREAD (`root_post_id`). Runs as a background task. `repo` focuses
-        the worker first (real projects); omit for a pre-focused/throwaway pool (`AO_DEFAULT_REPO`)."""
-        repo = repo or (self.s.default_repo or None)
+        the worker first; omit to resolve it from the effort's project (registry → AO_DEFAULT_REPO)."""
+        repo = repo or await self._effort_repo(effort_id)
         try:
             await self.charters.set_goal(effort_id, goal, created_by="po")
             # P4.0 gate: a high-blast-radius effort may not reach REAL-code execution until its
@@ -843,5 +894,61 @@ class Orchestrator:
                 )
             except Exception as exc:  # noqa: BLE001
                 await reply(f"⚠️ could not record dry-run for `{eff}`: {exc}")
+        elif cmd == "project":
+            sub = args[0].lower() if args else ""
+            if sub == "add" and len(args) >= 3:
+                name, repo = args[1], args[2]
+                try:
+                    proj = await self.projects.add(name, repo, created_by="operator")
+                    chan = await self.router.ensure_project_channel(proj["slug"])
+                    await self.projects.set_channel(proj["slug"], chan)
+                    self.events.track_channel(chan)
+                    if user_id:
+                        await self.chat.add_member(chan, user_id)
+                    note = ""
+                    if proj["git_host"]:  # widen the worker egress scope to this repo's host
+                        await self.egress.allow(proj["git_host"], added_by="operator", source="project")
+                        await self.egress.sync()
+                        note = f" · egress host `{proj['git_host']}` allowed"
+                    await reply(
+                        f"✅ project `{proj['slug']}` → `{repo}` (post in `#proj-{proj['slug']}` "
+                        f"to work on it, or say _\"in {proj['slug']}, …\"_ here){note}"
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    await reply(f"⚠️ could not add project: {exc}")
+            elif sub == "list":
+                ps = await self.projects.list()
+                await reply(
+                    "**Projects:**\n" + "\n".join(f"- `{p['slug']}` → {p['repo_url']}" for p in ps)
+                    if ps else "no projects yet — `/project add <name> <repo-url>`"
+                )
+            elif sub == "remove" and len(args) >= 2:
+                ok = await self.projects.remove(args[1], actor="operator")
+                await self.egress.sync()
+                await reply(f"{'✅ removed' if ok else '⚠️ no such'} project `{args[1]}`")
+            else:
+                await reply(
+                    "usage: `/project add <name> <repo-url>` · `/project list` · `/project remove <name>`"
+                )
+        elif cmd == "egress":
+            sub = args[0].lower() if args else ""
+            if sub == "allow" and len(args) >= 2:
+                try:
+                    h = await self.egress.allow(args[1], added_by="operator", source="manual")
+                    content = await self.egress.sync()
+                    await reply(f"✅ egress host `{h}` allowed ({content.count('^')} hosts live)")
+                except Exception as exc:  # noqa: BLE001
+                    await reply(f"⚠️ could not allow host: {exc}")
+            elif sub in ("remove", "deny") and len(args) >= 2:
+                h = await self.egress.remove(args[1], actor="operator")
+                await self.egress.sync()
+                await reply(f"✅ egress host `{h}` removed")
+            elif sub == "list":
+                hosts = await self.egress.hosts()
+                await reply("**Egress allowlist:**\n" + "\n".join(f"- `{h}`" for h in hosts))
+            else:
+                await reply(
+                    "usage: `/egress allow <host|repo-url>` · `/egress remove <host>` · `/egress list`"
+                )
         else:
             await reply(f"unknown command `/{cmd}` — try `/help`")

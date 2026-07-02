@@ -80,6 +80,15 @@ class PrepareIn(BaseModel):
     risk: str = "routine"
 
 
+class ProjectIn(BaseModel):
+    name: str
+    repo_url: str
+
+
+class EgressIn(BaseModel):
+    host: str  # a bare host or a repo URL
+
+
 def build_chat(settings):
     if settings.chat_adapter == "mattermost":
         return MattermostAdapter(
@@ -200,6 +209,33 @@ def create_app(orch: Orchestrator | None = None) -> FastAPI:
     @app.get("/execution/{effort_id}")
     async def execution_status(effort_id: str) -> dict:
         return await orch.exec_gate.status(effort_id)
+
+    # ── projects (multi-project registry — COMMS-MODEL §4) ─────────────────────
+    @app.get("/projects")
+    async def list_projects() -> dict:
+        return {"projects": await orch.projects.list()}
+
+    @app.post("/projects")
+    async def add_project(body: ProjectIn) -> dict:
+        proj = await orch.projects.add(body.name, body.repo_url, created_by="operator")
+        chan = await orch.router.ensure_project_channel(proj["slug"])
+        await orch.projects.set_channel(proj["slug"], chan)
+        orch.events.track_channel(chan)
+        if proj["git_host"]:
+            await orch.egress.allow(proj["git_host"], added_by="operator", source="project")
+            await orch.egress.sync()
+        return {"project": proj, "channel_id": chan}
+
+    # ── worker git-egress allowlist (remotely managed scope, governance §5) ─────
+    @app.get("/egress")
+    async def list_egress() -> dict:
+        return {"hosts": await orch.egress.hosts()}
+
+    @app.post("/egress")
+    async def allow_egress(body: EgressIn) -> dict:
+        host = await orch.egress.allow(body.host, added_by="operator", source="manual")
+        await orch.egress.sync()
+        return {"allowed": host, "hosts": await orch.egress.hosts()}
 
     # ── suggestion pool (P6.3) — recorded AND surfaced to #suggestions (CM.5) ───
     @app.post("/suggestion")

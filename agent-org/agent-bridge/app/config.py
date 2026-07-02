@@ -72,9 +72,14 @@ class Settings(BaseSettings):
     worker_instance_urls: str = ""
     worker_poll_interval_s: float = 3.0
     worker_poll_timeout_s: float = 1800.0
-    # If set, the bridge focuses a worker on this repo (clone via /project) before a delegation.
-    # Empty = the pool is pre-focused (e.g. the throwaway test repo) and no /project is issued.
+    # FALLBACK repo only. The org works on ANY project onboarded via `/project add` (a repo per
+    # project, resolved from the effort's #proj-<slug> channel — see modules/projects.py). This is
+    # just the default for a #mgmt request that names no project; empty = the sandbox pool. If set,
+    # it is auto-registered as a project on boot so it appears in the registry + gets a channel.
     default_repo: str = ""
+    # Path the bridge writes the tinyproxy egress allowlist to (a volume the ao-git-egress proxy
+    # mounts + reloads on change). Empty = don't manage the file (dev/tests).
+    egress_allowlist_file: str = ""
 
     # ── Wake bus reliability (event-gateway — PLAN §3.1.1) ──────────────────
     wake_undeliverable_bound_s: float = 300.0   # past this, an undelivered wake is a §3 trigger
