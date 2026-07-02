@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from sqlalchemy import (
     JSON,
+    BigInteger,
     Boolean,
     Float,
     ForeignKey,
@@ -107,7 +108,8 @@ class ChannelCursor(Base):
     __tablename__ = "channel_cursors"
 
     channel_id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    last_ts: Mapped[int] = mapped_column(Integer, default=0)  # ms epoch
+    # Mattermost create_at is a MILLISECOND epoch (~1.78e12) — needs 64-bit, not int32.
+    last_ts: Mapped[int] = mapped_column(BigInteger, default=0)
 
 
 class SessionMap(Base):

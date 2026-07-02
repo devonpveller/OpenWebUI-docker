@@ -182,6 +182,15 @@ class GovernanceGate:
                 return GATE_FROZEN
             return e.state if e.state in (GATE_ACTIVE, GATE_FROZEN) else GATE_FROZEN
 
+    async def snapshot(self) -> list[dict]:
+        """All efforts + their gate state — for the `/status` chat command + tooling."""
+        async with self.db.session_factory() as s:
+            rows = (await s.execute(select(Effort))).scalars().all()
+        return [
+            {"id": r.id, "state": r.state, "reason": r.freeze_reason, "level": r.freeze_level}
+            for r in rows
+        ]
+
     async def open_concerns(self, effort_id: str) -> list[ConcernRow]:
         async with self.db.session_factory() as s:
             return list(

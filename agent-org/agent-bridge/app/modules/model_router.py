@@ -41,6 +41,7 @@ class ModelClient(Protocol):
         system: str,
         user: str,
         schema: type[T],
+        max_retries: int = 2,
     ) -> T: ...
 
     async def complete(
@@ -77,18 +78,20 @@ class OpenAICompatClient:
         return self._instructor.from_openai(base, mode=self._instructor.Mode.JSON)
 
     async def structured(
-        self, *, api_base, api_key, model, caller_key, temperature, system, user, schema
+        self, *, api_base, api_key, model, caller_key, temperature, system, user, schema,
+        max_retries=2,
     ):
         client = self._client(api_base, api_key)
         # `user=caller_key`: LiteLLM forwards the OpenAI `user` field, so the spend
         # ledger attributes by role even though the caller key is stripped to `dummy`
         # on the permissive gateway (litellm-proxy-status memory). GBNF grammar is
         # derived by llama.cpp from the response schema (constrained decoding).
+        # max_retries=0 lets the P0.5 eval measure FIRST-TRY validity (zero repair).
         return await client.chat.completions.create(
             model=model,
             temperature=temperature,
             response_model=schema,
-            max_retries=2,
+            max_retries=max_retries,
             user=caller_key,
             messages=[
                 {"role": "system", "content": system},
@@ -166,7 +169,9 @@ class ModelRouter:
             return self.s.cloud_api_base, self.s.cloud_api_key
         return self.s.local_api_base, self.s.local_api_key
 
-    async def structured(self, profile_name: str, system: str, user: str, schema: type[T]) -> T:
+    async def structured(
+        self, profile_name: str, system: str, user: str, schema: type[T], max_retries: int = 2
+    ) -> T:
         p = self.profiles.get(profile_name)
         api_base, api_key = self._endpoint(p.lane)
         return await self._get_client().structured(
@@ -178,6 +183,7 @@ class ModelRouter:
             system=system,
             user=user,
             schema=schema,
+            max_retries=max_retries,
         )
 
     async def complete(self, profile_name: str, system: str, user: str) -> str:

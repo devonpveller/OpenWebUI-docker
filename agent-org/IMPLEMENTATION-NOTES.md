@@ -124,6 +124,48 @@ operator decision).
 
 ---
 
+## Live bring-up fixes (2026-07-01, during operator P0.2)
+
+First real Mattermost connect surfaced four issues, all now fixed + covered by tests:
+
+1. **Bot needs TEAM membership, not just channel** — `/users/me/teams` was empty. The adapter
+   now resolves the team **lazily + retries** (`_ensure_team`), so it self-heals once the
+   operator adds the bot to a team; a clear actionable error replaces the old `AssertionError`.
+   *(Operator step: add the bot account to the team, not only the #mgmt channel.)*
+2. **`#mgmt` display-name vs URL-slug** — the channel shows as `mgmt` but its slug was
+   `management`, so slug lookup 404'd and auto-create 400'd. `ensure_channel` now falls back to
+   **matching by display name** among the bot's channels before creating.
+3. **`ChannelCursor.last_ts` overflow** — Mattermost `create_at` is a **ms epoch** (~1.78e12),
+   but the column was `Integer` (int32) → `asyncpg DataError: out of int32 range` on every
+   `_mark_processed`, which rolled back the dispatch txn (nothing marked) and silently killed
+   catch-up. Fixed to **`BigInteger`**. (Live DB altered; model fixed for fresh deploys.)
+4. **catch-up robustness** — added per-event try/except + logging (mirrors the live WS loop) and
+   made `run()` survive a catch-up failure, so a single bad event can never abort recovery or
+   block the live WS loop. Also `posts_since(0)` now fetches the recent page (MM ignores `since=0`).
+
+Also added the **operator chat command surface** (P0.4 operability): `/help`, `/effort <name>`,
+`/status`, `/kill|/unkill`, `approve|modify|abort`, and a **boot-ack** post
+(`✅ agent-bridge online`). Verified live: connected as `@bot-pm`, `#mgmt` resolved, boot-ack
+posted, live WS loop running, zero errors.
+
+**Natural-language PO surface (added 2026-07-01 — the primary UX).** Slash commands are the
+*deterministic control surface*; the primary interface is **plain-language conversation with the
+PO** (UX-FLOW: the human converses with the PO). `orchestrator.nl_intake` routes any
+non-command `#mgmt` message to the **`po` profile** (local `qwen36-27b`), which returns a
+structured `OperatorIntent` (kind + conversational reply + optional action). The bridge executes
+**non-destructive** actions from NL — open an effort (Stage 0→1), apply steering (§4.3), report
+status — and **replies conversationally**. **Safety decisions are NOT auto-run from fuzzy NL**:
+the PO interprets "yeah go ahead" but asks the operator to confirm with the explicit
+`approve <effort>` command (governance §3 — decisions stay crisp + auditable). System posts
+(joins/adds) are ignored. Its quality rides the PO profile's lane — see P0.5.
+
+**P0.5 quick smoke (2026-07-01, preliminary):** `qwen36-27b` via the local gateway scored
+instruction **13/13**, structured-output (GBNF, first-try, zero repair) **4/4**, coordination
+(constraint-preservation **2/2** + drift-catch **1/1**) → **LOCAL_JUDGE_OK** on the indicative
+thresholds. Strong signal that the org can run **all-local (skip Pc)** — confirm with the full
+run (`docker exec agent-bridge python -m app.evals.capability_floor`). This also validates that
+constrained decoding works through the gateway (P0.3b) and that the NL PO layer is viable locally.
+
 ## P0.5 procedure (the one decision-gate that blocks Pc)
 
 Run these **bounded real completions** (never a model health-probe — C5) against the live

@@ -73,9 +73,12 @@ class EventGateway:
         return True
 
     async def catch_up(self) -> int:
-        """Replay missed posts per active channel since the last-processed ts."""
+        """Replay missed posts per active channel since the last-processed ts. Each event is
+        isolated: one bad event must not abort the whole catch-up (mirrors the live loop)."""
         replayed = 0
-        for channel_id in list(self._active_channels):
+        channels = list(self._active_channels)
+        log.info("catch-up: scanning %d channel(s): %s", len(channels), channels)
+        for channel_id in channels:
             async with self.db.session_factory() as s:
                 cur = await s.get(ChannelCursor, channel_id)
                 since = cur.last_ts if cur else 0
@@ -84,16 +87,24 @@ class EventGateway:
             except Exception as exc:  # noqa: BLE001
                 log.warning("catch-up for %s failed: %s", channel_id, exc)
                 continue
+            log.info("catch-up: %s -> %d post(s) since %s", channel_id, len(posts), since)
             for post in posts:
-                if await self.dispatch(post):
-                    replayed += 1
-        if replayed:
-            log.info("catch-up replayed %d missed event(s)", replayed)
+                try:
+                    if await self.dispatch(post):
+                        replayed += 1
+                except Exception as exc:  # noqa: BLE001 - one bad event can't abort catch-up
+                    log.exception("catch-up dispatch error on %s: %s", post.get("id"), exc)
+        log.info("catch-up replayed %d event(s)", replayed)
         return replayed
 
     async def run(self) -> None:
-        """Catch up, then consume the live WS stream through the idempotent path."""
-        await self.catch_up()
+        """Catch up, then consume the live WS stream through the idempotent path. A failure in
+        catch-up must NOT prevent the live WS loop from starting."""
+        try:
+            await self.catch_up()
+        except Exception as exc:  # noqa: BLE001
+            log.exception("catch-up failed (continuing to live WS): %s", exc)
+        log.info("event-gateway: entering live WS loop")
         async for event in self.chat.events():
             try:
                 await self.dispatch(event)

@@ -49,6 +49,7 @@ class FakeChatAdapter:
         self._queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self.posted: list[dict[str, Any]] = []
         self.channels: dict[str, str] = {}
+        self.username = "bot-pm"
         self._post_seq = 0
         self._closed = False
 

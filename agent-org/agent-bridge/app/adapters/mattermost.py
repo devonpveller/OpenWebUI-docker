@@ -35,15 +35,43 @@ class MattermostAdapter:
         )
         self._team_id: str | None = None
         self._me: str | None = None
+        self.username: str | None = None
         self._stop = asyncio.Event()
 
     async def start(self) -> None:
         me = (await self._client.get("/users/me")).json()
         self._me = me.get("id")
-        teams = (await self._client.get("/users/me/teams")).json()
-        if teams:
+        self.username = me.get("username")
+        # Best-effort at boot; retried lazily so the bridge self-heals once the operator
+        # adds the bot to a TEAM (channel membership alone is not enough in Mattermost).
+        await self._resolve_team()
+        log.info(
+            "mattermost adapter connected as %s (@%s, team %s)",
+            self._me, self.username, self._team_id or "UNRESOLVED — add the bot to a team",
+        )
+
+    async def _resolve_team(self) -> str | None:
+        try:
+            teams = (await self._client.get("/users/me/teams")).json()
+        except Exception:  # noqa: BLE001
+            teams = []
+        if isinstance(teams, list) and teams:
             self._team_id = teams[0]["id"]
-        log.info("mattermost adapter connected as %s (team %s)", self._me, self._team_id)
+        return self._team_id
+
+    async def _ensure_team(self) -> str:
+        """Return the team id, re-resolving if it wasn't available at boot. Raises a clear,
+        actionable error (not an AssertionError) if the bot still isn't on any team."""
+        if self._team_id:
+            return self._team_id
+        await self._resolve_team()
+        if not self._team_id:
+            raise RuntimeError(
+                "the bot account is not a member of any Mattermost TEAM yet — add the bot to "
+                "your team (System Console -> User Management, or the team's Manage Members -> "
+                "Add), not just to the #mgmt channel. The bridge retries automatically."
+            )
+        return self._team_id
 
     async def stop(self) -> None:
         self._stop.set()
@@ -60,27 +88,42 @@ class MattermostAdapter:
         return r.json()
 
     async def ensure_channel(self, name: str) -> str:
-        assert self._team_id, "team not resolved — call start() first"
-        # Try to fetch by name; create if missing.
-        r = await self._client.get(f"/teams/{self._team_id}/channels/name/{name}")
+        team_id = await self._ensure_team()
+        # 1) Exact URL-slug match.
+        r = await self._client.get(f"/teams/{team_id}/channels/name/{name}")
         if r.status_code == 200:
             return r.json()["id"]
+        # 2) Fallback: match by DISPLAY name among the channels the bot is a member of. The
+        #    operator usually types a display name (e.g. "mgmt") whose URL slug differs
+        #    (e.g. "management") — resolve to the existing channel rather than creating a dup.
+        mine = await self._client.get(f"/users/me/teams/{team_id}/channels")
+        if mine.status_code == 200:
+            for ch in mine.json():
+                if name.lower() in (ch.get("display_name", "").lower(), ch.get("name", "").lower()):
+                    return ch["id"]
+        # 3) Last resort: create it (used for #effort-<name> channels the bridge owns).
         r = await self._client.post(
             "/channels",
             json={
-                "team_id": self._team_id,
+                "team_id": team_id,
                 "name": name,
                 "display_name": name.replace("-", " ").title(),
                 "type": "O",
             },
         )
-        r.raise_for_status()
+        if r.status_code >= 400:
+            raise RuntimeError(
+                f"could not find or create channel {name!r} on team {team_id}: "
+                f"HTTP {r.status_code} {r.text[:200]}"
+            )
         return r.json()["id"]
 
     async def posts_since(self, channel_id: str, since_ms: int) -> list[dict[str, Any]]:
-        r = await self._client.get(
-            f"/channels/{channel_id}/posts", params={"since": since_ms}
-        )
+        # Mattermost's `?since=0` returns nothing (it expects a real ms timestamp), so on the
+        # first connect (no cursor yet) fetch the recent page instead — the idempotency ledger
+        # keeps this from re-processing anything already handled.
+        params: dict[str, Any] = {"since": since_ms} if since_ms and since_ms > 0 else {"per_page": 30}
+        r = await self._client.get(f"/channels/{channel_id}/posts", params=params)
         r.raise_for_status()
         data = r.json()
         order = data.get("order", [])
@@ -94,6 +137,9 @@ class MattermostAdapter:
             "thread_id": post.get("root_id") or post.get("id"),
             "user_id": post.get("user_id"),
             "message": post.get("message", ""),
+            # System posts (joins/adds/etc.) carry a non-empty `type` like "system_join_channel"
+            # — the bridge skips them so they don't trigger a PO/worker call.
+            "type": post.get("type", ""),
             "is_bot": bool(post.get("props", {}).get("from_bot"))
             or post.get("user_id") == self._me,
             "ts": post.get("create_at", 0),
