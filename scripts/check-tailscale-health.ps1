@@ -754,6 +754,31 @@ function Invoke-OpenBrainHealth {
     }
 }
 
+# agent-org is a SEPARATE compose project (project=agent-org); this monitor's
+# `docker compose` (ai-stack) can't see it. Delegate to the canonical by-name
+# probe scripts\check-agent-org-health.ps1 — same pattern as Open Brain. It
+# guards the agent-bridge stale-DB-pool + the ao-git-egress stale-mount classes.
+# -Repair auto-restarts/recreates broken pieces; -Quiet keeps per-OK lines out of
+# the loop; -LogPath routes its detail into this monitor's log.
+function Invoke-AgentOrgHealth {
+    $aoScript = Join-Path $SCRIPT_DIR 'check-agent-org-health.ps1'
+    if (-not (Test-Path $aoScript)) {
+        Write-LogEntry "agent-org probe not found: $aoScript" "WARN"
+        return
+    }
+    try {
+        & $aoScript -Repair -Quiet -LogPath $LOG_FILE | Out-Null
+        $code = $LASTEXITCODE
+        if ($code -eq 0) {
+            Write-LogEntry "agent-org stack healthy" "DEBUG"
+        } else {
+            Write-LogEntry "agent-org stack reported unresolved fault(s) (exit $code) - see AgentOrg WARN/ERROR lines above" "WARN"
+        }
+    } catch {
+        Write-LogEntry "agent-org probe error: $($_.Exception.Message)" "WARN"
+    }
+}
+
 # Function to perform comprehensive health check
 function Invoke-HealthCheck {
     Write-LogEntry "Starting comprehensive health check..."
@@ -923,6 +948,10 @@ function Invoke-HealthCheck {
 
     # --- Open Brain stack (SEPARATE compose project) incl. mcp stale-pool guard ---
     Invoke-OpenBrainHealth
+
+    # --- agent-org stack (SEPARATE compose project) incl. bridge stale-pool +
+    #     ao-git-egress stale-mount guards, + its nightly pg_dump backup sidecars ---
+    Invoke-AgentOrgHealth
 
     Write-LogEntry "All health checks passed" "SUCCESS"
     return $true

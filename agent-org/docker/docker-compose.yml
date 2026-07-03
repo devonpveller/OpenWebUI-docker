@@ -440,6 +440,64 @@ services:
     labels:
       - "com.centurylinklabs.watchtower.enable=false"
 
+  # ── Backups (nightly pg_dump sidecars) ──────────────────────────────────────
+  # The two authoritative Postgres stores in agent-org: the bridge's governance
+  # state (efforts, parked_efforts, projects+upstream, egress hosts, audit) and
+  # Mattermost's conversations. Custom-format dumps → repo-root ./backups/<name>/
+  # (shared with the NAS sync + scripts/check-backup-coverage.ps1). Paths are
+  # ../../ because compose resolves them relative to THIS file (agent-org/docker/).
+  agent-bridge-db-backup:
+    image: postgres:15-alpine
+    container_name: agent-bridge-db-backup
+    depends_on:
+      agent-bridge-db:
+        condition: service_healthy
+    networks:
+      - ao-net
+    environment:
+      - BACKUP_NAME=agent-bridge-db
+      - BACKUP_DIR=/backups
+      - PGHOST=agent-bridge-db
+      - PGUSER=bridge
+      - PGDATABASE=agent_bridge
+      - PGPASSWORD=${AO_DB_PASSWORD}
+      - RETAIN_COUNT=${AO_BACKUP_RETAIN_COUNT:-7}
+    volumes:
+      - ../../backups/agent-bridge-db:/backups
+      - ../../backup/pg-backup.sh:/scripts/backup.sh:ro
+    entrypoint: ["/bin/sh", "-c", "while true; do sh /scripts/backup.sh || true; sleep 86400; done"]
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
+  mattermost-db-backup:
+    image: postgres:15-alpine
+    container_name: mattermost-db-backup
+    depends_on:
+      mattermost-db:
+        condition: service_healthy
+    networks:
+      - ao-net
+    environment:
+      - BACKUP_NAME=mattermost-db
+      - BACKUP_DIR=/backups
+      - PGHOST=mattermost-db
+      - PGUSER=mmuser
+      - PGDATABASE=mattermost
+      - PGPASSWORD=${MM_DB_PASSWORD}
+      - RETAIN_COUNT=${AO_BACKUP_RETAIN_COUNT:-7}
+    volumes:
+      - ../../backups/mattermost-db:/backups
+      - ../../backup/pg-backup.sh:/scripts/backup.sh:ro
+    entrypoint: ["/bin/sh", "-c", "while true; do sh /scripts/backup.sh || true; sleep 86400; done"]
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
 volumes:
   mattermost-db-data:
   mattermost-data:

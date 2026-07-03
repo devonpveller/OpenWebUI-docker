@@ -101,6 +101,8 @@ Run with: `docker compose ...` from the workspace root.
 | `llm-gateway-backup` | nightly `pg_dump` of the LiteLLM spend ledger (`llm-gateway-db`) | llm-net | default |
 | `openbrain-db-backup` | `pg_dump` of OB1 Postgres | obnet (external) | default |
 | `openbrain-wiki-backup` | openbrain-wiki-data + wiki-assets | — | default |
+| `agent-bridge-db-backup` | `pg_dump` of `agent-bridge-db` (**agent-org** project; governance/effort/project state) | ao-net | default (agent-org) |
+| `mattermost-db-backup` | `pg_dump` of `mattermost-db` (**agent-org** project; conversation content) | ao-net | default (agent-org) |
 | `open-notebook-backup` | SurrealDB logical export + notebook_data | default | default |
 | `smolcrawl-backup` | smolcrawl-data | — | default |
 | `tailscale-backup` | tailscale state dir | — | default |
@@ -245,7 +247,9 @@ File: `agent-org/docker/docker-compose.yml`. Run with:
 | `mattermost-db` | Postgres for Mattermost | — | ao-net | default |
 | `mattermost` | Chat platform + mobile (Team Edition); on llm-net too so the `tailscale` netns can reach it for `tailscale serve` (P7.4) | 127.0.0.1:8065 | ao-net, llm-net | default |
 | `agent-bridge` | Orchestration + the governance gate (FastAPI); WebSocket consumer + REST poster; floor-hook endpoint | 127.0.0.1:8830 | ao-net, llm-net | default |
-| `agent-bridge-db` | Postgres — the bridge's fail-safe state store (gate/effort/scope/audit) | — | ao-net | default |
+| `agent-bridge-db` | Postgres — the bridge's fail-safe state store (gate/effort/parked-effort/project/scope/audit) | — | ao-net | default |
+| `agent-bridge-db-backup` | Nightly `pg_dump` of `agent-bridge-db` (governance/effort/project state) → repo-root `./backups/agent-bridge-db/` (generic `backup/pg-backup.sh`) | — | ao-net | default |
+| `mattermost-db-backup` | Nightly `pg_dump` of `mattermost-db` (conversation content) → `./backups/mattermost-db/` | — | ao-net | default |
 | `ao-worker-1` / `ao-worker-2` | Pooled `little-coder` control daemons (reuse `little-coder:local`) | — | ao-worker-net, llm-net | workers |
 | `ao-ot-1` / `ao-ot-2` | Per-worker `open-terminal` workspace planes (reuse `little-coder-open-terminal:local`) | — | ao-worker-net, llm-net | workers |
 | `ao-git-egress` | Shared git-allowlist egress for the worker pool (mirrors `lc-egress`); allowlist is the **bridge-written** `ao-egress-config` file, reloaded on change (custom `docker/egress/tinyproxy.conf` + `egress-reload.sh` command override) so the org can work on any onboarded repo | — | ao-worker-net, default | workers |

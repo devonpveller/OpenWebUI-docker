@@ -91,9 +91,11 @@ $Script:OB1Services = @(
 )
 
 # agent-org services, default plane only (workers/cloud profiles are gated + excluded,
-# same treatment as the profile-gated Portal). Low-level dependency first.
+# same treatment as the profile-gated Portal). Low-level dependency first; the two
+# pg_dump backup sidecars last (they depend_on the healthy DBs).
 $Script:AgentOrgServices = @(
-    "mattermost-db", "mattermost", "agent-bridge-db", "agent-bridge"
+    "mattermost-db", "mattermost", "agent-bridge-db", "agent-bridge",
+    "agent-bridge-db-backup", "mattermost-db-backup"
 )
 
 function Write-Log {

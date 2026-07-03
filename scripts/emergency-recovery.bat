@@ -15,8 +15,10 @@ REM           tailscale-backup, lm-models-backup, open-notebook-backup,
 REM           openbrain-db-backup, openbrain-wiki-backup (last two need OB1 up)
 REM   OB1     Open Brain - SEPARATE compose project (OB1\docker\docker-compose.yml)
 REM   AGORG   agent-org - SEPARATE compose project (agent-org\docker\docker-compose.yml);
-REM           default plane only (mattermost, mattermost-db, agent-bridge, agent-bridge-db);
-REM           workers/cloud profiles are gated + NOT managed here
+REM           default plane only (mattermost, mattermost-db, agent-bridge, agent-bridge-db,
+REM           + agent-bridge-db-backup, mattermost-db-backup); `up -d` brings the whole
+REM           default plane, so the backup sidecars start automatically. Workers/cloud
+REM           profiles are gated + NOT managed here
 REM   PORTAL  caddy/authelia/cloudflared/portal-*/integrity-tripwire (+ caddy-backup,
 REM           authelia-backup) are PROFILE-GATED (profiles: [internet]) and NOT
 REM           managed here; use scripts\portal-on.ps1 / portal-off.ps1. A nuclear
