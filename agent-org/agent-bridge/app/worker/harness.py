@@ -56,9 +56,13 @@ class WorkerHarness(Protocol):
         streams the worker's commands + answer to the bus as it works (observability)."""
         ...
 
-    async def set_project(self, base_url: str, repo: str, *, token: str | None = None) -> bool:
+    async def set_project(
+        self, base_url: str, repo: str, *, token: str | None = None,
+        upstream: str | None = None, upstream_token: str | None = None,
+    ) -> bool:
         """Focus the worker on a repo (little-coder clones it, bypassing the git-proxy). `token` is
-        an optional per-project deploy token (multi-PAT). Returns True on success."""
+        an optional per-project deploy token (multi-PAT). `upstream` (+ optional read-scoped
+        `upstream_token`) bakes a fork's read-only parent remote after the clone. True on success."""
         ...
 
     async def current_focus(self, base_url: str) -> str | None:
@@ -119,13 +123,22 @@ class LittleCoderHarness:
                     return WorkResult(status, task_id, answer)
             return WorkResult("error", task_id, "poll timeout")
 
-    async def set_project(self, base_url: str, repo: str, *, token: str | None = None) -> bool:
+    async def set_project(
+        self, base_url: str, repo: str, *, token: str | None = None,
+        upstream: str | None = None, upstream_token: str | None = None,
+    ) -> bool:
         # little-coder clones via the REAL git binary (bypasses the git-proxy) — the
         # supported "operator action" workspace-setup path (§12.3). Clone can be slow. A per-request
-        # `token` (if given) overrides the pool's global LC_DEPLOY_TOKEN for this project.
+        # `token` (if given) overrides the pool's global LC_DEPLOY_TOKEN for this project. `upstream`
+        # bakes a fork's read-only parent remote AFTER the clone (re-applied every focus, since the
+        # workspace is wiped on switch).
         body: dict[str, Any] = {"repo": repo, "actor": "agent-bridge"}
         if token:
             body["token"] = token
+        if upstream:
+            body["upstream"] = upstream
+            if upstream_token:
+                body["upstream_token"] = upstream_token
         async with httpx.AsyncClient(base_url=base_url.rstrip("/"), timeout=1800.0) as c:
             r = await c.post("/project", json=body)
             return r.status_code < 400
@@ -139,11 +152,18 @@ class LittleCoderHarness:
 class FakeHarness:
     """Deterministic in-memory worker for tests. Records every wake."""
 
-    def __init__(self, result_status: str = "done") -> None:
+    def __init__(
+        self, result_status: str = "done", *, stream_commands: list[str] | None = None
+    ) -> None:
         self.result_status = result_status
         self.wakes: list[dict[str, Any]] = []
         self.projects: dict[str, str] = {}
         self.tokens: dict[str, str] = {}
+        self.upstreams: dict[str, str] = {}
+        self.upstream_tokens: dict[str, str] = {}
+        # Optional command lines to stream via on_update("command", ...) before the answer, so a
+        # test can exercise the real activity-streaming path (Fix 1). Default None = no commands.
+        self.stream_commands = stream_commands
 
     async def wake(
         self, base_url: str, session_id: str, prompt: str, *,
@@ -153,13 +173,22 @@ class FakeHarness:
             {"base_url": base_url, "session_id": session_id, "prompt": prompt}
         )
         if on_update:
+            for cmd in self.stream_commands or []:
+                await on_update("command", {"command": cmd, "ok": True})
             await on_update("answer", {"status": self.result_status, "answer": "ok"})
         return WorkResult(self.result_status, task_id=f"fake-{len(self.wakes)}", output="ok")
 
-    async def set_project(self, base_url: str, repo: str, *, token: str | None = None) -> bool:
+    async def set_project(
+        self, base_url: str, repo: str, *, token: str | None = None,
+        upstream: str | None = None, upstream_token: str | None = None,
+    ) -> bool:
         self.projects[base_url] = repo
         if token:
             self.tokens[base_url] = token
+        if upstream:
+            self.upstreams[base_url] = upstream
+            if upstream_token:
+                self.upstream_tokens[base_url] = upstream_token
         return True
 
     async def current_focus(self, base_url: str) -> str | None:

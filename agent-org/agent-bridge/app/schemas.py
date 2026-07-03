@@ -145,6 +145,8 @@ class OperatorIntent(BaseModel):
     effort_name: str | None = None        # kebab-case slug for a NEW request
     effort_id: str | None = None          # target for clarification/status/steering/decision
     project: str | None = None            # a named project/repo to work on (a registered project)
+    repo_url: str | None = None           # a git URL to ONBOARD as a new project (creates its channel)
+    upstream_url: str | None = None       # if repo_url is a FORK, the parent/upstream repo URL (D0.f)
     steering: str | None = None           # the clarification / steering / direction text
     decision: Literal["approve", "modify", "abort"] | None = None  # interpreted, NOT auto-run
 

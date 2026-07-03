@@ -125,3 +125,40 @@ def test_clone_with_token_and_branch_both_apply():
     cmd, _ = ot.calls[0]
     assert "x-access-token:tok-x@" in cmd
     assert " -b 'dev' " in cmd or " -b dev " in cmd
+
+
+# --- fork/upstream onboarding (D0.f) --------------------------------------
+
+
+def test_add_upstream_remote_uses_real_git_and_fences_push():
+    """The fork parent is baked with the REAL git binary (operator-bypass, like clone —
+    the proxy blocks `remote add`), idempotently, with the push side fenced so the worker
+    can never push to the parent."""
+    ot = _FakeOT()
+    ws = WorkspaceManager(ot, workspace_path="/workspace", real_git="/usr/bin/git")
+    ws.add_upstream_remote("https://github.com/MonoGame/MonoGame")
+    cmd, cwd = ot.calls[0]
+    assert "/usr/bin/git" in cmd                       # real git, not the proxy
+    assert "remote add upstream" in cmd
+    assert "https://github.com/MonoGame/MonoGame" in cmd
+    assert "remote set-url upstream" in cmd            # idempotent fallback if it already exists
+    assert "set-url --push upstream" in cmd            # push fenced to a no-op
+    assert "DISABLED" in cmd
+    assert cwd == "/workspace"
+
+
+def test_add_upstream_remote_injects_token_for_private_parent():
+    """A private parent needs a read-scoped token, injected into the FETCH url like clone."""
+    ot = _FakeOT()
+    ws = WorkspaceManager(ot, workspace_path="/workspace")
+    ws.add_upstream_remote("https://github.com/acme/private-parent", token="ro-tok")
+    cmd, _ = ot.calls[0]
+    assert "x-access-token:ro-tok@" in cmd
+
+
+def test_add_upstream_remote_no_token_leaves_url_clean():
+    ot = _FakeOT()
+    ws = WorkspaceManager(ot, workspace_path="/workspace")
+    ws.add_upstream_remote("https://github.com/MonoGame/MonoGame")
+    cmd, _ = ot.calls[0]
+    assert "x-access-token" not in cmd                 # public parent → no credential baked

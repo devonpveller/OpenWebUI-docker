@@ -17,7 +17,7 @@ exercise · 🚀 operator step · 🚩 decision-gate.
 
 > **What "fully implemented" means here.** Everything that is *code / config / docs* is built,
 > wired, and — where it can run without a live GPU/Mattermost/Docker stack — covered by
-> deterministic tests (**116 passing** as of 2026-07-02). The remaining items are inherently operator-only: bringing
+> deterministic tests (**133 passing** as of 2026-07-03). The remaining items are inherently operator-only: bringing
 > up containers, creating a Mattermost bot token, running the capability-floor test against the
 > live GPU, deciding OpenRouter spend, and tailnet exposure. Those are authored + runnable, and
 > marked 🚀/🚩 below. The build makes them a switch-flip, not new work.
@@ -42,7 +42,7 @@ hand-off. Root cause — the floor lumped **push** with deploy/delete as "irreve
   `agent/<effort>` on completion (`orchestrator._publish_effort`: `checkout -b`/`add -A`/`commit`/
   `push -u origin agent/<effort>`), and the completion summary reports the branch + `git fetch`
   hint. Work is durable, visible, and hand-off-able; merge-to-`main`/deploy stay human-gated.
-  `test_projects.py::test_repo_effort_commits_and_pushes_a_feature_branch`. **116 tests green.**
+  `test_projects.py::test_repo_effort_commits_and_pushes_a_feature_branch`. **119 tests green.**
 - **Per-agent commit identity.** Publish commits carry the agent's **role identity**
   (`GIT_AUTHOR_NAME/EMAIL = <role>@<AO_AGENT_EMAIL_DOMAIN>`, via an env prefix — git-proxy-safe since
   `-c` is blocked), not the baked `little-coder`. So `git blame` + hand-off provenance (P5.4) show
@@ -61,6 +61,97 @@ hand-off. Root cause — the floor lumped **push** with deploy/delete as "irreve
   human-gated merge → deploy → human testing) is designed in
   [`DELIVERY-PIPELINE.md`](../documentation/implementation-guide/teams-chat-agent-orchestration/DELIVERY-PIPELINE.md)
   (DP.1–DP.6, not yet built; the AI-browser lane is the largest new build + a decision-gate).
+
+## Progress visibility + effort-list hygiene + fork onboarding (2026-07-03)
+
+Three fixes from the MonoGame live test (worker went quiet ~20 min; the effort list was cluttered
+with finished test efforts; and a *fork* workflow couldn't be set up). **126 → 133 tests green**
+(fork onboarding, below, added the last 7).
+
+- **Fix 1 — PO progress visibility (BUILT).** The PO answered "what's going on?" with "I don't have
+  real-time visibility." It now does: the router keeps a **per-effort activity buffer** of each
+  worker's streamed commands (`router._record_activity`/`recent_activity`, recorded in the wake
+  `_stream` closure — the same stream that posts to the thread). `orchestrator.nl_intake` folds a
+  **RECENT WORKER ACTIVITY** block into the PO's context and the `_PO_NL_SYS` prompt tells it to
+  answer *from that* (name the effort, describe the actual command — "still cloning / running the
+  build"), and to say "hasn't run a command yet" when a buffer is empty rather than claim blindness.
+  `/status` now shows the last few activity lines per effort too. `test_progress_and_lifecycle.py`.
+- **Fix 2 — effort-list hygiene (BUILT).** Finished/aborted test efforts drowned the live signal.
+  Efforts now carry a **lifecycle** (`open|done|aborted`, `Effort.lifecycle` + additive migration).
+  `_finish_effort` → `done`; aborting a concern → `aborted` (`gate.set_lifecycle`, set inside
+  `gate.clear` on abort). `gate.snapshot(open_only=True)` is the default view for both the PO context
+  and `/status`; **`/status all`** shows history, **`/status <id>`** targets one regardless of
+  lifecycle (tagged `[done]`/`[aborted]`). `test_progress_and_lifecycle.py`.
+- **Fix 3 — fork/upstream onboarding (BUILT 2026-07-03, needs `little-coder:local` rebuild to go
+  live).** The MonoGame worker fought the git-proxy because a fork needs a second remote (`upstream`)
+  and the proxy **blocks `git remote add`** + only fetches from **operator-configured** remotes.
+  Built D0.f (see the dedicated section below +
+  [`DELIVERY-PIPELINE.md`](../documentation/implementation-guide/teams-chat-agent-orchestration/DELIVERY-PIPELINE.md)):
+  `/project add … --upstream <url>` (+ NL onboarding); the bridge bakes `upstream` at setup **via the
+  real git binary** (the same operator path as clone, §12.3) so the worker can `fetch`/`merge --no-ff`
+  upstream but push only to `origin`. Substrate-native; the API-level alternative is the GitHub MCP
+  server (below).
+
+## Fork/upstream onboarding D0.f — BUILT + survives upstream/rebuilds (2026-07-03)
+
+The operator's MonoGame case = coding on a **fork**. A fork needs two remotes — `origin` (the fork,
+push target) + `upstream` (the parent, fetch-only) — but the little-coder **git-proxy blocks
+`git remote add`** and only fetches from operator-configured remotes, so a worker can't set a fork up
+itself. Built the operator-setup path that bakes `upstream` for it. **agent-bridge 133 tests green;
+little-coder 506 green (+3).** Needs a **`little-coder:local` rebuild** to go live (a daemon/workspace
+change).
+
+- **little-coder (the extension, `src/littlecoder`):** `workspace.add_upstream_remote(url, token)`
+  runs `real_git remote add upstream` — the SAME operator-bypass path as `clone` (the proxy blocks
+  `remote add`; the real git binary doesn't go through it, §3.3/§12.3). Idempotent (`add || set-url`),
+  **push-fenced** (`set-url --push upstream DISABLED-…` so `git push upstream` fails fast — worker
+  pushes only to `origin`), optional read-scoped token for a private parent. `daemon.ProjectRequest`
+  gains `upstream`/`upstream_token`; `switch_project` bakes it **after the clone** + journals
+  `project_upstream_set`. Distinct from little-coder's OWN `/admin/upstream/pull` (the *tool's*
+  fork-parent, self-improvement) — this is a git remote in the *project* workspace.
+- **agent-bridge:** `Project.upstream_url` (additive column + self-heal migration);
+  `projects.add(upstream_url=…)` / `upstream_for` / `hosts()` now yields each fork's **parent host**
+  too (egress survives every re-render); `orchestrator._effort_upstream` +
+  `_project_upstream_token` (parent's read token by `LC_<PARENT_OWNER>_TOKEN`) →
+  `router.wake(upstream=…)` → `harness.set_project(upstream=…)`. Onboard via
+  `/project add <name> <fork> --upstream <parent> [TOKEN_ENV]` (flag parsed anywhere) OR plain
+  language (the PO fills `repo_url`+`upstream_url`). `/project list` shows the upstream.
+- **Survives upstream updates + container rebuilds (the operator's explicit concern), two ways:**
+  1. **Our extension is a WRAPPER, not a patch.** Upstream little-coder is the npm package
+     (`little-coder@${LITTLE_CODER_VERSION}` in `Dockerfile.agent`); our `src/littlecoder` daemon
+     *invokes* it as a subprocess. Bumping the version + rebuilding re-`COPY`s our `src/` unchanged —
+     an upstream update never clobbers Fix 3 (or any of our code), because we don't fork upstream's
+     source.
+  2. **The `upstream` remote is re-derived, never restored.** It lives in the workspace clone, which
+     little-coder **wipes on every `/project` switch** and which is a named volume a rebuild can
+     clear. So the persistent source of truth is the bridge's `Project.upstream_url` (bridge DB
+     volume), and the bridge **re-bakes the remote on every focus** — a wipe/rebuild just means the
+     next focus re-adds it. Idempotent, so a re-focus onto an unwiped workspace is also correct.
+  Tests: `test_fork_upstream.py` (7 — registry/egress/command/threading/private-token/NL) +
+  `test_workspace.py::test_add_upstream_remote_*` (3 — real-git/idempotent/push-fence/token).
+
+## Anthropic resources to stop hand-building every permutation (2026-07-03, operator meta-question)
+
+The operator asked whether Anthropic resources exist so they don't muddle through every use-case by
+hand. Researched + mapped to this build (advisory — no code change):
+
+- **Claude Agent SDK** (`claude-agent-sdk` py/ts) — the agent loop, session/resume, subagents,
+  **PreToolUse/PostToolUse hooks**, permissions, MCP client. Maps to: our worker harness, our
+  floor as a PreToolUse hook, our wake/resume. **Does NOT** give the governance FSM or inter-agent
+  channels (subagents are intra-session).
+- **GitHub MCP server** (`github/github-mcp-server`) — PR/branch/review/merge/fork/**sync-fork** at
+  the API level. The clean replacement for the delivery lane's shell-git PR/merge (D1/D4) **and** the
+  fork/upstream sync (D0.f) — no in-workspace remote surgery. Known gap: no per-call token injection
+  (needs our token-broker layer — which we already have via `LC_<OWNER>_TOKEN`).
+- **"Building Effective Agents"** — validates our shape: **orchestrator-workers** (PO/PM→workers) +
+  **evaluator-optimizer** (differently-goaled reviewer) are named patterns, not ad-hoc.
+- **Managed Agents** (beta) — hosted multi-agent + **event-driven messaging** between separate agent
+  instances; an alternative to a custom bus if we want inter-agent comms without building transport.
+- **Cookbook** ("Chief of Staff" recipe ≈ our PO/PM) + **headless/channels** for CI-style dispatch.
+- **Bottom line — keep hand-building:** the governance FSM (floor/steering/reviewer), the Mattermost
+  org surface, per-project token routing, plan-approval/backpressure gates. **Adopt off-the-shelf:**
+  git/PR/fork via GitHub MCP, and (optionally) the Agent SDK's hook+permission+session primitives to
+  thin the worker harness. This directly de-risks DP.1–DP.6 + D0.f.
 
 ## Conversational PO — threading, memory, hierarchical context (2026-07-02)
 
@@ -83,7 +174,7 @@ Three connected fixes from live use, so the PO surface is coherent (all tested):
 ## Live-loop integration (2026-07-02) — the alignment core, now WIRED
 
 The proactive governance controls were module-only; they are now threaded through the live
-operator→worker path (`orchestrator.delegate` → the Stage-5 loop). **116 tests green.** The heavy
+operator→worker path (`orchestrator.delegate` → the Stage-5 loop). **119 tests green.** The heavy
 controls are **risk-gated** (like the dry-run + review-depth already were) so routine one-liners
 stay fast; set `AO_PLAN_APPROVAL=all` / `AO_REVIEW_MODE=all` for the strict-spec reading (every
 effort). What now runs:
@@ -339,7 +430,7 @@ default plane is what recovery manages). Stack-map §3 already lists the pool co
 
 ### Intake clarify-loop + readiness→risk + tailnet reachability (2026-07-02, from live feedback)
 
-Fixes from the first real conversational tests (**116 tests green**):
+Fixes from the first real conversational tests (**119 tests green**):
 
 1. **PO asked a question but dispatched anyway (F5 violation).** `nl_intake` used to dispatch the
    instant `kind=="request"`. Now a request runs the **readiness gate (P3.8)** first
@@ -389,7 +480,7 @@ Fixes from the first real conversational tests (**116 tests green**):
 
 `AO_DEFAULT_REPO` read as "the org only works on one hardcoded repo" — wrong for a multi-project
 orchestrator. It was always meant as a **fallback** (COMMS-MODEL §4 says "AO_DEFAULT_REPO **or
-per-effort**"), but the per-project selection was never built. Now it is (**116 tests green**):
+per-effort**"), but the per-project selection was never built. Now it is (**119 tests green**):
 
 - **Project registry** (`modules/projects.py`, `Project` table): `channel = project = repo`. Onboard
   any repo with **`/project add <name> <repo-url>`** (also `/project list|remove`, `POST /projects`)

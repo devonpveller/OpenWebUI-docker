@@ -139,6 +139,43 @@ class WorkspaceManager:
         )
         return self.ot.execute(cmd, cwd="/", timeout=self.clone_timeout)
 
+    def add_upstream_remote(
+        self, upstream_url: str, token: str | None = None
+    ) -> ExecResult:
+        """Bake a read-only `upstream` remote for a FORK workflow — a fork's worker needs
+        two remotes: `origin` (the fork, its push target) and `upstream` (the parent, to
+        pull others' changes). Adding a remote is an OPERATOR SETUP action, so — like
+        `clone` — it runs the REAL git binary directly, bypassing the git-proxy (which
+        blocks `git remote add`: "remotes are operator-baked", design §3.3/§12.3). The
+        worker itself can never add/mutate remotes; only this setup path does.
+
+        Called AFTER a fresh clone, so the source of truth for `upstream` is the caller
+        (the agent-org bridge's persistent Project record), re-applied on every focus —
+        the workspace is ephemeral (wiped on switch), so `upstream` is never assumed to
+        persist. Idempotent: `remote add` on a fresh clone succeeds; if it already exists
+        (a non-wiped re-focus) it falls back to `set-url`.
+
+        Push is fenced to a no-op URL so `git push upstream` fails fast — the worker
+        publishes only to `origin` (its fork). NOT `main`-related and additive, so it's
+        routine per the corrected floor. A PRIVATE upstream needs a read-scoped `token`
+        (injected into the fetch URL like clone); never journal the raw command."""
+        fetch_url = upstream_url
+        if token:
+            fetch_url = fetch_url.replace(
+                "https://", f"https://x-access-token:{token}@", 1
+            )
+        g = shlex.quote(self.real_git)
+        q = shlex.quote
+        # `remote add` fails (exit 3) if `upstream` already exists — fall back to set-url so
+        # a re-focus onto an unwiped workspace is still correct. Then fence the push side.
+        cmd = (
+            f"cd {q(self.workspace_path)} && "
+            f"({g} remote add upstream {q(fetch_url)} || "
+            f"{g} remote set-url upstream {q(fetch_url)}) && "
+            f"{g} remote set-url --push upstream DISABLED-fork-parent-is-fetch-only"
+        )
+        return self.ot.execute(cmd, cwd=self.workspace_path, timeout=120)
+
     def wipe(self) -> ExecResult:
         """Empty the workspace, keeping the mount point itself. open-terminal
         owns the files it created, so the wipe runs there."""

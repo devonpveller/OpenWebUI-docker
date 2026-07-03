@@ -66,6 +66,9 @@ class Effort(Base):
     # gates REAL-code execution for risky efforts (none|skipped|required|running|passed|failed).
     risk: Mapped[str] = mapped_column(String(24), default="routine")
     dry_run_status: Mapped[str] = mapped_column(String(16), default="none")
+    # Effort lifecycle (distinct from the gate FSM): open ⇒ still in play; done/aborted ⇒ closed.
+    # `/status` shows open efforts by default so completed test efforts don't drown the signal.
+    lifecycle: Mapped[str] = mapped_column(String(16), default="open")
     created_at: Mapped[str] = mapped_column(default=now_iso)
     updated_at: Mapped[str] = mapped_column(default=now_iso, onupdate=now_iso)
 
@@ -316,6 +319,11 @@ class Project(Base):
     # NAME of the env var holding this project's deploy token (NOT the token — secrets stay in env).
     # Lets different projects use different PATs (personal vs org). Empty ⇒ the pool's LC_DEPLOY_TOKEN.
     token_env: Mapped[str | None] = mapped_column(String(64))
+    # FORK parent (D0.f): when this project is a fork, the parent repo URL. The bridge re-bakes it as
+    # a read-only `upstream` remote on every worker focus (the workspace is ephemeral) so the worker
+    # can fetch/merge from upstream but push only to `origin`. This row is the persistent source of
+    # truth that survives workspace wipes + container rebuilds. Empty ⇒ not a fork.
+    upstream_url: Mapped[str | None] = mapped_column(String(512))
     channel_id: Mapped[str | None] = mapped_column(String(64))
     created_by: Mapped[str] = mapped_column(String(64), default="operator")
     active: Mapped[bool] = mapped_column(Boolean, default=True)

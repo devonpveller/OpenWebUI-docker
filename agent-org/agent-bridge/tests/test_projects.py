@@ -222,6 +222,64 @@ async def test_token_resolves_by_owner_convention(db_url, monkeypatch):
         await db.dispose()
 
 
+async def test_nl_onboards_new_project_from_url(db_url):
+    """The reported bug: 'start a new project' defaulted to #proj-sandbox. Now a git URL onboards a
+    NEW project + its channel."""
+    orch, chat, harness, db = await _orch(db_url)
+    try:
+        mgmt = await orch.mgmt_channel_id()
+        orch.models._client.queue_structured(OperatorIntent(
+            kind="chitchat", repo_url="https://github.com/PolyshDesign/cool-app.git",
+            reply="Setting that up."))
+        await orch.handle_event(
+            {"id": "n1", "channel_id": mgmt,
+             "message": "start a new project on https://github.com/PolyshDesign/cool-app.git",
+             "is_bot": False, "ts": 1})
+        assert (await orch.projects.resolve("cool-app")) is not None       # registered
+        assert "proj-cool-app" in chat.channels                            # its own channel, not sandbox
+        assert any("proj-cool-app" in p["message"] for p in chat.posted)
+        assert "github.com" in await orch.egress.hosts()                   # host allowlisted
+    finally:
+        await db.dispose()
+
+
+async def test_nl_new_project_with_work_opens_effort_in_it(db_url):
+    orch, chat, harness, db = await _orch(db_url)
+    try:
+        mgmt = await orch.mgmt_channel_id()
+        orch.models._client.queue_structured(OperatorIntent(
+            kind="request", effort_name="add-readme",
+            repo_url="https://github.com/PolyshDesign/cool-app.git", reply="On it."))
+        orch.models._client.queue_structured(ReadinessVerdict(clear_and_safe=True, blast_radius="routine"))
+        await orch.handle_event(
+            {"id": "n2", "channel_id": mgmt,
+             "message": "start a project on that repo and add a README", "is_bot": False, "ts": 1})
+        if orch._bg_tasks:
+            await asyncio.gather(*orch._bg_tasks)
+        from app.models import Effort
+        async with orch.db.session_factory() as s:
+            e = await s.get(Effort, "effort-add-readme")
+        assert e is not None and e.project == "cool-app"                   # effort in the NEW project, not sandbox
+    finally:
+        await db.dispose()
+
+
+async def test_nl_unknown_named_project_asks_for_url(db_url):
+    orch, chat, harness, db = await _orch(db_url)
+    try:
+        mgmt = await orch.mgmt_channel_id()
+        orch.models._client.queue_structured(OperatorIntent(
+            kind="request", effort_name="do-x", project="ghost-proj", reply="Sure."))
+        await orch.handle_event(
+            {"id": "u1", "channel_id": mgmt, "message": "in ghost-proj, do x", "is_bot": False, "ts": 1})
+        # nothing opened; the PO asks for the repo URL instead of defaulting to sandbox
+        assert not any(e["id"] == "effort-do-x" for e in await orch.gate.snapshot())
+        assert any("don't have a project called" in p["message"] and "ghost-proj" in p["message"]
+                   for p in chat.posted)
+    finally:
+        await db.dispose()
+
+
 async def test_default_repo_auto_registered_as_project(db_url):
     settings = Settings(
         _env_file=None, chat_adapter="fake",

@@ -68,8 +68,11 @@ class Database:
         # P4.0 risk-gated dry-run execution gate.
         ("efforts", "risk", "VARCHAR(24) DEFAULT 'routine'"),
         ("efforts", "dry_run_status", "VARCHAR(16) DEFAULT 'none'"),
+        ("efforts", "lifecycle", "VARCHAR(16) DEFAULT 'open'"),
         # Per-project deploy-token env-var name (multi-PAT support).
         ("projects", "token_env", "VARCHAR(64)"),
+        # Fork parent (D0.f) — re-baked as the `upstream` remote on every focus.
+        ("projects", "upstream_url", "VARCHAR(512)"),
     ]
 
     async def create_all(self) -> None:

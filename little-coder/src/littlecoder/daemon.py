@@ -96,6 +96,17 @@ class ProjectRequest(BaseModel):
     # an org PAT for another — instead of one ambient token for everything. Env only on the caller;
     # transits the internal network per request; never journaled raw (clone redacts the token).
     token: str | None = None
+    # Optional FORK parent. When `repo` is a fork, `upstream` is the parent repo URL; the daemon
+    # bakes it as a read-only `upstream` remote AFTER the clone (operator setup path) so the worker
+    # can `git fetch upstream` / `merge --no-ff upstream/...` but push only to `origin` (the fork).
+    # Re-applied on every focus — the workspace is wiped on switch, so `upstream` is never assumed
+    # to persist; the caller (agent-org bridge) holds the source of truth. `upstream_token` is a
+    # read-scoped PAT for a PRIVATE parent (public parents need none). Never journaled raw.
+    #
+    # NB — distinct from little-coder's OWN `/admin/upstream/pull` (the fork-parent of the *tool*,
+    # self-improvement). This `upstream` is a git remote in the *project* workspace.
+    upstream: str | None = None
+    upstream_token: str | None = None
 
 
 class ConfirmRequest(BaseModel):
@@ -458,7 +469,28 @@ class LittleCoderDaemon:
             repo=requested.canonical_url,
             action=decision.action.value,
         )
-        return {"action": decision.action.value, "focus": requested.canonical_url}
+        # Fork workflow: bake the read-only `upstream` remote right after the clone, so it's
+        # re-derived from the caller's persistent record on EVERY focus (the workspace is
+        # ephemeral). Non-fatal — a fork that can't reach its parent is still a usable clone;
+        # surface the failure in the response + journal so it isn't a silent stall.
+        upstream_ok: bool | None = None
+        if req.upstream:
+            up = await asyncio.to_thread(
+                self.workspace.add_upstream_remote, req.upstream, req.upstream_token
+            )
+            upstream_ok = bool(up.ok)
+            self.audit.write(
+                "project_upstream_set",
+                actor=req.actor,
+                repo=requested.canonical_url,
+                upstream=req.upstream,
+                ok=upstream_ok,
+            )
+        out = {"action": decision.action.value, "focus": requested.canonical_url}
+        if upstream_ok is not None:
+            out["upstream"] = req.upstream
+            out["upstream_ok"] = upstream_ok
+        return out
 
 
 def _parse_ts(ts: str) -> float:

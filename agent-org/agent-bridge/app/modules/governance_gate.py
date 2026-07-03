@@ -194,12 +194,21 @@ class GovernanceGate:
                 return GATE_FROZEN
             return e.state if e.state in (GATE_ACTIVE, GATE_FROZEN) else GATE_FROZEN
 
-    async def snapshot(self) -> list[dict]:
-        """All efforts + their gate state — for the `/status` chat command + tooling."""
+    async def snapshot(self, *, open_only: bool = False) -> list[dict]:
+        """Efforts + their gate state — for the `/status` chat command + tooling.
+
+        `open_only=True` hides efforts whose lifecycle is done/aborted, so completed test
+        efforts don't drown the live signal (the default view is what's still in play)."""
         async with self.db.session_factory() as s:
-            rows = (await s.execute(select(Effort))).scalars().all()
+            stmt = select(Effort)
+            if open_only:
+                stmt = stmt.where(Effort.lifecycle == "open")
+            rows = (await s.execute(stmt)).scalars().all()
         return [
-            {"id": r.id, "state": r.state, "reason": r.freeze_reason, "level": r.freeze_level}
+            {
+                "id": r.id, "state": r.state, "reason": r.freeze_reason,
+                "level": r.freeze_level, "lifecycle": r.lifecycle,
+            }
             for r in rows
         ]
 
@@ -253,8 +262,11 @@ class GovernanceGate:
                 c.cleared_at = now
 
             if decision.decision == "abort":
-                # Aborted efforts are NOT re-admitted to the scheduler.
-                pass
+                # Aborted efforts are NOT re-admitted to the scheduler, and drop out of the
+                # default `/status` view (lifecycle=aborted) so the live list stays clean.
+                e = await s.get(Effort, effort_id)
+                if e is not None:
+                    e.lifecycle = "aborted"
             else:
                 # approve / modify => unfreeze the effort + its dependents.
                 closure = await self._dependent_closure(s, effort_id)
@@ -281,6 +293,16 @@ class GovernanceGate:
         )
         log.info("CLEARED effort=%s decision=%s by=%s",
                  effort_id, decision.decision, actor_role)
+
+    async def set_lifecycle(self, effort_id: str, lifecycle: str) -> None:
+        """Move an effort's lifecycle (open|done|aborted). Distinct from the gate FSM state:
+        a done/aborted effort drops out of the default `/status` view but its gate row stays
+        for audit. Idempotent + best-effort (never raises into the orchestrator flow)."""
+        async with self.db.session_factory() as s:
+            e = await s.get(Effort, effort_id)
+            if e is not None and e.lifecycle != lifecycle:
+                e.lifecycle = lifecycle
+                await s.commit()
 
     # ── global kill switch (§3) ──────────────────────────────────────────────
     async def kill_switch(self, on: bool = True, actor: str = "human") -> None:

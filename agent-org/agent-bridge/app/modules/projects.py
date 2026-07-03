@@ -78,7 +78,7 @@ def _row(p: Project) -> dict:
     return {
         "slug": p.slug, "name": p.name, "repo_url": p.repo_url, "git_host": p.git_host,
         "channel_id": p.channel_id, "created_by": p.created_by, "active": p.active,
-        "token_env": p.token_env,
+        "token_env": p.token_env, "upstream_url": p.upstream_url,
     }
 
 
@@ -90,9 +90,11 @@ class ProjectRegistry:
     async def add(
         self, name: str, repo_url: str, *, channel_id: str | None = None,
         created_by: str = "operator", token_env: str | None = None,
+        upstream_url: str | None = None,
     ) -> dict:
         """Register (or update) a project. Slug is derived from `name`. `token_env` = the NAME of the
-        env var holding this project's deploy token (multi-PAT). Returns the row dict."""
+        env var holding this project's deploy token (multi-PAT). `upstream_url` = the fork PARENT (if
+        this project is a fork), re-baked as the `upstream` remote on every focus. Returns the row."""
         slug = slugify(name)
         host = host_of(repo_url)
         async with self.db.session_factory() as s:
@@ -100,7 +102,7 @@ class ProjectRegistry:
             if p is None:
                 p = Project(slug=slug, name=name, repo_url=repo_url, git_host=host,
                             channel_id=channel_id, created_by=created_by, active=True,
-                            token_env=token_env)
+                            token_env=token_env, upstream_url=upstream_url)
                 s.add(p)
             else:
                 p.name, p.repo_url, p.git_host, p.active = name, repo_url, host, True
@@ -108,11 +110,14 @@ class ProjectRegistry:
                     p.channel_id = channel_id
                 if token_env is not None:
                     p.token_env = token_env
+                if upstream_url is not None:
+                    p.upstream_url = upstream_url
             await s.commit()
             await s.refresh(p)
             row = _row(p)
         await self.audit.log("project_added", actor=created_by,
-                             payload={"slug": slug, "repo": repo_url, "host": host, "token_env": token_env})
+                             payload={"slug": slug, "repo": repo_url, "host": host,
+                                      "token_env": token_env, "upstream": upstream_url})
         return row
 
     async def set_channel(self, slug: str, channel_id: str) -> None:
@@ -147,6 +152,11 @@ class ProjectRegistry:
         p = await self.get(slug)
         return p["repo_url"] if p and p["active"] else None
 
+    async def upstream_for(self, slug: str) -> str | None:
+        """The fork PARENT URL for a project, or None if it isn't a fork."""
+        p = await self.get(slug)
+        return (p.get("upstream_url") or None) if p and p["active"] else None
+
     async def list(self) -> list[dict]:
         async with self.db.session_factory() as s:
             rows = (
@@ -165,9 +175,20 @@ class ProjectRegistry:
         return True
 
     async def hosts(self) -> set[str]:
-        """Distinct git hosts of active projects — feeds the egress allowlist."""
+        """Distinct git hosts of active projects — feeds the egress allowlist. Includes each fork's
+        UPSTREAM host too (a worker must reach the parent to `git fetch upstream`), so the host
+        survives every egress re-render/rebuild without a separate manual allow."""
         async with self.db.session_factory() as s:
             rows = (
-                await s.execute(select(Project.git_host).where(Project.active.is_(True)))
-            ).scalars().all()
-        return {h for h in rows if h}
+                await s.execute(
+                    select(Project.git_host, Project.upstream_url).where(Project.active.is_(True))
+                )
+            ).all()
+        out: set[str] = set()
+        for git_host, upstream_url in rows:
+            if git_host:
+                out.add(git_host)
+            uh = host_of(upstream_url or "")
+            if uh:
+                out.add(uh)
+        return out

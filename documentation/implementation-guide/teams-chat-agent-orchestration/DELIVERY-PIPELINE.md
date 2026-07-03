@@ -1,8 +1,9 @@
 # Delivery pipeline — branch → commit/push → PR → autonomous test → human-gated merge → deploy
 
 **Status:** 📐 **design (2026-07-02)** — the software-delivery layer that turns *governance* into
-*shipped work*. **Stage D0 (branch + commit/push on done) is BUILT**; D1–D6 are designed here and
-**not yet built**. This doc adds the pipeline the governance corpus never specified: the corpus
+*shipped work*. **Stage D0 (branch + commit/push on done) and D0.f (fork/upstream onboarding) are
+BUILT** (D0.f 2026-07-03 — needs a `little-coder:local` rebuild to go live); D1–D6 are designed here
+and **not yet built**. This doc adds the pipeline the governance corpus never specified: the corpus
 built *escalation* ("surface a concern up the ladder"); this builds *promotion* ("move a feature
 through test → merge → deploy → human testing"). Same org, different machinery.
 **Precedence:** governance spec > this doc > PLAN/TASKS. Where they touch (hard-rule #4, review),
@@ -77,6 +78,72 @@ Each effort works and, on completion, publishes `agent/<effort>` (`orchestrator.
 the corrected floor. The completion summary reports the branch (`git fetch origin agent/<effort>`).
 Makes work durable, visible, hand-off-able. *(This is the foundation D1–D6 build on.)*
 
+### D0.f — fork/upstream onboarding ✅ BUILT (2026-07-03, the MonoGame case)
+**The problem, concretely.** The operator's MonoGame use case is working on a **fork** of an
+upstream repo. That workflow needs **two remotes**: `origin` = the fork (the worker's push target)
+and `upstream` = the parent (fetch-only, to pull in others' changes). But the little-coder git-proxy
+**blocks `git remote add`** by design ("remotes are operator-baked — no new remotes mid-task",
+`git_proxy._HARD_DENY`/`remote-mutate`), and `git fetch`/`git push` are allowed **only against an
+operator-pre-configured remote** (`_guard_remote_arg` → `configured_remotes`). So a worker **cannot
+set up a fork workflow itself** — which is *exactly* the MonoGame transcript: the worker tried
+`clone` / `init` / `remote add`, each blocked, because it was flailing in the sandbox instead of a
+governed `/project` clone. (The onboarding fix already routes new projects through `/project`; this
+adds the second remote that a fork needs.)
+
+**The mechanism — bake `upstream` at setup, via the REAL git binary.** Adding `upstream` is an
+**operator setup action**, so it rides the *same privileged path little-coder already uses to clone*
+(`workspace.clone` runs `self.real_git` directly, outside the proxy — design §12.3). After the clone,
+the daemon runs `real_git remote add upstream <parent-url>`. Once baked, `upstream` is a *configured*
+remote → the worker may `git fetch upstream` and `git merge --no-ff upstream/<branch>` freely (the
+proxy allows fetch/merge to configured remotes), while it still can only **push to `origin`** (its
+fork). The worker never gains remote-*mutate* power — the invariant holds; only the operator (bridge)
+bakes remotes.
+
+**Grammar + flow (BUILT).**
+`/project add <name> <fork-url> --upstream <parent-url> [TOKEN_ENV]` (also onboardable in plain
+language — the PO captures a described fork + parent). The bridge:
+1. Records `upstream_url` on the `Project` row (additive column `projects.upstream_url` + the same
+   self-heal migration as `token_env`) — **the persistent source of truth** (see survival note).
+2. On **every** focus, passes `upstream` (+ a read-scoped `upstream_token` if the parent is private)
+   to little-coder's `/project` (`ProjectRequest.upstream`/`upstream_token`); the daemon, **after**
+   the clone, runs `real_git remote add upstream <url>` (`workspace.add_upstream_remote`).
+3. Widens the worker git-egress allowlist to **both** hosts — `projects.hosts()` now yields each
+   fork's parent host too, so it survives every egress re-render without a manual allow.
+4. **Never** injects the deploy token into the `upstream` URL — `upstream` is fetch/read only; the
+   token is `origin`'s push credential. A *private* upstream (e.g. an org parent) gets its own
+   **read-scoped** token by the per-owner convention `LC_<PARENT_OWNER>_TOKEN`
+   (`orchestrator._project_upstream_token`).
+5. Fences the push side belt-and-braces: `add_upstream_remote` sets the push URL to a no-op
+   (`remote set-url --push upstream DISABLED-fork-parent-is-fetch-only`) so `git push upstream` fails
+   fast rather than reaching the parent — the worker publishes only to `origin` (its fork).
+
+**Survival — the ephemeral-workspace discipline (this is the operator's rebuild concern).** The
+`upstream` remote lives in the workspace clone, which little-coder **wipes on every `/project`
+switch** and which is a named volume that a rebuild/`down -v` can clear. So it is **never assumed to
+persist**: the bridge re-bakes it from the `Project` record (in the bridge's persistent DB) on
+**every focus**. Container rebuilds are safe two ways — (a) our extension is the Python `littlecoder`
+*wrapper* (it invokes the upstream npm CLI as a subprocess; a `little-coder@<ver>` bump + rebuild
+re-`COPY`s our `src/` unchanged, never patching upstream), and (b) the fork's remotes are re-derived
+on the next focus, not restored from the old workspace. `add_upstream_remote` is idempotent
+(`remote add … || set-url …`) so a re-focus onto an unwiped workspace is also correct. NB — this
+project `upstream` is distinct from little-coder's OWN `/admin/upstream/pull` (the fork-parent of the
+*tool*, self-improvement).
+
+**Worker sync workflow (once baked, all proxy-allowed):**
+`git fetch upstream` → `git merge --no-ff upstream/main` (the proxy *requires* `--no-ff`). Merge
+conflicts surface as an ordinary effort (escalate → operator), never a silent stall.
+
+**The cleaner long-term path (API-level, no in-workspace remote surgery).** The **GitHub MCP server**
+(or `gh` CLI) does fork + "sync fork" + **cross-fork PR** at the API level — `create_fork`, sync, and
+a PR whose head is `fork:branch` and base is `upstream:main` — with no `remote add` in the workspace
+at all. That's the recommended substrate once the delivery lane adopts MCP (see the resources note in
+`IMPLEMENTATION-NOTES.md`). The real-git `remote add` above is the **substrate-native path built here**
+— it works today with the existing little-coder and doesn't wait on the MCP/browser build.
+
+**Note for D1:** when a project is a fork, the promotion PR (D1) is **cross-fork** — head
+`fork/agent/<feature>`, base `upstream/main` — and its merge (D4) targets the *upstream* and is
+therefore doubly human-gated (it's a contribution to someone else's repo).
+
 ### D1 — PR creation (the promotion artifact)
 When the PM judges a feature complete, the bridge opens a PR `agent/<feature>` → `main` via the git
 host API. The PR body = the intent thread + the plan + the effort branches + the review verdicts.
@@ -136,6 +203,16 @@ Status: ✅ done · ⬜ todo · 🚩 decision-gate. Each phase has a done-when.
 
 - **DP.0 ✅ commit + push on done** — `_publish_effort` + branch-per-effort + corrected floor.
   *Done-when:* an effort against a repo pushes `agent/<effort>` and reports it (BUILT + tested).
+- **DP.0f ✅ fork/upstream onboarding** — `/project add … --upstream <url>` (+ NL onboarding). Bridge:
+  `Project.upstream_url` (additive column + migration) + `_effort_upstream`/`_project_upstream_token`
+  → `router.wake(upstream=…)` → `harness.set_project(upstream=…)` → `ProjectRequest.upstream`;
+  little-coder `workspace.add_upstream_remote` runs `real_git remote add upstream` post-clone
+  (operator path, §12.3), idempotent, push-fenced; dual-host egress via `projects.hosts()`. Re-baked
+  every focus (ephemeral workspace). *Done-when:* ✅ a fork project onboards, the worker can
+  `git fetch upstream`/`merge --no-ff upstream/main`, `git push upstream` is refused (only `origin`).
+  Tests: `test_fork_upstream.py` (7) + `test_workspace.py::test_add_upstream_remote_*` (3). **Requires
+  rebuilding `little-coder:local`** (a daemon/workspace change) to go live. *(Substrate-native;
+  independent of the MCP/browser build.)*
 - **DP.1 ⬜ Feature model + PR creation** — a "feature" groups efforts (intent thread); the PM opens
   a PR via the host API (OD-DP1 token). → `modules/delivery.py` (new). *Done-when:* completing a
   feature opens a PR `agent/<feature>→main` with the intent+plan+branches in the body.
@@ -170,3 +247,9 @@ client) — no new container. A **PR-scoped token** is a new secret (env only).
 - **OD-DP3** — "feature" granularity: 1 effort = 1 PR (simple) vs N efforts = 1 feature PR (matches
   the intent thread; recommended). The PM owns the feature-complete judgment.
 - **OD-DP4** — preview/staging + prod environments: where they run, and the second gate for prod.
+- **OD-DP5 (resolved for now)** — fork/upstream substrate (D0.f): **BUILT the real-git
+  `remote add upstream` at setup** (works today with existing little-coder, substrate-native). The
+  **GitHub MCP server / `gh` fork+sync+cross-fork-PR** API path stays the cleaner long-term option
+  (no in-workspace remote surgery) and is **not mutually exclusive** — the baked remote works now;
+  adopt MCP for PR/sync when the delivery lane lands. Private-upstream auth = a **read-scoped** token
+  via the `LC_<PARENT_OWNER>_TOKEN` convention (built).

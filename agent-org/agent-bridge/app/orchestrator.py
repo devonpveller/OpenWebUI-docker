@@ -56,16 +56,30 @@ _PO_NL_SYS = (
     "You are the PO (Project Overseer) — the human operator's conversational counterpart in a "
     "governed multi-agent coding org. Read the operator's natural-language message and reply "
     "helpfully and concisely in the first person (you own the 'intent thread'). Classify it:\n"
-    "- request: they want NEW work done → set effort_name to a short kebab-case slug (it becomes "
-    "a thread in the project channel). If they name a project/repo to work on, set `project` to it "
-    "(match a KNOWN PROJECT if listed). Write a brief friendly acknowledgement, but do NOT ask "
+    "- new project: they want to START/onboard a NEW project, or they give a git URL "
+    "(github.com/…, gitlab, an `git@…:…` link) → set `repo_url` to that URL (and `project` to a "
+    "short name if they give one). This creates its `#proj-<name>` channel. If they want a new "
+    "project but give NO git URL, ASK for the repo URL in your reply (don't guess one). If they say "
+    "it's a **fork** (or mention an upstream/parent repo), set `repo_url` to THEIR fork and "
+    "`upstream_url` to the PARENT repo — the org bakes a read-only `upstream` remote so workers can "
+    "pull the parent's changes but push only to the fork. If they also describe work to do, ALSO "
+    "set effort_name.\n"
+    "- request: they want NEW work done on an EXISTING project → set effort_name to a short "
+    "kebab-case slug (it becomes a thread in the project channel). If they name a project to work "
+    "on, set `project` to it (match a KNOWN PROJECT). Write a brief friendly acknowledgement, but do NOT ask "
     "clarifying questions yourself and do NOT claim you started/dispatched anything — a readiness "
     "check runs next and will pause to ask the operator if the request is under-specified "
     "(governance F5 — a question is cheaper than a misaligned worker).\n"
     "- clarification: the operator is ANSWERING a question or ADDING detail to an effort that is "
     "awaiting clarification or already in progress → set kind=clarification, effort_id to that "
     "effort (see AWAITING CLARIFICATION / CURRENT EFFORTS), and put their words in `steering`.\n"
-    "- status: they're asking what's going on.\n"
+    "- status: they're asking what's going on / what a worker is doing / why something is taking a "
+    "while → set kind=status. You DO have visibility: RECENT WORKER ACTIVITY lists the actual "
+    "commands each effort's worker most recently ran (newest last). Answer from THAT — name the "
+    "effort and describe what it's actually been doing (e.g. 'still cloning / running the build / "
+    "waiting on tests'). If an effort has NO recent activity, say it hasn't run a command yet (it "
+    "may be queued or stalled) — do NOT claim you 'can't see' worker progress, and do NOT invent "
+    "activity that isn't listed.\n"
     "- steering: explicitly changing the direction/scope of an existing effort → set effort_id + steering.\n"
     "- decision: approve/modify/abort a paused effort → set effort_id + decision (you interpret "
     "it; the human still confirms with an explicit command — never claim you executed it).\n"
@@ -86,11 +100,14 @@ _HELP = (
     "**agent-bridge** — governed multi-agent orchestration. You can talk to me in **plain "
     "language** (I'm your PO — tell me what you want built and I'll scope it), or use commands:\n"
     "- `/help` — this message\n"
-    "- `/project add <name> <repo-url>` — onboard a repo the org can work on (creates "
-    "`#proj-<name>` + allows its git host); `/project list` · `/project remove <name>`\n"
+    "- `/project add <name> <repo-url> [--upstream <parent-url>]` — onboard a repo the org can work "
+    "on (creates `#proj-<name>` + allows its git host); `--upstream` makes it a **fork** (bakes a "
+    "read-only `upstream` remote so workers fetch the parent but push only to the fork); "
+    "`/project list` · `/project remove <name>`\n"
     "- `/egress allow <host|repo-url>` — widen the worker git-egress allowlist; `/egress list`\n"
     "- `/effort <name>` — open a work effort as a **thread** in its project channel\n"
-    "- `/status [effort_id]` — gate state of all efforts (or one)\n"
+    "- `/status [effort_id|all]` — open efforts + recent worker activity (`all` includes "
+    "done/aborted; an id targets one)\n"
     "- `approve|modify|abort <effort_id> [note]` — approve a drafted **plan**, or decide an open CONCERN\n"
     "- `/risk <effort_id> <routine|irreversible|cross_effort|cascading_refactor>` — set blast radius "
     "(risky ⇒ a dry-run is required before real-code execution)\n"
@@ -236,6 +253,86 @@ class Orchestrator:
         target = repo or (self.s.default_repo or "")
         return slugify(target) if target else self.s.default_project
 
+    @staticmethod
+    def _project_name_from_repo(repo_url: str) -> str:
+        """Derive a project name from a git URL (its repo segment) when the operator gives none."""
+        seg = (repo_url or "").rstrip("/").split("/")[-1]
+        if seg.endswith(".git"):
+            seg = seg[:-4]
+        return seg or "project"
+
+    async def _onboard_project(
+        self, name: str, repo_url: str, *, user_id: str | None = None,
+        upstream_url: str | None = None,
+    ) -> dict:
+        """Register a project from a git URL: create its `#proj-<slug>` channel, add the operator,
+        and allow its git host on the worker egress (so clones work). `upstream_url` makes it a fork
+        (parent baked as a read-only `upstream` remote + its host allowed). Returns the project row."""
+        proj = await self.projects.add(
+            name, repo_url, created_by="operator", upstream_url=upstream_url
+        )
+        chan = await self.router.ensure_project_channel(proj["slug"])
+        await self.projects.set_channel(proj["slug"], chan)
+        self.events.track_channel(chan)
+        if user_id:
+            await self.chat.add_member(chan, user_id)
+        from .modules.projects import host_of
+        for host in (proj["git_host"], host_of(upstream_url or "")):
+            if host:
+                try:
+                    await self.egress.allow(host, added_by="operator", source="project")
+                except Exception as exc:  # noqa: BLE001
+                    log.debug("egress allow for %s: %s", proj["slug"], exc)
+        try:
+            await self.egress.sync()
+        except Exception as exc:  # noqa: BLE001
+            log.debug("egress sync for %s: %s", proj["slug"], exc)
+        return proj
+
+    async def _handle_new_project(
+        self, intent, message: str, channel_id: str, thread_id: str | None,
+        user_id: str | None, reply: str,
+    ) -> None:
+        """Onboard a project from `intent.repo_url` (create its channel), then — if the operator also
+        described work — open the first effort in it; else confirm the channel is ready."""
+        name = intent.project or self._project_name_from_repo(intent.repo_url)
+        try:
+            proj = await self._onboard_project(
+                name, intent.repo_url, user_id=user_id,
+                upstream_url=getattr(intent, "upstream_url", None),
+            )
+        except Exception as exc:  # noqa: BLE001
+            await self.chat.post(
+                channel_id, (reply + f"\n\n_(couldn't set up that project: {exc})_").strip(),
+                thread_id=thread_id,
+            )
+            return
+        created = (
+            f"✅ Project **#proj-{proj['slug']}** → `{proj['repo_url']}` "
+            f"(token {self._project_token_label(proj)})"
+            + (f" · ⑂ fork of `{proj['upstream_url']}` (read-only `upstream` remote)"
+               if proj.get("upstream_url") else "")
+        )
+        if intent.effort_name:  # onboard + start the first effort in the new project
+            eid, chan, root = await self.router.open_effort(
+                intent.effort_name, project=proj["slug"], goal=message
+            )
+            self.events.track_channel(chan)
+            if thread_id:
+                self._effort_mgmt_thread[eid] = thread_id
+            await self._intake_or_dispatch(
+                eid, chan, root, message,
+                reply_prefix=f"{reply}\n\n{created} — starting your first effort there.",
+                mgmt_channel=channel_id, mgmt_thread=thread_id,
+            )
+        else:
+            await self.chat.post(
+                channel_id,
+                (f"{reply}\n\n{created}. Post in that channel — or say _\"in {proj['slug']}, …\"_ "
+                 f"here — to start work.").strip(),
+                thread_id=thread_id,
+            )
+
     async def _resolve_project_slug(self, named: str | None, channel_id: str | None = None) -> str:
         """Resolve which project a request belongs to: an explicitly named/onboarded project wins;
         else the originating #proj-<slug> channel's project; else the fallback (default/sandbox)."""
@@ -306,6 +403,29 @@ class Orchestrator:
             return os.environ[cand]
         # 3) pool default (LC_DEPLOY_TOKEN, on the worker pool).
         return None
+
+    async def _effort_upstream(self, effort_id: str) -> str | None:
+        """The fork PARENT URL for this effort's project (D0.f), or None if it isn't a fork. The
+        bridge re-bakes it as the read-only `upstream` remote on every focus — the persistent source
+        of truth is the Project record, so it survives workspace wipes + container rebuilds."""
+        async with self.db.session_factory() as s:
+            e = await s.get(Effort, effort_id)
+            proj = e.project if e else None
+        return await self.projects.upstream_for(proj) if proj else None
+
+    async def _project_upstream_token(self, effort_id: str) -> str | None:
+        """A READ-scoped token for a PRIVATE fork parent, by the per-owner convention
+        `LC_<PARENT_OWNER>_TOKEN` (used only if that env var is set). A public parent needs none.
+        Distinct from the origin/push token — the parent is a different owner than the fork."""
+        import os
+
+        from .modules.projects import owner_token_env
+
+        upstream = await self._effort_upstream(effort_id)
+        if not upstream:
+            return None
+        cand = owner_token_env(upstream)
+        return os.environ.get(cand) if cand else None
 
     async def _track_operator(self, user_id: str | None) -> None:
         """Remember an operator seen in #mgmt and pull them into the function channels so those
@@ -461,11 +581,14 @@ class Orchestrator:
         report status) are executed; safety decisions are NOT auto-run from fuzzy NL — the PO
         asks for the explicit, auditable command (governance §3). Runs on the PO profile's lane
         (local qwen36-27b by default; cloud if P0.5 mandated)."""
-        efforts = await self.gate.snapshot()
+        efforts = await self.gate.snapshot(open_only=True)  # PO reasons over what's still in play
         ctx = "; ".join(f"{e['id']}={e['state']}" for e in efforts) or "none"
         pending_ctx = ", ".join(self._pending.keys()) or "none"
         projects = await self.projects.list()
         projects_ctx = ", ".join(f"{p['slug']} ({p['repo_url']})" for p in projects) or "none"
+        # Fix 1 (PO progress visibility): real, recent per-worker command activity so the PO can
+        # answer "what's going on?" from FACTS instead of admitting it has no real-time visibility.
+        activity_ctx = self._worker_activity_ctx(efforts)
         # Hierarchical + bounded + relevance-selected: this thread (immediate) + relevant channel
         # background, filtered to the query so it never overwhelms the model window.
         history = self.context.build(channel_id, thread_id, query=message)
@@ -474,7 +597,8 @@ class Orchestrator:
                 "po", _PO_NL_SYS,
                 f"CONVERSATION SO FAR (most recent last):\n{history}\n\n"
                 f"LATEST OPERATOR MESSAGE:\n{message}\n\nCURRENT EFFORTS: {ctx}\n"
-                f"AWAITING CLARIFICATION: {pending_ctx}\nKNOWN PROJECTS: {projects_ctx}",
+                f"AWAITING CLARIFICATION: {pending_ctx}\nKNOWN PROJECTS: {projects_ctx}\n"
+                f"RECENT WORKER ACTIVITY (newest last):\n{activity_ctx}",
                 OperatorIntent,
             )
         except Exception as exc:  # noqa: BLE001 - degrade gracefully, never crash the loop
@@ -491,6 +615,21 @@ class Orchestrator:
         # Remember this turn (under its thread) so the next message keeps context.
         self._remember(channel_id, thread_id, "operator", message)
         self._remember(channel_id, thread_id, "po", reply)
+        # NEW PROJECT: a git URL onboards a new project (+ its #proj channel) — do this BEFORE
+        # treating the message as work, else it would default to #proj-sandbox (the reported bug).
+        if intent.repo_url:
+            await self._handle_new_project(intent, message, channel_id, thread_id, user_id, reply)
+            return
+        # They named a project we don't know + gave no URL → ask for the repo (don't silently
+        # fall back to the sandbox).
+        if intent.project and not await self.projects.resolve(intent.project):
+            await self.chat.post(
+                channel_id,
+                (reply + f"\n\n_I don't have a project called **{intent.project}** yet — share its "
+                 f"git URL and I'll set it up (or `/project add {intent.project} <repo-url>`)._").strip(),
+                thread_id=thread_id,
+            )
+            return
         if intent.kind == "request" and intent.effort_name:
             try:
                 # Resolve WHICH project this works on: a named/onboarded project, else the fallback.
@@ -553,12 +692,29 @@ class Orchestrator:
                 f"`{intent.decision} {intent.effort_id}`"
             )
         elif intent.kind == "status":
-            reply += "\n\n" + (
-                "\n".join(f"- `{e['id']}` — **{e['state']}**" for e in efforts)
-                if efforts else "_No efforts yet — tell me what you'd like built._"
-            )
+            if efforts:
+                lines = []
+                for e in efforts:
+                    line = f"- `{e['id']}` — **{e['state']}**"
+                    act = self.router.recent_activity(e["id"], n=3)
+                    if act:
+                        line += "\n  " + "\n  ".join(f"· {a}" for a in act)
+                    lines.append(line)
+                reply += "\n\n" + "\n".join(lines)
+            else:
+                reply += "\n\n_No open efforts — tell me what you'd like built._"
 
         await self.chat.post(channel_id, reply or "…", thread_id=thread_id)
+
+    def _worker_activity_ctx(self, efforts: list[dict]) -> str:
+        """Compact per-effort recent worker command activity for the PO's context (Fix 1).
+        Only efforts with recorded activity appear; keeps the block small and factual."""
+        blocks: list[str] = []
+        for e in efforts:
+            act = self.router.recent_activity(e["id"], n=6)
+            if act:
+                blocks.append(f"{e['id']}:\n  " + "\n  ".join(act))
+        return "\n".join(blocks) if blocks else "none yet (no worker has run a command)"
 
     def _mgmt_thread_of(self, effort_id: str | None) -> str | None:
         """The #mgmt thread an effort was requested in (for threading its summaries/CONCERNs)."""
@@ -569,6 +725,27 @@ class Orchestrator:
         """Map the readiness gate's blast_radius (UX-FLOW Stage 2) to the P4.0 dry-run risk class.
         cross_effort / cascading_refactor ⇒ a dry-run is required; routine ⇒ none."""
         return blast_radius if blast_radius in ("cross_effort", "cascading_refactor") else "routine"
+
+    @staticmethod
+    def _extract_flag(tokens: list[str], flag: str) -> tuple[str | None, list[str]]:
+        """Pull `--flag <value>` (or `--flag=<value>`) out of a token list; return
+        (value or None, remaining positional tokens). Only the first occurrence is taken."""
+        value: str | None = None
+        rest: list[str] = []
+        i = 0
+        while i < len(tokens):
+            t = tokens[i]
+            if value is None and t == flag and i + 1 < len(tokens):
+                value = tokens[i + 1]
+                i += 2
+                continue
+            if value is None and t.startswith(flag + "="):
+                value = t[len(flag) + 1:]
+                i += 1
+                continue
+            rest.append(t)
+            i += 1
+        return (value or None), rest
 
     @staticmethod
     def _render_questions(questions) -> str:
@@ -795,6 +972,8 @@ class Orchestrator:
         `repo` focuses the worker; omit to resolve from the effort's project (registry → fallback)."""
         repo = repo or await self._effort_repo(effort_id)
         repo_token = await self._project_token(effort_id) if repo else None
+        upstream = await self._effort_upstream(effort_id) if repo else None
+        upstream_token = await self._project_upstream_token(effort_id) if upstream else None
         try:
             await self.charters.set_goal(effort_id, goal, created_by="po")
             # P4.0 gate: a high-blast-radius effort may not reach REAL-code execution until its
@@ -819,7 +998,8 @@ class Orchestrator:
             last = None
             for i, step in enumerate(steps, 1):
                 last = await self._run_step(
-                    effort_id, channel_id, root_post_id, step, i, len(steps), repo, heavy, repo_token
+                    effort_id, channel_id, root_post_id, step, i, len(steps), repo, heavy,
+                    repo_token, upstream, upstream_token,
                 )
                 if last is None:   # stopped (failure / flagged / frozen) — handlers already posted
                     return
@@ -834,7 +1014,8 @@ class Orchestrator:
             )
             await self.router.update_effort_card(effort_id, "error")
 
-    async def _run_step(self, effort_id, channel_id, root, step, i, n, repo, heavy, repo_token=None):
+    async def _run_step(self, effort_id, channel_id, root, step, i, n, repo, heavy, repo_token=None,
+                        upstream=None, upstream_token=None):
         """Run one plan step = one checkpoint. Returns the WorkResult to continue, or None to STOP
         (the failure/flag/deviation handler has already posted + frozen where required)."""
         header = f"▶ **step {i}/{n}**: {step[:180]}" if n > 1 else "⏳ worker dispatched. Working…"
@@ -845,6 +1026,7 @@ class Orchestrator:
         result = await self.router.wake(
             effort_id, role="worker-default", thread_id=root, channel_id=channel_id,
             session_id=effort_id, instruction=step, repo=repo, repo_token=repo_token,
+            upstream=upstream, upstream_token=upstream_token,
         )
         if result is None:
             await self._report_completion(effort_id, None)
@@ -949,6 +1131,7 @@ class Orchestrator:
             effort_id=effort_id,
         )
         await self.router.update_effort_card(effort_id, "done")
+        await self.gate.set_lifecycle(effort_id, "done")  # drops out of the default /status view
         await self.comms.post(
             Intent.operator_reply,
             f"✅ **{effort_id}** finished (**done**): {head}\n_{where[0].upper() + where[1:]}._",
@@ -1250,17 +1433,34 @@ class Orchestrator:
             except Exception as exc:  # noqa: BLE001
                 await reply(f"⚠️ could not create effort `{name}`: {exc}")
         elif cmd == "status":
-            snap = await self.gate.snapshot()
-            if args:
-                snap = [e for e in snap if e["id"] == args[0]]
+            # Default view = efforts still in play. `/status all` includes done/aborted;
+            # `/status <effort_id>` targets one (regardless of lifecycle).
+            want_all = bool(args) and args[0].lower() == "all"
+            target = args[0] if args and not want_all else None
+            snap = await self.gate.snapshot(open_only=not (want_all or target))
+            if target:
+                snap = [e for e in snap if e["id"] == target]
             if not snap:
-                await reply("no efforts yet — create one with `/effort <name>`")
+                if target:
+                    await reply(f"no effort `{target}`.")
+                elif want_all:
+                    await reply("no efforts yet — create one with `/effort <name>`")
+                else:
+                    await reply(
+                        "no open efforts — everything's done/aborted. `/status all` shows the history."
+                    )
             else:
-                lines = [
-                    f"- `{e['id']}` — **{e['state']}**" + (f" ({e['reason']})" if e["reason"] else "")
-                    for e in snap
-                ]
-                await reply("**Efforts:**\n" + "\n".join(lines))
+                lines = []
+                for e in snap:
+                    life = "" if e.get("lifecycle", "open") == "open" else f" _[{e['lifecycle']}]_"
+                    line = (f"- `{e['id']}` — **{e['state']}**{life}"
+                            + (f" ({e['reason']})" if e["reason"] else ""))
+                    act = self.router.recent_activity(e["id"], n=3)
+                    if act:
+                        line += "\n  " + "\n  ".join(f"· {a}" for a in act)
+                    lines.append(line)
+                header = "**Efforts (open):**" if not (want_all or target) else "**Efforts:**"
+                await reply(header + "\n" + "\n".join(lines))
         elif cmd in ("kill", "unkill"):
             on = cmd == "kill"
             await self.gate.kill_switch(on=on, actor="human")
@@ -1319,11 +1519,18 @@ class Orchestrator:
         elif cmd == "project":
             sub = args[0].lower() if args else ""
             if sub == "add" and len(args) >= 3:
-                name, repo = args[1], args[2]
-                token_env = args[3] if len(args) >= 4 else None   # optional per-project token env var
+                # Pull out `--upstream <url>` (fork parent) wherever it appears; the rest is
+                # positional: name, repo, [TOKEN_ENV].
+                upstream_url, positional = self._extract_flag(args[1:], "--upstream")
+                if len(positional) < 2:
+                    await reply("usage: `/project add <name> <repo-url> [--upstream <parent-url>] [TOKEN_ENV]`")
+                    return
+                name, repo = positional[0], positional[1]
+                token_env = positional[2] if len(positional) >= 3 else None
                 try:
                     proj = await self.projects.add(
-                        name, repo, created_by="operator", token_env=token_env
+                        name, repo, created_by="operator", token_env=token_env,
+                        upstream_url=upstream_url,
                     )
                     chan = await self.router.ensure_project_channel(proj["slug"])
                     await self.projects.set_channel(proj["slug"], chan)
@@ -1333,12 +1540,20 @@ class Orchestrator:
                     note = ""
                     if proj["git_host"]:  # widen the worker egress scope to this repo's host
                         await self.egress.allow(proj["git_host"], added_by="operator", source="project")
-                        await self.egress.sync()
                         note = f" · egress host `{proj['git_host']}` allowed"
+                    up = ""
+                    if upstream_url:  # a fork — allow the PARENT host too so `git fetch upstream` works
+                        from .modules.projects import host_of
+                        uh = host_of(upstream_url)
+                        if uh:
+                            await self.egress.allow(uh, added_by="operator", source="project")
+                            note += f" · upstream host `{uh}` allowed"
+                        up = f" · fork of `{upstream_url}` (read-only `upstream` remote, re-baked each focus)"
+                    await self.egress.sync()
                     tok = f" · deploy token from env `{token_env}`" if token_env else ""
                     await reply(
                         f"✅ project `{proj['slug']}` → `{repo}` (post in `#proj-{proj['slug']}` "
-                        f"to work on it, or say _\"in {proj['slug']}, …\"_ here){note}{tok}"
+                        f"to work on it, or say _\"in {proj['slug']}, …\"_ here){up}{note}{tok}"
                     )
                 except Exception as exc:  # noqa: BLE001
                     await reply(f"⚠️ could not add project: {exc}")
@@ -1347,6 +1562,7 @@ class Orchestrator:
                 await reply(
                     "**Projects:**\n" + "\n".join(
                         f"- `{p['slug']}` → {p['repo_url']} · token {self._project_token_label(p)}"
+                        + (f" · ⑂ upstream `{p['upstream_url']}`" if p.get("upstream_url") else "")
                         for p in ps
                     )
                     if ps else "no projects yet — `/project add <name> <repo-url>`"
@@ -1357,9 +1573,10 @@ class Orchestrator:
                 await reply(f"{'✅ removed' if ok else '⚠️ no such'} project `{args[1]}`")
             else:
                 await reply(
-                    "usage: `/project add <name> <repo-url> [TOKEN_ENV]` · `/project list` · "
-                    "`/project remove <name>`  _(TOKEN_ENV = the env var holding this repo's PAT, "
-                    "e.g. `AO_TOKEN_ACME`; omit to use the pool's default token)_"
+                    "usage: `/project add <name> <repo-url> [--upstream <parent-url>] [TOKEN_ENV]` · "
+                    "`/project list` · `/project remove <name>`  _(`--upstream` = the fork PARENT, "
+                    "baked read-only so the worker can fetch it but push only to the fork; TOKEN_ENV "
+                    "= the env var holding this repo's PAT, omit to use the pool's default token)_"
                 )
         elif cmd == "egress":
             sub = args[0].lower() if args else ""

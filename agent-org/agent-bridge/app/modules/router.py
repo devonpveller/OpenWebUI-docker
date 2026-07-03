@@ -92,6 +92,18 @@ class Router:
         self.chat = chat
         self.audit = audit
         self.build_context = context_builder or _default_context
+        # Recent worker activity per effort (the streamed commands) so the PO can answer
+        # "what's going on?" with real visibility instead of "I don't have visibility."
+        self._activity: dict[str, list[str]] = {}
+
+    def _record_activity(self, effort_id: str, line: str) -> None:
+        buf = self._activity.setdefault(effort_id, [])
+        buf.append(line[:160])
+        del buf[:-30]  # keep the last ~30 activity lines
+
+    def recent_activity(self, effort_id: str, n: int = 8) -> list[str]:
+        """The last `n` streamed worker actions for an effort (for the PO's progress answers)."""
+        return self._activity.get(effort_id, [])[-n:]
 
     # ── project channel + effort thread (COMMS-MODEL §4 / CM.1) ──────────────
     def _effort_card(self, name: str, goal: str = "", status: str = "active") -> str:
@@ -220,11 +232,14 @@ class Router:
         instruction: str = "",
         repo: str | None = None,
         repo_token: str | None = None,
+        upstream: str | None = None,
+        upstream_token: str | None = None,
     ) -> WorkResult | None:
         """Wake a worker on an effort and post its reply in-thread. Returns None if the
         effort is frozen (the composition rule refuses to dispatch) or no capacity. If `repo`
         is given, the worker is focused on it first (clone via /project, using `repo_token` if the
-        project has a per-project deploy token); if omitted, the worker is assumed already focused."""
+        project has a per-project deploy token); if omitted, the worker is assumed already focused.
+        `upstream` (a fork's parent) is re-baked as the read-only `upstream` remote on this focus."""
         session_id = session_id or thread_id
         try:
             inst = await self.scheduler.acquire(effort_id, role, session_id)
@@ -241,10 +256,13 @@ class Router:
 
         try:
             if repo:
-                ok = await self.harness.set_project(inst.base_url, repo, token=repo_token)
+                ok = await self.harness.set_project(
+                    inst.base_url, repo, token=repo_token,
+                    upstream=upstream, upstream_token=upstream_token,
+                )
                 await self.audit.log(
                     "worker_project_set", effort_id=effort_id, actor=inst.id,
-                    payload={"repo": repo, "ok": ok},
+                    payload={"repo": repo, "ok": ok, "upstream": upstream},
                 )
                 if not ok:
                     await self.chat.post(
@@ -272,6 +290,7 @@ class Router:
                     ok = bool(item.get("ok"))
                     icon = "🚫" if item.get("denied") else ("✅" if ok else "❌")
                     line = f"{icon} `$ {cmd[:200]}`"
+                    self._record_activity(effort_id, f"{icon} {cmd[:120]}")  # PO visibility
                     if not ok:  # failure/denial — flush the batch, then surface this with context
                         tail = (item.get("stderr_tail") or "").strip()
                         if tail:
@@ -286,6 +305,7 @@ class Router:
                     await _flush()
                     ans = (item.get("answer") or "").strip()
                     if ans:
+                        self._record_activity(effort_id, f"💬 {ans[:120]}")
                         await self.chat.post(
                             channel_id, f"💬 **{role}@{inst.id}:** {ans[:1500]}",
                             thread_id=thread_id,
