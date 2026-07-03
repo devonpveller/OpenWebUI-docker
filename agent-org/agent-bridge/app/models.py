@@ -345,6 +345,30 @@ class EgressHost(Base):
     created_at: Mapped[str] = mapped_column(default=now_iso)
 
 
+class ParkedEffort(Base):
+    """An effort parked because an inference step was SHED by queue backpressure (the shared GPU is
+    saturated) — machine B `suspended` with reason `inference_backpressure`, NOT a governance freeze.
+    DB-backed so a bridge restart mid-saturation doesn't lose the parked work (resume-on-boot). The
+    row is a RESUME TOKEN: enough to re-run the shed stage when capacity returns. Removed on resume.
+
+    Distinct from the scheduler's dependency-DAG wait (`WorkerInstance.waiting_on_effort`): that parks
+    an INSTANCE blocked on another effort's finish; this parks an EFFORT blocked on GPU capacity."""
+
+    __tablename__ = "parked_efforts"
+
+    effort_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    stage: Mapped[str] = mapped_column(String(24), default="delegate")  # "intake" | "delegate"
+    reason: Mapped[str] = mapped_column(String(32), default="inference_backpressure")
+    channel_id: Mapped[str | None] = mapped_column(String(64))
+    root_post_id: Mapped[str | None] = mapped_column(String(64))
+    request: Mapped[str] = mapped_column(Text, default="")
+    plan_steps_json: Mapped[str | None] = mapped_column(Text)          # JSON list, or None (single-goal)
+    from_step: Mapped[int] = mapped_column(Integer, default=1)          # resume delegate from this 1-based step
+    mgmt_thread: Mapped[str | None] = mapped_column(String(64))
+    attempts: Mapped[int] = mapped_column(Integer, default=0)           # resume attempts (starvation guard)
+    parked_at: Mapped[str] = mapped_column(default=now_iso)
+
+
 class GlobalState(Base):
     """Singleton — the global kill switch (§3). One row, id=1."""
 

@@ -17,7 +17,7 @@ exercise · 🚀 operator step · 🚩 decision-gate.
 
 > **What "fully implemented" means here.** Everything that is *code / config / docs* is built,
 > wired, and — where it can run without a live GPU/Mattermost/Docker stack — covered by
-> deterministic tests (**133 passing** as of 2026-07-03). The remaining items are inherently operator-only: bringing
+> deterministic tests (**146 passing** as of 2026-07-03). The remaining items are inherently operator-only: bringing
 > up containers, creating a Mattermost bot token, running the capability-floor test against the
 > live GPU, deciding OpenRouter spend, and tailnet exposure. Those are authored + runnable, and
 > marked 🚀/🚩 below. The build makes them a switch-flip, not new work.
@@ -91,6 +91,41 @@ with finished test efforts; and a *fork* workflow couldn't be set up). **126 →
   real git binary** (the same operator path as clone, §12.3) so the worker can `fetch`/`merge --no-ff`
   upstream but push only to `origin`. Substrate-native; the API-level alternative is the GitHub MCP
   server (below).
+
+## Inference-backpressure resilience — the PM survives GPU saturation (2026-07-03)
+
+Live symptom: the PM "felt lost" / replied "I couldn't parse that." Root cause was NOT the PM logic —
+an `openbrain-research` fan-out saturated the shared single GPU, `llm-queue` shed the PO's request
+with a 503 (everything runs at the stripped `dummy`/prio-2 key), and the bridge mislabeled the 503 as
+a parse failure. Three layers of fix (**146 tests green**):
+
+- **Retry + honest degrade (LIVE).** `ModelRouter._with_backpressure_retry` retries 429/503 with
+  exponential backoff (`AO_MODEL_BACKPRESSURE_*`); `ModelBackpressureError` is a distinct type so
+  `nl_intake` says *"the local model's saturated — I didn't lose your message, resend in a moment"*
+  instead of "couldn't parse". `is_backpressure_text` classifies the shed by marker/status.
+  `test_backpressure.py` (5).
+- **Richer PM reasoning (LIVE).** `_PO_NL_SYS` now makes the PO a thinking-partner: reflect the goal,
+  propose the approach, surface genuine options — no frivolous questions; dispatch invites steering.
+  (Prompt-only, no extra model call — important under GPU pressure.)
+- **Capacity park-and-resume (BUILT).** An orchestration step (readiness/plan/delegate step, or a
+  worker whose OWN inference was shed) that exhausts retries is **parked, not failed** — machine B
+  `suspended`, reason=inference_backpressure, **DB-backed** (`ParkedEffort` + `modules/capacity_park.py
+  ParkStore`) so a restart mid-saturation resumes on boot. A resume driver drains parked efforts
+  **one at a time**, clocked by the **self-clocked capacity event** (a successful model call fires
+  `ModelRouter.on_capacity_signal` → `_signal_capacity`) with a **timer fallback**
+  (`AO_CAPACITY_TIMER_S`). Reuses the scheduler's existing park/resume shape (`to_waiting`/
+  `wake_finished`) for a second blocker type (GPU capacity vs. a dependency-DAG finish). Extras:
+  **source guard** (skip our own grounding/research fan-out while a shed is recent — anti-self-DoS)
+  and **starvation escalation** (past `AO_CAPACITY_MAX_ATTEMPTS`, escalate to #mgmt + stop retrying —
+  not a governance freeze; it's a capacity problem). `delegate` gained `start_step` for mid-sequence
+  resume. `test_capacity_park.py` (8). *Needs the rebuilt agent-bridge to be live.*
+
+**Operational note (2026-07-03):** the multi-project egress path was silently INERT — `ao-git-egress`
+was a stale 25h container with **no mounts** (predated the shared-allowlist wiring), so the bridge's
+`/egress`/`/project`-driven allowlist writes hit `Permission denied` and never took effect (workers
+ran on the old baked scope). Fix = recreate `ao-git-egress` (its reload script `chmod 0777`s the
+volume + seeds github.com), then the bridge writes the live allowlist. If egress "allow" seems to
+do nothing, check `ao-git-egress` isn't stale (`docker inspect … --format '{{.Mounts}}'`).
 
 ## Fork/upstream onboarding D0.f — BUILT + survives upstream/rebuilds (2026-07-03)
 

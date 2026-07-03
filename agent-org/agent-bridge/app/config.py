@@ -48,6 +48,26 @@ class Settings(BaseSettings):
     # thread post to keep effort threads readable. Failures/denials always post immediately.
     activity_batch: int = 5
 
+    # ── Inference backpressure resilience ───────────────────────────────────
+    # The shared single-GPU llm-queue can shed requests (429/503) when a batch job (research /
+    # ingestion) saturates it. A bridge model call retries with exponential backoff before giving
+    # up, so a transient GPU squeeze degrades gracefully (the PO says "model's busy, one moment")
+    # instead of surfacing as a bogus "couldn't parse". NOT a health probe (C5) — it only reacts to
+    # a real request being shed.
+    model_backpressure_retries: int = 3
+    model_backpressure_base_delay_s: float = 1.5
+    model_backpressure_max_delay_s: float = 8.0
+    # Capacity park-and-resume: an orchestration step shed after the retries above is PARKED (machine
+    # B suspended, reason=inference_backpressure) instead of failed, and auto-resumed when capacity
+    # returns. The resume driver drains parked efforts ONE AT A TIME — driven by the self-clocked
+    # capacity signal (a successful call) with a timer as the fallback tick.
+    capacity_resume_enabled: bool = True
+    capacity_timer_s: float = 45.0          # fallback re-check cadence when no success signal fires
+    capacity_max_attempts: int = 6          # resume attempts before escalating a starved effort
+    # Source guard (anti-self-DoS): the orchestration's own research/grounding call is SKIPPED if a
+    # shed happened within this window — don't add a fan-out on top of a saturated GPU.
+    capacity_source_guard_s: float = 60.0
+
     # ── Conversation context (hierarchical + bounded — the PO's memory) ──────
     # A reply builds thread-level context; the channel is a higher-level background. Both are
     # char-budgeted so they never overwhelm the model window, and the channel layer is filtered to

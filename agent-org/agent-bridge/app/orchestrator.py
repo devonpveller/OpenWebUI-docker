@@ -12,11 +12,13 @@ import asyncio
 import logging
 import random
 import re
+import time
 
 from .adapters.chat import ChatAdapter
 from .config import Settings
 from .db import Database
 from .modules.audit_sink import AuditSink
+from .modules.capacity_park import ParkStore
 from .modules.charters import Charters
 from .modules.comms_router import CommsRouter, Intent
 from .modules.context_manager import ContextManager
@@ -27,7 +29,11 @@ from .modules.floor_guard import FloorGuard
 from .modules.governance_gate import GovernanceGate
 from .modules.grounding import Grounding, build_grounding
 from .modules.learning_loop import LearningLoop
-from .modules.model_router import ModelRouter
+from .modules.model_router import (
+    ModelBackpressureError,
+    ModelRouter,
+    is_backpressure_text,
+)
 from .modules.planner import Planner
 from .modules.profiles import ProfileRegistry
 from .modules.project_context import ProjectContext
@@ -55,7 +61,13 @@ _CONTROL_RE = re.compile(r"^(/|approve\b|modify\b|abort\b|kill\b|unkill\b)", re.
 _PO_NL_SYS = (
     "You are the PO (Project Overseer) — the human operator's conversational counterpart in a "
     "governed multi-agent coding org. Read the operator's natural-language message and reply "
-    "helpfully and concisely in the first person (you own the 'intent thread'). Classify it:\n"
+    "helpfully and concisely in the first person (you own the 'intent thread').\n"
+    "BE A THINKING PARTNER, NOT A TICKET-TAKER. When the operator describes what they want built, "
+    "don't just say 'on it' — briefly reflect back what you understand the goal to be, propose HOW "
+    "you'd approach it, and surface any GENUINE decision that changes the outcome (with your "
+    "recommendation). That 'figuring out the options' is the value you add. But stay tight: no "
+    "frivolous questions, no re-asking things you can resolve from the project or standard practice, "
+    "and never pad. Classify the message:\n"
     "- new project: they want to START/onboard a NEW project, or they give a git URL "
     "(github.com/…, gitlab, an `git@…:…` link) → set `repo_url` to that URL (and `project` to a "
     "short name if they give one). This creates its `#proj-<name>` channel. If they want a new "
@@ -66,10 +78,12 @@ _PO_NL_SYS = (
     "set effort_name.\n"
     "- request: they want NEW work done on an EXISTING project → set effort_name to a short "
     "kebab-case slug (it becomes a thread in the project channel). If they name a project to work "
-    "on, set `project` to it (match a KNOWN PROJECT). Write a brief friendly acknowledgement, but do NOT ask "
-    "clarifying questions yourself and do NOT claim you started/dispatched anything — a readiness "
-    "check runs next and will pause to ask the operator if the request is under-specified "
-    "(governance F5 — a question is cheaper than a misaligned worker).\n"
+    "on, set `project` to it (match a KNOWN PROJECT). In your `reply`, do the thinking-partner thing: "
+    "(1) reflect the goal back in a line so they know you got it; (2) state your intended APPROACH at "
+    "a high level; (3) if a real fork-in-the-road exists (a choice that changes the result), name the "
+    "option(s) + your recommendation. Do NOT invent frivolous questions and do NOT claim you "
+    "started/dispatched anything — a readiness check runs next and will pause ONLY if a genuine "
+    "blocker remains (governance F5 — a question is cheaper than a misaligned worker).\n"
     "- clarification: the operator is ANSWERING a question or ADDING detail to an effort that is "
     "awaiting clarification or already in progress → set kind=clarification, effort_id to that "
     "effort (see AWAITING CLARIFICATION / CURRENT EFFORTS), and put their words in `steering`.\n"
@@ -199,12 +213,142 @@ class Orchestrator:
         # `approve <effort>` dispatches with the plan's steps. {effort_id: {proj_channel, root, request, plan}}
         self._pending_plan: dict[str, dict] = {}
         self._bg_tasks: set[asyncio.Task] = set()  # in-flight delegations
+        # Capacity park-and-resume (machine B `suspended`, reason=inference_backpressure): an effort
+        # whose step is shed by the saturated GPU is PARKED here (DB-backed) instead of failed, and
+        # auto-resumed when capacity returns. The resume driver drains one-at-a-time, clocked by a
+        # successful model call (self._signal_capacity, fired from the ModelRouter) + a timer tick.
+        self.parks = ParkStore(db, self.audit)
+        self.models.on_capacity_signal = self._signal_capacity
+        self._capacity_event = asyncio.Event()
+        self._capacity_task: asyncio.Task | None = None
+        self._draining = False
+        self._last_backpressure = 0.0   # monotonic ts of the last shed (source-guard window)
 
     def _spawn(self, coro) -> None:
         """Run a coroutine in the background, keeping a reference so it isn't GC'd."""
         task = asyncio.create_task(coro)
         self._bg_tasks.add(task)
         task.add_done_callback(self._bg_tasks.discard)
+
+    # ── capacity park-and-resume (inference backpressure, machine B) ───────────
+    def _signal_capacity(self) -> None:
+        """The capacity-recovered event: a successful model call proves the GPU has capacity, so
+        wake the drain loop. Sync + cheap (idempotent Event.set) — safe to call on every success."""
+        try:
+            self._capacity_event.set()
+        except Exception:  # noqa: BLE001 - never let a signal hiccup touch the call path
+            pass
+
+    def _note_backpressure(self) -> None:
+        self._last_backpressure = time.monotonic()
+
+    def _backpressure_recent(self) -> bool:
+        """True if a shed happened within the source-guard window — used to skip firing our OWN
+        research/grounding fan-out on top of an already-saturated GPU (anti-self-DoS)."""
+        return (time.monotonic() - self._last_backpressure) < self.s.capacity_source_guard_s
+
+    async def _park_effort(
+        self, effort_id: str, *, stage: str, channel_id: str | None, root: str | None,
+        request: str, plan_steps: list[str] | None, from_step: int, mgmt_thread: str | None,
+    ) -> None:
+        """Park an effort shed by backpressure (don't fail it). Records the resume token, notes the
+        shed (source guard), reflects a paused card, and posts an honest thread note. Auto-resumes."""
+        self._note_backpressure()
+        await self.parks.park(
+            effort_id, stage=stage, channel_id=channel_id, root_post_id=root, request=request,
+            plan_steps=plan_steps, from_step=from_step, mgmt_thread=mgmt_thread,
+        )
+        await self.router.update_effort_card(effort_id, "waiting")
+        await self.comms.post(
+            Intent.effort_dispatch,
+            "⏸️ Paused — the inference queue is saturated (the shared GPU is busy). I'll resume this "
+            "automatically as soon as capacity frees up; no work is lost.",
+            effort_id=effort_id,
+        )
+
+    async def _capacity_drain_loop(self) -> None:
+        """Drain parked-on-backpressure efforts ONE AT A TIME. Wakes on the capacity signal (a
+        successful call) OR a timer tick (fallback), then resumes a single effort — staggered
+        resumes clocked by real successes avoid re-saturating the queue (the thundering-herd trap)."""
+        while True:
+            try:
+                await asyncio.wait_for(self._capacity_event.wait(), timeout=self.s.capacity_timer_s)
+            except asyncio.TimeoutError:
+                pass  # fallback tick — re-check even if no success signal fired
+            except asyncio.CancelledError:
+                return
+            self._capacity_event.clear()
+            try:
+                await self._drain_parked_once()
+            except Exception as exc:  # noqa: BLE001 - the loop must never die
+                log.warning("capacity drain tick failed: %s", exc)
+
+    async def _drain_parked_once(self) -> None:
+        """Resume the oldest DISPATCHABLE parked effort (FIFO). Bumps its attempt count; escalates +
+        stops retrying once starved. Re-entrancy-guarded so concurrent signals don't double-resume."""
+        if self._draining:
+            return
+        self._draining = True
+        try:
+            token = None
+            for t in await self.parks.all():
+                if await self.gate.can_dispatch(t["effort_id"]):  # skip frozen/killed (stay parked)
+                    token = t
+                    break
+            if token is None:
+                return
+            eid = token["effort_id"]
+            attempts = await self.parks.bump_attempts(eid)
+            if attempts > self.s.capacity_max_attempts:
+                await self._escalate_starved(token)
+                await self.parks.unpark(eid)
+                self._signal_capacity()  # move on to the next parked effort
+                return
+            log.info("resuming parked effort %s (stage=%s, attempt %d)", eid, token["stage"], attempts)
+            await self._resume_parked(token)
+        finally:
+            self._draining = False
+
+    async def _resume_parked(self, token: dict) -> None:
+        """Re-run the shed stage from its resume token. Runs in the background (a full effort can take
+        minutes); its first successful model call fires _signal_capacity → the next drain. A re-shed
+        re-parks it via the same park points; real progress unparks it (delegate/intake unpark)."""
+        eid = token["effort_id"]
+        if token["stage"] == "intake":
+            mgmt = await self.mgmt_channel_id()
+            self._spawn(self._intake_or_dispatch(
+                eid, token["channel_id"], token["root_post_id"], token["request"],
+                reply_prefix="↩️ Capacity's back — resuming this now.",
+                mgmt_channel=mgmt or token["channel_id"], mgmt_thread=token["mgmt_thread"],
+            ))
+        else:  # "delegate"
+            self._spawn(self.delegate(
+                eid, token["channel_id"], token["root_post_id"], token["request"],
+                plan_steps=token["plan_steps"], start_step=token["from_step"],
+            ))
+
+    async def _escalate_starved(self, token: dict) -> None:
+        """A parked effort couldn't get capacity after the attempt cap — the queue's been saturated
+        too long. Surface it to #mgmt (not a governance freeze — it's a capacity problem, not a
+        safety one) and stop auto-retrying; the operator can re-request once the GPU frees up."""
+        eid = token["effort_id"]
+        await self.router.update_effort_card(eid, "error")
+        await self.comms.post(
+            Intent.escalation,
+            f"⚠️ **{eid}** has been waiting on GPU capacity for {token['attempts']} attempts — the "
+            f"inference queue has stayed saturated. I've stopped auto-retrying. Check what's using "
+            f"the GPU (e.g. a research/ingestion batch); re-send the request to try again.",
+            effort_id=eid,
+        )
+        await self.comms.post(
+            Intent.operator_reply,
+            f"⚠️ **{eid}** gave up waiting on inference capacity (queue saturated too long). "
+            f"Re-send the request once the GPU frees up.",
+            thread_id=token.get("mgmt_thread"),
+        )
+        await self.audit.log(
+            "effort_capacity_starved", effort_id=eid, payload={"attempts": token["attempts"]}
+        )
 
     # ── lifecycle ─────────────────────────────────────────────────────────────
     async def setup(self) -> None:
@@ -245,6 +389,27 @@ class Orchestrator:
                 await self.chat.post(mgmt, "✅ agent-bridge online — try `/help`")
             except Exception:  # noqa: BLE001
                 pass
+        # Capacity park-and-resume: start the drain loop and kick a boot resume so efforts parked
+        # before a restart (DB-backed) get picked up as soon as capacity is available. Gated to the
+        # live adapter — the deterministic test harness (fake) drives the drain directly, so no
+        # background loop leaks across the many per-test orchestrators.
+        if (self.s.capacity_resume_enabled and self.s.chat_adapter != "fake"
+                and self._capacity_task is None):
+            self._capacity_task = asyncio.create_task(self._capacity_drain_loop())
+            parked = await self.parks.count()
+            if parked:
+                log.info("resuming %d parked effort(s) from a prior run", parked)
+                self._signal_capacity()
+
+    async def aclose(self) -> None:
+        """Stop the capacity drain loop (for a clean shutdown / test teardown)."""
+        if self._capacity_task is not None:
+            self._capacity_task.cancel()
+            try:
+                await self._capacity_task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+            self._capacity_task = None
 
     def _project_for(self, repo: str | None = None) -> str:
         """The FALLBACK project slug for a request that names no project: the AO_DEFAULT_REPO slug
@@ -601,6 +766,19 @@ class Orchestrator:
                 f"RECENT WORKER ACTIVITY (newest last):\n{activity_ctx}",
                 OperatorIntent,
             )
+        except ModelBackpressureError:
+            # The shared GPU is saturated (a research/ingestion batch shed the request) — this is
+            # NOT a parse failure. Say so honestly + keep the operator's message in memory so a
+            # retry keeps context; never make a transient GPU squeeze look like a broken PM.
+            log.info("nl_intake shed by inference backpressure — advising operator to retry")
+            self._remember(channel_id, thread_id, "operator", message)
+            await self.chat.post(
+                channel_id,
+                "⏳ The local model is saturated right now (a background job is using the GPU). "
+                "I didn't lose your message — give me a moment and send it again, and I'll pick it up.",
+                thread_id=thread_id,
+            )
+            return
         except Exception as exc:  # noqa: BLE001 - degrade gracefully, never crash the loop
             log.warning("nl_intake model call failed: %s", exc)
             self._remember(channel_id, thread_id, "operator", message)
@@ -811,12 +989,23 @@ class Orchestrator:
         repo = await self._effort_repo(effort_id) or ""
         workspace_ctx = f"existing project: #{project}" + (f" (repo: {repo})" if repo else "")
         if repo:
-            summary = await self.project_context.ensure(project, repo)
+            try:
+                summary = await self.project_context.ensure(project, repo)
+            except ModelBackpressureError:
+                summary = None  # the survey is optional context — skip under load, don't park on it
             if summary:
                 workspace_ctx += f"\n\nPROJECT SUMMARY (survey of the actual codebase):\n{summary}"
         verdict = None
         try:
             verdict = await self.planner.readiness_gate(effort_id, request, workspace_ctx)
+        except ModelBackpressureError:
+            # The readiness gate was shed by the saturated GPU — PARK intake + auto-resume; do NOT
+            # fail-open to dispatch (that would skip the gate) and do NOT error the effort.
+            await self._park_effort(
+                effort_id, stage="intake", channel_id=proj_channel, root=root, request=request,
+                plan_steps=None, from_step=1, mgmt_thread=mgmt_thread,
+            )
+            return
         except Exception as exc:  # noqa: BLE001 - a model hiccup must not wedge intake
             log.warning("readiness gate failed for %s (proceeding to dispatch): %s", effort_id, exc)
         blast = getattr(verdict, "blast_radius", "routine") or "routine"
@@ -866,8 +1055,9 @@ class Orchestrator:
         self._spawn(self.delegate(effort_id, proj_channel, root, request))
         await self.chat.post(
             mgmt_channel,
-            (f"{reply_prefix}\n\n_Readiness ✓ — dispatched a worker on **{effort_id}**; watch it "
-             f"live in its project thread. I'll summarize back here when done._").strip(),
+            (f"{reply_prefix}\n\n_Readiness ✓ — I'm dispatching a worker on **{effort_id}** with the "
+             f"approach above; watch it live in its project thread. If you'd tackle it differently, "
+             f"just say so and I'll steer it. I'll summarize back here when done._").strip(),
             thread_id=mgmt_thread,
         )
 
@@ -891,6 +1081,14 @@ class Orchestrator:
             plan = await self.planner.draft_plan(
                 effort_id, intent_thread=request, request=request, workspace_ctx=workspace_ctx
             )
+        except ModelBackpressureError:
+            # Planner shed by the saturated GPU — PARK at intake (re-runs readiness+plan on resume)
+            # rather than skip the approval gate by dispatching without a plan.
+            await self._park_effort(
+                effort_id, stage="intake", channel_id=proj_channel, root=root, request=request,
+                plan_steps=None, from_step=1, mgmt_thread=mgmt_thread,
+            )
+            return
         except Exception as exc:  # noqa: BLE001 - a planner hiccup shouldn't wedge the operator
             log.warning("draft_plan failed for %s (dispatching without plan gate): %s", effort_id, exc)
             self._spawn(self.delegate(effort_id, proj_channel, root, request))
@@ -946,6 +1144,18 @@ class Orchestrator:
         best-effort/advisory; it never blocks. Returns the execution-gate status."""
         await self.exec_gate.set_risk(effort_id, risk)
         if self.s.grounding_enabled and self.exec_gate.dry_run_required(risk):
+            # Source guard (anti-self-DoS): grounding fires an openbrain-research job; don't stack a
+            # fan-out on top of an already-saturated GPU. If a shed happened recently, skip it —
+            # grounding is advisory (best-effort) so skipping only forgoes optional context.
+            if self._backpressure_recent():
+                log.info("skipping grounding for %s — recent inference backpressure (source guard)", effort_id)
+                await self.comms.post(
+                    Intent.worker_activity,
+                    "🔎 skipped grounding this time — the inference queue is saturated (avoiding "
+                    "piling a research fan-out onto a busy GPU). Proceeding without it.",
+                    effort_id=effort_id,
+                )
+                return await self.exec_gate.status(effort_id)
             res = await self.grounding.ground(request)
             if res.grounded and (res.claims or res.summary):
                 body = "# GROUNDED CONTEXT (openbrain-research — verify before relying)\n"
@@ -963,17 +1173,20 @@ class Orchestrator:
 
     async def delegate(
         self, effort_id: str, channel_id: str, root_post_id: str, goal: str,
-        *, repo: str | None = None, plan_steps: list[str] | None = None,
+        *, repo: str | None = None, plan_steps: list[str] | None = None, start_step: int = 1,
     ) -> None:
         """Execute an effort (UX-FLOW Stage 5) as a governed loop: each plan step is a **checkpoint**
         (P4.1/4.2) — the worker runs it, then (on risky efforts) a sampled **monitor** (P3.7) + a
         differently-goaled **review** (P4.4-4.7) gate it before proceeding; a flag/deviation freezes +
         escalates (P4.6/§3). Routine efforts take the light path (wake → done). Runs in the background.
-        `repo` focuses the worker; omit to resolve from the effort's project (registry → fallback)."""
+        `repo` focuses the worker; omit to resolve from the effort's project (registry → fallback).
+        `start_step` resumes from a given step after a backpressure park (the earlier steps are done)."""
         repo = repo or await self._effort_repo(effort_id)
         repo_token = await self._project_token(effort_id) if repo else None
         upstream = await self._effort_upstream(effort_id) if repo else None
         upstream_token = await self._project_upstream_token(effort_id) if upstream else None
+        steps = [s for s in (plan_steps or []) if s.strip()] or [goal]
+        cur_step = start_step
         try:
             await self.charters.set_goal(effort_id, goal, created_by="po")
             # P4.0 gate: a high-blast-radius effort may not reach REAL-code execution until its
@@ -994,18 +1207,29 @@ class Orchestrator:
             # P5.1/5.2: grant the worker its (non-irreversible) scope + confirm its role is approved.
             await self._authorize_worker(effort_id)
             heavy = await self._effort_heavy(effort_id)   # risk-gated stop-gates+review+monitor
-            steps = [s for s in (plan_steps or []) if s.strip()] or [goal]
             last = None
             for i, step in enumerate(steps, 1):
+                if i < start_step:   # resuming after a park — earlier steps already ran
+                    continue
+                cur_step = i
                 last = await self._run_step(
                     effort_id, channel_id, root_post_id, step, i, len(steps), repo, heavy,
                     repo_token, upstream, upstream_token,
                 )
                 if last is None:   # stopped (failure / flagged / frozen) — handlers already posted
                     return
+                await self.parks.unpark(effort_id)  # progressed past any prior shed point
             if repo:  # commit + push the effort's branch so the work is durable + shared
                 await self._publish_effort(effort_id, channel_id, root_post_id, repo)
             await self._finish_effort(effort_id, last)
+        except ModelBackpressureError:
+            # A step was shed by the saturated GPU — PARK (machine B suspended), don't fail. The
+            # resume driver re-runs delegate from `cur_step` when capacity returns; work isn't lost.
+            await self._park_effort(
+                effort_id, stage="delegate", channel_id=channel_id, root=root_post_id,
+                request=goal, plan_steps=steps, from_step=cur_step,
+                mgmt_thread=self._mgmt_thread_of(effort_id),
+            )
         except Exception as exc:  # noqa: BLE001
             log.exception("delegate failed for %s: %s", effort_id, exc)
             await self.comms.post(
@@ -1032,6 +1256,10 @@ class Orchestrator:
             await self._report_completion(effort_id, None)
             return None
         if not result.ok:
+            # If the worker's OWN inference was shed by the saturated GPU, that's backpressure — PARK
+            # + auto-resume (raise so delegate parks this step), NOT a worker failure to escalate.
+            if is_backpressure_text(getattr(result, "output", None)):
+                raise ModelBackpressureError(f"worker inference shed: {(result.output or '')[:160]}")
             await self._escalate_worker_failure(effort_id, result)
             return None
         if heavy and not await self._gate_deliverable(effort_id, result, cp_id):

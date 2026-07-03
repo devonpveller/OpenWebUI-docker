@@ -153,9 +153,11 @@ class FakeHarness:
     """Deterministic in-memory worker for tests. Records every wake."""
 
     def __init__(
-        self, result_status: str = "done", *, stream_commands: list[str] | None = None
+        self, result_status: str = "done", *, stream_commands: list[str] | None = None,
+        output: str = "ok",
     ) -> None:
         self.result_status = result_status
+        self.output = output          # the WorkResult output; set a 503 marker to simulate a shed
         self.wakes: list[dict[str, Any]] = []
         self.projects: dict[str, str] = {}
         self.tokens: dict[str, str] = {}
@@ -176,7 +178,7 @@ class FakeHarness:
             for cmd in self.stream_commands or []:
                 await on_update("command", {"command": cmd, "ok": True})
             await on_update("answer", {"status": self.result_status, "answer": "ok"})
-        return WorkResult(self.result_status, task_id=f"fake-{len(self.wakes)}", output="ok")
+        return WorkResult(self.result_status, task_id=f"fake-{len(self.wakes)}", output=self.output)
 
     async def set_project(
         self, base_url: str, repo: str, *, token: str | None = None,
