@@ -414,8 +414,31 @@ D0 verified-branch completion, D3 review) and four gaps — all fixed:
 
 **Accepted deviations (documented, not built):** one bot plays PO+PM (the corpus splits them);
 per-branch PRs instead of N-efforts→1-feature-PR (OD-DP3) — compositions span repos, so per-branch is
-the honest granularity; **D2 (autonomous test series) and D5/D6 (staging deploy + human-testing loop)
-remain TODO** — the PR presents review verdicts and verification, not CI results, until D2 lands.
+the honest granularity.
+
+## 11f. D2 autonomous checks + D6 human-testing handoff (added 2026-07-04)
+
+Closing the corpus's remaining delivery-pipeline stages, honestly scoped:
+
+- **D2 — the test series red-gates the merge (LIVE).** Each project can carry a **check command**
+  (`/project check <name> "<cmd>"`, e.g. `dotnet build Build.sln`; shown in `/project list` 🧪).
+  After a delivery's PR opens, the bridge wakes the **affine worker** (its workspace is already on
+  the delivered branch) to run the check and report `CHECK: PASS/FAIL`. **Green** → the merge gate is
+  presented with a "checks passed (worker-reported)" label — honest about verification depth.
+  **Red** → the corpus loop: the failing output routes **back to the owning effort** (fix on the SAME
+  branch → re-push → re-verify → re-check, one bounded round); **still red → the merge gate is
+  WITHDRAWN** (the PR stays open for human inspection; escalated) — *a red never travels forward*.
+  **No check configured** → skipped with an honest, actionable note (never silently pretended).
+- **D6 — human-testing handoff (LIVE).** Every successful merge (conversational or pre-authorized)
+  appends the D6 handoff: pull `main`, run the project's check locally, try it — *works → done;
+  broken → say what's wrong and a fix effort opens through ordinary intake* (the loop closes back to
+  Stage 0, as UX-FLOW prescribes).
+- **D5 (staging deploy) — environment-dependent, OPEN.** The onboarded projects (a game engine
+  composition) have no staging environment to deploy to; when a web-service project lands, D5 =
+  human-gated deploy to a preview env (reusing D2's mechanism per the corpus). Not faked.
+- **OD-DP2 (AI-browser web-test leg) — OPEN decision**, as the corpus itself marks it: Playwright
+  was deliberately excluded from little-coder; the web leg needs a new isolated browser-testing
+  container. Unbuilt until a web project needs it.
 
 ## 10. Build order (on approval)
 

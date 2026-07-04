@@ -208,6 +208,9 @@ class FakeHarness:
     ) -> None:
         self.result_status = result_status
         self.output = output          # the WorkResult output; set a 503 marker to simulate a shed
+        # Optional per-wake output sequence: each wake pops the next entry (falls back to `output`
+        # when empty) — lets a test script distinct step/publish/check responses.
+        self.output_queue: list[str] = []
         self.wakes: list[dict[str, Any]] = []
         self.projects: dict[str, str] = {}
         self.focus_calls: list[dict[str, Any]] = []   # every set_project (base_url, repo, token)
@@ -245,11 +248,12 @@ class FakeHarness:
                 "409 Conflict", request=req, response=httpx.Response(409, request=req))
         if base_url in self.down_urls:
             raise httpx.ConnectError("connection refused", request=httpx.Request("POST", base_url))
+        out = self.output_queue.pop(0) if self.output_queue else self.output
         if on_update:
             for cmd in self.stream_commands or []:
                 await on_update("command", {"command": cmd, "ok": True})
             await on_update("answer", {"status": self.result_status, "answer": "ok"})
-        return WorkResult(self.result_status, task_id=f"fake-{len(self.wakes)}", output=self.output)
+        return WorkResult(self.result_status, task_id=f"fake-{len(self.wakes)}", output=out)
 
     async def set_project(
         self, base_url: str, repo: str, *, token: str | None = None,

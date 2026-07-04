@@ -328,6 +328,10 @@ class Project(Base):
     # can fetch/merge from upstream but push only to `origin`. This row is the persistent source of
     # truth that survives workspace wipes + container rebuilds. Empty ⇒ not a fork.
     upstream_url: Mapped[str | None] = mapped_column(String(512))
+    # D2 (DELIVERY-PIPELINE): the project's check/test command (e.g. `dotnet build Build.sln`,
+    # `npm test`). Run on a delivered PR branch BEFORE the merge gate is presented; red routes back
+    # to the owning effort. Empty ⇒ D2 is skipped with an honest note (never silently pretended).
+    check_cmd: Mapped[str | None] = mapped_column(String(256))
     channel_id: Mapped[str | None] = mapped_column(String(64))
     created_by: Mapped[str] = mapped_column(String(64), default="operator")
     active: Mapped[bool] = mapped_column(Boolean, default=True)

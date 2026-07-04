@@ -241,8 +241,11 @@ _HELP = (
     "is echoed back into the effort thread so you get closure.\n"
     "\n**How delivery works:** every effort's work lands on its own branch **`agent/<effort-id>`** "
     "(I verify it on the remote before saying done) and I open a **GitHub PR** so you can review the "
-    "diff. **`main` never changes until you merge** — say **“merge it”** and I'll merge the pending "
-    "PR, or merge on GitHub yourself. Nothing deploys or merges without you."
+    "diff. If the project has a check command (`/project check <name> \"<cmd>\"`), I run it on the "
+    "branch first and a failure routes back to the worker — red never reaches you. **`main` never "
+    "changes until you merge** — say **“merge it”** and I'll merge the pending PR, or merge on GitHub "
+    "yourself. After a merge I hand you the human-testing step; if it's broken, just say what's wrong "
+    "and I'll open a fix effort. Nothing deploys or merges without you."
 )
 
 
@@ -2744,6 +2747,98 @@ class Orchestrator:
                              payload={"repo": repo, "pr": pr_number, "merge_id": merge_id})
         return res.url
 
+    async def _run_check(self, effort_id: str, check_cmd: str) -> tuple[str, str]:
+        """Run the project's D2 check command on the AFFINE worker (its workspace is already on the
+        delivered branch after publish). Returns (status, tail): 'pass' | 'fail' | 'unknown'.
+        Worker-reported (the worker executes + reports the exit) — labelled as such upstream."""
+        loc = await self.router.effort_thread(effort_id)
+        if not loc:
+            return "unknown", "no effort thread"
+        channel_id, root = loc
+        instruction = (
+            f"RUN THE PROJECT CHECK (a verification step — change NOTHING). Execute exactly:\n"
+            f"  cd /workspace && {check_cmd}\n"
+            f"If it exits 0, reply exactly `CHECK: PASS`. If it fails, reply `CHECK: FAIL` followed "
+            f"by the last ~15 lines of the failing output. Do not attempt fixes in this step."
+        )
+        try:
+            result = await self.router.wake(
+                effort_id, role="worker-default", thread_id=root, channel_id=channel_id,
+                session_id=effort_id, instruction=instruction, repo=None,
+            )
+        except (httpx.HTTPStatusError, httpx.TransportError, NoCapacityError) as exc:
+            return "unknown", str(exc)[:160]
+        out = (result.output or "") if result else ""
+        if "CHECK: PASS" in out:
+            return "pass", ""
+        if "CHECK: FAIL" in out:
+            return "fail", out.split("CHECK: FAIL", 1)[1].strip()[:600]
+        return "unknown", out.strip()[:200]
+
+    async def _d2_gate(self, effort_id: str, repo: str, delivery: BranchDelivery,
+                       merge_id: str) -> tuple[str, BranchDelivery]:
+        """DELIVERY-PIPELINE D2 — the autonomous test series, red-gating the merge: run the project's
+        check on the delivered branch BEFORE the merge gate is presented. Red → route back to the
+        owning effort ONCE (re-ground → fix → re-push → re-check, the corpus's loop); still red →
+        the merge gate is WITHDRAWN (PR stays open; escalated) — a red never travels forward. No
+        check command configured → skipped with an honest note. Returns (note-for-closure, possibly
+        updated delivery — a fix pushes a new commit)."""
+        proj = await self._effort_project(effort_id)
+        p = await self.projects.get(proj) if proj else None
+        check_cmd = (p or {}).get("check_cmd") or ""
+        if not check_cmd:
+            return (f"\n🧪 _D2 checks skipped — no check command configured for `{proj}` "
+                    f"(set one: `/project check {proj} \"<cmd>\"`)._", delivery)
+        status, tail = await self._run_check(effort_id, check_cmd)
+        if status == "pass":
+            return f"\n🧪 **D2 checks passed** (`{check_cmd}`, worker-reported).", delivery
+        if status == "unknown":
+            return (f"\n🧪 _D2 check couldn't run ({tail or 'no verdict'}) — presenting the merge "
+                    f"gate WITHOUT a green check; verify before merging._", delivery)
+        # RED — route back to the owning effort once (fix on the SAME branch), then re-check.
+        await self.comms.post(
+            Intent.worker_activity,
+            f"❌ **D2 check failed** (`{check_cmd}`) — routing back to the effort to fix + re-push "
+            f"(re-ground → fix → re-test, never forward):\n```\n{tail[:500]}\n```",
+            effort_id=effort_id,
+        )
+        loc = await self.router.effort_thread(effort_id)
+        if loc:
+            channel_id, root = loc
+            fix_instruction = (
+                f"THE PROJECT CHECK FAILED on your delivered branch. Failing output:\n```\n{tail}\n```\n"
+                f"Fix the CAUSE (stay in scope of your original task), then commit and push to the "
+                f"SAME branch ({delivery.branch}):\n  git add -A && git commit -m \"fix: check "
+                f"failure\" && git push origin {delivery.branch}\nThen reply with what you changed."
+            )
+            try:
+                repo_token = await self._project_token(effort_id)
+                await self.router.wake(
+                    effort_id, role="worker-default", thread_id=root, channel_id=channel_id,
+                    session_id=effort_id, instruction=fix_instruction, repo=repo,
+                    repo_token=repo_token,
+                )
+            except (httpx.HTTPStatusError, httpx.TransportError, NoCapacityError) as exc:
+                log.warning("D2 fix wake failed for %s: %s", effort_id, exc)
+            new_delivery = await self._verify_delivery(effort_id, repo)
+            if new_delivery.landed:
+                delivery = new_delivery
+            status2, tail2 = await self._run_check(effort_id, check_cmd)
+            if status2 == "pass":
+                return (f"\n🧪 **D2 checks passed after one fix round** (`{check_cmd}`, "
+                        f"worker-reported).", delivery)
+        # STILL red → withdraw the merge gate; the PR stays open for human inspection. Never forward.
+        self._pending_merge.pop(merge_id, None)
+        await self.pending.delete(merge_id)
+        await self.comms.post(
+            Intent.escalation,
+            f"⛔ **D2 checks still failing** after a fix round (`{check_cmd}`). The merge gate is "
+            f"withdrawn — the PR stays open for your inspection; nothing moves forward on red.",
+            effort_id=effort_id,
+        )
+        return (f"\n⛔ **D2 checks FAILED** (`{check_cmd}`) — merge gate withdrawn; the PR stays "
+                f"open for inspection. See the effort thread for the failure.", delivery)
+
     async def _execute_merge(self, merge_id: str, reply=None) -> None:
         """D4 — perform the operator-approved merge (the approve IS the §3 clearance for this
         irreversible action). Merge commit via the host API (--no-ff equivalent); the result is
@@ -2759,12 +2854,31 @@ class Orchestrator:
         await self.audit.log("pr_merge_decided", effort_id=entry.get("effort_id"),
                              payload={"merge_id": merge_id, "ok": res.ok, "pr": entry.get("pr_number")})
         icon = "✅" if res.ok else "⚠️"
+        msg = f"{icon} {res.summary}" + (f" — {res.url}" if res.ok and res.url else "")
+        if res.ok:   # D6 — the human-testing handoff: merged code is now YOURS to verify (UX-FLOW D6)
+            msg += await self._d6_handoff(entry.get("effort_id"), entry.get("repo") or "")
         if reply is not None:
-            await reply(f"{icon} {res.summary}" + (f" — {res.url}" if res.ok and res.url else ""))
+            await reply(msg)
         eid = entry.get("effort_id")
         if eid:   # bring the audience back down (CM.4)
             await self.comms.post(Intent.closure, f"{icon} {res.summary} (operator-approved merge).",
                                   effort_id=eid)
+
+    async def _d6_handoff(self, effort_id: str | None, repo: str) -> str:
+        """D6 — the human-testing handoff appended to every successful merge: what to do next, and
+        how the loop closes (pass → done; fail → a NEW effort back through intake — just say what's
+        broken). Includes the project's check command as the suggested local verification."""
+        proj = await self._effort_project(effort_id) if effort_id else None
+        if not proj and repo:
+            for p in await self.projects.list():
+                if p["repo_url"].rstrip("/") == repo.rstrip("/"):
+                    proj = p["slug"]
+                    break
+        check = ((await self.projects.get(proj)) or {}).get("check_cmd") if proj else None
+        verify = (f" run `{check}`," if check else "")
+        return (f"\n🧪 **Human testing (D6):** pull `main` (with submodules if any),{verify} and try "
+                f"it. Works → nothing more to do. Broken → just tell me what's wrong and I'll open a "
+                f"fix effort (the loop closes back through intake).")
 
     async def _nl_pr_request(self, message: str, channel_id: str, thread_id: str | None) -> bool:
         """Operator-plane catch (D1/D4): 'create/open a PR for <branch> [merge if clean]' is a
@@ -2822,10 +2936,13 @@ class Orchestrator:
                 await self.pending.delete(merge_id)
                 await self.audit.log("pr_merge_decided", effort_id=ctx_eid or None,
                                      payload={"merge_id": merge_id, "ok": res.ok, "pre_authorized": True})
-                lines.append((f"✅ `{slug}`: PR opened + **merged** (you pre-cleared it) — {url}"
-                              if res.ok else
-                              f"⚠️ `{slug}`: PR opened ({url}) but the merge didn't go through — "
-                              f"{res.summary} It stays open for you."))
+                if res.ok:
+                    handoff = await self._d6_handoff(ctx_eid or None, repo_url)
+                    lines.append(f"✅ `{slug}`: PR opened + **merged** (you pre-cleared it) — {url}"
+                                 + handoff)
+                else:
+                    lines.append(f"⚠️ `{slug}`: PR opened ({url}) but the merge didn't go through — "
+                                 f"{res.summary} It stays open for you.")
             else:
                 lines.append(f"📬 `{slug}`: PR opened — {url} — say **“merge it”** and I'll merge.")
         await say("\n".join(lines))
@@ -2846,12 +2963,18 @@ class Orchestrator:
             where = (f"pushed to branch **`{branch}`**{sha} (verified on the remote) — "
                      f"`git fetch origin {branch}` to see it")
             # D1: open the PR that makes this delivery VISIBLE; merge stays yours (D4).
+            eff_repo = await self._effort_repo(effort_id)
             pr_url = await self._open_delivery_pr(
-                effort_id, await self._effort_repo(effort_id), branch,
-                verified_sha=delivery.head_sha)
+                effort_id, eff_repo, branch, verified_sha=delivery.head_sha)
             if pr_url:
-                where += (f"\n📬 **PR opened for review:** {pr_url}\n_`main` only changes when you "
-                          f"merge — say **“merge it”** and I'll merge, or merge on GitHub after review._")
+                # D2: the autonomous test series red-gates the merge — run the project's check on
+                # the delivered branch BEFORE inviting the merge; red routes back, never forward.
+                d2_note, delivery = await self._d2_gate(effort_id, eff_repo, delivery,
+                                                        f"merge-{effort_id}")
+                gate_open = f"merge-{effort_id}" in self._pending_merge
+                invite = (f"\n_`main` only changes when you merge — say **“merge it”** and I'll "
+                          f"merge, or merge on GitHub after review._" if gate_open else "")
+                where += f"\n📬 **PR opened for review:** {pr_url}{d2_note}{invite}"
         elif delivery is not None and not delivery.verifiable and self_reported:
             # We couldn't independently check (App can't read this repo) — report the worker's word,
             # labelled honestly as unverified rather than asserting it as fact (§4.2 unverified).
@@ -3484,6 +3607,7 @@ class Orchestrator:
                     "**Projects:**\n" + "\n".join(
                         f"- `{p['slug']}` → {p['repo_url']} · token {self._project_token_label(p)}"
                         + (f" · ⑂ upstream `{p['upstream_url']}`" if p.get("upstream_url") else "")
+                        + (f" · 🧪 `{p['check_cmd']}`" if p.get("check_cmd") else "")
                         for p in ps
                     )
                     if ps else "no projects yet — `/project add <name> <repo-url>`"
@@ -3492,12 +3616,27 @@ class Orchestrator:
                 ok = await self.projects.remove(args[1], actor="operator")
                 await self.egress.sync()
                 await reply(f"{'✅ removed' if ok else '⚠️ no such'} project `{args[1]}`")
+            elif sub == "check" and len(args) >= 2:
+                # D2: the project's check/test command — run on every delivered PR branch BEFORE the
+                # merge gate; red routes back to the effort. Empty command clears it.
+                slug = slugify(args[1])
+                cmd_str = " ".join(args[2:]).strip().strip('"').strip("'")
+                ok = await self.projects.set_check(slug, cmd_str)
+                if not ok:
+                    await reply(f"⚠️ no such project `{slug}`")
+                elif cmd_str:
+                    await reply(f"🧪 `{slug}` check command set: `{cmd_str}` — I'll run it on every "
+                                f"delivered PR branch before inviting a merge (D2); red routes back "
+                                f"to the worker.")
+                else:
+                    await reply(f"🧪 `{slug}` check command cleared — D2 will be skipped (with a note).")
             else:
                 await reply(
                     "usage: `/project add <name> <repo-url> [--upstream <parent-url>] [TOKEN_ENV]` · "
-                    "`/project list` · `/project remove <name>`  _(`--upstream` = the fork PARENT, "
-                    "baked read-only so the worker can fetch it but push only to the fork; TOKEN_ENV "
-                    "= the env var holding this repo's PAT, omit to use the pool's default token)_"
+                    "`/project list` · `/project remove <name>` · `/project check <name> \"<cmd>\"` "
+                    "_(`--upstream` = the fork PARENT, baked read-only so the worker can fetch it but "
+                    "push only to the fork; TOKEN_ENV = the env var holding this repo's PAT; `check` "
+                    "= the D2 test command run on PR branches before the merge gate)_"
                 )
         elif cmd == "egress":
             sub = args[0].lower() if args else ""

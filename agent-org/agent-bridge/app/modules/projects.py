@@ -79,6 +79,7 @@ def _row(p: Project) -> dict:
         "slug": p.slug, "name": p.name, "repo_url": p.repo_url, "git_host": p.git_host,
         "channel_id": p.channel_id, "created_by": p.created_by, "active": p.active,
         "token_env": p.token_env, "upstream_url": p.upstream_url,
+        "check_cmd": getattr(p, "check_cmd", None),
     }
 
 
@@ -126,6 +127,19 @@ class ProjectRegistry:
             if p is not None and not p.channel_id:
                 p.channel_id = channel_id
                 await s.commit()
+
+    async def set_check(self, slug: str, check_cmd: str) -> bool:
+        """Set the project's D2 check/test command (run on delivered PR branches before the merge
+        gate; red routes back to the effort). Empty string clears it. False if the project is
+        unknown."""
+        async with self.db.session_factory() as s:
+            p = await s.get(Project, slug)
+            if p is None:
+                return False
+            p.check_cmd = check_cmd.strip() or None
+            await s.commit()
+        await self.audit.log("project_check_set", payload={"slug": slug, "check_cmd": check_cmd[:200]})
+        return True
 
     async def get(self, slug: str) -> dict | None:
         async with self.db.session_factory() as s:

@@ -75,6 +75,8 @@ class Database:
         ("projects", "upstream_url", "VARCHAR(512)"),
         # Worker health quarantine — a wedged/unreachable worker is un-pickable until this instant.
         ("worker_instances", "quarantined_until", "VARCHAR(32)"),
+        # D2 check/test command per project (run on PR branches before the merge gate).
+        ("projects", "check_cmd", "VARCHAR(256)"),
     ]
 
     async def create_all(self) -> None:
