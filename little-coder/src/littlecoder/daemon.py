@@ -496,11 +496,11 @@ class LittleCoderDaemon:
         token = req.token or os.environ.get("LC_DEPLOY_TOKEN") or None
         result = await asyncio.to_thread(self.workspace.clone, requested, token)
         if not result.ok:
-            # redact: a clone-auth error can echo the token-bearing URL back in stderr, and this
-            # detail is surfaced to the bridge → operator chat.
+            # Surface BOTH streams (git writes some fatals to stdout) so a clone failure is never a
+            # blank "(exit 128):"; redacted (a clone-auth error can echo the token-bearing URL).
+            tail = (f"{result.stderr}\n{result.stdout}").strip()[-400:]
             raise HTTPException(
-                502, f"clone failed (exit {result.exit_code}): "
-                     f"{redact_secrets(result.stderr[-300:])}"
+                502, f"clone failed (exit {result.exit_code}): {redact_secrets(tail) or '(no output)'}"
             )
         self.current_focus = requested
         self.audit.write(

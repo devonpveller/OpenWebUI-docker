@@ -234,9 +234,17 @@ class WorkspaceManager:
         return self.ot.execute(cmd, cwd=self.workspace_path, timeout=600)
 
     def wipe(self) -> ExecResult:
-        """Empty the workspace, keeping the mount point itself. open-terminal
-        owns the files it created, so the wipe runs there."""
-        cmd = f"find {shlex.quote(self.workspace_path)} -mindepth 1 -delete"
+        """Empty the workspace, keeping the mount point itself. open-terminal owns the files it
+        created, so the wipe runs there. FORCE-remove (`rm -rf` per top-level entry, not `find
+        -delete`) so git's read-only pack objects + nested submodule `.git` dirs of a stale/populated
+        clone are cleared — otherwise a leftover file makes the next `git clone` fail 'destination not
+        empty' (exit 128)."""
+        ws = shlex.quote(self.workspace_path)
+        cmd = (
+            f"chmod -R u+w {ws} 2>/dev/null; "
+            f"find {ws} -mindepth 1 -maxdepth 1 -exec rm -rf {{}} + 2>/dev/null; "
+            f"find {ws} -mindepth 1 -delete 2>/dev/null || true"
+        )
         return self.ot.execute(cmd, cwd="/", timeout=300)
 
     def tag_prior_state(self, label: str) -> ExecResult:

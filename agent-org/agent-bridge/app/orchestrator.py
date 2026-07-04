@@ -731,7 +731,17 @@ class Orchestrator:
         cand = owner_token_env(p.get("repo_url", ""))
         if cand and os.environ.get(cand):
             return os.environ[cand]
-        # 3) pool default (LC_DEPLOY_TOKEN, on the worker pool).
+        # 3) GitHub App installation token — for a repo under the App's account, so workers can
+        #    clone/push PRIVATE repos the App manages WITHOUT a per-project PAT (P-APL.1c). Short-
+        #    lived + minted per dispatch; the durable retirement of the at-rest deploy token.
+        if self.github is not None and self.s.github_app_enabled:
+            try:
+                owner, _repo = parse_owner_repo(p.get("repo_url", ""))
+                if owner.lower() == (self.github.owner or "").lower():
+                    return await self.github.installation_token()
+            except Exception as exc:  # noqa: BLE001 - fall through to the pool token
+                log.debug("App-token fallback skipped for %s: %s", proj, exc)
+        # 4) pool default (LC_DEPLOY_TOKEN, on the worker pool).
         return None
 
     async def _effort_upstream(self, effort_id: str) -> str | None:
