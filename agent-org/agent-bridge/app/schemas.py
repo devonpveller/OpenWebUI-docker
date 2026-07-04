@@ -213,6 +213,7 @@ class LifecyclePlan(BaseModel):
     goal: str = ""                        # the architectural intent, restated
     steps: list[LifecycleStep] = Field(default_factory=list)
     notes: str = ""                       # caveats / assumptions the operator should see
+    estimate: str = ""                    # rough effort/time estimate (UX-FLOW Stage-3 plan section 4)
 
 
 class AdvisoryAnswer(BaseModel):

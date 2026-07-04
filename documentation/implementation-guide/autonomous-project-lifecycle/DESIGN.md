@@ -384,6 +384,39 @@ branch, for human review + merge.
   publish wake passes `repo` + a current token (NOOP + re-auth; work preserved); (c) the App-token
   cache re-mints when < 45 min of life remain, so a token baked at dispatch has runway for the task.
 
+## 11e. Comms/UX audit vs the corpus — delivery visibility (added 2026-07-04, operator-caught)
+
+Trigger: the composition succeeded but **the operator couldn't see it** — work landed on `agent/*`
+branches, `main` looked untouched, and nothing had ever explained the branch-based delivery model
+("the branching wasn't communicated by the PM"). A full audit of the implementation against the
+teams-chat-agent-orchestration corpus found the comms plumbing **aligned** (intent→destination
+routing, intent-framed CONCERNs, bring-back-down echo, effort cards, readiness gate, honest /status,
+D0 verified-branch completion, D3 review) and four gaps — all fixed:
+
+- **D1 — PR creation (LIVE).** `capabilities.open_pull_request` (App API, `pull_requests: write` —
+  resolves OD-DP1 with the App, no new secret; idempotent — an existing PR is reused). Every
+  **verified** delivery now opens a PR whose body carries the goal + branch + verified sha + the
+  human-gated-merge invitation; a composition opens **two** (code PR on the submodule repo + wiring
+  PR on the engine, cross-linked — a multi-repo feature can't share one PR, so this consciously
+  implements OD-DP3's intent per-branch). The PR is the corpus's *promotion artifact* — delivered
+  work is now visible in GitHub's UI/notifications, not just on an easy-to-miss branch.
+- **D4 — human-gated merge (LIVE).** Each PR registers a pending **merge gate** (persisted,
+  rehydrated across restarts). The operator merges **conversationally** — a plain **"merge it"**
+  (deterministic catch, never the small model — the phrase is the §3 clearance for the irreversible
+  action; one pending → merges + echoes which; several → disambiguates; "merge both" supported) or
+  `approve merge-<id>` — and the bridge merges via the host API with a **merge commit** (`--no-ff`
+  equivalent). Declining leaves the PR open on GitHub. No auto-merge; no agent authority.
+- **Delivery-model explainer (LIVE).** `/help` now has a "How delivery works" section; the dispatch
+  ack says up front *"work will land on branch `agent/<effort-id>` (+ a PR for your review) — `main`
+  only changes when you merge"*; closures carry the PR link + the same one-line model.
+- **Stage-3 Estimate (LIVE).** `LifecyclePlan.estimate` + planner prompt + plan-card render — the
+  UX-FLOW plan template's 4th section (Overview/Steps/Delegation/**Estimate**).
+
+**Accepted deviations (documented, not built):** one bot plays PO+PM (the corpus splits them);
+per-branch PRs instead of N-efforts→1-feature-PR (OD-DP3) — compositions span repos, so per-branch is
+the honest granularity; **D2 (autonomous test series) and D5/D6 (staging deploy + human-testing loop)
+remain TODO** — the PR presents review verdicts and verification, not CI results, until D2 lands.
+
 ## 10. Build order (on approval)
 
 1. **P-APL.0** — register + install the GitHub App; land its key as a bridge secret; token-minter

@@ -237,6 +237,139 @@ async def fork_repo(
                             detail=r.text[:160])
 
 
+async def read_branch_changes(
+    github: GitHubApp, repo_url: str, branch: str, *, base_branch: str = "",
+    api_base: str = "https://api.github.com", transport: httpx.BaseTransport | None = None,
+) -> tuple[str, list[str], list[str]]:
+    """(base_branch, commit subjects, file-change lines) for `base...branch` — the DESCRIPTIVE
+    content of a delivery-PR body (corpus D1: the PR carries the intent + the changes; chat
+    instructions belong in Mattermost, not the PR). Best-effort: ('', [], []) on any failure —
+    the caller degrades to a minimal body."""
+    try:
+        owner, repo = parse_owner_repo(repo_url)
+    except ValueError:
+        return "", [], []
+    if owner.lower() != (github.owner or "").lower():
+        return "", [], []
+    try:
+        token = await github.installation_token()
+    except GitHubAppError:
+        return "", [], []
+    base = api_base.rstrip("/")
+    h = _headers(token)
+    try:
+        async with httpx.AsyncClient(timeout=15.0, transport=transport) as c:
+            if not base_branch:
+                meta = await c.get(f"{base}/repos/{owner}/{repo}", headers=h)
+                if meta.status_code >= 400:
+                    return "", [], []
+                base_branch = meta.json().get("default_branch") or "main"
+            cmp = await c.get(f"{base}/repos/{owner}/{repo}/compare/{base_branch}...{branch}", headers=h)
+            if cmp.status_code != 200:
+                return base_branch, [], []
+            d = cmp.json()
+    except (httpx.HTTPError, ValueError):
+        return base_branch, [], []
+    commits = [
+        (c.get("commit", {}).get("message") or "").splitlines()[0][:120]
+        for c in (d.get("commits") or [])[:10]
+    ]
+    files = [
+        f"`{f.get('filename')}` (+{f.get('additions', 0)}/−{f.get('deletions', 0)})"
+        for f in (d.get("files") or [])[:25]
+    ]
+    return base_branch, [s for s in commits if s], files
+
+
+async def open_pull_request(
+    github: GitHubApp, repo_url: str, head_branch: str, *,
+    title: str, body: str, base_branch: str = "",
+    api_base: str = "https://api.github.com", transport: httpx.BaseTransport | None = None,
+) -> CapabilityResult:
+    """DELIVERY-PIPELINE D1 — open the PR that makes delivered work VISIBLE (the 'promotion
+    artifact'): branch pushes are easy to miss; a PR shows up in GitHub's UI/notifications with the
+    diff, and is the thing the operator reviews + merges (D4 keeps the merge human-gated). Idempotent:
+    if a PR for this head already exists, returns it instead of failing. Own account only."""
+    try:
+        owner, repo = parse_owner_repo(repo_url)
+    except ValueError as exc:
+        return CapabilityResult(ok=False, summary=f"`{repo_url}` isn't a valid GitHub repo.", detail=str(exc))
+    if owner.lower() != (github.owner or "").lower():
+        return CapabilityResult(ok=False, summary=f"`{owner}/{repo}` isn't on the App's account — can't open a PR.")
+    try:
+        token = await github.installation_token()
+    except GitHubAppError as exc:
+        return CapabilityResult(ok=False, summary="The GitHub App isn't ready.", detail=str(exc))
+    base = api_base.rstrip("/")
+    h = _headers(token)
+    try:
+        async with httpx.AsyncClient(timeout=30.0, transport=transport) as c:
+            if not base_branch:
+                meta = await c.get(f"{base}/repos/{owner}/{repo}", headers=h)
+                if meta.status_code >= 400:
+                    return CapabilityResult(ok=False, summary=f"Couldn't read `{owner}/{repo}` ({meta.status_code}).",
+                                            detail=meta.text[:160])
+                base_branch = meta.json().get("default_branch") or "main"
+            r = await c.post(f"{base}/repos/{owner}/{repo}/pulls", headers=h,
+                             json={"title": title, "head": head_branch, "base": base_branch, "body": body})
+            if r.status_code == 422:
+                # usually "A pull request already exists" — surface the existing one (idempotent)
+                ex = await c.get(f"{base}/repos/{owner}/{repo}/pulls"
+                                 f"?head={owner}:{head_branch}&state=open", headers=h)
+                if ex.status_code == 200 and ex.json():
+                    d = ex.json()[0]
+                    return CapabilityResult(
+                        ok=True, summary=f"PR **#{d['number']}** already open for `{head_branch}`",
+                        url=d.get("html_url", ""), detail=str(d.get("number", "")))
+                return CapabilityResult(ok=False, summary=f"GitHub rejected the PR for `{head_branch}` (422).",
+                                        detail=r.text[:200])
+            if r.status_code >= 400:
+                return CapabilityResult(ok=False, summary=f"PR for `{head_branch}` failed ({r.status_code}).",
+                                        detail=r.text[:200])
+            d = r.json()
+            return CapabilityResult(
+                ok=True, summary=f"PR **#{d['number']}** opened: `{head_branch}` → `{base_branch}`",
+                url=d.get("html_url", ""), detail=str(d.get("number", "")))
+    except httpx.HTTPError as exc:
+        return CapabilityResult(ok=False, summary=f"Couldn't reach GitHub to open the PR for `{head_branch}`.",
+                                detail=str(exc)[:160])
+
+
+async def merge_pull_request(
+    github: GitHubApp, repo_url: str, pr_number: int, *,
+    api_base: str = "https://api.github.com", transport: httpx.BaseTransport | None = None,
+) -> CapabilityResult:
+    """DELIVERY-PIPELINE D4 — the HUMAN-GATED merge. Runs ONLY after the operator's explicit
+    `approve merge-…` (the §3 hard-gate clearance — merge is irreversible); the bridge then merges via
+    the host API with a merge commit (the `--no-ff` equivalent). No auto-merge; no agent authority."""
+    try:
+        owner, repo = parse_owner_repo(repo_url)
+    except ValueError as exc:
+        return CapabilityResult(ok=False, summary=f"`{repo_url}` isn't a valid GitHub repo.", detail=str(exc))
+    if owner.lower() != (github.owner or "").lower():
+        return CapabilityResult(ok=False, summary=f"`{owner}/{repo}` isn't on the App's account — can't merge.")
+    try:
+        token = await github.installation_token()
+    except GitHubAppError as exc:
+        return CapabilityResult(ok=False, summary="The GitHub App isn't ready.", detail=str(exc))
+    base = api_base.rstrip("/")
+    try:
+        async with httpx.AsyncClient(timeout=30.0, transport=transport) as c:
+            r = await c.put(f"{base}/repos/{owner}/{repo}/pulls/{pr_number}/merge",
+                            headers=_headers(token), json={"merge_method": "merge"})
+    except httpx.HTTPError as exc:
+        return CapabilityResult(ok=False, summary=f"Couldn't reach GitHub to merge PR #{pr_number}.",
+                                detail=str(exc)[:160])
+    if r.status_code == 200:
+        return CapabilityResult(ok=True, summary=f"PR **#{pr_number}** merged into `{owner}/{repo}` (merge commit)",
+                                url=f"https://github.com/{owner}/{repo}/pull/{pr_number}")
+    if r.status_code in (405, 409):
+        return CapabilityResult(ok=False, summary=f"PR #{pr_number} isn't mergeable ({r.status_code}) — "
+                                f"conflicts or branch protection; resolve on GitHub.", detail=r.text[:160])
+    return CapabilityResult(ok=False, summary=f"Merge of PR #{pr_number} failed ({r.status_code}).",
+                            detail=r.text[:160])
+
+
 async def bump_submodule(
     github: GitHubApp, engine_url: str, submodule_path: str, commit_sha: str, *,
     branch: str, base_branch: str = "", message: str = "",

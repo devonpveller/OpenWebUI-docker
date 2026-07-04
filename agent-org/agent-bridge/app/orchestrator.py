@@ -34,7 +34,10 @@ from .modules.capabilities import (
     CapabilityResult,
     bump_submodule,
     fork_repo,
+    merge_pull_request,
+    open_pull_request,
     parse_owner_repo,
+    read_branch_changes,
     read_branch_delivery,
     read_repo_state,
 )
@@ -207,7 +210,8 @@ _PLANNER_SYS = (
     "right path, do NOT add it again — skip it. (2) if it exists at a DIFFERENT path than the intent "
     "wants (e.g. `murder` at root but the intent wants `vendor/murder`), plan a worker_task to MOVE/"
     "rename it, NOT a duplicate add. (3) if the desired end-state ALREADY HOLDS, return an EMPTY steps "
-    "list and say so in `notes`. Keep the repo CLEAN — never leave or create duplicates."
+    "list and say so in `notes`. Keep the repo CLEAN — never leave or create duplicates. "
+    "Set `estimate` to a rough time/effort guess for the whole plan (e.g. '~20 min, 1 worker task')."
 )
 
 _HELP = (
@@ -234,7 +238,11 @@ _HELP = (
     "- `/kill` / `/unkill` — global kill switch (freeze/release the whole fleet)\n"
     "Each effort is a **thread** in its `#proj-<project>` channel — reply in the thread to wake "
     "its worker; watch the work stream there. Escalations come to **#mgmt** and their resolution "
-    "is echoed back into the effort thread so you get closure."
+    "is echoed back into the effort thread so you get closure.\n"
+    "\n**How delivery works:** every effort's work lands on its own branch **`agent/<effort-id>`** "
+    "(I verify it on the remote before saying done) and I open a **GitHub PR** so you can review the "
+    "diff. **`main` never changes until you merge** — say **“merge it”** and I'll merge the pending "
+    "PR, or merge on GitHub yourself. Nothing deploys or merges without you."
 )
 
 
@@ -317,6 +325,10 @@ class Orchestrator:
         self._effort_mgmt_thread: dict[str, str] = {}
         # Feature branch each effort's work was published to (commit + push on done).
         self._published_branch: dict[str, str] = {}
+        # D4 — PRs awaiting the operator's human-gated merge: {merge-<id>: {repo, pr_number,
+        # effort_id, mgmt_thread}}. Registered when D1 opens a delivery PR; consumed by
+        # `approve merge-<id>` / a plain "merge it". Persisted via PendingStore (kind="merge").
+        self._pending_merge: dict[str, dict] = {}
         # INTENT-ANCHORED completion (DELIVERY-PIPELINE §1: the PM judges completeness against the
         # operator-intent thread, not one mechanical effort). Per effort: the registered projects the
         # operator NAMED in the intent that this effort did NOT target — so a `done` on a sub-repo
@@ -678,13 +690,27 @@ class Orchestrator:
                 thread_id=thread_id,
             )
 
+    def _effort_of_mgmt_thread(self, thread_id: str | None) -> str | None:
+        """Reverse of `_effort_mgmt_thread`: the effort whose #mgmt conversation this thread IS.
+        Lets a reply in that conversation inherit the effort's CONTEXT (its project) instead of
+        falling to the sandbox — the live 'PR request in the monogame thread landed in proj-sandbox'
+        miss. First match wins (a thread maps to one conversation)."""
+        if not thread_id:
+            return None
+        for eid, tid in self._effort_mgmt_thread.items():
+            if tid == thread_id:
+                return eid
+        return None
+
     async def _resolve_project_slug(
         self, named: str | None, channel_id: str | None = None, effort_name: str | None = None,
+        thread_id: str | None = None,
     ) -> str:
         """Resolve which project a request belongs to: an explicitly named/onboarded project wins;
-        else the originating #proj-<slug> channel's project; else — the fix for
-        'init-monogame-engine' landing in the sandbox — an UNAMBIGUOUS match of a known project's
-        slug inside the effort name; else the fallback (default/sandbox)."""
+        else the originating #proj-<slug> channel's project; else the project of the effort whose
+        #mgmt conversation thread this is (a reply in that thread inherits its context); else — the
+        fix for 'init-monogame-engine' landing in the sandbox — an UNAMBIGUOUS match of a known
+        project's slug inside the effort name; else the fallback (default/sandbox)."""
         if named:
             p = await self.projects.resolve(named)
             if p:
@@ -693,6 +719,11 @@ class Orchestrator:
             slug = await self.router.resolve_project_by_channel(channel_id)
             if slug:
                 return slug
+        ctx_eid = self._effort_of_mgmt_thread(thread_id)
+        if ctx_eid:
+            proj = await self._effort_project(ctx_eid)
+            if proj and proj != self.s.default_project:
+                return proj
         if effort_name:
             guess = await self._project_from_name(effort_name)
             if guess:
@@ -977,6 +1008,46 @@ class Orchestrator:
         report status) are executed; safety decisions are NOT auto-run from fuzzy NL — the PO
         asks for the explicit, auditable command (governance §3). Runs on the PO profile's lane
         (local qwen36-27b by default; cloud if P0.5 mandated)."""
+        # NL-FIRST merge (D4): a plain "merge it" / "merge the PR" resolves the pending merge
+        # DETERMINISTICALLY (never via the small model — this is an irreversible action; the phrase
+        # is the operator's explicit clearance). One pending → merge it (echo which); several →
+        # disambiguate; none → fall through to the model (it may be about something else).
+        if re.fullmatch(r"(?:please\s+)?merge(?:\s+(?:it|that|the\s+prs?|both))?\s*[.!]*",
+                        message.strip(), re.IGNORECASE):
+            merges = list(self._pending_merge.keys())
+            if len(merges) == 1:
+                await self.chat.post(channel_id, f"_(merging the one open PR: `{merges[0]}`)_",
+                                     thread_id=thread_id)
+                async def _r(msg: str) -> None:
+                    await self.chat.post(channel_id, msg, thread_id=thread_id)
+                await self._execute_merge(merges[0], _r)
+                return
+            if "both" in message.lower() and len(merges) > 1:
+                for mid in merges:
+                    async def _r(msg: str, _mid=mid) -> None:
+                        await self.chat.post(channel_id, f"`{_mid}`: {msg}", thread_id=thread_id)
+                    await self._execute_merge(mid, _r)
+                return
+            if merges:
+                listing = "\n".join(f"- `{m}` — PR #{self._pending_merge[m].get('pr_number', '?')} on "
+                                    f"`{(self._pending_merge[m].get('repo') or '').split('github.com/')[-1]}`"
+                                    for m in merges)
+                await self.chat.post(
+                    channel_id, f"{len(merges)} PRs are awaiting your merge — which one?\n{listing}\n"
+                    f"Say `approve <id>`, or **merge both**.", thread_id=thread_id)
+                return
+            # NOTHING pending — answer deterministically (the model would just get confused): the
+            # likeliest reality is the previous PR(s) were already merged.
+            await self.chat.post(
+                channel_id,
+                "Nothing is awaiting a merge right now — the previous PR(s) were already merged or "
+                "closed. If you want a PR for a branch, say \"create a PR for `agent/…`\".",
+                thread_id=thread_id)
+            return
+        # NL-FIRST PR request (D1/D4): "create a PR for agent/… [merge if clean]" is an operator-
+        # plane capability the bridge does itself — deterministically, never via a worker.
+        if await self._nl_pr_request(message, channel_id, thread_id):
+            return
         efforts = await self.gate.snapshot(open_only=True)  # PO reasons over what's still in play
         # HONEST status (running/idle/paused/waiting-capacity) — NOT the gate `active` flag, which
         # persists forever and made the PM invent a phantom "queued, waiting for resources".
@@ -1060,7 +1131,7 @@ class Orchestrator:
                 # Resolve WHICH project this works on: a named/onboarded project, else the fallback.
                 # An effort is a THREAD in its project channel (COMMS-MODEL §4).
                 project = await self._resolve_project_slug(
-                    intent.project, channel_id, effort_name=intent.effort_name
+                    intent.project, channel_id, effort_name=intent.effort_name, thread_id=thread_id
                 )
                 eid, chan, root = await self.router.open_effort(
                     intent.effort_name, project=project, goal=message
@@ -1639,10 +1710,11 @@ class Orchestrator:
                                 self._jsonify_pending(self._pending_lifecycle[plan_id]))
         body = "\n".join(f"> {self._render_lifecycle_step(i, s)}" for i, s in enumerate(steps, 1))
         note = f"\n\n_{plan.notes}_" if plan.notes else ""
+        est = f"\n_Estimate: {plan.estimate}_" if plan.estimate else ""
         await self.chat.post(
             channel_id,
             (prefix + "\n\n" if prefix else "") +
-            f"📋 **Plan** — {plan.goal or intent_text}\n{body}{note}{already_note}\n\n"
+            f"📋 **Plan** — {plan.goal or intent_text}\n{body}{note}{est}{already_note}\n\n"
             f"Reply **`approve {plan_id}`** to run it, **`abort {plan_id}`** to drop it, or tell me "
             f"what to change and I'll redraft.",
             thread_id=thread_id,
@@ -1796,19 +1868,37 @@ class Orchestrator:
         )
         if res.ok:
             short = delivery.head_sha[:10]
+            # D1: PRs make BOTH halves visible — the code change (submodule repo) + the wiring
+            # (engine repo, gitlink bump). Each PR is separately mergeable; merges stay yours (D4).
+            code_pr = await self._open_delivery_pr(
+                eid, s_repo, delivery.branch, verified_sha=delivery.head_sha,
+                body_extra=f"This is the CODE half of a composition — `{engine_slug}` vendors it at "
+                           f"`{bump_step.path}` (see the engine's paired PR).\n")
+            engine_pr = await self._open_delivery_pr(
+                eid, engine_url, branch, merge_id=f"merge-{eid}-engine",
+                body_extra=f"This is the WIRING half of a composition: bumps `{bump_step.path}` to the "
+                           f"updated `{worker_step.target}` commit `{short}`"
+                           + (f" (code PR: {code_pr})" if code_pr else "") + ".\n")
+            prs = ""
+            if engine_pr or code_pr:
+                prs = ("\n📬 **PRs opened for review:**"
+                       + (f"\n- engine wiring: {engine_pr}" if engine_pr else "")
+                       + (f"\n- code change: {code_pr}" if code_pr else "")
+                       + "\n_`main` only changes when you merge — say **“merge it”** (I'll ask which "
+                         "if both are pending), or merge on GitHub after review._")
             await self.comms.post(
                 Intent.closure,
                 f"🔗 **Composition wired** — `{worker_step.target}` branch **`{delivery.branch}`** (the "
                 f"code change) + `{engine_slug}` branch **`{branch}`** (its `{bump_step.path}` bumped to "
                 f"`{short}`). `git fetch origin {branch}` in `{engine_slug}` for the wired engine. Merge "
-                f"to `main` stays human-gated.",
+                f"to `main` stays human-gated.{prs}",
                 effort_id=eid,
             )
             await self.comms.post(
                 Intent.operator_reply,
                 f"🔗 **{eid}** wired the composition: `{engine_slug}` branch **`{branch}`** now vendors "
                 f"the updated `{worker_step.target}` (`{bump_step.path}` → `{short}`). Fetch it to test; "
-                f"merge is human-gated.",
+                f"merge is human-gated.{prs}",
                 thread_id=mgmt,
             )
         else:
@@ -2154,8 +2244,9 @@ class Orchestrator:
             mgmt_channel,
             (f"{reply_prefix}\n\n_Readiness ✓ — I'm dispatching a worker on "
              f"{self._effort_link(effort_id, root)} with the approach above; click through to watch "
-             f"it live. If you'd tackle it differently, just say so and I'll steer it. I'll summarize "
-             f"back here when done._").strip(),
+             f"it live. Its work will land on branch `agent/{effort_id}` (+ a PR for your review) — "
+             f"`main` only changes when you merge. If you'd tackle it differently, just say so and "
+             f"I'll steer it. I'll summarize back here when done._").strip(),
             thread_id=mgmt_thread,
         )
 
@@ -2594,6 +2685,152 @@ class Orchestrator:
                 thread_id=self._mgmt_thread_of(effort_id),
             )
 
+    async def _open_delivery_pr(
+        self, effort_id: str, repo: str | None, branch: str, *,
+        merge_id: str | None = None, verified_sha: str = "", body_extra: str = "",
+    ) -> str:
+        """D1 — open the PR that makes a delivered branch VISIBLE (the corpus's 'promotion artifact':
+        a branch push is easy to miss; a PR shows in GitHub's UI/notifications with the diff). The PR
+        body carries the intent + branch + verification; merge stays HUMAN-GATED (D4) — the message
+        invites a plain "merge it". Best-effort: a PR failure never blocks the closure. Returns the
+        PR url ('' if none)."""
+        if not (repo and self.s.auto_pr and self.github is not None and self.s.github_app_enabled):
+            return ""
+        async with self.db.session_factory() as s:
+            e = await s.get(Effort, effort_id)
+            name = (e.name if e else "") or effort_id
+        goal = ""
+        try:
+            _, goal_text, _ = await self.charters.current_goal(effort_id)
+            goal = (goal_text or "").strip().splitlines()[0][:300] if goal_text else ""
+        except Exception:  # noqa: BLE001 — goal text is garnish; never block the PR
+            pass
+        merge_id = merge_id or f"merge-{effort_id}"
+        # The PR body is DESCRIPTIVE of the delivery (corpus D1: intent + changes + verification) —
+        # chat instructions ("say merge it") live in Mattermost, not here.
+        base_br, commits, files = await read_branch_changes(
+            self.github, repo, branch, api_base=self.s.github_api_base, transport=self._gh_transport)
+        parts: list[str] = []
+        if goal:
+            parts.append(f"## What this delivers\n{goal}")
+        if body_extra:
+            parts.append(body_extra.strip())
+        if commits:
+            parts.append("## Changes\n" + "\n".join(f"- {c}" for c in commits))
+        if files:
+            parts.append(f"## Files touched ({len(files)})\n" + "\n".join(f"- {f}" for f in files))
+        parts.append(f"Branch `{branch}`"
+                     + (f" verified on the remote @ `{verified_sha[:10]}`" if verified_sha else "")
+                     + (f", against `{base_br}`" if base_br else "") + ".")
+        parts.append("---\n_Opened by agent-org (DELIVERY-PIPELINE D1); merge is human-gated (D4)._")
+        body = "\n\n".join(parts)
+        res = await open_pull_request(
+            self.github, repo, branch, title=f"agent: {name}", body=body,
+            api_base=self.s.github_api_base, transport=self._gh_transport,
+        )
+        if not res.ok:
+            log.warning("delivery PR for %s failed: %s", effort_id, res.summary)
+            return ""
+        try:
+            pr_number = int(res.detail or "0")
+        except ValueError:
+            pr_number = 0
+        self._pending_merge[merge_id] = {
+            "repo": repo, "pr_number": pr_number, "effort_id": effort_id,
+            "mgmt_thread": self._mgmt_thread_of(effort_id) or "",
+        }
+        await self.pending.save(merge_id, "merge", self._pending_merge[merge_id])
+        await self.audit.log("delivery_pr_opened", effort_id=effort_id,
+                             payload={"repo": repo, "pr": pr_number, "merge_id": merge_id})
+        return res.url
+
+    async def _execute_merge(self, merge_id: str, reply=None) -> None:
+        """D4 — perform the operator-approved merge (the approve IS the §3 clearance for this
+        irreversible action). Merge commit via the host API (--no-ff equivalent); the result is
+        posted UP (operator thread) and echoed DOWN into the effort thread (bring-back-down)."""
+        entry = self._pending_merge.pop(merge_id, None)
+        if entry is None:
+            return
+        await self.pending.delete(merge_id)
+        res = await merge_pull_request(
+            self.github, entry["repo"], int(entry.get("pr_number") or 0),
+            api_base=self.s.github_api_base, transport=self._gh_transport,
+        )
+        await self.audit.log("pr_merge_decided", effort_id=entry.get("effort_id"),
+                             payload={"merge_id": merge_id, "ok": res.ok, "pr": entry.get("pr_number")})
+        icon = "✅" if res.ok else "⚠️"
+        if reply is not None:
+            await reply(f"{icon} {res.summary}" + (f" — {res.url}" if res.ok and res.url else ""))
+        eid = entry.get("effort_id")
+        if eid:   # bring the audience back down (CM.4)
+            await self.comms.post(Intent.closure, f"{icon} {res.summary} (operator-approved merge).",
+                                  effort_id=eid)
+
+    async def _nl_pr_request(self, message: str, channel_id: str, thread_id: str | None) -> bool:
+        """Operator-plane catch (D1/D4): 'create/open a PR for <branch> [merge if clean]' is a
+        CAPABILITY the bridge performs via the App — NEVER a worker task (a worker has no host-API
+        access; the live miss dispatched one to do nothing in the sandbox). Deterministic, like
+        "merge it" — PR/merge are governed actions, not fuzzy-NL material. A composition branch can
+        exist on SEVERAL onboarded repos (code + engine): PRs open for each. An explicit merge
+        instruction in the operator's words ("proceed with merge", "merge if clean") is the §3
+        clearance — logged verbatim — and each PR is merged if GitHub reports it mergeable.
+        Returns True when the message was handled here."""
+        if not re.search(r"\b(?:create|open|raise|make)\b[^.\n]{0,40}?\b(?:pr|pull\s+request)s?\b",
+                         message, re.IGNORECASE):
+            return False
+
+        async def say(msg: str) -> None:
+            await self.chat.post(channel_id, msg, thread_id=thread_id)
+
+        if self.github is None or not self.s.github_app_enabled:
+            await say("⚠️ I can't open PRs — the GitHub App isn't set up (see SETUP-github-app.md).")
+            return True
+        mb = re.search(r"\b(agent/[\w./-]+)", message)
+        if not mb:
+            await say("Which branch should the PR be for? (e.g. `agent/effort-…` — say "
+                      "\"create a PR for <branch>\")")
+            return True
+        branch = mb.group(1).rstrip(".")
+        # Every onboarded repo where this branch actually exists (a composition delivery lands on 2).
+        hits: list[tuple[str, str]] = []
+        for p in (await self.projects.list())[:8]:
+            d = await read_branch_delivery(self.github, p["repo_url"], branch,
+                                           api_base=self.s.github_api_base, transport=self._gh_transport)
+            if d.verifiable and d.exists:
+                hits.append((p["slug"], p["repo_url"]))
+        if not hits:
+            await say(f"I couldn't find `{branch}` on any onboarded repo — check the branch name?")
+            return True
+        merge_wanted = re.search(r"\bmerge\b", message, re.IGNORECASE) is not None
+        if merge_wanted:
+            await self.audit.log("operator_premerge_clearance",
+                                 payload={"branch": branch, "phrase": message[:300]})
+        ctx_eid = self._effort_of_mgmt_thread(thread_id) or ""
+        lines: list[str] = []
+        for slug, repo_url in hits:
+            merge_id = f"merge-{slugify(branch.split('/')[-1])[:20]}-{slug}"[:64]
+            url = await self._open_delivery_pr(ctx_eid or branch, repo_url, branch, merge_id=merge_id)
+            if not url:
+                lines.append(f"⚠️ `{slug}`: couldn't open a PR for `{branch}` — see the logs.")
+                continue
+            if merge_wanted:
+                entry = self._pending_merge.get(merge_id) or {}
+                res = await merge_pull_request(
+                    self.github, repo_url, int(entry.get("pr_number") or 0),
+                    api_base=self.s.github_api_base, transport=self._gh_transport)
+                self._pending_merge.pop(merge_id, None)
+                await self.pending.delete(merge_id)
+                await self.audit.log("pr_merge_decided", effort_id=ctx_eid or None,
+                                     payload={"merge_id": merge_id, "ok": res.ok, "pre_authorized": True})
+                lines.append((f"✅ `{slug}`: PR opened + **merged** (you pre-cleared it) — {url}"
+                              if res.ok else
+                              f"⚠️ `{slug}`: PR opened ({url}) but the merge didn't go through — "
+                              f"{res.summary} It stays open for you."))
+            else:
+                lines.append(f"📬 `{slug}`: PR opened — {url} — say **“merge it”** and I'll merge.")
+        await say("\n".join(lines))
+        return True
+
     async def _finish_effort(self, effort_id: str, result, *, delivery: BranchDelivery | None = None) -> None:
         """All steps cleared → closure DOWN into the effort thread + a summary UP to #mgmt (§2). When a
         repo was focused, `delivery` is the PM's VERIFIED verdict on the branch (§4.2): a verified
@@ -2608,6 +2845,13 @@ class Orchestrator:
             sha = f" @ `{delivery.head_sha[:10]}`" if delivery.head_sha else ""
             where = (f"pushed to branch **`{branch}`**{sha} (verified on the remote) — "
                      f"`git fetch origin {branch}` to see it")
+            # D1: open the PR that makes this delivery VISIBLE; merge stays yours (D4).
+            pr_url = await self._open_delivery_pr(
+                effort_id, await self._effort_repo(effort_id), branch,
+                verified_sha=delivery.head_sha)
+            if pr_url:
+                where += (f"\n📬 **PR opened for review:** {pr_url}\n_`main` only changes when you "
+                          f"merge — say **“merge it”** and I'll merge, or merge on GitHub after review._")
         elif delivery is not None and not delivery.verifiable and self_reported:
             # We couldn't independently check (App can't read this repo) — report the worker's word,
             # labelled honestly as unverified rather than asserting it as fact (§4.2 unverified).
@@ -2937,12 +3181,15 @@ class Orchestrator:
                 elif kind == "effort_plan":
                     payload["plan"] = Plan(**payload["plan"])
                     self._pending_plan[pid] = payload
+                elif kind == "merge":
+                    self._pending_merge[pid] = payload
                 else:
                     continue
             except Exception as exc:  # noqa: BLE001 — a drifted row must not crash boot; drop it
                 log.warning("dropping unrehydratable pending %s (%s): %s", pid, kind, exc)
                 await self.pending.delete(pid)
-        n = len(self._pending_lifecycle) + len(self._pending_capability) + len(self._pending_plan)
+        n = (len(self._pending_lifecycle) + len(self._pending_capability)
+             + len(self._pending_plan) + len(self._pending_merge))
         if n:
             log.info("rehydrated %d pending approval(s) held across a restart", n)
 
@@ -2957,6 +3204,7 @@ class Orchestrator:
             *self._pending_lifecycle.keys(),
             *self._pending_capability.keys(),
             *self._pending_plan.keys(),
+            *self._pending_merge.keys(),
         ]
         try:
             efforts = await self.gate.snapshot(open_only=True)
@@ -2980,6 +3228,9 @@ class Orchestrator:
             items.append((pid, f"📋 plan: {goal} ({n} step{'' if n == 1 else 's'})"))
         for aid, e in self._pending_capability.items():
             items.append((aid, f"🛠️ fork `{e.get('parent', '?')}`"))
+        for mid, e in self._pending_merge.items():
+            items.append((mid, f"🔀 merge PR #{e.get('pr_number', '?')} on "
+                               f"`{(e.get('repo') or '').split('github.com/')[-1]}` — say “merge it”"))
         for eid, e in self._pending_plan.items():
             plan = e.get("plan")
             feat = (getattr(plan, "feature_overview", None) or e.get("request") or "").strip()
@@ -3132,10 +3383,21 @@ class Orchestrator:
                         f"Re-send the request with your changes to adjust it."
                     )
                 return
+            # D4 — the human-gated merge: the operator's approve IS the §3 clearance; the bridge
+            # merges via the host API (merge commit = --no-ff). Abort leaves the PR open on GitHub.
+            if effort_id in self._pending_merge:
+                if cmd == "approve":
+                    await self._execute_merge(effort_id, reply)
+                else:
+                    self._pending_merge.pop(effort_id, None)
+                    await self.pending.delete(effort_id)
+                    await reply(f"👍 not merging `{effort_id}` — the PR stays open on GitHub for "
+                                f"review; merge it there whenever you're ready.")
+                return
             # A plan/capability id that reached here isn't pending — it already ran, was dropped, or
             # expired (a rebuild clears un-approved proposals). It is NOT a CONCERN to resolve, so say
             # that plainly instead of the confusing "no open concern for effort <plan-id>" fallthrough.
-            if effort_id.startswith(("plan-", "cap-")):
+            if effort_id.startswith(("plan-", "cap-", "merge-")):
                 await reply(
                     f"`{effort_id}` isn't awaiting approval — it already ran, was dropped, or expired "
                     f"(a rebuild clears un-approved proposals). Re-send the request to draft a fresh one."

@@ -114,6 +114,9 @@ class Settings(BaseSettings):
     # A single poison event that keeps throwing is dead-lettered after this many handler failures
     # (marked processed + escalated) so it can't replay forever on every catch-up.
     event_max_attempts: int = 5
+    # DELIVERY-PIPELINE D1: open a GitHub PR for every verified delivery (the 'promotion artifact'
+    # that makes branch work VISIBLE in GitHub's UI). Merge stays human-gated (D4).
+    auto_pr: bool = True
     # FALLBACK repo only. The org works on ANY project onboarded via `/project add` (a repo per
     # project, resolved from the effort's #proj-<slug> channel — see modules/projects.py). This is
     # just the default for a #mgmt request that names no project; empty = the sandbox pool. If set,
