@@ -226,6 +226,46 @@ handlers (`fork`/`create`/`add_submodule`/`compose`); (3) `capability` as a step
 
 ---
 
+## 11. State-awareness & context — the reconciling planner (added 2026-07-04, operator-caught)
+
+The operator identified the deepest gap: the P-APL.2 planner was **stateless about the target repo**
+— it reasoned over the registry (which forks exist) but was **blind to the repo's actual contents**,
+so it *duplicated* a submodule that already existed instead of reconciling. That is a **direct
+deviation from UX-FLOW Stage 1** — *"the planner reads the project's current workspace and drafts a
+plan **anchored to concrete workspace reality**; intent op: **anchor**."* The class of gap: the system
+makes decisions without grounding in **actual current state**, so it drifts, duplicates, and doesn't
+self-maintain. The corpus's own answer is the **intent thread** (§0) + **anchoring** (Stage 1) +
+**grounding** (Stage 4).
+
+**Fixed (this pass):**
+- **GAP-A — Stage-1 anchor (LIVE).** `capabilities.read_repo_state()` reads each project's ACTUAL
+  state (default branch, `.gitmodules`, top-level tree) via the App API (no clone) and the planner
+  prompt now carries *"CURRENT STATE … ANCHOR to this; do NOT re-add what exists."* The planner
+  reconciles the DELTA (skip what exists, MOVE when the intent wants a different path, empty plan when
+  the desired state already holds) — declarative, idempotent, clean. This is the design's Stage-1
+  anchor, previously omitted.
+- **GAP-B — intent thread to the worker (LIVE).** Plan `worker_task`s now carry the plan's goal + an
+  explicit *reconcile-don't-duplicate* directive as the worker's grounded goal (UX-FLOW §0 / Stage 5:
+  *"the intent thread rides along as each worker's grounded goal"*).
+
+**Planned follow-ups (same class — anchored to the corpus):**
+- **GAP-C — readiness gate on plans (UX-FLOW Stage 2).** A vague *"set up my project"* should trigger
+  clarifying questions (F5 — don't guess), not a blind plan. Wire the Stage-2 readiness gate into the
+  `plan` intent.
+- **GAP-D — plan dry-run/preview (UX-FLOW Stage 4 "ground + dry-run").** Present the reconciled DELTA
+  as a *preview* ("these 2 submodules already exist → no change; 1 add; 1 move") before approval —
+  measure-twice. The anchor makes this cheap; surface it in the plan card.
+- **GAP-E — cross-effort awareness (governance §2 F4).** The planner/executor don't check whether
+  another effort is mid-edit on a target repo → auto-escalate a cross-effort conflict, don't collide.
+- **GAP-F — advisor→plan link (this doc's original P-APL.2 intent).** `advisory` (research) and `plan`
+  are separate intents; the design intends the advisor's grounded answer to *feed* a plan
+  (research-then-plan) rather than the operator re-typing the intent.
+- **GAP-G — learning loop / estimate (UX-FLOW §6, Stage 3).** Accrue plan outcomes for real estimates
+  + to spot recurring drift; cold-start today.
+
+Precedence held: every fix maps to an existing corpus mechanism (anchor / intent-thread / readiness /
+ground / cross-effort / learning), not a new safety story.
+
 ## 10. Build order (on approval)
 
 1. **P-APL.0** — register + install the GitHub App; land its key as a bridge secret; token-minter

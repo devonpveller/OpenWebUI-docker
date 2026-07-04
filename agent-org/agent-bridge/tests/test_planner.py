@@ -96,6 +96,40 @@ async def test_plan_drafts_presents_then_executes_on_approve(db_url, tmp_path):
         await db.dispose()
 
 
+async def test_planner_is_anchored_to_actual_repo_state(db_url, tmp_path):
+    """UX-FLOW Stage 1 anchor: the planner must be given each repo's ACTUAL current state (submodules
+    + tree) so it reconciles instead of blindly duplicating. Verify the state reaches the model call."""
+    import base64
+    orch, chat, db = await _orch(db_url, tmp_path)
+    try:
+        await orch.projects.add("monogame-engine", "https://github.com/devonpveller/MonoGame-Engine")
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            p = request.url.path
+            if p == "/repos/devonpveller/MonoGame-Engine":
+                return httpx.Response(200, json={"default_branch": "main"})
+            if p.endswith("/contents/.gitmodules"):
+                gm = base64.b64encode(
+                    b'[submodule "vendor/murder"]\n\tpath = vendor/murder\n\turl = https://github.com/devonpveller/murder\n').decode()
+                return httpx.Response(200, json={"content": gm})
+            if p.endswith("/contents"):
+                return httpx.Response(200, json=[{"name": "vendor", "type": "dir"}])
+            return httpx.Response(404)
+        orch._gh_transport = httpx.MockTransport(handler)
+        orch.models._client.queue_structured(OperatorIntent(kind="plan", reply="Drafting."))
+        orch.models._client.queue_structured(LifecyclePlan(goal="x", steps=[
+            LifecycleStep(kind="worker_task", target="monogame-engine", task="wire", summary="w")]))
+        mgmt = await orch.mgmt_channel_id()
+        await orch.nl_intake("finish setting up monogame-engine", mgmt, thread_id="t")
+        # the planner's model call carried the ACTUAL state (submodule vendor/murder already present)
+        planner_call = next(c for c in orch.models._client.calls
+                            if c.get("kind") == "structured" and "CURRENT STATE" in str(c.get("user", "")))
+        assert "vendor/murder" in planner_call["user"]           # anchored to reality
+        assert "ANCHOR" in planner_call["user"] or "do NOT re-add" in planner_call["user"]
+    finally:
+        await db.dispose()
+
+
 async def test_plan_abort_runs_nothing(db_url, tmp_path):
     orch, chat, db = await _orch(db_url, tmp_path)
     try:

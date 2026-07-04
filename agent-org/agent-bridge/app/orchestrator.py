@@ -27,7 +27,7 @@ from .modules.event_gateway import EventGateway
 from .modules.execution_gate import ExecutionGate
 from .modules.floor_guard import FloorGuard
 from .modules.governance_gate import GovernanceGate
-from .modules.capabilities import CapabilityResult, fork_repo, parse_owner_repo
+from .modules.capabilities import CapabilityResult, fork_repo, parse_owner_repo, read_repo_state
 from .modules.github_app import GitHubApp, build_github_app
 from .modules.grounding import Grounding, build_grounding
 from .modules.learning_loop import LearningLoop
@@ -189,7 +189,14 @@ _PLANNER_SYS = (
     "Do NOT re-fork or re-create things already in the REGISTERED PROJECTS list — reference them by "
     "slug. Do NOT invent repos the operator didn't mention. Keep it minimal — only the steps needed. "
     "Each step's `summary` is one plain line. Put assumptions/caveats in `notes`. If you truly can't "
-    "form a plan, return an empty steps list."
+    "form a plan, return an empty steps list.\n"
+    "ANCHOR TO THE CURRENT STATE (this is the most important rule — you are given the ACTUAL contents "
+    "of each repo): plan the DELTA to reach the desired end-state, like a careful maintainer, NOT a "
+    "blind list of adds. Specifically: (1) if a submodule/file the intent wants ALREADY EXISTS at the "
+    "right path, do NOT add it again — skip it. (2) if it exists at a DIFFERENT path than the intent "
+    "wants (e.g. `murder` at root but the intent wants `vendor/murder`), plan a worker_task to MOVE/"
+    "rename it, NOT a duplicate add. (3) if the desired end-state ALREADY HOLDS, return an EMPTY steps "
+    "list and say so in `notes`. Keep the repo CLEAN — never leave or create duplicates."
 )
 
 _HELP = (
@@ -1409,11 +1416,24 @@ class Orchestrator:
         projects_ctx = "\n".join(
             f"- {p['slug']} — {p['repo_url']} — upstream: {p.get('upstream_url') or 'none'}"
             for p in projects) or "none"
+        # ANCHOR to workspace reality (UX-FLOW Stage 1): read each project's ACTUAL current state
+        # (submodules + tree) so the planner reconciles desired-vs-actual instead of blindly adding /
+        # duplicating. Best-effort + bounded; a repo the App can't read just contributes nothing.
+        state_lines: list[str] = []
+        for p in projects[:8]:
+            st = ""
+            if self.github is not None and self.s.github_app_enabled:
+                st = await read_repo_state(self.github, p["repo_url"],
+                                           api_base=self.s.github_api_base, transport=self._gh_transport)
+            if st:
+                state_lines.append(f"- {p['slug']}: {st}")
+        state_ctx = "\n".join(state_lines) or "(no readable repo state — plan from the intent)"
         try:
             plan: LifecyclePlan = await self.models.structured(
                 "po", _PLANNER_SYS,
                 f"OPERATOR INTENT:\n{intent_text}\n\nREGISTERED PROJECTS (slug — repo — upstream):\n"
-                f"{projects_ctx}\n\nProduce the plan.",
+                f"{projects_ctx}\n\nCURRENT STATE OF THE REPOS (the ACTUAL contents — ANCHOR to this; "
+                f"do NOT re-add what already exists):\n{state_ctx}\n\nProduce the plan.",
                 LifecyclePlan,
             )
         except ModelBackpressureError:
@@ -1502,13 +1522,19 @@ class Orchestrator:
             proj = await self.projects.resolve(s.target)
             if not proj:
                 results.append(f"❌ worker task: unknown project `{s.target}`"); continue
+            # Carry the INTENT THREAD into the worker's goal (UX-FLOW §0/Stage 5 — "the intent thread
+            # rides along as each worker's grounded goal") + an explicit reconcile-don't-duplicate
+            # directive, so the worker maintains the repo cleanly instead of working context-free.
+            goal = (f"{s.task}\n\n_Context — this is part of the effort: {plan.goal}. First orient in "
+                    f"the repo's CURRENT state, then reconcile toward that goal: build on / move what "
+                    f"already exists rather than duplicating it, and keep the repo clean._")
             try:
                 eid, chan, root = await self.router.open_effort(
-                    slugify(s.task)[:24] or "task", project=proj["slug"], goal=s.task)
-                await self.charters.set_goal(eid, s.task, created_by="planner")
+                    slugify(s.task)[:24] or "task", project=proj["slug"], goal=goal)
+                await self.charters.set_goal(eid, goal, created_by="planner")
                 if thread_id:
                     self._effort_mgmt_thread[eid] = thread_id
-                self._spawn(self.delegate(eid, chan, root, s.task))
+                self._spawn(self.delegate(eid, chan, root, goal))
                 results.append(f"▶ dispatched worker on `{proj['slug']}`: {s.task[:60]}")
             except Exception as exc:  # noqa: BLE001
                 results.append(f"❌ worker task on `{proj['slug']}`: {exc}")

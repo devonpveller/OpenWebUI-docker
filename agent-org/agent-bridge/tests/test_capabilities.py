@@ -14,7 +14,7 @@ import pytest
 from app.adapters.chat import FakeChatAdapter
 from app.config import Settings
 from app.db import Database
-from app.modules.capabilities import fork_repo, parse_owner_repo
+from app.modules.capabilities import fork_repo, parse_owner_repo, read_repo_state
 from app.modules.github_app import FakeGitHubApp
 from app.modules.model_router import FakeModelClient
 from app.orchestrator import Orchestrator
@@ -49,6 +49,37 @@ async def test_fork_repo_executor_404_is_clear():
     res = await fork_repo(FakeGitHubApp(), "ghost/missing",
                           transport=httpx.MockTransport(lambda r: httpx.Response(404, json={"message": "Not Found"})))
     assert not res.ok and "404" in res.summary and "token" not in res.detail.lower()
+
+
+# ── read_repo_state: the Stage-1 anchor (actual submodules + tree) ───────────
+async def test_read_repo_state_reports_submodules_and_tree():
+    import base64
+    gitmodules = base64.b64encode(
+        b'[submodule "vendor/murder"]\n\tpath = vendor/murder\n\turl = https://github.com/devonpveller/murder\n'
+    ).decode()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        p = request.url.path
+        if p == "/repos/devonpveller/MonoGame-Engine":
+            return httpx.Response(200, json={"default_branch": "main"})
+        if p.endswith("/contents/.gitmodules"):
+            return httpx.Response(200, json={"content": gitmodules})
+        if p.endswith("/contents"):
+            return httpx.Response(200, json=[{"name": "vendor", "type": "dir"},
+                                             {"name": "README.md", "type": "file"}])
+        return httpx.Response(404)
+
+    st = await read_repo_state(FakeGitHubApp(owner="devonpveller"),
+                               "https://github.com/devonpveller/MonoGame-Engine",
+                               transport=httpx.MockTransport(handler))
+    assert "vendor/murder" in st and "main" in st and "vendor/" in st
+
+
+async def test_read_repo_state_empty_for_other_owner():
+    # the App can only read its own account — a repo under a different owner returns "".
+    st = await read_repo_state(FakeGitHubApp(owner="me"), "https://github.com/someoneelse/repo",
+                               transport=httpx.MockTransport(lambda r: httpx.Response(200)))
+    assert st == ""
 
 
 # ── the governed flow via the orchestrator ──────────────────────────────────
