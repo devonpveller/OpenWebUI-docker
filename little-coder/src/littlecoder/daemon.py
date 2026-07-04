@@ -30,7 +30,7 @@ from .meta import should_trigger
 from .meta_wiring import build_meta_runner
 from .observer import report_dict
 from .openterminal import OpenTerminalClient
-from .sanitize import Sanitizer
+from .sanitize import Sanitizer, redact_secrets
 from .tasks import TaskContext, TaskState, TaskStatus
 from .ulid import new_ulid
 from .urlnorm import NormalizedRepo, RepoUrlError, normalize_repo_url
@@ -437,7 +437,19 @@ class LittleCoderDaemon:
         decision = decide_switch(requested, self.current_focus, self.busy)
 
         if decision.action is SwitchAction.NOOP:
-            return {"action": "noop", "focus": requested.canonical_url}
+            # Already focused — the workspace was NOT wiped, so `origin` is intact.
+            # But `upstream` may be absent (never baked, or baked before the caller
+            # knew the parent): ensure it here so a fork's `git fetch upstream` works
+            # on a re-focus, not only on the first clone. Idempotent + skipped when
+            # already present (has_remote) so routine re-dispatches stay cheap.
+            out: dict = {"action": "noop", "focus": requested.canonical_url}
+            if req.upstream and not await asyncio.to_thread(
+                self.workspace.has_remote, "upstream"
+            ):
+                upstream_ok = await self._bake_upstream(req, requested)
+                out["upstream"] = req.upstream
+                out["upstream_ok"] = upstream_ok
+            return out
         if decision.action is SwitchAction.REJECT:
             raise HTTPException(409, decision.reason)
 
@@ -459,8 +471,11 @@ class LittleCoderDaemon:
         token = req.token or os.environ.get("LC_DEPLOY_TOKEN") or None
         result = await asyncio.to_thread(self.workspace.clone, requested, token)
         if not result.ok:
+            # redact: a clone-auth error can echo the token-bearing URL back in stderr, and this
+            # detail is surfaced to the bridge → operator chat.
             raise HTTPException(
-                502, f"clone failed (exit {result.exit_code}): {result.stderr[-300:]}"
+                502, f"clone failed (exit {result.exit_code}): "
+                     f"{redact_secrets(result.stderr[-300:])}"
             )
         self.current_focus = requested
         self.audit.write(
@@ -475,22 +490,30 @@ class LittleCoderDaemon:
         # surface the failure in the response + journal so it isn't a silent stall.
         upstream_ok: bool | None = None
         if req.upstream:
-            up = await asyncio.to_thread(
-                self.workspace.add_upstream_remote, req.upstream, req.upstream_token
-            )
-            upstream_ok = bool(up.ok)
-            self.audit.write(
-                "project_upstream_set",
-                actor=req.actor,
-                repo=requested.canonical_url,
-                upstream=req.upstream,
-                ok=upstream_ok,
-            )
+            upstream_ok = await self._bake_upstream(req, requested)
         out = {"action": decision.action.value, "focus": requested.canonical_url}
         if upstream_ok is not None:
             out["upstream"] = req.upstream
             out["upstream_ok"] = upstream_ok
         return out
+
+    async def _bake_upstream(self, req: ProjectRequest, requested) -> bool:
+        """Bake (or refresh) the read-only `upstream` remote for a fork and journal the
+        outcome. Shared by the clone/switch path (fresh clone) and the NOOP re-focus path
+        (workspace not wiped, remote may be missing). Returns whether the git op succeeded —
+        non-fatal, but surfaced so a fork that can't reach its parent isn't a silent stall."""
+        up = await asyncio.to_thread(
+            self.workspace.add_upstream_remote, req.upstream, req.upstream_token
+        )
+        ok = bool(up.ok)
+        self.audit.write(
+            "project_upstream_set",
+            actor=req.actor,
+            repo=requested.canonical_url,
+            upstream=req.upstream,
+            ok=ok,
+        )
+        return ok
 
 
 def _parse_ts(ts: str) -> float:

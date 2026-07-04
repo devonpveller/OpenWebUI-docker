@@ -202,3 +202,47 @@ async def test_drain_loop_timer_resumes(db_url):
     finally:
         await orch.aclose()
         await db.dispose()
+
+
+# ── no worker slot → PARK (not "couldn't dispatch") → auto-run when a worker frees ──
+async def test_no_worker_slot_parks_then_resumes_on_release(db_url):
+    orch, chat, harness, db = await _orch(db_url)          # max_concurrent_workers=1
+    try:
+        # Occupy the only worker slot so the next dispatch hits NoCapacity.
+        held, _hc, _hr = await orch.router.open_effort("holder")
+        holder = await orch.scheduler.acquire(held, "worker-default", "sid")
+        eid, chan, root = await orch.router.open_effort("waiter")
+        await orch.charters.set_goal(eid, "do it", created_by="po")
+        await orch.delegate(eid, chan, root, "do it")
+        assert await orch.parks.is_parked(eid)                          # parked, NOT dead-ended
+        assert (await orch.parks.oldest())["reason"] == "no_worker_slot"
+        assert any("Waiting for a free worker" in p["message"] for p in chat.posted)
+        assert len(harness.wakes) == 0                                  # didn't run yet
+
+        # Free the worker → the release drain resumes the waiter and it runs.
+        await orch.scheduler.release(holder.id)
+        assert orch._capacity_event.is_set()                           # on_release fired the signal
+        await orch._drain_parked_once()
+        await _drain_bg(orch)
+        assert not await orch.parks.is_parked(eid)                      # resumed
+        assert len(harness.wakes) >= 1                                  # actually ran
+    finally:
+        await db.dispose()
+
+
+async def test_no_worker_slot_does_not_escalate_on_attempts(db_url):
+    # Slot contention is normal → a slot-parked effort must NOT hit the GPU starvation cap.
+    orch, chat, harness, db = await _orch(db_url, capacity_max_attempts=1)
+    try:
+        held, _hc, _hr = await orch.router.open_effort("holder")
+        await orch.scheduler.acquire(held, "worker-default", "sid")   # occupy the slot
+        eid, chan, root = await orch.router.open_effort("patient")
+        await orch.charters.set_goal(eid, "do it", created_by="po")
+        await orch.delegate(eid, chan, root, "do it")                  # parks (no_worker_slot)
+        for _ in range(4):                                             # drains while still no slot
+            await orch._drain_parked_once()
+            await _drain_bg(orch)
+        assert await orch.parks.is_parked(eid)                         # still WAITING, never escalated
+        assert not any("waiting on GPU capacity" in p["message"] for p in chat.posted)
+    finally:
+        await db.dispose()

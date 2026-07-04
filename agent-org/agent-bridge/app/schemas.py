@@ -140,7 +140,10 @@ class OperatorIntent(BaseModel):
 
     kind: Literal[
         "request", "clarification", "status", "steering", "decision", "question", "chitchat",
-        "reengage", "archive",
+        "reengage", "archive", "reassign",
+        # User-facing admin inlets — every slash command has an NL path (operator preference:
+        # all user-facing inlets stem from NL; slash commands are only a power-user fallback).
+        "project_list", "project_remove", "egress_allow", "kill", "unkill",
     ] = "chitchat"
     reply: str = ""                       # the PO's conversational, first-person response
     effort_name: str | None = None        # kebab-case slug for a NEW request
@@ -153,6 +156,7 @@ class OperatorIntent(BaseModel):
     # For reengage/archive/status bulk actions: a substring matching effort ids (e.g. "calculator",
     # "monogame") so "get the monogame tasks working" / "abort the calculators" target the right set.
     target_filter: str | None = None
+    host: str | None = None               # a git host (or repo URL) to widen egress for (egress_allow)
 
 
 # ── Grounding result (UX-FLOW Stage 4, P4.0) ────────────────────────────────

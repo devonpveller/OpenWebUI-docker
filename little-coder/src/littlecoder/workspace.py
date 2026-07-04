@@ -109,6 +109,21 @@ class WorkspaceManager:
         shared, so this is a direct filesystem check."""
         return os.path.isdir(os.path.join(self.workspace_path, ".git"))
 
+    def has_remote(self, name: str) -> bool:
+        """True when `name` is a configured git remote. `git remote` is a
+        read-only, proxy-allowed op — used to skip an idempotent re-bake of
+        `upstream` on a NOOP re-focus (the workspace wasn't wiped, so a remote
+        already present needn't be re-added). Fails closed: any error → False
+        (treat as absent → the caller re-bakes, which is idempotent anyway)."""
+        res = self.ot.execute(
+            f"{shlex.quote(self.real_git)} -C {shlex.quote(self.workspace_path)} remote",
+            cwd=self.workspace_path,
+            timeout=30,
+        )
+        if not res.ok:
+            return False
+        return name in {ln.strip() for ln in res.stdout.splitlines() if ln.strip()}
+
     def clone(self, repo: NormalizedRepo, deploy_token: str | None = None) -> ExecResult:
         """Clone `repo` into the (empty) workspace. With `deploy_token` the
         clone uses an HTTPS token URL — least-privilege, injected per switch,

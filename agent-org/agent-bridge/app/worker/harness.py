@@ -59,12 +59,16 @@ class WorkerHarness(Protocol):
     async def set_project(
         self, base_url: str, repo: str, *, token: str | None = None,
         upstream: str | None = None, upstream_token: str | None = None,
-    ) -> tuple[bool, str]:
+    ) -> tuple[bool, str, bool | None]:
         """Focus the worker on a repo (little-coder clones it, bypassing the git-proxy). `token` is
         an optional per-project deploy token (multi-PAT). `upstream` (+ optional read-scoped
         `upstream_token`) bakes a fork's read-only parent remote after the clone. Returns
-        (ok, detail) — detail carries the daemon's clone error (e.g. "clone failed (exit 128)") so a
-        failure can be surfaced as a clear CLONE problem, not a phantom worker failure."""
+        (ok, detail, upstream_ok):
+          - ok/detail: clone success + the daemon's clone error (e.g. "clone failed (exit 128)") so a
+            clone failure is surfaced as a clear CLONE problem, not a phantom worker failure.
+          - upstream_ok: whether the fork's `upstream` remote baked (None when no upstream was
+            requested). A clone can succeed while the upstream bake fails (unreachable parent) — that
+            must be surfaced, not silently swallowed, or `git fetch upstream` fails mid-task."""
         ...
 
     async def current_focus(self, base_url: str) -> str | None:
@@ -128,7 +132,7 @@ class LittleCoderHarness:
     async def set_project(
         self, base_url: str, repo: str, *, token: str | None = None,
         upstream: str | None = None, upstream_token: str | None = None,
-    ) -> bool:
+    ) -> tuple[bool, str, bool | None]:
         # little-coder clones via the REAL git binary (bypasses the git-proxy) — the
         # supported "operator action" workspace-setup path (§12.3). Clone can be slow. A per-request
         # `token` (if given) overrides the pool's global LC_DEPLOY_TOKEN for this project. `upstream`
@@ -144,13 +148,21 @@ class LittleCoderHarness:
         async with httpx.AsyncClient(base_url=base_url.rstrip("/"), timeout=1800.0) as c:
             r = await c.post("/project", json=body)
             if r.status_code < 400:
-                return True, ""
+                # Clone succeeded. The daemon reports `upstream_ok` in the body ONLY when it
+                # attempted a bake (fork case); None when no upstream was requested → nothing to warn.
+                upstream_ok: bool | None = None
+                if upstream:
+                    try:
+                        upstream_ok = bool(r.json().get("upstream_ok"))
+                    except Exception:  # noqa: BLE001 - non-JSON body → treat as bake-unknown/failed
+                        upstream_ok = False
+                return True, "", upstream_ok
             detail = ""
             try:
                 detail = (r.json().get("detail") or "")
             except Exception:  # noqa: BLE001 - non-JSON body
                 detail = r.text or ""
-            return False, detail.strip()[:200]
+            return False, detail.strip()[:200], None
 
     async def current_focus(self, base_url: str) -> str | None:
         async with httpx.AsyncClient(base_url=base_url.rstrip("/"), timeout=30.0) as c:
@@ -175,6 +187,9 @@ class FakeHarness:
         # Set to a non-empty error string to simulate a clone/set_project failure (e.g. a private
         # or missing repo the deploy token can't access → the daemon returns "clone failed").
         self.set_project_fails = ""
+        # Set True to simulate a clone that SUCCEEDS but whose fork `upstream` bake FAILS (an
+        # unreachable/private parent) → set_project returns (True, "", False) so the bridge warns.
+        self.upstream_fails = False
         # Optional command lines to stream via on_update("command", ...) before the answer, so a
         # test can exercise the real activity-streaming path (Fix 1). Default None = no commands.
         self.stream_commands = stream_commands
@@ -195,17 +210,19 @@ class FakeHarness:
     async def set_project(
         self, base_url: str, repo: str, *, token: str | None = None,
         upstream: str | None = None, upstream_token: str | None = None,
-    ) -> tuple[bool, str]:
+    ) -> tuple[bool, str, bool | None]:
         if self.set_project_fails:  # simulate a clone failure (private/missing repo)
-            return False, self.set_project_fails
+            return False, self.set_project_fails, None
         self.projects[base_url] = repo
         if token:
             self.tokens[base_url] = token
+        upstream_ok: bool | None = None
         if upstream:
             self.upstreams[base_url] = upstream
             if upstream_token:
                 self.upstream_tokens[base_url] = upstream_token
-        return True, ""
+            upstream_ok = not self.upstream_fails  # clone ok, but the bake may have failed
+        return True, "", upstream_ok
 
     async def current_focus(self, base_url: str) -> str | None:
         return self.projects.get(base_url)

@@ -139,7 +139,7 @@ class ProjectRegistry:
         want = slugify(name_or_slug)
         async with self.db.session_factory() as s:
             p = await s.get(Project, want)
-            if p is not None:
+            if p is not None and p.active:   # a removed/forgotten project must NOT resolve
                 return _row(p)
             rows = (await s.execute(select(Project).where(Project.active.is_(True)))).scalars().all()
         low = name_or_slug.strip().lower()
@@ -156,6 +156,19 @@ class ProjectRegistry:
         """The fork PARENT URL for a project, or None if it isn't a fork."""
         p = await self.get(slug)
         return (p.get("upstream_url") or None) if p and p["active"] else None
+
+    async def set_upstream(self, slug: str, upstream_url: str | None) -> bool:
+        """Set/track (or clear, with None) the fork parent on an EXISTING project — so an operator
+        can add an upstream after onboarding ('maintain X as upstream'). Returns True if found."""
+        async with self.db.session_factory() as s:
+            p = await s.get(Project, slugify(slug))
+            if p is None or not p.active:
+                return False
+            p.upstream_url = upstream_url
+            await s.commit()
+        await self.audit.log("project_upstream_set", actor="operator",
+                             payload={"slug": slugify(slug), "upstream": upstream_url})
+        return True
 
     async def list(self) -> list[dict]:
         async with self.db.session_factory() as s:

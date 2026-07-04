@@ -145,6 +145,47 @@ async def test_clone_failure_reads_as_clone_not_worker_failure(db_url):
         await db.dispose()
 
 
+async def test_upstream_bake_failure_surfaces(db_url):
+    """A clone that SUCCEEDS but whose fork `upstream` bake FAILS (private/unreachable parent) must
+    be surfaced in-thread — NON-FATAL (origin work proceeds) but the operator must know `git fetch
+    upstream` won't work, not discover it mid-task. Regression for the monogame fork where the
+    parent remote silently wasn't present."""
+    orch, chat, harness, db = await _orch(db_url)
+    harness.upstream_fails = True                     # clone ok, upstream bake fails
+    try:
+        await orch.projects.add("mono", FORK, upstream_url=PARENT)
+        eid, chan, root = await orch.router.open_effort("port-shader", project="mono")
+        await orch.delegate(eid, chan, root, "port the shader")
+        msgs = [p["message"] for p in chat.posted]
+        assert any("upstream" in m and "private or unreachable" in m for m in msgs)  # warned
+        assert any("origin" in m for m in msgs)                                       # proceeds on origin
+        # NOT reported as a clone failure — the clone worked
+        assert not any("No worker was dispatched" in m for m in msgs)
+        # and the worker WAS still dispatched (non-fatal; the effort proceeds through its steps)
+        assert len(harness.wakes) >= 1
+    finally:
+        await db.dispose()
+
+
+async def test_nl_set_upstream_on_existing_project(db_url):
+    """The always-NL path: 'maintain MonoGame as upstream for monogame-engine' on an ALREADY
+    registered project sets its upstream_url + allows the parent host — no /project command."""
+    orch, chat, harness, db = await _orch(db_url)
+    try:
+        await orch.projects.add("monogame-engine", FORK)          # onboarded WITHOUT upstream
+        assert await orch.projects.upstream_for("monogame-engine") is None
+        orch.models._client.queue_structured(OperatorIntent(
+            kind="chitchat", project="monogame-engine", upstream_url=PARENT, reply="Sure —"))
+        mgmt = await orch.mgmt_channel_id()
+        await orch.nl_intake(
+            "maintain the official MonoGame repo as upstream for monogame-engine", mgmt, thread_id="t1")
+        assert await orch.projects.upstream_for("monogame-engine") == PARENT   # set via NL
+        assert await orch.egress.is_allowed(PARENT)               # parent host allowlisted
+        assert any("upstream" in p["message"] for p in chat.posted)
+    finally:
+        await db.dispose()
+
+
 async def test_non_fork_threads_no_upstream(db_url):
     orch, chat, harness, db = await _orch(db_url)
     try:

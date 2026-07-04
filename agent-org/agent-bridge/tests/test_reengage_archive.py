@@ -76,6 +76,30 @@ async def test_reengage_dispatches_idle_effort(db_url):
         await db.dispose()
 
 
+# ── the dispatch message LINKS to the live effort thread (observability = safety) ──
+async def test_reengage_links_effort_thread_when_permalink_available(db_url):
+    """The work streams to the effort THREAD (#proj-<slug>), not #mgmt — so the dispatch message
+    must link straight to it, or the operator is left hunting ('the pm says see the project thread,
+    but there's nothing there'). When the adapter can't build a permalink it degrades to a plain id."""
+    orch, chat, harness, db = await _orch(db_url)
+    try:
+        eid, _c, root = await _idle_effort(orch, "port-shader", goal="port the shader")
+        mgmt = await orch.mgmt_channel_id()
+        # permalink unavailable (no site url / team) → degrades to a plain `id`, never a broken link
+        await orch._reengage([eid], mgmt_channel=mgmt)
+        msg = next(p["message"] for p in chat.posted if "Dispatching workers now" in p["message"])
+        assert f"`{eid}`" in msg and "](" not in msg               # plain id, no link
+        # now the adapter CAN build a permalink → the id becomes a clickable markdown link to the thread
+        chat.posted.clear()
+        chat.permalink_base = "https://mm.example/team"
+        eid2, _c2, root2 = await _idle_effort(orch, "port-audio", goal="port the audio")
+        await orch._reengage([eid2], mgmt_channel=mgmt)
+        msg2 = next(p["message"] for p in chat.posted if "Dispatching workers now" in p["message"])
+        assert f"[`{eid2}`](https://mm.example/team/pl/{root2})" in msg2   # clickable → live thread
+    finally:
+        await db.dispose()
+
+
 # ── reengage via NL: "get the workers working" fires, no empty promise ───────
 async def test_nl_reengage_fires_not_promises(db_url):
     orch, chat, harness, db = await _orch(db_url)

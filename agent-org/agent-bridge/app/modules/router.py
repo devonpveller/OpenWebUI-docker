@@ -249,21 +249,38 @@ class Router:
             )
             return None
         except NoCapacityError:
+            # No free worker slot — DON'T dead-end ("couldn't dispatch"). Propagate so the
+            # orchestrator PARKS the effort and auto-runs it when a worker frees (no silent idle).
             await self.audit.log(
                 "wake_queued", effort_id=effort_id, payload={"role": role}
             )
-            return None
+            raise
 
         try:
             if repo:
-                ok, detail = await self.harness.set_project(
+                ok, detail, upstream_ok = await self.harness.set_project(
                     inst.base_url, repo, token=repo_token,
                     upstream=upstream, upstream_token=upstream_token,
                 )
                 await self.audit.log(
                     "worker_project_set", effort_id=effort_id, actor=inst.id,
-                    payload={"repo": repo, "ok": ok, "upstream": upstream, "detail": detail},
+                    payload={"repo": repo, "ok": ok, "upstream": upstream,
+                             "upstream_ok": upstream_ok, "detail": detail},
                 )
+                if ok and upstream and upstream_ok is False:
+                    # Clone worked but the fork's read-only `upstream` remote didn't bake — the
+                    # parent is unreachable/private. NON-FATAL (origin work still runs), but the
+                    # worker's `git fetch upstream` will fail, so surface it in-thread rather than
+                    # let the effort discover it mid-task (observability = safety).
+                    await self.chat.post(
+                        channel_id,
+                        f"⚠️ Cloned `{repo}`, but I couldn't set up its `upstream` remote "
+                        f"(`{upstream}`) — the parent looks **private or unreachable**. Fork "
+                        f"sync (`git fetch upstream`) won't work until that's fixed (a "
+                        f"read-scoped token for the parent, or a correct URL). Proceeding on "
+                        f"`origin` only.",
+                        thread_id=thread_id,
+                    )
                 if not ok:
                     # A CLONE failure — not a worker failure. Name the real problem + how to fix it,
                     # so it never reads as a phantom "worker responded". exit 128 = private/missing
@@ -357,7 +374,8 @@ class Router:
         except (FrozenEffortError, NoCapacityError):
             return ""
         try:
-            if not await self.harness.set_project(inst.base_url, repo):
+            ok, _detail, _upstream_ok = await self.harness.set_project(inst.base_url, repo)
+            if not ok:  # a non-empty tuple is always truthy — unpack ok explicitly (was a latent bug)
                 return ""
             result = await self.harness.wake(
                 inst.base_url, f"survey-{slugify(repo)}", _SURVEY_PROMPT

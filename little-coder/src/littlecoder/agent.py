@@ -24,6 +24,7 @@ import tempfile
 from .config import Config
 from .journals import Journals
 from .openterminal import OpenTerminalClient
+from .sanitize import redact_secrets
 from .tasks import TaskContext, digest
 
 
@@ -55,16 +56,19 @@ class AgentResult:
 
 
 def _event_to_activity(ev: dict) -> dict:
-    """One ot-exec command event → a compact activity record for the UI."""
+    """One ot-exec command event → a compact activity record for the UI. The command + its stderr
+    are streamed to the operator's chat and journaled, so a deploy token that surfaced in either
+    (e.g. `git remote -v`, a clone/fetch auth error) is masked here before it leaves the worker."""
     denied = bool(ev.get("git_proxy_denied"))
     code = ev.get("exit_code")
+    # Redact BEFORE truncating so a token can't survive as a fragment split across the length cap.
     return {
-        "command": str(ev.get("command", ""))[:240],
+        "command": redact_secrets(str(ev.get("command", "")))[:240],
         "exit_code": code,
         "ok": code == 0 and not denied,
         "denied": denied,
         "duration_ms": ev.get("duration_ms"),
-        "stderr_tail": str(ev.get("stderr_tail", ""))[:500],
+        "stderr_tail": redact_secrets(str(ev.get("stderr_tail", "")))[:500],
     }
 
 
@@ -114,14 +118,14 @@ def extract_answer(pi_events_path: str) -> str:
                             if isinstance(c, dict) and c.get("type") == "text"
                         )
                         if text.strip():
-                            return text.strip()
+                            return redact_secrets(text.strip())  # never echo a token in the answer
                 elif etype == "message_update":
                     ame = ev.get("assistantMessageEvent") or {}
                     if ame.get("type") == "text_delta":
                         deltas.append(str(ame.get("delta", "")))
     except OSError:
         pass
-    return "".join(deltas).strip()
+    return redact_secrets("".join(deltas).strip())
 
 
 class AgentRunner:

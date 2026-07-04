@@ -36,6 +36,11 @@ class Settings(BaseSettings):
     mattermost_bot_token: str = ""          # env only (no secrets in files)
     mattermost_ws_url: str = ""             # derived from mattermost_url if empty
     mgmt_channel: str = "mgmt"              # Human Operator <-> PO <-> PM (§7)
+    # The OPERATOR-FACING canonical URL (the tailnet serve, e.g. https://…:8446) — NOT the internal
+    # mattermost_url the bridge connects to. Used ONLY to build clickable effort-thread permalinks so
+    # a dispatch message links straight to the live command stream (observability = safety). Empty →
+    # links degrade to plain effort ids. Mirrors MM_SITE_URL so both resolve to the same host.
+    mattermost_site_url: str = ""
 
     # ── Comms model (COMMS-MODEL — channel = project, effort = thread) ───────
     # One stable channel per project (#proj-<slug>); efforts are THREADS inside it, so

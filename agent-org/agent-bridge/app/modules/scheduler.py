@@ -50,6 +50,10 @@ class Scheduler:
         self.gate = gate
         self.audit = audit
         self.max_concurrent = max_concurrent
+        # Fired when a worker slot frees (release) — the orchestrator drains efforts parked on
+        # `no_worker_slot`, so a slot-starved effort auto-runs the moment a worker is free. No-op
+        # if unset. Precise (a slot genuinely freed), so it can't tight-loop the just-parked effort.
+        self.on_release = None
 
     # ── pool registry ───────────────────────────────────────────────────────
     async def register(self, instance_id: str, base_url: str) -> None:
@@ -149,6 +153,11 @@ class Scheduler:
             inst.waiting_on_effort = None
             await s.commit()
         await self.audit.log("worker_release", actor=instance_id)
+        if self.on_release is not None:   # a slot freed → let the orchestrator drain slot-parked work
+            try:
+                self.on_release()
+            except Exception:  # noqa: BLE001 - a signal hiccup must never break release
+                pass
 
     # ── idle-wait (dependency DAG) ───────────────────────────────────────────
     async def to_waiting(self, instance_id: str, waiting_on_effort: str) -> None:

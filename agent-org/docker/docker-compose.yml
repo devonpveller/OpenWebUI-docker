@@ -110,6 +110,9 @@ services:
       AO_CHAT_ADAPTER: mattermost
       AO_MATTERMOST_URL: http://mattermost:8065
       AO_MATTERMOST_BOT_TOKEN: ${AO_MATTERMOST_BOT_TOKEN}
+      # Operator-facing canonical URL (tailnet serve) → clickable effort-thread permalinks in
+      # dispatch messages. Mirrors MM_SITE_URL so links open the same host every device uses.
+      AO_MATTERMOST_SITE_URL: ${MM_SITE_URL:-}
       AO_MGMT_CHANNEL: mgmt
       # Local model lane — the EXISTING air-gapped llm-gateway (llama-cpp alias). NEVER a
       # new gateway; never a model health-probe (C5).

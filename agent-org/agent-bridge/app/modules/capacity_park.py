@@ -32,30 +32,33 @@ class ParkStore:
     async def park(
         self, effort_id: str, *, stage: str, channel_id: str | None, root_post_id: str | None,
         request: str, plan_steps: list[str] | None, from_step: int, mgmt_thread: str | None,
+        reason: str = "inference_backpressure",
     ) -> None:
         """Park (or refresh) an effort with its resume token. PRESERVES the existing attempt count
         (the drain loop owns bumping it) so a re-park after a failed resume doesn't reset the
-        starvation clock; a fresh park after real progress (unpark cleared the row) starts at 0."""
+        starvation clock; a fresh park after real progress (unpark cleared the row) starts at 0.
+        `reason` distinguishes waiting on GPU capacity vs. a free worker slot (no_worker_slot)."""
         async with self.db.session_factory() as s:
             row = await s.get(ParkedEffort, effort_id)
             steps_json = json.dumps(plan_steps) if plan_steps else None
             first = row is None
             if row is None:
                 row = ParkedEffort(
-                    effort_id=effort_id, stage=stage, channel_id=channel_id,
+                    effort_id=effort_id, stage=stage, reason=reason, channel_id=channel_id,
                     root_post_id=root_post_id, request=request, plan_steps_json=steps_json,
                     from_step=from_step, mgmt_thread=mgmt_thread, attempts=0, parked_at=now_iso(),
                 )
                 s.add(row)
             else:  # re-park at (possibly) a new resume point; keep attempts + original parked_at
-                row.stage, row.channel_id, row.root_post_id = stage, channel_id, root_post_id
+                row.stage, row.reason, row.channel_id, row.root_post_id = (
+                    stage, reason, channel_id, root_post_id)
                 row.request, row.plan_steps_json, row.from_step = request, steps_json, from_step
                 row.mgmt_thread = mgmt_thread
             await s.commit()
         if first:
             await self.audit.log(
-                "effort_parked_backpressure", effort_id=effort_id,
-                payload={"stage": stage, "from_step": from_step},
+                "effort_parked", effort_id=effort_id,
+                payload={"stage": stage, "from_step": from_step, "reason": reason},
             )
 
     async def bump_attempts(self, effort_id: str) -> int:
@@ -102,7 +105,7 @@ class ParkStore:
 
 def _token(r: ParkedEffort) -> dict:
     return {
-        "effort_id": r.effort_id, "stage": r.stage, "channel_id": r.channel_id,
+        "effort_id": r.effort_id, "stage": r.stage, "reason": r.reason, "channel_id": r.channel_id,
         "root_post_id": r.root_post_id, "request": r.request,
         "plan_steps": json.loads(r.plan_steps_json) if r.plan_steps_json else None,
         "from_step": r.from_step, "mgmt_thread": r.mgmt_thread, "attempts": r.attempts,

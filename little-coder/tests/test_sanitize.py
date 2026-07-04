@@ -3,7 +3,7 @@ seeded false-negatives and false-positives (design §10.2)."""
 
 import pytest
 
-from littlecoder.sanitize import Sanitizer, SanitizerError
+from littlecoder.sanitize import Sanitizer, SanitizerError, redact_secrets
 
 # Seeded FALSE-NEGATIVE guards: each MUST be detected. A regression that
 # stops catching one of these is a real leak.
@@ -97,3 +97,36 @@ def test_masked_preview_never_leaks_the_value():
 def test_invalid_mode_rejected():
     with pytest.raises(ValueError):
         Sanitizer(mode="bogus")
+
+
+# ── redact_secrets — the always-on git-credential net for the activity/answer path ──
+
+def test_redact_secrets_masks_token_in_remote_url():
+    """The demonstrated leak: a deploy token baked into a remote URL, printed by `git remote -v`
+    into the effort thread. The token must be masked; the host, path, and username must survive so
+    the line stays readable."""
+    fine = "github_pat_11ACZHHIA0AF79tuqAn2vE_pkN6GZ3xGCJNaAwRIN4b62JOJJdmCrBW0S3OAYHkgZfZ"
+    line = f"origin\thttps://x-access-token:{fine}@github.com/devonpveller/monogame-engine.git (fetch)"
+    out = redact_secrets(line)
+    assert fine not in out                                   # token gone
+    assert "«REDACTED»" in out
+    assert "x-access-token" in out                           # non-secret username kept
+    assert "github.com/devonpveller/monogame-engine.git" in out  # host + path readable
+    assert "(fetch)" in out
+
+
+def test_redact_secrets_masks_bare_github_pats():
+    # fine-grained github_pat_ (which the egress Sanitizer's gh[pousr]_ pattern misses) AND classic
+    assert "github_pat_" not in redact_secrets("token=github_pat_11ABCDEFGHIJKLMNOP0123456789abcd")
+    assert "ghp_" not in redact_secrets("here is ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ok")
+    assert redact_secrets("gho_0123456789ABCDEFGHIJKLMNOPQRSTUVWX") == "«REDACTED»"
+
+
+def test_redact_secrets_leaves_clean_text_untouched():
+    for benign in [
+        "https://github.com/MonoGame/MonoGame.git",   # clean URL — no credential to mask
+        "git status -sb",
+        "The workspace is essentially empty.",
+        "",
+    ]:
+        assert redact_secrets(benign) == benign

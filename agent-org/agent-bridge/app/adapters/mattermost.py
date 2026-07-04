@@ -21,9 +21,14 @@ log = logging.getLogger("agent_bridge.mattermost")
 
 
 class MattermostAdapter:
-    def __init__(self, base_url: str, bot_token: str, ws_url: str = "") -> None:
+    def __init__(
+        self, base_url: str, bot_token: str, ws_url: str = "", site_url: str = ""
+    ) -> None:
         self.base = base_url.rstrip("/")
         self.token = bot_token
+        # OPERATOR-FACING URL (the tailnet serve) for building clickable permalinks — distinct from
+        # `base` (the internal address the bridge connects to). Empty → permalink() returns None.
+        self._site_url = site_url.rstrip("/")
         self.ws_url = ws_url or (
             self.base.replace("http://", "ws://").replace("https://", "wss://")
             + "/api/v4/websocket"
@@ -34,6 +39,7 @@ class MattermostAdapter:
             timeout=30.0,
         )
         self._team_id: str | None = None
+        self._team_name: str | None = None   # the team's URL slug — permalinks use the NAME, not the id
         self._me: str | None = None
         self.username: str | None = None
         self._stop = asyncio.Event()
@@ -57,7 +63,16 @@ class MattermostAdapter:
             teams = []
         if isinstance(teams, list) and teams:
             self._team_id = teams[0]["id"]
+            self._team_name = teams[0].get("name")   # URL slug for permalinks
         return self._team_id
+
+    def permalink(self, post_id: str) -> str | None:
+        """A clickable Mattermost permalink to a post/thread: `<site_url>/<team-name>/pl/<post_id>`.
+        Returns None (caller degrades to a plain id) when the operator-facing site URL isn't
+        configured or the team hasn't resolved yet — never raises, never blocks the dispatch."""
+        if not self._site_url or not self._team_name or not post_id:
+            return None
+        return f"{self._site_url}/{self._team_name}/pl/{post_id}"
 
     async def _ensure_team(self) -> str:
         """Return the team id, re-resolving if it wasn't available at boot. Raises a clear,

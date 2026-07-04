@@ -19,7 +19,37 @@ BEFORE asking yourself questions you can answer from the files.
 4. **Purpose** — read the README if there is one:
    `cat README.md` (or `cat README.*` if the extension differs)
 
-Stop here unless the task needs more.
+Stop *reading* here unless the task needs more — but orientation is not the
+task. It is the first 30 seconds, not the deliverable.
+
+## Orientation is not "done" — now do the work
+
+The four commands above ORIENT you; they do not COMPLETE anything. The most
+common failure is to run them, summarize what you saw ("the repo is empty",
+"it's a Python project"), and end the turn there. **That is a half-done task,
+not a finished one.** A status summary is never the answer unless the operator
+literally asked only for status.
+
+After you orient:
+
+- **Carry the task through to a verifiable change** — the files edited, the
+  command that proves it works, the commit made. "Finished" means the goal is
+  met and checked, not that you understand the goal.
+- **Never narrate a next step instead of taking it.** If you catch yourself
+  writing "Let me check X" or "Next I'll do Y" — stop writing and DO it. Your
+  turn ends when the work is done or you are genuinely blocked, not when you
+  have described what you would do next.
+- **An empty or unfamiliar workspace is a starting condition, not a blocker.**
+  If the task is to populate, scaffold, fork, or set up a repo, an empty
+  workspace is exactly what you expect — proceed with the setup; don't report
+  the emptiness and stop. (A fork populated from an `upstream` remote: `git
+  fetch upstream`, then merge/checkout its default branch, then push to
+  `origin` — the remotes are already baked for you.)
+- **Only stop early to ESCALATE a genuine blocker** — a real ambiguity a
+  competent engineer couldn't resolve, a missing credential, a destructive
+  action needing sign-off. State the blocker plainly and say what you need. An
+  ordinary "I'm not sure where to start" is not a blocker: make the sensible
+  choice and proceed — you can always be corrected.
 
 ## Repo-authored agent instructions (read these too, if present)
 

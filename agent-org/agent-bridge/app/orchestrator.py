@@ -40,7 +40,7 @@ from .modules.project_context import ProjectContext
 from .modules.projects import ProjectRegistry
 from .modules.roles import RoleAuthority
 from .modules.router import Router, slugify
-from .modules.scheduler import Scheduler
+from .modules.scheduler import NoCapacityError, Scheduler
 from .modules.scope_ledger import ScopeLedger
 from .modules.stop_gates import StopGates
 from .models import Effort, GlobalState
@@ -76,6 +76,11 @@ _PO_NL_SYS = (
     "`upstream_url` to the PARENT repo — the org bakes a read-only `upstream` remote so workers can "
     "pull the parent's changes but push only to the fork. If they also describe work to do, ALSO "
     "set effort_name.\n"
+    "- set upstream on an EXISTING project: they want to add/track a parent repo as **upstream** on a "
+    "project that is ALREADY registered — 'set X as upstream for project Y', 'maintain X as upstream', "
+    "'track the official repo as upstream', 'clone X into Y keeping upstream'. Set `project` to the "
+    "existing project (match a KNOWN PROJECT) + `upstream_url` to the parent repo URL, and do NOT set "
+    "`repo_url` (you are NOT onboarding a new project). I update the project + confirm.\n"
     "- request: they want NEW work done on an EXISTING project → set effort_name to a short "
     "kebab-case slug (it becomes a thread in the project channel). If they name a project to work "
     "on, set `project` to it (match a KNOWN PROJECT). In your `reply`, do the thinking-partner thing: "
@@ -105,12 +110,24 @@ _PO_NL_SYS = (
     "'clear the queue', 'those are done, remove them', or a confirmed 'yes' to your offer to archive. "
     "Set kind=archive + `target_filter` (e.g. 'calculator') or `effort_id`. This actually cancels "
     "them (pushed branches are kept). Never just say you'll 'flag them for termination' — DO it.\n"
+    "- reassign: 'move effort X to project Y', 'X belongs in project Y', 'that effort should be on Y' "
+    "→ kind=reassign + effort_id=X + project=Y (fixes an effort stuck in the wrong/sandbox project).\n"
     "- steering: explicitly changing the direction/scope of an existing effort → set effort_id + steering.\n"
     "- decision: approve/modify a paused effort → set effort_id + decision (approve/modify still need "
     "the human's explicit command; abort is handled as archive above).\n"
+    "- project_list: 'what projects do we have', 'list the projects' → kind=project_list.\n"
+    "- project_remove: 'remove/forget/delete project X', 'stop tracking X' → kind=project_remove + "
+    "`project`=X.\n"
+    "- egress_allow: 'let the workers reach X', 'allow X for egress', 'whitelist host X' → "
+    "kind=egress_allow + `host`=the host or repo URL.\n"
+    "- kill: 'stop everything', 'freeze the fleet', 'emergency stop', 'kill switch' → kind=kill "
+    "(freezes ALL work; reversible). unkill: 'resume', 'release', 'unfreeze', 'let them run' → "
+    "kind=unkill.\n"
     "- question / chitchat otherwise.\n"
-    "Only set action fields when clearly warranted. Never claim to have taken an irreversible "
-    "action. Keep replies short and human.\n\n"
+    "EVERY user-facing action has an NL path (this is the primary surface; slash commands are just a "
+    "power-user fallback) — so map the operator's plain-language intent to the RIGHT kind and act, "
+    "rather than telling them to run a command. Only set action fields when clearly warranted. Never "
+    "claim to have taken an irreversible action. Keep replies short and human.\n\n"
     "NEVER MAKE EMPTY PROMISES. Do not say 'I'll route workers', 'I'll monitor and let you know', "
     "'they'll proceed as resources free up', or 'I'm flagging them for termination' — you have no "
     "background process that does those things. Either the action fires THIS turn (reengage/archive/"
@@ -239,6 +256,7 @@ class Orchestrator:
         # successful model call (self._signal_capacity, fired from the ModelRouter) + a timer tick.
         self.parks = ParkStore(db, self.audit)
         self.models.on_capacity_signal = self._signal_capacity
+        self.scheduler.on_release = self._signal_capacity   # worker frees → drain slot-parked efforts
         self._capacity_event = asyncio.Event()
         self._capacity_task: asyncio.Task | None = None
         self._draining = False
@@ -274,21 +292,24 @@ class Orchestrator:
     async def _park_effort(
         self, effort_id: str, *, stage: str, channel_id: str | None, root: str | None,
         request: str, plan_steps: list[str] | None, from_step: int, mgmt_thread: str | None,
+        reason: str = "inference_backpressure",
     ) -> None:
-        """Park an effort shed by backpressure (don't fail it). Records the resume token, notes the
-        shed (source guard), reflects a paused card, and posts an honest thread note. Auto-resumes."""
-        self._note_backpressure()
+        """Park an effort that can't run right now (don't fail it) — either the GPU is saturated
+        (inference_backpressure) or every worker slot is busy (no_worker_slot). Records the resume
+        token, reflects a waiting card, posts an honest note, and auto-resumes when capacity frees."""
+        if reason == "inference_backpressure":
+            self._note_backpressure()
+            note = ("⏸️ Paused — the inference queue is saturated (the shared GPU is busy). I'll "
+                    "resume this automatically as soon as capacity frees up; no work is lost.")
+        else:  # no_worker_slot
+            note = ("⏳ Waiting for a free worker — all worker slots are busy. I'll start this "
+                    "automatically the moment one frees up; nothing is lost.")
         await self.parks.park(
             effort_id, stage=stage, channel_id=channel_id, root_post_id=root, request=request,
-            plan_steps=plan_steps, from_step=from_step, mgmt_thread=mgmt_thread,
+            plan_steps=plan_steps, from_step=from_step, mgmt_thread=mgmt_thread, reason=reason,
         )
         await self.router.update_effort_card(effort_id, "waiting")
-        await self.comms.post(
-            Intent.effort_dispatch,
-            "⏸️ Paused — the inference queue is saturated (the shared GPU is busy). I'll resume this "
-            "automatically as soon as capacity frees up; no work is lost.",
-            effort_id=effort_id,
-        )
+        await self.comms.post(Intent.effort_dispatch, note, effort_id=effort_id)
 
     async def _capacity_drain_loop(self) -> None:
         """Drain parked-on-backpressure efforts ONE AT A TIME. Wakes on the capacity signal (a
@@ -322,13 +343,18 @@ class Orchestrator:
             if token is None:
                 return
             eid = token["effort_id"]
-            attempts = await self.parks.bump_attempts(eid)
-            if attempts > self.s.capacity_max_attempts:
-                await self._escalate_starved(token)
-                await self.parks.unpark(eid)
-                self._signal_capacity()  # move on to the next parked effort
-                return
-            log.info("resuming parked effort %s (stage=%s, attempt %d)", eid, token["stage"], attempts)
+            # GPU saturation is a SYSTEMIC fault → escalate after the attempt cap. Worker-slot
+            # contention is NORMAL and self-resolving (workers finish) → wait patiently, never
+            # escalate on count (the drain only fires on a release or the timer, so no tight loop).
+            if token.get("reason", "inference_backpressure") == "inference_backpressure":
+                attempts = await self.parks.bump_attempts(eid)
+                if attempts > self.s.capacity_max_attempts:
+                    await self._escalate_starved(token)
+                    await self.parks.unpark(eid)
+                    self._signal_capacity()  # move on to the next parked effort
+                    return
+            log.info("resuming parked effort %s (stage=%s, reason=%s)",
+                     eid, token["stage"], token.get("reason"))
             await self._resume_parked(token)
         finally:
             self._draining = False
@@ -478,6 +504,31 @@ class Orchestrator:
             log.debug("egress sync for %s: %s", proj["slug"], exc)
         return proj
 
+    async def _set_project_upstream(
+        self, slug: str, upstream_url: str, channel_id: str, thread_id: str | None, reply_prefix: str
+    ) -> None:
+        """Set the fork parent on an EXISTING project (NL 'maintain X as upstream'). Widens egress to
+        the parent host too, so the next focus can `git fetch upstream`. Idempotent + best-effort."""
+        await self.projects.set_upstream(slug, upstream_url)
+        from .modules.projects import host_of
+        uh = host_of(upstream_url)
+        note = ""
+        if uh:
+            try:
+                await self.egress.allow(uh, added_by="operator", source="project")
+                await self.egress.sync()
+                note = f" · upstream host `{uh}` allowed"
+            except Exception as exc:  # noqa: BLE001
+                log.debug("egress allow for upstream %s: %s", uh, exc)
+        await self.chat.post(
+            channel_id,
+            (reply_prefix + f"\n\n✅ Set **`{upstream_url}`** as the read-only **upstream** for "
+             f"`{slug}`{note}. On the next worker focus it's baked as the `upstream` remote — workers "
+             f"`git fetch upstream` the parent but push only to the fork. Say _\"get the workers "
+             f"working on {slug}\"_ to (re)dispatch with it now.").strip(),
+            thread_id=thread_id,
+        )
+
     async def _handle_new_project(
         self, intent, message: str, channel_id: str, thread_id: str | None,
         user_id: str | None, reply: str,
@@ -522,9 +573,13 @@ class Orchestrator:
                 thread_id=thread_id,
             )
 
-    async def _resolve_project_slug(self, named: str | None, channel_id: str | None = None) -> str:
+    async def _resolve_project_slug(
+        self, named: str | None, channel_id: str | None = None, effort_name: str | None = None,
+    ) -> str:
         """Resolve which project a request belongs to: an explicitly named/onboarded project wins;
-        else the originating #proj-<slug> channel's project; else the fallback (default/sandbox)."""
+        else the originating #proj-<slug> channel's project; else — the fix for
+        'init-monogame-engine' landing in the sandbox — an UNAMBIGUOUS match of a known project's
+        slug inside the effort name; else the fallback (default/sandbox)."""
         if named:
             p = await self.projects.resolve(named)
             if p:
@@ -533,7 +588,19 @@ class Orchestrator:
             slug = await self.router.resolve_project_by_channel(channel_id)
             if slug:
                 return slug
+        if effort_name:
+            guess = await self._project_from_name(effort_name)
+            if guess:
+                return guess
         return self._project_for()
+
+    async def _project_from_name(self, effort_name: str) -> str | None:
+        """The one known project whose slug appears in the effort name (e.g. `monogame-engine` in
+        `init-monogame-engine`). Only when EXACTLY one matches — never guess ambiguously."""
+        name_slug = slugify(effort_name)
+        hits = [p["slug"] for p in await self.projects.list()
+                if p["slug"] != self.s.default_project and p["slug"] in name_slug]
+        return hits[0] if len(hits) == 1 else None
 
     async def _effort_repo(self, effort_id: str) -> str | None:
         """The repo a worker should be focused on for this effort = its project's repo (registry),
@@ -838,11 +905,22 @@ class Orchestrator:
                 thread_id=thread_id,
             )
             return
+        # Set/track an UPSTREAM on an EXISTING project (no new repo_url) — "maintain X as upstream on
+        # project Y" / "track X upstream". The fork parent can be added after onboarding, all in NL.
+        if intent.upstream_url and intent.project and not intent.repo_url:
+            p = await self.projects.resolve(intent.project)
+            if p:
+                await self._set_project_upstream(
+                    p["slug"], intent.upstream_url, channel_id, thread_id, reply
+                )
+                return
         if intent.kind == "request" and intent.effort_name:
             try:
                 # Resolve WHICH project this works on: a named/onboarded project, else the fallback.
                 # An effort is a THREAD in its project channel (COMMS-MODEL §4).
-                project = await self._resolve_project_slug(intent.project, channel_id)
+                project = await self._resolve_project_slug(
+                    intent.project, channel_id, effort_name=intent.effort_name
+                )
                 eid, chan, root = await self.router.open_effort(
                     intent.effort_name, project=project, goal=message
                 )
@@ -913,12 +991,54 @@ class Orchestrator:
                 await self._archive_efforts(targets, mgmt_channel=channel_id, mgmt_thread=thread_id,
                                             reply_prefix=reply)
                 return
+        elif intent.kind == "reassign" and intent.effort_id and intent.project:
+            p = await self.projects.resolve(intent.project)
+            if not p:
+                reply += (f"\n\n_I don't have a project called **{intent.project}** — onboard it "
+                          f"first (share its git URL)._")
+            elif await self._reassign_effort(intent.effort_id, p["slug"]):
+                reply += (f"\n\n✅ Moved `{intent.effort_id}` to project **`{p['slug']}`** — say "
+                          f"_\"get the workers working on {p['slug']}\"_ to run it against that repo.")
+            else:
+                reply += f"\n\n_No effort called `{intent.effort_id}`._"
         elif intent.kind == "decision" and intent.effort_id and intent.decision:
             # approve/modify a PAUSED effort still needs the explicit command (safety gate, §3).
             reply += (
                 f"\n\n_To **{intent.decision}** `{intent.effort_id}`, confirm with:_ "
                 f"`{intent.decision} {intent.effort_id}`"
             )
+        elif intent.kind == "project_list":
+            ps = await self.projects.list()
+            if ps:
+                reply += "\n\n**Projects:**\n" + "\n".join(
+                    f"- `{p['slug']}` → {p['repo_url']}"
+                    + (f" · ⑂ upstream `{p['upstream_url']}`" if p.get("upstream_url") else "")
+                    for p in ps
+                )
+            else:
+                reply += "\n\n_No projects yet — give me a git URL and I'll onboard one._"
+        elif intent.kind == "project_remove" and intent.project:
+            ok = await self.projects.remove(intent.project, actor="operator")
+            try:
+                await self.egress.sync()
+            except Exception as exc:  # noqa: BLE001
+                log.debug("egress sync after remove: %s", exc)
+            reply += (f"\n\n✅ Removed project `{intent.project}` (its channel stays; efforts keep "
+                      f"their history)." if ok else f"\n\n_No project called `{intent.project}`._")
+        elif intent.kind == "egress_allow" and intent.host:
+            try:
+                h = await self.egress.allow(intent.host, added_by="operator", source="manual")
+                await self.egress.sync()
+                reply += f"\n\n✅ Workers can now reach **`{h}`** (git-egress widened)."
+            except Exception as exc:  # noqa: BLE001
+                reply += f"\n\n_(couldn't allow that host: {exc})_"
+        elif intent.kind == "kill":
+            await self.gate.kill_switch(on=True, actor="human")
+            reply += ("\n\n🛑 **Kill switch ENGAGED** — the whole fleet is frozen; no worker will run "
+                      "until you lift it. Say _“release”_ / _“resume”_ (or `/unkill`) to run again.")
+        elif intent.kind == "unkill":
+            await self.gate.kill_switch(on=False, actor="human")
+            reply += "\n\n✅ Kill switch **released** — the fleet can run again."
         elif intent.kind == "status":
             if efforts:
                 status_map = await self._effort_status_map(efforts)
@@ -1009,6 +1129,7 @@ class Orchestrator:
         Skips efforts already running (no double-dispatch) or paused on a concern (needs a decision)."""
         status_map = await self._effort_status_map(await self.gate.snapshot(open_only=True))
         started: list[str] = []
+        roots: dict[str, str] = {}       # eid -> effort-thread root post id (for clickable permalinks)
         skipped: list[tuple[str, str]] = []
         for eid in effort_ids:
             st = status_map.get(eid)
@@ -1025,13 +1146,22 @@ class Orchestrator:
             if not goal:
                 skipped.append((eid, "no goal recorded")); continue
             proj_channel, root = loc
+            # Thread this effort's summaries/errors back to the operator's CURRENT conversation, so a
+            # failure surfaces where they're looking — not buried in the project thread.
+            if mgmt_thread:
+                self._effort_mgmt_thread[eid] = mgmt_thread
             await self.router.update_effort_card(eid, "active")
             self._spawn(self.delegate(eid, proj_channel, root, goal))
             started.append(eid)
+            roots[eid] = root
         parts: list[str] = []
         if started:
-            parts.append("▶ **Dispatching workers now** on: " + ", ".join(f"`{e}`" for e in started)
-                         + " — watch each project thread for live command streams.")
+            # Link each effort to its live thread so the operator clicks straight to the command
+            # stream — the work lives in the effort THREAD (#proj-<slug>), not #mgmt, so a plain id
+            # left them hunting (Bug: "the pm says see the project thread, but there's nothing there").
+            parts.append("▶ **Dispatching workers now** on: "
+                         + ", ".join(self._effort_link(e, roots.get(e)) for e in started)
+                         + " — click through to watch each live command stream.")
         if skipped:
             parts.append("Skipped: " + "; ".join(f"`{e}` ({why})" for e, why in skipped))
         if not parts:
@@ -1069,9 +1199,46 @@ class Orchestrator:
                              thread_id=mgmt_thread)
         return archived
 
+    async def _reassign_effort(self, effort_id: str, project_slug: str) -> bool:
+        """Move an effort to a different project (fixes a mis-resolution, e.g. one stuck in the
+        sandbox). Updates the effort's project so its next focus clones the RIGHT repo. True if found."""
+        async with self.db.session_factory() as s:
+            e = await s.get(Effort, effort_id)
+            if e is None:
+                return False
+            e.project = project_slug
+            await s.commit()
+        return True
+
     def _mgmt_thread_of(self, effort_id: str | None) -> str | None:
         """The #mgmt thread an effort was requested in (for threading its summaries/CONCERNs)."""
         return self._effort_mgmt_thread.get(effort_id) if effort_id else None
+
+    def _effort_link(self, effort_id: str, root_post_id: str | None) -> str:
+        """Render an effort id as a clickable markdown link to its live thread when the adapter can
+        build a permalink, else a plain `code` id. Keeps dispatch messages navigable without
+        assuming permalinks are available (fake adapter / unresolved team / no site URL)."""
+        link = None
+        if root_post_id:
+            try:
+                link = self.chat.permalink(root_post_id)
+            except Exception:  # noqa: BLE001 - a link is a nicety; never break the dispatch message
+                link = None
+        return f"[`{effort_id}`]({link})" if link else f"`{effort_id}`"
+
+    @staticmethod
+    def _friendly_dispatch_error(exc: Exception) -> str:
+        """Turn a raw worker/HTTP error into a readable, actionable line (not a stack-trace dump)."""
+        s = str(exc)
+        low = s.lower()
+        if "409" in s and "no project focused" in low:
+            return ("the worker had no repo focused (409) — the effort isn't tied to a project with a "
+                    "repo; reassign it to a project or archive it")
+        if "409" in s:
+            return "the worker was busy (409 — a task was already in flight); re-engage it to retry"
+        if "connect" in low or "timeout" in low or "connecterror" in low:
+            return "the worker was unreachable (connection/timeout) — it may be restarting; retry it"
+        return f"delegation error — {s[:160]}"
 
     @staticmethod
     def _risk_from_blast(blast_radius: str) -> str:
@@ -1142,8 +1309,9 @@ class Orchestrator:
         self._spawn(self.delegate(effort_id, proj_channel, root, combined))
         await self.chat.post(
             mgmt_channel,
-            (f"{reply_prefix}\n\n_Got it — dispatching a worker on **{effort_id}** with your "
-             f"clarification. I'll summarize back here when done._").strip(),
+            (f"{reply_prefix}\n\n_Got it — dispatching a worker on {self._effort_link(effort_id, root)} "
+             f"with your clarification. Click through to watch it; I'll summarize back here when "
+             f"done._").strip(),
             thread_id=mgmt_thread,
         )
 
@@ -1230,9 +1398,10 @@ class Orchestrator:
         self._spawn(self.delegate(effort_id, proj_channel, root, request))
         await self.chat.post(
             mgmt_channel,
-            (f"{reply_prefix}\n\n_Readiness ✓ — I'm dispatching a worker on **{effort_id}** with the "
-             f"approach above; watch it live in its project thread. If you'd tackle it differently, "
-             f"just say so and I'll steer it. I'll summarize back here when done._").strip(),
+            (f"{reply_prefix}\n\n_Readiness ✓ — I'm dispatching a worker on "
+             f"{self._effort_link(effort_id, root)} with the approach above; click through to watch "
+             f"it live. If you'd tackle it differently, just say so and I'll steer it. I'll summarize "
+             f"back here when done._").strip(),
             thread_id=mgmt_thread,
         )
 
@@ -1356,14 +1525,22 @@ class Orchestrator:
         escalates (P4.6/§3). Routine efforts take the light path (wake → done). Runs in the background.
         `repo` focuses the worker; omit to resolve from the effort's project (registry → fallback).
         `start_step` resumes from a given step after a backpressure park (the earlier steps are done)."""
-        repo = repo or await self._effort_repo(effort_id)
-        repo_token = await self._project_token(effort_id) if repo else None
-        upstream = await self._effort_upstream(effort_id) if repo else None
-        upstream_token = await self._project_upstream_token(effort_id) if upstream else None
+        # SINGLE-FLIGHT: never dispatch an effort that's already executing. Without this, an explicit
+        # re-engage racing the capacity/slot drain (both spawn delegate for the SAME effort) → a
+        # second wake hits a busy worker → 409 Conflict. The check-then-add is atomic (no await
+        # between), so it's a correct guard under asyncio. (The park row is left intact — the drain
+        # that picks it will find the effort in-flight and skip via this same guard.)
+        if effort_id in self._delegating:
+            log.info("delegate: %s already executing — skipping duplicate dispatch", effort_id)
+            return
+        self._delegating.add(effort_id)   # honest "work is happening now" marker
         steps = [s for s in (plan_steps or []) if s.strip()] or [goal]
         cur_step = start_step
-        self._delegating.add(effort_id)   # honest "work is happening now" marker
         try:
+            repo = repo or await self._effort_repo(effort_id)
+            repo_token = await self._project_token(effort_id) if repo else None
+            upstream = await self._effort_upstream(effort_id) if repo else None
+            upstream_token = await self._project_upstream_token(effort_id) if upstream else None
             await self.charters.set_goal(effort_id, goal, created_by="po")
             # P4.0 gate: a high-blast-radius effort may not reach REAL-code execution until its
             # isolated dry-run is recorded complete. Routine efforts pass immediately.
@@ -1406,11 +1583,26 @@ class Orchestrator:
                 request=goal, plan_steps=steps, from_step=cur_step,
                 mgmt_thread=self._mgmt_thread_of(effort_id),
             )
+        except NoCapacityError:
+            # Every worker slot is busy — PARK (reason=no_worker_slot) instead of dead-ending on
+            # "couldn't dispatch". The scheduler's on_release drain auto-runs it when a worker frees.
+            await self._park_effort(
+                effort_id, stage="delegate", channel_id=channel_id, root=root_post_id,
+                request=goal, plan_steps=steps, from_step=cur_step,
+                mgmt_thread=self._mgmt_thread_of(effort_id), reason="no_worker_slot",
+            )
         except Exception as exc:  # noqa: BLE001
             log.exception("delegate failed for %s: %s", effort_id, exc)
+            friendly = self._friendly_dispatch_error(exc)
             await self.comms.post(
-                Intent.worker_activity, f"⚠️ delegation error on `{effort_id}`: {exc}",
-                effort_id=effort_id,
+                Intent.worker_activity, f"⚠️ {friendly}", effort_id=effort_id,
+            )
+            # Surface UP to the operator's conversation too — a worker failure must NEVER hide only
+            # in the effort thread while the operator waits (the 'error never reached me' bug).
+            await self.comms.post(
+                Intent.operator_reply,
+                f"⚠️ **{effort_id}** couldn't run — {friendly} (see its project thread).",
+                thread_id=self._mgmt_thread_of(effort_id),
             )
             await self.router.update_effort_card(effort_id, "error")
         finally:
@@ -1514,16 +1706,19 @@ class Orchestrator:
         return True
 
     async def _report_completion(self, effort_id: str, result) -> None:
-        """The undeliverable case (§2): couldn't dispatch (frozen / no free slot)."""
+        """The undeliverable case (§2): the effort is FROZEN (a concern / kill switch). A busy pool
+        is NO LONGER handled here — NoCapacity now parks + auto-resumes (no_worker_slot)."""
         if result is None:
             await self.comms.post(
                 Intent.worker_activity,
-                "⚠️ couldn't dispatch a worker (effort frozen or no free slot).",
+                "⚠️ can't dispatch — this effort is frozen (a concern or the kill switch). "
+                "Clear it (decide the concern / `unkill`) to run.",
                 effort_id=effort_id,
             )
             await self.comms.post(
                 Intent.operator_reply,
-                f"⚠️ **{effort_id}**: couldn't dispatch a worker (frozen or no free slot).",
+                f"⚠️ **{effort_id}** is frozen (a concern or the kill switch) — decide it / `unkill` "
+                f"to run.",
                 thread_id=self._mgmt_thread_of(effort_id),
             )
 

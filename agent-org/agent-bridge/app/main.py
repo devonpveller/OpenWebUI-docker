@@ -105,7 +105,8 @@ class HandoffIn(BaseModel):
 def build_chat(settings):
     if settings.chat_adapter == "mattermost":
         return MattermostAdapter(
-            settings.mattermost_url, settings.mattermost_bot_token, settings.mattermost_ws_url
+            settings.mattermost_url, settings.mattermost_bot_token, settings.mattermost_ws_url,
+            site_url=settings.mattermost_site_url,
         )
     return FakeChatAdapter()
 

@@ -41,6 +41,11 @@ class ChatAdapter(Protocol):
         """REST catch-up: posts in a channel after `since_ms` (PLAN §3.1.1)."""
         ...
 
+    def permalink(self, post_id: str) -> str | None:
+        """A clickable operator-facing link to a post/thread, or None if unavailable (the caller
+        degrades to a plain id). Sync + non-raising so it never blocks a dispatch message."""
+        ...
+
     def events(self) -> AsyncIterator[dict[str, Any]]:
         """Async stream of normalized inbound events (WebSocket)."""
         ...
@@ -62,6 +67,9 @@ class FakeChatAdapter:
         self.username = "bot-pm"
         self._post_seq = 0
         self._closed = False
+        # Set to a base like "https://mm.example/team" to exercise the permalink-rendering path in
+        # tests; default None → permalink() returns None (link degrades to a plain id).
+        self.permalink_base: str | None = None
 
     async def start(self) -> None:  # pragma: no cover - trivial
         self._closed = False
@@ -104,6 +112,11 @@ class FakeChatAdapter:
 
     async def posts_since(self, channel_id: str, since_ms: int) -> list[dict[str, Any]]:
         return []  # tests drive delivery via inject()
+
+    def permalink(self, post_id: str) -> str | None:
+        if not self.permalink_base or not post_id:
+            return None
+        return f"{self.permalink_base}/pl/{post_id}"
 
     async def inject(self, event: dict[str, Any]) -> None:
         await self._queue.put(event)
