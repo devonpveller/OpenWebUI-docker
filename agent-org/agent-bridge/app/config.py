@@ -170,7 +170,11 @@ class Settings(BaseSettings):
     # the operator's own private research egress (Mullvad/Tor), so it's on by default; the future
     # Tier-3 cloud lane will be an explicit per-question opt-in on the same intent.
     advisory_enabled: bool = True
-    advisory_timeout_s: float = 300.0       # the operator is WAITING — allow a full research job
+    # A REAL research pass (fan-out + synthesis, single-lane on the GPU) routinely needs >5 min —
+    # the old 300s gave up seconds before jobs finished (live: job done at ~5m05s → ungrounded
+    # fallback for nothing). The advisory runs as a BACKGROUND task, so a long poll blocks nothing;
+    # match the stack's research lane budget.
+    advisory_timeout_s: float = 1500.0      # the operator is told it takes several minutes
 
     # ── GitHub App — the capability plane's root of trust (autonomous-project-lifecycle P-APL.0) ──
     # A GitHub App (NOT a long-lived PAT) authorises the governed capability plane (fork/create/

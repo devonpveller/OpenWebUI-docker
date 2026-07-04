@@ -1924,7 +1924,8 @@ class Orchestrator:
         ack = (reply_prefix or "").strip()
         ack = (ack + "\n\n" if ack else "") + (
             "🔎 _Researching that against current sources — I'll post a grounded, cited answer here "
-            "in a moment (a full research pass can take a minute or two)._"
+            "when it lands (a full research pass usually takes **several minutes**; it runs in the "
+            "background, so feel free to keep working)._"
         )
         await self.chat.post(channel_id, ack.strip(), thread_id=thread_id)
         self._spawn(self._run_advisory(question, channel_id, thread_id))
