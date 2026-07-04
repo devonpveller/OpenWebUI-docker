@@ -14,6 +14,8 @@ import random
 import re
 import time
 
+import httpx
+
 from .adapters.chat import ChatAdapter
 from .config import Settings
 from .db import Database
@@ -27,7 +29,14 @@ from .modules.event_gateway import EventGateway
 from .modules.execution_gate import ExecutionGate
 from .modules.floor_guard import FloorGuard
 from .modules.governance_gate import GovernanceGate
-from .modules.capabilities import CapabilityResult, fork_repo, parse_owner_repo, read_repo_state
+from .modules.capabilities import (
+    BranchDelivery,
+    CapabilityResult,
+    fork_repo,
+    parse_owner_repo,
+    read_branch_delivery,
+    read_repo_state,
+)
 from .modules.github_app import GitHubApp, build_github_app
 from .modules.grounding import Grounding, build_grounding
 from .modules.learning_loop import LearningLoop
@@ -46,8 +55,9 @@ from .modules.scheduler import NoCapacityError, Scheduler
 from .modules.scope_ledger import ScopeLedger
 from .modules.stop_gates import StopGates
 from .models import Effort, GlobalState
+from .modules.pending_store import PendingStore
 from .schemas import (
-    Concern, Decision, Level, LifecyclePlan, MonitorVerdict, OperatorIntent, Trigger,
+    Concern, Decision, Level, LifecyclePlan, MonitorVerdict, OperatorIntent, Plan, Trigger,
 )
 from .worker.harness import FakeHarness, LittleCoderHarness, WorkerHarness
 
@@ -215,7 +225,8 @@ _HELP = (
     "`/retry monogame` or bare `/retry` for all idle\n"
     "- `/archive <effort_id|filter>` — cancel efforts you're done with (e.g. `/archive calculator`); "
     "pushed branches are kept\n"
-    "- `approve|modify|abort <effort_id> [note]` — approve a drafted **plan**, or decide an open CONCERN\n"
+    "- `approve|modify|abort <effort_id> [note]` — approve a drafted **plan**, or decide an open CONCERN "
+    "(id optional for `approve`/`abort` when exactly one thing is pending)\n"
     "- `/risk <effort_id> <routine|irreversible|cross_effort|cascading_refactor>` — set blast radius "
     "(risky ⇒ a dry-run is required before real-code execution)\n"
     "- `/dry-run <effort_id> <pass|fail>` — record the isolated dry-run outcome\n"
@@ -325,6 +336,10 @@ class Orchestrator:
         # auto-resumed when capacity returns. The resume driver drains one-at-a-time, clocked by a
         # successful model call (self._signal_capacity, fired from the ModelRouter) + a timer tick.
         self.parks = ParkStore(db, self.audit)
+        # Durable mirror of the three pending-approval dicts above — a proposed hard gate the operator
+        # hasn't decided yet must survive a bridge restart (else a rebuild silently drops it, §3).
+        # Rehydrated into the dicts in setup(); rows removed the instant a decision is made.
+        self.pending = PendingStore(db, self.audit)
         self.models.on_capacity_signal = self._signal_capacity
         self.scheduler.on_release = self._signal_capacity   # worker frees → drain slot-parked efforts
         self._capacity_event = asyncio.Event()
@@ -477,6 +492,7 @@ class Orchestrator:
             if await s.get(GlobalState, 1) is None:
                 s.add(GlobalState(id=1, kill_switch=False))
                 await s.commit()
+        await self._rehydrate_pending()   # restore proposals a prior run held (survives a rebuild, §3)
         await self.profiles.load_from_disk()
         await self.charters.seed_floor_from_disk()
         await self.scheduler.register_from_urls(self.s.worker_instance_urls)
@@ -1076,8 +1092,10 @@ class Orchestrator:
             return
         elif intent.kind == "plan":
             # A multi-step setup/architecture. The PLANNER (P-APL.2) drafts a concrete, reviewable
-            # plan from the operator's words; nothing runs until they `approve <plan_id>`.
-            await self._propose_lifecycle_plan(message, channel_id, thread_id, reply_prefix=reply)
+            # plan from the operator's words; nothing runs until they `approve <plan_id>`. Suppress the
+            # classification `reply` — the model's "I'll draft a plan, sound good?" is redundant with
+            # (and can contradict) the plan presentation the planner posts itself.
+            await self._propose_lifecycle_plan(message, channel_id, thread_id, reply_prefix="")
             return
         elif intent.kind == "reengage":
             # "get the workers working" / "continue" / "re-engage the monogame tasks" — actually
@@ -1313,6 +1331,8 @@ class Orchestrator:
                 "kind": "fork", "parent": f"{owner}/{repo}", "repo": repo,
                 "channel_id": channel_id, "thread_id": thread_id,
             }
+            await self.pending.save(action_id, "capability",
+                                    self._jsonify_pending(self._pending_capability[action_id]))
             await self.chat.post(
                 channel_id,
                 (prefix + "\n\n" if prefix else "") +
@@ -1346,6 +1366,7 @@ class Orchestrator:
         action = self._pending_capability.pop(action_id, None)
         if action is None:
             return
+        await self.pending.delete(action_id)   # decided → drop the durable mirror
         channel_id = action["channel_id"]
         thread_id = action.get("thread_id")
         if action["kind"] == "fork":
@@ -1419,14 +1440,15 @@ class Orchestrator:
         # ANCHOR to workspace reality (UX-FLOW Stage 1): read each project's ACTUAL current state
         # (submodules + tree) so the planner reconciles desired-vs-actual instead of blindly adding /
         # duplicating. Best-effort + bounded; a repo the App can't read just contributes nothing.
+        states: dict[str, object] = {}                 # slug -> RepoState (structured, for the filter)
         state_lines: list[str] = []
         for p in projects[:8]:
-            st = ""
             if self.github is not None and self.s.github_app_enabled:
                 st = await read_repo_state(self.github, p["repo_url"],
                                            api_base=self.s.github_api_base, transport=self._gh_transport)
-            if st:
-                state_lines.append(f"- {p['slug']}: {st}")
+                states[p["slug"]] = st
+                if st.readable and st.summary:
+                    state_lines.append(f"- {p['slug']}: {st.summary}")
         state_ctx = "\n".join(state_lines) or "(no readable repo state — plan from the intent)"
         try:
             plan: LifecyclePlan = await self.models.structured(
@@ -1448,11 +1470,44 @@ class Orchestrator:
             return
         steps = [s for s in (plan.steps or []) if s.kind in ("fork", "add_submodule", "worker_task")]
         if not steps:
+            # The model proposed no steps. That often means "nothing to change" (the model saw the
+            # state already satisfies the intent but didn't say so) — so SHOW the current state rather
+            # than a bare "couldn't plan", and let the operator confirm or add detail.
+            note = f" — {plan.notes}" if plan.notes else ""
+            if state_lines:
+                await self.chat.post(
+                    channel_id, (prefix + "\n\n" if prefix else "") +
+                    f"I didn't find concrete changes to make for that{note} — it may already be set up. "
+                    f"Current state:\n" + "\n".join(f"> {ln}" for ln in state_lines) +
+                    "\n\nIf you want me to change/add something specific, or I've misread the intent, "
+                    "tell me more and I'll draft it.", thread_id=thread_id)
+            else:
+                await self.chat.post(
+                    channel_id, (prefix + "\n\n" if prefix else "") +
+                    "I couldn't break that into concrete steps yet — tell me a bit more about the repos "
+                    "and how they should fit together.", thread_id=thread_id)
+            return
+        # DETERMINISTIC reconciliation (the model doesn't reliably subtract against the anchor): drop
+        # add_submodule steps whose target already HAS that submodule path. So the plan PRESENTED is
+        # already reconciled — no duplicate adds — regardless of the model's reconciliation quality.
+        already: list[str] = []
+        reconciled: list = []
+        for s in steps:
+            if s.kind == "add_submodule":
+                st = states.get(slugify(s.target))
+                path = (s.path or "").strip()
+                if st is not None and getattr(st, "readable", False) and path in getattr(st, "submodule_paths", []):
+                    already.append(f"`{s.target}` already has `{path}`")
+                    continue
+            reconciled.append(s)
+        already_note = ("\n\n_Already in place (skipped): " + "; ".join(already) + "._") if already else ""
+        if not reconciled:                             # every step was already satisfied
             await self.chat.post(
                 channel_id, (prefix + "\n\n" if prefix else "") +
-                "I couldn't break that into concrete steps yet — tell me a bit more about the repos "
-                "and how they should fit together.", thread_id=thread_id)
+                f"✅ **{plan.goal or intent_text}** — the desired state already holds; nothing to do."
+                + already_note, thread_id=thread_id)
             return
+        steps = reconciled
         plan.steps = steps
         base = re.sub(r"[^a-z0-9]+", "-", (plan.goal or intent_text).lower()).strip("-")[:24] or "setup"
         plan_id = f"plan-{base}"
@@ -1461,12 +1516,14 @@ class Orchestrator:
             n += 1; plan_id = f"plan-{base}-{n}"
         self._pending_lifecycle[plan_id] = {
             "plan": plan, "channel_id": channel_id, "thread_id": thread_id, "intent": intent_text}
+        await self.pending.save(plan_id, "lifecycle",
+                                self._jsonify_pending(self._pending_lifecycle[plan_id]))
         body = "\n".join(f"> {self._render_lifecycle_step(i, s)}" for i, s in enumerate(steps, 1))
         note = f"\n\n_{plan.notes}_" if plan.notes else ""
         await self.chat.post(
             channel_id,
             (prefix + "\n\n" if prefix else "") +
-            f"📋 **Plan** — {plan.goal or intent_text}\n{body}{note}\n\n"
+            f"📋 **Plan** — {plan.goal or intent_text}\n{body}{note}{already_note}\n\n"
             f"Reply **`approve {plan_id}`** to run it, **`abort {plan_id}`** to drop it, or tell me "
             f"what to change and I'll redraft.",
             thread_id=thread_id,
@@ -1481,6 +1538,7 @@ class Orchestrator:
         entry = self._pending_lifecycle.pop(plan_id, None)
         if entry is None:
             return
+        await self.pending.delete(plan_id)     # decided → drop the durable mirror
         plan: LifecyclePlan = entry["plan"]
         channel_id = entry["channel_id"]
         thread_id = entry.get("thread_id")
@@ -1920,6 +1978,8 @@ class Orchestrator:
         self._pending_plan[effort_id] = {
             "proj_channel": proj_channel, "root": root, "request": request, "plan": plan,
         }
+        await self.pending.save(effort_id, "effort_plan",
+                                self._jsonify_pending(self._pending_plan[effort_id]))
         steps_list = getattr(plan, "implementation_steps", None) or []
         steps = "\n".join(f"{i}. {s}" for i, s in enumerate(steps_list, 1)) or "_(no steps drafted)_"
         body = (
@@ -1943,6 +2003,7 @@ class Orchestrator:
         pend = self._pending_plan.pop(effort_id, None)
         if not pend:
             return False
+        await self.pending.delete(effort_id)   # decided → drop the durable mirror
         try:
             await self.planner.approve_plan(effort_id, actor_role="human")
         except Exception as exc:  # noqa: BLE001
@@ -2049,8 +2110,15 @@ class Orchestrator:
                     return
                 await self.parks.unpark(effort_id)  # progressed past any prior shed point
             if repo:  # commit + push the effort's branch so the work is durable + shared
-                await self._publish_effort(effort_id, channel_id, root_post_id, repo)
-            await self._finish_effort(effort_id, last)
+                # PM-as-monitor (governance §4.2 / F8): publish, then INDEPENDENTLY VERIFY the branch
+                # landed. A worker's turn ending `done` is not delivery; the PM checks the remote and,
+                # on non-delivery, re-engages once then escalates — it does NOT rubber-stamp "done".
+                delivery = await self._publish_and_verify(effort_id, channel_id, root_post_id, repo)
+                if delivery is None:   # verified-undelivered after a re-engage → escalated, NOT done
+                    return
+                await self._finish_effort(effort_id, last, delivery=delivery)
+            else:
+                await self._finish_effort(effort_id, last)
         except ModelBackpressureError:
             # A step was shed by the saturated GPU — PARK (machine B suspended), don't fail. The
             # resume driver re-runs delegate from `cur_step` when capacity returns; work isn't lost.
@@ -2129,36 +2197,139 @@ class Orchestrator:
         each role commits under its own identity automatically."""
         return role, f"{role}@{self.s.agent_email_domain}"
 
-    async def _publish_effort(self, effort_id: str, channel_id: str, root: str, repo: str) -> None:
+    async def _publish_effort(
+        self, effort_id: str, channel_id: str, root: str, repo: str, *, firm: bool = False
+    ) -> None:
         """Commit + push the effort's work to its feature branch so it's DURABLE (survives a
         /project wipe), VISIBLE to the team, and fetchable for A→B hand-off. Additive push to a
         feature branch is routine (floor); push-to-main/deploy stay human-gated. Deterministic
         finalize wake — not a reviewable deliverable, so it skips the review gate. Commits carry the
-        AGENT's identity (via GIT_AUTHOR/COMMITTER env — git-proxy-safe, since `-c` is blocked)."""
+        AGENT's identity (via GIT_AUTHOR/COMMITTER env — git-proxy-safe, since `-c` is blocked).
+        `firm=True` is the PM's RE-ENGAGE after verification found no landed branch: it states plainly
+        the task is not complete until pushed, and asks the worker to explicitly report if there were
+        genuinely no changes (so 'forgot to push' is distinguishable from 'nothing to do')."""
         branch = self._effort_branch(effort_id)
         name, email = self._agent_identity("worker-default")
         ident = (
             f'GIT_AUTHOR_NAME="{name}" GIT_AUTHOR_EMAIL="{email}" '
             f'GIT_COMMITTER_NAME="{name}" GIT_COMMITTER_EMAIL="{email}"'
         )
+        lead = (
+            "YOUR CHANGES ARE NOT PUBLISHED — I checked the remote and there is no `"
+            f"{branch}` branch with your commit. The task is NOT complete until it is pushed. "
+            "Run these git steps EXACTLY now"
+            if firm else
+            "PUBLISH YOUR WORK so the team can see it (additive, allowed). Run these git steps EXACTLY"
+        )
+        tail = (
+            "If you genuinely made NO file changes, do NOT invent any — instead reply exactly "
+            "`NO CHANGES: <why>` so I can report that. Otherwise reply with the branch name and the "
+            "pushed commit hash."
+            if firm else
+            "Then reply with the branch name and the pushed commit hash."
+        )
         instruction = (
-            f"PUBLISH YOUR WORK so the team can see it (additive, allowed). Run these git steps "
-            f"EXACTLY (the env prefix on the commit attributes it to you, `{name}`):\n"
+            f"{lead} (the env prefix on the commit attributes it to you, `{name}`):\n"
             f"  git checkout -b {branch} 2>/dev/null || git checkout {branch}\n"
             f"  git add -A\n"
-            f'  {ident} git commit -m "{effort_id}: <one-line summary of your changes>"   # skip if nothing to commit\n'
+            f'  {ident} git commit -m "{effort_id}: <one-line summary of your changes>"   # skip only if nothing to commit\n'
             f"  git push -u origin {branch}\n"
-            f"Do NOT push to main/master. Do NOT force-push or delete anything. "
-            f"Then reply with the branch name and the pushed commit hash."
+            f"Do NOT push to main/master. Do NOT force-push or delete anything. {tail}"
         )
-        result = await self.router.wake(
-            effort_id, role="worker-default", thread_id=root, channel_id=channel_id,
-            session_id=effort_id, instruction=instruction, repo=None,  # already focused; no re-clone
-        )
+        try:
+            result = await self.router.wake(
+                effort_id, role="worker-default", thread_id=root, channel_id=channel_id,
+                session_id=effort_id, instruction=instruction, repo=None,  # focused; no re-clone
+            )
+        except httpx.HTTPStatusError as exc:
+            # The worker daemon rejected the dispatch (e.g. 409 busy). Don't let a transient publish
+            # hiccup crash the finalize path — record it as a failed self-report and let VERIFICATION
+            # be the arbiter (it re-engages if nothing landed). NoCapacityError still propagates so
+            # delegate parks + auto-resumes.
+            log.warning("publish wake dispatch failed for %s: %s", effort_id, exc)
+            result = None
+        # NOTE: result.ok is only the worker's turn-ended signal — NOT proof anything pushed. The
+        # branch is CONFIRMED by _verify_delivery against the remote, never by this self-report.
         self._published_branch[effort_id] = branch if (result and result.ok) else ""
         await self.audit.log(
             "effort_published", effort_id=effort_id,
-            payload={"branch": branch, "ok": bool(result and result.ok)},
+            payload={"branch": branch, "self_reported_ok": bool(result and result.ok), "firm": firm},
+        )
+
+    async def _verify_delivery(self, effort_id: str, repo: str) -> BranchDelivery:
+        """PM's checkable acceptance signal (§4.2): independently read the remote to see if the effort's
+        branch landed with a real commit. Own-account only via the App; any error/other-owner ⇒
+        `verifiable=False` (the PM then falls back to the self-report, honestly labelled unverified)."""
+        branch = self._effort_branch(effort_id)
+        if self.github is None or not self.s.github_app_enabled:
+            return BranchDelivery(branch=branch, detail="GitHub App not enabled")
+        try:
+            return await read_branch_delivery(
+                self.github, repo, branch,
+                api_base=self.s.github_api_base, transport=self._gh_transport,
+            )
+        except Exception as exc:  # noqa: BLE001 — verification must never crash the finalize path
+            log.debug("delivery verification failed for %s: %s", effort_id, exc)
+            return BranchDelivery(branch=branch, detail=str(exc)[:120])
+
+    async def _publish_and_verify(
+        self, effort_id: str, channel_id: str, root: str, repo: str
+    ) -> BranchDelivery | None:
+        """The PM's monitor→verify→re-engage→escalate loop for the deliverable (governance §4.2/F8;
+        UX-FLOW Stage 5→6). Publishes, then VERIFIES the branch landed on the remote. If it didn't and
+        we can verify, re-engages the worker ONCE with a firm publish instruction and re-checks; if it
+        STILL hasn't landed, ESCALATES to the operator and returns None (the effort is NOT marked done —
+        it stays visible in /status). Returns the BranchDelivery to hand to _finish_effort otherwise
+        (a verified `landed`, or an `unverifiable` verdict the closure labels honestly)."""
+        await self._publish_effort(effort_id, channel_id, root, repo)
+        delivery = await self._verify_delivery(effort_id, repo)
+        if delivery.landed or not delivery.verifiable:
+            return delivery   # verified-landed, or we couldn't check (finish labels it unverified)
+
+        # Verified NON-delivery — the worker's turn ended but nothing landed. This is the exact
+        # deviation the PM must catch (a `done` that didn't deliver). Re-engage ONCE, firmly.
+        gap = ("created the branch but committed nothing" if delivery.exists
+               else "pushed no branch")
+        await self.comms.post(
+            Intent.worker_activity,
+            f"🔍 the worker reported done, but I checked the remote and it {gap} — the change hasn't "
+            f"landed. Re-dispatching with an explicit commit + push instruction (PM monitor, §4.2).",
+            effort_id=effort_id,
+        )
+        await self._publish_effort(effort_id, channel_id, root, repo, firm=True)
+        delivery = await self._verify_delivery(effort_id, repo)
+        if delivery.landed:
+            return delivery
+
+        # Still undelivered after a re-engage → climb the ladder (§3). Do NOT mark done; the operator
+        # decides (retry / investigate / accept as no-op). Intent-framed so the WHY reaches them.
+        await self._escalate_undelivered(effort_id, delivery)
+        return None
+
+    async def _escalate_undelivered(self, effort_id: str, delivery: BranchDelivery) -> None:
+        """Undelivered-after-re-engage escalation (§3 ladder). The change did not land even after the
+        PM re-dispatched; surface it honestly UP to the operator (never a false 'done') and mark the
+        card so it doesn't read as complete."""
+        empty = delivery.verifiable and delivery.exists  # branch exists but 0 commits over base
+        why = ("its branch has no new commits over the base — either the task needed no code change, "
+               "or the work wasn't done" if empty else
+               "no branch with the work reached the remote")
+        await self.comms.post(
+            Intent.escalation,
+            f"⚠️ **{effort_id}** finished but the change **did not land** — {why}. I re-dispatched the "
+            f"publish once and it still didn't. ↑ raised to you: re-run it, or confirm this is expected.",
+            effort_id=effort_id,
+        )
+        await self.router.update_effort_card(effort_id, "error")
+        await self.comms.post(
+            Intent.operator_reply,
+            f"⚠️ **{effort_id}** ran but I could **not verify the change landed** — {why}. It is **not** "
+            f"marked done. Reply to re-run it, or say it's expected and I'll close it.",
+            thread_id=self._mgmt_thread_of(effort_id),
+        )
+        await self.audit.log(
+            "effort_undelivered", effort_id=effort_id,
+            payload={"exists": delivery.exists, "ahead": delivery.ahead, "branch": delivery.branch},
         )
 
     async def _gate_deliverable(self, effort_id: str, result, cp_id: str) -> bool:
@@ -2198,16 +2369,27 @@ class Orchestrator:
                 thread_id=self._mgmt_thread_of(effort_id),
             )
 
-    async def _finish_effort(self, effort_id: str, result) -> None:
-        """All steps cleared → closure DOWN into the effort thread + a summary UP to #mgmt (§2)."""
+    async def _finish_effort(self, effort_id: str, result, *, delivery: BranchDelivery | None = None) -> None:
+        """All steps cleared → closure DOWN into the effort thread + a summary UP to #mgmt (§2). When a
+        repo was focused, `delivery` is the PM's VERIFIED verdict on the branch (§4.2): a verified
+        `landed` states the branch + commit factually; an `unverifiable` one is labelled as the
+        worker's self-report we couldn't independently check — never a bare, over-confident 'pushed'."""
         head = ((result.output or "").strip().splitlines()[0][:200]
                 if result and result.output else "done")
-        branch = self._published_branch.pop(effort_id, None)
-        if branch:
-            where = f"pushed to branch **`{branch}`** — `git fetch origin {branch}` to see it"
+        # The worker's self-report (its turn ended ok); the VERIFIED verdict overrides it as the truth.
+        self_reported = self._published_branch.pop(effort_id, None)
+        branch = delivery.branch if (delivery and delivery.landed) else None
+        if delivery is not None and delivery.landed:
+            sha = f" @ `{delivery.head_sha}`" if delivery.head_sha else ""
+            where = (f"pushed to branch **`{branch}`**{sha} (verified on the remote) — "
+                     f"`git fetch origin {branch}` to see it")
+        elif delivery is not None and not delivery.verifiable and self_reported:
+            # We couldn't independently check (App can't read this repo) — report the worker's word,
+            # labelled honestly as unverified rather than asserting it as fact (§4.2 unverified).
+            where = (f"the worker reports it pushed **`{self_reported}`**, which I could **not "
+                     f"independently verify** (this repo isn't on the App's account)")
         elif await self._effort_repo(effort_id):
-            # The project HAS a repo but the worker pushed no branch — it didn't commit/publish
-            # anything (often a worker that stopped early). Say so honestly, don't imply "no repo".
+            # The project HAS a repo but no branch landed — say so honestly, don't imply "no repo".
             where = ("the worker pushed **no branch** — nothing was committed/published. If it should "
                      "have, re-run it and tell it to commit + push its changes")
         else:
@@ -2484,6 +2666,88 @@ class Orchestrator:
         if mentioned:
             await self.chat.post(channel_id, _HELP)  # top-level, visible inline
 
+    @staticmethod
+    def _jsonify_pending(entry: dict) -> dict:
+        """A JSON-safe copy of a pending-store entry for persistence: any pydantic plan under `plan`
+        is `model_dump`'d; everything else is already str/None. The in-memory dict keeps the live
+        object — only the persisted mirror is flattened."""
+        out = dict(entry)
+        plan = out.get("plan")
+        if hasattr(plan, "model_dump"):
+            out["plan"] = plan.model_dump(mode="json")
+        return out
+
+    async def _rehydrate_pending(self) -> None:
+        """Boot: restore the three in-memory pending dicts from the durable store so a proposal held
+        across a restart is still resolvable (a bare/keyed `approve` finds it). A payload that no
+        longer deserializes (schema drift) is dropped, not fatal — boot must never wedge on it."""
+        for row in await self.pending.all():
+            pid, kind, payload = row["id"], row["kind"], dict(row["payload"])
+            try:
+                if kind == "lifecycle":
+                    payload["plan"] = LifecyclePlan(**payload["plan"])
+                    self._pending_lifecycle[pid] = payload
+                elif kind == "capability":
+                    self._pending_capability[pid] = payload
+                elif kind == "effort_plan":
+                    payload["plan"] = Plan(**payload["plan"])
+                    self._pending_plan[pid] = payload
+                else:
+                    continue
+            except Exception as exc:  # noqa: BLE001 — a drifted row must not crash boot; drop it
+                log.warning("dropping unrehydratable pending %s (%s): %s", pid, kind, exc)
+                await self.pending.delete(pid)
+        n = len(self._pending_lifecycle) + len(self._pending_capability) + len(self._pending_plan)
+        if n:
+            log.info("rehydrated %d pending approval(s) held across a restart", n)
+
+    async def _pending_decisions(self) -> list[str]:
+        """Every item currently awaiting an explicit operator decision — drafted lifecycle plans
+        (P-APL.3), proposed capability actions (P-APL.1), held Stage-3 effort plans (P3.9), and
+        efforts frozen on a concern (§3). De-duped, insertion order. Used so a bare `approve`/`abort`
+        (no id) can resolve THE single pending item unambiguously instead of erroring with a usage
+        string — the operator typed the decision verb explicitly; we only fill an unambiguous
+        target."""
+        ids: list[str] = [
+            *self._pending_lifecycle.keys(),
+            *self._pending_capability.keys(),
+            *self._pending_plan.keys(),
+        ]
+        try:
+            efforts = await self.gate.snapshot(open_only=True)
+            smap = await self._effort_status_map(efforts)
+            ids += [e["id"] for e in efforts if smap.get(e["id"]) == "paused"]
+        except Exception as exc:  # noqa: BLE001 — status enumeration must never break the command
+            log.debug("_pending_decisions status sweep failed: %s", exc)
+        seen: set[str] = set()
+        return [i for i in ids if not (i in seen or seen.add(i))]
+
+    def _render_pending(self, only: str | None = None) -> str:
+        """The queue of proposals awaiting an `approve <id>` — drafted plans, proposed forks, held
+        effort plans — rendered for `/status` so a restart-restored (or scrolled-past) hard gate is
+        VISIBLE without re-asking. `only` limits it to a single id (targeted `/status <id>`). Empty
+        string when nothing (matching) is pending."""
+        items: list[tuple[str, str]] = []
+        for pid, e in self._pending_lifecycle.items():
+            plan = e.get("plan")
+            goal = (getattr(plan, "goal", None) or e.get("intent") or "plan").strip()
+            n = len(getattr(plan, "steps", []) or [])
+            items.append((pid, f"📋 plan: {goal} ({n} step{'' if n == 1 else 's'})"))
+        for aid, e in self._pending_capability.items():
+            items.append((aid, f"🛠️ fork `{e.get('parent', '?')}`"))
+        for eid, e in self._pending_plan.items():
+            plan = e.get("plan")
+            feat = (getattr(plan, "feature_overview", None) or e.get("request") or "").strip()
+            items.append((eid, f"📋 effort plan: {feat[:80]}"))
+        if only is not None:
+            items = [(i, d) for (i, d) in items if i == only]
+        if not items:
+            return ""
+        lines = "\n".join(f"- `{i}` — {d}" for i, d in items)
+        hint = ("_Reply `approve` or `abort` — it's the only thing pending._" if len(items) == 1
+                else "_Reply `approve <id>` or `abort <id>`._")
+        return "**⛔ Awaiting your approval:**\n" + lines + "\n" + hint
+
     async def _handle_command(
         self, text: str, channel_id: str | None, thread_id: str | None, *, user_id: str | None = None
     ) -> None:
@@ -2527,19 +2791,23 @@ class Orchestrator:
             snap = await self.gate.snapshot(open_only=not (want_all or target))
             if target:
                 snap = [e for e in snap if e["id"] == target]
-            if not snap:
-                if target:
-                    await reply(f"no effort `{target}`.")
-                elif want_all:
-                    await reply("no efforts yet — create one with `/effort <name>`")
-                else:
-                    await reply(
-                        "no open efforts — everything's done/aborted. `/status all` shows the history."
-                    )
-            else:
+            # Proposals awaiting `approve <id>` — always shown, and the ONLY thing to show after a
+            # restart when nothing's running (why this got surfaced). Targeted view filters to that id.
+            pending_block = self._render_pending(only=target)
+            if snap:
                 status_map = await self._effort_status_map(snap)
                 header = "**Efforts (open):**" if not (want_all or target) else "**Efforts:**"
-                await reply(header + "\n" + self._render_status(snap, status_map))
+                out = header + "\n" + self._render_status(snap, status_map)
+            elif target:
+                out = pending_block or f"no effort `{target}`."
+                pending_block = ""                        # folded into `out` already
+            elif want_all:
+                out = "no efforts yet — create one with `/effort <name>`"
+            else:
+                out = "no open efforts — everything's done/aborted. `/status all` shows the history."
+            if pending_block:
+                out += "\n\n" + pending_block
+            await reply(out)
         elif cmd in ("retry", "reengage"):
             # Re-dispatch idle efforts now: `/retry [filter]` (no filter = all idle).
             efforts = await self.gate.snapshot(open_only=True)
@@ -2564,10 +2832,27 @@ class Orchestrator:
             await self.gate.kill_switch(on=on, actor="human")
             await reply(f"✅ kill switch {'engaged — fleet frozen' if on else 'released'}")
         elif cmd in ("approve", "modify", "abort"):
-            if not args:
+            if args:
+                effort_id, note = args[0], " ".join(args[1:])
+            elif cmd == "modify":
+                # `modify` conveys a change — it needs both the target and the note.
                 await reply(f"usage: `{cmd} <effort_id> [note]`")
                 return
-            effort_id, note = args[0], " ".join(args[1:])
+            else:
+                # NL-first: a bare `approve`/`abort` resolves THE single pending decision when
+                # there's exactly one (the operator gave the verb; we fill the unambiguous target
+                # and echo it — decisions stay crisp + auditable, §3). Otherwise disambiguate.
+                cands = await self._pending_decisions()
+                if len(cands) == 1:
+                    effort_id, note = cands[0], ""
+                    await reply(f"_(no id given — resolving the only item awaiting you: `{effort_id}`)_")
+                elif not cands:
+                    await reply("nothing's awaiting your approval right now.")
+                    return
+                else:
+                    listing = " · ".join(f"`{c}`" for c in cands)
+                    await reply(f"{len(cands)} items await you — which? `{cmd} <id>`\n{listing}")
+                    return
             # Lifecycle-plan approval (P-APL.3) — the operator approves the WHOLE plan, then it runs.
             if effort_id in self._pending_lifecycle:
                 if cmd == "approve":
@@ -2575,6 +2860,7 @@ class Orchestrator:
                     await self._execute_lifecycle_plan(effort_id)
                 else:
                     self._pending_lifecycle.pop(effort_id, None)
+                    await self.pending.delete(effort_id)
                     await reply(f"⛔ Plan `{effort_id}` dropped — nothing ran.")
                 return
             # Capability approval (fork/create/…) — the hard-gate on a proposed structure action.
@@ -2584,6 +2870,7 @@ class Orchestrator:
                     await self._execute_capability(effort_id)
                 else:
                     self._pending_capability.pop(effort_id, None)
+                    await self.pending.delete(effort_id)
                     await self.audit.log("capability_aborted", payload={"action": effort_id})
                     await reply(f"⛔ `{effort_id}` cancelled — nothing was created.")
                 return
@@ -2594,6 +2881,7 @@ class Orchestrator:
                     await reply(f"✅ plan approved for `{effort_id}` — dispatching a worker.")
                 else:
                     self._pending_plan.pop(effort_id, None)
+                    await self.pending.delete(effort_id)
                     await reply(
                         f"⛔ plan {cmd} for `{effort_id}` — not dispatched. "
                         f"Re-send the request with your changes to adjust it."

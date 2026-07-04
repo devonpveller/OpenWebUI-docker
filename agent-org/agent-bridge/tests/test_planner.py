@@ -130,6 +130,47 @@ async def test_planner_is_anchored_to_actual_repo_state(db_url, tmp_path):
         await db.dispose()
 
 
+async def test_planner_deterministically_drops_already_present_submodules(db_url, tmp_path):
+    """The model doesn't reliably subtract against the anchor (it still proposed adds that exist). The
+    CODE must reconcile: drop add_submodule steps whose path already exists in the target — so the
+    plan presented has NO duplicate. When ALL steps are already satisfied → 'nothing to do'."""
+    import base64
+    orch, chat, db = await _orch(db_url, tmp_path)
+    try:
+        await orch.projects.add("monogame-engine", "https://github.com/devonpveller/MonoGame-Engine")
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            p = request.url.path
+            if p == "/repos/devonpveller/MonoGame-Engine":
+                return httpx.Response(200, json={"default_branch": "main"})
+            if p.endswith("/contents/.gitmodules"):
+                gm = base64.b64encode(
+                    b'[submodule "vendor/MonoGame"]\n\tpath = vendor/MonoGame\n\turl = x\n'
+                    b'[submodule "vendor/murder"]\n\tpath = vendor/murder\n\turl = y\n').decode()
+                return httpx.Response(200, json={"content": gm})
+            if p.endswith("/contents"):
+                return httpx.Response(200, json=[{"name": "vendor", "type": "dir"}])
+            return httpx.Response(404)
+        orch._gh_transport = httpx.MockTransport(handler)
+        orch.models._client.queue_structured(OperatorIntent(kind="plan", reply="Drafting."))
+        # the model STILL proposes both adds (as qwen did live) — the code must drop them
+        orch.models._client.queue_structured(LifecyclePlan(goal="vendor forks", steps=[
+            LifecycleStep(kind="add_submodule", source="monogame", target="monogame-engine",
+                          path="vendor/MonoGame", summary="add monogame"),
+            LifecycleStep(kind="add_submodule", source="murder", target="monogame-engine",
+                          path="vendor/murder", summary="add murder"),
+        ]))
+        mgmt = await orch.mgmt_channel_id()
+        await orch.nl_intake("vendor my forks into monogame-engine", mgmt, thread_id="t")
+        # both already present → reconciled to a no-op plan; NOTHING pending, clear "already holds" msg
+        assert not orch._pending_lifecycle
+        msgs = " ".join(p["message"] for p in chat.posted)
+        assert "already holds" in msgs or "nothing to do" in msgs
+        assert "vendor/MonoGame" in msgs and "vendor/murder" in msgs   # names what's already in place
+    finally:
+        await db.dispose()
+
+
 async def test_plan_abort_runs_nothing(db_url, tmp_path):
     orch, chat, db = await _orch(db_url, tmp_path)
     try:
@@ -158,5 +199,157 @@ async def test_planner_empty_plan_asks_for_more(db_url, tmp_path):
         await orch.nl_intake("do the architecture thing", mgmt, thread_id="t")
         assert not orch._pending_lifecycle
         assert any("concrete steps" in m["message"] for m in chat.posted)
+    finally:
+        await db.dispose()
+
+
+# ── bare `approve` ergonomics (NL-first: no id needed when exactly one thing is pending) ──
+async def test_bare_approve_resolves_the_single_pending_item(db_url, tmp_path):
+    """A bare `approve` (no id) resolves THE one pending decision and echoes which — instead of the
+    old rigid `usage: approve <effort_id>` error. Governance stays crisp: it names the target it ran."""
+    orch, chat, db = await _orch(db_url, tmp_path)
+    try:
+        await orch.projects.add("monogame-engine", "https://github.com/devonpveller/MonoGame-Engine")
+        orch.models._client.queue_structured(OperatorIntent(kind="plan", reply="Drafting."))
+        orch.models._client.queue_structured(LifecyclePlan(goal="x", steps=[
+            LifecycleStep(kind="worker_task", target="monogame-engine", task="wire", summary="w")]))
+        mgmt = await orch.mgmt_channel_id()
+        await orch.nl_intake("finish setting up monogame-engine", mgmt, thread_id="t")
+        pid = next(iter(orch._pending_lifecycle))
+
+        await orch._handle_command("approve", mgmt, "t")        # ← bare, no id
+        await _drain(orch)
+
+        assert pid not in orch._pending_lifecycle               # the one pending item was resolved
+        msgs = " ".join(p["message"] for p in chat.posted)
+        assert pid in msgs and "resolving the only item" in msgs  # echoed WHICH (crisp + auditable)
+        assert not any("usage:" in p["message"] for p in chat.posted)  # no rigid usage error
+    finally:
+        await db.dispose()
+
+
+async def test_bare_approve_disambiguates_when_several_pending(db_url, tmp_path):
+    """Two decisions pending → a bare `approve` must NOT guess; it lists them and asks which. Never
+    auto-fire a decision when the target is ambiguous (§3)."""
+    orch, chat, db = await _orch(db_url, tmp_path)
+    try:
+        orch._pending_lifecycle["plan-alpha"] = {"proj_channel": "c", "root": "r", "plan": None}
+        orch._pending_lifecycle["plan-beta"] = {"proj_channel": "c", "root": "r", "plan": None}
+        mgmt = await orch.mgmt_channel_id()
+        await orch._handle_command("approve", mgmt, "t")
+        msgs = " ".join(p["message"] for p in chat.posted)
+        assert "plan-alpha" in msgs and "plan-beta" in msgs and "which" in msgs.lower()
+        # nothing ran — both still pending
+        assert "plan-alpha" in orch._pending_lifecycle and "plan-beta" in orch._pending_lifecycle
+    finally:
+        await db.dispose()
+
+
+async def test_bare_approve_with_nothing_pending_is_friendly(db_url, tmp_path):
+    orch, chat, db = await _orch(db_url, tmp_path)
+    try:
+        mgmt = await orch.mgmt_channel_id()
+        await orch._handle_command("approve", mgmt, "t")
+        msgs = " ".join(p["message"] for p in chat.posted)
+        assert "nothing" in msgs.lower()
+        assert not any("usage:" in p["message"] for p in chat.posted)
+    finally:
+        await db.dispose()
+
+
+async def test_bare_modify_still_needs_explicit_target(db_url, tmp_path):
+    """`modify` conveys a change, so it keeps requiring an id + note even when one item is pending."""
+    orch, chat, db = await _orch(db_url, tmp_path)
+    try:
+        orch._pending_lifecycle["plan-alpha"] = {"proj_channel": "c", "root": "r", "plan": None}
+        mgmt = await orch.mgmt_channel_id()
+        await orch._handle_command("modify", mgmt, "t")
+        assert any("usage:" in p["message"] and "modify" in p["message"] for p in chat.posted)
+        assert "plan-alpha" in orch._pending_lifecycle           # untouched
+    finally:
+        await db.dispose()
+
+
+async def test_pending_approvals_survive_a_restart(db_url, tmp_path):
+    """The bug behind 'I rebuilt but there are no ids in the chat': a proposed plan/fork lived ONLY in
+    memory, so a bridge rebuild dropped the hard gate the operator hadn't decided. Proposals must now
+    persist + rehydrate on boot (mirrors test_frozen_persists_across_restart for the gate)."""
+    # ── run 1: propose a lifecycle plan AND a capability, then 'bounce' the bridge ──
+    orch, chat, db = await _orch(db_url, tmp_path)
+    try:
+        await orch.projects.add("monogame-engine", "https://github.com/devonpveller/MonoGame-Engine")
+        orch.models._client.queue_structured(OperatorIntent(kind="plan", reply="Drafting."))
+        orch.models._client.queue_structured(LifecyclePlan(goal="vendor forks", steps=[
+            LifecycleStep(kind="worker_task", target="monogame-engine", task="wire", summary="w")]))
+        mgmt = await orch.mgmt_channel_id()
+        await orch.nl_intake("finish setting up monogame-engine", mgmt, thread_id="t")
+        pid = next(iter(orch._pending_lifecycle))
+
+        orch.models._client.queue_structured(OperatorIntent(
+            kind="capability", capability="fork", repo_url="isadorasophia/murder", reply="Sure —"))
+        await orch.nl_intake("fork isadorasophia/murder into my account", mgmt, thread_id="t")
+        assert "cap-fork-murder" in orch._pending_capability
+    finally:
+        await db.dispose()          # ← simulate the container rebuild (fresh process, same DB file)
+
+    # ── run 2: a fresh orchestrator on the SAME db file rehydrates BOTH proposals ──
+    orch2, chat2, db2 = await _orch(db_url, tmp_path)
+    try:
+        assert pid in orch2._pending_lifecycle                    # the plan survived the bounce
+        rehydrated = orch2._pending_lifecycle[pid]["plan"]
+        assert isinstance(rehydrated, LifecyclePlan)              # reconstructed as the real schema
+        assert rehydrated.steps[0].kind == "worker_task"          # nested steps intact
+        assert "cap-fork-murder" in orch2._pending_capability     # the fork proposal survived too
+
+        # and both are live decisions again — a bare `approve` sees two and disambiguates (proves it)
+        mgmt2 = await orch2.mgmt_channel_id()
+        await orch2._handle_command("approve", mgmt2, "t")
+        msgs = " ".join(p["message"] for p in chat2.posted)
+        assert pid in msgs and "cap-fork-murder" in msgs and "which" in msgs.lower()
+    finally:
+        await db2.dispose()
+
+
+async def test_status_surfaces_the_pending_approval_queue(db_url, tmp_path):
+    """After a restart there may be NO running efforts but a proposal still pending — `/status` must
+    show the awaiting-approval queue with each id (+ a summary) so the operator acts without re-asking."""
+    orch, chat, db = await _orch(db_url, tmp_path)
+    try:
+        await orch.projects.add("monogame-engine", "https://github.com/devonpveller/MonoGame-Engine")
+        orch.models._client.queue_structured(OperatorIntent(kind="plan", reply="Drafting."))
+        orch.models._client.queue_structured(LifecyclePlan(goal="vendor forks", steps=[
+            LifecycleStep(kind="worker_task", target="monogame-engine", task="wire", summary="w")]))
+        mgmt = await orch.mgmt_channel_id()
+        await orch.nl_intake("finish setting up monogame-engine", mgmt, thread_id="t")
+        pid = next(iter(orch._pending_lifecycle))
+        # also a fork proposal, so the queue shows both kinds
+        orch._pending_capability["cap-fork-murder"] = {"kind": "fork", "parent": "isadorasophia/murder"}
+        chat.posted.clear()
+
+        await orch._handle_command("/status", mgmt, "t")
+        msg = " ".join(p["message"] for p in chat.posted)
+        assert "Awaiting your approval" in msg
+        assert pid in msg and "vendor forks" in msg              # the plan, with its goal
+        assert "cap-fork-murder" in msg and "isadorasophia/murder" in msg  # the fork
+    finally:
+        await db.dispose()
+
+
+async def test_resolved_approval_is_removed_from_the_store(db_url, tmp_path):
+    """A decided proposal must NOT resurrect on the next restart — approve/abort deletes the mirror."""
+    orch, chat, db = await _orch(db_url, tmp_path)
+    try:
+        await orch.projects.add("monogame-engine", "https://github.com/devonpveller/MonoGame-Engine")
+        orch.models._client.queue_structured(OperatorIntent(kind="plan", reply="Drafting."))
+        orch.models._client.queue_structured(LifecyclePlan(goal="x", steps=[
+            LifecycleStep(kind="worker_task", target="monogame-engine", task="wire", summary="w")]))
+        mgmt = await orch.mgmt_channel_id()
+        await orch.nl_intake("finish setting up monogame-engine", mgmt, thread_id="t")
+        pid = next(iter(orch._pending_lifecycle))
+        assert any(r["id"] == pid for r in await orch.pending.all())   # persisted
+
+        await orch._handle_command(f"abort {pid}", mgmt, "t")
+        await _drain(orch)
+        assert not any(r["id"] == pid for r in await orch.pending.all())  # gone after the decision
     finally:
         await db.dispose()

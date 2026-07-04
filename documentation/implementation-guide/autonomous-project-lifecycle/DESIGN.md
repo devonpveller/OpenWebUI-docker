@@ -266,6 +266,38 @@ self-maintain. The corpus's own answer is the **intent thread** (§0) + **anchor
 Precedence held: every fix maps to an existing corpus mechanism (anchor / intent-thread / readiness /
 ground / cross-effort / learning), not a new safety story.
 
+## 11b. PM delivery verification — "approve → the change actually lands" (added 2026-07-04, operator-caught)
+
+The reconciling planner fixed the *structure/planning* half; the operator then surfaced the *doing*
+half: a worker would **investigate well (70–85 commands) but not reliably commit + push its changes**,
+and the PM reported *"pushed to branch X"* on the worker's word — or **marked the effort `done`** —
+even when nothing had actually landed on the remote. That is the paper's **rubber-stamp failure (F4)**
+and a violation of **governance §4.2** (a deliverable without a **checkable acceptance signal** is
+*unverified*, not done) and **F8** (*"the PM **is** the monitor agent"*). A worker's pi turn ending
+`done` means *its turn ended* — it is **not** evidence the change was delivered.
+
+**Fixed (this pass) — the PM verifies against the remote, not the worker's self-report:**
+- **Checkable signal (§4.2, deterministic floor).** `capabilities.read_branch_delivery()` reads the
+  effort's branch on the remote via the GitHub App API (own account) and reports whether it **exists**
+  and is **ahead of the base** (carries real commits). `landed = verifiable ∧ exists ∧ ahead ≥ 1`.
+  This is code (the deterministic floor), not the small model.
+- **Monitor → re-engage → escalate (F8, §3 ladder, UX-FLOW Stage 5→6).**
+  `_publish_and_verify()` publishes, then verifies. On **verified non-delivery** the PM **re-engages
+  the worker ONCE** with a firm, explicit publish instruction (F5 handoff contract — states plainly
+  *"NOT complete until pushed"*, and asks it to report `NO CHANGES: <why>` if there genuinely were
+  none, so *forgot-to-push* is distinguishable from *nothing-to-do*). If it **still** hasn't landed,
+  the PM **escalates UP to the operator** (intent-framed: *"ran but I could not verify the change
+  landed — it is **not** marked done; re-run, or confirm it's expected"*) and **does not** mark the
+  effort done (it stays visible in `/status`). No false `done`, ever.
+- **Honest `unverified` (§4.2).** When the App **can't** read the repo (not its own account),
+  verification returns `verifiable=False`; the PM then reports the worker's self-report **labelled as
+  unverified** (*"reports it pushed X, which I could not independently verify"*) rather than asserting
+  it as fact — and does not block (a repo the App can't see is not a worker failure).
+
+This is the concrete implementation of the PM's monitor role for the execution layer — the missing
+verification that made *approve → the change lands* unreliable. It reuses the existing acceptance /
+monitor / escalation mechanisms; no new safety story. Precedence held.
+
 ## 10. Build order (on approval)
 
 1. **P-APL.0** — register + install the GitHub App; land its key as a bridge secret; token-minter

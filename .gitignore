@@ -43,3 +43,7 @@ config/alerter/credentials.json
 /incident/
 /reports
 config/alerter/token.json
+
+# Claude Code Mattermost notifier — per-session allowlist (machine-specific runtime state)
+scripts/.mm-notify-sessions
+.claude/settings.local.json

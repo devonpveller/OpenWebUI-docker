@@ -116,16 +116,22 @@ class Scheduler:
         async with self.db.session_factory() as s:
             if await self._computing_count(s) >= self.max_concurrent:
                 raise NoCapacityError("MAX_CONCURRENT_WORKERS reached — queue the effort")
+            base_q = select(WorkerInstance).where(
+                WorkerInstance.retired.is_(False),
+                WorkerInstance.sched_state.in_([SCHED_IDLE, SCHED_SUSPENDED]),
+            )
+            # AFFINITY (workspace stickiness): a follow-up wake for a session — the next plan
+            # step, the publish, a PM re-engage — MUST return to the SAME worker that holds this
+            # effort's workspace + parked `--session`. release() suspends but keeps session_id, so
+            # that worker is reusable. Picking *any* free worker instead runs the wake against a
+            # DIFFERENT / empty workspace → "finished but pushed no branch" (nothing to commit) or a
+            # 409 if that worker is busy. Prefer the affine instance; fall back to any free one for a
+            # brand-new session.
             inst = (
-                await s.execute(
-                    select(WorkerInstance)
-                    .where(
-                        WorkerInstance.retired.is_(False),
-                        WorkerInstance.sched_state.in_([SCHED_IDLE, SCHED_SUSPENDED]),
-                    )
-                    .limit(1)
-                )
+                await s.execute(base_q.where(WorkerInstance.session_id == session_id).limit(1))
             ).scalar_one_or_none()
+            if inst is None:
+                inst = (await s.execute(base_q.limit(1))).scalar_one_or_none()
             if inst is None:
                 raise NoCapacityError("no free pool instance — queue the effort")
             inst.sched_state = SCHED_COMPUTING

@@ -33,6 +33,24 @@ async def test_acquire_and_release(db):
     assert snap["w1"]["state"] == "suspended"
 
 
+async def test_acquire_prefers_session_affine_worker(db):
+    """Workspace stickiness: a follow-up wake for the SAME session (next step / publish / re-engage)
+    returns to the SAME worker that holds its workspace + parked `--session` — not a different, empty
+    one. This is the fix for the publish landing on the wrong worker → 'finished but pushed no branch'
+    (or a 409). A brand-new session still takes another free worker."""
+    gate, sched = await _sched(db, cap=2)
+    await gate.ensure_effort("e1", "e1")
+    await gate.ensure_effort("e2", "e2")
+    await sched.register("w1", "u1")
+    await sched.register("w2", "u2")
+    first = await sched.acquire("e1", "worker", "e1")     # binds session_id=e1 to some worker
+    await sched.release(first.id)                          # suspended, KEEPS session_id=e1
+    again = await sched.acquire("e1", "worker", "e1")      # affinity → the SAME worker
+    assert again.id == first.id
+    other = await sched.acquire("e2", "worker", "e2")      # different session → the other free worker
+    assert other.id != first.id
+
+
 async def test_cap_enforced_then_queue(db):
     gate, sched = await _sched(db, cap=1)
     await gate.ensure_effort("e1", "e1")

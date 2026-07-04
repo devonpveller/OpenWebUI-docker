@@ -72,14 +72,17 @@ async def test_read_repo_state_reports_submodules_and_tree():
     st = await read_repo_state(FakeGitHubApp(owner="devonpveller"),
                                "https://github.com/devonpveller/MonoGame-Engine",
                                transport=httpx.MockTransport(handler))
-    assert "vendor/murder" in st and "main" in st and "vendor/" in st
+    assert st.readable and st.default_branch == "main"
+    assert "vendor/murder" in st.submodule_paths          # structured — for the deterministic filter
+    assert "vendor/" in st.top_level
+    assert "vendor/murder" in st.summary                  # + a string for the model context
 
 
-async def test_read_repo_state_empty_for_other_owner():
-    # the App can only read its own account — a repo under a different owner returns "".
+async def test_read_repo_state_unreadable_for_other_owner():
+    # the App can only read its own account — a repo under a different owner is unreadable.
     st = await read_repo_state(FakeGitHubApp(owner="me"), "https://github.com/someoneelse/repo",
                                transport=httpx.MockTransport(lambda r: httpx.Response(200)))
-    assert st == ""
+    assert not st.readable and st.summary == ""
 
 
 # ── the governed flow via the orchestrator ──────────────────────────────────

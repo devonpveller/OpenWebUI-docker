@@ -377,3 +377,19 @@ class GlobalState(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
     kill_switch: Mapped[bool] = mapped_column(Boolean, default=False)
     updated_at: Mapped[str] = mapped_column(default=now_iso, onupdate=now_iso)
+
+
+class PendingApproval(Base):
+    """A proposed decision awaiting the operator's `approve <id>` — a drafted lifecycle plan (P-APL.3),
+    a proposed capability action (P-APL.1, e.g. fork), or a held Stage-3 effort plan (P3.9). Persisted
+    so a bridge restart doesn't SILENTLY DROP the proposal (the in-memory pending dicts are rehydrated
+    from here on setup — a hard gate the operator hasn't yet decided must survive a bounce, §3). The
+    row is removed the instant the decision is made (approve OR abort). `payload` is the store entry,
+    made JSON-safe (pydantic plans → `model_dump(mode="json")`)."""
+
+    __tablename__ = "pending_approvals"
+
+    id: Mapped[str] = mapped_column(String(96), primary_key=True)   # plan-… / cap-… / <effort_id>
+    kind: Mapped[str] = mapped_column(String(24))                   # lifecycle | capability | effort_plan
+    payload: Mapped[dict] = mapped_column(JSON)
+    created_at: Mapped[str] = mapped_column(default=now_iso)

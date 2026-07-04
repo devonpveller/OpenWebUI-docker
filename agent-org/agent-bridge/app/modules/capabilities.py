@@ -35,6 +35,26 @@ class CapabilityResult(BaseModel):
     detail: str = ""        # short extra context on failure
 
 
+class RepoState(BaseModel):
+    """A repo's ACTUAL current state (UX-FLOW Stage 1 anchor). Carries STRUCTURED data so the planner
+    can reconcile DETERMINISTICALLY (drop steps already satisfied) — not just a string for the model,
+    which doesn't reliably subtract against it."""
+
+    readable: bool = False
+    default_branch: str = ""
+    submodule_paths: list[str] = []
+    submodule_urls: list[str] = []
+    top_level: list[str] = []
+
+    @property
+    def summary(self) -> str:
+        if not self.readable:
+            return ""
+        subs = "; ".join(f"{p} → {u}" for p, u in zip(self.submodule_paths, self.submodule_urls))
+        return (f"default branch: {self.default_branch} | submodules: {subs or 'none'} | "
+                f"top-level: {', '.join(self.top_level[:25]) if self.top_level else 'empty'}")
+
+
 def parse_owner_repo(url: str) -> tuple[str, str]:
     """(owner, repo) from a GitHub URL or `owner/repo` shorthand:
     https://github.com/o/r(.git) | git@github.com:o/r(.git) | o/r."""
@@ -63,45 +83,110 @@ async def read_repo_state(
     github: GitHubApp, repo_url: str, *,
     api_base: str = "https://api.github.com",
     transport: httpx.BaseTransport | None = None,
-) -> str:
+) -> RepoState:
     """The ACTUAL current state of a repo — default branch, submodules (from `.gitmodules`) and its
-    top-level tree — read via the GitHub App API (no clone). This ANCHORS the planner to workspace
-    reality (UX-FLOW Stage 1 'anchor') so it reconciles desired-vs-actual instead of blindly
-    duplicating. Returns "" when unreadable (App can only read its own account's repos)."""
+    top-level tree — read via the GitHub App API (no clone). ANCHORS the planner to workspace reality
+    (UX-FLOW Stage 1) so it reconciles desired-vs-actual instead of blindly duplicating. Returns an
+    unreadable RepoState when the App can't read it (own account only)."""
     try:
         owner, repo = parse_owner_repo(repo_url)
     except ValueError:
-        return ""
+        return RepoState(readable=False)
     if owner.lower() != (github.owner or "").lower():
-        return ""
+        return RepoState(readable=False)
     try:
         token = await github.installation_token()
     except GitHubAppError:
-        return ""
+        return RepoState(readable=False)
     base = api_base.rstrip("/")
     h = _headers(token)
     try:
         async with httpx.AsyncClient(timeout=15.0, transport=transport) as c:
             meta = await c.get(f"{base}/repos/{owner}/{repo}", headers=h)
             if meta.status_code >= 400:
-                return ""
+                return RepoState(readable=False)
             ref = meta.json().get("default_branch") or "main"
             gm = await c.get(f"{base}/repos/{owner}/{repo}/contents/.gitmodules?ref={ref}", headers=h)
             tree = await c.get(f"{base}/repos/{owner}/{repo}/contents?ref={ref}", headers=h)
     except httpx.HTTPError:
-        return ""
-    subs: list[str] = []
+        return RepoState(readable=False)
+    paths: list[str] = []
+    urls: list[str] = []
     if gm.status_code == 200 and gm.json().get("content"):
         text = base64.b64decode(gm.json()["content"]).decode("utf-8", "replace")
-        paths = re.findall(r"(?mi)^\s*path\s*=\s*(.+?)\s*$", text)
-        urls = re.findall(r"(?mi)^\s*url\s*=\s*(.+?)\s*$", text)
-        subs = [f"{p} → {u}" for p, u in zip(paths, urls)]
+        paths = [p.strip() for p in re.findall(r"(?mi)^\s*path\s*=\s*(.+?)\s*$", text)]
+        urls = [u.strip() for u in re.findall(r"(?mi)^\s*url\s*=\s*(.+?)\s*$", text)]
     entries: list[str] = []
     if tree.status_code == 200 and isinstance(tree.json(), list):
         entries = [e["name"] + ("/" if e.get("type") == "dir" else "") for e in tree.json()]
-    return (f"default branch: {ref} | submodules: "
-            f"{'; '.join(subs) if subs else 'none'} | "
-            f"top-level: {', '.join(entries[:25]) if entries else 'empty'}")
+    return RepoState(readable=True, default_branch=ref, submodule_paths=paths,
+                     submodule_urls=urls, top_level=entries)
+
+
+class BranchDelivery(BaseModel):
+    """A CHECKABLE verdict on whether an effort's work actually LANDED on the remote — the deterministic
+    acceptance signal the PM verifies against (governance §4.2 / F8), NOT the worker's self-report. A
+    worker's pi turn ending `done` only means its turn ended; it does not mean a branch with a real
+    commit exists. `verifiable=False` ⇒ the App can't read this repo (not its own account), so the PM
+    must fall back to the worker's word and LABEL the result unverified — never silently trust it."""
+
+    verifiable: bool = False     # could we independently check the remote at all?
+    exists: bool = False         # the branch is present on the remote
+    ahead: int = 0               # commits the branch is ahead of the base (default) branch
+    head_sha: str = ""           # the branch head (short) — surfaced so the operator can see it
+    branch: str = ""
+    base: str = ""
+    detail: str = ""             # short context on an unverifiable/failed check (never a token)
+
+    @property
+    def landed(self) -> bool:
+        """The change verifiably landed: a real branch exists AND carries at least one commit over base."""
+        return self.verifiable and self.exists and self.ahead >= 1
+
+
+async def read_branch_delivery(
+    github: GitHubApp, repo_url: str, branch: str, *,
+    api_base: str = "https://api.github.com",
+    transport: httpx.BaseTransport | None = None,
+) -> BranchDelivery:
+    """Independently verify a worker's deliverable landed: does `branch` exist on `repo_url`'s remote,
+    and is it ahead of the default branch (i.e. carries actual commits)? Read via the GitHub App API —
+    the deterministic floor, not the worker's claim. Own-account only; if the App can't read the repo
+    the verdict is `verifiable=False` (the PM then falls back to the self-report, honestly labelled)."""
+    try:
+        owner, repo = parse_owner_repo(repo_url)
+    except ValueError as exc:
+        return BranchDelivery(branch=branch, detail=str(exc))
+    if owner.lower() != (github.owner or "").lower():
+        return BranchDelivery(branch=branch, detail="repo is not on the App's account")
+    try:
+        token = await github.installation_token()
+    except GitHubAppError as exc:
+        return BranchDelivery(branch=branch, detail=str(exc)[:120])
+    base_api = api_base.rstrip("/")
+    h = _headers(token)
+    try:
+        async with httpx.AsyncClient(timeout=15.0, transport=transport) as c:
+            meta = await c.get(f"{base_api}/repos/{owner}/{repo}", headers=h)
+            if meta.status_code >= 400:
+                return BranchDelivery(branch=branch, detail=f"repo meta {meta.status_code}")
+            base = meta.json().get("default_branch") or "main"
+            br = await c.get(f"{base_api}/repos/{owner}/{repo}/branches/{branch}", headers=h)
+            if br.status_code == 404:
+                return BranchDelivery(verifiable=True, exists=False, branch=branch, base=base)
+            if br.status_code >= 400:
+                return BranchDelivery(branch=branch, base=base, detail=f"branch read {br.status_code}")
+            sha = (br.json().get("commit", {}) or {}).get("sha", "")[:10]
+            ahead = 0
+            if branch != base:
+                cmp = await c.get(
+                    f"{base_api}/repos/{owner}/{repo}/compare/{base}...{branch}", headers=h)
+                if cmp.status_code == 200:
+                    ahead = int(cmp.json().get("ahead_by", 0) or 0)
+    except (httpx.HTTPError, ValueError) as exc:
+        return BranchDelivery(branch=branch, detail=str(exc)[:120])
+    return BranchDelivery(verifiable=True, exists=True, ahead=ahead, head_sha=sha,
+                          branch=branch, base=base)
 
 
 async def fork_repo(
