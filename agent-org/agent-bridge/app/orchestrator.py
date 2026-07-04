@@ -123,7 +123,13 @@ _PO_NL_SYS = (
     "- kill: 'stop everything', 'freeze the fleet', 'emergency stop', 'kill switch' → kind=kill "
     "(freezes ALL work; reversible). unkill: 'resume', 'release', 'unfreeze', 'let them run' → "
     "kind=unkill.\n"
-    "- question / chitchat otherwise.\n"
+    "- advisory: the operator wants to DISCUSS or UNDERSTAND something — a design/architecture "
+    "decision, a 'what's the best way to…', 'how should I…', 'what's the industry standard for…', "
+    "'compare X vs Y', 'explain the tradeoffs of…' question that is NOT about the status of a specific "
+    "effort and is NOT a coding task to dispatch. Set kind=advisory. This runs real research and "
+    "replies with a grounded, cited answer — so DON'T try to answer it yourself in `reply`; instead "
+    "put a brief 'let me research that' acknowledgement in `reply`.\n"
+    "- question / chitchat otherwise (a quick factual/conversational reply you can give directly).\n"
     "EVERY user-facing action has an NL path (this is the primary surface; slash commands are just a "
     "power-user fallback) — so map the operator's plain-language intent to the RIGHT kind and act, "
     "rather than telling them to run a command. Only set action fields when clearly warranted. Never "
@@ -141,6 +147,17 @@ _PO_NL_SYS = (
     "'check', 'look up', 'find', or 'investigate' something and then do nothing — if answering "
     "requires inspecting a workspace/codebase, open an effort (kind=request, a worker actually "
     "checks); otherwise just say you don't have that information and suggest how they can find it."
+)
+
+# The ungrounded FALLBACK advisor prompt — used ONLY when the research engine is unreachable, and the
+# answer is always posted with a clear "unverified / no citations" label so it's never mistaken for a
+# grounded one. Kept scoped to software architecture / engineering practice (the advisory domain).
+_ADVISOR_FALLBACK_SYS = (
+    "You are a senior software architect advising an engineer. Answer their design / architecture / "
+    "best-practice question directly and concretely, with the industry-standard approach and its "
+    "tradeoffs. Be specific and practical (name tools, patterns, commands where useful); prefer a "
+    "clear recommendation over an exhaustive survey. You do NOT have live research access right now, "
+    "so stick to well-established practice and do not fabricate citations, versions, or URLs."
 )
 
 _HELP = (
@@ -971,11 +988,32 @@ class Orchestrator:
                 mgmt_thread=thread_id,
             )
             return
+        elif intent.kind == "advisory" and self.s.advisory_enabled:
+            # A design/architecture/best-practice question the operator wants DISCUSSED. Route to the
+            # research-grounded advisor (Tier 2): ack now, research in the background, post a grounded
+            # + cited answer in-thread. The operator's whole message is the research query.
+            await self._advise(message, channel_id, thread_id, reply_prefix=reply)
+            return
         elif intent.kind == "reengage":
             # "get the workers working" / "continue" / "re-engage the monogame tasks" — actually
             # RE-DISPATCH idle efforts. This is additive (running work the operator already asked
             # for), so it fires directly from NL — no phantom "they'll proceed as resources free up".
             targets = self._select_efforts(intent, efforts)
+            scope = (intent.project or intent.target_filter or "").strip()
+            if not targets and scope:
+                # A scoped re-engage that matched no IDLE effort. Do NOT grab unrelated efforts — the
+                # operator named a project/group, and re-dispatch means EXISTING work. Tell them
+                # plainly and offer to START new work (the likely intent when the last one finished).
+                await self.chat.post(
+                    channel_id,
+                    (reply + f"\n\n_There's no idle effort in **{scope}** to re-dispatch — its last "
+                     f"effort already finished (or there isn't one yet). I did **not** start "
+                     f"anything unrelated. Want me to open a NEW effort on it? Just tell me the task "
+                     f"(e.g. “on {scope}, fetch the upstream and integrate it”) and I'll run it._"
+                     ).strip(),
+                    thread_id=thread_id,
+                )
+                return
             await self._reengage(targets, mgmt_channel=channel_id, mgmt_thread=thread_id,
                                  reply_prefix=reply)
             return
@@ -1109,17 +1147,82 @@ class Orchestrator:
         return body
 
     def _select_efforts(self, intent, open_efforts: list[dict]) -> list[str]:
-        """Resolve which efforts an action targets: an explicit effort_id, a name/substring filter
-        (e.g. 'calculator', 'monogame'), else ALL open efforts."""
+        """Resolve which efforts an action targets. Scoping is by an explicit effort_id, a
+        name/substring filter, or a named project (matched against BOTH the effort id and its
+        project). CRITICAL: a scoped request that matches nothing returns [] — it must NEVER silently
+        widen to ALL efforts (that dispatched stale calculator efforts against the monogame workspace
+        when 'get the workers working on monogame-engine' had no idle monogame effort to re-dispatch).
+        Only a completely UNSCOPED request ('get the workers working', no group named) targets all."""
         ids = {e["id"] for e in open_efforts}
         if intent.effort_id and intent.effort_id in ids:
             return [intent.effort_id]
         filt = (getattr(intent, "target_filter", None) or "").strip().lower()
-        if filt:
-            sel = [e["id"] for e in open_efforts if filt in e["id"].lower()]
-            if sel:
-                return sel
-        return [e["id"] for e in open_efforts]
+        proj = (getattr(intent, "project", None) or "").strip().lower()
+        scoped = bool(filt or proj or intent.effort_id)
+        if scoped:
+            def _match(e: dict) -> bool:
+                eproj = (e.get("project") or "").lower()
+                if filt and (filt in e["id"].lower() or filt in eproj):
+                    return True
+                if proj and proj == eproj:
+                    return True
+                return False
+            return [e["id"] for e in open_efforts if _match(e)]   # may be [] — never widen to all
+        return [e["id"] for e in open_efforts]   # unscoped 'continue' → all idle efforts
+
+    async def _advise(
+        self, question: str, channel_id: str, thread_id: str | None, *, reply_prefix: str = "",
+    ) -> None:
+        """Tier-2 advisor: answer a design/architecture question with a research-grounded, CITED
+        answer. Acks immediately (a research job takes minutes), runs it in the background, and posts
+        the grounded answer + sources in-thread. If research is unavailable, posts a clearly-labelled
+        UNGROUNDED local-model take (honest — never a silent, uncited guess)."""
+        ack = (reply_prefix or "").strip()
+        ack = (ack + "\n\n" if ack else "") + (
+            "🔎 _Researching that against current sources — I'll post a grounded, cited answer here "
+            "in a moment (a full research pass can take a minute or two)._"
+        )
+        await self.chat.post(channel_id, ack.strip(), thread_id=thread_id)
+        self._spawn(self._run_advisory(question, channel_id, thread_id))
+
+    async def _run_advisory(
+        self, question: str, channel_id: str, thread_id: str | None
+    ) -> None:
+        """Background half of `_advise`: run the research job, then post the grounded answer (or the
+        labelled local fallback). Isolated in its own task so the operator's turn returns immediately
+        and a slow/failed research job never wedges the intake loop."""
+        ans = None
+        try:
+            ans = await self.grounding.advise(question)
+        except Exception as exc:  # noqa: BLE001 - degrade to the local fallback below
+            log.warning("advisory research raised: %s", exc)
+        if ans is not None and ans.grounded and (ans.answer or "").strip():
+            body = ans.answer.strip()
+            if ans.sources:
+                srcs = "\n".join(f"- {s}" for s in ans.sources[:12])
+                body += f"\n\n**Sources**\n{srcs}"
+            await self.chat.post(channel_id, body, thread_id=thread_id)
+            return
+        # Research unavailable/timed out → an honest, clearly-labelled ungrounded local answer.
+        local = ""
+        try:
+            local = (await self.models.complete("po", _ADVISOR_FALLBACK_SYS, question)).strip()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("advisory local fallback failed: %s", exc)
+        if local:
+            await self.chat.post(
+                channel_id,
+                "⚠️ _I couldn't reach the research engine to ground this, so here's my best take from "
+                f"general knowledge — **unverified, no citations**:_\n\n{local}",
+                thread_id=thread_id,
+            )
+        else:
+            await self.chat.post(
+                channel_id,
+                "⚠️ I couldn't reach the research engine to answer that just now — please try again "
+                "shortly.",
+                thread_id=thread_id,
+            )
 
     async def _reengage(
         self, effort_ids: list[str], *, mgmt_channel: str, mgmt_thread: str | None = None,

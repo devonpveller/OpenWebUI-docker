@@ -141,6 +141,10 @@ class OperatorIntent(BaseModel):
     kind: Literal[
         "request", "clarification", "status", "steering", "decision", "question", "chitchat",
         "reengage", "archive", "reassign",
+        # Advisory: a design / architecture / best-practice / "how do I" question the operator wants
+        # DISCUSSED (not a coding effort). Routed to the research-grounded advisor (Tier 2) — a real,
+        # cited answer, not a one-shot local guess. Distinct from `question` (quick factual reply).
+        "advisory",
         # User-facing admin inlets — every slash command has an NL path (operator preference:
         # all user-facing inlets stem from NL; slash commands are only a power-user fallback).
         "project_list", "project_remove", "egress_allow", "kill", "unkill",
@@ -167,6 +171,17 @@ class GroundingResult(BaseModel):
     grounded: bool = False
     claims: list[str] = Field(default_factory=list)
     summary: str = ""
+    job_id: str | None = None
+
+
+class AdvisoryAnswer(BaseModel):
+    """A research-grounded answer to an operator's design/architecture question (Tier 2 advisor).
+    `grounded=False` means the research engine was unavailable/timed out — the caller then falls back
+    to a local-model answer that is CLEARLY LABELLED ungrounded (never a silent, uncited guess)."""
+
+    grounded: bool = False
+    answer: str = ""                                # the synthesized answer (the research synthesis)
+    sources: list[str] = Field(default_factory=list)  # cited source URLs/titles for the answer
     job_id: str | None = None
 
 

@@ -10,6 +10,7 @@ per-service budget (§10.3.3).
 from __future__ import annotations
 
 import asyncio
+import time
 
 from .config import Settings
 from .models import Rejected
@@ -32,7 +33,11 @@ class Registry:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
         self._lock = asyncio.Lock()
-        self._held_total = 0
+        # Held connections as {request_id: monotonic reserve time}, NOT a bare counter. Keying by
+        # request id makes release IDEMPOTENT (a missed/duplicated release can't corrupt the count)
+        # and lets the reaper reclaim connections stuck past any legitimate lifetime — the fix for
+        # Starlette abandoning a disconnected StreamingResponse without releasing its held slot.
+        self._held: dict[str, float] = {}
         # Build one queue per known model family. One entry today; P4 adds embed.
         self._queues: dict[str, ModelQueue] = {
             "qwen36-27b": ModelQueue(
@@ -71,10 +76,11 @@ class Registry:
     def queues(self) -> dict[str, ModelQueue]:
         return dict(self._queues)
 
-    async def reserve_connection(self, model: str) -> None:
-        """Admit one held connection against the global cap, or reject (§10.3.3)."""
+    async def reserve_connection(self, rid: str, model: str) -> None:
+        """Admit one held connection against the global cap, or reject (§10.3.3). Records `rid` with
+        its reserve time so it can be released idempotently and reaped if leaked."""
         async with self._lock:
-            if self._held_total >= self._settings.max_total_connections:
+            if len(self._held) >= self._settings.max_total_connections:
                 raise Rejected(
                     type="queue_connections_exhausted",
                     message=(
@@ -85,13 +91,26 @@ class Registry:
                     status_code=503,
                     retry_after_s=10,
                 )
-            self._held_total += 1
+            self._held[rid] = time.monotonic()
 
-    async def release_connection(self) -> None:
+    async def release_connection(self, rid: str) -> None:
+        """Release a held connection. Idempotent: releasing an unknown/already-released (or
+        already-reaped) rid is a no-op, so no double-release can corrupt the count."""
         async with self._lock:
-            if self._held_total > 0:
-                self._held_total -= 1
+            self._held.pop(rid, None)
+
+    async def reap_stale_connections(self, ttl_s: float) -> list[str]:
+        """Reclaim connections held longer than `ttl_s` — a leak safety net. A legitimate request
+        never holds a slot beyond its upstream timeout + queue wait, so anything older is a slot the
+        release path never freed (Starlette abandoned the disconnected response generator). Returns
+        the reclaimed rids so a persistent leak is VISIBLE (logged), not silently masked forever."""
+        cutoff = time.monotonic() - ttl_s
+        async with self._lock:
+            stale = [rid for rid, ts in self._held.items() if ts < cutoff]
+            for rid in stale:
+                self._held.pop(rid, None)
+        return stale
 
     @property
     def held_total(self) -> int:
-        return self._held_total
+        return len(self._held)

@@ -208,6 +208,7 @@ class GovernanceGate:
             {
                 "id": r.id, "state": r.state, "reason": r.freeze_reason,
                 "level": r.freeze_level, "lifecycle": r.lifecycle,
+                "project": r.project,   # so actions can scope BY PROJECT, not just effort-id substring
             }
             for r in rows
         ]

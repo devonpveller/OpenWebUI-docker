@@ -112,6 +112,24 @@ class Settings(BaseSettings):
         25.0, alias="LLM_QUEUE_DRAIN_GRACE_S", ge=0, description="SIGTERM in-flight grace (§10.4)."
     )
 
+    # --- Connection-leak self-healing (§10.3.3 safety net) ---
+    # A held connection is released in the response generator's `finally`. But Starlette does NOT
+    # aclose an abandoned StreamingResponse body_iterator on client disconnect (verified 1.3.1) — so a
+    # mid-stream disconnect leaves the release to async-generator GC, which under load is delayed or
+    # effectively never. Accumulated leaks wedge the hard `max_total_connections` cap and shed ALL load
+    # while the GPU sits idle (the observed failure). This reaper reconciles the held set: any
+    # connection held longer than a legitimate request could possibly last (max queue wait + the ~600s
+    # upstream timeout) is a leak and is reclaimed, so the cap can never permanently wedge.
+    conn_ttl_s: float = Field(
+        1200.0, alias="LLM_QUEUE_CONN_TTL_S", gt=0,
+        description="Reclaim a held connection older than this — MUST exceed the longest legitimate "
+        "hold (> upstream_timeout_s + worst-case queue wait). Safety net for disconnect-leaked slots.",
+    )
+    reap_interval_s: float = Field(
+        30.0, alias="LLM_QUEUE_REAP_INTERVAL_S", gt=0,
+        description="How often the connection-leak reaper sweeps the held set.",
+    )
+
     # --- Analytics (P3) ---
     events_db_path: str = Field(
         "",

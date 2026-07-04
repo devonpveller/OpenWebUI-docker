@@ -151,6 +151,15 @@ class Settings(BaseSettings):
     grounding_timeout_s: float = 300.0      # bound the poll; on timeout grounding is skipped
     grounding_poll_interval_s: float = 5.0
 
+    # ── Advisory (Tier 2) — research-grounded answers to design/architecture questions ──
+    # When ON, an `advisory` operator message is answered by running an openbrain-research job and
+    # replying with the grounded, CITED synthesis in-thread (falls back to a clearly-labelled
+    # ungrounded local-model take if research is unavailable). Reuses research_url/key above. This is
+    # the operator's own private research egress (Mullvad/Tor), so it's on by default; the future
+    # Tier-3 cloud lane will be an explicit per-question opt-in on the same intent.
+    advisory_enabled: bool = True
+    advisory_timeout_s: float = 300.0       # the operator is WAITING — allow a full research job
+
     # ── Project-context anchor (UX-FLOW Stage 1, P3.8) ──────────────────────
     # Before the readiness gate, run a ONE-TIME read-only worker survey of the repo (languages,
     # structure, conventions) and cache it per project, so the gate ANCHORS to the real codebase

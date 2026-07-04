@@ -100,6 +100,51 @@ async def test_reengage_links_effort_thread_when_permalink_available(db_url):
         await db.dispose()
 
 
+# ── a SCOPED reengage must never widen to unrelated efforts ──────────────────
+async def test_scoped_reengage_does_not_dispatch_unrelated_efforts(db_url):
+    """Regression for the transcript: 'get the workers working on monogame-engine' re-dispatched stale
+    CALCULATOR efforts (against the monogame workspace) because a filter that matched nothing fell
+    back to ALL idle efforts. A scoped request must dispatch nothing unrelated + say so."""
+    orch, chat, harness, db = await _orch(db_url)
+    try:
+        await _idle_effort(orch, "calculator-percent-function")     # unrelated, idle, in sandbox
+        await _idle_effort(orch, "add-hello-function")              # unrelated, idle
+        orch.models._client.queue_structured(
+            OperatorIntent(kind="reengage", target_filter="monogame-engine", reply="On it —"))
+        mgmt = await orch.mgmt_channel_id()
+        await orch.nl_intake("get the workers working on monogame-engine", mgmt, thread_id="t")
+        await _drain(orch)
+        assert len(harness.wakes) == 0                              # NOTHING unrelated dispatched
+        posts = " ".join(p["message"] for p in chat.posted)
+        assert "no idle effort" in posts and "monogame-engine" in posts   # helpful, offers to start new
+        assert "Dispatching workers now" not in posts              # did NOT grab the calculators
+    finally:
+        await db.dispose()
+
+
+async def test_scoped_reengage_matches_by_project(db_url):
+    """A named project scopes to efforts in THAT project — even when the effort id doesn't contain the
+    project name — and leaves other projects' idle efforts alone."""
+    orch, chat, harness, db = await _orch(db_url)
+    try:
+        await orch.projects.add("monogame-engine", "https://github.com/me/mono.git")
+        eid, _c, _r = await orch.router.open_effort("port-shader", project="monogame-engine")
+        await orch.charters.set_goal(eid, "port the shader", created_by="po")
+        await _idle_effort(orch, "calculator-percent-function")     # different project (sandbox)
+        orch.models._client.queue_structured(
+            OperatorIntent(kind="reengage", target_filter="monogame-engine", reply="On it —"))
+        mgmt = await orch.mgmt_channel_id()
+        await orch.nl_intake("get the workers working on monogame-engine", mgmt, thread_id="t")
+        await _drain(orch)
+        # ONLY the monogame-engine effort ran (delegate may wake it more than once for its steps);
+        # the sandbox calculator effort was never touched.
+        assert len(harness.wakes) >= 1
+        assert all("port-shader" in w["session_id"] for w in harness.wakes)
+        assert not any("calculator" in w["prompt"].lower() for w in harness.wakes)
+    finally:
+        await db.dispose()
+
+
 # ── reengage via NL: "get the workers working" fires, no empty promise ───────
 async def test_nl_reengage_fires_not_promises(db_url):
     orch, chat, harness, db = await _orch(db_url)
