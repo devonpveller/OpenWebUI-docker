@@ -462,12 +462,21 @@ class LittleCoderDaemon:
             decision = decide_switch(requested, None, self.busy)   # → CLONE (fresh)
 
         if decision.action is SwitchAction.NOOP:
-            # Already focused — the workspace was NOT wiped, so `origin` is intact.
-            # But `upstream` may be absent (never baked, or baked before the caller
-            # knew the parent): ensure it here so a fork's `git fetch upstream` works
-            # on a re-focus, not only on the first clone. Idempotent + skipped when
-            # already present (has_remote) so routine re-dispatches stay cheap.
+            # Already focused — the workspace was NOT wiped, so `origin` is intact… but the token
+            # EMBEDDED in its URL at the original clone is SHORT-LIVED (a GitHub App installation
+            # token lives 1h). A NOOP re-focus hours later would push with a DEAD credential (the
+            # live "expired token in origin" failure). Re-bake origin's auth with the caller's
+            # current token — a cheap `remote set-url`; the work in the tree is untouched.
             out: dict = {"action": "noop", "focus": requested.canonical_url}
+            noop_token = req.token or os.environ.get("LC_DEPLOY_TOKEN") or None
+            if noop_token:
+                res = await asyncio.to_thread(
+                    self.workspace.refresh_origin_auth, requested, noop_token
+                )
+                out["origin_reauthed"] = bool(res.ok)
+            # `upstream` may be absent (never baked, or baked before the caller knew the parent):
+            # ensure it here so a fork's `git fetch upstream` works on a re-focus, not only on the
+            # first clone. Idempotent + skipped when already present (has_remote).
             if req.upstream and not await asyncio.to_thread(
                 self.workspace.has_remote, "upstream"
             ):

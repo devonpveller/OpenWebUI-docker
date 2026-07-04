@@ -193,13 +193,16 @@ class LifecycleStep(BaseModel):
       - fork:          fork `source` (owner/repo) into the operator's account
       - add_submodule: add `source` (a repo/registered-project) as a submodule at `path` in `target`
       - worker_task:   dispatch a coding task `task` in project `target` (e.g. wire a build)
+      - submodule_bump: after a worker_task on submodule `source` lands, update `target` (the parent/
+                        engine repo)'s submodule at `path` to the worker's new commit + commit the
+                        parent — the composition wiring-back so the ENGINE reflects the change.
     """
 
-    kind: Literal["fork", "add_submodule", "worker_task"]
+    kind: Literal["fork", "add_submodule", "worker_task", "submodule_bump"]
     summary: str                          # a human one-liner shown in the approval list
-    source: str = ""                      # fork: repo to fork; add_submodule: repo/project to add
-    target: str = ""                      # add_submodule: repo/project to add INTO; worker_task: project
-    path: str = ""                        # add_submodule: mount path
+    source: str = ""                      # fork: repo to fork; add_submodule/bump: submodule repo/project
+    target: str = ""                      # add_submodule/bump: parent/engine; worker_task: project
+    path: str = ""                        # add_submodule/bump: the submodule mount path (e.g. vendor/murder)
     task: str = ""                        # worker_task: the coding instruction
 
 

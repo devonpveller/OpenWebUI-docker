@@ -20,6 +20,7 @@ import re
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
 
+import httpx
 from sqlalchemy import func, select
 
 from ..config import Settings
@@ -40,6 +41,7 @@ _STATUS_ICON = {
     "done": "✅",
     "aborted": "⛔",
     "error": "⚠️",
+    "needs-attention": "🟠",   # did its piece but the operator's INTENT isn't complete (scope miss)
 }
 
 
@@ -54,6 +56,16 @@ def slugify(name: str) -> str:
 # the survey respects the scheduler's concurrency semaphore (surveys yield to real work).
 SURVEY_EFFORT = "__survey__"
 CAPABILITY_EFFORT = "__capability__"  # reserved effort for operator-plane git ops (compose/submodule)
+
+
+def _is_worker_unavailable(exc: Exception) -> bool:
+    """A dispatch failure that means THE WORKER is wedged/unreachable (not a task or repo problem):
+    409 (daemon already busy — the state-mismatch that trapped efforts), 502/503, or any transport
+    error (connection refused/timeout = the daemon is down). These quarantine the worker + retry
+    elsewhere; anything else (e.g. a clone auth error) is NOT a worker fault and propagates normally."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code in (409, 502, 503)
+    return isinstance(exc, httpx.TransportError)
 _SURVEY_PROMPT = (
     "PROJECT SURVEY (READ-ONLY — do not modify, create, or delete any files; do not run tests that "
     "mutate state). In 8–12 terse lines, give a FACTUAL summary of THIS repository so future work "
@@ -242,124 +254,162 @@ class Router:
         project has a per-project deploy token); if omitted, the worker is assumed already focused.
         `upstream` (a fork's parent) is re-baked as the read-only `upstream` remote on this focus."""
         session_id = session_id or thread_id
-        try:
-            inst = await self.scheduler.acquire(effort_id, role, session_id)
-        except FrozenEffortError:
-            await self.audit.log(
-                "wake_refused_frozen", effort_id=effort_id, payload={"role": role}
-            )
-            return None
-        except NoCapacityError:
-            # No free worker slot — DON'T dead-end ("couldn't dispatch"). Propagate so the
-            # orchestrator PARKS the effort and auto-runs it when a worker frees (no silent idle).
-            await self.audit.log(
-                "wake_queued", effort_id=effort_id, payload={"role": role}
-            )
-            raise
-
-        try:
-            if repo:
-                ok, detail, upstream_ok = await self.harness.set_project(
-                    inst.base_url, repo, token=repo_token,
-                    upstream=upstream, upstream_token=upstream_token,
-                )
+        # RELIABILITY: dispatch inside a bounded retry loop. If the acquired worker is wedged (409
+        # busy) or unreachable, QUARANTINE it (so it stops being picked) and RE-DISPATCH on another
+        # worker — a stuck daemon no longer traps the effort in an infinite 409-retry (the idle-GPU
+        # bug). Re-dispatch requires a `repo` to re-clone on the fresh worker; a repo-less follow-up
+        # (publish) can't be moved, so it quarantines + raises (the caller's verify/re-engage handles
+        # it). When every worker is quarantined, acquire raises NoCapacity → the effort PARKS.
+        attempts = 0
+        while True:
+            attempts += 1
+            try:
+                inst = await self.scheduler.acquire(effort_id, role, session_id)
+            except FrozenEffortError:
                 await self.audit.log(
-                    "worker_project_set", effort_id=effort_id, actor=inst.id,
-                    payload={"repo": repo, "ok": ok, "upstream": upstream,
-                             "upstream_ok": upstream_ok, "detail": detail},
+                    "wake_refused_frozen", effort_id=effort_id, payload={"role": role}
                 )
-                if ok and upstream and upstream_ok is False:
-                    # Clone worked but the fork's read-only `upstream` remote didn't bake — the
-                    # parent is unreachable/private. NON-FATAL (origin work still runs), but the
-                    # worker's `git fetch upstream` will fail, so surface it in-thread rather than
-                    # let the effort discover it mid-task (observability = safety).
-                    await self.chat.post(
-                        channel_id,
-                        f"⚠️ Cloned `{repo}`, but I couldn't set up its `upstream` remote "
-                        f"(`{upstream}`) — the parent looks **private or unreachable**. Fork "
-                        f"sync (`git fetch upstream`) won't work until that's fixed (a "
-                        f"read-scoped token for the parent, or a correct URL). Proceeding on "
-                        f"`origin` only.",
-                        thread_id=thread_id,
-                    )
-                if not ok:
-                    # A CLONE failure — not a worker failure. Name the real problem + how to fix it,
-                    # so it never reads as a phantom "worker responded". exit 128 = private/missing
-                    # repo the deploy token can't reach.
-                    is_auth = ("128" in detail) or ("authentication" in detail.lower()) or not detail
-                    hint = (
-                        "that repo looks **private or missing** and the deploy token can't reach it "
-                        "— check the URL, or set a token with `/project add <name> <repo> <TOKEN_ENV>`"
-                        if is_auth else "see the error above"
-                    )
-                    shown = f"`{detail}` — " if detail else ""
-                    await self.chat.post(
-                        channel_id,
-                        f"⚠️ I couldn't clone `{repo}` — {shown}{hint}. No worker was dispatched "
-                        f"(nothing ran; this wasn't a worker failure).",
-                        thread_id=thread_id,
-                    )
-                    return WorkResult("clone_failed", task_id="", output=f"clone failed: {detail}")
-            # Stream the worker's activity to the effort THREAD as it happens (observability =
-            # safety, governance §5/§7). Notification discipline (CM.6): coalesce rapid *successful*
-            # commands into one post; failures/denials always post immediately + in context so a
-            # problem is never buried under a batch.
-            batch_n = max(1, self.s.activity_batch)
-            buf: list[str] = []
+                return None
+            except NoCapacityError:
+                # No free worker slot — DON'T dead-end ("couldn't dispatch"). Propagate so the
+                # orchestrator PARKS the effort and auto-runs it when a worker frees (no silent idle).
+                await self.audit.log(
+                    "wake_queued", effort_id=effort_id, payload={"role": role}
+                )
+                raise
 
-            async def _flush() -> None:
-                if buf:
-                    await self.chat.post(channel_id, "\n".join(buf), thread_id=thread_id)
-                    buf.clear()
-
-            async def _stream(kind: str, item: dict) -> None:
-                if kind == "command":
-                    cmd = (item.get("command") or "").strip()
-                    if not cmd:
-                        return
-                    ok = bool(item.get("ok"))
-                    icon = "🚫" if item.get("denied") else ("✅" if ok else "❌")
-                    line = f"{icon} `$ {cmd[:200]}`"
-                    self._record_activity(effort_id, f"{icon} {cmd[:120]}")  # PO visibility
-                    if not ok:  # failure/denial — flush the batch, then surface this with context
-                        tail = (item.get("stderr_tail") or "").strip()
-                        if tail:
-                            line += f"\n> {tail[:300]}"
-                        await _flush()
-                        await self.chat.post(channel_id, line, thread_id=thread_id)
-                        return
-                    buf.append(line)
-                    if len(buf) >= batch_n:
-                        await _flush()
-                elif kind == "answer":
-                    await _flush()
-                    ans = (item.get("answer") or "").strip()
-                    if ans:
-                        self._record_activity(effort_id, f"💬 {ans[:120]}")
+            quarantined = False
+            try:
+                if repo:
+                    ok, detail, upstream_ok = await self.harness.set_project(
+                        inst.base_url, repo, token=repo_token,
+                        upstream=upstream, upstream_token=upstream_token,
+                    )
+                    await self.audit.log(
+                        "worker_project_set", effort_id=effort_id, actor=inst.id,
+                        payload={"repo": repo, "ok": ok, "upstream": upstream,
+                                 "upstream_ok": upstream_ok, "detail": detail},
+                    )
+                    if ok and upstream and upstream_ok is False:
+                        # Clone worked but the fork's read-only `upstream` remote didn't bake — the
+                        # parent is unreachable/private. NON-FATAL (origin work still runs), but the
+                        # worker's `git fetch upstream` will fail, so surface it in-thread rather than
+                        # let the effort discover it mid-task (observability = safety).
                         await self.chat.post(
-                            channel_id, f"💬 **{role}@{inst.id}:** {ans[:1500]}",
+                            channel_id,
+                            f"⚠️ Cloned `{repo}`, but I couldn't set up its `upstream` remote "
+                            f"(`{upstream}`) — the parent looks **private or unreachable**. Fork "
+                            f"sync (`git fetch upstream`) won't work until that's fixed (a "
+                            f"read-scoped token for the parent, or a correct URL). Proceeding on "
+                            f"`origin` only.",
                             thread_id=thread_id,
                         )
+                    if not ok:
+                        # A CLONE failure — not a worker failure. Name the real problem + how to fix
+                        # it, so it never reads as a phantom "worker responded". exit 128 =
+                        # private/missing repo the deploy token can't reach.
+                        is_auth = ("128" in detail) or ("authentication" in detail.lower()) or not detail
+                        hint = (
+                            "that repo looks **private or missing** and the deploy token can't reach "
+                            "it — check the URL, or set a token with `/project add <name> <repo> "
+                            "<TOKEN_ENV>`" if is_auth else "see the error above"
+                        )
+                        shown = f"`{detail}` — " if detail else ""
+                        await self.chat.post(
+                            channel_id,
+                            f"⚠️ I couldn't clone `{repo}` — {shown}{hint}. No worker was dispatched "
+                            f"(nothing ran; this wasn't a worker failure).",
+                            thread_id=thread_id,
+                        )
+                        return WorkResult("clone_failed", task_id="", output=f"clone failed: {detail}")
+                # Stream the worker's activity to the effort THREAD as it happens (observability =
+                # safety, governance §5/§7). Notification discipline (CM.6): coalesce rapid *successful*
+                # commands into one post; failures/denials always post immediately + in context so a
+                # problem is never buried under a batch.
+                batch_n = max(1, self.s.activity_batch)
+                buf: list[str] = []
 
-            context = await self.build_context(effort_id, role)
-            prompt = f"{context}\n\n{instruction}".strip()
-            # `channel` here is little-coder's trigger-surface enum, NOT the Mattermost
-            # channel — the harness defaults it to "batch" (automated trigger).
-            result = await self.harness.wake(
-                inst.base_url, session_id, prompt, on_update=_stream
-            )
-            await _flush()  # defensive: surface any tail commands if no answer callback fired
-            await self.audit.log(
-                "wake_done",
-                effort_id=effort_id,
-                actor=inst.id,
-                payload={"status": result.status, "role": role},
-            )
-            # A finished effort wakes its dependency waiters (idle-wait DAG).
-            await self.scheduler.wake_finished(effort_id)
-            return result
-        finally:
-            await self.scheduler.release(inst.id)
+                async def _flush() -> None:
+                    if buf:
+                        await self.chat.post(channel_id, "\n".join(buf), thread_id=thread_id)
+                        buf.clear()
+
+                async def _stream(kind: str, item: dict) -> None:
+                    if kind == "command":
+                        cmd = (item.get("command") or "").strip()
+                        if not cmd:
+                            return
+                        ok = bool(item.get("ok"))
+                        icon = "🚫" if item.get("denied") else ("✅" if ok else "❌")
+                        line = f"{icon} `$ {cmd[:200]}`"
+                        self._record_activity(effort_id, f"{icon} {cmd[:120]}")  # PO visibility
+                        if not ok:  # failure/denial — flush the batch, then surface with context
+                            tail = (item.get("stderr_tail") or "").strip()
+                            if tail:
+                                line += f"\n> {tail[:300]}"
+                            await _flush()
+                            await self.chat.post(channel_id, line, thread_id=thread_id)
+                            return
+                        buf.append(line)
+                        if len(buf) >= batch_n:
+                            await _flush()
+                    elif kind == "answer":
+                        await _flush()
+                        ans = (item.get("answer") or "").strip()
+                        if ans:
+                            self._record_activity(effort_id, f"💬 {ans[:120]}")
+                            await self.chat.post(
+                                channel_id, f"💬 **{role}@{inst.id}:** {ans[:1500]}",
+                                thread_id=thread_id,
+                            )
+
+                context = await self.build_context(effort_id, role)
+                prompt = f"{context}\n\n{instruction}".strip()
+                # `channel` here is little-coder's trigger-surface enum, NOT the Mattermost
+                # channel — the harness defaults it to "batch" (automated trigger).
+                result = await self.harness.wake(
+                    inst.base_url, session_id, prompt, on_update=_stream
+                )
+                await _flush()  # defensive: surface any tail commands if no answer callback fired
+                await self.audit.log(
+                    "wake_done",
+                    effort_id=effort_id,
+                    actor=inst.id,
+                    payload={"status": result.status, "role": role},
+                )
+                # A finished effort wakes its dependency waiters (idle-wait DAG).
+                await self.scheduler.wake_finished(effort_id)
+                return result
+            except (httpx.HTTPStatusError, httpx.TransportError) as exc:
+                if not _is_worker_unavailable(exc):
+                    raise  # a real error (repo/task/other) — not a worker-health problem
+                await self.scheduler.quarantine(
+                    inst.id, seconds=self.s.worker_quarantine_seconds,
+                    reason=f"dispatch failed: {exc}",
+                )
+                quarantined = True   # quarantine already reset its slot — don't also release
+                can_retry = bool(repo) and attempts < self.s.worker_dispatch_max_attempts
+                reason = (f"HTTP {exc.response.status_code}"
+                          if isinstance(exc, httpx.HTTPStatusError) else "unreachable")
+                await self.audit.log(
+                    "worker_dispatch_failed", effort_id=effort_id, actor=inst.id,
+                    payload={"attempt": attempts, "will_retry": can_retry,
+                             "reason": reason, "error": str(exc)[:160]},
+                )
+                await self.chat.post(
+                    channel_id,
+                    f"⚠️ worker `{inst.id}` was unresponsive/stuck ({reason}) — "
+                    + ("handing this to another worker (re-cloning there)…"
+                       if can_retry else
+                       "couldn't hand it off automatically (no repo focus to re-clone); raising it."),
+                    thread_id=thread_id,
+                )
+                if can_retry:
+                    continue   # re-acquire — the quarantined worker is now excluded
+                raise
+            finally:
+                if not quarantined:
+                    await self.scheduler.release(inst.id)
 
     # ── project survey — read-only Stage-1 anchor for the readiness gate (P3.8) ─
     async def survey_project(self, repo: str) -> str:

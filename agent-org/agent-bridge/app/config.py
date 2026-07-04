@@ -105,6 +105,15 @@ class Settings(BaseSettings):
     worker_instance_urls: str = ""
     worker_poll_interval_s: float = 3.0
     worker_poll_timeout_s: float = 1800.0
+    # Reliability: when a dispatch to a worker fails because the daemon is wedged (409 busy) or
+    # unreachable, quarantine that worker for this long (a self-healing back-off — after it lapses the
+    # worker is retried, so a transient wedge recovers on its own) and re-dispatch on another worker up
+    # to `worker_dispatch_max_attempts` times. Stops a stuck daemon from trapping an effort forever.
+    worker_quarantine_seconds: float = 300.0
+    worker_dispatch_max_attempts: int = 3
+    # A single poison event that keeps throwing is dead-lettered after this many handler failures
+    # (marked processed + escalated) so it can't replay forever on every catch-up.
+    event_max_attempts: int = 5
     # FALLBACK repo only. The org works on ANY project onboarded via `/project add` (a repo per
     # project, resolved from the effort's #proj-<slug> channel — see modules/projects.py). This is
     # just the default for a #mgmt request that names no project; empty = the sandbox pool. If set,

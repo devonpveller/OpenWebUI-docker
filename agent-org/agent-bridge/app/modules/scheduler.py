@@ -17,10 +17,11 @@ the gate (machine A) is what re-admits an effort to the scheduler (machine B).
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 
-from ..db import Database
+from ..db import Database, now_iso
 from ..models import (
     SCHED_COMPUTING,
     SCHED_IDLE,
@@ -90,6 +91,15 @@ class Scheduler:
                 r.sched_state = SCHED_IDLE
                 r.effort_id = None
                 r.waiting_on_effort = None
+            # Boot is a clean slate: lift any stale health-quarantine so a bridge restart re-admits
+            # every worker (a genuinely-wedged one simply re-quarantines on its next failed dispatch).
+            quarantined = (
+                await s.execute(
+                    select(WorkerInstance).where(WorkerInstance.quarantined_until.is_not(None))
+                )
+            ).scalars().all()
+            for q in quarantined:
+                q.quarantined_until = None
             await s.commit()
             return len(rows)
 
@@ -119,6 +129,12 @@ class Scheduler:
             base_q = select(WorkerInstance).where(
                 WorkerInstance.retired.is_(False),
                 WorkerInstance.sched_state.in_([SCHED_IDLE, SCHED_SUSPENDED]),
+                # Skip a quarantined (wedged/unreachable) worker until its back-off lapses — a stuck
+                # daemon must not keep being picked (the infinite-409-retry bug).
+                or_(
+                    WorkerInstance.quarantined_until.is_(None),
+                    WorkerInstance.quarantined_until <= now_iso(),
+                ),
             )
             # AFFINITY (workspace stickiness): a follow-up wake for a session — the next plan
             # step, the publish, a PM re-engage — MUST return to the SAME worker that holds this
@@ -148,6 +164,34 @@ class Scheduler:
             payload={"role": role, "session_id": session_id},
         )
         return inst
+
+    async def quarantine(self, instance_id: str, *, seconds: float, reason: str = "") -> None:
+        """Mark a worker un-pickable for `seconds` because a dispatch to it failed (409 busy /
+        unreachable). Frees its slot (→ idle) and DROPS its session/effort binding — a wedged worker's
+        workspace + affinity are worthless, so the effort re-clones on a healthy worker. Self-healing:
+        after the back-off lapses the worker is eligible again (a transient wedge recovers on its own);
+        a genuinely-stuck one just re-quarantines on the next failed dispatch. NOT a governance freeze
+        (that's the effort's gate) — this is pool-health only."""
+        until = (datetime.now(timezone.utc) + timedelta(seconds=seconds)).isoformat()
+        async with self.db.session_factory() as s:
+            inst = await s.get(WorkerInstance, instance_id)
+            if inst is None:
+                return
+            inst.sched_state = SCHED_IDLE
+            inst.effort_id = None
+            inst.session_id = None
+            inst.waiting_on_effort = None
+            inst.quarantined_until = until
+            await s.commit()
+        await self.audit.log(
+            "worker_quarantined", actor=instance_id,
+            payload={"until": until, "reason": reason[:160]},
+        )
+        if self.on_release is not None:   # a slot freed → let parked work drain onto a healthy worker
+            try:
+                self.on_release()
+            except Exception:  # noqa: BLE001
+                pass
 
     async def release(self, instance_id: str, *, suspend: bool = True) -> None:
         """Free a slot after computing. suspend=True parks the --session (no cost)."""

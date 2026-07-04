@@ -32,6 +32,7 @@ from .modules.governance_gate import GovernanceGate
 from .modules.capabilities import (
     BranchDelivery,
     CapabilityResult,
+    bump_submodule,
     fork_repo,
     parse_owner_repo,
     read_branch_delivery,
@@ -57,7 +58,7 @@ from .modules.stop_gates import StopGates
 from .models import Effort, GlobalState
 from .modules.pending_store import PendingStore
 from .schemas import (
-    Concern, Decision, Level, LifecyclePlan, MonitorVerdict, OperatorIntent, Plan, Trigger,
+    Concern, Decision, Level, LifecyclePlan, LifecycleStep, MonitorVerdict, OperatorIntent, Plan, Trigger,
 )
 from .worker.harness import FakeHarness, LittleCoderHarness, WorkerHarness
 
@@ -290,7 +291,8 @@ class Orchestrator:
         self.project_context = ProjectContext(
             self.router.survey_project, enabled=settings.project_survey_enabled
         )
-        self.events = EventGateway(db, chat, self.handle_event)
+        self.events = EventGateway(db, chat, self.handle_event,
+                                   max_attempts=settings.event_max_attempts)
         # Deterministic intent -> destination routing (COMMS-MODEL §2). Every bridge-emitted
         # message goes through here so no module picks a channel inline (governance §3.5).
         self.comms = CommsRouter(
@@ -315,6 +317,12 @@ class Orchestrator:
         self._effort_mgmt_thread: dict[str, str] = {}
         # Feature branch each effort's work was published to (commit + push on done).
         self._published_branch: dict[str, str] = {}
+        # INTENT-ANCHORED completion (DELIVERY-PIPELINE §1: the PM judges completeness against the
+        # operator-intent thread, not one mechanical effort). Per effort: the registered projects the
+        # operator NAMED in the intent that this effort did NOT target — so a `done` on a sub-repo
+        # can't hide that the operator's stated target went untouched (the murder-vs-monogame-engine
+        # scope miss). Checked at completion → a scope-mismatch flag instead of a false "done".
+        self._effort_intent_scope: dict[str, list[str]] = {}
         # Efforts opened but HELD at the readiness gate awaiting operator clarification (P3.8);
         # the operator's next answer resolves them → dispatch. {effort_id: {proj_channel, root, request}}
         self._pending: dict[str, dict] = {}
@@ -698,6 +706,31 @@ class Orchestrator:
         hits = [p["slug"] for p in await self.projects.list()
                 if p["slug"] != self.s.default_project and p["slug"] in name_slug]
         return hits[0] if len(hits) == 1 else None
+
+    async def _intent_named_projects(self, intent_text: str, exclude_slug: str) -> list[str]:
+        """Registered projects the operator NAMED in the intent, minus `exclude_slug` (the effort's own
+        target). Longest-slug-first so a shorter slug (`monogame`) can't match inside a longer one
+        (`monogame-engine`) — each match is consumed. Grounds the intent-anchored completion check:
+        if the operator named a project the effort didn't touch, the PM flags it (DELIVERY-PIPELINE §1
+        / governance §3.7 — deliverable-vs-intent), instead of a false 'done'."""
+        text = (intent_text or "").lower()
+        named: list[str] = []
+        for p in sorted(await self.projects.list(), key=lambda x: -len(x["slug"])):
+            slug = p["slug"]
+            name = (p.get("name") or "").lower()
+            token = slug if slug in text else (name if name and name in text else None)
+            if not token:
+                continue
+            text = text.replace(token, " ")   # consume so a shorter slug can't re-match the same span
+            if slug != exclude_slug:
+                named.append(slug)
+        return named
+
+    async def _effort_project(self, effort_id: str) -> str | None:
+        """The project slug this effort targets (its registry project), or None."""
+        async with self.db.session_factory() as s:
+            e = await s.get(Effort, effort_id)
+            return e.project if e else None
 
     async def _effort_repo(self, effort_id: str) -> str | None:
         """The repo a worker should be focused on for this effort = its project's repo (registry),
@@ -1423,8 +1456,87 @@ class Orchestrator:
         if s.kind == "add_submodule":
             return f"{i}. 🧩 **submodule** `{s.source}` → `{s.target}` at `{s.path or s.source}`"
         if s.kind == "worker_task":
-            return f"{i}. 🔧 **worker task** in `{s.target}`: {s.task}"
+            return f"{i}. 🔧 **worker task** in `{s.target}`: {s.task.split(chr(10))[0]}"
+        if s.kind == "submodule_bump":
+            what = s.source or (s.path or "submodule").split("/")[-1]
+            return (f"{i}. 🔗 **wire back** — bump `{s.target}`'s `{s.path}` to the new `{what}` "
+                    f"commit + commit the engine")
         return f"{i}. {s.summary}"
+
+    async def _augment_composition(self, intent_text: str, steps: list, states: dict) -> tuple[list, str]:
+        """DETERMINISTIC composition-awareness (the session pattern — put critical structure in CODE,
+        not the small model). A task like "in <engine>, wire <submodule> against <sibling>" is inherently
+        multi-repo: edit the submodule's repo, THEN bump the parent/engine's submodule pointer so the
+        engine reflects it. The planner under-plans this (a single sub-repo effort). Here, when the intent
+        NAMES an engine that vendors the submodule the worker_task targets, we (a) inject the ENGINE
+        LAYOUT into the worker task (so relative paths resolve in the vendored tree, not standalone), and
+        (b) ensure a `submodule_bump` step exists. Returns (steps, operator-facing note)."""
+        import posixpath
+
+        text = (intent_text or "").lower()
+        projects = await self.projects.list()
+
+        def _norm(url: str) -> str:
+            try:
+                o, r = parse_owner_repo(url)
+                return f"{o.lower()}/{r.lower()}"
+            except ValueError:
+                return ""
+
+        repo_to_slug = {_norm(p["repo_url"]): p["slug"] for p in projects if _norm(p["repo_url"])}
+        added: list[str] = []
+        for eng_slug, st in states.items():
+            if not getattr(st, "readable", False) or not getattr(st, "submodule_paths", []):
+                continue
+            if eng_slug not in text:                    # the engine must be NAMED in the intent
+                continue
+            sub_path_by_slug: dict[str, str] = {}       # registered submodule slug -> its path in the engine
+            for path, url in zip(st.submodule_paths, st.submodule_urls):
+                sslug = repo_to_slug.get(_norm(url))
+                if sslug:
+                    sub_path_by_slug[sslug] = path
+            if not sub_path_by_slug:
+                continue
+            for s in steps:
+                if s.kind != "worker_task":
+                    continue
+                wt_slug = slugify(s.target)
+                if wt_slug not in sub_path_by_slug:     # worker_task must target a submodule OF this engine
+                    continue
+                path = sub_path_by_slug[wt_slug]
+                # the sibling submodule the task builds AGAINST = another engine submodule named in intent
+                sib = next(((sl, p) for sl, p in sub_path_by_slug.items() if sl != wt_slug and sl in text), None)
+                if sib and "COMPOSITION CONTEXT" not in s.task:
+                    rel = posixpath.relpath(sib[1], path)   # e.g. vendor/MonoGame from vendor/murder -> ../MonoGame
+                    s.task += (
+                        f"\n\nCOMPOSITION CONTEXT: `{wt_slug}` is used as a git submodule inside `{eng_slug}` "
+                        f"at `{path}`, alongside `{sib[0]}` (the sibling you must build against) at `{rel}` "
+                        f"relative to `{wt_slug}`'s repo ROOT. Write any project/path reference to `{sib[0]}` "
+                        f"relative to THAT vendored layout (from your edited file's directory: up to the repo "
+                        f"root, then follow `{rel}`). Do NOT assume `{wt_slug}` is standalone.")
+                elif "COMPOSITION CONTEXT" not in s.task:
+                    s.task += (
+                        f"\n\nCOMPOSITION CONTEXT: `{wt_slug}` is vendored inside `{eng_slug}` at `{path}`; "
+                        f"keep any relative paths valid for that vendored layout, not a standalone checkout.")
+                # REPAIR a model-authored bump for this engine (the small model emits the step but
+                # fills fields sloppily — e.g. source="" — which would fail executor pairing): fix
+                # its path/source so it pairs with THIS worker_task deterministically.
+                for x in steps:
+                    if x.kind != "submodule_bump" or slugify(x.target) != eng_slug:
+                        continue
+                    if not (x.path or "").strip():
+                        x.path = path
+                    if (x.path or "") == path and slugify(x.source) != wt_slug:
+                        x.source = wt_slug
+                has_bump = any(x.kind == "submodule_bump" and slugify(x.target) == eng_slug
+                               and (x.path or "") == path for x in steps)
+                if not has_bump:
+                    steps.append(LifecycleStep(
+                        kind="submodule_bump", target=eng_slug, path=path, source=wt_slug,
+                        summary=f"bump {eng_slug}'s {path} to the wired {wt_slug} commit"))
+                added.append(f"`{eng_slug}` will be wired back (bump `{path}`) so the engine reflects it")
+        note = "  ".join(added)
+        return steps, note
 
     async def _propose_lifecycle_plan(
         self, intent_text: str, channel_id: str, thread_id: str | None, *, reply_prefix: str = "",
@@ -1468,7 +1580,8 @@ class Orchestrator:
             await self.chat.post(channel_id, "I couldn't turn that into a plan just now — try "
                                  "rephrasing the setup you want.", thread_id=thread_id)
             return
-        steps = [s for s in (plan.steps or []) if s.kind in ("fork", "add_submodule", "worker_task")]
+        steps = [s for s in (plan.steps or [])
+                 if s.kind in ("fork", "add_submodule", "worker_task", "submodule_bump")]
         if not steps:
             # The model proposed no steps. That often means "nothing to change" (the model saw the
             # state already satisfies the intent but didn't say so) — so SHOW the current state rather
@@ -1508,6 +1621,12 @@ class Orchestrator:
                 + already_note, thread_id=thread_id)
             return
         steps = reconciled
+        # DETERMINISTIC composition-awareness: if the intent targets an ENGINE that vendors a submodule
+        # the task wires, give the worker the engine LAYOUT (correct relative paths) + ensure the
+        # wiring-back (submodule_bump) so the ENGINE reflects the change — not just the submodule.
+        steps, comp_note = await self._augment_composition(intent_text, steps, states)
+        if comp_note:
+            already_note += f"\n\n_🧩 {comp_note}_"
         plan.steps = steps
         base = re.sub(r"[^a-z0-9]+", "-", (plan.goal or intent_text).lower()).strip("-")[:24] or "setup"
         plan_id = f"plan-{base}"
@@ -1575,8 +1694,14 @@ class Orchestrator:
             results.append(("✅" if ok else "❌") +
                            (f" submodules {', '.join('`'+p+'`' for p in added)} → {turl.split('github.com/')[-1]}"
                             if ok else f" submodules → {turl.split('github.com/')[-1]}: {detail}"))
-        # 3) worker tasks
-        for s in [s for s in steps if s.kind == "worker_task"]:
+        # 3) worker tasks — some are the coding half of a COMPOSITION (paired with a submodule_bump on
+        #    the engine); those run as a coordinated sequence (edit submodule → verify → bump the engine)
+        #    so the ENGINE reflects the change, not just the submodule.
+        all_bumps = [b for b in steps if b.kind == "submodule_bump"]
+        bumps_by_source = {slugify(b.source): b for b in all_bumps if (b.source or "").strip()}
+        worker_steps = [s for s in steps if s.kind == "worker_task"]
+        paired: set[int] = set()
+        for s in worker_steps:
             proj = await self.projects.resolve(s.target)
             if not proj:
                 results.append(f"❌ worker task: unknown project `{s.target}`"); continue
@@ -1586,20 +1711,115 @@ class Orchestrator:
             goal = (f"{s.task}\n\n_Context — this is part of the effort: {plan.goal}. First orient in "
                     f"the repo's CURRENT state, then reconcile toward that goal: build on / move what "
                     f"already exists rather than duplicating it, and keep the repo clean._")
+            bump = bumps_by_source.get(proj["slug"])
+            if bump is None and len(all_bumps) == 1 and len(worker_steps) == 1:
+                # Unambiguous fallback: one worker task + one wire-back → pair them even if the model
+                # left the bump's `source` blank/mismatched (belt-and-braces under the augmenter repair).
+                bump = all_bumps[0]
+            if bump is not None:
+                paired.add(id(bump))
             try:
                 eid, chan, root = await self.router.open_effort(
                     slugify(s.task)[:24] or "task", project=proj["slug"], goal=goal)
                 await self.charters.set_goal(eid, goal, created_by="planner")
                 if thread_id:
                     self._effort_mgmt_thread[eid] = thread_id
-                self._spawn(self.delegate(eid, chan, root, goal))
-                results.append(f"▶ dispatched worker on `{proj['slug']}`: {s.task[:60]}")
+                if bump is not None:
+                    # COMPOSITION: edit the submodule, then bump the engine's pointer. The coordinator
+                    # reports both branches; DON'T set the intent-scope flag (the engine IS updated by
+                    # the bump, so it's not an untouched stated target).
+                    self._spawn(self._run_composition(eid, chan, root, goal, s, bump, plan, thread_id))
+                    results.append(f"▶ composition on `{proj['slug']}` → wire back into "
+                                   f"`{slugify(bump.target)}`: {s.task.splitlines()[0][:50]}")
+                else:
+                    # Intent-anchored completion: record any project the operator NAMED that this effort
+                    # is NOT targeting, so a `done` on `proj` can't hide an untouched stated target.
+                    others = await self._intent_named_projects(
+                        entry.get("intent", "") or plan.goal, proj["slug"])
+                    if others:
+                        self._effort_intent_scope[eid] = others
+                    self._spawn(self.delegate(eid, chan, root, goal))
+                    results.append(f"▶ dispatched worker on `{proj['slug']}`: {s.task.splitlines()[0][:50]}")
             except Exception as exc:  # noqa: BLE001
                 results.append(f"❌ worker task on `{proj['slug']}`: {exc}")
+        # A wire-back step that couldn't be paired with any worker task must be SAID, not silently
+        # dropped — otherwise the plan shows a step that never runs (a phantom promise).
+        for b in all_bumps:
+            if id(b) not in paired:
+                results.append(f"⚠️ wire-back `{b.target}`/`{b.path}` had no matching worker task — skipped")
         await self.audit.log("lifecycle_plan_executed", payload={"plan": plan_id, "results": len(results)})
         await self.chat.post(
             channel_id, "**Plan run:**\n" + "\n".join(f"- {r}" for r in results),
             thread_id=thread_id)
+
+    async def _run_composition(self, eid, chan, root, goal, worker_step, bump_step, plan, mgmt_thread) -> None:
+        """Coordinated COMPOSITION (Phase 2 / autonomous-project-lifecycle §11d): run the submodule edit
+        on the WORKER plane, verify it landed on the remote, then bump the ENGINE's submodule pointer on
+        the OPERATOR plane (App Git Data API — no checkout) so the ENGINE reflects the change. Reports
+        BOTH branches. Everything additive; merge to the engine's `main` stays human-gated (D4)."""
+        engine_slug = slugify(bump_step.target)
+        mgmt = mgmt_thread or self._mgmt_thread_of(eid)
+        # 1) the submodule code edit (worker plane) — awaited (this coroutine is already backgrounded).
+        #    Its own completion posts the submodule branch; we then wire it back into the engine.
+        await self.delegate(eid, chan, root, goal)
+        # 2) verify the submodule branch landed → its exact commit (the bump target). No commit = no bump.
+        s_repo = await self._effort_repo(eid)
+        delivery = await self._verify_delivery(eid, s_repo) if s_repo else BranchDelivery(branch="")
+        if not (delivery.landed and delivery.head_sha):
+            await self.comms.post(
+                Intent.operator_reply,
+                f"⚠️ **{eid}** — composition halted: the `{worker_step.target}` edit didn't land a "
+                f"verified commit, so `{engine_slug}`'s `{bump_step.path}` was **not** bumped. Fix the "
+                f"edit (see the effort thread) and re-run.",
+                thread_id=mgmt,
+            )
+            return
+        # 3) bump the engine's submodule → an engine branch (same name as the submodule's, so they pair)
+        engine_url = await self.projects.repo_for(engine_slug) or await self._resolve_repo_ref(bump_step.target)
+        branch = self._effort_branch(eid)
+        if self.github is None or not engine_url:
+            await self.comms.post(
+                Intent.operator_reply,
+                f"⚠️ **{eid}** — the `{worker_step.target}` edit landed, but I can't wire it into "
+                f"`{engine_slug}` (no engine repo / GitHub App). The engine wasn't updated.",
+                thread_id=mgmt,
+            )
+            return
+        res = await bump_submodule(
+            self.github, engine_url, bump_step.path, delivery.head_sha,
+            branch=branch, api_base=self.s.github_api_base, transport=self._gh_transport,
+        )
+        await self.audit.log(
+            "composition_wired", effort_id=eid,
+            payload={"engine": engine_slug, "path": bump_step.path, "ok": res.ok,
+                     "commit": delivery.head_sha, "branch": branch},
+        )
+        if res.ok:
+            short = delivery.head_sha[:10]
+            await self.comms.post(
+                Intent.closure,
+                f"🔗 **Composition wired** — `{worker_step.target}` branch **`{delivery.branch}`** (the "
+                f"code change) + `{engine_slug}` branch **`{branch}`** (its `{bump_step.path}` bumped to "
+                f"`{short}`). `git fetch origin {branch}` in `{engine_slug}` for the wired engine. Merge "
+                f"to `main` stays human-gated.",
+                effort_id=eid,
+            )
+            await self.comms.post(
+                Intent.operator_reply,
+                f"🔗 **{eid}** wired the composition: `{engine_slug}` branch **`{branch}`** now vendors "
+                f"the updated `{worker_step.target}` (`{bump_step.path}` → `{short}`). Fetch it to test; "
+                f"merge is human-gated.",
+                thread_id=mgmt,
+            )
+        else:
+            await self.router.update_effort_card(eid, "needs-attention")
+            await self.comms.post(
+                Intent.operator_reply,
+                f"⚠️ **{eid}**: the `{worker_step.target}` edit landed (branch `{delivery.branch}`), but "
+                f"bumping `{engine_slug}`'s `{bump_step.path}` failed — {res.summary}. The engine was "
+                f"**not** updated.",
+                thread_id=mgmt,
+            )
 
     async def _advise(
         self, question: str, channel_id: str, thread_id: str | None, *, reply_prefix: str = "",
@@ -2237,15 +2457,20 @@ class Orchestrator:
             f"Do NOT push to main/master. Do NOT force-push or delete anything. {tail}"
         )
         try:
+            # Pass repo + a CURRENT token: the worker is already focused, so the daemon NOOPs (work
+            # preserved) but RE-BAKES origin's auth — the token embedded at clone time is short-lived
+            # (App token, 1h) and a long task / NOOP re-focus outlives it, killing the push with a
+            # dead credential (the live "expired token in origin" failure).
+            repo_token = await self._project_token(effort_id)
             result = await self.router.wake(
                 effort_id, role="worker-default", thread_id=root, channel_id=channel_id,
-                session_id=effort_id, instruction=instruction, repo=None,  # focused; no re-clone
+                session_id=effort_id, instruction=instruction, repo=repo, repo_token=repo_token,
             )
-        except httpx.HTTPStatusError as exc:
-            # The worker daemon rejected the dispatch (e.g. 409 busy). Don't let a transient publish
-            # hiccup crash the finalize path — record it as a failed self-report and let VERIFICATION
-            # be the arbiter (it re-engages if nothing landed). NoCapacityError still propagates so
-            # delegate parks + auto-resumes.
+        except (httpx.HTTPStatusError, httpx.TransportError) as exc:
+            # The worker daemon rejected the dispatch (409 busy) or was unreachable — router.wake has
+            # already quarantined it. Don't let a transient publish hiccup crash the finalize path —
+            # record it as a failed self-report and let VERIFICATION be the arbiter (it re-engages if
+            # nothing landed). NoCapacityError still propagates so delegate parks + auto-resumes.
             log.warning("publish wake dispatch failed for %s: %s", effort_id, exc)
             result = None
         # NOTE: result.ok is only the worker's turn-ended signal — NOT proof anything pushed. The
@@ -2380,7 +2605,7 @@ class Orchestrator:
         self_reported = self._published_branch.pop(effort_id, None)
         branch = delivery.branch if (delivery and delivery.landed) else None
         if delivery is not None and delivery.landed:
-            sha = f" @ `{delivery.head_sha}`" if delivery.head_sha else ""
+            sha = f" @ `{delivery.head_sha[:10]}`" if delivery.head_sha else ""
             where = (f"pushed to branch **`{branch}`**{sha} (verified on the remote) — "
                      f"`git fetch origin {branch}` to see it")
         elif delivery is not None and not delivery.verifiable and self_reported:
@@ -2394,16 +2619,36 @@ class Orchestrator:
                      "have, re-run it and tell it to commit + push its changes")
         else:
             where = "changes are in the worker's workspace (no repo focused to publish to)"
+        # INTENT-ANCHORED completion (DELIVERY-PIPELINE §1 / §3.7): the effort did its mechanical work,
+        # but if the operator NAMED a target this effort didn't touch, the OPERATOR'S goal isn't
+        # necessarily met — surface that as a deviation instead of a clean "done", so a sub-repo change
+        # can't masquerade as the whole intent (the murder-branch-but-monogame-engine-untouched miss).
+        unmet = self._effort_intent_scope.pop(effort_id, [])
+        scope_note = ""
+        if unmet:
+            listed = ", ".join(f"`{s}`" for s in unmet)
+            scope_note = (
+                f"\n\n⚠️ **Scope check:** your request also named {listed}, which this effort did "
+                f"**not** change (it worked on `{await self._effort_project(effort_id) or 'its repo'}`). "
+                f"If your goal needs {listed} updated too — e.g. a composition where the parent repo's "
+                f"submodule must be bumped — that part is **not done**. Say the word and I'll plan it."
+            )
+        done_word = "done" if not unmet else "partly done — see the scope check"
         await self.comms.post(
             Intent.closure,
-            f"✅ worker finished (**done**) — {where}. Merge to `main`/deploy stay human-gated.",
+            f"✅ worker finished (**{done_word}**) — {where}. Merge to `main`/deploy stay "
+            f"human-gated.{scope_note}",
             effort_id=effort_id,
         )
-        await self.router.update_effort_card(effort_id, "done")
-        await self.gate.set_lifecycle(effort_id, "done")  # drops out of the default /status view
+        # A scope-unmet effort did its piece but the INTENT is incomplete → mark the card
+        # 'needs-attention' and keep it visible in /status (don't silently close the operator's goal).
+        await self.router.update_effort_card(effort_id, "needs-attention" if unmet else "done")
+        if not unmet:
+            await self.gate.set_lifecycle(effort_id, "done")  # drops out of the default /status view
         await self.comms.post(
             Intent.operator_reply,
-            f"✅ **{effort_id}** finished (**done**): {head}\n_{where[0].upper() + where[1:]}._",
+            f"{'✅' if not unmet else '⚠️'} **{effort_id}** finished (**{done_word}**): {head}\n"
+            f"_{where[0].upper() + where[1:]}._{scope_note}",
             thread_id=self._mgmt_thread_of(effort_id),
         )
         await self._mgmt_remember(
@@ -2886,6 +3131,15 @@ class Orchestrator:
                         f"⛔ plan {cmd} for `{effort_id}` — not dispatched. "
                         f"Re-send the request with your changes to adjust it."
                     )
+                return
+            # A plan/capability id that reached here isn't pending — it already ran, was dropped, or
+            # expired (a rebuild clears un-approved proposals). It is NOT a CONCERN to resolve, so say
+            # that plainly instead of the confusing "no open concern for effort <plan-id>" fallthrough.
+            if effort_id.startswith(("plan-", "cap-")):
+                await reply(
+                    f"`{effort_id}` isn't awaiting approval — it already ran, was dropped, or expired "
+                    f"(a rebuild clears un-approved proposals). Re-send the request to draft a fresh one."
+                )
                 return
             try:
                 await self.apply_operator_decision(

@@ -298,6 +298,92 @@ This is the concrete implementation of the PM's monitor role for the execution l
 verification that made *approve → the change lands* unreliable. It reuses the existing acceptance /
 monitor / escalation mechanisms; no new safety story. Precedence held.
 
+## 11c. Worker-health reliability — quarantine, re-route, dead-letter (added 2026-07-04, live-caught)
+
+Validating §11b surfaced the deeper cause of the original "worker didn't push", plus a follow-on
+stuck loop. Three interacting reliability holes in the worker pool (machine B):
+
+1. **No worker affinity** — `scheduler.acquire` picked *any* free worker, so a follow-up wake (the
+   publish, a re-engage, a next step) could land on a **different worker** than the one holding the
+   effort's workspace → it ran `git add/push` in an empty tree ("pushed no branch") or 409'd on a
+   busy worker. **Fix:** affinity — a wake for a session returns to the worker bound to it
+   (`release()` suspends but keeps `session_id`).
+2. **No quarantine of a wedged worker** — a worker whose daemon is stuck (409 busy) or unreachable
+   stayed listed *free*, so `acquire` kept picking it and every dispatch 409'd. Combined with (1)
+   pinning an effort to that worker, the effort could **never** run — the GPU sat idle. **Fix:**
+   `scheduler.quarantine()` sets a self-healing back-off (`quarantined_until`), frees the slot, and
+   drops the stale session; `acquire` excludes quarantined workers; `router.wake` quarantines on a
+   409/transport error and **re-dispatches on a healthy worker** (re-cloning there) when a `repo` is
+   set; a repo-less follow-up can't be moved, so it quarantines + raises and verification arbitrates.
+   When *every* worker is quarantined, `acquire` raises NoCapacity → the effort **parks** and
+   auto-resumes when a slot frees / a back-off lapses. Boot (`reset_stale`) lifts stale quarantines.
+3. **Unbounded event retry** — a handler that always threw (e.g. because it kept re-dispatching to
+   the wedged worker) was "kept unprocessed" and **replayed on every catch-up forever**. **Fix:** the
+   event gateway caps handler attempts and **dead-letters** a poison event (marks it processed + logs
+   loudly) after `event_max_attempts`, so one bad event can't loop.
+
+Config: `worker_quarantine_seconds` (300), `worker_dispatch_max_attempts` (3), `event_max_attempts`
+(5). All self-healing (back-off lapses, boot lifts, parked efforts auto-resume) — fail-safe, not
+fail-stuck. This is pool-health only; it is **distinct from** the governance freeze (that's the
+effort's §3 gate). Precedence held — no change to the safety model, only to pool robustness.
+
+## 11d. Intent-anchored completion — the PM judges vs the operator's target (added 2026-07-04, operator-caught)
+
+Operator caught a false `done`: "*in monogame-engine, wire murder…*" ran, the PM verified a landed
+branch and reported **done** — but the change landed on **`murder`** (a submodule repo) while
+**`monogame-engine`** (the operator's stated target) got **nothing**. The planner had scoped the
+effort to `murder`, the PM verified `murder`, and completion was declared — a **mechanical-effort**
+judgment, not an **intent** judgment.
+
+The corpus is explicit (**DELIVERY-PIPELINE §1**): *"a 'feature' is the operator-intent thread — the
+PM decides when the constituent efforts are **feature-complete**."* Completion is judged against the
+**intent**, not one effort's branch. My PM judged per-effort → the miss.
+
+**Phase 1 — intent-anchored completion flag (LIVE).** At worker-task dispatch the executor records
+the registered projects the operator **named** in the intent that the effort is **not** targeting
+(`_intent_named_projects`, longest-slug-first). At completion, if such a named target exists, the PM
+does **not** report a clean `done`: it emits a **scope check** — *"your request also named
+`monogame-engine`, which this effort did not change (it worked on `murder`) … that part is not done"*
+— marks the card **needs-attention**, and **keeps the effort in `/status`** (does not set
+lifecycle=done). A sub-repo change can no longer masquerade as the whole intent. Grounded in §3.7
+(deviation detection) + §4.5 (verify deliverable vs. intent). This is the **safety net**; it does not
+itself do the missing work.
+
+**Phase 2 — composition-aware planning + execution (LIVE).** An "in `<engine>`, wire `<submodule>`
+against `<sibling>`" intent is inherently multi-repo. Built, all in the bridge (no worker/daemon
+change — the submodule bump is a pure App API call):
+- **`capabilities.bump_submodule`** — points the engine's submodule at a commit via the **GitHub Git
+  Data API**: a tree entry with mode `160000` / type `commit` IS a gitlink, so it creates
+  base-tree → new tree (gitlink at the worker's commit) → commit → branch ref. No checkout, no worker.
+- **Deterministic augmentation (`_augment_composition`)** — the session pattern (structure in code,
+  not the small model). When the intent NAMES an engine that vendors the submodule a worker_task
+  targets, it (a) injects the **engine LAYOUT** into the task (the relative path to the sibling
+  submodule, computed from the real `.gitmodules` paths — e.g. `../MonoGame`) so the worker writes
+  paths that resolve in the vendored tree, and (b) appends a **`submodule_bump`** step (new
+  `LifecycleStep` kind) so the plan includes the wiring-back.
+- **Coordinated executor (`_run_composition`)** — edit the submodule (worker plane) → **verify** its
+  branch landed + read its exact commit → **bump** the engine's pointer to that commit on a paired
+  branch (operator plane) → report BOTH branches. If the edit doesn't land a verified commit, the
+  engine is **not** bumped (no false wiring). Additive; merge to the engine's `main` stays
+  human-gated (D4). The intent-anchor (Phase 1) no longer flags the engine — it IS updated by the bump.
+
+So `in monogame-engine, wire murder…` now produces: a `murder` branch with the csproj change **and** a
+`monogame-engine` branch whose `vendor/murder` points at that commit — the engine is wired, on a
+branch, for human review + merge.
+
+**Live-caught fixes during Phase-2 validation (2026-07-04):**
+- **Bump pairing** — the small model emits its own `submodule_bump` with sloppy fields (blank
+  `source`), which failed executor pairing → the augmenter now REPAIRS a model-authored bump
+  (fills `source`/`path`), the executor pairs a lone bump↔lone worker-task as a fallback, and an
+  unpairable wire-back is *reported*, never silently dropped.
+- **Expired token in `origin` (the "worker can't push" class, root-caused).** The deploy token is
+  EMBEDDED in origin's URL at clone; a GitHub App installation token lives 1 h. A NOOP re-focus
+  hours later (same URL → no re-clone) or a long task pushed with a dead credential — the worker's
+  own blocker report confirmed it. Fixes: (a) little-coder `workspace.refresh_origin_auth` +
+  the daemon's NOOP branch re-bakes origin's auth with the caller's current token; (b) the bridge's
+  publish wake passes `repo` + a current token (NOOP + re-auth; work preserved); (c) the App-token
+  cache re-mints when < 45 min of life remain, so a token baked at dispatch has runway for the task.
+
 ## 10. Build order (on approval)
 
 1. **P-APL.0** — register + install the GitHub App; land its key as a bridge secret; token-minter

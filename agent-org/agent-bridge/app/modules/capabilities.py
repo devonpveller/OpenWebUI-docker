@@ -133,7 +133,7 @@ class BranchDelivery(BaseModel):
     verifiable: bool = False     # could we independently check the remote at all?
     exists: bool = False         # the branch is present on the remote
     ahead: int = 0               # commits the branch is ahead of the base (default) branch
-    head_sha: str = ""           # the branch head (short) — surfaced so the operator can see it
+    head_sha: str = ""           # the branch head commit — FULL sha (truncate at display sites)
     branch: str = ""
     base: str = ""
     detail: str = ""             # short context on an unverifiable/failed check (never a token)
@@ -176,7 +176,7 @@ async def read_branch_delivery(
                 return BranchDelivery(verifiable=True, exists=False, branch=branch, base=base)
             if br.status_code >= 400:
                 return BranchDelivery(branch=branch, base=base, detail=f"branch read {br.status_code}")
-            sha = (br.json().get("commit", {}) or {}).get("sha", "")[:10]
+            sha = (br.json().get("commit", {}) or {}).get("sha", "")   # full sha (for a submodule bump)
             ahead = 0
             if branch != base:
                 cmp = await c.get(
@@ -235,3 +235,80 @@ async def fork_repo(
         )
     return CapabilityResult(ok=False, summary=f"Fork of `{owner}/{repo}` failed ({r.status_code}).",
                             detail=r.text[:160])
+
+
+async def bump_submodule(
+    github: GitHubApp, engine_url: str, submodule_path: str, commit_sha: str, *,
+    branch: str, base_branch: str = "", message: str = "",
+    api_base: str = "https://api.github.com", transport: httpx.BaseTransport | None = None,
+) -> CapabilityResult:
+    """Composition wiring-back: point `engine_url`'s submodule at `submodule_path` to `commit_sha` on a
+    new `branch`, via the GitHub Git Data API — NO checkout, NO worker. This is how you bump a submodule
+    programmatically: a tree entry with mode `160000`, type `commit` IS a gitlink. Steps: read the base
+    branch's commit+tree → create a tree (base_tree + the gitlink entry) → create a commit → create the
+    branch ref. Additive (a new branch); merge to the engine's `main` stays human-gated (D4). Own
+    account only (the App can only write repos it manages)."""
+    try:
+        owner, repo = parse_owner_repo(engine_url)
+    except ValueError as exc:
+        return CapabilityResult(ok=False, summary=f"`{engine_url}` isn't a valid GitHub repo.", detail=str(exc))
+    if owner.lower() != (github.owner or "").lower():
+        return CapabilityResult(ok=False, summary=f"`{owner}/{repo}` isn't on the App's account — can't bump it.")
+    if not commit_sha:
+        return CapabilityResult(ok=False, summary="No submodule commit to bump to (the worker pushed nothing).")
+    try:
+        token = await github.installation_token()
+    except GitHubAppError as exc:
+        return CapabilityResult(ok=False, summary="The GitHub App isn't ready.", detail=str(exc))
+    base = api_base.rstrip("/")
+    h = _headers(token)
+    msg = message or f"Bump {submodule_path} to {commit_sha[:10]} (composition wiring)"
+    try:
+        async with httpx.AsyncClient(timeout=30.0, transport=transport) as c:
+            # resolve the base branch (default branch if not given) → its commit + tree
+            if not base_branch:
+                meta = await c.get(f"{base}/repos/{owner}/{repo}", headers=h)
+                if meta.status_code >= 400:
+                    return CapabilityResult(ok=False, summary=f"Couldn't read `{owner}/{repo}` ({meta.status_code}).",
+                                            detail=meta.text[:160])
+                base_branch = meta.json().get("default_branch") or "main"
+            ref = await c.get(f"{base}/repos/{owner}/{repo}/git/ref/heads/{base_branch}", headers=h)
+            if ref.status_code >= 400:
+                return CapabilityResult(ok=False, summary=f"Couldn't read `{base_branch}` of `{owner}/{repo}`.",
+                                        detail=ref.text[:160])
+            base_commit = ref.json()["object"]["sha"]
+            commit_obj = await c.get(f"{base}/repos/{owner}/{repo}/git/commits/{base_commit}", headers=h)
+            base_tree = commit_obj.json()["tree"]["sha"]
+            # a tree entry with mode 160000 / type commit IS the submodule gitlink — point it at commit_sha
+            tree = await c.post(
+                f"{base}/repos/{owner}/{repo}/git/trees", headers=h,
+                json={"base_tree": base_tree,
+                      "tree": [{"path": submodule_path, "mode": "160000", "type": "commit", "sha": commit_sha}]})
+            if tree.status_code >= 400:
+                return CapabilityResult(ok=False, summary=f"Couldn't build the bumped tree for `{submodule_path}`.",
+                                        detail=tree.text[:160])
+            new_tree = tree.json()["sha"]
+            commit = await c.post(
+                f"{base}/repos/{owner}/{repo}/git/commits", headers=h,
+                json={"message": msg, "tree": new_tree, "parents": [base_commit]})
+            if commit.status_code >= 400:
+                return CapabilityResult(ok=False, summary="Couldn't create the bump commit.", detail=commit.text[:160])
+            new_commit = commit.json()["sha"]
+            # create the branch (or fast-forward it if it already exists)
+            mk = await c.post(
+                f"{base}/repos/{owner}/{repo}/git/refs", headers=h,
+                json={"ref": f"refs/heads/{branch}", "sha": new_commit})
+            if mk.status_code == 422:  # ref exists → update it
+                mk = await c.patch(f"{base}/repos/{owner}/{repo}/git/refs/heads/{branch}", headers=h,
+                                   json={"sha": new_commit, "force": True})
+            if mk.status_code >= 400:
+                return CapabilityResult(ok=False, summary=f"Couldn't create branch `{branch}` on `{owner}/{repo}`.",
+                                        detail=mk.text[:160])
+    except (httpx.HTTPError, KeyError, ValueError) as exc:
+        return CapabilityResult(ok=False, summary=f"Bumping `{submodule_path}` in `{owner}/{repo}` failed.",
+                                detail=str(exc)[:160])
+    return CapabilityResult(
+        ok=True,
+        summary=f"Bumped `{submodule_path}` → `{commit_sha[:10]}` on `{owner}/{repo}` branch `{branch}`",
+        url=f"https://github.com/{owner}/{repo}/tree/{branch}",
+    )

@@ -73,6 +73,8 @@ class Database:
         ("projects", "token_env", "VARCHAR(64)"),
         # Fork parent (D0.f) — re-baked as the `upstream` remote on every focus.
         ("projects", "upstream_url", "VARCHAR(512)"),
+        # Worker health quarantine — a wedged/unreachable worker is un-pickable until this instant.
+        ("worker_instances", "quarantined_until", "VARCHAR(32)"),
     ]
 
     async def create_all(self) -> None:

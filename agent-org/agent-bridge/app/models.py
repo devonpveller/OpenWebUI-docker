@@ -214,6 +214,10 @@ class WorkerInstance(Base):
     waiting_on_effort: Mapped[str | None] = mapped_column(String(64))
     rule_version: Mapped[int | None] = mapped_column()
     retired: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Health quarantine: an ISO-8601 UTC instant a wedged/unreachable worker is un-pickable UNTIL.
+    # Set when a dispatch fails (409 busy / connection error) so the scheduler stops routing work to a
+    # stuck daemon; cleared automatically once the instant passes (self-healing back-off) or on boot.
+    quarantined_until: Mapped[str | None] = mapped_column(String(32))
     updated_at: Mapped[str] = mapped_column(default=now_iso, onupdate=now_iso)
 
 

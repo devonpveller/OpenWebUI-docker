@@ -12,9 +12,11 @@ import httpx
 import pytest
 
 from app.adapters.chat import FakeChatAdapter
+import json as _json
+
 from app.config import Settings
 from app.db import Database
-from app.modules.capabilities import fork_repo, parse_owner_repo, read_repo_state
+from app.modules.capabilities import bump_submodule, fork_repo, parse_owner_repo, read_repo_state
 from app.modules.github_app import FakeGitHubApp
 from app.modules.model_router import FakeModelClient
 from app.orchestrator import Orchestrator
@@ -76,6 +78,50 @@ async def test_read_repo_state_reports_submodules_and_tree():
     assert "vendor/murder" in st.submodule_paths          # structured — for the deterministic filter
     assert "vendor/" in st.top_level
     assert "vendor/murder" in st.summary                  # + a string for the model context
+
+
+# ── bump_submodule: the composition wiring-back (Git Data API, a 160000 gitlink) ────────────
+async def test_bump_submodule_creates_gitlink_branch():
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        p = request.url.path
+        if p == "/repos/devonpveller/MonoGame-Engine":
+            return httpx.Response(200, json={"default_branch": "main"})
+        if p.endswith("/git/ref/heads/main"):
+            return httpx.Response(200, json={"object": {"sha": "base_commit_sha"}})
+        if p.endswith("/git/commits/base_commit_sha"):
+            return httpx.Response(200, json={"tree": {"sha": "base_tree_sha"}})
+        if p.endswith("/git/trees") and request.method == "POST":
+            seen["tree"] = _json.loads(request.content)
+            return httpx.Response(201, json={"sha": "new_tree_sha"})
+        if p.endswith("/git/commits") and request.method == "POST":
+            seen["commit"] = _json.loads(request.content)
+            return httpx.Response(201, json={"sha": "new_commit_sha"})
+        if p.endswith("/git/refs") and request.method == "POST":
+            seen["ref"] = _json.loads(request.content)
+            return httpx.Response(201, json={"ref": "refs/heads/agent/effort-wire"})
+        return httpx.Response(404)
+
+    res = await bump_submodule(
+        FakeGitHubApp(owner="devonpveller"),
+        "https://github.com/devonpveller/MonoGame-Engine", "vendor/murder",
+        "murder_commit_sha_0123456789abcdef", branch="agent/effort-wire",
+        transport=httpx.MockTransport(handler))
+    assert res.ok and "vendor/murder" in res.summary and res.url.endswith("/agent/effort-wire")
+    entry = seen["tree"]["tree"][0]                       # the submodule gitlink entry
+    assert entry["path"] == "vendor/murder" and entry["mode"] == "160000" and entry["type"] == "commit"
+    assert entry["sha"] == "murder_commit_sha_0123456789abcdef"   # points at the worker's commit
+    assert seen["tree"]["base_tree"] == "base_tree_sha"
+    assert seen["commit"]["parents"] == ["base_commit_sha"]
+    assert seen["ref"]["ref"] == "refs/heads/agent/effort-wire" and seen["ref"]["sha"] == "new_commit_sha"
+
+
+async def test_bump_submodule_rejects_other_owner():
+    res = await bump_submodule(FakeGitHubApp(owner="me"), "https://github.com/someoneelse/eng",
+                               "vendor/x", "sha", branch="agent/x",
+                               transport=httpx.MockTransport(lambda r: httpx.Response(200)))
+    assert not res.ok and "account" in res.summary.lower()
 
 
 async def test_read_repo_state_unreadable_for_other_owner():

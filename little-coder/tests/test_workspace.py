@@ -164,6 +164,21 @@ def test_add_upstream_remote_no_token_leaves_url_clean():
     assert "x-access-token" not in cmd                 # public parent → no credential baked
 
 
+def test_refresh_origin_auth_rebakes_fresh_token():
+    """LIVE regression ("expired token in origin"): the token embedded at clone time is short-lived;
+    a NOOP re-focus / publish must re-bake origin's URL with a CURRENT token via real git set-url."""
+    ot = _FakeOT()
+    ws = WorkspaceManager(ot, workspace_path="/workspace", real_git="/usr/bin/git")
+    ws.refresh_origin_auth(WIDGET, "fresh-tok")
+    cmd, _ = ot.calls[0]
+    assert "/usr/bin/git" in cmd and "remote set-url origin" in cmd
+    assert "x-access-token:fresh-tok@" in cmd
+    # no token → resets origin to the clean URL (no stale credential left behind)
+    ws.refresh_origin_auth(WIDGET, None)
+    cmd2, _ = ot.calls[1]
+    assert "remote set-url origin" in cmd2 and "x-access-token" not in cmd2
+
+
 # --- submodule composition (P-APL.1b) -------------------------------------
 
 

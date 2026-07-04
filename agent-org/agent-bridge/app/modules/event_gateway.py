@@ -31,12 +31,18 @@ Handler = Callable[[dict[str, Any]], Awaitable[None]]
 
 
 class EventGateway:
-    def __init__(self, db: Database, chat, handler: Handler) -> None:
+    def __init__(self, db: Database, chat, handler: Handler, *, max_attempts: int = 5) -> None:
         self.db = db
         self.chat = chat
         self.handler = handler
         self._task: asyncio.Task | None = None
         self._active_channels: set[str] = set()
+        # A poison event (handler always throws) is kept unprocessed and replays on every catch-up —
+        # an infinite loop (the wedged-worker stuck-event bug). Cap the retries: after `max_attempts`
+        # handler failures, DEAD-LETTER it (mark processed so it stops replaying) + log loudly. In-
+        # memory per bridge session (a restart is a fresh, legitimate retry).
+        self._max_attempts = max(1, max_attempts)
+        self._attempts: dict[str, int] = {}
 
     def track_channel(self, channel_id: str) -> None:
         self._active_channels.add(channel_id)
@@ -68,8 +74,23 @@ class EventGateway:
         if await self._already_processed(event_id):
             log.debug("duplicate event %s ignored", event_id)
             return False
-        await self.handler(event)
+        try:
+            await self.handler(event)
+        except Exception as exc:  # noqa: BLE001
+            n = self._attempts.get(event_id, 0) + 1
+            self._attempts[event_id] = n
+            if n >= self._max_attempts:
+                # DEAD-LETTER: mark processed so this poison event stops replaying forever. Loud log
+                # (an operator-visible escalation would be ideal; the handler owns that surface).
+                log.error("event %s DEAD-LETTERED after %d failed handler attempts: %s",
+                          event_id, n, exc)
+                await self._mark_processed(event_id, event.get("channel_id"), int(event.get("ts", 0)))
+                self._attempts.pop(event_id, None)
+                return False
+            # keep unprocessed → replays on the next catch-up (bounded by the cap above)
+            raise
         await self._mark_processed(event_id, event.get("channel_id"), int(event.get("ts", 0)))
+        self._attempts.pop(event_id, None)
         return True
 
     async def catch_up(self) -> int:

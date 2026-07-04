@@ -29,8 +29,13 @@ from ..config import Settings
 
 log = logging.getLogger("agent_bridge.github_app")
 
-# Re-mint an installation token when the cached one is within this margin of expiry.
-_EXPIRY_MARGIN_S = 120.0
+# Re-mint an installation token when the cached one has less than this LIFETIME left. Generous
+# (45 min of a 60-min token) because a minted token gets BAKED into a worker's origin remote at
+# dispatch and must survive the whole task + publish — a 2-min margin handed out near-dead tokens
+# (the live "expired token in origin" push failure). Minting is one cheap API call every ~15 min
+# of activity; the NOOP/publish re-auth (little-coder refresh_origin_auth) covers tasks that
+# outlive even a fresh token.
+_EXPIRY_MARGIN_S = 2700.0
 _JWT_TTL_S = 540  # 9 min (GitHub caps the App JWT at 10)
 
 

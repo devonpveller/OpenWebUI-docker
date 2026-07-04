@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from app.adapters.chat import FakeChatAdapter
 from app.modules.event_gateway import EventGateway
 
@@ -43,6 +45,27 @@ async def test_catch_up_replays_missed(db):
     assert n == 1 and seen == ["m1"]
     # a second catch-up does not replay the same event (cursor advanced + idempotent).
     assert await gw.catch_up() == 0
+
+
+async def test_poison_event_dead_lettered_after_max_attempts(db):
+    """A handler that always throws must not replay forever (the wedged-worker stuck-event loop). It
+    is retried up to max_attempts, then DEAD-LETTERED: marked processed so future catch-ups dedupe
+    it — the loop is bounded."""
+    calls = []
+
+    async def boom(e):
+        calls.append(e["id"])
+        raise RuntimeError("handler always fails")
+
+    gw = EventGateway(db, FakeChatAdapter(), boom, max_attempts=3)
+    ev = {"id": "poison", "channel_id": "c1", "message": "x", "is_bot": False, "ts": 1}
+    for _ in range(2):                       # attempts 1-2 keep it unprocessed (re-raise → replay)
+        with pytest.raises(RuntimeError):
+            await gw.dispatch(ev)
+    assert await gw.dispatch(ev) is False    # attempt 3 hits the cap → dead-lettered, no raise
+    assert calls == ["poison", "poison", "poison"]
+    assert await gw.dispatch(ev) is False    # now processed → deduped, handler not called again
+    assert calls == ["poison", "poison", "poison"]
 
 
 async def _noop():

@@ -48,7 +48,7 @@ async def test_read_branch_delivery_landed():
         "https://github.com/devonpveller/Docker-Game", "agent/effort-wire",
         transport=_remote(branch_status=200, ahead=3))
     assert d.verifiable and d.exists and d.ahead == 3 and d.landed
-    assert d.head_sha == "abcdef1234"          # short sha surfaced
+    assert d.head_sha == "abcdef1234567890"    # FULL sha (needed to bump a submodule pointer)
 
 
 async def test_read_branch_delivery_missing_branch():
@@ -184,5 +184,59 @@ async def test_unverifiable_repo_reports_selfreport_labelled_unverified(db_url, 
         assert "could **not" in msgs and "independently verify" in msgs
         assert "finished (**done**)" in msgs                     # done, but honestly labelled
         assert await _lifecycle(orch, eid) == "done"
+    finally:
+        await db.dispose()
+
+
+async def test_publish_reauths_origin_with_current_token(db_url, tmp_path):
+    """LIVE regression ("expired token in origin"): the publish wake must pass repo + a CURRENT
+    project token so the daemon NOOP-refocuses (work preserved) and re-bakes origin's auth — the
+    token embedded at clone time is short-lived and dies before a long task's push."""
+    orch, chat, harness, db = await _orch(db_url, tmp_path)
+    try:
+        # repo under the App's account → _project_token returns the App installation token
+        await orch.projects.add("game", "https://github.com/devonpveller/Docker-Game")
+        eid, chan, root = await orch.router.open_effort("wire", project="game")
+        orch._gh_transport = _remote(branch_status=200, ahead=1)
+        await orch.delegate(eid, chan, root, "wire the build", plan_steps=["do the work"])
+        # set_project ran at least twice: the initial focus AND the publish re-auth — both w/ a token
+        assert len(harness.focus_calls) >= 2
+        publish_focus = harness.focus_calls[-1]
+        assert publish_focus["repo"] == "https://github.com/devonpveller/Docker-Game"
+        assert publish_focus["token"] == "ghs_faketoken"     # a CURRENT App token, not none
+    finally:
+        await db.dispose()
+
+
+# ── Phase 1: intent-anchored completion (DELIVERY-PIPELINE §1 — PM judges vs the intent) ──
+async def test_intent_named_projects_excludes_own_target(db_url, tmp_path):
+    orch, chat, harness, db = await _orch(db_url, tmp_path)
+    try:
+        await orch.projects.add("monogame-engine", "https://github.com/devonpveller/MonoGame-Engine")
+        await orch.projects.add("murder", "https://github.com/devonpveller/murder")
+        # names both, effort targets murder → only monogame-engine is "named but not targeted"
+        named = await orch._intent_named_projects("in monogame-engine, wire murder to build", "murder")
+        assert named == ["monogame-engine"]                      # longest-first; own target excluded
+        # when the effort targets the named engine, nothing extra is flagged
+        assert await orch._intent_named_projects("in monogame-engine, wire it", "monogame-engine") == []
+    finally:
+        await db.dispose()
+
+
+async def test_scope_mismatch_flags_partly_done_not_done(db_url, tmp_path):
+    """The effort's branch landed on `murder`, but the operator also named `monogame-engine` — which
+    this effort didn't touch. Completion must be a SCOPE-FLAGGED 'partly done' (stays in /status), not
+    a clean 'done' that hides the untouched stated target."""
+    orch, chat, harness, db = await _orch(db_url, tmp_path)
+    try:
+        await orch.projects.add("murder", "https://github.com/devonpveller/murder")
+        eid, chan, root = await orch.router.open_effort("wire", project="murder")
+        orch._gh_transport = _remote(branch_status=200, ahead=2)      # the murder branch DID land
+        orch._effort_intent_scope[eid] = ["monogame-engine"]          # operator named the engine too
+        await orch.delegate(eid, chan, root, "wire murder in monogame-engine", plan_steps=["work"])
+        msgs = " ".join(p["message"] for p in chat.posted)
+        assert "Scope check" in msgs and "monogame-engine" in msgs and "not done" in msgs
+        assert "partly done" in msgs and "finished (**done**)" not in msgs
+        assert await _lifecycle(orch, eid) != "done"                  # stays visible — intent unmet
     finally:
         await db.dispose()

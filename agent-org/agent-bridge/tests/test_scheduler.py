@@ -88,6 +88,39 @@ async def test_waiting_releases_slot_and_resumes(db):
     assert "w1" in resumed
 
 
+async def test_quarantine_excludes_worker_and_reroutes(db):
+    """A wedged worker (409'd dispatch) is quarantined: freed to idle, its session/effort binding
+    dropped, and NOT pickable — so a re-acquire routes the effort to a healthy worker instead of
+    looping on the stuck one (the idle-GPU stuck-loop fix)."""
+    from app.models import WorkerInstance
+    gate, sched = await _sched(db, cap=2)
+    await gate.ensure_effort("e1", "e1")
+    await sched.register("w1", "u1")
+    await sched.register("w2", "u2")
+    first = await sched.acquire("e1", "worker", "e1")
+    await sched.quarantine(first.id, seconds=300, reason="409 busy")
+    async with sched.db.session_factory() as s:
+        q = await s.get(WorkerInstance, first.id)
+    assert q.sched_state == "idle" and q.session_id is None and q.quarantined_until is not None
+    again = await sched.acquire("e1", "worker", "e1")     # skips the quarantined one
+    assert again.id != first.id
+
+
+async def test_reset_stale_lifts_quarantine_on_boot(db):
+    """Boot is a clean slate: reset_stale lifts a stale quarantine so a bridge restart re-admits every
+    worker (a genuinely-wedged one just re-quarantines on its next failed dispatch)."""
+    gate, sched = await _sched(db, cap=1)
+    await gate.ensure_effort("e1", "e1")
+    await sched.register("w1", "u1")
+    inst = await sched.acquire("e1", "worker", "e1")
+    await sched.quarantine(inst.id, seconds=999, reason="x")
+    with pytest.raises(NoCapacityError):                  # quarantined → no free worker
+        await sched.acquire("e1", "worker", "e1")
+    await sched.reset_stale()                             # boot lifts it
+    resumed = await sched.acquire("e1", "worker", "e1")
+    assert resumed.id == "w1"
+
+
 async def test_enforce_freeze_forces_out_of_computing(db):
     gate, sched = await _sched(db, cap=2)
     await gate.ensure_effort("e1", "e1")

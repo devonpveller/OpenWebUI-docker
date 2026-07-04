@@ -25,5 +25,11 @@
       "PowerShell(& python -m py_compile \"d:\\\\Open WebUI\\\\ai-stack\\\\owui\\\\tools\\\\deep_research.py\"; \"py_compile exit: $LASTEXITCODE\")",
       "Bash(echo \"exit=$?\")"
     ]
+  },
+  "hooks": {
+    "Stop": [
+      { "hooks": [ { "type": "command", "shell": "bash", "timeout": 15, "command": "bash \"d:/Open WebUI/ai-stack/scripts/notify-mattermost.sh\"" } ] }
+    ]
   }
 }
+

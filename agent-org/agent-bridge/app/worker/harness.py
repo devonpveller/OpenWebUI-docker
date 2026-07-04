@@ -210,6 +210,7 @@ class FakeHarness:
         self.output = output          # the WorkResult output; set a 503 marker to simulate a shed
         self.wakes: list[dict[str, Any]] = []
         self.projects: dict[str, str] = {}
+        self.focus_calls: list[dict[str, Any]] = []   # every set_project (base_url, repo, token)
         self.tokens: dict[str, str] = {}
         self.upstreams: dict[str, str] = {}
         self.upstream_tokens: dict[str, str] = {}
@@ -226,6 +227,10 @@ class FakeHarness:
         # Optional command lines to stream via on_update("command", ...) before the answer, so a
         # test can exercise the real activity-streaming path (Fix 1). Default None = no commands.
         self.stream_commands = stream_commands
+        # Simulate a WEDGED worker (409 busy) or an UNREACHABLE one (transport error) by base_url, so
+        # tests can exercise the quarantine + retry-elsewhere path. wake() raises for a matching url.
+        self.busy_urls: set[str] = set()
+        self.down_urls: set[str] = set()
 
     async def wake(
         self, base_url: str, session_id: str, prompt: str, *,
@@ -234,6 +239,12 @@ class FakeHarness:
         self.wakes.append(
             {"base_url": base_url, "session_id": session_id, "prompt": prompt}
         )
+        if base_url in self.busy_urls:
+            req = httpx.Request("POST", base_url.rstrip("/") + "/tasks")
+            raise httpx.HTTPStatusError(
+                "409 Conflict", request=req, response=httpx.Response(409, request=req))
+        if base_url in self.down_urls:
+            raise httpx.ConnectError("connection refused", request=httpx.Request("POST", base_url))
         if on_update:
             for cmd in self.stream_commands or []:
                 await on_update("command", {"command": cmd, "ok": True})
@@ -247,6 +258,7 @@ class FakeHarness:
     ) -> tuple[bool, str, bool | None]:
         if self.set_project_fails:  # simulate a clone failure (private/missing repo)
             return False, self.set_project_fails, None
+        self.focus_calls.append({"base_url": base_url, "repo": repo, "token": token})
         self.projects[base_url] = repo
         if token:
             self.tokens[base_url] = token

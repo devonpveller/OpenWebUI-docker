@@ -190,6 +190,21 @@ async def test_plan_abort_runs_nothing(db_url, tmp_path):
         await db.dispose()
 
 
+async def test_approve_stale_plan_id_gives_clear_message(db_url, tmp_path):
+    """Regression: `approve <plan-id>` for a plan that already ran / expired must say so plainly, NOT
+    fall through to concern-resolution and emit the confusing 'no open concern for effort <plan-id>'."""
+    orch, chat, db = await _orch(db_url, tmp_path)
+    try:
+        mgmt = await orch.mgmt_channel_id()
+        await orch.handle_event({"id": "s1", "channel_id": mgmt,
+                                 "message": "approve plan-wire-murder-to-build-aga",
+                                 "is_bot": False, "ts": 1})
+        msgs = " ".join(p["message"] for p in chat.posted)
+        assert "isn't awaiting approval" in msgs and "no open concern" not in msgs
+    finally:
+        await db.dispose()
+
+
 async def test_planner_empty_plan_asks_for_more(db_url, tmp_path):
     orch, chat, db = await _orch(db_url, tmp_path)
     try:

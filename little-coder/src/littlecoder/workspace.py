@@ -162,6 +162,25 @@ class WorkspaceManager:
         )
         return self.ot.execute(cmd, cwd="/", timeout=self.clone_timeout)
 
+    def refresh_origin_auth(
+        self, repo: NormalizedRepo, deploy_token: str | None
+    ) -> ExecResult:
+        """Re-bake `origin`'s URL with a FRESH deploy token (real git — operator setup path, like
+        `clone`/`add_upstream_remote`). The token embedded at clone time is SHORT-LIVED (a GitHub App
+        installation token lives 1h): a NOOP re-focus hours later, or a task that outlives the token,
+        would `git push` with a dead credential — the live "expired token in origin" failure. Cheap +
+        idempotent (`remote set-url`); with no token it resets origin to the clean URL. Never journal
+        the raw command (it contains the token)."""
+        url = repo.canonical_url
+        if deploy_token:
+            url = url.replace(
+                "https://", f"https://x-access-token:{deploy_token}@", 1
+            )
+        g = shlex.quote(self.real_git)
+        q = shlex.quote
+        cmd = f"cd {q(self.workspace_path)} && {g} remote set-url origin {q(url)}"
+        return self.ot.execute(cmd, cwd=self.workspace_path, timeout=60)
+
     def add_upstream_remote(
         self, upstream_url: str, token: str | None = None
     ) -> ExecResult:
