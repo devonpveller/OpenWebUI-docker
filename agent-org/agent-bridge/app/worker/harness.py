@@ -59,6 +59,7 @@ class WorkerHarness(Protocol):
     async def set_project(
         self, base_url: str, repo: str, *, token: str | None = None,
         upstream: str | None = None, upstream_token: str | None = None,
+        fresh: bool = False,
     ) -> tuple[bool, str, bool | None]:
         """Focus the worker on a repo (little-coder clones it, bypassing the git-proxy). `token` is
         an optional per-project deploy token (multi-PAT). `upstream` (+ optional read-scoped
@@ -73,6 +74,14 @@ class WorkerHarness(Protocol):
 
     async def current_focus(self, base_url: str) -> str | None:
         """The repo the worker is currently focused on, or None."""
+        ...
+
+    async def add_submodule(
+        self, base_url: str, url: str, path: str, *, token: str | None = None,
+    ) -> tuple[bool, str]:
+        """Add `url` as a submodule at `path` in the worker's currently-focused (composition) repo
+        (operator-plane git — P-APL.1b). Returns (ok, detail). The worker must already be focused on
+        the composition repo (its origin carries the push token)."""
         ...
 
 
@@ -132,6 +141,7 @@ class LittleCoderHarness:
     async def set_project(
         self, base_url: str, repo: str, *, token: str | None = None,
         upstream: str | None = None, upstream_token: str | None = None,
+        fresh: bool = False,
     ) -> tuple[bool, str, bool | None]:
         # little-coder clones via the REAL git binary (bypasses the git-proxy) — the
         # supported "operator action" workspace-setup path (§12.3). Clone can be slow. A per-request
@@ -141,6 +151,8 @@ class LittleCoderHarness:
         body: dict[str, Any] = {"repo": repo, "actor": "agent-bridge"}
         if token:
             body["token"] = token
+        if fresh:
+            body["fresh"] = True
         if upstream:
             body["upstream"] = upstream
             if upstream_token:
@@ -169,6 +181,23 @@ class LittleCoderHarness:
             h = (await c.get("/health")).json()
             return h.get("focus")
 
+    async def add_submodule(
+        self, base_url: str, url: str, path: str, *, token: str | None = None,
+    ) -> tuple[bool, str]:
+        body: dict[str, Any] = {"url": url, "path": path, "actor": "agent-bridge"}
+        if token:
+            body["token"] = token
+        async with httpx.AsyncClient(base_url=base_url.rstrip("/"), timeout=1800.0) as c:
+            r = await c.post("/project/submodule", json=body)
+            if r.status_code < 400:
+                return True, ""
+            detail = ""
+            try:
+                detail = (r.json().get("detail") or "")
+            except Exception:  # noqa: BLE001 - non-JSON body
+                detail = r.text or ""
+            return False, detail.strip()[:200]
+
 
 class FakeHarness:
     """Deterministic in-memory worker for tests. Records every wake."""
@@ -190,6 +219,10 @@ class FakeHarness:
         # Set True to simulate a clone that SUCCEEDS but whose fork `upstream` bake FAILS (an
         # unreachable/private parent) → set_project returns (True, "", False) so the bridge warns.
         self.upstream_fails = False
+        # Submodules added via add_submodule: list of (base_url, url, path). `submodule_fails` (an
+        # error string) simulates a failed submodule add.
+        self.submodules: list[tuple[str, str, str]] = []
+        self.submodule_fails = ""
         # Optional command lines to stream via on_update("command", ...) before the answer, so a
         # test can exercise the real activity-streaming path (Fix 1). Default None = no commands.
         self.stream_commands = stream_commands
@@ -210,6 +243,7 @@ class FakeHarness:
     async def set_project(
         self, base_url: str, repo: str, *, token: str | None = None,
         upstream: str | None = None, upstream_token: str | None = None,
+        fresh: bool = False,
     ) -> tuple[bool, str, bool | None]:
         if self.set_project_fails:  # simulate a clone failure (private/missing repo)
             return False, self.set_project_fails, None
@@ -226,3 +260,11 @@ class FakeHarness:
 
     async def current_focus(self, base_url: str) -> str | None:
         return self.projects.get(base_url)
+
+    async def add_submodule(
+        self, base_url: str, url: str, path: str, *, token: str | None = None,
+    ) -> tuple[bool, str]:
+        if self.submodule_fails:
+            return False, self.submodule_fails
+        self.submodules.append((base_url, url, path))
+        return True, ""

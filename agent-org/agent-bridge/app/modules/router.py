@@ -53,6 +53,7 @@ def slugify(name: str) -> str:
 # Reserved effort id for the read-only project survey (UX-FLOW Stage 1 anchor). It exists only so
 # the survey respects the scheduler's concurrency semaphore (surveys yield to real work).
 SURVEY_EFFORT = "__survey__"
+CAPABILITY_EFFORT = "__capability__"  # reserved effort for operator-plane git ops (compose/submodule)
 _SURVEY_PROMPT = (
     "PROJECT SURVEY (READ-ONLY — do not modify, create, or delete any files; do not run tests that "
     "mutate state). In 8–12 terse lines, give a FACTUAL summary of THIS repository so future work "
@@ -389,6 +390,43 @@ class Router:
         except Exception as exc:  # noqa: BLE001 - survey is advisory; never block intake
             log.warning("project survey failed for %s: %s", repo, exc)
             return ""
+        finally:
+            await self.scheduler.release(inst.id)
+
+    # ── operator-plane composition (autonomous-project-lifecycle P-APL.1b) ──────
+    async def compose_submodules(
+        self, engine_url: str, submodules: list[tuple[str, str]], *, token: str | None = None,
+    ) -> tuple[bool, str, list[str]]:
+        """Focus a pooled worker on the composition repo `engine_url` (cloned with the short-lived App
+        `token` in origin for the push) and add each `(url, path)` in `submodules` as a git submodule
+        via the daemon's operator-plane git (P-APL.1b). Returns (ok, detail, added_paths). This is a
+        GOVERNED capability call — it only runs after the operator cleared the hard-gate."""
+        await self.gate.ensure_effort(CAPABILITY_EFFORT, "capability: compose")
+        try:
+            inst = await self.scheduler.acquire(CAPABILITY_EFFORT, "capability", CAPABILITY_EFFORT)
+        except (FrozenEffortError, NoCapacityError):
+            return False, "no free worker to run the composition — try again shortly", []
+        added: list[str] = []
+        try:
+            # fresh=True: force a clean re-clone of the TRUE remote — a cached workspace can be stale
+            # (repo recreated at the same URL) and would push an unrelated history (exit 128).
+            ok, detail, _ = await self.harness.set_project(
+                inst.base_url, engine_url, token=token, fresh=True)
+            if not ok:
+                return False, f"couldn't focus the composition repo: {detail}", []
+            for url, path in submodules:
+                sub_ok, sub_detail = await self.harness.add_submodule(inst.base_url, url, path)
+                await self.audit.log(
+                    "compose_submodule", actor=inst.id,
+                    payload={"engine": engine_url, "path": path, "ok": sub_ok},
+                )
+                if not sub_ok:
+                    return False, f"added {added or 'none'}, then `{path}` failed: {sub_detail}", added
+                added.append(path)
+            return True, "", added
+        except Exception as exc:  # noqa: BLE001 - surface a clear failure, never a silent stall
+            log.warning("compose_submodules failed for %s: %s", engine_url, exc)
+            return False, f"composition error: {exc}", added
         finally:
             await self.scheduler.release(inst.id)
 

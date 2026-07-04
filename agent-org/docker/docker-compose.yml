@@ -157,8 +157,16 @@ services:
       AO_CONTEXT_CHANNEL_CHARS: ${AO_CONTEXT_CHANNEL_CHARS:-1500}
       # Commit attribution: agents commit as <role>@<domain> (blame/provenance, P5.4).
       AO_AGENT_EMAIL_DOMAIN: ${AO_AGENT_EMAIL_DOMAIN:-agent-org.local}
+      # GitHub App — the capability plane's root of trust (autonomous-project-lifecycle P-APL.0).
+      # Empty until you register the App; the private key is a file dropped into agent-bridge/secrets/
+      # (mounted below), NOT an env secret. The plane stays OFFLINE until both id + key are present.
+      AO_GITHUB_APP_ID: ${AO_GITHUB_APP_ID:-}
+      AO_GITHUB_APP_OWNER: ${AO_GITHUB_APP_OWNER:-}
     volumes:
       - ao-egress-config:/egress    # shared with ao-git-egress (bridge writes, proxy reads)
+      # Read-only mount of the App key directory. The DIR always exists (.gitkeep), so `up` never
+      # breaks before the App is set up; the .pem is gitignored + dropped in by the operator (P-APL.0).
+      - ../agent-bridge/secrets:/etc/agent-bridge/secrets:ro
     networks:
       - ao-net
       - llm-net       # reach the existing llm-gateway via the llama-cpp alias

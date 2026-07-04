@@ -145,6 +145,14 @@ class OperatorIntent(BaseModel):
         # DISCUSSED (not a coding effort). Routed to the research-grounded advisor (Tier 2) — a real,
         # cited answer, not a one-shot local guess. Distinct from `question` (quick factual reply).
         "advisory",
+        # Capability: a governed operator-plane STRUCTURE action — FORK a repo (not a coding task).
+        # Proposed, then HARD-GATED for the operator's approve before it executes (P-APL.1a). Set
+        # `capability`='fork' + the target (`repo_url`).
+        "capability",
+        # Plan: the operator describes a MULTI-STEP setup / ARCHITECTURE. The planner reasons from
+        # their words to a concrete, reviewable Plan of primitives (fork/submodule) + worker tasks —
+        # NOT a hardcoded recipe — which the operator approves, then the executor runs (P-APL.2/.3).
+        "plan",
         # User-facing admin inlets — every slash command has an NL path (operator preference:
         # all user-facing inlets stem from NL; slash commands are only a power-user fallback).
         "project_list", "project_remove", "egress_allow", "kill", "unkill",
@@ -161,6 +169,9 @@ class OperatorIntent(BaseModel):
     # "monogame") so "get the monogame tasks working" / "abort the calculators" target the right set.
     target_filter: str | None = None
     host: str | None = None               # a git host (or repo URL) to widen egress for (egress_allow)
+    # The operator-plane structure action for kind=capability: "fork". Its target is carried in
+    # `repo_url` (the repo to fork) / `project` (a name for the result).
+    capability: str | None = None
 
 
 # ── Grounding result (UX-FLOW Stage 4, P4.0) ────────────────────────────────
@@ -172,6 +183,33 @@ class GroundingResult(BaseModel):
     claims: list[str] = Field(default_factory=list)
     summary: str = ""
     job_id: str | None = None
+
+
+# ── Project-lifecycle plan (autonomous-project-lifecycle P-APL.2) ────────────
+class LifecycleStep(BaseModel):
+    """One concrete, executable step of a project-lifecycle plan. The planner emits a SEQUENCE of
+    these from the operator's natural-language architectural intent — so the intelligence lives in the
+    reasoning, not in a hardcoded recipe. Each maps to a governed primitive or a worker task:
+      - fork:          fork `source` (owner/repo) into the operator's account
+      - add_submodule: add `source` (a repo/registered-project) as a submodule at `path` in `target`
+      - worker_task:   dispatch a coding task `task` in project `target` (e.g. wire a build)
+    """
+
+    kind: Literal["fork", "add_submodule", "worker_task"]
+    summary: str                          # a human one-liner shown in the approval list
+    source: str = ""                      # fork: repo to fork; add_submodule: repo/project to add
+    target: str = ""                      # add_submodule: repo/project to add INTO; worker_task: project
+    path: str = ""                        # add_submodule: mount path
+    task: str = ""                        # worker_task: the coding instruction
+
+
+class LifecyclePlan(BaseModel):
+    """A reviewable plan the operator approves before ANY step runs. Produced by the planner from NL
+    intent + the current project state; executed step-by-step by the plan executor (P-APL.3)."""
+
+    goal: str = ""                        # the architectural intent, restated
+    steps: list[LifecycleStep] = Field(default_factory=list)
+    notes: str = ""                       # caveats / assumptions the operator should see
 
 
 class AdvisoryAnswer(BaseModel):

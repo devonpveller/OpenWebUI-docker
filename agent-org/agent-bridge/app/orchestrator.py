@@ -27,6 +27,8 @@ from .modules.event_gateway import EventGateway
 from .modules.execution_gate import ExecutionGate
 from .modules.floor_guard import FloorGuard
 from .modules.governance_gate import GovernanceGate
+from .modules.capabilities import CapabilityResult, fork_repo, parse_owner_repo
+from .modules.github_app import GitHubApp, build_github_app
 from .modules.grounding import Grounding, build_grounding
 from .modules.learning_loop import LearningLoop
 from .modules.model_router import (
@@ -44,7 +46,9 @@ from .modules.scheduler import NoCapacityError, Scheduler
 from .modules.scope_ledger import ScopeLedger
 from .modules.stop_gates import StopGates
 from .models import Effort, GlobalState
-from .schemas import Concern, Decision, Level, MonitorVerdict, OperatorIntent, Trigger
+from .schemas import (
+    Concern, Decision, Level, LifecyclePlan, MonitorVerdict, OperatorIntent, Trigger,
+)
 from .worker.harness import FakeHarness, LittleCoderHarness, WorkerHarness
 
 log = logging.getLogger("agent_bridge.orchestrator")
@@ -129,6 +133,14 @@ _PO_NL_SYS = (
     "effort and is NOT a coding task to dispatch. Set kind=advisory. This runs real research and "
     "replies with a grounded, cited answer — so DON'T try to answer it yourself in `reply`; instead "
     "put a brief 'let me research that' acknowledgement in `reply`.\n"
+    "- capability: the operator wants to FORK a repo — 'fork X', 'fork X into my account' → set "
+    "kind=capability, `capability`='fork', `repo_url`=the repo. NOT a coding task; I propose it and "
+    "the operator approves.\n"
+    "- plan: the operator describes a MULTI-STEP setup or ARCHITECTURE to build — 'set up an engine "
+    "repo that vendors my forks as submodules', 'wire murder to build on the monogame source', "
+    "'scaffold a project that…', anything needing several repo/code steps. Set kind=plan. I draft a "
+    "concrete, reviewable plan (fork/submodule/worker steps) for the operator to approve — I do NOT "
+    "guess a hardcoded recipe.\n"
     "- question / chitchat otherwise (a quick factual/conversational reply you can give directly).\n"
     "EVERY user-facing action has an NL path (this is the primary surface; slash commands are just a "
     "power-user fallback) — so map the operator's plain-language intent to the RIGHT kind and act, "
@@ -158,6 +170,26 @@ _ADVISOR_FALLBACK_SYS = (
     "tradeoffs. Be specific and practical (name tools, patterns, commands where useful); prefer a "
     "clear recommendation over an exhaustive survey. You do NOT have live research access right now, "
     "so stick to well-established practice and do not fabricate citations, versions, or URLs."
+)
+
+# The PLANNER (P-APL.2). Turns a natural-language architectural intent into a CONCRETE, reviewable
+# sequence of executable steps — the general mechanism (works for ANY project/architecture), NOT a
+# hardcoded recipe. The intelligence is here (the model reasoning), the steps map to governed
+# primitives + worker tasks, and the operator approves the whole plan before anything runs.
+_PLANNER_SYS = (
+    "You are a software architect PLANNER for a governed agent org. The operator describes an "
+    "architecture or a multi-step repo/code setup; you produce a CONCRETE, MINIMAL, ORDERED plan of "
+    "executable steps for the operator to review and approve. Use ONLY these step kinds:\n"
+    "- fork: fork an EXTERNAL repo into the operator's account. `source`='owner/repo'.\n"
+    "- add_submodule: add a repo as a git submodule. `source`=the repo/registered-project to add, "
+    "`target`=the repo/project to add it INTO, `path`=the mount path (a short dir name).\n"
+    "- worker_task: a CODING task a worker performs (edit/build/wire). `target`=the project slug, "
+    "`task`=a clear instruction.\n"
+    "RULES: order by dependency (fork before you submodule it; submodule before you wire it). "
+    "Do NOT re-fork or re-create things already in the REGISTERED PROJECTS list — reference them by "
+    "slug. Do NOT invent repos the operator didn't mention. Keep it minimal — only the steps needed. "
+    "Each step's `summary` is one plain line. Put assumptions/caveats in `notes`. If you truly can't "
+    "form a plan, return an empty steps list."
 )
 
 _HELP = (
@@ -197,6 +229,7 @@ class Orchestrator:
         model_client=None,
         harness: WorkerHarness | None = None,
         grounding: Grounding | None = None,
+        github_app: GitHubApp | None = None,
     ) -> None:
         self.s = settings
         self.db = db
@@ -214,6 +247,10 @@ class Orchestrator:
         self.stop_gates = StopGates(db, self.models, self.audit)
         self.exec_gate = ExecutionGate(db, self.audit)          # P4.0 risk-gated dry-run gate
         self.grounding: Grounding = grounding or build_grounding(settings)
+        # Capability plane root of trust (autonomous-project-lifecycle P-APL.0). None until the
+        # GitHub App is registered — the capability inlets (P-APL.1) refuse with a clear "not set up
+        # yet" message while it's None, so the bridge runs normally before the one-time App setup.
+        self.github: GitHubApp | None = github_app or build_github_app(settings)
         self.learning = LearningLoop(db, self.audit)
         self.roles = RoleAuthority(self.gate, self.scope)
         # Multi-project registry (COMMS-MODEL §4: channel = project = repo) + the worker git-egress
@@ -266,6 +303,15 @@ class Orchestrator:
         # Efforts HELD at the Stage-3 plan-approval gate (P3.9) awaiting operator approval;
         # `approve <effort>` dispatches with the plan's steps. {effort_id: {proj_channel, root, request, plan}}
         self._pending_plan: dict[str, dict] = {}
+        # Capability actions (fork/create/…) PROPOSED and awaiting the operator's hard-gate approval
+        # before they execute (irreversible/outward → §3). {action_id: {kind, args, description}}.
+        self._pending_capability: dict[str, dict] = {}
+        # Lifecycle PLANS drafted by the planner (P-APL.2) awaiting operator approval before the
+        # executor runs them. {plan_id: {plan: LifecyclePlan, channel_id, thread_id, intent}}.
+        self._pending_lifecycle: dict[str, dict] = {}
+        # Optional httpx transport for the GitHub-API capability calls — injected in tests
+        # (httpx.MockTransport) so the governed flow is exercised without touching real GitHub.
+        self._gh_transport = None
         self._bg_tasks: set[asyncio.Task] = set()  # in-flight delegations
         # Capacity park-and-resume (machine B `suspended`, reason=inference_backpressure): an effort
         # whose step is shed by the saturated GPU is PARKED here (DB-backed) instead of failed, and
@@ -439,6 +485,17 @@ class Orchestrator:
             await self.comms.ensure_function_channels()
         except Exception as exc:  # noqa: BLE001 - platform may not be ready yet; retried lazily
             log.warning("function channels not ready at boot (will retry): %s", exc)
+        # Capability plane readiness (P-APL.0): if the GitHub App is configured, verify it reachable +
+        # installed at boot so the operator gets a clear confirmation (or a clear failure) in the log.
+        if self.github is not None and self.s.chat_adapter != "fake" and self.s.github_app_enabled:
+            try:
+                info = await self.github.verify()
+                log.info("github app VERIFIED — capability plane online (slug=%s owner=%s installation=%s)",
+                         info.get("app_slug"), info.get("owner"), info.get("installation_id"))
+            except Exception as exc:  # noqa: BLE001 - configured but unreachable → plane stays offline
+                log.warning("github app configured but VERIFY FAILED — capability plane offline: %s", exc)
+        elif self.s.chat_adapter != "fake":
+            log.info("github app not configured — capability plane offline (P-APL.0 setup pending)")
         # Fallback repo (AO_DEFAULT_REPO) → auto-register as a project so it's in the registry +
         # gets a #proj channel; then render the egress allowlist file from all registered hosts.
         if self.s.default_repo:
@@ -909,7 +966,8 @@ class Orchestrator:
         self._remember(channel_id, thread_id, "po", reply)
         # NEW PROJECT: a git URL onboards a new project (+ its #proj channel) — do this BEFORE
         # treating the message as work, else it would default to #proj-sandbox (the reported bug).
-        if intent.repo_url:
+        # EXCEPT for a capability intent, whose `repo_url` is the fork TARGET, not a repo to onboard.
+        if intent.repo_url and intent.kind != "capability":
             await self._handle_new_project(intent, message, channel_id, thread_id, user_id, reply)
             return
         # They named a project we don't know + gave no URL → ask for the repo (don't silently
@@ -993,6 +1051,16 @@ class Orchestrator:
             # research-grounded advisor (Tier 2): ack now, research in the background, post a grounded
             # + cited answer in-thread. The operator's whole message is the research query.
             await self._advise(message, channel_id, thread_id, reply_prefix=reply)
+            return
+        elif intent.kind == "capability":
+            # A governed structure action (fork/create/…). PROPOSE + hard-gate — never fires from NL
+            # directly; the operator clears it with `approve <id>` (P-APL.1, governance §3).
+            await self._propose_capability(intent, message, channel_id, thread_id, reply_prefix=reply)
+            return
+        elif intent.kind == "plan":
+            # A multi-step setup/architecture. The PLANNER (P-APL.2) drafts a concrete, reviewable
+            # plan from the operator's words; nothing runs until they `approve <plan_id>`.
+            await self._propose_lifecycle_plan(message, channel_id, thread_id, reply_prefix=reply)
             return
         elif intent.kind == "reengage":
             # "get the workers working" / "continue" / "re-engage the monogame tasks" — actually
@@ -1169,6 +1237,275 @@ class Orchestrator:
                 return False
             return [e["id"] for e in open_efforts if _match(e)]   # may be [] — never widen to all
         return [e["id"] for e in open_efforts]   # unscoped 'continue' → all idle efforts
+
+    @staticmethod
+    def _extract_fork_target(intent, message: str) -> tuple[str, str] | None:
+        """Find the (owner, repo) to fork, robust to the small model mis-filling fields: try the
+        structured fields, then scan the raw message for a `owner/repo` or github URL. So 'fork
+        isadorasophia/murder into my account' works even if the model didn't set repo_url."""
+        for cand in (intent.repo_url, intent.project, intent.capability):
+            if cand:
+                try:
+                    return parse_owner_repo(cand)
+                except ValueError:
+                    pass
+        m = re.search(r"(?:https?://github\.com/|git@github\.com:)?"
+                      r"([A-Za-z0-9][\w.-]*/[A-Za-z0-9][\w.-]*)", message or "")
+        if m:
+            try:
+                return parse_owner_repo(m.group(1))
+            except ValueError:
+                pass
+        return None
+
+    async def _propose_capability(
+        self, intent, message: str, channel_id: str, thread_id: str | None, *, reply_prefix: str = "",
+    ) -> None:
+        """PROPOSE a capability-plane structure action (P-APL.1) and HARD-GATE it on the operator.
+        Deterministic + irreversible/outward → it never fires from fuzzy NL; the operator clears it
+        with `approve <id>` (governance §3). Refuses cleanly if the GitHub App isn't set up yet."""
+        prefix = (reply_prefix or "").strip()
+        if self.github is None or not self.s.github_app_enabled:
+            await self.chat.post(
+                channel_id,
+                (prefix + "\n\n" if prefix else "") +
+                "⚠️ The capability plane isn't set up yet — register the GitHub App (see "
+                "`SETUP-github-app.md`) and I'll be able to fork repos.",
+                thread_id=thread_id,
+            )
+            return
+        # Detect the action from the capability field OR the raw message (the model is unreliable at
+        # filling `capability` exactly — don't hinge on it). Multi-repo COMPOSITION is NOT a hardcoded
+        # verb here — it's a PLAN the planner produces from natural-language intent (P-APL.2), so the
+        # intelligence generalises to any project/architecture instead of being baked into a recipe.
+        cap = (intent.capability or "").strip().lower()
+        msg_l = (message or "").lower()
+        wants_fork = "fork" in cap or "fork" in msg_l
+        wants_create = any(w in cap or w in msg_l for w in ("create repo", "new repo"))
+        if wants_fork:
+            target = self._extract_fork_target(intent, message)
+            if target is None:
+                await self.chat.post(
+                    channel_id, (prefix + "\n\n" if prefix else "") +
+                    "Which repo should I fork? Give me its URL or `owner/repo`.",
+                    thread_id=thread_id)
+                return
+            owner, repo = target
+            action_id = f"cap-fork-{repo.lower()}"
+            self._pending_capability[action_id] = {
+                "kind": "fork", "parent": f"{owner}/{repo}", "repo": repo,
+                "channel_id": channel_id, "thread_id": thread_id,
+            }
+            await self.chat.post(
+                channel_id,
+                (prefix + "\n\n" if prefix else "") +
+                f"⛔ **Approval needed** (this creates a repo under `{self.github.owner}`):\n"
+                f"> Fork **`{owner}/{repo}`** → **`{self.github.owner}/{repo}`**, tracking "
+                f"`{owner}/{repo}` as its read-only upstream.\n\n"
+                f"Reply **`approve {action_id}`** to do it, or **`abort {action_id}`** to cancel.",
+                thread_id=thread_id,
+            )
+            await self.audit.log("capability_proposed", payload={"action": action_id, "kind": "fork",
+                                                                 "parent": f"{owner}/{repo}"})
+            return
+        if wants_create:
+            await self.chat.post(
+                channel_id, (prefix + "\n\n" if prefix else "") +
+                "I can't **create** a fresh empty repo — GitHub only allows that for organizations "
+                "via an App, not personal accounts. Create the empty repo on GitHub (once), then I "
+                "can **compose** it with your forks as submodules.",
+                thread_id=thread_id)
+            return
+        await self.chat.post(
+            channel_id, (prefix + "\n\n" if prefix else "") +
+            "I can **fork** a repo into your account (_“fork isadorasophia/murder”_). For multi-repo "
+            "setups (submodules, composition), just describe the architecture you want and I'll draft "
+            "a plan you can approve.",
+            thread_id=thread_id)
+
+    async def _execute_capability(self, action_id: str) -> None:
+        """Execute a PREVIOUSLY-APPROVED capability action and report the result in its thread. Called
+        only from the `approve <id>` control path — never directly from NL (the hard-gate is the fence)."""
+        action = self._pending_capability.pop(action_id, None)
+        if action is None:
+            return
+        channel_id = action["channel_id"]
+        thread_id = action.get("thread_id")
+        if action["kind"] == "fork":
+            parent = action["parent"]
+            result: CapabilityResult = await fork_repo(
+                self.github, parent, api_base=self.s.github_api_base, transport=self._gh_transport
+            )
+            await self.audit.log("capability_executed", payload={"action": action_id, "kind": "fork",
+                                                                 "parent": parent, "ok": result.ok})
+            if not result.ok:
+                await self.chat.post(channel_id, f"❌ {result.summary}"
+                                     + (f"\n> {result.detail}" if result.detail else ""),
+                                     thread_id=thread_id)
+                return
+            # Register the fork as a project with the parent as its read-only upstream, so a worker can
+            # `git fetch upstream` it and the #proj channel exists — the fork is immediately usable.
+            slug = action["repo"].lower()
+            fork_url = result.url or f"https://github.com/{self.github.owner}/{action['repo']}"
+            parent_url = f"https://github.com/{parent}"
+            registered = ""
+            try:
+                await self.projects.add(slug, fork_url, upstream_url=parent_url, created_by="capability")
+                await self.egress.sync()
+                registered = (f"\n\n_Registered as project **{slug}** (upstream `{parent}`). "
+                              f"Say “get the workers working on {slug}” to build in it._")
+            except Exception as exc:  # noqa: BLE001 - the fork succeeded; registration is best-effort
+                log.warning("fork ok but project register failed for %s: %s", slug, exc)
+                registered = (f"\n\n_(Forked, but I couldn't auto-register the project: {exc} — "
+                              f"you can register it by NL.)_")
+            await self.chat.post(channel_id, f"✅ {result.summary}"
+                                 + (f"\n{result.url}" if result.url else "") + registered,
+                                 thread_id=thread_id)
+
+    # ── the planner (P-APL.2) + executor (P-APL.3) ─────────────────────────────
+    async def _resolve_repo_ref(self, ref: str) -> str | None:
+        """A step's `source`/`target` → a git URL: a registered project slug resolves to its repo,
+        else an `owner/repo`/URL parses to a github URL. None if unresolvable."""
+        ref = (ref or "").strip()
+        if not ref:
+            return None
+        p = await self.projects.resolve(ref)
+        if p:
+            return p["repo_url"]
+        try:
+            owner, repo = parse_owner_repo(ref)
+            return f"https://github.com/{owner}/{repo}"
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _render_lifecycle_step(i: int, s) -> str:
+        if s.kind == "fork":
+            return f"{i}. 🍴 **fork** `{s.source}` → your account"
+        if s.kind == "add_submodule":
+            return f"{i}. 🧩 **submodule** `{s.source}` → `{s.target}` at `{s.path or s.source}`"
+        if s.kind == "worker_task":
+            return f"{i}. 🔧 **worker task** in `{s.target}`: {s.task}"
+        return f"{i}. {s.summary}"
+
+    async def _propose_lifecycle_plan(
+        self, intent_text: str, channel_id: str, thread_id: str | None, *, reply_prefix: str = "",
+    ) -> None:
+        """P-APL.2: draft a concrete plan from the operator's NL architectural intent, present it for
+        review, and HOLD for approval. Nothing runs until `approve <plan_id>` — the whole plan is the
+        gate. The plan is the MODEL's reasoning over the current project state, not a hardcoded recipe."""
+        prefix = (reply_prefix or "").strip()
+        projects = await self.projects.list()
+        projects_ctx = "\n".join(
+            f"- {p['slug']} — {p['repo_url']} — upstream: {p.get('upstream_url') or 'none'}"
+            for p in projects) or "none"
+        try:
+            plan: LifecyclePlan = await self.models.structured(
+                "po", _PLANNER_SYS,
+                f"OPERATOR INTENT:\n{intent_text}\n\nREGISTERED PROJECTS (slug — repo — upstream):\n"
+                f"{projects_ctx}\n\nProduce the plan.",
+                LifecyclePlan,
+            )
+        except ModelBackpressureError:
+            self._remember(channel_id, thread_id, "operator", intent_text)
+            await self.chat.post(channel_id, "⏳ The model's saturated right now — re-send that and "
+                                 "I'll draft the plan.", thread_id=thread_id)
+            return
+        except Exception as exc:  # noqa: BLE001
+            log.warning("planner failed: %s", exc)
+            await self.chat.post(channel_id, "I couldn't turn that into a plan just now — try "
+                                 "rephrasing the setup you want.", thread_id=thread_id)
+            return
+        steps = [s for s in (plan.steps or []) if s.kind in ("fork", "add_submodule", "worker_task")]
+        if not steps:
+            await self.chat.post(
+                channel_id, (prefix + "\n\n" if prefix else "") +
+                "I couldn't break that into concrete steps yet — tell me a bit more about the repos "
+                "and how they should fit together.", thread_id=thread_id)
+            return
+        plan.steps = steps
+        base = re.sub(r"[^a-z0-9]+", "-", (plan.goal or intent_text).lower()).strip("-")[:24] or "setup"
+        plan_id = f"plan-{base}"
+        n = 1
+        while plan_id in self._pending_lifecycle:
+            n += 1; plan_id = f"plan-{base}-{n}"
+        self._pending_lifecycle[plan_id] = {
+            "plan": plan, "channel_id": channel_id, "thread_id": thread_id, "intent": intent_text}
+        body = "\n".join(f"> {self._render_lifecycle_step(i, s)}" for i, s in enumerate(steps, 1))
+        note = f"\n\n_{plan.notes}_" if plan.notes else ""
+        await self.chat.post(
+            channel_id,
+            (prefix + "\n\n" if prefix else "") +
+            f"📋 **Plan** — {plan.goal or intent_text}\n{body}{note}\n\n"
+            f"Reply **`approve {plan_id}`** to run it, **`abort {plan_id}`** to drop it, or tell me "
+            f"what to change and I'll redraft.",
+            thread_id=thread_id,
+        )
+        await self.audit.log("lifecycle_plan_drafted", payload={
+            "plan": plan_id, "steps": [s.kind for s in steps]})
+
+    async def _execute_lifecycle_plan(self, plan_id: str) -> None:
+        """P-APL.3: run an APPROVED plan step-by-step, dispatching each to its governed primitive
+        (fork/add_submodule) or a worker task. Reports a per-step result. Called only from the
+        `approve <id>` path — the approval IS the gate."""
+        entry = self._pending_lifecycle.pop(plan_id, None)
+        if entry is None:
+            return
+        plan: LifecyclePlan = entry["plan"]
+        channel_id = entry["channel_id"]
+        thread_id = entry.get("thread_id")
+        steps = plan.steps
+        results: list[str] = []
+        # 1) forks
+        for s in [s for s in steps if s.kind == "fork"]:
+            res: CapabilityResult = await fork_repo(
+                self.github, s.source, api_base=self.s.github_api_base, transport=self._gh_transport)
+            if res.ok:
+                try:
+                    owner, repo = parse_owner_repo(s.source)
+                    await self.projects.add(repo.lower(), res.url or f"https://github.com/{self.github.owner}/{repo}",
+                                            upstream_url=f"https://github.com/{owner}/{repo}", created_by="planner")
+                    await self.egress.sync()
+                except Exception:  # noqa: BLE001
+                    pass
+            results.append(("✅" if res.ok else "❌") + f" {res.summary}")
+        # 2) submodules, grouped by target repo (one focus+push per target)
+        by_target: dict[str, list[tuple[str, str]]] = {}
+        for s in [s for s in steps if s.kind == "add_submodule"]:
+            turl = await self._resolve_repo_ref(s.target)
+            surl = await self._resolve_repo_ref(s.source)
+            if not turl or not surl:
+                results.append(f"❌ submodule `{s.source}`→`{s.target}`: couldn't resolve a repo")
+                continue
+            by_target.setdefault(turl, []).append((surl, s.path or parse_owner_repo(surl)[1]))
+        for turl, subs in by_target.items():
+            try:
+                token = await self.github.installation_token()
+            except Exception as exc:  # noqa: BLE001
+                results.append(f"❌ submodules into {turl}: no token ({exc})"); continue
+            ok, detail, added = await self.router.compose_submodules(turl, subs, token=token)
+            results.append(("✅" if ok else "❌") +
+                           (f" submodules {', '.join('`'+p+'`' for p in added)} → {turl.split('github.com/')[-1]}"
+                            if ok else f" submodules → {turl.split('github.com/')[-1]}: {detail}"))
+        # 3) worker tasks
+        for s in [s for s in steps if s.kind == "worker_task"]:
+            proj = await self.projects.resolve(s.target)
+            if not proj:
+                results.append(f"❌ worker task: unknown project `{s.target}`"); continue
+            try:
+                eid, chan, root = await self.router.open_effort(
+                    slugify(s.task)[:24] or "task", project=proj["slug"], goal=s.task)
+                await self.charters.set_goal(eid, s.task, created_by="planner")
+                if thread_id:
+                    self._effort_mgmt_thread[eid] = thread_id
+                self._spawn(self.delegate(eid, chan, root, s.task))
+                results.append(f"▶ dispatched worker on `{proj['slug']}`: {s.task[:60]}")
+            except Exception as exc:  # noqa: BLE001
+                results.append(f"❌ worker task on `{proj['slug']}`: {exc}")
+        await self.audit.log("lifecycle_plan_executed", payload={"plan": plan_id, "results": len(results)})
+        await self.chat.post(
+            channel_id, "**Plan run:**\n" + "\n".join(f"- {r}" for r in results),
+            thread_id=thread_id)
 
     async def _advise(
         self, question: str, channel_id: str, thread_id: str | None, *, reply_prefix: str = "",
@@ -1830,11 +2167,15 @@ class Orchestrator:
         head = ((result.output or "").strip().splitlines()[0][:200]
                 if result and result.output else "done")
         branch = self._published_branch.pop(effort_id, None)
-        where = (
-            f"pushed to branch **`{branch}`** — `git fetch origin {branch}` to see it"
-            if branch else
-            "changes are in the worker's workspace (no repo to publish to)"
-        )
+        if branch:
+            where = f"pushed to branch **`{branch}`** — `git fetch origin {branch}` to see it"
+        elif await self._effort_repo(effort_id):
+            # The project HAS a repo but the worker pushed no branch — it didn't commit/publish
+            # anything (often a worker that stopped early). Say so honestly, don't imply "no repo".
+            where = ("the worker pushed **no branch** — nothing was committed/published. If it should "
+                     "have, re-run it and tell it to commit + push its changes")
+        else:
+            where = "changes are in the worker's workspace (no repo focused to publish to)"
         await self.comms.post(
             Intent.closure,
             f"✅ worker finished (**done**) — {where}. Merge to `main`/deploy stay human-gated.",
@@ -2191,6 +2532,25 @@ class Orchestrator:
                 await reply(f"usage: `{cmd} <effort_id> [note]`")
                 return
             effort_id, note = args[0], " ".join(args[1:])
+            # Lifecycle-plan approval (P-APL.3) — the operator approves the WHOLE plan, then it runs.
+            if effort_id in self._pending_lifecycle:
+                if cmd == "approve":
+                    await reply(f"▶ Running plan `{effort_id}`…")
+                    await self._execute_lifecycle_plan(effort_id)
+                else:
+                    self._pending_lifecycle.pop(effort_id, None)
+                    await reply(f"⛔ Plan `{effort_id}` dropped — nothing ran.")
+                return
+            # Capability approval (fork/create/…) — the hard-gate on a proposed structure action.
+            if effort_id in self._pending_capability:
+                if cmd == "approve":
+                    await reply(f"▶ Executing `{effort_id}`…")
+                    await self._execute_capability(effort_id)
+                else:
+                    self._pending_capability.pop(effort_id, None)
+                    await self.audit.log("capability_aborted", payload={"action": effort_id})
+                    await reply(f"⛔ `{effort_id}` cancelled — nothing was created.")
+                return
             # Stage-3 plan approval takes precedence over a CONCERN clear when a plan is pending.
             if effort_id in self._pending_plan:
                 if cmd == "approve":

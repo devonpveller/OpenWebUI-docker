@@ -12,3 +12,5 @@ websockets>=12,<14           # Mattermost WebSocket event bus consumer
 openai>=1.30,<2.0            # OpenAI-compatible client -> llm-gateway (llama-cpp) / llm-gateway-cloud
 instructor>=1.3,<2.0         # schema-validated structured output (small-model reliability, TOOLING §3.2)
 tenacity>=8.2,<10.0          # bounded retry/backoff (429 tolerance, event redelivery)
+PyJWT>=2.8,<3.0              # GitHub App auth: RS256-sign the app JWT (autonomous-project-lifecycle P-APL.0)
+cryptography>=42,<46         # RS256 backend for PyJWT (loads the App private key)

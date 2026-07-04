@@ -160,6 +160,26 @@ class Settings(BaseSettings):
     advisory_enabled: bool = True
     advisory_timeout_s: float = 300.0       # the operator is WAITING — allow a full research job
 
+    # ── GitHub App — the capability plane's root of trust (autonomous-project-lifecycle P-APL.0) ──
+    # A GitHub App (NOT a long-lived PAT) authorises the governed capability plane (fork/create/
+    # submodule). The DURABLE secret is the App private key (a mounted file — never in git, never in a
+    # worker); it only signs a JWT to mint SHORT-LIVED, per-installation, revocable installation
+    # tokens. `github_app_owner` = your personal account login the App is installed on. Disabled until
+    # `github_app_id` + a readable key file are present, so nothing breaks before you register the App.
+    github_app_id: str = ""                          # numeric App ID from the App's settings page
+    # A read-only bind mount of agent-bridge/secrets/ (the DIRECTORY always exists via .gitkeep so
+    # `up` never breaks; the .pem is gitignored + dropped in by the operator). Absent file → plane off.
+    github_app_private_key_path: str = "/etc/agent-bridge/secrets/github-app-key.pem"
+    github_app_owner: str = ""                       # the account (personal login) the App is installed on
+    github_api_base: str = "https://api.github.com"
+
+    @property
+    def github_app_enabled(self) -> bool:
+        """The capability plane is live only when the App is configured (id set + key file present).
+        Everything gates on this so the bridge runs normally before the App is registered."""
+        import os
+        return bool(self.github_app_id) and os.path.isfile(self.github_app_private_key_path)
+
     # ── Project-context anchor (UX-FLOW Stage 1, P3.8) ──────────────────────
     # Before the readiness gate, run a ONE-TIME read-only worker survey of the repo (languages,
     # structure, conventions) and cache it per project, so the gate ANCHORS to the real codebase

@@ -26,7 +26,8 @@ from .journals import utc_now
 
 # Known audit events. Unknown events are rejected — the audit log is a
 # disciplined record, not a free-for-all.
-TOOL_EVENTS = {"project_switched", "project_upstream_set", "task_outcome_amended", "shutdown"}
+TOOL_EVENTS = {"project_switched", "project_upstream_set", "submodule_added",
+               "task_outcome_amended", "shutdown"}
 OBSERVER_EVENTS = {
     # Chapter 3 transitions + iteration lifecycle. `chapter_advanced` is
     # how the operator records moving between chapters (already used at

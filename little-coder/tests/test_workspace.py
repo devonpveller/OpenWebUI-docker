@@ -162,3 +162,53 @@ def test_add_upstream_remote_no_token_leaves_url_clean():
     ws.add_upstream_remote("https://github.com/MonoGame/MonoGame")
     cmd, _ = ot.calls[0]
     assert "x-access-token" not in cmd                 # public parent → no credential baked
+
+
+# --- submodule composition (P-APL.1b) -------------------------------------
+
+
+def test_add_submodule_uses_real_git_adds_commits_pushes():
+    """A submodule is an operator-plane action (the git-proxy hard-denies `submodule` to the worker):
+    real git, `submodule add` + commit + push, at the given path."""
+    ot = _FakeOT()
+    ws = WorkspaceManager(ot, workspace_path="/workspace", real_git="/usr/bin/git")
+    ws.add_submodule("https://github.com/devonpveller/murder", "murder")
+    cmd, cwd = ot.calls[0]
+    assert "/usr/bin/git" in cmd                        # real git, not the proxy
+    assert "submodule add" in cmd and "murder" in cmd
+    assert "commit -m" in cmd and "push -u origin HEAD" in cmd
+    assert cwd == "/workspace"
+
+
+def test_add_submodule_public_fork_leaves_url_clean():
+    ot = _FakeOT()
+    ws = WorkspaceManager(ot, workspace_path="/workspace")
+    ws.add_submodule("https://github.com/devonpveller/murder", "murder")
+    cmd, _ = ot.calls[0]
+    assert "x-access-token" not in cmd                  # public submodule → no token at rest in .gitmodules
+
+
+def test_add_submodule_private_injects_token():
+    ot = _FakeOT()
+    ws = WorkspaceManager(ot, workspace_path="/workspace")
+    ws.add_submodule("https://github.com/acme/private-lib", "libs/priv", token="ro-tok")
+    cmd, _ = ot.calls[0]
+    assert "x-access-token:ro-tok@" in cmd              # private submodule needs a read token
+
+
+def test_add_submodule_is_idempotent():
+    """Re-adding an already-present submodule (a repeated/partial compose) must SKIP, not fail
+    'already exists' — so re-running a plan adds only what's missing."""
+    ot = _FakeOT()
+    ws = WorkspaceManager(ot, workspace_path="/workspace")
+    ws.add_submodule("https://github.com/devonpveller/murder", "murder")
+    cmd, _ = ot.calls[0]
+    assert "submodule status" in cmd and "already present" in cmd   # guarded skip
+    assert "submodule add" in cmd                                    # still adds when absent
+
+
+def test_submodule_added_is_a_known_audit_event():
+    """Regression for the live 500: the daemon audit-writes 'submodule_added' after a successful add;
+    it MUST be a registered event or the write throws and fakes a failure AFTER a real push."""
+    from littlecoder.audit import KNOWN_EVENTS
+    assert "submodule_added" in KNOWN_EVENTS

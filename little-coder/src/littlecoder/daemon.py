@@ -107,6 +107,24 @@ class ProjectRequest(BaseModel):
     # self-improvement). This `upstream` is a git remote in the *project* workspace.
     upstream: str | None = None
     upstream_token: str | None = None
+    # Force a clean re-clone even when already focused on this URL (NOOP). The URL can point at a
+    # DIFFERENT repo than the cached workspace — e.g. the operator deleted + recreated it — leaving a
+    # stale, unrelated history that fails to push. Operator-plane composition sets this so it always
+    # starts from the true remote state.
+    fresh: bool = False
+
+
+class SubmoduleRequest(BaseModel):
+    """Add a git submodule to the FOCUSED (composition) repo — operator-plane setup for
+    autonomous-project-lifecycle P-APL.1b. `url` is the submodule (usually a public fork → no token);
+    `path` is where it mounts; `token` is a read-scoped token for a PRIVATE submodule. The daemon must
+    already be focused on the composition repo (its origin carries the push token)."""
+
+    url: str
+    path: str
+    commit_message: str | None = None
+    token: str | None = None
+    actor: str = "agent-bridge"
 
 
 class ConfirmRequest(BaseModel):
@@ -436,6 +454,13 @@ class LittleCoderDaemon:
             raise HTTPException(422, str(exc)) from exc
         decision = decide_switch(requested, self.current_focus, self.busy)
 
+        # `fresh`: the cached workspace may be STALE/unrelated (repo deleted+recreated at the same
+        # URL). Force a clean re-clone instead of trusting the NOOP. Only when no task is in flight.
+        if req.fresh and decision.action is SwitchAction.NOOP and not self.busy:
+            await asyncio.to_thread(self.workspace.wipe)
+            self.current_focus = None
+            decision = decide_switch(requested, None, self.busy)   # → CLONE (fresh)
+
         if decision.action is SwitchAction.NOOP:
             # Already focused — the workspace was NOT wiped, so `origin` is intact.
             # But `upstream` may be absent (never baked, or baked before the caller
@@ -514,6 +539,33 @@ class LittleCoderDaemon:
             ok=ok,
         )
         return ok
+
+    async def add_submodule(self, req: SubmoduleRequest) -> dict:
+        """Add a submodule to the currently-focused composition repo (operator-plane, real git —
+        P-APL.1b). Requires a focused repo; the caller (bridge capability) focuses it first with a
+        short-lived push token in origin. Non-fatal errors surface with a redacted detail so a
+        failure reads clearly and never leaks a token."""
+        if self.current_focus is None or not self.workspace.is_focused():
+            raise HTTPException(409, "no project focused — focus the composition repo first")
+        res = await asyncio.to_thread(
+            self.workspace.add_submodule, req.url, req.path,
+            commit_message=req.commit_message, token=req.token,
+        )
+        self.audit.write(
+            "submodule_added",
+            actor=req.actor,
+            repo=self.current_focus.canonical_url,
+            path=req.path,
+            ok=bool(res.ok),
+        )
+        if not res.ok:
+            # Surface BOTH streams — git writes some fatals to stdout — so the failure is never a
+            # blank "(exit 128):". Redacted; token never leaked.
+            tail = (f"{res.stderr}\n{res.stdout}").strip()[-400:]
+            raise HTTPException(
+                502, f"submodule add failed (exit {res.exit_code}): {redact_secrets(tail) or '(no output)'}"
+            )
+        return {"ok": True, "path": req.path}
 
 
 def _parse_ts(ts: str) -> float:
@@ -609,6 +661,10 @@ def build_app(daemon: LittleCoderDaemon) -> FastAPI:
     @app.post("/project")
     async def project(req: ProjectRequest) -> dict:
         return await daemon.switch_project(req)
+
+    @app.post("/project/submodule")
+    async def project_submodule(req: SubmoduleRequest) -> dict:
+        return await daemon.add_submodule(req)
 
     @app.get("/admin/observe")
     def observe(iterate: bool = False) -> dict:

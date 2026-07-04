@@ -146,11 +146,19 @@ class WorkspaceManager:
         branch_flag = ""
         if repo.branch:
             branch_flag = f" -b {shlex.quote(repo.branch)}"
+        g = shlex.quote(self.real_git)
+        ws = shlex.quote(self.workspace_path)
         # umask 000 so the clone is usable from the agent's other plane too
-        # (the workspace volume is shared across two containers' uids).
+        # (the workspace volume is shared across two containers' uids). Then POPULATE any
+        # submodules (non-fatal) — a composition repo's worker must SEE the vendored source to
+        # reference it, and the worker itself can't init them (the git-proxy hard-denies `submodule`).
+        # `|| true`: a private/unreachable submodule must not fail the whole focus.
         cmd = (
-            f"umask 000; {shlex.quote(self.real_git)} clone{branch_flag} "
-            f"{shlex.quote(url)} {shlex.quote(self.workspace_path)}"
+            f"umask 000; {g} clone{branch_flag} {shlex.quote(url)} {ws} && "
+            # Populate DIRECT submodules only (not --recursive): the worker needs to SEE the vendored
+            # source, but recursing into the forks' OWN submodules is slow + can fail on their private
+            # deps. Non-fatal (`|| true`) so a focus never breaks on a submodule fetch.
+            f"(cd {ws} && {g} submodule update --init 2>/dev/null || true)"
         )
         return self.ot.execute(cmd, cwd="/", timeout=self.clone_timeout)
 
@@ -190,6 +198,40 @@ class WorkspaceManager:
             f"{g} remote set-url --push upstream DISABLED-fork-parent-is-fetch-only"
         )
         return self.ot.execute(cmd, cwd=self.workspace_path, timeout=120)
+
+    def add_submodule(
+        self, url: str, path: str, *, commit_message: str | None = None,
+        token: str | None = None,
+    ) -> ExecResult:
+        """Add `url` as a git SUBMODULE at `path` in the focused (composition) repo, then commit +
+        push. This is an OPERATOR SETUP action (autonomous-project-lifecycle P-APL.1b) — like `clone`
+        / `add_upstream_remote`, it runs the REAL git binary directly, bypassing the git-proxy (which
+        HARD-DENIES `submodule` to the worker, design §3.3). The worker can never restructure the
+        repo topology; only this governed setup path does.
+
+        The submodule is typically a PUBLIC fork → anonymous fetch, so the URL stays clean (no token
+        at rest in `.gitmodules`); a private submodule passes a read-scoped `token`. The composition
+        repo's own origin carries its (short-lived GitHub App) token for the push. First submodule on
+        a freshly-cloned empty repo creates the initial commit + default branch, so we `push -u`."""
+        sub_url = url
+        if token:
+            sub_url = sub_url.replace("https://", f"https://x-access-token:{token}@", 1)
+        msg = commit_message or f"Add {path} submodule"
+        g = shlex.quote(self.real_git)
+        q = shlex.quote
+        # IDEMPOTENT: if `path` is already a submodule (a partial/repeated compose), skip cleanly
+        # instead of failing 'already exists' — so re-running a plan adds only what's missing.
+        cmd = (
+            f"cd {q(self.workspace_path)} && "
+            f"if {g} submodule status {q(path)} >/dev/null 2>&1; then "
+            f"echo 'submodule {path} already present — skipping'; "
+            f"else "
+            f"{g} submodule add {q(sub_url)} {q(path)} && "
+            f"{g} commit -m {q(msg)} && "
+            f"{g} push -u origin HEAD; "
+            f"fi"
+        )
+        return self.ot.execute(cmd, cwd=self.workspace_path, timeout=600)
 
     def wipe(self) -> ExecResult:
         """Empty the workspace, keeping the mount point itself. open-terminal
