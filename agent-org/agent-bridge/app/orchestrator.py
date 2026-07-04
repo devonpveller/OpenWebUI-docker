@@ -88,18 +88,34 @@ _PO_NL_SYS = (
     "awaiting clarification or already in progress → set kind=clarification, effort_id to that "
     "effort (see AWAITING CLARIFICATION / CURRENT EFFORTS), and put their words in `steering`.\n"
     "- status: they're asking what's going on / what a worker is doing / why something is taking a "
-    "while → set kind=status. You DO have visibility: RECENT WORKER ACTIVITY lists the actual "
-    "commands each effort's worker most recently ran (newest last). Answer from THAT — name the "
-    "effort and describe what it's actually been doing (e.g. 'still cloning / running the build / "
-    "waiting on tests'). If an effort has NO recent activity, say it hasn't run a command yet (it "
-    "may be queued or stalled) — do NOT claim you 'can't see' worker progress, and do NOT invent "
-    "activity that isn't listed.\n"
+    "while → set kind=status. Answer from CURRENT EFFORTS + RECENT WORKER ACTIVITY (real commands). "
+    "CRITICAL — understand the states: `running` = a worker is executing it NOW; `idle` = open but "
+    "NOTHING is running and it will NOT start on its own; `paused` = frozen on a concern (needs a "
+    "decision); `waiting-capacity` = auto-resumes when the GPU frees. Efforts DO NOT queue and "
+    "auto-run. So NEVER say things like 'they're queued and will proceed as resources become "
+    "available' or 'I'll route workers' — that is FALSE. If nothing is `running`, say so plainly and "
+    "OFFER to dispatch the idle ones (or archive the ones they're done with).\n"
+    "- reengage: they want stalled/idle/failed work to actually START — 'get the workers working', "
+    "'continue', 'start the work', 're-engage the X tasks', 'run it', 'kick it off', 'they're not "
+    "working'. Set kind=reengage. This DISPATCHES workers for real. If they name a group/project "
+    "(e.g. 'the monogame tasks'), set `target_filter` to a substring of those effort ids (e.g. "
+    "'monogame'); a specific effort → `effort_id`; otherwise it re-engages all idle efforts. Do NOT "
+    "promise to do it 'soon' — this action does it now.\n"
+    "- archive: they want efforts CANCELLED/cleared/removed — 'abort the calculators', 'cancel these', "
+    "'clear the queue', 'those are done, remove them', or a confirmed 'yes' to your offer to archive. "
+    "Set kind=archive + `target_filter` (e.g. 'calculator') or `effort_id`. This actually cancels "
+    "them (pushed branches are kept). Never just say you'll 'flag them for termination' — DO it.\n"
     "- steering: explicitly changing the direction/scope of an existing effort → set effort_id + steering.\n"
-    "- decision: approve/modify/abort a paused effort → set effort_id + decision (you interpret "
-    "it; the human still confirms with an explicit command — never claim you executed it).\n"
+    "- decision: approve/modify a paused effort → set effort_id + decision (approve/modify still need "
+    "the human's explicit command; abort is handled as archive above).\n"
     "- question / chitchat otherwise.\n"
     "Only set action fields when clearly warranted. Never claim to have taken an irreversible "
     "action. Keep replies short and human.\n\n"
+    "NEVER MAKE EMPTY PROMISES. Do not say 'I'll route workers', 'I'll monitor and let you know', "
+    "'they'll proceed as resources free up', or 'I'm flagging them for termination' — you have no "
+    "background process that does those things. Either the action fires THIS turn (reengage/archive/"
+    "request) or you state the honest current state and ask what to do. A promise you can't keep is "
+    "worse than saying 'nothing is running right now — want me to dispatch them?'.\n\n"
     "USE THE CONVERSATION SO FAR — the operator is continuing one thread; don't treat each message "
     "as new or ask them to repeat context you were already given.\n"
     "DO NOT INVENT FACTS you don't actually have: URLs, ports, host addresses, file paths, where "
@@ -120,8 +136,12 @@ _HELP = (
     "`/project list` · `/project remove <name>`\n"
     "- `/egress allow <host|repo-url>` — widen the worker git-egress allowlist; `/egress list`\n"
     "- `/effort <name>` — open a work effort as a **thread** in its project channel\n"
-    "- `/status [effort_id|all]` — open efforts + recent worker activity (`all` includes "
-    "done/aborted; an id targets one)\n"
+    "- `/status [effort_id|all]` — open efforts + HONEST status (running/idle/paused/waiting) + "
+    "recent worker activity (`all` includes done/aborted; an id targets one)\n"
+    "- `/retry [filter]` — DISPATCH idle efforts now (idle efforts don't auto-start); e.g. "
+    "`/retry monogame` or bare `/retry` for all idle\n"
+    "- `/archive <effort_id|filter>` — cancel efforts you're done with (e.g. `/archive calculator`); "
+    "pushed branches are kept\n"
     "- `approve|modify|abort <effort_id> [note]` — approve a drafted **plan**, or decide an open CONCERN\n"
     "- `/risk <effort_id> <routine|irreversible|cross_effort|cascading_refactor>` — set blast radius "
     "(risky ⇒ a dry-run is required before real-code execution)\n"
@@ -223,6 +243,10 @@ class Orchestrator:
         self._capacity_task: asyncio.Task | None = None
         self._draining = False
         self._last_backpressure = 0.0   # monotonic ts of the last shed (source-guard window)
+        # Efforts with a LIVE delegate task right now (actively being executed). This is the honest
+        # "work is happening" signal — distinct from the gate state `active` (= merely not-frozen),
+        # which persists forever and misleads the PM into reporting a phantom queue.
+        self._delegating: set[str] = set()
 
     def _spawn(self, coro) -> None:
         """Run a coroutine in the background, keeping a reference so it isn't GC'd."""
@@ -747,7 +771,13 @@ class Orchestrator:
         asks for the explicit, auditable command (governance §3). Runs on the PO profile's lane
         (local qwen36-27b by default; cloud if P0.5 mandated)."""
         efforts = await self.gate.snapshot(open_only=True)  # PO reasons over what's still in play
-        ctx = "; ".join(f"{e['id']}={e['state']}" for e in efforts) or "none"
+        # HONEST status (running/idle/paused/waiting-capacity) — NOT the gate `active` flag, which
+        # persists forever and made the PM invent a phantom "queued, waiting for resources".
+        status_map = await self._effort_status_map(efforts)
+        ctx = "; ".join(f"{e['id']}={status_map.get(e['id'], 'idle')}" for e in efforts) or "none"
+        n_running = sum(1 for v in status_map.values() if v == "running")
+        n_idle = sum(1 for v in status_map.values() if v == "idle")
+        ctx += f"  (running={n_running}, idle={n_idle}; idle efforts do NOT auto-start — dispatch them)"
         pending_ctx = ", ".join(self._pending.keys()) or "none"
         projects = await self.projects.list()
         projects_ctx = ", ".join(f"{p['slug']} ({p['repo_url']})" for p in projects) or "none"
@@ -863,22 +893,36 @@ class Orchestrator:
                 mgmt_thread=thread_id,
             )
             return
+        elif intent.kind == "reengage":
+            # "get the workers working" / "continue" / "re-engage the monogame tasks" — actually
+            # RE-DISPATCH idle efforts. This is additive (running work the operator already asked
+            # for), so it fires directly from NL — no phantom "they'll proceed as resources free up".
+            targets = self._select_efforts(intent, efforts)
+            await self._reengage(targets, mgmt_channel=channel_id, mgmt_thread=thread_id,
+                                 reply_prefix=reply)
+            return
+        elif intent.kind == "archive" or (intent.kind == "decision" and intent.decision == "abort"):
+            # "abort/cancel/archive/clear these" — actually FIRES for open efforts (cancellation, not
+            # a safety-gate clear; pushed branches persist). Require a target so we never wipe all.
+            has_target = bool(intent.effort_id) or bool((intent.target_filter or "").strip())
+            if not has_target:
+                reply += ("\n\n_Which should I archive? Name one (`effort-…`) or a group "
+                          "(e.g. “the calculator efforts”)._")
+            else:
+                targets = self._select_efforts(intent, efforts)
+                await self._archive_efforts(targets, mgmt_channel=channel_id, mgmt_thread=thread_id,
+                                            reply_prefix=reply)
+                return
         elif intent.kind == "decision" and intent.effort_id and intent.decision:
-            # SAFETY: never auto-clear a gate from fuzzy NL — require the explicit command (§3).
+            # approve/modify a PAUSED effort still needs the explicit command (safety gate, §3).
             reply += (
                 f"\n\n_To **{intent.decision}** `{intent.effort_id}`, confirm with:_ "
                 f"`{intent.decision} {intent.effort_id}`"
             )
         elif intent.kind == "status":
             if efforts:
-                lines = []
-                for e in efforts:
-                    line = f"- `{e['id']}` — **{e['state']}**"
-                    act = self.router.recent_activity(e["id"], n=3)
-                    if act:
-                        line += "\n  " + "\n  ".join(f"· {a}" for a in act)
-                    lines.append(line)
-                reply += "\n\n" + "\n".join(lines)
+                status_map = await self._effort_status_map(efforts)
+                reply += "\n\n" + self._render_status(efforts, status_map)
             else:
                 reply += "\n\n_No open efforts — tell me what you'd like built._"
 
@@ -893,6 +937,137 @@ class Orchestrator:
             if act:
                 blocks.append(f"{e['id']}:\n  " + "\n  ".join(act))
         return "\n".join(blocks) if blocks else "none yet (no worker has run a command)"
+
+    # ── honest execution status + re-engage + archive (the PM can ACT) ─────────
+    async def _effort_status_map(self, efforts: list[dict]) -> dict[str, str]:
+        """The TRUTH about whether work is happening — NOT the gate state (`active` = merely
+        not-frozen, which persists forever and misleads the PM into reporting a phantom queue).
+          running          — a delegate task is executing it right now (or a worker is computing it)
+          paused           — frozen on a concern / kill switch (needs an operator decision)
+          waiting-capacity — parked on GPU backpressure (auto-resumes when capacity returns)
+          idle             — open but NOTHING is running; it will NOT start on its own (needs dispatch)
+        Efforts do NOT queue and auto-run: an `idle` effort stays idle until re-engaged."""
+        sched = await self.scheduler.snapshot()
+        computing = {i["effort_id"] for i in sched
+                     if i.get("state") == "computing" and i.get("effort_id")}
+        parked = {t["effort_id"] for t in await self.parks.all()}
+        out: dict[str, str] = {}
+        for e in efforts:
+            eid = e["id"]
+            lc = e.get("lifecycle", "open")
+            if lc in ("done", "aborted"):        # terminal lifecycle wins (shown in /status all|<id>)
+                out[eid] = lc
+            elif eid in self._delegating or eid in computing:
+                out[eid] = "running"
+            elif e.get("state") == "frozen":
+                out[eid] = "paused"
+            elif eid in parked:
+                out[eid] = "waiting-capacity"
+            else:
+                out[eid] = "idle"
+        return out
+
+    def _render_status(self, efforts: list[dict], status_map: dict[str, str]) -> str:
+        """Honest per-effort status lines + a one-line reality check when nothing is running."""
+        icon = {"running": "🟢", "paused": "⏸️", "waiting-capacity": "⏳", "idle": "⚪",
+                "done": "✅", "aborted": "🗑️"}
+        lines = []
+        for e in efforts:
+            st = status_map.get(e["id"], "idle")
+            line = f"- `{e['id']}` — {icon.get(st, '·')} **{st}**"
+            act = self.router.recent_activity(e["id"], n=2)
+            if act:
+                line += "\n  " + "\n  ".join(f"· {a}" for a in act)
+            lines.append(line)
+        body = "\n".join(lines)
+        running = sum(1 for v in status_map.values() if v == "running")
+        idle = sum(1 for v in status_map.values() if v == "idle")
+        if running == 0 and idle:
+            body += (f"\n\n_⚠️ Nothing is running. {idle} effort(s) are **idle** — they will NOT "
+                     f"start on their own. Say **“get the workers working”** (or name which) and I'll "
+                     f"dispatch them; or **“archive”** the ones you're done with._")
+        return body
+
+    def _select_efforts(self, intent, open_efforts: list[dict]) -> list[str]:
+        """Resolve which efforts an action targets: an explicit effort_id, a name/substring filter
+        (e.g. 'calculator', 'monogame'), else ALL open efforts."""
+        ids = {e["id"] for e in open_efforts}
+        if intent.effort_id and intent.effort_id in ids:
+            return [intent.effort_id]
+        filt = (getattr(intent, "target_filter", None) or "").strip().lower()
+        if filt:
+            sel = [e["id"] for e in open_efforts if filt in e["id"].lower()]
+            if sel:
+                return sel
+        return [e["id"] for e in open_efforts]
+
+    async def _reengage(
+        self, effort_ids: list[str], *, mgmt_channel: str, mgmt_thread: str | None = None,
+        reply_prefix: str = "",
+    ) -> list[str]:
+        """Actually RE-DISPATCH idle efforts — the 'get the workers working' / 'continue' action.
+        Skips efforts already running (no double-dispatch) or paused on a concern (needs a decision)."""
+        status_map = await self._effort_status_map(await self.gate.snapshot(open_only=True))
+        started: list[str] = []
+        skipped: list[tuple[str, str]] = []
+        for eid in effort_ids:
+            st = status_map.get(eid)
+            if st == "running":
+                skipped.append((eid, "already running")); continue
+            if st == "paused":
+                skipped.append((eid, f"paused on a concern — `approve {eid}` / `abort {eid}`")); continue
+            if st == "waiting-capacity":
+                skipped.append((eid, "waiting on GPU capacity — auto-resumes")); continue
+            loc = await self.router.effort_thread(eid)
+            if loc is None:
+                skipped.append((eid, "no thread")); continue
+            _v, goal, _s = await self.charters.current_goal(eid)
+            if not goal:
+                skipped.append((eid, "no goal recorded")); continue
+            proj_channel, root = loc
+            await self.router.update_effort_card(eid, "active")
+            self._spawn(self.delegate(eid, proj_channel, root, goal))
+            started.append(eid)
+        parts: list[str] = []
+        if started:
+            parts.append("▶ **Dispatching workers now** on: " + ", ".join(f"`{e}`" for e in started)
+                         + " — watch each project thread for live command streams.")
+        if skipped:
+            parts.append("Skipped: " + "; ".join(f"`{e}` ({why})" for e, why in skipped))
+        if not parts:
+            parts.append("Nothing to re-engage.")
+        await self.chat.post(mgmt_channel, (reply_prefix + "\n\n" + "\n".join(parts)).strip(),
+                             thread_id=mgmt_thread)
+        return started
+
+    async def _archive_efforts(
+        self, effort_ids: list[str], *, mgmt_channel: str, mgmt_thread: str | None = None,
+        reply_prefix: str = "",
+    ) -> list[str]:
+        """Cancel/ARCHIVE open efforts (lifecycle=aborted) — actually fires on 'yes, abort'. Any
+        pushed work persists on its branch (reversible). A FROZEN effort (open concern) is a SAFETY
+        gate — left for the explicit `abort <id>` command, not archived from fuzzy NL."""
+        archived: list[str] = []
+        skipped: list[tuple[str, str]] = []
+        for eid in effort_ids:
+            if await self.gate.state_of(eid) == "frozen":
+                skipped.append((eid, f"paused on a concern — use `abort {eid}`")); continue
+            await self.gate.set_lifecycle(eid, "aborted")
+            self._delegating.discard(eid)
+            await self.parks.unpark(eid)
+            await self.router.update_effort_card(eid, "aborted")
+            archived.append(eid)
+        parts: list[str] = []
+        if archived:
+            parts.append("🗑️ **Archived** (cancelled; any pushed branch is kept): "
+                         + ", ".join(f"`{e}`" for e in archived))
+        if skipped:
+            parts.append("Skipped: " + "; ".join(f"`{e}` ({why})" for e, why in skipped))
+        if not parts:
+            parts.append("Nothing to archive.")
+        await self.chat.post(mgmt_channel, (reply_prefix + "\n\n" + "\n".join(parts)).strip(),
+                             thread_id=mgmt_thread)
+        return archived
 
     def _mgmt_thread_of(self, effort_id: str | None) -> str | None:
         """The #mgmt thread an effort was requested in (for threading its summaries/CONCERNs)."""
@@ -1187,6 +1362,7 @@ class Orchestrator:
         upstream_token = await self._project_upstream_token(effort_id) if upstream else None
         steps = [s for s in (plan_steps or []) if s.strip()] or [goal]
         cur_step = start_step
+        self._delegating.add(effort_id)   # honest "work is happening now" marker
         try:
             await self.charters.set_goal(effort_id, goal, created_by="po")
             # P4.0 gate: a high-blast-radius effort may not reach REAL-code execution until its
@@ -1237,6 +1413,8 @@ class Orchestrator:
                 effort_id=effort_id,
             )
             await self.router.update_effort_card(effort_id, "error")
+        finally:
+            self._delegating.discard(effort_id)   # no longer actively executing
 
     async def _run_step(self, effort_id, channel_id, root, step, i, n, repo, heavy, repo_token=None,
                         upstream=None, upstream_token=None):
@@ -1256,6 +1434,12 @@ class Orchestrator:
             await self._report_completion(effort_id, None)
             return None
         if not result.ok:
+            # A CLONE failure (couldn't focus the worker) is NOT a worker failure — router.wake
+            # already posted a clear, actionable message. Just mark the card + stop; don't reframe
+            # it as "worker ended error" (that's the confusing phantom-worker symptom).
+            if result.status == "clone_failed":
+                await self.router.update_effort_card(effort_id, "error")
+                return None
             # If the worker's OWN inference was shed by the saturated GPU, that's backpressure — PARK
             # + auto-resume (raise so delegate parks this step), NOT a worker failure to escalate.
             if is_backpressure_text(getattr(result, "output", None)):
@@ -1678,17 +1862,28 @@ class Orchestrator:
                         "no open efforts — everything's done/aborted. `/status all` shows the history."
                     )
             else:
-                lines = []
-                for e in snap:
-                    life = "" if e.get("lifecycle", "open") == "open" else f" _[{e['lifecycle']}]_"
-                    line = (f"- `{e['id']}` — **{e['state']}**{life}"
-                            + (f" ({e['reason']})" if e["reason"] else ""))
-                    act = self.router.recent_activity(e["id"], n=3)
-                    if act:
-                        line += "\n  " + "\n  ".join(f"· {a}" for a in act)
-                    lines.append(line)
+                status_map = await self._effort_status_map(snap)
                 header = "**Efforts (open):**" if not (want_all or target) else "**Efforts:**"
-                await reply(header + "\n" + "\n".join(lines))
+                await reply(header + "\n" + self._render_status(snap, status_map))
+        elif cmd in ("retry", "reengage"):
+            # Re-dispatch idle efforts now: `/retry [filter]` (no filter = all idle).
+            efforts = await self.gate.snapshot(open_only=True)
+            filt = args[0] if args else None
+            targets = [e["id"] for e in efforts if (not filt) or filt.lower() in e["id"].lower()]
+            if not targets:
+                await reply(f"no open efforts{f' matching `{filt}`' if filt else ''} to re-engage.")
+            elif channel_id:
+                await self._reengage(targets, mgmt_channel=channel_id, mgmt_thread=thread_id)
+        elif cmd == "archive":
+            if not args:
+                await reply("usage: `/archive <effort_id|filter>` (e.g. `/archive calculator`)")
+            else:
+                efforts = await self.gate.snapshot(open_only=True)
+                targets = [e["id"] for e in efforts if args[0].lower() in e["id"].lower()]
+                if not targets:
+                    await reply(f"no open efforts matching `{args[0]}`.")
+                elif channel_id:
+                    await self._archive_efforts(targets, mgmt_channel=channel_id, mgmt_thread=thread_id)
         elif cmd in ("kill", "unkill"):
             on = cmd == "kill"
             await self.gate.kill_switch(on=on, actor="human")

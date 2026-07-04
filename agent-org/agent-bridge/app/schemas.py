@@ -139,16 +139,20 @@ class OperatorIntent(BaseModel):
     default so a weak/partial model response still parses (the bridge degrades gracefully)."""
 
     kind: Literal[
-        "request", "clarification", "status", "steering", "decision", "question", "chitchat"
+        "request", "clarification", "status", "steering", "decision", "question", "chitchat",
+        "reengage", "archive",
     ] = "chitchat"
     reply: str = ""                       # the PO's conversational, first-person response
     effort_name: str | None = None        # kebab-case slug for a NEW request
-    effort_id: str | None = None          # target for clarification/status/steering/decision
+    effort_id: str | None = None          # target for clarification/status/steering/decision/reengage/archive
     project: str | None = None            # a named project/repo to work on (a registered project)
     repo_url: str | None = None           # a git URL to ONBOARD as a new project (creates its channel)
     upstream_url: str | None = None       # if repo_url is a FORK, the parent/upstream repo URL (D0.f)
     steering: str | None = None           # the clarification / steering / direction text
     decision: Literal["approve", "modify", "abort"] | None = None  # interpreted, NOT auto-run
+    # For reengage/archive/status bulk actions: a substring matching effort ids (e.g. "calculator",
+    # "monogame") so "get the monogame tasks working" / "abort the calculators" target the right set.
+    target_filter: str | None = None
 
 
 # ── Grounding result (UX-FLOW Stage 4, P4.0) ────────────────────────────────

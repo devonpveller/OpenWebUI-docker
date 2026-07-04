@@ -124,7 +124,7 @@ async def test_finished_effort_marked_done_and_hidden_from_open_status(db_url):
         chat.posted.clear()
         await orch._handle_command("/status all", mgmt, "t1")
         allpost = "\n".join(p["message"] for p in chat.posted)
-        assert eid in allpost and "[done]" in allpost
+        assert eid in allpost and "**done**" in allpost   # honest status shows the done lifecycle
     finally:
         await db.dispose()
 
@@ -140,7 +140,7 @@ async def test_status_by_id_shows_done_effort_with_activity(db_url):
         await orch._handle_command(f"/status {eid}", mgmt, "t1")
         post = next(p["message"] for p in chat.posted if eid in p["message"])
         assert "make" in post                                    # activity line present
-        assert "[done]" in post                                  # lifecycle tag shown on targeted view
+        assert "**done**" in post                                # honest status shows the done lifecycle
     finally:
         await db.dispose()
 

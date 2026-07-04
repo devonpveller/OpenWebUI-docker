@@ -256,20 +256,32 @@ class Router:
 
         try:
             if repo:
-                ok = await self.harness.set_project(
+                ok, detail = await self.harness.set_project(
                     inst.base_url, repo, token=repo_token,
                     upstream=upstream, upstream_token=upstream_token,
                 )
                 await self.audit.log(
                     "worker_project_set", effort_id=effort_id, actor=inst.id,
-                    payload={"repo": repo, "ok": ok, "upstream": upstream},
+                    payload={"repo": repo, "ok": ok, "upstream": upstream, "detail": detail},
                 )
                 if not ok:
+                    # A CLONE failure — not a worker failure. Name the real problem + how to fix it,
+                    # so it never reads as a phantom "worker responded". exit 128 = private/missing
+                    # repo the deploy token can't reach.
+                    is_auth = ("128" in detail) or ("authentication" in detail.lower()) or not detail
+                    hint = (
+                        "that repo looks **private or missing** and the deploy token can't reach it "
+                        "— check the URL, or set a token with `/project add <name> <repo> <TOKEN_ENV>`"
+                        if is_auth else "see the error above"
+                    )
+                    shown = f"`{detail}` — " if detail else ""
                     await self.chat.post(
-                        channel_id, f"⚠️ couldn't focus the worker on `{repo}`.",
+                        channel_id,
+                        f"⚠️ I couldn't clone `{repo}` — {shown}{hint}. No worker was dispatched "
+                        f"(nothing ran; this wasn't a worker failure).",
                         thread_id=thread_id,
                     )
-                    return WorkResult("error", task_id="", output="set_project failed")
+                    return WorkResult("clone_failed", task_id="", output=f"clone failed: {detail}")
             # Stream the worker's activity to the effort THREAD as it happens (observability =
             # safety, governance §5/§7). Notification discipline (CM.6): coalesce rapid *successful*
             # commands into one post; failures/denials always post immediately + in context so a

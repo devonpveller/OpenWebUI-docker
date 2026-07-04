@@ -127,6 +127,24 @@ async def test_private_upstream_token_by_owner_convention(db_url, monkeypatch):
         await db.dispose()
 
 
+async def test_clone_failure_reads_as_clone_not_worker_failure(db_url):
+    """A clone/set_project failure (private/missing repo the token can't reach) must surface as a
+    clear CLONE problem — not a phantom 'worker ended error'. Regression for the stale-token case
+    where every effort looked like a fast worker response with no dialogue."""
+    orch, chat, harness, db = await _orch(db_url)
+    harness.set_project_fails = "clone failed (exit 128): "     # GitHub auth-rejected private repo
+    try:
+        await orch.projects.add("priv", "https://github.com/me/private-repo.git")
+        eid, chan, root = await orch.router.open_effort("do-x", project="priv")
+        await orch.delegate(eid, chan, root, "do x")
+        msgs = [p["message"] for p in chat.posted]
+        assert any("clone" in m and "private or missing" in m for m in msgs)   # clear clone-auth guidance
+        assert any("No worker was dispatched" in m for m in msgs)              # named as a clone problem
+        assert not any("worker ended" in m for m in msgs)                      # NOT a phantom worker failure
+    finally:
+        await db.dispose()
+
+
 async def test_non_fork_threads_no_upstream(db_url):
     orch, chat, harness, db = await _orch(db_url)
     try:
