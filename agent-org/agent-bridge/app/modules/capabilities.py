@@ -133,6 +133,12 @@ class BranchDelivery(BaseModel):
     verifiable: bool = False     # could we independently check the remote at all?
     exists: bool = False         # the branch is present on the remote
     ahead: int = 0               # commits the branch is ahead of the base (default) branch
+    # Net files changed vs base (-1 = unknown/couldn't read). `ahead` counts COMMITS, not
+    # substance: a branch can be ahead-by-N with ZERO net file diff (live 2026-07-05: the worker
+    # fixed code inside a vendored submodule checkout, re-pointed the gitlink back, and published
+    # an engine branch whose commits cancel out — an EMPTY PR claiming the fix). 0 here means the
+    # "delivery" changes nothing for consumers.
+    files_changed: int = -1
     head_sha: str = ""           # the branch head commit — FULL sha (truncate at display sites)
     branch: str = ""
     base: str = ""
@@ -183,15 +189,19 @@ async def read_branch_delivery(
                 return BranchDelivery(branch=branch, base=base, detail=f"branch read {br.status_code}")
             sha = (br.json().get("commit", {}) or {}).get("sha", "")   # full sha (for a submodule bump)
             ahead = 0
+            files_changed = -1
             if branch != base:
                 cmp = await c.get(
                     f"{base_api}/repos/{owner}/{repo}/compare/{base}...{branch}", headers=h)
                 if cmp.status_code == 200:
-                    ahead = int(cmp.json().get("ahead_by", 0) or 0)
+                    d = cmp.json()
+                    ahead = int(d.get("ahead_by", 0) or 0)
+                    if "files" in d:      # absent ⇒ unknown (-1), never a false "empty"
+                        files_changed = len(d.get("files") or [])
     except (httpx.HTTPError, ValueError) as exc:
         return BranchDelivery(branch=branch, detail=str(exc)[:120])
     return BranchDelivery(verifiable=True, exists=True, ahead=ahead, head_sha=sha,
-                          branch=branch, base=base)
+                          files_changed=files_changed, branch=branch, base=base)
 
 
 async def read_broken_gitlinks(
@@ -258,6 +268,54 @@ async def read_broken_gitlinks(
     except (httpx.HTTPError, ValueError):
         return broken                            # keep positives found before the infra error
     return broken
+
+
+async def read_sibling_agent_prs(
+    github: GitHubApp, repo_url: str, own_branch: str, *,
+    api_base: str = "https://api.github.com",
+    transport: httpx.BaseTransport | None = None,
+) -> list[dict]:
+    """The OTHER open agent PRs on the same repo (head `agent/*`, excluding `own_branch`), each
+    with its changed files — so a delivery closure can SAY how parallel effort-PRs relate. (Live
+    2026-07-05 operator confusion: successive fixes landed on two different effort branches —
+    "the worker keeps switching branches and PRs". One-effort-one-branch-one-PR is the D1 design;
+    the RELATIONSHIP between parallel PRs must therefore be self-explaining at closure time.)
+    Best-effort + bounded (≤5 siblings, ≤50 files each): [] / partial on any failure."""
+    try:
+        owner, repo = parse_owner_repo(repo_url)
+    except ValueError:
+        return []
+    if owner.lower() != (github.owner or "").lower():
+        return []
+    try:
+        token = await github.installation_token()
+    except GitHubAppError:
+        return []
+    base = api_base.rstrip("/")
+    h = _headers(token)
+    out: list[dict] = []
+    try:
+        async with httpx.AsyncClient(timeout=15.0, transport=transport) as c:
+            r = await c.get(f"{base}/repos/{owner}/{repo}/pulls",
+                            headers=h, params={"state": "open", "per_page": 20})
+            if r.status_code != 200:
+                return []
+            for pr in r.json():
+                head = ((pr.get("head") or {}).get("ref")) or ""
+                if not head.startswith("agent/") or head == own_branch:
+                    continue
+                fr = await c.get(f"{base}/repos/{owner}/{repo}/pulls/{pr['number']}/files",
+                                 headers=h, params={"per_page": 50})
+                files = ([f.get("filename", "") for f in fr.json()]
+                         if fr.status_code == 200 else [])
+                out.append({"number": pr.get("number"), "head": head,
+                            "title": pr.get("title") or "",
+                            "files": [f for f in files if f]})
+                if len(out) >= 5:
+                    break
+    except (httpx.HTTPError, ValueError):
+        return out                       # partial visibility beats none
+    return out
 
 
 async def fork_repo(
@@ -438,6 +496,40 @@ async def merge_pull_request(
         return CapabilityResult(ok=False, summary=f"PR #{pr_number} isn't mergeable ({r.status_code}) — "
                                 f"conflicts or branch protection; resolve on GitHub.", detail=r.text[:160])
     return CapabilityResult(ok=False, summary=f"Merge of PR #{pr_number} failed ({r.status_code}).",
+                            detail=r.text[:160])
+
+
+async def close_pull_request(
+    github: GitHubApp, repo_url: str, pr_number: int, *,
+    api_base: str = "https://api.github.com", transport: httpx.BaseTransport | None = None,
+) -> CapabilityResult:
+    """Repo hygiene (operator-plane, like merge but REVERSIBLE — a closed PR can be reopened and
+    its branch persists): close a superseded/duplicate agent PR on the operator's say-so. Interim
+    hand tool until the repo-maintainer role (P5.3 catalog proposal) owns hygiene sweeps."""
+    try:
+        owner, repo = parse_owner_repo(repo_url)
+    except ValueError as exc:
+        return CapabilityResult(ok=False, summary=f"`{repo_url}` isn't a valid GitHub repo.", detail=str(exc))
+    if owner.lower() != (github.owner or "").lower():
+        return CapabilityResult(ok=False, summary=f"`{owner}/{repo}` isn't on the App's account — can't close.")
+    try:
+        token = await github.installation_token()
+    except GitHubAppError as exc:
+        return CapabilityResult(ok=False, summary="The GitHub App isn't ready.", detail=str(exc))
+    base = api_base.rstrip("/")
+    try:
+        async with httpx.AsyncClient(timeout=30.0, transport=transport) as c:
+            r = await c.patch(f"{base}/repos/{owner}/{repo}/pulls/{pr_number}",
+                              headers=_headers(token), json={"state": "closed"})
+    except httpx.HTTPError as exc:
+        return CapabilityResult(ok=False, summary=f"Couldn't reach GitHub to close PR #{pr_number}.",
+                                detail=str(exc)[:160])
+    if r.status_code == 200:
+        return CapabilityResult(
+            ok=True,
+            summary=f"PR **#{pr_number}** closed on `{owner}/{repo}` (branch kept; reopen any time)",
+            url=f"https://github.com/{owner}/{repo}/pull/{pr_number}")
+    return CapabilityResult(ok=False, summary=f"Closing PR #{pr_number} failed ({r.status_code}).",
                             detail=r.text[:160])
 
 

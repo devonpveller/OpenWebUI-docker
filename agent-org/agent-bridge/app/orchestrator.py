@@ -38,8 +38,10 @@ from .modules.capabilities import (
     open_pull_request,
     parse_owner_repo,
     read_branch_changes,
+    close_pull_request,
     read_branch_delivery,
     read_broken_gitlinks,
+    read_sibling_agent_prs,
     read_repo_state,
 )
 from .modules.github_app import GitHubApp, build_github_app
@@ -1248,6 +1250,10 @@ class Orchestrator:
         # NL-FIRST PR request (D1/D4): "create a PR for agent/… [merge if clean]" is an operator-
         # plane capability the bridge does itself — deterministically, never via a worker.
         if await self._nl_pr_request(message, channel_id, thread_id):
+            return
+        # NL-FIRST PR close (repo hygiene): "close PR 3" retires a superseded/duplicate agent PR —
+        # deterministic + reversible (branch kept), same operator plane as merge.
+        if await self._nl_pr_close(message, channel_id, thread_id):
             return
         # NL-FIRST knowledge sync (RS.2): "sync <project> docs/knowledge/sources" — a governed
         # operator-plane trigger, resolved deterministically like merge/PR above.
@@ -2988,6 +2994,11 @@ class Orchestrator:
             # fetch — gate on gitlink reachability before treating it as done.
             if delivery.landed and not await self._gate_gitlinks(effort_id, channel_id, root, repo):
                 return None
+            # …nor if its commits net to ZERO file changes (the fix is stranded elsewhere,
+            # usually an unpushed vendored-submodule commit) — recover before a false done.
+            if delivery.landed and delivery.files_changed == 0:
+                return await self._recover_empty_delivery(
+                    effort_id, channel_id, root, repo, delivery)
             return delivery   # verified-landed, or we couldn't check (finish labels it unverified)
 
         # Verified NON-delivery — the worker's turn ended but nothing landed. This is the exact
@@ -3007,6 +3018,9 @@ class Orchestrator:
         if delivery.landed:
             if not await self._gate_gitlinks(effort_id, channel_id, root, repo):
                 return None
+            if delivery.files_changed == 0:
+                return await self._recover_empty_delivery(
+                    effort_id, channel_id, root, repo, delivery)
             return delivery
 
         # Still undelivered after a re-engage. Before climbing the ladder, RECOVER the benign case
@@ -3018,6 +3032,78 @@ class Orchestrator:
         if state is not None:
             return state
         await self._escalate_undelivered(effort_id, delivery)
+        return None
+
+    async def _recover_empty_delivery(
+        self, effort_id: str, channel_id: str, root: str, repo: str,
+        delivery: BranchDelivery,
+    ) -> BranchDelivery | None:
+        """A branch LANDED but its commits net to ZERO file changes — the 'delivery' changes
+        nothing for consumers. The classic cause (live 2026-07-05, PR #4): the worker made its fix
+        INSIDE a vendored submodule checkout, then re-pointed the gitlink back to a published
+        commit — the fix stayed in its container while the superproject branch carries only
+        cancelled-out commits. Re-engage the AFFINE worker once with the exact remedy; re-verify;
+        a real diff → proceed, an explicit NO CHANGES → the no-op verdict, else state-check →
+        escalate. Never opens a PR for an empty delivery."""
+        branch = self._effort_branch(effort_id)
+        await self.comms.post(
+            Intent.worker_activity,
+            f"🔍 `{branch}` landed with {delivery.ahead} commit(s) but **zero net file changes** "
+            f"vs base — the delivery changes nothing for consumers. If the real fix lives inside "
+            f"a vendored submodule checkout, it was never published. Re-dispatching with the "
+            f"remedy (PM monitor, §4.2).",
+            effort_id=effort_id,
+        )
+        instruction = (
+            f"YOUR PUBLISHED BRANCH IS EMPTY: `{branch}` is ahead of base but its commits net to "
+            f"ZERO file changes — as delivered, it fixes nothing. The usual cause: you made the "
+            f"actual change inside a vendored SUBMODULE checkout and then re-pointed the gitlink "
+            f"back, so the fix only exists in this workspace.\n"
+            f"Recover it now:\n"
+            f"(a) if your change is inside a submodule at <path>: publish it —\n"
+            f"    git -C /workspace/<path> push origin HEAD:refs/heads/{branch}\n"
+            f"    then commit the updated gitlink in the superproject and push `{branch}` again;\n"
+            f"(b) if the change belongs in the SUPERPROJECT: re-apply it there, commit, push;\n"
+            f"(c) if there is GENUINELY nothing to change, reply exactly `NO CHANGES: <why>`.\n"
+            f"Do NOT push to main/master. Do NOT force-push. Reply with what you did."
+        )
+        try:
+            repo_token = await self._project_token(effort_id)
+            result = await self.router.wake(
+                effort_id, role="worker-default", thread_id=root, channel_id=channel_id,
+                session_id=effort_id, instruction=instruction, repo=repo, repo_token=repo_token,
+            )
+        except Exception as exc:  # noqa: BLE001 — fall through to state-check/escalation
+            log.warning("empty-delivery re-engage failed for %s: %s", effort_id, exc)
+            result = None
+        if result is not None and "NO CHANGES:" in (result.output or ""):
+            return BranchDelivery(no_changes=True, branch=branch)
+        delivery = await self._verify_delivery(effort_id, repo)
+        if delivery.landed and delivery.files_changed != 0:
+            if not await self._gate_gitlinks(effort_id, channel_id, root, repo):
+                return None
+            return delivery
+        state = await self._verify_goal_state(effort_id, channel_id, root, repo)
+        if state is not None:
+            return state
+        await self.comms.post(
+            Intent.escalation,
+            f"⚠️ **{effort_id}** published `{branch}` but it still changes **no files** after a "
+            f"re-engage — the actual fix may be stranded in the worker's workspace (an unpushed "
+            f"submodule commit). ↑ raised to you: it is **not** done and no PR was opened.",
+            effort_id=effort_id,
+        )
+        await self.router.update_effort_card(effort_id, "error")
+        await self.comms.post(
+            Intent.operator_reply,
+            f"⚠️ **{effort_id}**'s branch has commits but **zero net file changes** — as "
+            f"delivered it fixes nothing, so it is **not** marked done and I opened no PR. I "
+            f"re-engaged the worker once; reply to re-run it, or say it's expected and I'll "
+            f"close it.",
+            thread_id=self._mgmt_thread_of(effort_id),
+        )
+        await self.audit.log("delivery_empty_diff", effort_id=effort_id,
+                             payload={"branch": branch, "ahead": delivery.ahead})
         return None
 
     async def _verify_goal_state(
@@ -3224,6 +3310,41 @@ class Orchestrator:
                 thread_id=self._mgmt_thread_of(effort_id),
             )
 
+    async def _sibling_pr_note(self, repo: str | None, branch: str) -> str:
+        """A closure footnote mapping the OTHER open agent PRs on this repo (+ any files they
+        overlap with this branch). One effort = one branch = one PR is the D1 design, so when
+        several effort-PRs are open in parallel the relationship must be self-explaining — the
+        live miss was the operator reading successive deliveries on PR #3 then PR #2 as 'the
+        worker keeps switching branches'. '' when there are no siblings; best-effort."""
+        if not (repo and self.github is not None and self.s.github_app_enabled):
+            return ""
+        try:
+            siblings = await read_sibling_agent_prs(
+                self.github, repo, branch,
+                api_base=self.s.github_api_base, transport=self._gh_transport)
+            if not siblings:
+                return ""
+            _, _, own_files = await read_branch_changes(
+                self.github, repo, branch,
+                api_base=self.s.github_api_base, transport=self._gh_transport)
+            own = {f.split("`")[1] for f in own_files if "`" in f}
+            lines = []
+            for sib in siblings:
+                overlap = sorted(own.intersection(sib["files"]))
+                lines.append(
+                    f"- PR #{sib['number']} (`{sib['head']}`)"
+                    + ((" — ⚠️ **overlaps this one on** "
+                        + ", ".join(f"`{f}`" for f in overlap[:5])) if overlap
+                       else " — no file overlap")
+                )
+            return ("\n🔀 _Other agent PRs are open on this repo (each effort delivers on its own "
+                    "branch + PR):_\n" + "\n".join(lines)
+                    + "\n_Review overlapping PRs together — merge one and tell me to close the "
+                      "other(s), or say which should win._")
+        except Exception as exc:  # noqa: BLE001 — a visibility footnote must never block closure
+            log.debug("sibling PR note failed for %s: %s", repo, exc)
+            return ""
+
     async def _open_delivery_pr(
         self, effort_id: str, repo: str | None, branch: str, *,
         merge_id: str | None = None, verified_sha: str = "", body_extra: str = "",
@@ -3396,6 +3517,19 @@ class Orchestrator:
             # RS.2: main moved → refresh the repo's docs in Open Brain (background, announced in
             # the project channel). Only merged main is after-action truth (§5 triggers).
             self._spawn(self._repo_sync_for_repo_url(entry.get("repo") or ""))
+            # Repo hygiene: a merge often SUPERSEDES parallel effort-PRs — surface the leftovers
+            # with the exact close command instead of letting them accumulate (operator: "keep
+            # the repo clean"). Closing stays operator-worded (reversible, but their call).
+            try:
+                leftovers = await read_sibling_agent_prs(
+                    self.github, entry.get("repo") or "", own_branch="",
+                    api_base=self.s.github_api_base, transport=self._gh_transport)
+                if leftovers:
+                    listing = "\n".join(f"- PR #{p['number']} (`{p['head']}`)" for p in leftovers)
+                    msg += (f"\n🧹 _Still open on this repo:_\n{listing}\n_If this merge supersedes "
+                            f"one, say **\"close PR <n>\"** and I'll retire it (branch kept)._")
+            except Exception as exc:  # noqa: BLE001 — hygiene hint must never block the merge report
+                log.debug("post-merge hygiene scan failed: %s", exc)
         if reply is not None:
             await reply(msg)
         eid = entry.get("effort_id")
@@ -3475,6 +3609,55 @@ class Orchestrator:
         return (f"\n🧪 **Human testing (D6):** pull `main` (with submodules if any),{verify} and try "
                 f"it. Works → nothing more to do. Broken → just tell me what's wrong and I'll open a "
                 f"fix effort (the loop closes back through intake).")
+
+    async def _nl_pr_close(self, message: str, channel_id: str, thread_id: str | None) -> bool:
+        """Operator-plane repo hygiene (interim until the repo-maintainer role, P5.3): a plain
+        "close PR 3" / "close pull request #3 on <project>" closes a superseded agent PR via the
+        App — deterministic (never the small model), REVERSIBLE (branch kept, reopenable). Scans
+        the onboarded repos for an OPEN PR with that number; several matches → disambiguate, never
+        guess. Returns True when the message was handled here."""
+        m = re.search(r"\bclose\b[^.\n]{0,30}?\b(?:pr|pull\s+request)s?\s*#?(\d+)\b", message,
+                      re.IGNORECASE)
+        if not m:
+            return False
+
+        async def say(msg: str) -> None:
+            await self.chat.post(channel_id, msg, thread_id=thread_id)
+
+        if self.github is None or not self.s.github_app_enabled:
+            await say("⚠️ I can't manage PRs — the GitHub App isn't set up (see SETUP-github-app.md).")
+            return True
+        number = int(m.group(1))
+        projects = await self.projects.list()
+        named = await self._intent_named_projects(message, exclude_slug="")
+        if named:   # "… on <project>" scopes the search
+            projects = [p for p in projects if p["slug"] in named]
+        hits: list[tuple[str, str]] = []   # (slug, repo_url) whose OPEN PR #number exists
+        for p in projects[:8]:
+            prs = await read_sibling_agent_prs(
+                self.github, p["repo_url"], own_branch="",
+                api_base=self.s.github_api_base, transport=self._gh_transport)
+            if any(pr["number"] == number for pr in prs):
+                hits.append((p["slug"], p["repo_url"]))
+        if not hits:
+            await say(f"I couldn't find an OPEN agent PR **#{number}**"
+                      + (f" on **{', '.join(named)}**" if named else " on any onboarded repo")
+                      + " — it may already be closed/merged, or isn't an agent branch.")
+            return True
+        if len(hits) > 1:
+            listing = ", ".join(f"`{s}`" for s, _ in hits)
+            await say(f"PR **#{number}** is open on several projects ({listing}) — which one? "
+                      f"Say _\"close PR {number} on <project>\"_.")
+            return True
+        slug, repo_url = hits[0]
+        res = await close_pull_request(self.github, repo_url, number,
+                                       api_base=self.s.github_api_base,
+                                       transport=self._gh_transport)
+        await self.audit.log("pr_closed", payload={"repo": repo_url, "pr": number, "ok": res.ok,
+                                                   "by": "operator-nl"})
+        await say(("✅ " if res.ok else "⚠️ ") + res.summary
+                  + (f" — {res.url}" if res.ok and res.url else ""))
+        return True
 
     async def _nl_pr_request(self, message: str, channel_id: str, thread_id: str | None) -> bool:
         """Operator-plane catch (D1/D4): 'create/open a PR for <branch> [merge if clean]' is a
@@ -3580,6 +3763,7 @@ class Orchestrator:
                 invite = (f"\n_`main` only changes when you merge — say **“merge it”** and I'll "
                           f"merge, or merge on GitHub after review._" if gate_open else "")
                 where += f"\n📬 **PR opened for review:** {pr_url}{d2_note}{invite}"
+                where += await self._sibling_pr_note(eff_repo, branch)
         elif delivery is not None and not delivery.verifiable and self_reported:
             # We couldn't independently check (App can't read this repo) — report the worker's word,
             # labelled honestly as unverified rather than asserting it as fact (§4.2 unverified).

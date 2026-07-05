@@ -284,3 +284,147 @@ async def test_mgmt_thread_reply_inherits_effort_project(db_url, tmp_path):
         assert await orch._resolve_project_slug(None, None, effort_name="do-a-thing") == "sandbox"
     finally:
         await db.dispose()
+
+
+# ── LIVE 2026-07-05: parallel effort-PRs read as "the worker keeps switching branches" ──
+async def test_read_sibling_agent_prs_lists_other_agent_heads():
+    from app.modules.capabilities import read_sibling_agent_prs
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        p = request.url.path
+        if p.endswith("/pulls") and request.method == "GET":
+            return httpx.Response(200, json=[
+                {"number": 2, "head": {"ref": "agent/effort-a"}, "title": "agent: a"},
+                {"number": 3, "head": {"ref": "agent/effort-b"}, "title": "agent: b"},
+                {"number": 4, "head": {"ref": "feature/human-work"}, "title": "human"},
+            ])
+        if "/pulls/3/files" in p:
+            return httpx.Response(200, json=[{"filename": "Directory.Build.props"},
+                                             {"filename": "Engine.sln"}])
+        return httpx.Response(404)
+
+    sibs = await read_sibling_agent_prs(
+        FakeGitHubApp(owner="devonpveller"), "https://github.com/devonpveller/Engine",
+        "agent/effort-a", transport=httpx.MockTransport(handler))
+    assert [s["number"] for s in sibs] == [3]            # own head + human PRs excluded
+    assert sibs[0]["files"] == ["Directory.Build.props", "Engine.sln"]
+
+
+async def test_closure_names_sibling_pr_and_overlap(db_url, tmp_path):
+    """A delivery closure must MAP the other open agent PRs (+ overlapping files) so parallel
+    effort-PRs are self-explaining, never a surprise branch switch."""
+    key = tmp_path / "app.pem"
+    key.write_text("dummy")
+    settings = Settings(
+        _env_file=None, chat_adapter="fake",
+        profiles_dir=str(ROOT / "profiles"), charters_dir=str(ROOT / "charters"),
+        floor_dir=str(ROOT / "floor"), worker_instance_urls="http://w1:8090",
+        max_concurrent_workers=1, database_url=db_url, project_survey_enabled=False,
+        review_mode="off", plan_approval="off",
+        github_app_id="1", github_app_owner="devonpveller",
+        github_app_private_key_path=str(key),
+    )
+    db = Database(db_url)
+    orch = Orchestrator(settings, db, FakeChatAdapter(),
+                        model_client=FakeModelClient(), harness=FakeHarness())
+    await orch.setup()
+    chat = orch.chat
+    try:
+        await orch.projects.add("engine", "https://github.com/devonpveller/Engine")
+        eid, chan, root = await orch.router.open_effort("mine", project="engine")
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            p = request.url.path
+            if "/compare/" in p:
+                return httpx.Response(200, json={
+                    "ahead_by": 1, "behind_by": 0,
+                    "commits": [{"commit": {"message": "add props"}}],
+                    "files": [{"filename": "Directory.Build.props", "additions": 11,
+                               "deletions": 0}]})
+            if "/branches/" in p:
+                return httpx.Response(200, json={"commit": {"sha": "feedbead12345678"}})
+            if "/contents/Directory.Build.props" in p:
+                return httpx.Response(200, json={"type": "file", "sha": "aa"})
+            if p.endswith("/pulls") and request.method == "POST":
+                return httpx.Response(201, json={
+                    "number": 9, "html_url": "https://github.com/devonpveller/Engine/pull/9"})
+            if p.endswith("/pulls") and request.method == "GET":
+                return httpx.Response(200, json=[
+                    {"number": 9, "head": {"ref": f"agent/{eid}"}, "title": "agent: mine"},
+                    {"number": 3, "head": {"ref": "agent/effort-other"}, "title": "agent: other"},
+                ])
+            if "/pulls/3/files" in p:
+                return httpx.Response(200, json=[{"filename": "Directory.Build.props"}])
+            if p.count("/") == 3:
+                return httpx.Response(200, json={"default_branch": "main"})
+            return httpx.Response(404)
+
+        orch._gh_transport = httpx.MockTransport(handler)
+        await orch.delegate(eid, chan, root, "add the props", plan_steps=["work"])
+        msgs = " ".join(p["message"] for p in chat.posted)
+        assert "PR #3" in msgs and "agent/effort-other" in msgs, "sibling PR not named"
+        assert "overlaps this one on" in msgs and "Directory.Build.props" in msgs
+    finally:
+        await db.dispose()
+
+
+# ── repo hygiene: NL "close PR <n>" (interim hand tool until the maintainer role, P5.3) ──
+async def test_close_pull_request_capability():
+    from app.modules.capabilities import close_pull_request
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "PATCH" and request.url.path.endswith("/pulls/3")
+        assert json.loads(request.content) == {"state": "closed"}
+        return httpx.Response(200, json={"state": "closed"})
+
+    res = await close_pull_request(FakeGitHubApp(owner="devonpveller"),
+                                   "https://github.com/devonpveller/Engine", 3,
+                                   transport=httpx.MockTransport(handler))
+    assert res.ok and "closed" in res.summary and "branch kept" in res.summary
+
+
+async def test_nl_close_pr_closes_the_open_agent_pr(db_url, tmp_path):
+    key = tmp_path / "app.pem"
+    key.write_text("dummy")
+    settings = Settings(
+        _env_file=None, chat_adapter="fake",
+        profiles_dir=str(ROOT / "profiles"), charters_dir=str(ROOT / "charters"),
+        floor_dir=str(ROOT / "floor"), worker_instance_urls="http://w1:8090",
+        max_concurrent_workers=1, database_url=db_url, project_survey_enabled=False,
+        review_mode="off", plan_approval="off",
+        github_app_id="1", github_app_owner="devonpveller",
+        github_app_private_key_path=str(key),
+    )
+    db = Database(db_url)
+    orch = Orchestrator(settings, db, FakeChatAdapter(),
+                        model_client=FakeModelClient(), harness=FakeHarness())
+    await orch.setup()
+    chat = orch.chat
+    try:
+        await orch.projects.add("engine", "https://github.com/devonpveller/Engine")
+        closed = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            p = request.url.path
+            if p.endswith("/pulls") and request.method == "GET":
+                return httpx.Response(200, json=[
+                    {"number": 3, "head": {"ref": "agent/effort-old"}, "title": "agent: old"}])
+            if "/pulls/3/files" in p:
+                return httpx.Response(200, json=[{"filename": "a.txt"}])
+            if p.endswith("/pulls/3") and request.method == "PATCH":
+                closed["yes"] = True
+                return httpx.Response(200, json={"state": "closed"})
+            return httpx.Response(404)
+
+        orch._gh_transport = httpx.MockTransport(handler)
+        mgmt = await orch.mgmt_channel_id()
+        await orch.nl_intake("close PR 3", mgmt, thread_id="t")
+        assert closed.get("yes"), "the PR was not closed"
+        msgs = " ".join(p["message"] for p in chat.posted)
+        assert "closed" in msgs and "#3" in msgs
+        # unknown number → honest reply, no crash
+        await orch.nl_intake("close PR 99", mgmt, thread_id="t")
+        msgs = " ".join(p["message"] for p in chat.posted)
+        assert "couldn't find an OPEN agent PR" in msgs
+    finally:
+        await db.dispose()

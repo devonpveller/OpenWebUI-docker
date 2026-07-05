@@ -47,7 +47,8 @@ def _remote(state: dict):
         if "/branches/" in p:
             return httpx.Response(200, json={"commit": {"sha": "cafe1234beef"}})
         if "/compare/" in p:
-            return httpx.Response(200, json={"ahead_by": 1, "commits": [], "files": []})
+            return httpx.Response(200, json={"ahead_by": 1, "commits": [],
+                "files": [{"filename": "src/x.py", "additions": 1, "deletions": 0}]})
         if p.endswith("/pulls") and request.method == "POST":
             return httpx.Response(201, json={"number": 5, "html_url": "https://github.com/devonpveller/Docker-Game/pull/5"})
         if "/merge" in p and request.method == "PUT":

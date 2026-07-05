@@ -212,6 +212,16 @@ Merge to `main` is **irreversible → human-cleared** (hard-rule #4). The bridge
 via the host API). This is UX-FLOW "elevate to human testing," made concrete: the human sees a
 feature-complete, self-tested PR, not raw agent output. **No auto-merge**; no agent merge authority.
 
+**D4.h — parallel-PR visibility + hygiene ✅ BUILT (2026-07-05, interim until OD-DP3/OD-DP6).**
+With 1-effort-1-PR (OD-DP3's simple pole), successive related asks land on DIFFERENT effort
+branches/PRs and read as "the worker keeps switching branches" (live operator confusion: PR #3,
+then PR #2). Built now, all generic: (a) every delivery closure **maps the other open agent PRs**
+on the repo + the files they overlap with this one (`read_sibling_agent_prs` +
+`_sibling_pr_note`); (b) a successful merge lists the **leftover** open agent PRs with the exact
+retire command; (c) **NL `close PR <n>`** closes a superseded agent PR via the App —
+deterministic, reversible (branch kept), disambiguates across projects, never guesses. These make
+parallel PRs self-explaining; the structural fix stays OD-DP3 (feature PR) + OD-DP6 (maintainer).
+
 ### D5 — deploy to preview/staging (human-gated)
 On merge, deploy to a **preview/staging** environment (never prod without a second explicit gate).
 Deploy is irreversible/external → human-cleared. Reuses the D2 preview mechanism.
@@ -282,7 +292,17 @@ client) — no new container. A **PR-scoped token** is a new secret (env only).
   re-enabling the browser inside open-terminal (rejected earlier for blast-radius). This is the
   gating decision for the web-testing leg.
 - **OD-DP3** — "feature" granularity: 1 effort = 1 PR (simple) vs N efforts = 1 feature PR (matches
-  the intent thread; recommended). The PM owns the feature-complete judgment.
+  the intent thread; recommended). The PM owns the feature-complete judgment. **Live evidence
+  (2026-07-05):** the simple pole confused the operator within one debugging session (successive
+  fixes → PR #3 then PR #2, overlapping `Directory.Build.props`); D4.h's visibility/hygiene tools
+  are the interim. The recommended shape stays: follow-up efforts inside one intent thread should
+  land on that thread's FEATURE branch, giving one evolving PR per conversation.
+- **OD-DP6 (proposed 2026-07-05)** — **repo-maintainer role**: a governed role that OWNS repo
+  hygiene — stale/superseded branch + PR sweeps, feature-branch grouping proposals, post-merge
+  cleanup — advisory by default, destructive actions operator-worded. Introduce via the
+  role-catalog path (governance §4.1; P5.2/P5.3: PO proposes the new role TYPE, the Human
+  Operator gates it; charter inherits the floor unchanged). Until then, D4.h's deterministic
+  hand tools carry hygiene.
 - **OD-DP4** — preview/staging + prod environments: where they run, and the second gate for prod.
 - **OD-DP5 (resolved for now)** — fork/upstream substrate (D0.f): **BUILT the real-git
   `remote add upstream` at setup** (works today with existing little-coder, substrate-native). The
