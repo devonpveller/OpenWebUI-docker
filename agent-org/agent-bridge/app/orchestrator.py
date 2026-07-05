@@ -39,6 +39,7 @@ from .modules.capabilities import (
     parse_owner_repo,
     read_branch_changes,
     read_branch_delivery,
+    read_broken_gitlinks,
     read_repo_state,
 )
 from .modules.github_app import GitHubApp, build_github_app
@@ -2867,6 +2868,10 @@ class Orchestrator:
             return BranchDelivery(no_changes=True, branch=self._effort_branch(effort_id))
         delivery = await self._verify_delivery(effort_id, repo)
         if delivery.landed or not delivery.verifiable:
+            # A landed branch is NOT a delivery if it references submodule commits nobody can
+            # fetch — gate on gitlink reachability before treating it as done.
+            if delivery.landed and not await self._gate_gitlinks(effort_id, channel_id, root, repo):
+                return None
             return delivery   # verified-landed, or we couldn't check (finish labels it unverified)
 
         # Verified NON-delivery — the worker's turn ended but nothing landed. This is the exact
@@ -2884,6 +2889,8 @@ class Orchestrator:
             return BranchDelivery(no_changes=True, branch=self._effort_branch(effort_id))
         delivery = await self._verify_delivery(effort_id, repo)
         if delivery.landed:
+            if not await self._gate_gitlinks(effort_id, channel_id, root, repo):
+                return None
             return delivery
 
         # Still undelivered after a re-engage → climb the ladder (§3). Do NOT mark done; the operator
@@ -2916,6 +2923,99 @@ class Orchestrator:
             "effort_undelivered", effort_id=effort_id,
             payload={"exists": delivery.exists, "ahead": delivery.ahead, "branch": delivery.branch},
         )
+
+    async def _broken_gitlinks(self, effort_id: str, repo: str) -> list[dict]:
+        """Changed-but-unreachable submodule pointers on the effort's branch ([] = clean or
+        uncheckable — the read fails open; only a positive 'commit not found' blocks)."""
+        if self.github is None or not self.s.github_app_enabled:
+            return []
+        try:
+            return await read_broken_gitlinks(
+                self.github, repo, self._effort_branch(effort_id),
+                api_base=self.s.github_api_base, transport=self._gh_transport)
+        except Exception as exc:  # noqa: BLE001 — the gate must never crash the finalize path
+            log.debug("gitlink check failed for %s: %s", effort_id, exc)
+            return []
+
+    async def _gate_gitlinks(
+        self, effort_id: str, channel_id: str, root: str, repo: str
+    ) -> bool:
+        """DELIVERY-PIPELINE gitlink-reachability gate (live 2026-07-05): the engine branch landed
+        but pointed `vendor/MonoGame` at a commit the worker made ONLY inside its container — the
+        operator's `git submodule update --init --recursive` failed with "not our ref", i.e. the
+        PM verified 'landed' and invited a merge of a branch no one else could build. For every
+        gitlink the branch CHANGED: verify the commit exists on the submodule remote; if not,
+        re-engage the AFFINE worker once (its workspace still holds the unpushed commit) with the
+        exact per-path remedy, re-check, and on a still-broken branch escalate honestly. Returns
+        True when clean/uncheckable, False after escalation (the effort is NOT done)."""
+        broken = await self._broken_gitlinks(effort_id, repo)
+        if not broken:
+            return True
+        branch = self._effort_branch(effort_id)
+
+        def _listing(items: list[dict]) -> str:
+            return "\n".join(f"- `{b['path']}` → `{b['sha'][:10]}` (missing from "
+                             f"`{b['submodule_repo']}`)" for b in items)
+
+        await self.comms.post(
+            Intent.worker_activity,
+            f"🔍 the branch landed, but it references submodule commit(s) that do NOT exist on "
+            f"the submodule remote(s) — a fresh clone fails `git submodule update` with "
+            f"\"not our ref\":\n{_listing(broken)}\nRe-dispatching the worker to publish or "
+            f"re-point them (PM monitor, §4.2).",
+            effort_id=effort_id,
+        )
+        pushes = "\n".join(f"  git -C /workspace/{b['path']} push origin HEAD:refs/heads/{branch}"
+                           for b in broken)
+        instruction = (
+            f"YOUR PUBLISHED BRANCH IS BROKEN for anyone who clones it: it references submodule "
+            f"commit(s) that do NOT exist on the submodule remote(s), so `git submodule update "
+            f"--init --recursive` fails with \"not our ref\".\n{_listing(broken)}\n"
+            f"For EACH path above do ONE of:\n"
+            f"(a) PUBLISH the submodule commit you made (if you changed the submodule on purpose):\n"
+            f"{pushes}\n"
+            f"(b) or RE-POINT the gitlink to a commit that already exists on the submodule remote "
+            f"(`git -C <path> fetch origin && git -C <path> checkout origin/HEAD`), then commit the "
+            f"pointer change in the superproject and push `{branch}` again.\n"
+            f"Do NOT push to main/master. Do NOT force-push. Reply with what you did per path."
+        )
+        try:
+            repo_token = await self._project_token(effort_id)
+            await self.router.wake(
+                effort_id, role="worker-default", thread_id=root, channel_id=channel_id,
+                session_id=effort_id, instruction=instruction, repo=repo, repo_token=repo_token,
+            )
+        except Exception as exc:  # noqa: BLE001 — a wedged re-engage falls through to escalation
+            log.warning("gitlink re-engage failed for %s: %s", effort_id, exc)
+        broken = await self._broken_gitlinks(effort_id, repo)
+        if not broken:
+            await self.comms.post(
+                Intent.worker_activity,
+                "✅ submodule pointer(s) now resolve on their remote(s) — the branch is buildable "
+                "from a fresh clone.",
+                effort_id=effort_id,
+            )
+            return True
+        await self.comms.post(
+            Intent.escalation,
+            f"⚠️ **{effort_id}**'s branch landed but is BROKEN for consumers — after a re-engage "
+            f"it still references submodule commit(s) missing from their remote(s):\n"
+            f"{_listing(broken)}\n↑ raised to you: a fresh clone of `{branch}` cannot build "
+            f"(\"not our ref\" on submodule update).",
+            effort_id=effort_id,
+        )
+        await self.router.update_effort_card(effort_id, "error")
+        await self.comms.post(
+            Intent.operator_reply,
+            f"⚠️ **{effort_id}** pushed `{branch}`, but the branch references submodule commit(s) "
+            f"that don't exist on their remote(s) — it will NOT build from a fresh clone. I "
+            f"re-engaged the worker once and it's still broken, so it is **not** marked done:\n"
+            f"{_listing(broken)}",
+            thread_id=self._mgmt_thread_of(effort_id),
+        )
+        await self.audit.log("delivery_broken_gitlink", effort_id=effort_id,
+                             payload={"branch": branch, "broken": broken})
+        return False
 
     async def _gate_deliverable(self, effort_id: str, result, cp_id: str) -> bool:
         """Stage-5 gates on a step's deliverable (risky efforts): sampled monitor (P3.7) + a

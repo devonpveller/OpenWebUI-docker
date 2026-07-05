@@ -194,6 +194,72 @@ async def read_branch_delivery(
                           branch=branch, base=base)
 
 
+async def read_broken_gitlinks(
+    github: GitHubApp, repo_url: str, branch: str, *, base_branch: str = "",
+    api_base: str = "https://api.github.com",
+    transport: httpx.BaseTransport | None = None,
+) -> list[dict]:
+    """DELIVERY-PIPELINE gitlink-reachability gate. For each submodule POINTER the branch changed
+    (vs base), verify the referenced commit actually EXISTS on the submodule's remote. A worker
+    can commit inside its vendored submodule checkout, bump the superproject pointer and publish
+    ONLY the superproject — the branch then references a commit nobody else can fetch, and every
+    fresh clone dies on `git submodule update --init --recursive` with `fatal: remote error:
+    upload-pack: not our ref …` (live 2026-07-05: the engine branch pointed vendor/MonoGame at
+    `ac3a830b…`, made only inside the worker's container). "Landed" without this check invites a
+    merge of a branch no one else can build. Returns [{path, sha, submodule_repo}] per UNREACHABLE
+    changed gitlink. Fail-open: only a positive 'commit not found' (404/422) marks a gitlink
+    broken — infra errors and unparseable/off-host submodule URLs are skipped (can't check ≠
+    broken); partial findings survive a mid-scan error."""
+    try:
+        owner, repo = parse_owner_repo(repo_url)
+    except ValueError:
+        return []
+    if owner.lower() != (github.owner or "").lower():
+        return []
+    try:
+        token = await github.installation_token()
+    except GitHubAppError:
+        return []
+    base = api_base.rstrip("/")
+    h = _headers(token)
+    broken: list[dict] = []
+    try:
+        async with httpx.AsyncClient(timeout=15.0, transport=transport) as c:
+            if not base_branch:
+                meta = await c.get(f"{base}/repos/{owner}/{repo}", headers=h)
+                if meta.status_code >= 400:
+                    return []
+                base_branch = meta.json().get("default_branch") or "main"
+            cmp = await c.get(f"{base}/repos/{owner}/{repo}/compare/{base_branch}...{branch}",
+                              headers=h)
+            if cmp.status_code != 200:
+                return []
+            changed = [f.get("filename", "") for f in (cmp.json().get("files") or [])[:50]]
+            for path in changed:
+                if not path:
+                    continue
+                r = await c.get(f"{base}/repos/{owner}/{repo}/contents/{path}",
+                                headers=h, params={"ref": branch})
+                if r.status_code != 200 or not isinstance(r.json(), dict):
+                    continue                     # deleted path / directory listing / plain file
+                entry = r.json()
+                if entry.get("type") != "submodule":
+                    continue
+                sha = entry.get("sha") or ""
+                try:
+                    sub_owner, sub_repo = parse_owner_repo(entry.get("submodule_git_url") or "")
+                except ValueError:
+                    continue                     # can't check ≠ broken (fail-open)
+                cr = await c.get(f"{base}/repos/{sub_owner}/{sub_repo}/commits/{sha}", headers=h)
+                # GitHub answers 422 ("No commit found for SHA") — or 404 — for a missing commit.
+                if cr.status_code in (404, 422):
+                    broken.append({"path": path, "sha": sha,
+                                   "submodule_repo": f"{sub_owner}/{sub_repo}"})
+    except (httpx.HTTPError, ValueError):
+        return broken                            # keep positives found before the infra error
+    return broken
+
+
 async def fork_repo(
     github: GitHubApp, parent_url: str, *,
     api_base: str = "https://api.github.com",
