@@ -2653,7 +2653,7 @@ class Orchestrator:
 
     async def _publish_effort(
         self, effort_id: str, channel_id: str, root: str, repo: str, *, firm: bool = False
-    ) -> None:
+    ):
         """Commit + push the effort's work to its feature branch so it's DURABLE (survives a
         /project wipe), VISIBLE to the team, and fetchable for A→B hand-off. Additive push to a
         feature branch is routine (floor); push-to-main/deploy stay human-gated. Deterministic
@@ -2680,7 +2680,9 @@ class Orchestrator:
             "`NO CHANGES: <why>` so I can report that. Otherwise reply with the branch name and the "
             "pushed commit hash."
             if firm else
-            "Then reply with the branch name and the pushed commit hash."
+            "If this task was READ-ONLY / you made NO file changes, SKIP the git steps entirely and "
+            "reply exactly `NO CHANGES: <why>`. Otherwise reply with the branch name and the pushed "
+            "commit hash."
         )
         instruction = (
             f"{lead} (the env prefix on the commit attributes it to you, `{name}`):\n"
@@ -2714,6 +2716,7 @@ class Orchestrator:
             "effort_published", effort_id=effort_id,
             payload={"branch": branch, "self_reported_ok": bool(result and result.ok), "firm": firm},
         )
+        return result
 
     async def _verify_delivery(self, effort_id: str, repo: str) -> BranchDelivery:
         """PM's checkable acceptance signal (§4.2): independently read the remote to see if the effort's
@@ -2740,7 +2743,12 @@ class Orchestrator:
         STILL hasn't landed, ESCALATES to the operator and returns None (the effort is NOT marked done —
         it stays visible in /status). Returns the BranchDelivery to hand to _finish_effort otherwise
         (a verified `landed`, or an `unverifiable` verdict the closure labels honestly)."""
-        await self._publish_effort(effort_id, channel_id, root, repo)
+        pub = await self._publish_effort(effort_id, channel_id, root, repo)
+        # NO CHANGES protocol (read-only/investigation tasks): the worker explicitly reports it
+        # changed nothing — a LEGITIMATE completion whose deliverable is its ANSWER, not a branch.
+        # Honor it (the live miss ignored the worker's correct report and escalated 'undelivered').
+        if pub is not None and "NO CHANGES:" in (pub.output or ""):
+            return BranchDelivery(no_changes=True, branch=self._effort_branch(effort_id))
         delivery = await self._verify_delivery(effort_id, repo)
         if delivery.landed or not delivery.verifiable:
             return delivery   # verified-landed, or we couldn't check (finish labels it unverified)
@@ -2755,7 +2763,9 @@ class Orchestrator:
             f"landed. Re-dispatching with an explicit commit + push instruction (PM monitor, §4.2).",
             effort_id=effort_id,
         )
-        await self._publish_effort(effort_id, channel_id, root, repo, firm=True)
+        pub = await self._publish_effort(effort_id, channel_id, root, repo, firm=True)
+        if pub is not None and "NO CHANGES:" in (pub.output or ""):
+            return BranchDelivery(no_changes=True, branch=self._effort_branch(effort_id))
         delivery = await self._verify_delivery(effort_id, repo)
         if delivery.landed:
             return delivery
@@ -3098,7 +3108,14 @@ class Orchestrator:
         # The worker's self-report (its turn ended ok); the VERIFIED verdict overrides it as the truth.
         self_reported = self._published_branch.pop(effort_id, None)
         branch = delivery.branch if (delivery and delivery.landed) else None
-        if delivery is not None and delivery.landed:
+        if delivery is not None and delivery.no_changes:
+            # Read-only/investigation completion: the worker's ANSWER (streamed above in the thread)
+            # is the deliverable. No branch, no PR, no D2 — and no scope flag (nothing was meant to
+            # change). Honest and DONE.
+            self._effort_intent_scope.pop(effort_id, None)
+            where = ("**no changes** — the worker confirmed this was a read-only task; its answer "
+                     "above in the thread is the deliverable (nothing to publish)")
+        elif delivery is not None and delivery.landed:
             sha = f" @ `{delivery.head_sha[:10]}`" if delivery.head_sha else ""
             where = (f"pushed to branch **`{branch}`**{sha} (verified on the remote) — "
                      f"`git fetch origin {branch}` to see it")

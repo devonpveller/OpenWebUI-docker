@@ -358,10 +358,19 @@ class Router:
                         ans = (item.get("answer") or "").strip()
                         if ans:
                             self._record_activity(effort_id, f"💬 {ans[:120]}")
-                            await self.chat.post(
-                                channel_id, f"💬 **{role}@{inst.id}:** {ans[:1500]}",
-                                thread_id=thread_id,
-                            )
+                            # The answer IS the deliverable for investigation tasks — never chop it
+                            # at an arbitrary cap (live: a structure diagram was cut mid-tree).
+                            # Chunk long answers into thread replies (Mattermost caps ~16k/post);
+                            # only truly enormous output is truncated, and SAYS so.
+                            chunks = [ans[i:i + 3500] for i in range(0, min(len(ans), 14000), 3500)]
+                            for ci, chunk in enumerate(chunks):
+                                head = (f"💬 **{role}@{inst.id}:** " if ci == 0
+                                        else f"_(…continued {ci + 1}/{len(chunks)})_\n")
+                                tail_note = ("\n\n_(answer truncated at 14k chars)_"
+                                             if ci == len(chunks) - 1 and len(ans) > 14000 else "")
+                                await self.chat.post(
+                                    channel_id, f"{head}{chunk}{tail_note}", thread_id=thread_id,
+                                )
 
                 context = await self.build_context(effort_id, role)
                 prompt = f"{context}\n\n{instruction}".strip()

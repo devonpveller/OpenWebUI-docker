@@ -234,6 +234,9 @@ class FakeHarness:
         # tests can exercise the quarantine + retry-elsewhere path. wake() raises for a matching url.
         self.busy_urls: set[str] = set()
         self.down_urls: set[str] = set()
+        # Optional answer text streamed via on_update (default "ok") — set long text to exercise
+        # the answer-chunking path.
+        self.answer_text: str | None = None
 
     async def wake(
         self, base_url: str, session_id: str, prompt: str, *,
@@ -252,7 +255,8 @@ class FakeHarness:
         if on_update:
             for cmd in self.stream_commands or []:
                 await on_update("command", {"command": cmd, "ok": True})
-            await on_update("answer", {"status": self.result_status, "answer": "ok"})
+            await on_update("answer", {"status": self.result_status,
+                                       "answer": self.answer_text or "ok"})
         return WorkResult(self.result_status, task_id=f"fake-{len(self.wakes)}", output=out)
 
     async def set_project(

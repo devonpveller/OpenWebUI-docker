@@ -137,6 +137,11 @@ class BranchDelivery(BaseModel):
     branch: str = ""
     base: str = ""
     detail: str = ""             # short context on an unverifiable/failed check (never a token)
+    # Set by the ORCHESTRATOR (not the remote read) when the worker explicitly reported
+    # `NO CHANGES: <why>` — a read-only/investigation task with nothing to publish. A legitimate
+    # completion whose deliverable is the worker's ANSWER, not a branch (never escalated as
+    # undelivered — the live miss force-marched a read-only task through publish → escalation).
+    no_changes: bool = False
 
     @property
     def landed(self) -> bool:
