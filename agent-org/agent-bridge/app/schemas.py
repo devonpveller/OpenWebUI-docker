@@ -163,6 +163,10 @@ class OperatorIntent(BaseModel):
     project: str | None = None            # a named project/repo to work on (a registered project)
     repo_url: str | None = None           # a git URL to ONBOARD as a new project (creates its channel)
     upstream_url: str | None = None       # if repo_url is a FORK, the parent/upstream repo URL (D0.f)
+    # Clear a WRONG/stale upstream from an existing project ("X isn't a fork — remove its
+    # upstream"). The registry is bridge-owned state, so fixing it must be an NL operation (D0.f);
+    # set together with `project`. Distinct from upstream_url=None (which just means "not given").
+    remove_upstream: bool = False
     steering: str | None = None           # the clarification / steering / direction text
     decision: Literal["approve", "modify", "abort"] | None = None  # interpreted, NOT auto-run
     # For reengage/archive/status bulk actions: a substring matching effort ids (e.g. "calculator",

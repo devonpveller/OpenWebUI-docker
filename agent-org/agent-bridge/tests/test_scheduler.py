@@ -142,3 +142,49 @@ async def test_retire_leaves_no_assignment(db):
     await gate.ensure_effort("e1", "e1")
     with pytest.raises(NoCapacityError):
         await sched.acquire("e1", "worker", "s1")
+
+
+# ── LIVE 2026-07-05 15:48: a 5-effort re-engage burst double-booked BOTH workers ──
+# acquire() was SELECT-then-UPDATE with awaits between; concurrent acquires all saw the same
+# "idle" snapshot and last-write-wins bound one worker to several efforts — worker-1 accepted
+# TWO tasks into ONE workspace (same repo), risking cross-effort `git add -A` contamination.
+async def test_concurrent_acquires_never_double_book_a_worker(db):
+    import asyncio
+
+    gate, sched = await _sched(db, cap=4)                  # cap is NOT the constraint here
+    for e in ("e1", "e2", "e3", "e4"):
+        await gate.ensure_effort(e, e)
+    await sched.register("w1", "u1")                       # ONE worker, four contenders
+
+    async def grab(e):
+        try:
+            return (await sched.acquire(e, "worker", e)).id
+        except NoCapacityError:
+            return None
+
+    got = await asyncio.gather(*(grab(e) for e in ("e1", "e2", "e3", "e4")))
+    winners = [g for g in got if g]
+    assert winners == ["w1"] , f"exactly one effort may hold w1, got {got}"
+    snap = {i["id"]: i for i in await sched.snapshot()}
+    assert snap["w1"]["state"] == "computing"
+
+
+async def test_concurrent_acquires_spread_across_distinct_workers(db):
+    import asyncio
+
+    gate, sched = await _sched(db, cap=4)
+    for e in ("e1", "e2", "e3", "e4", "e5"):
+        await gate.ensure_effort(e, e)
+    await sched.register("w1", "u1")
+    await sched.register("w2", "u2")
+
+    async def grab(e):
+        try:
+            return (await sched.acquire(e, "worker", e)).id
+        except NoCapacityError:
+            return None
+
+    got = await asyncio.gather(*(grab(e) for e in ("e1", "e2", "e3", "e4", "e5")))
+    winners = [g for g in got if g]
+    assert sorted(winners) == ["w1", "w2"], \
+        f"each free worker must be bound EXACTLY once, got {got}"

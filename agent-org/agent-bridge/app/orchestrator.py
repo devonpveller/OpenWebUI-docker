@@ -85,6 +85,10 @@ _WORK_CUE_RE = re.compile(
 _ERROR_REPORT_RE = re.compile(
     r"\berrors?\b|\bexception\b|\btraceback\b|stack trace|could not be found|unable to find|"
     r"\bcannot find\b|\bfail(s|ed|ure|ing)?\b", re.I)
+# "continue its PREVIOUS/LAST task" (singular) — the operator means ONE interrupted effort, not a
+# fleet-wide fan-out (live 2026-07-05: an unscoped re-engage dispatched 5 stale efforts at once,
+# double-booking both workers). Deliberately does NOT match the plural ("the tasks").
+_SINGULAR_TASK_RE = re.compile(r"\b(?:previous|last|its)\s+(?:\w+\s+)?task\b", re.I)
 
 
 def _compact_paste(text: str, max_lines: int = 40, max_chars: int = 2500) -> str:
@@ -148,6 +152,9 @@ _PO_NL_SYS = (
     "'track the official repo as upstream', 'clone X into Y keeping upstream'. Set `project` to the "
     "existing project (match a KNOWN PROJECT) + `upstream_url` to the parent repo URL, and do NOT set "
     "`repo_url` (you are NOT onboarding a new project). I update the project + confirm.\n"
+    "- remove an upstream from an EXISTING project: 'remove/clear the upstream on X', 'X isn't a "
+    "fork — drop its upstream', 'stop treating X as a fork' → set `project`=X + "
+    "`remove_upstream`=true (no upstream_url, no repo_url). I clear it + confirm.\n"
     "- request: they want NEW work done on an EXISTING project → set effort_name to a short "
     "kebab-case slug (it becomes a thread in the project channel). If they name a project to work "
     "on, set `project` to it (match a KNOWN PROJECT). In your `reply`, do the thinking-partner thing: "
@@ -438,6 +445,9 @@ class Orchestrator:
         self.pending = PendingStore(db, self.audit)
         self.models.on_capacity_signal = self._signal_capacity
         self.scheduler.on_release = self._signal_capacity   # worker frees → drain slot-parked efforts
+        # upstream bake failed → verify the registry against the forge's ACTUAL fork parent and
+        # self-heal a wrong config (D0.f), instead of warning about tokens forever.
+        self.router.on_upstream_fail = self._heal_project_upstream
         self._capacity_event = asyncio.Event()
         self._capacity_task: asyncio.Task | None = None
         self._draining = False
@@ -696,6 +706,68 @@ class Orchestrator:
         except Exception as exc:  # noqa: BLE001
             log.debug("egress sync for %s: %s", proj["slug"], exc)
         return proj
+
+    @staticmethod
+    def _norm_repo(url: str) -> str:
+        """owner/name in lowercase for equality checks across URL spellings (.git, trailing /)."""
+        u = (url or "").strip().rstrip("/")
+        if u.endswith(".git"):
+            u = u[:-4]
+        return u.split("github.com/")[-1].lower()
+
+    async def _heal_project_upstream(self, repo: str, upstream: str) -> str | None:
+        """A worker focus reported the upstream bake FAILED. Recover autonomously when the forge
+        can PROVE the registry is wrong: read the repo's ACTUAL fork parent via the App —
+        - not a fork at all  → the configured upstream is a registry mistake (an NL mishap):
+          CLEAR it and say so;
+        - a fork of a DIFFERENT parent → CORRECT the registry to the real parent;
+        - the parent matches → the config is right and the parent is genuinely private or
+          unreachable → return None (the caller keeps the honest token/URL warning).
+        Generic for any registered project; own-account repos only (that's what the App can
+        verify); fails open — an unverifiable state never mutates the registry."""
+        if self.github is None or not self.s.github_app_enabled:
+            return None
+        slug = None
+        for p in await self.projects.list():
+            if self._norm_repo(p.get("repo_url") or "") == self._norm_repo(repo):
+                slug = p["slug"]
+                break
+        if not slug:
+            return None
+        try:
+            owner, name = parse_owner_repo(repo)
+            if owner.lower() != (self.github.owner or "").lower():
+                return None
+            token = await self.github.installation_token()
+            base = self.s.github_api_base.rstrip("/")
+            async with httpx.AsyncClient(timeout=15.0, transport=self._gh_transport) as c:
+                r = await c.get(
+                    f"{base}/repos/{owner}/{name}",
+                    headers={"Authorization": f"token {token}",
+                             "Accept": "application/vnd.github+json"},
+                )
+            if r.status_code != 200:
+                return None
+            parent = ((r.json().get("parent") or {}).get("full_name") or "")
+        except Exception as exc:  # noqa: BLE001 — an unverifiable state never mutates the registry
+            log.debug("upstream heal check failed for %s: %s", repo, exc)
+            return None
+        if parent and parent.lower() == self._norm_repo(upstream):
+            return None   # config is RIGHT — genuine reachability/auth problem; keep the warning
+        if parent:
+            fixed = f"https://github.com/{parent}"
+            await self.projects.set_upstream(slug, fixed)
+            await self.audit.log("project_upstream_healed",
+                                 payload={"slug": slug, "was": upstream, "now": fixed})
+            return (f"🩹 `{slug}`'s configured upstream (`{upstream}`) doesn't match its ACTUAL "
+                    f"fork parent on GitHub — corrected the registry to `{fixed}` (verified via "
+                    f"the App). It bakes as the `upstream` remote on the next focus.")
+        await self.projects.set_upstream(slug, None)
+        await self.audit.log("project_upstream_healed",
+                             payload={"slug": slug, "was": upstream, "now": None})
+        return (f"🩹 `{slug}` is **not a fork** (verified via the GitHub App), so its configured "
+                f"upstream (`{upstream}`) was a registry mistake — cleared it; this warning stops "
+                f"on the next focus. Re-add any time: _\"set <url> as upstream on {slug}\"_.")
 
     async def _set_project_upstream(
         self, slug: str, upstream_url: str, channel_id: str, thread_id: str | None, reply_prefix: str
@@ -1326,6 +1398,20 @@ class Orchestrator:
                 thread_id=thread_id,
             )
             return
+        # REMOVE a wrong/stale upstream from an EXISTING project — the registry is bridge-owned
+        # state, so correcting it is an NL operation (D0.f), never operator SQL.
+        if getattr(intent, "remove_upstream", False) and intent.project and not intent.upstream_url:
+            p = await self.projects.resolve(intent.project)
+            if p:
+                await self.projects.set_upstream(p["slug"], None)
+                await self.chat.post(
+                    channel_id,
+                    (reply + f"\n\n✅ Cleared the upstream on **`{p['slug']}`** — it's no longer "
+                     f"treated as a fork, so workers stop baking an `upstream` remote on their next "
+                     f"focus. Re-add any time: _\"set <url> as upstream on {p['slug']}\"_.").strip(),
+                    thread_id=thread_id,
+                )
+                return
         # Set/track an UPSTREAM on an EXISTING project (no new repo_url) — "maintain X as upstream on
         # project Y" / "track X upstream". The fork parent can be added after onboarding, all in NL.
         if intent.upstream_url and intent.project and not intent.repo_url:
@@ -1430,6 +1516,17 @@ class Orchestrator:
                     thread_id=thread_id,
                 )
                 return
+            # "continue its previous/last task" (SINGULAR, unscoped) = resume ONE interrupted
+            # effort — the most recently touched — not a fan-out over every stale idle effort
+            # (which re-runs outdated goals and floods the worker pool).
+            if (len(targets) > 1 and not scope and not intent.effort_id
+                    and _SINGULAR_TASK_RE.search(message)):
+                by_recency = {e["id"]: (e.get("updated_at") or "") for e in efforts}
+                latest = max(targets, key=lambda t: by_recency.get(t, ""))
+                targets = [latest]
+                reply = (reply + f"\n\n_(you said “previous task”, so I'm resuming only the most "
+                         f"recent effort `{latest}` — say “get the workers working” to re-dispatch "
+                         f"everything idle.)_").strip()
             await self._reengage(targets, mgmt_channel=channel_id, mgmt_thread=thread_id,
                                  reply_prefix=reply)
             return
@@ -2912,10 +3009,64 @@ class Orchestrator:
                 return None
             return delivery
 
-        # Still undelivered after a re-engage → climb the ladder (§3). Do NOT mark done; the operator
-        # decides (retry / investigate / accept as no-op). Intent-framed so the WHY reaches them.
+        # Still undelivered after a re-engage. Before climbing the ladder, RECOVER the benign case
+        # ourselves: "no branch" is EITHER unpushed work (a real failure) OR a goal that ALREADY
+        # HOLDS in the repo (a stale effort / work landed earlier) — and the org can tell these
+        # apart with a read-only state check against the effort's own goal. Only a verified
+        # already-holds closes as done; anything else still escalates (§3 — never a false `done`).
+        state = await self._verify_goal_state(effort_id, channel_id, root, repo)
+        if state is not None:
+            return state
         await self._escalate_undelivered(effort_id, delivery)
         return None
+
+    async def _verify_goal_state(
+        self, effort_id: str, channel_id: str, root: str, repo: str
+    ) -> BranchDelivery | None:
+        """Undelivered-recovery (DELIVERY-PIPELINE §4.2 extension): wake the AFFINE worker for a
+        READ-ONLY check of the effort's goal against the repo's CURRENT state. `STATE HOLDS` +
+        evidence ⇒ a legitimate no-op completion (returned as the NO-CHANGES verdict, closure
+        carries the evidence); anything else ⇒ None (the caller escalates). Goal-anchored and
+        task-agnostic — no repo- or project-specific logic."""
+        try:
+            _, goal_text, _ = await self.charters.current_goal(effort_id)
+        except Exception:  # noqa: BLE001
+            goal_text = ""
+        goal = (goal_text or "").strip()
+        if not goal:
+            return None
+        instruction = (
+            "STATE CHECK (read-only verification — change NOTHING, no git writes). Your branch "
+            "never landed on the remote, so I need ground truth about the repo's CURRENT state.\n"
+            f"THE GOAL WAS:\n{_compact_paste(goal)}\n"
+            "Inspect the checkout and decide: does the desired end-state ALREADY HOLD (an earlier "
+            "effort delivered it, or nothing was ever needed)? Reply with EXACTLY one first line:\n"
+            "`STATE HOLDS: <one line of concrete evidence — the files/config you verified>`\n"
+            "`STATE MISSING: <one line on what is absent>`"
+        )
+        try:
+            result = await self.router.wake(
+                effort_id, role="worker-default", thread_id=root, channel_id=channel_id,
+                session_id=effort_id, instruction=instruction, repo=repo,
+                repo_token=await self._project_token(effort_id),
+            )
+        except Exception as exc:  # noqa: BLE001 — recovery is best-effort; escalation still runs
+            log.debug("state check failed for %s: %s", effort_id, exc)
+            return None
+        out = (result.output or "") if result is not None else ""
+        m = re.search(r"STATE HOLDS:\s*(.*)", out)
+        if not m:
+            return None
+        evidence = (m.group(1) or "").strip().splitlines()[0][:300]
+        await self.comms.post(
+            Intent.worker_activity,
+            "✅ nothing to deliver — a read-only state check confirms the goal **already holds**"
+            + (f": {evidence}" if evidence else "") + ". Closing as done (no changes needed).",
+            effort_id=effort_id,
+        )
+        await self.audit.log("effort_state_holds", effort_id=effort_id,
+                             payload={"evidence": evidence})
+        return BranchDelivery(no_changes=True, branch=self._effort_branch(effort_id))
 
     async def _escalate_undelivered(self, effort_id: str, delivery: BranchDelivery) -> None:
         """Undelivered-after-re-engage escalation (§3 ladder). The change did not land even after the

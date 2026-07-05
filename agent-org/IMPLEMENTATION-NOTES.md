@@ -165,6 +165,39 @@ change).
   Tests: `test_fork_upstream.py` (7 — registry/egress/command/threading/private-token/NL) +
   `test_workspace.py::test_add_upstream_remote_*` (3 — real-git/idempotent/push-fence/token).
 
+## Self-recovery + acceptance-signal hardening (2026-07-05, from live misses)
+
+A day of live operation surfaced four failure classes; each got a **generic** (project/task-
+agnostic) mechanism + RED→GREEN regression tests. Principle: *the org recovers what it can prove,
+and escalates what it can't* — and bridge-owned state is corrected via NL, never operator SQL.
+
+- **Error-report intake** (`orchestrator.nl_intake`): a pasted build-error wall junk-misfired the
+  PO classifier twice → the fix request was dropped with the generic rephrase fallback. Fixes:
+  `_compact_paste` (dedupe `repeated ×N` + cap) feeds the classifier and readiness gate while the
+  FULL text stays the goal; the junk repair now grounds on `_project_scoped_in` (`in <p>,` prefix
+  → `project <name>` phrase → registered name anywhere, longest-first), gated by work-verb /
+  error-paste cues so a mere mention can't spawn a phantom effort; the PO prompt names
+  bug/build-failure reports as `request`s; the fallback names the projects it recognized.
+  Tests: `test_error_report_intake.py`.
+- **Delivery: gitlink reachability gate + goal state-check + upstream self-heal/NL removal** —
+  see DELIVERY-PIPELINE **§D0.v** (the canonical write-up). Tests: `test_gitlink_gate.py`,
+  `test_self_recovery.py`.
+- **Scheduler allocation race** (`scheduler.acquire`): a 5-effort re-engage burst double-booked
+  BOTH workers (SELECT-then-UPDATE with awaits between; last-write-wins) — one worker accepted two
+  tasks into one workspace. Fix: `_alloc_lock` (asyncio) serializes acquire/wake_finished —
+  single-process bridge, so a process lock is exact. A clone failing with "destination path …
+  already exists" is now triaged as a **dispatch collision**, not "private repo/token". Tests:
+  `test_scheduler.py::test_concurrent_*`, `test_dispatch_errors.py`.
+- **Singular re-engage scoping** (`nl_intake` reengage branch): "continue its **previous task**"
+  (singular, unscoped) resumes only the most-recently-touched idle effort (`updated_at` now in
+  `gate.snapshot`) with a transparent note; "get the workers working" keeps the fan-out. Kills the
+  stale-effort re-run flood. Tests: `test_reengage_archive.py::test_reengage_previous_*`.
+
+Known residuals (logged, not silent): the gitlink gate accepts any-ref-reachable (durable =
+submodule bumps land via PR on the submodule's default branch); the ao-worker daemon accepted a
+2nd concurrent `/tasks` with 200 (no 409-when-busy) — the scheduler lock removes the cause;
+daemon-side serialization is the defense-in-depth follow-up (little-coder change).
+
 ## Anthropic resources to stop hand-building every permutation (2026-07-03, operator meta-question)
 
 The operator asked whether Anthropic resources exist so they don't muddle through every use-case by

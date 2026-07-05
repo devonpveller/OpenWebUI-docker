@@ -228,3 +228,63 @@ async def test_retry_and_archive_commands(db_url):
         assert any(w for w in harness.wakes)                    # /retry dispatched mono-1
     finally:
         await db.dispose()
+
+
+# ── LIVE 2026-07-05 15:48: "continue its previous task" fanned out to ALL 5 idle efforts ──
+async def test_reengage_previous_task_singular_resumes_only_most_recent(db_url):
+    """An unscoped re-engage whose words say ONE task ("continue its previous task") must resume
+    only the most recently touched idle effort — not re-run every stale goal in the backlog."""
+    orch, chat, harness, db = await _orch(db_url)
+    try:
+        old_eid, _c1, _r1 = await _idle_effort(orch, "stale-yesterday")
+        new_eid, _c2, _r2 = await _idle_effort(orch, "fresh-interrupted")
+        # make recency unambiguous: touch the fresh effort LAST
+        from app.models import Effort
+        async with orch.db.session_factory() as s:
+            older = await s.get(Effort, old_eid)
+            older.updated_at = "2026-07-04T00:00:00+00:00"
+            newer = await s.get(Effort, new_eid)
+            newer.updated_at = "2026-07-05T15:00:00+00:00"
+            await s.commit()
+        orch.models._client.queue_structured(OperatorIntent(
+            kind="reengage", reply="Resuming the interrupted work."))
+        mgmt = await orch.mgmt_channel_id()
+        await orch.nl_intake("there was a disruption, please have the worker continue its "
+                             "previous task.", mgmt, thread_id="t")
+        await _drain(orch)
+        woken = {w["session_id"] for w in harness.wakes}
+        assert new_eid in woken, "the most recent effort was not resumed"
+        assert old_eid not in woken, "a stale effort was fanned out despite the SINGULAR ask"
+        msgs = " ".join(p["message"] for p in chat.posted)
+        assert "most recent effort" in msgs          # transparent about the narrowed scope
+    finally:
+        await db.dispose()
+
+
+async def test_reengage_plural_still_dispatches_all_idle(db_url):
+    """"get the workers working" (no singular phrasing) keeps the documented fan-out."""
+    settings = Settings(
+        _env_file=None, chat_adapter="fake",
+        profiles_dir=str(ROOT / "profiles"), charters_dir=str(ROOT / "charters"),
+        floor_dir=str(ROOT / "floor"),
+        worker_instance_urls="http://w1:8090,http://w2:8090",   # room for BOTH efforts
+        max_concurrent_workers=2, database_url=db_url, project_survey_enabled=False,
+        review_mode="off", plan_approval="off",
+    )
+    db = Database(db_url)
+    orch = Orchestrator(settings, db, FakeChatAdapter(),
+                        model_client=FakeModelClient(), harness=FakeHarness())
+    await orch.setup()
+    chat, harness = orch.chat, orch.harness
+    try:
+        e1, _c1, _r1 = await _idle_effort(orch, "one")
+        e2, _c2, _r2 = await _idle_effort(orch, "two")
+        orch.models._client.queue_structured(OperatorIntent(
+            kind="reengage", reply="Dispatching all idle work."))
+        mgmt = await orch.mgmt_channel_id()
+        await orch.nl_intake("get the workers working", mgmt, thread_id="t")
+        await _drain(orch)
+        woken = {w["session_id"] for w in harness.wakes}
+        assert {e1, e2} <= woken, f"fan-out lost efforts: woke only {woken}"
+    finally:
+        await db.dispose()

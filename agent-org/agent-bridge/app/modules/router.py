@@ -108,6 +108,12 @@ class Router:
         # Recent worker activity per effort (the streamed commands) so the PO can answer
         # "what's going on?" with real visibility instead of "I don't have visibility."
         self._activity: dict[str, list[str]] = {}
+        # Optional async hook `(repo, upstream) -> str | None`, tried when a focus reports the
+        # upstream bake FAILED. A truthy return means the caller RECOVERED (e.g. the orchestrator
+        # verified the registry upstream is wrong via the forge API and corrected it) and is the
+        # message to post instead of the generic private-or-unreachable warning. Same wiring style
+        # as scheduler.on_release.
+        self.on_upstream_fail = None
 
     def _record_activity(self, effort_id: str, line: str) -> None:
         buf = self._activity.setdefault(effort_id, [])
@@ -291,25 +297,46 @@ class Router:
                                  "upstream_ok": upstream_ok, "detail": detail},
                     )
                     if ok and upstream and upstream_ok is False:
-                        # Clone worked but the fork's read-only `upstream` remote didn't bake — the
-                        # parent is unreachable/private. NON-FATAL (origin work still runs), but the
-                        # worker's `git fetch upstream` will fail, so surface it in-thread rather than
-                        # let the effort discover it mid-task (observability = safety).
+                        # Clone worked but the fork's read-only `upstream` remote didn't bake.
+                        # FIRST let the recovery hook try to prove the CONFIG is wrong (repo isn't
+                        # actually a fork of that upstream) and heal the registry — else fall back
+                        # to the honest warning (a genuinely private/unreachable parent). NON-FATAL
+                        # either way (origin work still runs); surfaced in-thread rather than let
+                        # the effort discover it mid-task (observability = safety).
+                        healed = None
+                        if self.on_upstream_fail is not None:
+                            try:
+                                healed = await self.on_upstream_fail(repo, upstream)
+                            except Exception as exc:  # noqa: BLE001 — recovery must never break dispatch
+                                log.debug("upstream-fail hook errored for %s: %s", repo, exc)
                         await self.chat.post(
                             channel_id,
-                            f"⚠️ Cloned `{repo}`, but I couldn't set up its `upstream` remote "
-                            f"(`{upstream}`) — the parent looks **private or unreachable**. Fork "
-                            f"sync (`git fetch upstream`) won't work until that's fixed (a "
-                            f"read-scoped token for the parent, or a correct URL). Proceeding on "
-                            f"`origin` only.",
+                            healed or (
+                                f"⚠️ Cloned `{repo}`, but I couldn't set up its `upstream` remote "
+                                f"(`{upstream}`) — the parent looks **private or unreachable**. Fork "
+                                f"sync (`git fetch upstream`) won't work until that's fixed (a "
+                                f"read-scoped token for the parent, or a correct URL). Proceeding on "
+                                f"`origin` only."
+                            ),
                             thread_id=thread_id,
                         )
                     if not ok:
                         # A CLONE failure — not a worker failure. Name the real problem + how to fix
                         # it, so it never reads as a phantom "worker responded". exit 128 =
-                        # private/missing repo the deploy token can't reach.
-                        is_auth = ("128" in detail) or ("authentication" in detail.lower()) or not detail
+                        # private/missing repo the deploy token can't reach — EXCEPT a workspace
+                        # collision ("destination path … already exists"), which is a dispatch race
+                        # (another effort holds this worker's checkout), not repo/auth at all (live
+                        # 2026-07-05: it was reported as "private or missing", pointing the operator
+                        # at tokens instead of the scheduler).
+                        is_collision = "already exists" in (detail or "").lower()
+                        is_auth = not is_collision and (
+                            ("128" in detail) or ("authentication" in detail.lower()) or not detail
+                        )
                         hint = (
+                            "the worker's workspace is **busy with another effort's checkout** (a "
+                            "dispatch collision — not a repo or token problem); say _\"get the "
+                            "workers working\"_ again in a bit and it will land on a free worker"
+                            if is_collision else
                             "that repo looks **private or missing** and the deploy token can't reach "
                             "it — check the URL, or set a token with `/project add <name> <repo> "
                             "<TOKEN_ENV>`" if is_auth else "see the error above"

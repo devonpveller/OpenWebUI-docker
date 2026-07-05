@@ -127,8 +127,10 @@ async def test_nondelivery_reengages_once_then_escalates(db_url, tmp_path):
         eid, chan, root = await orch.router.open_effort("wire", project="game")
         orch._gh_transport = _remote(branch_status=404)          # branch NEVER lands
         await orch.delegate(eid, chan, root, "wire the build", plan_steps=["do the work"])
-        # 1 step + publish + ONE firm re-engage publish = 3 wakes
-        assert len(harness.wakes) == 3
+        # 1 step + publish + ONE firm re-engage publish + the read-only goal STATE CHECK
+        # (self-recovery: an already-holds goal closes as no-op; here it answers nothing
+        # useful, so the escalation below still fires) = 4 wakes
+        assert len(harness.wakes) == 4
         assert any("NOT PUBLISHED" in w["prompt"] for w in harness.wakes)   # firm re-engage went out
         msgs = " ".join(p["message"] for p in chat.posted)
         assert "explicit commit + push" in msgs                  # PM announced the re-engage

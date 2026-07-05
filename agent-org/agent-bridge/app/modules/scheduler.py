@@ -16,6 +16,7 @@ the gate (machine A) is what re-admits an effort to the scheduler (machine B).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 
@@ -55,6 +56,13 @@ class Scheduler:
         # `no_worker_slot`, so a slot-starved effort auto-runs the moment a worker is free. No-op
         # if unset. Precise (a slot genuinely freed), so it can't tight-loop the just-parked effort.
         self.on_release = None
+        # Serializes ALLOCATION (acquire / wake_finished). The critical section is
+        # count→select-free→bind with awaits in between; without this, a burst of concurrent
+        # acquires (a multi-effort re-engage) all see the same "idle" snapshot and last-write-wins
+        # binds ONE worker to SEVERAL efforts (live 2026-07-05: both workers double-booked;
+        # worker-1 accepted two tasks into one workspace). Single-process bridge ⇒ an asyncio
+        # lock is sufficient and exact.
+        self._alloc_lock = asyncio.Lock()
 
     # ── pool registry ───────────────────────────────────────────────────────
     async def register(self, instance_id: str, base_url: str) -> None:
@@ -123,7 +131,7 @@ class Scheduler:
                 f"effort {effort_id} is frozen/killed — scheduler will not dispatch "
                 f"(clear the gate first — governance §3.0 composition rule)"
             )
-        async with self.db.session_factory() as s:
+        async with self._alloc_lock, self.db.session_factory() as s:
             if await self._computing_count(s) >= self.max_concurrent:
                 raise NoCapacityError("MAX_CONCURRENT_WORKERS reached — queue the effort")
             base_q = select(WorkerInstance).where(
@@ -228,7 +236,7 @@ class Scheduler:
         """A `finish` event on `effort_id`: return the ids of instances that were
         waiting on it and now have a free slot to resume. Slot-bounded."""
         resumed: list[str] = []
-        async with self.db.session_factory() as s:
+        async with self._alloc_lock, self.db.session_factory() as s:
             waiters = (
                 await s.execute(
                     select(WorkerInstance).where(

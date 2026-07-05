@@ -96,3 +96,36 @@ async def test_reengage_associates_operator_thread(db_url):
         assert orch._effort_mgmt_thread.get(eid) == "conv-1"
     finally:
         await db.dispose()
+
+
+# ── LIVE 2026-07-05: a workspace collision must NOT be blamed on repo/token ────────
+async def test_workspace_collision_is_not_misdiagnosed_as_private_repo(db_url):
+    """clone failed (exit 128): "destination path '/workspace' already exists and is not an empty
+    directory" = another effort holds this worker's checkout (a dispatch race). The live message
+    said "private or missing … deploy token" — a token rabbit hole. It must say collision."""
+    orch, chat, harness, db = await _orch(db_url)
+    try:
+        await orch.projects.add("mono", "https://github.com/me/mono.git")
+        eid, chan, root = await orch.router.open_effort("collide", project="mono")
+        harness.set_project_fails = ("clone failed (exit 128): fatal: destination path "
+                                     "'/workspace' already exists and is not an empty directory.")
+        await orch.delegate(eid, chan, root, "do it")
+        msgs = " ".join(p["message"] for p in chat.posted)
+        assert "busy with another effort" in msgs, "collision not named"
+        assert "private or missing" not in msgs, "still misdiagnosed as a repo/token problem"
+    finally:
+        await db.dispose()
+
+
+async def test_genuine_auth_clone_failure_still_says_private_or_missing(db_url):
+    orch, chat, harness, db = await _orch(db_url)
+    try:
+        await orch.projects.add("mono", "https://github.com/me/mono.git")
+        eid, chan, root = await orch.router.open_effort("denied", project="mono")
+        harness.set_project_fails = ("clone failed (exit 128): fatal: Authentication failed for "
+                                     "'https://github.com/me/mono.git'")
+        await orch.delegate(eid, chan, root, "do it")
+        msgs = " ".join(p["message"] for p in chat.posted)
+        assert "private or missing" in msgs
+    finally:
+        await db.dispose()
