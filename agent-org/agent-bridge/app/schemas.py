@@ -225,6 +225,10 @@ class AdvisoryAnswer(BaseModel):
     answer: str = ""                                # the synthesized answer (the research synthesis)
     sources: list[str] = Field(default_factory=list)  # cited source URLs/titles for the answer
     job_id: str | None = None
+    # WHY grounding is absent, so the fallback message is truthful (state-aware, not a guess):
+    # "" | "failed" (job errored/cancelled) | "unreachable" (engine down) | "empty" (done, no
+    # synthesis) | "backstop" (runaway cap hit while the job still claimed to be alive)
+    reason: str = ""
 
 
 # ── Profile (C4, PLAN §5.4) ─────────────────────────────────────────────────

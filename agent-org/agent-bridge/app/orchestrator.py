@@ -186,6 +186,19 @@ _ADVISOR_FALLBACK_SYS = (
     "so stick to well-established practice and do not fabricate citations, versions, or URLs."
 )
 
+# De-biasing rewrite for SHORT-CHECK answers (research-engine-for-OB GROUNDING-MODEL principle,
+# operator-specified): in shallow context the operator's framing dominates the context pool, and
+# models favor the user's implied goal (sycophancy). The source→claim system avoids this by asking
+# the objective question WITHOUT the goal in context; an ungrounded fallback can't claim-check, so
+# it approximates the same discipline by NEUTRALIZING the question first. Deliberately given NO
+# conversation history, NO goals — just the question.
+_NEUTRALIZE_SYS = (
+    "Rewrite the user's question as a single NEUTRAL, NON-LEADING question. Remove presuppositions, "
+    "implied preferences, expected answers, and any framing that suggests what the asker hopes is "
+    "true — keep only the factual subject matter to investigate. Do not answer it. Output ONLY the "
+    "rewritten question, nothing else."
+)
+
 # The PLANNER (P-APL.2). Turns a natural-language architectural intent into a CONCRETE, reviewable
 # sequence of executable steps — the general mechanism (works for ANY project/architecture), NOT a
 # hardcoded recipe. The intelligence is here (the model reasoning), the steps map to governed
@@ -332,6 +345,10 @@ class Orchestrator:
         # effort_id, mgmt_thread}}. Registered when D1 opens a delivery PR; consumed by
         # `approve merge-<id>` / a plain "merge it". Persisted via PendingStore (kind="merge").
         self._pending_merge: dict[str, dict] = {}
+        # Advisory research jobs IN FLIGHT (transparency: PM work must be visible) — shown in
+        # /status; updated by the state-driven poll's progress callback. {key: {question, state,
+        # started}}. In-memory only (a restart orphans the job on the engine side, harmlessly).
+        self._advisories: dict[str, dict] = {}
         # INTENT-ANCHORED completion (DELIVERY-PIPELINE §1: the PM judges completeness against the
         # operator-intent thread, not one mechanical effort). Per effort: the registered projects the
         # operator NAMED in the intent that this effort did NOT target — so a `done` on a sub-repo
@@ -1068,15 +1085,14 @@ class Orchestrator:
         # Hierarchical + bounded + relevance-selected: this thread (immediate) + relevant channel
         # background, filtered to the query so it never overwhelms the model window.
         history = self.context.build(channel_id, thread_id, query=message)
+        user_prompt = (
+            f"CONVERSATION SO FAR (most recent last):\n{history}\n\n"
+            f"LATEST OPERATOR MESSAGE:\n{message}\n\nCURRENT EFFORTS: {ctx}\n"
+            f"AWAITING CLARIFICATION: {pending_ctx}\nKNOWN PROJECTS: {projects_ctx}\n"
+            f"RECENT WORKER ACTIVITY (newest last):\n{activity_ctx}"
+        )
         try:
-            intent = await self.models.structured(
-                "po", _PO_NL_SYS,
-                f"CONVERSATION SO FAR (most recent last):\n{history}\n\n"
-                f"LATEST OPERATOR MESSAGE:\n{message}\n\nCURRENT EFFORTS: {ctx}\n"
-                f"AWAITING CLARIFICATION: {pending_ctx}\nKNOWN PROJECTS: {projects_ctx}\n"
-                f"RECENT WORKER ACTIVITY (newest last):\n{activity_ctx}",
-                OperatorIntent,
-            )
+            intent = await self.models.structured("po", _PO_NL_SYS, user_prompt, OperatorIntent)
         except ModelBackpressureError:
             # The shared GPU is saturated (a research/ingestion batch shed the request) — this is
             # NOT a parse failure. Say so honestly + keep the operator's message in memory so a
@@ -1101,6 +1117,60 @@ class Orchestrator:
             return
 
         reply = (intent.reply or "").strip()
+
+        # JUNK-INTENT GUARD (live miss: the model returned kind=chitchat + reply="…" for a clear
+        # scoped work request → the bridge posted the ellipsis and SILENTLY DROPPED the work — the
+        # worst outcome). Contentless reply ⇒ the model misfired; repair deterministically:
+        def _junk(r: str) -> bool:
+            return len(re.sub(r"[\W_]", "", r)) < 3          # "…", "...", "-", "" …
+
+        def _actionless(it) -> bool:
+            """True when this intent, AS FILLED, will run no handler — it acts only via its reply
+            (or its branch requires fields the model didn't provide, so it falls through). This is
+            what made the SECOND live '…': kind=request with effort_name=None skips the request
+            branch entirely."""
+            return (
+                it.kind in ("chitchat", "question")
+                or (it.kind == "request" and not it.effort_name)
+                or (it.kind in ("clarification", "steering") and not it.effort_id)
+                or (it.kind == "decision" and not (it.effort_id and it.decision))
+                or (it.kind == "reassign" and not (it.effort_id and it.project))
+            )
+
+        if _junk(reply):
+            scoped = re.match(r"^\s*(?:@\S+\s+)?in\s+([A-Za-z0-9][\w-]*)\s*[,:]", message, re.I)
+            proj = await self.projects.resolve(scoped.group(1)) if scoped else None
+            if _actionless(intent) and proj:
+                # "in <known-project>, …" IS a scoped work request — force it (don't drop work).
+                intent.kind = "request"
+                intent.project = proj["slug"]
+                if not intent.effort_name:
+                    task_part = re.sub(r"^\s*(?:@\S+\s+)?in\s+\S+\s*[,:]\s*", "", message)
+                    intent.effort_name = slugify(task_part[:40]) or "task"
+                reply = f"On it — running that as work on `{proj['slug']}`."
+            elif _actionless(intent):
+                # One retry (the model is stochastic); still junk → an HONEST ask, never "…".
+                try:
+                    intent = await self.models.structured(
+                        "po", _PO_NL_SYS,
+                        user_prompt + "\n\nNOTE: your previous attempt returned an empty/unusable "
+                        "reply. Classify DECISIVELY and write a substantive reply.",
+                        OperatorIntent)
+                    reply = (intent.reply or "").strip()
+                except Exception:  # noqa: BLE001
+                    reply = ""
+                if _junk(reply) and _actionless(intent):
+                    self._remember(channel_id, thread_id, "operator", message)
+                    await self.chat.post(
+                        channel_id,
+                        "I couldn't turn that into something actionable — could you rephrase? "
+                        "(e.g. _“in <project>, <task>”_ for work, or ask a design question for the "
+                        "advisor.)",
+                        thread_id=thread_id)
+                    return
+            else:
+                reply = ""   # actionable kind, junk ack → drop the junk; the handler posts its own
+
         # Remember this turn (under its thread) so the next message keeps context.
         self._remember(channel_id, thread_id, "operator", message)
         self._remember(channel_id, thread_id, "po", reply)
@@ -1294,7 +1364,16 @@ class Orchestrator:
             else:
                 reply += "\n\n_No open efforts — tell me what you'd like built._"
 
-        await self.chat.post(channel_id, reply or "…", thread_id=thread_id)
+        # NEVER post bare punctuation (the live "…" came from this exact default: a junk reply was
+        # cleared upstream, every branch fell through, and this tail re-manufactured the ellipsis).
+        # An empty reply here means nothing acted — say so honestly instead.
+        await self.chat.post(
+            channel_id,
+            reply or ("I couldn't turn that into something actionable — could you rephrase? "
+                      "(e.g. _“in <project>, <task>”_ for work, or ask a design question for the "
+                      "advisor.)"),
+            thread_id=thread_id,
+        )
 
     def _worker_activity_ctx(self, efforts: list[dict]) -> str:
         """Compact per-effort recent worker command activity for the PO's context (Fix 1).
@@ -1348,9 +1427,14 @@ class Orchestrator:
                 line += "\n  " + "\n  ".join(f"· {a}" for a in act)
             lines.append(line)
         body = "\n".join(lines)
+        # Transparency: PM work beyond coding efforts is visible too — research jobs in flight.
+        for a in self._advisories.values():
+            mins = int((time.time() - a.get("started", time.time())) // 60)
+            body += (f"\n- 🔬 research — **{a.get('state', 'running')}** ({mins} min): "
+                     f"_{a.get('question', '')}_")
         running = sum(1 for v in status_map.values() if v == "running")
         idle = sum(1 for v in status_map.values() if v == "idle")
-        if running == 0 and idle:
+        if running == 0 and idle and not self._advisories:
             body += (f"\n\n_⚠️ Nothing is running. {idle} effort(s) are **idle** — they will NOT "
                      f"start on their own. Say **“get the workers working”** (or name which) and I'll "
                      f"dispatch them; or **“archive”** the ones you're done with._")
@@ -1933,14 +2017,47 @@ class Orchestrator:
     async def _run_advisory(
         self, question: str, channel_id: str, thread_id: str | None
     ) -> None:
-        """Background half of `_advise`: run the research job, then post the grounded answer (or the
-        labelled local fallback). Isolated in its own task so the operator's turn returns immediately
-        and a slow/failed research job never wedges the intake loop."""
+        """Background half of `_advise`: run the research job STATE-DRIVEN (the loop reads the job's
+        own status and decides — wait / fall back / give up — never an arbitrary time gate), posting
+        progress TRANSPARENTLY in-thread as the state changes + a heartbeat, then the grounded answer
+        (or a labelled fallback whose wording matches the REAL failure reason). Registered in
+        `_advisories` so /status shows research-in-flight like any other work."""
+        akey = f"research-{int(time.time())}"
+        started = time.time()
+        self._advisories[akey] = {"question": question[:120], "state": "submitting",
+                                  "started": started}
+
+        async def _progress(state: dict) -> None:
+            # advise() already gates these to MEANINGFUL milestones (status/phase transitions +
+            # a 10-min heartbeat). Here: always keep /status fresh, but only POST after the first
+            # 2 min (the ack just said it's running — echoing that seconds later is noise).
+            status = state.get("status") or "running"
+            qp = state.get("queue_position")
+            phase = state.get("phase") or ""
+            self._advisories[akey]["state"] = (
+                status + (f" · {phase}" if phase else "") + (f" (queue #{qp})" if qp else ""))
+            if time.time() - started < 120.0:
+                return
+            mins = int(state.get("waited_s", 0)) // 60
+            await self.chat.post(
+                channel_id,
+                f"🔎 _research update: **{status}**"
+                + (f" — phase **{phase}**" if phase else "")
+                + (f", queue position {qp}" if qp else "")
+                + (f" ({mins} min in)" if mins else "")
+                + "; I'll post the answer here when it lands._",
+                thread_id=thread_id,
+            )
+
         ans = None
         try:
+            ans = await self.grounding.advise(question, on_progress=_progress)
+        except TypeError:   # a Grounding impl without on_progress (fakes) — still state-driven inside
             ans = await self.grounding.advise(question)
         except Exception as exc:  # noqa: BLE001 - degrade to the local fallback below
             log.warning("advisory research raised: %s", exc)
+        finally:
+            self._advisories.pop(akey, None)
         if ans is not None and ans.grounded and (ans.answer or "").strip():
             body = ans.answer.strip()
             if ans.sources:
@@ -1948,24 +2065,46 @@ class Orchestrator:
                 body += f"\n\n**Sources**\n{srcs}"
             await self.chat.post(channel_id, body, thread_id=thread_id)
             return
-        # Research unavailable/timed out → an honest, clearly-labelled ungrounded local answer.
+        # No grounded answer → an honest, clearly-labelled ungrounded local answer, with the REAL
+        # reason (state-aware): a failed job ≠ an unreachable engine ≠ a wedged job.
+        reason = getattr(ans, "reason", "") if ans is not None else "unreachable"
+        why = {
+            "failed": "the research job **failed on the engine**",
+            "empty": "research finished but returned **no synthesis**",
+            "backstop": "the research job has been running for **hours — likely wedged** "
+                        "(check `openbrain-research`)",
+        }.get(reason, "I **couldn't reach the research engine**")
+        # De-bias the short check (research-engine-for-OB GROUNDING-MODEL discipline, operator-
+        # specified): in shallow context the operator's framing dominates and the model favors the
+        # implied goal. An ungrounded fallback can't claim-check, so it approximates the objective
+        # stance by answering a NEUTRALIZED form of the question. Sanity-guarded (junk/blown-up
+        # rewrite → original); TRANSPARENT (the neutral form is shown with the answer).
+        neutral = ""
+        try:
+            cand = (await self.models.complete("po", _NEUTRALIZE_SYS, question)).strip().strip('"')
+            if 10 <= len(cand) <= max(3 * len(question), 200) and "\n" not in cand:
+                neutral = cand
+        except Exception as exc:  # noqa: BLE001 — de-biasing is best-effort, never blocks
+            log.debug("question neutralization failed: %s", exc)
         local = ""
         try:
-            local = (await self.models.complete("po", _ADVISOR_FALLBACK_SYS, question)).strip()
+            local = (await self.models.complete(
+                "po", _ADVISOR_FALLBACK_SYS, neutral or question)).strip()
         except Exception as exc:  # noqa: BLE001
             log.warning("advisory local fallback failed: %s", exc)
         if local:
+            neutral_note = (f"\n\n_(To reduce framing bias, I answered the neutralized form: "
+                            f"“{neutral}”)_" if neutral and neutral != question.strip() else "")
             await self.chat.post(
                 channel_id,
-                "⚠️ _I couldn't reach the research engine to ground this, so here's my best take from "
-                f"general knowledge — **unverified, no citations**:_\n\n{local}",
+                f"⚠️ _{why}, so here's my best take from general knowledge — **unverified, no "
+                f"citations**:_\n\n{local}{neutral_note}",
                 thread_id=thread_id,
             )
         else:
             await self.chat.post(
                 channel_id,
-                "⚠️ I couldn't reach the research engine to answer that just now — please try again "
-                "shortly.",
+                f"⚠️ {why} — and my local fallback failed too. Please try again shortly.",
                 thread_id=thread_id,
             )
 

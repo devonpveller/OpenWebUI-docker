@@ -81,10 +81,11 @@ class Grounding(Protocol):
 
 
 class OpenBrainResearchGrounding:
-    """Drives the openbrain-research async job API (POST + poll), bounded by a timeout."""
+    """Drives the openbrain-research async job API (POST + state-driven poll)."""
 
     def __init__(self, settings: Settings) -> None:
         self.s = settings
+        self.transport: httpx.BaseTransport | None = None   # injectable for tests
 
     async def ground(self, question: str, *, context: str = "") -> GroundingResult:
         base = self.s.research_url.rstrip("/")
@@ -124,17 +125,29 @@ class OpenBrainResearchGrounding:
             log.warning("grounding call failed (proceeding without): %s", exc)
             return GroundingResult(grounded=False)
 
-    async def advise(self, question: str, *, context: str = "") -> AdvisoryAnswer:
+    async def advise(self, question: str, *, context: str = "",
+                     on_progress=None) -> AdvisoryAnswer:
         """Run a full research job for an operator's design question and return the synthesis + its
-        cited sources. Uses the (longer) advisory timeout — the operator is actively waiting. On any
-        failure/timeout returns grounded=False so the caller degrades to a labelled local answer."""
+        cited sources.
+
+        STATE-DRIVEN, not time-gated (operator-caught: a fixed timeout abandoned a job ~35 s before
+        it finished): the loop decides from the JOB'S OWN STATE each poll —
+          - `done`            → grounded answer (or reason="empty" if the synthesis is blank);
+          - `error/cancelled` → reason="failed" (a real failure, fall back now);
+          - alive (queued/running) → KEEP WAITING; `on_progress(state)` fires on every state change
+            + a ~5-min heartbeat so the caller can keep the operator informed instead of silent;
+          - engine unreachable → bounded consecutive-failure retries (a poll blip ≠ a dead job);
+            still down after that → reason="unreachable";
+          - `advisory_timeout_s` remains ONLY as a runaway backstop (job claims alive for hours) →
+            reason="backstop"."""
         base = self.s.research_url.rstrip("/")
         headers = {"Content-Type": "application/json"}
         if self.s.research_key:
             headers["x-brain-key"] = self.s.research_key
         query = question if not context else f"{question}\n\nContext:\n{context}"
+        poll = self.s.grounding_poll_interval_s
         try:
-            async with httpx.AsyncClient(timeout=30.0) as c:
+            async with httpx.AsyncClient(timeout=30.0, transport=self.transport) as c:
                 r = await c.post(
                     f"{base}/research",
                     headers=headers,
@@ -143,30 +156,63 @@ class OpenBrainResearchGrounding:
                 r.raise_for_status()
                 job_id = r.json().get("job_id")
                 if not job_id:
-                    return AdvisoryAnswer(grounded=False)
+                    return AdvisoryAnswer(grounded=False, reason="failed")
                 waited = 0.0
-                while waited < self.s.advisory_timeout_s:
-                    await asyncio.sleep(self.s.grounding_poll_interval_s)
-                    waited += self.s.grounding_poll_interval_s
-                    st = (await c.get(f"{base}/research/jobs/{job_id}", headers=headers)).json()
+                unreachable = 0
+                last_sig: tuple = ()
+                since_progress = 0.0
+                while waited < self.s.advisory_timeout_s:   # runaway BACKSTOP, not a decision gate
+                    await asyncio.sleep(poll)
+                    waited += poll
+                    since_progress += poll
+                    try:
+                        st = (await c.get(f"{base}/research/jobs/{job_id}", headers=headers)).json()
+                        unreachable = 0
+                    except Exception as exc:  # noqa: BLE001 — a poll blip must not kill a live job
+                        unreachable += 1
+                        if unreachable >= 12:   # ~1 min of consecutive failures at the 5s prod poll
+                            log.warning("advisory job %s: engine unreachable: %s", job_id, exc)
+                            return AdvisoryAnswer(grounded=False, job_id=job_id, reason="unreachable")
+                        continue
                     status = st.get("status")
                     if status == "done":
                         result = st.get("result") or {}
                         synthesis, _claims = _extract(result)
                         if not synthesis:
-                            return AdvisoryAnswer(grounded=False, job_id=job_id)
+                            return AdvisoryAnswer(grounded=False, job_id=job_id, reason="empty")
                         return AdvisoryAnswer(
                             grounded=True, answer=synthesis,
                             sources=_extract_sources(result), job_id=job_id,
                         )
                     if status in ("error", "cancelled"):
                         log.warning("advisory job %s ended %s", job_id, status)
-                        return AdvisoryAnswer(grounded=False, job_id=job_id)
-                log.info("advisory job %s still running past %ss", job_id, self.s.advisory_timeout_s)
-                return AdvisoryAnswer(grounded=False, job_id=job_id)
+                        return AdvisoryAnswer(grounded=False, job_id=job_id, reason="failed")
+                    # alive (queued/running) → keep waiting. Surface progress ONLY on a MEANINGFUL
+                    # transition — the status or the engine's discrete `progress.phase` (e.g.
+                    # gather → synthesize) — or a 10-min heartbeat. NEVER on the churning
+                    # message/counters (operator-caught: keying on the whole progress dict posted
+                    # ~8 updates/min — noise, not transparency).
+                    prog = st.get("progress") or {}
+                    phase = (prog.get("phase") or "") if isinstance(prog, dict) else ""
+                    sig = (status, st.get("queue_position"), phase)
+                    if on_progress and (sig != last_sig or since_progress >= 600.0):
+                        last_sig = sig
+                        since_progress = 0.0
+                        try:
+                            await on_progress({"status": status,
+                                               "queue_position": st.get("queue_position"),
+                                               "phase": phase,
+                                               "message": (prog.get("message") or ""
+                                                           ) if isinstance(prog, dict) else "",
+                                               "waited_s": int(waited)})
+                        except Exception:  # noqa: BLE001 — progress UX must never kill the poll
+                            pass
+                log.warning("advisory job %s hit the runaway backstop (%ss) still alive",
+                            job_id, self.s.advisory_timeout_s)
+                return AdvisoryAnswer(grounded=False, job_id=job_id, reason="backstop")
         except Exception as exc:  # noqa: BLE001 - degrade to a labelled local answer, never crash
             log.warning("advisory research call failed: %s", exc)
-            return AdvisoryAnswer(grounded=False)
+            return AdvisoryAnswer(grounded=False, reason="unreachable")
 
 
 class FakeGrounding:
@@ -193,8 +239,11 @@ class FakeGrounding:
         self.calls.append(question)
         return self.result
 
-    async def advise(self, question: str, *, context: str = "") -> AdvisoryAnswer:
+    async def advise(self, question: str, *, context: str = "",
+                     on_progress=None) -> AdvisoryAnswer:
         self.advice_calls.append(question)
+        if on_progress is not None:   # exercise the transparency path once
+            await on_progress({"status": "running", "queue_position": None, "waited_s": 0})
         return self.advice
 
 
