@@ -640,10 +640,20 @@ setup_mattermost_serve() {
     fi
     echo "✅ Mattermost proxy started successfully (PID: $MATTERMOST_SOCAT_PID)"
 
-    tailscale --socket=/tmp/tailscaled.sock serve \
+    if ! tailscale --socket=/tmp/tailscaled.sock serve \
       --https=${MATTERMOST_TS_PORT} \
       --bg \
-      http://127.0.0.1:${MATTERMOST_LOCAL_PORT}
+      http://127.0.0.1:${MATTERMOST_LOCAL_PORT}; then
+        echo "❌ ERROR: tailscale serve --https=${MATTERMOST_TS_PORT} failed — leaving unconfigured so the monitoring loop retries"
+        return 1
+    fi
+    # Confirm the mapping actually landed before stamping the flag: a flag written
+    # after a serve that did not apply permanently disables the deferred-setup
+    # retry (this exact failure stranded Mattermost off the tailnet, 2026-07-05).
+    if ! tailscale --socket=/tmp/tailscaled.sock serve status 2>/dev/null | grep -q ":${MATTERMOST_TS_PORT} "; then
+        echo "❌ ERROR: serve mapping :${MATTERMOST_TS_PORT} missing after configuration — leaving unconfigured so the monitoring loop retries"
+        return 1
+    fi
     echo "✅ Mattermost configured on tailnet HTTPS port ${MATTERMOST_TS_PORT} (via proxy: ${MATTERMOST_HOST}:${MATTERMOST_PORT} -> 127.0.0.1:${MATTERMOST_LOCAL_PORT})"
 
     touch /tmp/mattermost-serve-configured
@@ -941,6 +951,15 @@ fi
                         echo "❌ $(date): Failed to restart Mattermost proxy"
                         cat /tmp/socat-mattermost.log 2>/dev/null || echo "No log available"
                     fi
+                fi
+
+                # Re-verify the tailnet serve mapping still exists: a stranded flag
+                # with no serve leaves Mattermost silently unreachable from the
+                # tailnet (2026-07-05). Dropping the flag makes the next cycle rerun
+                # the full deferred setup (socat + serve, both now verified).
+                if ! tailscale --socket=/tmp/tailscaled.sock serve status 2>/dev/null | grep -q ":${MATTERMOST_TS_PORT} "; then
+                    echo "⚠️ $(date): Mattermost serve mapping :${MATTERMOST_TS_PORT} missing — clearing flag to reconfigure next cycle"
+                    rm -f /tmp/mattermost-serve-configured
                 fi
             fi
         fi
