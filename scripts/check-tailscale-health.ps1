@@ -151,6 +151,7 @@ $ExpectedTailscaleServes = @(
     @{ Name = 'open-notebook-api';    TailscalePort = 5055; TailscalePath = '/';                LocalPort = 8238 }
     @{ Name = 'quartz-wiki-viewer';   TailscalePort = 8444; TailscalePath = '/';                LocalPort = 8239 }
     @{ Name = 'mattermost';           TailscalePort = 8446; TailscalePath = '/';                LocalPort = 8241 }
+    @{ Name = 'llm-gateway-ui';       TailscalePort = 8445; TailscalePath = '/';                LocalPort = 8240 }
 )
 
 # Function to test serve configuration.
@@ -781,6 +782,127 @@ function Invoke-AgentOrgHealth {
 }
 
 # Function to perform comprehensive health check
+# --- HOST Tailscale daemon (a separate tailnet node from the container!) ---
+# 2026-07-05: after an OOM-crash reboot the host daemon sat in 'NoState' (the
+# tray app was not running and unattended mode was not yet enabled) — the
+# operator's remote access was dead while every container-side check passed.
+# Detect and best-effort repair by (re)starting the tray app; the daemon-level
+# fix (unattended mode) is set, this is the belt-and-braces layer.
+# Non-fatal: the container tailnet node is independent of the host node.
+function Test-HostTailscaleBackend {
+    [CmdletBinding()]
+    param()
+    try {
+        $exe = Join-Path $env:ProgramFiles 'Tailscale\tailscale.exe'
+        if (-not (Test-Path $exe)) { return $true }  # host tailscale not installed
+        $raw = (& $exe status --json 2>$null) -join "`n"
+        if (-not $raw) { throw "empty status output" }
+        $state = ($raw | ConvertFrom-Json).BackendState
+        if ($state -eq 'Running') {
+            Write-LogEntry "host Tailscale backend Running" "DEBUG"
+            return $true
+        }
+        Write-LogEntry "host Tailscale backend state '$state' (not Running) - starting tray app to reattach" "WARN"
+        if (-not (Get-Process -Name 'tailscale-ipn' -ErrorAction SilentlyContinue)) {
+            Start-Process (Join-Path $env:ProgramFiles 'Tailscale\tailscale-ipn.exe') | Out-Null
+        }
+        Start-Sleep 20
+        $raw2 = (& $exe status --json 2>$null) -join "`n"
+        $state2 = ($raw2 | ConvertFrom-Json).BackendState
+        if ($state2 -eq 'Running') {
+            Write-LogEntry "host Tailscale recovered (Running)" "SUCCESS"
+            return $true
+        }
+        Write-LogEntry "host Tailscale still '$state2' - needs operator (service restart may require elevation)" "ERROR"
+        return $false
+    } catch {
+        Write-LogEntry "host Tailscale check inconclusive: $($_.Exception.Message)" "WARN"
+        return $true
+    }
+}
+
+# --- Backup recency: an "Up" sidecar can still produce nothing ------------
+# The backup scripts precheck-skip with exit 0 (deliberately: never tar broken
+# state), so a wrong probe target means NO artifacts and NO error. That let
+# five sidecars go silent for ~5 weeks (2026-05-29 → 07-05) unnoticed. This
+# watches the OUTPUT instead: newest artifact per backups/<dir> must be
+# younger than its cadence allows. Alerts to the log + Mattermost (throttled).
+$ExpectedBackupRecency = @(
+    @{ Dir = 'agent-bridge-db'; MaxAgeHours = 52 }
+    @{ Dir = 'authelia';        MaxAgeHours = 52 }
+    @{ Dir = 'caddy';           MaxAgeHours = 52 }
+    @{ Dir = 'little-coder';    MaxAgeHours = 52 }
+    @{ Dir = 'llm-gateway';     MaxAgeHours = 52 }
+    @{ Dir = 'lm-models';       MaxAgeHours = 220 }  # weekly cron (Sun 01:00) + slack
+    @{ Dir = 'mattermost-db';   MaxAgeHours = 52 }
+    @{ Dir = 'mnemory';         MaxAgeHours = 52 }
+    @{ Dir = 'open-notebook';   MaxAgeHours = 52 }
+    @{ Dir = 'openbrain-db';    MaxAgeHours = 52 }
+    @{ Dir = 'openbrain-wiki';  MaxAgeHours = 52 }
+    @{ Dir = 'openwebui';       MaxAgeHours = 52 }
+    @{ Dir = 'smolcrawl';       MaxAgeHours = 52 }
+    @{ Dir = 'tailscale';       MaxAgeHours = 52 }
+)
+function Test-BackupRecency {
+    [CmdletBinding()]
+    param()
+    $stale = @()
+    foreach ($exp in $ExpectedBackupRecency) {
+        $dir = Join-Path $PROJECT_DIR "backups\$($exp.Dir)"
+        if (-not (Test-Path $dir)) {
+            $stale += "$($exp.Dir): backup dir missing"
+            continue
+        }
+        $newest = Get-ChildItem $dir -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -notlike '*.sha256' } |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 1
+        if (-not $newest) {
+            $stale += "$($exp.Dir): no artifacts at all"
+            continue
+        }
+        $ageH = [math]::Round(((Get-Date) - $newest.LastWriteTime).TotalHours, 1)
+        if ($ageH -gt $exp.MaxAgeHours) {
+            $stale += "$($exp.Dir): newest artifact $($newest.Name) is ${ageH}h old (max $($exp.MaxAgeHours)h)"
+        }
+    }
+    if ($stale.Count -eq 0) {
+        Write-LogEntry "backup recency OK ($($ExpectedBackupRecency.Count) dirs checked)" "DEBUG"
+        return $true
+    }
+    foreach ($s in $stale) { Write-LogEntry "BACKUP STALE - $s" "ERROR" }
+    # Mattermost alert, throttled: re-ping only if the stale set changed or the
+    # last ping is older than 12h (this check runs every 10 minutes).
+    try {
+        $sentinel = Join-Path $PROJECT_DIR 'logs\.backup-recency-alert'
+        $content = ($stale | Sort-Object) -join '; '
+        # Throttle key = WHICH dirs are stale (not the full message: the age
+        # number changes every cycle and would defeat the 12h suppression).
+        $contentKey = (($stale | ForEach-Object { ($_ -split ':')[0] }) | Sort-Object) -join ';'
+        $shouldPing = $true
+        if (Test-Path $sentinel) {
+            $prev = (Get-Content $sentinel -Raw -ErrorAction SilentlyContinue)
+            if ($prev) { $prev = $prev.Trim() }
+            $lastPing = (Get-Item $sentinel).LastWriteTime
+            if (($prev -eq $contentKey) -and ((Get-Date) - $lastPing).TotalHours -lt 12) { $shouldPing = $false }
+        }
+        if ($shouldPing) {
+            # Git bash EXPLICITLY: bare `Get-Command bash` resolves to WSL's
+            # bash (System32), which cannot open Windows paths. Forward-slash
+            # path for the same reason.
+            $bash = 'C:\Program Files\Git\bin\bash.exe'
+            if (Test-Path $bash) {
+                $scriptPath = ($PROJECT_DIR -replace '\\', '/') + '/scripts/notify-mattermost.sh'
+                # Pipe $null so bash's stdin is CLOSED: notify-mattermost.sh
+                # cats stdin when it isn't a tty, and an inherited open pipe
+                # (interactive/manual runs) would block it forever.
+                $null | & $bash $scriptPath "WARNING ai-stack backup STALE: $content" 2>$null | Out-Null
+            }
+            $contentKey | Out-File $sentinel -Encoding utf8 -Force
+        }
+    } catch { Write-LogEntry "backup recency MM alert failed: $($_.Exception.Message)" "WARN" }
+    return $false
+}
+
 function Invoke-HealthCheck {
     Write-LogEntry "Starting comprehensive health check..."
     
@@ -855,6 +977,10 @@ function Invoke-HealthCheck {
         }
     }
     
+    # HOST tailscale node (operator remote access) — independent of the
+    # container node checked above; non-fatal but repairs + logs loudly.
+    Test-HostTailscaleBackend | Out-Null
+
     # Test serve configuration. Additive repair: re-add only missing
     # mappings (never `serve reset`, which would wipe working ones --
     # including the per-service mappings the old code didn't know about).
@@ -947,12 +1073,38 @@ function Invoke-HealthCheck {
     # --- mnemory MCP gateway (the bridge clients reach; mnemory itself above) ---
     Confirm-AuxiliaryContainer -ServiceName "mnemory-gateway" -RestartWaitSeconds 10 | Out-Null
 
+    # --- inference gateway plane (LiteLLM front door + admission queue) ---
+    # ALL inference flows through llm-gateway (the llama-cpp:8080 alias) and
+    # llm-queue. Test-LlamaCppConnectivity above exercises the data path;
+    # these catch the db/UI sidecars the path test can't see.
+    Confirm-AuxiliaryContainer -ServiceName "llm-queue"      -RestartWaitSeconds 15 | Out-Null
+    Confirm-AuxiliaryContainer -ServiceName "llm-gateway"    -RestartWaitSeconds 20 | Out-Null
+    Confirm-AuxiliaryContainer -ServiceName "llm-gateway-db" -RestartWaitSeconds 15 | Out-Null
+    Confirm-AuxiliaryContainer -ServiceName "llm-gateway-ui" -RestartWaitSeconds 15 | Out-Null
+
+    # --- remaining main-stack backup sidecars (cron loops; mnemory-backup and
+    # openwebui-backup are confirmed above; portal backups (caddy/authelia) are
+    # deliberately NOT here — the portal has its own lifecycle (portal-on/off)
+    # and must not be auto-started; OB/agent-org backups live in their own
+    # Invoke-*Health blocks. Test-BackupRecency below watches everyone's OUTPUT.
+    Confirm-AuxiliaryContainer -ServiceName "little-coder-backup"  -RestartWaitSeconds 10 | Out-Null
+    Confirm-AuxiliaryContainer -ServiceName "llm-gateway-backup"   -RestartWaitSeconds 10 | Out-Null
+    Confirm-AuxiliaryContainer -ServiceName "lm-models-backup"     -RestartWaitSeconds 10 | Out-Null
+    Confirm-AuxiliaryContainer -ServiceName "tailscale-backup"     -RestartWaitSeconds 10 | Out-Null
+    Confirm-AuxiliaryContainer -ServiceName "smolcrawl-backup"     -RestartWaitSeconds 10 | Out-Null
+    Confirm-AuxiliaryContainer -ServiceName "open-notebook-backup" -RestartWaitSeconds 10 | Out-Null
+
     # --- Open Brain stack (SEPARATE compose project) incl. mcp stale-pool guard ---
     Invoke-OpenBrainHealth
 
     # --- agent-org stack (SEPARATE compose project) incl. bridge stale-pool +
     #     ao-git-egress stale-mount guards, + its nightly pg_dump backup sidecars ---
     Invoke-AgentOrgHealth
+
+    # --- backup OUTPUT recency (all 14 backups/<dir> trees, incl. portal + OB) ---
+    # Non-fatal for the overall check, but logs ERROR + Mattermost-alerts:
+    # a running sidecar that produces nothing is invisible to container checks.
+    Test-BackupRecency | Out-Null
 
     Write-LogEntry "All health checks passed" "SUCCESS"
     return $true

@@ -144,6 +144,43 @@ at all. That's the recommended substrate once the delivery lane adopts MCP (see 
 `fork/agent/<feature>`, base `upstream/main` — and its merge (D4) targets the *upstream* and is
 therefore doubly human-gated (it's a contribution to someone else's repo).
 
+### D0.v — acceptance-signal hardening + self-recovery ✅ BUILT (2026-07-05, from live misses)
+Three live failures showed that "branch exists + is ahead of base" is too **weak** an acceptance
+signal, and that several non-delivery states are the org's own to recover — not operator homework.
+All three mechanisms are **generic** (any project/repo/task; no product-specific logic). The
+principle: **the org recovers what it can *prove*, and escalates what it can't.**
+
+1. **Gitlink reachability gate** (`capabilities.read_broken_gitlinks` +
+   `orchestrator._gate_gitlinks`, on every landed-branch verdict). A worker can commit *inside* a
+   vendored submodule checkout, bump the superproject pointer, and publish only the superproject —
+   the branch then references a commit **nobody else can fetch** (`git submodule update` dies with
+   `not our ref`; live: an engine branch pointed a vendor submodule at a container-only commit).
+   The gate: for every gitlink the branch **changed** vs base, verify the commit exists on the
+   submodule's remote (compare → contents-API `type: submodule` → commit probe; 404/**422** = not
+   found). Broken ⇒ re-engage the **affine** worker once (its workspace still holds the unpushed
+   commit) with the exact per-path remedy (push the submodule commit, or re-point to a published
+   one) → re-check → still broken ⇒ escalate; the PR/merge invitation never fires on an
+   unbuildable branch. **Fail-open**: infra errors / off-forge submodule URLs never block.
+   *Residual:* reachable-via-any-ref is accepted; the durable form is the submodule bump landing
+   via its own PR on the submodule's default branch (ties into the D1 cross-fork note above).
+2. **Goal state-check on verified non-delivery** (`orchestrator._verify_goal_state`, the last step
+   before the undelivered escalation). "No branch landed" is *either* unpushed work (a real
+   failure) *or* a goal that **already holds** in the repo (a stale effort; the work landed
+   earlier) — distinguishable by a **read-only** worker check against the effort's own goal text.
+   A `STATE HOLDS: <evidence>` reply closes the effort as a verified no-op (the NO-CHANGES
+   verdict; the evidence posts in-thread); anything else still climbs the ladder — the check is a
+   recovery, never a rubber stamp (no false `done`).
+3. **Upstream registry self-heal + NL removal** (a D0.f extension —
+   `orchestrator._heal_project_upstream` via the router's `on_upstream_fail` hook, and
+   `OperatorIntent.remove_upstream`). When a focus reports the upstream bake failed, the bridge
+   reads the repo's **actual** fork parent from the forge API: *not a fork* ⇒ the configured
+   upstream is a registry mistake — cleared, with a transparent post; *fork of a different
+   parent* ⇒ corrected to the real parent; *parent matches* ⇒ the config is right and the honest
+   private-or-unreachable warning stands. Unverifiable states never mutate the registry
+   (fail-open). Symmetrically, the operator clears an upstream **in plain language** ("X isn't a
+   fork — remove its upstream") — registry state is bridge-owned, so its corrections are NL
+   operations, never operator SQL.
+
 ### D1 — PR creation (the promotion artifact)
 When the PM judges a feature complete, the bridge opens a PR `agent/<feature>` → `main` via the git
 host API. The PR body = the intent thread + the plan + the effort branches + the review verdicts.

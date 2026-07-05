@@ -412,7 +412,7 @@ services:
       - BACKUP_DIR=/backups
       - DATA_DIR=/data
       - RETAIN_COUNT=${BACKUP_RETAIN_COUNT:-2}
-      - HEALTH_TCP=mnemory-gateway:8080
+      - HEALTH_TCP=mnemory-gateway:8060 # gateway listens on 8060; 8080 made the precheck skip (=zero artifacts) silently from 2026-05-29 to 07-05
       - BACKUP_CRON=${BACKUP_CRON:-0 2 * * *}
     entrypoint: /bin/sh
     command:
