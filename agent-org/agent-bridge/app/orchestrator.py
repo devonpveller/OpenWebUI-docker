@@ -76,6 +76,54 @@ _MENTION_RE = re.compile(r"^\s*@[\w.\-]+\s*")
 # or one of the bare decision/kill verbs.
 _CONTROL_RE = re.compile(r"^(/|approve\b|modify\b|abort\b|kill\b|unkill\b)", re.I)
 
+# Deterministic cues that a message is a WORK request (junk-intent repair, live 2026-07-05 miss:
+# a pasted build-error list junk-misfired the classifier twice and the fix request was dropped).
+_WORK_CUE_RE = re.compile(
+    r"\b(fix|repair|resolve|debug|patch|implement|build|add|update|upgrade|wire|create|refactor|"
+    r"remove|rename|move|migrate|integrate|install)\w*\b", re.I)
+_ERROR_REPORT_RE = re.compile(
+    r"\berrors?\b|\bexception\b|\btraceback\b|stack trace|could not be found|unable to find|"
+    r"\bcannot find\b|\bfail(s|ed|ure|ing)?\b", re.I)
+
+
+def _compact_paste(text: str, max_lines: int = 40, max_chars: int = 2500) -> str:
+    """Compact a pasted wall (build errors, logs) for a SMALL-model prompt: collapse repeated
+    lines (annotated `repeated ×N` so no information is lost) and cap the total. Used ONLY for
+    the classification/readiness calls — the FULL text always remains the effort goal, so the
+    worker sees everything. (Live miss: 10 near-identical csproj errors pushed the constrained
+    small model into junk output twice.)"""
+    nonblank = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    has_dupes = len(set(nonblank)) < len(nonblank)   # repetition harms even a SHORT paste
+    if len(text) <= max_chars and text.count("\n") < max_lines and not has_dupes:
+        return text
+    counts: dict[str, int] = {}
+    order: list[str] = []
+    for raw in text.splitlines():
+        key = raw.strip()
+        if not key:                      # keep paragraph breaks; never dedupe blanks
+            order.append(raw)
+            continue
+        if key in counts:
+            counts[key] += 1
+            continue
+        counts[key] = 1
+        order.append(raw)
+    out = [f"{raw}  (repeated ×{counts[raw.strip()]})"
+           if raw.strip() and counts[raw.strip()] > 1 else raw
+           for raw in order]
+    omitted = 0
+    if len(out) > max_lines:
+        omitted = len(out) - max_lines
+        out = out[:max_lines]
+    compact = "\n".join(out)
+    if len(compact) > max_chars:
+        compact = compact[:max_chars]
+        omitted += 1                     # signal char-cap truncation too
+    if omitted:
+        compact += (f"\n… (+{omitted} more line(s) omitted here for brevity — the FULL text is "
+                    f"kept in the task goal)")
+    return compact
+
 _PO_NL_SYS = (
     "You are the PO (Project Overseer) — the human operator's conversational counterpart in a "
     "governed multi-agent coding org. Read the operator's natural-language message and reply "
@@ -106,7 +154,13 @@ _PO_NL_SYS = (
     "a high level; (3) if a real fork-in-the-road exists (a choice that changes the result), name the "
     "option(s) + your recommendation. Do NOT invent frivolous questions and do NOT claim you "
     "started/dispatched anything — a readiness check runs next and will pause ONLY if a genuine "
-    "blocker remains (governance F5 — a question is cheaper than a misaligned worker).\n"
+    "blocker remains (governance F5 — a question is cheaper than a misaligned worker). "
+    "A BUG or BUILD-FAILURE report is a request too: pasted compiler/build errors, stack traces "
+    "or failing logs about an existing project mean 'diagnose and fix these' — set kind=request + "
+    "`project` + an effort_name like fix-<area>-build-errors, even when the message ALSO asks what "
+    "the operator must run in their LOCAL dev environment (the worker fixes what's repo-side and "
+    "its answer reports any local steps — do NOT route this to advisory, and do NOT try to solve "
+    "the errors yourself in `reply`).\n"
     "- clarification: the operator is ANSWERING a question or ADDING detail to an effort that is "
     "awaiting clarification or already in progress → set kind=clarification, effort_id to that "
     "effort (see AWAITING CLARIFICATION / CURRENT EFFORTS), and put their words in `steering`.\n"
@@ -777,6 +831,56 @@ class Orchestrator:
                 named.append(slug)
         return named
 
+    async def _project_scoped_in(self, message: str) -> tuple[dict | None, str]:
+        """Deterministically resolve WHICH registered project a message is about — the junk-intent
+        repair's grounding. Three tiers, most explicit first:
+          1. 'prefix' — the documented `in <project>, …` idiom at the start;
+          2. 'phrase' — an explicit `project <name>` anywhere ("from project `MonoGame-Engine`");
+          3. 'named'  — a registered slug/display-name in the text (longest-first so `monogame`
+             can't shadow `monogame-engine`; earliest mention wins; sandbox never matches).
+        Returns (project_row | None, tier)."""
+        m = re.match(r"^\s*(?:@\S+\s+)?in\s+([A-Za-z0-9][\w-]*)\s*[,:]", message, re.I)
+        if m:
+            p = await self.projects.resolve(m.group(1))
+            if p:
+                return p, "prefix"
+        m = re.search(r"\bproject\s+[`'\"]?([A-Za-z0-9][\w.-]*)", message, re.I)
+        if m:
+            p = await self.projects.resolve(m.group(1))
+            if p:
+                return p, "phrase"
+        text = message.lower()
+        best: tuple[int, dict] | None = None
+        for p in sorted(await self.projects.list(), key=lambda x: -len(x["slug"])):
+            if p["slug"] == self.s.default_project:
+                continue
+            for token in (p["slug"], (p.get("name") or "").lower()):
+                if not token:
+                    continue
+                mm = re.search(rf"(?<![\w-]){re.escape(token)}(?![\w-])", text)
+                if mm:
+                    if best is None or mm.start() < best[0]:
+                        best = (mm.start(), p)
+                    text = text[:mm.start()] + " " * len(token) + text[mm.end():]  # consume span
+                    break
+        return (best[1], "named") if best else (None, "")
+
+    async def _post_unactionable(self, channel_id: str, thread_id: str | None,
+                                 message: str) -> None:
+        """The honest 'couldn't act on that' fallback. If the message DID name registered
+        projects, say which — so the operator's rephrase costs one line, not a guessing game."""
+        named = await self._intent_named_projects(message, exclude_slug="")
+        hint = ""
+        if named:
+            hint = (f" I did recognize {', '.join(f'`{s}`' for s in named)} — for work on it, try "
+                    f"_“in {named[0]}, <task>”_.")
+        await self.chat.post(
+            channel_id,
+            "I couldn't turn that into something actionable — could you rephrase? "
+            "(e.g. _“in <project>, <task>”_ for work, or ask a design question for the advisor.)"
+            + hint,
+            thread_id=thread_id)
+
     async def _effort_project(self, effort_id: str) -> str | None:
         """The project slug this effort targets (its registry project), or None."""
         async with self.db.session_factory() as s:
@@ -1085,9 +1189,11 @@ class Orchestrator:
         # Hierarchical + bounded + relevance-selected: this thread (immediate) + relevant channel
         # background, filtered to the query so it never overwhelms the model window.
         history = self.context.build(channel_id, thread_id, query=message)
+        # Classification sees a COMPACT view of pasted walls (deduped error lines, capped) — the
+        # small model junk-misfires on degenerate repetition. The FULL message stays the goal.
         user_prompt = (
             f"CONVERSATION SO FAR (most recent last):\n{history}\n\n"
-            f"LATEST OPERATOR MESSAGE:\n{message}\n\nCURRENT EFFORTS: {ctx}\n"
+            f"LATEST OPERATOR MESSAGE:\n{_compact_paste(message)}\n\nCURRENT EFFORTS: {ctx}\n"
             f"AWAITING CLARIFICATION: {pending_ctx}\nKNOWN PROJECTS: {projects_ctx}\n"
             f"RECENT WORKER ACTIVITY (newest last):\n{activity_ctx}"
         )
@@ -1138,15 +1244,30 @@ class Orchestrator:
             )
 
         if _junk(reply):
-            scoped = re.match(r"^\s*(?:@\S+\s+)?in\s+([A-Za-z0-9][\w-]*)\s*[,:]", message, re.I)
-            proj = await self.projects.resolve(scoped.group(1)) if scoped else None
-            if _actionless(intent) and proj:
-                # "in <known-project>, …" IS a scoped work request — force it (don't drop work).
+            proj, how = await self._project_scoped_in(message)
+            # The documented `in <project>,` prefix is a work idiom on its own; a project named
+            # ANYWHERE else needs a work cue (verb / error paste) so a mere mention — "how's murder
+            # doing?" — can't be forced into a phantom effort (live 2026-07-05: "when building
+            # `murder` from project `MonoGame-Engine` … Fix the entire list" + junk reply ×2 fell
+            # into the rephrase fallback and the fix request was DROPPED).
+            forceable = proj is not None and (
+                how == "prefix"
+                or _WORK_CUE_RE.search(message)
+                or _ERROR_REPORT_RE.search(message)
+            )
+            if _actionless(intent) and forceable:
+                # a scoped work request the model fumbled — force it (don't drop work).
                 intent.kind = "request"
                 intent.project = proj["slug"]
                 if not intent.effort_name:
-                    task_part = re.sub(r"^\s*(?:@\S+\s+)?in\s+\S+\s*[,:]\s*", "", message)
-                    intent.effort_name = slugify(task_part[:40]) or "task"
+                    if how == "prefix":
+                        task_part = re.sub(r"^\s*(?:@\S+\s+)?in\s+\S+\s*[,:]\s*", "", message)
+                        intent.effort_name = slugify(task_part[:40]) or "task"
+                    elif _ERROR_REPORT_RE.search(message):
+                        intent.effort_name = f"fix-{proj['slug']}-errors"
+                    else:
+                        first_line = message.strip().splitlines()[0]
+                        intent.effort_name = slugify(first_line[:40]) or "task"
                 reply = f"On it — running that as work on `{proj['slug']}`."
             elif _actionless(intent):
                 # One retry (the model is stochastic); still junk → an HONEST ask, never "…".
@@ -1161,12 +1282,7 @@ class Orchestrator:
                     reply = ""
                 if _junk(reply) and _actionless(intent):
                     self._remember(channel_id, thread_id, "operator", message)
-                    await self.chat.post(
-                        channel_id,
-                        "I couldn't turn that into something actionable — could you rephrase? "
-                        "(e.g. _“in <project>, <task>”_ for work, or ask a design question for the "
-                        "advisor.)",
-                        thread_id=thread_id)
+                    await self._post_unactionable(channel_id, thread_id, message)
                     return
             else:
                 reply = ""   # actionable kind, junk ack → drop the junk; the handler posts its own
@@ -1367,13 +1483,10 @@ class Orchestrator:
         # NEVER post bare punctuation (the live "…" came from this exact default: a junk reply was
         # cleared upstream, every branch fell through, and this tail re-manufactured the ellipsis).
         # An empty reply here means nothing acted — say so honestly instead.
-        await self.chat.post(
-            channel_id,
-            reply or ("I couldn't turn that into something actionable — could you rephrase? "
-                      "(e.g. _“in <project>, <task>”_ for work, or ask a design question for the "
-                      "advisor.)"),
-            thread_id=thread_id,
-        )
+        if not reply:
+            await self._post_unactionable(channel_id, thread_id, message)
+            return
+        await self.chat.post(channel_id, reply, thread_id=thread_id)
 
     def _worker_activity_ctx(self, efforts: list[dict]) -> str:
         """Compact per-effort recent worker command activity for the PO's context (Fix 1).
@@ -2327,7 +2440,10 @@ class Orchestrator:
                 workspace_ctx += f"\n\nPROJECT SUMMARY (survey of the actual codebase):\n{summary}"
         verdict = None
         try:
-            verdict = await self.planner.readiness_gate(effort_id, request, workspace_ctx)
+            # The gate is the same small model — give it the compacted view of pasted walls
+            # (the FULL request is already the goal, set above, and is what the worker gets).
+            verdict = await self.planner.readiness_gate(
+                effort_id, _compact_paste(request), workspace_ctx)
         except ModelBackpressureError:
             # The readiness gate was shed by the saturated GPU — PARK intake + auto-resume; do NOT
             # fail-open to dispatch (that would skip the gate) and do NOT error the effort.
