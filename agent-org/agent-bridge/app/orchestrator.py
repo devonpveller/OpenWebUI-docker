@@ -425,6 +425,7 @@ class Orchestrator:
         # Optional httpx transport for the GitHub-API capability calls — injected in tests
         # (httpx.MockTransport) so the governed flow is exercised without touching real GitHub.
         self._gh_transport = None
+        self._research_transport = None   # test hook for the repo-sync trigger's httpx calls
         self._bg_tasks: set[asyncio.Task] = set()  # in-flight delegations
         # Capacity park-and-resume (machine B `suspended`, reason=inference_backpressure): an effort
         # whose step is shed by the saturated GPU is PARKED here (DB-backed) instead of failed, and
@@ -745,6 +746,9 @@ class Orchestrator:
             + (f" · ⑂ fork of `{proj['upstream_url']}` (read-only `upstream` remote)"
                if proj.get("upstream_url") else "")
         )
+        # RS.2: onboarding → the repo's docs become knowledge immediately (background, announced).
+        self._spawn(self._repo_sync(proj["slug"], announce_channel=channel_id,
+                                    announce_thread=thread_id))
         if intent.effort_name:  # onboard + start the first effort in the new project
             eid, chan, root = await self.router.open_effort(
                 intent.effort_name, project=proj["slug"], goal=message
@@ -1173,6 +1177,21 @@ class Orchestrator:
         # plane capability the bridge does itself — deterministically, never via a worker.
         if await self._nl_pr_request(message, channel_id, thread_id):
             return
+        # NL-FIRST knowledge sync (RS.2): "sync <project> docs/knowledge/sources" — a governed
+        # operator-plane trigger, resolved deterministically like merge/PR above.
+        msync = re.match(
+            r"^\s*(?:please\s+)?(?:re-?)?sync\s+(?:the\s+)?([A-Za-z0-9][\w-]*)(?:'s)?\s+"
+            r"(?:docs|documentation|knowledge|sources)\s*[.!]*$",
+            message.strip(), re.IGNORECASE)
+        if msync:
+            p = await self.projects.resolve(msync.group(1))
+            if p:
+                await self.chat.post(
+                    channel_id, f"🧠 syncing `{p['slug']}`'s docs into Open Brain sources — "
+                    f"results follow.", thread_id=thread_id)
+                self._spawn(self._repo_sync(p["slug"], announce_channel=channel_id,
+                                            announce_thread=thread_id))
+                return
         efforts = await self.gate.snapshot(open_only=True)  # PO reasons over what's still in play
         # HONEST status (running/idle/paused/waiting-capacity) — NOT the gate `active` flag, which
         # persists forever and made the PM invent a phantom "queued, waiting for resources".
@@ -3223,12 +3242,72 @@ class Orchestrator:
         msg = f"{icon} {res.summary}" + (f" — {res.url}" if res.ok and res.url else "")
         if res.ok:   # D6 — the human-testing handoff: merged code is now YOURS to verify (UX-FLOW D6)
             msg += await self._d6_handoff(entry.get("effort_id"), entry.get("repo") or "")
+            # RS.2: main moved → refresh the repo's docs in Open Brain (background, announced in
+            # the project channel). Only merged main is after-action truth (§5 triggers).
+            self._spawn(self._repo_sync_for_repo_url(entry.get("repo") or ""))
         if reply is not None:
             await reply(msg)
         eid = entry.get("effort_id")
         if eid:   # bring the audience back down (CM.4)
             await self.comms.post(Intent.closure, f"{icon} {res.summary} (operator-approved merge).",
                                   effort_id=eid)
+
+    async def _repo_sync(self, slug: str, *, ref: str = "", announce_channel: str | None = None,
+                         announce_thread: str | None = None) -> None:
+        """RS.2 thin trigger (REPO-SOURCES-WIRING §5): ask openbrain-research to ingest this
+        project's docs + structural manifests as PRIMARY sources — the ENGINE enumerates, fetches
+        at a pinned sha, injection-screens and stages; the bridge only says WHEN (onboard / D4
+        merge / operator ask). Syncs the repo AND its registered upstream (the docs usually live
+        in the parent). Best-effort + transparent: results are posted, failures never block."""
+        if not self.s.repo_sync_enabled:
+            return
+        p = await self.projects.get(slug)
+        if not p:
+            return
+        targets = [p["repo_url"]] + ([p["upstream_url"]] if p.get("upstream_url") else [])
+        headers = {"content-type": "application/json"}
+        if self.s.research_key:
+            headers["x-brain-key"] = self.s.research_key
+        lines: list[str] = []
+        for target in targets:
+            short = target.split("github.com/")[-1]
+            try:
+                async with httpx.AsyncClient(timeout=240.0,
+                                             transport=self._research_transport) as c:
+                    r = await c.post(
+                        f"{self.s.research_url.rstrip('/')}/sources/repo-sync", headers=headers,
+                        json={"repo_url": target, **({"ref": ref} if ref else {})})
+                    d = r.json()
+                if r.status_code == 200 and d.get("ok"):
+                    nq = len(d.get("quarantined") or [])
+                    nsk = len(d.get("skipped") or [])
+                    lines.append(f"📚 `{short}`: **{d.get('synced', 0)}** doc/manifest source(s) "
+                                 f"ingested @ `{str(d.get('sha', ''))[:10]}`"
+                                 + (f" · ⚠️ {nq} quarantined (injection screen)" if nq else "")
+                                 + (f" · {nsk} skipped (caps/binaries)" if nsk else ""))
+                else:
+                    lines.append(f"⚠️ `{short}`: sync failed — "
+                                 f"{str(d.get('error') or r.status_code)[:120]}")
+            except Exception as exc:  # noqa: BLE001 — knowledge sync must never break a flow
+                lines.append(f"⚠️ `{short}`: research engine unreachable — {str(exc)[:80]}")
+        await self.audit.log("repo_sources_synced", payload={"slug": slug, "results": lines[:6]})
+        if announce_channel:
+            await self.chat.post(
+                announce_channel,
+                "🧠 **Knowledge sync** (repo docs → Open Brain sources):\n"
+                + "\n".join(f"- {ln}" for ln in lines)
+                + "\n_Repo questions now get research-grounded, cited answers from these._",
+                thread_id=announce_thread,
+            )
+
+    async def _repo_sync_for_repo_url(self, repo_url: str, *, ref: str = "") -> None:
+        """Merge-triggered sync (D4 → knowledge refresh): resolve the project owning `repo_url`
+        and sync it, announcing into its project channel."""
+        for p in await self.projects.list():
+            if p["repo_url"].rstrip("/") == (repo_url or "").rstrip("/"):
+                chan = await self.router.ensure_project_channel(p["slug"])
+                await self._repo_sync(p["slug"], ref=ref, announce_channel=chan)
+                return
 
     async def _d6_handoff(self, effort_id: str | None, repo: str) -> str:
         """D6 — the human-testing handoff appended to every successful merge: what to do next, and
@@ -3306,6 +3385,8 @@ class Orchestrator:
                     handoff = await self._d6_handoff(ctx_eid or None, repo_url)
                     lines.append(f"✅ `{slug}`: PR opened + **merged** (you pre-cleared it) — {url}"
                                  + handoff)
+                    # RS.2: main moved → refresh this repo's docs in Open Brain (background).
+                    self._spawn(self._repo_sync_for_repo_url(repo_url))
                 else:
                     lines.append(f"⚠️ `{slug}`: PR opened ({url}) but the merge didn't go through — "
                                  f"{res.summary} It stays open for you.")
@@ -3972,6 +4053,9 @@ class Orchestrator:
                         f"✅ project `{proj['slug']}` → `{repo}` (post in `#proj-{proj['slug']}` "
                         f"to work on it, or say _\"in {proj['slug']}, …\"_ here){up}{note}{tok}"
                     )
+                    # RS.2: onboarding → the repo's docs become knowledge immediately (background).
+                    self._spawn(self._repo_sync(proj["slug"], announce_channel=channel_id,
+                                                announce_thread=thread_id))
                 except Exception as exc:  # noqa: BLE001
                     await reply(f"⚠️ could not add project: {exc}")
             elif sub == "list":
@@ -4003,13 +4087,24 @@ class Orchestrator:
                                 f"to the worker.")
                 else:
                     await reply(f"🧪 `{slug}` check command cleared — D2 will be skipped (with a note).")
+            elif sub == "sync" and len(args) >= 2:
+                # RS.2 manual trigger: re-ingest the project's docs into Open Brain sources.
+                slug = slugify(args[1])
+                if not await self.projects.get(slug):
+                    await reply(f"⚠️ no such project `{slug}`")
+                else:
+                    await reply(f"🧠 syncing `{slug}`'s docs into Open Brain sources — results follow.")
+                    self._spawn(self._repo_sync(slug, announce_channel=channel_id,
+                                                announce_thread=thread_id))
             else:
                 await reply(
                     "usage: `/project add <name> <repo-url> [--upstream <parent-url>] [TOKEN_ENV]` · "
-                    "`/project list` · `/project remove <name>` · `/project check <name> \"<cmd>\"` "
+                    "`/project list` · `/project remove <name>` · `/project check <name> \"<cmd>\"` · "
+                    "`/project sync <name>` "
                     "_(`--upstream` = the fork PARENT, baked read-only so the worker can fetch it but "
                     "push only to the fork; TOKEN_ENV = the env var holding this repo's PAT; `check` "
-                    "= the D2 test command run on PR branches before the merge gate)_"
+                    "= the D2 test command run on PR branches before the merge gate; `sync` = ingest "
+                    "the repo's docs into Open Brain sources — or just say “sync <name> docs”)_"
                 )
         elif cmd == "egress":
             sub = args[0].lower() if args else ""

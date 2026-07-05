@@ -95,6 +95,7 @@ services:
       - ./scripts/post-update-hook.sh:/post-update-hook.sh:ro # Post-update hook
       - .:/compose-dir:ro # Access to compose files for hook
     environment:
+      - DOCKER_API_VERSION=1.44 # image bakes in 1.25; engine 29+ (Docker Desktop 4.80) requires >=1.40
       - WATCHTOWER_CLEANUP=true # remove old images
       - WATCHTOWER_POLL_INTERVAL=120 # check every 2 minutes for testing
       - WATCHTOWER_INCLUDE_STOPPED=false # Only running containers

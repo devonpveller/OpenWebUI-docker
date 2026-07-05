@@ -29,6 +29,9 @@
   "hooks": {
     "Stop": [
       { "hooks": [ { "type": "command", "shell": "bash", "timeout": 15, "command": "bash \"d:/Open WebUI/ai-stack/scripts/notify-mattermost.sh\"" } ] }
+    ],
+    "Notification": [
+      { "hooks": [ { "type": "command", "shell": "bash", "timeout": 20, "async": true, "command": "json=$(cat); txt=$(printf '%s' \"$json\" | PYTHONIOENCODING=utf-8 python -c \"import json,sys;d=json.load(sys.stdin);sid=(d.get('session_id') or '')[:8];m=(d.get('message') or 'needs your attention');print(('session '+sid+' - ' if sid else '')+m)\" 2>/dev/null); [ -z \"$txt\" ] && txt=\"needs your attention\"; bash \"d:/Open WebUI/ai-stack/scripts/notify-mattermost.sh\" \"🔔 Claude Code (ai-stack) $txt\" </dev/null || true" } ] }
     ]
   }
 }

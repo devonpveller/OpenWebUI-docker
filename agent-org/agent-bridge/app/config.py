@@ -160,6 +160,11 @@ class Settings(BaseSettings):
     grounding_enabled: bool = False
     research_url: str = "http://openbrain-research:8000"
     research_key: str = ""                  # env only (if the service requires one)
+    # RS.2 (REPO-SOURCES-WIRING §5): auto-ingest an onboarded repo's docs/manifests into Open
+    # Brain as primary sources (on /project add, on a D4 merge, or NL "sync <project> docs") so
+    # repo questions get claim-checked, cited answers. The ENGINE does the work; this only
+    # controls the bridge's thin triggers.
+    repo_sync_enabled: bool = True
     grounding_timeout_s: float = 300.0      # bound the poll; on timeout grounding is skipped
     grounding_poll_interval_s: float = 5.0
 
