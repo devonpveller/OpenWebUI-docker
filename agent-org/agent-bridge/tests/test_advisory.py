@@ -72,6 +72,8 @@ async def test_advisory_falls_back_labelled_when_research_unavailable(db_url):
         orch.grounding = FakeGrounding(advice=AdvisoryAnswer(grounded=False))   # research unreachable
         orch.models._client.queue_structured(
             OperatorIntent(kind="advisory", reply="Let me look into that."))
+        # two complete() calls now: 1) the de-biasing NEUTRALIZE rewrite, 2) the answer
+        orch.models._client.queue_text("What are common ways to structure engine dependencies?")
         orch.models._client.queue_text("Fork each component, submodule it; use NuGet for packages.")
         mgmt = await orch.mgmt_channel_id()
         await orch.nl_intake(
@@ -80,6 +82,57 @@ async def test_advisory_falls_back_labelled_when_research_unavailable(db_url):
         msgs = [p["message"] for p in chat.posted]
         assert any("unverified" in m.lower() and "Fork each component" in m for m in msgs)
         assert not any("**Sources**" in m for m in msgs)                     # never fabricate citations
+    finally:
+        await db.dispose()
+
+
+# ── de-biasing (GROUNDING-MODEL discipline): the short check answers a NEUTRALIZED question ─
+async def test_fallback_answers_the_neutralized_question_transparently(db_url):
+    """Operator-specified: shallow-context answers are steered by the asker's framing. The fallback
+    must (1) rewrite the question to a neutral form WITHOUT the goal in context, (2) answer THAT,
+    and (3) SHOW the neutral form (transparency — the operator sees what was actually answered)."""
+    orch, chat, db = await _orch(db_url)
+    try:
+        orch.grounding = FakeGrounding(advice=AdvisoryAnswer(grounded=False))
+        orch.models._client.queue_structured(
+            OperatorIntent(kind="advisory", reply="Looking into it."))
+        orch.models._client.queue_text("How do game projects reference a game engine dependency?")
+        orch.models._client.queue_text("Common patterns are submodules, packages, or vendoring.")
+        mgmt = await orch.mgmt_channel_id()
+        leading = ("surely the best way is submodules, right? how does a game reference the engine "
+                   "— submodules I assume?")
+        await orch.nl_intake(leading, mgmt, thread_id="t")
+        await _drain(orch)
+        completes = [c for c in orch.models._client.calls if c.get("kind") == "complete"]
+        assert len(completes) == 2
+        assert "NEUTRAL" in completes[0]["system"]                    # 1st call = the de-bias rewrite
+        assert leading in completes[0]["user"]
+        # 2nd call answered the NEUTRALIZED question, not the leading original
+        assert completes[1]["user"] == "How do game projects reference a game engine dependency?"
+        msgs = [p["message"] for p in chat.posted]
+        assert any("neutralized form" in m and "How do game projects reference" in m for m in msgs)
+    finally:
+        await db.dispose()
+
+
+async def test_fallback_junk_neutralization_falls_back_to_original(db_url):
+    """A junk rewrite (empty/too short) must not replace the question — answer the original,
+    with no neutralized-form note."""
+    orch, chat, db = await _orch(db_url)
+    try:
+        orch.grounding = FakeGrounding(advice=AdvisoryAnswer(grounded=False))
+        orch.models._client.queue_structured(
+            OperatorIntent(kind="advisory", reply="Looking into it."))
+        orch.models._client.queue_text("?")                                  # junk rewrite
+        orch.models._client.queue_text("A reasonable general answer.")
+        mgmt = await orch.mgmt_channel_id()
+        await orch.nl_intake("how should engines be referenced?", mgmt, thread_id="t")
+        await _drain(orch)
+        completes = [c for c in orch.models._client.calls if c.get("kind") == "complete"]
+        assert completes[1]["user"] == "how should engines be referenced?"   # original kept
+        msgs = [p["message"] for p in chat.posted]
+        assert any("A reasonable general answer" in m for m in msgs)
+        assert not any("neutralized form" in m for m in msgs)                # no false note
     finally:
         await db.dispose()
 
