@@ -205,3 +205,84 @@ async def test_state_missing_still_escalates(db_url, tmp_path):
         assert "not verify the change landed" in msgs or "did not land" in msgs
     finally:
         await db.dispose()
+
+
+# ── composition context on DIRECT intake (live: standalone worker reverted the vendoring) ──
+def _engine_hosts_murder():
+    """Engine repo whose .gitmodules vendors murder + monogame; murder branch/compare healthy."""
+    import base64
+    gitmodules = base64.b64encode(
+        b'[submodule "vendor/murder"]\n\tpath = vendor/murder\n'
+        b'\turl = https://github.com/devonpveller/murder\n'
+        b'[submodule "vendor/MonoGame"]\n\tpath = vendor/MonoGame\n'
+        b'\turl = https://github.com/devonpveller/MonoGame\n').decode()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        p = request.url.path
+        if p.endswith("/contents/.gitmodules"):
+            return httpx.Response(200, json={"content": gitmodules})
+        if p.endswith("/contents") or "/contents?" in str(request.url):
+            return httpx.Response(200, json=[{"name": "vendor", "type": "dir"}])
+        if "/compare/" in p:
+            return httpx.Response(200, json={
+                "ahead_by": 1, "behind_by": 0, "commits": [],
+                "files": [{"filename": "src/Game.cs"}]})
+        if "/contents/src/Game.cs" in p:
+            return httpx.Response(200, json={"type": "file", "sha": "aa"})
+        if "/branches/" in p:
+            return httpx.Response(200, json={"commit": {"sha": "feedbead12345678"}})
+        if p.endswith("/pulls") and request.method == "POST":
+            return httpx.Response(201, json={"number": 5, "html_url": "https://x/pull/5"})
+        if p.endswith("/pulls") and request.method == "GET":
+            return httpx.Response(200, json=[])
+        if p.count("/") == 3:
+            return httpx.Response(200, json={"default_branch": "main"})
+        return httpx.Response(404)
+
+    return httpx.MockTransport(handler)
+
+
+async def test_direct_intake_on_vendored_project_carries_composition_context(db_url, tmp_path):
+    """LIVE 2026-07-05: 'fix murder build errors' dispatched a STANDALONE murder clone with no
+    composition context → the worker saw the vendored-MonoGame project reference as breakage and
+    REVERTED the operator's architecture. Direct intake must inject the same context the planner
+    path does."""
+    orch, chat, harness, db = await _orch(db_url, tmp_path, github=True)
+    try:
+        await orch.projects.add("monogame-engine", "https://github.com/devonpveller/Engine")
+        await orch.projects.add("murder", "https://github.com/devonpveller/murder")
+        orch._gh_transport = _engine_hosts_murder()
+        from app.schemas import ReadinessVerdict
+        orch.models._client.queue_structured(
+            ReadinessVerdict(clear_and_safe=True, blast_radius="routine"))
+        eid, chan, root = await orch.router.open_effort("fix-murder-build-errors",
+                                                        project="murder")
+        await orch._intake_or_dispatch(eid, chan, root, "fix the build errors in Murder.sln",
+                                       reply_prefix="", mgmt_channel=chan)
+        import asyncio
+        for _ in range(12):
+            if not orch._bg_tasks:
+                break
+            await asyncio.gather(*list(orch._bg_tasks), return_exceptions=True)
+        _, goal_text, _ = await orch.charters.current_goal(eid)
+        assert "COMPOSITION CONTEXT" in (goal_text or ""), "vendored layout facts missing"
+        assert "vendor/murder" in goal_text and "monogame-engine" in goal_text
+        assert "do NOT" in goal_text.replace("Do NOT", "do NOT")   # the protective instruction
+        prompts = " ".join(w["prompt"] for w in harness.wakes)
+        assert "COMPOSITION CONTEXT" in prompts, "the worker never saw the composition facts"
+    finally:
+        await db.dispose()
+
+
+async def test_standalone_project_gets_no_composition_noise(db_url, tmp_path):
+    orch, chat, harness, db = await _orch(db_url, tmp_path, github=True)
+    try:
+        await orch.projects.add("solo", "https://github.com/devonpveller/Solo")
+        orch._gh_transport = _engine_hosts_murder()   # nothing vendors "Solo"
+        eid, chan, root = await orch.router.open_effort("task", project="solo")
+        await orch._intake_or_dispatch(eid, chan, root, "do the thing",
+                                       reply_prefix="", mgmt_channel=chan)
+        _, goal_text, _ = await orch.charters.current_goal(eid)
+        assert "COMPOSITION CONTEXT" not in (goal_text or "")
+    finally:
+        await db.dispose()

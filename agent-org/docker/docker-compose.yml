@@ -110,6 +110,10 @@ services:
       AO_CHAT_ADAPTER: mattermost
       AO_MATTERMOST_URL: http://mattermost:8065
       AO_MATTERMOST_BOT_TOKEN: ${AO_MATTERMOST_BOT_TOKEN}
+      # Mirror the active sidecar toolchain images so the bridge derives env-template
+      # egress (app/modules/envs.py) from what the operator activated.
+      AO_OT1_IMAGE: ${AO_OT1_IMAGE:-}
+      AO_OT2_IMAGE: ${AO_OT2_IMAGE:-}
       # Operator-facing canonical URL (tailnet serve) → clickable effort-thread permalinks in
       # dispatch messages. Mirrors MM_SITE_URL so links open the same host every device uses.
       AO_MATTERMOST_SITE_URL: ${MM_SITE_URL:-}
@@ -250,7 +254,9 @@ services:
       - "com.centurylinklabs.watchtower.enable=false"
 
   ao-ot-1:
-    image: little-coder-open-terminal:local
+    # Env-template hot-swap (little-coder/docker/envs/): set AO_OT1_IMAGE in .env
+    # to e.g. little-coder-open-terminal:dotnet8 and `up -d ao-ot-1` — no rebuild.
+    image: ${AO_OT1_IMAGE:-little-coder-open-terminal:local}
     container_name: ao-ot-1
     profiles: ["workers"]
     environment:
@@ -320,7 +326,7 @@ services:
       - "com.centurylinklabs.watchtower.enable=false"
 
   ao-ot-2:
-    image: little-coder-open-terminal:local
+    image: ${AO_OT2_IMAGE:-little-coder-open-terminal:local}
     container_name: ao-ot-2
     profiles: ["workers"]
     environment:

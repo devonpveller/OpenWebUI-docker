@@ -103,6 +103,11 @@ class Settings(BaseSettings):
     # Base URLs of the pooled little-coder daemons (comma-separated). Empty in
     # P0-P4; filled when the worker profile is enabled (P5).
     worker_instance_urls: str = ""
+    # The ACTIVE execution-sidecar toolchain images (mirrors compose's AO_OT1_IMAGE/AO_OT2_IMAGE)
+    # — lets the bridge derive env-template egress (modules/envs.py) from what the operator
+    # activated: the compose var IS the clearance.
+    ot1_image: str = ""
+    ot2_image: str = ""
     worker_poll_interval_s: float = 3.0
     worker_poll_timeout_s: float = 1800.0
     # Reliability: when a dispatch to a worker fails because the daemon is wedged (409 busy) or

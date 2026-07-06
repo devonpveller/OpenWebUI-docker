@@ -193,10 +193,49 @@ and escalates what it can't* — and bridge-owned state is corrected via NL, nev
   `gate.snapshot`) with a transparent note; "get the workers working" keeps the fan-out. Kills the
   stale-effort re-run flood. Tests: `test_reengage_archive.py::test_reengage_previous_*`.
 
+- **Empty-delivery gate + PR hygiene + composition context on intake** (same day, round 2): a
+  landed branch with commits but ZERO net file changes is not a delivery
+  (`BranchDelivery.files_changed` + `_recover_empty_delivery`; live: PR #4 shipped empty while
+  the fix sat in the worker's container); delivery closures map sibling agent PRs + overlaps,
+  merges list leftovers, NL `close PR <n>` retires superseded ones (DELIVERY-PIPELINE §D4.h;
+  maintainer role staged as OD-DP6); and DIRECT-intake dispatches to a project that is VENDORED
+  inside another registered project now carry the planner path's COMPOSITION CONTEXT
+  (`_composition_context`, derived from the host's actual `.gitmodules`) — a standalone clone
+  otherwise reads intentional cross-submodule wiring as breakage and "fixes" it by reverting the
+  composition (live: murder PR #2 reverted the vendored-MonoGame milestone to green the build).
+  Tests: `test_empty_delivery.py`, `test_delivery_pr.py`, `test_self_recovery.py`.
+
+- **Error-report convergence** (round 3, suite 303 — operator: "these issues the orchestration
+  is expected to fix, not you"): the same build error was re-reported after four deliveries.
+  Three generic mechanisms: (a) **REQUIRED VERIFICATION** — an error-report goal demands
+  reproduce → fix → re-run → confirm the pasted errors are gone before publishing (nobody but
+  the operator had ever run the failing build); (b) **PRIOR ATTEMPTS** (`_attempt_history`) — a
+  re-reported error (matched on the operator's own pasted signature lines) carries earlier
+  efforts' branches + verified outcomes ("2 commits, 4 files, UNMERGED — read it, build on it,
+  don't re-deliver a rejected approach") into the goal; (c) **intake AUTO-WIRING**
+  (`_wire_vendored_delivery`) — a delivery on a vendored project bumps the host's gitlink to the
+  verified commit + opens the paired wiring PR (planner-path §11d parity; plan-owned efforts
+  excluded via `_composition_managed`). Tests: `test_convergence.py`.
+
+- **Worker env templates — authentic dev environments, hot-swappable (2026-07-05, operator
+  decision)**: the execution plane is the `ao-ot` sidecar (all worker commands run there against
+  the shared `/workspace`), so project toolchains are **image layers on the security base**
+  (`little-coder/docker/envs/<env>.Dockerfile` FROM `little-coder-open-terminal:local` — inherits
+  the git-proxy splice; adds toolchain only), prebuilt and **hot-swapped** via
+  `AO_OT1_IMAGE`/`AO_OT2_IMAGE` in `agent-org/docker/.env` + `up -d ao-ot-N` (seconds; the
+  workspace volume persists; never a per-project rebuild). First template: `dotnet8` (.NET 8 SDK,
+  LIVE on both sidecars). Gotchas: compose substitutes from the PROJECT-dir `.env`, not the
+  stack root one; package-registry egress must be allowed per toolchain (default-deny tinyproxy —
+  NL "let the workers reach api.nuget.org"). Follow-up designed: per-project `env` registry field
+  + env-aware acquire for a heterogeneous pool. See `little-coder/docker/envs/README.md`.
+
 Known residuals (logged, not silent): the gitlink gate accepts any-ref-reachable (durable =
 submodule bumps land via PR on the submodule's default branch); the ao-worker daemon accepted a
 2nd concurrent `/tasks` with 200 (no 409-when-busy) — the scheduler lock removes the cause;
-daemon-side serialization is the defense-in-depth follow-up (little-coder change).
+daemon-side serialization is the defense-in-depth follow-up (little-coder change); composition
+context protects intake-dispatched efforts, but a per-project STANDING-INTENT ledger (e.g.
+"murder builds against the vendored MonoGame, not NuGet") that reviewers check deviations
+against is the durable form (pairs with OD-DP3/OD-DP6).
 
 ## Anthropic resources to stop hand-building every permutation (2026-07-03, operator meta-question)
 

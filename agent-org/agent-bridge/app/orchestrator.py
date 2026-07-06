@@ -28,6 +28,7 @@ from .modules.egress import EgressAllowlist
 from .modules.event_gateway import EventGateway
 from .modules.execution_gate import ExecutionGate
 from .modules.floor_guard import FloorGuard
+from .modules.envs import hosts_for_images
 from .modules.governance_gate import GovernanceGate
 from .modules.capabilities import (
     BranchDelivery,
@@ -39,6 +40,7 @@ from .modules.capabilities import (
     parse_owner_repo,
     read_branch_changes,
     close_pull_request,
+    delete_branch,
     read_branch_delivery,
     read_broken_gitlinks,
     read_sibling_agent_prs,
@@ -91,6 +93,18 @@ _ERROR_REPORT_RE = re.compile(
 # fleet-wide fan-out (live 2026-07-05: an unscoped re-engage dispatched 5 stale efforts at once,
 # double-booking both workers). Deliberately does NOT match the plural ("the tasks").
 _SINGULAR_TASK_RE = re.compile(r"\b(?:previous|last|its)\s+(?:\w+\s+)?task\b", re.I)
+
+# An ERROR-REPORT effort closes when the reported failure is GONE, not when a plausible edit
+# exists — the worker must reproduce, fix, and re-verify (live 2026-07-05: four attempts shipped
+# without anyone but the operator ever running the failing build).
+_VERIFY_CLAUSE = (
+    "\n\nREQUIRED VERIFICATION BEFORE PUBLISHING: reproduce the reported failure in your "
+    "workspace (run the same build/command that produced these errors, or the closest equivalent "
+    "available here), apply your fix, re-run it, and CONFIRM every reported error is gone. "
+    "Include the command and the tail of its passing output in your final report. If the repro "
+    "cannot run in this environment, say exactly which part you could not verify and why — a fix "
+    "that merely looks right does not close an error report."
+)
 
 
 def _compact_paste(text: str, max_lines: int = 40, max_chars: int = 2500) -> str:
@@ -409,6 +423,11 @@ class Orchestrator:
         # effort_id, mgmt_thread}}. Registered when D1 opens a delivery PR; consumed by
         # `approve merge-<id>` / a plain "merge it". Persisted via PendingStore (kind="merge").
         self._pending_merge: dict[str, dict] = {}
+        # slug → (ts, host-tuple|None) cache for _vendored_host (repo-state reads are API calls).
+        self._vendor_host_cache: dict[str, tuple[float, tuple | None]] = {}
+        # Efforts whose composition wiring is owned by a lifecycle PLAN (_run_composition) — the
+        # intake-delivery auto-wiring must not double-bump those.
+        self._composition_managed: set[str] = set()
         # Advisory research jobs IN FLIGHT (transparency: PM work must be visible) — shown in
         # /status; updated by the state-driven poll's progress callback. {key: {question, state,
         # started}}. In-memory only (a restart orphans the job on the engine side, harmlessly).
@@ -635,7 +654,13 @@ class Orchestrator:
             except Exception as exc:  # noqa: BLE001
                 log.warning("could not auto-register default repo: %s", exc)
         try:
-            await self.egress.sync()  # seed + project hosts → the mounted tinyproxy filter
+            # ENV-TEMPLATE egress (operator principle: fixes are orchestration abstractions):
+            # the ACTIVE sidecar toolchain images declare their package registries (envs.py);
+            # activating a template (AO_OT*_IMAGE — the operator's own act) IS the clearance, so
+            # the default-deny worker egress widens to exactly those registries automatically.
+            for h in sorted(hosts_for_images(self.s.ot1_image, self.s.ot2_image)):
+                await self.egress.allow(h, added_by="env-template", source="env")
+            await self.egress.sync()  # seed + project + env hosts → the mounted tinyproxy filter
         except Exception as exc:  # noqa: BLE001
             log.warning("egress allowlist sync failed at boot: %s", exc)
         if mgmt and self.s.chat_adapter != "fake":
@@ -1251,9 +1276,13 @@ class Orchestrator:
         # plane capability the bridge does itself — deterministically, never via a worker.
         if await self._nl_pr_request(message, channel_id, thread_id):
             return
-        # NL-FIRST PR close (repo hygiene): "close PR 3" retires a superseded/duplicate agent PR —
-        # deterministic + reversible (branch kept), same operator plane as merge.
-        if await self._nl_pr_close(message, channel_id, thread_id):
+        # NL-FIRST repo hygiene — these COMPOSE (the live cleanup prompt asked for both in ONE
+        # message): "close PR 3"/"remove all pull requests" (reversible sweep) and branch deletion
+        # (IRREVERSIBLE — fires only on explicitly NAMED agent/* branches in a delete-verb
+        # sentence; the operator's words are the §3 clearance, like "merge it").
+        handled_close = await self._nl_pr_close(message, channel_id, thread_id)
+        handled_delete = await self._nl_branch_delete(message, channel_id, thread_id)
+        if handled_close or handled_delete:
             return
         # NL-FIRST knowledge sync (RS.2): "sync <project> docs/knowledge/sources" — a governed
         # operator-plane trigger, resolved deterministically like merge/PR above.
@@ -2156,7 +2185,12 @@ class Orchestrator:
         mgmt = mgmt_thread or self._mgmt_thread_of(eid)
         # 1) the submodule code edit (worker plane) — awaited (this coroutine is already backgrounded).
         #    Its own completion posts the submodule branch; we then wire it back into the engine.
-        await self.delegate(eid, chan, root, goal)
+        #    Mark the effort plan-owned so the intake auto-wiring doesn't ALSO bump the gitlink.
+        self._composition_managed.add(eid)
+        try:
+            await self.delegate(eid, chan, root, goal)
+        finally:
+            self._composition_managed.discard(eid)
         # 2) verify the submodule branch landed → its exact commit (the bump target). No commit = no bump.
         s_repo = await self._effort_repo(eid)
         delivery = await self._verify_delivery(eid, s_repo) if s_repo else BranchDelivery(branch="")
@@ -2538,6 +2572,188 @@ class Orchestrator:
             thread_id=mgmt_thread,
         )
 
+    async def _vendored_host(self, slug: str) -> tuple[str, str, str, str] | None:
+        """(host_slug, path, host_repo_url, siblings_desc) when `slug`'s repo is a git submodule
+        inside another registered project — read from the host's ACTUAL `.gitmodules` (generic,
+        nothing hardcoded). None when standalone/unreadable (fail-open). Cached ~10 min."""
+        if self.github is None or not self.s.github_app_enabled:
+            return None
+        cached = self._vendor_host_cache.get(slug)
+        if cached and (time.time() - cached[0]) < 600:
+            return cached[1]
+        found: tuple | None = None
+        try:
+            me = await self.projects.get(slug)
+            if me:
+                my_repo = self._norm_repo(me["repo_url"])
+                for host in await self.projects.list():
+                    if host["slug"] == slug:
+                        continue
+                    st = await read_repo_state(
+                        self.github, host["repo_url"],
+                        api_base=self.s.github_api_base, transport=self._gh_transport)
+                    if not st.readable:
+                        continue
+                    pairs = list(zip(st.submodule_paths, st.submodule_urls))
+                    mine = next((p for p, u in pairs if self._norm_repo(u) == my_repo), None)
+                    if not mine:
+                        continue
+                    siblings = ", ".join(
+                        f"`{p}` (`{self._norm_repo(u)}`)" for p, u in pairs if p != mine) or "none"
+                    found = (host["slug"], mine, host["repo_url"], siblings)
+                    break
+        except Exception as exc:  # noqa: BLE001 — a lookup hiccup must never block dispatch
+            log.debug("vendored-host lookup for %s failed: %s", slug, exc)
+        self._vendor_host_cache[slug] = (time.time(), found)
+        return found
+
+    async def _composition_context(self, slug: str) -> str:
+        """The COMPOSITION CONTEXT block the planner path injects, for DIRECT-intake dispatches —
+        a worker given a standalone clone sees cross-submodule references as plainly broken and
+        'fixes' them by reverting the composition (live 2026-07-05: a standalone murder worker
+        reverted the vendored-MonoGame wiring back to NuGet to green the build)."""
+        host = await self._vendored_host(slug)
+        if not host:
+            return ""
+        host_slug, mine, _url, siblings = host
+        return (
+            f"\n\nCOMPOSITION CONTEXT: `{slug}` is used as a git submodule inside "
+            f"`{host_slug}` at `{mine}` — sibling submodules there: {siblings}. "
+            f"Cross-submodule project/path references are written for THAT vendored "
+            f"layout and are EXPECTED to look broken in a standalone checkout — do "
+            f"NOT 'fix' them by reverting to package references or rewriting paths "
+            f"for standalone use; keep the vendored wiring intact and make your "
+            f"change compatible with it. Do NOT assume `{slug}` is standalone."
+        )
+
+    async def _derive_check_cmd(self, slug: str, request: str, channel_id: str,
+                                thread_id: str | None) -> None:
+        """If the operator's error report contains an explicit REPRO COMMAND (a pasted shell line
+        like `PS P:\\…> dotnet build vendor\\murder\\Murder.sln`), adopt it as the project's D2
+        check when none is set — announced transparently, overridable any time
+        (`/project check <slug> "<cmd>"`). Generic across toolchains; never overwrites an
+        operator-set check; stricter-only (it can only ADD a red-gate, never remove one)."""
+        try:
+            p = await self.projects.get(slug)
+        except Exception:  # noqa: BLE001
+            return
+        if not p or (p.get("check_cmd") or "").strip():
+            return
+        m = re.search(
+            r"(?:^|\n)\s*(?:PS [^>\n]*>\s*|\$\s*|>\s*)?"
+            r"((?:dotnet|msbuild)\s+(?:build|test|msbuild)?[^\n]*"
+            r"|npm\s+(?:test|run\s+\S+)[^\n]*|(?:yarn|pnpm)\s+(?:test|build)[^\n]*"
+            r"|cargo\s+(?:build|test|check)[^\n]*|go\s+(?:build|test)[^\n]*"
+            r"|make\s+\S+[^\n]*|pytest[^\n]*)",
+            request, re.IGNORECASE)
+        if not m:
+            return
+        cmd = m.group(1).strip().rstrip(".").replace("\\", "/")
+        if len(cmd) < 8 or len(cmd) > 200:
+            return
+        await self.projects.set_check(slug, cmd)
+        await self.chat.post(
+            channel_id,
+            f"🧪 Adopted your repro as `{slug}`'s check command: `{cmd}` — every delivery now "
+            f"red-gates on it before a merge is offered (D2). Change or clear it any time: "
+            f"`/project check {slug} \"<cmd>\"`.",
+            thread_id=thread_id,
+        )
+
+    async def _attempt_history(self, effort_id: str, request: str) -> str:
+        """PRIOR ATTEMPTS block for a RE-REPORTED error: recent efforts whose goal contains the
+        same error line(s), each with its delivered branch's VERIFIED outcome. A re-report means
+        nothing delivered so far resolved it — the next worker must read what exists and build on
+        it (or consciously diverge), never re-derive blind (live 2026-07-05: attempt 1 stranded
+        the right fix in its container, attempt 2 reverted the architecture, attempt 3 would have
+        known about neither). Generic: matches on the operator's own pasted error text."""
+        def _sig(ln: str) -> bool:
+            # a "signature" line: long enough to be distinctive AND shaped like tool output
+            # (compiler/build lines carry quotes, paths or error keywords — plain prose doesn't)
+            s = ln.strip()
+            return (len(s) >= 30
+                    and bool(_ERROR_REPORT_RE.search(s) or "'" in s or "\\" in s or "/" in s))
+
+        lines = {ln.strip().lower() for ln in request.splitlines() if _sig(ln)}
+        if not lines:
+            return ""
+        matches: list[dict] = []
+        efforts = sorted(await self.gate.snapshot(open_only=False),
+                         key=lambda e: e.get("updated_at") or "", reverse=True)
+        for e in efforts:
+            if e["id"] == effort_id or e["id"].startswith("__"):
+                continue
+            try:
+                _, goal, _ = await self.charters.current_goal(e["id"])
+            except Exception:  # noqa: BLE001
+                goal = ""
+            g = (goal or "").lower()
+            if g and any(ln in g for ln in lines):
+                matches.append(e)
+            if len(matches) >= 3:
+                break
+        if not matches:
+            return ""
+        out = ["\n\nPRIOR ATTEMPTS AT THIS SAME ERROR (the operator reports it AGAIN — nothing "
+               "delivered so far resolved it):"]
+        for e in matches:
+            branch = self._effort_branch(e["id"])
+            repo = await self._effort_repo(e["id"]) or ""
+            fact = "no verifiable delivery"
+            if repo and self.github is not None and self.s.github_app_enabled:
+                try:
+                    d = await read_branch_delivery(
+                        self.github, repo, branch,
+                        api_base=self.s.github_api_base, transport=self._gh_transport)
+                    if d.verifiable and d.exists:
+                        nf = d.files_changed if d.files_changed >= 0 else "?"
+                        fact = (f"branch `{branch}` on `{self._norm_repo(repo)}` — "
+                                f"{d.ahead} commit(s), {nf} file(s) changed, UNMERGED")
+                    elif d.verifiable:
+                        fact = f"branch `{branch}` never reached `{self._norm_repo(repo)}`"
+                except Exception:  # noqa: BLE001
+                    pass
+            out.append(f"- `{e['id']}` (project `{e.get('project') or '?'}`): {fact}")
+        out.append(
+            "First fetch and READ those branches, then — IN THIS SAME TURN — implement, verify "
+            "and publish the fix. Orientation is not completion: do NOT end your turn after "
+            "reading the prior work (a previous attempt died exactly that way). Do NOT re-deliver "
+            "an approach that already sits there unmerged — it was not accepted. If a prior "
+            "branch contains the right fix that never got merged or wired through, BUILD ON IT "
+            "and say so in your report.")
+        return "\n".join(out)
+
+    async def _wire_vendored_delivery(self, effort_id: str, delivery: BranchDelivery) -> str:
+        """The WIRING half for an INTAKE-born delivery on a vendored project (planner-path parity,
+        §11d): a code fix on the vendored repo doesn't reach the host's build until the host's
+        gitlink bumps — so bump it to the verified commit on the same-named branch (Git Data API,
+        no checkout) and open the paired PR. Returns closure text; '' when the project isn't
+        vendored. Efforts owned by a composition PLAN are excluded by the caller (no double-bump)."""
+        proj = await self._effort_project(effort_id)
+        host = await self._vendored_host(proj) if proj else None
+        if not (host and delivery.head_sha and self.github is not None):
+            return ""
+        host_slug, path, host_url, _sib = host
+        branch = self._effort_branch(effort_id)
+        res = await bump_submodule(
+            self.github, host_url, path, delivery.head_sha, branch=branch,
+            api_base=self.s.github_api_base, transport=self._gh_transport)
+        await self.audit.log("composition_wired", effort_id=effort_id,
+                             payload={"engine": host_slug, "path": path, "ok": res.ok,
+                                      "commit": delivery.head_sha, "branch": branch,
+                                      "source": "intake"})
+        if not res.ok:
+            return (f"\n⚠️ _The code landed, but wiring it into `{host_slug}` failed: "
+                    f"{res.summary} — `{host_slug}` still points at the old `{path}` commit._")
+        wiring_pr = await self._open_delivery_pr(
+            effort_id, host_url, branch, merge_id=f"merge-{effort_id}-engine",
+            body_extra=f"WIRING half of a composition: bumps `{path}` to `{delivery.head_sha[:10]}` "
+                       f"(see the paired code PR on the vendored repo).\n")
+        return (f"\n🔗 **Wiring half:** `{host_slug}` vendors this at `{path}` — gitlink bumped to "
+                f"`{delivery.head_sha[:10]}` on `{branch}`"
+                + (f", paired PR: {wiring_pr}" if wiring_pr else "")
+                + "\n_Merge BOTH halves (code + wiring) for the fix to reach the host build._")
+
     async def _intake_or_dispatch(
         self, effort_id: str, proj_channel: str, root: str, request: str,
         *, reply_prefix: str, mgmt_channel: str, mgmt_thread: str | None = None,
@@ -2545,6 +2761,26 @@ class Orchestrator:
         """Stage 2→4 for a request: run the readiness gate (P3.8), auto-classify blast radius →
         dry-run risk (P4.0), then either HOLD for operator clarification (F5 — don't guess) or
         dispatch a worker. Owns its own #mgmt reply so the caller just returns."""
+        # Composition awareness on DIRECT intake (the planner path already injects this): a
+        # vendored project's goal carries the layout facts, so a standalone-cloned worker can't
+        # mistake intentional cross-submodule wiring for breakage.
+        proj_slug = await self._effort_project(effort_id)
+        if proj_slug and "COMPOSITION CONTEXT" not in request:
+            request += await self._composition_context(proj_slug)
+        # ERROR-REPORT convergence (live 2026-07-05: the same build error was re-reported after
+        # every attempt): the goal must (a) require the worker to reproduce → fix → RE-VERIFY the
+        # reported failure, and (b) carry what prior attempts already delivered, so the next
+        # worker builds on them instead of re-deriving (or repeating a rejected approach).
+        if _ERROR_REPORT_RE.search(request) and request.count("\n") >= 2:
+            if "REQUIRED VERIFICATION" not in request:
+                request += _VERIFY_CLAUSE
+            if "PRIOR ATTEMPTS" not in request:
+                request += await self._attempt_history(effort_id, request)
+            # The operator's own pasted repro becomes the project's D2 check (stricter-only
+            # autonomy: ADDING a merge gate is always safety-positive) — deliveries then red-gate
+            # on the REAL build instead of the operator being the only build executor.
+            if proj_slug:
+                await self._derive_check_cmd(proj_slug, request, proj_channel, root)
         await self.charters.set_goal(effort_id, request, created_by="po")
         # Anchor the readiness gate to the existing project (UX-FLOW Stage 1) so it resolves
         # conventions/placement/language itself instead of asking about them. When a real repo is
@@ -3616,9 +3852,11 @@ class Orchestrator:
         App — deterministic (never the small model), REVERSIBLE (branch kept, reopenable). Scans
         the onboarded repos for an OPEN PR with that number; several matches → disambiguate, never
         guess. Returns True when the message was handled here."""
+        bulk = re.search(r"\b(?:close|remove|clear|drop)\b[^.\n]{0,40}?\ball\b[^.\n]{0,40}?"
+                         r"\b(?:open\s+)?(?:pr|pull\s+request)s\b", message, re.IGNORECASE)
         m = re.search(r"\bclose\b[^.\n]{0,30}?\b(?:pr|pull\s+request)s?\s*#?(\d+)\b", message,
                       re.IGNORECASE)
-        if not m:
+        if not (bulk or m):
             return False
 
         async def say(msg: str) -> None:
@@ -3626,6 +3864,27 @@ class Orchestrator:
 
         if self.github is None or not self.s.github_app_enabled:
             await say("⚠️ I can't manage PRs — the GitHub App isn't set up (see SETUP-github-app.md).")
+            return True
+        if bulk:
+            # "remove ALL pull requests" — sweep every open AGENT PR across the onboarded repos
+            # (reversible: closing keeps branches; each PR can be reopened).
+            lines: list[str] = []
+            for p in (await self.projects.list())[:8]:
+                prs = await read_sibling_agent_prs(
+                    self.github, p["repo_url"], own_branch="",
+                    api_base=self.s.github_api_base, transport=self._gh_transport)
+                for pr in prs:
+                    res = await close_pull_request(
+                        self.github, p["repo_url"], pr["number"],
+                        api_base=self.s.github_api_base, transport=self._gh_transport)
+                    await self.audit.log("pr_closed", payload={
+                        "repo": p["repo_url"], "pr": pr["number"], "ok": res.ok,
+                        "by": "operator-nl-bulk"})
+                    lines.append(("✅ " if res.ok else "⚠️ ")
+                                 + f"`{p['slug']}` PR #{pr['number']} (`{pr['head']}`): "
+                                 + ("closed" if res.ok else res.summary))
+            await say("**PR sweep:**\n" + "\n".join(lines) if lines else
+                      "No open agent PRs found on any onboarded repo — nothing to close.")
             return True
         number = int(m.group(1))
         projects = await self.projects.list()
@@ -3657,6 +3916,68 @@ class Orchestrator:
                                                    "by": "operator-nl"})
         await say(("✅ " if res.ok else "⚠️ ") + res.summary
                   + (f" — {res.url}" if res.ok and res.url else ""))
+        return True
+
+    async def _nl_branch_delete(self, message: str, channel_id: str, thread_id: str | None) -> bool:
+        """Operator-plane branch deletion — IRREVERSIBLE, so it fires ONLY on branches the
+        operator explicitly NAMES in a sentence with a delete verb (their words are the §3
+        clearance, like "merge it"); `agent/*` branches only (the floor: never a human branch).
+        Sentence-scoped extraction so "delete X, Y. The remaining branch Z is current." can never
+        touch Z (live 2026-07-05: the PM mapped this ask to `archive` → "Nothing to archive" — an
+        empty promise; and the keep-branch was named one sentence later). Unknown names get a
+        closest-match suggestion instead of a silent skip. Returns True when handled here."""
+        targets: list[str] = []
+        for sentence in re.split(r"[.!?\n]", message):
+            if re.search(r"\b(?:delete|remove|drop)\b", sentence, re.I) \
+                    and re.search(r"\bbranch(?:es)?\b|agent/", sentence, re.I):
+                targets += re.findall(r"\bagent/[\w./-]+\b", sentence)
+        if not targets:
+            return False
+        targets = list(dict.fromkeys(t.rstrip("./") for t in targets))
+
+        async def say(msg: str) -> None:
+            await self.chat.post(channel_id, msg, thread_id=thread_id)
+
+        if self.github is None or not self.s.github_app_enabled:
+            await say("⚠️ I can't manage branches — the GitHub App isn't set up.")
+            return True
+        # Inventory the actual agent/* branches per onboarded repo (existence + typo suggestions).
+        inventory: dict[str, list[str]] = {}
+        for p in (await self.projects.list())[:8]:
+            try:
+                owner, name = parse_owner_repo(p["repo_url"])
+                token = await self.github.installation_token()
+                async with httpx.AsyncClient(timeout=15.0, transport=self._gh_transport) as c:
+                    r = await c.get(f"{self.s.github_api_base.rstrip('/')}/repos/{owner}/{name}/branches",
+                                    headers={"Authorization": f"token {token}",
+                                             "Accept": "application/vnd.github+json"},
+                                    params={"per_page": 100})
+                if r.status_code == 200:
+                    inventory[p["repo_url"]] = [b["name"] for b in r.json()
+                                                if (b.get("name") or "").startswith("agent/")]
+            except Exception as exc:  # noqa: BLE001
+                log.debug("branch inventory for %s failed: %s", p["slug"], exc)
+        lines: list[str] = []
+        all_names = sorted({b for bs in inventory.values() for b in bs})
+        for t in targets:
+            hit_repos = [repo for repo, bs in inventory.items() if t in bs]
+            if not hit_repos:
+                import difflib
+                close = difflib.get_close_matches(t, all_names, n=1, cutoff=0.75)
+                lines.append(f"⚠️ `{t}` — not found on any onboarded repo"
+                             + (f"; did you mean `{close[0]}`? (say _\"delete branch {close[0]}\"_)"
+                                if close else "") + ".")
+                continue
+            for repo in hit_repos:   # a composition branch exists on BOTH halves — delete each
+                res = await delete_branch(self.github, repo, t,
+                                          api_base=self.s.github_api_base,
+                                          transport=self._gh_transport)
+                await self.audit.log("branch_deleted", payload={
+                    "repo": repo, "branch": t, "ok": res.ok,
+                    "clearance": message[:200]})
+                lines.append(("✅ " if res.ok else "⚠️ ") + res.summary)
+        await say("**Branch cleanup** (operator-cleared, `agent/*` only):\n"
+                  + "\n".join(lines))
         return True
 
     async def _nl_pr_request(self, message: str, channel_id: str, thread_id: str | None) -> bool:
@@ -3764,6 +4085,10 @@ class Orchestrator:
                           f"merge, or merge on GitHub after review._" if gate_open else "")
                 where += f"\n📬 **PR opened for review:** {pr_url}{d2_note}{invite}"
                 where += await self._sibling_pr_note(eff_repo, branch)
+                # Composition pairing for intake-born deliveries (a plan-owned effort's wiring is
+                # handled by _run_composition — never bump twice).
+                if effort_id not in self._composition_managed:
+                    where += await self._wire_vendored_delivery(effort_id, delivery)
         elif delivery is not None and not delivery.verifiable and self_reported:
             # We couldn't independently check (App can't read this repo) — report the worker's word,
             # labelled honestly as unverified rather than asserting it as fact (§4.2 unverified).

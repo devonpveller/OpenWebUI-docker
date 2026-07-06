@@ -533,6 +533,45 @@ async def close_pull_request(
                             detail=r.text[:160])
 
 
+async def delete_branch(
+    github: GitHubApp, repo_url: str, branch: str, *,
+    api_base: str = "https://api.github.com", transport: httpx.BaseTransport | None = None,
+) -> CapabilityResult:
+    """Repo hygiene — IRREVERSIBLE (commits reachable only from this branch become garbage):
+    runs ONLY on the operator's explicit, branch-NAMING instruction (their words are the §3
+    clearance, like "merge it"). The caller restricts this to `agent/*` branches; here we refuse
+    the repo's default branch outright (belt-and-braces)."""
+    try:
+        owner, repo = parse_owner_repo(repo_url)
+    except ValueError as exc:
+        return CapabilityResult(ok=False, summary=f"`{repo_url}` isn't a valid GitHub repo.", detail=str(exc))
+    if owner.lower() != (github.owner or "").lower():
+        return CapabilityResult(ok=False, summary=f"`{owner}/{repo}` isn't on the App's account — can't delete.")
+    try:
+        token = await github.installation_token()
+    except GitHubAppError as exc:
+        return CapabilityResult(ok=False, summary="The GitHub App isn't ready.", detail=str(exc))
+    base = api_base.rstrip("/")
+    h = _headers(token)
+    try:
+        async with httpx.AsyncClient(timeout=30.0, transport=transport) as c:
+            meta = await c.get(f"{base}/repos/{owner}/{repo}", headers=h)
+            default = (meta.json().get("default_branch") or "main") if meta.status_code == 200 else "main"
+            if branch == default:
+                return CapabilityResult(ok=False, summary=f"`{branch}` is `{owner}/{repo}`'s DEFAULT "
+                                        f"branch — refusing to delete it.")
+            r = await c.delete(f"{base}/repos/{owner}/{repo}/git/refs/heads/{branch}", headers=h)
+    except httpx.HTTPError as exc:
+        return CapabilityResult(ok=False, summary=f"Couldn't reach GitHub to delete `{branch}`.",
+                                detail=str(exc)[:160])
+    if r.status_code == 204:
+        return CapabilityResult(ok=True, summary=f"branch `{branch}` deleted from `{owner}/{repo}`")
+    if r.status_code in (404, 422):
+        return CapabilityResult(ok=False, summary=f"`{branch}` doesn't exist on `{owner}/{repo}`.")
+    return CapabilityResult(ok=False, summary=f"Deleting `{branch}` on `{owner}/{repo}` failed "
+                            f"({r.status_code}).", detail=r.text[:160])
+
+
 async def bump_submodule(
     github: GitHubApp, engine_url: str, submodule_path: str, commit_sha: str, *,
     branch: str, base_branch: str = "", message: str = "",
