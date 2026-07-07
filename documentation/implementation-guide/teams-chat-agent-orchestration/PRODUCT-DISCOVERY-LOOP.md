@@ -1,9 +1,31 @@
 # Product-Discovery Loop (PDL) — market-grounded autonomous product iteration
 
-**Status:** 📐 **design (2026-07-06)** — a lifecycle EXTENSION that turns the agent-org from
-*reactive* (fix what the operator reports) into *generative* (drive a product toward market fit).
-Nothing here is built yet. **Precedence:** governance spec > this doc > PLAN/TASKS. Where they
-touch, this doc obeys `SAFETY-AND-WORKFLOW-governance-model.md` and the floor unchanged.
+**Status:** 📐 **design (2026-07-06, realigned to code 2026-07-07)** — a lifecycle EXTENSION that
+turns the agent-org from *reactive* (fix what the operator reports) into *generative* (drive a
+product toward market fit). The PDL machinery itself is not built yet, but the **reuse surface it
+stands on is now LIVE + DEPLOYED** (see the realignment note). **Precedence:** governance spec >
+this doc > PLAN/TASKS. Where they touch, this doc obeys `SAFETY-AND-WORKFLOW-governance-model.md`
+and the floor unchanged.
+
+> **Realignment note (2026-07-07) — the ground the plan stands on has firmed up.** Since this doc
+> was drafted, the 2026-07-05/06 convergence work shipped and, crucially, two mechanisms landed that
+> the plan treated as *to-build* but are now **live precedents**:
+> - **`Project.standing_intent`** (models.py:341, `projects.set_standing_intent`, NL-settable via
+>   `OperatorIntent.standing_intent`) — a **project-level persistent objective** injected into
+>   *every* effort goal as a NON-NEGOTIABLE preamble (`orchestrator._standing_intent_context`) with
+>   **forbidden-term rejection** (`_forbidden_terms` — "I will REJECT any delivery whose diff
+>   introduces `X`"). *This is the north-star alignment mechanism of §2.1/§8, already running.* It
+>   was built to stop the murder→NuGet architectural drift; the PDL's north star is a richer
+>   standing_intent reusing this exact injection+rejection path.
+> - **`_apply_note`** (the "try it locally" block on every landed delivery), **`check_cmd`
+>   NL-settable + auto-derived** (`_extract_check_cmd` / `_derive_check_cmd`), **PR/branch hygiene**
+>   (`close_pull_request`, `delete_branch`, `read_sibling_agent_prs`), and **hot-swappable worker
+>   env templates** (`dotnet8` live) — these are exactly the batch-digest, mandatory-test-gate,
+>   feature-removal, and real-build-in-CI pieces the plan needs, now built.
+>
+> Net effect: the plan is **more de-risked, not less** — the hardest governance piece (direction in
+> every unit + drift rejection) is proven live, and the "back half" is fully reuse. What remains
+> genuinely new narrows to the **rich product aggregate** (§3) + the **recurring driver** (§6).
 
 **Operator decisions locked (2026-07-06):**
 1. **Maximally autonomous, but feature-modular.** The loop runs continuously without per-iteration
@@ -56,19 +78,26 @@ workers on task"). The *back* (effort → worker → delivery → merge) and all
 
 ## 1. The two missing seams (why this is a real build, not a wiring job)
 
-The seam map (2026-07-06) found exactly two structural gaps everything else hangs off:
+The seam map (realigned 2026-07-07) leaves **one-and-a-half** structural gaps everything else hangs
+off:
 
-1. **No project-level persistent goal exists.** Today only per-effort `GoalVersion`
-   (`models.py:188`), the global floor, and per-effort steering (`RuleVersion.scope_effort_id`)
-   persist. Goals live and die with efforts. A recurring loop needs a durable *product-level*
-   objective + backlog to anchor to. → **New: the `ProductLoop` aggregate (§3).**
+1. **A LIGHTWEIGHT project-level objective now exists; the RICH product aggregate does not.** As of
+   2026-07-07 `Project.standing_intent` (`models.py:341`) persists a per-project durable
+   objective/constraint, injected into every effort (`_standing_intent_context`) and enforced by
+   forbidden-term rejection — so the *"a durable product-level intent, present in every unit"*
+   primitive is **already live** (it's a single guardrail string, not a versioned charter). What is
+   still missing is the **rich aggregate** a loop needs: a versioned north-star charter + market
+   brief + ranked gap backlog + feature ledger, keyed per product. → **New: the `ProductLoop`
+   aggregate (§3), which subsumes/relates to `standing_intent` — the north star is set as (and
+   enforced like) a richer standing_intent, reusing the live injection+rejection path.**
 2. **No recurring / self-clocked driver exists.** All orchestration is event-driven; the only
-   long-running loops are `_capacity_drain_loop` (`orchestrator.py:541`, event+timer) and the
+   long-running loops are `_capacity_drain_loop` (`orchestrator.py:570`, event+timer) and the
    event-gateway poll. There is no cron/schedule primitive. → **New: `_discovery_driver_loop`
    (§6), modeled on the drain loop's event+timer shape, durable via a `LoopStore` that mirrors
    `ParkStore` (`capacity_park.py`).**
 
-Everything else — research, planning, delivery, gates — is reuse.
+Everything else — research, planning, delivery, all reliability gates, north-star injection,
+apply-notes, check_cmd, PR hygiene, worker env templates — is **reuse, and now LIVE**.
 
 ---
 
@@ -193,12 +222,18 @@ signal off-direction. So:
   serves a cited market need *and* advances the north star. A market-attractive gap that does not
   serve the north star is **dropped or flagged for a pivot decision** (§4) — never silently built.
   Each `product_gaps` row records `serves_north_star` (the justification) alongside `market_need`.
-- **The north star is baked into every PRD → every effort goal** (the §4.3 discipline), so the
-  worker always has the direction present in its grounded goal, not just the local task.
-- **The driver DEFENDS the north star** exactly as the UX defends the intent thread: at each gap and
-  PRD the question is *"does this still serve the north star, and if not, should the north star
-  change?"* — a fork surfaces to the human (pivot), never a silent drift. The north star only
-  changes by human decision (learning-loop proposes, never auto-applies — floor #6).
+- **The north star is baked into every PRD → every effort goal** (the §4.3 discipline) — and this is
+  **already the live mechanism**: `_standing_intent_context` (orchestrator.py:2773) injects the
+  project's durable objective into every effort as a NON-NEGOTIABLE preamble, and `_forbidden_terms`
+  (orchestrator.py:2758) **rejects any delivery whose diff violates it** (it was built precisely to
+  stop the murder→NuGet architectural drift). The PDL sets the north star *as* the project's
+  standing intent, so "direction present + drift rejected in every unit" is not new code — it is the
+  existing path fed a richer objective.
+- **The driver DEFENDS the north star** exactly as the UX defends the intent thread and as
+  `standing_intent` already defends the architecture: at each gap and PRD the question is *"does this
+  still serve the north star, and if not, should the north star change?"* — a fork surfaces to the
+  human (pivot), never a silent drift. The north star only changes by human decision (learning-loop
+  proposes, never auto-applies — floor #6).
 
 In short: **the north star is the direction; the market brief is the terrain.** The loop navigates
 the terrain *toward* the direction; a gap that is terrain-but-not-direction is a pivot question for
@@ -249,6 +284,14 @@ Durability discipline (learned 2026-07-04, the pending-approval-persistence fix)
 product loop. `LoopStore` mirrors `ParkStore` (`capacity_park.py`): `create / advance / set_gap /
 spend / checkpoint / all_active`.
 
+**Relation to the live `Project.standing_intent` (2026-07-07):** the `north_star` is not a parallel
+concept — when a loop's charter is set/updated, the bridge also writes it (or its enforceable core)
+to `Project.standing_intent` via the existing `projects.set_standing_intent`, so **every effort the
+loop spawns already carries the direction + drift-rejection through the live
+`_standing_intent_context` path**, no new injection code. The `ProductLoop` row adds what
+standing_intent can't hold: the versioned charter history, the market brief, the gap backlog, and
+the feature ledger.
+
 ---
 
 ## 3.5 The Feature Ledger — the product as removable units (decision 1)
@@ -273,7 +316,9 @@ product_features
   created_at/updated_at
 ```
 
-**Removal is a first-class NL operation** — `"remove the <feature>"`:
+**Removal is a first-class NL operation** — `"remove the <feature>"` (its NL-routing + the git ops
+are **already live**: `_nl_branch_delete` + `delete_branch` and the revert-based recovery paths
+exist; removal wires them to the ledger):
 1. `git revert <merge_commit>` on the dev branch (reversible — the whole reason dev-merge is safe);
 2. emit a small **unwire effort**: repair the `integration_points` elsewhere that referenced it,
    and flag/handle any `depends_on` dependents — this is the "reimplement the removed wiring" step,
@@ -352,14 +397,15 @@ out_of_scope[]     # minimal-diff discipline (the 2026-07-06 "error fix ≠ rede
 success_metric     # how we'll know it advanced the north star
 ```
 
-The PRD becomes the effort's goal via `charters.set_goal(effort_id, prd_rendered)` — with the
-`north_star` in the goal header so every wake carries the direction (the §4.3 canonical-objective
-bake), and its
-`acceptance[]` drives verification — generalizing the **ERROR VERDICTS** protocol (2026-07-06) into
-**ACCEPTANCE VERDICTS**: the worker must end with each acceptance criterion marked MET / NOT MET
-with evidence, and a NOT-MET (or missing block) closes the effort *partly done* rather than
-inviting a merge. `out_of_scope[]` carries the minimal-diff instruction so a PRD for feature X
-can't balloon into a redesign. This is direct reuse of the convergence machinery.
+The PRD becomes the effort's goal via `charters.set_goal(effort_id, prd_rendered)`. The `north_star`
+reaches every wake through the **already-live** `_standing_intent_context` injection (§2.1) rather
+than a new goal-header field, and its `acceptance[]` drives verification — generalizing the **live
+ERROR VERDICTS** protocol (orchestrator.py:110) into **ACCEPTANCE VERDICTS** (the one genuinely new
+verdict variant): the worker must end with each acceptance criterion marked MET / NOT MET with
+evidence, and a NOT-MET (or missing block) closes the effort *partly done* rather than inviting a
+merge — identical machinery to the shipped ERROR VERDICTS path. `out_of_scope[]` carries the
+minimal-diff instruction (the live "fix ≠ redesign" rule) so a PRD for feature X can't balloon into
+a redesign. This is direct reuse of the convergence machinery, now all deployed.
 
 PRDs pass the existing gates: Stage-2 readiness gate (`planner.readiness_gate` — ambiguous PRD →
 clarifying questions, not a guess, F5), and Stage-3 plan approval (`_present_plan` /
@@ -369,9 +415,9 @@ clarifying questions, not a guess, F5), and Stage-3 plan approval (`_present_pla
 
 ## 6. The driver loop (`_discovery_driver_loop`)
 
-Modeled on `_capacity_drain_loop` (`orchestrator.py:541`): an `asyncio` task, event-driven with a
-timer fallback (research/gap phases are async-poll like `grounding.advise`). Started in `setup()`,
-rehydrated from `LoopStore`. Per active loop, per tick:
+Modeled on `_capacity_drain_loop` (`orchestrator.py:570`): an `asyncio` task, event-driven with a
+timer fallback (research/gap phases are async-poll like `grounding.advise`, grounding.py:128).
+Started in `setup()`, rehydrated from `LoopStore`. Per active loop, per tick:
 
 - **advance the phase FSM** (§2); each transition posts to the loop's effort thread (bus-only,
   observable — floor #5);
@@ -423,17 +469,29 @@ buggy code from reaching a review. If a check is red or an acceptance verdict is
 feature never merges; it routes back to the worker (existing D2 loop) or escalates — the human only
 ever sees green, ledgered work.
 
+**What is already live for this (2026-07-07):** the mandatory-test gate has all its pieces —
+`check_cmd` is NL-settable ("before merging, make sure X builds") *and* auto-derived from a pasted
+repro (`_extract_check_cmd` / `_derive_check_cmd`), `_d2_gate` runs it and red-routes-back, and the
+**worker env templates** (`dotnet8` hot-swapped onto the ao-ot sidecars) mean the check can be a
+*real* build/test, not a stub. The **batch digest** reuses `_apply_note` (the "try it locally"
+block already appended to every landed delivery: fetch/checkout + submodule sync + the project's own
+check). So §7 is mostly *wiring live parts together*, not new machinery — the genuinely-new bit is
+`Project.dev_branch` + the two-tier merge target (PDL.6).
+
 ---
 
 ## 8. Governance & safety (the non-negotiables)
 
 All from `SAFETY-AND-WORKFLOW-governance-model.md`, unchanged:
 
-- **North star present in every gap (F1 / §4.3) — the alignment spine (§2.1):** the product-level
-  intent thread is carried into every gap, PRD, and effort goal; a gap that serves the market but
-  not the north star is quarantined `off_direction` and surfaced as a pivot question, never
-  autonomously built. This is the direct defense against the paper's #1 failure (compartmentalized
-  sub-agents drifting from the whole-task view) — and it is what keeps *maximum autonomy* on-course.
+- **North star present in every gap (F1 / §4.3) — the alignment spine (§2.1), and ALREADY LIVE as a
+  pattern:** the product-level intent thread is carried into every gap, PRD, and effort goal via the
+  existing `_standing_intent_context` injection, and a delivery that violates it is **already
+  rejected** by `_forbidden_terms` (built to stop the murder→NuGet drift). A gap that serves the
+  market but not the north star is quarantined `off_direction` and surfaced as a pivot question,
+  never autonomously built. This is the direct defense against the paper's #1 failure
+  (compartmentalized sub-agents drifting from the whole-task view) — proven live, and what keeps
+  *maximum autonomy* on-course.
 - **Escalate-don't-guess (F5):** an ambiguous gap or PRD → clarifying question to the human, never
   a guess. The readiness gate already enforces this per effort.
 - **No self-granted scope (#3):** the loop cannot widen its own repo access, egress, or budget. A
@@ -456,13 +514,22 @@ All from `SAFETY-AND-WORKFLOW-governance-model.md`, unchanged:
 
 ## 9. Phased build (each deployable, tested, reversible — the workspace convention)
 
+> **Realignment (2026-07-07):** the back half (implement → test → prove → deliver) and the
+> alignment spine are **live** — north-star injection = `standing_intent`; the test gate =
+> `check_cmd` (NL/auto) + `_d2_gate` + env templates; verdicts = ERROR VERDICTS (→ ACCEPTANCE
+> VERDICTS is a small variant); the digest = `_apply_note`; removal git-ops = `_nl_branch_delete` /
+> `delete_branch` / revert. So PDL.0–.4 are mostly **new front-of-pipeline + wiring live parts**,
+> not new delivery machinery.
+
 - **PDL.0 — Operation Router + product-context persistence + the ledger schema.** Lead with the
   router (§1.5): extend `OperatorIntent` with the operation family + the dynamic dispatcher (this
   alone sharpens today's fix/feature/advisory routing). Then `product_loops` + `product_gaps` +
-  `product_features` tables + models + `LoopStore` (mirrors `ParkStore`); NL to start a
+  `product_features` tables + models + `LoopStore` (mirrors `ParkStore`); wire `north_star` →
+  `projects.set_standing_intent` (reuse the live injection+rejection); NL to start a
   `discovery_loop` → CHARTER_DRAFT; reuse advisory for refinement; human "solid" gate; rehydrate in
   `setup()`. *Tests:* router picks the right operation from NL (incl. one-shot-vs-loop
-  disambiguation), create/persist/rehydrate/advance, restart-survival, ledger CRUD.
+  disambiguation), create/persist/rehydrate/advance, restart-survival, ledger CRUD, north-star
+  writes standing_intent.
 - **PDL.1 — Market Brief.** MARKET_RESEARCH phase: framed market query to the research service
   (origin `agent-org-market`), persist the cited brief; the pivot loop (brief → human → re-charter).
   *Tests:* research call (fake grounding), brief persistence, pivot re-research.
