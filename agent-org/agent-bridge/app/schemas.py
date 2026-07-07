@@ -167,6 +167,11 @@ class OperatorIntent(BaseModel):
     # upstream"). The registry is bridge-owned state, so fixing it must be an NL operation (D0.f);
     # set together with `project`. Distinct from upstream_url=None (which just means "not given").
     remove_upstream: bool = False
+    # The project's D2 check/test command, set in PLAIN LANGUAGE (operator preference: no slash
+    # commands, no git-shaped vocabulary required) — "before merging engine changes, make sure
+    # vendor/murder/Murder.sln builds" → the exact shell command here + `project`. Empty string
+    # ("" ) CLEARS the check; None means "not mentioned".
+    check_cmd: str | None = None
     steering: str | None = None           # the clarification / steering / direction text
     decision: Literal["approve", "modify", "abort"] | None = None  # interpreted, NOT auto-run
     # For reengage/archive/status bulk actions: a substring matching effort ids (e.g. "calculator",

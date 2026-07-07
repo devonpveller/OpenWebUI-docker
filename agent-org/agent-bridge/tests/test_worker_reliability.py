@@ -106,3 +106,40 @@ async def test_all_workers_wedged_parks_via_nocapacity(db_url):
         assert w1.quarantined_until is not None and w2.quarantined_until is not None
     finally:
         await db.dispose()
+
+
+# ── LIVE 2026-07-06: a 775KB pi session zombied every retry (narrate one line, quit) ──
+async def test_session_rotates_after_undelivered_escalation(db_url):
+    """After an `effort_undelivered` escalation, the next dispatch must use a FRESH worker
+    session (gen suffix) — a degenerate session can't be repaired by re-wording goals. Gen 0
+    keeps the plain effort id (affinity unchanged for healthy efforts)."""
+    from pathlib import Path as _P
+    from app.adapters.chat import FakeChatAdapter
+    from app.config import Settings
+    from app.db import Database
+    from app.modules.model_router import FakeModelClient
+    from app.orchestrator import Orchestrator
+    from app.worker.harness import FakeHarness
+    _ROOT = _P(__file__).resolve().parents[1]
+    settings = Settings(
+        _env_file=None, chat_adapter="fake",
+        profiles_dir=str(_ROOT / "profiles"), charters_dir=str(_ROOT / "charters"),
+        floor_dir=str(_ROOT / "floor"), worker_instance_urls="http://w1:8090",
+        max_concurrent_workers=1, database_url=db_url, project_survey_enabled=False,
+        review_mode="off", plan_approval="off",
+    )
+    db = Database(db_url)
+    orch = Orchestrator(settings, db, FakeChatAdapter(),
+                        model_client=FakeModelClient(), harness=FakeHarness())
+    await orch.setup()
+    try:
+        eid, chan, root = await orch.router.open_effort("rotate-me")
+        assert await orch._session_for(eid) == eid                    # healthy → unchanged
+        await orch.audit.log("effort_undelivered", effort_id=eid,
+                             payload={"exists": False, "ahead": 0, "branch": "b"})
+        assert await orch._session_for(eid) == f"{eid}~r1"            # rotated after escalation
+        await orch.delegate(eid, chan, root, "try again", plan_steps=["work"])
+        sessions = {w["session_id"] for w in orch.harness.wakes}
+        assert sessions == {f"{eid}~r1"}, f"wakes did not rotate: {sessions}"
+    finally:
+        await db.dispose()

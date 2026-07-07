@@ -63,7 +63,9 @@ from .modules.router import Router, slugify
 from .modules.scheduler import NoCapacityError, Scheduler
 from .modules.scope_ledger import ScopeLedger
 from .modules.stop_gates import StopGates
-from .models import Effort, GlobalState
+from sqlalchemy import func, select
+
+from .models import Effort, Event, GlobalState
 from .modules.pending_store import PendingStore
 from .schemas import (
     Concern, Decision, Level, LifecyclePlan, LifecycleStep, MonitorVerdict, OperatorIntent, Plan, Trigger,
@@ -103,7 +105,15 @@ _VERIFY_CLAUSE = (
     "available here), apply your fix, re-run it, and CONFIRM every reported error is gone. "
     "Include the command and the tail of its passing output in your final report. If the repro "
     "cannot run in this environment, say exactly which part you could not verify and why — a fix "
-    "that merely looks right does not close an error report."
+    "that merely looks right does not close an error report.\n"
+    "End your final report with a block starting exactly `ERROR VERDICTS:` listing EVERY error "
+    "line the operator reported, each marked `RESOLVED` (with how you verified) or "
+    "`NOT RESOLVED` (with what is still needed). A missing or partial verdict block means the "
+    "report is treated as a PARTIAL fix, not a resolution.\n"
+    "MINIMAL DIFF: change ONLY what the reported errors require. Do not vendor, restructure or "
+    "add components the errors don't demand — if a structurally bigger change seems necessary, "
+    "SAY SO in your report (with why) instead of doing it (operator: an error fix is not an "
+    "invitation to redesign)."
 )
 
 
@@ -171,6 +181,13 @@ _PO_NL_SYS = (
     "- remove an upstream from an EXISTING project: 'remove/clear the upstream on X', 'X isn't a "
     "fork — drop its upstream', 'stop treating X as a fork' → set `project`=X + "
     "`remove_upstream`=true (no upstream_url, no repo_url). I clear it + confirm.\n"
+    "- set a project CHECK (the build/test that must pass before any merge is offered): they "
+    "describe it in plain words — 'before merging engine changes make sure Murder.sln builds', "
+    "'the check for X is <cmd>', 'every delivery on X must pass <cmd>' → set `project`=X + "
+    "`check_cmd`=the exact shell command (verbatim when they give one; when they DESCRIBE it, "
+    "write the command yourself from the paths they've used, e.g. `dotnet build "
+    "vendor/murder/Murder.sln`). 'remove/clear the check on X' → check_cmd='' + project. I "
+    "confirm + run it on every delivered branch (red routes back to the worker).\n"
     "- request: they want NEW work done on an EXISTING project → set effort_name to a short "
     "kebab-case slug (it becomes a thread in the project channel). If they name a project to work "
     "on, set `project` to it (match a KNOWN PROJECT). In your `reply`, do the thinking-partner thing: "
@@ -232,7 +249,12 @@ _PO_NL_SYS = (
     "repo that vendors my forks as submodules', 'wire murder to build on the monogame source', "
     "'scaffold a project that…', anything needing several repo/code steps. Set kind=plan. I draft a "
     "concrete, reviewable plan (fork/submodule/worker steps) for the operator to approve — I do NOT "
-    "guess a hardcoded recipe.\n"
+    "guess a hardcoded recipe. CHALLENGE STRUCTURAL ASSUMPTIONS: when the ask embeds a structure "
+    "decision (e.g. 'add X as a submodule', 'vendor Y'), your `reply` must say what GOAL that "
+    "structure serves, whether it is actually feasible/buildable as asked, and name the simpler "
+    "alternative if one exists — never silently execute a structure the goal doesn't need "
+    "(operator: 'the PM should have called out that it's not possible, or proposed a solution, "
+    "rather than blindly creating a submodule').\n"
     "- question / chitchat otherwise (a quick factual/conversational reply you can give directly).\n"
     "EVERY user-facing action has an NL path (this is the primary surface; slash commands are just a "
     "power-user fallback) — so map the operator's plain-language intent to the RIGHT kind and act, "
@@ -428,6 +450,19 @@ class Orchestrator:
         # Efforts whose composition wiring is owned by a lifecycle PLAN (_run_composition) — the
         # intake-delivery auto-wiring must not double-bump those.
         self._composition_managed: set[str] = set()
+        # Efforts whose COMPOSITION CHECK (host build of the wiring branch) failed — the closure
+        # must land "partly done" and the effort stays open; a red never travels forward.
+        self._comp_check_failed: set[str] = set()
+        # Efforts whose dispatch was refused by the KILL SWITCH — released automatically the
+        # moment the operator lifts it (no re-asking; "say resume and I'll re-dispatch").
+        self._kill_blocked: set[str] = set()
+        # Branch head BEFORE this run dispatched (per effort) — a "landed" verdict whose head
+        # equals this is a PRE-EXISTING branch resurrected, not a delivery (live 2026-07-07: an
+        # empty-workspace run "delivered" yesterday's stale branch and wired an OLD commit).
+        self._pre_dispatch_head: dict[str, str] = {}
+        # Evolved goals queued by a machine-detected failure (red check / unresolved verdicts) —
+        # launched by delegate's finally the moment the current run closes (auto-iteration).
+        self._iterate_after: dict[str, str] = {}
         # Advisory research jobs IN FLIGHT (transparency: PM work must be visible) — shown in
         # /status; updated by the state-driven poll's progress callback. {key: {question, state,
         # started}}. In-memory only (a restart orphans the job on the engine side, harmlessly).
@@ -1433,6 +1468,23 @@ class Orchestrator:
                 thread_id=thread_id,
             )
             return
+        # PROJECT CHECK in plain language (operator preference: no slash commands) — the D2
+        # build/test gate is registry state, so setting/clearing it is an NL operation.
+        if getattr(intent, "check_cmd", None) is not None and intent.project:
+            p = await self.projects.resolve(intent.project)
+            if p:
+                cmd = self._extract_check_cmd(intent.check_cmd)
+                await self.projects.set_check(p["slug"], cmd)
+                await self.chat.post(
+                    channel_id,
+                    (reply + ("\n\n🧪 Every delivery on **`{s}`** now red-gates on `{c}` before a "
+                              "merge is offered — a failing check routes straight back to the "
+                              "worker.".format(s=p["slug"], c=cmd) if cmd else
+                              f"\n\n🧪 Cleared the check on **`{p['slug']}`** — deliveries are no "
+                              f"longer machine-verified (I'll say so on each closure).")).strip(),
+                    thread_id=thread_id,
+                )
+                return
         # REMOVE a wrong/stale upstream from an EXISTING project — the registry is bridge-owned
         # state, so correcting it is an NL operation (D0.f), never operator SQL.
         if getattr(intent, "remove_upstream", False) and intent.project and not intent.upstream_url:
@@ -1535,6 +1587,25 @@ class Orchestrator:
             # "get the workers working" / "continue" / "re-engage the monogame tasks" — actually
             # RE-DISPATCH idle efforts. This is additive (running work the operator already asked
             # for), so it fires directly from NL — no phantom "they'll proceed as resources free up".
+            # An effort id in the operator's own words is DETERMINISTIC — never depend on the
+            # small model to copy it into the intent (live 2026-07-06: "re-run effort-fix-…"
+            # classified as reengage but effort_id came back empty → "Nothing to re-engage").
+            if not intent.effort_id:
+                m_eid = re.search(r"\beffort-[A-Za-z0-9][\w-]*\b", message)
+                if m_eid:
+                    intent.effort_id = m_eid.group(0)
+            # A re-run that NAMES a closed effort reopens it — "re-run effort-X" is a legitimate
+            # ask for lifecycle=done/aborted work (live 2026-07-06: it answered "Nothing to
+            # re-engage" because a prior delivery had closed the effort).
+            if intent.effort_id and intent.effort_id not in {e["id"] for e in efforts}:
+                async with self.db.session_factory() as s:
+                    e_row = await s.get(Effort, intent.effort_id)
+                    if e_row is not None:
+                        e_row.lifecycle = "open"
+                        await s.commit()
+                        await self.audit.log("effort_reopened", effort_id=intent.effort_id,
+                                             payload={"via": "named-rerun"})
+                        efforts = await self.gate.snapshot(open_only=True)
             targets = self._select_efforts(intent, efforts)
             scope = (intent.project or intent.target_filter or "").strip()
             if not targets and scope:
@@ -1551,17 +1622,30 @@ class Orchestrator:
                     thread_id=thread_id,
                 )
                 return
-            # "continue its previous/last task" (SINGULAR, unscoped) = resume ONE interrupted
-            # effort — the most recently touched — not a fan-out over every stale idle effort
-            # (which re-runs outdated goals and floods the worker pool).
-            if (len(targets) > 1 and not scope and not intent.effort_id
-                    and _SINGULAR_TASK_RE.search(message)):
-                by_recency = {e["id"]: (e.get("updated_at") or "") for e in efforts}
-                latest = max(targets, key=lambda t: by_recency.get(t, ""))
-                targets = [latest]
-                reply = (reply + f"\n\n_(you said “previous task”, so I'm resuming only the most "
-                         f"recent effort `{latest}` — say “get the workers working” to re-dispatch "
-                         f"everything idle.)_").strip()
+            # SINGULAR re-engage resolution (unscoped, several idle candidates). Two grounded
+            # narrowings — never a blind fan-out for a one-thing ask:
+            #   1. THREAD context: "re-run it" typed in an effort's #mgmt conversation means THAT
+            #      effort — the undelivered escalation invites exactly this reply (live 2026-07-06:
+            #      the bare reply re-fanned the stale backlog instead of the escalated effort).
+            #   2. RECENCY: bare "re-run it" / "continue its previous task" outside a mapped
+            #      thread means the most recently touched effort.
+            if len(targets) > 1 and not scope and not intent.effort_id:
+                ctx_eid = self._effort_of_mgmt_thread(thread_id) if thread_id else None
+                singular = (_SINGULAR_TASK_RE.search(message)
+                            or re.fullmatch(r"(?:please\s+)?re-?run\s+(?:it|that)\s*[.!]*",
+                                            message.strip(), re.I))
+                if ctx_eid and ctx_eid in targets:
+                    targets = [ctx_eid]
+                    reply = (reply + f"\n\n_(this conversation is about `{ctx_eid}` — resuming "
+                             f"just that one; say “get the workers working” for everything idle.)_"
+                             ).strip()
+                elif singular:
+                    by_recency = {e["id"]: (e.get("updated_at") or "") for e in efforts}
+                    latest = max(targets, key=lambda t: by_recency.get(t, ""))
+                    targets = [latest]
+                    reply = (reply + f"\n\n_(resuming only the most recent effort `{latest}` — "
+                             f"say “get the workers working” to re-dispatch everything idle.)_"
+                             ).strip()
             await self._reengage(targets, mgmt_channel=channel_id, mgmt_thread=thread_id,
                                  reply_prefix=reply)
             return
@@ -1625,6 +1709,15 @@ class Orchestrator:
         elif intent.kind == "unkill":
             await self.gate.kill_switch(on=False, actor="human")
             reply += "\n\n✅ Kill switch **released** — the fleet can run again."
+            # Anything refused WHILE frozen resumes now, automatically (the refusal message
+            # promised exactly this — the operator never re-asks).
+            blocked = sorted(self._kill_blocked)
+            self._kill_blocked.clear()
+            if blocked:
+                reply += (f"\n▶ Re-dispatching the {len(blocked)} effort(s) the freeze blocked: "
+                          + ", ".join(f"`{e}`" for e in blocked))
+                self._spawn(self._reengage(blocked, mgmt_channel=channel_id,
+                                           mgmt_thread=thread_id, reply_prefix=""))
         elif intent.kind == "status":
             if efforts:
                 status_map = await self._effort_status_map(efforts)
@@ -2626,6 +2719,17 @@ class Orchestrator:
             f"change compatible with it. Do NOT assume `{slug}` is standalone."
         )
 
+    @staticmethod
+    def _extract_check_cmd(rest: str) -> str:
+        """The check COMMAND from operator text: the quoted/backticked span when present, else
+        the first line — never a pasted wall that happens to follow it."""
+        rest = (rest or "").strip()
+        if rest[:1] in ("\"", "'", "`"):
+            end = rest.find(rest[0], 1)
+            if end > 0:
+                return rest[1:end].strip()[:250]
+        return (rest.splitlines() or [""])[0].strip().strip('"').strip("'").strip("`")[:250]
+
     async def _derive_check_cmd(self, slug: str, request: str, channel_id: str,
                                 thread_id: str | None) -> None:
         """If the operator's error report contains an explicit REPRO COMMAND (a pasted shell line
@@ -2659,6 +2763,27 @@ class Orchestrator:
             f"`/project check {slug} \"<cmd>\"`.",
             thread_id=thread_id,
         )
+
+    async def _session_for(self, effort_id: str) -> str:
+        """The worker session for an effort — ROTATED to a fresh session after each undelivered
+        escalation (live 2026-07-06: session-id = effort-id accumulated FIVE runs of history in
+        one 775KB pi session; every retry loaded the rot, narrated one orientation line and quit —
+        no goal wording can repair a degenerate session). Generation = the number of prior
+        `effort_undelivered` escalations, derived from the audit log (no new state; deterministic
+        across restarts). Gen 0 keeps the plain effort id, so healthy efforts keep workspace +
+        session affinity exactly as before."""
+        try:
+            async with self.db.session_factory() as s:
+                n = int((await s.execute(
+                    select(func.count()).select_from(Event).where(
+                        Event.kind.in_(("effort_undelivered", "delivery_stale_head",
+                                        "delivery_empty_diff")),
+                        Event.effort_id == effort_id)
+                )).scalar_one())
+        except Exception as exc:  # noqa: BLE001 — affinity fallback, never a dispatch blocker
+            log.debug("session generation lookup failed for %s: %s", effort_id, exc)
+            n = 0
+        return effort_id if n == 0 else f"{effort_id}~r{n}"
 
     async def _attempt_history(self, effort_id: str, request: str) -> str:
         """PRIOR ATTEMPTS block for a RE-REPORTED error: recent efforts whose goal contains the
@@ -2749,10 +2874,71 @@ class Orchestrator:
             effort_id, host_url, branch, merge_id=f"merge-{effort_id}-engine",
             body_extra=f"WIRING half of a composition: bumps `{path}` to `{delivery.head_sha[:10]}` "
                        f"(see the paired code PR on the vendored repo).\n")
+        # A vendored project's code can ONLY be compiled through its host's build — verify the
+        # wiring branch by machine before anyone is invited to merge it.
+        check_note = await self._composition_check(effort_id, host_slug, host_url, branch)
         return (f"\n🔗 **Wiring half:** `{host_slug}` vendors this at `{path}` — gitlink bumped to "
                 f"`{delivery.head_sha[:10]}` on `{branch}`"
                 + (f", paired PR: {wiring_pr}" if wiring_pr else "")
-                + "\n_Merge BOTH halves (code + wiring) for the fix to reach the host build._")
+                + "\n_Merge BOTH halves (code + wiring) for the fix to reach the host build._"
+                + check_note)
+
+    async def _composition_check(self, effort_id: str, host_slug: str, host_url: str,
+                                 branch: str) -> str:
+        """D2 for COMPOSITIONS: a vendored project's code cannot compile in its standalone clone
+        (the sibling submodules don't exist there), so 'verification' without the host build is
+        inspection, not compilation (live 2026-07-06, iteration 7: a signature fix that never
+        compiled shipped ambiguity errors only the operator's own build caught). When the HOST
+        project has a check_cmd, run it on the host's WIRING branch — fresh host focus → checkout
+        the branch → submodule init → check. Red ⇒ the closure blocks the merge invite and the
+        effort stays open. Returns the closure note."""
+        p = await self.projects.get(host_slug)
+        check_cmd = ((p or {}).get("check_cmd") or "").strip()
+        if not check_cmd:
+            return (f"\n🧪 _No machine check on `{host_slug}` — this wiring branch is UNVERIFIED "
+                    f"by any build (set one: `/project check {host_slug} \"<cmd>\"` and I'll run "
+                    f"it on every wiring branch before inviting a merge)._")
+        loc = await self.router.effort_thread(effort_id)
+        if not loc:
+            return ""
+        channel_id, root = loc
+        instruction = (
+            f"COMPOSITION CHECK (verification only — change NOTHING in this step). The wiring "
+            f"branch must BUILD. Execute exactly:\n"
+            f"  cd /workspace && git fetch origin {branch} && git checkout {branch}\n"
+            f"  git submodule sync --recursive && git submodule update --init --recursive\n"
+            f"  {check_cmd}\n"
+            f"If the final command exits 0, reply exactly `CHECK: PASS`. If it fails, reply "
+            f"`CHECK: FAIL` followed by the last ~20 lines of the failing output. Do not attempt "
+            f"fixes in this step."
+        )
+        try:
+            repo_token = await self._project_token(effort_id)
+            result = await self.router.wake(
+                effort_id, role="worker-default", thread_id=root, channel_id=channel_id,
+                session_id=await self._session_for(effort_id), instruction=instruction,
+                repo=host_url, repo_token=repo_token,
+            )
+        except Exception as exc:  # noqa: BLE001 — an unrunnable check is reported, never fatal
+            return (f"\n🧪 _Composition check couldn't run ({str(exc)[:120]}) — verify the build "
+                    f"yourself before merging._")
+        out = (result.output or "") if result is not None else ""
+        if "CHECK: PASS" in out:
+            return (f"\n🧪 **Composition check passed** on `{host_slug}` (`{check_cmd}`, "
+                    f"worker-reported) — the wiring branch builds.")
+        if "CHECK: FAIL" in out:
+            tail = out.split("CHECK: FAIL", 1)[1].strip()[:600]
+            self._comp_check_failed.add(effort_id)
+            iterating = await self._auto_iterate(
+                effort_id, f"the composition check failed on `{host_slug}` (`{check_cmd}`)", tail)
+            follow = ("_Auto-iterating — the worker continues from this failing output; no "
+                      "operator action needed._" if iterating else
+                      "_Auto-iteration limit reached — say “re-run it” to continue, or tell me "
+                      "how to proceed._")
+            return (f"\n❌ **Composition check FAILED** on `{host_slug}` — do **NOT** merge yet:\n"
+                    f"```\n{tail}\n```\n{follow}")
+        return (f"\n🧪 _Composition check returned no verdict — verify the build yourself before "
+                f"merging._")
 
     async def _intake_or_dispatch(
         self, effort_id: str, proj_channel: str, root: str, request: str,
@@ -2767,6 +2953,21 @@ class Orchestrator:
         proj_slug = await self._effort_project(effort_id)
         if proj_slug and "COMPOSITION CONTEXT" not in request:
             request += await self._composition_context(proj_slug)
+        # MACHINE-CHECK forewarning: when the project (or the host that vendors it) has a check
+        # command, the worker knows its delivery gets BUILT before any merge — so it runs the
+        # equivalent itself instead of shipping code it never compiled (live 2026-07-06,
+        # iteration 7: an uncompiled signature fix introduced ambiguity errors).
+        if proj_slug and "MACHINE CHECK" not in request:
+            host = await self._vendored_host(proj_slug)
+            check_owner = host[0] if host else proj_slug
+            cp = await self.projects.get(check_owner)
+            ccmd = ((cp or {}).get("check_cmd") or "").strip()
+            if ccmd:
+                request += (
+                    f"\n\nMACHINE CHECK: this delivery will be verified with `{ccmd}` on "
+                    f"`{check_owner}` before any merge is offered — run the equivalent in your "
+                    f"workspace first; a red check routes straight back to you."
+                )
         # ERROR-REPORT convergence (live 2026-07-05: the same build error was re-reported after
         # every attempt): the goal must (a) require the worker to reproduce → fix → RE-VERIFY the
         # reported failure, and (b) carry what prior attempts already delivered, so the next
@@ -3008,6 +3209,11 @@ class Orchestrator:
             upstream = await self._effort_upstream(effort_id) if repo else None
             upstream_token = await self._project_upstream_token(effort_id) if upstream else None
             await self.charters.set_goal(effort_id, goal, created_by="po")
+            # Record the branch head BEFORE any work: a later "landed" whose head still equals
+            # this is a pre-existing branch resurrected, not this run's delivery.
+            if repo and self.github is not None and self.s.github_app_enabled:
+                pre = await self._verify_delivery(effort_id, repo)
+                self._pre_dispatch_head[effort_id] = pre.head_sha or ""
             # P4.0 gate: a high-blast-radius effort may not reach REAL-code execution until its
             # isolated dry-run is recorded complete. Routine efforts pass immediately.
             ok, reason = await self.exec_gate.may_execute(effort_id)
@@ -3080,6 +3286,13 @@ class Orchestrator:
             await self.router.update_effort_card(effort_id, "error")
         finally:
             self._delegating.discard(effort_id)   # no longer actively executing
+            # AUTO-ITERATION (operator 2026-07-07: "having to say re-run it while the pm knows
+            # there's an issue — it should just re-run itself with an evolutionary prompt"): a
+            # machine-detected failure queued an evolved goal; launch it now that this run has
+            # fully closed (the single-flight guard is released above).
+            nxt = self._iterate_after.pop(effort_id, None)
+            if nxt:
+                self._spawn(self.delegate(effort_id, channel_id, root_post_id, nxt))
 
     async def _run_step(self, effort_id, channel_id, root, step, i, n, repo, heavy, repo_token=None,
                         upstream=None, upstream_token=None):
@@ -3092,7 +3305,7 @@ class Orchestrator:
             await self.stop_gates.add_checkpoint(cp_id, effort_id, f"step {i}", i)
         result = await self.router.wake(
             effort_id, role="worker-default", thread_id=root, channel_id=channel_id,
-            session_id=effort_id, instruction=step, repo=repo, repo_token=repo_token,
+            session_id=await self._session_for(effort_id), instruction=step, repo=repo, repo_token=repo_token,
             upstream=upstream, upstream_token=upstream_token,
         )
         if result is None:
@@ -3175,7 +3388,7 @@ class Orchestrator:
             repo_token = await self._project_token(effort_id)
             result = await self.router.wake(
                 effort_id, role="worker-default", thread_id=root, channel_id=channel_id,
-                session_id=effort_id, instruction=instruction, repo=repo, repo_token=repo_token,
+                session_id=await self._session_for(effort_id), instruction=instruction, repo=repo, repo_token=repo_token,
             )
         except (httpx.HTTPStatusError, httpx.TransportError) as exc:
             # The worker daemon rejected the dispatch (409 busy) or was unreachable — router.wake has
@@ -3226,6 +3439,12 @@ class Orchestrator:
             return BranchDelivery(no_changes=True, branch=self._effort_branch(effort_id))
         delivery = await self._verify_delivery(effort_id, repo)
         if delivery.landed or not delivery.verifiable:
+            # A "landed" branch whose head predates THIS run is a stale branch resurrected —
+            # nothing was delivered now (live 2026-07-07: an empty-workspace run "delivered"
+            # yesterday's branch and wired an old commit into the host).
+            if delivery.landed and self._is_stale_head(effort_id, delivery):
+                return await self._recover_stale_delivery(
+                    effort_id, channel_id, root, repo, delivery)
             # A landed branch is NOT a delivery if it references submodule commits nobody can
             # fetch — gate on gitlink reachability before treating it as done.
             if delivery.landed and not await self._gate_gitlinks(effort_id, channel_id, root, repo):
@@ -3252,6 +3471,9 @@ class Orchestrator:
             return BranchDelivery(no_changes=True, branch=self._effort_branch(effort_id))
         delivery = await self._verify_delivery(effort_id, repo)
         if delivery.landed:
+            if self._is_stale_head(effort_id, delivery):
+                return await self._recover_stale_delivery(
+                    effort_id, channel_id, root, repo, delivery)
             if not await self._gate_gitlinks(effort_id, channel_id, root, repo):
                 return None
             if delivery.files_changed == 0:
@@ -3268,6 +3490,120 @@ class Orchestrator:
         if state is not None:
             return state
         await self._escalate_undelivered(effort_id, delivery)
+        return None
+
+    async def _auto_iterate(self, effort_id: str, reason: str, failing_tail: str) -> bool:
+        """The PM already KNOWS this delivery failed its own bar — re-run automatically with an
+        EVOLVED goal (the failure folded in) instead of asking the operator to say "re-run it"
+        (operator 2026-07-07). Bounded: max 2 auto-iterations per effort (audit-counted, so the
+        limit survives restarts); past the limit the honest escalation stands. Returns True when
+        an iteration is queued — the caller words its closure as 'iterating', not 'your move'."""
+        try:
+            async with self.db.session_factory() as s:
+                n = int((await s.execute(
+                    select(func.count()).select_from(Event).where(
+                        Event.kind == "auto_iteration", Event.effort_id == effort_id)
+                )).scalar_one())
+        except Exception:  # noqa: BLE001
+            n = 0
+        if n >= 2:
+            return False
+        try:
+            _, goal_text, _ = await self.charters.current_goal(effort_id)
+        except Exception:  # noqa: BLE001
+            goal_text = ""
+        base_goal = (goal_text or "").split("\n\nITERATION ")[0].strip()
+        if not base_goal:
+            return False
+        await self.audit.log("auto_iteration", effort_id=effort_id,
+                             payload={"round": n + 1, "reason": reason[:150]})
+        evolved = (
+            f"{base_goal}\n\nITERATION {n + 1}/2 (automatic — no operator involved): the previous "
+            f"delivery FAILED the machine bar: {reason}.\nFAILING OUTPUT:\n```\n"
+            f"{(failing_tail or '(none captured)')[:800]}\n```\n"
+            f"Continue from the existing branch: fix the CAUSE of that failure, push NEW commits, "
+            f"and re-verify before publishing."
+        )
+        self._iterate_after[effort_id] = evolved
+        await self.comms.post(
+            Intent.worker_activity,
+            f"🔁 **Auto-iteration {n + 1}/2** — {reason}. Re-dispatching with the failing output "
+            f"folded into the goal; no operator action needed.",
+            effort_id=effort_id,
+        )
+        return True
+
+    def _is_stale_head(self, effort_id: str, delivery: BranchDelivery) -> bool:
+        """True when the 'landed' branch head is EXACTLY where it was before this run dispatched —
+        i.e. the branch pre-existed and this run contributed nothing (no pre-head recorded, or a
+        changed head, is never stale — fail-open)."""
+        pre = self._pre_dispatch_head.get(effort_id, "")
+        return bool(pre) and bool(delivery.head_sha) and delivery.head_sha == pre
+
+    async def _recover_stale_delivery(
+        self, effort_id: str, channel_id: str, root: str, repo: str,
+        delivery: BranchDelivery,
+    ) -> BranchDelivery | None:
+        """The branch verified 'landed' but its head predates this run — a resurrected stale
+        branch, not a delivery. Re-engage once with the plain truth; a NEW head → proceed through
+        the normal gates; still stale → state-check, then honest escalation. Never opens a PR or
+        wires a host to a stale commit."""
+        branch = delivery.branch
+        await self.comms.post(
+            Intent.worker_activity,
+            f"🔍 `{branch}` exists on the remote but its head (`{delivery.head_sha[:10]}`) is "
+            f"UNCHANGED from before this run — nothing new was delivered (a stale branch from an "
+            f"earlier attempt). Re-dispatching with that context (PM monitor, §4.2).",
+            effort_id=effort_id,
+        )
+        instruction = (
+            f"NOTHING NEW WAS DELIVERED: `{branch}` already existed on the remote and its head "
+            f"(`{delivery.head_sha[:10]}`) is unchanged from before this run started — your turn "
+            f"produced no pushed commits. Do the task now: implement the goal in the workspace, "
+            f"commit, and push NEW commits to `{branch}`. If the workspace looks empty or wrong, "
+            f"SAY SO explicitly. If there is genuinely nothing to change, reply exactly "
+            f"`NO CHANGES: <why>`."
+        )
+        try:
+            repo_token = await self._project_token(effort_id)
+            result = await self.router.wake(
+                effort_id, role="worker-default", thread_id=root, channel_id=channel_id,
+                session_id=await self._session_for(effort_id), instruction=instruction,
+                repo=repo, repo_token=repo_token,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("stale-delivery re-engage failed for %s: %s", effort_id, exc)
+            result = None
+        if result is not None and "NO CHANGES:" in (result.output or ""):
+            return BranchDelivery(no_changes=True, branch=branch)
+        delivery = await self._verify_delivery(effort_id, repo)
+        if delivery.landed and not self._is_stale_head(effort_id, delivery):
+            if not await self._gate_gitlinks(effort_id, channel_id, root, repo):
+                return None
+            if delivery.files_changed == 0:
+                return await self._recover_empty_delivery(
+                    effort_id, channel_id, root, repo, delivery)
+            return delivery
+        state = await self._verify_goal_state(effort_id, channel_id, root, repo)
+        if state is not None:
+            return state
+        await self.audit.log("delivery_stale_head", effort_id=effort_id,
+                             payload={"branch": branch, "head": delivery.head_sha})
+        await self.comms.post(
+            Intent.escalation,
+            f"⚠️ **{effort_id}** ran but delivered NOTHING NEW — `{branch}` still sits at its "
+            f"pre-run head `{delivery.head_sha[:10]}` after a re-engage. ↑ raised to you: it is "
+            f"**not** done and no PR was opened for the stale content.",
+            effort_id=effort_id,
+        )
+        await self.router.update_effort_card(effort_id, "error")
+        await self.comms.post(
+            Intent.operator_reply,
+            f"⚠️ **{effort_id}** produced no new commits (its branch pre-existed, unchanged) — "
+            f"**not** marked done, no PR opened. Reply to re-run it (a fresh session will be "
+            f"used), or say it's expected and I'll close it.",
+            thread_id=self._mgmt_thread_of(effort_id),
+        )
         return None
 
     async def _recover_empty_delivery(
@@ -3307,7 +3643,7 @@ class Orchestrator:
             repo_token = await self._project_token(effort_id)
             result = await self.router.wake(
                 effort_id, role="worker-default", thread_id=root, channel_id=channel_id,
-                session_id=effort_id, instruction=instruction, repo=repo, repo_token=repo_token,
+                session_id=await self._session_for(effort_id), instruction=instruction, repo=repo, repo_token=repo_token,
             )
         except Exception as exc:  # noqa: BLE001 — fall through to state-check/escalation
             log.warning("empty-delivery re-engage failed for %s: %s", effort_id, exc)
@@ -3369,7 +3705,7 @@ class Orchestrator:
         try:
             result = await self.router.wake(
                 effort_id, role="worker-default", thread_id=root, channel_id=channel_id,
-                session_id=effort_id, instruction=instruction, repo=repo,
+                session_id=await self._session_for(effort_id), instruction=instruction, repo=repo,
                 repo_token=await self._project_token(effort_id),
             )
         except Exception as exc:  # noqa: BLE001 — recovery is best-effort; escalation still runs
@@ -3475,7 +3811,7 @@ class Orchestrator:
             repo_token = await self._project_token(effort_id)
             await self.router.wake(
                 effort_id, role="worker-default", thread_id=root, channel_id=channel_id,
-                session_id=effort_id, instruction=instruction, repo=repo, repo_token=repo_token,
+                session_id=await self._session_for(effort_id), instruction=instruction, repo=repo, repo_token=repo_token,
             )
         except Exception as exc:  # noqa: BLE001 — a wedged re-engage falls through to escalation
             log.warning("gitlink re-engage failed for %s: %s", effort_id, exc)
@@ -3530,21 +3866,64 @@ class Orchestrator:
         return True
 
     async def _report_completion(self, effort_id: str, result) -> None:
-        """The undeliverable case (§2): the effort is FROZEN (a concern / kill switch). A busy pool
-        is NO LONGER handled here — NoCapacity now parks + auto-resumes (no_worker_slot)."""
+        """The undeliverable case (§2): the effort is FROZEN. Say WHICH freeze and what one word
+        releases it — never 'a concern or the kill switch' (live 2026-07-06: the operator had no
+        context to act: 'i can't answer the question i don't have the context')."""
         if result is None:
+            killed = await self.gate.is_killed()
+            if killed:
+                # Remember it — releasing the switch re-dispatches automatically (no re-asking).
+                self._kill_blocked.add(effort_id)
+                why = (
+                    f"🛑 **{effort_id}** is queued behind the fleet-wide **kill switch** (engaged "
+                    f"by your earlier “stop”). Nothing is wrong with the effort itself. Say "
+                    f"**resume** and I'll release the fleet and re-dispatch this effort "
+                    f"automatically — nothing else needed."
+                )
+            else:
+                try:
+                    concerns = await self.gate.open_concerns(effort_id)
+                except Exception:  # noqa: BLE001
+                    concerns = []
+                if concerns:
+                    listed = "\n".join(
+                        f"- {getattr(c, 'what_surfaced', '')[:200]}" for c in concerns[:3])
+                    why = (
+                        f"⚠️ **{effort_id}** is frozen on an open **concern** that needs your "
+                        f"decision:\n{listed}\nDecide it with `approve {effort_id}` / "
+                        f"`modify {effort_id}` / `abort {effort_id}` — it dispatches once cleared."
+                    )
+                else:
+                    why = (
+                        f"⚠️ **{effort_id}** is frozen (gate state `frozen`, no open concern on "
+                        f"record — likely from an earlier session). `approve {effort_id}` clears "
+                        f"it, or `abort {effort_id}` cancels it."
+                    )
+            await self.comms.post(Intent.worker_activity, why, effort_id=effort_id)
             await self.comms.post(
-                Intent.worker_activity,
-                "⚠️ can't dispatch — this effort is frozen (a concern or the kill switch). "
-                "Clear it (decide the concern / `unkill`) to run.",
-                effort_id=effort_id,
+                Intent.operator_reply, why, thread_id=self._mgmt_thread_of(effort_id),
             )
-            await self.comms.post(
-                Intent.operator_reply,
-                f"⚠️ **{effort_id}** is frozen (a concern or the kill switch) — decide it / `unkill` "
-                f"to run.",
-                thread_id=self._mgmt_thread_of(effort_id),
-            )
+
+    async def _apply_note(self, effort_id: str, repo: str | None, branch: str) -> str:
+        """Exact operator-side steps to try a landed delivery locally (live 2026-07-06: 'as the
+        operator i don't know what to do with this fix') — repo named plainly, fetch/checkout,
+        the submodule re-sync every vendored layout needs, and the project's own check command
+        when one is set. Generic for any repo/branch."""
+        if not (repo and branch):
+            return ""
+        check = ""
+        slug = await self._effort_project(effort_id)
+        if slug:
+            p = await self.projects.get(slug)
+            check = ((p or {}).get("check_cmd") or "").strip()
+        return (
+            f"\n🧭 **Try it locally before merging** (this branch is on `{self._norm_repo(repo)}`):\n"
+            f"```\ngit fetch origin {branch}\ngit checkout {branch}\n"
+            f"git submodule sync --recursive\ngit submodule update --init --recursive\n"
+            f"{check or '# then rebuild your solution as usual'}\n```\n"
+            f"_If you merge instead: `git checkout main && git pull`, then the same two "
+            f"submodule lines, then rebuild._"
+        )
 
     async def _sibling_pr_note(self, repo: str | None, branch: str) -> str:
         """A closure footnote mapping the OTHER open agent PRs on this repo (+ any files they
@@ -3657,7 +4036,7 @@ class Orchestrator:
         try:
             result = await self.router.wake(
                 effort_id, role="worker-default", thread_id=root, channel_id=channel_id,
-                session_id=effort_id, instruction=instruction, repo=None,
+                session_id=await self._session_for(effort_id), instruction=instruction, repo=None,
             )
         except (httpx.HTTPStatusError, httpx.TransportError, NoCapacityError) as exc:
             return "unknown", str(exc)[:160]
@@ -3708,7 +4087,7 @@ class Orchestrator:
                 repo_token = await self._project_token(effort_id)
                 await self.router.wake(
                     effort_id, role="worker-default", thread_id=root, channel_id=channel_id,
-                    session_id=effort_id, instruction=fix_instruction, repo=repo,
+                    session_id=await self._session_for(effort_id), instruction=fix_instruction, repo=repo,
                     repo_token=repo_token,
                 )
             except (httpx.HTTPStatusError, httpx.TransportError, NoCapacityError) as exc:
@@ -4089,6 +4468,9 @@ class Orchestrator:
                 # handled by _run_composition — never bump twice).
                 if effort_id not in self._composition_managed:
                     where += await self._wire_vendored_delivery(effort_id, delivery)
+                # The operator must never be left asking "what do I DO with this fix?" (live
+                # 2026-07-06) — every landed delivery carries exact local apply/verify steps.
+                where += await self._apply_note(effort_id, eff_repo, branch)
         elif delivery is not None and not delivery.verifiable and self_reported:
             # We couldn't independently check (App can't read this repo) — report the worker's word,
             # labelled honestly as unverified rather than asserting it as fact (§4.2 unverified).
@@ -4114,21 +4496,69 @@ class Orchestrator:
                 f"If your goal needs {listed} updated too — e.g. a composition where the parent repo's "
                 f"submodule must be bumped — that part is **not done**. Say the word and I'll plan it."
             )
-        done_word = "done" if not unmet else "partly done — see the scope check"
+        # PER-ERROR honesty (live 2026-07-06: a delivery fixed ONE leg of a 4-error report and the
+        # closure invited a merge as if the issue were resolved — the operator rebuilt and hit the
+        # same errors). An error-report effort is DONE only when the worker's ERROR VERDICTS block
+        # marks every reported error RESOLVED; explicit NOT RESOLVED (or a missing block on a
+        # landed delivery) closes as PARTIAL and the effort stays visible.
+        out_text = (result.output or "") if result is not None else ""
+        try:
+            _, goal_text, _ = await self.charters.current_goal(effort_id)
+        except Exception:  # noqa: BLE001
+            goal_text = ""
+        partial = False
+        if branch and goal_text and "REQUIRED VERIFICATION" in goal_text:
+            if re.search(r"\bNOT RESOLVED\b", out_text):
+                partial = True
+                tail = out_text[out_text.find("ERROR VERDICTS"):][:700] or out_text[-700:]
+                iterating = await self._auto_iterate(
+                    effort_id, "the worker marked some reported errors NOT RESOLVED", tail)
+                scope_note += (
+                    "\n\n⚠️ **Partial fix:** some of your reported errors are explicitly "
+                    "**NOT RESOLVED** (see the ERROR VERDICTS above). "
+                    + ("_Auto-iterating on the rest — no action needed._" if iterating else
+                       "_Auto-iteration limit reached — say “re-run it” to continue._")
+                )
+            elif "ERROR VERDICTS:" not in out_text:
+                partial = True
+                iterating = await self._auto_iterate(
+                    effort_id, "the delivery carried no per-error verdicts (unverified against "
+                    "the reported errors)", out_text[-700:])
+                scope_note += (
+                    "\n\n⚠️ **Unverified against your report:** the worker gave no per-error "
+                    "verdicts, so I can't claim your reported errors are resolved. "
+                    + ("_Auto-iterating with a verification demand — no action needed._"
+                       if iterating else
+                       "_Auto-iteration limit reached — say “re-run it” to continue._")
+                )
+        comp_failed = effort_id in self._comp_check_failed
+        self._comp_check_failed.discard(effort_id)
+        if comp_failed:
+            scope_note += (
+                "\n\n❌ **The composition check failed** — the wiring branch does not build, so "
+                "this is NOT done and no merge should happen. Say _\"re-run it\"_ and the worker "
+                "continues from the failing output above."
+            )
+        unmet_or_partial = bool(unmet) or partial or comp_failed
+        done_word = ("done" if not unmet_or_partial else
+                     "partly done — see the scope check" if unmet else
+                     "partly done — the composition check failed" if comp_failed else
+                     "partly done — not all reported errors verified resolved")
         await self.comms.post(
             Intent.closure,
             f"✅ worker finished (**{done_word}**) — {where}. Merge to `main`/deploy stay "
             f"human-gated.{scope_note}",
             effort_id=effort_id,
         )
-        # A scope-unmet effort did its piece but the INTENT is incomplete → mark the card
-        # 'needs-attention' and keep it visible in /status (don't silently close the operator's goal).
-        await self.router.update_effort_card(effort_id, "needs-attention" if unmet else "done")
-        if not unmet:
+        # A scope-unmet or partial effort did its piece but the INTENT is incomplete → mark the
+        # card 'needs-attention' and keep it visible (don't silently close the operator's goal).
+        await self.router.update_effort_card(
+            effort_id, "needs-attention" if unmet_or_partial else "done")
+        if not unmet_or_partial:
             await self.gate.set_lifecycle(effort_id, "done")  # drops out of the default /status view
         await self.comms.post(
             Intent.operator_reply,
-            f"{'✅' if not unmet else '⚠️'} **{effort_id}** finished (**{done_word}**): {head}\n"
+            f"{'✅' if not unmet_or_partial else '⚠️'} **{effort_id}** finished (**{done_word}**): {head}\n"
             f"_{where[0].upper() + where[1:]}._{scope_note}",
             thread_id=self._mgmt_thread_of(effort_id),
         )
@@ -4563,7 +4993,15 @@ class Orchestrator:
         elif cmd in ("kill", "unkill"):
             on = cmd == "kill"
             await self.gate.kill_switch(on=on, actor="human")
-            await reply(f"✅ kill switch {'engaged — fleet frozen' if on else 'released'}")
+            note = ""
+            if not on and self._kill_blocked:   # auto-resume what the freeze refused (promised)
+                blocked = sorted(self._kill_blocked)
+                self._kill_blocked.clear()
+                note = " — re-dispatching " + ", ".join(f"`{e}`" for e in blocked)
+                if channel_id:
+                    self._spawn(self._reengage(blocked, mgmt_channel=channel_id,
+                                               mgmt_thread=thread_id, reply_prefix=""))
+            await reply(f"✅ kill switch {'engaged — fleet frozen' if on else 'released' + note}")
         elif cmd in ("approve", "modify", "abort"):
             if args:
                 effort_id, note = args[0], " ".join(args[1:])
@@ -4735,9 +5173,11 @@ class Orchestrator:
                 await reply(f"{'✅ removed' if ok else '⚠️ no such'} project `{args[1]}`")
             elif sub == "check" and len(args) >= 2:
                 # D2: the project's check/test command — run on every delivered PR branch BEFORE the
-                # merge gate; red routes back to the effort. Empty command clears it.
+                # merge gate; red routes back to the effort. Empty command clears it. Take ONLY the
+                # quoted span (or the first line): a pasted error wall after the command must not
+                # become part of it (live 2026-07-06: it overflowed the column + crash-looped).
                 slug = slugify(args[1])
-                cmd_str = " ".join(args[2:]).strip().strip('"').strip("'")
+                cmd_str = self._extract_check_cmd(" ".join(args[2:]))
                 ok = await self.projects.set_check(slug, cmd_str)
                 if not ok:
                     await reply(f"⚠️ no such project `{slug}`")

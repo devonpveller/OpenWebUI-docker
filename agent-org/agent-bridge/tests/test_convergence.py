@@ -71,7 +71,10 @@ def _stack_remote(bumped: dict):
         if "/contents/src/Murder/Game.cs" in p:
             return httpx.Response(200, json={"type": "file", "sha": "aa"})
         if "/branches/" in p:
-            return httpx.Response(200, json={"commit": {"sha": "abc123def456789000000000"}})
+            bumped["branch_reads"] = bumped.get("branch_reads", 0) + 1
+            sha = ("prehead0000000000" if bumped["branch_reads"] == 1
+                   else "abc123def456789000000000")   # head moves after the pre-dispatch read
+            return httpx.Response(200, json={"commit": {"sha": sha}})
         if p.endswith("/git/ref/heads/main"):
             return httpx.Response(200, json={"object": {"sha": "eng_base"}})
         if p.endswith("/git/commits/eng_base"):
@@ -158,5 +161,249 @@ async def test_plan_owned_effort_is_not_double_wired(db_url, tmp_path):
         assert not bumped.get("tree"), "intake auto-wiring must not double-bump a plan-owned effort"
         msgs = " ".join(p["message"] for p in chat.posted)
         assert "Wiring half" not in msgs
+    finally:
+        await db.dispose()
+
+
+# ── LIVE 2026-07-06: partial fix closed "done" + operator didn't know what to do with it ──
+async def test_partial_error_verdicts_close_partly_done_and_stay_open(db_url, tmp_path):
+    """A landed delivery on an error-report goal whose worker marks errors NOT RESOLVED must
+    close as PARTIAL (needs-attention, lifecycle stays open) — never an unqualified done+merge."""
+    orch, chat, harness, db = await _orch(db_url, tmp_path)
+    try:
+        await orch.projects.add("engine", "https://github.com/devonpveller/Engine")
+        bumped: dict = {}
+        orch._gh_transport = _stack_remote(bumped)
+        eid, chan, root = await orch.router.open_effort("partial-fix", project="engine")
+        goal = ("errors:\nerror CS0115 OnExiting no suitable method\n"
+                "REQUIRED VERIFICATION: reproduce, fix, re-verify.")
+        harness.output_queue = [
+            "did the work. Summary follows.\nERROR VERDICTS:\n"
+            "- StbImageSharp missing: RESOLVED (built DesktopGL)\n"
+            "- CS0115 OnExiting: NOT RESOLVED (lives in vendor/murder)",
+            "published-ack",
+        ]
+        await orch.delegate(eid, chan, root, goal, plan_steps=["work"])
+        msgs = " ".join(p["message"] for p in chat.posted)
+        assert "Partial fix" in msgs and "NOT RESOLVED" in msgs
+        assert "partly done" in msgs
+        from app.models import Effort
+        async with orch.db.session_factory() as s:
+            e = await s.get(Effort, eid)
+        assert e.lifecycle != "done", "a partial fix silently closed the operator's report"
+    finally:
+        await db.dispose()
+
+
+async def test_landed_closure_includes_local_apply_steps(db_url, tmp_path):
+    orch, chat, harness, db = await _orch(db_url, tmp_path)
+    try:
+        await orch.projects.add("engine", "https://github.com/devonpveller/Engine")
+        await orch.projects.set_check("engine", "dotnet build vendor/murder/Murder.sln")
+        bumped: dict = {}
+        orch._gh_transport = _stack_remote(bumped)
+        eid, chan, root = await orch.router.open_effort("apply-steps", project="engine")
+        await orch.delegate(eid, chan, root, "do the thing", plan_steps=["work"])
+        msgs = " ".join(p["message"] for p in chat.posted)
+        assert "Try it locally before merging" in msgs
+        assert f"git checkout agent/{eid}" in msgs
+        assert "git submodule update --init --recursive" in msgs
+        assert "dotnet build vendor/murder/Murder.sln" in msgs   # the project's own check
+    finally:
+        await db.dispose()
+
+
+async def test_reopening_closed_effort_posts_channel_pointer(db_url, tmp_path):
+    orch, chat, harness, db = await _orch(db_url, tmp_path)
+    try:
+        await orch.projects.add("engine", "https://github.com/devonpveller/Engine")
+        eid, chan, root = await orch.router.open_effort("old-thread", project="engine")
+        await orch.gate.set_lifecycle(eid, "done")
+        await orch.router.open_effort("old-thread", project="engine")   # the re-report reuse
+        msgs = " ".join(p["message"] for p in chat.posted)
+        assert "reopened" in msgs and "original thread" in msgs
+    finally:
+        await db.dispose()
+
+
+# ── LIVE 2026-07-06 iteration 7: an uncompiled fix shipped ambiguity errors — the machine
+# must be the compiler in the loop, and a vendored project only compiles via its HOST build ──
+async def test_composition_check_pass_reported_in_closure(db_url, tmp_path):
+    orch, chat, harness, db = await _orch(db_url, tmp_path)
+    try:
+        await orch.projects.add("monogame-engine", "https://github.com/devonpveller/Engine")
+        await orch.projects.set_check("monogame-engine", "dotnet build vendor/murder/Murder.sln")
+        await orch.projects.add("murder", "https://github.com/devonpveller/murder")
+        bumped: dict = {}
+        orch._gh_transport = _stack_remote(bumped)
+        eid, chan, root = await orch.router.open_effort("sig-fix", project="murder")
+        harness.output_queue = ["did the work", "published", "CHECK: PASS"]
+        await orch.delegate(eid, chan, root, "fix the signature", plan_steps=["work"])
+        msgs = " ".join(p["message"] for p in chat.posted)
+        assert "Composition check passed" in msgs and "the wiring branch builds" in msgs
+        prompts = " ".join(w["prompt"] for w in harness.wakes)
+        assert "git submodule update --init --recursive" in prompts     # the check preamble
+        assert "dotnet build vendor/murder/Murder.sln" in prompts
+        from app.models import Effort
+        async with orch.db.session_factory() as s:
+            e = await s.get(Effort, eid)
+        assert e.lifecycle == "done"
+    finally:
+        await db.dispose()
+
+
+async def test_composition_check_red_blocks_done_and_stays_open(db_url, tmp_path):
+    orch, chat, harness, db = await _orch(db_url, tmp_path)
+    try:
+        await orch.projects.add("monogame-engine", "https://github.com/devonpveller/Engine")
+        await orch.projects.set_check("monogame-engine", "dotnet build vendor/murder/Murder.sln")
+        await orch.projects.add("murder", "https://github.com/devonpveller/murder")
+        bumped: dict = {}
+        orch._gh_transport = _stack_remote(bumped)
+        eid, chan, root = await orch.router.open_effort("bad-fix", project="murder")
+        harness.output_queue = [
+            "did the work", "published",
+            "CHECK: FAIL\nerror CS0104: 'Point' is an ambiguous reference",
+        ]
+        await orch.delegate(eid, chan, root, "fix the signature", plan_steps=["work"])
+        msgs = " ".join(p["message"] for p in chat.posted)
+        assert "Composition check FAILED" in msgs and "do **NOT** merge" in msgs
+        assert "ambiguous reference" in msgs                     # the failing tail is shown
+        assert "partly done" in msgs
+        from app.models import Effort
+        async with orch.db.session_factory() as s:
+            e = await s.get(Effort, eid)
+        assert e.lifecycle != "done", "a red composition check still closed the effort"
+    finally:
+        await db.dispose()
+
+
+async def test_goal_carries_machine_check_forewarning(db_url, tmp_path):
+    orch, chat, harness, db = await _orch(db_url, tmp_path)
+    try:
+        await orch.projects.add("monogame-engine", "https://github.com/devonpveller/Engine")
+        await orch.projects.set_check("monogame-engine", "dotnet build vendor/murder/Murder.sln")
+        await orch.projects.add("murder", "https://github.com/devonpveller/murder")
+        orch._gh_transport = _stack_remote({})
+        from app.schemas import ReadinessVerdict
+        orch.models._client.queue_structured(
+            ReadinessVerdict(clear_and_safe=True, blast_radius="routine"))
+        eid, chan, root = await orch.router.open_effort("warned", project="murder")
+        await orch._intake_or_dispatch(eid, chan, root, "fix the signature in Game.cs",
+                                       reply_prefix="", mgmt_channel=chan)
+        _, goal, _ = await orch.charters.current_goal(eid)
+        # murder has no check of its own — the HOST's check is the one that applies
+        assert "MACHINE CHECK" in goal and "dotnet build vendor/murder/Murder.sln" in goal
+        assert "`monogame-engine`" in goal
+    finally:
+        await db.dispose()
+
+
+# ── LIVE 2026-07-07 (operator): "having to say re-run it while the pm knows there's an
+# issue — it should just re-run itself with a relevant evolutionary prompt" ──
+def _iterating_remote(bumped: dict):
+    """Like _stack_remote but the branch head MOVES on every read (each iteration's push),
+    so neither the stale-head gate nor the mock trips a legitimate multi-round run."""
+    import base64 as _b64
+    gitmodules = _b64.b64encode(
+        b'[submodule "vendor/murder"]\n\tpath = vendor/murder\n'
+        b'\turl = https://github.com/devonpveller/murder\n').decode()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        p = request.url.path
+        if p.endswith("/contents/.gitmodules"):
+            return httpx.Response(200, json={"content": gitmodules})
+        if p.endswith("/contents"):
+            return httpx.Response(200, json=[{"name": "vendor", "type": "dir"}])
+        if "/compare/" in p:
+            return httpx.Response(200, json={
+                "ahead_by": 1, "behind_by": 0, "commits": [],
+                "files": [{"filename": "src/Murder/Game.cs", "additions": 1, "deletions": 1}]})
+        if "/contents/src/Murder/Game.cs" in p:
+            return httpx.Response(200, json={"type": "file", "sha": "aa"})
+        if "/branches/" in p:
+            bumped["reads"] = bumped.get("reads", 0) + 1
+            return httpx.Response(200, json={"commit": {"sha": f"head{bumped['reads']:02d}" + "0" * 18}})
+        if p.endswith("/git/ref/heads/main"):
+            return httpx.Response(200, json={"object": {"sha": "eng_base"}})
+        if p.endswith("/git/commits/eng_base"):
+            return httpx.Response(200, json={"tree": {"sha": "eng_tree"}})
+        if p.endswith("/git/trees") and request.method == "POST":
+            return httpx.Response(201, json={"sha": "eng_newtree"})
+        if p.endswith("/git/commits") and request.method == "POST":
+            return httpx.Response(201, json={"sha": "eng_newcommit"})
+        if p.endswith("/git/refs") and request.method == "POST":
+            return httpx.Response(201, json={})
+        if "/git/refs/heads/" in p and request.method == "PATCH":
+            return httpx.Response(200, json={})
+        if p.endswith("/pulls") and request.method == "POST":
+            return httpx.Response(201, json={"number": 9, "html_url": "https://x/pull/9"})
+        if p.endswith("/pulls") and request.method == "GET":
+            return httpx.Response(200, json=[])
+        if p.count("/") == 3:
+            return httpx.Response(200, json={"default_branch": "main"})
+        return httpx.Response(404)
+
+    return httpx.MockTransport(handler)
+
+
+async def _drain_bg(orch):
+    import asyncio
+    for _ in range(20):
+        if not orch._bg_tasks:
+            return
+        await asyncio.gather(*list(orch._bg_tasks), return_exceptions=True)
+
+
+async def test_red_composition_check_auto_iterates_to_green(db_url, tmp_path):
+    orch, chat, harness, db = await _orch(db_url, tmp_path)
+    try:
+        await orch.projects.add("monogame-engine", "https://github.com/devonpveller/Engine")
+        await orch.projects.set_check("monogame-engine", "dotnet build vendor/murder/Murder.sln")
+        await orch.projects.add("murder", "https://github.com/devonpveller/murder")
+        orch._gh_transport = _iterating_remote({})
+        eid, chan, root = await orch.router.open_effort("iterate-me", project="murder")
+        await orch.charters.set_goal(eid, "fix the ambiguity errors", created_by="po")
+        harness.output_queue = [
+            "did the work", "published", "CHECK: FAIL\nerror CS0104: ambiguous 'Point'",
+            "fixed the usings", "published again", "CHECK: PASS",
+        ]
+        await orch.delegate(eid, chan, root, "fix the ambiguity errors", plan_steps=["work"])
+        await _drain_bg(orch)
+        msgs = " ".join(p["message"] for p in chat.posted)
+        assert "Auto-iteration 1/2" in msgs, "the PM asked the operator instead of iterating"
+        prompts = " ".join(w["prompt"] for w in harness.wakes)
+        assert "ITERATION 1/2" in prompts and "FAILING OUTPUT" in prompts
+        assert "CS0104" in prompts                     # the evolutionary prompt carries the red
+        assert "Composition check passed" in msgs      # round 2 went green
+        from app.models import Effort
+        async with orch.db.session_factory() as s:
+            e = await s.get(Effort, eid)
+        assert e.lifecycle == "done"
+    finally:
+        await db.dispose()
+
+
+async def test_auto_iteration_is_bounded(db_url, tmp_path):
+    orch, chat, harness, db = await _orch(db_url, tmp_path)
+    try:
+        await orch.projects.add("monogame-engine", "https://github.com/devonpveller/Engine")
+        await orch.projects.set_check("monogame-engine", "dotnet build vendor/murder/Murder.sln")
+        await orch.projects.add("murder", "https://github.com/devonpveller/murder")
+        orch._gh_transport = _iterating_remote({})
+        eid, chan, root = await orch.router.open_effort("hopeless", project="murder")
+        await orch.charters.set_goal(eid, "fix it", created_by="po")
+        for r in (1, 2):   # the limit was already spent on earlier rounds
+            await orch.audit.log("auto_iteration", effort_id=eid, payload={"round": r})
+        harness.output_queue = ["did work", "published", "CHECK: FAIL\nstill broken"]
+        await orch.delegate(eid, chan, root, "fix it", plan_steps=["work"])
+        await _drain_bg(orch)
+        msgs = " ".join(p["message"] for p in chat.posted)
+        assert "limit reached" in msgs                 # honest hand-back to the operator
+        assert "Auto-iteration 3" not in msgs
+        from app.models import Effort
+        async with orch.db.session_factory() as s:
+            e = await s.get(Effort, eid)
+        assert e.lifecycle != "done"
     finally:
         await db.dispose()

@@ -45,7 +45,9 @@ def _remote(state: dict):
     def handler(request: httpx.Request) -> httpx.Response:
         p = request.url.path
         if "/branches/" in p:
-            return httpx.Response(200, json={"commit": {"sha": "cafe1234beef"}})
+            handler.reads = getattr(handler, "reads", 0) + 1
+            sha = "prehead000000" if handler.reads == 1 else "cafe1234beef"
+            return httpx.Response(200, json={"commit": {"sha": sha}})
         if "/compare/" in p:
             return httpx.Response(200, json={"ahead_by": 1, "commits": [],
                 "files": [{"filename": "src/x.py", "additions": 1, "deletions": 0}]})

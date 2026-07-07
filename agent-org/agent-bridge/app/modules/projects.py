@@ -131,12 +131,15 @@ class ProjectRegistry:
     async def set_check(self, slug: str, check_cmd: str) -> bool:
         """Set the project's D2 check/test command (run on delivered PR branches before the merge
         gate; red routes back to the effort). Empty string clears it. False if the project is
-        unknown."""
+        unknown. The check is ONE bounded command line — defense at the write (live 2026-07-06:
+        a slash command with a pasted error wall after the quoted command overflowed the
+        varchar(256) column and crash-looped the event handler)."""
+        check_cmd = ((check_cmd or "").strip().splitlines() or [""])[0].strip()[:250]
         async with self.db.session_factory() as s:
             p = await s.get(Project, slug)
             if p is None:
                 return False
-            p.check_cmd = check_cmd.strip() or None
+            p.check_cmd = check_cmd or None
             await s.commit()
         await self.audit.log("project_check_set", payload={"slug": slug, "check_cmd": check_cmd[:200]})
         return True

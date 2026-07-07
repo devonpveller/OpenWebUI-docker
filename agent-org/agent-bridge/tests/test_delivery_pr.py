@@ -103,7 +103,9 @@ def _delivery_handler(merged: dict):
     def handler(request: httpx.Request) -> httpx.Response:
         p = request.url.path
         if "/branches/" in p:
-            return httpx.Response(200, json={"commit": {"sha": "abc123def4567890"}})
+            handler.reads = getattr(handler, "reads", 0) + 1
+            sha = "prehead000000" if handler.reads == 1 else "abc123def4567890"
+            return httpx.Response(200, json={"commit": {"sha": sha}})
         if "/compare/" in p:
             return httpx.Response(200, json={
                 "ahead_by": 1,
@@ -211,8 +213,13 @@ def _pr_repo_handler(state: dict, *, repos_with_branch: set[str]):
         p = request.url.path
         repo = p.split("/repos/devonpveller/")[-1].split("/")[0] if "/repos/" in p else ""
         if "/branches/" in p:
-            return (httpx.Response(200, json={"commit": {"sha": "feedbeef1234"}})
-                    if repo in repos_with_branch else httpx.Response(404, json={}))
+            if repo not in repos_with_branch:
+                return httpx.Response(404, json={})
+            reads = getattr(handler, "reads", {})
+            reads[repo] = reads.get(repo, 0) + 1
+            handler.reads = reads
+            sha = "prehead000000" if reads[repo] == 1 else "feedbeef1234"
+            return httpx.Response(200, json={"commit": {"sha": sha}})
         if "/compare/" in p:
             return httpx.Response(200, json={"ahead_by": 1})
         if p.endswith("/pulls") and request.method == "POST":
@@ -342,7 +349,9 @@ async def test_closure_names_sibling_pr_and_overlap(db_url, tmp_path):
                     "files": [{"filename": "Directory.Build.props", "additions": 11,
                                "deletions": 0}]})
             if "/branches/" in p:
-                return httpx.Response(200, json={"commit": {"sha": "feedbead12345678"}})
+                handler.reads = getattr(handler, "reads", 0) + 1
+                sha = "prehead000000" if handler.reads == 1 else "feedbead12345678"
+                return httpx.Response(200, json={"commit": {"sha": sha}})
             if "/contents/Directory.Build.props" in p:
                 return httpx.Response(200, json={"type": "file", "sha": "aa"})
             if p.endswith("/pulls") and request.method == "POST":

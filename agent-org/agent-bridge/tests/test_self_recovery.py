@@ -230,7 +230,10 @@ def _engine_hosts_murder():
         if "/contents/src/Game.cs" in p:
             return httpx.Response(200, json={"type": "file", "sha": "aa"})
         if "/branches/" in p:
-            return httpx.Response(200, json={"commit": {"sha": "feedbead12345678"}})
+            state["branch_reads"] = state.get("branch_reads", 0) + 1
+            sha = ("prehead0000000000" if state["branch_reads"] == 1
+                   else "feedbead12345678")
+            return httpx.Response(200, json={"commit": {"sha": sha}})
         if p.endswith("/pulls") and request.method == "POST":
             return httpx.Response(201, json={"number": 5, "html_url": "https://x/pull/5"})
         if p.endswith("/pulls") and request.method == "GET":
@@ -284,5 +287,58 @@ async def test_standalone_project_gets_no_composition_noise(db_url, tmp_path):
                                        reply_prefix="", mgmt_channel=chan)
         _, goal_text, _ = await orch.charters.current_goal(eid)
         assert "COMPOSITION CONTEXT" not in (goal_text or "")
+    finally:
+        await db.dispose()
+
+
+# ── LIVE 2026-07-06: slash-check + pasted error wall crash-looped; operator wants NL only ──
+async def test_set_check_bounds_a_pasted_wall(db_url):
+    """The check is ONE bounded command line — a pasted wall must never overflow the column
+    (varchar 256) and crash-loop the event handler."""
+    orch, chat, harness, db = await _orch(db_url)
+    try:
+        await orch.projects.add("engine", "https://github.com/devonpveller/Engine")
+        wall = "dotnet build X.sln\n" + ("'Point' is an ambiguous reference\n" * 40)
+        assert await orch.projects.set_check("engine", wall)
+        p = await orch.projects.get("engine")
+        assert p["check_cmd"] == "dotnet build X.sln"     # first line only, bounded
+        assert await orch.projects.set_check("engine", "x" * 999)
+        p = await orch.projects.get("engine")
+        assert len(p["check_cmd"]) <= 250
+    finally:
+        await db.dispose()
+
+
+def test_extract_check_cmd_takes_quoted_span_only():
+    from app.orchestrator import Orchestrator
+    wall = '"dotnet build vendor/murder/Murder.sln" \n\n\'Point\' is ambiguous\nmore errors'
+    assert Orchestrator._extract_check_cmd(wall) == "dotnet build vendor/murder/Murder.sln"
+    assert Orchestrator._extract_check_cmd("dotnet build A.sln\njunk") == "dotnet build A.sln"
+
+
+async def test_nl_check_set_and_clear(db_url):
+    """Plain-language check management (operator: 'i'd really prefer NLP') — no slash, no
+    git-shaped vocabulary required of the operator."""
+    orch, chat, harness, db = await _orch(db_url)
+    try:
+        await orch.projects.add("engine", "https://github.com/devonpveller/Engine")
+        orch.models._client.queue_structured(OperatorIntent(
+            kind="chitchat", reply="Setting the check.", project="engine",
+            check_cmd="dotnet build vendor/murder/Murder.sln"))
+        mgmt = await orch.mgmt_channel_id()
+        await orch.nl_intake("before merging engine changes, make sure Murder.sln builds",
+                             mgmt, thread_id="t")
+        p = await orch.projects.get("engine")
+        assert p["check_cmd"] == "dotnet build vendor/murder/Murder.sln"
+        msgs = " ".join(m["message"] for m in chat.posted)
+        assert "red-gates" in msgs
+        # clearing, also in plain words (check_cmd="" means CLEAR)
+        orch.models._client.queue_structured(OperatorIntent(
+            kind="chitchat", reply="Clearing.", project="engine", check_cmd=""))
+        await orch.nl_intake("remove the check on engine", mgmt, thread_id="t")
+        p = await orch.projects.get("engine")
+        assert not p["check_cmd"]
+        msgs = " ".join(m["message"] for m in chat.posted)
+        assert "Cleared the check" in msgs
     finally:
         await db.dispose()

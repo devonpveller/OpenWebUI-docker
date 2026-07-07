@@ -288,3 +288,133 @@ async def test_reengage_plural_still_dispatches_all_idle(db_url):
         assert {e1, e2} <= woken, f"fan-out lost efforts: woke only {woken}"
     finally:
         await db.dispose()
+
+
+# ── LIVE 2026-07-06: "re-run it" (the escalation's own invited reply) re-fanned the backlog ──
+async def test_rerun_it_in_effort_thread_resumes_that_effort_only(db_url):
+    """The undelivered escalation says "Reply to re-run it" — a reply in that effort's #mgmt
+    conversation must resume THAT effort, never fan out over every stale idle effort."""
+    orch, chat, harness, db = await _orch(db_url)
+    try:
+        stale, _c1, _r1 = await _idle_effort(orch, "stale-june-leftover")
+        target, _c2, _r2 = await _idle_effort(orch, "escalated-fix")
+        orch._effort_mgmt_thread[target] = "mgmt-thread-42"     # the escalation's conversation
+        orch.models._client.queue_structured(OperatorIntent(
+            kind="reengage", reply="Re-running it."))
+        mgmt = await orch.mgmt_channel_id()
+        await orch.nl_intake("re-run it", mgmt, thread_id="mgmt-thread-42")
+        await _drain(orch)
+        woken = {w["session_id"] for w in harness.wakes}
+        assert target in woken, "the escalated effort was not resumed"
+        assert stale not in woken, "the stale backlog was fanned out AGAIN"
+        msgs = " ".join(p["message"] for p in chat.posted)
+        assert "this conversation is about" in msgs
+    finally:
+        await db.dispose()
+
+
+async def test_bare_rerun_it_outside_thread_resumes_most_recent(db_url):
+    orch, chat, harness, db = await _orch(db_url)
+    try:
+        old, _c1, _r1 = await _idle_effort(orch, "old-one")
+        new, _c2, _r2 = await _idle_effort(orch, "fresh-one")
+        from app.models import Effort
+        async with orch.db.session_factory() as s:
+            (await s.get(Effort, old)).updated_at = "2026-07-01T00:00:00+00:00"
+            (await s.get(Effort, new)).updated_at = "2026-07-06T00:00:00+00:00"
+            await s.commit()
+        orch.models._client.queue_structured(OperatorIntent(
+            kind="reengage", reply="On it."))
+        mgmt = await orch.mgmt_channel_id()
+        await orch.nl_intake("re-run it", mgmt, thread_id="unmapped-thread")
+        await _drain(orch)
+        woken = {w["session_id"] for w in harness.wakes}
+        assert new in woken and old not in woken
+    finally:
+        await db.dispose()
+
+
+# ── LIVE 2026-07-06: "re-run effort-X" → "Nothing to re-engage" (lifecycle was still done) ──
+async def test_named_rerun_reopens_a_done_effort(db_url):
+    orch, chat, harness, db = await _orch(db_url)
+    try:
+        eid, _c, _r = await _idle_effort(orch, "delivered-once")
+        await orch.gate.set_lifecycle(eid, "done")            # a prior delivery closed it
+        orch.models._client.queue_structured(OperatorIntent(
+            kind="reengage", reply="Re-running it.", effort_id=eid))
+        mgmt = await orch.mgmt_channel_id()
+        await orch.nl_intake(f"re-run {eid}", mgmt, thread_id="t")
+        await _drain(orch)
+        woken = {w["session_id"].split("~")[0] for w in harness.wakes}
+        assert eid in woken, "the named done effort was not reopened + dispatched"
+        from app.models import Effort
+        async with orch.db.session_factory() as s:
+            e = await s.get(Effort, eid)
+        assert e.lifecycle in ("open", "done")   # reopened for the run (done again if it finished)
+        msgs = " ".join(p["message"] for p in chat.posted)
+        assert "Nothing to re-engage" not in msgs
+    finally:
+        await db.dispose()
+
+
+async def test_error_report_reuse_reopens_closed_effort(db_url):
+    orch, chat, harness, db = await _orch(db_url)
+    try:
+        eid, _c, _r = await _idle_effort(orch, "fix-thing-errors")
+        await orch.gate.set_lifecycle(eid, "done")
+        # a re-reported error reuses the slug → open_effort must flip lifecycle back to open
+        eid2, _chan, _root = await orch.router.open_effort("fix-thing-errors")
+        assert eid2 == eid
+        from app.models import Effort
+        async with orch.db.session_factory() as s:
+            e = await s.get(Effort, eid)
+        assert e.lifecycle == "open"
+    finally:
+        await db.dispose()
+
+
+async def test_named_rerun_survives_model_dropping_the_effort_id(db_url):
+    """LIVE 2026-07-06 (second miss): the model classified "re-run effort-X" as reengage but
+    returned effort_id=None → "Nothing to re-engage" with an EMPTY open set. An effort id in the
+    operator's own words must resolve deterministically."""
+    orch, chat, harness, db = await _orch(db_url)
+    try:
+        eid, _c, _r = await _idle_effort(orch, "named-in-words")
+        await orch.gate.set_lifecycle(eid, "done")            # closed AND the open set is empty
+        orch.models._client.queue_structured(OperatorIntent(
+            kind="reengage", reply="Re-running."))            # model DROPPED the id
+        mgmt = await orch.mgmt_channel_id()
+        await orch.nl_intake(f"re-run {eid}", mgmt, thread_id="t")
+        await _drain(orch)
+        woken = {w["session_id"].split("~")[0] for w in harness.wakes}
+        assert eid in woken, "the literally-named effort was not resolved from the message"
+        msgs = " ".join(p["message"] for p in chat.posted)
+        assert "Nothing to re-engage" not in msgs
+    finally:
+        await db.dispose()
+
+
+# ── LIVE 2026-07-06: "frozen (a concern or the kill switch)" gave the operator no context ──
+async def test_kill_refusal_names_the_switch_and_release_resumes_automatically(db_url):
+    orch, chat, harness, db = await _orch(db_url)
+    try:
+        eid, chan, root = await _idle_effort(orch, "blocked-by-stop")
+        await orch.gate.kill_switch(on=True, actor="human")     # the operator's "stop"
+        await orch.delegate(eid, chan, root, "do the thing", plan_steps=["work"])
+        msgs = " ".join(p["message"] for p in chat.posted)
+        assert "kill switch" in msgs.lower() and "resume" in msgs, \
+            "the refusal must NAME the blocker and the release word"
+        assert "a concern or the kill switch" not in msgs, "still the ambiguous riddle"
+        assert len(harness.wakes) == 0
+        # the release re-dispatches automatically — no re-asking
+        orch.models._client.queue_structured(OperatorIntent(
+            kind="unkill", reply="Releasing."))
+        mgmt = await orch.mgmt_channel_id()
+        await orch.nl_intake("resume", mgmt, thread_id="t")
+        await _drain(orch)
+        woken = {w["session_id"].split("~")[0] for w in harness.wakes}
+        assert eid in woken, "the freeze-blocked effort did not auto-resume on release"
+        msgs = " ".join(p["message"] for p in chat.posted)
+        assert "Re-dispatching" in msgs
+    finally:
+        await db.dispose()

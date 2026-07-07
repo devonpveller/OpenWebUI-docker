@@ -461,6 +461,16 @@ class LittleCoderDaemon:
             self.current_focus = None
             decision = decide_switch(requested, None, self.busy)   # → CLONE (fresh)
 
+        # A NOOP is only valid when the workspace actually HOLDS a repo — the in-memory focus
+        # can outlive the tree (live 2026-07-07: focus said the repo, the volume was empty →
+        # the worker was dispatched into a void it cannot escape, since the git-proxy rightly
+        # blocks it from cloning for itself). An empty workspace means the focus record lies:
+        # drop it and clone.
+        if decision.action is SwitchAction.NOOP and not self.busy \
+                and not await asyncio.to_thread(self.workspace.is_focused):
+            self.current_focus = None
+            decision = decide_switch(requested, None, self.busy)   # → CLONE (workspace vanished)
+
         if decision.action is SwitchAction.NOOP:
             # Already focused — the workspace was NOT wiped, so `origin` is intact… but the token
             # EMBEDDED in its URL at the original clone is SHORT-LIVED (a GitHub App installation

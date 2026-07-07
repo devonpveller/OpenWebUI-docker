@@ -25,6 +25,7 @@ ROOT = Path(__file__).resolve().parents[1]
 # ── read_branch_delivery: the checkable signal (branch exists + ahead of base) ──
 def _remote(*, branch_status=200, ahead=1, default_branch="main"):
     """A MockTransport answering repo-meta / branch / compare for one repo."""
+    state: dict = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
         p = request.url.path
@@ -32,8 +33,12 @@ def _remote(*, branch_status=200, ahead=1, default_branch="main"):
             return httpx.Response(200, json={"ahead_by": ahead, "behind_by": 0})
         if "/branches/" in p:
             if branch_status == 200:
+                # the head MOVES after the pre-dispatch read (the worker's push) — a constant
+                # sha would (correctly) trip the stale-head gate
+                state["reads"] = state.get("reads", 0) + 1
+                sha = "prehead0000000000" if state["reads"] == 1 else "abcdef1234567890"
                 return httpx.Response(200, json={"name": "agent/effort-wire",
-                                                 "commit": {"sha": "abcdef1234567890"}})
+                                                 "commit": {"sha": sha}})
             return httpx.Response(branch_status, json={"message": "Not Found"})
         if p.count("/") == 3:  # /repos/{owner}/{repo}
             return httpx.Response(200, json={"default_branch": default_branch})
@@ -48,7 +53,7 @@ async def test_read_branch_delivery_landed():
         "https://github.com/devonpveller/Docker-Game", "agent/effort-wire",
         transport=_remote(branch_status=200, ahead=3))
     assert d.verifiable and d.exists and d.ahead == 3 and d.landed
-    assert d.head_sha == "abcdef1234567890"    # FULL sha (needed to bump a submodule pointer)
+    assert d.head_sha == "prehead0000000000"   # FULL sha of the FIRST read (moving-head mock)
 
 
 async def test_read_branch_delivery_missing_branch():
@@ -155,7 +160,7 @@ async def test_nondelivery_then_reengage_lands_finishes_done(db_url, tmp_path):
                 return httpx.Response(200, json={"ahead_by": 1, "behind_by": 0})
             if "/branches/" in p:
                 state["n"] += 1
-                if state["n"] == 1:
+                if state["n"] <= 2:   # pre-dispatch read + first verify: branch absent
                     return httpx.Response(404, json={"message": "Not Found"})
                 return httpx.Response(200, json={"commit": {"sha": "deadbeefcafe"}})
             if p.count("/") == 3:

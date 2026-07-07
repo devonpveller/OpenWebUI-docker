@@ -43,8 +43,10 @@ async def _orch(db_url, tmp_path):
 
 def _remote(*, heal_after: int | None = None):
     """Branch exists, ahead=2. Compare reports files=[] (empty diff) until `heal_after` compare
-    calls have happened; then a real file appears (the re-engaged worker published the fix)."""
-    state = {"compares": 0}
+    calls have happened; then a real file appears (the re-engaged worker published the fix).
+    The branch HEAD moves after the first read (the worker's push) so the stale-head gate —
+    which fires first — correctly sees a fresh delivery."""
+    state = {"compares": 0, "branch_reads": 0}
 
     def handler(request: httpx.Request) -> httpx.Response:
         p = request.url.path
@@ -59,7 +61,10 @@ def _remote(*, heal_after: int | None = None):
         if "/contents/src/Game.cs" in p:
             return httpx.Response(200, json={"type": "file", "sha": "aa"})
         if "/branches/" in p:
-            return httpx.Response(200, json={"commit": {"sha": "feedbead12345678"}})
+            state["branch_reads"] += 1
+            sha = ("pre_dispatch_head_000000" if state["branch_reads"] == 1
+                   else "feedbead12345678")
+            return httpx.Response(200, json={"commit": {"sha": sha}})
         if p.endswith("/pulls") and request.method == "POST":
             return httpx.Response(201, json={
                 "number": 9, "html_url": "https://github.com/devonpveller/Engine/pull/9"})
@@ -84,7 +89,7 @@ async def test_empty_diff_reengaged_worker_publishes_real_fix(db_url, tmp_path):
     try:
         await orch.projects.add("engine", "https://github.com/devonpveller/Engine")
         eid, chan, root = await orch.router.open_effort("fix", project="engine")
-        orch._gh_transport = _remote(heal_after=1)      # first compare empty, then the fix lands
+        orch._gh_transport = _remote(heal_after=2)      # pre-dispatch + first verify empty, then the fix lands
         await orch.delegate(eid, chan, root, "fix the override", plan_steps=["work"])
         prompts = " ".join(w["prompt"] for w in harness.wakes)
         assert "ZERO file changes" in prompts, "the worker was never told its delivery is empty"
@@ -124,6 +129,70 @@ async def test_empty_diff_with_no_changes_protocol_closes_noop(db_url, tmp_path)
         msgs = " ".join(p["message"] for p in chat.posted)
         assert "finished (**done**)" in msgs            # legitimate no-op completion
         assert "PR opened for review" not in msgs       # nothing to promote
+        assert await _lifecycle(orch, eid) == "done"
+    finally:
+        await db.dispose()
+
+
+# ── LIVE 2026-07-07: an empty-workspace run "delivered" yesterday's stale branch ──
+def _stale_branch(*, heal_after: int | None = None):
+    """The branch pre-exists at a FIXED head; after `heal_after` branch reads the head changes
+    (the re-engaged worker pushed real commits)."""
+    state = {"reads": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        p = request.url.path
+        if "/branches/" in p:
+            state["reads"] += 1
+            healed = heal_after is not None and state["reads"] > heal_after
+            sha = "new_commit_after_reengage_00" if healed else "stale_head_from_yesterday_0"
+            return httpx.Response(200, json={"commit": {"sha": sha}})
+        if "/compare/" in p:
+            return httpx.Response(200, json={
+                "ahead_by": 2, "behind_by": 0, "commits": [],
+                "files": [{"filename": "src/x.cs", "additions": 1, "deletions": 1}]})
+        if "/contents/src/x.cs" in p:
+            return httpx.Response(200, json={"type": "file", "sha": "aa"})
+        if p.endswith("/pulls") and request.method == "POST":
+            return httpx.Response(201, json={"number": 9, "html_url": "https://x/pull/9"})
+        if p.endswith("/pulls") and request.method == "GET":
+            return httpx.Response(200, json=[])
+        if p.count("/") == 3:
+            return httpx.Response(200, json={"default_branch": "main"})
+        return httpx.Response(404)
+
+    return httpx.MockTransport(handler)
+
+
+async def test_stale_head_never_counts_as_delivery(db_url, tmp_path):
+    """Branch pre-exists, the run pushes nothing → the head is unchanged → re-engage with the
+    plain truth; still stale → escalate, no PR, not done."""
+    orch, chat, harness, db = await _orch(db_url, tmp_path)
+    try:
+        await orch.projects.add("engine", "https://github.com/devonpveller/Engine")
+        eid, chan, root = await orch.router.open_effort("resurrect", project="engine")
+        orch._gh_transport = _stale_branch(heal_after=None)      # head never moves
+        await orch.delegate(eid, chan, root, "fix the thing", plan_steps=["work"])
+        prompts = " ".join(w["prompt"] for w in harness.wakes)
+        assert "NOTHING NEW WAS DELIVERED" in prompts
+        msgs = " ".join(p["message"] for p in chat.posted)
+        assert "no new commits" in msgs and "PR opened for review" not in msgs
+        assert await _lifecycle(orch, eid) != "done"
+    finally:
+        await db.dispose()
+
+
+async def test_stale_head_healed_by_reengage_proceeds(db_url, tmp_path):
+    orch, chat, harness, db = await _orch(db_url, tmp_path)
+    try:
+        await orch.projects.add("engine", "https://github.com/devonpveller/Engine")
+        eid, chan, root = await orch.router.open_effort("resurrect2", project="engine")
+        # pre-dispatch read (1) + post-publish verify (2) see the stale head; after the
+        # re-engage the worker's push moves it
+        orch._gh_transport = _stale_branch(heal_after=2)
+        await orch.delegate(eid, chan, root, "fix the thing", plan_steps=["work"])
+        msgs = " ".join(p["message"] for p in chat.posted)
+        assert "finished (**done**)" in msgs and "PR opened for review" in msgs
         assert await _lifecycle(orch, eid) == "done"
     finally:
         await db.dispose()

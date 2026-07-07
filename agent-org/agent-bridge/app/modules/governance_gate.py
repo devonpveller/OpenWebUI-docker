@@ -183,6 +183,14 @@ class GovernanceGate:
                 return False
             return e.state == GATE_ACTIVE
 
+    async def is_killed(self) -> bool:
+        """Whether the fleet-wide kill switch is currently engaged — so refusal messages can say
+        WHICH freeze blocks a dispatch instead of 'a concern or the kill switch' (live 2026-07-06:
+        the operator couldn't act on the ambiguous message)."""
+        async with self.db.session_factory() as s:
+            gs = await s.get(GlobalState, 1)
+            return bool(gs is not None and gs.kill_switch)
+
     async def is_frozen(self, effort_id: str) -> bool:
         return not await self.can_dispatch(effort_id)
 

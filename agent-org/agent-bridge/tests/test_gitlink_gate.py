@@ -64,7 +64,10 @@ def _engine_remote(*, gitlink_sha=BAD_SHA, sub_commit_status=None, heal_after=No
                           {"filename": "src/game.cs", "status": "modified"}],
             })
         if "/branches/" in p:
-            return httpx.Response(200, json={"commit": {"sha": "feedbead12345678"}})
+            state["branch_reads"] = state.get("branch_reads", 0) + 1
+            sha = ("prehead0000000000" if state["branch_reads"] == 1
+                   else "feedbead12345678")   # the head moves after the pre-dispatch read
+            return httpx.Response(200, json={"commit": {"sha": sha}})
         if p.count("/") == 3:   # /repos/{owner}/{repo}
             return httpx.Response(200, json={"default_branch": "main"})
         return httpx.Response(404)

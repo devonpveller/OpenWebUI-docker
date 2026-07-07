@@ -150,6 +150,30 @@ class Router:
         async with self.db.session_factory() as s:
             existing = await s.get(Effort, effort_id)
             if existing is not None and existing.root_post_id:
+                if existing.lifecycle != "open":
+                    # Re-opening a closed effort with NEW work (a re-reported error reuses the
+                    # slug): flip it back to `open`, else it stays invisible to re-engage/status
+                    # forever (live 2026-07-06: "re-run <effort>" → "Nothing to re-engage"
+                    # because the effort's lifecycle was still `done` from an earlier delivery).
+                    existing.lifecycle = "open"
+                    await s.commit()
+                    await self.audit.log("effort_reopened", effort_id=effort_id,
+                                         payload={"was": "done-or-aborted"})
+                    # RE-SURFACE the thread: activity resumes inside a card posted hours/days ago,
+                    # which the operator can't find in the channel view (live 2026-07-06: "I don't
+                    # see the effort in the project channel"). A fresh top-level pointer fixes it.
+                    try:
+                        link = ""
+                        if hasattr(self.chat, "permalink"):
+                            link = self.chat.permalink(existing.root_post_id) or ""
+                        await self.chat.post(
+                            existing.channel_id or channel_id,
+                            f"🔁 **Effort `{name}` reopened** — new work continues in its "
+                            f"original thread" + (f": {link}" if link else
+                                                  " (its effort card, earlier in this channel)."),
+                        )
+                    except Exception as exc:  # noqa: BLE001 — visibility is garnish, never a blocker
+                        log.debug("reopen pointer post failed for %s: %s", effort_id, exc)
                 return effort_id, existing.channel_id or channel_id, existing.root_post_id
         card = await self.chat.post(channel_id, self._effort_card(name, goal, "active"))
         root_post_id = card["id"]
