@@ -270,6 +270,49 @@ async def read_broken_gitlinks(
     return broken
 
 
+async def read_added_lines(
+    github: GitHubApp, repo_url: str, branch: str, *, base_branch: str = "",
+    api_base: str = "https://api.github.com", transport: httpx.BaseTransport | None = None,
+) -> list[str]:
+    """The ADDED lines (patch `+` lines, not `+++` headers) across `base...branch` — so a
+    standing-intent gate can check whether a delivery RE-INTRODUCES a forbidden term at the diff
+    level (deterministic, general — no repo-specific logic). Best-effort + bounded; [] on any
+    failure (fail-open — an unreadable diff never blocks)."""
+    try:
+        owner, repo = parse_owner_repo(repo_url)
+    except ValueError:
+        return []
+    if owner.lower() != (github.owner or "").lower():
+        return []
+    try:
+        token = await github.installation_token()
+    except GitHubAppError:
+        return []
+    base = api_base.rstrip("/")
+    h = _headers(token)
+    added: list[str] = []
+    try:
+        async with httpx.AsyncClient(timeout=15.0, transport=transport) as c:
+            if not base_branch:
+                meta = await c.get(f"{base}/repos/{owner}/{repo}", headers=h)
+                if meta.status_code >= 400:
+                    return []
+                base_branch = meta.json().get("default_branch") or "main"
+            cmp = await c.get(f"{base}/repos/{owner}/{repo}/compare/{base_branch}...{branch}",
+                              headers=h)
+            if cmp.status_code != 200:
+                return []
+            for f in (cmp.json().get("files") or [])[:100]:
+                for ln in (f.get("patch") or "").splitlines():
+                    if ln.startswith("+") and not ln.startswith("+++"):
+                        added.append(ln[1:])
+                        if len(added) >= 4000:
+                            return added
+    except (httpx.HTTPError, ValueError):
+        return added
+    return added
+
+
 async def read_sibling_agent_prs(
     github: GitHubApp, repo_url: str, own_branch: str, *,
     api_base: str = "https://api.github.com",

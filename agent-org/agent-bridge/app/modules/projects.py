@@ -80,6 +80,7 @@ def _row(p: Project) -> dict:
         "channel_id": p.channel_id, "created_by": p.created_by, "active": p.active,
         "token_env": p.token_env, "upstream_url": p.upstream_url,
         "check_cmd": getattr(p, "check_cmd", None),
+        "standing_intent": getattr(p, "standing_intent", None),
     }
 
 
@@ -142,6 +143,21 @@ class ProjectRegistry:
             p.check_cmd = check_cmd or None
             await s.commit()
         await self.audit.log("project_check_set", payload={"slug": slug, "check_cmd": check_cmd[:200]})
+        return True
+
+    async def set_standing_intent(self, slug: str, text: str) -> bool:
+        """Set/clear the project's STANDING INTENT — a durable architectural invariant injected
+        into every effort goal and enforced at delivery. Generic for ANY project (the anti-drift
+        rule the org must never trade away for a green-looking build). Empty clears it; bounded."""
+        text = " ".join((text or "").split())[:1000]
+        async with self.db.session_factory() as s:
+            p = await s.get(Project, slug)
+            if p is None:
+                return False
+            p.standing_intent = text or None
+            await s.commit()
+        await self.audit.log("project_standing_intent_set",
+                             payload={"slug": slug, "intent": text[:300]})
         return True
 
     async def get(self, slug: str) -> dict | None:

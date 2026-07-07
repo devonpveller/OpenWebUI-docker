@@ -59,7 +59,7 @@ class WorkerHarness(Protocol):
     async def set_project(
         self, base_url: str, repo: str, *, token: str | None = None,
         upstream: str | None = None, upstream_token: str | None = None,
-        fresh: bool = False,
+        fresh: bool = False, recurse_submodules: bool = False,
     ) -> tuple[bool, str, bool | None]:
         """Focus the worker on a repo (little-coder clones it, bypassing the git-proxy). `token` is
         an optional per-project deploy token (multi-PAT). `upstream` (+ optional read-scoped
@@ -141,18 +141,21 @@ class LittleCoderHarness:
     async def set_project(
         self, base_url: str, repo: str, *, token: str | None = None,
         upstream: str | None = None, upstream_token: str | None = None,
-        fresh: bool = False,
+        fresh: bool = False, recurse_submodules: bool = False,
     ) -> tuple[bool, str, bool | None]:
         # little-coder clones via the REAL git binary (bypasses the git-proxy) — the
         # supported "operator action" workspace-setup path (§12.3). Clone can be slow. A per-request
         # `token` (if given) overrides the pool's global LC_DEPLOY_TOKEN for this project. `upstream`
         # bakes a fork's read-only parent remote AFTER the clone (re-applied every focus, since the
-        # workspace is wiped on switch).
+        # workspace is wiped on switch). `recurse_submodules`: populate the full nested tree — a
+        # composition build needs it and the worker can't init it (proxy denies `submodule`).
         body: dict[str, Any] = {"repo": repo, "actor": "agent-bridge"}
         if token:
             body["token"] = token
         if fresh:
             body["fresh"] = True
+        if recurse_submodules:
+            body["recurse_submodules"] = True
         if upstream:
             body["upstream"] = upstream
             if upstream_token:
@@ -262,11 +265,12 @@ class FakeHarness:
     async def set_project(
         self, base_url: str, repo: str, *, token: str | None = None,
         upstream: str | None = None, upstream_token: str | None = None,
-        fresh: bool = False,
+        fresh: bool = False, recurse_submodules: bool = False,
     ) -> tuple[bool, str, bool | None]:
         if self.set_project_fails:  # simulate a clone failure (private/missing repo)
             return False, self.set_project_fails, None
-        self.focus_calls.append({"base_url": base_url, "repo": repo, "token": token})
+        self.focus_calls.append({"base_url": base_url, "repo": repo, "token": token,
+                                 "fresh": fresh, "recurse_submodules": recurse_submodules})
         self.projects[base_url] = repo
         if token:
             self.tokens[base_url] = token

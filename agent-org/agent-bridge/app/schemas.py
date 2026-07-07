@@ -172,6 +172,11 @@ class OperatorIntent(BaseModel):
     # vendor/murder/Murder.sln builds" → the exact shell command here + `project`. Empty string
     # ("" ) CLEARS the check; None means "not mentioned".
     check_cmd: str | None = None
+    # The project's STANDING INTENT — a durable architectural invariant the operator states once
+    # ("murder must build from the vendored MonoGame source; never use the `Murder.FNA` NuGet
+    # package"). Set with `project`. Injected into every effort goal + enforced at delivery so the
+    # org can't drift/revert the architecture. Empty ("") CLEARS it; None means "not mentioned".
+    standing_intent: str | None = None
     steering: str | None = None           # the clarification / steering / direction text
     decision: Literal["approve", "modify", "abort"] | None = None  # interpreted, NOT auto-run
     # For reengage/archive/status bulk actions: a substring matching effort ids (e.g. "calculator",

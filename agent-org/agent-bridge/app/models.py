@@ -332,6 +332,13 @@ class Project(Base):
     # `npm test`). Run on a delivered PR branch BEFORE the merge gate is presented; red routes back
     # to the owning effort. Empty ⇒ D2 is skipped with an honest note (never silently pretended).
     check_cmd: Mapped[str | None] = mapped_column(String(256))
+    # STANDING INTENT (anti-drift): a durable architectural invariant for this project, in plain
+    # language, injected into EVERY effort goal and enforced at delivery — e.g. "murder builds from
+    # the vendored MonoGame source; never use the `Murder.FNA` NuGet package". Terms the operator
+    # marks as forbidden (a `backticked` token after never/not/avoid) are checked against each
+    # delivery's diff: a delivery that RE-INTRODUCES a forbidden term is rejected, so the org can't
+    # manufacture a green build by reverting the architecture (live 2026-07-07: it did exactly that).
+    standing_intent: Mapped[str | None] = mapped_column(String(1024))
     channel_id: Mapped[str | None] = mapped_column(String(64))
     created_by: Mapped[str] = mapped_column(String(64), default="operator")
     active: Mapped[bool] = mapped_column(Boolean, default=True)

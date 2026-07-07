@@ -124,7 +124,8 @@ class WorkspaceManager:
             return False
         return name in {ln.strip() for ln in res.stdout.splitlines() if ln.strip()}
 
-    def clone(self, repo: NormalizedRepo, deploy_token: str | None = None) -> ExecResult:
+    def clone(self, repo: NormalizedRepo, deploy_token: str | None = None,
+              recurse: bool = False) -> ExecResult:
         """Clone `repo` into the (empty) workspace. With `deploy_token` the
         clone uses an HTTPS token URL — least-privilege, injected per switch,
         never the self-improvement PAT (design §10.3).
@@ -135,6 +136,14 @@ class WorkspaceManager:
         `repo.branch` is set (via the `#<branch>` link fragment), git's
         `-b <branch>` checks it out as HEAD; otherwise the remote's default
         branch is used.
+
+        `recurse`: populate the FULL nested submodule tree (`--init --recursive`)
+        via the privileged real-git path — a COMPOSITION BUILD needs the deep
+        tree (engine → vendored fork → the fork's OWN submodules), which the
+        worker cannot init itself (the git-proxy hard-denies `submodule`) and
+        which a direct-only init misses. Off by default (recursing forks' deep
+        deps is slow / can hit private repos); the bridge opts in for a
+        composition check.
 
         The returned ExecResult.command still contains the token; the caller
         MUST journal a redacted form, never the raw command."""
@@ -153,12 +162,13 @@ class WorkspaceManager:
         # submodules (non-fatal) — a composition repo's worker must SEE the vendored source to
         # reference it, and the worker itself can't init them (the git-proxy hard-denies `submodule`).
         # `|| true`: a private/unreachable submodule must not fail the whole focus.
+        recurse_flag = " --recursive" if recurse else ""
         cmd = (
             f"umask 000; {g} clone{branch_flag} {shlex.quote(url)} {ws} && "
-            # Populate DIRECT submodules only (not --recursive): the worker needs to SEE the vendored
-            # source, but recursing into the forks' OWN submodules is slow + can fail on their private
-            # deps. Non-fatal (`|| true`) so a focus never breaks on a submodule fetch.
-            f"(cd {ws} && {g} submodule update --init 2>/dev/null || true)"
+            # Default: DIRECT submodules only. `recurse`: the full nested tree, which a composition
+            # build requires — the operator-privileged clone is the ONLY place `submodule` can run
+            # (the proxy denies it to the worker), so recursive init MUST happen here or never.
+            f"(cd {ws} && {g} submodule update --init{recurse_flag} 2>/dev/null || true)"
         )
         return self.ot.execute(cmd, cwd="/", timeout=self.clone_timeout)
 

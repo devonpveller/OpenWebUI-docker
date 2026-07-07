@@ -112,6 +112,11 @@ class ProjectRequest(BaseModel):
     # stale, unrelated history that fails to push. Operator-plane composition sets this so it always
     # starts from the true remote state.
     fresh: bool = False
+    # Populate the FULL nested submodule tree on clone (`--init --recursive`). A composition BUILD
+    # needs the deep tree (engine → vendored fork → the fork's own submodules); the worker can't
+    # init it (the proxy denies `submodule`), so the privileged clone must. The bridge sets this
+    # for a composition check. Off by default (recursing deep/private deps is slow).
+    recurse_submodules: bool = False
 
 
 class SubmoduleRequest(BaseModel):
@@ -455,8 +460,12 @@ class LittleCoderDaemon:
         decision = decide_switch(requested, self.current_focus, self.busy)
 
         # `fresh`: the cached workspace may be STALE/unrelated (repo deleted+recreated at the same
-        # URL). Force a clean re-clone instead of trusting the NOOP. Only when no task is in flight.
-        if req.fresh and decision.action is SwitchAction.NOOP and not self.busy:
+        # URL). Force a clean re-clone instead of trusting the NOOP. `recurse_submodules` (a
+        # composition check) ALSO forces a clone — it needs the exact branch checked out with the
+        # full nested tree, which a cached workspace (default branch, direct-only submodules) lacks.
+        # Only when no task is in flight.
+        if (req.fresh or req.recurse_submodules) and decision.action is SwitchAction.NOOP \
+                and not self.busy:
             await asyncio.to_thread(self.workspace.wipe)
             self.current_focus = None
             decision = decide_switch(requested, None, self.busy)   # → CLONE (fresh)
@@ -513,7 +522,8 @@ class LittleCoderDaemon:
         # Per-request token (from the caller) overrides the global LC_DEPLOY_TOKEN, so different
         # projects can use different PATs (personal vs org). Falls back to the ambient token.
         token = req.token or os.environ.get("LC_DEPLOY_TOKEN") or None
-        result = await asyncio.to_thread(self.workspace.clone, requested, token)
+        result = await asyncio.to_thread(
+            self.workspace.clone, requested, token, req.recurse_submodules)
         if not result.ok:
             # Surface BOTH streams (git writes some fatals to stdout) so a clone failure is never a
             # blank "(exit 128):"; redacted (a clone-auth error can echo the token-bearing URL).

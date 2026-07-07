@@ -77,6 +77,8 @@ class Database:
         ("worker_instances", "quarantined_until", "VARCHAR(32)"),
         # D2 check/test command per project (run on PR branches before the merge gate).
         ("projects", "check_cmd", "VARCHAR(256)"),
+        # Standing architectural intent (anti-drift) — injected into goals + enforced at delivery.
+        ("projects", "standing_intent", "VARCHAR(1024)"),
     ]
 
     async def create_all(self) -> None:

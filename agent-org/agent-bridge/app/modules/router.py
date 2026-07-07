@@ -277,12 +277,15 @@ class Router:
         repo_token: str | None = None,
         upstream: str | None = None,
         upstream_token: str | None = None,
+        recurse_submodules: bool = False,
     ) -> WorkResult | None:
         """Wake a worker on an effort and post its reply in-thread. Returns None if the
         effort is frozen (the composition rule refuses to dispatch) or no capacity. If `repo`
         is given, the worker is focused on it first (clone via /project, using `repo_token` if the
         project has a per-project deploy token); if omitted, the worker is assumed already focused.
-        `upstream` (a fork's parent) is re-baked as the read-only `upstream` remote on this focus."""
+        `upstream` (a fork's parent) is re-baked as the read-only `upstream` remote on this focus.
+        `recurse_submodules`: the focus clones the FULL nested submodule tree — a composition build
+        needs it (the worker can't init submodules itself; the proxy denies it)."""
         session_id = session_id or thread_id
         # RELIABILITY: dispatch inside a bounded retry loop. If the acquired worker is wedged (409
         # busy) or unreachable, QUARANTINE it (so it stops being picked) and RE-DISPATCH on another
@@ -314,6 +317,7 @@ class Router:
                     ok, detail, upstream_ok = await self.harness.set_project(
                         inst.base_url, repo, token=repo_token,
                         upstream=upstream, upstream_token=upstream_token,
+                        recurse_submodules=recurse_submodules,
                     )
                     await self.audit.log(
                         "worker_project_set", effort_id=effort_id, actor=inst.id,

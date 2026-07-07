@@ -41,6 +41,7 @@ from .modules.capabilities import (
     read_branch_changes,
     close_pull_request,
     delete_branch,
+    read_added_lines,
     read_branch_delivery,
     read_broken_gitlinks,
     read_sibling_agent_prs,
@@ -188,6 +189,14 @@ _PO_NL_SYS = (
     "write the command yourself from the paths they've used, e.g. `dotnet build "
     "vendor/murder/Murder.sln`). 'remove/clear the check on X' → check_cmd='' + project. I "
     "confirm + run it on every delivered branch (red routes back to the worker).\n"
+    "- set a project's STANDING INTENT (a durable architectural rule the org must never trade "
+    "away): 'X must always <invariant>', 'the rule for X is <invariant>', 'X must build from "
+    "<A>, never <B>', 'don't ever let X do <thing>' → set `project`=X + `standing_intent`=the "
+    "invariant in plain words, and BACKTICK any term that is FORBIDDEN so I can enforce it at the "
+    "diff level (e.g. standing_intent='murder builds from the vendored MonoGame source; never use "
+    "the `Murder.FNA` NuGet package or a `PackageReference` to it'). 'clear the standing intent "
+    "on X' → standing_intent='' + project. I inject it into every effort on X and REJECT any "
+    "delivery that reintroduces a forbidden term.\n"
     "- request: they want NEW work done on an EXISTING project → set effort_name to a short "
     "kebab-case slug (it becomes a thread in the project channel). If they name a project to work "
     "on, set `project` to it (match a KNOWN PROJECT). In your `reply`, do the thinking-partner thing: "
@@ -1469,8 +1478,10 @@ class Orchestrator:
             )
             return
         # PROJECT CHECK in plain language (operator preference: no slash commands) — the D2
-        # build/test gate is registry state, so setting/clearing it is an NL operation.
-        if getattr(intent, "check_cmd", None) is not None and intent.project:
+        # build/test gate is registry state, so setting/clearing it is an NL operation. Like the
+        # standing intent, set it as a side effect but don't EAT a work request that names a build.
+        if getattr(intent, "check_cmd", None) is not None and intent.project and not (
+                intent.kind in ("request", "reengage") and (intent.effort_name or intent.effort_id)):
             p = await self.projects.resolve(intent.project)
             if p:
                 cmd = self._extract_check_cmd(intent.check_cmd)
@@ -1485,6 +1496,35 @@ class Orchestrator:
                     thread_id=thread_id,
                 )
                 return
+        # STANDING INTENT in plain language (anti-drift, ANY project) — a durable architectural
+        # invariant, injected into every effort goal + enforced at delivery. Set it as a SIDE
+        # EFFECT whenever present, but only STOP here when the message was PURELY about the rule —
+        # a WORK request that merely restates the constraint must still dispatch (live 2026-07-07:
+        # "in murder, … (never NuGet Murder.FNA); fix …" populated standing_intent and the handler
+        # ate the whole request, so no work ran).
+        if getattr(intent, "standing_intent", None) is not None and intent.project:
+            p = await self.projects.resolve(intent.project)
+            if p:
+                si = intent.standing_intent.strip()
+                await self.projects.set_standing_intent(p["slug"], si)
+                is_work = intent.kind in ("request", "reengage") and (
+                    intent.effort_name or intent.effort_id)
+                if not is_work:
+                    if si:
+                        forb = self._forbidden_terms(si)
+                        forb_note = (" Forbidden term(s) I'll reject in any diff: "
+                                     + ", ".join(f"`{t}`" for t in forb) + "." if forb else
+                                     " (no explicitly-forbidden `terms` — backtick any you want "
+                                     "me to block at the diff level.)")
+                        body = (reply + f"\n\n🧭 Standing intent set for **`{p['slug']}`**: _{si}_"
+                                f"\n\nEvery effort on it now carries this rule, and I reject any "
+                                f"delivery that violates it.{forb_note}")
+                    else:
+                        body = reply + f"\n\n🧭 Cleared the standing intent on **`{p['slug']}`**."
+                    await self.chat.post(channel_id, body.strip(), thread_id=thread_id)
+                    return
+                # a work request that also stated the rule: rule is now recorded; fall through so
+                # the work actually dispatches (its goal will carry the rule via injection).
         # REMOVE a wrong/stale upstream from an EXISTING project — the registry is bridge-owned
         # state, so correcting it is an NL operation (D0.f), never operator SQL.
         if getattr(intent, "remove_upstream", False) and intent.project and not intent.upstream_url:
@@ -1515,9 +1555,23 @@ class Orchestrator:
                 project = await self._resolve_project_slug(
                     intent.project, channel_id, effort_name=intent.effort_name, thread_id=thread_id
                 )
-                eid, chan, root = await self.router.open_effort(
-                    intent.effort_name, project=project, goal=message
-                )
+                # CONVERGENCE (anti-sprawl): a re-report of the SAME problem must reuse the
+                # existing open effort — its branch + PR — not mint a new slug/branch/PR every
+                # time (live 2026-07-07: 9+ branches/PRs from repeated build-error prompts). Match
+                # by shared error/goal signature on the same project; reuse when found.
+                conv = await self._find_convergent_effort(project, message)
+                if conv:
+                    eid, chan, root = conv
+                    await self.chat.post(
+                        channel_id,
+                        (reply + f"\n\n♻️ _Continuing the existing effort `{eid}` for this — same "
+                         f"branch + PR, so we converge instead of opening yet another. (Say "
+                         f"“new effort” if you truly want a separate one.)_").strip(),
+                        thread_id=thread_id)
+                else:
+                    eid, chan, root = await self.router.open_effort(
+                        intent.effort_name, project=project, goal=message
+                    )
                 self.events.track_channel(chan)
                 # Remember the #mgmt thread this effort was requested in, so its summaries + CONCERNs
                 # thread back under this conversation instead of scattering as new top-level posts.
@@ -2700,6 +2754,37 @@ class Orchestrator:
         self._vendor_host_cache[slug] = (time.time(), found)
         return found
 
+    @staticmethod
+    def _forbidden_terms(standing_intent: str) -> list[str]:
+        """Terms the operator marked FORBIDDEN in the standing intent: a `backticked` token that
+        follows a negation (never / no / not / don't / avoid / forbidden / instead of) within a
+        short window. These are checked against every delivery's added lines. Generic — the org
+        blocks exactly what the operator said to block, in ANY project's own vocabulary."""
+        out: list[str] = []
+        for m in re.finditer(r"`([^`]{2,60})`", standing_intent or ""):
+            prefix = standing_intent[max(0, m.start() - 45):m.start()].lower()
+            if re.search(r"\b(never|no|not|avoid|forbid|forbidden|instead of|rather than)\b"
+                         r"|n['’]t\b", prefix):
+                term = m.group(1).strip()
+                if term and term not in out:
+                    out.append(term)
+        return out
+
+    async def _standing_intent_context(self, slug: str) -> str:
+        """The project's standing intent as a goal preamble (injected into EVERY effort on the
+        project) — the durable architectural rule the worker must honor. '' when none set."""
+        p = await self.projects.get(slug)
+        si = ((p or {}).get("standing_intent") or "").strip()
+        if not si:
+            return ""
+        forb = self._forbidden_terms(si)
+        forb_line = (f" I will REJECT any delivery whose diff introduces: "
+                     + ", ".join(f"`{t}`" for t in forb) + "." if forb else "")
+        return (f"\n\nSTANDING INTENT (a durable architectural rule for `{slug}` — NON-NEGOTIABLE, "
+                f"overrides any expedient shortcut): {si}\nDo NOT trade this away for a green "
+                f"build — if honoring it makes the task hard or impossible, SAY SO and stop; do "
+                f"NOT revert or work around the architecture to force a pass.{forb_line}")
+
     async def _composition_context(self, slug: str) -> str:
         """The COMPOSITION CONTEXT block the planner path injects, for DIRECT-intake dispatches —
         a worker given a standalone clone sees cross-submodule references as plainly broken and
@@ -2784,6 +2869,35 @@ class Orchestrator:
             log.debug("session generation lookup failed for %s: %s", effort_id, exc)
             n = 0
         return effort_id if n == 0 else f"{effort_id}~r{n}"
+
+    async def _find_convergent_effort(self, project: str, request: str):
+        """The OPEN effort on `project` this request is a continuation of — matched by shared
+        error/goal signature lines — so a re-report reuses ONE branch + PR instead of spawning a
+        new one each time (anti-sprawl; live 2026-07-07: 9+ branches/PRs from repeated prompts).
+        Returns (effort_id, channel_id, root_post_id) or None. Never converges an unrelated
+        request (requires a real signature-line overlap); explicit 'new effort' bypasses upstream."""
+        if re.search(r"\bnew\s+effort\b|\bseparate\s+effort\b|\bfresh\s+effort\b", request, re.I):
+            return None
+        sig = {ln.strip().lower() for ln in request.splitlines()
+               if len(ln.strip()) >= 30 and ("'" in ln or "\\" in ln or "/" in ln
+                                             or _ERROR_REPORT_RE.search(ln))}
+        if not sig:
+            return None
+        efforts = sorted(await self.gate.snapshot(open_only=True),
+                         key=lambda e: e.get("updated_at") or "", reverse=True)
+        for e in efforts:
+            if (e.get("project") or "") != project or e["id"].startswith("__"):
+                continue
+            try:
+                _, goal, _ = await self.charters.current_goal(e["id"])
+            except Exception:  # noqa: BLE001
+                goal = ""
+            g = (goal or "").lower()
+            if g and sum(1 for s in sig if s in g) >= max(1, len(sig) // 2):
+                loc = await self.router.effort_thread(e["id"])
+                if loc:
+                    return e["id"], loc[0], loc[1]
+        return None
 
     async def _attempt_history(self, effort_id: str, request: str) -> str:
         """PRIOR ATTEMPTS block for a RE-REPORTED error: recent efforts whose goal contains the
@@ -2883,15 +2997,32 @@ class Orchestrator:
                 + "\n_Merge BOTH halves (code + wiring) for the fix to reach the host build._"
                 + check_note)
 
+    @staticmethod
+    def _build_segment(check_cmd: str) -> str:
+        """The BUILD/TEST portion of a check command — drop leading `git …` setup segments
+        (submodule/fetch/checkout/sync/pull) that the privileged recursive focus already did (and
+        that the worker's proxied git can't run anyway). E.g. `git submodule update --init
+        --recursive && dotnet build X.sln` → `dotnet build X.sln`. Keeps everything from the first
+        non-git segment on."""
+        segs = [s.strip() for s in re.split(r"&&|;", check_cmd) if s.strip()]
+        kept = [s for i, s in enumerate(segs)
+                if not (s.lower().startswith("git ") and all(
+                    p.lower().startswith("git ") for p in segs[:i + 1]))]
+        return " && ".join(kept) if kept else check_cmd
+
     async def _composition_check(self, effort_id: str, host_slug: str, host_url: str,
                                  branch: str) -> str:
         """D2 for COMPOSITIONS: a vendored project's code cannot compile in its standalone clone
         (the sibling submodules don't exist there), so 'verification' without the host build is
         inspection, not compilation (live 2026-07-06, iteration 7: a signature fix that never
-        compiled shipped ambiguity errors only the operator's own build caught). When the HOST
-        project has a check_cmd, run it on the host's WIRING branch — fresh host focus → checkout
-        the branch → submodule init → check. Red ⇒ the closure blocks the merge invite and the
-        effort stays open. Returns the closure note."""
+        compiled shipped ambiguity errors only the operator's own build caught). Run the HOST's
+        check_cmd on the host's WIRING branch — but the WORKSPACE PREP (checkout + recursive
+        submodule init) rides the PRIVILEGED focus (a recursive clone of `{host}#{branch}`), NOT
+        the worker: the git-proxy hard-denies `submodule`, so a worker-run `git submodule update`
+        can never populate the nested tree (live 2026-07-07: the build failed only because bang/gum
+        couldn't init — an environmental failure the org kept reading as a code failure). So we
+        strip the git-setup segments from check_cmd and run ONLY the build. Red ⇒ blocks the merge
+        invite and the effort stays open."""
         p = await self.projects.get(host_slug)
         check_cmd = ((p or {}).get("check_cmd") or "").strip()
         if not check_cmd:
@@ -2902,22 +3033,25 @@ class Orchestrator:
         if not loc:
             return ""
         channel_id, root = loc
+        # Strip the workspace-PREP segments (git submodule / fetch / checkout / sync) — the
+        # privileged recursive focus already did all of that; keep the actual build/test.
+        build_only = self._build_segment(check_cmd)
+        # Focus on the wiring BRANCH with a full recursive submodule clone (privileged path).
+        focus_repo = f"{host_url}#{branch}"
         instruction = (
-            f"COMPOSITION CHECK (verification only — change NOTHING in this step). The wiring "
-            f"branch must BUILD. Execute exactly:\n"
-            f"  cd /workspace && git fetch origin {branch} && git checkout {branch}\n"
-            f"  git submodule sync --recursive && git submodule update --init --recursive\n"
-            f"  {check_cmd}\n"
-            f"If the final command exits 0, reply exactly `CHECK: PASS`. If it fails, reply "
-            f"`CHECK: FAIL` followed by the last ~20 lines of the failing output. Do not attempt "
-            f"fixes in this step."
+            f"COMPOSITION CHECK (verification only — change NOTHING). Your workspace is already "
+            f"checked out on `{branch}` with all submodules initialized. Run exactly:\n"
+            f"  cd /workspace && {build_only}\n"
+            f"If it exits 0, reply exactly `CHECK: PASS`. If it fails, reply `CHECK: FAIL` "
+            f"followed by the last ~20 lines of the failing output. Do NOT run git commands and "
+            f"do NOT attempt fixes in this step."
         )
         try:
             repo_token = await self._project_token(effort_id)
             result = await self.router.wake(
                 effort_id, role="worker-default", thread_id=root, channel_id=channel_id,
                 session_id=await self._session_for(effort_id), instruction=instruction,
-                repo=host_url, repo_token=repo_token,
+                repo=focus_repo, repo_token=repo_token, recurse_submodules=True,
             )
         except Exception as exc:  # noqa: BLE001 — an unrunnable check is reported, never fatal
             return (f"\n🧪 _Composition check couldn't run ({str(exc)[:120]}) — verify the build "
@@ -2951,6 +3085,10 @@ class Orchestrator:
         # vendored project's goal carries the layout facts, so a standalone-cloned worker can't
         # mistake intentional cross-submodule wiring for breakage.
         proj_slug = await self._effort_project(effort_id)
+        # STANDING INTENT (anti-drift): the project's durable architectural rule rides on EVERY
+        # effort, so no worker can quietly revert the architecture to manufacture a pass.
+        if proj_slug and "STANDING INTENT" not in request:
+            request += await self._standing_intent_context(proj_slug)
         if proj_slug and "COMPOSITION CONTEXT" not in request:
             request += await self._composition_context(proj_slug)
         # MACHINE-CHECK forewarning: when the project (or the host that vendors it) has a check
@@ -3449,6 +3587,11 @@ class Orchestrator:
             # fetch — gate on gitlink reachability before treating it as done.
             if delivery.landed and not await self._gate_gitlinks(effort_id, channel_id, root, repo):
                 return None
+            # …nor if it VIOLATES the project's standing intent (reintroduces a forbidden term) —
+            # a green-but-wrong delivery (the NuGet-revert trap) must never merge.
+            if delivery.landed and not await self._gate_standing_intent(
+                    effort_id, channel_id, root, repo, delivery):
+                return None
             # …nor if its commits net to ZERO file changes (the fix is stranded elsewhere,
             # usually an unpushed vendored-submodule commit) — recover before a false done.
             if delivery.landed and delivery.files_changed == 0:
@@ -3475,6 +3618,8 @@ class Orchestrator:
                 return await self._recover_stale_delivery(
                     effort_id, channel_id, root, repo, delivery)
             if not await self._gate_gitlinks(effort_id, channel_id, root, repo):
+                return None
+            if not await self._gate_standing_intent(effort_id, channel_id, root, repo, delivery):
                 return None
             if delivery.files_changed == 0:
                 return await self._recover_empty_delivery(
@@ -3605,6 +3750,70 @@ class Orchestrator:
             thread_id=self._mgmt_thread_of(effort_id),
         )
         return None
+
+    async def _gate_standing_intent(
+        self, effort_id: str, channel_id: str, root: str, repo: str,
+        delivery: BranchDelivery,
+    ) -> bool:
+        """ANTI-DRIFT gate: reject a delivery whose diff RE-INTRODUCES a term the project's
+        standing intent forbids (live 2026-07-07: the org reverted to the `Murder.FNA` NuGet
+        package to force a green build — the exact thing the operator said never to do). Returns
+        True when clean/no-intent (proceed); False when it violated (auto-iterate if rounds
+        remain, else escalate — the caller returns None, never a merge). Generic: enforces
+        whatever the operator forbade, in any project. Fail-open — an unreadable diff never blocks."""
+        proj = await self._effort_project(effort_id)
+        p = await self.projects.get(proj) if proj else None
+        si = ((p or {}).get("standing_intent") or "").strip()
+        forbidden = self._forbidden_terms(si)
+        if not (si and forbidden):
+            return True
+        try:
+            added = await read_added_lines(
+                self.github, repo, delivery.branch,
+                api_base=self.s.github_api_base, transport=self._gh_transport)
+        except Exception as exc:  # noqa: BLE001 — the gate never blocks on an infra hiccup
+            log.debug("standing-intent diff read failed for %s: %s", effort_id, exc)
+            return True
+        blob = "\n".join(added).lower()
+        hit = [t for t in forbidden if t.lower() in blob]
+        if not hit:
+            return True
+        listed = ", ".join(f"`{t}`" for t in hit)
+        reason = (f"the delivery VIOLATES `{proj}`'s standing intent — it reintroduces "
+                  f"forbidden term(s) {listed} (intent: {si[:200]})")
+        await self.comms.post(
+            Intent.worker_activity,
+            f"⛔ **Standing-intent violation** on `{delivery.branch}`: the diff adds {listed}, "
+            f"which `{proj}`'s architecture rule forbids. This will NOT merge.",
+            effort_id=effort_id,
+        )
+        iterating = await self._auto_iterate(
+            effort_id, reason,
+            "Forbidden term(s) added to the diff: " + listed
+            + f"\nStanding intent: {si}\nImplement the task the REQUIRED way; do not revert or "
+            f"work around the architecture.")
+        if iterating:
+            return False  # auto-iteration owns the retry; the caller returns None (no PR now)
+        # limit reached → honest escalation, never a merge
+        await self.router.update_effort_card(effort_id, "error")
+        await self.audit.log("delivery_intent_violation", effort_id=effort_id,
+                             payload={"branch": delivery.branch, "terms": hit, "intent": si[:300]})
+        await self.comms.post(
+            Intent.escalation,
+            f"⚠️ **{effort_id}** keeps violating `{proj}`'s standing intent ({listed}) after "
+            f"auto-iterating — it can't reach the goal without breaking the architecture rule. "
+            f"↑ raised to you: this may be a genuine constraint conflict (the required approach "
+            f"may need real work, not a quick fix). No PR opened.",
+            effort_id=effort_id,
+        )
+        await self.comms.post(
+            Intent.operator_reply,
+            f"⚠️ **{effort_id}** can't satisfy your build without breaking `{proj}`'s standing "
+            f"intent (it kept reintroducing {listed}). **Not** merged, no PR. This usually means "
+            f"the required approach is real work — tell me how you'd like to proceed.",
+            thread_id=self._mgmt_thread_of(effort_id),
+        )
+        return False   # not done; nothing to hand forward
 
     async def _recover_empty_delivery(
         self, effort_id: str, channel_id: str, root: str, repo: str,

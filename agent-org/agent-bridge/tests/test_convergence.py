@@ -242,8 +242,12 @@ async def test_composition_check_pass_reported_in_closure(db_url, tmp_path):
         msgs = " ".join(p["message"] for p in chat.posted)
         assert "Composition check passed" in msgs and "the wiring branch builds" in msgs
         prompts = " ".join(w["prompt"] for w in harness.wakes)
-        assert "git submodule update --init --recursive" in prompts     # the check preamble
+        # the worker runs ONLY the build — the recursive submodule init rode the privileged focus,
+        # not the proxy-blocked worker git.
         assert "dotnet build vendor/murder/Murder.sln" in prompts
+        assert "Do NOT run git commands" in prompts
+        assert any(f.get("recurse_submodules") for f in harness.focus_calls), \
+            "the composition-check focus must request a recursive submodule clone"
         from app.models import Effort
         async with orch.db.session_factory() as s:
             e = await s.get(Effort, eid)
@@ -407,3 +411,15 @@ async def test_auto_iteration_is_bounded(db_url, tmp_path):
         assert e.lifecycle != "done"
     finally:
         await db.dispose()
+
+
+def test_build_segment_strips_git_setup():
+    from app.orchestrator import Orchestrator as O
+    assert O._build_segment(
+        "git submodule sync --recursive && git submodule update --init --recursive && "
+        "dotnet build vendor/murder/Murder.sln") == "dotnet build vendor/murder/Murder.sln"
+    # no git prefix → unchanged
+    assert O._build_segment("dotnet build X.sln") == "dotnet build X.sln"
+    # git AFTER the build is kept (only LEADING git-setup is dropped)
+    assert O._build_segment("npm ci && npm test") == "npm ci && npm test"
+    assert O._build_segment("git fetch && git checkout b && make") == "make"
