@@ -170,6 +170,22 @@ class WorkspaceManager:
             # (the proxy denies it to the worker), so recursive init MUST happen here or never.
             f"(cd {ws} && {g} submodule update --init{recurse_flag} 2>/dev/null || true)"
         )
+        if recurse and deploy_token:
+            # WORK-IN-HOST delivery: a composition fix is edited in-place inside a vendored
+            # submodule and must be PUSHED to THAT submodule's own remote. The proxy denies the
+            # worker `submodule`, and the submodule's `origin` (from .gitmodules) carries no token,
+            # so re-bake the deploy token into every same-host submodule origin here (privileged).
+            # Best-effort + non-fatal; the token is redacted at journal time by the caller.
+            tok = shlex.quote(deploy_token)
+            reauth = (
+                f"cd {ws} && {g} submodule foreach --recursive "
+                f"'u=$({g} config --get remote.origin.url 2>/dev/null); "
+                f"case \"$u\" in "
+                f"https://github.com/*) {g} remote set-url origin "
+                f"\"https://x-access-token:{tok}@github.com/${{u#https://github.com/}}\" ;; "
+                f"esac' 2>/dev/null || true"
+            )
+            cmd += f" ; ({reauth})"
         return self.ot.execute(cmd, cwd="/", timeout=self.clone_timeout)
 
     def refresh_origin_auth(

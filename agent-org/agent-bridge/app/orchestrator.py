@@ -97,6 +97,23 @@ _ERROR_REPORT_RE = re.compile(
 # double-booking both workers). Deliberately does NOT match the plural ("the tasks").
 _SINGULAR_TASK_RE = re.compile(r"\b(?:previous|last|its)\s+(?:\w+\s+)?task\b", re.I)
 
+# A worker signalling it is BLOCKED / the workspace is INSUFFICIENT / the task isn't feasible as
+# scoped — either via the explicit protocol or in its own words. The PM must ELEVATE this, not
+# steamroll it with a mechanical "commit + push" (live 2026-07-07: the worker said plainly "the
+# standalone build fails because ../MonoGame isn't present in this workspace" and the PM ignored
+# it entirely). Kept broad on purpose — a real constraint stated any reasonable way must be heard.
+_BLOCKER_RE = re.compile(
+    r"^\s*BLOCKED:|(?:is|are|it'?s)\s+not\s+present\s+in\s+this\s+workspace|"
+    r"not\s+(?:present|available|found)\s+in\s+(?:this|the)\s+workspace|"
+    r"workspace\s+(?:lacks|doesn'?t\s+have|is\s+missing|does\s+not\s+(?:have|contain))|"
+    r"(?:isn'?t|is\s+not|aren'?t|are\s+not)\s+present\s+in\s+(?:this|the|its)\b|"
+    r"standalone\s+build\s+fails\s+because|can(?:not|'?t)\s+(?:verify|build|compile|run)\b[^.\n]*"
+    r"\b(?:because|since|as|without)\b|"
+    r"(?:sibling|nested)\s+submodule[^.\n]*(?:isn'?t|is\s+not|not)\s+(?:present|available|there)|"
+    r"\bnot\s+(?:feasible|possible)\s+(?:in|as|here|with)\b|missing\s+(?:dependency|dependencies)|"
+    r"insufficient\s+context|need(?:s)?\s+(?:the\s+)?(?:host|engine|parent)\s+(?:repo|context)",
+    re.I | re.M)
+
 # An ERROR-REPORT effort closes when the reported failure is GONE, not when a plausible edit
 # exists — the worker must reproduce, fix, and re-verify (live 2026-07-05: four attempts shipped
 # without anyone but the operator ever running the failing build).
@@ -111,6 +128,16 @@ _VERIFY_CLAUSE = (
     "line the operator reported, each marked `RESOLVED` (with how you verified) or "
     "`NOT RESOLVED` (with what is still needed). A missing or partial verdict block means the "
     "report is treated as a PARTIAL fix, not a resolution.\n"
+    "IF THE TASK CANNOT BE COMPLETED OR VERIFIED IN THIS WORKSPACE — a needed dependency, file, "
+    "or sibling repo is ABSENT; the requirement is ambiguous or self-contradictory; or you lack "
+    "the context to judge feasibility — do NOT force a fix, do NOT claim NO CHANGES, and do NOT "
+    "stop silently. Report it, in exactly this shape, and it is a SUCCESSFUL outcome:\n"
+    "`BLOCKED:` <the specific obstacle — name the missing thing / exact error / ambiguity>\n"
+    "`NEEDS:` <what would unblock you — a dependency at a path, the host/parent repo, a clarified "
+    "requirement>\n"
+    "`FEASIBLE:` <yes-with-that | no | unknown-because-X>\n"
+    "A clear BLOCKED report is how the org learns the task's real constraints and fixes them; "
+    "guessing or faking progress is the only failure.\n"
     "MINIMAL DIFF: change ONLY what the reported errors require. Do not vendor, restructure or "
     "add components the errors don't demand — if a structurally bigger change seems necessary, "
     "SAY SO in your report (with why) instead of doing it (operator: an error fix is not an "
@@ -1327,6 +1354,31 @@ class Orchestrator:
         handled_close = await self._nl_pr_close(message, channel_id, thread_id)
         handled_delete = await self._nl_branch_delete(message, channel_id, thread_id)
         if handled_close or handled_delete:
+            return
+        # NL-FIRST "run it in the host context" — the remedy the blocker elevation offers for a
+        # workspace-insufficiency: re-run a composition effort where the build can actually run.
+        if re.search(r"\b(?:run|re-?run|retry|do)\b[^.\n]{0,30}?\b(?:in|with|using)\b"
+                     r"[^.\n]{0,20}?\bhost\s+context\b", message, re.I):
+            eid = None
+            m_eid = re.search(r"\beffort-[A-Za-z0-9][\w-]*\b", message)
+            if m_eid:
+                eid = m_eid.group(0)
+            else:
+                efforts = sorted(await self.gate.snapshot(open_only=True),
+                                 key=lambda e: e.get("updated_at") or "", reverse=True)
+                for e in efforts:
+                    if not e["id"].startswith("__") and await self._vendored_host(
+                            e.get("project") or ""):
+                        eid = e["id"]
+                        break
+            if eid:
+                await self.chat.post(channel_id, f"▶ Re-running `{eid}` in the host context now.",
+                                     thread_id=thread_id)
+                self._spawn(self._run_in_host_context(eid))
+            else:
+                await self.chat.post(
+                    channel_id, "I couldn't find a composition effort to run in the host context — "
+                    "name it (`effort-…`) and I'll run it there.", thread_id=thread_id)
             return
         # NL-FIRST knowledge sync (RS.2): "sync <project> docs/knowledge/sources" — a governed
         # operator-plane trigger, resolved deterministically like merge/PR above.
@@ -2997,6 +3049,29 @@ class Orchestrator:
                 + "\n_Merge BOTH halves (code + wiring) for the fix to reach the host build._"
                 + check_note)
 
+    async def _no_changes_acceptable(self, effort_id: str, output: str) -> bool:
+        """Whether a NO CHANGES claim is legitimate. For a genuine read-only/investigation goal:
+        always (the answer is the deliverable). For a FIX/BUILD goal (REQUIRED VERIFICATION, or the
+        project/host has a check_cmd): only when the report carries explicit BUILD-PASS evidence —
+        a fix request cannot be closed 'nothing to change' on the worker's word alone (live
+        2026-07-07: a hallucinated no-op skipped the whole check stack). Generic across toolchains."""
+        try:
+            _, goal, _ = await self.charters.current_goal(effort_id)
+        except Exception:  # noqa: BLE001
+            goal = ""
+        goal = goal or ""
+        proj = await self._effort_project(effort_id)
+        host = await self._vendored_host(proj) if proj else None
+        check_owner = host[0] if host else proj
+        cp = await self.projects.get(check_owner) if check_owner else None
+        demands_proof = "REQUIRED VERIFICATION" in goal or bool((cp or {}).get("check_cmd"))
+        if not demands_proof:
+            return True   # a real read-only task — NO CHANGES is the legitimate outcome
+        # a fix/build request: require concrete build-pass evidence in the worker's report
+        return bool(re.search(
+            r"CHECK:\s*PASS|build succeeded|BUILD SUCCEEDED|0\s+error\b|0\s+Error\(s\)|"
+            r"\bexit(?:ed)?\s+0\b|\bpassed\b", output, re.I))
+
     @staticmethod
     def _build_segment(check_cmd: str) -> str:
         """The BUILD/TEST portion of a check command — drop leading `git …` setup segments
@@ -3320,6 +3395,123 @@ class Orchestrator:
                 )
         return await self.exec_gate.status(effort_id)
 
+    async def _run_in_host_context(self, effort_id: str) -> None:
+        """WORKSPACE-SUFFICIENCY fix (operator 2026-07-07): a vendored project whose build needs
+        its host (e.g. murder can only compile where its sibling `vendor/MonoGame` exists) was
+        being worked in a STANDALONE clone where the build physically cannot run — so the worker
+        flailed and the org gate-stacked around it. This dispatches the WORK in the HOST context
+        (engine, recursively cloned so every sibling is present, submodule origins re-authed for
+        push), where the worker edits the vendored subdir IN PLACE, builds for real, and publishes
+        the fix to the vendored repo's own remote. Then the normal verify → wire → composition
+        check → finish path runs. Generic for any host/submodule composition."""
+        proj = await self._effort_project(effort_id)
+        host = await self._vendored_host(proj) if proj else None
+        loc = await self.router.effort_thread(effort_id)
+        if not (host and loc):
+            await self.comms.post(
+                Intent.operator_reply,
+                f"⚠️ **{effort_id}** isn't a vendored-in-a-host composition, so there's no host "
+                f"context to run it in. Tell me the task and I'll run it normally.",
+                thread_id=self._mgmt_thread_of(effort_id))
+            return
+        host_slug, sub_path, host_url, _sib = host
+        channel_id, root = loc
+        branch = self._effort_branch(effort_id)
+        if effort_id in self._delegating:
+            return
+        self._delegating.add(effort_id)
+        try:
+            await self._reopen_if_closed(effort_id)
+            try:
+                _, goal, _ = await self.charters.current_goal(effort_id)
+            except Exception:  # noqa: BLE001
+                goal = ""
+            hp = await self.projects.get(host_slug)
+            check_cmd = ((hp or {}).get("check_cmd") or "").strip()
+            build_line = (self._build_segment(check_cmd) if check_cmd
+                          else "(build the solution as usual)")
+            host_token = await self._project_token_for_slug(host_slug)
+            instruction = (
+                f"WORK IN HOST CONTEXT — your workspace is `{host_slug}` with ALL submodules "
+                f"present, so the build can actually run here (this is why prior standalone "
+                f"attempts couldn't compile). Do the task by editing files INSIDE `{sub_path}` "
+                f"(the vendored `{proj}`):\n"
+                f"1. Make the fix in `{sub_path}`.\n"
+                f"2. BUILD + verify from the host: `{build_line}`. Iterate until it PASSES; keep "
+                f"the passing output.\n"
+                f"3. Publish the `{proj}` change to ITS OWN remote (from inside the submodule):\n"
+                f"   cd {sub_path} && git checkout -b {branch} && git add -A && "
+                f"git commit -m \"{effort_id}: <summary>\" && git push origin {branch}\n"
+                f"4. Report the pushed commit hash + the passing build tail. If even HERE you "
+                f"cannot build, do NOT fake it — report `BLOCKED:` / `NEEDS:` / `FEASIBLE:`.\n\n"
+                f"THE TASK:\n{goal}"
+            )
+            await self.comms.post(
+                Intent.effort_dispatch,
+                f"▶ Re-running **{effort_id}** in the **host context** (`{host_slug}`, recursive) "
+                f"so the build can actually run — editing `{sub_path}` in place.",
+                effort_id=effort_id)
+            result = await self.router.wake(
+                effort_id, role="worker-default", thread_id=root, channel_id=channel_id,
+                session_id=await self._session_for(effort_id), instruction=instruction,
+                repo=host_url, repo_token=host_token, recurse_submodules=True,
+            )
+        finally:
+            self._delegating.discard(effort_id)
+        if result is None:
+            return
+        blk = self._extract_blocker(result.output or "")
+        if blk:
+            await self._elevate_blocker(effort_id, blk)
+            return
+        # The worker pushed the fix to the VENDORED repo's own remote — verify + gate + finish.
+        sub_repo = await self._effort_repo(effort_id)
+        delivery = await self._verify_delivery(effort_id, sub_repo) if sub_repo else BranchDelivery()
+        if not delivery.landed:
+            await self.comms.post(
+                Intent.operator_reply,
+                f"⚠️ **{effort_id}** ran in the host context but I don't see its branch on "
+                f"`{self._norm_repo(sub_repo or proj)}` — the submodule push may have failed. Not "
+                f"done; reply to re-run.",
+                thread_id=self._mgmt_thread_of(effort_id))
+            await self.router.update_effort_card(effort_id, "needs-attention")
+            return
+        if not await self._gate_standing_intent(effort_id, channel_id, root, sub_repo, delivery):
+            return
+        await self._finish_effort(effort_id, result, delivery=delivery)
+
+    async def _project_token_for_slug(self, slug: str) -> str | None:
+        """The deploy token for a project by SLUG (the host repo, for the recursive clone/push
+        re-auth) — same resolution as `_project_token` but keyed on the project directly:
+        explicit token_env → per-owner LC_<OWNER>_TOKEN → GitHub App token → pool fallback."""
+        import os
+
+        from .modules.projects import owner_token_env
+        p = await self.projects.get(slug)
+        if not p:
+            return None
+        env_name = p.get("token_env")
+        if env_name:
+            return os.environ.get(env_name) or None
+        cand = owner_token_env(p.get("repo_url", ""))
+        if cand and os.environ.get(cand):
+            return os.environ[cand]
+        if self.github is not None and self.s.github_app_enabled:
+            try:
+                owner, _repo = parse_owner_repo(p.get("repo_url", ""))
+                if owner.lower() == (self.github.owner or "").lower():
+                    return await self.github.installation_token()
+            except Exception as exc:  # noqa: BLE001
+                log.debug("App-token for host %s skipped: %s", slug, exc)
+        return None
+
+    async def _reopen_if_closed(self, effort_id: str) -> None:
+        async with self.db.session_factory() as s:
+            e = await s.get(Effort, effort_id)
+            if e is not None and e.lifecycle != "open":
+                e.lifecycle = "open"
+                await s.commit()
+
     async def delegate(
         self, effort_id: str, channel_id: str, root_post_id: str, goal: str,
         *, repo: str | None = None, plan_steps: list[str] | None = None, start_step: int = 1,
@@ -3570,11 +3762,37 @@ class Orchestrator:
         it stays visible in /status). Returns the BranchDelivery to hand to _finish_effort otherwise
         (a verified `landed`, or an `unverifiable` verdict the closure labels honestly)."""
         pub = await self._publish_effort(effort_id, channel_id, root, repo)
+        # BLOCKER / feasibility FIRST — before any mechanical re-engage or NO-CHANGES logic: if the
+        # worker named a real constraint (a missing dependency, an insufficient workspace, an
+        # ambiguous/infeasible requirement), the PM's job is to HEAR it and ELEVATE it, not bark
+        # "commit + push" at it (live 2026-07-07: the worker said "the standalone build fails
+        # because ../MonoGame isn't present in this workspace" and the monitor ignored it entirely).
+        blk = self._extract_blocker(pub.output or "") if pub is not None else None
+        if blk:
+            await self._elevate_blocker(effort_id, blk)
+            return None
         # NO CHANGES protocol (read-only/investigation tasks): the worker explicitly reports it
         # changed nothing — a LEGITIMATE completion whose deliverable is its ANSWER, not a branch.
         # Honor it (the live miss ignored the worker's correct report and escalated 'undelivered').
+        # BUT a FIX/BUILD request (goal demands verification) can't dodge the whole check stack by
+        # falsely claiming "nothing to change" (live 2026-07-07: worker hallucinated "no Murder.FNA,
+        # vendored ref in place, no changes" on a main that HAS Murder.FNA + the unfixed signature,
+        # and never built) — such a claim must carry BUILD-PASS evidence, else it auto-iterates.
         if pub is not None and "NO CHANGES:" in (pub.output or ""):
-            return BranchDelivery(no_changes=True, branch=self._effort_branch(effort_id))
+            if await self._no_changes_acceptable(effort_id, pub.output or ""):
+                return BranchDelivery(no_changes=True, branch=self._effort_branch(effort_id))
+            if await self._auto_iterate(
+                    effort_id, "the worker claimed NO CHANGES on a fix/build request without "
+                    "showing the build passes", pub.output or ""):
+                return None
+            await self.comms.post(
+                Intent.operator_reply,
+                f"⚠️ **{effort_id}** claimed nothing needed changing, but the goal was to FIX a "
+                f"build and it showed no passing build — I couldn't accept that as done and "
+                f"auto-iteration is spent. Reply to re-run, or tell me how to proceed.",
+                thread_id=self._mgmt_thread_of(effort_id))
+            await self.router.update_effort_card(effort_id, "error")
+            return None
         delivery = await self._verify_delivery(effort_id, repo)
         if delivery.landed or not delivery.verifiable:
             # A "landed" branch whose head predates THIS run is a stale branch resurrected —
@@ -3636,6 +3854,59 @@ class Orchestrator:
             return state
         await self._escalate_undelivered(effort_id, delivery)
         return None
+
+    @staticmethod
+    def _extract_blocker(output: str) -> dict | None:
+        """Parse a worker's report for a BLOCKER / feasibility constraint — the explicit protocol
+        (`BLOCKED:`/`NEEDS:`/`FEASIBLE:`) OR the same thing stated in plain language. Returns
+        {blocked, needs, feasible, raw} or None. The PM elevates this instead of steamrolling with
+        a mechanical re-engage (live 2026-07-07)."""
+        if not output or not _BLOCKER_RE.search(output):
+            return None
+        def _field(label: str) -> str:
+            m = re.search(rf"`?{label}`?:\s*(.+)", output, re.I)
+            return (m.group(1).strip()[:400] if m else "")
+        blocked = _field("BLOCKED")
+        if not blocked:
+            # NL blocker: quote the sentence that tripped the detector
+            m = _BLOCKER_RE.search(output)
+            start = output.rfind("\n", 0, m.start()) + 1
+            end = output.find("\n", m.end())
+            blocked = output[start:(end if end > 0 else len(output))].strip()[:400]
+        return {"blocked": blocked, "needs": _field("NEEDS"),
+                "feasible": _field("FEASIBLE"), "raw": output[:1500]}
+
+    async def _elevate_blocker(self, effort_id: str, blk: dict) -> None:
+        """The PM's job the mechanical monitor skipped: HEAR the worker's constraint and surface it
+        to the operator with a synthesized read + an actionable next step, keeping the effort OPEN
+        (needs-attention) — never a false done, never a blind re-dispatch. If the constraint is a
+        workspace insufficiency on a composition effort, name the concrete remedy (run in the host
+        context). Generic for any project/blocker."""
+        proj = await self._effort_project(effort_id)
+        host = await self._vendored_host(proj) if proj else None
+        remedy = ""
+        if host and re.search(r"workspace|present|sibling|submodule|host|context|standalone",
+                              blk["blocked"], re.I):
+            remedy = (f"\n\n**Likely remedy:** this reads as a WORKSPACE-context limit — `{proj}` "
+                      f"only builds inside its host `{host[0]}` (where `{host[1]}`'s siblings like "
+                      f"the vendored dependency exist). I can re-run this **in the host context** "
+                      f"(the engine, recursively cloned) so the worker can actually build and "
+                      f"verify. Say _\"run it in the host context\"_ and I'll do that.")
+        needs = f"\n- **What it needs:** {blk['needs']}" if blk["needs"] else ""
+        feas = f"\n- **Feasible as scoped:** {blk['feasible']}" if blk["feasible"] else ""
+        body = (
+            f"🚧 **{effort_id}** — the worker raised a real CONSTRAINT (this is the org learning "
+            f"the task's limits, **not** a worker failure or a done):\n"
+            f"- **What's blocking:** {blk['blocked']}{needs}{feas}\n"
+            f"It is **not** marked done. Tell me how to proceed — provide what it needs, re-scope, "
+            f"or ask me to dig further.{remedy}")
+        await self.comms.post(Intent.escalation, body, effort_id=effort_id)
+        await self.comms.post(Intent.operator_reply, body,
+                              thread_id=self._mgmt_thread_of(effort_id))
+        await self.router.update_effort_card(effort_id, "needs-attention")
+        await self.audit.log("effort_blocked_elevated", effort_id=effort_id,
+                             payload={"blocked": blk["blocked"][:200], "needs": blk["needs"][:200],
+                                      "feasible": blk["feasible"][:100]})
 
     async def _auto_iterate(self, effort_id: str, reason: str, failing_tail: str) -> bool:
         """The PM already KNOWS this delivery failed its own bar — re-run automatically with an

@@ -423,3 +423,71 @@ def test_build_segment_strips_git_setup():
     # git AFTER the build is kept (only LEADING git-setup is dropped)
     assert O._build_segment("npm ci && npm test") == "npm ci && npm test"
     assert O._build_segment("git fetch && git checkout b && make") == "make"
+
+
+# ── LIVE 2026-07-07: a fix request dodged the whole check stack via a FALSE "NO CHANGES" ──
+async def test_no_changes_on_fix_request_without_build_proof_auto_iterates(db_url, tmp_path):
+    orch, chat, harness, db = await _orch(db_url, tmp_path)
+    try:
+        await orch.projects.add("monogame-engine", "https://github.com/devonpveller/Engine")
+        await orch.projects.set_check("monogame-engine", "dotnet build vendor/murder/Murder.sln")
+        await orch.projects.add("murder", "https://github.com/devonpveller/murder")
+        orch._gh_transport = _stack_remote({})
+        eid, chan, root = await orch.router.open_effort("cop-out", project="murder")
+        await orch.charters.set_goal(
+            eid, "fix the build.\nREQUIRED VERIFICATION: reproduce, fix, re-verify.",
+            created_by="po")
+        # worker claims no-changes with NO build evidence → must be rejected + auto-iterated
+        harness.output_queue = ["did work", "NO CHANGES: vendored ref already in place"]
+        await orch.delegate(eid, chan, root, "fix the build", plan_steps=["work"])
+        await _drain_bg(orch)
+        msgs = " ".join(p["message"] for p in chat.posted)
+        assert "Auto-iteration" in msgs, "a false no-op closed the fix request as done"
+        assert "finished (**done**)" not in msgs
+        from app.models import Effort
+        async with orch.db.session_factory() as s:
+            e = await s.get(Effort, eid)
+        assert e.lifecycle != "done"
+    finally:
+        await db.dispose()
+
+
+async def test_no_changes_with_build_proof_is_accepted(db_url, tmp_path):
+    orch, chat, harness, db = await _orch(db_url, tmp_path)
+    try:
+        await orch.projects.add("monogame-engine", "https://github.com/devonpveller/Engine")
+        await orch.projects.set_check("monogame-engine", "dotnet build vendor/murder/Murder.sln")
+        await orch.projects.add("murder", "https://github.com/devonpveller/murder")
+        orch._gh_transport = _stack_remote({})
+        eid, chan, root = await orch.router.open_effort("legit-noop", project="murder")
+        await orch.charters.set_goal(
+            eid, "fix the build.\nREQUIRED VERIFICATION: reproduce, fix, re-verify.",
+            created_by="po")
+        harness.output_queue = [
+            "did work",
+            "NO CHANGES: already fixed on main — ran `dotnet build`, Build succeeded, 0 error(s)"]
+        await orch.delegate(eid, chan, root, "fix the build", plan_steps=["work"])
+        await _drain_bg(orch)
+        msgs = " ".join(p["message"] for p in chat.posted)
+        assert "finished (**done**)" in msgs        # build-proven no-op is legitimate
+        assert "Auto-iteration" not in msgs
+    finally:
+        await db.dispose()
+
+
+async def test_no_changes_on_pure_investigation_still_accepted(db_url, tmp_path):
+    orch, chat, harness, db = await _orch(db_url, tmp_path)
+    try:
+        await orch.projects.add("murder", "https://github.com/devonpveller/murder")
+        orch._gh_transport = _stack_remote({})
+        eid, chan, root = await orch.router.open_effort("investigate", project="murder")
+        # a read-only goal (no REQUIRED VERIFICATION, no project check) → NO CHANGES is fine
+        await orch.charters.set_goal(eid, "investigate the repo structure; read-only",
+                                     created_by="po")
+        harness.output_queue = ["looked around", "NO CHANGES: read-only investigation, here's what I found"]
+        await orch.delegate(eid, chan, root, "investigate", plan_steps=["work"])
+        await _drain_bg(orch)
+        msgs = " ".join(p["message"] for p in chat.posted)
+        assert "finished (**done**)" in msgs and "Auto-iteration" not in msgs
+    finally:
+        await db.dispose()
