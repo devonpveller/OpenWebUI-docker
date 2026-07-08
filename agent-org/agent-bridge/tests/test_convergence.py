@@ -268,12 +268,17 @@ async def test_composition_check_red_blocks_done_and_stays_open(db_url, tmp_path
         harness.output_queue = [
             "did the work", "published",
             "CHECK: FAIL\nerror CS0104: 'Point' is an ambiguous reference",
+            # the burn-down's round-1 worker states a real constraint → clean elevation ends it
+            "BLOCKED: the ambiguity fix needs an API decision\nNEEDS: guidance\nFEASIBLE: unknown",
         ]
         await orch.delegate(eid, chan, root, "fix the signature", plan_steps=["work"])
+        await _drain_bg(orch)
         msgs = " ".join(p["message"] for p in chat.posted)
-        assert "Composition check FAILED" in msgs and "do **NOT** merge" in msgs
+        assert "Composition check FAILED" in msgs
         assert "ambiguous reference" in msgs                     # the failing tail is shown
-        assert "partly done" in msgs
+        # PR STAGING (operator 2026-07-07): a red build means NO PR and an explicit not-done —
+        # the burn-down owns the follow-up, not the operator.
+        assert "no PR opened" in msgs and "Burn-down" in msgs
         from app.models import Effort
         async with orch.db.session_factory() as s:
             e = await s.get(Effort, eid)
@@ -370,16 +375,18 @@ async def test_red_composition_check_auto_iterates_to_green(db_url, tmp_path):
         await orch.charters.set_goal(eid, "fix the ambiguity errors", created_by="po")
         harness.output_queue = [
             "did the work", "published", "CHECK: FAIL\nerror CS0104: ambiguous 'Point'",
-            "fixed the usings", "published again", "CHECK: PASS",
+            "ERRORS AFTER: 0\nfixed the usings, pushed", "CHECK: PASS",
         ]
         await orch.delegate(eid, chan, root, "fix the ambiguity errors", plan_steps=["work"])
         await _drain_bg(orch)
         msgs = " ".join(p["message"] for p in chat.posted)
-        assert "Auto-iteration 1/2" in msgs, "the PM asked the operator instead of iterating"
+        # the red check hands off to the BURN-DOWN (progress-based, org-verified every round),
+        # not a fixed retry count — the PM keeps working instead of asking the operator
+        assert "Burn-down engaged" in msgs, "the PM asked the operator instead of iterating"
         prompts = " ".join(w["prompt"] for w in harness.wakes)
-        assert "ITERATION 1/2" in prompts and "FAILING OUTPUT" in prompts
-        assert "CS0104" in prompts                     # the evolutionary prompt carries the red
-        assert "Composition check passed" in msgs      # round 2 went green
+        assert "BURN-DOWN ROUND 1" in prompts
+        assert "CS0104" in prompts                     # the round's prompt carries the real red
+        assert "GREEN" in msgs                         # round 1 went green, org-verified
         from app.models import Effort
         async with orch.db.session_factory() as s:
             e = await s.get(Effort, eid)
@@ -397,14 +404,20 @@ async def test_auto_iteration_is_bounded(db_url, tmp_path):
         orch._gh_transport = _iterating_remote({})
         eid, chan, root = await orch.router.open_effort("hopeless", project="murder")
         await orch.charters.set_goal(eid, "fix it", created_by="po")
-        for r in (1, 2):   # the limit was already spent on earlier rounds
-            await orch.audit.log("auto_iteration", effort_id=eid, payload={"round": r})
-        harness.output_queue = ["did work", "published", "CHECK: FAIL\nstill broken"]
+        red = "CHECK: FAIL\nsrc/A.cs(1,1): error CS0001: still broken"
+        harness.output_queue = [
+            "did work", "published", red,              # red → burn-down engaged
+            "ERRORS AFTER: 1\nno luck", red,           # round 1: 1 → 1, no progress
+            "ERRORS AFTER: 1\nstill stuck", red,       # round 2: no progress → honest stop
+        ]
         await orch.delegate(eid, chan, root, "fix it", plan_steps=["work"])
         await _drain_bg(orch)
         msgs = " ".join(p["message"] for p in chat.posted)
-        assert "limit reached" in msgs                 # honest hand-back to the operator
-        assert "Auto-iteration 3" not in msgs
+        # bounded autonomy is now PROGRESS-based: two rounds without improvement → an honest,
+        # trajectory-carrying hand-back (never an infinite loop, never a silent stop)
+        assert "burn-down STALLED" in msgs
+        assert "1 → 1 → 1" in msgs                     # the evidence: org-run builds each round
+        assert len(harness.wakes) <= 8                 # bounded — no runaway dispatching
         from app.models import Effort
         async with orch.db.session_factory() as s:
             e = await s.get(Effort, eid)

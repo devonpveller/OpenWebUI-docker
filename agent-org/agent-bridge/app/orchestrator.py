@@ -46,6 +46,7 @@ from .modules.capabilities import (
     read_broken_gitlinks,
     read_sibling_agent_prs,
     read_repo_state,
+    merge_branch,
 )
 from .modules.github_app import GitHubApp, build_github_app
 from .modules.grounding import Grounding, build_grounding
@@ -113,6 +114,82 @@ _BLOCKER_RE = re.compile(
     r"\bnot\s+(?:feasible|possible)\s+(?:in|as|here|with)\b|missing\s+(?:dependency|dependencies)|"
     r"insufficient\s+context|need(?:s)?\s+(?:the\s+)?(?:host|engine|parent)\s+(?:repo|context)",
     re.I | re.M)
+
+# ── ORG-READ BUILD LOGS (operator 2026-07-07: "the PM should have access to logs") ──────────
+# The org runs builds ITSELF and reasons over the real output — error counts, categories and
+# per-file clusters come from the log, never from a worker's self-report (live: the first true
+# delivery in 10+ rounds was reported "delivered NOTHING NEW" because no one ever built it;
+# 138 real errors surfaced only in the operator's own IDE). Generic across toolchains.
+_ERR_AFTER_RE = re.compile(r"^\s*ERRORS\s+AFTER\s*:\s*(\d+)", re.I | re.M)
+_ERR_PROTO_RE = re.compile(r"^\s*ERRORS(?:\s+TOTAL)?\s*:\s*(\d+)", re.I | re.M)
+_ERR_SUMMARY_RES = [
+    re.compile(r"(\d+)\s+Error\(s\)", re.I),                          # MSBuild
+    re.compile(r"Found\s+(\d+)\s+errors?", re.I),                     # tsc
+    re.compile(r"(\d+)\s+errors?\s+generated", re.I),                 # clang
+    re.compile(r"aborting due to\s+(\d+)\s+previous errors", re.I),   # rustc
+    re.compile(r"[=\s](\d+)\s+failed", re.I),                         # pytest/jest
+]
+_ERR_LINE_RE = re.compile(r"\berror\b\s*(?:[A-Z]{1,5}\d{2,5})?\s*:", re.I)
+_ERR_FILE_RE = re.compile(r"^\s*(\S+?\.[A-Za-z0-9]{1,6})\s*[\(:]")
+
+
+def _error_lines(output: str) -> list[str]:
+    """Distinct error lines from a build log (MSBuild repeats each error in the final summary
+    with a `[project]` suffix — normalize that away so counts aren't doubled)."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for ln in (output or "").splitlines():
+        if not _ERR_LINE_RE.search(ln):
+            continue
+        key = re.sub(r"\s*\[[^\]]*\]\s*$", "", ln.strip())
+        if key and key not in seen:
+            seen.add(key)
+            out.append(key)
+    return out
+
+
+def _error_count(output: str) -> int | None:
+    """Total errors in a build log / check report: the org's own `ERRORS:` protocol first, then a
+    toolchain summary line, then the distinct-error-line count. None = no error evidence at all."""
+    m = _ERR_AFTER_RE.search(output or "") or _ERR_PROTO_RE.search(output or "")
+    if m:
+        return int(m.group(1))
+    best: int | None = None
+    for rx in _ERR_SUMMARY_RES:
+        for sm in rx.finditer(output or ""):
+            n = int(sm.group(1))
+            best = n if best is None or n > best else best
+    if best is not None:
+        return best
+    lines = _error_lines(output)
+    return len(lines) if lines else None
+
+
+def _error_files(output: str) -> dict[str, list[str]]:
+    """Error lines clustered by the file they name (lines with no recognizable file → '')."""
+    clusters: dict[str, list[str]] = {}
+    for ln in _error_lines(output):
+        m = _ERR_FILE_RE.match(ln)
+        clusters.setdefault(m.group(1) if m else "", []).append(ln)
+    return clusters
+
+
+def _error_brief(output: str) -> str:
+    """One honest line of SCOPE for the operator — count, file spread, top categories — straight
+    from the log (the PM 'expresses what effort the workers are about to undergo')."""
+    from collections import Counter
+    lines = _error_lines(output)
+    n = _error_count(output) or len(lines)
+    if not n:
+        return "no machine-readable errors in the log"
+    files = {f for f in _error_files(output) if f}
+    cats = Counter()
+    for ln in lines:
+        m = _ERR_LINE_RE.search(ln)
+        cats[ln[m.end():].strip()[:70] or ln[:70]] += 1
+    top = "; ".join(f"“{msg}” ×{c}" for msg, c in cats.most_common(3))
+    return (f"{n} error(s)" + (f" across {len(files)} file(s)" if files else "")
+            + (f" — top: {top}" if top else ""))
 
 # An ERROR-REPORT effort closes when the reported failure is GONE, not when a plausible edit
 # exists — the worker must reproduce, fix, and re-verify (live 2026-07-05: four attempts shipped
@@ -499,6 +576,16 @@ class Orchestrator:
         # Evolved goals queued by a machine-detected failure (red check / unresolved verdicts) —
         # launched by delegate's finally the moment the current run closes (auto-iteration).
         self._iterate_after: dict[str, str] = {}
+        # BURN-DOWN (operator 2026-07-07: "all 138 errors should have been worked through
+        # autonomously and not elevated in the first place"): a RED org-run build doesn't stop at
+        # a fixed retry count — it starts a progress-based loop that keeps dispatching fix rounds
+        # while the error count still falls. Failing logs queued here by paths inside delegate
+        # are launched by delegate's finally (single-flight-safe).
+        self._burndown_after: dict[str, str] = {}
+        # effort → branch head the ORG itself verified green (its own build run + log, not a
+        # worker's word) — the finish path skips a duplicate composition check and the closure is
+        # labelled "org-verified". Cleared on every fresh dispatch.
+        self._org_verified: dict[str, str] = {}
         # Advisory research jobs IN FLIGHT (transparency: PM work must be visible) — shown in
         # /status; updated by the state-driven poll's progress callback. {key: {question, state,
         # started}}. In-memory only (a restart orphans the job on the engine side, harmlessly).
@@ -1379,6 +1466,13 @@ class Orchestrator:
                 await self.chat.post(
                     channel_id, "I couldn't find a composition effort to run in the host context — "
                     "name it (`effort-…`) and I'll run it there.", thread_id=thread_id)
+            return
+        # NL-FIRST build-log access (operator 2026-07-07: "the PM should have access to logs") —
+        # every build the org ran itself is kept as evidence; hand over the same log the PM used.
+        if await self._nl_show_log(message, channel_id, thread_id):
+            return
+        # NL-FIRST burn-down resume: "keep going" after a stalled burn-down buys more rounds.
+        if await self._nl_burndown_resume(message, channel_id, thread_id):
             return
         # NL-FIRST knowledge sync (RS.2): "sync <project> docs/knowledge/sources" — a governed
         # operator-plane trigger, resolved deterministically like merge/PR above.
@@ -3036,13 +3130,17 @@ class Orchestrator:
         if not res.ok:
             return (f"\n⚠️ _The code landed, but wiring it into `{host_slug}` failed: "
                     f"{res.summary} — `{host_slug}` still points at the old `{path}` commit._")
+        # PR STAGING (operator 2026-07-07: "a PR was still created even though there's a lot
+        # more work to be done"): the build check runs FIRST; a wiring PR only exists on green.
+        check_note = await self._composition_check(effort_id, host_slug, host_url, branch)
+        if effort_id in self._comp_check_failed:
+            return (f"\n🔗 gitlink bumped to `{delivery.head_sha[:10]}` on `{host_slug}`/"
+                    f"`{branch}`, but the host build is RED — **no wiring PR opened** (PRs wait "
+                    f"for green).{check_note}")
         wiring_pr = await self._open_delivery_pr(
             effort_id, host_url, branch, merge_id=f"merge-{effort_id}-engine",
             body_extra=f"WIRING half of a composition: bumps `{path}` to `{delivery.head_sha[:10]}` "
                        f"(see the paired code PR on the vendored repo).\n")
-        # A vendored project's code can ONLY be compiled through its host's build — verify the
-        # wiring branch by machine before anyone is invited to merge it.
-        check_note = await self._composition_check(effort_id, host_slug, host_url, branch)
         return (f"\n🔗 **Wiring half:** `{host_slug}` vendors this at `{path}` — gitlink bumped to "
                 f"`{delivery.head_sha[:10]}` on `{branch}`"
                 + (f", paired PR: {wiring_pr}" if wiring_pr else "")
@@ -3098,6 +3196,11 @@ class Orchestrator:
         couldn't init — an environmental failure the org kept reading as a code failure). So we
         strip the git-setup segments from check_cmd and run ONLY the build. Red ⇒ blocks the merge
         invite and the effort stays open."""
+        # ORG-VERIFIED short-circuit: the org already ran this build itself (burn-down green /
+        # a verified already-in-place delivery) — don't pay for a duplicate check of the same head.
+        if self._org_verified.get(effort_id):
+            return (f"\n🧪 **Org-verified green** — I ran this build myself on the delivered head "
+                    f"(`{self._org_verified[effort_id][:10]}`; log on file). No duplicate check.")
         p = await self.projects.get(host_slug)
         check_cmd = ((p or {}).get("check_cmd") or "").strip()
         if not check_cmd:
@@ -3117,9 +3220,10 @@ class Orchestrator:
             f"COMPOSITION CHECK (verification only — change NOTHING). Your workspace is already "
             f"checked out on `{branch}` with all submodules initialized. Run exactly:\n"
             f"  cd /workspace && {build_only}\n"
-            f"If it exits 0, reply exactly `CHECK: PASS`. If it fails, reply `CHECK: FAIL` "
-            f"followed by the last ~20 lines of the failing output. Do NOT run git commands and "
-            f"do NOT attempt fixes in this step."
+            f"If it exits 0, reply exactly `CHECK: PASS`. If it fails, reply `CHECK: FAIL`, then "
+            f"on the next line `ERRORS: <total error count>`, then EVERY DISTINCT error line "
+            f"from the output (deduplicated, keep file paths, up to 120 lines), then the final "
+            f"summary line. Do NOT run git commands and do NOT attempt fixes in this step."
         )
         try:
             repo_token = await self._project_token(effort_id)
@@ -3138,14 +3242,17 @@ class Orchestrator:
         if "CHECK: FAIL" in out:
             tail = out.split("CHECK: FAIL", 1)[1].strip()[:600]
             self._comp_check_failed.add(effort_id)
-            iterating = await self._auto_iterate(
-                effort_id, f"the composition check failed on `{host_slug}` (`{check_cmd}`)", tail)
-            follow = ("_Auto-iterating — the worker continues from this failing output; no "
-                      "operator action needed._" if iterating else
-                      "_Auto-iteration limit reached — say “re-run it” to continue, or tell me "
-                      "how to proceed._")
-            return (f"\n❌ **Composition check FAILED** on `{host_slug}` — do **NOT** merge yet:\n"
-                    f"```\n{tail}\n```\n{follow}")
+            await self.audit.log("org_build_check", effort_id=effort_id,
+                                 payload={"verdict": "fail", "errors": _error_count(out),
+                                          "owner": host_slug, "cmd": check_cmd[:200],
+                                          "log": out[:6000]})
+            # A red build with a work list is not a dead end — burn it down (progress-based,
+            # autonomous), don't stop at a fixed retry count (operator 2026-07-07).
+            self._queue_burndown(effort_id, out)
+            return (f"\n❌ **Composition check FAILED** on `{host_slug}` — "
+                    f"{_error_brief(out)}:\n```\n{tail}\n```\n"
+                    f"_Burn-down engaged: I'll drive fix rounds autonomously (re-building after "
+                    f"each) and hold every PR/merge invite until it's green. No action needed._")
         return (f"\n🧪 _Composition check returned no verdict — verify the build yourself before "
                 f"merging._")
 
@@ -3480,6 +3587,71 @@ class Orchestrator:
             return
         await self._finish_effort(effort_id, result, delivery=delivery)
 
+    async def _nl_show_log(self, message: str, channel_id: str, thread_id: str | None) -> bool:
+        """NL-FIRST log access (operator 2026-07-07: "the PM should have access to logs"): the
+        org records every build it ran itself (`org_build_check` events, full output) — "show
+        the build log [for effort-x]" returns the newest one, so the operator reads the SAME
+        evidence the PM reasoned over instead of going to the worker for it."""
+        if not re.search(r"\b(?:show|see|view|get|share|paste)\b[^.\n]{0,40}?"
+                         r"\b(?:build\s+|check\s+|error\s+)?logs?\b", message, re.I):
+            return False
+        m_eid = re.search(r"\beffort-[A-Za-z0-9][\w-]*\b", message)
+        async with self.db.session_factory() as s:
+            q = select(Event).where(Event.kind == "org_build_check")
+            if m_eid:
+                q = q.where(Event.effort_id == m_eid.group(0))
+            ev = (await s.execute(q.order_by(Event.id.desc()).limit(1))).scalars().first()
+        if ev is None:
+            await self.chat.post(
+                channel_id,
+                "I have no org-run build logs yet"
+                + (f" for `{m_eid.group(0)}`" if m_eid else "")
+                + " — one appears every time I run a project's check myself (burn-down rounds, "
+                  "composition checks, no-changes verification).",
+                thread_id=thread_id)
+            return True
+        p = ev.payload or {}
+        logtxt = (p.get("log") or "").strip() or "(empty log)"
+        await self.chat.post(
+            channel_id,
+            f"🧾 **Org build log** — `{ev.effort_id}`, {ev.ts[:16]}Z, verdict "
+            f"**{p.get('verdict', '?')}**"
+            + (f", {p.get('errors')} error(s)" if p.get("errors") is not None else "")
+            + f", `{p.get('cmd', '')[:120]}`:\n```\n{logtxt[:3400]}\n```",
+            thread_id=thread_id)
+        return True
+
+    async def _nl_burndown_resume(self, message: str, channel_id: str,
+                                  thread_id: str | None) -> bool:
+        """“keep going” after a stalled burn-down = the operator buying more rounds — resume the
+        loop from the last org-run failing log. Only claims the phrase when a stalled burn-down
+        actually exists (otherwise the generic intake keeps it)."""
+        if not re.search(r"^\s*keep\s+going\b|\bcontinue\s+(?:the\s+)?burn-?down\b|"
+                         r"\bmore\s+rounds?\b", message.strip(), re.I):
+            return False
+        m_eid = re.search(r"\beffort-[A-Za-z0-9][\w-]*\b", message)
+        async with self.db.session_factory() as s:
+            q = select(Event).where(Event.kind == "burndown_stalled")
+            if m_eid:
+                q = q.where(Event.effort_id == m_eid.group(0))
+            ev = (await s.execute(q.order_by(Event.id.desc()).limit(1))).scalars().first()
+            eid = ev.effort_id if ev is not None else None
+            log_ev = None
+            if eid:
+                log_ev = (await s.execute(
+                    select(Event).where(Event.kind == "org_build_check",
+                                        Event.effort_id == eid)
+                    .order_by(Event.id.desc()).limit(1))).scalars().first()
+        if not eid:
+            return False   # no stalled burn-down — not ours to answer
+        failing = ((log_ev.payload or {}).get("log") if log_ev is not None else "") or ""
+        await self.chat.post(
+            channel_id,
+            f"▶ Resuming the burn-down on `{eid}` — more rounds, same rules (progress every "
+            f"round or I raise it with the trajectory).", thread_id=thread_id)
+        self._queue_burndown(eid, failing)
+        return True
+
     async def _project_token_for_slug(self, slug: str) -> str | None:
         """The deploy token for a project by SLUG (the host repo, for the recursive clone/push
         re-auth) — same resolution as `_project_token` but keyed on the project directly:
@@ -3544,6 +3716,8 @@ class Orchestrator:
             if repo and self.github is not None and self.s.github_app_enabled:
                 pre = await self._verify_delivery(effort_id, repo)
                 self._pre_dispatch_head[effort_id] = pre.head_sha or ""
+            # a fresh dispatch invalidates any prior org-verified verdict (new work, new head)
+            self._org_verified.pop(effort_id, None)
             # P4.0 gate: a high-blast-radius effort may not reach REAL-code execution until its
             # isolated dry-run is recorded complete. Routine efforts pass immediately.
             ok, reason = await self.exec_gate.may_execute(effort_id)
@@ -3621,7 +3795,12 @@ class Orchestrator:
             # machine-detected failure queued an evolved goal; launch it now that this run has
             # fully closed (the single-flight guard is released above).
             nxt = self._iterate_after.pop(effort_id, None)
-            if nxt:
+            burn = self._burndown_after.pop(effort_id, None)
+            if burn is not None:
+                # the burn-down supersedes a queued auto-iteration — it is the stronger loop
+                # (progress-based, org-verified every round) and owns the same failing output
+                self._spawn(self._burndown_loop(effort_id, burn))
+            elif nxt:
                 self._spawn(self.delegate(effort_id, channel_id, root_post_id, nxt))
 
     async def _run_step(self, effort_id, channel_id, root, step, i, n, repo, heavy, repo_token=None,
@@ -3781,9 +3960,30 @@ class Orchestrator:
         if pub is not None and "NO CHANGES:" in (pub.output or ""):
             if await self._no_changes_acceptable(effort_id, pub.output or ""):
                 return BranchDelivery(no_changes=True, branch=self._effort_branch(effort_id))
+            # The claim carries no proof — so the ORG builds it and READS THE LOG ITSELF instead
+            # of word-matching the worker (operator 2026-07-07: one NO-CHANGES claim was false,
+            # the next was TRUE, and word-matching mis-called both — only a real build tells
+            # them apart, and its failure output is the burn-down's work list, not a dead end).
+            d0 = await self._verify_delivery(effort_id, repo)
+            verdict, out, _n = await self._org_build_check(effort_id, on_branch=d0.landed)
+            if verdict == "pass":
+                await self.comms.post(
+                    Intent.worker_activity,
+                    "✅ the worker claims nothing needed changing — I ran the build **myself** "
+                    "and it PASSES (org-verified; log on file). Accepting the no-op as done.",
+                    effort_id=effort_id)
+                if d0.landed:
+                    self._org_verified[effort_id] = d0.head_sha or ""
+                    return d0
+                return BranchDelivery(no_changes=True, branch=self._effort_branch(effort_id))
+            if verdict == "fail":
+                self._queue_burndown(effort_id, out)
+                return None
+            # the org couldn't run a build here — the old proof-or-iterate ladder stands
             if await self._auto_iterate(
                     effort_id, "the worker claimed NO CHANGES on a fix/build request without "
-                    "showing the build passes", pub.output or ""):
+                    "showing the build passes (and the org has no runnable check here)",
+                    pub.output or ""):
                 return None
             await self.comms.post(
                 Intent.operator_reply,
@@ -3949,6 +4149,379 @@ class Orchestrator:
         )
         return True
 
+    def _queue_burndown(self, effort_id: str, failing_log: str) -> None:
+        """Start (or defer) the burn-down for a RED org build. Inside delegate's single-flight the
+        loop must wait for the current run to close — delegate's finally launches it; anywhere
+        else it starts immediately."""
+        if effort_id in self._delegating:
+            self._burndown_after[effort_id] = failing_log
+        else:
+            self._spawn(self._burndown_loop(effort_id, failing_log))
+
+    async def _org_build_check(self, effort_id: str, *, on_branch: bool = True
+                               ) -> tuple[str, str, int | None]:
+        """THE PM READS THE LOGS (operator 2026-07-07): the org runs the project's build ITSELF
+        and reasons over the full output — a worker's self-report is never the evidence. Resolves
+        the sufficient workspace automatically: a vendored project builds inside its HOST
+        (recursive clone, the effort branch checked out at the vendored path); a plain project
+        builds on its own branch. Returns (pass|fail|unknown, log, error_count) and records the
+        log as an `org_build_check` event so the PM's claims — and the operator, via "show the
+        build log" — always trace to real evidence. `on_branch=False` checks the repo state as-is
+        (a NO-CHANGES claim, where no branch may exist)."""
+        proj = await self._effort_project(effort_id)
+        branch = self._effort_branch(effort_id)
+        host = await self._vendored_host(proj) if proj else None
+        check_owner = host[0] if host else proj
+        p = await self.projects.get(check_owner) if check_owner else None
+        check_cmd = ((p or {}).get("check_cmd") or "").strip()
+        loc = await self.router.effort_thread(effort_id)
+        if not check_cmd:
+            return "unknown", f"no check command configured for `{check_owner}`", None
+        if not loc:
+            return "unknown", "no effort thread", None
+        channel_id, root = loc
+        build_only = self._build_segment(check_cmd)
+        if host:
+            host_slug, sub_path, host_url, _sib = host
+            focus, token, recurse = host_url, await self._project_token_for_slug(host_slug), True
+            checkout = (f"cd /workspace/{sub_path} && git fetch origin {branch} && "
+                        f"git checkout -B {branch} FETCH_HEAD && cd /workspace && "
+                        if on_branch else "")
+        else:
+            repo = await self._effort_repo(effort_id) or ""
+            if not repo:
+                return "unknown", "no repo focused", None
+            focus = f"{repo}#{branch}" if on_branch else repo
+            token, recurse, checkout = await self._project_token(effort_id), False, ""
+        instruction = (
+            f"ORG BUILD CHECK (verification only — run EXACTLY this, change nothing else, no "
+            f"other git writes):\n  {checkout}{build_only}\n"
+            f"If the build exits 0, reply exactly `CHECK: PASS`.\n"
+            f"If it fails, reply `CHECK: FAIL`, then on the next line `ERRORS: <total error "
+            f"count>`, then EVERY DISTINCT error line from the output (deduplicated, keep file "
+            f"paths, up to 120 lines), then the final summary line. Do NOT attempt any fixes."
+        )
+        try:
+            result = await self.router.wake(
+                effort_id, role="worker-default", thread_id=root, channel_id=channel_id,
+                session_id=await self._session_for(effort_id), instruction=instruction,
+                repo=focus, repo_token=token, recurse_submodules=recurse,
+            )
+        except Exception as exc:  # noqa: BLE001 — an unrunnable check is a verdict, never fatal
+            return "unknown", f"check couldn't run: {str(exc)[:200]}", None
+        out = (result.output or "") if result is not None else ""
+        if "CHECK: PASS" in out:
+            verdict, n = "pass", 0
+        elif "CHECK: FAIL" in out:
+            verdict, n = "fail", _error_count(out)
+        else:
+            verdict, n = "unknown", None
+        await self.audit.log("org_build_check", effort_id=effort_id,
+                             payload={"verdict": verdict, "errors": n, "owner": check_owner,
+                                      "cmd": check_cmd[:200], "log": out[:6000]})
+        return verdict, out, n
+
+    async def _burndown_loop(self, effort_id: str, failing_log: str) -> None:
+        """AUTONOMOUS ERROR BURN-DOWN (operator 2026-07-07: "all 138 errors should have been
+        worked through autonomously and not elevated in the first place" + "multiple workers
+        where there is natural segregation of tasks"): a RED org build starts a PROGRESS-based
+        loop, not a fixed retry count. Each round: dispatch fix work (fanned across workers when
+        the errors split cleanly by file), then the org re-builds ITSELF and reads the log. Keep
+        going while the error count falls; 0 → the normal green finish (PR + merge gate, held
+        until now); two rounds without progress (or the round cap) → an honest elevation carrying
+        the full trajectory. Generic for any project/toolchain with a check command."""
+        if effort_id in self._delegating:
+            self._burndown_after[effort_id] = failing_log
+            return
+        self._delegating.add(effort_id)
+        try:
+            loc = await self.router.effort_thread(effort_id)
+            repo = await self._effort_repo(effort_id) or ""
+            if not loc or not repo:
+                return
+            channel_id, root = loc
+            await self._reopen_if_closed(effort_id)
+            await self.router.update_effort_card(effort_id, "working")
+            n0 = _error_count(failing_log)
+            counts: list[int] = [n0 if n0 is not None else -1]
+            brief = _error_brief(failing_log)
+            # SCOPE BRIEF — the PM says what work is about to be undertaken, to CONFIRM but not
+            # WAIT (operator 2026-07-07): the operator can stop it; silence means proceed.
+            msg = (f"🔥 **Burn-down engaged** on **{effort_id}** — the org's own build is RED: "
+                   f"{brief}.\nPlan: I'll drive fix rounds **autonomously** (multiple workers in "
+                   f"parallel when the errors split cleanly by file), re-run the build myself "
+                   f"after every round, and report the error trajectory as I go. PRs and merge "
+                   f"invites are HELD until it builds green.\n_No action needed — say “stop” to "
+                   f"halt me, “show the build log” for the raw evidence._")
+            await self.comms.post(Intent.worker_activity, msg, effort_id=effort_id)
+            await self.comms.post(Intent.operator_reply, msg,
+                                  thread_id=self._mgmt_thread_of(effort_id))
+            await self.audit.log("burndown_started", effort_id=effort_id,
+                                 payload={"errors": n0, "brief": brief[:300]})
+            errors_log = failing_log
+            branch_exists = (await self._verify_delivery(effort_id, repo)).landed
+            stall = 0
+            last_result = None
+            for rnd in range(1, 9):
+                if await self.gate.is_killed() or await self.gate.is_frozen(effort_id):
+                    await self.comms.post(
+                        Intent.worker_activity,
+                        f"⏸ burn-down halted at round {rnd} — the effort is frozen or the kill "
+                        f"switch is engaged. The branch keeps all progress; say “resume” to "
+                        f"continue.", effort_id=effort_id)
+                    return
+                results = await self._burndown_work(
+                    effort_id, channel_id, root, rnd, errors_log, branch_exists=branch_exists)
+                last_result = next((r for r in reversed(results) if r is not None), last_result)
+                for r in results:   # a stated constraint is HEARD mid-loop too, never steamrolled
+                    blk = self._extract_blocker((r.output or "") if r else "")
+                    if blk:
+                        await self._elevate_blocker(effort_id, blk)
+                        return
+                if not branch_exists:
+                    branch_exists = (await self._verify_delivery(effort_id, repo)).landed
+                verdict, out, n = await self._org_build_check(effort_id, on_branch=branch_exists)
+                if verdict == "pass":
+                    counts.append(0)
+                    traj = " → ".join(str(c) if c >= 0 else "?" for c in counts)
+                    await self.comms.post(
+                        Intent.worker_activity,
+                        f"✅ **round {rnd}: GREEN** — error trajectory **{traj}**. Org-verified "
+                        f"(I ran the build myself; log on file). Proceeding to PR + merge gate.",
+                        effort_id=effort_id)
+                    await self.audit.log("burndown_green", effort_id=effort_id,
+                                         payload={"rounds": rnd, "trajectory": counts})
+                    delivery = await self._verify_delivery(effort_id, repo)
+                    if not delivery.landed:
+                        await self.comms.post(
+                            Intent.operator_reply,
+                            f"⚠️ **{effort_id}**: the build is green but no branch landed on the "
+                            f"remote — the last push may have failed. Not done; reply to re-run "
+                            f"the publish.", thread_id=self._mgmt_thread_of(effort_id))
+                        await self.router.update_effort_card(effort_id, "needs-attention")
+                        return
+                    self._org_verified[effort_id] = delivery.head_sha or ""
+                    if not await self._gate_standing_intent(
+                            effort_id, channel_id, root, repo, delivery):
+                        return
+                    from types import SimpleNamespace
+                    res = last_result or SimpleNamespace(
+                        status="done", output=f"burn-down green after {rnd} round(s)")
+                    await self._finish_effort(effort_id, res, delivery=delivery)
+                    return
+                if verdict == "unknown":
+                    stall += 1
+                    await self.comms.post(
+                        Intent.worker_activity,
+                        f"⚠️ round {rnd}: the org build check returned no verdict "
+                        f"({out[:120]}) — {stall}/2 before I raise it.", effort_id=effort_id)
+                else:
+                    counts.append(n if n is not None else counts[-1])
+                    prev = counts[-2]
+                    improved = prev < 0 or (n is not None and n < prev)
+                    await self.audit.log("burndown_round", effort_id=effort_id,
+                                         payload={"round": rnd, "errors": n, "prev": prev})
+                    if improved:
+                        stall = 0
+                        await self.comms.post(
+                            Intent.worker_activity,
+                            f"🔥 round {rnd}: **{prev if prev >= 0 else '?'} → {n}** errors — "
+                            f"progress, continuing autonomously.", effort_id=effort_id)
+                    else:
+                        stall += 1
+                        await self.comms.post(
+                            Intent.worker_activity,
+                            f"⚠️ round {rnd}: no progress ({prev} → {n} errors) — {stall}/2 "
+                            f"before I raise it with the full picture.", effort_id=effort_id)
+                    errors_log = out
+                if stall >= 2:
+                    await self._burndown_elevate(effort_id, counts, errors_log,
+                                                 "two consecutive rounds without progress")
+                    return
+            await self._burndown_elevate(effort_id, counts, errors_log, "round cap (8) reached")
+        finally:
+            self._delegating.discard(effort_id)
+            # a red queued DURING this loop (e.g. the finish path's D2 disagreed) re-enters —
+            # bounded: every loop's stall detector elevates after 2 rounds without progress
+            queued = self._burndown_after.pop(effort_id, None)
+            if queued is not None:
+                self._spawn(self._burndown_loop(effort_id, queued))
+
+    async def _burndown_work(self, effort_id: str, channel_id: str, root: str, rnd: int,
+                             errors_log: str, *, branch_exists: bool) -> list:
+        """One burn-down round's WORK dispatch. When the errors cluster into two file-disjoint
+        groups (and the branch exists to base parts on), fan out across workers on part branches
+        and fold them back via the API — the operator's "multiple workers where the work
+        naturally segregates". Otherwise a single evolved wake on the effort branch."""
+        proj = await self._effort_project(effort_id)
+        host = await self._vendored_host(proj) if proj else None
+        branch = self._effort_branch(effort_id)
+        repo = await self._effort_repo(effort_id) or ""
+        groups = self._partition_error_groups(_error_lines(errors_log))
+        can_fan = (len(groups) == 2 and branch_exists and self.github is not None
+                   and self.s.github_app_enabled)
+        if not can_fan:
+            flat = [ln for g in groups for ln in g]
+            res = await self._burndown_wake(effort_id, channel_id, root, rnd, flat, part=None,
+                                            host=host, branch=branch, repo=repo,
+                                            branch_exists=branch_exists)
+            return [res]
+        await self.comms.post(
+            Intent.worker_activity,
+            f"🔀 round {rnd}: the errors split into {len(groups)} file-disjoint groups "
+            f"({len(groups[0])} + {len(groups[1])} lines) — fanning out across workers in "
+            f"parallel on part branches; I'll fold them back automatically.",
+            effort_id=effort_id)
+
+        async def one(i: int, g: list[str]):
+            try:
+                return await self._burndown_wake(effort_id, channel_id, root, rnd, g, part=i,
+                                                 host=host, branch=branch, repo=repo,
+                                                 branch_exists=True)
+            except NoCapacityError:
+                return None   # only one slot free — the other group re-lists next round
+            except Exception as exc:  # noqa: BLE001 — one part failing must not kill the round
+                log.warning("burn-down part %s failed for %s: %s", i, effort_id, exc)
+                return None
+        results = list(await asyncio.gather(*(one(i, g) for i, g in enumerate(groups, 1))))
+        folded = []
+        for i in range(1, len(groups) + 1):
+            part_branch = f"{branch}-pt{i}"
+            r = await merge_branch(
+                self.github, repo, branch, part_branch,
+                message=f"{effort_id}: fold burn-down part {i} (round {rnd})",
+                api_base=self.s.github_api_base, transport=self._gh_transport)
+            folded.append(f"pt{i}: {r.summary}")
+            if r.ok:  # the part is folded in — delete the transient part branch (hygiene: the
+                # operator asked for no branch sprawl; its commits now live on the effort branch)
+                await delete_branch(self.github, repo, part_branch,
+                                    api_base=self.s.github_api_base,
+                                    transport=self._gh_transport)
+        await self.audit.log("burndown_parts", effort_id=effort_id,
+                             payload={"round": rnd, "parts": len(groups),
+                                      "fold": [f[:120] for f in folded]})
+        await self.comms.post(Intent.worker_activity,
+                              "🔀 parts folded back into the effort branch — "
+                              + "; ".join(folded), effort_id=effort_id)
+        return results
+
+    async def _burndown_wake(self, effort_id: str, channel_id: str, root: str, rnd: int,
+                             err_lines: list[str], *, part: int | None, host, branch: str,
+                             repo: str, branch_exists: bool):
+        """One worker wake of a burn-down round: continue from the delivery branch (host context
+        for a vendored project — the only place its build can run), fix the listed errors,
+        re-build, push, and report `ERRORS AFTER:` so progress is machine-readable."""
+        try:
+            _, goal, _ = await self.charters.current_goal(effort_id)
+        except Exception:  # noqa: BLE001
+            goal = ""
+        base_goal = (goal or "").split("\n\nITERATION ")[0].strip()[:2500]
+        push_branch = f"{branch}-pt{part}" if part else branch
+        slice_txt = "\n".join(err_lines[:60]) or "(see the failing log in the thread above)"
+        files = sorted({m.group(1) for m in (
+            _ERR_FILE_RE.match(ln) for ln in err_lines) if m})
+        scope = (f"ONLY touch these files — a sibling worker owns the rest in parallel: "
+                 + ", ".join(files[:20]) + "\n   ") if part and files else ""
+        if host:
+            host_slug, sub_path, host_url, _sib = host
+            hp = await self.projects.get(host_slug)
+            build_line = self._build_segment(((hp or {}).get("check_cmd") or "").strip()) \
+                or "(build the solution as usual)"
+            workspace = (f"Your workspace is `{host_slug}` with ALL submodules present (the only "
+                         f"place this build can run); the work happens INSIDE `{sub_path}`.")
+            checkout = (f"cd /workspace/{sub_path} && (git fetch origin {branch} && "
+                        f"git checkout -B {push_branch} FETCH_HEAD || git checkout -b {push_branch})")
+            publish = (f"cd /workspace/{sub_path} && git add -A && git commit -m "
+                       f"\"{effort_id}: burn-down round {rnd}\" && git push origin {push_branch}")
+            focus, recurse = host_url, True
+            token = await self._project_token_for_slug(host_slug)
+        else:
+            pp = await self.projects.get(await self._effort_project(effort_id) or "")
+            build_line = self._build_segment(((pp or {}).get("check_cmd") or "").strip()) \
+                or "(build/test as usual)"
+            workspace = f"Your workspace is the project repo, on `{branch}`."
+            checkout = f"git checkout -B {push_branch}"
+            publish = (f"git add -A && git commit -m \"{effort_id}: burn-down round {rnd}\" && "
+                       f"git push origin {push_branch}")
+            focus = f"{repo}#{branch}" if branch_exists else repo
+            recurse, token = False, await self._project_token(effort_id)
+        instruction = (
+            f"BURN-DOWN ROUND {rnd} (automatic — the org re-builds after every round and keeps "
+            f"going while the error count falls). {workspace} The org's own build currently "
+            f"FAILS; your ONLY job this round is to clear as many of the errors below as you can "
+            f"and PUSH real commits.\n"
+            f"1. Continue from the delivered work: {checkout}\n"
+            f"2. {scope}Fix these errors (mechanical, category by category; prefer small, "
+            f"uniform changes):\n{slice_txt}\n"
+            f"3. Re-build from /workspace: {build_line} — iterate until your slice is clean (or "
+            f"what remains is outside your file scope).\n"
+            f"4. Publish: {publish}\n"
+            f"5. Report — FIRST line exactly `ERRORS AFTER: <count from your final build>`, then "
+            f"any remaining error lines. If genuinely blocked, report `BLOCKED:` / `NEEDS:` / "
+            f"`FEASIBLE:` instead of guessing.\n\n"
+            f"CONTEXT — the goal this serves:\n{base_goal}"
+        )
+        session = f"{effort_id}~pt{part}" if part else await self._session_for(effort_id)
+        return await self.router.wake(
+            effort_id, role="worker-default", thread_id=root, channel_id=channel_id,
+            session_id=session, instruction=instruction,
+            repo=focus, repo_token=token, recurse_submodules=recurse,
+        )
+
+    @staticmethod
+    def _partition_error_groups(lines: list[str]) -> list[list[str]]:
+        """Split an error list into (at most two) FILE-DISJOINT groups for parallel workers —
+        only when the work is big enough to pay for a second recursive workspace (≥24 distinct
+        errors) and both halves are substantial (≥8 each). File-disjoint means the parts merge
+        cleanly; anything less returns one group (sequential is always safe)."""
+        if len(lines) < 24:
+            return [lines]
+        clusters: dict[str, list[str]] = {}
+        loose: list[str] = []
+        for ln in lines:
+            m = _ERR_FILE_RE.match(ln)
+            if m:
+                clusters.setdefault(m.group(1), []).append(ln)
+            else:
+                loose.append(ln)
+        if len(clusters) < 2:
+            return [lines]
+        buckets: list[list[str]] = [[], []]
+        sizes = [0, 0]
+        for f in sorted(clusters, key=lambda k: -len(clusters[k])):
+            i = 0 if sizes[0] <= sizes[1] else 1
+            buckets[i].extend(clusters[f])
+            sizes[i] += len(clusters[f])
+        buckets[0].extend(loose)   # un-attributable lines ride with group 1 (its worker may fix them)
+        if min(sizes) < 8:
+            return [lines]
+        return buckets
+
+    async def _burndown_elevate(self, effort_id: str, counts: list[int], errors_log: str,
+                                why: str) -> None:
+        """Burn-down stopped short of green — the HONEST, evidence-carrying elevation: the full
+        error trajectory (from the org's own builds, not worker claims), what still fails, and
+        the real next moves. The branch keeps all progress; the effort stays open."""
+        traj = " → ".join(str(c) if c >= 0 else "?" for c in counts)
+        brief = _error_brief(errors_log)
+        remaining = "\n".join(_error_lines(errors_log)[:15])
+        await self.audit.log("burndown_stalled", effort_id=effort_id,
+                             payload={"why": why, "trajectory": counts})
+        body = (
+            f"🧱 **{effort_id}** — burn-down STALLED ({why}). The honest picture, from the org's "
+            f"own build logs:\n"
+            f"- error trajectory across rounds: **{traj}**\n"
+            f"- still failing: {brief}\n"
+            + (f"```\n{remaining[:900]}\n```\n" if remaining else "")
+            + f"The branch keeps every fix so far — nothing is lost. What remains hasn't yielded "
+            f"to mechanical rounds, which usually means it needs a judgment call (an API choice, "
+            f"a design decision, missing context). Tell me how to proceed — answer the open "
+            f"question, re-scope, or say **“keep going”** for more rounds.")
+        await self.comms.post(Intent.escalation, body, effort_id=effort_id)
+        await self.comms.post(Intent.operator_reply, body,
+                              thread_id=self._mgmt_thread_of(effort_id))
+        await self.router.update_effort_card(effort_id, "needs-attention")
+
     def _is_stale_head(self, effort_id: str, delivery: BranchDelivery) -> bool:
         """True when the 'landed' branch head is EXACTLY where it was before this run dispatched —
         i.e. the branch pre-existed and this run contributed nothing (no pre-head recorded, or a
@@ -3965,6 +4538,43 @@ class Orchestrator:
         the normal gates; still stale → state-check, then honest escalation. Never opens a PR or
         wires a host to a stale commit."""
         branch = delivery.branch
+        # HONESTY FIRST (live 2026-07-07: the FIRST real success in 10+ rounds — the converged
+        # branch already carried the requested change — was reported "delivered NOTHING NEW"):
+        # a stale head whose branch ALREADY DIFFERS from base is PRIOR DELIVERED WORK, not an
+        # empty run. Say that, then let the ORG verify it by building, instead of re-engaging
+        # the worker to re-do finished work (or worse, mislabelling success as failure).
+        if delivery.files_changed and delivery.files_changed > 0:
+            await self.comms.post(
+                Intent.worker_activity,
+                f"ℹ️ no NEW commits this round — but `{branch}` **already carries a delivery** "
+                f"({delivery.ahead} commit(s), {delivery.files_changed} file(s) changed vs base) "
+                f"from an earlier round. That is not “nothing new” — verifying it by running "
+                f"the build myself…",
+                effort_id=effort_id,
+            )
+            verdict, out, _n = await self._org_build_check(effort_id)
+            if verdict == "pass":
+                self._org_verified[effort_id] = delivery.head_sha or ""
+                await self.comms.post(
+                    Intent.worker_activity,
+                    "✅ org-verified: the build PASSES with the branch as delivered — the "
+                    "requested change was already in place. Proceeding through the normal gates.",
+                    effort_id=effort_id)
+                if not await self._gate_gitlinks(effort_id, channel_id, root, repo):
+                    return None
+                if not await self._gate_standing_intent(
+                        effort_id, channel_id, root, repo, delivery):
+                    return None
+                return delivery
+            if verdict == "fail":
+                await self.comms.post(
+                    Intent.worker_activity,
+                    f"🔍 the branch carries real changes, but my own build of it is RED — "
+                    f"{_error_brief(out)}. This is unfinished work, not a failed delivery.",
+                    effort_id=effort_id)
+                self._queue_burndown(effort_id, out)
+                return None
+            # unknown → no runnable check; fall through to the classic re-engage below
         await self.comms.post(
             Intent.worker_activity,
             f"🔍 `{branch}` exists on the remote but its head (`{delivery.head_sha[:10]}`) is "
@@ -4579,17 +5189,21 @@ class Orchestrator:
             if status2 == "pass":
                 return (f"\n🧪 **D2 checks passed after one fix round** (`{check_cmd}`, "
                         f"worker-reported).", delivery)
-        # STILL red → withdraw the merge gate; the PR stays open for human inspection. Never forward.
+        # STILL red → withdraw the merge gate (the PR stays open for human inspection) and hand
+        # the failing log to the BURN-DOWN — a red with a work list keeps being worked, not
+        # parked on the operator (operator 2026-07-07). Never forward on red.
         self._pending_merge.pop(merge_id, None)
         await self.pending.delete(merge_id)
+        self._queue_burndown(effort_id, tail)
         await self.comms.post(
             Intent.escalation,
             f"⛔ **D2 checks still failing** after a fix round (`{check_cmd}`). The merge gate is "
-            f"withdrawn — the PR stays open for your inspection; nothing moves forward on red.",
+            f"withdrawn — nothing moves forward on red. Burn-down engaged: I'll keep driving fix "
+            f"rounds autonomously and re-invite the merge when it's green.",
             effort_id=effort_id,
         )
-        return (f"\n⛔ **D2 checks FAILED** (`{check_cmd}`) — merge gate withdrawn; the PR stays "
-                f"open for inspection. See the effort thread for the failure.", delivery)
+        return (f"\n⛔ **D2 checks FAILED** (`{check_cmd}`) — merge gate withdrawn; burn-down "
+                f"continues autonomously. See the effort thread for the failing output.", delivery)
 
     async def _execute_merge(self, merge_id: str, reply=None) -> None:
         """D4 — perform the operator-approved merge (the approve IS the §3 clearance for this
@@ -4930,8 +5544,26 @@ class Orchestrator:
             sha = f" @ `{delivery.head_sha[:10]}`" if delivery.head_sha else ""
             where = (f"pushed to branch **`{branch}`**{sha} (verified on the remote) — "
                      f"`git fetch origin {branch}` to see it")
-            # D1: open the PR that makes this delivery VISIBLE; merge stays yours (D4).
             eff_repo = await self._effort_repo(effort_id)
+            # ORG BUILD BEFORE ANY PR (operator 2026-07-07: "a PR was still created even though
+            # there's a lot more work to be done"): on a composition, the wiring bump + the
+            # HOST BUILD run FIRST — a red build opens NO PRs and hands off to the burn-down
+            # (which re-enters here on green, org-verified, and the PRs open then).
+            wire_note = ""
+            if effort_id not in self._composition_managed:
+                wire_note = await self._wire_vendored_delivery(effort_id, delivery)
+            if effort_id in self._comp_check_failed:
+                self._comp_check_failed.discard(effort_id)
+                hold = (f"⏳ **{effort_id}**: code landed on `{branch}`{sha}, but the org's own "
+                        f"build of the composition is **RED** — **not done, no PR opened**. "
+                        f"Burn-down continues autonomously; the PR + merge invite come when it "
+                        f"builds green. No action needed.{wire_note}")
+                await self.comms.post(Intent.closure, hold, effort_id=effort_id)
+                await self.comms.post(Intent.operator_reply, hold,
+                                      thread_id=self._mgmt_thread_of(effort_id))
+                await self.router.update_effort_card(effort_id, "working")
+                return
+            # D1: open the PR that makes this delivery VISIBLE; merge stays yours (D4).
             pr_url = await self._open_delivery_pr(
                 effort_id, eff_repo, branch, verified_sha=delivery.head_sha)
             if pr_url:
@@ -4944,10 +5576,7 @@ class Orchestrator:
                           f"merge, or merge on GitHub after review._" if gate_open else "")
                 where += f"\n📬 **PR opened for review:** {pr_url}{d2_note}{invite}"
                 where += await self._sibling_pr_note(eff_repo, branch)
-                # Composition pairing for intake-born deliveries (a plan-owned effort's wiring is
-                # handled by _run_composition — never bump twice).
-                if effort_id not in self._composition_managed:
-                    where += await self._wire_vendored_delivery(effort_id, delivery)
+                where += wire_note
                 # The operator must never be left asking "what do I DO with this fix?" (live
                 # 2026-07-06) — every landed delivery carries exact local apply/verify steps.
                 where += await self._apply_note(effort_id, eff_repo, branch)

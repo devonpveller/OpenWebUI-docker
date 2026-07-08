@@ -1,0 +1,303 @@
+"""Org self-verification + autonomous burn-down (operator 2026-07-07): the PM must READ THE
+LOGS — run the build itself — instead of word-matching worker self-reports. Live failure this
+guards: the FIRST true delivery in 10+ rounds (csproj switched to vendored MonoGame) was reported
+"delivered NOTHING NEW", no one surfaced the 138 real errors the operator's own IDE found, a PR
+was opened anyway, and no follow-up work happened. Now: an already-delivered branch is verified
+by an org-run build; a RED build starts a progress-based burn-down (scope brief → rounds while
+the count falls → green finish, or an honest trajectory-carrying elevation); PRs wait for green."""
+
+from __future__ import annotations
+
+import asyncio
+import base64
+import json
+from pathlib import Path
+
+import httpx
+
+from app.adapters.chat import FakeChatAdapter
+from app.config import Settings
+from app.db import Database
+from app.modules.model_router import FakeModelClient
+from app.orchestrator import Orchestrator, _error_brief, _error_count, _error_lines
+from app.worker.harness import FakeHarness
+
+ROOT = Path(__file__).resolve().parents[1]
+
+FAIL4 = (
+    "CHECK: FAIL\nERRORS: 4\n"
+    "src/A.cs(1,1): error CS0001: no implicit conversion\n"
+    "src/A.cs(2,2): error CS0002: bad operator\n"
+    "src/A.cs(3,3): error CS0003: missing member\n"
+    "src/A.cs(4,4): error CS0004: wrong signature\n"
+    "Build FAILED.")
+FAIL1 = ("CHECK: FAIL\nERRORS: 1\n"
+         "src/A.cs(9,9): error CS0009: one left\nBuild FAILED.")
+
+
+async def _orch(db_url, tmp_path):
+    key = tmp_path / "app.pem"
+    key.write_text("dummy")
+    settings = Settings(
+        _env_file=None, chat_adapter="fake",
+        profiles_dir=str(ROOT / "profiles"), charters_dir=str(ROOT / "charters"),
+        floor_dir=str(ROOT / "floor"), worker_instance_urls="http://w1:8090",
+        max_concurrent_workers=1, database_url=db_url, project_survey_enabled=False,
+        review_mode="off", plan_approval="off",
+        github_app_id="1", github_app_owner="devonpveller",
+        github_app_private_key_path=str(key),
+    )
+    db = Database(db_url)
+    orch = Orchestrator(settings, db, FakeChatAdapter(),
+                        model_client=FakeModelClient(), harness=FakeHarness())
+    await orch.setup()
+    return orch, orch.chat, orch.harness, db
+
+
+def _stack_remote(state: dict, *, static_head=True, sub_landed=True):
+    """Engine vendors murder. `static_head=True` = the branch head never moves across reads
+    (this run delivered nothing NEW — the live stale-head shape); the branch still DIFFERS from
+    base (compare: 1 commit, 1 file), i.e. it carries a PRIOR delivery."""
+    gitmodules = base64.b64encode(
+        b'[submodule "vendor/murder"]\n\tpath = vendor/murder\n'
+        b'\turl = https://github.com/devonpveller/murder\n').decode()
+    state.setdefault("pulls", [])
+    state.setdefault("merges", [])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        p = request.url.path
+        if p.endswith("/contents/.gitmodules"):
+            return httpx.Response(200, json={"content": gitmodules})
+        if p.endswith("/contents"):
+            return httpx.Response(200, json=[{"name": "vendor", "type": "dir"}])
+        if "/compare/" in p:
+            return httpx.Response(200, json={
+                "ahead_by": 1, "behind_by": 0, "commits": [],
+                "files": [{"filename": "src/Murder/Game.cs", "additions": 2, "deletions": 2}]})
+        if "/contents/src/Murder/Game.cs" in p:
+            return httpx.Response(200, json={"type": "file", "sha": "aa"})
+        if "/branches/" in p:
+            if not sub_landed and "/murder/" in p:
+                return httpx.Response(404, json={"message": "Not Found"})
+            state["reads"] = state.get("reads", 0) + 1
+            sha = ("samehead12345678901234567890" if static_head
+                   else ("prehead000000" if state["reads"] == 1 else "newhead1234567890"))
+            return httpx.Response(200, json={"commit": {"sha": sha}})
+        if p.endswith("/git/ref/heads/main"):
+            return httpx.Response(200, json={"object": {"sha": "eng_base"}})
+        if p.endswith("/git/commits/eng_base"):
+            return httpx.Response(200, json={"tree": {"sha": "eng_tree"}})
+        if p.endswith("/git/trees") and request.method == "POST":
+            state["tree"] = json.loads(request.content)
+            return httpx.Response(201, json={"sha": "eng_newtree"})
+        if p.endswith("/git/commits") and request.method == "POST":
+            return httpx.Response(201, json={"sha": "eng_newcommit"})
+        if p.endswith("/git/refs") and request.method == "POST":
+            return httpx.Response(201, json={})
+        if p.endswith("/merges") and request.method == "POST":
+            state["merges"].append(json.loads(request.content))
+            return httpx.Response(201, json={"sha": "mergedsha1234"})
+        if "/git/refs/heads/" in p and request.method == "DELETE":
+            return httpx.Response(204)
+        if p.endswith("/pulls") and request.method == "POST":
+            state["pulls"].append(p.split("/repos/", 1)[1].rsplit("/", 1)[0])
+            return httpx.Response(201, json={"number": len(state["pulls"]),
+                                             "html_url": f"https://x/pull/{len(state['pulls'])}"})
+        if p.endswith("/pulls") and request.method == "GET":
+            return httpx.Response(200, json=[])
+        if p.count("/") == 3:
+            return httpx.Response(200, json={"default_branch": "main"})
+        return httpx.Response(404)
+
+    return httpx.MockTransport(handler)
+
+
+async def _drain(orch, rounds=30):
+    for _ in range(rounds):
+        if not orch._bg_tasks:
+            return
+        await asyncio.gather(*list(orch._bg_tasks), return_exceptions=True)
+
+
+async def _setup_stack(orch):
+    await orch.projects.add("monogame-engine", "https://github.com/devonpveller/Engine")
+    await orch.projects.set_check(
+        "monogame-engine", "git submodule update --init --recursive && dotnet build Engine.sln")
+    await orch.projects.add("murder", "https://github.com/devonpveller/murder")
+
+
+# ── log parsing (the org's own evidence layer) ───────────────────────────────
+def test_error_parsing_counts_and_brief():
+    assert _error_count(FAIL4) == 4                      # the org's own protocol wins
+    msbuild = ("Game.cs(1,2): error CS1503: cannot convert\n"
+               "Game.cs(1,2): error CS1503: cannot convert [src/Murder.csproj]\n"  # summary dup
+               "    138 Error(s)\n")
+    assert _error_count(msbuild) == 138                  # toolchain summary
+    assert len(_error_lines(msbuild)) == 1               # dedup: the [project] echo collapses
+    assert _error_count("all good, 0 Error(s)") == 0
+    assert _error_count("hello world") is None
+    brief = _error_brief(FAIL4)
+    assert "4 error(s)" in brief and "A.cs" not in brief  # brief speaks categories, not paths
+    assert "no implicit conversion" in brief
+
+
+def test_partition_only_when_big_and_file_disjoint():
+    lines_a = [f"src/A.cs({i},1): error CS1: x{i}" for i in range(16)]
+    lines_b = [f"src/B.cs({i},1): error CS2: y{i}" for i in range(14)]
+    groups = Orchestrator._partition_error_groups(lines_a + lines_b)
+    assert len(groups) == 2
+    joined = ["".join(g) for g in groups]
+    assert not any("A.cs" in j and "B.cs" in j for j in joined)   # file-disjoint
+    assert len(Orchestrator._partition_error_groups(lines_a)) == 1        # one file → no split
+    assert len(Orchestrator._partition_error_groups(lines_a[:10])) == 1   # too small → no split
+
+
+# ── the live false negative: prior delivery ≠ "NOTHING NEW" ──────────────────
+async def test_prior_delivery_is_org_verified_not_nothing_new(db_url, tmp_path):
+    """THE live case: the converged branch already carried the requested change; the head didn't
+    move this round. The org must say the branch carries a delivery, BUILD it itself, and on
+    green proceed to a normal verified finish — never report "delivered NOTHING NEW"."""
+    orch, chat, harness, db = await _orch(db_url, tmp_path)
+    try:
+        await _setup_stack(orch)
+        state: dict = {}
+        orch._gh_transport = _stack_remote(state, static_head=True)
+        eid, chan, root = await orch.router.open_effort("prior-delivery", project="murder")
+        await orch.charters.set_goal(eid, "fix the build against vendored source", created_by="po")
+        harness.output_queue = ["did work", "pushed my changes", "CHECK: PASS"]
+        await orch.delegate(eid, chan, root, "fix the build", plan_steps=["work"])
+        await _drain(orch)
+        msgs = " ".join(p["message"] for p in chat.posted)
+        assert "already carries a delivery" in msgs
+        assert "org-verified" in msgs.lower()
+        assert "NOTHING NEW" not in msgs, "the first real success was mislabelled again"
+        prompts = " ".join(w["prompt"] for w in harness.wakes)
+        assert "NOTHING NEW WAS DELIVERED" not in prompts   # no wasteful re-engage either
+        from app.models import Effort
+        async with orch.db.session_factory() as s:
+            e = await s.get(Effort, eid)
+        assert e.lifecycle == "done"
+        assert "devonpveller/murder" in state["pulls"]      # the delivery PR opened (green)
+    finally:
+        await db.dispose()
+
+
+# ── a TRUE no-changes claim is org-verified, not word-matched ────────────────
+async def test_true_no_changes_claim_is_org_verified(db_url, tmp_path):
+    orch, chat, harness, db = await _orch(db_url, tmp_path)
+    try:
+        await _setup_stack(orch)
+        orch._gh_transport = _stack_remote({}, sub_landed=False)
+        eid, chan, root = await orch.router.open_effort("noop-true", project="murder")
+        await orch.charters.set_goal(eid, "fix the build errors", created_by="po")
+        harness.output_queue = [
+            "did work", "NO CHANGES: the repo already satisfies the goal", "CHECK: PASS"]
+        await orch.delegate(eid, chan, root, "fix the build errors", plan_steps=["work"])
+        await _drain(orch)
+        msgs = " ".join(p["message"] for p in chat.posted)
+        assert "ran the build" in msgs and "PASSES" in msgs   # org-verified acceptance
+        from app.models import Effort
+        async with orch.db.session_factory() as s:
+            e = await s.get(Effort, eid)
+        assert e.lifecycle == "done"
+    finally:
+        await db.dispose()
+
+
+# ── RED org build → burn-down rounds → green finish; PRs held until green ────
+async def test_red_build_burns_down_to_green_then_pr(db_url, tmp_path):
+    orch, chat, harness, db = await _orch(db_url, tmp_path)
+    try:
+        await _setup_stack(orch)
+        state: dict = {}
+        orch._gh_transport = _stack_remote(state, static_head=True)
+        eid, chan, root = await orch.router.open_effort("burn-green", project="murder")
+        await orch.charters.set_goal(eid, "fix the vendored build", created_by="po")
+        harness.output_queue = [
+            "did work", "pushed",                    # step + publish (head didn't move)
+            FAIL4,                                   # org check: RED, 4 errors → burn-down
+            "ERRORS AFTER: 1\npushed round 1", FAIL1,   # round 1: 4 → 1 (progress)
+            "ERRORS AFTER: 0\npushed round 2", "CHECK: PASS",   # round 2: green
+        ]
+        await orch.delegate(eid, chan, root, "fix the vendored build", plan_steps=["work"])
+        await _drain(orch)
+        msgs = " ".join(p["message"] for p in chat.posted)
+        assert "Burn-down engaged" in msgs and "4 error(s)" in msgs   # scope brief, with numbers
+        assert "4 → 1" in msgs                                        # progress narrated
+        assert "GREEN" in msgs and "4 → 1 → 0" in msgs                # full trajectory
+        assert state["pulls"], "the delivery PR must open once green"
+        assert state.get("tree"), "the host gitlink must be wired after the green finish"
+        from app.models import Effort
+        async with orch.db.session_factory() as s:
+            e = await s.get(Effort, eid)
+        assert e.lifecycle == "done"
+    finally:
+        await db.dispose()
+
+
+async def test_stalled_burndown_elevates_with_trajectory_and_no_pr(db_url, tmp_path):
+    orch, chat, harness, db = await _orch(db_url, tmp_path)
+    try:
+        await _setup_stack(orch)
+        state: dict = {}
+        orch._gh_transport = _stack_remote(state, static_head=True)
+        eid, chan, root = await orch.router.open_effort("burn-stall", project="murder")
+        await orch.charters.set_goal(eid, "fix the vendored build", created_by="po")
+        harness.output_queue = [
+            "did work", "pushed",
+            FAIL4,                                   # initial: RED 4
+            "ERRORS AFTER: 4\ncouldn't crack them", FAIL4,   # round 1: no progress (4 → 4)
+            "ERRORS AFTER: 4\nstill stuck", FAIL4,           # round 2: no progress → elevate
+        ]
+        await orch.delegate(eid, chan, root, "fix the vendored build", plan_steps=["work"])
+        await _drain(orch)
+        msgs = " ".join(p["message"] for p in chat.posted)
+        assert "burn-down STALLED" in msgs
+        assert "4 → 4 → 4" in msgs                          # the honest trajectory
+        assert "keep going" in msgs                         # the operator's resume handle
+        assert not state["pulls"], "no PR may exist while the build is red"
+        from app.models import Effort
+        async with orch.db.session_factory() as s:
+            e = await s.get(Effort, eid)
+        assert e.lifecycle != "done"
+    finally:
+        await db.dispose()
+
+
+# ── the PM's evidence is retrievable: "show the build log" ───────────────────
+async def test_nl_show_build_log_returns_org_evidence(db_url, tmp_path):
+    orch, chat, harness, db = await _orch(db_url, tmp_path)
+    try:
+        await orch.audit.log("org_build_check", effort_id="effort-x",
+                             payload={"verdict": "fail", "errors": 3, "cmd": "dotnet build",
+                                      "log": "a.cs(1,1): error CS0101: the real evidence"})
+        mgmt = await orch.mgmt_channel_id()
+        await orch.nl_intake("show me the build log", mgmt, thread_id="t")
+        msgs = " ".join(p["message"] for p in chat.posted)
+        assert "Org build log" in msgs and "the real evidence" in msgs
+        assert "effort-x" in msgs and "3 error(s)" in msgs
+    finally:
+        await db.dispose()
+
+
+async def test_keep_going_resumes_stalled_burndown(db_url, tmp_path):
+    orch, chat, harness, db = await _orch(db_url, tmp_path)
+    try:
+        await _setup_stack(orch)
+        state: dict = {}
+        orch._gh_transport = _stack_remote(state, static_head=True)
+        eid, chan, root = await orch.router.open_effort("burn-resume", project="murder")
+        await orch.charters.set_goal(eid, "fix it", created_by="po")
+        await orch.audit.log("burndown_stalled", effort_id=eid,
+                             payload={"why": "stall", "trajectory": [4, 4, 4]})
+        await orch.audit.log("org_build_check", effort_id=eid,
+                             payload={"verdict": "fail", "errors": 4, "log": FAIL4})
+        harness.output_queue = ["ERRORS AFTER: 0\npushed", "CHECK: PASS"]
+        mgmt = await orch.mgmt_channel_id()
+        await orch.nl_intake("keep going", mgmt, thread_id="t")
+        await _drain(orch)
+        msgs = " ".join(p["message"] for p in chat.posted)
+        assert "Resuming the burn-down" in msgs and eid in msgs
+        assert "GREEN" in msgs                              # the resumed loop reached green
+    finally:
+        await db.dispose()

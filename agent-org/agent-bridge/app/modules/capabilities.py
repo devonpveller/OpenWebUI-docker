@@ -576,6 +576,47 @@ async def close_pull_request(
                             detail=r.text[:160])
 
 
+async def merge_branch(
+    github: GitHubApp, repo_url: str, base_branch: str, head_branch: str, *,
+    message: str = "", api_base: str = "https://api.github.com",
+    transport: httpx.BaseTransport | None = None,
+) -> CapabilityResult:
+    """Merge one branch into another WITHIN a repo (POST /merges) — the burn-down partition's
+    join step: each part-worker pushes `agent/<effort>-ptN`, and the org folds the parts back
+    into the effort branch. File-disjoint parts merge cleanly; a 409 conflict is reported (never
+    forced) so the caller can fall back to sequential rounds. NOT a PR merge (that's D4,
+    human-gated) — this only moves an agent working branch, never a default branch."""
+    try:
+        owner, repo = parse_owner_repo(repo_url)
+    except ValueError as exc:
+        return CapabilityResult(ok=False, summary=f"`{repo_url}` isn't a valid GitHub repo.", detail=str(exc))
+    if owner.lower() != (github.owner or "").lower():
+        return CapabilityResult(ok=False, summary=f"`{owner}/{repo}` isn't on the App's account — can't merge.")
+    try:
+        token = await github.installation_token()
+    except GitHubAppError as exc:
+        return CapabilityResult(ok=False, summary="The GitHub App isn't ready.", detail=str(exc))
+    try:
+        async with httpx.AsyncClient(timeout=30.0, transport=transport) as c:
+            r = await c.post(
+                f"{api_base.rstrip('/')}/repos/{owner}/{repo}/merges", headers=_headers(token),
+                json={"base": base_branch, "head": head_branch,
+                      "commit_message": message or f"merge {head_branch} into {base_branch}"})
+    except httpx.HTTPError as exc:
+        return CapabilityResult(ok=False, summary=f"Couldn't reach GitHub to merge `{head_branch}`.",
+                                detail=str(exc)[:160])
+    if r.status_code == 201:
+        sha = (r.json().get("sha") or "")[:10]
+        return CapabilityResult(ok=True, summary=f"`{head_branch}` merged into `{base_branch}` @ `{sha}`")
+    if r.status_code == 204:  # base already contains head
+        return CapabilityResult(ok=True, summary=f"`{base_branch}` already contains `{head_branch}`")
+    if r.status_code == 409:
+        return CapabilityResult(ok=False, summary=f"merge CONFLICT folding `{head_branch}` into "
+                                f"`{base_branch}` — parts overlap", detail=r.text[:160])
+    return CapabilityResult(ok=False, summary=f"Merging `{head_branch}` failed ({r.status_code}).",
+                            detail=r.text[:160])
+
+
 async def delete_branch(
     github: GitHubApp, repo_url: str, branch: str, *,
     api_base: str = "https://api.github.com", transport: httpx.BaseTransport | None = None,

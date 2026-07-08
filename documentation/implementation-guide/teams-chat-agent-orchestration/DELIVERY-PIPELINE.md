@@ -201,6 +201,36 @@ A **CI-style pipeline** the bridge orchestrates, red-gates each stage:
   D2's web leg needs a **new capability**: a dedicated browser-testing lane/container (Playwright +
   a vision-capable model), isolated with its own egress. This is the largest new build here.
 
+### D2.b — org self-verification + error burn-down ✅ BUILT (2026-07-07, from live misses)
+The 2026-07-07 live run exposed the last structural gap: **the org demanded proof from workers
+but never verified anything itself, and it stopped at gates instead of working through what they
+revealed.** The first true delivery in 10+ rounds (csproj switched to the vendored source) was
+reported "delivered NOTHING NEW"; nobody surfaced the 138 real errors the operator's own IDE
+found; a PR opened anyway; no follow-up work happened. Mechanisms (all generic, any project):
+
+- **The PM reads the logs** (`_org_build_check`): on any unproven claim — a `NO CHANGES:` on a
+  fix goal, a "landed" branch whose head didn't move this round — the org runs the project's
+  check **itself** (vendored project → host context recursive; plain project → its own branch)
+  and reasons over the real output. Every run is recorded as an `org_build_check` event with the
+  full log; NL **"show the build log [for effort-x]"** returns the same evidence the PM used.
+- **Honest already-delivered handling**: a stale head whose branch differs from base is *prior
+  delivered work*, not "nothing new" — the org says so, builds it, and on green proceeds to a
+  normal org-verified finish. The false-negative class is dead.
+- **Error burn-down** (`_burndown_loop`): a RED org build starts a **progress-based** loop, not
+  a fixed retry count. Scope brief first (count + top categories from the log, "working
+  autonomously — say stop to halt": confirm-but-not-wait), then rounds keep dispatching while
+  the error count falls (org re-builds after every round; worker-reported counts are never the
+  truth). 0 errors → the green finish (PRs open only now). Two rounds without progress, or the
+  round cap (8) → an honest elevation carrying the full error trajectory; **"keep going"** buys
+  more rounds. Audit: `burndown_started/round/parts/green/stalled`.
+- **Multi-worker partition**: ≥24 distinct errors clustering into two file-disjoint groups →
+  parallel workers on `‑pt1/‑pt2` part branches, folded back via the API merge endpoint
+  (conflict → sequential fallback; part branches deleted after folding).
+- **PR staging**: on compositions the wiring bump + host build run **before** any PR exists; a
+  red build opens *no* code PR and *no* wiring PR — the closure says "not done, burn-down
+  continues", and the D2 still-red path likewise hands off to the burn-down instead of parking
+  on the operator.
+
 ### D3 — differently-goaled review ✅ BUILT, re-targeted to the PR
 `stop_gates.review` (P4.4–4.7) already produces differently-goaled verdicts. D3 **attaches** them to
 the PR as advisory input to the PM — **never a merge gate an agent can game** (F4). A flag still
