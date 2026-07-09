@@ -4658,9 +4658,12 @@ class Orchestrator:
             f"`FEASIBLE:` instead of guessing.\n\n"
             f"CONTEXT — the goal this serves:\n{base_goal}"
         )
-        # FRESH session per part per ROUND (live 2026-07-08 v7: reused ~pt sessions rotted —
-        # rounds 2/4/5 quit in ~90s with nothing pushed; round 1 on fresh sessions fixed 48).
-        session = f"{effort_id}~pt{part}r{rnd}" if part else await self._session_for(effort_id)
+        # FRESH session per ROUND — parts AND single rounds (live 2026-07-08: every reused
+        # session rotted the same way — part rounds 2/4/5 quit in ~90s with nothing pushed, and
+        # once the count dropped below the partition threshold the SINGLE rounds did the exact
+        # same thing on the main effort session, stalling at 19. A burn-down round is stateless:
+        # the goal + error slice carry everything it needs; history only poisons it.)
+        session = (f"{effort_id}~pt{part}r{rnd}" if part else f"{effort_id}~bd{rnd}")
         return await self.router.wake(
             effort_id, role="worker-default", thread_id=root, channel_id=channel_id,
             session_id=session, instruction=instruction,
