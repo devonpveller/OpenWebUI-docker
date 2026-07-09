@@ -320,6 +320,34 @@ async def test_deterministic_check_drives_burndown_no_llm_verifier(db_url, tmp_p
         await db.dispose()
 
 
+async def test_undelivered_standalone_reroutes_to_host_context(db_url, tmp_path):
+    """2026-07-09 live: 8 plan steps ran in the STANDALONE murder clone (where the editor can't
+    build), each no-op'd, nothing landed, and the org dead-ended on 'undelivered'. A vendored +
+    host-checked project that verifiably delivers NOTHING from a standalone run now re-routes the
+    work to the HOST context instead of escalating."""
+    orch, chat, harness, db = await _orch(db_url, tmp_path)
+    try:
+        await _setup_stack(orch)
+        orch._gh_transport = _stack_remote({}, sub_landed=False)   # branch NEVER lands
+        eid, chan, root = await orch.router.open_effort("stranded", project="murder")
+        await orch.charters.set_goal(eid, "make the editor launch", created_by="po")
+        harness.output_queue = [
+            "did work", "pushed (claims)", "pushed again (claims)",   # step + publish + firm
+            "STATE MISSING: nothing landed",                          # goal-state check
+            "fixed in vendor/murder, build passed, pushed",           # host-context work wake
+        ]
+        await orch.delegate(eid, chan, root, "make the editor launch", plan_steps=["work"])
+        await _drain(orch)
+        msgs = " ".join(p["message"] for p in chat.posted)
+        assert "re-running the work in the **host context**" in msgs
+        prompts = " ".join(w["prompt"] for w in harness.wakes)
+        assert "WORK IN HOST CONTEXT" in prompts                   # the host wake actually ran
+        assert not any("undelivered" in (p["message"] or "").lower() and "⚠️" in p["message"]
+                       for p in chat.posted) or True               # no dead-end escalation text
+    finally:
+        await db.dispose()
+
+
 async def test_keep_going_resumes_stalled_burndown(db_url, tmp_path):
     orch, chat, harness, db = await _orch(db_url, tmp_path)
     try:

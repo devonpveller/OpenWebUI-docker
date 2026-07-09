@@ -182,7 +182,9 @@ def _error_brief(output: str) -> str:
     lines = _error_lines(output)
     n = _error_count(output) or len(lines)
     if not n:
-        return "no machine-readable errors in the log"
+        # runtime failure — no compiler-style lines; the tail says what actually happened
+        tail = [ln.strip() for ln in (output or "").splitlines() if ln.strip()]
+        return ("runtime failure — log tail: " + tail[-1][:140]) if tail             else "no machine-readable errors in the log"
     files = {f for f in _error_files(output) if f}
     cats = Counter()
     for ln in lines:
@@ -583,6 +585,12 @@ class Orchestrator:
         # while the error count still falls. Failing logs queued here by paths inside delegate
         # are launched by delegate's finally (single-flight-safe).
         self._burndown_after: dict[str, str] = {}
+        # Efforts whose standalone run verifiably delivered NOTHING on a vendored+checked
+        # project — delegate's finally re-runs them in the HOST context (2026-07-09).
+        self._route_host_after: set[str] = set()
+        # effort -> the CURRENT round's failing log (full, in-memory) — burn-down wakes read
+        # the tail from here when the failure has no parseable error lines (runtime crashes).
+        self._last_burn_log: dict[str, str] = {}
         # effort → branch head the ORG itself verified green (its own build run + log, not a
         # worker's word) — the finish path skips a duplicate composition check and the closure is
         # labelled "org-verified". Cleared on every fresh dispatch.
@@ -1462,8 +1470,10 @@ class Orchestrator:
             return
         # NL-FIRST "run it in the host context" — the remedy the blocker elevation offers for a
         # workspace-insufficiency: re-run a composition effort where the build can actually run.
-        if re.search(r"\b(?:run|re-?run|retry|do)\b[^.\n]{0,30}?\b(?:in|with|using)\b"
+        if re.search(r"\b(?:run|re-?run|retry|do)\b[^.\n]{0,90}?\b(?:in|with|using)\b"
                      r"[^.\n]{0,20}?\bhost\s+context\b", message, re.I):
+            # gap widened 30→90 (live 2026-07-09: a 47-char effort id between "run" and "in"
+            # made the command miss the handler and dispatch a normal standalone run)
             eid = None
             m_eid = re.search(r"\beffort-[A-Za-z0-9][\w-]*\b", message)
             if m_eid:
@@ -3200,11 +3210,16 @@ class Orchestrator:
         that the worker's proxied git can't run anyway). E.g. `git submodule update --init
         --recursive && dotnet build X.sln` → `dotnet build X.sln`. Keeps everything from the first
         non-git segment on."""
-        segs = [s.strip() for s in re.split(r"&&|;", check_cmd) if s.strip()]
-        kept = [s for i, s in enumerate(segs)
-                if not (s.lower().startswith("git ") and all(
-                    p.lower().startswith("git ") for p in segs[:i + 1]))]
-        return " && ".join(kept) if kept else check_cmd
+        # Strip ONLY the leading `git …` segments and keep the remainder VERBATIM — a naive
+        # split-and-rejoin corrupted quoted sub-shells (live 2026-07-09: the editor smoke's
+        # `sh -c '…; …'` was split on the inner `;` and rejoined with `&&`, producing
+        # "Unterminated quoted string" on every check round).
+        parts = re.split(r"(\s*(?:&&|;)\s*)", check_cmd)
+        i = 0
+        while i < len(parts) and parts[i].strip().lower().startswith("git "):
+            i += 2   # skip the segment and its trailing delimiter
+        rest = "".join(parts[i:]).strip()
+        return rest if rest else check_cmd
 
     async def _composition_check(self, effort_id: str, host_slug: str, host_url: str,
                                  branch: str) -> str:
@@ -3253,7 +3268,7 @@ class Orchestrator:
                 await self.audit.log("org_build_check", effort_id=effort_id,
                                      payload={"verdict": "pass", "errors": 0, "owner": host_slug,
                                               "mode": "exec", "cmd": check_cmd[:200],
-                                              "log": dout[:6000]})
+                                              "log": dout[-6000:]})
                 return (f"\n🧪 **Composition check passed** on `{host_slug}` (`{check_cmd}`, "
                         f"org-run, exit 0) — the wiring branch builds.")
             if not timed_out and exit_code is not None:
@@ -3263,7 +3278,7 @@ class Orchestrator:
                 await self.audit.log("org_build_check", effort_id=effort_id,
                                      payload={"verdict": "fail", "errors": n, "owner": host_slug,
                                               "mode": "exec", "cmd": check_cmd[:200],
-                                              "log": dout[:6000]})
+                                              "log": dout[-6000:]})
                 self._queue_burndown(effort_id, dout)
                 return (f"\n❌ **Composition check FAILED** on `{host_slug}` — "
                         f"{_error_brief(dout)}:\n```\n{tail[:600]}\n```\n"
@@ -3310,7 +3325,7 @@ class Orchestrator:
             await self.audit.log("org_build_check", effort_id=effort_id,
                                  payload={"verdict": "fail", "errors": _error_count(out),
                                           "owner": host_slug, "cmd": check_cmd[:200],
-                                          "log": out[:6000]})
+                                          "log": out[-6000:]})
             # A red build with a work list is not a dead end — burn it down (progress-based,
             # autonomous), don't stop at a fixed retry count (operator 2026-07-07).
             self._queue_burndown(effort_id, out)
@@ -3623,9 +3638,13 @@ class Orchestrator:
                 f"▶ Re-running **{effort_id}** in the **host context** (`{host_slug}`, recursive) "
                 f"so the build can actually run — editing `{sub_path}` in place.",
                 effort_id=effort_id)
+            # FRESH session — a re-contexted workspace is a NEW task (live 2026-07-09: the
+            # host wake inherited the rotted work session and no-op'd in 3 seconds; the
+            # stateless-session law applies to every re-context, not just burn-down rounds).
+            self._verify_seq += 1
             result = await self.router.wake(
                 effort_id, role="worker-default", thread_id=root, channel_id=channel_id,
-                session_id=await self._session_for(effort_id), instruction=instruction,
+                session_id=f"{effort_id}~host{self._verify_seq}", instruction=instruction,
                 repo=host_url, repo_token=host_token, recurse_submodules=True,
             )
         finally:
@@ -3933,7 +3952,12 @@ class Orchestrator:
             # fully closed (the single-flight guard is released above).
             nxt = self._iterate_after.pop(effort_id, None)
             burn = self._burndown_after.pop(effort_id, None)
-            if burn is not None:
+            if effort_id in self._route_host_after:
+                # workspace-sufficiency re-route: the standalone run delivered nothing on a
+                # vendored+checked project — the work re-runs where it can actually build
+                self._route_host_after.discard(effort_id)
+                self._spawn(self._run_in_host_context(effort_id))
+            elif burn is not None:
                 # the burn-down supersedes a queued auto-iteration — it is the stronger loop
                 # (progress-based, org-verified every round) and owns the same failing output
                 self._spawn(self._burndown_loop(effort_id, burn))
@@ -4189,6 +4213,25 @@ class Orchestrator:
         state = await self._verify_goal_state(effort_id, channel_id, root, repo)
         if state is not None:
             return state
+        # WORKSPACE-SUFFICIENCY RE-ROUTE (live 2026-07-09: 8 plan steps ran in the STANDALONE
+        # murder clone where the editor can't even build — each no-op'd in ~3 min, nothing
+        # landed). A vendored project with a host build check that VERIFIABLY delivered nothing
+        # from a standalone run gets its work re-run in the HOST context — where building and
+        # running are physically possible — instead of a dead-end escalation. Once only per run
+        # (the host path's own blocker elevation is the honest stop).
+        proj = await self._effort_project(effort_id)
+        if (proj and await self._vendored_host(proj)
+                and await self._machine_verified_effort(effort_id)):
+            await self.comms.post(
+                Intent.worker_activity,
+                "🧭 the standalone workspace produced no delivery — this project is VENDORED in "
+                "a host composition, so I'm re-running the work in the **host context** "
+                "(recursive clone) where its build can actually run.",
+                effort_id=effort_id)
+            await self.audit.log("host_context_reroute", effort_id=effort_id,
+                                 payload={"from": "undelivered_standalone"})
+            self._route_host_after.add(effort_id)   # delegate's finally launches it
+            return None
         await self._escalate_undelivered(effort_id, delivery)
         return None
 
@@ -4362,7 +4405,7 @@ class Orchestrator:
                 focus, token, recurse)
         await self.audit.log("org_build_check", effort_id=effort_id,
                              payload={"verdict": verdict, "errors": n, "owner": check_owner,
-                                      "mode": mode, "cmd": check_cmd[:200], "log": out[:6000]})
+                                      "mode": mode, "cmd": check_cmd[:200], "log": out[-6000:]})
         return verdict, out, n
 
     async def _llm_verify_fallback(
@@ -4442,6 +4485,8 @@ class Orchestrator:
             await self.audit.log("burndown_started", effort_id=effort_id,
                                  payload={"errors": n0, "brief": brief[:300]})
             errors_log = failing_log
+            self._last_burn_log[effort_id] = failing_log
+            last_sig = self._failure_sig(failing_log)
             branch_exists = (await self._verify_delivery(effort_id, repo)).landed
             stall = 0
             last_result = None
@@ -4502,21 +4547,34 @@ class Orchestrator:
                     counts.append(n if n is not None else counts[-1])
                     prev = counts[-2]
                     improved = prev < 0 or (n is not None and n < prev)
+                    # RUNTIME failures defeat counting (live 2026-07-09: a failing editor smoke
+                    # is "0 errors" every round — 0 → 0 read as no-progress and insta-stalled).
+                    # When counts can't move, a CHANGED failure signature (normalized log tail)
+                    # is progress: the org moved PAST the previous failure into the next one.
+                    sig = self._failure_sig(out)
+                    sig_progress = (not improved and (n in (None, 0) or n == prev)
+                                    and last_sig is not None and sig != last_sig)
+                    last_sig = sig
                     await self.audit.log("burndown_round", effort_id=effort_id,
-                                         payload={"round": rnd, "errors": n, "prev": prev})
-                    if improved:
+                                         payload={"round": rnd, "errors": n, "prev": prev,
+                                                  "sig": sig, "sig_progress": sig_progress})
+                    if improved or sig_progress:
                         stall = 0
+                        note = (f"**{prev if prev >= 0 else '?'} → {n}** errors" if improved
+                                else "the failure CHANGED (moved past the previous one)")
                         await self.comms.post(
                             Intent.worker_activity,
-                            f"🔥 round {rnd}: **{prev if prev >= 0 else '?'} → {n}** errors — "
-                            f"progress, continuing autonomously.", effort_id=effort_id)
+                            f"🔥 round {rnd}: {note} — progress, continuing autonomously.",
+                            effort_id=effort_id)
                     else:
                         stall += 1
                         await self.comms.post(
                             Intent.worker_activity,
-                            f"⚠️ round {rnd}: no progress ({prev} → {n} errors) — {stall}/2 "
-                            f"before I raise it with the full picture.", effort_id=effort_id)
+                            f"⚠️ round {rnd}: no progress ({prev} → {n} errors, same failure) — "
+                            f"{stall}/2 before I raise it with the full picture.",
+                            effort_id=effort_id)
                     errors_log = out
+                    self._last_burn_log[effort_id] = out
                 if stall >= 2:
                     await self._burndown_elevate(effort_id, counts, errors_log,
                                                  "two consecutive rounds without progress")
@@ -4608,7 +4666,15 @@ class Orchestrator:
         # lands real commits; the loop's progress test does the rest. (Parallel parts share one
         # GPU, so their turns are slower — keep them smaller still.)
         cap = 12 if part else 16
-        slice_txt = "\n".join(err_lines[:cap]) or "(see the failing log in the thread above)"
+        # RUNTIME failures carry no `error XX123:` lines (live 2026-07-09: the editor smoke
+        # failed with an empty slice — the worker got "(see the failing log)" and nothing else).
+        # No parseable errors ⇒ hand the worker the LOG TAIL, where the runtime failure lives.
+        slice_txt = "\n".join(err_lines[:cap])
+        if not slice_txt:
+            tail = [ln for ln in (getattr(self, '_last_burn_log', {}).get(effort_id) or '')
+                    .splitlines() if ln.strip()][-30:]
+            slice_txt = ("THE CHECK'S FAILING OUTPUT (runtime failure — no compiler errors):\n"
+                         + "\n".join(tail)) if tail else "(see the failing log in the thread above)"
         if len(err_lines) > cap:
             slice_txt += (f"\n… plus {len(err_lines) - cap} more (later rounds — do NOT attempt "
                           f"them this turn; finish and PUSH your slice)")
@@ -4723,6 +4789,16 @@ class Orchestrator:
         await self.comms.post(Intent.operator_reply, body,
                               thread_id=self._mgmt_thread_of(effort_id))
         await self.router.update_effort_card(effort_id, "needs-attention")
+
+    @staticmethod
+    def _failure_sig(log: str) -> str:
+        """A stable signature of WHAT failed — the normalized log tail (digits/hashes masked).
+        Runtime failures have no countable error lines, so 'the failure changed' is the
+        progress signal a count can't give (2026-07-09)."""
+        import hashlib
+        tail = [ln.strip() for ln in (log or "").splitlines() if ln.strip()][-25:]
+        norm = re.sub(r"[0-9a-f]{7,}|\d+", "#", " ".join(tail).lower())
+        return hashlib.sha1(norm.encode()).hexdigest()[:16]
 
     def _is_stale_head(self, effort_id: str, delivery: BranchDelivery) -> bool:
         """True when the 'landed' branch head is EXACTLY where it was before this run dispatched —

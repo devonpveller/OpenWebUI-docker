@@ -12,6 +12,11 @@ project switch.
 ghcr.io/open-webui/open-terminal:slim
   └─ little-coder-open-terminal:local       ← Dockerfile.open-terminal (git-proxy splice, SECURITY BASE)
        ├─ little-coder-open-terminal:dotnet8   ← envs/dotnet8.Dockerfile (.NET 8 SDK)
+       │    └─ little-coder-open-terminal:dotnet8-gui ← envs/dotnet8-gui.Dockerfile (2026-07-09:
+       │         headless GUI runtime — Xvfb + Mesa software GL + SDL2/OpenAL, so a MonoGame
+       │         DesktopGL app can LAUNCH for runtime verification: `xvfb-run -a timeout 25
+       │         dotnet run` → exit 124 = still running = launched. Templates may layer on
+       │         other templates when they EXTEND a toolchain.)
        └─ little-coder-open-terminal:<env>     ← envs/<env>.Dockerfile (add yours here)
 ```
 
