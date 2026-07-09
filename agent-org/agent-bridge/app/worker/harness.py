@@ -84,6 +84,20 @@ class WorkerHarness(Protocol):
         the composition repo (its origin carries the push token)."""
         ...
 
+    async def run_check(
+        self, base_url: str, command: str, *, cwd: str | None = None, timeout: int = 600,
+    ) -> tuple[int | None, str, bool]:
+        """Deterministic VERIFICATION exec on the daemon (`/check`, 2026-07-08): one command,
+        REAL exit code + combined output back — no model in the loop (an LLM 'verifier' burned
+        its turn re-running builds and never reported). Returns (exit_code, output, timed_out).
+        Raises on transport errors / a daemon without the route — the caller falls back."""
+        ...
+
+    async def cancel_task(self, base_url: str, task_id: str) -> bool:
+        """Abandon a task the bridge stopped waiting for (poll timeout), so the daemon doesn't
+        stay busy on an orphaned turn and 409 the next dispatch. Best-effort."""
+        ...
+
 
 class LittleCoderHarness:
     """Drives the little-coder control daemon. One instance addresses many daemons
@@ -201,6 +215,28 @@ class LittleCoderHarness:
                 detail = r.text or ""
             return False, detail.strip()[:200]
 
+    async def run_check(
+        self, base_url: str, command: str, *, cwd: str | None = None, timeout: int = 600,
+    ) -> tuple[int | None, str, bool]:
+        async with httpx.AsyncClient(base_url=base_url.rstrip("/"),
+                                     timeout=float(timeout) + 90.0) as c:
+            r = await c.post("/check", json={"command": command, "cwd": cwd,
+                                             "timeout": timeout, "actor": "agent-bridge"})
+            r.raise_for_status()   # 404 = an old daemon without /check → the caller falls back
+            d = r.json()
+            return d.get("exit_code"), d.get("output") or "", bool(d.get("timed_out"))
+
+    async def cancel_task(self, base_url: str, task_id: str) -> bool:
+        """Abandon a task the bridge stopped waiting for (poll timeout) — otherwise the daemon
+        stays busy running an ORPHANED turn and the next dispatch 409s (live 2026-07-08: both
+        burn-down part turns outlived the poll window and would have zombie-blocked round 2)."""
+        try:
+            async with httpx.AsyncClient(base_url=base_url.rstrip("/"), timeout=30.0) as c:
+                r = await c.post(f"/tasks/{task_id}/cancel")
+                return r.status_code < 400
+        except httpx.HTTPError:
+            return False
+
 
 class FakeHarness:
     """Deterministic in-memory worker for tests. Records every wake."""
@@ -215,6 +251,12 @@ class FakeHarness:
         # when empty) — lets a test script distinct step/publish/check responses.
         self.output_queue: list[str] = []
         self.wakes: list[dict[str, Any]] = []
+        # Deterministic /check results: each run_check pops (exit_code, output, timed_out).
+        # EMPTY by default → run_check raises like a daemon without the route, so tests exercise
+        # the LLM-verifier fallback unless they explicitly queue deterministic results.
+        self.check_queue: list[tuple[int | None, str, bool]] = []
+        self.checks: list[dict[str, Any]] = []        # every run_check call
+        self.cancelled: list[tuple[str, str]] = []    # every cancel_task (base_url, task_id)
         self.projects: dict[str, str] = {}
         self.focus_calls: list[dict[str, Any]] = []   # every set_project (base_url, repo, token)
         self.tokens: dict[str, str] = {}
@@ -292,3 +334,17 @@ class FakeHarness:
             return False, self.submodule_fails
         self.submodules.append((base_url, url, path))
         return True, ""
+
+    async def run_check(
+        self, base_url: str, command: str, *, cwd: str | None = None, timeout: int = 600,
+    ) -> tuple[int | None, str, bool]:
+        self.checks.append({"base_url": base_url, "command": command, "cwd": cwd,
+                            "timeout": timeout})
+        if not self.check_queue:
+            # like a daemon without the /check route — callers fall back to the LLM verifier
+            raise RuntimeError("no /check on this daemon (fake: queue check_queue results)")
+        return self.check_queue.pop(0)
+
+    async def cancel_task(self, base_url: str, task_id: str) -> bool:
+        self.cancelled.append((base_url, task_id))
+        return True

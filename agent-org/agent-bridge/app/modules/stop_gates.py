@@ -226,3 +226,24 @@ class StopGates:
             payload={"checkpoint": checkpoint_id, "cleared": not flagged},
         )
         return not flagged
+
+    async def force_clear(self, checkpoint_id: str, *, reason: str = "") -> None:
+        """Clear a checkpoint regardless of the review verdicts — for an ADVISORY review (§4.4 /
+        DELIVERY-PIPELINE D3: reviews are advisory input, never a gate an agent can game). Used
+        when the effort's correctness is machine-verified by the org's OWN build (composition /
+        burn-down / D2) and its merge is D4 human-gated, so a subjective quality flag is surfaced
+        but must not hard-freeze autonomous progress (operator 2026-07-07: a big port froze on a
+        review of a mid-work status message)."""
+        async with self.db.session_factory() as s:
+            cp = await s.get(Checkpoint, checkpoint_id)
+            if cp is None:
+                return
+            cp.status = "cleared"
+            cp.cleared_at = now_iso()
+            await s.commit()
+            effort_id = cp.effort_id
+        await self.audit.log(
+            "checkpoint_dispositioned", effort_id=effort_id,
+            payload={"checkpoint": checkpoint_id, "cleared": True, "advisory": True,
+                     "reason": reason[:160]},
+        )

@@ -435,6 +435,18 @@ class Router:
                     inst.base_url, session_id, prompt, on_update=_stream
                 )
                 await _flush()  # defensive: surface any tail commands if no answer callback fired
+                # POLL TIMEOUT = the bridge stopped waiting, but the daemon is STILL running the
+                # turn — cancel it, or the orphaned task keeps the worker busy and the next
+                # dispatch 409s (live 2026-07-08: both burn-down part turns outlived the window
+                # and would have zombie-blocked round 2). Best-effort; the turn is abandoned.
+                if (result.status == "error" and "poll timeout" in (result.output or "")
+                        and getattr(result, "task_id", None)):
+                    try:
+                        await self.harness.cancel_task(inst.base_url, result.task_id)
+                        await self.audit.log("task_cancelled_timeout", effort_id=effort_id,
+                                             actor=inst.id, payload={"task": result.task_id})
+                    except Exception as exc:  # noqa: BLE001 — cancel is best-effort
+                        log.debug("timeout-cancel failed for %s: %s", result.task_id, exc)
                 await self.audit.log(
                     "wake_done",
                     effort_id=effort_id,
@@ -541,6 +553,38 @@ class Router:
         except Exception as exc:  # noqa: BLE001 - surface a clear failure, never a silent stall
             log.warning("compose_submodules failed for %s: %s", engine_url, exc)
             return False, f"composition error: {exc}", added
+        finally:
+            await self.scheduler.release(inst.id)
+
+    # ── deterministic verification exec (2026-07-08) ─────────────────────────
+    async def exec_check(
+        self, effort_id: str, *, command: str, session_id: str, repo: str | None = None,
+        repo_token: str | None = None, recurse_submodules: bool = False, timeout: int = 900,
+    ) -> tuple[int | None, str, bool]:
+        """Run ONE verification command on a pooled worker DETERMINISTICALLY (the daemon's
+        `/check` — real exit code + output, no model in the loop). Build verification is a
+        machine step: the LLM 'verifier' burned its turn re-running builds and never reported
+        (live 2026-07-08). Acquires a slot, optionally focuses `repo` (privileged recursive
+        clone for compositions), runs, releases. Exceptions propagate — the orchestrator falls
+        back to the LLM verifier (covers an old daemon image without `/check`)."""
+        inst = await self.scheduler.acquire(effort_id, "verifier", session_id)
+        try:
+            if repo:
+                ok, detail, _ = await self.harness.set_project(
+                    inst.base_url, repo, token=repo_token,
+                    recurse_submodules=recurse_submodules)
+                await self.audit.log(
+                    "worker_project_set", effort_id=effort_id, actor=inst.id,
+                    payload={"repo": repo, "ok": ok, "detail": detail, "verify": True})
+                if not ok:
+                    raise RuntimeError(f"verification focus failed: {detail[:200]}")
+            exit_code, output, timed_out = await self.harness.run_check(
+                inst.base_url, command, timeout=timeout)
+            await self.audit.log(
+                "check_exec", effort_id=effort_id, actor=inst.id,
+                payload={"command": command[:200], "exit_code": exit_code,
+                         "timed_out": timed_out})
+            return exit_code, output, timed_out
         finally:
             await self.scheduler.release(inst.id)
 

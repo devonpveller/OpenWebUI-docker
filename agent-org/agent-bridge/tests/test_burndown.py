@@ -280,6 +280,46 @@ async def test_nl_show_build_log_returns_org_evidence(db_url, tmp_path):
         await db.dispose()
 
 
+async def test_deterministic_check_drives_burndown_no_llm_verifier(db_url, tmp_path):
+    """2026-07-08 live: the LLM 'verifier' ran the build but burned its turn and never reported
+    — verification is now a MACHINE step (daemon /check → real exit code + raw log). Red exec →
+    burn-down (counts parsed from the raw MSBuild log); worker fixes; green exec → finish."""
+    orch, chat, harness, db = await _orch(db_url, tmp_path)
+    try:
+        await _setup_stack(orch)
+        state: dict = {}
+        orch._gh_transport = _stack_remote(state, static_head=True)
+        eid, chan, root = await orch.router.open_effort("burn-exec", project="murder")
+        await orch.charters.set_goal(eid, "fix the vendored build", created_by="po")
+        red_log = ("Game.cs(1,2): error CS1503: cannot convert\n"
+                   "Game.cs(9,9): error CS0117: no member\n    2 Error(s)\n")
+        harness.check_queue = [
+            (1, red_log, False),        # org exec: RED, exit 1, raw MSBuild log
+            (0, "Build succeeded.\n    0 Error(s)", False),   # after round 1: GREEN
+        ]
+        harness.output_queue = [
+            "did work", "pushed",                    # step + publish (head didn't move)
+            "ERRORS AFTER: 0\npushed round 1",       # burn-down round 1 work
+        ]
+        await orch.delegate(eid, chan, root, "fix the vendored build", plan_steps=["work"])
+        await _drain(orch)
+        msgs = " ".join(p["message"] for p in chat.posted)
+        assert "Burn-down engaged" in msgs and "2 error(s)" in msgs   # count from the RAW log
+        assert "GREEN" in msgs
+        # the verification never woke the LLM: no BUILD VERIFIER prompt anywhere
+        prompts = " ".join(w["prompt"] for w in harness.wakes)
+        assert "BUILD VERIFIER" not in prompts
+        assert len(harness.checks) == 2              # exec ran twice (initial + after round 1)
+        assert "dotnet build" in harness.checks[0]["command"]
+        from app.models import Effort
+        async with orch.db.session_factory() as s:
+            e = await s.get(Effort, eid)
+        assert e.lifecycle == "done"
+        assert state["pulls"], "the delivery PR opened once green"
+    finally:
+        await db.dispose()
+
+
 async def test_keep_going_resumes_stalled_burndown(db_url, tmp_path):
     orch, chat, harness, db = await _orch(db_url, tmp_path)
     try:

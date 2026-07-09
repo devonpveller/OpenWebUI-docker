@@ -245,7 +245,10 @@ async def test_composition_check_pass_reported_in_closure(db_url, tmp_path):
         # the worker runs ONLY the build — the recursive submodule init rode the privileged focus,
         # not the proxy-blocked worker git.
         assert "dotnet build vendor/murder/Murder.sln" in prompts
-        assert "Do NOT run git commands" in prompts
+        assert "BUILD VERIFIER" in prompts and "change NOTHING" in prompts
+        # the verification build runs in a FRESH isolated session (never the work session — a
+        # reused session made the agent no-op, live 2026-07-08)
+        assert any("~vfy" in (w.get("session_id") or "") for w in harness.wakes)
         assert any(f.get("recurse_submodules") for f in harness.focus_calls), \
             "the composition-check focus must request a recursive submodule clone"
         from app.models import Effort

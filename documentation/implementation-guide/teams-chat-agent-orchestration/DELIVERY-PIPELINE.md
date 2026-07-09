@@ -230,6 +230,46 @@ found; a PR opened anyway; no follow-up work happened. Mechanisms (all generic, 
   red build opens *no* code PR and *no* wiring PR — the closure says "not done, burn-down
   continues", and the D2 still-red path likewise hands off to the burn-down instead of parking
   on the operator.
+- **Dry-run reconciliation** (`_auto_dry_run_via_isolation`): the same run first surfaced that a
+  broad "port the whole engine" prompt classified `cross_effort` → P4.0 dry-run **required** →
+  the effort *dead-ended* waiting for a `/dry-run pass` command nobody runs. But P4.0's own
+  intent is "the dry-run execution is a worker step — an isolated branch that never merges". So
+  for a **branch-isolated code effort with a runnable build** (breadth risk: `cross_effort` /
+  `cascading_refactor`), the org now **performs the rehearsal itself** — the work lands on an
+  agent branch that can't reach `main` without the D4 human merge, and the org's own build of
+  that branch *is* the isolated rehearsal + verdict. No operator command; governance intact
+  (nothing merges un-rehearsed or un-approved). A genuinely `irreversible` act, or one with no
+  build to rehearse with, still holds for a human — but **"proceed"** (NL, the operator's word =
+  §3 clearance) releases even that. Audit: `dry_run_auto_isolated`, `dry_run_operator_cleared`.
+- **Advisory review for machine-verified efforts** (`_machine_verified_effort` +
+  `stop_gates.force_clear`): the same run then froze at checkpoint cp1 because the heavy-path
+  differently-goaled review flagged the worker's **mid-work status message** ("let me make all
+  the changes then build") for "no implementation / no incremental checks" — redundant with the
+  org's own build gate and exactly the autonomous-progress friction the operator flagged. Per D3
+  ("reviews are advisory, never a gate an agent can game"), a review flag on a **machine-verified
+  effort** (its project or vendoring host has a `check_cmd`, delivery branch-isolated) is now
+  SURFACED as advisory input and the checkpoint force-clears — the org's build (composition /
+  burn-down / D2) + D4 merge are the real gates. The **monitor** (P3.7, off-task/off-scope
+  deviation) stays a hard freeze — a safety signal a build can't catch. Efforts with no build
+  check still hard-freeze on a flag.
+- **Approve auto-resumes** (`apply_operator_decision`): approving a concern MEANS "continue" —
+  the cleared, non-aborted effort re-dispatches its own work automatically, so the operator
+  never has to say "approve" *and then* "re-run it" (abort does not resume).
+- **Deterministic verification** (2026-07-08, the last seam): "run a command, report its output"
+  must never be an LLM turn — a fresh-session LLM verifier RAN the build (exit 1, the real port
+  errors) but burned its turn re-running it and never wrote the verdict. little-coder gained
+  `POST /check` (one command via open-terminal → REAL exit code + combined output, same
+  containment, `check_ran` audit); the bridge gained `router.exec_check` (acquire → privileged
+  focus → `/check` → release) and both `_org_build_check` and `_composition_check` now run
+  exec-first with the LLM verifier as fallback only (old daemon images). First live run:
+  `org_build_check {mode: exec, errors: 134}` on the real composition — matching the operator's
+  local IDE — and the burn-down engaged with both workers fanned out on file-disjoint part
+  branches. Verdicts come from exit codes; error counts/briefs parse from the raw toolchain log.
+- **Pending-decision hygiene** (2026-07-08): merge gates are reconciled against the remote
+  before any bare `approve` listing (`read_open_pr_numbers` → a gate whose PR is closed/merged/
+  gone is pruned, `merge_gate_pruned` audit; fail-open on API errors), and a bare `approve`
+  prefers the decision that BLOCKS work — optional merge invites are acknowledged, never a
+  14-item wall burying the one frozen effort.
 
 ### D3 — differently-goaled review ✅ BUILT, re-targeted to the PR
 `stop_gates.review` (P4.4–4.7) already produces differently-goaled verdicts. D3 **attaches** them to

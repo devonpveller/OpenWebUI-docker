@@ -576,6 +576,38 @@ async def close_pull_request(
                             detail=r.text[:160])
 
 
+async def read_open_pr_numbers(
+    github: GitHubApp, repo_url: str, *,
+    api_base: str = "https://api.github.com", transport: httpx.BaseTransport | None = None,
+) -> set[int] | None:
+    """All OPEN PR numbers on a repo — for reconciling stale merge gates against reality
+    (operator 2026-07-08: a bare `approve` listed 14 items, 11 of them gates for PRs that no
+    longer exist). Returns None when unreadable — the caller fails OPEN (never drops a gate on
+    an API hiccup)."""
+    try:
+        owner, repo = parse_owner_repo(repo_url)
+    except ValueError:
+        return None
+    if owner.lower() != (github.owner or "").lower():
+        return None
+    try:
+        token = await github.installation_token()
+    except GitHubAppError:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=30.0, transport=transport) as c:
+            r = await c.get(f"{api_base.rstrip('/')}/repos/{owner}/{repo}/pulls",
+                            headers=_headers(token), params={"state": "open", "per_page": 100})
+    except httpx.HTTPError:
+        return None
+    if r.status_code != 200:
+        return None
+    try:
+        return {int(p.get("number") or 0) for p in r.json()}
+    except (ValueError, TypeError, AttributeError):
+        return None
+
+
 async def merge_branch(
     github: GitHubApp, repo_url: str, base_branch: str, head_branch: str, *,
     message: str = "", api_base: str = "https://api.github.com",

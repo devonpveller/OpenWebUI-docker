@@ -88,6 +88,18 @@ class TriggerRequest(BaseModel):
     acceptance_command: str | None = None
 
 
+class CheckRequest(BaseModel):
+    """A deterministic VERIFICATION exec (agent-org bridge, 2026-07-08): run ONE command in the
+    focused workspace and return its REAL exit code + output — no model in the loop. Exists
+    because build verification is a machine step: an LLM 'verifier' burned its whole turn
+    re-running builds and never reported the verdict. Same containment as agent commands
+    (open-terminal + git-proxy + egress)."""
+    command: str
+    cwd: str | None = None          # default: the workspace root
+    timeout: int = 600              # seconds; clamped to [30, 1800]
+    actor: str = "bridge"
+
+
 class ProjectRequest(BaseModel):
     repo: str
     actor: str = "cli"
@@ -596,6 +608,25 @@ class LittleCoderDaemon:
             )
         return {"ok": True, "path": req.path}
 
+    async def run_check(self, req: CheckRequest) -> dict:
+        """Deterministic verification exec (see CheckRequest): one command via open-terminal,
+        REAL exit code + combined output back. Requires a focused workspace (the caller focuses
+        first via /project — including the privileged recursive clone for compositions)."""
+        if self.current_focus is None or not self.workspace.is_focused():
+            raise HTTPException(409, "no project focused — focus the workspace first")
+        timeout = max(30, min(int(req.timeout or 600), 1800))
+        res = await asyncio.to_thread(
+            self.ot.execute, req.command, req.cwd, None, timeout)
+        out = (res.stdout or "")
+        if res.stderr:
+            out += ("\n" if out else "") + res.stderr
+        self.audit.write(
+            "check_ran", actor=req.actor, repo=self.current_focus.canonical_url,
+            command=req.command[:200], exit_code=res.exit_code, timed_out=res.timed_out,
+        )
+        return {"ok": True, "exit_code": res.exit_code, "timed_out": res.timed_out,
+                "status": res.status, "output": redact_secrets(out[-65536:])}
+
 
 def _parse_ts(ts: str) -> float:
     from datetime import datetime
@@ -694,6 +725,10 @@ def build_app(daemon: LittleCoderDaemon) -> FastAPI:
     @app.post("/project/submodule")
     async def project_submodule(req: SubmoduleRequest) -> dict:
         return await daemon.add_submodule(req)
+
+    @app.post("/check")
+    async def check(req: CheckRequest) -> dict:
+        return await daemon.run_check(req)
 
     @app.get("/admin/observe")
     def observe(iterate: bool = False) -> dict:
