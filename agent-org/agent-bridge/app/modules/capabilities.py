@@ -758,6 +758,70 @@ async def delete_branch(
                             f"({r.status_code}).", detail=r.text[:160])
 
 
+async def classify_agent_branches(
+    github: GitHubApp, repo_url: str, *,
+    api_base: str = "https://api.github.com", transport: httpx.BaseTransport | None = None,
+) -> dict:
+    """Classify a repo's `agent/*` branches by merge state so the org can reason about hygiene
+    the way a human does — "these were already merged and no longer need to be here" (operator
+    2026-07-10). Returns:
+      {"default": <default branch>,
+       "merged":   [names whose commits are ALL in the default branch — safe to delete, zero loss],
+       "unmerged": [{"name","ahead"} — carries commits NOT in the default branch],
+       "open_pr":  [names with an OPEN PR — keep, they're live]}
+    Merge test = compare(default...branch).ahead_by == 0 (every commit is already contained).
+    Fail-SAFE: a branch we can't classify is dropped from all buckets (never called deletable)."""
+    owner, name = parse_owner_repo(repo_url)
+    token = await github.installation_token()
+    base = api_base.rstrip("/")
+    h = _headers(token)
+    out: dict = {"default": "main", "merged": [], "unmerged": [], "open_pr": []}
+    async with httpx.AsyncClient(timeout=30.0, transport=transport) as c:
+        meta = await c.get(f"{base}/repos/{owner}/{name}", headers=h)
+        if meta.status_code == 200:
+            out["default"] = meta.json().get("default_branch") or "main"
+        default = out["default"]
+        # all agent/* branches (paginated)
+        agent: list[str] = []
+        page = 1
+        while True:
+            r = await c.get(f"{base}/repos/{owner}/{name}/branches", headers=h,
+                            params={"per_page": 100, "page": page})
+            if r.status_code != 200:
+                break
+            b = r.json()
+            agent += [x["name"] for x in b if (x.get("name") or "").startswith("agent/")]
+            if len(b) < 100:
+                break
+            page += 1
+        # heads of OPEN PRs (these are live — never delete)
+        open_heads: set[str] = set()
+        page = 1
+        while True:
+            r = await c.get(f"{base}/repos/{owner}/{name}/pulls", headers=h,
+                            params={"state": "open", "per_page": 100, "page": page})
+            if r.status_code != 200:
+                break
+            j = r.json()
+            open_heads |= {(p.get("head") or {}).get("ref") for p in j if p.get("head")}
+            if len(j) < 100:
+                break
+            page += 1
+        for b in sorted(set(agent)):
+            if b in open_heads:
+                out["open_pr"].append(b)
+                continue
+            cmp = await c.get(f"{base}/repos/{owner}/{name}/compare/{default}...{b}", headers=h)
+            if cmp.status_code != 200:
+                continue  # unknown → leave it alone (never classify as safe-to-delete)
+            ahead = cmp.json().get("ahead_by")
+            if ahead == 0:
+                out["merged"].append(b)
+            elif isinstance(ahead, int):
+                out["unmerged"].append({"name": b, "ahead": ahead})
+    return out
+
+
 async def bump_submodule(
     github: GitHubApp, engine_url: str, submodule_path: str, commit_sha: str, *,
     branch: str, base_branch: str = "", message: str = "",

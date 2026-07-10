@@ -280,6 +280,39 @@ async def test_nl_show_build_log_returns_org_evidence(db_url, tmp_path):
         await db.dispose()
 
 
+async def test_infra_check_failure_elevates_not_burndown(db_url, tmp_path):
+    """2026-07-10 live: the org's check failed on its OWN environment (git-proxy DENIED the
+    submodule fetch → MSB1009), and the burn-down SPUN on it as a code error (1→1→1→1, stalled).
+    A check that fails on infrastructure (proxy/clone/tool/path), with no source-code error, is
+    now surfaced honestly and NEVER burned down."""
+    orch, chat, harness, db = await _orch(db_url, tmp_path)
+    try:
+        await _setup_stack(orch)
+        state: dict = {}
+        orch._gh_transport = _stack_remote(state, static_head=True)
+        eid, chan, root = await orch.router.open_effort("infra", project="murder")
+        await orch.charters.set_goal(eid, "fix the vendored build", created_by="po")
+        infra_log = ("git-proxy: DENIED (blocklist:fetch-remote) — 'origin' is not an "
+                     "operator-configured remote (known: none)\n"
+                     "MSBUILD : error MSB1009: Project file does not exist.\n"
+                     "Switch: vendor/murder/Murder.sln\n")
+        harness.check_queue = [(1, infra_log, False)]   # the check breaks on its OWN environment
+        harness.output_queue = ["did work", "pushed"]
+        await orch.delegate(eid, chan, root, "fix the vendored build", plan_steps=["work"])
+        await _drain(orch)
+        msgs = " ".join(p["message"] for p in chat.posted)
+        assert "check couldn't run" in msgs.lower()           # surfaced as infra, honestly
+        assert "not on your code" in msgs                     # the honest framing
+        assert "Burn-down engaged" not in msgs                # NEVER burned down on infra
+        assert len(harness.checks) == 1                       # ran once, then stopped (no spin)
+        from app.models import Effort
+        async with orch.db.session_factory() as s:
+            e = await s.get(Effort, eid)
+        assert e.lifecycle != "done"                          # left open, not falsely done
+    finally:
+        await db.dispose()
+
+
 async def test_deterministic_check_drives_burndown_no_llm_verifier(db_url, tmp_path):
     """2026-07-08 live: the LLM 'verifier' ran the build but burned its turn and never reported
     — verification is now a MACHINE step (daemon /check → real exit code + raw log). Red exec →
@@ -367,5 +400,48 @@ async def test_keep_going_resumes_stalled_burndown(db_url, tmp_path):
         msgs = " ".join(p["message"] for p in chat.posted)
         assert "Resuming the burn-down" in msgs and eid in msgs
         assert "GREEN" in msgs                              # the resumed loop reached green
+    finally:
+        await db.dispose()
+
+
+# ── stall escalation distinguishes a RUNTIME failure from a compiler plateau ──
+async def test_stall_on_runtime_failure_escalates_as_runtime_not_api_judgment(db_url, tmp_path):
+    """A stall on a RUNTIME failure (RED check, NO compiler errors — it built and RAN, then failed
+    the same way each round) escalates as a runtime failure with the log TAIL, not the generic
+    'needs an API judgment call' that would print 'still failing: <nothing>'. Live 2026-07-09: an
+    editor-headless-launch stalled [0,0,0] and the empty compiler-error escalation was confusing."""
+    orch, chat, harness, db = await _orch(db_url, tmp_path)
+    try:
+        await _setup_stack(orch)
+        eid, _c, _r = await orch.router.open_effort("rt-stall", project="murder")
+        runtime_log = (
+            "Restore complete\nBuild succeeded\n"
+            "Unhandled exception. System.NullReferenceException: object reference not set\n"
+            "   at Murder.Editor.EditorScene.Load()\n   at Murder.Game.Initialize()\n")
+        await orch._burndown_elevate(eid, [0, 0, 0], runtime_log,
+                                     "two consecutive rounds without progress")
+        msgs = " ".join(p["message"] for p in chat.posted)
+        assert "runtime failure" in msgs                    # framed as runtime, not compiler
+        assert "NullReferenceException" in msgs             # the failing run's tail is shown
+        assert "run it and observe" in msgs                 # the honest human next step
+        assert "an API choice" not in msgs                  # NOT the compiler-plateau framing
+    finally:
+        await db.dispose()
+
+
+async def test_stall_on_compiler_plateau_keeps_trajectory_framing(db_url, tmp_path):
+    """The compiler-error plateau path is UNCHANGED: real `file(line): error` lines still escalate
+    with the count trajectory, the remaining errors, and the 'judgment call' framing."""
+    orch, chat, harness, db = await _orch(db_url, tmp_path)
+    try:
+        await _setup_stack(orch)
+        eid, _c, _r = await orch.router.open_effort("cc-stall", project="murder")
+        await orch._burndown_elevate(eid, [4, 4, 4], FAIL4,
+                                     "two consecutive rounds without progress")
+        msgs = " ".join(p["message"] for p in chat.posted)
+        assert "4 → 4 → 4" in msgs                          # the count trajectory
+        assert "error CS0001" in msgs                       # remaining errors shown
+        assert "a judgment call" in msgs
+        assert "runtime failure" not in msgs
     finally:
         await db.dispose()

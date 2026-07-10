@@ -47,7 +47,13 @@ class _FakeOT:
 def test_is_focused_reads_the_shared_volume(tmp_path):
     ws = WorkspaceManager(_FakeOT(), workspace_path=str(tmp_path))
     assert not ws.is_focused()
-    (tmp_path / ".git").mkdir()
+    gitdir = tmp_path / ".git"
+    gitdir.mkdir()
+    # a bare/partial `.git` (crashed clone: only submodule `modules/`, no HEAD) is NOT focused
+    (gitdir / "modules").mkdir()
+    assert not ws.is_focused()
+    # a real repo has .git/HEAD
+    (gitdir / "HEAD").write_text("ref: refs/heads/main\n")
     assert ws.is_focused()
 
 
@@ -59,6 +65,18 @@ def test_clone_runs_in_open_terminal_with_real_git():
     assert "/usr/bin/git" in cmd  # operator-bypass clone, not the proxy
     assert "clone" in cmd
     assert "github.com/acme/widget" in cmd
+
+
+def test_clone_wipes_the_workspace_before_cloning():
+    """A CLONE into the PERSISTENT /workspace mount must first clear any corrupt/partial leftovers,
+    or `git clone` fails 'destination path already exists and is not an empty directory' (live
+    2026-07-10: exit 128 wedged a composition focus for ~2h). The wipe must precede the clone."""
+    ot = _FakeOT()
+    ws = WorkspaceManager(ot, workspace_path="/workspace", real_git="/usr/bin/git")
+    ws.clone(WIDGET)
+    cmd, _cwd = ot.calls[0]
+    assert "-mindepth 1 -delete" in cmd                     # the workspace contents are wiped
+    assert cmd.index("-delete") < cmd.index("clone")        # wipe happens BEFORE the clone
 
 
 def test_clone_with_deploy_token_injects_https_credential():

@@ -72,6 +72,12 @@ class Settings(BaseSettings):
     # Source guard (anti-self-DoS): the orchestration's own research/grounding call is SKIPPED if a
     # shed happened within this window — don't add a fan-out on top of a saturated GPU.
     capacity_source_guard_s: float = 60.0
+    # Stall watchdog (operator 2026-07-10: "there hasn't been an update in 2 hours"): the org must
+    # never sit silent after a dispatch. A tick sweeps for efforts wedged mid-dispatch (silent past
+    # the threshold, not delegating, not parked) and auto-re-engages them, escalating past the cap.
+    stall_watchdog_s: float = 240.0         # sweep cadence
+    stall_threshold_s: float = 900.0        # silence past this (15 min) with no progress = wedged
+    stall_max_recoveries: int = 2           # auto-re-engages before a loud escalation stands
 
     # ── Conversation context (hierarchical + bounded — the PO's memory) ──────
     # A reply builds thread-level context; the channel is a higher-level background. Both are

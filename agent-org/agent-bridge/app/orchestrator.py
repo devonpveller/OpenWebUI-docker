@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import random
 import re
 import time
@@ -39,6 +40,7 @@ from .modules.capabilities import (
     open_pull_request,
     parse_owner_repo,
     read_branch_changes,
+    classify_agent_branches,
     close_pull_request,
     delete_branch,
     read_added_lines,
@@ -260,6 +262,35 @@ _VERIFY_CLAUSE = (
     "invitation to redesign)."
 )
 
+# For a RUNTIME/BEHAVIORAL goal (a symptom you only see by RUNNING + using the program), a green
+# build proves nothing (operator 2026-07-10: "90% of the time when I test what was claimed, the
+# claim is false" — because the check compiles, it doesn't RUN the behavior). The trust fix: the
+# fix must be PROVEN by an automated reproduction that FAILS on the broken code and PASSES on the
+# fix, wired into the check so it can never silently regress. This is what makes "done" mean the
+# GOAL is met, not "it compiles" — and it makes cheating fail (you can't hollow out the code and
+# still pass a test that exercises the real path).
+_REPRO_CLAUSE = (
+    "\n\nTHIS IS A RUNTIME / BEHAVIORAL SYMPTOM — something seen only by RUNNING the program, not "
+    "by compiling it. A build that COMPILES is NOT done, and a fix that merely 'looks right' proves "
+    "nothing. Prove it the only trustworthy way:\n"
+    "1. REPRODUCE the symptom as an AUTOMATED TEST that exercises the REAL code path that fails — "
+    "the actual load/init/operation (e.g. load the resource the way the failing action does), NOT "
+    "a simulated mouse-click. Run it against the CURRENT code and confirm it FAILS — that proves "
+    "the test genuinely catches the symptom.\n"
+    "2. FIX the code so the test PASSES — WITHOUT weakening, stubbing, or deleting the test or the "
+    "behavior it checks. (Hollowing out code to pass a build is exactly the failure this catches.)\n"
+    "3. WIRE the test into the project's check/build so it RUNS every time — a permanent regression "
+    "guard. If there is no test harness, add the smallest runnable one.\n"
+    "4. End your report with a block starting exactly `REPRO:` — then these lines:\n"
+    "   `EXERCISES:` <what real path the test drives>\n"
+    "   `BEFORE:` FAIL — <the failing run's evidence on the unfixed code>\n"
+    "   `AFTER:` PASS — <the passing run's evidence after the fix>\n"
+    "   `WIRED:` <exactly how the check now runs this test>\n"
+    "If part of the symptom genuinely CANNOT be exercised without a human (pure visual correctness, "
+    "real-GPU rendering, a physical display), add `UNAUTOMATABLE:` <exactly what needs a human eye> "
+    "and automate everything around it — NEVER fake a passing test to look done."
+)
+
 
 def _compact_paste(text: str, max_lines: int = 40, max_chars: int = 2500) -> str:
     """Compact a pasted wall (build errors, logs) for a SMALL-model prompt: collapse repeated
@@ -298,6 +329,20 @@ def _compact_paste(text: str, max_lines: int = 40, max_chars: int = 2500) -> str
         compact += (f"\n… (+{omitted} more line(s) omitted here for brevity — the FULL text is "
                     f"kept in the task goal)")
     return compact
+
+
+# Minimal built-in fallback for the PM communication voice (used only if charters/pm-voice.md is
+# missing on a bad deploy — the file is the source of truth + the operator-tunable surface).
+_PM_VOICE_FALLBACK_SYS = (
+    "You are the PM speaking directly to the human operator — a sharp engineer who would rather "
+    "talk to you than read a dashboard. Make them UNDERSTAND what's happening, what it means, and "
+    "what (if anything) they need to do. Communicate only what the GROUND-TRUTH FACTS support; "
+    "never invent a branch, SHA, PR number, count, or state, and never soften an honest caveat "
+    "into false confidence (a green build is not a verified runtime fix). Lead with what matters "
+    "most; separate clearly what's handled from what needs the operator; explain the WHY; be "
+    "honest about what you couldn't verify and offer the next step. Concise, direct, technical, "
+    "no corporate padding. Markdown. A one-line question gets a one-line answer."
+)
 
 _PO_NL_SYS = (
     "You are the PO (Project Overseer) — the human operator's conversational counterpart in a "
@@ -680,6 +725,7 @@ class Orchestrator:
         self.router.on_upstream_fail = self._heal_project_upstream
         self._capacity_event = asyncio.Event()
         self._capacity_task: asyncio.Task | None = None
+        self._stall_task: asyncio.Task | None = None
         self._draining = False
         self._last_backpressure = 0.0   # monotonic ts of the last shed (source-guard window)
         # Efforts with a LIVE delegate task right now (actively being executed). This is the honest
@@ -748,6 +794,105 @@ class Orchestrator:
                 await self._drain_parked_once()
             except Exception as exc:  # noqa: BLE001 - the loop must never die
                 log.warning("capacity drain tick failed: %s", exc)
+
+    # An effort whose LATEST event is one of these was dispatched but hasn't reached any resolution
+    # (delivery / burn-down / escalation / a surfaced state). If it then goes SILENT, it's wedged —
+    # a focus that failed, a delegate that died mid-flight — not something correctly awaiting you.
+    _STALL_MIDDISPATCH_KINDS = frozenset({
+        "worker_acquire", "worker_project_set", "worker_release", "goal_change",
+        "readiness_gate", "effort_risk_set", "effort_reopened", "worker_resumed",
+        "worker_waiting", "focus_failed",
+    })
+
+    async def _last_event(self, effort_id: str) -> tuple[str, str] | None:
+        async with self.db.session_factory() as s:
+            row = (await s.execute(
+                select(Event.kind, Event.ts).where(Event.effort_id == effort_id)
+                .order_by(Event.ts.desc()).limit(1))).first()
+        return (row[0], row[1]) if row else None
+
+    async def _event_count(self, effort_id: str, kind: str) -> int:
+        async with self.db.session_factory() as s:
+            return int((await s.execute(
+                select(func.count()).select_from(Event).where(
+                    Event.effort_id == effort_id, Event.kind == kind))).scalar_one())
+
+    async def _stall_watchdog_loop(self) -> None:
+        """Safety net so the org NEVER sits silent after a dispatch (operator 2026-07-10: "there
+        hasn't been an update in 2 hours"). Each tick sweeps for efforts wedged mid-dispatch — a
+        focus that failed, a delegate that died, a worker left bound — and AUTO-RE-ENGAGES them
+        (bounded), escalating loudly past the cap. Distinct from the capacity drain (backpressure)."""
+        while True:
+            try:
+                await asyncio.sleep(self.s.stall_watchdog_s)
+            except asyncio.CancelledError:
+                return
+            try:
+                await self._sweep_stalled_efforts()
+            except Exception as exc:  # noqa: BLE001 - the watchdog must never die
+                log.warning("stall watchdog tick failed: %s", exc)
+
+    async def _sweep_stalled_efforts(self) -> None:
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+        parked = {t["effort_id"] for t in await self.parks.all()}
+        mgmt = await self.mgmt_channel_id()
+        for e in await self.gate.snapshot(open_only=True):
+            eid = e["id"]
+            if eid.startswith("__") or eid in self._delegating or eid in parked:
+                continue                                    # internal / running now / waiting on capacity
+            if e.get("state") == "frozen":
+                continue                                    # paused on a concern (needs a decision)
+            last = await self._last_event(eid)
+            if last is None:
+                continue
+            kind, ts = last
+            if kind not in self._STALL_MIDDISPATCH_KINDS:
+                continue    # last event is a resolution / surfaced state — correctly awaiting you
+            try:
+                age = (now - datetime.fromisoformat(ts)).total_seconds()
+            except Exception:  # noqa: BLE001
+                continue
+            if age < self.s.stall_threshold_s:
+                continue
+            mins = int(age // 60)
+            n = await self._event_count(eid, "stall_recovered")
+            if n >= self.s.stall_max_recoveries:
+                await self.audit.log("stall_escalated", effort_id=eid,
+                                     payload={"idle_min": mins, "recoveries": n})
+                body = (f"🧰 **{eid}** stalled mid-dispatch and my {n} auto-recoveries didn't take — "
+                        f"it's been silent ~{mins} min. Something structural is blocking it (a repo, "
+                        f"clone, or tool problem), not your code. I've stopped auto-retrying to avoid "
+                        f"a loop — say **“re-run it”** to try again once the cause is clear.")
+                await self.comms.post(Intent.escalation, body, effort_id=eid)
+                await self.comms.post(Intent.operator_reply, body,
+                                      thread_id=self._mgmt_thread_of(eid))
+                await self.router.update_effort_card(eid, "needs-attention")
+                continue
+            await self.audit.log("stall_recovered", effort_id=eid,
+                                 payload={"idle_min": mins, "n": n + 1, "last_kind": kind})
+            await self._reengage(
+                [eid], mgmt_channel=mgmt, mgmt_thread=self._mgmt_thread_of(eid),
+                reply_prefix=(f"🔧 **{eid}** went quiet for ~{mins} min with no progress after a "
+                              f"dispatch — a focus or step stalled without reporting. "
+                              f"Auto-re-engaging it now (nothing was lost)."))
+
+    async def _handle_clone_failure(self, effort_id: str, result) -> None:
+        """A worker COULDN'T FOCUS its workspace (clone/setup failed) — NOT your code, NOT a worker
+        bug, and NEVER something to swallow silently (operator 2026-07-10: an effort sat silent for
+        2h after a focus failure only flipped its card to 'error'). Audit + tell you plainly; the
+        stall watchdog re-engages it on a clean workspace shortly. Generic across projects."""
+        tail = (getattr(result, "output", None) or getattr(result, "signal", None) or "")[-400:]
+        await self.audit.log("focus_failed", effort_id=effort_id, payload={"detail": tail[:300]})
+        body = (f"🔧 **{effort_id}** — the worker couldn't set up its workspace (clone/focus failed): "
+                f"this is a workspace/clone problem, not your code or the worker, and **nothing ran**. "
+                f"I'll re-engage it on a clean workspace automatically; if it keeps failing I'll raise "
+                f"it loudly rather than sit quiet."
+                + (f"\n```\n{tail[-280:]}\n```" if tail.strip() else ""))
+        await self.comms.post(Intent.worker_activity, body, effort_id=effort_id)
+        await self.comms.post(Intent.operator_reply, body,
+                              thread_id=self._mgmt_thread_of(effort_id))
+        await self.router.update_effort_card(effort_id, "working")
 
     async def _drain_parked_once(self) -> None:
         """Resume the oldest DISPATCHABLE parked effort (FIFO). Bumps its attempt count; escalates +
@@ -831,6 +976,7 @@ class Orchestrator:
         await self._rehydrate_pending()   # restore proposals a prior run held (survives a rebuild, §3)
         await self.profiles.load_from_disk()
         await self.charters.seed_floor_from_disk()
+        self._load_pm_voice_charter()     # the operator-tunable "how the org talks to you" system prompt
         await self.scheduler.register_from_urls(self.s.worker_instance_urls)
         stale = await self.scheduler.reset_stale()  # clear any wedged 'computing' from a crash
         if stale:
@@ -889,16 +1035,22 @@ class Orchestrator:
             if parked:
                 log.info("resuming %d parked effort(s) from a prior run", parked)
                 self._signal_capacity()
+        # Stall watchdog: the org must never sit silent after a dispatch (recovers mid-dispatch
+        # wedges — a failed focus, a dead delegate). Live only (a fake harness never really stalls).
+        if (self.s.chat_adapter != "fake" and getattr(self, "_stall_task", None) is None):
+            self._stall_task = asyncio.create_task(self._stall_watchdog_loop())
 
     async def aclose(self) -> None:
         """Stop the capacity drain loop (for a clean shutdown / test teardown)."""
-        if self._capacity_task is not None:
-            self._capacity_task.cancel()
-            try:
-                await self._capacity_task
-            except (asyncio.CancelledError, Exception):  # noqa: BLE001
-                pass
-            self._capacity_task = None
+        for attr in ("_capacity_task", "_stall_task"):
+            task = getattr(self, attr, None)
+            if task is not None:
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                    pass
+                setattr(self, attr, None)
 
     def _project_for(self, repo: str | None = None) -> str:
         """The FALLBACK project slug for a request that names no project: the AO_DEFAULT_REPO slug
@@ -1496,6 +1648,18 @@ class Orchestrator:
         # plane capability the bridge does itself — deterministically, never via a worker.
         if await self._nl_pr_request(message, channel_id, thread_id):
             return
+        # NL-FIRST "tidy up" — the umbrella board-cleanup: close COMPLETED efforts (idle + work
+        # already merged into main) and delete their merged branches in one go; report-only on a
+        # question. Before branch hygiene so "tidy up" (efforts + branches) isn't captured by the
+        # branch-only path.
+        if await self._nl_tidy_up(message, channel_id, thread_id):
+            return
+        # NL-FIRST branch HYGIENE — "clean up / which branches …" (NO branch named): understand the
+        # repo's agent/* branches by merge state and report, or delete the already-merged ones on a
+        # cleanup request (the org reasons "these were merged, they can go"). Before the named-delete
+        # path since a general cleanup names no branch.
+        if await self._nl_branch_hygiene(message, channel_id, thread_id):
+            return
         # NL-FIRST repo hygiene — these COMPOSE (the live cleanup prompt asked for both in ONE
         # message): "close PR 3"/"remove all pull requests" (reversible sweep) and branch deletion
         # (IRREVERSIBLE — fires only on explicitly NAMED agent/* branches in a delete-verb
@@ -1559,6 +1723,12 @@ class Orchestrator:
                                             announce_thread=thread_id))
                 return
         efforts = await self.gate.snapshot(open_only=True)  # PO reasons over what's still in play
+        # Internal singletons (`__survey__`, `__capability__`) are org PLUMBING, not the operator's
+        # work — never show them in status, never dispatch/archive them from a "get the workers
+        # working" / "archive" (operator 2026-07-10: they leaked into the effort list as things to
+        # dispatch). Filter here so every operator-facing path downstream (status, select, reengage,
+        # archive, the model's context) sees only real efforts.
+        efforts = [e for e in efforts if not (e.get("id") or "").startswith("__")]
         # HONEST status (running/idle/paused/waiting-capacity) — NOT the gate `active` flag, which
         # persists forever and made the PM invent a phantom "queued, waiting for resources".
         status_map = await self._effort_status_map(efforts)
@@ -1994,6 +2164,19 @@ class Orchestrator:
             else:
                 reply += "\n\n_No open efforts — tell me what you'd like built._"
 
+        # PM VOICE (operator UX 2026-07-10): on a CONVERSATIONAL turn — where the reply IS the
+        # deliverable — synthesize it from the full ground-truth facts in the PM's communication
+        # voice (charters/pm-voice.md), rather than the small model's thin classification-byproduct
+        # reply or a bare status template. This is DECOUPLED from intent classification so the model
+        # does ONE job (communicate) instead of splitting attention across a ~15-kind taxonomy.
+        # ACTION turns are untouched — their handlers already posted precise deterministic messages.
+        # Fails SOFT: on any synthesis hiccup / GPU squeeze it keeps the existing deterministic reply.
+        if intent.kind in ("status", "question") and (reply or efforts):
+            facts = await self._comm_facts(efforts, status_map)
+            synth = await self._pm_voice(message, facts, history)
+            if synth:
+                reply = synth
+
         # NEVER post bare punctuation (the live "…" came from this exact default: a junk reply was
         # cleared upstream, every branch fell through, and this tail re-manufactured the ellipsis).
         # An empty reply here means nothing acted — say so honestly instead.
@@ -2066,6 +2249,101 @@ class Orchestrator:
                      f"start on their own. Say **“get the workers working”** (or name which) and I'll "
                      f"dispatch them; or **“archive”** the ones you're done with._")
         return body
+
+    # ── PM communication voice (operator UX): synthesize, don't template ──────────
+    def _load_pm_voice_charter(self) -> None:
+        """Load the operator-tunable PM communication charter (how the org talks to the human).
+        Editing charters/pm-voice.md changes the voice with NO code change. Falls back to a
+        built-in minimal charter if the file is missing so synthesis never breaks on a bad deploy."""
+        self._pm_voice_sys = _PM_VOICE_FALLBACK_SYS
+        try:
+            path = os.path.join(self.s.charters_dir, "pm-voice.md")
+            if os.path.isfile(path):
+                with open(path, encoding="utf-8") as fh:
+                    txt = fh.read().strip()
+                if txt:
+                    self._pm_voice_sys = txt
+        except Exception as exc:  # noqa: BLE001 - a bad file must never break boot
+            log.warning("pm-voice charter load failed (using built-in fallback): %s", exc)
+
+    async def _comm_facts(self, efforts: list[dict], status_map: dict[str, str]) -> str:
+        """The GROUND-TRUTH facts block the PM voice synthesizes from — deterministic, honesty-
+        preserving, and richer than the classifier sees: honest per-effort status (+ recent real
+        commands), the PRs awaiting the operator's merge, anything else pending an operator
+        decision, and the latest org-run build verdict per effort. The synthesis renders these
+        faithfully; it never invents beyond them. Generic — no project specifics baked in."""
+        parts: list[str] = [self._render_status(efforts, status_map)]
+        # What NEEDS the operator — PRs held for their merge (D4) + other pending decisions.
+        if self._pending_merge:
+            merges = []
+            for mid, e in self._pending_merge.items():
+                pr = e.get("pr_number") or "?"
+                repo = (e.get("repo") or "").split("github.com/")[-1] or "?"
+                merges.append(f"  - `{mid}` → PR #{pr} on `{repo}` (say “merge it” to merge)")
+            parts.append("PRs AWAITING YOUR MERGE (main only changes when you say so):\n"
+                         + "\n".join(merges))
+        pending = [*self._pending_lifecycle.keys(), *self._pending_capability.keys(),
+                   *self._pending_plan.keys()]
+        if pending:
+            parts.append("AWAITING YOUR DECISION: " + ", ".join(f"`{p}`" for p in pending))
+        # The org's OWN most-recent build verdict per open effort (the evidence layer — a green
+        # build never proves a runtime symptom; the synthesis must carry that honestly).
+        verdicts = await self._recent_build_verdicts([e["id"] for e in efforts])
+        if verdicts:
+            parts.append("LATEST ORG BUILD VERDICTS (the org's own build, not a worker claim):\n"
+                         + verdicts)
+        return "\n\n".join(p for p in parts if p and p.strip())
+
+    async def _recent_build_verdicts(self, effort_ids: list[str], *, limit: int = 6) -> str:
+        """Most-recent org_build_check verdict per effort (pass/fail + error count/mode), from the
+        audit log — factual evidence for the voice. Empty when there's nothing to report."""
+        if not effort_ids:
+            return ""
+        lines: list[str] = []
+        try:
+            async with self.db.session_factory() as s:
+                for eid in effort_ids[:limit]:
+                    row = (await s.execute(
+                        select(Event).where(Event.kind == "org_build_check",
+                                            Event.effort_id == eid)
+                        .order_by(Event.ts.desc()).limit(1))).scalar_one_or_none()
+                    if row is None:
+                        continue
+                    p = row.payload or {}
+                    v, n = p.get("verdict", "?"), p.get("errors")
+                    n_txt = f", {n} error(s)" if isinstance(n, int) else ""
+                    lines.append(f"  - `{eid}`: **{v}**{n_txt}")
+        except Exception as exc:  # noqa: BLE001 - evidence is a nicety; never break the reply
+            log.debug("build-verdict lookup failed: %s", exc)
+            return ""
+        return "\n".join(lines)
+
+    async def _pm_voice(self, operator_message: str, facts: str, history: str) -> str:
+        """Synthesize the operator-facing reply in the PM's communication voice
+        (charters/pm-voice.md) — clear, honest, leading with what matters and what needs the
+        operator. DECOUPLED from intent classification: that call fills the action schema on a
+        big taxonomy; THIS call does one job — communicate — so the small model isn't splitting
+        attention. Faithful to the GROUND-TRUTH facts (never invents SHAs/states). Fails SOFT:
+        returns "" so the caller falls back to its deterministic reply/template (a synthesis
+        hiccup or GPU squeeze must never swallow the operator's turn)."""
+        sys = getattr(self, "_pm_voice_sys", "") or _PM_VOICE_FALLBACK_SYS
+        if not operator_message.strip():
+            return ""
+        user = (
+            f"THE OPERATOR JUST SAID:\n{operator_message}\n\n"
+            f"GROUND-TRUTH FACTS — communicate ONLY what these support; never invent beyond them:\n"
+            f"{facts or '(no additional facts beyond the conversation)'}\n\n"
+            f"CONVERSATION SO FAR (most recent last):\n{history or '(none)'}\n\n"
+            f"Write your reply to the operator now — faithful to the facts, in your voice."
+        )
+        try:
+            out = (await self.models.complete("pm-voice", sys, user)).strip()
+        except Exception as exc:  # noqa: BLE001 - enhancement only; degrade to the deterministic reply
+            log.info("pm-voice synthesis unavailable (%s) — using deterministic reply", exc)
+            return ""
+        if len(re.sub(r"[\W_]", "", out)) < 8:   # junk/empty → fall back
+            return ""
+        return out
 
     def _select_efforts(self, intent, open_efforts: list[dict]) -> list[str]:
         """Resolve which efforts an action targets. Scoping is by an explicit effort_id, a
@@ -3069,15 +3347,21 @@ class Orchestrator:
         escalation (live 2026-07-06: session-id = effort-id accumulated FIVE runs of history in
         one 775KB pi session; every retry loaded the rot, narrated one orientation line and quit —
         no goal wording can repair a degenerate session). Generation = the number of prior
-        `effort_undelivered` escalations, derived from the audit log (no new state; deterministic
-        across restarts). Gen 0 keeps the plain effort id, so healthy efforts keep workspace +
-        session affinity exactly as before."""
+        failed-run-END escalations, derived from the audit log (no new state; deterministic across
+        restarts). Gen 0 keeps the plain effort id, so healthy efforts keep workspace + session
+        affinity exactly as before. Every signal here marks the END of a failed attempt (never a
+        mid-run event), so the session rotates BETWEEN runs, never within one — the step→publish→
+        verify wakes of a single run share a session, but a RE-RUN starts clean (live 2026-07-10:
+        the atlas re-run ended in `burndown_stalled`/`check_infra_error`, which weren't counted, so
+        the re-dispatch reused the rotted base session and the worker no-op'd 0 commands for 18
+        min — the stateless-session law applies to re-runs too)."""
         try:
             async with self.db.session_factory() as s:
                 n = int((await s.execute(
                     select(func.count()).select_from(Event).where(
                         Event.kind.in_(("effort_undelivered", "delivery_stale_head",
-                                        "delivery_empty_diff")),
+                                        "delivery_empty_diff", "burndown_stalled",
+                                        "check_infra_error", "org_build_unverifiable")),
                         Event.effort_id == effort_id)
                 )).scalar_one())
         except Exception as exc:  # noqa: BLE001 — affinity fallback, never a dispatch blocker
@@ -3419,7 +3703,17 @@ class Orchestrator:
         # every attempt): the goal must (a) require the worker to reproduce → fix → RE-VERIFY the
         # reported failure, and (b) carry what prior attempts already delivered, so the next
         # worker builds on them instead of re-deriving (or repeating a rejected approach).
-        if _ERROR_REPORT_RE.search(request) and request.count("\n") >= 2:
+        # BEHAVIORAL goal FIRST (operator 2026-07-10 trust ladder): a runtime/interaction symptom is
+        # proven by a REPRODUCTION test (fails on the break, passes on the fix, wired into the check),
+        # not by a build. This supersedes the build-oriented verify clause for these goals — a green
+        # build never proves a runtime symptom fixed, and it's where 90% of the false "done"s came from.
+        if self._runtime_symptom_phrase(request) and "REPRO:" not in request:
+            request += _REPRO_CLAUSE
+            if "PRIOR ATTEMPTS" not in request:
+                request += await self._attempt_history(effort_id, request)
+            if proj_slug:
+                await self._derive_check_cmd(proj_slug, request, proj_channel, root)
+        elif _ERROR_REPORT_RE.search(request) and request.count("\n") >= 2:
             if "REQUIRED VERIFICATION" not in request:
                 request += _VERIFY_CLAUSE
             if "PRIOR ATTEMPTS" not in request:
@@ -4030,11 +4324,12 @@ class Orchestrator:
             await self._report_completion(effort_id, None)
             return None
         if not result.ok:
-            # A CLONE failure (couldn't focus the worker) is NOT a worker failure — router.wake
-            # already posted a clear, actionable message. Just mark the card + stop; don't reframe
-            # it as "worker ended error" (that's the confusing phantom-worker symptom).
+            # A CLONE failure (couldn't focus the worker) is NOT a worker failure — but it must be
+            # surfaced LOUDLY (operator 2026-07-10: this path only flipped the card to 'error' and an
+            # effort sat silent for 2h). Escalate to the operator's conversation + audit `focus_failed`
+            # so the stall watchdog re-engages it on a clean workspace, never leaving it stranded.
             if result.status == "clone_failed":
-                await self.router.update_effort_card(effort_id, "error")
+                await self._handle_clone_failure(effort_id, result)
                 return None
             # If the worker's OWN inference was shed by the saturated GPU, that's backpressure — PARK
             # + auto-resume (raise so delegate parks this step), NOT a worker failure to escalate.
@@ -4357,14 +4652,35 @@ class Orchestrator:
         context). Generic for any project/blocker."""
         proj = await self._effort_project(effort_id)
         host = await self._vendored_host(proj) if proj else None
+        # A WORKSPACE-context limit on a COMPOSITION (the standalone project can't build/test because
+        # its vendored siblings only exist inside the host) is something the ORG resolves ITSELF —
+        # re-run in the host context (the engine, recursively cloned). Do it AUTOMATICALLY, bounded to
+        # once, instead of offering it and waiting on the operator (operator 2026-07-10: the atlas fix
+        # was verified as far as it could be standalone — "atlas files exist + parse" — then blocked
+        # only on the full `dotnet test`, which the org can run in the host context on its own).
+        workspace_blocker = bool(host and re.search(
+            r"workspace|present|sibling|submodule|\bhost\b|context|standalone|vendored|"
+            r"couldn'?t\s+(?:run|build|test)|full\s+(?:build|test)|dotnet\s+(?:build|test)|"
+            r"needs?\s+the\s+(?:host|engine)", blk["blocked"], re.I))
+        if workspace_blocker and await self._event_count(effort_id, "host_context_reroute") < 1:
+            await self.audit.log("host_context_reroute", effort_id=effort_id,
+                                 payload={"blocked": blk["blocked"][:200], "auto": True})
+            note = (f"🔁 **{effort_id}** — the worker hit a WORKSPACE-context limit: `{proj}` builds/"
+                    f"tests only inside its host `{host[0]}`, where the vendored source + full test "
+                    f"live. **Re-running it in the host context automatically** so it can build and "
+                    f"verify for real — no action needed. The branch it already pushed is kept.")
+            await self.comms.post(Intent.worker_activity, note, effort_id=effort_id)
+            await self.comms.post(Intent.operator_reply, note,
+                                  thread_id=self._mgmt_thread_of(effort_id))
+            await self.router.update_effort_card(effort_id, "working")
+            self._spawn(self._run_in_host_context(effort_id))
+            return
         remedy = ""
-        if host and re.search(r"workspace|present|sibling|submodule|host|context|standalone",
-                              blk["blocked"], re.I):
+        if workspace_blocker:   # already auto-routed once → offer the manual retry, don't loop
             remedy = (f"\n\n**Likely remedy:** this reads as a WORKSPACE-context limit — `{proj}` "
                       f"only builds inside its host `{host[0]}` (where `{host[1]}`'s siblings like "
-                      f"the vendored dependency exist). I can re-run this **in the host context** "
-                      f"(the engine, recursively cloned) so the worker can actually build and "
-                      f"verify. Say _\"run it in the host context\"_ and I'll do that.")
+                      f"the vendored dependency exist). I already re-ran it in the host context once; "
+                      f"say _\"run it in the host context\"_ to try again, or tell me how to proceed.")
         # HUMAN-ACTION SUGGESTION (operator 2026-07-09: "if I'm building the shaders, the PM
         # should tell me to do so — when the issue is otherwise impossible for the workers, make
         # a suggestion with instruction for the human"). When the constraint is a capability the
@@ -4886,20 +5202,43 @@ class Orchestrator:
         error trajectory (from the org's own builds, not worker claims), what still fails, and
         the real next moves. The branch keeps all progress; the effort stays open."""
         traj = " → ".join(str(c) if c >= 0 else "?" for c in counts)
-        brief = _error_brief(errors_log)
-        remaining = "\n".join(_error_lines(errors_log)[:15])
+        error_lines = _error_lines(errors_log)
         await self.audit.log("burndown_stalled", effort_id=effort_id,
                              payload={"why": why, "trajectory": counts})
-        body = (
-            f"🧱 **{effort_id}** — burn-down STALLED ({why}). The honest picture, from the org's "
-            f"own build logs:\n"
-            f"- error trajectory across rounds: **{traj}**\n"
-            f"- still failing: {brief}\n"
-            + (f"```\n{remaining[:900]}\n```\n" if remaining else "")
-            + f"The branch keeps every fix so far — nothing is lost. What remains hasn't yielded "
-            f"to mechanical rounds, which usually means it needs a judgment call (an API choice, "
-            f"a design decision, missing context). Tell me how to proceed — answer the open "
-            f"question, re-scope, or say **“keep going”** for more rounds.")
+        # A RUNTIME stall (the check is RED but there are NO compiler errors to count — it built
+        # and RAN, then failed/crashed the same way every round) is a DIFFERENT animal from a
+        # compiler-error plateau. Grinding code-rounds can't clear a failure the count can't even
+        # measure. Show the LOG TAIL (where the runtime failure lives, not an empty error list) and
+        # frame it honestly — it usually needs a human to run/observe it, not an API judgment call.
+        # Live 2026-07-09: an editor-headless-launch stalled [0,0,0] and the generic "needs a
+        # judgment call on the API" escalation showed 'still failing: <nothing>' — confusing.
+        runtime_stall = not error_lines and bool((errors_log or "").strip())
+        if runtime_stall:
+            tail = "\n".join([ln for ln in (errors_log or "").splitlines()
+                              if ln.strip()][-14:])[:900]
+            body = (
+                f"🧱 **{effort_id}** — burn-down STALLED ({why}) on a **runtime failure**, not "
+                f"compiler errors. It builds and **runs**, then fails the same way every round — "
+                f"there are no `file.ext(line): error` lines to fix, so the org can't measure or "
+                f"grind this down mechanically. The failing run's tail:\n"
+                f"```\n{tail}\n```\n"
+                f"The branch keeps every fix so far. A runtime failure like this usually needs "
+                f"**you to run it and observe** (or a repro/different approach) — more code-rounds "
+                f"chase a target the check can't see. Tell me how to proceed, paste what you "
+                f"observe when you run it, or say **“keep going”** for more rounds anyway.")
+        else:
+            brief = _error_brief(errors_log)
+            remaining = "\n".join(error_lines[:15])
+            body = (
+                f"🧱 **{effort_id}** — burn-down STALLED ({why}). The honest picture, from the org's "
+                f"own build logs:\n"
+                f"- error trajectory across rounds: **{traj}**\n"
+                f"- still failing: {brief}\n"
+                + (f"```\n{remaining[:900]}\n```\n" if remaining else "")
+                + f"The branch keeps every fix so far — nothing is lost. What remains hasn't yielded "
+                f"to mechanical rounds, which usually means it needs a judgment call (an API choice, "
+                f"a design decision, missing context). Tell me how to proceed — answer the open "
+                f"question, re-scope, or say **“keep going”** for more rounds.")
         await self.comms.post(Intent.escalation, body, effort_id=effort_id)
         await self.comms.post(Intent.operator_reply, body,
                               thread_id=self._mgmt_thread_of(effort_id))
@@ -5556,7 +5895,7 @@ class Orchestrator:
         except ValueError:
             pr_number = 0
         self._pending_merge[merge_id] = {
-            "repo": repo, "pr_number": pr_number, "effort_id": effort_id,
+            "repo": repo, "pr_number": pr_number, "effort_id": effort_id, "branch": branch,
             "mgmt_thread": self._mgmt_thread_of(effort_id) or "",
         }
         await self.pending.save(merge_id, "merge", self._pending_merge[merge_id])
@@ -5694,6 +6033,24 @@ class Orchestrator:
                             f"one, say **\"close PR <n>\"** and I'll retire it (branch kept)._")
             except Exception as exc:  # noqa: BLE001 — hygiene hint must never block the merge report
                 log.debug("post-merge hygiene scan failed: %s", exc)
+            # AUTO-HYGIENE (operator 2026-07-10 "so many branches, its a mess"): the merged head's
+            # commits are now in `main`, so the branch is dead weight — delete it instead of letting
+            # agent/* branches pile up (the root cause: hygiene only ever HINTED, never deleted).
+            # Best-effort; a delete failure never taints the merge report. Only the just-merged
+            # head, only agent/* (delete_branch refuses the default branch itself).
+            head = entry.get("branch") or ""
+            if head.startswith("agent/"):
+                try:
+                    dr = await delete_branch(self.github, entry.get("repo") or "", head,
+                                             api_base=self.s.github_api_base,
+                                             transport=self._gh_transport)
+                    await self.audit.log("branch_deleted", effort_id=entry.get("effort_id"),
+                                         payload={"repo": entry.get("repo"), "branch": head,
+                                                  "ok": dr.ok, "reason": "auto-post-merge"})
+                    if dr.ok:
+                        msg += f"\n🧹 _Cleaned up the merged branch `{head}`._"
+                except Exception as exc:  # noqa: BLE001 — cleanup never blocks the merge report
+                    log.debug("post-merge branch delete failed: %s", exc)
         if reply is not None:
             await reply(msg)
         eid = entry.get("effort_id")
@@ -5846,6 +6203,213 @@ class Orchestrator:
                   + (f" — {res.url}" if res.ok and res.url else ""))
         return True
 
+    _TIDY_RE = re.compile(
+        r"\btidy\b|"
+        r"\b(?:clean(?:\s*up)?|clear(?:\s+out)?|sweep|wrap\s+up)\b[^.\n]{0,40}?"
+        r"\b(?:board|efforts?|finished|done|stale|completed?|old|mess|everything|up)\b", re.I)
+
+    async def _nl_tidy_up(self, message: str, channel_id: str, thread_id: str | None) -> bool:
+        """"Tidy up" the board the way a human would (operator 2026-07-10 "it would be good to have
+        this available … so the pm knows what to do"): understand which OPEN efforts are actually
+        COMPLETED (idle + their branch already merged into `main` → the work landed) vs still active
+        vs idle-with-unmerged-work, and — on a cleanup ask — close the completed ones and delete
+        their merged branches in one go. Internal `__` singletons are already hidden. Report-only on
+        a question. Never touches active efforts or idle work whose branch ISN'T merged (that would
+        lose it). Generic across projects."""
+        if not self._TIDY_RE.search(message):
+            return False
+        # a branch-ONLY ask ("clean up the branches") belongs to _nl_branch_hygiene
+        if re.search(r"\bbranch(?:es)?\b", message, re.I) and not re.search(
+                r"\beffort|\bboard\b|\btidy\b", message, re.I):
+            return False
+        act = bool(self._BRANCH_HYGIENE_ACT_RE.search(message))
+
+        async def say(m: str) -> None:
+            await self.chat.post(channel_id, m, thread_id=thread_id)
+
+        efforts = [e for e in await self.gate.snapshot(open_only=True)
+                   if not (e.get("id") or "").startswith("__")]
+        if not efforts:
+            await say("The board's already clean — no open efforts (internal plumbing aside).")
+            return True
+        status_map = await self._effort_status_map(efforts)
+        # classify each touched repo's agent/* branches ONCE (merged = work is in main)
+        merged_by_repo: dict[str, set] = {}
+        if self.github is not None and self.s.github_app_enabled:
+            for repo in {r for e in efforts if (r := await self._effort_repo(e["id"]))}:
+                try:
+                    cls = await classify_agent_branches(
+                        self.github, repo, api_base=self.s.github_api_base,
+                        transport=self._gh_transport)
+                    merged_by_repo[repo] = set(cls["merged"])
+                except Exception as exc:  # noqa: BLE001
+                    log.debug("tidy classify %s failed: %s", repo, exc)
+        completed: list[tuple[str, str, str]] = []   # (eid, repo, branch) — done, work in main
+        active: list[tuple[str, str]] = []
+        idle_open: list[str] = []
+        for e in efforts:
+            eid = e["id"]
+            st = status_map.get(eid, "idle")
+            if st in ("running", "paused", "waiting-capacity"):
+                active.append((eid, st)); continue
+            repo = await self._effort_repo(eid)
+            branch = self._effort_branch(eid)
+            if repo and branch in merged_by_repo.get(repo, set()):
+                completed.append((eid, repo, branch))
+            else:
+                idle_open.append(eid)
+        if act:
+            closed: list[str] = []
+            for eid, repo, branch in completed:
+                await self.gate.set_lifecycle(eid, "done")
+                await self.router.update_effort_card(eid, "done")
+                closed.append(eid)
+                try:
+                    res = await delete_branch(self.github, repo, branch,
+                                              api_base=self.s.github_api_base,
+                                              transport=self._gh_transport)
+                    await self.audit.log("branch_deleted", effort_id=eid, payload={
+                        "repo": repo, "branch": branch, "ok": res.ok, "reason": "tidy-merged"})
+                except Exception as exc:  # noqa: BLE001
+                    log.debug("tidy branch delete %s failed: %s", branch, exc)
+            lines: list[str] = []
+            if closed:
+                lines.append(f"✅ Closed **{len(closed)}** completed effort(s) — their work is in "
+                             f"`main` and I deleted the merged branch: "
+                             + ", ".join(f"`{i}`" for i in closed))
+            else:
+                lines.append("Nothing to auto-close — no idle effort has its work merged into "
+                             "`main` yet (I only close what's genuinely done).")
+            if active:
+                lines.append("**Kept — active:** "
+                             + ", ".join(f"`{i}` ({s})" for i, s in active))
+            if idle_open:
+                lines.append("**Kept — idle but NOT merged** (name one to archive if you're done "
+                             "with it): " + ", ".join(f"`{i}`" for i in idle_open))
+            await say("**Tidied up.**\n" + "\n".join(lines))
+        else:
+            await say(
+                "**Board** (internal plumbing hidden). Say **“tidy up”** and I'll close the "
+                "completed ones + delete their merged branches:\n\n"
+                f"- ✅ **Completed** (idle, work already in `main`): "
+                + (", ".join(f"`{i}`" for i, _, _ in completed) or "none") + "\n"
+                f"- 🟢 **Active:** "
+                + (", ".join(f"`{i}` ({s})" for i, s in active) or "none") + "\n"
+                f"- ⚪ **Idle, not yet merged:** "
+                + (", ".join(f"`{i}`" for i in idle_open) or "none"))
+        return True
+
+    _BRANCH_HYGIENE_RE = re.compile(
+        r"\b(?:clean(?:\s*up)?|tidy|prune|sweep|purge|clear\s+out|get\s+rid\s+of|"
+        r"delete|remove|which|what|show|list|any|how\s+many|are\s+there)\b"
+        r"[^.\n]*\bbranch(?:es)?\b", re.I)
+    _BRANCH_HYGIENE_ACT_RE = re.compile(
+        r"\b(?:clean(?:\s*up)?|tidy|prune|sweep|purge|clear\s+out|get\s+rid\s+of|"
+        r"delete|remove|kill)\b", re.I)
+
+    async def _nl_branch_hygiene(self, message: str, channel_id: str,
+                                 thread_id: str | None) -> bool:
+        """Branch HYGIENE the way a human reasons about it (operator 2026-07-10 "so many branches,
+        its a mess … it should understand the branches were already merged and no longer need to
+        be here"): understand a repo's `agent/*` branches by MERGE STATE and either REPORT them or,
+        on a cleanup request, delete the ones already CONTAINED IN MAIN (zero loss). Distinct from
+        `_nl_branch_delete` (which needs an explicitly-NAMED branch) — this fires on a general
+        "clean up / which branches …" ask with NO branch named. Merged→safe to delete; unmerged and
+        open-PR branches are NEVER auto-deleted (name them explicitly if you really mean it).
+        Returns True when handled here."""
+        if not self._BRANCH_HYGIENE_RE.search(message):
+            return False
+        if re.search(r"\bagent/[\w./-]+", message):
+            return False   # an explicit branch name → that's _nl_branch_delete's job, defer
+        act = bool(self._BRANCH_HYGIENE_ACT_RE.search(message))
+
+        async def say(msg: str) -> None:
+            await self.chat.post(channel_id, msg, thread_id=thread_id)
+
+        if self.github is None or not self.s.github_app_enabled:
+            await say("⚠️ I can't manage branches — the GitHub App isn't set up.")
+            return True
+        # Which repos? A named project scopes to it (+ any composition partner it's vendored into);
+        # otherwise every onboarded project. Merged branches are safe to clean on any of them.
+        projects = await self.projects.list()
+        named = None
+        for p in projects:
+            if re.search(rf"\b{re.escape(p['slug'])}\b", message, re.I):
+                named = p
+                break
+        if named:
+            repos = {named["repo_url"]}
+            host = await self._vendored_host(named["slug"])
+            if host:
+                hp = await self.projects.get(host[0])
+                if hp:
+                    repos.add(hp["repo_url"])
+            # a project this one is the HOST of (its vendored children carry the same effort branch)
+            for q in projects:
+                qh = await self._vendored_host(q["slug"])
+                if qh and qh[0] == named["slug"]:
+                    repos.add(q["repo_url"])
+        else:
+            repos = {p["repo_url"] for p in projects}
+        if not repos:
+            await say("No onboarded repos to check for stale branches.")
+            return True
+
+        blocks: list[str] = []
+        deleted_any = False
+        for repo in sorted(repos):
+            short = repo.split("github.com/")[-1].rstrip("/")
+            try:
+                cls = await classify_agent_branches(
+                    self.github, repo, api_base=self.s.github_api_base,
+                    transport=self._gh_transport)
+            except Exception as exc:  # noqa: BLE001 — one bad repo never fails the whole sweep
+                log.debug("branch classify for %s failed: %s", repo, exc)
+                blocks.append(f"**{short}** — couldn't read branches ({str(exc)[:80]}).")
+                continue
+            merged, unmerged, open_pr = cls["merged"], cls["unmerged"], cls["open_pr"]
+            if not (merged or unmerged or open_pr):
+                blocks.append(f"**{short}** — clean (no `agent/*` branches).")
+                continue
+            lines = [f"**{short}**"]
+            if act and merged:
+                results = []
+                for b in merged:
+                    res = await delete_branch(self.github, repo, b,
+                                              api_base=self.s.github_api_base,
+                                              transport=self._gh_transport)
+                    await self.audit.log("branch_deleted", payload={
+                        "repo": repo, "branch": b, "ok": res.ok, "reason": "merged-hygiene",
+                        "clearance": message[:160]})
+                    results.append((b, res.ok))
+                    deleted_any = deleted_any or res.ok
+                ok = [b for b, k in results if k]
+                if ok:
+                    lines.append(f"- 🧹 deleted {len(ok)} already-merged: "
+                                 + ", ".join(f"`{b}`" for b in ok))
+                bad = [b for b, k in results if not k]
+                if bad:
+                    lines.append(f"- ⚠️ couldn't delete: " + ", ".join(f"`{b}`" for b in bad))
+            elif merged:
+                lines.append(f"- ✅ {len(merged)} **safe to delete** (already merged into "
+                             f"`{cls['default']}`): " + ", ".join(f"`{b}`" for b in merged))
+            if unmerged:
+                lines.append("- ⚠️ **has unmerged commits** (kept — name it explicitly to delete): "
+                             + ", ".join(f"`{u['name']}` (+{u['ahead']})" for u in unmerged))
+            if open_pr:
+                lines.append("- 📬 **live PR — kept**: " + ", ".join(f"`{b}`" for b in open_pr))
+            blocks.append("\n".join(lines))
+        header = ("**Branch cleanup** — deleted the already-merged `agent/*` branches (their commits "
+                  "are all in `main`, nothing lost); kept anything unmerged or with a live PR:\n\n"
+                  if act and deleted_any else
+                  "**Branch cleanup** — nothing deleted (no already-merged branches, or you were "
+                  "just asking). Say _\"clean up the merged branches\"_ to delete the safe ones:\n\n"
+                  if act else
+                  "**Branch inventory** (`agent/*`, by merge state). Say _\"clean up the merged "
+                  "branches\"_ and I'll delete the safe ones:\n\n")
+        await say(header + "\n\n".join(blocks))
+        return True
+
     async def _nl_branch_delete(self, message: str, channel_id: str, thread_id: str | None) -> bool:
         """Operator-plane branch deletion — IRREVERSIBLE, so it fires ONLY on branches the
         operator explicitly NAMES in a sentence with a delete verb (their words are the §3
@@ -5981,6 +6545,40 @@ class Orchestrator:
     _REMOVAL_GOAL_RE = re.compile(
         r"\b(remov|delet|drop|prune|clean\s*up|cleanup|strip|deprecat|retire|get\s+rid|"
         r"tear\s+out|purge|excis)", re.I)
+
+    # A goal that describes a RUNTIME / INTERACTION / VISUAL symptom — something you only
+    # observe by RUNNING the program and using it, not by compiling it. A green build is
+    # necessary but NOT sufficient to prove such a symptom is gone: our checks here are
+    # headless and cannot click a UI, move a cursor, or watch a window. Generic for any
+    # project (live 2026-07-10: the atlas effort — "the editor throws this at runtime when
+    # clicked" — built green and closed 'done', but the actual interaction-triggered crash
+    # was never reproduced/verified; a green build masqueraded as a fixed symptom).
+    _RUNTIME_SYMPTOM_RE = re.compile(
+        r"\bat\s+runtime\b|\bruntime\s+(?:error|exception|crash|failure)|"
+        r"when\s+(?:i\s+|you\s+|the\s+user\s+)?(?:click|press|open|run|launch|select|drag|"
+        r"hover|type|use|navigat|move|scroll|resize|load)\w*|"
+        r"\bclick(?:ed|ing|s)?\b|\bcursor\b|\bmouse\b|\bkeyboard\b|"
+        r"\b(?:crash(?:es|ed|ing)?|freezes?|frozen|hangs?|hung|stutter)\b|"
+        r"\bunhandled\s+exception\b|throws?\s+(?:this\s+|it\s+)?(?:at|when|on|during)\b|"
+        r"doesn'?t\s+(?:display|show|render|appear|draw|load|open|launch|respond|animate)|"
+        r"\b(?:menu|button|dialog|toolbar|drop-?down|panel|widget|editor\s+ui|the\s+ui)\b|"
+        r"on\s+(?:launch|startup|start-?up|exit|load|open|resize|shutdown)\b|"
+        r"nothing\s+happens|black\s+screen|blank\s+screen|no\s+window|misrender|glitch",
+        re.I)
+
+    def _runtime_symptom_phrase(self, goal_text: str) -> str | None:
+        """If the goal describes a runtime/interaction/visual symptom (not a build error),
+        return a short human snippet around the match — else None. Used to caveat a
+        build-only-verified delivery: a green build never proves a run-time symptom fixed."""
+        if not goal_text:
+            return None
+        m = self._RUNTIME_SYMPTOM_RE.search(goal_text)
+        if not m:
+            return None
+        start = max(0, m.start() - 32)
+        end = min(len(goal_text), m.end() + 32)
+        snippet = goal_text[start:end].strip().replace("\n", " ")
+        return ("…" if start else "") + snippet + ("…" if end < len(goal_text) else "")
 
     async def _removal_disclosure(self, effort_id: str, branch: str,
                                   goal_text: str) -> tuple[str, bool]:
@@ -6171,11 +6769,67 @@ class Orchestrator:
         removal_note, removal_flag = await self._removal_disclosure(
             effort_id, branch, goal_text) if branch else ("", False)
         scope_note += removal_note
-        unmet_or_partial = bool(unmet) or partial or comp_failed or removal_flag
-        done_word = ("done" if not unmet_or_partial else
+        # RUNTIME-SYMPTOM TRUST LADDER (operator 2026-07-10: "90% of claims are false because the
+        # check compiles, it doesn't RUN the behavior … claims MUST be honest"). For a goal that's a
+        # runtime/interaction/visual symptom, a green BUILD proves nothing. "Done" requires a
+        # REPRODUCTION test (fails on the break, passes on the fix, wired into the check) — and the
+        # claim states EXACTLY what was proven, so the commit history stays honest/researchable:
+        #   • repro present + org-confirmed GREEN  → VERIFIED via reproduction (trustworthy; still
+        #     human-gated in this phase — auto-merge is earned once the track record proves out).
+        #   • no repro (build-only)                → UNVERIFIED: cannot claim the symptom is fixed;
+        #     demand the reproduction (auto-iterate), keep visible.
+        #   • UNAUTOMATABLE bit declared           → verified what's automatable; name the exact
+        #     slice that needs the operator's eyes, never a blanket "done".
+        runtime_symptom = (self._runtime_symptom_phrase(goal_text)
+                           if branch and not (partial or comp_failed) else None)
+        runtime_verified = False
+        if runtime_symptom:
+            repro_ok = (bool(re.search(r"\bREPRO:", out_text, re.I))
+                        and bool(re.search(r"\bAFTER:\s*PASS\b", out_text, re.I)))
+            unautomatable = bool(re.search(r"\bUNAUTOMATABLE:", out_text, re.I))
+            org_green = bool(self._org_verified.get(effort_id))
+            if repro_ok and org_green and not unautomatable:
+                runtime_verified = True
+                scope_note += (
+                    f"\n\n✅ **Verified via reproduction:** the worker reproduced your symptom "
+                    f"(“{runtime_symptom}”) as an automated test; **I ran the check myself and it's "
+                    f"GREEN**, and the test is wired in so it can't silently regress. _(I confirmed "
+                    f"it passes now; the ‘failed before’ is the worker's report — independently "
+                    f"re-proving the before-state is the last gap before I'd merge this unattended.)_ "
+                    f"Merge stays yours for now."
+                )
+                await self.audit.log("delivery_runtime_verified", effort_id=effort_id,
+                                     payload={"branch": branch, "symptom": runtime_symptom[:200],
+                                              "org_green": self._org_verified.get(effort_id, "")[:10]})
+            else:
+                why = ("it declared part of the symptom UNAUTOMATABLE" if unautomatable
+                       else "there's no reproduction test — only a build" if not repro_ok
+                       else "I couldn't confirm the check went green")
+                iterating = (not unautomatable) and await self._auto_iterate(
+                    effort_id, "a runtime symptom with no passing reproduction (build-only is not "
+                    "proof)", out_text[-700:])
+                scope_note += (
+                    f"\n\n🕹️ **Runtime symptom — NOT verified:** your report is a "
+                    f"**runtime/interaction** behavior (“{runtime_symptom}”), and {why}. A green "
+                    f"build can't prove a symptom that only shows when the program is **run**, so I "
+                    f"won't claim it's fixed. "
+                    + ("**This slice needs your eyes** — the rest is automated. "
+                       if unautomatable else
+                       "_Auto-iterating with a demand for a reproduction test (fails before, passes "
+                       "after, wired into the check) — no action needed._" if iterating else
+                       "Say **“re-run it”** and I'll push for a reproduction test.")
+                )
+                await self.audit.log("delivery_runtime_unverified", effort_id=effort_id,
+                                     payload={"branch": branch, "symptom": runtime_symptom[:200],
+                                              "why": why})
+        runtime_open = bool(runtime_symptom) and not runtime_verified
+        unmet_or_partial = (bool(unmet) or partial or comp_failed or removal_flag or runtime_open)
+        done_word = ("done — VERIFIED via reproduction" if runtime_verified and not unmet_or_partial else
+                     "done" if not unmet_or_partial else
                      "partly done — see the scope check" if unmet else
                      "partly done — the composition check failed" if comp_failed else
                      "done — but review the removals" if removal_flag and not partial else
+                     "not verified — needs a reproduction test" if runtime_open and not partial else
                      "partly done — not all reported errors verified resolved")
         await self.comms.post(
             Intent.closure,

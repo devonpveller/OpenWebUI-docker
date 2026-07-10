@@ -105,9 +105,13 @@ class WorkspaceManager:
         self.clone_timeout = clone_timeout
 
     def is_focused(self) -> bool:
-        """True when a repo is currently cloned. The workspace volume is
-        shared, so this is a direct filesystem check."""
-        return os.path.isdir(os.path.join(self.workspace_path, ".git"))
+        """True when a REAL repo is currently cloned. The workspace volume is shared, so this is a
+        direct filesystem check. Requires `.git/HEAD` — not just a `.git` directory — because a
+        crashed/partial clone can leave a `.git` holding only `modules/` (submodule gitdirs) with
+        no main-repo data (live 2026-07-10: such a `.git` made `git` itself report "not a git
+        repository", yet the old `isdir('.git')` check said focused → the daemon NOOP'd onto a
+        broken tree and every check failed with MSB1009). A missing HEAD ⇒ re-clone."""
+        return os.path.isfile(os.path.join(self.workspace_path, ".git", "HEAD"))
 
     def has_remote(self, name: str) -> bool:
         """True when `name` is a configured git remote. `git remote` is a
@@ -163,8 +167,16 @@ class WorkspaceManager:
         # reference it, and the worker itself can't init them (the git-proxy hard-denies `submodule`).
         # `|| true`: a private/unreachable submodule must not fail the whole focus.
         recurse_flag = " --recursive" if recurse else ""
+        # CLONE means START FRESH. `/workspace` is a PERSISTENT shared mount that can hold a corrupt
+        # partial clone from an interrupted/failed focus (a `.git` with no HEAD + leftover dirs) —
+        # `git clone` into a non-empty dir fails "destination path already exists and is not an empty
+        # directory" (live 2026-07-10: this exact exit-128 wedged a composition focus and the effort
+        # sat silent ~2h). Wipe the CONTENTS first (keep the mount point), then clone. Safe: a CLONE
+        # is only decided when there's nothing to preserve (no focus, or switching repos).
+        wipe_ws = (f"find {ws} -mindepth 1 -maxdepth 1 -exec rm -rf {{}} + 2>/dev/null; "
+                   f"find {ws} -mindepth 1 -delete 2>/dev/null || true")
         cmd = (
-            f"umask 000; {g} clone{branch_flag} {shlex.quote(url)} {ws} && "
+            f"{wipe_ws}; umask 000; {g} clone{branch_flag} {shlex.quote(url)} {ws} && "
             # Default: DIRECT submodules only. `recurse`: the full nested tree, which a composition
             # build requires — the operator-privileged clone is the ONLY place `submodule` can run
             # (the proxy denies it to the worker), so recursive init MUST happen here or never.

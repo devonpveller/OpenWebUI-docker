@@ -101,9 +101,11 @@ async def _drain(orch):
         await asyncio.gather(*list(orch._bg_tasks), return_exceptions=True)
 
 
-async def test_worker_stated_blocker_is_elevated_not_steamrolled(db_url, tmp_path):
-    """THE live case: the worker names the workspace constraint; the PM must elevate it (open,
-    actionable) instead of the mechanical 'no branch, commit + push'."""
+async def test_worker_stated_composition_blocker_auto_routes_to_host(db_url, tmp_path):
+    """THE live case, evolved (operator 2026-07-10): the worker names a WORKSPACE-context constraint
+    on a COMPOSITION — the org RESOLVES it itself by auto-re-running in the host context (bounded),
+    instead of steamrolling OR just waiting on the operator. The atlas fix was verified as far as it
+    could standalone, then blocked only on the full test the host context can run."""
     orch, chat, harness, db = await _orch(db_url, tmp_path)
     try:
         await orch.projects.add("monogame-engine", "https://github.com/devonpveller/Engine")
@@ -115,15 +117,12 @@ async def test_worker_stated_blocker_is_elevated_not_steamrolled(db_url, tmp_pat
         await orch.delegate(eid, chan, root, "make it build", plan_steps=["work"])
         await _drain(orch)
         msgs = " ".join(p["message"] for p in chat.posted)
-        assert "raised a real CONSTRAINT" in msgs, "the blocker was not elevated"
-        assert "not a worker failure" in msgs.lower() or "not** a worker failure" in msgs
-        assert "host context" in msgs                      # the actionable remedy is named
+        assert "host context" in msgs and "automatically" in msgs   # auto-resolved, no operator ask
+        assert await orch._event_count(eid, "host_context_reroute") == 1
         assert "commit + push" not in msgs and "explicit commit" not in msgs, \
             "the PM steamrolled instead of hearing the worker"
-        from app.models import Effort
-        async with orch.db.session_factory() as s:
-            e = await s.get(Effort, eid)
-        assert e.lifecycle != "done"                        # open, needs-attention
+        assert "raised a real CONSTRAINT" not in msgs, \
+            "a resolvable composition blocker must be auto-routed, not parked on the operator"
     finally:
         await db.dispose()
 

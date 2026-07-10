@@ -141,5 +141,12 @@ async def test_session_rotates_after_undelivered_escalation(db_url):
         await orch.delegate(eid, chan, root, "try again", plan_steps=["work"])
         sessions = {w["session_id"] for w in orch.harness.wakes}
         assert sessions == {f"{eid}~r1"}, f"wakes did not rotate: {sessions}"
+        # EVERY failed-run END rotates the session, not only 'undelivered' (live 2026-07-10: the
+        # atlas re-run ended in burndown_stalled/check_infra_error, which weren't counted, so the
+        # re-dispatch reused the rotted base session and the worker no-op'd 18 min).
+        await orch.audit.log("burndown_stalled", effort_id=eid, payload={"why": "x"})
+        assert await orch._session_for(eid) == f"{eid}~r2"
+        await orch.audit.log("check_infra_error", effort_id=eid, payload={"log": "x"})
+        assert await orch._session_for(eid) == f"{eid}~r3"
     finally:
         await db.dispose()

@@ -1,0 +1,9 @@
+{
+  "profile": "pm-voice",
+  "lane": "local",
+  "model": "qwen36-27b",
+  "system_prompt_ref": "charters/pm-voice.md",
+  "temperature": 0.5,
+  "tool_access": ["read"],
+  "caller_key": "agent-org-pm-voice"
+}
