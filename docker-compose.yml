@@ -304,6 +304,16 @@ services:
       - LLAMA_SWAP_QWEN36_27B_CACHE_TYPE_K=${LLAMA_SWAP_QWEN36_27B_CACHE_TYPE_K:-q4_0}
       - LLAMA_SWAP_QWEN36_27B_CACHE_TYPE_V=${LLAMA_SWAP_QWEN36_27B_CACHE_TYPE_V:-q4_0}
       - LLAMA_SWAP_QWEN36_27B_REASONING_BUDGET=${LLAMA_SWAP_QWEN36_27B_REASONING_BUDGET:-4096}
+      # Speculative decoding for the 27B entry. `draft-mtp` (set in .env,
+      # 2026-07-09) self-drafts via the MTP head in the ThinkingCap GGUF;
+      # compose default stays `none` so a bare env is conservative and old
+      # llama-server builds still parse the flag.
+      - LLAMA_SWAP_QWEN36_27B_SPEC_TYPE=${LLAMA_SWAP_QWEN36_27B_SPEC_TYPE:-none}
+      - LLAMA_SWAP_QWEN36_27B_SPEC_DRAFT_N_MAX=${LLAMA_SWAP_QWEN36_27B_SPEC_DRAFT_N_MAX:-2}
+      # Draft (MTP) KV cache type. Build default f16 blew VRAM to 98.9% at
+      # 256k ctx (crash line is ~95%); .env pins q4_0 to match the main KV.
+      - LLAMA_SWAP_QWEN36_27B_SPEC_DRAFT_CACHE_TYPE_K=${LLAMA_SWAP_QWEN36_27B_SPEC_DRAFT_CACHE_TYPE_K:-f16}
+      - LLAMA_SWAP_QWEN36_27B_SPEC_DRAFT_CACHE_TYPE_V=${LLAMA_SWAP_QWEN36_27B_SPEC_DRAFT_CACHE_TYPE_V:-f16}
     deploy:
       resources:
         reservations:
@@ -546,7 +556,8 @@ services:
       # LLM_QUEUE_UPSTREAM token specifically (§3.2).
       - LLM_QUEUE_UPSTREAM_BASE_URL=http://llama-cpp-upstream:8080
       - LLM_QUEUE_EMBED_UPSTREAM_BASE_URL=http://llama-cpp-embed-upstream:8080
-      # Admission sizing — MUST track llama-swap.config.yaml (--parallel 3).
+      # Admission sizing — MUST track LLAMA_SWAP_QWEN36_27B_N_PARALLEL (.env;
+      # 2 since 2026-07-09). Values live in .env next to that var.
       - LLM_QUEUE_SLOTS=${LLM_QUEUE_SLOTS:-3}
       - LLM_QUEUE_MAX_IN_FLIGHT=${LLM_QUEUE_MAX_IN_FLIGHT:-4}
       - LLM_QUEUE_BACKSTOP_DEPTH=${LLM_QUEUE_BACKSTOP_DEPTH:-24}
