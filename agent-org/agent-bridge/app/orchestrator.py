@@ -42,6 +42,7 @@ from .modules.capabilities import (
     close_pull_request,
     delete_branch,
     read_added_lines,
+    read_removal_summary,
     read_branch_delivery,
     read_broken_gitlinks,
     read_sibling_agent_prs,
@@ -147,6 +148,41 @@ def _error_lines(output: str) -> list[str]:
             seen.add(key)
             out.append(key)
     return out
+
+
+# A check FAILURE that is the CHECK's own environment/setup breaking — NOT the delivered code.
+# You can't burn these down by editing source; they mean the check or workspace is misconfigured
+# (fix the check/env, or hand off), so the org must not read them as code errors (2026-07-10).
+_INFRA_FAIL_RES = [
+    re.compile(r"git-proxy:\s*DENIED", re.I),
+    re.compile(r"MSB1009|project file does not exist", re.I),
+    re.compile(r"could(?:\s+not|n'?t)\s+find\s+a\s+project\s+to\s+run", re.I),
+    re.compile(r"clone\s+failed|fatal:\s+could\s+not\s+read|authentication\s+failed", re.I),
+    re.compile(r"no\s+such\s+file\s+or\s+directory", re.I),
+    re.compile(r"command\s+not\s+found|:\s*not\s+found\b|is\s+not\s+recognized", re.I),
+    re.compile(r"permission\s+denied", re.I),
+    re.compile(r"unable\s+to\s+access|could\s+not\s+resolve\s+host|network\s+is\s+unreachable", re.I),
+    re.compile(r"no\s+space\s+left\s+on\s+device|disk\s+quota\s+exceeded", re.I),
+    re.compile(r"submodule\b[^.\n]*\b(?:denied|failed|not\s+initialized)", re.I),
+]
+
+
+# A genuine SOURCE-code error carries a file+line locus (`Foo.cs(12,5): error CS1503:`); an
+# MSB/tool-level error (MSB1009, "command not found") does not. That locus is how we tell "the
+# code is broken" from "the check's environment is broken".
+_SOURCE_ERROR_RE = re.compile(r"\S+\.[A-Za-z]{1,6}\(\d+(?:,\d+)?\):\s*(?:error|fatal)\b", re.I)
+
+
+def _is_infra_failure(output: str) -> bool:
+    """True when a red check is the CHECK's OWN infrastructure failing (proxy/clone/tool/path),
+    not the delivered code. An infra signature must be present AND there must be no genuine
+    SOURCE-code error (a `file.ext(line): error` locus) — a real build error means the code IS
+    broken; treat it as code even if some infra-ish noise is also present."""
+    if not output:
+        return False
+    if not any(rx.search(output) for rx in _INFRA_FAIL_RES):
+        return False
+    return not _SOURCE_ERROR_RE.search(output)
 
 
 def _error_count(output: str) -> int | None:
@@ -3271,6 +3307,14 @@ class Orchestrator:
                                               "log": dout[-6000:]})
                 return (f"\n🧪 **Composition check passed** on `{host_slug}` (`{check_cmd}`, "
                         f"org-run, exit 0) — the wiring branch builds.")
+            if not timed_out and exit_code is not None and _is_infra_failure(dout):
+                # the CHECK's own environment failed (proxy/clone/tool/path), not the code —
+                # surface it, don't burn-down (2026-07-10).
+                await self.audit.log("check_infra_error", effort_id=effort_id,
+                                     payload={"owner": host_slug, "log": dout[-1500:]})
+                await self._elevate_check_infra(effort_id, dout)
+                return (f"\n🧰 **Composition check couldn't run** on `{host_slug}` — an environment "
+                        f"problem (not your code); left open for attention, no burn-down.")
             if not timed_out and exit_code is not None:
                 n = _error_count(dout)
                 tail = "\n".join(_error_lines(dout)[:12]) or dout[-600:]
@@ -3364,9 +3408,12 @@ class Orchestrator:
             ccmd = ((cp or {}).get("check_cmd") or "").strip()
             if ccmd:
                 request += (
-                    f"\n\nMACHINE CHECK: this delivery will be verified with `{ccmd}` on "
-                    f"`{check_owner}` before any merge is offered — run the equivalent in your "
-                    f"workspace first; a red check routes straight back to you."
+                    f"\n\nHow this gets checked: I'll build and run `{ccmd}` on `{check_owner}` "
+                    f"myself to confirm it actually works before anything merges — so build and "
+                    f"try it in your workspace as you go, to catch problems early. (The check is "
+                    f"there to catch real breakage, not something to satisfy by any means — a "
+                    f"correct fix that leaves a little to do beats a green one that dropped "
+                    f"something.)"
                 )
         # ERROR-REPORT convergence (live 2026-07-05: the same build error was re-reported after
         # every attempt): the goal must (a) require the worker to reproduce → fix → RE-VERIFY the
@@ -3619,19 +3666,20 @@ class Orchestrator:
                           else "(build the solution as usual)")
             host_token = await self._project_token_for_slug(host_slug)
             instruction = (
-                f"WORK IN HOST CONTEXT — your workspace is `{host_slug}` with ALL submodules "
-                f"present, so the build can actually run here (this is why prior standalone "
-                f"attempts couldn't compile). Do the task by editing files INSIDE `{sub_path}` "
-                f"(the vendored `{proj}`):\n"
-                f"1. Make the fix in `{sub_path}`.\n"
-                f"2. BUILD + verify from the host: `{build_line}`. Iterate until it PASSES; keep "
-                f"the passing output.\n"
-                f"3. Publish the `{proj}` change to ITS OWN remote (from inside the submodule):\n"
-                f"   cd {sub_path} && git checkout -b {branch} && git add -A && "
-                f"git commit -m \"{effort_id}: <summary>\" && git push origin {branch}\n"
-                f"4. Report the pushed commit hash + the passing build tail. If even HERE you "
-                f"cannot build, do NOT fake it — report `BLOCKED:` / `NEEDS:` / `FEASIBLE:`.\n\n"
-                f"THE TASK:\n{goal}"
+                f"You're working in `{host_slug}` — the full project with all its submodules "
+                f"present, so the build actually runs here. The work is on the vendored `{proj}` "
+                f"at `{sub_path}`.\n\n"
+                f"{goal}\n\n"
+                f"Edit the files under `{sub_path}`, then build and check with `{build_line}` "
+                f"from /workspace until it works. Please port things properly rather than "
+                f"deleting features to get past an error — if something genuinely can't be done "
+                f"here, say so instead of dropping it.\n\n"
+                f"When it's working, publish the `{proj}` change to its own remote from inside "
+                f"the submodule:\n"
+                f"  cd {sub_path} && git checkout -b {branch} && git add -A && "
+                f"git commit -m \"{effort_id}\" && git push origin {branch}\n"
+                f"Then report the commit hash and the passing build. If you truly can't build "
+                f"here, don't fake it — say what's blocking you."
             )
             await self.comms.post(
                 Intent.effort_dispatch,
@@ -4137,6 +4185,9 @@ class Orchestrator:
                     self._org_verified[effort_id] = d0.head_sha or ""
                     return d0
                 return BranchDelivery(no_changes=True, branch=self._effort_branch(effort_id))
+            if verdict == "infra":
+                await self._elevate_check_infra(effort_id, out)
+                return None
             if verdict == "fail":
                 self._queue_burndown(effort_id, out)
                 return None
@@ -4256,6 +4307,48 @@ class Orchestrator:
         return {"blocked": blocked, "needs": _field("NEEDS"),
                 "feasible": _field("FEASIBLE"), "raw": output[:1500]}
 
+    # A constraint that names a capability the SANDBOXED workers structurally lack but a human's
+    # own machine typically has — a host-only/platform-specific tool, a GUI/interactive step, a
+    # licensed or proprietary binary, physical hardware, or credentials the org must not hold.
+    # Generic across projects; used to turn a blocker into a HUMAN-ACTION suggestion.
+    _HUMAN_CAP_RE = re.compile(
+        r"\bwine\b|\bgui\b|graphical|interactiv|manual(?:ly)?\b|by\s+hand\b|"
+        r"windows(?:-only|\s+host|\s+machine)?\b|mac(?:os)?\b|native\s+(?:tool|compiler|binary)|"
+        r"licen[cs]|proprietary|activation|hardware|gpu\s+driver|physical\s+device|"
+        r"credential|secret|api\s+key|two-?factor|2fa|sign\s*in|log\s*in\s+to|"
+        r"install\s+(?:it\s+)?(?:on|locally)|on\s+your\s+(?:host|machine|box)|"
+        r"\bdisplay\b|\bscreen\b|window\s+manager|render(?:ing)?\s+context|click|"
+        r"game\s+(?:assets?|content|project)|real\s+content|user\s+(?:input|interaction)|"
+        r"can(?:not|'?t|\s+not)\s+(?:reproduce|repro|trigger|observe)\b|"
+        r"only\s+(?:works|runs|available|happens|reproduces?)\s+(?:on|when|with)\b|"
+        r"not\s+available\s+(?:in|on)\s+(?:this|the)\s+(?:worker|container|environment|sandbox)|"
+        r"headless\b[^.\n]*\b(?:can(?:not|'?t)|no|without)\b", re.I)
+
+    def _is_human_capability_blocker(self, blk: dict) -> bool:
+        text = f"{blk.get('needs', '')} {blk.get('blocked', '')} {blk.get('feasible', '')}"
+        return bool(self._HUMAN_CAP_RE.search(text))
+
+    async def _elevate_check_infra(self, effort_id: str, log: str) -> None:
+        """A red check that is the CHECK's OWN infrastructure failing (git-proxy denial, missing
+        project/tool, clone/workspace error) — not the delivered code. Surface it honestly as a
+        check/environment problem to fix (or hand off), never a code failure to burn down or a
+        worker's fault. Keeps the effort open. Generic (2026-07-10)."""
+        tail = "\n".join([ln for ln in (log or "").splitlines() if ln.strip()][-12:])[:700]
+        await self.audit.log("check_infra_error", effort_id=effort_id,
+                             payload={"log": (log or "")[-1500:]})
+        body = (
+            f"🧰 **{effort_id}** — the delivery may be fine, but my **check couldn't run** here: "
+            f"it failed on its own environment (proxy/clone/tool/path), not on your code:\n"
+            f"```\n{tail}\n```\n"
+            f"This isn't a code error to fix by editing source, and it's **not** the worker's "
+            f"fault — the CHECK or the workspace setup needs attention. I've left the effort open "
+            f"and not marked it done. (I flag this instead of grinding the code, which would only "
+            f"chase a problem that isn't in the code.)")
+        await self.comms.post(Intent.escalation, body, effort_id=effort_id)
+        await self.comms.post(Intent.operator_reply, body,
+                              thread_id=self._mgmt_thread_of(effort_id))
+        await self.router.update_effort_card(effort_id, "needs-attention")
+
     async def _elevate_blocker(self, effort_id: str, blk: dict) -> None:
         """The PM's job the mechanical monitor skipped: HEAR the worker's constraint and surface it
         to the operator with a synthesized read + an actionable next step, keeping the effort OPEN
@@ -4272,6 +4365,21 @@ class Orchestrator:
                       f"the vendored dependency exist). I can re-run this **in the host context** "
                       f"(the engine, recursively cloned) so the worker can actually build and "
                       f"verify. Say _\"run it in the host context\"_ and I'll do that.")
+        # HUMAN-ACTION SUGGESTION (operator 2026-07-09: "if I'm building the shaders, the PM
+        # should tell me to do so — when the issue is otherwise impossible for the workers, make
+        # a suggestion with instruction for the human"). When the constraint is a capability the
+        # WORKERS structurally lack but the operator's own machine has (a host-only tool, a GUI, a
+        # licensed/platform binary, a manual step), don't just say "your move" — propose the human
+        # do it, relaying whatever the worker said it NEEDS as concrete guidance. Generic.
+        elif not remedy and self._is_human_capability_blocker(blk):
+            need = (blk["needs"] or blk["blocked"]).strip()
+            remedy = (
+                f"\n\n**Suggested next step — this one likely needs YOU:** the workers can't do "
+                f"this in their environment (it needs {need}). That kind of capability usually "
+                f"lives on your own machine, not the sandboxed workers. If you can, do that step "
+                f"on your host and commit/point me at the result, and I'll verify and carry on "
+                f"from there — or tell me another way you'd like to handle it. (I'm flagging this "
+                f"rather than guessing, because forcing it here would only produce a fake pass.)")
         needs = f"\n- **What it needs:** {blk['needs']}" if blk["needs"] else ""
         feas = f"\n- **Feasible as scoped:** {blk['feasible']}" if blk["feasible"] else ""
         body = (
@@ -4394,6 +4502,14 @@ class Orchestrator:
                 out = f"(build timed out / no exit code)\n{out[-3000:]}"
             elif exit_code == 0:
                 verdict, n = "pass", 0
+            elif _is_infra_failure(out):
+                # the CHECK ITSELF couldn't run — a git-proxy denial, a missing project/tool, a
+                # clone/workspace-setup error (live 2026-07-10: the check's submodule branch
+                # fetch was git-proxy-DENIED → MSB1009, and the burn-down spun on it as if it
+                # were a code error). This is NOT a code failure — you can't fix a broken check
+                # by editing the code. Distinct verdict so callers surface it instead of
+                # burning down. Generic across toolchains.
+                verdict, n = "infra", None
             else:
                 verdict, n = "fail", _error_count(out)
         except Exception as exc:  # noqa: BLE001 — old daemon without /check, or a focus failure
@@ -4537,6 +4653,11 @@ class Orchestrator:
                         status="done", output=f"burn-down green after {rnd} round(s)")
                     await self._finish_effort(effort_id, res, delivery=delivery)
                     return
+                if verdict == "infra":
+                    # the CHECK itself broke (proxy/clone/tool/path) — NOT the code. Burning
+                    # down can't fix that. Stop and surface it as a check/environment problem.
+                    await self._elevate_check_infra(effort_id, out)
+                    return
                 if verdict == "unknown":
                     stall += 1
                     await self.comms.post(
@@ -4657,6 +4778,7 @@ class Orchestrator:
         except Exception:  # noqa: BLE001
             goal = ""
         base_goal = (goal or "").split("\n\nITERATION ")[0].strip()[:2500]
+        proj = await self._effort_project(effort_id) or "the project"
         # PER-ROUND part branches (live 2026-07-08 v7: folds 404'd on rounds whose part worker
         # never pushed — unique names also make any stale leftover branch harmless).
         push_branch = f"{branch}-pt{part}r{rnd}" if part else branch
@@ -4706,23 +4828,16 @@ class Orchestrator:
             focus = f"{repo}#{branch}" if branch_exists else repo
             recurse, token = False, await self._project_token(effort_id)
         instruction = (
-            f"BURN-DOWN ROUND {rnd} (automatic — the org re-builds after every round and keeps "
-            f"going while the error count falls). {workspace} The org's own build currently "
-            f"FAILS; your ONLY job this round is to clear as many of the errors below as you can "
-            f"and PUSH real commits.\n"
-            f"1. Continue from the delivered work: {checkout}\n"
-            f"2. {scope}Fix these errors (mechanical, category by category; prefer small, "
-            f"uniform changes):\n{slice_txt}\n"
-            f"3. Re-build from /workspace: {build_line} — iterate until your slice is clean (or "
-            f"what remains is outside your file scope).\n"
-            f"   COMMIT + PUSH INCREMENTALLY — after EVERY few files fixed, not only at the end "
-            f"(your turn has a hard time budget; pushed progress survives it, unpushed work "
-            f"does not — the org re-builds and continues from whatever landed):\n   {publish}\n"
-            f"4. Final publish: {publish}\n"
-            f"5. Report — FIRST line exactly `ERRORS AFTER: <count from your final build>`, then "
-            f"any remaining error lines. If genuinely blocked, report `BLOCKED:` / `NEEDS:` / "
-            f"`FEASIBLE:` instead of guessing.\n\n"
-            f"CONTEXT — the goal this serves:\n{base_goal}"
+            f"{workspace}\n\n"
+            f"The build for `{proj}` is failing. Get it building and working correctly under the "
+            f"new API — porting what each piece was doing, the way you'd handle any build fix. "
+            f"Please don't remove features or delete code just to silence an error; if something "
+            f"genuinely has no equivalent in the new API, say so rather than dropping it.\n\n"
+            f"{scope}Current build errors:\n{slice_txt}\n\n"
+            f"Work from /workspace; build and check yourself with `{build_line}`. Commit and push "
+            f"your progress to `{push_branch}` as you go — unpushed work is lost when your turn "
+            f"ends. Start from what's already delivered (`{checkout}`).\n\n"
+            f"What this is for:\n{base_goal}"
         )
         # FRESH session per ROUND — parts AND single rounds (live 2026-07-08: every reused
         # session rotted the same way — part rounds 2/4/5 quit in ~90s with nothing pushed, and
@@ -4845,6 +4960,9 @@ class Orchestrator:
                         effort_id, channel_id, root, repo, delivery):
                     return None
                 return delivery
+            if verdict == "infra":
+                await self._elevate_check_infra(effort_id, out)
+                return None
             if verdict == "fail":
                 await self.comms.post(
                     Intent.worker_activity,
@@ -5860,6 +5978,66 @@ class Orchestrator:
         await say("\n".join(lines))
         return True
 
+    _REMOVAL_GOAL_RE = re.compile(
+        r"\b(remov|delet|drop|prune|clean\s*up|cleanup|strip|deprecat|retire|get\s+rid|"
+        r"tear\s+out|purge|excis)", re.I)
+
+    async def _removal_disclosure(self, effort_id: str, branch: str,
+                                  goal_text: str) -> tuple[str, bool]:
+        """Surface what a delivery REMOVED (no silent removals). Returns (note, flag): `note` is
+        appended to the closure; `flag`=True marks the effort needs-attention when the removals
+        are NOT justified by a removal/cleanup goal — a fix/port/launch that deletes files or guts
+        methods must be reviewed, never silently 'done'. Generic; fail-open (no note on an
+        unreadable diff)."""
+        repo = await self._effort_repo(effort_id)
+        if not (repo and self.github is not None and self.s.github_app_enabled):
+            return "", False
+        try:
+            rm = await read_removal_summary(
+                self.github, repo, branch, api_base=self.s.github_api_base,
+                transport=self._gh_transport)
+        except Exception as exc:  # noqa: BLE001 — disclosure never blocks a finish
+            log.debug("removal summary failed for %s: %s", effort_id, exc)
+            return "", False
+        deleted = rm.get("deleted_files") or []
+        gutted = rm.get("gutted_files") or []
+        syms = rm.get("removed_symbols") or []
+        ins, dels = rm.get("insertions", 0), rm.get("deletions", 0)
+        # "substantial removal" = a deleted file, a gutted method-body, or a net-negative diff
+        # that removes a lot more than it adds (the delete-to-pass shape).
+        net_heavy = dels >= 60 and dels >= ins * 3
+        if not (deleted or gutted or net_heavy):
+            return "", False
+        goal_is_removal = bool(self._REMOVAL_GOAL_RE.search(goal_text or ""))
+        parts: list[str] = []
+        if deleted:
+            parts.append("deleted file(s): " + ", ".join(f"`{f}`" for f in deleted[:8])
+                         + (f" +{len(deleted) - 8} more" if len(deleted) > 8 else ""))
+        if gutted:
+            parts.append("gutted (body largely removed): "
+                         + ", ".join(f"`{g['file']}` (−{g['removed']}/+{g['added']})"
+                                     for g in gutted[:6]))
+        if syms:
+            parts.append("removed symbol(s): " + ", ".join(f"`{s}`" for s in syms[:10])
+                         + (f" +{len(syms) - 10} more" if len(syms) > 10 else ""))
+        if not parts and net_heavy:
+            parts.append(f"net-negative diff (−{dels}/+{ins} lines)")
+        listing = "; ".join(parts)
+        await self.audit.log("delivery_removals", effort_id=effort_id,
+                             payload={"deleted": deleted[:20], "gutted": [g["file"] for g in gutted],
+                                      "symbols": syms[:20], "ins": ins, "dels": dels,
+                                      "goal_removal": goal_is_removal})
+        if goal_is_removal:
+            # the operator ASKED to remove — disclose, but it's expected (not a flag)
+            return (f"\n\n🗑️ **Removals (as intended by the goal):** {listing}.", False)
+        # a fix/port/launch that removed things → REVIEW, don't silently pass. A green build does
+        # not prove the removed functionality wasn't needed (live: a deleted cursor feature).
+        return (
+            f"\n\n⚠️ **Removal review — the goal wasn't to remove code, but this delivery {listing}.** "
+            f"A passing build does NOT prove these were safe to drop. Confirm each removal was a "
+            f"genuine port/dead-code (not a feature deleted to clear an error). If any was needed, "
+            f"say so and I'll port it properly instead.", True)
+
     async def _finish_effort(self, effort_id: str, result, *, delivery: BranchDelivery | None = None) -> None:
         """All steps cleared → closure DOWN into the effort thread + a summary UP to #mgmt (§2). When a
         repo was focused, `delivery` is the PM's VERIFIED verdict on the branch (§4.2): a verified
@@ -5985,10 +6163,19 @@ class Orchestrator:
                 "this is NOT done and no merge should happen. Say _\"re-run it\"_ and the worker "
                 "continues from the failing output above."
             )
-        unmet_or_partial = bool(unmet) or partial or comp_failed
+        # NO SILENT REMOVALS (operator 2026-07-09: a burn-down round DELETED a whole feature file
+        # to clear compile errors and the org green-passed it — the operator only found out via a
+        # broken cursor). Every landed delivery discloses what it REMOVED; a removal that isn't
+        # justified by a removal/cleanup GOAL is surfaced for review, not silently "done". Generic
+        # for any project — a green build never proves functionality was preserved.
+        removal_note, removal_flag = await self._removal_disclosure(
+            effort_id, branch, goal_text) if branch else ("", False)
+        scope_note += removal_note
+        unmet_or_partial = bool(unmet) or partial or comp_failed or removal_flag
         done_word = ("done" if not unmet_or_partial else
                      "partly done — see the scope check" if unmet else
                      "partly done — the composition check failed" if comp_failed else
+                     "done — but review the removals" if removal_flag and not partial else
                      "partly done — not all reported errors verified resolved")
         await self.comms.post(
             Intent.closure,

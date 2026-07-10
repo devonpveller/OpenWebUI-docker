@@ -204,11 +204,10 @@ class Valves(BaseModel):
                     "model's per-request context lane minus response "
                     "headroom. Default derives from MODEL_CONTEXT_LANE_TOKENS "
                     f"({MODEL_CONTEXT_LANE_TOKENS}) in context_budget.py — the "
-                    "llama-swap qwen36-27b lane (ctx 180000 / --parallel 3 = "
-                    "60000 since 2026-07-09, when speculative decoding forced "
-                    "the ctx down). Update that single constant if the lane "
-                    "changes; raise here only if you also enlarge the lane. "
-                    "Set far lower for small models (e.g. 28000 for 32k ctx).",
+                    "llama-swap qwen36-27b lane (ctx 196608 / --parallel 2 = "
+                    "98304 since 2026-07-09b). Update that single constant if "
+                    "the lane changes; raise here only if you also enlarge the "
+                    "lane. Set far lower for small models (e.g. 28000 for 32k).",
     )
     max_chunks_per_iteration: int = Field(
         default=10,

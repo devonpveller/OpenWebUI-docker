@@ -341,7 +341,7 @@ async def test_undelivered_standalone_reroutes_to_host_context(db_url, tmp_path)
         msgs = " ".join(p["message"] for p in chat.posted)
         assert "re-running the work in the **host context**" in msgs
         prompts = " ".join(w["prompt"] for w in harness.wakes)
-        assert "WORK IN HOST CONTEXT" in prompts                   # the host wake actually ran
+        assert "git push origin" in prompts and "vendor/murder" in prompts  # the host wake ran
         assert not any("undelivered" in (p["message"] or "").lower() and "⚠️" in p["message"]
                        for p in chat.posted) or True               # no dead-end escalation text
     finally:

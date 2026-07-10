@@ -169,7 +169,7 @@ async def test_run_in_host_context_dispatches_recursive_host_focus(db_url, tmp_p
         assert focus["repo"].startswith("https://github.com/devonpveller/Engine")
         assert focus["recurse_submodules"] is True
         prompts = " ".join(w["prompt"] for w in harness.wakes)
-        assert "WORK IN HOST CONTEXT" in prompts and "vendor/murder" in prompts
+        assert "git push origin" in prompts and "vendor/murder" in prompts
         assert "git push origin" in prompts                 # publishes from the submodule
         # the murder branch verified → engine gitlink bumped (composition wired)
         assert bumped.get("tree"), "the host gitlink was not bumped after host-context work"

@@ -293,18 +293,19 @@ async def test_standalone_project_gets_no_composition_noise(db_url, tmp_path):
 
 # ── LIVE 2026-07-06: slash-check + pasted error wall crash-looped; operator wants NL only ──
 async def test_set_check_bounds_a_pasted_wall(db_url):
-    """The check is ONE bounded command line — a pasted wall must never overflow the column
-    (varchar 256) and crash-loop the event handler."""
+    """The check is ONE bounded command line — a pasted wall must never overflow the column and
+    crash-loop the event handler. FIRST-LINE-ONLY is what defeats the wall; the length bound was
+    raised to 1000 (2026-07-09) because a real runtime smoke check is legitimately long."""
     orch, chat, harness, db = await _orch(db_url)
     try:
         await orch.projects.add("engine", "https://github.com/devonpveller/Engine")
         wall = "dotnet build X.sln\n" + ("'Point' is an ambiguous reference\n" * 40)
         assert await orch.projects.set_check("engine", wall)
         p = await orch.projects.get("engine")
-        assert p["check_cmd"] == "dotnet build X.sln"     # first line only, bounded
-        assert await orch.projects.set_check("engine", "x" * 999)
+        assert p["check_cmd"] == "dotnet build X.sln"     # first line only — the real guard
+        assert await orch.projects.set_check("engine", "x" * 2000)
         p = await orch.projects.get("engine")
-        assert len(p["check_cmd"]) <= 250
+        assert len(p["check_cmd"]) <= 1000                # bounded (raised for runtime checks)
     finally:
         await db.dispose()
 

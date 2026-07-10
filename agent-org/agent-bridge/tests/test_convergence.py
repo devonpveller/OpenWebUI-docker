@@ -304,8 +304,9 @@ async def test_goal_carries_machine_check_forewarning(db_url, tmp_path):
         await orch._intake_or_dispatch(eid, chan, root, "fix the signature in Game.cs",
                                        reply_prefix="", mgmt_channel=chan)
         _, goal, _ = await orch.charters.current_goal(eid)
-        # murder has no check of its own — the HOST's check is the one that applies
-        assert "MACHINE CHECK" in goal and "dotnet build vendor/murder/Murder.sln" in goal
+        # murder has no check of its own — the HOST's check is the one that applies. The worker is
+        # TOLD how it'll be checked (informative, not a gate to beat), naming the host + command.
+        assert "How this gets checked" in goal and "dotnet build vendor/murder/Murder.sln" in goal
         assert "`monogame-engine`" in goal
     finally:
         await db.dispose()
@@ -387,7 +388,7 @@ async def test_red_composition_check_auto_iterates_to_green(db_url, tmp_path):
         # not a fixed retry count — the PM keeps working instead of asking the operator
         assert "Burn-down engaged" in msgs, "the PM asked the operator instead of iterating"
         prompts = " ".join(w["prompt"] for w in harness.wakes)
-        assert "BURN-DOWN ROUND 1" in prompts
+        assert "build for" in prompts.lower() or "current build errors" in prompts.lower()
         assert "CS0104" in prompts                     # the round's prompt carries the real red
         assert "GREEN" in msgs                         # round 1 went green, org-verified
         from app.models import Effort

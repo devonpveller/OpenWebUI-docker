@@ -313,6 +313,76 @@ async def read_added_lines(
     return added
 
 
+async def read_removal_summary(
+    github: GitHubApp, repo_url: str, branch: str, *, base_branch: str = "",
+    api_base: str = "https://api.github.com", transport: httpx.BaseTransport | None = None,
+) -> dict:
+    """What a delivery REMOVED, for the no-silent-removals gate (operator 2026-07-09: a burn-down
+    round DELETED a whole feature file — MouseCursor.Sdl.cs — to make errors go away, and the org
+    green-passed it without ever surfacing the removal). Returns
+    {deleted_files:[...], gutted_files:[{file,removed,added}], insertions, deletions, removed_symbols:[...]}
+    from `base...branch` — deterministic, general, no repo-specific logic. Fail-open: an unreadable
+    diff returns empty (never blocks). `gutted_files` = files whose patch removes far more than it
+    adds (a body replaced by nothing / a stub). `removed_symbols` = deleted method/type/property
+    signatures scraped from the `-` lines (best-effort, language-agnostic-ish)."""
+    empty = {"deleted_files": [], "gutted_files": [], "insertions": 0, "deletions": 0,
+             "removed_symbols": []}
+    try:
+        owner, repo = parse_owner_repo(repo_url)
+    except ValueError:
+        return empty
+    if owner.lower() != (github.owner or "").lower():
+        return empty
+    try:
+        token = await github.installation_token()
+    except GitHubAppError:
+        return empty
+    base = api_base.rstrip("/")
+    h = _headers(token)
+    deleted: list[str] = []
+    gutted: list[dict] = []
+    removed_syms: list[str] = []
+    ins = dels = 0
+    # a deleted def/method/type/prop on a `-` line — signatures worth surfacing (C#/TS/py/go/etc.)
+    sig = re.compile(
+        r"\b(?:class|struct|interface|enum|record|def|func|function|void|public|private|"
+        r"protected|internal|static)\b.*?\b([A-Z_a-z][\w]*)\s*[\(<{]")
+    try:
+        async with httpx.AsyncClient(timeout=15.0, transport=transport) as c:
+            if not base_branch:
+                meta = await c.get(f"{base}/repos/{owner}/{repo}", headers=h)
+                if meta.status_code >= 400:
+                    return empty
+                base_branch = meta.json().get("default_branch") or "main"
+            cmp = await c.get(f"{base}/repos/{owner}/{repo}/compare/{base_branch}...{branch}",
+                              headers=h)
+            if cmp.status_code != 200:
+                return empty
+            for f in (cmp.json().get("files") or [])[:300]:
+                a = int(f.get("additions") or 0)
+                d = int(f.get("deletions") or 0)
+                ins += a
+                dels += d
+                st = f.get("status") or ""
+                fn = f.get("filename") or "?"
+                if st == "removed":
+                    deleted.append(fn)
+                elif d >= 20 and d >= a * 4:   # far more removed than added → gutted
+                    gutted.append({"file": fn, "removed": d, "added": a})
+                for ln in (f.get("patch") or "").splitlines():
+                    if ln.startswith("-") and not ln.startswith("---"):
+                        m = sig.search(ln[1:])
+                        if m and len(removed_syms) < 60:
+                            removed_syms.append(f"{m.group(1)} ({fn.split('/')[-1]})")
+    except (httpx.HTTPError, ValueError):
+        return empty
+    # de-dup removed symbols, preserve order
+    seen: set[str] = set()
+    removed_syms = [s for s in removed_syms if not (s in seen or seen.add(s))]
+    return {"deleted_files": deleted, "gutted_files": gutted, "insertions": ins,
+            "deletions": dels, "removed_symbols": removed_syms}
+
+
 async def read_sibling_agent_prs(
     github: GitHubApp, repo_url: str, own_branch: str, *,
     api_base: str = "https://api.github.com",
