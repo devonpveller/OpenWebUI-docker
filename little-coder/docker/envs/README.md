@@ -12,6 +12,16 @@ project switch.
 ghcr.io/open-webui/open-terminal:slim
   └─ little-coder-open-terminal:local       ← Dockerfile.open-terminal (git-proxy splice, SECURITY BASE)
        ├─ little-coder-open-terminal:dotnet8   ← envs/dotnet8.Dockerfile (.NET 8 SDK)
+       │    └─ little-coder-open-terminal:dotnet8-gui-mgfx ← envs/dotnet8-gui-mgfx.Dockerfile
+       │         (2026-07-09: Wine + mgfxc for MonoGame SHADER compilation. NOTE: built, but the
+       │          Windows-dotnet-under-Wine muxer is fragile/failing on this base — mgfxc can't
+       │          reliably compile here. LESSON: MonoGame shader compilation is effectively a
+       │          Windows-HOST capability. The working pattern is HOST-PRODUCES-ARTIFACT +
+       │          WORKER-VERIFIES-CONSUMPTION: compile the .fx→MGFX .fxb on the host (mgfxc runs
+       │          native there), commit them, and let the worker VERIFY the load path — the
+       │          monogame-engine check asserts every packed .fxb starts with the `MGFX` magic,
+       │          which reproduces the "not a MonoGame MGFX file" crash with no Wine/GL. So the
+       │          live env stays dotnet8-gui; this layer is kept for reference/experiments.)
        │    └─ little-coder-open-terminal:dotnet8-gui ← envs/dotnet8-gui.Dockerfile (2026-07-09:
        │         headless GUI runtime — Xvfb + Mesa software GL + SDL2/OpenAL, so a MonoGame
        │         DesktopGL app can LAUNCH for runtime verification: `xvfb-run -a timeout 25

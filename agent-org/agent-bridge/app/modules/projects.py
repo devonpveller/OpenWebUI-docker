@@ -133,9 +133,11 @@ class ProjectRegistry:
         """Set the project's D2 check/test command (run on delivered PR branches before the merge
         gate; red routes back to the effort). Empty string clears it. False if the project is
         unknown. The check is ONE bounded command line — defense at the write (live 2026-07-06:
-        a slash command with a pasted error wall after the quoted command overflowed the
-        varchar(256) column and crash-looped the event handler)."""
-        check_cmd = ((check_cmd or "").strip().splitlines() or [""])[0].strip()[:250]
+        a slash command with a pasted error wall after the quoted command overflowed the column
+        and crash-looped the event handler). Bound raised to 1000 (2026-07-09): a real RUNTIME
+        smoke check — build + content-format assertion + headless launch — is legitimately long;
+        still FIRST-LINE-ONLY, which is what defeats a pasted multi-line error wall."""
+        check_cmd = ((check_cmd or "").strip().splitlines() or [""])[0].strip()[:1000]
         async with self.db.session_factory() as s:
             p = await s.get(Project, slug)
             if p is None:

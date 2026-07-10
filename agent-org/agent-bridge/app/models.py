@@ -331,7 +331,7 @@ class Project(Base):
     # D2 (DELIVERY-PIPELINE): the project's check/test command (e.g. `dotnet build Build.sln`,
     # `npm test`). Run on a delivered PR branch BEFORE the merge gate is presented; red routes back
     # to the owning effort. Empty ⇒ D2 is skipped with an honest note (never silently pretended).
-    check_cmd: Mapped[str | None] = mapped_column(String(256))
+    check_cmd: Mapped[str | None] = mapped_column(String(1024))
     # STANDING INTENT (anti-drift): a durable architectural invariant for this project, in plain
     # language, injected into EVERY effort goal and enforced at delivery — e.g. "murder builds from
     # the vendored MonoGame source; never use the `Murder.FNA` NuGet package". Terms the operator
