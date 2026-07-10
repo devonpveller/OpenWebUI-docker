@@ -14,6 +14,7 @@ from .journal import ResearchJournal
 from .models import ResearchSession, Valves
 from .sub_agent import SubAgent
 from .context_budget import (
+    DEFAULT_MAX_PROMPT_TOKENS,
     build_iteration_text,
     cap_sources_to_budget,
     usable_budget_chars,
@@ -323,9 +324,13 @@ class Synthesizer:
         iteration_summaries: List[str],
         relevant_sources: List[Dict] = None,
         trail_sources: List[Dict] = None,
-        max_prompt_tokens: int = 28000,
+        max_prompt_tokens: int = DEFAULT_MAX_PROMPT_TOKENS,
     ) -> str:
         """Construct a budget-aware synthesis prompt.
+
+        The live caller always passes ``self._valves.max_prompt_tokens``; the
+        default here is only a fallback for direct/standalone calls and tracks
+        the same lane constant (context_budget.MODEL_CONTEXT_LANE_TOKENS).
 
         Allocates the token budget across sections by priority so that
         critical content (anchor, instructions, sources) is always

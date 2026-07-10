@@ -13,6 +13,8 @@ from typing import Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
+from .context_budget import DEFAULT_MAX_PROMPT_TOKENS, MODEL_CONTEXT_LANE_TOKENS
+
 
 class ResearchPhase(str, Enum):
     """Tracks current phase of a research session."""
@@ -195,17 +197,18 @@ class Valves(BaseModel):
 
     # Context management
     max_prompt_tokens: int = Field(
-        default=120000,
+        default=DEFAULT_MAX_PROMPT_TOKENS,
         ge=1000,
         le=262144,
         description="Token budget for SubAgent prompts. MUST be <= the "
                     "model's per-request context lane minus response "
-                    "headroom. The llama-swap qwen36-27b runs --parallel 2 "
-                    "over a 262144 ctx, so each request lane is 131072 "
-                    "tokens; 120000 leaves ~11k for the generated answer. "
-                    "Raise toward the lane size only if you also lower "
-                    "parallelism (bigger lane). Set far lower for small "
-                    "models (e.g. 28000 for 32k ctx).",
+                    "headroom. Default derives from MODEL_CONTEXT_LANE_TOKENS "
+                    f"({MODEL_CONTEXT_LANE_TOKENS}) in context_budget.py — the "
+                    "llama-swap qwen36-27b lane (ctx 180000 / --parallel 3 = "
+                    "60000 since 2026-07-09, when speculative decoding forced "
+                    "the ctx down). Update that single constant if the lane "
+                    "changes; raise here only if you also enlarge the lane. "
+                    "Set far lower for small models (e.g. 28000 for 32k ctx).",
     )
     max_chunks_per_iteration: int = Field(
         default=10,

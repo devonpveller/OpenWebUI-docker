@@ -21,6 +21,20 @@ CHARS_PER_TOKEN = 4
 # Tokens reserved so the model can generate a response.
 RESPONSE_RESERVE_TOKENS = 4000
 
+# --- Single source of truth for the target model's context lane -------------
+# The deep_research SubAgents run on the ai-stack `qwen36-27b` model. Its
+# per-request context LANE = llama-swap ctx-size / n_parallel. As of
+# 2026-07-09 that is 180000 / 3 = 60000 tokens (speculative decoding forced the
+# ctx down from 262144; see ai-stack/.env "qwen36-27b LANE CONSUMERS").
+# Keep this in sync with MNEMORY_LLM_CONTEXT_SIZE and little-coder's
+# contextWindow when the lane changes.
+MODEL_CONTEXT_LANE_TOKENS = 60000
+
+# Default prompt-token budget: the lane minus room for the generated answer and
+# chat-template/tool overhead. Consumed as the `max_prompt_tokens` valve default
+# (models.py) and the synthesis fallback. ~10k reserve on a 60k lane.
+DEFAULT_MAX_PROMPT_TOKENS = MODEL_CONTEXT_LANE_TOKENS - 10000
+
 
 def estimate_tokens(text: str) -> int:
     """Estimate token count from character length."""
