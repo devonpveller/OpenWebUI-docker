@@ -479,6 +479,41 @@ async def fork_repo(
                             detail=r.text[:160])
 
 
+async def read_merge_base(
+    github: GitHubApp, repo_url: str, branch: str, *, base_branch: str = "",
+    api_base: str = "https://api.github.com", transport: httpx.BaseTransport | None = None,
+) -> str:
+    """The MERGE-BASE commit of `branch` and the repo's default branch — the 'before the fix' point
+    for a before/after reproduction check (the code as it was when the branch forked). Returns the
+    full sha, or '' if unresolvable (the caller fails closed: no base ⇒ no red→green proof). Generic."""
+    try:
+        owner, repo = parse_owner_repo(repo_url)
+    except ValueError:
+        return ""
+    try:
+        token = await github.installation_token()
+    except GitHubAppError:
+        return ""
+    base = api_base.rstrip("/")
+    h = _headers(token)
+    try:
+        async with httpx.AsyncClient(timeout=15.0, transport=transport) as c:
+            if not base_branch:
+                meta = await c.get(f"{base}/repos/{owner}/{repo}", headers=h)
+                if meta.status_code >= 400:
+                    return ""
+                base_branch = meta.json().get("default_branch") or "main"
+            if branch == base_branch:
+                return ""
+            cmp = await c.get(
+                f"{base}/repos/{owner}/{repo}/compare/{base_branch}...{branch}", headers=h)
+            if cmp.status_code != 200:
+                return ""
+            return (cmp.json().get("merge_base_commit", {}) or {}).get("sha", "") or ""
+    except (httpx.HTTPError, ValueError):
+        return ""
+
+
 async def read_branch_changes(
     github: GitHubApp, repo_url: str, branch: str, *, base_branch: str = "",
     api_base: str = "https://api.github.com", transport: httpx.BaseTransport | None = None,
@@ -775,13 +810,16 @@ async def classify_agent_branches(
     token = await github.installation_token()
     base = api_base.rstrip("/")
     h = _headers(token)
-    out: dict = {"default": "main", "merged": [], "unmerged": [], "open_pr": []}
+    # `dates`: branch → last-commit ISO (for supersession/staleness); `pr_num`: branch → open PR #
+    # (so a superseded branch's PR can be closed when it is reaped). Additive — existing keys unchanged.
+    out: dict = {"default": "main", "merged": [], "unmerged": [], "open_pr": [],
+                 "dates": {}, "pr_num": {}}
     async with httpx.AsyncClient(timeout=30.0, transport=transport) as c:
         meta = await c.get(f"{base}/repos/{owner}/{name}", headers=h)
         if meta.status_code == 200:
             out["default"] = meta.json().get("default_branch") or "main"
         default = out["default"]
-        # all agent/* branches (paginated)
+        # all agent/* branches (paginated) + each branch's HEAD commit date (from the list item)
         agent: list[str] = []
         page = 1
         while True:
@@ -790,11 +828,14 @@ async def classify_agent_branches(
             if r.status_code != 200:
                 break
             b = r.json()
-            agent += [x["name"] for x in b if (x.get("name") or "").startswith("agent/")]
+            for x in b:
+                nm = x.get("name") or ""
+                if nm.startswith("agent/"):
+                    agent.append(nm)
             if len(b) < 100:
                 break
             page += 1
-        # heads of OPEN PRs (these are live — never delete)
+        # heads of OPEN PRs → keep the branch→PR# map (a superseded PR is CLOSED when reaped, not left)
         open_heads: set[str] = set()
         page = 1
         while True:
@@ -803,11 +844,20 @@ async def classify_agent_branches(
             if r.status_code != 200:
                 break
             j = r.json()
-            open_heads |= {(p.get("head") or {}).get("ref") for p in j if p.get("head")}
+            for p in j:
+                ref = (p.get("head") or {}).get("ref")
+                if ref:
+                    open_heads.add(ref)
+                    out["pr_num"][ref] = p.get("number")
             if len(j) < 100:
                 break
             page += 1
         for b in sorted(set(agent)):
+            # last-commit date (single-branch GET carries the nested committer date) — best-effort
+            br = await c.get(f"{base}/repos/{owner}/{name}/branches/{b}", headers=h)
+            if br.status_code == 200:
+                out["dates"][b] = (((br.json().get("commit") or {}).get("commit") or {})
+                                   .get("committer") or {}).get("date") or ""
             if b in open_heads:
                 out["open_pr"].append(b)
                 continue

@@ -124,3 +124,20 @@ async def test_voice_is_the_operator_tunable_charter_from_disk(db_url):
         assert len(orch._pm_voice_sys) > 400                     # the real charter, not the fallback
     finally:
         await db.dispose()
+
+
+async def test_comm_facts_names_the_current_branch_to_check(db_url):
+    """The facts name the CURRENT branch per project (operator 2026-07-11: "the latest change-
+    containing branch is what we focus on; older branches aren't progress") so "what do I check?"
+    always has one answer."""
+    orch, chat, db = await _orch(db_url)
+    try:
+        await orch.router.open_effort("the-fix", project="app")
+        efforts = await orch.gate.snapshot(open_only=True)
+        status_map = await orch._effort_status_map(efforts)
+        facts = await orch._comm_facts(efforts, status_map)
+        assert "CURRENT WORK" in facts and "WHAT TO CHECK" in facts
+        assert "agent/effort-the-fix" in facts       # the branch to check is named unambiguously
+        assert "app" in facts
+    finally:
+        await db.dispose()

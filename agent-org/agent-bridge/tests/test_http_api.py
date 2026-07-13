@@ -76,3 +76,24 @@ async def test_kill_switch_over_http(client):
     await client.post("/kill-switch", json={"on": True})
     st = (await client.get("/state/effort-demo")).json()
     assert st["can_dispatch"] is False
+
+
+async def test_nl_inlet_drives_the_org_like_an_operator_message(db_url):
+    """The internal /nl inlet injects an operator NL message → nl_intake (classify → govern →
+    dispatch), so tooling/automation can drive the org exactly like a chat turn (operator
+    2026-07-11: "you lead the orchestration as me")."""
+    from app.schemas import OperatorIntent
+    settings = Settings(
+        _env_file=None, chat_adapter="fake", database_url=db_url,
+        profiles_dir=str(ROOT / "profiles"), charters_dir=str(ROOT / "charters"),
+        floor_dir=str(ROOT / "floor"), worker_instance_urls="http://w1:8090")
+    orch = Orchestrator(settings, Database(db_url), FakeChatAdapter(),
+                        model_client=FakeModelClient(), harness=FakeHarness())
+    orch.models._client.queue_structured(OperatorIntent(kind="status", reply="Here's the board."))
+    app = create_app(orch)
+    async with app.router.lifespan_context(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+            r = await c.post("/nl", json={"message": "how's it going?"})
+            assert r.status_code == 200 and r.json()["ok"] is True
+    assert orch.chat.posted, "the /nl inlet did not reach nl_intake (no org reply posted)"

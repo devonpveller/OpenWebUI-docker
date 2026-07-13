@@ -125,3 +125,34 @@ async def test_clone_failure_escalates_loudly_and_audits(db_url):
         assert "not your code" in msgs.lower()                      # honest attribution
     finally:
         await db.dispose()
+
+
+async def test_sweep_defers_while_a_worker_daemon_is_actually_running(db_url):
+    """Restart-safe (live 2026-07-11): a bridge redeploy mid-task wipes the in-memory 'executing'
+    marker, so the watchdog must ask the DAEMON — if a worker reports a RUNNING task, work IS
+    happening; defer the sweep (re-dispatching would 409 the still-running worker). When workers are
+    free again, the genuinely-wedged effort recovers."""
+    orch, chat, db = await _orch(db_url)
+    try:
+        await _seed(orch, "effort-wedged", last_kind="worker_release", age_min=120)
+        orch.harness.busy_urls = {"http://w1:8090"}          # a worker is still working
+        await orch._sweep_stalled_efforts()
+        assert await orch._event_count("effort-wedged", "stall_recovered") == 0   # deferred
+        orch.harness.busy_urls = set()                        # workers free now
+        await orch._sweep_stalled_efforts()
+        assert await orch._event_count("effort-wedged", "stall_recovered") == 1   # recovered
+    finally:
+        await db.dispose()
+
+
+async def test_watchdog_recovers_a_post_publish_stall(db_url):
+    """A delivery that PUBLISHED a branch but whose verify→PR→closure then STALLED (silent, no
+    worker running) is a wedge the watchdog must recover — publishing is not the finish line (live
+    2026-07-11: an auto-iteration re-published then went silent 20 min, both workers idle)."""
+    orch, chat, db = await _orch(db_url)
+    try:
+        await _seed(orch, "effort-pub", last_kind="effort_published", age_min=30)
+        await orch._sweep_stalled_efforts()
+        assert await orch._event_count("effort-pub", "stall_recovered") == 1
+    finally:
+        await db.dispose()

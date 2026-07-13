@@ -324,6 +324,25 @@ class Router:
                         payload={"repo": repo, "ok": ok, "upstream": upstream,
                                  "upstream_ok": upstream_ok, "detail": detail},
                     )
+                    # TRANSIENT workspace collision ("destination path … already exists") — a suspended/
+                    # parked worker still holds a prior checkout, the SAME race the verify-focus retries.
+                    # Re-clone ONCE with fresh=True (wipe + re-clone) before giving up, so a transient
+                    # collision doesn't cost a ~15-min stall-watchdog cycle — costly for a multi-round
+                    # burndown campaign that focuses many times (live: repeated focus_failed on this).
+                    # Generic across projects; only for the collision, never an auth/private-repo failure.
+                    if (not ok) and "already exists" in (detail or "").lower():
+                        log.info("worker focus for %s hit a transient workspace collision — retrying "
+                                 "once with a fresh re-clone", effort_id)
+                        ok, detail, upstream_ok = await self.harness.set_project(
+                            inst.base_url, repo, token=repo_token,
+                            upstream=upstream, upstream_token=upstream_token,
+                            recurse_submodules=recurse_submodules, fresh=True,
+                        )
+                        await self.audit.log(
+                            "worker_project_set", effort_id=effort_id, actor=inst.id,
+                            payload={"repo": repo, "ok": ok, "fresh_retry": True,
+                                     "upstream": upstream, "upstream_ok": upstream_ok, "detail": detail},
+                        )
                     if ok and upstream and upstream_ok is False:
                         # Clone worked but the fork's read-only `upstream` remote didn't bake.
                         # FIRST let the recovery hook try to prove the CONFIG is wrong (repo isn't
@@ -560,19 +579,21 @@ class Router:
     async def exec_check(
         self, effort_id: str, *, command: str, session_id: str, repo: str | None = None,
         repo_token: str | None = None, recurse_submodules: bool = False, timeout: int = 900,
+        fresh: bool = False,
     ) -> tuple[int | None, str, bool]:
         """Run ONE verification command on a pooled worker DETERMINISTICALLY (the daemon's
         `/check` — real exit code + output, no model in the loop). Build verification is a
         machine step: the LLM 'verifier' burned its turn re-running builds and never reported
         (live 2026-07-08). Acquires a slot, optionally focuses `repo` (privileged recursive
-        clone for compositions), runs, releases. Exceptions propagate — the orchestrator falls
-        back to the LLM verifier (covers an old daemon image without `/check`)."""
+        clone for compositions), runs, releases. `fresh` FORCES a clean re-clone of the focus
+        (self-heals a partial/parked workspace — e.g. a composition whose nested submodules didn't
+        populate). Exceptions propagate — the orchestrator falls back to the LLM verifier."""
         inst = await self.scheduler.acquire(effort_id, "verifier", session_id)
         try:
             if repo:
                 ok, detail, _ = await self.harness.set_project(
                     inst.base_url, repo, token=repo_token,
-                    recurse_submodules=recurse_submodules)
+                    recurse_submodules=recurse_submodules, fresh=fresh)
                 await self.audit.log(
                     "worker_project_set", effort_id=effort_id, actor=inst.id,
                     payload={"repo": repo, "ok": ok, "detail": detail, "verify": True})

@@ -1,10 +1,13 @@
 """Trust ladder (operator 2026-07-10: "90% of the time when I test what was claimed, the claim is
-false" — because the check compiles, it doesn't RUN the behavior). For a RUNTIME/behavioral goal,
-"done" now requires a REPRODUCTION test (fails on the break, passes on the fix, wired into the
-check), and the org must have run the check GREEN itself. The closure states EXACTLY what was
-proven so the commit history stays honest:
-  • repro + org-green            → VERIFIED via reproduction (done; human still merges this phase)
-  • build-only, no repro         → NOT verified (stays visible; auto-iterates for a repro)
+false" — because the check compiles, it doesn't RUN the behavior; hardened 2026-07-12 after the
+atlas false-done: a green BUILD/SMOKE isn't a reproduction of an INTERACTION symptom). For a
+RUNTIME/behavioral goal, "done" now requires a REPRODUCTION test (fails on the break, passes on the
+fix, wired into the check) AND the org must have watched that reproduction go RED on the pre-fix
+state and GREEN on the fix ITSELF — the worker's word + a green build is not enough. The closure
+states EXACTLY what was proven so the commit history stays honest:
+  • repro + org-observed RED→GREEN → VERIFIED via reproduction (done; human still merges this phase)
+  • repro + green build, no RED→GREEN → NOT independently verified (operator confirms; org self-check pending)
+  • build-only, no repro           → NOT verified (stays visible; auto-iterates for a repro)
 Generic — keys off the GOAL wording + the worker's REPRO block, no project specifics."""
 
 from __future__ import annotations
@@ -84,6 +87,11 @@ async def test_behavioral_goal_with_repro_and_org_green_is_verified(db_url, tmp_
         await orch.charters.set_goal(
             eid, "the editor throws this at runtime when clicking Game Profile", created_by="po")
         orch._org_verified[eid] = "headsha123456789000"       # the org ran the check GREEN itself
+        # …AND the org's before/after harness observed the reproduction go RED on the pre-fix state
+        # and GREEN on the fix (2026-07-12 atlas false-done fix: a green build/smoke is NOT proof —
+        # only an org-observed RED→GREEN earns "verified via reproduction"). The harness sets this;
+        # here we simulate it firing for this head.
+        orch._repro_red_green[eid] = "headsha123456789000"
         delivery = BranchDelivery(verifiable=True, exists=True, ahead=2, files_changed=3,
                                   head_sha="headsha123456789000", branch="agent/editor-atlas")
         res = SimpleNamespace(status="done", output=_REPRO_OUTPUT)
@@ -91,10 +99,43 @@ async def test_behavioral_goal_with_repro_and_org_green_is_verified(db_url, tmp_
         msgs = " ".join(p["message"] for p in chat.posted)
         assert "Verified via reproduction" in msgs
         assert "VERIFIED via reproduction" in msgs             # the done_word
-        assert "confirmed it passes now" in msgs               # honest about what it did/didn't prove
+        assert "RED on the code before the fix, GREEN on the fix" in msgs  # org-observed before/after
         async with orch.db.session_factory() as s:
             e = await s.get(Effort, eid)
         assert e.lifecycle == "done"                           # genuinely verified → done (you merge)
+    finally:
+        await db.dispose()
+
+
+async def test_behavioral_goal_with_repro_but_org_did_not_run_before_after_is_not_verified(db_url, tmp_path):
+    """The atlas false-done, exactly (2026-07-12): the worker gives a full REPRO block AND the org's
+    BUILD/SMOKE check is green — but the org never ran that reproduction against the pre-fix state, so
+    a green build (which passes whether or not the interaction bug is present) is NOT proof. FAIL
+    CLOSED: no org-observed RED→GREEN ⇒ honest needs-attention, and — because the WORKER already gave
+    a repro — we do NOT burn worker cycles re-iterating; we ask the operator to confirm."""
+    orch, chat, db = await _orch(db_url, tmp_path)
+    try:
+        await orch.projects.add("app", "https://github.com/devonpveller/app")
+        orch._gh_transport = _clean_remote()
+        eid, _c, _r = await orch.router.open_effort("editor-atlas-fc", project="app")
+        await orch.charters.set_goal(
+            eid, "the editor throws this at runtime when clicking Game Profile", created_by="po")
+        orch._org_verified[eid] = "headsha123456789000"       # green BUILD/SMOKE …
+        # …but _repro_red_green is NOT set — the org never watched the reproduction fail-before.
+        delivery = BranchDelivery(verifiable=True, exists=True, ahead=2, files_changed=3,
+                                  head_sha="headsha123456789000", branch="agent/editor-atlas-fc")
+        res = SimpleNamespace(status="done", output=_REPRO_OUTPUT)
+        await orch._finish_effort(eid, res, delivery=delivery)
+        msgs = " ".join(p["message"] for p in chat.posted)
+        assert "VERIFIED via reproduction" not in msgs        # NOT falsely verified
+        assert "NOT independently verified" in msgs
+        assert "have not run it myself" in msgs                # honest about the specific gap
+        assert "Please confirm it on your end" in msgs        # operator confirms; not worker re-iterate
+        assert await orch._event_count(eid, "delivery_runtime_unverified") == 1
+        assert await orch._event_count(eid, "delivery_runtime_verified") == 0
+        async with orch.db.session_factory() as s:
+            e = await s.get(Effort, eid)
+        assert e.lifecycle != "done"                           # the operator's to confirm
     finally:
         await db.dispose()
 
@@ -113,7 +154,7 @@ async def test_behavioral_goal_build_only_is_not_verified_and_stays_open(db_url,
         res = SimpleNamespace(status="done", output="Made it compile. Looks fixed to me.")
         await orch._finish_effort(eid, res, delivery=delivery)
         msgs = " ".join(p["message"] for p in chat.posted)
-        assert "NOT verified" in msgs
+        assert "NOT independently verified" in msgs
         assert "reproduction test" in msgs.lower()             # demands the repro
         assert "VERIFIED via reproduction" not in msgs
         async with orch.db.session_factory() as s:

@@ -1,6 +1,21 @@
 # Claude Code ⟷ Mattermost bridge — design
 
-**Status:** DESIGN (outbound LIVE, inbound not built) · 2026-07-04
+**Status:** outbound LIVE · **read/post MCP LIVE** (2026-07-11, `scripts/mattermost-mcp/`) ·
+**INBOUND BRIDGE LIVE** (2026-07-13, `scripts/claude-sessions-bridge/`) — the §5 thread=session
+model on the **#Claude-Sessions** channel (`claude-sessions`, id `6z9khgkdd7df9q454be6fimw1h`):
+root post → new headless session, replies resume it, and gated tools relay a **mid-turn**
+approval (`--permission-prompt-tool` MCP → 🛑 post → in-thread `approve`/`deny`, fail-closed).
+That is P-CCB.1 delivered with the P-CCB.3 mid-turn approval mechanism (open decision #4
+resolved in favor of mid-turn; #1 resolved as default-mode + relay). See the bridge README.
+· 2026-07-04
+
+> **2026-07-11 update.** A dependency-free **stdio MCP server** (`scripts/mattermost-mcp/server.py`,
+> registered in `.mcp.json` as `mattermost`, + an `mm.py` CLI) now gives a Claude Code session
+> native `mattermost_read` / `mattermost_post` / `mattermost_channels` tools — the durable
+> replacement for ad-hoc `docker exec … curl`. This covers the **self-driven poll→report** loop (I
+> read the operator's replies and post progress on my own cadence). It is NOT yet the §5 "channels"
+> push model where an operator message wakes a live session through a permission relay — that
+> remains the next step (P-CCB.1/§5). Token still read from `.env` at run time, never committed.
 **Scope:** ai-stack first; expansion to other repos on this machine theorized in §9.
 **One line:** let the operator get pinged by, and remotely re-engage, *this* Claude Code
 session from the same Mattermost surface they already watch the agent-org fleet from —

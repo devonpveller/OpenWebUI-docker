@@ -69,6 +69,102 @@ async def _game(orch, check_cmd=""):
     return await orch.router.open_effort("wire", project="game")
 
 
+async def test_plain_project_focus_is_recursive_when_check_declares_submodules(db_url, tmp_path):
+    """A plain project that VENDORS submodules its build needs (its check_cmd declares
+    `git submodule … --recursive`) must get a RECURSIVE focus, or the nested tree doesn't populate
+    and the build fails MSB3202 (live 2026-07-12: the atlas effort is on the engine HOST and its
+    build of vendor/murder needs murder's OWN nested bang/gum)."""
+    orch, chat, harness, db = await _orch(db_url, tmp_path)
+    try:
+        eid, chan, root = await _game(
+            orch, "git submodule update --init --recursive && dotnet build vendor/x/X.sln")
+        harness.check_queue = [(0, "Build succeeded.\n0 Error(s)", False)]
+        verdict, _out, _n = await orch._org_build_check(eid)
+        assert verdict == "pass"
+        assert any(f.get("recurse_submodules") for f in harness.focus_calls), \
+            "the focus was not recursive despite the check declaring recursive submodules"
+    finally:
+        await db.dispose()
+
+
+async def test_plain_project_focus_not_recursive_without_submodule_declaration(db_url, tmp_path):
+    """A plain project whose check does NOT declare submodules gets a direct (non-recursive) focus —
+    no needless deep clone."""
+    orch, chat, harness, db = await _orch(db_url, tmp_path)
+    try:
+        eid, chan, root = await _game(orch, "dotnet build Build.sln")
+        harness.check_queue = [(0, "Build succeeded.", False)]
+        await orch._org_build_check(eid)
+        assert not any(f.get("recurse_submodules") for f in harness.focus_calls)
+    finally:
+        await db.dispose()
+
+
+async def test_org_build_check_fast_fails_on_unreachable_gitlink(db_url, tmp_path):
+    """A composition branch that bumped a submodule pointer to a commit NOT on the submodule remote
+    used to HANG the build ~30 min (`git submodule update` fetching an unresolvable commit), timing
+    out to 'unknown' and wedging verify for the effort (live 2026-07-13). Reachability is a fast API
+    check — do it FIRST and return 'infra' cleanly WITHOUT running the hanging build. Generic."""
+    orch, chat, harness, db = await _orch(db_url, tmp_path)
+    try:
+        eid, chan, root = await _game(
+            orch, "git submodule update --init --recursive && dotnet build vendor/x/X.sln")
+
+        async def _broken(effort_id, repo):     # stand in for read_broken_gitlinks (unit-tested apart)
+            return [{"path": "vendor/x", "sha": "deadbeefcafe0000", "submodule_repo": "devonpveller/x"}]
+        orch._broken_gitlinks = _broken
+        harness.check_queue = [(0, "Build succeeded.\n0 Error(s)", False)]   # must NOT be consumed
+        verdict, out, _n = await orch._org_build_check(eid)
+        assert verdict == "infra", f"a broken gitlink must fast-fail to infra, got {verdict}"
+        assert "unreachable submodule gitlink" in out and "vendor/x" in out
+        assert len(harness.checks) == 0, "the build ran despite the broken gitlink — it would hang"
+        ev = [e for e in await orch.audit.replay(eid) if e["kind"] == "org_build_check"]
+        assert ev and ev[-1]["payload"]["mode"] == "gitlink-precheck"
+    finally:
+        await db.dispose()
+
+
+async def test_org_build_check_runs_build_when_gitlinks_clean(db_url, tmp_path):
+    """Guard: clean gitlinks → the pre-check is a no-op and the build runs normally. The fast-fail
+    must not suppress real builds."""
+    orch, chat, harness, db = await _orch(db_url, tmp_path)
+    try:
+        eid, chan, root = await _game(orch, "dotnet build Build.sln")
+
+        async def _clean(effort_id, repo):
+            return []
+        orch._broken_gitlinks = _clean
+        harness.check_queue = [(0, "Build succeeded.\n0 Error(s)", False)]
+        verdict, _out, _n = await orch._org_build_check(eid)
+        assert verdict == "pass"
+        assert len(harness.checks) == 1     # the build DID run
+    finally:
+        await db.dispose()
+
+
+async def test_verify_focus_collision_retries_deterministic_check(db_url, tmp_path):
+    """A verify-focus can TRANSIENTLY collide (privileged recursive re-clone on a parked/shared
+    workspace → 'destination already exists'); the org must RETRY the deterministic check ONCE —
+    keeping the MACHINE verdict — instead of dropping to the nondeterministic LLM verifier (live
+    2026-07-11: the atlas composition kept getting an LLM guess, "pass" one round, "unknown" the
+    next). One retry, a fresh focus, a real verdict."""
+    orch, chat, harness, db = await _orch(db_url, tmp_path)
+    try:
+        eid, chan, root = await _game(orch, "dotnet build Build.sln")
+        harness.set_project_fail_once = (
+            "verification focus failed: clone failed (exit 128): fatal: destination path "
+            "'/workspace' already exists and is not an empty directory.")
+        harness.check_queue = [(0, "Build succeeded.\n0 Error(s)", False)]
+        verdict, out, n = await orch._org_build_check(eid)
+        assert verdict == "pass", f"deterministic retry didn't land a machine verdict: {verdict}"
+        assert harness.set_project_fail_once == ""      # the transient failure was consumed (a retry)
+        assert len(harness.checks) == 1                 # the check ran once, after the clean retry
+        ev = [e for e in await orch.audit.replay(eid) if e["kind"] == "org_build_check"]
+        assert ev and ev[-1]["payload"]["mode"] == "exec"   # deterministic, NOT the LLM fallback
+    finally:
+        await db.dispose()
+
+
 async def test_d2_pass_presents_merge_gate(db_url, tmp_path):
     orch, chat, harness, db = await _orch(db_url, tmp_path)
     try:

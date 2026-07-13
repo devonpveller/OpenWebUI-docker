@@ -40,10 +40,16 @@ async def _orch(db_url, tmp_path):
     return orch, orch.chat, db
 
 
-def _repo_transport(state: dict, *, branches: dict, open_heads: list):
-    """`branches`: {name: ahead_by}. `open_heads`: branch names with an open PR.
-    Records DELETE calls in state['deleted']."""
+def _repo_transport(state: dict, *, branches: dict, open_heads: list,
+                    dates: dict | None = None, pr_nums: dict | None = None):
+    """`branches`: {name: ahead_by}. `open_heads`: branch names with an open PR. `dates`: {name: iso}
+    last-commit date per branch (default a RECENT date). `pr_nums`: {name: pr#}. Records DELETE calls
+    in state['deleted'] and closed PRs in state['closed_prs']."""
     state.setdefault("deleted", [])
+    state.setdefault("closed_prs", [])
+    dates = dates or {}
+    pr_nums = pr_nums or {}
+    _RECENT = "2026-07-12T00:00:00Z"
 
     def handler(request: httpx.Request) -> httpx.Response:
         p = request.url.path
@@ -51,13 +57,21 @@ def _repo_transport(state: dict, *, branches: dict, open_heads: list):
         if m == "DELETE" and "/git/refs/heads/" in p:
             state["deleted"].append(p.split("/git/refs/heads/", 1)[1])
             return httpx.Response(204)
+        if m == "PATCH" and "/pulls/" in p:                     # close PR
+            state["closed_prs"].append(int(p.rsplit("/", 1)[1]))
+            return httpx.Response(200, json={"state": "closed"})
         if "/compare/" in p:
             head = p.split("...", 1)[1] if "..." in p else ""
             return httpx.Response(200, json={"ahead_by": branches.get(head, 0), "behind_by": 0})
+        if "/branches/" in p and m == "GET":                    # single branch → carries commit date
+            nm = p.split("/branches/", 1)[1]
+            return httpx.Response(200, json={"name": nm, "commit": {
+                "sha": "s", "commit": {"committer": {"date": dates.get(nm, _RECENT)}}}})
         if p.endswith("/branches"):
             return httpx.Response(200, json=[{"name": n} for n in branches])
         if p.endswith("/pulls"):
-            return httpx.Response(200, json=[{"head": {"ref": h}} for h in open_heads])
+            return httpx.Response(200, json=[{"head": {"ref": h}, "number": pr_nums.get(h, 0)}
+                                             for h in open_heads])
         if p.count("/") == 3:                                   # GET /repos/owner/name
             return httpx.Response(200, json={"default_branch": "main"})
         return httpx.Response(404)
@@ -194,6 +208,50 @@ async def test_tidy_up_closes_completed_efforts_and_cleans_their_branches(db_url
         await db.dispose()
 
 
+async def test_branch_reaper_reaps_stale_superseded_and_closes_prs_keeps_current(db_url, tmp_path):
+    """The org keeps its repos clean itself (operator 2026-07-12: "3 branches again, confusing; I
+    don't know where to look"). The reaper deletes MERGED branches + STALE SUPERSEDED ones (older than
+    the newest AND not touched recently) and CLOSES their open PRs — even a PR'd branch, since no human
+    code lives on an agent branch. It KEEPS the newest (the current work) and any RECENTLY-touched
+    branch (parallel live work)."""
+    orch, chat, db = await _orch(db_url, tmp_path)
+    try:
+        await orch.projects.add("murder", "https://github.com/devonpveller/murder")
+        import datetime as _dt
+        now = _dt.datetime.now(_dt.timezone.utc)
+
+        def _iso(**kw):
+            return (now - _dt.timedelta(**kw)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        state: dict = {}
+        orch._gh_transport = _repo_transport(
+            state,
+            branches={
+                "agent/current": 2,        # newest, unmerged, no PR → current work → keep
+                "agent/old": 2,            # unmerged, stale, no PR → superseded → reap
+                "agent/merged": 0,         # merged into main → reap
+                "agent/pr-stale": 2,       # unmerged, stale, OPEN PR → reap + close PR
+                "agent/pr-recent": 2,      # unmerged, RECENT, OPEN PR → keep (parallel live work)
+            },
+            open_heads=["agent/pr-stale", "agent/pr-recent"],
+            pr_nums={"agent/pr-stale": 21, "agent/pr-recent": 22},
+            dates={
+                "agent/current": _iso(hours=1),
+                "agent/old": _iso(days=10),
+                "agent/merged": _iso(days=8),
+                "agent/pr-stale": _iso(days=9),
+                "agent/pr-recent": _iso(hours=3),
+            })
+        n = await orch._reap_abandoned_branches()
+        assert set(state["deleted"]) == {"agent/merged", "agent/old", "agent/pr-stale"}
+        assert "agent/current" not in state["deleted"]         # newest → current work → kept
+        assert "agent/pr-recent" not in state["deleted"]       # recent → kept (parallel live work)
+        assert state["closed_prs"] == [21]                     # the stale PR'd branch's PR was closed
+        assert n == 3
+    finally:
+        await db.dispose()
+
+
 async def test_internal_singletons_are_hidden_from_the_operator(db_url, tmp_path):
     """`__survey__` / `__capability__` are org plumbing — never shown as dispatchable/archivable
     efforts (operator 2026-07-10: they leaked into the effort list)."""
@@ -211,5 +269,44 @@ async def test_internal_singletons_are_hidden_from_the_operator(db_url, tmp_path
         await orch.nl_intake("what's running?", mgmt, thread_id="t")
         msgs = " ".join(p["message"] for p in chat.posted)
         assert "__survey__" not in msgs and "__capability__" not in msgs
+    finally:
+        await db.dispose()
+
+
+async def test_reaper_consolidates_efforts_behind_reaped_branches(db_url, tmp_path):
+    """Reaping a branch also drops its effort out of the active board (operator 2026-07-11: "the
+    latest change-containing branch is what we focus on; all others aren't progress"). A merged
+    branch's effort → done; a superseded one's → aborted; the newest (kept) stays open."""
+    orch, chat, db = await _orch(db_url, tmp_path)
+    try:
+        await orch.projects.add("murder", "https://github.com/devonpveller/murder")
+        from app.models import Effort
+        async with orch.db.session_factory() as s:
+            s.add(Effort(id="effort-old", name="old", channel_id="c",
+                         created_at="2026-07-01T00:00:00+00:00", lifecycle="open"))
+            s.add(Effort(id="effort-new", name="new", channel_id="c",
+                         created_at="2026-07-10T00:00:00+00:00", lifecycle="open"))
+            s.add(Effort(id="effort-merged", name="m", channel_id="c",
+                         created_at="2026-07-05T00:00:00+00:00", lifecycle="open"))
+            await s.commit()
+        import datetime as _dt
+        now = _dt.datetime.now(_dt.timezone.utc)
+
+        def _iso(**kw):
+            return (now - _dt.timedelta(**kw)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        state: dict = {}
+        orch._gh_transport = _repo_transport(state, branches={
+            "agent/effort-old": 2, "agent/effort-new": 2, "agent/effort-merged": 0,
+        }, open_heads=[], dates={
+            "agent/effort-new": _iso(hours=1),      # newest → current work → kept
+            "agent/effort-old": _iso(days=10),      # stale superseded → reaped → aborted
+            "agent/effort-merged": _iso(days=8),    # merged → reaped → done
+        })
+        await orch._reap_abandoned_branches()
+        async with orch.db.session_factory() as s:
+            assert (await s.get(Effort, "effort-merged")).lifecycle == "done"     # merged → done
+            assert (await s.get(Effort, "effort-old")).lifecycle == "aborted"     # superseded → aborted
+            assert (await s.get(Effort, "effort-new")).lifecycle == "open"        # current work → kept
     finally:
         await db.dispose()

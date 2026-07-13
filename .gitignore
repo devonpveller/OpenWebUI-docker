@@ -47,3 +47,6 @@ config/alerter/token.json
 # Claude Code Mattermost notifier — per-session allowlist (machine-specific runtime state)
 scripts/.mm-notify-sessions
 .claude/settings.local.json
+
+# Claude-Sessions bridge runtime state (session map, audit logs, per-turn MCP configs)
+scripts/claude-sessions-bridge/state/

@@ -78,6 +78,23 @@ class Settings(BaseSettings):
     stall_watchdog_s: float = 240.0         # sweep cadence
     stall_threshold_s: float = 900.0        # silence past this (15 min) with no progress = wedged
     stall_max_recoveries: int = 2           # auto-re-engages before a loud escalation stands
+    # Autonomous burn-down round cap (operator 2026-07-07: "all 138 errors should have been worked
+    # through autonomously and not elevated in the first place"). This is a RUNAWAY GUARD, not a
+    # check-in: a STILL-PROGRESSING campaign should run to green, not elevate mid-progress — so the cap
+    # is generous. A genuinely STUCK campaign elevates FAR sooner via the 2-consecutive-no-progress
+    # stall detector; the cap only bounds a campaign that progresses every single round (a big port).
+    burndown_round_cap: int = 40
+    # Branch reaper (operator 2026-07-11: "when a new branch replaces the last, just delete the last
+    # — it's abandoned; no human code is lost in an agent branch"). The org auto-deletes SPENT/
+    # ABANDONED `agent/*` branches (merged into main, or superseded by a newer effort's branch),
+    # keeping open-PR branches + the newest/in-flight effort's branch. agent/* only.
+    branch_reaper_enabled: bool = True
+    branch_reaper_s: float = 900.0          # reap cadence
+    # A SUPERSEDED agent branch (an older one, when a newer agent branch exists on the repo) whose
+    # last commit is older than this is ABANDONED → reaped and its open PR closed, so the operator
+    # sees ONLY the current work (operator 2026-07-12: "3 branches again, confusing; I don't know
+    # where to look"). A recent superseded branch is kept (it may be parallel live work).
+    branch_stale_hours: float = 36.0
 
     # ── Conversation context (hierarchical + bounded — the PO's memory) ──────
     # A reply builds thread-level context; the channel is a higher-level background. Both are

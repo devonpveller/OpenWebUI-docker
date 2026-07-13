@@ -182,6 +182,35 @@ async def test_stale_head_never_counts_as_delivery(db_url, tmp_path):
         await db.dispose()
 
 
+async def test_behavioral_goal_stale_branch_no_changes_is_not_closed_done(db_url, tmp_path):
+    """LIVE 2026-07-11 (the false-done the operator distrusts): a REOPENED behavioral effort whose
+    branch pre-existed (stale head) — the re-engaged worker replied "NO CHANGES: already published,
+    nothing to change" and the stale-recovery path FALSE-closed it 'done — verified'. A behavioral-
+    symptom goal must NEVER close done on a bare no-op (doing nothing can't fix a live symptom); it
+    falls through to the honest 'delivered nothing new — not done, no PR' escalation instead. RED on
+    the pre-gate code (line closed done), GREEN after. Behavioral detection keys off the GOAL, not
+    any project specifics."""
+    orch, chat, harness, db = await _orch(db_url, tmp_path)
+    try:
+        await orch.projects.add("engine", "https://github.com/devonpveller/Engine")
+        eid, chan, root = await orch.router.open_effort("atlas-runtime", project="engine")
+        goal = ("the editor throws at runtime when Game Profile is clicked: the atlas is not "
+                "loaded, and the cursor is missing")
+        await orch.charters.set_goal(eid, goal, created_by="po")
+        orch._gh_transport = _stale_branch(heal_after=None)      # branch pre-exists, never heals
+        # step → publish → stale re-engage says NO CHANGES → state-check says STATE MISSING
+        harness.output_queue = ["did the work", "published the branch",
+                                "NO CHANGES: already correct on this branch, nothing to change",
+                                "STATE MISSING: the atlas.json still fails to load"]
+        await orch.delegate(eid, chan, root, goal, plan_steps=["work"])
+        msgs = " ".join(p["message"] for p in chat.posted)
+        assert "finished (**done**)" not in msgs, "a behavioral no-op FALSE-closed done"
+        assert "PR opened for review" not in msgs
+        assert await _lifecycle(orch, eid) != "done"
+    finally:
+        await db.dispose()
+
+
 async def test_stale_head_healed_by_reengage_proceeds(db_url, tmp_path):
     orch, chat, harness, db = await _orch(db_url, tmp_path)
     try:

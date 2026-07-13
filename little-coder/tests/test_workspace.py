@@ -87,6 +87,30 @@ def test_clone_with_deploy_token_injects_https_credential():
     assert "x-access-token:tok-secret@" in cmd
 
 
+def test_deploy_token_rebakes_submodule_push_credential_on_task_focus():
+    """2026-07-12: a composition fix is edited inside a vendored submodule and PUSHED to ITS own
+    remote on a NORMAL task focus (non-recursive). The submodule origin must get the push token
+    re-baked even when recurse=False — otherwise the worker's submodule push has no credential, it
+    fails, and the host's gitlink points at an unreachable commit (live: the atlas fix landed on the
+    engine but its murder branch couldn't push)."""
+    ot = _FakeOT()
+    ws = WorkspaceManager(ot, workspace_path="/workspace", real_git="/usr/bin/git")
+    ws.clone(WIDGET, deploy_token="tok-sub", recurse=False)     # a normal task focus
+    cmd, _cwd = ot.calls[0]
+    assert "submodule foreach --recursive" in cmd               # the origin re-bake runs
+    assert "remote set-url origin" in cmd
+    assert "x-access-token:tok-sub@" in cmd
+
+
+def test_no_submodule_rebake_without_a_token():
+    """No deploy token → no origin re-bake (there is nothing to inject)."""
+    ot = _FakeOT()
+    ws = WorkspaceManager(ot, workspace_path="/workspace", real_git="/usr/bin/git")
+    ws.clone(WIDGET, recurse=False)
+    cmd, _cwd = ot.calls[0]
+    assert "submodule foreach" not in cmd
+
+
 def test_wipe_keeps_the_mount_point():
     ot = _FakeOT()
     ws = WorkspaceManager(ot, workspace_path="/workspace")
@@ -195,6 +219,24 @@ def test_refresh_origin_auth_rebakes_fresh_token():
     ws.refresh_origin_auth(WIDGET, None)
     cmd2, _ = ot.calls[1]
     assert "remote set-url origin" in cmd2 and "x-access-token" not in cmd2
+
+
+def test_refresh_origin_auth_also_rebakes_submodule_push_credential():
+    """2026-07-12: a NOOP re-focus (persistent workspace, no re-clone) never re-runs clone()'s
+    submodule reauth, so a vendored submodule's `origin` kept its token-less `.gitmodules` URL and the
+    worker's `git -C <sub> push` had no credential → the engine's gitlink pointed at an unreachable
+    commit (live: the murder cursor commit 5b138c12 couldn't push, breaking the composition). Symmetric
+    with clone(): refresh_origin_auth must re-bake the token into submodule origins too."""
+    ot = _FakeOT()
+    ws = WorkspaceManager(ot, workspace_path="/workspace", real_git="/usr/bin/git")
+    ws.refresh_origin_auth(WIDGET, "fresh-tok")
+    cmd, _ = ot.calls[0]
+    assert "submodule foreach --recursive" in cmd               # submodule origins re-baked too
+    assert "x-access-token:fresh-tok@" in cmd
+    # no token → no submodule re-bake (nothing to inject)
+    ws.refresh_origin_auth(WIDGET, None)
+    cmd2, _ = ot.calls[1]
+    assert "submodule foreach" not in cmd2
 
 
 # --- submodule composition (P-APL.1b) -------------------------------------

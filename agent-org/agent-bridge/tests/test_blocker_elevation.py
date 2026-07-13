@@ -191,3 +191,45 @@ async def test_run_in_host_context_elevates_if_still_blocked(db_url, tmp_path):
         assert "raised a real CONSTRAINT" in msgs           # honest escalation, even in host ctx
     finally:
         await db.dispose()
+
+
+async def test_stale_blocked_composition_effort_auto_resolves_in_host_context(db_url, tmp_path):
+    """A blocked effort whose blocker is a WORKSPACE-context limit (the org CAN resolve it in the
+    host context) must not sit idle waiting on the operator (operator 2026-07-11: the org does the
+    work). The watchdog's _try_auto_resolve_blocked re-runs it in the host context."""
+    orch, chat, harness, db = await _orch(db_url, tmp_path)
+    try:
+        await orch.projects.add("monogame-engine", "https://github.com/devonpveller/Engine")
+        await orch.projects.add("murder", "https://github.com/devonpveller/murder")
+        orch._gh_transport = _stack_remote({})
+        eid, chan, root = await orch.router.open_effort("stuck", project="murder")
+        await orch.charters.set_goal(eid, "fix the atlas", created_by="po")
+        await orch.audit.log("effort_blocked_elevated", effort_id=eid, payload={
+            "blocked": "the full dotnet test couldn't run standalone because the vendored "
+                       "MonoGame source isn't present in this workspace"})
+        acted = await orch._try_auto_resolve_blocked(eid)
+        assert acted is True
+        assert await orch._event_count(eid, "host_context_reroute") == 1
+        msgs = " ".join(p["message"] for p in chat.posted)
+        assert "host context" in msgs and "idle" in msgs
+    finally:
+        await db.dispose()
+
+
+async def test_human_needed_blocker_is_not_auto_resolved(db_url, tmp_path):
+    """A blocker that genuinely needs a HUMAN (not a workspace limit) is NOT auto-routed — it stays
+    put for the operator, even on a composition."""
+    orch, chat, harness, db = await _orch(db_url, tmp_path)
+    try:
+        await orch.projects.add("monogame-engine", "https://github.com/devonpveller/Engine")
+        await orch.projects.add("murder", "https://github.com/devonpveller/murder")
+        orch._gh_transport = _stack_remote({})
+        eid, chan, root = await orch.router.open_effort("human", project="murder")
+        await orch.charters.set_goal(eid, "fix it", created_by="po")
+        await orch.audit.log("effort_blocked_elevated", effort_id=eid, payload={
+            "blocked": "this needs a licensed proprietary GUI tool on your own machine to produce"})
+        acted = await orch._try_auto_resolve_blocked(eid)
+        assert acted is False
+        assert await orch._event_count(eid, "host_context_reroute") == 0
+    finally:
+        await db.dispose()

@@ -98,6 +98,14 @@ class WorkerHarness(Protocol):
         stay busy on an orphaned turn and 409 the next dispatch. Best-effort."""
         ...
 
+    async def has_running_task(self, base_url: str) -> bool:
+        """GROUND TRUTH from the daemon: is a task RUNNING right now? The bridge's in-memory
+        'executing' markers die on restart (live 2026-07-11: a redeploy mid-task made the stall
+        watchdog re-engage an effort whose worker was still working — the daemon 409'd it). The
+        daemon's own task list survives, so restart-safe decisions ask IT. False on any error
+        (fail-open: an unreachable daemon shouldn't freeze recovery forever)."""
+        ...
+
 
 class LittleCoderHarness:
     """Drives the little-coder control daemon. One instance addresses many daemons
@@ -237,6 +245,18 @@ class LittleCoderHarness:
         except httpx.HTTPError:
             return False
 
+    async def has_running_task(self, base_url: str) -> bool:
+        """Restart-safe ground truth: does this daemon report a RUNNING task? (see Protocol doc)."""
+        try:
+            async with httpx.AsyncClient(base_url=base_url.rstrip("/"), timeout=15.0) as c:
+                r = await c.get("/tasks")
+                if r.status_code != 200:
+                    return False
+                tasks = (r.json() or {}).get("tasks", [])
+                return any(t.get("status") == "running" for t in tasks)
+        except (httpx.HTTPError, ValueError):
+            return False
+
 
 class FakeHarness:
     """Deterministic in-memory worker for tests. Records every wake."""
@@ -265,6 +285,10 @@ class FakeHarness:
         # Set to a non-empty error string to simulate a clone/set_project failure (e.g. a private
         # or missing repo the deploy token can't access → the daemon returns "clone failed").
         self.set_project_fails = ""
+        # Set to an error string to fail the NEXT set_project ONCE then self-clear — simulates a
+        # TRANSIENT verify-focus collision (a fresh focus succeeds on retry), so tests can exercise
+        # the deterministic-check retry-before-LLM-fallback path.
+        self.set_project_fail_once = ""
         # Set True to simulate a clone that SUCCEEDS but whose fork `upstream` bake FAILS (an
         # unreachable/private parent) → set_project returns (True, "", False) so the bridge warns.
         self.upstream_fails = False
@@ -309,6 +333,9 @@ class FakeHarness:
         upstream: str | None = None, upstream_token: str | None = None,
         fresh: bool = False, recurse_submodules: bool = False,
     ) -> tuple[bool, str, bool | None]:
+        if self.set_project_fail_once:  # transient collision: fail once, then self-heal on retry
+            detail, self.set_project_fail_once = self.set_project_fail_once, ""
+            return False, detail, None
         if self.set_project_fails:  # simulate a clone failure (private/missing repo)
             return False, self.set_project_fails, None
         self.focus_calls.append({"base_url": base_url, "repo": repo, "token": token,
@@ -348,3 +375,7 @@ class FakeHarness:
     async def cancel_task(self, base_url: str, task_id: str) -> bool:
         self.cancelled.append((base_url, task_id))
         return True
+
+    async def has_running_task(self, base_url: str) -> bool:
+        # tests mark daemons busy via `busy_urls` (restart-safety: the stall sweep defers to them)
+        return base_url in getattr(self, "busy_urls", set())

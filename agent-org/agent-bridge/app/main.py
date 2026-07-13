@@ -36,6 +36,11 @@ class EffortIn(BaseModel):
     name: str
 
 
+class OperatorNlIn(BaseModel):
+    message: str
+    thread_id: str | None = None
+
+
 class ConcernIn(BaseModel):
     effort_id: str
     trigger: Trigger
@@ -150,6 +155,18 @@ def create_app(orch: Orchestrator | None = None) -> FastAPI:
         effort_id, channel_id = await orch.router.ensure_effort_channel(body.name)
         orch.events.track_channel(channel_id)
         return {"effort_id": effort_id, "channel_id": channel_id}
+
+    @app.post("/nl")
+    async def operator_nl(body: OperatorNlIn) -> dict:
+        """Inject an operator natural-language message — drives the org EXACTLY like a chat message
+        from the operator (nl_intake → classify → govern → dispatch → the same governance gates).
+        An INTERNAL control inlet (the bridge is not internet-exposed): operator tooling, automation,
+        deterministic tests. The org's reply lands in #mgmt like any operator turn."""
+        mgmt = await orch.mgmt_channel_id()
+        if not mgmt:
+            raise HTTPException(503, "mgmt channel not resolvable yet")
+        await orch.nl_intake(body.message, mgmt, user_id="operator-api", thread_id=body.thread_id)
+        return {"ok": True, "channel_id": mgmt}
 
     @app.get("/state/{effort_id}")
     async def state(effort_id: str) -> dict:

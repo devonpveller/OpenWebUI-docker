@@ -129,3 +129,28 @@ async def test_genuine_auth_clone_failure_still_says_private_or_missing(db_url):
         assert "private or missing" in msgs
     finally:
         await db.dispose()
+
+
+# ── LIVE (event log): a TRANSIENT collision must be retried, not dead-ended to the stall watchdog ──
+async def test_transient_workspace_collision_retries_with_fresh_reclone(db_url):
+    """A transient "/workspace already exists" collision (a suspended/parked worker still holds a prior
+    checkout) used to dead-end to the ~15-min stall watchdog. The verify-focus already retries such a
+    collision with a fresh re-clone; the WORKER focus now does too — it fails once, re-clones fresh, and
+    proceeds silently. Matters for a multi-round burndown that focuses many times (the FNA→MonoGame
+    port)."""
+    orch, chat, harness, db = await _orch(db_url)
+    try:
+        await orch.projects.add("mono", "https://github.com/me/mono.git")
+        eid, chan, root = await orch.router.open_effort("transient", project="mono")
+        # fail the FIRST focus with a collision, then self-heal on the fresh retry (FakeHarness helper)
+        harness.set_project_fail_once = ("clone failed (exit 128): fatal: destination path "
+                                         "'/workspace' already exists and is not an empty directory.")
+        harness.output_queue = ["did the work"]
+        await orch.delegate(eid, chan, root, "do it")
+        ev = [e for e in await orch.audit.replay(eid) if e["kind"] == "worker_project_set"]
+        assert any(e["payload"].get("fresh_retry") for e in ev), "no fresh re-clone retry happened"
+        assert harness.set_project_fail_once == "", "the transient failure wasn't consumed by a retry"
+        msgs = " ".join(p["message"] for p in chat.posted)
+        assert "busy with another effort" not in msgs, "recovered → must not surface a collision error"
+    finally:
+        await db.dispose()

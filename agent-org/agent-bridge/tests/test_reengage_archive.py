@@ -394,6 +394,116 @@ async def test_named_rerun_survives_model_dropping_the_effort_id(db_url):
         await db.dispose()
 
 
+# ── LIVE 2026-07-11: a verbose "re-run effort-X" MIS-CLASSIFIED as archive/tidy ──────────────
+async def test_named_rerun_overrides_a_misclassified_archive(db_url):
+    """The operator sent "re-run effort-X. It was closed 'done' … reopen it and re-verify …" — the
+    cleanup-adjacent words ("closed", "reopen", "surface") pulled the small model to kind=archive,
+    which ran a TIDY and dispatched a DIFFERENT idle effort. A re-run verb + an EXPLICITLY named
+    effort id is unambiguous: the deterministic guard must force reengage on THAT effort (reopening
+    it), and must NOT archive it. Project-agnostic — keys off the verb + `effort-<id>`, nothing
+    murder-specific."""
+    orch, chat, harness, db = await _orch(db_url)
+    try:
+        target, _c, _r = await _idle_effort(orch, "fix-editor-atlas-runtime-error", goal="atlas")
+        decoy, _c2, _r2 = await _idle_effort(orch, "fix-editor-atlas-and-pr12", goal="atlas dup")
+        await orch.gate.set_lifecycle(target, "done")             # the false-done we want reopened
+        # the model gets it WRONG — classifies the verbose message as archive/tidy
+        orch.models._client.queue_structured(OperatorIntent(
+            kind="archive", target_filter="atlas", reply="Tidying up."))
+        mgmt = await orch.mgmt_channel_id()
+        await orch.nl_intake(
+            f"re-run {target}. It was closed 'done — verified' off a no-op, but it's still broken — "
+            f"reopen it and re-verify honestly, and surface it as needs-attention if unproven.",
+            mgmt, thread_id="t")
+        await _drain(orch)
+        # the NAMED effort was reopened + dispatched — never archived
+        from app.models import Effort
+        async with orch.db.session_factory() as s:
+            t_row = await s.get(Effort, target)
+            d_row = await s.get(Effort, decoy)
+        assert t_row.lifecycle in ("open", "done"), "the named effort wasn't reopened for the run"
+        woken = {w["session_id"].split("~")[0] for w in harness.wakes}
+        assert target in woken, "the explicitly-named effort was not re-dispatched"
+        assert decoy not in woken, "a DIFFERENT idle effort was grabbed (the live tidy miss)"
+        assert d_row.lifecycle == "open", "the decoy must be left untouched, not aborted"
+        msgs = " ".join(p["message"] for p in chat.posted)
+        assert "Archived" not in msgs, "a named re-run must never archive"
+    finally:
+        await db.dispose()
+
+
+# ── LIVE 2026-07-12: a named re-run carrying an operator RUNTIME VERDICT must keep the verdict ──
+async def test_named_rerun_captures_operator_verdict_as_steering(db_url):
+    """The operator ran the editor and reported "re-run effort-X — the atlas loads now but the
+    editor cursor is still MISSING." The deterministic re-run override reopened + re-ran but
+    DISCARDED the verdict, re-running the STALE goal so the worker lost the human's runtime finding.
+    A re-run message carrying substance beyond the bare command is a runtime verdict / new direction —
+    it must be recorded as STEERING so the reengaged worker gets it on wake (build_context injects
+    current_steering). Generic — keys off the message having real content, no project specifics."""
+    orch, chat, harness, db = await _orch(db_url)
+    try:
+        target, _c, _r = await _idle_effort(orch, "fix-editor-atlas-runtime-error", goal="atlas")
+        await orch.gate.set_lifecycle(target, "done")
+        orch.models._client.queue_structured(OperatorIntent(
+            kind="reengage", reply="Re-running.", effort_id=target))
+        mgmt = await orch.mgmt_channel_id()
+        await orch.nl_intake(
+            f"re-run {target}: I ran the editor from the PR — the atlas loads now, no errors, but the "
+            f"editor CURSOR graphic is still missing. Focus the cursor.", mgmt, thread_id="t")
+        await _drain(orch)
+        steering = (await orch.charters.current_steering(target)).lower()
+        assert "cursor" in steering and "missing" in steering, \
+            "the operator's runtime verdict was not captured as steering"
+        woken = {w["session_id"].split("~")[0] for w in harness.wakes}
+        assert target in woken, "the effort must still reopen + dispatch"
+    finally:
+        await db.dispose()
+
+
+async def test_bare_named_rerun_adds_no_spurious_steering(db_url):
+    """Guard the other side: a BARE "re-run effort-X" (no findings) must NOT invent steering — only
+    substantive operator detail becomes steering, so a plain re-run doesn't hand the worker noise."""
+    orch, chat, harness, db = await _orch(db_url)
+    try:
+        target, _c, _r = await _idle_effort(orch, "plain-rerun", goal="build it")
+        await orch.gate.set_lifecycle(target, "done")
+        orch.models._client.queue_structured(OperatorIntent(
+            kind="reengage", reply="Re-running.", effort_id=target))
+        mgmt = await orch.mgmt_channel_id()
+        await orch.nl_intake(f"re-run {target}", mgmt, thread_id="t")
+        await _drain(orch)
+        steering = (await orch.charters.current_steering(target)).strip()
+        assert steering == "", "a bare re-run must not fabricate steering"
+        woken = {w["session_id"].split("~")[0] for w in harness.wakes}
+        assert target in woken, "the effort must still reopen + dispatch"
+    finally:
+        await db.dispose()
+
+
+async def test_named_rerun_beats_branch_hygiene_capture(db_url):
+    """LIVE 2026-07-13: "re-run effort-X. CLEAN RESET — a commit was lost, the branch's gitlink is
+    broken …" was captured by the branch-HYGIENE path (its "clean/branch/lost/reset" words ran BEFORE
+    the deterministic re-run override) and NOTHING dispatched. A re-run/reopen verb + an explicitly
+    named effort must skip the board/branch hygiene paths and reengage that effort."""
+    orch, chat, harness, db = await _orch(db_url)
+    try:
+        target, _c, _r = await _idle_effort(orch, "fix-editor-atlas-runtime-error", goal="atlas")
+        # the model even mis-reads the reset context as a branch cleanup
+        orch.models._client.queue_structured(OperatorIntent(
+            kind="archive", target_filter="branches", reply="Cleaning up branches."))
+        mgmt = await orch.mgmt_channel_id()
+        await orch.nl_intake(
+            f"re-run {target}. CLEAN RESET — a previous commit was lost and the branch's gitlink is "
+            f"broken; rebuild it clean and push it.", mgmt, thread_id="t")
+        await _drain(orch)
+        woken = {w["session_id"].split("~")[0] for w in harness.wakes}
+        assert target in woken, "the named re-run was swallowed by hygiene instead of reengaging"
+        msgs = " ".join(p["message"] for p in chat.posted)
+        assert "Branch cleanup" not in msgs, "a named re-run must not run branch hygiene"
+    finally:
+        await db.dispose()
+
+
 # ── LIVE 2026-07-06: "frozen (a concern or the kill switch)" gave the operator no context ──
 async def test_kill_refusal_names_the_switch_and_release_resumes_automatically(db_url):
     orch, chat, harness, db = await _orch(db_url)

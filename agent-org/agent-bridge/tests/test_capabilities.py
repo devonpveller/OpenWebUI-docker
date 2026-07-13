@@ -182,6 +182,35 @@ async def test_fork_proposes_hardgate_then_executes_on_approve(db_url, tmp_path)
         await db.dispose()
 
 
+async def test_failed_fork_restores_the_gate_for_retry(db_url, tmp_path):
+    """A capability action (fork) that DOESN'T land — a transient GitHub error — must keep the gate
+    OPEN so 'approve <id>' can be retried, symmetric with the merge gate. Popping it before the
+    attempt otherwise STRANDS it ('nothing pending')."""
+    orch, chat, db = await _orch(db_url, tmp_path)
+    try:
+        state = {"attempts": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path.endswith("/forks") and request.method == "POST":
+                state["attempts"] += 1
+                return httpx.Response(500, json={"message": "Server Error"})   # transient
+            return httpx.Response(404)
+        orch._gh_transport = httpx.MockTransport(handler)
+        orch.models._client.queue_structured(OperatorIntent(
+            kind="capability", capability="fork", repo_url="isadorasophia/murder", reply="Sure —"))
+        mgmt = await orch.mgmt_channel_id()
+        await orch.nl_intake("fork isadorasophia/murder into my account", mgmt, thread_id="t")
+        assert "cap-fork-murder" in orch._pending_capability
+        await orch.handle_event({"id": "d1", "channel_id": mgmt, "message": "approve cap-fork-murder",
+                                 "is_bot": False, "ts": 2})
+        assert state["attempts"] == 1                                  # the fork WAS attempted
+        assert "cap-fork-murder" in orch._pending_capability, "the gate was discarded on a failed fork"
+        msgs = " ".join(p["message"] for p in chat.posted)
+        assert "Kept it pending" in msgs and "approve cap-fork-murder" in msgs   # retry handle
+    finally:
+        await db.dispose()
+
+
 async def test_fork_recovers_when_model_misfills_fields(db_url, tmp_path):
     """Regression for the live failure: the small model set kind=capability but NOT capability='fork'
     / repo_url. The handler must still recognise the fork + extract the repo from the raw MESSAGE, so

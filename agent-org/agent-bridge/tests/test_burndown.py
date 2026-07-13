@@ -18,8 +18,10 @@ import httpx
 from app.adapters.chat import FakeChatAdapter
 from app.config import Settings
 from app.db import Database
+from app.modules.grounding import FakeGrounding
 from app.modules.model_router import FakeModelClient
 from app.orchestrator import Orchestrator, _error_brief, _error_count, _error_lines
+from app.schemas import GroundingResult
 from app.worker.harness import FakeHarness
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -33,6 +35,12 @@ FAIL4 = (
     "Build FAILED.")
 FAIL1 = ("CHECK: FAIL\nERRORS: 1\n"
          "src/A.cs(9,9): error CS0009: one left\nBuild FAILED.")
+
+
+def _fail(n: int) -> str:
+    """A RED check log carrying exactly `n` error lines (for driving a chosen error trajectory)."""
+    lines = "\n".join(f"src/A.cs({i},{i}): error CS00{i:02d}: err {i}" for i in range(1, n + 1))
+    return f"CHECK: FAIL\nERRORS: {n}\n{lines}\nBuild FAILED."
 
 
 async def _orch(db_url, tmp_path):
@@ -124,6 +132,97 @@ async def _setup_stack(orch):
     await orch.projects.set_check(
         "monogame-engine", "git submodule update --init --recursive && dotnet build Engine.sln")
     await orch.projects.add("murder", "https://github.com/devonpveller/murder")
+
+
+async def _orch_grounded(db_url, tmp_path):
+    """An orch with grounding ENABLED, for the research-on-stall path."""
+    key = tmp_path / "app.pem"
+    key.write_text("dummy")
+    settings = Settings(
+        _env_file=None, chat_adapter="fake",
+        profiles_dir=str(ROOT / "profiles"), charters_dir=str(ROOT / "charters"),
+        floor_dir=str(ROOT / "floor"), worker_instance_urls="http://w1:8090",
+        max_concurrent_workers=1, database_url=db_url, project_survey_enabled=False,
+        review_mode="off", plan_approval="off", grounding_enabled=True,
+        github_app_id="1", github_app_owner="devonpveller",
+        github_app_private_key_path=str(key),
+    )
+    db = Database(db_url)
+    orch = Orchestrator(settings, db, FakeChatAdapter(),
+                        model_client=FakeModelClient(), harness=FakeHarness())
+    await orch.setup()
+    return orch, orch.chat, orch.harness, db
+
+
+# ── RESEARCH-ON-STALL (operator 2026-07-12: "research MSB3202, the pm/workers should be able to") ──
+async def test_burndown_stall_researches_before_escalating(db_url, tmp_path):
+    """A stalled burn-down must RESEARCH the failing error (grounded) and retry once before punting.
+    The org answers its own question instead of a vague 'answer the open question' with no question."""
+    orch, chat, harness, db = await _orch_grounded(db_url, tmp_path)
+    try:
+        await _setup_stack(orch)
+        eid, chan, root = await orch.router.open_effort("stall", project="murder")
+        orch.grounding = FakeGrounding(result=GroundingResult(
+            grounded=True,
+            claims=["MSB3202 = the referenced project file is missing from disk",
+                    "for git submodules, run `git submodule update --init --recursive`"],
+            summary="The bang/gum project files aren't present — the nested submodules weren't checked out."))
+        log = ("NuGet.targets(465,5): error MSB3202: The project file "
+               "\"/workspace/vendor/murder/bang/src/Bang/Bang.csproj\" was not found.\nBuild FAILED.")
+        # 1st stall → researches, injects steering, signals a retry
+        assert await orch._research_burndown_stall(eid, log) is True
+        assert orch.grounding.calls, "the org did not research the error"
+        assert eid in orch._burndown_research_note, "research findings not stored for the escalation"
+        msgs = " ".join(p["message"] for p in chat.posted)
+        assert "researching the error" in msgs and "researched it" in msgs
+        # bounded: a second call this loop returns False (no research spam) → the loop escalates
+        assert await orch._research_burndown_stall(eid, log) is False
+        # the escalation now CARRIES the research (actionable), not a bare "answer the open question"
+        chat.posted.clear()
+        await orch._burndown_elevate(eid, [4, 4, 4], log, "two consecutive rounds without progress")
+        emsg = " ".join(p["message"] for p in chat.posted)
+        assert "researched this" in emsg and "submodule" in emsg.lower()
+        assert "answer the open question" not in emsg          # the useless non-question is gone
+    finally:
+        await db.dispose()
+
+
+async def test_composition_infra_self_heals_with_fresh_recursive_focus(db_url, tmp_path):
+    """Dark-factory self-heal (operator 2026-07-12, north star): a composition build that hits a
+    missing-project/submodule MSBuild infra error (the privileged recursive focus TRANSIENTLY missed
+    a vendored NESTED submodule — the worker can't fix it, the git-proxy blocks `git submodule`) is
+    re-run ONCE with a FRESH recursive focus to re-populate the tree — the org repairs its own
+    workspace instead of surfacing an unfixable-by-code error. RED before the self-heal (verdict stuck
+    'infra'), GREEN after (fresh re-focus → pass)."""
+    orch, chat, harness, db = await _orch(db_url, tmp_path)
+    try:
+        await _setup_stack(orch)                              # murder vendored in monogame-engine
+        state: dict = {}
+        orch._gh_transport = _stack_remote(state, static_head=True)
+        eid, chan, root = await orch.router.open_effort("comp", project="murder")
+        msb = ("/usr/share/dotnet/sdk/8.0.422/NuGet.targets(465,5): error MSB3202: The project file "
+               "\"/workspace/vendor/murder/bang/src/Bang/Bang.csproj\" was not found.\nBuild FAILED.")
+        # 1st check: MSB3202 (a nested submodule didn't populate); 2nd (FRESH re-focus): passes
+        harness.check_queue = [(1, msb, False), (0, "Build succeeded.\n0 Error(s)", False)]
+        verdict, out, n = await orch._org_build_check(eid)
+        assert verdict == "pass", f"composition infra didn't self-heal with a fresh focus: {verdict}"
+        assert len(harness.checks) == 2                       # infra → fresh recursive re-focus → pass
+        assert any(f.get("fresh") and f.get("recurse_submodules") for f in harness.focus_calls), \
+            "the retry did not force a FRESH recursive focus"
+    finally:
+        await db.dispose()
+
+
+async def test_burndown_stall_without_grounding_still_escalates_cleanly(db_url, tmp_path):
+    """Grounding OFF (or unavailable): the stall path must still escalate honestly — research is
+    best-effort and never blocks. `_research_burndown_stall` returns False, the loop elevates."""
+    orch, chat, harness, db = await _orch(db_url, tmp_path)   # grounding disabled by default
+    try:
+        await _setup_stack(orch)
+        eid, chan, root = await orch.router.open_effort("stall2", project="murder")
+        assert await orch._research_burndown_stall(eid, "error MSB3202: not found") is False
+    finally:
+        await db.dispose()
 
 
 # ── log parsing (the org's own evidence layer) ───────────────────────────────
@@ -260,6 +359,35 @@ async def test_stalled_burndown_elevates_with_trajectory_and_no_pr(db_url, tmp_p
         async with orch.db.session_factory() as s:
             e = await s.get(Effort, eid)
         assert e.lifecycle != "done"
+    finally:
+        await db.dispose()
+
+
+async def test_burndown_round_cap_is_configurable_and_lets_progress_run(db_url, tmp_path):
+    """The round cap is a RUNAWAY GUARD, not a check-in: a STILL-PROGRESSING campaign runs to the
+    (configurable) cap rather than being elevated early. Operator: "all 138 errors should have been
+    worked through autonomously, not elevated." Here cap=2 with steady progress (4→3→2) elevates at
+    the CAP (round cap (2)), NOT at a stall — proving progress isn't cut short and the cap is honored
+    (the fix that lets a big campaign like the FNA→MonoGame port run to green autonomously)."""
+    orch, chat, harness, db = await _orch(db_url, tmp_path)
+    try:
+        orch.s.burndown_round_cap = 2                     # small cap for the test
+        await _setup_stack(orch)
+        state: dict = {}
+        orch._gh_transport = _stack_remote(state, static_head=True)
+        eid, chan, root = await orch.router.open_effort("burn-cap", project="murder")
+        await orch.charters.set_goal(eid, "fix the vendored build", created_by="po")
+        harness.output_queue = [
+            "did work", "pushed", _fail(4),               # initial: RED 4
+            "round1 fixed one", _fail(3),                 # round 1: 4 → 3 (progress)
+            "round2 fixed one", _fail(2),                 # round 2: 3 → 2 (progress) → CAP reached
+        ]
+        await orch.delegate(eid, chan, root, "fix the vendored build", plan_steps=["work"])
+        await _drain(orch)
+        msgs = " ".join(p["message"] for p in chat.posted)
+        assert "round cap (2)" in msgs, "the configurable cap wasn't honored/reported"
+        assert "no progress" not in msgs, "steady progress was mis-read as a stall"
+        assert not state["pulls"], "no PR may exist while the build is red"
     finally:
         await db.dispose()
 

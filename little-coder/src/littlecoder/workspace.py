@@ -182,12 +182,18 @@ class WorkspaceManager:
             # (the proxy denies it to the worker), so recursive init MUST happen here or never.
             f"(cd {ws} && {g} submodule update --init{recurse_flag} 2>/dev/null || true)"
         )
-        if recurse and deploy_token:
+        if deploy_token:
             # WORK-IN-HOST delivery: a composition fix is edited in-place inside a vendored
             # submodule and must be PUSHED to THAT submodule's own remote. The proxy denies the
             # worker `submodule`, and the submodule's `origin` (from .gitmodules) carries no token,
-            # so re-bake the deploy token into every same-host submodule origin here (privileged).
-            # Best-effort + non-fatal; the token is redacted at journal time by the caller.
+            # so re-bake the deploy token into every populated same-host submodule origin here
+            # (privileged). Runs on EVERY focus with a token — NOT just recursive ones (2026-07-12):
+            # a composition fix happens on a NORMAL task focus (non-recursive) too, and without the
+            # re-bake murder's origin has no push credential, so the worker's submodule push fails and
+            # the engine's gitlink points at an unreachable commit (live: the atlas fix landed on the
+            # engine but its murder branch couldn't push). `foreach --recursive` only visits the
+            # submodules actually populated by this focus (direct-only on a task focus). Best-effort +
+            # non-fatal; the token is redacted at journal time by the caller.
             tok = shlex.quote(deploy_token)
             reauth = (
                 f"cd {ws} && {g} submodule foreach --recursive "
@@ -216,7 +222,28 @@ class WorkspaceManager:
             )
         g = shlex.quote(self.real_git)
         q = shlex.quote
-        cmd = f"cd {q(self.workspace_path)} && {g} remote set-url origin {q(url)}"
+        ws = q(self.workspace_path)
+        cmd = f"cd {ws} && {g} remote set-url origin {q(url)}"
+        if deploy_token:
+            # SYMMETRIC WITH clone() (live 2026-07-12: the cursor fix's murder commit couldn't push).
+            # A composition fix edited inside a vendored submodule must be PUSHED to THAT submodule's
+            # own remote — but a NOOP re-focus (persistent workspace, no re-clone) never re-runs
+            # clone()'s submodule reauth, so the submodule origin keeps its token-less `.gitmodules`
+            # URL and the worker's `git -C <sub> push` has no credential → the engine's gitlink points
+            # at an unreachable commit (broken gitlink → not buildable from a fresh clone). Re-bake the
+            # deploy token into every populated same-host submodule origin here too. `foreach
+            # --recursive` visits only the submodules this focus populated. Best-effort + non-fatal;
+            # the token is redacted at journal time by the caller.
+            tok = shlex.quote(deploy_token)
+            reauth = (
+                f"cd {ws} && {g} submodule foreach --recursive "
+                f"'u=$({g} config --get remote.origin.url 2>/dev/null); "
+                f"case \"$u\" in "
+                f"https://github.com/*) {g} remote set-url origin "
+                f"\"https://x-access-token:{tok}@github.com/${{u#https://github.com/}}\" ;; "
+                f"esac' 2>/dev/null || true"
+            )
+            cmd += f" ; ({reauth})"
         return self.ot.execute(cmd, cwd=self.workspace_path, timeout=60)
 
     def add_upstream_remote(

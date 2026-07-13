@@ -199,6 +199,36 @@ async def test_abort_merge_leaves_pr_open(db_url, tmp_path):
         await db.dispose()
 
 
+async def test_failed_merge_restores_the_gate_for_retry(db_url, tmp_path):
+    """A merge that DOESN'T land — a transient GitHub error, or a resolvable not-mergeable state (a
+    conflict to fix, a required check to wait on) — must keep the gate OPEN so the operator can retry
+    'merge it'. Popping it before the attempt otherwise STRANDS the delivery ('nothing pending')."""
+    orch, chat, db = await _orch(db_url, tmp_path)
+    try:
+        await orch.projects.add("game", "https://github.com/devonpveller/Docker-Game")
+        eid, chan, root = await orch.router.open_effort("wire", project="game")
+        state: dict = {}
+        base = _delivery_handler(state)
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path.endswith("/pulls/12/merge") and request.method == "PUT":
+                state["merge_attempts"] = state.get("merge_attempts", 0) + 1
+                return httpx.Response(405, json={"message": "Pull Request is not mergeable"})
+            return base(request)
+        orch._gh_transport = httpx.MockTransport(handler)
+        await orch.delegate(eid, chan, root, "wire", plan_steps=["work"])
+        assert f"merge-{eid}" in orch._pending_merge
+        mgmt = await orch.mgmt_channel_id()
+        await orch.nl_intake("merge it", mgmt, thread_id="t")
+        assert state.get("merge_attempts") == 1                       # the merge WAS attempted
+        assert f"merge-{eid}" in orch._pending_merge, "the gate was discarded on a FAILED merge"
+        msgs = " ".join(p["message"] for p in chat.posted)
+        assert "kept the gate open" in msgs                           # honest + retryable
+        assert f"abort merge-{eid}" in msgs                           # the drop handle
+    finally:
+        await db.dispose()
+
+
 def test_help_explains_the_delivery_model():
     """Audit fix: the branch-based delivery model must be EXPLAINED, not implicit."""
     assert "agent/<effort-id>" in _HELP
@@ -435,5 +465,62 @@ async def test_nl_close_pr_closes_the_open_agent_pr(db_url, tmp_path):
         await orch.nl_intake("close PR 99", mgmt, thread_id="t")
         msgs = " ".join(p["message"] for p in chat.posted)
         assert "couldn't find an OPEN agent PR" in msgs
+    finally:
+        await db.dispose()
+
+
+async def test_stale_reverify_does_not_masquerade_as_new_pr(db_url, tmp_path):
+    """Operator 2026-07-12: a re-verify with NO new commits (the head is exactly where it was before
+    dispatch) re-ran the delivery pipeline and posted "📬 PR opened for review", so a no-op looked
+    like fresh work — "I can't tell what's real / where to look." When the head didn't move this
+    round, the closure must frame it as a re-confirmation of the EXISTING delivery, never a new
+    push/PR. Generic for any project — keys off the pre-dispatch head, no project specifics."""
+    from types import SimpleNamespace
+    from app.modules.capabilities import BranchDelivery
+    orch, chat, db = await _orch(db_url, tmp_path)
+    try:
+        await orch.projects.add("game", "https://github.com/devonpveller/Docker-Game")
+        eid, chan, root = await orch.router.open_effort("wire", project="game")
+        await orch.charters.set_goal(
+            eid, "wire the build against the vendored source", created_by="po")
+        orch._gh_transport = httpx.MockTransport(_delivery_handler({}))
+        orch._org_verified[eid] = "samehead00000000"
+        # the head is EXACTLY the pre-dispatch head → nothing new landed this round
+        orch._pre_dispatch_head[eid] = "samehead00000000"
+        delivery = BranchDelivery(verifiable=True, exists=True, ahead=1, files_changed=1,
+                                  head_sha="samehead00000000", branch="agent/wire")
+        res = SimpleNamespace(status="done",
+                              output="Re-verified: the branch already carries the delivery.")
+        await orch._finish_effort(eid, res, delivery=delivery)
+        msgs = " ".join(p["message"] for p in chat.posted)
+        assert "no new commits this round" in msgs           # framed as a re-confirmation
+        assert "Existing PR still open" in msgs
+        assert "PR opened for review" not in msgs             # NOT re-announced as new work
+    finally:
+        await db.dispose()
+
+
+async def test_fresh_delivery_still_announces_pr_opened(db_url, tmp_path):
+    """Guard the other side: a genuine NEW delivery (head moved past the pre-dispatch head) must
+    still announce "📬 PR opened for review" — the stale-reverify reframe must not suppress real
+    deliveries."""
+    from types import SimpleNamespace
+    from app.modules.capabilities import BranchDelivery
+    orch, chat, db = await _orch(db_url, tmp_path)
+    try:
+        await orch.projects.add("game", "https://github.com/devonpveller/Docker-Game")
+        eid, chan, root = await orch.router.open_effort("wire2", project="game")
+        await orch.charters.set_goal(
+            eid, "wire the build against the vendored source", created_by="po")
+        orch._gh_transport = httpx.MockTransport(_delivery_handler({}))
+        orch._org_verified[eid] = "newhead111111111"
+        orch._pre_dispatch_head[eid] = "prehead000000000"   # head MOVED → genuinely new work
+        delivery = BranchDelivery(verifiable=True, exists=True, ahead=1, files_changed=1,
+                                  head_sha="newhead111111111", branch="agent/wire2")
+        res = SimpleNamespace(status="done", output="Landed the wiring fix.")
+        await orch._finish_effort(eid, res, delivery=delivery)
+        msgs = " ".join(p["message"] for p in chat.posted)
+        assert "PR opened for review" in msgs
+        assert "no new commits this round" not in msgs
     finally:
         await db.dispose()

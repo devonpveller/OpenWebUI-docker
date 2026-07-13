@@ -29,20 +29,48 @@ from ..schemas import AdvisoryAnswer, GroundingResult
 log = logging.getLogger("agent_bridge.grounding")
 
 
+def _is_gap(text: str) -> bool:
+    """The research engine signals 'the corpus/web had nothing usable on this' with a `[GAP]` marker
+    (or a 'provided sources do not contain' phrasing). Such a result has no real answer — treat it as
+    UNGROUNDED so a caller never injects a non-answer (or the stale/irrelevant reused claims that ride
+    along with a gap) as if it were grounded fix context."""
+    t = (text or "").strip().lower()
+    return (t.startswith("[gap]") or "do not contain information" in t
+            or "provided sources do not contain" in t or not t)
+
+
 def _extract(result: dict[str, Any]) -> tuple[str, list[str]]:
-    """Pull a summary + a flat list of grounded-claim strings out of a research result,
-    tolerant of shape (claims may be strings or {text}/{claim} dicts)."""
-    summary = (result.get("synthesis") or result.get("summary") or "").strip()
+    """Pull the SESSION REPORT + validated-claim strings out of a research result, tolerant of shape.
+    The openbrain-research result carries the written report as `synthesis` (a distilled answer) AND
+    `prose` (the fuller narrative report), and the VALIDATED claims under `reuse_claims`
+    (reused/validated from the corpus, shaped `{id, text}`) — NOT `claims`/`grounded_claims`. Reading
+    only `synthesis`/`claims` silently dropped the fuller report and EVERY validated claim (operator
+    2026-07-12: 'the research returned the sources and research data but not the session report which
+    contains the validated claims and useful information'). Read the fuller written output + all claim
+    shapes, so a schema tweak never silently loses the report again."""
+    synthesis = (result.get("synthesis") or "").strip()
+    prose = (result.get("prose") or "").strip()
+    summary = prose if len(prose) > len(synthesis) else synthesis
+    if not summary:
+        summary = (result.get("summary") or result.get("report")
+                   or result.get("session_report") or result.get("final_report") or "").strip()
     claims: list[str] = []
-    raw = result.get("claims") or result.get("grounded_claims") or []
-    if isinstance(raw, list):
+    seen: set[str] = set()
+    for key in ("claims", "grounded_claims", "reuse_claims", "validated_claims"):
+        raw = result.get(key)
+        if not isinstance(raw, list):
+            continue
         for c in raw:
             if isinstance(c, str):
-                claims.append(c)
+                t = c
             elif isinstance(c, dict):
-                t = c.get("text") or c.get("claim") or c.get("statement")
-                if t:
-                    claims.append(str(t))
+                t = c.get("text") or c.get("claim") or c.get("statement") or ""
+            else:
+                t = ""
+            t = str(t).strip()
+            if t and t not in seen:
+                seen.add(t)
+                claims.append(t)
     return summary, claims
 
 
@@ -112,6 +140,11 @@ class OpenBrainResearchGrounding:
                     status = st.get("status")
                     if status == "done":
                         summary, claims = _extract(st.get("result") or {})
+                        if _is_gap(summary):
+                            # the engine found nothing usable — not grounded (and don't inject the
+                            # stale reused claims a gap drags along). The caller escalates honestly.
+                            log.info("grounding job %s returned a GAP — treating as ungrounded", job_id)
+                            return GroundingResult(grounded=False, job_id=job_id)
                         return GroundingResult(
                             grounded=True, claims=claims, summary=summary, job_id=job_id
                         )
@@ -177,11 +210,17 @@ class OpenBrainResearchGrounding:
                     status = st.get("status")
                     if status == "done":
                         result = st.get("result") or {}
-                        synthesis, _claims = _extract(result)
-                        if not synthesis:
+                        synthesis, claims = _extract(result)
+                        if _is_gap(synthesis):
                             return AdvisoryAnswer(grounded=False, job_id=job_id, reason="empty")
+                        # Fold the validated claims into the answer so the operator's synthesis
+                        # carries the "session report" content, not just the distilled line.
+                        answer = synthesis
+                        if claims:
+                            answer += "\n\n**Grounded claims:**\n" + "\n".join(
+                                f"- {c}" for c in claims[:12])
                         return AdvisoryAnswer(
-                            grounded=True, answer=synthesis,
+                            grounded=True, answer=answer,
                             sources=_extract_sources(result), job_id=job_id,
                         )
                     if status in ("error", "cancelled"):
