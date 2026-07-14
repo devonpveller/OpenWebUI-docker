@@ -278,6 +278,8 @@ class Router:
         upstream: str | None = None,
         upstream_token: str | None = None,
         recurse_submodules: bool = False,
+        plan_only: bool = False,
+        flail_guard: bool = False,
     ) -> WorkResult | None:
         """Wake a worker on an effort and post its reply in-thread. Returns None if the
         effort is frozen (the composition rule refuses to dispatch) or no capacity. If `repo`
@@ -450,8 +452,15 @@ class Router:
                 prompt = f"{context}\n\n{instruction}".strip()
                 # `channel` here is little-coder's trigger-surface enum, NOT the Mattermost
                 # channel — the harness defaults it to "batch" (automated trigger).
+                # `plan_only`/`flail_guard` are passed ONLY when set: normal wakes keep working
+                # against any older/duck-typed harness whose wake() predates the kwargs.
+                extra: dict = {}
+                if plan_only:
+                    extra["plan_only"] = True
+                if flail_guard:
+                    extra["flail_guard"] = True
                 result = await self.harness.wake(
-                    inst.base_url, session_id, prompt, on_update=_stream
+                    inst.base_url, session_id, prompt, on_update=_stream, **extra,
                 )
                 await _flush()  # defensive: surface any tail commands if no answer callback fired
                 # POLL TIMEOUT = the bridge stopped waiting, but the daemon is STILL running the

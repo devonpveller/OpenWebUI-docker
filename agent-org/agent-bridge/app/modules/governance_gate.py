@@ -237,12 +237,17 @@ class GovernanceGate:
 
     # ── clear (authority-checked) ────────────────────────────────────────────
     async def clear(
-        self, effort_id: str, decision: Decision, *, actor_role: str
+        self, effort_id: str, decision: Decision, *, actor_role: str,
+        infra_recovery: bool = False,
     ) -> None:
         """Clear the open CONCERN(s) for an effort and unfreeze it + dependents.
 
         Authority (invariant iv): the PO may clear a `steering` concern; a `hard_gate`
         concern can be cleared ONLY by the human. `actor_role` in {human, po}.
+        SANCTIONED EXCEPTION (operator-authorized 2026-07-13): the autonomous `auto-recovery`
+        actor may clear a hard-gate when `infra_recovery=True` — the caller has classified the
+        concern as an ENVIRONMENT/WORKSPACE symptom the org can self-heal (re-clone + retry). A real
+        code/behaviour deviation is never infra-classified, so it still needs the Human Operator.
         On `abort`, the effort stays frozen (aborted), only the CONCERN closes.
         """
         async with self.db.session_factory() as s:
@@ -259,10 +264,13 @@ class GovernanceGate:
             # Authority check BEFORE any state change.
             for c in open_c:
                 if c.level == Level.hard_gate.value and actor_role != "human":
-                    raise AuthorityError(
-                        f"{actor_role} cannot clear a hard-gate concern — only the "
-                        f"Human Operator may (governance §3 invariant iv)"
-                    )
+                    # Sanctioned autonomous INFRA-symptom recovery is the ONLY non-human hard-gate
+                    # clear (operator-authorized 2026-07-13). Everything else stays human-only.
+                    if not (actor_role == "auto-recovery" and infra_recovery):
+                        raise AuthorityError(
+                            f"{actor_role} cannot clear a hard-gate concern — only the "
+                            f"Human Operator may (governance §3 invariant iv)"
+                        )
 
             now = datetime.now(timezone.utc).isoformat()
             for c in open_c:

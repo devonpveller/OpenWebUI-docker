@@ -130,6 +130,22 @@ class TasksConfig(_Strict):
     outcome_amend_window_seconds: int = 604800
 
 
+class FlailConfig(_Strict):
+    """Flail guard (agent-org bridge, 2026-07-14): a coding turn that keeps READING without ever
+    EDITING is lost — "too many thinking turns / time iterating on read without editing" is the
+    operator's stop signal. Opt-in per task (`flail_guard` on the trigger; the bridge sets it on
+    coding step wakes only — plan/publish/survey turns are exempt). Tripping kills the turn with
+    a FLAIL-GUARD answer marker; the bridge then forks a fresh session from the original goal and
+    re-asks in plan mode. Trip = ZERO edit/write tool executions AND (tool_calls reached, OR
+    seconds elapsed with at least min_tool_calls executions — so a slow, thoughtful task with a
+    couple of reads is never killed on time alone)."""
+
+    tool_calls: int = 25            # read-only tool executions before the count trip
+    seconds: int = 900              # elapsed (15 min) before the time trip
+    min_tool_calls: int = 8         # time trip requires at least this much activity
+    poll_seconds: float = 20.0      # watcher scan cadence
+
+
 class ShutdownConfig(_Strict):
     """SIGTERM drain mode (design §12.7)."""
 
@@ -229,6 +245,7 @@ class Config(_Strict):
     journals: JournalsConfig = Field(default_factory=JournalsConfig)
     paths: PathsConfig = Field(default_factory=PathsConfig)
     tasks: TasksConfig = Field(default_factory=TasksConfig)
+    flail: FlailConfig = Field(default_factory=FlailConfig)
     shutdown: ShutdownConfig = Field(default_factory=ShutdownConfig)
     budgets: BudgetsConfig = Field(default_factory=BudgetsConfig)
     sanitization: SanitizationConfig = Field(default_factory=SanitizationConfig)

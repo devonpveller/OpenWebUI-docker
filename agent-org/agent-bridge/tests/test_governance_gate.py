@@ -80,6 +80,28 @@ async def test_human_clears_hard_gate_and_unfreezes(db):
     assert await gate.can_dispatch("e") is True
 
 
+async def test_auto_recovery_clears_an_infra_hard_gate(db):
+    # Sanctioned exception (operator-authorized 2026-07-13): the autonomous infra recovery, having
+    # classified the concern as an environment/workspace symptom, may clear a hard-gate.
+    gate = await _gate(db)
+    await gate.ensure_effort("e", "e")
+    await gate.freeze("e", Trigger.refusal, _concern("e"))     # refusal = hard-gate
+    await gate.clear("e", Decision(decision="approve"),
+                     actor_role="auto-recovery", infra_recovery=True)
+    assert await gate.can_dispatch("e") is True
+
+
+async def test_auto_recovery_actor_without_the_infra_flag_is_still_denied(db):
+    # The actor alone is NOT enough — without infra_recovery=True the hard-gate stays human-only, so
+    # a mis-set actor can never quietly bypass the invariant.
+    gate = await _gate(db)
+    await gate.ensure_effort("e", "e")
+    await gate.freeze("e", Trigger.refusal, _concern("e"))
+    with pytest.raises(AuthorityError):
+        await gate.clear("e", Decision(decision="approve"), actor_role="auto-recovery")
+    assert await gate.can_dispatch("e") is False
+
+
 async def test_po_may_clear_steering(db):
     gate = await _gate(db)
     await gate.ensure_effort("e", "e")

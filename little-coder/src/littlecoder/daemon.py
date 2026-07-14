@@ -86,6 +86,13 @@ class TriggerRequest(BaseModel):
     user_id: str = "cli"
     session_id: str | None = None
     acceptance_command: str | None = None
+    # PLAN-ONLY turn (agent-org bridge): run the agent with edit/write tools EXCLUDED so this
+    # turn can only explore + reply with a plan, never change files (headless plan mode).
+    plan_only: bool = False
+    # FLAIL GUARD (agent-org bridge): watch this turn for read-without-edit flailing and kill it
+    # with a FLAIL-GUARD answer marker when it trips (the bridge then re-plans from a fresh
+    # session). Opt-in — the bridge sets it on coding step wakes only.
+    flail_guard: bool = False
 
 
 class CheckRequest(BaseModel):
@@ -394,7 +401,12 @@ class LittleCoderDaemon:
             raise HTTPException(503, "shutting down — not accepting new triggers")
         if req.channel not in _VALID_CHANNELS:
             raise HTTPException(422, f"channel must be one of {sorted(_VALID_CHANNELS)}")
-        if self.current_focus is None:
+        # A valid FOCUS means both an in-memory record AND a real clone on disk — the two can diverge
+        # (the record outlives the tree). Mirror run_check/add_submodule: never spawn an agent onto a
+        # workspace with no cloned repo. Live 2026-07-13: a corrupt leftover workspace (no .git) left
+        # current_focus set; the task ran on the void, "finished" having changed nothing (it couldn't
+        # branch/commit), and the PM monitor froze the effort. Reject so the bridge re-focuses (fresh).
+        if self.current_focus is None or not self.workspace.is_focused():
             raise HTTPException(409, "no project focused — run /project first")
         if not req.prompt.strip():
             raise HTTPException(422, "empty prompt")
@@ -406,6 +418,8 @@ class LittleCoderDaemon:
             prompt=req.prompt,
             repo=self.current_focus.canonical_url,
             acceptance_command=req.acceptance_command,
+            plan_only=req.plan_only,
+            flail_guard=req.flail_guard,
         )
         self.tasks[state.task_id] = state
         self.contexts[state.task_id] = TaskContext(state)
@@ -486,8 +500,12 @@ class LittleCoderDaemon:
         # can outlive the tree (live 2026-07-07: focus said the repo, the volume was empty →
         # the worker was dispatched into a void it cannot escape, since the git-proxy rightly
         # blocks it from cloning for itself). An empty workspace means the focus record lies:
-        # drop it and clone.
-        if decision.action is SwitchAction.NOOP and not self.busy \
+        # drop it and clone. This fires EVEN IF a task is "in flight": that task is running on the
+        # SAME void (is_focused=False) and is already doomed, so there is no valid work for the busy
+        # guard to protect — and NOOPing again would dispatch the next task onto the void too (live
+        # 2026-07-13: a corrupt leftover workspace + a busy dry-run made this NOOP silently, the
+        # worker "worked" on nothing, and the PM monitor froze the effort as a hard-gate deviation).
+        if decision.action is SwitchAction.NOOP \
                 and not await asyncio.to_thread(self.workspace.is_focused):
             self.current_focus = None
             decision = decide_switch(requested, None, self.busy)   # → CLONE (workspace vanished)

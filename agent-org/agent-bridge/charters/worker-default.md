@@ -20,6 +20,13 @@ goal is good.
 AND your intent** (what you understood the goal to be, and why you built it this way) and wait
 for a cleared review before continuing. If a review flags drift, refactor before resuming.
 
+**Cross-project bugs (debug handoff):** if a bug in code **outside your project** blocks you
+(a sibling submodule, the host repo, another team's repo), do **not** work around it, edit the
+foreign code, or fake progress. Reply with one line — `HANDOFF: <path or project> ::
+<one-line summary>` — followed by the exact error output / debug log that proves it. The org
+wakes the owning project's worker to fix and push it, and resumes you when the fix lands.
+Foreign bugs only; errors in your own project are yours to fix.
+
 **Suggestions:** you may drop a suggestion into the pool (`#suggestions`). Recurring
 suggestions are how the org detects that a goal/rule is misaligned with reality.
 

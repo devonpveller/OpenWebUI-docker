@@ -212,6 +212,79 @@ def _is_infra_failure(output: str) -> bool:
     return not _SOURCE_ERROR_RE.search(output)
 
 
+# A monitor/PM CONCERN whose subject is an ENVIRONMENT/WORKSPACE symptom — the org can self-heal it
+# by re-cloning + retrying (operator-authorized autonomous recovery, 2026-07-13). Deliberately
+# SPECIFIC (a missing `.git`, an unpopulated clone, an uninitialised submodule, "reset the repository
+# setup") so it never fires on a real code/behaviour deviation, which must still reach the human.
+_INFRA_CONCERN_RES = [re.compile(r, re.I) for r in (
+    r"\bnot a git repo",
+    r"\bno\b[^.\n]{0,15}\.git\b|\.git\b[^.\n]{0,15}\b(missing|absent|gone|no longer)",
+    r"\bonly\b[^.\n]{0,25}\b(compiled|build)\b[^.\n]{0,15}\bartifact",       # "only compiled artifacts"
+    r"\b(re-?set|reset|re-?clone|re-?establish|repair)\b[^.\n]{0,30}\brepositor",
+    r"\bclone\b[^.\n]{0,25}\b(missing|failed|absent|incomplete|corrupt|empty)",
+    r"\bsubmodul\w*\b[^.\n]{0,35}\b(not|un)[- ]?initiali",                    # submodule(s) not initialised
+    r"\brepository setup\b",
+    r"\bworkspace\b[^.\n]{0,45}\b(empty|void|corrupt|missing|no (repo|clone|source|git)|"
+    r"only .{0,15}artifact|not .{0,10}clon|deviat|environment)",
+)]
+
+# Signs of a GENUINE work-deviation — if present, the concern is NOT auto-cleared even if some
+# infra-ish words also appear (a real problem must never be masked by the autonomous recovery).
+_REAL_DEVIATION_RE = re.compile(
+    r"\b(remov|delet|dropp?|strip)\w*\b[^.\n]{0,30}\b(feature|functionality|code|test|method|class|logic)"
+    r"|does ?n[o']?t match|revert(ed|ing)?\b|regress|wrong (output|behaviou?r|result|answer)"
+    r"|violat\w* the (spec|intent|standing|charter)|gaming|faked?\b|hard-?cod",
+    re.I,
+)
+
+
+def _is_infra_concern(text: str) -> bool:
+    """True when a FROZEN effort's concern is an environment/workspace symptom the org can self-heal
+    (re-clone + retry) rather than a real code/behaviour deviation that needs the Human Operator.
+    Conservative: an infra signature must be present AND no genuine-deviation signature."""
+    if not text:
+        return False
+    if _REAL_DEVIATION_RE.search(text):
+        return False
+    return any(rx.search(text) for rx in _INFRA_CONCERN_RES)
+
+
+# Cross-effort DEBUG HANDOFF marker (operator 2026-07-14): a worker BLOCKED by a bug in code
+# OUTSIDE its project reports `HANDOFF: <path or project> :: <one-line summary>` followed by the
+# debug log, instead of working around it or editing foreign code. The protocol clause's own
+# template line carries angle brackets, so an echoed instruction never parses as a real request.
+_HANDOFF_LINE_RE = re.compile(r"^[ \t>*-]*HANDOFF:\s*(?P<rest>\S[^\n]*)$", re.M)
+
+
+def _parse_handoff(output: str) -> dict | None:
+    """The worker's handoff request as {'target', 'summary', 'log'}, or None. The log is
+    everything from the marker line on (the worker pastes the error output right after it)."""
+    if not output or "HANDOFF:" not in output:
+        return None
+    m = _HANDOFF_LINE_RE.search(output)
+    if not m:
+        return None
+    target, _, summary = m.group("rest").strip().partition("::")
+    target = target.strip().strip("`'\"")
+    if not target or "<" in target or ">" in target:
+        return None            # the template line from an echoed instruction, not a real request
+    return {"target": target[:200], "summary": summary.strip()[:300],
+            "log": output[m.start():][:2600]}
+
+
+# A PLAN that intends to delete/remove/gut functionality — on a goal that is NOT a removal goal,
+# that's the delete-to-pass shortcut declared UP FRONT, caught before any work happens (the
+# delivery-side removal gate stays as the backstop). Deliberately object-anchored (file/class/
+# feature/…) so "remove the unused import" doesn't trip it.
+_PLAN_REMOVAL_RE = re.compile(
+    r"\b(delet|remov|dropp?|gutt?|stripp?)\w*\b[^.\n]{0,45}\b(files?|class(es)?|methods?|"
+    r"features?|components?|functionality|\w+\.\w{1,5})\b", re.I)
+
+# The little-coder daemon's flail-guard answer marker: the turn was KILLED for reading without
+# ever editing (operator 2026-07-14) — the bridge forks a fresh session and re-plans.
+_FLAIL_MARKER = "FLAIL-GUARD:"
+
+
 def _is_transient_focus_collision(detail: str) -> bool:
     """A verify-focus (privileged recursive re-clone) that TRANSIENTLY collided on a workspace the
     scheduler handed it while it still held a prior/parked clone — the `git clone` exit-128
@@ -733,11 +806,30 @@ class Orchestrator:
         # little-coder agent no-op (live 2026-07-08: the org build check ran 0 commands, returned
         # empty → verdict "unknown" → the burn-down never engaged). A stateless "clone, build,
         # report" task must not inherit the port work's conversational context.
-        self._verify_seq = 0
+        # Session-number namespace, seeded from the BOOT CLOCK so a restart can never RE-ISSUE a
+        # session id that a previous boot already used. Live 2026-07-13: a restart reset this to 0,
+        # the next dispatch re-issued `~host1`, the daemon re-focused THAT session's already-BLOATED
+        # 646KB journal, the prompt overflowed the model's context window, qwen returned EMPTY
+        # completions, and the agent no-op'd (0 commands, idle GPU). Monotonic within a boot;
+        # disjoint across boots — so a stale, bloated session is never inherited again.
+        self._verify_seq = int(time.time()) % 1_000_000
         # Advisory research jobs IN FLIGHT (transparency: PM work must be visible) — shown in
         # /status; updated by the state-driven poll's progress callback. {key: {question, state,
         # started}}. In-memory only (a restart orphans the job on the engine side, harmlessly).
         self._advisories: dict[str, dict] = {}
+        # Cross-effort A→B DEBUG HANDOFFS in flight (operator 2026-07-14): fix-effort id → the
+        # REPORTING effort waiting on it ({'from', 'target', 'escalated'}). In-memory; the durable
+        # trail is the handoff_* audit events. A restart drops the link harmlessly: the reporter is
+        # eventually re-engaged by the stall watchdog and re-raises the handoff if the bug still
+        # bites — bounded by `handoff_cap`, which IS restart-safe (an event count).
+        self._handoff_by_fix: dict[str, dict] = {}
+        # Reporting efforts paused on a handed-off fix — the stall watchdog must not re-engage
+        # them mid-wait (their resume comes from the fix effort's clean finish, or the operator).
+        self._handoff_waiting: set[str] = set()
+        # Efforts whose NEXT dispatch must plan first regardless of risk mode — set by the flail
+        # guard (a killed read-without-edit turn re-enters through the plan gate) and consumed
+        # one-shot by _worker_plan_required.
+        self._force_plan: set[str] = set()
         # INTENT-ANCHORED completion (DELIVERY-PIPELINE §1: the PM judges completeness against the
         # operator-intent thread, not one mechanical effort). Per effort: the registered projects the
         # operator NAMED in the intent that this effort did NOT target — so a `done` on a sub-repo
@@ -917,8 +1009,15 @@ class Orchestrator:
             eid = e["id"]
             if eid.startswith("__") or eid in self._delegating or eid in parked:
                 continue                                    # internal / running now / waiting on capacity
+            if eid in self._handoff_waiting:
+                continue        # paused on a handed-off fix — resumed by its finish (or by you)
             if e.get("state") == "frozen":
-                continue                                    # paused on a concern (needs a decision)
+                # A freeze on an ENVIRONMENT/WORKSPACE symptom (not a real code deviation) is
+                # something the org self-heals — re-clone + retry, bounded — instead of idling on the
+                # operator (operator 2026-07-13: full infra-autonomy, notify-don't-ask). A genuine
+                # work-deviation stays frozen for the human.
+                await self._maybe_auto_recover_infra_freeze(eid, mgmt)
+                continue                                    # (real concerns stay put — needs a decision)
             last = await self._last_event(eid)
             if last is None:
                 continue
@@ -958,6 +1057,65 @@ class Orchestrator:
                 reply_prefix=(f"🔧 **{eid}** went quiet for ~{mins} min with no progress after a "
                               f"dispatch — a focus or step stalled without reporting. "
                               f"Auto-re-engaging it now (nothing was lost)."))
+
+    async def _maybe_auto_recover_infra_freeze(self, eid: str, mgmt: str | None) -> None:
+        """A FROZEN effort whose concern is an ENVIRONMENT/WORKSPACE symptom (not a real code
+        deviation) is self-healable — the org clears it, re-clones + retries, and just NOTIFIES,
+        instead of idling on the operator (operator 2026-07-13: "fully autonomous ... send a message
+        so i can see; i don't need approval"). Bounded by `infra_recovery_cap`; escalates HONESTLY
+        if the re-clones don't take. A genuine work-deviation is never infra-classified, so it stays
+        frozen for the human. Live origin: a corrupt leftover workspace froze the FNA→MonoGame port
+        as a hard-gate 'deviation' and idled the floor ~5h waiting on a human tap it didn't need."""
+        concerns = await self.gate.open_concerns(eid)
+        if not concerns:
+            return
+        text = " ".join(
+            f"{(c.payload or {}).get('what_surfaced', '')} {(c.payload or {}).get('intent_of_change', '')}"
+            for c in concerns
+        )
+        if not _is_infra_concern(text):
+            return                                      # a real deviation — stays frozen for the human
+        cap = max(1, self.s.infra_recovery_cap)
+        n = await self._event_count(eid, "infra_auto_recovered")
+        if n >= cap:
+            # Re-clones didn't take — escalate ONCE, honestly, then leave it for the human.
+            if await self._event_count(eid, "infra_recovery_exhausted") == 0:
+                await self.audit.log("infra_recovery_exhausted", effort_id=eid,
+                                     payload={"recoveries": n})
+                body = (f"🛠️ **{eid}** — I auto-re-cloned {n}× for an infra/workspace symptom and it "
+                        f"still won't take, so this genuinely needs you: the environment problem looks "
+                        f"structural (a repo/clone/tool issue), not the code. `approve {eid}` once it's "
+                        f"sorted, or `abort {eid}`.")
+                await self.comms.post(Intent.escalation, body, effort_id=eid)
+                if mgmt:
+                    await self.comms.post(Intent.operator_reply, body,
+                                          thread_id=self._mgmt_thread_of(eid))
+                await self.router.update_effort_card(eid, "needs-attention")
+            return
+        # AUTO-RECOVER: clear the infra hard-gate (sanctioned) → re-dispatch (the daemon re-clones a
+        # void workspace fresh) → NOTIFY (visibility, not a request).
+        try:
+            await self.gate.clear(
+                eid,
+                Decision(decision="approve",
+                         note="auto-recovery: infra/workspace symptom (operator-authorized 2026-07-13)"),
+                actor_role="auto-recovery", infra_recovery=True,
+            )
+        except Exception as exc:  # noqa: BLE001 - a clear failure must not wedge the sweep
+            log.warning("infra auto-recovery clear failed for %s: %s", eid, exc)
+            return
+        await self.audit.log("infra_auto_recovered", effort_id=eid,
+                             payload={"attempt": n + 1, "cap": cap})
+        await self.router.update_effort_card(eid, "active")
+        note = (f"🔧 **Auto-recovering `{eid}`** — the freeze was an **infra/workspace symptom** (the "
+                f"environment, not your code): re-cloning fresh + retrying (attempt {n + 1}/{cap}). "
+                f"I'll only pull you in if it doesn't take.")
+        await self.comms.post(Intent.worker_activity, note, effort_id=eid)
+        if mgmt:
+            await self.comms.post(Intent.operator_reply, note, thread_id=self._mgmt_thread_of(eid))
+        await self._reengage(
+            [eid], mgmt_channel=mgmt, mgmt_thread=self._mgmt_thread_of(eid),
+            reply_prefix=f"↩️ Auto-resuming **{eid}** after infra recovery (fresh re-clone).")
 
     async def _branch_reaper_loop(self) -> None:
         """Keep the repos clean AUTOMATICALLY (operator 2026-07-11: "when a new branch replaces the
@@ -3634,7 +3792,10 @@ class Orchestrator:
                     select(func.count()).select_from(Event).where(
                         Event.kind.in_(("effort_undelivered", "delivery_stale_head",
                                         "delivery_empty_diff", "burndown_stalled",
-                                        "check_infra_error", "org_build_unverifiable")),
+                                        "check_infra_error", "org_build_unverifiable",
+                                        # a flail-guard kill forks a FRESH session (2026-07-14):
+                                        # the flailing context is the poison — never re-enter it
+                                        "flail_replanned")),
                         Event.effort_id == effort_id)
                 )).scalar_one())
         except Exception as exc:  # noqa: BLE001 — affinity fallback, never a dispatch blocker
@@ -4252,20 +4413,32 @@ class Orchestrator:
                 f"present, so the build actually runs here. The work is on the vendored `{proj}` "
                 f"at `{sub_path}`.\n\n"
                 f"{goal}\n\n"
-                f"Edit the files under `{sub_path}`, then build and check with `{build_line}` "
-                f"from /workspace until it works. Please port things properly rather than "
-                f"deleting features to get past an error — if something genuinely can't be done "
-                f"here, say so instead of dropping it.\n\n"
-                f"When it's working, publish ONLY the `{proj}` change to ITS OWN remote, from "
-                f"INSIDE the submodule directory:\n"
-                f"  cd {sub_path} && git checkout -b {branch} && git add -A && "
-                f"git commit -m \"{effort_id}\" && git push origin {branch}\n"
+                f"THIS IS ONE ROUND OF A MULTI-ROUND BURN-DOWN. Progress is carried on the `{branch}` "
+                f"branch of `{proj}`, so FIRST continue any prior rounds' work — inside the submodule:\n"
+                f"  cd {sub_path} && (git fetch origin {branch} && git checkout {branch} || "
+                f"git checkout -b {branch})\n"
+                f"(checks out `{branch}` with prior progress if it exists; creates it otherwise.)\n\n"
+                f"Then edit the files under `{sub_path}` and build/check with `{build_line}` from "
+                f"/workspace.\n\n"
+                f"NEVER DELETE A FEATURE TO GET PAST AN ERROR. Do not delete or gut a file, class or "
+                f"method just because it doesn't compile — that is not a port, and I will REJECT the "
+                f"delivery and make you redo it. (This has already happened once: a round 'went green' "
+                f"by deleting the editor's CURSOR — `MouseCursor.Sdl.cs` — which broke a critical part "
+                f"of a working editor.) PORT each FNA construct to its MonoGame equivalent instead. If "
+                f"some API genuinely has NO MonoGame equivalent, SAY SO and stop — do not drop it.\n\n"
+                f"You do NOT need a fully green build in this single round. Make as much CORRECT "
+                f"progress as you can, then — ALWAYS, even if compile errors still remain — commit and "
+                f"push it so the next round continues from it and the build can measure the remaining "
+                f"errors. Never leave work uncommitted. Publish ONLY the `{proj}` change to ITS OWN "
+                f"remote, from INSIDE the submodule directory:\n"
+                f"  cd {sub_path} && git add -A && git commit -m \"{effort_id}: round progress\" && "
+                f"git push origin {branch}\n"
                 f"CRITICAL — do NOT commit or push at the `{host_slug}` (engine) ROOT, and NEVER "
-                f"push to `main`/`master`. You are ONLY delivering the `{proj}` fix on its `{branch}` "
+                f"push to `main`/`master`. You are ONLY delivering the `{proj}` work on its `{branch}` "
                 f"branch. The engine's submodule pointer is bumped by the org on an operator-approved "
                 f"PR — not by you. (A push to the engine root or to main will be refused, by design.)\n"
-                f"Then report the commit hash and the passing build. If you truly can't build "
-                f"here, don't fake it — say what's blocking you."
+                f"Then report the CURRENT error count (or the passing build) and the commit hash. "
+                f"Don't fake a pass — say what's blocking you if you're stuck."
             )
             await self.comms.post(
                 Intent.effort_dispatch,
@@ -4276,9 +4449,10 @@ class Orchestrator:
             # host wake inherited the rotted work session and no-op'd in 3 seconds; the
             # stateless-session law applies to every re-context, not just burn-down rounds).
             self._verify_seq += 1
+            host_session = f"{effort_id}~host{self._verify_seq}"
             result = await self.router.wake(
                 effort_id, role="worker-default", thread_id=root, channel_id=channel_id,
-                session_id=f"{effort_id}~host{self._verify_seq}", instruction=instruction,
+                session_id=host_session, instruction=instruction,
                 repo=host_url, repo_token=host_token, recurse_submodules=True,
             )
         finally:
@@ -4293,17 +4467,107 @@ class Orchestrator:
         sub_repo = await self._effort_repo(effort_id)
         delivery = await self._verify_delivery(effort_id, sub_repo) if sub_repo else BranchDelivery()
         if not delivery.landed:
+            # THE PM ITERATES AND HELPS — it does not idle on "reply to re-run" (operator 2026-07-14:
+            # "the purpose of the orchestration is to iterate and continue … when the worker doesn't
+            # know how to progress, the bot-pm will help with an alternative approach").
+            # LIVE CAUSE: on a heavy port the worker burns its ENTIRE turn fixing errors and ends
+            # (stopReason=stop) before it ever reaches the commit+push — 14 real FNA→MonoGame edits sat
+            # stranded and uncommitted, so no delivery landed, the build check never ran, and the
+            # burn-down loop never engaged. Re-running just repeats that. The PM's alternative approach
+            # is to PUBLISH the worker's stranded progress ITSELF (deterministic exec, no model in the
+            # loop, no re-clone), which lands the delivery and hands off to the burn-down.
+            delivery = await self._publish_stranded_work(
+                effort_id, sub_repo, sub_path, branch, host_session)
+        if not delivery.landed:
             await self.comms.post(
                 Intent.operator_reply,
-                f"⚠️ **{effort_id}** ran in the host context but I don't see its branch on "
-                f"`{self._norm_repo(sub_repo or proj)}` — the submodule push may have failed. Not "
-                f"done; reply to re-run.",
+                f"⚠️ **{effort_id}** ran in the host context but landed no branch on "
+                f"`{self._norm_repo(sub_repo or proj)}`, and it left no work I could publish for it "
+                f"— so the round genuinely produced nothing. Not done; say “re-run it” to try again.",
                 thread_id=self._mgmt_thread_of(effort_id))
             await self.router.update_effort_card(effort_id, "needs-attention")
             return
         if not await self._gate_standing_intent(effort_id, channel_id, root, sub_repo, delivery):
             return
         await self._finish_effort(effort_id, result, delivery=delivery)
+
+    async def _publish_stranded_work(
+        self, effort_id: str, sub_repo: str | None, sub_path: str, branch: str, session_id: str,
+    ) -> BranchDelivery:
+        """PM ALTERNATIVE APPROACH — publish the worker's STRANDED progress for it.
+
+        On a heavy port the worker spends its ENTIRE turn fixing compile errors and its turn ends
+        (stopReason=stop) before it ever runs commit+push — so real work sits UNCOMMITTED, no branch
+        lands, the org's build check never runs, and the burn-down loop never engages (live 2026-07-14:
+        28 min of work, 14 modified FNA→MonoGame files, local branch created, never pushed). Simply
+        re-running reproduces that exactly. So the PM finishes the step the worker couldn't reach.
+
+        DETERMINISTIC by construction: no model in the loop (a bloated session can't no-op it), and
+        `repo=None` means `exec_check` does NOT focus/clone — it runs in the worker's EXISTING
+        workspace, so the stranded work survives. Affinity on `session_id` returns the very worker
+        holding it. Best-effort: any failure just leaves the delivery unlanded and the round escalates
+        honestly. Returns the RE-VERIFIED delivery."""
+        if not sub_repo:
+            return BranchDelivery()
+        # NEVER PUBLISH DESTRUCTION. The PM finishing the worker's job must not also ship the worker's
+        # shortcut: if the stranded work DELETES tracked files, refuse outright (live 2026-07-14: the
+        # worker deleted the editor CURSOR to get past FNA errors and the PM published it — the exact
+        # delete-to-pass the operator has now flagged twice). Deletions are checked BEFORE `git add`.
+        cmd = (
+            f"cd {sub_path} 2>/dev/null || exit 90; "
+            f"DEL=$(git status --porcelain 2>/dev/null | grep -E '^( D|D |AD)' | cut -c4- | head -20); "
+            f"if [ -n \"$DEL\" ]; then echo PM_PUBLISH_REFUSED_DELETIONS; echo \"$DEL\"; exit 0; fi; "
+            f"git add -A 2>&1; "
+            f"if git diff --cached --quiet 2>/dev/null; then echo PM_PUBLISH_NOTHING_TO_COMMIT; "
+            f"else git commit -m \"{effort_id}: round progress (published by the PM — the worker's "
+            f"turn ended before it could commit)\" 2>&1; fi; "
+            f"git push origin {branch} 2>&1; echo PM_PUBLISH_DONE"
+        )
+        try:
+            exit_code, out, timed_out = await self.router.exec_check(
+                effort_id, command=cmd, session_id=session_id, repo=None, timeout=300)
+        except Exception as exc:  # noqa: BLE001 — salvage is best-effort; never wedge the round
+            log.warning("PM publish-stranded-work failed for %s: %s", effort_id, exc)
+            return BranchDelivery()
+        if "PM_PUBLISH_REFUSED_DELETIONS" in (out or ""):
+            deleted = [ln.strip() for ln in (out or "").splitlines()
+                       if ln.strip() and not ln.strip().startswith("PM_PUBLISH")][:12]
+            listed = ", ".join(f"`{d}`" for d in deleted) or "source file(s)"
+            await self.audit.log("pm_publish_refused_removals", effort_id=effort_id,
+                                 payload={"deleted": deleted})
+            await self.comms.post(
+                Intent.worker_activity,
+                f"⛔ The worker's unfinished round DELETES {listed} — I will **not** publish that. "
+                f"Deleting a feature to get past a compile error is not a port. Re-driving it to "
+                f"RESTORE and PORT them instead.",
+                effort_id=effort_id,
+            )
+            await self._auto_iterate(
+                effort_id,
+                f"the round DELETED {listed} instead of porting them",
+                f"Your last round DELETED: {listed}\nThose are FEATURES (e.g. the editor CURSOR), "
+                f"not errors — and I did NOT publish that work. RESTORE them and PORT them to their "
+                f"MonoGame equivalents. If an API genuinely has NO MonoGame equivalent, SAY SO and "
+                f"stop — never delete a feature to make the build green.",
+            )
+            return BranchDelivery()
+        tail = re.sub(r"x-access-token:[^@\s]+@", "x-access-token:***@", (out or ""))[-400:]
+        await self.audit.log(
+            "pm_published_stranded_work", effort_id=effort_id,
+            payload={"branch": branch, "exit_code": exit_code, "timed_out": timed_out,
+                     "nothing_to_commit": "PM_PUBLISH_NOTHING_TO_COMMIT" in (out or ""),
+                     "tail": tail[:300]},
+        )
+        delivery = await self._verify_delivery(effort_id, sub_repo)
+        if delivery.landed:
+            await self.comms.post(
+                Intent.worker_activity,
+                f"🧰 The worker ran out of turn mid-port with its work still uncommitted, so I "
+                f"published its progress for it — `{branch}` is now on `{self._norm_repo(sub_repo)}`. "
+                f"Picking the burn-down up from there; no action needed.",
+                effort_id=effort_id,
+            )
+        return delivery
 
     async def _nl_proceed_execution(self, message: str, channel_id: str,
                                     thread_id: str | None) -> bool:
@@ -4490,6 +4754,9 @@ class Orchestrator:
             log.info("delegate: %s already executing — skipping duplicate dispatch", effort_id)
             return
         self._delegating.add(effort_id)   # honest "work is happening now" marker
+        # A (re-)dispatch supersedes a handoff wait — the operator's manual re-run must never be
+        # ignored because a stale wait marker says the effort is still paused on a fix.
+        self._handoff_waiting.discard(effort_id)
         steps = [s for s in (plan_steps or []) if s.strip()] or [goal]
         cur_step = start_step
         try:
@@ -4527,6 +4794,20 @@ class Orchestrator:
             # P5.1/5.2: grant the worker its (non-irreversible) scope + confirm its role is approved.
             await self._authorize_worker(effort_id)
             heavy = await self._effort_heavy(effort_id)   # risk-gated stop-gates+review+monitor
+            # WORKER-SIDE PLAN GATE (operator 2026-07-14: "plan mode could be used to ensure
+            # alignment to the task ... save wasted time working on the wrong thing"). Before any
+            # code changes, the worker plans in a READ-ONLY turn (edit/write excluded — headless
+            # plan mode) in its OWN session; the PM checks the plan against the goal. Misaligned →
+            # one revision with the reason → still misaligned → honest stop BEFORE wasted work.
+            # The approved plan stays in the session, so execution continues from it.
+            if await self._worker_plan_required(effort_id):
+                if not await self._worker_plan_gate(
+                        effort_id, channel_id, root_post_id, goal, repo, repo_token,
+                        upstream, upstream_token):
+                    return          # blocked/steered/escalated — the gate posted the state
+                steps[0] += (
+                    "\n\nYour plan (previous turn in this session) was REVIEWED and APPROVED — "
+                    "execute exactly that plan now.")
             last = None
             for i, step in enumerate(steps, 1):
                 if i < start_step:   # resuming after a park — earlier steps already ran
@@ -4608,11 +4889,27 @@ class Orchestrator:
         cp_id = f"{effort_id}:cp{i}"
         if heavy:  # P4.1: the enforced halt exists as a Checkpoint row, independent of plan markers
             await self.stop_gates.add_checkpoint(cp_id, effort_id, f"step {i}", i)
+        # Cross-effort DEBUG HANDOFF protocol rides on every step wake (operator 2026-07-14): a
+        # worker blocked by FOREIGN code must report it (marker + debug log), never work around it.
+        # Injected per-wake — the goal itself stays clean — and only when the org actually has a
+        # sibling project to hand off TO.
+        instruction = step
+        if self.s.handoff_enabled and "HANDOFF PROTOCOL" not in instruction:
+            instruction += await self._handoff_protocol_context(effort_id)
         result = await self.router.wake(
             effort_id, role="worker-default", thread_id=root, channel_id=channel_id,
-            session_id=await self._session_for(effort_id), instruction=step, repo=repo, repo_token=repo_token,
+            session_id=await self._session_for(effort_id), instruction=instruction, repo=repo, repo_token=repo_token,
             upstream=upstream, upstream_token=upstream_token,
+            flail_guard=True,   # arm the daemon's read-without-edit watchdog on CODING turns
         )
+        # FLAIL GUARD tripped (operator 2026-07-14: "too many thinking turns or time iterating on
+        # read without editing anything is a good indicator to stop, fork from original user
+        # prompt and re-ask in plan mode"). The daemon killed a turn that kept reading without a
+        # single edit — the context itself is the poison, so don't retry INTO it: fork a fresh
+        # session from the original goal and re-enter through the plan gate. Bounded to once.
+        if result is not None and _FLAIL_MARKER in (result.output or ""):
+            await self._flail_replan(effort_id, result)
+            return None
         if result is None:
             await self._report_completion(effort_id, None)
             return None
@@ -4630,6 +4927,14 @@ class Orchestrator:
                 raise ModelBackpressureError(f"worker inference shed: {(result.output or '')[:160]}")
             await self._escalate_worker_failure(effort_id, result)
             return None
+        # Cross-effort DEBUG HANDOFF (operator 2026-07-14): the worker is BLOCKED by a bug in
+        # ANOTHER project's code — this turn is a bug report, not a deliverable. Route the debug
+        # log to the owning project's worker and pause this effort until the fix lands.
+        if self.s.handoff_enabled:
+            ho = _parse_handoff(result.output or "")
+            if ho:
+                await self._open_handoff(effort_id, channel_id, root, ho, repo)
+                return None
         if heavy and not await self._gate_deliverable(effort_id, result, cp_id):
             return None
         return result
@@ -7179,6 +7484,90 @@ class Orchestrator:
         snippet = goal_text[start:end].strip().replace("\n", " ")
         return ("…" if start else "") + snippet + ("…" if end < len(goal_text) else "")
 
+    async def _gate_removals(
+        self, effort_id: str, repo: str, delivery: BranchDelivery
+    ) -> bool:
+        """ANTI-DELETE-TO-PASS gate — a green reached by DELETING features is NOT a fix.
+
+        LIVE 2026-07-14: the FNA→MonoGame port reached `burndown_green` by DELETING
+        `src/Murder.Editor/Core/Cursor/MouseCursor.Sdl.cs` (181 lines — the CURSOR, a critical
+        component of a working editor) and gutting input/game code, and the org opened PRs off it.
+        The removals WERE detected — but `_removal_disclosure` only DISCLOSES, and it ran AFTER the
+        PR was already open, so delete-to-pass shipped. Operator (2nd time): "removing the cursor is
+        a repeated issue… a critical component to a functioning piece of software."
+
+        So on a goal that is NOT a removal/cleanup goal, a delivery that deletes source files, guts
+        method bodies, or is heavily net-negative is REJECTED — no PR, no green. The PM then does what
+        it's for: auto-iterate with steering that NAMES what was deleted and requires it be PORTED
+        rather than dropped; if it keeps deleting, escalate HONESTLY (never a PR).
+        True = clean (proceed). False = blocked. Fail-open on an unreadable diff."""
+        if not (repo and self.github is not None and self.s.github_app_enabled):
+            return True
+        try:
+            _, goal_text, _ = await self.charters.current_goal(effort_id)
+        except Exception:  # noqa: BLE001
+            goal_text = ""
+        if self._REMOVAL_GOAL_RE.search(goal_text or ""):
+            return True                      # the operator ASKED for removal — deleting IS the job
+        try:
+            rm = await read_removal_summary(
+                self.github, repo, delivery.branch, api_base=self.s.github_api_base,
+                transport=self._gh_transport)
+        except Exception as exc:  # noqa: BLE001 — an unreadable diff must never block a good delivery
+            log.debug("removal gate diff read failed for %s: %s", effort_id, exc)
+            return True
+        deleted = rm.get("deleted_files") or []
+        gutted = rm.get("gutted_files") or []
+        ins, dels = rm.get("insertions", 0), rm.get("deletions", 0)
+        net_heavy = dels >= 60 and dels >= ins * 3
+        if not (deleted or gutted or net_heavy):
+            return True
+        what: list[str] = []
+        if deleted:
+            what.append("DELETED " + ", ".join(f"`{f}`" for f in deleted[:8]))
+        if gutted:
+            what.append("GUTTED " + ", ".join(f"`{g['file']}`" for g in gutted[:6]))
+        if not what and net_heavy:
+            what.append(f"net-negative diff (−{dels}/+{ins} lines)")
+        listed = "; ".join(what)
+        await self.audit.log(
+            "delivery_removal_blocked", effort_id=effort_id,
+            payload={"branch": delivery.branch, "deleted": deleted[:20],
+                     "gutted": [g["file"] for g in gutted][:20], "ins": ins, "dels": dels})
+        await self.comms.post(
+            Intent.worker_activity,
+            f"⛔ **Green by REMOVING code — rejected.** `{delivery.branch}`: {listed}. Deleting a "
+            f"feature to get past a compile error is not a port. **No PR.** Re-driving it: what was "
+            f"removed has to be PORTED, not dropped.",
+            effort_id=effort_id,
+        )
+        iterating = await self._auto_iterate(
+            effort_id,
+            f"the delivery reached green by REMOVING code ({listed}) — deleting features is not a fix",
+            f"You made the build pass by REMOVING code: {listed}\n"
+            f"That is NOT acceptable. Those are FEATURES (e.g. the editor CURSOR), not errors. "
+            f"RESTORE everything you deleted or gutted, and PORT it to its MonoGame equivalent "
+            f"instead. If some API genuinely has NO MonoGame equivalent, SAY SO and stop — never "
+            f"delete a feature to make the build green.",
+        )
+        if iterating:
+            return False                     # auto-iteration owns the retry; no PR now
+        await self.router.update_effort_card(effort_id, "error")
+        await self.comms.post(
+            Intent.escalation,
+            f"⚠️ **{effort_id}** keeps reaching green by DELETING code ({listed}) even after "
+            f"auto-iterating. **No PR, not merged.** It cannot port these without dropping them — "
+            f"that's a real constraint, not a quick fix. ↑ raised to you.",
+            effort_id=effort_id,
+        )
+        await self.comms.post(
+            Intent.operator_reply,
+            f"⚠️ **{effort_id}** could only go green by REMOVING code ({listed}) — that's features, "
+            f"not errors. I **refused the PR**. This needs a real porting decision from you.",
+            thread_id=self._mgmt_thread_of(effort_id),
+        )
+        return False
+
     async def _removal_disclosure(self, effort_id: str, branch: str,
                                   goal_text: str) -> tuple[str, bool]:
         """Surface what a delivery REMOVED (no silent removals). Returns (note, flag): `note` is
@@ -7318,6 +7707,12 @@ class Orchestrator:
                 await self.comms.post(Intent.operator_reply, hold,
                                       thread_id=self._mgmt_thread_of(effort_id))
                 await self.router.update_effort_card(effort_id, "working")
+                return
+            # ANTI-DELETE-TO-PASS — a green reached by DELETING features is not a fix. This runs
+            # BEFORE any PR: removals used to be merely DISCLOSED, and disclosure ran *after* the PR
+            # was already open (live 2026-07-14: the port went green by deleting the CURSOR and the
+            # org opened PRs off it). Blocked ⇒ no PR; the PM re-drives it to PORT what it deleted.
+            if not await self._gate_removals(effort_id, eff_repo, delivery):
                 return
             # D1: open the PR that makes this delivery VISIBLE; merge stays yours (D4).
             pr_url = await self._open_delivery_pr(
@@ -7535,6 +7930,10 @@ class Orchestrator:
         await self._mgmt_remember(
             effort_id, f"[effort {effort_id} finished] {head}" + (f" (branch {branch})" if branch else "")
         )
+        # Cross-effort DEBUG HANDOFF: if THIS effort was a handed-off fix, close the loop — tell
+        # the waiting reporter and re-engage it (operator 2026-07-14). No-op for normal efforts.
+        await self._resolve_handoff_if_any(effort_id, delivery, result,
+                                           clean=not unmet_or_partial)
 
     async def _escalate_worker_failure(self, effort_id: str, result) -> None:
         """A worker that ended non-`done` climbs the escalation ladder (CM.3). A refusal/rejection
@@ -7563,6 +7962,23 @@ class Orchestrator:
             f"⚠️ **{effort_id}** ended **{result.status}** — see its project-channel thread. {head}",
             thread_id=self._mgmt_thread_of(effort_id),
         )
+        # Cross-effort DEBUG HANDOFF: a FAILED fix effort must not leave its reporter waiting
+        # silently — say so once, and release the reporter to the stall watchdog (it re-engages
+        # and, if the bug still bites, re-raises the handoff — bounded by the cap). The B→A link
+        # stays, so a later successful re-run of the fix still resumes the reporter.
+        info = self._handoff_by_fix.get(effort_id)
+        if info is not None and not info.get("escalated"):
+            info["escalated"] = True
+            frm = info["from"]
+            self._handoff_waiting.discard(frm)
+            await self.comms.post(
+                Intent.operator_reply,
+                f"⏸️ **{frm}** is still waiting on that fix — `{effort_id}` failed before "
+                f"delivering it. Re-run `{effort_id}` (or steer it), or say “re-run {frm}” to "
+                f"continue without the fix.",
+                thread_id=self._mgmt_thread_of(frm),
+            )
+            await self.router.update_effort_card(frm, "needs-attention")
 
     # ── Stage-5 governance helpers (scope / risk-gating / review-flag / learning) ─
     async def _authorize_worker(self, effort_id: str) -> None:
@@ -7624,10 +8040,416 @@ class Orchestrator:
         await self.audit.log("handoff", effort_id=effort_id, payload={"path": path, "owner": owner})
         return owner
 
+    # ── cross-effort A→B DEBUG HANDOFF (operator 2026-07-14) ──────────────────
+    async def _handoff_protocol_context(self, effort_id: str) -> str:
+        """The HANDOFF PROTOCOL clause that teaches a worker how to report a FOREIGN blocking bug
+        (operator 2026-07-14: cross-worker debug handoff). Injected per step wake, and only when
+        the org actually has somewhere to hand off TO (≥1 other registered project) — a lone
+        project keeps its prompts lean."""
+        try:
+            slug = await self._effort_project(effort_id)
+            others = [p for p in await self.projects.list()
+                      if p["slug"] not in (slug, self.s.default_project)]
+        except Exception:  # noqa: BLE001 — a lookup hiccup must never block a dispatch
+            return ""
+        if not others:
+            return ""
+        return (
+            "\n\nHANDOFF PROTOCOL (cross-project bugs): if you are BLOCKED by a bug in code "
+            "OUTSIDE this project (a sibling submodule, the host repo, another team's repo — code "
+            "that is not yours to change from here), do NOT work around it, do NOT edit the "
+            "foreign code, and do NOT fake progress. Instead reply with one line in exactly this "
+            "form:\nHANDOFF: <path or project where the bug lives> :: <one-line summary>\n"
+            "followed by the exact error output / debug log that proves it. The org wakes that "
+            "project's own worker to fix and push it, then resumes you once the fix lands. Only "
+            "use this for genuinely FOREIGN code — errors in this project are yours to fix."
+        )
+
+    async def _resolve_handoff_owner(self, from_slug: str | None, target: str) -> str | None:
+        """Which registered project OWNS the code a handoff points at. Explicit project name
+        first, then a slug/repo-name match inside the path, then the composition layout (a sibling
+        submodule's path in the host's .gitmodules). None ⇒ unresolvable — routes to the human."""
+        t = (target or "").strip().strip("`'\"").replace("\\", "/")
+        tl = t.lower()
+        if not tl:
+            return None
+        try:
+            p = await self.projects.resolve(t)
+            if p and p["slug"] != from_slug:
+                return p["slug"]
+            projects = await self.projects.list()
+        except Exception:  # noqa: BLE001 — resolution is best-effort; unresolved goes to the human
+            return None
+        for p in projects:
+            slug = p["slug"]
+            if slug in (from_slug, self.s.default_project):
+                continue
+            repo_name = self._norm_repo(p.get("repo_url") or "").split("/")[-1].lower()
+            if (slug and slug in tl) or (repo_name and repo_name in tl):
+                return slug
+        if from_slug:
+            host = await self._vendored_host(from_slug)
+            if host:
+                _host_slug, _mine, _url, siblings = host
+                for pth, rep in re.findall(r"`([^`]+)` \(`([^`]+)`\)", siblings or ""):
+                    if pth.lower().strip("/") in tl:
+                        for p in projects:
+                            if self._norm_repo(p.get("repo_url") or "").lower() == rep.lower():
+                                return p["slug"]
+        return None
+
+    async def _open_handoff(
+        self, effort_id: str, channel_id: str, root: str, ho: dict, repo: str | None,
+    ) -> None:
+        """Cross-effort A→B DEBUG HANDOFF — BRIDGE-MEDIATED, never peer-to-peer, so the floor's
+        bus-only (#3) and escalate-up (#7) rules hold (the report goes UP to the org, which wakes
+        the owning project's worker and resumes the reporter when the fix lands — operator
+        2026-07-14). Flow: preserve A's progress (publish its branch) → open a fix effort B on the
+        owning project with the debug log as its goal (B passes the SAME delivery gates as any
+        effort — a handoff is never a side door) → pause A → B's clean finish re-engages A.
+        Depth 1 (no chains) + capped per effort; anything unresolvable reaches the human."""
+        target, summary = ho["target"], (ho["summary"] or "(no summary given)")
+        mgmt_thread = self._mgmt_thread_of(effort_id)
+        await self.audit.log("handoff_requested", effort_id=effort_id,
+                             payload={"target": target, "summary": summary[:200]})
+        # DEPTH 1 (anti-chain — the runaway-delegation guard, governance §5): a FIX effort blocked
+        # by yet another foreign bug reaches the HUMAN, not a third worker.
+        if effort_id.startswith("effort-hx-"):
+            msg = (f"⛔ **{effort_id}** — this handed-off FIX effort is itself blocked by another "
+                   f"foreign bug (`{target}`: {summary}). Handoffs don't chain (depth 1 by "
+                   f"design) — this needs you.")
+            await self.comms.post(Intent.escalation, msg, effort_id=effort_id)
+            await self.comms.post(Intent.operator_reply, msg, thread_id=mgmt_thread)
+            await self.router.update_effort_card(effort_id, "needs-attention")
+            return
+        n = await self._event_count(effort_id, "handoff_opened")
+        if n >= max(1, self.s.handoff_cap):
+            msg = (f"⛔ **{effort_id}** hit yet another cross-project blocker (`{target}`: "
+                   f"{summary}) — past the handoff cap ({n} already opened), so I'm not opening "
+                   f"another fix loop. This pattern usually means the split of work is wrong — "
+                   f"needs your steer.")
+            await self.comms.post(Intent.escalation, msg, effort_id=effort_id)
+            await self.comms.post(Intent.operator_reply, msg, thread_id=mgmt_thread)
+            await self.router.update_effort_card(effort_id, "needs-attention")
+            return
+        from_proj = await self._effort_project(effort_id)
+        owner = await self._resolve_handoff_owner(from_proj, target)
+        if not owner:
+            msg = (f"↪️ **{effort_id}** reports a blocking bug OUTSIDE its scope (`{target}`: "
+                   f"{summary}), but I can't map `{target}` to any registered project — routed to "
+                   f"you. (Register the owning project, or steer this effort.)")
+            await self.comms.post(Intent.escalation, msg, effort_id=effort_id)
+            await self.comms.post(Intent.operator_reply, msg, thread_id=mgmt_thread)
+            await self.router.update_effort_card(effort_id, "needs-attention")
+            return
+        # Preserve A's progress FIRST (its resume may land on a fresh clone): push what it has to
+        # its own branch. Best-effort — a read-only turn just answers NO CHANGES.
+        if repo:
+            try:
+                await self._publish_effort(effort_id, channel_id, root, repo)
+            except Exception as exc:  # noqa: BLE001 — preservation must never block the handoff
+                log.debug("handoff progress publish for %s failed: %s", effort_id, exc)
+        goal = (
+            f"CROSS-PROJECT BUG HANDOFF — a worker on `{effort_id}` (project `{from_proj}`) is "
+            f"BLOCKED by a bug in THIS project ({target}): {summary}\n\n"
+            f"THEIR DEBUG LOG / ERROR OUTPUT:\n{ho['log'][:2400]}\n\n"
+            f"First REPRODUCE this failure here, then fix the CAUSE in this project (not a "
+            f"workaround in the caller), verify your reproduction passes, then commit and push "
+            f"your branch. If you reproduce it and conclude the bug is NOT in this project (the "
+            f"caller misuses it), reply exactly `NO CHANGES: <your analysis>` — never force a "
+            f"fix that doesn't belong here."
+        )
+        try:
+            goal += await self._standing_intent_context(owner)
+            goal += await self._composition_context(owner)
+        except Exception:  # noqa: BLE001 — context is garnish, never a blocker
+            pass
+        short = effort_id.removeprefix("effort-")[:22]
+        fix_eid, fix_chan, fix_root = await self.router.open_effort(
+            f"hx-{short}-{n + 1}", project=owner, goal=goal)
+        await self.charters.set_goal(fix_eid, goal, created_by="pm")
+        if mgmt_thread:
+            self._effort_mgmt_thread[fix_eid] = mgmt_thread
+        self._handoff_by_fix[fix_eid] = {"from": effort_id, "target": target, "escalated": False}
+        self._handoff_waiting.add(effort_id)
+        await self.router.record_wake(effort_id, target=owner, kind="brake")  # storm-exempt (§5)
+        await self.audit.log("handoff_opened", effort_id=effort_id,
+                             payload={"fix_effort": fix_eid, "owner": owner, "target": target,
+                                      "attempt": n + 1})
+        await self.comms.post(
+            Intent.escalation,
+            f"↪️ **Debug handoff:** this effort is blocked by a bug in `{owner}` (`{target}`). "
+            f"I've woken `{owner}`'s worker on {self._effort_link(fix_eid, fix_root)} with the "
+            f"debug log — this effort is **paused** and resumes automatically when the fix lands.",
+            effort_id=effort_id,
+        )
+        await self.comms.post(
+            Intent.operator_reply,
+            f"↪️ **{effort_id}** hit a bug in `{owner}` (`{target}`: {summary}) — handed the "
+            f"debug log to `{owner}`'s worker as `{fix_eid}`. `{effort_id}` waits and "
+            f"auto-resumes when the fix lands. No action needed.",
+            thread_id=mgmt_thread,
+        )
+        await self.router.update_effort_card(effort_id, "working")
+        self._spawn(self.delegate(fix_eid, fix_chan, fix_root, goal))
+
+    async def _resolve_handoff_if_any(
+        self, fix_eid: str, delivery, result, *, clean: bool,
+    ) -> None:
+        """When a finished effort was a HANDOFF FIX, close the loop: tell the waiting reporter
+        the bug is fixed — with the exact branch/commit to build against, or the owner's
+        no-bug-here analysis — and RE-ENGAGE it on its original goal (operator 2026-07-14:
+        "Worker is told the bug was fixed and wakes again to continue its work"). A partial/
+        flagged finish keeps the reporter paused and tells the operator honestly, once."""
+        info = self._handoff_by_fix.get(fix_eid)
+        if info is None:
+            return
+        frm, target = info["from"], info["target"]
+        mgmt_thread = self._mgmt_thread_of(frm)
+        if not clean:
+            if not info.get("escalated"):
+                info["escalated"] = True
+                self._handoff_waiting.discard(frm)   # let the watchdog reclaim A eventually
+                msg = (f"⏸️ **{frm}** stays paused — its handed-off fix `{fix_eid}` finished only "
+                       f"partially (see its closure). Steer or re-run `{fix_eid}`, or say "
+                       f"“re-run {frm}” to continue without the fix.")
+                await self.comms.post(Intent.operator_reply, msg, thread_id=mgmt_thread)
+                await self.router.update_effort_card(frm, "needs-attention")
+            return
+        self._handoff_by_fix.pop(fix_eid, None)
+        self._handoff_waiting.discard(frm)
+        out_tail = ((result.output or "").strip()[:600]) if result is not None else ""
+        if delivery is not None and delivery.landed:
+            repo = await self._effort_repo(fix_eid)
+            sha = (delivery.head_sha or "")[:10]
+            fix_note = (
+                f"the owning worker fixed it on branch `{delivery.branch}` of "
+                f"`{self._norm_repo(repo) if repo else 'its repo'}`"
+                + (f" @ `{sha}`" if sha else "")
+                + f" — a PR is open (merge to main stays with the operator). To build against "
+                  f"the fix NOW, fetch that branch in the affected checkout (`{target}`): "
+                  f"`git fetch origin {delivery.branch} && git checkout {delivery.branch}`."
+            )
+        elif delivery is not None and delivery.no_changes:
+            fix_note = (f"the owning project's worker investigated and reports the bug is NOT on "
+                        f"their side — their analysis:\n{out_tail}\nAdjust your approach "
+                        f"accordingly.")
+        else:
+            fix_note = f"the owning project's worker reports it resolved: {out_tail}"
+        await self.audit.log("handoff_resolved", effort_id=frm,
+                             payload={"fix_effort": fix_eid, "target": target,
+                                      "landed": bool(delivery is not None and delivery.landed)})
+        await self.comms.post(
+            Intent.worker_activity,
+            f"✅ **Handoff resolved** — {fix_note}\n↩️ Resuming `{frm}` on its original goal now.",
+            effort_id=frm,
+        )
+        await self.comms.post(
+            Intent.operator_reply,
+            f"✅ the bug `{frm}` was blocked on is resolved (`{fix_eid}`) — resuming `{frm}` "
+            f"automatically.",
+            thread_id=mgmt_thread,
+        )
+        loc = await self.router.effort_thread(frm)
+        try:
+            _v, goal, _s = await self.charters.current_goal(frm)
+        except Exception:  # noqa: BLE001
+            goal = ""
+        if loc is None or not goal:
+            await self.router.update_effort_card(frm, "needs-attention")
+            return
+        chan, res_root = loc
+        resume_goal = (
+            f"{goal}\n\nHANDOFF RESOLVED ({target}): {fix_note} Your own earlier progress (if "
+            f"any) is on branch `agent/{frm}` — continue from it toward your ORIGINAL goal above."
+        )
+        await self.router.update_effort_card(frm, "active")
+        self._spawn(self.delegate(frm, chan, res_root, resume_goal))
+
     async def _effort_risk_str(self, effort_id: str) -> str:
         async with self.db.session_factory() as s:
             e = await s.get(Effort, effort_id)
         return e.risk if e and e.risk else "routine"
+
+    # ── worker-side plan gate (operator 2026-07-14 — headless plan mode) ──────
+    async def _worker_plan_required(self, effort_id: str) -> bool:
+        """Whether this dispatch plans first (AO_WORKER_PLAN_GATE): `all` = every effort,
+        `risky` = high-blast-radius only (default), `off` = never."""
+        # The flail guard forces the next dispatch through the plan gate regardless of mode —
+        # the worker just proved it doesn't know how to proceed (one-shot; even mode=off).
+        if effort_id in self._force_plan:
+            self._force_plan.discard(effort_id)
+            return True
+        mode = self.s.worker_plan_gate
+        if mode == "off":
+            return False
+        if mode == "all":
+            return True
+        return self.exec_gate.dry_run_required(await self._effort_risk_str(effort_id))
+
+    async def _flail_replan(self, effort_id: str, result) -> None:
+        """The daemon's FLAIL GUARD killed a coding turn that kept READING without one edit
+        (operator 2026-07-14: the signal to "stop, fork from original user prompt and re-ask in
+        plan mode"). Retrying INTO that context reproduces the spiral — the fix is a FORK: the
+        `flail_replanned` event bumps the session generation (a fresh session, seeded only by the
+        re-dispatch goal) and forces the next dispatch through the plan gate. Bounded to ONCE per
+        effort; a second flail is a real can't-converge signal for the human."""
+        head = (result.output or "").strip().splitlines()[0][:200]
+        n = await self._event_count(effort_id, "flail_replanned")
+        if n >= 1:
+            msg = (f"⛔ **{effort_id}** — the worker flailed again after a fresh plan-first "
+                   f"restart ({head}). It can't converge on this goal without help — steer it "
+                   f"(what should the approach be?) or say “re-run it”.")
+            await self.comms.post(Intent.escalation, msg, effort_id=effort_id)
+            await self.comms.post(Intent.operator_reply, msg,
+                                  thread_id=self._mgmt_thread_of(effort_id))
+            await self.router.update_effort_card(effort_id, "needs-attention")
+            return
+        # The event BOTH records the decision and rotates _session_for's generation — the fork.
+        await self.audit.log("flail_replanned", effort_id=effort_id, payload={"detail": head})
+        self._force_plan.add(effort_id)
+        try:
+            _, goal_text, _ = await self.charters.current_goal(effort_id)
+        except Exception:  # noqa: BLE001
+            goal_text = ""
+        base_goal = (goal_text or "").split("\n\nITERATION ")[0].strip()
+        if not base_goal:
+            await self.router.update_effort_card(effort_id, "needs-attention")
+            return
+        note = (f"🌀 The worker was spinning — reading and thinking without a single edit "
+                f"({head}). I stopped it, and I'm **forking a fresh session from the original "
+                f"goal and re-asking in plan mode** so it commits to an approach before touching "
+                f"code. No action needed.")
+        await self.comms.post(Intent.worker_activity, note, effort_id=effort_id)
+        await self.comms.post(Intent.operator_reply, note,
+                              thread_id=self._mgmt_thread_of(effort_id))
+        # Queued (not spawned) — delegate's finally launches it AFTER this run fully closes,
+        # exactly like an auto-iteration, so the single-flight guard can't collide.
+        self._iterate_after[effort_id] = base_goal
+
+    async def _plan_misalignment(self, effort_id: str, goal: str, plan: str) -> str | None:
+        """WHY the worker's plan is misaligned with the goal, or None when it's fine.
+        Deterministic checks first (forbidden standing-intent terms; declared delete-to-pass on a
+        non-removal goal), then the PM's LLM lens (off-goal judgment). The LLM lens FAILS OPEN on
+        a model hiccup — the deterministic checks and the delivery-side gates still stand."""
+        proj = await self._effort_project(effort_id)
+        try:
+            p = await self.projects.get(proj) if proj else None
+        except Exception:  # noqa: BLE001
+            p = None
+        low = plan.lower()
+        for t in self._forbidden_terms((p or {}).get("standing_intent") or ""):
+            if t.lower() in low:
+                return f"it reintroduces `{t}`, which the project's standing intent forbids"
+        if not self._REMOVAL_GOAL_RE.search(goal or ""):
+            m = _PLAN_REMOVAL_RE.search(plan)
+            if m:
+                return (f"it plans to “{m.group(0).strip()[:80]}” — deleting features "
+                        f"is not part of this goal (port/keep them, don't drop them)")
+        try:
+            verdict = await self.models.structured(
+                "pm",
+                "You are the PM. A worker proposed this PLAN before touching any code. Judge "
+                "ONLY whether executing the plan would accomplish the GOAL without violating "
+                "its stated constraints or dropping/deleting existing functionality. Set "
+                "deviates=true only for a real misalignment, with the rationale.",
+                f"GOAL:\n{(goal or '')[:2000]}\n\nWORKER PLAN:\n{plan[:2500]}",
+                MonitorVerdict,
+            )
+        except ModelBackpressureError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — the lens is best-effort; delivery gates remain
+            log.debug("plan alignment lens failed for %s: %s", effort_id, exc)
+            return None
+        if getattr(verdict, "deviates", False):
+            return (getattr(verdict, "rationale", "") or "the PM judged it off-goal")[:300]
+        return None
+
+    async def _worker_plan_gate(
+        self, effort_id: str, channel_id: str, root: str, goal: str, repo: str | None,
+        repo_token: str | None, upstream: str | None, upstream_token: str | None,
+    ) -> bool:
+        """PLAN-FIRST dispatch (operator 2026-07-14): the worker maps its approach in a READ-ONLY
+        turn (edit/write tools excluded — the plan-mode guard, headless) and the PM checks the
+        plan against the goal BEFORE any code changes. One steered revision; a second misaligned
+        plan stops honestly — catching the wrong direction costs two model turns here instead of
+        a wasted implementation + operator steering + a restart. True = execute (the approved
+        plan is in the worker's session); False = stopped (this method posted the state)."""
+        await self.comms.post(
+            Intent.effort_dispatch,
+            "📐 **Plan first** — the worker maps its approach in a read-only turn, and I check "
+            "it against the goal before any code changes.",
+            effort_id=effort_id,
+        )
+        instr = (
+            "PLAN FIRST — do NOT change any file this turn (your edit tools are disabled; "
+            "explore only). Read whatever you need in the workspace, then reply with exactly:\n"
+            "UNDERSTANDING: the goal in your own words (1-2 lines)\n"
+            "PLAN: numbered steps — name the files you'll touch and what changes in each\n"
+            "WON'T DO: what you will NOT change (out of scope for this goal)\n"
+            "RISKS: what could go wrong / anything you're unsure of\n\n"
+            f"The goal:\n{goal}"
+        )
+        reason: str | None = None
+        for attempt in (1, 2):
+            result = await self.router.wake(
+                effort_id, role="worker-default", thread_id=root, channel_id=channel_id,
+                session_id=await self._session_for(effort_id), instruction=instr,
+                repo=repo, repo_token=repo_token, upstream=upstream,
+                upstream_token=upstream_token, plan_only=True,
+            )
+            if result is None:
+                await self._report_completion(effort_id, None)
+                return False
+            out = result.output or ""
+            if not result.ok:
+                if result.status == "clone_failed":
+                    await self._handle_clone_failure(effort_id, result)
+                    return False
+                if is_backpressure_text(out):
+                    raise ModelBackpressureError(f"plan turn shed: {out[:160]}")
+                await self._escalate_worker_failure(effort_id, result)
+                return False
+            # A genuine blocker named at PLAN time is the cheapest possible catch — elevate it
+            # before any work. EXPLICIT protocol markers only: the plan's RISKS section is
+            # SUPPOSED to speculate ("could be blocked by…"), so the plain-language blocker
+            # heuristic would false-positive here and bounce good plans to the operator.
+            blk = self._extract_blocker(out) if re.search(r"\b(BLOCKED|NEEDS):", out) else None
+            if blk:
+                await self._elevate_blocker(effort_id, blk)
+                return False
+            reason = await self._plan_misalignment(effort_id, goal, out)
+            if reason is None:
+                await self.audit.log("worker_plan_approved", effort_id=effort_id,
+                                     payload={"attempt": attempt})
+                await self.comms.post(
+                    Intent.worker_activity,
+                    "✅ Plan reviewed — aligned with the goal. Executing it now.",
+                    effort_id=effort_id,
+                )
+                return True
+            await self.audit.log("worker_plan_rejected", effort_id=effort_id,
+                                 payload={"attempt": attempt, "reason": reason[:300]})
+            if attempt == 1:
+                await self.comms.post(
+                    Intent.worker_activity,
+                    f"↩️ Plan NOT aligned — {reason}. Asking for a revised plan (no code has "
+                    f"been touched).",
+                    effort_id=effort_id,
+                )
+                instr = (
+                    f"Your plan is NOT aligned with the goal: {reason}\n"
+                    f"Write a REVISED plan in the same format (UNDERSTANDING / PLAN / WON'T DO / "
+                    f"RISKS) that fixes this. Do NOT change any file this turn."
+                )
+        msg = (f"⛔ **{effort_id}** — the worker's plan stayed misaligned after one revision "
+               f"({reason}). Stopped **before any code was touched** — that's the point of the "
+               f"plan gate. Steer it (tell me what to change) or say “re-run it”.")
+        await self.comms.post(Intent.escalation, msg, effort_id=effort_id)
+        await self.comms.post(Intent.operator_reply, msg,
+                              thread_id=self._mgmt_thread_of(effort_id))
+        await self.router.update_effort_card(effort_id, "needs-attention")
+        return False
 
     async def _effort_heavy(self, effort_id: str) -> bool:
         """Whether to run the Stage-5 stop-gates + monitor + review (AO_REVIEW_MODE): `all` =

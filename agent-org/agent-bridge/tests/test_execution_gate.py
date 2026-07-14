@@ -70,6 +70,9 @@ async def _orch(db_url, grounding=None):
         profiles_dir=str(ROOT / "profiles"), charters_dir=str(ROOT / "charters"),
         floor_dir=str(ROOT / "floor"), worker_instance_urls="http://w1:8090",
         max_concurrent_workers=1, database_url=db_url, grounding_enabled=True,
+        # This file tests the DRY-RUN gate in isolation; the worker-side plan gate (which also
+        # fires on risky efforts and would add a plan wake) is exercised in test_worker_plan_gate.
+        worker_plan_gate="off",
     )
     db = Database(db_url)
     orch = Orchestrator(

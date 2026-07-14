@@ -78,6 +78,30 @@ class Settings(BaseSettings):
     stall_watchdog_s: float = 240.0         # sweep cadence
     stall_threshold_s: float = 900.0        # silence past this (15 min) with no progress = wedged
     stall_max_recoveries: int = 2           # auto-re-engages before a loud escalation stands
+    # Autonomous INFRA-freeze recovery (operator 2026-07-13: "fully autonomous would be my choice,
+    # but send a message so i can see; i don't need approval"). When the PM monitor freezes an effort
+    # on an ENVIRONMENT/WORKSPACE symptom (no .git, clone missing, "repository setup") rather than a
+    # real code deviation, the org self-heals by re-cloning + retrying (this many times) and only
+    # escalates to the human if the re-clones don't take. A real work-deviation still needs the human.
+    infra_recovery_cap: int = 2
+    # Cross-effort A→B DEBUG HANDOFF (operator 2026-07-14: workers "work with each other by
+    # providing debug logs for errors they've run into outside of their current workspace. This
+    # engages/wakes the other worker to fix the bug and push. Worker is told the bug was fixed and
+    # wakes again to continue its work."). BRIDGE-MEDIATED, never peer-to-peer — the floor's
+    # bus-only (#3) and escalate-up (#7) rules hold: the org routes the log, wakes the OWNING
+    # project's worker as a normal gated effort, and resumes the reporter when the fix lands.
+    # Depth 1 by design (a fix effort may not hand off again — that reaches the human).
+    handoff_enabled: bool = True
+    handoff_cap: int = 2                    # handoffs per reporting effort before escalating
+    # WORKER-SIDE PLAN GATE (operator 2026-07-14: "plan mode could be used to ensure alignment to
+    # the task — save wasted time working on the wrong thing, additional steering and ultimately
+    # starting over"). Before touching any code, the worker plans in a READ-ONLY turn (edit/write
+    # tools excluded — headless plan mode) in its OWN session; the PM checks the plan against the
+    # goal (forbidden terms, delete-to-pass intent, an LLM off-goal lens). Misaligned → one
+    # revision with the reason → still misaligned → honest stop BEFORE any wasted work. The
+    # approved plan stays in the session, so execution continues from it.
+    # `off` = never, `risky` = high-blast-radius efforts only (default), `all` = every effort.
+    worker_plan_gate: str = "risky"
     # Autonomous burn-down round cap (operator 2026-07-07: "all 138 errors should have been worked
     # through autonomously and not elevated in the first place"). This is a RUNAWAY GUARD, not a
     # check-in: a STILL-PROGRESSING campaign should run to green, not elevate mid-progress — so the cap
@@ -132,7 +156,13 @@ class Settings(BaseSettings):
     ot1_image: str = ""
     ot2_image: str = ""
     worker_poll_interval_s: float = 3.0
-    worker_poll_timeout_s: float = 1800.0
+    # A single worker ROUND's ceiling. Raised 1800→5400 (2026-07-13): the FNA→MonoGame port's FIRST
+    # heavy composition round (audit + replace ALL FNA deps across the codebase, then commit + push the
+    # vendored-murder submodule) ran ~120 real commands and was cut off at 30 min BEFORE it could push,
+    # so it produced no delivery, never reached a build check, and the auto-retrying burn-down loop
+    # never engaged. Heavy first rounds need room to finish + push; later error-fixing rounds are
+    # smaller and finish well inside this. Still bounded, so a genuine hang is still caught.
+    worker_poll_timeout_s: float = 5400.0
     # Reliability: when a dispatch to a worker fails because the daemon is wedged (409 busy) or
     # unreachable, quarantine that worker for this long (a self-healing back-off — after it lapses the
     # worker is retried, so a transient wedge recovers on its own) and re-dispatch on another worker up

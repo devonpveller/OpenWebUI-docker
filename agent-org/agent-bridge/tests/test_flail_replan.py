@@ -1,0 +1,103 @@
+"""FLAIL GUARD -> fork -> plan-first re-ask (operator 2026-07-14: "too many thinking turns or
+time iterating on read without editing anything is a good indicator to stop, fork from original
+user prompt and re-ask in plan mode"). The daemon kills a read-without-edit coding turn with a
+FLAIL-GUARD answer marker; the bridge then: records `flail_replanned` (which bumps the session
+generation = the FORK — the flailing context is never re-entered), forces the plan gate on the
+re-dispatch regardless of mode, and re-runs from the ORIGINAL goal. Once per effort; a second
+flail escalates honestly. Fakes only."""
+
+from __future__ import annotations
+
+import asyncio
+from pathlib import Path
+
+from app.adapters.chat import FakeChatAdapter
+from app.config import Settings
+from app.db import Database
+from app.modules.model_router import FakeModelClient
+from app.orchestrator import Orchestrator
+from app.worker.harness import FakeHarness
+
+ROOT = Path(__file__).resolve().parents[1]
+
+_FLAIL_OUT = ("FLAIL-GUARD: stopped the turn — 25 read-only tool calls with zero file edits. "
+              "The approach wasn't converging; a fresh plan is needed.")
+
+
+async def _orch(db_url, *, plan_gate="off"):
+    settings = Settings(
+        _env_file=None, chat_adapter="fake",
+        profiles_dir=str(ROOT / "profiles"), charters_dir=str(ROOT / "charters"),
+        floor_dir=str(ROOT / "floor"), worker_instance_urls="http://w1:8090",
+        max_concurrent_workers=1, database_url=db_url, project_survey_enabled=False,
+        review_mode="off", plan_approval="off", worker_plan_gate=plan_gate,
+    )
+    db = Database(db_url)
+    orch = Orchestrator(settings, db, FakeChatAdapter(),
+                        model_client=FakeModelClient(), harness=FakeHarness())
+    await orch.setup()
+    return orch, orch.chat, orch.harness, db
+
+
+async def _drain(orch, rounds: int = 3):
+    for _ in range(rounds):
+        if orch._bg_tasks:
+            await asyncio.gather(*list(orch._bg_tasks))
+
+
+async def _shutdown(orch, db):
+    """Cancel the loops setup() started before disposing the DB (a late tick against a disposed
+    DB throws in aiosqlite's worker thread and lands on whatever test runs next)."""
+    await _drain(orch)
+    for t in (orch._capacity_task, orch._stall_task, orch._reaper_task):
+        if t is not None:
+            t.cancel()
+            try:
+                await t
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+    await db.dispose()
+
+
+# -- the full loop: flail -> fork (fresh session) -> forced plan -> execute ------
+async def test_flail_forks_a_fresh_session_and_replans_even_with_gate_off(db_url):
+    orch, chat, harness, db = await _orch(db_url, plan_gate="off")
+    try:
+        await orch.projects.add("app", "https://github.com/acme/app.git")
+        eid, chan, root = await orch.router.open_effort("spin", project="app")
+        harness.output_queue.append(_FLAIL_OUT)     # the first coding turn gets killed flailing
+        await orch.delegate(eid, chan, root, "port the parser to the new API")
+        await _drain(orch)                          # the queued re-dispatch runs
+        # the original coding turn was ARMED with the guard
+        assert harness.wakes[0]["flail_guard"] is True
+        assert harness.wakes[0]["session_id"] == eid            # generation 0
+        # the re-dispatch went through the plan gate DESPITE mode=off (forced one-shot) ...
+        assert harness.wakes[1]["plan_only"] is True
+        assert "PLAN FIRST" in harness.wakes[1]["prompt"]
+        assert "port the parser" in harness.wakes[1]["prompt"]  # the ORIGINAL goal
+        assert harness.wakes[1]["flail_guard"] is False         # plan turns are never guarded
+        # ... in a FRESH session (the fork — generation bumped by the flail event)
+        assert harness.wakes[1]["session_id"] == f"{eid}~r1"
+        # then executed (plan approved via the fail-open lens; no model queued)
+        assert harness.wakes[2]["plan_only"] is False
+        assert "REVIEWED and APPROVED" in harness.wakes[2]["prompt"]
+        assert await orch._event_count(eid, "flail_replanned") == 1
+        assert any("forking a fresh session" in p["message"] for p in chat.posted)
+    finally:
+        await _shutdown(orch, db)
+
+
+# -- bounded: a second flail is a can't-converge signal for the human ------------
+async def test_second_flail_escalates_instead_of_looping(db_url):
+    orch, chat, harness, db = await _orch(db_url)
+    try:
+        await orch.projects.add("app", "https://github.com/acme/app.git")
+        eid, chan, root = await orch.router.open_effort("stuck", project="app")
+        await orch.audit.log("flail_replanned", effort_id=eid, payload={})
+        harness.output_queue.append(_FLAIL_OUT)
+        await orch.delegate(eid, chan, root, "port the parser")
+        await _drain(orch)
+        assert len(harness.wakes) == 1                          # no re-dispatch
+        assert any("flailed again" in p["message"] for p in chat.posted)
+    finally:
+        await _shutdown(orch, db)

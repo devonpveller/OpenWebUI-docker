@@ -51,9 +51,14 @@ class WorkerHarness(Protocol):
     async def wake(
         self, base_url: str, session_id: str, prompt: str, *,
         channel: str = LC_TRIGGER_CHANNEL, on_update: OnUpdate | None = None,
+        plan_only: bool = False, flail_guard: bool = False,
     ) -> WorkResult:
         """Resume a session and run one turn to completion; return the result. `on_update`
-        streams the worker's commands + answer to the bus as it works (observability)."""
+        streams the worker's commands + answer to the bus as it works (observability).
+        `plan_only` runs the turn with edit/write tools EXCLUDED (headless plan mode) —
+        the worker can explore and reply with a plan but cannot change a file.
+        `flail_guard` arms the daemon's read-without-edit watchdog on this turn: a flailing
+        turn is killed with a FLAIL-GUARD answer marker instead of burning the timeout."""
         ...
 
     async def set_project(
@@ -118,17 +123,22 @@ class LittleCoderHarness:
     async def wake(
         self, base_url: str, session_id: str, prompt: str, *,
         channel: str = LC_TRIGGER_CHANNEL, on_update: OnUpdate | None = None,
+        plan_only: bool = False, flail_guard: bool = False,
     ) -> WorkResult:
         async with httpx.AsyncClient(base_url=base_url.rstrip("/"), timeout=60.0) as c:
-            r = await c.post(
-                "/tasks",
-                json={
-                    "prompt": prompt,
-                    "channel": channel,
-                    "user_id": "agent-bridge",
-                    "session_id": session_id,
-                },
-            )
+            body = {
+                "prompt": prompt,
+                "channel": channel,
+                "user_id": "agent-bridge",
+                "session_id": session_id,
+            }
+            if plan_only:
+                # Only sent when set, so an older daemon (no `plan_only` field) is untouched
+                # by normal wakes and merely ignores the extra key on plan wakes.
+                body["plan_only"] = True
+            if flail_guard:
+                body["flail_guard"] = True
+            r = await c.post("/tasks", json=body)
             r.raise_for_status()
             task_id = r.json()["task_id"]
             # Poll to terminal state (little-coder is async; the scheduler treats this whole
@@ -310,9 +320,11 @@ class FakeHarness:
     async def wake(
         self, base_url: str, session_id: str, prompt: str, *,
         channel: str = LC_TRIGGER_CHANNEL, on_update: OnUpdate | None = None,
+        plan_only: bool = False, flail_guard: bool = False,
     ) -> WorkResult:
         self.wakes.append(
-            {"base_url": base_url, "session_id": session_id, "prompt": prompt}
+            {"base_url": base_url, "session_id": session_id, "prompt": prompt,
+             "plan_only": plan_only, "flail_guard": flail_guard}
         )
         if base_url in self.busy_urls:
             req = httpx.Request("POST", base_url.rstrip("/") + "/tasks")
