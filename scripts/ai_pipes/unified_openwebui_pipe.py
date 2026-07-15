@@ -30,10 +30,13 @@ compose projects: main `ai-stack` + separate `open-brain`).
   Triggers: status · overview · stack · stack status · stack-status
             status of <service> · status for <service>
   Output:   Full stack view — Containers table, Tailnet URLs, Processing
-            detail, GPU temp/VRAM panel.
-  Coverage: ★ ALL containers across BOTH compose projects (32 services).
+            detail, LLM gateway panel (LiteLLM · llm-queue: now processing,
+            queue depth, top requester in queue, free slots / parallel
+            availability, idle time since last request), GPU temp/VRAM panel.
+  Coverage: ★ ALL containers across BOTH compose projects (34 services).
             Scopable to any container below:
-    core    openwebui · tailscale · llama-cpp · llama-cpp-embed · watchtower
+    core    openwebui · tailscale · llm-gateway · llm-queue · llama-cpp ·
+            llama-cpp-embed · watchtower
     memory  mnemory · mnemory-gateway · mnemory-backup
     search  tor · redis · searxng · gateway · mcpo
     coder   open-terminal · little-coder · lc-mcpo · lc-egress ·
