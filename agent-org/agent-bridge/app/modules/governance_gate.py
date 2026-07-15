@@ -315,12 +315,23 @@ class GovernanceGate:
     async def set_lifecycle(self, effort_id: str, lifecycle: str) -> None:
         """Move an effort's lifecycle (open|done|aborted). Distinct from the gate FSM state:
         a done/aborted effort drops out of the default `/status` view but its gate row stays
-        for audit. Idempotent + best-effort (never raises into the orchestrator flow)."""
+        for audit. Idempotent + best-effort (never raises into the orchestrator flow).
+
+        ABORT WINS EVERY RACE (live 2026-07-15, the gym 'ouroboros': an operator abort landed
+        while a run was in flight; the run's finish stamped `done` over `aborted`, the D2-fail
+        path then machine-reopened it, and the effort resurrected TWICE): a machine `done` may
+        never overwrite an operator `aborted`. Only the operator's own re-run path (which sets
+        `open` explicitly when reopening) brings an aborted effort back."""
         async with self.db.session_factory() as s:
             e = await s.get(Effort, effort_id)
-            if e is not None and e.lifecycle != lifecycle:
-                e.lifecycle = lifecycle
-                await s.commit()
+            if e is None or e.lifecycle == lifecycle:
+                return
+            if e.lifecycle == "aborted" and lifecycle == "done":
+                await self.audit.log("aborted_finish_suppressed", effort_id=effort_id,
+                                     payload={"attempted": lifecycle})
+                return
+            e.lifecycle = lifecycle
+            await s.commit()
 
     # ── global kill switch (§3) ──────────────────────────────────────────────
     async def kill_switch(self, on: bool = True, actor: str = "human") -> None:

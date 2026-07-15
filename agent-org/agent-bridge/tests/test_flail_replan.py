@@ -109,6 +109,55 @@ async def test_machine_loops_never_dispatch_an_archived_effort(db_url):
         await _shutdown(orch, db)
 
 
+# -- the gym 'ouroboros' quartet (2026-07-15): abort wins, config is not work ----
+async def test_machine_done_never_overwrites_an_operator_abort(db_url):
+    orch, chat, harness, db = await _orch(db_url)
+    try:
+        await orch.projects.add("app", "https://github.com/acme/app.git")
+        eid, _c, _r = await orch.router.open_effort("racer", project="app")
+        await orch.gate.set_lifecycle(eid, "aborted")
+        await orch.gate.set_lifecycle(eid, "done")            # the in-flight finish's stamp
+        assert await orch._is_aborted(eid) is True            # abort won the race
+        assert await orch._event_count(eid, "aborted_finish_suppressed") == 1
+        await orch.gate.set_lifecycle(eid, "open")            # operator re-run path still works
+        assert await orch._is_aborted(eid) is False
+    finally:
+        await _shutdown(orch, db)
+
+
+async def test_abort_without_a_concern_falls_back_to_archive(db_url):
+    orch, chat, harness, db = await _orch(db_url)
+    try:
+        await orch.projects.add("app", "https://github.com/acme/app.git")
+        eid, _c, _r = await orch.router.open_effort("plain", project="app")
+        mgmt = await orch.mgmt_channel_id()
+        await orch.nl_intake(f"abort {eid}", mgmt, user_id="operator-api")
+        assert await orch._is_aborted(eid) is True            # archived, not dead-ended
+        assert any("archiving it instead" in p["message"] or "Archived" in p["message"]
+                   for p in chat.posted)
+    finally:
+        await _shutdown(orch, db)
+
+
+async def test_pure_standing_intent_message_is_config_not_work(db_url):
+    orch, chat, harness, db = await _orch(db_url)
+    try:
+        await orch.projects.add("gym", "https://github.com/acme/gym.git")
+        mgmt = await orch.mgmt_channel_id()
+        await orch.nl_intake(
+            "in gym, set the standing intent: tests are never weakened; never use `NuGet` here.",
+            mgmt, user_id="operator-api")
+        await _drain(orch)
+        assert len(harness.wakes) == 0                        # NO effort dispatched
+        p = await orch.projects.get("gym")
+        assert "never weakened" in (p.get("standing_intent") or "")
+        # the setter echoes its blast radius (the `harness` foot-gun class)
+        assert any("Forbidden term" in m["message"] and "`NuGet`" in m["message"]
+                   for m in chat.posted)
+    finally:
+        await _shutdown(orch, db)
+
+
 # -- bounded: a second flail is a can't-converge signal for the human ------------
 async def test_second_flail_escalates_instead_of_looping(db_url):
     orch, chat, harness, db = await _orch(db_url)

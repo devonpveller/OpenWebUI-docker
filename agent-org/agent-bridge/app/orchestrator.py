@@ -1978,6 +1978,51 @@ class Orchestrator:
             await self._handle_command(_ctrl, channel_id, thread_id,
                                        user_id=user_id or "operator-api")
             return
+        # PURE standing-intent statements are CONFIG, never work (live 2026-07-15, the gym
+        # 'ouroboros': the model minted an effort_name from "in gym, set the standing intent: …",
+        # its is_work heuristic went True, and the fall-through dispatched an effort whose
+        # DELIVERABLE was the intent text — which then violated its own freshly-extracted
+        # forbidden terms). A message that OPENS by setting/clearing the standing intent is
+        # handled deterministically here; work requests that merely restate a rule mid-sentence
+        # (the 2026-07-07 anti-eat case) don't match this shape and still dispatch.
+        m_si = re.match(
+            r"^\s*(?:in\s+(?P<proj>[A-Za-z0-9][\w.-]*)\s*[,:]?\s+)?(?P<verb>set|update|change|clear)"
+            r"\s+(?:the\s+)?standing\s+intent\b\s*(?:for\s+(?P<proj2>[A-Za-z0-9][\w.-]*))?"
+            r"\s*(?:to|:|=)?\s*(?P<text>.*)$",
+            message.strip(), re.I | re.S)
+        if m_si:
+            named = m_si.group("proj") or m_si.group("proj2")
+            p = await self.projects.resolve(named) if named else None
+            if p is None:
+                slug = await self.router.resolve_project_by_channel(channel_id)
+                p = await self.projects.get(slug) if slug else None
+            if p is not None:
+                si = "" if m_si.group("verb").lower() == "clear" else m_si.group("text").strip()
+                await self.projects.set_standing_intent(p["slug"], si)
+                if si:
+                    # ECHO THE EXTRACTED FORBIDDEN TERMS (live 2026-07-15: a backticked word
+                    # after a negation silently became a diff-wide forbidden term — `harness` —
+                    # and rejected deliveries that merely named it; the setter must show its
+                    # blast radius so wording mistakes surface immediately).
+                    forb = self._forbidden_terms(si)
+                    forb_note = (
+                        "\nForbidden term(s) I will reject in any diff: "
+                        + ", ".join(f"`{t}`" for t in forb) + "."
+                        if forb else
+                        "\n(No diff-level forbidden terms — backtick a word after a negation to "
+                        "block it in diffs.)")
+                    body = (f"🧭 Standing intent set for **`{p['slug']}`** (config only — no "
+                            f"work dispatched): _{si}_{forb_note}")
+                else:
+                    body = f"🧭 Cleared the standing intent on **`{p['slug']}`**."
+                await self.chat.post(channel_id, body, thread_id=thread_id)
+                return
+            await self.chat.post(
+                channel_id,
+                "Which project is that standing intent for? Say `in <project>, set the standing "
+                "intent: …`.",
+                thread_id=thread_id)
+            return
         # NL-FIRST merge (D4): a plain "merge it" / "merge the PR" resolves the pending merge
         # DETERMINISTICALLY (never via the small model — this is an irreversible action; the phrase
         # is the operator's explicit clearance). One pending → merge it (echo which); several →
@@ -9006,6 +9051,16 @@ class Orchestrator:
                 )
                 await reply(f"✅ `{effort_id}` {cmd} applied — state now `{await self.gate.state_of(effort_id)}`")
             except Exception as exc:  # noqa: BLE001
+                # ABORT FALLBACK (live 2026-07-15, the gym 'ouroboros'): `abort <effort>` on an
+                # effort with NO open concern used to dead-end on "no open concern" — but the
+                # operator's plain meaning is CANCEL THE EFFORT. Fall back to archiving it
+                # (reversible; pushed branches kept), exactly like the NL archive path.
+                if (cmd == "abort" and effort_id.startswith("effort-")
+                        and "no open concern" in str(exc)):
+                    await self._archive_efforts(
+                        [effort_id], mgmt_channel=channel_id, mgmt_thread=thread_id,
+                        reply_prefix=f"_(no open concern on `{effort_id}` — archiving it instead)_")
+                    return
                 await reply(f"⚠️ could not {cmd} `{effort_id}`: {exc}")
         elif cmd == "risk":
             if len(args) < 2:
