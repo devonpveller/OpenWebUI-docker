@@ -4537,7 +4537,11 @@ class Orchestrator:
             f"if git diff --cached --quiet 2>/dev/null; then echo PM_PUBLISH_NOTHING_TO_COMMIT; "
             f"else git commit -m \"{effort_id}: round progress (published by the PM — the worker's "
             f"turn ended before it could commit)\" 2>&1; fi; "
-            f"git push origin {branch} 2>&1; echo PM_PUBLISH_DONE"
+            # ONE bounded push retry: a transient 'unable to access' (live 2026-07-15: a single
+            # GitHub hiccup) must not convert a committed round into "produced nothing" — the
+            # manual re-push seconds later succeeded. The re-verify below stays the arbiter.
+            f"git push origin {branch} 2>&1 || {{ echo PM_PUSH_RETRY; sleep 8; "
+            f"git push origin {branch} 2>&1; }}; echo PM_PUBLISH_DONE"
         )
         try:
             exit_code, out, timed_out = await self.router.exec_check(
