@@ -158,6 +158,56 @@ async def test_pure_standing_intent_message_is_config_not_work(db_url):
         await _shutdown(orch, db)
 
 
+# -- gym findings ⑤+⑥ (2026-07-15): explicit efforts dispatch; checks are org-run -
+async def test_start_effort_idiom_is_deterministic_even_with_hygiene_bait(db_url):
+    """Finding ⑤: 'start effort gym-003…' whose goal mentioned branches was captured whole by
+    branch hygiene and never dispatched. The explicit idiom now opens + intakes directly."""
+    orch, chat, harness, db = await _orch(db_url)
+    try:
+        await orch.projects.add("gym", "https://github.com/acme/gym.git")
+        mgmt = await orch.mgmt_channel_id()
+        from app.schemas import ReadinessVerdict
+        orch.models._client.queue_structured(
+            ReadinessVerdict(clear_and_safe=True, blast_radius="routine"))
+        await orch.nl_intake(
+            "in gym, start effort gym-007-cleanup: tidy the module layout; do not build on any "
+            "other agent branch or leftover branches in the workspace.",
+            mgmt, user_id="operator-api")
+        await _drain(orch)
+        assert await orch._is_aborted("effort-gym-007-cleanup") is False   # row exists, open
+        assert len(harness.wakes) >= 1                                     # actually dispatched
+        assert not any("Branch inventory" in p["message"] for p in chat.posted)
+    finally:
+        await _shutdown(orch, db)
+
+
+async def test_d2_check_is_org_run_when_deterministic_route_works(db_url):
+    """Finding ⑥: every gym D2 closed 'worker-reported' — the check's subject was also its
+    executor. With a branch+repo, _run_check now execs deterministically on a verifier slot."""
+    orch, chat, harness, db = await _orch(db_url)
+    try:
+        await orch.projects.add("gym", "https://github.com/acme/gym.git")
+        eid, _c, _r = await orch.router.open_effort("checked", project="gym")
+        harness.check_queue.append((0, "OK 5 tests", False))
+        status, tail, prov = await orch._run_check(
+            eid, "python3 -m unittest discover", branch="agent/x",
+            repo="https://github.com/acme/gym.git")
+        assert (status, prov) == ("pass", "org-run")
+        harness.check_queue.append((1, "FAILED (failures=1)", False))
+        status, tail, prov = await orch._run_check(
+            eid, "python3 -m unittest discover", branch="agent/x",
+            repo="https://github.com/acme/gym.git")
+        assert (status, prov) == ("fail", "org-run") and "FAILED" in tail
+        # deterministic route unavailable (empty check queue raises) -> honest fallback
+        harness.output_queue.append("CHECK: PASS")
+        status, tail, prov = await orch._run_check(
+            eid, "python3 -m unittest discover", branch="agent/x",
+            repo="https://github.com/acme/gym.git")
+        assert (status, prov) == ("pass", "worker-reported")
+    finally:
+        await _shutdown(orch, db)
+
+
 # -- bounded: a second flail is a can't-converge signal for the human ------------
 async def test_second_flail_escalates_instead_of_looping(db_url):
     orch, chat, harness, db = await _orch(db_url)

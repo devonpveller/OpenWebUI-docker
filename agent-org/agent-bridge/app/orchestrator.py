@@ -2023,6 +2023,37 @@ class Orchestrator:
                 "intent: …`.",
                 thread_id=thread_id)
             return
+        # EXPLICIT NEW-EFFORT idiom — deterministic, immune to the board/hygiene classifiers
+        # (gym finding ⑤, 2026-07-15: "start effort gym-003-…: <goal>" whose goal text mentioned
+        # branches was captured WHOLE by branch hygiene and never dispatched; the anti-capture
+        # guard only protected NAMED RE-RUNS). "start [a new] effort <name>: <goal>" is beyond
+        # classification doubt — open it and run the normal governed intake directly. Bonus: the
+        # effort id becomes exactly `effort-<name>` instead of a model-mangled slug.
+        m_ne = re.match(
+            r"^\s*(?:in\s+(?P<proj>[A-Za-z0-9][\w.-]*)\s*[,:]?\s+)?start\s+(?:a\s+new\s+)?"
+            r"effort\s+(?P<name>[A-Za-z0-9][\w-]{2,60})\s*[:\-–—]\s*(?P<goal>.+)$",
+            message.strip(), re.I | re.S)
+        if m_ne:
+            _p = None
+            if m_ne.group("proj"):
+                _p = await self.projects.resolve(m_ne.group("proj"))
+            if _p is None:
+                _slug = await self.router.resolve_project_by_channel(channel_id)
+                _p = await self.projects.get(_slug) if _slug else None
+            if _p is not None:
+                _goal = m_ne.group("goal").strip()
+                eid, chan, root = await self.router.open_effort(
+                    m_ne.group("name"), project=_p["slug"], goal=_goal)
+                await self.chat.post(
+                    channel_id,
+                    f"On it — opened {self._effort_link(eid, root)} on `{_p['slug']}`; running "
+                    f"readiness now.",
+                    thread_id=thread_id)
+                await self._intake_or_dispatch(
+                    eid, chan, root, _goal, reply_prefix="",
+                    mgmt_channel=channel_id, mgmt_thread=thread_id)
+                return
+            # no resolvable project — fall through to the model, which will ask
         # NL-FIRST merge (D4): a plain "merge it" / "merge the PR" resolves the pending merge
         # DETERMINISTICALLY (never via the small model — this is an irreversible action; the phrase
         # is the operator's explicit clearance). One pending → merge it (echo which); several →
@@ -6886,13 +6917,36 @@ class Orchestrator:
                              payload={"repo": repo, "pr": pr_number, "merge_id": merge_id})
         return res.url
 
-    async def _run_check(self, effort_id: str, check_cmd: str) -> tuple[str, str]:
-        """Run the project's D2 check command on the AFFINE worker (its workspace is already on the
-        delivered branch after publish). Returns (status, tail): 'pass' | 'fail' | 'unknown'.
-        Worker-reported (the worker executes + reports the exit) — labelled as such upstream."""
+    async def _run_check(self, effort_id: str, check_cmd: str,
+                         branch: str | None = None, repo: str | None = None,
+                         ) -> tuple[str, str, str]:
+        """Run the project's D2 check — ORG-RUN first. The deterministic `/check` exec (a
+        verifier slot, real exit code, no model) runs `check_cmd` against the DELIVERED branch;
+        only when that route is unavailable does it fall back to the old worker-reported wake.
+        Gym finding ⑥ (2026-07-15): every gym delivery closed "D2 passed (worker-reported)"
+        because this path only ever ASKED THE WORKER — the subject of verification was also its
+        executor, on a project where the deterministic route worked fine. Verification is a
+        machine step. Returns (status, tail, provenance): status 'pass'|'fail'|'unknown',
+        provenance 'org-run'|'worker-reported'."""
+        if branch and repo:
+            self._verify_seq += 1
+            det = (f"git fetch origin {branch} && git checkout -f FETCH_HEAD && {check_cmd}")
+            try:
+                repo_token = await self._project_token(effort_id)
+                rc, out, timed_out = await self.router.exec_check(
+                    effort_id, command=det, session_id=f"{effort_id}~d2{self._verify_seq}",
+                    repo=repo, repo_token=repo_token, timeout=900)
+                if timed_out:
+                    return "unknown", "org-run check timed out", "org-run"
+                if rc == 0:
+                    return "pass", "", "org-run"
+                if rc is not None:
+                    return "fail", (out or "").strip()[-600:], "org-run"
+            except Exception as exc:  # noqa: BLE001 — deterministic route missing → fall back
+                log.debug("org-run D2 check unavailable for %s: %s", effort_id, exc)
         loc = await self.router.effort_thread(effort_id)
         if not loc:
-            return "unknown", "no effort thread"
+            return "unknown", "no effort thread", "worker-reported"
         channel_id, root = loc
         instruction = (
             f"RUN THE PROJECT CHECK (a verification step — change NOTHING). Execute exactly:\n"
@@ -6906,13 +6960,13 @@ class Orchestrator:
                 session_id=await self._session_for(effort_id), instruction=instruction, repo=None,
             )
         except (httpx.HTTPStatusError, httpx.TransportError, NoCapacityError) as exc:
-            return "unknown", str(exc)[:160]
+            return "unknown", str(exc)[:160], "worker-reported"
         out = (result.output or "") if result else ""
         if "CHECK: PASS" in out:
-            return "pass", ""
+            return "pass", "", "worker-reported"
         if "CHECK: FAIL" in out:
-            return "fail", out.split("CHECK: FAIL", 1)[1].strip()[:600]
-        return "unknown", out.strip()[:200]
+            return "fail", out.split("CHECK: FAIL", 1)[1].strip()[:600], "worker-reported"
+        return "unknown", out.strip()[:200], "worker-reported"
 
     async def _d2_gate(self, effort_id: str, repo: str, delivery: BranchDelivery,
                        merge_id: str) -> tuple[str, BranchDelivery]:
@@ -6928,9 +6982,10 @@ class Orchestrator:
         if not check_cmd:
             return (f"\n🧪 _D2 checks skipped — no check command configured for `{proj}` "
                     f"(set one: `/project check {proj} \"<cmd>\"`)._", delivery)
-        status, tail = await self._run_check(effort_id, check_cmd)
+        status, tail, prov = await self._run_check(
+            effort_id, check_cmd, branch=delivery.branch, repo=repo)
         if status == "pass":
-            return f"\n🧪 **D2 checks passed** (`{check_cmd}`, worker-reported).", delivery
+            return f"\n🧪 **D2 checks passed** (`{check_cmd}`, {prov}).", delivery
         if status == "unknown":
             return (f"\n🧪 _D2 check couldn't run ({tail or 'no verdict'}) — presenting the merge "
                     f"gate WITHOUT a green check; verify before merging._", delivery)
@@ -6962,10 +7017,11 @@ class Orchestrator:
             new_delivery = await self._verify_delivery(effort_id, repo)
             if new_delivery.landed:
                 delivery = new_delivery
-            status2, tail2 = await self._run_check(effort_id, check_cmd)
+            status2, tail2, prov2 = await self._run_check(
+                effort_id, check_cmd, branch=delivery.branch, repo=repo)
             if status2 == "pass":
                 return (f"\n🧪 **D2 checks passed after one fix round** (`{check_cmd}`, "
-                        f"worker-reported).", delivery)
+                        f"{prov2}).", delivery)
         # STILL red → withdraw the merge gate (the PR stays open for human inspection) and hand
         # the failing log to the BURN-DOWN — a red with a work list keeps being worked, not
         # parked on the operator (operator 2026-07-07). Never forward on red.
