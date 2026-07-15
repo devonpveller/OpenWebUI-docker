@@ -11,8 +11,12 @@ mkdir -p /var/lib/little-coder/journals \
          /workspace
 chown -R lc:lc /var/lib/little-coder /workspace 2>/dev/null || true
 # The workspace volume is shared with open-terminal (a different uid); make
-# the mount point traversable/writable from both planes.
-chmod 0777 /workspace 2>/dev/null || true
+# the WHOLE TREE traversable/writable from both planes, not just the mount
+# point. Recursive (live 2026-07-14): dotnet build artifacts under vendor/
+# were owned by a foreign uid, the ot-plane wipe couldn't delete them, and
+# every re-clone failed on the non-empty dir — a worker restart must
+# self-heal any such leftovers. Runs as root, so ownership never blocks it.
+chmod -R 0777 /workspace 2>/dev/null || true
 
 # models.json override — points the llamacpp provider at ai-stack's llama-swap
 # and registers the model ids it actually serves (see config/models.json).

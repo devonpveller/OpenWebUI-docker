@@ -272,17 +272,16 @@ def _parse_handoff(output: str) -> dict | None:
             "log": output[m.start():][:2600]}
 
 
-# A PLAN that intends to delete/remove/gut functionality — on a goal that is NOT a removal goal,
-# that's the delete-to-pass shortcut declared UP FRONT, caught before any work happens (the
-# delivery-side removal gate stays as the backstop). Deliberately object-anchored (file/class/
-# feature/…) so "remove the unused import" doesn't trip it.
-_PLAN_REMOVAL_RE = re.compile(
-    r"\b(delet|remov|dropp?|gutt?|stripp?)\w*\b[^.\n]{0,45}\b(files?|class(es)?|methods?|"
-    r"features?|components?|functionality|\w+\.\w{1,5})\b", re.I)
-
 # The little-coder daemon's flail-guard answer marker: the turn was KILLED for reading without
 # ever editing (operator 2026-07-14) — the bridge forks a fresh session and re-plans.
 _FLAIL_MARKER = "FLAIL-GUARD:"
+
+# NOTE (operator 2026-07-14, after two live false-positive generations): "the plan inclusion
+# needs REASONING, not determinism." A plan is PROSE about intent — a bare substring match
+# rejected honest plans for naming the very term they were REMOVING, and a context-regex is just
+# a longer keyword list. Plan judgment is therefore the PM LLM lens's job alone (fed the standing
+# intent + forbidden terms as reasoning context); determinism stays where the surface IS
+# deterministic — the delivery gates on actual diffs (added lines, file deletions, exit codes).
 
 
 def _is_transient_focus_collision(detail: str) -> bool:
@@ -3795,7 +3794,12 @@ class Orchestrator:
                                         "check_infra_error", "org_build_unverifiable",
                                         # a flail-guard kill forks a FRESH session (2026-07-14):
                                         # the flailing context is the poison — never re-enter it
-                                        "flail_replanned")),
+                                        "flail_replanned",
+                                        # an EMPTY plan reply / a plan-gate stop = a rotted or
+                                        # overflowing session (live 2026-07-14: a 593KB base
+                                        # session returned EMPTY on every plan turn) — the retry
+                                        # and any operator re-run must start fresh
+                                        "worker_plan_empty", "worker_plan_stopped")),
                         Event.effort_id == effort_id)
                 )).scalar_one())
         except Exception as exc:  # noqa: BLE001 — affinity fallback, never a dispatch blocker
@@ -4689,10 +4693,20 @@ class Orchestrator:
                 log.debug("App-token for host %s skipped: %s", slug, exc)
         return None
 
-    async def _reopen_if_closed(self, effort_id: str) -> None:
+    async def _is_aborted(self, effort_id: str) -> bool:
+        """The operator ARCHIVED this effort — machine loops must treat that as a full stop."""
         async with self.db.session_factory() as s:
             e = await s.get(Effort, effort_id)
-            if e is not None and e.lifecycle != "open":
+        return bool(e is not None and e.lifecycle == "aborted")
+
+    async def _reopen_if_closed(self, effort_id: str) -> None:
+        # NEVER machine-resurrect an operator ABORT (live 2026-07-14: an archived effort's
+        # queued flail-replan re-dispatched, its burn-down REOPENED it, and a zombie loop ground
+        # rounds on a wrong branch for an hour). `done` may reopen (convergent re-reports);
+        # `aborted` reopens only through the operator's own explicit re-run/re-report path.
+        async with self.db.session_factory() as s:
+            e = await s.get(Effort, effort_id)
+            if e is not None and e.lifecycle == "done":
                 e.lifecycle = "open"
                 await s.commit()
 
@@ -4752,6 +4766,14 @@ class Orchestrator:
         # that picks it will find the effort in-flight and skip via this same guard.)
         if effort_id in self._delegating:
             log.info("delegate: %s already executing — skipping duplicate dispatch", effort_id)
+            return
+        # ABORTED IS FINAL for machine loops (live 2026-07-14: a queued flail-replan re-dispatch
+        # ran AFTER the operator archived the effort — a zombie worked a wrong branch for an
+        # hour). Auto-iterate/flail/burn-down/park-drain re-entries all pass through here; only
+        # the operator's own re-run (which reopens the effort first) may dispatch it again.
+        if await self._is_aborted(effort_id):
+            await self.audit.log("aborted_dispatch_suppressed", effort_id=effort_id)
+            log.info("delegate: %s is archived (operator abort) — not dispatching", effort_id)
             return
         self._delegating.add(effort_id)   # honest "work is happening now" marker
         # A (re-)dispatch supersedes a handoff wait — the operator's manual re-run must never be
@@ -5702,6 +5724,11 @@ class Orchestrator:
         if effort_id in self._delegating:
             self._burndown_after[effort_id] = failing_log
             return
+        # ABORTED IS FINAL — a burn-down must never start on (or resurrect) an archived effort.
+        if await self._is_aborted(effort_id):
+            await self.audit.log("aborted_dispatch_suppressed", effort_id=effort_id,
+                                 payload={"loop": "burndown"})
+            return
         self._delegating.add(effort_id)
         try:
             loc = await self.router.effort_thread(effort_id)
@@ -5739,6 +5766,12 @@ class Orchestrator:
             # detector below). The cap is only a runaway guard for a campaign progressing every round.
             cap = max(1, self.s.burndown_round_cap)
             for rnd in range(1, cap + 1):
+                if await self._is_aborted(effort_id):
+                    # The operator archived it mid-campaign — stop silently and finally (the
+                    # archive already told them; the branch keeps whatever landed).
+                    await self.audit.log("aborted_dispatch_suppressed", effort_id=effort_id,
+                                         payload={"loop": "burndown-round", "round": rnd})
+                    return
                 if await self.gate.is_killed() or await self.gate.is_frozen(effort_id):
                     await self.comms.post(
                         Intent.worker_activity,
@@ -8337,23 +8370,28 @@ class Orchestrator:
             p = await self.projects.get(proj) if proj else None
         except Exception:  # noqa: BLE001
             p = None
-        low = plan.lower()
-        for t in self._forbidden_terms((p or {}).get("standing_intent") or ""):
-            if t.lower() in low:
-                return f"it reintroduces `{t}`, which the project's standing intent forbids"
-        if not self._REMOVAL_GOAL_RE.search(goal or ""):
-            m = _PLAN_REMOVAL_RE.search(plan)
-            if m:
-                return (f"it plans to “{m.group(0).strip()[:80]}” — deleting features "
-                        f"is not part of this goal (port/keep them, don't drop them)")
+        # REASONING, not determinism (operator 2026-07-14): the lens judges INTENT, with the
+        # standing intent + forbidden terms supplied as context — and told explicitly that
+        # naming a forbidden thing in order to REMOVE it is compliant (two honest removal
+        # plans were rejected by keyword matching before this). Fails open on a model hiccup:
+        # the delivery gates on the ACTUAL diff remain the deterministic backstop.
+        si = ((p or {}).get("standing_intent") or "").strip()
+        forb = self._forbidden_terms(si)
         try:
             verdict = await self.models.structured(
                 "pm",
                 "You are the PM. A worker proposed this PLAN before touching any code. Judge "
-                "ONLY whether executing the plan would accomplish the GOAL without violating "
-                "its stated constraints or dropping/deleting existing functionality. Set "
-                "deviates=true only for a real misalignment, with the rationale.",
-                f"GOAL:\n{(goal or '')[:2000]}\n\nWORKER PLAN:\n{plan[:2500]}",
+                "whether EXECUTING the plan would accomplish the GOAL without violating its "
+                "constraints. Reason about INTENT, not keywords: a plan that mentions a "
+                "forbidden thing in order to REMOVE or verify the absence of it is COMPLIANT; "
+                "a plan that would add it back, keep depending on it, or delete working "
+                "features to force a green build is a DEVIATION. Set deviates=true only for a "
+                "real misalignment, with a specific rationale.",
+                f"GOAL:\n{(goal or '')[:2000]}\n\n"
+                f"STANDING INTENT (non-negotiable constraint):\n{si or '(none)'}\n\n"
+                f"FORBIDDEN — must never be (re)introduced; removing/mentioning them is fine: "
+                f"{', '.join(forb) if forb else '(none)'}\n\n"
+                f"WORKER PLAN:\n{plan[:2500]}",
                 MonitorVerdict,
             )
         except ModelBackpressureError:
@@ -8391,7 +8429,9 @@ class Orchestrator:
             f"The goal:\n{goal}"
         )
         reason: str | None = None
-        for attempt in (1, 2):
+        misaligned = 0
+        empties = 0
+        while misaligned < 2:
             result = await self.router.wake(
                 effort_id, role="worker-default", thread_id=root, channel_id=channel_id,
                 session_id=await self._session_for(effort_id), instruction=instr,
@@ -8410,6 +8450,26 @@ class Orchestrator:
                     raise ModelBackpressureError(f"plan turn shed: {out[:160]}")
                 await self._escalate_worker_failure(effort_id, result)
                 return False
+            if not out.strip():
+                # An EMPTY plan reply is a rotted/overflowing SESSION symptom, not a worker
+                # decision (live 2026-07-14: a 593KB base session made the model return EMPTY on
+                # every plan turn — the gate stopped with "plan missing", honest but self-healable).
+                # The `worker_plan_empty` event bumps _session_for's generation, so the retry runs
+                # the SAME self-contained plan request in a FRESH session. One retry; a second
+                # empty is a real can't-answer and stops below.
+                empties += 1
+                await self.audit.log("worker_plan_empty", effort_id=effort_id,
+                                     payload={"retry": empties})
+                if empties <= 1:
+                    await self.comms.post(
+                        Intent.worker_activity,
+                        "🌀 The plan turn came back EMPTY — a rotted/overflowing session, not an "
+                        "answer. Retrying the plan request in a FRESH session.",
+                        effort_id=effort_id,
+                    )
+                    continue
+                reason = "the worker replied EMPTY twice, even in a fresh session"
+                break
             # A genuine blocker named at PLAN time is the cheapest possible catch — elevate it
             # before any work. EXPLICIT protocol markers only: the plan's RISKS section is
             # SUPPOSED to speculate ("could be blocked by…"), so the plain-language blocker
@@ -8421,16 +8481,17 @@ class Orchestrator:
             reason = await self._plan_misalignment(effort_id, goal, out)
             if reason is None:
                 await self.audit.log("worker_plan_approved", effort_id=effort_id,
-                                     payload={"attempt": attempt})
+                                     payload={"attempt": misaligned + 1})
                 await self.comms.post(
                     Intent.worker_activity,
                     "✅ Plan reviewed — aligned with the goal. Executing it now.",
                     effort_id=effort_id,
                 )
                 return True
+            misaligned += 1
             await self.audit.log("worker_plan_rejected", effort_id=effort_id,
-                                 payload={"attempt": attempt, "reason": reason[:300]})
-            if attempt == 1:
+                                 payload={"attempt": misaligned, "reason": reason[:300]})
+            if misaligned == 1:
                 await self.comms.post(
                     Intent.worker_activity,
                     f"↩️ Plan NOT aligned — {reason}. Asking for a revised plan (no code has "
@@ -8442,9 +8503,17 @@ class Orchestrator:
                     f"Write a REVISED plan in the same format (UNDERSTANDING / PLAN / WON'T DO / "
                     f"RISKS) that fixes this. Do NOT change any file this turn."
                 )
-        msg = (f"⛔ **{effort_id}** — the worker's plan stayed misaligned after one revision "
-               f"({reason}). Stopped **before any code was touched** — that's the point of the "
-               f"plan gate. Steer it (tell me what to change) or say “re-run it”.")
+        # The stop event ALSO rotates _session_for's generation, so the operator's "re-run it"
+        # starts from a fresh session instead of re-entering the one that just failed here.
+        await self.audit.log("worker_plan_stopped", effort_id=effort_id,
+                             payload={"reason": (reason or "")[:250]})
+        # Say WHAT the effort is for, not just its id (operator 2026-07-14, twice: the stop
+        # "doesn't state at all what specific task it's planned for").
+        goal_head = " ".join((goal or "").strip().split())[:160]
+        msg = (f"⛔ **{effort_id}** — its task: “{goal_head}…”\n"
+               f"The worker couldn't produce an aligned plan ({reason}). Stopped **before any "
+               f"code was touched** — that's the point of the plan gate. Steer it (tell me what "
+               f"to change) or say “re-run it” (a re-run starts from a fresh session).")
         await self.comms.post(Intent.escalation, msg, effort_id=effort_id)
         await self.comms.post(Intent.operator_reply, msg,
                               thread_id=self._mgmt_thread_of(effort_id))

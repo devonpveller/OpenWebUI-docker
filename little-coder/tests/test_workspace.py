@@ -87,6 +87,32 @@ def test_clone_with_deploy_token_injects_https_credential():
     assert "x-access-token:tok-secret@" in cmd
 
 
+def test_clone_exit_code_survives_the_token_reauth_suffix():
+    """2026-07-14 (the false-focus incident): with a deploy token, clone() appended the submodule
+    origin re-bake as `; (... || true)` — making the SHELL'S exit code the reauth's uncondition-
+    al 0, never the clone's. A clone failing 128 on a non-wipeable workspace reported ok=True in
+    0.3s; the daemon claimed focus on a VOID tree and the bridge quarantine-looped both workers
+    with an idle GPU. The clone's rc must be captured and re-raised as the command's exit, with
+    every best-effort extra gated on it."""
+    ot = _FakeOT()
+    ws = WorkspaceManager(ot, workspace_path="/workspace", real_git="/usr/bin/git")
+    ws.clone(WIDGET, deploy_token="tok-x")
+    cmd, _cwd = ot.calls[0]
+    assert "rc=$?" in cmd                                   # the clone's exit code is captured...
+    assert cmd.rstrip().endswith("exit $rc")                # ...and is the command's final word
+    assert cmd.index("clone") < cmd.index("rc=$?")
+    # the best-effort extras only run on a SUCCESSFUL clone
+    assert cmd.count("if [ $rc -eq 0 ]") == 2               # submodule init + token re-bake
+
+
+def test_clone_exit_code_is_honest_without_a_token_too():
+    ot = _FakeOT()
+    ws = WorkspaceManager(ot, workspace_path="/workspace", real_git="/usr/bin/git")
+    ws.clone(WIDGET)
+    cmd, _cwd = ot.calls[0]
+    assert "rc=$?" in cmd and cmd.rstrip().endswith("exit $rc")
+
+
 def test_deploy_token_rebakes_submodule_push_credential_on_task_focus():
     """2026-07-12: a composition fix is edited inside a vendored submodule and PUSHED to ITS own
     remote on a NORMAL task focus (non-recursive). The submodule origin must get the push token

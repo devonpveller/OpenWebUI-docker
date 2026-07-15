@@ -87,6 +87,28 @@ async def test_flail_forks_a_fresh_session_and_replans_even_with_gate_off(db_url
         await _shutdown(orch, db)
 
 
+# -- ABORTED IS FINAL: no machine loop may dispatch or resurrect an archive ------
+async def test_machine_loops_never_dispatch_an_archived_effort(db_url):
+    """2026-07-14 live zombie: the operator archived a mis-routed effort, but its queued
+    flail-replan re-dispatch ran anyway, the burn-down REOPENED it, and a ghost campaign ground
+    rounds on a wrong branch for an hour while the PM narrated nothing useful. Aborted =
+    machine-final; only the operator's own re-run path may bring an effort back."""
+    orch, chat, harness, db = await _orch(db_url)
+    try:
+        await orch.projects.add("app", "https://github.com/acme/app.git")
+        eid, chan, root = await orch.router.open_effort("ghost", project="app")
+        await orch.gate.set_lifecycle(eid, "aborted")
+        await orch.delegate(eid, chan, root, "do the thing")      # queued machine re-entry
+        assert len(harness.wakes) == 0                            # refused, no worker touched
+        assert await orch._event_count(eid, "aborted_dispatch_suppressed") >= 1
+        await orch._burndown_loop(eid, "error CS0001: boom")      # zombie burn-down attempt
+        assert len(harness.wakes) == 0
+        await orch._reopen_if_closed(eid)                         # machine reopen path
+        assert await orch._is_aborted(eid) is True                # still archived
+    finally:
+        await _shutdown(orch, db)
+
+
 # -- bounded: a second flail is a can't-converge signal for the human ------------
 async def test_second_flail_escalates_instead_of_looping(db_url):
     orch, chat, harness, db = await _orch(db_url)

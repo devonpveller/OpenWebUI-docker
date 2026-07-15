@@ -173,14 +173,26 @@ class WorkspaceManager:
         # directory" (live 2026-07-10: this exact exit-128 wedged a composition focus and the effort
         # sat silent ~2h). Wipe the CONTENTS first (keep the mount point), then clone. Safe: a CLONE
         # is only decided when there's nothing to preserve (no focus, or switching repos).
-        wipe_ws = (f"find {ws} -mindepth 1 -maxdepth 1 -exec rm -rf {{}} + 2>/dev/null; "
+        # chmod first: leftover BUILD ARTIFACTS can be owned by a different uid than the exec user
+        # (live 2026-07-14: dotnet `bin/Debug` files under vendor/ were undeletable → the wipe
+        # silently left 379M behind → clone failed 'destination not empty'). u+w only helps
+        # own files; the durable cross-uid heal is the worker entrypoint's recursive chmod.
+        wipe_ws = (f"chmod -R u+w {ws} 2>/dev/null; "
+                   f"find {ws} -mindepth 1 -maxdepth 1 -exec rm -rf {{}} + 2>/dev/null; "
                    f"find {ws} -mindepth 1 -delete 2>/dev/null || true")
         cmd = (
-            f"{wipe_ws}; umask 000; {g} clone{branch_flag} {shlex.quote(url)} {ws} && "
+            # THE CLONE'S EXIT CODE IS THE RESULT — captured in `rc` and re-raised by the trailing
+            # `exit $rc`, so no best-effort suffix can mask a failed clone (live 2026-07-14: the
+            # token-reauth suffix ended `|| true`, a failed clone reported ok=True in 0.3s, the
+            # daemon claimed focus on a VOID workspace, and the bridge quarantine-looped both
+            # workers for hours with an idle GPU — a silent false "ok" at the very bottom of the
+            # stack defeated every honesty gate above it).
+            f"{wipe_ws}; umask 000; {g} clone{branch_flag} {shlex.quote(url)} {ws}; rc=$?; "
             # Default: DIRECT submodules only. `recurse`: the full nested tree, which a composition
             # build requires — the operator-privileged clone is the ONLY place `submodule` can run
             # (the proxy denies it to the worker), so recursive init MUST happen here or never.
-            f"(cd {ws} && {g} submodule update --init{recurse_flag} 2>/dev/null || true)"
+            f"if [ $rc -eq 0 ]; then "
+            f"(cd {ws} && {g} submodule update --init{recurse_flag} 2>/dev/null || true); fi"
         )
         if deploy_token:
             # WORK-IN-HOST delivery: a composition fix is edited in-place inside a vendored
@@ -203,7 +215,10 @@ class WorkspaceManager:
                 f"\"https://x-access-token:{tok}@github.com/${{u#https://github.com/}}\" ;; "
                 f"esac' 2>/dev/null || true"
             )
-            cmd += f" ; ({reauth})"
+            # Gated on the clone's rc and never the last word on the exit code — the reauth's
+            # `|| true` must not bless a failed clone (the 2026-07-14 false-focus incident).
+            cmd += f" ; if [ $rc -eq 0 ]; then ({reauth}); fi"
+        cmd += " ; exit $rc"
         return self.ot.execute(cmd, cwd="/", timeout=self.clone_timeout)
 
     def refresh_origin_auth(
