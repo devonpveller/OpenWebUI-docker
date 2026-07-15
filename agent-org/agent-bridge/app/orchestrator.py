@@ -1966,6 +1966,18 @@ class Orchestrator:
         report status) are executed; safety decisions are NOT auto-run from fuzzy NL — the PO
         asks for the explicit, auditable command (governance §3). Runs on the PO profile's lane
         (local qwen36-27b by default; cloud if P0.5 mandated)."""
+        # CONTROL-SURFACE PARITY (live 2026-07-15, iteration-2's first gate): `approve <effort>`
+        # sent through POST /nl reached the PO MODEL, which NARRATED "Approved. Dispatching…"
+        # while the plan stayed `draft` — a false-ack at the operator API, because the privileged
+        # command grammar was only checked on the CHAT path (handle_event). Every inlet gets the
+        # same control surface: a decision/kill/slash message routes to _handle_command, exactly
+        # as /nl's contract promises ("drives the org EXACTLY like a chat message"). Idempotent
+        # for the chat path (handle_event already returns before nl_intake on a control message).
+        _ctrl = _MENTION_RE.sub("", message).strip()
+        if _CONTROL_RE.match(_ctrl):
+            await self._handle_command(_ctrl, channel_id, thread_id,
+                                       user_id=user_id or "operator-api")
+            return
         # NL-FIRST merge (D4): a plain "merge it" / "merge the PR" resolves the pending merge
         # DETERMINISTICALLY (never via the small model — this is an irreversible action; the phrase
         # is the operator's explicit clearance). One pending → merge it (echo which); several →

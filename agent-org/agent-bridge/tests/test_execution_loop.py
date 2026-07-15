@@ -133,6 +133,36 @@ async def test_plan_approval_gate_holds_until_approved(db_url):
         await db.dispose()
 
 
+async def test_operator_api_approve_reaches_the_control_surface(db_url):
+    """2026-07-15 (iteration-2's very first gate): `approve <effort>` sent through POST /nl —
+    which calls nl_intake directly — bypassed handle_event's control surface, so the PO MODEL
+    narrated "Approved. Dispatching…" while the plan stayed `draft` (a false-ack at the operator
+    API). The control grammar now applies inside nl_intake itself: every inlet honors
+    decision/kill/slash commands exactly like chat."""
+    orch, chat, harness, db = await _orch(db_url, plan_approval="always", review_mode="off")
+    try:
+        mgmt = await orch.mgmt_channel_id()
+        orch.models._client.queue_structured(
+            OperatorIntent(kind="request", effort_name="api-2-approved", reply="ok"))
+        orch.models._client.queue_structured(
+            ReadinessVerdict(clear_and_safe=True, blast_radius="routine"))
+        orch.models._client.queue_structured(
+            Plan(intent_thread="i", feature_overview="adds X",
+                 implementation_steps=["do a"], estimate="~1h"))
+        await orch.handle_event(
+            {"id": "n1", "channel_id": mgmt, "message": "build X (iteration 2)",
+             "is_bot": False, "ts": 1})
+        await _drain(orch)
+        assert len(harness.wakes) == 0                        # held at the plan gate
+        # approve arrives via the OPERATOR API inlet (nl_intake direct), id contains a DIGIT
+        await orch.nl_intake("approve effort-api-2-approved", mgmt, user_id="operator-api")
+        await _drain(orch)
+        assert len(harness.wakes) == 1                        # actually dispatched
+        assert await orch.planner.plan_status("effort-api-2-approved") == "approved"
+    finally:
+        await db.dispose()
+
+
 async def test_plan_abort_does_not_dispatch(db_url):
     orch, chat, harness, db = await _orch(db_url, plan_approval="always", review_mode="off")
     try:
