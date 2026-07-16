@@ -5122,13 +5122,24 @@ class Orchestrator:
             "reply exactly `NO CHANGES: <why>`. Otherwise reply with the branch name and the pushed "
             "commit hash."
         )
+        # A commit needs a SUBJECT and a BODY (operator 2026-07-15, a git-history evaluation: the
+        # effort commits were "silent" — bare one-line subjects with no body, so a reader landing on
+        # the branch couldn't tell what changed, why, or whether tests pass; the gold-standard
+        # commits pair subject=WHAT with body=WHY + verification). Two `-m` flags = subject + body.
         instruction = (
             f"{lead} (the env prefix on the commit attributes it to you, `{name}`):\n"
             f"  git checkout -b {branch} 2>/dev/null || git checkout {branch}\n"
             f"  git add -A\n"
-            f'  {ident} git commit -m "{effort_id}: <one-line summary of your changes>"   # skip only if nothing to commit\n'
+            f'  {ident} git commit \\\n'
+            f'    -m "{effort_id}: <short imperative subject — WHAT changed>" \\\n'
+            f'    -m "<body, 1-3 lines: what changed and WHY, and the verification result — '
+            f"e.g. 'Extracted file I/O from todo.py into a TodoStore class. Tests: 6/6 pass, "
+            f'behaviour unchanged.\'>"   # skip only if nothing to commit\n'
             f"  git push -u origin {branch}\n"
-            f"Do NOT push to main/master. Do NOT force-push or delete anything. {tail}"
+            f"The commit MUST have BOTH a clear subject AND a body (what + why + test result) — a "
+            f"bare one-line commit is not acceptable; a reader landing on this branch cold should "
+            f"understand the change from the message alone. Do NOT push to main/master. Do NOT "
+            f"force-push or delete anything. {tail}"
         )
         try:
             # Pass repo + a CURRENT token: the worker is already focused, so the daemon NOOPs (work
@@ -6962,9 +6973,16 @@ class Orchestrator:
                 api_base=self.s.github_api_base, transport=self._gh_transport)
             if not seed.ok:
                 return f"\n🔀 _Couldn't prepare `{dev}` for integration ({seed.summary})._"
+            # The merge commit records the ACCEPTANCE status (operator 2026-07-15, git-history
+            # eval: a reader should see WHY a branch was folded in) — org-verified green + gated.
+            sha = (delivery.head_sha or "")[:10]
             merged = await merge_branch(
                 self.github, repo, dev, delivery.branch,
-                message=f"integrate {effort_id} into {dev}",
+                message=(f"Integrate {effort_id} into {dev} (accepted)\n\n"
+                         f"Accepted per-effort delivery: org-verified green build, D2 gate passed"
+                         + (f", QA-evaluated" if self.s.qa_gate != "off" else "")
+                         + f". Source branch {delivery.branch}"
+                         + (f" @ {sha}" if sha else "") + "."),
                 api_base=self.s.github_api_base, transport=self._gh_transport)
         except Exception as exc:  # noqa: BLE001 — integration is best-effort; never wedge closure
             log.warning("develop integration failed for %s: %s", effort_id, exc)

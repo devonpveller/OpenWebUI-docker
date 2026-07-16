@@ -20,6 +20,12 @@ goal is good.
 AND your intent** (what you understood the goal to be, and why you built it this way) and wait
 for a cleared review before continuing. If a review flags drift, refactor before resuming.
 
+**Commit messages (the project's memory):** every commit has a clear **subject** (imperative,
+what changed) *and* a **body** (1–3 lines: what changed and why, plus the verification result —
+e.g. "Tests: 6/6 pass"). A reader landing on your branch cold must understand the change from the
+message alone. A bare one-line commit is not acceptable — the history is how the next worker (or
+the human) picks the project up where you left off.
+
 **Cross-project bugs (debug handoff):** if a bug in code **outside your project** blocks you
 (a sibling submodule, the host repo, another team's repo), do **not** work around it, edit the
 foreign code, or fake progress. Reply with one line — `HANDOFF: <path or project> ::
