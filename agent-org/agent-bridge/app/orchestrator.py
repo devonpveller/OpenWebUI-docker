@@ -8094,6 +8094,22 @@ class Orchestrator:
                 if result and result.output else "done")
         # The worker's self-report (its turn ended ok); the VERIFIED verdict overrides it as the truth.
         self_reported = self._published_branch.pop(effort_id, None)
+        # A no_changes delivery means "the worker changed nothing THIS turn" — but a PRIOR turn may
+        # already have published a real branch. Before a read-only close (which skips the whole
+        # PR/QA/develop pipeline), RE-VERIFY the remote: if the branch is actually AHEAD of main there
+        # IS a deliverable, so route it through the real delivery path instead of closing it hollow
+        # (2026-07-16 gym: a complete 62-test product closed "done — read-only, nothing to publish"
+        # with no PR, no QA, no develop, because a final no-changes turn masked the landed branch).
+        if delivery is not None and delivery.no_changes:
+            _rv_repo = await self._effort_repo(effort_id)
+            if _rv_repo:
+                _rv = await self._verify_delivery(effort_id, _rv_repo)
+                # only a branch with REAL changes overrides the no-op close — an empty-diff branch
+                # (a commit that touches nothing) is a legitimate NO CHANGES read-only completion.
+                if _rv.landed and _rv.files_changed != 0:
+                    log.info("no_changes re-verify: %s branch has real changes ahead of main — "
+                             "delivering, not read-only closing", effort_id)
+                    delivery = _rv
         branch = delivery.branch if (delivery and delivery.landed) else None
         if delivery is not None and delivery.no_changes:
             # BACKSTOP (single closure chokepoint — every no_changes delivery passes through here):

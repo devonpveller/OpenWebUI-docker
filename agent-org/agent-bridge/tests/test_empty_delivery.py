@@ -77,11 +77,63 @@ def _remote(*, heal_after: int | None = None):
     return httpx.MockTransport(handler)
 
 
+def _remote_real_changes():
+    """Branch exists AHEAD with REAL file changes (files_changed > 0) from the start — a genuine
+    landed delivery, even if the worker's final turn claims NO CHANGES."""
+    state = {"branch_reads": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        p = request.url.path
+        if "/compare/" in p:
+            return httpx.Response(200, json={
+                "ahead_by": 3, "behind_by": 0,
+                "commits": [{"commit": {"message": "add features"}}],
+                "files": [{"filename": "todo.py", "additions": 120, "deletions": 2},
+                          {"filename": "tests/test_todo.py", "additions": 200, "deletions": 0}]})
+        if "/branches/" in p:
+            state["branch_reads"] += 1
+            sha = "pre_dispatch_head_000000" if state["branch_reads"] == 1 else "cafef00d12345678"
+            return httpx.Response(200, json={"commit": {"sha": sha}})
+        if p.endswith("/pulls") and request.method == "POST":
+            return httpx.Response(201, json={
+                "number": 12, "html_url": "https://github.com/devonpveller/Engine/pull/12"})
+        if p.endswith("/pulls") and request.method == "GET":
+            return httpx.Response(200, json=[])
+        if p.count("/") == 3:
+            return httpx.Response(200, json={"default_branch": "main"})
+        return httpx.Response(404)
+
+    return httpx.MockTransport(handler)
+
+
 async def _lifecycle(orch, effort_id):
     from app.models import Effort
     async with orch.db.session_factory() as s:
         e = await s.get(Effort, effort_id)
         return e.lifecycle if e else None
+
+
+async def test_no_changes_over_a_real_branch_delivers_not_readonly_closes(db_url, tmp_path):
+    """2026-07-16 gym: a complete, 62-test product closed 'done — read-only, nothing to publish'
+    because a final NO CHANGES turn (with self-reported REPRO:/AFTER: PASS on a behavioral goal)
+    masked the LANDED branch — so it never opened a PR, ran QA, or integrated to develop. A
+    no_changes delivery whose branch actually has real changes ahead of main must go through the
+    DELIVERY pipeline (a PR), never a hollow read-only close."""
+    orch, chat, harness, db = await _orch(db_url, tmp_path)
+    try:
+        await orch.projects.add("engine", "https://github.com/devonpveller/Engine")
+        eid, chan, root = await orch.router.open_effort("full", project="engine")
+        orch._gh_transport = _remote_real_changes()
+        harness.output_queue = ["did work", "published",
+                                "NO CHANGES: everything was already committed on the branch"]
+        await orch.delegate(eid, chan, root,
+                            "add delete and edit commands to the todo CLI", plan_steps=["work"])
+        msgs = " ".join(p["message"] for p in chat.posted)
+        assert "PR opened for review" in msgs, "a landed branch with real changes must be delivered"
+        assert "read-only task" not in msgs, "must NOT close read-only over a real branch"
+        assert await _lifecycle(orch, eid) == "done"
+    finally:
+        await db.dispose()
 
 
 async def test_empty_diff_reengaged_worker_publishes_real_fix(db_url, tmp_path):
