@@ -7856,14 +7856,7 @@ class Orchestrator:
             f"crash / silent corruption / lost data? Check for atomic writes + defensive field "
             f"access (item.get, not item['x']).\n"
             f"4. END-TO-END — every accepted input must actually SHOW in output (stored-but-never-"
-            f"shown does not count).\n\n"
-            f"(Original happy-path check.) As a skeptical END USER, also RUN the product and use "
-            f"function/command. Try empty, malformed, non-ASCII, and edge-case inputs. Ask: could "
-            f"a new user figure out how to use this — is there usage HELP and DOCUMENTATION "
-            f"(README / --help / usage examples), are error messages clear, does it fail "
-            f"gracefully or crash with a traceback? Does the delivered feature actually SHOW its "
-            f"result to the user (a field that is accepted/stored but never displayed or used is "
-            f"a feature that does NOT work end-to-end)?\n"
+            f"shown does not count).\n"
             f"Grade to a FINAL-PRODUCT bar. Then reply in EXACTLY this format:\n"
             f"WORKS: one line, what genuinely works.\n"
             f"DEFECTS: numbered list of QUALITY problems in the product to fix before it ships — "
@@ -7906,7 +7899,97 @@ class Orchestrator:
                          + "\n".join(f"- {d}" for d in followups))
         if not defects and not followups:
             lines.append("_No defects or follow-ups surfaced — the product exercised cleanly._")
+        # ── Lens 2 (governance §4.4): a distinct reviewer reads the SOURCE for craftsmanship &
+        # documentation — the class of gaps the run-the-product lens above cannot see. Its defects
+        # merge into the same iterate loop.
+        if self.s.qa_code_review:
+            cr = await self._qa_code_review_lens(
+                effort_id, channel_id, root, repo, delivery, goal_head)
+            if cr is not None:
+                _cv, c_defects, _cf, c_block = cr
+                defects = defects + c_defects
+                lines.append(c_block)
         return "\n\n".join(lines), defects
+
+    async def _qa_code_review_lens(
+        self, effort_id: str, channel_id: str, root: str, repo: str,
+        delivery: BranchDelivery, goal_head: str,
+    ):
+        """Second QA lens (operator 2026-07-15, evaluating the delivered tool a 4th way: "evaluate
+        the code cleanliness — is it SOLID, industry-standard patterns, clear naming, does the code
+        support documentation?"). The functional QA is BLACK-BOX (run it, feed it garbage) and by
+        design cannot see missing docstrings, absent type hints, a data-layer `sys.exit` that should
+        `raise`, or `sys.path` packaging hacks. This DIFFERENTLY-GOALED reviewer READS THE SOURCE
+        for craftsmanship & documentation and optimises to REFUTE 'this is clean, maintainable
+        code' (governance §4.4). Gated by AO_QA_CODE_REVIEW; CHANGE-NOTHING; best-effort — a lens
+        hiccup never blocks the delivery. Returns (verdict, defects, followups, markdown_block) or
+        None if it couldn't run."""
+        self._verify_seq += 1
+        instr = (
+            f"CODE REVIEW — craftsmanship, maintainability & documentation. You did NOT build this "
+            f"and you will CHANGE NOTHING (no edits, no git writes; this is a review turn). First "
+            f"check out the DELIVERED branch:\n"
+            f"  git fetch origin {delivery.branch} && git checkout -f {delivery.branch}\n"
+            f"This delivery's goal was: {goal_head}\n\n"
+            f"READ THE SOURCE as a senior engineer doing a merge-review. Your job is to REFUTE the "
+            f"claim that this is clean, well-documented, maintainable code. Judge every point AT "
+            f"THE SCALE OF THIS PROJECT (no enterprise ceremony on a small script) but hold the "
+            f"fundamentals:\n"
+            f"1. DOCUMENTATION-OF-CODE — a docstring on every public function/class saying what it "
+            f"does; type hints on signatures; a module docstring and a README that match real "
+            f"behaviour. Project-level docs do NOT excuse undocumented functions.\n"
+            f"2. SOLID & SEPARATION — one responsibility per function; I/O separated from logic; "
+            f"design smells like a data-layer/helper calling sys.exit() or print() instead of "
+            f"raising/returning so callers can handle it; behaviour testable, not hard-wired to "
+            f"globals.\n"
+            f"3. NAMING & CONVENTIONS — clear, consistent, idiomatic names (PEP 8 for Python); no "
+            f"cryptic abbreviations; tests named for what they assert.\n"
+            f"4. PACKAGING & HYGIENE — proper layout (no sys.path.insert hacks / missing "
+            f"__init__.py), no dead code, no copy-paste duplication, tidy imports.\n"
+            f"5. ERROR-HANDLING SHAPE — typed exceptions with clear messages, not swallowed or "
+            f"turned into process-killing exits deep in the call tree.\n"
+            f"Then reply in EXACTLY this format:\n"
+            f"WORKS: one line — what the code does well.\n"
+            f"DEFECTS: numbered list of CODE-QUALITY problems to fix before merge — missing "
+            f"docstrings/type hints, SOLID/separation violations, design smells (e.g. sys.exit from "
+            f"a data layer), naming problems, packaging hacks, unhandled failure shapes. Scope to "
+            f"THIS project's size — real gaps only, not gold-plating. Say `none` only if the source "
+            f"genuinely meets a professional bar.\n"
+            f"FOLLOWUPS: numbered list of larger refactors out of scope for now — the operator's "
+            f"call. Say `none` if none.\n"
+            f"VERDICT: a one-line maintainability grade naming the biggest code-quality weakness."
+        )
+        try:
+            result = await self.router.wake(
+                effort_id, role="worker-default", thread_id=root, channel_id=channel_id,
+                session_id=f"{effort_id}~qa{self._verify_seq}", instruction=instr,
+                repo=repo, repo_token=await self._project_token(effort_id),
+            )
+        except Exception as exc:  # noqa: BLE001 — a second-lens hiccup never blocks delivery
+            log.debug("QA code-review lens wake failed for %s: %s", effort_id, exc)
+            return None
+        out = (result.output or "") if result else ""
+        if not out.strip():
+            return None
+        defects = _qa_items(_qa_block(out, "DEFECTS"))
+        followups = _qa_items(_qa_block(out, "FOLLOWUPS"))
+        verdict = " ".join(_qa_block(out, "VERDICT").split())[:300]
+        await self.audit.log("qa_evaluation", effort_id=effort_id,
+                             payload={"lens": "code_review", "defects": len(defects),
+                                      "followups": len(followups), "verdict": verdict[:120]})
+        block = ["### 🧹 Code review — craftsmanship & documentation\n_A second, differently-goaled "
+                 "reviewer audited the SOURCE (SOLID, naming, docstrings, type hints, packaging)._"]
+        if verdict:
+            block.append(f"**Verdict:** {verdict}")
+        if defects:
+            block.append("**Code-quality defects (worth fixing before merge):**\n"
+                         + "\n".join(f"- {d}" for d in defects))
+        if followups:
+            block.append("**Refactor follow-ups (out of scope — your call):**\n"
+                         + "\n".join(f"- {d}" for d in followups))
+        if not defects and not followups:
+            block.append("_Code reads clean — no craftsmanship gaps surfaced._")
+        return verdict, defects, followups, "\n\n".join(block)
 
     async def _removal_disclosure(self, effort_id: str, branch: str,
                                   goal_text: str) -> tuple[str, bool]:

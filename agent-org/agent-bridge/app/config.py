@@ -119,6 +119,15 @@ class Settings(BaseSettings):
     # keeps the human as the disposer of what's worth fixing (governance §6). The DEPLOYED bridge
     # sets `AO_QA_GATE=report` in compose so real deliveries get QA; the default stays `off`.
     qa_gate: str = "off"
+    # QA CODE-REVIEW LENS (operator 2026-07-15, evaluating the delivered tool a 4th way: "evaluate
+    # the code cleanliness — is it SOLID, industry-standard patterns, clear naming, does it support
+    # documentation?"). The functional QA above is BLACK-BOX (run the product, feed it garbage); it
+    # cannot see missing docstrings, absent type hints, a data-layer `sys.exit` that should `raise`,
+    # or `sys.path` packaging hacks. When on (and qa_gate != off) a SECOND, differently-goaled
+    # reviewer READS THE SOURCE for craftsmanship & documentation (governance §4.4 — a distinct
+    # review role, not a second happy-path pass); its defects feed the same iterate loop. Default
+    # off so the wake-counting unit harness is unchanged; the DEPLOYED bridge / the gym turn it on.
+    qa_code_review: bool = False
     # DEVELOP-BRANCH INTEGRATION (operator 2026-07-15, reviewing gym PR#2-5: "the PRs should be
     # separate as they are now, but they should be MERGED INTO DEVELOPMENT" — the org left N
     # parallel PRs off main and never integrated them into one converging product "like an actual

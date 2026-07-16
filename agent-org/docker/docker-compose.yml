@@ -164,6 +164,10 @@ services:
       # iterations to CLOSE the in-scope gaps (crash bugs, a feature stored-but-not-shown, missing
       # docs/help) before the PR, instead of only reporting them.
       AO_QA_GATE: ${AO_QA_GATE:-iterate}                # report | iterate | off — exploratory QA
+      # Second QA lens (operator 2026-07-15, "evaluate the code cleanliness — SOLID, patterns,
+      # naming, does it support documentation?"): a differently-goaled reviewer READS THE SOURCE for
+      # craftsmanship & docstrings/type hints/packaging — gaps the run-the-product lens can't see.
+      AO_QA_CODE_REVIEW: ${AO_QA_CODE_REVIEW:-1}        # 1 | 0 — code-craftsmanship review lens
       # Develop-branch integration (operator 2026-07-15): fold each ACCEPTED per-effort delivery
       # into a `develop` branch that accumulates the whole product ("PRs separate as they are, but
       # merged into development"), with one standing develop→default PR as the human gate. Merge to
