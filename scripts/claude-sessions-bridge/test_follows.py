@@ -174,5 +174,56 @@ class FollowEngineTests(unittest.TestCase):
         self.assertIn("fw-new222", self.b.state["follows"])
 
 
+    # ── sliding "work-day" idle window: renew on human engagement (2026-07-16) ──────────
+    def test_renew_slides_expiry_forward(self):
+        window = 10 * 3600 * 1000
+        self.b.state["follows"]["fw-renew1"] = follow(id="fw-renew1", idle_ms=window, expires=100)
+        now = 9_000_000_000
+        renewed = self.b._renew_follows(now, bridge_thread="bt1")     # operator engaged the session
+        self.assertEqual(renewed, ["fw-renew1"])
+        self.assertEqual(self.b.state["follows"]["fw-renew1"]["expires"], now + window)
+
+    def test_renew_only_pushes_forward_never_shortens(self):
+        far = 10 ** 15
+        self.b.state["follows"]["fw-renew2"] = follow(id="fw-renew2", idle_ms=5000, expires=far)
+        renewed = self.b._renew_follows(2000, bridge_thread="bt1")    # 2000+5000 ≪ far → no change
+        self.assertEqual(renewed, [])
+        self.assertEqual(self.b.state["follows"]["fw-renew2"]["expires"], far)
+
+    def test_renew_scoped_to_the_matching_session_or_channel(self):
+        window = 1000
+        self.b.state["follows"]["fw-mine"] = follow(id="fw-mine", bridge_thread="bt1",
+                                                    idle_ms=window, expires=1)
+        self.b.state["follows"]["fw-other"] = follow(id="fw-other", bridge_thread="bt2",
+                                                     idle_ms=window, expires=1)
+        self.b._renew_follows(5_000_000, bridge_thread="bt1")
+        self.assertEqual(self.b.state["follows"]["fw-mine"]["expires"], 5_000_000 + window)
+        self.assertEqual(self.b.state["follows"]["fw-other"]["expires"], 1)   # untouched
+
+    def test_operator_post_in_followed_channel_renews_without_waking(self):
+        import time as _t
+        mmapi._user_cache.update({OP: "profnovice", PM: "bot-pm", ME: "bot-claude"})
+        now = int(_t.time() * 1000)
+        window = 10 * 3600 * 1000
+        self.b.state["follows"]["fw-ch1"] = follow(
+            id="fw-ch1", wake_on=["bot-pm"], created=now - window, idle_ms=window,
+            expires=now + 60_000)                        # ~1 min from lapsing → survives the drop
+        mmapi._api = self._channel_with({"pop": post(id="pop", user_id=OP,
+                                          message="steering the org directly", create_at=now)})
+        self.b.poll_follows(ME)
+        # the operator's own post slid the window forward ~a full work day…
+        self.assertGreaterEqual(self.b.state["follows"]["fw-ch1"]["expires"], now + window - 5000)
+        # …but did NOT wake the session (wake_on is bot-pm, not the operator)
+        self.assertTrue("bt1" not in self.b.queues or self.b.queues["bt1"].empty())
+
+    def test_apply_request_derives_idle_ms_when_absent(self):
+        self.b._apply_follow_request({
+            "action": "follow", "id": "fw-idle1", "bridge_thread": "bt1", "channel_id": "ch1",
+            "channel_label": "proj-x", "thread_id": "root1", "wake_on": [], "note": "",
+            "created": 1000, "expires": 1000 + 7000, "last_seen": 1000, "wakes": 0,
+            "max_wakes": 20, "one_shot": False})                       # no idle_ms in the request
+        self.assertEqual(self.b.state["follows"]["fw-idle1"]["idle_ms"], 7000)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

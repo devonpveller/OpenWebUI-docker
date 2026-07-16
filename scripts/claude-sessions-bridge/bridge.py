@@ -794,6 +794,31 @@ class Bridge:
                      "stops that session's.")
         return "\n".join(lines)
 
+    def _renew_follows(self, now_ms: int, *, bridge_thread: str | None = None,
+                       channel_id: str | None = None) -> list[str]:
+        """Slide a follow's idle window forward on HUMAN engagement (operator 2026-07-16: "a more
+        realistic work day that resets its timer based on human engagement"). A follow lives as long
+        as the operator keeps engaging — with the SESSION (messaging bot-claude in its bridge_thread)
+        or with the followed CHANNEL (posting there directly) — and lapses only after a full idle
+        window ('a work day') of real silence. Only ever pushes `expires` FORWARD; never shortens.
+        Returns the fids actually renewed (for logging/tests)."""
+        renewed: list[str] = []
+        with self.state_lock:
+            for fid, f in self.state.get("follows", {}).items():
+                if bridge_thread is not None and f.get("bridge_thread") != bridge_thread:
+                    continue
+                if channel_id is not None and f.get("channel_id") != channel_id:
+                    continue
+                idle = int(f.get("idle_ms") or (int(f.get("expires", 0)) - int(f.get("created", 0))))
+                if idle <= 0:
+                    continue
+                if now_ms + idle > int(f.get("expires", 0)):
+                    f["expires"] = now_ms + idle
+                    renewed.append(fid)
+            if renewed:
+                save_state(self.state)
+        return renewed
+
     def _drop_follow(self, fid: str, f: dict, why: str) -> None:
         with self.state_lock:
             self.state.get("follows", {}).pop(fid, None)
@@ -834,7 +859,13 @@ class Bridge:
             fid = str(req["id"])
             record = {k: req.get(k) for k in (
                 "id", "bridge_thread", "channel_id", "channel_label", "thread_id", "wake_on",
-                "note", "created", "expires", "last_seen", "wakes", "max_wakes", "one_shot")}
+                "note", "created", "expires", "idle_ms", "last_seen", "wakes", "max_wakes",
+                "one_shot")}
+            # The sliding idle window the bridge renews on human engagement — derive it for follow
+            # requests written before this field existed (window = original expires − created).
+            if not record.get("idle_ms"):
+                record["idle_ms"] = max(0, int(record.get("expires", 0))
+                                        - int(record.get("created", 0)))
             with self.state_lock:
                 follows = self.state.setdefault("follows", {})
                 # same session re-following the same target replaces, never double-wakes
@@ -901,7 +932,12 @@ class Bridge:
                 continue
             posts.sort(key=lambda p: p.get("create_at", 0))
             newest = posts[-1].get("create_at", 0)
+            op_engaged = 0        # newest genuine HUMAN-operator post here → renews this channel
             for p in posts:
+                pr = p.get("props") or {}
+                if not (pr.get("from_bridge") or pr.get("from_webhook") or pr.get("from_claude")) \
+                        and mmapi._username(p.get("user_id", "")).lower() in OPERATORS:
+                    op_engaged = max(op_engaged, p.get("create_at", 0))
                 for fid in fids:
                     f = follows[fid]
                     if follow_matches(f, p, me):
@@ -909,6 +945,8 @@ class Bridge:
                                                     {"posts": {}, "follows": set()})
                         b["posts"][p["id"]] = p
                         b["follows"].add(fid)
+            if op_engaged:        # the operator engaged the followee directly — slide its window
+                self._renew_follows(op_engaged, channel_id=ch)
             for fid in fids:
                 if newest > int(follows[fid].get("last_seen", 0)):
                     advanced = True
@@ -1012,6 +1050,11 @@ class Bridge:
             if not msg:
                 continue
             thread_root = p.get("root_id") or pid
+            # HUMAN ENGAGEMENT with the session renews its follows' idle window (a live operator
+            # message means "still working" — keep the auto-wake alive; the bot's own posts never
+            # count, which uid != me guarantees).
+            if uid != me:
+                self._renew_follows(ca, bridge_thread=thread_root)
             cmd = SESSIONS_CMD_RE.match(msg)
             if cmd:  # inventory command — answered by the bridge itself, no Claude turn
                 arg = cmd.group(1) or ""

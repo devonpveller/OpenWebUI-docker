@@ -235,6 +235,13 @@ def permission_prompt(args: dict) -> dict:
 # ── follow tools (auto-wake on Mattermost replies) ───────────────────────────
 STATE_DIR = os.path.join(_HERE_DIR, "state")
 
+# A follow is a SLIDING idle window, not a fixed lifetime (operator 2026-07-16: "a more realistic
+# work day that resets its timer based on human engagement"). `expire_hours` is the IDLE window —
+# the follow lives this long after the LAST human engagement (the operator messaging the session, or
+# posting in the followed channel) and the bridge pushes its expiry forward on every engagement.
+# Default is a generous work day so a normal away-day is covered without lapsing.
+_FOLLOW_IDLE_HOURS = float(os.environ.get("FOLLOW_IDLE_HOURS", "10"))
+
 
 def _write_follow_request(req: dict) -> None:
     """Atomic handoff file for bridge.py (write tmp + rename, so the bridge never reads a
@@ -296,9 +303,9 @@ def tool_follow(args: dict) -> str:
     wake_on = [str(u).lstrip("@").strip().lower()
                for u in (args.get("wake_on") or []) if str(u).strip()]
     try:
-        hours = float(args.get("expire_hours") or 48)
+        hours = float(args.get("expire_hours") or _FOLLOW_IDLE_HOURS)
     except (TypeError, ValueError):
-        hours = 48.0
+        hours = _FOLLOW_IDLE_HOURS
     hours = max(0.25, min(hours, 336.0))
     try:
         max_wakes = int(args.get("max_wakes") or 20)
@@ -313,15 +320,18 @@ def tool_follow(args: dict) -> str:
         "channel_id": ch, "channel_label": label, "thread_id": thread_id,
         "wake_on": wake_on, "note": str(args.get("note") or "")[:300],
         "created": now, "expires": now + int(hours * 3600 * 1000),
+        "idle_ms": int(hours * 3600 * 1000),   # the sliding window the bridge renews on engagement
         "last_seen": now, "wakes": 0, "max_wakes": max_wakes, "one_shot": one_shot,
     })
     target = f"#{label}" + (f" thread {thread_id}" if thread_id else " (whole channel)")
     who = ", ".join("@" + u for u in wake_on) or "anyone (this bot's own posts never count)"
     return (f"follow registered: {fid} → {target}. The bridge will auto-wake THIS session with "
             f"the new message(s) whenever {who} posts there — including after this turn ends. "
-            f"Limits: {'one-shot' if one_shot else f'max {max_wakes} wakes'}, expires in "
-            f"{hours:g}h. Only posts made from now on trigger. The bridge confirms in-thread "
-            f"within a few seconds; call unfollow('{fid}') when the conversation is done.")
+            f"Limits: {'one-shot' if one_shot else f'max {max_wakes} wakes'}; lapses after "
+            f"{hours:g}h of NO human engagement — the window RENEWS every time the operator messages "
+            f"this session or posts in the followed channel, so it stays alive while you're working "
+            f"and only expires after a full idle 'work day' of silence. Only posts made from now on "
+            f"trigger. Call unfollow('{fid}') when the conversation is done.")
 
 
 def tool_unfollow(args: dict) -> str:
@@ -373,7 +383,7 @@ FOLLOW_TOOLS = {
             "thread_id": {"type": "string", "description": "root post id of the thread to follow; omit to follow every new post in the channel"},
             "wake_on": {"type": "array", "items": {"type": "string"}, "description": "only posts by these usernames wake the session (default: anyone but this bot)"},
             "note": {"type": "string", "description": "why you're waiting — echoed back to you on wake"},
-            "expire_hours": {"type": "number", "description": "auto-expire after this many hours (default 48, max 336)"},
+            "expire_hours": {"type": "number", "description": "IDLE window in hours: the follow lapses only after this long with NO human engagement, and the window renews each time the operator messages the session or posts in the followed channel (default 10 = a work day, max 336)"},
             "max_wakes": {"type": "integer", "description": "auto-unfollow after this many wakes (default 20, max 100)"},
             "one_shot": {"type": "boolean", "description": "unfollow after the first wake"},
         }, "required": ["channel"]},
