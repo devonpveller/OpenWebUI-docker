@@ -155,6 +155,11 @@ services:
       # set to `all` for the strict-spec reading (plan-approval + review on EVERY effort), `off` to skip.
       AO_PLAN_APPROVAL: ${AO_PLAN_APPROVAL:-risky}      # always | risky | off — Stage-3 plan gate (P3.9)
       AO_REVIEW_MODE: ${AO_REVIEW_MODE:-risky}          # all | risky | off — Stage-5 stop-gates/review (P4)
+      # Post-delivery QA (operator 2026-07-15): a differently-goaled agent EXERCISES the product
+      # after it lands (green tests != usable product) and reports usability gaps a test suite
+      # misses. report = attach findings to the PR + closure; iterate = also auto-fix in-scope
+      # defects once; off = skip. Field defaults off so the test harness is unchanged; ON here.
+      AO_QA_GATE: ${AO_QA_GATE:-report}                 # report | iterate | off — exploratory QA
       # Conversation context (the PO's memory): thread = immediate, channel = relevant background,
       # char-budgeted so it never overwhelms the model window. Raise for a larger-context model.
       AO_CONTEXT_THREAD_CHARS: ${AO_CONTEXT_THREAD_CHARS:-2500}

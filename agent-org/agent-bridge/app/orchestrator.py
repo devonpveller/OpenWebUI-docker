@@ -276,6 +276,30 @@ def _parse_handoff(output: str) -> dict | None:
 # ever editing (operator 2026-07-14) — the bridge forks a fresh session and re-plans.
 _FLAIL_MARKER = "FLAIL-GUARD:"
 
+# POST-DELIVERY QA report parsing (operator 2026-07-15). The QA agent replies with WORKS/DEFECTS/
+# FOLLOWUPS/VERDICT sections; these pull one section's block and split it into list items.
+_QA_HEADERS = ("WORKS", "DEFECTS", "FOLLOWUPS", "VERDICT")
+
+
+def _qa_block(out: str, header: str) -> str:
+    """The text following `HEADER:` up to the next known QA header (or end)."""
+    m = re.search(
+        rf"^\s*{header}\s*:\s*(.*?)(?=^\s*(?:{'|'.join(_QA_HEADERS)})\s*:|\Z)",
+        out or "", re.I | re.M | re.S)
+    return m.group(1).strip() if m else ""
+
+
+def _qa_items(block: str) -> list[str]:
+    """Split a QA section block into cleaned list items; empty for an explicit 'none'."""
+    if not block or re.fullmatch(r"none\.?", block.strip(), re.I):
+        return []
+    items: list[str] = []
+    for ln in block.splitlines():
+        ln = re.sub(r"^[\-\*\d.)\s]+", "", ln.strip()).strip()
+        if ln and not re.fullmatch(r"none\.?", ln, re.I):
+            items.append(ln[:200])
+    return items[:12]
+
 # NOTE (operator 2026-07-14, after two live false-positive generations): "the plan inclusion
 # needs REASONING, not determinism." A plan is PROSE about intent — a bare substring match
 # rejected honest plans for naming the very term they were REMOVING, and a context-regex is just
@@ -7718,6 +7742,76 @@ class Orchestrator:
         )
         return False
 
+    async def _qa_evaluation(
+        self, effort_id: str, channel_id: str, root: str, repo: str, delivery: BranchDelivery,
+    ) -> tuple[str, list[str]]:
+        """POST-DELIVERY QA (operator 2026-07-15, reviewing gym PR#2: green tests, but frustrating
+        to USE — no help systems, and a separate QA pass found a page of gaps "that could've been
+        caught with a simple QA"). A DIFFERENTLY-GOALED agent that did NOT build the thing exercises
+        the product as a skeptical end user — runs it, tries each function + malformed/edge inputs,
+        checks for usage help and clear errors — and reports DEFECTS (in scope → fixable now) vs
+        FOLLOWUPS (out of scope → the operator's call). It optimises to FIND fault, not bless
+        (governance §4.4). CHANGE-NOTHING; best-effort — a QA hiccup never blocks the delivery.
+        Returns (qa_note, defects): `qa_note` is a PR/closure markdown block ('' if QA couldn't
+        run); `defects` are the in-scope fixables."""
+        if self.s.qa_gate == "off" or not (repo and delivery.branch):
+            return "", []
+        try:
+            _, goal_text, _ = await self.charters.current_goal(effort_id)
+        except Exception:  # noqa: BLE001
+            goal_text = ""
+        goal_head = " ".join((goal_text or "").split())[:400]
+        self._verify_seq += 1
+        instr = (
+            f"QA EVALUATION — you did NOT build this, and you will CHANGE NOTHING (no edits, no "
+            f"git writes; this is a review turn). First check out the DELIVERED branch:\n"
+            f"  git fetch origin {delivery.branch} && git checkout -f {delivery.branch}\n"
+            f"The delivery's GOAL was: {goal_head}\n\n"
+            f"Now evaluate it as a skeptical END USER. RUN the product. Exercise EACH "
+            f"function/command. Try empty, malformed, and edge-case inputs. Ask: could a new user "
+            f"figure out how to use this — is there usage help, are error messages clear, does it "
+            f"fail gracefully or crash with a traceback? Then reply in EXACTLY this format:\n"
+            f"WORKS: <one line — what genuinely works>\n"
+            f"DEFECTS: numbered list of problems IN SCOPE of the goal that should be fixed before "
+            f"this ships — the feature not working end-to-end, crashes on its own inputs, "
+            f"missing/unclear help or error messages for the delivered feature. Write `none` if "
+            f"there are none.\n"
+            f"FOLLOWUPS: numbered list of OUT-OF-SCOPE gaps / nice-to-haves (new features, broader "
+            f"hardening) — suggestions for the operator, NOT to fix now. Write `none` if none.\n"
+            f"VERDICT: does the delivery serve its goal well for a real user? one line."
+        )
+        try:
+            result = await self.router.wake(
+                effort_id, role="worker-default", thread_id=root, channel_id=channel_id,
+                session_id=f"{effort_id}~qa{self._verify_seq}", instruction=instr,
+                repo=repo, repo_token=await self._project_token(effort_id),
+            )
+        except Exception as exc:  # noqa: BLE001 — QA is a bonus; never block the delivery
+            log.debug("QA evaluation wake failed for %s: %s", effort_id, exc)
+            return "", []
+        out = (result.output or "") if result else ""
+        if not out.strip():
+            return "", []
+        defects = _qa_items(_qa_block(out, "DEFECTS"))
+        followups = _qa_items(_qa_block(out, "FOLLOWUPS"))
+        verdict = " ".join(_qa_block(out, "VERDICT").split())[:300]
+        await self.audit.log("qa_evaluation", effort_id=effort_id,
+                             payload={"defects": len(defects), "followups": len(followups),
+                                      "verdict": verdict[:120]})
+        lines = ["## 🔎 QA evaluation\n_A differently-goaled agent exercised the running product "
+                 "(not just the tests)._"]
+        if verdict:
+            lines.append(f"**Verdict:** {verdict}")
+        if defects:
+            lines.append("**Defects (in scope — worth fixing before merge):**\n"
+                         + "\n".join(f"- {d}" for d in defects))
+        if followups:
+            lines.append("**Follow-ups (out of scope — your call):**\n"
+                         + "\n".join(f"- {d}" for d in followups))
+        if not defects and not followups:
+            lines.append("_No defects or follow-ups surfaced — the product exercised cleanly._")
+        return "\n\n".join(lines), defects
+
     async def _removal_disclosure(self, effort_id: str, branch: str,
                                   goal_text: str) -> tuple[str, bool]:
         """Surface what a delivery REMOVED (no silent removals). Returns (note, flag): `note` is
@@ -7864,9 +7958,32 @@ class Orchestrator:
             # org opened PRs off it). Blocked ⇒ no PR; the PM re-drives it to PORT what it deleted.
             if not await self._gate_removals(effort_id, eff_repo, delivery):
                 return
+            # POST-DELIVERY QA (operator 2026-07-15): exercise the PRODUCT before shipping — green
+            # tests are not a usable product. A differently-goaled agent runs it and surfaces the
+            # gaps a test suite misses (usability, missing help, unhandled inputs). In `iterate`
+            # mode, in-scope defects auto-iterate ONCE first; in `report` mode the findings ride on
+            # the PR + closure for the human to dispose. Best-effort — never blocks the delivery.
+            # (_finish_effort has no channel_id/root in scope — resolve the effort's own thread.)
+            qa_note, qa_defects = "", []
+            if self.s.qa_gate != "off":
+                _qa_loc = await self.router.effort_thread(effort_id)
+                if _qa_loc:
+                    qa_note, qa_defects = await self._qa_evaluation(
+                        effort_id, _qa_loc[0], _qa_loc[1], eff_repo, delivery)
+            if self.s.qa_gate == "iterate" and qa_defects:
+                if await self._auto_iterate(
+                        effort_id,
+                        "QA found in-scope defects a user would hit: " + "; ".join(qa_defects[:6]),
+                        "QA DEFECTS (fix these, stay in scope):\n- " + "\n- ".join(qa_defects)):
+                    await self.comms.post(
+                        Intent.worker_activity,
+                        "🔎 QA exercised the product and found fixable gaps — auto-iterating before "
+                        "the PR:\n" + "\n".join(f"- {d}" for d in qa_defects[:6]),
+                        effort_id=effort_id)
+                    return   # the improved delivery re-enters here and opens the PR then
             # D1: open the PR that makes this delivery VISIBLE; merge stays yours (D4).
             pr_url = await self._open_delivery_pr(
-                effort_id, eff_repo, branch, verified_sha=delivery.head_sha)
+                effort_id, eff_repo, branch, verified_sha=delivery.head_sha, body_extra=qa_note)
             if pr_url:
                 # D2: the autonomous test series red-gates the merge — run the project's check on
                 # the delivered branch BEFORE inviting the merge; red routes back, never forward.
@@ -7878,6 +7995,8 @@ class Orchestrator:
                 pr_lead = ("📬 **Existing PR still open** (no new commits this round)"
                            if stale_reverify else "📬 **PR opened for review:**")
                 where += f"\n{pr_lead} {pr_url}{d2_note}{invite}"
+                if qa_note:      # surface the QA findings in-thread too, not only in the PR body
+                    where += "\n\n" + qa_note
                 where += await self._sibling_pr_note(eff_repo, branch)
                 where += wire_note
                 # The operator must never be left asking "what do I DO with this fix?" (live

@@ -102,6 +102,23 @@ class Settings(BaseSettings):
     # approved plan stays in the session, so execution continues from it.
     # `off` = never, `risky` = high-blast-radius efforts only (default), `all` = every effort.
     worker_plan_gate: str = "risky"
+    # POST-DELIVERY QA / EXPLORATORY EVALUATION (operator 2026-07-15, reviewing gym PR#2: the
+    # delivery passed its own tests and read well, but was frustrating to actually USE — no help
+    # systems, and a SEPARATE little-coder QA pass surfaced a page of gaps "that could've been
+    # caught with a simple QA from the original orchestration effort"). Green tests != a good
+    # product. After a delivery lands + passes its check, a DIFFERENTLY-GOALED QA agent (it did
+    # NOT build the thing) EXERCISES the product as a skeptical user — runs it, tries each
+    # function + malformed/edge inputs, checks for usage help and clear errors — and reports
+    # DEFECTS (in scope of the goal → fixable now) vs FOLLOWUPS (out of scope → operator's call).
+    # The report rides on the PR and the closure. Modes:
+    #   off     — no QA pass (the pre-2026-07-15 behaviour; the field DEFAULT so the unit-test
+    #             harness — which counts worker wakes on delivery — is unchanged)
+    #   report  — run QA, attach the findings to the PR + thread; the human decides
+    #   iterate — additionally auto-iterate ONCE on the in-scope DEFECTS before the PR
+    # `iterate` trades wall-time + a scope-expansion risk for a more finished product; `report`
+    # keeps the human as the disposer of what's worth fixing (governance §6). The DEPLOYED bridge
+    # sets `AO_QA_GATE=report` in compose so real deliveries get QA; the default stays `off`.
+    qa_gate: str = "off"
     # Autonomous burn-down round cap (operator 2026-07-07: "all 138 errors should have been worked
     # through autonomously and not elevated in the first place"). This is a RUNAWAY GUARD, not a
     # check-in: a STILL-PROGRESSING campaign should run to green, not elevate mid-progress — so the cap
