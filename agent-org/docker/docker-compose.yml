@@ -164,6 +164,12 @@ services:
       # iterations to CLOSE the in-scope gaps (crash bugs, a feature stored-but-not-shown, missing
       # docs/help) before the PR, instead of only reporting them.
       AO_QA_GATE: ${AO_QA_GATE:-iterate}                # report | iterate | off — exploratory QA
+      # Develop-branch integration (operator 2026-07-15): fold each ACCEPTED per-effort delivery
+      # into a `develop` branch that accumulates the whole product ("PRs separate as they are, but
+      # merged into development"), with one standing develop→default PR as the human gate. Merge to
+      # develop is autonomous; merge to the default branch stays human.
+      AO_DEVELOP_INTEGRATION: ${AO_DEVELOP_INTEGRATION:-1}   # 1 | 0 — accumulate into develop
+      AO_DEVELOP_BRANCH: ${AO_DEVELOP_BRANCH:-develop}
       # Conversation context (the PO's memory): thread = immediate, channel = relevant background,
       # char-budgeted so it never overwhelms the model window. Raise for a larger-context model.
       AO_CONTEXT_THREAD_CHARS: ${AO_CONTEXT_THREAD_CHARS:-2500}

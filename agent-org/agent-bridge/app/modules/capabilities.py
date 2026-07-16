@@ -754,6 +754,54 @@ async def merge_branch(
                             detail=r.text[:160])
 
 
+async def ensure_branch(
+    github: GitHubApp, repo_url: str, branch: str, *, from_branch: str = "",
+    api_base: str = "https://api.github.com", transport: httpx.BaseTransport | None = None,
+) -> CapabilityResult:
+    """Create `branch` at the head of `from_branch` (default: the repo's default branch) if it does
+    not already exist — the DEVELOP-INTEGRATION seed (operator 2026-07-15: accepted per-effort PRs
+    accumulate on a `develop` branch that converges to the whole product). Idempotent: a present
+    branch is left untouched (its accumulated history is the point). Own account only."""
+    try:
+        owner, repo = parse_owner_repo(repo_url)
+    except ValueError as exc:
+        return CapabilityResult(ok=False, summary=f"`{repo_url}` isn't a valid GitHub repo.", detail=str(exc))
+    if owner.lower() != (github.owner or "").lower():
+        return CapabilityResult(ok=False, summary=f"`{owner}/{repo}` isn't on the App's account.")
+    try:
+        token = await github.installation_token()
+    except GitHubAppError as exc:
+        return CapabilityResult(ok=False, summary="The GitHub App isn't ready.", detail=str(exc))
+    base = api_base.rstrip("/")
+    h = _headers(token)
+    try:
+        async with httpx.AsyncClient(timeout=30.0, transport=transport) as c:
+            exists = await c.get(f"{base}/repos/{owner}/{repo}/git/ref/heads/{branch}", headers=h)
+            if exists.status_code == 200:
+                return CapabilityResult(ok=True, summary=f"`{branch}` already exists on `{owner}/{repo}`")
+            src = from_branch
+            if not src:
+                meta = await c.get(f"{base}/repos/{owner}/{repo}", headers=h)
+                src = (meta.json().get("default_branch") or "main") if meta.status_code == 200 else "main"
+            ref = await c.get(f"{base}/repos/{owner}/{repo}/git/ref/heads/{src}", headers=h)
+            if ref.status_code >= 400:
+                return CapabilityResult(ok=False, summary=f"Couldn't read `{src}` of `{owner}/{repo}`.",
+                                        detail=ref.text[:160])
+            sha = ref.json()["object"]["sha"]
+            r = await c.post(f"{base}/repos/{owner}/{repo}/git/refs", headers=h,
+                             json={"ref": f"refs/heads/{branch}", "sha": sha})
+    except httpx.HTTPError as exc:
+        return CapabilityResult(ok=False, summary=f"Couldn't reach GitHub to create `{branch}`.",
+                                detail=str(exc)[:160])
+    if r.status_code == 201:
+        return CapabilityResult(ok=True, summary=f"branch `{branch}` created on `{owner}/{repo}` "
+                                f"from `{src}` @ `{sha[:10]}`")
+    if r.status_code == 422:      # a race created it between our check and create — fine
+        return CapabilityResult(ok=True, summary=f"`{branch}` already exists on `{owner}/{repo}`")
+    return CapabilityResult(ok=False, summary=f"Creating `{branch}` on `{owner}/{repo}` failed "
+                            f"({r.status_code}).", detail=r.text[:160])
+
+
 async def delete_branch(
     github: GitHubApp, repo_url: str, branch: str, *,
     api_base: str = "https://api.github.com", transport: httpx.BaseTransport | None = None,

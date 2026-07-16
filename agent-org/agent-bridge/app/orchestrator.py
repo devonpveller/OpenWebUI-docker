@@ -52,6 +52,7 @@ from .modules.capabilities import (
     read_sibling_agent_prs,
     read_repo_state,
     merge_branch,
+    ensure_branch,
     read_open_pr_numbers,
 )
 from .modules.github_app import GitHubApp, build_github_app
@@ -6941,6 +6942,61 @@ class Orchestrator:
                              payload={"repo": repo, "pr": pr_number, "merge_id": merge_id})
         return res.url
 
+    async def _integrate_to_develop(
+        self, effort_id: str, repo: str | None, delivery: BranchDelivery,
+    ) -> str:
+        """DEVELOP-BRANCH INTEGRATION (operator 2026-07-15: "the PRs should be separate as they are
+        now, but they should be MERGED INTO DEVELOPMENT" — the org left N parallel PRs off main and
+        never converged them into one product 'like an actual project'). Fold an ACCEPTED delivery
+        (green + its own PR) into the project's `develop` branch so the product ACCUMULATES across
+        efforts, and keep ONE standing `develop → main` PR as the whole-product gate. Merge-into-
+        develop is autonomous; merge-to-main stays HUMAN (D4). A conflict is surfaced honestly, not
+        forced. Best-effort — never blocks the closure. Returns a closure note ('' when off)."""
+        if not (self.s.develop_integration and repo and delivery.landed
+                and self.github is not None and self.s.github_app_enabled):
+            return ""
+        dev = self.s.develop_branch
+        try:
+            seed = await ensure_branch(
+                self.github, repo, dev,
+                api_base=self.s.github_api_base, transport=self._gh_transport)
+            if not seed.ok:
+                return f"\n🔀 _Couldn't prepare `{dev}` for integration ({seed.summary})._"
+            merged = await merge_branch(
+                self.github, repo, dev, delivery.branch,
+                message=f"integrate {effort_id} into {dev}",
+                api_base=self.s.github_api_base, transport=self._gh_transport)
+        except Exception as exc:  # noqa: BLE001 — integration is best-effort; never wedge closure
+            log.warning("develop integration failed for %s: %s", effort_id, exc)
+            return ""
+        await self.audit.log(
+            "develop_integration", effort_id=effort_id,
+            payload={"branch": delivery.branch, "develop": dev, "ok": merged.ok,
+                     "summary": merged.summary[:160]})
+        if not merged.ok:
+            # a conflict = this effort overlaps accumulated develop work — the operator decides;
+            # its own PR stays open, nothing is force-merged.
+            return (f"\n🔀 **Not integrated into `{dev}`** — {merged.summary}. The effort's own PR "
+                    f"stays open; folding it into `{dev}` needs a manual call.")
+        # Keep the standing whole-product PR: `develop` → default branch (merge stays human, D4).
+        prod_pr = ""
+        try:
+            res = await open_pull_request(
+                self.github, repo, dev,
+                title="agent: develop → main (integrated product)",
+                body=(f"The accumulated, integrated product — every accepted per-effort delivery "
+                      f"merged into `{dev}`. Review the WHOLE product here; merge to the default "
+                      f"branch is human-gated (D4)."),
+                base_branch="", api_base=self.s.github_api_base, transport=self._gh_transport)
+            prod_pr = res.url if res.ok else ""
+        except Exception as exc:  # noqa: BLE001
+            log.debug("develop→main PR ensure failed for %s: %s", effort_id, exc)
+        note = f"\n🔀 **Integrated into `{dev}`** — {merged.summary}."
+        if prod_pr:
+            note += (f"\n📦 **Whole-product PR (`{dev}` → default, your gate):** {prod_pr} — "
+                     f"review the complete product here.")
+        return note
+
     async def _run_check(self, effort_id: str, check_cmd: str,
                          branch: str | None = None, repo: str | None = None,
                          ) -> tuple[str, str, str]:
@@ -8000,6 +8056,8 @@ class Orchestrator:
                 where += f"\n{pr_lead} {pr_url}{d2_note}{invite}"
                 if qa_note:      # surface the QA findings in-thread too, not only in the PR body
                     where += "\n\n" + qa_note
+                if gate_open:    # D2 green/skipped ⇒ safe to accumulate this delivery into develop
+                    where += await self._integrate_to_develop(effort_id, eff_repo, delivery)
                 where += await self._sibling_pr_note(eff_repo, branch)
                 where += wire_note
                 # The operator must never be left asking "what do I DO with this fix?" (live

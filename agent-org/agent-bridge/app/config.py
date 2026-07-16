@@ -119,6 +119,16 @@ class Settings(BaseSettings):
     # keeps the human as the disposer of what's worth fixing (governance §6). The DEPLOYED bridge
     # sets `AO_QA_GATE=report` in compose so real deliveries get QA; the default stays `off`.
     qa_gate: str = "off"
+    # DEVELOP-BRANCH INTEGRATION (operator 2026-07-15, reviewing gym PR#2-5: "the PRs should be
+    # separate as they are now, but they should be MERGED INTO DEVELOPMENT" — the org left N
+    # parallel PRs off main and never integrated them into one converging product "like an actual
+    # project"). When on, each ACCEPTED per-effort delivery (green + its own PR) is additionally
+    # MERGED into a per-project `develop` branch that accumulates the whole product, and ONE
+    # standing `develop → main` PR is kept as the complete-product gate (merge to main stays
+    # human — only the merge-into-develop is autonomous). The per-effort PRs stay exactly as they
+    # are. Default off (unchanged behaviour); the DEPLOYED bridge / the gym turn it on.
+    develop_integration: bool = False
+    develop_branch: str = "develop"
     # Autonomous burn-down round cap (operator 2026-07-07: "all 138 errors should have been worked
     # through autonomously and not elevated in the first place"). This is a RUNAWAY GUARD, not a
     # check-in: a STILL-PROGRESSING campaign should run to green, not elevate mid-progress — so the cap
