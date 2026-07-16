@@ -145,15 +145,20 @@ async def test_sweep_defers_while_a_worker_daemon_is_actually_running(db_url):
         await db.dispose()
 
 
-async def test_watchdog_recovers_a_plan_drafted_strand(db_url):
-    """An effort that drafted a plan and then sat at `plan_drafted` with no dispatch (2026-07-16 gym:
-    30+ min silent, GPU idle, no posts) must be re-engaged — the planning/dry-run mid-pipeline
-    AUTO-ADVANCES to dispatch, so a stall there is a wedge, not a state awaiting the operator."""
+async def test_watchdog_never_bypasses_the_plan_approval_gate(db_url):
+    """`plan_drafted` is the Stage-3 PLAN APPROVAL gate (P3.9): an effort parked there is CORRECTLY
+    awaiting the operator's `approve <effort>`, however long that takes. The watchdog must NEVER
+    auto-re-engage it — that would bypass a human governance gate (§4.5). A quiet plan gate is the
+    system working, not a stall. (2026-07-16: an earlier fix wrongly added `plan_drafted` to the
+    mid-dispatch kinds, so the watchdog silently executed unapproved plans after 15 min.)"""
     orch, chat, db = await _orch(db_url)
     try:
-        await _seed(orch, "effort-planned", last_kind="plan_drafted", age_min=40)
+        await _seed(orch, "effort-planned", last_kind="plan_drafted", age_min=240)
         await orch._sweep_stalled_efforts()
-        assert await orch._event_count("effort-planned", "stall_recovered") == 1
+        assert await orch._event_count("effort-planned", "stall_recovered") == 0
+        await _seed(orch, "effort-lifeplan", last_kind="lifecycle_plan_drafted", age_min=240)
+        await orch._sweep_stalled_efforts()
+        assert await orch._event_count("effort-lifeplan", "stall_recovered") == 0
     finally:
         await db.dispose()
 

@@ -974,13 +974,15 @@ class Orchestrator:
         "worker_acquire", "worker_project_set", "worker_release", "goal_change",
         "readiness_gate", "effort_risk_set", "effort_reopened", "worker_resumed",
         "worker_waiting", "focus_failed", "effort_published",
-        # The PLANNING / DRY-RUN mid-pipeline (2026-07-16 gym: an effort drafted a plan and then sat
-        # at `plan_drafted` for 30+ min — GPU idle, no posts — because the watchdog treated that as a
-        # "surfaced state awaiting the operator" and never re-engaged it. These states all AUTO-ADVANCE
-        # to dispatch; if one goes quiet past the threshold the effort is genuinely stuck, not waiting
-        # on a human, so the safety net must cover them too).
-        "plan_drafted", "lifecycle_plan_drafted", "dry_run_started", "dry_run_recorded",
-        "dry_run_auto_isolated", "worker_plan_approved",
+        # The DRY-RUN / worker-plan mid-pipeline (2026-07-16 gym: an effort sat mid-pipeline with the
+        # GPU idle because the watchdog treated these as "surfaced states awaiting the operator" and
+        # never re-engaged). These states AUTO-ADVANCE to dispatch, so going quiet past the threshold
+        # means genuinely stuck, not waiting on a human — the safety net must cover them.
+        # DELIBERATELY EXCLUDED: `plan_drafted` / `lifecycle_plan_drafted` are the Stage-3 PLAN
+        # APPROVAL gate (P3.9) — an effort parked there is CORRECTLY awaiting the operator's
+        # `approve <effort>`, and auto-re-engaging it would bypass a human governance gate (§4.5).
+        # A quiet plan gate is the system working, not a stall.
+        "dry_run_started", "dry_run_recorded", "dry_run_auto_isolated", "worker_plan_approved",
     })
 
     async def _worker_urls(self) -> list[dict]:
