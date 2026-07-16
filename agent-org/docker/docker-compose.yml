@@ -158,8 +158,12 @@ services:
       # Post-delivery QA (operator 2026-07-15): a differently-goaled agent EXERCISES the product
       # after it lands (green tests != usable product) and reports usability gaps a test suite
       # misses. report = attach findings to the PR + closure; iterate = also auto-fix in-scope
-      # defects once; off = skip. Field defaults off so the test harness is unchanged; ON here.
-      AO_QA_GATE: ${AO_QA_GATE:-report}                 # report | iterate | off — exploratory QA
+      # defects once; off = skip. Field defaults off so the test harness is unchanged.
+      # DEPLOYED = iterate (operator 2026-07-15, reviewing PR#2/#3: "we have infinite iterations
+      # available since it's running locally — there's a severe lack of polish"): use those
+      # iterations to CLOSE the in-scope gaps (crash bugs, a feature stored-but-not-shown, missing
+      # docs/help) before the PR, instead of only reporting them.
+      AO_QA_GATE: ${AO_QA_GATE:-iterate}                # report | iterate | off — exploratory QA
       # Conversation context (the PO's memory): thread = immediate, channel = relevant background,
       # char-budgeted so it never overwhelms the model window. Raise for a larger-context model.
       AO_CONTEXT_THREAD_CHARS: ${AO_CONTEXT_THREAD_CHARS:-2500}
