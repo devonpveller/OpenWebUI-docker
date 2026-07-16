@@ -974,6 +974,13 @@ class Orchestrator:
         "worker_acquire", "worker_project_set", "worker_release", "goal_change",
         "readiness_gate", "effort_risk_set", "effort_reopened", "worker_resumed",
         "worker_waiting", "focus_failed", "effort_published",
+        # The PLANNING / DRY-RUN mid-pipeline (2026-07-16 gym: an effort drafted a plan and then sat
+        # at `plan_drafted` for 30+ min — GPU idle, no posts — because the watchdog treated that as a
+        # "surfaced state awaiting the operator" and never re-engaged it. These states all AUTO-ADVANCE
+        # to dispatch; if one goes quiet past the threshold the effort is genuinely stuck, not waiting
+        # on a human, so the safety net must cover them too).
+        "plan_drafted", "lifecycle_plan_drafted", "dry_run_started", "dry_run_recorded",
+        "dry_run_auto_isolated", "worker_plan_approved",
     })
 
     async def _worker_urls(self) -> list[dict]:

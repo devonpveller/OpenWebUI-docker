@@ -145,6 +145,31 @@ async def test_sweep_defers_while_a_worker_daemon_is_actually_running(db_url):
         await db.dispose()
 
 
+async def test_watchdog_recovers_a_plan_drafted_strand(db_url):
+    """An effort that drafted a plan and then sat at `plan_drafted` with no dispatch (2026-07-16 gym:
+    30+ min silent, GPU idle, no posts) must be re-engaged — the planning/dry-run mid-pipeline
+    AUTO-ADVANCES to dispatch, so a stall there is a wedge, not a state awaiting the operator."""
+    orch, chat, db = await _orch(db_url)
+    try:
+        await _seed(orch, "effort-planned", last_kind="plan_drafted", age_min=40)
+        await orch._sweep_stalled_efforts()
+        assert await orch._event_count("effort-planned", "stall_recovered") == 1
+    finally:
+        await db.dispose()
+
+
+async def test_watchdog_recovers_a_dry_run_strand(db_url):
+    """Same coverage gap, one step later: an effort whose dry-run passed but never dispatched is a
+    wedge the watchdog must recover (not an operator-hold)."""
+    orch, chat, db = await _orch(db_url)
+    try:
+        await _seed(orch, "effort-dry", last_kind="dry_run_recorded", age_min=40)
+        await orch._sweep_stalled_efforts()
+        assert await orch._event_count("effort-dry", "stall_recovered") == 1
+    finally:
+        await db.dispose()
+
+
 async def test_watchdog_recovers_a_post_publish_stall(db_url):
     """A delivery that PUBLISHED a branch but whose verify→PR→closure then STALLED (silent, no
     worker running) is a wedge the watchdog must recover — publishing is not the finish line (live
