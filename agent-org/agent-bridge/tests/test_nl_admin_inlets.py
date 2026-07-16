@@ -71,6 +71,44 @@ async def test_nl_egress_allow(db_url):
         await db.dispose()
 
 
+async def test_start_effort_prose_is_not_tidied(db_url):
+    """Regression (2026-07-16 gym): "start a new effort <multi-word> on the <proj> project. <goal>"
+    whose goal text describes a "clear-completed" FEATURE was swallowed by _nl_tidy_up (the word
+    "effort" + "clear…completed" tripped the board-tidy classifier) and silently dropped — no effort,
+    just a "Tidied up" reply. The deterministic new-effort idiom must catch the natural phrasing
+    FIRST and open the effort, slugifying the multi-word name."""
+    orch, chat, db = await _orch(db_url)
+    try:
+        await orch.projects.add("gym", "https://github.com/acme/gym.git")
+        mgmt = await orch.mgmt_channel_id()
+        msg = ("start a new effort gym-004 todo-product on the gym project. Take the todo CLI and "
+               "add delete, priority levels, and a clear-completed action, with per-command help. "
+               "Deliver as a PR.")
+        await orch.nl_intake(msg, mgmt, thread_id="t1")
+        posts = " || ".join(p["message"] for p in chat.posted)
+        assert "On it — opened" in posts and "todo-product" in posts   # routed to new-effort
+        assert "Tidied up" not in posts                                # NOT the board-tidy path
+        snap = await orch.gate.snapshot(open_only=True)
+        assert any("gym-004-todo-product" in (e.get("id") or "") for e in snap)   # slugified name
+    finally:
+        await db.dispose()
+
+
+async def test_tidy_guard_skips_start_effort(db_url):
+    """The _nl_tidy_up guard in isolation: a start-effort directive is never a board-tidy, even
+    though its goal text mentions clear/completed as feature words."""
+    orch, chat, db = await _orch(db_url)
+    try:
+        mgmt = await orch.mgmt_channel_id()
+        handled = await orch._nl_tidy_up(
+            "start a new effort gym-004 todo-product on the gym project. add a clear-completed "
+            "action and clear out finished todos.", mgmt, thread_id="t1")
+        assert handled is False                                        # not treated as tidy
+        assert not any("Tidied up" in p["message"] for p in chat.posted)
+    finally:
+        await db.dispose()
+
+
 async def test_nl_kill_and_unkill(db_url):
     orch, chat, db = await _orch(db_url)
     try:

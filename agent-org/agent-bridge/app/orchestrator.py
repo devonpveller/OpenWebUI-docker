@@ -2054,10 +2054,28 @@ class Orchestrator:
         # guard only protected NAMED RE-RUNS). "start [a new] effort <name>: <goal>" is beyond
         # classification doubt — open it and run the normal governed intake directly. Bonus: the
         # effort id becomes exactly `effort-<name>` instead of a model-mangled slug.
+        # Two accepted shapes, BOTH deterministic and BOTH immune to the hygiene classifiers:
+        #   "[in <proj>,] start [a new] effort <name>: <goal>"                  (explicit separator)
+        #   "start [a new] effort <name…> on [the] <proj> [project]. <goal>"    (natural prose)
+        # The 2nd shape is how a human — and the gym runner — actually phrase it: a MULTI-WORD name,
+        # the project named via "on the <proj> project", and NO separator before the goal (2026-07-16
+        # gym finding: "start a new effort gym-004 todo-product on the gym project. …" fell through
+        # the strict 1st shape, then its goal text "a clear-completed action" tripped _TIDY_RE and the
+        # whole start-effort was swallowed as a board-tidy — silently dropped, never dispatched).
+        # Separator between <name> and <goal> is a colon OR a SPACE-PADDED dash — never a bare dash,
+        # so a hyphenated name ("gym-004", "gym-a-delete-command") is not split at its own hyphen
+        # (that mis-split left proj empty → fell through to the model, mangling the slug — the other
+        # half of the 2026-07-16 gym drop).
         m_ne = re.match(
             r"^\s*(?:in\s+(?P<proj>[A-Za-z0-9][\w.-]*)\s*[,:]?\s+)?start\s+(?:a\s+new\s+)?"
-            r"effort\s+(?P<name>[A-Za-z0-9][\w-]{2,60})\s*[:\-–—]\s*(?P<goal>.+)$",
+            r"effort\s+(?P<name>[A-Za-z0-9][\w-]{2,60})(?:\s*:\s*|\s+[-–—]\s+)(?P<goal>.+)$",
             message.strip(), re.I | re.S)
+        if not m_ne:
+            m_ne = re.match(
+                r"^\s*start\s+(?:a\s+new\s+)?effort\s+(?P<name>[A-Za-z0-9][\w -]{1,80}?)"
+                r"\s+on\s+(?:the\s+)?(?P<proj>[A-Za-z0-9][\w.-]*?)(?:\s+project)?\s*[.:]\s+"
+                r"(?P<goal>\S.+)$",
+                message.strip(), re.I | re.S)
         if m_ne:
             _p = None
             if m_ne.group("proj"):
@@ -2067,8 +2085,11 @@ class Orchestrator:
                 _p = await self.projects.get(_slug) if _slug else None
             if _p is not None:
                 _goal = m_ne.group("goal").strip()
+                # slugify — the 2nd shape's name may be multiple words ("gym-004 todo-product")
+                _ne_name = re.sub(r"[^A-Za-z0-9]+", "-",
+                                  m_ne.group("name").strip()).strip("-").lower()
                 eid, chan, root = await self.router.open_effort(
-                    m_ne.group("name"), project=_p["slug"], goal=_goal)
+                    _ne_name, project=_p["slug"], goal=_goal)
                 await self.chat.post(
                     channel_id,
                     f"On it — opened {self._effort_link(eid, root)} on `{_p['slug']}`; running "
@@ -7369,6 +7390,12 @@ class Orchestrator:
         a question. Never touches active efforts or idle work whose branch ISN'T merged (that would
         lose it). Generic across projects."""
         if not self._TIDY_RE.search(message):
+            return False
+        # A start-effort directive is NEVER a board-tidy — even though its GOAL text may mention
+        # clear/complete/done as FEATURE words ("a clear-completed action"). The deterministic
+        # new-effort idiom handles these first; this is defense in depth (2026-07-16 gym finding).
+        if re.match(r"^\s*(?:in\s+\S+[,:]?\s+)?(?:start|open|create|kick\s*off|launch)\s+"
+                    r"(?:a\s+new\s+)?effort\b", message, re.I):
             return False
         # a branch-ONLY ask ("clean up the branches") belongs to _nl_branch_hygiene
         if re.search(r"\bbranch(?:es)?\b", message, re.I) and not re.search(
