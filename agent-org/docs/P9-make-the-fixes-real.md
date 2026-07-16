@@ -45,6 +45,9 @@ Keep this current. An issue leaves the register only when a **live gym round** p
 | 10 | PM narrates the worker's story, not the verified facts | closure said *"no changes — nothing to publish"* with a published branch + passing D2 in the same audit | **PARTIAL** — P8 #1 covers the claim; the prose is still worker-sourced |
 | 11 | Closure invariant / waiting-on-human / provenance / prose-never-verifies | P8 #1–#4 built, 527 green | **BUILT, NOT LIVE-PROVEN** — needs a round to close |
 | 12 | Background watchers die on session teardown | runner + watchers stopped ~6× | **WORKAROUND** — use the Mattermost follow, never `sleep` loops |
+| 13 | **A wake carries a chat line, not the state** | 6+ consecutive wakes on posts already superseded ("On it…", "Readiness ✓", "which branch?", the 422, the archive). Every one cost a turn + several audit queries to re-derive what was *actually* true. | **OPEN — P9 #6** |
+| 14 | **Concurrent sessions have no shared intent** | This session held the validation round back to protect PR #10 and said so; another actor fired it ~2 min later and the swap closed #10. Neither was wrong — neither could see the other. | **OPEN — P9 #7** |
+| 15 | **The org can't be asked "what is true now?"** | Diagnosing any of the above meant `docker exec` + raw `/audit` + `/scheduler` + bridge logs + `git` inside the worker. The org has no "explain this effort" surface. | **OPEN — P9 #8** |
 
 ---
 
@@ -153,6 +156,68 @@ integration result). The worker's answer may be quoted, never summarised as trut
 
 ---
 
+## P9 #6 — A wake must carry state, not a stale chat line
+
+**Evidence (this session, since the P8 round started).** Six-plus consecutive wakes delivered posts
+that were already superseded by the time they arrived: *"On it — opened…"*, *"Readiness ✓…"*,
+*"Which branch should the PR be for?"*, the `422`, the archive confirmation. One even delivered a
+`stall_escalated` **45 seconds after the approval that resolved it**, which reads as an emergency
+when nothing is wrong. Each cost a turn plus 2–4 audit queries just to establish what was *currently*
+true — and twice I nearly acted on a stale alarm.
+
+**Research.** Not a batching bug: `bridge.py :: _dispatch_wake` genuinely batches (`rows = sorted(
+batch["posts"].values(), …)`). The posts arrive one-per-wake because the *turn* is slow relative to
+the post rate, so each poll finds exactly one new post. The real defect is the **payload**: the wake
+is a chat transcript, and the woken agent must re-derive reality from scratch.
+
+**Design.** The wake payload should carry a **state snapshot alongside the posts**: for each effort
+mentioned — lifecycle, `waiting_on` (P8 #2), the gate tally (`effort_published` / `delivery_pr_opened`
+/ `qa_evaluation` / `develop_integration`), last event + age, and the current ask. Cheap to compute
+(one audit read the org already does) and it removes the entire "wake → 4 queries → oh, that's stale"
+loop. Follows the same principle as P8 #1: **speak from the audit, not from prose.**
+
+**Done when.** A woken agent can act — or correctly decline to act — without querying anything.
+
+---
+
+## P9 #7 — Concurrent actors need shared, visible intent
+
+**Evidence.** This session deliberately held the validation round to protect PR #10 (the artifact the
+operator had said they were coming home to review) and announced that hold in #management. ~2 minutes
+later another actor fired the round; its swap closed PR #10. **Neither actor was wrong** — the hold
+existed only as English in a chat message, invisible to anything that could act on it.
+
+**Why it matters for the north star.** A dark factory is *many* agents on one org. If one agent's
+intent ("don't swap — this is under review") lives only in prose, every other agent is free to
+violate it without knowing. That is not a coordination bug; it is a **missing primitive**.
+
+**Design.** Intent must be state the org can read, not a sentence:
+- A **claim/hold registry**: `{resource: pr#10|arena:gym|effort:X, holder, reason, expires}`, set via
+  the operator plane, honored by destructive operations (the swap checks it — pairs with P9 #2).
+- Destructive actions consult it and **refuse-and-explain** instead of proceeding.
+- Cheap version: reuse P9 #2's review marker as the first concrete resource claim, and generalise
+  later.
+
+**Done when.** An announced hold is enforceable by something other than the announcer's attention.
+
+---
+
+## P9 #8 — "Explain this effort" as a first-class surface
+
+**Evidence.** Every diagnosis in this arc required `docker exec` into the bridge, raw `/audit`
+queries, `/scheduler`, bridge logs, and finally `git` *inside the worker container* to discover a
+days-stale checkout. The org knew every fact needed — it just had no way to say them.
+
+**Design.** One endpoint / one command: `explain <effort>` → why it is where it is:
+lifecycle · `waiting_on` + the ask · gate tally with the missing gate named (P8 #1 already computes
+this) · last event + age · base commit + workspace provenance (P8 #3) · the last honest blocker. The
+PM's answer to *"why is the GPU idle?"* should be one call, not an afternoon.
+
+**Note.** P9 #6 and #8 are the same insight from two directions — the org can compute its own state
+but never volunteers it. Build #8 first; #6 is then a consumer of it.
+
+---
+
 ## The meta-fix: a live assertion per change
 
 **Every P9 change ships with a gym-observed assertion, not just a unit test.** Add to
@@ -162,6 +227,9 @@ integration result). The worker's answer may be quoted, never summarised as trut
 - P9 #2 ⇒ a PR marked for review survives a swap
 - P9 #3 ⇒ the same goal twice ⇒ the same risk class
 - P9 #4 ⇒ a deliberately bug-ratifying test is reported as a defect
+- P9 #6 ⇒ a wake payload contains the gate tally + `waiting_on` for every effort it names
+- P9 #7 ⇒ a held resource survives a destructive op, and the refusal is audited
+- P9 #8 ⇒ `explain <effort>` names the missing gate for a deliberately half-delivered effort
 - P8 #1 ⇒ `delivery_pr_opened >= 1` whenever an effort reaches `done` with a landed delivery
 
 **A change without a live assertion is not done.** That is the whole lesson of 2026-07-16: three
