@@ -216,6 +216,8 @@ def _engine_hosts_murder():
         b'\turl = https://github.com/devonpveller/murder\n'
         b'[submodule "vendor/MonoGame"]\n\tpath = vendor/MonoGame\n'
         b'\turl = https://github.com/devonpveller/MonoGame\n').decode()
+    state: dict = {}   # was referenced but never defined — a latent NameError every /branches/
+                       # read used to swallow inside _verify_delivery's broad except
 
     def handler(request: httpx.Request) -> httpx.Response:
         p = request.url.path

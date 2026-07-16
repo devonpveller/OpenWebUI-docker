@@ -110,22 +110,31 @@ class Router:
         self._activity: dict[str, list[str]] = {}
         # WORKSPACE PROVENANCE (operator 2026-07-16: "worker workspaces should be wiped each time the
         # task changes unless we can deterministically determine dependencies … project name and git
-        # commit id"). {worker_instance_id: (effort_id, repo)} — what a worker's /workspace was last
-        # cloned FOR. The daemon only wipes on a PROJECT switch, so consecutive efforts on the SAME
-        # project reused a days-old checkout: it accumulated every prior effort's branches, sat on a
-        # stale base, and pushed branches with NO common ancestor to the live main → `compare → 404`,
-        # `PR → 422`, so two complete products could never be delivered (and a worker even reported
-        # "all phases complete" off the PREVIOUS effort's branch). Rule: reuse ONLY when the task is
-        # provably identical (same effort + same repo → same base we cloned); otherwise WIPE. A fresh
-        # clone at task start always carries the CURRENT base commit, which is the determinism the
-        # commit-id check is for.
-        self._ws_focus: dict[str, tuple[str, str]] = {}
+        # commit id"). {worker_instance_id: (effort_id, repo, base_sha)} — what a worker's /workspace
+        # was last cloned FOR, and the base commit it was cloned AT ("" = unknown). The daemon only
+        # wipes on a PROJECT switch, so consecutive efforts on the SAME project reused a days-old
+        # checkout: it accumulated every prior effort's branches, sat on a stale base, and pushed
+        # branches with NO common ancestor to the live main → `compare → 404`, `PR → 422`, so two
+        # complete products could never be delivered (and a worker even reported "all phases
+        # complete" off the PREVIOUS effort's branch). Rule: reuse ONLY when the task is provably
+        # identical — same effort + same repo, AND (P8 #3) the base the caller expects matches the
+        # base we cloned; a moved base (a merge, an arena swap) means the checkout's lineage is no
+        # longer the live one → WIPE. A fresh clone at task start always carries the CURRENT base
+        # commit, which is the determinism the commit-id check is for.
+        self._ws_focus: dict[str, tuple[str, str, str]] = {}
         # Optional async hook `(repo, upstream) -> str | None`, tried when a focus reports the
         # upstream bake FAILED. A truthy return means the caller RECOVERED (e.g. the orchestrator
         # verified the registry upstream is wrong via the forge API and corrected it) and is the
         # message to post instead of the generic private-or-unreachable warning. Same wiring style
         # as scheduler.on_release.
         self.on_upstream_fail = None
+
+    def invalidate_focus(self, effort_id: str) -> None:
+        """Drop every workspace-provenance claim for this effort, so the NEXT focus wipes and
+        re-clones off the live base (P8 #3: refuse to act on unprovenanced state — used on a
+        reopen, and when a worker asserts its checkout is not rooted on the expected base)."""
+        for _wid in [w for w, v in self._ws_focus.items() if v[0] == effort_id]:
+            self._ws_focus.pop(_wid, None)
 
     def _record_activity(self, effort_id: str, line: str) -> None:
         buf = self._activity.setdefault(effort_id, [])
@@ -175,8 +184,7 @@ class Router:
                     # WIPES and re-clones off the current base (live 2026-07-16: a reopened effort's
                     # worker read the prior round's finished branch and reported "all phases
                     # complete — no changes", closing hollow with nothing delivered).
-                    for _wid in [w for w, v in self._ws_focus.items() if v[0] == effort_id]:
-                        self._ws_focus.pop(_wid, None)
+                    self.invalidate_focus(effort_id)
                     await self.audit.log("effort_reopened", effort_id=effort_id,
                                          payload={"was": "done-or-aborted"})
                     # RE-SURFACE the thread: activity resumes inside a card posted hours/days ago,
@@ -300,6 +308,7 @@ class Router:
         recurse_submodules: bool = False,
         plan_only: bool = False,
         flail_guard: bool = False,
+        expected_base: str | None = None,
     ) -> WorkResult | None:
         """Wake a worker on an effort and post its reply in-thread. Returns None if the
         effort is frozen (the composition rule refuses to dispatch) or no capacity. If `repo`
@@ -307,7 +316,11 @@ class Router:
         project has a per-project deploy token); if omitted, the worker is assumed already focused.
         `upstream` (a fork's parent) is re-baked as the read-only `upstream` remote on this focus.
         `recurse_submodules`: the focus clones the FULL nested submodule tree — a composition build
-        needs it (the worker can't init submodules itself; the proxy denies it)."""
+        needs it (the worker can't init submodules itself; the proxy denies it).
+        `expected_base` (P8 #3): the base commit the caller expects the checkout to sit on (the
+        remote default-branch head read at dispatch). When given, an existing workspace is reused
+        ONLY if it was cloned at that same base — a moved base forces a fresh clone. When None,
+        reuse falls back to the effort+repo identity alone (mid-effort follow-up turns)."""
         session_id = session_id or thread_id
         # RELIABILITY: dispatch inside a bounded retry loop. If the acquired worker is wedged (409
         # busy) or unreachable, QUARANTINE it (so it stops being picked) and RE-DISPATCH on another
@@ -337,24 +350,31 @@ class Router:
             try:
                 if repo:
                     # WIPE unless this worker's workspace was cloned for THIS EXACT task (same
-                    # effort + same repo). Any task change gets a fresh clone off the CURRENT base —
-                    # never a stale checkout carrying another effort's branches (see _ws_focus).
-                    want = (effort_id, repo)
-                    reuse = self._ws_focus.get(inst.id) == want
+                    # effort + same repo — and, when the caller states one, the SAME base commit,
+                    # P8 #3). Any task change OR a moved base gets a fresh clone off the CURRENT
+                    # base — never a stale checkout carrying another effort's branches or a dead
+                    # lineage (see _ws_focus).
+                    rec = self._ws_focus.get(inst.id)
+                    reuse = (rec is not None and rec[0] == effort_id and rec[1] == repo
+                             and (expected_base is None or rec[2] == expected_base))
                     ok, detail, upstream_ok = await self.harness.set_project(
                         inst.base_url, repo, token=repo_token,
                         upstream=upstream, upstream_token=upstream_token,
                         recurse_submodules=recurse_submodules, fresh=not reuse,
                     )
                     if ok:
-                        self._ws_focus[inst.id] = want
+                        # record the base this workspace now provably sits on: the caller's
+                        # expected base on a fresh anchor, or the prior record on a NOOP reuse.
+                        base = (expected_base if expected_base is not None
+                                else (rec[2] if (rec is not None and reuse) else ""))
+                        self._ws_focus[inst.id] = (effort_id, repo, base)
                     else:
                         self._ws_focus.pop(inst.id, None)   # unknown state → never claim provenance
                     await self.audit.log(
                         "worker_project_set", effort_id=effort_id, actor=inst.id,
                         payload={"repo": repo, "ok": ok, "upstream": upstream,
                                  "upstream_ok": upstream_ok, "detail": detail,
-                                 "fresh": not reuse},
+                                 "fresh": not reuse, "base_sha": expected_base or ""},
                     )
                     # TRANSIENT workspace collision ("destination path … already exists") — a suspended/
                     # parked worker still holds a prior checkout, the SAME race the verify-focus retries.
@@ -370,10 +390,13 @@ class Router:
                             upstream=upstream, upstream_token=upstream_token,
                             recurse_submodules=recurse_submodules, fresh=True,
                         )
+                        if ok:   # the fresh retry re-anchored the workspace — claim its provenance
+                            self._ws_focus[inst.id] = (effort_id, repo, expected_base or "")
                         await self.audit.log(
                             "worker_project_set", effort_id=effort_id, actor=inst.id,
                             payload={"repo": repo, "ok": ok, "fresh_retry": True,
-                                     "upstream": upstream, "upstream_ok": upstream_ok, "detail": detail},
+                                     "upstream": upstream, "upstream_ok": upstream_ok,
+                                     "detail": detail, "base_sha": expected_base or ""},
                         )
                     if ok and upstream and upstream_ok is False:
                         # Clone worked but the fork's read-only `upstream` remote didn't bake.

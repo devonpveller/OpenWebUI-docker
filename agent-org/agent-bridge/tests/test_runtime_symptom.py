@@ -81,11 +81,12 @@ async def test_build_only_goals_do_not_trip_it(db_url):
         await db.dispose()
 
 
-async def test_no_changes_on_a_behavioral_goal_needs_repro_proof(db_url):
-    """The false-done the operator distrusts (live 2026-07-11): an auto-iteration of an
-    already-unverified atlas fix returned NO CHANGES (read-only) and was closed 'done — verified'.
-    A behavioral-symptom goal can NEVER be closed on a bare no-op — doing nothing can't fix a live
-    symptom — unless the report proves the symptom no longer reproduces (`REPRO:` + `AFTER: PASS`)."""
+async def test_no_changes_on_a_behavioral_goal_needs_org_observed_proof(db_url):
+    """The false-done the operator distrusts (live 2026-07-11; recurred 2026-07-16 gym-004b, which
+    closed on `REPRO:`/`AFTER: PASS` PROSE while `effort_reproduction_verified: 0`). A
+    behavioral-symptom goal can NEVER be closed on a bare no-op — doing nothing can't fix a live
+    symptom — and the worker's prose is not proof either (P8 #4: no worker sentence may cause a
+    state change). Only the ORG's own red→green harness closes it."""
     orch, db = await _orch(db_url)
     try:
         await _seed_goal(orch, "eff-behav",
@@ -96,11 +97,17 @@ async def test_no_changes_on_a_behavioral_goal_needs_repro_proof(db_url):
         # even a green BUILD isn't proof a runtime symptom is gone
         assert not await orch._no_changes_acceptable(
             "eff-behav", "NO CHANGES: build succeeded, 0 errors, nothing to change.")
-        # a reproduction that now PASSES IS proof (same bar _finish_effort's runtime gate uses)
-        assert await orch._no_changes_acceptable(
+        # P8 #4 — the worker's OWN reproduction prose is NOT proof: this exact shape closed
+        # gym-004b as 'done' while the org had verified nothing. Prose never verifies.
+        assert not await orch._no_changes_acceptable(
             "eff-behav",
             "NO CHANGES: the symptom was already fixed upstream.\n"
             "REPRO: click Game Profile\nBEFORE: FAIL — atlas not loaded\nAFTER: PASS — atlas loads")
+        # only the ORG-OBSERVED RED→GREEN (the org ran the reproduction itself) is proof
+        orch._org_verified["eff-behav"] = "headsha123456789000"
+        orch._repro_red_green["eff-behav"] = "headsha123456789000"
+        assert await orch._no_changes_acceptable(
+            "eff-behav", "NO CHANGES: the symptom was already fixed upstream.")
     finally:
         await db.dispose()
 
@@ -138,6 +145,37 @@ async def test_finish_effort_backstop_refuses_no_changes_done_on_behavioral_goal
         assert "did **not** mark it done" in msgs and "runtime/interaction" in msgs
         assert "finished (**done**)" not in msgs
         assert await orch._event_count(eid, "delivery_runtime_unverified") == 1
+    finally:
+        await db.dispose()
+
+
+async def test_finish_effort_backstop_ignores_worker_repro_prose(db_url):
+    """P8 #4 at the chokepoint: a no_changes closure whose OUTPUT carries the full
+    `REPRO:`/`AFTER: PASS` block — but which the org did NOT independently verify — must still be
+    refused. That exact prose closed gym-004b (2026-07-16) with `effort_reproduction_verified: 0`.
+    No worker sentence may cause a state change."""
+    orch, db = await _orch(db_url)
+    try:
+        eid = "eff-prose"
+        await _seed_goal(orch, eid, "the editor throws at runtime when clicked")
+        result = SimpleNamespace(output=(
+            "NO CHANGES: already fixed.\n"
+            "REPRO: click Game Profile\nBEFORE: FAIL — throws\nAFTER: PASS — loads fine"))
+        deliv = BranchDelivery(no_changes=True, branch=f"agent/{eid}")
+        await orch._finish_effort(eid, result, delivery=deliv)
+        async with orch.db.session_factory() as s:
+            e = await s.get(Effort, eid)
+        assert e.lifecycle != "done", "worker prose caused a state change (P8 #4 regression)"
+        msgs = " ".join(p["message"] for p in orch.chat.posted)
+        assert "did **not** mark it done" in msgs
+        assert await orch._event_count(eid, "delivery_runtime_unverified") == 1
+        # …but with the ORG's own red→green observed, the same closure is honest and closes
+        orch.chat.posted.clear()
+        orch._org_verified[eid] = "headsha123456789000"
+        orch._repro_red_green[eid] = "headsha123456789000"
+        await orch._finish_effort(eid, result, delivery=deliv)
+        msgs = " ".join(p["message"] for p in orch.chat.posted)
+        assert "finished (**done**)" in msgs
     finally:
         await db.dispose()
 

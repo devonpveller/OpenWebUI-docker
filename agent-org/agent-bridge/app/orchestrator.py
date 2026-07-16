@@ -41,6 +41,7 @@ from .modules.capabilities import (
     open_pull_request,
     parse_owner_repo,
     read_branch_changes,
+    read_default_branch_head,
     read_merge_base,
     classify_agent_branches,
     close_pull_request,
@@ -147,6 +148,12 @@ _ERR_SUMMARY_RES = [
 ]
 _ERR_LINE_RE = re.compile(r"\berror\b\s*(?:[A-Z]{1,5}\d{2,5})?\s*:", re.I)
 _ERR_FILE_RE = re.compile(r"^\s*(\S+?\.[A-Za-z0-9]{1,6})\s*[\(:]")
+
+
+def _now_iso() -> str:
+    """UTC now, ISO — stamps `asked_at` on human-gate parks (P8 #2 waiting-on state)."""
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _error_lines(output: str) -> list[str]:
@@ -276,6 +283,26 @@ def _parse_handoff(output: str) -> dict | None:
 # The little-coder daemon's flail-guard answer marker: the turn was KILLED for reading without
 # ever editing (operator 2026-07-14) — the bridge forks a fresh session and re-plans.
 _FLAIL_MARKER = "FLAIL-GUARD:"
+
+# P8 #3 — the worker's honest-stop marker when its checkout fails the base assertion below.
+_STALE_MARKER = "WORKSPACE STALE:"
+
+# P8 #3 — PROVENANCE clause injected into the FIRST coding step when the org knows the expected
+# base (2026-07-16 gym: both workers ran days-old checkouts rooted on dead history — every branch
+# they pushed had no common ancestor with the live main, so nothing could ever be delivered, and
+# nobody noticed until a human diffed the audit). The worker cannot discover the live base itself
+# (its git egress is proxied — `git fetch` can't reach the forge), so the org HANDS it the base
+# and demands an assert-before-work: an ancestry check, not a HEAD equality, so a re-engaged
+# workspace that already carries this effort's own commits still passes.
+_PROVENANCE_CLAUSE = (
+    "\n\nWORKSPACE PROVENANCE — run this check FIRST, before any other work: this task is planned "
+    "against base commit `{sha}` (the current `{branch}` head; your clone should be rooted on "
+    "it). Verify:\n"
+    "  git rev-list -n 500 HEAD | grep -q ^{sha} && echo BASE-OK || echo BASE-MISMATCH\n"
+    "BASE-OK → proceed with the task. BASE-MISMATCH → your workspace is STALE (cloned from dead "
+    "history — anything built on it is undeliverable): STOP immediately, change NOTHING, and "
+    "reply exactly `WORKSPACE STALE: HEAD not rooted on {sha12}` so I can re-clone you fresh."
+)
 
 # POST-DELIVERY QA report parsing (operator 2026-07-15). The QA agent replies with WORKS/DEFECTS/
 # FOLLOWUPS/VERDICT sections; these pull one section's block and split it into list items.
@@ -791,6 +818,13 @@ class Orchestrator:
         # equals this is a PRE-EXISTING branch resurrected, not a delivery (live 2026-07-07: an
         # empty-workspace run "delivered" yesterday's stale branch and wired an OLD commit).
         self._pre_dispatch_head: dict[str, str] = {}
+        # P8 #3 — PROVENANCE: the expected BASE per effort, read from the remote at dispatch
+        # ({effort_id: {"branch": default_branch, "sha": head_sha}}). Handed to the worker in the
+        # brief to ASSERT against (it can't discover it — proxied git), keys workspace reuse in the
+        # router, and is stamped on effort_published / delivery_pr_opened so no claim exists
+        # without the base it was made against (2026-07-16 gym: days-stale checkouts pushed
+        # branches with no common ancestor to the live main → compare 404 → PR 422 → hollow done).
+        self._expected_base: dict[str, dict] = {}
         # Evolved goals queued by a machine-detected failure (red check / unresolved verdicts) —
         # launched by delegate's finally the moment the current run closes (auto-iteration).
         self._iterate_after: dict[str, str] = {}
@@ -1006,6 +1040,39 @@ class Orchestrator:
                 select(func.count()).select_from(Event).where(
                     Event.effort_id == effort_id, Event.kind == kind))).scalar_one())
 
+    def _waiting_on(self, effort_id: str) -> dict | None:
+        """P8 #2 — WAITING-ON-HUMAN as a first-class state. Whether this effort is parked at a
+        HUMAN gate right now, and which: `{gate, asked_at, ask}` — derived straight from the hold
+        dicts (the single source of truth, rehydrated across restarts by the PendingStore), so it
+        can never drift out of sync with the actual parking. Born 2026-07-16: an effort correctly
+        holding at the Stage-3 plan gate looked IDENTICAL to a wedge (idle GPU, silent thread), a
+        session misread it as a stall, and the watchdog it 'fixed' auto-executed unapproved plans
+        after 15 min. None = not waiting on a human."""
+        if effort_id in self._pending:
+            e = self._pending[effort_id]
+            qs = e.get("questions") or []
+            return {"gate": "clarification", "asked_at": e.get("asked_at", ""),
+                    "ask": (qs[0] if isinstance(qs[0], str) else str(qs[0]))[:200] if qs
+                           else "answer the clarifying questions"}
+        if effort_id in self._pending_plan:
+            e = self._pending_plan[effort_id]
+            return {"gate": "plan_approval", "asked_at": e.get("asked_at", ""),
+                    "ask": f"`approve {effort_id}` (or `abort {effort_id}`)"}
+        m = self._pending_merge.get(f"merge-{effort_id}")
+        if m is not None:
+            return {"gate": "merge", "asked_at": m.get("asked_at", ""),
+                    "ask": f"say “merge it” for PR #{m.get('pr_number', '?')}"}
+        # capability/lifecycle holds are keyed by action/plan id — match on their payload's effort
+        for aid, e in self._pending_capability.items():
+            if e.get("effort_id") == effort_id:
+                return {"gate": "capability", "asked_at": e.get("asked_at", ""),
+                        "ask": f"`approve {aid}`"}
+        for pid, e in self._pending_lifecycle.items():
+            if e.get("effort_id") == effort_id:
+                return {"gate": "plan_approval", "asked_at": e.get("asked_at", ""),
+                        "ask": f"`approve {pid}`"}
+        return None
+
     async def _stall_watchdog_loop(self) -> None:
         """Safety net so the org NEVER sits silent after a dispatch (operator 2026-07-10: "there
         hasn't been an update in 2 hours"). Each tick sweeps for efforts wedged mid-dispatch — a
@@ -1044,6 +1111,12 @@ class Orchestrator:
                 continue                                    # internal / running now / waiting on capacity
             if eid in self._handoff_waiting:
                 continue        # paused on a handed-off fix — resumed by its finish (or by you)
+            # P8 #2 — an effort WAITING ON A HUMAN gate is never a stall, however long it idles:
+            # NO timeout may ever bypass a human gate (§4.5). Direct state check, not the fragile
+            # rule-by-event-kind below (2026-07-16: `plan_drafted` was once added to the
+            # mid-dispatch kinds and the watchdog auto-executed unapproved plans after 15 min).
+            if self._waiting_on(eid) is not None:
+                continue
             if e.get("state") == "frozen":
                 # A freeze on an ENVIRONMENT/WORKSPACE symptom (not a real code deviation) is
                 # something the org self-heals — re-clone + retry, bounded — instead of idling on the
@@ -1276,6 +1349,29 @@ class Orchestrator:
                 f"I'll re-engage it on a clean workspace automatically; if it keeps failing I'll raise "
                 f"it loudly rather than sit quiet."
                 + (f"\n```\n{tail[-280:]}\n```" if tail.strip() else ""))
+        await self.comms.post(Intent.worker_activity, body, effort_id=effort_id)
+        await self.comms.post(Intent.operator_reply, body,
+                              thread_id=self._mgmt_thread_of(effort_id))
+        await self.router.update_effort_card(effort_id, "working")
+
+    async def _handle_stale_workspace(self, effort_id: str, result) -> None:
+        """P8 #3 — the worker verified its checkout is NOT rooted on the expected base and honestly
+        STOPPED before building on dead history (the assert the org hands it in the brief — the
+        worker's proxied git can't refresh a stale clone, so working on would only produce branches
+        with no common ancestor to the live main: undeliverable). Drop the workspace's provenance
+        claim so the next focus WIPES + re-clones off the live base; audited as `focus_failed`
+        (a mid-dispatch kind) so the stall watchdog re-engages it bounded, like a clone failure."""
+        self.router.invalidate_focus(effort_id)
+        tail = (getattr(result, "output", None) or "")[-300:]
+        exp = (self._expected_base.get(effort_id) or {}).get("sha", "")
+        await self.audit.log("focus_failed", effort_id=effort_id,
+                             payload={"reason": "workspace_stale",
+                                      "expected_base": exp, "detail": tail})
+        body = (f"🧭 **{effort_id}** — the worker checked its workspace against the expected base "
+                f"(`{exp[:12] or 'unknown'}`) and found it rooted on DEAD history, so it honestly "
+                f"stopped **before doing any work** (work built there could never be delivered). "
+                f"I've invalidated that checkout — it re-clones fresh off the live base on the "
+                f"next dispatch, which the watchdog triggers automatically. Nothing was lost.")
         await self.comms.post(Intent.worker_activity, body, effort_id=effort_id)
         await self.comms.post(Intent.operator_reply, body,
                               thread_id=self._mgmt_thread_of(effort_id))
@@ -2739,6 +2835,8 @@ class Orchestrator:
         not-frozen, which persists forever and misleads the PM into reporting a phantom queue).
           running          — a delegate task is executing it right now (or a worker is computing it)
           paused           — frozen on a concern / kill switch (needs an operator decision)
+          waiting-on-you   — parked at a HUMAN gate (plan approval / clarification / merge); the
+                             system working, not a wedge — an idle GPU here is CORRECT (P8 #2)
           waiting-capacity — parked on GPU backpressure (auto-resumes when capacity returns)
           idle             — open but NOTHING is running; it will NOT start on its own (needs dispatch)
         Efforts do NOT queue and auto-run: an `idle` effort stays idle until re-engaged."""
@@ -2756,6 +2854,8 @@ class Orchestrator:
                 out[eid] = "running"
             elif e.get("state") == "frozen":
                 out[eid] = "paused"
+            elif self._waiting_on(eid) is not None:
+                out[eid] = "waiting-on-you"
             elif eid in parked:
                 out[eid] = "waiting-capacity"
             else:
@@ -2764,12 +2864,16 @@ class Orchestrator:
 
     def _render_status(self, efforts: list[dict], status_map: dict[str, str]) -> str:
         """Honest per-effort status lines + a one-line reality check when nothing is running."""
-        icon = {"running": "🟢", "paused": "⏸️", "waiting-capacity": "⏳", "idle": "⚪",
-                "done": "✅", "aborted": "🗑️"}
+        icon = {"running": "🟢", "paused": "⏸️", "waiting-on-you": "🙋", "waiting-capacity": "⏳",
+                "idle": "⚪", "done": "✅", "aborted": "🗑️"}
         lines = []
         for e in efforts:
             st = status_map.get(e["id"], "idle")
             line = f"- `{e['id']}` — {icon.get(st, '·')} **{st}**"
+            if st == "waiting-on-you":
+                # P8 #2: "why is the GPU idle?" answerable in one look — name the gate + the ask.
+                w = self._waiting_on(e["id"]) or {}
+                line += f" ({w.get('gate', 'human gate')} — {w.get('ask', 'your decision')})"
             act = self.router.recent_activity(e["id"], n=2)
             if act:
                 line += "\n  " + "\n  ".join(f"· {a}" for a in act)
@@ -2782,6 +2886,11 @@ class Orchestrator:
                      f"_{a.get('question', '')}_")
         running = sum(1 for v in status_map.values() if v == "running")
         idle = sum(1 for v in status_map.values() if v == "idle")
+        waiting = sum(1 for v in status_map.values() if v == "waiting-on-you")
+        if waiting:
+            body += (f"\n\n_🙋 **Waiting on you ({waiting})** — holding at a human gate, not "
+                     f"stuck; an idle GPU here is the system working. Each ask is on its line "
+                     f"above._")
         if running == 0 and idle and not self._advisories:
             body += (f"\n\n_⚠️ Nothing is running. {idle} effort(s) are **idle** — they will NOT "
                      f"start on their own. Say **“get the workers working”** (or name which) and I'll "
@@ -4087,13 +4196,17 @@ class Orchestrator:
         project/host has a check_cmd): only when the report carries explicit BUILD-PASS evidence —
         a fix request cannot be closed 'nothing to change' on the worker's word alone (live
         2026-07-07: a hallucinated no-op skipped the whole check stack). For a BEHAVIORAL goal (a
-        runtime/interaction/visual symptom): only when the report carries a reproduction that now
-        PASSES (`REPRO:` + `AFTER: PASS`) — 'no changes' on a LIVE symptom means the symptom is
-        unaddressed, so nothing was fixed; a worker's bare word can never close it (live 2026-07-11:
-        a NO-CHANGES auto-iteration of an already-`delivery_runtime_unverified` atlas fix was
-        falsely closed 'done — verified', the exact false-done the operator distrusts). This mirrors
-        `_finish_effort`'s runtime-symptom gate so the bar is identical whether or not a branch
-        landed. Generic across toolchains."""
+        runtime/interaction/visual symptom): only when the ORG ITSELF has observed the reproduction
+        go RED on the pre-fix state and GREEN on the fix (`_repro_red_green`, the org-run harness)
+        — 'no changes' on a LIVE symptom means the symptom is unaddressed, so nothing was fixed,
+        and a worker's PROSE (`REPRO:` + `AFTER: PASS` markers) can never close it (P8 #4,
+        2026-07-16 gym: exactly those markers closed gym-004b while the audit read
+        `effort_reproduction_verified: 0`; earlier live 2026-07-11: a NO-CHANGES auto-iteration of
+        an already-`delivery_runtime_unverified` atlas fix was falsely closed 'done — verified').
+        General rule: NO WORKER SENTENCE MAY CAUSE A STATE CHANGE. When the org can't run the
+        reproduction, the honest outcome is the "not verified — needs your runtime check" hold,
+        which is a GOOD outcome, not a failure. This mirrors `_finish_effort`'s runtime-symptom
+        gate so the bar is identical whether or not a branch landed. Generic across toolchains."""
         try:
             _, goal, _ = await self.charters.current_goal(effort_id)
         except Exception:  # noqa: BLE001
@@ -4109,11 +4222,12 @@ class Orchestrator:
         if not demands_proof:
             return True   # a real read-only task — NO CHANGES is the legitimate outcome
         # A behavioral-symptom goal: doing nothing never fixes a live symptom, so 'no changes' is a
-        # done ONLY if the report PROVES the symptom no longer reproduces — a reproduction that now
-        # PASSES (the same signature `_finish_effort` requires for a verified runtime fix).
+        # done ONLY if the ORG has independently proven the symptom no longer reproduces — the
+        # org-run RED→GREEN harness (`_org_reproduction_verified` sets `_repro_red_green` to the
+        # org-verified head). The worker's own `REPRO:`/`AFTER: PASS` prose is NOT proof (P8 #4).
         if behavioral:
-            return (bool(re.search(r"\bREPRO:", output, re.I))
-                    and bool(re.search(r"\bAFTER:\s*PASS\b", output, re.I)))
+            _rg = self._repro_red_green.get(effort_id)
+            return bool(_rg) and _rg == self._org_verified.get(effort_id)
         # a fix/build request: require concrete build-pass evidence in the worker's report
         return bool(re.search(
             r"CHECK:\s*PASS|build succeeded|BUILD SUCCEEDED|0\s+error\b|0\s+Error\(s\)|"
@@ -4363,7 +4477,7 @@ class Orchestrator:
             # recommended default; do NOT dispatch until answered (UX-FLOW Stage 2).
             self._pending[effort_id] = {
                 "proj_channel": proj_channel, "root": root, "request": request,
-                "questions": questions,
+                "questions": questions, "asked_at": _now_iso(),
             }
             numbered = self._render_questions(questions)
             n = len(questions)
@@ -4444,6 +4558,7 @@ class Orchestrator:
             return
         self._pending_plan[effort_id] = {
             "proj_channel": proj_channel, "root": root, "request": request, "plan": plan,
+            "asked_at": _now_iso(),
         }
         await self.pending.save(effort_id, "effort_plan",
                                 self._jsonify_pending(self._pending_plan[effort_id]))
@@ -4939,6 +5054,20 @@ class Orchestrator:
             if repo and self.github is not None and self.s.github_app_enabled:
                 pre = await self._verify_delivery(effort_id, repo)
                 self._pre_dispatch_head[effort_id] = pre.head_sha or ""
+            # P8 #3 — PROVENANCE: read the CURRENT default-branch head — the expected BASE this
+            # run is planned against. Refreshed every dispatch (never carried stale); unreadable
+            # ⇒ absent, and nothing downstream claims a base it can't prove.
+            self._expected_base.pop(effort_id, None)
+            if repo and self.github is not None and self.s.github_app_enabled:
+                try:
+                    bb = await read_default_branch_head(
+                        self.github, repo, api_base=self.s.github_api_base,
+                        transport=self._gh_transport)
+                except Exception as exc:  # noqa: BLE001 — best-effort; never wedge a dispatch
+                    log.debug("expected-base read failed for %s: %s", effort_id, exc)
+                    bb = None
+                if bb:
+                    self._expected_base[effort_id] = {"branch": bb[0], "sha": bb[1]}
             # a fresh dispatch invalidates any prior org-verified verdict (new work, new head)
             self._org_verified.pop(effort_id, None)
             self._repro_red_green.pop(effort_id, None)
@@ -5065,11 +5194,39 @@ class Orchestrator:
         instruction = step
         if self.s.handoff_enabled and "HANDOFF PROTOCOL" not in instruction:
             instruction += await self._handoff_protocol_context(effort_id)
+        # P8 #3 — PROVENANCE: the first coding step carries the expected base + the assert-before-
+        # work demand (the worker can't discover the live base itself — proxied git); every focused
+        # wake keys workspace reuse on that base, so a moved base re-clones instead of resuming
+        # dead history.
+        eb = self._expected_base.get(effort_id) or {}
+        if (i == 1 and repo and eb.get("sha")
+                and "WORKSPACE PROVENANCE" not in instruction):
+            instruction += _PROVENANCE_CLAUSE.format(
+                sha=eb["sha"], branch=eb.get("branch") or "main", sha12=eb["sha"][:12])
+        # P8 #5 — ORIENTATION ARTIFACT: a wiped workspace must not mean a BLIND worker (a fresh
+        # clone once burned 26 read-only calls re-discovering a tiny template and tripped the
+        # flail guard). Hand the worker the org's cached survey of this codebase, keyed by the
+        # base commit: same base ⇒ a map lookup shared across efforts; base moved ⇒ one
+        # re-survey. Best-effort — no map, no harm.
+        if i == 1 and repo and "PROJECT ORIENTATION" not in instruction:
+            try:
+                _proj = await self._effort_project(effort_id)
+                omap = await self.project_context.ensure(
+                    _proj or "", repo, base_sha=eb.get("sha", ""))
+            except Exception as exc:  # noqa: BLE001 — orientation is a bonus, never a blocker
+                log.debug("orientation map for %s failed: %s", effort_id, exc)
+                omap = ""
+            if omap:
+                instruction += (
+                    "\n\nPROJECT ORIENTATION (the org's cached survey of this codebase at your "
+                    "base — orient from THIS instead of re-exploring from zero; verify only the "
+                    "files you actually touch):\n" + omap)
         result = await self.router.wake(
             effort_id, role="worker-default", thread_id=root, channel_id=channel_id,
             session_id=await self._session_for(effort_id), instruction=instruction, repo=repo, repo_token=repo_token,
             upstream=upstream, upstream_token=upstream_token,
             flail_guard=True,   # arm the daemon's read-without-edit watchdog on CODING turns
+            expected_base=eb.get("sha") or None,
         )
         # FLAIL GUARD tripped (operator 2026-07-14: "too many thinking turns or time iterating on
         # read without editing anything is a good indicator to stop, fork from original user
@@ -5078,6 +5235,13 @@ class Orchestrator:
         # session from the original goal and re-enter through the plan gate. Bounded to once.
         if result is not None and _FLAIL_MARKER in (result.output or ""):
             await self._flail_replan(effort_id, result)
+            return None
+        # P8 #3 — the worker asserted its checkout is NOT rooted on the expected base and honestly
+        # stopped. Refuse to act on unprovenanced state: drop the workspace's provenance claim (the
+        # next focus wipes + re-clones off the live base) and surface it; the stall watchdog
+        # re-engages it bounded (focus_failed is a mid-dispatch kind), exactly like a clone failure.
+        if result is not None and _STALE_MARKER in (result.output or ""):
+            await self._handle_stale_workspace(effort_id, result)
             return None
         if result is None:
             await self._report_completion(effort_id, None)
@@ -5193,7 +5357,10 @@ class Orchestrator:
         self._published_branch[effort_id] = branch if (result and result.ok) else ""
         await self.audit.log(
             "effort_published", effort_id=effort_id,
-            payload={"branch": branch, "self_reported_ok": bool(result and result.ok), "firm": firm},
+            payload={"branch": branch, "self_reported_ok": bool(result and result.ok), "firm": firm,
+                     # P8 #3 — every published claim states what it was built against ("" = the
+                     # org couldn't read the base; the claim is then explicitly unprovenanced).
+                     "base_sha": (self._expected_base.get(effort_id) or {}).get("sha", "")},
         )
         return result
 
@@ -6977,10 +7144,13 @@ class Orchestrator:
         self._pending_merge[merge_id] = {
             "repo": repo, "pr_number": pr_number, "effort_id": effort_id, "branch": branch,
             "mgmt_thread": self._mgmt_thread_of(effort_id) or "",
+            "asked_at": _now_iso(),
         }
         await self.pending.save(merge_id, "merge", self._pending_merge[merge_id])
         await self.audit.log("delivery_pr_opened", effort_id=effort_id,
-                             payload={"repo": repo, "pr": pr_number, "merge_id": merge_id})
+                             payload={"repo": repo, "pr": pr_number, "merge_id": merge_id,
+                                      "base_sha": (self._expected_base.get(effort_id)
+                                                   or {}).get("sha", "")})
         return res.url
 
     async def _integrate_to_develop(
@@ -7002,6 +7172,12 @@ class Orchestrator:
                 self.github, repo, dev,
                 api_base=self.s.github_api_base, transport=self._gh_transport)
             if not seed.ok:
+                # Record the ATTEMPT (P8 #1: the closure invariant asserts integration was
+                # attempted, not that it succeeded — an unrecorded failure is invisible).
+                await self.audit.log(
+                    "develop_integration", effort_id=effort_id,
+                    payload={"branch": delivery.branch, "develop": dev, "ok": False,
+                             "summary": f"couldn't prepare {dev}: {seed.summary}"[:160]})
                 return f"\n🔀 _Couldn't prepare `{dev}` for integration ({seed.summary})._"
             # The merge commit records the ACCEPTANCE status (operator 2026-07-15, git-history
             # eval: a reader should see WHY a branch was folded in) — org-verified green + gated.
@@ -7016,6 +7192,15 @@ class Orchestrator:
                 api_base=self.s.github_api_base, transport=self._gh_transport)
         except Exception as exc:  # noqa: BLE001 — integration is best-effort; never wedge closure
             log.warning("develop integration failed for %s: %s", effort_id, exc)
+            # Same honesty on the error path: the attempt happened — leave its trace so the
+            # closure invariant (P8 #1) sees "attempted and failed", not a silent void.
+            try:
+                await self.audit.log(
+                    "develop_integration", effort_id=effort_id,
+                    payload={"branch": delivery.branch, "develop": dev, "ok": False,
+                             "summary": f"error: {exc}"[:160]})
+            except Exception:  # noqa: BLE001
+                pass
             return ""
         await self.audit.log(
             "develop_integration", effort_id=effort_id,
@@ -8087,6 +8272,36 @@ class Orchestrator:
             f"genuine port/dead-code (not a feature deleted to clear an error). If any was needed, "
             f"say so and I'll port it properly instead.", True)
 
+    async def _closure_invariant_gaps(self, effort_id: str) -> list[str]:
+        """P8 #1 — the delivery gates a LANDED delivery must have hit before "done", read from the
+        effort's OWN audit (2026-07-16 gym: two complete, green products closed "done — read-only,
+        nothing to publish" while their audits read `delivery_pr_opened: 0`, `qa_evaluation: 0`,
+        `develop_integration: 0` — the report and the audit disagreed and nothing noticed). Each
+        gate is asserted ONLY when its own preconditions say it should have run, so a stack without
+        the GitHub App / with qa off is never held to gates it can't reach. Returns human-readable
+        descriptions of the missing gates (empty = the audit backs the claim)."""
+        gaps: list[str] = []
+        repo = await self._effort_repo(effort_id)
+        gh_live = self.github is not None and self.s.github_app_enabled
+        if repo and self.s.auto_pr and gh_live:
+            if await self._event_count(effort_id, "delivery_pr_opened") == 0:
+                gaps.append("**no delivery PR** (`delivery_pr_opened: 0`) — the branch never "
+                            "became visible for review")
+        if repo and self.s.qa_gate != "off":
+            if await self._event_count(effort_id, "qa_evaluation") == 0:
+                gaps.append(f"**no QA evaluation** (`qa_evaluation: 0` with "
+                            f"qa_gate={self.s.qa_gate}) — nobody exercised the product")
+        # Integration is asserted only when the delivery was ACCEPTED (its merge gate opened) —
+        # and "attempted" is the invariant, not success: an honestly-surfaced conflict counts
+        # (every attempt path in _integrate_to_develop leaves a develop_integration event).
+        if (repo and self.s.develop_integration and gh_live
+                and f"merge-{effort_id}" in self._pending_merge):
+            if await self._event_count(effort_id, "develop_integration") == 0:
+                gaps.append(f"**no develop integration** (`develop_integration: 0`) — the accepted "
+                            f"delivery was never folded into `{self.s.develop_branch}` (not even "
+                            f"attempted)")
+        return gaps
+
     async def _finish_effort(self, effort_id: str, result, *, delivery: BranchDelivery | None = None) -> None:
         """All steps cleared → closure DOWN into the effort thread + a summary UP to #mgmt (§2). When a
         repo was focused, `delivery` is the PM's VERIFIED verdict on the branch (§4.2): a verified
@@ -8118,18 +8333,20 @@ class Orchestrator:
             # a BEHAVIORAL-symptom goal must NEVER reach a clean no-changes 'done' — doing nothing
             # can't fix a live runtime symptom. Each upstream no-changes path is already gated by
             # `_no_changes_acceptable`, but this is the last line of defense: if any path ever leaks
-            # a no_changes delivery here for a behavioral goal that lacks reproduction proof
-            # (`REPRO:` + `AFTER: PASS`), REFUSE the false done and surface honest needs-attention.
-            # Makes the whole false-done class impossible regardless of upstream path (live
-            # 2026-07-11: a false-done recurred via a path that resisted tracing — a chokepoint
-            # guard is the durable fix). Project-agnostic; keys off the GOAL wording only.
+            # a no_changes delivery here for a behavioral goal the ORG has not independently proven
+            # fixed (the org-run RED→GREEN harness), REFUSE the false done and surface honest
+            # needs-attention. The worker's `REPRO:`/`AFTER: PASS` prose is NOT proof — no worker
+            # sentence may cause a state change (P8 #4; 2026-07-16 gym: those markers closed
+            # gym-004b with `effort_reproduction_verified: 0`). Makes the whole false-done class
+            # impossible regardless of upstream path (live 2026-07-11: a false-done recurred via a
+            # path that resisted tracing — a chokepoint guard is the durable fix). Project-agnostic;
+            # keys off the GOAL wording + org-observed state only.
             try:
                 _, _bgoal, _ = await self.charters.current_goal(effort_id)
             except Exception:  # noqa: BLE001
                 _bgoal = ""
-            _bout = (result.output or "") if result else ""
-            _brepro = (bool(re.search(r"\bREPRO:", _bout, re.I))
-                       and bool(re.search(r"\bAFTER:\s*PASS\b", _bout, re.I)))
+            _brg = self._repro_red_green.get(effort_id)
+            _brepro = bool(_brg) and _brg == self._org_verified.get(effort_id)
             if self._runtime_symptom_phrase(_bgoal or "") and not _brepro:
                 log.warning("no_changes-on-behavioral backstop tripped for %s — refusing false done",
                             effort_id)
@@ -8408,6 +8625,30 @@ class Orchestrator:
                                               "why": why})
         runtime_open = bool(runtime_symptom) and not runtime_verified
         unmet_or_partial = (bool(unmet) or partial or comp_failed or removal_flag or runtime_open)
+        # P8 #1 — CLOSURE INVARIANT: the PM may not claim "done" without proof. Immediately before
+        # a clean close on a LANDED delivery, assert the effort's OWN audit shows the gates that
+        # should have run actually did (PR / QA / develop integration). A genuine read-only
+        # no-changes completion has no delivery and no gates to assert (the branch above). If a
+        # gate is missing: do NOT close done — audit it, name exactly what's missing, honest
+        # needs-attention, effort stays open ("I could not deliver", never a hollow "done").
+        if (self.s.closure_invariant and not unmet_or_partial and delivery is not None
+                and delivery.landed and not delivery.no_changes):
+            _gaps = await self._closure_invariant_gaps(effort_id)
+            if _gaps:
+                await self.audit.log(
+                    "closure_invariant_failed", effort_id=effort_id,
+                    payload={"missing": [g.split("**")[1] for g in _gaps if "**" in g],
+                             "branch": branch or ""})
+                _gap_lines = "\n".join(f"- {g}" for g in _gaps)
+                msg = (f"🛑 **{effort_id}** — I could **not** deliver this, so I'm not claiming "
+                       f"done. The work is real and safe on `{branch}`, but my own audit says the "
+                       f"delivery pipeline didn't complete:\n{_gap_lines}\n"
+                       f"Say **“re-run it”** to retry the delivery, or tell me how to proceed.")
+                await self.comms.post(Intent.escalation, msg, effort_id=effort_id)
+                await self.comms.post(Intent.operator_reply, msg,
+                                      thread_id=self._mgmt_thread_of(effort_id))
+                await self.router.update_effort_card(effort_id, "needs-attention")
+                return
         done_word = ("done — VERIFIED via reproduction" if runtime_verified and not unmet_or_partial else
                      "done" if not unmet_or_partial else
                      "partly done — see the scope check" if unmet else

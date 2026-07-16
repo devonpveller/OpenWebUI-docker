@@ -158,11 +158,13 @@ async def test_nondelivery_then_reengage_lands_finishes_done(db_url, tmp_path):
             p = request.url.path
             if "/compare/" in p:
                 return httpx.Response(200, json={"ahead_by": 1, "behind_by": 0})
-            if "/branches/" in p:
+            if "/branches/agent/" in p:
                 state["n"] += 1
                 if state["n"] <= 2:   # pre-dispatch read + first verify: branch absent
                     return httpx.Response(404, json={"message": "Not Found"})
                 return httpx.Response(200, json={"commit": {"sha": "deadbeefcafe"}})
+            if "/branches/" in p:     # the default-branch head = the expected base (P8 #3)
+                return httpx.Response(200, json={"commit": {"sha": "ba5e0000cafe"}})
             if p.count("/") == 3:
                 return httpx.Response(200, json={"default_branch": "main"})
             return httpx.Response(404)

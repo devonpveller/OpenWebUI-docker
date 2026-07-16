@@ -174,6 +174,11 @@ services:
       # develop is autonomous; merge to the default branch stays human.
       AO_DEVELOP_INTEGRATION: ${AO_DEVELOP_INTEGRATION:-1}   # 1 | 0 — accumulate into develop
       AO_DEVELOP_BRANCH: ${AO_DEVELOP_BRANCH:-develop}
+      # Closure invariant (P8 #1, 2026-07-16 gym: two complete green products closed "done" with
+      # delivery_pr_opened: 0 and nobody noticed for hours): "done" on a landed delivery requires
+      # the effort's own audit to show the PR/QA/develop gates actually ran; a missing gate holds
+      # the effort open with an honest "I could not deliver" instead of a hollow done.
+      AO_CLOSURE_INVARIANT: ${AO_CLOSURE_INVARIANT:-1}  # 1 | 0 — no "done" without audit proof
       # Conversation context (the PO's memory): thread = immediate, channel = relevant background,
       # char-budgeted so it never overwhelms the model window. Raise for a larger-context model.
       AO_CONTEXT_THREAD_CHARS: ${AO_CONTEXT_THREAD_CHARS:-2500}

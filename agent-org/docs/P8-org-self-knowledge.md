@@ -1,7 +1,19 @@
 # P8 — Org self-knowledge
 
-**Status:** planned, none of it built. Authored 2026-07-16 after a full day of live gym runs.
+**Status:** ALL FIVE BUILT 2026-07-16 (same day, later session) — unit suite green (527 passed;
+the pre-P8 baseline was 513). NOT yet deployed, NOT yet gym-validated. #1 ships default-off
+(`AO_CLOSURE_INVARIANT`, enabled in compose per the house rule); #2–#5 are unconditional.
+Deploy (`docker compose build agent-bridge && up -d`) + fire the scenario-004 gym round per the
+Validation loop below. Authored 2026-07-16 after a full day of live gym runs.
 **Owner:** any session. Self-contained — you need no prior context beyond this file.
+
+| Change | Where it landed | Test |
+|---|---|---|
+| #1 closure invariant | `orchestrator.py :: _closure_invariant_gaps` + `_finish_effort`; attempt-logging in `_integrate_to_develop`; `config.py closure_invariant` | `tests/test_closure_invariant.py` (6) |
+| #2 waiting-on-human | `_waiting_on()` (derived from the `_pending_*` hold dicts, restart-safe), watchdog skip, `waiting-on-you` status + render | `test_stall_watchdog.py` (+2) |
+| #3 provenance | `read_default_branch_head` capability; `_expected_base` per dispatch; brief assert (`_PROVENANCE_CLAUSE` → honest `WORKSPACE STALE:` stop); base-keyed reuse in `router.wake(expected_base=…)`; `base_sha` stamped on `effort_published`/`delivery_pr_opened` | `test_workspace_provenance.py` (+4) |
+| #4 prose never verifies | `_no_changes_acceptable` behavioral branch + `_finish_effort` backstop now require org-observed `_repro_red_green` | `test_runtime_symptom.py` (updated + 1) |
+| #5 orientation artifact | `ProjectContext` cache keyed by base commit; map injected into the first coding turn | `test_project_context.py` (+2), provenance integration test |
 
 ---
 

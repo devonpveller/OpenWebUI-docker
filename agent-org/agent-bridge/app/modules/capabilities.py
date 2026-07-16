@@ -123,6 +123,44 @@ async def read_repo_state(
                      submodule_urls=urls, top_level=entries)
 
 
+async def read_default_branch_head(
+    github: GitHubApp, repo_url: str, *,
+    api_base: str = "https://api.github.com",
+    transport: httpx.BaseTransport | None = None,
+) -> tuple[str, str] | None:
+    """The repo's default branch + its CURRENT head sha — the expected BASE a fresh task checkout
+    sits on (P8 #3 provenance). The worker cannot discover this itself (its git egress is
+    proxied), so the org reads it, hands it to the worker in the brief to ASSERT against, keys
+    workspace reuse on it, and stamps it on every published claim — no claim without the base it
+    was made against. Returns (default_branch, head_sha), or None when unreadable (not the App's
+    account / API error) — callers must then refuse to claim provenance, never infer it."""
+    try:
+        owner, repo = parse_owner_repo(repo_url)
+    except ValueError:
+        return None
+    if owner.lower() != (github.owner or "").lower():
+        return None
+    try:
+        token = await github.installation_token()
+    except GitHubAppError:
+        return None
+    base = api_base.rstrip("/")
+    h = _headers(token)
+    try:
+        async with httpx.AsyncClient(timeout=15.0, transport=transport) as c:
+            meta = await c.get(f"{base}/repos/{owner}/{repo}", headers=h)
+            if meta.status_code >= 400:
+                return None
+            ref = meta.json().get("default_branch") or "main"
+            br = await c.get(f"{base}/repos/{owner}/{repo}/branches/{ref}", headers=h)
+            if br.status_code >= 400:
+                return None
+            sha = (br.json().get("commit", {}) or {}).get("sha", "")
+    except (httpx.HTTPError, ValueError):
+        return None
+    return (ref, sha) if sha else None
+
+
 class BranchDelivery(BaseModel):
     """A CHECKABLE verdict on whether an effort's work actually LANDED on the remote — the deterministic
     acceptance signal the PM verifies against (governance §4.2 / F8), NOT the worker's self-report. A

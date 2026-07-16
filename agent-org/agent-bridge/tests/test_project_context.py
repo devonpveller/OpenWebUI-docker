@@ -58,6 +58,44 @@ async def test_project_context_caches_failed_survey():
     assert len(calls) == 1
 
 
+# ── P8 #5: the survey cache is keyed by the BASE COMMIT ─────────────────────
+async def test_survey_cache_keyed_by_base_commit():
+    """Same base ⇒ one survey shared across efforts; base moved ⇒ re-survey once; a caller that
+    states no base reuses the current map. (2026-07-16: fresh-wiped workspaces made "clean" mean
+    "blind" — 26 read-only calls to re-discover a tiny template; the map is the fix, and it must
+    track the base or it becomes the stale-context poison it replaces.)"""
+    calls: list[str] = []
+
+    async def survey(repo: str) -> str:
+        calls.append(repo)
+        return f"map-{len(calls)}"
+
+    pc = ProjectContext(survey, enabled=True)
+    a = await pc.ensure("proj", "git://x", base_sha="base-1")     # effort 1: fresh clone
+    b = await pc.ensure("proj", "git://x", base_sha="base-1")     # effort 2: same base
+    assert a == b == "map-1" and len(calls) == 1                  # ONE survey, shared
+    c = await pc.ensure("proj", "git://x", base_sha="base-2")     # the base MOVED
+    assert c == "map-2" and len(calls) == 2                       # re-surveyed once
+    d = await pc.ensure("proj", "git://x")                        # baseless caller → current map
+    assert d == "map-2" and len(calls) == 2
+
+
+async def test_survey_taken_without_a_base_is_reused():
+    """A map surveyed before any base was known (the pre-P8 shape) keeps serving — a stated base
+    must not force a pointless re-survey when we have no base to compare against."""
+    calls: list[str] = []
+
+    async def survey(repo: str) -> str:
+        calls.append(repo)
+        return "the-map"
+
+    pc = ProjectContext(survey, enabled=True)
+    assert await pc.ensure("proj", "git://x") == "the-map"                 # no base recorded
+    assert await pc.ensure("proj", "git://x", base_sha="b1") == "the-map"  # reused, not re-run
+    assert len(calls) == 1
+    assert pc.get("proj") == "the-map"
+
+
 # ── router.survey_project ────────────────────────────────────────────────────
 async def _router(db, settings):
     audit = AuditSink(db, settings)

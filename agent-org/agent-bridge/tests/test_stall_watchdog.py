@@ -175,6 +175,68 @@ async def test_watchdog_recovers_a_dry_run_strand(db_url):
         await db.dispose()
 
 
+async def test_watchdog_never_recovers_an_effort_waiting_on_a_human(db_url):
+    """P8 #2 — WAITING-ON-HUMAN is first-class: an effort parked at ANY human gate is never
+    `stall_recovered`, at any age, even when its LAST EVENT is a mid-dispatch kind the watchdog
+    would otherwise re-engage. The event-kind exclusion list is fragile (2026-07-16: adding
+    `plan_drafted` to it made the watchdog execute unapproved plans); the direct waiting_on state
+    check makes that class of mistake impossible — no timeout may ever bypass a human gate (§4.5)."""
+    orch, chat, db = await _orch(db_url)
+    try:
+        # last event is worker_release — a kind the watchdog DOES recover (see the first test) —
+        # but the effort is parked at the Stage-3 plan gate: it must be left alone forever.
+        await _seed(orch, "effort-heldplan", last_kind="worker_release", age_min=100000)
+        orch._pending_plan["effort-heldplan"] = {"proj_channel": "c", "root": "r",
+                                                 "request": "req", "plan": None,
+                                                 "asked_at": "2026-07-16T00:00:00+00:00"}
+        await orch._sweep_stalled_efforts()
+        assert await orch._event_count("effort-heldplan", "stall_recovered") == 0
+        # same for the readiness/clarification hold…
+        await _seed(orch, "effort-clarify", last_kind="worker_release", age_min=100000)
+        orch._pending["effort-clarify"] = {"proj_channel": "c", "root": "r", "request": "req",
+                                           "questions": ["which port?"], "asked_at": "t"}
+        await orch._sweep_stalled_efforts()
+        assert await orch._event_count("effort-clarify", "stall_recovered") == 0
+        # …and the D4 merge gate.
+        await _seed(orch, "effort-merge", last_kind="worker_release", age_min=100000)
+        orch._pending_merge["merge-effort-merge"] = {"repo": "x", "pr_number": 7,
+                                                     "effort_id": "effort-merge", "asked_at": "t"}
+        await orch._sweep_stalled_efforts()
+        assert await orch._event_count("effort-merge", "stall_recovered") == 0
+        # the decision CLEARS the gate → the watchdog may recover it again
+        orch._pending_plan.pop("effort-heldplan")
+        await orch._sweep_stalled_efforts()
+        assert await orch._event_count("effort-heldplan", "stall_recovered") == 1
+    finally:
+        await db.dispose()
+
+
+async def test_waiting_on_is_answerable_in_one_call(db_url):
+    """P8 #2 — "why is the GPU idle?" answerable from the org in one look: the status map reports
+    `waiting-on-you` (distinct from working and from wedged/idle) and the rendered status carries
+    the gate + the exact ask."""
+    orch, chat, db = await _orch(db_url)
+    try:
+        await _seed(orch, "effort-gated", last_kind="plan_drafted", age_min=30)
+        orch._pending_plan["effort-gated"] = {"proj_channel": "c", "root": "r",
+                                              "request": "req", "plan": None,
+                                              "asked_at": "2026-07-16T00:00:00+00:00"}
+        w = orch._waiting_on("effort-gated")
+        assert w is not None and w["gate"] == "plan_approval"
+        assert "approve effort-gated" in w["ask"]
+        assert w["asked_at"] == "2026-07-16T00:00:00+00:00"
+        efforts = await orch.gate.snapshot(open_only=True)
+        smap = await orch._effort_status_map(efforts)
+        assert smap["effort-gated"] == "waiting-on-you"           # NOT idle, NOT wedged
+        rendered = orch._render_status(efforts, smap)
+        assert "waiting-on-you" in rendered and "approve effort-gated" in rendered
+        assert "Waiting on you (1)" in rendered
+        # an effort NOT at a gate stays honestly separate
+        assert orch._waiting_on("effort-nope") is None
+    finally:
+        await db.dispose()
+
+
 async def test_watchdog_recovers_a_post_publish_stall(db_url):
     """A delivery that PUBLISHED a branch but whose verify→PR→closure then STALLED (silent, no
     worker running) is a wedge the watchdog must recover — publishing is not the finish line (live

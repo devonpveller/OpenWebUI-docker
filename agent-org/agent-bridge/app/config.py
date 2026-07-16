@@ -138,6 +138,17 @@ class Settings(BaseSettings):
     # are. Default off (unchanged behaviour); the DEPLOYED bridge / the gym turn it on.
     develop_integration: bool = False
     develop_branch: str = "develop"
+    # CLOSURE INVARIANT (P8 #1, 2026-07-16 gym: two complete, green products closed "done" with
+    # `delivery_pr_opened: 0` — no PR, no QA, no develop-integration — and nothing noticed until a
+    # human queried the audit table; the org's REPORT and its AUDIT disagreed). When on, the PM may
+    # not claim "done" on a LANDED delivery unless the effort's own audit proves the gates that
+    # should have run actually did (PR opened; QA evaluated when qa_gate != off; develop
+    # integration ATTEMPTED when it's on and the delivery was accepted). A missing gate refuses the
+    # close: `closure_invariant_failed` is audited, an honest "could not deliver" needs-attention
+    # is posted, and the effort stays open. A genuine read-only/no-changes completion has no
+    # delivery, hence no gates to assert. Default off (house rule); the DEPLOYED bridge / the gym
+    # turn it on via AO_CLOSURE_INVARIANT.
+    closure_invariant: bool = False
     # Autonomous burn-down round cap (operator 2026-07-07: "all 138 errors should have been worked
     # through autonomously and not elevated in the first place"). This is a RUNAWAY GUARD, not a
     # check-in: a STILL-PROGRESSING campaign should run to green, not elevate mid-progress — so the cap
