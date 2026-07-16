@@ -108,6 +108,18 @@ class Router:
         # Recent worker activity per effort (the streamed commands) so the PO can answer
         # "what's going on?" with real visibility instead of "I don't have visibility."
         self._activity: dict[str, list[str]] = {}
+        # WORKSPACE PROVENANCE (operator 2026-07-16: "worker workspaces should be wiped each time the
+        # task changes unless we can deterministically determine dependencies … project name and git
+        # commit id"). {worker_instance_id: (effort_id, repo)} — what a worker's /workspace was last
+        # cloned FOR. The daemon only wipes on a PROJECT switch, so consecutive efforts on the SAME
+        # project reused a days-old checkout: it accumulated every prior effort's branches, sat on a
+        # stale base, and pushed branches with NO common ancestor to the live main → `compare → 404`,
+        # `PR → 422`, so two complete products could never be delivered (and a worker even reported
+        # "all phases complete" off the PREVIOUS effort's branch). Rule: reuse ONLY when the task is
+        # provably identical (same effort + same repo → same base we cloned); otherwise WIPE. A fresh
+        # clone at task start always carries the CURRENT base commit, which is the determinism the
+        # commit-id check is for.
+        self._ws_focus: dict[str, tuple[str, str]] = {}
         # Optional async hook `(repo, upstream) -> str | None`, tried when a focus reports the
         # upstream bake FAILED. A truthy return means the caller RECOVERED (e.g. the orchestrator
         # verified the registry upstream is wrong via the forge API and corrected it) and is the
@@ -157,6 +169,14 @@ class Router:
                     # because the effort's lifecycle was still `done` from an earlier delivery).
                     existing.lifecycle = "open"
                     await s.commit()
+                    # A reopen is a NEW round: the base almost certainly moved since the last round
+                    # (a swap/merge), and any workspace still holding this slug's old checkout would
+                    # resume the PREVIOUS round's branch. Drop its provenance so the next focus
+                    # WIPES and re-clones off the current base (live 2026-07-16: a reopened effort's
+                    # worker read the prior round's finished branch and reported "all phases
+                    # complete — no changes", closing hollow with nothing delivered).
+                    for _wid in [w for w, v in self._ws_focus.items() if v[0] == effort_id]:
+                        self._ws_focus.pop(_wid, None)
                     await self.audit.log("effort_reopened", effort_id=effort_id,
                                          payload={"was": "done-or-aborted"})
                     # RE-SURFACE the thread: activity resumes inside a card posted hours/days ago,
@@ -316,15 +336,25 @@ class Router:
             quarantined = False
             try:
                 if repo:
+                    # WIPE unless this worker's workspace was cloned for THIS EXACT task (same
+                    # effort + same repo). Any task change gets a fresh clone off the CURRENT base —
+                    # never a stale checkout carrying another effort's branches (see _ws_focus).
+                    want = (effort_id, repo)
+                    reuse = self._ws_focus.get(inst.id) == want
                     ok, detail, upstream_ok = await self.harness.set_project(
                         inst.base_url, repo, token=repo_token,
                         upstream=upstream, upstream_token=upstream_token,
-                        recurse_submodules=recurse_submodules,
+                        recurse_submodules=recurse_submodules, fresh=not reuse,
                     )
+                    if ok:
+                        self._ws_focus[inst.id] = want
+                    else:
+                        self._ws_focus.pop(inst.id, None)   # unknown state → never claim provenance
                     await self.audit.log(
                         "worker_project_set", effort_id=effort_id, actor=inst.id,
                         payload={"repo": repo, "ok": ok, "upstream": upstream,
-                                 "upstream_ok": upstream_ok, "detail": detail},
+                                 "upstream_ok": upstream_ok, "detail": detail,
+                                 "fresh": not reuse},
                     )
                     # TRANSIENT workspace collision ("destination path … already exists") — a suspended/
                     # parked worker still holds a prior checkout, the SAME race the verify-focus retries.
