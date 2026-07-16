@@ -109,6 +109,19 @@ async def test_tidy_guard_skips_start_effort(db_url):
         await db.dispose()
 
 
+def test_tidy_regex_ignores_feature_words():
+    """_TIDY_RE must not fire on a hyphenated FEATURE compound ("clear-completed") in a goal or
+    steering message, but must still catch real board-cleanup phrasing (2026-07-16 gym: the feature
+    word swallowed a start-effort fire AND a clarification answer as "Tidied up")."""
+    from app.orchestrator import Orchestrator
+    r = Orchestrator._TIDY_RE
+    assert not r.search("add a clear-completed action to the todo app")
+    assert not r.search("for effort-gym-004-todo-product: keep clear-completed and search")
+    assert r.search("tidy up")
+    assert r.search("clean up the finished efforts")
+    assert r.search("clear out the old branches")
+
+
 async def test_nl_kill_and_unkill(db_url):
     orch, chat, db = await _orch(db_url)
     try:

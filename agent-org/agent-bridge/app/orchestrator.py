@@ -7378,8 +7378,12 @@ class Orchestrator:
 
     _TIDY_RE = re.compile(
         r"\btidy\b|"
-        r"\b(?:clean(?:\s*up)?|clear(?:\s+out)?|sweep|wrap\s+up)\b[^.\n]{0,40}?"
-        r"\b(?:board|efforts?|finished|done|stale|completed?|old|mess|everything|up)\b", re.I)
+        # The cleanup verb and its target must be SEPARATE whitespace-delimited words, so a
+        # hyphenated FEATURE compound in a goal/steering message ("a clear-completed action") is NOT
+        # read as a board-cleanup command (2026-07-16 gym: "clear-completed" swallowed BOTH a
+        # start-effort fire AND a clarification answer as "Tidied up", dropping the work).
+        r"\b(?:clean(?:\s*up)?|clear(?:\s+out)?|sweep|wrap\s+up)\b\s+(?:\w+\s+){0,4}?"
+        r"(?:board|efforts?|finished|done|stale|completed?|old|mess|everything|up)\b", re.I)
 
     async def _nl_tidy_up(self, message: str, channel_id: str, thread_id: str | None) -> bool:
         """"Tidy up" the board the way a human would (operator 2026-07-10 "it would be good to have
