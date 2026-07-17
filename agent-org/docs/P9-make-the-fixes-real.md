@@ -379,6 +379,22 @@ todos, missing sort/overdue — instead of the operator finding them every round
 
 ---
 
+## P9 #10 — An artifact's identity must be checkable from the audit
+
+**Evidence.** Establishing what PR #10 actually *was* required the GitHub API. Nothing in the org
+links `delivery_pr_opened` to the artifact's shape, so PR facts get inferred from adjacent efforts'
+events — which is exactly how this plan's author fabricated *"PR#10 = 62 tests"* out of gym-004b's
+`effort_state_holds` (register #20). The missing data made the bad claim easy.
+
+**Design.** P8 #3 already stamps `base_sha` on `effort_published` / `delivery_pr_opened`. Extend the
+stamp to the artifact's shape: `{pr, branch, head_sha, base_sha, files_changed, test_files}`. Then
+"which PR is which, and what is in it" is one audit read — for the org, and for anyone reasoning
+about it.
+
+**Done when.** Nobody — human or agent — infers a PR's contents from a neighbouring effort's events.
+
+---
+
 ## The meta-fix: a live assertion per change
 
 **Every P9 change ships with a gym-observed assertion, not just a unit test.** Add to
@@ -394,6 +410,7 @@ todos, missing sort/overdue — instead of the operator finding them every round
 - P9 #7 ⇒ a held resource survives a destructive op, and the refusal is audited
 - P9 #8 ⇒ `explain <effort>` names the missing gate for a deliberately half-delivered effort
 - P9 #9 ⇒ the completeness lens names an un-doable-todo class gap the operator would have found
+- P9 #10 ⇒ a PR's branch/base/file+test counts are readable from the audit alone, no GitHub call
 - P8 #1 ⇒ `delivery_pr_opened >= 1` whenever an effort reaches `done` with a landed delivery
 
 **A change without a live assertion is not done.** That is the whole lesson of 2026-07-16: three
@@ -409,3 +426,26 @@ it — see P9 #2).
 
 Known-good reference (`effort-gym-004c-todo-product`, 2026-07-16): PR #10, `qa_evaluation: 6`
 (3 rounds × 2 lenses), `develop_integration: 1` (conflict, surfaced honestly), `org_build_check: pass`.
+
+---
+
+## Lessons (this arc, paid for)
+
+- **Reproduce before fixing.** The arena-swap fix (`e2a329c`) shipped on a hypothesis. It was a real
+  defect but **secondary** — the actual cause was the stale workspace (`59405a5`), and hours were lost
+  proving the wrong thing.
+- **Do not narrate a number you did not read.** This plan asserted *"PR#10 = 62/62 tests"*, a figure
+  cross-wired from a **different branch that never opened a PR**, and built a whole regression thesis
+  on it. The operator caught it; no check did. An agent writing *"the org claims what the audit can't
+  back"* is exactly as capable of doing it. **Verify the artifact, then write the sentence.**
+- **A verdict is not a cause.** *"PR#10 is significantly better"* is the operator's **observation**.
+  *Why* is unknown until P9 #0 measures it. The pull toward a satisfying mechanism ("the fork
+  destroyed the design model!") is the same reflex that produced the fabricated number — a good story
+  arriving ahead of the evidence.
+- **A quiet GPU is not a bug.** Twice it was the org correctly waiting at a human gate. Once, acting
+  on that misreading shipped a watchdog that executed unapproved plans.
+- **Background watchers die on session teardown.** Use the Mattermost follow to observe async work,
+  never `sleep` loops.
+- **The org's building was never the problem.** It has produced a complete, tested product three
+  times. Every hour lost went to delivery plumbing, to not knowing what it had done — and, at the
+  end, to a reviewer's product judgement that no gate in the org can yet replace.
