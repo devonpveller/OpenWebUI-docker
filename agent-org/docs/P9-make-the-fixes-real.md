@@ -333,7 +333,37 @@ finding that organization trades coherence for output (see THE REVISION → *the
 the operator judges PR #12 better than PR #10, that reading is falsified** and the "more org → worse
 artifact" hypothesis dies here. Recorded in advance precisely so it cannot be fitted afterwards.
 
-### RESULT — arm B (fork disarmed), 2026-07-17 — INCONCLUSIVE, re-running
+### RESULT — arm B (fork disarmed), 2026-07-17 — CONCLUDED: the fork is load-bearing for delivery
+
+**Both fork-off runs failed to deliver** (undelivered, no branch on remote). The clean comparison is
+**arm A (fork ON) delivered PR#12 / arm B1 (fork OFF, fresh slug) did not** — identical config except
+the fork. B2 (a re-run) also failed but is a weaker replicate: it *reopened B1's slug*, so it shares
+the `agent/effort-gym-005b` branch namespace (B2 even showed `firm:true` on one publish then
+`exists:false` — verified-then-missing, consistent with same-branch churn).
+
+**This RULES OUT the "restart broke delivery" alternative (H3):** arm A also ran after a bridge
+restart and delivered fine, so the A-vs-B difference *is* the fork flag. **Conclusion: fork-off ⇒
+session never rotates ⇒ bloat across a long single-session effort ⇒ the worker hallucinates a push it
+never made** (the `self_reported_ok:true / firm:false / empty-remote` signature = the known
+`agent-org-session-counter-collision` no-op). **This INVERTS the original P9 hypothesis** — the fork
+does not destroy quality; it is *load-bearing for delivery*. Actionable: **keep it armed** (the
+default; the disarm switch is measurement-only, never a default). Not spending a third round on clean
+n=2 — the actionable answer is settled and arm D (fork back on) re-confirms fork-on delivers.
+
+*What arm B could NOT do:* measure the fork's effect on *quality* — fork-off produced no product to
+judge. The "fork hurts quality" idea is simply unsupported; if anything the fork helps.
+
+### RUNNING — arm D (decomposition disabled, Path A), fired 2026-07-17 16:01
+
+`effort-gym-005d-todo-product`. Config verified live: `plan_approval/review_mode/worker_plan_gate/
+qa_gate = off`, `worker_flail_guard = true`. **The audit confirms the scoping**: goal →
+`readiness_gate` → `dry_run` → `worker_acquire`, with **NO `plan_drafted`** — decomposition is
+genuinely off, the whole goal is one worker wake, no plan tap needed. Doubles as the H2/H3 check: fork
+is back on, so if arm D delivers, fork-on delivery is re-confirmed. Pre-registered: the paper predicts
+the un-decomposed product is *more coherent* than the decomposed org (arms A/B); operator judges
+arm D vs PR#10.
+
+### (superseded) arm B first-look — INCONCLUSIVE, re-running
 
 **Failed to deliver.** `effort-gym-005b-todo-product` → **no PR**, `effort_undelivered
 {exists: False, ahead: 0}`, 0/5 gym assertions, 26 min, 8 worker turns. The org closed it
