@@ -24,13 +24,14 @@ _FLAIL_OUT = ("FLAIL-GUARD: stopped the turn — 25 read-only tool calls with ze
               "The approach wasn't converging; a fresh plan is needed.")
 
 
-async def _orch(db_url, *, plan_gate="off"):
+async def _orch(db_url, *, plan_gate="off", flail_guard=True):
     settings = Settings(
         _env_file=None, chat_adapter="fake",
         profiles_dir=str(ROOT / "profiles"), charters_dir=str(ROOT / "charters"),
         floor_dir=str(ROOT / "floor"), worker_instance_urls="http://w1:8090",
         max_concurrent_workers=1, database_url=db_url, project_survey_enabled=False,
         review_mode="off", plan_approval="off", worker_plan_gate=plan_gate,
+        worker_flail_guard=flail_guard,
     )
     db = Database(db_url)
     orch = Orchestrator(settings, db, FakeChatAdapter(),
@@ -57,6 +58,28 @@ async def _shutdown(orch, db):
             except (asyncio.CancelledError, Exception):  # noqa: BLE001
                 pass
     await db.dispose()
+
+
+# -- P9 Phase 0: the guard is a MEASURABLE variable, not a constant ------------
+async def test_the_guard_can_be_disarmed_so_the_fork_can_be_measured(db_url):
+    """P9's quality thesis says the worker needs a coherent MODEL of the code, and the fork is the
+    one mechanism that throws that model away mid-effort. It is a suspect in the P8 regression, so
+    it has to be switchable: disarmed, no coding turn carries the guard, the daemon never kills,
+    and the effort keeps ONE session end-to-end. This knob exists to measure the fork's effect on
+    product quality — not to fix anything."""
+    orch, chat, harness, db = await _orch(db_url, flail_guard=False)
+    try:
+        await orch.projects.add("app", "https://github.com/acme/app.git")
+        eid, chan, root = await orch.router.open_effort("spin", project="app")
+        await orch.delegate(eid, chan, root, "port the parser to the new API")
+        await _drain(orch)
+        coding = [w for w in harness.wakes if not w.get("plan_only")]
+        assert coding, "the effort must still dispatch coding turns"
+        assert all(w["flail_guard"] is False for w in coding), "disarmed = no turn is guarded"
+        # no kill => no fork => the model of the code survives the whole effort
+        assert {w["session_id"] for w in harness.wakes} == {eid}, "no session rotation without a flail"
+    finally:
+        await db.dispose()
 
 
 # -- the full loop: flail -> fork (fresh session) -> forced plan -> execute ------

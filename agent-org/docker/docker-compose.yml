@@ -164,6 +164,10 @@ services:
       # iterations to CLOSE the in-scope gaps (crash bugs, a feature stored-but-not-shown, missing
       # docs/help) before the PR, instead of only reporting them.
       AO_QA_GATE: ${AO_QA_GATE:-iterate}                # report | iterate | off — exploratory QA
+      # P9 Phase 0 instrument (2026-07-16). Both knobs above/below are the EXPERIMENT's variables:
+      # a round is defined by (AO_QA_GATE, AO_WORKER_FLAIL_GUARD). Live default = the settings that
+      # produced PR#11, so an unset environment reproduces the baseline exactly.
+      AO_WORKER_FLAIL_GUARD: ${AO_WORKER_FLAIL_GUARD:-true}   # true | false — arm the fork-on-flail
       # Second QA lens (operator 2026-07-15, "evaluate the code cleanliness — SOLID, patterns,
       # naming, does it support documentation?"): a differently-goaled reviewer READS THE SOURCE for
       # craftsmanship & docstrings/type hints/packaging — gaps the run-the-product lens can't see.

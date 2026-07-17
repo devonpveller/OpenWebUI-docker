@@ -100,12 +100,43 @@ should be tested against that sentence.
 
 ### The sequence
 
-**Phase 0 — MEASURE. Build nothing.**  (P9 #0)
+**Phase 0 — MEASURE. Build nothing.**  (P9 #0)  — **RUNNING, started 2026-07-16**
 Run the three experiments that separate context-loss / iterate-churn / run-variance: one round with
 the flail guard off; one with `AO_QA_GATE=report`; one repeat at identical settings. ~3 gym rounds,
 operator-reviewed.
 **Exit:** we can name what drives quality, with evidence. Until then every fix below is a guess.
 **Why first:** the last three fixes shipped on hypotheses and moved nothing. This is the whole thesis.
+
+*Design (as built).* One task, three org configurations. The arms live in the gym as
+`scenarios/scenario-005-arm-{a,b,c}-*`; they are **generated** from `scenario-004`, not hand-copied,
+and the generator asserts the goal text is byte-identical across all three — the only variable is the
+org config, so a divergent goal would silently confound the whole phase.
+
+| Arm | Effort | `AO_QA_GATE` | `AO_WORKER_FLAIL_GUARD` | Isolates |
+|---|---|---|---|---|
+| **a — control** | `gym-005a` | `iterate` | `true` | **run variance** (identical settings to PR #11) |
+| **b — no-flail** | `gym-005b` | `iterate` | `false` | the **fork** discarding the worker's model |
+| **c — report** | `gym-005c` | `report` | `true` | the **iterate loop** chasing an oscillating target |
+
+*The one thing built:* `worker_flail_guard` (`config.py`, defaults **true** = live behaviour, so an
+unset environment reproduces the PR #11 baseline exactly). The guard was hard-coded `flail_guard=True`
+at the dispatch site — arm b was unrunnable without a switch. This is an **instrument, not a fix**:
+it makes a suspect measurable and changes nothing by default. Assertion:
+`test_flail_replan.py :: test_the_guard_can_be_disarmed_so_the_fork_can_be_measured` (disarmed ⇒ no
+turn is guarded ⇒ one session survives the whole effort).
+
+*How to read the result — decided BEFORE the runs, so the answer can't be fitted to the data:*
+- **Arm a ≈ PR #11** ⇒ the settings are reproducible, and any a-vs-b or a-vs-c gap is a real signal.
+- **Arm a ≉ PR #11** (differs as much as b or c do) ⇒ **run variance dominates and Phase 0 has failed
+  to measure anything at n=1.** That is a legitimate, publishable outcome: it means the honest next
+  step is raising N, not shipping a fix. Do not rescue a story from a noisy cell.
+- **b ≫ a** ⇒ the fork is the mechanism. **c ≫ a** ⇒ the loop is. **Both ≈ a** ⇒ neither suspect is
+  it, and the search moves to the worker's model of the target (P9 #1).
+
+*The measurement is the operator's product judgement, not the gym score.* The assertions only prove a
+PR opened and the tests ran; they cannot see what "significantly better" meant about PR #10. Arms are
+run sequentially (one arena) and each swap **closes** the previous arm's PR — the branches survive, so
+all PRs are reopened at the end and reviewed together.
 
 **Phase 1 — FIX THE QUALITY MECHANISM.**  (whichever of P9 #1 / the loop the measurement indicts)
 - If **churn**: cap `iterate` at 1, or make it one coherent pass with the model intact — the QA

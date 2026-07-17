@@ -5225,7 +5225,9 @@ class Orchestrator:
             effort_id, role="worker-default", thread_id=root, channel_id=channel_id,
             session_id=await self._session_for(effort_id), instruction=instruction, repo=repo, repo_token=repo_token,
             upstream=upstream, upstream_token=upstream_token,
-            flail_guard=True,   # arm the daemon's read-without-edit watchdog on CODING turns
+            # arm the daemon's read-without-edit watchdog on CODING turns. Off only to MEASURE the
+            # fork's effect on product quality (P9 Phase 0) — see `worker_flail_guard`.
+            flail_guard=self.s.worker_flail_guard,
             expected_base=eb.get("sha") or None,
         )
         # FLAIL GUARD tripped (operator 2026-07-14: "too many thinking turns or time iterating on

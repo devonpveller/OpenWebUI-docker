@@ -102,6 +102,14 @@ class Settings(BaseSettings):
     # approved plan stays in the session, so execution continues from it.
     # `off` = never, `risky` = high-blast-radius efforts only (default), `all` = every effort.
     worker_plan_gate: str = "risky"
+    # FLAIL GUARD arming (P9 Phase 0 instrument, 2026-07-16). The daemon kills a coding turn that
+    # reads for 25 calls / 15 min without ever editing; the bridge then forks a FRESH session from
+    # the base goal. That fork is a SUSPECT in the P8 quality regression: it is the one mechanism
+    # that discards the worker's model of the code mid-effort, and P9's thesis is that quality
+    # comes from the worker holding a coherent model. This field exists to MEASURE that, not to
+    # fix it — turn it off for one round and let the operator judge the product. Defaults to the
+    # live behaviour (armed) so the unit suite's wake expectations are unchanged.
+    worker_flail_guard: bool = True
     # POST-DELIVERY QA / EXPLORATORY EVALUATION (operator 2026-07-15, reviewing gym PR#2: the
     # delivery passed its own tests and read well, but was frustrating to actually USE — no help
     # systems, and a SEPARATE little-coder QA pass surfaced a page of gaps "that could've been
