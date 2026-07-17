@@ -301,6 +301,29 @@ finding that organization trades coherence for output (see THE REVISION → *the
 the operator judges PR #12 better than PR #10, that reading is falsified** and the "more org → worse
 artifact" hypothesis dies here. Recorded in advance precisely so it cannot be fitted afterwards.
 
+### RESULT — arm B (fork disarmed), 2026-07-17 — INCONCLUSIVE, re-running
+
+**Failed to deliver.** `effort-gym-005b-todo-product` → **no PR**, `effort_undelivered
+{exists: False, ahead: 0}`, 0/5 gym assertions, 26 min, 8 worker turns. The org closed it
+**honestly** (undelivered, not a false "done") — a gate working.
+
+**But it was NOT a flail-spiral, so it does not cleanly measure the fork.** The worker produced **4
+real checkpoints** (cp1–cp4), each reviewed (correctness flags cp1–3, pass cp4), then
+`effort_published {self_reported_ok: true, **firm: false**}` — and the branch never reached the
+remote (GitHub 404, ahead=0). The flail guard governs read-without-edit turns; this worker was
+editing. So the failure mode is **delivery-path**, not flail, and splits two ways:
+- **H1 confound:** a random push failure unrelated to the fork ⇒ arm B is *invalid* as a fork measure.
+- **H2 real fork effect:** fork-off ⇒ session never rotates ⇒ bloat across 8 turns ⇒ the worker
+  hallucinates a push it didn't do. The `self_reported_ok:true / firm:false / nothing-on-remote`
+  signature exactly matches the known session-bloat failure (`agent-org-session-counter-collision`:
+  *"computing but GPU 0%, qwen EMPTY, no-op"*).
+
+**What arm B already settles:** it **cannot** support the original "the fork destroys quality"
+hypothesis — there is no delivered product to judge. If anything it hints the fork *helps* delivery.
+**Re-running arm B once** (identical config) to separate H1 from H2: a reproduced undelivered ⇒ H2
+(the fork is load-bearing for delivery, inverting the prior); a clean delivery ⇒ the first failure
+was a fluke and the fork's quality effect is measurable after all.
+
 *How to read the result — decided BEFORE the runs, so the answer can't be fitted to the data:*
 - **Arm a ≈ PR #11** ⇒ the settings are reproducible, and any a-vs-b or a-vs-c gap is a real signal.
 - **Arm a ≉ PR #11** (differs as much as b or c do) ⇒ **run variance dominates and Phase 0 has failed
