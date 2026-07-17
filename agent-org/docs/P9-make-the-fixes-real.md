@@ -142,11 +142,87 @@ that is not its own reflection.
 - **Do NOT touch the arena or scenarios mid-experiment.** Seeding the corpus into the template would
   change the task and confound arms B and C. Design it now; apply it after Phase 0.
 
+### The research check (operator, 2026-07-17: "validate against the Anthropic research")
+
+Grounded against the operator-provided paper **"AI Organizations Are More Effective But Less Aligned
+Than Individual Agents"** (Anthropic + Constellation/MATS, ICLR 2026 MALG, arXiv:2604.10290, full
+text in `documentation/implementation-guide/teams-chat-agent-orchestration/`) and Anthropic's
+engineering note *"How we built our multi-agent research system."* The operator's caveat — *Anthropic
+compares its own frontier models; we run a local ~27B* — turns out to be **the most important finding,
+and it cuts against this whole architecture, not for it.**
+
+1. **On small models the org's advantage INVERTS.** The paper's headline ("orgs more effective") holds
+   for Opus 4.1/4.5. But appendix D.5 (GPT-5-Mini): *"Single agents frequently outperform AI
+   Organizations on business goals **due to coordination failures in the multi-agent system.**"* D.4
+   (GPT-4.1): single agents *"as effective or more effective... due to better coordination."* §5.2
+   quantifies it — Opus 4.1→4.5 *shrinks* the multi-agent penalty (interaction β₃ = +0.438 consultancy
+   ethics, p<0.001): **better alignment helps the org more than the individual.** Extrapolated down,
+   qwen36-27b sits at the worst end of that curve, and the paper's main lever (a better model) is the
+   one we gave up. *Caveat: D.4/D.5 are the consultancy setting; software-team runs used Opus/Sonnet.
+   But the mechanism is coordination cost, and code has more interdependency than slides, not less.*
+
+2. **Decomposition is the NAMED cause of failure, and our design maximizes it.** §E.4
+   *Compartmentalization*: *"each agent sees only a fragment... prevents any single agent from weighing
+   the full tradeoff. In contrast, single agents process the entire task holistically."* §4.2, software
+   team, describing our register #9 before we found it: *"reviewer agents tended to run pre-existing
+   tests and approve tickets without checking for conflicts with their own work"*; PM sub-tasks with
+   loose constraints *"can lead to verification failures."*
+
+3. **Our PR#10-vs-PR#11 result may already BE this finding.** Scaling 1→2→4→8 agents raises output
+   monotonically and lowers coherence (ethics 0.95 single → 0.75–0.85 org, *regardless of size*). PR#10
+   (4 files, less machinery) = better; PR#11 (14 files, every gate green) = worse; PR#12 (18 files) =
+   predicted worse. **More organization → more output → worse artifact is the paper's headline,
+   reproduced in our gym.** If so, no Phase-0 knob finds it — it isn't a bug in a component, it's the
+   org.
+
+4. **Anthropic says coding is a poor fit.** Engineering note: *"domains that require all agents to
+   share the same context or involve many dependencies... are not a good fit... most coding tasks
+   involve fewer truly parallelizable tasks than research."* Our justification therefore **cannot be
+   parallelism.** The one honest justification the research leaves us is *horizon beyond a single
+   context window* — a project spanning chapters/sections genuinely exceeds one context. That is the
+   real reason this org should exist, and a better one than speed.
+
+5. **Our QA panel contradicts their evaluation finding.** They tested elaborate judging and landed on:
+   *"a single LLM call with a single prompt outputting scores 0.0–1.0 and a pass/fail grade was the
+   most consistent and aligned with human judgements."* We built a two-lens panel + iterate loop. And
+   *"evaluate whether it achieved the correct final state"* — not the process — while nearly every gate
+   this arc is a **process** gate.
+
+**What this does to the plan:**
+- **Tier 3 (post-merge eval on `develop`) is promoted to the FIRST build.** It is the *only* stage
+  that looks at the whole product — the direct antidote to compartmentalization (§E.4), the paper's
+  central failure mode. If we build one thing, build that.
+- **Decompose only as far as the context window forces, and no further.** Chapters/sections are a
+  human-legible narrative of the long horizon; they must NOT auto-become execution boundaries. Every
+  extra split is pure compartmentalization cost. Conflating narrative with execution boundary is how
+  PR#11 happened.
+- **Simplify QA toward a single-call final-state judge** (their result), rather than adding lenses.
+- **The token objection doesn't bind us.** Their "don't do this for coding" is largely economics (15×
+  tokens). Our marginal token is electricity — drain loops are affordable here in a way they aren't in
+  a product. This is our one real edge over their guidance; name it, don't pretend the whole finding
+  is void.
+- **Arm B (the fork) matters more, not less:** the fork is context destruction, and context continuity
+  is the entire justification the research leaves us.
+
+**Proposed ARM D — single agent, no org.** Same todo goal, one worker, whole goal, no PM
+decomposition, no QA panel. The paper predicts it *wins* at small scale; the PR#10 verdict hints the
+same; Anthropic says coding doesn't parallelize. **If a single agent beats the org at this task size,
+that is the most important thing we learn today** — and it is a genuine falsification test of this
+entire arc's premise. What it CANNOT test: long-horizon building. The paper's tasks are short; a
+single agent has no answer for a 40-hour project. So arm D may win the todo app and still lose the
+real goal — which is exactly the line between "org is pointless" and "org is only justified by
+horizon."
+
 ### What is NOT yet earned
 
 **The anchoring claim is a hypothesis.** "A durable exogenous target stops the oscillation" has not
 been measured — and P9's own first rule forbids shipping a causal story without measurement. Phase 0
 is live and will say something real about the mechanism. Let it land, then build this.
+
+**The org-vs-single question is now the ROOT hypothesis** and arm D is its test. Do not build the
+task-graph / acceptance-corpus machinery on top of "the org is the right structure" until arm D shows
+the org actually beats a single agent at a task that needs it. Building a hierarchy on an unfalsified
+premise is the exact patch-not-fix the operator warned against.
 
 ---
 
@@ -197,6 +273,33 @@ at the dispatch site — arm b was unrunnable without a switch. This is an **ins
 it makes a suspect measurable and changes nothing by default. Assertion:
 `test_flail_replan.py :: test_the_guard_can_be_disarmed_so_the_fork_can_be_measured` (disarmed ⇒ no
 turn is guarded ⇒ one session survives the whole effort).
+
+### RESULT — arm A (control), 2026-07-17
+
+**Ran clean in ~1h.** `effort-gym-005a-todo-product` → **PR #12**, head `7cf528ba86`, 75 tests green,
+D2 passed, QA panel ran (1 genuine bug found: an I/O leak writing to `sys.stderr` instead of the
+injected `error` stream). Every gate fired; closure was honest (*"not verified — needs a reproduction
+test"*).
+
+**Artifact shape, verified against the GitHub API (not the org's self-report):**
+
+| | Files | Test files | Operator verdict |
+|---|---|---|---|
+| PR #10 (pre-P8) | 4 | 1 | **"significantly better"** |
+| PR #11 (post-P8) | 14 | 12 | worse |
+| **PR #12 (arm A — PR#11's exact settings)** | **18** | **14** | *pending* |
+
+**The control holds: arm A reproduced PR #11's shape, not PR #10's.** Artifact shape at fixed
+settings is therefore **reproducible, not run-variance** — which was the single thing Phase 0 most
+needed to establish, because it means any arm-B/arm-D difference is *attributable* rather than noise.
+(Caveat: shape is not quality. Reproducible shape does not prove reproducible quality; only the
+operator's verdict on PR #12 tests that.)
+
+**PRE-REGISTERED PREDICTION (written before the operator reviewed PR #12):** the operator will judge
+PR #12 ≈ PR #11 — i.e. **worse than PR #10**. This follows from the provided Anthropic paper's
+finding that organization trades coherence for output (see THE REVISION → *the research check*). **If
+the operator judges PR #12 better than PR #10, that reading is falsified** and the "more org → worse
+artifact" hypothesis dies here. Recorded in advance precisely so it cannot be fitted afterwards.
 
 *How to read the result — decided BEFORE the runs, so the answer can't be fitted to the data:*
 - **Arm a ≈ PR #11** ⇒ the settings are reproducible, and any a-vs-b or a-vs-c gap is a real signal.
