@@ -213,6 +213,38 @@ single agent has no answer for a 40-hour project. So arm D may win the todo app 
 real goal — which is exactly the line between "org is pointless" and "org is only justified by
 horizon."
 
+*Scoping (2026-07-17, no code needed either way). Two ways to run arm D, and they are NOT the same
+experiment:*
+
+- **Path B — pure single agent.** Drive a little-coder worker directly: `lc project <gym>` then
+  `lc task "<goal>"` on `ao-worker-1:8090` (daemon `POST /project` + `/tasks`, `channel=cli`;
+  `plan_only`/`flail_guard` default off ⇒ one holistic turn). Bypasses the orchestrator **entirely** —
+  no PM, no readiness gate, no publish-verify. This is the literal reproduction of the paper's "single
+  agent handles the whole task holistically." **Risk:** it also bypasses the *proven* delivery
+  pipeline — the worker must push + open its own PR through the proxied git, unverified. Arm B just
+  showed delivery-path failure is easy to hit; a Path-B arm D that fails to deliver teaches nothing
+  about code quality (the same trap).
+
+- **Path A — flattened org.** Run through the gym runner exactly like arms A/B, with
+  `AO_PLAN_APPROVAL=off AO_REVIEW_MODE=off AO_WORKER_PLAN_GATE=off AO_QA_GATE=off` (+ the QA/closure/
+  develop flags already off). `plan_approval=off` ⇒ `_plan_required=False` ⇒ **no plan drafted ⇒ no
+  decomposition**; the whole goal becomes one step = one checkpoint = one worker wake
+  (`orchestrator.py:5044`). Residual: the always-on readiness gate (`orchestrator.py:4456`) — a single
+  fail-open PM judgment call that does **not** decompose. Keeps the proven swap / publish-verify / PR /
+  audit / `gym-watch-effort.py` tooling.
+
+*Recommendation — RUN PATH A, and here is the non-obvious reason.* The paper's causal mechanism is
+**compartmentalization from decomposition** (§E.4: *"when tasks are decomposed across agents, each
+agent sees only a fragment... single agents process the entire task holistically"*). The clean test of
+that claim **varies decomposition and holds everything else constant.** Path A does exactly that:
+decomposition OFF, delivery/model/scoring identical to arms A/B. Path B varies decomposition **and**
+the delivery path **and** all the scaffolding at once — it is *more* confounded, not less, and it
+reintroduces arm B's delivery risk. So the more literal "single agent" is the *worse* experiment here.
+Name the arm honestly: **arm D = "org with decomposition disabled,"** which is the paper's lever, not
+"no org." If the operator specifically wants the literal single-agent construct (e.g. to check the
+delivery pipeline itself is the cost), Path B is there and needs no code — but that is a different
+question than the compartmentalization one.
+
 ### What is NOT yet earned
 
 **The anchoring claim is a hypothesis.** "A durable exogenous target stops the oscillation" has not
