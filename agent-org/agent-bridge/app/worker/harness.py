@@ -111,6 +111,14 @@ class WorkerHarness(Protocol):
         (fail-open: an unreachable daemon shouldn't freeze recovery forever)."""
         ...
 
+    async def running_task_progress(
+        self, base_url: str, since_offset: int = 0,
+    ) -> tuple[str, int] | None:
+        """LIVENESS (register #25): `(task_id, event_offset)` for the daemon's running task, else None.
+        The offset advances on every agent-loop step, so a FROZEN offset across ticks = a hung turn —
+        unlike `has_running_task`, which a hang holds True forever. None on any error / no running task."""
+        ...
+
 
 class LittleCoderHarness:
     """Drives the little-coder control daemon. One instance addresses many daemons
