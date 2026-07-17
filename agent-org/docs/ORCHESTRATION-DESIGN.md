@@ -280,11 +280,16 @@ Two forks are genuinely undecided and shape what gets built:
 | Piece | State |
 |---|---|
 | Worker liveness (silence detector, §8) | **BUILT + DEPLOYED + validated** |
+| Finding → durable check pipeline (§10) | **BUILT** (storage + hard-gate enforcement + operator capture; 535 tests green) — deploy + proof-round pending |
 | Executable goal-posts, CDCL loop, diff-check, drain (§5–6) | designed, not built |
 | Frontier / OpenRouter oracle (§7) | designed, not built |
 | Security standing adversary (§9) | designed, not built |
-| Finding → durable check pipeline (§10) | designed, not built — the next build |
 | Tiered composition + faithful escalation (§4, §11) | designed, not built |
+
+**Forks resolved (§12):** the finding→check pipeline was built **executable-from-day-one** (a check
+is a command run against the delivery, not prose) and **operator-in-the-loop** (a governor-issued
+`accept check for <project>: <command> :: <note>`, not auto-conversion). Auto-conversion remains a
+future addition on top of this base.
 
 The build sequence and its evidence are tracked in `P9-make-the-fixes-real.md`. This document is
 the *what and why*; that one is the *how and when*.
