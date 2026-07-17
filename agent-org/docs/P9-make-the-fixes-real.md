@@ -353,15 +353,49 @@ n=2 — the actionable answer is settled and arm D (fork back on) re-confirms fo
 *What arm B could NOT do:* measure the fork's effect on *quality* — fork-off produced no product to
 judge. The "fork hurts quality" idea is simply unsupported; if anything the fork helps.
 
-### RUNNING — arm D (decomposition disabled, Path A), fired 2026-07-17 16:01
+### RESULT — arm D (decomposition disabled, Path A), 2026-07-17 — ⭐ THE PHASE 0 HEADLINE
 
-`effort-gym-005d-todo-product`. Config verified live: `plan_approval/review_mode/worker_plan_gate/
-qa_gate = off`, `worker_flail_guard = true`. **The audit confirms the scoping**: goal →
-`readiness_gate` → `dry_run` → `worker_acquire`, with **NO `plan_drafted`** — decomposition is
-genuinely off, the whole goal is one worker wake, no plan tap needed. Doubles as the H2/H3 check: fork
-is back on, so if arm D delivers, fork-on delivery is re-confirmed. Pre-registered: the paper predicts
-the un-decomposed product is *more coherent* than the decomposed org (arms A/B); operator judges
-arm D vs PR#10.
+Config verified live: `plan_approval/review_mode/worker_plan_gate/qa_gate = off`,
+`worker_flail_guard = true`. Scoping confirmed: `readiness_gate → dry_run → worker_acquire`, **no
+`plan_drafted`** — decomposition genuinely off, whole goal in one worker wake.
+
+**Two attempts. Attempt 1 (`gym-005d`) HUNG** — see register #25 (the guard blind spot; flat config
+has no liveness heartbeat). **Attempt 2 (`gym-005d2`) DELIVERED → PR #13** (verified via GitHub API,
+not the org's self-report).
+
+**The shape result — decomposition is the sprawl lever, reproduced in our gym:**
+
+| PR | Files | Test files | Config | Operator verdict |
+|---|---|---|---|---|
+| #10 (pre-P8) | 4 | 1 | full org | **"significantly better"** |
+| #11 (post-P8) | 14 | 12 | full org | worse |
+| #12 (arm A) | 18 | 14 | full org (= #11 settings) | pending |
+| **#13 (arm D2)** | **3** | **1** | **decomposition OFF** | pending |
+
+**Arm D's un-decomposed artifact is PR#10-shaped (3 files vs PR#10's 4) — the near-inverse of the
+decomposed org's 14–18 files / 12–14 test modules.** This is the Anthropic paper's core finding
+reproduced on our small-model org: *the org's decomposition trades coherence/compactness for sprawl.*
+And PR#10 (the compact one) is the artifact the operator already judged best.
+
+**And it is "good compact," not "incomplete compact":** PR#13's `todo.py` (590 lines) exposes
+`add/delete/done/edit/list/search` + priority/due/filter flags, REPL, summary, and atomic writes
+(tempfile+rename) — it HAS the search + filters that attempt 1 (hung) lacked. One apparent gap:
+**`clear-completed`** is not a subcommand (needs operator/repro check). No QA panel ran (`qa_gate=off`),
+so the operator's judgment is the only quality signal.
+
+**Pre-registered prediction (arm D ≥ PR#10 shape ⇒ supports "more org → worse") is SUPPORTED by shape,
+pending the operator's quality verdict on PR#13 vs PR#10 vs PR#12.** The confirming test is the
+operator judging whether PR#13 is as *good* as it is *compact*.
+
+**The nuance that matters for the tiered design:** flat/un-decomposed gives the better-shaped artifact
+BUT is operationally fragile (attempt 1 hung, no recovery — register #25). So arm D validates the
+**base unit** of the operator's theory — *a single bounded-scope task to a small model yields coherent,
+compact output* — while exposing that the robustness (liveness, recovery, and at project scale,
+horizon) is what the tier structure must add. Arm D is the coherent unit; the tiers are the scaffolding
+that must not reintroduce the sprawl. See THE REVISION.
+
+Also settled: **fork-on delivery re-confirmed** (arm D2 delivered with `flail_guard=true`), closing the
+arm B H2/H3 question — the fork is load-bearing for delivery.
 
 ### (superseded) arm B first-look — INCONCLUSIVE, re-running
 
@@ -505,6 +539,7 @@ Keep this current. An issue leaves the register only when a **live gym round** p
 | 22 | **The factory outlives its observer, silently** | 2026-07-17: the gym runner died when the Claude session that launched it exited. The org kept building at full GPU (`worker-1 computing`) with **nobody watching or scoring**. Swap/fire/approve had completed, so the round survived — the *measurement* was what died. The org has no idea whether it is being observed. | **OPEN — architecture, see THE REVISION.** Real fix = the runner's own docstring: *"P2 moves this surface into the agent-bridge as `/gym run <scenario>`"*. `scripts/gym-watch-effort.py` is an acknowledged band-aid. |
 | 23 | **One transient socket error aborts a whole gym round, mid-mutation** | 2026-07-17: `WinError 10055` (WSAENOBUFS) killed arm A's first attempt **during the swap**, on its first remote write (`PATCH pulls/11`), after preflight passed. Verified no partial mutation (#10/#11 still open) and retried clean. Not the known docker.backend leak — connections were *draining* (1259→1197/20s), ephemeral ports fine. So: a transient blip, with **no retry/backoff on a multi-step destructive sequence**. | **FIXED** gym `296668e` — `http_json` retries with backoff in two tiers (never-sent = any method incl. POST /nl; ambiguous = idempotent only, so no double-fired goal). 4 fakes-only tests green. Ports to `/gym run`. |
 | 24 | **The org cannot tell good work from bad work** | Every gate answers *"did it do the work?"*; none answers *"is it any good?"*. The only reliable oracle is the operator → quality review is **O(n) in one human's attention**. Symptom already measured: the iterate loop oscillates (`7→0→5` functional, `6→7→7` code_review) — a judge re-inventing its target each pass. | **OPEN — THE CEILING.** See THE REVISION; this is what Phases 1+ now exist to fix. |
+| 25 | **A mid-turn hang survives BOTH liveness guards (flat config)** | 2026-07-17 arm D (`review_mode/plan_approval/qa=off`, fork on): worker rewrote `todo.py` + 4 test files (37 tests pass) on `main`, uncommitted, then the agent loop **hung** — GPU 0% for 20+ min, no daemon logs, no inference calls, inference plane healthy. **Neither guard recovered it:** the flail guard's read-without-edit counter was reset by the 16:04 edit (edit-then-hang); the stall watchdog (900s) skips the effort because the worker still reports `computing` (busy≠stalled). The hang lives in the gap between them. **`review_mode=off` made it worse** — arms A/B's checkpoint cycles double as liveness heartbeats; flat config emits none, so the hang is invisible until a coarse watchdog that then doesn't fire. | **OPEN — directly informs the tiered design.** A bounded single-task turn needs its OWN liveness heartbeat + a watchdog that treats a long-silent `computing` worker as suspect, not healthy. Guard blind spot = `busy` state trusted as progress. |
 
 ---
 
