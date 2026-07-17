@@ -3,7 +3,8 @@
 **Status:** planned, nothing built. Authored 2026-07-16 (evening) while the P8 validation round
 (`effort-gym-004d-todo-product`) was live.
 **Owner:** any session. Self-contained. Read `P8-org-self-knowledge.md` first for the prior arc.
-**Start at "THE PLAN" below** — it sequences everything; the register and per-change sections are the
+**Start at "THE REVISION" below, then "THE PLAN"** — the revision (2026-07-17) reframes what
+Phases 1+ are for; the plan sequences everything; the register and per-change sections are the
 supporting detail. **Phase 0 gates all building: measure before you fix.**
 
 ---
@@ -77,6 +78,78 @@ invariants would all have made PR #11 *more honest and no better*. **P9 #0 is no
 
 ---
 
+## 🧭 THE REVISION — build the standard, not more gates  (operator, 2026-07-17)
+
+**Operator steer:** *"I want to make sure we're building towards production and scale. We don't want
+to build patches, we want to build long horizon fixes."* Read this before THE PLAN: it does not
+replace Phase 0 (measure first — that rule is the opposite of patching), but it **rewrites what
+Phases 1+ are for.**
+
+### The ceiling
+
+Every gate this arc has built answers **"did it do the work?"** — did a PR open, does the branch
+descend from the live base, did the tests run, did QA execute. Not one answers **"is this any
+good?"** For that the only reliable oracle is *the operator*.
+
+That is the scale ceiling, and it is not a code problem: **quality review is O(n) in one human's
+attention.** Ten projects and the dark factory is just the operator reading PRs faster. Every new
+lens or invariant we add is O(1) more code and O(n) more places a round can park waiting on a
+person. That is not a factory; it is a checklist with a human at the end.
+
+### The evidence already says this
+
+The iterate loop **oscillates**: functional defects `7 → 0 → 5` while code_review goes `6 → 7 → 7`.
+That is the signature of a judge with **no fixed target** — an LLM re-deriving "what is wrong with
+this" from scratch each pass, against a standard it re-invents each pass. **An LLM grading an LLM is
+a mirror.** At scale it is a mirror with a GPU bill.
+
+So *capping `iterate` at 1 would suppress the symptom and teach us nothing.* The target is not
+unstable because the loop runs too often. It is unstable because **the target is self-generated.**
+
+### The direction: the human's judgement must COMPOUND, not repeat
+
+Every operator review currently **evaporates**. *"PR#10 is significantly better."* The PR#11
+catalogue — the `--due-before` crash on malformed stored `due`, REPL `add` losing text, duplicate
+IDs, and **"no per-command help" flagged twice across rounds**. That is high-grade *exogenous* ground
+truth about what "good" means here, and it lives in a chat message and this markdown file, which no
+worker will ever read.
+
+It must become a **durable, executable acceptance corpus owned by the project**: every defect the
+operator finds once becomes a test the org runs forever; every standard stated once becomes a check
+it cannot self-negotiate. The primitives exist in embryo — `check_cmd` and `standing_intent` per
+project in `scenario.yaml`. Today `standing_intent` is three sentences of prose. The long-horizon
+version is that prose **grown teeth**: the operator's review of round N is the machine gate of round
+N+1.
+
+This flips the economics. Review stops being O(n) per delivery and becomes **O(1) per _class_ of
+defect** — pay once for *"the store must never crash on malformed data"* and the factory enforces it
+forever, on every project, unattended. It also hands the QA panel the one thing it lacks: an anchor
+that is not its own reflection.
+
+### Consequences for the plan
+
+- **Phase 1's exit criterion is REPLACED.** Old: *"an operator-reviewed round is no worse than the
+  PR#10 baseline"* — that still uses the operator's eyeballs as the instrument. New: **the org
+  catches, before the PR, a defect from the operator's PR#11 catalogue _without being told to look
+  for it_.** That is a factory learning, not a factory being inspected.
+- **The harness is architecture, not a script.** The gym runner is a host-side script coupled to its
+  caller's lifetime: on 2026-07-17 it died with the Claude session while the org kept building at
+  full GPU, and nothing noticed — *the factory outlived its observer.* `scripts/gym-watch-effort.py`
+  is a **band-aid on this**, and the real fix is already written in the runner's own docstring:
+  *"P2 moves this surface into the agent-bridge as `/gym run <scenario>`."* The org should own its
+  arena as a service — restart-proof, in the same audit as everything else, N rounds concurrent
+  instead of one script babysat by one session.
+- **Do NOT touch the arena or scenarios mid-experiment.** Seeding the corpus into the template would
+  change the task and confound arms B and C. Design it now; apply it after Phase 0.
+
+### What is NOT yet earned
+
+**The anchoring claim is a hypothesis.** "A durable exogenous target stops the oscillation" has not
+been measured — and P9's own first rule forbids shipping a causal story without measurement. Phase 0
+is live and will say something real about the mechanism. Let it land, then build this.
+
+---
+
 ## THE PLAN — what to do, in order, and why
 
 ### The strategic read
@@ -144,8 +217,14 @@ all PRs are reopened at the end and reviewed together.
   default and `iterate` as opt-in.
 - If **context loss**: the map must survive the fork (session-generation keyed, not `i == 1`).
 - If **variance**: stop attributing; raise N and compare distributions, not anecdotes.
-**Exit:** an operator-reviewed round is **no worse than the PR #10 baseline**. This is the only
-metric that has ever mattered.
+
+**Exit — SUPERSEDED 2026-07-17 by THE REVISION.** ~~An operator-reviewed round is no worse than the
+PR #10 baseline.~~ That criterion still makes the operator's eyeballs the instrument, which is the
+very thing that does not scale. **New exit: the org catches, before the PR, a defect from the
+operator's PR#11 catalogue (P9 #9) _without being told to look for it_** — a factory learning, not a
+factory being inspected. Whatever the measurement indicts, the fix must be shaped so the standard it
+enforces is durable and exogenous; a knob that suppresses a symptom is a patch and does not exit
+this phase.
 
 **Phase 2 — CLOSE THE HUMAN GAP.**  (P9 #9, then #4)
 Only once the loop is safe: the product-completeness lens — the org must find its own *"you cannot
@@ -235,6 +314,9 @@ Keep this current. An issue leaves the register only when a **live gym round** p
 | 19 | **No product-completeness lens** | Operator found a `--due-before` crash the QA panel MISSED, plus 6 design gaps (`undone`, sorting, `--overdue`, `clear` confirm, REPL exit code). Our lenses ask "does it run?" / "is it clean?" — never "is this the whole right product?" | **OPEN — P9 #9** |
 | 20 | **This plan's author fabricated evidence** | An earlier revision asserted "PR#10 = 62/62 tests" and built a regression narrative on it. The figure came from gym-004b/gym-004 — branches that never opened a PR. Verified: PR#10 = 4 files, 1 test file. Caught by the OPERATOR, not by any check. The same failure the whole plan indicts, committed by the plan. | **LESSON — see Lessons** |
 | 21 | **A PR's identity is not checkable from the audit** | Diagnosing #20 needed the GitHub API; nothing links `delivery_pr_opened → {branch, base_sha, file/test counts}`, so PR facts get inferred from adjacent efforts' events. P8 #3 stamps `base_sha` on the event — extend it to the artifact's shape. | **OPEN — P9 #10** |
+| 22 | **The factory outlives its observer, silently** | 2026-07-17: the gym runner died when the Claude session that launched it exited. The org kept building at full GPU (`worker-1 computing`) with **nobody watching or scoring**. Swap/fire/approve had completed, so the round survived — the *measurement* was what died. The org has no idea whether it is being observed. | **OPEN — architecture, see THE REVISION.** Real fix = the runner's own docstring: *"P2 moves this surface into the agent-bridge as `/gym run <scenario>`"*. `scripts/gym-watch-effort.py` is an acknowledged band-aid. |
+| 23 | **One transient socket error aborts a whole gym round, mid-mutation** | 2026-07-17: `WinError 10055` (WSAENOBUFS) killed arm A's first attempt **during the swap**, on its first remote write (`PATCH pulls/11`), after preflight passed. Verified no partial mutation (#10/#11 still open) and retried clean. Not the known docker.backend leak — connections were *draining* (1259→1197/20s), ephemeral ports fine. So: a transient blip, with **no retry/backoff on a multi-step destructive sequence**. | **OPEN** — the swap must be idempotent + retried, not all-or-nothing at the mercy of one socket. |
+| 24 | **The org cannot tell good work from bad work** | Every gate answers *"did it do the work?"*; none answers *"is it any good?"*. The only reliable oracle is the operator → quality review is **O(n) in one human's attention**. Symptom already measured: the iterate loop oscillates (`7→0→5` functional, `6→7→7` code_review) — a judge re-inventing its target each pass. | **OPEN — THE CEILING.** See THE REVISION; this is what Phases 1+ now exist to fix. |
 
 ---
 
