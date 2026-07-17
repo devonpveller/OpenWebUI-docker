@@ -535,6 +535,52 @@ that must not reintroduce the sprawl. See THE REVISION.
 Also settled: **fork-on delivery re-confirmed** (arm D2 delivered with `flail_guard=true`), closing the
 arm B H2/H3 question — the fork is load-bearing for delivery.
 
+### ⭐⭐ THE RECURRENCE FINDING — gym-006 (PR#14), operator evaluation 2026-07-17
+
+**The single most important empirical result of the project: the org REPEATS the same class of defect
+across rounds, and the operator's hand-review is the only thing that ever catches them.** This is
+register #24 / THE REVISION *measured*, not argued.
+
+The Phase-1 validation round (gym-006, PR#14, normal config + the liveness fix) delivered a solid
+product — and the operator's evaluation found **5 bugs + 3 gaps**, of which the majority are the SAME
+findings from the **PR#11** evaluation two rounds earlier:
+
+| PR#11 finding (operator, hand) | PR#14 finding (operator, hand) | verdict |
+|---|---|---|
+| REPL add loses text when options interleave | Bug 2: REPL can't add text containing `--priority`/`--due` | **RECURS** |
+| negative IDs → negative `next_id` | Bug 4: IDs reset to 1 after delete-all | **RECURS** (next_id family) |
+| gap: no `undone` | Gap 1: no undo/reopen | **RECURS** |
+| gap: no `--sort` | Gap 2: no `--sort` | **RECURS** |
+| gap: string-comparison overdue | Gap 3: no overdue indicator | **RECURS** |
+| minor: Unicode crash on Windows | 2 tests fail on Windows console encoding | **RECURS** |
+| **crash: `--due-before` ValueError on malformed `due`** | — (robust data layer; no crash) | **FIXED** |
+
+**Reading:** between rounds the org fixed the *catastrophic crash* (the atomic/normalizing data layer
+is genuinely good) but **reproduced five-plus of the exact defects the operator had already found by
+hand** — while this round's QA panel ran and resolved 6 *other* defects (`qa_evaluation=6`). The QA
+loop missed the recurring ones because they are not in its **self-generated** target. That is the
+oscillation / no-fixed-target problem, shown at the round-over-round scale: **an LLM grading an LLM
+never converges on the human's standard, because the human's standard never enters the loop.**
+
+**This is the empirical mandate for the acceptance corpus.** It is no longer a hypothesis: two
+operator reports, two rounds apart, with the same findings, prove the org cannot learn the operator's
+quality bar from a chat thread. The fix is to make each finding a durable executable check the org
+cannot regress on.
+
+**The seed corpus (the first executable contracts, straight from the two reports):**
+1. `add "-- text"` (text starting with `--`) must succeed, not error (PR#14 Bug 1).
+2. REPL `add --priority low` must store the LITERAL text `--priority low` (PR#14 Bug 2 / PR#11 recur).
+3. `summary` priority buckets must sum to the total, incl. an `other` bucket (PR#14 Bug 3).
+4. delete-all-then-add must NOT reset IDs to 1 — monotonic `next_id` (PR#14 Bug 4 / PR#11 recur).
+5. `search ""` must reject with a usage message, not match all (PR#14 Bug 5).
+6. a `reopen <id>` command must exist and un-complete a done item (PR#14 Gap 1 / PR#11 recur).
+7. `list --sort {priority,due,id}` must exist (PR#14 Gap 2 / PR#11 recur).
+8. overdue items must be visibly flagged in `list` output (PR#14 Gap 3 / PR#11 recur).
+
+Each is a **failing test the org cannot green without actually fixing the behavior** — the executable
+goal-post of "The worker execution loop". This is the concrete starting point for Increment 2. Owned
+by the *project* (`scenario`'s `standing_intent` grown teeth), so it applies to every future round.
+
 ### (superseded) arm B first-look — INCONCLUSIVE, re-running
 
 **Failed to deliver.** `effort-gym-005b-todo-product` → **no PR**, `effort_undelivered
