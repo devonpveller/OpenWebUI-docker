@@ -6,6 +6,57 @@
 
 ---
 
+## ⚠️ THE HEADLINE FINDING (operator verdict, 2026-07-16 evening)
+
+**P8 made the org honest. It did not make the product better — and the product got WORSE.**
+
+Operator review of the two artifacts, same goal, same scenario:
+
+| | **PR #10** (pre-P8) | **PR #11** (post-P8) |
+|---|---|---|
+| Tests | 62 | 54 (53 pass, 1 Windows quirk) |
+| Operator verdict | **"significantly better"** | 1 crash · 2 logic bugs · 6 design gaps · 3 minor |
+| Workspace | stale, contaminated — but a RICH context | clean — then **flailed at 28 reads → force-forked mid-effort** |
+| Org gates | none fired (hollow "done") | all fired, honest hold |
+
+P8's gates worked perfectly and the thing they gated got worse. **Honesty and quality are separate
+axes, and we only moved one.**
+
+### Why (evidence, not hypothesis)
+
+**1. The iterate loop OSCILLATES — it does not converge.** QA defect counts across the three
+`qa_gate=iterate` rounds on `gym-004d`:
+
+```
+functional lens:   7 → 0 → 5      (went to zero, then BACK UP)
+code_review lens:  6 → 7 → 7      (went UP, stayed up)
+```
+
+The worker plays whack-a-mole against whatever the lens names; each local patch perturbs the code
+into new defects. **`iterate` optimises "make the QA quiet", which is not "build a good product"** —
+Goodhart, arriving through the very gate built to raise quality. This is the gaming-green pattern the
+operator has warned about since 2026-07-09, now produced by our own machinery.
+
+**2. The fork destroys the design model.** PR #11's worker was restarted from scratch mid-effort by
+the flail guard, which *deliberately* discards context ("the context itself is the poison"). A worker
+with no coherent model of the code can only patch locally. PR #10's worker kept a rich (if stale)
+model — and produced the better product. **This reframes P9 #1: the flail/fork path may be CAUSING
+the quality regression, not merely costing turns.**
+
+**3. The org has no product-completeness lens.** The operator's review found `--due-before` crashing
+on a malformed `due` value — a crash **the QA panel missed** — plus six design gaps (`undone`,
+sorting, `--overdue`, `clear` confirmation, meaningless REPL exit code). Our two lenses ask *"does it
+run?"* and *"is it clean?"*. Neither asks **"is this the whole right product for the problem?"** —
+which is exactly what the operator's own prompt asks. That is why the human keeps finding what the
+org cannot.
+
+### What this means
+
+Do **not** ship more gates until this is understood. A third lens, more iterations, and stricter
+invariants would all have made PR #11 *more honest and no better*. **P9 #0 is now the first job.**
+
+---
+
 ## The thesis
 
 **Unit-green is not validated.** Three fixes shipped on 2026-07-16 were *correct in their tests* and
@@ -48,10 +99,46 @@ Keep this current. An issue leaves the register only when a **live gym round** p
 | 13 | **A wake carries a chat line, not the state** | 6+ consecutive wakes on posts already superseded ("On it…", "Readiness ✓", "which branch?", the 422, the archive). Every one cost a turn + several audit queries to re-derive what was *actually* true. | **OPEN — P9 #6** |
 | 14 | **Concurrent sessions have no shared intent** | This session held the validation round back to protect PR #10 and said so; another actor fired it ~2 min later and the swap closed #10. Neither was wrong — neither could see the other. | **OPEN — P9 #7** |
 | 15 | **The org can't be asked "what is true now?"** | Diagnosing any of the above meant `docker exec` + raw `/audit` + `/scheduler` + bridge logs + `git` inside the worker. The org has no "explain this effort" surface. | **OPEN — P9 #8** |
+| 16 | **⚠️ QUALITY REGRESSED post-P8** | Operator: *"PR#10 is significantly better."* PR#11 (post-P8): 1 crash + 2 logic bugs + 6 design gaps, 54 tests vs PR#10's 62 and a B+. All gates fired; the product got worse. | **OPEN — P9 #0** |
+| 17 | **The iterate loop oscillates instead of converging** | `gym-004d` QA counts: functional **7 → 0 → 5**; code_review **6 → 7 → 7**. Whack-a-mole against the lens; each patch creates new defects. `iterate` optimises "QA quiet", not "good product" — Goodhart via our own gate. | **OPEN — P9 #0** |
+| 18 | **The flail fork destroys the design model** | PR#11's worker was force-restarted mid-effort (context deliberately discarded) → local patching only. PR#10's worker kept a rich model → better product. | **OPEN — P9 #1 (re-scoped)** |
+| 19 | **No product-completeness lens** | Operator found a `--due-before` crash the QA panel MISSED, plus 6 design gaps (`undone`, sorting, `--overdue`, `clear` confirm, REPL exit code). Our lenses ask "does it run?" / "is it clean?" — never "is this the whole right product?" | **OPEN — P9 #9** |
 
 ---
 
-## P9 #1 — The orientation map must survive the fork  ⭐ start here
+## P9 #0 — Understand the quality regression before adding anything  ⭐⭐ FIRST JOB
+
+**Do not build another gate until this is answered.** More lenses, more iterations, stricter
+invariants would each have made PR #11 *more honest and no better*.
+
+**The question.** Same goal, same scenario, two artifacts: PR #10 (pre-P8, stale rich context, no
+gates, hollow "done", **operator says significantly better**) vs PR #11 (post-P8, clean workspace,
+forked mid-effort, every gate fired, honest hold, **1 crash + 2 logic bugs + 6 design gaps**). **What
+actually caused the regression?**
+
+**Three candidates — design an experiment that separates them, don't guess** (the house rule; this
+plan's whole thesis is that we ship on hypotheses and lose days):
+
+| Candidate | Prediction if true | Cheap test |
+|---|---|---|
+| **A. Context loss** (wipe + fork left the worker with no design model) | a round with a wipe but **no flail/fork** matches PR#10 quality | run scenario-004 with the flail guard **disabled**; compare |
+| **B. Iterate churn** (whack-a-mole against the lens creates defects) | `qa_gate=report` (no auto-iterate) yields **fewer** defects than `iterate` | run once with `AO_QA_GATE=report`; operator-review both |
+| **C. Model/prompt variance** (nothing structural; run-to-run noise) | repeat runs at the same settings vary as much as PR#10 vs PR#11 | run scenario-004 twice unchanged; compare spread |
+
+**Do all three before touching code.** The answer decides whether P9 #1 (orientation/fork) is the
+fix, whether `iterate` must be re-thought or turned off, or whether we are chasing noise.
+
+**Note on B.** The oscillation is already measured (functional 7→0→5, code_review 6→7→7). If B holds,
+the remedy is not "more QA" but **fewer, better-targeted iterations**: fix defects in one coherent
+pass with the design model intact, rather than N local patches. Consider capping iterate at 1 and
+letting the human review the rest — the QA panel's *report* was excellent; its *loop* is the problem.
+
+**Done when.** We can say which of A/B/C caused it, with evidence, and P9's ranking is set by that
+answer rather than by intuition.
+
+---
+
+## P9 #1 — The orientation map must survive the fork  (re-scoped by P9 #0)
 
 **Evidence.** Two consecutive rounds flailed identically on a fresh clone (26 and 28 read-only calls,
 zero edits) *after* `project_survey` had run. P8 #5 is deployed and did not prevent it.
@@ -218,11 +305,43 @@ but never volunteers it. Build #8 first; #6 is then a consumer of it.
 
 ---
 
+## P9 #9 — A product-completeness lens (the one the operator IS)
+
+**Evidence.** The operator's review of PR #11 found things **both** org lenses missed:
+- a **crash** — `cmd_list --due-before` raises an unhandled `ValueError` from
+  `date.fromisoformat()` when a stored `due` is malformed (`cmd_summary` dodges it only because it
+  string-compares). The functional lens tested corrupt *files*; it never tested a corrupt *field
+  inside a valid file*.
+- six **design gaps** — no `undone` (a done todo can never be un-done), no `--sort`, no `--overdue`
+  / `--due-after`, no confirmation on `clear`, a REPL that always exits 0, duplicate/negative IDs
+  silently accepted.
+
+**The gap.** Our lenses ask *"does it run?"* (functional) and *"is it clean?"* (code-craft). The
+operator's prompt asks a third thing: **"find gaps in the solution for the problem the script is
+attempting to solve."** Nobody in the org asks whether the delivered thing is the **whole right
+product** — so a todo app with no way to un-complete a task passes every gate we have.
+
+**Design.** A third differently-goaled lens, given the GOAL (not the diff): *"Assume this ships to a
+real user tomorrow. What can they not do that they will obviously expect? What breaks on data the
+app itself could have written?"* Its output is FOLLOWUPS by default (the operator disposes) —
+promote to DEFECTS only for the goal's explicit promises (the `--due-before` crash violates the
+stated "never crashes on malformed data" guarantee and IS a defect).
+
+**Gotcha — see P9 #0 first.** Adding a lens to a loop that already oscillates may make the product
+*worse*. Ship this only after #0 says the loop is safe, or ship it in `report` mode.
+
+**Done when.** The org's own review names the same class of gaps the operator's does — un-doable
+todos, missing sort/overdue — instead of the operator finding them every round.
+
+---
+
 ## The meta-fix: a live assertion per change
 
 **Every P9 change ships with a gym-observed assertion, not just a unit test.** Add to
 `scenarios/*/scenario.yaml` `assertions:` (gym-observed, org self-reports never score):
 
+- P9 #0 ⇒ an operator-reviewed round is **no worse than PR #10** (the pre-P8 baseline) — this is the
+  only assertion that measures the thing we actually care about, and the only one P8 would have failed
 - P9 #1 ⇒ `flail_replanned == 0` on a fresh-clone round
 - P9 #2 ⇒ a PR marked for review survives a swap
 - P9 #3 ⇒ the same goal twice ⇒ the same risk class
@@ -230,6 +349,7 @@ but never volunteers it. Build #8 first; #6 is then a consumer of it.
 - P9 #6 ⇒ a wake payload contains the gate tally + `waiting_on` for every effort it names
 - P9 #7 ⇒ a held resource survives a destructive op, and the refusal is audited
 - P9 #8 ⇒ `explain <effort>` names the missing gate for a deliberately half-delivered effort
+- P9 #9 ⇒ the completeness lens names an un-doable-todo class gap the operator would have found
 - P8 #1 ⇒ `delivery_pr_opened >= 1` whenever an effort reaches `done` with a landed delivery
 
 **A change without a live assertion is not done.** That is the whole lesson of 2026-07-16: three
