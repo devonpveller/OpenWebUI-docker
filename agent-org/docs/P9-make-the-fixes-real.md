@@ -370,9 +370,13 @@ not the org's self-report).
 | #10 (pre-P8) | 4 | 1 | full org | **"significantly better"** |
 | #11 (post-P8) | 14 | 12 | full org | worse |
 | #12 (arm A) | 18 | 14 | full org (= #11 settings) | pending |
-| **#13 (arm D2)** | **3** | **1** | **decomposition OFF** | pending |
+| **#13 (arm D2)** | **4** | **2** | **decomposition OFF** | pending |
 
-**Arm D's un-decomposed artifact is PR#10-shaped (3 files vs PR#10's 4) — the near-inverse of the
+*(#13 delivered at 3 files / 1 test @ `efc38ba`; the runtime-symptom repro ladder then auto-iterated
+`@2387daf`, adding exactly one targeted repro test file `test_todo_extended.py` — a precise addition,
+not sprawl. Final: 4 files / 2 tests.)*
+
+**Arm D's un-decomposed artifact is PR#10-shaped (4 files, same as PR#10) — the near-inverse of the
 decomposed org's 14–18 files / 12–14 test modules.** This is the Anthropic paper's core finding
 reproduced on our small-model org: *the org's decomposition trades coherence/compactness for sprawl.*
 And PR#10 (the compact one) is the artifact the operator already judged best.
