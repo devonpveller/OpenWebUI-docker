@@ -2208,6 +2208,40 @@ class Orchestrator:
                 "intent: …`.",
                 thread_id=thread_id)
             return
+        # DURABLE ACCEPTANCE CHECK capture (ORCHESTRATION-DESIGN §10 — the finding→durable-check
+        # pipeline). The operator, reviewing a delivery, turns a finding into a PERMANENT executable
+        # check the org can't regress on. Deterministic + governor-issued (a governance action is not
+        # left to the PO model's classification). Grammar: `accept check for <project>: <command>
+        # [:: <note>]`. Config only — never dispatches work.
+        m_ac = re.match(
+            r"^\s*(?:add\s+(?:an?\s+)?)?accept(?:ance)?\s+check\s+(?:for|to|in|on)\s+"
+            r"(?P<proj>[A-Za-z0-9][\w.-]*)\s*[:=]\s*(?P<rest>\S.*)$",
+            message.strip(), re.I | re.S)
+        if m_ac:
+            p = await self.projects.resolve(m_ac.group("proj"))
+            if p is None:
+                slug = await self.router.resolve_project_by_channel(channel_id)
+                p = await self.projects.get(slug) if slug else None
+            if p is None:
+                await self.chat.post(
+                    channel_id, "Which project is that acceptance check for? Say `accept check for "
+                    "<project>: <command> :: <note>`.", thread_id=thread_id)
+                return
+            body, _sep, note = m_ac.group("rest").strip().partition("::")
+            body, note = body.strip(), (note.strip() or "operator review")
+            cid = await self.projects.add_acceptance_check(
+                p["slug"], note, body, created_by=user_id or "operator")
+            if cid:
+                await self.chat.post(
+                    channel_id,
+                    f"📐 Acceptance check captured for **`{p['slug']}`** (durable — every future "
+                    f"delivery must pass it, or the merge is withheld):\n  `{body}`\n  _origin: {note}_",
+                    thread_id=thread_id)
+            else:
+                await self.chat.post(
+                    channel_id, "That acceptance check needs a command to run — `accept check for "
+                    "<project>: <command> :: <note>`.", thread_id=thread_id)
+            return
         # EXPLICIT NEW-EFFORT idiom — deterministic, immune to the board/hygiene classifiers
         # (gym finding ⑤, 2026-07-15: "start effort gym-003-…: <goal>" whose goal text mentioned
         # branches was captured WHOLE by branch hygiene and never dispatched; the anti-capture
@@ -7408,6 +7442,86 @@ class Orchestrator:
         return (f"\n⛔ **D2 checks FAILED** (`{check_cmd}`) — merge gate withdrawn; burn-down "
                 f"continues autonomously. See the effort thread for the failing output.", delivery)
 
+    async def _acceptance_corpus_gate(self, effort_id: str, repo: str, delivery: BranchDelivery,
+                                      merge_id: str) -> tuple[str, BranchDelivery]:
+        """DURABLE ACCEPTANCE CORPUS (ORCHESTRATION-DESIGN §10, the finding→durable-check pipeline).
+        The project's PERMANENT checks — each an operator review finding made executable — run against
+        every delivery. Distinct from D2 (the project's own test suite): the corpus OUTLIVES every
+        round and encodes the human's standard, so the org cannot repeat a defect a human already found.
+        Same hard red-gate as D2 (route back once → re-check → still red → withdraw the merge +
+        burn-down): a broken promise never travels forward. Empty corpus → silent (no clutter for
+        projects that have none yet). Returns (note-for-closure, possibly-updated delivery)."""
+        proj = await self._effort_project(effort_id)
+        checks = await self.projects.list_acceptance_checks(proj) if proj else []
+        if not checks:
+            return "", delivery
+
+        async def _run_all(d: BranchDelivery) -> list[tuple[dict, str]]:
+            out: list[tuple[dict, str]] = []
+            for c in checks:
+                status, tail, _prov = await self._run_check(
+                    effort_id, c["body"], branch=d.branch, repo=repo)
+                if status == "fail":          # 'unknown' can't run → don't block; 'pass' → ok
+                    out.append((c, tail))
+            return out
+
+        def _fmt(fs: list[tuple[dict, str]]) -> str:
+            return "\n".join(f"- [{c['id']}] {c['origin_note']}\n    cmd: `{c['body']}`\n    {t[:300]}"
+                             for c, t in fs)
+
+        fails = await _run_all(delivery)
+        if not fails:
+            await self.audit.log("acceptance_corpus_passed", effort_id=effort_id,
+                                 payload={"total": len(checks)})
+            return (f"\n📐 **Acceptance corpus passed** — {len(checks)} durable check(s) from prior "
+                    f"reviews.", delivery)
+        # RED — route back ONCE, naming the exact broken standards (executable, not prose).
+        await self.comms.post(
+            Intent.worker_activity,
+            f"❌ **Acceptance corpus failed** ({len(fails)}/{len(checks)}) — durable checks captured "
+            f"from earlier human reviews; these are non-negotiable. Routing back to fix:\n{_fmt(fails)}",
+            effort_id=effort_id)
+        loc = await self.router.effort_thread(effort_id)
+        if loc:
+            channel_id, root = loc
+            fix_instruction = (
+                f"THE PROJECT'S DURABLE ACCEPTANCE CHECKS FAILED on your delivered branch. Each encodes "
+                f"a standard the org committed to from an earlier human review — they are NOT optional "
+                f"and must not be worked around. Fix the CAUSE of each (stay in scope of your task), "
+                f"then commit + push to the SAME branch ({delivery.branch}):\n{_fmt(fails)}\n"
+                f"  git add -A && git commit -m \"fix: acceptance corpus\" && "
+                f"git push origin {delivery.branch}\nThen reply with what you changed.")
+            try:
+                repo_token = await self._project_token(effort_id)
+                await self.router.wake(
+                    effort_id, role="worker-default", thread_id=root, channel_id=channel_id,
+                    session_id=await self._session_for(effort_id), instruction=fix_instruction,
+                    repo=repo, repo_token=repo_token)
+            except (httpx.HTTPStatusError, httpx.TransportError, NoCapacityError) as exc:
+                log.warning("acceptance-corpus fix wake failed for %s: %s", effort_id, exc)
+            new_delivery = await self._verify_delivery(effort_id, repo)
+            if new_delivery.landed:
+                delivery = new_delivery
+            fails = await _run_all(delivery)
+            if not fails:
+                await self.audit.log("acceptance_corpus_passed", effort_id=effort_id,
+                                     payload={"total": len(checks), "after_fix": True})
+                return (f"\n📐 **Acceptance corpus passed after one fix round** — {len(checks)} "
+                        f"check(s).", delivery)
+        # STILL red → withdraw the merge gate + burn-down (never ship a broken promise).
+        self._pending_merge.pop(merge_id, None)
+        await self.pending.delete(merge_id)
+        self._queue_burndown(effort_id, "acceptance corpus failing:\n" + _fmt(fails))
+        await self.audit.log("acceptance_corpus_failed", effort_id=effort_id,
+                             payload={"failed": [c["id"] for c, _ in fails], "total": len(checks)})
+        await self.comms.post(
+            Intent.escalation,
+            f"⛔ **Acceptance corpus still failing** ({len(fails)}/{len(checks)}) after a fix round. "
+            f"The merge gate is withdrawn — the org will not ship a delivery that breaks a standard it "
+            f"already committed to. Burn-down engaged.", effort_id=effort_id)
+        return (f"\n⛔ **Acceptance corpus FAILED** ({len(fails)}/{len(checks)} durable check(s)) — "
+                f"merge gate withdrawn; burn-down continues.", delivery)
+
     async def _execute_merge(self, merge_id: str, reply=None) -> None:
         """D4 — perform the operator-approved merge (the approve IS the §3 clearance for this
         irreversible action). Merge commit via the host API (--no-ff equivalent); the result is
@@ -8498,12 +8612,17 @@ class Orchestrator:
                 # the delivered branch BEFORE inviting the merge; red routes back, never forward.
                 d2_note, delivery = await self._d2_gate(effort_id, eff_repo, delivery,
                                                         f"merge-{effort_id}")
+                # DURABLE ACCEPTANCE CORPUS (§10): the project's permanent operator-review findings,
+                # run on this delivery AFTER D2. Same hard red-gate — a delivery that breaks a standard
+                # the org already committed to withdraws the merge and burns down, never ships.
+                corpus_note, delivery = await self._acceptance_corpus_gate(
+                    effort_id, eff_repo, delivery, f"merge-{effort_id}")
                 gate_open = f"merge-{effort_id}" in self._pending_merge
                 invite = (f"\n_`main` only changes when you merge — say **“merge it”** and I'll "
                           f"merge, or merge on GitHub after review._" if gate_open else "")
                 pr_lead = ("📬 **Existing PR still open** (no new commits this round)"
                            if stale_reverify else "📬 **PR opened for review:**")
-                where += f"\n{pr_lead} {pr_url}{d2_note}{invite}"
+                where += f"\n{pr_lead} {pr_url}{d2_note}{corpus_note}{invite}"
                 if qa_note:      # surface the QA findings in-thread too, not only in the PR body
                     where += "\n\n" + qa_note
                 if gate_open:    # D2 green/skipped ⇒ safe to accumulate this delivery into develop

@@ -345,6 +345,29 @@ class Project(Base):
     created_at: Mapped[str] = mapped_column(default=now_iso)
 
 
+class AcceptanceCheck(Base):
+    """A durable, executable acceptance check for a PROJECT — the mechanism by which an operator's
+    review finding becomes a permanent gate the org cannot regress on (ORCHESTRATION-DESIGN §10, the
+    finding→durable-check pipeline). Unlike the `Effort`-scoped child rows (Concern/Review/Checkpoint,
+    which die with a round), this hangs off the durable `projects` row so it OUTLIVES every effort:
+    once captured, EVERY future delivery must satisfy it. `body` is a command run against the delivered
+    branch in a worker verifier slot (exactly like `check_cmd`), so a green requires the behavior to
+    actually exist — an LLM can't argue its way past a failing test. `origin_note` records WHERE the
+    finding came from (which operator review), so the corpus is auditable back to the human judgment
+    that created it; `active` retires a check without erasing that trail."""
+
+    __tablename__ = "acceptance_checks"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    project_slug: Mapped[str] = mapped_column(ForeignKey("projects.slug"), index=True)
+    origin_note: Mapped[str] = mapped_column(String(512))        # human origin (an operator PR review)
+    kind: Mapped[str] = mapped_column(String(16), default="cmd")  # cmd today; snippet a future kind
+    body: Mapped[str] = mapped_column(Text)                       # command run against the delivered branch
+    active: Mapped[bool] = mapped_column(Boolean, default=True)   # retire without deleting the audit trail
+    created_by: Mapped[str] = mapped_column(String(64), default="operator")
+    created_at: Mapped[str] = mapped_column(default=now_iso)
+
+
 class EgressHost(Base):
     """A git host the worker egress proxy is allowed to reach — the scope boundary for what
     workers can clone/push. Onboarded projects add theirs automatically; a role can add/remove

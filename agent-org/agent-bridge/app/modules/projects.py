@@ -11,13 +11,14 @@ reachable) is owned by `EgressAllowlist`, driven off `hosts()`.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 
 from sqlalchemy import select
 
 from ..db import Database
-from ..models import Project
+from ..models import AcceptanceCheck, Project
 from .audit_sink import AuditSink
 
 log = logging.getLogger("agent_bridge.projects")
@@ -160,6 +161,56 @@ class ProjectRegistry:
             await s.commit()
         await self.audit.log("project_standing_intent_set",
                              payload={"slug": slug, "intent": text[:300]})
+        return True
+
+    async def add_acceptance_check(
+        self, slug: str, origin_note: str, body: str, *, kind: str = "cmd",
+        created_by: str = "operator",
+    ) -> str | None:
+        """Capture a durable, executable acceptance check for a project — an operator review finding
+        made permanent (ORCHESTRATION-DESIGN §10). `body` is a command run against every future
+        delivery's branch; a red blocks the merge. Content-addressed: re-capturing the same check on
+        the same project is idempotent (re-activates it, no duplicate). None if the project is unknown.
+        The corpus is how the org stops repeating a defect the human already found once."""
+        body = (body or "").strip()
+        if not body:
+            return None
+        cid = "ac-" + hashlib.sha1(f"{slug}|{kind}|{body}".encode()).hexdigest()[:12]
+        async with self.db.session_factory() as s:
+            if await s.get(Project, slug) is None:
+                return None
+            row = await s.get(AcceptanceCheck, cid)
+            if row is None:
+                s.add(AcceptanceCheck(id=cid, project_slug=slug, origin_note=(origin_note or "")[:512],
+                                      kind=kind, body=body, active=True, created_by=created_by))
+            else:                                    # already captured — reactivate + refresh origin
+                row.active = True
+                row.origin_note = (origin_note or row.origin_note)[:512]
+            await s.commit()
+        await self.audit.log("acceptance_check_added",
+                             payload={"slug": slug, "id": cid, "origin": (origin_note or "")[:200],
+                                      "body": body[:200]})
+        return cid
+
+    async def list_acceptance_checks(self, slug: str, *, active_only: bool = True) -> list[dict]:
+        """The project's durable acceptance corpus (newest first). Each: id/origin_note/kind/body/active."""
+        async with self.db.session_factory() as s:
+            q = select(AcceptanceCheck).where(AcceptanceCheck.project_slug == slug)
+            if active_only:
+                q = q.where(AcceptanceCheck.active.is_(True))
+            rows = (await s.execute(q.order_by(AcceptanceCheck.created_at.desc()))).scalars().all()
+        return [{"id": r.id, "origin_note": r.origin_note, "kind": r.kind, "body": r.body,
+                 "active": r.active} for r in rows]
+
+    async def set_acceptance_check_active(self, check_id: str, active: bool) -> bool:
+        """Retire (or restore) a corpus check without deleting its audit trail. False if unknown."""
+        async with self.db.session_factory() as s:
+            row = await s.get(AcceptanceCheck, check_id)
+            if row is None:
+                return False
+            row.active = active
+            await s.commit()
+        await self.audit.log("acceptance_check_toggled", payload={"id": check_id, "active": active})
         return True
 
     async def get(self, slug: str) -> dict | None:
