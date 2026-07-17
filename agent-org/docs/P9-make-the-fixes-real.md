@@ -3,6 +3,8 @@
 **Status:** planned, nothing built. Authored 2026-07-16 (evening) while the P8 validation round
 (`effort-gym-004d-todo-product`) was live.
 **Owner:** any session. Self-contained. Read `P8-org-self-knowledge.md` first for the prior arc.
+**Start at "THE PLAN" below** — it sequences everything; the register and per-change sections are the
+supporting detail. **Phase 0 gates all building: measure before you fix.**
 
 ---
 
@@ -72,6 +74,85 @@ org cannot.
 
 Do **not** ship more gates until this is understood. A third lens, more iterations, and stricter
 invariants would all have made PR #11 *more honest and no better*. **P9 #0 is now the first job.**
+
+---
+
+## THE PLAN — what to do, in order, and why
+
+### The strategic read
+
+Three layers, and they must be fixed in this order because each is meaningless without the one
+before it:
+
+| Layer | State | Evidence |
+|---|---|---|
+| **1. Delivery** — can the org ship at all, and say so honestly? | **DONE, live-proven** | PR #11: every gate fired, nothing claimed done falsely |
+| **2. Quality** — is what it ships any good? | **THE FRONTIER — mechanism unknown** | operator still judges the pre-P8 artifact better; our quality gate *oscillates* |
+| **3. Legibility & governance** — can humans/agents see and steer it? | cheap, compounding, **not the bottleneck** | the wake/explain/claim cluster |
+
+**The insight that should drive everything below: we have been adding GATES. Gates produce honesty,
+not quality.** P8 proved that exactly — five changes, every gate green, and the operator's verdict
+did not move. Quality comes from the worker holding **a coherent model of the code** and aiming at
+**a stable target**. Right now the iterate loop gives it a *noisy* target (whack-a-mole: 7→0→5) and
+the flail-fork may destroy the *model* (context deliberately discarded). **The quality program is
+about MODEL and TARGET, not more gates.** Every instinct to add a lens, a check, or an invariant
+should be tested against that sentence.
+
+### The sequence
+
+**Phase 0 — MEASURE. Build nothing.**  (P9 #0)
+Run the three experiments that separate context-loss / iterate-churn / run-variance: one round with
+the flail guard off; one with `AO_QA_GATE=report`; one repeat at identical settings. ~3 gym rounds,
+operator-reviewed.
+**Exit:** we can name what drives quality, with evidence. Until then every fix below is a guess.
+**Why first:** the last three fixes shipped on hypotheses and moved nothing. This is the whole thesis.
+
+**Phase 1 — FIX THE QUALITY MECHANISM.**  (whichever of P9 #1 / the loop the measurement indicts)
+- If **churn**: cap `iterate` at 1, or make it one coherent pass with the model intact — the QA
+  panel's *report* is excellent, its *loop* is the suspect. Consider `report` + human disposal as the
+  default and `iterate` as opt-in.
+- If **context loss**: the map must survive the fork (session-generation keyed, not `i == 1`).
+- If **variance**: stop attributing; raise N and compare distributions, not anecdotes.
+**Exit:** an operator-reviewed round is **no worse than the PR #10 baseline**. This is the only
+metric that has ever mattered.
+
+**Phase 2 — CLOSE THE HUMAN GAP.**  (P9 #9, then #4)
+Only once the loop is safe: the product-completeness lens — the org must find its own *"you cannot
+un-complete a todo"*. Ship in `report` mode first; adding a lens to an oscillating loop is how we got
+here. Then the tests-assert-the-right-thing lens (#4) — green-by-construction is invisible to every
+gate we own.
+**Exit:** the org's panel names the same class of gaps the operator's review does.
+
+**Phase 3 — MAKE IT LEGIBLE.**  (P9 #8 → #6 → #10 → #5)
+The "org can see itself" cluster, in dependency order: `explain <effort>` first (#8), then the wake
+carries that state (#6), then artifact identity in the audit (#10), then closures rendered from gates
+not prose (#5). Cheap, compounding, and it removes the `docker exec` archaeology that cost most of
+2026-07-16.
+**Exit:** "why is the GPU idle?" is one call, and no agent infers a PR's contents from a neighbour's
+events.
+
+**Phase 4 — HARDEN GOVERNANCE.**  (P9 #7, #2, #3)
+Shared intent (claim/hold registry) so one actor's hold is enforceable; the swap refuses to destroy a
+review artifact; deterministic risk classification so the plan gate isn't a coin flip.
+**Exit:** an announced hold survives a destructive op; the same goal fires the same gate twice.
+
+### The discipline that wraps all of it
+
+1. **Every change ships with a live gym assertion**, not just a unit test. A change without one is
+   not done. (Three fixes on 2026-07-16 were unit-green and inert.)
+2. **Reproduce before fixing.** Ship on a measurement, never a story.
+3. **An issue leaves the register only when a live round proves it fixed.**
+4. **Verify the artifact, then write the sentence.** This plan fabricated a test count and built a
+   thesis on it (#20). Agents indict the org for claiming what the audit can't back, then do it.
+
+### What this plan explicitly refuses
+
+- **No new gates before Phase 0.** More lenses/iterations/invariants would have made PR #11 *more
+  honest and no better*.
+- **No causal story without a measurement.** "The fork destroyed the design model" is a good story and
+  currently unevidenced.
+- **No autonomy widening** while the human's product judgement is still the only reliable quality
+  signal. The gym remains the only place D4 may earn trust.
 
 ---
 
