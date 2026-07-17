@@ -935,6 +935,11 @@ class Orchestrator:
         # "work is happening" signal — distinct from the gate state `active` (= merely not-frozen),
         # which persists forever and misleads the PM into reporting a phantom queue.
         self._delegating: set[str] = set()
+        # WORKER LIVENESS (register #25): {base_url: (task_id, last_offset, last_progress_at)} — the
+        # last per-agent-step event offset the stall sweep observed for each worker's running task, and
+        # WHEN. The offset climbing = alive; frozen past `worker_silence_s` = hung. Empty after a
+        # restart (we can't know pre-restart silence, so the clock starts fresh — the safe default).
+        self._worker_progress: dict[str, tuple[str, int, datetime]] = {}
 
     def _spawn(self, coro) -> None:
         """Run a coroutine in the background, keeping a reference so it isn't GC'd."""
@@ -1025,7 +1030,7 @@ class Orchestrator:
         async with self.db.session_factory() as s:
             rows = (await s.execute(
                 select(WorkerInstance).where(WorkerInstance.retired.is_(False)))).scalars().all()
-        return [{"id": r.id, "base_url": r.base_url} for r in rows]
+        return [{"id": r.id, "base_url": r.base_url, "effort_id": r.effort_id} for r in rows]
 
     async def _last_event(self, effort_id: str) -> tuple[str, str] | None:
         async with self.db.session_factory() as s:
@@ -1098,13 +1103,63 @@ class Orchestrator:
         # — the daemon 409'd it, and the failed recovery burned a retry + queued a noise escalation).
         # The daemons' own task lists survive restarts: if ANY worker is actually running a task,
         # work IS happening — defer this sweep's recoveries to a later tick instead of guessing.
-        try:
-            busy = any([await self.harness.has_running_task(w["base_url"])
-                        for w in await self._worker_urls()])
-        except Exception:  # noqa: BLE001 - a probe failure must not stop recovery forever
-            busy = False
-        if busy:
-            return
+        #
+        # BUT "running" is not "progressing" (P9 register #25, arm D 2026-07-17): a worker that HANGS
+        # mid-turn holds status `running` forever, so a status-only busy-defer sat idle 20 min while the
+        # GPU was at 0%. So we ask the daemon for each running worker's per-agent-step event OFFSET
+        # (advances on generation/tool/edit): offset climbing = alive → defer to it; offset FROZEN past
+        # `worker_silence_s` = hung → cancel the turn and recover the bound effort now. This never
+        # interrupts legitimate long work (a working worker keeps bumping the offset).
+        alive = False
+        hung: list[tuple[str, str, str | None]] = []          # (base_url, task_id, effort_id)
+        if self.s.worker_silence_s > 0:
+            for w in await self._worker_urls():
+                url = w["base_url"]
+                prev = self._worker_progress.get(url)
+                try:
+                    prog = await self.harness.running_task_progress(
+                        url, since_offset=(prev[1] if prev else 0))
+                except Exception:  # noqa: BLE001 — a probe failure must not stall the sweep
+                    prog = None
+                if prog is None:                              # idle daemon (no running task)
+                    self._worker_progress.pop(url, None)
+                    continue
+                task_id, offset = prog
+                if prev is not None and prev[0] == task_id and offset <= prev[1]:
+                    # same task, no new agent-loop events since we last looked
+                    if (now - prev[2]).total_seconds() >= self.s.worker_silence_s:
+                        hung.append((url, task_id, w.get("effort_id")))
+                        continue
+                    alive = True                              # silent but still within the grace window
+                else:                                         # first sight, new task, or offset advanced
+                    self._worker_progress[url] = (task_id, offset, now)
+                    alive = True
+            for url, task_id, eid in hung:                    # recover each genuinely-hung worker
+                await self.harness.cancel_task(url, task_id)   # free the daemon (orphaned turn) …
+                self._worker_progress.pop(url, None)
+                if not eid or eid in parked or self._waiting_on(eid) is not None:
+                    continue
+                self._delegating.discard(eid)                 # … its delegate coroutine is dead now
+                n = await self._event_count(eid, "stall_recovered")
+                if n >= self.s.stall_max_recoveries:
+                    await self.audit.log("stall_escalated", effort_id=eid,
+                                         payload={"reason": "worker_silent", "recoveries": n})
+                    body = (f"🧰 **{eid}**'s worker hung mid-turn and my {n} recoveries didn't take — "
+                            f"stopping auto-retry to avoid a loop. Say **“re-run it”** when clear.")
+                    await self.comms.post(Intent.escalation, body, effort_id=eid)
+                    await self.comms.post(Intent.operator_reply, body,
+                                          thread_id=self._mgmt_thread_of(eid))
+                    await self.router.update_effort_card(eid, "needs-attention")
+                    continue
+                await self.audit.log("stall_recovered", effort_id=eid,
+                                     payload={"reason": "worker_silent", "n": n + 1})
+                await self._reengage(
+                    [eid], mgmt_channel=mgmt, mgmt_thread=self._mgmt_thread_of(eid),
+                    reply_prefix=(f"🔧 **{eid}**'s worker went silent mid-turn (no progress for "
+                                  f"~{int(self.s.worker_silence_s // 60)} min) — I stopped the hung "
+                                  f"turn and re-engaged it (nothing was lost)."))
+        if alive:
+            return                                            # a worker is genuinely progressing
         for e in await self.gate.snapshot(open_only=True):
             eid = e["id"]
             if eid.startswith("__") or eid in self._delegating or eid in parked:

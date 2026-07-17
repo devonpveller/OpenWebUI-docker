@@ -10,10 +10,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
+from sqlalchemy import select
+
 from app.adapters.chat import FakeChatAdapter
 from app.config import Settings
 from app.db import Database
-from app.models import Effort, Event, GoalVersion
+from app.models import Effort, Event, GoalVersion, WorkerInstance
 from app.modules.model_router import FakeModelClient
 from app.orchestrator import Orchestrator
 from app.worker.harness import FakeHarness
@@ -141,6 +143,61 @@ async def test_sweep_defers_while_a_worker_daemon_is_actually_running(db_url):
         orch.harness.busy_urls = set()                        # workers free now
         await orch._sweep_stalled_efforts()
         assert await orch._event_count("effort-wedged", "stall_recovered") == 1   # recovered
+    finally:
+        await db.dispose()
+
+
+async def test_watchdog_recovers_a_silent_running_worker(db_url):
+    """Register #25 (arm D, 2026-07-17): a worker that HANGS mid-turn holds task status `running`
+    forever, so the legacy `has_running_task` busy-defer sits idle indefinitely — arm D hung 20 min,
+    GPU 0%, uncaught. The fix reads the daemon's per-agent-step event offset: a running worker whose
+    offset has NOT advanced for `worker_silence_s` is hung → cancel the turn + recover the effort.
+    Crucially this fires even though the effort's own DB events are RECENT (8 min < the 900s stall
+    threshold) — liveness is judged from the WORKER's silence, not the effort's event age."""
+    orch, chat, db = await _orch(db_url)
+    try:
+        await _seed(orch, "effort-hung", last_kind="worker_project_set", age_min=8)  # recent, not aged
+        # bind the worker to the hung effort so base_url -> effort_id resolves
+        async with orch.db.session_factory() as s:
+            wi = (await s.execute(
+                select(WorkerInstance).where(WorkerInstance.base_url == "http://w1:8090"))).scalar_one()
+            wi.effort_id = "effort-hung"
+            wi.sched_state = "computing"
+            await s.commit()
+        orch.harness.busy_urls = {"http://w1:8090"}              # daemon still reports RUNNING
+        orch.harness.progress_task_ids = {"http://w1:8090": "task-x"}
+        orch.harness.progress_offsets = {"http://w1:8090": 42}   # FROZEN — no agent-loop progress
+        # we last saw offset 42 well beyond the silence window → the worker is hung
+        stale = datetime.now(timezone.utc) - timedelta(seconds=orch.s.worker_silence_s + 60)
+        orch._worker_progress = {"http://w1:8090": ("task-x", 42, stale)}
+        await orch._sweep_stalled_efforts()
+        assert ("http://w1:8090", "task-x") in orch.harness.cancelled   # hung turn cancelled
+        assert await orch._event_count("effort-hung", "stall_recovered") == 1   # effort recovered
+    finally:
+        await db.dispose()
+
+
+async def test_sweep_defers_while_a_worker_is_progressing(db_url):
+    """The other half: a running worker whose offset is ADVANCING is genuinely working — never
+    recovered, however long the turn (this is what protects legitimate long work from a wall-clock
+    timeout). First sight of a worker is treated as alive (no prior observation to call it silent)."""
+    orch, chat, db = await _orch(db_url)
+    try:
+        await _seed(orch, "effort-working", last_kind="worker_project_set", age_min=30)
+        async with orch.db.session_factory() as s:
+            wi = (await s.execute(
+                select(WorkerInstance).where(WorkerInstance.base_url == "http://w1:8090"))).scalar_one()
+            wi.effort_id = "effort-working"
+            await s.commit()
+        orch.harness.busy_urls = {"http://w1:8090"}
+        orch.harness.progress_task_ids = {"http://w1:8090": "task-y"}
+        orch.harness.progress_offsets = {"http://w1:8090": 10}
+        # seen a while ago, but the offset has since ADVANCED (10 > 3) → alive, defer
+        stale = datetime.now(timezone.utc) - timedelta(seconds=orch.s.worker_silence_s + 60)
+        orch._worker_progress = {"http://w1:8090": ("task-y", 3, stale)}
+        await orch._sweep_stalled_efforts()
+        assert orch.harness.cancelled == []                             # nothing cancelled
+        assert await orch._event_count("effort-working", "stall_recovered") == 0   # not recovered
     finally:
         await db.dispose()
 

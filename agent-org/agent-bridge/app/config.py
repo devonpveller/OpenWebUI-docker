@@ -78,6 +78,16 @@ class Settings(BaseSettings):
     stall_watchdog_s: float = 240.0         # sweep cadence
     stall_threshold_s: float = 900.0        # silence past this (15 min) with no progress = wedged
     stall_max_recoveries: int = 2           # auto-re-engages before a loud escalation stands
+    # WORKER LIVENESS — silence detection, not a wall-clock deadline (P9 register #25, 2026-07-17).
+    # A worker that HANGS mid-turn holds task status `running` forever, so `has_running_task` reports
+    # `busy` and the stall sweep DEFERS indefinitely — a real hang (arm D) sat 20 min, uncaught, with
+    # GPU at 0%. The fix asks the daemon's per-agent-step event offset (`/tasks/{id}/events`
+    # `next_offset`, which advances on generation/tool/edit — unlike the shell-only `activity` array):
+    # a working worker's offset climbs every tick; a hung one's is FROZEN. If a running worker's offset
+    # has not advanced for `worker_silence_s`, it is hung → cancel the turn + recover the effort. This
+    # NEVER interrupts legitimate long work (a working worker keeps bumping the offset), so the value
+    # can be small and generous at once. 0 disables the check (pure legacy busy-defer).
+    worker_silence_s: float = 300.0         # running but offset frozen this long (5 min) = hung
     # Autonomous INFRA-freeze recovery (operator 2026-07-13: "fully autonomous would be my choice,
     # but send a message so i can see; i don't need approval"). When the PM monitor freezes an effort
     # on an ENVIRONMENT/WORKSPACE symptom (no .git, clone missing, "repository setup") rather than a

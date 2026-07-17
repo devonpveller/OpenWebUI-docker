@@ -267,6 +267,36 @@ class LittleCoderHarness:
         except (httpx.HTTPError, ValueError):
             return False
 
+    async def running_task_progress(
+        self, base_url: str, since_offset: int = 0,
+    ) -> tuple[str, int] | None:
+        """Worker-LIVENESS signal (register #25): `(task_id, event_offset)` for this daemon's running
+        task, or `None` if it reports no running task. The offset is the daemon's per-agent-step event
+        count (`/tasks/{id}/events` `next_offset`) — it advances on generation / tool / edit, unlike the
+        shell-only `activity` array, so a FROZEN offset across ticks is the true signature of a hung
+        turn (the stall sweep decides silence from the delta over time). `since_offset` is the last
+        offset the caller saw, so the daemon returns only the new events; the returned offset is still
+        the running total."""
+        try:
+            async with httpx.AsyncClient(base_url=base_url.rstrip("/"), timeout=15.0) as c:
+                r = await c.get("/tasks")
+                if r.status_code != 200:
+                    return None
+                running = next((t for t in (r.json() or {}).get("tasks", [])
+                                if t.get("status") == "running"), None)
+                tid = running and running.get("task_id")
+                if not tid:
+                    return None
+                e = await c.get(f"/tasks/{tid}/events", params={"offset": max(0, int(since_offset))})
+                if e.status_code != 200:            # daemon without the /events route → offset unknown
+                    # FAIL-SAFE: report as advancing so an unobservable-but-running daemon is never
+                    # mistaken for hung. Never kill a worker whose progress you cannot actually watch.
+                    return (tid, int(since_offset) + 1)
+                off = int((e.json() or {}).get("next_offset", since_offset))
+                return (tid, off)
+        except (httpx.HTTPError, ValueError, TypeError):
+            return None
+
 
 class FakeHarness:
     """Deterministic in-memory worker for tests. Records every wake."""
@@ -313,6 +343,11 @@ class FakeHarness:
         # tests can exercise the quarantine + retry-elsewhere path. wake() raises for a matching url.
         self.busy_urls: set[str] = set()
         self.down_urls: set[str] = set()
+        # Worker-liveness (register #25): a busy worker's per-step event offset. `running_task_progress`
+        # returns (task_id, offset) for a busy_url; a test freezes the offset to simulate a HANG or bumps
+        # it to simulate progress. Defaults: offset 0, task id "fake-task".
+        self.progress_offsets: dict[str, int] = {}
+        self.progress_task_ids: dict[str, str] = {}
         # Optional answer text streamed via on_update (default "ok") — set long text to exercise
         # the answer-chunking path.
         self.answer_text: str | None = None
@@ -391,3 +426,13 @@ class FakeHarness:
     async def has_running_task(self, base_url: str) -> bool:
         # tests mark daemons busy via `busy_urls` (restart-safety: the stall sweep defers to them)
         return base_url in getattr(self, "busy_urls", set())
+
+    async def running_task_progress(
+        self, base_url: str, since_offset: int = 0,
+    ) -> tuple[str, int] | None:
+        # register #25: (task_id, event_offset) for a busy worker; None if idle. A test freezes the
+        # offset to simulate a hang or bumps it to simulate progress.
+        if base_url not in getattr(self, "busy_urls", set()):
+            return None
+        tid = self.progress_task_ids.get(base_url, "fake-task")
+        return (tid, self.progress_offsets.get(base_url, 0))
