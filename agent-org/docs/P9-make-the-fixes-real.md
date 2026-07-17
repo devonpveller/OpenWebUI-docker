@@ -303,6 +303,82 @@ the fix for (4): until now it was captured only in chat.
 misalignments are *engineering risks to build against*, not flaws in the idea. Arm D validated the unit;
 Phase 1 is about making the *composition* (contracts + faithful escalation) as lossless as the unit.
 
+### 🔁 The worker execution loop (operator + analysis, 2026-07-17) — LOCKED design
+
+The tiered composition above sits on one repeated unit: how ONE worker executes ONE bounded task.
+Locked element-by-element with the operator. It is deliberately **CDCL-shaped** — the intelligence
+lives in the loop, not the small model. The model proposes; the environment remembers.
+
+**The loop, per bounded task:**
+1. **Goal-post** — the module goal as an **executable acceptance test**, not prose (the clearest
+   possible prompt). No path to it is given.
+2. **Attempt** — the small model runs guided search toward the goal-post. It is a *proposer*, not a
+   reasoner.
+3. **Liveness** — a per-worker **agent-loop-silence detector** bounds the turn (NOT a wall clock). See
+   below. Forces termination only if the worker has gone silent.
+4. **Diff-check** — on termination, evaluate the git diff against the module goal's test: does this
+   change satisfy the goal? *Absence of a meaningful diff = not solved* — same branch as a wrong diff.
+5. **Pass** → route the outcome as context; a **sequential** sweep of adversarial prompts each append
+   scoped `module goal + task` items to the queue. A *map that accumulates*, never a single reduce over
+   all prompts (that is a horizon problem).
+6. **Fail / empty** → if reproducible in a **cleared context**, record the failure as a **constraint**;
+   wipe; retry with the narrowed search. (A hang is NOT a constraint — it is an *absence*, not "this
+   approach is wrong.")
+7. **Drain** → the list is done when a full adversarial sweep yields **zero new tasks**. The honest
+   zero; it does not oscillate like a re-scored judgment (`7→0→5`) because a concrete executable task is
+   either done or not.
+8. **Escalate** → when guided search plateaus (N constraints still red, or elapsed > the data-derived
+   budget), invoke the **frontier (OpenRouter)** as an oracle to inject the one constraint only
+   *knowledge* provides, then hand back to the small model.
+
+**Why it converges — CDCL.** This is conflict-driven clause learning (SAT solvers): a dumb proposer +
+a growing set of learned constraints solves what no single reasoning step can. Each reproducible failure
+is a learned clause that prunes the search. That pedigree is the convergence evidence. Hygiene: **only
+reproducible, attributable failures become constraints** — noise corrupts the search.
+
+**The queue is the synthesis substrate.** No model ever holds all the adversarial outcomes (the horizon
+problem). The queue carries them; dedup is mechanical (same module+task = same item). Synthesis happens
+at the queue precisely because the queue needs no horizon.
+
+**Frontier vs small model = explore vs execute.** The frontier explores via *knowledge* (considerations
+in-weights, ~one shot); the small model explores via guided *search* (holds nothing, narrows via
+accumulated determinism, over time). Split: ~95% small-model search, ~5% frontier unstick. OpenRouter is
+the **oracle invoked on a stall signal**, not a better worker. (This is what the paused OpenRouter
+connection is *for*.)
+
+**Liveness — silence detection, not a timer (the register #25 fix).** Failure: arm D hung, held
+`computing` 20 min, and neither guard caught it (flail counter reset by an edit; stall watchdog trusts
+`computing`). Fix = reframe the question from *"has the task run too long?"* to **"has the worker emitted
+any agent-loop event in the last T?"** A working worker bumps its activity constantly → never
+interrupted however long the task; a hung worker is silent immediately → caught fast, so T is small AND
+generous at once. **Two traps found while diagnosing arm D:** (a) the daemon logs are dominated by
+`GET /health` polling, so "container is doing something" is a FALSE heartbeat; (b) `/tasks/{id}`'s
+`activity` array only grows on SHELL commands — arm D2 sat at `activity=0` with GPU 100% while *editing*.
+So the signal must be a **`last_activity_ts` bumped on every agent-loop event** (generation start/end,
+tool call, tool result, edit) — a small addition to the little-coder daemon. Watchdog trips on
+`now − last_activity_ts > T`. GPU-idle is secondary corroboration only (shared resource, not
+per-worker). Average-response-time data answers a *different* question — the frontier-escalation budget
+(step 8), not liveness.
+
+**Security = the same loop, standing.** Point the orchestration at the DEPLOYED product as an adversary;
+exploits/breach-attempts are failing tests → constraints → patch tasks → re-attack → drain. Four rules:
+(1) **weight the adversary toward the SEAMS** — borrowed-package safety does not compose at the wiring,
+which is where breaches live; (2) **re-runnable on a schedule**, not a one-time gate (CVEs disclose
+continuously; clean code becomes vulnerable while unchanged); (3) security *research* is a **frontier
+role** (known-CVE knowledge), patching is small-model execution; (4) **governance hard requirement** —
+an autonomous breach-attempt generator is dual-use: scoped by the floor, attacks only the org's own
+product in a controlled environment, never real user data or external systems, and the pre-deployment
+**curated vuln list is a human-governor artifact** (like the D4 merge gate), not auto-dispositioned.
+
+**The one open edge — seam placement.** The loop resolves interface mismatches WITHIN a decomposition
+(the `{x}`/`{y}` contract; error surfaces at the seam from the connecting module's view). It CANNOT
+detect that the decomposition *itself* is wrong — that a boundary is misplaced — because that needs both
+scopes at once, which no encapsulated worker has. Mitigation: borrow/blend battle-tested industry
+architectures so the seams are pre-drawn. Residual risk: **novel projects with no reference
+architecture**, where a bad seam gets "resolved" locally by patching around a boundary that should not
+exist. That is where a **frontier or human at the scope-definition tier** still earns its place.
+UNSOLVED — flagged, not closed.
+
 ### What is NOT yet earned
 
 **The anchoring claim is a hypothesis.** "A durable exogenous target stops the oscillation" has not
@@ -601,7 +677,7 @@ Keep this current. An issue leaves the register only when a **live gym round** p
 | 22 | **The factory outlives its observer, silently** | 2026-07-17: the gym runner died when the Claude session that launched it exited. The org kept building at full GPU (`worker-1 computing`) with **nobody watching or scoring**. Swap/fire/approve had completed, so the round survived — the *measurement* was what died. The org has no idea whether it is being observed. | **OPEN — architecture, see THE REVISION.** Real fix = the runner's own docstring: *"P2 moves this surface into the agent-bridge as `/gym run <scenario>`"*. `scripts/gym-watch-effort.py` is an acknowledged band-aid. |
 | 23 | **One transient socket error aborts a whole gym round, mid-mutation** | 2026-07-17: `WinError 10055` (WSAENOBUFS) killed arm A's first attempt **during the swap**, on its first remote write (`PATCH pulls/11`), after preflight passed. Verified no partial mutation (#10/#11 still open) and retried clean. Not the known docker.backend leak — connections were *draining* (1259→1197/20s), ephemeral ports fine. So: a transient blip, with **no retry/backoff on a multi-step destructive sequence**. | **FIXED** gym `296668e` — `http_json` retries with backoff in two tiers (never-sent = any method incl. POST /nl; ambiguous = idempotent only, so no double-fired goal). 4 fakes-only tests green. Ports to `/gym run`. |
 | 24 | **The org cannot tell good work from bad work** | Every gate answers *"did it do the work?"*; none answers *"is it any good?"*. The only reliable oracle is the operator → quality review is **O(n) in one human's attention**. Symptom already measured: the iterate loop oscillates (`7→0→5` functional, `6→7→7` code_review) — a judge re-inventing its target each pass. | **OPEN — THE CEILING.** See THE REVISION; this is what Phases 1+ now exist to fix. |
-| 25 | **A mid-turn hang survives BOTH liveness guards (flat config)** | 2026-07-17 arm D (`review_mode/plan_approval/qa=off`, fork on): worker rewrote `todo.py` + 4 test files (37 tests pass) on `main`, uncommitted, then the agent loop **hung** — GPU 0% for 20+ min, no daemon logs, no inference calls, inference plane healthy. **Neither guard recovered it:** the flail guard's read-without-edit counter was reset by the 16:04 edit (edit-then-hang); the stall watchdog (900s) skips the effort because the worker still reports `computing` (busy≠stalled). The hang lives in the gap between them. **`review_mode=off` made it worse** — arms A/B's checkpoint cycles double as liveness heartbeats; flat config emits none, so the hang is invisible until a coarse watchdog that then doesn't fire. | **OPEN — directly informs the tiered design.** A bounded single-task turn needs its OWN liveness heartbeat + a watchdog that treats a long-silent `computing` worker as suspect, not healthy. Guard blind spot = `busy` state trusted as progress. |
+| 25 | **A mid-turn hang survives BOTH liveness guards (flat config)** | 2026-07-17 arm D (`review_mode/plan_approval/qa=off`, fork on): worker rewrote `todo.py` + 4 test files (37 tests pass) on `main`, uncommitted, then the agent loop **hung** — GPU 0% for 20+ min, no daemon logs, no inference calls, inference plane healthy. **Neither guard recovered it:** the flail guard's read-without-edit counter was reset by the 16:04 edit (edit-then-hang); the stall watchdog (900s) skips the effort because the worker still reports `computing` (busy≠stalled). The hang lives in the gap between them. **`review_mode=off` made it worse** — arms A/B's checkpoint cycles double as liveness heartbeats; flat config emits none, so the hang is invisible until a coarse watchdog that then doesn't fire. | **DESIGN LOCKED** (build pending) — the fix is a **`last_activity_ts` silence detector**, not a timer: bump it on every agent-loop event in the little-coder daemon; watchdog trips on `now − last_activity_ts > T`. Immune to the `GET /health` false heartbeat and the edit-phase (`activity=0`, GPU 100%) false positive. See "The worker execution loop → Liveness". |
 
 ---
 
