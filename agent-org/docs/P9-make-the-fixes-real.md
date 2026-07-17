@@ -245,6 +245,64 @@ Name the arm honestly: **arm D = "org with decomposition disabled,"** which is t
 delivery pipeline itself is the cost), Path B is there and needs no code — but that is a different
 question than the compartmentalization one.
 
+### 🏛️ The tiered-scope model (operator, 2026-07-17) — the target architecture
+
+Captured here because it was stated in chat and belongs in the durable plan (the whole point of THE
+REVISION is that judgement must not evaporate into a thread). **The model, in the operator's frame:**
+
+- The goal is **single tasks delegated to a single worker.** From the worker's view it holds **one task
+  at a time and is unaware of the bigger picture** — this deliberately sidesteps the paper's
+  small-model long-horizon failure: the worker is never asked to carry the horizon.
+- The org is **tiered task-lists, top-down.** The lever with small models is **SCOPE**: a small model
+  can't plan the whole codebase, but it *can* plan/execute one tier's bounded scope. Plan the
+  scaffolding tier by tier (borrow/blend well-defined industry architectures) until code defines the
+  scope border.
+- **Top-down planning → bottom-up escalation.** A worker's application surfaces issues; those are
+  proposed to the **superior tier that owns the adjacent scope**; scope-blend between systems becomes
+  *proposed tasks* that stay within that tier's scope.
+- **This is encapsulation / SOLID applied to the org.** The long horizon is *relative to each scope and
+  intentionally excluded from the project's global horizon* — each scope protects its own horizon.
+
+**What was DONE about it (honest):** (1) analyzed adversarially, three times, in-thread; (2) **arm D
+empirically validated its BASE UNIT** — a single bounded-scope task to the small model produced a
+coherent, compact, near-complete artifact (PR#13, PR#10-shaped), the opposite of the decomposed org's
+sprawl; (3) **NOT built** — correctly gated behind Phase 0 and the two open decisions. This section is
+the fix for (4): until now it was captured only in chat.
+
+**Where it ALIGNS with the research + current direction (strong):**
+- **The paper's failure was AMBIGUOUS decomposition, not decomposition.** Its own words: *"sub-tasks
+  that do not strictly specify clear constraints and handoffs → verification failures."* Anthropic's
+  engineering fix — *"each subagent needs an objective, an output format, and clear task boundaries"* —
+  **is** the operator's sharp-scope contract. The model adopts the remedy and tiers it.
+- **"Worker never holds the horizon" is the correct answer to the small-model finding.** The paper
+  tested small models on whole tasks / ambiguous fragments — never on bounded, well-specified scopes.
+  So it does not refute this model; it refutes the thing this model also rejects.
+- **It converges with THE REVISION.** The tiered-scope model and the "durable exogenous acceptance
+  corpus" are the *same idea from two ends*: **the load-bearing claim is that each tier's scope
+  boundary must be an executable CONTRACT, or the encapsulation is only nominal** (prose scope + LLM
+  judgement = the paper's ambiguous handoff in a SOLID costume).
+- **Arm D is the empirical down-payment.** The base unit demonstrably works on our 27B.
+
+**Where it MISALIGNS / carries the real engineering risk (this is where to build, not where it's wrong):**
+1. **Escalation faithfulness is the crux — and it is the paper's PROVEN-lossy step** (*"concerns raised
+   may not propagate to the final output"*). In code, escalation is a typed exception; between LLM tiers
+   it's prose a superior re-interprets. The model *relies* on bottom-up escalation working. Fix:
+   escalation must carry a **structured payload** (the failing test, the exact violated constraint), not
+   a summary.
+2. **The top tier that draws the first scope boundary needs the horizon vision the small model lacks.**
+   Wrong seams → every tier below inherits a bad boundary, each locally correct, composition broken, no
+   tier able to see it. Put a **frontier model or a human** at scope-definition; small models *execute*
+   scopes, they should not *choose the seams*.
+3. **Depth is a reliability tax even when tokens are free** (90%-faithful escalation × 3 tiers ≈ 73%).
+   Tier only as deep as the scope genuinely nests.
+4. **The bounded unit is FRAGILE alone (arm D, register #25):** attempt 1 hung and neither guard caught
+   it. So the tiers must *add* liveness/recovery/horizon that a single bounded task lacks — **without
+   reintroducing the sprawl.** That last clause is the whole design tension in one line.
+
+**Net:** the model is not misaligned with the research — it is the research's own remedy, scaled. The
+misalignments are *engineering risks to build against*, not flaws in the idea. Arm D validated the unit;
+Phase 1 is about making the *composition* (contracts + faithful escalation) as lossless as the unit.
+
 ### What is NOT yet earned
 
 **The anchoring claim is a hypothesis.** "A durable exogenous target stops the oscillation" has not
