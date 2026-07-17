@@ -8,24 +8,42 @@
 
 ## ⚠️ THE HEADLINE FINDING (operator verdict, 2026-07-16 evening)
 
-**P8 made the org honest. It did not make the product better — and the product got WORSE.**
+**P8 made the org honest. It did not make the product better.**
 
-Operator review of the two artifacts, same goal, same scenario:
+**Operator verdict:** *"PR#10 is significantly better."* Operator review of PR#11 found:
+**1 crash · 2 logic bugs · 6 design gaps · 3 minor** (full catalogue in P9 #9).
 
-| | **PR #10** (pre-P8) | **PR #11** (post-P8) |
-|---|---|---|
-| Tests | 62 | 54 (53 pass, 1 Windows quirk) |
-| Operator verdict | **"significantly better"** | 1 crash · 2 logic bugs · 6 design gaps · 3 minor |
-| Workspace | stale, contaminated — but a RICH context | clean — then **flailed at 28 reads → force-forked mid-effort** |
-| Org gates | none fired (hollow "done") | all fired, honest hold |
+**VERIFIED facts** (GitHub API, 2026-07-16 — *not* inferred):
 
-P8's gates worked perfectly and the thing they gated got worse. **Honesty and quality are separate
-axes, and we only moved one.**
+| | Head branch | Files | Test files | Built |
+|---|---|---|---|---|
+| **PR #9** | `agent/effort-gym-c-robust-storage` | 2 | 1 | morning iteration (closed) |
+| **PR #10** | `agent/effort-gym-004c-todo-product` | **4** | **1** (`test_todo.py`) | **pre-P8** |
+| **PR #11** | `agent/effort-gym-004d-todo-product` | **14** | **12** modules (54 tests) | **post-P8** |
 
-### Why (evidence, not hypothesis)
+P8's gates worked perfectly and the operator judged the *pre*-P8 artifact better. **Honesty and
+quality are separate axes, and we only moved one.**
 
-**1. The iterate loop OSCILLATES — it does not converge.** QA defect counts across the three
-`qa_gate=iterate` rounds on `gym-004d`:
+### ⚠️ CORRECTION — read this before trusting the analysis below
+
+An earlier revision of this document asserted *"PR #10 = 62/62 tests"* and built a regression
+narrative on it. **That number was fabricated by conflation** — the 62-test figure came from
+`effort_state_holds` on **gym-004b** and **gym-004**, branches that never opened a PR at all. PR #10
+is gym-004c: **4 files, 1 test file.** The author of this plan claimed what the audit could not back,
+inside the document whose thesis is *"speak from the audit, not from prose."* Caught by the operator,
+not by any check. (Register #20.)
+
+**What this correction changes.** The verified shape is the **inverse** of the original story: PR #11
+is the *larger, more decomposed* change (14 files, 12 test modules); PR #10 is the *smaller, tighter*
+one. So *"P8 degraded quality"* is **not established**. A live alternative: **the smaller, more
+focused change was simply better** — which would be an argument against the sprawl the iterate loop
+produces, not against the wipe/fork. **The cause is UNKNOWN and must be measured (P9 #0), not
+narrated.**
+
+### Why — what is actually evidenced vs. hypothesised
+
+**1. The iterate loop OSCILLATES — it does not converge.  [MEASURED]** QA defect counts across the
+three `qa_gate=iterate` rounds on `gym-004d`:
 
 ```
 functional lens:   7 → 0 → 5      (went to zero, then BACK UP)
@@ -37,13 +55,13 @@ into new defects. **`iterate` optimises "make the QA quiet", which is not "build
 Goodhart, arriving through the very gate built to raise quality. This is the gaming-green pattern the
 operator has warned about since 2026-07-09, now produced by our own machinery.
 
-**2. The fork destroys the design model.** PR #11's worker was restarted from scratch mid-effort by
-the flail guard, which *deliberately* discards context ("the context itself is the poison"). A worker
-with no coherent model of the code can only patch locally. PR #10's worker kept a rich (if stale)
-model — and produced the better product. **This reframes P9 #1: the flail/fork path may be CAUSING
-the quality regression, not merely costing turns.**
+**2. The fork destroys the design model.  [HYPOTHESIS — NOT MEASURED]** PR #11's worker *was*
+restarted from scratch mid-effort by the flail guard, which deliberately discards context ("the
+context itself is the poison") — that part is fact (`flail_replanned`, 20:28). The claim that this
+*caused* worse output is a guess: PR #10's worker also flailed (26 reads) on its own round. **Do not
+act on this until P9 #0 measures it.**
 
-**3. The org has no product-completeness lens.** The operator's review found `--due-before` crashing
+**3. The org has no product-completeness lens.  [MEASURED]** The operator's review found `--due-before` crashing
 on a malformed `due` value — a crash **the QA panel missed** — plus six design gaps (`undone`,
 sorting, `--overdue`, `clear` confirmation, meaningless REPL exit code). Our two lenses ask *"does it
 run?"* and *"is it clean?"*. Neither asks **"is this the whole right product for the problem?"** —
@@ -103,6 +121,8 @@ Keep this current. An issue leaves the register only when a **live gym round** p
 | 17 | **The iterate loop oscillates instead of converging** | `gym-004d` QA counts: functional **7 → 0 → 5**; code_review **6 → 7 → 7**. Whack-a-mole against the lens; each patch creates new defects. `iterate` optimises "QA quiet", not "good product" — Goodhart via our own gate. | **OPEN — P9 #0** |
 | 18 | **The flail fork destroys the design model** | PR#11's worker was force-restarted mid-effort (context deliberately discarded) → local patching only. PR#10's worker kept a rich model → better product. | **OPEN — P9 #1 (re-scoped)** |
 | 19 | **No product-completeness lens** | Operator found a `--due-before` crash the QA panel MISSED, plus 6 design gaps (`undone`, sorting, `--overdue`, `clear` confirm, REPL exit code). Our lenses ask "does it run?" / "is it clean?" — never "is this the whole right product?" | **OPEN — P9 #9** |
+| 20 | **This plan's author fabricated evidence** | An earlier revision asserted "PR#10 = 62/62 tests" and built a regression narrative on it. The figure came from gym-004b/gym-004 — branches that never opened a PR. Verified: PR#10 = 4 files, 1 test file. Caught by the OPERATOR, not by any check. The same failure the whole plan indicts, committed by the plan. | **LESSON — see Lessons** |
+| 21 | **A PR's identity is not checkable from the audit** | Diagnosing #20 needed the GitHub API; nothing links `delivery_pr_opened → {branch, base_sha, file/test counts}`, so PR facts get inferred from adjacent efforts' events. P8 #3 stamps `base_sha` on the event — extend it to the artifact's shape. | **OPEN — P9 #10** |
 
 ---
 
@@ -307,14 +327,38 @@ but never volunteers it. Build #8 first; #6 is then a consumer of it.
 
 ## P9 #9 — A product-completeness lens (the one the operator IS)
 
-**Evidence.** The operator's review of PR #11 found things **both** org lenses missed:
-- a **crash** — `cmd_list --due-before` raises an unhandled `ValueError` from
-  `date.fromisoformat()` when a stored `due` is malformed (`cmd_summary` dodges it only because it
-  string-compares). The functional lens tested corrupt *files*; it never tested a corrupt *field
-  inside a valid file*.
-- six **design gaps** — no `undone` (a done todo can never be un-done), no `--sort`, no `--overdue`
-  / `--due-after`, no confirmation on `clear`, a REPL that always exits 0, duplicate/negative IDs
-  silently accepted.
+**Evidence — the operator's full PR #11 review (2026-07-16). This is the target: the org's own panel
+must find this catalogue itself.** 54 tests, 53 pass (1 Windows `chmod` quirk). The org's two lenses
+found NONE of the following:
+
+**Crash (severity high)**
+1. `cmd_list --due-before` → unhandled `ValueError` from `date.fromisoformat()` when a *stored* `due`
+   is malformed (e.g. `"not-a-date"`). `cmd_summary` dodges it only by string-comparing. **We test
+   corrupt FILES; we never test a corrupt FIELD inside a valid file.**
+
+**Logic bugs**
+2. REPL `add` loses text when options interleave: `add first --priority high second` → text
+   `"second"` (`_repl_add` assigns instead of appending).
+3. Duplicate IDs silently allowed — `done`/`delete`/`edit` hit only the first match, no warning.
+4. Negative IDs → negative `next_id` (`max()` of negatives).
+
+**Design gaps (the "is this the whole product?" class)**
+5. No `undone` — **a completed todo can never be un-completed.**
+6. No `--sort` (priority / due / id) — insertion order only.
+7. Overdue via string comparison — fragile.
+8. No `--due-after` / `--overdue` filter.
+9. REPL always returns 0 — exit code meaningless.
+10. `clear` wipes completed todos with no confirmation.
+11. `--version` exits via `SystemExit`, bypassing `main()`'s contract.
+12. `TODO_DB` pointing at a directory → `IsADirectoryError` traceback.
+
+**Minor**
+13. Unicode output crashes on Windows (CP1252) — `UnicodeEncodeError`.
+14. `_normalize_item` called twice (redundant).
+15. `cmd_add`'s own priority validation is dead code on the CLI path (argparse `choices=` catches it).
+
+**The tell.** Items 5–8 are not bugs — they are *the product not being the product*. A todo app where
+you cannot un-complete a task passes every gate we own.
 
 **The gap.** Our lenses ask *"does it run?"* (functional) and *"is it clean?"* (code-craft). The
 operator's prompt asks a third thing: **"find gaps in the solution for the problem the script is
