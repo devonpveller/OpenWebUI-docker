@@ -78,7 +78,7 @@ from sqlalchemy import func, select
 
 from .models import (
     Concern as ConcernRow,
-    Effort, EffortConstraint, Event, GlobalState, WorkerInstance,
+    Effort, EffortConstraint, Event, GlobalState, Project, ScopeNode, WorkerInstance,
 )
 from .modules.pending_store import PendingStore
 from .schemas import (
@@ -1048,6 +1048,81 @@ class Orchestrator:
             return int((await s.execute(
                 select(func.count()).select_from(Event).where(
                     Event.effort_id == effort_id, Event.kind == kind))).scalar_one())
+
+    # ── §4 TIERED SCOPE TREE — the operator's composition layer ──────────────
+    async def add_scope_node(self, project_slug: str, title: str, scope: str, *,
+                             parent_id: str | None = None, contract: str | None = None) -> str | None:
+        """Add one TIER to a project's scope tree. Top-down decomposition: each node bounds what a
+        worker at that tier may hold, so the long horizon lives in the TREE rather than in any single
+        model's context (§4). `contract` is the node's executable boundary — the check that says this
+        scope is satisfied. Returns the node id, or None if the project/parent is unknown."""
+        title, scope = (title or "").strip(), (scope or "").strip()
+        if not title or not scope:
+            return None
+        nid = "sn-" + hashlib.sha1(f"{project_slug}|{parent_id or ''}|{title}".encode()).hexdigest()[:12]
+        try:
+            async with self.db.session_factory() as s:
+                if await s.get(Project, project_slug) is None:
+                    return None
+                depth = 0
+                if parent_id:
+                    par = await s.get(ScopeNode, parent_id)
+                    if par is None:
+                        return None
+                    depth = par.depth + 1
+                if await s.get(ScopeNode, nid) is None:
+                    s.add(ScopeNode(id=nid, project_slug=project_slug, parent_id=parent_id,
+                                    depth=depth, title=title[:200], scope=scope,
+                                    contract=(contract or None)))
+                    await s.commit()
+        except Exception as exc:  # noqa: BLE001
+            log.debug("scope node add failed for %s: %s", project_slug, exc)
+            return None
+        await self.audit.log("scope_node_added",
+                             payload={"id": nid, "project": project_slug, "parent": parent_id,
+                                      "depth": depth, "title": title[:120]})
+        return nid
+
+    async def _scope_node(self, node_id: str) -> dict | None:
+        try:
+            async with self.db.session_factory() as s:
+                n = await s.get(ScopeNode, node_id)
+                if n is None:
+                    return None
+                return {"id": n.id, "project_slug": n.project_slug, "parent_id": n.parent_id,
+                        "depth": n.depth, "title": n.title, "scope": n.scope,
+                        "contract": n.contract, "status": n.status, "effort_id": n.effort_id}
+        except Exception as exc:  # noqa: BLE001
+            log.debug("scope node read failed for %s: %s", node_id, exc)
+            return None
+
+    async def _scope_context(self, node_id: str) -> str:
+        """The BOUNDED brief a worker at this tier gets: its own scope and its contract — and
+        deliberately NOT the rest of the tree. Withholding the global picture is the mechanism, not an
+        oversight: a small model fails at whole-project horizon and succeeds inside a bounded scope
+        (§4). What lies outside is named only as 'not yours — escalate', so the worker knows the
+        BORDER without carrying what's beyond it."""
+        n = await self._scope_node(node_id)
+        if not n:
+            return ""
+        contract = (f"\nDONE means this passes: `{n['contract']}`" if n.get("contract")
+                    else "\n(No executable contract on this scope yet — say so rather than guessing "
+                         "when you believe it is done.)")
+        return (
+            f"\n\nYOUR SCOPE — `{n['title']}` (tier {n['depth']}):\n{n['scope']}{contract}\n"
+            f"This scope is the WHOLE of your responsibility. Anything outside it is NOT yours to "
+            f"fix, refactor, or redesign — if your work is blocked by something beyond this border, "
+            f"do NOT work around it: report it as `ESCALATE: <what you need and why>` and stop. "
+            f"Someone owns the adjacent scope and will decide it.")
+
+    async def _escalation_target(self, node_id: str) -> dict | None:
+        """Route an escalation UP: the tier that owns the ADJACENT scope (the parent) is the only
+        place with the standing to decide a cross-scope issue — a worker inside a bounded scope
+        structurally cannot (§4). None at the root, which is where a human governs."""
+        n = await self._scope_node(node_id)
+        if not n or not n.get("parent_id"):
+            return None
+        return await self._scope_node(n["parent_id"])
 
     async def _record_constraint(self, effort_id: str, body: str, *, origin: str = "",
                                  kind: str = "failure") -> str | None:

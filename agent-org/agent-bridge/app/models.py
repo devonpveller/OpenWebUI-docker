@@ -345,6 +345,35 @@ class Project(Base):
     created_at: Mapped[str] = mapped_column(default=now_iso)
 
 
+class ScopeNode(Base):
+    """A TIER in the project's scope tree (ORCHESTRATION-DESIGN §4 — the operator's tiered-scope
+    model). The long-horizon plan decomposes top-down into bounded scopes (chapter → section →
+    component); a worker is handed ONE node and is deliberately unaware of the rest, which is what
+    keeps a small model inside a scope it can actually hold. The horizon is carried by the TREE, not
+    by any single model — that is the whole point: *the long horizon is relative to each scope and
+    intentionally excluded from the project's global horizon* (encapsulation applied to the org).
+
+    `parent_id` is the escalation target: an issue a worker cannot resolve inside its own scope goes
+    UP to the tier that owns the adjacent scope, which is the only place with the standing to decide
+    it. `contract` is the node's executable boundary — the check that says this scope is satisfied
+    (§11: a boundary defined in prose is not encapsulation, it's the paper's ambiguous handoff).
+    `depth` is denormalized so a query can enforce "tier only as deep as the scope genuinely nests"
+    — depth is a reliability tax even when tokens are free (loss compounds per hop)."""
+
+    __tablename__ = "scope_nodes"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    project_slug: Mapped[str] = mapped_column(ForeignKey("projects.slug"), index=True)
+    parent_id: Mapped[str | None] = mapped_column(String(64), index=True)  # None = root (the project)
+    depth: Mapped[int] = mapped_column(Integer, default=0)
+    title: Mapped[str] = mapped_column(String(200))
+    scope: Mapped[str] = mapped_column(Text)              # what IS and ISN'T this tier's business
+    contract: Mapped[str | None] = mapped_column(Text)    # executable check that this scope is met
+    status: Mapped[str] = mapped_column(String(16), default="open")   # open | done | blocked
+    effort_id: Mapped[str | None] = mapped_column(String(64), index=True)  # the effort working it
+    created_at: Mapped[str] = mapped_column(default=now_iso)
+
+
 class EffortConstraint(Base):
     """A LEARNED CONSTRAINT — one conflict clause in the org's CDCL loop (ORCHESTRATION-DESIGN §5–6).
 
