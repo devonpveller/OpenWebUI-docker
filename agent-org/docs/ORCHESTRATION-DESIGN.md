@@ -280,7 +280,7 @@ Two forks are genuinely undecided and shape what gets built:
 | Piece | State |
 |---|---|
 | Worker liveness (silence detector, §8) | **BUILT + DEPLOYED + validated** |
-| Finding → durable check pipeline (§10) | **BUILT** (storage + hard-gate enforcement + operator capture; 535 tests green) — deploy + proof-round pending |
+| Finding → durable check pipeline (§10) | **BUILT + DEPLOYED + PROVEN** — gym-007 (PR#15): a recurring operator finding (missing `reopen`), captured once as a durable check, forced the third round's org to ship a *working* reopen the goal never asked for. The recurrence is broken; the human's judgment compounded. Auto-conversion + scale still pending. |
 | Executable goal-posts, CDCL loop, diff-check, drain (§5–6) | designed, not built |
 | Frontier / OpenRouter oracle (§7) | designed, not built |
 | Security standing adversary (§9) | designed, not built |

@@ -581,6 +581,34 @@ Each is a **failing test the org cannot green without actually fixing the behavi
 goal-post of "The worker execution loop". This is the concrete starting point for Increment 2. Owned
 by the *project* (`scenario`'s `standing_intent` grown teeth), so it applies to every future round.
 
+### ⭐⭐⭐ THE PROOF — gym-007, 2026-07-17: the recurrence is broken
+
+Increment 2 (the finding→durable-check pipeline) built + deployed, then tested with the cleanest
+possible experiment. Setup: one recurring operator finding — *"a `reopen` command to un-complete a
+done item was missing in both PR#11 and PR#14"* — captured once as a durable executable check
+`python3 todo.py reopen --help` on the gym project (via the live operator NL capture). Then a full
+round on the **same full-product goal, which does NOT mention reopen** (the plan didn't either — so
+the ONLY thing that could force reopen in is the durable check).
+
+**Result, verified against GitHub (not the org's self-report):**
+- The org built the product **without** reopen (as PR#11/#14 did) → the corpus gate ran
+  `reopen --help` → **failed** → routed back ONCE → the worker added reopen → re-check **passed**
+  (`acceptance_corpus_passed {total:1, after_fix:True}`; PR head advanced `024ee14`→`4e9a560`).
+- **PR#15 ships WITH reopen** — subcommands now include it, and it is a *working* command, not a stub:
+  behavioral test `add → done 1 → reopen 1` flips `#1 [x]` back to `#1 [ ]` ("reopened #1", exit 0).
+
+**The recurrence is broken. The human's judgment COMPOUNDED instead of evaporating** — the operator
+found "no reopen" twice by hand; captured once as a durable check, the third round's org was *forced*
+to include a working reopen, with no human flagging it again. This is the empirical validation of the
+finding→durable-check pipeline (§10), the same tier of result as arm D (base unit) and gym-006
+(liveness). The core strategic bet of THE REVISION — *make the human's judgment durable and
+executable* — is proven to work on a live small-model org.
+
+*What this does NOT yet prove:* auto-conversion (the operator still authored the check by hand — the
+resolved fork; auto is a future add-on), and scale (one check, one round — the seed corpus has 8).
+Also live-incident this round: register #26 (a test-scope monitor false-positive froze the healthy
+effort mid-build; investigated → additive tests → cleared).
+
 ### (superseded) arm B first-look — INCONCLUSIVE, re-running
 
 **Failed to deliver.** `effort-gym-005b-todo-product` → **no PR**, `effort_undelivered
