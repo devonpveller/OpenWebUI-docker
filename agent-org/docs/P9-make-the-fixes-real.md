@@ -622,6 +622,23 @@ on hard-signal defects — the `--due-before` crash class is gone, data layer ro
 soft-signal findings that same hard signal.) **Next: seed the remaining recurring findings and show
 the recurrence set collapse — the scale proof.**
 
+### ✅ ALTERATION 1 PROVEN — gym-008 (PR#16), 2026-07-18
+
+The corpus moved UPSTREAM (plan + build time) removes the fix round. Same goal, same durable check
+(`python3 todo.py reopen --help`), which the goal never mentions:
+
+| | gym-007 (corpus at DELIVERY only) | gym-008 (corpus UPSTREAM) |
+|---|---|---|
+| Plan | omitted `reopen` | **included `reopen`** |
+| Corpus gate | `acceptance_corpus_passed {after_fix: True}` | **`{total: 1}` — clean** |
+| Cost | a wasted second worker turn | none |
+
+Verified on GitHub: PR#16, 3 files, `reopen` present. **Build-wrong→catch→fix became
+build-right-first-time** — the exact waste alteration 1 targeted, eliminated.
+
+*Round also surfaced two OPEN defects (see register #27/#28): the org misreads an EMPTY plan as a
+malfunction instead of asking "is the goal met?", and the iterate loop reuses one growing session.*
+
 ### (superseded) arm B first-look — INCONCLUSIVE, re-running
 
 **Failed to deliver.** `effort-gym-005b-todo-product` → **no PR**, `effort_undelivered
