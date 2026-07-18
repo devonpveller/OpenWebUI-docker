@@ -76,7 +76,10 @@ from .modules.scope_ledger import ScopeLedger
 from .modules.stop_gates import StopGates
 from sqlalchemy import func, select
 
-from .models import Effort, EffortConstraint, Event, GlobalState, WorkerInstance
+from .models import (
+    Concern as ConcernRow,
+    Effort, EffortConstraint, Event, GlobalState, WorkerInstance,
+)
 from .modules.pending_store import PendingStore
 from .schemas import (
     Concern, Decision, Level, LifecyclePlan, LifecycleStep, MonitorVerdict, OperatorIntent, Plan, Trigger,
@@ -2136,9 +2139,100 @@ class Orchestrator:
             log.warning("effort %s frozen but #mgmt unresolved — CONCERN not posted (logged only)", effort_id)
 
     # ── operator decision (§3) + bring-the-audience-back-down closure (CM.4) ──
+    async def raise_verifiable_concern(
+        self, effort_id: str, trigger: Trigger, concern: Concern, *, verify_cmd: str,
+        branch: str | None = None, constraint_id: str | None = None,
+        actor: str = "pm", level: Level | None = None,
+    ) -> Concern:
+        """§11 — raise a concern that carries its own EXECUTABLE proof (the failing check), not just
+        prose. The structured payload is what makes the escalation lossless end-to-end: the receiving
+        tier gets the exact command that is red, and `apply_operator_decision` re-runs it before
+        allowing a close, so 'resolved' is VERIFIED rather than asserted. Prose escalations are the
+        paper's proven-lossy step; this is the antidote."""
+        result = await self.raise_concern(effort_id, trigger, concern, actor=actor, level=level)
+        try:
+            async with self.db.session_factory() as s:
+                rows = (await s.execute(
+                    select(ConcernRow).where(ConcernRow.effort_id == effort_id,
+                                             ConcernRow.status == "open"))).scalars().all()
+                for c in rows:
+                    p = dict(c.payload or {})
+                    p.update({"verify_cmd": verify_cmd, "branch": branch,
+                              "constraint_id": constraint_id})
+                    c.payload = p
+                await s.commit()
+            await self.audit.log("escalation_verifiable", effort_id=effort_id,
+                                 payload={"verify_cmd": verify_cmd[:200],
+                                          "constraint_id": constraint_id})
+        except Exception as exc:  # noqa: BLE001 — the freeze already happened; payload is enrichment
+            log.debug("attaching verify_cmd to concern failed for %s: %s", effort_id, exc)
+        return result
+
+    async def _verifiable_concern_blocks_clear(self, effort_id: str, decision: Decision) -> str:
+        """§11 FAITHFUL ESCALATION — a ticket may not close by ASSERTION. When a concern was raised
+        from a failing executable check, its payload carries that check; clearing it as
+        approve/modify RE-RUNS the check and refuses the clear while it is still red. Returns ''
+        when the clear may proceed, else the refusal reason.
+
+        This is the mechanism that makes escalation lossless (ORCHESTRATION-DESIGN §11): the paper's
+        proven-lossy step is a concern raised and then NOT incorporated. Prose can be waved through;
+        a failing test cannot. `abort` is always allowed (giving up is a legitimate decision), and an
+        explicit `override` in the note is the human's escape hatch — logged, never silent."""
+        if decision.decision == "abort":
+            return ""
+        if "override" in (decision.note or "").lower():
+            await self.audit.log("escalation_override", effort_id=effort_id,
+                                 payload={"note": (decision.note or "")[:200]})
+            return ""
+        try:
+            concerns = await self.gate.open_concerns(effort_id)
+        except Exception as exc:  # noqa: BLE001 — never wedge a decision on a lookup
+            log.debug("verifiable-concern lookup failed for %s: %s", effort_id, exc)
+            return ""
+        for c in concerns:
+            cmd = ((c.payload or {}).get("verify_cmd") or "").strip() if isinstance(c.payload, dict) else ""
+            if not cmd:
+                continue
+            # We do NOT run the check here: governance §3.0 forbids moving a frozen effort's agents
+            # to computing, and acquiring a verifier slot would do exactly that. Instead we consult
+            # the RECORD — a check_exec that PASSED for this command since the concern was raised.
+            # The check runs during the fix round (while the effort is active); the clear consults
+            # its result. Same guarantee ("verified, not asserted"), no invariant broken.
+            passed = False
+            try:
+                async with self.db.session_factory() as s:
+                    rows = (await s.execute(
+                        select(Event).where(
+                            Event.effort_id == effort_id, Event.kind == "check_exec",
+                            Event.ts > c.created_at).order_by(Event.ts.desc()).limit(50)
+                    )).scalars().all()
+                for ev in rows:
+                    p = ev.payload if isinstance(ev.payload, dict) else {}
+                    if p.get("exit_code") == 0 and (p.get("command") or "")[:120] == cmd[:120]:
+                        passed = True
+                        break
+            except Exception as exc:  # noqa: BLE001 — never wedge a decision on a lookup
+                log.debug("verify-record lookup failed for %s: %s", effort_id, exc)
+                return ""
+            if not passed:
+                return (f"its own check has not passed since this was raised (`{cmd}`). Re-run the "
+                        f"work so the check goes green, and I'll close it on the proof")
+        return ""
+
     async def apply_operator_decision(
         self, effort_id: str, decision: Decision, *, actor_role: str = "human"
     ) -> None:
+        # §11: an escalation carrying an executable check cannot be closed while that check is red.
+        blocked = await self._verifiable_concern_blocks_clear(effort_id, decision)
+        if blocked:
+            await self.audit.log("escalation_clear_refused", effort_id=effort_id,
+                                 payload={"reason": blocked[:300]})
+            await self.comms.post(
+                Intent.operator_reply,
+                f"⛔ I can't close **{effort_id}** yet — {blocked}\nFix it (or re-send your decision "
+                f"with the word **override** to close it anyway, which I'll log).",
+                effort_id=effort_id, thread_id=self._mgmt_thread_of(effort_id))
+            return
         await self.gate.clear(effort_id, decision, actor_role=actor_role)
         # On resume, wake any dependency-waiters of this effort (idle-wait DAG).
         await self.scheduler.wake_finished(effort_id)

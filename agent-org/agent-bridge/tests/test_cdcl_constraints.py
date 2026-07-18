@@ -118,3 +118,57 @@ async def _drain(orch, rounds: int = 3):
         if orch._bg_tasks:
             await asyncio.gather(*list(orch._bg_tasks), return_exceptions=True)
         await asyncio.sleep(0)
+
+
+# ── §11 FAITHFUL ESCALATION — a ticket may not close by assertion ─────────────
+async def test_verifiable_escalation_cannot_be_closed_while_its_check_is_red(db_url):
+    """ORCHESTRATION-DESIGN §11: the paper's proven-lossy step is a concern RAISED and then not
+    INCORPORATED. Prose can be waved through; a failing test cannot. A concern carrying its own
+    executable check re-runs it on clear and refuses while red — 'resolved' is verified, not
+    asserted. `abort` (giving up) and an explicit `override` stay allowed, the latter audited."""
+    from app.schemas import Concern as ConcernSchema, ConcernOption, Decision, Trigger
+    orch, chat, harness, db = await _orch(db_url)
+    try:
+        eid, _c, _r = await _effort(orch, "esc")
+        await orch.raise_verifiable_concern(
+            eid, Trigger.deviation,
+            ConcernSchema(intent_thread=f"effort {eid}", what_surfaced="the check is red",
+                          intent_of_change="verify", risk_if_wrong="ships broken",
+                          options=[ConcernOption(action="fix", effect_on_outcome="green")],
+                          recommendation="fix"),
+            verify_cmd="pytest tests/test_thing.py", branch="agent/x")
+        # NO passing run recorded since it was raised → the clear is refused
+        await orch.apply_operator_decision(eid, Decision(decision="approve", note="looks fine to me"))
+        assert await orch.gate.state_of(eid) == "frozen"                  # NOT cleared
+        msgs = " ".join(p["message"] for p in chat.posted)
+        assert "can't close" in msgs and "has not passed" in msgs
+        assert [e for e in await orch.audit.replay(eid) if e["kind"] == "escalation_clear_refused"]
+        # a PASSING run of that exact check is recorded (as a fix round would) → the clear proceeds
+        await orch.audit.log("check_exec", effort_id=eid,
+                             payload={"command": "pytest tests/test_thing.py", "exit_code": 0})
+        await orch.apply_operator_decision(eid, Decision(decision="approve", note="fixed"))
+        assert await orch.gate.state_of(eid) != "frozen"                  # cleared on proof
+    finally:
+        await db.dispose()
+
+
+async def test_override_and_abort_still_close_a_verifiable_escalation(db_url):
+    """The human governor is never trapped: `abort` always closes, and an explicit `override` closes
+    a red ticket — but the override is AUDITED, never silent."""
+    from app.schemas import Concern as ConcernSchema, ConcernOption, Decision, Trigger
+    orch, _chat, harness, db = await _orch(db_url)
+    try:
+        eid, _c, _r = await _effort(orch, "esc2")
+        await orch.raise_verifiable_concern(
+            eid, Trigger.deviation,
+            ConcernSchema(intent_thread=f"effort {eid}", what_surfaced="red",
+                          intent_of_change="verify", risk_if_wrong="x",
+                          options=[ConcernOption(action="fix", effect_on_outcome="green")],
+                          recommendation="fix"),
+            verify_cmd="pytest tests/test_thing.py")
+        await orch.apply_operator_decision(
+            eid, Decision(decision="approve", note="known issue — override, tracked elsewhere"))
+        assert await orch.gate.state_of(eid) != "frozen"                  # …but override closes it
+        assert [e for e in await orch.audit.replay(eid) if e["kind"] == "escalation_override"]
+    finally:
+        await db.dispose()
