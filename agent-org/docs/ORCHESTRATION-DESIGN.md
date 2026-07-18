@@ -10,9 +10,12 @@ file is the *design north star*: read it to understand what we are building and 
 *probe* — a vehicle for measuring the orchestration's behavior. Nothing here is about making a
 todo app good; it is about the org that builds software autonomously with a human as governor.
 
-**Status in one line.** Of everything below, only the *worker-liveness* piece is built and
-deployed. The rest is designed and locked, not yet implemented. This doc is the spec for that
-implementation.
+**Status in one line** (2026-07-17). **Built + deployed:** worker liveness (§8), the
+finding→durable-check pipeline (§10, *proven* live), CDCL constraint learning + fixed-point drain
+(§5–6), faithful escalation (§11), and the tiered scope tree (§4, foundation). **Not built:** the
+frontier/OpenRouter oracle (§7), the security standing adversary (§9), and — inside the pieces
+above — per-task executable goal-posts, a first-class diff-check, the adversarial task-drain,
+auto-conversion of reviews into checks, and wiring scope nodes into planning/dispatch. See §14.
 
 ---
 
