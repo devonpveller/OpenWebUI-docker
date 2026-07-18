@@ -128,6 +128,28 @@ async def test_operator_captures_a_check_via_nl(db_url, tmp_path):
         await db.dispose()
 
 
+async def test_corpus_is_visible_upstream_at_plan_and_build_time(db_url, tmp_path):
+    """ALTERATION 1 (2026-07-17): the corpus must reach the worker's goal/plan context, not only the
+    delivery gate. Live evidence it matters — gym-007's plan omitted `reopen`, the gate caught it, and
+    a SECOND worker turn was burned adding it. Seeing the durable checks up front turns
+    build-wrong-then-fix into build-right-first-time."""
+    orch, _chat, harness, db = await _orch(db_url, tmp_path)
+    try:
+        eid, chan, root = await _game(orch)
+        await orch.projects.add_acceptance_check(
+            "game", "operator PR#11+#14: reopen was missing", "python3 todo.py reopen --help")
+        orch._gh_transport = httpx.MockTransport(_remote({}))
+        harness.output_queue = ["did the work", "pushed"]
+        harness.check_queue = [(0, "ok", False)]
+        await orch.delegate(eid, chan, root, "wire", plan_steps=["work"])
+        prompts = " ".join(w["prompt"] for w in harness.wakes)
+        assert "ACCEPTANCE CORPUS" in prompts                      # the worker SEES it while working
+        assert "todo.py reopen --help" in prompts                  # …including the exact check
+        assert "reopen was missing" in prompts                     # …and its human origin
+    finally:
+        await db.dispose()
+
+
 async def test_corpus_red_withdraws_the_merge_gate(db_url, tmp_path):
     """THE POINT: a delivery that BREAKS a durable check the org already committed to is hard-gated —
     route back once, still red → the merge gate is WITHDRAWN and burn-down engaged. Without the corpus

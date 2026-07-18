@@ -4049,6 +4049,32 @@ class Orchestrator:
                 f"build — if honoring it makes the task hard or impossible, SAY SO and stop; do "
                 f"NOT revert or work around the architecture to force a pass.{forb_line}")
 
+    async def _acceptance_corpus_context(self, slug: str) -> str:
+        """The project's DURABLE ACCEPTANCE CORPUS as a goal preamble — the corpus moved UPSTREAM
+        (ORCHESTRATION-DESIGN §10 + alteration 1, 2026-07-17). Each entry is an executable check
+        captured from an earlier human review that WILL run against this delivery and hard-gates the
+        merge. Injected at PLAN time, not only enforced at delivery, because a delivery-only corpus
+        makes the org build wrong, get caught, and burn a fix round: observed live in gym-007 — the
+        plan omitted `reopen`, the gate caught it, and a SECOND worker turn was spent adding it. The
+        checks up front turn build-wrong-then-fix into build-right-first-time (at project scale that
+        is the difference between converging and thrashing). '' when the corpus is empty."""
+        try:
+            checks = await self.projects.list_acceptance_checks(slug)
+        except Exception as exc:  # noqa: BLE001 — context enrichment must never block dispatch
+            log.debug("acceptance-corpus context lookup failed for %s: %s", slug, exc)
+            return ""
+        if not checks:
+            return ""
+        listed = "\n".join(f"  - `{c['body']}`   ({c['origin_note']})" for c in checks[:20])
+        more = (f"\n  …and {len(checks) - 20} more." if len(checks) > 20 else "")
+        return (
+            f"\n\nACCEPTANCE CORPUS for `{slug}` — {len(checks)} durable check(s) captured from "
+            f"earlier human reviews of this project. Each one RUNS against your delivery and a "
+            f"failure WITHHOLDS the merge, so satisfy them as part of this work EVEN IF the goal "
+            f"text doesn't mention them:\n{listed}{more}\nThese are standards the org already "
+            f"committed to — do not weaken or work around them; plan and build so they pass first "
+            f"time.")
+
     async def _composition_context(self, slug: str) -> str:
         """The COMPOSITION CONTEXT block the planner path injects, for DIRECT-intake dispatches —
         a worker given a standalone clone sees cross-submodule references as plainly broken and
@@ -4478,6 +4504,10 @@ class Orchestrator:
         # effort, so no worker can quietly revert the architecture to manufacture a pass.
         if proj_slug and "STANDING INTENT" not in request:
             request += await self._standing_intent_context(proj_slug)
+        # The corpus UPSTREAM (alteration 1): the durable checks are visible while PLANNING, so the
+        # work is built to pass them first time instead of being caught at the delivery gate.
+        if proj_slug and "ACCEPTANCE CORPUS" not in request:
+            request += await self._acceptance_corpus_context(proj_slug)
         if proj_slug and "COMPOSITION CONTEXT" not in request:
             request += await self._composition_context(proj_slug)
         # MACHINE-CHECK forewarning: when the project (or the host that vendors it) has a check
@@ -5283,6 +5313,14 @@ class Orchestrator:
         instruction = step
         if self.s.handoff_enabled and "HANDOFF PROTOCOL" not in instruction:
             instruction += await self._handoff_protocol_context(effort_id)
+        # ALTERATION 1 — the corpus UPSTREAM: the durable acceptance checks ride the FIRST coding
+        # step so the worker builds to pass them, instead of being caught at the delivery gate and
+        # burning a fix round (gym-007, live). Once per effort — later steps already have it in
+        # session context.
+        if i == 1 and "ACCEPTANCE CORPUS" not in instruction:
+            _proj = await self._effort_project(effort_id)
+            if _proj:
+                instruction += await self._acceptance_corpus_context(_proj)
         # P8 #3 — PROVENANCE: the first coding step carries the expected base + the assert-before-
         # work demand (the worker can't discover the live base itself — proxied git); every focused
         # wake keys workspace reuse on that base, so a moved base re-clones instead of resuming
@@ -9084,6 +9122,7 @@ class Orchestrator:
         )
         try:
             goal += await self._standing_intent_context(owner)
+            goal += await self._acceptance_corpus_context(owner)   # corpus upstream (alteration 1)
             goal += await self._composition_context(owner)
         except Exception:  # noqa: BLE001 — context is garnish, never a blocker
             pass
