@@ -345,6 +345,41 @@ class Project(Base):
     created_at: Mapped[str] = mapped_column(default=now_iso)
 
 
+class EffortConstraint(Base):
+    """A LEARNED CONSTRAINT — one conflict clause in the org's CDCL loop (ORCHESTRATION-DESIGN §5–6).
+
+    When an attempt fails, the failure is recorded here and injected into every later retry, so the
+    small model's search space NARROWS instead of re-walking the same dead end. This is the mechanism
+    that makes a dumb proposer converge: the intelligence lives in the accumulated clause set, not in
+    the model. Before this existed, every retry loop injected only the LATEST failure — auto-iterate
+    actively *stripped* the previous iteration's text — so nothing in the org accumulated across
+    retries and a worker could rediscover the same wall forever.
+
+    Scope is the middle tier that was missing: `Concern`/`Checkpoint`/`Review` die with a round, while
+    `AcceptanceCheck` outlives every effort. A constraint lives for the EFFORT — long enough to steer
+    its retries, short enough that a dead end from one task doesn't haunt the project. A constraint
+    that survives to a green close is the natural candidate for promotion into the durable corpus.
+
+    `signature` is `_failure_sig`'s normalized log hash, so "have we seen this failure before?" is a
+    cheap set-membership test — which is exactly the drain condition (a sweep that yields no NEW
+    signature has produced no new information). Content-addressed `id` makes re-recording the same
+    failure idempotent (clause subsumption), which matters because several red paths funnel the same
+    underlying failure through the recorder. INFRA failures are never recorded — a proxy/clone/tool
+    breakage is not a fact about the code."""
+
+    __tablename__ = "effort_constraints"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    effort_id: Mapped[str] = mapped_column(ForeignKey("efforts.id"), index=True)
+    signature: Mapped[str] = mapped_column(String(128), index=True)  # _failure_sig — novelty test
+    kind: Mapped[str] = mapped_column(String(32), default="failure")  # failure | violation | defect
+    body: Mapped[str] = mapped_column(Text)                # what failed, as the retry should read it
+    origin_note: Mapped[str] = mapped_column(String(512), default="")   # which gate/path recorded it
+    reproduced: Mapped[bool] = mapped_column(Boolean, default=False)    # confirmed in a cleared context
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[str] = mapped_column(default=now_iso)
+
+
 class AcceptanceCheck(Base):
     """A durable, executable acceptance check for a PROJECT — the mechanism by which an operator's
     review finding becomes a permanent gate the org cannot regress on (ORCHESTRATION-DESIGN §10, the

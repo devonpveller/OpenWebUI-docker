@@ -9,6 +9,7 @@ sampled monitor, and route inbound chat events to wakes/decisions. Keeping it th
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
 import random
@@ -75,7 +76,7 @@ from .modules.scope_ledger import ScopeLedger
 from .modules.stop_gates import StopGates
 from sqlalchemy import func, select
 
-from .models import Effort, Event, GlobalState, WorkerInstance
+from .models import Effort, EffortConstraint, Event, GlobalState, WorkerInstance
 from .modules.pending_store import PendingStore
 from .schemas import (
     Concern, Decision, Level, LifecyclePlan, LifecycleStep, MonitorVerdict, OperatorIntent, Plan, Trigger,
@@ -1044,6 +1045,71 @@ class Orchestrator:
             return int((await s.execute(
                 select(func.count()).select_from(Event).where(
                     Event.effort_id == effort_id, Event.kind == kind))).scalar_one())
+
+    async def _record_constraint(self, effort_id: str, body: str, *, origin: str = "",
+                                 kind: str = "failure") -> str | None:
+        """CDCL clause learning (ORCHESTRATION-DESIGN §5–6): record a failure as a durable constraint
+        on this effort so every later retry inherits it and the search narrows. Content-addressed →
+        re-recording the same failure is a no-op (clause subsumption), which matters because several
+        red paths funnel the same underlying failure here. Returns the id, or None if it was NOT
+        recorded (empty, or an INFRA failure — a proxy/clone/tool breakage is not a fact about the
+        code and must never steer the search). Never raises: learning is not a dispatch blocker."""
+        body = (body or "").strip()
+        if not body:
+            return None
+        if _is_infra_failure(body):
+            return None
+        sig = self._failure_sig(body)
+        cid = "ec-" + hashlib.sha1(f"{effort_id}|{kind}|{sig}".encode()).hexdigest()[:12]
+        try:
+            async with self.db.session_factory() as s:
+                if await s.get(EffortConstraint, cid) is None:
+                    s.add(EffortConstraint(
+                        id=cid, effort_id=effort_id, signature=sig, kind=kind,
+                        body=body[:4000], origin_note=(origin or "")[:512]))
+                    await s.commit()
+                    fresh = True
+                else:
+                    fresh = False
+        except Exception as exc:  # noqa: BLE001 — learning must never block a retry
+            log.debug("constraint record failed for %s: %s", effort_id, exc)
+            return None
+        if fresh:
+            await self.audit.log("constraint_learned", effort_id=effort_id,
+                                 payload={"id": cid, "sig": sig, "origin": (origin or "")[:120]})
+        return cid
+
+    async def _list_constraints(self, effort_id: str) -> list[dict]:
+        """This effort's learned constraints (oldest first — the order they were discovered)."""
+        try:
+            async with self.db.session_factory() as s:
+                rows = (await s.execute(
+                    select(EffortConstraint)
+                    .where(EffortConstraint.effort_id == effort_id,
+                           EffortConstraint.active.is_(True))
+                    .order_by(EffortConstraint.created_at))).scalars().all()
+            return [{"id": r.id, "sig": r.signature, "kind": r.kind, "body": r.body,
+                     "origin_note": r.origin_note} for r in rows]
+        except Exception as exc:  # noqa: BLE001
+            log.debug("constraint list failed for %s: %s", effort_id, exc)
+            return []
+
+    async def _constraints_context(self, effort_id: str, *, limit: int = 12) -> str:
+        """The accumulated constraints as a retry preamble — the CDCL clause set the next attempt must
+        not re-walk. Empty string when nothing has been learned yet."""
+        cs = await self._list_constraints(effort_id)
+        if not cs:
+            return ""
+        shown = cs[-limit:]
+        listed = "\n".join(
+            f"  {i}. {c['body'].strip()[:400]}" + (f"   ({c['origin_note']})" if c['origin_note'] else "")
+            for i, c in enumerate(shown, 1))
+        more = f"\n  …and {len(cs) - len(shown)} earlier constraint(s)." if len(cs) > len(shown) else ""
+        return (
+            f"\n\nLEARNED CONSTRAINTS ({len(cs)}) — failures already hit on THIS task. Each one is a "
+            f"dead end that has been tried; do NOT repeat these approaches, and do not undo a fix that "
+            f"resolved one:\n{listed}{more}\nTreat them as the narrowed search space: your next attempt "
+            f"must satisfy all of them at once.")
 
     def _waiting_on(self, effort_id: str) -> dict | None:
         """P8 #2 — WAITING-ON-HUMAN as a first-class state. Whether this effort is parked at a
@@ -5321,6 +5387,10 @@ class Orchestrator:
             _proj = await self._effort_project(effort_id)
             if _proj:
                 instruction += await self._acceptance_corpus_context(_proj)
+        # CDCL (§5–6): a re-dispatch after a failed round carries the clause set, so the retry starts
+        # from the NARROWED search space instead of rediscovering the same dead ends.
+        if i == 1 and "LEARNED CONSTRAINTS" not in instruction:
+            instruction += await self._constraints_context(effort_id)
         # P8 #3 — PROVENANCE: the first coding step carries the expected base + the assert-before-
         # work demand (the worker can't discover the live base itself — proxied git); every focused
         # wake keys workspace reuse on that base, so a moved base re-clones instead of resuming
@@ -5872,10 +5942,18 @@ class Orchestrator:
         )
         return True
 
-    def _queue_burndown(self, effort_id: str, failing_log: str) -> None:
+    def _queue_burndown(self, effort_id: str, failing_log: str, *, origin: str = "") -> None:
         """Start (or defer) the burn-down for a RED org build. Inside delegate's single-flight the
         loop must wait for the current run to close — delegate's finally launches it; anywhere
-        else it starts immediately."""
+        else it starts immediately.
+
+        CDCL (§5–6): this is the chokepoint EVERY red path funnels through (composition check, the
+        post-check ladder, delegate deviation, D2, the acceptance corpus), so it is where a failure
+        becomes a durable LEARNED CONSTRAINT. Recorded BEFORE the defer/spawn branch, so the clause
+        is already on the effort when the loop reads it. Content-addressed + infra-filtered inside
+        `_record_constraint`, so the several paths that report the same underlying failure collapse
+        to one clause and a tool breakage never steers the search."""
+        self._spawn(self._record_constraint(effort_id, failing_log, origin=origin or "burn-down"))
         if effort_id in self._delegating:
             self._burndown_after[effort_id] = failing_log
         else:
@@ -6211,6 +6289,10 @@ class Orchestrator:
             errors_log = failing_log
             self._last_burn_log[effort_id] = failing_log
             last_sig = self._failure_sig(failing_log)
+            # CDCL: every failure signature seen in THIS burn-down. Novelty against the whole set
+            # (not just the previous round) is what makes the stop condition a fixed point and
+            # catches A→B→A cycles that a one-step comparison scores as endless progress.
+            seen_sigs: set[str] = {last_sig}
             branch_exists = (await self._verify_delivery(effort_id, repo)).landed
             stall = 0
             last_result = None
@@ -6292,12 +6374,24 @@ class Orchestrator:
                     # When counts can't move, a CHANGED failure signature (normalized log tail)
                     # is progress: the org moved PAST the previous failure into the next one.
                     sig = self._failure_sig(out)
-                    sig_progress = (not improved and (n in (None, 0) or n == prev)
-                                    and last_sig is not None and sig != last_sig)
+                    # CDCL (§5–6): novelty is measured against EVERY signature seen this burn-down,
+                    # not just the previous round. A→B→A is not progress — it's a cycle, and the old
+                    # `last_sig` test scored both flips as progress and looped forever. A signature
+                    # absent from the set is genuinely NEW INFORMATION: record it as a clause. This
+                    # turns the loop's stop condition into a real fixed point — "a sweep that yields
+                    # no new constraint" — instead of a bare counter.
+                    novel_sig = sig not in seen_sigs
+                    seen_sigs.add(sig)
+                    if novel_sig:
+                        await self._record_constraint(
+                            effort_id, out, origin=f"burn-down round {rnd}")
+                    sig_progress = (not improved and (n in (None, 0) or n == prev) and novel_sig
+                                    and last_sig is not None)
                     last_sig = sig
                     await self.audit.log("burndown_round", effort_id=effort_id,
                                          payload={"round": rnd, "errors": n, "prev": prev,
-                                                  "sig": sig, "sig_progress": sig_progress})
+                                                  "sig": sig, "sig_progress": sig_progress,
+                                                  "novel": novel_sig, "seen": len(seen_sigs)})
                     if improved or sig_progress:
                         stall = 0
                         note = (f"**{prev if prev >= 0 else '?'} → {n}** errors" if improved
@@ -6466,6 +6560,10 @@ class Orchestrator:
             f"ends. Start from what's already delivered (`{checkout}`).\n\n"
             f"What this is for:\n{base_goal}"
         )
+        # CDCL (§5–6): every round is a FRESH session, so the accumulated clause set is the ONLY
+        # thing carrying what earlier rounds already learned. Without it each round re-walks the
+        # same dead ends with only the latest error slice for guidance.
+        instruction += await self._constraints_context(effort_id)
         # FRESH session per ROUND — parts AND single rounds (live 2026-07-08: every reused
         # session rotted the same way — part rounds 2/4/5 quit in ~90s with nothing pushed, and
         # once the count dropped below the partition threshold the SINGLE rounds did the exact
