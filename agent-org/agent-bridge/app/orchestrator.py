@@ -82,7 +82,7 @@ from .models import (
 )
 from .modules.pending_store import PendingStore
 from .schemas import (
-    Concern, Decision, Level, LifecyclePlan, LifecycleStep, MonitorVerdict, OperatorIntent, Plan, Trigger,
+    Concern, ConcernOption, Decision, Level, LifecyclePlan, LifecycleStep, MonitorVerdict, OperatorIntent, Plan, Trigger,
 )
 from .worker.harness import FakeHarness, LittleCoderHarness, WorkerHarness
 
@@ -2253,7 +2253,11 @@ class Orchestrator:
         proven-lossy step is a concern raised and then NOT incorporated. Prose can be waved through;
         a failing test cannot. `abort` is always allowed (giving up is a legitimate decision), and an
         explicit `override` in the note is the human's escape hatch — logged, never silent."""
-        if decision.decision == "abort":
+        if decision.decision != "approve":
+            # `abort` (giving up) and `modify` (steer + RESUME work) must always pass. Blocking
+            # `modify` would deadlock the ticket: the check can only go green if work resumes, and
+            # work can only resume by clearing the freeze. Only `approve` — the claim that this is
+            # RESOLVED — has to be earned with a passing check.
             return ""
         if "override" in (decision.note or "").lower():
             await self.audit.log("escalation_override", effort_id=effort_id,

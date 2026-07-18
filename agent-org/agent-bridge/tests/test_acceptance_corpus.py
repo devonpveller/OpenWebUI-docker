@@ -174,3 +174,10 @@ async def test_corpus_red_withdraws_the_merge_gate(db_url, tmp_path):
         assert ev
     finally:
         await db.dispose()
+
+
+# NOTE — §11 producer deliberately NOT wired here. Raising a verifiable concern on the corpus-red
+# path FREEZES the effort, which (a) contradicts the burn-down queued alongside it (a frozen effort
+# cannot dispatch, governance §3.0) and (b) deadlocks the clear-gate: the check can only go green if
+# work runs, and work cannot run while frozen. §11's enforcement half is live; its producer needs a
+# home where freezing is already correct (a genuine give-up point), which is a separate increment.
