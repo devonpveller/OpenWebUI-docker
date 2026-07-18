@@ -143,8 +143,9 @@ model proposes; the environment remembers.
 6. **Fail / empty** → if reproducible in a **cleared context**, record the failure as a
    **constraint**; wipe; retry with the narrowed search. (A hang is *not* a constraint — it is an
    absence, not "this approach is wrong.")
-7. **Drain** → the list is done when a full adversarial sweep yields **zero new tasks.** The
-   honest zero; it does not oscillate, because a concrete executable task is either done or not.
+7. **Drain** → the list is done when a full sweep of the QA lenses **propagates zero new tasks**
+   (§6.5). The honest zero: a *counted quantity*, not a model saying "none" — that phrasing is the
+   bias §6.5 exists to remove. A scope completes when its goal is met AND all lenses are green.
 8. **Escalate** → when guided search plateaus, invoke the frontier oracle (§8).
 
 **The queue is the synthesis substrate.** No model ever holds all the adversarial outcomes (the
@@ -162,6 +163,104 @@ loop terminates rather than wandering.
 
 **Hygiene:** only reproducible, attributable failures become constraints. Noise (a flaky test, a
 hang) corrupts the search and must never be recorded as a constraint.
+
+---
+
+## 6.5 Prompt determinism — reasoning vs structural propagation
+
+**The principle (operator, 2026-07-18).** The model will reason regardless. The question is *what it
+reasons toward*. **If it reasons toward an answer, the answer is biased toward completion** — the
+model is hungry to finish the task it was given, and "yes, it's done" is the cheapest way to finish.
+If the prompt states an **objective** instead, the reasoning goes into *how to satisfy that
+objective*, because the objective becomes the target. **So prompts must avoid asking for a verdict
+and target determinism instead.**
+
+This is a first-class defect class, not a style preference. Evidence from our own system: the QA
+prompt contained
+
+```
+DEFECTS: … Say `none` ONLY if adversarial testing genuinely surfaced zero.
+FOLLOWUPS: … Say `none` if none.
+```
+
+and in gym-008 the functional lens took exactly that affordance — *"No defects or follow-ups
+surfaced"* — on a codebase where a differently-framed lens found real defects (`SystemExit` in the
+data layer, unhandled `IsADirectoryError`, REPL greedy token-stripping) and an operator review of a
+comparable product found 5 bugs + 3 gaps. **Same code, two prompts, opposite answers.** A prompt that
+sanctions "nothing" will be told "nothing."
+
+### The rules
+
+1. **Never offer a "nothing" affordance.** No "say none if none."
+2. **Never ask for a verdict where an observation will do.** Not *"is this goal accomplished?"* but
+   *"find the gaps in the solution for the problem this codebase is attempting to solve."*
+3. **Keep the GOAL OUT of the observation prompt.** This is the structural fix and it is the
+   counter-intuitive one: an observation prompt that contains the goal invites the model to reason
+   *toward* that goal and declare it met. Observe first, compare second.
+4. **State the task plainly and thoroughly.** The prompt must *be* the work.
+5. **Terminate on a counted quantity, never on a model's opinion** — see propagation below.
+
+### The two-step alignment (why the goal is withheld)
+
+> *Alignment begins with objectivity and ends in reasoning.*
+
+```
+STEP 1 — OBSERVE (no goal present):  codebase → objective report of what literally exists
+STEP 2 — COMPARE (goal present):     report vs THIS SCOPE'S goal → GAPS
+                                     gaps = misalignment = work = TASKS
+```
+
+Step 1 is arbitrary and reusable — the same prompt works on any codebase. Step 2 is the reasoning
+effort, and **with the scope as its constraint it is obtainable by a small model** (which is exactly
+why scopes are bounded, §4). Gap generation is where tasks are *discovered organically* rather than
+invented.
+
+### The three standing QA lenses (operator's, verbatim — these are the reference)
+
+**1. Goal alignment** — *objective observation, then reasoned gap analysis*
+> "test the codebase thoroughly treating as a final product, checking each function, find gaps in the
+> solution for the problem the codebase is attempting to solve and write a short report. Do not edit
+> files in this codebase, this is just evaluative."
+
+Note: **no goal in the prompt.** The resulting report is compared against the scope's goal to produce
+gaps.
+
+**2. Clean code** — *objective task generation*
+> "evaluate the codebase code cleanliness, is the code practicing SOLID, industry standard
+> programming patterns, clear naming conventions and does the code support good documentation? How
+> does or doesn't this codebase support documentation for its code?"
+
+*Why:* most defects distil to bad organisation or an architecture that is hard to work with. Cleaner
+code takes longer to write but **reduces plan token counts**, because changes become less complicated
+to implement. Proactive, and measurable against known standards — hence *objective*.
+
+**3. Project documentation** — *reasoning task generation*
+> "evaluate the comments in the git repo through its history here. Are the titles and descriptions
+> clear with intent focused and enough to grasp an evolving projects history? how does is the
+> information helpful and how could the information be better written for you to be able to pick up
+> the project where it left off?"
+
+*Why:* a well-documented project reduces the time a worker spends getting acclimated, and reduces plan
+token generation. Deliberately a *reasoning* lens (what would a future reader need?) as opposed to
+lens 2's objective one.
+
+### Termination by propagation, not by verdict
+
+Each QA lens yields items; each item propagates tasks. Work the tasks, re-run the lenses, count again.
+
+```
+QA lenses → N tasks → work → QA → M tasks → … → a full pass propagates ZERO new tasks
+zero propagation  ⇒  requirements met  ⇒  scope complete (goal met AND QA all green)
+```
+
+The stopping condition is **a counted quantity**, removing the model's opinion from the decision
+entirely — the same discipline as the acceptance corpus (§10) and executable contracts (§11). QA must
+therefore have **sufficient items to check against**; a lens that re-derives its own scope each round
+produces a drifting count (measured live: defects trickled 6 → 5 → "none").
+
+**Corollary on task size:** handing a worker too much produces incomplete work, which resurfaces as QA
+items anyway. Small scopes are not only a context-window concern — they are what makes the propagation
+count meaningful.
 
 ---
 
@@ -289,6 +388,7 @@ Two forks are genuinely undecided and shape what gets built:
 | Security standing adversary (§9) | designed, not built |
 | Faithful escalation (§11) | **BUILT + DEPLOYED** — escalations carry their executable check; a ticket cannot close until that check has passed (abort/override still close; override audited). Respects §3.0: the check runs while ACTIVE, the clear consults the record. |
 | Tiered scope tree (§4) | **BUILT + DEPLOYED (foundation)** — `ScopeNode` tree with depth, bounded per-tier worker brief (own scope + contract; the rest withheld; border named), escalation routes to the adjacent-scope owner. *Still open: wiring nodes into planning/dispatch.* |
+| Prompt determinism + 3 standing lenses (§6.5) | **designed, not built** — the QA prompt still contains the `none` affordance and embeds the goal in the observation step |
 
 **Forks resolved (§12):** the finding→check pipeline was built **executable-from-day-one** (a check
 is a command run against the delivery, not prose) and **operator-in-the-loop** (a governor-issued
