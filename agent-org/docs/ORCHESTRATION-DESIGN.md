@@ -281,10 +281,11 @@ Two forks are genuinely undecided and shape what gets built:
 |---|---|
 | Worker liveness (silence detector, §8) | **BUILT + DEPLOYED + validated** |
 | Finding → durable check pipeline (§10) | **BUILT + DEPLOYED + PROVEN** — gym-007 (PR#15): a recurring operator finding (missing `reopen`), captured once as a durable check, forced the third round's org to ship a *working* reopen the goal never asked for. The recurrence is broken; the human's judgment compounded. Auto-conversion + scale still pending. |
-| Executable goal-posts, CDCL loop, diff-check, drain (§5–6) | designed, not built |
+| CDCL constraint learning + fixed-point drain (§5–6) | **BUILT + DEPLOYED** — failures become durable clauses (infra never learned), injected into every retry; `seen_sigs` set makes the burn-down a real fixed point. *Still open: per-task executable goal-posts, first-class diff-check, adversarial task-drain.* |
 | Frontier / OpenRouter oracle (§7) | designed, not built |
 | Security standing adversary (§9) | designed, not built |
-| Tiered composition + faithful escalation (§4, §11) | designed, not built |
+| Faithful escalation (§11) | **BUILT + DEPLOYED** — escalations carry their executable check; a ticket cannot close until that check has passed (abort/override still close; override audited). Respects §3.0: the check runs while ACTIVE, the clear consults the record. |
+| Tiered scope tree (§4) | **BUILT + DEPLOYED (foundation)** — `ScopeNode` tree with depth, bounded per-tier worker brief (own scope + contract; the rest withheld; border named), escalation routes to the adjacent-scope owner. *Still open: wiring nodes into planning/dispatch.* |
 
 **Forks resolved (§12):** the finding→check pipeline was built **executable-from-day-one** (a check
 is a command run against the delivery, not prose) and **operator-in-the-loop** (a governor-issued
