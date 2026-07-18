@@ -305,3 +305,20 @@ async def test_watchdog_recovers_a_post_publish_stall(db_url):
         assert await orch._event_count("effort-pub", "stall_recovered") == 1
     finally:
         await db.dispose()
+
+
+async def test_an_effort_stranded_after_an_abandoned_turn_is_recovered(db_url):
+    """LIVE GAP (gym-008, 2026-07-18): a worker turn that ends `abandoned` leaves `wake_done` as the
+    effort's last event. `wake_done` was NOT in the mid-dispatch kinds, so the watchdog's kind-gate
+    skipped it — the effort sat open+active with an idle worker and idle GPU for 31 min and would
+    have stranded forever. An OPEN effort that has been silent past the threshold after a completed
+    turn IS a stall: nothing followed the turn. (Safe by construction: the sweep only sees OPEN
+    efforts, and human-gated / parked / actively-delegating ones are skipped earlier — so this can
+    never bypass a human gate the way adding `plan_drafted` once did.)"""
+    orch, chat, db = await _orch(db_url)
+    try:
+        await _seed(orch, "effort-stranded", last_kind="wake_done", age_min=31)
+        await orch._sweep_stalled_efforts()
+        assert await orch._event_count("effort-stranded", "stall_recovered") == 1
+    finally:
+        await db.dispose()

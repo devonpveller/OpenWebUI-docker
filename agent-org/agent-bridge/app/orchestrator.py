@@ -1026,6 +1026,15 @@ class Orchestrator:
         # `approve <effort>`, and auto-re-engaging it would bypass a human governance gate (§4.5).
         # A quiet plan gate is the system working, not a stall.
         "dry_run_started", "dry_run_recorded", "dry_run_auto_isolated", "worker_plan_approved",
+        # LIVE GAP (gym-008, 2026-07-18): a worker turn that ends `abandoned` — or whose
+        # post-turn handling dies — leaves `wake_done` as the effort's last event. Without it
+        # here the kind-gate skipped the effort: it sat open+active, worker idle, GPU idle for
+        # 31 min, and would have stranded FOREVER, silently. An OPEN effort still silent past
+        # the threshold after a COMPLETED turn is a stall — nothing followed the turn.
+        # Safe: the sweep only sees OPEN efforts, and human-gated / parked / actively-
+        # delegating ones are skipped earlier, so unlike the `plan_drafted` mistake of
+        # 2026-07-16 this can never bypass a human gate.
+        "wake_done",
     })
 
     async def _worker_urls(self) -> list[dict]:
