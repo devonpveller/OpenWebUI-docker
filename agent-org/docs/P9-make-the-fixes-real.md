@@ -609,6 +609,19 @@ resolved fork; auto is a future add-on), and scale (one check, one round — the
 Also live-incident this round: register #26 (a test-scope monitor false-positive froze the healthy
 effort mid-build; investigated → additive tests → cleared).
 
+**The operator's PR#15 review is an accidental CONTROL GROUP — a stronger form of the proof.** Only
+`reopen` was seeded. In the SAME round / same worker, the operator's evaluation found: the corpus
+target (**reopen**) *fixed* (`cmd_reopen() OK`, confirmed working on done+active), while every
+recurring finding NOT in the corpus **recurred a third time** — no `--sort` (PR#11→#14→#15), overdue
+not flagged, REPL `--`/flag-text mangling, Unicode-crash-on-Windows. The corpus check is the only
+variable that broke the recurrence for its target; everything uncaptured stayed broken. This isolates
+the mechanism with a built-in control and demonstrates the economics: **the corpus converts operator
+review from O(n)-per-round into O(1)-per-defect-class** — a finding captured once never returns; the
+recurrence set shrinks monotonically as findings become checks. (The org already converges perfectly
+on hard-signal defects — the `--due-before` crash class is gone, data layer robust; the corpus gives
+soft-signal findings that same hard signal.) **Next: seed the remaining recurring findings and show
+the recurrence set collapse — the scale proof.**
+
 ### (superseded) arm B first-look — INCONCLUSIVE, re-running
 
 **Failed to deliver.** `effort-gym-005b-todo-product` → **no PR**, `effort_undelivered
