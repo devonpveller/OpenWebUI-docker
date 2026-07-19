@@ -167,6 +167,39 @@ class Settings(BaseSettings):
     # delivery, hence no gates to assert. Default off (house rule); the DEPLOYED bridge / the gym
     # turn it on via AO_CLOSURE_INVARIANT.
     closure_invariant: bool = False
+    # ── P10 THE DRAIN LOOP (ORCHESTRATION-DESIGN §4, §5, §6.5) ───────────────
+    # The org RAN OUT OF WORK BEFORE THE PROJECT WAS DONE: it QA'd once or twice, hit the `n >= 2`
+    # auto-iterate cap, and stopped — with no task queue and no notion of "next item", so "nothing
+    # left to do" was an *accident of an empty model reply* rather than a computed fact (gym-007/008:
+    # defects trickled 6 → 5 → none while an operator review of a comparable product found 5 bugs +
+    # 3 gaps). When on, post-delivery evaluation becomes a DRAIN LOOP: three objective standing
+    # lenses observe what exists → gap analysis compares that to THIS SCOPE's goal → gaps become
+    # plainly-stated tasks in a content-addressed queue → the tasks are worked → repeat. A scope is
+    # complete when a full sweep propagates ZERO NEW tasks — a COUNTED quantity, never a model's
+    # opinion. Requires qa_gate != off (the drain replaces that evaluation). Default off so the
+    # wake-counting unit harness is unchanged; the DEPLOYED bridge / the gym turn it on.
+    drain_loop: bool = False
+    # RUNAWAY GUARD ONLY — not the termination condition. Termination is zero propagation; this
+    # only bounds a loop that propagates new work every single round (generous, like burndown).
+    drain_round_cap: int = 40
+    # PLAN/IMPLEMENT SPLIT (P10.5): a worker asked to plan work it JUST PERFORMED has context bias
+    # by construction — gym-008's `_auto_iterate` re-sent the entire original goal to the worker
+    # that had just satisfied it, which returned an EMPTY plan and stranded the effort. When on, a
+    # planner turn converts the open tasks into a plan and a FRESH implementer session executes it,
+    # never having defended the prior output. Safe only because the CDCL clause set (§5–6) carries
+    # the learning across that rotation.
+    drain_plan_split: bool = False
+    # TIER WALK (P10.6): scopes nest, complete bottom-up, and a parent's sweep that finds a SEAM
+    # defect writes the task into the OWNING CHILD and flips it back to open — "complete" is a
+    # current state, not a terminal one. Off leaves the drain flat (effort-scoped, no tree).
+    drain_tier_walk: bool = False
+    # A round that propagates at least this many tasks is evidence the scope spans several concerns
+    # — split it, using the tasks themselves as the description of what those concerns are.
+    # Decomposition is therefore DERIVED FROM OBSERVED WORK, not guessed at intake.
+    drain_decompose_threshold: int = 5
+    # Depth is a reliability tax even when tokens are free: loss compounds per hop (§4). Tier only
+    # as deep as the scope genuinely nests.
+    drain_max_tier_depth: int = 2
     # Autonomous burn-down round cap (operator 2026-07-07: "all 138 errors should have been worked
     # through autonomously and not elevated in the first place"). This is a RUNAWAY GUARD, not a
     # check-in: a STILL-PROGRESSING campaign should run to green, not elevate mid-progress — so the cap

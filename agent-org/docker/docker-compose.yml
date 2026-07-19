@@ -183,6 +183,25 @@ services:
       # the effort's own audit to show the PR/QA/develop gates actually ran; a missing gate holds
       # the effort open with an honest "I could not deliver" instead of a hollow done.
       AO_CLOSURE_INVARIANT: ${AO_CLOSURE_INVARIANT:-1}  # 1 | 0 — no "done" without audit proof
+      # ── P10 THE DRAIN LOOP (2026-07-18) ──────────────────────────────────────
+      # The org RAN OUT OF WORK BEFORE THE PROJECT WAS DONE: QA once or twice, hit `_auto_iterate`'s
+      # hard `n >= 2` cap, stop. No task queue, no "next item", and "nothing left to do" was an
+      # accident of an empty model reply (gym-007/008: defects trickled 6 → 5 → none while an
+      # operator review of a comparable product found 5 bugs + 3 gaps). ON replaces the graded QA
+      # pass with a COUNTED round: three objective lenses observe (the goal-alignment lens is not
+      # told the goal — that's the debias) → gaps are derived against THIS SCOPE's goal → gaps
+      # become plainly-stated tasks in a content-addressed queue → a fresh implementer works them.
+      # A scope is complete when a full sweep propagates ZERO NEW TASKS. Requires AO_QA_GATE != off.
+      AO_DRAIN_LOOP: ${AO_DRAIN_LOOP:-1}                # 1 | 0 — counted termination, not a cap
+      # RUNAWAY GUARD ONLY — termination is zero propagation, never this number.
+      AO_DRAIN_ROUND_CAP: ${AO_DRAIN_ROUND_CAP:-40}
+      # A worker asked to plan work it just performed has context bias by construction — gym-008
+      # returned an EMPTY plan and the effort stranded. Planner and implementer are separate agents
+      # in separate sessions; the CDCL clause set carries the learning across the rotation.
+      AO_DRAIN_PLAN_SPLIT: ${AO_DRAIN_PLAN_SPLIT:-1}    # 1 | 0 — plan/implement split
+      # Scopes nest and complete bottom-up; a parent's sweep that finds a SEAM defect writes the
+      # task into the owning CHILD and reopens it — "complete" is a current state, not terminal.
+      AO_DRAIN_TIER_WALK: ${AO_DRAIN_TIER_WALK:-1}      # 1 | 0 — the §4 tier walk
       # Conversation context (the PO's memory): thread = immediate, channel = relevant background,
       # char-budgeted so it never overwhelms the model window. Raise for a larger-context model.
       AO_CONTEXT_THREAD_CHARS: ${AO_CONTEXT_THREAD_CHARS:-2500}

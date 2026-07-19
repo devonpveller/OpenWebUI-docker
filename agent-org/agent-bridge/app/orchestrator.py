@@ -78,7 +78,8 @@ from sqlalchemy import func, select
 
 from .models import (
     Concern as ConcernRow,
-    Effort, EffortConstraint, Event, GlobalState, Project, ScopeNode, WorkerInstance,
+    Effort, EffortConstraint, Event, GlobalState, LensReport, Project, ScopeNode, ScopeTask,
+    WorkerInstance,
 )
 from .modules.pending_store import PendingStore
 from .schemas import (
@@ -331,6 +332,108 @@ def _qa_items(block: str) -> list[str]:
         if ln and not re.fullmatch(r"none\.?", ln, re.I):
             items.append(ln[:200])
     return items[:12]
+
+# ── P10.1 THE THREE STANDING LENSES (ORCHESTRATION-DESIGN §6.5) ──────────────────────────────
+# The operator's own PR-review prompts, VERBATIM — proven by hand on the gym deliveries the org
+# had already declared clean. They replace the single graded QA instruction, which was producing
+# FALSE GREENS: it literally said "Say `none` ONLY if…", and gym-008's functional lens duly
+# returned "no defects" on a codebase where the code-review lens found real ones and an operator
+# review of a comparable product found 5 bugs + 3 gaps. A prompt that sanctions "nothing" gets
+# told "nothing".
+#
+# Two structural rules make these lenses OBJECTIVE, and both are acceptance criteria:
+#
+#   1. NO "NOTHING" AFFORDANCE and NO VERDICT FRAMING. No "say none if none", no "grade to a bar".
+#      A lens OBSERVES and REPORTS; it never adjudicates. Whether the scope is done is decided by
+#      COUNTING what the sweep propagates (P10.4), never by asking a model for a verdict.
+#   2. THE GOAL IS WITHHELD from `goal_alignment`. This is the debias, not an oversight: a goal in
+#      an observation prompt invites the model to reason *toward* it and declare it met. The report
+#      is compared to the goal in P10.2 — a separate step, after the observation is already fixed.
+#
+# All three run FRESH every round and are never fed a previous report (see `LensReport`).
+_LENS_GOAL_ALIGNMENT = (
+    "test the codebase thoroughly treating as a final product, checking each function, find gaps "
+    "in the solution for the problem the codebase is attempting to solve and write a short report. "
+    "Do not edit files in this codebase, this is just evaluative."
+)
+_LENS_CLEAN_CODE = (
+    "evaluate the codebase code cleanliness, is the code practicing SOLID, industry standard "
+    "programming patterns, clear naming conventions and does the code support good documentation? "
+    "How does or doesn't this codebase support documentation for its code?"
+)
+_LENS_PROJECT_DOCUMENTATION = (
+    "evaluate the comments in the git repo through its history here. Are the titles and "
+    "descriptions clear with intent focused and enough to grasp an evolving projects history? how "
+    "does is the information helpful and how could the information be better written for you to be "
+    "able to pick up the project where it left off?"
+)
+# Order is the sweep order; `goal_alignment` runs first because P10.2 consumes its report.
+_LENSES: tuple[tuple[str, str], ...] = (
+    ("goal_alignment", _LENS_GOAL_ALIGNMENT),
+    ("clean_code", _LENS_CLEAN_CODE),
+    ("project_documentation", _LENS_PROJECT_DOCUMENTATION),
+)
+
+
+# An explicit "nothing to do" in any of the shapes a small model actually writes it. This is the
+# COUNTABLE ZERO the whole termination rule rests on, so it must not be defeated by punctuation or
+# a trailing word ("none.", "None found", "- none").
+# Structural words that appear in almost every scope title and so carry no ownership information.
+_SCOPE_STOPWORDS = frozenset({
+    "layer", "module", "component", "system", "service", "part", "area", "code", "scope",
+    "feature", "support", "handling", "logic", "core", "main", "base", "misc",
+})
+_NOTHING_RE = re.compile(r"\s*(?:none|nothing|n/a)\b[\s.!]*(?:found|identified|required|needed)?[\s.!]*",
+                         re.I)
+# Prose that ASSERTS there is no work, rather than naming work. Such a line must never become a
+# task: a task is content-addressed, so re-worded commentary would count as NEW every round and the
+# propagation count could never reach zero.
+_NO_WORK_RE = re.compile(
+    r"\b(?:no|zero)\s+(?:\w+\s+){0,2}(?:issues?|problems?|defects?|gaps?|shortcomings?|changes?|"
+    r"gap|work|gaps? (?:were|was) (?:found|identified))\b"
+    r"|\b(?:nothing|no work)\s+(?:to\s+(?:do|change|fix)|(?:is\s+)?(?:required|needed|outstanding))\b"
+    r"|\b(?:looks?|reads?|is)\s+(?:fine|clean|good|complete|solid)\b",
+    re.I)
+
+
+def _plain_tasks(text: str, *, limit: int = 12) -> list[str]:
+    """Split a model's task list into PLAINLY-STATED task bodies.
+
+    Rationale is stripped, not preserved: a task handed to a small model must be a legitimate,
+    relevant, plainly stated unit of work, because a small model reasons worse than a frontier one
+    and a "why" chain is an invitation to re-litigate the task instead of doing it. The reasoning
+    that produced the task survives in the `LensReport` audit trail. An explicit "none" yields [],
+    which is the honest zero the propagation count needs."""
+    text = (text or "").strip()
+    if not text or _NOTHING_RE.fullmatch(text):
+        return []
+    out: list[str] = []
+    for ln in text.splitlines():
+        # Strip a list marker — but ONLY a real one. A bare `[\d.)]+` prefix class eats the leading
+        # digits of real text ("2FA login support" → "FA login support"), so a numbered marker must
+        # be followed by its punctuation and a space.
+        ln = re.sub(r"^\s*(?:[-*•]+\s*|\d+[.)]\s+)", "", ln.strip()).strip()
+        if not ln or _NOTHING_RE.fullmatch(ln):
+            continue
+        # A model asked for a list still emits headers and commentary. Left unfiltered, a line like
+        # "The codebase is fine, no issues were found." becomes a content-addressed TASK that is
+        # NEW every time the wording drifts — which would block the propagation count from ever
+        # reaching zero, i.e. break termination itself. Drop headers, and drop prose that ASSERTS
+        # there is nothing to do rather than naming work.
+        if ln.endswith(":") and len(ln.split()) <= 4:
+            continue
+        if _NO_WORK_RE.search(ln):
+            continue
+        # Drop a trailing rationale clause — the task is the WORK, not the argument for it.
+        # Deliberately does NOT include "since": it is far more often temporal than causal in a
+        # task body ("list todos since a given date"), and truncating a real task is a worse
+        # failure than leaving one rationale clause attached.
+        ln = re.split(r"\s+(?:because|so that|in order to|as this|which is why)\b", ln,
+                      maxsplit=1, flags=re.I)[0].strip(" .;,–—-")
+        if ln:
+            out.append(ln[:300])
+    return out[:limit]
+
 
 # NOTE (operator 2026-07-14, after two live false-positive generations): "the plan inclusion
 # needs REASONING, not determinism." A plan is PROSE about intent — a bare substring match
@@ -1124,6 +1227,247 @@ class Orchestrator:
             f"do NOT work around it: report it as `ESCALATE: <what you need and why>` and stop. "
             f"Someone owns the adjacent scope and will decide it.")
 
+    # ── P10.6 THE TIER WALK — what makes the §4 tree LIVE ─────────────────────
+    # Until now `ScopeNode` and its helpers existed with NO CALLER. The tree is what stops the loop
+    # running out of work before the project is done: a scope completes when its own queue drains
+    # and its sweep is silent, then its PARENT re-evaluates, and so on up to the project. Crucially
+    # "complete" is a CURRENT STATE, not a terminal one — a neighbour's later sweep can reopen a
+    # finished scope, which is the integration/seam check.
+    async def _ensure_scope_node(self, effort_id: str) -> str | None:
+        """The scope node this effort is working, creating the project's ROOT tier on first use.
+
+        An effort that arrived before the tree existed still needs somewhere to hang its tasks, so
+        the root is derived from the effort's own goal rather than demanding an up-front
+        decomposition. Returns None when the effort has no project (nothing to scope)."""
+        proj = await self._effort_project(effort_id)
+        if not proj:
+            return None
+        try:
+            async with self.db.session_factory() as s:
+                row = (await s.execute(
+                    select(ScopeNode).where(ScopeNode.effort_id == effort_id)
+                    .order_by(ScopeNode.depth.desc()))).scalars().first()
+                if row is not None:
+                    return row.id
+        except Exception as exc:  # noqa: BLE001
+            log.debug("scope node lookup failed for %s: %s", effort_id, exc)
+            return None
+        try:
+            _, goal, _ = await self.charters.current_goal(effort_id)
+        except Exception:  # noqa: BLE001
+            goal = ""
+        # The root is PER EFFORT, not per project. `add_scope_node` content-addresses on
+        # `(project, parent, title)`, so a title of just the project slug would hand every effort
+        # on that project the SAME node — the newest effort would steal `effort_id` while the
+        # node's `scope` stayed the first effort's goal, and gap analysis would then score effort B
+        # against effort A's goal. The effort id in the title keeps the roots distinct; a genuine
+        # shared tree is built by `decompose_scope` under a deliberate parent.
+        nid = await self.add_scope_node(proj, f"{proj} · {effort_id}",
+                                        (goal or f"the {proj} project").strip())
+        if nid:
+            await self._attach_effort_to_scope(nid, effort_id)
+        return nid
+
+    async def _attach_effort_to_scope(self, node_id: str, effort_id: str) -> None:
+        try:
+            async with self.db.session_factory() as s:
+                n = await s.get(ScopeNode, node_id)
+                if n is not None and n.effort_id != effort_id:
+                    n.effort_id = effort_id
+                    await s.commit()
+        except Exception as exc:  # noqa: BLE001
+            log.debug("scope attach failed for %s: %s", node_id, exc)
+
+    async def _scope_children(self, node_id: str) -> list[dict]:
+        try:
+            async with self.db.session_factory() as s:
+                rows = (await s.execute(
+                    select(ScopeNode).where(ScopeNode.parent_id == node_id)
+                    .order_by(ScopeNode.created_at))).scalars().all()
+            return [{"id": r.id, "title": r.title, "scope": r.scope, "status": r.status,
+                     "effort_id": r.effort_id, "depth": r.depth} for r in rows]
+        except Exception as exc:  # noqa: BLE001
+            log.debug("scope children read failed for %s: %s", node_id, exc)
+            return []
+
+    async def decompose_scope(self, node_id: str, parts: list[tuple[str, str]]) -> list[str]:
+        """Split one tier into child tiers — the top-down decomposition of §4. Each part is
+        `(title, scope)`; the child inherits nothing but its border, because what a worker at a
+        tier may hold is exactly what keeps a small model inside a scope it can actually reason
+        about. Returns the created node ids."""
+        n = await self._scope_node(node_id)
+        if not n:
+            return []
+        out: list[str] = []
+        for title, scope in parts:
+            cid = await self.add_scope_node(n["project_slug"], title, scope, parent_id=node_id)
+            if cid:
+                out.append(cid)
+        if out:
+            await self.audit.log("scope_decomposed",
+                                 payload={"parent": node_id, "children": len(out)})
+        return out
+
+    async def _maybe_decompose(self, node_id: str, tasks: list[str], *,
+                               effort_id: str | None = None) -> list[str]:
+        """SPLIT A TIER THAT HAS OUTGROWN ITSELF — the production caller that makes the tree live.
+
+        Decomposition is driven by evidence rather than guessed up front: when one round propagates
+        more work than a single bounded scope should hold, that IS the signal the scope spans
+        several concerns, and the tasks themselves describe what those concerns are. Splitting then
+        (rather than at intake) means the tree is derived from observed work instead of a model's
+        speculation about a codebase it has not read.
+
+        No-ops when the node already has children, when the tier is deep enough (depth is a
+        reliability tax — loss compounds per hop, §4), or when the round's work fits one scope.
+        Returns the created child ids."""
+        n = await self._scope_node(node_id)
+        if not n or n["depth"] >= self.s.drain_max_tier_depth:
+            return []
+        if len(tasks) < max(2, self.s.drain_decompose_threshold):
+            return []
+        if await self._scope_children(node_id):
+            return []
+        sys_p = (
+            "You group a list of tasks into the parts of a project they belong to.\n"
+            "- Output one group per line, as `title :: what this part covers`.\n"
+            "- Between 2 and 5 groups. Every task must fit exactly one group.\n"
+            "- Titles are concrete parts of THIS project (e.g. `storage`, `argument parsing`), "
+            "not generic words like `layer`, `module` or `core`.\n"
+            "- No preamble, no numbering, no explanation."
+        )
+        listed = "\n".join(f"- {t}" for t in tasks[:20])
+        try:
+            out = await self.models.complete(
+                "pm", sys_p, f"PROJECT SCOPE:\n{n['scope'][:1500]}\n\nTASKS:\n{listed}")
+        except Exception as exc:  # noqa: BLE001 — a flat tree is a valid tree; never block a round
+            log.debug("scope decomposition failed for %s: %s", node_id, exc)
+            return []
+        parts: list[tuple[str, str]] = []
+        for ln in (out or "").splitlines():
+            ln = re.sub(r"^\s*(?:[-*•]+\s*|\d+[.)]\s+)", "", ln.strip()).strip()
+            if "::" not in ln:
+                continue
+            title, _, scope = ln.partition("::")
+            title, scope = title.strip()[:200], scope.strip()
+            if title and scope and title.lower() not in _SCOPE_STOPWORDS:
+                parts.append((title, scope))
+        if len(parts) < 2:
+            return []
+        kids = await self.decompose_scope(node_id, parts[:5])
+        if kids:
+            await self.audit.log("scope_decomposed_live", effort_id=effort_id,
+                                 payload={"parent": node_id, "children": len(kids),
+                                          "from_tasks": len(tasks)})
+        return kids
+
+    async def _seam_owner(self, node_id: str | None, task_body: str) -> str | None:
+        """Which CHILD scope owns this finding, if any — the seam router.
+
+        A sweep at a parent tier sees the whole assembled product, so it surfaces defects that live
+        inside a child's territory. Those must be written into the CHILD (and reopen it), not fixed
+        by the parent: a parent reaching into its children's insides is exactly the encapsulation
+        break the tree exists to prevent. Matched on the child's title tokens appearing in the
+        finding — deliberately conservative, because mis-routing work is worse than leaving it with
+        the parent, which is a legitimate owner of a genuine seam."""
+        if not node_id:
+            return None
+        kids = await self._scope_children(node_id)
+        if not kids:
+            return None
+        body = (task_body or "").lower()
+        matches: list[str] = []
+        for k in kids:
+            # Generic structural words ("layer", "module", "component") carry no ownership
+            # information — a child titled "cli layer" reducing to ["layer"] would claim every task
+            # mentioning any layer. Require the DISTINCTIVE tokens, matched on word boundaries so
+            # "port" cannot match "reporting".
+            toks = [t for t in re.split(r"[^a-z0-9]+", (k["title"] or "").lower())
+                    if len(t) >= 4 and t not in _SCOPE_STOPWORDS]
+            if toks and all(re.search(rf"\b{re.escape(t)}\b", body) for t in toks):
+                matches.append(k["id"])
+        # AMBIGUITY STAYS WITH THE PARENT. Two children both claiming a finding means we cannot
+        # tell who owns it, and mis-routing work is worse than leaving it with the parent — which
+        # is a legitimate owner of a genuine seam.
+        return matches[0] if len(matches) == 1 else None
+
+    async def _reopen_scope(self, node_id: str, *, reason: str = "",
+                            effort_id: str | None = None) -> bool:
+        """Flip a scope back to `open` because a neighbour's sweep found a defect it owns. This is
+        why completion is a CURRENT STATE: a scope that drained honestly can still be reopened by
+        work it could not see from the inside."""
+        try:
+            async with self.db.session_factory() as s:
+                n = await s.get(ScopeNode, node_id)
+                if n is None or n.status == "open":
+                    return False
+                n.status = "open"
+                await s.commit()
+        except Exception as exc:  # noqa: BLE001
+            log.debug("scope reopen failed for %s: %s", node_id, exc)
+            return False
+        await self.audit.log("scope_reopened", effort_id=effort_id,
+                             payload={"scope": node_id, "reason": (reason or "")[:200]})
+        return True
+
+    async def _complete_scope(self, node_id: str, effort_id: str | None = None) -> dict | None:
+        """Mark a scope complete and BUBBLE UP: the parent is flagged for re-evaluation, because a
+        child finishing changes what the parent's own sweep will see (its seams are now real). A
+        parent whose children are ALL done and whose queue is empty is itself a completion
+        candidate — that recursion is what walks the tree up to the project. Returns the parent
+        node marked for re-evaluation, or None at the root (where a human governs)."""
+        n = await self._scope_node(node_id)
+        if not n:
+            return None
+        if await self.list_open_tasks(scope_node_id=node_id):
+            return None    # the queue must DRAIN too — a silent sweep alone is not completion
+        # NOR MAY A PARENT COMPLETE OVER AN UNFINISHED CHILD. A tier whose findings all seam-routed
+        # down has an empty queue of its own while the work it discovered is still outstanding
+        # below it — completing on that would report the whole subtree done on the strength of the
+        # parent having handed its work away.
+        #
+        # But a child this effort's own decomposition created has NO owner of its own: nobody will
+        # ever call `_complete_scope` on it, so a strict "all children done" rule would deadlock
+        # the parent until the runaway cap. An UNOWNED child whose queue has drained, under a
+        # parent whose sweep is silent, is complete by exactly the same rule that is completing the
+        # parent — so close it here rather than let it block forever.
+        for kid in await self._scope_children(node_id):
+            if kid["status"] == "done":
+                continue
+            if kid["effort_id"] and kid["effort_id"] != effort_id:
+                return None      # a real other owner — not ours to declare finished
+            if await self.list_open_tasks(scope_node_id=kid["id"]):
+                return None      # its queue still holds work
+            await self._complete_scope(kid["id"], effort_id)
+        if any(k["status"] != "done" for k in await self._scope_children(node_id)):
+            return None
+        try:
+            async with self.db.session_factory() as s:
+                row = await s.get(ScopeNode, node_id)
+                if row is not None and row.status != "done":
+                    row.status = "done"
+                    await s.commit()
+        except Exception as exc:  # noqa: BLE001
+            log.debug("scope complete failed for %s: %s", node_id, exc)
+            return None
+        await self.audit.log("scope_completed", effort_id=effort_id,
+                             payload={"scope": node_id, "title": n["title"], "depth": n["depth"]})
+        parent = await self._escalation_target(node_id)
+        if parent is None:
+            return None
+        siblings = await self._scope_children(parent["id"])
+        pending = [k for k in siblings if k["status"] != "done"]
+        await self.audit.log("scope_reevaluate", effort_id=effort_id,
+                             payload={"scope": parent["id"], "child_done": node_id,
+                                      "children_pending": len(pending)})
+        # BUBBLE UP, RECURSIVELY. "child complete → parent complete → … → project" (§4) is a WALK,
+        # not a single hop: a parent whose children are ALL done and whose own queue is empty is
+        # itself complete, and its completion re-evaluates ITS parent. Without the recursion the
+        # tree only ever completes one tier and the project is never reached.
+        if not pending:
+            await self._complete_scope(parent["id"], effort_id)
+        return parent
+
     async def _escalation_target(self, node_id: str) -> dict | None:
         """Route an escalation UP: the tier that owns the ADJACENT scope (the parent) is the only
         place with the standing to decide a cross-scope issue — a worker inside a bounded scope
@@ -1132,6 +1476,164 @@ class Orchestrator:
         if not n or not n.get("parent_id"):
             return None
         return await self._scope_node(n["parent_id"])
+
+    # ── P10.3 THE SCOPED TASK QUEUE — the substrate the drain drains ──────────
+    async def add_task(self, body: str, *, project_slug: str, scope_node_id: str | None = None,
+                       effort_id: str | None = None, source_lens: str = "goal_alignment",
+                       round_no: int = 1) -> tuple[str, bool] | None:
+        """Queue one plainly-stated task for a scope. Returns `(task_id, is_new)`, or None if the
+        body was empty. IDEMPOTENT by content address on `(scope_node_id, body)`: the same gap
+        re-derived by next round's independent sweep collapses onto the existing row and reports
+        `is_new=False`.
+
+        That flag is the whole ballgame. Termination is "a full lens sweep propagated ZERO NEW
+        tasks" — if a re-derived gap counted as new, every round would re-propagate its
+        predecessors' findings and the count could never reach zero, so the loop would run to the
+        runaway cap on a finished project. Mirrors `AcceptanceCheck` / `EffortConstraint`, which
+        content-address for the same reason."""
+        body = " ".join((body or "").split()).strip()
+        if not body:
+            return None
+        # Content address. The OWNER is the scope node when there is one; without a tree, two
+        # concurrent efforts on one project that derive the same body would otherwise collide —
+        # the second would see `is_new=False` on a row carrying the FIRST effort's `effort_id`,
+        # making it invisible to both `list_open_tasks(effort_id=…)` and `count_new_tasks`, and the
+        # second effort would complete on a phantom zero. Falling back to the effort (not the
+        # project) keeps idempotency per owner while keeping efforts genuinely separate.
+        owner = scope_node_id or effort_id or project_slug or "unscoped"
+        tid = "st-" + hashlib.sha1(f"{owner}|{body}".encode()).hexdigest()[:12]
+        try:
+            async with self.db.session_factory() as s:
+                existing = await s.get(ScopeTask, tid)
+                if existing is None:
+                    s.add(ScopeTask(id=tid, project_slug=project_slug, scope_node_id=scope_node_id,
+                                    effort_id=effort_id, body=body[:2000], source_lens=source_lens,
+                                    round_no=round_no))
+                    await s.commit()
+                    is_new = True
+                else:
+                    is_new = False
+                    # A CLOSED task re-derived by a later independent sweep is still-outstanding
+                    # work: reopen it so the queue stays true. It is emphatically NOT new
+                    # information, so it keeps its original `round_no` and does not count toward
+                    # propagation — otherwise a task the implementer keeps failing would
+                    # re-propagate forever and the loop could never terminate.
+                    if existing.status == "done":
+                        existing.status = "open"
+                        existing.closed_at = None
+                        await s.commit()
+        except Exception as exc:  # noqa: BLE001 — the queue must never block a delivery path
+            log.debug("scope task add failed for %s: %s", project_slug, exc)
+            return None
+        if is_new:
+            await self.audit.log("scope_task_added", effort_id=effort_id,
+                                 payload={"id": tid, "scope": scope_node_id, "lens": source_lens,
+                                          "round": round_no, "body": body[:200]})
+        return tid, is_new
+
+    async def list_open_tasks(self, *, project_slug: str | None = None,
+                              scope_node_id: str | None = None,
+                              effort_id: str | None = None) -> list[dict]:
+        """This scope's OPEN tasks, oldest first (the order they were discovered)."""
+        try:
+            async with self.db.session_factory() as s:
+                q = select(ScopeTask).where(ScopeTask.status == "open")
+                if scope_node_id is not None:
+                    q = q.where(ScopeTask.scope_node_id == scope_node_id)
+                elif effort_id is not None:
+                    q = q.where(ScopeTask.effort_id == effort_id)
+                elif project_slug is not None:
+                    q = q.where(ScopeTask.project_slug == project_slug)
+                rows = (await s.execute(q.order_by(ScopeTask.created_at))).scalars().all()
+            return [{"id": r.id, "body": r.body, "lens": r.source_lens, "round": r.round_no,
+                     "scope_node_id": r.scope_node_id, "effort_id": r.effort_id} for r in rows]
+        except Exception as exc:  # noqa: BLE001
+            log.debug("scope task list failed: %s", exc)
+            return []
+
+    async def close_task(self, task_id: str, *, status: str = "done") -> bool:
+        """Close one task (`done` — worked; `dropped` — no longer relevant)."""
+        try:
+            async with self.db.session_factory() as s:
+                t = await s.get(ScopeTask, task_id)
+                if t is None or t.status != "open":
+                    return False
+                t.status = status if status in ("done", "dropped") else "done"
+                t.closed_at = _now_iso()
+                await s.commit()
+        except Exception as exc:  # noqa: BLE001
+            log.debug("scope task close failed for %s: %s", task_id, exc)
+            return False
+        return True
+
+    async def count_new_tasks(self, round_no: int, *, scope_node_id: str | None = None,
+                              effort_id: str | None = None) -> int:
+        """How many tasks THIS ROUND propagated — the termination quantity (P10.4).
+
+        Counts rows STAMPED with this round, which by content-addressing can only be tasks nobody
+        had seen before: a re-derived gap kept its original `round_no` and is invisible here. Zero
+        means an independent, un-primed sweep of the whole scope found nothing new to do, which is
+        the only honest definition of "complete" the org has."""
+        try:
+            async with self.db.session_factory() as s:
+                q = select(func.count()).select_from(ScopeTask).where(ScopeTask.round_no == round_no)
+                # Both filters COMBINE when both are given. `round_no` is per-effort (it counts
+                # THIS effort's drain rounds), so a scope filter alone would mix efforts' rounds on
+                # a shared tree and report another effort's round-3 work as this one's.
+                if scope_node_id is not None:
+                    q = q.where(ScopeTask.scope_node_id == scope_node_id)
+                if effort_id is not None:
+                    q = q.where(ScopeTask.effort_id == effort_id)
+                return int((await s.execute(q)).scalar_one())
+        except Exception as exc:  # noqa: BLE001
+            log.debug("new-task count failed: %s", exc)
+            return 0
+
+    async def _dispatchable_tasks(self, effort_id: str, node_id: str | None) -> list[dict]:
+        """The open tasks THIS effort must actually work.
+
+        "A parent never fixes its children's insides" (§4) is about ANOTHER OWNER's scope — it
+        presumes somebody else is going to do that work. An UNOWNED child scope has no such
+        somebody: nothing else is attached to it, and `_ensure_scope_node` always resolves an
+        effort to its own root, so a task filed there can never be picked up by anyone.
+
+        Filtering those out (as a naive "own node only" rule does) creates the worst failure this
+        loop has: the round that decomposes a scope routes every task it just derived into the new
+        children, the parent's list comes back EMPTY, and the effort closes reporting "a full,
+        independent lens sweep found nothing further to do" while all of its work sits unreachable
+        one tier down. So: exclude a descendant's tasks only when that descendant belongs to a
+        DIFFERENT effort — a real other owner, which is the case the encapsulation rule is for."""
+        mine = await self.list_open_tasks(effort_id=effort_id)
+        if not node_id:
+            return mine
+        foreign: set[str] = set()
+        for kid in await self._scope_children(node_id):
+            if kid["effort_id"] and kid["effort_id"] != effort_id:
+                foreign.add(kid["id"])
+            for grandkid in await self._scope_children(kid["id"]):
+                if grandkid["effort_id"] and grandkid["effort_id"] != effort_id:
+                    foreign.add(grandkid["id"])
+        return [t for t in mine if t["scope_node_id"] not in foreign]
+
+    async def _record_lens_report(self, effort_id: str, lens: str, body: str, *, round_no: int,
+                                  scope_node_id: str | None = None) -> str | None:
+        """Persist one lens's report FOR OUR HISTORY ONLY. Never read back into a prompt — see
+        `LensReport`: a sweep that inherits the last sweep's text is not independent, and the
+        propagation count would stop meaning anything."""
+        body = (body or "").strip()
+        if not body:
+            return None
+        rid = "lr-" + hashlib.sha1(f"{effort_id}|{lens}|{round_no}".encode()).hexdigest()[:12]
+        try:
+            async with self.db.session_factory() as s:
+                if await s.get(LensReport, rid) is None:
+                    s.add(LensReport(id=rid, effort_id=effort_id, scope_node_id=scope_node_id,
+                                     lens=lens, round_no=round_no, body=body[:20000]))
+                    await s.commit()
+        except Exception as exc:  # noqa: BLE001 — history is never a dispatch blocker
+            log.debug("lens report persist failed for %s: %s", effort_id, exc)
+            return None
+        return rid
 
     async def _record_constraint(self, effort_id: str, body: str, *, origin: str = "",
                                  kind: str = "failure") -> str | None:
@@ -4414,7 +4916,15 @@ class Orchestrator:
                                         # overflowing session (live 2026-07-14: a 593KB base
                                         # session returned EMPTY on every plan turn) — the retry
                                         # and any operator re-run must start fresh
-                                        "worker_plan_empty", "worker_plan_stopped")),
+                                        "worker_plan_empty", "worker_plan_stopped",
+                                        # P10.5 PLAN/IMPLEMENT SPLIT: every drain round dispatches
+                                        # a FRESH implementer. A worker asked to continue in the
+                                        # session where it just declared the goal met has context
+                                        # bias by construction (gym-008: it planned nothing and the
+                                        # effort stranded). Counting the round here rotates the
+                                        # session, so the implementer differs from the planner AND
+                                        # from the previous round's implementer.
+                                        "drain_round")),
                         Event.effort_id == effort_id)
                 )).scalar_one())
         except Exception as exc:  # noqa: BLE001 — affinity fallback, never a dispatch blocker
@@ -6124,6 +6634,106 @@ class Orchestrator:
         )
         return True
 
+    async def _drain_iterate(self, effort_id: str, open_tasks: list[dict], round_no: int, *,
+                             channel_id: str = "", root: str = "") -> bool:
+        """P10.4 + P10.5 — dispatch one round's work. Returns True when work was queued.
+
+        This REPLACES `_auto_iterate` on the drain path, and deliberately does not inherit either of
+        its two constructions:
+
+        * **No `n >= 2` cap.** The loop continues while the sweep keeps propagating new work and
+          stops when it propagates none. A cap stops for a reason unrelated to whether the work is
+          finished, which is precisely how the org kept declaring unfinished products done.
+        * **No restating of the whole goal.** `_auto_iterate` re-sent the ENTIRE original goal plus
+          one defect to the worker that had just satisfied that goal — asking it to plan work it
+          had just done, against a goal it believed met. gym-008 answered with an EMPTY plan and the
+          effort stranded as `abandoned`. The implementer here is handed a PLAN and a TASK LIST and
+          nothing else.
+
+        The PLAN/IMPLEMENT SPLIT (P10.5): a planner turn (fresh, read-only session) converts the
+        open tasks into an ordered plan; a FRESH implementer session executes it. The implementer
+        never plans its own completed work and is not defending prior output. This is only safe
+        because the CDCL clause set (§5–6) now carries the learning across the rotation — before
+        clauses existed, a fresh session forgot every dead end it had already walked."""
+        if not open_tasks:
+            return False
+        listed = "\n".join(f"- {t['body']}" for t in open_tasks[:20])
+        await self.audit.log("drain_dispatch", effort_id=effort_id,
+                             payload={"round": round_no, "tasks": len(open_tasks)})
+        plan = ""
+        if self.s.drain_plan_split:
+            plan = await self._drain_plan(effort_id, listed)
+        # The implementer's brief: the plan + the tasks, the scope border, and the learned
+        # constraints — NOT the project goal (see the docstring).
+        # THE SCOPE BORDER — but only from a genuine SUB-scope. `_scope_context` exists to withhold
+        # the REST of the tree; at an undecomposed ROOT there is no rest, and the root's scope text
+        # is the effort's own goal — so injecting it here would restate the whole goal to the
+        # implementer, which is precisely the gym-008 construction this split was built to retire.
+        # A root brief is therefore tasks + plan only.
+        scope_ctx = ""
+        node_id = await self._ensure_scope_node(effort_id) if self.s.drain_tier_walk else None
+        if node_id:
+            n = await self._scope_node(node_id)
+            if n and (n.get("depth") or 0) > 0:
+                scope_ctx = await self._scope_context(node_id)
+        goal = (
+            f"Work the following tasks on the existing branch. These are the outstanding items for "
+            f"this scope — implement them, commit, and push.\n\nTASKS:\n{listed}"
+            + (f"\n\nPLAN:\n{plan}" if plan else "")
+            + scope_ctx
+        )
+        # DISPATCH, DON'T STRAND. `_iterate_after` is drained by `delegate`'s finally — but
+        # `_finish_effort` is ALSO reached from `_burndown_loop` and `_run_in_host_context`, where
+        # that finally has already run. Queuing there would leave the effort with no dispatch, no
+        # PR and no closure: silently dead, with its tasks already closed. So mirror
+        # `_queue_burndown`: inside delegate's single-flight, queue for the finally; anywhere else,
+        # launch it directly. (`_auto_iterate` had the same shape but its callers fell through to
+        # a closure — this path RETURNS, which is what makes stranding terminal.)
+        if effort_id in self._delegating or not (channel_id and root):
+            self._iterate_after[effort_id] = goal
+        else:
+            self._spawn(self.delegate(effort_id, channel_id, root, goal))
+        # Close what we just handed over. The EVIDENCE that a task is actually done is the NEXT
+        # sweep's silence, not the implementer's word — and a task that isn't really finished is
+        # re-derived by that independent sweep and reopened (see `add_task`). So closing here
+        # cannot hide unfinished work; it only stops a worked item being re-dispatched forever.
+        for t in open_tasks:
+            await self.close_task(t["id"])
+        await self.comms.post(
+            Intent.worker_activity,
+            f"🔁 **Drain round {round_no}** — {len(open_tasks)} open task(s); dispatching a fresh "
+            f"implementer. No operator action needed.",
+            effort_id=effort_id,
+        )
+        return True
+
+    async def _drain_plan(self, effort_id: str, listed_tasks: str) -> str:
+        """The PLANNER half of P10.5 — a fresh, read-only turn that orders the open tasks against
+        the actual codebase. Separate from the implementer so that no agent is ever asked to plan
+        work it has just performed. Best-effort: an unplanned round still dispatches the tasks."""
+        loc = await self.router.effort_thread(effort_id)
+        if not loc:
+            return ""
+        channel_id, root = loc
+        repo = await self._effort_repo(effort_id) or ""
+        self._verify_seq += 1
+        instr = (
+            f"PLANNING TURN — you will CHANGE NOTHING (no edits, no git writes). Read the codebase "
+            f"and turn the task list below into an ordered implementation plan: for each task, "
+            f"name the files to change and what the change is. Keep it short and concrete.\n\n"
+            f"TASKS:\n{listed_tasks}"
+        )
+        try:
+            result = await self.router.wake(
+                effort_id, role="worker-default", thread_id=root, channel_id=channel_id,
+                session_id=f"{effort_id}~plan{self._verify_seq}", instruction=instr,
+                repo=repo, repo_token=await self._project_token(effort_id),
+            )
+        except Exception as exc:  # noqa: BLE001 — planning is a quality step, never a blocker
+            log.debug("drain planner wake failed for %s: %s", effort_id, exc)
+            return ""
+        return ((result.output or "") if result else "").strip()[:4000]
+
     def _queue_burndown(self, effort_id: str, failing_log: str, *, origin: str = "") -> None:
         """Start (or defer) the burn-down for a RED org build. Inside delegate's single-flight the
         loop must wait for the current run to close — delegate's finally launches it; anywhere
@@ -6444,6 +7054,9 @@ class Orchestrator:
                                  payload={"loop": "burndown"})
             return
         self._delegating.add(effort_id)
+        # Bound BEFORE the try: the finally drains a queued drain iteration and must not itself
+        # raise NameError on the early-return paths below.
+        channel_id, root = "", ""
         try:
             loc = await self.router.effort_thread(effort_id)
             repo = await self._effort_repo(effort_id) or ""
@@ -6611,6 +7224,15 @@ class Orchestrator:
             queued = self._burndown_after.pop(effort_id, None)
             if queued is not None:
                 self._spawn(self._burndown_loop(effort_id, queued))
+            else:
+                # DRAIN THE QUEUED ITERATION HERE TOO. This loop holds `_delegating` while it calls
+                # `_finish_effort`, so a drain round firing on the burn-down-green path queues into
+                # `_iterate_after` — which only `delegate`'s finally used to drain. The effort would
+                # be left with no dispatch, no PR and no closure, its tasks already closed. Any
+                # single-flight holder that reaches `_finish_effort` owes the same drain.
+                nxt = self._iterate_after.pop(effort_id, None)
+                if nxt and channel_id and root:
+                    self._spawn(self.delegate(effort_id, channel_id, root, nxt))
 
     async def _burndown_work(self, effort_id: str, channel_id: str, root: str, rnd: int,
                              errors_log: str, *, branch_exists: bool) -> list:
@@ -8530,6 +9152,259 @@ class Orchestrator:
         )
         return False
 
+    # ══════════════════════════════════════════════════════════════════════════
+    # P10 — THE DRAIN LOOP (ORCHESTRATION-DESIGN §4, §5, §6.5)
+    #
+    # The org ran out of work before the project was done. It QA'd once or twice, the loop hit a
+    # hard `n >= 2` cap, and it stopped — or a worker shrugged and the effort stranded. There was no
+    # task queue, no notion of "next item / next module / next tier", and "nothing left to do" was
+    # an ACCIDENT OF AN EMPTY MODEL REPLY rather than a computed fact.
+    #
+    # The replacement is a loop with a COUNTED termination:
+    #
+    #     round:  run 3 objective lenses (fresh)  →  gap analysis  →  tasks
+    #             work the open tasks
+    #             count NEW tasks propagated this round
+    #             > 0   → another round
+    #             == 0  → this scope is COMPLETE
+    #
+    # Every step of that is designed against one failure mode: a model being ASKED whether it is
+    # done. The lenses observe without being told the goal; the goal enters exactly once, at the
+    # comparison step; and the stopping rule is arithmetic on content-addressed rows. No model is
+    # ever asked "is this finished?", because in gym-007/008 the answer was reliably yes.
+    # ══════════════════════════════════════════════════════════════════════════
+    async def _drain_round_no(self, effort_id: str) -> int:
+        """This effort's NEXT drain round (1-based), derived from the audit log so the count
+        survives a bridge restart — the same reason `_auto_iterate` counts its own events."""
+        return await self._event_count(effort_id, "drain_round") + 1
+
+    async def _lens_sweep(
+        self, effort_id: str, channel_id: str, root: str, repo: str, delivery: BranchDelivery,
+        *, round_no: int, scope_node_id: str | None = None,
+    ) -> dict[str, str]:
+        """Run all three standing lenses FRESH against the delivered branch and persist their
+        reports. Returns `{lens: report_body}` (a lens that couldn't run is simply absent).
+
+        Each lens gets its own fresh session and is read-only. The operator's prompt is passed
+        THROUGH VERBATIM — the only thing wrapped around it is the mechanical checkout and the
+        change-nothing rule. Nothing here tells a lens what the goal is, offers it a way to say
+        "nothing", or asks it to grade: those three omissions ARE the debias (§6.5).
+
+        Best-effort per lens — a hiccup on one lens costs that lens's observations for the round,
+        never the delivery."""
+        reports: dict[str, str] = {}
+        token = await self._project_token(effort_id)
+        for lens, prompt in _LENSES:
+            self._verify_seq += 1
+            instr = (
+                f"EVALUATION — you did NOT build this, and you will CHANGE NOTHING (no edits, no "
+                f"git writes; this is an evaluative turn). First check out the DELIVERED branch:\n"
+                f"  git fetch origin {delivery.branch} && git checkout -f {delivery.branch}\n\n"
+                f"{prompt}\n\n"
+                f"Write your report as plain prose. Report what you actually observe."
+            )
+            try:
+                result = await self.router.wake(
+                    effort_id, role="worker-default", thread_id=root, channel_id=channel_id,
+                    session_id=f"{effort_id}~lens{self._verify_seq}", instruction=instr,
+                    repo=repo, repo_token=token,
+                    # THE DEBIAS, enforced at the wake: withholding the goal from the instruction
+                    # is worthless if the standing context preamble injects it anyway.
+                    withhold_goal=True,
+                )
+            except NoCapacityError:
+                # NEVER swallow this. A saturated worker pool means the sweep DIDN'T HAPPEN, and a
+                # sweep that didn't happen must not read as a sweep that found nothing. Propagate
+                # so the effort PARKS and resumes when capacity returns (the pre-existing
+                # no-silent-idle contract) — trap 3: a round needs four worker slots.
+                raise
+            except Exception as exc:  # noqa: BLE001 — a lens hiccup never blocks the delivery
+                log.debug("lens %s wake failed for %s: %s", lens, effort_id, exc)
+                continue
+            body = ((result.output or "") if result else "").strip()
+            if not body:
+                continue
+            reports[lens] = body
+            await self._record_lens_report(effort_id, lens, body, round_no=round_no,
+                                           scope_node_id=scope_node_id)
+        await self.audit.log("lens_sweep", effort_id=effort_id,
+                             payload={"round": round_no, "lenses": sorted(reports),
+                                      "scope": scope_node_id})
+        return reports
+
+    async def _gap_analysis(self, effort_id: str, report: str, scope_goal: str) -> list[str]:
+        """P10.2 — the ONLY place the goal is allowed to enter.
+
+        Compare an OBJECTIVE observation of what exists against what THIS SCOPE's goal requires,
+        and state the difference as work. Tasks are DISCOVERED here rather than invented: the input
+        is a report written by an agent that did not know the goal, so a gap is a real absence of
+        evidence, not a model's willingness to agree that something is missing.
+
+        Scope is what makes this tractable for a small model (§4) — never run this against the whole
+        project goal. Returns plainly-stated task bodies; empty when the report evidences every
+        component of the goal (which is a legitimate, and countable, zero)."""
+        report, scope_goal = (report or "").strip(), (scope_goal or "").strip()
+        if not (report and scope_goal):
+            return []
+        # NOTE on the "output exactly: none" line below. The §6.5 ban on a "nothing" affordance
+        # governs the OBSERVATION lenses, where it invites a model to skip looking. This is an
+        # EXTRACTION step over a report that is already written and fixed: the affordance here does
+        # not decide whether anything was observed, it just lets an empty extraction be stated
+        # cleanly instead of as prose that `_plain_tasks` would have to guess at. The countable
+        # zero has to be expressible somewhere; the point is that it is expressed AFTER the looking,
+        # not offered as an alternative to it.
+        sys_p = (
+            "You compare an evaluation report against a goal and list the work that remains.\n"
+            "The report was written by someone who did NOT know the goal — it describes only what "
+            "the codebase actually does.\n"
+            "Your output is a list of tasks. Rules:\n"
+            "- One task per line. No numbering, no headers, no preamble.\n"
+            "- State each task PLAINLY as work to do: what to build, fix or change.\n"
+            "- Give NO rationale. Do not explain why. Do not reference the report or the goal.\n"
+            "- A task is something the goal requires that the report does not evidence.\n"
+            "- If the report evidences every part of the goal, output exactly: none"
+        )
+        user_p = f"GOAL FOR THIS SCOPE:\n{scope_goal[:2000]}\n\nEVALUATION REPORT:\n{report[:6000]}"
+        try:
+            out = await self.models.complete("pm", sys_p, user_p)
+        except Exception as exc:  # noqa: BLE001 — no gaps derived is honest; a crash is not
+            log.debug("gap analysis failed for %s: %s", effort_id, exc)
+            return []
+        tasks = _plain_tasks(out)
+        await self.audit.log("gap_analysis", effort_id=effort_id,
+                             payload={"tasks": len(tasks), "goal_chars": len(scope_goal)})
+        return tasks
+
+    async def _tasks_from_lens(self, effort_id: str, lens: str, report: str) -> list[str]:
+        """Lenses 2 and 3 need no goal comparison — code cleanliness and project history are
+        judged against the standards named in the lens prompt itself, so their findings convert
+        DIRECTLY into tasks. Same plain-statement rule as P10.2: work, not argument."""
+        report = (report or "").strip()
+        if not report:
+            return []
+        sys_p = (
+            "You convert an evaluation report into a list of tasks.\n"
+            "- One task per line. No numbering, no headers, no preamble.\n"
+            "- State each task PLAINLY as work to do.\n"
+            "- Give NO rationale. Do not explain why.\n"
+            "- Cover every concrete shortcoming the report identifies.\n"
+            "- If the report identifies no shortcoming, output exactly: none"
+        )
+        try:
+            out = await self.models.complete("pm", sys_p, f"REPORT:\n{report[:6000]}")
+        except Exception as exc:  # noqa: BLE001
+            log.debug("lens task extraction failed for %s/%s: %s", effort_id, lens, exc)
+            return []
+        return _plain_tasks(out)
+
+    async def _drain_round(
+        self, effort_id: str, channel_id: str, root: str, repo: str, delivery: BranchDelivery,
+    ) -> dict:
+        """ONE round of the drain loop: sweep → gap analysis → queue → count.
+
+        Returns `{round, new_tasks, open_tasks, note, scope_node_id, capped}`. `new_tasks` is the
+        TERMINATION QUANTITY (P10.4): zero means an independent sweep of the whole scope found
+        nothing new to do, which is the org's only honest definition of complete. `open_tasks` is
+        what the next dispatch works — including tasks carried over from earlier rounds, because
+        "complete" requires the queue drained AND the sweep silent, not just the sweep silent."""
+        if not (repo and delivery.branch):
+            return {"round": 0, "new_tasks": 0, "open_tasks": [], "note": "",
+                    "scope_node_id": None, "capped": False}
+        round_no = await self._drain_round_no(effort_id)
+        proj = await self._effort_project(effort_id) or ""
+        node_id = await self._ensure_scope_node(effort_id) if self.s.drain_tier_walk else None
+        # RUNAWAY GUARD ONLY (never the termination condition — see `drain_round_cap`).
+        if round_no > max(1, self.s.drain_round_cap):
+            await self.audit.log("drain_round_capped", effort_id=effort_id,
+                                 payload={"round": round_no, "cap": self.s.drain_round_cap})
+            return {"round": round_no, "new_tasks": 0, "capped": True, "scope_node_id": node_id,
+                    "open_tasks": await self.list_open_tasks(effort_id=effort_id),
+                    "note": (f"\n\n⚠️ **Drain loop hit its runaway guard** after "
+                             f"{self.s.drain_round_cap} rounds — still propagating new work. This "
+                             f"is a safety net, not a completion: the scope is **not** finished.")}
+        # THE SCOPED goal — never the whole project goal (§4: scope is what makes gap analysis
+        # tractable for a small model). A scope node's own `scope` text wins; the effort goal is
+        # the fallback when the tier walk is off.
+        scope_goal = ""
+        if node_id:
+            n = await self._scope_node(node_id)
+            scope_goal = (n or {}).get("scope") or ""
+        if not scope_goal:
+            try:
+                _, scope_goal, _ = await self.charters.current_goal(effort_id)
+            except Exception:  # noqa: BLE001
+                scope_goal = ""
+        reports = await self._lens_sweep(effort_id, channel_id, root, repo, delivery,
+                                         round_no=round_no, scope_node_id=node_id)
+        derived: list[tuple[str, str]] = []
+        if reports.get("goal_alignment"):
+            derived += [("goal_alignment", b) for b in await self._gap_analysis(
+                effort_id, reports["goal_alignment"], scope_goal)]
+        for lens in ("clean_code", "project_documentation"):
+            if reports.get(lens):
+                derived += [(lens, b) for b in
+                            await self._tasks_from_lens(effort_id, lens, reports[lens])]
+        # SPLIT BEFORE ROUTING (P10.6): a round carrying more work than one bounded scope should
+        # hold is the evidence that this tier spans several concerns. Decomposing here — before the
+        # tasks are filed — means they land in the child that owns them from the very first round,
+        # rather than piling onto the parent and being re-homed later.
+        if node_id and derived:
+            await self._maybe_decompose(node_id, [b for _l, b in derived], effort_id=effort_id)
+        new_bodies: list[str] = []
+        for lens, body in derived:
+            # P10.6 SEAM ROUTING: on a parent tier, a defect that belongs to a CHILD scope is
+            # written into that child and flips it back to open — the integration check. A parent
+            # never fixes its children's insides; that would dissolve the encapsulation the tree
+            # exists to provide.
+            owner = await self._seam_owner(node_id, body) if node_id else None
+            target = owner or node_id
+            res = await self.add_task(body, project_slug=proj, scope_node_id=target,
+                                      effort_id=effort_id, source_lens=lens, round_no=round_no)
+            if res and res[1]:
+                new_bodies.append(body)
+            # Reopen on ANY seam finding, new or re-derived. A defect the parent's sweep still sees
+            # is still real — gating the reopen on novelty would leave a since-completed child
+            # marked done while a known defect it owns sits unfixed.
+            if owner and res:
+                await self._reopen_scope(owner, reason=body, effort_id=effort_id)
+        # Counted from the DB, not from the loop above: the count must be a property of what was
+        # PERSISTED (idempotently), so a restart mid-round can't double-count and a re-derived gap
+        # can't inflate it. Seam-routed tasks still belong to this effort's round.
+        new_tasks = await self.count_new_tasks(round_no, effort_id=effort_id)
+        open_tasks = await self._dispatchable_tasks(effort_id, node_id)
+        # ZERO MUST BE EVIDENCED. A sweep that did not run is not a sweep that found nothing: if no
+        # lens produced a report (all three wakes failed, or the effort is frozen and every wake
+        # returned None), `new_tasks` is zero for a reason that has nothing to do with the state of
+        # the product. Treating that as completion would reinstate the exact false-green this loop
+        # exists to eliminate — an absence of output read as an absence of work.
+        swept = bool(reports)
+        await self.audit.log("drain_round", effort_id=effort_id,
+                             payload={"round": round_no, "new_tasks": new_tasks,
+                                      "open": len(open_tasks), "lenses": sorted(reports),
+                                      "swept": swept, "scope": node_id})
+        lines = [f"## 🔁 Drain round {round_no}\n_Three objective lenses swept the product; gaps "
+                 f"were derived against this scope's goal._"]
+        if not swept:
+            lines = [f"## ⚠️ Drain round {round_no} — **the lenses could not run**\n_No lens "
+                     f"produced a report, so nothing was observed this round. This is **not** a "
+                     f"clean sweep and says nothing about whether the work is finished._"]
+        elif new_tasks:
+            lines.append(f"**{new_tasks} new task(s) propagated this round:**\n"
+                         + "\n".join(f"- {b}" for b in new_bodies[:10]))
+        elif open_tasks:
+            lines.append(f"**Zero NEW tasks propagated**, but {len(open_tasks)} task(s) are still "
+                         f"open — the sweep re-derived work the last round did not land. Not "
+                         f"complete: completion needs the queue drained AND the sweep silent.")
+        else:
+            lines.append("**Zero new tasks propagated** and the queue is empty — a full, "
+                         "independent lens sweep found nothing further to do. This scope is "
+                         "complete.")
+        if open_tasks and (new_tasks or not swept):
+            lines.append(f"_{len(open_tasks)} task(s) open in this scope's queue._")
+        return {"round": round_no, "new_tasks": new_tasks, "open_tasks": open_tasks,
+                "note": "\n\n".join(lines), "scope_node_id": node_id, "capped": False,
+                "swept": swept}
+
     async def _qa_evaluation(
         self, effort_id: str, channel_id: str, root: str, repo: str, delivery: BranchDelivery,
     ) -> tuple[str, list[str]]:
@@ -8777,8 +9652,12 @@ class Orchestrator:
                 gaps.append("**no delivery PR** (`delivery_pr_opened: 0`) — the branch never "
                             "became visible for review")
         if repo and self.s.qa_gate != "off":
-            if await self._event_count(effort_id, "qa_evaluation") == 0:
-                gaps.append(f"**no QA evaluation** (`qa_evaluation: 0` with "
+            # P10: the drain loop REPLACES the graded QA pass, so it satisfies this gate on its own
+            # evidence — a `drain_round` event means three lenses swept the product and the round's
+            # propagation was counted, which is strictly more than the old pass proved.
+            if (await self._event_count(effort_id, "qa_evaluation") == 0
+                    and await self._event_count(effort_id, "drain_round") == 0):
+                gaps.append(f"**no QA evaluation** (`qa_evaluation: 0`, `drain_round: 0` with "
                             f"qa_gate={self.s.qa_gate}) — nobody exercised the product")
         # Integration is asserted only when the delivery was ACCEPTED (its merge gate opened) —
         # and "attempted" is the invariant, not success: an honestly-surfaced conflict counts
@@ -8906,7 +9785,38 @@ class Orchestrator:
             # the PR + closure for the human to dispose. Best-effort — never blocks the delivery.
             # (_finish_effort has no channel_id/root in scope — resolve the effort's own thread.)
             qa_note, qa_defects = "", []
-            if self.s.qa_gate != "off":
+            # P10 — THE DRAIN LOOP. When on, post-delivery evaluation is not a graded QA pass but a
+            # counted round: three objective lenses sweep, gaps are derived against THIS SCOPE's
+            # goal, and the round's NEW-TASK COUNT decides what happens next. > 0 dispatches another
+            # round; == 0 completes the scope and walks the tree up. The org stops because it has
+            # computed that there is nothing left, not because a counter ran out or a model shrugged.
+            if self.s.drain_loop and self.s.qa_gate != "off":
+                _dr_loc = await self.router.effort_thread(effort_id)
+                if _dr_loc:
+                    dr = await self._drain_round(
+                        effort_id, _dr_loc[0], _dr_loc[1], eff_repo, delivery)
+                    qa_note = dr["note"]
+                    # WORK REMAINS while the queue is non-empty, even on a zero-propagation round:
+                    # a task the last implementer failed to land is re-derived by the next
+                    # independent sweep and REOPENED without counting as new information (it isn't
+                    # new). Dispatching only on `new_tasks` would close such an effort as complete
+                    # with its own queue visibly non-empty — DoD 4 is "the queue drains AND the
+                    # sweep propagates zero", not either alone.
+                    if dr["swept"] and dr["open_tasks"] and not dr["capped"]:
+                        if await self._drain_iterate(effort_id, dr["open_tasks"], dr["round"],
+                                                     channel_id=_dr_loc[0], root=_dr_loc[1]):
+                            await self.comms.post(
+                                Intent.worker_activity,
+                                f"🔎 Drain round {dr['round']} — {dr['new_tasks']} new task(s), "
+                                f"{len(dr['open_tasks'])} open; working them before the PR:\n"
+                                + "\n".join(f"- {t['body']}" for t in dr["open_tasks"][:6]),
+                                effort_id=effort_id)
+                            return   # the improved delivery re-enters here and opens the PR then
+                    elif dr["swept"] and not dr["capped"] and dr["scope_node_id"]:
+                        # EVIDENCED ZERO on both counts → this scope is complete; bubble up so the
+                        # parent tier re-evaluates with its child's seams now real (P10.6).
+                        await self._complete_scope(dr["scope_node_id"], effort_id)
+            elif self.s.qa_gate != "off":
                 _qa_loc = await self.router.effort_thread(effort_id)
                 if _qa_loc:
                     qa_note, qa_defects = await self._qa_evaluation(

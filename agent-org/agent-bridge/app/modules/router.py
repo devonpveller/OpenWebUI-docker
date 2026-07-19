@@ -309,6 +309,7 @@ class Router:
         plan_only: bool = False,
         flail_guard: bool = False,
         expected_base: str | None = None,
+        withhold_goal: bool = False,
     ) -> WorkResult | None:
         """Wake a worker on an effort and post its reply in-thread. Returns None if the
         effort is frozen (the composition rule refuses to dispatch) or no capacity. If `repo`
@@ -320,7 +321,9 @@ class Router:
         `expected_base` (P8 #3): the base commit the caller expects the checkout to sit on (the
         remote default-branch head read at dispatch). When given, an existing workspace is reused
         ONLY if it was cloned at that same base — a moved base forces a fresh clone. When None,
-        reuse falls back to the effort+repo identity alone (mid-effort follow-up turns)."""
+        reuse falls back to the effort+repo identity alone (mid-effort follow-up turns).
+        `withhold_goal` (P10.1): omit the goal/scope/steering blocks from the injected context, for
+        an OBJECTIVE lens that must observe the codebase without knowing what it is meant to be."""
         session_id = session_id or thread_id
         # RELIABILITY: dispatch inside a bounded retry loop. If the acquired worker is wedged (409
         # busy) or unreachable, QUARANTINE it (so it stops being picked) and RE-DISPATCH on another
@@ -501,7 +504,16 @@ class Router:
                                     channel_id, f"{head}{chunk}{tail_note}", thread_id=thread_id,
                                 )
 
-                context = await self.build_context(effort_id, role)
+                # P10.1: an objective lens must not be handed the goal by the standing preamble —
+                # withholding it in the instruction is pointless if build_context injects it two
+                # lines above. Passed as a kwarg so any older/duck-typed builder still works.
+                if withhold_goal:
+                    try:
+                        context = await self.build_context(effort_id, role, withhold_goal=True)
+                    except TypeError:
+                        context = ""     # fail CLOSED: no context beats leaking the goal to a lens
+                else:
+                    context = await self.build_context(effort_id, role)
                 prompt = f"{context}\n\n{instruction}".strip()
                 # `channel` here is little-coder's trigger-surface enum, NOT the Mattermost
                 # channel — the harness defaults it to "batch" (automated trigger).

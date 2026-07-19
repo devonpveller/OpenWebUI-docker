@@ -228,12 +228,23 @@ class Charters:
         return (row.version, row.objective, row.scope_slice or "")
 
     # ── the wake context (§4.2/§4.3 delivery surface) ────────────────────────
-    async def build_context(self, effort_id: str, role: str) -> str:
+    async def build_context(self, effort_id: str, role: str, *,
+                            withhold_goal: bool = False) -> str:
         """What the router injects on wake: floor + steering + goal (constraints inline)
-        + role charter. Short, sharp, repeated (small models drift from long prompts)."""
+        + role charter. Short, sharp, repeated (small models drift from long prompts).
+
+        `withhold_goal` (P10.1) drops the GOAL, SCOPE SLICE and STEERING blocks — everything that
+        states what the work is SUPPOSED to achieve — leaving the floor and charter, which govern
+        conduct rather than outcome. This exists for the objective lenses: an agent asked to observe
+        a codebase while holding the goal reasons TOWARD the goal and reports it met, which is the
+        false-green the whole drain loop is built to eliminate. The goal is applied later, at gap
+        analysis, against a report that was written without it."""
         floor_ver, floor = await self.current_floor()
-        steering = await self.current_steering(effort_id)
-        goal_ver, objective, scope_slice = await self.current_goal(effort_id)
+        steering = "" if withhold_goal else await self.current_steering(effort_id)
+        if withhold_goal:
+            goal_ver, objective, scope_slice = 0, "", ""
+        else:
+            goal_ver, objective, scope_slice = await self.current_goal(effort_id)
         charter = self.charter_text(role)
         parts = [
             f"# FLOOR (non-overridable — rule v{floor_ver})\n{floor}".rstrip(),

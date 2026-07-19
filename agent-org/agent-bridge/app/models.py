@@ -374,6 +374,58 @@ class ScopeNode(Base):
     created_at: Mapped[str] = mapped_column(default=now_iso)
 
 
+class LensReport(Base):
+    """One standing lens's OBJECTIVE observation of the codebase, for one round (P10.1 /
+    ORCHESTRATION-DESIGN §6.5). Three lenses run fresh every round — `goal_alignment` (which is
+    deliberately NOT told the goal, so it cannot reason *toward* it and declare it met),
+    `clean_code`, and `project_documentation`.
+
+    These rows exist for OUR history, never for a worker: a report is NEVER injected back into a
+    lens or a worker prompt. Feeding a previous report forward would make each sweep depend on the
+    last, and the propagation count is only meaningful when every sweep is INDEPENDENT. What the
+    rows buy us is the audit: diff round N against round N-1 and you can see exactly where a task
+    came from, which is the trail that makes "the scope is complete" checkable by a human."""
+
+    __tablename__ = "lens_reports"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    effort_id: Mapped[str] = mapped_column(ForeignKey("efforts.id"), index=True)
+    scope_node_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    lens: Mapped[str] = mapped_column(String(32))     # goal_alignment | clean_code | project_documentation
+    round_no: Mapped[int] = mapped_column(Integer, default=1)
+    body: Mapped[str] = mapped_column(Text)           # the lens's report, as written
+    created_at: Mapped[str] = mapped_column(default=now_iso)
+
+
+class ScopeTask(Base):
+    """One plainly-stated unit of work in a scope's queue — the substrate the drain loop drains
+    (P10.4). Before this existed the org had no task list at all: it QA'd once or twice, hit a hard
+    `n >= 2` cap, and stopped, so "nothing left to do" was an *accident of an empty model reply*
+    rather than a computed fact.
+
+    `id` is content-addressed on `(scope_node_id, body)` so the SAME gap re-derived by next round's
+    independent sweep is not a new row. That idempotency is load-bearing: the termination rule is
+    "a full lens sweep propagated ZERO NEW tasks", and without content-addressing every round would
+    re-propagate its predecessors' findings and the count could never reach zero.
+
+    `body` is a PLAIN statement of work with no rationale chain. A small model reasons worse than a
+    frontier one, so we ask it for *less* reasoning, not more: give it a legitimate, relevant,
+    plainly stated task. The rationale lives in the `LensReport` audit trail, not in the task."""
+
+    __tablename__ = "scope_tasks"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    project_slug: Mapped[str] = mapped_column(String(64), index=True)
+    scope_node_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    effort_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    body: Mapped[str] = mapped_column(Text)
+    source_lens: Mapped[str] = mapped_column(String(32), default="goal_alignment")
+    round_no: Mapped[int] = mapped_column(Integer, default=1)   # the round that PROPAGATED it
+    status: Mapped[str] = mapped_column(String(16), default="open")   # open | done | dropped
+    created_at: Mapped[str] = mapped_column(default=now_iso)
+    closed_at: Mapped[str | None] = mapped_column(String(32))
+
+
 class EffortConstraint(Base):
     """A LEARNED CONSTRAINT — one conflict clause in the org's CDCL loop (ORCHESTRATION-DESIGN §5–6).
 

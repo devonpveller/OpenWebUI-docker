@@ -1,6 +1,49 @@
 # P10 — The drain loop: objective lenses, gap-derived tasks, propagation to zero
 
-**Status:** planned, nothing built. Authored 2026-07-18.
+**Status:** **BUILT + DEPLOYED 2026-07-18** — all six increments; full unit suite green (40 new in
+`agent-bridge/tests/test_lenses.py`); `agent-bridge:local` rebuilt and the live bridge recreated
+with `AO_DRAIN_LOOP=1`. **Not yet gym-validated** — see *Validation* below; the org's self-report
+never scores, and neither does this one. Authored 2026-07-18.
+
+**The plan's own first line of defence held, but only after an adversarial review.** The first build
+was 27/27 green and still had **four reachable paths that reported "complete" for a reason unrelated
+to the product** — the precise failure this plan exists to eliminate, reintroduced by the
+implementation of it. Green tests did not catch any of them (trap 2, exactly as written). They are
+now fixed and each has a named test under *FALSE-GREEN GUARDS* in `tests/test_lenses.py`:
+
+| Path | Why it read as "complete" |
+|---|---|
+| All three lens wakes fail / return empty | `new_tasks == 0` → "nothing further to do". An absence of OUTPUT read as an absence of WORK. Now a round carries `swept`; an unswept round completes nothing. |
+| Worker pool saturated | `_lens_sweep`'s blanket `except` swallowed `NoCapacityError`, converting the park-and-resume contract into a silent completion. Now re-raised (trap 3: a round needs 4 slots). |
+| A task the implementer failed to land | Re-derived next round → reopened but **not counted** (correctly — it isn't new information). Dispatch keyed on `new_tasks` alone then closed the effort with its queue visibly non-empty. Now dispatch keys on open work; completion needs the queue drained **and** the sweep silent. |
+| A parent whose findings all seam-routed down | Its own queue is empty while the work it discovered is outstanding below it. Now a parent cannot complete over an unfinished child. |
+
+**A second review round found the fixes had relocated the same failure**, which is worth recording
+as its own lesson: the naive reading of "a parent never fixes its children's insides" filtered a
+scope's dispatch to its OWN node — so the round that DECOMPOSES a scope routed every task it had
+just derived into the brand-new children, returned an empty list, and closed the effort reporting
+*"a full, independent lens sweep found nothing further to do"* with all of its work sitting
+unreachable one tier down. Nothing was attached to those children, so nobody could ever pick it up.
+The encapsulation rule presumes there IS another owner; an **unowned** child has none. Dispatch now
+excludes a descendant's tasks only when that descendant belongs to a **different effort**, and
+`_complete_scope` closes an unowned, drained child rather than deadlocking its parent on it.
+
+A fifth was a **stranding** bug, not a false green: `_drain_iterate` queued into `_iterate_after`,
+which only `delegate`'s `finally` drains — but `_finish_effort` is also reached from
+`_burndown_loop` and `_run_in_host_context`, where that finally has already run. Because the drain
+path *returns*, the effort was left with no dispatch, no PR and no closure, its tasks already
+closed. `_drain_iterate` now dispatches directly unless it is inside delegate's single-flight.
+
+**Two bugs the build surfaced that the plan did not anticipate:**
+1. **The goal leaked into the lenses through the standing wake preamble.** Withholding it from the
+   instruction is worthless while `charters.build_context` injects `# GOAL` two lines above. Fixed
+   with `build_context(..., withhold_goal=True)` → `router.wake(..., withhold_goal=True)`, which
+   drops GOAL + SCOPE SLICE + STEERING and keeps floor + charter (conduct, not outcome). It fails
+   CLOSED: an older/duck-typed builder yields empty context rather than a leaked goal.
+2. **An undecomposed ROOT scope's text *is* the effort goal**, so injecting `_scope_context` into
+   the implementer brief restated the whole goal — the exact gym-008 construction P10.5 retires.
+   Scope context is now injected only from a genuine sub-scope (`depth > 0`); at a root there is no
+   sibling to be bounded away from.
 **Owner:** any session. **Self-contained** — you need no prior conversation, but read
 [`ORCHESTRATION-DESIGN.md`](ORCHESTRATION-DESIGN.md) **§4, §5, §6.5** first; this plan implements them.
 **Execution record / issue register:** [`P9-make-the-fixes-real.md`](P9-make-the-fixes-real.md).
@@ -45,8 +88,10 @@ a counted quantity, never a model's opinion.
   injected into retries; burn-down terminates on a `seen_sigs` fixed point.
 
 **Built but INERT (no caller — do not assume these work)**
-- **§4 `ScopeNode`** — tree model + `add_scope_node` / `_scope_context` / `_escalation_target`.
-  **Nothing calls them.** This plan is what makes them live.
+- ~~**§4 `ScopeNode`**~~ — **NOW LIVE (2026-07-18).** `_ensure_scope_node` attaches every drained
+  effort to a node, `decompose_scope` splits a tier, `_scope_context` bounds a sub-scope worker,
+  `_complete_scope` walks completion up, `_seam_owner` + `_reopen_scope` route a parent's seam
+  defect down into the owning child.
 - **§11 producer** — `_verifiable_concern_blocks_clear` is wired into `apply_operator_decision`, but
   `raise_verifiable_concern` has **no caller**, so no concern carries a check. (See *Traps* — a naive
   wiring deadlocks.)
@@ -234,6 +279,24 @@ defect reopens the child and writes the task there; a worker brief never contain
 7. **Never commit or push on the operator's behalf unless asked.** Merges to `main` stay human-gated.
 
 ---
+
+## Known gaps carried forward (2026-07-18)
+
+Deliberately not closed in this iteration — recorded so the next session does not assume otherwise:
+
+- **`_auto_iterate`'s `n >= 2` and its whole-goal restatement are still live** for the non-drain
+  paths, including the ERROR-VERDICTS branch *inside* `_finish_effort`, which can still fire on the
+  same delivery the drain just handled. The drain loop itself never calls it, so P10.4's assertion
+  holds, but the old construction has not been deleted from the codebase.
+- **`drain_plan_split` / `drain_tier_walk` default `True`**, against trap 4's "config defaults OFF".
+  Harmless to the unit suite because both are only read on the drain path and `drain_loop` itself
+  defaults off — but it is a deviation, not an oversight.
+- **`_maybe_decompose` splits on the evidence of ONE round** (`>= 5` derived tasks). A single noisy
+  sweep can therefore create a tier. The children are cheap and unowned, so the cost is structural
+  clutter rather than lost work, but a two-round confirmation would be sounder.
+- **Seam routing is lexical** (`_seam_owner` matches distinctive title tokens on word boundaries and
+  gives ambiguity back to the parent). It will under-route rather than mis-route, which is the safe
+  direction, but it is not semantic.
 
 ## Definition of done for this iteration
 
