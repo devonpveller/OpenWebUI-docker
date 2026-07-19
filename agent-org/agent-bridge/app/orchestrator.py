@@ -383,6 +383,33 @@ _SCOPE_STOPWORDS = frozenset({
     "layer", "module", "component", "system", "service", "part", "area", "code", "scope",
     "feature", "support", "handling", "logic", "core", "main", "base", "misc",
 })
+# P11.5 — A VANISHED REPORT IS NOT AN EMPTY ONE. In gym-009 the `goal_alignment` lens produced no
+# report in 3 of 3 rounds: its turn ended mid-flight and the last thing it had emitted was a
+# narration line ("All 44 tests pass. Now let me do manual CLI testing to probe edge cases." — 72
+# chars). That was stored as the round's report and fed to gap analysis, which correctly concluded
+# a 72-char stub evidences none of a 5417-char goal and manufactured 12 tasks demanding features the
+# product had already shipped. P10's `swept = bool(reports)` defends the ZERO and leaves the
+# NEAR-zero wide open — so a body has to clear a substance floor and not read as narration.
+_LENS_MIN_REPORT_CHARS = 400
+_NARRATION_RE = re.compile(
+    r"^\s*(?:ok|okay|good|great|alright)?[\s,.—-]*"
+    r"(?:all \d+ tests? pass|tests? pass|the tests? pass)?[\s,.—-]*"
+    r"(?:now )?(?:let me|let's|i'll|i will|i'm going to|next,? i)\b",
+    re.I)
+
+
+def _is_lens_report(body: str) -> bool:
+    """Is this a REPORT, or a turn that ended before writing one? A lens that genuinely found
+    nothing still writes prose saying so; a lens whose turn died mid-flight leaves its last
+    narration line. Treating the second as the first is how an accident of a truncated reply
+    becomes a confident, wrong work list."""
+    body = (body or "").strip()
+    if len(body) < _LENS_MIN_REPORT_CHARS:
+        return False
+    # A report that opens by ANNOUNCING work it never got to is a preamble, however long.
+    return not _NARRATION_RE.match(body)
+
+
 _NOTHING_RE = re.compile(r"\s*(?:none|nothing|n/a)\b[\s.!]*(?:found|identified|required|needed)?[\s.!]*",
                          re.I)
 # Prose that ASSERTS there is no work, rather than naming work. Such a line must never become a
@@ -1308,38 +1335,48 @@ class Orchestrator:
                                  payload={"parent": node_id, "children": len(out)})
         return out
 
-    async def _maybe_decompose(self, node_id: str, tasks: list[str], *,
-                               effort_id: str | None = None) -> list[str]:
+    async def _maybe_decompose(self, node_id: str, evidence: list[str], *,
+                               effort_id: str | None = None,
+                               from_reports: bool = False) -> list[str]:
         """SPLIT A TIER THAT HAS OUTGROWN ITSELF — the production caller that makes the tree live.
 
-        Decomposition is driven by evidence rather than guessed up front: when one round propagates
-        more work than a single bounded scope should hold, that IS the signal the scope spans
-        several concerns, and the tasks themselves describe what those concerns are. Splitting then
-        (rather than at intake) means the tree is derived from observed work instead of a model's
-        speculation about a codebase it has not read.
+        Decomposition is driven by evidence rather than guessed up front, and (P11.3) that evidence
+        is now the LENS REPORTS rather than derived tasks. The order matters: splitting from the
+        raw observation of what the codebase contains means the resulting scopes describe the
+        PRODUCT's real parts, and gap analysis can then run against one of them. Splitting from
+        derived tasks — as gym-009 did — happens after the analysis it was meant to scope, which is
+        why that tree was never used for anything.
 
         No-ops when the node already has children, when the tier is deep enough (depth is a
-        reliability tax — loss compounds per hop, §4), or when the round's work fits one scope.
-        Returns the created child ids."""
+        reliability tax — loss compounds per hop, §4), or when the evidence is too thin to justify
+        a split. Returns the created child ids."""
         n = await self._scope_node(node_id)
         if not n or n["depth"] >= self.s.drain_max_tier_depth:
             return []
-        if len(tasks) < max(2, self.s.drain_decompose_threshold):
-            return []
         if await self._scope_children(node_id):
             return []
+        if from_reports:
+            # A report is one blob per lens, so "how much work is here" can't be a line count.
+            # Require real substance before carving a tree out of it.
+            if sum(len(e) for e in evidence) < 1200:
+                return []
+        elif len(evidence) < max(2, self.s.drain_decompose_threshold):
+            return []
         sys_p = (
-            "You group a list of tasks into the parts of a project they belong to.\n"
-            "- Output one group per line, as `title :: what this part covers`.\n"
-            "- Between 2 and 5 groups. Every task must fit exactly one group.\n"
+            "You identify the distinct parts of a software project from a description of it.\n"
+            "- Output one part per line, as `title :: what this part covers`.\n"
+            "- Between 2 and 5 parts. Together they cover the whole project.\n"
             "- Titles are concrete parts of THIS project (e.g. `storage`, `argument parsing`), "
             "not generic words like `layer`, `module` or `core`.\n"
             "- No preamble, no numbering, no explanation."
         )
-        listed = "\n".join(f"- {t}" for t in tasks[:20])
+        listed = "\n\n".join(e[:2500] for e in evidence[:3])
         try:
             out = await self.models.complete(
-                "pm", sys_p, f"PROJECT SCOPE:\n{n['scope'][:1500]}\n\nTASKS:\n{listed}")
+                "pm", sys_p,
+                f"PROJECT SCOPE:\n{n['scope'][:1500]}\n\n"
+                + (f"OBSERVATIONS OF THE CODEBASE:\n{listed}" if from_reports
+                   else f"TASKS:\n{listed}"))
         except Exception as exc:  # noqa: BLE001 — a flat tree is a valid tree; never block a round
             log.debug("scope decomposition failed for %s: %s", node_id, exc)
             return []
@@ -1358,8 +1395,41 @@ class Orchestrator:
         if kids:
             await self.audit.log("scope_decomposed_live", effort_id=effort_id,
                                  payload={"parent": node_id, "children": len(kids),
-                                          "from_tasks": len(tasks)})
+                                          "source": "reports" if from_reports else "tasks",
+                                          "evidence": len(evidence)})
         return kids
+
+    async def _select_working_scope(self, effort_id: str, root_id: str) -> str | None:
+        """P11.3 — WHICH TIER IS THIS ROUND ACTUALLY WORKING? The deepest open descendant that
+        still holds work, else the shallowest open one, else the root.
+
+        Without this the tree is decorative. gym-009 built three child scopes and then analysed
+        against the root's goal every single round, because `_ensure_scope_node` can only return a
+        node whose `effort_id` matches — and decomposition never set one. Selecting here (and
+        stamping the choice, below) is what makes a bounded scope reach gap analysis.
+
+        Returns the selected node id, or None to leave the caller's choice alone."""
+        kids = await self._scope_children(root_id)
+        if not kids:
+            return None
+        # A scope another effort OWNS is not ours to select — taking it would have this effort
+        # working inside someone else's border, which is the encapsulation break the tree exists
+        # to prevent (§4). Unowned children are fair game; that is what decomposition creates.
+        def _mine(k: dict) -> bool:
+            return k["status"] != "done" and k["effort_id"] in (None, "", effort_id)
+
+        # Prefer a child that already carries open work — that is where this round's effort lives.
+        for k in kids:
+            if _mine(k) and await self.list_open_tasks(scope_node_id=k["id"]):
+                await self._attach_effort_to_scope(k["id"], effort_id)
+                return k["id"]
+        for k in kids:
+            if _mine(k):
+                await self._attach_effort_to_scope(k["id"], effort_id)
+                return k["id"]
+        # Nothing selectable below: every child is done, or belongs to another owner. The parent is
+        # the working scope — which is precisely when a seam check is meaningful.
+        return None
 
     async def _seam_owner(self, node_id: str | None, task_body: str) -> str | None:
         """Which CHILD scope owns this finding, if any — the seam router.
@@ -6717,10 +6787,19 @@ class Orchestrator:
         channel_id, root = loc
         repo = await self._effort_repo(effort_id) or ""
         self._verify_seq += 1
+        # P11.2 — PHRASED AS AN EVALUATION, NOT A CALL TO ACTION. The previous wording said "you
+        # will CHANGE NOTHING" and then "turn the task list into an ordered implementation plan" —
+        # a prohibition wrapped around an imperative, and in gym-009 the worker did the whole
+        # implementation here (6 min, 5 commits) before the implementer was ever dispatched. The
+        # three standing lenses stay read-only every round with NO enforcement at all, because they
+        # ask for an assessment and a written report. This is modelled on them: the deliverable is
+        # a report about the work, not the work. `plan_only` is the backstop (it gates the
+        # edit/write tools but NOT `cat > file` or `git push`, so the phrasing carries the load).
         instr = (
-            f"PLANNING TURN — you will CHANGE NOTHING (no edits, no git writes). Read the codebase "
-            f"and turn the task list below into an ordered implementation plan: for each task, "
-            f"name the files to change and what the change is. Keep it short and concrete.\n\n"
+            f"assess the codebase against the task list below and write a short report. For each "
+            f"task, state which files it touches and what would need to change, and say whether "
+            f"the codebase already satisfies it. Do not edit files in this codebase, this is just "
+            f"evaluative.\n\n"
             f"TASKS:\n{listed_tasks}"
         )
         try:
@@ -6728,6 +6807,7 @@ class Orchestrator:
                 effort_id, role="worker-default", thread_id=root, channel_id=channel_id,
                 session_id=f"{effort_id}~plan{self._verify_seq}", instruction=instr,
                 repo=repo, repo_token=await self._project_token(effort_id),
+                plan_only=True, withhold_goal=True,
             )
         except Exception as exc:  # noqa: BLE001 — planning is a quality step, never a blocker
             log.debug("drain planner wake failed for %s: %s", effort_id, exc)
@@ -9224,6 +9304,18 @@ class Orchestrator:
             body = ((result.output or "") if result else "").strip()
             if not body:
                 continue
+            # P11.5: a truncated turn is a MISSING report, not a clean one. Persist it for the
+            # audit trail (we want to see what the lens managed to say), but keep it out of
+            # `reports` so it can neither satisfy `swept` nor reach gap analysis.
+            if not _is_lens_report(body):
+                await self._record_lens_report(effort_id, f"{lens}:truncated", body,
+                                               round_no=round_no, scope_node_id=scope_node_id)
+                await self.audit.log("lens_report_truncated", effort_id=effort_id,
+                                     payload={"lens": lens, "round": round_no,
+                                              "chars": len(body), "body": body[:200]})
+                log.info("lens %s produced no report for %s (%d chars) — round not swept by it",
+                         lens, effort_id, len(body))
+                continue
             reports[lens] = body
             await self._record_lens_report(effort_id, lens, body, round_no=round_no,
                                            scope_node_id=scope_node_id)
@@ -9253,18 +9345,29 @@ class Orchestrator:
         # cleanly instead of as prose that `_plain_tasks` would have to guess at. The countable
         # zero has to be expressible somewhere; the point is that it is expressed AFTER the looking,
         # not offered as an alternative to it.
+        # P11.4 — the question is "what REMAINS for this scope", asked of a report that has already
+        # observed what EXISTS. gym-009's prompt framed it as "what the report does not evidence",
+        # which against a thin report degenerates into restating the goal: it produced 12 tasks
+        # demanding delete/search/priority/REPL on a codebase that had shipped all of them and had
+        # 44 passing tests. The report is now stated as the authority on what is ALREADY BUILT, and
+        # the model is told in terms that most of the goal may already be done.
         sys_p = (
-            "You compare an evaluation report against a goal and list the work that remains.\n"
-            "The report was written by someone who did NOT know the goal — it describes only what "
-            "the codebase actually does.\n"
-            "Your output is a list of tasks. Rules:\n"
+            "You are given a report describing what a codebase CURRENTLY DOES, and a goal for one "
+            "part of that project. The report was written by someone who did not know the goal, so "
+            "it is an unbiased account of what already exists.\n"
+            "MUCH OF THE GOAL MAY ALREADY BE IMPLEMENTED. The report is your evidence for what is "
+            "already there — treat anything it describes as DONE.\n"
+            "List only the work that genuinely REMAINS for this part of the project.\n"
+            "Rules:\n"
             "- One task per line. No numbering, no headers, no preamble.\n"
             "- State each task PLAINLY as work to do: what to build, fix or change.\n"
             "- Give NO rationale. Do not explain why. Do not reference the report or the goal.\n"
-            "- A task is something the goal requires that the report does not evidence.\n"
-            "- If the report evidences every part of the goal, output exactly: none"
+            "- Do NOT list anything the report describes as existing or working.\n"
+            "- Do NOT list work outside this part of the project.\n"
+            "- If the report shows this part of the goal is already satisfied, output exactly: none"
         )
-        user_p = f"GOAL FOR THIS SCOPE:\n{scope_goal[:2000]}\n\nEVALUATION REPORT:\n{report[:6000]}"
+        user_p = (f"GOAL FOR THIS PART OF THE PROJECT:\n{scope_goal[:2000]}\n\n"
+                  f"REPORT — WHAT THE CODEBASE ALREADY DOES:\n{report[:6000]}")
         try:
             out = await self.models.complete("pm", sys_p, user_p)
         except Exception as exc:  # noqa: BLE001 — no gaps derived is honest; a crash is not
@@ -9322,6 +9425,20 @@ class Orchestrator:
                     "note": (f"\n\n⚠️ **Drain loop hit its runaway guard** after "
                              f"{self.s.drain_round_cap} rounds — still propagating new work. This "
                              f"is a safety net, not a completion: the scope is **not** finished.")}
+        reports = await self._lens_sweep(effort_id, channel_id, root, repo, delivery,
+                                         round_no=round_no, scope_node_id=node_id)
+        # ── P11.3 THE SEQUENCE: decompose → SELECT the working scope → analyse against ITS goal ──
+        # gym-009 ran this backwards and the tier walk was cosmetic as a result: `_maybe_decompose`
+        # fired AFTER `_gap_analysis`, so the children could never inform the analysis that created
+        # them, and every single round asked "does this report evidence the ENTIRE 5417-char
+        # project goal?" A storage-layer round and a UX-layer round were handed the same question.
+        # Decomposition now happens FIRST, from the raw observations rather than from derived
+        # tasks, so the scope that gets analysed is the scope the work actually belongs to.
+        if node_id and reports:
+            await self._maybe_decompose(
+                node_id, [b for b in reports.values() if b], effort_id=effort_id,
+                from_reports=True)
+            node_id = await self._select_working_scope(effort_id, node_id) or node_id
         # THE SCOPED goal — never the whole project goal (§4: scope is what makes gap analysis
         # tractable for a small model). A scope node's own `scope` text wins; the effort goal is
         # the fallback when the tier walk is off.
@@ -9334,8 +9451,9 @@ class Orchestrator:
                 _, scope_goal, _ = await self.charters.current_goal(effort_id)
             except Exception:  # noqa: BLE001
                 scope_goal = ""
-        reports = await self._lens_sweep(effort_id, channel_id, root, repo, delivery,
-                                         round_no=round_no, scope_node_id=node_id)
+        await self.audit.log("drain_scope_selected", effort_id=effort_id,
+                             payload={"round": round_no, "scope": node_id,
+                                      "scope_goal_chars": len(scope_goal)})
         derived: list[tuple[str, str]] = []
         if reports.get("goal_alignment"):
             derived += [("goal_alignment", b) for b in await self._gap_analysis(
@@ -9344,12 +9462,6 @@ class Orchestrator:
             if reports.get(lens):
                 derived += [(lens, b) for b in
                             await self._tasks_from_lens(effort_id, lens, reports[lens])]
-        # SPLIT BEFORE ROUTING (P10.6): a round carrying more work than one bounded scope should
-        # hold is the evidence that this tier spans several concerns. Decomposing here — before the
-        # tasks are filed — means they land in the child that owns them from the very first round,
-        # rather than piling onto the parent and being re-homed later.
-        if node_id and derived:
-            await self._maybe_decompose(node_id, [b for _l, b in derived], effort_id=effort_id)
         new_bodies: list[str] = []
         for lens, body in derived:
             # P10.6 SEAM ROUTING: on a parent tier, a defect that belongs to a CHILD scope is

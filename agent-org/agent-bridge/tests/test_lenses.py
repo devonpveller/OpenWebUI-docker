@@ -37,10 +37,21 @@ ROOT = Path(__file__).resolve().parents[1]
 REPO = "https://github.com/acme/gym.git"
 GOAL = "a todo CLI that adds, lists, completes and deletes todos with a due date"
 
+# A realistic lens report. Length matters: P11.5 requires a body to clear a substance floor before
+# it counts as a report at all, because gym-009's goal_alignment lens produced 72- and 48-char
+# narration stubs that were stored as findings and fed to gap analysis. A fixture shorter than a
+# real report would test a path production can no longer take.
 _REPORT = (
     "The tool stores todos in todos.json and supports add and list. Each todo has a title and a "
     "due date. There is no way to mark a todo complete, and no delete path. Running it with no "
-    "arguments prints an argparse traceback."
+    "arguments prints an argparse traceback rather than usage text.\n\n"
+    "Storage is a single JSON array rewritten in full on every change, with no temp-file or "
+    "rename step, so an interrupted write truncates the file. Loading does not guard against a "
+    "missing 'due' key, so a record written by an older version raises KeyError on list.\n\n"
+    "The add command accepts any string for --due without validating the format, so an unparseable "
+    "date is stored verbatim and silently excluded from every later filter. Ids are assigned by "
+    "taking len(items) + 1, which reuses an id after a deletion.\n\n"
+    "There is no interactive mode, no search, and no way to edit an item's text once created."
 )
 
 
@@ -333,9 +344,16 @@ async def test_close_task_drains_the_queue_and_rederivation_reopens_it(db_url):
 # P10.4 — propagation-count termination
 # ══════════════════════════════════════════════════════════════════════════════
 async def _round(orch, harness, eid, chan, root, gap_lines: str):
-    """One drain round with a stubbed lens sweep + stubbed gap/task extraction."""
+    """One drain round with a stubbed lens sweep + stubbed gap/task extraction.
+
+    P11.3 note: the round now asks the model to DECOMPOSE before it asks for gaps, so the model
+    queue must account for that call or every later response shifts by one. `no split` yields
+    fewer than two parts, so decomposition no-ops and the tree stays flat — which is what the
+    tests below that aren't about the tier walk actually want."""
     for _ in _LENSES:
         harness.output_queue.append(_REPORT)
+    if orch.s.drain_tier_walk:
+        orch.models._client.queue_text("no split")   # decomposition -> <2 parts -> no-op
     orch.models._client.queue_text(gap_lines)   # goal_alignment -> gap analysis
     orch.models._client.queue_text("none")      # clean_code
     orch.models._client.queue_text("none")      # project_documentation
@@ -425,7 +443,9 @@ async def test_implementer_session_differs_from_the_planner_session(db_url):
         assert await orch._drain_iterate(eid, r1["open_tasks"], r1["round"]) is True
         planner = [w for w in harness.wakes if "~plan" in (w.get("session_id") or "")]
         assert len(planner) == 1
-        assert "CHANGE NOTHING" in planner[0]["prompt"]
+        # P11.2: phrased as an evaluation, not a prohibition wrapped around an imperative
+        assert "this is just evaluative" in planner[0]["prompt"]
+        assert planner[0].get("plan_only") is True
         # the implementer runs in the effort's own session, ROTATED by the drain round — so it is
         # neither the planner's session nor the session that just declared the goal met
         implementer_session = await orch._session_for(eid)
@@ -531,8 +551,11 @@ async def test_a_parent_seam_defect_reopens_the_child_and_writes_the_task_there(
         kids = await orch.decompose_scope(parent, [("storage layer", "persist todos to disk"),
                                                    ("export layer", "write CSV exports")])
         await orch._attach_effort_to_scope(parent, eid)
-        assert await orch._complete_scope(kids[0], eid) is not None
-        assert (await orch._scope_node(kids[0]))["status"] == "done"
+        # P11.3: the walk is BOTTOM-UP — a parent only becomes the working scope once its children
+        # are done. That is exactly when a seam check is meaningful: the assembled product exists.
+        for k in kids:
+            assert await orch._complete_scope(k, eid) is not None
+            assert (await orch._scope_node(k))["status"] == "done"
         # the parent's sweep sees the assembled product and finds a defect the CHILD owns
         for _ in _LENSES:
             harness.output_queue.append(_REPORT)
@@ -725,6 +748,7 @@ async def test_a_parent_does_not_work_an_owned_childs_tasks(db_url):
         kids = await orch.decompose_scope(parent, [("storage layer", "persist to disk")])
         await orch._attach_effort_to_scope(parent, eid)
         await orch._attach_effort_to_scope(kids[0], other)        # a REAL other owner
+        # the child belongs to someone else, so THIS effort's working scope stays the parent
         for _ in _LENSES:
             harness.output_queue.append(_REPORT)
         orch.models._client.queue_text("make the storage layer fsync before returning")
@@ -782,17 +806,21 @@ async def test_a_big_round_splits_the_scope_into_real_child_tiers(db_url):
         eid, chan, root = await _effort(orch)
         for _ in _LENSES:
             harness.output_queue.append(_REPORT)
+        # P11.3: decomposition runs FIRST, from the REPORTS — so it is the first model call.
+        orch.models._client.queue_text(
+            "commands :: the add/delete/complete subcommands\n"
+            "storage :: writing and reading todos.json\n"
+            "export :: rendering todos to other formats")
         orch.models._client.queue_text(
             "add a delete command\nadd a complete command\nvalidate the due date\n"
             "print usage help\nwrite todos atomically\nadd a csv export")
         orch.models._client.queue_text("none")
         orch.models._client.queue_text("none")
-        orch.models._client.queue_text(
-            "commands :: the add/delete/complete subcommands\n"
-            "storage :: writing and reading todos.json\n"
-            "export :: rendering todos to other formats")
         r = await orch._drain_round(eid, chan, root, REPO, _delivery())
-        kids = await orch._scope_children(r["scope_node_id"])
+        # the round now WORKS a child scope; the tree hangs off its parent
+        working = await orch._scope_node(r["scope_node_id"])
+        assert working["depth"] == 1
+        kids = await orch._scope_children(working["parent_id"])
         assert len(kids) == 3
         assert {k["title"] for k in kids} == {"commands", "storage", "export"}
         assert await orch._event_count(eid, "scope_decomposed_live") == 1
@@ -811,17 +839,18 @@ async def test_a_decomposing_round_still_dispatches_the_work_it_derived(db_url):
         eid, chan, root = await _effort(orch)
         for _ in _LENSES:
             harness.output_queue.append(_REPORT)
+        orch.models._client.queue_text(          # P11.3: decomposition is the FIRST model call
+            "commands :: the add/delete/complete subcommands\n"
+            "storage :: writing and reading todos.json\n"
+            "export :: rendering todos to other formats")
         orch.models._client.queue_text(
             "add a delete command\nadd a complete command\nvalidate the due date\n"
             "print usage help\nwrite todos atomically\nadd a csv export")
         orch.models._client.queue_text("none")
         orch.models._client.queue_text("none")
-        orch.models._client.queue_text(
-            "commands :: the add/delete/complete subcommands\n"
-            "storage :: writing and reading todos.json\n"
-            "export :: rendering todos to other formats")
         r = await orch._drain_round(eid, chan, root, REPO, _delivery())
-        assert len(await orch._scope_children(r["scope_node_id"])) == 3   # it DID decompose
+        working = await orch._scope_node(r["scope_node_id"])
+        assert len(await orch._scope_children(working["parent_id"])) == 3   # it DID decompose
         assert r["new_tasks"] == 6
         # ...and every derived task is still dispatchable by the effort that found it
         assert len(r["open_tasks"]) == 6
@@ -893,5 +922,114 @@ async def test_the_drain_attaches_an_effort_to_a_scope_node(db_url):
         assert r["scope_node_id"] is not None
         node = await orch._scope_node(r["scope_node_id"])
         assert node["effort_id"] == eid and node["project_slug"] == "gym"
+    finally:
+        await _shutdown(orch, db)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# P11 — THE SEQUENCE. gym-009 (2026-07-19) ran the drain loop with its steps in an order that
+# contradicted what they claimed to do: a "plan" turn implemented, the implementer ran second and
+# could only find work already done, and decomposition happened AFTER the analysis it was meant to
+# scope. These pin the corrected order.
+# ══════════════════════════════════════════════════════════════════════════════
+from app.orchestrator import _is_lens_report  # noqa: E402
+
+
+def test_a_truncated_lens_turn_is_not_a_report():
+    """gym-009's goal_alignment lens produced no report in 3 of 3 rounds — its turn ended mid-flight
+    and the last narration line was stored as the round's findings. Gap analysis then read a 72-char
+    stub as evidence that a 5417-char goal was unmet and invented 12 tasks for shipped features."""
+    assert _is_lens_report(
+        "All 44 tests pass. Now let me do manual CLI testing to probe edge cases.") is False
+    assert _is_lens_report("All 47 tests pass. Let me do manual CLI testing:") is False
+    # length alone is not enough — a long preamble is still a preamble
+    assert _is_lens_report("Now let me examine the codebase carefully. " * 20) is False
+    # a genuine report passes
+    assert _is_lens_report("The codebase is clean and well structured. " * 20) is True
+
+
+async def test_a_truncated_lens_does_not_sweep_or_reach_gap_analysis(db_url):
+    orch, _chat, harness, db = await _orch(db_url, tier_walk=False)
+    try:
+        eid, chan, root = await _effort(orch)
+        for _ in _LENSES:
+            harness.output_queue.append("All 44 tests pass. Now let me do manual CLI testing.")
+        r = await orch._drain_round(eid, chan, root, REPO, _delivery())
+        assert r["swept"] is False and r["new_tasks"] == 0
+        assert "could not run" in r["note"]
+        assert await orch._event_count(eid, "lens_report_truncated") == 3
+        assert await orch._event_count(eid, "gap_analysis") == 0   # never ran on a stub
+    finally:
+        await _shutdown(orch, db)
+
+
+async def test_gap_analysis_is_told_the_report_is_the_authority_on_what_exists(db_url):
+    """P11.4 — the question is 'what REMAINS', asked of a report that already observed what EXISTS.
+    The old framing ('what the goal requires that the report does not evidence') restated the goal
+    whenever the report was thin."""
+    orch, _chat, _harness, db = await _orch(db_url)
+    try:
+        eid, _c, _r = await _effort(orch)
+        orch.models._client.queue_text("none")
+        await orch._gap_analysis(eid, _REPORT, GOAL)
+        call = orch.models._client.calls[-1]
+        sys_p = call["system"]
+        assert "MAY ALREADY BE IMPLEMENTED" in sys_p
+        assert "treat anything it describes as DONE" in sys_p
+        assert "Do NOT list anything the report describes as existing" in sys_p
+        assert "WHAT THE CODEBASE ALREADY DOES" in call["user"]
+    finally:
+        await _shutdown(orch, db)
+
+
+async def test_decomposition_happens_before_gap_analysis_and_scopes_it(db_url):
+    """THE gym-009 SEQUENCING DEFECT: `_maybe_decompose` ran after `_gap_analysis`, so the children
+    could never scope the analysis that created them — every round asked about the whole project
+    goal. Now: sweep -> decompose -> SELECT a child -> analyse against that child's goal."""
+    orch, _chat, harness, db = await _orch(db_url, tier_walk=True)
+    try:
+        eid, chan, root = await _effort(orch)
+        big = ("The tool stores todos in todos.json and supports add and list. " * 40)
+        for _ in _LENSES:
+            harness.output_queue.append(big)
+        orch.models._client.queue_text(          # decomposition, from the REPORTS
+            "storage :: persisting todos to todos.json\n"
+            "commands :: the add/list/done subcommands\n"
+            "output :: rendering todos to the terminal")
+        orch.models._client.queue_text("write todos atomically")   # gap analysis
+        orch.models._client.queue_text("none")
+        orch.models._client.queue_text("none")
+        r = await orch._drain_round(eid, chan, root, REPO, _delivery())
+        node = await orch._scope_node(r["scope_node_id"])
+        assert node["depth"] > 0, "the round must work a CHILD scope, not the root"
+        assert node["effort_id"] == eid, "the child must be selectable by _ensure_scope_node"
+        # the decomposition call came BEFORE the gap-analysis call
+        kinds = [c["system"][:60] for c in orch.models._client.calls]
+        assert "identify the distinct parts" in kinds[0]
+        assert "report describing what a codebase" in kinds[1]
+        # ...and gap analysis was handed the CHILD's goal, not the project goal
+        gap_user = orch.models._client.calls[1]["user"]
+        assert GOAL not in gap_user
+    finally:
+        await _shutdown(orch, db)
+
+
+async def test_the_drain_planner_is_evaluative_and_gated(db_url):
+    """P11.2 — gym-009's planner did the whole implementation (6 min, 5 commits) before the
+    implementer was dispatched. The three lenses stay read-only every round with no enforcement,
+    because they ask for an assessment. The planner is now phrased the same way, plus plan_only."""
+    orch, _chat, harness, db = await _orch(db_url, tier_walk=False)
+    try:
+        eid, chan, root = await _effort(orch)
+        harness.output_queue.append("todo.py would need a delete subcommand; tests/ needs a case.")
+        out = await orch._drain_plan(eid, "- add a delete command")
+        assert out
+        w = [x for x in harness.wakes if "~plan" in (x.get("session_id") or "")][0]
+        assert w.get("plan_only") is True                  # the mechanical backstop
+        p = w["prompt"]
+        assert "this is just evaluative" in p              # the lens phrasing that actually works
+        assert "write a short report" in p
+        assert "implementation plan" not in p              # no imperative
+        assert GOAL not in p                               # the goal stays out of an evaluation
     finally:
         await _shutdown(orch, db)
