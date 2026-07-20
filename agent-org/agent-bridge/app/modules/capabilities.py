@@ -552,6 +552,58 @@ async def read_merge_base(
         return ""
 
 
+async def sha_is_ancestor(
+    github: GitHubApp, repo_url: str, ancestor_sha: str, descendant_sha: str, *,
+    api_base: str = "https://api.github.com", transport: httpx.BaseTransport | None = None,
+) -> bool | None:
+    """Is `ancestor_sha` reachable from `descendant_sha`? True / False / None (couldn't tell).
+
+    The delivery-integrity primitive behind P17 F13 and F2. GitHub's compare endpoint answers this
+    directly: `status` is `identical` or `ahead` when the first sha IS an ancestor of the second,
+    and `diverged`/`behind` when it is not.
+
+    Why it exists: the org's provenance check asked "is the declared BASE in my history?", which a
+    four-commits-stale workspace answers correctly. gym-015 round 5 published `1b04400` off
+    `0f375e0` while the branch head was `1ed9da6`, discarding four commits of delivered work with
+    a green suite and a PASSING base check. Head currency is a different question from base
+    ancestry, and only this one catches it. It also answers F2 — a reported hash that no longer
+    exists on the remote fails the same call.
+
+    Returns None (never False) when the remote can't be read: unverifiable is not refuted, and a
+    delivery must never be rejected because the API was unreachable."""
+    if not ancestor_sha or not descendant_sha:
+        return None
+    if ancestor_sha == descendant_sha:
+        return True
+    try:
+        owner, repo = parse_owner_repo(repo_url)
+    except ValueError:
+        return None
+    try:
+        token = await github.installation_token()
+    except GitHubAppError:
+        return None
+    base = api_base.rstrip("/")
+    h = _headers(token)
+    try:
+        async with httpx.AsyncClient(timeout=15.0, transport=transport) as c:
+            cmp = await c.get(
+                f"{base}/repos/{owner}/{repo}/compare/{ancestor_sha}...{descendant_sha}",
+                headers=h)
+            if cmp.status_code == 404:
+                return False          # one of the shas is not on the remote at all (F2)
+            if cmp.status_code != 200:
+                return None
+            status = (cmp.json() or {}).get("status") or ""
+            if status in ("identical", "ahead"):
+                return True
+            if status in ("diverged", "behind"):
+                return False
+            return None
+    except (httpx.HTTPError, ValueError):
+        return None
+
+
 async def read_branch_changes(
     github: GitHubApp, repo_url: str, branch: str, *, base_branch: str = "",
     api_base: str = "https://api.github.com", transport: httpx.BaseTransport | None = None,

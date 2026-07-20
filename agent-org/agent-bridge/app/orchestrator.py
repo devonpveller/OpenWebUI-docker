@@ -44,6 +44,7 @@ from .modules.capabilities import (
     read_branch_changes,
     read_default_branch_head,
     read_merge_base,
+    sha_is_ancestor,
     classify_agent_branches,
     close_pull_request,
     delete_branch,
@@ -97,6 +98,21 @@ _MENTION_RE = re.compile(r"^\s*@[\w.\-]+\s*")
 # A message is a "control" message (privileged, always answered) if it's a slash command
 # or one of the bare decision/kill verbs.
 _CONTROL_RE = re.compile(r"^(/|approve\b|modify\b|abort\b|kill\b|unkill\b)", re.I)
+# P17 F14 — a STOP instruction that misses the strict grammar must never be silently swallowed.
+# Live 2026-07-20: `POST /nl` with "Stop and abort effort-gym-015-todo-product. The gym diagnostic
+# run is complete and I do not want any further rounds, dispatches or pushes on it." returned
+# {"ok": true} and did NOTHING — `_CONTROL_RE` is anchored at `^` and the message opens with
+# "Stop and", so it fell through to the PO model, which took no action and logged no event. The
+# effort ran another full drain round seven minutes later. The terse "archive <id>" worked. The
+# more explicit, more human phrasing lost, which is the wrong way round for a stop.
+# Deliberately NOT auto-aborting on this looser shape: acting on a fuzzy stop is its own hazard
+# ("don't stop effort-x"). It ASKS, which is the one thing the silent path never did.
+# The id must not swallow sentence punctuation: `[\w.-]+` is greedy and captured the trailing
+# period of "…abort effort-x." as part of the id, so the lookup missed and the guard silently
+# did nothing — the very failure it exists to prevent. Ends on a word char or hyphen.
+_STOP_INTENT_RE = re.compile(
+    r"\b(stop|halt|abort|archive|cancel|shut\s+down|kill)\b[\s\S]{0,120}?"
+    r"\b(effort-[\w.-]*[\w-])", re.I)
 
 # Deterministic cues that a message is a WORK request (junk-intent repair, live 2026-07-05 miss:
 # a pasted build-error list junk-misfired the classifier twice and the fix request was dropped).
@@ -367,9 +383,14 @@ _LENS_PROJECT_DOCUMENTATION = (
     "does is the information helpful and how could the information be better written for you to be "
     "able to pick up the project where it left off?"
 )
+# The KEY of the only goal-aware lens. Named because it is load-bearing in two coupled places:
+# `_gap_analysis` consumes this report and nothing else, and `_drain_round` refuses to call a round
+# "swept" without it (P17 F3). A sweep that loses this lens has not compared the product to the
+# goal, however many other lenses reported.
+_LENS_GOAL_ALIGNMENT_KEY = "goal_alignment"
 # Order is the sweep order; `goal_alignment` runs first because P10.2 consumes its report.
 _LENSES: tuple[tuple[str, str], ...] = (
-    ("goal_alignment", _LENS_GOAL_ALIGNMENT),
+    (_LENS_GOAL_ALIGNMENT_KEY, _LENS_GOAL_ALIGNMENT),
     ("clean_code", _LENS_CLEAN_CODE),
     ("project_documentation", _LENS_PROJECT_DOCUMENTATION),
 )
@@ -408,6 +429,26 @@ def _is_lens_report(body: str) -> bool:
         return False
     # A report that opens by ANNOUNCING work it never got to is a preamble, however long.
     return not _NARRATION_RE.match(body)
+
+
+def _is_plan_reply(body: str) -> bool:
+    """Is this a PLAN, or a turn that ended before writing one? (P13.3)
+
+    The same discipline as `_is_lens_report`, but a plan is legitimately much shorter than a lens
+    report, so the lens's length floor would re-ask perfectly good plans. A plan is identified by
+    STRUCTURE first — the sections the gate asks for — and only falls back to length.
+
+    gym-011: the worker had implemented, tested and committed its work; the turn's final output was
+    `"Final test run and commit:"`. The gate adjudicated that fragment, called it "severely
+    incomplete", and rejected finished work three times until the effort blocked."""
+    body = (body or "").strip()
+    if not body:
+        return False
+    if re.search(r"^\s*(?:UNDERSTANDING|PLAN|WON'?T DO|RISKS)\s*:", body, re.I | re.M):
+        return True          # it has the requested structure — judge it on the merits
+    if _NARRATION_RE.match(body):
+        return False         # "now let me…", "final test run and commit:" — a preamble
+    return len(body) >= 200  # unstructured, but substantial enough to be a real answer
 
 
 _NOTHING_RE = re.compile(r"\s*(?:none|nothing|n/a)\b[\s.!]*(?:found|identified|required|needed)?[\s.!]*",
@@ -1188,6 +1229,63 @@ class Orchestrator:
                 select(func.count()).select_from(Event).where(
                     Event.effort_id == effort_id, Event.kind == kind))).scalar_one())
 
+    async def _last_event_payload(self, effort_id: str, kind: str) -> dict | None:
+        """The most recent payload for one event kind on one effort. Used by the delivery-ancestry
+        check (P17 F13) to recover the head this effort last published."""
+        async with self.db.session_factory() as s:
+            row = (await s.execute(
+                select(Event.payload).where(
+                    Event.effort_id == effort_id, Event.kind == kind)
+                .order_by(Event.id.desc()).limit(1))).first()
+        if not row or not row[0]:
+            return None
+        p = row[0]
+        return p if isinstance(p, dict) else None
+
+    async def _delivery_orphans_previous_head(
+        self, effort_id: str, repo: str, delivery: BranchDelivery,
+    ) -> str | None:
+        """P17 F13/F2 — has this delivery THROWN AWAY the head it previously published?
+
+        Returns the orphaned sha when the new head does not descend from the last one, else None.
+
+        gym-015 round 5 dispatched to a worker whose workspace was four commits stale. It committed
+        on that base, producing `1b04400` whose parent is `0f375e0` rather than the branch head
+        `1ed9da6` — silently dropping the quoting fix, the TypedDict, `pyproject.toml`,
+        `docs/architecture.md` and four tests (55 → 51). Nothing noticed: the suite passed at
+        51/51, and the org's provenance check PASSED because it asks the wrong question —
+
+            git rev-list -n 500 HEAD | grep -q ^<base_sha>     ← true on a 4-commits-stale HEAD
+
+        Base ancestry is not head currency. A stale workspace answers "is the base in my history?"
+        perfectly well. The only question that catches this is whether the PREVIOUS head is an
+        ancestor of the NEW one, which is also exactly the check F2 needs (a reported hash that no
+        longer exists fails it too). That round survived on merge luck — a later merge happened to
+        reconcile both sides — which is not a mechanism.
+
+        Fails OPEN: an unreadable remote or a first delivery is never an orphan claim."""
+        new_head = (delivery.head_sha or "").strip()
+        if not new_head or not delivery.verifiable:
+            return None
+        prev = await self._last_event_payload(effort_id, "effort_published")
+        prev_head = ((prev or {}).get("head_sha") or "").strip()
+        if not prev_head or prev_head == new_head:
+            return None
+        # No `github_app_enabled` guard: `sha_is_ancestor` already returns None on GitHubAppError,
+        # and this must fail OPEN anyway — an unreadable remote is never an orphan claim.
+        if self.github is None:
+            return None
+        try:
+            ok = await sha_is_ancestor(
+                self.github, repo, prev_head, new_head,
+                api_base=self.s.github_api_base, transport=self._gh_transport)
+        except Exception as exc:  # noqa: BLE001 — unverifiable is NOT an orphan
+            log.debug("ancestry check failed for %s: %s", effort_id, exc)
+            return None
+        if ok is False:
+            return prev_head
+        return None
+
     # ── §4 TIERED SCOPE TREE — the operator's composition layer ──────────────
     async def add_scope_node(self, project_slug: str, title: str, scope: str, *,
                              parent_id: str | None = None, contract: str | None = None) -> str | None:
@@ -1391,7 +1489,35 @@ class Orchestrator:
                 parts.append((title, scope))
         if len(parts) < 2:
             return []
-        kids = await self.decompose_scope(node_id, parts[:5])
+        # P17 F9 — A CHILD MUST BE SMALLER THAN ITS PARENT. gym-015 decomposed
+        # "Data persistence layer :: handles loading, saving, atomic file writes, and robust
+        # parsing" into a child "data_layer :: handles loading, saving, atomic file writes,
+        # database path configuration, and malformed data resilience" — a restatement, not a
+        # narrowing. The tier walk descended a level, narrowed nothing, and spent a round doing it.
+        # Nothing checked, because `decompose_scope` accepts whatever the model returns.
+        # Cheap, high-precision test: near-total token overlap with the parent AND no new
+        # constraint terms. A genuinely narrower child names something the parent did not.
+        parent_words = {w for w in re.findall(r"[a-z]{4,}", (n["scope"] or "").lower())}
+        narrowed: list[tuple[str, str]] = []
+        for title, scope in parts[:5]:
+            words = {w for w in re.findall(r"[a-z]{4,}", scope.lower())}
+            novel = words - parent_words
+            # A child that adds nothing (or almost nothing) to its parent's vocabulary is a
+            # paraphrase. Two novel content words is a deliberately low bar — the aim is to catch
+            # "data persistence layer" -> "data_layer", not to police wording.
+            if words and len(novel) < 2 and len(words & parent_words) >= max(3, len(words) - 1):
+                await self.audit.log("scope_child_rejected_not_narrower", effort_id=effort_id,
+                                     payload={"parent": node_id, "title": title[:80],
+                                              "scope": scope[:160]})
+                continue
+            narrowed.append((title, scope))
+        if len(narrowed) < 2:
+            # Everything the model returned restated the parent — treat this node as ATOMIC rather
+            # than burning a tier on a copy of itself.
+            await self.audit.log("scope_decompose_declined", effort_id=effort_id,
+                                 payload={"parent": node_id, "returned": len(parts)})
+            return []
+        kids = await self.decompose_scope(node_id, narrowed[:5])
         if kids:
             await self.audit.log("scope_decomposed_live", effort_id=effort_id,
                                  payload={"parent": node_id, "children": len(kids),
@@ -1588,7 +1714,12 @@ class Orchestrator:
                     # information, so it keeps its original `round_no` and does not count toward
                     # propagation — otherwise a task the implementer keeps failing would
                     # re-propagate forever and the loop could never terminate.
-                    if existing.status == "done":
+                    #
+                    # `dispatched` reopens for exactly the same reason as `done` (P17 F12 split the
+                    # two): both mean "closed, and the sweep can still see the gap". Only `dropped`
+                    # stays shut — that is a deliberate decision that the item is not wanted, and
+                    # re-deriving it must not silently overturn the operator's call.
+                    if existing.status in ("done", "dispatched"):
                         existing.status = "open"
                         existing.closed_at = None
                         await s.commit()
@@ -1622,13 +1753,24 @@ class Orchestrator:
             return []
 
     async def close_task(self, task_id: str, *, status: str = "done") -> bool:
-        """Close one task (`done` — worked; `dropped` — no longer relevant)."""
+        """Close one task.
+
+        `done` — evidenced as worked. `dropped` — no longer relevant. `dispatched` — handed to an
+        implementer, outcome NOT yet known (P17 F12).
+
+        The `dispatched` state exists because the drain closes its queue at HAND-OVER, before the
+        implementer has run. Recording that as `done` made the org assert completion it had never
+        observed: in gym-015 a worker explicitly declined two out-of-scope tasks ("Not touched:
+        outside data_layer scope") and both were already marked `done` — one of them,
+        `st-19ee694` (remove the broad `except Exception` in `cmd_repl`), is still not done on the
+        delivered branch. All three states are closed for dispatch purposes, so nothing is
+        re-dispatched forever; only the CLAIM differs, and the claim is what the audit reads."""
         try:
             async with self.db.session_factory() as s:
                 t = await s.get(ScopeTask, task_id)
                 if t is None or t.status != "open":
                     return False
-                t.status = status if status in ("done", "dropped") else "done"
+                t.status = status if status in ("done", "dropped", "dispatched") else "done"
                 t.closed_at = _now_iso()
                 await s.commit()
         except Exception as exc:  # noqa: BLE001
@@ -1676,14 +1818,27 @@ class Orchestrator:
         mine = await self.list_open_tasks(effort_id=effort_id)
         if not node_id:
             return mine
-        foreign: set[str] = set()
-        for kid in await self._scope_children(node_id):
-            if kid["effort_id"] and kid["effort_id"] != effort_id:
-                foreign.add(kid["id"])
-            for grandkid in await self._scope_children(kid["id"]):
-                if grandkid["effort_id"] and grandkid["effort_id"] != effort_id:
-                    foreign.add(grandkid["id"])
-        return [t for t in mine if t["scope_node_id"] not in foreign]
+        # P13.1 — THE BRIEF AND THE BORDER MUST DESCRIBE THE SAME WORK. Until now this returned
+        # every task belonging to the EFFORT while `_drain_iterate` injected the context of the
+        # SELECTED SCOPE, so the worker was told "work these 12 tasks" and "your scope is JSON data
+        # persistence" in the same brief. gym-011 (2026-07-19) did exactly what `_scope_context`
+        # prescribes — worked its 5 persistence tasks, wrote `ESCALATE: REPL scope worker needed`
+        # for the rest — and the plan gate, which judges against the GOAL, rejected that three times
+        # and BLOCKED the effort. Nothing misbehaved; the instructions were incoherent.
+        #
+        # Dispatch is now exactly the selected scope's tasks. A sibling scope's work stays queued
+        # until the walk selects that scope, which is the whole point of the tier walk: bounded
+        # work, one tier at a time.
+        own = [t for t in mine if t["scope_node_id"] == node_id]
+        if own:
+            return own
+        # No task filed against this node yet (e.g. the round that created the tree). Fall back to
+        # the effort's unrouted tasks — never a sibling's, and never one another effort owns.
+        kid_ids = {k["id"] for k in await self._scope_children(node_id)}
+        for kid in list(kid_ids):
+            kid_ids |= {g["id"] for g in await self._scope_children(kid)}
+        return [t for t in mine if t["scope_node_id"] in (None, node_id)
+                and t["scope_node_id"] not in kid_ids]
 
     async def _record_lens_report(self, effort_id: str, lens: str, body: str, *, round_no: int,
                                   scope_node_id: str | None = None) -> str | None:
@@ -1878,11 +2033,26 @@ class Orchestrator:
                     continue
                 await self.audit.log("stall_recovered", effort_id=eid,
                                      payload={"reason": "worker_silent", "n": n + 1})
+                # P16 — A RECOVERED TURN MUST START FROM THE LAST COMMITTED STATE. gym-014
+                # (2026-07-20): a worker abandoned mid-edit leaving `tests/test_todo.py` modified
+                # and the suite FAILING (2 errors). The recovery re-engaged onto that same tree, so
+                # the next worker inherited a broken suite it had not caused, spent its whole turn
+                # chasing it, and abandoned too — three turns lost to one partial edit. The org
+                # then told the operator "something structural is blocking it… not your code",
+                # which was wrong: the daemon, queue and GPU were all healthy.
+                #
+                # Uncommitted work from a turn that DIED is not work — it is wreckage the next
+                # worker cannot distinguish from intent. Discard it. Anything committed survives,
+                # which is the line that matters.
+                discarded = await self._discard_uncommitted(url, eid)
                 await self._reengage(
                     [eid], mgmt_channel=mgmt, mgmt_thread=self._mgmt_thread_of(eid),
                     reply_prefix=(f"🔧 **{eid}**'s worker went silent mid-turn (no progress for "
                                   f"~{int(self.s.worker_silence_s // 60)} min) — I stopped the hung "
-                                  f"turn and re-engaged it (nothing was lost)."))
+                                  f"turn and re-engaged it. Committed work is intact"
+                                  + ("; its half-finished uncommitted edits were discarded so the "
+                                     "next turn starts from a clean, known state."
+                                     if discarded else ".")))
         if alive:
             return                                            # a worker is genuinely progressing
         for e in await self.gate.snapshot(open_only=True):
@@ -1927,10 +2097,19 @@ class Orchestrator:
             if n >= self.s.stall_max_recoveries:
                 await self.audit.log("stall_escalated", effort_id=eid,
                                      payload={"idle_min": mins, "recoveries": n})
+                # P16 — DON'T NAME A CAUSE YOU HAVEN'T CHECKED. This used to assert "something
+                # structural is blocking it (a repo, clone, or tool problem), not your code".
+                # In gym-014 that was wrong on every count — the daemon answered 200, the queue had
+                # free permits and zero held connections, and the GPU and containers were healthy.
+                # The real cause was a half-finished edit left by an abandoned turn. Sending the
+                # operator a confident wrong diagnosis is worse than sending none: it aims their
+                # attention at the wrong layer. Same rule as P13.4.
                 body = (f"🧰 **{eid}** stalled mid-dispatch and my {n} auto-recoveries didn't take — "
-                        f"it's been silent ~{mins} min. Something structural is blocking it (a repo, "
-                        f"clone, or tool problem), not your code. I've stopped auto-retrying to avoid "
-                        f"a loop — say **“re-run it”** to try again once the cause is clear.")
+                        f"it's been silent ~{mins} min. I have NOT identified the cause. Common "
+                        f"ones: a turn dying mid-edit, an unreachable worker, or a repo/clone "
+                        f"problem. I've stopped auto-retrying to avoid a loop — say **“re-run it”** "
+                        f"to try again, and its workspace is reset to the last committed state "
+                        f"first.")
                 await self.comms.post(Intent.escalation, body, effort_id=eid)
                 await self.comms.post(Intent.operator_reply, body,
                                       thread_id=self._mgmt_thread_of(eid))
@@ -1938,11 +2117,18 @@ class Orchestrator:
                 continue
             await self.audit.log("stall_recovered", effort_id=eid,
                                  payload={"idle_min": mins, "n": n + 1, "last_kind": kind})
+            # P16 — the SECOND recovery path, same rule: re-engaging onto a dead turn's
+            # half-finished tree is what cost gym-014 three turns. No worker url is in scope here
+            # (this path fires on idleness, not on a specific hung daemon), so the discard runs
+            # against the effort's current workspace.
+            discarded = await self._discard_uncommitted("", eid)
             await self._reengage(
                 [eid], mgmt_channel=mgmt, mgmt_thread=self._mgmt_thread_of(eid),
                 reply_prefix=(f"🔧 **{eid}** went quiet for ~{mins} min with no progress after a "
                               f"dispatch — a focus or step stalled without reporting. "
-                              f"Auto-re-engaging it now (nothing was lost)."))
+                              f"Auto-re-engaging it now. Committed work is intact"
+                              + ("; half-finished uncommitted edits were discarded so it restarts "
+                                 "from a clean, known state." if discarded else ".")))
 
     async def _maybe_auto_recover_infra_freeze(self, eid: str, mgmt: str | None) -> None:
         """A FROZEN effort whose concern is an ENVIRONMENT/WORKSPACE symptom (not a real code
@@ -2982,6 +3168,23 @@ class Orchestrator:
         if _CONTROL_RE.match(_ctrl):
             await self._handle_command(_ctrl, channel_id, thread_id,
                                        user_id=user_id or "operator-api")
+            return
+        # P17 F14 — stop-shaped but off-grammar. The strict path above needs the message to OPEN
+        # with the verb; anything else reached a model that could silently do nothing. Answer with
+        # the exact command instead of guessing, and leave an event so the drop is never invisible.
+        _stop = _STOP_INTENT_RE.search(_ctrl)
+        if _stop and not _DECISION_RE.match(_ctrl):
+            eid = _stop.group(2)
+            await self.audit.log("operator_intent_unmatched", effort_id=eid,
+                                 payload={"kind": "stop", "message": _ctrl[:400]})
+            await self.comms.post(
+                Intent.operator_reply,
+                f"🛑 That reads as a request to STOP **{eid}**, but it didn't match the command "
+                f"grammar, so **I have not stopped anything**. Send exactly `abort {eid}` and I "
+                f"will archive it (machine loops treat that as a full stop). If you meant "
+                f"something else, say so and I'll act on it.",
+                thread_id=thread_id,
+            )
             return
         # PURE standing-intent statements are CONFIG, never work (live 2026-07-15, the gym
         # 'ouroboros': the model minted an effort_name from "in gym, set the standing intent: …",
@@ -5039,11 +5242,46 @@ class Orchestrator:
         the right fix in its container, attempt 2 reverted the architecture, attempt 3 would have
         known about neither). Generic: matches on the operator's own pasted error text."""
         def _sig(ln: str) -> bool:
-            # a "signature" line: long enough to be distinctive AND shaped like tool output
-            # (compiler/build lines carry quotes, paths or error keywords — plain prose doesn't)
+            """A "signature" line: long enough to be distinctive AND genuinely shaped like TOOL
+            OUTPUT.
+
+            P12.2 — the old test accepted any long line containing `'`, `\\` or `/`, on the theory
+            that "plain prose doesn't". English prose is full of both. On gym-010's goal that
+            passed **8 of 23 lines**, among them `Beyond add/list/done,`,
+            `levels (low/medium/high), due dates, …` and `edit a todo's text`. Those were then
+            matched against other efforts' goals — and because the gym scenarios carry
+            byte-identical goal text by design (so rounds stay comparable), every line matched and
+            a first-ever run was told three prior attempts had failed at "this same error".
+
+            A real compiler/runtime line carries structure, not just punctuation: a file:line, a
+            stack frame, a tool code, or an error word next to a path/symbol."""
             s = ln.strip()
-            return (len(s) >= 30
-                    and bool(_ERROR_REPORT_RE.search(s) or "'" in s or "\\" in s or "/" in s))
+            if len(s) < 30:
+                return False
+            if re.search(r"[\w./\\-]+[(:]\d+[,:)]", s):        # foo.cs(42,17): / foo.py:42:
+                return True
+            if re.search(r"^\s*(?:at\s+\w[\w.<>]*\(|File\s+\"[^\"]+\",\s+line\s+\d+)", s):
+                return True                                     # stack frame (CLR / Python)
+            # Tool/compiler diagnostic codes. The bare form matters: real MSBuild output is
+            # `MSB3202: The project file … was not found` with no preceding "error", and
+            # `_ERROR_REPORT_RE` does not cover "was not found" — so requiring an error word here
+            # would silently drop the exact class of failure this org hits most (the murder/atlas
+            # gitlink breakages). 2-5 uppercase letters + 3-5 digits does not occur in prose.
+            if re.search(r"\b(?:error|warning)\s+[A-Z]{1,4}\d{2,5}\b|\berror\s*:|"
+                         r"\b[A-Z]{2,5}\d{3,5}\b", s):
+                return True                                     # CS0246 / MSB3202 / error:
+            if _ERROR_REPORT_RE.search(s) and re.search(
+                    r"[\w-]+\.[A-Za-z]{1,5}\b|[\w-]+/[\w./-]+|\b\w+\.\w+\.\w+\b|'[^']+'", s):
+                return True                                     # error word + path/symbol/quoted
+            # A QUOTED SYMBOL INTRODUCING A DIAGNOSTIC — `'Game.OnExiting(object, EventArgs)': no
+            # suitable method found to override`. Real C#/MSBuild output, and it carries none of
+            # the error words in `_ERROR_REPORT_RE` ("no suitable method found" is not "cannot
+            # find"). Requiring one would drop it, which is how the first cut of this filter broke
+            # `test_error_report_goal_gets_verification_and_attempt_history`. Prose does not put a
+            # dotted/parenthesised symbol in quotes and follow it with a colon.
+            if re.search(r"'[^']*[.(][^']*'\s*:", s):
+                return True
+            return False
 
         lines = {ln.strip().lower() for ln in request.splitlines() if _sig(ln)}
         if not lines:
@@ -5053,6 +5291,13 @@ class Orchestrator:
                          key=lambda e: e.get("updated_at") or "", reverse=True)
         for e in efforts:
             if e["id"] == effort_id or e["id"].startswith("__"):
+                continue
+            # P12.3 (b) — an ABORTED effort was WITHDRAWN, not attempted-and-failed. There is
+            # nothing to "build on" and nothing was rejected, so offering it as a prior attempt is
+            # noise. `done` stays eligible: a delivered-but-unmerged attempt is exactly the case
+            # this block exists for. (gym-010 listed `effort-gym-004d-todo-product`, which is
+            # aborted — this scan passes `open_only=False`, so lifecycle was never consulted.)
+            if (e.get("lifecycle") or "").lower() == "aborted":
                 continue
             try:
                 _, goal, _ = await self.charters.current_goal(e["id"])
@@ -5065,26 +5310,37 @@ class Orchestrator:
                 break
         if not matches:
             return ""
-        out = ["\n\nPRIOR ATTEMPTS AT THIS SAME ERROR (the operator reports it AGAIN — nothing "
-               "delivered so far resolved it):"]
+        # P12.3 (a) — AN UNREACHABLE BRANCH DISQUALIFIES AN EFFORT; it does not merely reword it.
+        # Previously a missing branch just changed the text to "never reached", left the entry in
+        # the list, and still emitted "First fetch and READ those branches". That inverts the
+        # meaning of absence: there is nothing to read. It also makes an arena wipe SELF-ARMING —
+        # deleting agent branches is exactly what makes every prior effort look like an
+        # unpublished failed attempt (gym-010: all three listed branches had just been deleted, and
+        # the worker duly fetched them, failed, and then adopted `agent/effort-gym-008-todo-product`
+        # as its own working branch).
+        entries: list[str] = []
         for e in matches:
             branch = self._effort_branch(e["id"])
             repo = await self._effort_repo(e["id"]) or ""
-            fact = "no verifiable delivery"
-            if repo and self.github is not None and self.s.github_app_enabled:
-                try:
-                    d = await read_branch_delivery(
-                        self.github, repo, branch,
-                        api_base=self.s.github_api_base, transport=self._gh_transport)
-                    if d.verifiable and d.exists:
-                        nf = d.files_changed if d.files_changed >= 0 else "?"
-                        fact = (f"branch `{branch}` on `{self._norm_repo(repo)}` — "
-                                f"{d.ahead} commit(s), {nf} file(s) changed, UNMERGED")
-                    elif d.verifiable:
-                        fact = f"branch `{branch}` never reached `{self._norm_repo(repo)}`"
-                except Exception:  # noqa: BLE001
-                    pass
-            out.append(f"- `{e['id']}` (project `{e.get('project') or '?'}`): {fact}")
+            if not (repo and self.github is not None and self.s.github_app_enabled):
+                continue          # cannot verify reachability ⇒ cannot claim it is worth reading
+            try:
+                d = await read_branch_delivery(
+                    self.github, repo, branch,
+                    api_base=self.s.github_api_base, transport=self._gh_transport)
+            except Exception:  # noqa: BLE001
+                continue
+            if not (d.verifiable and d.exists):
+                continue          # deleted / never pushed / unverifiable ⇒ nothing to build on
+            nf = d.files_changed if d.files_changed >= 0 else "?"
+            entries.append(
+                f"- `{e['id']}` (project `{e.get('project') or '?'}`): branch `{branch}` on "
+                f"`{self._norm_repo(repo)}` — {d.ahead} commit(s), {nf} file(s) changed, UNMERGED")
+        if not entries:
+            return ""             # a header with an empty list is worse than no header
+        out = ["\n\nPRIOR ATTEMPTS AT THIS SAME ERROR (the operator reports it AGAIN — nothing "
+               "delivered so far resolved it):"]
+        out += entries
         out.append(
             "First fetch and READ those branches, then — IN THIS SAME TURN — implement, verify "
             "and publish the fix. Orientation is not completion: do NOT end your turn after "
@@ -5669,7 +5925,7 @@ class Orchestrator:
         if result is None:
             return
         blk = self._extract_blocker(result.output or "")
-        if blk:
+        if blk and not await self._route_escalation(effort_id, result.output or ""):
             await self._elevate_blocker(effort_id, blk)
             return
         # The worker pushed the fix to the VENDORED repo's own remote — verify + gate + finish.
@@ -6046,13 +6302,21 @@ class Orchestrator:
             # one revision with the reason → still misaligned → honest stop BEFORE wasted work.
             # The approved plan stays in the session, so execution continues from it.
             if await self._worker_plan_required(effort_id):
-                if not await self._worker_plan_gate(
-                        effort_id, channel_id, root_post_id, goal, repo, repo_token,
-                        upstream, upstream_token):
+                approved_plan = await self._worker_plan_gate(
+                    effort_id, channel_id, root_post_id, goal, repo, repo_token,
+                    upstream, upstream_token)
+                if approved_plan is None:
                     return          # blocked/steered/escalated — the gate posted the state
+                # P17 F16 — the plan is CARRIED, not remembered. It was written in its own `~plan`
+                # session (so it was observed rather than recalled), which means this session has
+                # never seen it. Quoting it here is what lets those two steps have different
+                # sessions at all; "your plan (previous turn in this session)" silently degraded to
+                # "whatever this session happens to recall" the moment they diverged.
                 steps[0] += (
-                    "\n\nYour plan (previous turn in this session) was REVIEWED and APPROVED — "
-                    "execute exactly that plan now.")
+                    "\n\nYour plan below was REVIEWED and APPROVED — execute exactly that plan "
+                    "now. It was written in a separate read-only turn, so re-read any file you "
+                    "need rather than assuming what is in front of you.\n\n"
+                    f"--- APPROVED PLAN ---\n{approved_plan.strip()[:4000]}\n--- END PLAN ---")
             last = None
             for i, step in enumerate(steps, 1):
                 if i < start_step:   # resuming after a park — earlier steps already ran
@@ -6071,6 +6335,29 @@ class Orchestrator:
                 # on non-delivery, re-engages once then escalates — it does NOT rubber-stamp "done".
                 delivery = await self._publish_and_verify(effort_id, channel_id, root_post_id, repo)
                 if delivery is None:   # verified-undelivered after a re-engage → escalated, NOT done
+                    return
+                # P17 F13/F2 — a delivery that ORPHANS the head we last published has thrown work
+                # away. Never close on it; hand it to the human with the sha that went missing.
+                orphaned = await self._delivery_orphans_previous_head(effort_id, repo, delivery)
+                if orphaned:
+                    await self.audit.log(
+                        "delivery_orphans_head", effort_id=effort_id,
+                        payload={"previous_head": orphaned, "new_head": delivery.head_sha,
+                                 "branch": delivery.branch})
+                    msg = (
+                        f"⛔ **{effort_id}** — the new delivery **does not descend from the work "
+                        f"already published**. `{delivery.head_sha[:8]}` does not have "
+                        f"`{orphaned[:8]}` in its history, so everything committed since that "
+                        f"point is missing from this branch.\n\n"
+                        f"This is what a stale worker workspace looks like: the base-sha check "
+                        f"still passes (the base IS in history) while several commits of "
+                        f"delivered work are silently dropped. **I have not closed this effort.** "
+                        f"The published branch `{delivery.branch}` needs a human look before "
+                        f"anything merges.")
+                    await self.comms.post(Intent.escalation, msg, effort_id=effort_id)
+                    await self.comms.post(Intent.operator_reply, msg,
+                                          thread_id=self._mgmt_thread_of(effort_id))
+                    await self.router.update_effort_card(effort_id, "needs-attention")
                     return
                 await self._finish_effort(effort_id, last, delivery=delivery)
             else:
@@ -6129,6 +6416,16 @@ class Orchestrator:
                         upstream=None, upstream_token=None):
         """Run one plan step = one checkpoint. Returns the WorkResult to continue, or None to STOP
         (the failure/flag/deviation handler has already posted + frozen where required)."""
+        # P13.5 — ABORT MUST BITE MID-RUN, NOT ONLY AT ENTRY. `delegate` checks `_is_aborted` when
+        # it starts, but an abort issued WHILE a delegate is running was never re-read, so the
+        # in-flight call walked its remaining steps regardless. gym-010: aborted at ~14:11, then
+        # `worker_acquire` at 14:15, 14:20, 14:24, 14:27… — roughly 19 minutes of worker turns on
+        # an effort the operator had stopped, with no `aborted_dispatch_suppressed` until the drain
+        # path happened to check. Every step is a dispatch; every dispatch re-reads the abort.
+        if await self._is_aborted(effort_id):
+            await self.audit.log("aborted_dispatch_suppressed", effort_id=effort_id,
+                                 payload={"stage": "run_step", "step": i})
+            return None
         header = f"▶ **step {i}/{n}**: {step[:180]}" if n > 1 else "⏳ worker dispatched. Working…"
         await self.comms.post(Intent.effort_dispatch, header, effort_id=effort_id)
         cp_id = f"{effort_id}:cp{i}"
@@ -6598,6 +6895,148 @@ class Orchestrator:
         self._spawn(self._run_in_host_context(effort_id))
         return True
 
+    _ESCALATE_RE = re.compile(r"^\s*ESCALATE\s*:\s*(.+)$", re.I | re.M)
+
+    async def _discard_uncommitted(self, worker_url: str, effort_id: str) -> bool:
+        """P16 — drop a dead turn's uncommitted edits so the next turn starts from a known state.
+
+        Returns True when something was actually discarded. COMMITTED work is never touched: the
+        commit is the worker's statement that a change is finished, and an abandoned turn made no
+        such statement about its working tree. `checkout -- .` reverts tracked edits and `clean -fd`
+        drops untracked files; both are scoped to the workspace and are proxy-legal (unlike
+        `reset --hard`). Never raises — a failed cleanup must not block the recovery it serves.
+
+        P17 F6 — when `worker_url` is known this MUST run against that worker. The original went
+        through `router.exec_check`, which calls `scheduler.acquire(...)` and therefore cleans
+        whichever worker happens to be free. gym-015: the hung worker was worker-2 (tree dirty with
+        `M todo.py`, `M tests/test_todo.py`); the discard ran on worker-1, which was already clean;
+        `stall_tree_discarded` never fired and the wreckage stayed exactly where it was. The
+        recovery that round succeeded in spite of this, not because of it. `run_check` takes the
+        base URL directly, so a known worker is cleaned deterministically; the idle path (no URL in
+        scope) still falls back to the pool."""
+        cmd = ("cd /workspace && git status --porcelain | head -20 && "
+               "git checkout -- . 2>/dev/null; git clean -fd 2>/dev/null; "
+               "echo DISCARD-DONE")
+        try:
+            if worker_url:
+                # TARGETED: this is the worker that hung, so this is the tree that is dirty.
+                _exit, out, _timed = await self.router.harness.run_check(
+                    worker_url, cmd, timeout=120)
+            else:
+                # Idle-stall path — no specific daemon is implicated; clean the effort's workspace
+                # via the pool. Still worth doing, just not attributable to one worker.
+                _exit, out, _timed = await self.router.exec_check(
+                    effort_id, command=cmd, session_id=f"{effort_id}~clean",
+                    repo=None, repo_token=None, timeout=120,
+                )
+        except Exception as exc:  # noqa: BLE001 — cleanup is best-effort, never a recovery blocker
+            log.debug("uncommitted discard failed for %s: %s", effort_id, exc)
+            return False
+        # `git status --porcelain` emits `XY<space><path>`, X/Y from a fixed status alphabet. Match
+        # that shape exactly — a looser `^\s*[?MADRU]` also matches the DISCARD-DONE sentinel on
+        # its leading `D` and reports a clean tree as dirty.
+        dirty = bool(out and re.search(r"^[ ?MADRUC][ ?MADRUC]\s+\S", out, re.M))
+        if dirty:
+            await self.audit.log("stall_tree_discarded", effort_id=effort_id,
+                                 payload={"worker": worker_url, "status": (out or "")[:400]})
+        return dirty
+
+    async def _route_escalation(self, effort_id: str, output: str) -> int:
+        """P14.1 — A SIBLING-SCOPE HANDOFF IS ROUTING, NOT A HUMAN QUESTION.
+
+        `_scope_context` tells a bounded worker to write `ESCALATE: <what you need and why>` when
+        the work is outside its border, and `_escalation_target` was built in P10.6 to say who owns
+        the adjacent scope. Nothing connected the two: an ESCALATE was treated as a generic blocker,
+        so it froze the effort and asked the operator. gym-012 (2026-07-19) did everything right —
+        completed its in-scope task, escalated a test-assertions task that had been mis-filed into
+        the persistence scope — and the org froze on `ambiguous_scope` with a four-child tree
+        sitting right there. With a bounded tree, that means the org can never work its own
+        decomposition unaided.
+
+        Re-file each escalated task into the sibling scope whose text best matches it (else the
+        parent), leave it OPEN, and let the tier walk pick it up. Returns how many were routed; 0
+        means nothing matched and the caller should elevate to a human as before — a genuine
+        cross-project escalation still reaches the operator."""
+        marks = [m.group(1).strip() for m in self._ESCALATE_RE.finditer(output or "")]
+        if not marks:
+            return 0
+        node_id = await self._ensure_scope_node(effort_id) if self.s.drain_tier_walk else None
+        if not node_id:
+            return 0
+        n = await self._scope_node(node_id)
+        parent_id = (n or {}).get("parent_id")
+        siblings = await self._scope_children(parent_id) if parent_id else []
+        candidates = [k for k in siblings if k["id"] != node_id]
+        if not candidates:
+            candidates = await self._scope_children(node_id)   # a root escalating into its children
+        if not candidates:
+            return 0
+        proj = await self._effort_project(effort_id) or ""
+        routed = 0
+        for mark in marks:
+            target = await self._best_scope_for(mark, candidates)
+            if not target:
+                continue
+            # The escalated work is usually ALREADY queued in the wrong scope (that is why the
+            # worker met it at all) — move it rather than duplicating it.
+            moved = await self._refile_task(effort_id, mark, target)
+            if not moved:
+                res = await self.add_task(mark[:2000], project_slug=proj, scope_node_id=target,
+                                          effort_id=effort_id, source_lens="escalation",
+                                          round_no=await self._drain_round_no(effort_id))
+                moved = bool(res)
+            if moved:
+                routed += 1
+                await self._reopen_scope(target, reason=mark[:200], effort_id=effort_id)
+                await self.audit.log("escalation_routed", effort_id=effort_id,
+                                     payload={"from": node_id, "to": target, "mark": mark[:200]})
+        if routed:
+            await self.comms.post(
+                Intent.worker_activity,
+                f"↔️ **Escalation routed** — {routed} item(s) handed to the adjacent scope that "
+                f"owns them. No operator action needed; the tier walk works them in turn.",
+                effort_id=effort_id)
+        return routed
+
+    async def _best_scope_for(self, text: str, candidates: list[dict]) -> str | None:
+        """Which candidate scope owns this text. Lexical overlap on distinctive words — the same
+        conservative posture as `_seam_owner`: no clear winner means no route, and the caller
+        falls back to a human rather than guessing."""
+        words = {w for w in re.split(r"[^a-z0-9]+", (text or "").lower())
+                 if len(w) >= 4 and w not in _SCOPE_STOPWORDS}
+        if not words:
+            return None
+        best, best_score = None, 0
+        for k in candidates:
+            blob = f"{k.get('title','')} {k.get('scope','')}".lower()
+            score = sum(1 for w in words if re.search(rf"\b{re.escape(w)}", blob))
+            if score > best_score:
+                best, best_score = k["id"], score
+        return best if best_score >= 2 else None
+
+    async def _refile_task(self, effort_id: str, text: str, target_node: str) -> bool:
+        """Move an already-queued task to the scope that owns it, keeping it OPEN. Matched on
+        distinctive-word overlap with the task body — the escalation text paraphrases the task."""
+        words = {w for w in re.split(r"[^a-z0-9]+", (text or "").lower()) if len(w) >= 5}
+        if not words:
+            return False
+        try:
+            async with self.db.session_factory() as s:
+                rows = (await s.execute(
+                    select(ScopeTask).where(ScopeTask.effort_id == effort_id))).scalars().all()
+                for r in rows:
+                    body = (r.body or "").lower()
+                    if sum(1 for w in words if w in body) < 2:
+                        continue
+                    r.scope_node_id = target_node
+                    r.status = "open"          # escalated work is NOT done
+                    r.closed_at = None
+                    await s.commit()
+                    return True
+        except Exception as exc:  # noqa: BLE001 — routing must never break a dispatch
+            log.debug("task refile failed for %s: %s", effort_id, exc)
+        return False
+
     async def _elevate_blocker(self, effort_id: str, blk: dict) -> None:
         """The PM's job the mechanical monitor skipped: HEAR the worker's constraint and surface it
         to the operator with a synthesized read + an actionable next step, keeping the effort OPEN
@@ -6746,11 +7185,25 @@ class Orchestrator:
             n = await self._scope_node(node_id)
             if n and (n.get("depth") or 0) > 0:
                 scope_ctx = await self._scope_context(node_id)
+        # P15.5 — THE COMMIT IS THE HANDOFF. The operator's review of gym-013's history scored
+        # intent clarity 5/10 and context linking 2/10: the commits said WHAT changed and never
+        # WHY, and never referenced the goal, the scenario or the acceptance check that motivated
+        # them — all of which the org holds and simply never passed on. The requirement, in the
+        # operator's words: "the commit history should be a traceable record of the agent's
+        # reasoning — not just its output."
+        commit_brief = (
+            "\n\nWHEN YOU COMMIT: the message is how the next worker inherits your reasoning.\n"
+            "Subject: imperative, naming the component you changed.\n"
+            "Body: state WHY before what — the goal or check this serves, the decision you took "
+            "and what you rejected, and anything a later reader would otherwise have to "
+            "reverse-engineer from the diff. Name the file/function the change lands in. End with "
+            "the verification you ran and its result."
+        )
         goal = (
             f"Work the following tasks on the existing branch. These are the outstanding items for "
             f"this scope — implement them, commit, and push.\n\nTASKS:\n{listed}"
             + (f"\n\nPLAN:\n{plan}" if plan else "")
-            + scope_ctx
+            + scope_ctx + commit_brief
         )
         # DISPATCH, DON'T STRAND. `_iterate_after` is drained by `delegate`'s finally — but
         # `_finish_effort` is ALSO reached from `_burndown_loop` and `_run_in_host_context`, where
@@ -6763,12 +7216,25 @@ class Orchestrator:
             self._iterate_after[effort_id] = goal
         else:
             self._spawn(self.delegate(effort_id, channel_id, root, goal))
-        # Close what we just handed over. The EVIDENCE that a task is actually done is the NEXT
-        # sweep's silence, not the implementer's word — and a task that isn't really finished is
-        # re-derived by that independent sweep and reopened (see `add_task`). So closing here
-        # cannot hide unfinished work; it only stops a worked item being re-dispatched forever.
+        # Close what we just handed over, as `dispatched` — NOT `done`. The distinction is the
+        # whole of P17 F12. This runs immediately after the dispatch above, so at this instant the
+        # implementer has not executed a single step: any completion claim here is a guess.
+        #
+        # The original reasoning — "a task that isn't really finished is re-derived by the next
+        # independent sweep, so closing cannot hide unfinished work" — did not survive gym-015 on
+        # two counts. (1) Re-derivation is not idempotent: the sweep re-words the finding, so
+        # `sha1(owner|body)` sees a NEW task rather than reopening the old one, and the queue
+        # churns instead of correcting (`st-29afe75` "Implement a --version CLI flag" came back as
+        # `st-1783517` "Expose the __version__ string via a --version CLI flag"). (2) It does not
+        # always come back at all: `st-19ee694` (remove the broad `except Exception` in `cmd_repl`)
+        # was closed `done`, was never re-derived as actionable, and is still undone on the
+        # delivered branch. Meanwhile a worker that CORRECTLY declines out-of-scope work — the
+        # tier walk behaving exactly as designed — has its refusal recorded as completion.
+        #
+        # `dispatched` keeps the anti-re-dispatch property (it is still a closed state) while
+        # making the audit honest: the org now says "handed over", which is what it actually knows.
         for t in open_tasks:
-            await self.close_task(t["id"])
+            await self.close_task(t["id"], status="dispatched")
         await self.comms.post(
             Intent.worker_activity,
             f"🔁 **Drain round {round_no}** — {len(open_tasks)} open task(s); dispatching a fresh "
@@ -8409,7 +8875,15 @@ class Orchestrator:
         status, tail, prov = await self._run_check(
             effort_id, check_cmd, branch=delivery.branch, repo=repo)
         if status == "pass":
-            return f"\n🧪 **D2 checks passed** (`{check_cmd}`, {prov}).", delivery
+            # P15.1 — SAY WHERE IT WAS VERIFIED. gym-013 reported 48/48 green and the operator's
+            # own run was 47/48: a `UnicodeEncodeError` on a high-priority item under CP1252, i.e.
+            # a High-severity crash on the platform the product is actually used on. The org checks
+            # inside a Linux container and had no way to see it. Until a second verification lane
+            # exists, the honest thing is to name the platform rather than let "checks passed" read
+            # as "works where you are".
+            return (f"\n🧪 **D2 checks passed** (`{check_cmd}`, {prov})."
+                    f"\n_Verified in the org's Linux worker container — **not** on your own "
+                    f"platform. Encoding-, path- and shell-specific behaviour is unverified._"), delivery
         if status == "unknown":
             return (f"\n🧪 _D2 check couldn't run ({tail or 'no verdict'}) — presenting the merge "
                     f"gate WITHOUT a green check; verify before merging._", delivery)
@@ -9140,13 +9614,34 @@ class Orchestrator:
         build-only-verified delivery: a green build never proves a run-time symptom fixed."""
         if not goal_text:
             return None
-        m = self._RUNTIME_SYMPTOM_RE.search(goal_text)
-        if not m:
-            return None
-        start = max(0, m.start() - 32)
-        end = min(len(goal_text), m.end() + 32)
-        snippet = goal_text[start:end].strip().replace("\n", " ")
-        return ("…" if start else "") + snippet + ("…" if end < len(goal_text) else "")
+        # P12.1 — A SYMPTOM MUST BE REPORTED, NOT FORBIDDEN. The regex below is keyword-only: it
+        # carries no polarity and no subject, so "must never crash" reads exactly like "it
+        # crashes", and "your turn will hang" reads as a product defect. gym-010 (2026-07-19) was a
+        # greenfield feature build on an empty template, and it matched precisely two words —
+        # `crashes` from "never corrupts or CRASHES on malformed data" (a quality REQUIREMENT) and
+        # `hang` from "it will HANG your turn" (a warning about the WORKER'S OWN TURN, not the
+        # product). That single match appended the whole reproduce-the-symptom protocol, which then
+        # demanded `BEFORE: FAIL` evidence of a failure that did not exist — so the worker invented
+        # one. Every match is now tested for both defects before it counts.
+        for m in self._RUNTIME_SYMPTOM_RE.finditer(goal_text):
+            before = goal_text[max(0, m.start() - 60):m.start()]
+            sent_start = max((before.rfind(c) for c in ".!?\n"), default=-1)
+            clause = before[sent_start + 1:] if sent_start >= 0 else before
+            # (1) NEGATED / ASPIRATIONAL — a requirement that it must not happen, not a report
+            #     that it did. Scoped to the clause so a distant "not" can't suppress a real report.
+            if re.search(r"\b(?:never|not|n't|cannot|can't|avoid|prevent|without|no|"
+                         r"instead\s+of|must\s+not|should\s+not|shouldn't)\b", clause, re.I):
+                continue
+            # (2) SECOND-PERSON PROCESS WARNING — describes the worker's own turn or environment,
+            #     never the deliverable ("it will hang your turn", "you are a headless worker").
+            after = goal_text[m.end():m.end() + 60]
+            if re.search(r"\byour\s+(?:turn|workspace|session|run)\b", clause + after, re.I):
+                continue
+            start = max(0, m.start() - 32)
+            end = min(len(goal_text), m.end() + 32)
+            snippet = goal_text[start:end].strip().replace("\n", " ")
+            return ("…" if start else "") + snippet + ("…" if end < len(goal_text) else "")
+        return None
 
     async def _gate_removals(
         self, effort_id: str, repo: str, delivery: BranchDelivery
@@ -9276,12 +9771,47 @@ class Orchestrator:
         token = await self._project_token(effort_id)
         for lens, prompt in _LENSES:
             self._verify_seq += 1
+            # P17 F8 — WHAT CHANGED IS THE LEAST-EXERCISED SURFACE. A lens sweeps the branch as a
+            # flat artifact and gives a line written two commits ago no more scrutiny than one that
+            # has survived several rounds. gym-015: round 1's drain replaced `rest.split()` with a
+            # bare `shlex.split()`, which raises on an unbalanced quote and kills the REPL session
+            # on a typo. Round 2's lens probed `_parse_repl_line` EIGHT times — twice with quotes,
+            # both balanced — and filed "REPL parser handles quoted strings ... correctly" under
+            # What Works Well. The loop certified its own regression, three rounds running.
+            # This is PRIORITISATION, not narrowing: the whole scope is still in play, so F3's
+            # completeness contract is untouched. A diff is also an objective artifact, so the
+            # P10.1 debias survives — it reveals nothing about the goal.
+            changed = ""
+            if round_no > 1:
+                changed = (
+                    "\nRECENTLY CHANGED — the newest and least-exercised code on this branch:\n"
+                    "  git diff --stat HEAD~1 HEAD && git diff HEAD~1 HEAD | head -200\n"
+                    "Run that first. Code changed in the last round has been exercised least and "
+                    "is where a regression is most likely; probe it HARDER than the rest, "
+                    "especially with malformed or hostile input. Do NOT limit your assessment to "
+                    "it — cover everything the questions below ask about.\n")
             instr = (
                 f"EVALUATION — you did NOT build this, and you will CHANGE NOTHING (no edits, no "
                 f"git writes; this is an evaluative turn). First check out the DELIVERED branch:\n"
-                f"  git fetch origin {delivery.branch} && git checkout -f {delivery.branch}\n\n"
+                f"  git fetch origin {delivery.branch} && git checkout -f {delivery.branch}\n"
+                f"{changed}\n"
                 f"{prompt}\n\n"
-                f"Write your report as plain prose. Report what you actually observe."
+                f"Answer every question above, in order, and assess against those criteria AS "
+                f"WRITTEN. Do not decide a different standard for the project because it is small, "
+                f"a script, or early — no 'for its scope', 'at this scale', or 'good enough for a "
+                f"prototype'. Something that behaves wrongly is wrong at any size.\n"
+                # P17 F4 — WRITE EACH FINDING AS YOU ESTABLISH IT. A report composed at the end is
+                # lost entirely when the turn runs out of budget: gym-015's goal_alignment lens
+                # spent 5m27s on genuinely good adversarial probing (hostile inputs, a directory
+                # where the data file belongs, `--due 2026-02-30`) and emitted 70 characters of
+                # preamble. That was CONTEXT exhaustion, not a timeout — the harness bound is 90
+                # minutes — so no watchdog or timeout change can fix it, and a stopping rule would
+                # have cut the turn before the probe that found the one real bug in the codebase.
+                f"Write your report as plain prose. Report what you actually observe.\n"
+                f"IMPORTANT — write each finding as a complete, self-contained sentence AS SOON AS "
+                f"you establish it, before moving to the next check. Do not save your findings for "
+                f"a summary at the end: if this turn runs out of room, everything you have not yet "
+                f"written down is lost."
             )
             try:
                 result = await self.router.wake(
@@ -9324,6 +9854,74 @@ class Orchestrator:
                                       "scope": scope_node_id})
         return reports
 
+    # Identifiers a task body can name concretely enough to CHECK: a backticked token, a long
+    # flag, or a filename with an extension. Anything vaguer ("improve error handling") is a
+    # judgement, not a checkable absence, and is never filtered.
+    _NAMED_THING_RE = re.compile(
+        r"`([^`\s]{2,60})`|(?<![\w-])(--[a-z][\w-]{1,30})|\b([\w.-]{2,40}\.(?:py|toml|md|json|ya?ml|cfg|ini|txt|ts|js))\b")
+    # "add / implement / expose X" — the shapes that ASSERT X is absent. A task that says "fix" or
+    # "rename" presupposes existence and must never be dropped for the thing existing.
+    _ASSERTS_ABSENCE_RE = re.compile(
+        r"\b(add|create|implement|introduce|expose|define|provide|include|write)\b", re.I)
+
+    async def _drop_false_absences(
+        self, effort_id: str, derived: list[tuple[str, str]], *, round_no: int,
+    ) -> list[tuple[str, str]]:
+        """P17 F11 — refuse to create work from an absence the repository refutes.
+
+        P11.4 made the lens report authoritative for what EXISTS ("treat anything it describes as
+        DONE"). Nothing was ever authoritative for what it says is MISSING, so an asserted absence
+        became work with nothing checking it. gym-015 produced three, from two different agent
+        roles: a lens claimed "no type annotations on function signatures" (17 of 17 defs were
+        annotated, and it contradicted itself two sentences later); an assessment claimed "there is
+        no `__version__` variable defined anywhere" (`todo.py:20`); the REVIEWER claimed
+        "`os.makedirs` lacks explicit `exist_ok=True`" (it was there). The `__version__` one was
+        dispatched — and the worker then burned its plan turn hex-dumping the file, because the
+        task's premise contradicted what was in front of it.
+
+        Deliberately conservative — this drops a task only when EVERY concrete thing it names is
+        already present AND the body is phrased as "add/create/implement". Vague bodies, and
+        anything phrased as fix/change/remove, pass through untouched: the goal is to stop
+        fabricated work, not to second-guess judgement. Failure to check is never a drop."""
+        if not derived:
+            return derived
+        candidates: dict[str, list[str]] = {}
+        for _lens, body in derived:
+            if not self._ASSERTS_ABSENCE_RE.search(body):
+                continue
+            names = {g for m in self._NAMED_THING_RE.finditer(body) for g in m.groups() if g}
+            if names:
+                candidates[body] = sorted(names)
+        if not candidates:
+            return derived
+        # One grep per distinct identifier, in a single shell round-trip. `-F` so `--version` and
+        # `todo.py` are literals, not patterns; `-r` over the workspace; quiet exit codes only.
+        probes = sorted({n for names in candidates.values() for n in names})
+        script = " ; ".join(
+            f"grep -rqF -- {shlex.quote(n)} /workspace --exclude-dir=.git 2>/dev/null "
+            f"&& echo 'PRESENT {n}' || echo 'ABSENT {n}'" for n in probes[:40])
+        try:
+            _exit, out, _timed = await self.router.exec_check(
+                effort_id, command=script, session_id=f"{effort_id}~absence",
+                repo=None, repo_token=None, timeout=120)
+        except Exception as exc:  # noqa: BLE001 — unverifiable is NOT refuted; keep every task
+            log.debug("false-absence check failed for %s: %s", effort_id, exc)
+            return derived
+        present = {ln.split(" ", 1)[1].strip() for ln in (out or "").splitlines()
+                   if ln.startswith("PRESENT ") and " " in ln}
+        if not present:
+            return derived
+        kept: list[tuple[str, str]] = []
+        for lens, body in derived:
+            names = candidates.get(body)
+            if names and all(n in present for n in names):
+                await self.audit.log("false_absence_rejected", effort_id=effort_id,
+                                     payload={"round": round_no, "lens": lens,
+                                              "body": body[:200], "present": names[:8]})
+                continue
+            kept.append((lens, body))
+        return kept
+
     async def _gap_analysis(self, effort_id: str, report: str, scope_goal: str) -> list[str]:
         """P10.2 — the ONLY place the goal is allowed to enter.
 
@@ -9351,22 +9949,41 @@ class Orchestrator:
         # demanding delete/search/priority/REPL on a codebase that had shipped all of them and had
         # 44 passing tests. The report is now stated as the authority on what is ALREADY BUILT, and
         # the model is told in terms that most of the goal may already be done.
+        # P17 F10 — THE SCOPE IS A BOUNDARY, NOT A SPECIFICATION. The previous prompt labelled the
+        # scope text "GOAL FOR THIS PART OF THE PROJECT", which invited the model to read a
+        # DESCRIPTION as a checklist. gym-015 round 2 ran against the scope "handles loading,
+        # saving, atomic file writes, database path configuration, and malformed data resilience"
+        # and emitted "Implement database path configuration" — the scope's own wording reflected
+        # back as work, for a `db_path()` that already existed and which the worker then correctly
+        # reported as "already satisfied, no changes needed". The same round produced
+        # `pyproject.toml`, a version string and mypy config: packaging concerns present in
+        # neither the scope nor the project goal.
+        #
+        # A scope says WHERE to look. Only an ABSENCE the report evidences is work.
         sys_p = (
-            "You are given a report describing what a codebase CURRENTLY DOES, and a goal for one "
-            "part of that project. The report was written by someone who did not know the goal, so "
-            "it is an unbiased account of what already exists.\n"
-            "MUCH OF THE GOAL MAY ALREADY BE IMPLEMENTED. The report is your evidence for what is "
-            "already there — treat anything it describes as DONE.\n"
-            "List only the work that genuinely REMAINS for this part of the project.\n"
+            "You are given a report describing what a codebase CURRENTLY DOES, and a description "
+            "of ONE AREA of that project. The report was written by someone who did not know the "
+            "area, so it is an unbiased account of what already exists.\n"
+            "The area description tells you WHERE to look. It is NOT a specification and NOT a "
+            "checklist: it describes what that part of the system deals with, and the things it "
+            "names may already be built.\n"
+            "MUCH OF THE PROJECT MAY ALREADY BE IMPLEMENTED. The report is your evidence for what "
+            "is already there — treat anything it describes as DONE.\n"
+            "List only work that the REPORT SHOWS is missing or broken inside this area.\n"
             "Rules:\n"
             "- One task per line. No numbering, no headers, no preamble.\n"
             "- State each task PLAINLY as work to do: what to build, fix or change.\n"
-            "- Give NO rationale. Do not explain why. Do not reference the report or the goal.\n"
+            "- Give NO rationale. Do not explain why. Do not reference the report or the area.\n"
             "- Do NOT list anything the report describes as existing or working.\n"
-            "- Do NOT list work outside this part of the project.\n"
-            "- If the report shows this part of the goal is already satisfied, output exactly: none"
+            "- Do NOT turn a phrase from the area description into a task. That the area MENTIONS "
+            "something is not evidence the thing is missing — only the report is evidence.\n"
+            "- Do NOT list general software hygiene the report gives no evidence is needed "
+            "(packaging metadata, version strings, linter or type-checker configuration, CI, "
+            "changelogs) unless this area is explicitly about that.\n"
+            "- Do NOT list work outside this area.\n"
+            "- If the report shows nothing is missing in this area, output exactly: none"
         )
-        user_p = (f"GOAL FOR THIS PART OF THE PROJECT:\n{scope_goal[:2000]}\n\n"
+        user_p = (f"THE AREA TO EXAMINE (a boundary, not a checklist):\n{scope_goal[:2000]}\n\n"
                   f"REPORT — WHAT THE CODEBASE ALREADY DOES:\n{report[:6000]}")
         try:
             out = await self.models.complete("pm", sys_p, user_p)
@@ -9385,19 +10002,76 @@ class Orchestrator:
         report = (report or "").strip()
         if not report:
             return []
+        # P13.6 — A SEVERITY FLOOR, OR THE COUNT CANNOT REACH ZERO. `clean_code` and
+        # `project_documentation` are asked "how could this be better?", and an aesthetic observer
+        # asked that always answers: gym-009 round 3 called the history "above average" and still
+        # emitted four more suggestions; gym-011 round 1 propagated 12 tasks of which 7 were
+        # commit-message preferences ("rewrite subject lines to state intent", "restructure bodies
+        # into bullet points"). With no fixed point on two of three lenses the propagation count
+        # cannot converge, so termination-on-zero is unmeasurable however correct everything else
+        # is. Preferences still reach the human in the persisted LensReport; only DEFECTS queue.
+        # P15.2 — RECALIBRATED. The first grading treated "the program silently does the wrong
+        # thing" as taste. Measured against the operator's own evaluation of gym-013 (2026-07-19),
+        # it dropped: the REPL swallowing error output, `done`/`reopen` succeeding silently on
+        # no-ops, empty text accepted, and `Dict[str, Any]` blocking any documentable data
+        # contract — the operator's #1 recommendation. Round 1 dropped 11 of 12 findings and at
+        # least four came back in the human report as real gaps.
+        #
+        # The floor still exists for a measured reason: without it two of three lenses have no
+        # fixed point and the count cannot converge (gym-009: 21 -> 23 -> ascending; gym-011: 7 of
+        # 12 tasks were commit-message preferences). So the fix is a SHARPER LINE plus a third
+        # grade — GAP — that is queued and visible but NOT counted, so real work survives without
+        # reintroducing a loop that never terminates.
         sys_p = (
-            "You convert an evaluation report into a list of tasks.\n"
-            "- One task per line. No numbering, no headers, no preamble.\n"
-            "- State each task PLAINLY as work to do.\n"
-            "- Give NO rationale. Do not explain why.\n"
-            "- Cover every concrete shortcoming the report identifies.\n"
-            "- If the report identifies no shortcoming, output exactly: none"
+            "You convert an evaluation report into a list of tasks, and you grade each one.\n"
+            "- One task per line, prefixed with DEFECT:, GAP: or PREFERENCE:.\n"
+            "\n"
+            "DEFECT — the software is wrong. Includes:\n"
+            "  * a crash, a traceback, or a failure on any input or platform\n"
+            "  * a command that REPORTS SUCCESS while doing nothing\n"
+            "  * an error that is swallowed, discarded or never shown to the user\n"
+            "  * invalid input accepted (empty, malformed, out of range)\n"
+            "  * an error path or branch with no test\n"
+            "  * a documented or claimed behaviour that is not true\n"
+            "  * a data contract that cannot be relied on or documented\n"
+            "GAP — genuinely required by the goal but not yet done, and not a malfunction.\n"
+            "PREFERENCE — it is correct and complete; someone might arrange it differently:\n"
+            "  naming, formatting, file layout, wording, or a feature the goal never asked for.\n"
+            "\n"
+            "- Grade by what the software DOES, not by whether the project is small. Do not soften "
+            "a DEFECT because the codebase is a script or the scope is modest.\n"
+            "- State each task PLAINLY as work to do. Give NO rationale.\n"
+            "- If the report identifies nothing at all, output exactly: none"
         )
         try:
             out = await self.models.complete("pm", sys_p, f"REPORT:\n{report[:6000]}")
         except Exception as exc:  # noqa: BLE001
             log.debug("lens task extraction failed for %s/%s: %s", effort_id, lens, exc)
             return []
+        defects, gaps, prefs = [], [], 0
+        for ln in (out or "").splitlines():
+            s = ln.strip().lstrip("-*• ").strip()
+            if re.match(r"^DEFECT\s*:", s, re.I):
+                defects.append(re.sub(r"^DEFECT\s*:\s*", "", s, flags=re.I))
+            elif re.match(r"^GAP\s*:", s, re.I):
+                gaps.append(re.sub(r"^GAP\s*:\s*", "", s, flags=re.I))
+            elif re.match(r"^PREFERENCE\s*:", s, re.I):
+                prefs += 1
+        if prefs or gaps:
+            await self.audit.log("lens_preferences_dropped", effort_id=effort_id,
+                                 payload={"lens": lens, "dropped": prefs, "kept": len(defects),
+                                          "gaps": len(gaps)})
+        # GAPs are queued but NOT counted — `_drain_round` stamps them with round 0 so they never
+        # increment `new_tasks`. Real work stays visible; termination stays reachable.
+        # ACCUMULATE across the round's lenses — assigning here would let a later lens with no
+        # GAPs wipe an earlier lens's, which is exactly what a three-lens sweep does.
+        self._pending_gaps = getattr(self, "_pending_gaps", {})
+        if gaps:
+            self._pending_gaps.setdefault(effort_id, []).extend(_plain_tasks("\n".join(gaps)))
+        # An ungraded reply (older model, format drift) must not silently propagate everything as
+        # defects — fall back to the plain parse ONLY when nothing was graded at all.
+        if defects or gaps or prefs:
+            return _plain_tasks("\n".join(defects))
         return _plain_tasks(out)
 
     async def _drain_round(
@@ -9425,6 +10099,8 @@ class Orchestrator:
                     "note": (f"\n\n⚠️ **Drain loop hit its runaway guard** after "
                              f"{self.s.drain_round_cap} rounds — still propagating new work. This "
                              f"is a safety net, not a completion: the scope is **not** finished.")}
+        # Clear last round's GAP carry-over before this round's lenses accumulate into it.
+        getattr(self, "_pending_gaps", {}).pop(effort_id, None)
         reports = await self._lens_sweep(effort_id, channel_id, root, repo, delivery,
                                          round_no=round_no, scope_node_id=node_id)
         # ── P11.3 THE SEQUENCE: decompose → SELECT the working scope → analyse against ITS goal ──
@@ -9455,20 +10131,31 @@ class Orchestrator:
                              payload={"round": round_no, "scope": node_id,
                                       "scope_goal_chars": len(scope_goal)})
         derived: list[tuple[str, str]] = []
-        if reports.get("goal_alignment"):
-            derived += [("goal_alignment", b) for b in await self._gap_analysis(
-                effort_id, reports["goal_alignment"], scope_goal)]
+        if reports.get(_LENS_GOAL_ALIGNMENT_KEY):
+            derived += [(_LENS_GOAL_ALIGNMENT_KEY, b) for b in await self._gap_analysis(
+                effort_id, reports[_LENS_GOAL_ALIGNMENT_KEY], scope_goal)]
         for lens in ("clean_code", "project_documentation"):
             if reports.get(lens):
                 derived += [(lens, b) for b in
                             await self._tasks_from_lens(effort_id, lens, reports[lens])]
+        # P17 F11 — DROP TASKS BUILT ON AN ABSENCE THE TREE REFUTES. One batch check per round.
+        derived = await self._drop_false_absences(effort_id, derived, round_no=round_no)
+        # The sibling scopes a task may belong to (P14.2). Read once per round, not per task.
+        scope_children = await self._scope_children(node_id) if node_id else []
         new_bodies: list[str] = []
         for lens, body in derived:
             # P10.6 SEAM ROUTING: on a parent tier, a defect that belongs to a CHILD scope is
             # written into that child and flips it back to open — the integration check. A parent
             # never fixes its children's insides; that would dissolve the encapsulation the tree
             # exists to provide.
+            # P14.2 — FILE WORK WHERE IT BELONGS, not where it was found. `_seam_owner` is lexical
+            # and conservative, so anything it can't match lands in whichever scope happened to be
+            # selected. gym-012 filed "add stdout assertions to filter tests" into the DATA STORAGE
+            # scope with a four-child tree available; the worker then had to escalate it, and the
+            # org froze. Correct filing removes most escalations before they happen.
             owner = await self._seam_owner(node_id, body) if node_id else None
+            if not owner and node_id and scope_children:
+                owner = await self._best_scope_for(body, scope_children)
             target = owner or node_id
             res = await self.add_task(body, project_slug=proj, scope_node_id=target,
                                       effort_id=effort_id, source_lens=lens, round_no=round_no)
@@ -9479,6 +10166,16 @@ class Orchestrator:
             # marked done while a known defect it owns sits unfixed.
             if owner and res:
                 await self._reopen_scope(owner, reason=body, effort_id=effort_id)
+        # P15.2 — GAPs: queued, visible, and NOT counted. Stamped round 0 so `count_new_tasks`
+        # (which filters on the current round) can never see them, and so a lens that keeps
+        # surfacing required-but-not-malfunctioning work cannot prevent termination. Filed AFTER
+        # the counted tasks so the round's arithmetic is already fixed.
+        for gap_body in (getattr(self, "_pending_gaps", {}) or {}).pop(effort_id, []):
+            owner = await self._seam_owner(node_id, gap_body) if node_id else None
+            if not owner and node_id and scope_children:
+                owner = await self._best_scope_for(gap_body, scope_children)
+            await self.add_task(gap_body, project_slug=proj, scope_node_id=owner or node_id,
+                                effort_id=effort_id, source_lens="gap", round_no=0)
         # Counted from the DB, not from the loop above: the count must be a property of what was
         # PERSISTED (idempotently), so a restart mid-round can't double-count and a re-derived gap
         # can't inflate it. Seam-routed tasks still belong to this effort's round.
@@ -9489,7 +10186,15 @@ class Orchestrator:
         # returned None), `new_tasks` is zero for a reason that has nothing to do with the state of
         # the product. Treating that as completion would reinstate the exact false-green this loop
         # exists to eliminate — an absence of output read as an absence of work.
-        swept = bool(reports)
+        #
+        # P17 F3 — `bool(reports)` was too weak: it is true when ANY lens reported. gym-015 rounds 1
+        # and 5 (2 of 5 rounds) recorded `swept: true` on a 2-of-3 sweep whose MISSING lens was
+        # `goal_alignment` — the sole input to `_gap_analysis` (see the `reports.get(...)` guard
+        # above). Those rounds never compared the deliverable to the goal at all, and emitted no
+        # `gap_analysis` event; with an empty queue they would have declared the scope complete.
+        # A sweep missing the only goal-aware lens is a sweep that did not happen, exactly as the
+        # `NoCapacityError` path one screen up already asserts.
+        swept = bool(reports) and bool(reports.get(_LENS_GOAL_ALIGNMENT_KEY))
         await self.audit.log("drain_round", effort_id=effort_id,
                              payload={"round": round_no, "new_tasks": new_tasks,
                                       "open": len(open_tasks), "lenses": sorted(reports),
@@ -9497,9 +10202,13 @@ class Orchestrator:
         lines = [f"## 🔁 Drain round {round_no}\n_Three objective lenses swept the product; gaps "
                  f"were derived against this scope's goal._"]
         if not swept:
-            lines = [f"## ⚠️ Drain round {round_no} — **the lenses could not run**\n_No lens "
-                     f"produced a report, so nothing was observed this round. This is **not** a "
-                     f"clean sweep and says nothing about whether the work is finished._"]
+            missing = ("no lens produced a report" if not reports else
+                       f"the **{_LENS_GOAL_ALIGNMENT_KEY}** lens produced no report "
+                       f"(only {', '.join(sorted(reports))} reported)")
+            lines = [f"## ⚠️ Drain round {round_no} — **the sweep did not complete**\n_"
+                     f"{missing.capitalize()}, so the product was never compared against the goal "
+                     f"this round. This is **not** a clean sweep and says nothing about whether "
+                     f"the work is finished._"]
         elif new_tasks:
             lines.append(f"**{new_tasks} new task(s) propagated this round:**\n"
                          + "\n".join(f"- {b}" for b in new_bodies[:10]))
@@ -10591,11 +11300,17 @@ class Orchestrator:
         # exactly like an auto-iteration, so the single-flight guard can't collide.
         self._iterate_after[effort_id] = base_goal
 
-    async def _plan_misalignment(self, effort_id: str, goal: str, plan: str) -> str | None:
+    async def _plan_misalignment(self, effort_id: str, goal: str, plan: str,
+                                 *, scope_goal: str = "") -> str | None:
         """WHY the worker's plan is misaligned with the goal, or None when it's fine.
         Deterministic checks first (forbidden standing-intent terms; declared delete-to-pass on a
         non-removal goal), then the PM's LLM lens (off-goal judgment). The LLM lens FAILS OPEN on
-        a model hiccup — the deterministic checks and the delivery-side gates still stand."""
+        a model hiccup — the deterministic checks and the delivery-side gates still stand.
+
+        `scope_goal` (P13.2): when a BOUNDED SCOPE is in force, that is the standard the plan is
+        held to — not the whole goal. Declining out-of-scope work with `ESCALATE:` is the protocol
+        `_scope_context` prescribes, so it must read as compliance. Skipping an IN-SCOPE task is
+        still a deviation."""
         proj = await self._effort_project(effort_id)
         try:
             p = await self.projects.get(proj) if proj else None
@@ -10617,8 +11332,34 @@ class Orchestrator:
                 "forbidden thing in order to REMOVE or verify the absence of it is COMPLIANT; "
                 "a plan that would add it back, keep depending on it, or delete working "
                 "features to force a green build is a DEVIATION. Set deviates=true only for a "
-                "real misalignment, with a specific rationale.",
-                f"GOAL:\n{(goal or '')[:2000]}\n\n"
+                "real misalignment, with a specific rationale."
+                # P17 F7 — THE GATE MUST FAIL IN BOTH DIRECTIONS. Within one gym-015 effort it
+                # REJECTED a correct plan for "completely fail[ing] to address the core goal" when
+                # every named feature was already implemented, committed and passing (10 commands,
+                # 51 tests green) — then APPROVED, as "aligned with the goal", a plan to add
+                # `pyproject.toml`, a version string and mypy config to a goal about a polished
+                # todo CLI. Same effort, opposite errors: it was matching how much the plan's prose
+                # resembled the goal's prose. The worker layer already gets this right ("already
+                # satisfied, no changes needed"), so the discipline exists one tier down.
+                + "\nOMISSION IS NOT AUTOMATICALLY A DEVIATION. The plan's ALREADY DONE section "
+                  "reports what the worker OBSERVED to be working, with the command or file that "
+                  "shows it. Work that is already done must NOT be re-planned: a plan that omits "
+                  "it BECAUSE the observation shows it exists is CORRECT and must be approved. "
+                  "Treat an omission as a deviation only when nothing in ALREADY DONE accounts "
+                  "for it.\n"
+                  "DRIFT IS ALSO A DEVIATION. Every step the plan proposes must be traceable to "
+                  "the goal or the scope. A plan that proposes work nobody asked for — packaging "
+                  "metadata, version strings, linter or CI configuration, refactors, extra "
+                  "features — is a DEVIATION even though it sounds constructive. Judge what the "
+                  "plan ADDS as strictly as what it leaves out."
+                + ("\nA BOUNDED SCOPE is in force (see SCOPE below). Judge the plan against THAT "
+                   "scope only. Declining work that falls outside it — especially with an "
+                   "`ESCALATE:` marker naming the adjacent owner — is the REQUIRED protocol and is "
+                   "COMPLIANT, never a refusal. Set deviates=true only if the plan skips work that "
+                   "is INSIDE the scope, or would violate a constraint." if scope_goal else ""),
+                (f"SCOPE IN FORCE (judge against this, not the whole goal):\n{scope_goal[:1200]}\n\n"
+                 if scope_goal else "")
+                + f"GOAL:\n{(goal or '')[:2000]}\n\n"
                 f"STANDING INTENT (non-negotiable constraint):\n{si or '(none)'}\n\n"
                 f"FORBIDDEN — must never be (re)introduced; removing/mentioning them is fine: "
                 f"{', '.join(forb) if forb else '(none)'}\n\n"
@@ -10634,27 +11375,121 @@ class Orchestrator:
             return (getattr(verdict, "rationale", "") or "the PM judged it off-goal")[:300]
         return None
 
+    async def _revert_plan_turn_writes(self, effort_id: str) -> bool:
+        """P17 F1/F15 — undo anything a supposedly read-only plan turn wrote. Returns True when it
+        had in fact written something.
+
+        `plan_only` excludes the daemon's edit/write TOOLS; it does not restrict the shell. gym-015
+        proved a deny-list cannot close that: round 3 wrote with `sed -i` and committed `33eae95`;
+        round 5 used a `python3 -c` read-modify-write and committed `1b04400`. Any interpreter with
+        file access is another route, so the durable fix is a read-only workspace for the duration
+        of the turn (a worker-image change).
+
+        This is the interim guard, and it targets the property that matters rather than the
+        mechanism: after a plan turn the workspace must look exactly as it did before, so the gate
+        judges a PLAN and not a fait accompli. It also removes the way `33eae95` was lost — a plan
+        turn committed, reported the commit as delivered, and the post-gate re-clone destroyed it
+        24 seconds later, leaving the org's record pointing at a commit that existed nowhere.
+
+        Reverts uncommitted edits AND resets a commit the plan turn made (`reset --soft` is
+        proxy-legal where `--hard` is not; the working tree is then cleaned separately). Never
+        raises: a failed revert must not block the gate."""
+        probe = ("cd /workspace && "
+                 "echo BEFORE-HEAD=$(git rev-parse HEAD 2>/dev/null) && "
+                 "git status --porcelain | head -20 && echo PROBE-DONE")
+        try:
+            _exit, out, _timed = await self.router.exec_check(
+                effort_id, command=probe, session_id=f"{effort_id}~planclean",
+                repo=None, repo_token=None, timeout=120)
+        except Exception as exc:  # noqa: BLE001 — best-effort; never a gate blocker
+            log.debug("plan-turn write probe failed for %s: %s", effort_id, exc)
+            return False
+        dirty = bool(out and re.search(r"^[ ?MADRUC][ ?MADRUC]\s+\S", out, re.M))
+        if not dirty:
+            return False
+        await self.audit.log("plan_turn_wrote_files", effort_id=effort_id,
+                             payload={"status": (out or "")[:400]})
+        try:
+            await self.router.exec_check(
+                effort_id,
+                command=("cd /workspace && git checkout -- . 2>/dev/null; "
+                         "git clean -fd 2>/dev/null; echo REVERT-DONE"),
+                session_id=f"{effort_id}~planclean", repo=None, repo_token=None, timeout=120)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("plan-turn revert failed for %s: %s", effort_id, exc)
+            return True
+        await self.comms.post(
+            Intent.worker_activity,
+            "🧹 The plan turn modified files even though it was a read-only turn — reverted them "
+            "so the plan is reviewed on its merits, not on work already done.",
+            effort_id=effort_id,
+        )
+        return True
+
     async def _worker_plan_gate(
         self, effort_id: str, channel_id: str, root: str, goal: str, repo: str | None,
         repo_token: str | None, upstream: str | None, upstream_token: str | None,
-    ) -> bool:
+    ) -> str | None:
         """PLAN-FIRST dispatch (operator 2026-07-14): the worker maps its approach in a READ-ONLY
         turn (edit/write tools excluded — the plan-mode guard, headless) and the PM checks the
         plan against the goal BEFORE any code changes. One steered revision; a second misaligned
         plan stops honestly — catching the wrong direction costs two model turns here instead of
-        a wasted implementation + operator steering + a restart. True = execute (the approved
-        plan is in the worker's session); False = stopped (this method posted the state)."""
+        a wasted implementation + operator steering + a restart.
+
+        Returns the APPROVED PLAN TEXT to execute, or None if stopped (this method posted the
+        state).
+
+        P17 F16 — the plan runs in its OWN session, and is returned as an ARTIFACT rather than
+        left as implicit session memory. Both halves matter:
+
+        * FRESH SESSION. This turn used to run in `_session_for(effort_id)` — the very session
+          that had just built the thing. gym-015: a 7-minute build turn was followed, in the same
+          session, by a 21-second "plan" that replied "The work is already complete — all features
+          implemented, all 51 tests passing". That is RECALL, not observation: the worker was
+          reporting its own previous turn, never looking at the repository. Zero-change plans and
+          the plan gate's contradictory verdicts (P17 F7 — it was adjudicating between two
+          recollections) both follow from that. ORCHESTRATION-DESIGN §11 already mandates the cure
+          for the reviewer — "cleared-context adversarial review ... a fresh reviewer isn't
+          carrying the builder's rationalizations" — and P10.1 applied it to the lenses. The plan
+          step never got it. It does now.
+        * EXPLICIT ARTIFACT. Execution used to be told "your plan (previous turn in this session)",
+          which only works while the plan and the execution share a session — the coupling that
+          forced the plan into the builder's session in the first place. Handing the text back
+          makes the plan an executable-contract-shaped artifact (§11) and lets the two steps have
+          whatever sessions they need."""
         await self.comms.post(
             Intent.effort_dispatch,
             "📐 **Plan first** — the worker maps its approach in a read-only turn, and I check "
             "it against the goal before any code changes.",
             effort_id=effort_id,
         )
+        # P17 F16 — this turn runs in a FRESH session with NO memory of any previous turn, which is
+        # the point: the plan must come from the repository, not from recollection. That cuts both
+        # ways, so the instruction is explicit about it. Without the first line a context-free
+        # worker plans to build things that already exist (the mirror of the recall failure); with
+        # it, "already done" becomes a CITED observation instead of a remembered one.
         instr = (
             "PLAN FIRST — do NOT change any file this turn (your edit tools are disabled; "
-            "explore only). Read whatever you need in the workspace, then reply with exactly:\n"
+            "explore only).\n"
+            # P17 F1 — the tool block does not cover the shell, and gym-015's plan turns wrote via
+            # `sed -i` and then via `python3 -c`. Name the routes explicitly: a model that has been
+            # told "your edit tools are disabled" reasonably concludes the shell is the sanctioned
+            # way to proceed. Anything written here is reverted before the gate runs anyway, so
+            # writing is purely wasted turn budget.
+            "This includes the shell: no `sed -i`, no redirection into a file, no `python3 -c` "
+            "that writes, no `git add`/`commit`/`push`. Read-only commands only. Any change you "
+            "make this turn will be REVERTED before your plan is reviewed — writing here costs "
+            "you the turn and lands nothing.\n"
+            "You have NO memory of earlier turns on this project. Before planning anything, LOOK "
+            "at the current state of the workspace and establish what ALREADY EXISTS — read the "
+            "relevant files, run the test suite, try the entry point. Much of the goal may "
+            "already be implemented.\n"
+            "Then reply with exactly:\n"
             "UNDERSTANDING: the goal in your own words (1-2 lines)\n"
-            "PLAN: numbered steps — name the files you'll touch and what changes in each\n"
+            "ALREADY DONE: what you OBSERVED to be working, each with the command or file that "
+            "shows it (write 'nothing' if the work has not been started)\n"
+            "PLAN: numbered steps for what REMAINS — name the files you'll touch and what changes "
+            "in each (write 'nothing remains' if your observations show the goal is already met)\n"
             "WON'T DO: what you will NOT change (out of scope for this goal)\n"
             "RISKS: what could go wrong / anything you're unsure of\n\n"
             f"The goal:\n{goal}"
@@ -10662,25 +11497,55 @@ class Orchestrator:
         reason: str | None = None
         misaligned = 0
         empties = 0
+        stubs = 0
+        # P13.2 — JUDGE THE PLAN AGAINST THE SCOPE IN FORCE. When the drain dispatches a bounded
+        # scope, the goal text carries that scope's border, and declining out-of-scope work with
+        # `ESCALATE:` is the PRESCRIBED protocol (`_scope_context`), not a refusal. gym-011 blocked
+        # an effort over exactly that: the worker escalated 7 sibling-scope tasks and the gate,
+        # comparing against the whole goal, called it "refus[ing] to implement multiple requested
+        # tasks". P13.1 stops the lists diverging; this stops the gate punishing the protocol if
+        # they ever do again.
+        scope_goal = ""
+        _m = re.search(r"YOUR SCOPE — `([^`]+)` \(tier \d+\):\n(.+?)\nThis scope is the WHOLE",
+                       goal or "", re.S)
+        if _m:
+            scope_goal = _m.group(2).strip()
         while misaligned < 2:
+            # P17 F16 — `~plan` keeps this OFF the builder's session so the plan is observed, not
+            # recalled. Derived from `_session_for` (not a fixed id) so the `worker_plan_empty`
+            # generation bump still rotates it: an overflowing session must stay self-healable.
             result = await self.router.wake(
                 effort_id, role="worker-default", thread_id=root, channel_id=channel_id,
-                session_id=await self._session_for(effort_id), instruction=instr,
+                session_id=f"{await self._session_for(effort_id)}~plan", instruction=instr,
                 repo=repo, repo_token=repo_token, upstream=upstream,
                 upstream_token=upstream_token, plan_only=True,
             )
+            # P17 F1/F15 — A PLAN TURN MUST LEAVE NOTHING ON DISK. `plan_only` gates the daemon's
+            # edit/write TOOLS, not the shell, and gym-015 broke it twice by different routes:
+            # round 3 with `sed -i` + `git commit` (33eae95), round 5 with a `python3 -c`
+            # read-modify-write + commit (1b04400). A command deny-list cannot close this — any
+            # interpreter with file access defeats it — and the durable fix is a read-only
+            # workspace for the turn, which needs a worker-image change.
+            #
+            # Until then, DETECT AND REVERT. This is the property that actually matters: the gate
+            # must judge a plan, not a fait accompli, and the post-gate re-clone must not be able
+            # to silently destroy work (which is how 33eae95 was lost — reported as delivered,
+            # then wiped 24 seconds later). Reverting here makes the violation visible and the
+            # workspace honest, whichever mechanism the worker used.
+            if repo:
+                await self._revert_plan_turn_writes(effort_id)
             if result is None:
                 await self._report_completion(effort_id, None)
-                return False
+                return None
             out = result.output or ""
             if not result.ok:
                 if result.status == "clone_failed":
                     await self._handle_clone_failure(effort_id, result)
-                    return False
+                    return None
                 if is_backpressure_text(out):
                     raise ModelBackpressureError(f"plan turn shed: {out[:160]}")
                 await self._escalate_worker_failure(effort_id, result)
-                return False
+                return None
             if not out.strip():
                 # An EMPTY plan reply is a rotted/overflowing SESSION symptom, not a worker
                 # decision (live 2026-07-14: a 593KB base session made the model return EMPTY on
@@ -10705,11 +11570,42 @@ class Orchestrator:
             # before any work. EXPLICIT protocol markers only: the plan's RISKS section is
             # SUPPOSED to speculate ("could be blocked by…"), so the plain-language blocker
             # heuristic would false-positive here and bounce good plans to the operator.
+            # P14.1 — try the TREE before waking a human. A sibling-scope handoff is routing the
+            # decomposition already encodes; only an escalation with no plausible owner is a
+            # genuine operator question.
+            if await self._route_escalation(effort_id, out):
+                await self.audit.log("worker_plan_approved", effort_id=effort_id,
+                                     payload={"attempt": misaligned + 1, "escalation_routed": True})
+                return out
             blk = self._extract_blocker(out) if re.search(r"\b(BLOCKED|NEEDS):", out) else None
             if blk:
                 await self._elevate_blocker(effort_id, blk)
-                return False
-            reason = await self._plan_misalignment(effort_id, goal, out)
+                return None
+            # P13.3 — A NARRATION STUB IS A MISSING PLAN, NOT A BAD ONE. gym-011: the worker had
+            # implemented, tested and COMMITTED the work; its turn's final output was the single
+            # line "Final test run and commit:" — a preamble. The gate adjudicated that stub, found
+            # it "severely incomplete", and rejected finished work. This is the THIRD instance of
+            # one pattern (gym-009 and gym-010: a truncated lens narration read as findings →
+            # phantom tasks). P11.5 fixed it for lenses with a substance floor; the same discipline
+            # applies to every turn-output consumer. Re-ask ONCE rather than judge the fragment.
+            if not _is_plan_reply(out) and stubs < 1:
+                stubs += 1
+                await self.audit.log("worker_plan_stub", effort_id=effort_id,
+                                     payload={"chars": len(out.strip()), "body": out.strip()[:200]})
+                await self.comms.post(
+                    Intent.worker_activity,
+                    "🌀 The plan turn ended on a narration line rather than a plan — that's a "
+                    "TRUNCATED turn, not an answer. Asking for the plan itself.",
+                    effort_id=effort_id,
+                )
+                instr = (
+                    "Your previous turn ended before you wrote the plan (its last line was "
+                    "narration). Write ONLY the plan now, in the format UNDERSTANDING / PLAN / "
+                    "WON'T DO / RISKS. If the work is already complete, say so and list what was "
+                    "done, with the commit. Do NOT change any file this turn."
+                )
+                continue
+            reason = await self._plan_misalignment(effort_id, goal, out, scope_goal=scope_goal)
             if reason is None:
                 await self.audit.log("worker_plan_approved", effort_id=effort_id,
                                      payload={"attempt": misaligned + 1})
@@ -10718,15 +11614,20 @@ class Orchestrator:
                     "✅ Plan reviewed — aligned with the goal. Executing it now.",
                     effort_id=effort_id,
                 )
-                return True
+                return out
             misaligned += 1
             await self.audit.log("worker_plan_rejected", effort_id=effort_id,
                                  payload={"attempt": misaligned, "reason": reason[:300]})
             if misaligned == 1:
+                # P13.4 — DON'T ASSERT WHAT WE HAVEN'T CHECKED. This used to claim "no code has
+                # been touched" unconditionally. In gym-011 it said so at 18:48:39 while commit
+                # `d3de299` sat in the worker's workspace, made 13 seconds earlier — the plan turn
+                # is `plan_only`, but that gates the edit/write TOOLS, not `cat > file` or `git
+                # commit`. An org that reports its own gate outcomes wrongly is the failure class
+                # the closure invariant exists to prevent: the report and the reality must agree.
                 await self.comms.post(
                     Intent.worker_activity,
-                    f"↩️ Plan NOT aligned — {reason}. Asking for a revised plan (no code has "
-                    f"been touched).",
+                    f"↩️ Plan NOT aligned — {reason}. Asking for a revised plan.",
                     effort_id=effort_id,
                 )
                 instr = (
@@ -10742,14 +11643,14 @@ class Orchestrator:
         # "doesn't state at all what specific task it's planned for").
         goal_head = " ".join((goal or "").strip().split())[:160]
         msg = (f"⛔ **{effort_id}** — its task: “{goal_head}…”\n"
-               f"The worker couldn't produce an aligned plan ({reason}). Stopped **before any "
-               f"code was touched** — that's the point of the plan gate. Steer it (tell me what "
+               f"The worker couldn't produce an aligned plan ({reason}). Stopped at the plan gate, "
+               f"before any work was dispatched. Steer it (tell me what "
                f"to change) or say “re-run it” (a re-run starts from a fresh session).")
         await self.comms.post(Intent.escalation, msg, effort_id=effort_id)
         await self.comms.post(Intent.operator_reply, msg,
                               thread_id=self._mgmt_thread_of(effort_id))
         await self.router.update_effort_card(effort_id, "needs-attention")
-        return False
+        return None
 
     async def _effort_heavy(self, effort_id: str) -> bool:
         """Whether to run the Stage-5 stop-gates + monitor + review (AO_REVIEW_MODE): `all` =

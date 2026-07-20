@@ -610,8 +610,12 @@ async def test_a_sweep_that_could_not_run_is_not_a_clean_sweep(db_url):
         harness.output_queue.extend(["", "", ""])       # three lenses, no output
         r = await orch._drain_round(eid, chan, root, REPO, _delivery())
         assert r["swept"] is False and r["new_tasks"] == 0
-        assert "could not run" in r["note"]
-        assert "complete" not in r["note"].lower().replace("not** a", "")
+        # Assert the MEANING, not the wording: the note must say a sweep didn't happen and must
+        # not read as completion. (P17 reworded this message when `swept` grew the goal_alignment
+        # requirement; the original assertion pinned the exact phrase "could not run" and failed
+        # on a behaviour-identical change.)
+        assert "not** a clean sweep" in r["note"]
+        assert "no lens produced a report" in r["note"].lower()
     finally:
         await _shutdown(orch, db)
 
@@ -876,8 +880,14 @@ async def test_a_foreign_owners_scope_is_still_not_this_efforts_to_work(db_url):
                             effort_id=eid, round_no=1)
         await orch.add_task("add csv export", project_slug="gym", scope_node_id=kids[1],
                             effort_id=eid, round_no=1)
-        mine = await orch._dispatchable_tasks(eid, parent)
-        assert [t["body"] for t in mine] == ["add csv export"]
+        # P13.1: a parent dispatches ONLY its own scope's tasks. Neither child's work is its to do
+        # — the foreign-owned one because someone else owns it, the unowned one because the walk
+        # will select that scope and work it there. gym-011 blocked an effort by handing a worker
+        # 12 tasks and a scope covering 5 of them.
+        assert await orch._dispatchable_tasks(eid, parent) == []
+        assert len(await orch.list_open_tasks(scope_node_id=kids[1])) == 1   # still queued
+        # ...and when the walk selects that child, its task IS dispatchable
+        assert [t["body"] for t in await orch._dispatchable_tasks(eid, kids[1])] == ["add csv export"]
     finally:
         await _shutdown(orch, db)
 
@@ -956,7 +966,7 @@ async def test_a_truncated_lens_does_not_sweep_or_reach_gap_analysis(db_url):
             harness.output_queue.append("All 44 tests pass. Now let me do manual CLI testing.")
         r = await orch._drain_round(eid, chan, root, REPO, _delivery())
         assert r["swept"] is False and r["new_tasks"] == 0
-        assert "could not run" in r["note"]
+        assert "not** a clean sweep" in r["note"]                  # meaning, not wording
         assert await orch._event_count(eid, "lens_report_truncated") == 3
         assert await orch._event_count(eid, "gap_analysis") == 0   # never ran on a stub
     finally:
@@ -1033,3 +1043,330 @@ async def test_the_drain_planner_is_evaluative_and_gated(db_url):
         assert GOAL not in p                               # the goal stays out of an evaluation
     finally:
         await _shutdown(orch, db)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# P13 — scope and gate coherence (gym-011, 2026-07-19)
+# ══════════════════════════════════════════════════════════════════════════════
+async def test_only_the_selected_scopes_tasks_are_dispatched(db_url):
+    """gym-011 BLOCKED an effort here. `_drain_iterate` handed the worker 12 tasks and a 63-char
+    scope covering 5 of them; the worker escalated the other 7 exactly as `_scope_context`
+    prescribes, and the plan gate — judging against the GOAL — rejected that three times."""
+    orch, _chat, _harness, db = await _orch(db_url)
+    try:
+        eid, _c, _r = await _effort(orch)
+        parent = await orch._ensure_scope_node(eid)
+        kids = await orch.decompose_scope(parent, [("storage", "persist todos to disk"),
+                                                   ("history", "commit message quality")])
+        for body in ("write todos atomically", "add a fsync on close"):
+            await orch.add_task(body, project_slug="gym", scope_node_id=kids[0],
+                                effort_id=eid, round_no=1)
+        await orch.add_task("rewrite commit subjects", project_slug="gym",
+                            scope_node_id=kids[1], effort_id=eid, round_no=1)
+        got = [t["body"] for t in await orch._dispatchable_tasks(eid, kids[0])]
+        assert got == ["write todos atomically", "add a fsync on close"]
+        assert "rewrite commit subjects" not in got          # a sibling scope's work
+        assert len(await orch.list_open_tasks(scope_node_id=kids[1])) == 1   # still queued
+    finally:
+        await _shutdown(orch, db)
+
+
+def test_a_narration_stub_is_not_a_plan():
+    """P13.3 — the third instance of one pattern: a turn ends on narration and a consumer
+    adjudicates the fragment. gym-011 rejected finished work over `Final test run and commit:`."""
+    from app.orchestrator import _is_plan_reply
+    assert _is_plan_reply("Final test run and commit:") is False
+    assert _is_plan_reply("ok") is False
+    assert _is_plan_reply("Now let me examine the codebase. " * 20) is False
+    # a STRUCTURED plan passes however short — plans are legitimately terser than lens reports
+    assert _is_plan_reply("UNDERSTANDING: port it\nPLAN:\n1. edit parser.py") is True
+
+
+async def test_only_defect_grade_findings_become_tasks(db_url):
+    """P13.6 — an aesthetic lens asked "how could this be better?" always answers, so without a
+    severity floor the propagation count has no fixed point and E5 is unmeasurable. gym-011 round
+    1: 7 of 12 tasks were commit-message preferences."""
+    orch, _chat, _harness, db = await _orch(db_url)
+    try:
+        eid, _c, _r = await _effort(orch)
+        orch.models._client.queue_text(
+            "DEFECT: add a guard for the missing due field\n"
+            "PREFERENCE: rewrite commit subject lines to state intent\n"
+            "PREFERENCE: restructure commit bodies into bullet points\n"
+            "DEFECT: fix the crash when run with no arguments")
+        tasks = await orch._tasks_from_lens(eid, "clean_code", "a report body")
+        assert tasks == ["add a guard for the missing due field",
+                         "fix the crash when run with no arguments"]
+        assert await orch._event_count(eid, "lens_preferences_dropped") == 1
+    finally:
+        await _shutdown(orch, db)
+
+
+async def test_a_round_of_pure_preference_propagates_zero(db_url):
+    orch, _chat, _harness, db = await _orch(db_url)
+    try:
+        eid, _c, _r = await _effort(orch)
+        orch.models._client.queue_text(
+            "PREFERENCE: use narrative prose in commit bodies\n"
+            "PREFERENCE: add cross-references between commits")
+        assert await orch._tasks_from_lens(eid, "project_documentation", "a report body") == []
+    finally:
+        await _shutdown(orch, db)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# P14 — escalation routing (gym-012, 2026-07-19: frozen `ambiguous_scope`)
+# ══════════════════════════════════════════════════════════════════════════════
+async def test_an_escalation_routes_to_the_sibling_scope_instead_of_freezing(db_url):
+    """gym-012 did everything right — completed its in-scope task, escalated a test-assertions task
+    that had been mis-filed into the persistence scope — and the org FROZE on `ambiguous_scope`
+    with a four-child tree sitting right there. `_escalation_target` existed since P10.6; nothing
+    connected an ESCALATE marker to it."""
+    orch, _chat, _harness, db = await _orch(db_url)
+    try:
+        eid, _c, _r = await _effort(orch)
+        root = await orch._ensure_scope_node(eid)
+        kids = await orch.decompose_scope(root, [
+            ("storage", "json data storage and persistence layer"),
+            ("testing", "test suite assertions and output verification")])
+        await orch._attach_effort_to_scope(kids[0], eid)   # the worker is in `storage`
+        tid, _n = await orch.add_task(
+            "Add assertions to filter tests verifying output content",
+            project_slug="gym", scope_node_id=kids[0], effort_id=eid, round_no=1)
+        await orch.close_task(tid)                        # closed at dispatch, as the drain does
+        routed = await orch._route_escalation(
+            eid, "ESCALATE: adding assertions to filter tests verifying output content is "
+                 "outside my scope; a testing-scoped worker should handle it")
+        assert routed == 1
+        assert await orch._event_count(eid, "escalation_routed") == 1
+        # re-filed into `testing`, and REOPENED — an escalated task is not done
+        moved = await orch.list_open_tasks(scope_node_id=kids[1])
+        assert len(moved) == 1 and "filter tests" in moved[0]["body"]
+        assert await orch.list_open_tasks(scope_node_id=kids[0]) == []
+    finally:
+        await _shutdown(orch, db)
+
+
+async def test_an_escalation_with_no_plausible_owner_still_reaches_a_human(db_url):
+    """Do not make freeze unreachable — a genuine cross-project escalation must still elevate."""
+    orch, _chat, _harness, db = await _orch(db_url)
+    try:
+        eid, _c, _r = await _effort(orch)
+        root = await orch._ensure_scope_node(eid)
+        await orch.decompose_scope(root, [("storage", "json persistence layer")])
+        assert await orch._route_escalation(
+            eid, "ESCALATE: the upstream vendor SDK is broken and needs a new licence key") == 0
+    finally:
+        await _shutdown(orch, db)
+
+
+async def test_a_derived_task_is_filed_to_the_scope_that_owns_it(db_url):
+    """P14.2 — gym-012 filed a test-assertions task into the DATA STORAGE scope because assignment
+    followed SELECTION rather than content, which is why there was anything to escalate."""
+    orch, _chat, harness, db = await _orch(db_url)
+    try:
+        eid, chan, root_post = await _effort(orch)
+        root = await orch._ensure_scope_node(eid)
+        kids = await orch.decompose_scope(root, [
+            ("storage", "json data storage persistence atomic writes"),
+            ("testing", "test suite assertions coverage verification")])
+        await orch._attach_effort_to_scope(kids[0], eid)
+        # `_best_scope_for` takes scope DICTS (as `_scope_children` returns), not ids
+        cands = await orch._scope_children(root)
+        assert await orch._best_scope_for(
+            "add assertions to the test suite verifying coverage", cands) == kids[1]
+        assert await orch._best_scope_for(
+            "make the json persistence writes atomic", cands) == kids[0]
+        # no clear owner -> no guess (the caller falls back to the selected scope)
+        assert await orch._best_scope_for("rename a variable", cands) is None
+    finally:
+        await _shutdown(orch, db)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# P15 — verification fidelity. The operator tested gym-013's delivery and found 5 bugs + 10 design
+# gaps on a product the loop had declared complete at zero propagation. The loop counted correctly;
+# the evidence had been softened twice before it was counted. Fixtures below are the operator's
+# ACTUAL findings (2026-07-19).
+# ══════════════════════════════════════════════════════════════════════════════
+async def test_the_operators_findings_grade_as_defects_not_preferences(db_url):
+    """Every one of these was seen by a lens in gym-013 and dropped as a preference; every one came
+    back in the operator's report as a real bug or gap. `done`/`reopen` silently succeeding, the
+    REPL discarding error output, empty text accepted, and an undocumentable data contract are the
+    software behaving wrongly — not taste."""
+    orch, _chat, _harness, db = await _orch(db_url)
+    try:
+        eid, _c, _r = await _effort(orch)
+        orch.models._client.queue_text(
+            "DEFECT: make done on an already-done item report that it was already done\n"
+            "DEFECT: surface command errors in the REPL instead of discarding the return code\n"
+            "DEFECT: reject empty todo text on add and edit\n"
+            "DEFECT: replace the Dict[str, Any] item model with a documented TypedDict\n"
+            "GAP: add a --sort flag for list output\n"
+            "PREFERENCE: use f-strings consistently instead of mixing with percent formatting")
+        tasks = await orch._tasks_from_lens(eid, "clean_code", "a report body")
+        assert len(tasks) == 4, tasks
+        assert any("already-done" in t for t in tasks)
+        assert any("REPL" in t for t in tasks)
+        assert any("TypedDict" in t for t in tasks)
+        assert not any("f-strings" in t for t in tasks)      # preference stays out
+        assert not any("--sort" in t for t in tasks)         # GAP is not a counted task
+    finally:
+        await _shutdown(orch, db)
+
+
+async def test_a_gap_is_queued_but_never_counted(db_url):
+    """P15.2's third grade. A GAP keeps required-but-not-malfunctioning work visible without
+    reintroducing the non-terminating loop the floor was built to stop (gym-009: 21 -> 23 ->
+    ascending)."""
+    orch, _chat, harness, db = await _orch(db_url, tier_walk=False)
+    try:
+        eid, chan, root = await _effort(orch)
+        for _ in _LENSES:
+            harness.output_queue.append(_REPORT)
+        orch.models._client.queue_text("none")                      # gap analysis
+        orch.models._client.queue_text("GAP: add a --sort flag\nGAP: add overdue highlighting")
+        orch.models._client.queue_text("none")
+        r = await orch._drain_round(eid, chan, root, REPO, _delivery())
+        assert r["new_tasks"] == 0, "a GAP must not increment the propagation count"
+        queued = await orch.list_open_tasks(effort_id=eid)
+        assert len(queued) == 2, "but it must still be queued and visible"
+        assert {t["lens"] for t in queued} == {"gap"}
+    finally:
+        await _shutdown(orch, db)
+
+
+async def test_a_lens_is_told_not_to_invent_its_own_bar(db_url):
+    """P15.2b — the org's lens graded SOLID "Strong" where the operator graded 2/5, having supplied
+    a scale qualifier the verbatim prompt never set ("for its scope", "at this scale"). That is
+    verdict framing returning in the ANSWER after P10.1 removed it from the prompt."""
+    orch, _chat, harness, db = await _orch(db_url)
+    try:
+        eid, chan, root = await _effort(orch)
+        for _ in _LENSES:
+            harness.output_queue.append(_REPORT)
+        await orch._lens_sweep(eid, chan, root, REPO, _delivery(), round_no=1)
+        for w in harness.wakes:
+            p = w["prompt"]
+            assert "criteria AS WRITTEN" in p
+            assert "for its scope" in p          # named as a thing NOT to do
+            assert "wrong at any size" in p
+            assert "VERDICT" not in p            # P10.1 still holds
+    finally:
+        await _shutdown(orch, db)
+
+
+async def test_the_implementer_is_told_to_record_why_in_the_commit(db_url):
+    """P15.5 — the operator scored the history 5/10: intent clarity 5, context linking 2. The org
+    holds the goal, the scenario and the acceptance check and passed none of them on."""
+    orch, _chat, harness, db = await _orch(db_url, tier_walk=False)
+    try:
+        eid, chan, root = await _effort(orch)
+        r1 = await _round(orch, harness, eid, chan, root, "add a delete command")
+        harness.output_queue.append("plan")
+        await orch._drain_iterate(eid, r1["open_tasks"], r1["round"])
+        brief = orch._iterate_after[eid]
+        assert "WHY before what" in brief
+        assert "traceable" not in brief          # the brief instructs; it doesn't lecture
+        assert "verification you ran" in brief
+    finally:
+        await _shutdown(orch, db)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# P16 — a recovered turn starts from the last COMMITTED state (gym-014, 2026-07-20)
+# ══════════════════════════════════════════════════════════════════════════════
+async def test_a_dead_turns_uncommitted_edits_are_discarded(db_url):
+    """gym-014: a worker abandoned mid-edit leaving `tests/test_todo.py` modified and the suite
+    FAILING (2 errors). The recovery re-engaged onto that same tree, so the next worker inherited a
+    break it had not caused, burned its turn on it, and abandoned too — three turns lost to one
+    partial edit. Uncommitted work from a turn that DIED is wreckage, not work."""
+    orch, _chat, _harness, db = await _orch(db_url)
+    try:
+        eid, _c, _r = await _effort(orch)
+        seen = {}
+
+        # P17 F6 — a KNOWN worker url must be cleaned on THAT worker. `exec_check` acquires
+        # whichever worker is free, so the original went through it and, in gym-015, cleaned
+        # worker-1 while worker-2 held the dirty tree. `run_check` takes the base url directly.
+        async def _fake_run_check(base_url, command, timeout=120, **kw):
+            seen["url"], seen["command"] = base_url, command
+            return 0, " M tests/test_todo.py\n?? scratch.py\nDISCARD-DONE", False
+
+        async def _must_not_run(*a, **kw):
+            raise AssertionError("targeted discard must not go through the acquire path")
+
+        orch.router.harness.run_check = _fake_run_check
+        orch.router.exec_check = _must_not_run
+        assert await orch._discard_uncommitted("http://w1:8090", eid) is True
+        assert seen["url"] == "http://w1:8090"           # the worker that hung, not a free one
+        # reverts tracked edits AND drops untracked files, scoped to the workspace
+        assert "git checkout -- ." in seen["command"]
+        assert "git clean -fd" in seen["command"]
+        assert "reset --hard" not in seen["command"]     # proxy-illegal; never used
+        assert await orch._event_count(eid, "stall_tree_discarded") == 1
+    finally:
+        await _shutdown(orch, db)
+
+
+async def test_the_idle_path_with_no_worker_url_falls_back_to_the_pool(db_url):
+    """P17 F6 — the idle-stall recovery implicates no specific daemon, so it has no url to target.
+    That path must still clean (via the pool), just without attribution."""
+    orch, _chat, _harness, db = await _orch(db_url)
+    try:
+        eid, _c, _r = await _effort(orch)
+        seen = {}
+
+        async def _fake_exec(effort_id, *, command, session_id, **kw):
+            seen["command"] = command
+            return 0, " M todo.py\nDISCARD-DONE", False
+
+        async def _must_not_run(*a, **kw):
+            raise AssertionError("no url is known — nothing to target")
+
+        orch.router.exec_check = _fake_exec
+        orch.router.harness.run_check = _must_not_run
+        assert await orch._discard_uncommitted("", eid) is True
+        assert "git clean -fd" in seen["command"]
+    finally:
+        await _shutdown(orch, db)
+
+
+async def test_a_clean_tree_discards_nothing_and_is_not_audited(db_url):
+    orch, _chat, _harness, db = await _orch(db_url)
+    try:
+        eid, _c, _r = await _effort(orch)
+
+        async def _clean(base_url, command, timeout=120, **kw):
+            return 0, "DISCARD-DONE", False
+
+        orch.router.harness.run_check = _clean
+        assert await orch._discard_uncommitted("http://w1:8090", eid) is False
+        assert await orch._event_count(eid, "stall_tree_discarded") == 0
+    finally:
+        await _shutdown(orch, db)
+
+
+async def test_a_cleanup_failure_never_blocks_the_recovery(db_url):
+    """The discard serves the recovery; it must never be able to prevent one."""
+    orch, _chat, _harness, db = await _orch(db_url)
+    try:
+        eid, _c, _r = await _effort(orch)
+
+        async def _boom(*a, **kw):
+            raise RuntimeError("worker unreachable")
+
+        orch.router.harness.run_check = _boom
+        assert await orch._discard_uncommitted("http://w1:8090", eid) is False
+    finally:
+        await _shutdown(orch, db)
+
+
+def test_the_stall_escalation_does_not_assert_an_unchecked_cause():
+    """It told the operator "something structural is blocking it (a repo, clone, or tool problem),
+    not your code" — wrong on every count in gym-014, and it aimed attention at the wrong layer."""
+    import inspect
+    from app.orchestrator import Orchestrator
+    src = inspect.getsource(Orchestrator)
+    assert "Something structural is blocking it" not in src
+    assert "I have NOT identified the cause" in src

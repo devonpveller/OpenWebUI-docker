@@ -89,6 +89,14 @@ async def test_flail_forks_a_fresh_session_and_replans_even_with_gate_off(db_url
         await orch.projects.add("app", "https://github.com/acme/app.git")
         eid, chan, root = await orch.router.open_effort("spin", project="app")
         harness.output_queue.append(_FLAIL_OUT)     # the first coding turn gets killed flailing
+        # P13.3: the plan turn must return an actual PLAN. The fake's default output is "ok", and
+        # a 2-char reply is now treated as a TRUNCATED turn (re-ask once) rather than adjudicated
+        # as a bad plan — gym-011 rejected finished work because the gate judged the narration line
+        # "Final test run and commit:" as if it were the worker's plan.
+        harness.output_queue.append(
+            "UNDERSTANDING: port the parser to the new API.\n"
+            "PLAN:\n1. update parser.py to the new call shape\n2. run the tests\n"
+            "WON'T DO: no unrelated refactors\nRISKS: none known")
         await orch.delegate(eid, chan, root, "port the parser to the new API")
         await _drain(orch)                          # the queued re-dispatch runs
         # the original coding turn was ARMED with the guard
@@ -99,8 +107,10 @@ async def test_flail_forks_a_fresh_session_and_replans_even_with_gate_off(db_url
         assert "PLAN FIRST" in harness.wakes[1]["prompt"]
         assert "port the parser" in harness.wakes[1]["prompt"]  # the ORIGINAL goal
         assert harness.wakes[1]["flail_guard"] is False         # plan turns are never guarded
-        # ... in a FRESH session (the fork — generation bumped by the flail event)
-        assert harness.wakes[1]["session_id"] == f"{eid}~r1"
+        # ... in a FRESH session (the fork — generation bumped by the flail event). P17 F16 runs
+        # plan turns in their own `~plan` session on top of that generation; the fork is the point.
+        assert harness.wakes[1]["session_id"] == f"{eid}~r1~plan"
+        assert harness.wakes[1]["session_id"] != harness.wakes[0]["session_id"]
         # then executed (plan approved via the fail-open lens; no model queued)
         assert harness.wakes[2]["plan_only"] is False
         assert "REVIEWED and APPROVED" in harness.wakes[2]["prompt"]

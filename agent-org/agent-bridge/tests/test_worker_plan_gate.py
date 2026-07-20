@@ -58,11 +58,26 @@ async def _shutdown(orch, db):
 
 
 # -- aligned plan: read-only plan wake, PM pass, then execution in-session ------
+# P13.3: a plan turn must return an actual PLAN. The FakeHarness default output is "ok", and a
+# 2-char reply is now treated as a TRUNCATED turn (one re-ask) rather than adjudicated as a bad
+# plan — gym-011 rejected finished work because the gate judged the narration line "Final test run
+# and commit:" as though it were the worker's plan.
+_PLAN = "\n".join([
+    "UNDERSTANDING: port the callers to the new API.",
+    "PLAN:",
+    "1. update the call sites in parser.py",
+    "2. run the test suite",
+    "WON'T DO: no unrelated refactors",
+    "RISKS: none known",
+])
+
+
 async def test_aligned_plan_is_reviewed_then_executed(db_url):
     orch, chat, harness, db = await _orch(db_url)
     try:
         await orch.projects.add("app", "https://github.com/acme/app.git")
         eid, chan, root = await orch.router.open_effort("feat", project="app")
+        harness.output_queue.append(_PLAN)
         orch.models._client.queue_structured(MonitorVerdict(deviates=False))
         await orch.delegate(eid, chan, root, "port the parser to the new API")
         # wake 1 = the READ-ONLY plan turn; wake 2 = execution with the approval note
@@ -112,6 +127,8 @@ async def test_llm_lens_steers_once_then_the_revision_executes(db_url):
     try:
         await orch.projects.add("app", "https://github.com/acme/app.git")
         eid, chan, root = await orch.router.open_effort("steer", project="app")
+        harness.output_queue.append(_PLAN)          # first plan turn
+        harness.output_queue.append(_PLAN)          # the steered revision
         orch.models._client.queue_structured(
             MonitorVerdict(deviates=True, trigger="deviation", level="steering",
                            rationale="it renames the API instead of porting the callers"))
@@ -150,11 +167,16 @@ async def test_empty_plan_reply_retries_once_in_a_fresh_session(db_url):
         await orch.projects.add("app", "https://github.com/acme/app.git")
         eid, chan, root = await orch.router.open_effort("hollow", project="app")
         harness.output_queue.append("   ")                    # empty plan turn (rotted session)
+        harness.output_queue.append(_PLAN)                    # the fresh-session retry answers
         orch.models._client.queue_structured(MonitorVerdict(deviates=False))
         await orch.delegate(eid, chan, root, "port the parser")
-        # wake 1 = plan in the base session; wake 2 = the SAME plan request, FRESH session
-        assert harness.wakes[0]["session_id"] == eid
-        assert harness.wakes[1]["session_id"] == f"{eid}~r1"
+        # wake 1 = plan turn; wake 2 = the SAME plan request in a FRESH session (generation bump).
+        # P17 F16 — plan turns run in their own `~plan` session, derived from `_session_for` so
+        # the empty-reply rotation below still works. What matters here is the GENERATION moving,
+        # not the literal id.
+        assert harness.wakes[0]["session_id"] == f"{eid}~plan"
+        assert harness.wakes[1]["session_id"] == f"{eid}~r1~plan"   # rotated
+        assert harness.wakes[1]["session_id"] != harness.wakes[0]["session_id"]
         assert "PLAN FIRST" in harness.wakes[1]["prompt"]      # re-ask, not a revision
         assert harness.wakes[2]["plan_only"] is False          # then execution proceeds
         assert await orch._event_count(eid, "worker_plan_empty") == 1
@@ -195,7 +217,8 @@ async def test_plan_gate_stop_rotates_the_next_runs_session(db_url):
         harness.output_queue.append("PLAN: 1. port to the vendored engine")
         orch.models._client.queue_structured(MonitorVerdict(deviates=False))
         await orch.delegate(eid, chan, root, "fix the build")
-        assert harness.wakes[n]["session_id"].endswith("~r1")
+        # the generation is what rotated; P17 F16 appends `~plan` to plan-turn sessions
+        assert "~r1" in harness.wakes[n]["session_id"]
     finally:
         await _shutdown(orch, db)
 
