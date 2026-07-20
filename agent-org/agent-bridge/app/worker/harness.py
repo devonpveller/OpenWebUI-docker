@@ -31,14 +31,37 @@ log = logging.getLogger("agent_bridge.worker")
 
 
 class WorkResult:
-    def __init__(self, status: str, task_id: str, output: str = "") -> None:
+    def __init__(self, status: str, task_id: str, output: str = "",
+                 commands: list[str] | None = None) -> None:
         self.status = status          # done | abandoned | rejected | error
         self.task_id = task_id
         self.output = output
+        # P18 F18 — WHAT THE TURN ACTUALLY RAN, not what it says it ran. The daemon already
+        # reports this as `activity` and the harness already streams it to the bus for
+        # observability; keeping it on the result lets a gate check a claim against the record.
+        # gym-016 produced three turns that reported a suite result after running only `git log`,
+        # including one that said "28 tests" moments after a command printed 31. Each was true by
+        # luck; the org had no way to know that.
+        self.commands: list[str] = commands or []
 
     @property
     def ok(self) -> bool:
         return self.status == "done"
+
+
+def _command_texts(activity: list) -> list[str]:
+    """The command strings out of a daemon `activity` list (P18 F18).
+
+    Shape-tolerant on purpose: the daemon's item schema is not ours, and a gate that reads this
+    must degrade to "no commands recorded" rather than raise. An empty list therefore means
+    "cannot tell", never "ran nothing" — every caller has to treat it that way."""
+    out: list[str] = []
+    for item in activity or []:
+        if isinstance(item, dict):
+            cmd = (item.get("command") or "").strip()
+            if cmd:
+                out.append(cmd)
+    return out
 
 
 # little-coder's daemon validates `channel` against a fixed trigger-surface enum
@@ -175,7 +198,8 @@ class LittleCoderHarness:
                             await on_update("answer", {"status": status, "answer": answer})
                         except Exception:  # noqa: BLE001
                             pass
-                    return WorkResult(status, task_id, answer)
+                    return WorkResult(status, task_id, answer,
+                                      commands=_command_texts(activity))
             return WorkResult("error", task_id, "poll timeout")
 
     async def set_project(
@@ -381,7 +405,8 @@ class FakeHarness:
                 await on_update("command", {"command": cmd, "ok": True})
             await on_update("answer", {"status": self.result_status,
                                        "answer": self.answer_text or "ok"})
-        return WorkResult(self.result_status, task_id=f"fake-{len(self.wakes)}", output=out)
+        return WorkResult(self.result_status, task_id=f"fake-{len(self.wakes)}", output=out,
+                          commands=list(self.stream_commands or []))
 
     async def set_project(
         self, base_url: str, repo: str, *, token: str | None = None,

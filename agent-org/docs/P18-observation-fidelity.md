@@ -296,6 +296,49 @@ answer.
 
 ---
 
+## Build status (2026-07-20)
+
+| Finding | State | Where |
+|---|---|---|
+| **F19** — observations spent on one scope | ✅ **SHIPPED** | `_extraction_scopes` fans gap analysis across every OPEN scope in the tier; existing `_seam_owner` routing files each task to its owner. Dispatch still works one scope at a time |
+| **F4** — findings die with the turn | ✅ **SHIPPED** | lenses append `FINDING:` lines to `/tmp/lens-findings.txt`; `_salvage_lens_findings` reads them back when a turn truncates, `_clear_lens_findings` wipes between lenses so one lens can never inherit another's |
+| **F17** — false defects pass unfiltered | ✅ **SHIPPED** | `_drop_false_defects` runs the `REPRO:` command the LENS named; drops the task only on positive evidence the input is handled |
+| **F13** — test-count monotonicity | ✅ **SHIPPED** | `_check_test_count_regression` at the delivery chokepoint; a drop raises `test_count_regressed` and posts to the operator. Flags, never blocks |
+| **F18** — turns assert unverified results | ✅ **SHIPPED** | `WorkResult.commands` carries what the turn actually ran (the daemon already reported it; the harness already streamed it). `_flag_unverified_claim` compares a verification CLAIM against that record and posts when a turn reports a suite result with no test invocation in it |
+| F12 refile, F1/F15 prevention, H1 | ⬜ not built | carried from P17; F1/H1 remain image-blocked |
+
+Tests: `tests/test_p18_observation.py` (17, all green).
+
+### F18's three deliberate silences
+
+The check flags and never blocks, and stays quiet in three cases where firing would be worse than
+missing:
+
+- **An honest carry-forward.** "already delivered in the previous turn ... 31/31 tests pass" is
+  legitimate and is most of what no-op turns say. The defect is silence about provenance, not the
+  carry-forward, so a turn that states where the result came from passes.
+- **An unreadable command record.** `_command_texts` returns `[]` both for "ran nothing" and for
+  "a shape we could not parse". Flagging the second would cry wolf on every daemon whose activity
+  schema drifts, so empty always means "cannot tell".
+- **Intent rather than claim.** "Next I will run the test suite" is not a result.
+
+The delivery chokepoint still runs `check_cmd` itself, so this adds visibility without becoming a
+second, weaker arbiter of whether the build is good.
+
+### Two design errors caught while building, both by the tests
+
+1. **The F17 check was gym-overfitted.** The first draft synthesised a probe —
+   `python3 todo.py add probe --due <literal>` — which works on the gym's todo CLI and is
+   meaningless on any other project. An orchestrator-level gate cannot know how to drive an
+   arbitrary product. Replaced with running the `REPRO:` command the lens itself names; a finding
+   with no named reproduction is unchecked and therefore KEPT.
+2. **`REPRO:` lines became their own tasks.** `_plain_tasks` splits on newlines, so a repro line
+   was content-addressed into a task body and would have been dispatched to a worker — worse than
+   the fabricated task F17 exists to prevent. Now folded into the finding above it, which also
+   keeps the reproduction where `_drop_false_defects` looks for it.
+
+Both would have shipped silently without a test that exercised the whole path.
+
 ## Implementation order for P18
 
 1. **F19** — extraction fan-out across open scopes. Highest value: it recovers observations the

@@ -388,6 +388,10 @@ _LENS_PROJECT_DOCUMENTATION = (
 # "swept" without it (P17 F3). A sweep that loses this lens has not compared the product to the
 # goal, however many other lenses reported.
 _LENS_GOAL_ALIGNMENT_KEY = "goal_alignment"
+# P18 F4 — where a lens appends findings as it establishes them, so a turn that dies mid-sweep
+# still yields what it had found. Outside the repo tree (`/tmp`, not `/workspace`) so it can never
+# be committed by a later turn or show up in a diff.
+_LENS_FINDINGS_PATH = "/tmp/lens-findings.txt"
 # Order is the sweep order; `goal_alignment` runs first because P10.2 consumes its report.
 _LENSES: tuple[tuple[str, str], ...] = (
     (_LENS_GOAL_ALIGNMENT_KEY, _LENS_GOAL_ALIGNMENT),
@@ -482,6 +486,15 @@ def _plain_tasks(text: str, *, limit: int = 12) -> list[str]:
         # be followed by its punctuation and a space.
         ln = re.sub(r"^\s*(?:[-*•]+\s*|\d+[.)]\s+)", "", ln.strip()).strip()
         if not ln or _NOTHING_RE.fullmatch(ln):
+            continue
+        # P18 F17 — a `REPRO:` line BELONGS TO the task above it; it is evidence, not work. Left
+        # alone it becomes its own content-addressed task ("REPRO: python3 todo.py add ...") and
+        # gets dispatched to a worker, which is worse than the fabricated task F17 exists to stop.
+        # Folding it into the preceding body also keeps the reproduction where `_drop_false_defects`
+        # looks for it.
+        if ln.upper().startswith("REPRO:"):
+            if out:
+                out[-1] = f"{out[-1]}\n{ln}"
             continue
         # A model asked for a list still emits headers and commentary. Left unfiltered, a line like
         # "The codebase is fine, no issues were found." becomes a content-addressed TASK that is
@@ -1241,6 +1254,120 @@ class Orchestrator:
             return None
         p = row[0]
         return p if isinstance(p, dict) else None
+
+    # A turn CLAIMING a verification result: "31/31 tests pass", "all tests pass", "suite is
+    # green", "tests passed". Deliberately narrow — it must match a claim about a RUN, not a
+    # description of intent ("I will run the tests") or of the suite's existence.
+    _CLAIMS_VERIFICATION_RE = re.compile(
+        r"\b(\d+\s*/\s*\d+\s+tests?\s+pass|all\s+\d*\s*tests?\s+pass|"
+        r"tests?\s+(?:all\s+)?pass(?:ed|ing)?\b|suite\s+(?:is\s+)?green|"
+        r"acceptance\s+corpus\s+(?:check\s+)?pass)", re.I)
+    # A command that actually EXERCISES the product: a test runner, or the acceptance check.
+    # `git log` is not one, which is the whole point.
+    _IS_VERIFICATION_CMD_RE = re.compile(
+        r"\b(unittest|pytest|py\.test|tox|nose|npm\s+(?:run\s+)?test|yarn\s+test|"
+        r"go\s+test|cargo\s+test|dotnet\s+test|make\s+(?:test|check)|--help)\b", re.I)
+    # An honest carry-forward: the turn says the result is inherited rather than fresh.
+    _CARRIES_FORWARD_RE = re.compile(
+        r"\b(unchanged since|already (?:verified|committed|delivered|pushed)|"
+        r"in the (?:previous|prior) turn|no additional changes)\b", re.I)
+
+    async def _flag_unverified_claim(self, effort_id: str, result) -> bool:
+        """P18 F18 — did this turn claim a verification result it did not produce?
+
+        gym-016 produced three: a step reporting "All 31 tests pass, acceptance corpus passes"
+        after running only `git log --oneline -5`; a drain no-op reporting "31/31 tests pass" after
+        `git log --oneline -3`; and a plan turn reporting "the existing test suite (28 tests)
+        passes" moments after a command printed 31. Each was true by luck — nothing had changed —
+        and the org had no way to establish that. It is the same mechanism by which gym-015's
+        delivery claim outlived the commit it named (P17 F2).
+
+        Returns True when a claim was made with no verification command in the turn's record.
+
+        FLAGS, never blocks. A carry-forward is legitimate and common — most no-op turns correctly
+        report an unchanged result — so the honest move is to make the unevidenced claim visible
+        and let the delivery-side gates (which run `check_cmd` themselves) remain the arbiters. A
+        turn that says so explicitly ("unchanged since the previous turn") is not flagged at all:
+        the problem is silence about provenance, not the carry-forward itself.
+
+        Fails SILENT when the command record is empty: `_command_texts` returns [] both for "ran
+        nothing" and for "shape we could not read", and flagging on the latter would cry wolf on
+        every daemon whose activity schema drifts."""
+        out = (getattr(result, "output", None) or "")
+        if not out or not self._CLAIMS_VERIFICATION_RE.search(out):
+            return False
+        cmds = list(getattr(result, "commands", None) or [])
+        if not cmds:
+            return False                      # cannot tell — never a claim of wrongdoing
+        if any(self._IS_VERIFICATION_CMD_RE.search(c) for c in cmds):
+            return False                      # it ran one; the claim is earned
+        if self._CARRIES_FORWARD_RE.search(out):
+            return False                      # honest about inheriting the result
+        await self.audit.log("unverified_claim", effort_id=effort_id,
+                             payload={"claim": out[:300], "commands": cmds[:10]})
+        await self.comms.post(
+            Intent.worker_activity,
+            "🔎 That turn reported a test result without running the tests in it. The result may "
+            "well still hold — nothing may have changed — but say so explicitly (\"unchanged "
+            "since <commit>\") rather than restating it as if freshly measured. I verify the "
+            "suite myself before anything is delivered.",
+            effort_id=effort_id,
+        )
+        return True
+
+    _TEST_COUNT_RE = re.compile(r"^Ran\s+(\d+)\s+tests?\b", re.M)
+
+    async def _check_test_count_regression(self, effort_id: str) -> int | None:
+        """P17 F13 (deferred) / P18 — a delivery whose test count DROPPED is a silent regression.
+
+        Specified in P17 as "the cheapest possible detector" and then not built. gym-015 shows the
+        cost: a stale workspace published a tree with 51 tests where the branch had 55, and the
+        drop passed unremarked because nothing in the org remembers the previous count. gym-016
+        showed the softer version — a worker reported "28 tests" moments after running the command
+        that printed 31, and again nothing noticed.
+
+        One integer, compared round over round. Strictly weaker than the ancestry check (a revert
+        that happens to preserve the count defeats it) and completely independent of git, which is
+        exactly why it is worth having alongside. Records the count and returns the previous one
+        when a regression is detected, else None.
+
+        Never blocks: this RAISES A FLAG for the human. A test count can legitimately fall (a
+        consolidated suite, a removed feature the operator asked for), so the honest move is to
+        make the drop visible rather than to refuse the delivery on it."""
+        proj = await self._effort_project(effort_id)
+        check = ""
+        try:
+            p = await self.projects.get(proj) if proj else None
+            check = ((p or {}).get("check_cmd") or "").strip()
+        except Exception:  # noqa: BLE001
+            return None
+        if not check:
+            return None
+        try:
+            _exit, out, _timed = await self.router.exec_check(
+                effort_id, command=f"cd /workspace && {check}",
+                session_id=f"{effort_id}~testcount", repo=None, repo_token=None, timeout=300)
+        except Exception as exc:  # noqa: BLE001 — unmeasurable is not a regression
+            log.debug("test count read failed for %s: %s", effort_id, exc)
+            return None
+        m = self._TEST_COUNT_RE.search(out or "")
+        if not m:
+            return None                       # not a unittest-shaped runner; nothing to compare
+        count = int(m.group(1))
+        prev_payload = await self._last_event_payload(effort_id, "delivery_test_count")
+        prev = (prev_payload or {}).get("count")
+        await self.audit.log("delivery_test_count", effort_id=effort_id,
+                             payload={"count": count, "previous": prev})
+        if isinstance(prev, int) and count < prev:
+            await self.audit.log("test_count_regressed", effort_id=effort_id,
+                                 payload={"count": count, "previous": prev})
+            msg = (f"⚠️ **{effort_id}** — the delivered test count **fell from {prev} to "
+                   f"{count}**. That can be legitimate (a consolidated suite, a feature you asked "
+                   f"to remove), but it is also what a silent revert or a dropped test file looks "
+                   f"like, and the suite still passes either way. Worth a look before merging.")
+            await self.comms.post(Intent.escalation, msg, effort_id=effort_id)
+            return prev
+        return None
 
     async def _delivery_orphans_previous_head(
         self, effort_id: str, repo: str, delivery: BranchDelivery,
@@ -6338,6 +6465,7 @@ class Orchestrator:
                     return
                 # P17 F13/F2 — a delivery that ORPHANS the head we last published has thrown work
                 # away. Never close on it; hand it to the human with the sha that went missing.
+                await self._check_test_count_regression(effort_id)
                 orphaned = await self._delivery_orphans_previous_head(effort_id, repo, delivery)
                 if orphaned:
                     await self.audit.log(
@@ -6526,6 +6654,8 @@ class Orchestrator:
             if ho:
                 await self._open_handoff(effort_id, channel_id, root, ho, repo)
                 return None
+        # P18 F18 — a turn that CLAIMS a verification result must have run one.
+        await self._flag_unverified_claim(effort_id, result)
         if heavy and not await self._gate_deliverable(effort_id, result, cp_id):
             return None
         return result
@@ -9771,6 +9901,9 @@ class Orchestrator:
         token = await self._project_token(effort_id)
         for lens, prompt in _LENSES:
             self._verify_seq += 1
+            # P18 F4 — start each lens with an empty findings file, so a salvage can only ever
+            # recover THIS lens's observations (see `_clear_lens_findings`).
+            await self._clear_lens_findings(effort_id, round_no=round_no)
             # P17 F8 — WHAT CHANGED IS THE LEAST-EXERCISED SURFACE. A lens sweeps the branch as a
             # flat artifact and gives a line written two commits ago no more scrutiny than one that
             # has survived several rounds. gym-015: round 1's drain replaced `rest.split()` with a
@@ -9808,10 +9941,34 @@ class Orchestrator:
                 # minutes — so no watchdog or timeout change can fix it, and a stopping rule would
                 # have cut the turn before the probe that found the one real bug in the codebase.
                 f"Write your report as plain prose. Report what you actually observe.\n"
-                f"IMPORTANT — write each finding as a complete, self-contained sentence AS SOON AS "
-                f"you establish it, before moving to the next check. Do not save your findings for "
-                f"a summary at the end: if this turn runs out of room, everything you have not yet "
-                f"written down is lost."
+                # P18 F4 — THE FINDINGS MUST LEAVE THE TURN AS AN ARTIFACT, NOT AS CONTEXT.
+                # P17 asked for incremental emission in prose and it did not work: gym-016 round 2
+                # ran ~30 probes over four minutes and emitted 44 characters
+                # ("Now let me test malformed database handling:"), the same failure as gym-015's
+                # 70-char truncation. A model's natural rhythm is probe-then-report, one
+                # instruction line does not override it, and the SAME budget funds both — so a
+                # lens that probes to exhaustion has nothing left to report with. It is not a
+                # timeout either (the harness bound is 5400s; the turn died at ~4 minutes), so no
+                # limit change touches it.
+                # Writing to a file converts a claim held in context into something on disk that
+                # the harness can read back however the turn ended. Same move as every other fix
+                # in P17/P18: make the boundary an artifact rather than a promise.
+                # P18 F17 — a finding that alleges a misbehaviour must carry the command that
+                # shows it. gym-016's clean_code lens asserted "`strptime` still accepts invalid
+                # dates like 2025-02-30" — false; it raises, and the CLI exits 1 with a clear
+                # message — and that became an open task against correct code. A named
+                # reproduction turns the claim into something the org can run before spending a
+                # worker on it, which is the same executable-contract move as every other gate.
+                f"If a finding says the program MISHANDLES some input, you must have run it. "
+                f"State the exact command on its own line, prefixed `REPRO: `, immediately after "
+                f"the finding. If you cannot demonstrate it with a command, say plainly that you "
+                f"did not verify it.\n"
+                f"AFTER EACH CHECK, before moving on, append your finding to a file:\n"
+                f"  echo 'FINDING: <one self-contained sentence>' >> {_LENS_FINDINGS_PATH}\n"
+                f"Write it as a complete sentence that stands alone — someone reading only that "
+                f"line must understand the finding without the rest of your report. Do this as you "
+                f"go, not at the end: if this turn runs out of room, the file is all that "
+                f"survives. Then write your full report as normal."
             )
             try:
                 result = await self.router.wake(
@@ -9838,11 +9995,25 @@ class Orchestrator:
             # audit trail (we want to see what the lens managed to say), but keep it out of
             # `reports` so it can neither satisfy `swept` nor reach gap analysis.
             if not _is_lens_report(body):
+                # P18 F4 — the turn died, but it may have banked findings on disk as it went.
+                # Recover them: a lens that probed for four minutes and established a dozen real
+                # defects should not lose all of them because it never reached its summary.
+                salvaged = await self._salvage_lens_findings(effort_id, lens, round_no=round_no)
                 await self._record_lens_report(effort_id, f"{lens}:truncated", body,
                                                round_no=round_no, scope_node_id=scope_node_id)
                 await self.audit.log("lens_report_truncated", effort_id=effort_id,
                                      payload={"lens": lens, "round": round_no,
-                                              "chars": len(body), "body": body[:200]})
+                                              "chars": len(body), "body": body[:200],
+                                              "salvaged_chars": len(salvaged)})
+                if salvaged and _is_lens_report(salvaged):
+                    # Recovered enough to be a real report. It counts — including for `swept`,
+                    # because the observation genuinely happened; only the summary was lost.
+                    log.info("lens %s truncated for %s but %d chars salvaged from findings file",
+                             lens, effort_id, len(salvaged))
+                    reports[lens] = salvaged
+                    await self._record_lens_report(effort_id, f"{lens}:salvaged", salvaged,
+                                                   round_no=round_no, scope_node_id=scope_node_id)
+                    continue
                 log.info("lens %s produced no report for %s (%d chars) — round not swept by it",
                          lens, effort_id, len(body))
                 continue
@@ -9921,6 +10092,185 @@ class Orchestrator:
                 continue
             kept.append((lens, body))
         return kept
+
+    # A task body that alleges a specific input is mishandled: it names a quoted literal AND a
+    # verb of rejection/acceptance. That shape is CHECKABLE — run the input, see what happens.
+    _ALLEGES_MISBEHAVIOUR_RE = re.compile(
+        r"\b(reject|accept|handle|validate|guard|prevent|allow)\w*\b", re.I)
+    # The reproduction the LENS named, in the form the lens prompt asks for:
+    #   REPRO: <command>
+    # Nothing is synthesised — an orchestrator-level check cannot know how to drive an arbitrary
+    # product, and guessing produced a gym-only probe in the first draft of this fix.
+    _REPRO_CMD_RE = re.compile(r"REPRO:\s*(.+?)(?:\n|$)")
+
+    async def _drop_false_defects(
+        self, effort_id: str, derived: list[tuple[str, str]], *, round_no: int,
+    ) -> list[tuple[str, str]]:
+        """P18 F17 — refuse to create work from a MISBEHAVIOUR the code refutes.
+
+        F11 checks asserted ABSENCES ("add X" where X exists) and deliberately never fires on
+        fix/reject/remove verbs, because a filter that could delete real repair work is a worse
+        failure than one that lets fabricated work through. The consequence is a blind spot
+        exactly the size of that exclusion, and gym-016 walked straight into it: the `clean_code`
+        lens reported
+
+            "`strptime` still accepts invalid dates like 2025-02-30 — the regex checks shape but
+             not semantic validity ... the function claims to validate but does not fully validate"
+
+        which is false (`strptime` raises "day is out of range for month", and the CLI exits 1
+        with a clear message). It became the open task "Reject semantically invalid dates in
+        _parse_date" — fabricated work against correct code.
+
+        The tractable check is the same executable-contract move as everywhere else in P17/P18: a
+        claim of the form "input X is mishandled" is settled by RUNNING X. Where a task alleges a
+        misbehaviour and names a concrete literal, feed that literal to the module and see whether
+        anything actually goes wrong.
+
+        Conservative by construction, in the direction that matters: a task is dropped ONLY when
+        the named input is demonstrably handled correctly (non-zero exit with a diagnostic, or a
+        clean rejection). Anything unparseable, unrunnable or ambiguous is KEPT. Failure to
+        reproduce a bug is not the same as proving there is none — but a command that exits 1 with
+        "invalid date format" is positive evidence the alleged acceptance does not happen."""
+        if not derived:
+            return derived
+        # The reproduction must come FROM THE FINDING. An earlier draft of this synthesised a
+        # probe (`python3 todo.py add --due <literal>`), which works on the gym's todo CLI and is
+        # meaningless on any other project — an orchestrator-level check must not know what the
+        # product is. If the lens did not name a way to demonstrate the misbehaviour, that is a
+        # finding we cannot check, and an unchecked finding is KEPT.
+        candidates: dict[str, str] = {}
+        for _lens, body in derived:
+            if not self._ALLEGES_MISBEHAVIOUR_RE.search(body):
+                continue
+            repro = self._REPRO_CMD_RE.search(body)
+            if repro:
+                candidates[body] = repro.group(1).strip()
+        if not candidates:
+            return derived
+        idx = {i: (body, cmd) for i, (body, cmd) in enumerate(list(candidates.items())[:6])}
+        parts = []
+        for i, (_body, cmd) in idx.items():
+            # `sh -c` so the lens's own command runs as written. A non-zero exit WITH output is
+            # positive evidence the input is handled: the program noticed and complained.
+            parts.append(
+                f"out=$(cd /workspace && sh -c {shlex.quote(cmd)} 2>&1); rc=$?; "
+                f"if [ $rc -ne 0 ] && [ -n \"$out\" ]; then echo 'HANDLED {i}'; "
+                f"else echo 'UNPROVEN {i}'; fi")
+        try:
+            _exit, out, _timed = await self.router.exec_check(
+                effort_id, command=" ; ".join(parts),
+                session_id=f"{effort_id}~defect{round_no}",
+                repo=None, repo_token=None, timeout=180)
+        except Exception as exc:  # noqa: BLE001 — unverifiable is NOT refuted; keep every task
+            log.debug("false-defect check failed for %s: %s", effort_id, exc)
+            return derived
+        handled_bodies = {idx[int(ln.split(" ", 1)[1])][0]
+                          for ln in (out or "").splitlines()
+                          if ln.startswith("HANDLED ") and ln.split(" ", 1)[1].strip().isdigit()
+                          and int(ln.split(" ", 1)[1]) in idx}
+        if not handled_bodies:
+            return derived
+        kept: list[tuple[str, str]] = []
+        for lens, body in derived:
+            if body in handled_bodies:
+                await self.audit.log("false_defect_rejected", effort_id=effort_id,
+                                     payload={"round": round_no, "lens": lens,
+                                              "body": body[:200],
+                                              "repro": candidates.get(body, "")[:160]})
+                continue
+            kept.append((lens, body))
+        return kept
+
+    async def _salvage_lens_findings(
+        self, effort_id: str, lens: str, *, round_no: int,
+    ) -> str:
+        """P18 F4 — read back the findings a truncated lens banked to disk, then clear the file.
+
+        gym-016 round 2: the `goal_alignment` lens ran ~30 probes over four minutes and returned
+        44 characters of narration. Everything it had established was in its context and died with
+        the turn. P17 tried to fix that by ASKING for incremental prose emission; that failed,
+        because the same budget funds probing and reporting.
+
+        The lens now appends each finding to a file as it goes, so recovery is a file read rather
+        than a request for cooperation. Clearing afterwards matters as much as reading: the file
+        lives in the container, so a later lens in the same round would otherwise inherit its
+        predecessor's findings and report them as its own.
+
+        Returns the salvaged text, or '' when there is nothing (which is the honest answer — a
+        lens that banked nothing observed nothing worth keeping)."""
+        cmd = (f"cat {_LENS_FINDINGS_PATH} 2>/dev/null; "
+               f"rm -f {_LENS_FINDINGS_PATH} 2>/dev/null; echo SALVAGE-DONE")
+        try:
+            _exit, out, _timed = await self.router.exec_check(
+                effort_id, command=cmd, session_id=f"{effort_id}~salvage{round_no}",
+                repo=None, repo_token=None, timeout=120)
+        except Exception as exc:  # noqa: BLE001 — nothing salvaged is the pre-P18 behaviour
+            log.debug("lens findings salvage failed for %s: %s", effort_id, exc)
+            return ""
+        lines = [ln.strip() for ln in (out or "").splitlines()
+                 if ln.strip().startswith("FINDING:")]
+        if not lines:
+            return ""
+        await self.audit.log("lens_findings_salvaged", effort_id=effort_id,
+                             payload={"lens": lens, "round": round_no, "findings": len(lines)})
+        return (f"Findings recovered from the {lens} lens after its turn ended early. Each line "
+                f"is one observation it had established and written down before stopping.\n\n"
+                + "\n".join(lines))
+
+    async def _clear_lens_findings(self, effort_id: str, *, round_no: int) -> None:
+        """Drop any findings file left over before a lens runs. Without this, a lens that finishes
+        cleanly leaves its file behind and the NEXT lens's salvage would pick it up — attributing
+        one lens's observations to another, which is worse than losing them."""
+        try:
+            await self.router.exec_check(
+                effort_id, command=f"rm -f {_LENS_FINDINGS_PATH} 2>/dev/null; echo CLEARED",
+                session_id=f"{effort_id}~salvage{round_no}",
+                repo=None, repo_token=None, timeout=120)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("lens findings clear failed for %s: %s", effort_id, exc)
+
+    async def _extraction_scopes(
+        self, effort_id: str, node_id: str | None, scope_goal: str,
+    ) -> list[str]:
+        """P18 F19 — every scope this round's report should be mined against.
+
+        The selected scope FIRST (its tasks are the ones about to be dispatched), then every other
+        OPEN scope in the same tree. Deduplicated, and capped so a wide tree cannot turn one round
+        into a dozen model calls.
+
+        Returns just the scope-goal texts: `_gap_analysis` takes a goal, and `_seam_owner` decides
+        ownership afterwards from the task body, so nothing here needs to thread node ids through.
+        Falls back to `[scope_goal]` — the old behaviour — whenever the tree cannot be read, which
+        keeps a tree-less effort and a database hiccup on exactly the path they had before."""
+        goals: list[str] = [scope_goal] if scope_goal else []
+        if not node_id:
+            return goals
+        try:
+            async with self.db.session_factory() as s:
+                node = await s.get(ScopeNode, node_id)
+                if node is None:
+                    return goals
+                # Siblings under the same parent, plus the parent's other descendants at this
+                # tier. A round working one child should still bank findings about the others.
+                root_id = node.parent_id or node_id
+                rows = (await s.execute(
+                    select(ScopeNode).where(ScopeNode.parent_id == root_id)
+                    .order_by(ScopeNode.created_at))).scalars().all()
+        except Exception as exc:  # noqa: BLE001 — a tree we cannot read is the old behaviour
+            log.debug("extraction scope read failed for %s: %s", effort_id, exc)
+            return goals
+        seen = {g.strip() for g in goals}
+        for r in rows:
+            if r.status != "open":
+                continue                      # a completed scope is not owed more work
+            txt = (r.scope or "").strip()
+            if txt and txt not in seen:
+                seen.add(txt)
+                goals.append(txt)
+        if len(goals) > 1:
+            await self.audit.log("gap_extraction_fanout", effort_id=effort_id,
+                                 payload={"scopes": len(goals), "selected": node_id})
+        return goals[:5]
 
     async def _gap_analysis(self, effort_id: str, report: str, scope_goal: str) -> list[str]:
         """P10.2 — the ONLY place the goal is allowed to enter.
@@ -10132,14 +10482,34 @@ class Orchestrator:
                                       "scope_goal_chars": len(scope_goal)})
         derived: list[tuple[str, str]] = []
         if reports.get(_LENS_GOAL_ALIGNMENT_KEY):
-            derived += [(_LENS_GOAL_ALIGNMENT_KEY, b) for b in await self._gap_analysis(
-                effort_id, reports[_LENS_GOAL_ALIGNMENT_KEY], scope_goal)]
+            # P18 F19 — EXTRACT FOR EVERY OPEN SCOPE, NOT JUST THE SELECTED ONE.
+            #
+            # The lens sweeps the WHOLE branch, but gap analysis used to mine its report against a
+            # single scope's goal, and everything it said about the siblings was discarded.
+            # gym-016 round 1: the `goal_alignment` lens found and precisely diagnosed a broken
+            # REPL flag parser ("`add test --priority high` becomes ['add', 'test --priority
+            # high']"); gap analysis ran against the 68-char `json data storage` scope, the
+            # finding belonged to `cli and repl interface`, and it evaporated. It was still broken
+            # at the delivered head and shipped in the PR.
+            #
+            # The org already routes TASKS to their owning scope (`_seam_owner` / P14.2) one step
+            # later. This is the same idea one step earlier: the report is already in hand, so
+            # extracting against each open scope is cheap (one model call per scope, no extra
+            # observation) and stops a diagnosed defect landing in nobody's queue. DISPATCH still
+            # works one scope at a time — only the extraction fans out.
+            targets = await self._extraction_scopes(effort_id, node_id, scope_goal)
+            for tgt_goal in targets:
+                derived += [(_LENS_GOAL_ALIGNMENT_KEY, b) for b in await self._gap_analysis(
+                    effort_id, reports[_LENS_GOAL_ALIGNMENT_KEY], tgt_goal)]
         for lens in ("clean_code", "project_documentation"):
             if reports.get(lens):
                 derived += [(lens, b) for b in
                             await self._tasks_from_lens(effort_id, lens, reports[lens])]
         # P17 F11 — DROP TASKS BUILT ON AN ABSENCE THE TREE REFUTES. One batch check per round.
         derived = await self._drop_false_absences(effort_id, derived, round_no=round_no)
+        # P18 F17 — and drop tasks built on a MISBEHAVIOUR the code refutes. F11's filter only
+        # looks at asserted absences; this is its mirror.
+        derived = await self._drop_false_defects(effort_id, derived, round_no=round_no)
         # The sibling scopes a task may belong to (P14.2). Read once per round, not per task.
         scope_children = await self._scope_children(node_id) if node_id else []
         new_bodies: list[str] = []
