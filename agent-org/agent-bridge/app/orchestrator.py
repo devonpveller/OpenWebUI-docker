@@ -7334,9 +7334,20 @@ class Orchestrator:
         clauses existed, a fresh session forgot every dead end it had already walked."""
         if not open_tasks:
             return False
-        listed = "\n".join(f"- {t['body']}" for t in open_tasks[:20])
+        # P20 ONE TASK AT A TIME (ORCHESTRATION-DESIGN §4: "single tasks, each delegated to a single
+        # worker ... one task at a time and unaware of the bigger picture"; §5: "how ONE worker
+        # executes ONE bounded task"). This is the architecture's load-bearing sidestep of the
+        # small-model long-horizon failure — the worker never carries the horizon. Handing it the
+        # whole scope queue is a multi-task turn, which "don't typically work reliably" (operator,
+        # 2026-07-21): gym-018's worker went silent mid-turn trying to implement 6 tasks in one pass.
+        # Dispatch the FIRST task ONLY; the rest stay queued and drain one per turn (`_finish_effort`
+        # re-enters and works the next single one without re-sweeping).
+        queued = len(open_tasks)
+        open_tasks = open_tasks[:1]
+        listed = f"- {open_tasks[0]['body']}"
         await self.audit.log("drain_dispatch", effort_id=effort_id,
-                             payload={"round": round_no, "tasks": len(open_tasks)})
+                             payload={"round": round_no, "task": open_tasks[0]["body"][:200],
+                                      "queued": queued})
         plan = ""
         if self.s.drain_plan_split:
             plan = await self._drain_plan(effort_id, listed)
@@ -7368,8 +7379,9 @@ class Orchestrator:
             "the verification you ran and its result."
         )
         goal = (
-            f"Work the following tasks on the existing branch. These are the outstanding items for "
-            f"this scope — implement them, commit, and push.\n\nTASKS:\n{listed}"
+            f"Work the following SINGLE task on the existing branch — implement it, commit, and "
+            f"push. It is one bounded unit; do only this, then stop. Other work for this scope is "
+            f"tracked separately and will come to you as its own task.\n\nTASK:\n{listed}"
             + (f"\n\nPLAN:\n{plan}" if plan else "")
             + scope_ctx + commit_brief
         )
@@ -7405,8 +7417,9 @@ class Orchestrator:
             await self.close_task(t["id"], status="dispatched")
         await self.comms.post(
             Intent.worker_activity,
-            f"🔁 **Drain round {round_no}** — {len(open_tasks)} open task(s); dispatching a fresh "
-            f"implementer. No operator action needed.",
+            f"🔁 **Drain round {round_no}** — dispatching a fresh implementer on **one** task"
+            + (f" ({queued - 1} more queued for this scope)" if queued > 1 else "")
+            + ". No operator action needed.",
             effort_id=effort_id,
         )
         return True
@@ -11033,6 +11046,22 @@ class Orchestrator:
             if self.s.drain_loop and self.s.qa_gate != "off":
                 _dr_loc = await self.router.effort_thread(effort_id)
                 if _dr_loc:
+                    # P20 ONE TASK AT A TIME — before sweeping again, drain the tasks the LAST sweep
+                    # already produced, one implementer turn each. The lens sweep is a whole-product
+                    # observation and belongs at the ROUND BOUNDARY (an empty queue); running it
+                    # between every task would spend three lens turns per fix for no new information.
+                    # So: if this scope still has queued tasks, dispatch the NEXT SINGLE one and
+                    # re-enter — the sweep waits until the queue is empty. (§4/§5: the worker holds
+                    # one bounded task and is unaware of the bigger picture.)
+                    _drain_node = (await self._ensure_scope_node(effort_id)
+                                   if self.s.drain_tier_walk else None)
+                    _pending = await self._dispatchable_tasks(effort_id, _drain_node)
+                    if _pending:
+                        await self._drain_iterate(
+                            effort_id, _pending,
+                            max(1, await self._drain_round_no(effort_id) - 1),
+                            channel_id=_dr_loc[0], root=_dr_loc[1])
+                        return   # the delivery re-enters: next queued task, or the sweep when empty
                     dr = await self._drain_round(
                         effort_id, _dr_loc[0], _dr_loc[1], eff_repo, delivery)
                     qa_note = dr["note"]

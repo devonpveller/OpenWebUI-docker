@@ -360,20 +360,34 @@ async def _round(orch, harness, eid, chan, root, gap_lines: str):
     return await orch._drain_round(eid, chan, root, REPO, _delivery())
 
 
+async def _drain_queue(orch, eid, round_no, node=None):
+    """P20 ONE TASK AT A TIME — dispatch every queued task in the scope, ONE implementer turn each,
+    until the queue is empty. Production does this via `_finish_effort`'s pending-drain (dispatch
+    the next single task, re-enter, sweep only when empty); the tests drive `_drain_round` /
+    `_drain_iterate` directly, so they drain the round's queue here between sweeps."""
+    for _ in range(50):                       # bound: a real round never queues 50; guards a slip
+        opens = await orch._dispatchable_tasks(eid, node)
+        if not opens:
+            return
+        await orch._drain_iterate(eid, opens, round_no)
+
+
 async def test_a_scope_completes_after_exactly_three_rounds_of_2_then_1_then_0(db_url):
     """The plan's assertion verbatim: a stubbed lens returning 2 gaps, then 1, then 0 completes
-    after exactly 3 rounds — and the runaway cap is never reached."""
+    after exactly 3 rounds — and the runaway cap is never reached. P20: each round's tasks now
+    dispatch one at a time, so the test drains the queue between sweeps; the SWEEP counts (2, 1, 0)
+    and the termination are unchanged — those are `_drain_round`, not the dispatch cadence."""
     orch, _chat, harness, db = await _orch(db_url, tier_walk=False)
     try:
         eid, chan, root = await _effort(orch)
         r1 = await _round(orch, harness, eid, chan, root,
                           "add a delete command\nprint usage help with no arguments")
         assert r1["round"] == 1 and r1["new_tasks"] == 2
-        await orch._drain_iterate(eid, r1["open_tasks"], r1["round"])
+        await _drain_queue(orch, eid, r1["round"])          # drain BOTH, one at a time
 
         r2 = await _round(orch, harness, eid, chan, root, "validate the due date format")
         assert r2["round"] == 2 and r2["new_tasks"] == 1
-        await orch._drain_iterate(eid, r2["open_tasks"], r2["round"])
+        await _drain_queue(orch, eid, r2["round"])          # drain the 1
 
         r3 = await _round(orch, harness, eid, chan, root, "none")
         assert r3["round"] == 3 and r3["new_tasks"] == 0    # ZERO PROPAGATION -> complete
@@ -381,6 +395,27 @@ async def test_a_scope_completes_after_exactly_three_rounds_of_2_then_1_then_0(d
         assert r3["open_tasks"] == []                       # and the queue drained
         assert "complete" in r3["note"].lower()
         assert await orch._event_count(eid, "drain_round") == 3
+    finally:
+        await _shutdown(orch, db)
+
+
+async def test_drain_iterate_dispatches_one_task_and_leaves_the_rest_queued(db_url):
+    """P20 — ONE task per implementer turn (ORCHESTRATION-DESIGN §4/§5). Given three open tasks, a
+    single `_drain_iterate` dispatches exactly ONE (closing it `dispatched`) and leaves the other
+    two queued for their own turns. Handing a worker the whole queue is the multi-task turn that
+    "don't typically work reliably" — gym-018's worker hung trying to do 6 in one pass."""
+    orch, _chat, harness, db = await _orch(db_url, tier_walk=False)
+    try:
+        eid, chan, root = await _effort(orch)
+        r1 = await _round(orch, harness, eid, chan, root,
+                          "add a delete command\nadd an edit command\nvalidate the due date")
+        assert r1["new_tasks"] == 3
+        assert await orch._drain_iterate(eid, r1["open_tasks"], r1["round"]) is True
+        still_open = await orch._dispatchable_tasks(eid, None)
+        assert len(still_open) == 2                        # ONE dispatched, two remain queued
+        brief = orch._iterate_after[eid]
+        assert "delete" in brief                           # the first-derived task, dispatched
+        assert "edit command" not in brief                 # a sibling — NOT in this turn's brief
     finally:
         await _shutdown(orch, db)
 
@@ -455,9 +490,11 @@ async def test_implementer_session_differs_from_the_planner_session(db_url):
         await _shutdown(orch, db)
 
 
-async def test_implementer_gets_the_plan_and_tasks_and_not_the_whole_goal(db_url):
+async def test_implementer_gets_one_task_and_the_plan_not_the_whole_goal(db_url):
     """gym-008: `_auto_iterate` re-sent the ENTIRE original goal to the worker that had just
-    satisfied it — asking it to plan work it had just done — and got an empty plan."""
+    satisfied it — asking it to plan work it had just done — and got an empty plan. P20: the brief
+    now carries exactly ONE task (§4/§5 — the worker holds one bounded unit and is unaware of the
+    bigger picture), never the sibling task and never the whole goal."""
     orch, _chat, harness, db = await _orch(db_url, tier_walk=False)
     try:
         eid, chan, root = await _effort(orch)
@@ -466,7 +503,8 @@ async def test_implementer_gets_the_plan_and_tasks_and_not_the_whole_goal(db_url
         harness.output_queue.append("1. edit todo.py: add a `delete` subcommand.")
         assert await orch._drain_iterate(eid, r1["open_tasks"], r1["round"]) is True
         brief = orch._iterate_after[eid]
-        assert "add a delete command" in brief and "print usage help" in brief
+        assert "add a delete command" in brief                   # the ONE dispatched task
+        assert "print usage help" not in brief                   # the sibling stays queued (P20)
         assert "delete` subcommand" in brief                     # the plan rode along
         assert GOAL not in brief                                 # ...but never the whole goal
         assert "ITERATION" not in brief                          # nor the old evolved-goal shape
