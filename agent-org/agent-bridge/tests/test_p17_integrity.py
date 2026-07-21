@@ -295,6 +295,42 @@ async def test_a_wellformed_abort_still_goes_straight_through(db_url):
         await _shutdown(orch, db)
 
 
+# ── F14-refinement (P19) — a clean stop COMMAND routes to abort, not to the ask ───────────────
+async def test_a_clean_archive_command_aborts_directly(db_url):
+    """`archive <id>` was a valid PO command before F14 shipped (it stopped gym-015); F14 then
+    diverted it to the "send abort" ask because it isn't in the control grammar. A clean stop
+    command (verb leading, id following, nothing else) now routes STRAIGHT to the abort handler —
+    no ask, the effort is actually cancelled."""
+    orch, chat, _harness, db = await _orch(db_url)
+    try:
+        eid, _c, _r = await _effort(orch)
+        chan = await orch.mgmt_channel_id() or "chan"
+        await orch.nl_intake(f"archive {eid}", chan, user_id="operator-api")
+        assert await orch._event_count(eid, "operator_intent_unmatched") == 0
+        posts = " ".join(str(p.get("message", "")) for p in chat.posted)
+        assert "have not stopped anything" not in posts    # NOT diverted to the ask
+        assert "aborted" == await orch.gate.lifecycle_of(eid)    # the abort actually fired
+    finally:
+        await _shutdown(orch, db)
+
+
+async def test_elaborate_stop_phrasing_still_reaches_the_ask(db_url):
+    """The refinement must not swallow a fuzzy stop. A message carrying more than the bare verb+id
+    is NOT a clean command and still reaches the F14 ask, which is the safe place for an ambiguous
+    stop (acting on "don't stop effort-x" would be the opposite hazard)."""
+    orch, chat, _harness, db = await _orch(db_url)
+    try:
+        eid, _c, _r = await _effort(orch)
+        chan = await orch.mgmt_channel_id() or "chan"
+        await orch.nl_intake(f"stop {eid} — the run is done, no more pushes please",
+                             chan, user_id="operator-api")
+        assert await orch._event_count(eid, "operator_intent_unmatched") == 1
+        posts = " ".join(str(p.get("message", "")) for p in chat.posted)
+        assert "have not stopped anything" in posts
+    finally:
+        await _shutdown(orch, db)
+
+
 # ── F9 — a child scope must be narrower than its parent ───────────────────────
 async def test_a_child_scope_that_restates_its_parent_is_rejected(db_url):
     """gym-015 decomposed "Data persistence layer :: handles loading, saving, atomic file writes,

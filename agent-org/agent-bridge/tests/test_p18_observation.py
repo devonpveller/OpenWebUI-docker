@@ -17,61 +17,106 @@ from test_lenses import (  # noqa: F401 — shared fixtures/helpers, same fake s
 )
 
 
-# ── F19 — a sweep's observations are mined for every open scope ───────────────
-async def test_gap_extraction_fans_out_across_open_sibling_scopes(db_url):
-    """gym-016 round 1: the goal_alignment lens found and precisely diagnosed a broken REPL flag
-    parser. Gap analysis ran against the 68-char `json data storage` scope, the finding belonged
-    to `cli and repl interface`, and it evaporated — still broken at the delivered head, shipped
-    in the PR. The lens sweeps the whole branch; extraction must not throw away everything it saw
-    about the siblings."""
-    orch, _chat, _harness, db = await _orch(db_url)
+# ── F19-redux (P19) — mine the report ONCE against the product goal, then route ───────────────
+#
+# P18 F19 fanned gap analysis across every open scope so a sibling's finding could not evaporate
+# (gym-016). But mining the same whole-branch report against N overlapping scope-goals N-plicates
+# every cross-scope finding: gym-017 round 3 turned ~8 findings into 24 tasks and re-ascended the
+# open queue 9 → 24 — the wrong direction for a propagation-count termination (P10.4). The fix is
+# to extract ONCE against the product goal and let the existing per-task `_seam_owner` routing file
+# each result to its owner: one finding, one task, no paraphrase duplication, a trustworthy count.
+async def test_gap_analysis_is_run_once_against_the_product_goal_not_per_scope(db_url):
+    """The convergence fix. With a decomposed tree, a round used to run gap analysis once PER open
+    scope (the fan-out); it now runs exactly once, against the effort's own goal — so the derived
+    count reflects distinct findings, not findings × scopes."""
+    orch, _chat, harness, db = await _orch(db_url)
     try:
-        eid, _c, _r = await _effort(orch)
-        root = await orch.add_scope_node("gym", "product", "the whole todo product")
-        kids = await orch.decompose_scope(root, [
-            ("json data storage", "loading, saving, atomic writes, repairing malformed entries"),
-            ("cli and repl interface", "argument parsing, interactive loop, input validation"),
-        ])
-        assert len(kids) == 2
-        goals = await orch._extraction_scopes(
-            eid, kids[0], "loading, saving, atomic writes, repairing malformed entries")
-        # the selected scope first, then the open sibling — the report is mined against both
-        assert len(goals) == 2
-        assert "atomic writes" in goals[0]
-        assert any("interactive loop" in g for g in goals)
-        assert await orch._event_count(eid, "gap_extraction_fanout") == 1
+        eid, chan, root = await _effort(orch)
+        seen = {"n": 0, "goal": None}
+
+        async def _fake_gap(effort_id, report, goal):
+            seen["n"] += 1
+            seen["goal"] = goal
+            return ["Add atomic writes so an interrupted save cannot truncate the storage file",
+                    "Fix the interface so repl input flags are parsed, not swallowed into text"]
+
+        async def _no_lens_tasks(effort_id, lens, report):
+            return []
+
+        orch._gap_analysis = _fake_gap
+        orch._tasks_from_lens = _no_lens_tasks
+        for _ in range(3):
+            harness.output_queue.append(_REPORT)
+        orch.models._client.queue_text(          # the ONE decomposition call
+            "storage :: loading saving atomic writes json database file resilience\n"
+            "interface :: argument parsing interactive repl loop flag input validation")
+        r = await orch._drain_round(eid, chan, root, REPO, _delivery())
+        assert seen["n"] == 1                      # ONCE — not once per open scope
+        assert seen["goal"] == GOAL                # against the PRODUCT goal, not a scope's
+        assert r["new_tasks"] == 2                 # one task per distinct finding, no fan-out
     finally:
         await _shutdown(orch, db)
 
 
-async def test_a_completed_scope_is_not_mined_for_more_work(db_url):
-    """Fan-out covers OPEN scopes only. A scope that has completed is not owed further work, and
-    re-deriving against it would reopen finished tiers every round."""
-    orch, _chat, _harness, db = await _orch(db_url)
+async def test_a_decomposing_round_does_not_multiply_its_findings_by_the_scope_count(db_url):
+    """The anti-duplication guarantee, end to end. gym-017 round 3 fanned ~8 findings across the
+    open scopes into 24 tasks and re-ascended the queue; the implementer then de-duped them back to
+    9 — the harm was to the COUNT (the termination signal), not the work. Under F19-redux the same
+    two distinct findings, with two open sibling scopes present, yield exactly two tasks: the count
+    equals the number of distinct findings, so it can descend to a trustworthy zero.
+
+    Routing is deliberately UNCHANGED: the derivations land on the selected working scope and stay
+    dispatchable this round. Distributing them to the siblings would strand them, because the tier
+    walk selects downward only (`_dispatchable_tasks` / the "worst failure mode" test)."""
+    orch, _chat, harness, db = await _orch(db_url)
     try:
-        eid, _c, _r = await _effort(orch)
-        root = await orch.add_scope_node("gym", "product", "the whole todo product")
-        kids = await orch.decompose_scope(root, [
-            ("storage", "loading and saving the database file"),
-            ("interface", "argument parsing and the interactive loop"),
-        ])
-        await orch._complete_scope(kids[1])
-        goals = await orch._extraction_scopes(eid, kids[0], "loading and saving the database file")
-        assert len(goals) == 1                      # only the selected, still-open scope
-        assert "interactive loop" not in " ".join(goals)
+        eid, chan, root = await _effort(orch)
+
+        async def _fake_gap(effort_id, report, goal):
+            return ["Add atomic writes to the storage path so a crash cannot truncate the file",
+                    "Fix the interface repl so flags in input are parsed, not swallowed as text"]
+
+        async def _no_lens_tasks(effort_id, lens, report):
+            return []
+
+        orch._gap_analysis = _fake_gap
+        orch._tasks_from_lens = _no_lens_tasks
+        for _ in range(3):
+            harness.output_queue.append(_REPORT)
+        orch.models._client.queue_text(          # decompose into two OPEN sibling scopes
+            "storage :: loading saving atomic writes json database file resilience\n"
+            "interface :: argument parsing interactive repl loop flag input validation")
+        r = await orch._drain_round(eid, chan, root, REPO, _delivery())
+        assert r["new_tasks"] == 2               # two findings -> two tasks, NOT two × two scopes
+        assert len(r["open_tasks"]) == 2         # both dispatchable this round — nothing stranded
     finally:
         await _shutdown(orch, db)
 
 
-async def test_extraction_falls_back_to_the_selected_scope_without_a_tree(db_url):
-    """No tree, or an unreadable one, must behave exactly as it did before P18 — one extraction
-    against the scope in force. A new fan-out must never change the tree-less path."""
-    orch, _chat, _harness, db = await _orch(db_url, tier_walk=False)
+async def test_without_a_tree_the_product_goal_is_still_mined_once(db_url):
+    """Tree-less (tier walk off): node routing is unavailable, but the single-extraction contract
+    still holds and the goal passed is the effort's own goal."""
+    orch, _chat, harness, db = await _orch(db_url, tier_walk=False)
     try:
-        eid, _c, _r = await _effort(orch)
-        goals = await orch._extraction_scopes(eid, None, "the whole goal")
-        assert goals == ["the whole goal"]
-        assert await orch._event_count(eid, "gap_extraction_fanout") == 0
+        eid, chan, root = await _effort(orch)
+        seen = {"n": 0, "goal": None}
+
+        async def _fake_gap(effort_id, report, goal):
+            seen["n"] += 1
+            seen["goal"] = goal
+            return ["Add a delete command to the cli"]
+
+        async def _no_lens_tasks(effort_id, lens, report):
+            return []
+
+        orch._gap_analysis = _fake_gap
+        orch._tasks_from_lens = _no_lens_tasks
+        for _ in range(3):
+            harness.output_queue.append(_REPORT)
+        r = await orch._drain_round(eid, chan, root, REPO, _delivery())
+        assert seen["n"] == 1
+        assert seen["goal"] == GOAL
+        assert r["new_tasks"] == 1
     finally:
         await _shutdown(orch, db)
 
@@ -205,11 +250,79 @@ async def test_a_finding_with_no_named_reproduction_is_kept(db_url):
         await _shutdown(orch, db)
 
 
-# ── F13 — a delivered test count must not silently fall ───────────────────────
+# ── F17-redux (P19) — carry a shown repro through, and tell a crash from a clean rejection ────
+async def test_the_false_defect_probe_treats_a_traceback_as_unhandled(db_url):
+    """gym-017's undo bug is REAL and its repro exits non-zero with a `JSONDecodeError` traceback.
+    The first F17 rule ("non-zero exit + output → HANDLED → drop") could not tell that crash from
+    an argparse exit-2, and — had a repro reached it — would have DROPPED a real critical bug as
+    fabricated. The probe must check for a traceback FIRST and route it to keep."""
+    orch, _chat, harness, db = await _orch(db_url, tier_walk=False)
+    try:
+        eid, chan, root = await _effort(orch)
+        captured = {}
+
+        async def _exec(effort_id, *, command, session_id, **kw):
+            captured["cmd"] = command
+            return 0, "UNPROVEN 0", False        # a crash routes to UNPROVEN in the real shell
+
+        orch.router.exec_check = _exec
+        r = await _round(
+            orch, harness, eid, chan, root,
+            "Reject the undo command crashing on an empty database\n"
+            "REPRO: python3 todo.py undo")
+        # the traceback test is present AND is checked BEFORE the non-zero+output HANDLED branch
+        assert "grep -qF 'Traceback (most recent call last)'" in captured["cmd"]
+        assert captured["cmd"].index("Traceback") < captured["cmd"].index("HANDLED")
+        assert len(r["open_tasks"]) == 1                       # UNPROVEN -> kept
+        assert await orch._event_count(eid, "false_defect_rejected") == 0
+    finally:
+        await _shutdown(orch, db)
+
+
+async def test_gap_analysis_carries_a_shown_repro_into_the_task_body(db_url):
+    """Part 1 of the pair: F17 was inert because gap analysis rewrote lens findings into plain
+    bodies and stripped the reproduction — `_drop_false_defects` never had a command to run. The
+    extraction now copies a repro the report shows onto the task, and the prompt forbids inventing
+    one (an invented probe is meaningless off the single product it was guessed for)."""
+    orch, _chat, _harness, db = await _orch(db_url, tier_walk=False)
+    try:
+        eid, _c, _r = await _effort(orch)
+        orch.models._client.queue_text(
+            "Reject invalid dates in _parse_date\nREPRO: python3 todo.py add x --due 2025-02-30")
+        tasks = await orch._gap_analysis(eid, _REPORT, GOAL)
+        assert len(tasks) == 1
+        assert tasks[0].startswith("Reject invalid dates in _parse_date")
+        assert "REPRO: python3 todo.py add x --due 2025-02-30" in tasks[0]
+        sys_p = orch.models._client.calls[-1]["system"]
+        assert "REPRO:" in sys_p and "never invent" in sys_p.lower()
+    finally:
+        await _shutdown(orch, db)
+
+
+async def test_tasks_from_lens_keeps_a_repro_on_its_defect(db_url):
+    """The clean_code / project_documentation path carries a repro the same way — the shown command
+    stays on the DEFECT it demonstrates (and a repro under a non-DEFECT line, which has no
+    false-defect check to feed, is dropped with it)."""
+    orch, _chat, _harness, db = await _orch(db_url, tier_walk=False)
+    try:
+        eid, _c, _r = await _effort(orch)
+        orch.models._client.queue_text(
+            "DEFECT: the undo command crashes on an empty database\n"
+            "REPRO: python3 todo.py undo\n"
+            "PREFERENCE: rename todos.json to db.json")
+        tasks = await orch._tasks_from_lens(eid, "clean_code", _REPORT)
+        assert len(tasks) == 1
+        assert tasks[0].startswith("the undo command crashes on an empty database")
+        assert "REPRO: python3 todo.py undo" in tasks[0]
+    finally:
+        await _shutdown(orch, db)
+
+
+# ── F13 (P19 F13-redux) — count test DEFINITIONS by AST, not by scraping "Ran N tests" ────────
 async def test_a_falling_test_count_raises_a_flag(db_url):
-    """gym-015: a stale workspace published a tree with 51 tests where the branch had 55, and the
-    drop passed unremarked because nothing remembers the previous count. Specified in P17 as "the
-    cheapest possible detector" and then not built."""
+    """gym-015: a stale workspace published a tree with fewer tests than the branch, and the drop
+    passed unremarked because nothing remembers the previous count. The count is now a stable
+    definition count (`TESTDEFS`), so a genuine drop still flags."""
     orch, chat, _harness, db = await _orch(db_url)
     try:
         eid, _c, _r = await _effort(orch)
@@ -218,8 +331,8 @@ async def test_a_falling_test_count_raises_a_flag(db_url):
 
         async def _exec(effort_id, *, command, session_id, **kw):
             calls["n"] += 1
-            ran = 55 if calls["n"] == 1 else 51
-            return 0, f"Ran {ran} tests in 0.2s\n\nOK", False
+            n = 55 if calls["n"] == 1 else 51
+            return 0, f"TESTDEFS {n}\n", False
 
         orch.router.exec_check = _exec
         assert await orch._check_test_count_regression(eid) is None      # first: records 55
@@ -227,6 +340,29 @@ async def test_a_falling_test_count_raises_a_flag(db_url):
         assert await orch._event_count(eid, "test_count_regressed") == 1
         posts = " ".join(str(p.get("message", "")) for p in chat.posted)
         assert "fell from 55 to 51" in posts
+    finally:
+        await _shutdown(orch, db)
+
+
+async def test_a_flaky_runner_count_does_not_masquerade_as_a_regression(db_url):
+    """THE gym-017 FALSE POSITIVE. The first publish scraped `55` from a flaky `Ran N` line, the
+    branch has a stable 44 `def test_`, and the honest 44 next round read as a regression. Counting
+    definitions makes the number stable: the same tree yields 44 both times even when the runner's
+    stdout also carries a spurious `Ran 55 tests`, so no phantom regression fires."""
+    orch, _chat, _harness, db = await _orch(db_url)
+    try:
+        eid, _c, _r = await _effort(orch)
+        await orch.projects.set_check("gym", "python3 -m unittest discover -s tests")
+
+        async def _exec(effort_id, *, command, session_id, **kw):
+            # The AST counter only ever emits TESTDEFS; a flaky "Ran 55" cannot reach the parser.
+            assert "TESTDEFS" in command and "ast" in command
+            return 0, "Ran 55 tests in 0.2s\nTESTDEFS 44\n", False
+
+        orch.router.exec_check = _exec
+        for _ in range(3):
+            assert await orch._check_test_count_regression(eid) is None
+        assert await orch._event_count(eid, "test_count_regressed") == 0
     finally:
         await _shutdown(orch, db)
 
@@ -241,7 +377,7 @@ async def test_a_rising_or_equal_test_count_is_silent(db_url):
         counts = iter([31, 31, 55])
 
         async def _exec(effort_id, *, command, session_id, **kw):
-            return 0, f"Ran {next(counts)} tests in 0.2s\n\nOK", False
+            return 0, f"TESTDEFS {next(counts)}\n", False
 
         orch.router.exec_check = _exec
         for _ in range(3):
@@ -252,15 +388,15 @@ async def test_a_rising_or_equal_test_count_is_silent(db_url):
 
 
 async def test_an_unmeasurable_suite_is_not_a_regression(db_url):
-    """A runner whose output is not unittest-shaped yields no count. Unmeasurable is not a drop —
-    the check must stay silent rather than guess."""
+    """A tree the counter could not measure (no python, a crash before the marker) yields no count.
+    Unmeasurable is not a drop — the check must stay silent rather than guess."""
     orch, _chat, _harness, db = await _orch(db_url)
     try:
         eid, _c, _r = await _effort(orch)
         await orch.projects.set_check("gym", "pytest -q")
 
         async def _exec(effort_id, *, command, session_id, **kw):
-            return 0, "5 passed in 0.10s", False      # pytest-shaped, no "Ran N tests"
+            return 0, "python3: command not found", False      # no TESTDEFS marker
 
         orch.router.exec_check = _exec
         assert await orch._check_test_count_regression(eid) is None

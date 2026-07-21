@@ -333,6 +333,13 @@ class GovernanceGate:
             e.lifecycle = lifecycle
             await s.commit()
 
+    async def lifecycle_of(self, effort_id: str) -> str | None:
+        """This effort's lifecycle (open|done|aborted), or None when unknown. The read counterpart
+        to `set_lifecycle` — distinct from `state_of`, which reports the gate FSM (clear|frozen)."""
+        async with self.db.session_factory() as s:
+            e = await s.get(Effort, effort_id)
+            return e.lifecycle if e is not None else None
+
     # ── global kill switch (§3) ──────────────────────────────────────────────
     async def kill_switch(self, on: bool = True, actor: str = "human") -> None:
         async with self.db.session_factory() as s:

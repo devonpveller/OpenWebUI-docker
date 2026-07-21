@@ -992,10 +992,13 @@ async def test_gap_analysis_is_told_the_report_is_the_authority_on_what_exists(d
         await _shutdown(orch, db)
 
 
-async def test_decomposition_happens_before_gap_analysis_and_scopes_it(db_url):
+async def test_decomposition_happens_before_gap_analysis(db_url):
     """THE gym-009 SEQUENCING DEFECT: `_maybe_decompose` ran after `_gap_analysis`, so the children
-    could never scope the analysis that created them — every round asked about the whole project
-    goal. Now: sweep -> decompose -> SELECT a child -> analyse against that child's goal."""
+    could never inform the analysis that created them. Order is now sweep -> decompose -> SELECT a
+    child (for DISPATCH) -> analyse. The child selection still governs which tasks run this round;
+    what changed in P19 F19-redux is the goal gap analysis is HANDED — the product goal, mined once,
+    not the child's goal mined per-scope (which N-plicated cross-scope findings and broke the
+    termination count)."""
     orch, _chat, harness, db = await _orch(db_url, tier_walk=True)
     try:
         eid, chan, root = await _effort(orch)
@@ -1006,7 +1009,7 @@ async def test_decomposition_happens_before_gap_analysis_and_scopes_it(db_url):
             "storage :: persisting todos to todos.json\n"
             "commands :: the add/list/done subcommands\n"
             "output :: rendering todos to the terminal")
-        orch.models._client.queue_text("write todos atomically")   # gap analysis
+        orch.models._client.queue_text("write todos atomically")   # gap analysis (ONE call)
         orch.models._client.queue_text("none")
         orch.models._client.queue_text("none")
         r = await orch._drain_round(eid, chan, root, REPO, _delivery())
@@ -1017,9 +1020,12 @@ async def test_decomposition_happens_before_gap_analysis_and_scopes_it(db_url):
         kinds = [c["system"][:60] for c in orch.models._client.calls]
         assert "identify the distinct parts" in kinds[0]
         assert "report describing what a codebase" in kinds[1]
-        # ...and gap analysis was handed the CHILD's goal, not the project goal
-        gap_user = orch.models._client.calls[1]["user"]
-        assert GOAL not in gap_user
+        # ...and gap analysis ran exactly ONCE (F19-redux: no per-scope fan-out), against the
+        # PRODUCT goal — the whole-branch report is mined in a single pass.
+        gap_calls = [c for c in orch.models._client.calls
+                     if "report describing what a codebase" in c["system"]]
+        assert len(gap_calls) == 1
+        assert GOAL in gap_calls[0]["user"]
     finally:
         await _shutdown(orch, db)
 

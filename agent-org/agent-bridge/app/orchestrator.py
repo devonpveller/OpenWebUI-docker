@@ -113,6 +113,15 @@ _CONTROL_RE = re.compile(r"^(/|approve\b|modify\b|abort\b|kill\b|unkill\b)", re.
 _STOP_INTENT_RE = re.compile(
     r"\b(stop|halt|abort|archive|cancel|shut\s+down|kill)\b[\s\S]{0,120}?"
     r"\b(effort-[\w.-]*[\w-])", re.I)
+# P19 F14-refinement — a CLEAN stop COMMAND: the verb LEADS and an effort id follows, and that is
+# the whole message (a trailing period is fine). `archive <id>` was a valid PO command before F14
+# shipped (it stopped gym-015); F14 then diverted it to the "use abort" ask because it isn't in
+# `_CONTROL_RE`. This shape is unambiguous — route it straight to the abort handler. Anything more
+# elaborate ("Stop and abort effort-x. The run is complete …") does NOT match and still reaches the
+# ASK below, which is where a fuzzy stop belongs. Negations ("do not stop effort-x") lead with a
+# different word and never match. `abort <id>` itself is already handled by `_CONTROL_RE` upstream.
+_STOP_COMMAND_RE = re.compile(
+    r"^\s*(?:stop|halt|archive|cancel|shut\s+down)\s+(?P<eid>effort-[\w.-]*[\w-])\s*\.?\s*$", re.I)
 
 # Deterministic cues that a message is a WORK request (junk-intent repair, live 2026-07-05 miss:
 # a pasted build-error list junk-misfired the classifier twice and the fix request was dropped).
@@ -1315,10 +1324,24 @@ class Orchestrator:
         )
         return True
 
-    _TEST_COUNT_RE = re.compile(r"^Ran\s+(\d+)\s+tests?\b", re.M)
+    _TESTDEF_RE = re.compile(r"^TESTDEFS\s+(\d+)\s*$", re.M)
+    # P19 F13-redux — count test DEFINITIONS by AST, not by scraping the runner's stdout. A parse
+    # per file (parse errors skipped, so a mid-edit file cannot abort the count), every `def
+    # test_*` / `async def test_*` in the tree. Deterministic: the same tree always yields the same
+    # number, which "Ran N tests" does not.
+    _TESTDEF_CMD = (
+        "cd /workspace && python3 -c \"import ast,glob\n"
+        "def c(p):\n"
+        " try: t=ast.parse(open(p,encoding='utf-8').read())\n"
+        " except Exception: return 0\n"
+        " return sum(isinstance(x,(ast.FunctionDef,ast.AsyncFunctionDef)) and "
+        "x.name.startswith('test_') for x in ast.walk(t))\n"
+        "print('TESTDEFS',sum(c(p) for p in sorted(set("
+        "glob.glob('**/test_*.py',recursive=True)+glob.glob('**/*_test.py',recursive=True)))))\"")
 
     async def _check_test_count_regression(self, effort_id: str) -> int | None:
-        """P17 F13 (deferred) / P18 — a delivery whose test count DROPPED is a silent regression.
+        """P17 F13 (deferred) / P18 / P19 — a delivery whose test count DROPPED is a silent
+        regression.
 
         Specified in P17 as "the cheapest possible detector" and then not built. gym-015 shows the
         cost: a stale workspace published a tree with 51 tests where the branch had 55, and the
@@ -1331,6 +1354,12 @@ class Orchestrator:
         exactly why it is worth having alongside. Records the count and returns the previous one
         when a regression is detected, else None.
 
+        P19 F13-redux — the count is now the number of test DEFINITIONS in the tree (AST), not a
+        scrape of "Ran N tests". gym-017 fired this flag WRONGLY: the first publish scraped `55`
+        from a flaky run of a suite that has a stable 44 `def test_`, so the next round's honest 44
+        read as a regression. A definition count is stable across runs, which is the whole point of
+        a round-over-round comparison.
+
         Never blocks: this RAISES A FLAG for the human. A test count can legitimately fall (a
         consolidated suite, a removed feature the operator asked for), so the honest move is to
         make the drop visible rather than to refuse the delivery on it."""
@@ -1342,17 +1371,17 @@ class Orchestrator:
         except Exception:  # noqa: BLE001
             return None
         if not check:
-            return None
+            return None                       # no configured suite — nothing to count
         try:
             _exit, out, _timed = await self.router.exec_check(
-                effort_id, command=f"cd /workspace && {check}",
+                effort_id, command=self._TESTDEF_CMD,
                 session_id=f"{effort_id}~testcount", repo=None, repo_token=None, timeout=300)
         except Exception as exc:  # noqa: BLE001 — unmeasurable is not a regression
             log.debug("test count read failed for %s: %s", effort_id, exc)
             return None
-        m = self._TEST_COUNT_RE.search(out or "")
+        m = self._TESTDEF_RE.search(out or "")
         if not m:
-            return None                       # not a unittest-shaped runner; nothing to compare
+            return None                       # the counter did not run; nothing to compare
         count = int(m.group(1))
         prev_payload = await self._last_event_payload(effort_id, "delivery_test_count")
         prev = (prev_payload or {}).get("count")
@@ -3294,6 +3323,15 @@ class Orchestrator:
         _ctrl = _MENTION_RE.sub("", message).strip()
         if _CONTROL_RE.match(_ctrl):
             await self._handle_command(_ctrl, channel_id, thread_id,
+                                       user_id=user_id or "operator-api")
+            return
+        # P19 F14-refinement — a clean stop COMMAND (`archive`/`stop`/`halt`/`cancel <id>`, the verb
+        # leading and the id following, nothing else) is a real command, not off-grammar phrasing.
+        # Route it straight to the abort handler — the same full stop the ask below would have told
+        # the operator to type — instead of diverting a synonym of `abort` to "I didn't understand".
+        _stop_cmd = _STOP_COMMAND_RE.match(_ctrl)
+        if _stop_cmd:
+            await self._handle_command(f"abort {_stop_cmd.group('eid')}", channel_id, thread_id,
                                        user_id=user_id or "operator-api")
             return
         # P17 F14 — stop-shaped but off-grammar. The strict path above needs the message to OPEN
@@ -10127,10 +10165,12 @@ class Orchestrator:
         anything actually goes wrong.
 
         Conservative by construction, in the direction that matters: a task is dropped ONLY when
-        the named input is demonstrably handled correctly (non-zero exit with a diagnostic, or a
-        clean rejection). Anything unparseable, unrunnable or ambiguous is KEPT. Failure to
-        reproduce a bug is not the same as proving there is none — but a command that exits 1 with
-        "invalid date format" is positive evidence the alleged acceptance does not happen."""
+        the named input is demonstrably handled correctly (a non-zero exit with a diagnostic and NO
+        traceback — a clean rejection). Anything unparseable, unrunnable, ambiguous, or CRASHING is
+        KEPT. Failure to reproduce a bug is not the same as proving there is none — but a command
+        that exits 1 with "invalid date format" is positive evidence the alleged acceptance does not
+        happen. P19 F17-redux draws the line between that and a traceback (a real crash), which the
+        first cut could not: see the probe below."""
         if not derived:
             return derived
         # The reproduction must come FROM THE FINDING. An earlier draft of this synthesised a
@@ -10151,10 +10191,20 @@ class Orchestrator:
         parts = []
         for i, (_body, cmd) in idx.items():
             # `sh -c` so the lens's own command runs as written. A non-zero exit WITH output is
-            # positive evidence the input is handled: the program noticed and complained.
+            # positive evidence the input is handled: the program noticed and complained —
+            # EXCEPT when that output is a traceback.
+            # P19 F17-redux — A TRACEBACK IS A CRASH, NOT A CLEAN REJECTION. gym-017's undo bug is
+            # real and its repro exits non-zero with a `JSONDecodeError` traceback; the old rule
+            # ("non-zero + output → HANDLED") could not tell that crash from an argparse exit-2, and
+            # would have DROPPED a real critical bug as fabricated. So a `Traceback (most recent
+            # call last)` in the output means the input is NOT handled — keep the task. Only a
+            # non-zero exit WITHOUT a traceback (a validation message, argparse usage) is a clean
+            # rejection worth dropping the fabricated task over.
             parts.append(
                 f"out=$(cd /workspace && sh -c {shlex.quote(cmd)} 2>&1); rc=$?; "
-                f"if [ $rc -ne 0 ] && [ -n \"$out\" ]; then echo 'HANDLED {i}'; "
+                f"if printf '%s' \"$out\" | grep -qF 'Traceback (most recent call last)'; then "
+                f"echo 'UNPROVEN {i}'; "
+                f"elif [ $rc -ne 0 ] && [ -n \"$out\" ]; then echo 'HANDLED {i}'; "
                 f"else echo 'UNPROVEN {i}'; fi")
         try:
             _exit, out, _timed = await self.router.exec_check(
@@ -10229,59 +10279,26 @@ class Orchestrator:
         except Exception as exc:  # noqa: BLE001
             log.debug("lens findings clear failed for %s: %s", effort_id, exc)
 
-    async def _extraction_scopes(
-        self, effort_id: str, node_id: str | None, scope_goal: str,
-    ) -> list[str]:
-        """P18 F19 — every scope this round's report should be mined against.
-
-        The selected scope FIRST (its tasks are the ones about to be dispatched), then every other
-        OPEN scope in the same tree. Deduplicated, and capped so a wide tree cannot turn one round
-        into a dozen model calls.
-
-        Returns just the scope-goal texts: `_gap_analysis` takes a goal, and `_seam_owner` decides
-        ownership afterwards from the task body, so nothing here needs to thread node ids through.
-        Falls back to `[scope_goal]` — the old behaviour — whenever the tree cannot be read, which
-        keeps a tree-less effort and a database hiccup on exactly the path they had before."""
-        goals: list[str] = [scope_goal] if scope_goal else []
-        if not node_id:
-            return goals
-        try:
-            async with self.db.session_factory() as s:
-                node = await s.get(ScopeNode, node_id)
-                if node is None:
-                    return goals
-                # Siblings under the same parent, plus the parent's other descendants at this
-                # tier. A round working one child should still bank findings about the others.
-                root_id = node.parent_id or node_id
-                rows = (await s.execute(
-                    select(ScopeNode).where(ScopeNode.parent_id == root_id)
-                    .order_by(ScopeNode.created_at))).scalars().all()
-        except Exception as exc:  # noqa: BLE001 — a tree we cannot read is the old behaviour
-            log.debug("extraction scope read failed for %s: %s", effort_id, exc)
-            return goals
-        seen = {g.strip() for g in goals}
-        for r in rows:
-            if r.status != "open":
-                continue                      # a completed scope is not owed more work
-            txt = (r.scope or "").strip()
-            if txt and txt not in seen:
-                seen.add(txt)
-                goals.append(txt)
-        if len(goals) > 1:
-            await self.audit.log("gap_extraction_fanout", effort_id=effort_id,
-                                 payload={"scopes": len(goals), "selected": node_id})
-        return goals[:5]
+    # P18 F19's `_extraction_scopes` (per-scope fan-out of gap analysis) was removed in P19
+    # F19-redux: fanning the same whole-branch report across N overlapping scope-goals N-plicated
+    # every cross-scope finding and inflated the propagation count the loop terminates on. Gap
+    # analysis now runs ONCE against the product goal in `_drain_round`, and per-task `_seam_owner`
+    # routing places each result — one finding, one task, filed to its owner.
 
     async def _gap_analysis(self, effort_id: str, report: str, scope_goal: str) -> list[str]:
         """P10.2 — the ONLY place the goal is allowed to enter.
 
-        Compare an OBJECTIVE observation of what exists against what THIS SCOPE's goal requires,
-        and state the difference as work. Tasks are DISCOVERED here rather than invented: the input
-        is a report written by an agent that did not know the goal, so a gap is a real absence of
+        Compare an OBJECTIVE observation of what exists against what the goal requires, and state
+        the difference as work. Tasks are DISCOVERED here rather than invented: the input is a
+        report written by an agent that did not know the goal, so a gap is a real absence of
         evidence, not a model's willingness to agree that something is missing.
 
-        Scope is what makes this tractable for a small model (§4) — never run this against the whole
-        project goal. Returns plainly-stated task bodies; empty when the report evidences every
+        The goal passed in is the PRODUCT goal since P19 F19-redux — one pass over the whole-branch
+        report, not one pass per scope. §4 scoped this to keep it tractable for a small model, but
+        the P11.4 reframe below (the report is the authority on what is ALREADY BUILT) is what
+        actually defends against gym-009's restate-the-goal degeneration, and scoping's cost —
+        N-plicating cross-scope findings across the fan-out — broke the termination count it was
+        meant to protect. Returns plainly-stated task bodies; empty when the report evidences every
         component of the goal (which is a legitimate, and countable, zero)."""
         report, scope_goal = (report or "").strip(), (scope_goal or "").strip()
         if not (report and scope_goal):
@@ -10331,6 +10348,13 @@ class Orchestrator:
             "(packaging metadata, version strings, linter or type-checker configuration, CI, "
             "changelogs) unless this area is explicitly about that.\n"
             "- Do NOT list work outside this area.\n"
+            # P19 F17-redux — carry a reproduction THROUGH extraction so the misbehaviour check has
+            # something to run. The report, not this step, is the source of truth: copy a command
+            # it actually shows, never invent one (an invented probe is meaningless off the one
+            # product it was guessed for — the failure the first F17 was built to avoid).
+            "- If the report shows a concrete command or input that DEMONSTRATES a defect, copy "
+            "that command VERBATIM on the very next line as `REPRO: <command>`. Copy only a command "
+            "the report actually shows; never invent one.\n"
             "- If the report shows nothing is missing in this area, output exactly: none"
         )
         user_p = (f"THE AREA TO EXAMINE (a boundary, not a checklist):\n{scope_goal[:2000]}\n\n"
@@ -10391,6 +10415,10 @@ class Orchestrator:
             "- Grade by what the software DOES, not by whether the project is small. Do not soften "
             "a DEFECT because the codebase is a script or the scope is modest.\n"
             "- State each task PLAINLY as work to do. Give NO rationale.\n"
+            # P19 F17-redux — as in gap analysis: carry a reproduction the report shows, verbatim,
+            # so a false DEFECT can be refuted by running it. Copy only; never invent.
+            "- If the report shows a concrete command or input that DEMONSTRATES a DEFECT, copy "
+            "that command VERBATIM on the next line as `REPRO: <command>`. Never invent one.\n"
             "- If the report identifies nothing at all, output exactly: none"
         )
         try:
@@ -10407,6 +10435,11 @@ class Orchestrator:
                 gaps.append(re.sub(r"^GAP\s*:\s*", "", s, flags=re.I))
             elif re.match(r"^PREFERENCE\s*:", s, re.I):
                 prefs += 1
+            elif s.upper().startswith("REPRO:") and defects:
+                # P19 F17-redux — a repro belongs to the DEFECT above it. Keep it on the body so
+                # `_plain_tasks` folds it and `_drop_false_defects` can run it. (A repro under a
+                # GAP/PREFERENCE has no false-defect check to feed, so it is dropped with the line.)
+                defects[-1] = f"{defects[-1]}\n{s}"
         if prefs or gaps:
             await self.audit.log("lens_preferences_dropped", effort_id=effort_id,
                                  payload={"lens": lens, "dropped": prefs, "kept": len(defects),
@@ -10465,8 +10498,8 @@ class Orchestrator:
                 node_id, [b for b in reports.values() if b], effort_id=effort_id,
                 from_reports=True)
             node_id = await self._select_working_scope(effort_id, node_id) or node_id
-        # THE SCOPED goal — never the whole project goal (§4: scope is what makes gap analysis
-        # tractable for a small model). A scope node's own `scope` text wins; the effort goal is
+        # The SELECTED working scope — used for DISPATCH (which tasks run this round) and as the
+        # default routing target below. A scope node's own `scope` text wins; the effort goal is
         # the fallback when the tier walk is off.
         scope_goal = ""
         if node_id:
@@ -10477,30 +10510,41 @@ class Orchestrator:
                 _, scope_goal, _ = await self.charters.current_goal(effort_id)
             except Exception:  # noqa: BLE001
                 scope_goal = ""
+        # P19 F19-redux — the goal gap analysis mines against is the PRODUCT (root) goal, not the
+        # selected scope's. The whole effort goal covers every scope's findings in one pass; a
+        # single scope's goal covers only its own, which is what P18 F19 fanned out to repair.
+        try:
+            _, product_goal, _ = await self.charters.current_goal(effort_id)
+        except Exception:  # noqa: BLE001
+            product_goal = ""
+        product_goal = (product_goal or scope_goal or "").strip()
         await self.audit.log("drain_scope_selected", effort_id=effort_id,
                              payload={"round": round_no, "scope": node_id,
                                       "scope_goal_chars": len(scope_goal)})
         derived: list[tuple[str, str]] = []
         if reports.get(_LENS_GOAL_ALIGNMENT_KEY):
-            # P18 F19 — EXTRACT FOR EVERY OPEN SCOPE, NOT JUST THE SELECTED ONE.
+            # P19 F19-redux — EXTRACT ONCE AGAINST THE PRODUCT GOAL, THEN ROUTE. NO FAN-OUT.
             #
-            # The lens sweeps the WHOLE branch, but gap analysis used to mine its report against a
-            # single scope's goal, and everything it said about the siblings was discarded.
-            # gym-016 round 1: the `goal_alignment` lens found and precisely diagnosed a broken
-            # REPL flag parser ("`add test --priority high` becomes ['add', 'test --priority
-            # high']"); gap analysis ran against the 68-char `json data storage` scope, the
-            # finding belonged to `cli and repl interface`, and it evaporated. It was still broken
-            # at the delivered head and shipped in the PR.
+            # P18 F19 fanned gap analysis across every open scope so a sibling's finding could not
+            # evaporate (gym-016: a precisely-diagnosed broken REPL flag parser belonged to `cli
+            # and repl interface`, gap analysis ran against `json data storage`, and it vanished).
+            # But mining the SAME whole-branch report against N overlapping scope-goals N-plicates
+            # every finding that touches more than one scope. gym-017 round 3 turned ~8 distinct
+            # findings into 24 tasks; the undo crash alone became five. The implementer de-duped
+            # the WORK ("deduplicated the 20 items into 9 unique concerns") — but `new_tasks` is
+            # the loop's termination signal (P10.4: stop on zero NEW), and a count inflated by
+            # paraphrase can never descend to a trustworthy zero. The loop re-ascended instead of
+            # converging, and the over-produced schema-tightening tasks drove a 44→5 delete-to-pass
+            # (commit 03390ff) that shipped only because a non-ff push forced a reconciling merge.
             #
-            # The org already routes TASKS to their owning scope (`_seam_owner` / P14.2) one step
-            # later. This is the same idea one step earlier: the report is already in hand, so
-            # extracting against each open scope is cheap (one model call per scope, no extra
-            # observation) and stops a diagnosed defect landing in nobody's queue. DISPATCH still
-            # works one scope at a time — only the extraction fans out.
-            targets = await self._extraction_scopes(effort_id, node_id, scope_goal)
-            for tgt_goal in targets:
-                derived += [(_LENS_GOAL_ALIGNMENT_KEY, b) for b in await self._gap_analysis(
-                    effort_id, reports[_LENS_GOAL_ALIGNMENT_KEY], tgt_goal)]
+            # The report already describes the whole branch, so mine it ONCE against the product
+            # goal — which covers every scope — and let the SAME per-task routing that already
+            # files work to its owner (`_seam_owner` / `_best_scope_for`, below) place each result.
+            # One finding in, one task out, routed to its owner: no fan-out, no paraphrase
+            # duplication, and a count that means what P10.4 needs it to mean. DISPATCH still works
+            # one scope at a time (`_dispatchable_tasks` below uses the selected `node_id`).
+            derived += [(_LENS_GOAL_ALIGNMENT_KEY, b) for b in await self._gap_analysis(
+                effort_id, reports[_LENS_GOAL_ALIGNMENT_KEY], product_goal)]
         for lens in ("clean_code", "project_documentation"):
             if reports.get(lens):
                 derived += [(lens, b) for b in
@@ -10523,6 +10567,11 @@ class Orchestrator:
             # selected. gym-012 filed "add stdout assertions to filter tests" into the DATA STORAGE
             # scope with a four-child tree available; the worker then had to escalate it, and the
             # org froze. Correct filing removes most escalations before they happen.
+            # P19 NOTE: F19-redux mines the whole report against the product goal in ONE pass (fixing
+            # the propagation count the loop terminates on), but routing stays anchored to the
+            # SELECTED scope. Distributing a decomposing round's derivations across sibling children
+            # would strand them: the tier walk selects downward only, so a sibling's tasks would
+            # never be picked up (the "worst failure mode" test). Sideways selection is deferred.
             owner = await self._seam_owner(node_id, body) if node_id else None
             if not owner and node_id and scope_children:
                 owner = await self._best_scope_for(body, scope_children)

@@ -336,6 +336,45 @@ NO near-duplicate tasks in a single round.
 
 ---
 
+## What actually shipped (P19 batch 1)
+
+Implemented and unit-tested (full suite green): **F19-redux, F17-redux, F13-redux, F14-refinement.**
+Deferred to a follow-up: **F4-redux, F20** (both touch runtime plumbing, not convergence).
+
+**F19-redux — the count fix, NOT the routing aspiration.** Extraction now runs `_gap_analysis`
+exactly ONCE per round, against the product goal (`charters.current_goal`), and `_extraction_scopes`
+is deleted. This is the whole convergence fix: one finding → one task → a count that reflects
+distinct findings, so the loop can descend to a trustworthy zero.
+
+The doc above also proposed *routing* each derived task to its owning sibling scope. Building it
+revealed that **that would strand work**, and it is deliberately NOT shipped. The tier walk selects
+DOWNWARD only (`_select_working_scope` walks into a child, never sideways to a sibling), and
+`_dispatchable_tasks` returns only the selected scope's tasks — so a task filed into a sibling in a
+decomposing round would never be picked up. This is the exact "worst failure mode" an existing test
+guards. gym-017 confirms the routing aspiration was never real: "all 21 landed on ONE scope node"
+because `_seam_owner(working_leaf, …)` finds no children. So routing stays anchored to the selected
+scope (unchanged), and *sideways tier-walk selection* is the real prerequisite for owner-routing —
+filed as follow-up work, not smuggled in here where it would break dispatch.
+
+**F17-redux — both halves, as required.** (1) The lens prompts are the operator's VERBATIM
+PR-review prompts and must not change, so the repro is carried by the EXTRACTION step: `_gap_analysis`
+and `_tasks_from_lens` now copy a `REPRO:` command the report actually shows (verbatim; "never
+invent one" — an invented probe is the gym-only failure the first F17 warned of), `_plain_tasks`
+folds it onto the body, and `_tasks_from_lens` keeps a repro with its DEFECT. (2) The probe checks
+for `Traceback (most recent call last)` FIRST and routes it to UNPROVEN (keep) — a crash is a real
+bug, not a clean rejection. Shipped together: carrying-through without the traceback guard would
+delete real crashes.
+
+**F13-redux.** `_check_test_count_regression` now counts test DEFINITIONS by AST (`TESTDEFS N` from a
+per-file `ast.parse`, parse errors skipped) instead of scraping `Ran N tests`. Deterministic across
+runs, so a flaky baseline can no longer manufacture a phantom regression. Flag-not-block unchanged.
+
+**F14-refinement.** A clean stop COMMAND (`archive`/`stop`/`halt`/`cancel <effort-id>`, verb leading,
+nothing else) routes straight to the abort handler; only genuinely off-grammar stop phrasing reaches
+the F14 ask. Added `governance_gate.lifecycle_of` as the read counterpart to `set_lifecycle`.
+
+---
+
 ## Method note
 
 The gym-017 read-out required three mid-run corrections, each caught by running the code rather
