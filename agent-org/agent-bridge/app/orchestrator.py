@@ -1228,6 +1228,16 @@ class Orchestrator:
         # delegating ones are skipped earlier, so unlike the `plan_drafted` mistake of
         # 2026-07-16 this can never bypass a human gate.
         "wake_done",
+        # P21 F4 (gym-019, 2026-07-21): the gym-008 `wake_done` fix above was DEFEATED by ONE
+        # trailing event. An abandon (`wake_done`, covered) was immediately followed by a verifier
+        # `worker_acquire` + a `check_exec` probe (git status / a test run) whose verify→publish
+        # coroutine then died silently — moving the effort's LAST event PAST the covered `wake_done`
+        # to `check_exec`, which the kind-gate did not cover → the effort sat open+idle for 2 HOURS
+        # until a human `re-run it`. `check_exec` is a BRIDGE-ISSUED verify command, never a human
+        # gate (same category as `dry_run_*`: auto-advancing, so silent-past-threshold = stuck, not
+        # awaiting you). The human-gate/frozen/refusal cases are still excluded earlier + by their
+        # own kinds staying OUT of this set, so this cannot bypass a gate (§4.5 / paper-F3).
+        "check_exec",
     })
 
     async def _worker_urls(self) -> list[dict]:
@@ -5355,6 +5365,13 @@ class Orchestrator:
                                         # session returned EMPTY on every plan turn) — the retry
                                         # and any operator re-run must start fresh
                                         "worker_plan_empty", "worker_plan_stopped",
+                                        # P21 F1 — an ABANDONED turn (a per-turn deadline kill,
+                                        # gym-019) rots its session the same way. Counting it here
+                                        # is what makes a re-run/auto-recovery after an abandon start
+                                        # in a FRESH session instead of resuming the bloated one
+                                        # (which returned EMPTY twice). Same class as the atlas re-run
+                                        # note below (uncounted END event → rotted-session reuse).
+                                        "worker_turn_abandoned",
                                         # P10.5 PLAN/IMPLEMENT SPLIT: every drain round dispatches
                                         # a FRESH implementer. A worker asked to continue in the
                                         # session where it just declared the goal met has context
@@ -5898,6 +5915,27 @@ class Orchestrator:
             return True
         return self.exec_gate.dry_run_required(await self._effort_risk_str(effort_id))
 
+    async def _plan_auto_approvable(self, effort_id: str) -> bool:
+        """P21 F2b — is a time-boxed AUTONOMOUS WINDOW active, and is THIS plan's risk one it may
+        auto-clear? The window (`plan_auto_approve_until`) is a Human-Operator grant. FIREWALL, per
+        the research alignment check (§1 / governance §3 / the paper's dropped-signal rule):
+        - Only a `cascading_refactor` plan — a WIDE but REVERSIBLE dev change — is auto-approvable.
+        - `irreversible` and `cross_effort` risk are NEVER auto-approved (they stay human).
+        - This only clears the Stage-3 PLAN-PROCEED gate; §3 hard-gates (refusal / ethics / a real
+          concern) freeze the effort on a DIFFERENT path this never reaches, and merge-to-main (D4)
+          is a separate human gate this never touches.
+        - Fails SAFE (→ human) on an empty/expired/unparseable window. Audited on use."""
+        until = (self.s.plan_auto_approve_until or "").strip()
+        if not until:
+            return False
+        from datetime import datetime, timezone
+        try:
+            if datetime.now(timezone.utc) >= datetime.fromisoformat(until):
+                return False                                   # window expired → fail safe (human)
+        except Exception:  # noqa: BLE001
+            return False                                       # unparseable → fail safe (human)
+        return (await self._effort_risk_str(effort_id)) == "cascading_refactor"
+
     async def _present_plan(
         self, effort_id: str, proj_channel: str, root: str, request: str,
         reply_prefix: str, mgmt_channel: str, workspace_ctx: str, *, mgmt_thread: str | None = None,
@@ -5930,6 +5968,22 @@ class Orchestrator:
         }
         await self.pending.save(effort_id, "effort_plan",
                                 self._jsonify_pending(self._pending_plan[effort_id]))
+        # P21 F2b — inside an active autonomous window, a DEV-scale (`cascading_refactor`) plan
+        # auto-proceeds instead of idling for a human tap (gym-019 lost ~5h here). Firewalled: only
+        # cascading_refactor (never irreversible/cross_effort/a hard-gate), and merge-to-main stays
+        # human. Audited. Off by default — the window is a Human-Operator grant.
+        if await self._plan_auto_approvable(effort_id):
+            await self.audit.log("plan_auto_approved", effort_id=effort_id,
+                                 payload={"window_until": self.s.plan_auto_approve_until,
+                                          "risk": "cascading_refactor"})
+            await self.chat.post(
+                mgmt_channel,
+                (f"{reply_prefix}\n\n📋 Plan for `{effort_id}` **auto-approved** under the active "
+                 f"autonomous window (dev-scale `cascading_refactor` — reversible; `main` still only "
+                 f"changes when you merge). `abort {effort_id}` to stop it.").strip(),
+                thread_id=mgmt_thread)
+            await self.approve_effort_plan(effort_id)
+            return
         steps_list = getattr(plan, "implementation_steps", None) or []
         steps = "\n".join(f"{i}. {s}" for i, s in enumerate(steps_list, 1)) or "_(no steps drafted)_"
         body = (

@@ -306,6 +306,11 @@ class Settings(BaseSettings):
     # depth) so routine one-liners stay fast; set to `all` for the strict-spec reading (every effort
     # gets a plan-approval gate + review), or `off` to skip.
     plan_approval: str = "risky"           # always | risky | off — Stage-3 plan-approval gate (P3.9)
+    # P21 F2b — a time-boxed AUTONOMOUS-WINDOW grant (a Human-Operator act): an ISO-8601 UTC instant
+    # until which the bridge may AUTO-APPROVE the Stage-3 plan-proceed gate for a DEV-scale
+    # (`cascading_refactor`) effort. Empty = OFF (default). FIREWALL: never auto-clears a §3 hard-gate
+    # (refusal / ethics / irreversible / cross_effort) and never touches merge-to-main (D4, human).
+    plan_auto_approve_until: str = ""      # "" = off; e.g. "2026-07-22T06:00:00+00:00"
     review_mode: str = "risky"             # all | risky | off — Stage-5 checkpoints+monitor+review (P4)
 
     # ── Ground + dry-run, risk-gated (UX-FLOW Stage 4, P4.0) ────────────────

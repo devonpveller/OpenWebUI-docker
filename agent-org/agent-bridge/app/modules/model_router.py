@@ -246,10 +246,15 @@ class ModelRouter:
                 return result
 
     async def structured(
-        self, profile_name: str, system: str, user: str, schema: type[T], max_retries: int = 2
+        self, profile_name: str, system: str, user: str, schema: type[T], max_retries: int = 2,
+        temperature: float | None = None,
     ) -> T:
+        # P21 F2a — `temperature` overrides the profile default for a call that must be DETERMINISTIC
+        # (a governance decision, not a creative one — the readiness/risk gate). Omitted → the
+        # profile's temperature, unchanged for every other caller.
         p = self.profiles.get(profile_name)
         api_base, api_key = self._endpoint(p.lane)
+        temp = p.temperature if temperature is None else temperature
 
         def _call():
             return self._get_client().structured(
@@ -257,7 +262,7 @@ class ModelRouter:
                 api_key=api_key,
                 model=p.model,
                 caller_key=p.caller_key,
-                temperature=p.temperature,
+                temperature=temp,
                 system=system,
                 user=user,
                 schema=schema,

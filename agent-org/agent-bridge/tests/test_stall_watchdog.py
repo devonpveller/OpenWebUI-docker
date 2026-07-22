@@ -75,6 +75,54 @@ async def test_watchdog_recovers_a_mid_dispatch_wedge(db_url):
         await db.dispose()
 
 
+async def test_watchdog_recovers_a_check_exec_terminal_wedge(db_url):
+    """P21 F4 (gym-019): an abandon's trailing `check_exec` verify probe — whose verify→publish
+    coroutine then died silently — left `check_exec` as the effort's LAST event, outside the old
+    kind-gate, so the effort sat idle for 2h until a human `re-run it`. `check_exec` is a
+    bridge-issued probe, never a human gate, so a silent-past-threshold `check_exec` must recover."""
+    orch, chat, db = await _orch(db_url)
+    try:
+        await _seed(orch, "effort-checkexec", last_kind="check_exec", age_min=120)
+        await orch._sweep_stalled_efforts()
+        assert await orch._event_count("effort-checkexec", "stall_recovered") == 1
+    finally:
+        await db.dispose()
+
+
+async def test_watchdog_still_skips_the_plan_approval_gate(db_url):
+    """SAFETY boundary for F4: adding `check_exec` must not weaken the human-gate exclusion. An
+    effort parked at `plan_drafted` (the Stage-3 plan-approval gate) is correctly awaiting the
+    operator's `approve` and must NEVER be auto-re-engaged (§4.5 / the paper's dropped-signal)."""
+    orch, chat, db = await _orch(db_url)
+    try:
+        await _seed(orch, "effort-plangate", last_kind="plan_drafted", age_min=200)
+        await orch._sweep_stalled_efforts()
+        assert await orch._event_count("effort-plangate", "stall_recovered") == 0
+    finally:
+        await db.dispose()
+
+
+async def test_abandon_rotates_the_session_generation(db_url):
+    """P21 F1 (gym-019): a re-run/auto-recovery after an abandon must NOT resume the rotted session
+    that returned EMPTY twice. The `worker_turn_abandoned` event bumps `_session_for`'s generation,
+    so the next dispatch starts FRESH (`~r{n}`) instead of reusing the same (bloated) id."""
+    orch, _chat, db = await _orch(db_url)
+    try:
+        eid = "effort-abandoned"
+        async with orch.db.session_factory() as s:
+            s.add(Effort(id=eid, name=eid, channel_id=await orch.mgmt_channel_id(),
+                         root_post_id=f"root-{eid}", state="active", lifecycle="open"))
+            await s.commit()
+        assert await orch._session_for(eid) == eid            # generation 0: the plain effort id
+        async with orch.db.session_factory() as s:
+            s.add(Event(kind="worker_turn_abandoned", effort_id=eid,
+                        ts=datetime.now(timezone.utc).isoformat()))
+            await s.commit()
+        assert await orch._session_for(eid) == f"{eid}~r1"    # the abandon rotated it → fresh
+    finally:
+        await db.dispose()
+
+
 async def test_watchdog_skips_efforts_awaiting_the_operator(db_url):
     """An effort whose last event is a RESOLUTION (a PR opened, awaiting merge) is correctly waiting
     on the operator — the watchdog must NOT re-dispatch it."""

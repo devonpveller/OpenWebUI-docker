@@ -53,7 +53,18 @@ _READINESS_SYS = (
     "DEFAULT you'll apply if unanswered; for security/ethics, a one-line statement of the SPECIFIC "
     "concern and why it matters to the intent. Set `category` to match. If there are no genuine "
     "blockers, set clear_and_safe=true with an EMPTY question list and let the worker proceed under "
-    "existing conventions."
+    "existing conventions.\n\n"
+    # P21 F2a — the classifier was previously uninstructed (identical goals classed differently on
+    # different runs); this drives the risk gate, so classify by what the work TOUCHES, not by how
+    # long the feature list is.
+    "ALSO classify `blast_radius` — how far a CORRECT implementation reaches:\n"
+    "- 'routine': a self-contained or ADDITIVE change (new features, new files, or edits confined to "
+    "one bounded area). This is the COMMON case and INCLUDES building features on a small or "
+    "greenfield codebase, however long the feature list.\n"
+    "- 'cross_effort': it must touch code that ANOTHER in-flight effort is actively changing.\n"
+    "- 'cascading_refactor': a WIDE structural refactor of EXISTING code across MANY modules where "
+    "one edit forces edits elsewhere — NOT a greenfield feature-add. When genuinely unsure between "
+    "two, choose the MORE-gated one."
 )
 
 _PLAN_SYS = (
@@ -77,6 +88,7 @@ class Planner:
             _READINESS_SYS,
             f"REQUEST:\n{request}\n\nWORKSPACE:\n{workspace_ctx}",
             ReadinessVerdict,
+            temperature=0.0,   # P21 F2a — the risk/readiness gate is a governance decision: deterministic
         )
         await self.audit.log(
             "readiness_gate",

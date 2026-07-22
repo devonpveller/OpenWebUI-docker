@@ -90,7 +90,27 @@ class ClarifyingQuestion(BaseModel):
 class ReadinessVerdict(BaseModel):
     clear_and_safe: bool
     clarifying_questions: list[ClarifyingQuestion] = Field(default_factory=list)
-    blast_radius: Literal["routine", "cross_effort", "cascading_refactor"] = "routine"
+    # P21 F2a — this field was UNINSTRUCTED (no description; the readiness prompt never mentions it),
+    # so a 27B model at temp 0.3 sampled it inconsistently: the SAME goal was classed `routine`
+    # (gym-017, dispatched in 1s) and `cascading_refactor` (gym-018/019, → a plan-approval HOLD that
+    # cost ~5h). It drives real governance (dry-run + review depth), so it must be a CONTRACT
+    # (ORCHESTRATION-DESIGN §11), not a coin-flip. Explicit criteria anchor it; a greenfield/additive
+    # feature-add is `routine`.
+    blast_radius: Literal["routine", "cross_effort", "cascading_refactor"] = Field(
+        default="routine",
+        description=(
+            "How far a correct implementation reaches. "
+            "'routine' = a self-contained or ADDITIVE change — new features, new files, or edits "
+            "confined to one bounded area; this is the COMMON case and includes building new "
+            "features on a small or greenfield codebase. "
+            "'cross_effort' = it must touch code that ANOTHER in-flight effort is actively changing "
+            "(a real concurrent-conflict risk). "
+            "'cascading_refactor' = it RESTRUCTURES EXISTING code across MANY modules, where one edit "
+            "forces edits elsewhere (a wide structural refactor of code that already exists) — NOT a "
+            "greenfield feature-add, however large the feature list. "
+            "When genuinely unsure between two, pick the MORE-gated one."
+        ),
+    )
     reasoning: str = ""
 
 

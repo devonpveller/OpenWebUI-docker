@@ -546,6 +546,18 @@ class Router:
                     actor=inst.id,
                     payload={"status": result.status, "role": role},
                 )
+                # P21 F1 — an ABANDONED turn ROTS its session (the model runs on the accumulated
+                # context, and a small model returns EMPTY on an overflowing one — §8/context-rot).
+                # gym-019: a `re-run it` reused the exact `~r2~plan` session a 60-min turn had
+                # abandoned → the plan turn came back EMPTY twice → the effort stopped. `wake_done`'s
+                # `abandoned` status is not a distinct kind, so `_session_for` (which counts kinds)
+                # could not see it — the re-engage kept the same generation. This event IS counted
+                # by `_session_for`, so the next dispatch/recovery starts from a FRESH session.
+                if result.status == "abandoned":
+                    await self.audit.log(
+                        "worker_turn_abandoned", effort_id=effort_id, actor=inst.id,
+                        payload={"role": role},
+                    )
                 # A finished effort wakes its dependency waiters (idle-wait DAG).
                 await self.scheduler.wake_finished(effort_id)
                 return result
