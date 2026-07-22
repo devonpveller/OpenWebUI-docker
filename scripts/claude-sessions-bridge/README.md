@@ -228,6 +228,26 @@ don't trigger (only posts newer than registration count). Agent-org's `bot-pm` c
 bot-claude until agent-org allow-lists it — following bot-pm's activity in effort threads
 works regardless.
 
+## Closing a session — `close` / `end session` (2026-07-18)
+
+Post **`close`** (or `end session`, `close this session`, `!close`) as the whole message in a
+session's thread and the bridge **disposes everything that session left running**: drops every
+follow it registered, purges its queued background wakes and buffered progress digest, clears a
+parked question, and aborts a running *background* turn (your own in-flight turn is never
+killed). The thread is then marked **closed** — nothing can auto-wake it and it cannot register
+a new follow.
+
+**Closing is not deletion.** The Claude session id is kept, so your next message in the thread
+**reopens** it and it resumes where it left off (with no follows until it registers new ones).
+Closed sessions show as `👋closed` in the `sessions` listing.
+
+*Why it exists (2026-07-18):* `!stop` only empties the **queue** — the follow survived it. A
+session abandoned two days earlier was re-woken 11 seconds after a full stop and answered
+alongside the new session the operator had moved to. Worse, a channel-wide follow renewed its
+own idle window every time the operator posted in that channel, so working the topic kept the
+zombie alive indefinitely. Sessions had no off switch; now they do, `!stop` warns when follows
+are still live, and a closed session's follows never renew.
+
 ## Channel hygiene
 
 Keep **bot-pm out of #claude-sessions**: agent-org's NL intake treats a bare `approve` as an

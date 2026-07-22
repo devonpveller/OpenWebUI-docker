@@ -136,6 +136,27 @@ SETTING_SOURCES = os.environ.get("BRIDGE_SETTING_SOURCES", "user,project")
 ALLOWED_TOOLS = os.environ.get("BRIDGE_ALLOWED_TOOLS", "")
 ALLOW_SELF = os.environ.get("BRIDGE_ALLOW_SELF") == "1"
 
+# ── two-lane attention model (PLAN-bridge-two-lane-attention.md) ─────────────
+# Lane 1 = the operator (ungated, always first). Lane 2 = background auto-wakes (valved).
+# The valve is the gate on lane 2; its state is a pure function of lane-1 activity:
+#   operator message queued/running → CLOSED · agent parked on ask_user → CLOSED until
+#   answered or timed out · turn ends with no parked question → OPEN.
+# Nothing in lane 2 is ever discarded — only deferred, then delivered as one catch-up turn.
+VALVE_ENABLED = os.environ.get("BRIDGE_VALVE", "1") != "0"
+# How long `ask_user` holds a question open before returning TIMED_OUT (operator: ~30 min).
+QUESTION_TIMEOUT = int(os.environ.get("BRIDGE_QUESTION_TIMEOUT", "1800"))
+# On valve re-open, coalesce all held lane-2 items into ONE catch-up turn (operator choice)
+# rather than replaying them one-by-one. Everything is still observed; no turn-storm.
+CATCHUP_COALESCE = os.environ.get("BRIDGE_CATCHUP_COALESCE", "1") != "0"
+# Phase 5 rollout: SHADOW = classify every wake and LOG what would have been suppressed, but
+# wake exactly as today. Flip to 0 only once the classifier has a clean round of evidence.
+CLASSIFY_SHADOW = os.environ.get("BRIDGE_CLASSIFY_SHADOW", "1") != "0"
+# A lone wake younger than this (minutes) was never actually held, so it is delivered EXACTLY as
+# it was before the two-lane change — no catch-up wrapper, no staleness warning. Wrapping a live
+# update in "held while you were with the operator … VERIFY before acting" tells the session a
+# falsehood and makes it distrust current information.
+WAKE_FRESH_MIN = int(os.environ.get("BRIDGE_WAKE_FRESH_MIN", "2"))
+
 STATE_DIR = os.path.join(_HERE, "state")
 STATE_FILE = os.path.join(STATE_DIR, "state.json")
 AUDIT_FILE = os.path.join(STATE_DIR, "audit.jsonl")
@@ -159,6 +180,31 @@ SESSIONS_CMD_RE = re.compile(r"^\s*sessions?(?:\s+(\S{1,40}))?\s*$", re.IGNORECA
 # the approvals MCP server's follow_thread tool (handoff files: state/follow-req-*.json).
 FOLLOWS_CMD_RE = re.compile(r"^\s*follows\s*$", re.IGNORECASE)
 UNFOLLOW_CMD_RE = re.compile(r"^\s*unfollow\s+(fw-[0-9a-f]{4,12}|all)\s*$", re.IGNORECASE)
+
+# Operator full-stop: purge lane 2, keep every lane-1 (operator) item, and abort the in-flight
+# turn ONLY if it is a lane-2 turn. Deliberately `!stop` and NOT `/stop` — Mattermost intercepts
+# a leading `/` as a slash command, so `/stop` never becomes a channel post the bridge can see.
+# Must be matched BEFORE VERDICT_RE, which already claims bare `stop`/`abort` for the approval relay.
+STOP_CMD_RE = re.compile(r"^\s*!\s*stop\s*$", re.IGNORECASE)
+
+# `close` / `end session` as the whole message → DISPOSE this session's lingering setups: drop
+# every follow it registered, purge its queued background wakes + buffered digest, clear a parked
+# question, and mark the thread CLOSED so nothing can auto-wake it again.
+#
+# Why this exists (2026-07-18 incident): `!stop` only empties the QUEUE — the follow survives, so
+# the next matching post re-woke a two-day-old abandoned session 11 seconds after a full stop, and
+# it answered alongside the new session the operator had moved to. A session had no OFF switch;
+# its only remaining activity was the wake that kept renewing its own idle window.
+#
+# Closing is not deletion and not a kill: the Claude session id is kept, an operator turn already
+# running is never aborted, and the operator's next message in the thread REOPENS it (a human
+# talking to a session obviously means it is live again).
+CLOSE_CMD_RE = re.compile(r"^\s*!?\s*(?:close|end)(?:\s+(?:this\s+|the\s+)?session)?\s*$",
+                          re.IGNORECASE)
+
+# 👎 on a queued message cancels exactly that item (lazy/tombstone deletion — the worker skips it
+# on dequeue). Operator reactions only; a bot's reaction can never cancel.
+CANCEL_EMOJI = {"-1", "thumbsdown"}
 
 # Per-thread approval level: `mode: <level>` (colon required, like `model:`). bypassPermissions
 # is deliberately NOT reachable from a chat message — that's the bridge's hard floor.
@@ -417,6 +463,7 @@ def write_mcp_config(thread_root: str) -> str:
             "BRIDGE_THREAD_ID": thread_root,
             "BRIDGE_OPERATORS": ",".join(sorted(OPERATORS)),
             "BRIDGE_APPROVAL_TIMEOUT": str(APPROVAL_TIMEOUT),
+            "BRIDGE_QUESTION_TIMEOUT": str(QUESTION_TIMEOUT),
             "BRIDGE_APPROVALS_LOG": APPROVALS_LOG,
             "BRIDGE_ALLOW_SELF": "1" if ALLOW_SELF else "0",
             "BRIDGE_TOKEN_KEY": TOKEN_KEY,
@@ -445,7 +492,7 @@ def kill_tree(proc: subprocess.Popen) -> None:
 
 def run_turn(claude_bin: str, thread_root: str, prompt: str, session_id: str | None,
              fork: bool = False, model: str = "", on_event=None, title: str = "",
-             permission_mode: str = "") -> dict:
+             permission_mode: str = "", on_proc=None) -> dict:
     """Run one headless turn, streaming NDJSON events. `on_event` receives each event as it
     arrives (used for the mid-turn progress log); the final `result` event is returned as the
     turn's result dict (same shape as --output-format json)."""
@@ -475,6 +522,11 @@ def run_turn(claude_bin: str, thread_root: str, prompt: str, session_id: str | N
     t0 = time.time()
     proc = subprocess.Popen(cmd, cwd=REPO, stdin=subprocess.PIPE,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if on_proc is not None:  # register with the bridge so `!stop` can abort a lane-2 turn
+        try:
+            on_proc(proc)
+        except Exception:  # noqa: BLE001
+            pass
     killer = threading.Timer(TURN_TIMEOUT, lambda: kill_tree(proc))
     killer.daemon = True
     killer.start()
@@ -523,16 +575,187 @@ def run_turn(claude_bin: str, thread_root: str, prompt: str, session_id: str | N
             "result": f"claude exited {proc.returncode} without a result: {stderr_txt[-600:]}"}
 
 
+# ── question parking (deterministic "the agent is waiting on the human") ─────
+# approval_server.py's ask_user tool writes this marker while a question is open and removes it
+# when answered/timed out. The bridge never INFERS a question from prose (ends-with-"?" is a
+# heuristic, not determinism) — the marker's existence IS the signal.
+def question_marker(thread_root: str) -> str:
+    return os.path.join(STATE_DIR, f"question-{thread_root}.json")
+
+
+def question_parked(thread_root: str) -> dict | None:
+    """The parked-question marker, or None.
+
+    Self-healing: a hard-killed approval server (taskkill, crash, reboot) can leave the marker
+    behind, and a stale marker would hold the valve shut FOREVER — background traffic would
+    never resume. So a marker older than the question timeout plus slack is treated as dead and
+    removed. The valve must never be able to latch closed."""
+    path = question_marker(thread_root)
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            rec = json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return None
+    asked_at = int(rec.get("asked_at") or 0)
+    if asked_at and time.time() * 1000 - asked_at > (QUESTION_TIMEOUT + 300) * 1000:
+        log(f"clearing stale question marker for thread {thread_root[:8]} "
+            f"(older than {QUESTION_TIMEOUT + 300}s — approval server likely died)")
+        audit({"event": "question_marker_stale", "thread": thread_root, "asked_at": asked_at})
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        return None
+    return rec
+
+
+# ── post classification (decision-required vs progress) ──────────────────────
+# Structural markers only, and ONLY as a fallback: the authoritative signal is props.ao_class,
+# stamped by the producer. Prose-matching is a guess and is treated as such.
+DECISION_RE = re.compile(
+    r"(reply\s+`?\s*approve|`approve\s|approve\s*\|\s*modify\s*\|\s*abort|\bmodify\b\s*\|\s*\babort\b"
+    r"|say\s+\*{0,2}merge it|merge gate|\bCONCERN\b|state\s*=\s*frozen|\bfrozen\b|⛔"
+    r"|needs your attention|escalat)", re.IGNORECASE)
+
+
+def classify_post(p: dict) -> tuple[str, str]:
+    """→ (class, why). FAIL OPEN: anything unstamped and unrecognised is a DECISION.
+
+    Under-waking means a MISSED GATE, which is the dangerous direction — a false wake is only
+    noise. So ambiguity always resolves to 'decision'."""
+    props = p.get("props") or {}
+    stamped = str(props.get("ao_class") or "").strip().lower()
+    if stamped in ("decision", "progress"):
+        return stamped, "props.ao_class"
+    msg = (p.get("message") or "")
+    if DECISION_RE.search(msg):
+        return "decision", "prose-match"
+    # Recognised progress narration — the only case we dare call non-actionable without a stamp.
+    if re.search(r"(opened\s+\[?`?effort|readiness|dispatch|plan approved|archived|delivered"
+                 r"|agent-bridge online|✅|📋)", msg, re.IGNORECASE):
+        return "progress", "prose-match"
+    return "decision", "unclassified — failing open"
+
+
+# ── two-lane queue ───────────────────────────────────────────────────────────
+class _Item:
+    """One unit of work. `kind` decides its lane; `post_id` links it to the Mattermost message
+    that spawned it (for the ⏳/🚫 receipts and for 👎 cancellation)."""
+    __slots__ = ("kind", "prompt", "post_id", "meta")
+
+    def __init__(self, kind: str, prompt: str, post_id: str = "", meta: dict | None = None):
+        self.kind, self.prompt, self.post_id, self.meta = kind, prompt, post_id, meta or {}
+
+
+class _ThreadQueue:
+    """Lane 1 (operator, ungated) + lane 2 (background, valved), one condition variable.
+
+    Deliberately NOT a PriorityQueue: `!stop` must purge lane 2 *only*, and the staleness guard
+    must re-validate lane 2 *as a collection* at release time. Both are trivial with two real
+    queues and awkward with one priority queue.
+    """
+
+    def __init__(self) -> None:
+        self.cv = threading.Condition()
+        self.lane1: deque[_Item] = deque()
+        self.lane2: deque[_Item] = deque()
+        self.valve_open = True
+        self.cancelled: set[str] = set()
+
+    def put_user(self, item: _Item) -> None:
+        with self.cv:
+            self.lane1.append(item)
+            if VALVE_ENABLED:
+                self.valve_open = False  # lane-1 activity closes the valve
+            self.cv.notify_all()
+
+    def put_wake(self, item: _Item) -> None:
+        with self.cv:
+            self.lane2.append(item)
+            self.cv.notify_all()
+
+    def set_valve(self, is_open: bool) -> None:
+        with self.cv:
+            self.valve_open = bool(is_open) or not VALVE_ENABLED
+            self.cv.notify_all()
+
+    def purge_lane2(self) -> int:
+        with self.cv:
+            n = len(self.lane2)
+            self.lane2.clear()
+            return n
+
+    def cancel(self, post_id: str) -> None:
+        with self.cv:
+            self.cancelled.add(post_id)
+
+    def depth(self) -> tuple[int, int]:
+        with self.cv:
+            return len(self.lane1), len(self.lane2)
+
+    def empty(self) -> bool:
+        with self.cv:
+            return not self.lane1 and not self.lane2
+
+    def get_nowait(self) -> _Item:
+        """Non-blocking introspection: lane 1 first, then lane 2, ignoring the valve."""
+        with self.cv:
+            if self.lane1:
+                return self.lane1.popleft()
+            if self.lane2:
+                return self.lane2.popleft()
+        raise IndexError("both lanes are empty")
+
+    def pending_post_ids(self) -> list[str]:
+        with self.cv:
+            return [i.post_id for i in list(self.lane1) + list(self.lane2) if i.post_id]
+
+    def _take_locked(self) -> tuple[_Item, list[_Item]] | None:
+        """The admission POLICY, with self.cv held. None = nothing admissible right now.
+
+        Kept separate from the blocking in get() so the policy is a pure, thread-free function
+        that tests can drive directly."""
+        if self.lane1:                       # lane 1 is ungated and always wins
+            return self.lane1.popleft(), []
+        if self.lane2 and (self.valve_open or not VALVE_ENABLED):
+            item = self.lane2.popleft()
+            extras: list[_Item] = []
+            if CATCHUP_COALESCE:             # everything held rides out as ONE catch-up turn
+                while self.lane2:
+                    extras.append(self.lane2.popleft())
+            return item, extras
+        return None
+
+    def try_get(self) -> tuple[_Item, list[_Item]] | None:
+        with self.cv:
+            return self._take_locked()
+
+    def get(self) -> tuple[_Item, list[_Item]]:
+        """Block until an item is admissible (see _take_locked for the policy)."""
+        with self.cv:
+            while True:
+                got = self._take_locked()
+                if got is not None:
+                    return got
+                self.cv.wait(timeout=5)
+
+
 # ── per-thread worker ────────────────────────────────────────────────────────
 class Bridge:
     def __init__(self) -> None:
         self.claude_bin = find_claude_bin()
         self.state = load_state()
         self.state_lock = threading.Lock()
-        self.queues: dict[str, queue.Queue] = {}
+        self.queues: dict[str, _ThreadQueue] = {}
         self.running: set[str] = set()          # thread_roots with a turn in flight
         self.running_lock = threading.Lock()
         self.sem = threading.Semaphore(MAX_CONCURRENT)
+        self.procs: dict[str, subprocess.Popen] = {}   # in-flight turn, for !stop abort
+        self.proc_kind: dict[str, str] = {}            # "user" | "wake" — never abort a user turn
+        self.proc_post: dict[str, str] = {}            # trigger post of the in-flight turn (👎)
+        self.cancel_inflight: set[str] = set()         # threads whose running turn was 👎'd
+        self.proc_lock = threading.Lock()
+        self.digest: dict[str, list[str]] = {}         # thread → buffered PROGRESS lines
         self.processed: deque[str] = deque(self.state.get("processed", []), maxlen=500)
         self.first_poll = True
         self.state.setdefault("follows", {})   # fid → follow record (see follow_matches)
@@ -542,31 +765,204 @@ class Bridge:
     def ensure_worker(self, thread_root: str) -> None:
         if thread_root in self.queues:
             return
-        self.queues[thread_root] = queue.Queue()
+        self.queues[thread_root] = _ThreadQueue()
         t = threading.Thread(target=self.worker, args=(thread_root,), daemon=True,
                              name=f"worker-{thread_root[:8]}")
         t.start()
 
+    def _park_watcher(self, thread_root: str, release_once, stop_evt: threading.Event) -> None:
+        """Release this turn's concurrency slot the moment it parks on a question.
+
+        A parked `ask_user` is idle-waiting, not computing — with MAX_CONCURRENT=2 a 30-minute
+        park would otherwise hold HALF the bridge's total turn capacity and starve every other
+        thread. The slot is released exactly once (whichever comes first: park, or turn end)."""
+        while not stop_evt.wait(3):
+            if question_parked(thread_root):
+                release_once("parked on a question")
+                return
+
     def worker(self, thread_root: str) -> None:
         q = self.queues[thread_root]
         while True:
-            prompt, trigger_post = q.get()
-            with self.sem:
-                with self.running_lock:
-                    self.running.add(thread_root)
-                try:
-                    self.execute(thread_root, prompt, trigger_post)
-                except Exception as e:  # noqa: BLE001 - a broken turn must not kill the worker
-                    log(f"worker {thread_root[:8]} error: {e}")
-                    try:
-                        post(f"❌ Bridge error running this turn: `{e}`", thread_root)
-                    except Exception:  # noqa: BLE001
-                        pass
-                finally:
-                    with self.running_lock:
-                        self.running.discard(thread_root)
+            item, extras = q.get()
 
-    def execute(self, thread_root: str, prompt: str, trigger_post: str = "") -> None:
+            # 👎 tombstone — skip without running, flip the ⏳ to 🚫.
+            if item.post_id and item.post_id in q.cancelled:
+                log(f"skipping cancelled item in thread {thread_root[:8]} ({item.kind})")
+                audit({"event": "turn_cancelled", "thread": thread_root, "post": item.post_id,
+                       "kind": item.kind})
+                unreact(item.post_id, "hourglass_flowing_sand")
+                react(item.post_id, "no_entry_sign")
+                continue
+
+            prompt = item.prompt
+            if item.kind == "wake":
+                prompt = self._compose_wake_prompt(thread_root, item, extras)
+                if prompt is None:  # every held item went stale — nothing worth a turn
+                    continue
+
+            self.sem.acquire()
+            released = {"done": False}
+            sem_lock = threading.Lock()
+
+            def release_once(why: str = "turn ended") -> None:
+                with sem_lock:
+                    if released["done"]:
+                        return
+                    released["done"] = True
+                try:
+                    self.sem.release()
+                    log(f"thread {thread_root[:8]}: concurrency slot released ({why})")
+                except ValueError:  # noqa: PERF203 - over-release guard
+                    pass
+
+            stop_evt = threading.Event()
+            watcher = threading.Thread(target=self._park_watcher,
+                                       args=(thread_root, release_once, stop_evt),
+                                       daemon=True, name=f"park-{thread_root[:8]}")
+            watcher.start()
+            with self.running_lock:
+                self.running.add(thread_root)
+            try:
+                self.execute(thread_root, prompt, item.post_id, kind=item.kind)
+            except Exception as e:  # noqa: BLE001 - a broken turn must not kill the worker
+                log(f"worker {thread_root[:8]} error: {e}")
+                try:
+                    post(f"❌ Bridge error running this turn: `{e}`", thread_root)
+                except Exception:  # noqa: BLE001
+                    pass
+            finally:
+                stop_evt.set()
+                release_once()
+                with self.running_lock:
+                    self.running.discard(thread_root)
+                with self.proc_lock:
+                    self.procs.pop(thread_root, None)
+                    self.proc_kind.pop(thread_root, None)
+                    self.proc_post.pop(thread_root, None)
+                # THE CONTROL LAW: the valve reopens only when the agent is not waiting on the
+                # human and no operator work is left. A parked question keeps it shut so no
+                # background wake can mutate the session between a question and its answer.
+                pending_user, _ = q.depth()
+                if question_parked(thread_root):
+                    q.set_valve(False)
+                elif pending_user == 0:
+                    q.set_valve(True)
+
+    def _full_stop(self, thread_root: str, pid: str) -> None:
+        """Operator full stop (`!stop`): purge lane 2, keep EVERY lane-1 item, and abort the
+        in-flight turn only if it is a lane-2 turn. The operator's own work is never killed."""
+        self.ensure_worker(thread_root)
+        q = self.queues[thread_root]
+        purged = q.purge_lane2()
+        kept, _ = q.depth()
+        dropped = len(self.digest.pop(thread_root, []))
+        aborted = False
+        with self.proc_lock:
+            proc, kind = self.procs.get(thread_root), self.proc_kind.get(thread_root, "")
+        if proc is not None and kind == "wake":
+            kill_tree(proc)
+            aborted = True
+        if not question_parked(thread_root) and kept == 0:
+            q.set_valve(True)  # backlog is gone; let future background traffic flow again
+        bits = [f"purged **{purged}** queued background wake(s)"]
+        if dropped:
+            bits.append(f"dropped **{dropped}** buffered progress line(s)")
+        bits.append(f"kept **{kept}** of your message(s)")
+        bits.append("aborted the running background turn" if aborted
+                    else ("left your in-flight turn running" if proc is not None
+                          else "nothing was running"))
+        # A full stop empties the QUEUE; it does not unsubscribe. Saying so here is the difference
+        # between "I stopped it" and the session being auto-woken again a minute later.
+        with self.state_lock:
+            live = [fid for fid, f in self.state.get("follows", {}).items()
+                    if f.get("bridge_thread") == thread_root]
+        if live:
+            bits.append(f"⚠️ **{len(live)}** follow(s) still live ({', '.join('`' + x + '`' for x in sorted(live))})"
+                        f" — this session can still be auto-woken; say `close` to dispose it")
+        log(f"full stop in thread {thread_root[:8]}: purged={purged} kept={kept} aborted={aborted}")
+        audit({"event": "full_stop", "thread": thread_root, "post": pid, "purged": purged,
+               "kept": kept, "aborted": aborted})
+        react(pid, "octagonal_sign")
+        try:
+            post("🛑 **Full stop** — " + " · ".join(bits) + ".", thread_root)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _compose_wake_prompt(self, thread_root: str, item: _Item,
+                             extras: list[_Item]) -> str | None:
+        """Build ONE catch-up turn from every held lane-2 item, with the staleness guard applied.
+
+        Deferral MANUFACTURES staleness: by construction a held wake is older when it is finally
+        released, so a "plan approved" held through a long operator conversation may refer to an
+        effort that was aborted during it. Validation therefore happens HERE, at release time —
+        never at enqueue time, because the world moved while the item waited.
+        """
+        held = [item] + [e for e in extras if not (e.post_id and e.post_id in
+                                                   self.queues[thread_root].cancelled)]
+        now_ms = int(time.time() * 1000)
+        # FAST PATH — nothing was actually held. One fresh wake, no coalescing, no buffered
+        # digest: deliver it verbatim, exactly as the pre-change bridge did. The catch-up and
+        # staleness framing is only honest when something really did wait.
+        lone_age = max(0, (now_ms - int(item.meta.get("created_at") or now_ms)) // 60000)
+        if (len(held) == 1 and not self.digest.get(thread_root)
+                and lone_age <= WAKE_FRESH_MIN):
+            return item.prompt
+        terminal_re = re.compile(r"\b(aborted|archived|cancell?ed|closed|merged|abandoned|"
+                                 r"superseded|resolved)\b", re.IGNORECASE)
+        effort_re = re.compile(r"effort-[A-Za-z0-9_-]+")
+
+        # An effort named with a terminal state in ANY held post is no longer blocking — every
+        # earlier decision post about it is downgraded rather than acted on.
+        settled: set[str] = set()
+        for h in held:
+            body = h.meta.get("body", "")
+            if terminal_re.search(body):
+                settled.update(effort_re.findall(body))
+
+        live, stale, oldest = [], [], 0
+        for h in held:
+            body = h.meta.get("body", "")
+            age_min = max(0, (now_ms - int(h.meta.get("created_at") or now_ms)) // 60000)
+            oldest = max(oldest, age_min)
+            efforts = set(effort_re.findall(body))
+            superseded = bool(efforts & settled) and not terminal_re.search(body)
+            tag = f"[posted {age_min} min ago"
+            if superseded:
+                tag += " · ⚠️ SUPERSEDED — that effort reached a terminal state in a later post"
+            tag += "]"
+            (stale if superseded else live).append(f"{tag}\n{h.prompt}")
+
+        if not live and not stale:
+            return None
+        if not live:  # everything held went stale — record it, don't burn a turn on dead state
+            log(f"thread {thread_root[:8]}: all {len(stale)} held wake(s) went stale — no turn")
+            audit({"event": "wake_all_stale", "thread": thread_root, "count": len(stale)})
+            return None
+
+        digest = self.digest.pop(thread_root, [])
+        waited = oldest > WAKE_FRESH_MIN  # did anything ACTUALLY sit behind a closed valve?
+        head = (f"📡 **Catch-up** — {len(held)} background update(s) held while you were with "
+                f"the operator, delivered as one turn."
+                if waited else
+                f"📡 **{len(held)} background updates** — delivered together.")
+        parts = [head, "\n\n".join(live)]
+        if stale:
+            parts.append("⚠️ **Also held, but now stale** (do NOT act on these; they are context "
+                         "only):\n\n" + "\n\n".join(stale))
+        if digest:
+            parts.append(f"📝 **Progress since the last wake ({len(digest)} post(s))** — FYI, "
+                         f"nothing blocking:\n" + "\n".join(f"- {d}" for d in digest[-40:]))
+        # Only tell the session to distrust what it is reading when something genuinely waited.
+        # Asking it to re-verify LIVE updates makes it hedge and burn tool calls on current state.
+        if waited or stale:
+            parts.append("Some of the above waited while you were with the operator — check the "
+                         "stated ages and confirm any referenced effort is still in a blocking "
+                         "state before acting on it.")
+        return "\n\n".join(parts)
+
+    def execute(self, thread_root: str, prompt: str, trigger_post: str = "",
+                kind: str = "user") -> None:
         with self.state_lock:
             meta = dict(self.state["threads"].get(thread_root, {}))
         session_id = meta.get("session_id")
@@ -697,15 +1093,39 @@ class Bridge:
                "handoff": bool(handoff), "fork": fork, "model": model_label,
                "mode": mode_label, "prompt_preview": prompt[:300]})
         t0 = time.time()
+        def register_proc(proc: subprocess.Popen) -> None:
+            with self.proc_lock:
+                self.procs[thread_root] = proc
+                self.proc_kind[thread_root] = kind
+                self.proc_post[thread_root] = trigger_post
+
         resp = run_turn(self.claude_bin, thread_root, prompt, session_id, fork=fork,
                         model=thread_model or MODEL, on_event=on_event, title=title,
-                        permission_mode=mode_label)
+                        permission_mode=mode_label, on_proc=register_proc)
         dur = int(time.time() - t0)
         if progress["post_id"] and progress["lines"]:
             try:  # final flush so the log is complete, and mark the turn done
                 patch_post(progress["post_id"], render_progress("✔ turn complete — result below."))
             except Exception:  # noqa: BLE001
                 pass
+        # A 👎 landing after the turn already started aborts it (see poll_cancellations). The
+        # kill makes run_turn return a generic error — translate it into an honest receipt so
+        # the operator sees "cancelled", not "turn failed".
+        with self.proc_lock:
+            was_cancelled = thread_root in self.cancel_inflight
+            self.cancel_inflight.discard(thread_root)
+        if was_cancelled:
+            if trigger_post:
+                unreact(trigger_post, "hourglass_flowing_sand")
+                react(trigger_post, "no_entry_sign")
+            audit({"event": "turn_cancelled_inflight", "thread": thread_root,
+                   "post": trigger_post, "seconds": dur})
+            try:
+                post(f"🚫 **Cancelled** — you 👎'd this message, so the running turn was stopped "
+                     f"after {dur}s. Nothing further was done.", thread_root)
+            except Exception:  # noqa: BLE001
+                pass
+            return
         if trigger_post:  # flip the ⏳ ack to the outcome
             unreact(trigger_post, "hourglass_flowing_sand")
             react(trigger_post, "x" if resp.get("is_error") else "white_check_mark")
@@ -791,7 +1211,8 @@ class Bridge:
                          f"expires in {hrs:.0f}h · session “{title}”"
                          + (f" · {f['note']}" if f.get("note") else ""))
         lines.append("`unfollow <id>` stops one; `unfollow all` (inside a session's thread) "
-                     "stops that session's.")
+                     "stops that session's; `close` in a session's thread disposes everything "
+                     "it left running.")
         return "\n".join(lines)
 
     def _renew_follows(self, now_ms: int, *, bridge_thread: str | None = None,
@@ -804,8 +1225,14 @@ class Bridge:
         Returns the fids actually renewed (for logging/tests)."""
         renewed: list[str] = []
         with self.state_lock:
+            threads = self.state["threads"]
             for fid, f in self.state.get("follows", {}).items():
                 if bridge_thread is not None and f.get("bridge_thread") != bridge_thread:
+                    continue
+                # A closed session's follows never renew — otherwise engaging the TOPIC (posting
+                # in the followed channel) keeps a disposed session's window sliding forward.
+                # Read inline: state_lock is not reentrant, so thread_closed() would deadlock.
+                if (threads.get(f.get("bridge_thread") or "") or {}).get("closed"):
                     continue
                 if channel_id is not None and f.get("channel_id") != channel_id:
                     continue
@@ -819,16 +1246,98 @@ class Bridge:
                 save_state(self.state)
         return renewed
 
-    def _drop_follow(self, fid: str, f: dict, why: str) -> None:
+    def _drop_follow(self, fid: str, f: dict, why: str, *, notify: bool = True) -> None:
         with self.state_lock:
             self.state.get("follows", {}).pop(fid, None)
             save_state(self.state)
         audit({"event": "follow_dropped", "follow": fid, "why": why})
-        if f.get("bridge_thread"):
+        if notify and f.get("bridge_thread"):
             try:
                 post(f"📡 Follow `{fid}` ({self._follow_label(f)}) {why}.", f["bridge_thread"])
             except Exception:  # noqa: BLE001
                 pass
+
+    # -- session closure: the OFF switch for a session's lingering setups ------
+    def thread_closed(self, thread_root: str) -> int:
+        """Timestamp the operator closed this session, or 0 when it is live."""
+        with self.state_lock:
+            return int((self.state["threads"].get(thread_root) or {}).get("closed") or 0)
+
+    def _reopen_thread(self, thread_root: str) -> bool:
+        """A human messaging a closed session reopens it. Returns True if it WAS closed."""
+        with self.state_lock:
+            entry = self.state["threads"].get(thread_root)
+            if not entry or not entry.get("closed"):
+                return False
+            entry.pop("closed", None)
+            save_state(self.state)
+        log(f"thread {thread_root[:8]}: reopened by an operator message")
+        audit({"event": "session_reopened", "thread": thread_root})
+        return True
+
+    def _close_session(self, thread_root: str, pid: str) -> None:
+        """`close` / `end session` — dispose everything this session left running.
+
+        Order matters: mark CLOSED first, so a follow poll racing this call can neither wake the
+        session nor register a new follow for it while we tear down."""
+        with self.state_lock:
+            entry = self.state["threads"].setdefault(thread_root, {})
+            entry["closed"] = int(time.time() * 1000)
+            save_state(self.state)
+            follows = {fid: dict(f) for fid, f in self.state.get("follows", {}).items()
+                       if f.get("bridge_thread") == thread_root}
+        # 1. Follows — the actual cause of zombie re-engagement. One summary post, not N.
+        for fid, f in follows.items():
+            self._drop_follow(fid, f, "dropped: the session was closed", notify=False)
+        # 2. Queued background wakes + the buffered progress digest.
+        self.ensure_worker(thread_root)
+        q = self.queues[thread_root]
+        purged = q.purge_lane2()
+        kept, _ = q.depth()
+        dropped_digest = len(self.digest.pop(thread_root, []))
+        # 3. A parked question would otherwise hold this session's valve shut forever.
+        unparked = False
+        if question_parked(thread_root):
+            try:
+                os.remove(question_marker(thread_root))
+                unparked = True
+            except OSError:
+                pass
+        # 4. A background turn is work nobody asked for in a session being disposed — abort it.
+        #    An OPERATOR turn is their own work and is never killed (same law as `!stop`).
+        aborted = False
+        with self.proc_lock:
+            proc, kind = self.procs.get(thread_root), self.proc_kind.get(thread_root, "")
+        if proc is not None and kind == "wake":
+            kill_tree(proc)
+            aborted = True
+        if kept == 0:
+            q.set_valve(True)
+        bits = [f"dropped **{len(follows)}** follow(s)"
+                + (" (" + ", ".join(f"`{x}`" for x in sorted(follows)) + ")" if follows else ""),
+                f"purged **{purged}** queued background wake(s)"]
+        if dropped_digest:
+            bits.append(f"dropped **{dropped_digest}** buffered progress line(s)")
+        if unparked:
+            bits.append("cleared a parked question (that turn will time out)")
+        if aborted:
+            bits.append("aborted the running background turn")
+        elif proc is not None:
+            bits.append("left **your** in-flight turn running")
+        if kept:
+            bits.append(f"kept **{kept}** of your queued message(s) — they will still run")
+        log(f"session closed in thread {thread_root[:8]}: follows={len(follows)} "
+            f"purged={purged} kept={kept} aborted={aborted}")
+        audit({"event": "session_closed", "thread": thread_root, "post": pid,
+               "follows": sorted(follows), "purged": purged, "kept": kept, "aborted": aborted})
+        react(pid, "wave")
+        try:
+            post("👋 **Session closed** — " + " · ".join(bits)
+                 + ".\n\nNothing can auto-wake this session again. Its Claude session id is kept, "
+                   "so just message this thread to reopen and continue where it left off.",
+                 thread_root)
+        except Exception:  # noqa: BLE001
+            pass
 
     def ingest_follow_requests(self) -> None:
         """Adopt the handoff files the approval server writes (one JSON per follow/unfollow
@@ -857,6 +1366,12 @@ class Bridge:
         bthread = str(req.get("bridge_thread") or "")
         if action == "follow" and bthread and req.get("id") and req.get("channel_id"):
             fid = str(req["id"])
+            # A CLOSED session may not re-arm itself. Without this, the last turn of a session
+            # being closed could register a follow after the teardown and resurrect the zombie.
+            if self.thread_closed(bthread):
+                log(f"follow {fid} refused — thread {bthread[:8]} is closed")
+                audit({"event": "follow_refused_closed", "follow": fid, "thread": bthread})
+                return
             record = {k: req.get(k) for k in (
                 "id", "bridge_thread", "channel_id", "channel_label", "thread_id", "wake_on",
                 "note", "created", "expires", "idle_ms", "last_seen", "wakes", "max_wakes",
@@ -965,8 +1480,36 @@ class Bridge:
                 log(f"follow wake failed for thread {bthread[:8]}: {e}")
 
     def _dispatch_wake(self, bthread: str, batch: dict, follows: dict) -> None:
+        # Belt and braces: closing drops the follows, so this should be unreachable — but a wake
+        # batch computed just before the teardown must not land in a session the operator closed.
+        if self.thread_closed(bthread):
+            log(f"wake suppressed — thread {bthread[:8]} is closed")
+            audit({"event": "wake_suppressed_closed", "thread": bthread,
+                   "follows": sorted(batch["follows"])})
+            return
         rows = sorted(batch["posts"].values(), key=lambda p: p.get("create_at", 0))
         fids = sorted(batch["follows"])
+        # Phase 5 — classify FIRST, so a progress-only batch need not cost a wake at all.
+        classed = [(p,) + classify_post(p) for p in rows]
+        decisions = [c for c in classed if c[1] == "decision"]
+        mode = str((follows.get(fids[0]) or {}).get("wake_on_class") or "all").lower()
+        if not decisions:
+            if CLASSIFY_SHADOW or mode == "all":
+                # SHADOW: wake exactly as today, but record what would have been suppressed.
+                # This is the evidence needed before trusting the classifier to drop wakes.
+                log(f"[shadow] thread {bthread[:8]}: {len(rows)} progress post(s) would have "
+                    f"been suppressed under wake_on=decision")
+                audit({"event": "wake_shadow_suppressed", "thread": bthread,
+                       "count": len(rows), "why": [c[2] for c in classed]})
+            else:
+                for p, _k, _w in classed:
+                    self.digest.setdefault(bthread, []).append(
+                        f"@{mmapi._username(p.get('user_id', ''))}: "
+                        f"{_short((p.get('message') or '').strip(), 160)}")
+                log(f"thread {bthread[:8]}: {len(rows)} progress post(s) buffered — no wake")
+                audit({"event": "wake_suppressed_progress", "thread": bthread,
+                       "count": len(rows)})
+                return
         dropped, status = [], []
         with self.state_lock:
             for fid in fids:
@@ -1020,7 +1563,59 @@ class Bridge:
         audit({"event": "follow_wake", "thread": bthread, "follows": fids,
                "posts": [p.get("id") for p in rows]})
         self.ensure_worker(bthread)
-        self.queues[bthread].put((prompt, note_id))
+        # Lane 2 — valved. Carries the age + body the staleness guard re-validates at RELEASE.
+        self.queues[bthread].put_wake(_Item("wake", prompt, note_id, {
+            "created_at": rows[-1].get("create_at", int(time.time() * 1000)),
+            "body": "\n".join((p.get("message") or "") for p in rows),
+            "klass": "decision" if decisions else "progress",
+        }))
+
+    def _operator_thumbsdown(self, pid: str) -> bool:
+        """True when an OPERATOR (never a bot) has 👎'd this post."""
+        try:
+            rs = mmapi._api("GET", f"/posts/{pid}/reactions")
+        except Exception:  # noqa: BLE001 - transient failure just retries next cycle
+            return False
+        if not isinstance(rs, list):
+            return False
+        for r in rs:
+            if str(r.get("emoji_name", "")).lower() not in CANCEL_EMOJI:
+                continue
+            if mmapi._username(r.get("user_id", "")).lower() in OPERATORS:
+                return True
+        return False
+
+    def poll_cancellations(self) -> None:
+        """👎 on a queued message cancels exactly that item (tombstone; the worker skips it).
+
+        Deliberately BOUNDED: only items still PENDING in a lane are checked — usually 0–3, and
+        zero API calls when the queues are empty. An unbounded per-post reaction poll is exactly
+        how this bridge has hit `WinError 10055` (socket exhaustion) before."""
+        for thread_root, q in list(self.queues.items()):
+            # (1) Items still WAITING in a lane — tombstoned, skipped on dequeue.
+            for pid in q.pending_post_ids():
+                if pid in q.cancelled or not self._operator_thumbsdown(pid):
+                    continue
+                q.cancel(pid)
+                log(f"👎 cancel — item {pid[:8]} in thread {thread_root[:8]} will be skipped")
+                audit({"event": "item_cancelled", "thread": thread_root, "post": pid})
+            # (2) The turn already RUNNING. Without this, 👎 is near-useless: the worker sits
+            # blocked in get(), so a lane-1 message is dequeued in MICROSECONDS while this poll
+            # runs every ~4s — a plain message could essentially never be caught while queued.
+            # Here the operator is explicitly cancelling their OWN work, so aborting is sanctioned
+            # (unlike !stop, which never kills a user turn).
+            with self.proc_lock:
+                proc = self.procs.get(thread_root)
+                pid = self.proc_post.get(thread_root, "")
+                already = thread_root in self.cancel_inflight
+            if proc is None or not pid or already:
+                continue
+            if self._operator_thumbsdown(pid):
+                with self.proc_lock:
+                    self.cancel_inflight.add(thread_root)
+                log(f"👎 cancel — aborting the running turn in thread {thread_root[:8]}")
+                audit({"event": "inflight_cancel_requested", "thread": thread_root, "post": pid})
+                kill_tree(proc)
 
     # -- poll loop ------------------------------------------------------------
     def poll_once(self, me: str) -> None:
@@ -1091,6 +1686,22 @@ class Bridge:
                     self._drop_follow(fid, follows[fid], "unfollowed by the operator")
                 react(pid, "white_check_mark")
                 continue
+            if STOP_CMD_RE.match(msg):  # BEFORE the verdict check — `stop` is a verdict word
+                self._full_stop(thread_root, pid)
+                continue
+            if CLOSE_CMD_RE.match(msg):  # the session OFF switch — disposes follows + queue
+                self._close_session(thread_root, pid)
+                continue
+            # A parked ask_user question OWNS the next operator message: it is the answer, and
+            # approval_server's poller reads it straight from the thread. Enqueuing it here would
+            # double-run it — and the VERDICT_RE branch below would swallow "yes, go" entirely,
+            # which is exactly the bug that made answers to questions disappear.
+            if question_parked(thread_root):
+                log(f"thread {thread_root[:8]}: message routed to the parked question")
+                audit({"event": "question_answered", "thread": thread_root, "post": pid,
+                       "user": username, "chars": len(msg)})
+                react(pid, "speech_balloon")
+                continue
             with self.running_lock:
                 turn_in_flight = thread_root in self.running
             if turn_in_flight and VERDICT_RE.match(msg):
@@ -1103,11 +1714,21 @@ class Bridge:
                          "was down.", thread_root)
                 except Exception:  # noqa: BLE001
                     pass
+            # A human prompting a closed session obviously means it is live again. Only a real
+            # prompt reopens — the meta-commands above (`sessions`, `follows`, `!stop`, …) are
+            # about a session, not to it, and must not resurrect one.
+            if self._reopen_thread(thread_root):
+                try:
+                    post("↩️ **Session reopened** — it resumes where it left off. It has no "
+                         "follows: it will only wake for you until it registers new ones.",
+                         thread_root)
+                except Exception:  # noqa: BLE001
+                    pass
             log(f"queueing message in thread {thread_root[:8]} ({len(msg)} chars)")
             audit({"event": "message_received", "thread": thread_root, "post": pid,
                    "user": username, "chars": len(msg)})
             self.ensure_worker(thread_root)
-            self.queues[thread_root].put((msg, pid))
+            self.queues[thread_root].put_user(_Item("user", msg, pid))  # lane 1 — closes the valve
         if new_last != last_seen:
             with self.state_lock:
                 self.state["last_seen"] = new_last
@@ -1138,6 +1759,7 @@ class Bridge:
                 self.poll_once(me)
                 self.ingest_follow_requests()
                 self.poll_follows(me)
+                self.poll_cancellations()
                 errors = 0
             except Exception as e:  # noqa: BLE001 - transient MM/network outage must not kill the bridge
                 errors += 1

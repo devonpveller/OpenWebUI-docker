@@ -368,7 +368,106 @@ def tool_list_follows(args: dict) -> str:
     return "\n".join(rows)
 
 
+# ── ask_user (the deterministic "I am waiting on the human" signal) ──────────
+# The ACT of calling this tool is the signal — the bridge never infers a question from prose.
+# While it is parked: the valve stays shut (no background wake can mutate the session between
+# the question and its answer) and the next operator message routes here as the answer.
+QUESTION_TIMEOUT = int(os.environ.get("BRIDGE_QUESTION_TIMEOUT", "1800"))
+
+
+def _question_marker() -> str:
+    return os.path.join(STATE_DIR, f"question-{THREAD_ID}.json")
+
+
+def _wait_for_answer(asked_at_ms: int) -> tuple[str, str]:
+    """Poll the thread for the operator's answer and return it VERBATIM.
+
+    Unlike _wait_for_verdict this does no pattern matching: ANY operator message is the answer.
+    That is precisely what stops "yes, go" being swallowed by the approval relay's verdict
+    grammar — the long-standing bug where answers to questions vanished."""
+    me = mmapi._me()
+    deadline = time.time() + QUESTION_TIMEOUT
+    while time.time() < deadline:
+        time.sleep(POLL_SECONDS)
+        try:
+            d = mmapi._api("GET", f"/posts/{THREAD_ID}/thread")
+        except Exception:  # noqa: BLE001 - transient MM outage: keep waiting
+            continue
+        posts = d.get("posts", {}) if isinstance(d, dict) else {}
+        for p in sorted(posts.values(), key=lambda x: x.get("create_at", 0)):
+            if p.get("create_at", 0) <= asked_at_ms or p.get("type"):
+                continue
+            if (p.get("props") or {}).get("from_bridge"):
+                continue
+            uid = p.get("user_id", "")
+            if uid == me:
+                if not ALLOW_SELF:
+                    continue
+            elif mmapi._username(uid).lower() not in OPERATORS:
+                continue
+            msg = (p.get("message") or "").strip()
+            if msg:
+                return "answered", msg
+    return "timeout", ""
+
+
+def tool_ask_user(args: dict) -> str:
+    question = str(args.get("question") or "").strip()
+    if not question:
+        return "error: `question` is required"
+    if not THREAD_ID or not CHANNEL_ID:
+        return "error: ask_user is only available to bridge sessions (no thread context)"
+    ask = _post(f"❓ **Question for you**\n\n{question}\n\n"
+                f"_Reply here to answer — this turn is parked and holding its full context, so "
+                f"your answer continues it rather than starting a new one. Background updates "
+                f"are paused until you answer (or {QUESTION_TIMEOUT // 60} min passes)._")
+    asked_at = (ask.get("create_at", int(time.time() * 1000)) if isinstance(ask, dict)
+                else int(time.time() * 1000))
+    os.makedirs(STATE_DIR, exist_ok=True)
+    marker, tmp = _question_marker(), _question_marker() + ".tmp"
+    try:  # atomic write — the bridge must never read a partial marker
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump({"thread": THREAD_ID, "asked_at": asked_at, "question": question[:500]}, fh)
+        os.replace(tmp, marker)
+    except OSError:
+        pass
+    _audit({"event": "question_asked", "thread": THREAD_ID, "question": question[:400]})
+    try:
+        state, answer = _wait_for_answer(asked_at)
+    finally:
+        try:  # ALWAYS clear the marker, or the valve would stay shut forever
+            os.remove(marker)
+        except OSError:
+            pass
+    _audit({"event": "question_resolved", "thread": THREAD_ID, "state": state,
+            "answer": answer[:400]})
+    if state == "answered":
+        return answer
+    try:
+        _post(f"⌛ No answer within {QUESTION_TIMEOUT // 60} min — continuing without one. "
+              f"Background updates have resumed.")
+    except Exception:  # noqa: BLE001
+        pass
+    return (f"TIMED_OUT: no operator answer within {QUESTION_TIMEOUT // 60} minutes. Decide how "
+            f"to proceed yourself — either continue with a clearly-stated assumption, or stop "
+            f"and summarise exactly what you need. Do not ask again this turn.")
+
+
 FOLLOW_TOOLS = {
+    "ask_user": {
+        "fn": tool_ask_user,
+        "description": (
+            "Ask the operator a question and WAIT for their answer, returned to you verbatim. "
+            "Use this whenever you genuinely cannot proceed without a human decision — it is the "
+            "ONLY way to ask that actually blocks. Your turn parks with full context intact, so "
+            "the answer continues this same turn rather than starting a new one, and background "
+            "auto-wakes are held until you are answered (nothing is lost — they are delivered "
+            "afterwards). Returns TIMED_OUT if unanswered, and you then decide how to proceed. "
+            "Do NOT use it for things you can determine yourself."),
+        "schema": {"type": "object", "properties": {
+            "question": {"type": "string", "description": "the question, self-contained — the operator may not have your context"},
+        }, "required": ["question"]},
+    },
     "follow_thread": {
         "fn": tool_follow,
         "description": (

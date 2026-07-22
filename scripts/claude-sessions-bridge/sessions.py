@@ -118,9 +118,12 @@ def list_sessions(repo: str, bridge_threads: dict | None = None,
                   query: str = "", limit: int = 30) -> list[dict]:
     pdir = project_dir_for(repo)
     mm_titles = {}
+    mm_closed = set()   # sessions the operator closed — listed, but marked as not auto-wakeable
     for meta in (bridge_threads or {}).values():
         if isinstance(meta, dict) and meta.get("session_id"):
             mm_titles[meta["session_id"]] = meta.get("title", "")
+            if meta.get("closed"):
+                mm_closed.add(meta["session_id"])
     entries = []
     try:
         files = [os.path.join(pdir, f) for f in os.listdir(pdir) if f.endswith(".jsonl")]
@@ -159,7 +162,7 @@ def list_sessions(repo: str, bridge_threads: dict | None = None,
                 continue
             title = f"{title} ⟨'{query}' found in content⟩"
         entries.append({"id": sid, "title": _clean(title, 110), "age": _age(os.path.getmtime(path)),
-                        "mm": tag == "mm"})
+                        "mm": tag == "mm", "closed": sid in mm_closed})
         if len(entries) >= limit:
             break
     return entries
@@ -187,6 +190,7 @@ def listing_text(repo: str, bridge_threads: dict | None = None,
     lines = []
     for e in entries:
         tag = " · 🧵mm" if e["mm"] else ""
+        tag += " · 👋closed" if e.get("closed") else ""
         lines.append(f"`{e['id']}` · {e['age']}{tag}\n    {e['title']}")
     head = (f"**Sessions for `{repo}`**" + (f" matching `{query}`" if query else "")
             + f" — newest first (top {limit}). Use `handoff <id>` / `fork <id>` "

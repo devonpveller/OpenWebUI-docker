@@ -23,7 +23,8 @@
       "Bash(docker build *)",
       "Bash(docker rmi *)",
       "PowerShell(& python -m py_compile \"d:\\\\Open WebUI\\\\ai-stack\\\\owui\\\\tools\\\\deep_research.py\"; \"py_compile exit: $LASTEXITCODE\")",
-      "Bash(echo \"exit=$?\")"
+      "Bash(echo \"exit=$?\")",
+      "Bash(cd \"/d/Open WebUI/ai-orchestration-gym\" && python runner/gym_runner.py --auth app run scenario-005-arm-*)"
     ]
   },
   "hooks": {
