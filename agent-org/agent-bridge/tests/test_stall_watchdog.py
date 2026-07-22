@@ -123,6 +123,28 @@ async def test_abandon_rotates_the_session_generation(db_url):
         await db.dispose()
 
 
+async def test_stall_recovery_rotates_the_session_generation(db_url):
+    """P23 F1-redux (gym-021): the silent-worker recovery re-engaged a hung worker into the SAME
+    session, so it hung AGAIN and escalated on the last 2 tasks. `stall_recovered` now rotates the
+    generation (like an abandon), so the recovery restarts from a FRESH session instead of the
+    rotted one."""
+    orch, _chat, db = await _orch(db_url)
+    try:
+        eid = "effort-silent"
+        async with orch.db.session_factory() as s:
+            s.add(Effort(id=eid, name=eid, channel_id=await orch.mgmt_channel_id(),
+                         root_post_id=f"root-{eid}", state="active", lifecycle="open"))
+            await s.commit()
+        assert await orch._session_for(eid) == eid            # generation 0
+        async with orch.db.session_factory() as s:
+            s.add(Event(kind="stall_recovered", effort_id=eid,
+                        ts=datetime.now(timezone.utc).isoformat()))
+            await s.commit()
+        assert await orch._session_for(eid) == f"{eid}~r1"    # the recovery rotated it → fresh
+    finally:
+        await db.dispose()
+
+
 async def test_watchdog_skips_efforts_awaiting_the_operator(db_url):
     """An effort whose last event is a RESOLUTION (a PR opened, awaiting merge) is correctly waiting
     on the operator — the watchdog must NOT re-dispatch it."""

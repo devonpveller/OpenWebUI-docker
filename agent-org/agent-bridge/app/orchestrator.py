@@ -5372,6 +5372,14 @@ class Orchestrator:
                                         # (which returned EMPTY twice). Same class as the atlas re-run
                                         # note below (uncounted END event → rotted-session reuse).
                                         "worker_turn_abandoned",
+                                        # P23 F1-redux — the SILENT-worker recovery path (gym-021):
+                                        # the stall watchdog re-engaged a hung worker into the SAME
+                                        # session, it hung AGAIN, and it escalated on the last 2
+                                        # tasks (stall_recovered x2 -> stall_escalated). `stall_
+                                        # recovered` is logged BEFORE `_reengage` dispatches, so
+                                        # counting it makes that recovery restart from a FRESH
+                                        # session — F1 applied to the second recovery path.
+                                        "stall_recovered",
                                         # P10.5 PLAN/IMPLEMENT SPLIT: every drain round dispatches
                                         # a FRESH implementer. A worker asked to continue in the
                                         # session where it just declared the goal met has context
