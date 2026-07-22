@@ -10068,12 +10068,18 @@ class Orchestrator:
                 f"State the exact command on its own line, prefixed `REPRO: `, immediately after "
                 f"the finding. If you cannot demonstrate it with a command, say plainly that you "
                 f"did not verify it.\n"
-                f"AFTER EACH CHECK, before moving on, append your finding to a file:\n"
+                # P22 F22.1 — the ECHOED findings are your PRIMARY output, not a prose summary.
+                # gym-016/019/020 all failed the same way: the small model spends its budget
+                # probing, says "now let me write the report", and the turn ends before the report
+                # exists. So make the per-finding echo the required deliverable (captured from the
+                # command stream even if nothing else survives) and the summary explicitly optional.
+                f"YOUR PRIMARY OUTPUT IS ONE ECHOED LINE PER FINDING, emitted the INSTANT you "
+                f"observe it — never saved for a summary you might not reach:\n"
                 f"  echo 'FINDING: <one self-contained sentence>' >> {_LENS_FINDINGS_PATH}\n"
-                f"Write it as a complete sentence that stands alone — someone reading only that "
-                f"line must understand the finding without the rest of your report. Do this as you "
-                f"go, not at the end: if this turn runs out of room, the file is all that "
-                f"survives. Then write your full report as normal."
+                f"Write each as a complete sentence that stands alone — someone reading only that "
+                f"line must understand it without the rest. Echo them AS YOU GO, one per check. "
+                f"These echoed FINDING lines ARE your report; a final prose summary is OPTIONAL and "
+                f"may not fit — do not spend your last budget on it at the expense of the findings."
             )
             try:
                 result = await self.router.wake(
@@ -10100,10 +10106,13 @@ class Orchestrator:
             # audit trail (we want to see what the lens managed to say), but keep it out of
             # `reports` so it can neither satisfy `swept` nor reach gap analysis.
             if not _is_lens_report(body):
-                # P18 F4 — the turn died, but it may have banked findings on disk as it went.
-                # Recover them: a lens that probed for four minutes and established a dozen real
-                # defects should not lose all of them because it never reached its summary.
-                salvaged = await self._salvage_lens_findings(effort_id, lens, round_no=round_no)
+                # P18 F4 / P22 F22.1 — the turn died, but it may have established findings as it
+                # went. Recover them from the findings file AND from the turn's own command stream
+                # (`result.commands`) — gym-020's file was empty because the lens narrated instead
+                # of writing, so the stream is the reliable source.
+                salvaged = await self._salvage_lens_findings(
+                    effort_id, lens, round_no=round_no,
+                    commands=getattr(result, "commands", None))
                 await self._record_lens_report(effort_id, f"{lens}:truncated", body,
                                                round_no=round_no, scope_node_id=scope_node_id)
                 await self.audit.log("lens_report_truncated", effort_id=effort_id,
@@ -10298,34 +10307,53 @@ class Orchestrator:
             kept.append((lens, body))
         return kept
 
+    @staticmethod
+    def _findings_in_commands(commands: list[str] | None) -> list[str]:
+        """P22 F22.1 — pull `FINDING:` lines out of the commands the lens ACTUALLY RAN (the daemon
+        streams every command into `WorkResult.commands`, built for F18). This recovers a truncated
+        lens's findings from its actions, independent of whether the model finished writing the
+        findings FILE — the failure gym-020 hit (the file was empty; the lens narrated instead of
+        echoing). `echo 'FINDING: x' >> file` and `echo "FINDING: x"` both land here."""
+        out: list[str] = []
+        for c in (commands or []):
+            for m in re.finditer(r"FINDING:\s*(.+)", str(c)):
+                txt = m.group(1)
+                txt = re.sub(r"['\"]?\s*>>?\s*\S+\s*$", "", txt)   # drop a trailing `>> file`
+                txt = txt.strip().strip("'\"").strip()
+                if len(txt) >= 8:
+                    out.append(f"FINDING: {txt}")
+        return out
+
     async def _salvage_lens_findings(
-        self, effort_id: str, lens: str, *, round_no: int,
+        self, effort_id: str, lens: str, *, round_no: int, commands: list[str] | None = None,
     ) -> str:
-        """P18 F4 — read back the findings a truncated lens banked to disk, then clear the file.
+        """P18 F4 / P22 F22.1 — recover the findings a truncated lens established, from TWO sources:
+        the findings FILE it was asked to append to, AND the command STREAM of the turn itself.
 
-        gym-016 round 2: the `goal_alignment` lens ran ~30 probes over four minutes and returned
-        44 characters of narration. Everything it had established was in its context and died with
-        the turn. P17 tried to fix that by ASKING for incremental prose emission; that failed,
-        because the same budget funds probing and reporting.
+        gym-016 round 2: the `goal_alignment` lens ran ~30 probes over four minutes and returned 44
+        characters of narration. gym-020 repeated it — and the file was EMPTY, because the model
+        narrated ("Now let me write the full evaluation report:") instead of echoing findings, so a
+        file-only salvage recovered nothing and the round was never swept. So salvage no longer
+        depends on the model finishing a file: it ALSO parses `FINDING:` out of `commands` (the
+        daemon-streamed activity, F18) — the actions, not the fragile self-report (design §5, the
+        research's "verify self-report against actions"). Clearing the file still matters: it lives
+        in the container, so a later lens in the round would inherit its predecessor's findings.
 
-        The lens now appends each finding to a file as it goes, so recovery is a file read rather
-        than a request for cooperation. Clearing afterwards matters as much as reading: the file
-        lives in the container, so a later lens in the same round would otherwise inherit its
-        predecessor's findings and report them as its own.
-
-        Returns the salvaged text, or '' when there is nothing (which is the honest answer — a
-        lens that banked nothing observed nothing worth keeping)."""
+        Returns the salvaged text, or '' when there is nothing — the honest answer."""
+        lines: list[str] = list(self._findings_in_commands(commands))   # from the ACTIONS first
         cmd = (f"cat {_LENS_FINDINGS_PATH} 2>/dev/null; "
                f"rm -f {_LENS_FINDINGS_PATH} 2>/dev/null; echo SALVAGE-DONE")
         try:
             _exit, out, _timed = await self.router.exec_check(
                 effort_id, command=cmd, session_id=f"{effort_id}~salvage{round_no}",
                 repo=None, repo_token=None, timeout=120)
-        except Exception as exc:  # noqa: BLE001 — nothing salvaged is the pre-P18 behaviour
-            log.debug("lens findings salvage failed for %s: %s", effort_id, exc)
-            return ""
-        lines = [ln.strip() for ln in (out or "").splitlines()
-                 if ln.strip().startswith("FINDING:")]
+            lines += [ln.strip() for ln in (out or "").splitlines()
+                      if ln.strip().startswith("FINDING:")]
+        except Exception as exc:  # noqa: BLE001 — a failed file read still leaves the stream findings
+            log.debug("lens findings file salvage failed for %s: %s", effort_id, exc)
+        # De-duplicate (the file and the stream carry the same echoes when both survive), order-kept.
+        seen: set[str] = set()
+        lines = [x for x in lines if not (x in seen or seen.add(x))]
         if not lines:
             return ""
         await self.audit.log("lens_findings_salvaged", effort_id=effort_id,

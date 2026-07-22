@@ -176,6 +176,49 @@ async def test_a_truncated_lens_with_nothing_banked_still_does_not_sweep(db_url)
         await _shutdown(orch, db)
 
 
+# ── P22 F22.1 — a truncated lens is salvaged from its ACTIONS (the command stream) ────────────
+def test_findings_in_commands_extracts_and_cleans():
+    """Pure: pull `FINDING:` out of the echo commands a lens streamed, stripping the shell
+    redirection and quotes; drop non-findings and too-short stubs."""
+    from app.orchestrator import Orchestrator
+    got = Orchestrator._findings_in_commands([
+        "echo 'FINDING: the --due flag accepts an unparseable date' >> /tmp/lens-findings.txt",
+        'echo "FINDING: reopen on a missing id exits 0 silently"',
+        "python3 todo.py list",     # not a finding
+        "echo 'FINDING: x'",        # too short -> dropped
+    ])
+    assert got == ["FINDING: the --due flag accepts an unparseable date",
+                   "FINDING: reopen on a missing id exits 0 silently"]
+
+
+async def test_findings_are_salvaged_from_the_command_stream_when_the_file_is_empty(db_url):
+    """gym-020: the goal_alignment lens NARRATED instead of writing the findings file, so a
+    file-only salvage recovered NOTHING and the round was never swept. Salvage now also parses
+    FINDING: from the turn's streamed commands (its actions), so a lens that echoed findings is
+    recovered even with an empty file — the design's 'the environment remembers' / 'verify
+    self-report against actions'."""
+    orch, _chat, _harness, db = await _orch(db_url, tier_walk=False)
+    try:
+        eid, _c, _r = await _effort(orch)
+
+        async def _exec(effort_id, *, command, session_id, **kw):
+            return 0, "SALVAGE-DONE", False          # the findings FILE is empty
+
+        orch.router.exec_check = _exec
+        cmds = [
+            "cd /workspace && python3 todo.py add x --due nonsense",
+            "echo 'FINDING: the --due flag accepts an unparseable date without any error' "
+            ">> /tmp/lens-findings.txt",
+            'echo "FINDING: reopen on a missing id prints nothing and exits 0"',
+        ]
+        salvaged = await orch._salvage_lens_findings(
+            eid, "goal_alignment", round_no=1, commands=cmds)
+        assert "unparseable date" in salvaged and "reopen on a missing id" in salvaged
+        assert await orch._event_count(eid, "lens_findings_salvaged") == 1
+    finally:
+        await _shutdown(orch, db)
+
+
 # ── F17 — a false DEFECT is refuted by running the named reproduction ─────────
 async def test_a_task_alleging_a_misbehaviour_the_code_refutes_is_dropped(db_url):
     """gym-016's clean_code lens reported "`strptime` still accepts invalid dates like
