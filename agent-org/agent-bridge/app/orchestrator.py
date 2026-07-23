@@ -1200,45 +1200,37 @@ class Orchestrator:
             except Exception as exc:  # noqa: BLE001 - the loop must never die
                 log.warning("capacity drain tick failed: %s", exc)
 
-    # An effort whose LATEST event is one of these was dispatched but hasn't reached any resolution
-    # (a PR opened / burn-down / escalation / a surfaced state). If it then goes SILENT, it's wedged —
-    # a focus that failed, a delegate that died mid-flight — not something correctly awaiting you.
-    # `effort_published` is included (live 2026-07-11): a delivery that PUBLISHED a branch but whose
-    # verify→PR→closure then STALLED (silent, no worker running) is a wedge the org must recover —
-    # publishing is not the finish line. The busy-check keeps this from disturbing an in-flight verify.
-    _STALL_MIDDISPATCH_KINDS = frozenset({
-        "worker_acquire", "worker_project_set", "worker_release", "goal_change",
-        "readiness_gate", "effort_risk_set", "effort_reopened", "worker_resumed",
-        "worker_waiting", "focus_failed", "effort_published",
-        # The DRY-RUN / worker-plan mid-pipeline (2026-07-16 gym: an effort sat mid-pipeline with the
-        # GPU idle because the watchdog treated these as "surfaced states awaiting the operator" and
-        # never re-engaged). These states AUTO-ADVANCE to dispatch, so going quiet past the threshold
-        # means genuinely stuck, not waiting on a human — the safety net must cover them.
-        # DELIBERATELY EXCLUDED: `plan_drafted` / `lifecycle_plan_drafted` are the Stage-3 PLAN
-        # APPROVAL gate (P3.9) — an effort parked there is CORRECTLY awaiting the operator's
-        # `approve <effort>`, and auto-re-engaging it would bypass a human governance gate (§4.5).
-        # A quiet plan gate is the system working, not a stall.
-        "dry_run_started", "dry_run_recorded", "dry_run_auto_isolated", "worker_plan_approved",
-        # LIVE GAP (gym-008, 2026-07-18): a worker turn that ends `abandoned` — or whose
-        # post-turn handling dies — leaves `wake_done` as the effort's last event. Without it
-        # here the kind-gate skipped the effort: it sat open+active, worker idle, GPU idle for
-        # 31 min, and would have stranded FOREVER, silently. An OPEN effort still silent past
-        # the threshold after a COMPLETED turn is a stall — nothing followed the turn.
-        # Safe: the sweep only sees OPEN efforts, and human-gated / parked / actively-
-        # delegating ones are skipped earlier, so unlike the `plan_drafted` mistake of
-        # 2026-07-16 this can never bypass a human gate.
-        "wake_done",
-        # P21 F4 (gym-019, 2026-07-21): the gym-008 `wake_done` fix above was DEFEATED by ONE
-        # trailing event. An abandon (`wake_done`, covered) was immediately followed by a verifier
-        # `worker_acquire` + a `check_exec` probe (git status / a test run) whose verify→publish
-        # coroutine then died silently — moving the effort's LAST event PAST the covered `wake_done`
-        # to `check_exec`, which the kind-gate did not cover → the effort sat open+idle for 2 HOURS
-        # until a human `re-run it`. `check_exec` is a BRIDGE-ISSUED verify command, never a human
-        # gate (same category as `dry_run_*`: auto-advancing, so silent-past-threshold = stuck, not
-        # awaiting you). The human-gate/frozen/refusal cases are still excluded earlier + by their
-        # own kinds staying OUT of this set, so this cannot bypass a gate (§4.5 / paper-F3).
-        "check_exec",
+    # P24 (gym-022, 2026-07-22) — KEY ON SILENCE, NOT THE EVENT KIND (design §8: "silence detection,
+    # not a timer"). The old approach was an ALLOW-LIST of "mid-dispatch" kinds; a silent effort whose
+    # last event was NOT in it was assumed to be awaiting the operator. That is fragile, and it was
+    # defeated THREE times by a new trailing event: gym-008 (`wake_done`), gym-019 (`check_exec`),
+    # gym-022 (`worker_turn_abandoned` — the very event P21 F1 added). Each time an effort sat SILENT
+    # for hours because its terminal event kind was not yet in the list.
+    #
+    # Inverted: the idle-effort sweep now recovers a silent, open effort on ANY terminal kind EXCEPT
+    # the few below that genuinely mean "correctly awaiting a human" and do NOT register a pending
+    # decision. Real gates are caught FIRST by authoritative state (`_awaiting_operator_decision`
+    # below the sweep + `frozen` + `_waiting_on`), so this can never bypass a human gate (§4.5); the
+    # deny-list is defense-in-depth for the terminal-kind cases. Future mid-pipeline events are
+    # covered by default — no more moles.
+    _STALL_AWAITING_HUMAN_KINDS = frozenset({
+        # The Stage-3 plan-approval gate (P3.9): awaiting `approve <effort>` (the 2026-07-16
+        # incident — recovering it auto-executed unapproved plans). Also registers `_pending_plan`.
+        "plan_drafted", "lifecycle_plan_drafted",
+        # The plan gate STOPPED on an empty plan / a capability proposed: awaiting a human steer or
+        # `approve` (`_pending_capability`). Re-running is the operator's call.
+        "worker_plan_stopped", "capability_proposed",
+        # The watchdog already gave up here (bounded-recovery cap) and asked for a re-run —
+        # re-recovering it would be the exact loop the escalation exists to stop.
+        "stall_escalated",
     })
+
+    def _awaiting_operator_decision(self, eid: str) -> bool:
+        """P24 — is this effort awaiting a HUMAN decision (the authoritative gate check the old
+        event-kind guess was a fragile proxy for)? A plan-approval or a held merge registers a
+        pending-decision map keyed by the effort. The watchdog must never re-engage one of these
+        (§4.5: no timeout bypasses a human gate)."""
+        return eid in self._pending_plan or f"merge-{eid}" in self._pending_merge
 
     async def _worker_urls(self) -> list[dict]:
         """The live worker pool's daemon base_urls (non-retired) — for restart-safe ground-truth
@@ -2233,6 +2225,11 @@ class Orchestrator:
             # mid-dispatch kinds and the watchdog auto-executed unapproved plans after 15 min).
             if self._waiting_on(eid) is not None:
                 continue
+            # P24 — the AUTHORITATIVE human-gate check (replaces the fragile event-kind guess below):
+            # an effort holding a pending operator decision (a drafted plan, a held merge) is awaiting
+            # `approve`/`merge`, and no timeout may re-engage it (§4.5).
+            if self._awaiting_operator_decision(eid):
+                continue
             if e.get("state") == "frozen":
                 # A freeze on an ENVIRONMENT/WORKSPACE symptom (not a real code deviation) is
                 # something the org self-heals — re-clone + retry, bounded — instead of idling on the
@@ -2256,8 +2253,9 @@ class Orchestrator:
             if kind == "effort_blocked_elevated":
                 await self._try_auto_resolve_blocked(eid)
                 continue
-            if kind not in self._STALL_MIDDISPATCH_KINDS:
-                continue    # last event is a resolution / surfaced state — correctly awaiting you
+            if kind in self._STALL_AWAITING_HUMAN_KINDS:
+                continue    # P24 — a genuine "awaiting the human" terminal (plan gate / escalation);
+                            # everything else silent-past-threshold is a wedge and gets recovered.
             mins = int(age // 60)
             n = await self._event_count(eid, "stall_recovered")
             if n >= self.s.stall_max_recoveries:

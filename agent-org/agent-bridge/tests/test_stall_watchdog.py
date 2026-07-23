@@ -145,14 +145,42 @@ async def test_stall_recovery_rotates_the_session_generation(db_url):
         await db.dispose()
 
 
-async def test_watchdog_skips_efforts_awaiting_the_operator(db_url):
-    """An effort whose last event is a RESOLUTION (a PR opened, awaiting merge) is correctly waiting
-    on the operator — the watchdog must NOT re-dispatch it."""
+async def test_watchdog_skips_an_effort_awaiting_a_human_decision(db_url):
+    """P24 — the AUTHORITATIVE gate check. An effort holding a pending operator decision (a drafted
+    plan / a held merge) is awaiting `approve`/`merge` and must NEVER be re-engaged, whatever its
+    last event kind (§4.5). This is the real check the fragile event-kind allow-list was a proxy for
+    (the 2026-07-16 `plan_drafted` incident)."""
     orch, chat, db = await _orch(db_url)
     try:
-        await _seed(orch, "effort-pr", last_kind="delivery_pr_opened", age_min=200)
+        await _seed(orch, "effort-plan", last_kind="worker_release", age_min=200)  # normally recoverable
+        orch._pending_plan["effort-plan"] = {"plan": None}     # ...but a human decision is pending
         await orch._sweep_stalled_efforts()
-        assert await orch._event_count("effort-pr", "stall_recovered") == 0
+        assert await orch._event_count("effort-plan", "stall_recovered") == 0
+    finally:
+        await db.dispose()
+
+
+async def test_watchdog_recovers_an_abandon_terminal_wedge(db_url):
+    """P24 (gym-022): the effort's terminal event was `worker_turn_abandoned` — the very event P21 F1
+    added — which the old allow-list did not cover, so it sat SILENT for 2 HOURS. Keying on silence
+    (not the event kind) recovers it. The third mole in a row (wake_done → check_exec → abandon)."""
+    orch, chat, db = await _orch(db_url)
+    try:
+        await _seed(orch, "effort-abandon", last_kind="worker_turn_abandoned", age_min=120)
+        await orch._sweep_stalled_efforts()
+        assert await orch._event_count("effort-abandon", "stall_recovered") == 1
+    finally:
+        await db.dispose()
+
+
+async def test_watchdog_does_not_re_recover_after_it_escalated(db_url):
+    """P24 deny-list: `stall_escalated` means the watchdog already hit the cap and asked for a
+    re-run — re-recovering it would be the exact loop the escalation exists to stop."""
+    orch, chat, db = await _orch(db_url)
+    try:
+        await _seed(orch, "effort-esc", last_kind="stall_escalated", age_min=120)
+        await orch._sweep_stalled_efforts()
+        assert await orch._event_count("effort-esc", "stall_recovered") == 0
     finally:
         await db.dispose()
 
