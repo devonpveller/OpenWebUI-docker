@@ -7484,6 +7484,36 @@ class Orchestrator:
         )
         return True
 
+    async def _drain_next_pending(self, effort_id: str) -> bool:
+        """P25 — dispatch the next queued drain task, INDEPENDENT of remote-branch verification.
+
+        The task queue is the org's OWN memory (§5, "the environment remembers"); draining it needs
+        the workspace, not a verified remote. `_verify_delivery` collapses ANY transient read failure
+        to `landed=False, verifiable=False` (orchestrator.py ~6865), and the whole drain loop used to
+        live only inside `_finish_effort`'s `elif delivery.landed:` branch — so one transient GitHub
+        blip on a mid-drain round abandoned every task still queued and closed the effort (gym-023,
+        2026-07-23: 5 of 16 tasks, no re-sweep, no `scope_completed`). This is the shared,
+        verification-independent step both the landed and the unverifiable branch now call: if the
+        drain loop is on, the effort's thread resolves, and there is a dispatchable task, hand over
+        the next SINGLE one and return True.
+
+        `_drain_iterate` closes each task it dispatches as `dispatched` immediately (see above), so
+        the queue drains monotonically — this can never re-dispatch a task or loop. Returns True when
+        a task was dispatched (the caller MUST `return`; the effort re-enters when that task delivers),
+        False when nothing was dispatchable (the caller proceeds to its normal close/re-sweep)."""
+        if not (self.s.drain_loop and self.s.qa_gate != "off"):
+            return False
+        loc = await self.router.effort_thread(effort_id)
+        if not loc:
+            return False
+        node = await self._ensure_scope_node(effort_id) if self.s.drain_tier_walk else None
+        pending = await self._dispatchable_tasks(effort_id, node)
+        if not pending:
+            return False
+        return await self._drain_iterate(
+            effort_id, pending, max(1, await self._drain_round_no(effort_id) - 1),
+            channel_id=loc[0], root=loc[1])
+
     async def _drain_plan(self, effort_id: str, listed_tasks: str) -> str:
         """The PLANNER half of P10.5 — a fresh, read-only turn that orders the open tasks against
         the actual codebase. Separate from the implementer so that no agent is ever asked to plan
@@ -11140,15 +11170,10 @@ class Orchestrator:
                     # between every task would spend three lens turns per fix for no new information.
                     # So: if this scope still has queued tasks, dispatch the NEXT SINGLE one and
                     # re-enter — the sweep waits until the queue is empty. (§4/§5: the worker holds
-                    # one bounded task and is unaware of the bigger picture.)
-                    _drain_node = (await self._ensure_scope_node(effort_id)
-                                   if self.s.drain_tier_walk else None)
-                    _pending = await self._dispatchable_tasks(effort_id, _drain_node)
-                    if _pending:
-                        await self._drain_iterate(
-                            effort_id, _pending,
-                            max(1, await self._drain_round_no(effort_id) - 1),
-                            channel_id=_dr_loc[0], root=_dr_loc[1])
+                    # one bounded task and is unaware of the bigger picture.) P25 — this is now the
+                    # shared, verification-independent step (`_drain_next_pending`), so the same
+                    # queue-draining runs in the unverifiable branch below instead of abandoning it.
+                    if await self._drain_next_pending(effort_id):
                         return   # the delivery re-enters: next queued task, or the sweep when empty
                     dr = await self._drain_round(
                         effort_id, _dr_loc[0], _dr_loc[1], eff_repo, delivery)
@@ -11218,8 +11243,17 @@ class Orchestrator:
                 # 2026-07-06) — every landed delivery carries exact local apply/verify steps.
                 where += await self._apply_note(effort_id, eff_repo, branch)
         elif delivery is not None and not delivery.verifiable and self_reported:
-            # We couldn't independently check (App can't read this repo) — report the worker's word,
-            # labelled honestly as unverified rather than asserting it as fact (§4.2 unverified).
+            # P25 — a TRANSIENT failure to verify the remote must NOT abandon convergence. The whole
+            # drain loop used to live only in the `landed` branch above, so one transient read blip
+            # mid-drain (`_verify_delivery` collapses any exception to landed=False/verifiable=False)
+            # closed the effort with tasks still queued — gym-023 stranded 11 of 16 after one round.
+            # The queued tasks are the org's own memory (§5) and drain against the workspace, not the
+            # remote; dispatch the next one instead of closing (§10.4 — a non-empty queue isn't done).
+            if await self._drain_next_pending(effort_id):
+                return   # the next queued task dispatched; the effort re-enters when it delivers
+            # Queue drained (or drain off): we couldn't independently check (App can't read this repo),
+            # so report the worker's word, labelled honestly as unverified rather than asserting it as
+            # fact (§4.2 unverified).
             where = (f"the worker reports it pushed **`{self_reported}`**, which I could **not "
                      f"independently verify** (this repo isn't on the App's account)")
         elif await self._effort_repo(effort_id):
