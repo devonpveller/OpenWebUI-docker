@@ -10594,59 +10594,44 @@ class Orchestrator:
             return _plain_tasks("\n".join(defects))
         return _plain_tasks(out)
 
-    async def _sort_off_theme(
-        self, effort_id: str, candidates: list[tuple[str, str]], product_goal: str,
+    # P28 — the deterministic signature of GIT-META noise (design §11: an executable contract, not a
+    # prose judgment). git-meta work NAMES the git artifact — a commit, a commit message/body, a commit
+    # SHA, a merge/rebase/bisect/cherry-pick/amend, or the git history/log/tree. Product work names CODE
+    # (functions, files, inputs) and never these. A SHA must carry a hex LETTER (a-f) so a plain decimal
+    # number (a port, a size) can never masquerade as one. gym-024/026 evidence: this separates the two
+    # sets with ZERO overlap (all commit-hygiene names a commit/SHA; no product task does).
+    _GIT_META_RE = re.compile(
+        r"\bcommits?\b"                                   # commit / commits (message, body, split, …)
+        r"|\bgit\s+(?:history|log|tree)\b"
+        r"|\b(?:rebase|bisect|cherry-pick|amend)\w*"
+        r"|\b(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\b",         # a bare commit SHA (has ≥1 hex letter)
+        re.I)
+
+    def _sort_off_theme(
+        self, candidates: list[tuple[str, str]],
     ) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
-        """P26 (design §6.6) — THE NORTH STAR SORTS GENERATION. A candidate that advances the PRODUCT
-        toward its goal stays a task; one that is OFF-THEME — meta/process/cosmetic work that does not
-        move the product toward the goal (git-history housekeeping, commit-message rewrites, tooling
-        unrelated to the product's purpose) — is MISALIGNMENT, and misalignment becomes a CONSTRAINT
-        that narrows the path (§6.6), never a counted task that stalls termination.
+        """P28 (design §6.5/§6.6/§11) — DETERMINISTIC off-theme filter, replacing P26 F26.1's LLM verdict.
 
-        gym-024 evidence: off-theme commit-hygiene reached the COUNTED queue through BOTH paths — a
-        mis-graded DEFECT out of `_tasks_from_lens` AND `goal_alignment` gap analysis mapping a
-        git-history observation to a "gap" ("split the scaffold commit b3de9e3", "add bodies to merge
-        commits") — re-derived every round, plateauing the count at 2-4 on a product that had already
-        delivered. This is the backstop that keeps the propagation count measuring THEME progress
-        (§6.5/§10.4) regardless of grading drift upstream, so it sorts the WHOLE derived list.
+        The job here is telling git-meta NOISE apart from product WORK — a *mechanical* distinction (one
+        rewrites git history, the other changes product code), so it must be deterministic, not reasoned.
+        P26 forced this onto an LLM ("is this off-theme?") and it INVERTED (gym-026: pruned 10/10 real
+        product tasks — `IsADirectoryError` handling, a `_repl_argv_add` parser bug — while KEEPING
+        commit-hygiene like "split the second commit for bisecting"). That is §6.5's "an LLM grading an
+        LLM is a mirror"; every deterministic filter in this file (F11/F17/content-addressing/test-count)
+        holds, every model-judgment one drifts. So: `_GIT_META_RE` matches → git-meta → CONSTRAINT (keep
+        §6.6's misalignment→constraint plumbing); no match → stays a task.
 
-        FAIL-SAFE by construction: it names the clearly off-theme MINORITY and keeps everything else —
-        an uncertain candidate stays a task, so real product work is never amputated (the operator's
-        caution: the generative tail is the value; only clear drift is pruned). Returns (kept, off)."""
-        goal = (product_goal or "").strip()
-        if not candidates or not goal:
-            return list(candidates), []
-        numbered = "\n".join(f"{i}. {b}" for i, (_lens, b) in enumerate(candidates, 1))
-        sys_p = (
-            "A software project is working toward a PRODUCT GOAL. Below is a list of candidate "
-            "improvement tasks. MOST advance the product toward the goal and must be KEPT. A FEW may "
-            "be OFF-THEME: work that does not move the PRODUCT itself toward its goal — meta/process/"
-            "housekeeping ABOUT THE DEVELOPMENT rather than the product, e.g. rewriting or "
-            "restructuring git commit messages or history, or tooling unrelated to what the product "
-            "does.\n\n"
-            "Rules:\n"
-            "- Output ONLY the NUMBERS of the OFF-THEME tasks, one per line (e.g. `3`).\n"
-            "- If a task plausibly improves the PRODUCT — its behaviour, correctness, code quality, or "
-            "usefulness to a user — it is NOT off-theme; do not list it. WHEN UNSURE, KEEP it.\n"
-            "- If none are off-theme, output exactly: none"
-        )
-        usr = f"PRODUCT GOAL:\n{goal[:2000]}\n\nCANDIDATE TASKS:\n{numbered}"
-        try:
-            out = await self.models.complete("pm", sys_p, usr)
-        except Exception as exc:  # noqa: BLE001 — a failed sort must NEVER drop real work
-            log.debug("off-theme sort failed for %s: %s", effort_id, exc)
-            return list(candidates), []
-        off_idx: set[int] = set()
-        for ln in (out or "").splitlines():
-            m = re.match(r"^\s*#?\s*(\d+)", ln.strip())
-            if m:
-                i = int(m.group(1))
-                if 1 <= i <= len(candidates):
-                    off_idx.add(i)
-        if not off_idx:
-            return list(candidates), []
-        kept = [c for i, c in enumerate(candidates, 1) if i not in off_idx]
-        off = [c for i, c in enumerate(candidates, 1) if i in off_idx]
+        GOAL-RELEVANCE is NOT decided here — that is genuinely interpretive and stays REASONING (the
+        goal_alignment lens + gap analysis). This filter only removes the mechanically-identifiable noise.
+
+        FAIL-SAFE by construction: it prunes ONLY a named pattern, and product code never names a commit,
+        so it CANNOT amputate real work (P26's exact failure). "No match ⇒ keep" has nothing to be wrong
+        about. Returns (kept, off)."""
+        if not candidates:
+            return [], []
+        kept, off = [], []
+        for lens, body in candidates:
+            (off if self._GIT_META_RE.search(body or "") else kept).append((lens, body))
         return kept, off
 
     async def _drain_round(
@@ -10767,8 +10752,9 @@ class Orchestrator:
         # propagation count measuring THEME progress (§6.5/§10.4): gym-024 delivered a complete product
         # PR but its count plateaued 2-4 for rounds because an off-theme commit-hygiene tail — leaking
         # through both a mis-graded DEFECT and a gap-analysis "gap" — kept re-inflating it. Runs on the
-        # WHOLE derived list (the drift enters via multiple lenses) and fails safe (unsure ⇒ keep).
-        derived, _off_theme = await self._sort_off_theme(effort_id, derived, product_goal)
+        # WHOLE derived list (the drift enters via multiple lenses; P28 makes it DETERMINISTIC — a
+        # git-artifact signature, not an LLM verdict — so it can never amputate product work).
+        derived, _off_theme = self._sort_off_theme(derived)
         for _ol, _ob in _off_theme:
             await self._record_constraint(
                 effort_id, _ob, origin=f"off-theme:{_ol}:r{round_no}", kind="off_theme")
