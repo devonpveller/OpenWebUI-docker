@@ -2068,8 +2068,12 @@ class Orchestrator:
 
     async def _constraints_context(self, effort_id: str, *, limit: int = 12) -> str:
         """The accumulated constraints as a retry preamble — the CDCL clause set the next attempt must
-        not re-walk. Empty string when nothing has been learned yet."""
-        cs = await self._list_constraints(effort_id)
+        not re-walk. Empty string when nothing has been learned yet.
+
+        FAILURE clauses only: a P26 `off_theme` constraint (design §6.6) is not a dead end the worker
+        walked — it narrows GENERATION (which directions the lenses may propose), not a task RETRY —
+        so it must not appear in this "failures already hit on THIS task" preamble."""
+        cs = [c for c in await self._list_constraints(effort_id) if c.get("kind") != "off_theme"]
         if not cs:
             return ""
         shown = cs[-limit:]
@@ -10588,6 +10592,61 @@ class Orchestrator:
             return _plain_tasks("\n".join(defects))
         return _plain_tasks(out)
 
+    async def _sort_off_theme(
+        self, effort_id: str, candidates: list[tuple[str, str]], product_goal: str,
+    ) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
+        """P26 (design §6.6) — THE NORTH STAR SORTS GENERATION. A candidate that advances the PRODUCT
+        toward its goal stays a task; one that is OFF-THEME — meta/process/cosmetic work that does not
+        move the product toward the goal (git-history housekeeping, commit-message rewrites, tooling
+        unrelated to the product's purpose) — is MISALIGNMENT, and misalignment becomes a CONSTRAINT
+        that narrows the path (§6.6), never a counted task that stalls termination.
+
+        gym-024 evidence: off-theme commit-hygiene reached the COUNTED queue through BOTH paths — a
+        mis-graded DEFECT out of `_tasks_from_lens` AND `goal_alignment` gap analysis mapping a
+        git-history observation to a "gap" ("split the scaffold commit b3de9e3", "add bodies to merge
+        commits") — re-derived every round, plateauing the count at 2-4 on a product that had already
+        delivered. This is the backstop that keeps the propagation count measuring THEME progress
+        (§6.5/§10.4) regardless of grading drift upstream, so it sorts the WHOLE derived list.
+
+        FAIL-SAFE by construction: it names the clearly off-theme MINORITY and keeps everything else —
+        an uncertain candidate stays a task, so real product work is never amputated (the operator's
+        caution: the generative tail is the value; only clear drift is pruned). Returns (kept, off)."""
+        goal = (product_goal or "").strip()
+        if not candidates or not goal:
+            return list(candidates), []
+        numbered = "\n".join(f"{i}. {b}" for i, (_lens, b) in enumerate(candidates, 1))
+        sys_p = (
+            "A software project is working toward a PRODUCT GOAL. Below is a list of candidate "
+            "improvement tasks. MOST advance the product toward the goal and must be KEPT. A FEW may "
+            "be OFF-THEME: work that does not move the PRODUCT itself toward its goal — meta/process/"
+            "housekeeping ABOUT THE DEVELOPMENT rather than the product, e.g. rewriting or "
+            "restructuring git commit messages or history, or tooling unrelated to what the product "
+            "does.\n\n"
+            "Rules:\n"
+            "- Output ONLY the NUMBERS of the OFF-THEME tasks, one per line (e.g. `3`).\n"
+            "- If a task plausibly improves the PRODUCT — its behaviour, correctness, code quality, or "
+            "usefulness to a user — it is NOT off-theme; do not list it. WHEN UNSURE, KEEP it.\n"
+            "- If none are off-theme, output exactly: none"
+        )
+        usr = f"PRODUCT GOAL:\n{goal[:2000]}\n\nCANDIDATE TASKS:\n{numbered}"
+        try:
+            out = await self.models.complete("pm", sys_p, usr)
+        except Exception as exc:  # noqa: BLE001 — a failed sort must NEVER drop real work
+            log.debug("off-theme sort failed for %s: %s", effort_id, exc)
+            return list(candidates), []
+        off_idx: set[int] = set()
+        for ln in (out or "").splitlines():
+            m = re.match(r"^\s*#?\s*(\d+)", ln.strip())
+            if m:
+                i = int(m.group(1))
+                if 1 <= i <= len(candidates):
+                    off_idx.add(i)
+        if not off_idx:
+            return list(candidates), []
+        kept = [c for i, c in enumerate(candidates, 1) if i not in off_idx]
+        off = [c for i, c in enumerate(candidates, 1) if i in off_idx]
+        return kept, off
+
     async def _drain_round(
         self, effort_id: str, channel_id: str, root: str, repo: str, delivery: BranchDelivery,
     ) -> dict:
@@ -10685,6 +10744,23 @@ class Orchestrator:
         # P18 F17 — and drop tasks built on a MISBEHAVIOUR the code refutes. F11's filter only
         # looks at asserted absences; this is its mirror.
         derived = await self._drop_false_defects(effort_id, derived, round_no=round_no)
+        # P26 (design §6.6) — THE NORTH STAR SORTS GENERATION. A candidate that advances the PRODUCT
+        # toward its goal stays a task; an OFF-THEME one (meta/process/cosmetic — git-history
+        # housekeeping, commit-message rewrites) is MISALIGNMENT, which becomes a CONSTRAINT that
+        # narrows the path (§6.6), never a COUNTED task that stalls termination. This keeps the
+        # propagation count measuring THEME progress (§6.5/§10.4): gym-024 delivered a complete product
+        # PR but its count plateaued 2-4 for rounds because an off-theme commit-hygiene tail — leaking
+        # through both a mis-graded DEFECT and a gap-analysis "gap" — kept re-inflating it. Runs on the
+        # WHOLE derived list (the drift enters via multiple lenses) and fails safe (unsure ⇒ keep).
+        derived, _off_theme = await self._sort_off_theme(effort_id, derived, product_goal)
+        for _ol, _ob in _off_theme:
+            await self._record_constraint(
+                effort_id, _ob, origin=f"off-theme:{_ol}:r{round_no}", kind="off_theme")
+        if _off_theme:
+            await self.audit.log("off_theme_pruned", effort_id=effort_id,
+                                 payload={"round": round_no, "pruned": len(_off_theme),
+                                          "kept": len(derived),
+                                          "examples": [b[:80] for _l, b in _off_theme[:5]]})
         # The sibling scopes a task may belong to (P14.2). Read once per round, not per task.
         scope_children = await self._scope_children(node_id) if node_id else []
         new_bodies: list[str] = []

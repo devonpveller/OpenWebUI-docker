@@ -13,9 +13,10 @@ todo app good; it is about the org that builds software autonomously with a huma
 **Status in one line** (2026-07-17). **Built + deployed:** worker liveness (§8), the
 finding→durable-check pipeline (§10, *proven* live), CDCL constraint learning + fixed-point drain
 (§5–6), faithful escalation (§11), and the tiered scope tree (§4, foundation). **Not built:** the
-frontier/OpenRouter oracle (§7), the security standing adversary (§9), and — inside the pieces
-above — per-task executable goal-posts, a first-class diff-check, the adversarial task-drain,
-auto-conversion of reviews into checks, and wiring scope nodes into planning/dispatch. See §14.
+frontier/OpenRouter oracle (§7), the security standing adversary (§9), the two-mode convergence model
+(§6.6 — North Star realignment, misalignment→constraint, Mode-B data), and — inside the pieces above —
+per-task executable goal-posts, a first-class diff-check, the adversarial task-drain, auto-conversion
+of reviews into checks, and wiring scope nodes into planning/dispatch. See §14.
 
 ---
 
@@ -262,6 +263,69 @@ produces a drifting count (measured live: defects trickled 6 → 5 → "none").
 items anyway. Small scopes are not only a context-window concern — they are what makes the propagation
 count meaningful.
 
+**Refinement (§6.6).** "Zero propagation" is precise for one mode of the loop and wrong for the other.
+§6.6 separates *generative discovery* (which must never be forced to zero) from *adversarial hardening*
+(which should approach zero, diagnosed by data) — read it before treating a non-zero count as failure.
+
+---
+
+## 6.6 The North Star and the two convergence modes (operator, 2026-07-23)
+
+§6.5 terminates on "zero propagation." Applied to the whole loop that is a category error: it is exactly
+right for one mode and exactly wrong for the other, and conflating them made a *delivered* product read as
+"unconverged" (gym-024: a complete, D2-passing PR that closed on a plateau of 2–4 because an off-theme tail
+kept inflating the count). Three streams flow through the loop; they converge differently.
+
+**The North Star is the original prompt.** The human element is not a checkpoint the org waits on each
+round — it *already happened*. The prompt that initiated the effort **is** the goal, and it is a **theme,
+not a hard target**: a direction the work is *found toward*, not a spec to be exhausted. Every round's gap
+analysis (§6.5 Step 2) realigns against **that original prompt** — not a re-derived scope goal, whose drift
+§6.5 already warns produces a meaningless count. Maintaining alignment to the North Star is what keeps a
+generative loop from wandering; it is the standing form of the human-as-governor (§1), spent once, up front.
+
+**Mode A — generative discovery (does NOT go to zero).** Task generation propagates *toward* the theme. As
+elements land, their inclusion inspires adjacent ideas that were invisible before — the goal **comes into
+focus by walking the path**, not by checking off a fixed list. So:
+- Ideas that **align** with the North Star become **tasks** that advance and sharpen the path.
+- Ideas that **do not align** become **constraints** that *narrow* it — "the way to this goal does not run
+  here." Not worked, not silently dropped: recorded as a clause (§6) that focuses every later round. This
+  extends CDCL (§6) from *reproducible failures* to *off-theme drift* — both are "this direction is wrong."
+- **Zero propagation here is a red flag, not success.** It more likely means the search went blind (a lens
+  re-deriving its own scope, or one that stopped seeing) than that the theme is exhausted. Convergence in
+  Mode A is the **path tightening on the theme**, delivered as coherent increments; the human's merge (§1)
+  is the checkpoint, not a count.
+
+**Mode B — adversarial hardening ("polish") (SHOULD approach zero).** A distinct, *contrarian* loop pointed
+at a delivered increment — §9 generalized past security. Deliberately shift perspective to **break** the
+thing: expose **bugs**, **exploits**, and **edge cases**. Unlike Mode A it *does* have a diminishing-returns
+floor — a given surface can only be hardened so far. But **it fluctuates by approach**: a security lens, an
+edge-case lens, and a break-the-parser lens each surface different things, so one lens drying up is not
+"hardened." Completion is **diminishing returns across DIVERSE approaches** — K varied contrarian
+perspectives all coming up near-empty — the loop-until-dry pattern applied to *perspectives*, not rounds.
+
+**Cosmetic / commit-hygiene is neither mode.** "Rewrite this commit body", "split the scaffold commit" —
+off-theme meta-work that is not the product and not an attack surface. It is Mode-A misalignment: it becomes
+a **constraint** (narrow away from it), never a task. Left uncaught it inflates the count and stalls both
+modes. (Note: the project-documentation lens of §6.5 legitimately observes commit history for *future-worker
+readability*; the failure is treating its output as **product** propagation. It is process/meta work — a
+non-counting backlog at most, never a Mode-A termination gate.)
+
+### Diagnosing Mode B by data, not assertion (operator, 2026-07-23)
+
+"Polish is done" must be a **reading, not a guess**, and the reading requires evidence that each round
+actually *improved* the product. The ledger reuses what the design already has:
+- **Findings per round, tagged by approach, gated by reproducibility** (§6 hygiene: only a reproducible,
+  attributable failure registers; noise never does, or the curve lies).
+- **The standing adversarial corpus (§10) is the improvement ledger.** Each reproduced finding becomes a
+  durable check that flips **red→green** and must *stay* green. Corpus growth = cumulative hardening; a round
+  adding many red→green checks improved the product; a round adding none across diverse approaches did not.
+- **The completion signal is then measured:** new reproducible findings/round → ~0 across K diverse
+  perspectives, corpus growth plateaus, zero regressions. That is Mode B complete *for this increment* —
+  until the schedule (§9.2) or a new increment re-opens the surface.
+
+This is the same discipline as §2.3 and §10: the human's "is it hardened enough?" judgment becomes a
+*measured, durable* quantity the org carries forward, not a per-round opinion.
+
 ---
 
 ## 7. Frontier vs small model — explore vs execute
@@ -389,6 +453,7 @@ Two forks are genuinely undecided and shape what gets built:
 | Faithful escalation (§11) | **BUILT + DEPLOYED** — escalations carry their executable check; a ticket cannot close until that check has passed (abort/override still close; override audited). Respects §3.0: the check runs while ACTIVE, the clear consults the record. |
 | Tiered scope tree (§4) | **BUILT + DEPLOYED (foundation)** — `ScopeNode` tree with depth, bounded per-tier worker brief (own scope + contract; the rest withheld; border named), escalation routes to the adjacent-scope owner. *Still open: wiring nodes into planning/dispatch.* |
 | Prompt determinism + 3 standing lenses (§6.5) | **designed, not built** — the QA prompt still contains the `none` affordance and embeds the goal in the observation step |
+| Two-mode convergence (§6.6) | **designed, being built** — North Star realignment to the original prompt + misalignment→constraint is the first slice (P26); Mode-B adversarial hardening and its data ledger follow. Evidence: gym-024 delivered a complete PR but its count plateaued 2–4 on an off-theme (commit-hygiene) tail that should have been constraints, not tasks. |
 
 **Forks resolved (§12):** the finding→check pipeline was built **executable-from-day-one** (a check
 is a command run against the delivery, not prose) and **operator-in-the-loop** (a governor-issued
