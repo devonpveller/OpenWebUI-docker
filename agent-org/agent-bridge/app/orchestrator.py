@@ -10030,7 +10030,7 @@ class Orchestrator:
 
     async def _lens_sweep(
         self, effort_id: str, channel_id: str, root: str, repo: str, delivery: BranchDelivery,
-        *, round_no: int, scope_node_id: str | None = None,
+        *, round_no: int, scope_node_id: str | None = None, only: set[str] | None = None,
     ) -> dict[str, str]:
         """Run all three standing lenses FRESH against the delivered branch and persist their
         reports. Returns `{lens: report_body}` (a lens that couldn't run is simply absent).
@@ -10045,6 +10045,8 @@ class Orchestrator:
         reports: dict[str, str] = {}
         token = await self._project_token(effort_id)
         for lens, prompt in _LENSES:
+            if only is not None and lens not in only:
+                continue          # F27.1 — a targeted re-run of a single lens (the goal-lens retry)
             self._verify_seq += 1
             # P18 F4 — start each lens with an empty findings file, so a salvage can only ever
             # recover THIS lens's observations (see `_clear_lens_findings`).
@@ -10668,6 +10670,7 @@ class Orchestrator:
             await self.audit.log("drain_round_capped", effort_id=effort_id,
                                  payload={"round": round_no, "cap": self.s.drain_round_cap})
             return {"round": round_no, "new_tasks": 0, "capped": True, "scope_node_id": node_id,
+                    "swept": False,   # a capped round never cleanly swept (also avoids a KeyError below)
                     "open_tasks": await self.list_open_tasks(effort_id=effort_id),
                     "note": (f"\n\n⚠️ **Drain loop hit its runaway guard** after "
                              f"{self.s.drain_round_cap} rounds — still propagating new work. This "
@@ -10676,6 +10679,19 @@ class Orchestrator:
         getattr(self, "_pending_gaps", {}).pop(effort_id, None)
         reports = await self._lens_sweep(effort_id, channel_id, root, repo, delivery,
                                          round_no=round_no, scope_node_id=node_id)
+        # P27 F27.1 (design §6.5/§6.6) — THE GOAL LENS IS THE CONVERGENCE SINGLE POINT OF FAILURE. It
+        # is the only goal-aware lens (its report is the sole input to gap analysis) and it probes the
+        # most, so it truncates/gets-abandoned the most; without its report the round can never be
+        # `swept` and the effort delivers on a comparison that never happened (gym-020, gym-024 r9,
+        # gym-025 r1). Truncation is partly stochastic, so RE-RUN just that lens ONCE in a fresh
+        # session before the round proceeds. Bounded to one retry; best-effort (a failure just leaves
+        # it missing → F27.2 refuses to close "done" on the incomplete sweep).
+        if _LENS_GOAL_ALIGNMENT_KEY not in reports:
+            await self.audit.log("goal_lens_retry", effort_id=effort_id, payload={"round": round_no})
+            retry = await self._lens_sweep(effort_id, channel_id, root, repo, delivery,
+                                           round_no=round_no, scope_node_id=node_id,
+                                           only={_LENS_GOAL_ALIGNMENT_KEY})
+            reports.update(retry)
         # ── P11.3 THE SEQUENCE: decompose → SELECT the working scope → analyse against ITS goal ──
         # gym-009 ran this backwards and the tier walk was cosmetic as a result: `_maybe_decompose`
         # fired AFTER `_gap_analysis`, so the children could never inform the analysis that created
@@ -11126,6 +11142,10 @@ class Orchestrator:
                 if result and result.output else "done")
         # The worker's self-report (its turn ended ok); the VERIFIED verdict overrides it as the truth.
         self_reported = self._published_branch.pop(effort_id, None)
+        # P27 F27.2 — set when the drain's final round could not complete its sweep (the goal lens
+        # produced no report even after the F27.1 retry). An incomplete sweep never compared the
+        # product to the goal (§6.5/§6.6), so it may deliver a PR for review but must NOT close "done".
+        sweep_incomplete = False
         # A no_changes delivery means "the worker changed nothing THIS turn" — but a PRIOR turn may
         # already have published a real branch. Before a read-only close (which skips the whole
         # PR/QA/develop pipeline), RE-VERIFY the remote: if the branch is actually AHEAD of main there
@@ -11274,6 +11294,12 @@ class Orchestrator:
                         # EVIDENCED ZERO on both counts → this scope is complete; bubble up so the
                         # parent tier re-evaluates with its child's seams now real (P10.6).
                         await self._complete_scope(dr["scope_node_id"], effort_id)
+                    # P27 F27.2 — the round could not complete its sweep even after the F27.1 goal-lens
+                    # retry: it never compared the product to the goal (§6.5/§6.6). It may deliver a PR
+                    # for review, but it must NOT close "done" on an uncompared sweep. Flag it so the
+                    # closure marks needs-attention (join `unmet_or_partial`) instead of certifying done.
+                    if not dr.get("swept") and not dr.get("capped"):
+                        sweep_incomplete = True
             elif self.s.qa_gate != "off":
                 _qa_loc = await self.router.effort_thread(effort_id)
                 if _qa_loc:
@@ -11495,7 +11521,8 @@ class Orchestrator:
                                      payload={"branch": branch, "symptom": runtime_symptom[:200],
                                               "why": why})
         runtime_open = bool(runtime_symptom) and not runtime_verified
-        unmet_or_partial = (bool(unmet) or partial or comp_failed or removal_flag or runtime_open)
+        unmet_or_partial = (bool(unmet) or partial or comp_failed or removal_flag or runtime_open
+                            or sweep_incomplete)   # P27 F27.2 — an incomplete sweep never certifies done
         # P8 #1 — CLOSURE INVARIANT: the PM may not claim "done" without proof. Immediately before
         # a clean close on a LANDED delivery, assert the effort's OWN audit shows the gates that
         # should have run actually did (PR / QA / develop integration). A genuine read-only
@@ -11522,6 +11549,8 @@ class Orchestrator:
                 return
         done_word = ("done — VERIFIED via reproduction" if runtime_verified and not unmet_or_partial else
                      "done" if not unmet_or_partial else
+                     "delivered — the goal comparison didn't complete this round; not certified converged"
+                     if sweep_incomplete and not (unmet or partial or comp_failed) else
                      "partly done — see the scope check" if unmet else
                      "partly done — the composition check failed" if comp_failed else
                      "done — but review the removals" if removal_flag and not partial else

@@ -1000,12 +1000,15 @@ async def test_a_truncated_lens_does_not_sweep_or_reach_gap_analysis(db_url):
     orch, _chat, harness, db = await _orch(db_url, tier_walk=False)
     try:
         eid, chan, root = await _effort(orch)
-        for _ in _LENSES:
+        # 4 stubs: 3 for the initial sweep + 1 for the P27 F27.1 goal-lens retry (which also truncates).
+        for _ in range(len(_LENSES) + 1):
             harness.output_queue.append("All 44 tests pass. Now let me do manual CLI testing.")
         r = await orch._drain_round(eid, chan, root, REPO, _delivery())
         assert r["swept"] is False and r["new_tasks"] == 0
         assert "not** a clean sweep" in r["note"]                  # meaning, not wording
-        assert await orch._event_count(eid, "lens_report_truncated") == 3
+        # P27 F27.1 — a missing goal lens triggers exactly ONE retry (which also truncates here).
+        assert await orch._event_count(eid, "goal_lens_retry") == 1
+        assert await orch._event_count(eid, "lens_report_truncated") == 4   # 3 initial + 1 retry
         assert await orch._event_count(eid, "gap_analysis") == 0   # never ran on a stub
     finally:
         await _shutdown(orch, db)
