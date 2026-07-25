@@ -1,10 +1,10 @@
-"""P27 — retry the goal lens; never close "done" on an incomplete sweep (design §6.5/§6.6).
+"""P29 — goal-lens resilience: a BOUNDED focused retry that completes, and no infinite incomplete loop.
 
-The goal_alignment lens is the convergence single point of failure: without its report the round is
-`swept=False`, gap analysis is skipped, and the effort used to deliver-and-close "done" on a
-comparison that never happened (gym-020, gym-024 r9, gym-025 r1). F27.1 re-runs just that lens once
-(stochastic truncation often recovers on a fresh session). F27.2: if it is STILL missing, the effort
-may deliver a PR but must NOT close "done" — the closure marks needs-attention.
+The goal_alignment lens exhausts its budget on a matured product and produces no report → swept=False.
+F27.1 retried once with the SAME exhaustive prompt (same wall). F29.1 makes the retry a FOCUSED
+goal-coverage re-check (a mechanical wrapper on the operator's §6.5 prompt) and allows up to
+`goal_lens_retries` attempts, so it completes. F29.2 bounds repeated incomplete sweeps: after
+`incomplete_sweep_cap` consecutive swept=False rounds it ESCALATES instead of looping (gym-026).
 
 Fakes + mocked GitHub.
 """
@@ -33,13 +33,9 @@ _STUB = "All 44 tests pass. Now let me do manual CLI testing."   # too short →
 _REPORT = (
     "The tool stores todos in todos.json and supports add and list. Each todo has a title and a due "
     "date. There is no way to mark a todo complete, and no delete path. Running it with no arguments "
-    "prints an argparse traceback rather than usage text. Storage is a single JSON array rewritten in "
-    "full on every change, with no temp-file or rename step, so an interrupted write truncates the "
-    "file. The add command accepts any string for --due without validating the format, so an "
-    "unparseable date is stored verbatim and silently excluded from every later filter. Ids are "
-    "assigned by taking len(items)+1, which reuses an id after a deletion. There is no interactive "
-    "mode, no search, and no way to edit an item's text once created."
-)
+    "prints an argparse traceback rather than usage text. The add command accepts any string for --due "
+    "without validating the format, so an unparseable date is stored and silently excluded from every "
+    "later filter. Ids are len(items)+1, reused after a deletion, and there is no way to edit an item.")
 
 
 async def _orch(db_url, tmp_path=None, *, github=False, **overrides):
@@ -89,39 +85,58 @@ def _delivery():
     return BranchDelivery(branch="agent/feat", exists=True, ahead=1, head_sha="abc1234567")
 
 
-# ── F27.1 — the goal-lens retry ───────────────────────────────────────────────
-async def test_goal_lens_retry_fires_and_recovers_the_sweep(db_url):
-    """The goal lens truncates on the first attempt; the bounded retry re-runs it in a fresh session
-    and it reports — so the round becomes `swept` instead of delivering on an uncompared sweep."""
+# ── F29.1 — the focused, bounded retry ────────────────────────────────────────
+async def test_focused_retry_recovers_the_sweep(db_url):
+    """Goal lens truncates on the exhaustive pass; the FOCUSED retry reports → the round is swept."""
     orch, db = await _orch(db_url)
     try:
         eid, chan, root = await _effort(orch)
-        # sweep order is goal_alignment, clean_code, project_documentation; then the retry re-runs goal.
+        # full sweep: goal(stub), clean(report), proj(report); then focused retry: goal(report)
         orch.harness.output_queue.extend([_STUB, _REPORT, _REPORT, _REPORT])
         for _ in range(3):
-            orch.models._client.queue_text("none")   # gap + clean + proj task extraction
+            orch.models._client.queue_text("none")   # gap + clean + proj extraction
         r = await orch._drain_round(eid, chan, root, REPO, _delivery())
         assert await orch._event_count(eid, "goal_lens_retry") == 1
-        assert r["swept"] is True          # the retry recovered the goal comparison
-    finally:
-        await _shutdown(orch, db)
-
-
-async def test_no_retry_when_the_goal_lens_reports_first_time(db_url):
-    orch, db = await _orch(db_url)
-    try:
-        eid, chan, root = await _effort(orch)
-        orch.harness.output_queue.extend([_REPORT, _REPORT, _REPORT])
-        for _ in range(3):
-            orch.models._client.queue_text("none")
-        r = await orch._drain_round(eid, chan, root, REPO, _delivery())
-        assert await orch._event_count(eid, "goal_lens_retry") == 0
         assert r["swept"] is True
     finally:
         await _shutdown(orch, db)
 
 
-# ── F27.2 — an incomplete sweep never closes "done" ───────────────────────────
+async def test_the_retry_is_focused_but_the_first_pass_is_not(db_url):
+    """The bounding wrapper reaches the prompt ONLY on the retry — the operator's §6.5 pass is untouched."""
+    orch, db = await _orch(db_url)
+    try:
+        eid, chan, root = await _effort(orch)
+        orch.harness.output_queue.extend([_STUB, _REPORT, _REPORT, _REPORT])
+        for _ in range(3):
+            orch.models._client.queue_text("none")
+        await orch._drain_round(eid, chan, root, REPO, _delivery())
+        prompts = [w["prompt"] for w in orch.harness.wakes]
+        focused = [p for p in prompts if "FOCUSED re-check" in p]
+        assert len(focused) == 1                       # exactly the one retry pass is focused
+        # the three initial lens passes are the exhaustive (un-wrapped) prompt
+        assert sum("FOCUSED re-check" not in p for p in prompts) == len(_LENSES)
+    finally:
+        await _shutdown(orch, db)
+
+
+async def test_focused_retries_are_bounded(db_url):
+    """If the goal lens keeps failing, the retry fires at most `goal_lens_retries` times, then stops."""
+    orch, db = await _orch(db_url, goal_lens_retries=2)
+    try:
+        eid, chan, root = await _effort(orch)
+        # full sweep goal(stub), clean(report), proj(report); then 2 focused retries both stub
+        orch.harness.output_queue.extend([_STUB, _REPORT, _REPORT, _STUB, _STUB])
+        for _ in range(2):
+            orch.models._client.queue_text("none")     # clean + proj extraction (no gap: goal missing)
+        r = await orch._drain_round(eid, chan, root, REPO, _delivery())
+        assert await orch._event_count(eid, "goal_lens_retry") == 2   # bounded
+        assert r["swept"] is False
+    finally:
+        await _shutdown(orch, db)
+
+
+# ── F29.2 — repeated incomplete sweeps escalate, they don't loop ──────────────
 def _remote():
     def handler(request: httpx.Request) -> httpx.Response:
         p = request.url.path
@@ -132,7 +147,7 @@ def _remote():
         if "/branches/" in p:
             return httpx.Response(200, json={"commit": {"sha": "headsha123456789000"}})
         if p.endswith("/pulls") and request.method == "POST":
-            return httpx.Response(201, json={"number": 7, "html_url": "https://x/pull/7"})
+            return httpx.Response(201, json={"number": 9, "html_url": "https://x/pull/9"})
         if p.endswith("/pulls"):
             return httpx.Response(200, json=[])
         if p.count("/") == 3:
@@ -141,33 +156,23 @@ def _remote():
     return httpx.MockTransport(handler)
 
 
-async def _lifecycle(orch, eid):
-    async with orch.db.session_factory() as s:
-        e = await s.get(Effort, eid)
-    return e.lifecycle
-
-
-async def test_incomplete_sweep_delivers_a_pr_but_does_not_close_done(db_url, tmp_path):
-    """THE F27.2 invariant. The goal lens produces no report even after the retry, so the round is
-    swept=False. The effort still opens its PR (review value), but it must NOT be certified 'done' —
-    the card is needs-attention and the lifecycle is not 'done'."""
-    orch, db = await _orch(db_url, tmp_path, github=True, goal_lens_retries=1)   # P29: pin 1 retry here
+async def test_repeated_incomplete_sweeps_escalate(db_url, tmp_path):
+    """Two consecutive incomplete sweeps (cap=2) escalate to the human instead of churning forever."""
+    orch, db = await _orch(db_url, tmp_path, github=True, incomplete_sweep_cap=2, goal_lens_retries=1)
     try:
-        await orch.projects.add("gym", "https://github.com/devonpveller/gym")   # on the App's account
+        await orch.projects.add("gym", "https://github.com/devonpveller/gym")
         eid, _c, _r = await orch.router.open_effort("todo-product", project="gym")
-        await orch.charters.set_goal(eid, "add a due-date field to the todo tool", created_by="po")
+        await orch.charters.set_goal(eid, GOAL, created_by="po")
         orch._gh_transport = _remote()
-        # every lens attempt (3 initial + 1 goal retry) truncates → goal_alignment never reports.
-        orch.harness.output_queue.extend([_STUB, _STUB, _STUB, _STUB])
         delivery = BranchDelivery(verifiable=True, exists=True, ahead=1, files_changed=1,
                                   head_sha="headsha123456789000", branch=f"agent/{eid}")
-        res = SimpleNamespace(status="done", output="Built the feature; tests green.")
-        await orch._finish_effort(eid, res, delivery=delivery)
-
-        assert await orch._event_count(eid, "goal_lens_retry") == 1
-        assert await orch._event_count(eid, "delivery_pr_opened") == 1     # PR still opened for review
-        assert await _lifecycle(orch, eid) != "done"                      # but NOT certified done
-        msgs = " ".join(p["message"] for p in orch.chat.posted)
-        assert "not certified converged" in msgs
+        res = SimpleNamespace(status="done", output="done")
+        # Each _finish_effort → drain round with the goal lens ALWAYS failing (stub for full + retry).
+        for _round in range(2):
+            orch.harness.output_queue.extend([_STUB, _REPORT, _REPORT, _STUB])   # goal fails both passes
+            orch.models._client.queue_text("none")     # clean extraction
+            orch.models._client.queue_text("none")     # proj extraction
+            await orch._finish_effort(eid, res, delivery=delivery)
+        assert await orch._event_count(eid, "incomplete_sweep_escalated") == 1   # fired once at the cap
     finally:
         await _shutdown(orch, db)

@@ -10031,6 +10031,7 @@ class Orchestrator:
     async def _lens_sweep(
         self, effort_id: str, channel_id: str, root: str, repo: str, delivery: BranchDelivery,
         *, round_no: int, scope_node_id: str | None = None, only: set[str] | None = None,
+        focused: bool = False,
     ) -> dict[str, str]:
         """Run all three standing lenses FRESH against the delivered branch and persist their
         reports. Returns `{lens: report_body}` (a lens that couldn't run is simply absent).
@@ -10070,11 +10071,22 @@ class Orchestrator:
                     "is where a regression is most likely; probe it HARDER than the rest, "
                     "especially with malformed or hostile input. Do NOT limit your assessment to "
                     "it — cover everything the questions below ask about.\n")
+            # P29 F29.1 — the FOCUSED goal-lens retry. The exhaustive probe below exhausts its budget
+            # on a matured product and the turn dies with no report (gym-020/025/028); a fresh session
+            # with the SAME prompt hits the same wall. On a retry we bound it to the ONE thing the
+            # convergence count needs — the goal comparison — so it completes. A mechanical wrapper on
+            # the operator's verbatim §6.5 prompt (P17 F8 precedent), not a change to it.
+            focus = (
+                "\nBUDGET IS LIMITED — this is a FOCUSED re-check, not an exhaustive audit. Your ONE "
+                "job is the goal comparison: does the product MISS or MISHANDLE anything the goal "
+                "requires? Check the KEY commands/paths directly; do NOT probe every function "
+                "exhaustively. ECHO each finding the instant you see it, then FINISH and report — a "
+                "focused report that LANDS beats an exhaustive one that never does.\n" if focused else "")
             instr = (
                 f"EVALUATION — you did NOT build this, and you will CHANGE NOTHING (no edits, no "
                 f"git writes; this is an evaluative turn). First check out the DELIVERED branch:\n"
                 f"  git fetch origin {delivery.branch} && git checkout -f {delivery.branch}\n"
-                f"{changed}\n"
+                f"{changed}{focus}\n"
                 f"{prompt}\n\n"
                 f"Answer every question above, in order, and assess against those criteria AS "
                 f"WRITTEN. Do not decide a different standard for the project because it is small, "
@@ -10671,11 +10683,18 @@ class Orchestrator:
         # gym-025 r1). Truncation is partly stochastic, so RE-RUN just that lens ONCE in a fresh
         # session before the round proceeds. Bounded to one retry; best-effort (a failure just leaves
         # it missing → F27.2 refuses to close "done" on the incomplete sweep).
-        if _LENS_GOAL_ALIGNMENT_KEY not in reports:
-            await self.audit.log("goal_lens_retry", effort_id=effort_id, payload={"round": round_no})
+        for _gl_attempt in range(max(0, self.s.goal_lens_retries)):
+            if _LENS_GOAL_ALIGNMENT_KEY in reports:
+                break
+            # P29 F29.1 — a FOCUSED re-check (bounded to the goal comparison), not the exhaustive
+            # probe that just exhausted; up to `goal_lens_retries` attempts. A focused pass completes
+            # where the exhaustive one dies with no report (gym-028 r5: empty queue but swept=False
+            # only because the goal lens failed → couldn't certify convergence).
+            await self.audit.log("goal_lens_retry", effort_id=effort_id,
+                                 payload={"round": round_no, "attempt": _gl_attempt + 1})
             retry = await self._lens_sweep(effort_id, channel_id, root, repo, delivery,
                                            round_no=round_no, scope_node_id=node_id,
-                                           only={_LENS_GOAL_ALIGNMENT_KEY})
+                                           only={_LENS_GOAL_ALIGNMENT_KEY}, focused=True)
             reports.update(retry)
         # ── P11.3 THE SEQUENCE: decompose → SELECT the working scope → analyse against ITS goal ──
         # gym-009 ran this backwards and the tier walk was cosmetic as a result: `_maybe_decompose`
@@ -11284,8 +11303,31 @@ class Orchestrator:
                     # retry: it never compared the product to the goal (§6.5/§6.6). It may deliver a PR
                     # for review, but it must NOT close "done" on an uncompared sweep. Flag it so the
                     # closure marks needs-attention (join `unmet_or_partial`) instead of certifying done.
-                    if not dr.get("swept") and not dr.get("capped"):
+                    # P29 F29.2 — bound repeated incomplete sweeps. A complete sweep resets the churn
+                    # counter; a run of incomplete ones (the goal lens failing even after the focused
+                    # retries) ESCALATES past the cap instead of looping silently to the runaway guard
+                    # (gym-026 churned rounds 7-8). The effort still delivers a PR for review; this
+                    # only converts silent churn into an honest human alert.
+                    _isw = getattr(self, "_incomplete_sweeps", {})
+                    self._incomplete_sweeps = _isw
+                    if dr.get("swept"):
+                        _isw.pop(effort_id, None)
+                    elif not dr.get("capped"):
                         sweep_incomplete = True
+                        _n = _isw.get(effort_id, 0) + 1
+                        _isw[effort_id] = _n
+                        if _n >= max(1, self.s.incomplete_sweep_cap):
+                            await self.audit.log(
+                                "incomplete_sweep_escalated", effort_id=effort_id,
+                                payload={"round": dr.get("round"), "consecutive": _n})
+                            await self.comms.post(
+                                Intent.escalation,
+                                f"⚠️ **{effort_id}** — the goal-alignment sweep has failed to complete "
+                                f"**{_n} rounds running** (the goal lens keeps producing no report even "
+                                f"after focused retries), so I **cannot certify convergence**. The work "
+                                f"is on the branch for review, but this needs a human look or a "
+                                f"**re-run**.", effort_id=effort_id)
+                            _isw.pop(effort_id, None)   # reset so it alerts once per cap, not per round
             elif self.s.qa_gate != "off":
                 _qa_loc = await self.router.effort_thread(effort_id)
                 if _qa_loc:

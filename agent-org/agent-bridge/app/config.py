@@ -182,6 +182,16 @@ class Settings(BaseSettings):
     # RUNAWAY GUARD ONLY — not the termination condition. Termination is zero propagation; this
     # only bounds a loop that propagates new work every single round (generous, like burndown).
     drain_round_cap: int = 40
+    # P29 F29.1 — the goal-alignment lens is the convergence single point of failure (its report is
+    # the sole input to gap analysis, §6.5) and its EXHAUSTIVE probe exhausts on a matured product.
+    # When it produces no report, re-run it up to this many FOCUSED (goal-coverage, not exhaustive)
+    # attempts before the round proceeds — a focused pass completes where the exhaustive one can't.
+    goal_lens_retries: int = 2
+    # P29 F29.2 — if the goal lens is STILL missing after the focused retries, the round is honestly
+    # incomplete (F27.2 withholds "done"). Bound the churn: after this many CONSECUTIVE incomplete
+    # sweeps, escalate to the human instead of looping (gym-026 looped to the runaway cap). Reset on
+    # a complete (swept) round.
+    incomplete_sweep_cap: int = 2
     # PLAN/IMPLEMENT SPLIT (P10.5): a worker asked to plan work it JUST PERFORMED has context bias
     # by construction — gym-008's `_auto_iterate` re-sent the entire original goal to the worker
     # that had just satisfied it, which returned an EMPTY plan and stranded the effort. When on, a
