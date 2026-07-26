@@ -10,13 +10,15 @@ file is the *design north star*: read it to understand what we are building and 
 *probe* — a vehicle for measuring the orchestration's behavior. Nothing here is about making a
 todo app good; it is about the org that builds software autonomously with a human as governor.
 
-**Status in one line** (2026-07-17). **Built + deployed:** worker liveness (§8), the
+**Status in one line** (2026-07-26). **Built + deployed:** worker liveness (§8), the
 finding→durable-check pipeline (§10, *proven* live), CDCL constraint learning + fixed-point drain
-(§5–6), faithful escalation (§11), and the tiered scope tree (§4, foundation). **Not built:** the
-frontier/OpenRouter oracle (§7), the security standing adversary (§9), the two-mode convergence model
-(§6.6 — North Star realignment, misalignment→constraint, Mode-B data), and — inside the pieces above —
-per-task executable goal-posts, a first-class diff-check, the adversarial task-drain, auto-conversion
-of reviews into checks, and wiring scope nodes into planning/dispatch. See §14.
+(§5–6), faithful escalation (§11), the tiered scope tree (§4, foundation), and **Mode A — generative
+convergence (§6.6): North-Star realignment, deterministic off-theme→constraint, goal-lens resilience —
+PROVEN (gym-027/029 reached `scope_completed` on real work, one self-repairing a red build).** **Not
+built:** the frontier/OpenRouter oracle (§7), the security standing adversary (§9), **Mode B —
+adversarial hardening + its data ledger (§9.5) — designed, being built next**, and — inside the pieces
+above — per-task executable goal-posts, a first-class diff-check, auto-conversion of reviews into checks,
+and wiring scope nodes into planning/dispatch. See §14.
 
 ---
 
@@ -377,6 +379,65 @@ are failing tests → constraints → patch tasks → re-attack → drain. Rules
 
 ---
 
+## 9.5 Mode B — adversarial hardening, and the data that says "done" (operator, 2026-07-26)
+
+§6.6 split the loop into two convergence modes. §5–6.6 built **Mode A** — generative discovery, which
+propagates toward the North Star and converges on real work (proven twice: gym-027/029 reached an
+evidenced `scope_completed`, one of them burning down a 13-error red build to green). This section is
+**Mode B**: the standing *contrarian* loop that hardens a delivered Mode-A increment. §9 (security) is
+its first special case; Mode B is the generalization to *all* breakage.
+
+**Why it is distinct from Mode A's own QA — proven, not assumed.** Mode A's lenses passed **105 tests**
+on the gym product and still missed three real bugs (an operator review, 2026-07-26, found
+`db_path("")` silently returning cwd, an *unpersisted* schema version that breaks the migration
+contract, and a parser rebuilt on every `list` call). A loop optimized to *satisfy* a goal does not find
+where it *breaks*; a differently-goaled agent optimized to *refute* does (§2.3, the reviewer charter).
+That review *is* Mode B's intended output. Two of its findings also expose Mode A's blind spot precisely:
+the REPL parser is still hand-rolled and fragile *after* a drain round explicitly "fixed REPL parsing"
+(a point-fix that did not generalize), and `cmd_add` rejects empty text while `cmd_edit` accepts it (the
+fix touched one path, not the *consistency*). Contrarian "find the edge the fix missed" is the complement
+Mode A structurally lacks.
+
+**The unit.** Point the loop at the **delivered increment** as an adversary and shift perspective to
+break it — expose **bugs, exploits, edge cases**. A *reproducible* break is a failing test → a
+constraint → a patch task → re-attack → drain (§5–6, §9). Unlike Mode A, Mode B *should approach zero*:
+a given surface has a diminishing-returns floor.
+
+**It fluctuates by approach — so completion is diminishing returns across DIVERSE lenses**, never one
+drying up. The reference lens set (the operator review's own categories):
+- **correctness/logic** — a valid-but-unusual input that yields the wrong result (`db_path("")`);
+- **edge-case/robustness** — hostile/boundary input (unicode, 10KB text, 1000+ items, empty-string
+  consistency, unhandled exception types);
+- **performance** — the hidden cost (a parser rebuilt per call);
+- **fragility/DRY** — reimplemented logic that will rot (a hand-rolled parser beside `argparse`);
+- **security-at-the-seams** (§9) — the composition boundary.
+One lens empty is not "hardened"; K *diverse* lenses near-empty is.
+
+**"Done" is a reading, not a guess — the data ledger** (extends §6.6's data subsection). The improvement
+record is the **acceptance corpus (§10)**: every *reproducible, attributable* finding (§6 hygiene — noise
+never registers, or the curve lies) becomes a durable check that flips **red→green** and must *stay*
+green. Per round, tagged by lens: findings, reproduced, fixed, corpus delta. **Mode B is complete for
+this increment when** new reproducible findings/round → ~0 across the diverse lenses, corpus growth
+plateaus, and zero regressions — the same measured discipline as §6 termination and §10 compounding. The
+corpus is what proves the product *measurably improved*, and it is the durable artifact carried into
+every future round (§2.3): the human's bar, learned once, enforced forever.
+
+**Governance (§9.4 applies).** An autonomous breakage generator is dual-use: scoped by the floor,
+attacks only the org's own product in a controlled environment, never reaches real data or external
+systems; the human governs *direction* (the standing lens set), not each finding.
+
+**Placement — a distinct phase after Mode A delivers a coherent increment.** A converged product is the
+stable surface an adversary attacks, and separating the phases keeps the two convergence models from
+contaminating each other's counts (Mode A must not zero; Mode B should).
+
+**The acid test (first build's success criterion).** Mode B works when it autonomously surfaces the same
+class the operator's hand-review found — **re-derived, not told**. First proof: without being handed the
+report, Mode B surfaces the three bugs + the design/edge gaps; each reproduced finding becomes a corpus
+check the org can never regress on. Then it compounds. (Seeding the corpus from the report directly is
+the §10 operator-in-the-loop fork; we re-derive first precisely to test the capability.)
+
+---
+
 ## 10. The compounding mechanism — operator finding → durable check
 
 This is the system's highest-leverage capability and the direct answer to §2.3.
@@ -453,7 +514,8 @@ Two forks are genuinely undecided and shape what gets built:
 | Faithful escalation (§11) | **BUILT + DEPLOYED** — escalations carry their executable check; a ticket cannot close until that check has passed (abort/override still close; override audited). Respects §3.0: the check runs while ACTIVE, the clear consults the record. |
 | Tiered scope tree (§4) | **BUILT + DEPLOYED (foundation)** — `ScopeNode` tree with depth, bounded per-tier worker brief (own scope + contract; the rest withheld; border named), escalation routes to the adjacent-scope owner. *Still open: wiring nodes into planning/dispatch.* |
 | Prompt determinism + 3 standing lenses (§6.5) | **designed, not built** — the QA prompt still contains the `none` affordance and embeds the goal in the observation step |
-| Two-mode convergence (§6.6) | **designed, being built** — North Star realignment to the original prompt + misalignment→constraint is the first slice (P26); Mode-B adversarial hardening and its data ledger follow. Evidence: gym-024 delivered a complete PR but its count plateaued 2–4 on an off-theme (commit-hygiene) tail that should have been constraints, not tasks. |
+| Mode A — generative convergence (§6.6) | **BUILT + PROVEN** — North-Star realignment (P26), deterministic off-theme→constraint (P28, replacing an LLM verdict that amputated real work), goal-lens resilience (P27/P29: focused bounded retry + no-done-on-incomplete-sweep + bounded incomplete-sweep escalation). gym-027 and gym-029 reached a genuine `scope_completed` on real work (67 tasks, zero amputation), gym-029 self-repairing a 13-error red build. *In-loop triggers for P28's pruning and P29's retry are intermittent — ready insurance, unit-validated, awaiting a run that fires them.* |
+| Mode B — adversarial hardening + data ledger (§9.5) | **designed, being built next** — the contrarian loop that drives to ~0 (bugs/exploits/edge-cases across diverse lenses), each reproducible finding a durable §10 red→green check; "done" is measured (findings/round→0 across lenses, corpus green). Acid test: autonomously re-derive the 2026-07-26 operator review's 3 bugs + gaps. |
 
 **Forks resolved (§12):** the finding→check pipeline was built **executable-from-day-one** (a check
 is a command run against the delivery, not prose) and **operator-in-the-loop** (a governor-issued
