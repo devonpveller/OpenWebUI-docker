@@ -202,6 +202,10 @@ services:
       # Scopes nest and complete bottom-up; a parent's sweep that finds a SEAM defect writes the
       # task into the owning CHILD and reopens it — "complete" is a current state, not terminal.
       AO_DRAIN_TIER_WALK: ${AO_DRAIN_TIER_WALK:-1}      # 1 | 0 — the §4 tier walk
+      # MODE B (§9.5): after Mode A converges an increment, run the adversarial hardening phase — a
+      # contrarian lens breaks the product; each REPRODUCED defect becomes a durable §10 corpus check
+      # the build didn't catch. Best-effort, never blocks. (P30 Slice 1.)
+      AO_MODE_B: ${AO_MODE_B:-1}                        # 1 | 0 — adversarial hardening after convergence
       # Conversation context (the PO's memory): thread = immediate, channel = relevant background,
       # char-budgeted so it never overwhelms the model window. Raise for a larger-context model.
       AO_CONTEXT_THREAD_CHARS: ${AO_CONTEXT_THREAD_CHARS:-2500}

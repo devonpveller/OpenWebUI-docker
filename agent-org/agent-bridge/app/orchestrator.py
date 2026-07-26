@@ -10646,6 +10646,119 @@ class Orchestrator:
             (off if self._GIT_META_RE.search(body or "") else kept).append((lens, body))
         return kept, off
 
+    @staticmethod
+    def _mode_b_pairs(blob: str) -> list[tuple[str, str]]:
+        """P30 — extract (FINDING desc, REPRO command) pairs from a Mode-B turn's output/command stream.
+        A REPRO binds to the nearest preceding FINDING. Best-effort: strips a trailing `>> file` and
+        surrounding quotes (the lens echoes `echo 'FINDING: …' >> file` / `echo 'REPRO: …' >> file`)."""
+        def _clean(s: str) -> str:
+            # Drop a trailing `>> file` redirect (only if present — a repro rarely contains `>>`).
+            s = re.sub(r"\s*>>?\s*\S+\s*$", "", s.strip()) if ">>" in s else s.strip()
+            # Drop an UNBALANCED trailing wrapper quote — the echo's closing `'`/`"` whose opener sat
+            # before `FINDING:`/`REPRO:` and so isn't in the capture — WITHOUT touching a command's own
+            # balanced quotes (e.g. `python3 -c "…"` must keep its closing `"`).
+            for q in ("'", '"'):
+                if s.endswith(q) and s.count(q) % 2 == 1:
+                    s = s[:-1].rstrip()
+            return s.strip()
+        pairs: list[tuple[str, str]] = []
+        cur: str | None = None
+        for ln in (blob or "").splitlines():
+            fm = re.search(r"FINDING:\s*(.+)", ln)
+            rm = re.search(r"REPRO:\s*(.+)", ln)
+            if fm:
+                cur = _clean(fm.group(1))
+            elif rm and cur:
+                repro = _clean(rm.group(1))
+                if len(cur) >= 8 and len(repro) >= 3:
+                    pairs.append((cur, repro))
+                cur = None
+        return pairs
+
+    async def _mode_b_phase(
+        self, effort_id: str, channel_id: str, root: str, repo: str, delivery: BranchDelivery,
+    ) -> dict:
+        """P30 Slice 1 (design §9.5) — MODE B: adversarial hardening on a DELIVERED, converged increment.
+
+        A single contrarian lens tries to BREAK the product; each defect must carry a REPRODUCTION —
+        a check that EXITS NON-ZERO on the current code (a real break, not an opinion — §6 hygiene).
+        A reproduced defect becomes a durable §10 acceptance-corpus check (org-generated; red-gates every
+        FUTURE delivery so it can never regress). Distinct from Mode A's QA: this optimizes to REFUTE, so
+        it finds where the product BREAKS, not whether it meets the goal (§2.3 / the reviewer charter) —
+        gym showed Mode A can pass 105 tests and still miss 3 real bugs. Best-effort; never blocks the
+        effort. Returns {findings, reproduced, checks_added}. (Slice 2: diverse lenses + a re-drain fix
+        loop + the diminishing-returns completion reading.)"""
+        if not (repo and delivery and delivery.branch):
+            return {"findings": 0, "reproduced": 0, "checks_added": 0}
+        proj = await self._effort_project(effort_id) or ""
+        token = await self._project_token(effort_id)
+        self._verify_seq += 1
+        await self._clear_lens_findings(effort_id, round_no=0)
+        instr = (
+            "ADVERSARIAL REVIEW — you did NOT build this and you will CHANGE NOTHING (read-only; no "
+            "edits, no git writes). Your ONE job is to BREAK this product: find a bug, an unhandled edge "
+            "case, or an input that yields the WRONG result or a crash. First check out the delivered "
+            f"branch:\n  git fetch origin {delivery.branch} && git checkout -f {delivery.branch}\n"
+            "Attack hostile/boundary inputs: empty or None arguments, unicode, very long text, malformed "
+            "dates, duplicate flags, a missing/unreadable file, a directory where a file is expected, "
+            "huge inputs, and valid-but-unusual values. Read the code AND run it.\n\n"
+            "For EACH defect you can DEMONSTRATE, echo TWO lines the instant you confirm it:\n"
+            f"  echo 'FINDING: <one self-contained sentence naming the defect>' >> {_LENS_FINDINGS_PATH}\n"
+            f"  echo 'REPRO: <a single shell command that EXITS 0 IFF the product is correct>' >> "
+            f"{_LENS_FINDINGS_PATH}\n"
+            "The REPRO is a CHECK: it must exit NON-ZERO on THIS code (proving the defect exists now) and "
+            "would exit 0 once the defect is fixed. Only report a defect whose REPRO you actually ran and "
+            "saw fail. Echo as you go — those lines ARE your report."
+        )
+        try:
+            result = await self.router.wake(
+                effort_id, role="worker-default", thread_id=root, channel_id=channel_id,
+                session_id=f"{effort_id}~modeb{self._verify_seq}", instruction=instr,
+                repo=repo, repo_token=token, withhold_goal=True)
+        except Exception as exc:  # noqa: BLE001 — Mode B never blocks the effort
+            log.debug("mode-b lens failed for %s: %s", effort_id, exc)
+            return {"findings": 0, "reproduced": 0, "checks_added": 0}
+        text = ((result.output or "") if result else "")
+        cmds = list(getattr(result, "commands", None) or [])
+        salvaged = await self._salvage_lens_findings(effort_id, "mode_b", round_no=0, commands=cmds)
+        blob = "\n".join([text, "\n".join(str(c) for c in cmds), salvaged])
+        pairs = self._mode_b_pairs(blob)
+        reproduced = 0
+        checks = 0
+        for desc, repro in pairs:
+            # REPRODUCIBILITY GATE (§6) — keep only a REPRO that FAILS on the current code: a real break,
+            # and a check meaningful enough to red-gate future deliveries. Runs it on the delivered branch.
+            chk = (f"git fetch origin {delivery.branch} >/dev/null 2>&1; "
+                   f"git checkout -f {delivery.branch} >/dev/null 2>&1; {repro}")
+            try:
+                _exit, _out, _timed = await self.router.exec_check(
+                    effort_id, command=chk, session_id=f"{effort_id}~modebrepro", repo=repo,
+                    repo_token=token, timeout=300)
+            except Exception:  # noqa: BLE001 — an unrunnable repro is not a reproduced defect
+                _exit, _timed = 0, False
+            if _timed or _exit == 0:
+                await self.audit.log("mode_b_finding_unreproduced", effort_id=effort_id,
+                                     payload={"desc": desc[:200], "exit": _exit, "timed_out": _timed})
+                continue
+            reproduced += 1
+            cid = await self.projects.add_acceptance_check(
+                proj, origin_note=f"mode_b: {desc}"[:512], body=repro, created_by="mode_b")
+            if cid:
+                checks += 1
+            await self.audit.log("mode_b_check_added", effort_id=effort_id,
+                                 payload={"desc": desc[:200], "check": cid, "repro": repro[:200]})
+        await self.audit.log("mode_b_phase", effort_id=effort_id,
+                             payload={"findings": len(pairs), "reproduced": reproduced,
+                                      "checks_added": checks, "branch": delivery.branch})
+        if checks:
+            await self.comms.post(
+                Intent.worker_activity,
+                f"🛡️ **Adversarial hardening (Mode B)** on `{delivery.branch}` — reproduced "
+                f"**{reproduced}** defect(s) the build didn't catch and banked them as durable checks "
+                f"(they red-gate every future delivery until fixed). No action needed.",
+                effort_id=effort_id)
+        return {"findings": len(pairs), "reproduced": reproduced, "checks_added": checks}
+
     async def _drain_round(
         self, effort_id: str, channel_id: str, root: str, repo: str, delivery: BranchDelivery,
     ) -> dict:
@@ -11299,6 +11412,12 @@ class Orchestrator:
                         # EVIDENCED ZERO on both counts → this scope is complete; bubble up so the
                         # parent tier re-evaluates with its child's seams now real (P10.6).
                         await self._complete_scope(dr["scope_node_id"], effort_id)
+                        # P30 Mode B (design §9.5) — Mode A converged a coherent increment; now run the
+                        # ADVERSARIAL hardening phase against it. A contrarian lens breaks it; each
+                        # reproduced defect becomes a durable §10 corpus check the build never caught.
+                        if self.s.mode_b:
+                            await self._mode_b_phase(
+                                effort_id, _dr_loc[0], _dr_loc[1], eff_repo, delivery)
                     # P27 F27.2 — the round could not complete its sweep even after the F27.1 goal-lens
                     # retry: it never compared the product to the goal (§6.5/§6.6). It may deliver a PR
                     # for review, but it must NOT close "done" on an uncompared sweep. Flag it so the

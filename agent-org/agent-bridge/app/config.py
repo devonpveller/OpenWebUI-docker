@@ -192,6 +192,11 @@ class Settings(BaseSettings):
     # sweeps, escalate to the human instead of looping (gym-026 looped to the runaway cap). Reset on
     # a complete (swept) round.
     incomplete_sweep_cap: int = 2
+    # P30 MODE B (design §9.5) — after Mode A converges an increment, run the standing ADVERSARIAL
+    # hardening phase: a contrarian lens tries to BREAK the product; each defect it can REPRODUCE
+    # (a check that exits non-zero on the current code) becomes a durable §10 acceptance-corpus check.
+    # Off by default (like drain_loop was); the gym turns it on.
+    mode_b: bool = False
     # PLAN/IMPLEMENT SPLIT (P10.5): a worker asked to plan work it JUST PERFORMED has context bias
     # by construction — gym-008's `_auto_iterate` re-sent the entire original goal to the worker
     # that had just satisfied it, which returned an EMPTY plan and stranded the effort. When on, a
