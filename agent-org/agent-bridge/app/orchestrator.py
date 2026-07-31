@@ -84,7 +84,7 @@ from .models import (
 )
 from .modules.pending_store import PendingStore
 from .schemas import (
-    Concern, ConcernOption, Decision, Level, LifecyclePlan, LifecycleStep, MonitorVerdict, OperatorIntent, Plan, Trigger,
+    AlignmentVerdict, Concern, ConcernOption, Decision, EscalationVerdict, Level, LifecyclePlan, LifecycleStep, MonitorVerdict, OperatorIntent, Plan, Trigger,
 )
 from .worker.harness import FakeHarness, LittleCoderHarness, WorkerHarness
 
@@ -1132,6 +1132,10 @@ class Orchestrator:
         # "work is happening" signal — distinct from the gate state `active` (= merely not-frozen),
         # which persists forever and misleads the PM into reporting a phantom queue.
         self._delegating: set[str] = set()
+        # P31 — efforts already told (once) they're paused on an ENVIRONMENT outage (every worker
+        # health-quarantined), so the honest "waiting on the environment" note isn't re-posted every
+        # sweep. Cleared when the effort re-engages (env healed) so a later outage re-notifies.
+        self._env_wait_noted: set[str] = set()
         # WORKER LIVENESS (register #25): {base_url: (task_id, last_offset, last_progress_at)} — the
         # last per-agent-step event offset the stall sweep observed for each worker's running task, and
         # WHEN. The offset climbing = alive; frozen past `worker_silence_s` = hung. Empty after a
@@ -1240,10 +1244,57 @@ class Orchestrator:
                 select(WorkerInstance).where(WorkerInstance.retired.is_(False)))).scalars().all()
         return [{"id": r.id, "base_url": r.base_url, "effort_id": r.effort_id} for r in rows]
 
+    async def _cancel_worker_turns(self, *, effort_id: str | None, reason: str) -> int:
+        """F31.3 — force-cancel in-flight worker DAEMON turns. Returns the count cancelled.
+
+        The bridge's paths that free a worker SLOT are bookkeeping-only — abort (`set_lifecycle`),
+        freeze (`enforce_freeze` → SUSPENDED), and boot (`reset_stale` → IDLE) all flip the DB
+        `sched_state` but never tell the DAEMON to stop, so the orphaned turn grinds to its deadline
+        holding capacity (gym-030: an aborted effort's worker ground ~1h → downstream `no_worker_slot`
+        parks; and every bridge recreate this session re-orphaned both workers until a manual restart).
+        The daemon-cancel already exists (`harness.cancel_task`) and was wired ONLY into the
+        stall-watchdog for HUNG turns; this wires it to the abort/freeze/boot paths too.
+
+        `effort_id` set → only turns bound to that effort (abort/freeze). `effort_id=None` → every
+        running turn (boot: a restart orphaned them all — the poll loop that drove them is gone, exactly
+        as `reset_stale`'s own docstring notes). Best-effort: an unreachable/uncancellable daemon is
+        skipped and never blocks the abort/freeze/boot. Ground truth is the daemon's own task list
+        (`running_task_progress`), so this is restart-safe — the in-memory scheduler state is not trusted."""
+        n = 0
+        for w in await self._worker_urls():
+            if effort_id is not None and w.get("effort_id") != effort_id:
+                continue
+            url = w["base_url"]
+            try:
+                prog = await self.harness.running_task_progress(url)
+            except Exception:  # noqa: BLE001 — an unreachable daemon can't be cancelled; skip it
+                continue
+            if not prog:
+                continue
+            task_id = prog[0]
+            try:
+                ok = await self.harness.cancel_task(url, task_id)
+            except Exception:  # noqa: BLE001 — best-effort; a cancel hiccup never blocks the caller
+                ok = False
+            self._worker_progress.pop(url, None)   # drop stale progress so the stall sweep re-baselines
+            await self.audit.log("worker_turn_cancelled",
+                                 effort_id=(effort_id or w.get("effort_id")),
+                                 payload={"worker": url, "task": task_id, "reason": reason, "ok": ok})
+            if ok:
+                n += 1
+        return n
+
     async def _last_event(self, effort_id: str) -> tuple[str, str] | None:
         async with self.db.session_factory() as s:
             row = (await s.execute(
-                select(Event.kind, Event.ts).where(Event.effort_id == effort_id)
+                select(Event.kind, Event.ts).where(
+                    Event.effort_id == effort_id,
+                    # P31 — `env_wait` is the watchdog's own "holding on the environment" marker, not
+                    # effort activity. Excluding it keeps the silence clock anchored to the last REAL
+                    # event, so the effort is re-evaluated every sweep and auto-resumes the instant the
+                    # environment heals (never masked as "fresh" by the hold-marker it just wrote).
+                    Event.kind != "env_wait",
+                )
                 .order_by(Event.ts.desc()).limit(1))).first()
         return (row[0], row[1]) if row else None
 
@@ -2135,6 +2186,32 @@ class Orchestrator:
             except Exception as exc:  # noqa: BLE001 - the watchdog must never die
                 log.warning("stall watchdog tick failed: %s", exc)
 
+    async def _env_wait_hold(self, eid: str, arm: str) -> bool:
+        """P31 — an ENVIRONMENT failure is not a WORKER failure (design §8 + infra-freeze pattern).
+        When EVERY worker is health-quarantined — the whole fleet is unreachable, or inference is
+        shedding (502/503) — a worker's silence is a stalled ENVIRONMENT, not a hung worker or a code
+        gate. Escalating it (gym-030: three `stall_escalated` during the llm-queue shed) aims the
+        operator at the wrong layer and stops auto-recovery for an infra blip the worker could never
+        fix. So HOLD: don't escalate, don't re-engage into the down env. The next sweep resumes it
+        automatically once a worker is reachable again (the infra-freeze contract; §3.0 fail-safe —
+        pause, never a false code escalation). Deterministic signal (all-quarantined), not an LLM
+        verdict. A genuine hang with a HEALTHY env (gym-033) fails this check and escalates as before.
+        Returns True when the caller should skip this effort for this sweep."""
+        if not await self.scheduler.environment_down():
+            self._env_wait_noted.discard(eid)   # env is healthy for this effort's path — allow re-note later
+            return False
+        await self.audit.log("env_wait", effort_id=eid,
+                             payload={"arm": arm, "reason": "workers_all_quarantined"})
+        if eid not in self._env_wait_noted:
+            self._env_wait_noted.add(eid)
+            body = (f"⏸️ **{eid}** is waiting on the environment — every worker is currently "
+                    f"unreachable (inference or the worker fleet is down/shedding). This is an "
+                    f"INFRASTRUCTURE pause, not a stuck task; I'll resume it automatically the moment "
+                    f"a worker is reachable again. Nothing is lost.")
+            await self.comms.post(Intent.effort_dispatch, body, effort_id=eid)
+            await self.router.update_effort_card(eid, "waiting")
+        return True
+
     async def _sweep_stalled_efforts(self) -> None:
         from datetime import datetime, timezone
         now = datetime.now(timezone.utc)
@@ -2182,6 +2259,10 @@ class Orchestrator:
                 if not eid or eid in parked or self._waiting_on(eid) is not None:
                     continue
                 self._delegating.discard(eid)                 # … its delegate coroutine is dead now
+                # P31 — the hung turn is cancelled (daemon freed); but if the WHOLE fleet is
+                # unreachable this silence is the environment, not the worker. Hold, don't escalate.
+                if await self._env_wait_hold(eid, "hung"):
+                    continue
                 n = await self._event_count(eid, "stall_recovered")
                 if n >= self.s.stall_max_recoveries:
                     await self.audit.log("stall_escalated", effort_id=eid,
@@ -2261,6 +2342,11 @@ class Orchestrator:
                 continue    # P24 — a genuine "awaiting the human" terminal (plan gate / escalation);
                             # everything else silent-past-threshold is a wedge and gets recovered.
             mins = int(age // 60)
+            # P31 — if the whole worker fleet is unreachable/shedding, this idle silence is a stalled
+            # ENVIRONMENT, not a wedged effort. Hold (don't escalate, don't re-engage into a down env);
+            # the next sweep resumes it once a worker is reachable. A healthy env falls through as before.
+            if await self._env_wait_hold(eid, "idle"):
+                continue
             n = await self._event_count(eid, "stall_recovered")
             if n >= self.s.stall_max_recoveries:
                 await self.audit.log("stall_escalated", effort_id=eid,
@@ -2512,33 +2598,47 @@ class Orchestrator:
         await self.router.update_effort_card(effort_id, "working")
 
     async def _drain_parked_once(self) -> None:
-        """Resume the oldest DISPATCHABLE parked effort (FIFO). Bumps its attempt count; escalates +
-        stops retrying once starved. Re-entrancy-guarded so concurrent signals don't double-resume."""
+        """Resume EVERY dispatchable parked effort this tick (P31 F31.2). Re-entrancy-guarded so
+        concurrent signals don't double-resume.
+
+        Why not just the oldest (the old FIFO-head behaviour): a re-park PRESERVES `parked_at`
+        (capacity_park.py), so a park that keeps re-parking stays pinned at the head of `all()` and
+        STARVES every newer park behind it. gym-030 (parked 00:28, env down) re-parked forever and
+        gym-031/032 behind it never ran (0 acquires). Attempting all dispatchable parks removes that
+        head-of-line block; the scheduler's concurrency cap bounds real work (an effort that can't get
+        a slot just re-parks), so this is not a thundering herd."""
         if self._draining:
             return
         self._draining = True
         try:
-            token = None
-            for t in await self.parks.all():
-                if await self.gate.can_dispatch(t["effort_id"]):  # skip frozen/killed (stay parked)
-                    token = t
-                    break
-            if token is None:
+            # F31.2 (1) — never resume into a DEAD environment. When the whole fleet is quarantined
+            # (F31.1's deterministic signal), every resume just re-parks — and the re-parking head is
+            # exactly what monopolised the drain. Hold; the timer re-checks, and the drain runs the
+            # instant the environment is back (the watchdog holds env-silent efforts meanwhile).
+            if await self.scheduler.environment_down():
                 return
-            eid = token["effort_id"]
-            # GPU saturation is a SYSTEMIC fault → escalate after the attempt cap. Worker-slot
-            # contention is NORMAL and self-resolving (workers finish) → wait patiently, never
-            # escalate on count (the drain only fires on a release or the timer, so no tight loop).
-            if token.get("reason", "inference_backpressure") == "inference_backpressure":
-                attempts = await self.parks.bump_attempts(eid)
-                if attempts > self.s.capacity_max_attempts:
-                    await self._escalate_starved(token)
+            for token in await self.parks.all():
+                eid = token["effort_id"]
+                if eid in self._delegating:                       # already resuming — no double-dispatch
+                    continue
+                if await self._effort_terminal(eid):              # aborted/done zombie — clean up, NEVER resume
                     await self.parks.unpark(eid)
-                    self._signal_capacity()  # move on to the next parked effort
-                    return
-            log.info("resuming parked effort %s (stage=%s, reason=%s)",
-                     eid, token["stage"], token.get("reason"))
-            await self._resume_parked(token)
+                    log.info("drain: unparked terminal effort %s (lifecycle aborted/done)", eid)
+                    continue
+                if not await self.gate.can_dispatch(eid):         # frozen/killed — stay parked
+                    continue
+                # GPU saturation is a SYSTEMIC fault → escalate after the attempt cap. Worker-slot
+                # contention is NORMAL and self-resolving (workers finish) → wait patiently, never
+                # escalate on count.
+                if token.get("reason", "inference_backpressure") == "inference_backpressure":
+                    attempts = await self.parks.bump_attempts(eid)
+                    if attempts > self.s.capacity_max_attempts:
+                        await self._escalate_starved(token)
+                        await self.parks.unpark(eid)
+                        continue
+                log.info("resuming parked effort %s (stage=%s, reason=%s)",
+                         eid, token["stage"], token.get("reason"))
+                await self._resume_parked(token)
         finally:
             self._draining = False
 
@@ -2595,6 +2695,15 @@ class Orchestrator:
         await self.charters.seed_floor_from_disk()
         self._load_pm_voice_charter()     # the operator-tunable "how the org talks to you" system prompt
         await self.scheduler.register_from_urls(self.s.worker_instance_urls)
+        # F31.3 — a bridge restart orphans every in-flight DAEMON turn: the poll loop that drove it
+        # is gone, but the daemon keeps running (reset_stale below only clears the bridge's bookkeeping,
+        # not the daemon — its own docstring: "nothing is actually driving that worker"). Left alone the
+        # turn grinds to its deadline and 409s the next dispatch; this session every recreate re-orphaned
+        # BOTH workers until a manual `docker restart`. Cancel each running daemon turn now — post-restart
+        # they are ALL orphaned by definition. Best-effort; runs before reset_stale clears the DB state.
+        orphaned = await self._cancel_worker_turns(effort_id=None, reason="boot-orphan")
+        if orphaned:
+            log.info("F31.3 — cancelled %d orphaned worker turn(s) on startup", orphaned)
         stale = await self.scheduler.reset_stale()  # clear any wedged 'computing' from a crash
         if stale:
             log.info("reset %d stale worker(s) to idle on startup", stale)
@@ -3109,6 +3218,10 @@ class Orchestrator:
         effort thread (escalation ladder, COMMS-MODEL §3 rule 1)."""
         result = await self.gate.freeze(effort_id, trigger, concern, actor=actor, level=level)
         await self.scheduler.enforce_freeze(effort_id)
+        # F31.3 — enforce_freeze only flips sched_state to SUSPENDED (bookkeeping); the daemon keeps
+        # running. §3.0 ("a frozen effort's agents are never computing") is only true once the daemon
+        # turn is actually cancelled. Best-effort; a resumed effort re-dispatches a fresh turn anyway.
+        await self._cancel_worker_turns(effort_id=effort_id, reason="freeze")
         await self.router.update_effort_card(effort_id, "frozen")  # CM.6 live card status
         await self._post_concern(effort_id, trigger, result)
         # Escalation ladder (CM.3): the RECORD is decided in #mgmt, but the effort thread's
@@ -5053,6 +5166,11 @@ class Orchestrator:
             await self.gate.set_lifecycle(eid, "aborted")
             self._delegating.discard(eid)
             await self.parks.unpark(eid)
+            # F31.3 — abort must STOP the daemon, not just the bookkeeping: without this the worker
+            # grinds its now-orphaned turn to the deadline, holding capacity (gym-030: ~1h → downstream
+            # no_worker_slot parks). Cancelling the daemon task also unwinds the delegate's poll → the
+            # slot releases naturally. Best-effort; never blocks the archive.
+            await self._cancel_worker_turns(effort_id=eid, reason="abort")
             await self.router.update_effort_card(eid, "aborted")
             archived.append(eid)
         parts: list[str] = []
@@ -6393,6 +6511,17 @@ class Orchestrator:
             e = await s.get(Effort, effort_id)
         return bool(e is not None and e.lifecycle == "aborted")
 
+    async def _effort_terminal(self, effort_id: str) -> bool:
+        """True if the effort is in a TERMINAL lifecycle (aborted or done). A terminal effort must
+        never be dispatched or resumed. `can_dispatch` is the GOVERNANCE gate (active/frozen) and
+        deliberately does NOT read lifecycle (machine A vs B), so an aborted effort — state still
+        `active` — reads as dispatchable. The drain uses this to UNPARK a terminal effort's lingering
+        park instead of resuming it forever (gym-030: an aborted run churned the drain for a day,
+        burning inference on a dead effort and starving the live run)."""
+        async with self.db.session_factory() as s:
+            e = await s.get(Effort, effort_id)
+        return bool(e is not None and e.lifecycle in ("aborted", "done"))
+
     async def _reopen_if_closed(self, effort_id: str) -> None:
         # NEVER machine-resurrect an operator ABORT (live 2026-07-14: an archived effort's
         # queued flail-replan re-dispatched, its burn-down REOPENED it, and a zombie loop ground
@@ -6714,6 +6843,10 @@ class Orchestrator:
             # arm the daemon's read-without-edit watchdog on CODING turns. Off only to MEASURE the
             # fork's effect on product quality (P9 Phase 0) — see `worker_flail_guard`.
             flail_guard=self.s.worker_flail_guard,
+            # F33 — start the turn on the effort's delivery-branch HEAD, not the base clone, so a
+            # drain/re-engage worker builds on the accumulated work (best-effort; first delivery has
+            # no branch yet and stays on base to create it).
+            checkout_branch=(self._effort_branch(effort_id) if self.s.sync_delivery_branch else None),
             expected_base=eb.get("sha") or None,
         )
         # FLAIL GUARD tripped (operator 2026-07-14: "too many thinking turns or time iterating on
@@ -6888,6 +7021,17 @@ class Orchestrator:
         blk = self._extract_blocker(pub.output or "") if pub is not None else None
         if blk:
             await self._elevate_blocker(effort_id, blk)
+            return None
+        # F34 — an ESCALATE is an out-of-scope HANDOFF, not a delivery. Left unhandled it falls
+        # through to the stale-head recovery below, which reads "no new commits + build passes" as
+        # "the requested change was already in place" and ARCHIVES the task though the work was never
+        # done (gym-037: the SOLID-refactor task the worker escalated as out-of-scope was closed as
+        # done). The org resolves it AUTONOMOUSLY — route to an existing adjacent scope, else
+        # DECOMPOSE a scope for it and re-file — and only a still-unplaceable escalation is LOGGED for
+        # review (never silently closed, never frozen). The human path is a temporary instrumented
+        # backstop: `escalation_unresolved` is the data for understanding WHY, so we can remove it.
+        if pub is not None and self._ESCALATE_RE.search(pub.output or ""):
+            await self._handle_drain_escalation(effort_id, channel_id, root, pub.output or "")
             return None
         # NO CHANGES protocol (read-only/investigation tasks): the worker explicitly reports it
         # changed nothing — a LEGITIMATE completion whose deliverable is its ANSWER, not a branch.
@@ -7269,6 +7413,155 @@ class Orchestrator:
             log.debug("task refile failed for %s: %s", effort_id, exc)
         return False
 
+    async def _handle_drain_escalation(
+        self, effort_id: str, channel_id: str, root: str, output: str,
+    ) -> None:
+        """F34 — resolve a drain worker's `ESCALATE:` (out-of-scope handoff) AUTONOMOUSLY, and never
+        let it be mistaken for a delivery. Three tiers, most-autonomous first:
+
+          1. ROUTE to an existing adjacent scope (`_route_escalation` — the org's decomposition
+             already owns this work somewhere).
+          2. DECOMPOSE — the escalation names work no scope owns yet, so BUILD the scope for it and
+             re-file the task there for the tier walk to pick up with a freshly-bounded worker.
+          3. Still unplaceable → LOG it richly (`escalation_unresolved`) and keep the task OPEN with a
+             one-line FYI. This is a TEMPORARY instrumented backstop, not a decision request: the log
+             is the data for understanding WHY the org couldn't self-place it, so this tier can be
+             removed. It is emphatically NOT a freeze, NOT "already in place", NOT a silent drop."""
+        marks = [m.group(1).strip() for m in self._ESCALATE_RE.finditer(output or "")]
+        if await self._route_escalation(effort_id, output):
+            await self._continue_drain_after_escalation(effort_id, "routed")
+            return
+        if await self._decompose_for_escalation(effort_id, marks):
+            await self._continue_drain_after_escalation(effort_id, "decomposed")
+            return
+        # 3) the deterministic tiers couldn't place it → CLASSIFY what it requires (F34.1). The verdict
+        #    is the LEDGER (what does the org's escalations actually need?) AND the decision gate: only a
+        #    verdict the org CAN'T resolve itself reaches the operator. This shrinks the human path to the
+        #    genuinely-irreducible and turns every other case into a logged automation target.
+        verdict = await self._classify_escalation(effort_id, marks)
+        node = await self._ensure_scope_node(effort_id) if self.s.drain_tier_walk else None
+        await self.audit.log("escalation_classified", effort_id=effort_id, payload={
+            "category": verdict.category, "autonomous": verdict.autonomous,
+            "requires": verdict.requires[:300], "suggested_action": verdict.suggested_action[:300],
+            "marks": [m[:200] for m in marks], "tier_walk": self.s.drain_tier_walk, "node": node})
+        if verdict.autonomous:
+            # The classifier says the org SHOULD own this (route/decompose/clarify), but the
+            # deterministic tiers didn't place it — a GAP in those tiers, not an operator question.
+            # Log it as the automation target and keep the task open; do NOT ping the human.
+            await self.audit.log("escalation_recoverable", effort_id=effort_id, payload={
+                "category": verdict.category, "requires": verdict.requires[:300],
+                "suggested_action": verdict.suggested_action[:300]})
+            return
+        # genuinely-irreducible (needs_human, or an external dependency the org can't obtain) — the
+        # evidence-backed operator FYI, carrying WHAT it needs. Task kept OPEN (not frozen, not closed).
+        await self.audit.log("escalation_unresolved", effort_id=effort_id, payload={
+            "category": verdict.category, "requires": verdict.requires[:300],
+            "marks": [m[:200] for m in marks], "node": node})
+        await self.comms.post(
+            Intent.escalation,
+            f"↔️ **Escalation needs you** (`{verdict.category}`) — the org couldn't self-resolve "
+            f"{len(marks)} out-of-scope item(s).\n"
+            f"**Requires:** {verdict.requires or '(unclassified)'}\n"
+            f"**Suggested:** {verdict.suggested_action or '—'}\n"
+            f"_Task kept open; reply with a decision or `abort {effort_id}`._",
+            effort_id=effort_id)
+
+    async def _continue_drain_after_escalation(self, effort_id: str, how: str) -> None:
+        """F34.2 (gym-040) — an AUTONOMOUSLY-resolved escalation must keep the drain MOVING. F34
+        routes/decomposes the escalated work and `_handle_drain_escalation` returns; `_publish_and_verify`
+        then returns None, but the caller (orchestrator.py ~6695) treats that None as "escalated to a
+        human — stop" and RETURNS, leaving the re-filed task and every other open task undispatched.
+        gym-040 idled 18 min after a clean route until the stall watchdog escalated (its recovery budget
+        already spent by two build-phase abandons). This kicks the next dispatchable drain task so the
+        effort re-enters normally. The routed/decomposed work has MOVED, so `_drain_next_pending` can
+        never re-dispatch the escalated item (no loop; it's monotonic). No-op if nothing is dispatchable."""
+        try:
+            dispatched = await self._drain_next_pending(effort_id)
+        except Exception as exc:  # noqa: BLE001 — best-effort; a continuation hiccup never crashes finalize
+            log.debug("drain continuation after escalation failed for %s: %s", effort_id, exc)
+            dispatched = False
+        await self.audit.log("escalation_drain_continued", effort_id=effort_id,
+                             payload={"how": how, "dispatched": dispatched})
+
+    async def _classify_escalation(self, effort_id: str, marks: list[str]) -> EscalationVerdict:
+        """F34.1 — diagnose an unplaceable escalation: what does it REQUIRE, and can the org resolve it
+        WITHOUT a human? Context-isolated like the P32 gate — the classifier sees the escalated work +
+        the North Star + nothing of the worker's own framing, so it judges the NEED, not the refusal.
+        Fail-SAFE to `needs_human` (a hiccup keeps a human in the loop rather than auto-dropping real
+        work). The verdict is logged as the escalation LEDGER; its distribution over real runs is the
+        evidence for which categories to automate next — the path to removing this human touch."""
+        marks_text = "\n".join(f"- {m}" for m in marks) or "(none)"
+        north = await self._north_star(effort_id)
+        try:
+            return await self.models.structured(
+                "pm",
+                "You triage an autonomous coding org's out-of-scope ESCALATION — work a bounded worker "
+                "refused as outside its slice, which the org could neither route to an existing part nor "
+                "split into a new one. Decide WHAT it needs and WHETHER the org can resolve it ITSELF "
+                "(no human). Categories: scope_handoff (belongs to another part of the code — the org "
+                "should re-file/decompose it); needs_clarification (the requirement is ambiguous — "
+                "reconcile it against the goal below); needs_dependency (needs a tool/library/config — "
+                "autonomous if addable within the stated toolchain, human ONLY if it needs an external "
+                "secret/credential/paid service); infeasible (cannot be done as written — re-scope, "
+                "unless it contradicts the goal, which is the human's call); needs_human (genuinely the "
+                "operator's — a credential the org cannot obtain, or a product-direction the goal does "
+                "not settle). Set `autonomous` True ONLY when you can name a concrete org-side action in "
+                "`suggested_action`; when unsure, choose needs_human. Give `requires` (one line: what it "
+                "needs to proceed).",
+                f"THE GOAL (North Star):\n{(north or '(unknown)')[:1500]}\n\n"
+                f"THE ESCALATED WORK:\n{marks_text[:2000]}",
+                EscalationVerdict,
+            )
+        except Exception as exc:  # noqa: BLE001 — fail SAFE: keep the human in the loop on any hiccup
+            log.debug("escalation classify failed for %s: %s", effort_id, exc)
+            return EscalationVerdict(category="needs_human", requires="(classifier unavailable)")
+
+    async def _decompose_for_escalation(self, effort_id: str, marks: list[str]) -> int:
+        """F34 tier 2 — the escalation names work no existing scope owns, so CREATE the scope for it
+        (a sibling of the worked scope, or a child of the root) and re-file the task there. Bounded:
+        the new scope must be genuinely NARROWER than its parent (the P17 F9 word-overlap guard, so an
+        escalation can't spawn a paraphrase scope) and the tree must stay under the depth tax. Declines
+        (returns 0) to the logged backstop when tier-walk is off, the tree is at max depth, or every
+        mark is a paraphrase. Returns how many scopes were created + filled."""
+        if not self.s.drain_tier_walk:
+            return 0
+        node_id = await self._ensure_scope_node(effort_id)
+        if not node_id:
+            return 0
+        n = await self._scope_node(node_id)
+        if not n or (n.get("depth") or 0) >= self.s.drain_max_tier_depth:
+            return 0
+        parent_id = n.get("parent_id") or node_id          # a SIBLING of the worked scope, else a child of root
+        parent = await self._scope_node(parent_id)
+        parent_words = {w for w in re.findall(r"[a-z]{4,}", ((parent or n).get("scope") or "").lower())}
+        proj = await self._effort_project(effort_id) or ""
+        created = 0
+        for mark in marks:
+            words = {w for w in re.findall(r"[a-z]{4,}", mark.lower())}
+            if not words or len(words - parent_words) < 2:   # P17 F9 — adds nothing new ⇒ a paraphrase
+                await self.audit.log("escalation_scope_declined", effort_id=effort_id,
+                                     payload={"parent": parent_id, "mark": mark[:160]})
+                continue
+            title = " ".join(mark.split()[:6])[:80]
+            kids = await self.decompose_scope(parent_id, [(title, mark[:1000])])
+            if not kids:
+                continue
+            if not await self._refile_task(effort_id, mark, kids[0]):
+                await self.add_task(mark[:2000], project_slug=proj, scope_node_id=kids[0],
+                                    effort_id=effort_id, source_lens="escalation",
+                                    round_no=await self._drain_round_no(effort_id))
+            await self._reopen_scope(kids[0], reason=mark[:200], effort_id=effort_id)
+            await self.audit.log("escalation_decomposed", effort_id=effort_id,
+                                 payload={"parent": parent_id, "new_scope": kids[0], "mark": mark[:200]})
+            created += 1
+        if created:
+            await self.comms.post(
+                Intent.worker_activity,
+                f"🌿 **Escalation absorbed** — created {created} scope(s) for out-of-scope work a worker "
+                f"flagged; the tier walk works them next. No operator action needed.",
+                effort_id=effort_id)
+        return created
+
     async def _elevate_blocker(self, effort_id: str, blk: dict) -> None:
         """The PM's job the mechanical monitor skipped: HEAR the worker's constraint and surface it
         to the operator with a synthesized read + an actionable next step, keeping the effort OPEN
@@ -7374,6 +7667,75 @@ class Orchestrator:
             effort_id=effort_id,
         )
         return True
+
+    async def _north_star(self, effort_id: str) -> str:
+        """The effort's North Star (§6.6): its ORIGINAL prompt — the root goal before any auto-added
+        `ITERATION` suffix — never a re-derived scope goal (whose drift §6.5 warns of). '' if unknown."""
+        try:
+            _v, goal_text, _by = await self.charters.current_goal(effort_id)
+        except Exception:  # noqa: BLE001
+            return ""
+        return (goal_text or "").split("\n\nITERATION ")[0].strip()
+
+    async def _sort_off_north_star(
+        self, effort_id: str, candidates: list[tuple[str, str]],
+    ) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
+        """P32 (§6.6.1) — the North-Star alignment gate, judged over the ROUND'S WHOLE GROUP of
+        candidate tasks. Returns (kept, off_north_star).
+
+        Why the GROUP and not each task alone (operator, 2026-07-29): alignment is a property of the
+        plan, not of an isolated line item. A scaffolding/enabling task ("add a `_normalize_priority`
+        helper") looks like a tangent alone but is essential to an aligned group ("sort the list by
+        priority"). Judged in isolation it would be falsely pruned, and the aligned work it enables
+        could never land. So the check sees the ENTIRE round's proposal at once and flags a candidate
+        ONLY when it serves no part of the North Star EVEN given the rest of the group.
+
+        CONTEXT-ISOLATED (the anti-mirror, §6.6.1): the model gets the North Star + the candidate LIST
+        and nothing else — no current-state summary, none of the generator's reasoning. That asymmetry
+        is what makes this a check and not a P26 echo. Deterministic git-meta is already gone (P28's
+        `_sort_off_theme`); this is the interpretive, group-level layer above it.
+
+        FAIL-SAFE toward KEEP: gate off / no North Star / a model hiccup / an out-of-range index → keep
+        everything. Never prune real work on uncertainty (the P26 lesson); a candidate is dropped only
+        when the model affirmatively lists its index as serving nothing."""
+        if not self.s.north_star_gate or not candidates:
+            return candidates, []
+        north = await self._north_star(effort_id)
+        if not north:
+            return candidates, []
+        listed = "\n".join(f"{i}. {b}" for i, (_l, b) in enumerate(candidates, 1))
+        try:
+            verdict = await self.models.structured(
+                "pm",
+                "You are the PM, checking ALIGNMENT ONLY. You are given the NORTH STAR (the original "
+                "request that started this effort) and the list of CANDIDATE TASKS a round proposed. "
+                "Judge them AS A GROUP, never in isolation. A task ADVANCES the North Star if it — OR "
+                "ANOTHER TASK IN THE LIST THAT IT ENABLES — moves toward the original request; so an "
+                "enabling or scaffolding step that only makes sense together with the others is "
+                "ALIGNED — keep it. Flag a task ONLY when it serves NO part of the North Star even "
+                "considering the rest of the list: a tangent nobody asked for — packaging/build/CI/"
+                "linter configuration, version strings, rewriting commit history, or polish so "
+                "marginal a real user of the North Star would never notice it. Return `off_north_star` "
+                "= the 1-based indices of ONLY those tangents. When unsure about a task, do NOT flag "
+                "it. Most rounds flag NONE.",
+                f"NORTH STAR (the original request — the only standard that matters here):\n"
+                f"{north[:2500]}\n\n"
+                f"CANDIDATE TASKS proposed this round (judge them together, as a group):\n"
+                f"{listed[:3500]}",
+                AlignmentVerdict,
+            )
+        except ModelBackpressureError:
+            raise   # inference is shed — let the drain PARK, don't judge blind
+        except Exception as exc:  # noqa: BLE001 — fail OPEN; a hiccup must never prune real work
+            log.debug("north-star group gate failed for %s: %s", effort_id, exc)
+            return candidates, []
+        flagged = {i for i in (getattr(verdict, "off_north_star", None) or [])
+                   if isinstance(i, int) and 1 <= i <= len(candidates)}
+        if not flagged:
+            return candidates, []
+        kept = [c for idx, c in enumerate(candidates, 1) if idx not in flagged]
+        off = [c for idx, c in enumerate(candidates, 1) if idx in flagged]
+        return kept, off
 
     async def _drain_iterate(self, effort_id: str, open_tasks: list[dict], round_no: int, *,
                              channel_id: str = "", root: str = "") -> bool:
@@ -10143,6 +10505,10 @@ class Orchestrator:
                     # THE DEBIAS, enforced at the wake: withholding the goal from the instruction
                     # is worthless if the standing context preamble injects it anyway.
                     withhold_goal=True,
+                    # F31.4 — bridge-side flail-guard: a lens is read-only, so the daemon's
+                    # read-without-edit guard can't police it; stop a turn stuck repeating one
+                    # command (findings so far are salvaged below).
+                    max_repeat=self.s.lens_flail_repeats,
                 )
             except NoCapacityError:
                 # NEVER swallow this. A saturated worker pool means the sweep DIDN'T HAPPEN, and a
@@ -10154,12 +10520,15 @@ class Orchestrator:
                 log.debug("lens %s wake failed for %s: %s", lens, effort_id, exc)
                 continue
             body = ((result.output or "") if result else "").strip()
-            if not body:
+            # F31.4 — a flail-stopped lens returns an EMPTY answer, but it streamed FINDING lines
+            # before it wedged; route it into the salvage path (below) instead of dropping it here.
+            is_flail = bool(result and getattr(result, "status", "") == "flail")
+            if not body and not is_flail:
                 continue
             # P11.5: a truncated turn is a MISSING report, not a clean one. Persist it for the
             # audit trail (we want to see what the lens managed to say), but keep it out of
             # `reports` so it can neither satisfy `swept` nor reach gap analysis.
-            if not _is_lens_report(body):
+            if is_flail or not _is_lens_report(body):
                 # P18 F4 / P22 F22.1 — the turn died, but it may have established findings as it
                 # went. Recover them from the findings file AND from the turn's own command stream
                 # (`result.commands`) — gym-020's file was empty because the lens narrated instead
@@ -10895,6 +11264,17 @@ class Orchestrator:
                                  payload={"round": round_no, "pruned": len(_off_theme),
                                           "kept": len(derived),
                                           "examples": [b[:80] for _l, b in _off_theme[:5]]})
+        # P33 (2026-07-30, gym-037) — THE NORTH-STAR GATE MOVED OFF `derived`. gym-037 proved that
+        # running the interpretive LLM alignment gate on `derived` AMPUTATED real work: `derived`
+        # holds only goal-gaps (from `_gap_analysis`) and DEFECTs (from `_tasks_from_lens`) — all
+        # genuine, product-serving correctness work by construction — and the gate pruned the
+        # `load_items` crash fix, duplicate-ID detection, exception hygiene and date validation as
+        # "off-North-Star" (rounds 3-4 audit: `kept: 0` of every derived task, every round), the
+        # exact P26 "an LLM grading an LLM over-prunes real work" failure P28 was built to retire.
+        # The off-North-Star TANGENTS (linting/packaging config, SOLID refactors, commit-message
+        # conventions) do NOT travel on `derived` — they are GAP-graded and queued below; that is
+        # where the gate now runs. `derived` keeps ONLY the deterministic git-meta filter above
+        # (which cannot amputate product code — P28), never the interpretive verdict.
         # The sibling scopes a task may belong to (P14.2). Read once per round, not per task.
         scope_children = await self._scope_children(node_id) if node_id else []
         new_bodies: list[str] = []
@@ -10930,7 +11310,32 @@ class Orchestrator:
         # (which filters on the current round) can never see them, and so a lens that keeps
         # surfacing required-but-not-malfunctioning work cannot prevent termination. Filed AFTER
         # the counted tasks so the round's arithmetic is already fixed.
-        for gap_body in (getattr(self, "_pending_gaps", {}) or {}).pop(effort_id, []):
+        # P33 (gym-037) — THE ALIGNMENT GATES RUN HERE, on the GAP candidates, because this is where
+        # off-North-Star drift actually lives. gym-037: linting/packaging config, a SOLID refactor,
+        # and commit-message conventions all arrived GAP-graded and, gated nowhere, were dispatched
+        # as wasted rounds while the real crash fix was amputated from `derived`. Deterministic
+        # git-meta first (P28 — a commit-message GAP names a commit), then the interpretive North-Star
+        # group gate (P32/§6.6.1 — packaging/linter/refactor tangents). A pruned GAP becomes a
+        # constraint, exactly as an off-theme derived task does; the survivors (e.g. a genuine
+        # test-coverage gap) queue as before. DEFECT/goal work never reaches this gate.
+        gap_pairs = [("gap", b) for b in
+                     (getattr(self, "_pending_gaps", {}) or {}).pop(effort_id, [])]
+        if gap_pairs:
+            gap_pairs, _gap_theme = self._sort_off_theme(gap_pairs)
+            try:
+                gap_pairs, _gap_ns = await self._sort_off_north_star(effort_id, gap_pairs)
+            except ModelBackpressureError:
+                _gap_ns = []   # inference shed — don't park a finished round to prune polish
+            for _kind, _pruned in (("off_theme", _gap_theme), ("off_north_star", _gap_ns)):
+                for _gl, _gb in _pruned:
+                    await self._record_constraint(
+                        effort_id, _gb, origin=f"{_kind}:gap:r{round_no}", kind=_kind)
+                if _pruned:
+                    await self.audit.log(f"{_kind}_pruned", effort_id=effort_id,
+                                         payload={"round": round_no, "list": "gap",
+                                                  "pruned": len(_pruned),
+                                                  "examples": [b[:80] for _l, b in _pruned[:5]]})
+        for _gl, gap_body in gap_pairs:
             owner = await self._seam_owner(node_id, gap_body) if node_id else None
             if not owner and node_id and scope_children:
                 owner = await self._best_scope_for(gap_body, scope_children)

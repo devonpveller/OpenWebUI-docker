@@ -118,6 +118,7 @@ import sessions as sessions_mod  # noqa: E402
 # ── config ───────────────────────────────────────────────────────────────────
 CHANNEL_ID = os.environ.get("BRIDGE_CHANNEL_ID", "6z9khgkdd7df9q454be6fimw1h")  # #claude-sessions
 OPERATORS = {u.strip().lower() for u in os.environ.get("BRIDGE_OPERATORS", "profnovice").split(",") if u.strip()}
+
 REPO = os.environ.get("BRIDGE_REPO", _REPO_ROOT)
 MODEL = os.environ.get("BRIDGE_MODEL", "")
 # Per-turn cost-estimate cap. On a subscription nothing is billed — this is purely a
@@ -157,7 +158,7 @@ CLASSIFY_SHADOW = os.environ.get("BRIDGE_CLASSIFY_SHADOW", "1") != "0"
 # falsehood and makes it distrust current information.
 WAKE_FRESH_MIN = int(os.environ.get("BRIDGE_WAKE_FRESH_MIN", "2"))
 
-STATE_DIR = os.path.join(_HERE, "state")
+STATE_DIR = os.environ.get("BRIDGE_STATE_DIR") or os.path.join(_HERE, "state")
 STATE_FILE = os.path.join(STATE_DIR, "state.json")
 AUDIT_FILE = os.path.join(STATE_DIR, "audit.jsonl")
 APPROVALS_LOG = os.path.join(STATE_DIR, "approvals.jsonl")
@@ -234,6 +235,26 @@ REMOTE_NOTE = (
     "call the approvals MCP server's follow_thread tool with that post's id and end your turn — "
     "the bridge will automatically wake this session with the reply when it arrives."
 )
+
+
+def _load_charter() -> str:
+    """Optional persona charter appended to REMOTE_NOTE, so ONE bridge codebase can run multiple
+    personas (e.g. a systems-administrator instance) by env alone. Backward-compatible: with neither
+    env var set this returns '' and the system prompt is exactly REMOTE_NOTE (default behaviour)."""
+    txt = os.environ.get("BRIDGE_APPEND_PROMPT", "") or ""
+    path = os.environ.get("BRIDGE_CHARTER_FILE", "")
+    if path:
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                extra = fh.read()
+            txt = (txt + "\n\n" + extra) if txt else extra
+        except OSError:
+            pass
+    return txt.strip()
+
+
+CHARTER = _load_charter()
+SYSTEM_PROMPT = (REMOTE_NOTE + "\n\n" + CHARTER) if CHARTER else REMOTE_NOTE
 
 
 # ── small utils ──────────────────────────────────────────────────────────────
@@ -502,7 +523,7 @@ def run_turn(claude_bin: str, thread_root: str, prompt: str, session_id: str | N
     cmd = [claude_bin, "-p", "--output-format", "stream-json", "--verbose",
            "--permission-prompt-tool", "mcp__approvals__permission_prompt",
            "--mcp-config", write_mcp_config(thread_root),
-           "--append-system-prompt", REMOTE_NOTE,
+           "--append-system-prompt", SYSTEM_PROMPT,
            "-n", name]
     if SETTING_SOURCES:
         cmd += ["--setting-sources", SETTING_SOURCES]

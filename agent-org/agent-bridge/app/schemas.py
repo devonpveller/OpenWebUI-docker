@@ -147,6 +147,38 @@ class MonitorVerdict(BaseModel):
     rationale: str = ""
 
 
+# ── North-Star alignment, judged over a GROUP of candidate tasks (§6.6.1, P32) ──
+class AlignmentVerdict(BaseModel):
+    # 1-based indices of ONLY the candidates that serve NO part of the North Star even given the rest
+    # of the group. Empty (the default, and the Fake's model_construct default) = nothing flagged.
+    off_north_star: list[int] = []
+    rationale: str = ""
+
+
+class EscalationVerdict(BaseModel):
+    """F34.1 — the structured diagnosis of a drain worker's out-of-scope ESCALATE that the org's
+    deterministic tiers (route → decompose) could not place. It is the LEDGER for "what does this
+    escalation require?" and the DECISION for "can the org resolve it without a human?" — the data
+    we gather to automate away the human backstop entirely.
+
+    `category` (what KIND of need):
+      scope_handoff      — the work belongs to another part of the code (route/decompose should own it)
+      needs_clarification— the requirement is ambiguous/underspecified (reconcile vs the North Star)
+      needs_dependency   — needs a tool/lib/config (autonomous if the org can add it; human if external)
+      infeasible         — cannot be done as specified (re-scope, or a real product-direction conflict)
+      needs_human        — genuinely the operator's: a credential/secret the org lacks, or a North-Star
+                           product-direction only the human owns (governance §2.1)
+    `autonomous` is the fail-SAFE default False — an unclassifiable/uncertain escalation stays a human
+    touch until we have the evidence to automate it; the model sets it True only when it can name the
+    org-side resolution in `suggested_action`."""
+    category: Literal[
+        "scope_handoff", "needs_clarification", "needs_dependency", "infeasible", "needs_human"
+    ] = "needs_human"
+    requires: str = ""            # one line: what the escalation actually needs to proceed
+    suggested_action: str = ""    # the concrete org-side (or operator) next step
+    autonomous: bool = False      # can the org resolve this itself, no human?
+
+
 # ── Explanation-vs-diff cross-check (§4.5, P4.3b) ───────────────────────────
 class ExplanationCheck(BaseModel):
     consistent: bool

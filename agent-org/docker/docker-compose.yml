@@ -202,6 +202,15 @@ services:
       # Scopes nest and complete bottom-up; a parent's sweep that finds a SEAM defect writes the
       # task into the owning CHILD and reopens it — "complete" is a current state, not terminal.
       AO_DRAIN_TIER_WALK: ${AO_DRAIN_TIER_WALK:-1}      # 1 | 0 — the §4 tier walk
+      # NORTH-STAR ALIGNMENT GATE (§6.6.1, P32): before a drain plan reaches the worker team, check it
+      # against the ORIGINAL prompt (context-isolated). A plan that serves no part of the North Star is
+      # a tangent → a constraint, never worked. Bounds a runaway by exhausting the ALIGNED list, not a
+      # round cap. Fails open (a hiccup → aligned).
+      AO_NORTH_STAR_GATE: ${AO_NORTH_STAR_GATE:-1}      # 1 | 0 — plan-vs-North-Star alignment gate
+      # F33 (gym-036): before a drain/re-engage turn, hard-sync the worker to the delivery-branch HEAD
+      # (git fetch + checkout -f) so it builds on the accumulated work, not a stale base clone whose
+      # push then bounces. Best-effort (first delivery has no branch yet).
+      AO_SYNC_DELIVERY_BRANCH: ${AO_SYNC_DELIVERY_BRANCH:-1}  # 1 | 0 — worker starts on the delivery HEAD
       # MODE B (§9.5): after Mode A converges an increment, run the adversarial hardening phase — a
       # contrarian lens breaks the product; each REPRODUCED defect becomes a durable §10 corpus check
       # the build didn't catch. Best-effort, never blocks. (P30 Slice 1.)

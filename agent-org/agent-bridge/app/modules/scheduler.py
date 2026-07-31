@@ -122,6 +122,31 @@ class Scheduler:
             ).scalar_one()
         )
 
+    async def environment_down(self) -> bool:
+        """P31 — a DETERMINISTIC environment-health signal: True when there are workers and EVERY
+        non-retired one is currently health-quarantined (unreachable / 502-503 shed / 409-wedged).
+        That is an ENVIRONMENT outage — inference or the whole worker fleet is down — NOT worker-slot
+        contention: a busy-but-reachable worker is `computing`, never quarantined, so it never trips
+        this. Callers (the stall watchdog) use it to WAIT-for-health instead of escalating a silent
+        turn as a hung worker (an environment failure is not a worker failure). Returns False when no
+        workers are registered (nothing to conclude) so this never masks a real config problem."""
+        async with self.db.session_factory() as s:
+            total = int((await s.execute(
+                select(func.count()).where(WorkerInstance.retired.is_(False))
+            )).scalar_one())
+            if total == 0:
+                return False
+            reachable = int((await s.execute(
+                select(func.count()).where(
+                    WorkerInstance.retired.is_(False),
+                    or_(
+                        WorkerInstance.quarantined_until.is_(None),
+                        WorkerInstance.quarantined_until <= now_iso(),
+                    ),
+                )
+            )).scalar_one())
+            return reachable == 0
+
     # ── acquire / release (the semaphore) ────────────────────────────────────
     async def acquire(self, effort_id: str, role: str, session_id: str) -> WorkerInstance:
         """Move a free instance to `computing` for an effort. Enforces the cap and

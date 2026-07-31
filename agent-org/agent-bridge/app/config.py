@@ -120,6 +120,21 @@ class Settings(BaseSettings):
     # fix it — turn it off for one round and let the operator judge the product. Defaults to the
     # live behaviour (armed) so the unit suite's wake expectations are unchanged.
     worker_flail_guard: bool = True
+    # F33 (gym-036) — SYNC THE WORKER TO THE DELIVERY-BRANCH HEAD before a turn. set_project clones the
+    # DEFAULT branch (base); a drain/re-engage worker must start from the effort's accumulated work, not
+    # base, or it redoes finished work and its push bounces (non-fast-forward) — the stale-workspace
+    # thrash gym-036 hit. Mechanical (a bridge-issued `git fetch + checkout -f` on the acquired worker),
+    # not left to the prompt. Best-effort: first delivery has no branch yet, so the fetch no-ops and the
+    # worker stays on base to create it. Off by default (a run_check would perturb the unit suite's
+    # queues); prod turns it on via AO_SYNC_DELIVERY_BRANCH.
+    sync_delivery_branch: bool = False
+    # P31 F31.4 — a BRIDGE-SIDE flail-guard for READ-ONLY lens turns. `worker_flail_guard` above is
+    # the daemon's read-*without-edit* guard, which can't police a lens (it never edits by design):
+    # gym-035's round-3 lens wedged repeating ONE command for minutes, evading that guard, the
+    # offset-silence watchdog (its offset kept advancing) and lens truncation (repeats don't grow the
+    # findings file), looping to the turn deadline. The lens sweep stops a turn after this many
+    # CONSECUTIVE identical commands and salvages whatever findings streamed first. 0 disables it.
+    lens_flail_repeats: int = 6
     # POST-DELIVERY QA / EXPLORATORY EVALUATION (operator 2026-07-15, reviewing gym PR#2: the
     # delivery passed its own tests and read well, but was frustrating to actually USE — no help
     # systems, and a SEPARATE little-coder QA pass surfaced a page of gaps "that could've been
@@ -204,6 +219,15 @@ class Settings(BaseSettings):
     # never having defended the prior output. Safe only because the CDCL clause set (§5–6) carries
     # the learning across that rotation.
     drain_plan_split: bool = False
+    # P32 (§6.6.1) — the NORTH-STAR ALIGNMENT GATE. Before a drain plan is handed to the worker team,
+    # check it against the ORIGINAL prompt (context-isolated: North Star + plan only). A plan that
+    # serves no part of the North Star is a tangent (gym-035's ~13h runaway was fed by off-North-Star
+    # work — packaging/linting/version, commit rewrites, corner-cases no real user hits) → it becomes a
+    # constraint, never worked. This is what bounds a runaway by exhausting the ALIGNED list, not a
+    # round cap. Fails OPEN (a hiccup → aligned; never prune real work on uncertainty — the P26 lesson).
+    # Off by default like the other drain features (drain_loop/plan_split/tier_walk); prod turns it on
+    # via AO_NORTH_STAR_GATE. Off = the gate is a no-op (no model call), so it never perturbs a test.
+    north_star_gate: bool = False
     # TIER WALK (P10.6): scopes nest, complete bottom-up, and a parent's sweep that finds a SEAM
     # defect writes the task into the OWNING CHILD and flips it back to open — "complete" is a
     # current state, not a terminal one. Off leaves the drain flat (effort-scoped, no tree).

@@ -308,6 +308,8 @@ class Router:
         recurse_submodules: bool = False,
         plan_only: bool = False,
         flail_guard: bool = False,
+        max_repeat: int = 0,
+        checkout_branch: str | None = None,
         expected_base: str | None = None,
         withhold_goal: bool = False,
     ) -> WorkResult | None:
@@ -454,6 +456,26 @@ class Router:
                             thread_id=thread_id,
                         )
                         return WorkResult("clone_failed", task_id="", output=f"clone failed: {detail}")
+                # F33 (gym-036) — SYNC TO THE DELIVERY-BRANCH HEAD. set_project just cloned the DEFAULT
+                # branch (base); a drain/re-engage worker must start from the effort's accumulated work,
+                # not base, or it redoes finished work and its push bounces (non-fast-forward). Mechanical,
+                # not a prompt instruction. Best-effort: on the FIRST delivery the branch doesn't exist,
+                # the fetch fails, the `&&` short-circuits, and the worker stays on base to create it.
+                if repo and checkout_branch:
+                    try:
+                        code, out, _timed = await self.harness.run_check(
+                            inst.base_url,
+                            f"cd /workspace && git fetch origin {checkout_branch} "
+                            f"&& git checkout -f -B {checkout_branch} FETCH_HEAD",
+                            timeout=120,
+                        )
+                        await self.audit.log(
+                            "worker_synced_to_delivery", effort_id=effort_id, actor=inst.id,
+                            payload={"branch": checkout_branch, "synced": code == 0,
+                                     "detail": (out or "")[:160]},
+                        )
+                    except Exception as exc:  # noqa: BLE001 — best-effort; first delivery has no branch
+                        log.debug("delivery-branch sync for %s failed: %s", effort_id, exc)
                 # Stream the worker's activity to the effort THREAD as it happens (observability =
                 # safety, governance §5/§7). Notification discipline (CM.6): coalesce rapid *successful*
                 # commands into one post; failures/denials always post immediately + in context so a
@@ -524,6 +546,9 @@ class Router:
                     extra["plan_only"] = True
                 if flail_guard:
                     extra["flail_guard"] = True
+                if max_repeat:
+                    # F31.4 — bridge-side repeat guard for a read-only lens turn (not a daemon flag).
+                    extra["max_repeat"] = max_repeat
                 result = await self.harness.wake(
                     inst.base_url, session_id, prompt, on_update=_stream, **extra,
                 )
@@ -546,6 +571,12 @@ class Router:
                     actor=inst.id,
                     payload={"status": result.status, "role": role},
                 )
+                # F31.4 — the bridge-side lens flail-guard stopped a turn stuck repeating one command.
+                if result.status == "flail":
+                    await self.audit.log(
+                        "lens_flail_stopped", effort_id=effort_id, actor=inst.id,
+                        payload={"role": role, "commands": len(getattr(result, "commands", []) or [])},
+                    )
                 # P21 F1 — an ABANDONED turn ROTS its session (the model runs on the accumulated
                 # context, and a small model returns EMPTY on an overflowing one — §8/context-rot).
                 # gym-019: a `re-run it` reused the exact `~r2~plan` session a 60-min turn had

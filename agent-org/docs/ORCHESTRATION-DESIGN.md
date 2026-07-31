@@ -16,9 +16,12 @@ finding→durable-check pipeline (§10, *proven* live), CDCL constraint learning
 convergence (§6.6): North-Star realignment, deterministic off-theme→constraint, goal-lens resilience —
 PROVEN (gym-027/029 reached `scope_completed` on real work, one self-repairing a red build).** **Not
 built:** the frontier/OpenRouter oracle (§7), the security standing adversary (§9), **Mode B —
-adversarial hardening + its data ledger (§9.5) — designed, being built next**, and — inside the pieces
-above — per-task executable goal-posts, a first-class diff-check, auto-conversion of reviews into checks,
-and wiring scope nodes into planning/dispatch. See §14.
+adversarial hardening + its data ledger (§9.5) — slice 1 built, rest designed**, the **North-Star
+alignment gate (§6.6.1) — designed 2026-07-29, being built next** (the general form of Mode A's
+misaligned→constraint; the built git-meta filter is only its deterministic sliver — its absence let a
+misaligned tail run gym-035 ~13h/2109 events), and — inside the pieces above — per-task executable
+goal-posts, a first-class diff-check, auto-conversion of reviews into checks, and wiring scope nodes into
+planning/dispatch. See §14.
 
 ---
 
@@ -311,6 +314,79 @@ a **constraint** (narrow away from it), never a task. Left uncaught it inflates 
 modes. (Note: the project-documentation lens of §6.5 legitimately observes commit history for *future-worker
 readability*; the failure is treating its output as **product** propagation. It is process/meta work — a
 non-counting backlog at most, never a Mode-A termination gate.)
+
+### 6.6.1 The North-Star alignment gate — and why a runaway is a misalignment symptom (operator, 2026-07-29)
+
+Mode A says *misaligned → constraint*. What was **built** enforced only a sliver of that: a deterministic
+git-meta filter (P28, `_sort_off_theme`) that catches "names a commit/SHA" and nothing else. There was no
+**general** check of whether the work about to be done actually serves the North Star. So off-North-Star
+work reached the worker team unchecked, and the loop wandered.
+
+gym-035 is the proof. A run that had already delivered a polished product kept generating and dispatching
+work its *own workers escalated as off-scope* — packaging metadata, linting config, a `__version__`
+attribute (developer-facing, not the "a real person would enjoy" North Star), a commit-subject rewrite
+(git-meta), and an unbounded tail of REPL corner-cases no real person would hit. Nothing asked "does this
+serve the North Star?" before handing it over, so it ran **~13 hours / 2109 events**, abandoning and
+recovering and re-sticking, long after the gym harness's wall budget stopped *watching*.
+
+**The lesson: a runaway is a symptom of missing North-Star alignment, not of too many rounds.** An arbitrary
+round/event cap is the wrong fix — a large project legitimately needs far more rounds than a small one, so a
+fixed limit punishes complexity instead of catching drift. The correct bound is *convergence by exhausting
+the **aligned** task list*: off-tangent plans never become work, so the loop tightens on the theme and stops
+on its own; a big project still gets every round it needs.
+
+**The gate.** Before any of a round's proposed work is handed to the worker team, a **North-Star alignment
+check** judges the round's **generated task list against the original prompt**, at generation (right after
+P28's deterministic git-meta filter). **A candidate that serves the North Star → stays a task. One that
+serves it in no way → a constraint (§6), never worked.** This is the standing, general form of Mode A's
+*misaligned → constraint*; the P28 git-meta filter is one cheap deterministic case of it, not the whole.
+
+**Judge the GROUP, never a task in isolation (operator, 2026-07-29).** Alignment is a property of the plan,
+not of a line item. An enabling/scaffolding task ("add a `_normalize_priority` helper") is a tangent *alone*
+but essential to an aligned group ("sort the list by priority"). Checked in isolation it would be falsely
+pruned — and the aligned work it enables could never land. So the check sees the **entire round's proposal
+at once** and flags a candidate **only when it serves no part of the North Star even given the rest of the
+group**. That also answers "2 of 12 are off": the checker keeps the 10 aligned *and* any enabling steps
+among them, and constrains only the genuine tangents — no all-or-nothing, no amputated scaffolding.
+
+**Why this is a reasoning pass and still not a P26 mirror — context management is the mechanism.** Alignment
+to a *theme* ("does this serve a polished todo app a real person would enjoy?") is genuinely interpretive; it
+needs an LLM, and P26 warned an LLM grading an LLM is a mirror. But **the mirror is a shared-context
+artifact, not a property of LLM-checks-LLM.** P26 inverted because the checker shared the generator's frame
+— same context in, same confusion out. The fix is per-pass context management:
+
+- **Task generation** gets **North Star + the lens reports + a summary of what's already built**. It needs
+  the current state to decide *what to propose next*.
+- **The alignment check** gets **North Star + the candidate list. Only.** It is blind to the current-state
+  summary and to the generator's reasoning. Its single question is "which of these serve no part of the
+  North Star, even as a group?"
+
+The asymmetry *is* the independence: the checker cannot inherit the generator's rationalization ("given
+everything we've built, this next step makes sense") because it never receives the context that produced it.
+Current state is what a plan needs to be *generated*; it is irrelevant to whether a plan *serves the goal*, so
+withholding it is correct, not a limitation. **Standing principle: independence between a producer and its
+checker comes from the difference in their contexts — not from adding a second model with the same view.**
+Every LLM pass in the loop gets exactly the context its job needs, no more; that discipline is what makes a
+check a check and not an echo.
+
+**P33 (gym-037, 2026-07-30) — the gate belongs on the GAP candidates, NOT on `derived`.** As first built,
+the alignment check ran on the whole `derived` list. gym-037's audit proved that was backwards: `derived`
+holds only goal-gaps (from gap analysis) and DEFECTs (from the lens grader) — genuine, product-serving
+correctness work *by construction* — and the interpretive gate **amputated it**, pruning the `load_items`
+crash fix, duplicate-ID detection, exception hygiene and date validation as "off-North-Star"
+(`off_north_star_pruned kept:0` in rounds 3 AND 4). That is the P26 "an LLM grading an LLM over-prunes real
+work" failure resurrected — the exact thing P28's deterministic filter was built to retire, reintroduced by
+pointing the interpretive gate at the real-work list. Meanwhile the ACTUAL off-North-Star tangents
+(linting/packaging config, a SOLID refactor, commit-message conventions) never reach `derived` at all —
+they are GAP-graded (§P13.6/P15.2: "required but not malfunctioning") and queued on the separate
+`_pending_gaps` path, which bypassed the gate entirely. **So the gate was gutting the real work and waving
+the tangents through.** The fix: run BOTH gates — deterministic git-meta (P28) then the interpretive
+North-Star group gate — on the **GAP-candidate list**, and leave `derived` guarded only by the
+deterministic git-meta filter (which cannot amputate product code). A DEFECT or a goal-gap is, by
+definition, in service of the product; it is never a "tangent nobody asked for," so it must never face the
+interpretive verdict. This is the same lesson as P28, one level up: **place the interpretive alignment
+verdict only where a genuine tangent can appear (GAP-graded polish), never where the grade already proves
+the work is real.**
 
 ### Diagnosing Mode B by data, not assertion (operator, 2026-07-23)
 

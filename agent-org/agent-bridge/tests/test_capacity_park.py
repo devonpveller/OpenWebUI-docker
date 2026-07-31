@@ -5,8 +5,12 @@ so a research/ingestion batch saturating the GPU can't stall the whole sequence.
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from sqlalchemy import select
+
+from app.models import WorkerInstance
 from app.adapters.chat import FakeChatAdapter
 from app.config import Settings
 from app.db import Database
@@ -22,12 +26,12 @@ ROOT = Path(__file__).resolve().parents[1]
 SHED = "ServiceUnavailableError: llm-queue at hard connection cap (128); queue_connections_exhausted"
 
 
-async def _orch(db_url, *, harness=None, **over):
+async def _orch(db_url, *, harness=None, worker_urls="http://w1:8090", max_workers=1, **over):
     settings = Settings(
         _env_file=None, chat_adapter="fake",
         profiles_dir=str(ROOT / "profiles"), charters_dir=str(ROOT / "charters"),
-        floor_dir=str(ROOT / "floor"), worker_instance_urls="http://w1:8090",
-        max_concurrent_workers=1, database_url=db_url, project_survey_enabled=False,
+        floor_dir=str(ROOT / "floor"), worker_instance_urls=worker_urls,
+        max_concurrent_workers=max_workers, database_url=db_url, project_survey_enabled=False,
         review_mode="off", plan_approval="off",
         model_backpressure_retries=2, model_backpressure_base_delay_s=0.0,
         model_backpressure_max_delay_s=0.0, **over,
@@ -244,5 +248,85 @@ async def test_no_worker_slot_does_not_escalate_on_attempts(db_url):
             await _drain_bg(orch)
         assert await orch.parks.is_parked(eid)                         # still WAITING, never escalated
         assert not any("waiting on GPU capacity" in p["message"] for p in chat.posted)
+    finally:
+        await db.dispose()
+
+
+# ── P31 F31.2 — fairness: a stuck FIFO head no longer starves the tail ────────
+async def _park_delegate(orch, eid, chan, root):
+    await orch.charters.set_goal(eid, "do it", created_by="po")
+    await orch.parks.park(eid, stage="delegate", channel_id=chan, root_post_id=root,
+                          request="do it", plan_steps=["do it"], from_step=1, mgmt_thread=None,
+                          reason="no_worker_slot")
+
+
+async def test_drain_resumes_all_dispatchable_not_just_the_head(db_url):
+    """gym-030→031/032 regression: a re-park PRESERVES `parked_at`, so a head that keeps re-parking
+    stayed pinned at the front of the FIFO and the old one-per-tick drain resumed only IT — starving
+    every newer park (gym-031/032 got 0 acquires behind gym-030). The drain now attempts EVERY
+    dispatchable park per tick, so the tail resumes even while the head churns."""
+    orch, chat, harness, db = await _orch(db_url, worker_urls="http://w1:8090,http://w2:8090",
+                                          max_workers=2)
+    try:
+        e1, c1, r1 = await orch.router.open_effort("head")
+        e2, c2, r2 = await orch.router.open_effort("tail")
+        await _park_delegate(orch, e1, c1, r1)     # older (front of FIFO)
+        await _park_delegate(orch, e2, c2, r2)     # newer (would starve behind the head)
+        assert await orch.parks.is_parked(e1) and await orch.parks.is_parked(e2)
+        await orch._drain_parked_once()            # ONE tick
+        await _drain_bg(orch)
+        assert not await orch.parks.is_parked(e1)  # head resumed
+        assert not await orch.parks.is_parked(e2)  # AND the tail — not blocked behind the head
+    finally:
+        await db.dispose()
+
+
+# ── P31 F31.2 — the drain HOLDS when the whole fleet is unreachable ───────────
+async def test_drain_holds_all_parks_when_environment_down(db_url):
+    """When every worker is health-quarantined (inference/fleet down), resuming just re-parks — and the
+    re-parking head is exactly what monopolised the drain during gym-030's outage. So the drain holds
+    entirely while the environment is down, and resumes the instant it's back."""
+    orch, chat, harness, db = await _orch(db_url)
+    try:
+        eid, chan, root = await orch.router.open_effort("held")
+        await _park_delegate(orch, eid, chan, root)
+        # quarantine every worker → environment_down()
+        until = (datetime.now(timezone.utc) + timedelta(seconds=600)).isoformat()
+        async with orch.db.session_factory() as s:
+            for wi in (await s.execute(select(WorkerInstance))).scalars().all():
+                wi.quarantined_until = until
+            await s.commit()
+        assert await orch.scheduler.environment_down() is True
+        await orch._drain_parked_once()
+        await _drain_bg(orch)
+        assert await orch.parks.is_parked(eid)                 # HELD — not resumed into a dead env
+        assert len(harness.wakes) == 0
+        # environment heals → the same drain resumes it
+        async with orch.db.session_factory() as s:
+            for wi in (await s.execute(select(WorkerInstance))).scalars().all():
+                wi.quarantined_until = None
+            await s.commit()
+        await orch._drain_parked_once()
+        await _drain_bg(orch)
+        assert not await orch.parks.is_parked(eid)             # auto-resumed once reachable
+    finally:
+        await db.dispose()
+
+
+async def test_drain_unparks_a_terminal_zombie_and_never_resumes_it(db_url):
+    """gym-030 zombie (surfaced live by F31.2's resume-all): an ABORTED effort keeps state=active, so
+    `can_dispatch` (the GOVERNANCE gate, which does not read lifecycle) stays True — the drain resumed
+    its stale park FOREVER, burning inference on a dead run and starving the live one. The drain now
+    recognises a terminal (aborted/done) effort, UNPARKS the zombie, and never resumes it."""
+    orch, chat, harness, db = await _orch(db_url)
+    try:
+        eid, chan, root = await orch.router.open_effort("zombie")
+        await _park_delegate(orch, eid, chan, root)             # parked (no_worker_slot)
+        await orch.gate.set_lifecycle(eid, "aborted")          # operator aborted it — state stays active
+        assert await orch.gate.can_dispatch(eid) is True       # the trap: gate reads state, not lifecycle
+        await orch._drain_parked_once()
+        await _drain_bg(orch)
+        assert not await orch.parks.is_parked(eid)             # zombie unparked (cleaned up)...
+        assert len(harness.wakes) == 0                         # ...and NEVER resumed a dead run
     finally:
         await db.dispose()

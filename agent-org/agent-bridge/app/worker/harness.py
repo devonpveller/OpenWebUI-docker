@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from collections.abc import Awaitable, Callable
 from typing import Any, Protocol
 
@@ -64,6 +65,29 @@ def _command_texts(activity: list) -> list[str]:
     return out
 
 
+def _one_command_text(item) -> str:
+    """The command string of a single daemon activity `item` (same shape-tolerance as
+    `_command_texts`). "" when the item carries no command (e.g. a non-command activity line)."""
+    return (item.get("command") or "").strip() if isinstance(item, dict) else ""
+
+
+# F31.4b (gym-038) — a scratch-file path under a temp dir, the volatile token a flailing lens varies.
+_TEMP_PATH_RE = re.compile(r"(?:/tmp|/var/tmp|/dev/shm)/\S+")
+
+
+def _flail_key(cmd: str) -> str:
+    """F31.4b (gym-038) — the flail-comparison key: the command with temp scratch-file paths
+    collapsed to `<tmp>`. The original F31.4 compared raw command strings, which a lens defeats by
+    re-running the SAME probe against a fresh scratch file each time — gym-038's goal lens looped
+    `TODO_DB=/tmp/todo_eval_60.json … repl`, `…_61.json …`, `…_62.json …` 20+ times; the changing
+    path made each string distinct, so the consecutive-repeat counter reset every turn and never
+    tripped. Collapsing the temp path makes "the same probe modulo a scratch file" compare equal, so
+    the guard catches it. The normalisation is deliberately SURGICAL — only temp paths, not all
+    numbers — so a genuinely varied sweep (different subcommands, flags, ids) is never false-flailed;
+    requiring `max_repeat` (=6) CONSECUTIVE normalised-identical commands keeps the bar high on top."""
+    return _TEMP_PATH_RE.sub("<tmp>", cmd)
+
+
 # little-coder's daemon validates `channel` against a fixed trigger-surface enum
 # (batch/cli/owui/validation) — it is NOT the chat channel. The bridge is an automated
 # trigger, so it uses "batch".
@@ -74,7 +98,7 @@ class WorkerHarness(Protocol):
     async def wake(
         self, base_url: str, session_id: str, prompt: str, *,
         channel: str = LC_TRIGGER_CHANNEL, on_update: OnUpdate | None = None,
-        plan_only: bool = False, flail_guard: bool = False,
+        plan_only: bool = False, flail_guard: bool = False, max_repeat: int = 0,
     ) -> WorkResult:
         """Resume a session and run one turn to completion; return the result. `on_update`
         streams the worker's commands + answer to the bus as it works (observability).
@@ -154,8 +178,15 @@ class LittleCoderHarness:
     async def wake(
         self, base_url: str, session_id: str, prompt: str, *,
         channel: str = LC_TRIGGER_CHANNEL, on_update: OnUpdate | None = None,
-        plan_only: bool = False, flail_guard: bool = False,
+        plan_only: bool = False, flail_guard: bool = False, max_repeat: int = 0,
     ) -> WorkResult:
+        """`max_repeat` (F31.4) — a BRIDGE-SIDE flail-guard for READ-ONLY turns (the lens sweep).
+        The daemon's `flail_guard` keys on read-*without-edit*, so it can't police a lens, which
+        never edits by design; a lens stuck repeating one command evades it, the offset-silence
+        watchdog (its offset keeps advancing), and lens truncation (repeats don't grow the findings
+        file), looping to the turn deadline (gym-035). When `max_repeat > 0`, this poll loop stops
+        the turn after that many CONSECUTIVE identical commands; the caller salvages whatever
+        findings streamed before the flail. 0 = off (every non-lens wake is unaffected)."""
         async with httpx.AsyncClient(base_url=base_url.rstrip("/"), timeout=60.0) as c:
             body = {
                 "prompt": prompt,
@@ -177,17 +208,38 @@ class LittleCoderHarness:
             # the worker runs to the bus as it happens (observability — governance §5/§7).
             seen = 0
             waited = 0.0
+            last_cmd: str | None = None   # F31.4 — consecutive-repeat tracking for the lens flail-guard
+            repeat = 0
             while waited < self.poll_timeout:
                 await asyncio.sleep(self.poll_interval)
                 waited += self.poll_interval
                 s = (await c.get(f"/tasks/{task_id}")).json()
                 activity = s.get("activity") or []
-                if on_update and len(activity) > seen:
+                if len(activity) > seen:
                     for item in activity[seen:]:
-                        try:
-                            await on_update("command", item)
-                        except Exception:  # noqa: BLE001 - streaming must never break the poll
-                            pass
+                        if on_update:
+                            try:
+                                await on_update("command", item)
+                            except Exception:  # noqa: BLE001 - streaming must never break the poll
+                                pass
+                        # F31.4 — a lens stuck repeating one command: stop it (findings so far are
+                        # salvaged by the caller from the streamed command list).
+                        if max_repeat:
+                            cmd = _one_command_text(item)
+                            key = _flail_key(cmd) if cmd else ""   # F31.4b — digits→# so a probe
+                            if key and key == last_cmd:            # re-run on a fresh scratch file counts
+                                repeat += 1
+                            elif key:
+                                last_cmd, repeat = key, 1
+                            if key and repeat >= max_repeat:
+                                try:
+                                    await self.cancel_task(base_url, task_id)
+                                except Exception:  # noqa: BLE001 - cancel is best-effort
+                                    pass
+                                return WorkResult(
+                                    "flail", task_id,
+                                    s.get("answer") or s.get("result", "") or "",
+                                    commands=_command_texts(activity))
                     seen = len(activity)
                 status = s.get("status", "")
                 # Terminal = anything not still in-flight (done/abandoned/rejected/cancelled/…).
@@ -387,11 +439,11 @@ class FakeHarness:
     async def wake(
         self, base_url: str, session_id: str, prompt: str, *,
         channel: str = LC_TRIGGER_CHANNEL, on_update: OnUpdate | None = None,
-        plan_only: bool = False, flail_guard: bool = False,
+        plan_only: bool = False, flail_guard: bool = False, max_repeat: int = 0,
     ) -> WorkResult:
         self.wakes.append(
             {"base_url": base_url, "session_id": session_id, "prompt": prompt,
-             "plan_only": plan_only, "flail_guard": flail_guard}
+             "plan_only": plan_only, "flail_guard": flail_guard, "max_repeat": max_repeat}
         )
         if base_url in self.busy_urls:
             req = httpx.Request("POST", base_url.rstrip("/") + "/tasks")
@@ -400,13 +452,31 @@ class FakeHarness:
         if base_url in self.down_urls:
             raise httpx.ConnectError("connection refused", request=httpx.Request("POST", base_url))
         out = self.output_queue.pop(0) if self.output_queue else self.output
+        cmds = list(self.stream_commands or [])
+        # F31.4 — mirror the real harness's consecutive-repeat guard so tests exercise the lens
+        # flail-guard: stop at the Nth identical command in a row and return a "flail" result.
+        if max_repeat:
+            last, rep = None, 0
+            for i, cmd in enumerate(cmds):
+                key = _flail_key(cmd)          # F31.4b — normalise digits so a counter-suffixed
+                if key == last:                # scratch file doesn't reset the repeat counter
+                    rep += 1
+                else:
+                    last, rep = key, 1
+                if rep >= max_repeat:
+                    streamed = cmds[: i + 1]
+                    if on_update:
+                        for c in streamed:
+                            await on_update("command", {"command": c, "ok": True})
+                    return WorkResult("flail", task_id=f"fake-{len(self.wakes)}",
+                                      output="", commands=streamed)
         if on_update:
-            for cmd in self.stream_commands or []:
+            for cmd in cmds:
                 await on_update("command", {"command": cmd, "ok": True})
             await on_update("answer", {"status": self.result_status,
                                        "answer": self.answer_text or "ok"})
         return WorkResult(self.result_status, task_id=f"fake-{len(self.wakes)}", output=out,
-                          commands=list(self.stream_commands or []))
+                          commands=cmds)
 
     async def set_project(
         self, base_url: str, repo: str, *, token: str | None = None,
