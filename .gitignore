@@ -50,3 +50,7 @@ scripts/.mm-notify-sessions
 
 # Claude-Sessions bridge runtime state (session map, audit logs, per-turn MCP configs)
 scripts/claude-sessions-bridge/state/
+
+# sysadmin-mcp runtime state (audit log, compaction result)
+scripts/sysadmin-mcp/state/
+scripts/sysadmin-mcp/bridge-state/
