@@ -32,6 +32,7 @@
 #   - openbrain-gateway     http://127.0.0.1:8061/health == "ok"   (functional, no secret)
 #   - openbrain-rest        http://127.0.0.1:3001/   (PostgREST proxy reachable)
 #   - openbrain-postgrest / -wiki / -wiki-viewer / -entity-worker  running
+#   - openbrain-idea-refinery  running (Idea Refinery drain; profile-gated, liveness only)
 #
 # Usage:
 #   .\scripts\check-openbrain-health.ps1            # detect + report, exit 0/1
@@ -214,6 +215,21 @@ if ((Get-CState 'openbrain-rest') -eq 'running') {
 # ---- 5. Remaining OB containers — liveness only ----------------------------
 foreach ($svc in @('openbrain-postgrest','openbrain-wiki','openbrain-wiki-viewer','openbrain-entity-worker')) {
   Confirm-ObContainer $svc | Out-Null
+}
+
+# ---- 6. Idea Refinery drain (profile-gated 'idea-refinery'; nightly batch) --
+# Liveness only: no host port (obnet-internal) so no functional /health probe from
+# the host, and it's idle between the 03:00-UTC cron fire + on-demand /run. States:
+#   running -> ok; exited/created/paused -> fault (repaired via `docker start`);
+#   absent  -> WARN not a hard fault (a profile-gated service is legitimately not
+#              present on a stack brought up without --profile idea-refinery).
+$irState = Get-CState 'openbrain-idea-refinery'
+if ($irState -eq 'running') {
+  Write-Ob 'openbrain-idea-refinery' ok 'running (drain; nightly 03:00 UTC + on-demand)'
+} elseif ($irState -eq 'absent') {
+  Write-Ob 'openbrain-idea-refinery' warn 'not present -- enable: docker compose -f OB1/docker/docker-compose.yml --profile idea-refinery up -d openbrain-idea-refinery'
+} else {
+  Confirm-ObContainer 'openbrain-idea-refinery' | Out-Null
 }
 
 Write-Host ""

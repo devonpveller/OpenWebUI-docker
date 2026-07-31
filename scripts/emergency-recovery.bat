@@ -256,7 +256,7 @@ docker compose up -d lc-mcpo lc-egress little-coder-backup
 
 echo [INFO] Starting Open Brain (OB1) stack...
 if exist "%OB1_COMPOSE%" (
-    docker compose -f "%OB1_COMPOSE%" up -d
+    docker compose -f "%OB1_COMPOSE%" --profile idea-refinery up -d
     echo [INFO] Starting OB1-attached backups (obnet + open-brain volumes now exist)...
     docker compose up -d openbrain-db-backup openbrain-wiki-backup
 ) else (
@@ -351,7 +351,7 @@ docker compose up -d open-terminal little-coder lc-mcpo lc-egress little-coder-b
 
 echo [INFO] Starting Open Brain (OB1) stack...
 if exist "%OB1_COMPOSE%" (
-    docker compose -f "%OB1_COMPOSE%" up -d
+    docker compose -f "%OB1_COMPOSE%" --profile idea-refinery up -d
     docker compose up -d openbrain-db-backup openbrain-wiki-backup
 )
 if exist "%AGENTORG_COMPOSE%" docker compose -f "%AGENTORG_COMPOSE%" up -d
@@ -398,7 +398,7 @@ docker compose up -d
 timeout /t 90 /nobreak >nul
 echo [INFO] Starting Open Brain (OB1) stack...
 if exist "%OB1_COMPOSE%" (
-    docker compose -f "%OB1_COMPOSE%" up -d
+    docker compose -f "%OB1_COMPOSE%" --profile idea-refinery up -d
     docker compose up -d openbrain-db-backup openbrain-wiki-backup
 )
 if exist "%AGENTORG_COMPOSE%" docker compose -f "%AGENTORG_COMPOSE%" up -d

@@ -87,7 +87,8 @@ $Script:OB1Services = @(
     "openbrain-grounding-backfiller",
     "openbrain-wiki", "openbrain-wiki-viewer", "openbrain-workbench", "openbrain-extract",
     "openbrain-cron", "openbrain-gmail-pull", "openbrain-gmail-prune", "openbrain-digest",
-    "openbrain-podcast"
+    "openbrain-podcast",
+    "openbrain-idea-refinery"   # Idea Refinery drain (profile-gated 'idea-refinery'; started via the profile below)
 )
 
 # agent-org services, default plane only (workers/cloud profiles are gated + excluded,
@@ -189,7 +190,8 @@ function Start-OB1Stack {
     }
     Write-Log "INFO" "Starting Open Brain (OB1) stack ($($Script:OB1Services.Count) containers)..."
     try {
-        docker compose -f $Script:OB1Compose up -d
+        # --profile idea-refinery so the (profile-gated) Idea Refinery drain is (re)started too.
+        docker compose -f $Script:OB1Compose --profile idea-refinery up -d
         Write-Log "SUCCESS" "Open Brain (OB1) stack started"
     }
     catch {
@@ -205,9 +207,9 @@ function Reset-OB1Stack {
     }
     Write-Log "INFO" "Recreating Open Brain (OB1) stack..."
     try {
-        docker compose -f $Script:OB1Compose down
+        docker compose -f $Script:OB1Compose --profile idea-refinery down
         Start-Sleep -Seconds 5
-        docker compose -f $Script:OB1Compose up -d
+        docker compose -f $Script:OB1Compose --profile idea-refinery up -d
         Write-Log "SUCCESS" "OB1 stack recreated"
     }
     catch {

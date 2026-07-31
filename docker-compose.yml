@@ -90,6 +90,11 @@ services:
   watchtower:
     image: containrrr/watchtower:latest
     container_name: watchtower
+    logging: # sysadmin log cap (disk-prune-watcher); applies on recreate
+      driver: json-file
+      options:
+        max-size: "100m"
+        max-file: "5"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro # Read-only access
       - ./scripts/post-update-hook.sh:/post-update-hook.sh:ro # Post-update hook
@@ -816,6 +821,11 @@ services:
     # documentation/implementation-guide/open -notebook-integration-openbrain/.
     image: open_notebook:iks
     container_name: open_notebook
+    logging: # sysadmin log cap (disk-prune-watcher); applies on recreate
+      driver: json-file
+      options:
+        max-size: "100m"
+        max-file: "5"
     networks:
       - default
       - llm-net
