@@ -182,9 +182,11 @@ Run with: `docker compose -f OB1/docker/docker-compose.yml ...`.
 | `openbrain-gmail-prune` | HTTP-triggered short-term prune; chains to digest + wiki recompile | — (internal only) | obnet, llm-net |
 | `openbrain-digest` | HTTP-triggered daily digest; mechanical formatting, Gmail send; chains to podcast after delivery | — (internal only) | obnet |
 | `openbrain-podcast` | HTTP-triggered chain tail (digest → podcast); spawns the link-enrich pipeline — follow newsletter links (Tor) → grounded research via openbrain-research (article mode) → two-host script → Open Notebook audio → loop-close (episode source linked to the day's threads); best-effort, never blocks the email | — (internal only) | obnet, llm-net, search-gw-net (=ai-stack_default, Tor) |
+| `openbrain-idea-refinery` | **Idea Refinery drain** (IR.1–IR.5/IR.7): `POST /run` walks the owed-idea queue (`ideas`/`idea_revisions`, init-ideas.sql), researches each via openbrain-research (bounded submit-on-complete + rollover), posts the gap-centered dossier to Mattermost `#ideas` (via `host.docker.internal:8065`), ages to dormant + resurfaces. Stand-alone cron `03:00 UTC` (before the 05:00-UTC gmail/wiki chain → new claims feed the 1am-local wiki compile). **PROFILE-GATED (`idea-refinery`)** — NOT started by a plain `up`. deno-postgres | — (internal only) | obnet, llm-net |
 
-**Scheduled-job slice:** the five trailing services (`openbrain-cron` + the
-four HTTP-triggered jobs) live in [`OB1/docker/docker-compose.scheduled.yml`](../../../OB1/docker/docker-compose.scheduled.yml),
+**Scheduled-job slice:** the five always-on services (`openbrain-cron` + the
+four HTTP-triggered jobs) — plus the **profile-gated `openbrain-idea-refinery`**
+drain (Idea Refinery; enable with `--profile idea-refinery`) — live in [`OB1/docker/docker-compose.scheduled.yml`](../../../OB1/docker/docker-compose.scheduled.yml),
 included from the main OB1 compose file. Trigger model is event-chained:
 cron fires `openbrain-gmail-pull` at 01:00; pull→prune→digest is wired
 via `NEXT_TRIGGER_URL` env vars, not multiple cron entries. Schedules
