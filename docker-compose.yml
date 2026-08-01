@@ -1245,7 +1245,7 @@ services:
   # Unified snapshot backups (post-2026-05-29 plan).
   # Six new containers covering the gaps from the post-implementation
   # audit: OB1 PostgreSQL + wiki, Open Notebook (SurrealDB + notebook_data),
-  # smolcrawl pipelines, Tailscale state, LM Studio models. All write
+  # smolcrawl pipelines, Tailscale state, the llama.cpp model store. All write
   # under ./backups/<service>/ with .sha256 sentinels and configurable
   # retention. The existing weekly NAS sync (scripts/backup-to-nas.ps1)
   # picks them up automatically.
@@ -1324,16 +1324,22 @@ services:
       - DATA_DIR=/data
       - ASSETS_DIR=/assets
       - RETAIN_COUNT=${OPENBRAIN_WIKI_BACKUP_RETAIN_COUNT:-2}
-      - BACKUP_CRON=${OPENBRAIN_WIKI_BACKUP_CRON:-15 2 * * *}
+      # 2026-08-01: switched from busybox crond to a sleep-loop. crond on
+      # Windows Docker Desktop silently misses fire-windows when the VM clock
+      # jumps on host sleep/resume (only :00 jobs survived; :15/:25 never
+      # fired for ~2 months). The sleep-loop is wall-clock-independent and
+      # matches the proven pg-backup sidecars. Runs once immediately on start.
+      - BACKUP_INTERVAL=${OPENBRAIN_WIKI_BACKUP_INTERVAL:-86400}   # daily
       - TZ=UTC
     entrypoint: /bin/sh
     command:
       - -c
       - |
-        chmod +x /scripts/backup.sh
-        echo "$${BACKUP_CRON} /scripts/backup.sh >> /var/log/backup.log 2>&1" > /etc/crontabs/root
-        echo "[$(date -u +%FT%TZ)] openbrain-wiki-backup scheduler started (cron: $${BACKUP_CRON}, retain: $${RETAIN_COUNT} most recent)"
-        crond -f -l 2
+        echo "[$$(date -u +%FT%TZ)] openbrain-wiki-backup started (sleep-loop; interval=$${BACKUP_INTERVAL}s, retain=$${RETAIN_COUNT})"
+        while true; do
+          sh /scripts/backup.sh || echo "[$$(date -u +%FT%TZ)] openbrain-wiki backup.sh exited $$?"
+          sleep "$${BACKUP_INTERVAL}"
+        done
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
@@ -1417,16 +1423,18 @@ services:
       - PREFIX=smolcrawl
       - RETAIN_COUNT=${SMOLCRAWL_BACKUP_RETAIN_COUNT:-2}
       - HEALTH_TCP=${SMOLCRAWL_BACKUP_HEALTH_TCP:-smolcrawl-pipelines:9099}
-      - BACKUP_CRON=${SMOLCRAWL_BACKUP_CRON:-25 2 * * *}
+      # 2026-08-01: crond -> sleep-loop (see openbrain-wiki-backup rationale).
+      - BACKUP_INTERVAL=${SMOLCRAWL_BACKUP_INTERVAL:-86400}   # daily
       - TZ=UTC
     entrypoint: /bin/sh
     command:
       - -c
       - |
-        chmod +x /scripts/backup.sh
-        echo "$${BACKUP_CRON} sh /scripts/backup.sh >> /var/log/backup.log 2>&1" > /etc/crontabs/root
-        echo "[$(date -u +%FT%TZ)] smolcrawl-backup scheduler started (cron: $${BACKUP_CRON}, retain: $${RETAIN_COUNT} most recent)"
-        crond -f -l 2
+        echo "[$$(date -u +%FT%TZ)] smolcrawl-backup started (sleep-loop; interval=$${BACKUP_INTERVAL}s, retain=$${RETAIN_COUNT})"
+        while true; do
+          sh /scripts/backup.sh || echo "[$$(date -u +%FT%TZ)] smolcrawl backup.sh exited $$?"
+          sleep "$${BACKUP_INTERVAL}"
+        done
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
@@ -1455,16 +1463,18 @@ services:
       # only precheck. Set HEALTH_TCP=tailscale:41641 etc if you wire it
       # onto a shared network later.
       - HEALTH_TCP=
-      - BACKUP_CRON=${TAILSCALE_BACKUP_CRON:-25 2 * * *}
+      # 2026-08-01: crond -> sleep-loop (see openbrain-wiki-backup rationale).
+      - BACKUP_INTERVAL=${TAILSCALE_BACKUP_INTERVAL:-86400}   # daily
       - TZ=UTC
     entrypoint: /bin/sh
     command:
       - -c
       - |
-        chmod +x /scripts/backup.sh
-        echo "$${BACKUP_CRON} sh /scripts/backup.sh >> /var/log/backup.log 2>&1" > /etc/crontabs/root
-        echo "[$(date -u +%FT%TZ)] tailscale-backup scheduler started (cron: $${BACKUP_CRON}, retain: $${RETAIN_COUNT} most recent)"
-        crond -f -l 2
+        echo "[$$(date -u +%FT%TZ)] tailscale-backup started (sleep-loop; interval=$${BACKUP_INTERVAL}s, retain=$${RETAIN_COUNT})"
+        while true; do
+          sh /scripts/backup.sh || echo "[$$(date -u +%FT%TZ)] tailscale backup.sh exited $$?"
+          sleep "$${BACKUP_INTERVAL}"
+        done
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
@@ -1473,11 +1483,13 @@ services:
     labels:
       - "com.centurylinklabs.watchtower.enable=false"
 
-  # lm-models-backup -- tar of the LM Studio models directory.
+  # lm-models-backup -- tar of the llama.cpp model store (the .lmstudio/models
+  # dir). Despite the path name it holds HF-downloaded GGUFs served by
+  # llama-cpp-upstream (incl. the live ThinkingCap fine-tune) -- NOT LM Studio.
   # CAVEAT: this directory can be 50+ GB. The two-slot NAS mirror means
-  # ~100+ GB on the NAS. WEEKLY (Sundays 01:00 UTC) by default to limit
-  # disk churn; set LM_MODELS_BACKUP_CRON= (empty) in .env to disable
-  # if NAS storage becomes tight. Models are re-downloadable from
+  # ~100+ GB on the NAS. WEEKLY by default (sleep-loop: runs on start + every
+  # LM_MODELS_BACKUP_INTERVAL s); set LM_MODELS_BACKUP_INTERVAL= (empty) in
+  # .env to disable if NAS storage becomes tight. Models are re-downloadable from
   # HuggingFace if you choose to skip backup.
   lm-models-backup:
     image: alpine:3.21
@@ -1503,20 +1515,27 @@ services:
       # report "reachable" even while the model server is down/paused). Empty
       # HEALTH_TCP disables the probe (e.g., if you keep the upstream paused).
       - HEALTH_TCP=${LM_MODELS_BACKUP_HEALTH_TCP:-llama-cpp-upstream:8080}
-      - BACKUP_CRON=${LM_MODELS_BACKUP_CRON:-0 1 * * 0}     # Sunday 01:00 UTC
+      # 2026-08-01: crond -> sleep-loop (see openbrain-wiki-backup rationale).
+      # Weekly, since the llama.cpp model store (incl. the live ThinkingCap
+      # GGUF) rarely changes. MIN_AGE_SECS skips the expensive ~120 GB tar on
+      # start if a fresh-enough backup already exists (prevents restart-storm
+      # re-tars and an immediate re-tar right after a manual capture).
+      - BACKUP_INTERVAL=${LM_MODELS_BACKUP_INTERVAL:-604800}   # weekly
+      - MIN_AGE_SECS=${LM_MODELS_BACKUP_MIN_AGE_SECS:-43200}   # 12h
       - TZ=UTC
     entrypoint: /bin/sh
     command:
       - -c
       - |
-        if [ -z "$${BACKUP_CRON}" ]; then
-          echo "[$(date -u +%FT%TZ)] lm-models-backup DISABLED (LM_MODELS_BACKUP_CRON is empty). Container will exit."
+        if [ -z "$${BACKUP_INTERVAL}" ]; then
+          echo "[$$(date -u +%FT%TZ)] lm-models-backup DISABLED (LM_MODELS_BACKUP_INTERVAL is empty). Container will exit."
           exit 0
         fi
-        chmod +x /scripts/backup.sh
-        echo "$${BACKUP_CRON} sh /scripts/backup.sh >> /var/log/backup.log 2>&1" > /etc/crontabs/root
-        echo "[$(date -u +%FT%TZ)] lm-models-backup scheduler started (cron: $${BACKUP_CRON}, retain: $${RETAIN_COUNT} most recent)"
-        crond -f -l 2
+        echo "[$$(date -u +%FT%TZ)] lm-models-backup started (sleep-loop; interval=$${BACKUP_INTERVAL}s, min_age=$${MIN_AGE_SECS}s, retain=$${RETAIN_COUNT})"
+        while true; do
+          sh /scripts/backup.sh || echo "[$$(date -u +%FT%TZ)] lm-models backup.sh exited $$?"
+          sleep "$${BACKUP_INTERVAL}"
+        done
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true

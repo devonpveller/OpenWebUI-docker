@@ -17,7 +17,8 @@
 param(
   [string]$CompactTaskName = 'AI-Stack Sysadmin Compact VHDX',
   [string]$CheckTaskName   = 'AI-Stack Sysadmin Disk Check',
-  [string]$SweepTaskName   = 'AI-Stack Sysadmin Tmp Sweep'
+  [string]$SweepTaskName   = 'AI-Stack Sysadmin Tmp Sweep',
+  [string]$BackupCheckTaskName = 'AI-Stack Sysadmin Backup Check'
 )
 
 $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
@@ -65,4 +66,19 @@ if (Test-Path $sweep) {
   Write-Output "Registered '$SweepTaskName' (daily 04:00)."
 } else { Write-Warning "sweep_tmp.py not found; skipped daily sweep task." }
 
-Write-Output "DONE. compact_execute armed; weekly detector + daily /tmp sweep scheduled."
+# 4) daily backup-freshness monitor (Limited) — posts a #sysadmin alert when any
+#    RUNNING backup's newest artifact is older than its cadence threshold. Closes
+#    the gap where coverage was checked but recency never was (a *-backup can be
+#    "up" yet silently producing nothing). 09:30 = after the nightly backups and
+#    the disk check, so a missed nightly run is caught the same morning.
+$bchk = Join-Path $here 'check_backups.py'
+if (Test-Path $bchk) {
+  $aBchk = New-ScheduledTaskAction -Execute $py -Argument "`"$bchk`"" -WorkingDirectory $repo
+  $tBchk = New-ScheduledTaskTrigger -Daily -At 9:30am
+  $sBchk = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 15) -MultipleInstances IgnoreNew
+  Register-ScheduledTask -TaskName $BackupCheckTaskName -Action $aBchk -Trigger $tBchk -Principal $pLimit -Settings $sBchk `
+    -Description 'ai-stack systems-administrator: daily backup-freshness check -> #sysadmin alert' -Force | Out-Null
+  Write-Output "Registered '$BackupCheckTaskName' (daily 09:30)."
+} else { Write-Warning "check_backups.py not found; skipped backup-freshness task." }
+
+Write-Output "DONE. compact_execute armed; disk check + /tmp sweep + backup-freshness scheduled."
