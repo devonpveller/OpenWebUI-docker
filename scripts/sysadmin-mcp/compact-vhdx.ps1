@@ -66,6 +66,12 @@ try {
 
 $docker = (Get-Command docker -ErrorAction SilentlyContinue).Source
 if (-not $docker) { $docker = 'C:\Program Files\Docker\Docker\resources\bin\docker.exe' }
+$py = (Get-Command python -ErrorAction SilentlyContinue).Source
+if (-not $py) { $vp = Join-Path (Split-Path (Split-Path $scriptDir -Parent) -Parent) '.venv\Scripts\python.exe'; if (Test-Path $vp) { $py = $vp } }
+$mmpost = Join-Path $scriptDir 'mm_post.py'
+# pre-flight: never compact if the engine is already down/wedged -- it would only deepen the hole.
+& $docker version --format '{{.Server.Version}}' 2>$null | Out-Null
+if ($LASTEXITCODE -ne 0) { $result.error = 'aborted: Docker engine not responding at start (fix Docker first)'; Note 'ABORT: engine unhealthy at pre-flight'; Save; exit 3 }
 try { $result.pre_running = [int]((& $docker ps -q 2>$null | Measure-Object).Count) } catch { $result.pre_running = $null }
 Note "pre-shutdown running containers: $($result.pre_running)"
 
@@ -76,10 +82,24 @@ try {
   try { Stop-ScheduledTask -TaskName $Watchdog -ErrorAction SilentlyContinue; Disable-ScheduledTask -TaskName $Watchdog -ErrorAction Stop | Out-Null; Note "watchdog $Watchdog DISABLED" }
   catch { Note "WARN could not disable watchdog: $($_.Exception.Message)" }
 
-  Get-Process 'Docker Desktop','com.docker.backend','com.docker.build','com.docker.dev-envs','com.docker.extensions' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-  Note 'stopped Docker Desktop'
+  # Stop the engine GRACEFULLY via the supported CLI. Force-killing the Docker Desktop processes
+  # (the old approach) left the backend half-written and wedged it on relaunch ("already running"
+  # yet engine down) -- the 2026-07-31 incident. Graceful stop cleans backend state so start works.
+  Note 'docker desktop stop (graceful)'
+  & $docker desktop stop 2>&1 | Out-Null
+  $downOk = $false
+  for ($k = 0; $k -lt 24; $k++) {   # wait up to ~120s for the engine to actually be down
+    Start-Sleep 5
+    & $docker version --format '{{.Server.Version}}' 2>$null | Out-Null
+    if ($LASTEXITCODE -ne 0) { $downOk = $true; break }
+  }
+  if (-not $downOk) {
+    Note 'WARN engine still responding after graceful stop; last-resort process stop'
+    Get-Process 'Docker Desktop','com.docker.backend','com.docker.build','com.docker.dev-envs','com.docker.extensions' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+  }
+  Note 'engine stopped'
   Start-Sleep 3
-  wsl --shutdown 2>&1 | Out-Null
+  wsl --shutdown 2>&1 | Out-Null   # belt: ensure the docker-desktop VM is down so the vhdx is released
   Note 'wsl --shutdown; waiting for handles'
   Start-Sleep 12
 
@@ -102,15 +122,27 @@ try {
   Note "vhdx $($result.vhdx_before_gb) -> $($result.vhdx_after_gb) GB (reclaimed $($result.reclaimed_gb))"
 }
 finally {
-  Note 'restarting Docker Desktop'
-  if (Test-Path $ddPath) { Start-Process -FilePath $ddPath }
+  # Restart the engine GRACEFULLY, with retries. `docker desktop start` cleans up and starts dockerd;
+  # if it doesn't come up, reset (stop + wsl --shutdown) and retry before giving up.
   $up = $false
-  for ($i = 0; $i -lt [math]::Ceiling($DaemonWaitSec / 5); $i++) {
-    Start-Sleep 5
-    $v = & $docker version --format '{{.Server.Version}}' 2>$null
-    if ($LASTEXITCODE -eq 0 -and $v) { $up = $true; Note "daemon up (server $v)"; break }
+  for ($attempt = 1; $attempt -le 3 -and -not $up; $attempt++) {
+    if ($attempt -gt 1) {
+      Note "engine not up; resetting for attempt $attempt"
+      & $docker desktop stop 2>&1 | Out-Null; Start-Sleep 5
+      wsl --shutdown 2>&1 | Out-Null; Start-Sleep 8
+    }
+    if (-not (Get-Process 'Docker Desktop' -ErrorAction SilentlyContinue)) {
+      if (Test-Path $ddPath) { Start-Process -FilePath $ddPath }; Start-Sleep 8
+    }
+    Note "docker desktop start (attempt $attempt)"
+    & $docker desktop start 2>&1 | Out-Null
+    for ($i = 0; $i -lt [math]::Ceiling($DaemonWaitSec / 5); $i++) {
+      Start-Sleep 5
+      $v = & $docker version --format '{{.Server.Version}}' 2>$null
+      if ($LASTEXITCODE -eq 0 -and $v) { $up = $true; Note "daemon up (server $v) on attempt $attempt"; break }
+    }
   }
-  if (-not $up) { Note 'WARN daemon not confirmed up' }
+  if (-not $up) { Note 'ERROR daemon NOT up after retries -- needs a manual Docker quit/restart or reboot' }
 
   # verify the stack RETURNED: running-container count back to pre-shutdown value
   if ($result.pre_running) {
@@ -128,7 +160,20 @@ finally {
 
   $cAfter = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'"
   $result.c_free_after_gb = [math]::Round($cAfter.FreeSpace / $GB, 1)
-  $result.ok = ($result.reclaimed_gb -ne $null) -and ($up) -and ($result.stack_returned -or -not $result.pre_running)
+  $result.ok = ($null -ne $result.reclaimed_gb) -and ($up) -and ($result.stack_returned -or -not $result.pre_running)
   Note "DONE ok=$($result.ok) C: $($result.c_free_before_gb) -> $($result.c_free_after_gb) GB"
+
+  # Notify. On success the engine (and Mattermost) is back -> post a #sysadmin summary. On FAILURE the
+  # engine is down so Mattermost (a container) is unreachable -> fire a Windows msg popup so the
+  # incident is LOUD, not silent (a compaction must never strand Docker quietly again).
+  if ($result.ok) {
+    $sum = "[sysadmin] compaction OK: reclaimed $($result.reclaimed_gb) GB, C: $($result.c_free_before_gb)->$($result.c_free_after_gb) GB, stack $($result.post_running)/$($result.pre_running) running."
+    if ($py -and (Test-Path $mmpost)) { try { & $py $mmpost $sum 2>$null | Out-Null } catch {} }
+  } else {
+    if (-not $up) { $result.error = "compaction left the Docker engine DOWN (reclaimed $($result.reclaimed_gb) GB). Quit and restart Docker Desktop, or reboot." }
+    elseif (-not $result.stack_returned) { $result.error = "engine came back but only $($result.post_running)/$($result.pre_running) containers returned." }
+    try { msg * /time:0 ("ai-stack sysadmin ALERT: " + $result.error) 2>$null } catch {}
+    if ($py -and (Test-Path $mmpost)) { try { & $py $mmpost ("[sysadmin] ALERT: " + $result.error) 2>$null | Out-Null } catch {} }
+  }
   Save
 }

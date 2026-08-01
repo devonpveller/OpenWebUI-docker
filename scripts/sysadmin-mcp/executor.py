@@ -224,6 +224,14 @@ def reclaim_execute(confirm_token: str | None = None) -> dict:
     results["ok"] = True
     _audit("reclaim_done", {"freed_gb": results["freed_gb"],
                             "cleared": [c["worker"] for c in results["cleared_workers"]]})
+    try:  # completion summary to #sysadmin (best-effort)
+        import mm_post
+        cleared = ", ".join(c["worker"] for c in results["cleared_workers"]) or "none"
+        mm_post.post(f"\U0001f9f9 **Safe reclaim** — freed ~{total} GB "
+                     f"(cleared: {cleared}; {len(results.get('truncated_logs', []))} log(s) truncated; "
+                     f"dangling images/cache pruned).")
+    except Exception:  # noqa: BLE001
+        pass
     return results
 
 
@@ -254,4 +262,12 @@ def sweep_old_tmp(days: float = 3) -> dict:
                         timeout=180)
         results.append({"worker": w, "deleted": n, "rc": rm["rc"]})
         _audit("sweep_old_tmp", {"worker": w, "deleted": n, "days": days})
+    total = sum(r.get("deleted", 0) for r in results if isinstance(r, dict))
+    if total > 0:
+        try:  # only pings #sysadmin when it actually deleted something (stays quiet otherwise)
+            import mm_post
+            mm_post.post(f"\U0001f9f9 **Daily /tmp sweep** removed {total} old lc-*.jsonl file(s) "
+                         f"(>{days}d) from running workers.")
+        except Exception:  # noqa: BLE001
+            pass
     return {"days": days, "results": results}
