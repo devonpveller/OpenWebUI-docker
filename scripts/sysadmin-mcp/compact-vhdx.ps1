@@ -69,11 +69,22 @@ if (-not $docker) { $docker = 'C:\Program Files\Docker\Docker\resources\bin\dock
 $py = (Get-Command python -ErrorAction SilentlyContinue).Source
 if (-not $py) { $vp = Join-Path (Split-Path (Split-Path $scriptDir -Parent) -Parent) '.venv\Scripts\python.exe'; if (Test-Path $vp) { $py = $vp } }
 $mmpost = Join-Path $scriptDir 'mm_post.py'
+$tgnotify = Join-Path $scriptDir 'telegram_notify.py'   # DOCKER-INDEPENDENT out-of-band alert (Telegram)
 # pre-flight: never compact if the engine is already down/wedged -- it would only deepen the hole.
 & $docker version --format '{{.Server.Version}}' 2>$null | Out-Null
 if ($LASTEXITCODE -ne 0) { $result.error = 'aborted: Docker engine not responding at start (fix Docker first)'; Note 'ABORT: engine unhealthy at pre-flight'; Save; exit 3 }
 try { $result.pre_running = [int]((& $docker ps -q 2>$null | Measure-Object).Count) } catch { $result.pre_running = $null }
 Note "pre-shutdown running containers: $($result.pre_running)"
+
+# Pre-flight handshake (out-of-band): announce the downtime window the instant we
+# commit, BEFORE the engine goes down. Docker + Mattermost are about to disappear,
+# so this Telegram ping is the only way to say "expect ~10-15 min of silence" while
+# you're away. The matching "OK / ALERT" ping fires from the finally block.
+if ($py -and (Test-Path $tgnotify)) {
+  try {
+    & $py $tgnotify "ai-stack compaction STARTING now: Docker (and Mattermost) go DOWN ~10-15 min, then auto-recover. You'll get an out-of-band ping when it's back -- or if it gets stuck. Reply 'status' anytime." 2>$null | Out-Null
+  } catch {}
+}
 
 $dd = Get-Process 'Docker Desktop' -ErrorAction SilentlyContinue | Where-Object { $_.Path } | Select-Object -First 1
 $ddPath = if ($dd) { $dd.Path } else { 'C:\Program Files\Docker\Docker\Docker Desktop.exe' }
@@ -169,11 +180,22 @@ finally {
   if ($result.ok) {
     $sum = "[sysadmin] compaction OK: reclaimed $($result.reclaimed_gb) GB, C: $($result.c_free_before_gb)->$($result.c_free_after_gb) GB, stack $($result.post_running)/$($result.pre_running) running."
     if ($py -and (Test-Path $mmpost)) { try { & $py $mmpost $sum 2>$null | Out-Null } catch {} }
+    # Out-of-band confirmation (works whether or not you're at the machine).
+    if ($py -and (Test-Path $tgnotify)) { try { & $py $tgnotify $sum 2>$null | Out-Null } catch {} }
   } else {
     if (-not $up) { $result.error = "compaction left the Docker engine DOWN (reclaimed $($result.reclaimed_gb) GB). Quit and restart Docker Desktop, or reboot." }
     elseif (-not $result.stack_returned) { $result.error = "engine came back but only $($result.post_running)/$($result.pre_running) containers returned." }
     try { msg * /time:0 ("ai-stack sysadmin ALERT: " + $result.error) 2>$null } catch {}
     if ($py -and (Test-Path $mmpost)) { try { & $py $mmpost ("[sysadmin] ALERT: " + $result.error) 2>$null | Out-Null } catch {} }
+    # CRITICAL out-of-band alert: on failure Docker (and Mattermost) is down, so the MM post above
+    # cannot land. Telegram posts straight to the operator's phone and is actionable -- the listener
+    # accepts these commands as replies. This is the fix for "compaction stranded Docker silently".
+    if ($py -and (Test-Path $tgnotify)) {
+      try {
+        $tgmsg = "ALERT ai-stack compaction FAILED: " + $result.error + " -- reply 'docker up', 'recover', or 'status' to act."
+        & $py $tgnotify $tgmsg 2>$null | Out-Null
+      } catch {}
+    }
   }
   Save
 }

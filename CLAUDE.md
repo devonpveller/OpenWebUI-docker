@@ -55,5 +55,6 @@ GGUF over the Windows `C:` bind mount hangs). See `litellm-proxy-status` memory 
 
 - Stack topology / "what runs here?" → `/stack-map` skill
 - Recovery after a crash or netns break → `scripts/emergency-recovery.ps1`
+- Compaction downtime / Docker-down out-of-band Telegram channel → `documentation/sysadmin-out-of-band-channel.md`
 - little-coder design + workflow → `documentation/little-coder/`
 - Private search gateway → `documentation/web-search/`

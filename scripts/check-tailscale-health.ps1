@@ -1081,12 +1081,176 @@ function Test-BackupRecency {
     return $false
 }
 
+# --- Out-of-band Telegram alert (DOCKER-INDEPENDENT) --------------------------
+# Posts straight to the operator's phone via scripts/sysadmin-mcp/telegram_notify.py
+# (plain HTTPS to the Telegram Bot API). Unlike notify-mattermost.sh (which posts
+# to the Mattermost *container* on :8065), this still lands when Docker is down --
+# the whole point of the out-of-band channel. Throttled per-key via a logs sentinel
+# so a persistent fault doesn't spam every 60s cycle. Best-effort; never throws.
+function Send-TelegramAlert {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Message,
+        [string]$ThrottleKey,
+        [double]$ThrottleHours = 0.5
+    )
+    try {
+        if ($ThrottleKey) {
+            $sentinel = Join-Path $PROJECT_DIR "logs\.tg-alert-$ThrottleKey"
+            if (Test-Path $sentinel) {
+                if (((Get-Date) - (Get-Item $sentinel).LastWriteTime).TotalHours -lt $ThrottleHours) { return }
+            }
+        }
+        $py = Join-Path $PROJECT_DIR '.venv\Scripts\python.exe'
+        if (-not (Test-Path $py)) { $py = 'python' }
+        $tg = Join-Path $SCRIPT_DIR 'sysadmin-mcp\telegram_notify.py'
+        if (Test-Path $tg) {
+            & $py $tg $Message 2>$null | Out-Null
+            if ($ThrottleKey) { (Get-Date -Format o) | Out-File $sentinel -Encoding utf8 -Force }
+        }
+    } catch { Write-LogEntry "Telegram alert failed: $($_.Exception.Message)" "WARN" }
+}
+
+# --- Docker ENGINE liveness + autonomous restart ------------------------------
+# The single most important addition for the "compaction/crash stranded Docker"
+# class. Every other probe in this script issues `docker ...` and assumes the
+# daemon is up; this confirms that first. If the engine is DOWN it attempts an
+# autonomous restart (docker desktop start, with a reset-and-retry) -- this is
+# what keeps trying AFTER compact-vhdx.ps1's own 3 finally-block retries give up,
+# because the watchdog is re-enabled the moment a compaction ends. On unrecovered
+# failure it fires an ACTIONABLE out-of-band Telegram alert (the operator can
+# reply 'docker up' / 'recover' / 'status' to the listener). Returns $true if the
+# engine is up (or was recovered), $false if it is still down.
+function Confirm-DockerEngine {
+    [CmdletBinding()]
+    param()
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'   # native docker/wsl stderr must not throw under -Stop
+    try {
+        & docker version --format '{{.Server.Version}}' 2>$null | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            Write-LogEntry "Docker engine UP" "DEBUG"
+            Remove-Item (Join-Path $PROJECT_DIR 'logs\.tg-alert-engine') -Force -ErrorAction SilentlyContinue
+            return $true
+        }
+        Write-LogEntry "Docker ENGINE is DOWN (docker version failed) -- attempting autonomous restart" "ERROR"
+        $dd = Get-Process 'Docker Desktop' -ErrorAction SilentlyContinue | Where-Object { $_.Path } | Select-Object -First 1
+        $ddPath = if ($dd) { $dd.Path } else { 'C:\Program Files\Docker\Docker\Docker Desktop.exe' }
+        for ($attempt = 1; $attempt -le 2; $attempt++) {
+            if ($attempt -gt 1) {
+                & docker desktop stop 2>$null | Out-Null; Start-Sleep 5
+                & wsl --shutdown 2>$null | Out-Null; Start-Sleep 8
+            }
+            if (-not (Get-Process 'Docker Desktop' -ErrorAction SilentlyContinue)) {
+                if (Test-Path $ddPath) { Start-Process -FilePath $ddPath }
+                Start-Sleep 8
+            }
+            Write-LogEntry "docker desktop start (attempt $attempt)" "WARN"
+            & docker desktop start 2>$null | Out-Null
+            for ($i = 0; $i -lt 30; $i++) {   # up to ~150s per attempt
+                Start-Sleep 5
+                & docker version --format '{{.Server.Version}}' 2>$null | Out-Null
+                if ($LASTEXITCODE -eq 0) {
+                    Write-LogEntry "Docker engine recovered on attempt $attempt" "SUCCESS"
+                    Send-TelegramAlert "ai-stack: Docker engine was down; the watchdog restarted it. Verifying the stack now." -ThrottleKey 'engine-ok' -ThrottleHours 1
+                    Remove-Item (Join-Path $PROJECT_DIR 'logs\.tg-alert-engine') -Force -ErrorAction SilentlyContinue
+                    return $true
+                }
+            }
+        }
+        Write-LogEntry "Docker engine still DOWN after restart attempts -- needs manual intervention/reboot" "ERROR"
+        Send-TelegramAlert "ALERT ai-stack Docker engine is DOWN and the watchdog could NOT restart it. Reply 'docker up' to retry, 'recover' for an ordered restart, or 'status'. May need a host reboot." -ThrottleKey 'engine' -ThrottleHours 0.25
+        return $false
+    } finally {
+        $ErrorActionPreference = $prevEAP
+    }
+}
+
+# --- Generic HOST lifeline (bridge/listener) liveness + restart ---------------
+# The claude-sessions bridge (48291), the sysadmin persona bridge (48292) and the
+# out-of-band Telegram listener (48293) are HOST Scheduled Tasks, not containers,
+# so they stay reachable during a Docker-down window -- they are the lifelines.
+# Liveness proxy: a LISTEN socket on the single-instance lock port, owned by a
+# python process. Test-HostLockPort probes it; Confirm-HostTaskByPort restarts the
+# owning Scheduled Task if it is not listening and alerts out-of-band on failure.
+function Test-HostLockPort {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][int]$Port)
+    try {
+        $conn = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
+        if (-not $conn) { return $false }
+        $owner = Get-Process -Id (@($conn)[0].OwningProcess) -ErrorAction SilentlyContinue
+        if ($owner -and $owner.ProcessName -notmatch '^python') {
+            Write-LogEntry "lock port $Port held by '$($owner.ProcessName)' (PID $($owner.Id)) -- not a python bridge/listener; a task restart cannot fix a foreign squatter" "ERROR"
+            return $false
+        }
+        return $true
+    } catch {
+        Write-LogEntry "host lock-port $Port probe error: $($_.Exception.Message)" "WARN"
+        return $false
+    }
+}
+
+function Confirm-HostTaskByPort {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$TaskName,
+        [Parameter(Mandatory)][int]$Port,
+        [Parameter(Mandatory)][string]$Label
+    )
+    if (Test-HostLockPort -Port $Port) {
+        Write-LogEntry "$Label alive (lock port $Port listening)" "DEBUG"
+        return $true
+    }
+    Write-LogEntry "$Label DOWN (no listener on 127.0.0.1:$Port), restarting Scheduled Task '$TaskName'..." "WARN"
+    try {
+        $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+        if (-not $task) {
+            Write-LogEntry "Scheduled Task '$TaskName' not found -- cannot repair $Label (not registered?)" "ERROR"
+        } else {
+            Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+            Start-Sleep 2
+            Start-ScheduledTask -TaskName $TaskName
+            $waited = 0
+            while ($waited -lt 30) {
+                Start-Sleep 5; $waited += 5
+                if (Test-HostLockPort -Port $Port) {
+                    Write-LogEntry "$Label recovered after ${waited}s" "SUCCESS"
+                    return $true
+                }
+            }
+            Write-LogEntry "$Label did not come back within 30s of task restart" "ERROR"
+        }
+    } catch {
+        Write-LogEntry "$Label recovery error: $($_.Exception.Message)" "ERROR"
+    }
+    # Outbound Telegram is independent of the listener, so this lands even if the
+    # listener itself is the thing that is down (inbound control is then lost, but
+    # the operator is at least told and can RDP in via host Tailscale).
+    Send-TelegramAlert "ALERT $Label is DOWN and auto-restart FAILED (Scheduled Task '$TaskName'). Check the host." -ThrottleKey ("task-" + $Port) -ThrottleHours 1
+    return $false
+}
+
 function Invoke-HealthCheck {
     Write-LogEntry "Starting comprehensive health check..."
-    
+
     # Change to project directory
     Set-Location $PROJECT_DIR
-    
+
+    # --- Docker ENGINE liveness FIRST: every check below issues `docker ...` and
+    # needs the daemon. If it is down (a compaction stranded it, or a crash), try
+    # to restart it autonomously and alert out-of-band. Then short-circuit: with
+    # no daemon there is nothing container-side to check -- but the HOST lifelines
+    # (bridges + Telegram listener) DON'T need Docker, so verify them here instead
+    # of skipping them via the early return that used to blind this window.
+    if (-not (Confirm-DockerEngine)) {
+        Write-LogEntry "Docker engine down and not recovered; verifying host lifelines, skipping container checks" "ERROR"
+        Confirm-HostTaskByPort -TaskName 'claude-sessions-bridge'     -Port 48291 -Label 'claude-sessions bridge' | Out-Null
+        Confirm-HostTaskByPort -TaskName 'sysadmin-bridge'            -Port 48292 -Label 'sysadmin bridge'        | Out-Null
+        Confirm-HostTaskByPort -TaskName 'sysadmin-telegram-listener' -Port 48293 -Label 'telegram listener'      | Out-Null
+        return $false
+    }
+
     # First, validate entrypoint and detect common issues
     if (-not (Test-EntrypointHealth)) {
         Write-LogEntry "Entrypoint validation failed. Manual intervention required." "ERROR"
@@ -1283,6 +1447,14 @@ function Invoke-HealthCheck {
     # After Invoke-AgentOrgHealth so the Mattermost container it connects to has
     # just been confirmed/repaired. Non-fatal for the overall check.
     Confirm-ClaudeSessionsBridge | Out-Null
+
+    # --- sysadmin persona bridge (#sysadmin, 48292) + out-of-band Telegram command
+    # listener (48293), both HOST Scheduled Tasks. Process-liveness + task-restart:
+    # the claude-bridge check above already repairs the shared Mattermost host
+    # port-forward, and the listener needs no container at all. This closes the gap
+    # where nothing watched the sysadmin bridge or the break-glass control channel.
+    Confirm-HostTaskByPort -TaskName 'sysadmin-bridge'            -Port 48292 -Label 'sysadmin bridge'   | Out-Null
+    Confirm-HostTaskByPort -TaskName 'sysadmin-telegram-listener' -Port 48293 -Label 'telegram listener' | Out-Null
 
     # --- backup OUTPUT recency (all 14 backups/<dir> trees, incl. portal + OB) ---
     # Non-fatal for the overall check, but logs ERROR + Mattermost-alerts:

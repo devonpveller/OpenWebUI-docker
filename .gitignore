@@ -56,3 +56,5 @@ scripts/claude-sessions-bridge/state/
 # sysadmin-mcp runtime state (audit log, compaction result)
 scripts/sysadmin-mcp/state/
 scripts/sysadmin-mcp/bridge-state/
+# Telegram out-of-band listener runtime state (getUpdates offset, command audit)
+scripts/sysadmin-mcp/telegram-state/
