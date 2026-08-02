@@ -46,7 +46,7 @@ services:
       start_period: 20s
 
   mattermost:
-    image: mattermost/mattermost-team-edition:${MATTERMOST_VERSION:-10.5}
+    image: mattermost/mattermost-team-edition:${MATTERMOST_VERSION:-11.7}
     container_name: mattermost
     depends_on:
       mattermost-db:
@@ -80,7 +80,11 @@ services:
     security_opt:
       - no-new-privileges:true
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "--max-time", "5", "http://localhost:8065/api/v4/system/ping"]
+      # mmctl over the local socket — the image's own probe. The prior curl-based
+      # check broke on the v10.11+ distroless images (no curl/shell in-image),
+      # leaving the container permanently "unhealthy" and wedging agent-bridge's
+      # depends_on: service_healthy. Changed during the 10.5->10.11->11.7 upgrade (2026-08-02).
+      test: ["CMD", "/mattermost/bin/mmctl", "system", "status", "--local"]
       interval: 30s
       timeout: 10s
       retries: 5
