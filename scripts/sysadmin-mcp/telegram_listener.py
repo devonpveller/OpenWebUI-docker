@@ -21,6 +21,8 @@ Security model (a remote-command path into the host -- non-negotiable):
 Commands:
   status          daemon up? running-container count, C: free, last compaction
   docker up       start the Docker engine (docker desktop start) + wait
+  mattermost / mm bring up ONLY Mattermost + its DB, then confirm the #claude-sessions
+                  bridge -- fast, safe path to a Claude session (vs a full recover)
   recover         scripts/emergency-recovery.ps1 recover  (ordered restart)
   compact status  last vhdx-compaction result
   gpu-reset       (confirm) scripts/emergency-recovery.ps1 gpu-reset
@@ -56,6 +58,11 @@ import telegram_notify as tn  # noqa: E402  (shares the .env creds + send())
 _DOCKER = shutil.which("docker") or r"C:\Program Files\Docker\Docker\resources\bin\docker.exe"
 _PWSH = shutil.which("powershell") or r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
 _RECOVERY = os.path.join(_REPO, "scripts", "emergency-recovery.ps1")
+# agent-org compose holds Mattermost; invoked with -f only (project name resolves from the
+# file/.env), matching emergency-recovery.ps1's proven invocation.
+_AGENT_ORG_COMPOSE = os.path.join(_REPO, "agent-org", "docker", "docker-compose.yml")
+_CLAUDE_BRIDGE_TASK = "claude-sessions-bridge"  # host Scheduled Task serving #claude-sessions
+_CLAUDE_BRIDGE_PORT = 48291                     # its single-instance lock port (liveness proxy)
 
 # a pending destructive confirmation: {"action": "nuclear", "expires": <ts>}
 _pending: dict = {}
@@ -130,6 +137,22 @@ def _run(cmd: list[str], timeout: int) -> tuple[int, str]:
         return 1, f"({e})"
 
 
+def _port_in_use(port: int) -> bool:
+    """True if 127.0.0.1:port is already bound (a bridge/listener holds it).
+    Uses a PASSIVE bind probe (no SO_REUSEADDR), NOT connect(): the bridge lock
+    sockets are never accept()ed, so connect-probes pile up in the backlog and
+    then time out -> false 'down'. A bind attempt just asks the OS 'is this taken?'
+    without touching the socket. bind fails (EADDRINUSE) => held => alive."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        s.bind(("127.0.0.1", port))
+        return False  # bind succeeded -> nothing holds it -> down
+    except OSError:
+        return True   # in use -> alive
+    finally:
+        s.close()
+
+
 # --------------------------------------------------------------- handlers ----
 def _daemon_up() -> bool:
     rc, _ = _run([_DOCKER, "version", "--format", "{{.Server.Version}}"], timeout=15)
@@ -191,6 +214,74 @@ def _handle_recover() -> None:
     _reply(f"recover finished (exit {rc}).\n{tail}\n\nSend 'status' to confirm.")
 
 
+def _mm_health() -> str:
+    rc, out = _run([_DOCKER, "inspect", "-f", "{{.State.Health.Status}}", "mattermost"], timeout=15)
+    return out.strip() if rc == 0 and out.strip() else "absent"
+
+
+def _handle_mattermost() -> None:
+    """Targeted fast path to a Claude session: bring up ONLY Mattermost + its DB (not the
+    whole stack), then confirm the host claude-sessions bridge so #claude-sessions is live.
+    Much lighter and safer than `recover` when the rest of the stack is fine."""
+    # 1) engine must be up first
+    if not _daemon_up():
+        _reply("Docker engine is down -- starting it first...")
+        _run([_DOCKER, "desktop", "start"], timeout=60)
+        ok = False
+        for _ in range(24):  # ~120s
+            if _daemon_up():
+                ok = True
+                break
+            time.sleep(5)
+        if not ok:
+            _reply("Could not start the Docker engine. Try 'docker up' again, or 'recover'.")
+            return
+    # 2) bring up Mattermost ONLY if it isn't already healthy -- never bounce a
+    #    working MM (docker compose up -d would recreate it on any config drift).
+    health = _mm_health()
+    if health == "healthy":
+        _reply("Mattermost is already healthy -- not touching it; confirming the bridge...")
+    else:
+        if not os.path.exists(_AGENT_ORG_COMPOSE):
+            _reply(f"agent-org compose not found at {_AGENT_ORG_COMPOSE}")
+            return
+        _reply(f"Mattermost health='{health}'; bringing up mattermost-db + mattermost only "
+               "(leaving the rest of the stack untouched)...")
+        rc, out = _run([_DOCKER, "compose", "-f", _AGENT_ORG_COMPOSE, "up", "-d",
+                        "mattermost-db", "mattermost"], timeout=180)
+        if rc != 0:
+            tail = "\n".join(out.splitlines()[-8:]) if out else "(no output)"
+            _reply(f"compose up failed (exit {rc}):\n{tail}\n\nTry 'recover'.")
+            return
+        # 3) wait for Mattermost to report healthy
+        health = "starting"
+        for _ in range(24):  # ~120s
+            health = _mm_health()
+            if health == "healthy":
+                break
+            time.sleep(5)
+    # 4) ensure the #claude-sessions bridge (host task) is alive. Passive bind probe
+    #    (see _port_in_use). If genuinely down, END then RUN to clear a wedged
+    #    'Running' instance (a bare `schtasks /run` no-ops on an already-Running task).
+    bridge = _port_in_use(_CLAUDE_BRIDGE_PORT)
+    if not bridge:
+        _run(["schtasks", "/end", "/tn", _CLAUDE_BRIDGE_TASK], timeout=15)
+        time.sleep(2)
+        _run(["schtasks", "/run", "/tn", _CLAUDE_BRIDGE_TASK], timeout=30)
+        for _ in range(8):  # ~40s
+            time.sleep(5)
+            if _port_in_use(_CLAUDE_BRIDGE_PORT):
+                bridge = True
+                break
+    # 5) report
+    if health == "healthy" and bridge:
+        _reply("Mattermost is HEALTHY and the #claude-sessions bridge is up. Open the app -- your Claude session is ready.")
+    elif health == "healthy":
+        _reply("Mattermost is HEALTHY, but the #claude-sessions bridge isn't listening yet. The watchdog restarts it within ~10 min; give it a minute then open the app.")
+    else:
+        _reply(f"Mattermost brought up but health='{health}' (still starting or unhealthy). Wait a minute and send 'status'; if it won't go healthy, try 'recover'.")
+
+
 def _handle_destructive(action: str) -> None:
     if not os.path.exists(_RECOVERY):
         _reply(f"recovery script not found at {_RECOVERY}")
@@ -206,6 +297,7 @@ _HELP = (
     "ai-stack sysadmin - commands:\n"
     "  status          engine + container count + C: free + last compaction\n"
     "  docker up       start the Docker engine\n"
+    "  mattermost / mm bring up ONLY Mattermost + its DB (fast path to a Claude session)\n"
     "  recover         ordered stack restart (emergency-recovery recover)\n"
     "  compact status  last vhdx-compaction result\n"
     "  gpu-reset       (asks to confirm) GPU/container reset\n"
@@ -243,6 +335,8 @@ def _dispatch(text: str) -> None:
         _reply(_handle_status())
     elif cmd in ("docker up", "docker start", "start docker", "engine up", "up"):
         _spawn(_handle_docker_up)
+    elif cmd in ("mattermost", "mm", "/mattermost"):
+        _spawn(_handle_mattermost)
     elif cmd in ("recover", "/recover"):
         _spawn(_handle_recover)
     elif cmd in ("compact status", "compaction status", "compact", "/compact"):

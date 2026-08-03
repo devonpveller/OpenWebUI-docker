@@ -62,6 +62,7 @@ Telegram and runs a **strict whitelist** for the operator's `chat_id` only:
 |---|---|
 | `status` | engine up? · running-container count · C: free · last compaction |
 | `docker up` | `docker desktop start` + wait |
+| `mattermost` / `mm` | bring up **only** Mattermost + its DB, then confirm the #claude-sessions bridge — fast, safe path to a Claude session (vs a full `recover`) |
 | `recover` | `emergency-recovery.ps1 recover` (ordered restart) |
 | `compact status` | last vhdx-compaction result |
 | `gpu-reset` / `nuclear` | **asks for `confirm <action>`** first |
@@ -77,14 +78,23 @@ lock prevents duplicate pollers; every command is audit-logged to
 ## Operator runbook — "I got an ALERT while away"
 
 1. **`status`** → see what's actually wrong (engine down? partial stack?).
-2. Engine down → **`docker up`**. Wait, then **`status`** again.
-3. Engine up but containers didn't return → **`recover`** (ordered restart, a few minutes),
-   then **`status`**.
-4. Still broken → RDP/SSH to the host over **Tailscale** (it's up) and run
-   `scripts\emergency-recovery.ps1 recover`, or last-resort **`nuclear`** → `confirm nuclear`,
-   or reboot the host.
-5. Once Docker is back, Mattermost returns and `#sysadmin` resumes automatically (the bridges
-   reconnect within one poll).
+2. **Just want a Claude session to drive the fixes yourself?** → **`mm`**. It ensures the engine
+   is up, brings up **only** Mattermost + its DB, and confirms the #claude-sessions bridge — then
+   open the Mattermost app and work in `#claude-sessions`. This is the preferred first move: it
+   leaves inference/GPU/the rest untouched, so it can't make a partial outage worse the way a full
+   `recover` might.
+3. Whole engine down → **`docker up`** (starts the engine; `restart: unless-stopped` containers,
+   Mattermost included, come back on their own). Wait, then **`status`**.
+4. Still partial/broken after `mm` or `docker up` → **`recover`** (ordered full restart, a few
+   minutes; also needed if a prior `nuclear`/`compose down` removed containers so restart policies
+   don't apply), or last-resort **`nuclear`** → `confirm nuclear`, or reboot the host.
+5. Once Docker is back, Mattermost returns and both `#sysadmin` and `#claude-sessions` resume
+   automatically (the host bridges reconnect within one poll).
+
+> Hands-on host access (RDP/SSH over Tailscale) is **not enabled yet** (host is on the tailnet at
+> `shuya8873desktop01-1.tail37f875.ts.net`, but RDP is off and no SSH server is installed). Until it
+> is, the Telegram commands above are the remote levers. Tailscale-SSH server is not available on a
+> Windows host; enabling tailnet-scoped RDP is the planned fallback.
 
 ## The compaction protocol (@sysadmin persona)
 Before triggering `compact_execute`, announce in `#sysadmin`: window starting, ~10–15 min of
