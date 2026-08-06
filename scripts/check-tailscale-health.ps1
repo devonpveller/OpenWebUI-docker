@@ -1043,15 +1043,37 @@ function Test-BackupRecency {
             $stale += "$($exp.Dir): newest artifact $($newest.Name) is ${ageH}h old (max $($exp.MaxAgeHours)h)"
         }
     }
+    # Sentinel = the outstanding-alert marker. Its presence means a STALE ping
+    # was sent and never cleared; its content is the throttle key (the ';'-joined
+    # stale dir names). Used by both the all-clear below and the throttle logic.
+    $sentinel = Join-Path $PROJECT_DIR 'logs\.backup-recency-alert'
     if ($stale.Count -eq 0) {
         Write-LogEntry "backup recency OK ($($ExpectedBackupRecency.Count) dirs checked)" "DEBUG"
+        # All-clear: if a stale alert was outstanding (sentinel present), post a
+        # one-time RECOVERED notice and clear the sentinel. Without this a
+        # resolved incident looks identical to an open one in #claude-code, and
+        # the next stale event wouldn't re-ping until the 12h throttle lapsed.
+        if (Test-Path $sentinel) {
+            try {
+                $prevKey = (Get-Content $sentinel -Raw -ErrorAction SilentlyContinue)
+                if ($prevKey) { $prevKey = $prevKey.Trim() }
+                # Same git-bash / forward-slash constraints as the STALE ping below.
+                $bash = 'C:\Program Files\Git\bin\bash.exe'
+                if ((Test-Path $bash) -and $prevKey) {
+                    $scriptPath = ($PROJECT_DIR -replace '\\', '/') + '/scripts/notify-mattermost.sh'
+                    $recovered = (($prevKey -split ';') | Sort-Object) -join ', '
+                    $null | & $bash $scriptPath "RECOVERED ai-stack backup: fresh artifacts again for $recovered" 2>$null | Out-Null
+                }
+                Remove-Item $sentinel -Force -ErrorAction SilentlyContinue
+                Write-LogEntry "backup recency RECOVERED - cleared stale alert for: $prevKey" "SUCCESS"
+            } catch { Write-LogEntry "backup recency recovery notice failed: $($_.Exception.Message)" "WARN" }
+        }
         return $true
     }
     foreach ($s in $stale) { Write-LogEntry "BACKUP STALE - $s" "ERROR" }
     # Mattermost alert, throttled: re-ping only if the stale set changed or the
     # last ping is older than 12h (this check runs every 10 minutes).
     try {
-        $sentinel = Join-Path $PROJECT_DIR 'logs\.backup-recency-alert'
         $content = ($stale | Sort-Object) -join '; '
         # Throttle key = WHICH dirs are stale (not the full message: the age
         # number changes every cycle and would defeat the 12h suppression).
