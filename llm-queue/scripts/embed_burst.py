@@ -21,7 +21,7 @@ async def one(client):
                               headers={"Authorization": "Bearer not-needed"})
         ok = r.status_code == 200 and len(r.json().get("data", [{}])[0].get("embedding", [])) == 1024
         return r.status_code, ok
-    except Exception as exc:  # noqa: BLE001
+    except Exception:  # noqa: BLE001
         return -1, False
 
 

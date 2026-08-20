@@ -5,7 +5,6 @@ GPU Check - Python equivalent of quick-fixes.bat gpu
 Checks GPU status and restarts GPU services if needed.
 """
 
-import os
 import subprocess
 import sys
 import time

@@ -1,6 +1,6 @@
 import os
 from smolcrawl.utils import get_storage_path
-from typing import List, Iterable, Set, Optional
+from typing import List, Iterable, Set
 from pydantic import BaseModel
 from loguru import logger
 import xml.etree.ElementTree as ET

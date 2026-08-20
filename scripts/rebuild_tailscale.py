@@ -5,11 +5,9 @@ Rebuild Tailscale - Python equivalent of quick-fixes.bat rebuild
 Rebuilds Tailscale container for persistent issues that simple restart can't fix.
 """
 
-import os
 import subprocess
 import sys
 import time
-import requests
 from pathlib import Path
 
 def log_info(message):

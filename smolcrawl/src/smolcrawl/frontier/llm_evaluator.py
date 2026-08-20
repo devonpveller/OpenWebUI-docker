@@ -12,8 +12,8 @@ Open/Closed: EvaluatorConfig allows extension without modifying core logic.
 import json
 import logging
 import re
-from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional
+from dataclasses import dataclass
+from typing import Callable, Dict, List, Optional
 from urllib.parse import urlparse
 
 logger = logging.getLogger("smolcrawl.frontier.llm_evaluator")

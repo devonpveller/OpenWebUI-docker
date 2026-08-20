@@ -6,10 +6,8 @@ Comprehensive system status check with detailed diagnostics.
 """
 
 import json
-import os
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 def log_info(message):

@@ -9,11 +9,9 @@ This script works from within the OpenWebUI container by using HTTP APIs
 instead of Docker CLI commands.
 """
 
-import os
 import subprocess
 import sys
 import time
-import requests
 from pathlib import Path
 
 def log_info(message):

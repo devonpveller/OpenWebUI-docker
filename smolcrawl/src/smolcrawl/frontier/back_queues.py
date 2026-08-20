@@ -1,4 +1,4 @@
-from collections import deque, defaultdict
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Dict, Optional, Set, List
 import heapq

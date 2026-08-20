@@ -1,6 +1,5 @@
 from urllib.parse import urlparse
 from typing import Set, Optional
-import asyncio
 from .models import URLEntry
 from .front_queues import FrontQueueManager
 from .back_queues import BackQueueManager

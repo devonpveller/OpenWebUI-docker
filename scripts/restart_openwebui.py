@@ -5,7 +5,6 @@ Restart OpenWebUI - Python equivalent of quick-fixes.bat restart-openwebui
 Properly restart OpenWebUI with dependent containers in correct order.
 """
 
-import os
 import subprocess
 import sys
 import time

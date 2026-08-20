@@ -1,5 +1,5 @@
 from collections import deque
-from typing import Dict, List, Optional
+from typing import List, Optional
 import random
 from .models import URLEntry
 

@@ -49,7 +49,6 @@ from __future__ import annotations
 import glob as globmod
 import json
 import os
-import queue
 import re
 import shutil
 import subprocess
