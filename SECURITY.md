@@ -15,13 +15,16 @@ Documents security posture, decisions, and known gaps. Last updated 2026-08-20.
   mounts anywhere (previously one, on watchtower, with an unpinned `:latest`
   image and a second whole-repo mount). Updates are manual + verified per
   `documentation/runbooks/UPDATE-MANAGEMENT.md`.
-- **Committed gateway key defanged, rotation PENDING.** The live `gw-…`
-  Open Brain key was tracked in `.vscode/mcp.json` and
-  `openbrain-gateway/smoke_test.py` — both untracked/env-indirected now, but
-  the key is **still valid until rotated** (operator action) and remains in
-  git history along with two 2026-08 `.env.bak` commits holding ~25 live
-  credentials each (scrub decision = CLEANUP-PLAN D-1). Treat all of it as
-  burned until rotation.
+- **Committed gateway key defanged; rotation DECLINED (operator, 2026-08-20).**
+  The live `gw-…` Open Brain key was tracked in `.vscode/mcp.json` and
+  `openbrain-gateway/smoke_test.py` — both untracked/env-indirected now. The
+  operator explicitly declined rotating the key (it would break every
+  external MCP client until re-keyed). **Accepted-risk posture:** the key
+  remains valid AND present in git history (with the two 2026-08 `.env.bak`
+  commits, ~25 live credentials each; scrub = CLEANUP-PLAN D-1, deferred).
+  Standing conditions of that acceptance: the repo remote stays private, and
+  the pre-commit `gw-` guard stays in force. Revisit before any change to
+  either condition.
 - **Pre-commit secret guard hardened**: the `gw-` gateway-key pattern was
   added (the one token class this repo actually leaked was the one the guard
   couldn't see). Hooks bootstrap for fresh clones:

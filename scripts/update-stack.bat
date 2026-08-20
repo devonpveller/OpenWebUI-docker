@@ -106,45 +106,24 @@ echo   OpenWebUI Update Process
 echo ========================================
 echo.
 
-REM Step 1: Backup data
-echo [STEP 1/8] Creating data backup...
-set BACKUP_DIR=..\data-backup\data-backup-%date:~-4%%date:~-7,2%%date:~-10,2%-%time:~0,2%%time:~3,2%%time:~6,2%
-set BACKUP_DIR=%BACKUP_DIR: =0%
-echo [INFO] Backup directory: %BACKUP_DIR%
-
-if not exist "..\data\openwebui" (
-    echo.
-    echo [WARNING] data\openwebui directory not found
-    echo [INFO] This may be a fresh install or data is stored elsewhere
-    set /p SKIP_BACKUP="Continue without backup? (y/n): "
-    if /i not "!SKIP_BACKUP!"=="y" (
-        echo [INFO] Update cancelled
-        if "%1"=="" (
-            pause
-            goto :interactive_menu
-        )
-        goto :end
+REM Step 1: Verify backups are fresh (the openwebui-backup sidecar owns
+REM backups now - nightly tars of the openwebui-data NAMED VOLUME into
+REM ..\backups\openwebui). The old xcopy of data\openwebui was removed
+REM 2026-08-20: that bind-mount dir has been dead since the named-volume
+REM move, so it silently backed up stale data.
+echo [STEP 1/8] Verify backup freshness before updating...
+echo [INFO] Latest sidecar artifacts in ..\backups\openwebui:
+dir /b /o-d "..\backups\openwebui" 2>nul | findstr /n "^" | findstr "^[1-3]:"
+echo [INFO] If the newest artifact is older than last night, run a manual
+echo [INFO] backup first (see documentation\runbooks\UPDATE-MANAGEMENT.md).
+set /p BACKUP_OK="Newest artifact fresh enough to proceed? (y/n): "
+if /i not "%BACKUP_OK%"=="y" (
+    echo [INFO] Update cancelled - refresh backups first
+    if "%1"=="" (
+        pause
+        goto :interactive_menu
     )
-    echo [INFO] Skipping backup - continuing with update...
-) else (
-    if not exist "..\data-backup" mkdir "..\data-backup"
-    if not exist "%BACKUP_DIR%" mkdir "%BACKUP_DIR%"
-    
-    echo [INFO] Backing up data\openwebui to %BACKUP_DIR%\openwebui...
-    xcopy /E /I /Y /Q "..\data\openwebui" "%BACKUP_DIR%\openwebui"
-    
-    REM Check if backup actually succeeded by verifying files exist
-    if exist "%BACKUP_DIR%\openwebui" (
-        echo [SUCCESS] Data backed up to %BACKUP_DIR%
-    ) else (
-        echo [ERROR] Backup failed - aborting update
-        echo [INFO] Make sure data\openwebui directory exists
-        if "%1"=="" (
-            pause
-            goto :interactive_menu
-        )
-        goto :end
-    )
+    goto :end
 )
 
 REM Step 2: Get version input

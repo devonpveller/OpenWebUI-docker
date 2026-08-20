@@ -34,12 +34,21 @@ as document-not-delete: skills provenance README).
 **IN FLIGHT:** F.1 extraction #1 (pending-decision semantics; gated on the
 723-test Docker suite).
 
-**BLOCKED ON OPERATOR:** key rotation (A.1 step 1); D-1 scrub; D-4 (20 GB
-data-backup); D-7 (main + 9 branches); iks-dev overlay teardown (#11);
-data/openwebui 1.2 GB (#12); G.2 physical moves + watchdog rename (needs an
+**OPERATOR DECISIONS 2026-08-20 (evening):** key rotation **DECLINED** —
+accepted-risk posture recorded in SECURITY.md §0 (conditions: private remote
++ the `gw-` pre-commit guard; D-1 scrub deferred with it). D-4 **EXECUTED**
+(20 GB data-backup deleted; update-stack.bat's obsolete xcopy step — which
+created those snapshots from the dead bind-mount dir — replaced by a
+sidecar-freshness check). #12 **EXECUTED** (data/openwebui deleted).
+D-7 **EXECUTED** (old main tagged `archive/main-2025-05`, main re-pointed to
+the integration line, 9 merged branches deleted; the 5 stale UNMERGED
+branches still need individual keep/extract/drop calls). #11 **EXECUTED**
+earlier (iks-dev overlay down, volumes kept, tree archived).
+
+**STILL BLOCKED ON OPERATOR:** G.2 physical moves + watchdog rename (needs an
 ELEVATED session to re-register Scheduled Tasks — commands in scripts/README);
-J.1 flip (needs operator reachable); H.1 (after rotation + OB1's uncommitted
-k8s work lands); H.2 (needs a GitHub repo created).
+J.1 flip (needs operator reachable); H.1 (OB1's uncommitted k8s work lands
+first); H.2 (needs a GitHub repo created); the 5 unmerged stale branches.
 
 **DEFERRED BY DESIGN:** E.1 gateway unification (coupled to D-9 + H.1);
 F.1 #2–#9 (between gym rounds); F.2; E.4 (OB1-side); D.1 x-anchors polish;
