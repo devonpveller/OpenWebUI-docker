@@ -51,7 +51,7 @@ class TailscaleServeAdmin:
             self.execute_command([
                 "tailscaled",
                 "--tun=userspace-networking",
-                f"--state=/var/lib/tailscale/tailscaled.state"
+                "--state=/var/lib/tailscale/tailscaled.state"
             ])
             
             # Authenticate with non-interactive auth
@@ -121,9 +121,10 @@ class TailscaleServeAdmin:
             return self._no_cli_response()
 
         try:
-            # Health check first
+            # Health probe runs for its side effect only; serve verification
+            # below is what actually gates success.
             health_check_url = f"http://{target_host}:{target_port}{health_path}"
-            health_result = self.execute_command([
+            self.execute_command([
                 "curl", "-f", "-s", "-o", "/dev/null", health_check_url
             ])
             

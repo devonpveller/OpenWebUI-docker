@@ -1,0 +1,25 @@
+# ruff — starter gate (CLEANUP-PLAN v3 I.2), added 2026-08-20.
+# Deliberately high-signal/low-churn: F (pyflakes: undefined names, unused
+# imports/vars, dead assignments) + E9 (syntax/indentation errors). Style
+# rules stay off until a dedicated formatting pass — this repo spans several
+# eras and a style flood would train people to ignore the linter.
+
+target-version = "py311"
+line-length = 120
+
+exclude = [
+    "scripts/archive",           # retired code, kept for history
+    "documentation",             # archived snippets inside docs
+    "owui",                      # deploy-by-paste snapshots incl. vendored 11k-line tools
+    "OB1",                       # vendored independent repo (own tooling)
+    "little-coder",              # own pyproject/tooling (submodule candidate H.2)
+    "data",
+    "data-backup",
+    "backups",
+    "backup/models",
+    "**/.venv*",
+    "**/__pycache__",
+]
+
+[lint]
+select = ["F", "E9"]

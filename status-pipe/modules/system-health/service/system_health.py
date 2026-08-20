@@ -6,15 +6,12 @@ Manifest-driven system health monitoring module implementing the new AI Stack ar
 Provides comprehensive system monitoring with structured contracts.
 """
 
-import json
 import logging
 import os
 import subprocess
-import sys
 import time
 from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List
 
 def setup_logging() -> logging.Logger:
     """Setup module logging"""

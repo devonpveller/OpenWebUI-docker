@@ -4,11 +4,9 @@ GPU Helper Utilities for AI Stack
 Provides GPU availability checks and monitoring utilities for the AI stack environment.
 """
 
-import json
 import subprocess
-import sys
 import time
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any
 
 # Try to import torch - may not be available in all environments
 try:

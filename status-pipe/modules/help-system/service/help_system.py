@@ -6,14 +6,10 @@ Manifest-driven help and documentation module implementing the new AI Stack arch
 Provides comprehensive help system with structured contracts.
 """
 
-import json
 import logging
-import os
-import sys
 import time
 from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict
 
 def setup_logging() -> logging.Logger:
     """Setup module logging"""
@@ -448,7 +444,7 @@ class HelpSystemModule:
         """Format help overview with query-specific message"""
         content = self._format_help_overview(overview_data)
         content = f"## 🔍 No specific help found for '{query}'\n\n" + content
-        content += f"\n\n💡 **Suggestion**: Try searching for broader terms or ask about specific topics listed above."
+        content += "\n\n💡 **Suggestion**: Try searching for broader terms or ask about specific topics listed above."
         return content
     
     def _format_search_results(self, result_data: Dict[str, Any]) -> str:

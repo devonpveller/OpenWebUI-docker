@@ -10,7 +10,6 @@ import json
 import logging
 import os
 import sys
-import time
 import uuid
 import importlib.util
 from datetime import datetime, timezone
@@ -204,7 +203,7 @@ class DirectModuleAdapter:
                     module_id=module_slug,
                     status=ExecutionStatus.ERROR,
                     content=f"❌ Module missing 'main' function: {module_slug}",
-                    error={"code": "MISSING_ENTRYPOINT", "message": f"Module missing 'main' function"}
+                    error={"code": "MISSING_ENTRYPOINT", "message": "Module missing 'main' function"}
                 )
             
             # Convert request to legacy format for existing modules during migration
@@ -562,7 +561,7 @@ class AIStackRouter:
         
         if not adapter:
             return self._create_error_result(request.request_id, module_slug, 
-                                           "NO_ADAPTER", f"No execution adapter available")
+                                           "NO_ADAPTER", "No execution adapter available")
         
         # Execute module
         return adapter.execute(module_manifest, request)

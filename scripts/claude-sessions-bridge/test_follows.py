@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import json
 import os
-import queue
 import shutil
 import sys
 import tempfile
@@ -133,7 +132,7 @@ class FollowEngineTests(unittest.TestCase):
         q = self.b.queues.get("bt1")
         self.assertIsNotNone(q, "wake must be enqueued for the owning bridge thread")
         item = q.get_nowait()
-        prompt, trigger = item.prompt, item.post_id
+        prompt = item.prompt
         self.assertEqual(item.kind, "wake", "a follow wake belongs in lane 2")
         self.assertIn("AUTO-WAKE", prompt)
         self.assertIn("PM says done", prompt)

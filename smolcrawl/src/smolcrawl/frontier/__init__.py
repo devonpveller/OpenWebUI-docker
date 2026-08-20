@@ -9,3 +9,10 @@ from .llm_evaluator import (
     LinkBuffer,
     partition_links,
 )
+
+# Public package surface (re-exports).
+__all__ = [
+    "URLEntry", "URLFrontier", "FrontQueueManager", "BackQueueManager",
+    "HostQueue", "EvaluatedLink", "EvaluatorConfig", "LlmLinkEvaluator",
+    "LinkBuffer", "partition_links",
+]

@@ -5,10 +5,19 @@ from .owui_client import OwuiConfig, OwuiKnowledgeClient, SyncResult
 import typer
 import asyncio
 from pathlib import Path
-from typing import List, Literal, Optional
+from typing import List
 from loguru import logger
 from .utils import get_storage_path
 import os
+
+# Public package surface (re-exports consumed by smolcrawl_pipeline.py et al.)
+__all__ = [
+    "MarkdownFileIndexer", "Page", "Section", "XmlFileIndexer", "TANTIVY_AVAILABLE",
+    "crawl_target", "crawl_target_sync", "SmolCrawler",
+    "augment_markdown", "augment_pages",
+    "OwuiConfig", "OwuiKnowledgeClient", "SyncResult",
+    "app",
+]
 
 # Optional tantivy import
 if TANTIVY_AVAILABLE:

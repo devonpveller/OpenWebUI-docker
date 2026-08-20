@@ -26,12 +26,11 @@ aliases and the friendly-name map below simply stops being needed.
 import json
 import logging
 import os
-import sys
 import time
 import urllib.request
 import urllib.error
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional
 
 
 def setup_logging() -> logging.Logger:
@@ -263,7 +262,7 @@ class LLMTrafficModule:
             ]
             return "\n".join(lines)
         if not agg:
-            lines.append(f"_No requests logged in this window._ (Widen it: append `today`, `last 24h`, `last week`, or `since boot`.)")
+            lines.append("_No requests logged in this window._ (Widen it: append `today`, `last 24h`, `last week`, or `since boot`.)")
             return "\n".join(lines)
         lines += [
             "| Caller (presented key) | Reqs | Tok in | Tok out | Total tok | Fails | Avg ms | Models | Last seen (UTC) |",

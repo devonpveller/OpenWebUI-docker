@@ -8,12 +8,10 @@ Provides comprehensive tool management with structured contracts.
 
 import json
 import logging
-import os
-import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict
 
 def setup_logging() -> logging.Logger:
     """Setup module logging"""
@@ -328,7 +326,6 @@ class CustomToolsModule:
         
         try:
             # Import and execute the tailscale_serve_pipe
-            import sys
             import os
             
             # Environment-aware path setup

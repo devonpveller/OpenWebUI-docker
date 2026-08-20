@@ -283,10 +283,6 @@ def disk_report() -> dict:
     trapped = rep["vhdx"].get("trapped_gb")
     if trapped is not None and trapped >= th.get("vhdx_trapped_warn_gb", 60):
         flags.append(("compaction", f"vhdx trapped ≈ {trapped} GB (compaction would reclaim to {cfg['system_drive']})"))
-    containers_total = 0.0
-    if isinstance(rep["docker"], dict):
-        containers_total = rep["docker"].get("Containers", {}).get("size_gb", 0) or 0
-
     severity = "healthy"
     if any(f[0] == "critical" for f in flags):
         severity = "critical"
