@@ -1,5 +1,4 @@
 file,type,name,owui_id,bytes
-actions/add_web_sources_to_knowledge.py,action,Add Web Sources to Knowledge,add_web_sources_to_knowledge,22306
 actions/copy_research_note.py,action,Copy Research Note,copy_research_note,13178
 actions/copy_sources.py,action,Copy Sources,copy_sources,7728
 filters/context_window_manager.py,filter,Context Window Manager,context_window_manager,11902

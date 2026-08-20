@@ -16,7 +16,7 @@ the id is cryptic the filename uses the friendly name instead — e.g. the
 | `tools/`   | Tools (model-callable)        | `superpowers_tool`, `fileshed`, `mnemory`, `deep_research`, `github_chat_mcp_tools` (GitHub Repo Analyzer), `code_agent_tools` |
 | `filters/` | Filter functions              | `context_window_manager`, `mnemory_persistent_memory` |
 | `pipes/`   | Pipe functions (custom models)| `server_status` (the AI-Stack unified status pipe), `little_coder`, `githelper`, `github_chat_mcp`, `code_agent` *(inactive)* |
-| `actions/` | Action functions (buttons)    | `add_web_sources_to_knowledge`, `copy_research_note`, `copy_sources` |
+| `actions/` | Action functions (buttons)    | `copy_research_note`, `copy_sources` (`add_web_sources_to_knowledge` retired 2026-08-20 — wrote into the retired OWUI Knowledge layer; deactivated in webui.db, snapshot in `scripts/archive/owui-retired/`) |
 | `skills/`  | Skills (attached to models via `skillIds`) | `skill-creator`, `docx`, `canvas-design`, `doc-coauthoring`, `github-repo-analyzer`, `feature-validation-workflow`, `github-repo-expert`, `openwebui-tools` |
 
 **Skills note (2026-08-20):** files are named by their OWUI **skill id**, which

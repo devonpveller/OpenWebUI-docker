@@ -20,7 +20,7 @@ _log = logging.getLogger(__name__)
 class Tools:
     class Valves(BaseModel):
         mnemory_url: str = Field(
-            default="http://localhost:8050",
+            default="http://mnemory:8050",
             description="Mnemory server base URL",
         )
         api_key: str = Field(

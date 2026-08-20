@@ -23,7 +23,7 @@ class Filter:
             description="Filter priority (lower = runs first)",
         )
         mnemory_url: str = Field(
-            default="http://localhost:8050",
+            default="http://mnemory:8050",
             description="Mnemory server base URL",
         )
         api_key: str = Field(
