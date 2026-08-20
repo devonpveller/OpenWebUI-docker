@@ -697,3 +697,91 @@ re-registering or removing.
   the operator's call. Deleting it from the volume is the clean fix (it then leaves
   the backups naturally); excluding it from the tar instead would silently stop
   protecting it.
+
+---
+
+## OWUI knowledge retired + an OB1 retrieval bug found — 2026-08-20
+
+Operator decision: keep SenseGlove, retire the rest of OWUI knowledge, drop
+`vector_db` in favour of OB1. Executing that surfaced a **systemic OB1 bug**.
+
+### The SenseGlove promotion was already done — but half of it was unusable
+
+Both docs were promoted in the 2026-06-12 migration (byte-exact char counts,
+matching `owui_file_id`s). Nothing to promote. But only one was retrievable:
+
+| Document | Chunks before |
+|---|---|
+| `senseglove-docs-unity-v2023.md` | 728, embedded |
+| `senseglove-unreal-5.4-documentation.md` | **0** — `chunk_error: binary_content` |
+
+The Unreal manual was verified **100% clean text** (0 non-printable chars across
+all 582,822). The flag was wrong.
+
+### Root cause — an emoji
+
+`OB1/integrations/chunk-embedding-worker/index.ts:113`:
+
+```js
+if (c >= 0xd800 && c <= 0xdfff) return true; // lone/UTF-16 surrogate -> binary
+```
+
+The comment says *lone* surrogate; the code rejected **all** surrogates. JS strings
+are UTF-16, so every character above U+FFFF is a valid surrogate **pair** — this
+tripped on the first half. The SenseGlove manual contains 🚀 three times in its
+first 4000 chars, so it was excluded from chunk retrieval by a rocket emoji.
+
+### Blast radius: 494 sources (5.9% of OB1), all false positives
+
+- **494 of 8,419** sources carried `chunk_error: binary_content`.
+- **All 494** had an astral character in their first 4000 chars.
+- **Zero** were genuinely binary (no PDF header, no NUL).
+- **488 were `content_type = web_article`** — research-ingested pages, i.e. exactly
+  the corpus the research engine retrieves from, silently missing from chunk
+  search since ingestion. Emoji are ubiquitous in web content, which is why this
+  concentrated there.
+
+This is a **retrieval-quality** bug, not a data-loss bug: `sources.content` always
+held the full text. But under the source→claim grounding model, content that is
+not chunk-indexed is effectively invisible to deep retrieval — only the coarse
+source-level vector remained, and that is prefix-bounded to 1,500 chars by the
+2026-06 `MAX_EMBED_CHARS` fix. So these documents were near-unfindable.
+
+### Fix
+
+1. **Heuristic corrected** to reject only *unpaired* surrogates; a valid pair is
+   text. Handles the case where the 4000-char slice splits a pair.
+   Unit-tested 10 cases (emoji at start/middle, CJK astral, lone high, lone low,
+   NUL, PDF header, control-char soup, empty) — all pass.
+2. **Deployed durably** — image rebuilt via
+   `docker compose --project-name open-brain ... up -d --build --no-deps
+   openbrain-chunk-worker`, container recreated, `/app/index.ts` md5 matches the
+   repo. (A `docker cp` alone would be reverted by any `--force-recreate`.)
+3. **Re-queued the 494** by clearing `chunked_hash` + `chunk_error` — the worker
+   selects on `md5(content) IS DISTINCT FROM metadata->>'chunked_hash'`, so
+   clearing the stamp is the entire trigger. Drained in ~27 min on the 15 s
+   periodic scan.
+
+**Result:** `binary_content` flags **494 → 0**. The SenseGlove Unreal manual went
+**0 → 618 chunks, all embedded** (verified content at chunk 0 / 300 / 617 spans
+the whole document). Fleet-wide: 207,605 chunks across 7,995 of 8,419 sources.
+
+### `vector_db` removed — 29.1 GB reclaimed
+
+Volume **39.1 GB → 10.0 GB**, deleted in 15 s. `chromadb.PersistentClient`
+recreated an empty store on boot (188 KB); OWUI came back **healthy in 50 s** with
+no errors, and post-flight is **29/29**.
+
+Remaining in the volume: `cache/` 7.9 GB (regenerable, already excluded from
+backup), `webui.db` 1.1 GB, the stale `webui.db.backup_20260424_184325` 605 MB,
+`uploads/` 466 MB, `user_files/` 30 MB.
+
+> The backup exclusion for `vector_db` stays in place — OWUI will slowly regrow a
+> store if RAG is used again, and we do not want it back in the nightly.
+
+### Lesson
+
+The original ask was a two-file copy. What it actually surfaced was 5.9% of OB1's
+corpus missing from retrieval for two months. **Verifying that a copy is
+*retrievable* — not merely *present* — is what found it.** "It's in OB1" and "the
+research engine can find it" are different claims; only the second one matters.
