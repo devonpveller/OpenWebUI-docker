@@ -1,0 +1,197 @@
+# compose/search.yml - private search plane: Mullvad vpn egress, tor page-fetch, redis, searxng, gateway, mcpo
+# Split from the 2,2xx-line root docker-compose.yml 2026-08-20 (CLEANUP-PLAN v3 D.1).
+# Networks/volumes are defined in the root file.
+services:
+  tor:
+    image: ${TOR_IMAGE:-osminogin/tor-simple:latest}
+    container_name: search-tor
+    networks:
+      - search-net
+      - default
+    volumes:
+      - ./search-gateway/tor/torrc:/etc/tor/torrc:ro
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 9050 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
+  # ---------------------------------------------------------------------
+  # vpn (Mullvad WireGuard via gluetun) — SearXNG's engine-query egress
+  # (2026-06-14). Replaces Tor for the SEARCH leg ONLY: search engines
+  # blocklist Tor exit IPs by reputation (brave/ddg/startpage/mojeek all
+  # 403/429/CAPTCHA on sight), which neutralises SearXNG's multi-engine
+  # aggregation. Mullvad gives a clean, non-Tor exit IP so aggregation works
+  # again. Page FETCH still egresses via `tor` (openbrain-research et al.'s
+  # FETCH_PROXY_URL) — arbitrary pages aren't engine-blocked, and Tor keeps
+  # "what you actually read" private.
+  #
+  # Privacy invariant preserved: like `tor`, `vpn` is the ONLY search-net
+  # member that ALSO joins `default`, so SearXNG stays internal-only and can
+  # egress solely through this HTTP proxy. gluetun's firewall is a KILL-SWITCH
+  # — if the WireGuard tunnel drops, all egress is blocked (no clear-IP leak).
+  # Secrets (MULLVAD_WG_*) live in .env and are NEVER committed.
+  # ---------------------------------------------------------------------
+
+  vpn:
+    image: ${VPN_IMAGE:-qmcgaw/gluetun:latest}
+    container_name: search-vpn
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    networks:
+      - search-net
+      - default
+    environment:
+      - VPN_SERVICE_PROVIDER=mullvad
+      - VPN_TYPE=wireguard
+      - WIREGUARD_PRIVATE_KEY=${MULLVAD_WG_PRIVATE_KEY}
+      - WIREGUARD_ADDRESSES=${MULLVAD_WG_ADDRESSES}
+      - SERVER_COUNTRIES=${MULLVAD_COUNTRIES:-Netherlands}
+      # HTTP forward-proxy for SearXNG. HTTPS targets use CONNECT, so DNS is
+      # resolved at gluetun THROUGH the tunnel (no local DNS leak, matching the
+      # old socks5h behaviour).
+      - HTTPPROXY=on
+      - HTTPPROXY_LISTENING_ADDRESS=:8888
+      # Allow the LAN-side (docker search-net) to reach the proxy through the
+      # kill-switch firewall. 172.16/12 covers Docker's default subnet pool.
+      - FIREWALL_OUTBOUND_SUBNETS=${SEARCH_NET_SUBNET:-172.16.0.0/12}
+      # DNS: leave gluetun's default DNS-over-TLS ON — engine hostnames resolve
+      # via DoT through the tunnel (no DNS leak). NOTE: WIREGUARD_ADDRESSES must
+      # be IPv4-only unless the Docker host has IPv6 (gluetun rejects v6 addrs).
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "/gluetun-entrypoint", "healthcheck"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
+  redis:
+    image: ${SEARCH_REDIS_IMAGE:-redis:7-alpine}
+    container_name: search-redis
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    networks:
+      - search-net
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 15s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
+  searxng:
+    image: ${SEARXNG_IMAGE:-searxng/searxng:latest}
+    container_name: searxng
+    networks:
+      - search-net
+    depends_on:
+      vpn:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      - SEARXNG_SECRET=${SEARXNG_SECRET_KEY}
+      - SEARXNG_REDIS_URL=redis://redis:6379/0
+    volumes:
+      - ./search-gateway/searxng:/etc/searxng:rw
+    restart: unless-stopped
+    cap_drop: [ALL]
+    cap_add: [CHOWN, SETGID, SETUID, DAC_OVERRIDE]
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:8080/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 90s   # WireGuard tunnel build can be slow on first start
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
+  gateway:
+    build:
+      context: ./search-gateway/gateway
+      dockerfile: Dockerfile
+    image: private-search-gateway:local
+    container_name: search-gateway
+    networks:
+      - search-net
+      - default
+    depends_on:
+      searxng:
+        condition: service_started
+      redis:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      - SEARXNG_URL=http://searxng:8080
+      - REDIS_URL=redis://redis:6379/1
+    ports:
+      - "127.0.0.1:8085:8080"   # native REST / Tavily shim for host tools
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "--max-time", "5", "http://localhost:8080/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
+  mcpo:
+    build:
+      context: ./search-gateway/gateway
+      dockerfile: Dockerfile
+    image: private-search-gateway:local   # same tag as gateway; built once, cached
+    container_name: search-mcpo
+    networks:
+      - search-net
+    depends_on:
+      gateway:
+        condition: service_started
+    env_file:
+      - .env
+    environment:
+      - SEARXNG_URL=http://searxng:8080
+      - REDIS_URL=redis://redis:6379/1
+    command: ["mcpo", "--port", "8001", "--", "python", "-m", "gateway.mcp_server"]
+    ports:
+      - "127.0.0.1:8001:8001"   # MCP-as-OpenAPI for REST/MCP clients
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "--max-time", "5", "http://localhost:8001/openapi.json"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
+  # =====================================================================
+  # little-coder — self-improving coding agent (Chapter 1: Tool).
+  # Docs: documentation/little-coder/. Control plane (decides) +
+  # the open-terminal workspace plane (executes) reconfigured above.
+  # =====================================================================
+

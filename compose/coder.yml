@@ -1,0 +1,123 @@
+# compose/coder.yml - little-coder agent + egress
+# Split from the 2,2xx-line root docker-compose.yml 2026-08-20 (CLEANUP-PLAN v3 D.1).
+# Networks/volumes are defined in the root file.
+services:
+  little-coder:
+    build:
+      context: ./little-coder
+      dockerfile: docker/Dockerfile.agent
+      args:
+        LITTLE_CODER_VERSION: ${LITTLE_CODER_VERSION:-latest}
+    image: little-coder:local
+    container_name: little-coder
+    networks:
+      - lc-net      # control plane ↔ open-terminal ↔ lc-mcpo
+      - llm-net     # llama-cpp inference
+    env_file:
+      - .env
+    environment:
+      - LC_CONFIG=/app/config/little-coder.config.yaml
+      - LC_LLAMA_API_KEY=${LC_LLAMA_API_KEY:-llama}
+      - OPEN_TERMINAL_API_KEY=${OPEN_TERMINAL_API_KEY}
+      - LC_DEPLOY_TOKEN=${LC_DEPLOY_TOKEN:-}
+      # Route the agent's shell into open-terminal (design §3.4). Verified
+      # working; default on. Set 0 to fall back to built-in bash (runs in the
+      # network-isolated little-coder container). See pi-extension/README.md.
+      - LC_ROUTE_EXEC=${LC_ROUTE_EXEC:-1}
+      # open-terminal exec params, exposed statically so a direct interactive
+      # `little-coder` run (docker exec) has working exec routing — not only
+      # the daemon-spawned agent (the daemon also sets these per task).
+      - LC_OPEN_TERMINAL_URL=http://open-terminal:8000
+      - LC_OPEN_TERMINAL_KEY=${OPEN_TERMINAL_API_KEY}
+      - LC_WORKSPACE=/workspace
+      # 1.9.x llama-cpp-provider probes the server's /props at startup to detect
+      # the live context window. Our base_url is the LiteLLM gateway, which does
+      # not forward llama.cpp's /props — the probe just fails (silently) on every
+      # task and falls back to models.json's declared window (131072), which is
+      # what we want anyway. Skip the futile probe + its log noise.
+      - LITTLE_CODER_NO_CTX_PROBE=1
+    volumes:
+      - ./little-coder/config:/app/config:ro
+      - little-coder-journals:/var/lib/little-coder/journals
+      - little-coder-skill:/var/lib/little-coder/skill
+      - little-coder-cohorts:/var/lib/little-coder/cohorts
+      - little-coder-polyglot:/var/lib/little-coder/polyglot
+      - little-coder-sessions:/var/lib/little-coder/sessions
+      - little-coder-workspace:/workspace
+    ports:
+      - "127.0.0.1:9091:9090"   # Prometheus metrics (loopback only)
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      llm-gateway:
+        condition: service_healthy
+      open-terminal:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "--max-time", "5", "http://localhost:8090/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
+  # MCP→OpenAPI edge. Built in Tool, DORMANT until chapter 2 registers it as
+  # an OWUI tool (design §3.1). API-key'd; carries task triggers only —
+  # operator commands authenticate elsewhere (design §12.6).
+
+  lc-mcpo:
+    build:
+      context: ./little-coder
+      dockerfile: docker/Dockerfile.agent
+      args:
+        LITTLE_CODER_VERSION: ${LITTLE_CODER_VERSION:-latest}
+    image: little-coder:local
+    container_name: lc-mcpo
+    networks:
+      - lc-net    # control plane (reaches the little-coder daemon)
+      - llm-net   # OWUI reaches lc-mcpo here to register it as an OpenAPI tool
+    env_file:
+      - .env
+    environment:
+      - LC_DAEMON_URL=http://little-coder:8090
+    command: ["mcpo", "--host", "0.0.0.0", "--port", "8002", "--api-key", "${LC_MCPO_API_KEY}", "--", "python", "-m", "littlecoder.mcp_server"]
+    ports:
+      - "127.0.0.1:8002:8002"   # MCP-as-OpenAPI (loopback only)
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      little-coder:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "--max-time", "5", "http://localhost:8002/openapi.json"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
+  # Egress allowlist for open-terminal — only the operator-configured git
+  # host is reachable; everything else is denied (design §3.4).
+
+  lc-egress:
+    build:
+      context: ./little-coder
+      dockerfile: docker/Dockerfile.egress
+    image: little-coder-egress:local
+    container_name: lc-egress
+    networks:
+      - lc-net      # reachable by open-terminal
+      - default     # the only little-coder-side service with internet
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
+  # Nightly backup of the four little-coder expertise volumes (design §3.6).
+  # The workspace volume is project-scoped and re-clonable — not backed up.
+

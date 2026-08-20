@@ -1,0 +1,231 @@
+# compose/core.yml - OpenWebUI frontend, the tailscale netns companion, open-terminal, watchtower
+# Split from the 2,2xx-line root docker-compose.yml 2026-08-20 (CLEANUP-PLAN v3 D.1).
+# Networks/volumes are defined in the root file.
+services:
+  openwebui:
+    build:
+      context: .
+      dockerfile: Dockerfile.openwebui-gpu
+    container_name: openwebui
+    ports:
+      - "127.0.0.1:3000:8080" # Bind to localhost only
+    networks:
+      - default
+      - llm-net
+      - app-net               # plan §7.4 — portal Caddy reaches openwebui:8080 here
+    volumes:
+      - openwebui-data:/app/backend/data
+      - ./config:/app/config:ro # Read-only config
+      - .:/host_project:ro # Mount entire project for AI Stack pipe functions
+    environment:
+      - TZ=America/New_York
+      # Pinned session/encryption key (value in .env). 0.9.6 hard-requires this; and the
+      # key was previously auto-generated into the container's EPHEMERAL layer
+      # (/app/backend/.webui_secret_key, outside the data volume), so a recreate would
+      # rotate it and break every encrypted-at-rest value in webui.db + all sessions.
+      - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY}
+      - USE_CUDA=true
+      - USE_CUDA_DOCKER=true
+      - NVIDIA_VISIBLE_DEVICES=${GPU_AISTACK_DEVICE_ID:-1}
+      - CUDA_VISIBLE_DEVICES=${GPU_AISTACK_DEVICE_ID:-1}
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - TRANSFORMERS_CACHE=/tmp/transformers_cache
+      - HF_HOME=/tmp/hf_cache
+      # OWUI HTTP-client timeouts (backend/model calls)
+      - AIOHTTP_CLIENT_TIMEOUT=3600
+      - AIOHTTP_CLIENT_TIMEOUT_MODEL_LIST=60
+      # AIOHTTP_CLIENT_TIMEOUT_TOOL_CALL was set here until 2026-08-20 and was a
+      # PHANTOM: no reader exists in OWUI 0.9.6 or 0.11.0 (verified by grepping
+      # env.py in both). It never bounded tool calls. The real knob is below --
+      # it governs fetching TOOL SERVER specs (mcpo / lc-mcpo), default 10s,
+      # which is tight for a cold MCP server. Raised deliberately.
+      - AIOHTTP_CLIENT_TIMEOUT_TOOL_SERVER_DATA=30
+      - MODELS_CACHE_TTL=10 # Cache model list for 10 seconds to reduce repeated calls
+      - ENABLE_BASE_MODELS_CACHE=true # Cache base models for faster loading
+      # Reduce OpenWebUI overhead for model requests
+      - CHAT_RESPONSE_STREAM_DELTA_CHUNK_SIZE=4 # Larger chunks for better streaming performance
+      - BYPASS_MODEL_ACCESS_CONTROL=true # Skip access control checks for faster requests
+      # 0.9.6 renamed CHAT_RESPONSE_MAX_TOOL_CALL_RETRIES -> _ITERATIONS and raised the
+      # default 30 -> 256. Pin a sane bound so deep_research / little-coder tool loops
+      # don't run away on latency/cost. (Ignored by 0.8.10, which uses the old name.)
+      - CHAT_RESPONSE_MAX_TOOL_CALL_ITERATIONS=40
+      # 0.11.0 adds a master switch for the Tools/Functions plugin surfaces.
+      # Upstream default is True; pinned so an upstream default change can
+      # never silently disable this stack's 16 deploy-by-paste plugins.
+      - ENABLE_PLUGINS=true
+      # open-terminal moved into the little-coder control plane (Tool chapter):
+      # it left OWUI's network namespace, so OWUI's direct terminal access
+      # ends here. It returns in chapter 2 via lc-mcpo (design §3.4, Decision
+      # Log 2026-05-20). Re-enable only when chapter 2 lands.
+      # - ENABLE_OPEN_TERMINAL=true
+      # - TERMINAL_SERVER_CONNECTIONS=[{"id":"open-terminal","name":"Open Terminal","url":"http://localhost:8000","key":"${OPEN_TERMINAL_API_KEY}"}]
+      # Web search → Private Search Gateway (Approach B: OWUI's stock searxng
+      # engine pointed at the gateway, which routes via Tor). This also feeds
+      # smolcrawl deep_research, which calls OWUI's search_web().
+      - ENABLE_WEB_SEARCH=${ENABLE_WEB_SEARCH:-True}
+      - WEB_SEARCH_ENGINE=${WEB_SEARCH_ENGINE:-searxng}
+      - SEARXNG_QUERY_URL=${SEARXNG_QUERY_URL:-http://gateway:8080/search?q=<query>}
+      # Built-in code interpreter disabled: the default Pyodide engine runs
+      # via `await __event_call__({"type": "execute:python"})` with no timeout
+      # (backend/open_webui/tools/builtin.py execute_code), so when the
+      # browser tab is backgrounded or the WS round-trip stalls, the tool
+      # call hangs forever and the chat model stays stuck waiting. The fix
+      # is still absent on OWUI main as of 2026-05-09. Re-enable only after
+      # standing up the Jupyter engine — see
+      # documentation/implementation-guide/Jupyter/.
+      - ENABLE_CODE_INTERPRETER=${ENABLE_CODE_INTERPRETER:-False}
+      - ENABLE_CODE_EXECUTION=${ENABLE_CODE_EXECUTION:-False}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${GPU_AISTACK_DEVICE_ID:-1}"]
+              capabilities: [ gpu ]
+    restart: unless-stopped
+    pull_policy: build
+    security_opt:
+      - no-new-privileges:true
+    read_only: false # OpenWebUI needs write access for temp files
+    tmpfs:
+      - /tmp:noexec,nosuid,size=100m
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "--max-time", "10", "http://localhost:8080/health" ]
+      interval: 15s
+      timeout: 15s
+      retries: 3
+      start_period: 60s
+
+  watchtower:
+    # Pinned by digest (was :latest — an unpinned auto-updater holding the
+    # docker.sock is host-root-equivalent supply-chain exposure). Retirement
+    # in favor of the manual update runbook is CLEANUP-PLAN v3 decision D-2.
+    image: containrrr/watchtower@sha256:6dd50763bbd632a83cb154d5451700530d1e44200b268a4e9488fefdfcf2b038
+    container_name: watchtower
+    logging: # sysadmin log cap (disk-prune-watcher); applies on recreate
+      driver: json-file
+      options:
+        max-size: "100m"
+        max-file: "5"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro # Read-only access
+      # (post-update-hook.sh + .:/compose-dir mounts removed 2026-08-20: the
+      # scratch-image watchtower has no shell and no container carries a
+      # lifecycle label, so the hook never executed once. The OWUI→tailscale
+      # restart coordination it intended is handled by the health watchdog.)
+    environment:
+      - DOCKER_API_VERSION=1.44 # image bakes in 1.25; engine 29+ (Docker Desktop 4.80) requires >=1.40
+      - WATCHTOWER_CLEANUP=true # remove old images
+      - WATCHTOWER_POLL_INTERVAL=120 # check every 2 minutes for testing
+      - WATCHTOWER_INCLUDE_STOPPED=false # Only running containers
+      - WATCHTOWER_DEBUG=true # Enable debug logging to verify container detection
+      - WATCHTOWER_RUN_ONCE=false # Keep running
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true # Prevent privilege escalation
+
+  tailscale:
+    build:
+      context: .
+      dockerfile: dockerfile.tailscale
+    container_name: tailscale
+    network_mode: service:openwebui
+    env_file:
+      - .env
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    environment:
+      - TS_HOSTNAME=openwebui
+      - TS_ACCEPT_DNS=false
+      # MUST be the GATEWAY alias (llama-cpp / llama-cpp-embed), NOT the *-upstream
+      # real servers. entrypoint.sh proxies the tailnet /llama-cpp + /llama-cpp-embed
+      # serve routes here; pointing at *-upstream would expose inference on the
+      # tailnet BYPASSING LiteLLM (no ledger, no routing). Gateway-only policy —
+      # see scripts/check-llm-gateway-routing.ps1. (Was *-upstream after the
+      # 2026-06-12 rename; corrected 2026-06-13.)
+      - LLAMA_CPP_HOST=${LLAMA_CPP_HOST:-llama-cpp}
+      - LLAMA_CPP_PORT=${LLAMA_CPP_PORT:-8080}
+      - LLAMA_CPP_ENABLED=${LLAMA_CPP_ENABLED:-true}
+      - LLAMA_CPP_EMBED_HOST=${LLAMA_CPP_EMBED_HOST:-llama-cpp-embed}
+      - LLAMA_CPP_EMBED_PORT=${LLAMA_CPP_EMBED_PORT:-8080}
+      - LLAMA_CPP_EMBED_ENABLED=${LLAMA_CPP_EMBED_ENABLED:-true}
+      - OPEN_NOTEBOOK_HOST=${OPEN_NOTEBOOK_HOST:-open_notebook}
+      - OPEN_NOTEBOOK_PORT=${OPEN_NOTEBOOK_PORT:-8502}
+      - OPEN_NOTEBOOK_ENABLED=${OPEN_NOTEBOOK_ENABLED:-true}
+      - OPEN_NOTEBOOK_TS_PORT=${OPEN_NOTEBOOK_TS_PORT:-8443}
+      - OPEN_NOTEBOOK_API_PORT=${OPEN_NOTEBOOK_API_PORT:-5055}
+      - OPEN_NOTEBOOK_API_TS_PORT=${OPEN_NOTEBOOK_API_TS_PORT:-5055}
+      # OB1 Quartz wiki — routed through the portal Caddy's tailnet listener
+      # (caddy:8446 → the shared (wiki_app) snippet) so the tailnet gets the SAME
+      # /workbench key-injected routing as the external vhost: Tailnet > Caddy >
+      # app (Authelia skipped — Tailscale device-auth is the trust boundary; the
+      # workbench's X-Brain-Key is injected by Caddy). caddy is on ai-stack_app-net,
+      # which openwebui — whose netns this container shares — is also on, so
+      # caddy:8446 resolves here. (Pre-Caddy this pointed straight at
+      # openbrain-wiki-viewer:8080, which had NO /workbench routing → 404 on tailnet.)
+      # ORDER: caddy must be up before this serve configures at boot; if it isn't,
+      # entrypoint.sh's monitor loop does deferred setup once caddy appears.
+      - QUARTZ_HOST=${QUARTZ_HOST:-caddy}
+      - QUARTZ_PORT=${QUARTZ_PORT:-8446}
+      - QUARTZ_ENABLED=${QUARTZ_ENABLED:-true}
+      - QUARTZ_TS_PORT=${QUARTZ_TS_PORT:-8444}
+    volumes:
+      - ./data/tailscale:/var/lib/tailscale
+      - /dev/net/tun:/dev/net/tun
+    restart: unless-stopped
+    depends_on:
+      openwebui:
+        condition: service_healthy
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+    healthcheck:
+      test: [ "CMD", "sh", "-c", "tailscale --socket=/tmp/tailscaled.sock status >/dev/null 2>&1 && ping -c 1 8.8.8.8 >/dev/null 2>&1 && wget -q -T 3 -O /dev/null http://127.0.0.1:8080" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # open-terminal — the little-coder workspace plane (design §3.4).
+  # Tool reconfigures it: own networks (no host netns), git-proxy spliced in,
+  # egress allowlisted via lc-egress. The repo lives on the shared workspace
+  # volume; the agent edits files there, commands execute here.
+
+  open-terminal:
+    build:
+      context: ./little-coder
+      dockerfile: docker/Dockerfile.open-terminal
+    image: little-coder-open-terminal:local
+    container_name: open-terminal
+    networks:
+      - lc-net      # reachable by the control plane
+      - llm-net     # llama-cpp inference
+    env_file:
+      - .env
+    environment:
+      - API_KEY=${OPEN_TERMINAL_API_KEY}
+      # All internet traffic goes through lc-egress, which permits only the
+      # operator-configured git host (design §3.4). Internal peers bypass it.
+      - HTTP_PROXY=http://lc-egress:8888
+      - HTTPS_PROXY=http://lc-egress:8888
+      - http_proxy=http://lc-egress:8888
+      - https_proxy=http://lc-egress:8888
+      - NO_PROXY=llama-cpp,little-coder,lc-mcpo,lc-egress,localhost,127.0.0.1
+      - no_proxy=llama-cpp,little-coder,lc-mcpo,lc-egress,localhost,127.0.0.1
+    volumes:
+      - little-coder-workspace:/workspace
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      llm-gateway:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "--max-time", "5", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+

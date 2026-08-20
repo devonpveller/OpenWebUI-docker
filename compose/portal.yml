@@ -1,0 +1,590 @@
+# compose/portal.yml - internet-exposed auth front-end - EVERY service here is profile-gated ([internet]/[local-test]); driven by scripts/portal-on.ps1 / portal-off.ps1, never a default up
+# Split from the 2,2xx-line root docker-compose.yml 2026-08-20 (CLEANUP-PLAN v3 D.1).
+# Networks/volumes are defined in the root file.
+services:
+  portal-init:
+    image: alpine:3.21
+    container_name: portal-init
+    profiles: [internet, local-test]
+    user: "0:0"   # root — required to chown volumes
+    volumes:
+      - authelia-data:/vols/authelia
+      - caddy-data:/vols/caddy
+      - caddy-config:/vols/caddy-config
+      - tripwire-data:/vols/tripwire
+    # No networks — this container doesn't need any network access
+    network_mode: none
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN          # only capability needed
+      - FOWNER
+      - DAC_OVERRIDE   # let root write where it needs even with bind-mount quirks
+    restart: "no"
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        set -e
+        echo "[portal-init] chowning portal volumes..."
+        # Authelia (UID 10001) — writes /data/db.sqlite3 + /data/authelia.log + /data/notification.txt
+        # mode 0755 so portal-alerter (UID 10006) can READ authelia.log for the digest function.
+        chown -R 10001:10001 /vols/authelia
+        chmod 0755 /vols/authelia
+        touch /vols/authelia/authelia.log
+        chown 10001:10001 /vols/authelia/authelia.log
+        chmod 0644 /vols/authelia/authelia.log
+        # Caddy (UID 10000) — writes /data (access logs + ACME state if used) + /config (runtime config).
+        # mode 0755 so portal-alerter can READ caddy-access.log for the digest function.
+        chown -R 10000:10000 /vols/caddy /vols/caddy-config
+        chmod 0755 /vols/caddy /vols/caddy-config
+        touch /vols/caddy/caddy-access.log
+        chown 10000:10000 /vols/caddy/caddy-access.log
+        chmod 0644 /vols/caddy/caddy-access.log
+        # Integrity-tripwire (UID 10003) — writes /state/baseline.sha256
+        chown -R 10003:10003 /vols/tripwire
+        chmod 0700 /vols/tripwire
+        echo "[portal-init] done. UIDs: authelia=10001 caddy=10000 tripwire=10003"
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
+  portal-alerter:
+    # Digest-pinned (plan §12.1, audit 2026-05-29 §F.3). Bump by:
+    #   1. docker pull denoland/deno:alpine
+    #   2. docker inspect denoland/deno:alpine --format '{{index .RepoDigests 0}}'
+    #   3. paste the new sha256 below
+    #   4. recreate portal-alerter and run alerter.ts --selftest before relying on it
+    image: denoland/deno@sha256:a40c899f6aca244a3f0a116c05f6dec0a29f9898d2f004d60ec57c1514f87349
+    container_name: portal-alerter
+    profiles: [internet, local-test]
+    networks:
+      - auth-net          # internal: true — watcher + tripwire POST /alert here
+      - notify-net        # outbound to oauth2.googleapis.com + gmail.googleapis.com
+    working_dir: /app
+    volumes:
+      # NOT :ro — Docker can't create the /app/token.json mount target
+      # inside a read-only parent (OB1's openbrain-digest uses the same pattern).
+      - ./config/alerter:/app
+      - ./secrets/google/portal-alerter/credentials.json:/app/credentials.json:ro
+      - ./secrets/google/portal-alerter/token.json:/app/token.json
+      - authelia-data:/logs/authelia:ro
+      - caddy-data:/logs/caddy:ro
+      # Daily digest markdown reports. Persists to host so the operator
+      # can browse via documentation/portal-digest/ (see also
+      # portal-status.ps1's "Most recent digest" probe).
+      - ./reports/portal-digest:/reports
+    environment:
+      - DIGEST_TO=${DIGEST_TO}
+      - DIGEST_FROM=${DIGEST_FROM}
+      - DIGEST_WINDOW_HOURS=${DIGEST_WINDOW_HOURS:-24}
+      - ALERT_RATE_LIMIT_PER_MIN=${ALERT_RATE_LIMIT_PER_MIN:-20}
+      - PUBLIC_DOMAIN=${PUBLIC_DOMAIN}
+      - TZ=UTC
+    user: "10006:10006"      # plan §2 hardening floor — non-root UID
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true          # plan §2 hardening floor — read-only root FS
+    tmpfs:
+      - /tmp:noexec,nosuid,size=32m
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 192M
+          pids: 100
+    entrypoint: ["deno", "run", "--allow-net", "--allow-read", "--allow-write", "--allow-env", "alerter.ts"]
+    command: []
+    depends_on:
+      portal-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
+  authelia:
+    image: authelia/authelia:4.39
+    container_name: authelia
+    profiles: [internet, local-test]
+    networks:
+      - auth-net          # internal: true — no internet egress
+    volumes:
+      - ./config/authelia:/config:ro
+      - authelia-data:/data
+      # Writable bind mount for Authelia's healthcheck env file. Without
+      # this, read_only:true fails because Authelia writes to /app/.healthcheck.env
+      # during startup. Host file is empty placeholder — Authelia populates it.
+      - ./config/authelia/.healthcheck.env:/app/.healthcheck.env
+    environment:
+      - TZ=UTC
+      - PUBLIC_DOMAIN=${PUBLIC_DOMAIN}
+      # Renamed from AUTHELIA_JWT_SECRET to its 4.39 home (the old name auto-maps
+      # but emits a deprecation warning on every startup; will become an error
+      # in Authelia 5.0). The .env key stays as AUTHELIA_JWT_SECRET so the
+      # operator doesn't need to rotate; only the env-var name Authelia sees
+      # inside the container changes.
+      - AUTHELIA_IDENTITY_VALIDATION_RESET_PASSWORD_JWT_SECRET=${AUTHELIA_JWT_SECRET}
+      - AUTHELIA_SESSION_SECRET=${AUTHELIA_SESSION_SECRET}
+      - AUTHELIA_STORAGE_ENCRYPTION_KEY=${AUTHELIA_STORAGE_ENCRYPTION_KEY}
+    user: "10001:10001"      # plan §2 hardening floor — non-root UID
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true          # plan §2 hardening floor — read-only root FS
+    tmpfs:
+      - /tmp:noexec,nosuid,size=32m
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 256M
+          pids: 100
+    depends_on:
+      portal-init:
+        condition: service_completed_successfully
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9091/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  caddy:
+    image: caddy:2.8.4-alpine
+    container_name: caddy
+    profiles: [internet, local-test]
+    networks:
+      - edge-net          # cloudflared → caddy
+      - auth-net          # caddy → authelia (forward_auth)
+      - app-net           # caddy → openwebui + open_notebook
+    # NO host port bindings — Cloudflare Tunnel is the only ingress
+    volumes:
+      - ./config/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./config/caddy/site:/srv/site:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    environment:
+      - PUBLIC_DOMAIN=${PUBLIC_DOMAIN}
+      - ACME_EMAIL=${ACME_EMAIL}
+      # Server-side secret Caddy injects as X-Brain-Key when proxying
+      # /workbench/* to openbrain-workbench (G7). Set this in the main .env to
+      # the SAME value as OB1's MCP_ACCESS_KEY. Empty = the workbench rejects
+      # every /workbench call (fail closed).
+      - WORKBENCH_KEY=${WORKBENCH_KEY}
+    user: "10000:10000"      # plan §2 hardening floor — non-root UID
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE   # binds :80 inside the container; not exposed on host
+    read_only: true          # plan §2 hardening floor — read-only root FS
+    tmpfs:
+      - /tmp:noexec,nosuid,size=64m
+    deploy:
+      resources:
+        limits:
+          cpus: '1.5'
+          memory: 512M
+          pids: 200
+    depends_on:
+      authelia:
+        condition: service_started
+      portal-init:
+        condition: service_completed_successfully
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+    healthcheck:
+      # Caddy's admin API at 127.0.0.1:2019 returns 200 whenever Caddy is up.
+      # We can't use http://127.0.0.1:80/healthz because the Host header
+      # would be 127.0.0.1, which doesn't match any site block in the
+      # Caddyfile and trips the catch-all `:80 { respond 421 }` line.
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:2019/config/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  authelia-watcher:
+    build:
+      context: ./config/watcher
+      dockerfile: Dockerfile
+    image: portal-watcher:local
+    container_name: authelia-watcher
+    profiles: [internet, local-test]
+    networks:
+      - auth-net          # internal: true — only talks to portal-alerter over auth-net
+    volumes:
+      - authelia-data:/logs/authelia:ro
+      - caddy-data:/logs/caddy:ro
+      - ./config/watcher/authelia-watch.sh:/scripts/watch.sh:ro
+      # RW so the watcher can append a new IP after firing the first
+      # new_ip alert (so subsequent logins from the same device/network
+      # don't re-alert). Lives in config/watcher/ so the operator can
+      # also edit it (e.g. remove a stale carrier IP).
+      - ./config/watcher/known-ips.txt:/data/known-ips.txt
+    environment:
+      - ALERTER_URL=http://portal-alerter:8080/alert
+      - ALERT_BASE_URL=${PUBLIC_DOMAIN}
+    user: "10002:10002"
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=16m
+    deploy:
+      resources:
+        limits:
+          cpus: '0.25'
+          memory: 64M
+          pids: 50
+    depends_on:
+      authelia:
+        condition: service_started
+      portal-alerter:
+        condition: service_started
+    # No runtime entrypoint override — Dockerfile's tini + watch.sh runs
+    # via CMD, with deps baked into the image at build time.
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
+  # authelia-notif-bridge -- tails Authelia's filesystem notifier and
+  # forwards each user-facing record (2FA OTP, password reset, account
+  # change) to portal-alerter so they reach Gmail. Without this, the OTP
+  # for 2FA enrollment lives only at /data/notification.txt -- unreachable
+  # when you're off the LAN, which defeats the point of the public portal.
+
+  authelia-notif-bridge:
+    build:
+      context: ./config/auth-notification-bridge
+      dockerfile: Dockerfile
+    image: portal-authnotif-bridge:local
+    container_name: authelia-notif-bridge
+    profiles: [internet, local-test]
+    networks:
+      - auth-net          # portal-alerter is on auth-net; bridge talks to it here
+    volumes:
+      - authelia-data:/data:ro
+      - ./config/auth-notification-bridge/bridge.sh:/scripts/bridge.sh:ro
+    environment:
+      - NOTIF_FILE=/data/notification.txt
+      - ALERTER_URL=http://portal-alerter:8080/alert
+      - ALERT_SEVERITY=info
+      - ALERT_EVENT=authelia.user-notification
+    # Same UID as authelia (10001) so we can read /data/notification.txt
+    # (mode 0600). Read-only mount + read_only fs constrain further.
+    user: "10001:10001"
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=4m
+    deploy:
+      resources:
+        limits:
+          cpus: '0.10'
+          memory: 32M
+          pids: 30
+    depends_on:
+      authelia:
+        condition: service_started
+      portal-alerter:
+        condition: service_started
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
+  integrity-tripwire:
+    build:
+      context: ./config/tripwire
+      dockerfile: Dockerfile
+    image: portal-tripwire:local
+    container_name: integrity-tripwire
+    profiles: [internet, local-test]
+    networks:
+      - auth-net          # internal: true
+    volumes:
+      - ./config/caddy/Caddyfile:/watch/Caddyfile:ro
+      - ./config/authelia/configuration.yml:/watch/configuration.yml:ro
+      - ./config/authelia/users_database.yml:/watch/users_database.yml:ro
+      - ./config/tripwire/integrity-tripwire.sh:/scripts/tripwire.sh:ro
+      - tripwire-data:/state
+    environment:
+      - ALERTER_URL=http://portal-alerter:8080/alert
+      - CHECK_CRON=${TRIPWIRE_CRON:-0 4 * * *}
+    user: "10003:10003"
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=16m
+    deploy:
+      resources:
+        limits:
+          cpus: '0.25'
+          memory: 64M
+          pids: 50
+    depends_on:
+      portal-alerter:
+        condition: service_started
+      portal-init:
+        condition: service_completed_successfully
+    command:
+      - sh
+      - -c
+      - |
+        # Init once at startup; ignore non-zero (e.g., drift detected — alert sent, container should still run cron).
+        /scripts/tripwire.sh init || true
+        # Render the supercronic crontab from the CHECK_CRON env var, then exec.
+        printf '%s /scripts/tripwire.sh check\n' "$$CHECK_CRON" > /tmp/crontab.rendered
+        exec /usr/local/bin/supercronic /tmp/crontab.rendered
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
+  portal-cron:
+    build:
+      context: ./config/portal-cron
+      dockerfile: Dockerfile
+    image: portal-cron:local
+    container_name: portal-cron
+    profiles: [internet, local-test]
+    networks:
+      - notify-net        # only reaches portal-alerter; no internet egress used by cron itself
+    volumes:
+      - ./config/portal-cron/crontab:/etc/portal-crontab:ro
+    environment:
+      - PORTAL_DIGEST_CRON=${PORTAL_DIGEST_CRON:-0 7 * * *}
+      - TZ=UTC
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=16m
+    deploy:
+      resources:
+        limits:
+          cpus: '0.1'
+          memory: 32M
+          pids: 50
+    depends_on:
+      portal-alerter:
+        condition: service_healthy
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
+  cloudflared:
+    image: cloudflare/cloudflared:2024.10.0
+    container_name: cloudflared
+    # `internet` profile only — local-test mode runs the portal without ever
+    # talking to Cloudflare, so nothing is exposed to the internet during dev.
+    profiles: [internet]
+    networks:
+      - edge-net
+    # --metrics exposes /ready and /healthcheck on port 2000 (bound to
+    # the edge-net only -- no host port). tunnel-watcher probes this to
+    # detect tunnel disconnects and alert via portal-alerter.
+    command: tunnel --no-autoupdate --metrics 0.0.0.0:2000 run
+    environment:
+      - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}
+    user: "65532:65532"
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=16m
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 128M
+          pids: 100
+    depends_on:
+      caddy:
+        condition: service_healthy
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
+  # tunnel-watcher -- HTTP-probes cloudflared:2000/ready every 30s and
+  # alerts (HIGH) if the tunnel is down for >=3 consecutive checks
+  # (default 90s). Fires an INFO event when the tunnel recovers.
+
+  tunnel-watcher:
+    build:
+      context: ./config/tunnel-watcher
+      dockerfile: Dockerfile
+    image: portal-tunnel-watcher:local
+    container_name: tunnel-watcher
+    profiles: [internet]
+    networks:
+      - edge-net          # reaches cloudflared:2000
+      - auth-net          # reaches portal-alerter:8080 (it sits on both nets)
+    volumes:
+      - ./config/tunnel-watcher/tunnel-watch.sh:/scripts/watch.sh:ro
+    environment:
+      - CLOUDFLARED_URL=http://cloudflared:2000/ready
+      - ALERTER_URL=http://portal-alerter:8080/alert
+      - POLL_SEC=${TUNNEL_WATCHER_POLL_SEC:-30}
+      - FAILURES_BEFORE_ALERT=${TUNNEL_WATCHER_FAILURES_BEFORE_ALERT:-3}
+    user: "10003:10003"
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=4m
+    deploy:
+      resources:
+        limits:
+          cpus: '0.10'
+          memory: 32M
+          pids: 30
+    depends_on:
+      cloudflared:
+        condition: service_started
+      portal-alerter:
+        condition: service_started
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
+  caddy-backup:
+    build:
+      context: ./backup
+      dockerfile: Dockerfile
+      args:
+        # UID 10000 matches Caddy's UID so the backup process can read all
+        # of Caddy's state files (instance.uuid, locks/, last_clean.json
+        # are mode 0600). Audit 2026-05-29 finding F.1 — earlier UID 10004
+        # silently excluded these from the tarball.
+        BACKUP_UID: "10000"
+        BACKUP_USER: caddybak
+    image: portal-backup-caddy:local
+    container_name: caddy-backup
+    profiles: [internet, local-test]
+    volumes:
+      - caddy-data:/data:ro
+      - ./backups/caddy:/backups
+      - ./backup/caddy-backup.sh:/scripts/backup.sh:ro
+    environment:
+      - BACKUP_DIR=/backups
+      - DATA_DIR=/data
+      - RETAIN_COUNT=${CADDY_BACKUP_RETAIN_COUNT:-2}
+      - HEALTH_TCP=${CADDY_BACKUP_HEALTH_TCP:-caddy:80}
+      - BACKUP_CRON=${CADDY_BACKUP_CRON:-0 3 * * *}
+    user: "10000:10000"
+    # edge-net membership exists only so the precheck can TCP-probe
+    # caddy:80. cap_drop ALL + read_only + no-new-privileges + non-root UID
+    # constrain what a compromised backup container could do on the net.
+    networks:
+      - default
+      - edge-net
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=16m
+    deploy:
+      resources:
+        limits:
+          pids: 50
+    command:
+      - sh
+      - -c
+      - |
+        printf '%s sh /scripts/backup.sh\n' "$$BACKUP_CRON" > /tmp/crontab.rendered
+        echo "[$$(date -u +%FT%TZ)] Caddy backup scheduler started"
+        exec /usr/local/bin/supercronic /tmp/crontab.rendered
+    restart: unless-stopped
+    depends_on:
+      caddy:
+        condition: service_healthy
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
+  authelia-backup:
+    build:
+      context: ./backup
+      dockerfile: Dockerfile
+      args:
+        # UID 10001 matches Authelia's UID so the backup process can read
+        # Authelia state files (notification.txt is mode 0600).
+        # Audit 2026-05-29 finding F.1 — earlier UID 10005 silently excluded
+        # these from the tarball.
+        BACKUP_UID: "10001"
+        BACKUP_USER: authbak
+    image: portal-backup-authelia:local
+    container_name: authelia-backup
+    profiles: [internet, local-test]
+    volumes:
+      - authelia-data:/data:ro
+      - ./backups/authelia:/backups
+      - ./backup/authelia-backup.sh:/scripts/backup.sh:ro
+    environment:
+      - BACKUP_DIR=/backups
+      - DATA_DIR=/data
+      - RETAIN_COUNT=${AUTHELIA_BACKUP_RETAIN_COUNT:-2}
+      - HEALTH_TCP=${AUTHELIA_BACKUP_HEALTH_TCP:-authelia:9091}
+      - BACKUP_CRON=${AUTHELIA_BACKUP_CRON:-0 3 * * *}
+    user: "10001:10001"
+    # auth-net membership exists only so the precheck can TCP-probe
+    # authelia:9091. Hardening still applies (cap_drop ALL, read_only,
+    # no-new-privileges, non-root UID).
+    networks:
+      - default
+      - auth-net
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=16m
+    deploy:
+      resources:
+        limits:
+          pids: 50
+    command:
+      - sh
+      - -c
+      - |
+        printf '%s sh /scripts/backup.sh\n' "$$BACKUP_CRON" > /tmp/crontab.rendered
+        echo "[$$(date -u +%FT%TZ)] Authelia backup scheduler started"
+        exec /usr/local/bin/supercronic /tmp/crontab.rendered
+    restart: unless-stopped
+    depends_on:
+      authelia:
+        condition: service_started
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
