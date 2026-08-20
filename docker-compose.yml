@@ -34,7 +34,12 @@ services:
       # Performance Optimizations for faster Ollama communication
       - AIOHTTP_CLIENT_TIMEOUT=3600
       - AIOHTTP_CLIENT_TIMEOUT_MODEL_LIST=60
-      - AIOHTTP_CLIENT_TIMEOUT_TOOL_CALL=3600
+      # AIOHTTP_CLIENT_TIMEOUT_TOOL_CALL was set here until 2026-08-20 and was a
+      # PHANTOM: no reader exists in OWUI 0.9.6 or 0.11.0 (verified by grepping
+      # env.py in both). It never bounded tool calls. The real knob is below --
+      # it governs fetching TOOL SERVER specs (mcpo / lc-mcpo), default 10s,
+      # which is tight for a cold MCP server. Raised deliberately.
+      - AIOHTTP_CLIENT_TIMEOUT_TOOL_SERVER_DATA=30
       - MODELS_CACHE_TTL=10 # Cache model list for 10 seconds to reduce repeated calls
       - ENABLE_BASE_MODELS_CACHE=true # Cache base models for faster loading
       # Reduce OpenWebUI overhead for model requests
@@ -44,6 +49,10 @@ services:
       # default 30 -> 256. Pin a sane bound so deep_research / little-coder tool loops
       # don't run away on latency/cost. (Ignored by 0.8.10, which uses the old name.)
       - CHAT_RESPONSE_MAX_TOOL_CALL_ITERATIONS=40
+      # 0.11.0 adds a master switch for the Tools/Functions plugin surfaces.
+      # Upstream default is True; pinned so an upstream default change can
+      # never silently disable this stack's 16 deploy-by-paste plugins.
+      - ENABLE_PLUGINS=true
       # open-terminal moved into the little-coder control plane (Tool chapter):
       # it left OWUI's network namespace, so OWUI's direct terminal access
       # ends here. It returns in chapter 2 via lc-mcpo (design §3.4, Decision

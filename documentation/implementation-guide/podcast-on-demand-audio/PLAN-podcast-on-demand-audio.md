@@ -80,7 +80,8 @@ card is **duration** — not stored anywhere today.
 | `commands/podcast_commands.py` | After `episode.audio_file` is set at generation completion, stamp `episode.duration_seconds` before the save. |
 | `api/routers/podcasts.py` | Add `duration_seconds` to `PodcastEpisodeResponse` (list + detail). In the list loop: if audio exists on disk and duration is unstamped, probe via `asyncio.to_thread` and persist. |
 | `api/auth.py` | Regex exemption for the audio path (comment explains why). |
-| `api/routers/podcasts.py` (audio endpoint) | `content_disposition_type="inline"` — a streaming endpoint should not advertise `attachment`; filename still applies to player-menu downloads. |
+| `api/routers/podcasts.py` (audio endpoint) | `content_disposition_type="inline"` — a streaming endpoint should not advertise `attachment`. **Follow-up 2026-08-03:** `?download=1` query param serves `attachment` instead, restoring save-as-file (the inline switch had removed the browser's download-with-filename behavior, and iOS never offers downloads from an inline player). |
+| `frontend/src/components/podcasts/EpisodeCard.tsx` (follow-up) | Explicit Download button in the card action row (anchor to `{audioSrc}?download=1`, `t('common.download')`, shown only when audio exists) — a deliberate affordance that works on every platform incl. iPhone. |
 | `frontend/src/lib/types/podcasts.ts` | Add `duration_seconds?: number \| null` to `PodcastEpisode`. |
 | `frontend/src/components/podcasts/EpisodeCard.tsx` | Remove observer/blob/loading machinery. Small shared `EpisodeAudio` sub-component (used in card + details dialog): direct src, `preload="none"`, `onError` → unavailable + retry. Show formatted duration in the meta line. |
 

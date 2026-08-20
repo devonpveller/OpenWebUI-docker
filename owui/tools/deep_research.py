@@ -145,7 +145,9 @@ class Tools:
                     else:  # running
                         prog = st.get("progress") or {}
                         if prog.get("message"):
-                            await emit(f"{prog.get('phase', 'working')}: {prog['message']}")
+                            await emit(
+                                f"{prog.get('phase', 'working')}: {prog['message']}"
+                            )
                 if result is None:
                     return f"Research is still running (job {job_id}); it will finish server-side. Ask again to retrieve it (the result is cached)."
 

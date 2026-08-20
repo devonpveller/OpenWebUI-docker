@@ -1,6 +1,16 @@
 # .gitignore
 .env
 .env.killswitch-*.bak
+# Any .env backup, however named. 2026-08-20: .env.bak-pre-mtp and
+# .env.bak-pre-qwen38 were committed and GitHub push-protection caught two
+# GitHub PATs in them -- but each file held ~25 live credentials (Authelia
+# keys, Cloudflare tunnel token, Mullvad WG private key, Tailscale auth key,
+# bot tokens, DB passwords). Only the PATs were pattern-matchable, so the
+# block was luck. Never let an .env copy near the index again.
+.env.bak*
+.env.*.bak
+.env-bak*
+*.env.bak*
 data/
 logs/
 data-backup/
