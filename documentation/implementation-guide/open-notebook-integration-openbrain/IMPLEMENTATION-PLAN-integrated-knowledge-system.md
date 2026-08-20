@@ -119,7 +119,7 @@ Phase 0 (sandbox) ─► Phase 1 (schema) ─► Phase 2 (MCP tools) ─┬─�
 
 **Tasks**
 - **0.1** Create working branches (no commits): `ai-stack` → `feature/integrated-knowledge-system`; `OB1` → a local branch; `open-notebook` → a local branch. Leave all later edits uncommitted.
-- **0.2** Author `documentation/implementation-guide/open -notebook-integration-openbrain/iks-dev/docker-compose.dev.yml` — a **separate compose project** named `iks-dev`. It stands up, on a dedicated bridge network and non-colliding host ports:
+- **0.2** Author `documentation/implementation-guide/open-notebook-integration-openbrain/iks-dev/docker-compose.dev.yml` — a **separate compose project** named `iks-dev`. It stands up, on a dedicated bridge network and non-colliding host ports:
   - `iks-db` — `pgvector/pgvector:pg16`, initialized **from copies of** `OB1/docker/init*.sql` **plus the new `init-threads.sql`** via `/docker-entrypoint-initdb.d`. **Fresh named volume** (`iks-db-data`) — never the prod `openbrain-db-data`.
   - `iks-mcp` — the OB1 MCP server built from source, env-pointed at `iks-db` and the **live local models** (`llama-cpp`, `llama-cpp-embed` on `ai-stack_llm-net`, read-only inference — acceptable).
   - `iks-surreal` — scratch `surrealdb/surrealdb:v2`, fresh volume.
@@ -129,7 +129,7 @@ Phase 0 (sandbox) ─► Phase 1 (schema) ─► Phase 2 (MCP tools) ─┬─�
 - **0.4** Write `iks-dev/README.md` — how to bring the sandbox up/down, ports, and the explicit warning that this never touches prod volumes.
 - **0.5** Snapshot current topology: run `/stack-map`, save the container inventory to `iks-dev/baseline-inventory.md` for later drift comparison.
 
-**Files:** new under `documentation/implementation-guide/open -notebook-integration-openbrain/iks-dev/`.
+**Files:** new under `documentation/implementation-guide/open-notebook-integration-openbrain/iks-dev/`.
 
 **DoD:** `docker compose -p iks-dev -f …/iks-dev/docker-compose.dev.yml up -d` brings up the sandbox; `iks-mcp` answers a tools/list; `iks-db` contains the seed data; **zero** prod containers/volumes referenced (grep the dev compose to prove it).
 
@@ -259,7 +259,7 @@ Phase 0 (sandbox) ─► Phase 1 (schema) ─► Phase 2 (MCP tools) ─┬─�
 **Tasks**
 - **8.1** Run the concept §6 scenarios end-to-end in `iks-dev`: 6.1 OWUI session, 6.2 ON upload, 6.3 ON interaction (cross-tool visibility), 6.4 cross-thread suggestion → triage, 6.5 Obsidian note writing. Record results in `iks-dev/e2e-results.md`.
 - **8.2** **Three-places sync (guardrail 6)** for the new `suggestion-worker` (and any other new container): update OB1 compose, `scripts/emergency-recovery.ps1` + `.bat` (service inventory + ordered shutdown/startup — OB1 comes up after `llama-cpp` healthy, down before the main stack), and `.claude/skills/stack-map/references/workspace-stacks.md`. Run `/stack-map` and confirm no drift vs `baseline-inventory.md`.
-- **8.3** **Promotion runbook** `documentation/implementation-guide/open -notebook-integration-openbrain/PROMOTION-RUNBOOK.md` for the operator (the agent does not execute it):
+- **8.3** **Promotion runbook** `documentation/implementation-guide/open-notebook-integration-openbrain/PROMOTION-RUNBOOK.md` for the operator (the agent does not execute it):
   - **Backup first:** dump live `openbrain-db` (and the wiki repo) before any migration.
   - **Migration order:** apply `init-threads.sql` (idempotent) → `content_hash` add + optional backfill → run `migrate-on-sources` (dry-run, then real) to move existing SurrealDB sources into OB1.
   - **Rebuild order:** build the ON fork image; swap the compose `image:`→`build:`; bring up respecting OB1-after-`llama-cpp`-healthy; start `suggestion-worker`.

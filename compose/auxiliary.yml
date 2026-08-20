@@ -55,7 +55,7 @@ services:
     # IKS fork (open-notebook repo, Dockerfile.single) — OB1 Postgres is the
     # canonical source-of-truth. Locally built + tagged; never pulled.
     # Build/tag at promotion: docker build -t open_notebook:iks ...; see
-    # documentation/implementation-guide/open -notebook-integration-openbrain/.
+    # documentation/implementation-guide/open-notebook-integration-openbrain/.
     image: open_notebook:iks
     container_name: open_notebook
     labels:

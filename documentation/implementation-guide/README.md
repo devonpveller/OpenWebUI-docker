@@ -18,7 +18,7 @@
 | `web-search/` | ✅ shipped | `search-gateway/README.md` is the living doc. |
 | `open-source authentication front ends for ai stack/` | ✅ shipped | Portal live; posture + post-audit kept, plan/tasks archived. |
 | `expand-quartz-4/` | ✅ shipped | Plan + outcomes + promotion runbook kept. |
-| `open -notebook-integration-openbrain/` | ✅ shipped (IKS) | Ledger + sync/pending plans kept. `iks-dev/` = dev overlay, still running (decision #11 pending). |
+| `open-notebook-integration-openbrain/` | ✅ shipped (IKS) | Ledger + sync/pending plans kept. its `iks-dev` overlay was torn down + archived 2026-08-20 (idle since 08-01; volumes kept; tree at `scripts/archive/iks-dev/`). |
 | `little-coder/` | ✅ shipped | Design + workflow guide + UPDATE-NOTES kept. |
 | `teams-chat-agent-orchestration/` | ✅ built as `agent-org/` | Governing specs kept (SAFETY, COMMS-MODEL, PLAN, …); tasks/outline/analyses archived. |
 | `research-engine-for-OB/` | ✅ deployed | `GROUNDING-MODEL.md` is the governing spec; `REPO-SOURCES-WIRING.md` design not built. |

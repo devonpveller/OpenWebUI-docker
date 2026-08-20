@@ -113,7 +113,7 @@ Backfilling all 915 sources on a 15s scan.
 - `scripts/emergency-recovery.ps1` (`openbrain-chunk-worker` in `$OB1Services`)
 - `.claude/skills/stack-map/references/workspace-stacks.md` (chunk-worker row)
 - `CLAUDE.md` (OB1 count 10→20)
-- `documentation/implementation-guide/open -notebook-integration-openbrain/`
+- `documentation/implementation-guide/open-notebook-integration-openbrain/`
   (this file, the runbook, `iks-dev/migrate-prod-on-api.py`,
   `iks-dev/merge-prod-notebooks.py`, plan docs)
 - Pre-existing/unrelated in the tree — review separately: `smolcrawl/
