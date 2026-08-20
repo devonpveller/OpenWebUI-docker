@@ -46,6 +46,14 @@ centralized here:
 (CR-normalized SHA-256 compared against the deployed `content` of every tool and
 function). `manifest.csv` byte counts were regenerated at the same time.
 
+`tools/deep_research.py` was re-pasted the same day at **v1.2.0** (async
+completion callback: the tool hands off and the `openbrain-research` engine POSTs
+the finished report back into the chat message). Verified live in `webui.db`.
+The tool reads `callback_armed` from the engine's submit response, so it is safe
+against an older engine — it simply keeps blocking — but the engine needs
+`RESEARCH_OWUI_API_KEY` in **`OB1/docker/.env`** before the callback does
+anything, and a key in the main stack `.env` silently reads as "not armed".
+
 The two drift items previously recorded here are resolved:
 
 - **`pipes/server_status.py`** (Server Status) — WAS stale: the deployed snapshot
