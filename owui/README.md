@@ -46,12 +46,11 @@ centralized here:
   is the only OWUI-side artifact.
 - `pipes/code_agent.py` + `tools/code_agent_tools.py` ← [`tools/code-generation/`](../tools/code-generation/) (docs/system prompt)
 - `pipes/server_status.py` (OWUI id `ai_stack_unified_pipe_function`) is the
-  flattened deploy snapshot of the **AI-Stack unified status pipe**. Its build
-  subsystem — the orchestrator `unified_openwebui_pipe.py`, its `core/router.py`,
-  and the per-capability `*_pipe.py` modules — lives in
-  [`scripts/ai_pipes/`](../scripts/ai_pipes/) (see that folder's README). The
-  orchestrator loads the router fresh from disk on each call; this snapshot is
-  what's pasted into OWUI.
+  verbatim deploy snapshot of [`status-pipe/orchestrator.py`](../status-pipe/)
+  (the unified status pipe subsystem — orchestrator + router + modules +
+  schemas, consolidated 2026-08-20). The orchestrator loads
+  `status-pipe/router.py` fresh from its mount on each call, so router/module
+  edits go live without a re-paste; orchestrator edits need a re-paste.
 
 ## Deployment sync status
 
@@ -69,11 +68,9 @@ anything, and a key in the main stack `.env` silently reads as "not armed".
 
 The two drift items previously recorded here are resolved:
 
-- **`pipes/server_status.py`** (Server Status) — WAS stale: the deployed snapshot
-  lacked the `llm-traffic` panel and reported 32 services. Rebuilt from
-  [`scripts/ai_pipes/unified_openwebui_pipe.py`](../scripts/ai_pipes/unified_openwebui_pipe.py)
-  and redeployed during the 0.11.0 upgrade; now carries the LiteLLM/llm-queue
-  gateway panel and 34-service coverage.
+- **`pipes/server_status.py`** (Server Status) — WAS stale; rebuilt and
+  redeployed during the 0.11.0 upgrade. Since 2026-08-20 its build source is
+  [`status-pipe/orchestrator.py`](../status-pipe/) (G.1 consolidation).
 - **`tools/deep_research.py`** — was NOT actually drifted. The live tool and the
   repo copy differed only by black line-wrapping of one `await emit(...)` call;
   the deployed valve `research_url` has been the correct

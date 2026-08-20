@@ -19,21 +19,17 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 from dataclasses import dataclass, asdict
 from enum import Enum
 
-# Environment-aware path setup for container vs host
-if os.path.exists('/host_project/scripts'):
-    # Container environment - use project mount
-    sys.path.append('/host_project/scripts/ai_pipes')
-    sys.path.append('/host_project/scripts')
-    MODULES_DIR = '/host_project/modules'
-    SCHEMAS_DIR = '/host_project/schemas'
+# Environment-aware path setup for container vs host. The whole subsystem
+# lives in status-pipe/ (router, modules, schemas, utilities) — mounted into
+# OWUI at /host_project/status-pipe (the ONLY code mount; the old whole-repo
+# mount was a security liability, CLEANUP-PLAN v3 A.2).
+if os.path.exists('/host_project/status-pipe'):
+    _BASE = '/host_project/status-pipe'
 else:
-    # Host environment - use relative paths
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    project_root = os.path.dirname(current_dir)  # core -> ai-stack
-    sys.path.append(os.path.join(project_root, 'scripts', 'ai_pipes'))
-    sys.path.append(os.path.join(project_root, 'scripts'))
-    MODULES_DIR = os.path.join(project_root, 'modules')
-    SCHEMAS_DIR = os.path.join(project_root, 'schemas')
+    _BASE = os.path.dirname(os.path.abspath(__file__))
+sys.path.append(_BASE)  # for `utilities.*` imports by modules
+MODULES_DIR = os.path.join(_BASE, 'modules')
+SCHEMAS_DIR = os.path.join(_BASE, 'schemas')
 
 # Try to import jsonschema, fall back gracefully if not available
 try:
@@ -532,10 +528,13 @@ class AIStackRouter:
         elif any(keyword in input_lower for keyword in ["gpu", "cuda", "graphics", "nvidia", "smi"]):
             return "gpu-status"
 
-        # Emergency recovery (general recovery, but NOT tailscale serve)
-        elif any(keyword in input_lower for keyword in ["recovery", "fix", "repair", "emergency", "restart", "ollama"]) and \
+        # Recovery questions route to help-system, which points at the real
+        # recovery story (scripts/emergency-recovery.ps1). The old
+        # emergency-recovery module (stale, ollama-era) was archived
+        # 2026-08-20 (CLEANUP-PLAN v3 D-15).
+        elif any(keyword in input_lower for keyword in ["recovery", "repair", "emergency"]) and \
              not any(keyword in input_lower for keyword in ["serve", "serving", "expose"]):
-            return "emergency-recovery"
+            return "help-system"
 
         # Health and status monitoring (system-health) — kept for explicit
         # "health" / "monitor" queries; bare "status" is handled above.
@@ -546,10 +545,6 @@ class AIStackRouter:
         # Custom tools discovery
         elif any(keyword in input_lower for keyword in ["tools", "commands"]):
             return "custom-tools"
-        
-        # LM Studio help
-        elif input_lower.strip() == "lmstudio":
-            return "help-system"
         
         # Default to help
         else:

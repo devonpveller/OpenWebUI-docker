@@ -1603,8 +1603,8 @@ def _format_inventory_message(
 
 def execute_tailscale_admin(action: str, params: Dict[str, Any]) -> Dict[str, Any]:
     """Invoke the tailscale_serve_admin CLI with the given action/params."""
-    if os.path.exists("/host_project/modules"):
-        admin_script = "/host_project/modules/custom-tools/service/tailscale_serve_admin.py"
+    if os.path.exists("/host_project/status-pipe/modules"):
+        admin_script = "/host_project/status-pipe/modules/custom-tools/service/tailscale_serve_admin.py"
     else:
         current_dir = os.path.dirname(os.path.abspath(__file__))
         project_root = os.path.dirname(os.path.dirname(current_dir))

@@ -37,16 +37,12 @@ class CustomToolsModule:
         """Load tools configuration"""
         return {
             "tools": {
-                "ai_pipes": {
-                    "path": "/host_scripts/ai_pipes",
-                    "description": "AI Stack pipe functions for system management"
-                },
-                "recovery_scripts": {
-                    "path": "/host_scripts/scripts",
-                    "description": "Emergency recovery and automation scripts"
+                "serve_pipes": {
+                    "path": "/host_project/status-pipe/serve",
+                    "description": "Serve-management pipes (tailscale serve admin)"
                 },
                 "refactored_modules": {
-                    "path": "/host_scripts/modules",
+                    "path": "/host_project/status-pipe/modules",
                     "description": "New manifest-driven modules"
                 }
             }
@@ -55,37 +51,23 @@ class CustomToolsModule:
     def discover_available_tools(self) -> Dict[str, Any]:
         """Discover all available tools and scripts"""
         tools_inventory = {
-            "ai_pipes": [],
-            "recovery_scripts": [],
+            "serve_pipes": [],
             "refactored_modules": [],
             "other_tools": []
         }
-        
-        # Discover AI pipe functions
-        ai_pipes_path = Path(self.config["tools"]["ai_pipes"]["path"])
-        if ai_pipes_path.exists():
-            for pipe_file in ai_pipes_path.glob("*_pipe.py"):
+
+        # Discover serve-management pipes (status-pipe/serve/)
+        serve_path = Path(self.config["tools"]["serve_pipes"]["path"])
+        if serve_path.exists():
+            for pipe_file in serve_path.glob("*_pipe.py"):
                 if not pipe_file.name.startswith("__"):
-                    tools_inventory["ai_pipes"].append({
+                    tools_inventory["serve_pipes"].append({
                         "name": pipe_file.stem.replace("_pipe", "").replace("_", " ").title(),
                         "file": pipe_file.name,
-                        "type": "legacy_pipe",
-                        "description": f"Legacy pipe function: {pipe_file.stem}"
+                        "type": "serve_pipe",
+                        "description": f"Serve management pipe: {pipe_file.stem}"
                     })
-        
-        # Discover recovery scripts
-        scripts_path = Path(self.config["tools"]["recovery_scripts"]["path"])
-        if scripts_path.exists():
-            script_patterns = ["*.ps1", "*.bat", "*.sh"]
-            for pattern in script_patterns:
-                for script_file in scripts_path.glob(pattern):
-                    tools_inventory["recovery_scripts"].append({
-                        "name": script_file.stem.replace("-", " ").replace("_", " ").title(),
-                        "file": script_file.name,
-                        "type": script_file.suffix.lstrip("."),
-                        "description": f"Recovery script: {script_file.name}"
-                    })
-        
+
         # Discover refactored modules
         modules_path = Path(self.config["tools"]["refactored_modules"]["path"])
         if modules_path.exists():
@@ -119,12 +101,6 @@ class CustomToolsModule:
                         "System health checks", 
                         "Emergency recovery procedures",
                         "Network connectivity testing"
-                    ],
-                    "Development Tools": [
-                        "Module scaffolding and generation",
-                        "Migration from legacy to refactored architecture",
-                        "Schema validation and testing",
-                        "Orchestrated refactoring automation"
                     ],
                     "Recovery & Maintenance": [
                         "Quick fixes for common issues",
@@ -356,12 +332,12 @@ class CustomToolsModule:
             import os
             
             # Environment-aware path setup
-            if os.path.exists('/host_project/scripts'):
-                pipe_path = '/host_project/scripts/ai_pipes/tailscale_serve_pipe.py'
+            if os.path.exists('/host_project/status-pipe'):
+                pipe_path = '/host_project/status-pipe/serve/tailscale_serve_pipe.py'
             else:
                 current_dir = os.path.dirname(os.path.abspath(__file__))
                 project_root = os.path.dirname(os.path.dirname(os.path.dirname(current_dir)))
-                pipe_path = os.path.join(project_root, 'scripts', 'ai_pipes', 'tailscale_serve_pipe.py')
+                pipe_path = os.path.join(project_root, 'status-pipe', 'serve', 'tailscale_serve_pipe.py')
             
             # Execute via subprocess to isolate execution
             import subprocess

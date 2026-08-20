@@ -16,7 +16,13 @@ services:
     volumes:
       - openwebui-data:/app/backend/data
       - ./config:/app/config:ro # Read-only config
-      - .:/host_project:ro # Mount entire project for AI Stack pipe functions
+      # Narrow code mounts (v3 A.2/G.1) — the old `.:/host_project:ro` mount
+      # shipped every on-disk secret into the internet-facing frontend. Only
+      # the status-pipe subsystem, the system prompts the githelper pipe
+      # reads, and the tailnet-info dump are visible now.
+      - ./status-pipe:/host_project/status-pipe:ro
+      - ./system-prompts:/host_project/system-prompts:ro
+      - ./data/tailscale:/host_project/data/tailscale:ro
     environment:
       - TZ=America/New_York
       # Pinned session/encryption key (value in .env). 0.9.6 hard-requires this; and the

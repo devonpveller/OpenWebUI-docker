@@ -22,7 +22,7 @@ BENEFITS
 COMMAND LIST
 ============
 Every command this pipe responds to, and the containers each function covers.
-Commands are matched by keywords in your message; routing is in core/router.py.
+Commands are matched by keywords in your message; routing is in status-pipe/router.py.
 "★ ALL containers" means every container in the workspace roster (both
 compose projects: main `ai-stack` + separate `open-brain`).
 
@@ -171,13 +171,12 @@ class Pipe:
         # Dynamically determine router path (container vs host environment)
         # This MUST be done here as OpenWebUI may not call __init__ at the right time
         if not self.valves.ROUTER_SCRIPT_PATH:  # Only set if not already set
-            if os.path.exists('/host_project/core'):
-                self.valves.ROUTER_SCRIPT_PATH = "/host_project/core/router.py"
+            if os.path.exists('/host_project/status-pipe'):
+                self.valves.ROUTER_SCRIPT_PATH = "/host_project/status-pipe/router.py"
             else:
-                # Host environment - use relative path
-                current_dir = os.path.dirname(os.path.abspath(__file__))
-                project_root = os.path.dirname(os.path.dirname(current_dir))
-                self.valves.ROUTER_SCRIPT_PATH = os.path.join(project_root, "core", "router.py")
+                # Host environment - router.py sits next to this orchestrator
+                self.valves.ROUTER_SCRIPT_PATH = os.path.join(
+                    os.path.dirname(os.path.abspath(__file__)), "router.py")
         
         self.logger = self._setup_logging()
         
@@ -228,13 +227,12 @@ class Pipe:
         try:
             # Safety check: ensure router path is set (in case __init__ didn't run properly in OpenWebUI)
             if not self.valves.ROUTER_SCRIPT_PATH:
-                if os.path.exists('/host_project/core'):
-                    self.valves.ROUTER_SCRIPT_PATH = "/host_project/core/router.py"
+                if os.path.exists('/host_project/status-pipe'):
+                    self.valves.ROUTER_SCRIPT_PATH = "/host_project/status-pipe/router.py"
                 else:
-                    # Host environment - use relative path
-                    current_dir = os.path.dirname(os.path.abspath(__file__))
-                    project_root = os.path.dirname(os.path.dirname(current_dir))
-                    self.valves.ROUTER_SCRIPT_PATH = os.path.join(project_root, "core", "router.py")
+                    # Host environment - router.py sits next to this orchestrator
+                    self.valves.ROUTER_SCRIPT_PATH = os.path.join(
+                        os.path.dirname(os.path.abspath(__file__)), "router.py")
             
             if not os.path.exists(self.valves.ROUTER_SCRIPT_PATH):
                 return {
@@ -244,11 +242,9 @@ class Pipe:
                     "help": "Ensure the router.py file exists and is mounted correctly",
                     "debug_info": {
                         "checked_paths": [
-                            "/host_project/core/router.py",
-                            "/host_scripts/core/router.py"
+                            "/host_project/status-pipe/router.py",
                         ],
                         "host_project_exists": os.path.exists('/host_project'),
-                        "host_scripts_exists": os.path.exists('/host_scripts'),
                         "current_path": self.valves.ROUTER_SCRIPT_PATH
                     }
                 }

@@ -102,7 +102,7 @@ class SystemHealthModule:
         """Load system health configuration"""
         return {
             "ai_stack": {
-                "workspace_root": "/host_project",  # Container context  
+                "workspace_root": "/host_project/status-pipe",  # Container context
                 "name": "OpenWebUI AI Stack",
                 # Core always-on containers. ollama was retired — llama-cpp is
                 # the inference backend now. Live per-service health is probed by
@@ -122,7 +122,7 @@ class SystemHealthModule:
         checks = {
             "in_container": os.path.exists("/.dockerenv"),
             "openwebui_context": os.path.exists("/app"),
-            "host_project_mounted": os.path.exists("/host_project"),
+            "host_project_mounted": os.path.exists("/host_project/status-pipe"),
             "gpu_available": False
         }
         

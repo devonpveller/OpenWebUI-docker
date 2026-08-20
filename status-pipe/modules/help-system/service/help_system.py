@@ -107,7 +107,7 @@ class HelpSystemModule:
                     "pipe_function_not_working": {
                         "symptoms": ["Pipe function not accessible", "Module not found", "Import errors"],
                         "cause": "Scripts not mounted or incorrect volume configuration",
-                        "solution": "Check: docker compose exec openwebui ls /host_project/scripts/ai_pipes/",
+                        "solution": "Check: docker compose exec openwebui ls /host_project/status-pipe/",
                         "explanation": "Verify script mount and container access"
                     }
                 }
@@ -141,9 +141,9 @@ class HelpSystemModule:
                     "docker compose exec openwebui python -c \"import torch; print('CUDA available:', torch.cuda.is_available())\" - GPU check"
                 ],
                 "pipe_function_testing": [
-                    "docker compose exec openwebui ls /host_project/scripts/ai_pipes/ - Verify script mount",
-                    "docker compose exec openwebui python /host_project/scripts/ai_pipes/unified_openwebui_pipe.py - Test unified pipe",
-                    "docker compose exec openwebui python /host_project/core/router.py '{\"input\": \"gpu status\"}' - Test router"
+                    "docker compose exec openwebui ls /host_project/status-pipe/ - Verify subsystem mount",
+                    "docker compose exec openwebui python /host_project/status-pipe/orchestrator.py - Test the orchestrator",
+                    "docker compose exec openwebui python /host_project/status-pipe/router.py '{\"input\": \"gpu status\"}' - Test router"
                 ]
             }
         }
