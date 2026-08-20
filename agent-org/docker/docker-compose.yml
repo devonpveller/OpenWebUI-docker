@@ -1,0 +1,624 @@
+# agent-org — governed multi-agent chat-orchestration stack.
+#
+# A SEPARATE compose project (mirrors the Open Brain pattern): its own lifecycle +
+# resource envelope, attached to the main stack's ai-stack_llm-net (external) for local
+# model access — exactly as OB1 does. Bring it up AFTER llm-gateway (and its
+# llama-cpp-upstream) is healthy; tear it down BEFORE the main stack (so ai-stack_llm-net
+# can be dropped).
+#
+# Planes (profiles):
+#   default        mattermost + mattermost-db + agent-bridge  (P0..P6 — the alignment core)
+#   profile workers  the pooled (little-coder + open-terminal) workers + git egress  (P5)
+#   profile cloud    llm-gateway-cloud + its db + ao-egress (OpenRouter)  (Pc — CONDITIONAL,
+#                    only if the P0.5 capability-floor test mandates a cloud judge)
+#
+# `docker compose -f agent-org/docker/docker-compose.yml config` validates ALL services
+# incl. profiled ones (R.1 done-when). A plain `up -d` starts only the default plane.
+#
+# Inference (CLAUDE.md invariant): NEVER route around LiteLLM. Workers + the local judge
+# reach inference ONLY via the `llama-cpp` alias on the existing air-gapped llm-gateway
+# (http://llama-cpp:8080). The cloud lane is the ONLY component with internet egress, and
+# only through ao-egress (OpenRouter allowlist). The local gateway air-gap is untouched.
+
+name: agent-org
+
+services:
+  # ── Chat platform (Mattermost Team Edition) — chat + mobile (TOOLING §3.1) ──
+  mattermost-db:
+    image: postgres:15-alpine
+    container_name: mattermost-db
+    environment:
+      POSTGRES_DB: mattermost
+      POSTGRES_USER: mmuser
+      POSTGRES_PASSWORD: ${MM_DB_PASSWORD}
+    volumes:
+      - mattermost-db-data:/var/lib/postgresql/data
+    networks:
+      - ao-net
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mmuser -d mattermost"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  mattermost:
+    image: mattermost/mattermost-team-edition:${MATTERMOST_VERSION:-11.7}
+    container_name: mattermost
+    depends_on:
+      mattermost-db:
+        condition: service_healthy
+    environment:
+      MM_SQLSETTINGS_DRIVERNAME: postgres
+      MM_SQLSETTINGS_DATASOURCE: >-
+        postgres://mmuser:${MM_DB_PASSWORD}@mattermost-db:5432/mattermost?sslmode=disable&connect_timeout=10
+      # Tailnet-only in v1 (operator sets the real tailnet URL at P7.4). No public exposure.
+      MM_SERVICESETTINGS_SITEURL: ${MM_SITE_URL:-http://localhost:8065}
+      MM_SERVICESETTINGS_ENABLEBOTACCOUNTCREATION: "true"
+      MM_SERVICESETTINGS_ENABLEUSERACCESSTOKENS: "true"
+      # No E2EE on agent channels — observability IS the safety control (§5/§7).
+      MM_TEAMSETTINGS_ENABLEOPENSERVER: "true"
+    volumes:
+      - mattermost-data:/mattermost/data
+      - mattermost-config:/mattermost/config
+      - mattermost-logs:/mattermost/logs
+      - mattermost-plugins:/mattermost/plugins
+      - mattermost-client-plugins:/mattermost/client/plugins
+    networks:
+      - ao-net
+      # Also on the shared external llm-net so the `tailscale` container (which shares
+      # openwebui's netns, on ai-stack_llm-net) can reach it by name for `tailscale serve`
+      # (P7.4). llm-net is internal (no internet) — this is NOT public exposure.
+      - llm-net
+    # Loopback publish only; tailnet exposure is a `tailscale serve` operator step (P7.4).
+    ports:
+      - "127.0.0.1:8065:8065"
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      # mmctl over the local socket — the image's own probe. The prior curl-based
+      # check broke on the v10.11+ distroless images (no curl/shell in-image),
+      # leaving the container permanently "unhealthy" and wedging agent-bridge's
+      # depends_on: service_healthy. Changed during the 10.5->10.11->11.7 upgrade (2026-08-02).
+      test: ["CMD", "/mattermost/bin/mmctl", "system", "status", "--local"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
+  # ── agent-bridge — orchestration + the governance gate (PLAN §5.1) ──────────
+  agent-bridge:
+    build:
+      context: ../agent-bridge
+      dockerfile: Dockerfile
+    image: agent-bridge:local
+    container_name: agent-bridge
+    depends_on:
+      mattermost:
+        condition: service_healthy
+      agent-bridge-db:
+        condition: service_healthy
+    # Per-project deploy tokens (AO_TOKEN_<PROJECT>=<PAT>) live here so the bridge can resolve
+    # them per project (multi-PAT). Secrets via env only; the DB stores just the var NAME.
+    env_file:
+      - .env
+    environment:
+      # State store — fail-safe persistence (a frozen effort stays frozen across a bounce).
+      AO_DATABASE_URL: postgresql+asyncpg://bridge:${AO_DB_PASSWORD}@agent-bridge-db:5432/agent_bridge
+      AO_CHAT_ADAPTER: mattermost
+      AO_MATTERMOST_URL: http://mattermost:8065
+      AO_MATTERMOST_BOT_TOKEN: ${AO_MATTERMOST_BOT_TOKEN}
+      # Mirror the active sidecar toolchain images so the bridge derives env-template
+      # egress (app/modules/envs.py) from what the operator activated.
+      AO_OT1_IMAGE: ${AO_OT1_IMAGE:-}
+      AO_OT2_IMAGE: ${AO_OT2_IMAGE:-}
+      # Operator-facing canonical URL (tailnet serve) → clickable effort-thread permalinks in
+      # dispatch messages. Mirrors MM_SITE_URL so links open the same host every device uses.
+      AO_MATTERMOST_SITE_URL: ${MM_SITE_URL:-}
+      AO_MGMT_CHANNEL: mgmt
+      # Local model lane — the EXISTING air-gapped llm-gateway (llama-cpp alias). NEVER a
+      # new gateway; never a model health-probe (C5).
+      AO_LOCAL_API_BASE: http://llama-cpp:8080/v1
+      AO_WORKER_MODEL: qwen36-27b
+      AO_JUDGE_MODEL: qwen36-27b
+      # Cloud lane — OFF by default (pre-P0.5). Flip on ONLY if Pc is built + P0.5 mandates.
+      AO_CLOUD_ENABLED: ${AO_CLOUD_ENABLED:-false}
+      AO_CLOUD_API_BASE: http://llm-gateway-cloud:4000/v1
+      AO_CLOUD_API_KEY: ${AO_CLOUD_API_KEY:-}
+      # Worker pool (P5) — filled when the `workers` profile is enabled. Static, conservative
+      # semaphore: no live GPU-occupancy signal (/slots dead on llama-swap — C6).
+      AO_MAX_CONCURRENT_WORKERS: ${AO_MAX_CONCURRENT_WORKERS:-1}
+      AO_WORKER_INSTANCE_URLS: ${AO_WORKER_INSTANCE_URLS:-}
+      # Audit mirror to Open Brain (P6.2) — off unless the operator wires the OB gateway.
+      AO_OPENBRAIN_MIRROR_ENABLED: ${AO_OPENBRAIN_MIRROR_ENABLED:-false}
+      AO_OPENBRAIN_URL: ${AO_OPENBRAIN_URL:-http://openbrain-gateway:8061}
+      AO_OPENBRAIN_KEY: ${AO_OPENBRAIN_KEY:-}
+      # Comms model (COMMS-MODEL — channel = project, effort = thread). Defaults are safe;
+      # set AO_DEFAULT_REPO to point efforts at a real project channel (#proj-<repo-slug>).
+      AO_DEFAULT_PROJECT: ${AO_DEFAULT_PROJECT:-sandbox}
+      AO_DEFAULT_REPO: ${AO_DEFAULT_REPO:-}
+      AO_ACTIVITY_BATCH: ${AO_ACTIVITY_BATCH:-5}
+      # Ground + dry-run (P4.0). Grounding is best-effort + OFF by default; reach openbrain-research
+      # BY CONTAINER NAME on llm-net (the :8818 host port is loopback-only, unreachable here).
+      AO_GROUNDING_ENABLED: ${AO_GROUNDING_ENABLED:-false}
+      AO_RESEARCH_URL: ${AO_RESEARCH_URL:-http://openbrain-research:8000}
+      AO_RESEARCH_KEY: ${AO_RESEARCH_KEY:-}
+      # Stage-1 anchor: one-time read-only repo survey feeds the readiness gate (only fires when a
+      # repo is focused; the sandbox has nothing to survey).
+      AO_PROJECT_SURVEY_ENABLED: ${AO_PROJECT_SURVEY_ENABLED:-true}
+      # Multi-project egress allowlist: the bridge writes this tinyproxy filter (shared volume) as
+      # projects/hosts are onboarded; ao-git-egress reloads it (remotely-managed worker scope, §5).
+      AO_EGRESS_ALLOWLIST_FILE: /egress/egress-allowlist.txt
+      # Proactive alignment controls (UX-FLOW Stage 3/5). Risk-gated by default (fast for routine);
+      # set to `all` for the strict-spec reading (plan-approval + review on EVERY effort), `off` to skip.
+      AO_PLAN_APPROVAL: ${AO_PLAN_APPROVAL:-risky}      # always | risky | off — Stage-3 plan gate (P3.9)
+      AO_REVIEW_MODE: ${AO_REVIEW_MODE:-risky}          # all | risky | off — Stage-5 stop-gates/review (P4)
+      # Post-delivery QA (operator 2026-07-15): a differently-goaled agent EXERCISES the product
+      # after it lands (green tests != usable product) and reports usability gaps a test suite
+      # misses. report = attach findings to the PR + closure; iterate = also auto-fix in-scope
+      # defects once; off = skip. Field defaults off so the test harness is unchanged.
+      # DEPLOYED = iterate (operator 2026-07-15, reviewing PR#2/#3: "we have infinite iterations
+      # available since it's running locally — there's a severe lack of polish"): use those
+      # iterations to CLOSE the in-scope gaps (crash bugs, a feature stored-but-not-shown, missing
+      # docs/help) before the PR, instead of only reporting them.
+      AO_QA_GATE: ${AO_QA_GATE:-iterate}                # report | iterate | off — exploratory QA
+      # P9 Phase 0 instrument (2026-07-16). Both knobs above/below are the EXPERIMENT's variables:
+      # a round is defined by (AO_QA_GATE, AO_WORKER_FLAIL_GUARD). Live default = the settings that
+      # produced PR#11, so an unset environment reproduces the baseline exactly.
+      AO_WORKER_FLAIL_GUARD: ${AO_WORKER_FLAIL_GUARD:-true}   # true | false — arm the fork-on-flail
+      # Second QA lens (operator 2026-07-15, "evaluate the code cleanliness — SOLID, patterns,
+      # naming, does it support documentation?"): a differently-goaled reviewer READS THE SOURCE for
+      # craftsmanship & docstrings/type hints/packaging — gaps the run-the-product lens can't see.
+      AO_QA_CODE_REVIEW: ${AO_QA_CODE_REVIEW:-1}        # 1 | 0 — code-craftsmanship review lens
+      # Develop-branch integration (operator 2026-07-15): fold each ACCEPTED per-effort delivery
+      # into a `develop` branch that accumulates the whole product ("PRs separate as they are, but
+      # merged into development"), with one standing develop→default PR as the human gate. Merge to
+      # develop is autonomous; merge to the default branch stays human.
+      AO_DEVELOP_INTEGRATION: ${AO_DEVELOP_INTEGRATION:-1}   # 1 | 0 — accumulate into develop
+      AO_DEVELOP_BRANCH: ${AO_DEVELOP_BRANCH:-develop}
+      # Closure invariant (P8 #1, 2026-07-16 gym: two complete green products closed "done" with
+      # delivery_pr_opened: 0 and nobody noticed for hours): "done" on a landed delivery requires
+      # the effort's own audit to show the PR/QA/develop gates actually ran; a missing gate holds
+      # the effort open with an honest "I could not deliver" instead of a hollow done.
+      AO_CLOSURE_INVARIANT: ${AO_CLOSURE_INVARIANT:-1}  # 1 | 0 — no "done" without audit proof
+      # ── P10 THE DRAIN LOOP (2026-07-18) ──────────────────────────────────────
+      # The org RAN OUT OF WORK BEFORE THE PROJECT WAS DONE: QA once or twice, hit `_auto_iterate`'s
+      # hard `n >= 2` cap, stop. No task queue, no "next item", and "nothing left to do" was an
+      # accident of an empty model reply (gym-007/008: defects trickled 6 → 5 → none while an
+      # operator review of a comparable product found 5 bugs + 3 gaps). ON replaces the graded QA
+      # pass with a COUNTED round: three objective lenses observe (the goal-alignment lens is not
+      # told the goal — that's the debias) → gaps are derived against THIS SCOPE's goal → gaps
+      # become plainly-stated tasks in a content-addressed queue → a fresh implementer works them.
+      # A scope is complete when a full sweep propagates ZERO NEW TASKS. Requires AO_QA_GATE != off.
+      AO_DRAIN_LOOP: ${AO_DRAIN_LOOP:-1}                # 1 | 0 — counted termination, not a cap
+      # RUNAWAY GUARD ONLY — termination is zero propagation, never this number.
+      AO_DRAIN_ROUND_CAP: ${AO_DRAIN_ROUND_CAP:-40}
+      # A worker asked to plan work it just performed has context bias by construction — gym-008
+      # returned an EMPTY plan and the effort stranded. Planner and implementer are separate agents
+      # in separate sessions; the CDCL clause set carries the learning across the rotation.
+      AO_DRAIN_PLAN_SPLIT: ${AO_DRAIN_PLAN_SPLIT:-1}    # 1 | 0 — plan/implement split
+      # Scopes nest and complete bottom-up; a parent's sweep that finds a SEAM defect writes the
+      # task into the owning CHILD and reopens it — "complete" is a current state, not terminal.
+      AO_DRAIN_TIER_WALK: ${AO_DRAIN_TIER_WALK:-1}      # 1 | 0 — the §4 tier walk
+      # NORTH-STAR ALIGNMENT GATE (§6.6.1, P32): before a drain plan reaches the worker team, check it
+      # against the ORIGINAL prompt (context-isolated). A plan that serves no part of the North Star is
+      # a tangent → a constraint, never worked. Bounds a runaway by exhausting the ALIGNED list, not a
+      # round cap. Fails open (a hiccup → aligned).
+      AO_NORTH_STAR_GATE: ${AO_NORTH_STAR_GATE:-1}      # 1 | 0 — plan-vs-North-Star alignment gate
+      # F33 (gym-036): before a drain/re-engage turn, hard-sync the worker to the delivery-branch HEAD
+      # (git fetch + checkout -f) so it builds on the accumulated work, not a stale base clone whose
+      # push then bounces. Best-effort (first delivery has no branch yet).
+      AO_SYNC_DELIVERY_BRANCH: ${AO_SYNC_DELIVERY_BRANCH:-1}  # 1 | 0 — worker starts on the delivery HEAD
+      # MODE B (§9.5): after Mode A converges an increment, run the adversarial hardening phase — a
+      # contrarian lens breaks the product; each REPRODUCED defect becomes a durable §10 corpus check
+      # the build didn't catch. Best-effort, never blocks. (P30 Slice 1.)
+      AO_MODE_B: ${AO_MODE_B:-1}                        # 1 | 0 — adversarial hardening after convergence
+      # Conversation context (the PO's memory): thread = immediate, channel = relevant background,
+      # char-budgeted so it never overwhelms the model window. Raise for a larger-context model.
+      AO_CONTEXT_THREAD_CHARS: ${AO_CONTEXT_THREAD_CHARS:-2500}
+      AO_CONTEXT_CHANNEL_CHARS: ${AO_CONTEXT_CHANNEL_CHARS:-1500}
+      # Commit attribution: agents commit as <role>@<domain> (blame/provenance, P5.4).
+      AO_AGENT_EMAIL_DOMAIN: ${AO_AGENT_EMAIL_DOMAIN:-agent-org.local}
+      # GitHub App — the capability plane's root of trust (autonomous-project-lifecycle P-APL.0).
+      # Empty until you register the App; the private key is a file dropped into agent-bridge/secrets/
+      # (mounted below), NOT an env secret. The plane stays OFFLINE until both id + key are present.
+      AO_GITHUB_APP_ID: ${AO_GITHUB_APP_ID:-}
+      AO_GITHUB_APP_OWNER: ${AO_GITHUB_APP_OWNER:-}
+    volumes:
+      - ao-egress-config:/egress    # shared with ao-git-egress (bridge writes, proxy reads)
+      # Read-only mount of the App key directory. The DIR always exists (.gitkeep), so `up` never
+      # breaks before the App is set up; the .pem is gitignored + dropped in by the operator (P-APL.0).
+      - ../agent-bridge/secrets:/etc/agent-bridge/secrets:ro
+    networks:
+      - ao-net
+      - llm-net       # reach the existing llm-gateway via the llama-cpp alias
+    ports:
+      - "127.0.0.1:8830:8000"   # loopback control/debug surface + floor-hook endpoint
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
+  agent-bridge-db:
+    image: postgres:15-alpine
+    container_name: agent-bridge-db
+    environment:
+      POSTGRES_DB: agent_bridge
+      POSTGRES_USER: bridge
+      POSTGRES_PASSWORD: ${AO_DB_PASSWORD}
+    volumes:
+      - agent-bridge-db-data:/var/lib/postgresql/data
+    networks:
+      - ao-net
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bridge -d agent_bridge"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  # ── Worker pool (profile: workers) — P5, the real architectural lift ────────
+  # Each worker = a (little-coder + open-terminal) pair with its own network-isolated
+  # workspace + git-proxy + egress (per-plane containment preserved). Reuses the images
+  # the MAIN stack builds (little-coder:local / little-coder-open-terminal:local) — bring
+  # the main stack up first. Concurrency is bounded by AO_MAX_CONCURRENT_WORKERS, NOT by
+  # container count (the GPU is the ceiling — §3.6).
+  ao-worker-1:
+    image: little-coder:local
+    container_name: ao-worker-1
+    profiles: ["workers"]
+    depends_on:
+      ao-ot-1:
+        condition: service_healthy
+    env_file:
+      - ../../.env
+    environment:
+      - LC_CONFIG=/app/config/little-coder.config.yaml
+      - LC_ROUTE_EXEC=1
+      - LC_OPEN_TERMINAL_URL=http://ao-ot-1:8000
+      # The daemon reads the OT key from OPEN_TERMINAL_API_KEY (config open_terminal_key_env);
+      # `environment` overrides the env_file, so the pool uses its OWN key (AO_OPEN_TERMINAL_KEY),
+      # matching ao-ot-1's API_KEY — independent of the main stack's open-terminal.
+      - OPEN_TERMINAL_API_KEY=${AO_OPEN_TERMINAL_KEY}
+      - LC_OPEN_TERMINAL_KEY=${AO_OPEN_TERMINAL_KEY}
+      - LC_WORKSPACE=/workspace
+      - LITTLE_CODER_NO_CTX_PROBE=1
+      # Floor hook (P3.3) — block irreversible actions without a cleared decision.
+      - AO_BRIDGE_URL=http://agent-bridge:8000
+      - AO_SUBJECT=ao-worker-1
+    volumes:
+      # Per-instance config (open_terminal_url -> ao-ot-1); generated by
+      # agent-org/scripts/gen-worker-configs.py from the canonical little-coder config.
+      - ../agent-bridge/worker-configs/worker-1:/app/config:ro
+      - ao-worker-1-workspace:/workspace
+      - ao-worker-1-sessions:/var/lib/little-coder/sessions
+    networks:
+      - ao-worker-net
+      - llm-net
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "--max-time", "5", "http://localhost:8090/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
+  ao-ot-1:
+    # Env-template hot-swap (little-coder/docker/envs/): set AO_OT1_IMAGE in .env
+    # to e.g. little-coder-open-terminal:dotnet8 and `up -d ao-ot-1` — no rebuild.
+    image: ${AO_OT1_IMAGE:-little-coder-open-terminal:local}
+    container_name: ao-ot-1
+    profiles: ["workers"]
+    environment:
+      # The open-terminal server reads OPEN_TERMINAL_API_KEY (the little-coder layer/git-proxy
+      # reads API_KEY); set both to the pool key so the worker's Bearer matches.
+      - OPEN_TERMINAL_API_KEY=${AO_OPEN_TERMINAL_KEY}
+      - API_KEY=${AO_OPEN_TERMINAL_KEY}
+      # /workspace is a bind-mount; git 2.36+ refuses to discover a submodule's gitdir across the
+      # mount boundary unless this is set — without it a RECURSIVE clone leaves nested submodule
+      # content unpopulated (MSB1009) and the git-proxy's own `git remote` probe returns "known:
+      # none", denying every fetch. (Regression surfaced 2026-07-10 when an env rebuild pulled a
+      # newer git.) No security impact: the git-proxy still governs every operation.
+      - GIT_DISCOVERY_ACROSS_FILESYSTEM=1
+      - HTTP_PROXY=http://ao-git-egress:8888
+      - HTTPS_PROXY=http://ao-git-egress:8888
+      - http_proxy=http://ao-git-egress:8888
+      - https_proxy=http://ao-git-egress:8888
+      - NO_PROXY=llama-cpp,agent-bridge,ao-worker-1,ao-git-egress,localhost,127.0.0.1
+      - no_proxy=llama-cpp,agent-bridge,ao-worker-1,ao-git-egress,localhost,127.0.0.1
+    volumes:
+      - ao-worker-1-workspace:/workspace
+    networks:
+      - ao-worker-net
+      - llm-net
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "--max-time", "5", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
+  ao-worker-2:
+    image: little-coder:local
+    container_name: ao-worker-2
+    profiles: ["workers"]
+    depends_on:
+      ao-ot-2:
+        condition: service_healthy
+    env_file:
+      - ../../.env
+    environment:
+      - LC_CONFIG=/app/config/little-coder.config.yaml
+      - LC_ROUTE_EXEC=1
+      - LC_OPEN_TERMINAL_URL=http://ao-ot-2:8000
+      - OPEN_TERMINAL_API_KEY=${AO_OPEN_TERMINAL_KEY}
+      - LC_OPEN_TERMINAL_KEY=${AO_OPEN_TERMINAL_KEY}
+      - LC_WORKSPACE=/workspace
+      - LITTLE_CODER_NO_CTX_PROBE=1
+      - AO_BRIDGE_URL=http://agent-bridge:8000
+      - AO_SUBJECT=ao-worker-2
+    volumes:
+      - ../agent-bridge/worker-configs/worker-2:/app/config:ro
+      - ao-worker-2-workspace:/workspace
+      - ao-worker-2-sessions:/var/lib/little-coder/sessions
+    networks:
+      - ao-worker-net
+      - llm-net
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "--max-time", "5", "http://localhost:8090/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
+  ao-ot-2:
+    image: ${AO_OT2_IMAGE:-little-coder-open-terminal:local}
+    container_name: ao-ot-2
+    profiles: ["workers"]
+    environment:
+      # The open-terminal server reads OPEN_TERMINAL_API_KEY (the little-coder layer/git-proxy
+      # reads API_KEY); set both to the pool key so the worker's Bearer matches.
+      - OPEN_TERMINAL_API_KEY=${AO_OPEN_TERMINAL_KEY}
+      - API_KEY=${AO_OPEN_TERMINAL_KEY}
+      # /workspace bind-mount: let git discover submodule gitdirs across the boundary (git 2.36+).
+      # Without it a recursive clone leaves submodules unpopulated (MSB1009) + the proxy's `git
+      # remote` probe sees "known: none" and denies fetches. Proxy still governs all ops.
+      - GIT_DISCOVERY_ACROSS_FILESYSTEM=1
+      - HTTP_PROXY=http://ao-git-egress:8888
+      - HTTPS_PROXY=http://ao-git-egress:8888
+      - http_proxy=http://ao-git-egress:8888
+      - https_proxy=http://ao-git-egress:8888
+      - NO_PROXY=llama-cpp,agent-bridge,ao-worker-2,ao-git-egress,localhost,127.0.0.1
+      - no_proxy=llama-cpp,agent-bridge,ao-worker-2,ao-git-egress,localhost,127.0.0.1
+    volumes:
+      - ao-worker-2-workspace:/workspace
+    networks:
+      - ao-worker-net
+      - llm-net
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "--max-time", "5", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
+  # Shared git-allowlist egress for the worker pool (mirrors lc-egress). The ONLY worker-side path
+  # to the internet, pinned to the allowlisted git hosts. The allowlist is the SHARED file the
+  # agent-bridge writes (multi-project onboarding), reloaded on change — so the org can work on any
+  # repo the operator adds via Mattermost with no rebuild (governance §5, remotely-managed scope).
+  ao-git-egress:
+    build:
+      context: ../../little-coder
+      dockerfile: docker/Dockerfile.egress
+    image: little-coder-egress:local
+    container_name: ao-git-egress
+    profiles: ["workers"]
+    volumes:
+      - ao-egress-config:/egress                              # bridge-written allowlist file
+      - ./egress/tinyproxy.conf:/etc/tinyproxy/tinyproxy.conf:ro   # Filter -> /egress/…
+      - ./egress/egress-reload.sh:/egress-reload.sh:ro
+    command: ["/bin/sh", "/egress-reload.sh"]                 # run tinyproxy + reload-on-change
+    networks:
+      - ao-worker-net
+      - default
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
+  # ── Cloud lane (profile: cloud) — Pc, CONDITIONAL on the P0.5 decision ──────
+  # A SEPARATE sibling LiteLLM for OpenRouter, with master_key + per-role virtual keys +
+  # budgets (the cost-tier cap). The ONLY agent-org component with an egress, and only via
+  # ao-egress -> openrouter.ai. The local llm-gateway air-gap is left untouched.
+  llm-gateway-cloud:
+    image: ghcr.io/berriai/litellm:main-stable
+    container_name: llm-gateway-cloud
+    profiles: ["cloud"]
+    depends_on:
+      llm-gateway-cloud-db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://litellm:${AO_CLOUD_DB_PASSWORD}@llm-gateway-cloud-db:5432/litellm
+      LITELLM_MASTER_KEY: ${AO_CLOUD_MASTER_KEY}
+      # OpenRouter key is read by LiteLLM from the env named in the config's model_list.
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
+      # Force ALL egress through ao-egress (single audited chokepoint).
+      HTTP_PROXY: http://ao-egress:8888
+      HTTPS_PROXY: http://ao-egress:8888
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    volumes:
+      - ../config/litellm-cloud.config.yaml:/app/config.yaml:ro
+    networks:
+      - ao-net
+      - ao-cloud-egress-net
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
+  llm-gateway-cloud-db:
+    image: postgres:15-alpine
+    container_name: llm-gateway-cloud-db
+    profiles: ["cloud"]
+    environment:
+      POSTGRES_DB: litellm
+      POSTGRES_USER: litellm
+      POSTGRES_PASSWORD: ${AO_CLOUD_DB_PASSWORD}
+    volumes:
+      - llm-gateway-cloud-db-data:/var/lib/postgresql/data
+    networks:
+      - ao-net
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U litellm -d litellm"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  # Allowlist egress proxy pinned to openrouter.ai (mirrors lc-egress). The ONLY internet
+  # path in agent-org. no-log/ZDR providers are pinned in the cloud LiteLLM config.
+  ao-egress:
+    build:
+      context: ../../little-coder
+      dockerfile: docker/Dockerfile.egress
+    image: little-coder-egress:local
+    container_name: ao-egress
+    profiles: ["cloud"]
+    environment:
+      # Reuse the lc-egress allowlist mechanism; the operator sets the allowed host list to
+      # openrouter.ai (+ its CDN) at Pc.1. See agent-org/README.md.
+      - EGRESS_ALLOWLIST=${AO_EGRESS_ALLOWLIST:-openrouter.ai}
+    networks:
+      - ao-cloud-egress-net
+      - default
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
+  # ── Backups (nightly pg_dump sidecars) ──────────────────────────────────────
+  # The two authoritative Postgres stores in agent-org: the bridge's governance
+  # state (efforts, parked_efforts, projects+upstream, egress hosts, audit) and
+  # Mattermost's conversations. Custom-format dumps → repo-root ./backups/<name>/
+  # (shared with the NAS sync + scripts/check-backup-coverage.ps1). Paths are
+  # ../../ because compose resolves them relative to THIS file (agent-org/docker/).
+  agent-bridge-db-backup:
+    image: postgres:15-alpine
+    container_name: agent-bridge-db-backup
+    depends_on:
+      agent-bridge-db:
+        condition: service_healthy
+    networks:
+      - ao-net
+    environment:
+      - BACKUP_NAME=agent-bridge-db
+      - BACKUP_DIR=/backups
+      - PGHOST=agent-bridge-db
+      - PGUSER=bridge
+      - PGDATABASE=agent_bridge
+      - PGPASSWORD=${AO_DB_PASSWORD}
+      - RETAIN_COUNT=${AO_BACKUP_RETAIN_COUNT:-7}
+    volumes:
+      - ../../backups/agent-bridge-db:/backups
+      - ../../backup/pg-backup.sh:/scripts/backup.sh:ro
+    entrypoint: ["/bin/sh", "-c", "while true; do sh /scripts/backup.sh || true; sleep 86400; done"]
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
+  mattermost-db-backup:
+    image: postgres:15-alpine
+    container_name: mattermost-db-backup
+    depends_on:
+      mattermost-db:
+        condition: service_healthy
+    networks:
+      - ao-net
+    environment:
+      - BACKUP_NAME=mattermost-db
+      - BACKUP_DIR=/backups
+      - PGHOST=mattermost-db
+      - PGUSER=mmuser
+      - PGDATABASE=mattermost
+      - PGPASSWORD=${MM_DB_PASSWORD}
+      - RETAIN_COUNT=${AO_BACKUP_RETAIN_COUNT:-7}
+    volumes:
+      - ../../backups/mattermost-db:/backups
+      - ../../backup/pg-backup.sh:/scripts/backup.sh:ro
+    entrypoint: ["/bin/sh", "-c", "while true; do sh /scripts/backup.sh || true; sleep 86400; done"]
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
+volumes:
+  mattermost-db-data:
+  mattermost-data:
+  mattermost-config:
+  mattermost-logs:
+  mattermost-plugins:
+  mattermost-client-plugins:
+  agent-bridge-db-data:
+  ao-worker-1-workspace:
+  ao-worker-1-sessions:
+  ao-worker-2-workspace:
+  ao-worker-2-sessions:
+  ao-egress-config:        # bridge-written git-egress allowlist, shared with ao-git-egress
+  llm-gateway-cloud-db-data:
+
+networks:
+  # Control plane. Normal bridge (like OB1's obnet) so host port publishing works; "no
+  # cloud" is enforced at the application layer (no cloud keys on the default services).
+  ao-net:
+    driver: bridge
+  # Worker pool isolation (mirrors lc-net): internal, no internet except via ao-git-egress.
+  ao-worker-net:
+    internal: true
+  # Cloud egress isolation: only llm-gateway-cloud + ao-egress attach; ao-egress bridges out.
+  ao-cloud-egress-net:
+    internal: true
+  # The main stack's internal caller plane — reach the existing llm-gateway (llama-cpp
+  # alias) for LOCAL inference. External: exists whenever the main stack is up.
+  llm-net:
+    external: true
+    name: ai-stack_llm-net
+  default:
+    driver: bridge

@@ -2,7 +2,9 @@
   v2 of research-system-prompt.md — for the SHARED RESEARCH ENGINE.
 
   Paste this in place of research-system-prompt.md AT THE SAME TIME you paste
-  smolcrawl/deep_research_thin_client.py into OWUI (Research Engine P5.2). It
+  owui/tools/deep_research.py into OWUI (Research Engine P5.2). (This used to name
+  smolcrawl/deep_research_thin_client.py, the v1.0.0 snapshot of the same client;
+  retired 2026-08-20 — owui/tools/ is the canonical copy.) It
   describes the single `deep_research` tool the thin client exposes (the heavy
   3-method bundle is retired). Until you swap the tool, keep using
   research-system-prompt.md — this v2 would otherwise describe tools that aren't

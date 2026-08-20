@@ -150,6 +150,8 @@ $ExpectedTailscaleServes = @(
     @{ Name = 'open-notebook-ui';     TailscalePort = 8443; TailscalePath = '/';                LocalPort = 8237 }
     @{ Name = 'open-notebook-api';    TailscalePort = 5055; TailscalePath = '/';                LocalPort = 8238 }
     @{ Name = 'quartz-wiki-viewer';   TailscalePort = 8444; TailscalePath = '/';                LocalPort = 8239 }
+    @{ Name = 'mattermost';           TailscalePort = 8446; TailscalePath = '/';                LocalPort = 8241 }
+    @{ Name = 'llm-gateway-ui';       TailscalePort = 8445; TailscalePath = '/';                LocalPort = 8240 }
 )
 
 # Function to test serve configuration.
@@ -754,13 +756,523 @@ function Invoke-OpenBrainHealth {
     }
 }
 
+# agent-org is a SEPARATE compose project (project=agent-org); this monitor's
+# `docker compose` (ai-stack) can't see it. Delegate to the canonical by-name
+# probe scripts\check-agent-org-health.ps1 — same pattern as Open Brain. It
+# guards the agent-bridge stale-DB-pool + the ao-git-egress stale-mount classes.
+# -Repair auto-restarts/recreates broken pieces; -Quiet keeps per-OK lines out of
+# the loop; -LogPath routes its detail into this monitor's log.
+function Invoke-AgentOrgHealth {
+    $aoScript = Join-Path $SCRIPT_DIR 'check-agent-org-health.ps1'
+    if (-not (Test-Path $aoScript)) {
+        Write-LogEntry "agent-org probe not found: $aoScript" "WARN"
+        return
+    }
+    try {
+        & $aoScript -Repair -Quiet -LogPath $LOG_FILE | Out-Null
+        $code = $LASTEXITCODE
+        if ($code -eq 0) {
+            Write-LogEntry "agent-org stack healthy" "DEBUG"
+        } else {
+            Write-LogEntry "agent-org stack reported unresolved fault(s) (exit $code) - see AgentOrg WARN/ERROR lines above" "WARN"
+        }
+    } catch {
+        Write-LogEntry "agent-org probe error: $($_.Exception.Message)" "WARN"
+    }
+}
+
 # Function to perform comprehensive health check
+# --- HOST Tailscale daemon (a separate tailnet node from the container!) ---
+# 2026-07-05: after an OOM-crash reboot the host daemon sat in 'NoState' (the
+# tray app was not running and unattended mode was not yet enabled) — the
+# operator's remote access was dead while every container-side check passed.
+# Detect and best-effort repair by (re)starting the tray app; the daemon-level
+# fix (unattended mode) is set, this is the belt-and-braces layer.
+# Non-fatal: the container tailnet node is independent of the host node.
+function Test-HostTailscaleBackend {
+    [CmdletBinding()]
+    param()
+    try {
+        $exe = Join-Path $env:ProgramFiles 'Tailscale\tailscale.exe'
+        if (-not (Test-Path $exe)) { return $true }  # host tailscale not installed
+        $raw = (& $exe status --json 2>$null) -join "`n"
+        if (-not $raw) { throw "empty status output" }
+        $state = ($raw | ConvertFrom-Json).BackendState
+        if ($state -eq 'Running') {
+            Write-LogEntry "host Tailscale backend Running" "DEBUG"
+            return $true
+        }
+        Write-LogEntry "host Tailscale backend state '$state' (not Running) - starting tray app to reattach" "WARN"
+        if (-not (Get-Process -Name 'tailscale-ipn' -ErrorAction SilentlyContinue)) {
+            Start-Process (Join-Path $env:ProgramFiles 'Tailscale\tailscale-ipn.exe') | Out-Null
+        }
+        Start-Sleep 20
+        $raw2 = (& $exe status --json 2>$null) -join "`n"
+        $state2 = ($raw2 | ConvertFrom-Json).BackendState
+        if ($state2 -eq 'Running') {
+            Write-LogEntry "host Tailscale recovered (Running)" "SUCCESS"
+            return $true
+        }
+        Write-LogEntry "host Tailscale still '$state2' - needs operator (service restart may require elevation)" "ERROR"
+        return $false
+    } catch {
+        Write-LogEntry "host Tailscale check inconclusive: $($_.Exception.Message)" "WARN"
+        return $true
+    }
+}
+
+# --- claude-sessions bridge (Mattermost <-> Claude Code, HOST process) -----
+# The bridge that connects #claude-sessions in Mattermost to headless claude -p
+# runs as a HOST Scheduled Task ('claude-sessions-bridge', venv pythonw shim +
+# interpreter pair), not a container -- no container check can see it. Liveness
+# proxy: its single-instance lock, a LISTEN socket on 127.0.0.1:48291 held by
+# the interpreter (bridge.py binds it at process start, BEFORE the wait for
+# Mattermost, so it listens within seconds of launch). 2026-07-23: the pair
+# dies together if either member is killed; a reboot restarts the task but
+# nothing else watched it -- this check closes that gap. Repair = restart the
+# Scheduled Task (the canonical launcher; NEVER spawn pythonw directly -- the
+# task owns the process tree). Unrecovered failure alerts to Mattermost
+# (notify-mattermost.sh posts via the MM API directly, independent of the
+# bridge), throttled to one ping per 12h while the outage persists.
+$CLAUDE_BRIDGE_TASK = 'claude-sessions-bridge'
+$CLAUDE_BRIDGE_LOCK_PORT = 48291   # bridge.py BRIDGE_LOCK_PORT default
+# The bridge talks to Mattermost over the HOST port-forward (bridge.py BRIDGE_MM_URL
+# default http://localhost:8065). This is a DIFFERENT path from the tailnet serve
+# route (which is container->container via socat) and can fail independently.
+$CLAUDE_BRIDGE_MM_URL = if ($env:BRIDGE_MM_URL) { $env:BRIDGE_MM_URL } elseif ($env:MM_URL) { $env:MM_URL } else { 'http://localhost:8065' }
+
+function Test-ClaudeSessionsBridge {
+    [CmdletBinding()]
+    param()
+    try {
+        $conn = Get-NetTCPConnection -LocalPort $CLAUDE_BRIDGE_LOCK_PORT -State Listen -ErrorAction SilentlyContinue
+        if (-not $conn) { return $false }
+        # Confirm the listener really is the bridge's python -- a foreign
+        # squatter on this port would also block the bridge from ever starting,
+        # and a task restart cannot fix that (worth an explicit ERROR).
+        $owner = Get-Process -Id (@($conn)[0].OwningProcess) -ErrorAction SilentlyContinue
+        if ($owner -and $owner.ProcessName -notmatch '^python') {
+            Write-LogEntry "claude-sessions bridge lock port $CLAUDE_BRIDGE_LOCK_PORT held by '$($owner.ProcessName)' (PID $($owner.Id)) -- NOT the bridge; it cannot start until the port is freed" "ERROR"
+            return $false
+        }
+        return $true
+    } catch {
+        Write-LogEntry "claude-sessions bridge probe error: $($_.Exception.Message)" "WARN"
+        return $false
+    }
+}
+
+# Probe the bridge's ACTUAL Mattermost dependency from the host. 'Process alive'
+# (lock port held) is NOT the same as 'bridge can poll': 2026-07-24 the bridge
+# held the lock port for ~4h while Mattermost's host port-forward went stale
+# after an MM container restart, so it logged 'poll error' every 36s and picked
+# up ZERO chats while every container-side check said healthy. This closes that
+# blind spot by hitting the same endpoint the bridge polls.
+function Test-ClaudeBridgeMattermostReachable {
+    [CmdletBinding()]
+    param()
+    try {
+        $r = Invoke-WebRequest -Uri "$CLAUDE_BRIDGE_MM_URL/api/v4/system/ping" -UseBasicParsing -TimeoutSec 6
+        return ($r.StatusCode -eq 200)
+    } catch {
+        return $false
+    }
+}
+
+# Repair path for 'bridge alive but its MM endpoint is dead'. Restarting the
+# BRIDGE would not help here (proven 2026-07-24 -- the fault is the dependency,
+# not the process). Distinguish a wedged host port-forward (MM healthy inside
+# its container, but com.docker.backend drops host connections) from MM being
+# genuinely down (that is agent-org's domain -- Invoke-AgentOrgHealth ran just
+# before this). Only the wedged-forward case is repaired here, by restarting the
+# mattermost container so Docker rebuilds the port mapping. That briefly blips
+# the tailnet serve route too, but socat re-resolves per connection and recovers.
+function Repair-ClaudeBridgeMattermostForward {
+    [CmdletBinding()]
+    param()
+    $health = $null
+    try { $health = (docker inspect -f '{{.State.Health.Status}}' mattermost 2>$null) } catch { }
+    if ($health -ne 'healthy') {
+        Write-LogEntry "bridge MM endpoint $CLAUDE_BRIDGE_MM_URL unreachable AND mattermost container health='$health' -- MM itself is degraded; agent-org health check owns that, NOT restarting MM from here" "ERROR"
+        return $false
+    }
+    Write-LogEntry "bridge MM endpoint $CLAUDE_BRIDGE_MM_URL unreachable but mattermost container is healthy -- wedged Docker host port-forward; restarting mattermost to rebuild the port mapping" "WARN"
+    try {
+        docker restart mattermost 2>&1 | Out-Null
+    } catch {
+        Write-LogEntry "docker restart mattermost failed: $($_.Exception.Message)" "ERROR"
+        return $false
+    }
+    $waited = 0
+    while ($waited -lt 90) {
+        Start-Sleep 6
+        $waited += 6
+        if (Test-ClaudeBridgeMattermostReachable) {
+            Write-LogEntry "bridge MM endpoint reachable again after ${waited}s (port-forward rebuilt); the bridge opens a fresh connection each poll and self-recovers within one cycle" "SUCCESS"
+            return $true
+        }
+    }
+    Write-LogEntry "bridge MM endpoint still unreachable 90s after mattermost restart -- needs operator" "ERROR"
+    return $false
+}
+
+function Confirm-ClaudeSessionsBridge {
+    [CmdletBinding()]
+    param()
+    $sentinel = Join-Path $PROJECT_DIR 'logs\.claude-bridge-alert'
+    $mmSentinel = Join-Path $PROJECT_DIR 'logs\.claude-bridge-mm-alert'
+    if (Test-ClaudeSessionsBridge) {
+        # Process is alive. Now confirm it can actually REACH Mattermost -- an
+        # alive-but-deaf bridge (wedged host port-forward) looks identical to a
+        # healthy one at the process level. See Test-ClaudeBridgeMattermostReachable.
+        if (Test-ClaudeBridgeMattermostReachable) {
+            Write-LogEntry "claude-sessions bridge healthy (lock port $CLAUDE_BRIDGE_LOCK_PORT listening + MM endpoint reachable)" "DEBUG"
+            Remove-Item $sentinel -Force -ErrorAction SilentlyContinue
+            Remove-Item $mmSentinel -Force -ErrorAction SilentlyContinue
+            return $true
+        }
+        Write-LogEntry "claude-sessions bridge process is alive but its Mattermost endpoint $CLAUDE_BRIDGE_MM_URL is unreachable -- bridge is deaf (not registering chats)" "WARN"
+        if (Repair-ClaudeBridgeMattermostForward) {
+            Remove-Item $mmSentinel -Force -ErrorAction SilentlyContinue
+            return $true
+        }
+        # Dependency repair failed. Best-effort MM alert (may not land if the MM
+        # host path is still down -- notify-mattermost.sh posts via localhost:8065
+        # too), throttled 12h via its own sentinel so it retries once MM is back.
+        try {
+            $shouldPing = $true
+            if (Test-Path $mmSentinel) {
+                if (((Get-Date) - (Get-Item $mmSentinel).LastWriteTime).TotalHours -lt 12) { $shouldPing = $false }
+            }
+            if ($shouldPing) {
+                $bash = 'C:\Program Files\Git\bin\bash.exe'
+                if (Test-Path $bash) {
+                    $scriptPath = ($PROJECT_DIR -replace '\\', '/') + '/scripts/notify-mattermost.sh'
+                    $null | & $bash $scriptPath "WARNING claude-sessions bridge is alive but cannot reach Mattermost at $CLAUDE_BRIDGE_MM_URL and auto-repair FAILED -- @bot-claude is not registering chats. Check the mattermost container + Docker host port-forward." 2>$null | Out-Null
+                }
+                (Get-Date -Format o) | Out-File $mmSentinel -Encoding utf8 -Force
+            }
+        } catch { Write-LogEntry "claude-sessions bridge MM-endpoint alert failed: $($_.Exception.Message)" "WARN" }
+        return $false
+    }
+    Write-LogEntry "claude-sessions bridge is DOWN (no listener on 127.0.0.1:$CLAUDE_BRIDGE_LOCK_PORT), restarting its Scheduled Task..." "WARN"
+    try {
+        $task = Get-ScheduledTask -TaskName $CLAUDE_BRIDGE_TASK -ErrorAction SilentlyContinue
+        if (-not $task) {
+            Write-LogEntry "Scheduled Task '$CLAUDE_BRIDGE_TASK' not found -- cannot repair (renamed/removed?)" "ERROR"
+        } else {
+            # Stop first: a wedged still-'Running' task instance makes
+            # Start-ScheduledTask a no-op.
+            Stop-ScheduledTask -TaskName $CLAUDE_BRIDGE_TASK -ErrorAction SilentlyContinue
+            Start-Sleep 2
+            Start-ScheduledTask -TaskName $CLAUDE_BRIDGE_TASK
+            $waited = 0
+            while ($waited -lt 30) {
+                Start-Sleep 5
+                $waited += 5
+                if (Test-ClaudeSessionsBridge) {
+                    Write-LogEntry "claude-sessions bridge recovered after ${waited}s" "SUCCESS"
+                    Remove-Item $sentinel -Force -ErrorAction SilentlyContinue
+                    return $true
+                }
+            }
+            Write-LogEntry "claude-sessions bridge did not come back within 30s of task restart" "ERROR"
+        }
+    } catch {
+        Write-LogEntry "claude-sessions bridge recovery error: $($_.Exception.Message)" "ERROR"
+    }
+    try {
+        $shouldPing = $true
+        if (Test-Path $sentinel) {
+            if (((Get-Date) - (Get-Item $sentinel).LastWriteTime).TotalHours -lt 12) { $shouldPing = $false }
+        }
+        if ($shouldPing) {
+            # Git bash EXPLICITLY (same reasoning as Test-BackupRecency below).
+            $bash = 'C:\Program Files\Git\bin\bash.exe'
+            if (Test-Path $bash) {
+                $scriptPath = ($PROJECT_DIR -replace '\\', '/') + '/scripts/notify-mattermost.sh'
+                $null | & $bash $scriptPath "WARNING claude-sessions bridge (Mattermost <-> Claude) is DOWN and auto-restart FAILED -- @bot-claude will not respond. Check Scheduled Task '$CLAUDE_BRIDGE_TASK' and scripts/claude-sessions-bridge/state/bridge.log" 2>$null | Out-Null
+            }
+            (Get-Date -Format o) | Out-File $sentinel -Encoding utf8 -Force
+        }
+    } catch { Write-LogEntry "claude-sessions bridge MM alert failed: $($_.Exception.Message)" "WARN" }
+    return $false
+}
+
+# --- Backup recency: an "Up" sidecar can still produce nothing ------------
+# The backup scripts precheck-skip with exit 0 (deliberately: never tar broken
+# state), so a wrong probe target means NO artifacts and NO error. That let
+# five sidecars go silent for ~5 weeks (2026-05-29 → 07-05) unnoticed. This
+# watches the OUTPUT instead: newest artifact per backups/<dir> must be
+# younger than its cadence allows. Alerts to the log + Mattermost (throttled).
+$ExpectedBackupRecency = @(
+    @{ Dir = 'agent-bridge-db'; MaxAgeHours = 52 }
+    @{ Dir = 'authelia';        MaxAgeHours = 52 }
+    @{ Dir = 'caddy';           MaxAgeHours = 52 }
+    @{ Dir = 'little-coder';    MaxAgeHours = 52 }
+    @{ Dir = 'llm-gateway';     MaxAgeHours = 52 }
+    @{ Dir = 'lm-models';       MaxAgeHours = 220 }  # weekly cron (Sun 01:00) + slack
+    @{ Dir = 'mattermost-db';   MaxAgeHours = 52 }
+    @{ Dir = 'mnemory';         MaxAgeHours = 52 }
+    @{ Dir = 'open-notebook';   MaxAgeHours = 52 }
+    @{ Dir = 'openbrain-db';    MaxAgeHours = 52 }
+    @{ Dir = 'openbrain-wiki';  MaxAgeHours = 52 }
+    @{ Dir = 'openwebui';       MaxAgeHours = 52 }
+    @{ Dir = 'smolcrawl';       MaxAgeHours = 52 }
+    @{ Dir = 'tailscale';       MaxAgeHours = 52 }
+)
+function Test-BackupRecency {
+    [CmdletBinding()]
+    param()
+    $stale = @()
+    foreach ($exp in $ExpectedBackupRecency) {
+        $dir = Join-Path $PROJECT_DIR "backups\$($exp.Dir)"
+        if (-not (Test-Path $dir)) {
+            $stale += "$($exp.Dir): backup dir missing"
+            continue
+        }
+        $newest = Get-ChildItem $dir -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -notlike '*.sha256' } |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 1
+        if (-not $newest) {
+            $stale += "$($exp.Dir): no artifacts at all"
+            continue
+        }
+        $ageH = [math]::Round(((Get-Date) - $newest.LastWriteTime).TotalHours, 1)
+        if ($ageH -gt $exp.MaxAgeHours) {
+            $stale += "$($exp.Dir): newest artifact $($newest.Name) is ${ageH}h old (max $($exp.MaxAgeHours)h)"
+        }
+    }
+    # Sentinel = the outstanding-alert marker. Its presence means a STALE ping
+    # was sent and never cleared; its content is the throttle key (the ';'-joined
+    # stale dir names). Used by both the all-clear below and the throttle logic.
+    $sentinel = Join-Path $PROJECT_DIR 'logs\.backup-recency-alert'
+    if ($stale.Count -eq 0) {
+        Write-LogEntry "backup recency OK ($($ExpectedBackupRecency.Count) dirs checked)" "DEBUG"
+        # All-clear: if a stale alert was outstanding (sentinel present), post a
+        # one-time RECOVERED notice and clear the sentinel. Without this a
+        # resolved incident looks identical to an open one in #claude-code, and
+        # the next stale event wouldn't re-ping until the 12h throttle lapsed.
+        if (Test-Path $sentinel) {
+            try {
+                $prevKey = (Get-Content $sentinel -Raw -ErrorAction SilentlyContinue)
+                if ($prevKey) { $prevKey = $prevKey.Trim() }
+                # Same git-bash / forward-slash constraints as the STALE ping below.
+                $bash = 'C:\Program Files\Git\bin\bash.exe'
+                if ((Test-Path $bash) -and $prevKey) {
+                    $scriptPath = ($PROJECT_DIR -replace '\\', '/') + '/scripts/notify-mattermost.sh'
+                    $recovered = (($prevKey -split ';') | Sort-Object) -join ', '
+                    $null | & $bash $scriptPath "RECOVERED ai-stack backup: fresh artifacts again for $recovered" 2>$null | Out-Null
+                }
+                Remove-Item $sentinel -Force -ErrorAction SilentlyContinue
+                Write-LogEntry "backup recency RECOVERED - cleared stale alert for: $prevKey" "SUCCESS"
+            } catch { Write-LogEntry "backup recency recovery notice failed: $($_.Exception.Message)" "WARN" }
+        }
+        return $true
+    }
+    foreach ($s in $stale) { Write-LogEntry "BACKUP STALE - $s" "ERROR" }
+    # Mattermost alert, throttled: re-ping only if the stale set changed or the
+    # last ping is older than 12h (this check runs every 10 minutes).
+    try {
+        $content = ($stale | Sort-Object) -join '; '
+        # Throttle key = WHICH dirs are stale (not the full message: the age
+        # number changes every cycle and would defeat the 12h suppression).
+        $contentKey = (($stale | ForEach-Object { ($_ -split ':')[0] }) | Sort-Object) -join ';'
+        $shouldPing = $true
+        if (Test-Path $sentinel) {
+            $prev = (Get-Content $sentinel -Raw -ErrorAction SilentlyContinue)
+            if ($prev) { $prev = $prev.Trim() }
+            $lastPing = (Get-Item $sentinel).LastWriteTime
+            if (($prev -eq $contentKey) -and ((Get-Date) - $lastPing).TotalHours -lt 12) { $shouldPing = $false }
+        }
+        if ($shouldPing) {
+            # Git bash EXPLICITLY: bare `Get-Command bash` resolves to WSL's
+            # bash (System32), which cannot open Windows paths. Forward-slash
+            # path for the same reason.
+            $bash = 'C:\Program Files\Git\bin\bash.exe'
+            if (Test-Path $bash) {
+                $scriptPath = ($PROJECT_DIR -replace '\\', '/') + '/scripts/notify-mattermost.sh'
+                # Pipe $null so bash's stdin is CLOSED: notify-mattermost.sh
+                # cats stdin when it isn't a tty, and an inherited open pipe
+                # (interactive/manual runs) would block it forever.
+                $null | & $bash $scriptPath "WARNING ai-stack backup STALE: $content" 2>$null | Out-Null
+            }
+            $contentKey | Out-File $sentinel -Encoding utf8 -Force
+        }
+    } catch { Write-LogEntry "backup recency MM alert failed: $($_.Exception.Message)" "WARN" }
+    return $false
+}
+
+# --- Out-of-band Telegram alert (DOCKER-INDEPENDENT) --------------------------
+# Posts straight to the operator's phone via scripts/sysadmin-mcp/telegram_notify.py
+# (plain HTTPS to the Telegram Bot API). Unlike notify-mattermost.sh (which posts
+# to the Mattermost *container* on :8065), this still lands when Docker is down --
+# the whole point of the out-of-band channel. Throttled per-key via a logs sentinel
+# so a persistent fault doesn't spam every 60s cycle. Best-effort; never throws.
+function Send-TelegramAlert {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Message,
+        [string]$ThrottleKey,
+        [double]$ThrottleHours = 0.5
+    )
+    try {
+        if ($ThrottleKey) {
+            $sentinel = Join-Path $PROJECT_DIR "logs\.tg-alert-$ThrottleKey"
+            if (Test-Path $sentinel) {
+                if (((Get-Date) - (Get-Item $sentinel).LastWriteTime).TotalHours -lt $ThrottleHours) { return }
+            }
+        }
+        $py = Join-Path $PROJECT_DIR '.venv\Scripts\python.exe'
+        if (-not (Test-Path $py)) { $py = 'python' }
+        $tg = Join-Path $SCRIPT_DIR 'sysadmin-mcp\telegram_notify.py'
+        if (Test-Path $tg) {
+            & $py $tg $Message 2>$null | Out-Null
+            if ($ThrottleKey) { (Get-Date -Format o) | Out-File $sentinel -Encoding utf8 -Force }
+        }
+    } catch { Write-LogEntry "Telegram alert failed: $($_.Exception.Message)" "WARN" }
+}
+
+# --- Docker ENGINE liveness + autonomous restart ------------------------------
+# The single most important addition for the "compaction/crash stranded Docker"
+# class. Every other probe in this script issues `docker ...` and assumes the
+# daemon is up; this confirms that first. If the engine is DOWN it attempts an
+# autonomous restart (docker desktop start, with a reset-and-retry) -- this is
+# what keeps trying AFTER compact-vhdx.ps1's own 3 finally-block retries give up,
+# because the watchdog is re-enabled the moment a compaction ends. On unrecovered
+# failure it fires an ACTIONABLE out-of-band Telegram alert (the operator can
+# reply 'docker up' / 'recover' / 'status' to the listener). Returns $true if the
+# engine is up (or was recovered), $false if it is still down.
+function Confirm-DockerEngine {
+    [CmdletBinding()]
+    param()
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'   # native docker/wsl stderr must not throw under -Stop
+    try {
+        & docker version --format '{{.Server.Version}}' 2>$null | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            Write-LogEntry "Docker engine UP" "DEBUG"
+            Remove-Item (Join-Path $PROJECT_DIR 'logs\.tg-alert-engine') -Force -ErrorAction SilentlyContinue
+            return $true
+        }
+        Write-LogEntry "Docker ENGINE is DOWN (docker version failed) -- attempting autonomous restart" "ERROR"
+        $dd = Get-Process 'Docker Desktop' -ErrorAction SilentlyContinue | Where-Object { $_.Path } | Select-Object -First 1
+        $ddPath = if ($dd) { $dd.Path } else { 'C:\Program Files\Docker\Docker\Docker Desktop.exe' }
+        for ($attempt = 1; $attempt -le 2; $attempt++) {
+            if ($attempt -gt 1) {
+                & docker desktop stop 2>$null | Out-Null; Start-Sleep 5
+                & wsl --shutdown 2>$null | Out-Null; Start-Sleep 8
+            }
+            if (-not (Get-Process 'Docker Desktop' -ErrorAction SilentlyContinue)) {
+                if (Test-Path $ddPath) { Start-Process -FilePath $ddPath }
+                Start-Sleep 8
+            }
+            Write-LogEntry "docker desktop start (attempt $attempt)" "WARN"
+            & docker desktop start 2>$null | Out-Null
+            for ($i = 0; $i -lt 30; $i++) {   # up to ~150s per attempt
+                Start-Sleep 5
+                & docker version --format '{{.Server.Version}}' 2>$null | Out-Null
+                if ($LASTEXITCODE -eq 0) {
+                    Write-LogEntry "Docker engine recovered on attempt $attempt" "SUCCESS"
+                    Send-TelegramAlert "ai-stack: Docker engine was down; the watchdog restarted it. Verifying the stack now." -ThrottleKey 'engine-ok' -ThrottleHours 1
+                    Remove-Item (Join-Path $PROJECT_DIR 'logs\.tg-alert-engine') -Force -ErrorAction SilentlyContinue
+                    return $true
+                }
+            }
+        }
+        Write-LogEntry "Docker engine still DOWN after restart attempts -- needs manual intervention/reboot" "ERROR"
+        Send-TelegramAlert "ALERT ai-stack Docker engine is DOWN and the watchdog could NOT restart it. Reply 'docker up' to retry, 'recover' for an ordered restart, or 'status'. May need a host reboot." -ThrottleKey 'engine' -ThrottleHours 0.25
+        return $false
+    } finally {
+        $ErrorActionPreference = $prevEAP
+    }
+}
+
+# --- Generic HOST lifeline (bridge/listener) liveness + restart ---------------
+# The claude-sessions bridge (48291), the sysadmin persona bridge (48292) and the
+# out-of-band Telegram listener (48293) are HOST Scheduled Tasks, not containers,
+# so they stay reachable during a Docker-down window -- they are the lifelines.
+# Liveness proxy: a LISTEN socket on the single-instance lock port, owned by a
+# python process. Test-HostLockPort probes it; Confirm-HostTaskByPort restarts the
+# owning Scheduled Task if it is not listening and alerts out-of-band on failure.
+function Test-HostLockPort {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][int]$Port)
+    try {
+        $conn = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
+        if (-not $conn) { return $false }
+        $owner = Get-Process -Id (@($conn)[0].OwningProcess) -ErrorAction SilentlyContinue
+        if ($owner -and $owner.ProcessName -notmatch '^python') {
+            Write-LogEntry "lock port $Port held by '$($owner.ProcessName)' (PID $($owner.Id)) -- not a python bridge/listener; a task restart cannot fix a foreign squatter" "ERROR"
+            return $false
+        }
+        return $true
+    } catch {
+        Write-LogEntry "host lock-port $Port probe error: $($_.Exception.Message)" "WARN"
+        return $false
+    }
+}
+
+function Confirm-HostTaskByPort {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$TaskName,
+        [Parameter(Mandatory)][int]$Port,
+        [Parameter(Mandatory)][string]$Label
+    )
+    if (Test-HostLockPort -Port $Port) {
+        Write-LogEntry "$Label alive (lock port $Port listening)" "DEBUG"
+        return $true
+    }
+    Write-LogEntry "$Label DOWN (no listener on 127.0.0.1:$Port), restarting Scheduled Task '$TaskName'..." "WARN"
+    try {
+        $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+        if (-not $task) {
+            Write-LogEntry "Scheduled Task '$TaskName' not found -- cannot repair $Label (not registered?)" "ERROR"
+        } else {
+            Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+            Start-Sleep 2
+            Start-ScheduledTask -TaskName $TaskName
+            $waited = 0
+            while ($waited -lt 30) {
+                Start-Sleep 5; $waited += 5
+                if (Test-HostLockPort -Port $Port) {
+                    Write-LogEntry "$Label recovered after ${waited}s" "SUCCESS"
+                    return $true
+                }
+            }
+            Write-LogEntry "$Label did not come back within 30s of task restart" "ERROR"
+        }
+    } catch {
+        Write-LogEntry "$Label recovery error: $($_.Exception.Message)" "ERROR"
+    }
+    # Outbound Telegram is independent of the listener, so this lands even if the
+    # listener itself is the thing that is down (inbound control is then lost, but
+    # the operator is at least told and can RDP in via host Tailscale).
+    Send-TelegramAlert "ALERT $Label is DOWN and auto-restart FAILED (Scheduled Task '$TaskName'). Check the host." -ThrottleKey ("task-" + $Port) -ThrottleHours 1
+    return $false
+}
+
 function Invoke-HealthCheck {
     Write-LogEntry "Starting comprehensive health check..."
-    
+
     # Change to project directory
     Set-Location $PROJECT_DIR
-    
+
+    # --- Docker ENGINE liveness FIRST: every check below issues `docker ...` and
+    # needs the daemon. If it is down (a compaction stranded it, or a crash), try
+    # to restart it autonomously and alert out-of-band. Then short-circuit: with
+    # no daemon there is nothing container-side to check -- but the HOST lifelines
+    # (bridges + Telegram listener) DON'T need Docker, so verify them here instead
+    # of skipping them via the early return that used to blind this window.
+    if (-not (Confirm-DockerEngine)) {
+        Write-LogEntry "Docker engine down and not recovered; verifying host lifelines, skipping container checks" "ERROR"
+        Confirm-HostTaskByPort -TaskName 'claude-sessions-bridge'     -Port 48291 -Label 'claude-sessions bridge' | Out-Null
+        Confirm-HostTaskByPort -TaskName 'sysadmin-bridge'            -Port 48292 -Label 'sysadmin bridge'        | Out-Null
+        Confirm-HostTaskByPort -TaskName 'sysadmin-telegram-listener' -Port 48293 -Label 'telegram listener'      | Out-Null
+        return $false
+    }
+
     # First, validate entrypoint and detect common issues
     if (-not (Test-EntrypointHealth)) {
         Write-LogEntry "Entrypoint validation failed. Manual intervention required." "ERROR"
@@ -829,6 +1341,10 @@ function Invoke-HealthCheck {
         }
     }
     
+    # HOST tailscale node (operator remote access) — independent of the
+    # container node checked above; non-fatal but repairs + logs loudly.
+    Test-HostTailscaleBackend | Out-Null
+
     # Test serve configuration. Additive repair: re-add only missing
     # mappings (never `serve reset`, which would wipe working ones --
     # including the per-service mappings the old code didn't know about).
@@ -921,8 +1437,51 @@ function Invoke-HealthCheck {
     # --- mnemory MCP gateway (the bridge clients reach; mnemory itself above) ---
     Confirm-AuxiliaryContainer -ServiceName "mnemory-gateway" -RestartWaitSeconds 10 | Out-Null
 
+    # --- inference gateway plane (LiteLLM front door + admission queue) ---
+    # ALL inference flows through llm-gateway (the llama-cpp:8080 alias) and
+    # llm-queue. Test-LlamaCppConnectivity above exercises the data path;
+    # these catch the db/UI sidecars the path test can't see.
+    Confirm-AuxiliaryContainer -ServiceName "llm-queue"      -RestartWaitSeconds 15 | Out-Null
+    Confirm-AuxiliaryContainer -ServiceName "llm-gateway"    -RestartWaitSeconds 20 | Out-Null
+    Confirm-AuxiliaryContainer -ServiceName "llm-gateway-db" -RestartWaitSeconds 15 | Out-Null
+    Confirm-AuxiliaryContainer -ServiceName "llm-gateway-ui" -RestartWaitSeconds 15 | Out-Null
+
+    # --- remaining main-stack backup sidecars (cron loops; mnemory-backup and
+    # openwebui-backup are confirmed above; portal backups (caddy/authelia) are
+    # deliberately NOT here — the portal has its own lifecycle (portal-on/off)
+    # and must not be auto-started; OB/agent-org backups live in their own
+    # Invoke-*Health blocks. Test-BackupRecency below watches everyone's OUTPUT.
+    Confirm-AuxiliaryContainer -ServiceName "little-coder-backup"  -RestartWaitSeconds 10 | Out-Null
+    Confirm-AuxiliaryContainer -ServiceName "llm-gateway-backup"   -RestartWaitSeconds 10 | Out-Null
+    Confirm-AuxiliaryContainer -ServiceName "lm-models-backup"     -RestartWaitSeconds 10 | Out-Null
+    Confirm-AuxiliaryContainer -ServiceName "tailscale-backup"     -RestartWaitSeconds 10 | Out-Null
+    Confirm-AuxiliaryContainer -ServiceName "smolcrawl-backup"     -RestartWaitSeconds 10 | Out-Null
+    Confirm-AuxiliaryContainer -ServiceName "open-notebook-backup" -RestartWaitSeconds 10 | Out-Null
+
     # --- Open Brain stack (SEPARATE compose project) incl. mcp stale-pool guard ---
     Invoke-OpenBrainHealth
+
+    # --- agent-org stack (SEPARATE compose project) incl. bridge stale-pool +
+    #     ao-git-egress stale-mount guards, + its nightly pg_dump backup sidecars ---
+    Invoke-AgentOrgHealth
+
+    # --- claude-sessions bridge (Mattermost <-> Claude, HOST Scheduled Task) ---
+    # After Invoke-AgentOrgHealth so the Mattermost container it connects to has
+    # just been confirmed/repaired. Non-fatal for the overall check.
+    Confirm-ClaudeSessionsBridge | Out-Null
+
+    # --- sysadmin persona bridge (#sysadmin, 48292) + out-of-band Telegram command
+    # listener (48293), both HOST Scheduled Tasks. Process-liveness + task-restart:
+    # the claude-bridge check above already repairs the shared Mattermost host
+    # port-forward, and the listener needs no container at all. This closes the gap
+    # where nothing watched the sysadmin bridge or the break-glass control channel.
+    Confirm-HostTaskByPort -TaskName 'sysadmin-bridge'            -Port 48292 -Label 'sysadmin bridge'   | Out-Null
+    Confirm-HostTaskByPort -TaskName 'sysadmin-telegram-listener' -Port 48293 -Label 'telegram listener' | Out-Null
+
+    # --- backup OUTPUT recency (all 14 backups/<dir> trees, incl. portal + OB) ---
+    # Non-fatal for the overall check, but logs ERROR + Mattermost-alerts:
+    # a running sidecar that produces nothing is invisible to container checks.
+    Test-BackupRecency | Out-Null
 
     Write-LogEntry "All health checks passed" "SUCCESS"
     return $true

@@ -39,6 +39,19 @@ agent:
     - "/app/agent-knowledge/project-context.md"
     - "--append-system-prompt"
     - "/app/agent-knowledge/engineering-principles.md"
+    # Declarative denylist of tools whose execution/egress would escape the
+    # open-terminal workspace plane (control-plane→workspace invariant). This is
+    # the durable backstop for the entrypoint's `rm` of those extensions: it
+    # still fires if an upstream rename makes the rm miss. (1.9.x, --exclude-tools
+    # is a comma-separated name denylist; unknown names are no-ops.)
+    #   ShellSession*  — in-container shell (git-proxy bypass)
+    #   Browser*       — playwright launches chromium IN-PROCESS, not in
+    #                    open-terminal; also egress
+    #   webfetch/websearch — node fetch egress from the control plane (and
+    #                    redundant with the stack's research plane)
+    # NOT excluded: bash (our open-terminal-routed override) and glob (local fs).
+    - "--exclude-tools"
+    - "ShellSession,ShellSessionCwd,ShellSessionReset,BrowserNavigate,BrowserClick,BrowserExtract,BrowserBack,BrowserHistory,BrowserScroll,BrowserType,webfetch,websearch"
   # Session continuity (design §3.1 follow-up). `--session <id>` makes
   # pi load/create a per-chat session; compaction is automatic when
   # the session grows past pi's context budget. Sessions live on the

@@ -116,6 +116,11 @@ services:
       dockerfile: Dockerfile.single
     image: iks-notebook:local
     container_name: iks-notebook
+    logging: # sysadmin log cap (disk-prune-watcher); applies on recreate
+      driver: json-file
+      options:
+        max-size: "100m"
+        max-file: "5"
     depends_on:
       - iks-surreal
       - iks-db

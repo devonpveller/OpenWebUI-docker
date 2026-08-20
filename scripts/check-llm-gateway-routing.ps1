@@ -89,13 +89,54 @@ function Test-Allowed([string]$path) {
 
 $violations = New-Object System.Collections.Generic.List[object]
 
-$files = Get-ChildItem -Path $Root -Recurse -File -Include $exts -ErrorAction SilentlyContinue |
-    Where-Object { -not (Test-Allowed $_.FullName) }
+# Directories we never DESCEND into. Pruning at traversal time (not just filtering
+# after) is the whole speedup: `Get-ChildItem -Recurse` used to walk every file in
+# node_modules/.venv/.testvenv/site-packages (tens of thousands) and ReadAllLines
+# each one BEFORE the allow-filter ran, pushing the pre-commit hook past 2 min. These
+# trees hold only vendored/generated/data files — no first-party source a bypass
+# could live in — so skipping them is a pure win (and .venv site-packages is third-
+# party library code we never want to flag). Matched by exact dir name, plus the
+# `*-data` volume-mount suffix. Junctions/symlinks are skipped to avoid loops.
+$pruneDirNames = @('.git', '.venv', '.testvenv', 'node_modules', '.next',
+                   'backups', 'tiktoken-cache', 'notebook_data', 'data')
+
+function Get-ScanFiles {
+    param([string]$RootDir, [string[]]$ExtPatterns, [string[]]$PruneNames)
+    $results = New-Object System.Collections.Generic.List[string]
+    $stack = New-Object System.Collections.Generic.Stack[string]
+    $stack.Push($RootDir)
+    while ($stack.Count -gt 0) {
+        $dir = $stack.Pop()
+        try {
+            foreach ($sub in [System.IO.Directory]::EnumerateDirectories($dir)) {
+                $name = [System.IO.Path]::GetFileName($sub)
+                if ($PruneNames -contains $name) { continue }
+                if ($name -like '*-data') { continue }
+                # don't traverse reparse points (junctions/symlinks) — avoids loops
+                # and walking into mounted/duplicated trees.
+                if ([System.IO.File]::GetAttributes($sub) -band [System.IO.FileAttributes]::ReparsePoint) { continue }
+                $stack.Push($sub)
+            }
+        } catch { continue }
+        try {
+            foreach ($file in [System.IO.Directory]::EnumerateFiles($dir)) {
+                $leaf = [System.IO.Path]::GetFileName($file)
+                foreach ($pat in $ExtPatterns) {
+                    if ($leaf -like $pat) { $results.Add($file); break }
+                }
+            }
+        } catch { continue }
+    }
+    return $results
+}
+
+$files = Get-ScanFiles -RootDir $Root -ExtPatterns $exts -PruneNames $pruneDirNames |
+    Where-Object { -not (Test-Allowed $_) }
 
 foreach ($f in $files) {
     $n = 0
     try {
-        $lines = [System.IO.File]::ReadAllLines($f.FullName)
+        $lines = [System.IO.File]::ReadAllLines($f)
     } catch {
         continue   # locked / in-use / binary — skip
     }
@@ -106,7 +147,7 @@ foreach ($f in $files) {
         # Sanctioned: the llm-queue admission controller's forward target (§3.2).
         if ($line -match $queueUpstreamAllow) { continue }
         if ($line -match $badPattern) {
-            $rel = $f.FullName.Substring($Root.Length).TrimStart('\')
+            $rel = $f.Substring($Root.Length).TrimStart('\')
             $violations.Add([pscustomobject]@{ File = $rel; Line = $n; Text = $line.Trim() })
         }
     }

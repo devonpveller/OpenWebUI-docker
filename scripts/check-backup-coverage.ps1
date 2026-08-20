@@ -48,6 +48,15 @@ try {
     $ob1Volumes = @($rawOb1) | ForEach-Object { $_ -replace '^open-brain_', '' } | Sort-Object -Unique
   }
   Write-Host ("  OB1     named volumes  : {0}" -f $ob1Volumes.Count) -ForegroundColor DarkGray
+
+  # agent-org is a THIRD separate compose project (project=agent-org) — mattermost +
+  # agent-bridge governance state. Same by-project volume inventory as ai-stack/OB1.
+  $agentOrgVolumes = @()
+  $rawAo = docker volume ls --filter 'label=com.docker.compose.project=agent-org' --format '{{.Name}}' 2>$null
+  if ($rawAo) {
+    $agentOrgVolumes = @($rawAo) | ForEach-Object { $_ -replace '^agent-org_', '' } | Sort-Object -Unique
+  }
+  Write-Host ("  agent-org named volumes: {0}" -f $agentOrgVolumes.Count) -ForegroundColor DarkGray
   Write-Host ""
 
   # ----- Inventory: bind-mount data paths (under D:\ for the operator) -----
@@ -64,6 +73,18 @@ try {
   $intentionallyExcluded = @(
     @{ Volume = 'little-coder-workspace'; Reason = 'Project workspace - intentionally re-clonable (design)' }
     @{ Volume = 'llm-queue-data'; Reason = 'B2 queue analytics events (SQLite) - non-critical, regenerable observability data' }
+    # agent-org: only the two Postgres stores are authoritative (backed up below).
+    @{ Volume = 'ao-worker-1-workspace'; Reason = 'agent-org worker workspace - re-clonable per /project (same as little-coder-workspace)' }
+    @{ Volume = 'ao-worker-2-workspace'; Reason = 'agent-org worker workspace - re-clonable per /project' }
+    @{ Volume = 'ao-worker-1-sessions';  Reason = 'agent-org worker session cache - regenerable per-effort continuity (authoritative effort state is in agent-bridge-db)' }
+    @{ Volume = 'ao-worker-2-sessions';  Reason = 'agent-org worker session cache - regenerable per-effort continuity' }
+    @{ Volume = 'ao-egress-config';      Reason = 'git-egress allowlist - regenerated from agent-bridge-db on boot (bridge rewrites it)' }
+    @{ Volume = 'mattermost-config';     Reason = 'Mattermost config - regenerable from compose env' }
+    @{ Volume = 'mattermost-logs';       Reason = 'Mattermost logs - transient' }
+    @{ Volume = 'mattermost-plugins';        Reason = 'Mattermost server plugins - regenerable' }
+    @{ Volume = 'mattermost-client-plugins'; Reason = 'Mattermost client plugins - regenerable' }
+    @{ Volume = 'mattermost-data';       Reason = 'Mattermost file attachments (avatars/uploads) - conversation CONTENT is in mattermost-db (backed up); revisit if attachments become important' }
+    @{ Volume = 'llm-gateway-cloud-db-data'; Reason = 'Cloud LiteLLM spend-log (profile:cloud) - non-authoritative telemetry, same class as llm-gateway-db' }
   )
 
   # ----- Mapping: volume name -> backup container that covers it -----
@@ -85,13 +106,21 @@ try {
     'tripwire-data'          = 'integrity-tripwire (state-only; bound to host config) - not separately backed up'
     'openbrain-db-data'      = 'openbrain-db-backup'
     'openbrain-wiki-data'    = 'openbrain-wiki-backup'
+    # Pre-existing map omissions (the backup containers already cover these; the map just
+    # never listed them — see the Backups table in stack-map/workspace-stacks.md):
+    'llm-gateway-db-data'    = 'llm-gateway-backup (logical pg_dump of the LiteLLM DB)'
+    'wiki-assets'            = 'openbrain-wiki-backup (mounts wiki-assets alongside openbrain-wiki-data)'
+    # agent-org — the two authoritative Postgres stores.
+    'agent-bridge-db-data'   = 'agent-bridge-db-backup'
+    'mattermost-db-data'     = 'mattermost-db-backup'
   }
 
   # ----- Pre-flight: ensure ./backups/<service>/ dirs exist ----------
   $expectedBackupDirs = @(
     'caddy', 'authelia', 'mnemory', 'openwebui', 'little-coder',
     'openbrain-db', 'openbrain-wiki', 'open-notebook', 'smolcrawl',
-    'tailscale', 'lm-models'
+    'tailscale', 'lm-models',
+    'agent-bridge-db', 'mattermost-db'
   )
   $missingDirs = @()
   foreach ($d in $expectedBackupDirs) {
@@ -115,7 +144,7 @@ try {
 
   # ----- Volume coverage check ---------------------------------------
   Write-Host "==> Volume coverage" -ForegroundColor Cyan
-  $allVolumes = @($aiStackVolumeNames) + @($ob1Volumes) | Sort-Object -Unique
+  $allVolumes = @($aiStackVolumeNames) + @($ob1Volumes) + @($agentOrgVolumes) | Sort-Object -Unique
   $gaps = @()
   $orphans = @()
   foreach ($v in $allVolumes) {
@@ -132,7 +161,7 @@ try {
     # Orphan detection: if no container (running OR stopped) references the
     # volume, it's a leftover from a previous compose config -- not a real
     # backup gap. Surface as hygiene flag, not a failure.
-    $candidateNames = @("ai-stack_$v", "open-brain_$v", $v)
+    $candidateNames = @("ai-stack_$v", "open-brain_$v", "agent-org_$v", $v)
     $referencingContainers = @()
     foreach ($candidate in $candidateNames) {
       $usage = docker ps -a --filter "volume=$candidate" --format '{{.Names}}' 2>$null

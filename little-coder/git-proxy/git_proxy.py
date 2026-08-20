@@ -146,11 +146,43 @@ def _has(rest: list[str], *flags: str) -> bool:
     return any(r in flags for r in rest)
 
 
+# `main`/`master` is the client-facing PRODUCTION branch — HUMAN-APPROVAL-GATED (operator 2026-07-11:
+# "nothing should've been pushed to main without my approval … main is client facing, the production
+# branch"). A worker must NEVER push to it (live breach: a host-context run pushed a submodule bump
+# straight onto the host's `main`). `main` changes ONLY via the App's operator-approved PR merge.
+# Workers push to `agent/*` (or ordinary dev) branches. `development`/feature branches are NOT protected.
+_PROTECTED_BRANCHES = {"main", "master"}
+
+
+def _protected_push_target(rest: list[str], current_branch: str | None) -> str | None:
+    """The protected branch a `git push` would land on (`main`/`master`), else None. Covers explicit
+    refspecs (`main`, `HEAD:main`, `refs/heads/main`) AND the bare/HEAD push (→ the checked-out
+    branch). Conservative: any refspec whose DESTINATION is protected trips it, regardless of position."""
+    positional = [t for t in rest if not t.startswith("-")]
+    refspecs = positional[1:] if len(positional) >= 2 else []
+    explicit = False
+    for rs in refspecs:
+        dst = rs.split(":")[-1] if ":" in rs else rs
+        if dst.startswith("refs/heads/"):
+            dst = dst[len("refs/heads/"):]
+        if dst in ("HEAD", ""):
+            dst = current_branch or ""
+        if dst:
+            explicit = True
+            if dst in _PROTECTED_BRANCHES:
+                return dst
+    # bare `git push` / `git push <remote>` → the destination is the checked-out branch
+    if not explicit and current_branch in _PROTECTED_BRANCHES:
+        return current_branch
+    return None
+
+
 def _guard(
     sub: str,
     rest: list[str],
     configured_remotes: set[str],
     is_tag: Callable[[str], bool],
+    current_branch: str | None = None,
 ) -> Decision:
     """Per-subcommand argument guards for whitelisted-but-dangerous commands."""
 
@@ -167,6 +199,14 @@ def _guard(
         for tok in rest:
             if not tok.startswith("-") and tok.startswith(":"):
                 return _deny("blocklist:push-delete", "refspec deletes a remote ref")
+        # PRODUCTION-BRANCH GUARD: never let a worker push to main/master (human-gated).
+        prot = _protected_push_target(rest, current_branch)
+        if prot:
+            return _deny(
+                "blocklist:push-protected-branch",
+                f"push to '{prot}' is blocked — it is the human-gated PRODUCTION branch; push to an "
+                f"agent/* (or dev) branch instead. `main` changes only via an operator-approved PR.",
+            )
         return _guard_remote_arg("push", rest, configured_remotes)
 
     if sub == "fetch":
@@ -290,6 +330,7 @@ def classify(
     argv: list[str],
     configured_remotes: set[str] | None = None,
     is_tag: Callable[[str], bool] | None = None,
+    current_branch: str | None = None,
 ) -> Decision:
     """Decide whether `git <argv>` may run. Pure — no side effects."""
     configured_remotes = configured_remotes or set()
@@ -309,7 +350,7 @@ def classify(
         )
     if sub in _READ_ONLY:
         return _allow(f"allow:read-only:{sub}")
-    return _guard(sub, rest, configured_remotes, is_tag)
+    return _guard(sub, rest, configured_remotes, is_tag, current_branch)
 
 
 # --------------------------------------------------------------------------
@@ -319,6 +360,21 @@ def classify(
 
 def _real_git() -> str:
     return os.environ.get("GIT_PROXY_REAL_GIT", "/usr/bin/git")
+
+
+def _current_branch(real_git: str) -> str | None:
+    """The checked-out branch name — for the production-branch push guard (a bare `git push` on
+    `main` must be denied). None on detached HEAD / any query failure; an EXPLICIT `push … main`
+    is still caught by refspec, so detection failure never opens the protected branch."""
+    try:
+        out = subprocess.run(
+            [real_git, "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True, text=True, timeout=5,
+        )
+        name = (out.stdout or "").strip()
+        return name if name and name != "HEAD" else None
+    except (OSError, subprocess.SubprocessError):
+        return None
 
 
 def _configured_remotes(real_git: str) -> set[str]:
@@ -378,8 +434,10 @@ def main(argv: list[str] | None = None) -> int:
     needs_repo = sub in {"fetch", "push", "reset"}
     remotes = _configured_remotes(real_git) if needs_repo else set()
     is_tag = _make_is_tag(real_git) if needs_repo else (lambda _r: False)
+    # The checked-out branch — only needed to guard a bare `git push` on main/master.
+    current_branch = _current_branch(real_git) if sub == "push" else None
 
-    decision = classify(argv, remotes, is_tag)
+    decision = classify(argv, remotes, is_tag, current_branch)
     if decision.action == "deny":
         _journal_denial(argv, decision)
         # The "git-proxy: DENIED" marker is what the daemon greps for.

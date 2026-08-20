@@ -34,7 +34,12 @@ services:
       # Performance Optimizations for faster Ollama communication
       - AIOHTTP_CLIENT_TIMEOUT=3600
       - AIOHTTP_CLIENT_TIMEOUT_MODEL_LIST=60
-      - AIOHTTP_CLIENT_TIMEOUT_TOOL_CALL=3600
+      # AIOHTTP_CLIENT_TIMEOUT_TOOL_CALL was set here until 2026-08-20 and was a
+      # PHANTOM: no reader exists in OWUI 0.9.6 or 0.11.0 (verified by grepping
+      # env.py in both). It never bounded tool calls. The real knob is below --
+      # it governs fetching TOOL SERVER specs (mcpo / lc-mcpo), default 10s,
+      # which is tight for a cold MCP server. Raised deliberately.
+      - AIOHTTP_CLIENT_TIMEOUT_TOOL_SERVER_DATA=30
       - MODELS_CACHE_TTL=10 # Cache model list for 10 seconds to reduce repeated calls
       - ENABLE_BASE_MODELS_CACHE=true # Cache base models for faster loading
       # Reduce OpenWebUI overhead for model requests
@@ -44,6 +49,10 @@ services:
       # default 30 -> 256. Pin a sane bound so deep_research / little-coder tool loops
       # don't run away on latency/cost. (Ignored by 0.8.10, which uses the old name.)
       - CHAT_RESPONSE_MAX_TOOL_CALL_ITERATIONS=40
+      # 0.11.0 adds a master switch for the Tools/Functions plugin surfaces.
+      # Upstream default is True; pinned so an upstream default change can
+      # never silently disable this stack's 16 deploy-by-paste plugins.
+      - ENABLE_PLUGINS=true
       # open-terminal moved into the little-coder control plane (Tool chapter):
       # it left OWUI's network namespace, so OWUI's direct terminal access
       # ends here. It returns in chapter 2 via lc-mcpo (design §3.4, Decision
@@ -90,11 +99,17 @@ services:
   watchtower:
     image: containrrr/watchtower:latest
     container_name: watchtower
+    logging: # sysadmin log cap (disk-prune-watcher); applies on recreate
+      driver: json-file
+      options:
+        max-size: "100m"
+        max-file: "5"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro # Read-only access
       - ./scripts/post-update-hook.sh:/post-update-hook.sh:ro # Post-update hook
       - .:/compose-dir:ro # Access to compose files for hook
     environment:
+      - DOCKER_API_VERSION=1.44 # image bakes in 1.25; engine 29+ (Docker Desktop 4.80) requires >=1.40
       - WATCHTOWER_CLEANUP=true # remove old images
       - WATCHTOWER_POLL_INTERVAL=120 # check every 2 minutes for testing
       - WATCHTOWER_INCLUDE_STOPPED=false # Only running containers
@@ -303,6 +318,16 @@ services:
       - LLAMA_SWAP_QWEN36_27B_CACHE_TYPE_K=${LLAMA_SWAP_QWEN36_27B_CACHE_TYPE_K:-q4_0}
       - LLAMA_SWAP_QWEN36_27B_CACHE_TYPE_V=${LLAMA_SWAP_QWEN36_27B_CACHE_TYPE_V:-q4_0}
       - LLAMA_SWAP_QWEN36_27B_REASONING_BUDGET=${LLAMA_SWAP_QWEN36_27B_REASONING_BUDGET:-4096}
+      # Speculative decoding for the 27B entry. `draft-mtp` (set in .env,
+      # 2026-07-09) self-drafts via the MTP head in the ThinkingCap GGUF;
+      # compose default stays `none` so a bare env is conservative and old
+      # llama-server builds still parse the flag.
+      - LLAMA_SWAP_QWEN36_27B_SPEC_TYPE=${LLAMA_SWAP_QWEN36_27B_SPEC_TYPE:-none}
+      - LLAMA_SWAP_QWEN36_27B_SPEC_DRAFT_N_MAX=${LLAMA_SWAP_QWEN36_27B_SPEC_DRAFT_N_MAX:-2}
+      # Draft (MTP) KV cache type. Build default f16 blew VRAM to 98.9% at
+      # 256k ctx (crash line is ~95%); .env pins q4_0 to match the main KV.
+      - LLAMA_SWAP_QWEN36_27B_SPEC_DRAFT_CACHE_TYPE_K=${LLAMA_SWAP_QWEN36_27B_SPEC_DRAFT_CACHE_TYPE_K:-f16}
+      - LLAMA_SWAP_QWEN36_27B_SPEC_DRAFT_CACHE_TYPE_V=${LLAMA_SWAP_QWEN36_27B_SPEC_DRAFT_CACHE_TYPE_V:-f16}
     deploy:
       resources:
         reservations:
@@ -411,7 +436,7 @@ services:
       - BACKUP_DIR=/backups
       - DATA_DIR=/data
       - RETAIN_COUNT=${BACKUP_RETAIN_COUNT:-2}
-      - HEALTH_TCP=mnemory-gateway:8080
+      - HEALTH_TCP=mnemory-gateway:8060 # gateway listens on 8060; 8080 made the precheck skip (=zero artifacts) silently from 2026-05-29 to 07-05
       - BACKUP_CRON=${BACKUP_CRON:-0 2 * * *}
     entrypoint: /bin/sh
     command:
@@ -447,6 +472,11 @@ services:
     command:
       - -c
       - |
+        # pigz = parallel gzip. The nightly tar of this ~40GB volume took ~50min
+        # with plain gzip (measured); pigz benchmarked 8x faster on the same data.
+        # Best-effort: the script falls back to gzip if this install fails
+        # (e.g. no network at container start), so backups never break on it.
+        apk add --no-cache pigz >/dev/null 2>&1           && echo "[$(date -u +%FT%TZ)] pigz installed (parallel compression enabled)"           || echo "[$(date -u +%FT%TZ)] WARN: pigz install failed -- falling back to gzip"
         echo "$${BACKUP_CRON} sh /scripts/backup.sh >> /var/log/backup.log 2>&1" > /etc/crontabs/root
         echo "[$(date -u +%FT%TZ)] Backup scheduler started (cron: $${BACKUP_CRON}, retain: $${RETAIN_COUNT} most recent)"
         crond -f -l 2
@@ -545,7 +575,8 @@ services:
       # LLM_QUEUE_UPSTREAM token specifically (§3.2).
       - LLM_QUEUE_UPSTREAM_BASE_URL=http://llama-cpp-upstream:8080
       - LLM_QUEUE_EMBED_UPSTREAM_BASE_URL=http://llama-cpp-embed-upstream:8080
-      # Admission sizing — MUST track llama-swap.config.yaml (--parallel 3).
+      # Admission sizing — MUST track LLAMA_SWAP_QWEN36_27B_N_PARALLEL (.env;
+      # 2 since 2026-07-09). Values live in .env next to that var.
       - LLM_QUEUE_SLOTS=${LLM_QUEUE_SLOTS:-3}
       - LLM_QUEUE_MAX_IN_FLIGHT=${LLM_QUEUE_MAX_IN_FLIGHT:-4}
       - LLM_QUEUE_BACKSTOP_DEPTH=${LLM_QUEUE_BACKSTOP_DEPTH:-24}
@@ -804,6 +835,11 @@ services:
     # documentation/implementation-guide/open -notebook-integration-openbrain/.
     image: open_notebook:iks
     container_name: open_notebook
+    logging: # sysadmin log cap (disk-prune-watcher); applies on recreate
+      driver: json-file
+      options:
+        max-size: "100m"
+        max-file: "5"
     networks:
       - default
       - llm-net
@@ -1101,6 +1137,12 @@ services:
       - LC_OPEN_TERMINAL_URL=http://open-terminal:8000
       - LC_OPEN_TERMINAL_KEY=${OPEN_TERMINAL_API_KEY}
       - LC_WORKSPACE=/workspace
+      # 1.9.x llama-cpp-provider probes the server's /props at startup to detect
+      # the live context window. Our base_url is the LiteLLM gateway, which does
+      # not forward llama.cpp's /props — the probe just fails (silently) on every
+      # task and falls back to models.json's declared window (131072), which is
+      # what we want anyway. Skip the futile probe + its log noise.
+      - LITTLE_CODER_NO_CTX_PROBE=1
     volumes:
       - ./little-coder/config:/app/config:ro
       - little-coder-journals:/var/lib/little-coder/journals
@@ -1217,7 +1259,7 @@ services:
   # Unified snapshot backups (post-2026-05-29 plan).
   # Six new containers covering the gaps from the post-implementation
   # audit: OB1 PostgreSQL + wiki, Open Notebook (SurrealDB + notebook_data),
-  # smolcrawl pipelines, Tailscale state, LM Studio models. All write
+  # smolcrawl pipelines, Tailscale state, the llama.cpp model store. All write
   # under ./backups/<service>/ with .sha256 sentinels and configurable
   # retention. The existing weekly NAS sync (scripts/backup-to-nas.ps1)
   # picks them up automatically.
@@ -1296,16 +1338,22 @@ services:
       - DATA_DIR=/data
       - ASSETS_DIR=/assets
       - RETAIN_COUNT=${OPENBRAIN_WIKI_BACKUP_RETAIN_COUNT:-2}
-      - BACKUP_CRON=${OPENBRAIN_WIKI_BACKUP_CRON:-15 2 * * *}
+      # 2026-08-01: switched from busybox crond to a sleep-loop. crond on
+      # Windows Docker Desktop silently misses fire-windows when the VM clock
+      # jumps on host sleep/resume (only :00 jobs survived; :15/:25 never
+      # fired for ~2 months). The sleep-loop is wall-clock-independent and
+      # matches the proven pg-backup sidecars. Runs once immediately on start.
+      - BACKUP_INTERVAL=${OPENBRAIN_WIKI_BACKUP_INTERVAL:-86400}   # daily
       - TZ=UTC
     entrypoint: /bin/sh
     command:
       - -c
       - |
-        chmod +x /scripts/backup.sh
-        echo "$${BACKUP_CRON} /scripts/backup.sh >> /var/log/backup.log 2>&1" > /etc/crontabs/root
-        echo "[$(date -u +%FT%TZ)] openbrain-wiki-backup scheduler started (cron: $${BACKUP_CRON}, retain: $${RETAIN_COUNT} most recent)"
-        crond -f -l 2
+        echo "[$$(date -u +%FT%TZ)] openbrain-wiki-backup started (sleep-loop; interval=$${BACKUP_INTERVAL}s, retain=$${RETAIN_COUNT})"
+        while true; do
+          sh /scripts/backup.sh || echo "[$$(date -u +%FT%TZ)] openbrain-wiki backup.sh exited $$?"
+          sleep "$${BACKUP_INTERVAL}"
+        done
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
@@ -1389,16 +1437,18 @@ services:
       - PREFIX=smolcrawl
       - RETAIN_COUNT=${SMOLCRAWL_BACKUP_RETAIN_COUNT:-2}
       - HEALTH_TCP=${SMOLCRAWL_BACKUP_HEALTH_TCP:-smolcrawl-pipelines:9099}
-      - BACKUP_CRON=${SMOLCRAWL_BACKUP_CRON:-25 2 * * *}
+      # 2026-08-01: crond -> sleep-loop (see openbrain-wiki-backup rationale).
+      - BACKUP_INTERVAL=${SMOLCRAWL_BACKUP_INTERVAL:-86400}   # daily
       - TZ=UTC
     entrypoint: /bin/sh
     command:
       - -c
       - |
-        chmod +x /scripts/backup.sh
-        echo "$${BACKUP_CRON} sh /scripts/backup.sh >> /var/log/backup.log 2>&1" > /etc/crontabs/root
-        echo "[$(date -u +%FT%TZ)] smolcrawl-backup scheduler started (cron: $${BACKUP_CRON}, retain: $${RETAIN_COUNT} most recent)"
-        crond -f -l 2
+        echo "[$$(date -u +%FT%TZ)] smolcrawl-backup started (sleep-loop; interval=$${BACKUP_INTERVAL}s, retain=$${RETAIN_COUNT})"
+        while true; do
+          sh /scripts/backup.sh || echo "[$$(date -u +%FT%TZ)] smolcrawl backup.sh exited $$?"
+          sleep "$${BACKUP_INTERVAL}"
+        done
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
@@ -1427,16 +1477,18 @@ services:
       # only precheck. Set HEALTH_TCP=tailscale:41641 etc if you wire it
       # onto a shared network later.
       - HEALTH_TCP=
-      - BACKUP_CRON=${TAILSCALE_BACKUP_CRON:-25 2 * * *}
+      # 2026-08-01: crond -> sleep-loop (see openbrain-wiki-backup rationale).
+      - BACKUP_INTERVAL=${TAILSCALE_BACKUP_INTERVAL:-86400}   # daily
       - TZ=UTC
     entrypoint: /bin/sh
     command:
       - -c
       - |
-        chmod +x /scripts/backup.sh
-        echo "$${BACKUP_CRON} sh /scripts/backup.sh >> /var/log/backup.log 2>&1" > /etc/crontabs/root
-        echo "[$(date -u +%FT%TZ)] tailscale-backup scheduler started (cron: $${BACKUP_CRON}, retain: $${RETAIN_COUNT} most recent)"
-        crond -f -l 2
+        echo "[$$(date -u +%FT%TZ)] tailscale-backup started (sleep-loop; interval=$${BACKUP_INTERVAL}s, retain=$${RETAIN_COUNT})"
+        while true; do
+          sh /scripts/backup.sh || echo "[$$(date -u +%FT%TZ)] tailscale backup.sh exited $$?"
+          sleep "$${BACKUP_INTERVAL}"
+        done
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
@@ -1445,11 +1497,13 @@ services:
     labels:
       - "com.centurylinklabs.watchtower.enable=false"
 
-  # lm-models-backup -- tar of the LM Studio models directory.
+  # lm-models-backup -- tar of the llama.cpp model store (the .lmstudio/models
+  # dir). Despite the path name it holds HF-downloaded GGUFs served by
+  # llama-cpp-upstream (incl. the live ThinkingCap fine-tune) -- NOT LM Studio.
   # CAVEAT: this directory can be 50+ GB. The two-slot NAS mirror means
-  # ~100+ GB on the NAS. WEEKLY (Sundays 01:00 UTC) by default to limit
-  # disk churn; set LM_MODELS_BACKUP_CRON= (empty) in .env to disable
-  # if NAS storage becomes tight. Models are re-downloadable from
+  # ~100+ GB on the NAS. WEEKLY by default (sleep-loop: runs on start + every
+  # LM_MODELS_BACKUP_INTERVAL s); set LM_MODELS_BACKUP_INTERVAL= (empty) in
+  # .env to disable if NAS storage becomes tight. Models are re-downloadable from
   # HuggingFace if you choose to skip backup.
   lm-models-backup:
     image: alpine:3.21
@@ -1475,20 +1529,27 @@ services:
       # report "reachable" even while the model server is down/paused). Empty
       # HEALTH_TCP disables the probe (e.g., if you keep the upstream paused).
       - HEALTH_TCP=${LM_MODELS_BACKUP_HEALTH_TCP:-llama-cpp-upstream:8080}
-      - BACKUP_CRON=${LM_MODELS_BACKUP_CRON:-0 1 * * 0}     # Sunday 01:00 UTC
+      # 2026-08-01: crond -> sleep-loop (see openbrain-wiki-backup rationale).
+      # Weekly, since the llama.cpp model store (incl. the live ThinkingCap
+      # GGUF) rarely changes. MIN_AGE_SECS skips the expensive ~120 GB tar on
+      # start if a fresh-enough backup already exists (prevents restart-storm
+      # re-tars and an immediate re-tar right after a manual capture).
+      - BACKUP_INTERVAL=${LM_MODELS_BACKUP_INTERVAL:-604800}   # weekly
+      - MIN_AGE_SECS=${LM_MODELS_BACKUP_MIN_AGE_SECS:-43200}   # 12h
       - TZ=UTC
     entrypoint: /bin/sh
     command:
       - -c
       - |
-        if [ -z "$${BACKUP_CRON}" ]; then
-          echo "[$(date -u +%FT%TZ)] lm-models-backup DISABLED (LM_MODELS_BACKUP_CRON is empty). Container will exit."
+        if [ -z "$${BACKUP_INTERVAL}" ]; then
+          echo "[$$(date -u +%FT%TZ)] lm-models-backup DISABLED (LM_MODELS_BACKUP_INTERVAL is empty). Container will exit."
           exit 0
         fi
-        chmod +x /scripts/backup.sh
-        echo "$${BACKUP_CRON} sh /scripts/backup.sh >> /var/log/backup.log 2>&1" > /etc/crontabs/root
-        echo "[$(date -u +%FT%TZ)] lm-models-backup scheduler started (cron: $${BACKUP_CRON}, retain: $${RETAIN_COUNT} most recent)"
-        crond -f -l 2
+        echo "[$$(date -u +%FT%TZ)] lm-models-backup started (sleep-loop; interval=$${BACKUP_INTERVAL}s, min_age=$${MIN_AGE_SECS}s, retain=$${RETAIN_COUNT})"
+        while true; do
+          sh /scripts/backup.sh || echo "[$$(date -u +%FT%TZ)] lm-models backup.sh exited $$?"
+          sleep "$${BACKUP_INTERVAL}"
+        done
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true

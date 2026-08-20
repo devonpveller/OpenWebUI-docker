@@ -11,8 +11,12 @@ mkdir -p /var/lib/little-coder/journals \
          /workspace
 chown -R lc:lc /var/lib/little-coder /workspace 2>/dev/null || true
 # The workspace volume is shared with open-terminal (a different uid); make
-# the mount point traversable/writable from both planes.
-chmod 0777 /workspace 2>/dev/null || true
+# the WHOLE TREE traversable/writable from both planes, not just the mount
+# point. Recursive (live 2026-07-14): dotnet build artifacts under vendor/
+# were owned by a foreign uid, the ot-plane wipe couldn't delete them, and
+# every re-clone failed on the non-empty dir — a worker restart must
+# self-heal any such leftovers. Runs as root, so ownership never blocks it.
+chmod -R 0777 /workspace 2>/dev/null || true
 
 # models.json override — points the llamacpp provider at ai-stack's llama-swap
 # and registers the model ids it actually serves (see config/models.json).
@@ -34,11 +38,24 @@ if [ "${LC_ROUTE_EXEC:-0}" = "1" ]; then
   else
     echo "[entrypoint] WARN: could not install open-terminal-exec extension"
   fi
-  # Remove tools that execute or egress OUTSIDE the routed path. `bash` (our
-  # override → ot-exec → open-terminal → git-proxy) must be the sole execution
-  # tool — the agent was observed escaping the git-proxy via ShellSession.
-  rm -rf "$EXT_DIR/shell-session" "$EXT_DIR/browser" 2>/dev/null || true
-  echo "[entrypoint] removed shell-session + browser extensions (no exec bypass)"
+  # Remove extensions whose execution/egress would land OUTSIDE the open-terminal
+  # workspace plane (control-plane→workspace invariant). `bash` (our override →
+  # ot-exec → open-terminal → git-proxy) must be the sole execution path — the
+  # agent was observed escaping the git-proxy via ShellSession.
+  #   shell-session            — in-container shell (git-proxy bypass)
+  #   browser / browser-extract-retention — playwright launches chromium
+  #                              IN-PROCESS here (1.9.x), not in open-terminal;
+  #                              also egress. Excluded until/unless routed.
+  # The `--exclude-tools` denylist in config/little-coder.config.yaml is the
+  # declarative backstop (survives an upstream dir rename); this rm is the
+  # belt-and-braces. Removal is logged per-dir so a silent miss is visible.
+  for ext in shell-session browser browser-extract-retention; do
+    if [ -d "$EXT_DIR/$ext" ]; then
+      rm -rf "$EXT_DIR/$ext" && echo "[entrypoint] removed extension: $ext"
+    else
+      echo "[entrypoint] NOTE: extension '$ext' not present (renamed upstream? check --exclude-tools)"
+    fi
+  done
 else
   echo "[entrypoint] exec routing disabled (LC_ROUTE_EXEC!=1) — built-in bash"
 fi

@@ -1,0 +1,705 @@
+# agent-org — Implementation Notes (what's built / what's operator-gated)
+
+**Date:** 2026-07-01. This is the authoritative record of the v1 build of the
+[teams-chat-agent-orchestration](../documentation/implementation-guide/teams-chat-agent-orchestration/)
+design corpus. It maps every TASKS item to its landing site and status.
+
+**Status legend:** ✅ built + tested here **AND wired into the live path** · 🟡 module built +
+unit-tested but **not integrated** into the operator→worker loop · 🧩 built, needs a live stack to
+exercise · 🚀 operator step · 🚩 decision-gate.
+
+> **⚠️ Status-semantics correction (2026-07-02).** An earlier pass marked many controls ✅ when the
+> *module* existed + unit-tested but was **never called from the live loop** (the build was
+> module-first, the execution loop minimal). An audit found the entire P3.9/P4/P3.7/P5/P6 layer
+> was 🟡 module-only. It has since been **wired into the live loop** — see "Live-loop integration
+> (2026-07-02)" below. The phase rows further down are the original per-task record; the
+> integration section is authoritative for what actually runs.
+
+> **What "fully implemented" means here.** Everything that is *code / config / docs* is built,
+> wired, and — where it can run without a live GPU/Mattermost/Docker stack — covered by
+> deterministic tests (**146 passing** as of 2026-07-03). The remaining items are inherently operator-only: bringing
+> up containers, creating a Mattermost bot token, running the capability-floor test against the
+> live GPU, deciding OpenRouter spend, and tailnet exposure. Those are authored + runnable, and
+> marked 🚀/🚩 below. The build makes them a switch-flip, not new work.
+
+---
+
+## Delivery: additive-push correction + commit/push-on-done (2026-07-02)
+
+Fixes a framing bug the operator caught: workers that can't commit/push produce **nothing durable**
+(little-coder wipes the workspace on `/project` switch), can't collaborate, and break the A→B
+hand-off. Root cause — the floor lumped **push** with deploy/delete as "irreversible." It isn't.
+
+- **Corrected floor** (`floor_guard.py` + `hooks/pretooluse_floor.py` mirror + `floor/hard-rules.md`
+  + governance §8 #5). Irreversible/human-gated = **destructive/external only**: publish to
+  `main`/`master` (`publish-main`), `destructive-git` (force-push, ref/branch/tag delete, history
+  rewrite, `reset --hard`), deploy, delete (`rm -rf`/drop/truncate), spend, send-outside. **Additive
+  = routine:** `commit`, `checkout -b`, **push to a feature branch**, fetch, `merge --no-ff` into a
+  feature branch. This matches what the little-coder **git-proxy already enforced** (additive push
+  allowed; destructive blocked) — the bridge floor was the one out of step. `scope_ledger` irreversible
+  set updated to match. `test_scope_and_floor.py` (feature-push routine; main/force/delete gated).
+- **Commit + push on done (Stage D0).** A real-project effort now publishes its work to
+  `agent/<effort>` on completion (`orchestrator._publish_effort`: `checkout -b`/`add -A`/`commit`/
+  `push -u origin agent/<effort>`), and the completion summary reports the branch + `git fetch`
+  hint. Work is durable, visible, and hand-off-able; merge-to-`main`/deploy stay human-gated.
+  `test_projects.py::test_repo_effort_commits_and_pushes_a_feature_branch`. **119 tests green.**
+- **Per-agent commit identity.** Publish commits carry the agent's **role identity**
+  (`GIT_AUTHOR_NAME/EMAIL = <role>@<AO_AGENT_EMAIL_DOMAIN>`, via an env prefix — git-proxy-safe since
+  `-c` is blocked), not the baked `little-coder`. So `git blame` + hand-off provenance (P5.4) show
+  *which* agent did what. When per-domain roles land, each commits under its own identity.
+- **Deploy tokens by owner/org (multi-PAT).** A repo's token is resolved automatically at clone time
+  (`orchestrator._project_token`): (1) an explicit `Project.token_env` override; else (2) the
+  **per-owner convention `LC_<OWNER>_TOKEN`** (`projects.owner_token_env` — e.g.
+  `github.com/PolyshDesign/*` → `LC_POLYSHDESIGN_TOKEN`) used only if set; else (3) the pool's
+  `LC_DEPLOY_TOKEN` (your own repos). So onboarding an org repo needs **no per-project token config** —
+  just set `LC_<ORG>_TOKEN` on the bridge; scaling to a new org = add one env var. The resolved token
+  threads to the worker's `/project` clone (`router.wake(repo_token=…)` → `harness.set_project(token=…)`);
+  `/project list` shows which token applies. Secrets stay env-only (DB stores the var NAME). Requires
+  a **2-line little-coder change** — `ProjectRequest.token` (falls back to `LC_DEPLOY_TOKEN`); **rebuild
+  `little-coder:local`**. `test_projects.py` (owner convention + explicit override + threading).
+- **The rest of the delivery pipeline** (PR → autonomous test series incl. AI-browser for web →
+  human-gated merge → deploy → human testing) is designed in
+  [`DELIVERY-PIPELINE.md`](../documentation/implementation-guide/teams-chat-agent-orchestration/DELIVERY-PIPELINE.md)
+  (DP.1–DP.6, not yet built; the AI-browser lane is the largest new build + a decision-gate).
+
+## Progress visibility + effort-list hygiene + fork onboarding (2026-07-03)
+
+Three fixes from the MonoGame live test (worker went quiet ~20 min; the effort list was cluttered
+with finished test efforts; and a *fork* workflow couldn't be set up). **126 → 133 tests green**
+(fork onboarding, below, added the last 7).
+
+- **Fix 1 — PO progress visibility (BUILT).** The PO answered "what's going on?" with "I don't have
+  real-time visibility." It now does: the router keeps a **per-effort activity buffer** of each
+  worker's streamed commands (`router._record_activity`/`recent_activity`, recorded in the wake
+  `_stream` closure — the same stream that posts to the thread). `orchestrator.nl_intake` folds a
+  **RECENT WORKER ACTIVITY** block into the PO's context and the `_PO_NL_SYS` prompt tells it to
+  answer *from that* (name the effort, describe the actual command — "still cloning / running the
+  build"), and to say "hasn't run a command yet" when a buffer is empty rather than claim blindness.
+  `/status` now shows the last few activity lines per effort too. `test_progress_and_lifecycle.py`.
+- **Fix 2 — effort-list hygiene (BUILT).** Finished/aborted test efforts drowned the live signal.
+  Efforts now carry a **lifecycle** (`open|done|aborted`, `Effort.lifecycle` + additive migration).
+  `_finish_effort` → `done`; aborting a concern → `aborted` (`gate.set_lifecycle`, set inside
+  `gate.clear` on abort). `gate.snapshot(open_only=True)` is the default view for both the PO context
+  and `/status`; **`/status all`** shows history, **`/status <id>`** targets one regardless of
+  lifecycle (tagged `[done]`/`[aborted]`). `test_progress_and_lifecycle.py`.
+- **Fix 3 — fork/upstream onboarding (BUILT 2026-07-03, needs `little-coder:local` rebuild to go
+  live).** The MonoGame worker fought the git-proxy because a fork needs a second remote (`upstream`)
+  and the proxy **blocks `git remote add`** + only fetches from **operator-configured** remotes.
+  Built D0.f (see the dedicated section below +
+  [`DELIVERY-PIPELINE.md`](../documentation/implementation-guide/teams-chat-agent-orchestration/DELIVERY-PIPELINE.md)):
+  `/project add … --upstream <url>` (+ NL onboarding); the bridge bakes `upstream` at setup **via the
+  real git binary** (the same operator path as clone, §12.3) so the worker can `fetch`/`merge --no-ff`
+  upstream but push only to `origin`. Substrate-native; the API-level alternative is the GitHub MCP
+  server (below).
+
+## Inference-backpressure resilience — the PM survives GPU saturation (2026-07-03)
+
+Live symptom: the PM "felt lost" / replied "I couldn't parse that." Root cause was NOT the PM logic —
+an `openbrain-research` fan-out saturated the shared single GPU, `llm-queue` shed the PO's request
+with a 503 (everything runs at the stripped `dummy`/prio-2 key), and the bridge mislabeled the 503 as
+a parse failure. Three layers of fix (**146 tests green**):
+
+- **Retry + honest degrade (LIVE).** `ModelRouter._with_backpressure_retry` retries 429/503 with
+  exponential backoff (`AO_MODEL_BACKPRESSURE_*`); `ModelBackpressureError` is a distinct type so
+  `nl_intake` says *"the local model's saturated — I didn't lose your message, resend in a moment"*
+  instead of "couldn't parse". `is_backpressure_text` classifies the shed by marker/status.
+  `test_backpressure.py` (5).
+- **Richer PM reasoning (LIVE).** `_PO_NL_SYS` now makes the PO a thinking-partner: reflect the goal,
+  propose the approach, surface genuine options — no frivolous questions; dispatch invites steering.
+  (Prompt-only, no extra model call — important under GPU pressure.)
+- **Capacity park-and-resume (BUILT).** An orchestration step (readiness/plan/delegate step, or a
+  worker whose OWN inference was shed) that exhausts retries is **parked, not failed** — machine B
+  `suspended`, reason=inference_backpressure, **DB-backed** (`ParkedEffort` + `modules/capacity_park.py
+  ParkStore`) so a restart mid-saturation resumes on boot. A resume driver drains parked efforts
+  **one at a time**, clocked by the **self-clocked capacity event** (a successful model call fires
+  `ModelRouter.on_capacity_signal` → `_signal_capacity`) with a **timer fallback**
+  (`AO_CAPACITY_TIMER_S`). Reuses the scheduler's existing park/resume shape (`to_waiting`/
+  `wake_finished`) for a second blocker type (GPU capacity vs. a dependency-DAG finish). Extras:
+  **source guard** (skip our own grounding/research fan-out while a shed is recent — anti-self-DoS)
+  and **starvation escalation** (past `AO_CAPACITY_MAX_ATTEMPTS`, escalate to #mgmt + stop retrying —
+  not a governance freeze; it's a capacity problem). `delegate` gained `start_step` for mid-sequence
+  resume. `test_capacity_park.py` (8). *Needs the rebuilt agent-bridge to be live.*
+
+**Operational note (2026-07-03):** the multi-project egress path was silently INERT — `ao-git-egress`
+was a stale 25h container with **no mounts** (predated the shared-allowlist wiring), so the bridge's
+`/egress`/`/project`-driven allowlist writes hit `Permission denied` and never took effect (workers
+ran on the old baked scope). Fix = recreate `ao-git-egress` (its reload script `chmod 0777`s the
+volume + seeds github.com), then the bridge writes the live allowlist. If egress "allow" seems to
+do nothing, check `ao-git-egress` isn't stale (`docker inspect … --format '{{.Mounts}}'`).
+
+## Fork/upstream onboarding D0.f — BUILT + survives upstream/rebuilds (2026-07-03)
+
+The operator's MonoGame case = coding on a **fork**. A fork needs two remotes — `origin` (the fork,
+push target) + `upstream` (the parent, fetch-only) — but the little-coder **git-proxy blocks
+`git remote add`** and only fetches from operator-configured remotes, so a worker can't set a fork up
+itself. Built the operator-setup path that bakes `upstream` for it. **agent-bridge 133 tests green;
+little-coder 506 green (+3).** Needs a **`little-coder:local` rebuild** to go live (a daemon/workspace
+change).
+
+- **little-coder (the extension, `src/littlecoder`):** `workspace.add_upstream_remote(url, token)`
+  runs `real_git remote add upstream` — the SAME operator-bypass path as `clone` (the proxy blocks
+  `remote add`; the real git binary doesn't go through it, §3.3/§12.3). Idempotent (`add || set-url`),
+  **push-fenced** (`set-url --push upstream DISABLED-…` so `git push upstream` fails fast — worker
+  pushes only to `origin`), optional read-scoped token for a private parent. `daemon.ProjectRequest`
+  gains `upstream`/`upstream_token`; `switch_project` bakes it **after the clone** + journals
+  `project_upstream_set`. Distinct from little-coder's OWN `/admin/upstream/pull` (the *tool's*
+  fork-parent, self-improvement) — this is a git remote in the *project* workspace.
+- **agent-bridge:** `Project.upstream_url` (additive column + self-heal migration);
+  `projects.add(upstream_url=…)` / `upstream_for` / `hosts()` now yields each fork's **parent host**
+  too (egress survives every re-render); `orchestrator._effort_upstream` +
+  `_project_upstream_token` (parent's read token by `LC_<PARENT_OWNER>_TOKEN`) →
+  `router.wake(upstream=…)` → `harness.set_project(upstream=…)`. Onboard via
+  `/project add <name> <fork> --upstream <parent> [TOKEN_ENV]` (flag parsed anywhere) OR plain
+  language (the PO fills `repo_url`+`upstream_url`). `/project list` shows the upstream.
+- **Survives upstream updates + container rebuilds (the operator's explicit concern), two ways:**
+  1. **Our extension is a WRAPPER, not a patch.** Upstream little-coder is the npm package
+     (`little-coder@${LITTLE_CODER_VERSION}` in `Dockerfile.agent`); our `src/littlecoder` daemon
+     *invokes* it as a subprocess. Bumping the version + rebuilding re-`COPY`s our `src/` unchanged —
+     an upstream update never clobbers Fix 3 (or any of our code), because we don't fork upstream's
+     source.
+  2. **The `upstream` remote is re-derived, never restored.** It lives in the workspace clone, which
+     little-coder **wipes on every `/project` switch** and which is a named volume a rebuild can
+     clear. So the persistent source of truth is the bridge's `Project.upstream_url` (bridge DB
+     volume), and the bridge **re-bakes the remote on every focus** — a wipe/rebuild just means the
+     next focus re-adds it. Idempotent, so a re-focus onto an unwiped workspace is also correct.
+  Tests: `test_fork_upstream.py` (7 — registry/egress/command/threading/private-token/NL) +
+  `test_workspace.py::test_add_upstream_remote_*` (3 — real-git/idempotent/push-fence/token).
+
+## Self-recovery + acceptance-signal hardening (2026-07-05, from live misses)
+
+A day of live operation surfaced four failure classes; each got a **generic** (project/task-
+agnostic) mechanism + RED→GREEN regression tests. Principle: *the org recovers what it can prove,
+and escalates what it can't* — and bridge-owned state is corrected via NL, never operator SQL.
+
+- **Error-report intake** (`orchestrator.nl_intake`): a pasted build-error wall junk-misfired the
+  PO classifier twice → the fix request was dropped with the generic rephrase fallback. Fixes:
+  `_compact_paste` (dedupe `repeated ×N` + cap) feeds the classifier and readiness gate while the
+  FULL text stays the goal; the junk repair now grounds on `_project_scoped_in` (`in <p>,` prefix
+  → `project <name>` phrase → registered name anywhere, longest-first), gated by work-verb /
+  error-paste cues so a mere mention can't spawn a phantom effort; the PO prompt names
+  bug/build-failure reports as `request`s; the fallback names the projects it recognized.
+  Tests: `test_error_report_intake.py`.
+- **Delivery: gitlink reachability gate + goal state-check + upstream self-heal/NL removal** —
+  see DELIVERY-PIPELINE **§D0.v** (the canonical write-up). Tests: `test_gitlink_gate.py`,
+  `test_self_recovery.py`.
+- **Scheduler allocation race** (`scheduler.acquire`): a 5-effort re-engage burst double-booked
+  BOTH workers (SELECT-then-UPDATE with awaits between; last-write-wins) — one worker accepted two
+  tasks into one workspace. Fix: `_alloc_lock` (asyncio) serializes acquire/wake_finished —
+  single-process bridge, so a process lock is exact. A clone failing with "destination path …
+  already exists" is now triaged as a **dispatch collision**, not "private repo/token". Tests:
+  `test_scheduler.py::test_concurrent_*`, `test_dispatch_errors.py`.
+- **Singular re-engage scoping** (`nl_intake` reengage branch): "continue its **previous task**"
+  (singular, unscoped) resumes only the most-recently-touched idle effort (`updated_at` now in
+  `gate.snapshot`) with a transparent note; "get the workers working" keeps the fan-out. Kills the
+  stale-effort re-run flood. Tests: `test_reengage_archive.py::test_reengage_previous_*`.
+
+- **Empty-delivery gate + PR hygiene + composition context on intake** (same day, round 2): a
+  landed branch with commits but ZERO net file changes is not a delivery
+  (`BranchDelivery.files_changed` + `_recover_empty_delivery`; live: PR #4 shipped empty while
+  the fix sat in the worker's container); delivery closures map sibling agent PRs + overlaps,
+  merges list leftovers, NL `close PR <n>` retires superseded ones (DELIVERY-PIPELINE §D4.h;
+  maintainer role staged as OD-DP6); and DIRECT-intake dispatches to a project that is VENDORED
+  inside another registered project now carry the planner path's COMPOSITION CONTEXT
+  (`_composition_context`, derived from the host's actual `.gitmodules`) — a standalone clone
+  otherwise reads intentional cross-submodule wiring as breakage and "fixes" it by reverting the
+  composition (live: murder PR #2 reverted the vendored-MonoGame milestone to green the build).
+  Tests: `test_empty_delivery.py`, `test_delivery_pr.py`, `test_self_recovery.py`.
+
+- **Error-report convergence** (round 3, suite 303 — operator: "these issues the orchestration
+  is expected to fix, not you"): the same build error was re-reported after four deliveries.
+  Three generic mechanisms: (a) **REQUIRED VERIFICATION** — an error-report goal demands
+  reproduce → fix → re-run → confirm the pasted errors are gone before publishing (nobody but
+  the operator had ever run the failing build); (b) **PRIOR ATTEMPTS** (`_attempt_history`) — a
+  re-reported error (matched on the operator's own pasted signature lines) carries earlier
+  efforts' branches + verified outcomes ("2 commits, 4 files, UNMERGED — read it, build on it,
+  don't re-deliver a rejected approach") into the goal; (c) **intake AUTO-WIRING**
+  (`_wire_vendored_delivery`) — a delivery on a vendored project bumps the host's gitlink to the
+  verified commit + opens the paired wiring PR (planner-path §11d parity; plan-owned efforts
+  excluded via `_composition_managed`). Tests: `test_convergence.py`.
+
+- **Worker env templates — authentic dev environments, hot-swappable (2026-07-05, operator
+  decision)**: the execution plane is the `ao-ot` sidecar (all worker commands run there against
+  the shared `/workspace`), so project toolchains are **image layers on the security base**
+  (`little-coder/docker/envs/<env>.Dockerfile` FROM `little-coder-open-terminal:local` — inherits
+  the git-proxy splice; adds toolchain only), prebuilt and **hot-swapped** via
+  `AO_OT1_IMAGE`/`AO_OT2_IMAGE` in `agent-org/docker/.env` + `up -d ao-ot-N` (seconds; the
+  workspace volume persists; never a per-project rebuild). First template: `dotnet8` (.NET 8 SDK,
+  LIVE on both sidecars). Gotchas: compose substitutes from the PROJECT-dir `.env`, not the
+  stack root one; package-registry egress must be allowed per toolchain (default-deny tinyproxy —
+  NL "let the workers reach api.nuget.org"). Follow-up designed: per-project `env` registry field
+  + env-aware acquire for a heterogeneous pool. See `little-coder/docker/envs/README.md`.
+
+Known residuals (logged, not silent): the gitlink gate accepts any-ref-reachable (durable =
+submodule bumps land via PR on the submodule's default branch); the ao-worker daemon accepted a
+2nd concurrent `/tasks` with 200 (no 409-when-busy) — the scheduler lock removes the cause;
+daemon-side serialization is the defense-in-depth follow-up (little-coder change); composition
+context protects intake-dispatched efforts, but a per-project STANDING-INTENT ledger (e.g.
+"murder builds against the vendored MonoGame, not NuGet") that reviewers check deviations
+against is the durable form (pairs with OD-DP3/OD-DP6).
+
+## Anthropic resources to stop hand-building every permutation (2026-07-03, operator meta-question)
+
+The operator asked whether Anthropic resources exist so they don't muddle through every use-case by
+hand. Researched + mapped to this build (advisory — no code change):
+
+- **Claude Agent SDK** (`claude-agent-sdk` py/ts) — the agent loop, session/resume, subagents,
+  **PreToolUse/PostToolUse hooks**, permissions, MCP client. Maps to: our worker harness, our
+  floor as a PreToolUse hook, our wake/resume. **Does NOT** give the governance FSM or inter-agent
+  channels (subagents are intra-session).
+- **GitHub MCP server** (`github/github-mcp-server`) — PR/branch/review/merge/fork/**sync-fork** at
+  the API level. The clean replacement for the delivery lane's shell-git PR/merge (D1/D4) **and** the
+  fork/upstream sync (D0.f) — no in-workspace remote surgery. Known gap: no per-call token injection
+  (needs our token-broker layer — which we already have via `LC_<OWNER>_TOKEN`).
+- **"Building Effective Agents"** — validates our shape: **orchestrator-workers** (PO/PM→workers) +
+  **evaluator-optimizer** (differently-goaled reviewer) are named patterns, not ad-hoc.
+- **Managed Agents** (beta) — hosted multi-agent + **event-driven messaging** between separate agent
+  instances; an alternative to a custom bus if we want inter-agent comms without building transport.
+- **Cookbook** ("Chief of Staff" recipe ≈ our PO/PM) + **headless/channels** for CI-style dispatch.
+- **Bottom line — keep hand-building:** the governance FSM (floor/steering/reviewer), the Mattermost
+  org surface, per-project token routing, plan-approval/backpressure gates. **Adopt off-the-shelf:**
+  git/PR/fork via GitHub MCP, and (optionally) the Agent SDK's hook+permission+session primitives to
+  thin the worker harness. This directly de-risks DP.1–DP.6 + D0.f.
+
+## Conversational PO — threading, memory, hierarchical context (2026-07-02)
+
+Three connected fixes from live use, so the PO surface is coherent (all tested):
+
+- **In-thread replies.** The bot posted top-level everywhere, so a multi-turn #mgmt exchange
+  scattered across threads. Now every bot reply threads **in the operator's message thread**
+  (`reply_thread = root_id or post_id`), and an effort's dispatch reply / completion summary /
+  CONCERN thread back under the **originating request** (`_effort_mgmt_thread`). Works on any channel.
+- **Conversation memory.** Each `nl_intake` was stateless → the PO lost context + **hallucinated**
+  (invented `localhost:3000`) + made empty promises ("I'll check…" then nothing). Fixed with a
+  conversation memory + a hardened PO prompt: *use the conversation; don't invent URLs/ports/paths;
+  never promise to check something and do nothing — open an effort so a worker actually checks.*
+- **Hierarchical, bounded, relevant context** (`modules/context_manager.py`). The PO's context is
+  now layered — **THIS THREAD** (immediate) + **relevant background from the channel** — each
+  **char-budgeted** (`AO_CONTEXT_*`) so it never overwhelms the model window, and the channel layer
+  is **relevance-prioritized** (query term-overlap) then recency-filled. Deterministic (no embed
+  call). `test_context_manager.py` + `test_end_to_end.py` (threading/memory).
+
+## Live-loop integration (2026-07-02) — the alignment core, now WIRED
+
+The proactive governance controls were module-only; they are now threaded through the live
+operator→worker path (`orchestrator.delegate` → the Stage-5 loop). **119 tests green.** The heavy
+controls are **risk-gated** (like the dry-run + review-depth already were) so routine one-liners
+stay fast; set `AO_PLAN_APPROVAL=all` / `AO_REVIEW_MODE=all` for the strict-spec reading (every
+effort). What now runs:
+
+- **Stage 3 — plan-approval gate (P3.9).** After readiness passes, a risky effort (or `always`)
+  gets a **drafted plan presented to #mgmt and HELD** until the operator `approve <effort>`s it —
+  nothing executes before approval (`_present_plan` / `approve_effort_plan`; `_pending_plan`).
+- **Stage 5 — governed execution loop (P4.1–P4.7, P3.7).** `delegate` runs each plan step as a
+  **checkpoint** (`stop_gates.add_checkpoint`); on risky efforts each deliverable passes a **sampled
+  monitor** (P3.7, forced on risky) + a **differently-goaled review** (`stop_gates.review`, depth
+  risk-gated P4.5, on the reviewer profiles P4.7) before the checkpoint clears (P4.2). A **flag or
+  deviation freezes + escalates** (P4.6/§3, `_on_review_flag`/`monitor_sampled`) — pause-until-cleared.
+- **Scope + role (P5.1/5.2).** `_authorize_worker` grants the worker its non-irreversible scope
+  (read/write, never push/deploy — human-only) and approves the `worker-default` role in the catalog
+  on first dispatch.
+- **Learning loop (P6.4/6.5).** A review flag / monitor deviation feeds `learning.observe`; a pattern
+  recurring across ≥2 efforts surfaces to **#suggestions** + a **PROPOSED** hardening (never
+  auto-applied — the human disposes) (`_observe_pattern`).
+- **Lateral concern (P4.8) + A→B hand-off (P5.4).** `raise_lateral_concern` (bus + PM route,
+  storm-exempt) and `hand_off` (git-blame last-owner) exist as methods + HTTP endpoints
+  (`/lateral-concern`, `/handoff`), activated by a worker/role signal.
+
+**Deferred (honestly):** (a) **P4.3 structured explain-intent** — the worker (little-coder) doesn't
+emit the 4-field Explanation artifact mid-run, so the deliverable **review** covers "verify, don't
+trust"; the structured per-phase explanation needs a little-coder checkpoint protocol. (b)
+**Multi-worker A→B collaboration** — one worker per effort today; `hand_off`/lateral are the
+primitives for the future multi-worker topology. These are the only P3.9/P4/P5/P6 items not fully
+live, and they require worker-side protocol changes, not just bridge wiring.
+
+## Phase status
+
+### P0 — Platform spike
+| Task | Status | Landing site / note |
+|------|--------|---------------------|
+| P0.0 prerequisites | ✅ | Local `llm-gateway` consumed as-is (`AO_LOCAL_API_BASE=http://llama-cpp:8080/v1`); nothing built on it. Stack-map reconciled (this build's 3-place change). |
+| P0.1 compose scaffold | ✅ | [`docker/docker-compose.yml`](docker/docker-compose.yml). `docker compose config` validates (default + all profiles). |
+| P0.2 Mattermost bot | 🚀 | One-time operator step — [README "P0.2"](README.md). Token via env (`AO_MATTERMOST_BOT_TOKEN`), never a file. |
+| P0.3 bridge skeleton | ✅ | [`agent-bridge/app/`](agent-bridge/app/) — FastAPI + `/health` + WS consumer + Postgres state + all §3.1.1 modules present (not stubs). |
+| P0.3b GBNF structured call | 🧩 | `model_router.OpenAICompatClient` uses Instructor + `extra_body.json_schema` (llama.cpp GBNF) via the gateway. The 20/20 zero-repair assertion needs the live model (no GPU here); the mechanism + Fake path are tested. |
+| P0.4 echo test | ✅ | `test_end_to_end.py::test_wake_on_mention_posts_reply` (fake adapter): @mention → bridge → threaded reply. |
+| **P0.5 capability-floor** | 🚩 | **Decision-gate — see "P0.5 procedure" below.** Decides whether judge profiles stay `local` or flip `cloud`. Profiles ship `local` (fail-safe pre-decision). |
+
+### Pc — Cloud lane (CONDITIONAL)
+| Task | Status | Landing site / note |
+|------|--------|---------------------|
+| Pc.0 spend ceiling | 🚩🚀 | Operator confirms the OpenRouter budget before Pc.1. |
+| Pc.1 `llm-gateway-cloud` + `ao-egress` | 🧩🚀 | Compose `profile: cloud` + [`config/litellm-cloud.config.yaml`](config/litellm-cloud.config.yaml). Master_key + budgets + OpenRouter models + allowlisted egress. Operator provisions per-role virtual keys/budgets at bring-up. |
+| Pc.2 governance-summary egress | ✅(logic) 🧩(live) | `AuditSink` logs an egress payload for cloud calls; the privacy boundary (summaries only, no raw code) is a bridge responsibility — the cloud call sites send claim/goal/deviation/options, never file contents. |
+| Pc.3 profiles registry | ✅ | [`agent-bridge/profiles/`](agent-bridge/profiles/) + `modules/profiles.py`; lane-flip via `POST /profiles/lane` (no code change). |
+| Pc.4 join analytics by lane | 🚀 | Two spend DBs (`llm-gateway-db` local + `llm-gateway-cloud-db`); union with a `lane` tag later (documented, no live merge). |
+
+### P1 — Wake mechanic
+| Task | Status | Landing site / note |
+|------|--------|---------------------|
+| P1.0 reliable event delivery | ✅ | `modules/event_gateway.py`: idempotent dedupe on `event_id` + reconnect REST catch-up via `ChannelCursor`. `test_event_gateway.py`. |
+| P1.1 channel↔effort↔session map | ✅ | `modules/router.py` + `SessionMap` (session id == thread id). |
+| P1.2 wake/resume | ✅ | `router.wake` → `scheduler.acquire` → `harness.wake` (little-coder `POST /tasks {session_id}`). `test_end_to_end`. |
+| P1.3 A→B hand-off | ✅ | `orchestrator.handle_event` on an effort channel → wake target; reply posts in-thread. |
+| P1.4 bus-only enforcement | 🧩 | Structural: workers only reach the bridge (compose `ao-worker-net` internal + `ao-git-egress` allowlist). The egress denial is a container-level property (needs the live worker profile). |
+
+### P2 — Escalation gate (CORE SAFETY)
+| Task | Status | Landing site / note |
+|------|--------|---------------------|
+| P2.1 gate FSM {active⇄frozen} | ✅ | `modules/governance_gate.py`, persisted; **restart keeps frozen** — `test_governance_gate::test_frozen_persists_across_restart`. |
+| P2.2 triggers → freeze | ✅ | All 9 triggers → freeze — `test_every_trigger_freezes` (parametrized over `Trigger`). |
+| P2.3 CONCERN + dependents | ✅ | `orchestrator.raise_concern` posts the UX-FLOW §3 schema to `#mgmt`; `gate.freeze` freezes dependents (`test_dependents_freeze_with_parent`). |
+| P2.4 operator decision | ✅ | `gate.clear` parses approve/modify/abort → propagate/unfreeze + audit. |
+| P2.5 fail-safe default | ✅ | No auto-resume (no clock/timer in the gate), no reroute verb (`test_no_reroute_verb_exists`), PO can't self-clear hard-gate (`test_hard_gate_cannot_be_cleared_by_po`). |
+| P2.6 global kill switch | ✅ | `gate.kill_switch` — `test_kill_switch_freezes_everything` + `test_kill_switch_from_mgmt`. |
+| P2.7 safety tests | ✅ | `tests/test_governance_gate.py` (13 cases). |
+
+### P3 — Charters + grounding
+| Task | Status | Landing site / note |
+|------|--------|---------------------|
+| P3.1 charters as skills | ✅ | [`.claude/skills/agent-org-{floor,worker,reviewer}/`](../.claude/skills/) + `agent-bridge/charters/*.md`. |
+| P3.2 floor/steering split | ✅ | `modules/charters.py`; steering mutable per-effort, floor immutable at runtime. |
+| P3.3 hooks enforce floor | ✅ | `modules/floor_guard.py` (classify + decision) + `hooks/pretooluse_floor.py` (fail-closed CLI) + `POST /hook/floor-check`. `test_scope_and_floor`. |
+| P3.4 rule/goal version store | ✅ | `RuleVersion`/`GoalVersion`; floor change requires `approved_by="human"` (`test_floor_change_requires_human`). |
+| P3.5 goal injection (constraints inline) | ✅ | `charters.build_context` — `test_goal_constraints_inline_in_context`. |
+| P3.6 re-ground in flight | ✅ | `charters.set_goal(invalidates_in_progress=...)`; the invalidating case is a §3 freeze at the call site. |
+| P3.7 cost-tiered supervision | ✅ (wired 2026-07-02) | `orchestrator.monitor_sampled` — now **called in the Stage-5 loop** (`_gate_deliverable`), forced on risky efforts, never per-token/health-probe. See Live-loop integration. |
+| P3.8 readiness gate + clarify-loop | ✅ | `modules/planner.py::readiness_gate` + **wired into the live conversational path** (2026-07-02): a NL request is **anchored** to a cached read-only project survey (Stage 1, `modules/project_context.py` + `router.survey_project`), then the readiness gate runs; if a genuine blocker remains it **HOLDS** (numbered questions w/ recommended defaults, no worker) until the operator answers, then dispatches (`orchestrator._intake_or_dispatch`). `blast_radius` auto-maps to the P4.0 dry-run risk. |
+| P3.9 plan presentation + approval | ✅ | `planner.draft_plan` + `approve_plan` (human-only) + `Effort.plan_status`. |
+
+### P4 — Plan-stop-gates + review
+| Task | Status | Landing site / note |
+|------|--------|---------------------|
+| P4.0 ground + dry-run (risk-gated) | ✅(gate) 🧩(dry-run exec) | **BUILT 2026-07-02.** `modules/execution_gate.py` — `set_risk`/`record_dry_run`/`may_execute`: a high-blast-radius effort (`irreversible`/`cross_effort`/`cascading_refactor`) can't reach real-code execution until its dry-run is recorded (`Effort.risk`/`dry_run_status`); routine efforts pass. `delegate` consults `may_execute` before dispatch (holds risky efforts). `modules/grounding.py` — `openbrain-research` client (`POST /research` + poll, best-effort, OFF by default) + `FakeGrounding`; `orchestrator.prepare_execution` grounds risky efforts and injects claims as steering. Ops: `/risk`/`/dry-run` chat commands + `POST /effort/{risk,dry-run,prepare}` + `GET /execution/{id}`. Tests: `test_execution_gate.py` (7). The **dry-run *execution*** (isolated branch) stays a live-worker step. |
+| P4.1 plan-doc checkpoints (separate floor doc) | ✅ | [`floor/stop-gate-enforcement.md`](agent-bridge/floor/stop-gate-enforcement.md); enforced halt is the `Checkpoint` row, independent of plan markers. |
+| P4.2 block past checkpoint | ✅ | `stop_gates.may_proceed`/`assert_may_proceed` — `test_checkpoint_blocks_until_cleared`. |
+| P4.3 explain-intent | ✅ | `stop_gates.submit_explanation` (4-field `Explanation`). |
+| P4.3b verify vs diff | ✅ | `submit_explanation` cross-checks via judge model — `test_explanation_mismatch_flagged`. |
+| P4.4 differently-goaled reviewer | ✅ (wired 2026-07-02) | `stop_gates.review` now **called per checkpoint** in the Stage-5 loop (`_gate_deliverable`); a flag freezes+escalates (`_on_review_flag`). `test_execution_loop.py`. |
+| P4.5 risk-gated depth | ✅ | `stop_gates.lenses_for` (routine=1, irreversible=panel) — `test_risk_gates_lens_count`. |
+| P4.6 aggregate → re-ground → refactor | ✅ | `clear_checkpoint` keeps a flagged checkpoint blocking — `test_flagged_review_keeps_checkpoint_blocked`. |
+| P4.7 reviewers on JUDGE_MODEL + deterministic checks | ✅ | Reviewer profiles bind the judge lane; a failed deterministic check is an LLM-independent flag — `test_deterministic_check_failure_flags`. |
+| P4.8 lateral concern channel | ✅(logic) | Lateral concerns surface on the bus → PM; `WakeLog.kind="brake"` is exempt from the rate cap (`router.wake_storm_tripped` counts `kind="work"` only). |
+
+### P5 — Dynamic roles + worker pool + scope
+| Task | Status | Landing site / note |
+|------|--------|---------------------|
+| P5.0 worker pool + scheduler FSM (machine B) | ✅(logic) 🧩(pool) | `modules/scheduler.py` {computing,waiting,suspended} + static `MAX_CONCURRENT_WORKERS` semaphore — `test_scheduler.py`. The live 2-instance pool is compose `profile: workers`. |
+| P5.1 scope ledger | ✅ (wired 2026-07-02) | `modules/scope_ledger.py` — self-grant denied; now **granted on dispatch** (`_authorize_worker`: read/write to the worker, push/deploy stay human-only). `test_stage5_governance.py`. |
+| P5.2 role authority split | ✅ | `modules/roles.py` — PM instantiates approved roles; a new role TYPE routes through the §3 gate for human sign-off. |
+| P5.3 approved-role catalog | ✅ | `scope_ledger.catalog_add`/`is_role_approved` — `test_role_catalog_approval`. |
+| P5.4 last-owner provenance | ✅(logic) 🧩(live) | `router.last_owner` (git-blame v1). Needs a real workspace clone to exercise. |
+| P5.5 channel taxonomy | ✅ | **Superseded by the comms model (CM.1, built 2026-07-02): channel = project (`#proj-<slug>`), effort = thread.** `router.open_effort` posts an effort-card root post; activity threads under it; `#mgmt`/`#incidents`/`#suggestions` are the permanent function channels. See the CM.1–CM.6 record below. |
+| P5.6 wake-storm cap (brake exempt) | ✅ | `router.wake_storm_tripped` (work chatter only) → §3 trigger in `orchestrator.handle_event`. |
+| P5.7 stream-aligned, right-sized scoping | ✅(policy) | Encoded in the PM/worker charters + goal-injection; a cognitive-load heuristic hook is a v1.5 refinement (documented). |
+| P5.8 retirement/decommission | ✅ | `scheduler.retire` + `scope_ledger.revoke_subject` + `retire_role` — `test_retire_leaves_no_assignment` / `test_revoke_leaves_no_authority`. |
+
+### P6 — Audit + learning loop
+| Task | Status | Landing site / note |
+|------|--------|---------------------|
+| P6.1 full event log | ✅ | `modules/audit_sink.py` (append-only `Event`); `replay()` reconstructs the timeline with versions. |
+| P6.2 mirror to Open Brain | ✅(logic) 🚀(wire) | `audit_sink._mirror` → `openbrain-gateway /capture_thought` (best-effort). Off by default; operator sets `AO_OPENBRAIN_MIRROR_ENABLED` + key. |
+| P6.3 suggestion pool | ✅ | `modules/learning_loop.py::add_suggestion`/`pool` — `test_suggestion_pool`. |
+| P6.4 pattern surfacing | ✅ | `learning_loop.observe` surfaces at ≥2 efforts — `test_pattern_surfaces_across_two_efforts`. |
+| P6.5 propose-not-dispose | ✅ (wired 2026-07-02) | `propose`/`dispose` (human-only, no auto-apply); the loop now **feeds it** — a pattern recurring across ≥2 efforts surfaces + proposes (`_observe_pattern`). `test_stage5_governance.py`. |
+
+### R — 3-place change
+| Task | Status | Landing site / note |
+|------|--------|---------------------|
+| R.1 compose | ✅ | [`docker/docker-compose.yml`](docker/docker-compose.yml) — validates with all v1 services. |
+| R.2 recovery scripts | ✅ | `scripts/emergency-recovery.ps1` (parses clean) + `.bat` — agent-org added to inventory + shutdown-first/startup-last sequences + status report. |
+| R.3 stack-map reference | ✅ | `.claude/skills/stack-map/references/workspace-stacks.md` §3 (new agent-org section) + dependency order + recovery notes. |
+
+### P7 — Mobile + hardening
+| Task | Status | Landing site / note |
+|------|--------|---------------------|
+| P7.1 mobile flow | 🚀 | [`docs/P7-mobile-and-exposure.md`](docs/P7-mobile-and-exposure.md). Decide CONCERNs + kill switch from the phone via `#mgmt` commands. |
+| P7.3 CONCERN UX | ✅(plain) | Structured plain posts (OD-5) implemented; the interactive plugin is the optional upgrade. |
+| P7.4 tailnet exposure | 🚀 | `tailscale serve` recipe in the P7 doc; no public exposure; non-E2EE agent channels. |
+
+---
+
+## Live bring-up fixes (2026-07-01, during operator P0.2)
+
+First real Mattermost connect surfaced four issues, all now fixed + covered by tests:
+
+1. **Bot needs TEAM membership, not just channel** — `/users/me/teams` was empty. The adapter
+   now resolves the team **lazily + retries** (`_ensure_team`), so it self-heals once the
+   operator adds the bot to a team; a clear actionable error replaces the old `AssertionError`.
+   *(Operator step: add the bot account to the team, not only the #mgmt channel.)*
+2. **`#mgmt` display-name vs URL-slug** — the channel shows as `mgmt` but its slug was
+   `management`, so slug lookup 404'd and auto-create 400'd. `ensure_channel` now falls back to
+   **matching by display name** among the bot's channels before creating.
+3. **`ChannelCursor.last_ts` overflow** — Mattermost `create_at` is a **ms epoch** (~1.78e12),
+   but the column was `Integer` (int32) → `asyncpg DataError: out of int32 range` on every
+   `_mark_processed`, which rolled back the dispatch txn (nothing marked) and silently killed
+   catch-up. Fixed to **`BigInteger`**. (Live DB altered; model fixed for fresh deploys.)
+4. **catch-up robustness** — added per-event try/except + logging (mirrors the live WS loop) and
+   made `run()` survive a catch-up failure, so a single bad event can never abort recovery or
+   block the live WS loop. Also `posts_since(0)` now fetches the recent page (MM ignores `since=0`).
+
+Also added the **operator chat command surface** (P0.4 operability): `/help`, `/effort <name>`,
+`/status`, `/kill|/unkill`, `approve|modify|abort`, and a **boot-ack** post
+(`✅ agent-bridge online`). Verified live: connected as `@bot-pm`, `#mgmt` resolved, boot-ack
+posted, live WS loop running, zero errors.
+
+**Natural-language PO surface (added 2026-07-01 — the primary UX).** Slash commands are the
+*deterministic control surface*; the primary interface is **plain-language conversation with the
+PO** (UX-FLOW: the human converses with the PO). `orchestrator.nl_intake` routes any
+non-command `#mgmt` message to the **`po` profile** (local `qwen36-27b`), which returns a
+structured `OperatorIntent` (kind + conversational reply + optional action). The bridge executes
+**non-destructive** actions from NL — open an effort (Stage 0→1), apply steering (§4.3), report
+status — and **replies conversationally**. **Safety decisions are NOT auto-run from fuzzy NL**:
+the PO interprets "yeah go ahead" but asks the operator to confirm with the explicit
+`approve <effort>` command (governance §3 — decisions stay crisp + auditable). System posts
+(joins/adds) are ignored. Its quality rides the PO profile's lane — see P0.5.
+
+**P0.5 — RESOLVED (2026-07-02): LOCAL_JUDGE_OK → stay all-local, skip Pc.** Full run of
+`qwen36-27b` via the local gateway:
+- instruction / charter-following: **18/18** (1.00) — every §3 trigger correctly froze +
+  escalated-to-human + no self-clear + no route-around; benign case took no action.
+- structured-output (GBNF, first-try, `max_retries=0`, zero repair): **11/12** (0.917, threshold
+  0.90) — the softest axis; in production `max_retries=2` recovers a miss. Watch this axis.
+- coordination: constraint-preservation **3/3** + drift-catch **2/2** (1.00).
+
+Decision (OD-10): **all-local, judgment profiles keep `lane: local`, Pc skipped, no OpenRouter.**
+This also confirms P0.3b (constrained decoding works through the gateway) and that the NL PO layer
+is viable locally. Re-run any time: `docker exec agent-bridge python -m app.evals.capability_floor`
+(writes `/app/p0_5-result.json` inside the container; `docker cp` it out — the harness now prints
+the exact command). Quick smoke first-observed 2026-07-01 (13/13, 4/4, 2/2+1/1) — full run above.
+
+## P5 worker-pool bring-up (2026-07-02) — pool LIVE, wake seam validated
+
+Stood up the `workers` profile against the live stack. Both `(little-coder + open-terminal)`
+pairs (`ao-worker-1/2` + `ao-ot-1/2` + shared `ao-git-egress`) are **healthy**, both registered
+in the scheduler (cap=1), and the bridge drives them through the production wake path. Findings +
+fixes (all applied):
+
+1. **Per-instance config required** — little-coder's config loader is plain `yaml.safe_load` (no
+   env substitution/layering) and `workspace.open_terminal_url` is the only lever the daemon +
+   agent use, so the shared config would route a pooled worker's exec to the MAIN open-terminal.
+   Fixed with `agent-org/scripts/gen-worker-configs.py`: generates per-instance config dirs
+   (`worker-configs/worker-N/`) from the canonical config, rewriting only that one line. The
+   compose mounts the per-instance dir; regenerate when the canonical config changes.
+2. **Pool open-terminal key** — the daemon reads the OT key from `OPEN_TERMINAL_API_KEY`
+   (config `open_terminal_key_env`); the pool now uses its OWN `AO_OPEN_TERMINAL_KEY` (compose
+   `environment` overrides the env_file) so it's independent of the main stack.
+3. **`channel` is the trigger-surface enum, not the chat channel** — the daemon `POST /tasks`
+   validates `channel ∈ {batch,cli,owui,validation}`; the harness was passing the Mattermost
+   channel → 422. Fixed: the bridge sends `channel="batch"` (automated trigger). Verified the
+   daemon then accepts the task.
+4. **Workers need a project** — a woken worker with no focus returns
+   *"no project focused — run /project first"* (expected little-coder behavior; it works on a
+   repo). So actual **delegation** needs a step the bridge doesn't do yet: set a project on the
+   assigned instance (`POST /project {repo}`) before waking, which requires an operator decision
+   (which repo(s) the org works on + the `ao-git-egress` git allowlist). This is the next P5
+   increment (`P5-delegation`), gated on that decision. The pool + wake seam themselves are done.
+
+5. **Pool open-terminal key var** — the open-terminal *server* reads `OPEN_TERMINAL_API_KEY`
+   (the little-coder layer/git-proxy reads `API_KEY`); the main OT gets it via its `env_file`. The
+   pool OTs only had `API_KEY` → the server 401'd every exec. Fixed: set BOTH
+   `OPEN_TERMINAL_API_KEY` and `API_KEY` to `AO_OPEN_TERMINAL_KEY` on `ao-ot-N`.
+
+### Delegation LIVE + validated end-to-end (2026-07-02)
+
+The full conversational delegation loop is wired and proven on the live stack with a **throwaway
+test repo**:
+- **PO NL → intent** (live `qwen36-27b`): "add a subtract function" → `kind=request,
+  effort_name=add-subtract-function`; "what's going on" → `status`; "hey there" → `chitchat`.
+- **Bridge delegation**: `orchestrator.delegate` (background task) sets the effort goal
+  (constraints inline, §4.3), dispatches a worker via `router.wake` (optional `set_project` for
+  real repos; pre-focused pool otherwise), and posts the result to the effort channel. NL
+  requests auto-spawn a delegation; the PO replies immediately (`_spawn`), the result follows.
+- **Worker does real work** (proven): a wake with *"add subtract(a,b) to calculator.py"* →
+  little-coder on 27B edited the file correctly (`subtract` added in the right place, matching
+  style), status `done` in ~20s, no push (floor intact).
+- Harness gained `set_project` / `current_focus`; the daemon `channel` must be `batch`
+  (trigger-surface enum). 65 tests green.
+
+**Throwaway test-repo setup (reproducible).** little-coder needs a focused repo; the git-proxy
+blocks `git init` (workspace setup is an operator action, §12.3), so seed with the REAL git
+(`/usr/bin/git.real`, which `/project` also uses) into the worker's workspace via its
+open-terminal, then restart the worker so `_seed_focus` adopts it:
+```bash
+docker exec ao-ot-1 sh -c 'cd /workspace && umask 000 && /usr/bin/git.real init -q && \
+  /usr/bin/git.real config user.email t@a.local && /usr/bin/git.real config user.name t && \
+  printf "def add(a,b):\n    return a+b\n" > calculator.py && /usr/bin/git.real add -A && \
+  /usr/bin/git.real commit -qm initial && \
+  /usr/bin/git.real remote add origin https://github.com/agent-org/throwaway-test.git'
+docker restart ao-worker-1   # _seed_focus adopts it; GET :8090/health shows focus set
+```
+For a REAL project instead, set `AO_DEFAULT_REPO` (or pass a repo per effort) and the bridge
+issues `/project` (clone via real git) before waking — plus add the repo's host to the
+`ao-git-egress` allowlist.
+
+Recovery scripts are unchanged for the pool by design: the `workers`/`cloud` profiles are gated
+(like the Portal) and operator-driven, so they're excluded from the recovery inventory (the
+default plane is what recovery manages). Stack-map §3 already lists the pool containers.
+
+### Intake clarify-loop + readiness→risk + tailnet reachability (2026-07-02, from live feedback)
+
+Fixes from the first real conversational tests (**119 tests green**):
+
+1. **PO asked a question but dispatched anyway (F5 violation).** `nl_intake` used to dispatch the
+   instant `kind=="request"`. Now a request runs the **readiness gate (P3.8)** first
+   (`orchestrator._intake_or_dispatch`): if `clear_and_safe=false` with questions, it **HOLDS**
+   (posts the clarifying questions to `#mgmt` + a `⏸️ awaiting clarification` note in the effort
+   thread, tracks the effort in `self._pending`, **no worker dispatched**). The operator's answer
+   (PO `kind=clarification`, or a `steering` follow-up) merges into the goal, re-runs readiness, and
+   dispatches when clear. Fixes both the premature dispatch **and** the bug where a follow-up only
+   recorded steering and never did the work. `_PO_NL_SYS` updated so the PO acknowledges but does
+   **not** ask questions itself (the readiness gate owns clarification) or claim it dispatched.
+2. **readiness→risk auto-wiring (P4.0).** The readiness gate's `blast_radius`
+   (`cross_effort`/`cascading_refactor`) now auto-sets the effort's dry-run risk
+   (`_risk_from_blast` → `exec_gate.set_risk`), so a high-blast-radius request automatically
+   requires a dry-run before real-code execution — no manual `/risk`.
+
+   **Readiness-quality pass (from operator feedback — the gate asked frivolous questions).** The
+   gate was manufacturing generic integration questions (language? file placement? integrate vs
+   standalone?). Grounded the prompt in F5 + UX-FLOW Stage 1/2: **anchor to the existing project**
+   and resolve conventions/placement/language/patterns YOURSELF (match the project + SOLID +
+   industry-standard patterns); **elevate ONLY genuine blockers** — feature-intent ambiguity,
+   missing info only the operator has, security, or ethics. `ClarifyingQuestion` is now structured
+   `{question, recommendation, category}`: each carries a **recommended default** (feature/missing)
+   or the **specific concern** (security/ethics). Rendered as a **numbered** list with the
+   recommendation shown + an explicit *"all N need an answer — or say 'use your recommendations'"*
+   footer. On the operator's answer the bridge folds their reply + the held recommendations into
+   the goal and dispatches **without re-interrogating** (`_resume_after_clarification`). The gate is
+   passed a `workspace_ctx` of the project/repo so it anchors rather than guesses.
+
+   **Stage-1 project anchor (so the gate reasons from the ACTUAL codebase, not the request alone).**
+   When a real repo is focused (`AO_DEFAULT_REPO` / per-project), the bridge runs a **one-time
+   read-only worker survey** of the repo (`router.survey_project` — a bounded, scheduler-slotted
+   worker pass that lists languages/structure/conventions/test setup, floor-enforced read-only),
+   caches it per project (`modules/project_context.py`), and injects it into the readiness gate's
+   `workspace_ctx`. So the gate resolves placement/conventions from real files instead of asking.
+   Best-effort + cached (survey failure → conventions-only; empty result cached so it isn't retried
+   per request; `invalidate` forces a refresh). Off for the sandbox (nothing to survey). New setting
+   `AO_PROJECT_SURVEY_ENABLED` (default true; only fires with a repo). Tests: `test_project_context.py` (6).
+
+   *Model-capability note (answering the operator's P0.5 question):* P0.5 measured **three** batteries
+   — instruction/charter-following (18/18, incl. a benign "no-escalate" case), structured-output
+   (11/12), coordination (5/5) — not just the judge; local `qwen36-27b` passed all. The earlier
+   over-asking was a *prompt* gap (now grounded in F5/UX-FLOW) + a missing anchor (now added), not a
+   model-capability failure. If it recurs, the lever is the P0.5 escape hatch (flip
+   `planner`/`pm`/`po` to `lane: cloud`), but P0.5 says local judgment is sufficient.
+
+### Multi-project model — work on ANY repo, onboarded from Mattermost (2026-07-02, operator feedback)
+
+`AO_DEFAULT_REPO` read as "the org only works on one hardcoded repo" — wrong for a multi-project
+orchestrator. It was always meant as a **fallback** (COMMS-MODEL §4 says "AO_DEFAULT_REPO **or
+per-effort**"), but the per-project selection was never built. Now it is (**119 tests green**):
+
+- **Project registry** (`modules/projects.py`, `Project` table): `channel = project = repo`. Onboard
+  any repo with **`/project add <name> <repo-url>`** (also `/project list|remove`, `POST /projects`)
+  — creates `#proj-<slug>`, parses the git host, and allowlists it. `AO_DEFAULT_REPO` is demoted to
+  the fallback for a `#mgmt` request that names no project, and is auto-registered as a project on
+  boot so it's visible/uniform.
+- **Dispatch-time resolution** (`orchestrator._resolve_project_slug` / `_effort_repo`): a request in
+  `#proj-acme`, or *"in acme, …"* to the PO (it sets `intent.project` from the KNOWN PROJECTS list),
+  resolves to acme's repo; the worker is focused on **that** repo (`/project` clone), not a global
+  default. The readiness-gate survey + `delegate` both use the resolved repo.
+- **Remotely-managed worker git-egress scope** (operator's ask — "a task for bot-pm/a role"):
+  `modules/egress.py` renders `seed(github) ∪ project-hosts ∪ manually-allowed − suppressed` to a
+  **tinyproxy filter file the bridge writes** on a shared volume (`ao-egress-config`); `ao-git-egress`
+  runs `docker/egress/egress-reload.sh` (custom `tinyproxy.conf` → the shared file + a poll-and-SIGHUP
+  reloader) so onboarding a new git host **takes effect live, no rebuild**. Manage from chat:
+  `/project add` auto-allows the repo's host; `/egress allow|remove|list` (+ `GET/POST /egress`) for
+  explicit control. Default-deny is preserved (governance §5 — scope is operator-controlled + audited).
+  **3-place:** the new `ao-egress-config` volume + the `ao-git-egress` command/mount override are
+  compose-only (no new container); stack-map updated. **Operator step:** rebuild the `workers` profile
+  (`up -d --build --profile workers`) for the reload wrapper to take effect.
+3. **Tailnet `tailscale serve` fix (P7.4).** Two gotchas corrected in `docs/P7-mobile-and-exposure.md`:
+   the socket is **`/tmp/tailscaled.sock`** (not the default path — that was the operator's *"not
+   running?"* error), and Mattermost (ao-net) was unreachable from the `tailscale` netns
+   (openwebui's, on `ai-stack_llm-net`) — so `mattermost` is now **also on `llm-net`** and the serve
+   target is `http://mattermost:8065`. Stack-map row updated (mattermost networks → ao-net, llm-net).
+
+### Comms model (CM.1–CM.6) — BUILT + tested (2026-07-02)
+
+Implemented [`COMMS-MODEL-deterministic-routing.md`](../documentation/implementation-guide/teams-chat-agent-orchestration/COMMS-MODEL-deterministic-routing.md)
+in full — the deterministic *audience × intent → destination* model that replaces the
+channel-per-effort sprawl. Bridge-internal (no 3-place change); only the `agent-bridge` image is
+rebuilt. **81 tests green** (65 → 73 comms model → 80 P4.0 → 81 intake clarify-loop). What landed, per phase:
+
+- **CM.1 — channel = project, effort = thread.** `Effort` gained `project` + `root_post_id`;
+  `router.open_effort(name, project=…)` posts an **effort-card root post** in `#proj-<slug>` and
+  its id becomes the effort's thread. All effort activity (dispatch, worker stream, review,
+  closure) posts as **replies** under it. The operator is added to the **project channel once**,
+  not per effort. `resolve_effort_by_thread` replaces channel-keyed lookup (a channel is now a
+  project = many efforts). *Result:* two efforts in one project = two threads in one channel; the
+  sidebar never grows with task volume. `ensure_effort_channel` kept as a thin shim (default
+  project). Test: `test_two_efforts_share_one_project_channel`, `test_wake_in_effort_thread_posts_reply`.
+- **CM.2 — deterministic router.** New `modules/comms_router.py`: `resolve(intent, effort_id) →
+  (channel_id, thread_id|None)` is the §2 table as one pure function; every posting flow goes
+  through `comms.post(intent, …)` — no module picks a channel inline. Test:
+  `test_routing_table_resolves_each_intent`, `test_thread_intent_requires_effort_id`.
+- **CM.3 — escalation ladder + CONCERN routing.** `raise_concern` posts the CONCERN to `#mgmt`
+  (decide-private) **and** raises the up-signal into the effort thread (record-public pointer). A
+  worker that ends `rejected` → hard-gate CONCERN (F3); other non-`done` ends → thread escalation
+  + `#mgmt` summary without a hard freeze (`_escalate_worker_failure`).
+- **CM.4 — "bring the audience back down" ⭐.** `apply_operator_decision` echoes the resolution
+  into the originating effort thread (`✅ resuming` / `⛔ aborted`) in addition to the `#mgmt`
+  record + audit — the closure the earlier build lacked. Test:
+  `test_concern_freezes_escalates_and_closure_comes_back_down`.
+- **CM.5 — function channels.** `#incidents` + `#suggestions` are created-or-got at boot and the
+  operator is pulled in when first seen in `#mgmt`. Worker suggestions surface in `#suggestions`
+  (`orchestrator.record_suggestion`, wired to `POST /suggestion`); wake-storm/undeliverable/crash
+  notices go to `#incidents` (and still freeze per §3). Tests:
+  `test_suggestion_surfaces_in_suggestions_channel`, `test_wake_storm_posts_incident_and_freezes`.
+- **CM.6 — effort-card status + notification discipline.** `ChatAdapter.update_post`
+  (Mattermost `PUT /posts/{id}`; Fake records it) keeps the effort-card root post's status live
+  (`active → frozen → active/done/aborted`). Worker-activity streaming **batches** successful
+  commands (`AO_ACTIVITY_BATCH`, default 5) into one thread post; failures/denials always flush +
+  post immediately with context. Tests: `test_effort_card_status_updates_on_freeze`,
+  `test_activity_stream_batches_successful_commands`.
+
+**DB migration (self-healing):** `Effort` gained two columns. `Database.create_all` now runs an
+idempotent, **additive-only** migration (`ADD COLUMN IF NOT EXISTS` on Postgres; PRAGMA-probe on
+SQLite) so a rebuilt image doesn't 500 on the existing live `efforts` table — no manual ALTER
+needed. New config: `AO_DEFAULT_PROJECT` (`sandbox`), `AO_INCIDENTS_CHANNEL`,
+`AO_SUGGESTIONS_CHANNEL`, `AO_ACTIVITY_BATCH`.
+
+*Alignment guard:* nothing here weakens governance §3/§5 — the escalation gate, mandatory
+up-level, pause-until-cleared, and no-reroute invariants are untouched; the comms model only makes
+*where each message lands* deterministic. **Operator step:** rebuild + restart `agent-bridge`
+(`docker compose ... up -d --build agent-bridge`) to pick up the taxonomy; existing `#effort-*`
+channels can be archived by hand once efforts run as threads.
+
+## P0.5 procedure (the one decision-gate that blocks Pc)
+
+Run these **bounded real completions** (never a model health-probe — C5) against the live
+`llm-gateway` and record pass/fail:
+
+1. **Instruction/charter-following** — feed the PM charter + a task; check it holds the §3
+   duties (freezes on a planted trigger, up-levels, doesn't self-clear).
+2. **Structured-output reliability** — 20 constrained `ReviewVerdict`/`Plan` calls via the
+   `model_router` (GBNF); require 20/20 schema-valid with zero repair.
+3. **Coordination** — a 2-step A→B hand-off with a constraint that must survive the seam;
+   check the constraint isn't dropped (the paper's GPT-5-MINI failure).
+
+**Decision (binary — OD-10):**
+- **27B judge OK** → keep judgment profiles `lane: local`. **Pc is skipped.** All-local.
+- **27B judge too weak** → build **Pc**, then `POST /profiles/lane {name, lane:"cloud"}` for
+  `pm`, `po`, `planner`, `reviewer-*`. **Workers always stay local.** If Pc isn't wired yet, a
+  `cloud`-lane call falls back to local *with a warning* and the Human Operator carries more —
+  never a silently-trusted weak monitor (governance §2.1).
+
+Record the outcome + the per-task "org vs. single agent?" guidance in this file when run.
+
+---
+
+## Deliberate v1 scope calls (logged, not silent — governance §5)
+
+- **Worker pool is 2 instances behind `profile: workers`**, off by default. The pool wiring
+  (per-instance little-coder config, session dirs) needs a live bring-up to validate; the
+  scheduler + assignment logic are fully tested with fakes. The GPU is the org-size budget.
+- **Cloud lane is fully authored but OFF** (`profile: cloud`, `AO_CLOUD_ENABLED=false`) pending
+  the P0.5 decision — the honest pre-decision posture (all-local, same model, zero swap thrash).
+- **Open Brain audit mirror is best-effort + off by default** — the local append-only log is
+  always the source of truth; the mirror is durable provenance, not a dependency.
+- **CONCERN UX is plain structured posts** (OD-5), not yet a Mattermost plugin (P7.3 upgrade).
+- **Provenance is git-blame v1** (OD-4); the ownership-ledger is the v1.5 upgrade.
+- **Cognitive-load split heuristic (P5.7)** is policy-in-charter for v1; an automated
+  files-touched/scope-breadth trigger is a v1.5 refinement.
+
+These are the "no silent caps" disclosures: where v1 bounds coverage, it's stated here.

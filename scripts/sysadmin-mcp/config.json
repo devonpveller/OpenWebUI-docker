@@ -1,0 +1,29 @@
+{
+  "_comment": "Thresholds + machine facts for the sysadmin-mcp disk capability. vhdx_path defaults to %LOCALAPPDATA%\\Docker\\wsl\\disk\\docker_data.vhdx when null. All *_gb are gigabytes.",
+  "vhdx_path": null,
+  "system_drive": "C:",
+  "data_drive": "D:",
+  "docker_desktop_mount": "/mnt/docker-desktop-disk",
+  "ao_workers": ["ao-worker-1", "ao-worker-2"],
+  "sysadmin_channel_id": "sysadmin",
+  "_sysadmin_channel_comment": "Mattermost #sysadmin channel id; null falls back to #claude-code until the channel exists.",
+  "sysadmin_operators": "profnovice",
+  "alert_throttle_hours": 20,
+  "thresholds": {
+    "c_free_warn_gb": 60,
+    "c_free_critical_gb": 25,
+    "container_layer_warn_gb": 40,
+    "containers_total_warn_gb": 90,
+    "ao_worker_tmp_warn_gb": 20,
+    "container_log_warn_gb": 2,
+    "vhdx_trapped_warn_gb": 60,
+    "volume_reclaimable_warn_gb": 25,
+    "image_reclaimable_warn_gb": 25
+  },
+  "protected_volume_substrings": [
+    "openwebui", "open-webui", "mnemory", "tailscale", "openbrain",
+    "mattermost", "surreal", "iks", "llm-gateway", "open-terminal",
+    "open_notebook", "task-management", "agent-bridge", "automatic1111",
+    "realtimeaudiochat", "stable_diff"
+  ]
+}

@@ -30,7 +30,7 @@ from .meta import should_trigger
 from .meta_wiring import build_meta_runner
 from .observer import report_dict
 from .openterminal import OpenTerminalClient
-from .sanitize import Sanitizer
+from .sanitize import Sanitizer, redact_secrets
 from .tasks import TaskContext, TaskState, TaskStatus
 from .ulid import new_ulid
 from .urlnorm import NormalizedRepo, RepoUrlError, normalize_repo_url
@@ -86,11 +86,69 @@ class TriggerRequest(BaseModel):
     user_id: str = "cli"
     session_id: str | None = None
     acceptance_command: str | None = None
+    # PLAN-ONLY turn (agent-org bridge): run the agent with edit/write tools EXCLUDED so this
+    # turn can only explore + reply with a plan, never change files (headless plan mode).
+    plan_only: bool = False
+    # FLAIL GUARD (agent-org bridge): watch this turn for read-without-edit flailing and kill it
+    # with a FLAIL-GUARD answer marker when it trips (the bridge then re-plans from a fresh
+    # session). Opt-in — the bridge sets it on coding step wakes only.
+    flail_guard: bool = False
+
+
+class CheckRequest(BaseModel):
+    """A deterministic VERIFICATION exec (agent-org bridge, 2026-07-08): run ONE command in the
+    focused workspace and return its REAL exit code + output — no model in the loop. Exists
+    because build verification is a machine step: an LLM 'verifier' burned its whole turn
+    re-running builds and never reported the verdict. Same containment as agent commands
+    (open-terminal + git-proxy + egress)."""
+    command: str
+    cwd: str | None = None          # default: the workspace root
+    timeout: int = 600              # seconds; clamped to [30, 1800]
+    actor: str = "bridge"
 
 
 class ProjectRequest(BaseModel):
     repo: str
     actor: str = "cli"
+    # Optional per-request deploy token (overrides the global LC_DEPLOY_TOKEN). Lets a caller (the
+    # agent-org bridge) supply a DIFFERENT token per project — e.g. a personal PAT for one repo and
+    # an org PAT for another — instead of one ambient token for everything. Env only on the caller;
+    # transits the internal network per request; never journaled raw (clone redacts the token).
+    token: str | None = None
+    # Optional FORK parent. When `repo` is a fork, `upstream` is the parent repo URL; the daemon
+    # bakes it as a read-only `upstream` remote AFTER the clone (operator setup path) so the worker
+    # can `git fetch upstream` / `merge --no-ff upstream/...` but push only to `origin` (the fork).
+    # Re-applied on every focus — the workspace is wiped on switch, so `upstream` is never assumed
+    # to persist; the caller (agent-org bridge) holds the source of truth. `upstream_token` is a
+    # read-scoped PAT for a PRIVATE parent (public parents need none). Never journaled raw.
+    #
+    # NB — distinct from little-coder's OWN `/admin/upstream/pull` (the fork-parent of the *tool*,
+    # self-improvement). This `upstream` is a git remote in the *project* workspace.
+    upstream: str | None = None
+    upstream_token: str | None = None
+    # Force a clean re-clone even when already focused on this URL (NOOP). The URL can point at a
+    # DIFFERENT repo than the cached workspace — e.g. the operator deleted + recreated it — leaving a
+    # stale, unrelated history that fails to push. Operator-plane composition sets this so it always
+    # starts from the true remote state.
+    fresh: bool = False
+    # Populate the FULL nested submodule tree on clone (`--init --recursive`). A composition BUILD
+    # needs the deep tree (engine → vendored fork → the fork's own submodules); the worker can't
+    # init it (the proxy denies `submodule`), so the privileged clone must. The bridge sets this
+    # for a composition check. Off by default (recursing deep/private deps is slow).
+    recurse_submodules: bool = False
+
+
+class SubmoduleRequest(BaseModel):
+    """Add a git submodule to the FOCUSED (composition) repo — operator-plane setup for
+    autonomous-project-lifecycle P-APL.1b. `url` is the submodule (usually a public fork → no token);
+    `path` is where it mounts; `token` is a read-scoped token for a PRIVATE submodule. The daemon must
+    already be focused on the composition repo (its origin carries the push token)."""
+
+    url: str
+    path: str
+    commit_message: str | None = None
+    token: str | None = None
+    actor: str = "agent-bridge"
 
 
 class ConfirmRequest(BaseModel):
@@ -343,7 +401,12 @@ class LittleCoderDaemon:
             raise HTTPException(503, "shutting down — not accepting new triggers")
         if req.channel not in _VALID_CHANNELS:
             raise HTTPException(422, f"channel must be one of {sorted(_VALID_CHANNELS)}")
-        if self.current_focus is None:
+        # A valid FOCUS means both an in-memory record AND a real clone on disk — the two can diverge
+        # (the record outlives the tree). Mirror run_check/add_submodule: never spawn an agent onto a
+        # workspace with no cloned repo. Live 2026-07-13: a corrupt leftover workspace (no .git) left
+        # current_focus set; the task ran on the void, "finished" having changed nothing (it couldn't
+        # branch/commit), and the PM monitor froze the effort. Reject so the bridge re-focuses (fresh).
+        if self.current_focus is None or not self.workspace.is_focused():
             raise HTTPException(409, "no project focused — run /project first")
         if not req.prompt.strip():
             raise HTTPException(422, "empty prompt")
@@ -355,6 +418,8 @@ class LittleCoderDaemon:
             prompt=req.prompt,
             repo=self.current_focus.canonical_url,
             acceptance_command=req.acceptance_command,
+            plan_only=req.plan_only,
+            flail_guard=req.flail_guard,
         )
         self.tasks[state.task_id] = state
         self.contexts[state.task_id] = TaskContext(state)
@@ -420,8 +485,54 @@ class LittleCoderDaemon:
             raise HTTPException(422, str(exc)) from exc
         decision = decide_switch(requested, self.current_focus, self.busy)
 
+        # `fresh`: the cached workspace may be STALE/unrelated (repo deleted+recreated at the same
+        # URL). Force a clean re-clone instead of trusting the NOOP. `recurse_submodules` (a
+        # composition check) ALSO forces a clone — it needs the exact branch checked out with the
+        # full nested tree, which a cached workspace (default branch, direct-only submodules) lacks.
+        # Only when no task is in flight.
+        if (req.fresh or req.recurse_submodules) and decision.action is SwitchAction.NOOP \
+                and not self.busy:
+            await asyncio.to_thread(self.workspace.wipe)
+            self.current_focus = None
+            decision = decide_switch(requested, None, self.busy)   # → CLONE (fresh)
+
+        # A NOOP is only valid when the workspace actually HOLDS a repo — the in-memory focus
+        # can outlive the tree (live 2026-07-07: focus said the repo, the volume was empty →
+        # the worker was dispatched into a void it cannot escape, since the git-proxy rightly
+        # blocks it from cloning for itself). An empty workspace means the focus record lies:
+        # drop it and clone. This fires EVEN IF a task is "in flight": that task is running on the
+        # SAME void (is_focused=False) and is already doomed, so there is no valid work for the busy
+        # guard to protect — and NOOPing again would dispatch the next task onto the void too (live
+        # 2026-07-13: a corrupt leftover workspace + a busy dry-run made this NOOP silently, the
+        # worker "worked" on nothing, and the PM monitor froze the effort as a hard-gate deviation).
+        if decision.action is SwitchAction.NOOP \
+                and not await asyncio.to_thread(self.workspace.is_focused):
+            self.current_focus = None
+            decision = decide_switch(requested, None, self.busy)   # → CLONE (workspace vanished)
+
         if decision.action is SwitchAction.NOOP:
-            return {"action": "noop", "focus": requested.canonical_url}
+            # Already focused — the workspace was NOT wiped, so `origin` is intact… but the token
+            # EMBEDDED in its URL at the original clone is SHORT-LIVED (a GitHub App installation
+            # token lives 1h). A NOOP re-focus hours later would push with a DEAD credential (the
+            # live "expired token in origin" failure). Re-bake origin's auth with the caller's
+            # current token — a cheap `remote set-url`; the work in the tree is untouched.
+            out: dict = {"action": "noop", "focus": requested.canonical_url}
+            noop_token = req.token or os.environ.get("LC_DEPLOY_TOKEN") or None
+            if noop_token:
+                res = await asyncio.to_thread(
+                    self.workspace.refresh_origin_auth, requested, noop_token
+                )
+                out["origin_reauthed"] = bool(res.ok)
+            # `upstream` may be absent (never baked, or baked before the caller knew the parent):
+            # ensure it here so a fork's `git fetch upstream` works on a re-focus, not only on the
+            # first clone. Idempotent + skipped when already present (has_remote).
+            if req.upstream and not await asyncio.to_thread(
+                self.workspace.has_remote, "upstream"
+            ):
+                upstream_ok = await self._bake_upstream(req, requested)
+                out["upstream"] = req.upstream
+                out["upstream_ok"] = upstream_ok
+            return out
         if decision.action is SwitchAction.REJECT:
             raise HTTPException(409, decision.reason)
 
@@ -438,11 +549,17 @@ class LittleCoderDaemon:
             # is a no-op when the workspace is genuinely empty.
             await asyncio.to_thread(self.workspace.wipe)
 
-        token = os.environ.get("LC_DEPLOY_TOKEN") or None
-        result = await asyncio.to_thread(self.workspace.clone, requested, token)
+        # Per-request token (from the caller) overrides the global LC_DEPLOY_TOKEN, so different
+        # projects can use different PATs (personal vs org). Falls back to the ambient token.
+        token = req.token or os.environ.get("LC_DEPLOY_TOKEN") or None
+        result = await asyncio.to_thread(
+            self.workspace.clone, requested, token, req.recurse_submodules)
         if not result.ok:
+            # Surface BOTH streams (git writes some fatals to stdout) so a clone failure is never a
+            # blank "(exit 128):"; redacted (a clone-auth error can echo the token-bearing URL).
+            tail = (f"{result.stderr}\n{result.stdout}").strip()[-400:]
             raise HTTPException(
-                502, f"clone failed (exit {result.exit_code}): {result.stderr[-300:]}"
+                502, f"clone failed (exit {result.exit_code}): {redact_secrets(tail) or '(no output)'}"
             )
         self.current_focus = requested
         self.audit.write(
@@ -451,7 +568,82 @@ class LittleCoderDaemon:
             repo=requested.canonical_url,
             action=decision.action.value,
         )
-        return {"action": decision.action.value, "focus": requested.canonical_url}
+        # Fork workflow: bake the read-only `upstream` remote right after the clone, so it's
+        # re-derived from the caller's persistent record on EVERY focus (the workspace is
+        # ephemeral). Non-fatal — a fork that can't reach its parent is still a usable clone;
+        # surface the failure in the response + journal so it isn't a silent stall.
+        upstream_ok: bool | None = None
+        if req.upstream:
+            upstream_ok = await self._bake_upstream(req, requested)
+        out = {"action": decision.action.value, "focus": requested.canonical_url}
+        if upstream_ok is not None:
+            out["upstream"] = req.upstream
+            out["upstream_ok"] = upstream_ok
+        return out
+
+    async def _bake_upstream(self, req: ProjectRequest, requested) -> bool:
+        """Bake (or refresh) the read-only `upstream` remote for a fork and journal the
+        outcome. Shared by the clone/switch path (fresh clone) and the NOOP re-focus path
+        (workspace not wiped, remote may be missing). Returns whether the git op succeeded —
+        non-fatal, but surfaced so a fork that can't reach its parent isn't a silent stall."""
+        up = await asyncio.to_thread(
+            self.workspace.add_upstream_remote, req.upstream, req.upstream_token
+        )
+        ok = bool(up.ok)
+        self.audit.write(
+            "project_upstream_set",
+            actor=req.actor,
+            repo=requested.canonical_url,
+            upstream=req.upstream,
+            ok=ok,
+        )
+        return ok
+
+    async def add_submodule(self, req: SubmoduleRequest) -> dict:
+        """Add a submodule to the currently-focused composition repo (operator-plane, real git —
+        P-APL.1b). Requires a focused repo; the caller (bridge capability) focuses it first with a
+        short-lived push token in origin. Non-fatal errors surface with a redacted detail so a
+        failure reads clearly and never leaks a token."""
+        if self.current_focus is None or not self.workspace.is_focused():
+            raise HTTPException(409, "no project focused — focus the composition repo first")
+        res = await asyncio.to_thread(
+            self.workspace.add_submodule, req.url, req.path,
+            commit_message=req.commit_message, token=req.token,
+        )
+        self.audit.write(
+            "submodule_added",
+            actor=req.actor,
+            repo=self.current_focus.canonical_url,
+            path=req.path,
+            ok=bool(res.ok),
+        )
+        if not res.ok:
+            # Surface BOTH streams — git writes some fatals to stdout — so the failure is never a
+            # blank "(exit 128):". Redacted; token never leaked.
+            tail = (f"{res.stderr}\n{res.stdout}").strip()[-400:]
+            raise HTTPException(
+                502, f"submodule add failed (exit {res.exit_code}): {redact_secrets(tail) or '(no output)'}"
+            )
+        return {"ok": True, "path": req.path}
+
+    async def run_check(self, req: CheckRequest) -> dict:
+        """Deterministic verification exec (see CheckRequest): one command via open-terminal,
+        REAL exit code + combined output back. Requires a focused workspace (the caller focuses
+        first via /project — including the privileged recursive clone for compositions)."""
+        if self.current_focus is None or not self.workspace.is_focused():
+            raise HTTPException(409, "no project focused — focus the workspace first")
+        timeout = max(30, min(int(req.timeout or 600), 1800))
+        res = await asyncio.to_thread(
+            self.ot.execute, req.command, req.cwd, None, timeout)
+        out = (res.stdout or "")
+        if res.stderr:
+            out += ("\n" if out else "") + res.stderr
+        self.audit.write(
+            "check_ran", actor=req.actor, repo=self.current_focus.canonical_url,
+            command=req.command[:200], exit_code=res.exit_code, timed_out=res.timed_out,
+        )
+        return {"ok": True, "exit_code": res.exit_code, "timed_out": res.timed_out,
+                "status": res.status, "output": redact_secrets(out[-65536:])}
 
 
 def _parse_ts(ts: str) -> float:
@@ -547,6 +739,14 @@ def build_app(daemon: LittleCoderDaemon) -> FastAPI:
     @app.post("/project")
     async def project(req: ProjectRequest) -> dict:
         return await daemon.switch_project(req)
+
+    @app.post("/project/submodule")
+    async def project_submodule(req: SubmoduleRequest) -> dict:
+        return await daemon.add_submodule(req)
+
+    @app.post("/check")
+    async def check(req: CheckRequest) -> dict:
+        return await daemon.run_check(req)
 
     @app.get("/admin/observe")
     def observe(iterate: bool = False) -> dict:

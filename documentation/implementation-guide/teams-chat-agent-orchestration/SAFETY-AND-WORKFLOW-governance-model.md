@@ -204,8 +204,11 @@ human); the human clears the hard-gate ones:**
 - A worker finds its **constraints/handoffs ambiguous or missing** — it escalates
   instead of guessing (F5).
 - A **cross-effort conflict** is detected (two efforts touching the same area, F4).
-- An action would have **irreversible or external side-effects** beyond pre-authorized
-  scope (push, deploy, delete, spend, send-outside).
+- An action would have **irreversible or external side-effects** beyond pre-authorized scope:
+  publishing to `main`/`master` (the merge moment), force-push, deleting/rewriting history,
+  deploy, delete (`rm -rf`/drop), spend, send-outside. *(An additive **commit + push to a feature
+  branch** is REVERSIBLE and routine — it's how work is preserved, shared, and handed off — see
+  the 2026-07-02 correction in §8 #5 and the floor.)*
 - Two agents **disagree and can't resolve** within N exchanges.
 - A **wake-storm / loop** trips a rate cap (§5).
 
@@ -585,8 +588,15 @@ Mapping to the companion doc's tooling (Mattermost primitives shown):
    want a *notification* escalation (push to your phone) vs. silent hold? Recommend push.
 4. **Worker homogeneity policy.** Confirm all workers come from one aligned baseline; if we
    ever want a "red-team" agent, it runs **isolated**, never in the live fleet (F5).
-5. **What counts as "irreversible/external"** for hard-rule #4 — the deploy/push/delete/
-   spend/send list needs to be explicit and enforced at the tool-permission layer too.
+5. **What counts as "irreversible/external"** for hard-rule #4 — **RESOLVED (2026-07-02):** the
+   line is **additive vs destructive**, not "any git write." Gated (human-cleared): publish to
+   `main`/`master` (the merge moment), force-push, branch/tag/ref delete, history rewrite
+   (`rebase`/`filter-branch`/`reflog`/`reset --hard`), deploy, `rm -rf`/drop/truncate, spend,
+   send-outside. **Routine (NOT gated):** `commit`, `checkout -b`, **push to a feature branch**
+   (`agent/<effort>`), `fetch`, `merge --no-ff` into a feature branch — this is how workers preserve
+   (a `/project` wipe destroys unpushed work), share, and hand off work. Enforced at the tool layer
+   by `floor_guard.py` + the git-proxy (which already drew this line). Workers **commit + push their
+   branch on completion**; merge-to-`main` + deploy remain the human gate.
 6. **Model assignment by role — RESOLVED (F7/§2.1; reconciled to as-built LiteLLM 2026-06-13).**
    **Local via the air-gapped `llm-gateway`; cloud via a separate `llm-gateway-cloud` (operator
    C1 = option B).** Workers + local judge = `qwen36-27b` through the existing gateway (free, no

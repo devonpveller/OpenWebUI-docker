@@ -105,11 +105,31 @@ class WorkspaceManager:
         self.clone_timeout = clone_timeout
 
     def is_focused(self) -> bool:
-        """True when a repo is currently cloned. The workspace volume is
-        shared, so this is a direct filesystem check."""
-        return os.path.isdir(os.path.join(self.workspace_path, ".git"))
+        """True when a REAL repo is currently cloned. The workspace volume is shared, so this is a
+        direct filesystem check. Requires `.git/HEAD` — not just a `.git` directory — because a
+        crashed/partial clone can leave a `.git` holding only `modules/` (submodule gitdirs) with
+        no main-repo data (live 2026-07-10: such a `.git` made `git` itself report "not a git
+        repository", yet the old `isdir('.git')` check said focused → the daemon NOOP'd onto a
+        broken tree and every check failed with MSB1009). A missing HEAD ⇒ re-clone."""
+        return os.path.isfile(os.path.join(self.workspace_path, ".git", "HEAD"))
 
-    def clone(self, repo: NormalizedRepo, deploy_token: str | None = None) -> ExecResult:
+    def has_remote(self, name: str) -> bool:
+        """True when `name` is a configured git remote. `git remote` is a
+        read-only, proxy-allowed op — used to skip an idempotent re-bake of
+        `upstream` on a NOOP re-focus (the workspace wasn't wiped, so a remote
+        already present needn't be re-added). Fails closed: any error → False
+        (treat as absent → the caller re-bakes, which is idempotent anyway)."""
+        res = self.ot.execute(
+            f"{shlex.quote(self.real_git)} -C {shlex.quote(self.workspace_path)} remote",
+            cwd=self.workspace_path,
+            timeout=30,
+        )
+        if not res.ok:
+            return False
+        return name in {ln.strip() for ln in res.stdout.splitlines() if ln.strip()}
+
+    def clone(self, repo: NormalizedRepo, deploy_token: str | None = None,
+              recurse: bool = False) -> ExecResult:
         """Clone `repo` into the (empty) workspace. With `deploy_token` the
         clone uses an HTTPS token URL — least-privilege, injected per switch,
         never the self-improvement PAT (design §10.3).
@@ -121,6 +141,14 @@ class WorkspaceManager:
         `-b <branch>` checks it out as HEAD; otherwise the remote's default
         branch is used.
 
+        `recurse`: populate the FULL nested submodule tree (`--init --recursive`)
+        via the privileged real-git path — a COMPOSITION BUILD needs the deep
+        tree (engine → vendored fork → the fork's OWN submodules), which the
+        worker cannot init itself (the git-proxy hard-denies `submodule`) and
+        which a direct-only init misses. Off by default (recursing forks' deep
+        deps is slow / can hit private repos); the bridge opts in for a
+        composition check.
+
         The returned ExecResult.command still contains the token; the caller
         MUST journal a redacted form, never the raw command."""
         url = repo.canonical_url
@@ -131,18 +159,191 @@ class WorkspaceManager:
         branch_flag = ""
         if repo.branch:
             branch_flag = f" -b {shlex.quote(repo.branch)}"
+        g = shlex.quote(self.real_git)
+        ws = shlex.quote(self.workspace_path)
         # umask 000 so the clone is usable from the agent's other plane too
-        # (the workspace volume is shared across two containers' uids).
+        # (the workspace volume is shared across two containers' uids). Then POPULATE any
+        # submodules (non-fatal) — a composition repo's worker must SEE the vendored source to
+        # reference it, and the worker itself can't init them (the git-proxy hard-denies `submodule`).
+        # `|| true`: a private/unreachable submodule must not fail the whole focus.
+        recurse_flag = " --recursive" if recurse else ""
+        # CLONE means START FRESH. `/workspace` is a PERSISTENT shared mount that can hold a corrupt
+        # partial clone from an interrupted/failed focus (a `.git` with no HEAD + leftover dirs) —
+        # `git clone` into a non-empty dir fails "destination path already exists and is not an empty
+        # directory" (live 2026-07-10: this exact exit-128 wedged a composition focus and the effort
+        # sat silent ~2h). Wipe the CONTENTS first (keep the mount point), then clone. Safe: a CLONE
+        # is only decided when there's nothing to preserve (no focus, or switching repos).
+        # chmod first: leftover BUILD ARTIFACTS can be owned by a different uid than the exec user
+        # (live 2026-07-14: dotnet `bin/Debug` files under vendor/ were undeletable → the wipe
+        # silently left 379M behind → clone failed 'destination not empty'). u+w only helps
+        # own files; the durable cross-uid heal is the worker entrypoint's recursive chmod.
+        wipe_ws = (f"chmod -R u+w {ws} 2>/dev/null; "
+                   f"find {ws} -mindepth 1 -maxdepth 1 -exec rm -rf {{}} + 2>/dev/null; "
+                   f"find {ws} -mindepth 1 -delete 2>/dev/null || true")
         cmd = (
-            f"umask 000; {shlex.quote(self.real_git)} clone{branch_flag} "
-            f"{shlex.quote(url)} {shlex.quote(self.workspace_path)}"
+            # THE CLONE'S EXIT CODE IS THE RESULT — captured in `rc` and re-raised by the trailing
+            # `exit $rc`, so no best-effort suffix can mask a failed clone (live 2026-07-14: the
+            # token-reauth suffix ended `|| true`, a failed clone reported ok=True in 0.3s, the
+            # daemon claimed focus on a VOID workspace, and the bridge quarantine-looped both
+            # workers for hours with an idle GPU — a silent false "ok" at the very bottom of the
+            # stack defeated every honesty gate above it).
+            f"{wipe_ws}; umask 000; {g} clone{branch_flag} {shlex.quote(url)} {ws}; rc=$?; "
+            # Default: DIRECT submodules only. `recurse`: the full nested tree, which a composition
+            # build requires — the operator-privileged clone is the ONLY place `submodule` can run
+            # (the proxy denies it to the worker), so recursive init MUST happen here or never.
+            f"if [ $rc -eq 0 ]; then "
+            f"(cd {ws} && {g} submodule update --init{recurse_flag} 2>/dev/null || true); fi"
         )
+        if deploy_token:
+            # WORK-IN-HOST delivery: a composition fix is edited in-place inside a vendored
+            # submodule and must be PUSHED to THAT submodule's own remote. The proxy denies the
+            # worker `submodule`, and the submodule's `origin` (from .gitmodules) carries no token,
+            # so re-bake the deploy token into every populated same-host submodule origin here
+            # (privileged). Runs on EVERY focus with a token — NOT just recursive ones (2026-07-12):
+            # a composition fix happens on a NORMAL task focus (non-recursive) too, and without the
+            # re-bake murder's origin has no push credential, so the worker's submodule push fails and
+            # the engine's gitlink points at an unreachable commit (live: the atlas fix landed on the
+            # engine but its murder branch couldn't push). `foreach --recursive` only visits the
+            # submodules actually populated by this focus (direct-only on a task focus). Best-effort +
+            # non-fatal; the token is redacted at journal time by the caller.
+            tok = shlex.quote(deploy_token)
+            reauth = (
+                f"cd {ws} && {g} submodule foreach --recursive "
+                f"'u=$({g} config --get remote.origin.url 2>/dev/null); "
+                f"case \"$u\" in "
+                f"https://github.com/*) {g} remote set-url origin "
+                f"\"https://x-access-token:{tok}@github.com/${{u#https://github.com/}}\" ;; "
+                f"esac' 2>/dev/null || true"
+            )
+            # Gated on the clone's rc and never the last word on the exit code — the reauth's
+            # `|| true` must not bless a failed clone (the 2026-07-14 false-focus incident).
+            cmd += f" ; if [ $rc -eq 0 ]; then ({reauth}); fi"
+        cmd += " ; exit $rc"
         return self.ot.execute(cmd, cwd="/", timeout=self.clone_timeout)
 
+    def refresh_origin_auth(
+        self, repo: NormalizedRepo, deploy_token: str | None
+    ) -> ExecResult:
+        """Re-bake `origin`'s URL with a FRESH deploy token (real git — operator setup path, like
+        `clone`/`add_upstream_remote`). The token embedded at clone time is SHORT-LIVED (a GitHub App
+        installation token lives 1h): a NOOP re-focus hours later, or a task that outlives the token,
+        would `git push` with a dead credential — the live "expired token in origin" failure. Cheap +
+        idempotent (`remote set-url`); with no token it resets origin to the clean URL. Never journal
+        the raw command (it contains the token)."""
+        url = repo.canonical_url
+        if deploy_token:
+            url = url.replace(
+                "https://", f"https://x-access-token:{deploy_token}@", 1
+            )
+        g = shlex.quote(self.real_git)
+        q = shlex.quote
+        ws = q(self.workspace_path)
+        cmd = f"cd {ws} && {g} remote set-url origin {q(url)}"
+        if deploy_token:
+            # SYMMETRIC WITH clone() (live 2026-07-12: the cursor fix's murder commit couldn't push).
+            # A composition fix edited inside a vendored submodule must be PUSHED to THAT submodule's
+            # own remote — but a NOOP re-focus (persistent workspace, no re-clone) never re-runs
+            # clone()'s submodule reauth, so the submodule origin keeps its token-less `.gitmodules`
+            # URL and the worker's `git -C <sub> push` has no credential → the engine's gitlink points
+            # at an unreachable commit (broken gitlink → not buildable from a fresh clone). Re-bake the
+            # deploy token into every populated same-host submodule origin here too. `foreach
+            # --recursive` visits only the submodules this focus populated. Best-effort + non-fatal;
+            # the token is redacted at journal time by the caller.
+            tok = shlex.quote(deploy_token)
+            reauth = (
+                f"cd {ws} && {g} submodule foreach --recursive "
+                f"'u=$({g} config --get remote.origin.url 2>/dev/null); "
+                f"case \"$u\" in "
+                f"https://github.com/*) {g} remote set-url origin "
+                f"\"https://x-access-token:{tok}@github.com/${{u#https://github.com/}}\" ;; "
+                f"esac' 2>/dev/null || true"
+            )
+            cmd += f" ; ({reauth})"
+        return self.ot.execute(cmd, cwd=self.workspace_path, timeout=60)
+
+    def add_upstream_remote(
+        self, upstream_url: str, token: str | None = None
+    ) -> ExecResult:
+        """Bake a read-only `upstream` remote for a FORK workflow — a fork's worker needs
+        two remotes: `origin` (the fork, its push target) and `upstream` (the parent, to
+        pull others' changes). Adding a remote is an OPERATOR SETUP action, so — like
+        `clone` — it runs the REAL git binary directly, bypassing the git-proxy (which
+        blocks `git remote add`: "remotes are operator-baked", design §3.3/§12.3). The
+        worker itself can never add/mutate remotes; only this setup path does.
+
+        Called AFTER a fresh clone, so the source of truth for `upstream` is the caller
+        (the agent-org bridge's persistent Project record), re-applied on every focus —
+        the workspace is ephemeral (wiped on switch), so `upstream` is never assumed to
+        persist. Idempotent: `remote add` on a fresh clone succeeds; if it already exists
+        (a non-wiped re-focus) it falls back to `set-url`.
+
+        Push is fenced to a no-op URL so `git push upstream` fails fast — the worker
+        publishes only to `origin` (its fork). NOT `main`-related and additive, so it's
+        routine per the corrected floor. A PRIVATE upstream needs a read-scoped `token`
+        (injected into the fetch URL like clone); never journal the raw command."""
+        fetch_url = upstream_url
+        if token:
+            fetch_url = fetch_url.replace(
+                "https://", f"https://x-access-token:{token}@", 1
+            )
+        g = shlex.quote(self.real_git)
+        q = shlex.quote
+        # `remote add` fails (exit 3) if `upstream` already exists — fall back to set-url so
+        # a re-focus onto an unwiped workspace is still correct. Then fence the push side.
+        cmd = (
+            f"cd {q(self.workspace_path)} && "
+            f"({g} remote add upstream {q(fetch_url)} || "
+            f"{g} remote set-url upstream {q(fetch_url)}) && "
+            f"{g} remote set-url --push upstream DISABLED-fork-parent-is-fetch-only"
+        )
+        return self.ot.execute(cmd, cwd=self.workspace_path, timeout=120)
+
+    def add_submodule(
+        self, url: str, path: str, *, commit_message: str | None = None,
+        token: str | None = None,
+    ) -> ExecResult:
+        """Add `url` as a git SUBMODULE at `path` in the focused (composition) repo, then commit +
+        push. This is an OPERATOR SETUP action (autonomous-project-lifecycle P-APL.1b) — like `clone`
+        / `add_upstream_remote`, it runs the REAL git binary directly, bypassing the git-proxy (which
+        HARD-DENIES `submodule` to the worker, design §3.3). The worker can never restructure the
+        repo topology; only this governed setup path does.
+
+        The submodule is typically a PUBLIC fork → anonymous fetch, so the URL stays clean (no token
+        at rest in `.gitmodules`); a private submodule passes a read-scoped `token`. The composition
+        repo's own origin carries its (short-lived GitHub App) token for the push. First submodule on
+        a freshly-cloned empty repo creates the initial commit + default branch, so we `push -u`."""
+        sub_url = url
+        if token:
+            sub_url = sub_url.replace("https://", f"https://x-access-token:{token}@", 1)
+        msg = commit_message or f"Add {path} submodule"
+        g = shlex.quote(self.real_git)
+        q = shlex.quote
+        # IDEMPOTENT: if `path` is already a submodule (a partial/repeated compose), skip cleanly
+        # instead of failing 'already exists' — so re-running a plan adds only what's missing.
+        cmd = (
+            f"cd {q(self.workspace_path)} && "
+            f"if {g} submodule status {q(path)} >/dev/null 2>&1; then "
+            f"echo 'submodule {path} already present — skipping'; "
+            f"else "
+            f"{g} submodule add {q(sub_url)} {q(path)} && "
+            f"{g} commit -m {q(msg)} && "
+            f"{g} push -u origin HEAD; "
+            f"fi"
+        )
+        return self.ot.execute(cmd, cwd=self.workspace_path, timeout=600)
+
     def wipe(self) -> ExecResult:
-        """Empty the workspace, keeping the mount point itself. open-terminal
-        owns the files it created, so the wipe runs there."""
-        cmd = f"find {shlex.quote(self.workspace_path)} -mindepth 1 -delete"
+        """Empty the workspace, keeping the mount point itself. open-terminal owns the files it
+        created, so the wipe runs there. FORCE-remove (`rm -rf` per top-level entry, not `find
+        -delete`) so git's read-only pack objects + nested submodule `.git` dirs of a stale/populated
+        clone are cleared — otherwise a leftover file makes the next `git clone` fail 'destination not
+        empty' (exit 128)."""
+        ws = shlex.quote(self.workspace_path)
+        cmd = (
+            f"chmod -R u+w {ws} 2>/dev/null; "
+            f"find {ws} -mindepth 1 -maxdepth 1 -exec rm -rf {{}} + 2>/dev/null; "
+            f"find {ws} -mindepth 1 -delete 2>/dev/null || true"
+        )
         return self.ot.execute(cmd, cwd="/", timeout=300)
 
     def tag_prior_state(self, label: str) -> ExecResult:

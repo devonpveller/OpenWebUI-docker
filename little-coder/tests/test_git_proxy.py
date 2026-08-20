@@ -164,6 +164,47 @@ def test_fetch_all_blocked():
     assert decide("fetch", "--all").rule == "blocklist:fetch-all"
 
 
+# --- production-branch guard: a worker must NEVER push to main/master --------
+# (operator 2026-07-11: a host-context run pushed a submodule bump straight to the host's `main`;
+#  `main` is the client-facing production branch and changes only via an operator-approved PR.)
+
+def test_push_to_main_is_blocked():
+    d = decide("push", "origin", "main")
+    assert d.action == "deny" and d.rule == "blocklist:push-protected-branch"
+
+
+def test_push_to_master_is_blocked():
+    assert decide("push", "origin", "master").rule == "blocklist:push-protected-branch"
+
+
+def test_push_head_to_main_is_blocked():
+    assert classify(["push", "origin", "HEAD:main"], REMOTES, _is_tag).rule \
+        == "blocklist:push-protected-branch"
+
+
+def test_push_refs_heads_main_is_blocked():
+    assert classify(["push", "origin", "refs/heads/main"], REMOTES, _is_tag).rule \
+        == "blocklist:push-protected-branch"
+
+
+def test_bare_push_while_on_main_is_blocked():
+    # `git push` with no refspec pushes the CHECKED-OUT branch — deny if that's main.
+    assert classify(["push"], REMOTES, _is_tag, "main").rule == "blocklist:push-protected-branch"
+
+
+def test_push_to_agent_branch_is_allowed():
+    assert classify(["push", "origin", "agent/effort-x"], REMOTES, _is_tag).action == "allow"
+
+
+def test_bare_push_while_on_agent_branch_is_allowed():
+    assert classify(["push"], REMOTES, _is_tag, "agent/effort-x").action == "allow"
+
+
+def test_push_to_dev_branch_is_allowed():
+    # development / feature branches are NOT protected — only main/master are human-gated.
+    assert classify(["push", "origin", "development"], REMOTES, _is_tag).action == "allow"
+
+
 def test_remotes_fail_closed_when_unknown():
     # With no configured remotes (e.g. git unreachable), every remote op denies.
     assert classify(["push", "origin"], set(), _is_tag).action == "deny"

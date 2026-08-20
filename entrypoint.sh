@@ -604,6 +604,75 @@ else
     echo "🔄 LiteLLM Admin UI Tailscale integration disabled (LITELLM_UI_ENABLED=false)"
 fi
 
+# Configure the Mattermost chat server (agent-org project) on its own Tailscale
+# HTTPS port. Mattermost is a full web app (root path + websockets) so it can't
+# host under a sub-path — expose it at root on a distinct tailnet HTTPS port. It
+# lives on the SEPARATE agent-org compose project but joins llm-net, so this netns
+# (shared with openwebui) reaches it by name. agent-org usually starts AFTER the
+# main stack, so it may not be up at boot — the monitoring loop's deferred setup
+# handles it. (For full function over the tailnet set MM_SERVICESETTINGS_SITEURL to
+# the tailnet URL — agent-org/docker/.env MM_SITE_URL — else MM rejects websockets.)
+sleep 2
+echo "💬 Configuring Mattermost (agent-org) access..."
+
+MATTERMOST_HOST=${MATTERMOST_HOST:-mattermost}
+MATTERMOST_PORT=${MATTERMOST_PORT:-8065}
+MATTERMOST_ENABLED=${MATTERMOST_ENABLED:-true}
+MATTERMOST_TS_PORT=${MATTERMOST_TS_PORT:-8446}
+MATTERMOST_LOCAL_PORT=8241  # Local port for socat proxy (8240 reserved by llm-gateway-ui)
+
+setup_mattermost_serve() {
+    echo "🔄 Creating local proxy for Mattermost at ${MATTERMOST_HOST}:${MATTERMOST_PORT}"
+
+    pkill -f "socat.*:${MATTERMOST_LOCAL_PORT}" || true
+    sleep 2
+
+    echo "🚀 Starting socat proxy: 127.0.0.1:${MATTERMOST_LOCAL_PORT} -> ${MATTERMOST_HOST}:${MATTERMOST_PORT}"
+    socat -d -d TCP-LISTEN:${MATTERMOST_LOCAL_PORT},fork,reuseaddr,keepalive TCP:${MATTERMOST_HOST}:${MATTERMOST_PORT} > /tmp/socat-mattermost.log 2>&1 &
+    MATTERMOST_SOCAT_PID=$!
+    echo $MATTERMOST_SOCAT_PID > /tmp/socat-mattermost.pid
+
+    sleep 3
+    if ! kill -0 $MATTERMOST_SOCAT_PID 2>/dev/null; then
+        echo "❌ ERROR: Mattermost socat failed to start"
+        cat /tmp/socat-mattermost.log 2>/dev/null || echo "No log file found"
+        return 1
+    fi
+    echo "✅ Mattermost proxy started successfully (PID: $MATTERMOST_SOCAT_PID)"
+
+    if ! tailscale --socket=/tmp/tailscaled.sock serve \
+      --https=${MATTERMOST_TS_PORT} \
+      --bg \
+      http://127.0.0.1:${MATTERMOST_LOCAL_PORT}; then
+        echo "❌ ERROR: tailscale serve --https=${MATTERMOST_TS_PORT} failed — leaving unconfigured so the monitoring loop retries"
+        return 1
+    fi
+    # Confirm the mapping actually landed before stamping the flag: a flag written
+    # after a serve that did not apply permanently disables the deferred-setup
+    # retry (this exact failure stranded Mattermost off the tailnet, 2026-07-05).
+    if ! tailscale --socket=/tmp/tailscaled.sock serve status 2>/dev/null | grep -q ":${MATTERMOST_TS_PORT} "; then
+        echo "❌ ERROR: serve mapping :${MATTERMOST_TS_PORT} missing after configuration — leaving unconfigured so the monitoring loop retries"
+        return 1
+    fi
+    echo "✅ Mattermost configured on tailnet HTTPS port ${MATTERMOST_TS_PORT} (via proxy: ${MATTERMOST_HOST}:${MATTERMOST_PORT} -> 127.0.0.1:${MATTERMOST_LOCAL_PORT})"
+
+    touch /tmp/mattermost-serve-configured
+    return 0
+}
+
+if [ "$MATTERMOST_ENABLED" = "true" ]; then
+    # Single boot attempt — agent-org usually isn't up yet (starts after the main
+    # stack), so don't block startup on a long retry; the monitoring loop's
+    # deferred setup configures it once Mattermost is reachable.
+    if wget -q -T 10 -O /dev/null http://${MATTERMOST_HOST}:${MATTERMOST_PORT}/api/v4/system/ping; then
+        setup_mattermost_serve || echo "⚠️ Mattermost setup failed — monitoring loop will retry"
+    else
+        echo "⚠️ Mattermost not reachable yet (agent-org starts after the main stack) — monitoring loop will configure it when it comes online"
+    fi
+else
+    echo "🔄 Mattermost Tailscale integration disabled (MATTERMOST_ENABLED=false)"
+fi
+
 echo "✅ Tailscale serve configured:"
 echo "  - OpenWebUI: HTTPS port 443 -> 127.0.0.1:8080"
 echo "  - Ollama API: HTTPS port 443/ollama -> 127.0.0.1:11434"
@@ -850,6 +919,47 @@ fi
                         echo "❌ $(date): Failed to restart LiteLLM Admin UI proxy"
                         cat /tmp/socat-litellm-ui.log 2>/dev/null || echo "No log available"
                     fi
+                fi
+            fi
+        fi
+
+        # Check Mattermost (agent-org): deferred setup + socat health
+        if [ "$MATTERMOST_ENABLED" = "true" ]; then
+            if [ ! -f /tmp/mattermost-serve-configured ]; then
+                # Serve was never configured (agent-org came up after us) — try deferred setup
+                if wget -q -T 10 -O /dev/null http://${MATTERMOST_HOST}:${MATTERMOST_PORT}/api/v4/system/ping; then
+                    echo "💬 $(date): Mattermost is now online, performing deferred setup..."
+                    setup_mattermost_serve || echo "❌ $(date): Deferred Mattermost setup failed, will retry next cycle"
+                fi
+            elif [ -f /tmp/socat-mattermost.pid ]; then
+                # Serve is configured — keep the socat proxy alive
+                MATTERMOST_PID=$(cat /tmp/socat-mattermost.pid)
+                if ! kill -0 $MATTERMOST_PID 2>/dev/null; then
+                    echo "⚠️ $(date): Mattermost socat proxy (PID: $MATTERMOST_PID) has died, restarting..."
+
+                    pkill -f "socat.*:${MATTERMOST_LOCAL_PORT}" || true
+                    sleep 2
+
+                    socat -d -d TCP-LISTEN:${MATTERMOST_LOCAL_PORT},fork,reuseaddr,keepalive TCP:${MATTERMOST_HOST}:${MATTERMOST_PORT} > /tmp/socat-mattermost.log 2>&1 &
+                    NEW_MATTERMOST_PID=$!
+                    echo $NEW_MATTERMOST_PID > /tmp/socat-mattermost.pid
+                    sleep 3
+
+                    if kill -0 $NEW_MATTERMOST_PID 2>/dev/null; then
+                        echo "✅ $(date): Mattermost proxy restarted successfully (PID: $NEW_MATTERMOST_PID)"
+                    else
+                        echo "❌ $(date): Failed to restart Mattermost proxy"
+                        cat /tmp/socat-mattermost.log 2>/dev/null || echo "No log available"
+                    fi
+                fi
+
+                # Re-verify the tailnet serve mapping still exists: a stranded flag
+                # with no serve leaves Mattermost silently unreachable from the
+                # tailnet (2026-07-05). Dropping the flag makes the next cycle rerun
+                # the full deferred setup (socat + serve, both now verified).
+                if ! tailscale --socket=/tmp/tailscaled.sock serve status 2>/dev/null | grep -q ":${MATTERMOST_TS_PORT} "; then
+                    echo "⚠️ $(date): Mattermost serve mapping :${MATTERMOST_TS_PORT} missing — clearing flag to reconfigure next cycle"
+                    rm -f /tmp/mattermost-serve-configured
                 fi
             fi
         fi

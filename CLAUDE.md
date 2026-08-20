@@ -14,7 +14,7 @@ for the full inventory — networks, ports, dependency order.
 |-------|-------------|----------|
 | **Main** (`ai-stack`) | `docker compose ...` | core (`openwebui`, `tailscale`, `llm-gateway` + `llm-gateway-db` — LiteLLM analytics **front door**, holds the `llama-cpp`/`llama-cpp-embed` aliases since 2026-06-12; `llm-gateway-ui` — master-key'd Admin-UI sidecar / analytics dashboard at tailnet :8445/ui, shares `llm-gateway-db`, serves no inference, since 2026-06-14; `llama-cpp-upstream`, `llama-cpp-embed-upstream` — real inference (llama-swap) behind the gateway; `watchtower`), memory (`mnemory`, `mnemory-gateway`), search (`vpn` — Mullvad WireGuard, SearXNG's engine-query egress since 2026-06-14; `tor` — page-fetch egress; `redis`, `searxng`, `gateway`, `mcpo`), coder (`open-terminal`, `little-coder`, `lc-mcpo`, `lc-egress`), aux (`smolcrawl-pipelines`, `surrealdb`, `open_notebook`), backups (10 cron sidecars incl. `*-backup` + `llm-gateway-backup` + `openbrain-db/wiki-backup`) |
 | **Main — Portal** (`profiles: [internet]`) | `scripts/portal-on.ps1` / `portal-off.ps1` | **profile-gated, NOT in a default `up`:** `caddy`, `authelia`, `cloudflared`, `portal-init`, `portal-alerter`, `authelia-watcher`, `authelia-notif-bridge`, `integrity-tripwire`, `portal-cron`, `tunnel-watcher` (+ `caddy-backup`, `authelia-backup`). Internet-exposed auth front-end. |
-| **Open Brain** (`open-brain`) | `docker compose -f OB1/docker/docker-compose.yml ...` | ~23 `openbrain-*` containers (incl. a 5-container scheduled slice: `cron` + 4 HTTP-triggered jobs) — a **separate** project that attaches to the main stack's `ai-stack_llm-net` as an external network |
+| **Open Brain** (`open-brain`) | `docker compose -f OB1/docker/docker-compose.yml ...` | ~23 `openbrain-*` containers (incl. a scheduled slice: `cron` + 4 HTTP-triggered jobs + the profile-gated `openbrain-idea-refinery` drain — the Idea Refinery) — a **separate** project that attaches to the main stack's `ai-stack_llm-net` as an external network |
 | **Recovery stack** | `scripts/emergency-recovery.ps1` (or `.bat`) | Ordered restart/repair across **both** compose projects — `recover` / `nuclear` / `gpu-reset`. Does **not** manage the profile-gated Portal. |
 
 A plain `docker compose` command never touches Open Brain (its own project) **or
@@ -55,5 +55,6 @@ GGUF over the Windows `C:` bind mount hangs). See `litellm-proxy-status` memory 
 
 - Stack topology / "what runs here?" → `/stack-map` skill
 - Recovery after a crash or netns break → `scripts/emergency-recovery.ps1`
+- Compaction downtime / Docker-down out-of-band Telegram channel → `documentation/sysadmin-out-of-band-channel.md`
 - little-coder design + workflow → `documentation/little-coder/`
 - Private search gateway → `documentation/web-search/`

@@ -47,6 +47,15 @@ class TaskState:
     repo: str = ""
     lang: str = ""
     acceptance_command: str | None = None
+    # PLAN-ONLY turn (agent-org bridge, 2026-07-14): the agent explores and PLANS but cannot
+    # change files — its edit/write tools are excluded for this invocation (the same guard the
+    # upstream plan-mode extension enforces interactively). Used for the bridge's pre-execution
+    # alignment gate: plan → PM checks it against the goal → execute in the SAME session.
+    plan_only: bool = False
+    # FLAIL GUARD (agent-org bridge, 2026-07-14): watch this turn for read-without-edit flailing
+    # ("too many thinking turns / time iterating on read without editing anything") and kill it
+    # with a FLAIL-GUARD answer marker so the bridge can fork a fresh session and re-plan.
+    flail_guard: bool = False
     status: TaskStatus = TaskStatus.QUEUED
     outcome: Outcome | None = None
     signal: str | None = None

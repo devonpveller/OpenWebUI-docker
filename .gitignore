@@ -1,21 +1,28 @@
 # .gitignore
 .env
 .env.killswitch-*.bak
+# Any .env backup, however named. 2026-08-20: .env.bak-pre-mtp and
+# .env.bak-pre-qwen38 were committed and GitHub push-protection caught two
+# GitHub PATs in them -- but each file held ~25 live credentials (Authelia
+# keys, Cloudflare tunnel token, Mullvad WG private key, Tailscale auth key,
+# bot tokens, DB passwords). Only the PATs were pattern-matchable, so the
+# block was luck. Never let an .env copy near the index again.
+.env.bak*
+.env.*.bak
+.env-bak*
+*.env.bak*
 data/
 logs/
 data-backup/
 backups/
+# Tailscale runtime logs (keep tailscaled.log.conf, drop rotated logs)
+tailscale-state/*.txt
+tailscale-state/*.log*
 # Use glob form so the `!backup/<script>.sh` re-includes below work.
 # (Git won't re-include files inside an excluded *directory*, but it WILL
 # re-include files matched by an excluded *glob*.)
 backup/*
-logs/
-filters/__pycache__/
-smolcrawl/__pycache__/
-scripts/ai_pipes/__pycache__/
-modules/custom-tools/service/__pycache__/
-modules/emergency-recovery/service/__pycache__/
-.../__pycache__/
+__pycache__/
 # Local MCP config (contains Open Brain access key)
 .mcp.json
 # Vendored external repo (devonpveller/OB1 @ develop) — own .git, not tracked here
@@ -24,7 +31,6 @@ OB1/
 secrets/
 *.pyc
 *.log
-/backups
 /backups
 
 # --- Re-include backup scripts under backup/ that ARE meant to be tracked ---
@@ -38,6 +44,8 @@ secrets/
 !backup/caddy-backup.sh
 !backup/authelia-backup.sh
 !backup/llm-gateway-backup.sh
+!backup/generic-tar-backup.sh
+!backup/pg-backup.sh
 
 # --- Portal-specific paths from plan §7.2 ---
 config/authelia/users_database.yml
@@ -47,3 +55,16 @@ config/alerter/credentials.json
 /incident/
 /reports
 config/alerter/token.json
+
+# Claude Code Mattermost notifier — per-session allowlist (machine-specific runtime state)
+scripts/.mm-notify-sessions
+.claude/settings.local.json
+
+# Claude-Sessions bridge runtime state (session map, audit logs, per-turn MCP configs)
+scripts/claude-sessions-bridge/state/
+
+# sysadmin-mcp runtime state (audit log, compaction result)
+scripts/sysadmin-mcp/state/
+scripts/sysadmin-mcp/bridge-state/
+# Telegram out-of-band listener runtime state (getUpdates offset, command audit)
+scripts/sysadmin-mcp/telegram-state/

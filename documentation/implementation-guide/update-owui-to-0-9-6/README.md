@@ -1,5 +1,12 @@
 # Open WebUI 0.8.10 → 0.9.6 upgrade + knowledge-collection migration
 
+> **⚠️ SUPERSEDED for new upgrades (2026-08-20).** This folder is the historical
+> record of the completed 0.8.10 → 0.9.6 upgrade. The stack now runs 0.9.6; the
+> current effort is 0.9.6 → 0.11.0 — see
+> [`../update-owui-to-0-11-0/UPGRADE-PLAN.md`](../update-owui-to-0-11-0/UPGRADE-PLAN.md).
+> Do not follow the runbook below for that upgrade.
+
+
 Two coupled tracks, **run in this order**:
 
 1. **[KNOWLEDGE-MIGRATION-PLAN.md](KNOWLEDGE-MIGRATION-PLAN.md)** — copy the existing

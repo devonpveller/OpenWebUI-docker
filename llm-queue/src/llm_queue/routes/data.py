@@ -31,6 +31,24 @@ from ..transport import filter_request_headers, filter_response_headers
 router = APIRouter(tags=["data"])
 log = get_logger("llm_queue.data")
 
+
+class _ReleasingStreamingResponse(StreamingResponse):
+    """A StreamingResponse that CLOSES its body iterator when streaming ends — including on client
+    disconnect. Starlette 1.3.1's `stream_response` does NOT aclose the generator on disconnect (it
+    lets `send()` raise and abandons the `async for`), so the generator's `finally` — where llm-queue
+    releases its held connection slot — is left to async-generator GC (delayed / effectively never
+    under load). That is the connection-leak the reaper backstops; this closes it at the source so the
+    slot is freed immediately on disconnect, not up to a reap-interval later. aclose() on an already-
+    exhausted generator (normal completion) is a harmless no-op, and the release is idempotent."""
+
+    async def stream_response(self, send) -> None:  # type: ignore[override]
+        try:
+            await super().stream_response(send)
+        finally:
+            aclose = getattr(self.body_iterator, "aclose", None)
+            if aclose is not None:
+                await aclose()
+
 # Nginx/uvicorn's "client closed request" — the request was abandoned while queued.
 _CLIENT_CLOSED = 499
 _DISCONNECT_POLL_S = 0.5
@@ -151,7 +169,7 @@ async def _admit_and_proxy(request: Request, upstream_path: str) -> Response:
 
     # Hard global connection cap (independent of per-service budget).
     try:
-        await state.registry.reserve_connection(model_name)
+        await state.registry.reserve_connection(rid, model_name)
     except Rejected as r:
         await state.events.emit(
             "reject", ts=time.time(), request_id=rid, key=waiter.key, model=model_name,
@@ -163,7 +181,7 @@ async def _admit_and_proxy(request: Request, upstream_path: str) -> Response:
     try:
         await mq.enqueue(waiter)
     except Rejected as r:
-        await state.registry.release_connection()
+        await state.registry.release_connection(rid)
         await state.events.emit(
             "reject", ts=time.time(), request_id=rid, key=waiter.key, model=model_name,
             prio=cls.rank, est_wait_s=r.projected_wait_s, depth=r.queue_depth,
@@ -174,7 +192,7 @@ async def _admit_and_proxy(request: Request, upstream_path: str) -> Response:
     fwd_headers = filter_request_headers(dict(request.headers))
 
     if want_stream:
-        return StreamingResponse(
+        return _ReleasingStreamingResponse(
             _stream_waiting_then_proxy(request, state, mq, waiter, upstream_base, upstream_path,
                                        fwd_headers, raw, rid),
             media_type="text/event-stream",
@@ -185,7 +203,7 @@ async def _admit_and_proxy(request: Request, upstream_path: str) -> Response:
     try:
         await _await_dispatch_or_disconnect(request, mq, waiter)
     except Cancelled:
-        await state.registry.release_connection()
+        await state.registry.release_connection(rid)
         return Response(status_code=_CLIENT_CLOSED)
 
     await state.events.emit(
@@ -198,7 +216,7 @@ async def _admit_and_proxy(request: Request, upstream_path: str) -> Response:
         )
     except Exception as exc:  # noqa: BLE001
         await mq.release(waiter, record_duration=False)
-        await state.registry.release_connection()
+        await state.registry.release_connection(rid)
         await state.events.emit(
             "finish", ts=time.time(), request_id=rid, key=waiter.key, model=model_name,
             prio=cls.rank, status=502, reason="upstream_error",
@@ -222,14 +240,14 @@ async def _admit_and_proxy(request: Request, upstream_path: str) -> Response:
         finally:
             await resp.aclose()
             await mq.release(waiter, record_duration=ok)
-            await state.registry.release_connection()
+            await state.registry.release_connection(rid)
             await state.events.emit(
                 "finish", ts=time.time(), request_id=rid, key=waiter.key, model=model_name,
                 prio=cls.rank, wait_s=waiter.wait_seconds, duration_s=_elapsed(waiter),
                 est_wait_s=waiter.est_at_enqueue, status=resp.status_code,
             )
 
-    return StreamingResponse(
+    return _ReleasingStreamingResponse(
         relay(),
         status_code=resp.status_code,
         headers=headers,
@@ -312,7 +330,7 @@ async def _stream_waiting_then_proxy(
                 prio=cls.rank, reason="client_disconnect_or_cancel",
             )
         if conn_held:
-            await state.registry.release_connection()
+            await state.registry.release_connection(rid)
 
 
 # ---- pass-through (no admission) -----------------------------------------

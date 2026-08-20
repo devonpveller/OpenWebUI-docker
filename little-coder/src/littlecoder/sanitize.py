@@ -22,6 +22,42 @@ import re
 from dataclasses import dataclass, field
 
 # --------------------------------------------------------------------------
+# Fast, always-on git-credential redaction for the INTERNAL activity/answer path
+# (distinct from the egress Sanitizer below, which gates OUTBOUND judge/PR calls).
+#
+# A deploy token baked into a remote URL surfaces in routine output the worker
+# streams to the operator's chat + journals — `git remote -v`, a clone/fetch error
+# line, or an agent answer that echoes the URL. That is the demonstrated leak
+# (a PAT printed into the effort thread). This scrubs the token from any such text
+# BEFORE it leaves the worker, regardless of where the token is stored. It is a
+# defense-in-depth net; the durable fix keeps the token out of the remote URL
+# entirely (a credential helper). Kept deliberately simple + allocation-cheap so
+# it can run on every activity record without measurable cost.
+# --------------------------------------------------------------------------
+
+_REDACTED = "«REDACTED»"
+
+# user:secret@host inside a URL — covers `x-access-token:<PAT>@github.com` (the credential
+# form git bakes into a remote). Keeps the non-secret username, masks only the secret.
+_URL_CREDENTIAL = re.compile(r"(https?://[^:/@\s]+:)([^@/\s]+)(@)")
+# Bare GitHub tokens (not necessarily in a URL): fine-grained `github_pat_…` (which the
+# egress Sanitizer's `gh[pousr]_` pattern MISSES) + classic/OAuth `ghp_/gho_/ghu_/ghs_/ghr_`.
+_GH_PAT_FINE = re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b")
+_GH_PAT_CLASSIC = re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b")
+
+
+def redact_secrets(text: str) -> str:
+    """Mask git deploy tokens (and bare GitHub PATs) in any worker-produced text before it is
+    streamed to chat / written to a journal. Non-raising, idempotent, preserves everything else."""
+    if not text:
+        return text
+    text = _URL_CREDENTIAL.sub(rf"\1{_REDACTED}\3", text)
+    text = _GH_PAT_FINE.sub(_REDACTED, text)
+    text = _GH_PAT_CLASSIC.sub(_REDACTED, text)
+    return text
+
+
+# --------------------------------------------------------------------------
 # Detection patterns. Ordered roughly most-specific first.
 # --------------------------------------------------------------------------
 

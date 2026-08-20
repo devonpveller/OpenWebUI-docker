@@ -13,7 +13,8 @@ Covers the current ai-stack roster:
 
 Recognized phrasings (a few examples):
   "show tailnet services"           -> inventory (registry + GPU env vars)
-  "status"                          -> stack status (containers + GPU + processing)
+  "status"                          -> stack status (containers + GPU + processing
+                                       + LLM gateway queue metrics)
   "status of llama-cpp"             -> stack status filtered to one service
   "health check open-notebook"      -> tailscale-side health check
   "tailscale serve status"          -> tailscale serve config dump
@@ -28,7 +29,9 @@ import socket
 import subprocess
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 
@@ -36,6 +39,16 @@ HTTP_TIMEOUT = 4
 HTTP_TIMEOUT_SLOW = 8  # for services with slow cold-start (Streamlit/uvicorn)
 NVIDIA_SMI_TIMEOUT = 8
 DOCKER_PS_TIMEOUT = 10
+
+# LiteLLM gateway — the inference front door on llm-net. The ONLY side-effect-
+# free surfaces reachable from the openwebui container are /health/liveliness
+# and the read-only /observe/* pass-throughs to the llm-queue admission
+# controller. NEVER GET /health on the gateway: with background_health_checks
+# off, LiteLLM's /health fires a LIVE health-check completion at every
+# registered model, which forces a llama-swap model load (swap thrash — see
+# config/litellm.config.yaml). No host publish (llm-net is internal), so host
+# runs report the panel as unreachable; that is expected.
+LLM_GATEWAY_URL = os.environ.get("LLM_GATEWAY_URL", "http://llm-gateway:8080").rstrip("/")
 
 
 # ---------------------------------------------------------------------------
@@ -75,7 +88,10 @@ SERVICE_REGISTRY: Dict[str, Dict[str, Any]] = {
         "path": "llama-cpp",
         "target_host": "llama-cpp",
         "target_port": 8080,
-        "health_path": "/health",
+        # llama-cpp is a network ALIAS on llm-gateway (LiteLLM) since 2026-06-12.
+        # Must be /health/liveliness: LiteLLM's /health actively health-checks
+        # every registered model (forces a llama-swap load -> thrash).
+        "health_path": "/health/liveliness",
         "tailnet_https_port": 443,
         "exposes_at": "/llama-cpp",
         "container": "llama-cpp (llama-swap, CUDA)",
@@ -88,7 +104,8 @@ SERVICE_REGISTRY: Dict[str, Dict[str, Any]] = {
         "path": "llama-cpp-embed",
         "target_host": "llama-cpp-embed",
         "target_port": 8080,
-        "health_path": "/health",
+        # Gateway alias too (see llama-cpp above) — liveliness only.
+        "health_path": "/health/liveliness",
         "tailnet_https_port": 443,
         "exposes_at": "/llama-cpp-embed",
         "container": "llama-cpp-embed",
@@ -135,8 +152,11 @@ SERVICE_REGISTRY: Dict[str, Dict[str, Any]] = {
 # table. Keep in sync with the compose files — see the /stack-map skill.
 # ---------------------------------------------------------------------------
 _STACK_ROSTER: List[str] = [
-    # main project — core
-    "openwebui", "tailscale", "llama-cpp", "llama-cpp-embed", "watchtower",
+    # main project — core (llm-gateway = LiteLLM front door; llm-queue = B2
+    # admission controller on llm-backend-net, observed via the gateway's
+    # read-only /observe/* pass-through)
+    "openwebui", "tailscale", "llm-gateway", "llm-queue",
+    "llama-cpp", "llama-cpp-embed", "watchtower",
     # main project — memory layer
     "mnemory", "mnemory-gateway", "mnemory-backup",
     # main project — Private Search Gateway
@@ -288,6 +308,8 @@ def _build_scope_aliases() -> Dict[str, List[str]]:
         "open-terminal":       ["terminal"],
         "lc-egress":           ["egress"],
         "gateway":             ["search gateway"],
+        "llm-gateway":         ["litellm", "lite llm"],
+        "llm-queue":           ["inference queue"],
         "openwebui-backup":    ["owui-backup"],
         "openbrain-mcp":       ["openbrain", "open brain", "ob1"],
     }
@@ -351,14 +373,18 @@ def _params_for_service(text: str, include_target: bool) -> Dict[str, Any]:
 _HELP_COMMANDS: List[Dict[str, Any]] = [
     {
         "name": "Stack status",
-        "description": "Itemized container roster + per-service processing detail + GPU temp/VRAM panel.",
+        "description": (
+            "Itemized container roster + per-service processing detail + LLM "
+            "gateway queue metrics (now processing, queue depth, top requester, "
+            "free slots, idle time) + GPU temp/VRAM panel."
+        ),
         "phrases": ["status", "show", "overview", "stack status"],
     },
     {
         "name": "Scoped status",
         "description": "Filter the stack status to one service.",
         "phrases": [
-            "status of llama-cpp", "status of llama-cpp-embed",
+            "status of llama-cpp", "status of llm-gateway",
             "status of smolcrawl", "status of mnemory",
             "status of open-notebook", "status of surrealdb",
         ],
@@ -584,15 +610,34 @@ def _build_tailnet_urls(scope_service: Optional[str] = None) -> Dict[str, Any]:
 # (tor/redis/searxng/mcpo) or OB1's obnet have no probe — they still appear in
 # the container table (from _STACK_ROSTER) as "registered".
 _PROBES: Dict[str, Dict[str, Any]] = {
+    # llama-cpp / llama-cpp-embed are network ALIASES on llm-gateway (LiteLLM)
+    # since 2026-06-12 — these hostnames no longer reach a llama.cpp server, so
+    # the old llama_slots probe (GET /health + /slots) is both wrong and UNSAFE:
+    # LiteLLM's /health fires a live health-check completion at every registered
+    # model (llama-swap load thrash), and /slots 404s at the gateway. Probe
+    # liveliness only; live inference activity now comes from the LLM gateway
+    # panel (_llm_gateway_panel, /observe/queue). The real servers
+    # (*-upstream) are isolated on llm-backend-net — unreachable from openwebui
+    # by design (host-side recovery scripts probe 127.0.0.1:8081 directly).
     "llama-cpp": {
         "host": "llama-cpp", "port": 8080,
-        "host_fallback": "127.0.0.1", "host_fallback_port": 8081,
-        "kind": "llama_slots",
+        "kind": "llm_gateway_alias",
     },
     "llama-cpp-embed": {
         "host": "llama-cpp-embed", "port": 8080,
-        "host_fallback": "127.0.0.1", "host_fallback_port": 8082,
-        "kind": "llama_slots",
+        "kind": "llm_gateway_alias",
+    },
+    # LiteLLM analytics front door itself (same container the aliases land on).
+    "llm-gateway": {
+        "host": "llm-gateway", "port": 8080,
+        "kind": "http_health", "health_path": "/health/liveliness",
+    },
+    # B2 admission controller — llm-backend-net only, so probed THROUGH the
+    # gateway's read-only pass-through: a 200 from /observe/queue proves
+    # llm-queue itself answered. (Gateway down => shows unreachable too.)
+    "llm-queue": {
+        "host": "llm-gateway", "port": 8080,
+        "kind": "http_health", "health_path": "/observe/queue",
     },
     "smolcrawl-pipelines": {
         "host": "smolcrawl-pipelines", "port": 9099,
@@ -648,10 +693,17 @@ _PROBES: Dict[str, Dict[str, Any]] = {
 
 
 def build_stack_status(scope_service: Optional[str] = None) -> Dict[str, Any]:
-    """Comprehensive AI Stack status: containers + processing detail + GPUs."""
+    """Comprehensive AI Stack status: containers + processing detail
+    + LLM gateway queue metrics + GPUs."""
     containers = _docker_compose_ps()
     gpus = _nvidia_smi_panel()
     tailnet = _build_tailnet_urls(scope_service)
+
+    # LiteLLM / llm-queue live metrics — stack-wide view, or when scoped to a
+    # service on the inference plane.
+    litellm: Optional[Dict[str, Any]] = None
+    if scope_service is None or scope_service in _LLM_PLANE_SCOPES:
+        litellm = _llm_gateway_panel()
 
     # Per-container "is it processing" detail. Only probe containers that are
     # actually running (per docker), or — when docker isn't reachable — every
@@ -680,9 +732,12 @@ def build_stack_status(scope_service: Optional[str] = None) -> Dict[str, Any]:
         "scope": scope_service or "all",
         "containers": containers,
         "processing": processing,
+        "litellm": litellm,
         "gpus": gpus,
         "tailnet": tailnet,
-        "message": _format_stack_status_message(containers, processing, gpus, tailnet, scope_service),
+        "message": _format_stack_status_message(
+            containers, processing, litellm, gpus, tailnet, scope_service
+        ),
     }
 
 
@@ -931,44 +986,18 @@ def _probe_processing(probe: Dict[str, Any]) -> Dict[str, Any]:
     """Return the live processing detail for a container's HTTP surface."""
     kind = probe["kind"]
 
-    if kind == "llama_slots":
-        # Confirm the server is up via /health first — llama-swap returns 200 on
-        # /health even when no model is active, but /slots may 404/503 in that
-        # state. Distinguishing these tells us "container is healthy, just no
-        # model loaded right now" instead of an alarming '?'.
-        health_code, _, health_url, health_err = _try_get(probe, "/health")
-        if health_code == 0:
-            return {"status": "unreachable", "error": health_err}
-
-        code, slots, url, _ = _try_get(probe, "/slots")
-        if code != 200 or not isinstance(slots, list):
-            return {
-                "status": "model_unloaded",
-                "code": code,
-                "via": url or health_url,
-                "note": (
-                    "/slots not serving — likely no active model loaded "
-                    "(llama-swap unloads idle models)"
-                ),
-            }
-        active = [
-            s for s in slots
-            if isinstance(s, dict) and s.get("state", 0) not in (0, "0", False, None)
-        ]
+    if kind == "llm_gateway_alias":
+        # This hostname is a network alias on llm-gateway (LiteLLM). Only the
+        # side-effect-free liveliness endpoint is safe here (see _PROBES note);
+        # what the inference plane is DOING lives in the LLM gateway panel.
+        code, _, url, err = _try_get(probe, "/health/liveliness")
+        if code == 0:
+            return {"status": "unreachable", "error": err}
         return {
-            "status": "processing" if active else "idle",
+            "status": "ready" if 200 <= code < 300 else "degraded",
+            "code": code,
             "via": url,
-            "slots_total": len(slots),
-            "slots_active": len(active),
-            "slots_detail": [
-                {
-                    "id": s.get("id"),
-                    "state": s.get("state"),
-                    "prompt_tokens": s.get("n_prompt_tokens", s.get("n_prompt_tokens_processed")),
-                    "predicted": s.get("n_decoded", s.get("n_predict")),
-                }
-                for s in active[:4]  # cap to 4 to keep output tight
-            ],
+            "note": "alias lands on llm-gateway — activity in the LLM gateway panel",
         }
 
     if kind == "http_root":
@@ -1018,6 +1047,185 @@ def _probe_processing(probe: Dict[str, Any]) -> Dict[str, Any]:
         }
 
     return {"status": "unknown_probe_kind"}
+
+
+# --- LLM gateway panel (LiteLLM · llm-queue) --------------------------------
+#
+# Live inference-plane metrics for the `status` view: what is processing right
+# now, queue depth, top requester in the queue, parallel availability, and —
+# when fully quiet — how long the plane has been idle. All data comes from
+# side-effect-free surfaces: the gateway's read-only /observe/queue pass-through
+# (llm-queue admission board) and the /spend/logs ledger (idle time).
+
+# Permissive-mode presented-key -> friendly caller name. The CANONICAL map is
+# KEY_FRIENDLY_NAMES in modules/llm-traffic/service/llm_traffic.py — keep in
+# sync until virtual keys land (then the ledger carries real aliases).
+_LLM_KEY_NAMES: Dict[str, str] = {
+    "ollama": "openwebui",
+    "not-needed": "openbrain",
+    "llama": "little-coder",
+    "mnemory": "mnemory",
+    "": "anonymous",
+    "no-key": "anonymous",
+    "sk-admin": "admin",
+    # LiteLLM's openai-client path re-keys upstream requests as `dummy` (its
+    # litellm_params.api_key) — the caller's real key is NOT forwarded to
+    # llm-queue unless the caller sets the OpenAI `user` body field (see
+    # config/litellm.config.yaml, B2/P2 attribution note).
+    "dummy": "via-gateway (unattributed)",
+}
+
+# Scopes for which the LLM gateway panel is relevant when the status view is
+# filtered to one service ("status of llm-gateway" etc.).
+_LLM_PLANE_SCOPES = {"llm-gateway", "llm-queue", "llama-cpp", "llama-cpp-embed"}
+
+
+def _llm_caller(key: Any) -> str:
+    key = key if isinstance(key, str) else ""
+    return _LLM_KEY_NAMES.get(key, key or "anonymous")
+
+
+def _humanize_seconds(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m {seconds % 60:02d}s"
+    return f"{seconds // 3600}h {(seconds % 3600) // 60:02d}m"
+
+
+# How far back to look for the newest ledger row when deriving idle time.
+_LLM_IDLE_LOOKBACK_DAYS = 30
+
+
+def _llm_last_activity() -> Dict[str, Any]:
+    """Idle-time source: now minus the newest row in the LiteLLM spend ledger.
+
+    Uses the paginated /spend/logs/ui endpoint (newest-first, page_size=1) —
+    verified working unauthenticated in this build. The plain /spend/logs
+    ledger has grown too large to pull (times out) and its date params 500,
+    so it is NOT a fallback here; failing cheap-and-fast beats hanging the
+    status view.
+    """
+    now = datetime.now(timezone.utc)
+    fmt = "%Y-%m-%d %H:%M:%S"  # this endpoint rejects bare YYYY-MM-DD
+    query = urllib.parse.urlencode({
+        "start_date": (now - timedelta(days=_LLM_IDLE_LOOKBACK_DAYS)).strftime(fmt),
+        "end_date": (now + timedelta(days=1)).strftime(fmt),
+        "page": 1,
+        "page_size": 1,
+    })
+    code, body, _err = _http_get(
+        f"{LLM_GATEWAY_URL}/spend/logs/ui?{query}", timeout=HTTP_TIMEOUT_SLOW
+    )
+    if code != 200 or not isinstance(body, dict):
+        return {
+            "known": False,
+            "note": f"spend ledger query failed (HTTP {code}) — idle duration unknown",
+        }
+    rows = body.get("data") or []
+    if not rows:
+        return {
+            "known": False,
+            "note": f"no requests in the last {_LLM_IDLE_LOOKBACK_DAYS} days",
+        }
+    latest: Optional[datetime] = None
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        for field in ("endTime", "startTime"):
+            raw = r.get(field)
+            if not raw:
+                continue
+            try:
+                ts = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            if latest is None or ts > latest:
+                latest = ts
+    if latest is None:
+        return {"known": False, "note": "ledger rows carried no parseable timestamps"}
+    idle_s = max(0.0, (datetime.now(timezone.utc) - latest).total_seconds())
+    return {
+        "known": True,
+        "last_request_utc": latest.isoformat(),
+        "idle_s": round(idle_s, 1),
+    }
+
+
+def _llm_gateway_panel() -> Dict[str, Any]:
+    """Per-model live queue metrics from the llm-queue admission board."""
+    code, board, err = _http_get(
+        f"{LLM_GATEWAY_URL}/observe/queue", timeout=HTTP_TIMEOUT
+    )
+    if code == 0:
+        return {"available": False, "gateway": LLM_GATEWAY_URL, "error": err}
+    if code != 200 or not isinstance(board, dict):
+        return {
+            "available": False,
+            "gateway": LLM_GATEWAY_URL,
+            "error": f"HTTP {code} from /observe/queue",
+        }
+
+    models: List[Dict[str, Any]] = []
+    total_running = 0
+    total_waiting = 0
+    for name, m in sorted((board.get("models") or {}).items()):
+        if not isinstance(m, dict):
+            continue
+        running = [r for r in (m.get("running") or []) if isinstance(r, dict)]
+        waiting = [w for w in (m.get("waiting") or []) if isinstance(w, dict)]
+        total_running += len(running)
+        total_waiting += len(waiting)
+
+        waiting_by_key: Dict[str, int] = {}
+        for w in waiting:
+            k = w.get("key") if isinstance(w.get("key"), str) else ""
+            waiting_by_key[k] = waiting_by_key.get(k, 0) + 1
+        top_waiting = None
+        if waiting_by_key:
+            top_key = max(waiting_by_key, key=lambda k: waiting_by_key[k])
+            top_waiting = {
+                "key": top_key,
+                "caller": _llm_caller(top_key),
+                "count": waiting_by_key[top_key],
+            }
+
+        models.append({
+            "model": name,
+            "running": [
+                {
+                    "key": r.get("key", ""),
+                    "caller": _llm_caller(r.get("key", "")),
+                    "elapsed_s": r.get("elapsed_s"),
+                }
+                for r in running
+            ],
+            "waiting_depth": len(waiting),
+            "top_waiting": top_waiting,
+            "longest_wait_s": max((w.get("waited_s") or 0 for w in waiting), default=0),
+            "permits_free": m.get("permits_free"),
+            "slots": m.get("P"),
+            "avg_T_s": m.get("avg_T_s"),
+        })
+
+    panel: Dict[str, Any] = {
+        "available": True,
+        "gateway": LLM_GATEWAY_URL,
+        "models": models,
+        "running_total": total_running,
+        "waiting_total": total_waiting,
+        "held_total": board.get("held_total"),
+        "max_total_connections": board.get("max_total_connections"),
+        "idle": None,
+    }
+    # Only consult the ledger when the plane is fully quiet — the idle metric
+    # is meaningless (and the extra call wasted) while anything runs or waits.
+    if total_running == 0 and total_waiting == 0:
+        panel["idle"] = _llm_last_activity()
+    return panel
 
 
 # --- GPU panel (nvidia-smi) -----------------------------------------------
@@ -1106,6 +1314,7 @@ def _gpu_assignment_index() -> Dict[str, List[str]]:
 def _format_stack_status_message(
     containers: Dict[str, Any],
     processing: Dict[str, Dict[str, Any]],
+    litellm: Optional[Dict[str, Any]],
     gpus: Dict[str, Any],
     tailnet: Dict[str, Any],
     scope: Optional[str],
@@ -1188,6 +1397,74 @@ def _format_stack_status_message(
             lines.append(_format_processing_entry(svc, info))
     lines.append("")
 
+    # LLM gateway panel — live inference-plane metrics from the llm-queue
+    # admission board (via the gateway's read-only /observe pass-through).
+    if litellm is not None:
+        lines.append("### LLM gateway (LiteLLM · llm-queue)")
+        if not litellm.get("available"):
+            lines.append(
+                f"_Queue board unreachable at `{litellm.get('gateway')}/observe/queue` — "
+                f"{litellm.get('error') or 'unknown error'}. (Expected when this pipe "
+                "runs on the host: llm-net is internal-only.)_"
+            )
+        elif not litellm.get("models"):
+            lines.append("_Queue board reachable but reports no models._")
+        else:
+            # "Free slots" = free admission permits (how many new requests
+            # dispatch immediately); "P" = the model's parallelism used for
+            # wait estimates. Same naming as the llm-traffic live board.
+            lines.append(
+                "| Model | Now processing | Queue | Top requester in queue "
+                "| Free slots | P | Avg T (s) |"
+            )
+            lines.append("|---|---|--:|---|--:|--:|--:|")
+            for m in litellm["models"]:
+                if m["running"]:
+                    now_processing = "; ".join(
+                        f"`{r['caller']}` ({r['elapsed_s']}s)" for r in m["running"]
+                    )
+                else:
+                    now_processing = "— idle"
+                top = m.get("top_waiting")
+                top_cell = (
+                    f"`{top['caller']}` ×{top['count']} "
+                    f"(longest {m['longest_wait_s']}s)"
+                    if top else "—"
+                )
+                lines.append(
+                    f"| `{m['model']}` | {now_processing} | {m['waiting_depth']} "
+                    f"| {top_cell} | {m['permits_free']} | {m['slots']} "
+                    f"| {m['avg_T_s']} |"
+                )
+            lines.append("")
+            lines.append(
+                "_Free slots = free admission permits (N ≤ P+1: one extra "
+                "request is admitted so the upstream never idles between "
+                "completions); P = real parallel lanes. Avg T = rolling mean "
+                "of recent completions, worst trimmed._"
+            )
+            held = litellm.get("held_total")
+            if held is not None:
+                lines.append(
+                    f"_Held connections (all models): "
+                    f"{held}/{litellm.get('max_total_connections')}._"
+                )
+            idle = litellm.get("idle")
+            if idle:
+                if idle.get("known"):
+                    last = idle["last_request_utc"][:19].replace("T", " ")
+                    lines.append(
+                        f"_Inference plane idle for "
+                        f"{_humanize_seconds(idle['idle_s'])} "
+                        f"(last request finished {last} UTC)._"
+                    )
+                else:
+                    lines.append(
+                        f"_Inference plane idle (nothing running or queued); "
+                        f"{idle.get('note')}._"
+                    )
+        lines.append("")
+
     # GPU panel
     lines.append("### GPUs")
     if not gpus["available"]:
@@ -1268,7 +1545,8 @@ def _format_processing_entry(service: str, info: Dict[str, Any]) -> str:
 
     if status in ("ready", "degraded"):
         code = info.get("code")
-        return f"- {icon} **`{service}`** — {status} (HTTP {code})"
+        note = f" — {info['note']}" if info.get("note") else ""
+        return f"- {icon} **`{service}`** — {status} (HTTP {code}){note}"
 
     if status == "unreachable":
         err = info.get("error")

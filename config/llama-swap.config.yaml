@@ -52,8 +52,37 @@ models:
           chat_template_kwargs:
             enable_thinking: false
 
+  # 2026-07-09 TEMPORARY benchmark entry: the pre-ThinkingCap 27B GGUF with
+  # speculative decoding off, so before/after runs compare on the same
+  # llama-server build. NOT registered in LiteLLM — unreachable from the
+  # service plane; only direct diagnostic probes hit it. Values mirror the
+  # qwen36-27b .env values at swap time. Remove once the experiment settles.
+  qwen36-27b-baseline:
+    name: Qwen 3.6 27B (pre-ThinkingCap baseline)
+    cmd: |
+      llama-server ${common-args}
+      --model        /models/lmstudio-community/Qwen3.6-27B-GGUF/Qwen3.6-27B-Q4_K_M.gguf
+      --ctx-size     262144
+      --n-gpu-layers 99
+      --parallel     3
+      --batch-size   1024
+      --ubatch-size  512
+      --cache-type-k q4_0
+      --cache-type-v q4_0
+      --reasoning-budget 4096
+    filters:
+      setParamsByID:
+        "${MODEL_ID}":
+          chat_template_kwargs:
+            enable_thinking: true
+        "${MODEL_ID}:nothink":
+          chat_template_kwargs:
+            enable_thinking: false
+
   qwen36-27b:
-    name: Qwen 3.6 27B
+    # 2026-07-09: id kept as `qwen36-27b` (many services pin it) but the GGUF
+    # underneath is now the ThinkingCap fine-tune — see .env MODEL_PATH.
+    name: Qwen 3.6 27B (ThinkingCap)
     # B2 LANDED (2026-06-14): concurrencyLimit 0 = UNLIMITED here. The admission
     # decision now belongs ENTIRELY to the `llm-queue` controller in front of this
     # server (LiteLLM api_base → llm-queue → here). llama-swap must NOT also cap,
@@ -77,6 +106,10 @@ models:
       --cache-type-k ${env.LLAMA_SWAP_QWEN36_27B_CACHE_TYPE_K}
       --cache-type-v ${env.LLAMA_SWAP_QWEN36_27B_CACHE_TYPE_V}
       --reasoning-budget ${env.LLAMA_SWAP_QWEN36_27B_REASONING_BUDGET}
+      --spec-type    ${env.LLAMA_SWAP_QWEN36_27B_SPEC_TYPE}
+      --spec-draft-n-max ${env.LLAMA_SWAP_QWEN36_27B_SPEC_DRAFT_N_MAX}
+      --spec-draft-type-k ${env.LLAMA_SWAP_QWEN36_27B_SPEC_DRAFT_CACHE_TYPE_K}
+      --spec-draft-type-v ${env.LLAMA_SWAP_QWEN36_27B_SPEC_DRAFT_CACHE_TYPE_V}
     filters:
       setParamsByID:
         "${MODEL_ID}":
