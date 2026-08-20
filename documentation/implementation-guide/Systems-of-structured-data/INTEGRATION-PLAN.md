@@ -1,7 +1,10 @@
 # Personal Memory Stack — Integration Plan (LIVING DOCUMENT)
 
-> **Status:** Phase 1 not yet started — awaiting greenlight to begin Phase 0/1.
-> **Last updated:** 2026-05-16
+> **Status:** Phases 0–5 COMPLETE and live-verified — see
+> [PHASE6-WIRING-HANDOFF.md](PHASE6-WIRING-HANDOFF.md) for the wiring record.
+> (Header corrected 2026-08-20; it had claimed "Phase 1 not yet started"
+> since 2026-05-16 while the build shipped around it.)
+> **Last updated:** 2026-08-20
 > **Companion tracker:** [INTEGRATION-TASKS.md](INTEGRATION-TASKS.md) — granular checklist + decision log. Update both together.
 > **Source specs:** [personal-memory-stack-setup.md](personal-memory-stack-setup.md) (requirements) · [wiki-compiler-and-research-frontend.md](wiki-compiler-and-research-frontend.md) (task order + validation gate)
 
