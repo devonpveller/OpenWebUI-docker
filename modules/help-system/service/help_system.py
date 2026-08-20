@@ -144,11 +144,6 @@ class HelpSystemModule:
                     "docker compose exec openwebui ls /host_project/scripts/ai_pipes/ - Verify script mount",
                     "docker compose exec openwebui python /host_project/scripts/ai_pipes/unified_openwebui_pipe.py - Test unified pipe",
                     "docker compose exec openwebui python /host_project/core/router.py '{\"input\": \"gpu status\"}' - Test router"
-                ],
-                "development": [
-                    "python tools/validation_tool.py --all - Validate schemas and modules",
-                    "python tools/refactor_orchestrator.py --dry-run - Preview refactoring",
-                    "python tools/scaffold_generator.py --interactive - Create new modules"
                 ]
             }
         }

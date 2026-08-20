@@ -144,8 +144,7 @@ class CustomToolsModule:
                 ],
                 "direct_execution": [
                     "scripts\\quick-fixes.bat namespace",
-                    "python modules/gpu-status/service/gpu_status.py",
-                    "python tools/validation_tool.py --all"
+                    "python modules/gpu-status/service/gpu_status.py"
                 ]
             }
         }
