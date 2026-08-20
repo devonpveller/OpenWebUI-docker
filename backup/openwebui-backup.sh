@@ -34,9 +34,25 @@
 #     >> RESTORE NOTE: after restoring, the first boot needs internet to
 #     >> re-pull the embedding/reranker models. Everything else is intact.
 #
-# NOT excluded, deliberately: vector_db/ (~29 GB, 72% of the volume). It is
-# derived data, but rebuilding it means re-embedding thousands of files, so
-# it stays in until someone decides OWUI RAG is truly retired.
+#  3. vector_db/ is EXCLUDED (operator decision 2026-08-20, in favour of OB1).
+#     ~29 GB / 72% of the volume: the Chroma index behind OWUI RAG.
+#     Evidence it is safe to drop:
+#       - It is DERIVED. 7,522 of 7,693 `file` rows carry their extracted text
+#         inside webui.db (median ~4.3k chars), and webui.db IS backed up. So
+#         excluding this loses the search INDEX, never the content.
+#       - OWUI RAG is dormant: 97% of files (7,493) were loaded Apr-May 2026;
+#         since then 1 file in June, 45 in July, 3 in August. Newest knowledge
+#         collection updated 2026-05-14.
+#       - The 0.9.6-era decision was to abandon OWUI knowledge in favour of OB1
+#         (see documentation/implementation-guide/update-owui-to-0-9-6/
+#         KNOWLEDGE-MIGRATION-PLAN.md).
+#     >> RESTORE NOTE: after a restore, RAG *search* is empty until re-indexed.
+#     >> Re-embedding ~7.7k files through llama-cpp-embed is not instant -- plan
+#     >> for it on restore day. Chat/file content, uploads and plugins are intact.
+#     CAVEAT worth remembering: only ~93 of ~7,400 OWUI file-links were actually
+#     promoted to OB1 (filter was --origins=authored; 6,234 were deliberately
+#     rejected as smolcrawl/appsync/low-context). So OB1 is NOT a full copy of
+#     OWUI knowledge -- webui.db is what makes this safe, not OB1.
 # -----------------------------------------------------------------------
 
 set -eu
@@ -81,7 +97,7 @@ START_EPOCH="$(date +%s)"
 
 # --exclude is relative to -C ${DATA_DIR}. Keep the exclusion list in sync
 # with the header comment above.
-tar cf - -C "${DATA_DIR}" --exclude='./cache' . | ${COMPRESSOR} > "${BACKUP_FILE}"
+tar cf - -C "${DATA_DIR}" --exclude='./cache' --exclude='./vector_db' . | ${COMPRESSOR} > "${BACKUP_FILE}"
 
 sha256sum "${BACKUP_FILE}" > "${BACKUP_FILE}.sha256"
 

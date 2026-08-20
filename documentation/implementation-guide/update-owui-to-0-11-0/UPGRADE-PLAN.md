@@ -622,10 +622,30 @@ Only ~1.6 GB is genuinely irreplaceable. Two changes to
 **Measured result:** `510s` (8.5 min), 17.7 GB → 11.9 GB. Archive verified with
 `pigz -t` — full decompression valid, sha256 written.
 
-> `vector_db/` was **deliberately left in**. It is derived data, but rebuilding means
-> re-embedding thousands of files. It is also 72% of what remains — if OWUI RAG is
-> ever formally retired (newest knowledge collection is dated 2026-05-14), excluding
-> it would take the nightly to roughly a minute. **Operator decision, not taken here.**
+**`vector_db/` also excluded — operator decision 2026-08-20, in favour of OB1.**
+Final measured result: **23 s, 374 MB** (from ~50 min / 17.7 GB). Verified the archive
+still holds `webui.db`, `webui.db-wal`, 8,512 `uploads/` entries, `user_files/` and
+`code_agent/`, with zero `vector_db/` and `cache/` entries and a valid gzip stream.
+
+The evidence that made it safe:
+
+- **It is derived, and its source is backed up.** 7,522 of 7,693 `file` rows carry
+  their extracted text *inside `webui.db`* (median ~4.3k chars). Excluding the Chroma
+  index loses the **search index**, never the content.
+- **OWUI RAG is dormant.** 97% of files (7,493) were loaded Apr–May 2026; since then
+  1 file in June, 45 in July, 3 in August. Newest knowledge collection: 2026-05-14.
+
+> **⚠️ Correct the record on "it all went to OB1".** It did not, and that is by design.
+> The 2026-06-12 migration ran `--origins=authored` and promoted **93 sources / 25
+> threads** — verified still present in OB1 today (92 rows carrying `owui_file_id`).
+> It **rejected 6,234** (4,766 smolcrawl, 1,468 appsync, plus empty/low-context/dupes)
+> and excluded 1,066 chat-upload files from the audit entirely. So roughly **1.5%** of
+> the OWUI corpus is in OB1. **`webui.db` is what makes dropping `vector_db` safe —
+> not OB1 coverage.**
+
+> **RESTORE NOTE:** after a restore, RAG *search* is empty until re-indexed, and
+> re-embedding ~7.7k files through `llama-cpp-embed` is not instant. Plan for it on
+> restore day. Chats, file content, uploads and plugins are unaffected.
 
 ### 2. `openbrain-ext` stale DB session — FIXED
 
@@ -677,4 +697,3 @@ re-registering or removing.
   the operator's call. Deleting it from the volume is the clean fix (it then leaves
   the backups naturally); excluding it from the tar instead would silently stop
   protecting it.
-- **`vector_db/` (29.1 GB, 72% of the backup)** — see above.
