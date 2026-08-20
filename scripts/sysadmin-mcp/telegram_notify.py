@@ -31,21 +31,12 @@ _REPO = os.path.dirname(os.path.dirname(_HERE))
 _ENV = os.path.join(_REPO, ".env")
 
 
+sys.path.insert(0, os.path.join(_REPO, "scripts", "lib"))
+from mm_lib import parse_env_file  # noqa: E402
+
+
 def _read_env(path: str = _ENV) -> dict:
-    """Minimal .env parser -> dict. Ignores comments/blank lines; strips quotes.
-    utf-8-sig so a BOM-prefixed .env (Windows editors) parses cleanly."""
-    vals: dict = {}
-    try:
-        with open(path, "r", encoding="utf-8-sig") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                k, _, v = line.partition("=")
-                vals[k.strip()] = v.strip().strip('"').strip("'")
-    except OSError:
-        pass
-    return vals
+    return parse_env_file(path)
 
 
 def creds() -> tuple[str | None, str | None]:

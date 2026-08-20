@@ -59,19 +59,8 @@ TOKEN_KEY = os.environ.get("MM_TOKEN_KEY", "CLAUDE_MM_BOT_TOKEN")
 _TOKEN_ENV_FILES = [DEFAULT_ENV_FILE, os.path.join(_REPO_ROOT, ".env")]
 _token_cache: str | None = None
 
-
-def _read_env_key(key: str, paths: list[str]) -> str:
-    for path in paths:
-        try:
-            with open(path, "r", encoding="utf-8", errors="ignore") as fh:
-                for line in fh:
-                    if line.startswith(key + "="):
-                        tok = line.split("=", 1)[1].strip().strip('"').strip("'").replace("\r", "")
-                        if tok:
-                            return tok
-        except OSError:
-            continue
-    return ""
+sys.path.insert(0, os.path.join(_REPO_ROOT, "scripts", "lib"))
+from mm_lib import read_env_key as _read_env_key  # noqa: E402
 
 
 def _probe_ok(tok: str) -> bool:

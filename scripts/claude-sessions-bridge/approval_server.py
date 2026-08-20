@@ -57,24 +57,14 @@ if os.environ.get("BRIDGE_ENV_FILE"):
 _TOKEN_KEY = os.environ.get("BRIDGE_TOKEN_KEY", "CLAUDE_MM_BOT_TOKEN")
 _HERE_DIR = os.path.dirname(os.path.abspath(__file__))
 _REPO_ROOT_DIR = os.path.dirname(os.path.dirname(_HERE_DIR))
+sys.path.insert(0, os.path.join(_REPO_ROOT_DIR, "scripts", "lib"))
+import mm_lib  # noqa: E402
+
 if not os.environ.get("MM_TOKEN"):
-    for _envf in (os.environ.get("BRIDGE_ENV_FILE", ""),
-                  os.path.join(_REPO_ROOT_DIR, "agent-org", "docker", ".env"),
-                  os.path.join(_REPO_ROOT_DIR, ".env")):
-        if not _envf:
-            continue
-        try:
-            with open(_envf, "r", encoding="utf-8", errors="ignore") as _fh:
-                for _line in _fh:
-                    if _line.startswith(_TOKEN_KEY + "="):
-                        _tok = _line.split("=", 1)[1].strip().strip('"').strip("'").replace("\r", "")
-                        if _tok:
-                            os.environ["MM_TOKEN"] = _tok
-                        break
-        except OSError:
-            continue
-        if os.environ.get("MM_TOKEN"):
-            break
+    _tok = mm_lib.read_env_key(
+        _TOKEN_KEY, mm_lib.default_env_files(os.environ.get("BRIDGE_ENV_FILE", "")))
+    if _tok:
+        os.environ["MM_TOKEN"] = _tok
 
 sys.path.insert(0, os.path.join(_HERE_DIR, "..", "mattermost-mcp"))
 import server as mmapi  # noqa: E402

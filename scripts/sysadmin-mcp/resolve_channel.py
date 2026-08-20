@@ -16,17 +16,12 @@ _REPO = os.path.dirname(os.path.dirname(_HERE))
 sys.path.insert(0, _HERE)
 
 
+sys.path.insert(0, os.path.join(_REPO, "scripts", "lib"))
+from mm_lib import default_env_files, read_env_key  # noqa: E402
+
+
 def sysadmin_token() -> str:
-    for p in (os.path.join(_REPO, "agent-org", "docker", ".env"), os.path.join(_REPO, ".env")):
-        try:
-            for line in open(p, encoding="utf-8", errors="ignore"):
-                if line.startswith("SYSADMIN_MM_BOT_TOKEN="):
-                    tok = line.split("=", 1)[1].strip().strip('"').strip("'").replace("\r", "")
-                    if tok:
-                        return tok
-        except OSError:
-            continue
-    return ""
+    return read_env_key("SYSADMIN_MM_BOT_TOKEN", default_env_files())
 
 
 def resolve(value: str | None = None) -> str:

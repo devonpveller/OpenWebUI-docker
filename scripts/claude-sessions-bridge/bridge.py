@@ -83,30 +83,12 @@ if os.environ.get("BRIDGE_ENV_FILE"):
 # Searched in order: BRIDGE_ENV_FILE, agent-org/docker/.env, the repo-root .env.
 TOKEN_KEY = os.environ.get("BRIDGE_TOKEN_KEY", "CLAUDE_MM_BOT_TOKEN")
 
+sys.path.insert(0, os.path.join(_REPO_ROOT, "scripts", "lib"))
+import mm_lib  # noqa: E402
 
-def _find_env_token(key: str, candidates: list[str]) -> str:
-    for path in candidates:
-        if not path:
-            continue
-        try:
-            with open(path, "r", encoding="utf-8", errors="ignore") as fh:
-                for line in fh:
-                    if line.startswith(key + "="):
-                        tok = line.split("=", 1)[1].strip().strip('"').strip("'").replace("\r", "")
-                        if tok:
-                            return tok
-        except OSError:
-            continue
-    return ""
-
-
-TOKEN_ENV_CANDIDATES = [
-    os.environ.get("BRIDGE_ENV_FILE", ""),
-    os.path.join(_REPO_ROOT, "agent-org", "docker", ".env"),
-    os.path.join(_REPO_ROOT, ".env"),
-]
 if not os.environ.get("MM_TOKEN"):
-    _tok = _find_env_token(TOKEN_KEY, TOKEN_ENV_CANDIDATES)
+    _tok = mm_lib.read_env_key(
+        TOKEN_KEY, mm_lib.default_env_files(os.environ.get("BRIDGE_ENV_FILE", "")))
     if _tok:
         os.environ["MM_TOKEN"] = _tok
 
