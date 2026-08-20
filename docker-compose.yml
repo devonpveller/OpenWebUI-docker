@@ -97,7 +97,10 @@ services:
       start_period: 60s
 
   watchtower:
-    image: containrrr/watchtower:latest
+    # Pinned by digest (was :latest — an unpinned auto-updater holding the
+    # docker.sock is host-root-equivalent supply-chain exposure). Retirement
+    # in favor of the manual update runbook is CLEANUP-PLAN v3 decision D-2.
+    image: containrrr/watchtower@sha256:6dd50763bbd632a83cb154d5451700530d1e44200b268a4e9488fefdfcf2b038
     container_name: watchtower
     logging: # sysadmin log cap (disk-prune-watcher); applies on recreate
       driver: json-file
@@ -106,8 +109,10 @@ services:
         max-file: "5"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro # Read-only access
-      - ./scripts/post-update-hook.sh:/post-update-hook.sh:ro # Post-update hook
-      - .:/compose-dir:ro # Access to compose files for hook
+      # (post-update-hook.sh + .:/compose-dir mounts removed 2026-08-20: the
+      # scratch-image watchtower has no shell and no container carries a
+      # lifecycle label, so the hook never executed once. The OWUI→tailscale
+      # restart coordination it intended is handled by the health watchdog.)
     environment:
       - DOCKER_API_VERSION=1.44 # image bakes in 1.25; engine 29+ (Docker Desktop 4.80) requires >=1.40
       - WATCHTOWER_CLEANUP=true # remove old images
@@ -115,7 +120,6 @@ services:
       - WATCHTOWER_INCLUDE_STOPPED=false # Only running containers
       - WATCHTOWER_DEBUG=true # Enable debug logging to verify container detection
       - WATCHTOWER_RUN_ONCE=false # Keep running
-      - WATCHTOWER_LIFECYCLE_HOOKS=true # Enable lifecycle hooks
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true # Prevent privilege escalation
@@ -812,8 +816,13 @@ services:
       start_period: 60s
 
   surrealdb:
-    image: surrealdb/surrealdb:v2
+    # Pinned by digest 2026-08-20 (was floating :v2 + pull_policy:always with
+    # NO watchtower opt-out — an unflagged auto-update path on the datastore
+    # behind open_notebook).
+    image: surrealdb/surrealdb@sha256:d653f6c8a89e81f865ee31cd2f587c50f50ace922175e04150b1e385d2f86011
     container_name: surrealdb
+    labels:
+      - com.centurylinklabs.watchtower.enable=false
     # Credentials live in .env (pre-flight §6.3). Keeping root/root by user
     # decision; localhost-only bind below + auth-net Docker isolation are the
     # real defenses against external access.
@@ -835,6 +844,8 @@ services:
     # documentation/implementation-guide/open -notebook-integration-openbrain/.
     image: open_notebook:iks
     container_name: open_notebook
+    labels:
+      - com.centurylinklabs.watchtower.enable=false # local tag, never pulled
     logging: # sysadmin log cap (disk-prune-watcher); applies on recreate
       driver: json-file
       options:
@@ -1377,15 +1388,16 @@ services:
     networks:
       - default     # surrealdb is on default; we reach it via DNS name 'surrealdb'
     environment:
-      # SurrealDB v2 accepts a built-in root/root login regardless of the
-      # --user/--pass passed to surreal start. We use it here so the backup
-      # is independent of any operator-defined runtime credential rotation
-      # in open_notebook's SURREAL_USER/SURREAL_PASSWORD. The "real" auth
-      # boundary is the network isolation (surrealdb is only on the default
-      # bridge with localhost-only host port).
+      # Same credentials the open_notebook runtime uses (proven valid against
+      # this datastore). Was hardcoded root/root — that leaned on SurrealDB's
+      # persisted first-boot root user, and left a literal credential in a
+      # tracked file. Note the datastore still ACCEPTS the legacy root login
+      # until a DEFINE USER pass rotates it (SurrealDB v2: start --user/--pass
+      # is only honored on first boot); network isolation (default bridge,
+      # localhost-only host port) remains the real boundary.
       - SURREAL_URL=http://surrealdb:8000
-      - SURREAL_USER=root
-      - SURREAL_PASSWORD=root
+      - SURREAL_USER=${SURREAL_USER}
+      - SURREAL_PASSWORD=${SURREAL_PASSWORD}
       - SURREAL_NS=open_notebook
       - SURREAL_DB=open_notebook
       - NOTEBOOK_DATA_DIR=/notebook-data
