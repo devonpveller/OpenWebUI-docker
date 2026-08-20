@@ -9,7 +9,6 @@ import httpx
 
 from app.config import Settings
 from app.modules.grounding import OpenBrainResearchGrounding
-from app.schemas import AdvisoryAnswer
 
 
 def _settings(**over):

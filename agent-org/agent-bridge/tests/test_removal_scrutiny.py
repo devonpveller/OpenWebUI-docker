@@ -8,7 +8,6 @@ project, any language."""
 
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
 
 import httpx
@@ -47,8 +46,6 @@ def _remote_with_files(files: list[dict]):
     def handler(request: httpx.Request) -> httpx.Response:
         p = request.url.path
         if "/compare/" in p:
-            total_a = sum(f.get("additions", 0) for f in files)
-            total_d = sum(f.get("deletions", 0) for f in files)
             return httpx.Response(200, json={"ahead_by": 1, "behind_by": 0, "commits": [],
                                              "files": files})
         if "/branches/" in p:

@@ -15,7 +15,7 @@ from app.modules.egress import EgressAllowlist
 from app.modules.model_router import FakeModelClient
 from app.modules.projects import ProjectRegistry
 from app.orchestrator import Orchestrator
-from app.schemas import OperatorIntent, ReadinessVerdict
+from app.schemas import OperatorIntent
 from app.worker.harness import FakeHarness
 
 ROOT = Path(__file__).resolve().parents[1]

@@ -20,7 +20,6 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from sqlalchemy import select
 
 from ..db import Database
 from ..models import ChannelCursor, ProcessedEvent

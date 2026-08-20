@@ -63,7 +63,7 @@ async def test_delegation_error_reaches_operator(db_url):
         opmsg = next(p["message"] for p in chat.posted if p.get("thread_id") == "op-thread")
         assert "couldn't run" in opmsg and "repo focused" in opmsg
         # the effort is marked errored (not left looking active)
-        full = await orch.gate.snapshot()
+        await orch.gate.snapshot()  # must not raise post-error
         assert eid not in orch._delegating
     finally:
         await db.dispose()

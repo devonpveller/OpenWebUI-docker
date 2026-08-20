@@ -275,7 +275,7 @@ async def test_reengage_plural_still_dispatches_all_idle(db_url):
     orch = Orchestrator(settings, db, FakeChatAdapter(),
                         model_client=FakeModelClient(), harness=FakeHarness())
     await orch.setup()
-    chat, harness = orch.chat, orch.harness
+    harness = orch.harness
     try:
         e1, _c1, _r1 = await _idle_effort(orch, "one")
         e2, _c2, _r2 = await _idle_effort(orch, "two")

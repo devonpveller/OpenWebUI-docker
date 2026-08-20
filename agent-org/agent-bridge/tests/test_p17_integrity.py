@@ -15,7 +15,6 @@ Fakes only.
 from __future__ import annotations
 
 from app.models import ScopeTask
-from app.orchestrator import _LENSES
 
 from test_lenses import (  # noqa: F401 — shared fixtures/helpers, same fake stack
     GOAL, REPO, _REPORT, _delivery, _effort, _orch, _round, _shutdown,

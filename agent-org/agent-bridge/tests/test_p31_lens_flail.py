@@ -10,7 +10,6 @@ whatever findings streamed before the flail. Fakes only.
 
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
 
 from app.adapters.chat import FakeChatAdapter
@@ -18,7 +17,7 @@ from app.config import Settings
 from app.modules.capabilities import BranchDelivery
 from app.db import Database
 from app.modules.model_router import FakeModelClient
-from app.orchestrator import _LENSES, Orchestrator
+from app.orchestrator import Orchestrator
 from app.worker.harness import FakeHarness
 
 ROOT = Path(__file__).resolve().parents[1]

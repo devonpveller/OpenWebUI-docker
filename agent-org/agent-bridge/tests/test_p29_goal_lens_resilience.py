@@ -20,7 +20,6 @@ import httpx
 from app.adapters.chat import FakeChatAdapter
 from app.config import Settings
 from app.db import Database
-from app.models import Effort
 from app.modules.capabilities import BranchDelivery
 from app.modules.model_router import FakeModelClient
 from app.orchestrator import _LENSES, Orchestrator

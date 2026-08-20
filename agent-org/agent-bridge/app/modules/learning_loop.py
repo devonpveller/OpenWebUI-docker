@@ -76,7 +76,6 @@ class LearningLoop:
             await s.commit()
             await s.refresh(pat)
             surfaced = len(pat.effort_ids or []) >= 2 and pat.status == "observed"
-            pat_id = pat.id
         if surfaced:
             await self.audit.log(
                 "pattern_surfaced",

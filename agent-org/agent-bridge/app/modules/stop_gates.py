@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import logging
 
-from sqlalchemy import select
 
 from ..db import Database, now_iso
 from ..models import Checkpoint, Review

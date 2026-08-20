@@ -6,7 +6,6 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-import pytest
 
 from app.adapters.chat import FakeChatAdapter
 from app.config import Settings

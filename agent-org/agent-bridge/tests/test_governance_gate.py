@@ -8,7 +8,7 @@ import pytest
 from app.db import Database
 from app.modules.audit_sink import AuditSink
 from app.modules.governance_gate import AuthorityError, GateError, GovernanceGate
-from app.schemas import Concern, Decision, Level, Trigger
+from app.schemas import Concern, Decision, Trigger
 
 
 def _concern(effort_id: str) -> Concern:

@@ -23,7 +23,7 @@ from app.db import Database
 from app.models import Effort
 from app.modules.capabilities import BranchDelivery
 from app.modules.model_router import FakeModelClient
-from app.orchestrator import _LENSES, Orchestrator
+from app.orchestrator import Orchestrator
 from app.worker.harness import FakeHarness
 
 ROOT = Path(__file__).resolve().parents[1]

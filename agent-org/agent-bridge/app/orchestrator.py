@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+
+from datetime import datetime  # annotations (e.g. _worker_progress) reference it
 import logging
 import os
 import random
@@ -56,7 +58,6 @@ from .modules.capabilities import (
     read_repo_state,
     merge_branch,
     ensure_branch,
-    read_open_pr_numbers,
 )
 from .modules.github_app import GitHubApp, build_github_app
 from .modules.grounding import Grounding, build_grounding
@@ -84,7 +85,7 @@ from .models import (
 )
 from .modules.pending_store import PendingStore
 from .schemas import (
-    AlignmentVerdict, Concern, ConcernOption, Decision, EscalationVerdict, Level, LifecyclePlan, LifecycleStep, MonitorVerdict, OperatorIntent, Plan, Trigger,
+    AlignmentVerdict, Concern, Decision, EscalationVerdict, Level, LifecyclePlan, LifecycleStep, MonitorVerdict, OperatorIntent, Trigger,
 )
 from .worker.harness import FakeHarness, LittleCoderHarness, WorkerHarness
 
@@ -5360,7 +5361,7 @@ class Orchestrator:
         if not si:
             return ""
         forb = self._forbidden_terms(si)
-        forb_line = (f" I will REJECT any delivery whose diff introduces: "
+        forb_line = (" I will REJECT any delivery whose diff introduces: "
                      + ", ".join(f"`{t}`" for t in forb) + "." if forb else "")
         return (f"\n\nSTANDING INTENT (a durable architectural rule for `{slug}` — NON-NEGOTIABLE, "
                 f"overrides any expedient shortcut): {si}\nDo NOT trade this away for a green "
@@ -5880,8 +5881,8 @@ class Orchestrator:
                     f"{_error_brief(out)}:\n```\n{tail}\n```\n"
                     f"_Burn-down engaged: I'll drive fix rounds autonomously (re-building after "
                     f"each) and hold every PR/merge invite until it's green. No action needed._")
-        return (f"\n🧪 _Composition check returned no verdict — verify the build yourself before "
-                f"merging._")
+        return ("\n🧪 _Composition check returned no verdict — verify the build yourself before "
+                "merging._")
 
     async def _intake_or_dispatch(
         self, effort_id: str, proj_channel: str, root: str, request: str,
@@ -8510,7 +8511,7 @@ class Orchestrator:
                           f"them this turn; finish and PUSH your slice)")
         files = sorted({m.group(1) for m in (
             _ERR_FILE_RE.match(ln) for ln in err_lines[:cap]) if m})
-        scope = (f"ONLY touch these files — a sibling worker owns the rest in parallel: "
+        scope = ("ONLY touch these files — a sibling worker owns the rest in parallel: "
                  + ", ".join(files[:20]) + "\n   ") if part and files else ""
         if host:
             host_slug, sub_path, host_url, _sib = host
@@ -8521,8 +8522,6 @@ class Orchestrator:
                          f"place this build can run); the work happens INSIDE `{sub_path}`.")
             checkout = (f"cd /workspace/{sub_path} && (git fetch origin {branch} && "
                         f"git checkout -B {push_branch} FETCH_HEAD || git checkout -b {push_branch})")
-            publish = (f"cd /workspace/{sub_path} && git add -A && git commit -m "
-                       f"\"{effort_id}: burn-down round {rnd}\" && git push origin {push_branch}")
             focus, recurse = host_url, True
             token = await self._project_token_for_slug(host_slug)
         else:
@@ -8531,8 +8530,6 @@ class Orchestrator:
                 or "(build/test as usual)"
             workspace = f"Your workspace is the project repo, on `{branch}`."
             checkout = f"git checkout -B {push_branch}"
-            publish = (f"git add -A && git commit -m \"{effort_id}: burn-down round {rnd}\" && "
-                       f"git push origin {push_branch}")
             focus = f"{repo}#{branch}" if branch_exists else repo
             recurse, token = False, await self._project_token(effort_id)
         instruction = (
@@ -8682,14 +8679,14 @@ class Orchestrator:
                 f"- error trajectory across rounds: **{traj}**\n"
                 f"- still failing: {brief}\n"
                 + (f"```\n{remaining[:900]}\n```\n" if remaining else "")
-                + f"The branch keeps every fix so far — nothing is lost. What remains hasn't yielded "
-                f"to mechanical rounds"
+                + "The branch keeps every fix so far — nothing is lost. What remains hasn't yielded "
+                "to mechanical rounds"
                 + (". I researched it (below) and it still didn't clear — this likely needs a "
                    "judgment call or a change the workers can't make (e.g. a workspace/build-setup "
                    "issue, not code)." if research_note else
                    ", which usually means it needs a judgment call (an API choice, a design "
                    "decision, or missing context).")
-                + f" Tell me how you'd like to proceed, or say **“keep going”** for more rounds."
+                + " Tell me how you'd like to proceed, or say **“keep going”** for more rounds."
                 + research_note)
         await self.comms.post(Intent.escalation, body, effort_id=effort_id)
         await self.comms.post(Intent.operator_reply, body,
@@ -9400,7 +9397,7 @@ class Orchestrator:
                 self.github, repo, dev, delivery.branch,
                 message=(f"Integrate {effort_id} into {dev} (accepted)\n\n"
                          f"Accepted per-effort delivery: org-verified green build, D2 gate passed"
-                         + (f", QA-evaluated" if self.s.qa_gate != "off" else "")
+                         + (", QA-evaluated" if self.s.qa_gate != "off" else "")
                          + f". Source branch {delivery.branch}"
                          + (f" @ {sha}" if sha else "") + "."),
                 api_base=self.s.github_api_base, transport=self._gh_transport)
@@ -9970,11 +9967,11 @@ class Orchestrator:
             await say(
                 "**Board** (internal plumbing hidden). Say **“tidy up”** and I'll close the "
                 "completed ones + delete their merged branches:\n\n"
-                f"- ✅ **Completed** (idle, work already in `main`): "
+                "- ✅ **Completed** (idle, work already in `main`): "
                 + (", ".join(f"`{i}`" for i, _, _ in completed) or "none") + "\n"
-                f"- 🟢 **Active:** "
+                "- 🟢 **Active:** "
                 + (", ".join(f"`{i}` ({s})" for i, s in active) or "none") + "\n"
-                f"- ⚪ **Idle, not yet merged:** "
+                "- ⚪ **Idle, not yet merged:** "
                 + (", ".join(f"`{i}`" for i in idle_open) or "none"))
         return True
 
@@ -10068,7 +10065,7 @@ class Orchestrator:
                                  + ", ".join(f"`{b}`" for b in ok))
                 bad = [b for b, k in results if not k]
                 if bad:
-                    lines.append(f"- ⚠️ couldn't delete: " + ", ".join(f"`{b}`" for b in bad))
+                    lines.append("- ⚠️ couldn't delete: " + ", ".join(f"`{b}`" for b in bad))
             elif merged:
                 lines.append(f"- ✅ {len(merged)} **safe to delete** (already merged into "
                              f"`{cls['default']}`): " + ", ".join(f"`{b}`" for b in merged))
@@ -11882,8 +11879,8 @@ class Orchestrator:
                 corpus_note, delivery = await self._acceptance_corpus_gate(
                     effort_id, eff_repo, delivery, f"merge-{effort_id}")
                 gate_open = f"merge-{effort_id}" in self._pending_merge
-                invite = (f"\n_`main` only changes when you merge — say **“merge it”** and I'll "
-                          f"merge, or merge on GitHub after review._" if gate_open else "")
+                invite = ("\n_`main` only changes when you merge — say **“merge it”** and I'll "
+                          "merge, or merge on GitHub after review._" if gate_open else "")
                 pr_lead = ("📬 **Existing PR still open** (no new commits this round)"
                            if stale_reverify else "📬 **PR opened for review:**")
                 where += f"\n{pr_lead} {pr_url}{d2_note}{corpus_note}{invite}"
@@ -13042,123 +13039,39 @@ class Orchestrator:
         if mentioned:
             await self.chat.post(channel_id, _HELP)  # top-level, visible inline
 
+    # Pending-decision semantics live in modules/pending_store.py (PendingStore) — the methods
+    # below are thin same-signature delegators so every caller (and test) is unchanged.
+
     @staticmethod
     def _jsonify_pending(entry: dict) -> dict:
-        """A JSON-safe copy of a pending-store entry for persistence: any pydantic plan under `plan`
-        is `model_dump`'d; everything else is already str/None. The in-memory dict keeps the live
-        object — only the persisted mirror is flattened."""
-        out = dict(entry)
-        plan = out.get("plan")
-        if hasattr(plan, "model_dump"):
-            out["plan"] = plan.model_dump(mode="json")
-        return out
+        """Delegates to `PendingStore.jsonify_pending`."""
+        return PendingStore.jsonify_pending(entry)
 
     async def _rehydrate_pending(self) -> None:
-        """Boot: restore the three in-memory pending dicts from the durable store so a proposal held
-        across a restart is still resolvable (a bare/keyed `approve` finds it). A payload that no
-        longer deserializes (schema drift) is dropped, not fatal — boot must never wedge on it."""
-        for row in await self.pending.all():
-            pid, kind, payload = row["id"], row["kind"], dict(row["payload"])
-            try:
-                if kind == "lifecycle":
-                    payload["plan"] = LifecyclePlan(**payload["plan"])
-                    self._pending_lifecycle[pid] = payload
-                elif kind == "capability":
-                    self._pending_capability[pid] = payload
-                elif kind == "effort_plan":
-                    payload["plan"] = Plan(**payload["plan"])
-                    self._pending_plan[pid] = payload
-                elif kind == "merge":
-                    self._pending_merge[pid] = payload
-                else:
-                    continue
-            except Exception as exc:  # noqa: BLE001 — a drifted row must not crash boot; drop it
-                log.warning("dropping unrehydratable pending %s (%s): %s", pid, kind, exc)
-                await self.pending.delete(pid)
-        n = (len(self._pending_lifecycle) + len(self._pending_capability)
-             + len(self._pending_plan) + len(self._pending_merge))
-        if n:
-            log.info("rehydrated %d pending approval(s) held across a restart", n)
+        """Delegates to `PendingStore.rehydrate` (boot: durable store → in-memory pending dicts)."""
+        await self.pending.rehydrate(
+            self._pending_lifecycle, self._pending_capability,
+            self._pending_plan, self._pending_merge)
 
     async def _reconcile_merge_gates(self) -> None:
-        """Drop merge gates whose PR is no longer OPEN on the remote (merged / closed / repo
-        cleaned up) — 11 stale gates once buried the ONE real decision behind a wall of dead
-        options (operator 2026-07-08: bare `approve` listed 14 items). Batched per repo;
-        fail-open — an unreadable remote never drops a gate."""
-        if not self._pending_merge or self.github is None or not self.s.github_app_enabled:
-            return
-        by_repo: dict[str, list[str]] = {}
-        for mid, e in list(self._pending_merge.items()):
-            by_repo.setdefault((e.get("repo") or "").strip(), []).append(mid)
-        for repo, mids in by_repo.items():
-            if not repo:
-                continue
-            nums = await read_open_pr_numbers(
-                self.github, repo, api_base=self.s.github_api_base,
-                transport=self._gh_transport)
-            if nums is None:
-                continue   # unreadable → keep everything (fail-open)
-            for mid in mids:
-                pr = int((self._pending_merge.get(mid) or {}).get("pr_number") or 0)
-                if pr and pr not in nums:
-                    self._pending_merge.pop(mid, None)
-                    await self.pending.delete(mid)
-                    await self.audit.log(
-                        "merge_gate_pruned",
-                        effort_id=(mid[len("merge-"):] if mid.startswith("merge-") else None),
-                        payload={"merge_id": mid, "pr": pr, "repo": repo})
+        """Delegates to `PendingStore.reconcile_merge_gates` (prune gates whose PR is gone)."""
+        await self.pending.reconcile_merge_gates(
+            self._pending_merge, github=self.github, settings=self.s,
+            transport=self._gh_transport)
 
     async def _pending_decisions(self) -> list[str]:
-        """Every item currently awaiting an explicit operator decision — drafted lifecycle plans
-        (P-APL.3), proposed capability actions (P-APL.1), held Stage-3 effort plans (P3.9), and
-        efforts frozen on a concern (§3). De-duped, insertion order. Used so a bare `approve`/`abort`
-        (no id) can resolve THE single pending item unambiguously instead of erroring with a usage
-        string — the operator typed the decision verb explicitly; we only fill an unambiguous
-        target. Merge gates are RECONCILED against the remote first (stale ones pruned)."""
-        await self._reconcile_merge_gates()
-        ids: list[str] = [
-            *self._pending_lifecycle.keys(),
-            *self._pending_capability.keys(),
-            *self._pending_plan.keys(),
-            *self._pending_merge.keys(),
-        ]
-        try:
-            efforts = await self.gate.snapshot(open_only=True)
-            smap = await self._effort_status_map(efforts)
-            ids += [e["id"] for e in efforts if smap.get(e["id"]) == "paused"]
-        except Exception as exc:  # noqa: BLE001 — status enumeration must never break the command
-            log.debug("_pending_decisions status sweep failed: %s", exc)
-        seen: set[str] = set()
-        return [i for i in ids if not (i in seen or seen.add(i))]
+        """Delegates to `PendingStore.decisions` (everything awaiting an operator decision)."""
+        return await self.pending.decisions(
+            self._pending_lifecycle, self._pending_capability,
+            self._pending_plan, self._pending_merge,
+            reconcile=self._reconcile_merge_gates,
+            snapshot=self.gate.snapshot, status_map=self._effort_status_map)
 
     def _render_pending(self, only: str | None = None) -> str:
-        """The queue of proposals awaiting an `approve <id>` — drafted plans, proposed forks, held
-        effort plans — rendered for `/status` so a restart-restored (or scrolled-past) hard gate is
-        VISIBLE without re-asking. `only` limits it to a single id (targeted `/status <id>`). Empty
-        string when nothing (matching) is pending."""
-        items: list[tuple[str, str]] = []
-        for pid, e in self._pending_lifecycle.items():
-            plan = e.get("plan")
-            goal = (getattr(plan, "goal", None) or e.get("intent") or "plan").strip()
-            n = len(getattr(plan, "steps", []) or [])
-            items.append((pid, f"📋 plan: {goal} ({n} step{'' if n == 1 else 's'})"))
-        for aid, e in self._pending_capability.items():
-            items.append((aid, f"🛠️ fork `{e.get('parent', '?')}`"))
-        for mid, e in self._pending_merge.items():
-            items.append((mid, f"🔀 merge PR #{e.get('pr_number', '?')} on "
-                               f"`{(e.get('repo') or '').split('github.com/')[-1]}` — say “merge it”"))
-        for eid, e in self._pending_plan.items():
-            plan = e.get("plan")
-            feat = (getattr(plan, "feature_overview", None) or e.get("request") or "").strip()
-            items.append((eid, f"📋 effort plan: {feat[:80]}"))
-        if only is not None:
-            items = [(i, d) for (i, d) in items if i == only]
-        if not items:
-            return ""
-        lines = "\n".join(f"- `{i}` — {d}" for i, d in items)
-        hint = ("_Reply `approve` or `abort` — it's the only thing pending._" if len(items) == 1
-                else "_Reply `approve <id>` or `abort <id>`._")
-        return "**⛔ Awaiting your approval:**\n" + lines + "\n" + hint
+        """Delegates to `PendingStore.render_pending` (the `/status` approval-queue block)."""
+        return self.pending.render_pending(
+            self._pending_lifecycle, self._pending_capability,
+            self._pending_merge, self._pending_plan, only=only)
 
     async def _handle_command(
         self, text: str, channel_id: str | None, thread_id: str | None, *, user_id: str | None = None
