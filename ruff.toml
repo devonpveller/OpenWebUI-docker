@@ -8,6 +8,7 @@ target-version = "py311"
 line-length = 120
 
 exclude = [
+    ".claude/skills",            # OB1-mirror skills stay byte-identical (D-11) — not lint scope
     "scripts/archive",           # retired code, kept for history
     "documentation",             # archived snippets inside docs
     "owui",                      # deploy-by-paste snapshots incl. vendored 11k-line tools
