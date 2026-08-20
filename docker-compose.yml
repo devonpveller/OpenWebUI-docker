@@ -23,7 +23,6 @@ services:
       # (/app/backend/.webui_secret_key, outside the data volume), so a recreate would
       # rotate it and break every encrypted-at-rest value in webui.db + all sessions.
       - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY}
-      - OLLAMA_HOST=http://localhost:11434
       - USE_CUDA=true
       - USE_CUDA_DOCKER=true
       - NVIDIA_VISIBLE_DEVICES=${GPU_AISTACK_DEVICE_ID:-1}
@@ -31,7 +30,7 @@ services:
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
       - TRANSFORMERS_CACHE=/tmp/transformers_cache
       - HF_HOME=/tmp/hf_cache
-      # Performance Optimizations for faster Ollama communication
+      # OWUI HTTP-client timeouts (backend/model calls)
       - AIOHTTP_CLIENT_TIMEOUT=3600
       - AIOHTTP_CLIENT_TIMEOUT_MODEL_LIST=60
       # AIOHTTP_CLIENT_TIMEOUT_TOOL_CALL was set here until 2026-08-20 and was a
@@ -230,46 +229,6 @@ services:
       start_period: 30s
     labels:
       - "com.centurylinklabs.watchtower.enable=false"
-
-  # ollama: # DISABLED - no longer used; llama-cpp (llama-swap) handles all LLM inference
-  #   image: ollama/ollama:latest
-  #   container_name: ollama
-  #   network_mode: service:openwebui
-  #   volumes:
-  #     - ./data/ollama:/root/.ollama
-  #   environment:
-  #     - NVIDIA_VISIBLE_DEVICES=${GPU_AISTACK_DEVICE_ID:-1}
-  #     - CUDA_VISIBLE_DEVICES=${GPU_AISTACK_DEVICE_ID:-1}
-  #     - NVIDIA_DRIVER_CAPABILITIES=compute,utility
-  #     # Optimized Ollama settings for faster response to OpenWebUI
-  #     - OLLAMA_KEEP_ALIVE=1200 # Keep models in memory longer (20 minutes in seconds)
-  #     - OLLAMA_HOST=0.0.0.0:11434
-  #     - OLLAMA_ORIGINS=*
-  #     - OLLAMA_MAX_LOADED_MODELS=2 # Allow multiple models to stay loaded
-  #     - OLLAMA_NUM_PARALLEL=2 # Allow parallel requests
-  #     - OLLAMA_FLASH_ATTENTION=1 # Enable flash attention for faster inference
-  #   deploy:
-  #     resources:
-  #       reservations:
-  #         devices:
-  #           - driver: nvidia
-  #             device_ids: ["${GPU_AISTACK_DEVICE_ID:-1}"]
-  #             capabilities: [ gpu ]
-  #   restart: unless-stopped
-  #   pull_policy: never
-  #   security_opt:
-  #     - no-new-privileges:true
-  #   depends_on:
-  #     openwebui:
-  #       condition: service_healthy
-  #   labels:
-  #     - "com.centurylinklabs.watchtower.enable=false"
-  #   healthcheck:
-  #     test: [ "CMD", "ollama", "list" ]
-  #     interval: 30s
-  #     timeout: 10s
-  #     retries: 3
-  #     start_period: 30s
 
   llama-cpp-upstream:
     image: ghcr.io/mostlygeek/llama-swap:cuda

@@ -313,7 +313,7 @@ echo ========================================
 echo.
 echo [INFO] Effective container GPU environment:
 cd /d "%SCRIPT_DIR%\.."
-for %%S in (openwebui ollama llama-cpp-upstream llama-cpp-embed-upstream) do (
+for %%S in (openwebui llama-cpp-upstream llama-cpp-embed-upstream) do (
     echo.
     echo [INFO] %%S:
     docker inspect %%S --format "{{range .Config.Env}}{{println .}}{{end}}" | findstr /R /C:"^NVIDIA_VISIBLE_DEVICES=" /C:"^NVIDIA_DRIVER_CAPABILITIES="
