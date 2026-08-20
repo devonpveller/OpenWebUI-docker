@@ -3,6 +3,9 @@
 # Shell scripts should always use LF line endings (Unix style)
 *.sh text eol=lf
 entrypoint.sh text eol=lf
+# Git hooks are shell scripts with NO .sh extension, so they miss the rule
+# above. CRLF would break them under Git Bash ("$'': command not found").
+.githooks/* text eol=lf
 
 # Docker files should use LF
 Dockerfile* text eol=lf

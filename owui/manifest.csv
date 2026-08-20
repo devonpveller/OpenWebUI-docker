@@ -10,7 +10,7 @@ pipes/githelper.py,pipe,GitHelper,githelper,27607
 pipes/github_chat_mcp.py,pipe,GitHub Chat MCP,github_chat_mcp,10953
 pipes/little_coder.py,pipe,Little Coder,little_coder,32467
 tools/code_agent_tools.py,tool,Code Agent Tools,code_agent_tools,33235
-tools/deep_research.py,tool,Deep Research,deep_research,10236
+tools/deep_research.py,tool,Deep Research,deep_research,10234
 tools/fileshed.py,tool,FileShed,fileshed,438768
 tools/github_chat_mcp_tools.py,tool,GitHub Repo Analyzer,github_chat_mcp_tools,50690
 tools/mnemory.py,tool,mnemory,mnemory,23789

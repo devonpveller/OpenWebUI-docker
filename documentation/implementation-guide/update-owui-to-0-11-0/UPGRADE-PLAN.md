@@ -552,9 +552,15 @@ retry succeeds. Same class as the known `openbrain-mcp` stale-connection issue
 (`openbrain-mcp` *was* restarted with the DB; `openbrain-ext` was missed).
 Clears with `docker restart openbrain-ext`.
 
-**Still not exercised:** an end-to-end `deep_research` run (the tool is present,
-its valve is correct, and `openbrain-research` is reachable — but no job has been
-submitted since the upgrade).
+**`deep_research` verified end-to-end 2026-08-20** (operator, in the UI). A live
+job returned sourced findings with attribution, emitted `[GAP]` markers for
+sub-topics it could not ground rather than fabricating, recorded the open gaps,
+and cited only the source actually used — coverage reported honestly at 25%.
+That is the grounded-only contract behaving exactly as designed, and it exercises
+the deepest chain in the stack: **OWUI 0.11.0 → `deep_research` thin client →
+`openbrain-research` (Deno) → LiteLLM → llm-queue → llama.cpp**.
+
+**With that, every path is verified. No unexercised paths remain from this upgrade.**
 
 ### Not done (deliberately, still open)
 
@@ -565,10 +571,110 @@ submitted since the upgrade).
 - Dead-tree retirement (Adjacent item F) — separate decision.
 - **Adjacent item D (plaintext API keys in `webui.db`) is unresolved.** Rotation
   remains an operator decision; the rehearsal copy that held them was destroyed.
-- **`deep_research` end-to-end** — still the one unexercised path (see above).
 
 **Rollback (still available):** stop `openwebui` + `tailscale` → restore
 `backups/openwebui/manual/webui-20260820-preupgrade-0110.db` over `webui.db` in
 the `ai-stack_openwebui-data` volume → revert `Dockerfile.openwebui-gpu` base tag
 to `v0.9.6` → rebuild → start `openwebui`, wait healthy, then start `tailscale`.
 Plugin content needs no rollback (model methods are async in both versions).
+
+---
+
+## FOLLOW-UPS RESOLVED — 2026-08-20
+
+Everything the EXECUTED record left open (except key rotation, deferred by the
+operator) is now closed. Final state re-verified at **29/29**, `owui/` byte-identical
+to live for all 16 plugins.
+
+### 1. Backup throughput — FIXED (~50 min → 8.5 min)
+
+**Correction to the EXECUTED record:** the deviation note projected "2+ hours" for a
+full-volume tar. That was extrapolated from a 60-second sample and was wrong. The
+backup log gives the true figure — **~50 minutes, consistently**, five nights running
+(02:00 → ~02:50). Still far too long for a maintenance window, so aborting the
+cutover tar was still the right call, but the number quoted was not.
+
+Root cause was single-threaded `gzip` over a ~40 GB volume. Volume breakdown:
+
+| Path | Size | Nature |
+|---|---|---|
+| `vector_db/` | **29.1 GB** | derived (Chroma; 22,896 collections, one 12.3 GB `chroma.sqlite3`) |
+| `cache/` | 7.9 GB | **fully regenerable** (HF embedding/reranker models, whisper, audio) |
+| `webui.db` | 1.1 GB | **irreplaceable** |
+| `webui.db.backup_20260424_184325` | 605 MB | stale April copy, still in the live volume |
+| `uploads/` + `user_files/` | ~0.5 GB | **irreplaceable** |
+
+Only ~1.6 GB is genuinely irreplaceable. Two changes to
+[`backup/openwebui-backup.sh`](../../../backup/openwebui-backup.sh):
+
+- **`pigz -p 8` instead of `gzip`** — benchmarked **8× faster** on this data
+  (466 MB sample: 16 s → 2 s). Output is a standard gzip stream, so `.tar.gz` and the
+  restore path are unchanged. Falls back to `gzip` if pigz is absent, so a failed
+  install can never break backups. Threads are capped at 8, not `nproc` (14),
+  because the sidecar is deliberately memory-limited to 1 g and runs at 02:00
+  alongside the OB1 scheduled slice.
+- **`cache/` excluded** — 7.9 GB of regenerable model snapshots.
+  *Restore note: first boot after a restore needs internet to re-pull the
+  embedding/reranker models.*
+
+`docker-compose.yml` installs pigz at sidecar start (best-effort, logged).
+
+**Measured result:** `510s` (8.5 min), 17.7 GB → 11.9 GB. Archive verified with
+`pigz -t` — full decompression valid, sha256 written.
+
+> `vector_db/` was **deliberately left in**. It is derived data, but rebuilding means
+> re-embedding thousands of files. It is also 72% of what remains — if OWUI RAG is
+> ever formally retired (newest knowledge collection is dated 2026-05-14), excluding
+> it would take the nightly to roughly a minute. **Operator decision, not taken here.**
+
+### 2. `openbrain-ext` stale DB session — FIXED
+
+`docker restart openbrain-ext`. It had been up 2 weeks holding connections opened
+before `openbrain-db` restarted 6 days ago, so the first extension call after an idle
+period hit a dead session (`list_vendors` → 500, fine on retry). `openbrain-mcp` had
+been restarted with the DB; `openbrain-ext` was missed. Extension spec now answers
+200 on a cold first call.
+
+### 3. OWUI config cleanups — DONE
+
+Applied with `openwebui` **stopped**, so its in-memory config could not clobber the
+writes. All four in one restart window:
+
+- **Two dead connections removed** — `http://169.254.83.107:5506/v1` and
+  `http://host.docker.internal:5506/v1` (stale LM Studio; both connection-refused).
+  Remaining: `api.openai.com`, `host.docker.internal:9099` (Pipelines),
+  `llama-cpp:8080`, `llama-cpp-embed:8080`.
+- **Duplicate tool server removed** — `host.docker.internal:8000` was registered
+  twice, differing only by `path`.
+- **`deep_research` stale default fixed** — in-code default
+  `host.docker.internal:8818` → `http://openbrain-research:8000`. The stored valve
+  (already correct) was verified unchanged afterwards. The dormant landmine is gone:
+  a valve reset no longer breaks research.
+- **`code_agent` repointed** — `MODEL_ID` `Qwen3.6-35B-A3B-Q4_K_M.gguf` (removed from
+  the gateway 2026-06-12) → `qwen36-27b`. Still `is_active=0`; this only means
+  enabling it would no longer fail instantly.
+
+> **⚠️ A regression was introduced and fixed during this step — worth reading.**
+> De-duplicating the tool servers dropped `Initialized 3 tool server(s)` to **2**.
+> The two duplicate entries were *not* equivalent: the one kept (first in list order)
+> carried `config.enable: false`, and the one removed was the **enabled** one. Both
+> URLs and both `path` forms resolved 200, so probing the endpoint could not have
+> caught it — only the init count did. Fixed by setting `config.enable: true` on the
+> surviving entry; back to **3**. **Lesson: when de-duplicating OWUI tool servers,
+> dedupe on `url` but merge on `config.enable` — never keep the first blindly.**
+
+**Separate finding, not acted on:** that `host.docker.internal:8000` registration has
+**stale metadata**. Its stored `info.name` is `nlp-microservice` (spaCy), but the
+endpoint now actually serves `Local LAN STT→LM Studio→TTS v2.1.0`. The registration
+still works, but the tools it exposes are not what the entry claims. Worth
+re-registering or removing.
+
+### Still open (operator decisions)
+
+- **Plaintext API keys in `webui.db`** — deferred by the operator.
+- **`webui.db.backup_20260424_184325` (605 MB)** — a four-month-old stale copy inside
+  the live volume, backed up nightly. Deliberately **not** deleted: removing files is
+  the operator's call. Deleting it from the volume is the clean fix (it then leaves
+  the backups naturally); excluding it from the tar instead would silently stop
+  protecting it.
+- **`vector_db/` (29.1 GB, 72% of the backup)** — see above.

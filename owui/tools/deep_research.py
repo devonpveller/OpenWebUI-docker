@@ -32,7 +32,7 @@ from pydantic import BaseModel, Field
 class Tools:
     class Valves(BaseModel):
         research_url: str = Field(
-            default="http://host.docker.internal:8818",
+            default="http://openbrain-research:8000",
             description="Base URL of the openbrain-research service (loopback 8818 on the OB1 host, or http://openbrain-research:8000 if OWUI shares its network).",
         )
         brain_key: str = Field(
