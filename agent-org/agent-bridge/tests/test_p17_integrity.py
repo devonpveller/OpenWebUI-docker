@@ -1,7 +1,7 @@
 """P17 — plan-gate, sweep and delivery integrity (evidence: gym-015, 2026-07-20).
 
 Each test is one observed gym-015 failure. The full evidence for every finding — event ids,
-git output, reproduced commands — is in docs/P17-plan-gate-and-sweep-integrity.md; the
+git output, reproduced commands — is in docs/log/P17-plan-gate-and-sweep-integrity.md; the
 docstrings here carry the short form so a failure explains itself.
 
 The organising principle behind the fixes (ORCHESTRATION-DESIGN §11, "every boundary in the

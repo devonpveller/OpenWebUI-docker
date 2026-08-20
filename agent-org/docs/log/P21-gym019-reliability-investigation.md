@@ -64,8 +64,8 @@ gym-019's hold cost **294 minutes** (`plan_drafted 11:28:36` → `plan_approved 
   `RISKY={irreversible,cross_effort,cascading_refactor}` → `dry_run_status=required`) → default
   `plan_approval:"risky"` (`config.py:308`) → `_plan_required` (`orchestrator.py:5891-5899`) HOLDs
   until a human types `approve <effort>`.
-- Already logged as a known defect: `docs/P8-org-self-knowledge.md:204-207` ("Risk classification
-  is a coin flip … make it deterministic/explainable per (goal, project)"); `docs/P9-...:880-882`.
+- Already logged as a known defect: `docs/log/P8-org-self-knowledge.md:204-207` ("Risk classification
+  is a coin flip … make it deterministic/explainable per (goal, project)"); `docs/log/P9-...:880-882`.
 
 ### F3 — a 60-min per-turn wall-clock deadline abandons a hard single task (severity: MEDIUM)
 

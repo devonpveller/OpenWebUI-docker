@@ -3,7 +3,7 @@
 The org used to run out of work before the project was done: it QA'd once or twice, hit a hard
 `n >= 2` cap, and stopped — with no task queue and no notion of "next item", so "nothing left to
 do" was an ACCIDENT OF AN EMPTY MODEL REPLY rather than a computed fact. These tests hold the
-replacement to its acceptance criteria (docs/P10-the-drain-loop.md):
+replacement to its acceptance criteria (docs/log/P10-the-drain-loop.md):
 
   P10.1  three lenses, fresh every round, no "nothing" affordance, no verdict framing, and the
          goal WITHHELD from the goal-alignment lens (the structural debias)

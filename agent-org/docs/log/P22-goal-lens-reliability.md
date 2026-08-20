@@ -2,7 +2,7 @@
 
 gym-020 was the first run with the count (P19), one-task dispatch (P20) and reliability (P21) all in
 place. P21 worked — F2a classed the goal `routine` (no plan-approval idle), and nothing abandoned or
-stalled. But it still did NOT converge, and the audit (docs/P21-...md flow) shows a single root
+stalled. But it still did NOT converge, and the audit (docs/log/P21-...md flow) shows a single root
 cause, downstream of everything P21 fixed.
 
 ## Evidence (gym-020 audit)

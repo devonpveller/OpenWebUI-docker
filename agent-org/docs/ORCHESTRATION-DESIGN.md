@@ -3,7 +3,7 @@
 **What this is.** The distilled design for the agent-org orchestration system, from the
 2026-07-17 brainstorm between the operator and Claude. It is deliberately kept **clean of dev
 logs, experiment mechanics, commit hashes, and register churn** — those live in
-[`P9-make-the-fixes-real.md`](P9-make-the-fixes-real.md), which is the execution record. This
+[`log/P9-make-the-fixes-real.md`](log/P9-make-the-fixes-real.md), which is the execution record. This
 file is the *design north star*: read it to understand what we are building and why.
 
 **We are building the ORCHESTRATION, not any test project.** The todo CLI used in the gym is a
@@ -598,5 +598,5 @@ is a command run against the delivery, not prose) and **operator-in-the-loop** (
 `accept check for <project>: <command> :: <note>`, not auto-conversion). Auto-conversion remains a
 future addition on top of this base.
 
-The build sequence and its evidence are tracked in `P9-make-the-fixes-real.md`. This document is
+The build sequence and its evidence are tracked in `log/P9-make-the-fixes-real.md`. This document is
 the *what and why*; that one is the *how and when*.

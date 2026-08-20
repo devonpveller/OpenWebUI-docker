@@ -1,6 +1,6 @@
 """P18 — observation fidelity (evidence: gym-016, 2026-07-20).
 
-Each test is one gym-016 failure. Full evidence in docs/P18-observation-fidelity.md.
+Each test is one gym-016 failure. Full evidence in docs/log/P18-observation-fidelity.md.
 
 The through-line, unchanged from P17 and from ORCHESTRATION-DESIGN §11: a claim that can be
 settled by running something must be settled by running it. P18 extends that from "does this

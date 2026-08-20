@@ -6,7 +6,7 @@ REPRODUCE the symptom … BEFORE: FAIL — the failing run's evidence on the unf
 three PRIOR ATTEMPTS at an error that never existed. Two independent classifiers misfired on
 ordinary English and their outputs compounded.
 
-See docs/P12-intake-classification.md. Fakes only.
+See docs/log/P12-intake-classification.md. Fakes only.
 """
 
 from __future__ import annotations
