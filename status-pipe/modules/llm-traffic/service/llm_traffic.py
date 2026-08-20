@@ -373,20 +373,8 @@ def validate(input_data: Dict[str, Any]) -> Dict[str, Any]:
 
 
 if __name__ == "__main__":
-    if not sys.stdin.isatty():
-        try:
-            data = json.loads(sys.stdin.read())
-            print(json.dumps(main(data), indent=2, ensure_ascii=False))
-        except Exception as e:
-            print(json.dumps({"error": str(e), "type": "CLI execution error"}, indent=2))
-            sys.exit(1)
-    elif len(sys.argv) > 1:
-        if sys.argv[1] == "--describe":
-            print(json.dumps(describe(), indent=2))
-        elif sys.argv[1] == "--health":
-            print(json.dumps(health(), indent=2))
-        else:
-            text = " ".join(sys.argv[1:])
-            print(json.dumps(main({"request_id": str(time.time()), "input": text}), indent=2, ensure_ascii=False))
-    else:
-        print(json.dumps(describe(), indent=2))
+    from pathlib import Path as _Path
+    import sys as _sys
+    _sys.path.insert(0, str(_Path(__file__).resolve().parents[3]))
+    from utilities.module_cli import run_module_cli
+    run_module_cli(main, describe, health)

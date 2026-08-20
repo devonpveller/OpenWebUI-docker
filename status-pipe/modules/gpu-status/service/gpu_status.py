@@ -1110,29 +1110,8 @@ def validate(input_data: Dict[str, Any]) -> Dict[str, Any]:
     return gpu_module.validate(input_data)
 
 if __name__ == "__main__":
-    # Check for piped input first
-    if not sys.stdin.isatty():
-        # Input from pipe
-        try:
-            input_data = json.loads(sys.stdin.read())
-            result = main(input_data)
-            print(json.dumps(result, indent=2, ensure_ascii=False))
-        except Exception as e:
-            error_result = {"error": str(e), "type": "CLI execution error"}
-            print(json.dumps(error_result, indent=2))
-            sys.exit(1)
-    elif len(sys.argv) > 1:
-        # CLI mode with arguments
-        if sys.argv[1] == "--describe":
-            print(json.dumps(describe(), indent=2))
-        elif sys.argv[1] == "--health":
-            print(json.dumps(health(), indent=2))
-        else:
-            # Process command line arguments as input
-            input_text = " ".join(sys.argv[1:])
-            input_data = {"request_id": str(time.time()), "input": input_text}
-            result = main(input_data)
-            print(json.dumps(result, indent=2, ensure_ascii=False))
-    else:
-        # Interactive mode - show description
-        print(json.dumps(describe(), indent=2))
+    from pathlib import Path as _Path
+    import sys as _sys
+    _sys.path.insert(0, str(_Path(__file__).resolve().parents[3]))
+    from utilities.module_cli import run_module_cli
+    run_module_cli(main, describe, health)
