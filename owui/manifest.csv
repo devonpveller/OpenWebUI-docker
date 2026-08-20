@@ -15,3 +15,11 @@ tools/fileshed.py,tool,FileShed,fileshed,438768
 tools/github_chat_mcp_tools.py,tool,GitHub Repo Analyzer,github_chat_mcp_tools,50690
 tools/mnemory.py,tool,mnemory,mnemory,23789
 tools/superpowers_tool.py,tool,superpowers_tool,superpowers_tool,149450
+skills/skill-creator.md,skill,Skill Creator,skill-creator,33653
+skills/docx.md,skill,Docx,docx,20674
+skills/canvas-design.md,skill,Canvas Design,canvas-design,12068
+skills/doc-coauthoring.md,skill,Doc Coauthoring,doc-coauthoring,16190
+skills/github-repo-analyzer.md,skill,GitHub Repo Analyzer,github-repo-analyzer,29506
+skills/feature-validation-workflow.md,skill,Feature Validation Workflow,feature-validation-workflow,6923
+skills/github-repo-expert.md,skill,Github Repo Expert,github-repo-expert,4466
+skills/openwebui-tools.md,skill,Openwebui Tools,openwebui-tools,14502

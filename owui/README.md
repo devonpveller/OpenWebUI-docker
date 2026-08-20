@@ -17,8 +17,17 @@ the id is cryptic the filename uses the friendly name instead — e.g. the
 | `filters/` | Filter functions              | `context_window_manager`, `mnemory_persistent_memory` |
 | `pipes/`   | Pipe functions (custom models)| `server_status` (the AI-Stack unified status pipe), `little_coder`, `githelper`, `github_chat_mcp`, `code_agent` *(inactive)* |
 | `actions/` | Action functions (buttons)    | `add_web_sources_to_knowledge`, `copy_research_note`, `copy_sources` |
+| `skills/`  | Skills (attached to models via `skillIds`) | `skill-creator`, `docx`, `canvas-design`, `doc-coauthoring`, `github-repo-analyzer`, `feature-validation-workflow`, `github-repo-expert`, `openwebui-tools` |
 
-`manifest.csv` lists `file, type, name, owui_id, bytes` for all 16. All are
+**Skills note (2026-08-20):** files are named by their OWUI **skill id**, which
+is what `skillIds` on a model references — NOT by display name (the trap that
+hid this class from audits: `github-repo-analyzer` was previously a root-level
+file named `github-chat-mcp.md`). All 8 exported live from `webui.db`
+2026-08-20; the old partial root `skills/` folder (3 of 8, stale names) was
+retired the same day in favour of this complete set.
+
+`manifest.csv` lists `file, type, name, owui_id, bytes` for all 16 function
+files + the 8 skills. Functions are
 async-compatible with OWUI **0.11.0** (re-verified 2026-08-20 against v0.11.0
 source: `Files/Groups/Chats/Notes/Knowledges` model methods are still `async`,
 so the 2026-06 async port carries forward unchanged).
