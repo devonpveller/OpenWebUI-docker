@@ -23,7 +23,12 @@ import uuid
 import httpx
 
 GATEWAY = "http://127.0.0.1:8061"
-KEY = "gw-eprbHZf9is5R40BjzptiAQXlQQ9Dy9ZhapPvR3FEpSg"
+KEY = os.environ.get("OPENBRAIN_GATEWAY_KEY", "")
+if not KEY:
+    sys.exit(
+        "OPENBRAIN_GATEWAY_KEY is not set. Export it from OB1/docker/.env "
+        "before running (never hardcode it here - this file is tracked)."
+    )
 
 PASS = "OK"
 FAIL = "FAIL"

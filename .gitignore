@@ -23,8 +23,9 @@ tailscale-state/*.log*
 # re-include files matched by an excluded *glob*.)
 backup/*
 __pycache__/
-# Local MCP config (contains Open Brain access key)
+# Local MCP configs (contain the Open Brain access key)
 .mcp.json
+.vscode/mcp.json
 # Vendored external repo (devonpveller/OB1 @ develop) — own .git, not tracked here
 OB1/
 # Deploy keys / mounted secrets (e.g. openbrain-wiki private remote key)
