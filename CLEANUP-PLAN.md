@@ -6,7 +6,44 @@ part lettering, so v2 references stay meaningful). v2 was itself audited on
 code, a 280-file documentation triage, deploy plane, monoliths/duplication,
 scripts inventory, agent-communication fabric). All file:line references are
 from that 2026-08-20 snapshot.
-**Status:** PLAN ONLY — nothing in this document has been executed.
+**Status:** IN EXECUTION — the 2026-08-20 execution day (operator-authorized,
+branch `refactor/ai-stack-cleanup`) landed the bulk of Parts A–E, G.1, D.1/D.2,
+I and the J prep. Ledger below; unchecked items carry their blockers.
+
+## Execution ledger — 2026-08-20 (~30 commits)
+
+**DONE:** A.1 steps 2–4 (both key files defanged + `gw-` guard pattern; ROTATION
+STILL PENDING = operator), A.2 (narrow mounts, verified in-container), A.3→D-2
+(watchtower RETIRED; zero docker.sock mounts workspace-wide), A.4 all rows
+(state files, root/root sidecar creds verified by live backup run, `.env.example`
+complete, 6 backup files tracked, alerter dup removed, stale git-hook deleted,
+SECURITY.md §0), B.2, B.3, B.4 with all five traps honored, B.5 (8 skills
+exported + manifest; verified against live webui.db), C.1–C.9 (README rewrite,
+copilot regen, update-docs merge, ~70 files archived, 7 junk deleted, runbooks/,
+impl-guide index, agent-org docs/log split, CLAUDE.md/scripts-README/stack-map
+truth sync), D.1 (compose split, config-diff proven identical), D.2 (entrypoint
+318 lines, 8 routes verified live), D-5 (LM Studio fully retired incl. `.env`
+boot-stall), D-13 + J.3 (lc-mcpo/search-mcpo retired, container rule applied),
+D-14 (action deactivated + archived), D-15 (module archived, routing fixed),
+E.2/J.2 (mm_lib, 6→1 loaders, bridge tests green), E.3 (module CLI extracted,
+verified live), I.1/I.2 (ruff gate F+E9 clean in scope, CI workflow, 88+ dead
+imports/vars removed), J.1 (cutover RUNBOOK prepared — deliberately not
+flipped), D-9-lite (mnemory plugin defaults fixed; plane kept), D-11 (resolved
+as document-not-delete: skills provenance README).
+
+**IN FLIGHT:** F.1 extraction #1 (pending-decision semantics; gated on the
+723-test Docker suite).
+
+**BLOCKED ON OPERATOR:** key rotation (A.1 step 1); D-1 scrub; D-4 (20 GB
+data-backup); D-7 (main + 9 branches); iks-dev overlay teardown (#11);
+data/openwebui 1.2 GB (#12); G.2 physical moves + watchdog rename (needs an
+ELEVATED session to re-register Scheduled Tasks — commands in scripts/README);
+J.1 flip (needs operator reachable); H.1 (after rotation + OB1's uncommitted
+k8s work lands); H.2 (needs a GitHub repo created).
+
+**DEFERRED BY DESIGN:** E.1 gateway unification (coupled to D-9 + H.1);
+F.1 #2–#9 (between gym rounds); F.2; E.4 (OB1-side); D.1 x-anchors polish;
+D-12 (wire-or-demote stack-services.json).
 
 Discipline for every phase (unchanged from v1/v2, plus one addition):
 
