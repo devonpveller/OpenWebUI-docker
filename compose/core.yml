@@ -37,7 +37,7 @@ services:
       # AIOHTTP_CLIENT_TIMEOUT_TOOL_CALL was set here until 2026-08-20 and was a
       # PHANTOM: no reader exists in OWUI 0.9.6 or 0.11.0 (verified by grepping
       # env.py in both). It never bounded tool calls. The real knob is below --
-      # it governs fetching TOOL SERVER specs (mcpo / lc-mcpo), default 10s,
+      # it governs fetching TOOL SERVER specs (the Open Brain mcpo servers), default 10s,
       # which is tight for a cold MCP server. Raised deliberately.
       - AIOHTTP_CLIENT_TIMEOUT_TOOL_SERVER_DATA=30
       - MODELS_CACHE_TTL=10 # Cache model list for 10 seconds to reduce repeated calls
@@ -55,7 +55,7 @@ services:
       - ENABLE_PLUGINS=true
       # open-terminal moved into the little-coder control plane (Tool chapter):
       # it left OWUI's network namespace, so OWUI's direct terminal access
-      # ends here. It returns in chapter 2 via lc-mcpo (design §3.4, Decision
+      # ends here. It returns in chapter 2 via a keyed MCP edge (design §3.4, Decision
       # Log 2026-05-20). Re-enable only when chapter 2 lands.
       # - ENABLE_OPEN_TERMINAL=true
       # - TERMINAL_SERVER_CONNECTIONS=[{"id":"open-terminal","name":"Open Terminal","url":"http://localhost:8000","key":"${OPEN_TERMINAL_API_KEY}"}]
@@ -96,34 +96,10 @@ services:
       retries: 3
       start_period: 60s
 
-  watchtower:
-    # Pinned by digest (was :latest — an unpinned auto-updater holding the
-    # docker.sock is host-root-equivalent supply-chain exposure). Retirement
-    # in favor of the manual update runbook is CLEANUP-PLAN v3 decision D-2.
-    image: containrrr/watchtower@sha256:6dd50763bbd632a83cb154d5451700530d1e44200b268a4e9488fefdfcf2b038
-    container_name: watchtower
-    logging: # sysadmin log cap (disk-prune-watcher); applies on recreate
-      driver: json-file
-      options:
-        max-size: "100m"
-        max-file: "5"
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro # Read-only access
-      # (post-update-hook.sh + .:/compose-dir mounts removed 2026-08-20: the
-      # scratch-image watchtower has no shell and no container carries a
-      # lifecycle label, so the hook never executed once. The OWUI→tailscale
-      # restart coordination it intended is handled by the health watchdog.)
-    environment:
-      - DOCKER_API_VERSION=1.44 # image bakes in 1.25; engine 29+ (Docker Desktop 4.80) requires >=1.40
-      - WATCHTOWER_CLEANUP=true # remove old images
-      - WATCHTOWER_POLL_INTERVAL=120 # check every 2 minutes for testing
-      - WATCHTOWER_INCLUDE_STOPPED=false # Only running containers
-      - WATCHTOWER_DEBUG=true # Enable debug logging to verify container detection
-      - WATCHTOWER_RUN_ONCE=false # Keep running
-    restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true # Prevent privilege escalation
-
+  # watchtower retired 2026-08-20 (v3 D-2): an unpinned auto-updater holding
+  # docker.sock was host-root-equivalent supply-chain risk for one effective
+  # target (openwebui). Updates are manual + verified per
+  # documentation/runbooks/UPDATE-MANAGEMENT.md.
   tailscale:
     build:
       context: .
@@ -210,8 +186,8 @@ services:
       - HTTPS_PROXY=http://lc-egress:8888
       - http_proxy=http://lc-egress:8888
       - https_proxy=http://lc-egress:8888
-      - NO_PROXY=llama-cpp,little-coder,lc-mcpo,lc-egress,localhost,127.0.0.1
-      - no_proxy=llama-cpp,little-coder,lc-mcpo,lc-egress,localhost,127.0.0.1
+      - NO_PROXY=llama-cpp,little-coder,lc-egress,localhost,127.0.0.1
+      - no_proxy=llama-cpp,little-coder,lc-egress,localhost,127.0.0.1
     volumes:
       - little-coder-workspace:/workspace
     restart: unless-stopped

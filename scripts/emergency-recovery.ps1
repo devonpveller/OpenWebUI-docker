@@ -15,9 +15,9 @@ $ErrorActionPreference = "Stop"
 #           (llm-queue = B2 admission controller between the upstreams and LiteLLM;
 #            llm-gateway-ui = master-key'd Admin-UI sidecar / analytics dashboard)
 #   memory  mnemory, mnemory-gateway
-#   search  vpn, tor, redis, searxng, gateway, mcpo (Private Search Gateway)
-#   coder   open-terminal, little-coder, lc-mcpo, lc-egress
-#   aux     smolcrawl-pipelines, surrealdb, open_notebook, watchtower
+#   search  vpn, tor, redis, searxng, gateway (Private Search Gateway)
+#   coder   open-terminal, little-coder, lc-egress
+#   aux     smolcrawl-pipelines, surrealdb, open_notebook
 #   backup  mnemory-backup, openwebui-backup, little-coder-backup,
 #           smolcrawl-backup, tailscale-backup, lm-models-backup,
 #           open-notebook-backup, openbrain-db-backup, openbrain-wiki-backup
@@ -54,9 +54,8 @@ $Script:MainStackServices = @(
     "llm-queue", "llm-gateway-db", "llm-gateway", "llm-gateway-ui", "tailscale",
     "mnemory", "mnemory-gateway",
     "smolcrawl-pipelines", "surrealdb", "open_notebook",
-    "vpn", "tor", "redis", "searxng", "gateway", "mcpo",
-    "open-terminal", "little-coder", "lc-mcpo", "lc-egress",
-    "watchtower",
+    "vpn", "tor", "redis", "searxng", "gateway",
+    "open-terminal", "little-coder", "lc-egress",
     # Backup cron sidecars (see helper arrays below).
     "mnemory-backup", "openwebui-backup", "little-coder-backup",
     "smolcrawl-backup", "tailscale-backup", "lm-models-backup", "open-notebook-backup",
@@ -289,12 +288,12 @@ function Test-BasicConnectivity {
             $states["openwebui"], $states["llama-cpp-upstream"], $states["llama-cpp-embed-upstream"], $states["tailscale"])
         Write-Log "INFO" ("Memory - mnemory: {0}, mnemory-gateway: {1}" -f `
             $states["mnemory"], $states["mnemory-gateway"])
-        Write-Log "INFO" ("Search - vpn: {0}, tor: {1}, redis: {2}, searxng: {3}, gateway: {4}, mcpo: {5}" -f `
-            $states["vpn"], $states["tor"], $states["redis"], $states["searxng"], $states["gateway"], $states["mcpo"])
-        Write-Log "INFO" ("Coder  - open-terminal: {0}, little-coder: {1}, lc-mcpo: {2}, lc-egress: {3}" -f `
-            $states["open-terminal"], $states["little-coder"], $states["lc-mcpo"], $states["lc-egress"])
-        Write-Log "INFO" ("Aux    - smolcrawl-pipelines: {0}, surrealdb: {1}, open_notebook: {2}, watchtower: {3}" -f `
-            $states["smolcrawl-pipelines"], $states["surrealdb"], $states["open_notebook"], $states["watchtower"])
+        Write-Log "INFO" ("Search - vpn: {0}, tor: {1}, redis: {2}, searxng: {3}, gateway: {4}" -f `
+            $states["vpn"], $states["tor"], $states["redis"], $states["searxng"], $states["gateway"])
+        Write-Log "INFO" ("Coder  - open-terminal: {0}, little-coder: {1}, lc-egress: {2}" -f `
+            $states["open-terminal"], $states["little-coder"], $states["lc-egress"])
+        Write-Log "INFO" ("Aux    - smolcrawl-pipelines: {0}, surrealdb: {1}, open_notebook: {2}" -f `
+            $states["smolcrawl-pipelines"], $states["surrealdb"], $states["open_notebook"])
         Write-Log "INFO" ("Backup - mnemory: {0}, owui: {1}, lc: {2}, smolcrawl: {3}, tailscale: {4}, lm-models: {5}, on: {6}, ob1-db: {7}, ob1-wiki: {8}" -f `
             $states["mnemory-backup"], $states["openwebui-backup"], $states["little-coder-backup"], `
             $states["smolcrawl-backup"], $states["tailscale-backup"], $states["lm-models-backup"], `
@@ -418,10 +417,10 @@ function Invoke-MinimalRecovery {
         # nudge them so a cold dependent comes back.
         docker compose up -d llm-queue llm-gateway
 
-        docker compose up -d watchtower mnemory mnemory-gateway `
+        docker compose up -d mnemory mnemory-gateway `
             smolcrawl-pipelines surrealdb open_notebook `
-            vpn tor redis searxng gateway mcpo `
-            open-terminal little-coder lc-mcpo lc-egress
+            vpn tor redis searxng gateway `
+            open-terminal little-coder lc-egress
 
         # Backup cron sidecars touching only main/host resources (safe anytime).
         Start-ServiceGroup "main backups" $Script:MainBackups
@@ -564,15 +563,14 @@ function Invoke-EmergencyRecovery {
     Stop-OB1Stack
 
     # Watchtower (independent monitor).
-    Stop-ServiceGroup "Watchtower" @("watchtower")
 
     # little-coder control plane (reverse dependency order).
     Stop-ServiceGroup "little-coder control plane" `
-        @("little-coder-backup", "lc-egress", "lc-mcpo", "little-coder", "open-terminal")
+        @("little-coder-backup", "lc-egress", "little-coder", "open-terminal")
 
     # Private Search Gateway (reverse dependency order).
     Stop-ServiceGroup "Private Search Gateway" `
-        @("mcpo", "gateway", "searxng", "redis", "tor", "vpn")
+        @("gateway", "searxng", "redis", "tor", "vpn")
 
     # Tailscale (shares the OpenWebUI network namespace).
     if (-not (Stop-ServiceGracefully "tailscale" 30)) {
@@ -769,10 +767,10 @@ function Invoke-EmergencyRecovery {
         Write-Log "WARN" "Failed to start open-notebook: $_"
     }
 
-    # Private Search Gateway — vpn -> tor -> redis -> searxng -> gateway -> mcpo.
+    # Private Search Gateway — vpn -> tor -> redis -> searxng -> gateway.
     # depends_on chains the internal order; vpn (Mullvad) is searxng's egress and
     # the WireGuard tunnel is slow to build; tor stays as the page-fetch egress.
-    Start-ServiceGroup "Private Search Gateway" @("vpn", "tor", "redis", "searxng", "gateway", "mcpo")
+    Start-ServiceGroup "Private Search Gateway" @("vpn", "tor", "redis", "searxng", "gateway")
     if (-not (Wait-ForHealthy "gateway" 150)) {
         Write-Log "WARN" "Search gateway slow to come up, but continuing..."
     }
@@ -801,12 +799,11 @@ function Invoke-EmergencyRecovery {
         Write-Log "WARN" "Failed to start little-coder: $_"
     }
 
-    Start-ServiceGroup "little-coder edges" @("lc-mcpo", "lc-egress", "little-coder-backup")
+    Start-ServiceGroup "little-coder edges" @("lc-egress", "little-coder-backup")
 
     # Start Watchtower (independent service)
     Write-Log "INFO" "Starting Watchtower monitoring service..."
     try {
-        docker compose up -d watchtower
         Write-Log "SUCCESS" "Watchtower started"
     }
     catch {
@@ -870,12 +867,12 @@ function Invoke-EmergencyRecovery {
         docker compose ps surrealdb --format "table {{.Service}}\t{{.Status}}" 2>$null
 
         Write-Log "INFO" "Memory + coder plane status:"
-        docker compose ps mnemory-gateway lc-mcpo lc-egress --format "table {{.Service}}\t{{.Status}}" 2>$null
+        docker compose ps mnemory-gateway lc-egress --format "table {{.Service}}\t{{.Status}}" 2>$null
 
         Write-Log "INFO" "Backup schedulers + Watchtower status:"
         docker compose ps mnemory-backup openwebui-backup little-coder-backup `
             smolcrawl-backup tailscale-backup lm-models-backup open-notebook-backup `
-            openbrain-db-backup openbrain-wiki-backup watchtower --format "table {{.Service}}\t{{.Status}}" 2>$null
+            openbrain-db-backup openbrain-wiki-backup --format "table {{.Service}}\t{{.Status}}" 2>$null
 
         if (Test-OB1Available) {
             Write-Log "INFO" "Open Brain (OB1) status:"
@@ -1020,7 +1017,7 @@ function Invoke-GPUReset {
                     docker compose up -d mnemory mnemory-gateway mnemory-backup
                     Write-Log "INFO" "Mnemory layer started"
 
-                    docker compose up -d open-terminal little-coder lc-mcpo lc-egress little-coder-backup
+                    docker compose up -d open-terminal little-coder lc-egress little-coder-backup
                     Write-Log "INFO" "little-coder control plane started"
 
                     Start-OB1Stack

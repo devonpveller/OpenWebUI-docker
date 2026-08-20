@@ -75,7 +75,7 @@ A third concern — the **recovery stack** (`scripts/emergency-recovery.ps1` /
 | Main · core | `openwebui`, `tailscale`, `llama-cpp`, `llama-cpp-embed`, `watchtower` |
 | Main · memory | `mnemory`, `mnemory-gateway`, `mnemory-backup` |
 | Main · search | `tor`, `redis`, `searxng`, `gateway`, `mcpo` |
-| Main · coder | `open-terminal`, `little-coder`, `lc-mcpo`, `lc-egress`, `little-coder-backup` |
+| Main · coder | `open-terminal`, `little-coder`, `lc-egress`, `little-coder-backup` |
 | Main · aux | `smolcrawl-pipelines`, `surrealdb`, `open_notebook`, `openwebui-backup` |
 | OB1 (`open-brain`) | `openbrain-db`, `openbrain-mcp`, `openbrain-ext`, `openbrain-mcpo`, `openbrain-mcpo-ext`, `openbrain-postgrest`, `openbrain-rest`, `openbrain-entity-worker`, `openbrain-wiki`, `openbrain-wiki-viewer` |
 | Recovery stack | `scripts/emergency-recovery.ps1`, `scripts/emergency-recovery.bat` |

@@ -476,7 +476,7 @@ function Repair-OpenTerminal {
 # Generic helper: ensure a non-critical compose container is running.
 # Uses Test-ServiceHealth (which reads docker's compose-defined healthcheck
 # status, or just the running state for containers without a healthcheck).
-# Used for mnemory, smolcrawl-pipelines, watchtower, and the backup sidecars —
+# Used for mnemory, smolcrawl-pipelines, and the backup sidecars —
 # none are required for the core OpenWebUI/Tailscale/LLM path, so failures
 # are logged but do not fail the overall health check.
 function Confirm-AuxiliaryContainer {
@@ -1389,7 +1389,6 @@ function Invoke-HealthCheck {
     # on llama-cpp + llama-cpp-embed, which are confirmed healthy above.
     Confirm-AuxiliaryContainer -ServiceName "mnemory"            -RestartWaitSeconds 20 | Out-Null
     Confirm-AuxiliaryContainer -ServiceName "smolcrawl-pipelines" -RestartWaitSeconds 20 | Out-Null
-    Confirm-AuxiliaryContainer -ServiceName "watchtower"          -RestartWaitSeconds 10 | Out-Null
     Confirm-AuxiliaryContainer -ServiceName "mnemory-backup"      -RestartWaitSeconds 10 | Out-Null
     Confirm-AuxiliaryContainer -ServiceName "openwebui-backup"    -RestartWaitSeconds 10 | Out-Null
     # surrealdb has no HTTP healthcheck (WS-only); just verify the container is up.
@@ -1409,8 +1408,7 @@ function Invoke-HealthCheck {
 
     # --- Private web-search gateway plane (SearXNG-over-Tor) — non-critical ---
     # Compose SERVICE keys differ from container names here: service tor ->
-    # search-tor, redis -> search-redis, gateway -> search-gateway, mcpo ->
-    # search-mcpo. Probe /readyz first (covers the whole plane); only ensure the
+    # search-tor, redis -> search-redis, gateway -> search-gateway. Probe /readyz first (covers the whole plane); only ensure the
     # individual containers if it is not ready.
     if (Test-SearchGatewayHealth) {
         Write-LogEntry "search-gateway /healthz OK" "DEBUG"
@@ -1424,14 +1422,12 @@ function Invoke-HealthCheck {
         Confirm-AuxiliaryContainer -ServiceName "redis"   -RestartWaitSeconds 10 | Out-Null
         Confirm-AuxiliaryContainer -ServiceName "searxng" -RestartWaitSeconds 15 | Out-Null
         Confirm-AuxiliaryContainer -ServiceName "gateway" -RestartWaitSeconds 15 | Out-Null
-        Confirm-AuxiliaryContainer -ServiceName "mcpo"    -RestartWaitSeconds 10 | Out-Null
     }
 
     # --- little-coder plane (autonomous coding agent) — non-critical ---
     # open-terminal (checked above) is its workspace; these are the agent + its
     # MCP-as-OpenAPI bridge + the egress proxy.
     Confirm-AuxiliaryContainer -ServiceName "little-coder" -RestartWaitSeconds 15 | Out-Null
-    Confirm-AuxiliaryContainer -ServiceName "lc-mcpo"      -RestartWaitSeconds 10 | Out-Null
     Confirm-AuxiliaryContainer -ServiceName "lc-egress"    -RestartWaitSeconds 10 | Out-Null
 
     # --- mnemory MCP gateway (the bridge clients reach; mnemory itself above) ---

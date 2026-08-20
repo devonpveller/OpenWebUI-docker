@@ -59,7 +59,6 @@ Run with: `docker compose ...` from the workspace root.
 | `llm-gateway-db` | Postgres for the LiteLLM spend-log ledger (`llm-gateway-db-data` volume) — shared by `llm-gateway` (writes) and `llm-gateway-ui` (reads) | — | llm-net | no |
 | `llama-cpp-upstream` | llama-swap inference (was `llama-cpp`) — `qwen36-27b` (∥2); 35B is in llama-swap config but **not registered in the gateway**; one model resident at a time; `--no-mmap` (mmap over the C: bind mount hangs) | 127.0.0.1:8081 | llm-backend-net (isolated) | yes (device 0) |
 | `llama-cpp-embed-upstream` | bge-m3 embeddings server (was `llama-cpp-embed`) | 127.0.0.1:8082 | llm-backend-net (isolated) | yes (device 1) |
-| `watchtower` | container auto-update monitor | — | default | no |
 
 **Memory (mnemory)**
 | Container | Role | Host port | Networks |
@@ -75,14 +74,12 @@ Run with: `docker compose ...` from the workspace root.
 | `search-redis` | `redis` | SearXNG cache | — | search-net |
 | `searxng` | `searxng` | Metasearch engine | — | search-net |
 | `search-gateway` | `gateway` | REST / Tavily-shim API | 127.0.0.1:8085 | search-net, default |
-| `search-mcpo` | `mcpo` | MCP-as-OpenAPI bridge | 127.0.0.1:8001 | search-net |
 
 **Coder (little-coder control plane)**
 | Container | Role | Host port | Networks |
 |-----------|------|-----------|----------|
 | `open-terminal` | Workspace plane — executes agent commands (egress via `lc-egress`) | — | lc-net, llm-net |
 | `little-coder` | Control daemon — decides (daemon :8090) | 127.0.0.1:9091 (metrics) | lc-net, llm-net |
-| `lc-mcpo` | MCP→OpenAPI edge (task triggers) | 127.0.0.1:8002 | lc-net, llm-net |
 | `lc-egress` | Egress allowlist proxy (git host only) | — | lc-net, default |
 
 **Aux**
@@ -313,8 +310,7 @@ Bottom-up (start in this order; stop in reverse):
 5. `openwebui-backup`, `smolcrawl-pipelines`
 6. `surrealdb` → `open_notebook`
 7. Search: `vpn` → `tor` → `redis` → `searxng` → `gateway` → `mcpo`
-8. Coder: `open-terminal` → `little-coder` → `lc-mcpo` / `lc-egress`
-9. `watchtower`
+8. Coder: `open-terminal` → `little-coder` → `lc-egress`
 10. **Backup sidecars** — each starts after its target is healthy; idle cron otherwise
     (`mnemory-backup`, `openwebui-backup`, `little-coder-backup`, `smolcrawl-backup`,
     `tailscale-backup`, `lm-models-backup`, `llm-gateway-backup`, and — needs OB1 up —

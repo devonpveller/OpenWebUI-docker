@@ -11,7 +11,7 @@
     "IMPORTANT: 'container' is the docker container NAME (use with `docker inspect`).",
     "For the ai-stack project some compose SERVICE keys differ from container names",
     "(service tor->search-tor, redis->search-redis, gateway->search-gateway,",
-    "mcpo->search-mcpo) — see the 'service' field where it differs.",
+    "— see the 'service' field where it differs.",
     "Open Brain is a SEPARATE compose project (open-brain); a plain `docker compose`",
     "from the ai-stack dir cannot see it — probe its containers by name."
   ],
@@ -26,8 +26,7 @@
       { "container": "llm-gateway",     "project": "ai-stack", "critical": true,  "note": "LiteLLM front door (holds the llama-cpp / llama-cpp-embed aliases). No host_health: llm-net is internal so host :4000 is inert; liveliness is in-network (http://llm-gateway:8080/health/liveliness)." },
       { "container": "llm-gateway-db",   "project": "ai-stack", "critical": true,  "note": "Postgres spend-log ledger backing llm-gateway." },
       { "container": "llama-cpp-upstream",       "project": "ai-stack", "critical": true,  "host_health": "http://127.0.0.1:8081/health" },
-      { "container": "llama-cpp-embed-upstream", "project": "ai-stack", "critical": false, "host_health": "http://127.0.0.1:8082/health" },
-      { "container": "watchtower",      "project": "ai-stack", "critical": false }
+      { "container": "llama-cpp-embed-upstream", "project": "ai-stack", "critical": false, "host_health": "http://127.0.0.1:8082/health" }
     ],
     "memory": [
       { "container": "mnemory",         "project": "ai-stack", "critical": false },
@@ -37,13 +36,11 @@
       { "container": "search-tor",     "project": "ai-stack", "service": "tor",     "critical": false },
       { "container": "search-redis",   "project": "ai-stack", "service": "redis",   "critical": false },
       { "container": "searxng",        "project": "ai-stack", "service": "searxng", "critical": false },
-      { "container": "search-gateway", "project": "ai-stack", "service": "gateway", "critical": false, "host_health": "http://127.0.0.1:8085/healthz" },
-      { "container": "search-mcpo",    "project": "ai-stack", "service": "mcpo",    "critical": false }
+      { "container": "search-gateway", "project": "ai-stack", "service": "gateway", "critical": false, "host_health": "http://127.0.0.1:8085/healthz" }
     ],
     "coder": [
       { "container": "open-terminal", "project": "ai-stack", "critical": false },
       { "container": "little-coder",  "project": "ai-stack", "critical": false },
-      { "container": "lc-mcpo",       "project": "ai-stack", "critical": false },
       { "container": "lc-egress",     "project": "ai-stack", "critical": false }
     ],
     "notebook": [

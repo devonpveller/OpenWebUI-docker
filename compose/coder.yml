@@ -67,42 +67,11 @@ services:
   # an OWUI tool (design §3.1). API-key'd; carries task triggers only —
   # operator commands authenticate elsewhere (design §12.6).
 
-  lc-mcpo:
-    build:
-      context: ./little-coder
-      dockerfile: docker/Dockerfile.agent
-      args:
-        LITTLE_CODER_VERSION: ${LITTLE_CODER_VERSION:-latest}
-    image: little-coder:local
-    container_name: lc-mcpo
-    networks:
-      - lc-net    # control plane (reaches the little-coder daemon)
-      - llm-net   # OWUI reaches lc-mcpo here to register it as an OpenAPI tool
-    env_file:
-      - .env
-    environment:
-      - LC_DAEMON_URL=http://little-coder:8090
-    command: ["mcpo", "--host", "0.0.0.0", "--port", "8002", "--api-key", "${LC_MCPO_API_KEY}", "--", "python", "-m", "littlecoder.mcp_server"]
-    ports:
-      - "127.0.0.1:8002:8002"   # MCP-as-OpenAPI (loopback only)
-    restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
-    depends_on:
-      little-coder:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "curl", "-fsS", "--max-time", "5", "http://localhost:8002/openapi.json"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
-    labels:
-      - "com.centurylinklabs.watchtower.enable=false"
-
-  # Egress allowlist for open-terminal — only the operator-configured git
-  # host is reachable; everything else is denied (design §3.4).
-
+  # lc-mcpo (MCP->OpenAPI edge, :8002) retired 2026-08-20 (v3 D-13): dormant
+  # since build ("until chapter 2"), zero consumers - OWUI's little_coder
+  # pipe and agent-org's harness both call the daemon directly. Chapter 2's
+  # keyed OWUI->little-coder edge gets rebuilt from
+  # little-coder/src/littlecoder/mcp_server.py (kept) when it lands.
   lc-egress:
     build:
       context: ./little-coder

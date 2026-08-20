@@ -7,9 +7,9 @@ REM   core    openwebui, llama-cpp-upstream, llama-cpp-embed-upstream, llm-queue
 REM           llm-gateway-db, llm-gateway, llm-gateway-ui, tailscale
 REM           (llm-queue = B2 admission controller; llm-gateway-ui = Admin-UI sidecar)
 REM   memory  mnemory, mnemory-gateway
-REM   search  vpn, tor, redis, searxng, gateway, mcpo  (Private Search Gateway)
-REM   coder   open-terminal, little-coder, lc-mcpo, lc-egress
-REM   aux     smolcrawl-pipelines, surrealdb, open_notebook, watchtower
+REM   search  vpn, tor, redis, searxng, gateway  (Private Search Gateway)
+REM   coder   open-terminal, little-coder, lc-egress
+REM   aux     smolcrawl-pipelines, surrealdb, open_notebook
 REM   backup  mnemory-backup, openwebui-backup, little-coder-backup, smolcrawl-backup,
 REM           tailscale-backup, lm-models-backup, open-notebook-backup,
 REM           openbrain-db-backup, openbrain-wiki-backup (last two need OB1 up)
@@ -87,20 +87,19 @@ echo [INFO] Stopping Open Brain (OB1) stack...
 if exist "%OB1_COMPOSE%" docker compose -f "%OB1_COMPOSE%" stop
 
 echo [INFO] Stopping Watchtower...
-docker compose stop watchtower
 
 echo [INFO] Stopping little-coder control plane...
-docker compose stop little-coder-backup lc-egress lc-mcpo little-coder open-terminal
+docker compose stop little-coder-backup lc-egress little-coder open-terminal
 if %ERRORLEVEL% NEQ 0 (
     echo [WARN] little-coder plane stop failed, attempting force kill...
-    docker compose kill little-coder-backup lc-egress lc-mcpo little-coder open-terminal
+    docker compose kill little-coder-backup lc-egress little-coder open-terminal
 )
 
 echo [INFO] Stopping Private Search Gateway...
-docker compose stop mcpo gateway searxng redis tor vpn
+docker compose stop gateway searxng redis tor vpn
 if %ERRORLEVEL% NEQ 0 (
     echo [WARN] Search gateway stop failed, attempting force kill...
-    docker compose kill mcpo gateway searxng redis tor vpn
+    docker compose kill gateway searxng redis tor vpn
 )
 
 echo [INFO] Stopping Tailscale container...
@@ -218,7 +217,6 @@ echo [INFO] Waiting for Tailscale network connectivity and serve configuration..
 timeout /t 60 /nobreak >nul
 
 echo [INFO] Starting Watchtower monitoring service...
-docker compose up -d watchtower
 
 echo [INFO] Starting Mnemory memory service...
 docker compose up -d mnemory
@@ -240,8 +238,8 @@ timeout /t 10 /nobreak >nul
 echo [INFO] Starting open-notebook...
 docker compose up -d open_notebook
 
-echo [INFO] Starting Private Search Gateway (vpn, tor, redis, searxng, gateway, mcpo)...
-docker compose up -d vpn tor redis searxng gateway mcpo
+echo [INFO] Starting Private Search Gateway (vpn, tor, redis, searxng, gateway)...
+docker compose up -d vpn tor redis searxng gateway
 echo [INFO] Allowing VPN tunnel + Tor circuit to build...
 timeout /t 30 /nobreak >nul
 
@@ -252,7 +250,7 @@ timeout /t 20 /nobreak >nul
 echo [INFO] Starting little-coder control plane (daemon, MCP edge, egress)...
 docker compose up -d little-coder
 timeout /t 20 /nobreak >nul
-docker compose up -d lc-mcpo lc-egress little-coder-backup
+docker compose up -d lc-egress little-coder-backup
 
 echo [INFO] Starting Open Brain (OB1) stack...
 if exist "%OB1_COMPOSE%" (
@@ -290,7 +288,7 @@ echo [INFO] Restarting with proper network dependency sequence...
 
 REM Stop dependent containers first
 echo [INFO] Stopping Tailscale and dependent services (network dependents)...
-docker compose stop tailscale llama-cpp-upstream llama-cpp-embed-upstream mnemory mnemory-gateway mnemory-backup openwebui-backup smolcrawl-pipelines open_notebook surrealdb mcpo gateway searxng redis tor vpn little-coder-backup lc-egress lc-mcpo little-coder open-terminal
+docker compose stop tailscale llama-cpp-upstream llama-cpp-embed-upstream mnemory mnemory-gateway mnemory-backup openwebui-backup smolcrawl-pipelines open_notebook surrealdb gateway searxng redis tor vpn little-coder-backup lc-egress little-coder open-terminal
 if exist "%OB1_COMPOSE%" docker compose -f "%OB1_COMPOSE%" stop
 
 REM Restart OpenWebUI first and wait for health
@@ -324,7 +322,6 @@ echo [INFO] Starting Tailscale with fresh network namespace...
 docker compose up -d tailscale
 timeout /t 30 /nobreak >nul
 
-docker compose up -d watchtower
 
 echo [INFO] Starting Mnemory services...
 docker compose up -d mnemory mnemory-gateway mnemory-backup
@@ -344,10 +341,10 @@ echo [INFO] Starting open-notebook...
 docker compose up -d open_notebook
 
 echo [INFO] Starting Private Search Gateway...
-docker compose up -d vpn tor redis searxng gateway mcpo
+docker compose up -d vpn tor redis searxng gateway
 
 echo [INFO] Starting little-coder control plane...
-docker compose up -d open-terminal little-coder lc-mcpo lc-egress little-coder-backup
+docker compose up -d open-terminal little-coder lc-egress little-coder-backup
 
 echo [INFO] Starting Open Brain (OB1) stack...
 if exist "%OB1_COMPOSE%" (
@@ -466,15 +463,11 @@ docker compose ps surrealdb --format "table {{.Service}}\t{{.Status}}" 2>nul
 
 echo.
 echo [INFO] Memory + coder plane status:
-docker compose ps mnemory-gateway lc-mcpo lc-egress --format "table {{.Service}}\t{{.Status}}" 2>nul
+docker compose ps mnemory-gateway lc-egress --format "table {{.Service}}\t{{.Status}}" 2>nul
 
 echo.
 echo [INFO] Backup schedulers status:
 docker compose ps mnemory-backup openwebui-backup little-coder-backup smolcrawl-backup tailscale-backup lm-models-backup open-notebook-backup openbrain-db-backup openbrain-wiki-backup --format "table {{.Service}}\t{{.Status}}" 2>nul
-
-echo.
-echo [INFO] Watchtower status:
-docker compose ps watchtower --format "table {{.Service}}\t{{.Status}}" 2>nul
 
 echo.
 echo [INFO] Open Brain (OB1) status:

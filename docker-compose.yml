@@ -79,8 +79,8 @@ networks:
   # have NO internet route here; only `tor` (also on `default`) can egress.
   search-net:
     internal: true
-  # Internal-only network for the little-coder control plane. little-coder,
-  # open-terminal, and lc-mcpo talk here; none reaches the internet except
+  # Internal-only network for the little-coder control plane. little-coder
+  # and open-terminal talk here; none reaches the internet except
   # via lc-egress, which is allowlisted to the git host (design §3.4).
   lc-net:
     internal: true
