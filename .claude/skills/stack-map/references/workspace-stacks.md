@@ -309,9 +309,9 @@ Bottom-up (start in this order; stop in reverse):
 4. `mnemory` → `mnemory-gateway` → `mnemory-backup`
 5. `openwebui-backup`, `smolcrawl-pipelines`
 6. `surrealdb` → `open_notebook`
-7. Search: `vpn` → `tor` → `redis` → `searxng` → `gateway` → `mcpo`
+7. Search: `vpn` → `tor` → `redis` → `searxng` → `gateway`
 8. Coder: `open-terminal` → `little-coder` → `lc-egress`
-10. **Backup sidecars** — each starts after its target is healthy; idle cron otherwise
+9. **Backup sidecars** — each starts after its target is healthy; idle cron otherwise
     (`mnemory-backup`, `openwebui-backup`, `little-coder-backup`, `smolcrawl-backup`,
     `tailscale-backup`, `lm-models-backup`, `llm-gateway-backup`, and — needs OB1 up —
     `openbrain-db-backup`, `openbrain-wiki-backup`, `open-notebook-backup`).
