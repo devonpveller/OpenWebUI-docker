@@ -98,7 +98,7 @@ Authelia 4.39 logs warnings; auto-mapped to `AUTHELIA_IDENTITY_VALIDATION_RESET_
 - Caddy JSON access log at `/data/caddy-access.log` (in `caddy-data` volume); rolls at 100 MiB / 7 files / 30 days
 
 ### Access monitoring (single source of truth)
-- Full reference: [documentation/monitoring-access.md](documentation/monitoring-access.md)
+- Full reference: [documentation/runbooks/monitoring-access.md](documentation/runbooks/monitoring-access.md)
 - Operator tool: [scripts/access-query.ps1](scripts/access-query.ps1) for interactive review of recent activity (filters: Hours, Subdomain, Status, IP, UniqueIPs)
 - `config/watcher/known-ips.txt` is the "trusted source IP" list. Auto-populated by `authelia-watcher` after the first new-IP alert; edit by hand to remove stale entries
 - `tunnel-watcher` polls `cloudflared:2000/ready` every 30s and alerts HIGH after 3 consecutive failures (~90s default); INFO on recovery; hourly heartbeat to docker logs
@@ -113,8 +113,8 @@ Authelia 4.39 logs warnings; auto-mapped to `AUTHELIA_IDENTITY_VALIDATION_RESET_
 ### Backup state
 - **Full-stack coverage** (post-2026-05-30): nightly logical/tar backups for caddy, authelia, openwebui, mnemory, little-coder (5 volumes), smolcrawl, tailscale, openbrain-db (`pg_dump -Fc`), openbrain-wiki (volume tar), open-notebook (surreal export + notebook_data tar) — plus weekly lm-models tar (Sundays 01:00 UTC)
 - Every backup writes a `.sha256` sentinel beside the archive; restore tooling verifies before touching anything
-- Convention for new services: [documentation/backup-conventions.md](documentation/backup-conventions.md). Coverage check: `.\scripts\check-backup-coverage.ps1`
-- Restore workflow: per-service in [documentation/restore-from-snapshot.md](documentation/restore-from-snapshot.md); disaster recovery via `.\scripts\restore-from-snapshot.ps1 -SnapshotRoot ... -Date ... -Apply`
+- Convention for new services: [documentation/runbooks/backup-conventions.md](documentation/runbooks/backup-conventions.md). Coverage check: `.\scripts\check-backup-coverage.ps1`
+- Restore workflow: per-service in [documentation/runbooks/restore-from-snapshot.md](documentation/runbooks/restore-from-snapshot.md); disaster recovery via `.\scripts\restore-from-snapshot.ps1 -SnapshotRoot ... -Date ... -Apply`
 - Off-host sync: `scripts/backup-to-nas.ps1` runs weekly (Sundays 04:00 UTC), alternating slot-A/slot-B on the NAS using DPAPI-encrypted credentials (LocalMachine scope). Failures are now reported via portal-alerter (2026-05-30 alerter wiring fix — silent-failure bug closed)
 - SurrealDB note: backups authenticate as `root/root` regardless of the `--user`/`--pass` startup args; SurrealDB v2 grants any caller these credentials when no `DEFINE USER` exists. This is acceptable because the surrealdb port is bound to 127.0.0.1 (not LAN-reachable)
 
@@ -152,7 +152,7 @@ Every portal container honors: `read_only: true` + non-root UID + `cap_drop: [AL
 ```powershell
 .\scripts\breach-killswitch.ps1     # email final notice, stop portal, snapshot logs, rotate Authelia JWT
 ```
-Distinct from `portal-off.ps1` (planned downtime, no secret rotation). See [documentation/incident-response.md](documentation/incident-response.md) for the full playbook.
+Distinct from `portal-off.ps1` (planned downtime, no secret rotation). See [documentation/runbooks/incident-response.md](documentation/runbooks/incident-response.md) for the full playbook.
 
 ### Planned shutdown (any mode)
 ```powershell
@@ -187,8 +187,8 @@ In approximate priority order:
 
 - Implementation plan: [documentation/implementation-guide/open-source authentication front ends for ai stack/plan-internet-exposed-front-end.md](documentation/implementation-guide/open-source%20authentication%20front%20ends%20for%20ai%20stack/plan-internet-exposed-front-end.md)
 - Post-implementation audit (2026-05-29): [documentation/implementation-guide/open-source authentication front ends for ai stack/audit-post-implementation-2026-05-29.md](documentation/implementation-guide/open-source%20authentication%20front%20ends%20for%20ai%20stack/audit-post-implementation-2026-05-29.md)
-- Incident response playbook: [documentation/incident-response.md](documentation/incident-response.md)
-- Backup conventions (new services): [documentation/backup-conventions.md](documentation/backup-conventions.md)
-- Restore workflow: [documentation/restore-from-snapshot.md](documentation/restore-from-snapshot.md) + [scripts/restore-from-snapshot.ps1](scripts/restore-from-snapshot.ps1)
+- Incident response playbook: [documentation/runbooks/incident-response.md](documentation/runbooks/incident-response.md)
+- Backup conventions (new services): [documentation/runbooks/backup-conventions.md](documentation/runbooks/backup-conventions.md)
+- Restore workflow: [documentation/runbooks/restore-from-snapshot.md](documentation/runbooks/restore-from-snapshot.md) + [scripts/restore-from-snapshot.ps1](scripts/restore-from-snapshot.ps1)
 - Active compose: [docker-compose.yml](docker-compose.yml)
 - Live Caddyfile: [config/caddy/Caddyfile](config/caddy/Caddyfile)

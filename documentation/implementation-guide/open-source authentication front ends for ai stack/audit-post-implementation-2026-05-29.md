@@ -206,7 +206,7 @@ Live:
 ### C.13 §E — Incident response
 
 - `scripts/breach-killswitch.ps1` present (7,014 bytes); explicitly enumerates portal services to stop (post-incident lesson from earlier "compose down" mishap)
-- `documentation/incident-response.md` present (14,277 bytes); covers all 7 sections per plan §13.6 outline
+- `documentation/runbooks/incident-response.md` (moved 2026-08-20) present (14,277 bytes); covers all 7 sections per plan §13.6 outline
 
 **Status:** PASS.
 
@@ -433,4 +433,4 @@ After items 1–4, the portal is in "audit-clean" state ready for ongoing operat
 - Active compose: [docker-compose.yml](../../../docker-compose.yml)
 - Live Caddyfile: [config/caddy/Caddyfile](../../../config/caddy/Caddyfile)
 - Live Authelia config: [config/authelia/configuration.yml](../../../config/authelia/configuration.yml)
-- Incident response playbook: [documentation/incident-response.md](../../../documentation/incident-response.md)
+- Incident response playbook: [documentation/incident-response.md](../../../documentation/runbooks/incident-response.md)

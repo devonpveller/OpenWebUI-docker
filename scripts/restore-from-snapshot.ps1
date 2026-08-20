@@ -6,7 +6,7 @@
 # `\\<nas>\<share>\ai-stack\portal\slot-<A|B>\`.
 #
 # For partial restores or to understand what each step does, see
-# documentation/restore-from-snapshot.md.
+# documentation/runbooks/restore-from-snapshot.md.
 #
 # USAGE
 #   # Plan only (no changes; default mode):

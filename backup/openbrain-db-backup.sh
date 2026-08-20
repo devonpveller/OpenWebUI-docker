@@ -14,7 +14,7 @@
 #   BACKUP_DIR      (default /backups)
 #   RETAIN_COUNT    (default 2; how many recent dumps to keep)
 #
-# Restore (per documentation/restore-from-snapshot.md):
+# Restore (per documentation/runbooks/restore-from-snapshot.md):
 #   pg_restore -h openbrain-db -U $POSTGRES_USER -d $POSTGRES_DB \
 #     --clean --if-exists --no-owner --no-acl <dump>
 

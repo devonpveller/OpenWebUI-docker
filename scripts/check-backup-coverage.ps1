@@ -14,7 +14,7 @@
 # non-root backup containers from writing).
 #
 # Run manually before merging a PR that adds a new service with
-# persistent state. See documentation/backup-conventions.md.
+# persistent state. See documentation/runbooks/backup-conventions.md.
 
 [CmdletBinding()]
 param(
@@ -193,7 +193,7 @@ try {
     Write-Host ("==> Coverage: {0} GAPS" -f $gaps.Count) -ForegroundColor Red
     Write-Host "    Add backup containers for the volumes flagged above, or mark them"
     Write-Host "    excluded in `$intentionallyExcluded with a reason. See:"
-    Write-Host "    documentation/backup-conventions.md"
+    Write-Host "    documentation/runbooks/backup-conventions.md"
     exit 1
   }
 } finally {

@@ -128,7 +128,7 @@ try {
 
   # --- Step 5: Recovery instructions. ---
   Write-Host ""
-  Write-Host "==> NEXT STEPS -- read documentation/incident-response.md before restarting" -ForegroundColor Red
+  Write-Host "==> NEXT STEPS -- read documentation/runbooks/incident-response.md before restarting" -ForegroundColor Red
   Write-Host "    - Tailnet path is still up. Reach OpenWebUI via https://<tailnet-host>.ts.net/" -ForegroundColor Yellow
   Write-Host "    - Snapshot $incidentDir to an off-host destination NOW (before any restart)." -ForegroundColor Yellow
   Write-Host "    - Restore authelia-data from YESTERDAY'S backup before restarting (today's may be poisoned)." -ForegroundColor Yellow
