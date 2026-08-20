@@ -137,9 +137,6 @@ services:
     environment:
       - TS_HOSTNAME=openwebui
       - TS_ACCEPT_DNS=false
-      - LMSTUDIO_HOST=${LMSTUDIO_HOST:-host.docker.internal}
-      - LMSTUDIO_PORT=${LMSTUDIO_PORT:-1234}
-      - LMSTUDIO_ENABLED=${LMSTUDIO_ENABLED:-true}
       # MUST be the GATEWAY alias (llama-cpp / llama-cpp-embed), NOT the *-upstream
       # real servers. entrypoint.sh proxies the tailnet /llama-cpp + /llama-cpp-embed
       # serve routes here; pointing at *-upstream would expose inference on the

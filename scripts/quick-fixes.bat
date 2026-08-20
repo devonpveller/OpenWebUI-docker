@@ -1,6 +1,6 @@
 @echo off
 REM Quick Emergency Fixes for OpenWebUI AI Stack
-REM Usage: quick-fixes.bat [namespace|rebuild|nuclear|gpu|gpu-map|status|lmstudio|restart-openwebui]
+REM Usage: quick-fixes.bat [namespace|rebuild|nuclear|gpu|gpu-map|status|restart-openwebui]
 
 setlocal enabledelayedexpansion
 set "SCRIPT_DIR=%~dp0"
@@ -13,7 +13,6 @@ if "%1"=="nuclear" goto :nuclear_option
 if "%1"=="gpu" goto :gpu_check
 if "%1"=="gpu-map" goto :gpu_map
 if "%1"=="status" goto :status_check
-if "%1"=="lmstudio" goto :lmstudio_fix
 if "%1"=="restart-openwebui" goto :restart_openwebui
 if "%1"=="mnemory" goto :mnemory_check
 if "%1"=="smolcrawl" goto :smolcrawl_check
@@ -38,18 +37,17 @@ echo   5. Restart OpenWebUI properly
 echo.
 echo Advanced Fixes:
 echo   6. Rebuild Tailscale container
-echo   7. Fix LM Studio connectivity
-echo   8. Nuclear option (full restart)
-echo   9. Mnemory check and restart
-echo  10. SmolCrawl pipelines check and restart
-echo  11. llama-cpp / llama-cpp-embed check and restart
-echo  12. open-notebook (and surrealdb) check and restart
-echo  13. Open Brain (mcp/mcpo/db/gateway/wiki) check and restart
-echo  14. llm-gateway (LiteLLM front door) check and restart
+echo   7. Nuclear option (full restart)
+echo   8. Mnemory check and restart
+echo   9. SmolCrawl pipelines check and restart
+echo  10. llama-cpp / llama-cpp-embed check and restart
+echo  11. open-notebook (and surrealdb) check and restart
+echo  12. Open Brain (mcp/mcpo/db/gateway/wiki) check and restart
+echo  13. llm-gateway (LiteLLM front door) check and restart
 echo.
 echo   0. Exit
 echo.
-set /p choice="Select option (1-14,0): "
+set /p choice="Select option (1-13,0): "
 
 if "%choice%"=="1" goto :namespace_reset
 if "%choice%"=="2" goto :status_check
@@ -57,14 +55,13 @@ if "%choice%"=="3" goto :gpu_check
 if "%choice%"=="4" goto :gpu_map
 if "%choice%"=="5" goto :restart_openwebui
 if "%choice%"=="6" goto :rebuild_tailscale
-if "%choice%"=="7" goto :lmstudio_fix
-if "%choice%"=="8" goto :nuclear_option
-if "%choice%"=="9" goto :mnemory_check
-if "%choice%"=="10" goto :smolcrawl_check
-if "%choice%"=="11" goto :llama_cpp_check
-if "%choice%"=="12" goto :open_notebook_check
-if "%choice%"=="13" goto :openbrain_check
-if "%choice%"=="14" goto :llm_gateway_check
+if "%choice%"=="7" goto :nuclear_option
+if "%choice%"=="8" goto :mnemory_check
+if "%choice%"=="9" goto :smolcrawl_check
+if "%choice%"=="10" goto :llama_cpp_check
+if "%choice%"=="11" goto :open_notebook_check
+if "%choice%"=="12" goto :openbrain_check
+if "%choice%"=="13" goto :llm_gateway_check
 if "%choice%"=="0" goto :end
 echo [ERROR] Invalid choice
 timeout /t 2 /nobreak >nul
@@ -473,51 +470,6 @@ if "%1"=="" (
 )
 goto :end
 
-:lmstudio_fix
-echo.
-echo ========================================
-echo   LM Studio Connectivity Fix
-echo ========================================
-echo.
-echo [INFO] Fixing LM Studio Tailscale connectivity...
-echo [INFO] Testing LM Studio host connectivity...
-curl -s -m 5 http://169.254.83.107:5506/v1/models >nul 2>&1
-if %ERRORLEVEL% NEQ 0 (
-    echo [ERROR] LM Studio not accessible - make sure it's running
-    echo [INFO] Start LM Studio and ensure the server is running on port 5506
-    if "%1"=="" (
-        pause
-        goto :interactive_menu
-    )
-    goto :end
-)
-echo [SUCCESS] LM Studio is running
-echo.
-echo [INFO] Restarting socat proxy and Tailscale serve...
-cd ..
-docker compose exec tailscale sh -c "pkill socat 2>/dev/null || true"
-cd scripts
-echo [INFO] Starting persistent socat proxy...
-cd ..
-docker compose exec -d tailscale sh -c "socat TCP-LISTEN:8234,fork,reuseaddr,keepalive TCP:169.254.83.107:5506"
-cd scripts
-echo [INFO] Waiting for proxy to initialize...
-timeout /t 8 /nobreak >nul
-echo.
-echo [INFO] Testing proxy connection...
-cd ..
-docker compose exec tailscale sh -c "wget -q -T 5 -O /dev/null http://127.0.0.1:8234/v1/models && echo 'Proxy working' || echo 'Proxy failed'"
-docker compose exec tailscale tailscale --socket=/tmp/tailscaled.sock serve --https=443 --set-path=/lmstudio --bg http://127.0.0.1:8234 >nul
-cd scripts
-echo [SUCCESS] LM Studio Tailscale configuration restored
-echo [INFO] Access URL: https://openwebui-13.tail37f875.ts.net/lmstudio
-if "%1"=="" (
-    echo.
-    pause
-    goto :interactive_menu
-)
-goto :end
-
 :restart_openwebui
 echo.
 echo ========================================
@@ -891,7 +843,6 @@ echo   gpu               - Check and restart GPU functionality
 echo   gpu-map           - Show current GPU assignment per service
 echo   restart-openwebui - Properly restart OpenWebUI with dependent containers
 echo   rebuild           - Rebuild and restart Tailscale container
-echo   lmstudio          - Fix LM Studio Tailscale connectivity
 echo   mnemory           - Check Mnemory health and restart if needed
 echo   smolcrawl         - Check SmolCrawl Pipelines health and restart if needed
 echo   llama-cpp         - Check llama-cpp and llama-cpp-embed health and restart if needed
