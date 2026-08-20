@@ -3,6 +3,7 @@
 Authoritative inventory of the Docker stacks in this `ai-stack` workspace.
 Cross-check against the live compose files before relying on it — the files
 are the source of truth; this doc is the curated summary.
+Per-container purpose & justification: [documentation/CONTAINER-REGISTRY.md](../../../documentation/CONTAINER-REGISTRY.md).
 
 **Last reconciled against live compose: 2026-08-20** — CLEANUP-PLAN v3 execution
 day: the root compose is now a thin include of `compose/<plane>.yml` files
