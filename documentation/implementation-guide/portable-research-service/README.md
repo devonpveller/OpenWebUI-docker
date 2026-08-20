@@ -30,7 +30,8 @@ These plans are derived from this workspace's live implementation:
   `OB1/integrations/research-curator/`
 - Schema: `OB1/docker/init-claims.sql`, `init-threads.sql`, `init-sources.sql`,
   `init-research-jobs.sql`, `init-source-chunks.sql`
-- OWUI inlet: `owui/tools/deep_research.py`, `smolcrawl/deep_research_thin_client.py`
+- OWUI inlet: `owui/tools/deep_research.py` (sole copy; the
+  `smolcrawl/deep_research_thin_client.py` snapshot was retired 2026-08-20)
 - Quartz viewer/compiler/workbench: `OB1/docker/wiki-viewer/`,
   `OB1/recipes/entity-wiki/`, `OB1/docker/workbench/`
 - Internal design docs: `documentation/implementation-guide/research-engine-for-OB/`,

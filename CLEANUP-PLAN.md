@@ -163,10 +163,13 @@ unpinned `containrrr/watchtower:latest`, while it updates only `openwebui`.
 - `owui/pipes/server_status.py` (deployed snapshot) lags its build source —
   missing the `llm-traffic` panel (`core/router.py:522-528` exists). Rebuild
   from `scripts/ai_pipes/unified_openwebui_pipe.py` and re-paste.
-- `owui/tools/deep_research.py` defaults to unreachable
-  `host.docker.internal:8818`; the fixed client is
-  `smolcrawl/deep_research_thin_client.py` (`openbrain-research:8000`).
-  Re-paste the fixed one.
+- ~~`owui/tools/deep_research.py` defaults to unreachable
+  `host.docker.internal:8818`; re-paste the fixed client.~~ **RESOLVED
+  2026-08-20.** It was never actually drifted — the *stored valve* has always
+  been `http://openbrain-research:8000`, which overrides the in-code default
+  (see `owui/README.md`). The "fixed client" this pointed at
+  (`smolcrawl/deep_research_thin_client.py`) was a v1.0.0 snapshot of the same
+  tool and has been retired; `owui/tools/deep_research.py` is the only copy.
 
 ### B.4 Dead code — archive with evidence
 

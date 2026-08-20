@@ -6,7 +6,7 @@ gate — the risk-gated dry-run (execution_gate) is the gate. So grounding is **
 default** (like the OB audit mirror): if the research service is slow/unavailable, the effort
 proceeds without it rather than blocking.
 
-Contract (verified against `smolcrawl/deep_research_thin_client.py` + the digest/podcast clients):
+Contract (verified against `owui/tools/deep_research.py` + the digest/podcast clients):
   POST /research {query, origin, options}     -> {job_id}
   GET  /research/jobs/{job_id}                -> {status, progress, result:{synthesis, cited_sources, ...}}
 Reach the service BY CONTAINER NAME on `ai-stack_llm-net` (`http://openbrain-research:8000`) — the

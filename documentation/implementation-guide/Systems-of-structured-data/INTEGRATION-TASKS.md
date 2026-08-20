@@ -67,6 +67,12 @@
 
 ## Phase 4 — Migrate research off mnemory _(resolves the misuse)_
 
+> **SUPERSEDED 2026-08-20 — do not work these boxes.** Every task below targets
+> `smolcrawl/deep_research/*`, retired that day (see the OWUI 0.11.0 UPGRADE-PLAN,
+> adjacent item F). The outcome was reached another way: the Deno
+> `openbrain-research` engine writes grounded claims through the curator, and
+> `EV:research` in mnemory is retired. Left in place as the record of why.
+
 - [ ] Repoint `deep_research/evidence_memory.py` persistence → OpenBrain `sources`
 - [ ] Repoint cache lookup → OpenBrain (drop mnemory `EV:research` search)
 - [ ] Synthesis surfaced via wiki, not mnemory

@@ -42,4 +42,4 @@ root; the capability implementations are the top-level [`modules/`](../../module
 plugin. This pipe is *composed* from a router + modules at runtime, so its source
 is a multi-file subsystem (like a service). Only its flattened result belongs in
 `owui/pipes/`; the build source stays here. Same pattern as `little-coder/` and
-`smolcrawl/deep_research/`.
+`OB1/integrations/research-service/` (which backs `owui/tools/deep_research.py`).

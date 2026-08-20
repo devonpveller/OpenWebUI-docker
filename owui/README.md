@@ -30,7 +30,11 @@ their service code in the service's own folder; only the OWUI-facing artifact is
 centralized here:
 
 - `pipes/little_coder.py` ← service: [`little-coder/`](../little-coder/)
-- `tools/deep_research.py` ← service: [`smolcrawl/deep_research/`](../smolcrawl/deep_research/) (openbrain-research)
+- `tools/deep_research.py` ← service: `OB1/integrations/research-service/` (the
+  `openbrain-research` Deno engine). The Python harness that used to live at
+  `smolcrawl/deep_research/`, and the v1.0.0 client snapshot at
+  `smolcrawl/deep_research_thin_client.py`, were retired 2026-08-20 — this file
+  is the only OWUI-side artifact.
 - `pipes/code_agent.py` + `tools/code_agent_tools.py` ← [`tools/code-generation/`](../tools/code-generation/) (docs/system prompt)
 - `pipes/server_status.py` (OWUI id `ai_stack_unified_pipe_function`) is the
   flattened deploy snapshot of the **AI-Stack unified status pipe**. Its build

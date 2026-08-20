@@ -312,6 +312,34 @@ Neither affects the upgrade. Flagged so the post-upgrade redeploy step does not
 silently resurrect them. **Do not delete anything as part of this upgrade** —
 retirement is its own decision with its own justification.
 
+#### ✅ DECIDED 2026-08-20 — and one of the two "dead trees" was not dead
+
+**Retired** (`git rm`, 18 files):
+
+- `smolcrawl/deep_research/` — re-verified before removal: absent from the
+  `smolcrawl-pipelines` image (its Dockerfile copies only `smolcrawl_pipeline.py`,
+  `pyproject.toml`, `README.md`, `src/`), absent from the running container
+  (`find / -name 'deep_research*'` → nothing), not imported by
+  `smolcrawl_pipeline.py` or by any `owui/` plugin or `scripts/` entrypoint, and
+  its own documented entry point (`smolcrawl/deep_research_tool.py`) was already
+  gone. Its last commit (`4de9eab`, 07-10) only swept a context-lane constant
+  through it — maintenance paid on code that never runs.
+- `smolcrawl/deep_research_thin_client.py` — a v1.0.0 snapshot of the *same*
+  tool now deployed as `owui/tools/deep_research.py` (v1.2.0). Diff was version
+  string, docstring, black formatting, and `max_wait_sec` 600 vs 3600. Zero code
+  references; all 7 mentions were prose.
+
+**Kept — this item's premise was wrong:** `owui/tools/code_agent_tools.py` is
+**live**. It is deployed in `webui.db` (33 KB) and listed in `meta.toolIds` of two
+`is_active=1` models, `code` and `code---unity-6`, both on `qwen36-27b`. Only the
+`code_agent` *pipe* is dormant. The pipe and the tool were bundled here as one
+tree; they are not. `code_agent.py` (pipe, `is_active=0`) remains an open
+question — deleting the repo copy alone would desync `owui/` from `webui.db`,
+which is the exact drift that folder exists to prevent, so retiring it means
+dropping the DB row too.
+
+Recovery for anything above: `git checkout 9223516 -- <path>`.
+
 ---
 
 ## Execution checklist
