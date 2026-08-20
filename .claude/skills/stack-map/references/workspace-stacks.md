@@ -4,7 +4,13 @@ Authoritative inventory of the Docker stacks in this `ai-stack` workspace.
 Cross-check against the live compose files before relying on it — the files
 are the source of truth; this doc is the curated summary.
 
-**Last reconciled against live compose: 2026-07-01** — added the **`agent-org`** project
+**Last reconciled against live compose: 2026-08-20** — CLEANUP-PLAN v3 execution
+day: the root compose is now a thin include of `compose/<plane>.yml` files
+(rendered model proven identical); **retired**: `watchtower`, `search-mcpo`,
+`lc-mcpo` (main = **31 default + 12 portal services**); the status-pipe
+subsystem consolidated to `status-pipe/` and OWUI's whole-repo mount replaced
+by three narrow ro mounts; entrypoint.sh rewritten to a 318-line route table
+(ollama/LM Studio blocks gone). Prior reconcile (2026-07-01) — added the **`agent-org`** project
 (teams-chat agent orchestration: `mattermost` + `mattermost-db` + `agent-bridge` +
 `agent-bridge-db`, plus the profile-gated `workers`/`cloud` planes — see §3). Prior
 (2026-06-14): added **`llm-queue`** (B2 front-ended inference admission controller between the
@@ -274,7 +280,7 @@ update, or network-namespace break.
 |------|------|
 | `scripts/emergency-recovery.ps1` | Primary recovery — `recover` / `nuclear` / `gpu-reset`; 5-phase ordered restart that also drives the OB1 project |
 | `scripts/emergency-recovery.bat` | Legacy linear equivalent (PowerShell version preferred) |
-| `modules/emergency-recovery/` | OWUI guidance module — **stale**: its startup config still names the disabled `ollama` container |
+| `scripts/archive/emergency-recovery-module/` | ARCHIVED 2026-08-20 (was OWUI-reachable stale guidance; recovery keywords now route to help-system) |
 
 The recovery scripts hold a service inventory (`MainStackServices` — now incl. the
 backup sidecars, `OB1Services`, `AgentOrgServices`) plus `$MainBackups` / `$OB1Backups`

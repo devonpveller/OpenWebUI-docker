@@ -1,6 +1,37 @@
 # Security Configuration for AI Stack
 
-Documents security posture, decisions, and known gaps. Last updated 2026-05-29.
+Documents security posture, decisions, and known gaps. Last updated 2026-08-20.
+
+---
+
+## 0. 2026-08-20 posture changes (CLEANUP-PLAN v3 execution day)
+
+- **Whole-repo mount into OWUI REMOVED.** `.:/host_project:ro` on the
+  internet-facing frontend (which shipped `.env`, `secrets/`, tailscale
+  certs, the GitHub App key into the container) is gone — replaced by three
+  narrow read-only mounts (`status-pipe/`, `system-prompts/`,
+  `data/tailscale/`). Verified in-container.
+- **Watchtower RETIRED.** The workspace now has **zero** `docker.sock`
+  mounts anywhere (previously one, on watchtower, with an unpinned `:latest`
+  image and a second whole-repo mount). Updates are manual + verified per
+  `documentation/runbooks/UPDATE-MANAGEMENT.md`.
+- **Committed gateway key defanged, rotation PENDING.** The live `gw-…`
+  Open Brain key was tracked in `.vscode/mcp.json` and
+  `openbrain-gateway/smoke_test.py` — both untracked/env-indirected now, but
+  the key is **still valid until rotated** (operator action) and remains in
+  git history along with two 2026-08 `.env.bak` commits holding ~25 live
+  credentials each (scrub decision = CLEANUP-PLAN D-1). Treat all of it as
+  burned until rotation.
+- **Pre-commit secret guard hardened**: the `gw-` gateway-key pattern was
+  added (the one token class this repo actually leaked was the one the guard
+  couldn't see). Hooks bootstrap for fresh clones:
+  `git config core.hooksPath .githooks`.
+- **LiteLLM stays permissive (no master_key) for now** — the per-caller
+  virtual-keys cutover is prepared, not flipped:
+  `documentation/implementation-guide/LiteLLM-Proxy/J1-VIRTUAL-KEYS-CUTOVER.md`.
+- SurrealDB image pinned by digest; its datastore still accepts the
+  persisted first-boot root login (network isolation is the boundary) — a
+  DEFINE USER rotation pass remains open.
 
 ---
 
@@ -19,7 +50,7 @@ Documents security posture, decisions, and known gaps. Last updated 2026-05-29.
 - ✅ Authelia exception: `read_only: true` works via a targeted `/app/.healthcheck.env` bind mount (the only writable path Authelia 4.39 needs at startup)
 - ✅ Sidecars (watcher, tripwire, backups) run from CUSTOM Dockerfiles with deps pre-installed at build time — no `apk add` at runtime as a non-root UID
 - ✅ Backup containers run with the SAME UID as the data owner (caddy-backup as 10000, authelia-backup as 10001) so they can read mode-0600 state files. Pre-2026-05-29 audit, UIDs were 10004/10005 and SILENTLY excluded `instance.uuid`, `locks/`, `last_clean.json`, `notification.txt` from tarballs.
-- ✅ No `docker.sock` mounts anywhere in the portal slice
+- ✅ No `docker.sock` mounts anywhere in the workspace (since 2026-08-20 — previously the root compose's watchtower held one; §0)
 - ✅ `portal-init` one-shot container chowns the named volumes at portal-on; runs with `network_mode: none` + only `CHOWN/FOWNER/DAC_OVERRIDE` caps
 
 ---

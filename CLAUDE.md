@@ -1,60 +1,71 @@
 # CLAUDE.md — ai-stack workspace
 
-Self-hosted AI stack: Open WebUI + local LLM inference, a memory layer, a
-private search gateway, a self-improving coding agent, and Open Brain.
+Self-hosted AI stack: Open WebUI + local llama.cpp inference behind a LiteLLM
+gateway with an admission queue, a memory layer (mnemory + Open Brain), a
+private search gateway, a self-improving coding agent with a governed
+multi-agent org, and a gated internet portal.
 
 ## Stacks at a glance
 
-This workspace is **two separate Docker Compose projects** plus a recovery
-layer. Run the `/stack-map` skill (or read
+Run the `/stack-map` skill (or read
 [.claude/skills/stack-map/references/workspace-stacks.md](.claude/skills/stack-map/references/workspace-stacks.md))
 for the full inventory — networks, ports, dependency order.
 
 | Stack | Driven with | Contents |
 |-------|-------------|----------|
-| **Main** (`ai-stack`) | `docker compose ...` | core (`openwebui`, `tailscale`, `llm-gateway` + `llm-gateway-db` — LiteLLM analytics **front door**, holds the `llama-cpp`/`llama-cpp-embed` aliases since 2026-06-12; `llm-gateway-ui` — master-key'd Admin-UI sidecar / analytics dashboard at tailnet :8445/ui, shares `llm-gateway-db`, serves no inference, since 2026-06-14; `llama-cpp-upstream`, `llama-cpp-embed-upstream` — real inference (llama-swap) behind the gateway), memory (`mnemory`, `mnemory-gateway`), search (`vpn` — Mullvad WireGuard, SearXNG's engine-query egress since 2026-06-14; `tor` — page-fetch egress; `redis`, `searxng`, `gateway`), coder (`open-terminal`, `little-coder`, `lc-egress`), aux (`smolcrawl-pipelines`, `surrealdb`, `open_notebook`), backups (10 cron sidecars incl. `*-backup` + `llm-gateway-backup` + `openbrain-db/wiki-backup`) |
-| **Main — Portal** (`profiles: [internet]`) | `scripts/portal-on.ps1` / `portal-off.ps1` | **profile-gated, NOT in a default `up`:** `caddy`, `authelia`, `cloudflared`, `portal-init`, `portal-alerter`, `authelia-watcher`, `authelia-notif-bridge`, `integrity-tripwire`, `portal-cron`, `tunnel-watcher` (+ `caddy-backup`, `authelia-backup`). Internet-exposed auth front-end. |
-| **Open Brain** (`open-brain`) | `docker compose -f OB1/docker/docker-compose.yml ...` | ~23 `openbrain-*` containers (incl. a scheduled slice: `cron` + 4 HTTP-triggered jobs + the profile-gated `openbrain-idea-refinery` drain — the Idea Refinery) — a **separate** project that attaches to the main stack's `ai-stack_llm-net` as an external network |
-| **Recovery stack** | `scripts/emergency-recovery.ps1` (or `.bat`) | Ordered restart/repair across **both** compose projects — `recover` / `nuclear` / `gpu-reset`. Does **not** manage the profile-gated Portal. |
+| **Main** (`ai-stack`) | `docker compose ...` (root file includes `compose/<plane>.yml` since 2026-08-20) | core (`openwebui`, `tailscale`, `open-terminal`), inference (`llm-gateway` + `llm-gateway-db`/`-ui` — LiteLLM **front door**, holds the `llama-cpp`/`llama-cpp-embed` aliases; `llm-queue` — per-caller admission/priority; `llama-cpp-upstream`, `llama-cpp-embed-upstream` — real inference), memory (`mnemory`, `mnemory-gateway`), search (`vpn` — Mullvad engine egress; `tor` — page fetch; `redis`, `searxng`, `gateway`), coder (`little-coder`, `lc-egress`), aux (`smolcrawl-pipelines`, `surrealdb`, `open_notebook` — *being retired, still live for podcasts*), 12 backup sidecars. **31 default services.** |
+| **Main — Portal** (`profiles: [internet]`) | `scripts/portal-on.ps1` / `portal-off.ps1` | 12 profile-gated services (`caddy`, `authelia`, `cloudflared`, watchers/alerter/tripwire/cron + 2 backups). Internet-exposed auth front-end — never in a default `up`. |
+| **Open Brain** (`open-brain`) | `docker compose -f OB1/docker/docker-compose.yml ...` | ~24 `openbrain-*` containers (own project; attaches to `ai-stack_llm-net` as external). Bring up **after** `llm-gateway` is healthy; tear down before the main stack. |
+| **agent-org** | `docker compose -f agent-org/docker/docker-compose.yml ...` | Mattermost (+db) + `agent-bridge` (the governed org bus, 700+ tests) + profile-gated `workers`/`cloud` slices. |
+| **Recovery** | `scripts/emergency-recovery.ps1` (or `.bat`) | Ordered restart/repair across both projects — `recover` / `nuclear` / `gpu-reset`. Does **not** manage the Portal. |
 
-A plain `docker compose` command never touches Open Brain (its own project) **or
-the Portal** (profile-gated). Bring OB1 up after `llm-gateway` (and its
-`llama-cpp-upstream` / `llama-cpp-embed-upstream` servers) is healthy; tear it
-down before the main stack. The Portal has its own lifecycle (`portal-on/off.ps1`).
+Retired 2026-08-20 (CLEANUP-PLAN v3): `watchtower` (manual updates per
+`documentation/runbooks/UPDATE-MANAGEMENT.md`), `search-mcpo` and `lc-mcpo`
+(no consumers), Ollama and LM Studio remnants.
 
-**Inference plane (since 2026-06-12):** every service reaches inference through
-`http://llama-cpp:8080` / `http://llama-cpp-embed:8080`, which are now **network
-aliases on `llm-gateway` (LiteLLM)** — the analytics front door. It forwards by
-model name to `llama-cpp-upstream` (llama-swap → llama.cpp) and
-`llama-cpp-embed-upstream`. **Never route inference around LiteLLM** (it's the
-analytics inlet + the future multi-backend router) — this includes tailnet serve
-routes (`/llama-cpp`, `/llama-cpp-embed`), which must proxy to the `llama-cpp`
-alias, **not** `*-upstream`. Only health/GPU/recovery probes may target the
-**real** servers (`*-upstream`) directly, not the gateway. Enforced at change
-time by `scripts/check-llm-gateway-routing.ps1` (fails if any inference/serve
-endpoint points at a `*-upstream` server); the durable goal is network isolation
-so callers physically cannot reach `*-upstream`. Config gotchas:
-`config/litellm.config.yaml` runs **permissive (no master_key)** with
-`background_health_checks: false` (a model health-probe forces a llama-swap
-load → thrash); `config/llama-swap.config.yaml` uses `--no-mmap` (mmap of the big
-GGUF over the Windows `C:` bind mount hangs). See `litellm-proxy-status` memory +
-`documentation/implementation-guide/LiteLLM-Proxy/`.
+**Inference plane:** every service reaches inference through
+`http://llama-cpp:8080` / `http://llama-cpp-embed:8080` — **network aliases on
+`llm-gateway` (LiteLLM)**, which forwards through **`llm-queue`**
+(hold-and-dispatch, per-caller lanes) to the `*-upstream` servers. **Never
+route inference around LiteLLM**; only health/GPU/recovery probes may target
+`*-upstream` directly. Enforced pre-commit by
+`scripts/check-llm-gateway-routing.ps1`. Gotchas: LiteLLM runs permissive (no
+master_key — the virtual-keys cutover runbook is
+`documentation/implementation-guide/LiteLLM-Proxy/J1-VIRTUAL-KEYS-CUTOVER.md`);
+`background_health_checks: false` and never GET LiteLLM `/health` via the
+alias (model-load thrash — use `/health/liveliness`); llama-swap uses
+`--no-mmap` (GGUF mmap over the Windows bind mount hangs).
+
+**Status pipe:** the OWUI "Server Status" pipe subsystem lives in
+`status-pipe/` (orchestrator, router, modules, schemas, serve pipe) — the
+ONLY code mount into the OWUI container. `owui/` holds the deploy-by-paste
+snapshots + `manifest.csv` (file → OWUI id; skills included).
 
 ## Conventions
 
 - **Git:** never commit or push on the user's behalf unless explicitly asked.
-- **Adding/removing a container** means changing three places together: the
-  compose file, the recovery scripts' service inventory + shutdown/startup
-  sequences (`emergency-recovery.ps1` / `.bat`), and the stack-map reference
-  doc. The `/stack-map` skill checks for this drift.
-- **Shell:** Windows + PowerShell. Recovery scripts assume Docker Desktop.
-- `modules/emergency-recovery/` is a stale OWUI guidance module (still names
-  the disabled `ollama` container) — not part of the live recovery path.
+  Hooks live in `.githooks/` (`git config core.hooksPath .githooks`): secret
+  guard, LF check, gateway-routing check.
+- **Container rule:** adding/removing/moving a container = the compose plane
+  file + recovery scripts (`emergency-recovery.ps1`/`.bat`) + the stack-map
+  reference doc **together**. `/stack-map` checks for drift.
+- **Archive, don't delete:** retired code goes to `scripts/archive/` (see its
+  README provenance table), retired docs to `documentation/archive/`.
+- **Verify against gitignored evidence** before declaring anything dead:
+  `.env*` values and `backup/models/` OWUI exports are exactly where
+  "zero references" verdicts die (`grep --no-ignore`, live `webui.db`).
+- **Shell:** Windows + PowerShell 5.1 (ASCII no-BOM for scripts it parses);
+  recovery scripts assume Docker Desktop. Never restart `openwebui` alone —
+  `tailscale` shares its netns; order is openwebui → tailscale.
+- **Lint:** `ruff check .` (F + E9 gate; subprojects carry their own configs).
 
 ## Pointers
 
 - Stack topology / "what runs here?" → `/stack-map` skill
 - Recovery after a crash or netns break → `scripts/emergency-recovery.ps1`
-- Compaction downtime / Docker-down out-of-band Telegram channel → `documentation/sysadmin-out-of-band-channel.md`
-- little-coder design + workflow → `documentation/little-coder/`
-- Private search gateway → `documentation/web-search/`
+- Runbooks (updates, backups, incident response, out-of-band channel) →
+  `documentation/runbooks/` + `documentation/sysadmin-out-of-band-channel.md`
+- Per-feature status (shipped/draft) → `documentation/implementation-guide/README.md`
+- The living cleanup/restructure plan → `CLEANUP-PLAN.md` (v3)
+- little-coder design + workflow → `documentation/implementation-guide/little-coder/`
+- Private search gateway → `search-gateway/README.md`
