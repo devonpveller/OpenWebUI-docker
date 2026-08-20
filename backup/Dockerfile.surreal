@@ -1,0 +1,38 @@
+# backup/Dockerfile.surreal
+#
+# Custom image for open-notebook-backup: the surreal CLI for logical
+# exports + supercronic + tini + tar/gzip.
+#
+# Base is debian:stable-slim rather than alpine because the surreal
+# binary in surrealdb/surrealdb:v2 is dynamically linked against glibc.
+# Trying to run it on musl-libc (alpine) fails with the classic
+# "exec: ... no such file or directory" -- the missing dynamic linker.
+#
+# Two-stage build:
+#   1. Pull the surreal binary out of the official surrealdb:v2 image.
+#   2. Copy into debian-slim + add supercronic.
+#
+# Runs as root inside the container:
+#   - The SurrealDB export is over TCP (UID-agnostic).
+#   - notebook_data on the host is owned by root (open_notebook runs as root).
+#   - cap_drop:ALL + no-new-privileges still apply at the compose level.
+
+FROM surrealdb/surrealdb:v2 AS surreal-bin
+
+FROM debian:stable-slim
+
+ARG SUPERCRONIC_VERSION=v0.2.33
+ARG SUPERCRONIC_SHA1=71b0d58cc53f6bd72cf2f293e09e294b79c666d8
+
+COPY --from=surreal-bin /surreal /usr/local/bin/surreal
+
+RUN apt-get update && \
+    apt-get install --no-install-recommends -y \
+      ca-certificates tini wget gzip tar coreutils && \
+    rm -rf /var/lib/apt/lists/* && \
+    wget -q -O /usr/local/bin/supercronic \
+      "https://github.com/aptible/supercronic/releases/download/${SUPERCRONIC_VERSION}/supercronic-linux-amd64" && \
+    echo "${SUPERCRONIC_SHA1}  /usr/local/bin/supercronic" | sha1sum -c - && \
+    chmod +x /usr/local/bin/supercronic /usr/local/bin/surreal
+
+ENTRYPOINT ["/usr/bin/tini", "--"]

@@ -1,0 +1,30 @@
+# backup/Dockerfile.postgres
+#
+# Custom image for openbrain-db-backup: postgres:16-alpine for pg_dump
+# (matches the openbrain-db version), supercronic for non-root scheduling,
+# tini for proper signal forwarding.
+#
+# Runs as non-root UID 10008. The data source (openbrain-db) is accessed
+# over TCP via pg_dump, so no shared filesystem ownership concerns.
+# Output goes to a host bind mount (./backups/openbrain-db/) which must
+# be writable by UID 10008.
+
+FROM postgres:16-alpine
+
+ARG SUPERCRONIC_VERSION=v0.2.33
+ARG SUPERCRONIC_SHA1=71b0d58cc53f6bd72cf2f293e09e294b79c666d8
+ARG BACKUP_UID=10008
+ARG BACKUP_USER=pgbak
+
+RUN apk add --no-cache tini ca-certificates && \
+    wget -q -O /usr/local/bin/supercronic \
+      "https://github.com/aptible/supercronic/releases/download/${SUPERCRONIC_VERSION}/supercronic-linux-amd64" && \
+    echo "${SUPERCRONIC_SHA1}  /usr/local/bin/supercronic" | sha1sum -c - && \
+    chmod +x /usr/local/bin/supercronic && \
+    addgroup -g ${BACKUP_UID} ${BACKUP_USER} && \
+    adduser  -u ${BACKUP_UID} -G ${BACKUP_USER} -s /sbin/nologin -D ${BACKUP_USER}
+
+USER ${BACKUP_UID}:${BACKUP_UID}
+WORKDIR /home/${BACKUP_USER}
+
+ENTRYPOINT ["/sbin/tini", "--"]
