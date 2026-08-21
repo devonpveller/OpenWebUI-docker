@@ -70,3 +70,23 @@ snapshots + `manifest.csv` (file → OWUI id; skills included).
 - The living cleanup/restructure plan → `CLEANUP-PLAN.md` (v3)
 - little-coder design + workflow → `documentation/implementation-guide/little-coder/`
 - Private search gateway → `search-gateway/README.md`
+
+## OB1 submodule (since 2026-08-21)
+
+OB1 is a **pinned git submodule** (`.gitmodules` → `devonpveller/OB1.git`,
+branch `feature/integrated-knowledge-system`), not a loose nested repo. The
+parent records exactly which OB1 commit is deployed.
+
+- **Clone:** `git clone --recurse-submodules …`, or `git submodule update
+  --init` in an existing checkout. Recovery scripts and `docker compose -f
+  OB1/docker/docker-compose.yml …` are unaffected — the on-disk layout is
+  identical.
+- **The gitlink is real code — bump it via PR.** After landing OB1 changes:
+  push them to OB1's remote FIRST (the pinned SHA must be reachable there, or
+  a fresh `--recurse-submodules` clone breaks), then in the parent
+  `git add OB1` + commit the new pointer with a message saying what moved.
+  Never bump the gitlink to a commit that isn't on the OB1 remote.
+- **openbrain-gateway** source lives HERE (`openbrain-gateway/`, beside its
+  twin `mnemory-cloud-gateway`); OB1 consumes the prebuilt
+  `openbrain-gateway:local` image. Rebuild it from this repo:
+  `docker build -t openbrain-gateway:local ./openbrain-gateway`.

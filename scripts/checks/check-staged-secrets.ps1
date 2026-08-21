@@ -21,8 +21,14 @@
 $ErrorActionPreference = 'Stop'
 
 # --- staged, still-present files (Added/Copied/Modified) --------------------
+# Exclude submodule gitlinks (mode 160000): they are commit pointers, not
+# blobs, so `git show :<path>` errors on them. `--diff-filter` can't express
+# "not a gitlink", so filter by mode from the staged index listing.
+$gitlinks = @(& git ls-files --stage |
+    Where-Object { $_ -match '^160000 ' } |
+    ForEach-Object { ($_ -split '\t', 2)[1] })
 $staged = @(& git diff --cached --name-only --diff-filter=ACM) |
-    Where-Object { $_ -and $_.Trim() -ne '' }
+    Where-Object { $_ -and $_.Trim() -ne '' -and $gitlinks -notcontains $_ }
 
 if (-not $staged -or $staged.Count -eq 0) {
     Write-Host "  [secrets] nothing staged - skip"

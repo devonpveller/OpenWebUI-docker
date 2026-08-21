@@ -26,8 +26,7 @@ __pycache__/
 # Local MCP configs (contain the Open Brain access key)
 .mcp.json
 .vscode/mcp.json
-# Vendored external repo (devonpveller/OB1 @ develop) — own .git, not tracked here
-OB1/
+# OB1/ is a git submodule (H.1, 2026-08-21) - tracked via .gitmodules, not ignored
 # Deploy keys / mounted secrets (e.g. openbrain-wiki private remote key)
 secrets/
 *.pyc
