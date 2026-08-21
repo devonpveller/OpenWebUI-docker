@@ -80,7 +80,7 @@ twice (watchdog recency table + sysadmin daily check). Scheduler flavors are
 a known 3-way split (crond/supercronic/sleep-loop) — unification queued in
 D.1 follow-ups.
 
-### Portal slice (12 services, `profiles: [internet]` — **currently ON**, up 2 weeks)
+### Portal — own compose project `portal` since 2026-08-21 (12 services, **currently ON**)
 
 | Container | Purpose |
 |---|---|
@@ -98,7 +98,7 @@ D.1 follow-ups.
 
 Justification: the portal is the deliberate, audited internet exposure
 (SECURITY.md); every sidecar exists because the 2026-05-29 audit added it.
-Running-state is an operator choice (`portal-on.ps1`).
+Running-state is an operator choice (`portal-on.ps1`); the split into its own project positions the portal to front more than ai-stack (operator decision #5). Data lives in `portal_*` volumes (migrated from `ai-stack_*` 2026-08-21).
 
 ---
 

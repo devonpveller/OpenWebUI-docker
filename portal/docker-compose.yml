@@ -1,11 +1,17 @@
-# compose/portal.yml - internet-exposed auth front-end - EVERY service here is profile-gated ([internet]/[local-test]); driven by scripts/portal/portal-on.ps1 / portal-off.ps1, never a default up
+# portal/docker-compose.yml - the internet-exposed auth front-end as its OWN
+# compose project (`portal`) since 2026-08-21 (CLEANUP-PLAN v3, operator
+# decision #5): the portal may front more than ai-stack in the future, and a
+# separate project is the expandability seam. Driven by
+# scripts/portal/portal-on.ps1 / portal-off.ps1 - never part of an ai-stack up.
+# Cross-project seam: caddy attaches to ai-stack_app-net (external) to reach
+# openwebui + open_notebook. Relative paths are ../ because this file lives in
+# portal/ but the config/secrets/backups trees stay at the repo root.
 # Split from the 2,2xx-line root docker-compose.yml 2026-08-20 (CLEANUP-PLAN v3 D.1).
 # Networks/volumes are defined in the root file.
 services:
   portal-init:
     image: alpine:3.21
     container_name: portal-init
-    profiles: [internet, local-test]
     user: "0:0"   # root — required to chown volumes
     volumes:
       - authelia-data:/vols/authelia
@@ -58,7 +64,6 @@ services:
     #   4. recreate portal-alerter and run alerter.ts --selftest before relying on it
     image: denoland/deno@sha256:a40c899f6aca244a3f0a116c05f6dec0a29f9898d2f004d60ec57c1514f87349
     container_name: portal-alerter
-    profiles: [internet, local-test]
     networks:
       - auth-net          # internal: true — watcher + tripwire POST /alert here
       - notify-net        # outbound to oauth2.googleapis.com + gmail.googleapis.com
@@ -66,15 +71,15 @@ services:
     volumes:
       # NOT :ro — Docker can't create the /app/token.json mount target
       # inside a read-only parent (OB1's openbrain-digest uses the same pattern).
-      - ./config/alerter:/app
-      - ./secrets/google/portal-alerter/credentials.json:/app/credentials.json:ro
-      - ./secrets/google/portal-alerter/token.json:/app/token.json
+      - ../config/alerter:/app
+      - ../secrets/google/portal-alerter/credentials.json:/app/credentials.json:ro
+      - ../secrets/google/portal-alerter/token.json:/app/token.json
       - authelia-data:/logs/authelia:ro
       - caddy-data:/logs/caddy:ro
       # Daily digest markdown reports. Persists to host so the operator
       # can browse via documentation/portal-digest/ (see also
       # portal-status.ps1's "Most recent digest" probe).
-      - ./reports/portal-digest:/reports
+      - ../reports/portal-digest:/reports
     environment:
       - DIGEST_TO=${DIGEST_TO}
       - DIGEST_FROM=${DIGEST_FROM}
@@ -114,16 +119,15 @@ services:
   authelia:
     image: authelia/authelia:4.39
     container_name: authelia
-    profiles: [internet, local-test]
     networks:
       - auth-net          # internal: true — no internet egress
     volumes:
-      - ./config/authelia:/config:ro
+      - ../config/authelia:/config:ro
       - authelia-data:/data
       # Writable bind mount for Authelia's healthcheck env file. Without
       # this, read_only:true fails because Authelia writes to /app/.healthcheck.env
       # during startup. Host file is empty placeholder — Authelia populates it.
-      - ./config/authelia/.healthcheck.env:/app/.healthcheck.env
+      - ../config/authelia/.healthcheck.env:/app/.healthcheck.env
     environment:
       - TZ=UTC
       - PUBLIC_DOMAIN=${PUBLIC_DOMAIN}
@@ -165,15 +169,14 @@ services:
   caddy:
     image: caddy:2.8.4-alpine
     container_name: caddy
-    profiles: [internet, local-test]
     networks:
       - edge-net          # cloudflared → caddy
       - auth-net          # caddy → authelia (forward_auth)
       - app-net           # caddy → openwebui + open_notebook
     # NO host port bindings — Cloudflare Tunnel is the only ingress
     volumes:
-      - ./config/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
-      - ./config/caddy/site:/srv/site:ro
+      - ../config/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ../config/caddy/site:/srv/site:ro
       - caddy-data:/data
       - caddy-config:/config
     environment:
@@ -221,22 +224,21 @@ services:
 
   authelia-watcher:
     build:
-      context: ./config/watcher
+      context: ../config/watcher
       dockerfile: Dockerfile
     image: portal-watcher:local
     container_name: authelia-watcher
-    profiles: [internet, local-test]
     networks:
       - auth-net          # internal: true — only talks to portal-alerter over auth-net
     volumes:
       - authelia-data:/logs/authelia:ro
       - caddy-data:/logs/caddy:ro
-      - ./config/watcher/authelia-watch.sh:/scripts/watch.sh:ro
+      - ../config/watcher/authelia-watch.sh:/scripts/watch.sh:ro
       # RW so the watcher can append a new IP after firing the first
       # new_ip alert (so subsequent logins from the same device/network
       # don't re-alert). Lives in config/watcher/ so the operator can
       # also edit it (e.g. remove a stale carrier IP).
-      - ./config/watcher/known-ips.txt:/data/known-ips.txt
+      - ../config/watcher/known-ips.txt:/data/known-ips.txt
     environment:
       - ALERTER_URL=http://portal-alerter:8080/alert
       - ALERT_BASE_URL=${PUBLIC_DOMAIN}
@@ -273,16 +275,15 @@ services:
 
   authelia-notif-bridge:
     build:
-      context: ./config/auth-notification-bridge
+      context: ../config/auth-notification-bridge
       dockerfile: Dockerfile
     image: portal-authnotif-bridge:local
     container_name: authelia-notif-bridge
-    profiles: [internet, local-test]
     networks:
       - auth-net          # portal-alerter is on auth-net; bridge talks to it here
     volumes:
       - authelia-data:/data:ro
-      - ./config/auth-notification-bridge/bridge.sh:/scripts/bridge.sh:ro
+      - ../config/auth-notification-bridge/bridge.sh:/scripts/bridge.sh:ro
     environment:
       - NOTIF_FILE=/data/notification.txt
       - ALERTER_URL=http://portal-alerter:8080/alert
@@ -315,18 +316,17 @@ services:
 
   integrity-tripwire:
     build:
-      context: ./config/tripwire
+      context: ../config/tripwire
       dockerfile: Dockerfile
     image: portal-tripwire:local
     container_name: integrity-tripwire
-    profiles: [internet, local-test]
     networks:
       - auth-net          # internal: true
     volumes:
-      - ./config/caddy/Caddyfile:/watch/Caddyfile:ro
-      - ./config/authelia/configuration.yml:/watch/configuration.yml:ro
-      - ./config/authelia/users_database.yml:/watch/users_database.yml:ro
-      - ./config/tripwire/integrity-tripwire.sh:/scripts/tripwire.sh:ro
+      - ../config/caddy/Caddyfile:/watch/Caddyfile:ro
+      - ../config/authelia/configuration.yml:/watch/configuration.yml:ro
+      - ../config/authelia/users_database.yml:/watch/users_database.yml:ro
+      - ../config/tripwire/integrity-tripwire.sh:/scripts/tripwire.sh:ro
       - tripwire-data:/state
     environment:
       - ALERTER_URL=http://portal-alerter:8080/alert
@@ -365,15 +365,14 @@ services:
 
   portal-cron:
     build:
-      context: ./config/portal-cron
+      context: ../config/portal-cron
       dockerfile: Dockerfile
     image: portal-cron:local
     container_name: portal-cron
-    profiles: [internet, local-test]
     networks:
       - notify-net        # only reaches portal-alerter; no internet egress used by cron itself
     volumes:
-      - ./config/portal-cron/crontab:/etc/portal-crontab:ro
+      - ../config/portal-cron/crontab:/etc/portal-crontab:ro
     environment:
       - PORTAL_DIGEST_CRON=${PORTAL_DIGEST_CRON:-0 7 * * *}
       - TZ=UTC
@@ -438,7 +437,7 @@ services:
 
   tunnel-watcher:
     build:
-      context: ./config/tunnel-watcher
+      context: ../config/tunnel-watcher
       dockerfile: Dockerfile
     image: portal-tunnel-watcher:local
     container_name: tunnel-watcher
@@ -447,7 +446,7 @@ services:
       - edge-net          # reaches cloudflared:2000
       - auth-net          # reaches portal-alerter:8080 (it sits on both nets)
     volumes:
-      - ./config/tunnel-watcher/tunnel-watch.sh:/scripts/watch.sh:ro
+      - ../config/tunnel-watcher/tunnel-watch.sh:/scripts/watch.sh:ro
     environment:
       - CLOUDFLARED_URL=http://cloudflared:2000/ready
       - ALERTER_URL=http://portal-alerter:8080/alert
@@ -489,10 +488,9 @@ services:
         BACKUP_USER: caddybak
     image: portal-backup-caddy:local
     container_name: caddy-backup
-    profiles: [internet, local-test]
     volumes:
       - caddy-data:/data:ro
-      - ./backups/caddy:/backups
+      - ../backups/caddy:/backups
       - ./backup/caddy-backup.sh:/scripts/backup.sh:ro
     environment:
       - BACKUP_DIR=/backups
@@ -545,10 +543,9 @@ services:
         BACKUP_USER: authbak
     image: portal-backup-authelia:local
     container_name: authelia-backup
-    profiles: [internet, local-test]
     volumes:
       - authelia-data:/data:ro
-      - ./backups/authelia:/backups
+      - ../backups/authelia:/backups
       - ./backup/authelia-backup.sh:/scripts/backup.sh:ro
     environment:
       - BACKUP_DIR=/backups
@@ -588,3 +585,28 @@ services:
     labels:
       - "com.centurylinklabs.watchtower.enable=false"
 
+networks:
+  # edge-net: only cloudflared <-> caddy.
+  edge-net:
+    driver: bridge
+  # auth-net: caddy <-> authelia <-> portal-alerter (receive) <-> watchers.
+  # internal: true - no internet egress for anything attached here.
+  auth-net:
+    driver: bridge
+    internal: true
+  # notify-net: portal-alerter (egress to Gmail) + portal-cron.
+  # NOT internal - the single internet-egress chokepoint in the portal.
+  notify-net:
+    driver: bridge
+  # The ai-stack seam: owned by the ai-stack project; caddy joins it to reach
+  # openwebui:8080 and open_notebook. ai-stack must be up first.
+  app-net:
+    external: true
+    name: ai-stack_app-net
+
+volumes:
+  # Migrated from ai-stack_* 2026-08-21 (data copied during the split cutover).
+  caddy-data:
+  caddy-config:
+  authelia-data:
+  tripwire-data:

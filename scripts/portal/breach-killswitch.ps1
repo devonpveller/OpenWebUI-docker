@@ -72,9 +72,9 @@ try {
     'authelia-backup'
   )
   if ($DryRun) {
-    Write-Host "    [DRY RUN] would: docker compose --profile internet stop $($services -join ' ')"
+    Write-Host "    [DRY RUN] would: docker compose -p portal --profile internet stop $($services -join ' ')"
   } else {
-    docker compose --profile internet stop @services
+    docker compose -p portal -f (Join-Path $projectRoot 'portal\docker-compose.yml') --env-file (Join-Path $projectRoot '.env') --profile internet stop @services
     if ($LASTEXITCODE -ne 0) { Write-Warning "compose stop returned $LASTEXITCODE -- review state" }
   }
 

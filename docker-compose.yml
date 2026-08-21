@@ -22,8 +22,10 @@ include:
     project_directory: .
   - path: compose/backups.yml
     project_directory: .
-  - path: compose/portal.yml
-    project_directory: .
+  # The portal slice moved to its own compose project 2026-08-21:
+  # portal/docker-compose.yml (project name `portal`), driven by
+  # scripts/portal/portal-on.ps1 / portal-off.ps1. It attaches to this
+  # project's app-net externally to reach openwebui / open_notebook.
 
 volumes:
   openwebui-data:
@@ -42,11 +44,8 @@ volumes:
   little-coder-polyglot:
   little-coder-sessions:
   little-coder-workspace:
-  # Portal volumes (plan §7.3) — empty until `scripts/portal/portal-on.ps1` runs.
-  caddy-data:
-  caddy-config:
-  authelia-data:
-  tripwire-data:
+  # (Portal volumes moved to the `portal` compose project 2026-08-21 —
+  # data migrated to portal_* volumes during the split cutover.)
   # Cross-project named volume from the open-brain compose project,
   # referenced by openbrain-wiki-backup. ai-stack does not own this;
   # it must already exist (it does, when OB1 is up).
@@ -86,21 +85,11 @@ networks:
     internal: true
   default:
     driver: bridge
-  # ----- Portal networks (plan §7.4) -------------------------------------
-  # edge-net: only cloudflared ↔ caddy.
-  edge-net:
-    driver: bridge
-  # auth-net: caddy ↔ authelia ↔ portal-alerter (receive) ↔ watchers.
-  # internal: true — no internet egress for anything attached here.
-  auth-net:
-    driver: bridge
-    internal: true
-  # app-net: caddy ↔ openwebui ↔ open_notebook. Backends reachable only from caddy.
+  # app-net: the ai-stack↔portal seam — the portal project's caddy attaches
+  # here EXTERNALLY (name: ai-stack_app-net) to reach openwebui +
+  # open_notebook. edge/auth/notify nets moved to the portal project
+  # 2026-08-21.
   app-net:
-    driver: bridge
-  # notify-net: portal-alerter (egress to Gmail) + portal-cron (curls the alerter).
-  # NOT internal — this is the single chokepoint with internet egress in the portal slice.
-  notify-net:
     driver: bridge
   # ----- Cross-project networks (declared external) ----------------------
   # obnet: the open-brain compose project's own bridge. openbrain-db-backup

@@ -8,7 +8,9 @@ Per-container purpose & justification: [documentation/CONTAINER-REGISTRY.md](../
 **Last reconciled against live compose: 2026-08-20** — CLEANUP-PLAN v3 execution
 day: the root compose is now a thin include of `compose/<plane>.yml` files
 (rendered model proven identical); **retired**: `watchtower`, `search-mcpo`,
-`lc-mcpo` (main = **31 default + 12 portal services**); the status-pipe
+`lc-mcpo` (main = **31 services**); the **portal became its own compose
+project `portal`** on 2026-08-21 (12 services, `portal/docker-compose.yml`,
+data migrated to `portal_*` volumes, joins `ai-stack_app-net` externally); the status-pipe
 subsystem consolidated to `status-pipe/` and OWUI's whole-repo mount replaced
 by three narrow ro mounts; entrypoint.sh rewritten to a 318-line route table
 (ollama/LM Studio blocks gone). Prior reconcile (2026-07-01) — added the **`agent-org`** project

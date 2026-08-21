@@ -16,7 +16,7 @@ by default.
 | Stack | Driven with | Contents |
 |-------|-------------|----------|
 | **Main** (`ai-stack`) | `docker compose …` | core (`openwebui`, `tailscale`, `open-terminal`), inference (`llm-gateway` + db/ui, `llm-queue`, `llama-cpp-upstream`, `llama-cpp-embed-upstream`), memory (`mnemory`, `mnemory-gateway`), search (`vpn`, `tor`, `redis`, `searxng`, `gateway`), coder (`little-coder`, `lc-egress`), aux (`smolcrawl-pipelines`, `surrealdb`, `open_notebook`), 12 backup sidecars |
-| **Main — Portal** (`profiles: [internet]`) | `scripts/portal/portal-on.ps1` / `portal-off.ps1` | `caddy`, `authelia`, `cloudflared` + watcher/alerter/tripwire/cron sidecars. Internet-exposed auth front-end — **not** part of a default `up`. |
+| **Portal** (`portal` — own compose project) | `scripts/portal/portal-on.ps1` / `portal-off.ps1` (`portal/docker-compose.yml`) | `caddy`, `authelia`, `cloudflared` + watcher/alerter/tripwire/cron sidecars. Internet-exposed auth front-end; joins `ai-stack_app-net` externally. |
 | **Open Brain** (`open-brain`) | `docker compose -f OB1/docker/docker-compose.yml …` | ~24 `openbrain-*` containers (db, MCP servers, gateway, workers, wiki, research, scheduled digest/podcast slice). Separate project; attaches to `ai-stack_llm-net` as an external network. |
 | **agent-org** | `docker compose -f agent-org/docker/docker-compose.yml …` | Mattermost + `agent-bridge` (the governed org bus) + profile-gated worker/cloud slices. |
 | **Recovery** | `scripts/recovery/emergency-recovery.ps1` (or `.bat`) | Ordered restart/repair across both projects — `recover` / `nuclear` / `gpu-reset`. |
@@ -38,7 +38,7 @@ Enforced at commit time by `scripts/checks/check-llm-gateway-routing.ps1`.
 ```powershell
 git config core.hooksPath .githooks   # pre-commit: secret guard + line endings + routing check
 Copy-Item .env.example .env           # then fill in values — WEBUI_SECRET_KEY is REQUIRED
-docker compose up -d                  # main stack (31 services; portal stays down)
+docker compose up -d                  # main stack (31 services; portal = own project)
 docker compose -f OB1/docker/docker-compose.yml up -d   # after llm-gateway is healthy
 ```
 
@@ -60,7 +60,7 @@ access is Tailscale serve or the portal only.
 
 | Path | What it is |
 |---|---|
-| `docker-compose.yml` | Main stack (31 default + 12 portal services, split into compose/<plane>.yml) |
+| `docker-compose.yml` | Main stack (31 services, split into compose/<plane>.yml) |
 | `owui/` | Canonical deploy-by-paste OWUI artifacts: tools/pipes/filters/actions/skills + `manifest.csv` |
 | `scripts/` | Ops plane: recovery, checks, portal lifecycle, backups, bridges (`claude-sessions-bridge/`, `sysadmin-mcp/`, `mattermost-mcp/`), `archive/` |
 | `llm-queue/`, `search-gateway/`, `mnemory-gateway/`, `openbrain-gateway/`, `smolcrawl/`, `little-coder/` | Service source trees |

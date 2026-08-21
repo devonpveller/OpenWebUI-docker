@@ -42,15 +42,18 @@ $ErrorActionPreference = 'Continue'
 $projectRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 Push-Location $projectRoot
 try {
+  # Own compose project since 2026-08-21 (CLEANUP-PLAN v3 #5). The root .env
+  # is passed explicitly - interpolation no longer finds it from portal/.
+  $portalBase = @('-p', 'portal',
+                  '-f', (Join-Path $projectRoot 'portal\docker-compose.yml'),
+                  '--env-file', (Join-Path $projectRoot '.env'))
   if ($Test) {
-    $profileName = 'local-test'
-    $composeArgs = @('-f', 'docker-compose.yml', '-f', 'docker-compose.local-test.override.yml')
-    Write-Host "==> Bringing portal up in TEST mode (profile: local-test)" -ForegroundColor Cyan
+    $composeArgs = $portalBase + @('-f', (Join-Path $projectRoot 'portal\local-test.override.yml'))
+    Write-Host "==> Bringing portal up in TEST mode (no tunnel)" -ForegroundColor Cyan
     Write-Host "    No internet exposure. Caddy bound to 127.0.0.1:8443."
   } else {
-    $profileName = 'internet'
-    $composeArgs = @()
-    Write-Host "==> Bringing portal up in PRODUCTION mode (profile: internet)" -ForegroundColor Cyan
+    $composeArgs = $portalBase + @('--profile', 'internet')
+    Write-Host "==> Bringing portal up in PRODUCTION mode" -ForegroundColor Cyan
     Write-Host "    cloudflared will connect; portal becomes internet-reachable."
   }
   Write-Host "    Project root: $projectRoot"
@@ -63,20 +66,20 @@ try {
     @{ Name = 'alerter';   Services = @('portal-alerter') },
     @{ Name = 'auth';      Services = @('authelia') },
     @{ Name = 'caddy';     Services = @('caddy') },
-    @{ Name = 'watchers';  Services = @('authelia-watcher','integrity-tripwire','portal-cron') },
+    @{ Name = 'watchers';  Services = @('authelia-watcher','authelia-notif-bridge','integrity-tripwire','portal-cron') },
     @{ Name = 'backups';   Services = @('caddy-backup','authelia-backup') }
   )
 
   # cloudflared only in production. In test mode the tunnel never runs;
   # the local-test override file binds caddy to 127.0.0.1 for browser access.
   if (-not $Test) {
-    $groups += @{ Name = 'tunnel'; Services = @('cloudflared') }
+    $groups += @{ Name = 'tunnel'; Services = @('cloudflared','tunnel-watcher') }
   }
 
   foreach ($group in $groups) {
     Write-Host "==> Group: $($group.Name) -- $($group.Services -join ', ')" -ForegroundColor Cyan
     $svcArgs = $group.Services
-    $allArgs = $composeArgs + @('--profile', $profileName, 'up', '-d') + $svcArgs
+    $allArgs = $composeArgs + @('up', '-d') + $svcArgs
     if ($PSCmdlet.ShouldProcess(($svcArgs -join ', '), "docker compose $($allArgs -join ' ')")) {
       docker compose @allArgs
       if ($LASTEXITCODE -ne 0) { throw "docker compose up failed for group $($group.Name)" }

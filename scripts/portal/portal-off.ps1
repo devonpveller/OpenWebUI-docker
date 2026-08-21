@@ -46,7 +46,10 @@ try {
 
   # Both compose files referenced so the local-test override is also
   # known (idempotent — fine to include even in production teardown).
-  $stopArgs = @('-f', 'docker-compose.yml', '-f', 'docker-compose.local-test.override.yml', 'stop') + $portalServices
+  $stopArgs = @('-p', 'portal',
+                '-f', (Join-Path $projectRoot 'portal\docker-compose.yml'),
+                '--env-file', (Join-Path $projectRoot '.env'),
+                '--profile', 'internet', 'stop') + $portalServices
   if ($PSCmdlet.ShouldProcess(($portalServices -join ', '), "docker compose $($stopArgs -join ' ')")) {
     docker compose @stopArgs
     if ($LASTEXITCODE -ne 0) {
