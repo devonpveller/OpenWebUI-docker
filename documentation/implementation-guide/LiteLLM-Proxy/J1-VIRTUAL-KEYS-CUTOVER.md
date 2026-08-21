@@ -17,24 +17,28 @@ field. Full fix = LiteLLM `master_key` + per-caller virtual keys (the config's
 own §10.3.2 pointer): real authn at the gateway, real spend attribution, and
 a caller identity llm-queue can trust.
 
-## Phase A — verify the identity transport (30 min, no risk)
+## Phase A — EXECUTED 2026-08-21 (throwaway rig: LiteLLM main-stable + header-echo upstream + scratch postgres)
 
-The open question: with virtual keys, **what does llm-queue see?** LiteLLM
-still sends `Bearer dummy` upstream. Candidate mechanisms, test in order:
+**Findings (all verified live):**
 
-1. **`user`-injection:** issue a test virtual key, send a completion through
-   the gateway, and dump what llm-queue receives (`docker logs llm-queue` at
-   DEBUG, or the events DB). Check whether LiteLLM injects `user`/metadata
-   from the key. If yes → lanes key off `user` (already implemented as
-   llm-queue's fallback).
-2. **`x-litellm-*` upstream headers:** same dump — if the LiteLLM build sends
-   attribution headers upstream, extend `routes/data.py:94-99` to read one
-   (a 5-line change, llm-queue is well-tested).
-3. **Custom-string keys:** test whether `/key/generate` accepts a caller-chosen
-   token value. If yes, issue keys with the EXACT strings callers send today
-   (`owui-chat`, `ollama`, `lc-coder`, `ob-research`, …) → the flip needs
-   **zero caller edits** on day one; rotate to strong keys caller-by-caller
-   later. This is the lowest-risk path if supported.
+1. ❌ `user` body field is now STRIPPED upstream by this LiteLLM build (the
+   2026-06-14 note that it forwards is obsolete) — llm-queue's `user`
+   fallback is dead through the gateway.
+2. ❌ No `x-litellm-*` attribution headers reach the upstream.
+3. ❌ Arbitrary custom key strings rejected — but ✅ **`sk-` prefixed custom
+   strings ARE accepted** (`/key/generate {"key":"sk-<name>"}`) →
+   deterministic memorable keys per caller.
+4. ✅ **THE mechanism: a pre-call hook** (`config/litellm/custom_callbacks.py`,
+   `LaneHeaderInjector`) reads the virtual key's `metadata.lane` (falling
+   back to `key_alias`) and injects **`x-ai-stack-caller: <lane>`** upstream
+   — verified arriving at the upstream alongside `Bearer dummy`.
+5. ✅ Near-zero-downtime sequencing: **`llm-gateway-ui` is master-key'd
+   against the SAME `llm-gateway-db`** — pre-generate all keys through it,
+   re-key callers while the main gateway is still permissive (any string
+   accepted), flip `master_key` on the main gateway LAST.
+
+**llm-queue change:** read `x-ai-stack-caller` as the primary lane id in
+`routes/data.py` (before the Authorization/`user` fallbacks) + a test.
 
 ## Phase B — enable master_key (one line + one env)
 
