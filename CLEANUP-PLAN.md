@@ -825,3 +825,82 @@ agent-communication end-state everything later builds on.
   (router keywords incl. `ollama`). Fix its content, or remove the routing
   branch + render whitelist and let `scripts/emergency-recovery.ps1` be the
   only recovery story? (Either way, correct the CLAUDE.md line.)
+
+
+## Part K — NEW (2026-08-21): project-per-plane restructure ("ai-stack as chassis")
+
+Operator direction (anomaly review #3, approved same day): the main stack's
+monolithic compose project dissolves into self-contained compose projects —
+one per service tree — exactly like `portal`, `OB1`, and `agent-org` already
+are. The ai-stack repo remains the CHASSIS: shared networks, recovery/checks,
+backups tree + NAS mirror, docs/registry, .env conventions.
+
+### K.0 — Design decisions (locked with operator 2026-08-21)
+
+1. **Network anchor:** the root `docker-compose.yml` (project `ai-stack`)
+   becomes the platform anchor — it keeps ONLY the shared seam networks
+   (`llm-net`, `app-net`, `default`) plus the transitional aux plane. Project
+   name stays `ai-stack`, so every existing external reference
+   (`ai-stack_llm-net`, `ai-stack_app-net`, `ai-stack_default` from OB1 /
+   portal / agent-org) survives UNCHANGED. Plane-internal networks move with
+   their plane and go native (`llm-backend-net` → inference,
+   `search-net` → search, `lc-net` → coder).
+2. **Layout:** one top-level dir per project (`inference/`, `frontend/`,
+   `memory/`, `search/`, `coder/`), each holding `docker-compose.yml` with an
+   explicit `name:` key — the portal precedent, kept consistent. Source trees
+   (`little-coder/`, `search-gateway/`, `llm-queue/`, …) do NOT move today.
+3. **.env:** single root `.env` stays. Plane projects are driven with
+   `--env-file <root>/.env` (portal precedent) via a new
+   `scripts/stack/stack.ps1` driver. Fail-loud guard: each plane compose marks
+   one critical variable with `${VAR:?...}` interpolation so a bare
+   `docker compose up` without the env file STOPS instead of silently
+   starting with empty credentials.
+4. **Volumes move with their plane** — new project-native volumes, data
+   copied (operator's portal-split preference; no name-pinning).
+   Container NAMES never change (DNS, watchers, NAS paths all hold).
+5. **Backups sidecars follow their store's plane** (the OB1-adoption
+   precedent): openwebui/tailscale → frontend; llm-gateway/lm-models →
+   inference; mnemory → memory; little-coder → coder; open-notebook stays
+   with aux in the root project. Artifact output paths under `./backups/`
+   are invariant.
+6. **open-terminal moves to the coder project** — it is the coder plane's
+   executor (control-plane DECIDES / open-terminal EXECUTES) and the last
+   `lc-net` member outside it; moving it makes `lc-net` fully plane-native.
+7. **The notebook/aux plane does NOT split** — surrealdb + open_notebook +
+   open-notebook-backup are retiring into the wiki (D-10); they stay in the
+   root project until then.
+8. **openwebui + tailscale stay one project** (`frontend`) — tailscale runs
+   `network_mode: service:openwebui`; the netns coupling is physical.
+
+### K.1–K.5 — The ladder (one plane per step, test gate between)
+
+Order: inference → memory → search → coder → frontend (frontend last: the
+netns + tailnet-serve restore path is the most delicate).
+
+Per-plane playbook (portal-split procedure, now run 3×):
+  a. Create `<plane>/docker-compose.yml` (`name: <plane>`); move service defs
+     verbatim from `compose/<plane>.yml`; shared nets → `external: true` +
+     `name: ai-stack_*`; plane nets native; binds re-pointed `../…`;
+     output binds for backups stay `../backups/...`.
+  b. Create plane volumes; stop old services; copy data (alpine `cp -a`);
+     `up -d` under the new project; verify health + one functional probe.
+  c. Same commit: root include/volume trims, recovery trio edits,
+     stack-services.json project fields, stack-map + CONTAINER-REGISTRY +
+     CLAUDE.md counts (container rule).
+  d. Test gate before the next plane (per-plane probes listed in K ledger).
+
+### K.6 — Chassis consolidation (after the ladder)
+
+- Root compose = anchor networks + aux plane only; volumes section trimmed.
+- `scripts/stack/stack.ps1` — single driver: `up|down|ps|logs [plane|all]`,
+  dependency-ordered, always passes `--env-file`.
+- emergency-recovery.ps1/.bat rewritten data-driven: an ordered project
+  registry (compose path + services + health gate per project) replaces the
+  monolithic service arrays.
+- check-llm-gateway-routing.ps1 file lists re-pointed at the new layout.
+- Docs sweep: stack-map, CONTAINER-REGISTRY, CLAUDE.md, copilot-instructions,
+  runbooks (backup-conventions, UPDATE-MANAGEMENT).
+
+### K ledger
+
+(appended as steps execute)
