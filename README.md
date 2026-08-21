@@ -11,18 +11,24 @@ by default.
 > The previous 1,362-line README described the retired Ollama-era stack; it is
 > preserved at `documentation/archive/README-pre-2026-08.md`.
 
-## Topology — two compose projects + a gated portal
+## Topology — compose projects around a network anchor (Part K, 2026-08-21)
 
-| Stack | Driven with | Contents |
-|-------|-------------|----------|
-| **Main** (`ai-stack`) | `docker compose …` | core (`openwebui`, `tailscale`, `open-terminal`), inference (`llm-gateway` + db/ui, `llm-queue`, `llama-cpp-upstream`, `llama-cpp-embed-upstream`), memory (`mnemory`, `mnemory-cloud-gateway`), search (`vpn`, `redis`, `searxng`, `gateway`), coder (`little-coder`, `lc-egress`), aux (`surrealdb`, `open_notebook`), 12 backup sidecars |
-| **Portal** (`portal` — own compose project) | `scripts/portal/portal-on.ps1` / `portal-off.ps1` (`portal/docker-compose.yml`) | `caddy`, `authelia`, `cloudflared` + watcher/alerter/tripwire/cron sidecars. Internet-exposed auth front-end; joins `ai-stack_app-net` externally. |
-| **Open Brain** (`open-brain`) | `docker compose -f OB1/docker/docker-compose.yml …` | ~24 `openbrain-*` containers (db, MCP servers, gateway, workers, wiki, research, scheduled digest/podcast slice). Separate project; attaches to `ai-stack_llm-net` as an external network. |
-| **agent-org** | `docker compose -f agent-org/docker/docker-compose.yml …` | Mattermost + `agent-bridge` (the governed org bus) + profile-gated worker/cloud slices. |
-| **Recovery** | `scripts/recovery/emergency-recovery.ps1` (or `.bat`) | Ordered restart/repair across both projects — `recover` / `nuclear` / `gpu-reset`. |
+| Project | Driven with | Contents |
+|---------|-------------|----------|
+| **Anchor** (`ai-stack`, root `docker-compose.yml`) | `docker compose up -d` (or `stack.ps1 up anchor`) | **0 services** — owns the shared `ai-stack_llm-net` / `app-net` / `default` networks every project attaches to externally |
+| **Frontend** (`frontend/`) | `stack.ps1` or `docker compose -f frontend/docker-compose.yml --env-file .env …` | `openwebui` + `tailscale` (netns pair) + their backups |
+| **Inference** (`inference/`) | same pattern | `llm-gateway` + db/ui (LiteLLM front door, holds the aliases), `llm-queue`, `llama-cpp-upstream`, `llama-cpp-embed-upstream`, 2 backups — owns `llm-backend-net` |
+| **Memory** (`memory/`) | same pattern | `mnemory`, `mnemory-cloud-gateway` (host :8060), `mnemory-backup` |
+| **Search** (`search/`) | same pattern | `vpn` (Mullvad — all egress), `redis`, `searxng`, `gateway` (host :8085) — owns `search-net` |
+| **Coder** (`coder/`) | same pattern | `open-terminal`, `little-coder`, `lc-egress`, backup — owns `lc-net` |
+| **Portal** (`portal/`) | `scripts/portal/portal-on.ps1` / `portal-off.ps1` | `caddy`, `authelia`, `cloudflared` + watcher/alerter/tripwire/cron sidecars. Internet-exposed auth front-end |
+| **Open Brain** (`OB1/docker/`) | `docker compose -f OB1/docker/docker-compose.yml …` | ~29 containers: the `openbrain-*` fleet + its backups + the Open Notebook trio (`surrealdb`, `open_notebook`, backup) |
+| **agent-org** (`agent-org/docker/`) | `docker compose -f agent-org/docker/docker-compose.yml …` | Mattermost + `agent-bridge` (the governed org bus) + profile-gated worker/cloud slices |
+| **Recovery** | `scripts/recovery/emergency-recovery.ps1` (or `.bat`) | Ordered restart/repair across ALL projects — `recover` / `nuclear` / `gpu-reset` |
 
-Bring OB1 up **after** `llm-gateway` is healthy; tear it down before the main
-stack. A plain `docker compose` command never touches OB1 or the portal.
+Start order: anchor → inference → the caller planes → OB1 → agent-org
+(`scripts/stack/stack.ps1 up` runs exactly that). Bring OB1 up **after**
+`llm-gateway` is healthy; tear it down before the planes it consumes.
 
 ## Inference plane (the one rule)
 
@@ -38,9 +44,17 @@ Enforced at commit time by `scripts/checks/check-llm-gateway-routing.ps1`.
 ```powershell
 git config core.hooksPath .githooks   # pre-commit: secret guard + line endings + routing check
 Copy-Item .env.example .env           # then fill in values — WEBUI_SECRET_KEY is REQUIRED
-docker compose up -d                  # main stack (31 services; portal = own project)
-docker compose -f OB1/docker/docker-compose.yml up -d   # after llm-gateway is healthy
+.\scripts\stack\stack.ps1 up          # every project, dependency order (anchor networks first)
+.\scripts\stack\stack.ps1 status      # per-project container states
 ```
+
+Since the 2026-08-21 Part K restructure the workspace is **compose projects
+around a network anchor**: the root `docker-compose.yml` owns only the shared
+`ai-stack_*` networks (0 services), and each service tree is its own project
+(`frontend/`, `inference/`, `memory/`, `search/`, `coder/`, `portal/`,
+`OB1/docker/`, `agent-org/docker/`). Drive one plane manually with
+`docker compose -f <plane>/docker-compose.yml --env-file .env ...` from this
+directory — the `--env-file` is required (plane files fail loud without it).
 
 `WEBUI_SECRET_KEY` encrypts values at rest in `webui.db` — pin it once and
 never rotate casually. All published ports bind to `127.0.0.1`; external
@@ -60,12 +74,13 @@ access is Tailscale serve or the portal only.
 
 | Path | What it is |
 |---|---|
-| `docker-compose.yml` | Main stack (31 services, split into compose/<plane>.yml) |
+| `docker-compose.yml` | The platform ANCHOR — shared networks only (Part K, 2026-08-21) |
+| `frontend/` `inference/` `memory/` `search/` `coder/` | The plane compose projects (one service tree each) |
 | `owui/` | Canonical deploy-by-paste OWUI artifacts: tools/pipes/filters/actions/skills + `manifest.csv` |
 | `scripts/` | Ops plane: recovery, checks, portal lifecycle, backups, bridges (`claude-sessions-bridge/`, `sysadmin-mcp/`, `mattermost-mcp/`), `archive/` |
 | `llm-queue/`, `search-gateway/`, `mnemory-cloud-gateway/`, `openbrain-gateway/`, `smolcrawl/`, `little-coder/` | Service source trees |
 | `agent-org/` | Governed multi-agent org (bus, charters, floor, 700+ tests) |
-| `OB1/` | Open Brain (vendored independent repo — own git) |
+| `OB1/` | Open Brain — pinned git submodule since 2026-08-21 (bump via PR; incl. the Open Notebook trio since K.5b) |
 | `backup/` + `backups/` | Sidecar scripts/Dockerfiles + produced artifacts |
 | `documentation/runbooks/` | Operational runbooks (incident response, backups, updates…) |
 | `documentation/implementation-guide/` | Per-feature plans — see its README index for shipped/draft status |

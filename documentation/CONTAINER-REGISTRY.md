@@ -13,15 +13,22 @@ purpose. Containers that failed that test today were removed (see
 
 ---
 
-## Project `ai-stack` — main stack (31 default services)
+## Project `ai-stack` — the platform ANCHOR (0 services since Part K.5b, 2026-08-21)
 
-### Core
+> Owns only the shared seam networks (`llm-net`, `app-net`, `default`).
+> The planes below were the "main stack" until Part K split each into
+> its own compose project (`frontend/`, `inference/`, `memory/`,
+> `search/`, `coder/`); their container purposes are unchanged.
+
+### Frontend — own compose project `frontend` since 2026-08-21 (Part K.5)
 
 | Container | Purpose | Why it exists / what breaks without it |
 |---|---|---|
-| `openwebui` | The chat frontend (OWUI 0.11.0, GPU build) | The primary human surface; hosts the paste-deployed tools/pipes/skills (`owui/`) |
-| `tailscale` | Tailnet ingress; **shares openwebui's netns** | Carries all 8 tailnet serve routes (OWUI, llama-cpp aliases, ON ×2, wiki, LiteLLM UI, Mattermost). Restart order openwebui→tailscale is mandatory |
-| `open-terminal` | Sandboxed exec backend for little-coder | The only place agent code executes; isolated on lc-net with key'd API |
+| `openwebui` | The chat frontend (OWUI 0.11.0, GPU build; image pinned `openwebui:local`) | The primary human surface; hosts the paste-deployed tools/pipes/skills (`owui/`) |
+| `tailscale` | Tailnet ingress; **shares openwebui's netns** (encoded in the project's depends_on) | Carries all 8 tailnet serve routes (OWUI, llama-cpp aliases — probe `/health/liveliness` since J.1, ON ×2, wiki, LiteLLM UI, Mattermost). Restart order openwebui→tailscale is mandatory |
+
+(`open-terminal` moved to the **coder** project in K.4 — it is that plane's
+executor; see the Coder section.)
 
 ### Inference plane (the LiteLLM front door) — own compose project `inference` since 2026-08-21 (Part K.1)
 
@@ -40,14 +47,14 @@ purpose. Containers that failed that test today were removed (see
 | `llama-cpp-upstream` | Real chat inference: llama-swap → llama.cpp (qwen36-27b, MTP) | The GPU worker; isolated on llm-backend-net so callers physically cannot bypass the gateway |
 | `llama-cpp-embed-upstream` | Real embedding inference (bge-m3, plain llama.cpp) | Separate from chat so embedding bursts (OB1 backfills) never contend for the swap slot |
 
-### Memory (decision D-9 keeps this plane, direction pending)
+### Memory — own compose project `memory` since 2026-08-21 (Part K.2; D-9 keeps this plane, direction pending)
 
 | Container | Purpose | Why |
 |---|---|---|
 | `mnemory` | Layer-1 personal memory service (llm-net only, no host port) | Live consumers: OWUI mnemory tool + persistent-memory filter, system-health/llm-traffic modules |
 | `mnemory-cloud-gateway` | Privacy proxy (:8060, bearer-key'd, allow-listed verbs) | The ONLY published door to mnemory; label-forcing keeps cloud reads scoped. Twin of openbrain-gateway (unification = E.1, coupled to D-9/H.1) |
 
-### Search (private search gateway)
+### Search — own compose project `search` since 2026-08-21 (Part K.3)
 
 | Container | Purpose | Why |
 |---|---|---|
@@ -56,19 +63,20 @@ purpose. Containers that failed that test today were removed (see
 | `searxng` | The metasearch engine (internal-only net) | Aggregates engines without API keys |
 | `search-gateway` | REST face (:8085, key'd) + Tavily shim | What `openbrain-research` and tools actually call; provider abstraction + rotation |
 
-### Coder
+### Coder — own compose project `coder` since 2026-08-21 (Part K.4)
 
 | Container | Purpose | Why |
 |---|---|---|
+| `open-terminal` | Sandboxed exec backend (moved in from core at K.4) | The only place agent code executes; isolated on the now-plane-native lc-net with key'd API |
 | `little-coder` | The self-improving coding agent daemon (:8090 on lc-net) | Executes OWUI-triggered and agent-org-dispatched coding tasks; control plane DECIDES / open-terminal EXECUTES |
 | `lc-egress` | tinyproxy default-deny egress allowlist | The coder plane's only internet path (git host allowlist) — blast-radius control |
 
-### Aux (transitional plane — decision D-10)
+### Aux — moved to the OB1 project (K.5b, 2026-08-21)
 
-| Container | Purpose | Why |
-|---|---|---|
-| `surrealdb` | Datastore for open_notebook (digest-pinned since today) | Exists solely for ON; retires with it (D-10) |
-| `open_notebook` | The IKS fork of Open Notebook | **STAYING (operator, 2026-08-21)** until the wiki workbench UI matures; long-term direction = fold ON's function into the wiki (D-10 decided) |
+The Open Notebook trio (`surrealdb`, `open_notebook`, `open-notebook-backup`)
+lives in the OB1 project now — ON is OB1-tethered (IKS store, wiki volume,
+podcast chain). **Not retired**: it stays until the wiki workbench matures
+(D-10 direction unchanged). See the OB1 section below.
 
 ### Backup sidecars (one per stateful store — backup-conventions runbook)
 
@@ -109,7 +117,7 @@ Running-state is an operator choice (`portal-on.ps1`); the split into its own pr
 
 ---
 
-## Project `open-brain` (OB1) — 26 containers
+## Project `open-brain` (OB1) — 29 containers (incl. the Open Notebook trio since K.5b)
 
 ### Store + API plane
 
@@ -158,6 +166,14 @@ Running-state is an operator choice (`portal-on.ps1`); the split into its own pr
 |---|---|
 | `openbrain-db-backup` | Nightly `pg_dump` of openbrain-db (supercronic). Output still `ai-stack/backups/openbrain-db` — NAS mirror + freshness watchers unchanged |
 | `openbrain-wiki-backup` | Daily tar of the wiki git-vault + binary-assets volumes. Output still `ai-stack/backups/openbrain-wiki` |
+
+### Open Notebook trio (adopted from ai-stack at K.5b 2026-08-21 — NOT retiring; stays until the wiki workbench matures)
+
+| Container | Purpose |
+|---|---|
+| `surrealdb` | ON's local store (SurrealDB v2, digest-pinned; host 127.0.0.1:8003) |
+| `open_notebook` | ON UI + API (IKS fork — openbrain-db is the canonical store; host :8503/:5055; renders the digest→podcast audio) |
+| `open-notebook-backup` | SurrealDB logical export + notebook_data tar (output still `ai-stack/backups/open-notebook`) |
 
 ---
 

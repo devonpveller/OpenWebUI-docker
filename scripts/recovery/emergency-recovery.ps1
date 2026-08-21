@@ -15,8 +15,8 @@ $ErrorActionPreference = "Stop"
 # Service inventory — every container the recovery stack maintains.
 #
 # The MAIN compose project (docker-compose.yml) holds several planes:
-#   aux     surrealdb, open_notebook, open-notebook-backup (retiring into
-#           the wiki eventually; joins OB1 in a later Part K step)
+#   (the Open Notebook trio joined the OB1 project in K.5b 2026-08-21 --
+#    the root project owns NO services; it is the pure network anchor.)
 #   (the FRONTEND plane -- openwebui, tailscale + their backups -- is its own
 #    compose project since 2026-08-21 Part K.5: frontend\docker-compose.yml.
 #    tailscale shares openwebui's netns INSIDE that project.)
@@ -32,7 +32,6 @@ $ErrorActionPreference = "Stop"
 #   (the CODER plane -- open-terminal, little-coder, lc-egress,
 #    little-coder-backup -- is its own compose project since 2026-08-21
 #    Part K.4: coder\docker-compose.yml. open-terminal moved in from core.)
-#   backup  open-notebook-backup
 #           (openbrain-db/wiki backups live in the OB1 project; llm-gateway/
 #            lm-models backups live in the inference project -- 2026-08-21)
 #
@@ -686,7 +685,7 @@ function Invoke-EmergencyRecovery {
 
     # Root anchor first: creates the shared ai-stack_* networks every plane
     # project attaches to (the aux trio rides along).
-    Write-Log "INFO" "Starting the root anchor project (networks + aux)..."
+    Write-Log "INFO" "Starting the root anchor project (shared networks; 0 services)..."
     docker compose up -d
 
     # Frontend project: openwebui -> (healthy) -> tailscale, ordered by its

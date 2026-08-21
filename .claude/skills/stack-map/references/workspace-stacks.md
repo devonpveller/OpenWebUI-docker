@@ -5,10 +5,13 @@ Cross-check against the live compose files before relying on it — the files
 are the source of truth; this doc is the curated summary.
 Per-container purpose & justification: [documentation/CONTAINER-REGISTRY.md](../../../documentation/CONTAINER-REGISTRY.md).
 
-**Last reconciled against live compose: 2026-08-21** — Part K restructure in
-progress: the **inference plane became its own compose project `inference`**
-(K.1, 8 services, owns `llm-backend-net`; main root project = **18 default
-services** and shrinking as the ladder proceeds); earlier that day the
+**Last reconciled against live compose: 2026-08-21** — Part K restructure
+COMPLETE: the root `ai-stack` project is a **pure network anchor (0
+services)**; each plane is its own compose project — `frontend` (K.5, incl.
+the openwebui+tailscale netns pair), `inference` (K.1, owns
+`llm-backend-net`), `memory` (K.2), `search` (K.3, owns `search-net`),
+`coder` (K.4, owns `lc-net`, adopted open-terminal); the Open Notebook trio
+joined OB1 (K.5b). Driver: `scripts/stack/stack.ps1`. Earlier that day the
 openbrain-db/wiki backups moved into OB1 and `smolcrawl-pipelines`/`-backup`
 retired. 2026-08-20 CLEANUP-PLAN v3 execution day: the root compose became a
 thin include of `compose/<plane>.yml` files (rendered model proven identical);
@@ -39,7 +42,7 @@ Source files:
 
 ---
 
-## 1. Main stack — compose project `ai-stack`
+## 1. Root anchor — compose project `ai-stack` (0 services since K.5b)
 
 Files: `docker-compose.yml` (thin include of `compose/<plane>.yml`; the network ANCHOR — owns `llm-net`/`app-net`/`default`); plane projects at `frontend|inference|memory|search|coder/docker-compose.yml`; portal = `portal/docker-compose.yml` (own project).
 Run with: `docker compose ...` from the workspace root.

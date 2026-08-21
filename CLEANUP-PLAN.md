@@ -977,3 +977,20 @@ Per-plane playbook (portal-split procedure, now run 3×):
   watchtower-era override archived at K.5). VERIFIED: trio healthy under
   `open-brain`; ON API :5055/api/config dbStatus=online; UI :8503 alive;
   openbrain-podcast resolves open_notebook over native obnet.
+- **K.6 chassis consolidation — EXECUTED 2026-08-21.**
+  `scripts/stack/stack.ps1` (up/down/status/restart across all projects in
+  dependency order, always --env-file; portal + agent-org profiles stay
+  operator-driven by design). Doc sweep: README topology table rewritten
+  (anchor + 9 projects), CONTAINER-REGISTRY per-plane headers + ON trio,
+  stack-map reconcile header, copilot-instructions, CLAUDE.md.
+  VALIDATED: all 8 project configs render; 78 containers, 0 unhealthy;
+  stack.ps1 status green across every project; check-backup-coverage CLEAN;
+  root ruff F+E9 gate clean.
+  **OPEN (operator):** delete the superseded pre-split volumes after a soak —
+  Part K copies (`ai-stack_`: mnemory-data, llm-gateway-db-data,
+  llm-queue-data, openwebui-data, little-coder-* ×6) hold the rollback data;
+  ancient orphans (`ai-stack_`: openwebui_data, openwebui_sessions,
+  tailscale_state, tailscale-state) were already flagged safe-to-rm.
+  **Follow-up:** 17 pre-existing E501s inside llm-queue's own stricter ruff
+  config (root F+E9 gate unaffected); mnemory image rebuild needs a
+  deliberate `mcp` dependency pin first (K.2 trap).
