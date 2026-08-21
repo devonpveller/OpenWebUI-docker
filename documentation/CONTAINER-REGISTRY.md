@@ -61,7 +61,6 @@ purpose. Containers that failed that test today were removed (see
 
 | Container | Purpose | Why |
 |---|---|---|
-| `smolcrawl-pipelines` | OWUI Pipelines server (:9099, key'd) for crawl→KB flows | Live crawl/ingest surface (the retired deep-research harness was a different part of smolcrawl) |
 | `surrealdb` | Datastore for open_notebook (digest-pinned since today) | Exists solely for ON; retires with it (D-10) |
 | `open_notebook` | The IKS fork of Open Notebook | **STAYING (operator, 2026-08-21)** until the wiki workbench UI matures; long-term direction = fold ON's function into the wiki (D-10 decided) |
 

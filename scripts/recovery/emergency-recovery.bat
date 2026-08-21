@@ -11,8 +11,8 @@ REM           (llm-queue = B2 admission controller; llm-gateway-ui = Admin-UI si
 REM   memory  mnemory, mnemory-cloud-gateway
 REM   search  vpn, redis, searxng, gateway  (Private Search Gateway)
 REM   coder   open-terminal, little-coder, lc-egress
-REM   aux     smolcrawl-pipelines, surrealdb, open_notebook
-REM   backup  mnemory-backup, openwebui-backup, little-coder-backup, smolcrawl-backup,
+REM   aux    , surrealdb, open_notebook
+REM   backup  mnemory-backup, openwebui-backup, little-coder-backup,,
 REM           tailscale-backup, lm-models-backup, open-notebook-backup,
 REM           openbrain-db-backup, openbrain-wiki-backup (last two need OB1 up)
 REM   OB1     Open Brain - SEPARATE compose project (OB1\docker\docker-compose.yml)
@@ -109,12 +109,6 @@ if %ERRORLEVEL% NEQ 0 (
     docker compose kill tailscale
 )
 
-echo [INFO] Stopping SmolCrawl Pipelines container...
-docker compose stop smolcrawl-pipelines
-if %ERRORLEVEL% NEQ 0 (
-    echo [WARN] SmolCrawl Pipelines stop failed, attempting force kill...
-    docker compose kill smolcrawl-pipelines
-)
 
 echo [INFO] Stopping open-notebook and surrealdb containers...
 docker compose stop open_notebook surrealdb
@@ -224,10 +218,7 @@ echo [INFO] Starting Mnemory gateway (cloud MCP proxy)...
 docker compose up -d mnemory-cloud-gateway
 
 echo [INFO] Starting backup schedulers (main/host resources)...
-docker compose up -d mnemory-backup openwebui-backup smolcrawl-backup tailscale-backup lm-models-backup open-notebook-backup
-
-echo [INFO] Starting SmolCrawl Pipelines...
-docker compose up -d smolcrawl-pipelines
+docker compose up -d mnemory-backup openwebui-backup tailscale-backup lm-models-backup open-notebook-backup
 
 echo [INFO] Starting surrealdb (open-notebook database)...
 docker compose up -d surrealdb
@@ -286,7 +277,7 @@ echo [INFO] Restarting with proper network dependency sequence...
 
 REM Stop dependent containers first
 echo [INFO] Stopping Tailscale and dependent services (network dependents)...
-docker compose stop tailscale llama-cpp-upstream llama-cpp-embed-upstream mnemory mnemory-cloud-gateway mnemory-backup openwebui-backup smolcrawl-pipelines open_notebook surrealdb gateway searxng redis vpn little-coder-backup lc-egress little-coder open-terminal
+docker compose stop tailscale llama-cpp-upstream llama-cpp-embed-upstream mnemory mnemory-cloud-gateway mnemory-backup openwebui-backup open_notebook surrealdb gateway searxng redis vpn little-coder-backup lc-egress little-coder open-terminal
 if exist "%OB1_COMPOSE%" docker compose -f "%OB1_COMPOSE%" stop
 
 REM Restart OpenWebUI first and wait for health
@@ -326,10 +317,7 @@ docker compose up -d mnemory mnemory-cloud-gateway mnemory-backup
 timeout /t 15 /nobreak >nul
 
 echo [INFO] Starting backup schedulers (main/host resources)...
-docker compose up -d openwebui-backup smolcrawl-backup tailscale-backup lm-models-backup open-notebook-backup
-
-echo [INFO] Starting SmolCrawl Pipelines...
-docker compose up -d smolcrawl-pipelines
+docker compose up -d openwebui-backup tailscale-backup lm-models-backup open-notebook-backup
 
 echo [INFO] Starting surrealdb (open-notebook database)...
 docker compose up -d surrealdb
@@ -435,9 +423,6 @@ echo.
 echo [INFO] Mnemory status:
 docker compose exec mnemory python -c "import urllib.request; print(urllib.request.urlopen('http://localhost:8051/health').read().decode())" 2>nul
 
-echo.
-echo [INFO] SmolCrawl Pipelines status:
-docker compose exec smolcrawl-pipelines curl -s http://localhost:9099/ 2>nul
 
 echo.
 echo [INFO] open-notebook API status:
@@ -465,7 +450,6 @@ docker compose ps mnemory-cloud-gateway lc-egress --format "table {{.Service}}\t
 
 echo.
 echo [INFO] Backup schedulers status:
-docker compose ps mnemory-backup openwebui-backup little-coder-backup smolcrawl-backup tailscale-backup lm-models-backup open-notebook-backup openbrain-db-backup openbrain-wiki-backup --format "table {{.Service}}\t{{.Status}}" 2>nul
 
 echo.
 echo [INFO] Open Brain (OB1) status:

@@ -52,7 +52,6 @@ _EXPECTED = [
     ("openbrain-db",     "openbrain-db-backup",     36),
     ("openbrain-wiki",   "openbrain-wiki-backup",   36),
     ("open-notebook",    "open-notebook-backup",    36),
-    ("smolcrawl",        "smolcrawl-backup",        36),
     ("tailscale",        "tailscale-backup",        36),
     ("caddy",            "caddy-backup",            36),
     ("authelia",         "authelia-backup",         36),

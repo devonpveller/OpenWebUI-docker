@@ -22,9 +22,9 @@ $ErrorActionPreference = "Stop"
 #   memory  mnemory, mnemory-cloud-gateway
 #   search  vpn, redis, searxng, gateway (Private Search Gateway)
 #   coder   open-terminal, little-coder, lc-egress
-#   aux     smolcrawl-pipelines, surrealdb, open_notebook
+#   aux    , surrealdb, open_notebook
 #   backup  mnemory-backup, openwebui-backup, little-coder-backup,
-#           smolcrawl-backup, tailscale-backup, lm-models-backup,
+#          , tailscale-backup, lm-models-backup,
 #           open-notebook-backup, openbrain-db-backup, openbrain-wiki-backup
 #
 # PORTAL plane (caddy, authelia, cloudflared, portal-init, portal-alerter,
@@ -58,12 +58,12 @@ $Script:MainStackServices = @(
     "openwebui", "llama-cpp-upstream", "llama-cpp-embed-upstream",
     "llm-queue", "llm-gateway-db", "llm-gateway", "llm-gateway-ui", "tailscale",
     "mnemory", "mnemory-cloud-gateway",
-    "smolcrawl-pipelines", "surrealdb", "open_notebook",
+     "surrealdb", "open_notebook",
     "vpn", "redis", "searxng", "gateway",
     "open-terminal", "little-coder", "lc-egress",
     # Backup cron sidecars (see helper arrays below).
     "mnemory-backup", "openwebui-backup", "little-coder-backup",
-    "smolcrawl-backup", "tailscale-backup", "lm-models-backup", "open-notebook-backup",
+     "tailscale-backup", "lm-models-backup", "open-notebook-backup",
     "llm-gateway-backup",
     "openbrain-db-backup", "openbrain-wiki-backup"
 )
@@ -71,7 +71,7 @@ $Script:MainStackServices = @(
 # Backup sidecars touching only main-stack/host resources — safe to nudge anytime.
 $Script:MainBackups = @(
     "mnemory-backup", "openwebui-backup", "little-coder-backup",
-    "smolcrawl-backup", "tailscale-backup", "lm-models-backup", "open-notebook-backup"
+     "tailscale-backup", "lm-models-backup", "open-notebook-backup"
 )
 # Backup sidecars that attach to OB1-owned external network/volumes — start only
 # AFTER the OB1 stack is up (open-brain_obnet + open-brain_* volumes must exist).
@@ -297,11 +297,11 @@ function Test-BasicConnectivity {
             $states["vpn"], $states["redis"], $states["searxng"], $states["gateway"])
         Write-Log "INFO" ("Coder  - open-terminal: {0}, little-coder: {1}, lc-egress: {2}" -f `
             $states["open-terminal"], $states["little-coder"], $states["lc-egress"])
-        Write-Log "INFO" ("Aux    - smolcrawl-pipelines: {0}, surrealdb: {1}, open_notebook: {2}" -f `
-            $states["smolcrawl-pipelines"], $states["surrealdb"], $states["open_notebook"])
-        Write-Log "INFO" ("Backup - mnemory: {0}, owui: {1}, lc: {2}, smolcrawl: {3}, tailscale: {4}, lm-models: {5}, on: {6}, ob1-db: {7}, ob1-wiki: {8}" -f `
+        Write-Log "INFO" ("Aux    - surrealdb: {0}, open_notebook: {1}" -f `
+            $states["surrealdb"], $states["open_notebook"])
+        Write-Log "INFO" ("Backup - mnemory: {0}, owui: {1}, lc: {2}, tailscale: {3}, lm-models: {4}, on: {5}, ob1-db: {6}, ob1-wiki: {7}" -f `
             $states["mnemory-backup"], $states["openwebui-backup"], $states["little-coder-backup"], `
-            $states["smolcrawl-backup"], $states["tailscale-backup"], $states["lm-models-backup"], `
+            $states["tailscale-backup"], $states["lm-models-backup"], `
             $states["open-notebook-backup"], $states["openbrain-db-backup"], $states["openbrain-wiki-backup"])
 
         # Open Brain (OB1) — separate compose project, reported as a count.
@@ -423,7 +423,7 @@ function Invoke-MinimalRecovery {
         docker compose up -d llm-queue llm-gateway
 
         docker compose up -d mnemory mnemory-cloud-gateway `
-            smolcrawl-pipelines surrealdb open_notebook `
+            surrealdb open_notebook `
             vpn redis searxng gateway `
             open-terminal little-coder lc-egress
 
@@ -581,7 +581,7 @@ function Invoke-EmergencyRecovery {
     }
 
     # OpenWebUI-dependent auxiliary services (open_notebook before surrealdb).
-    Stop-ServiceGroup "auxiliary services" @("smolcrawl-pipelines", "open_notebook", "surrealdb")
+    Stop-ServiceGroup "auxiliary services" @( "open_notebook", "surrealdb")
 
     # Mnemory memory layer (gateway before mnemory).
     Stop-ServiceGroup "Mnemory layer" @("mnemory-cloud-gateway", "mnemory", "mnemory-backup")
@@ -735,19 +735,6 @@ function Invoke-EmergencyRecovery {
     # Backup schedulers (independent cron sidecars, main/host resources).
     # OB1-attached backups (openbrain-db/wiki) start later, after Start-OB1Stack.
     Start-ServiceGroup "backup schedulers" $Script:MainBackups
-
-    # Start SmolCrawl Pipelines (depends on OpenWebUI)
-    Write-Log "INFO" "Starting SmolCrawl Pipelines..."
-    try {
-        docker compose up -d smolcrawl-pipelines
-        if (-not (Wait-ForHealthy "smolcrawl-pipelines" 90)) {
-            Write-Log "WARN" "SmolCrawl Pipelines health check failed, but continuing..."
-        }
-    }
-    catch {
-        Write-Log "WARN" "Failed to start SmolCrawl Pipelines: $_"
-    }
-
     # Start surrealdb first, then open-notebook (which depends on it).
     Write-Log "INFO" "Starting surrealdb (open-notebook database)..."
     try {
@@ -842,10 +829,6 @@ function Invoke-EmergencyRecovery {
 
         Write-Log "INFO" "Mnemory status:"
         docker compose exec mnemory python -c "import urllib.request; print(urllib.request.urlopen('http://localhost:8051/health').read().decode())" 2>$null
-
-        Write-Log "INFO" "SmolCrawl Pipelines status:"
-        docker compose exec smolcrawl-pipelines curl -s http://localhost:9099/ 2>$null
-
         Write-Log "INFO" "open-notebook API status:"
         docker compose exec open_notebook python3 -c "import urllib.request; print(urllib.request.urlopen('http://localhost:5055/api/config').read().decode())" 2>$null
 
@@ -866,7 +849,7 @@ function Invoke-EmergencyRecovery {
 
         Write-Log "INFO" "Backup scheduler status:"
         docker compose ps mnemory-backup openwebui-backup little-coder-backup `
-            smolcrawl-backup tailscale-backup lm-models-backup open-notebook-backup `
+            tailscale-backup lm-models-backup open-notebook-backup `
             openbrain-db-backup openbrain-wiki-backup --format "table {{.Service}}\t{{.Status}}" 2>$null
 
         if (Test-OB1Available) {

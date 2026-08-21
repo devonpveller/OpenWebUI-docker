@@ -323,43 +323,7 @@ services:
   # pipelines + crawl outputs). Hot-safe: pipelines are JSON definitions,
   # outputs are append-only files. Uses the generic-tar-backup.sh script.
 
-  smolcrawl-backup:
-    image: alpine:3.21
-    container_name: smolcrawl-backup
-    volumes:
-      - smolcrawl-data:/data:ro
-      - ./backups/smolcrawl:/backups
-      - ./backup/generic-tar-backup.sh:/scripts/backup.sh:ro
-    environment:
-      - DATA_DIR=/data
-      - BACKUP_DIR=/backups
-      - PREFIX=smolcrawl
-      - RETAIN_COUNT=${SMOLCRAWL_BACKUP_RETAIN_COUNT:-2}
-      - HEALTH_TCP=${SMOLCRAWL_BACKUP_HEALTH_TCP:-smolcrawl-pipelines:9099}
-      # 2026-08-01: crond -> sleep-loop (see openbrain-wiki-backup rationale).
-      - BACKUP_INTERVAL=${SMOLCRAWL_BACKUP_INTERVAL:-86400}   # daily
-      - TZ=UTC
-    entrypoint: /bin/sh
-    command:
-      - -c
-      - |
-        echo "[$$(date -u +%FT%TZ)] smolcrawl-backup started (sleep-loop; interval=$${BACKUP_INTERVAL}s, retain=$${RETAIN_COUNT})"
-        while true; do
-          sh /scripts/backup.sh || echo "[$$(date -u +%FT%TZ)] smolcrawl backup.sh exited $$?"
-          sleep "$${BACKUP_INTERVAL}"
-        done
-    restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
-    labels:
-      - "com.centurylinklabs.watchtower.enable=false"
-
-  # tailscale-backup -- tar of the Tailscale state directory bind mount.
-  # Small (~100 KB): device identity, derpmap cache, log files. Restore
-  # avoids re-authenticating the device to your tailnet.
-
+  # smolcrawl-backup retired 2026-08-21 with its subject (see auxiliary.yml).
   tailscale-backup:
     image: alpine:3.21
     container_name: tailscale-backup

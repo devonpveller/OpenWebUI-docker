@@ -79,7 +79,7 @@ try {
   }
 
   # Sanity check: NEVER touch these
-  Write-Host "    [guard] NOT touching: tailscale, openwebui, open_notebook, llama-cpp*, mnemory*, surrealdb, search-*, little-coder*, smolcrawl-pipelines, OB1 stack" -ForegroundColor DarkGray
+  Write-Host "    [guard] NOT touching: tailscale, openwebui, open_notebook, llama-cpp*, mnemory*, surrealdb, search-*, little-coder*,, OB1 stack" -ForegroundColor DarkGray
 
   # --- Step 3: Snapshot logs. ---
   Write-Host ""

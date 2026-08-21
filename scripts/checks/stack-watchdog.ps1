@@ -476,7 +476,7 @@ function Repair-OpenTerminal {
 # Generic helper: ensure a non-critical compose container is running.
 # Uses Test-ServiceHealth (which reads docker's compose-defined healthcheck
 # status, or just the running state for containers without a healthcheck).
-# Used for mnemory, smolcrawl-pipelines, and the backup sidecars —
+# Used for mnemory and the backup sidecars —
 # none are required for the core OpenWebUI/Tailscale/LLM path, so failures
 # are logged but do not fail the overall health check.
 function Confirm-AuxiliaryContainer {
@@ -1018,7 +1018,6 @@ $ExpectedBackupRecency = @(
     @{ Dir = 'openbrain-db';    MaxAgeHours = 52 }
     @{ Dir = 'openbrain-wiki';  MaxAgeHours = 52 }
     @{ Dir = 'openwebui';       MaxAgeHours = 52 }
-    @{ Dir = 'smolcrawl';       MaxAgeHours = 52 }
     @{ Dir = 'tailscale';       MaxAgeHours = 52 }
 )
 function Test-BackupRecency {
@@ -1388,7 +1387,6 @@ function Invoke-HealthCheck {
     # but do not fail the overall health check). Order matters: mnemory depends
     # on llama-cpp + llama-cpp-embed, which are confirmed healthy above.
     Confirm-AuxiliaryContainer -ServiceName "mnemory"            -RestartWaitSeconds 20 | Out-Null
-    Confirm-AuxiliaryContainer -ServiceName "smolcrawl-pipelines" -RestartWaitSeconds 20 | Out-Null
     Confirm-AuxiliaryContainer -ServiceName "mnemory-backup"      -RestartWaitSeconds 10 | Out-Null
     Confirm-AuxiliaryContainer -ServiceName "openwebui-backup"    -RestartWaitSeconds 10 | Out-Null
     # surrealdb has no HTTP healthcheck (WS-only); just verify the container is up.
@@ -1450,7 +1448,6 @@ function Invoke-HealthCheck {
     Confirm-AuxiliaryContainer -ServiceName "llm-gateway-backup"   -RestartWaitSeconds 10 | Out-Null
     Confirm-AuxiliaryContainer -ServiceName "lm-models-backup"     -RestartWaitSeconds 10 | Out-Null
     Confirm-AuxiliaryContainer -ServiceName "tailscale-backup"     -RestartWaitSeconds 10 | Out-Null
-    Confirm-AuxiliaryContainer -ServiceName "smolcrawl-backup"     -RestartWaitSeconds 10 | Out-Null
     Confirm-AuxiliaryContainer -ServiceName "open-notebook-backup" -RestartWaitSeconds 10 | Out-Null
 
     # --- Open Brain stack (SEPARATE compose project) incl. mcp stale-pool guard ---

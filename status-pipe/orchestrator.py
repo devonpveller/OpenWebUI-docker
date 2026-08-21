@@ -41,7 +41,7 @@ compose projects: main `ai-stack` + separate `open-brain`).
     search  vpn · redis · searxng · gateway
     coder   open-terminal · little-coder · lc-egress ·
             little-coder-backup
-    aux     smolcrawl-pipelines · surrealdb · open_notebook · openwebui-backup
+    aux     surrealdb · open_notebook · openwebui-backup
     OB1     openbrain-db · openbrain-mcp · openbrain-ext · openbrain-mcpo ·
             openbrain-mcpo-ext · openbrain-postgrest · openbrain-rest ·
             openbrain-entity-worker · openbrain-wiki · openbrain-wiki-viewer

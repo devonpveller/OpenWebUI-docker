@@ -30,7 +30,7 @@ include:
 volumes:
   openwebui-data:
   mnemory-data:
-  smolcrawl-data:
+  smolcrawl-data:   # kept after smolcrawl-pipelines retired 2026-08-21 (crawl indexes; delete when confident)
   llm-gateway-db-data:   # LiteLLM spend-log DB (transparent gateway, guide §1A)
   llm-queue-data:        # llm-queue's OWN analytics event store (B2/P3 SQLite, NOT LiteLLM's schema)
   # little-coder — five expertise volumes (persistence boundary, design §3.6)

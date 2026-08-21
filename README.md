@@ -15,7 +15,7 @@ by default.
 
 | Stack | Driven with | Contents |
 |-------|-------------|----------|
-| **Main** (`ai-stack`) | `docker compose …` | core (`openwebui`, `tailscale`, `open-terminal`), inference (`llm-gateway` + db/ui, `llm-queue`, `llama-cpp-upstream`, `llama-cpp-embed-upstream`), memory (`mnemory`, `mnemory-cloud-gateway`), search (`vpn`, `redis`, `searxng`, `gateway`), coder (`little-coder`, `lc-egress`), aux (`smolcrawl-pipelines`, `surrealdb`, `open_notebook`), 12 backup sidecars |
+| **Main** (`ai-stack`) | `docker compose …` | core (`openwebui`, `tailscale`, `open-terminal`), inference (`llm-gateway` + db/ui, `llm-queue`, `llama-cpp-upstream`, `llama-cpp-embed-upstream`), memory (`mnemory`, `mnemory-cloud-gateway`), search (`vpn`, `redis`, `searxng`, `gateway`), coder (`little-coder`, `lc-egress`), aux (`surrealdb`, `open_notebook`), 12 backup sidecars |
 | **Portal** (`portal` — own compose project) | `scripts/portal/portal-on.ps1` / `portal-off.ps1` (`portal/docker-compose.yml`) | `caddy`, `authelia`, `cloudflared` + watcher/alerter/tripwire/cron sidecars. Internet-exposed auth front-end; joins `ai-stack_app-net` externally. |
 | **Open Brain** (`open-brain`) | `docker compose -f OB1/docker/docker-compose.yml …` | ~24 `openbrain-*` containers (db, MCP servers, gateway, workers, wiki, research, scheduled digest/podcast slice). Separate project; attaches to `ai-stack_llm-net` as an external network. |
 | **agent-org** | `docker compose -f agent-org/docker/docker-compose.yml …` | Mattermost + `agent-bridge` (the governed org bus) + profile-gated worker/cloud slices. |

@@ -15,7 +15,6 @@ if "%1"=="gpu-map" goto :gpu_map
 if "%1"=="status" goto :status_check
 if "%1"=="restart-openwebui" goto :restart_openwebui
 if "%1"=="mnemory" goto :mnemory_check
-if "%1"=="smolcrawl" goto :smolcrawl_check
 if "%1"=="llama-cpp" goto :llama_cpp_check
 if "%1"=="open-notebook" goto :open_notebook_check
 if "%1"=="openbrain" goto :openbrain_check
@@ -39,15 +38,14 @@ echo Advanced Fixes:
 echo   6. Rebuild Tailscale container
 echo   7. Nuclear option (full restart)
 echo   8. Mnemory check and restart
-echo   9. SmolCrawl pipelines check and restart
-echo  10. llama-cpp / llama-cpp-embed check and restart
-echo  11. open-notebook (and surrealdb) check and restart
-echo  12. Open Brain (mcp/mcpo/db/gateway/wiki) check and restart
-echo  13. llm-gateway (LiteLLM front door) check and restart
+echo   9. llama-cpp / llama-cpp-embed check and restart
+echo  10. open-notebook (and surrealdb) check and restart
+echo  11. Open Brain (mcp/mcpo/db/gateway/wiki) check and restart
+echo  12. llm-gateway (LiteLLM front door) check and restart
 echo.
 echo   0. Exit
 echo.
-set /p choice="Select option (1-13,0): "
+set /p choice="Select option (1-12,0): "
 
 if "%choice%"=="1" goto :namespace_reset
 if "%choice%"=="2" goto :status_check
@@ -57,11 +55,10 @@ if "%choice%"=="5" goto :restart_openwebui
 if "%choice%"=="6" goto :rebuild_tailscale
 if "%choice%"=="7" goto :nuclear_option
 if "%choice%"=="8" goto :mnemory_check
-if "%choice%"=="9" goto :smolcrawl_check
-if "%choice%"=="10" goto :llama_cpp_check
-if "%choice%"=="11" goto :open_notebook_check
-if "%choice%"=="12" goto :openbrain_check
-if "%choice%"=="13" goto :llm_gateway_check
+if "%choice%"=="9" goto :llama_cpp_check
+if "%choice%"=="10" goto :open_notebook_check
+if "%choice%"=="11" goto :openbrain_check
+if "%choice%"=="12" goto :llm_gateway_check
 if "%choice%"=="0" goto :end
 echo [ERROR] Invalid choice
 timeout /t 2 /nobreak >nul
@@ -412,15 +409,6 @@ if %ERRORLEVEL% EQU 0 (
     echo [ERROR] Mnemory health: FAILED - run: docker compose up -d mnemory
 )
 echo.
-echo [INFO] SmolCrawl Pipelines Health:
-cd /d "%SCRIPT_DIR%\..\.."
-docker compose exec smolcrawl-pipelines curl -f -s http://localhost:9099/ >nul 2>&1
-cd /d "%SCRIPT_DIR%"
-if %ERRORLEVEL% EQU 0 (
-    echo [SUCCESS] SmolCrawl Pipelines health: OK
-) else (
-    echo [ERROR] SmolCrawl Pipelines health: FAILED - run: docker compose up -d smolcrawl-pipelines
-)
 echo.
 echo [INFO] open-notebook Health (API on port 5055):
 cd /d "%SCRIPT_DIR%\..\.."
@@ -476,7 +464,7 @@ echo [WARN] This will restart OpenWebUI, llama-cpp, llama-cpp-embed, and Tailsca
 echo.
 echo [INFO] Stopping dependent containers first...
 cd /d "%SCRIPT_DIR%\..\.."
-docker compose stop tailscale llama-cpp-upstream llama-cpp-embed-upstream mnemory mnemory-backup openwebui-backup smolcrawl-pipelines open_notebook surrealdb
+docker compose stop tailscale llama-cpp-upstream llama-cpp-embed-upstream mnemory mnemory-backup openwebui-backup open_notebook surrealdb
 cd /d "%SCRIPT_DIR%"
 echo [INFO] Restarting OpenWebUI...
 cd /d "%SCRIPT_DIR%\..\.."
@@ -534,13 +522,6 @@ if %ERRORLEVEL% NEQ 0 (
 docker compose up -d mnemory-backup
 docker compose up -d openwebui-backup
 cd /d "%SCRIPT_DIR%"
-echo [INFO] Starting SmolCrawl Pipelines...
-cd /d "%SCRIPT_DIR%\..\.."
-docker compose start smolcrawl-pipelines
-if %ERRORLEVEL% NEQ 0 (
-    echo [WARN] SmolCrawl Pipelines start failed, trying up -d...
-    docker compose up -d smolcrawl-pipelines
-)
 cd /d "%SCRIPT_DIR%"
 echo [INFO] Starting surrealdb (open-notebook DB)...
 cd /d "%SCRIPT_DIR%\..\.."
@@ -610,46 +591,6 @@ echo [INFO] Mnemory backup service status:
 cd /d "%SCRIPT_DIR%\..\.."
 docker compose ps mnemory-backup --format "table {{.Service}}\t{{.Status}}"
 cd /d "%SCRIPT_DIR%"
-if "%1"=="" (
-    echo.
-    pause
-    goto :interactive_menu
-)
-goto :end
-
-:smolcrawl_check
-echo.
-echo ========================================
-echo   SmolCrawl Pipelines Health Check
-echo ========================================
-echo.
-echo [INFO] Checking SmolCrawl Pipelines service status...
-cd /d "%SCRIPT_DIR%\..\.."
-docker compose ps smolcrawl-pipelines --format "table {{.Service}}\t{{.Status}}"
-echo.
-echo [INFO] Testing SmolCrawl Pipelines health endpoint...
-docker compose exec smolcrawl-pipelines curl -f -s http://localhost:9099/ >nul 2>&1
-set RESULT=%ERRORLEVEL%
-cd /d "%SCRIPT_DIR%"
-if %RESULT% EQU 0 (
-    echo [SUCCESS] SmolCrawl Pipelines is healthy and running
-) else (
-    echo [WARN] SmolCrawl Pipelines health check failed, restarting...
-    cd /d "%SCRIPT_DIR%\..\.."
-    docker compose restart smolcrawl-pipelines
-    cd /d "%SCRIPT_DIR%"
-    echo [INFO] Waiting for SmolCrawl Pipelines to start...
-    timeout /t 30 /nobreak >nul
-    cd /d "%SCRIPT_DIR%\..\.."
-    docker compose exec smolcrawl-pipelines curl -f -s http://localhost:9099/ >nul 2>&1
-    set RESULT=%ERRORLEVEL%
-    cd /d "%SCRIPT_DIR%"
-    if %RESULT% EQU 0 (
-        echo [SUCCESS] SmolCrawl Pipelines restored after restart
-    ) else (
-        echo [ERROR] SmolCrawl Pipelines still not healthy - check logs: docker compose logs smolcrawl-pipelines
-    )
-)
 if "%1"=="" (
     echo.
     pause
@@ -839,7 +780,6 @@ echo   gpu-map           - Show current GPU assignment per service
 echo   restart-openwebui - Properly restart OpenWebUI with dependent containers
 echo   rebuild           - Rebuild and restart Tailscale container
 echo   mnemory           - Check Mnemory health and restart if needed
-echo   smolcrawl         - Check SmolCrawl Pipelines health and restart if needed
 echo   llama-cpp         - Check llama-cpp and llama-cpp-embed health and restart if needed
 echo   open-notebook     - Check open-notebook (and surrealdb) health and restart if needed
 echo   openbrain         - Check Open Brain (mcp/mcpo/db/gateway/wiki) health and restart if needed

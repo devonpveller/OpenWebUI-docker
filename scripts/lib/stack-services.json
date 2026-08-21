@@ -46,9 +46,6 @@
       { "container": "open_notebook", "project": "ai-stack", "critical": false, "note": "being retired (Quartz workbench); still live for podcasts" },
       { "container": "surrealdb",     "project": "ai-stack", "critical": false, "note": "open-notebook DB; WS-only, no HTTP health" }
     ],
-    "ingest": [
-      { "container": "smolcrawl-pipelines", "project": "ai-stack", "critical": false, "host_health": "http://127.0.0.1:9099/" }
-    ],
     "openbrain": [
       { "container": "openbrain-db",          "project": "open-brain", "critical": true,  "note": "stale-pool dependency: if this restarts after openbrain-mcp, mcp must be restarted" },
       { "container": "openbrain-mcp",         "project": "open-brain", "critical": true,  "stale_pool_guard": "openbrain-db", "note": "holds a long-lived DB connection that does NOT auto-reconnect; OWUI tool 500s / 'Broken pipe' when stale" },

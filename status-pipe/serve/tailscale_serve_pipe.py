@@ -164,7 +164,7 @@ _STACK_ROSTER: List[str] = [
     # main project — little-coder control plane
     "open-terminal", "little-coder", "lc-egress", "little-coder-backup",
     # main project — auxiliary
-    "smolcrawl-pipelines", "surrealdb", "open_notebook", "openwebui-backup",
+    "surrealdb", "open_notebook", "openwebui-backup",
     # Open Brain (OB1) — separate compose project (project name "open-brain")
     "openbrain-db", "openbrain-mcp", "openbrain-ext", "openbrain-mcpo",
     "openbrain-mcpo-ext", "openbrain-postgrest", "openbrain-rest",
@@ -301,7 +301,6 @@ def _build_scope_aliases() -> Dict[str, List[str]]:
         variants = {svc, svc.replace("-", " "), svc.replace("_", " ")}
         aliases[svc] = sorted(variants, key=len, reverse=True)
     extras: Dict[str, List[str]] = {
-        "smolcrawl-pipelines": ["smolcrawl", "smol crawl", "pipelines"],
         "mnemory":             ["memory service"],
         "open_notebook":       ["notebook"],
         "surrealdb":           ["surreal", "surreal db"],
@@ -385,7 +384,7 @@ _HELP_COMMANDS: List[Dict[str, Any]] = [
         "description": "Filter the stack status to one service.",
         "phrases": [
             "status of llama-cpp", "status of llm-gateway",
-            "status of smolcrawl", "status of mnemory",
+            "status of mnemory",
             "status of open-notebook", "status of surrealdb",
         ],
     },
@@ -457,7 +456,7 @@ def _format_help_message(commands: List[Dict[str, Any]]) -> str:
     lines.append(
         "_Service registry covers: openwebui, lmstudio, llama-cpp, "
         "llama-cpp-embed, open-notebook, open-notebook-api. "
-        "Stack scope adds smolcrawl, mnemory, surrealdb, tailscale, "
+        "Stack scope adds mnemory, surrealdb, tailscale, "
         "open-terminal._"
     )
     return "\n".join(lines)
@@ -639,11 +638,6 @@ _PROBES: Dict[str, Dict[str, Any]] = {
         "host": "llm-gateway", "port": 8080,
         "kind": "http_health", "health_path": "/observe/queue",
     },
-    "smolcrawl-pipelines": {
-        "host": "smolcrawl-pipelines", "port": 9099,
-        "host_fallback": "127.0.0.1", "host_fallback_port": 9099,
-        "kind": "http_root",
-    },
     "mnemory": {
         "host": "mnemory", "port": 8051,
         "host_fallback": "127.0.0.1", "host_fallback_port": 8051,
@@ -819,7 +813,6 @@ def _registry_alias_for(docker_service: str) -> Optional[str]:
     """Map docker-compose service names to registry keys where they differ."""
     return {
         "open_notebook": "open-notebook",
-        "smolcrawl-pipelines": "smolcrawl",
     }.get(docker_service, docker_service)
 
 
