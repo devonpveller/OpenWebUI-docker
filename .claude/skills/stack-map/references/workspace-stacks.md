@@ -67,14 +67,6 @@ Run with: `docker compose ...` from the workspace root.
 | `openwebui` | Open WebUI chat surface | 127.0.0.1:3000 | default, llm-net, app-net | yes |
 | `tailscale` | Tailnet VPN; shares openwebui netns; serves ON :8443/:5055 + wiki :8444 (via caddy:8446) + LiteLLM Admin UI :8445 (→ `llm-gateway-ui`) | — (`network_mode: service:openwebui`) | — | no |
 
-**Search (Private Search Gateway — all egress over Mullvad WireGuard since 2026-08-21)**
-| Container | Compose service | Role | Host port | Networks |
-|-----------|-----------------|------|-----------|----------|
-| `search-vpn` | `vpn` | Mullvad WireGuard (gluetun) — SearXNG's engine-query egress + kill-switch | — | search-net, default |
-| `search-redis` | `redis` | SearXNG cache | — | search-net |
-| `searxng` | `searxng` | Metasearch engine | — | search-net |
-| `search-gateway` | `gateway` | REST / Tavily-shim API | 127.0.0.1:8085 | search-net, default |
-
 **Coder (little-coder control plane)**
 | Container | Role | Host port | Networks |
 |-----------|------|-----------|----------|
@@ -168,6 +160,23 @@ Run with: `docker compose ...` from the workspace root.
 | `mnemory` | Unified memory layer (mgmt :8051) | — (internal only) | llm-net |
 | `mnemory-cloud-gateway` | Privacy-enforcing MCP proxy for cloud clients | 127.0.0.1:8060 | llm-net, default |
 | `mnemory-backup` | nightly tar of mnemory-data (output still `./backups/mnemory`) | — | default |
+
+---
+
+## 1d. Search — compose project `search` (SEPARATE since 2026-08-21, Part K.3)
+
+> `search/docker-compose.yml` — the Private Search Gateway (all egress over
+> Mullvad WireGuard). Owns `search-net` (internal) natively; `vpn` + `gateway`
+> attach EXTERNALLY to the anchor's `ai-stack_default` so their DNS names keep
+> resolving for OB1 (openbrain-research/podcast FETCH_PROXY `http://vpn:8888`)
+> and OWUI. No data volumes (redis is deliberately in-memory).
+
+| Container | Compose service | Role | Host port | Networks |
+|-----------|-----------------|------|-----------|----------|
+| `search-vpn` | `vpn` | Mullvad WireGuard (gluetun) — engine-query AND page-fetch egress + kill-switch (HTTP proxy :8888) | — | search-net, ai-stack_default (external) |
+| `search-redis` | `redis` | SearXNG cache | — | search-net |
+| `searxng` | `searxng` | Metasearch engine | — | search-net |
+| `search-gateway` | `gateway` | REST / Tavily-shim API | 127.0.0.1:8085 | search-net, ai-stack_default (external) |
 
 ## 2. Open Brain — compose project `open-brain` (SEPARATE)
 

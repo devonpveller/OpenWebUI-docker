@@ -930,3 +930,11 @@ Per-plane playbook (portal-split procedure, now run 3×):
   too). VERIFIED: all three healthy under project `memory`; cloud door
   :8060/health = ok from host; mnemory:8050 reachable from openwebui over
   llm-net. Root main stack = 15 default services.
+- **K.3 search — EXECUTED 2026-08-21.** `search/docker-compose.yml`
+  (4 services; `${MULLVAD_WG_PRIVATE_KEY:?}` guard); search-net native;
+  `vpn` + `gateway` attach EXTERNALLY to ai-stack_default so the DNS names
+  OB1 (FETCH_PROXY http://vpn:8888, research/podcast) and OWUI resolve keep
+  working. No data volumes (redis in-memory by design). VERIFIED: all four
+  healthy under project `search`; :8085/healthz ok; a REAL query returned
+  Mullvad-egressed results; `gateway`/`vpn` resolve from openbrain-research.
+  Root main stack = 11 default services.

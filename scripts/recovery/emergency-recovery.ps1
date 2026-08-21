@@ -23,7 +23,8 @@ $ErrorActionPreference = "Stop"
 #    anchor's ai-stack_llm-net externally.)
 #   (the MEMORY plane -- mnemory, mnemory-cloud-gateway, mnemory-backup --
 #    is its own compose project since 2026-08-21 Part K.2: memory\docker-compose.yml)
-#   search  vpn, redis, searxng, gateway (Private Search Gateway)
+#   (the SEARCH plane -- vpn, redis, searxng, gateway -- is its own compose
+#    project since 2026-08-21 Part K.3: search\docker-compose.yml)
 #   coder   open-terminal, little-coder, lc-egress
 #   aux    , surrealdb, open_notebook
 #   backup  openwebui-backup, little-coder-backup,
@@ -73,12 +74,17 @@ $Script:InferenceServices = @(
 $Script:MemoryCompose = "memory\docker-compose.yml"
 $Script:MemoryServices = @("mnemory", "mnemory-cloud-gateway", "mnemory-backup")
 
+# The SEARCH plane is a separate compose project since 2026-08-21 (Part K.3,
+# project name "search"): Mullvad vpn + redis + searxng + gateway. `vpn` and
+# `gateway` stay on the anchor's ai-stack_default (external) so OB1/OWUI DNS holds.
+$Script:SearchCompose = "search\docker-compose.yml"
+$Script:SearchServices = @("search-vpn", "search-redis", "searxng", "search-gateway")
+
 # Main compose services, low-level dependency first.
 # (Portal plane omitted on purpose — profile-gated; see the header note.)
 $Script:MainStackServices = @(
     "openwebui", "tailscale",
      "surrealdb", "open_notebook",
-    "vpn", "redis", "searxng", "gateway",
     "open-terminal", "little-coder", "lc-egress",
     # Backup cron sidecars (see helper arrays below).
     "openwebui-backup", "little-coder-backup",
@@ -367,7 +373,7 @@ function Test-BasicConnectivity {
         # Inference plane lives in its own project - look its containers up by
         # NAME (container names are stable across projects).
         $running = @(docker ps --format "{{.Names}}")
-        foreach ($svc in ($Script:InferenceServices + $Script:MemoryServices)) {
+        foreach ($svc in ($Script:InferenceServices + $Script:MemoryServices + $Script:SearchServices)) {
             $states[$svc] = if ($running -contains $svc) { "running" } else { "absent" }
         }
 
@@ -377,7 +383,7 @@ function Test-BasicConnectivity {
         Write-Log "INFO" ("Memory - mnemory: {0}, mnemory-cloud-gateway: {1}" -f `
             $states["mnemory"], $states["mnemory-cloud-gateway"])
         Write-Log "INFO" ("Search - vpn: {0}, redis: {1}, searxng: {2}, gateway: {3}" -f `
-            $states["vpn"], $states["redis"], $states["searxng"], $states["gateway"])
+            $states["search-vpn"], $states["search-redis"], $states["searxng"], $states["search-gateway"])
         Write-Log "INFO" ("Coder  - open-terminal: {0}, little-coder: {1}, lc-egress: {2}" -f `
             $states["open-terminal"], $states["little-coder"], $states["lc-egress"])
         Write-Log "INFO" ("Aux    - surrealdb: {0}, open_notebook: {1}" -f `
@@ -508,8 +514,9 @@ function Invoke-MinimalRecovery {
         docker compose -f $Script:MemoryCompose --env-file .env up -d
 
         docker compose up -d surrealdb open_notebook `
-            vpn redis searxng gateway `
             open-terminal little-coder lc-egress
+
+        docker compose -f $Script:SearchCompose --env-file .env up -d
 
         # Backup cron sidecars touching only main/host resources (safe anytime).
         Start-ServiceGroup "main backups" $Script:MainBackups
@@ -653,9 +660,8 @@ function Invoke-EmergencyRecovery {
     Stop-ServiceGroup "little-coder control plane" `
         @("little-coder-backup", "lc-egress", "little-coder", "open-terminal")
 
-    # Private Search Gateway (reverse dependency order).
-    Stop-ServiceGroup "Private Search Gateway" `
-        @("gateway", "searxng", "redis", "vpn")
+    # Search project (its compose stop runs reverse dependency order).
+    Stop-PlaneStack "search" $Script:SearchCompose
 
     # Tailscale (shares the OpenWebUI network namespace).
     if (-not (Stop-ServiceGracefully "tailscale" 30)) {
@@ -756,11 +762,8 @@ function Invoke-EmergencyRecovery {
         Write-Log "WARN" "Failed to start open-notebook: $_"
     }
 
-    # Private Search Gateway — vpn -> redis -> searxng -> gateway.
-    # depends_on chains the internal order; vpn (Mullvad) is searxng's egress and
-    # the WireGuard tunnel is slow to build. (tor retired 2026-08-21; the vpn
-    # proxy carries page fetches too.)
-    Start-ServiceGroup "Private Search Gateway" @("vpn", "redis", "searxng", "gateway")
+    # Search project — vpn -> redis -> searxng -> gateway (own project since K.3).
+    Start-PlaneStack "search" $Script:SearchCompose "search-gateway" 150
     if (-not (Wait-ForHealthy "gateway" 150)) {
         Write-Log "WARN" "Search gateway slow to come up, but continuing..."
     }

@@ -14,9 +14,8 @@ include:
   #  now, driven via scripts/stack/stack.ps1 or
   #  `docker compose -f <plane>/docker-compose.yml --env-file .env ...`:
   #    K.1 inference/docker-compose.yml
-  #    K.2 memory/docker-compose.yml)
-  - path: compose/search.yml
-    project_directory: .
+  #    K.2 memory/docker-compose.yml
+  #    K.3 search/docker-compose.yml)
   - path: compose/coder.yml
     project_directory: .
   - path: compose/auxiliary.yml
@@ -68,11 +67,10 @@ networks:
   # (llm-backend-net moved WITH the inference plane 2026-08-21, Part K.1 —
   #  it is native to inference/docker-compose.yml now, so nothing outside
   #  that project can even declare membership.)
-  # Internal-only network for the search stack. SearXNG/redis/gateway have NO
-  # internet route here; only `vpn` (Mullvad, also on `default`) can egress —
-  # engine queries AND page fetches (tor retired 2026-08-21).
-  search-net:
-    internal: true
+  # (search-net moved WITH the search plane 2026-08-21, Part K.3 — native to
+  #  search/docker-compose.yml. The `vpn`/`gateway` DNS names stay reachable
+  #  for OB1/OWUI because those two attach to THIS project's `default`
+  #  externally.)
   # Internal-only network for the little-coder control plane. little-coder
   # and open-terminal talk here; none reaches the internet except
   # via lc-egress, which is allowlisted to the git host (design §3.4).

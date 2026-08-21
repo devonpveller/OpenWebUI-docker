@@ -33,9 +33,9 @@
       { "container": "mnemory-cloud-gateway", "project": "memory", "critical": false }
     ],
     "search": [
-      { "container": "search-redis",   "project": "ai-stack", "service": "redis",   "critical": false },
-      { "container": "searxng",        "project": "ai-stack", "service": "searxng", "critical": false },
-      { "container": "search-gateway", "project": "ai-stack", "service": "gateway", "critical": false, "host_health": "http://127.0.0.1:8085/healthz" }
+      { "container": "search-redis",   "project": "search", "service": "redis",   "critical": false },
+      { "container": "searxng",        "project": "search", "service": "searxng", "critical": false },
+      { "container": "search-gateway", "project": "search", "service": "gateway", "critical": false, "host_health": "http://127.0.0.1:8085/healthz" }
     ],
     "coder": [
       { "container": "open-terminal", "project": "ai-stack", "critical": false },

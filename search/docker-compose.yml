@@ -1,6 +1,19 @@
-# compose/search.yml - private search plane: Mullvad vpn egress (engine queries + page fetches), redis, searxng, gateway
-# Split from the 2,2xx-line root docker-compose.yml 2026-08-20 (CLEANUP-PLAN v3 D.1).
-# Networks/volumes are defined in the root file.
+# search/docker-compose.yml — the SEARCH compose project (K.3, 2026-08-21).
+# Private Search Gateway: Mullvad vpn egress (engine queries + page fetches),
+# redis, searxng, gateway. Moved out of the root ai-stack project (CLEANUP-PLAN
+# Part K); definition-identical to the former compose/search.yml — only paths
+# (../) and network ownership changed.
+#
+# Drive it with scripts/stack/stack.ps1, or manually FROM THE REPO ROOT:
+#   docker compose -f search/docker-compose.yml --env-file .env up -d
+# The ${MULLVAD_WG_PRIVATE_KEY:?} guard makes a bare `up` fail loud.
+#
+# Seams: `vpn` (:8888 proxy) and `gateway` (:8080) are DNS names that OB1
+# (openbrain-research/podcast, FETCH_PROXY) and OWUI resolve on the anchor’s
+# ai-stack_default bridge — both attach to it EXTERNALLY here, which is also
+# their internet egress. search-net is plane-internal and native.
+name: search
+
 services:
   # tor RETIRED 2026-08-21 (operator, after dependency validation): its
   # exits are blocked by most large sites, and it carried zero real traffic
@@ -19,7 +32,7 @@ services:
     environment:
       - VPN_SERVICE_PROVIDER=mullvad
       - VPN_TYPE=wireguard
-      - WIREGUARD_PRIVATE_KEY=${MULLVAD_WG_PRIVATE_KEY}
+      - WIREGUARD_PRIVATE_KEY=${MULLVAD_WG_PRIVATE_KEY:?set via --env-file ../.env or scripts/stack/stack.ps1}
       - WIREGUARD_ADDRESSES=${MULLVAD_WG_ADDRESSES}
       - SERVER_COUNTRIES=${MULLVAD_COUNTRIES:-Netherlands}
       # HTTP forward-proxy for SearXNG. HTTPS targets use CONNECT, so DNS is
@@ -77,7 +90,7 @@ services:
       - SEARXNG_SECRET=${SEARXNG_SECRET_KEY}
       - SEARXNG_REDIS_URL=redis://redis:6379/0
     volumes:
-      - ./search-gateway/searxng:/etc/searxng:rw
+      - ../search-gateway/searxng:/etc/searxng:rw
     restart: unless-stopped
     cap_drop: [ALL]
     cap_add: [CHOWN, SETGID, SETUID, DAC_OVERRIDE]
@@ -94,7 +107,7 @@ services:
 
   gateway:
     build:
-      context: ./search-gateway/gateway
+      context: ../search-gateway/gateway
       dockerfile: Dockerfile
     image: private-search-gateway:local
     container_name: search-gateway
@@ -107,7 +120,7 @@ services:
       redis:
         condition: service_healthy
     env_file:
-      - .env
+      - ../.env
     environment:
       - SEARXNG_URL=http://searxng:8080
       - REDIS_URL=redis://redis:6379/1
@@ -130,3 +143,13 @@ services:
   # which no consumer shares. The search gateway's REST face (`gateway`,
   # :8085) is the live surface; gateway/mcp_server.py stays in the source
   # tree if an MCP edge is ever wired to a real consumer.
+
+networks:
+  # Plane-internal isolation net — native: only this project’s four services.
+  search-net:
+    internal: true
+  # The anchor’s shared bridge (internet-capable). External so the `vpn` and
+  # `gateway` DNS names keep resolving for OB1/OWUI consumers.
+  default:
+    external: true
+    name: ai-stack_default

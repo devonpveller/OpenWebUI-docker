@@ -431,13 +431,14 @@ curl -s -f -m 5 http://127.0.0.1:8085/healthz >nul 2>&1
 if %ERRORLEVEL% EQU 0 (
     echo [SUCCESS] search-gateway healthz: OK
 ) else (
-    echo [ERROR] search-gateway healthz: FAILED - run: docker compose up -d vpn redis searxng gateway
+    echo [ERROR] search-gateway healthz: FAILED - run: docker compose -f search\docker-compose.yml --env-file .env up -d
 )
 echo.
 echo [INFO] Extended planes running state (search / little-coder / mnemory-cloud-gateway):
 echo        ^(compose service keys: gateway=search-gateway, vpn=search-vpn^)
 cd /d "%SCRIPT_DIR%\..\.."
-docker compose ps vpn redis searxng gateway little-coder lc-egress --format "table {{.Service}}\t{{.Status}}" 2>nul
+docker compose -f search\docker-compose.yml --env-file .env ps --format "table {{.Service}}\t{{.Status}}" 2>nul
+docker compose ps little-coder lc-egress --format "table {{.Service}}\t{{.Status}}" 2>nul
 cd /d "%SCRIPT_DIR%"
 echo.
 echo [INFO] Open Brain stack (mcp/mcpo/db/gateway/wiki - SEPARATE compose project):
