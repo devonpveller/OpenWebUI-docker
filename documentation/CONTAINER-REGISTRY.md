@@ -67,12 +67,14 @@ purpose. Containers that failed that test today were removed (see
 ### Backup sidecars (one per stateful store — backup-conventions runbook)
 
 `mnemory-backup`, `openwebui-backup` (vector_db excluded → 23 s nightly),
-`llm-gateway-backup`, `little-coder-backup`, `openbrain-db-backup` (joins
-obnet cross-project), `openbrain-wiki-backup` (+ wiki-assets),
-`open-notebook-backup` (surql export + notebook tar; env-var creds since
-today), `smolcrawl-backup`, `tailscale-backup` (state/certs),
+`llm-gateway-backup`, `little-coder-backup`,
+`open-notebook-backup` (surql export + notebook tar; env-var creds),
+`tailscale-backup` (state/certs),
 `lm-models-backup` (the GGUF store — **not LM Studio**, despite the host
-path). Justification for all ten: every stateful byte has exactly one
+path). The openbrain-db/wiki backup sidecars moved INTO the OB1 project
+2026-08-21 (OB1 owns its own backups; artifacts still land in `backups/`);
+`smolcrawl-backup` retired 2026-08-21 with smolcrawl-pipelines.
+Justification for all seven: every stateful byte has exactly one
 sidecar producing verified artifacts into `backups/`, freshness-watched
 twice (watchdog recency table + sysadmin daily check). Scheduler flavors are
 a known 3-way split (crond/supercronic/sleep-loop) — unification queued in
@@ -100,7 +102,7 @@ Running-state is an operator choice (`portal-on.ps1`); the split into its own pr
 
 ---
 
-## Project `open-brain` (OB1) — 24 containers
+## Project `open-brain` (OB1) — 26 containers
 
 ### Store + API plane
 
@@ -142,6 +144,13 @@ Running-state is an operator choice (`portal-on.ps1`); the split into its own pr
 | `openbrain-gmail-pull` / `openbrain-gmail-prune` | Gmail ingest + retention (halve-retry embed fix lives in pull) |
 | `openbrain-podcast` | Digest→podcast renderer (on-demand audio via ON) |
 | `openbrain-idea-refinery` | Profile-gated idea-honing drain (user-gated loop; 100% local since 07-26) |
+
+### Backup sidecars (moved from ai-stack 2026-08-21 — OB1 owns its backups)
+
+| Container | Purpose |
+|---|---|
+| `openbrain-db-backup` | Nightly `pg_dump` of openbrain-db (supercronic). Output still `ai-stack/backups/openbrain-db` — NAS mirror + freshness watchers unchanged |
+| `openbrain-wiki-backup` | Daily tar of the wiki git-vault + binary-assets volumes. Output still `ai-stack/backups/openbrain-wiki` |
 
 ---
 

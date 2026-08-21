@@ -94,7 +94,7 @@ try {
   $backupCoverage = @{
     'openwebui-data'         = 'openwebui-backup'
     'mnemory-data'           = 'mnemory-backup'
-    'smolcrawl-data'         = 'smolcrawl-backup'
+    'smolcrawl-data'         = 'RETIRED 2026-08-21 (smolcrawl-pipelines + smolcrawl-backup removed; volume kept for old crawl indexes - delete when confident)'
     'little-coder-journals'  = 'little-coder-backup'
     'little-coder-skill'     = 'little-coder-backup'
     'little-coder-cohorts'   = 'little-coder-backup'
@@ -104,8 +104,8 @@ try {
     'caddy-config'           = 'caddy-backup'
     'authelia-data'          = 'authelia-backup'
     'tripwire-data'          = 'integrity-tripwire (state-only; bound to host config) - not separately backed up'
-    'openbrain-db-data'      = 'openbrain-db-backup'
-    'openbrain-wiki-data'    = 'openbrain-wiki-backup'
+    'openbrain-db-data'      = 'openbrain-db-backup (open-brain project since 2026-08-21; artifacts still in ./backups)'
+    'openbrain-wiki-data'    = 'openbrain-wiki-backup (open-brain project since 2026-08-21; artifacts still in ./backups)'
     # Pre-existing map omissions (the backup containers already cover these; the map just
     # never listed them — see the Backups table in stack-map/workspace-stacks.md):
     'llm-gateway-db-data'    = 'llm-gateway-backup (logical pg_dump of the LiteLLM DB)'
@@ -118,7 +118,7 @@ try {
   # ----- Pre-flight: ensure ./backups/<service>/ dirs exist ----------
   $expectedBackupDirs = @(
     'caddy', 'authelia', 'mnemory', 'openwebui', 'little-coder',
-    'openbrain-db', 'openbrain-wiki', 'open-notebook', 'smolcrawl',
+    'openbrain-db', 'openbrain-wiki', 'open-notebook',
     'tailscale', 'lm-models',
     'agent-bridge-db', 'mattermost-db'
   )

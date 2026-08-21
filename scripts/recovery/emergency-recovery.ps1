@@ -25,7 +25,8 @@ $ErrorActionPreference = "Stop"
 #   aux    , surrealdb, open_notebook
 #   backup  mnemory-backup, openwebui-backup, little-coder-backup,
 #          , tailscale-backup, lm-models-backup,
-#           open-notebook-backup, openbrain-db-backup, openbrain-wiki-backup
+#           open-notebook-backup (openbrain-db/wiki backups moved to the
+#           OB1 project 2026-08-21 — they start with Start-OB1Stack)
 #
 # PORTAL plane (caddy, authelia, cloudflared, portal-init, portal-alerter,
 # authelia-watcher, authelia-notif-bridge, integrity-tripwire, portal-cron,
@@ -64,8 +65,7 @@ $Script:MainStackServices = @(
     # Backup cron sidecars (see helper arrays below).
     "mnemory-backup", "openwebui-backup", "little-coder-backup",
      "tailscale-backup", "lm-models-backup", "open-notebook-backup",
-    "llm-gateway-backup",
-    "openbrain-db-backup", "openbrain-wiki-backup"
+    "llm-gateway-backup"
 )
 
 # Backup sidecars touching only main-stack/host resources — safe to nudge anytime.
@@ -73,9 +73,8 @@ $Script:MainBackups = @(
     "mnemory-backup", "openwebui-backup", "little-coder-backup",
      "tailscale-backup", "lm-models-backup", "open-notebook-backup"
 )
-# Backup sidecars that attach to OB1-owned external network/volumes — start only
-# AFTER the OB1 stack is up (open-brain_obnet + open-brain_* volumes must exist).
-$Script:OB1Backups = @("openbrain-db-backup", "openbrain-wiki-backup")
+# (openbrain-db-backup / openbrain-wiki-backup moved INTO the OB1 compose
+# project 2026-08-21 — they now start/stop with Start-OB1Stack, no nudge needed.)
 
 # Open Brain (OB1) services, low-level dependency first.
 # The trailing block (cron + 3 HTTP-triggered scheduled services) lives
@@ -92,6 +91,7 @@ $Script:OB1Services = @(
     "openbrain-wiki", "openbrain-wiki-viewer", "openbrain-workbench", "openbrain-extract",
     "openbrain-cron", "openbrain-gmail-pull", "openbrain-gmail-prune", "openbrain-digest",
     "openbrain-podcast",
+    "openbrain-db-backup", "openbrain-wiki-backup",   # backup sidecars (moved from ai-stack 2026-08-21; output still lands in ai-stack/backups/)
     "openbrain-idea-refinery"   # Idea Refinery drain (profile-gated 'idea-refinery'; started via the profile below)
 )
 
@@ -299,10 +299,10 @@ function Test-BasicConnectivity {
             $states["open-terminal"], $states["little-coder"], $states["lc-egress"])
         Write-Log "INFO" ("Aux    - surrealdb: {0}, open_notebook: {1}" -f `
             $states["surrealdb"], $states["open_notebook"])
-        Write-Log "INFO" ("Backup - mnemory: {0}, owui: {1}, lc: {2}, tailscale: {3}, lm-models: {4}, on: {5}, ob1-db: {6}, ob1-wiki: {7}" -f `
+        Write-Log "INFO" ("Backup - mnemory: {0}, owui: {1}, lc: {2}, tailscale: {3}, lm-models: {4}, on: {5}" -f `
             $states["mnemory-backup"], $states["openwebui-backup"], $states["little-coder-backup"], `
             $states["tailscale-backup"], $states["lm-models-backup"], `
-            $states["open-notebook-backup"], $states["openbrain-db-backup"], $states["openbrain-wiki-backup"])
+            $states["open-notebook-backup"])
 
         # Open Brain (OB1) — separate compose project, reported as a count.
         if (Test-OB1Available) {
@@ -430,11 +430,9 @@ function Invoke-MinimalRecovery {
         # Backup cron sidecars touching only main/host resources (safe anytime).
         Start-ServiceGroup "main backups" $Script:MainBackups
 
-        # Open Brain (OB1) — separate compose project.
+        # Open Brain (OB1) — separate compose project (includes its own
+        # openbrain-db/wiki backup sidecars since 2026-08-21).
         Start-OB1Stack
-
-        # OB1-attached backups — only after OB1 (obnet + open-brain volumes exist).
-        Start-ServiceGroup "OB1 backups" $Script:OB1Backups
 
         # agent-org — separate compose project, brought up last (downstream of OB1).
         Start-AgentOrgStack
@@ -733,7 +731,6 @@ function Invoke-EmergencyRecovery {
     Start-ServiceGroup "mnemory-cloud-gateway" @("mnemory-cloud-gateway")
 
     # Backup schedulers (independent cron sidecars, main/host resources).
-    # OB1-attached backups (openbrain-db/wiki) start later, after Start-OB1Stack.
     Start-ServiceGroup "backup schedulers" $Script:MainBackups
     # Start surrealdb first, then open-notebook (which depends on it).
     Write-Log "INFO" "Starting surrealdb (open-notebook database)..."
@@ -793,10 +790,8 @@ function Invoke-EmergencyRecovery {
     Start-ServiceGroup "little-coder edges" @("lc-egress", "little-coder-backup")
 
     # Open Brain (OB1) last — needs ai-stack_llm-net + llama-cpp-upstream healthy.
+    # (Its own openbrain-db/wiki backup sidecars come up with it.)
     Start-OB1Stack
-
-    # OB1-attached backups — only now that obnet + open-brain volumes exist.
-    Start-ServiceGroup "OB1 backups" $Script:OB1Backups
 
     # agent-org — separate compose project, brought up last (downstream of OB1).
     Start-AgentOrgStack
@@ -850,7 +845,7 @@ function Invoke-EmergencyRecovery {
         Write-Log "INFO" "Backup scheduler status:"
         docker compose ps mnemory-backup openwebui-backup little-coder-backup `
             tailscale-backup lm-models-backup open-notebook-backup `
-            openbrain-db-backup openbrain-wiki-backup --format "table {{.Service}}\t{{.Status}}" 2>$null
+            --format "table {{.Service}}\t{{.Status}}" 2>$null
 
         if (Test-OB1Available) {
             Write-Log "INFO" "Open Brain (OB1) status:"
@@ -918,15 +913,11 @@ function Invoke-NuclearRecovery {
     Start-Sleep -Seconds 90
 
     # Open Brain (OB1) last — main stack (and ai-stack_llm-net) is up now.
+    # (Its own openbrain-db/wiki backup sidecars come up with it.)
     Start-OB1Stack
 
-    # agent-org — separate compose project, downstream of OB1 (started after the
-    # OB1 backups nudge below).
+    # agent-org — separate compose project, downstream of OB1.
     Start-AgentOrgStack
-
-    # OB1-attached backups — the main `up -d` above could not start
-    # openbrain-db-backup while obnet was down; nudge them now that OB1 is up.
-    Start-ServiceGroup "OB1 backups" $Script:OB1Backups
 
     if ($portalWasUp) {
         Write-Log "WARN" "Portal was running before recovery. Re-run scripts/portal-on.ps1 to restore the internet front-end (recovery does not auto-start it)."

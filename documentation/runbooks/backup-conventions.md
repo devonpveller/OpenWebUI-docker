@@ -15,8 +15,8 @@ to confirm there's no other gap you missed.
 
 | Source data type | Pattern | Reference |
 |---|---|---|
-| Plain files / append-only logs / config / immutable git objects | **Generic tar** — `backup/generic-tar-backup.sh` + alpine sidecar | smolcrawl-backup, tailscale-backup, openbrain-wiki-backup |
-| **PostgreSQL** (any version, any extensions including pgvector) | **`pg_dump -Fc`** — custom Dockerfile based on postgres:N-alpine | openbrain-db-backup |
+| Plain files / append-only logs / config / immutable git objects | **Generic tar** — `backup/generic-tar-backup.sh` + alpine sidecar | tailscale-backup, openbrain-wiki-backup (OB1 project) |
+| **PostgreSQL** (any version, any extensions including pgvector) | **`pg_dump -Fc`** — custom Dockerfile based on postgres:N-alpine | openbrain-db-backup (OB1 project), llm-gateway-backup |
 | **SurrealDB** (RocksDB store) | **`surreal export`** logical dump — custom Dockerfile based on debian-slim with the surreal binary copied in | open-notebook-backup |
 | **SQLite** under active write | **`sqlite3 .backup`** command (Online Backup API) — NOT a hot tar | (none yet — Authelia's SQLite is currently tar'd via authelia-backup; it works because SQLite WAL mode tolerates concurrent reads) |
 | **Redis** with append-only-file persistence | `BGSAVE` + tar the resulting dump.rdb | (none — search-redis is intentionally in-memory only) |
@@ -150,7 +150,7 @@ a `backup/Dockerfile.<service>` based on either the official DB image
 or a minimal base with the binary copied in.
 
 References:
-- `backup/Dockerfile.postgres` + `backup/openbrain-db-backup.sh` — pg_dump
+- `OB1/docker/backup/Dockerfile.postgres` + `OB1/docker/backup/openbrain-db-backup.sh` — pg_dump (moved with the sidecar into the OB1 project 2026-08-21)
 - `backup/Dockerfile.surreal` + `backup/open-notebook-backup.sh` — surreal export
 
 Other ingredients (UIDs, schedule, retention, sentinel, restore doc

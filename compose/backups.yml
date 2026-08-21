@@ -159,104 +159,11 @@ services:
   # picks them up automatically.
   # =====================================================================
 
-  # openbrain-db-backup -- pg_dump nightly of the openbrain PostgreSQL DB.
-  # Joins the open-brain compose project's obnet to reach openbrain-db:5432
-  # over TCP. Requires the OB1 stack to be UP.
+  # (openbrain-db-backup + openbrain-wiki-backup moved to the OB1 project
+  #  2026-08-21 -- OB1 owns its own backup sidecars now that it is a
+  #  self-contained submodule: OB1/docker/docker-compose.yml. Output still
+  #  lands in ./backups/openbrain-{db,wiki} so NAS mirror + watchers hold.)
 
-  openbrain-db-backup:
-    build:
-      context: ./backup
-      dockerfile: Dockerfile.postgres
-    image: openbrain-db-backup:local
-    container_name: openbrain-db-backup
-    env_file:
-      # OB1's .env carries POSTGRES_PASSWORD; user + db are hardcoded in
-      # OB1's compose (postgres / openbrain) so we mirror them as static
-      # environment vars below. Rotating the password in OB1's .env
-      # propagates here automatically.
-      - ./OB1/docker/.env
-    environment:
-      - PGHOST=openbrain-db
-      - PGPORT=5432
-      - POSTGRES_USER=postgres        # matches OB1 docker-compose.yml line 24
-      - POSTGRES_DB=openbrain          # matches OB1 docker-compose.yml line 23
-      - BACKUP_DIR=/backups
-      - RETAIN_COUNT=${OPENBRAIN_DB_BACKUP_RETAIN_COUNT:-2}
-      - BACKUP_CRON=${OPENBRAIN_DB_BACKUP_CRON:-0 2 * * *}
-      - TZ=UTC
-    volumes:
-      - ./backups/openbrain-db:/backups
-      - ./backup/openbrain-db-backup.sh:/scripts/backup.sh:ro
-    networks:
-      - obnet           # external -- reaches openbrain-db
-    user: "10008:10008"
-    restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
-    read_only: true
-    tmpfs:
-      - /tmp:noexec,nosuid,size=16m
-    deploy:
-      resources:
-        limits:
-          cpus: '0.5'
-          memory: 256M
-          pids: 50
-    command:
-      - sh
-      - -c
-      - |
-        # Render supercronic crontab from $BACKUP_CRON. supercronic
-        # inherits env naturally so no profile.d shim needed.
-        printf '%s sh /scripts/backup.sh\n' "$$BACKUP_CRON" > /tmp/crontab.rendered
-        echo "[$$(date -u +%FT%TZ)] openbrain-db-backup scheduler started (cron: $$BACKUP_CRON, retain: $${RETAIN_COUNT} most recent)"
-        exec /usr/local/bin/supercronic /tmp/crontab.rendered
-    labels:
-      - "com.centurylinklabs.watchtower.enable=false"
-
-  # openbrain-wiki-backup -- tar of the openbrain-wiki-data volume.
-  # Source files are root-owned (openbrain-wiki runs as root), so the
-  # backup container runs as root too -- the pre-portal pattern. Other
-  # hardening (cap_drop ALL, no-new-privileges) still applies.
-
-  openbrain-wiki-backup:
-    image: alpine:3.21
-    container_name: openbrain-wiki-backup
-    volumes:
-      - openbrain-wiki-data:/data:ro
-      - wiki-assets:/assets:ro          # X.2 — gitignored binary uploads (separate tar)
-      - ./backups/openbrain-wiki:/backups
-      - ./backup/openbrain-wiki-backup.sh:/scripts/backup.sh:ro
-    environment:
-      - BACKUP_DIR=/backups
-      - DATA_DIR=/data
-      - ASSETS_DIR=/assets
-      - RETAIN_COUNT=${OPENBRAIN_WIKI_BACKUP_RETAIN_COUNT:-2}
-      # 2026-08-01: switched from busybox crond to a sleep-loop. crond on
-      # Windows Docker Desktop silently misses fire-windows when the VM clock
-      # jumps on host sleep/resume (only :00 jobs survived; :15/:25 never
-      # fired for ~2 months). The sleep-loop is wall-clock-independent and
-      # matches the proven pg-backup sidecars. Runs once immediately on start.
-      - BACKUP_INTERVAL=${OPENBRAIN_WIKI_BACKUP_INTERVAL:-86400}   # daily
-      - TZ=UTC
-    entrypoint: /bin/sh
-    command:
-      - -c
-      - |
-        echo "[$$(date -u +%FT%TZ)] openbrain-wiki-backup started (sleep-loop; interval=$${BACKUP_INTERVAL}s, retain=$${RETAIN_COUNT})"
-        while true; do
-          sh /scripts/backup.sh || echo "[$$(date -u +%FT%TZ)] openbrain-wiki backup.sh exited $$?"
-          sleep "$${BACKUP_INTERVAL}"
-        done
-    restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
-    labels:
-      - "com.centurylinklabs.watchtower.enable=false"
 
   # open-notebook-backup -- two-phase:
   #   (1) SurrealDB logical export via the `surreal` CLI over the WebSocket

@@ -13,10 +13,11 @@ Compose projects** (main, portal, Open Brain, agent-org):
   inference plane (`llm-gateway` = LiteLLM front door → `llm-queue` →
   `llama-cpp-upstream`/`llama-cpp-embed-upstream`), mnemory memory layer,
   private search gateway (Mullvad + SearXNG), little-coder, aux services,
-  10 backup sidecars. The portal is its OWN compose project since 2026-08-21
+  7 backup sidecars. The portal is its OWN compose project since 2026-08-21
   (`portal/docker-compose.yml`), driven only by `scripts/portal/portal-on.ps1`.
 - **Open Brain** (`OB1/docker/docker-compose.yml`): a separate project of
-  ~24 `openbrain-*` containers, attaching to `ai-stack_llm-net` externally.
+  ~26 `openbrain-*` containers (incl. its own db/wiki backup sidecars),
+  attaching to `ai-stack_llm-net` externally.
 - **agent-org** (`agent-org/docker/docker-compose.yml`): Mattermost + the
   governed agent-bridge org.
 

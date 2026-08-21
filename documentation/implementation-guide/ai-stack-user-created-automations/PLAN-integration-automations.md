@@ -102,8 +102,7 @@ in a *different compose project*:
   It is **not** on the main stack's default networks.
 - Because n8n is now its **own** project, **every** network it uses is declared
   **external** (the OB1 precedent: OB1 attaches to `ai-stack_llm-net` / `app-net`
-  this way; `open_notebook` and `openbrain-db-backup` likewise join
-  `open-brain_obnet`):
+  this way; `open_notebook` likewise joins `open-brain_obnet`):
 
 ```yaml
 # automations/docker/docker-compose.yml — networks block (all external)

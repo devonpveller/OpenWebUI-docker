@@ -54,6 +54,39 @@ first); H.2 (needs a GitHub repo created); the 5 unmerged stale branches.
 F.1 #2–#9 (between gym rounds); F.2; E.4 (OB1-side); D.1 x-anchors polish;
 D-12 (wire-or-demote stack-services.json).
 
+## Execution ledger — 2026-08-21 (day 2, ~27 commits)
+
+Day 2 cleared the operator-blocked queue and the operator's morning review:
+G.2 **EXECUTED** (portal split to its own compose project, data migrated to
+portal_* volumes; StackWatchdog re-registered elevated by operator); J.1
+**EXECUTED** (virtual-keys flip — master_key ON, 13 sk- caller keys,
+x-ai-stack-caller lane header via LaneHeaderInjector; proven on a throwaway
+rig first); H.1 **EXECUTED** (OB1 converted to a pinned git submodule;
+gateway = prebuilt image); tor **RETIRED** (all egress via Mullvad `vpn`,
+zero-traffic validated); mnemory-gateway → `mnemory-cloud-gateway` rename;
+CONTAINER-REGISTRY.md + doors matrix written; 5 stale branches triaged
+(setup-prereqs extracted, 4 deleted); full-codebase validation pass fixed
+38 loose ends (commit 38e6c28).
+
+**Operator anomaly review (afternoon):**
+- **#1 EXECUTED** — smolcrawl-pipelines + smolcrawl-backup retired (purpose
+  died with OWUI Knowledge; zero logs 14 days). Main stack 28 → 27 default
+  services (commit a18aa0c). `smolcrawl-data` volume kept for old crawl
+  indexes — delete when confident.
+- **#2 EXECUTED** — openbrain-db-backup + openbrain-wiki-backup moved INTO
+  the OB1 project (OB1 commit 8d0a32a: scripts + Dockerfile.postgres under
+  OB1/docker/backup/, services on native obnet/volumes). Output still lands
+  in ai-stack/backups/ and container names are unchanged, so NAS mirror +
+  freshness watchers (StackWatchdog, sysadmin check_backups) hold. ai-stack
+  side: compose blocks + wiki-assets external decl removed (obnet +
+  openbrain-wiki-data externals stay — open_notebook consumes them),
+  recovery trio + coverage check + runbooks swept. Main stack 27 → 26;
+  OB1 → 26 containers. Verified: fresh 1.3 GB pg_dump + wiki tar from the
+  new project.
+- **#3 OPEN** — "ai-stack as host" re-organization question (project-per-
+  service-tree). Assessment delivered in-chat 2026-08-21; awaiting operator
+  direction on scope.
+
 Discipline for every phase (unchanged from v1/v2, plus one addition):
 
 - **Archive (`git mv`), don't delete**, anything with history or inbound links;

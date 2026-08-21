@@ -53,7 +53,7 @@ Run with: `docker compose ...` from the workspace root.
 | `edge-net`   | bridge          | portal ingress: cloudflared ↔ caddy |
 | `notify-net` | bridge          | portal egress chokepoint (portal-alerter → Gmail; portal-cron) |
 | `default`    | bridge          | host-reachable / internet egress |
-| `obnet`      | external (`open-brain_obnet`) | so `openbrain-db-backup` can reach OB1's Postgres |
+| `obnet`      | external (`open-brain_obnet`) | so `open_notebook` (IKS) can reach OB1's Postgres |
 
 ### Planes & containers
 
@@ -93,7 +93,6 @@ Run with: `docker compose ...` from the workspace root.
 **Aux**
 | Container | Role | Host port | Networks |
 |-----------|------|-----------|----------|
-| `smolcrawl-pipelines` | Deep-research crawl pipelines | 127.0.0.1:9099 | default |
 | `surrealdb` | Open Notebook database (SurrealDB v2) | 127.0.0.1:8003 | default |
 | `open_notebook` | Open Notebook UI + API (IKS fork → OB1 Postgres) | 127.0.0.1:8503 / :5055 | default, llm-net, app-net, obnet |
 
@@ -104,12 +103,11 @@ Run with: `docker compose ...` from the workspace root.
 | `openwebui-backup` | openwebui-data (mem-capped 1g) | — | default |
 | `little-coder-backup` | the little-coder expertise volumes | — | default |
 | `llm-gateway-backup` | nightly `pg_dump` of the LiteLLM spend ledger (`llm-gateway-db`) | llm-net | default |
-| `openbrain-db-backup` | `pg_dump` of OB1 Postgres | obnet (external) | default |
-| `openbrain-wiki-backup` | openbrain-wiki-data + wiki-assets | — | default |
+| `openbrain-db-backup` | `pg_dump` of OB1 Postgres (**open-brain** project since 2026-08-21; output still `./backups/openbrain-db`) | obnet (native) | default (open-brain) |
+| `openbrain-wiki-backup` | openbrain-wiki-data + wiki-assets (**open-brain** project since 2026-08-21; output still `./backups/openbrain-wiki`) | — | default (open-brain) |
 | `agent-bridge-db-backup` | `pg_dump` of `agent-bridge-db` (**agent-org** project; governance/effort/project state) | ao-net | default (agent-org) |
 | `mattermost-db-backup` | `pg_dump` of `mattermost-db` (**agent-org** project; conversation content) | ao-net | default (agent-org) |
 | `open-notebook-backup` | SurrealDB logical export + notebook_data | default | default |
-| `smolcrawl-backup` | smolcrawl-data | — | default |
 | `tailscale-backup` | tailscale state dir | — | default |
 | `lm-models-backup` | LM Studio models (**WEEKLY**; disableable) | — | llm-backend-net (HEALTH_TCP liveness probe to `llama-cpp-upstream`) |
 | `caddy-backup` | caddy-data | default, edge-net | internet, local-test |
@@ -188,6 +186,8 @@ Run with: `docker compose -f OB1/docker/docker-compose.yml ...`.
 | `openbrain-digest` | HTTP-triggered daily digest; mechanical formatting, Gmail send; chains to podcast after delivery | — (internal only) | obnet |
 | `openbrain-podcast` | HTTP-triggered chain tail (digest → podcast); spawns the link-enrich pipeline — follow newsletter links (Tor) → grounded research via openbrain-research (article mode) → two-host script → Open Notebook audio → loop-close (episode source linked to the day's threads); best-effort, never blocks the email | — (internal only) | obnet, llm-net, search-gw-net (=ai-stack_default, Tor) |
 | `openbrain-idea-refinery` | **Idea Refinery drain** (IR.1–IR.5/IR.7): `POST /run` walks the owed-idea queue (`ideas`/`idea_revisions`, init-ideas.sql), researches each via openbrain-research (bounded submit-on-complete + rollover), posts the gap-centered dossier to Mattermost `#ideas` (via `host.docker.internal:8065`), ages to dormant + resurfaces. Stand-alone cron `03:00 UTC` (before the 05:00-UTC gmail/wiki chain → new claims feed the 1am-local wiki compile). **PROFILE-GATED (`idea-refinery`)** — NOT started by a plain `up`. deno-postgres | — (internal only) | obnet, llm-net |
+| `openbrain-db-backup` | Nightly `pg_dump` of `openbrain-db` (moved from ai-stack 2026-08-21 — OB1 owns its backups; output still lands in `ai-stack/backups/openbrain-db` for the NAS mirror + freshness watchers) | — | obnet |
+| `openbrain-wiki-backup` | Daily tar of `openbrain-wiki-data` + `wiki-assets` (moved from ai-stack 2026-08-21; output still `ai-stack/backups/openbrain-wiki`) | — | — |
 
 **Scheduled-job slice:** the five always-on services (`openbrain-cron` + the
 four HTTP-triggered jobs) — plus the **profile-gated `openbrain-idea-refinery`**
@@ -285,8 +285,9 @@ update, or network-namespace break.
 | `scripts/archive/emergency-recovery-module/` | ARCHIVED 2026-08-20 (was OWUI-reachable stale guidance; recovery keywords now route to help-system) |
 
 The recovery scripts hold a service inventory (`MainStackServices` — now incl. the
-backup sidecars, `OB1Services`, `AgentOrgServices`) plus `$MainBackups` / `$OB1Backups`
-helper groups (OB1-attached backups start only after OB1 is up). agent-org is driven as a
+backup sidecars, `OB1Services`, `AgentOrgServices`) plus a `$MainBackups`
+helper group (the openbrain-db/wiki backups live in the OB1 project since
+2026-08-21 and start with it). agent-org is driven as a
 separate project (`Start-/Stop-/Reset-AgentOrgStack`, `$AgentOrgCompose`), stopped first and
 started last (downstream of OB1). **When you add a container to any of the three compose
 files, add it to that inventory and to the shutdown/startup sequences** so the recovery stack
@@ -315,14 +316,15 @@ Bottom-up (start in this order; stop in reverse):
     `llm-gateway-db`, serves no inference, non-critical (best-effort start)
 3. `tailscale`
 4. `mnemory` → `mnemory-cloud-gateway` → `mnemory-backup`
-5. `openwebui-backup`, `smolcrawl-pipelines`
+5. `openwebui-backup`
 6. `surrealdb` → `open_notebook`
 7. Search: `vpn` → `redis` → `searxng` → `gateway`
 8. Coder: `open-terminal` → `little-coder` → `lc-egress`
 9. **Backup sidecars** — each starts after its target is healthy; idle cron otherwise
-    (`mnemory-backup`, `openwebui-backup`, `little-coder-backup`, `smolcrawl-backup`,
-    `tailscale-backup`, `lm-models-backup`, `llm-gateway-backup`, and — needs OB1 up —
-    `openbrain-db-backup`, `openbrain-wiki-backup`, `open-notebook-backup`).
+    (`mnemory-backup`, `openwebui-backup`, `little-coder-backup`,
+    `tailscale-backup`, `lm-models-backup`, `llm-gateway-backup`,
+    `open-notebook-backup`; the openbrain-db/wiki backups belong to the OB1
+    project and come up with it).
 11. **OB1** (`docker compose -f OB1/docker/docker-compose.yml up -d`) — after `llm-gateway`.
 11.5. **agent-org** (`docker compose -f agent-org/docker/docker-compose.yml up -d`) — after OB1
     (downstream of it: attaches to `ai-stack_llm-net`, optionally mirrors audit to OB1's

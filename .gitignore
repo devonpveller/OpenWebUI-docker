@@ -47,12 +47,11 @@ secrets/
 !backup/generic-tar-backup.sh
 !backup/pg-backup.sh
 !backup/open-notebook-backup.sh
-!backup/openbrain-db-backup.sh
-!backup/openbrain-wiki-backup.sh
+# (openbrain-db/wiki backup scripts + Dockerfile.postgres moved to
+#  OB1/docker/backup/ 2026-08-21 — OB1 owns its own backup sidecars now.)
 # Sidecar build contexts (compose builds ./backup with these) — must be tracked
 # or a fresh clone cannot build the postgres/surreal/generic backup sidecars.
 !backup/Dockerfile
-!backup/Dockerfile.postgres
 !backup/Dockerfile.surreal
 
 # --- Portal-specific paths from plan §7.2 ---

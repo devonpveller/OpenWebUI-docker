@@ -13,8 +13,8 @@ REM   search  vpn, redis, searxng, gateway  (Private Search Gateway)
 REM   coder   open-terminal, little-coder, lc-egress
 REM   aux    , surrealdb, open_notebook
 REM   backup  mnemory-backup, openwebui-backup, little-coder-backup,,
-REM           tailscale-backup, lm-models-backup, open-notebook-backup,
-REM           openbrain-db-backup, openbrain-wiki-backup (last two need OB1 up)
+REM           tailscale-backup, lm-models-backup, open-notebook-backup
+REM           (openbrain-db/wiki backups moved to the OB1 project 2026-08-21)
 REM   OB1     Open Brain - SEPARATE compose project (OB1\docker\docker-compose.yml)
 REM   AGORG   agent-org - SEPARATE compose project (agent-org\docker\docker-compose.yml);
 REM           default plane only (mattermost, mattermost-db, agent-bridge, agent-bridge-db,
@@ -244,8 +244,6 @@ docker compose up -d lc-egress little-coder-backup
 echo [INFO] Starting Open Brain (OB1) stack...
 if exist "%OB1_COMPOSE%" (
     docker compose -f "%OB1_COMPOSE%" --profile idea-refinery up -d
-    echo [INFO] Starting OB1-attached backups (obnet + open-brain volumes now exist)...
-    docker compose up -d openbrain-db-backup openbrain-wiki-backup
 ) else (
     echo [INFO] Open Brain (OB1) not deployed in this workspace - skipping
 )
@@ -335,7 +333,6 @@ docker compose up -d open-terminal little-coder lc-egress little-coder-backup
 echo [INFO] Starting Open Brain (OB1) stack...
 if exist "%OB1_COMPOSE%" (
     docker compose -f "%OB1_COMPOSE%" --profile idea-refinery up -d
-    docker compose up -d openbrain-db-backup openbrain-wiki-backup
 )
 if exist "%AGENTORG_COMPOSE%" docker compose -f "%AGENTORG_COMPOSE%" up -d
 
@@ -382,7 +379,6 @@ timeout /t 90 /nobreak >nul
 echo [INFO] Starting Open Brain (OB1) stack...
 if exist "%OB1_COMPOSE%" (
     docker compose -f "%OB1_COMPOSE%" --profile idea-refinery up -d
-    docker compose up -d openbrain-db-backup openbrain-wiki-backup
 )
 if exist "%AGENTORG_COMPOSE%" docker compose -f "%AGENTORG_COMPOSE%" up -d
 

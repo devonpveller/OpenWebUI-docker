@@ -47,17 +47,13 @@ volumes:
   # (Portal volumes moved to the `portal` compose project 2026-08-21 —
   # data migrated to portal_* volumes during the split cutover.)
   # Cross-project named volume from the open-brain compose project,
-  # referenced by openbrain-wiki-backup. ai-stack does not own this;
-  # it must already exist (it does, when OB1 is up).
+  # mounted read-only by open_notebook (Quartz workbench reads the wiki
+  # vault). ai-stack does not own this; it must already exist (it does,
+  # when OB1 is up). The wiki backup sidecars moved INTO the OB1 project
+  # 2026-08-21, taking the wiki-assets external decl with them.
   openbrain-wiki-data:
     external: true
     name: open-brain_openbrain-wiki-data
-  # X.2 — OB1's gitignored binary-asset volume (uploaded images/PDFs), so the
-  # wiki-backup can snapshot it (it's not in the git vault). External: owned by
-  # the open-brain project.
-  wiki-assets:
-    external: true
-    name: open-brain_wiki-assets
 
 networks:
   # Internal-only CALLER plane: no internet access. Every service that consumes
@@ -93,10 +89,11 @@ networks:
   app-net:
     driver: bridge
   # ----- Cross-project networks (declared external) ----------------------
-  # obnet: the open-brain compose project's own bridge. openbrain-db-backup
-  # (defined below) joins it to reach openbrain-db over TCP. The OB1 stack
-  # must be UP for backups to succeed -- consistent with the existing
-  # cross-project dependency (OB1 depends on ai-stack_llm-net).
+  # obnet: the open-brain compose project's own bridge. open_notebook joins
+  # it to reach openbrain-db (IKS canonical store). OB1 must be UP for that
+  # path to work -- consistent with the existing cross-project dependency
+  # (OB1 depends on ai-stack_llm-net). The openbrain-* backup sidecars that
+  # used to join from here moved into the OB1 project 2026-08-21.
   obnet:
     external: true
     name: open-brain_obnet
