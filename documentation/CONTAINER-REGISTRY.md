@@ -45,8 +45,8 @@ purpose. Containers that failed that test today were removed (see
 
 | Container | Purpose | Why |
 |---|---|---|
-| `search-vpn` | Mullvad WireGuard egress for engine queries | Search queries leave via VPN, not the home IP (since 2026-06-14) |
-| `search-tor` | Tor egress for page fetches | Page-fetch anonymity lane, kept separate from engine-query lane |
+| `search-vpn` | Mullvad WireGuard egress — engine queries AND (since 2026-08-21) page fetches via its HTTP proxy :8888 | All search-plane traffic leaves via VPN, not the home IP; anonymity without tor-exit blocking |
+| `search-tor` | Tor egress — **FALLBACK only since 2026-08-21** | Tor exits are blocked by most large sites; page-fetch now egresses via the Mullvad HTTP proxy on `search-vpn` (:8888). Tor kept as the documented fallback; retirement candidate after a soak |
 | `search-redis` | SearXNG's rate-limit/cache store | SearXNG requirement; FLUSHDB db0 clears engine suspensions |
 | `searxng` | The metasearch engine (internal-only net) | Aggregates engines without API keys |
 | `search-gateway` | REST face (:8085, key'd) + Tavily shim | What `openbrain-research` and tools actually call; provider abstraction + rotation |
@@ -64,7 +64,7 @@ purpose. Containers that failed that test today were removed (see
 |---|---|---|
 | `smolcrawl-pipelines` | OWUI Pipelines server (:9099, key'd) for crawl→KB flows | Live crawl/ingest surface (the retired deep-research harness was a different part of smolcrawl) |
 | `surrealdb` | Datastore for open_notebook (digest-pinned since today) | Exists solely for ON; retires with it (D-10) |
-| `open_notebook` | The IKS fork of Open Notebook | **Being retired in stages** — still the live podcast surface (on-demand audio shipped 08-02); Quartz workbench replaces the rest |
+| `open_notebook` | The IKS fork of Open Notebook | **STAYING (operator, 2026-08-21)** until the wiki workbench UI matures; long-term direction = fold ON's function into the wiki (D-10 decided) |
 
 ### Backup sidecars (one per stateful store — backup-conventions runbook)
 

@@ -28,8 +28,11 @@ services:
   # blocklist Tor exit IPs by reputation (brave/ddg/startpage/mojeek all
   # 403/429/CAPTCHA on sight), which neutralises SearXNG's multi-engine
   # aggregation. Mullvad gives a clean, non-Tor exit IP so aggregation works
-  # again. Page FETCH still egresses via `tor` (openbrain-research et al.'s
-  # FETCH_PROXY_URL) — arbitrary pages aren't engine-blocked, and Tor keeps
+  # again. Page FETCH moved to the Mullvad HTTP proxy too (2026-08-21):
+  # tor exit nodes are blocked by most large sites now, so openbrain-research
+  # + grounding-backfiller set FETCH_PROXY_URL=http://vpn:8888 (OB1/.env).
+  # `tor` stays as the documented FALLBACK (unset those env vars to revert);
+  # candidate for retirement after a soak period. Historically Tor kept
   # "what you actually read" private.
   #
   # Privacy invariant preserved: like `tor`, `vpn` is the ONLY search-net
