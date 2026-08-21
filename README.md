@@ -15,7 +15,7 @@ by default.
 
 | Stack | Driven with | Contents |
 |-------|-------------|----------|
-| **Main** (`ai-stack`) | `docker compose …` | core (`openwebui`, `tailscale`, `open-terminal`), inference (`llm-gateway` + db/ui, `llm-queue`, `llama-cpp-upstream`, `llama-cpp-embed-upstream`), memory (`mnemory`, `mnemory-gateway`), search (`vpn`, `tor`, `redis`, `searxng`, `gateway`), coder (`little-coder`, `lc-egress`), aux (`smolcrawl-pipelines`, `surrealdb`, `open_notebook`), 12 backup sidecars |
+| **Main** (`ai-stack`) | `docker compose …` | core (`openwebui`, `tailscale`, `open-terminal`), inference (`llm-gateway` + db/ui, `llm-queue`, `llama-cpp-upstream`, `llama-cpp-embed-upstream`), memory (`mnemory`, `mnemory-cloud-gateway`), search (`vpn`, `tor`, `redis`, `searxng`, `gateway`), coder (`little-coder`, `lc-egress`), aux (`smolcrawl-pipelines`, `surrealdb`, `open_notebook`), 12 backup sidecars |
 | **Portal** (`portal` — own compose project) | `scripts/portal/portal-on.ps1` / `portal-off.ps1` (`portal/docker-compose.yml`) | `caddy`, `authelia`, `cloudflared` + watcher/alerter/tripwire/cron sidecars. Internet-exposed auth front-end; joins `ai-stack_app-net` externally. |
 | **Open Brain** (`open-brain`) | `docker compose -f OB1/docker/docker-compose.yml …` | ~24 `openbrain-*` containers (db, MCP servers, gateway, workers, wiki, research, scheduled digest/podcast slice). Separate project; attaches to `ai-stack_llm-net` as an external network. |
 | **agent-org** | `docker compose -f agent-org/docker/docker-compose.yml …` | Mattermost + `agent-bridge` (the governed org bus) + profile-gated worker/cloud slices. |
@@ -63,7 +63,7 @@ access is Tailscale serve or the portal only.
 | `docker-compose.yml` | Main stack (31 services, split into compose/<plane>.yml) |
 | `owui/` | Canonical deploy-by-paste OWUI artifacts: tools/pipes/filters/actions/skills + `manifest.csv` |
 | `scripts/` | Ops plane: recovery, checks, portal lifecycle, backups, bridges (`claude-sessions-bridge/`, `sysadmin-mcp/`, `mattermost-mcp/`), `archive/` |
-| `llm-queue/`, `search-gateway/`, `mnemory-gateway/`, `openbrain-gateway/`, `smolcrawl/`, `little-coder/` | Service source trees |
+| `llm-queue/`, `search-gateway/`, `mnemory-cloud-gateway/`, `openbrain-gateway/`, `smolcrawl/`, `little-coder/` | Service source trees |
 | `agent-org/` | Governed multi-agent org (bus, charters, floor, 700+ tests) |
 | `OB1/` | Open Brain (vendored independent repo — own git) |
 | `backup/` + `backups/` | Sidecar scripts/Dockerfiles + produced artifacts |

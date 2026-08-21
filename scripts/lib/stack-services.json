@@ -30,7 +30,7 @@
     ],
     "memory": [
       { "container": "mnemory",         "project": "ai-stack", "critical": false },
-      { "container": "mnemory-gateway", "project": "ai-stack", "critical": false }
+      { "container": "mnemory-cloud-gateway", "project": "ai-stack", "critical": false }
     ],
     "search": [
       { "container": "search-tor",     "project": "ai-stack", "service": "tor",     "critical": false },

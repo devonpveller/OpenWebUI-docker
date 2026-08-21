@@ -695,7 +695,7 @@ function Repair-OpenNotebook {
 
 # ---------------------------------------------------------------------------
 # Extended-plane checks (added 2026-06-05): the private web-search gateway,
-# little-coder, mnemory-gateway, and the SEPARATE "open-brain" compose project
+# little-coder, mnemory-cloud-gateway, and the SEPARATE "open-brain" compose project
 # (including the openbrain-mcp stale-DB-pool guard that caused Open WebUI tool
 # 500s / "Broken pipe" on 2026-06-05).
 # ---------------------------------------------------------------------------
@@ -1431,7 +1431,7 @@ function Invoke-HealthCheck {
     Confirm-AuxiliaryContainer -ServiceName "lc-egress"    -RestartWaitSeconds 10 | Out-Null
 
     # --- mnemory MCP gateway (the bridge clients reach; mnemory itself above) ---
-    Confirm-AuxiliaryContainer -ServiceName "mnemory-gateway" -RestartWaitSeconds 10 | Out-Null
+    Confirm-AuxiliaryContainer -ServiceName "mnemory-cloud-gateway" -RestartWaitSeconds 10 | Out-Null
 
     # --- inference gateway plane (LiteLLM front door + admission queue) ---
     # ALL inference flows through llm-gateway (the llama-cpp:8080 alias) and

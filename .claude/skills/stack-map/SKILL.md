@@ -73,7 +73,7 @@ A third concern — the **recovery stack** (`scripts/recovery/emergency-recovery
 | Stack / plane | Containers |
 |---------------|-----------|
 | Main · core | `openwebui`, `tailscale`, `llama-cpp`, `llama-cpp-embed`, `watchtower` |
-| Main · memory | `mnemory`, `mnemory-gateway`, `mnemory-backup` |
+| Main · memory | `mnemory`, `mnemory-cloud-gateway`, `mnemory-backup` |
 | Main · search | `tor`, `redis`, `searxng`, `gateway`, `mcpo` |
 | Main · coder | `open-terminal`, `little-coder`, `lc-egress`, `little-coder-backup` |
 | Main · aux | `smolcrawl-pipelines`, `surrealdb`, `open_notebook`, `openwebui-backup` |

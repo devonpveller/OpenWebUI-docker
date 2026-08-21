@@ -91,8 +91,8 @@ $catalog = [ordered]@{
   }
   'mnemory' = @{
     Archives = @(@{ Pattern = "mnemory-*.tar.gz"; Target = 'ai-stack_mnemory-data'; Type = 'volume-tar' })
-    Stop    = @('mnemory','mnemory-gateway')
-    Start   = @('mnemory','mnemory-gateway')
+    Stop    = @('mnemory','mnemory-cloud-gateway')
+    Start   = @('mnemory','mnemory-cloud-gateway')
   }
   'little-coder' = @{
     Archives = @(

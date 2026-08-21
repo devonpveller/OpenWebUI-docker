@@ -11,7 +11,7 @@ services:
       - llm-net
     # NO host ports: mnemory is reachable only inside llm-net (internal,
     # no gateway). Trusted local clients (Open WebUI) talk to it directly.
-    # Cloud services must go through mnemory-gateway, which is the only
+    # Cloud services must go through mnemory-cloud-gateway, which is the only
     # host-published door and enforces the privacy policy.
     environment:
       - LLM_API_KEY=ollama
@@ -47,11 +47,11 @@ services:
   # Only host-published mnemory door. Holds the real mnemory key; cloud
   # clients use MNEMORY_GATEWAY_KEY and never see the mnemory key.
 
-  mnemory-gateway:
+  mnemory-cloud-gateway:
     build:
       context: ./mnemory-gateway
       dockerfile: Dockerfile
-    container_name: mnemory-gateway
+    container_name: mnemory-cloud-gateway
     networks:
       - llm-net      # reach mnemory:8050 internally
       - default      # be reachable from the host (non-internal => publishable)

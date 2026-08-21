@@ -10,7 +10,7 @@
 #   DATA_DIR        (default /data)
 #   BACKUP_DIR      (default /backups)
 #   RETAIN_COUNT    (default 2)
-#   HEALTH_TCP      (default mnemory-gateway:8060; empty to skip)
+#   HEALTH_TCP      (default mnemory-cloud-gateway:8060; empty to skip)
 
 set -eu
 
@@ -19,7 +19,7 @@ DATA_DIR="${DATA_DIR:-/data}"
 RETAIN_COUNT="${RETAIN_COUNT:-2}"
 # 8060, not 8080: the gateway serves /health on 8060. The 8080 default made the
 # precheck skip (exit 0, no artifact, no alert) nightly from 2026-05-29 to 07-05.
-HEALTH_TCP="${HEALTH_TCP:-mnemory-gateway:8060}"
+HEALTH_TCP="${HEALTH_TCP:-mnemory-cloud-gateway:8060}"
 TIMESTAMP="$(date -u +%Y%m%d-%H%M%S)"
 BACKUP_FILE="${BACKUP_DIR}/mnemory-backup-${TIMESTAMP}.tar.gz"
 

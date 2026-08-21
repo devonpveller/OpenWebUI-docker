@@ -73,7 +73,7 @@ Run with: `docker compose ...` from the workspace root.
 | Container | Role | Host port | Networks |
 |-----------|------|-----------|----------|
 | `mnemory` | Unified memory layer (mgmt :8051) | — (internal only) | llm-net |
-| `mnemory-gateway` | Privacy-enforcing MCP proxy for cloud clients | 127.0.0.1:8060 | llm-net, default |
+| `mnemory-cloud-gateway` | Privacy-enforcing MCP proxy for cloud clients | 127.0.0.1:8060 | llm-net, default |
 
 **Search (Private Search Gateway — SearXNG engine queries over Mullvad WireGuard; page-fetch over Tor)**
 | Container | Compose service | Role | Host port | Networks |
@@ -206,7 +206,7 @@ host ports — cloud services (Claude Code, ChatGPT) must enter through
 `openbrain-gateway` at `127.0.0.1:8061`. Gateway forces
 `metadata.share=cloud` on reads and stamps `metadata.origin=cloud,
 share=cloud` on writes; the 39 extension tools are blocked entirely.
-Mirrors the mnemory-gateway pattern (`mnemory-gateway/app.py`). Local
+Mirrors the mnemory-cloud-gateway pattern (`mnemory-gateway/app.py`). Local
 trusted clients (OWUI via the mcpo bridges, recipes on obnet, the
 entity worker, the wiki compiler) keep talking to `openbrain-mcp` /
 `openbrain-ext` directly on internal networks and are unaffected.
@@ -315,7 +315,7 @@ Bottom-up (start in this order; stop in reverse):
     `llm-gateway-ui` (Admin-UI sidecar) also starts here — depends only on
     `llm-gateway-db`, serves no inference, non-critical (best-effort start)
 3. `tailscale`
-4. `mnemory` → `mnemory-gateway` → `mnemory-backup`
+4. `mnemory` → `mnemory-cloud-gateway` → `mnemory-backup`
 5. `openwebui-backup`, `smolcrawl-pipelines`
 6. `surrealdb` → `open_notebook`
 7. Search: `vpn` → `tor` → `redis` → `searxng` → `gateway`

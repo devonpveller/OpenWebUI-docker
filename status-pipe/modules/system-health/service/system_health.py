@@ -43,7 +43,7 @@ _AI_STACK_SERVICES: List[Dict[str, Any]] = [
     {"name": "llm-gateway",              "plane": "Core", "host": "llm-gateway",              "port": 8080, "path": "/health/liveliness",       "critical": True},
     # Memory layer.
     {"name": "mnemory",         "plane": "Memory",       "host": "mnemory",         "port": 8051, "path": "/health",                  "critical": False},
-    {"name": "mnemory-gateway", "plane": "Memory",       "host": "mnemory-gateway", "port": 8060, "path": "/health",                  "critical": False},
+    {"name": "mnemory-cloud-gateway", "plane": "Memory",       "host": "mnemory-cloud-gateway", "port": 8060, "path": "/health",                  "critical": False},
     # Private Search Gateway (`gateway` also joins the default network).
     # Probe /readyz (NOT /healthz): /healthz is liveness-only and returns 200
     # whenever the event loop serves, so a dead Redis or an unreachable SearXNG

@@ -450,10 +450,10 @@ if %ERRORLEVEL% EQU 0 (
     echo [ERROR] search-gateway healthz: FAILED - run: docker compose up -d tor redis searxng gateway mcpo
 )
 echo.
-echo [INFO] Extended planes running state (search / little-coder / mnemory-gateway):
+echo [INFO] Extended planes running state (search / little-coder / mnemory-cloud-gateway):
 echo        ^(compose service keys: tor=search-tor, gateway=search-gateway, mcpo=search-mcpo^)
 cd /d "%SCRIPT_DIR%\..\.."
-docker compose ps tor redis searxng gateway mcpo little-coder lc-mcpo lc-egress mnemory-gateway --format "table {{.Service}}\t{{.Status}}" 2>nul
+docker compose ps tor redis searxng gateway mcpo little-coder lc-mcpo lc-egress mnemory-cloud-gateway --format "table {{.Service}}\t{{.Status}}" 2>nul
 cd /d "%SCRIPT_DIR%"
 echo.
 echo [INFO] Open Brain stack (mcp/mcpo/db/gateway/wiki - SEPARATE compose project):

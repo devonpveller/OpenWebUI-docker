@@ -158,7 +158,7 @@ _STACK_ROSTER: List[str] = [
     "openwebui", "tailscale", "llm-gateway", "llm-queue",
     "llama-cpp", "llama-cpp-embed", "watchtower",
     # main project — memory layer
-    "mnemory", "mnemory-gateway", "mnemory-backup",
+    "mnemory", "mnemory-cloud-gateway", "mnemory-backup",
     # main project — Private Search Gateway
     "tor", "redis", "searxng", "gateway", "mcpo",
     # main project — little-coder control plane
@@ -649,8 +649,8 @@ _PROBES: Dict[str, Dict[str, Any]] = {
         "host_fallback": "127.0.0.1", "host_fallback_port": 8051,
         "kind": "http_health",
     },
-    "mnemory-gateway": {
-        "host": "mnemory-gateway", "port": 8060,
+    "mnemory-cloud-gateway": {
+        "host": "mnemory-cloud-gateway", "port": 8060,
         "host_fallback": "127.0.0.1", "host_fallback_port": 8060,
         "kind": "http_health",
     },

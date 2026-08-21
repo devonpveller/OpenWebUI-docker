@@ -37,7 +37,7 @@ compose projects: main `ai-stack` + separate `open-brain`).
             Scopable to any container below:
     core    openwebui · tailscale · llm-gateway · llm-queue · llama-cpp ·
             llama-cpp-embed · watchtower
-    memory  mnemory · mnemory-gateway · mnemory-backup
+    memory  mnemory · mnemory-cloud-gateway · mnemory-backup
     search  tor · redis · searxng · gateway · mcpo
     coder   open-terminal · little-coder · lc-mcpo · lc-egress ·
             little-coder-backup
@@ -45,7 +45,7 @@ compose projects: main `ai-stack` + separate `open-brain`).
     OB1     openbrain-db · openbrain-mcp · openbrain-ext · openbrain-mcpo ·
             openbrain-mcpo-ext · openbrain-postgrest · openbrain-rest ·
             openbrain-entity-worker · openbrain-wiki · openbrain-wiki-viewer
-  Examples: "status" · "status of mnemory-gateway" · "status of openbrain-mcpo"
+  Examples: "status" · "status of mnemory-cloud-gateway" · "status of openbrain-mcpo"
 
 ─ System health  ──────────────────────────────── → modules/system-health
   Triggers: system health · health · monitor

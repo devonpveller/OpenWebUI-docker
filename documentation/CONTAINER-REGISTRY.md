@@ -39,7 +39,7 @@ purpose. Containers that failed that test today were removed (see
 | Container | Purpose | Why |
 |---|---|---|
 | `mnemory` | Layer-1 personal memory service (llm-net only, no host port) | Live consumers: OWUI mnemory tool + persistent-memory filter, system-health/llm-traffic modules |
-| `mnemory-gateway` | Privacy proxy (:8060, bearer-key'd, allow-listed verbs) | The ONLY published door to mnemory; label-forcing keeps cloud reads scoped. Twin of openbrain-gateway (unification = E.1, coupled to D-9/H.1) |
+| `mnemory-cloud-gateway` | Privacy proxy (:8060, bearer-key'd, allow-listed verbs) | The ONLY published door to mnemory; label-forcing keeps cloud reads scoped. Twin of openbrain-gateway (unification = E.1, coupled to D-9/H.1) |
 
 ### Search (private search gateway)
 
@@ -112,7 +112,7 @@ Running-state is an operator choice (`portal-on.ps1`); the split into its own pr
 | `openbrain-mcp` | Core MCP server (capture/search/fetch tools) | The write/read contract used by OWUI (via mcpo), the gateway (cloud), and curator |
 | `openbrain-ext` | Extensions MCP server (wiki/threads/extras) | Split from core so the cloud gateway can expose core-only |
 | `openbrain-mcpo` / `openbrain-mcpo-ext` | MCP→OpenAPI bridges for OWUI tool-servers | **Two instances on purpose** — one mcpo proxying two MCP servers crashes (documented upstream bug in `mcpo.config.json`) |
-| `openbrain-gateway` | Cloud privacy proxy (:8061, bearer-key'd; forces origin/share=cloud) | The ONLY door external/cloud clients get; twin of mnemory-gateway (E.1) |
+| `openbrain-gateway` | Cloud privacy proxy (:8061, bearer-key'd; forces origin/share=cloud) | The ONLY door external/cloud clients get; twin of mnemory-cloud-gateway (E.1) |
 | `openbrain-postgrest` + `openbrain-rest` | PostgREST + its Caddy front (:3001) | Recipes/local integrations read the store without MCP |
 
 ### Workers (async enrichment)
@@ -184,7 +184,7 @@ OFF: cloud-model escalation lane, master-key'd, enabled per-engagement.)
 ## Redundancies examined and deliberately KEPT
 
 - `openbrain-mcpo` + `openbrain-mcpo-ext` — upstream mcpo crash bug, documented.
-- `mnemory-gateway` vs `openbrain-gateway` — same program twice (~75%); merge
+- `mnemory-cloud-gateway` vs `openbrain-gateway` — same program twice (~75%); merge
   (E.1) is deliberately sequenced behind the mnemory direction call (D-9) and
   the OB1 submodule move (H.1), not forgotten.
 - `surrealdb` + `open_notebook` — transitional pair; retires together (D-10).

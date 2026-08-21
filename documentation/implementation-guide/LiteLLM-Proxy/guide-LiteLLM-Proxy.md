@@ -42,7 +42,7 @@ admin API and a new module in `scripts/ai_pipes/unified_openwebui_pipe.py`.
 
 The pattern (gateway-in-front-of-OpenAI-compatible-backend) is the industry
 standard for self-hosted LLM observability and matches the same architectural
-shape already used elsewhere in this workspace (`mnemory-gateway`,
+shape already used elsewhere in this workspace (`mnemory-cloud-gateway`,
 `search-gateway`, `mcpo`, `lc-mcpo`).
 
 ## 1A. Architecture revision — Transparent interposition (2026-06-12)
@@ -350,7 +350,7 @@ tracking + reflection later) without bolting on a custom pipeline.
 | D1 | Embeddings traffic goes **through** LiteLLM (not bypassed) | The motivating workload is `openbrain-entity-worker`, whose embedding calls are a large fraction of its GPU demand. Excluding them would leave the demand-over-time view incomplete. LiteLLM proxies `/v1/embeddings` natively. |
 | D2 | Dedicated `llm-gateway-db` Postgres container — **not** shared with `openbrain-db` | `open-brain` is a separate compose project (per workspace CLAUDE.md). Sharing the DB would couple OB1's lifecycle to the gateway and cross the project boundary the workspace deliberately maintains. |
 | D3 | Per-service **virtual API keys** issued by LiteLLM (not a single shared key with header attribution) | Idiomatic LiteLLM; survives caller restarts and IP changes; gives per-caller `/spend/logs` slicing out of the box; supports per-caller rate limits / budgets later. |
-| D4 | New service named **`llm-gateway`** on the existing `ai-stack_llm-net` | Consistent with `mnemory-gateway`, `search-gateway`. Same internal-network membership as `llama-cpp` so callers reach it by container DNS. |
+| D4 | New service named **`llm-gateway`** on the existing `ai-stack_llm-net` | Consistent with `mnemory-cloud-gateway`, `search-gateway`. Same internal-network membership as `llama-cpp` so callers reach it by container DNS. |
 | D5 | **Per-caller cutover**, not big-bang | Each caller can revert independently if behavior regresses. Order is chosen to start with lowest-risk consumers. |
 | D6 | OWUI's chat + embedding wiring is **re-pointed via OWUI Admin → Connections** (UI step, persisted in OWUI's database), not via compose env | OWUI's compose file does not currently set `OPENAI_API_BASE_URLS`; the configuration lives in OWUI's data volume. This is a documented operator action in the cutover, not a code change. |
 | D7 | Prometheus + Grafana dashboards are **phase 2** | The LiteLLM REST API + pipe module covers the immediate need ("who is using the GPU and how much"). Dashboards add value but also infrastructure cost; defer until the request ledger has accumulated something worth charting. |
@@ -1454,7 +1454,7 @@ plane over Tailscale Serve paths. Migration to `/llm-gateway` is
 recommended (so virtual-key attribution applies) but not required.
 
 - [ ] **Claude Code on the host (Windows)** — uses MCP servers
-      (`mnemory-gateway`, `openbrain-mcpo*`, `lc-mcpo`). These are
+      (`mnemory-cloud-gateway`, `openbrain-mcpo*`, `lc-mcpo`). These are
       upstream of the gateway and do not change. No action.
 - [ ] **Claude Code / Codex / external chat clients on other machines**
       — if any are configured against

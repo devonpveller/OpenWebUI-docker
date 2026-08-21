@@ -19,7 +19,7 @@ $ErrorActionPreference = "Stop"
 #           llm-gateway-db, llm-gateway, llm-gateway-ui, tailscale
 #           (llm-queue = B2 admission controller between the upstreams and LiteLLM;
 #            llm-gateway-ui = master-key'd Admin-UI sidecar / analytics dashboard)
-#   memory  mnemory, mnemory-gateway
+#   memory  mnemory, mnemory-cloud-gateway
 #   search  vpn, tor, redis, searxng, gateway (Private Search Gateway)
 #   coder   open-terminal, little-coder, lc-egress
 #   aux     smolcrawl-pipelines, surrealdb, open_notebook
@@ -57,7 +57,7 @@ $Script:AgentOrgCompose = "agent-org\docker\docker-compose.yml"
 $Script:MainStackServices = @(
     "openwebui", "llama-cpp-upstream", "llama-cpp-embed-upstream",
     "llm-queue", "llm-gateway-db", "llm-gateway", "llm-gateway-ui", "tailscale",
-    "mnemory", "mnemory-gateway",
+    "mnemory", "mnemory-cloud-gateway",
     "smolcrawl-pipelines", "surrealdb", "open_notebook",
     "vpn", "tor", "redis", "searxng", "gateway",
     "open-terminal", "little-coder", "lc-egress",
@@ -291,8 +291,8 @@ function Test-BasicConnectivity {
         # Report container states grouped by plane so 20+ services stay readable.
         Write-Log "INFO" ("Core   - openwebui: {0}, llama-cpp-upstream: {1}, llama-cpp-embed-upstream: {2}, tailscale: {3}" -f `
             $states["openwebui"], $states["llama-cpp-upstream"], $states["llama-cpp-embed-upstream"], $states["tailscale"])
-        Write-Log "INFO" ("Memory - mnemory: {0}, mnemory-gateway: {1}" -f `
-            $states["mnemory"], $states["mnemory-gateway"])
+        Write-Log "INFO" ("Memory - mnemory: {0}, mnemory-cloud-gateway: {1}" -f `
+            $states["mnemory"], $states["mnemory-cloud-gateway"])
         Write-Log "INFO" ("Search - vpn: {0}, tor: {1}, redis: {2}, searxng: {3}, gateway: {4}" -f `
             $states["vpn"], $states["tor"], $states["redis"], $states["searxng"], $states["gateway"])
         Write-Log "INFO" ("Coder  - open-terminal: {0}, little-coder: {1}, lc-egress: {2}" -f `
@@ -422,7 +422,7 @@ function Invoke-MinimalRecovery {
         # nudge them so a cold dependent comes back.
         docker compose up -d llm-queue llm-gateway
 
-        docker compose up -d mnemory mnemory-gateway `
+        docker compose up -d mnemory mnemory-cloud-gateway `
             smolcrawl-pipelines surrealdb open_notebook `
             vpn tor redis searxng gateway `
             open-terminal little-coder lc-egress
@@ -586,7 +586,7 @@ function Invoke-EmergencyRecovery {
     Stop-ServiceGroup "auxiliary services" @("smolcrawl-pipelines", "open_notebook", "surrealdb")
 
     # Mnemory memory layer (gateway before mnemory).
-    Stop-ServiceGroup "Mnemory layer" @("mnemory-gateway", "mnemory", "mnemory-backup")
+    Stop-ServiceGroup "Mnemory layer" @("mnemory-cloud-gateway", "mnemory", "mnemory-backup")
 
     # OpenWebUI backup scheduler.
     Stop-ServiceGroup "OpenWebUI backup" @("openwebui-backup")
@@ -731,8 +731,8 @@ function Invoke-EmergencyRecovery {
         # Don't throw - Mnemory is not critical for basic functionality
     }
 
-    # mnemory-gateway (cloud MCP proxy — depends on mnemory)
-    Start-ServiceGroup "mnemory-gateway" @("mnemory-gateway")
+    # mnemory-cloud-gateway (cloud MCP proxy — depends on mnemory)
+    Start-ServiceGroup "mnemory-cloud-gateway" @("mnemory-cloud-gateway")
 
     # Backup schedulers (independent cron sidecars, main/host resources).
     # OB1-attached backups (openbrain-db/wiki) start later, after Start-OB1Stack.
@@ -872,7 +872,7 @@ function Invoke-EmergencyRecovery {
         docker compose ps surrealdb --format "table {{.Service}}\t{{.Status}}" 2>$null
 
         Write-Log "INFO" "Memory + coder plane status:"
-        docker compose ps mnemory-gateway lc-egress --format "table {{.Service}}\t{{.Status}}" 2>$null
+        docker compose ps mnemory-cloud-gateway lc-egress --format "table {{.Service}}\t{{.Status}}" 2>$null
 
         Write-Log "INFO" "Backup schedulers + Watchtower status:"
         docker compose ps mnemory-backup openwebui-backup little-coder-backup `
@@ -1019,7 +1019,7 @@ function Invoke-GPUReset {
 
                     # Restart the planes that consume llama-cpp-upstream inference:
                     # the memory layer, the little-coder plane, and OB1.
-                    docker compose up -d mnemory mnemory-gateway mnemory-backup
+                    docker compose up -d mnemory mnemory-cloud-gateway mnemory-backup
                     Write-Log "INFO" "Mnemory layer started"
 
                     docker compose up -d open-terminal little-coder lc-egress little-coder-backup
