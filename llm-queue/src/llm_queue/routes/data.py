@@ -82,14 +82,20 @@ def _extract_auth_key(request: Request, key_header: str) -> str | None:
     return raw or None
 
 
-def _attribute_key(auth_key: str | None, body_user: str | None) -> str | None:
+def _attribute_key(
+    auth_key: str | None, body_user: str | None, caller_header: str | None = None
+) -> str | None:
     """The caller identity priority is derived from (design §10.3.2 — server-side,
-    never a client X-Priority header). Precedence: a real Authorization key
-    (direct callers) → the OpenAI `user` body field (survives LiteLLM forwarding)
-    → the sentinel/None (→ default class). LiteLLM's permissive openai-client path
-    strips the caller's Authorization to `dummy`, so per-caller priority through
-    the gateway needs either a caller-set `user` or the future master_key/virtual
-    keys; direct callers and `user`-setting callers attribute correctly today."""
+    never a client X-Priority header). Precedence: the `x-ai-stack-caller`
+    header (J.1, 2026-08-21: injected upstream by the gateway's pre-call hook
+    from the virtual key's metadata — the only signal that survives LiteLLM,
+    which strips both Authorization (→ `dummy`) and the `user` body field in
+    current builds; trustworthy because llm-backend-net carries only gateway
+    traffic) → a real Authorization key (direct callers) → the OpenAI `user`
+    body field (legacy fallback, dead through the gateway but kept for direct
+    callers) → the sentinel/None (→ default class)."""
+    if caller_header:
+        return caller_header
     if auth_key and auth_key.lower() not in _SENTINEL_KEYS:
         return auth_key
     if body_user:
@@ -157,7 +163,11 @@ async def _admit_and_proxy(request: Request, upstream_path: str) -> Response:
     raw = await request.body()
     model, want_stream, body_user = _parse_body(raw)
     model_name = model or "qwen36-27b"
-    key = _attribute_key(_extract_auth_key(request, state.settings.key_header), body_user)
+    key = _attribute_key(
+        _extract_auth_key(request, state.settings.key_header),
+        body_user,
+        caller_header=(request.headers.get("x-ai-stack-caller") or "").strip() or None,
+    )
     # DEBUG (LLM_QUEUE_LOG_LEVEL=DEBUG): dump incoming headers so we can see what
     # the caller-identity signal actually is after LiteLLM forwarding.
     log.debug("incoming_headers", headers={k: v for k, v in request.headers.items()})

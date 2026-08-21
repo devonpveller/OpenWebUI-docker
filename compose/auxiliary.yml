@@ -113,7 +113,7 @@ services:
       - OB1_DB_USER=postgres
       # bge-m3 (1024-dim) so OB1 source embeddings match every other writer.
       - EMBEDDING_API_BASE=http://llama-cpp-embed:8080/v1
-      - EMBEDDING_API_KEY=not-needed
+      - EMBEDDING_API_KEY=${OPEN_NOTEBOOK_LLM_API_KEY:-not-needed}
       - EMBEDDING_MODEL=bge-m3
       # Wiki notebooks/ folder = the notebook registry (B1 folder sync), RO.
       - WIKI_NOTEBOOKS_DIR=/wiki/content/notebooks

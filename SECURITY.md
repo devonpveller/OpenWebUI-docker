@@ -29,8 +29,11 @@ Documents security posture, decisions, and known gaps. Last updated 2026-08-20.
   added (the one token class this repo actually leaked was the one the guard
   couldn't see). Hooks bootstrap for fresh clones:
   `git config core.hooksPath .githooks`.
-- **LiteLLM stays permissive (no master_key) for now** — the per-caller
-  virtual-keys cutover is prepared, not flipped:
+- **LiteLLM master_key FLIPPED ON 2026-08-21 (J.1 executed):** per-caller
+  `sk-` virtual keys enforced at the gateway; caller identity reaches
+  llm-queue via the `x-ai-stack-caller` header injected by the pre-call hook
+  (`config/litellm/custom_callbacks.py`). Verified: junk key → 401, virtual
+  key → 200 with correct lane attribution. Runbook:
   `documentation/implementation-guide/LiteLLM-Proxy/J1-VIRTUAL-KEYS-CUTOVER.md`.
 - SurrealDB image pinned by digest; its datastore still accepts the
   persisted first-boot root login (network isolation is the boundary) — a

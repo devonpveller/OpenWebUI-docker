@@ -80,7 +80,11 @@ model_list:
       api_key: dummy
 
 general_settings:
-  # NO master_key — permissive (guide §1A.3). DATABASE_URL comes from compose env.
+  # J.1 FLIP (2026-08-21): master_key ON - per-caller sk- virtual keys are
+  # enforced (issued via llm-gateway-ui, same DB; see
+  # LiteLLM-Proxy/J1-VIRTUAL-KEYS-CUTOVER.md). Rollback = comment this line
+  # out + `docker compose up -d llm-gateway` (permissive mode ignores keys).
+  master_key: os.environ/LITELLM_MASTER_KEY
   store_model_in_db: true
   success_callback: ["postgres"]   # proven to populate LiteLLM_SpendLogs (T0 spike)
   failure_callback: ["postgres"]
@@ -122,6 +126,9 @@ general_settings:
   # -> llama-cpp-upstream. Keep LiteLLM the front door; never route around it.
 
 litellm_settings:
+  # J.1: pre-call hook (custom_callbacks.py mounted into /app) injects
+  # x-ai-stack-caller from the key's metadata.lane -> llm-queue attribution.
+  callbacks: custom_callbacks.proxy_handler_instance
   drop_params: true        # tolerate caller params llama.cpp doesn't recognize
   set_verbose: false
   telemetry: false         # no anonymous outbound beacon (guide §19/D10)

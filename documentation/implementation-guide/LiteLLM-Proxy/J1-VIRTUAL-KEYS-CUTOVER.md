@@ -1,9 +1,8 @@
 # J.1 — per-caller identity through the gateway (virtual-keys cutover)
 
-> Status: RUNBOOK, prepared 2026-08-20 (CLEANUP-PLAN v3 J.1). **Not executed** —
-> the flip touches every inference consumer across three compose projects and
-> needs the operator reachable. Prepared instead of flipped on the 2026-08-20
-> cleanup day, deliberately.
+> Status: **EXECUTED 2026-08-21** (operator present). Junk keys 401; virtual
+> keys 200; llm-queue attributes lanes via `x-ai-stack-caller`. Rollback
+> stays as documented below (comment out master_key).
 
 ## Why
 

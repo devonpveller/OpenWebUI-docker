@@ -242,10 +242,15 @@ services:
     # The llm-traffic OWUI module reaches it the same way (OWUI is on llm-net).
     volumes:
       - ./config/litellm.config.yaml:/app/config.yaml:ro
+      # J.1 (2026-08-21): pre-call hook injecting x-ai-stack-caller from the
+      # virtual key's metadata - the identity signal llm-queue lanes key on.
+      - ./config/litellm/custom_callbacks.py:/app/custom_callbacks.py:ro
     command: ["--config", "/app/config.yaml", "--port", "8080"]
     environment:
       # DATABASE_URL expands ${LITELLM_DB_PASSWORD} from .env at compose-parse time.
       - DATABASE_URL=postgres://litellm:${LITELLM_DB_PASSWORD}@llm-gateway-db:5432/litellm
+      # J.1: master_key (virtual-key enforcement) - config reads it via os.environ
+      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
       - LITELLM_LOCAL_MODEL_COST_MAP=True   # bundled cost map; no GitHub fetch at boot (guide §19/D10)
     depends_on:
       llama-cpp-upstream:

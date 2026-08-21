@@ -22,3 +22,15 @@ def test_sentinel_and_no_user_stays_sentinel():
 
 def test_empty_auth_uses_user():
     assert _attribute_key("", "llama") == "llama"
+
+
+def test_caller_header_wins_over_everything():
+    # J.1: the gateway hook's x-ai-stack-caller header is THE identity signal
+    # through LiteLLM (which strips both Authorization and `user`).
+    assert _attribute_key("dummy", None, caller_header="ob-research") == "ob-research"
+    assert _attribute_key("real-key", "some-user", caller_header="owui-chat") == "owui-chat"
+
+
+def test_absent_caller_header_preserves_legacy_precedence():
+    assert _attribute_key("owui-chat", "x", caller_header=None) == "owui-chat"
+    assert _attribute_key("dummy", "ob-entity", caller_header=None) == "ob-entity"

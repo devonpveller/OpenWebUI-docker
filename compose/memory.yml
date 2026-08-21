@@ -14,7 +14,7 @@ services:
     # Cloud services must go through mnemory-cloud-gateway, which is the only
     # host-published door and enforces the privacy policy.
     environment:
-      - LLM_API_KEY=ollama
+      - LLM_API_KEY=${MNEMORY_LLM_API_KEY:-mnemory}
       - LLM_BASE_URL=http://llama-cpp:8080/v1
       - LLM_MODEL=qwen36-27b:nothink
       - EMBED_BASE_URL=http://llama-cpp-embed:8080/v1

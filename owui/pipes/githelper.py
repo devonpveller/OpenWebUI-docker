@@ -94,6 +94,10 @@ class Pipe:
             default="http://llama-cpp:8080/v1",
             description="Backend URL (e.g. http://llama-cpp:8080/v1).",
         )
+        API_KEY: str = Field(
+            default="",
+            description="LiteLLM virtual key for the gateway (J.1, 2026-08-21). Empty = no Authorization header (permissive-gateway era).",
+        )
         TARGET_MODEL_ID: str = Field(
             default="",
             description="Model ID for the backend. Leave empty to auto-detect.",
@@ -507,6 +511,12 @@ class Pipe:
 
     # ── Pipe entry point ──
 
+    def _headers(self) -> dict:
+        h = {"Content-Type": "application/json"}
+        if self.valves.API_KEY.strip():
+            h["Authorization"] = f"Bearer {self.valves.API_KEY.strip()}"
+        return h
+
     async def pipe(
         self,
         body: dict,
@@ -610,7 +620,7 @@ class Pipe:
         try:
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.post(
-                    url, json=payload, headers={"Content-Type": "application/json"}
+                    url, json=payload, headers=self._headers()
                 ) as resp:
                     if resp.status != 200:
                         error_text = await resp.text()
@@ -641,7 +651,7 @@ class Pipe:
         try:
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.post(
-                    url, json=payload, headers={"Content-Type": "application/json"}
+                    url, json=payload, headers=self._headers()
                 ) as resp:
                     if resp.status != 200:
                         error_text = await resp.text()

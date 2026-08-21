@@ -1,3 +1,4 @@
+README.md
 pyproject.toml
 src/llm_queue/__init__.py
 src/llm_queue/app_state.py
@@ -20,7 +21,10 @@ src/llm_queue/routes/__init__.py
 src/llm_queue/routes/control.py
 src/llm_queue/routes/data.py
 src/llm_queue/routes/health.py
+src/llm_queue/routes/observe.py
 tests/test_app.py
+tests/test_attribution.py
+tests/test_conn_reaper.py
 tests/test_metrics.py
 tests/test_policy.py
 tests/test_scheduler.py

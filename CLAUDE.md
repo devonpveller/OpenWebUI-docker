@@ -29,8 +29,9 @@ Retired 2026-08-20 (CLEANUP-PLAN v3): `watchtower` (manual updates per
 (hold-and-dispatch, per-caller lanes) to the `*-upstream` servers. **Never
 route inference around LiteLLM**; only health/GPU/recovery probes may target
 `*-upstream` directly. Enforced pre-commit by
-`scripts/checks/check-llm-gateway-routing.ps1`. Gotchas: LiteLLM runs permissive (no
-master_key — the virtual-keys cutover runbook is
+`scripts/checks/check-llm-gateway-routing.ps1`. Gotchas: LiteLLM enforces per-caller
+virtual keys since 2026-08-21 (J.1 — master_key + the x-ai-stack-caller
+pre-call hook; every new consumer needs a key, see
 `documentation/implementation-guide/LiteLLM-Proxy/J1-VIRTUAL-KEYS-CUTOVER.md`);
 `background_health_checks: false` and never GET LiteLLM `/health` via the
 alias (model-load thrash — use `/health/liveliness`); llama-swap uses
