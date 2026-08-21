@@ -1,9 +1,9 @@
 # scripts/ — the host-side ops plane
 
-> Rewritten 2026-08-20 (the previous README described the retired 2025
-> pipe-function era). Physical bucket-reorg is deferred until an elevated
-> session can re-register the Windows Scheduled Tasks that reference these
-> paths — until then this README **is** the taxonomy.
+> Rewritten 2026-08-20; physical bucket-reorg EXECUTED 2026-08-21 (the
+> elevated session re-registered the two path-bound Scheduled Tasks:
+> `StackWatchdog` — renamed from `TailscaleHealthCheck` — and the NAS
+> backup task).
 
 ## Subsystems (self-contained directories)
 
@@ -15,21 +15,23 @@
 | `lib/` | Shared code: `mm_lib.py` (.env credential mechanics — the once-6×-copied line-walk), `portal-alerter-client.ps1`, `stack-services.json` (inventory; wire-or-demote = CLEANUP-PLAN D-12) | imported |
 | `archive/` | Retired code with provenance table — see `archive/README.md` | never |
 
-## Recovery
+## `recovery/`
 
-`emergency-recovery.ps1` (canonical; `recover`/`nuclear`/`gpu-reset`),
+`emergency-recovery.ps1` (canonical; `recover`/`nuclear`/`gpu-reset`; now
+pins CWD to the repo root — it was silently CWD-dependent before),
 `emergency-recovery.bat` (legacy twin), `quick-fixes.bat` (interactive menu),
-plus the Python primitives they drive: `namespace_reset.py`,
+plus the Python primitives they drive (`namespace_reset.py`,
 `nuclear_option.py`, `rebuild_tailscale.py`, `restart_openwebui.py`,
-`gpu_check.py`, `status_check.py`, `update-stack.bat`.
+`gpu_check.py`, `status_check.py` — all locate the repo by walking up to
+docker-compose.yml) and `update-stack.bat`.
 
-## Checks & watchdog
+## `checks/`
 
-- `check-tailscale-health.ps1` — the 60 s watchdog (Scheduled Task
-  `TailscaleHealthCheck` via `install-service.ps1`, or `simple-monitor.ps1`).
-  Despite the name it now also covers: Docker-engine restart, backup
-  recency, claude-bridge health, Telegram alerting. Rename to
-  `stack-watchdog.ps1` is queued for the elevated-session reorg.
+- `stack-watchdog.ps1` — the 60 s watchdog (Scheduled Task `StackWatchdog`;
+  renamed from check-tailscale-health 2026-08-21). Covers: tailnet serves,
+  all three compose projects, Docker-engine restart, backup recency,
+  claude-bridge health, Telegram alerting. Log stays at
+  `logs/tailscale-health.log` for continuity.
 - `check-openbrain-health.ps1`, `check-agent-org-health.ps1` — per-project
   probes (fanned out from the watchdog).
 - `check-backup-coverage.ps1` — every stateful path has a sidecar (manual).
@@ -37,12 +39,12 @@ plus the Python primitives they drive: `namespace_reset.py`,
   `validate-lineendings.ps1`, `check-llm-gateway-routing.ps1`.
 - `test-quartz4-offline.ps1`, `dev-helper.ps1` — manual dev aids.
 
-## Portal lifecycle
+## `portal/`
 
 `portal-on.ps1` / `portal-off.ps1` / `portal-status.ps1`,
 `breach-killswitch.ps1`, `access-query.ps1`.
 
-## Backups (host side)
+## `backup/` (host side — NAS mirror + DR; container-side sidecar scripts live in ../backup/)
 
 `backup-to-nas.ps1` (weekly NAS mirror; Task via
 `install-nas-backup-task.ps1`), `set-nas-credential.ps1`,

@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   ONE-TIME (elevated) registration of the sysadmin Telegram command listener as a logon Scheduled Task.
 

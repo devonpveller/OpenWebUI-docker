@@ -31,7 +31,7 @@ Invoke when the user:
 - asks where a service runs, what network it is on, or what port it uses
 - asks how the stacks connect or for a topology / inventory / diagram
 - is about to edit `docker-compose.yml`, `OB1/docker/docker-compose.yml`, or
-  the `scripts/emergency-recovery.*` scripts (verify the map first)
+  the `scripts/recovery/emergency-recovery.*` scripts (verify the map first)
 - reports a container that "isn't covered" by recovery or backups
 
 ## The two compose projects
@@ -44,7 +44,7 @@ Invoke when the user:
    main stack's `ai-stack_llm-net` as an **external** network, so it depends
    on the main stack and is recovered last.
 
-A third concern — the **recovery stack** (`scripts/emergency-recovery.ps1` /
+A third concern — the **recovery stack** (`scripts/recovery/emergency-recovery.ps1` /
 `.bat`) — is not a compose project; it orchestrates both of the above.
 
 ## Process
@@ -78,7 +78,7 @@ A third concern — the **recovery stack** (`scripts/emergency-recovery.ps1` /
 | Main · coder | `open-terminal`, `little-coder`, `lc-egress`, `little-coder-backup` |
 | Main · aux | `smolcrawl-pipelines`, `surrealdb`, `open_notebook`, `openwebui-backup` |
 | OB1 (`open-brain`) | `openbrain-db`, `openbrain-mcp`, `openbrain-ext`, `openbrain-mcpo`, `openbrain-mcpo-ext`, `openbrain-postgrest`, `openbrain-rest`, `openbrain-entity-worker`, `openbrain-wiki`, `openbrain-wiki-viewer` |
-| Recovery stack | `scripts/emergency-recovery.ps1`, `scripts/emergency-recovery.bat` |
+| Recovery stack | `scripts/recovery/emergency-recovery.ps1`, `scripts/recovery/emergency-recovery.bat` |
 
 ## Consistency rule
 

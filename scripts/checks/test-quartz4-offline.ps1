@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   Offline test harness for the Quartz-4-expansion work (workbench + extract +
   schema + compiler). Nothing here touches the live/prod stack or its data.

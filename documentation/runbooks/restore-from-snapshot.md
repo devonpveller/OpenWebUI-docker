@@ -2,7 +2,7 @@
 
 For partial restores (one service went bad, everything else is fine).
 For total disaster recovery, see
-[`scripts/restore-from-snapshot.ps1`](../scripts/restore-from-snapshot.ps1)
+[`scripts/backup/restore-from-snapshot.ps1`](../scripts/backup/restore-from-snapshot.ps1)
 which orchestrates the whole stack in dependency order.
 
 **Pre-flight, every restore**:
@@ -252,7 +252,7 @@ Persistent state captured by the snapshot:
   (DPAPI-bound — only the original Windows user on the original machine
   can decrypt). On a new machine, re-run `setup-token.ts`.
 - `secrets/nas-backup-vault.dat` (DPAPI-bound, LocalMachine scope). On a
-  new machine, re-run `scripts/set-nas-credential.ps1`.
+  new machine, re-run `scripts/backup/set-nas-credential.ps1`.
 - Cloudflare Tunnel registration (`cloudflared` is configured by token;
   if the token expires you re-create at the Cloudflare dashboard).
 - Tailscale auth key (re-issue at `https://login.tailscale.com/admin/settings/keys`).

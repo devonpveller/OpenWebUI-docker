@@ -37,13 +37,13 @@ Run with: `docker compose ...` from the workspace root.
 
 > **Profiles:** the **Portal** plane below is gated behind `profiles: [internet]`
 > (or `[internet, local-test]`) and does **NOT** start with a plain `docker compose up -d` —
-> it's driven by `scripts/portal-on.ps1` / `portal-off.ps1`. Everything else starts by default.
+> it's driven by `scripts/portal/portal-on.ps1` / `portal-off.ps1`. Everything else starts by default.
 
 ### Networks
 | Network      | Type            | Purpose |
 |--------------|-----------------|---------|
 | `llm-net`    | internal (no internet) | **caller plane**: every inference consumer sits here and reaches inference ONLY via the `llama-cpp` / `llama-cpp-embed` aliases on **`llm-gateway`** (LiteLLM). The `*-upstream` real servers are NOT here (isolated on `llm-backend-net`, 2026-06-13) so callers cannot route around LiteLLM |
-| `llm-backend-net` | internal (no internet) | **backend plane**: the `*-upstream` real inference servers + the sole ingress `llm-gateway` + the `llm-queue` admission controller (downstream of the gateway) + the `lm-models-backup` liveness probe. Nothing else attaches → inference is reachable only through the gateway. Enforced by `scripts/check-llm-gateway-routing.ps1` |
+| `llm-backend-net` | internal (no internet) | **backend plane**: the `*-upstream` real inference servers + the sole ingress `llm-gateway` + the `llm-queue` admission controller (downstream of the gateway) + the `lm-models-backup` liveness probe. Nothing else attaches → inference is reachable only through the gateway. Enforced by `scripts/checks/check-llm-gateway-routing.ps1` |
 | `search-net` | internal (no internet) | search gateway isolation — only `vpn` (search egress) + `tor` (fetch egress) bridge out |
 | `lc-net`     | internal (no internet) | little-coder control plane isolation |
 | `auth-net`   | bridge, **internal** | portal: caddy ↔ authelia ↔ portal-alerter ↔ watchers (no internet) |
@@ -279,8 +279,8 @@ update, or network-namespace break.
 
 | File | Role |
 |------|------|
-| `scripts/emergency-recovery.ps1` | Primary recovery — `recover` / `nuclear` / `gpu-reset`; 5-phase ordered restart that also drives the OB1 project |
-| `scripts/emergency-recovery.bat` | Legacy linear equivalent (PowerShell version preferred) |
+| `scripts/recovery/emergency-recovery.ps1` | Primary recovery — `recover` / `nuclear` / `gpu-reset`; 5-phase ordered restart that also drives the OB1 project |
+| `scripts/recovery/emergency-recovery.bat` | Legacy linear equivalent (PowerShell version preferred) |
 | `scripts/archive/emergency-recovery-module/` | ARCHIVED 2026-08-20 (was OWUI-reachable stale guidance; recovery keywords now route to help-system) |
 
 The recovery scripts hold a service inventory (`MainStackServices` — now incl. the
@@ -292,7 +292,7 @@ files, add it to that inventory and to the shutdown/startup sequences** so the r
 stays complete.
 
 **The Portal plane is deliberately excluded** from recovery: it is profile-gated
-(`profiles: [internet]`) and managed by `scripts/portal-on.ps1` / `portal-off.ps1`.
+(`profiles: [internet]`) and managed by `scripts/portal/portal-on.ps1` / `portal-off.ps1`.
 A nuclear `docker compose down` stops a running portal; recovery detects this and
 **warns** rather than auto-restoring the internet front-end.
 
@@ -327,7 +327,7 @@ Bottom-up (start in this order; stop in reverse):
     (downstream of it: attaches to `ai-stack_llm-net`, optionally mirrors audit to OB1's
     gateway). Default plane only; `workers`/`cloud` profiles are operator-driven. Stop it
     first (before OB1) on the way down.
-12. **Portal** (profile-gated, **separate lifecycle**): `scripts/portal-on.ps1` →
+12. **Portal** (profile-gated, **separate lifecycle**): `scripts/portal/portal-on.ps1` →
     `portal-init` → `authelia` → `caddy` → `cloudflared`, plus `portal-alerter` and the
     watchers/tripwire/cron + `caddy-backup`/`authelia-backup`. Not part of the default `up`;
     tear down with `portal-off.ps1`.

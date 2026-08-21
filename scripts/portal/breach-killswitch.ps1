@@ -1,4 +1,4 @@
-# scripts/breach-killswitch.ps1
+﻿# scripts/breach-killswitch.ps1
 #
 # Emergency stop for the internet-exposed portal (plan sec.8 Step 6, sec.12.6).
 # Distinct from portal-off.ps1:
@@ -23,7 +23,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$projectRoot = Split-Path -Parent $PSScriptRoot
+$projectRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 Push-Location $projectRoot
 try {
   $ts = (Get-Date -AsUTC -Format 'yyyyMMddTHHmmssZ')

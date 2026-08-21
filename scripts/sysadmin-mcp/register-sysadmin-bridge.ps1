@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   ONE-TIME (elevated) registration of the @sysadmin persona bridge as a logon Scheduled Task.
 

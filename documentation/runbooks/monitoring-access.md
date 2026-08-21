@@ -47,7 +47,7 @@ empty the file -- next login from every device will alert again.
 
 ## Interactive log query — when an alert isn't enough
 
-[`scripts/access-query.ps1`](../scripts/access-query.ps1) is the
+[`scripts/portal/access-query.ps1`](../scripts/portal/access-query.ps1) is the
 operator's "show me what happened" tool. It reads the tail of
 `authelia.log` and `caddy-access.log` from inside the watcher container,
 applies filters, and prints a table.

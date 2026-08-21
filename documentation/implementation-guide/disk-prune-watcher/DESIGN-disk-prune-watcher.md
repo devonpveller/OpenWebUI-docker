@@ -23,7 +23,7 @@ Almost everything is already in place:
 
 | Need | Already exists | Reuse |
 |------|----------------|-------|
-| Scheduled detector | `TailscaleHealthCheck` task → `scripts/check-tailscale-health.ps1` | Clone the pattern |
+| Scheduled detector | `StackWatchdog` task → `scripts/checks/stack-watchdog.ps1` | Clone the pattern |
 | Post to Mattermost | `scripts/notify-mattermost.sh` (bot token from `agent-org/docker/.env`, `#claude-code`) | Call directly |
 | Throttled alerting | stale-backup alert logic in the health script | Copy the throttle idiom |
 | Approval-from-MM → action | claude-sessions bridge (reply→resume) + agent-bridge `pending_approvals` table | See §5, Option A/B |
@@ -76,7 +76,7 @@ scripts/
   - `docker image prune -f` + `docker builder prune -f`.
   - **Never** `docker volume prune`; never touch named data volumes.
 - **Compaction tier (has downtime)** — only if approved AND vhdx-trapped threshold met:
-  pause `TailscaleHealthCheck`, stop Docker, `wsl --shutdown`, `Optimize-VHD -Mode Full`
+  pause `StackWatchdog`, stop Docker, `wsl --shutdown`, `Optimize-VHD -Mode Full`
   (fallback `diskpart compact vdisk`), restart Docker, wait for daemon, **verify the
   running-container count matches the pre-shutdown count**, re-arm the watchdog. Alerts
   to MM if any container fails to return.
@@ -123,7 +123,7 @@ fallback since the bridge already exists.
 - **Never** `docker volume prune`; named data volumes are untouchable.
 - ao-worker `/tmp` cleared only when that worker is idle.
 - Compaction only on explicit `approve compact`, only when the trapped-space threshold
-  is met, always pausing/re-arming `TailscaleHealthCheck`, and it **verifies the stack
+  is met, always pausing/re-arming `StackWatchdog`, and it **verifies the stack
   came back** (container count) before declaring success.
 - Throttle: if a request is already pending, the weekly check does not re-post.
 - Every action is logged and a result summary is posted back to MM.

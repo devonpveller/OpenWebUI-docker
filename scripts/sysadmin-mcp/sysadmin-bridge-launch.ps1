@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   Launch a SECOND claude-sessions-bridge instance as the @sysadmin persona (watches #sysadmin).
 

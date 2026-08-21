@@ -155,7 +155,7 @@ services:
   # audit: OB1 PostgreSQL + wiki, Open Notebook (SurrealDB + notebook_data),
   # smolcrawl pipelines, Tailscale state, the llama.cpp model store. All write
   # under ./backups/<service>/ with .sha256 sentinels and configurable
-  # retention. The existing weekly NAS sync (scripts/backup-to-nas.ps1)
+  # retention. The existing weekly NAS sync (scripts/backup/backup-to-nas.ps1)
   # picks them up automatically.
   # =====================================================================
 
@@ -463,7 +463,7 @@ services:
   # Internet-exposed front-end (PORTAL).
   # Every service below tagged `profiles: [internet]` — does NOT start
   # with a plain `docker compose up -d`. Lifecycle is driven by
-  # `scripts/portal-on.ps1` / `portal-off.ps1` (plan §12.9).
+  # `scripts/portal/portal-on.ps1` / `portal-off.ps1` (plan §12.9).
   #
   # Plan: documentation/implementation-guide/open-source authentication
   # front ends for ai stack/plan-internet-exposed-front-end.md (§8 Step 1).

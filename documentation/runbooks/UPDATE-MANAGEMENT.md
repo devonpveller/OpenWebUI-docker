@@ -19,7 +19,7 @@ the pattern to copy is
   (it encrypts values at rest in `webui.db`).
 - Never restart `openwebui` alone: the tailscale container shares its netns —
   restart order is **openwebui → tailscale**, then verify the 8 tailnet serve
-  routes (`scripts/check-tailscale-health.ps1` self-heals them).
+  routes (`scripts/checks/stack-watchdog.ps1` self-heals them).
 - Never smoke-test OWUI tools via `/api/chat/completions` (false regression);
   test through the UI or the tool-server path.
 - Re-verify the `owui/` plugin snapshots against `webui.db` after the upgrade
@@ -29,23 +29,23 @@ the pattern to copy is
 
 - Model swaps follow the written-plan pattern:
   `implementation-guide/qwen3.8-model-swap/` is the reference execution.
-- `scripts/update-stack.bat` drives image updates for the llama-cpp upstreams.
+- `scripts/recovery/update-stack.bat` drives image updates for the llama-cpp upstreams.
 - LiteLLM (`llm-gateway`) and `llm-queue` are pinned images / local builds —
   bump deliberately, one PR each, and re-run
-  `scripts/check-llm-gateway-routing.ps1`.
+  `scripts/checks/check-llm-gateway-routing.ps1`.
 
 ## Everything else
 
 Images are digest- or tag-pinned in the compose files. Updating one means:
 bump the pin → `docker compose up -d <service>` → verify via
-`scripts/check-tailscale-health.ps1` (main), `check-openbrain-health.ps1`
+`scripts/checks/stack-watchdog.ps1` (main), `check-openbrain-health.ps1`
 (OB1), or `check-agent-org-health.ps1` (agent-org). The **container rule**
 applies to anything that adds/removes/renames a service: compose + recovery
 scripts + stack-map doc change together.
 
 ## After any update
 
-1. `mcp` sysadmin `stack_health` or `scripts/status_check.py` — everything
+1. `mcp` sysadmin `stack_health` or `scripts/recovery/status_check.py` — everything
    running.
 2. Affected plane's check script passes.
 3. Backups still fresh the next morning (`sysadmin-mcp/check_backups.py`

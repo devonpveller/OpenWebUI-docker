@@ -107,7 +107,7 @@ docker compose up -d tailscale
 1. **Test Docker builds locally** before pushing
 2. **Run health checks** after updates:
    ```powershell
-   .\scripts\check-tailscale-health.ps1 -Mode check
+   .\scripts\stack-watchdog.ps1 -Mode check
    ```
 3. **Monitor container logs** for early warning signs
 
@@ -120,7 +120,7 @@ The enhanced health monitoring system now provides:
 
 Run comprehensive health check:
 ```powershell
-.\scripts\check-tailscale-health.ps1 -Mode check
+.\scripts\stack-watchdog.ps1 -Mode check
 ```
 
 ## Emergency Recovery
@@ -134,12 +134,12 @@ If issues occur despite prevention measures:
 
 2. **Emergency rebuild**:
    ```batch
-   .\scripts\emergency-recovery.bat
+   .\scriptsecovery\emergency-recovery.bat
    ```
 
 3. **Full system recovery**:
    ```powershell
-   .\scripts\check-tailscale-health.ps1 -Mode check
+   .\scripts\stack-watchdog.ps1 -Mode check
    ```
 
 ## Monitoring and Alerts

@@ -1,4 +1,4 @@
-# scripts/portal-status.ps1
+﻿# scripts/portal-status.ps1
 #
 # Read-only liveness check for the internet-exposed portal (plan sec.12.9).
 # One line per check, color-coded. Does not modify anything.

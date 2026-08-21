@@ -1,4 +1,4 @@
-# scripts/check-backup-coverage.ps1
+﻿# scripts/check-backup-coverage.ps1
 #
 # Audits every Docker volume + bind-mount data path across the ai-stack
 # and OB1 compose projects, and confirms that each one is either:
@@ -23,7 +23,7 @@ param(
 
 # docker compose config writes to stderr too; keep Continue.
 $ErrorActionPreference = 'Continue'
-$projectRoot = Split-Path -Parent $PSScriptRoot
+$projectRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 Push-Location $projectRoot
 try {
   Write-Host "==> Backup coverage check" -ForegroundColor Cyan

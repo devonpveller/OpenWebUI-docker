@@ -1,4 +1,4 @@
-# Enhanced Tailscale Health Check and Recovery Service for Windows
+﻿# Enhanced Tailscale Health Check and Recovery Service for Windows
 # This script provides autonomous management of Tailscale connectivity
 
 [CmdletBinding()]
@@ -18,7 +18,7 @@ $ProgressPreference = "SilentlyContinue"
 
 # Constants
 $SCRIPT_DIR = Split-Path -Parent $PSCommandPath
-$PROJECT_DIR = Split-Path -Parent $SCRIPT_DIR
+$PROJECT_DIR = Split-Path -Parent (Split-Path -Parent $PSCommandPath) | Split-Path -Parent
 $LOG_FILE = Join-Path $PROJECT_DIR "logs\tailscale-health.log"
 $SERVICE_NAME = "TailscaleHealthMonitor"
 
@@ -1125,7 +1125,7 @@ function Send-TelegramAlert {
         }
         $py = Join-Path $PROJECT_DIR '.venv\Scripts\python.exe'
         if (-not (Test-Path $py)) { $py = 'python' }
-        $tg = Join-Path $SCRIPT_DIR 'sysadmin-mcp\telegram_notify.py'
+        $tg = Join-Path $SCRIPT_DIR '..\sysadmin-mcp\telegram_notify.py'
         if (Test-Path $tg) {
             & $py $tg $Message 2>$null | Out-Null
             if ($ThrottleKey) { (Get-Date -Format o) | Out-File $sentinel -Encoding utf8 -Force }

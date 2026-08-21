@@ -83,6 +83,6 @@ extra keys are ignored in permissive mode; nothing else needs reverting.
 
 - `LLM_API_KEY=ollama` (mnemory) → `mnemory` — the string is a caller-id, and
   `ollama` is a retired backend's name squatting in an identity field.
-- `check-tailscale-health.ps1` `$ExpectedTailscaleServes` labels
+- `stack-watchdog.ps1` `$ExpectedTailscaleServes` labels
   `llama-cpp-upstream`/`llama-cpp-embed-upstream` → they probe the gateway
   ALIASES; rename labels `llama-cpp`/`llama-cpp-embed` (found during D.2).

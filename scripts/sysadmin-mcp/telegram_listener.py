@@ -23,10 +23,10 @@ Commands:
   docker up       start the Docker engine (docker desktop start) + wait
   mattermost / mm bring up ONLY Mattermost + its DB, then confirm the #claude-sessions
                   bridge -- fast, safe path to a Claude session (vs a full recover)
-  recover         scripts/emergency-recovery.ps1 recover  (ordered restart)
+  recover         scripts/recovery/emergency-recovery.ps1 recover  (ordered restart)
   compact status  last vhdx-compaction result
-  gpu-reset       (confirm) scripts/emergency-recovery.ps1 gpu-reset
-  nuclear         (confirm) scripts/emergency-recovery.ps1 nuclear
+  gpu-reset       (confirm) scripts/recovery/emergency-recovery.ps1 gpu-reset
+  nuclear         (confirm) scripts/recovery/emergency-recovery.ps1 nuclear
   help            list commands
 
 Stdlib only; long commands run on a worker thread so the poll loop stays live.
@@ -57,7 +57,7 @@ import telegram_notify as tn  # noqa: E402  (shares the .env creds + send())
 
 _DOCKER = shutil.which("docker") or r"C:\Program Files\Docker\Docker\resources\bin\docker.exe"
 _PWSH = shutil.which("powershell") or r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
-_RECOVERY = os.path.join(_REPO, "scripts", "emergency-recovery.ps1")
+_RECOVERY = os.path.join(_REPO, "scripts", "recovery", "emergency-recovery.ps1")
 # agent-org compose holds Mattermost; invoked with -f only (project name resolves from the
 # file/.env), matching emergency-recovery.ps1's proven invocation.
 _AGENT_ORG_COMPOSE = os.path.join(_REPO, "agent-org", "docker", "docker-compose.yml")

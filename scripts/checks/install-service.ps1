@@ -1,4 +1,4 @@
-# Install Tailscale Health Monitor as Windows Service
+﻿# Install Tailscale Health Monitor as Windows Service
 # Run this script as Administrator
 # Compatible with GPU-enabled OpenWebUI containers (handles longer startup times)
 
@@ -10,12 +10,12 @@ param(
     [int]$IntervalSeconds = 60
 )
 
-$ServiceName = "TailscaleHealthMonitor"
+$ServiceName = "StackWatchdog"
 $ServiceDisplayName = "Tailscale Health Monitor"
 $ServiceDescription = "Autonomous Tailscale Health Monitor for AI Stack - monitors and recovers Tailscale connectivity issues"
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
-$HealthScript = Join-Path $ScriptDir "check-tailscale-health.ps1"
+$HealthScript = Join-Path $ScriptDir "stack-watchdog.ps1"
 
 # Check if running as Administrator
 function Test-IsAdmin {

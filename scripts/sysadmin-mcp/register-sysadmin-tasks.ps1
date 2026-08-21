@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   ONE-TIME (elevated) registration of the systems-administrator Windows Scheduled Tasks.
 

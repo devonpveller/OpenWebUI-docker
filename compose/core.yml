@@ -124,7 +124,7 @@ services:
       # real servers. entrypoint.sh proxies the tailnet /llama-cpp + /llama-cpp-embed
       # serve routes here; pointing at *-upstream would expose inference on the
       # tailnet BYPASSING LiteLLM (no ledger, no routing). Gateway-only policy —
-      # see scripts/check-llm-gateway-routing.ps1. (Was *-upstream after the
+      # see scripts/checks/check-llm-gateway-routing.ps1. (Was *-upstream after the
       # 2026-06-12 rename; corrected 2026-06-13.)
       - LLAMA_CPP_HOST=${LLAMA_CPP_HOST:-llama-cpp}
       - LLAMA_CPP_PORT=${LLAMA_CPP_PORT:-8080}

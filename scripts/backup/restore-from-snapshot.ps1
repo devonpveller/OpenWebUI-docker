@@ -1,4 +1,4 @@
-# scripts/restore-from-snapshot.ps1
+﻿# scripts/restore-from-snapshot.ps1
 #
 # Disaster-recovery driver: restore one or more services from a snapshot
 # directory. The snapshot directory layout is the same as `./backups/` —
@@ -42,7 +42,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$projectRoot = Split-Path -Parent $PSScriptRoot
+$projectRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 Push-Location $projectRoot
 
 # --- Logging setup -----------------------------------------------------

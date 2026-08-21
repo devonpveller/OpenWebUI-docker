@@ -65,7 +65,7 @@ echo ========================================
 echo.
 
 echo [INFO] Current OpenWebUI version:
-cd ..
+cd /d "%SCRIPT_DIR%\..\.."
 docker compose logs openwebui 2>nul | findstr /C:"v0." | findstr /C:"building the best"
 if %ERRORLEVEL% NEQ 0 (
     echo [WARNING] Could not detect version from logs
@@ -74,7 +74,7 @@ if %ERRORLEVEL% NEQ 0 (
 
 echo.
 echo [INFO] Current llama-cpp image:
-cd ..
+cd /d "%SCRIPT_DIR%\..\.."
 docker compose exec -T llama-cpp-upstream curl -s http://localhost:8080/health 2>nul
 echo.
 docker compose ps llama-cpp-upstream llama-cpp-embed-upstream --format "table {{.Name}}\t{{.Status}}" 2>nul
@@ -90,7 +90,7 @@ echo   - llama.cpp: https://github.com/ggml-org/llama.cpp/releases/latest
 echo.
 echo [INFO] Current Dockerfile base image:
 findstr "FROM ghcr.io/open-webui" Dockerfile.openwebui-gpu
-cd scripts
+cd /d "%SCRIPT_DIR%"
 
 if "%1"=="" (
     echo.
@@ -179,10 +179,10 @@ echo.
 echo [STEP 4/8] Rebuilding OpenWebUI with GPU support (custom CUDA PyTorch)...
 echo [INFO] This builds from Dockerfile.openwebui-gpu with CUDA-enabled PyTorch
 echo [INFO] This may take several minutes...
-cd ..
+cd /d "%SCRIPT_DIR%\..\.."
 docker compose build --no-cache openwebui
 set BUILD_RESULT=%ERRORLEVEL%
-cd scripts
+cd /d "%SCRIPT_DIR%"
 if %BUILD_RESULT% NEQ 0 (
     echo [ERROR] Custom GPU image build FAILED - check logs above
     echo [ERROR] Without this build, OpenWebUI will lack CUDA PyTorch and GPU health checks will timeout
@@ -203,10 +203,10 @@ echo [SUCCESS] Custom GPU image built successfully
 REM Step 5: Verify GPU support in built image before starting
 echo.
 echo [STEP 5/8] Verifying CUDA PyTorch in built image...
-cd ..
+cd /d "%SCRIPT_DIR%\..\.."
 docker compose run --rm --no-deps --entrypoint python openwebui -c "import torch; assert torch.cuda.is_available(), 'CUDA NOT AVAILABLE'; print('CUDA available:', torch.cuda.is_available()); print('PyTorch version:', torch.__version__)"
 set CUDA_VERIFY_RESULT=%ERRORLEVEL%
-cd scripts
+cd /d "%SCRIPT_DIR%"
 if %CUDA_VERIFY_RESULT% NEQ 0 (
     echo [ERROR] Built image does NOT have working CUDA PyTorch!
     echo [ERROR] The health check will timeout waiting for GPU initialization
@@ -233,7 +233,7 @@ if %CUDA_VERIFY_RESULT% NEQ 0 (
 REM Step 6: Restart services
 echo.
 echo [STEP 6/8] Restarting services...
-cd ..
+cd /d "%SCRIPT_DIR%\..\.."
 docker compose up -d openwebui
 echo [INFO] Waiting for OpenWebUI CUDA initialization (up to 90s)...
 timeout /t 30 /nobreak >nul
@@ -242,14 +242,14 @@ REM Wait for OpenWebUI health check to pass
 set HEALTH_WAIT=0
 set HEALTH_MAX=90
 :health_loop
-cd ..
+cd /d "%SCRIPT_DIR%\..\.."
 docker compose ps openwebui --format "{{.Health}}" 2>nul | findstr /C:"healthy" >nul 2>&1
 if %ERRORLEVEL% EQU 0 (
-    cd scripts
+    cd /d "%SCRIPT_DIR%"
     echo [SUCCESS] OpenWebUI is healthy after approximately %HEALTH_WAIT%s
     goto :health_done
 )
-cd scripts
+cd /d "%SCRIPT_DIR%"
 set /a HEALTH_WAIT+=10
 if %HEALTH_WAIT% GEQ %HEALTH_MAX% (
     echo [WARNING] OpenWebUI not yet healthy after %HEALTH_MAX%s - continuing with dependent services
@@ -259,9 +259,9 @@ timeout /t 10 /nobreak >nul
 goto :health_loop
 
 :health_done
-cd ..
+cd /d "%SCRIPT_DIR%\..\.."
 docker compose up -d llama-cpp-upstream llama-cpp-embed-upstream tailscale
-cd scripts
+cd /d "%SCRIPT_DIR%"
 
 REM Step 7: Final verification
 echo.
@@ -269,10 +269,10 @@ echo [STEP 7/8] Final verification...
 timeout /t 15 /nobreak >nul
 
 echo [INFO] Checking GPU availability in running container...
-cd ..
+cd /d "%SCRIPT_DIR%\..\.."
 docker compose exec -T openwebui python -c "import torch; print('CUDA available:', torch.cuda.is_available()); print('GPU count:', torch.cuda.device_count()); print('GPU name:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'None')" 2>nul
 set GPU_CHECK_RESULT=%ERRORLEVEL%
-cd scripts
+cd /d "%SCRIPT_DIR%"
 if %GPU_CHECK_RESULT% NEQ 0 (
     echo [ERROR] GPU check failed in running container!
     echo [ERROR] OpenWebUI may not have CUDA-enabled PyTorch
@@ -292,9 +292,9 @@ echo [SUCCESS] GPU verified in running container
 
 echo.
 echo [INFO] Checking service health...
-cd ..
+cd /d "%SCRIPT_DIR%\..\.."
 docker compose ps
-cd scripts
+cd /d "%SCRIPT_DIR%"
 
 REM Step 8: Resume monitoring (skip if part of full update)
 if not defined FULL_UPDATE (
@@ -357,7 +357,7 @@ echo [SUCCESS] Latest llama-cpp image pulled
 
 echo.
 echo [STEP 2/3] Restarting llama-cpp services...
-cd ..
+cd /d "%SCRIPT_DIR%\..\.."
 docker compose up -d llama-cpp-upstream
 echo [INFO] Waiting for llama-cpp to load model (this may take a few minutes)...
 timeout /t 60 /nobreak >nul
@@ -368,13 +368,13 @@ set LLAMA_MAX=180
 :llama_health_loop
 docker compose ps llama-cpp-upstream --format "{{.Health}}" 2>nul | findstr /C:"healthy" >nul 2>&1
 if %ERRORLEVEL% EQU 0 (
-    cd scripts
+    cd /d "%SCRIPT_DIR%"
     echo [SUCCESS] llama-cpp is healthy after approximately %LLAMA_WAIT%s
     goto :llama_health_done
 )
 set /a LLAMA_WAIT+=10
 if %LLAMA_WAIT% GEQ %LLAMA_MAX% (
-    cd scripts
+    cd /d "%SCRIPT_DIR%"
     echo [WARNING] llama-cpp not yet healthy after %LLAMA_MAX%s - continuing
     goto :llama_health_done
 )
@@ -382,19 +382,19 @@ timeout /t 10 /nobreak >nul
 goto :llama_health_loop
 
 :llama_health_done
-cd ..
+cd /d "%SCRIPT_DIR%\..\.."
 docker compose up -d llama-cpp-embed-upstream
 echo [INFO] Waiting for llama-cpp-embed to initialize...
 timeout /t 30 /nobreak >nul
-cd scripts
+cd /d "%SCRIPT_DIR%"
 
 echo.
 echo [STEP 3/3] Verifying llama-cpp services...
-cd ..
+cd /d "%SCRIPT_DIR%\..\.."
 docker compose exec -T llama-cpp-upstream curl -s http://localhost:8080/health 2>nul
 echo.
 docker compose ps llama-cpp-upstream llama-cpp-embed-upstream --format "table {{.Name}}\t{{.Status}}" 2>nul
-cd scripts
+cd /d "%SCRIPT_DIR%"
 
 REM Resume monitoring (skip if part of full update)
 if not defined FULL_UPDATE (
@@ -533,7 +533,7 @@ echo      then verify: docker compose exec llm-gateway python -c "import urllib.
 echo.
 set /p GW_RECREATE="Recreate llm-gateway NOW with whatever digest is currently in compose? (y/n): "
 if /i "%GW_RECREATE%"=="y" (
-    cd /d "%SCRIPT_DIR%\.."
+    cd /d "%SCRIPT_DIR%\..\.."
     docker compose up -d llm-gateway
     echo [INFO] Waiting for gateway (first boot runs prisma migrations, ~60-90s)...
     timeout /t 60 /nobreak >nul

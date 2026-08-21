@@ -535,7 +535,7 @@ services:
   # The two authoritative Postgres stores in agent-org: the bridge's governance
   # state (efforts, parked_efforts, projects+upstream, egress hosts, audit) and
   # Mattermost's conversations. Custom-format dumps → repo-root ./backups/<name>/
-  # (shared with the NAS sync + scripts/check-backup-coverage.ps1). Paths are
+  # (shared with the NAS sync + scripts/checks/check-backup-coverage.ps1). Paths are
   # ../../ because compose resolves them relative to THIS file (agent-org/docker/).
   agent-bridge-db-backup:
     image: postgres:15-alpine

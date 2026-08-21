@@ -1,4 +1,4 @@
-# check-staged-secrets.ps1 - pre-commit secret guard
+﻿# check-staged-secrets.ps1 - pre-commit secret guard
 #
 # WHY THIS EXISTS (2026-08-20):
 #   .env.bak-pre-mtp and .env.bak-pre-qwen38 were committed and only caught at

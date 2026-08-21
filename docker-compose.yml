@@ -42,7 +42,7 @@ volumes:
   little-coder-polyglot:
   little-coder-sessions:
   little-coder-workspace:
-  # Portal volumes (plan §7.3) — empty until `scripts/portal-on.ps1` runs.
+  # Portal volumes (plan §7.3) — empty until `scripts/portal/portal-on.ps1` runs.
   caddy-data:
   caddy-config:
   authelia-data:
@@ -72,7 +72,7 @@ networks:
   # (llama-cpp-upstream, llama-cpp-embed-upstream) + the single ingress
   # (llm-gateway) + the lm-models-backup liveness probe. Nothing else attaches,
   # so inference is reachable only through the gateway. Enforced at change time
-  # by scripts/check-llm-gateway-routing.ps1; see CLAUDE.md "Inference plane".
+  # by scripts/checks/check-llm-gateway-routing.ps1; see CLAUDE.md "Inference plane".
   llm-backend-net:
     internal: true
   # Internal-only network for the search stack. SearXNG/redis/gateway/mcpo

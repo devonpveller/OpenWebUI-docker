@@ -6,7 +6,7 @@ This doc is the convention every future addition follows so the snapshot
 slowly grows with the stack — no service silently goes unbackuped.
 
 If you're adding a new service, you should ALSO run
-[`scripts/check-backup-coverage.ps1`](../scripts/check-backup-coverage.ps1)
+[`scripts/checks/check-backup-coverage.ps1`](../scripts/checks/check-backup-coverage.ps1)
 to confirm there's no other gap you missed.
 
 ---
@@ -45,7 +45,7 @@ Every backup container, regardless of shape, must have:
 
 3. **Output path**: `./backups/<service>/<service>-<UTC-timestamp>.<ext>`
    with a matching `.sha256` sentinel beside each archive. The NAS sync
-   script ([`scripts/backup-to-nas.ps1`](../scripts/backup-to-nas.ps1))
+   script ([`scripts/backup/backup-to-nas.ps1`](../scripts/backup/backup-to-nas.ps1))
    automatically mirrors every subdir of `./backups/` — no NAS-side
    change needed.
 
@@ -80,7 +80,7 @@ Every backup container, regardless of shape, must have:
    must exist before the container starts (Docker creates it as root if
    missing, which then blocks a non-root container from writing). The
    easiest way is to add it to the
-   [`scripts/check-backup-coverage.ps1`](../scripts/check-backup-coverage.ps1)
+   [`scripts/checks/check-backup-coverage.ps1`](../scripts/checks/check-backup-coverage.ps1)
    pre-flight — that script auto-creates missing dirs.
 
 ---
@@ -129,7 +129,7 @@ Then:
 1. Add `<SERVICE>_BACKUP_RETAIN_COUNT=2` and `<SERVICE>_BACKUP_CRON=` to
    [`.env.example`](../.env.example).
 2. Add `./backups/<SERVICE>/` to the inventory in
-   [`scripts/check-backup-coverage.ps1`](../scripts/check-backup-coverage.ps1).
+   [`scripts/checks/check-backup-coverage.ps1`](../scripts/checks/check-backup-coverage.ps1).
 3. Add a restore section to [`restore-from-snapshot.md`](./restore-from-snapshot.md).
 4. `docker compose build` (if applicable) and `docker compose up -d <SERVICE>-backup`.
 5. Smoke-test: `docker exec <SERVICE>-backup sh /scripts/backup.sh` —
@@ -160,7 +160,7 @@ entry) are the same as the hot-tar case.
 
 ## NAS sync — nothing to do
 
-[`scripts/backup-to-nas.ps1`](../scripts/backup-to-nas.ps1) mirrors all
+[`scripts/backup/backup-to-nas.ps1`](../scripts/backup/backup-to-nas.ps1) mirrors all
 of `./backups/` to the NAS on Sundays at 04:00 UTC, alternating between
 `slot-A/` and `slot-B/` weekly. **New `./backups/<service>/` directories
 are picked up automatically** — Robocopy's `/MIR` reflects everything

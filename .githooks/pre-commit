@@ -15,14 +15,14 @@ echo "Running pre-commit validations..."
 # Added 2026-08-20 after two .env.bak-* files reached a commit and were only
 # stopped at push time by GitHub push protection - which matched 2 GitHub PATs
 # while each file held ~25 live credentials. Catch it at commit time instead.
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File './scripts/check-staged-secrets.ps1'
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File './scripts/checks/check-staged-secrets.ps1'
 if [ $? -ne 0 ]; then
     echo "Pre-commit validation failed (secret detected in staged files)!"
     exit 1
 fi
 
 # --- 2. line endings -------------------------------------------------------
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File './scripts/validate-lineendings.ps1'
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File './scripts/checks/validate-lineendings.ps1'
 if [ $? -ne 0 ]; then
     echo "Pre-commit validation failed (line endings)!"
     exit 1
@@ -31,7 +31,7 @@ fi
 # --- 3. gateway-only LLM routing -------------------------------------------
 # Fail if any inference/serve endpoint points at a *-upstream real server
 # instead of the LiteLLM gateway alias.
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File './scripts/check-llm-gateway-routing.ps1'
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File './scripts/checks/check-llm-gateway-routing.ps1'
 if [ $? -ne 0 ]; then
     echo "Pre-commit validation failed (LLM gateway routing bypass)!"
     exit 1

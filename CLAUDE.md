@@ -14,10 +14,10 @@ for the full inventory — networks, ports, dependency order.
 | Stack | Driven with | Contents |
 |-------|-------------|----------|
 | **Main** (`ai-stack`) | `docker compose ...` (root file includes `compose/<plane>.yml` since 2026-08-20) | core (`openwebui`, `tailscale`, `open-terminal`), inference (`llm-gateway` + `llm-gateway-db`/`-ui` — LiteLLM **front door**, holds the `llama-cpp`/`llama-cpp-embed` aliases; `llm-queue` — per-caller admission/priority; `llama-cpp-upstream`, `llama-cpp-embed-upstream` — real inference), memory (`mnemory`, `mnemory-gateway`), search (`vpn` — Mullvad engine egress; `tor` — page fetch; `redis`, `searxng`, `gateway`), coder (`little-coder`, `lc-egress`), aux (`smolcrawl-pipelines`, `surrealdb`, `open_notebook` — *being retired, still live for podcasts*), 12 backup sidecars. **31 default services.** |
-| **Main — Portal** (`profiles: [internet]`) | `scripts/portal-on.ps1` / `portal-off.ps1` | 12 profile-gated services (`caddy`, `authelia`, `cloudflared`, watchers/alerter/tripwire/cron + 2 backups). Internet-exposed auth front-end — never in a default `up`. |
+| **Main — Portal** (`profiles: [internet]`) | `scripts/portal/portal-on.ps1` / `portal-off.ps1` | 12 profile-gated services (`caddy`, `authelia`, `cloudflared`, watchers/alerter/tripwire/cron + 2 backups). Internet-exposed auth front-end — never in a default `up`. |
 | **Open Brain** (`open-brain`) | `docker compose -f OB1/docker/docker-compose.yml ...` | ~24 `openbrain-*` containers (own project; attaches to `ai-stack_llm-net` as external). Bring up **after** `llm-gateway` is healthy; tear down before the main stack. |
 | **agent-org** | `docker compose -f agent-org/docker/docker-compose.yml ...` | Mattermost (+db) + `agent-bridge` (the governed org bus, 700+ tests) + profile-gated `workers`/`cloud` slices. |
-| **Recovery** | `scripts/emergency-recovery.ps1` (or `.bat`) | Ordered restart/repair across both projects — `recover` / `nuclear` / `gpu-reset`. Does **not** manage the Portal. |
+| **Recovery** | `scripts/recovery/emergency-recovery.ps1` (or `.bat`) | Ordered restart/repair across both projects — `recover` / `nuclear` / `gpu-reset`. Does **not** manage the Portal. |
 
 Retired 2026-08-20 (CLEANUP-PLAN v3): `watchtower` (manual updates per
 `documentation/runbooks/UPDATE-MANAGEMENT.md`), `search-mcpo` and `lc-mcpo`
@@ -29,7 +29,7 @@ Retired 2026-08-20 (CLEANUP-PLAN v3): `watchtower` (manual updates per
 (hold-and-dispatch, per-caller lanes) to the `*-upstream` servers. **Never
 route inference around LiteLLM**; only health/GPU/recovery probes may target
 `*-upstream` directly. Enforced pre-commit by
-`scripts/check-llm-gateway-routing.ps1`. Gotchas: LiteLLM runs permissive (no
+`scripts/checks/check-llm-gateway-routing.ps1`. Gotchas: LiteLLM runs permissive (no
 master_key — the virtual-keys cutover runbook is
 `documentation/implementation-guide/LiteLLM-Proxy/J1-VIRTUAL-KEYS-CUTOVER.md`);
 `background_health_checks: false` and never GET LiteLLM `/health` via the
@@ -62,7 +62,7 @@ snapshots + `manifest.csv` (file → OWUI id; skills included).
 ## Pointers
 
 - Stack topology / "what runs here?" → `/stack-map` skill
-- Recovery after a crash or netns break → `scripts/emergency-recovery.ps1`
+- Recovery after a crash or netns break → `scripts/recovery/emergency-recovery.ps1`
 - Runbooks (updates, backups, incident response, out-of-band channel) →
   `documentation/runbooks/` + `documentation/sysadmin-out-of-band-channel.md`
 - Per-feature status (shipped/draft) → `documentation/implementation-guide/README.md`

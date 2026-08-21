@@ -1,4 +1,4 @@
-# scripts/access-query.ps1
+﻿# scripts/access-query.ps1
 #
 # Interactive review of recent portal access. Tails the Caddy and
 # Authelia logs from inside their containers and pivots them into a
@@ -39,7 +39,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$projectRoot = Split-Path -Parent $PSScriptRoot
+$projectRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 Push-Location $projectRoot
 
 $cutoffUnix = [DateTimeOffset]::UtcNow.AddHours(-$Hours).ToUnixTimeSeconds()

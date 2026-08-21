@@ -19,9 +19,9 @@ git config --get core.hooksPath   # -> .githooks
 
 | # | Check | Script | Blocks on |
 |---|-------|--------|-----------|
-| 1 | **Secret guard** | [`scripts/check-staged-secrets.ps1`](../scripts/check-staged-secrets.ps1) | any staged env-shaped file, or a staged blob containing a recognizable provider token / private-key block |
-| 2 | Line endings | `scripts/validate-lineendings.ps1` | repo line-ending convention |
-| 3 | Gateway-only LLM routing | `scripts/check-llm-gateway-routing.ps1` | an inference/serve endpoint pointing at a `*-upstream` server instead of the LiteLLM alias |
+| 1 | **Secret guard** | [`scripts/checks/check-staged-secrets.ps1`](../scripts/checks/check-staged-secrets.ps1) | any staged env-shaped file, or a staged blob containing a recognizable provider token / private-key block |
+| 2 | Line endings | `scripts/checks/validate-lineendings.ps1` | repo line-ending convention |
+| 3 | Gateway-only LLM routing | `scripts/checks/check-llm-gateway-routing.ps1` | an inference/serve endpoint pointing at a `*-upstream` server instead of the LiteLLM alias |
 
 Only **staged** content is scanned, so the secret guard stays fast — it never walks
 the working tree or the vendored/data directories.

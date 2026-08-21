@@ -412,10 +412,10 @@ inference plane health independent of LiteLLM.
   `LLAMA_CPP_EMBED_*` — register the inference servers for tailnet
   serving. Tailnet exposure of the gateway, if wanted, is a separate
   follow-up.
-- `modules/system-health/`, `modules/gpu-status/`, `scripts/status_check.py`,
-  `scripts/check-tailscale-health.ps1`, `scripts/gpu_check.py` —
+- `modules/system-health/`, `modules/gpu-status/`, `scripts/recovery/status_check.py`,
+  `scripts/checks/stack-watchdog.ps1`, `scripts/recovery/gpu_check.py` —
   probes / smoke tests.
-- `scripts/emergency-recovery.{ps1,bat}` — service inventory + ordered
+- `scripts/recovery/emergency-recovery.{ps1,bat}` — service inventory + ordered
   restart. Must be updated to **add** `llm-gateway` and `llm-gateway-db`
   to the inventory (see §10), but the existing llama-cpp references stay.
 - `.claude/skills/stack-map/references/workspace-stacks.md`, this guide,
@@ -887,7 +887,7 @@ matching §9.1.
 Per the workspace CLAUDE.md three-place rule, **adding a container = updating
 all three of these together**. The plan/task doc must cover every line.
 
-### 10.1 `scripts/emergency-recovery.ps1`
+### 10.1 `scripts/recovery/emergency-recovery.ps1`
 
 - Add `llm-gateway`, `llm-gateway-db`, `llm-gateway-backup` to
   `MainStackServices`.
@@ -900,7 +900,7 @@ all three of these together**. The plan/task doc must cover every line.
 - Insert into the **shutdown sequence** as the inverse: callers stop first,
   then `llm-gateway`, then `llm-gateway-db`, then llama-cpp.
 
-### 10.2 `scripts/emergency-recovery.bat`
+### 10.2 `scripts/recovery/emergency-recovery.bat`
 
 Mirror the same inventory + ordering changes. The `.bat` is the linear legacy
 equivalent; keep the two scripts in lock-step.
@@ -1194,13 +1194,13 @@ llama-cpp references stay; the new `llm-gateway` + `llm-gateway-db` are
 
 | File | Existing llama-cpp refs (preserve) | Additions needed |
 |---|---|---|
-| [scripts/emergency-recovery.ps1:30](scripts/emergency-recovery.ps1#L30) | line 30 `MainStackServices`; lines 177-178, 202-203, 261, 428-432, 472-493, 626-627, 745, 754-792 (startup/shutdown/probes) | Add `"llm-gateway", "llm-gateway-db", "llm-gateway-backup"` to `MainStackServices`; insert startup between `llama-cpp-embed` healthy and the consumer planes (mnemory, openwebui, OB1); insert shutdown as the inverse |
-| [scripts/emergency-recovery.bat:6](scripts/emergency-recovery.bat#L6) | line 6 header; lines 39-42, 120-124, 156-167, 243, 261-266, 354-359 | Mirror the .ps1 additions linearly |
-| [scripts/quick-fixes.bat:20](scripts/quick-fixes.bat#L20) | lines 20, 43, 226, 238-292, 310, 347-354, 387-392, 505-543, 693-729 | Add `llm-gateway` to menu option 11; new probe + restart helpers paralleling the llama-cpp pair |
-| [scripts/check-tailscale-health.ps1:158](scripts/check-tailscale-health.ps1#L158) | lines 158-228 (OpenWebUI↔llama-cpp connectivity recovery), 364-470, 640-671 (test/repair functions) | Optional: add a `Test-LlmGatewayConnectivity` function + `Repair-LlmGateway`. Non-blocking — the gateway has its own healthcheck. |
-| [scripts/gpu_check.py:116](scripts/gpu_check.py#L116) | lines 116-167 (llama-cpp probes inside `docker compose exec`), 216-275 | No change — probes inference plane directly, which is correct |
-| [scripts/update-stack.bat:10](scripts/update-stack.bat#L10) | lines 10, 23-24, 49-50, 73-296, 348-502 (update flow for llama-cpp image) | Add an `llm-gateway` update menu item — LiteLLM updates separately from llama-cpp |
-| [scripts/status_check.py](scripts/status_check.py) | (file checked separately) | Add `llm-gateway` row to whatever service table it prints |
+| [scripts/recovery/emergency-recovery.ps1:30](scripts/recovery/emergency-recovery.ps1#L30) | line 30 `MainStackServices`; lines 177-178, 202-203, 261, 428-432, 472-493, 626-627, 745, 754-792 (startup/shutdown/probes) | Add `"llm-gateway", "llm-gateway-db", "llm-gateway-backup"` to `MainStackServices`; insert startup between `llama-cpp-embed` healthy and the consumer planes (mnemory, openwebui, OB1); insert shutdown as the inverse |
+| [scripts/recovery/emergency-recovery.bat:6](scripts/recovery/emergency-recovery.bat#L6) | line 6 header; lines 39-42, 120-124, 156-167, 243, 261-266, 354-359 | Mirror the .ps1 additions linearly |
+| [scripts/recovery/quick-fixes.bat:20](scripts/recovery/quick-fixes.bat#L20) | lines 20, 43, 226, 238-292, 310, 347-354, 387-392, 505-543, 693-729 | Add `llm-gateway` to menu option 11; new probe + restart helpers paralleling the llama-cpp pair |
+| [scripts/checks/stack-watchdog.ps1:158](scripts/checks/stack-watchdog.ps1#L158) | lines 158-228 (OpenWebUI↔llama-cpp connectivity recovery), 364-470, 640-671 (test/repair functions) | Optional: add a `Test-LlmGatewayConnectivity` function + `Repair-LlmGateway`. Non-blocking — the gateway has its own healthcheck. |
+| [scripts/recovery/gpu_check.py:116](scripts/recovery/gpu_check.py#L116) | lines 116-167 (llama-cpp probes inside `docker compose exec`), 216-275 | No change — probes inference plane directly, which is correct |
+| [scripts/recovery/update-stack.bat:10](scripts/recovery/update-stack.bat#L10) | lines 10, 23-24, 49-50, 73-296, 348-502 (update flow for llama-cpp image) | Add an `llm-gateway` update menu item — LiteLLM updates separately from llama-cpp |
+| [scripts/recovery/status_check.py](scripts/recovery/status_check.py) | (file checked separately) | Add `llm-gateway` row to whatever service table it prints |
 | [modules/system-health/service/system_health.py:38-39](modules/system-health/service/system_health.py#L38) | lines 38-39 probe definitions, line 93 `expected_services`, line 266 narrative | Add probe row: `{"name": "llm-gateway", "plane": "Core", "host": "llm-gateway", "port": 4000, "path": "/health/liveliness", "critical": True}`. Add `"llm-gateway"` to `expected_services`. |
 | [modules/gpu-status/service/gpu_status.py:239-318](modules/gpu-status/service/gpu_status.py#L239) | lines 239-240 container→GPU mapping, lines 315-318 hostname mapping | No change — gateway has no GPU; metric reads stay against the inference servers |
 | [scripts/ai_pipes/unified_openwebui_pipe.py:302](scripts/ai_pipes/unified_openwebui_pipe.py#L302) | `_format_response()` module-id allowlist | Add `"llm-traffic"` to the allowlist (§9.4). Update the COMMAND LIST docstring header per §9.1. |
@@ -1248,7 +1248,7 @@ edit them. These mention llama-cpp as a string but don't talk to it.
 | B — OWUI filter pipes | 1 (+ 1 backup) | Code change required; backup left as-is |
 | C — OWUI runtime UI | 1 (OWUI) + 1 (open_notebook) | Admin-UI step |
 | D — tailscale serve | 3 (entrypoint.sh, compose, pipe) | Decision needed; optional addition |
-| E — recovery / probes | 11 (re-audit added `scripts/status_check.py` lines 139/153/175/189/326/338) | Additive changes (inventory + probes for the new services) |
+| E — recovery / probes | 11 (re-audit added `scripts/recovery/status_check.py` lines 139/153/175/189/326/338) | Additive changes (inventory + probes for the new services) |
 | F — documentation | 9 (CLAUDE.md, skills, design docs, integration docs, security doc) | Semantic rewrites, post-cutover |
 | G — verify-only | 7 | No change |
 | **Total touched files** | **40+** (some span multiple categories) | |
@@ -1519,7 +1519,7 @@ is required.
       The only address should be the gateway's IP on `llm-net`. Any
       other client IP indicates a missed cutover.
 - [ ] Recovery script update (Category E in §16) has been exercised at
-      least once — `scripts/emergency-recovery.ps1 recover` brings the
+      least once — `scripts/recovery/emergency-recovery.ps1 recover` brings the
       gateway up in the correct order without errors.
 - [ ] Documentation updates (Category F in §16) are queued as a single
       follow-up PR rather than dripped across the cutover.
@@ -1570,7 +1570,7 @@ The re-audit surfaced four gaps the first pass missed:
 3. **little-coder's schema.json is generated** from `src/littlecoder/config.py`.
    Editing the JSON without the Python source means the next regeneration
    reverts your change. §16.1 row added.
-4. `scripts/status_check.py` probe lines (139, 153, 175, 189, 326, 338)
+4. `scripts/recovery/status_check.py` probe lines (139, 153, 175, 189, 326, 338)
    — Category E, no action required, but listed for completeness.
 
 To prevent further surprises, the agent runs assertions A1–A7 below as a
@@ -1685,7 +1685,7 @@ so the pin must be **bumped deliberately**, not auto-followed:
 5. Subscribe to the LiteLLM GitHub security advisories feed so a future
    incident is a notification, not a surprise.
 
-`scripts/update-stack.bat` is updated (task T5.5) to follow this digest-bump
+`scripts/recovery/update-stack.bat` is updated (task T5.5) to follow this digest-bump
 procedure rather than blindly pulling `:main-stable`.
 
 ### 19.4 If a LiteLLM compromise is announced while this is deployed

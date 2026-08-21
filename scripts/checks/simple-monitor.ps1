@@ -1,4 +1,4 @@
-# Simple Tailscale Monitor Launcher
+﻿# Simple Tailscale Monitor Launcher
 # This script provides an alternative to Windows Service installation
 # Compatible with GPU-enabled OpenWebUI containers (handles longer startup times)
 
@@ -12,8 +12,8 @@ param(
 
 $ProcessName = "TailscaleHealthMonitor"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
-$HealthScript = Join-Path $ScriptDir "check-tailscale-health.ps1"
-$ProjectDir = Split-Path -Parent $ScriptDir
+$HealthScript = Join-Path $ScriptDir "stack-watchdog.ps1"
+$ProjectDir = Split-Path -Parent (Split-Path -Parent $ScriptDir)
 $PidFile = Join-Path $ProjectDir "logs\tailscale-monitor.pid"
 
 # Create logs directory if it doesn't exist

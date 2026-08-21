@@ -1,8 +1,13 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [ValidateSet("recover", "nuclear", "gpu-reset")]
     [string]$Action = "recover"
 )
+
+# Pin CWD to the repo root: every `docker compose` call below is relative
+# (moved to scripts/recovery/ 2026-08-21; previously this script silently
+# depended on being launched from the repo root).
+Set-Location (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))
 
 $ErrorActionPreference = "Stop"
 

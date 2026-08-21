@@ -1,4 +1,6 @@
 @echo off
+REM Pin CWD to the repo root (moved to scripts/recovery/ 2026-08-21)
+cd /d "%~dp0..\.."
 REM Emergency Tailscale Network Recovery - Legacy Batch Version
 REM For PowerShell version with better GPU support, use: emergency-recovery.ps1
 REM

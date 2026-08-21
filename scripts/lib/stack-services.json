@@ -3,7 +3,7 @@
     "Canonical service inventory for the ai-stack health checkers — the single",
     "source of truth for WHAT to check, to stop the three checkers from drifting.",
     "Consumed directly by status_check.py (data-driven liveness loop). The",
-    "PowerShell monitor (check-tailscale-health.ps1) and quick-fixes.bat keep their",
+    "PowerShell monitor (stack-watchdog.ps1) and quick-fixes.bat keep their",
     "bespoke probe/recovery logic but should be reconciled against this list when",
     "containers are added/removed (alongside compose + recovery scripts + stack-map,",
     "per CLAUDE.md's three-place convention).",

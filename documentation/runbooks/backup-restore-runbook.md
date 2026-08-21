@@ -4,7 +4,7 @@
 broken state (corrupt DB, wiped/garbled volume, bad migration). Every procedure
 here restores a *point-in-time* copy — **anything written since that backup is
 lost**, so treat restore as a last resort after normal recovery
-(`scripts/emergency-recovery.ps1`) has failed.
+(`scripts/recovery/emergency-recovery.ps1`) has failed.
 
 > Restore is **destructive**: it overwrites live data. Always (1) verify the
 > backup's integrity first, (2) take a fresh pre-restore snapshot of the current
@@ -21,7 +21,7 @@ faithful; every archive integrity-checked).
 
 Backups land in repo-root `./backups/<service>/`, newest-per-service, with a
 `.sha256` sentinel next to each artifact. A weekly two-slot NAS mirror
-(`scripts/backup-to-nas.ps1`) copies all of `./backups/` to
+(`scripts/backup/backup-to-nas.ps1`) copies all of `./backups/` to
 `\\PolyshDesignNAS\backups\...\slot-A|B`.
 
 | Service | Type | Artifact | Restore tool |

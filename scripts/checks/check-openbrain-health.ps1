@@ -1,4 +1,4 @@
-# scripts/check-openbrain-health.ps1
+﻿# scripts/check-openbrain-health.ps1
 #
 # Health probe for the **Open Brain** compose project (project = "open-brain"),
 # which a plain `docker compose ...` from the ai-stack project dir CANNOT see.

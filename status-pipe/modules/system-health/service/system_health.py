@@ -36,10 +36,10 @@ _AI_STACK_SERVICES: List[Dict[str, Any]] = [
     # The real servers (llama-cpp-upstream / llama-cpp-embed-upstream) are
     # isolated on llm-backend-net (2026-06-13) and intentionally NOT reachable
     # from here; their detailed health is owned by the recovery plane
-    # (check-tailscale-health.ps1 probes them via `docker exec ... localhost:8080`
+    # (stack-watchdog.ps1 probes them via `docker exec ... localhost:8080`
     # + each container's docker healthcheck + host ports 127.0.0.1:8081/8082).
     # Do NOT add direct *-upstream probes here -- that routes around the gateway
-    # (see scripts/check-llm-gateway-routing.ps1).
+    # (see scripts/checks/check-llm-gateway-routing.ps1).
     {"name": "llm-gateway",              "plane": "Core", "host": "llm-gateway",              "port": 8080, "path": "/health/liveliness",       "critical": True},
     # Memory layer.
     {"name": "mnemory",         "plane": "Memory",       "host": "mnemory",         "port": 8051, "path": "/health",                  "critical": False},

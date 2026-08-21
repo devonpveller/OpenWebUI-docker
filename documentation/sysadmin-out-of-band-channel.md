@@ -8,7 +8,7 @@ bridge, `notify-mattermost.sh`) is dead too. The fix is a **Docker-independent T
 channel** plus an autonomous **engine-restart watchdog**.
 
 Related: [`backup-restore-runbook.md`](backup-restore-runbook.md) (data recovery),
-`scripts/emergency-recovery.ps1` (ordered restart), and the `litellm-proxy-status` /
+`scripts/recovery/emergency-recovery.ps1` (ordered restart), and the `litellm-proxy-status` /
 disk-bloat memories.
 
 ---
@@ -20,7 +20,7 @@ disk-bloat memories.
 | Mattermost (our normal channel) | **Docker container** (agent-org) | ❌ DOWN |
 | `notify-mattermost.sh` alerts | POST to MM container :8065 | ❌ silent |
 | Compaction task (`compact-vhdx.ps1`) | Host, elevated Scheduled Task | ✅ runs, self-drives Docker back |
-| `check-tailscale-health.ps1` watchdog | Host Scheduled Task (60s) | ✅ runs (see Layer 2) |
+| `stack-watchdog.ps1` watchdog | Host Scheduled Task (60s) | ✅ runs (see Layer 2) |
 | Host **Tailscale** (your remote access) | Host daemon, **unattended mode** | ✅ UP — you can still RDP/SSH to the box |
 | claude-sessions bridge / sysadmin bridge / **Telegram listener** | Host Scheduled Tasks (48291/48292/48293) | ✅ processes alive |
 | **Telegram** (out-of-band channel) | Host HTTPS → api.telegram.org | ✅ UP both directions |
@@ -41,7 +41,7 @@ Wired into `compact-vhdx.ps1`:
 - **ALERT** ping on failure — actionable ("reply `docker up` / `recover` / `status`").
   This is the fix for *"a compaction stranded Docker silently."*
 
-### Layer 2 — engine-down watchdog (`scripts/check-tailscale-health.ps1`)
+### Layer 2 — engine-down watchdog (`scripts/checks/stack-watchdog.ps1`)
 - `Confirm-DockerEngine` runs **first** in `Invoke-HealthCheck`. If the engine is up it
   no-ops; if DOWN it attempts `docker desktop start` (reset-and-retry, ~2×150 s). This is
   what keeps trying **after** the compaction script's own 3 finally-block retries give up

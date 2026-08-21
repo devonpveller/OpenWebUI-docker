@@ -1,4 +1,4 @@
-# scripts/check-agent-org-health.ps1
+﻿# scripts/check-agent-org-health.ps1
 #
 # Health probe for the **agent-org** compose project (project = "agent-org") — the
 # governed multi-agent orchestration stack (Mattermost + agent-bridge + worker pool
@@ -37,7 +37,7 @@ $ErrorActionPreference = 'Continue'
 $script:Faults = 0
 
 $SCRIPT_DIR  = Split-Path -Parent $PSCommandPath
-$PROJECT_DIR = Split-Path -Parent $SCRIPT_DIR
+$PROJECT_DIR = Split-Path -Parent (Split-Path -Parent $SCRIPT_DIR)
 $AO_COMPOSE  = Join-Path $PROJECT_DIR 'agent-org\docker\docker-compose.yml'
 
 function Write-Ao {

@@ -1,4 +1,4 @@
-# scripts/lib/portal-alerter-client.ps1
+﻿# scripts/lib/portal-alerter-client.ps1
 #
 # Shared PowerShell client for the portal-alerter HTTP service.
 # Source via dot-load from any host-side script that wants to dispatch

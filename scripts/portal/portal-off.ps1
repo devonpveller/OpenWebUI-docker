@@ -1,4 +1,4 @@
-# scripts/portal-off.ps1
+﻿# scripts/portal-off.ps1
 #
 # Stop the portal in whatever mode it's currently running (plan sec.12.9).
 # IMPORTANT: this script explicitly names every portal service to stop.
@@ -24,7 +24,7 @@ param()
 # docker compose writes status to stderr by design. Don't let it trip
 # $ErrorActionPreference = Stop.
 $ErrorActionPreference = 'Continue'
-$projectRoot = Split-Path -Parent $PSScriptRoot
+$projectRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 Push-Location $projectRoot
 try {
   Write-Host "==> Stopping portal services explicitly" -ForegroundColor Cyan

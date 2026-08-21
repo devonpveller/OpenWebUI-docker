@@ -1,11 +1,11 @@
-# Simple line ending validator for git pre-commit hook
+﻿# Simple line ending validator for git pre-commit hook
 #
 # Validates that GIT-TRACKED shell scripts use Unix (LF) line endings.
 # Only tracked files are checked: vendored / gitignored dependency clones
 # (e.g. OB1/) legitimately contain CRLF shell scripts on Windows checkouts
 # and are not this repo's concern — scanning them blocked every commit.
 
-$ProjectDir = Split-Path -Parent $PSScriptRoot
+$ProjectDir = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $HasErrors = $false
 
 Write-Host "Checking line endings (git-tracked *.sh)..." -ForegroundColor Cyan

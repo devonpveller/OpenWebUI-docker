@@ -1,4 +1,4 @@
-# compose/portal.yml - internet-exposed auth front-end - EVERY service here is profile-gated ([internet]/[local-test]); driven by scripts/portal-on.ps1 / portal-off.ps1, never a default up
+# compose/portal.yml - internet-exposed auth front-end - EVERY service here is profile-gated ([internet]/[local-test]); driven by scripts/portal/portal-on.ps1 / portal-off.ps1, never a default up
 # Split from the 2,2xx-line root docker-compose.yml 2026-08-20 (CLEANUP-PLAN v3 D.1).
 # Networks/volumes are defined in the root file.
 services:

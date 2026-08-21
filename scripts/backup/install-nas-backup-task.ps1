@@ -1,4 +1,4 @@
-# scripts/install-nas-backup-task.ps1
+﻿# scripts/install-nas-backup-task.ps1
 #
 # Registers a Windows Scheduled Task that runs backup-to-nas.ps1 weekly
 # on Sundays at 04:00 (local time, intentionally after the nightly compose
@@ -47,7 +47,7 @@ if (-not $isAdmin) {
   exit 1
 }
 
-$projectRoot = Split-Path -Parent $PSScriptRoot
+$projectRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $syncScript = Join-Path $PSScriptRoot 'backup-to-nas.ps1'
 
 if (-not (Test-Path $syncScript)) {

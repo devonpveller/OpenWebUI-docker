@@ -1,4 +1,4 @@
-# scripts/backup-to-nas.ps1
+﻿# scripts/backup-to-nas.ps1
 #
 # Weekly NAS sync of the portal backup archives, two-slot alternating.
 # Mirrors `./backups/` to `<NasUncRoot>\slot-A\` or `<NasUncRoot>\slot-B\`
@@ -62,7 +62,7 @@ param(
 # both streams). Keep Continue and check exit codes explicitly.
 $ErrorActionPreference = 'Continue'
 
-$projectRoot = Split-Path -Parent $PSScriptRoot
+$projectRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $backupSrc = Join-Path $projectRoot 'backups'
 $logDir = Join-Path $projectRoot 'logs'
 $dateStamp = Get-Date -Format 'yyyy-MM-dd'
@@ -95,7 +95,7 @@ function Write-LogLine {
 # bug that the inline implementation had with UNC paths, and (b) actually
 # checks wget's exit code + the alerter's response body, so we know whether
 # the email truly dispatched. See scripts/lib/portal-alerter-client.ps1.
-. (Join-Path $PSScriptRoot 'lib\portal-alerter-client.ps1')
+. (Join-Path $PSScriptRoot '..\lib\portal-alerter-client.ps1')
 
 function Send-AlerterFailure {
   param([string]$Reason)

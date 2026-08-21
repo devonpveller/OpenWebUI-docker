@@ -1,4 +1,4 @@
-# scripts/portal-on.ps1
+﻿# scripts/portal-on.ps1
 #
 # Portal lifecycle entrypoint (plan sec.12.9).
 #
@@ -39,7 +39,7 @@ param(
 # In Windows PowerShell, $ErrorActionPreference = 'Stop' treats those lines as
 # fatal NativeCommandError records. Keep Continue and check $LASTEXITCODE.
 $ErrorActionPreference = 'Continue'
-$projectRoot = Split-Path -Parent $PSScriptRoot
+$projectRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 Push-Location $projectRoot
 try {
   if ($Test) {

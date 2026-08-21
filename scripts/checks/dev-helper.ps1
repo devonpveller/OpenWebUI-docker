@@ -1,4 +1,4 @@
-# Development Helper Script for AI Stack
+﻿# Development Helper Script for AI Stack
 # Prevents common Windows/Docker issues
 
 [CmdletBinding()]
@@ -10,7 +10,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $SCRIPT_DIR = Split-Path -Parent $PSCommandPath
-$PROJECT_DIR = Split-Path -Parent $SCRIPT_DIR
+$PROJECT_DIR = Split-Path -Parent (Split-Path -Parent $SCRIPT_DIR)
 
 function Write-ColorOutput {
     param([string]$Message, [string]$Color = "White")

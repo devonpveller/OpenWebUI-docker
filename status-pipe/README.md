@@ -32,10 +32,10 @@ Rules:
 
 - Inference stays behind the gateway: anything here that talks to a model
   uses the `llama-cpp` / `llama-cpp-embed` aliases — never `*-upstream`
-  (`scripts/check-llm-gateway-routing.ps1` enforces).
+  (`scripts/checks/check-llm-gateway-routing.ps1` enforces).
 - The retired `emergency-recovery` module (ollama-era guidance) lives in
   `scripts/archive/emergency-recovery-module/`; recovery questions route to
   help-system, and the real recovery story is
-  `scripts/emergency-recovery.ps1` (v3 D-15).
+  `scripts/recovery/emergency-recovery.ps1` (v3 D-15).
 - The serve pipe also reads `/host_project/data/tailscale/tailnet-info.json`
   (a second, read-only mount) for tailnet URL reporting.

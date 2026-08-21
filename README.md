@@ -16,10 +16,10 @@ by default.
 | Stack | Driven with | Contents |
 |-------|-------------|----------|
 | **Main** (`ai-stack`) | `docker compose …` | core (`openwebui`, `tailscale`, `open-terminal`), inference (`llm-gateway` + db/ui, `llm-queue`, `llama-cpp-upstream`, `llama-cpp-embed-upstream`), memory (`mnemory`, `mnemory-gateway`), search (`vpn`, `tor`, `redis`, `searxng`, `gateway`), coder (`little-coder`, `lc-egress`), aux (`smolcrawl-pipelines`, `surrealdb`, `open_notebook`), 12 backup sidecars |
-| **Main — Portal** (`profiles: [internet]`) | `scripts/portal-on.ps1` / `portal-off.ps1` | `caddy`, `authelia`, `cloudflared` + watcher/alerter/tripwire/cron sidecars. Internet-exposed auth front-end — **not** part of a default `up`. |
+| **Main — Portal** (`profiles: [internet]`) | `scripts/portal/portal-on.ps1` / `portal-off.ps1` | `caddy`, `authelia`, `cloudflared` + watcher/alerter/tripwire/cron sidecars. Internet-exposed auth front-end — **not** part of a default `up`. |
 | **Open Brain** (`open-brain`) | `docker compose -f OB1/docker/docker-compose.yml …` | ~24 `openbrain-*` containers (db, MCP servers, gateway, workers, wiki, research, scheduled digest/podcast slice). Separate project; attaches to `ai-stack_llm-net` as an external network. |
 | **agent-org** | `docker compose -f agent-org/docker/docker-compose.yml …` | Mattermost + `agent-bridge` (the governed org bus) + profile-gated worker/cloud slices. |
-| **Recovery** | `scripts/emergency-recovery.ps1` (or `.bat`) | Ordered restart/repair across both projects — `recover` / `nuclear` / `gpu-reset`. |
+| **Recovery** | `scripts/recovery/emergency-recovery.ps1` (or `.bat`) | Ordered restart/repair across both projects — `recover` / `nuclear` / `gpu-reset`. |
 
 Bring OB1 up **after** `llm-gateway` is healthy; tear it down before the main
 stack. A plain `docker compose` command never touches OB1 or the portal.
@@ -31,7 +31,7 @@ Every service reaches inference through `http://llama-cpp:8080` /
 which forwards through **`llm-queue`** (per-caller admission/priority) to the
 real llama.cpp servers (`*-upstream`). **Never route inference around
 LiteLLM**; only health/GPU/recovery probes may target `*-upstream` directly.
-Enforced at commit time by `scripts/check-llm-gateway-routing.ps1`.
+Enforced at commit time by `scripts/checks/check-llm-gateway-routing.ps1`.
 
 ## Quickstart (fresh clone)
 
@@ -48,11 +48,11 @@ access is Tailscale serve or the portal only.
 
 ## Health & recovery
 
-- `scripts/check-tailscale-health.ps1` — the 60 s watchdog (runs as a Windows
+- `scripts/checks/stack-watchdog.ps1` — the 60 s watchdog (runs as a Windows
   service; also covers Docker-engine restart, backup recency, bridge health).
-- `scripts/check-openbrain-health.ps1`, `scripts/check-agent-org-health.ps1`.
-- `scripts/emergency-recovery.ps1 recover|nuclear|gpu-reset` — ordered
-  cross-project repair. `scripts/quick-fixes.bat` — interactive menu.
+- `scripts/checks/check-openbrain-health.ps1`, `scripts/checks/check-agent-org-health.ps1`.
+- `scripts/recovery/emergency-recovery.ps1 recover|nuclear|gpu-reset` — ordered
+  cross-project repair. `scripts/recovery/quick-fixes.bat` — interactive menu.
 - Never restart `openwebui` alone (tailscale shares its netns): order is
   openwebui → tailscale; the watchdog restores the tailnet serve routes.
 

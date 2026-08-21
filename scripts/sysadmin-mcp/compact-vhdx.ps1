@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   Compact the Docker WSL2 data vhdx to return freed space to C:. The elevated body of the
   systems-administrator "compact_vhdx" capability — run as a RunLevel=Highest Scheduled Task so it
@@ -15,7 +15,7 @@
 [CmdletBinding()]
 param(
   [string]$VhdxPath = (Join-Path $env:LOCALAPPDATA 'Docker\wsl\disk\docker_data.vhdx'),
-  [string]$Watchdog = 'TailscaleHealthCheck',
+  [string]$Watchdog = 'StackWatchdog',
   [string]$ResultFile = '',
   [double]$MinTrappedGb = 1.0,
   [int]$DaemonWaitSec = 180,

@@ -1,4 +1,4 @@
-#requires -Version 5
+﻿#requires -Version 5
 <#
 .SYNOPSIS
   Enforce gateway-only LLM routing: fail if anything points an inference or
@@ -41,7 +41,7 @@ if (-not $Root) {
     } else {
         $scriptDir = (Get-Location).Path
     }
-    $Root = Split-Path -Parent $scriptDir
+    $Root = Split-Path -Parent (Split-Path -Parent $scriptDir)
     if (-not $Root) { $Root = (Get-Location).Path }
 }
 
