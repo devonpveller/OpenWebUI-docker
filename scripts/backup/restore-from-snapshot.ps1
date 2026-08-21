@@ -72,48 +72,63 @@ function Write-Log {
 #
 # To add a new service to the disaster-recovery flow, add an entry here.
 
+# Part K (2026-08-21): every service lives in its own compose project now, so
+# each entry names its Compose file (+ ComposeArgs where the project needs
+# --env-file or a profile). Volume targets carry the new project prefixes
+# (frontend_/memory_/coder_/portal_) - the old ai-stack_* volumes are the
+# superseded pre-split copies, NOT the live data.
 $catalog = [ordered]@{
   'caddy' = @{
-    Archives = @(@{ Pattern = "caddy-*.tar.gz";  Target = 'ai-stack_caddy-data';   Type = 'volume-tar' },
-                 @{ Pattern = "caddy-*.tar.gz";  Target = 'ai-stack_caddy-config'; Type = 'volume-tar' })
+    Archives = @(@{ Pattern = "caddy-*.tar.gz";  Target = 'portal_caddy-data';   Type = 'volume-tar' },
+                 @{ Pattern = "caddy-*.tar.gz";  Target = 'portal_caddy-config'; Type = 'volume-tar' })
     Stop    = @('caddy')
     Start   = @('caddy')
+    Compose = 'portal\docker-compose.yml'
+    ComposeArgs = @('--profile','internet')
   }
   'authelia' = @{
-    Archives = @(@{ Pattern = "authelia-*.tar.gz"; Target = 'ai-stack_authelia-data'; Type = 'volume-tar' })
+    Archives = @(@{ Pattern = "authelia-*.tar.gz"; Target = 'portal_authelia-data'; Type = 'volume-tar' })
     Stop    = @('authelia')
     Start   = @('authelia')
+    Compose = 'portal\docker-compose.yml'
+    ComposeArgs = @('--profile','internet')
   }
   'openwebui' = @{
-    Archives = @(@{ Pattern = "openwebui-*.tar.gz"; Target = 'ai-stack_openwebui-data'; Type = 'volume-tar' })
-    Stop    = @('openwebui')
-    Start   = @('openwebui')
+    Archives = @(@{ Pattern = "openwebui-*.tar.gz"; Target = 'frontend_openwebui-data'; Type = 'volume-tar' })
+    # NETNS rule: stop tailscale first, start openwebui before tailscale.
+    Stop    = @('tailscale','openwebui')
+    Start   = @('openwebui','tailscale')
+    Compose = 'frontend\docker-compose.yml'
+    ComposeArgs = @('--env-file','.env')
   }
   'mnemory' = @{
-    Archives = @(@{ Pattern = "mnemory-*.tar.gz"; Target = 'ai-stack_mnemory-data'; Type = 'volume-tar' })
+    Archives = @(@{ Pattern = "mnemory-*.tar.gz"; Target = 'memory_mnemory-data'; Type = 'volume-tar' })
     Stop    = @('mnemory','mnemory-cloud-gateway')
     Start   = @('mnemory','mnemory-cloud-gateway')
+    Compose = 'memory\docker-compose.yml'
+    ComposeArgs = @('--env-file','.env')
   }
   'little-coder' = @{
     Archives = @(
-      @{ Pattern = "little-coder-journals-*.tar.gz"; Target = 'ai-stack_little-coder-journals'; Type = 'volume-tar' }
-      @{ Pattern = "little-coder-skill-*.tar.gz";    Target = 'ai-stack_little-coder-skill';    Type = 'volume-tar' }
-      @{ Pattern = "little-coder-cohorts-*.tar.gz";  Target = 'ai-stack_little-coder-cohorts';  Type = 'volume-tar' }
-      @{ Pattern = "little-coder-polyglot-*.tar.gz"; Target = 'ai-stack_little-coder-polyglot'; Type = 'volume-tar' }
-      @{ Pattern = "little-coder-sessions-*.tar.gz"; Target = 'ai-stack_little-coder-sessions'; Type = 'volume-tar' }
+      @{ Pattern = "little-coder-journals-*.tar.gz"; Target = 'coder_little-coder-journals'; Type = 'volume-tar' }
+      @{ Pattern = "little-coder-skill-*.tar.gz";    Target = 'coder_little-coder-skill';    Type = 'volume-tar' }
+      @{ Pattern = "little-coder-cohorts-*.tar.gz";  Target = 'coder_little-coder-cohorts';  Type = 'volume-tar' }
+      @{ Pattern = "little-coder-polyglot-*.tar.gz"; Target = 'coder_little-coder-polyglot'; Type = 'volume-tar' }
+      @{ Pattern = "little-coder-sessions-*.tar.gz"; Target = 'coder_little-coder-sessions'; Type = 'volume-tar' }
     )
-    Stop    = @('little-coder','open-terminal','lc-mcpo','lc-egress')
-    Start   = @('lc-egress','open-terminal','little-coder','lc-mcpo')
+    Stop    = @('little-coder','open-terminal','lc-egress')
+    Start   = @('lc-egress','open-terminal','little-coder')
+    Compose = 'coder\docker-compose.yml'
+    ComposeArgs = @('--env-file','.env')
   }
-  'smolcrawl' = @{
-    Archives = @(@{ Pattern = "smolcrawl-*.tar.gz"; Target = 'ai-stack_smolcrawl-data'; Type = 'volume-tar' })
-    Stop    = @('smolcrawl-pipelines')
-    Start   = @('smolcrawl-pipelines')
-  }
+  # (smolcrawl removed 2026-08-21: pipelines + backup retired; old archives
+  #  remain on the NAS for history but there is nothing to restore INTO.)
   'tailscale' = @{
     Archives = @(@{ Pattern = "tailscale-*.tar.gz"; Target = "$projectRoot\data\tailscale"; Type = 'bind-tar' })
     Stop    = @('tailscale')
     Start   = @('tailscale')
+    Compose = 'frontend\docker-compose.yml'
+    ComposeArgs = @('--env-file','.env')
   }
   'openbrain-wiki' = @{
     Archives = @(@{ Pattern = "openbrain-wiki-*.tar.gz"; Target = 'open-brain_openbrain-wiki-data'; Type = 'volume-tar' })
@@ -127,11 +142,13 @@ $catalog = [ordered]@{
     Stop    = @('openbrain-mcp','openbrain-ext','openbrain-mcpo','openbrain-mcpo-ext',
                 'openbrain-gateway','openbrain-rest','openbrain-postgrest',
                 'openbrain-entity-worker','openbrain-wiki','openbrain-cron',
-                'openbrain-gmail-pull','openbrain-gmail-prune','openbrain-digest')
+                'openbrain-gmail-pull','openbrain-gmail-prune','openbrain-digest',
+                'open_notebook')   # IKS: ON writes to openbrain-db too (in the OB1 project since K.5b)
     Start   = @('openbrain-mcp','openbrain-ext','openbrain-mcpo','openbrain-mcpo-ext',
                 'openbrain-gateway','openbrain-rest','openbrain-postgrest',
                 'openbrain-entity-worker','openbrain-wiki','openbrain-cron',
-                'openbrain-gmail-pull','openbrain-gmail-prune','openbrain-digest')
+                'openbrain-gmail-pull','openbrain-gmail-prune','openbrain-digest',
+                'open_notebook')
     Compose = 'OB1\docker\docker-compose.yml'
   }
   'open-notebook' = @{
@@ -141,18 +158,21 @@ $catalog = [ordered]@{
     )
     Stop    = @('open_notebook')
     Start   = @('open_notebook')
+    Compose = 'OB1\docker\docker-compose.yml'
   }
   'lm-models' = @{
     Archives = @(@{ Pattern = "lm-models-*.tar.gz"; Target = 'C:\Users\yamao\.lmstudio\models'; Type = 'bind-tar' })
     Stop    = @('llama-cpp-upstream','llama-cpp-embed-upstream')
     Start   = @('llama-cpp-upstream','llama-cpp-embed-upstream')
+    Compose = 'inference\docker-compose.yml'
+    ComposeArgs = @('--env-file','.env')
   }
 }
 
 # Restore order — services that other services depend on first.
 $restoreOrder = @(
   'openbrain-db', 'openbrain-wiki', 'open-notebook',
-  'mnemory', 'smolcrawl', 'lm-models', 'tailscale',
+  'mnemory', 'lm-models', 'tailscale',
   'openwebui', 'little-coder',
   'caddy', 'authelia'
 )
@@ -263,10 +283,11 @@ if (-not $Apply) {
 Write-Log "=== Phase 3: stopping consumer services ===" 'PLAN'
 foreach ($svc in $discovered.Keys) {
   $entry = $catalog[$svc]
-  $compose = if ($entry.Compose) { $entry.Compose } else { 'docker-compose.yml' }
+  $compose = $entry.Compose
+  $cargs = if ($entry.ComposeArgs) { $entry.ComposeArgs } else { @() }
   foreach ($container in $entry.Stop) {
     Write-Log "  Stopping $container ..."
-    & docker compose -f $compose stop $container 2>&1 | ForEach-Object { Write-Log "    $_" }
+    & docker compose -f $compose @cargs stop $container 2>&1 | ForEach-Object { Write-Log "    $_" }
   }
 }
 Write-Log ""
@@ -342,10 +363,11 @@ Write-Log "=== Phase 5: starting consumer services ===" 'PLAN'
 foreach ($svc in $restoreOrder) {
   if (-not $discovered.ContainsKey($svc)) { continue }
   $entry = $catalog[$svc]
-  $compose = if ($entry.Compose) { $entry.Compose } else { 'docker-compose.yml' }
+  $compose = $entry.Compose
+  $cargs = if ($entry.ComposeArgs) { $entry.ComposeArgs } else { @() }
   foreach ($container in $entry.Start) {
     Write-Log "  Starting $container ..."
-    & docker compose -f $compose start $container 2>&1 | ForEach-Object { Write-Log "    $_" }
+    & docker compose -f $compose @cargs start $container 2>&1 | ForEach-Object { Write-Log "    $_" }
   }
 }
 Write-Log ""

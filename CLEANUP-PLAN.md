@@ -994,3 +994,25 @@ Per-plane playbook (portal-split procedure, now run 3×):
   **Follow-up:** 17 pre-existing E501s inside llm-queue's own stricter ruff
   config (root F+E9 gate unaffected); mnemory image rebuild needs a
   deliberate `mcp` dependency pin first (K.2 trap).
+- **K.7 restart-survival + backup/restore audit — EXECUTED 2026-08-21**
+  (operator request). RESTART: all 78 containers carry restart policies
+  (76 unless-stopped, 2 always); every stack scheduled task Ready and
+  pointing at the patched scripts; **controlled cold-start test PASSED** —
+  all five plane projects `down` then one `stack.ps1 up` brought the whole
+  ladder back (79 containers, 0 unhealthy; alias/lanes, search, both memory
+  doors, coder, ON, OWUI :3000, 8/8 tailnet serves). Six ORPHANED pre-split
+  networks removed (lc/llm-backend/search/auth/edge/notify) — which exposed
+  **openbrain-podcast still fetching via the dead ai-stack_search-net**:
+  repointed to search-gw-net→ai-stack_default (OB1 c842f11; vpn:8888
+  verified reachable — tonight's link-enrich would have silently failed).
+  BACKUP: fresh artifacts produced from every NEW project home; ALL
+  sentinels SHA-OK + tars/gz structurally valid; all three pg dumps
+  pg_restore --list OK; llm-gateway-backup gained the sha256 sentinel it
+  never had (convention gap, verified live). RESTORE: DR orchestrator
+  catalog rewritten for project-prefixed volumes + per-plane compose files
+  (old one targeted orphaned ai-stack_*/pre-split portal volumes and
+  retired services lc-mcpo/smolcrawl — a restore would have written into
+  volumes nothing reads); restore runbook + script headers updated;
+  open_notebook added to the openbrain-db writer stop-list (IKS);
+  **non-destructive restore drill PASSED** (mnemory artifact → scratch
+  volume via the real script: 17/17 files match live).

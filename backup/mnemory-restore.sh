@@ -6,14 +6,15 @@ set -eu
 #
 # Usage:
 #   docker run --rm \
-#     -v mnemory-data:/data \
-#     -v ./backups:/backups:ro \
-#     alpine sh -c "apk add --no-cache tar && sh /backups/restore.sh /backups/mnemory-backup-YYYYMMDD-HHMMSS.tar.gz"
+#     -v memory_mnemory-data:/data \
+#     -v ./backups/mnemory:/backups:ro \
+#     alpine sh -c "sh /backups/../../backup/mnemory-restore.sh /backups/mnemory-backup-YYYYMMDD-HHMMSS.tar.gz"
 #
-# IMPORTANT: Stop the mnemory container before restoring!
-#   docker compose stop mnemory
+# IMPORTANT: Stop the memory plane before restoring! (own compose project
+# since Part K 2026-08-21; run from the repo root)
+#   docker compose -f memory/docker-compose.yml --env-file .env stop mnemory mnemory-cloud-gateway
 #   <run restore>
-#   docker compose start mnemory
+#   docker compose -f memory/docker-compose.yml --env-file .env start mnemory mnemory-cloud-gateway
 
 BACKUP_FILE="${1:-}"
 DATA_DIR="${DATA_DIR:-/data}"

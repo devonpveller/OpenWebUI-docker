@@ -166,7 +166,7 @@ docker start open_notebook
 
 ```powershell
 # 1. Stop only the portal services.
-.\scripts\portal-off.ps1
+.\scripts\portal\portal-off.ps1
 
 # 2. Verify sentinels.
 docker run --rm -v "${PWD}\backups\caddy:/backups:ro" alpine sh -c "cd /backups && sha256sum -c caddy-*.sha256 | tail -1"
@@ -175,18 +175,18 @@ docker run --rm -v "${PWD}\backups\authelia:/backups:ro" alpine sh -c "cd /backu
 # 3. Restore each volume.
 $caddyArchive = 'caddy-20260529T183254Z.tar.gz'
 docker run --rm `
-  -v ai-stack_caddy-data:/dest `
+  -v portal_caddy-data:/dest `
   -v "${PWD}\backups\caddy:/in:ro" `
   alpine sh -c "find /dest -mindepth 1 -delete && cd /dest && tar xzf /in/$caddyArchive"
 
 $autheliaArchive = 'authelia-20260529T183254Z.tar.gz'
 docker run --rm `
-  -v ai-stack_authelia-data:/dest `
+  -v portal_authelia-data:/dest `
   -v "${PWD}\backups\authelia:/in:ro" `
   alpine sh -c "find /dest -mindepth 1 -delete && cd /dest && tar xzf /in/$autheliaArchive"
 
 # 4. Start back up. portal-init will re-chown if necessary.
-.\scripts\portal-on.ps1
+.\scripts\portal\portal-on.ps1
 ```
 
 **Important**: after Authelia restore, any sessions issued before the
@@ -196,26 +196,37 @@ verify by signing in.
 
 ---
 
-## Other tar-based services (openwebui, mnemory, little-coder, smolcrawl, tailscale, lm-models)
+## Other tar-based services (openwebui, mnemory, little-coder, tailscale, lm-models)
 
-All follow the same pattern. Substitute service name + volume:
+All follow the same pattern. **Volume names carry their PROJECT prefix since
+Part K (2026-08-21)** — the live volumes are:
+
+| Service | Volume(s) | Stop/start via |
+|---|---|---|
+| openwebui | `frontend_openwebui-data` | `docker compose -f frontend/docker-compose.yml --env-file .env stop tailscale openwebui` (netns rule: tailscale first; start openwebui then tailscale) |
+| mnemory | `memory_mnemory-data` | `docker compose -f memory/docker-compose.yml --env-file .env stop mnemory mnemory-cloud-gateway` |
+| little-coder | `coder_little-coder-{journals,skill,cohorts,polyglot,sessions}` | `docker compose -f coder/docker-compose.yml --env-file .env stop little-coder open-terminal lc-egress` |
+| tailscale | bind `./data/tailscale` | frontend project, see below |
+| lm-models | bind `C:\Users\yamao\.lmstudio\models` | `docker compose -f inference/docker-compose.yml --env-file .env stop llama-cpp-upstream llama-cpp-embed-upstream` |
+
+(The pre-split `ai-stack_*` volumes still exist as rollback copies until the
+post-K soak cleanup — do NOT restore into them, nothing reads them.
+`smolcrawl` retired 2026-08-21; its old archives have nothing to restore into.)
 
 ```powershell
-# 1. Stop the consumer service.
-docker stop <consumer>     # e.g., openwebui, mnemory, smolcrawl-pipelines, tailscale
+# 1. Stop the consumer service(s) — see the table above.
 
 # 2. Verify sentinel.
 docker run --rm -v "${PWD}\backups\<service>:/backups:ro" alpine sh -c "cd /backups && sha256sum -c <service>-*.sha256 | tail -1"
 
-# 3. Restore the volume.
+# 3. Restore the volume (project-prefixed name from the table).
 $archive = '<service>-<ts>.tar.gz'
 docker run --rm `
-  -v ai-stack_<volume-name>:/dest `
+  -v <project>_<volume-name>:/dest `
   -v "${PWD}\backups\<service>:/in:ro" `
   alpine sh -c "find /dest -mindepth 1 -delete && cd /dest && tar xzf /in/$archive"
 
-# 4. Restart.
-docker start <consumer>
+# 4. Restart via the same plane compose file (compose start, or `up -d`).
 ```
 
 **Tailscale**: the bind mount is `./data/tailscale`, not a named volume.
@@ -258,4 +269,4 @@ Persistent state captured by the snapshot:
 - Tailscale auth key (re-issue at `https://login.tailscale.com/admin/settings/keys`).
 
 If you're restoring to fresh hardware, restore the data first, then
-fill in these secrets, then `docker compose up -d`.
+fill in these secrets, then `.\scripts\stack\stack.ps1 up` (anchor networks first, then every project in dependency order).

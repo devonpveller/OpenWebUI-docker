@@ -45,8 +45,14 @@ done
 pg_dump -h "${PGHOST}" -U "${PGUSER}" "${PGDATABASE}" | gzip > "${OUT}"
 echo "[$(date -u +%FT%TZ)] wrote ${OUT} ($(du -h "${OUT}" | cut -f1))"
 
+# --- sha256 sentinel (backup-conventions: every artifact ships one; this
+# script predated the rule — added 2026-08-21 during the restore audit) -----
+( cd "${BACKUP_DIR}" && sha256sum "$(basename "${OUT}")" > "${OUT}.sha256" )
+echo "[$(date -u +%FT%TZ)] wrote ${OUT}.sha256"
+
 # --- retention: delete dumps older than RETAIN_DAYS ------------------------
 find "${BACKUP_DIR}" -name 'llm-gateway-*.sql.gz' -type f -mtime "+${RETAIN_DAYS}" -delete 2>/dev/null || true
+find "${BACKUP_DIR}" -name 'llm-gateway-*.sql.gz.sha256' -type f -mtime "+${RETAIN_DAYS}" -delete 2>/dev/null || true
 
 TOTAL="$(ls -1 "${BACKUP_DIR}"/llm-gateway-*.sql.gz 2>/dev/null | wc -l)"
 echo "[$(date -u +%FT%TZ)] llm-gateway-backup complete. ${TOTAL} dump(s) retained (retain=${RETAIN_DAYS}d)."
