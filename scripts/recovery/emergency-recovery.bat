@@ -5,15 +5,17 @@ REM Emergency Tailscale Network Recovery - Legacy Batch Version
 REM For PowerShell version with better GPU support, use: emergency-recovery.ps1
 REM
 REM Recovery stack scope (kept in sync with docker-compose.yml):
-REM   core    openwebui, llama-cpp-upstream, llama-cpp-embed-upstream, llm-queue,
-REM           llm-gateway-db, llm-gateway, llm-gateway-ui, tailscale
-REM           (llm-queue = B2 admission controller; llm-gateway-ui = Admin-UI sidecar)
+REM   core    openwebui, tailscale
+REM   (INFERENCE plane = its own compose project since 2026-08-21 Part K.1:
+REM    inference\docker-compose.yml -- upstreams, llm-queue, llm-gateway+db/ui,
+REM    llm-gateway-backup, lm-models-backup. Driven with --env-file .env.)
 REM   memory  mnemory, mnemory-cloud-gateway
 REM   search  vpn, redis, searxng, gateway  (Private Search Gateway)
 REM   coder   open-terminal, little-coder, lc-egress
 REM   aux    , surrealdb, open_notebook
 REM   backup  mnemory-backup, openwebui-backup, little-coder-backup,,
-REM           tailscale-backup, lm-models-backup, open-notebook-backup
+REM           tailscale-backup, open-notebook-backup (lm-models/llm-gateway
+REM           backups live in the inference project since 2026-08-21)
 REM           (openbrain-db/wiki backups moved to the OB1 project 2026-08-21)
 REM   OB1     Open Brain - SEPARATE compose project (OB1\docker\docker-compose.yml)
 REM   AGORG   agent-org - SEPARATE compose project (agent-org\docker\docker-compose.yml);
@@ -57,7 +59,7 @@ if %ERRORLEVEL% EQU 0 (
     echo [INFO] OpenWebUI responding...
 
     REM Test llama-cpp-upstream connectivity
-    docker compose exec llama-cpp-upstream curl -f -s http://localhost:8080/health >nul 2>&1
+    docker exec llama-cpp-upstream curl -f -s http://localhost:8080/health >nul 2>&1
     if %ERRORLEVEL% EQU 0 (
         echo [INFO] llama-cpp-upstream connectivity working...
 
@@ -131,17 +133,11 @@ if %ERRORLEVEL% NEQ 0 (
     docker compose kill openwebui-backup
 )
 
-echo [INFO] Stopping LiteLLM gateway (before the upstream inference servers)...
-docker compose stop llm-gateway-backup llm-gateway-ui llm-gateway llm-gateway-db
-
-echo [INFO] Stopping llm-queue (B2 admission controller, after the gateway)...
-docker compose stop llm-queue
-
-echo [INFO] Stopping llama-cpp-upstream containers...
-docker compose stop llama-cpp-upstream llama-cpp-embed-upstream
+echo [INFO] Stopping the inference project (gateway -^> llm-queue -^> upstreams)...
+docker compose -f inference\docker-compose.yml --env-file .env stop --timeout 30
 if %ERRORLEVEL% NEQ 0 (
-    echo [WARN] llama-cpp-upstream stop failed, attempting force kill...
-    docker compose kill llama-cpp-upstream llama-cpp-embed-upstream
+    echo [WARN] inference project stop failed, attempting force kill...
+    docker compose -f inference\docker-compose.yml --env-file .env kill
 )
 
 echo [INFO] Stopping OpenWebUI container...
@@ -173,32 +169,15 @@ if %ERRORLEVEL% NEQ 0 (
 )
 echo [SUCCESS] OpenWebUI is healthy - safe to start llama-cpp-upstream services
 
-echo [INFO] Starting llama-cpp-upstream with GPU support...
-docker compose up -d llama-cpp-upstream
+echo [INFO] Starting the inference project (upstreams -^> llm-queue -^> gateway)...
+docker compose -f inference\docker-compose.yml --env-file .env up -d
 if %ERRORLEVEL% NEQ 0 (
-    echo [ERROR] Failed to start llama-cpp-upstream container
+    echo [ERROR] Failed to start the inference project
     goto :nuclear_option
 )
 
-echo [INFO] Waiting for llama-cpp-upstream to initialize...
-timeout /t 30 /nobreak >nul
-
-echo [INFO] Starting llama-cpp-embed-upstream...
-docker compose up -d llama-cpp-embed-upstream
-
-echo [INFO] Starting llm-queue (B2 admission controller, between upstreams and LiteLLM)...
-docker compose up -d llm-queue
-timeout /t 5 /nobreak >nul
-
-echo [INFO] Starting LiteLLM gateway (db, then gateway) - the front door all callers use...
-docker compose up -d llm-gateway-db
-timeout /t 10 /nobreak >nul
-docker compose up -d llm-gateway
-timeout /t 10 /nobreak >nul
-docker compose up -d llm-gateway-backup
-REM llm-gateway-ui: master-key'd Admin-UI sidecar (analytics dashboard), shares
-REM llm-gateway-db; serves no inference, non-critical — start it best-effort.
-docker compose up -d llm-gateway-ui
+echo [INFO] Waiting for the inference plane to initialize...
+timeout /t 45 /nobreak >nul
 
 echo [INFO] Starting Tailscale with shared network namespace...
 docker compose up -d tailscale
@@ -218,7 +197,7 @@ echo [INFO] Starting Mnemory gateway (cloud MCP proxy)...
 docker compose up -d mnemory-cloud-gateway
 
 echo [INFO] Starting backup schedulers (main/host resources)...
-docker compose up -d mnemory-backup openwebui-backup tailscale-backup lm-models-backup open-notebook-backup
+docker compose up -d mnemory-backup openwebui-backup tailscale-backup open-notebook-backup
 
 echo [INFO] Starting surrealdb (open-notebook database)...
 docker compose up -d surrealdb
@@ -275,7 +254,8 @@ echo [INFO] Restarting with proper network dependency sequence...
 
 REM Stop dependent containers first
 echo [INFO] Stopping Tailscale and dependent services (network dependents)...
-docker compose stop tailscale llama-cpp-upstream llama-cpp-embed-upstream mnemory mnemory-cloud-gateway mnemory-backup openwebui-backup open_notebook surrealdb gateway searxng redis vpn little-coder-backup lc-egress little-coder open-terminal
+docker compose -f inference\docker-compose.yml --env-file .env stop --timeout 30
+docker compose stop tailscale mnemory mnemory-cloud-gateway mnemory-backup openwebui-backup open_notebook surrealdb gateway searxng redis vpn little-coder-backup lc-egress little-coder open-terminal
 if exist "%OB1_COMPOSE%" docker compose -f "%OB1_COMPOSE%" stop
 
 REM Restart OpenWebUI first and wait for health
@@ -293,16 +273,10 @@ if %ERRORLEVEL% NEQ 0 (
 echo [SUCCESS] OpenWebUI healthy - restarting dependent services
 
 REM Now restart the dependent containers
-echo [INFO] Starting llama-cpp-upstream with fresh network namespace...
-docker compose up -d llama-cpp-upstream
+echo [INFO] Starting the inference project with fresh network namespace...
+docker compose -f inference\docker-compose.yml --env-file .env up -d
 timeout /t 15 /nobreak >nul
 
-echo [INFO] Starting llama-cpp-embed-upstream...
-docker compose up -d llama-cpp-embed-upstream
-timeout /t 15 /nobreak >nul
-
-echo [INFO] Starting llm-queue + LiteLLM gateway (admission plane, before callers)...
-docker compose up -d llm-queue llm-gateway
 timeout /t 5 /nobreak >nul
 
 echo [INFO] Starting Tailscale with fresh network namespace...
@@ -315,7 +289,7 @@ docker compose up -d mnemory mnemory-cloud-gateway mnemory-backup
 timeout /t 15 /nobreak >nul
 
 echo [INFO] Starting backup schedulers (main/host resources)...
-docker compose up -d openwebui-backup tailscale-backup lm-models-backup open-notebook-backup
+docker compose up -d openwebui-backup tailscale-backup open-notebook-backup
 
 echo [INFO] Starting surrealdb (open-notebook database)...
 docker compose up -d surrealdb
@@ -397,11 +371,11 @@ if %ERRORLEVEL% NEQ 0 (
 echo.
 echo [INFO] Verifying services...
 echo [INFO] llama-cpp-upstream status:
-docker compose exec llama-cpp-upstream curl -s http://localhost:8080/health
+docker exec llama-cpp-upstream curl -s http://localhost:8080/health
 
 echo.
 echo [INFO] llama-cpp-embed-upstream status:
-docker compose exec llama-cpp-embed-upstream curl -s http://localhost:8080/health
+docker exec llama-cpp-embed-upstream curl -s http://localhost:8080/health
 
 echo.
 echo [INFO] Tailscale status:

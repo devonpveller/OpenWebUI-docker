@@ -866,9 +866,13 @@ backups tree + NAS mirror, docs/registry, .env conventions.
 6. **open-terminal moves to the coder project** — it is the coder plane's
    executor (control-plane DECIDES / open-terminal EXECUTES) and the last
    `lc-net` member outside it; moving it makes `lc-net` fully plane-native.
-7. **The notebook/aux plane does NOT split** — surrealdb + open_notebook +
-   open-notebook-backup are retiring into the wiki (D-10); they stay in the
-   root project until then.
+7. **The notebook/aux trio moves into the OB1 project** (operator amendment,
+   2026-08-21 mid-ladder): surrealdb + open_notebook + open-notebook-backup
+   are tethered to OB1 on every axis (IKS canonical store = OB1 Postgres via
+   obnet, wiki-vault volume mount, digest→podcast chain), so they join OB1 —
+   same playbook as the backup-sidecar adoption. NO retirement implied: ON
+   stays live until the wiki workbench matures (D-10 direction unchanged).
+   Bonus: the root ai-stack project ends the ladder as a PURE network anchor.
 8. **openwebui + tailscale stay one project** (`frontend`) — tailscale runs
    `network_mode: service:openwebui`; the netns coupling is physical.
 
@@ -903,4 +907,16 @@ Per-plane playbook (portal-split procedure, now run 3×):
 
 ### K ledger
 
-(appended as steps execute)
+- **K.1 inference — EXECUTED 2026-08-21.** `inference/docker-compose.yml`
+  (8 services, `name: inference`, fail-loud `${LITELLM_DB_PASSWORD:?}`);
+  llm-backend-net native; llm-net external; data copied to
+  `inference_llm-gateway-db-data` / `inference_llm-queue-data`; old ai-stack_*
+  volumes retained until the K.6 sweep. Cross-plane `depends_on` on
+  llm-gateway removed from core/coder/memory (retry posture, like OB1).
+  Recovery trio rewired (Start-/Stop-InferenceStack; granular per-service
+  gates collapsed into the project's own depends_on; nuclear/GPU-reset paths
+  reroute; watchdog Test-ServiceHealth got a cross-project name fallback).
+  VERIFIED: all 8 healthy under project `inference`; /v1/models + a real
+  completion via the `llama-cpp` alias from openwebui (HTTP 200, MTP
+  drafting); llm-queue lane attribution intact (`key: owui-chat`). Root main
+  stack = 18 default services.

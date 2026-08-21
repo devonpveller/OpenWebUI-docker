@@ -83,6 +83,16 @@ function Test-ServiceHealth {
     
     try {
         $Status = docker compose ps $ServiceName --format json | ConvertFrom-Json
+        if (-not $Status) {
+            # Not a root-project service (e.g. the inference plane is its own
+            # compose project since 2026-08-21 K.1) - look up by container NAME.
+            $ByName = docker ps --filter "name=^$ServiceName$" --format "{{.Names}} {{.Status}}"
+            if ($ByName -match '^' + [regex]::Escape($ServiceName) + ' Up') {
+                if ($ByName -match 'unhealthy') { return $false }
+                return $true
+            }
+            return $false
+        }
         
         # For OpenWebUI with GPU, allow extra time for CUDA initialization
         if ($ServiceName -eq "openwebui" -and $Status.State -eq "running") {
@@ -314,7 +324,7 @@ function Repair-LlamaCppConnectivity {
         # Check if llama-cpp-upstream container is running
         if (-not (Test-ServiceHealth "llama-cpp-upstream")) {
             Write-LogEntry "llama-cpp-upstream container not running, starting..." "WARN"
-            docker compose up -d llama-cpp-upstream | Out-Null
+            docker compose -f inference\docker-compose.yml --env-file .env up -d llama-cpp-upstream | Out-Null
             Start-Sleep 30
 
             if (-not (Test-ServiceHealth "llama-cpp-upstream")) {
@@ -326,7 +336,7 @@ function Repair-LlamaCppConnectivity {
         # Also check llama-cpp-embed-upstream
         if (-not (Test-ServiceHealth "llama-cpp-embed-upstream")) {
             Write-LogEntry "llama-cpp-embed-upstream container not running, starting..." "WARN"
-            docker compose up -d llama-cpp-embed-upstream | Out-Null
+            docker compose -f inference\docker-compose.yml --env-file .env up -d llama-cpp-embed-upstream | Out-Null
             Start-Sleep 15
         }
         
@@ -337,7 +347,7 @@ function Repair-LlamaCppConnectivity {
         
         while ($WaitTime -lt $MaxWaitTime) {
             try {
-                docker compose exec -T llama-cpp-upstream curl -s -f --max-time 5 http://localhost:8080/health | Out-Null
+                docker exec llama-cpp-upstream curl -s -f --max-time 5 http://localhost:8080/health | Out-Null
                 if ($LASTEXITCODE -eq 0) {
                     Write-LogEntry "llama-cpp API is now responding" "SUCCESS"
                     break

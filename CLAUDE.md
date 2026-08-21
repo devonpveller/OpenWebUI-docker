@@ -13,7 +13,8 @@ for the full inventory — networks, ports, dependency order.
 
 | Stack | Driven with | Contents |
 |-------|-------------|----------|
-| **Main** (`ai-stack`) | `docker compose ...` (root file includes `compose/<plane>.yml` since 2026-08-20) | core (`openwebui`, `tailscale`, `open-terminal`), inference (`llm-gateway` + `llm-gateway-db`/`-ui` — LiteLLM **front door**, holds the `llama-cpp`/`llama-cpp-embed` aliases; `llm-queue` — per-caller admission/priority; `llama-cpp-upstream`, `llama-cpp-embed-upstream` — real inference), memory (`mnemory`, `mnemory-cloud-gateway`), search (`vpn` — Mullvad egress for engine queries AND page fetches; `redis`, `searxng`, `gateway`), coder (`little-coder`, `lc-egress`), aux (`surrealdb`, `open_notebook` — staying until the wiki workbench matures), backup sidecars. **26 default services.** |
+| **Main** (`ai-stack`) | `docker compose ...` (root file includes `compose/<plane>.yml` since 2026-08-20) | Part K (2026-08-21, in progress) is dissolving this into per-plane projects; root becomes the **network anchor** (owns `llm-net`/`app-net`/`default`). Still here: core (`openwebui`, `tailscale`, `open-terminal`), memory (`mnemory`, `mnemory-cloud-gateway`), search (`vpn` — Mullvad egress for engine queries AND page fetches; `redis`, `searxng`, `gateway`), coder (`little-coder`, `lc-egress`), aux (`surrealdb`, `open_notebook` — staying until the wiki workbench matures), backup sidecars. **18 default services.** |
+| **Inference** (`inference`, own project since 2026-08-21 K.1) | `docker compose -f inference/docker-compose.yml --env-file .env ...` (or `scripts/stack/stack.ps1`) | The LLM host: `llm-gateway` + `llm-gateway-db`/`-ui` — LiteLLM **front door**, holds the `llama-cpp`/`llama-cpp-embed` aliases on the anchor's `llm-net` (external); `llm-queue` — per-caller admission/priority; `llama-cpp-upstream`, `llama-cpp-embed-upstream` — real inference on its **native** `llm-backend-net`; `llm-gateway-backup`, `lm-models-backup`. **8 services.** |
 | **Portal** (`portal`, own compose project since 2026-08-21) | `scripts/portal/portal-on.ps1` / `portal-off.ps1` (`portal/docker-compose.yml`) | 12 services (`caddy`, `authelia`, `cloudflared`, watchers/alerter/tripwire/cron + 2 backups). Internet-exposed auth front-end; attaches to `ai-stack_app-net` externally to reach openwebui/open_notebook — positioned to front more apps later. |
 | **Open Brain** (`open-brain`) | `docker compose -f OB1/docker/docker-compose.yml ...` | ~26 `openbrain-*` containers (own project; attaches to `ai-stack_llm-net` as external; owns its two backup sidecars since 2026-08-21). Bring up **after** `llm-gateway` is healthy; tear down before the main stack. |
 | **agent-org** | `docker compose -f agent-org/docker/docker-compose.yml ...` | Mattermost (+db) + `agent-bridge` (the governed org bus, 700+ tests) + profile-gated `workers`/`cloud` slices. |
@@ -26,7 +27,10 @@ Retired 2026-08-20 (CLEANUP-PLAN v3): `watchtower` (manual updates per
 **Inference plane:** every service reaches inference through
 `http://llama-cpp:8080` / `http://llama-cpp-embed:8080` — **network aliases on
 `llm-gateway` (LiteLLM)**, which forwards through **`llm-queue`**
-(hold-and-dispatch, per-caller lanes) to the `*-upstream` servers. **Never
+(hold-and-dispatch, per-caller lanes) to the `*-upstream` servers. The whole
+plane is its own compose project since 2026-08-21 (K.1):
+`inference/docker-compose.yml`, which owns `llm-backend-net` and attaches to
+the anchor's `llm-net` externally — the alias contract is unchanged. **Never
 route inference around LiteLLM**; only health/GPU/recovery probes may target
 `*-upstream` directly. Enforced pre-commit by
 `scripts/checks/check-llm-gateway-routing.ps1`. Gotchas: LiteLLM enforces per-caller

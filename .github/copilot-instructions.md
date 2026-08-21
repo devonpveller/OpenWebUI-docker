@@ -6,15 +6,19 @@
 
 ## What this repo is
 
-A self-hosted AI stack on Windows + Docker Desktop, organized as **four Docker
-Compose projects** (main, portal, Open Brain, agent-org):
+A self-hosted AI stack on Windows + Docker Desktop, organized as **multiple
+Docker Compose projects** (Part K, 2026-08-21, is dissolving the old main
+project into per-plane projects; root `ai-stack` = the network anchor):
 
 - **Main** (`ai-stack`, `docker-compose.yml`): Open WebUI, tailscale,
-  inference plane (`llm-gateway` = LiteLLM front door → `llm-queue` →
-  `llama-cpp-upstream`/`llama-cpp-embed-upstream`), mnemory memory layer,
-  private search gateway (Mullvad + SearXNG), little-coder, aux services,
-  7 backup sidecars. The portal is its OWN compose project since 2026-08-21
+  mnemory memory layer, private search gateway (Mullvad + SearXNG),
+  little-coder, aux services, backup sidecars — shrinking as planes split
+  out. The portal is its OWN compose project since 2026-08-21
   (`portal/docker-compose.yml`), driven only by `scripts/portal/portal-on.ps1`.
+- **Inference** (`inference/docker-compose.yml`, own project since K.1):
+  `llm-gateway` = LiteLLM front door → `llm-queue` →
+  `llama-cpp-upstream`/`llama-cpp-embed-upstream`, + gateway db/ui and the
+  llm-gateway/lm-models backups. Drive with `--env-file .env` from the root.
 - **Open Brain** (`OB1/docker/docker-compose.yml`): a separate project of
   ~26 `openbrain-*` containers (incl. its own db/wiki backup sidecars),
   attaching to `ai-stack_llm-net` externally.

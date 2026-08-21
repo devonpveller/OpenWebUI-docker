@@ -15,18 +15,20 @@ $ErrorActionPreference = "Stop"
 # Service inventory — every container the recovery stack maintains.
 #
 # The MAIN compose project (docker-compose.yml) holds several planes:
-#   core    openwebui, llama-cpp-upstream, llama-cpp-embed-upstream, llm-queue,
-#           llm-gateway-db, llm-gateway, llm-gateway-ui, tailscale
-#           (llm-queue = B2 admission controller between the upstreams and LiteLLM;
-#            llm-gateway-ui = master-key'd Admin-UI sidecar / analytics dashboard)
+#   core    openwebui, tailscale
+#   (the INFERENCE plane -- llama-cpp upstreams, llm-queue, llm-gateway+db/ui,
+#    llm-gateway-backup, lm-models-backup -- is its own compose project since
+#    2026-08-21 Part K.1: inference\docker-compose.yml, driven below via
+#    Start-/Stop-InferenceStack. It owns llm-backend-net and attaches to the
+#    anchor's ai-stack_llm-net externally.)
 #   memory  mnemory, mnemory-cloud-gateway
 #   search  vpn, redis, searxng, gateway (Private Search Gateway)
 #   coder   open-terminal, little-coder, lc-egress
 #   aux    , surrealdb, open_notebook
 #   backup  mnemory-backup, openwebui-backup, little-coder-backup,
-#          , tailscale-backup, lm-models-backup,
-#           open-notebook-backup (openbrain-db/wiki backups moved to the
-#           OB1 project 2026-08-21 — they start with Start-OB1Stack)
+#          , tailscale-backup, open-notebook-backup
+#           (openbrain-db/wiki backups live in the OB1 project; llm-gateway/
+#            lm-models backups live in the inference project -- 2026-08-21)
 #
 # PORTAL plane (caddy, authelia, cloudflared, portal-init, portal-alerter,
 # authelia-watcher, authelia-notif-bridge, integrity-tripwire, portal-cron,
@@ -53,25 +55,35 @@ $Script:OB1Compose = "OB1\docker\docker-compose.yml"
 # default plane (mattermost + agent-bridge + their DBs) is.
 $Script:AgentOrgCompose = "agent-org\docker\docker-compose.yml"
 
+# The INFERENCE plane is a separate compose project since 2026-08-21 (Part K.1,
+# project name "inference"). It owns llm-backend-net; llm-gateway carries the
+# llama-cpp/llama-cpp-embed aliases on the anchor's ai-stack_llm-net (external).
+# It must start BEFORE the callers and stop AFTER them. --env-file is REQUIRED
+# (single root .env; the compose file fails loud without it).
+$Script:InferenceCompose = "inference\docker-compose.yml"
+$Script:InferenceServices = @(
+    "llama-cpp-upstream", "llama-cpp-embed-upstream", "llm-queue",
+    "llm-gateway-db", "llm-gateway", "llm-gateway-ui",
+    "llm-gateway-backup", "lm-models-backup"
+)
+
 # Main compose services, low-level dependency first.
 # (Portal plane omitted on purpose — profile-gated; see the header note.)
 $Script:MainStackServices = @(
-    "openwebui", "llama-cpp-upstream", "llama-cpp-embed-upstream",
-    "llm-queue", "llm-gateway-db", "llm-gateway", "llm-gateway-ui", "tailscale",
+    "openwebui", "tailscale",
     "mnemory", "mnemory-cloud-gateway",
      "surrealdb", "open_notebook",
     "vpn", "redis", "searxng", "gateway",
     "open-terminal", "little-coder", "lc-egress",
     # Backup cron sidecars (see helper arrays below).
     "mnemory-backup", "openwebui-backup", "little-coder-backup",
-     "tailscale-backup", "lm-models-backup", "open-notebook-backup",
-    "llm-gateway-backup"
+     "tailscale-backup", "open-notebook-backup"
 )
 
 # Backup sidecars touching only main-stack/host resources — safe to nudge anytime.
 $Script:MainBackups = @(
     "mnemory-backup", "openwebui-backup", "little-coder-backup",
-     "tailscale-backup", "lm-models-backup", "open-notebook-backup"
+     "tailscale-backup", "open-notebook-backup"
 )
 # (openbrain-db-backup / openbrain-wiki-backup moved INTO the OB1 compose
 # project 2026-08-21 — they now start/stop with Start-OB1Stack, no nudge needed.)
@@ -184,6 +196,38 @@ function Stop-OB1Stack {
     }
 }
 
+function Start-InferenceStack {
+    # Bring the inference compose project up. Internal depends_on ordering
+    # (upstreams -> llm-queue -> llm-gateway-db -> llm-gateway) is declared in
+    # the project file; a single `up -d` runs it. Requires the anchor networks
+    # (any root-project `up` creates them).
+    Write-Log "INFO" "Starting inference project (upstreams -> llm-queue -> LiteLLM gateway)..."
+    try {
+        docker compose -f $Script:InferenceCompose --env-file .env up -d
+        if (-not (Wait-ForHealthy "llm-gateway" 240)) {
+            Write-Log "WARN" "llm-gateway health check failed, but continuing..."
+        }
+        else {
+            Write-Log "SUCCESS" "Inference project healthy (gateway answering)"
+        }
+    }
+    catch {
+        Write-Log "ERROR" "Failed to start inference project: $_"
+    }
+}
+
+function Stop-InferenceStack {
+    # compose stop runs reverse dependency order: backups/ui/gateway ->
+    # llm-queue (graceful drain) -> upstreams. Callers must stop first.
+    Write-Log "INFO" "Stopping inference project..."
+    try {
+        docker compose -f $Script:InferenceCompose --env-file .env stop --timeout 30
+    }
+    catch {
+        Write-Log "WARN" "Inference stop had issues, continuing: $_"
+    }
+}
+
 function Start-OB1Stack {
     # Bring the Open Brain (OB1) compose project up. OB1's own depends_on
     # handles its internal ordering; it must run AFTER the main stack so
@@ -287,6 +331,12 @@ function Test-BasicConnectivity {
             $s = ($containers | Where-Object { $_.Service -eq $svc }).State
             $states[$svc] = if ($s) { $s } else { "absent" }
         }
+        # Inference plane lives in its own project - look its containers up by
+        # NAME (container names are stable across projects).
+        $running = @(docker ps --format "{{.Names}}")
+        foreach ($svc in $Script:InferenceServices) {
+            $states[$svc] = if ($running -contains $svc) { "running" } else { "absent" }
+        }
 
         # Report container states grouped by plane so 20+ services stay readable.
         Write-Log "INFO" ("Core   - openwebui: {0}, llama-cpp-upstream: {1}, llama-cpp-embed-upstream: {2}, tailscale: {3}" -f `
@@ -340,7 +390,7 @@ function Test-BasicConnectivity {
 
                     # Test llama-cpp-upstream connectivity
                     try {
-                        docker compose exec llama-cpp-upstream curl -f -s http://localhost:8080/health 2>$null | Out-Null
+                        docker exec llama-cpp-upstream curl -f -s http://localhost:8080/health 2>$null | Out-Null
                         if ($LASTEXITCODE -eq 0) {
                             Write-Log "INFO" "llama-cpp-upstream connectivity: PASSED"
 
@@ -398,7 +448,7 @@ function Invoke-MinimalRecovery {
         # from under it. The order MUST be: inference (netns-independent) → restart
         # openwebui → WAIT until it is healthy → only THEN restart tailscale so it
         # re-attaches to the new, stable namespace.
-        docker compose restart llama-cpp-upstream llama-cpp-embed-upstream
+        docker compose -f $Script:InferenceCompose --env-file .env restart llama-cpp-upstream llama-cpp-embed-upstream
 
         docker compose restart openwebui
         if (-not (Wait-ForHealthy "openwebui" 240)) {
@@ -420,7 +470,7 @@ function Invoke-MinimalRecovery {
         # and LiteLLM; both must be up before callers — design B2). A
         # llama-cpp-upstream restart drops nothing here (httpx reconnects), but
         # nudge them so a cold dependent comes back.
-        docker compose up -d llm-queue llm-gateway
+        docker compose -f $Script:InferenceCompose --env-file .env up -d llm-queue llm-gateway
 
         docker compose up -d mnemory mnemory-cloud-gateway `
             surrealdb open_notebook `
@@ -587,23 +637,9 @@ function Invoke-EmergencyRecovery {
     # OpenWebUI backup scheduler.
     Stop-ServiceGroup "OpenWebUI backup" @("openwebui-backup")
 
-    # LiteLLM gateway — stops after callers, before the upstream inference servers
-    # (callers reach inference through it; the upstreams must outlive it).
-    Stop-ServiceGroup "LiteLLM gateway" @("llm-gateway-backup", "llm-gateway-ui", "llm-gateway", "llm-gateway-db")
-
-    # llm-queue (B2 admission controller) — stops after the gateway (which
-    # forwards through it), before the upstreams it forwards to.
-    if (-not (Stop-ServiceGracefully "llm-queue" 30)) {
-        Write-Log "WARN" "llm-queue stop had issues, continuing..."
-    }
-
-    # llama-cpp-upstream inference services.
-    if (-not (Stop-ServiceGracefully "llama-cpp-upstream" 30)) {
-        Write-Log "WARN" "llama-cpp-upstream stop had issues, continuing..."
-    }
-    if (-not (Stop-ServiceGracefully "llama-cpp-embed-upstream" 30)) {
-        Write-Log "WARN" "llama-cpp-embed-upstream stop had issues, continuing..."
-    }
+    # Inference project — stops after callers (compose handles its internal
+    # reverse order: gateway -> llm-queue -> upstreams).
+    Stop-InferenceStack
 
     # OpenWebUI last — it provides the shared network namespace.
     if (-not (Stop-ServiceGracefully "openwebui" 45)) {
@@ -642,64 +678,9 @@ function Invoke-EmergencyRecovery {
     Write-Log "INFO" "Allowing network namespace to stabilize..."
     Start-Sleep -Seconds 20
 
-    # Start llama-cpp-upstream services (GPU inference) — many planes depend on these
-    Write-Log "INFO" "Starting llama-cpp-upstream with GPU support..."
-    try {
-        docker compose up -d llama-cpp-upstream
-        if (-not (Wait-ForHealthy "llama-cpp-upstream" 120)) {
-            Write-Log "WARN" "llama-cpp-upstream health check failed, but continuing..."
-        }
-    }
-    catch {
-        Write-Log "ERROR" "Failed to start llama-cpp-upstream: $_"
-        throw
-    }
-
-    Write-Log "INFO" "Starting llama-cpp-embed-upstream..."
-    try {
-        docker compose up -d llama-cpp-embed-upstream
-        if (-not (Wait-ForHealthy "llama-cpp-embed-upstream" 60)) {
-            Write-Log "WARN" "llama-cpp-embed-upstream health check failed, but continuing..."
-        }
-    }
-    catch {
-        Write-Log "ERROR" "Failed to start llama-cpp-embed-upstream: $_"
-        throw
-    }
-
-    # llm-queue (B2 admission controller) — between the upstreams and LiteLLM.
-    # Starts AFTER the upstreams are healthy, BEFORE the gateway (which forwards
-    # chat through it). Restart-fast (stateless proxy, no model load).
-    Write-Log "INFO" "Starting llm-queue (inference admission controller)..."
-    try {
-        docker compose up -d llm-queue
-        if (-not (Wait-ForHealthy "llm-queue" 60)) {
-            Write-Log "WARN" "llm-queue health check failed, but continuing..."
-        }
-    }
-    catch {
-        Write-Log "ERROR" "Failed to start llm-queue: $_"
-    }
-
-    # LiteLLM gateway — the front door every caller reaches inference through.
-    # Starts after BOTH upstream inference servers + llm-queue are healthy; before any caller.
-    Write-Log "INFO" "Starting LiteLLM gateway (db, then gateway)..."
-    try {
-        docker compose up -d llm-gateway-db
-        Wait-ForHealthy "llm-gateway-db" 60 | Out-Null
-        docker compose up -d llm-gateway
-        if (-not (Wait-ForHealthy "llm-gateway" 150)) {
-            Write-Log "WARN" "llm-gateway health check failed, but continuing..."
-        }
-        docker compose up -d llm-gateway-backup
-        # llm-gateway-ui: master-key'd Admin-UI sidecar (analytics dashboard).
-        # Depends only on llm-gateway-db (already healthy) — serves no inference,
-        # so it is non-critical to the recovery path; start it best-effort.
-        docker compose up -d llm-gateway-ui
-    }
-    catch {
-        Write-Log "ERROR" "Failed to start LiteLLM gateway: $_"
-    }
+    # Inference project — upstreams -> llm-queue -> gateway (+ backups/ui),
+    # ordered by its own depends_on. Own compose project since K.1.
+    Start-InferenceStack
 
     # Start Tailscale (depends on OpenWebUI network)
     Write-Log "INFO" "Starting Tailscale with shared network namespace..."
@@ -814,7 +795,7 @@ function Invoke-EmergencyRecovery {
 
     try {
         Write-Log "INFO" "llama-cpp-upstream status:"
-        docker compose exec llama-cpp-upstream curl -s http://localhost:8080/health
+        docker exec llama-cpp-upstream curl -s http://localhost:8080/health
 
         Write-Log "INFO" "Tailscale status:"
         docker compose exec tailscale tailscale --socket=/tmp/tailscaled.sock status
@@ -844,8 +825,11 @@ function Invoke-EmergencyRecovery {
 
         Write-Log "INFO" "Backup scheduler status:"
         docker compose ps mnemory-backup openwebui-backup little-coder-backup `
-            tailscale-backup lm-models-backup open-notebook-backup `
+            tailscale-backup open-notebook-backup `
             --format "table {{.Service}}\t{{.Status}}" 2>$null
+
+        Write-Log "INFO" "Inference project status:"
+        docker compose -f $Script:InferenceCompose --env-file .env ps --format "table {{.Service}}\t{{.Status}}" 2>$null
 
         if (Test-OB1Available) {
             Write-Log "INFO" "Open Brain (OB1) status:"
@@ -900,6 +884,12 @@ function Invoke-NuclearRecovery {
         catch { Write-Log "WARN" "OB1 teardown had issues: $_" }
     }
 
+    # Inference project down BEFORE the root `down` so ai-stack_llm-net can
+    # drop its external endpoints (same reason OB1 goes first).
+    Write-Log "INFO" "Tearing down inference project..."
+    try { docker compose -f $Script:InferenceCompose --env-file .env down }
+    catch { Write-Log "WARN" "Inference teardown had issues: $_" }
+
     Write-Log "INFO" "Performing complete main-stack shutdown..."
     docker compose down
 
@@ -907,7 +897,12 @@ function Invoke-NuclearRecovery {
     Start-Sleep -Seconds 20
 
     Write-Log "INFO" "Starting full main stack with proper dependency order..."
+    # Root up first: recreates the anchor networks the other projects attach
+    # to. Callers retry until the gateway answers (same posture as OB1).
     docker compose up -d
+
+    # Inference project next - callers go healthy once the gateway is up.
+    Start-InferenceStack
 
     Write-Log "INFO" "Waiting for complete stack initialization..."
     Start-Sleep -Seconds 90
@@ -951,7 +946,9 @@ function Invoke-GPUReset {
     Write-Log "INFO" "========================================="
 
     Write-Log "INFO" "Stopping GPU-dependent services for reset..."
-    docker compose down llama-cpp-upstream llama-cpp-embed-upstream openwebui mnemory
+    try { docker compose -f $Script:InferenceCompose --env-file .env down }
+    catch { Write-Log "WARN" "Inference teardown had issues: $_" }
+    docker compose down openwebui mnemory
 
     Write-Log "INFO" "Rebuilding OpenWebUI with fresh GPU configuration..."
     docker compose build --no-cache openwebui
@@ -960,8 +957,8 @@ function Invoke-GPUReset {
     docker compose up -d openwebui
 
     if (Wait-ForHealthy "openwebui" 240) {
-        Write-Log "INFO" "Starting llama-cpp-upstream with GPU support..."
-        docker compose up -d llama-cpp-upstream
+        Write-Log "INFO" "Starting the inference project with GPU support..."
+        Start-InferenceStack
 
         if (Wait-ForHealthy "llama-cpp-upstream" 120) {
             if (Test-GPUAvailability) {
@@ -969,17 +966,8 @@ function Invoke-GPUReset {
 
                 # Test llama-cpp-upstream GPU access
                 try {
-                    docker compose exec llama-cpp-upstream curl -s http://localhost:8080/health
+                    docker exec llama-cpp-upstream curl -s http://localhost:8080/health
                     Write-Log "SUCCESS" "llama-cpp-upstream GPU integration verified"
-
-                    # Also start embedding service
-                    docker compose up -d llama-cpp-embed-upstream
-                    Write-Log "INFO" "llama-cpp-embed-upstream started"
-
-                    # Inference admission plane (B2): llm-queue then LiteLLM, so
-                    # callers reach inference through the gateway → queue → upstream.
-                    docker compose up -d llm-queue llm-gateway
-                    Write-Log "INFO" "llm-queue + LiteLLM gateway started"
 
                     # Restart the planes that consume llama-cpp-upstream inference:
                     # the memory layer, the little-coder plane, and OB1.

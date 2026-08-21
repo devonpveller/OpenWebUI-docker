@@ -198,9 +198,9 @@ services:
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
-    depends_on:
-      llm-gateway:
-        condition: service_healthy
+    # (cross-project since K.1 2026-08-21: llm-gateway lives in the inference
+    #  project; startup order is enforced by stack.ps1 / recovery, and the
+    #  service retries until the gateway answers -- same posture as OB1.)
     healthcheck:
       test: ["CMD", "curl", "-fsS", "--max-time", "5", "http://localhost:8000/health"]
       interval: 30s

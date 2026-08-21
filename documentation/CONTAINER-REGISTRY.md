@@ -23,7 +23,13 @@ purpose. Containers that failed that test today were removed (see
 | `tailscale` | Tailnet ingress; **shares openwebui's netns** | Carries all 8 tailnet serve routes (OWUI, llama-cpp aliases, ON ×2, wiki, LiteLLM UI, Mattermost). Restart order openwebui→tailscale is mandatory |
 | `open-terminal` | Sandboxed exec backend for little-coder | The only place agent code executes; isolated on lc-net with key'd API |
 
-### Inference plane (the LiteLLM front door)
+### Inference plane (the LiteLLM front door) — own compose project `inference` since 2026-08-21 (Part K.1)
+
+> `inference/docker-compose.yml`, driven with `--env-file .env` from the repo
+> root (or `scripts/stack/stack.ps1`). Owns `llm-backend-net` + the
+> `inference_*` data volumes; attaches to the anchor's `ai-stack_llm-net`
+> externally, where `llm-gateway` carries the aliases. The two inference
+> backup sidecars (`llm-gateway-backup`, `lm-models-backup`) moved with it.
 
 | Container | Purpose | Why |
 |---|---|---|
@@ -67,14 +73,15 @@ purpose. Containers that failed that test today were removed (see
 ### Backup sidecars (one per stateful store — backup-conventions runbook)
 
 `mnemory-backup`, `openwebui-backup` (vector_db excluded → 23 s nightly),
-`llm-gateway-backup`, `little-coder-backup`,
+`little-coder-backup`,
 `open-notebook-backup` (surql export + notebook tar; env-var creds),
-`tailscale-backup` (state/certs),
-`lm-models-backup` (the GGUF store — **not LM Studio**, despite the host
-path). The openbrain-db/wiki backup sidecars moved INTO the OB1 project
-2026-08-21 (OB1 owns its own backups; artifacts still land in `backups/`);
-`smolcrawl-backup` retired 2026-08-21 with smolcrawl-pipelines.
-Justification for all seven: every stateful byte has exactly one
+`tailscale-backup` (state/certs).
+Moved with their planes 2026-08-21: openbrain-db/wiki backups → the OB1
+project; `llm-gateway-backup` + `lm-models-backup` (the GGUF store — **not
+LM Studio**, despite the host path) → the inference project (K.1). All
+artifacts still land in `backups/`. `smolcrawl-backup` retired 2026-08-21
+with smolcrawl-pipelines.
+Justification: every stateful byte has exactly one
 sidecar producing verified artifacts into `backups/`, freshness-watched
 twice (watchdog recency table + sysadmin daily check). Scheduler flavors are
 a known 3-way split (crond/supercronic/sleep-loop) — unification queued in

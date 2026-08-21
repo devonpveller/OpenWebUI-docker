@@ -1,6 +1,20 @@
-# compose/inference.yml - LiteLLM front door (llm-gateway + db/ui) -> llm-queue -> llama.cpp upstreams
-# Split from the 2,2xx-line root docker-compose.yml 2026-08-20 (CLEANUP-PLAN v3 D.1).
-# Networks/volumes are defined in the root file.
+# inference/docker-compose.yml — the INFERENCE compose project (K.1, 2026-08-21).
+# Moved out of the root ai-stack project (CLEANUP-PLAN Part K): the LLM host is
+# its own service tree. Everything here is definition-identical to the former
+# compose/inference.yml + the two inference backup sidecars from
+# compose/backups.yml — only paths (../) and network ownership changed.
+#
+# Drive it with scripts/stack/stack.ps1, or manually FROM THE REPO ROOT:
+#   docker compose -f inference/docker-compose.yml --env-file .env up -d
+# The ${LITELLM_DB_PASSWORD:?} guard makes a bare `up` without the env file
+# fail loud instead of starting with empty credentials.
+#
+# Seam: llm-net is OWNED by the root ai-stack anchor project (callers live
+# there and in other projects); this project attaches externally and holds the
+# llama-cpp / llama-cpp-embed aliases on llm-gateway. llm-backend-net is
+# plane-internal and native here — nothing outside inference may join it.
+name: inference
+
 services:
   llama-cpp-upstream:
     image: ghcr.io/mostlygeek/llama-swap:cuda
@@ -18,8 +32,8 @@ services:
       - "127.0.0.1:8081:8080"
     volumes:
       - C:\Users\yamao\.lmstudio\models:/models:ro
-      - ./config/llama-swap.config.yaml:/app/config.yaml:ro
-      - ./config/chat-template.jinja:/etc/llama/chat-template.jinja:ro
+      - ../config/llama-swap.config.yaml:/app/config.yaml:ro
+      - ../config/chat-template.jinja:/etc/llama/chat-template.jinja:ro
     environment:
       - NVIDIA_VISIBLE_DEVICES=${GPU_LLAMA_CPP_DEVICE_ID:-0}
       - CUDA_VISIBLE_DEVICES=${GPU_LLAMA_CPP_DEVICE_ID:-0}
@@ -94,7 +108,7 @@ services:
     ports:
       - "127.0.0.1:8082:8080"
     volumes:
-      - ./data/models/embeddings:/models:ro
+      - ../data/models/embeddings:/models:ro
     environment:
       # NVIDIA_VISIBLE_DEVICES selects host GPU exposed to this container.
       # CUDA_VISIBLE_DEVICES intentionally unset: NVIDIA Container Toolkit
@@ -147,7 +161,7 @@ services:
 
   llm-queue:
     build:
-      context: ./llm-queue
+      context: ../llm-queue
       dockerfile: Dockerfile
     image: llm-queue:local
     container_name: llm-queue
@@ -241,10 +255,10 @@ services:
     #   docker exec llm-gateway-db psql -U litellm -d litellm -c '...'
     # The llm-traffic OWUI module reaches it the same way (OWUI is on llm-net).
     volumes:
-      - ./config/litellm.config.yaml:/app/config.yaml:ro
+      - ../config/litellm.config.yaml:/app/config.yaml:ro
       # J.1 (2026-08-21): pre-call hook injecting x-ai-stack-caller from the
       # virtual key's metadata - the identity signal llm-queue lanes key on.
-      - ./config/litellm/custom_callbacks.py:/app/custom_callbacks.py:ro
+      - ../config/litellm/custom_callbacks.py:/app/custom_callbacks.py:ro
     command: ["--config", "/app/config.yaml", "--port", "8080"]
     environment:
       # DATABASE_URL expands ${LITELLM_DB_PASSWORD} from .env at compose-parse time.
@@ -284,7 +298,7 @@ services:
     environment:
       - POSTGRES_DB=litellm
       - POSTGRES_USER=litellm
-      - POSTGRES_PASSWORD=${LITELLM_DB_PASSWORD}
+      - POSTGRES_PASSWORD=${LITELLM_DB_PASSWORD:?set via --env-file ../.env or scripts/stack/stack.ps1}
     volumes:
       - llm-gateway-db-data:/var/lib/postgresql/data
     restart: unless-stopped
@@ -309,7 +323,7 @@ services:
     networks:
       - llm-net
     volumes:
-      - ./config/litellm.ui.config.yaml:/app/config.yaml:ro
+      - ../config/litellm.ui.config.yaml:/app/config.yaml:ro
     command: ["--config", "/app/config.yaml", "--port", "8080"]
     environment:
       - DATABASE_URL=postgres://litellm:${LITELLM_DB_PASSWORD}@llm-gateway-db:5432/litellm
@@ -335,3 +349,105 @@ services:
     labels:
       - "com.centurylinklabs.watchtower.enable=false"
 
+  llm-gateway-backup:
+    image: postgres:16-alpine
+    container_name: llm-gateway-backup
+    depends_on:
+      llm-gateway-db:
+        condition: service_healthy
+    networks:
+      - llm-net
+    environment:
+      - BACKUP_DIR=/backups
+      - PGHOST=llm-gateway-db
+      - PGUSER=litellm
+      - PGDATABASE=litellm
+      - PGPASSWORD=${LITELLM_DB_PASSWORD}
+      - RETAIN_DAYS=${LITELLM_BACKUP_RETAIN_DAYS:-7}
+    volumes:
+      - ../backups/llm-gateway:/backups
+      - ../backup/llm-gateway-backup.sh:/scripts/backup.sh:ro
+    entrypoint: ["/bin/sh", "-c", "while true; do /scripts/backup.sh || true; sleep 86400; done"]
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
+  # lm-models-backup -- weekly tar of the host GGUF model store (llama.cpp
+  # models; the .lmstudio path is historical). Sleep-loop; HEALTH_TCP probes
+  # llama-cpp-upstream (probe-only backend-net member, no inference client).
+  # Set LM_MODELS_BACKUP_INTERVAL= (empty) in .env to disable.
+  lm-models-backup:
+    image: alpine:3.21
+    container_name: lm-models-backup
+    # On llm-backend-net so its HEALTH_TCP liveness probe can reach the real
+    # inference server (llama-cpp-upstream:8080). Probe-only member with no
+    # inference client (cap_drop ALL) — it does NOT bypass the gateway. (Before
+    # isolation it sat on `default` and the cross-network probe never resolved.)
+    networks:
+      - llm-backend-net
+    volumes:
+      - C:\Users\yamao\.lmstudio\models:/data:ro
+      - ../backups/lm-models:/backups
+      - ../backup/generic-tar-backup.sh:/scripts/backup.sh:ro
+    environment:
+      - DATA_DIR=/data
+      - BACKUP_DIR=/backups
+      - PREFIX=lm-models
+      - RETAIN_COUNT=${LM_MODELS_BACKUP_RETAIN_COUNT:-2}
+      # llama-cpp-upstream serves models from this directory; backup runs when
+      # that REAL inference server is reachable. Probe the upstream by name, NOT
+      # the bare `llama-cpp` alias (which now resolves to llm-gateway and would
+      # report "reachable" even while the model server is down/paused). Empty
+      # HEALTH_TCP disables the probe (e.g., if you keep the upstream paused).
+      - HEALTH_TCP=${LM_MODELS_BACKUP_HEALTH_TCP:-llama-cpp-upstream:8080}
+      # 2026-08-01: crond -> sleep-loop (see openbrain-wiki-backup rationale).
+      # Weekly, since the llama.cpp model store (incl. the live ThinkingCap
+      # GGUF) rarely changes. MIN_AGE_SECS skips the expensive ~120 GB tar on
+      # start if a fresh-enough backup already exists (prevents restart-storm
+      # re-tars and an immediate re-tar right after a manual capture).
+      - BACKUP_INTERVAL=${LM_MODELS_BACKUP_INTERVAL:-604800}   # weekly
+      - MIN_AGE_SECS=${LM_MODELS_BACKUP_MIN_AGE_SECS:-43200}   # 12h
+      - TZ=UTC
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        if [ -z "$${BACKUP_INTERVAL}" ]; then
+          echo "[$$(date -u +%FT%TZ)] lm-models-backup DISABLED (LM_MODELS_BACKUP_INTERVAL is empty). Container will exit."
+          exit 0
+        fi
+        echo "[$$(date -u +%FT%TZ)] lm-models-backup started (sleep-loop; interval=$${BACKUP_INTERVAL}s, min_age=$${MIN_AGE_SECS}s, retain=$${RETAIN_COUNT})"
+        while true; do
+          sh /scripts/backup.sh || echo "[$$(date -u +%FT%TZ)] lm-models backup.sh exited $$?"
+          sleep "$${BACKUP_INTERVAL}"
+        done
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
+volumes:
+  # LiteLLM spend-log DB (transparent gateway, guide §1A). Migrated from
+  # ai-stack_llm-gateway-db-data 2026-08-21 (data copied).
+  llm-gateway-db-data:
+  # llm-queue's OWN analytics event store (B2/P3 SQLite, NOT LiteLLM's schema).
+  # Migrated from ai-stack_llm-queue-data 2026-08-21 (data copied).
+  llm-queue-data:
+
+networks:
+  # Caller-facing seam — owned by the root ai-stack anchor. The gateway (and
+  # only the gateway) attaches with the llama-cpp/llama-cpp-embed aliases.
+  llm-net:
+    external: true
+    name: ai-stack_llm-net
+  # Internal-only BACKEND plane: the real inference servers + llm-queue +
+  # the single ingress (llm-gateway) + the lm-models-backup liveness probe.
+  # Native to this project — callers physically cannot route around LiteLLM.
+  # Enforced at change time by scripts/checks/check-llm-gateway-routing.ps1.
+  llm-backend-net:
+    internal: true
