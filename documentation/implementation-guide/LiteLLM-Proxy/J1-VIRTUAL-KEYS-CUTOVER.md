@@ -55,6 +55,7 @@ a caller identity llm-queue can trust.
 | Caller | Lane today (policy.py) | Key configured where |
 |---|---|---|
 | Open WebUI main connection | `owui-chat` (prio 0) | Admin → Connections in `webui.db` (also listed in update-owui-to-0-11-0 UPGRADE-PLAN §connections) |
+| Open WebUI **embed** connection + `rag.openai.api_key` | `owui-chat` (same key) | **MISSED at cutover — found 2026-08-21 PM** ("error when prompting": `/openai/models/3` 500 on the keyless `llama-cpp-embed:8080/v1` connection, and RAG embeddings 401'd silently). Both set in `webui.db` config (`openai.api_keys[3]`, `rag.openai.api_key`) + frontend restart. LESSON: OWUI holds MULTIPLE gateway credentials — connections list AND the RAG embedding config; audit all of them on any auth change. |
 | `githelper` pipe | default | valve in `webui.db` (base `llama-cpp:8080/v1`) |
 | `mnemory` | `ollama` (prio 1) | `compose/memory.yml` `LLM_API_KEY` (rename the string to `mnemory` while touching it) |
 | `smolcrawl-pipelines` | — | (VALIDATED 2026-08-21: does NOT call the gateway — its LLM work goes through OWUI; no key needed) |
