@@ -15,7 +15,11 @@ $ErrorActionPreference = "Stop"
 # Service inventory — every container the recovery stack maintains.
 #
 # The MAIN compose project (docker-compose.yml) holds several planes:
-#   core    openwebui, tailscale
+#   aux     surrealdb, open_notebook, open-notebook-backup (retiring into
+#           the wiki eventually; joins OB1 in a later Part K step)
+#   (the FRONTEND plane -- openwebui, tailscale + their backups -- is its own
+#    compose project since 2026-08-21 Part K.5: frontend\docker-compose.yml.
+#    tailscale shares openwebui's netns INSIDE that project.)
 #   (the INFERENCE plane -- llama-cpp upstreams, llm-queue, llm-gateway+db/ui,
 #    llm-gateway-backup, lm-models-backup -- is its own compose project since
 #    2026-08-21 Part K.1: inference\docker-compose.yml, driven below via
@@ -28,8 +32,7 @@ $ErrorActionPreference = "Stop"
 #   (the CODER plane -- open-terminal, little-coder, lc-egress,
 #    little-coder-backup -- is its own compose project since 2026-08-21
 #    Part K.4: coder\docker-compose.yml. open-terminal moved in from core.)
-#   aux    , surrealdb, open_notebook
-#   backup  openwebui-backup, tailscale-backup, open-notebook-backup
+#   backup  open-notebook-backup
 #           (openbrain-db/wiki backups live in the OB1 project; llm-gateway/
 #            lm-models backups live in the inference project -- 2026-08-21)
 #
@@ -87,21 +90,21 @@ $Script:SearchServices = @("search-vpn", "search-redis", "searxng", "search-gate
 $Script:CoderCompose = "coder\docker-compose.yml"
 $Script:CoderServices = @("open-terminal", "little-coder", "lc-egress", "little-coder-backup")
 
+# The FRONTEND plane is a separate compose project since 2026-08-21 (Part K.5,
+# project name "frontend"): openwebui + tailscale (netns companion) + their
+# backups. The NETNS RULE lives inside the project's depends_on now, but the
+# operator-facing rule is unchanged: never restart openwebui alone.
+$Script:FrontendCompose = "frontend\docker-compose.yml"
+$Script:FrontendServices = @("openwebui", "tailscale", "openwebui-backup", "tailscale-backup")
+
 # Main compose services, low-level dependency first.
 # (Portal plane omitted on purpose — profile-gated; see the header note.)
 $Script:MainStackServices = @(
-    "openwebui", "tailscale",
-     "surrealdb", "open_notebook",
-    # Backup cron sidecars (see helper arrays below).
-    "openwebui-backup",
-     "tailscale-backup", "open-notebook-backup"
+    "surrealdb", "open_notebook", "open-notebook-backup"
 )
 
 # Backup sidecars touching only main-stack/host resources — safe to nudge anytime.
-$Script:MainBackups = @(
-    "openwebui-backup",
-     "tailscale-backup", "open-notebook-backup"
-)
+$Script:MainBackups = @("open-notebook-backup")
 # (openbrain-db-backup / openbrain-wiki-backup moved INTO the OB1 compose
 # project 2026-08-21 — they now start/stop with Start-OB1Stack, no nudge needed.)
 
@@ -379,7 +382,7 @@ function Test-BasicConnectivity {
         # Inference plane lives in its own project - look its containers up by
         # NAME (container names are stable across projects).
         $running = @(docker ps --format "{{.Names}}")
-        foreach ($svc in ($Script:InferenceServices + $Script:MemoryServices + $Script:SearchServices + $Script:CoderServices)) {
+        foreach ($svc in ($Script:InferenceServices + $Script:MemoryServices + $Script:SearchServices + $Script:CoderServices + $Script:FrontendServices)) {
             $states[$svc] = if ($running -contains $svc) { "running" } else { "absent" }
         }
 
@@ -429,7 +432,7 @@ function Test-BasicConnectivity {
             $states["llama-cpp-embed-upstream"] -eq "running" -and $states["tailscale"] -eq "running") {
             # Test OpenWebUI health
             try {
-                docker compose exec openwebui curl -f -s http://localhost:8080/health 2>$null | Out-Null
+                docker exec openwebui curl -f -s http://localhost:8080/health 2>$null | Out-Null
                 if ($LASTEXITCODE -eq 0) {
                     Write-Log "INFO" "OpenWebUI health check: PASSED"
 
@@ -495,14 +498,14 @@ function Invoke-MinimalRecovery {
         # re-attaches to the new, stable namespace.
         docker compose -f $Script:InferenceCompose --env-file .env restart llama-cpp-upstream llama-cpp-embed-upstream
 
-        docker compose restart openwebui
+        docker compose -f $Script:FrontendCompose --env-file .env restart openwebui
         if (-not (Wait-ForHealthy "openwebui" 240)) {
             Write-Log "WARN" "OpenWebUI not healthy after restart; restarting tailscale anyway so it is not left orphaned..."
         }
 
         # Tailscale LAST — re-attaches to openwebui's (now stable) netns and
         # re-applies its serve config via entrypoint.sh.
-        docker compose restart tailscale
+        docker compose -f $Script:FrontendCompose --env-file .env restart tailscale
         Wait-ForHealthy "tailscale" 90 | Out-Null
 
         # Ensure every auxiliary container is running (cheap no-op if already
@@ -555,7 +558,7 @@ function Invoke-MinimalRecovery {
 
 function Test-GPUAvailability {
     try {
-        $result = docker compose exec openwebui python -c "import torch; print('CUDA:', torch.cuda.is_available())" 2>$null
+        $result = docker exec openwebui python -c "import torch; print('CUDA:', torch.cuda.is_available())" 2>$null
         return $result -like "*True*"
     }
     catch {
@@ -668,28 +671,19 @@ function Invoke-EmergencyRecovery {
     # Search project (its compose stop runs reverse dependency order).
     Stop-PlaneStack "search" $Script:SearchCompose
 
-    # Tailscale (shares the OpenWebUI network namespace).
-    if (-not (Stop-ServiceGracefully "tailscale" 30)) {
-        Write-Log "WARN" "Tailscale stop had issues, continuing..."
-    }
-
     # OpenWebUI-dependent auxiliary services (open_notebook before surrealdb).
     Stop-ServiceGroup "auxiliary services" @( "open_notebook", "surrealdb")
 
     # Memory project (its compose stop orders gateway before mnemory).
     Stop-PlaneStack "memory" $Script:MemoryCompose
 
-    # OpenWebUI backup scheduler.
-    Stop-ServiceGroup "OpenWebUI backup" @("openwebui-backup")
-
     # Inference project — stops after callers (compose handles its internal
     # reverse order: gateway -> llm-queue -> upstreams).
     Stop-InferenceStack
 
-    # OpenWebUI last — it provides the shared network namespace.
-    if (-not (Stop-ServiceGracefully "openwebui" 45)) {
-        Write-Log "WARN" "OpenWebUI stop had issues, continuing..."
-    }
+    # Frontend project last — openwebui provides the shared network namespace;
+    # its compose stop runs tailscale (netns tenant) before openwebui.
+    Stop-PlaneStack "frontend" $Script:FrontendCompose 45
 
     # ── Phase 2: Clean up any orphaned network namespaces ──────────────────
     Write-Log "INFO" "Phase 2: Network namespace cleanup"
@@ -698,16 +692,22 @@ function Invoke-EmergencyRecovery {
     # ── Phase 3: Restart in correct dependency order ───────────────────────
     Write-Log "INFO" "Phase 3: Service restart"
 
-    # Start OpenWebUI first (with GPU passthrough)
-    Write-Log "INFO" "Starting OpenWebUI with GPU support..."
+    # Root anchor first: creates the shared ai-stack_* networks every plane
+    # project attaches to (the aux trio rides along).
+    Write-Log "INFO" "Starting the root anchor project (networks + aux)..."
+    docker compose up -d
+
+    # Frontend project: openwebui -> (healthy) -> tailscale, ordered by its
+    # own depends_on. The netns rule is encoded inside the project.
+    Write-Log "INFO" "Starting frontend project (openwebui + tailscale)..."
     try {
-        docker compose up -d openwebui
+        docker compose -f $Script:FrontendCompose --env-file .env up -d
         if (-not (Wait-ForHealthy "openwebui" 240)) {
             throw "OpenWebUI failed to become healthy"
         }
     }
     catch {
-        Write-Log "ERROR" "Failed to start OpenWebUI: $_"
+        Write-Log "ERROR" "Failed to start the frontend project: $_"
         throw
     }
 
@@ -727,17 +727,9 @@ function Invoke-EmergencyRecovery {
     # ordered by its own depends_on. Own compose project since K.1.
     Start-InferenceStack
 
-    # Start Tailscale (depends on OpenWebUI network)
-    Write-Log "INFO" "Starting Tailscale with shared network namespace..."
-    try {
-        docker compose up -d tailscale
-        if (-not (Wait-ForHealthy "tailscale" 90)) {
-            Write-Log "WARN" "Tailscale health check failed, testing connectivity..."
-        }
-    }
-    catch {
-        Write-Log "ERROR" "Failed to start Tailscale: $_"
-        throw
+    # (tailscale started with the frontend project above; give it its gate.)
+    if (-not (Wait-ForHealthy "tailscale" 90)) {
+        Write-Log "WARN" "Tailscale health check failed, testing connectivity..."
     }
 
     # Memory project (mnemory -> cloud gateway -> backup; own project since K.2).
@@ -805,10 +797,10 @@ function Invoke-EmergencyRecovery {
         docker exec llama-cpp-upstream curl -s http://localhost:8080/health
 
         Write-Log "INFO" "Tailscale status:"
-        docker compose exec tailscale tailscale --socket=/tmp/tailscaled.sock status
+        docker exec tailscale tailscale --socket=/tmp/tailscaled.sock status
 
         Write-Log "INFO" "Tailscale serve configuration:"
-        docker compose exec tailscale tailscale --socket=/tmp/tailscaled.sock serve status
+        docker exec tailscale tailscale --socket=/tmp/tailscaled.sock serve status
 
         Write-Log "INFO" "Mnemory status:"
         docker exec mnemory python -c "import urllib.request; print(urllib.request.urlopen('http://localhost:8051/health').read().decode())" 2>$null
@@ -832,9 +824,8 @@ function Invoke-EmergencyRecovery {
         docker compose -f $Script:CoderCompose --env-file .env ps --format "table {{.Service}}\t{{.Status}}" 2>$null
 
         Write-Log "INFO" "Backup scheduler status:"
-        docker compose ps openwebui-backup `
-            tailscale-backup open-notebook-backup `
-            --format "table {{.Service}}\t{{.Status}}" 2>$null
+        docker compose ps open-notebook-backup --format "table {{.Service}}\t{{.Status}}" 2>$null
+        docker compose -f $Script:FrontendCompose --env-file .env ps --format "table {{.Service}}\t{{.Status}}" 2>$null
 
         Write-Log "INFO" "Inference project status:"
         docker compose -f $Script:InferenceCompose --env-file .env ps --format "table {{.Service}}\t{{.Status}}" 2>$null
@@ -892,11 +883,18 @@ function Invoke-NuclearRecovery {
         catch { Write-Log "WARN" "OB1 teardown had issues: $_" }
     }
 
-    # Inference project down BEFORE the root `down` so ai-stack_llm-net can
-    # drop its external endpoints (same reason OB1 goes first).
-    Write-Log "INFO" "Tearing down inference project..."
-    try { docker compose -f $Script:InferenceCompose --env-file .env down }
-    catch { Write-Log "WARN" "Inference teardown had issues: $_" }
+    # Every plane project down BEFORE the root `down` so the anchor networks
+    # can drop their external endpoints (same reason OB1 goes first).
+    foreach ($plane in @(
+            @{ N = "frontend";  C = $Script:FrontendCompose },
+            @{ N = "coder";     C = $Script:CoderCompose },
+            @{ N = "search";    C = $Script:SearchCompose },
+            @{ N = "memory";    C = $Script:MemoryCompose },
+            @{ N = "inference"; C = $Script:InferenceCompose })) {
+        Write-Log "INFO" "Tearing down $($plane.N) project..."
+        try { docker compose -f $plane.C --env-file .env down }
+        catch { Write-Log "WARN" "$($plane.N) teardown had issues: $_" }
+    }
 
     Write-Log "INFO" "Performing complete main-stack shutdown..."
     docker compose down
@@ -909,8 +907,12 @@ function Invoke-NuclearRecovery {
     # to. Callers retry until the gateway answers (same posture as OB1).
     docker compose up -d
 
-    # Inference project next - callers go healthy once the gateway is up.
+    # Inference first (every caller needs it), then the caller planes.
     Start-InferenceStack
+    Start-PlaneStack "frontend" $Script:FrontendCompose "openwebui" 240
+    Start-PlaneStack "memory" $Script:MemoryCompose "mnemory" 90
+    Start-PlaneStack "search" $Script:SearchCompose "search-gateway" 150
+    Start-PlaneStack "coder" $Script:CoderCompose "little-coder" 120
 
     Write-Log "INFO" "Waiting for complete stack initialization..."
     Start-Sleep -Seconds 90
@@ -958,13 +960,14 @@ function Invoke-GPUReset {
     catch { Write-Log "WARN" "Inference teardown had issues: $_" }
     try { docker compose -f $Script:MemoryCompose --env-file .env down }
     catch { Write-Log "WARN" "Memory teardown had issues: $_" }
-    docker compose down openwebui
+    try { docker compose -f $Script:FrontendCompose --env-file .env down }
+    catch { Write-Log "WARN" "Frontend teardown had issues: $_" }
 
     Write-Log "INFO" "Rebuilding OpenWebUI with fresh GPU configuration..."
-    docker compose build --no-cache openwebui
+    docker compose -f $Script:FrontendCompose --env-file .env build --no-cache openwebui
 
-    Write-Log "INFO" "Starting OpenWebUI with GPU support..."
-    docker compose up -d openwebui
+    Write-Log "INFO" "Starting the frontend project with GPU support..."
+    docker compose -f $Script:FrontendCompose --env-file .env up -d
 
     if (Wait-ForHealthy "openwebui" 240) {
         Write-Log "INFO" "Starting the inference project with GPU support..."

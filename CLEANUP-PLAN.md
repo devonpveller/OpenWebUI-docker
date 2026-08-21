@@ -947,3 +947,22 @@ Per-plane playbook (portal-split procedure, now run 3×):
   daemon :8090/health ok WITH journals + workspace focus intact
   (github.com/anthropics/skills); open-terminal keyed /health ok.
   Root main stack = 7 default services.
+- **K.5 frontend — EXECUTED 2026-08-21.** `frontend/docker-compose.yml`
+  (4 services; `${WEBUI_SECRET_KEY:?}` guard — a recreate without it would
+  rotate webui.db encryption). openwebui-data (~10 GB) copied to
+  `frontend_openwebui-data`; all three nets external (default/llm-net/
+  app-net) so every DNS seam holds; images pinned openwebui:local /
+  tailscale:local (a rebuild reinstalls CUDA torch — deliberate only, per
+  UPDATE-MANAGEMENT). compose/core.yml deleted (empty after the move);
+  watchtower-era docker-compose.override.yml ARCHIVED (phantom tailscale
+  service; every setting already in the project). **LATENT J.1 BUG FOUND +
+  FIXED:** entrypoint.sh probed `llama-cpp:8080/health` unauthenticated —
+  401 since the master_key flip, so the llama-cpp/-embed tailnet serve
+  routes could never (re)configure after a restart; probe switched to
+  `/health/liveliness` (also kills the old model-thrash exposure), tailscale
+  image rebuilt. Recovery Phase 3 restructured: root anchor up (networks) →
+  frontend → GPU → inference → plane projects; nuclear tears down all five
+  plane projects before the root down. VERIFIED: 4/4 healthy under project
+  `frontend`; OWUI :3000 health ok; ALL 8 tailnet serve routes configured
+  in <60 s; from the new openwebui: inference (keyed alias) + search
+  gateway + mnemory all reachable. Root main stack = 3 services (aux trio).

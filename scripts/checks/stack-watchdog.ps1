@@ -119,7 +119,7 @@ function Test-NetworkConnectivity {
     param()
     
     try {
-        $null = docker compose exec -T tailscale ping -c 1 8.8.8.8 2>$null
+        $null = docker exec tailscale ping -c 1 8.8.8.8 2>$null
         return $LASTEXITCODE -eq 0
     }
     catch {
@@ -133,7 +133,7 @@ function Test-TailscaleConnection {
     param()
     
     try {
-        $null = docker compose exec -T tailscale tailscale --socket=/tmp/tailscaled.sock status 2>$null
+        $null = docker exec tailscale tailscale --socket=/tmp/tailscaled.sock status 2>$null
         return $LASTEXITCODE -eq 0
     }
     catch {
@@ -256,9 +256,9 @@ function Repair-TailscaleServes {
             #   --set-path     for non-root path prefixes (llama-cpp, llama-cpp-embed)
             #   --bg           leave the proxy running in the background
             if ($m.TailscalePath -eq '/') {
-                docker compose exec -T tailscale tailscale --socket=/tmp/tailscaled.sock serve --https=$($m.TailscalePort) --bg "http://127.0.0.1:$($m.LocalPort)" | Out-Null
+                docker exec tailscale tailscale --socket=/tmp/tailscaled.sock serve --https=$($m.TailscalePort) --bg "http://127.0.0.1:$($m.LocalPort)" | Out-Null
             } else {
-                docker compose exec -T tailscale tailscale --socket=/tmp/tailscaled.sock serve --https=$($m.TailscalePort) --set-path=$($m.TailscalePath) --bg "http://127.0.0.1:$($m.LocalPort)" | Out-Null
+                docker exec tailscale tailscale --socket=/tmp/tailscaled.sock serve --https=$($m.TailscalePort) --set-path=$($m.TailscalePath) --bg "http://127.0.0.1:$($m.LocalPort)" | Out-Null
             }
             if ($LASTEXITCODE -eq 0) {
                 Write-LogEntry "  added: $($m.Name) :$($m.TailscalePort)$($m.TailscalePath)" "SUCCESS"
@@ -297,7 +297,7 @@ function Test-EntrypointHealth {
         # check — that exact misclassification (a docker stderr warning bubbling
         # up under -Stop) is what crashed every run before 2026-06-05.
         try {
-            $Logs = docker compose logs tailscale --tail=5 2>$null
+            $Logs = docker logs tailscale --tail 5 2>$null
             if ($Logs -match "no such file or directory" -and $Logs -match "entrypoint") {
                 Write-LogEntry "CRITICAL: Entrypoint script not found in container. Rebuild required." "ERROR"
                 Write-LogEntry "Run: docker compose build --no-cache tailscale" "INFO"
@@ -390,7 +390,7 @@ function Repair-TailscaleService {
     try {
         # First try gentle restart (preserves network namespace)
         Write-LogEntry "Attempting gentle restart (preserving GPU container)..."
-        docker compose stop tailscale | Out-Null
+        docker compose -f frontend\docker-compose.yml --env-file .env stop tailscale | Out-Null
         Start-Sleep 5
         
         # Ensure OpenWebUI is still healthy before restarting Tailscale
@@ -420,7 +420,7 @@ function Repair-TailscaleService {
         # Use the proper network namespace recovery method
         docker compose down tailscale | Out-Null
         Start-Sleep 5  # Give OpenWebUI time to stabilize
-        docker compose up -d tailscale | Out-Null
+        docker compose -f frontend\docker-compose.yml --env-file .env up -d tailscale | Out-Null
         Start-Sleep 60  # Increased wait for GPU container + network namespace reattachment
         
         # Final verification
@@ -1320,7 +1320,7 @@ function Invoke-HealthCheck {
     # Check if Tailscale container is running
     if (-not (Test-ServiceHealth "tailscale")) {
         Write-LogEntry "Tailscale container not running, starting..." "WARN"
-        docker compose up -d tailscale | Out-Null
+        docker compose -f frontend\docker-compose.yml --env-file .env up -d tailscale | Out-Null
         
         # Wait longer for GPU container dependencies
         Start-Sleep 45  # Increased from 30s for GPU container startup

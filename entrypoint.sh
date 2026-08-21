@@ -87,9 +87,12 @@ MATTERMOST_TS_PORT=${MATTERMOST_TS_PORT:-8446}
 routes() {
     grep -v '^#' <<EOF
 # llama-cpp: LiteLLM gateway alias on llm-gateway -- must stay the alias, never a *-upstream real server; 18 attempts covers the 120s model-load start_period
-llama-cpp|$LLAMA_CPP_ENABLED|$LLAMA_CPP_HOST|$LLAMA_CPP_PORT|443|/llama-cpp|8235|/health|18|n
+# Probe path is /health/liveliness: unauthenticated liveness. Plain /health
+# 401s since J.1 (master_key, 2026-08-21) so the probe never passed -- and it
+# was the model-load-thrash endpoint anyway (CLAUDE.md inference gotchas).
+llama-cpp|$LLAMA_CPP_ENABLED|$LLAMA_CPP_HOST|$LLAMA_CPP_PORT|443|/llama-cpp|8235|/health/liveliness|18|n
 # llama-cpp-embed: LiteLLM gateway alias on llm-gateway -- must stay the alias, never a *-upstream real server
-llama-cpp-embed|$LLAMA_CPP_EMBED_ENABLED|$LLAMA_CPP_EMBED_HOST|$LLAMA_CPP_EMBED_PORT|443|/llama-cpp-embed|8236|/health|12|n
+llama-cpp-embed|$LLAMA_CPP_EMBED_ENABLED|$LLAMA_CPP_EMBED_HOST|$LLAMA_CPP_EMBED_PORT|443|/llama-cpp-embed|8236|/health/liveliness|12|n
 # open-notebook: Streamlit UI hosts only at root -> own tailnet port
 open-notebook|$OPEN_NOTEBOOK_ENABLED|$OPEN_NOTEBOOK_HOST|$OPEN_NOTEBOOK_PORT|$OPEN_NOTEBOOK_TS_PORT|/|8237|/|18|n
 # open-notebook-api: the browser derives <proto>://<host>:5055, so the tailnet port must be 5055 (shares OPEN_NOTEBOOK_ENABLED)

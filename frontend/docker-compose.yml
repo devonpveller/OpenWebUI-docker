@@ -1,11 +1,31 @@
-# compose/core.yml - OpenWebUI frontend, the tailscale netns companion, open-terminal, watchtower
-# Split from the 2,2xx-line root docker-compose.yml 2026-08-20 (CLEANUP-PLAN v3 D.1).
-# Networks/volumes are defined in the root file.
+# frontend/docker-compose.yml — the FRONTEND compose project (K.5, 2026-08-21).
+# openwebui + its tailscale netns companion + their backup sidecars, moved out
+# of the root ai-stack project (CLEANUP-PLAN Part K). Definitions unchanged;
+# only paths (../), image pinning, and network/volume ownership.
+#
+# Drive it with scripts/stack/stack.ps1, or manually FROM THE REPO ROOT:
+#   docker compose -f frontend/docker-compose.yml --env-file .env up -d
+# The ${WEBUI_SECRET_KEY:?} guard makes a bare `up` fail loud — REQUIRED,
+# because a recreate without that key would rotate it and break webui.db.
+#
+# NETNS RULE (unchanged): tailscale runs network_mode: service:openwebui.
+# NEVER restart openwebui alone — order is openwebui → (healthy) → tailscale;
+# compose's depends_on encodes it inside this project.
+# Seams (all external): ai-stack_default (reach search `gateway`, host UX),
+# llm-net (llama-cpp aliases), app-net (portal caddy → openwebui; the QUARTZ
+# tailnet serve route reaches caddy:8446 through it).
+name: frontend
+
 services:
   openwebui:
     build:
-      context: .
+      context: ..
       dockerfile: Dockerfile.openwebui-gpu
+    # Pinned to the proven image (retagged from ai-stack-openwebui at the K.5
+    # split). Rebuild DELIBERATELY only (docker compose ... build openwebui):
+    # the Dockerfile reinstalls CUDA torch (heavy) and upgrades track the
+    # UPDATE-MANAGEMENT runbook, never an `up` side effect.
+    image: openwebui:local
     container_name: openwebui
     ports:
       - "127.0.0.1:3000:8080" # Bind to localhost only
@@ -15,21 +35,21 @@ services:
       - app-net               # plan §7.4 — portal Caddy reaches openwebui:8080 here
     volumes:
       - openwebui-data:/app/backend/data
-      - ./config:/app/config:ro # Read-only config
+      - ../config:/app/config:ro # Read-only config
       # Narrow code mounts (v3 A.2/G.1) — the old `.:/host_project:ro` mount
       # shipped every on-disk secret into the internet-facing frontend. Only
       # the status-pipe subsystem, the system prompts the githelper pipe
       # reads, and the tailnet-info dump are visible now.
-      - ./status-pipe:/host_project/status-pipe:ro
-      - ./system-prompts:/host_project/system-prompts:ro
-      - ./data/tailscale:/host_project/data/tailscale:ro
+      - ../status-pipe:/host_project/status-pipe:ro
+      - ../system-prompts:/host_project/system-prompts:ro
+      - ../data/tailscale:/host_project/data/tailscale:ro
     environment:
       - TZ=America/New_York
       # Pinned session/encryption key (value in .env). 0.9.6 hard-requires this; and the
       # key was previously auto-generated into the container's EPHEMERAL layer
       # (/app/backend/.webui_secret_key, outside the data volume), so a recreate would
       # rotate it and break every encrypted-at-rest value in webui.db + all sessions.
-      - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY}
+      - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY:?set via --env-file ../.env or scripts/stack/stack.ps1 - a recreate WITHOUT this key rotates it and breaks webui.db encrypted values + all sessions}
       - USE_CUDA=true
       - USE_CUDA_DOCKER=true
       - NVIDIA_VISIBLE_DEVICES=${GPU_AISTACK_DEVICE_ID:-1}
@@ -88,7 +108,6 @@ services:
               device_ids: ["${GPU_AISTACK_DEVICE_ID:-1}"]
               capabilities: [ gpu ]
     restart: unless-stopped
-    pull_policy: build
     security_opt:
       - no-new-privileges:true
     read_only: false # OpenWebUI needs write access for temp files
@@ -101,18 +120,16 @@ services:
       retries: 3
       start_period: 60s
 
-  # watchtower retired 2026-08-20 (v3 D-2): an unpinned auto-updater holding
-  # docker.sock was host-root-equivalent supply-chain risk for one effective
-  # target (openwebui). Updates are manual + verified per
-  # documentation/runbooks/UPDATE-MANAGEMENT.md.
   tailscale:
     build:
-      context: .
+      context: ..
       dockerfile: dockerfile.tailscale
+    # Pinned like openwebui (retagged from ai-stack-tailscale at K.5).
+    image: tailscale:local
     container_name: tailscale
     network_mode: service:openwebui
     env_file:
-      - .env
+      - ../.env
     cap_add:
       - NET_ADMIN
       - NET_RAW
@@ -152,7 +169,7 @@ services:
       - QUARTZ_ENABLED=${QUARTZ_ENABLED:-true}
       - QUARTZ_TS_PORT=${QUARTZ_TS_PORT:-8444}
     volumes:
-      - ./data/tailscale:/var/lib/tailscale
+      - ../data/tailscale:/var/lib/tailscale
       - /dev/net/tun:/dev/net/tun
     restart: unless-stopped
     depends_on:
@@ -167,11 +184,104 @@ services:
       retries: 3
       start_period: 60s
 
-  # open-terminal — the little-coder workspace plane (design §3.4).
-  # Tool reconfigures it: own networks (no host netns), git-proxy spliced in,
-  # egress allowlisted via lc-egress. The repo lives on the shared workspace
-  # volume; the agent edits files there, commands execute here.
+  openwebui-backup:
+    image: alpine:3.21
+    container_name: openwebui-backup
+    volumes:
+      - openwebui-data:/data:ro
+      - ../backups/openwebui:/backups
+      - ../backup/openwebui-backup.sh:/scripts/backup.sh:ro
+    networks:
+      - default
+    environment:
+      - BACKUP_DIR=/backups
+      - DATA_DIR=/data
+      - RETAIN_COUNT=${OPENWEBUI_BACKUP_RETAIN_COUNT:-2}
+      - HEALTH_TCP=openwebui:8080
+      - BACKUP_CRON=${OPENWEBUI_BACKUP_CRON:-0 2 * * *}
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        # pigz = parallel gzip. The nightly tar of this ~40GB volume took ~50min
+        # with plain gzip (measured); pigz benchmarked 8x faster on the same data.
+        # Best-effort: the script falls back to gzip if this install fails
+        # (e.g. no network at container start), so backups never break on it.
+        apk add --no-cache pigz >/dev/null 2>&1           && echo "[$(date -u +%FT%TZ)] pigz installed (parallel compression enabled)"           || echo "[$(date -u +%FT%TZ)] WARN: pigz install failed -- falling back to gzip"
+        echo "$${BACKUP_CRON} sh /scripts/backup.sh >> /var/log/backup.log 2>&1" > /etc/crontabs/root
+        echo "[$(date -u +%FT%TZ)] Backup scheduler started (cron: $${BACKUP_CRON}, retain: $${RETAIN_COUNT} most recent)"
+        crond -f -l 2
+    # Cap memory so the nightly `tar` of the (large) /data volume cannot
+    # balloon the WSL VM with reclaimable page cache. The kernel evicts this
+    # cgroup's own file cache to stay under the limit, so the backup streams
+    # through a small cache window instead of parking tens of GB until the
+    # next `wsl --shutdown`. tar/gzip stream sequentially (no re-reads) so
+    # capping costs nothing; anon RSS is a few MB, so no OOM risk.
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      openwebui:
+        condition: service_healthy
 
-  # (open-terminal moved to the coder project 2026-08-21, Part K.4 --
-  #  it is the coder plane's executor; lc-net went native there with it.)
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
 
+  tailscale-backup:
+    image: alpine:3.21
+    container_name: tailscale-backup
+    volumes:
+      - ../data/tailscale:/data:ro
+      - ../backups/tailscale:/backups
+      - ../backup/generic-tar-backup.sh:/scripts/backup.sh:ro
+    environment:
+      - DATA_DIR=/data
+      - BACKUP_DIR=/backups
+      - PREFIX=tailscale
+      - RETAIN_COUNT=${TAILSCALE_BACKUP_RETAIN_COUNT:-2}
+      # tailscale-backup has no network attachment (the bind mount is the
+      # only source). HEALTH_TCP intentionally empty -- dir-nonempty is the
+      # only precheck. Set HEALTH_TCP=tailscale:41641 etc if you wire it
+      # onto a shared network later.
+      - HEALTH_TCP=
+      # 2026-08-01: crond -> sleep-loop (see openbrain-wiki-backup rationale).
+      - BACKUP_INTERVAL=${TAILSCALE_BACKUP_INTERVAL:-86400}   # daily
+      - TZ=UTC
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        echo "[$$(date -u +%FT%TZ)] tailscale-backup started (sleep-loop; interval=$${BACKUP_INTERVAL}s, retain=$${RETAIN_COUNT})"
+        while true; do
+          sh /scripts/backup.sh || echo "[$$(date -u +%FT%TZ)] tailscale backup.sh exited $$?"
+          sleep "$${BACKUP_INTERVAL}"
+        done
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
+volumes:
+  # Migrated from ai-stack_openwebui-data 2026-08-21 (data copied; ~10 GB).
+  openwebui-data:
+
+networks:
+  # All three are anchor-owned seams — attached externally so every DNS name
+  # (openwebui for portal caddy; gateway/vpn from here; llama-cpp aliases)
+  # keeps resolving unchanged.
+  default:
+    external: true
+    name: ai-stack_default
+  llm-net:
+    external: true
+    name: ai-stack_llm-net
+  app-net:
+    external: true
+    name: ai-stack_app-net

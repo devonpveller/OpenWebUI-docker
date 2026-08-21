@@ -8,15 +8,14 @@
 # included files' relative paths (./config, ./scripts, ./backup, .env
 # interpolation) keep resolving exactly as they did in the monolithic file.
 include:
-  - path: compose/core.yml
-    project_directory: .
   # (Part K plane splits, 2026-08-21 — these are their own compose projects
   #  now, driven via scripts/stack/stack.ps1 or
   #  `docker compose -f <plane>/docker-compose.yml --env-file .env ...`:
   #    K.1 inference/docker-compose.yml
   #    K.2 memory/docker-compose.yml
   #    K.3 search/docker-compose.yml
-  #    K.4 coder/docker-compose.yml)
+  #    K.4 coder/docker-compose.yml
+  #    K.5 frontend/docker-compose.yml — openwebui + tailscale netns pair)
   - path: compose/auxiliary.yml
     project_directory: .
   - path: compose/backups.yml
@@ -27,7 +26,8 @@ include:
   # project's app-net externally to reach openwebui / open_notebook.
 
 volumes:
-  openwebui-data:
+  # (openwebui-data moved to the frontend project 2026-08-21, Part K.5 —
+  #  data copied to frontend_openwebui-data, ~10 GB.)
   # (mnemory-data moved to the memory project 2026-08-21, Part K.2 —
   #  data copied to memory_mnemory-data.)
   smolcrawl-data:   # kept after smolcrawl-pipelines retired 2026-08-21 (crawl indexes; delete when confident)

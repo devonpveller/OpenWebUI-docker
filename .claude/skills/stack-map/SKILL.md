@@ -36,7 +36,7 @@ Invoke when the user:
 
 ## The two compose projects
 
-1. **`ai-stack`** — `docker-compose.yml` (+ `docker-compose.override.yml`).
+1. **`ai-stack`** — `docker-compose.yml` (network anchor + aux; plane projects split out under Part K, 2026-08-21).
    Driven with plain `docker compose ...`. Holds the core, memory, search,
    coder, and aux planes.
 2. **`open-brain`** — `OB1/docker/docker-compose.yml`. Driven with
@@ -50,7 +50,7 @@ A third concern — the **recovery stack** (`scripts/recovery/emergency-recovery
 ## Process
 
 1. **Read the source of truth.** Open `docker-compose.yml`,
-   `docker-compose.override.yml`, and `OB1/docker/docker-compose.yml`.
+   the `<plane>/docker-compose.yml` projects, and `OB1/docker/docker-compose.yml`.
    Enumerate every `services:` entry, its `container_name`, `networks`,
    published `ports`, `depends_on`, and `volumes`.
 2. **Group by plane.** Map each container to a plane: core, memory, search,

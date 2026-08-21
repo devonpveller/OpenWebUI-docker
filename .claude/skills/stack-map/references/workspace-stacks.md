@@ -30,7 +30,9 @@ portal/auth slice (Authelia/Caddy/Cloudflared + watchers/tripwire), the unified-
 and the portal networks (`edge/auth/app/notify-net`).
 
 Source files:
-- `docker-compose.yml` + `docker-compose.override.yml` — the **main** project
+- `docker-compose.yml` — the **main** (anchor) project (the watchtower-era
+  `docker-compose.override.yml` was archived at K.5 — its settings live in
+  `frontend/docker-compose.yml` now)
 - `portal/local-test.override.yml` — portal test mode, no Cloudflare (own project since 2026-08-21)
 - `OB1/docker/docker-compose.yml` (+ `docker-compose.scheduled.yml`) — the **open-brain** project (separate)
 - `agent-org/docker/docker-compose.yml` — the **agent-org** project (separate; teams-chat orchestration)
@@ -39,7 +41,7 @@ Source files:
 
 ## 1. Main stack — compose project `ai-stack`
 
-Files: `docker-compose.yml` (thin include of `compose/<plane>.yml`); portal = `portal/docker-compose.yml` (own project).
+Files: `docker-compose.yml` (thin include of `compose/<plane>.yml`; the network ANCHOR — owns `llm-net`/`app-net`/`default`); plane projects at `frontend|inference|memory|search|coder/docker-compose.yml`; portal = `portal/docker-compose.yml` (own project).
 Run with: `docker compose ...` from the workspace root.
 
 > **Profiles:** the **Portal** plane below is gated behind `profiles: [internet]`
@@ -61,12 +63,6 @@ Run with: `docker compose ...` from the workspace root.
 
 ### Planes & containers
 
-**Core**
-| Container | Role | Host port | Networks | GPU |
-|-----------|------|-----------|----------|-----|
-| `openwebui` | Open WebUI chat surface | 127.0.0.1:3000 | default, llm-net, app-net | yes |
-| `tailscale` | Tailnet VPN; shares openwebui netns; serves ON :8443/:5055 + wiki :8444 (via caddy:8446) + LiteLLM Admin UI :8445 (→ `llm-gateway-ui`) | — (`network_mode: service:openwebui`) | — | no |
-
 **Aux**
 | Container | Role | Host port | Networks |
 |-----------|------|-----------|----------|
@@ -76,13 +72,11 @@ Run with: `docker compose ...` from the workspace root.
 **Backups (unified snapshot sidecars — `backup/` scripts, nightly cron; NAS-synced)**
 | Container | Backs up | Networks | Profile |
 |-----------|----------|----------|---------|
-| `openwebui-backup` | openwebui-data (mem-capped 1g) | — | default |
 | `openbrain-db-backup` | `pg_dump` of OB1 Postgres (**open-brain** project since 2026-08-21; output still `./backups/openbrain-db`) | obnet (native) | default (open-brain) |
 | `openbrain-wiki-backup` | openbrain-wiki-data + wiki-assets (**open-brain** project since 2026-08-21; output still `./backups/openbrain-wiki`) | — | default (open-brain) |
 | `agent-bridge-db-backup` | `pg_dump` of `agent-bridge-db` (**agent-org** project; governance/effort/project state) | ao-net | default (agent-org) |
 | `mattermost-db-backup` | `pg_dump` of `mattermost-db` (**agent-org** project; conversation content) | ao-net | default (agent-org) |
 | `open-notebook-backup` | SurrealDB logical export + notebook_data | default | default |
-| `tailscale-backup` | tailscale state dir | — | default |
 | `caddy-backup` | caddy-data | default, edge-net | internet, local-test |
 | `authelia-backup` | authelia-data | default, auth-net | internet, local-test |
 
@@ -111,6 +105,24 @@ Run with: `docker compose ...` from the workspace root.
 (= `open-brain_openbrain-wiki-data`), `wiki-assets` (= `open-brain_wiki-assets`).
 
 ---
+
+
+## 1a. Frontend — compose project `frontend` (SEPARATE since 2026-08-21, Part K.5)
+
+> `frontend/docker-compose.yml` — openwebui + its tailscale netns companion +
+> their backups. NETNS RULE unchanged (never restart openwebui alone); the
+> project's depends_on encodes the openwebui→tailscale order. All three nets
+> attached externally (ai-stack_default / llm-net / app-net) so every DNS
+> seam holds. openwebui-data migrated to `frontend_openwebui-data` (~10 GB).
+> Images pinned (`openwebui:local` / `tailscale:local`) — rebuilds are
+> deliberate, per the UPDATE-MANAGEMENT runbook, never an `up` side effect.
+
+| Container | Role | Host port | Networks | GPU |
+|-----------|------|-----------|----------|-----|
+| `openwebui` | Open WebUI chat surface | 127.0.0.1:3000 | default, llm-net, app-net (all external) | yes |
+| `tailscale` | Tailnet VPN; shares openwebui netns; 8 serve routes (OWUI, llama-cpp aliases — probe = `/health/liveliness` since J.1, ON :8443/:5055, wiki :8444 via caddy:8446, LiteLLM UI :8445, Mattermost :8446) | — (`network_mode: service:openwebui`) | — | no |
+| `openwebui-backup` | openwebui-data (mem-capped 1g; output still `./backups/openwebui`) | — | default (external) |  |
+| `tailscale-backup` | tailscale state dir (bind mount) | — | — |  |
 
 ---
 

@@ -83,8 +83,8 @@ if %ERRORLEVEL% NEQ 0 (
     goto :interactive_menu
 )
 echo [DEBUG] Now in: %CD%
-echo [DEBUG] Running docker compose restart tailscale...
-docker compose restart tailscale
+echo [DEBUG] Running docker compose -f frontend\docker-compose.yml --env-file .env restart tailscale...
+docker compose -f frontend\docker-compose.yml --env-file .env restart tailscale
 echo [DEBUG] Docker compose exit code: %ERRORLEVEL%
 cd /d "%SCRIPT_DIR%"
 echo [INFO] Waiting for Tailscale to reconnect...
@@ -92,7 +92,7 @@ timeout /t 30 /nobreak >nul
 echo.
 echo [INFO] Testing connectivity...
 cd /d "%SCRIPT_DIR%\..\.."
-docker compose exec tailscale ping -c 1 8.8.8.8 2>&1
+docker exec tailscale ping -c 1 8.8.8.8 2>&1
 set RESULT=%ERRORLEVEL%
 cd /d "%SCRIPT_DIR%"
 if %RESULT% EQU 0 (
@@ -118,15 +118,15 @@ echo.
 echo [INFO] Rebuilding Tailscale container...
 cd /d "%SCRIPT_DIR%\..\.."
 docker compose down tailscale
-docker compose build --no-cache tailscale
-docker compose up -d tailscale
+docker compose -f frontend\docker-compose.yml --env-file .env build --no-cache tailscale
+docker compose -f frontend\docker-compose.yml --env-file .env up -d tailscale
 cd /d "%SCRIPT_DIR%"
 echo [INFO] Waiting for rebuild completion...
 timeout /t 45 /nobreak >nul
 echo.
 echo [INFO] Testing connectivity...
 cd /d "%SCRIPT_DIR%\..\.."
-docker compose exec tailscale ping -c 1 8.8.8.8 >nul 2>&1
+docker exec tailscale ping -c 1 8.8.8.8 >nul 2>&1
 cd /d "%SCRIPT_DIR%"
 if %ERRORLEVEL% EQU 0 (
     echo [SUCCESS] Tailscale rebuild successful - network restored!
@@ -152,7 +152,7 @@ echo [WARN] This will DESTROY containers and rebuild them
 echo.
 echo [INFO] Pre-nuclear diagnostic check...
 cd /d "%SCRIPT_DIR%\..\.."
-docker compose exec tailscale ping -c 1 8.8.8.8 >nul 2>&1
+docker exec tailscale ping -c 1 8.8.8.8 >nul 2>&1
 cd /d "%SCRIPT_DIR%"
 if %ERRORLEVEL% EQU 0 (
     echo [SUCCESS] Wait - connectivity is actually working!
@@ -194,7 +194,7 @@ timeout /t 90 /nobreak >nul
 echo.
 echo [INFO] Testing final connectivity...
 cd /d "%SCRIPT_DIR%\..\.."
-docker compose exec tailscale ping -c 1 8.8.8.8 >nul 2>&1
+docker exec tailscale ping -c 1 8.8.8.8 >nul 2>&1
 cd /d "%SCRIPT_DIR%"
 if %ERRORLEVEL% EQU 0 (
     echo [SUCCESS] Nuclear option successful - all systems operational!
@@ -218,20 +218,20 @@ echo.
 echo [INFO] Checking GPU status and restarting GPU services if needed...
 echo [INFO] Testing OpenWebUI GPU access...
 cd /d "%SCRIPT_DIR%\..\.."
-docker compose exec openwebui python -c "import torch; print('CUDA available:', torch.cuda.is_available())" 2>nul
+docker exec openwebui python -c "import torch; print('CUDA available:', torch.cuda.is_available())" 2>nul
 cd /d "%SCRIPT_DIR%"
 if %ERRORLEVEL% NEQ 0 (
     echo [WARN] GPU check failed, restarting GPU services...
 cd /d "%SCRIPT_DIR%\..\.."
     docker restart llama-cpp-upstream llama-cpp-embed-upstream
-docker compose restart openwebui
+docker compose -f frontend\docker-compose.yml --env-file .env restart openwebui
     cd /d "%SCRIPT_DIR%"
     echo [INFO] Waiting for GPU services to restart...
     timeout /t 60 /nobreak >nul
     echo.
     echo [INFO] Re-testing GPU access...
 cd /d "%SCRIPT_DIR%\..\.."
-    docker compose exec openwebui python -c "import torch; print('CUDA available:', torch.cuda.is_available())" 2>nul
+    docker exec openwebui python -c "import torch; print('CUDA available:', torch.cuda.is_available())" 2>nul
     cd /d "%SCRIPT_DIR%"
     if %ERRORLEVEL% EQU 0 (
         echo [SUCCESS] GPU restored after restart
@@ -337,7 +337,7 @@ cd /d "%SCRIPT_DIR%"
 echo.
 echo [INFO] OpenWebUI GPU Status:
 cd /d "%SCRIPT_DIR%\..\.."
-docker compose exec openwebui python -c "import torch; print('CUDA available:', torch.cuda.is_available()); print('GPU count:', torch.cuda.device_count())" 2>nul
+docker exec openwebui python -c "import torch; print('CUDA available:', torch.cuda.is_available()); print('GPU count:', torch.cuda.device_count())" 2>nul
 cd /d "%SCRIPT_DIR%"
 echo.
 echo [INFO] llama-cpp Status:
@@ -352,7 +352,7 @@ cd /d "%SCRIPT_DIR%"
 echo.
 echo [INFO] Network Connectivity:
 cd /d "%SCRIPT_DIR%\..\.."
-docker compose exec tailscale ping -c 1 8.8.8.8 >nul 2>&1
+docker exec tailscale ping -c 1 8.8.8.8 >nul 2>&1
 cd /d "%SCRIPT_DIR%"
 if %ERRORLEVEL% EQU 0 (
     echo [SUCCESS] Network connectivity: OK
@@ -362,17 +362,17 @@ if %ERRORLEVEL% EQU 0 (
 echo.
 echo [INFO] Tailscale Status:
 cd /d "%SCRIPT_DIR%\..\.."
-docker compose exec tailscale tailscale --socket=/tmp/tailscaled.sock status 2>nul
+docker exec tailscale tailscale --socket=/tmp/tailscaled.sock status 2>nul
 cd /d "%SCRIPT_DIR%"
 echo.
 echo [INFO] Tailscale Serve Status:
 cd /d "%SCRIPT_DIR%\..\.."
-docker compose exec tailscale tailscale --socket=/tmp/tailscaled.sock serve status 2>nul
+docker exec tailscale tailscale --socket=/tmp/tailscaled.sock serve status 2>nul
 cd /d "%SCRIPT_DIR%"
 echo.
 echo [INFO] Service Accessibility Check:
 cd /d "%SCRIPT_DIR%\..\.."
-docker compose exec tailscale wget -q -T 3 -O /dev/null http://127.0.0.1:8080 2>nul
+docker exec tailscale wget -q -T 3 -O /dev/null http://127.0.0.1:8080 2>nul
 cd /d "%SCRIPT_DIR%"
 if %ERRORLEVEL% EQU 0 (
     echo [SUCCESS] OpenWebUI accessibility: OK
@@ -446,7 +446,7 @@ powershell -ExecutionPolicy Bypass -NoProfile -File "%SCRIPT_DIR%check-openbrain
 echo.
 echo [INFO] Backup schedulers (no health endpoints - running state only):
 cd /d "%SCRIPT_DIR%\..\.."
-docker compose ps openwebui-backup --format "table {{.Service}}\t{{.Status}}" 2>nul
+docker compose -f frontend\docker-compose.yml --env-file .env ps openwebui-backup --format "table {{.Service}}\t{{.Status}}" 2>nul
 docker compose -f memory\docker-compose.yml --env-file .env ps mnemory-backup --format "table {{.Service}}\t{{.Status}}" 2>nul
 cd /d "%SCRIPT_DIR%"
 if "%1"=="" (
@@ -469,16 +469,16 @@ echo [INFO] Stopping dependent containers first...
 cd /d "%SCRIPT_DIR%\..\.."
 docker compose -f inference\docker-compose.yml --env-file .env stop --timeout 30
 docker compose -f memory\docker-compose.yml --env-file .env stop --timeout 30
-docker compose stop tailscale openwebui-backup open_notebook surrealdb
+docker compose -f frontend\docker-compose.yml --env-file .env stop --timeout 45-backup open_notebook surrealdb
 cd /d "%SCRIPT_DIR%"
 echo [INFO] Restarting OpenWebUI...
 cd /d "%SCRIPT_DIR%\..\.."
-docker compose restart openwebui
+docker compose -f frontend\docker-compose.yml --env-file .env restart openwebui
 cd /d "%SCRIPT_DIR%"
 echo [INFO] Waiting for OpenWebUI to be healthy...
 :wait_openwebui_restart
 cd /d "%SCRIPT_DIR%\..\.."
-docker compose ps openwebui | findstr "healthy" >nul 2>&1
+docker ps --filter "name=openwebui" --format "{{.Status}}" | findstr "healthy" >nul 2>&1
 cd /d "%SCRIPT_DIR%"
 if %ERRORLEVEL% NEQ 0 (
     echo [INFO] OpenWebUI not yet healthy, waiting 10 more seconds...
@@ -511,7 +511,7 @@ cd /d "%SCRIPT_DIR%\..\.."
 docker compose start tailscale
 if %ERRORLEVEL% NEQ 0 (
     echo [WARN] Tailscale start failed, trying up -d...
-    docker compose up -d tailscale
+    docker compose -f frontend\docker-compose.yml --env-file .env up -d tailscale
 )
 cd /d "%SCRIPT_DIR%"
 echo [INFO] Waiting for Tailscale to connect...
@@ -525,7 +525,7 @@ if %ERRORLEVEL% NEQ 0 (
     docker compose -f memory\docker-compose.yml --env-file .env up -d mnemory
 )
 docker compose -f memory\docker-compose.yml --env-file .env up -d mnemory-backup
-docker compose up -d openwebui-backup
+docker compose -f frontend\docker-compose.yml --env-file .env up -d openwebui-backup
 cd /d "%SCRIPT_DIR%"
 cd /d "%SCRIPT_DIR%"
 echo [INFO] Starting surrealdb (open-notebook DB)...

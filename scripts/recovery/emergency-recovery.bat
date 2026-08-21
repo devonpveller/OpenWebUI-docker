@@ -54,7 +54,7 @@ if %ERRORLEVEL% NEQ 0 (
 )
 
 REM Test OpenWebUI health
-docker compose exec openwebui curl -f -s http://localhost:8080/ >nul 2>&1
+docker exec openwebui curl -f -s http://localhost:8080/ >nul 2>&1
 if %ERRORLEVEL% EQU 0 (
     echo [INFO] OpenWebUI responding...
 
@@ -64,7 +64,7 @@ if %ERRORLEVEL% EQU 0 (
         echo [INFO] llama-cpp-upstream connectivity working...
 
         REM Test external connectivity
-        docker compose exec tailscale ping -c 1 8.8.8.8 >nul 2>&1
+        docker exec tailscale ping -c 1 8.8.8.8 >nul 2>&1
         if %ERRORLEVEL% EQU 0 (
             echo [SUCCESS] All basic checks PASSED - trying minimal recovery first
             goto :minimal_recovery
@@ -105,10 +105,10 @@ if %ERRORLEVEL% NEQ 0 (
 )
 
 echo [INFO] Stopping Tailscale container...
-docker compose stop tailscale
+docker compose -f frontend\docker-compose.yml --env-file .env stop tailscale
 if %ERRORLEVEL% NEQ 0 (
     echo [WARN] Tailscale stop failed, attempting force kill...
-    docker compose kill tailscale
+    docker compose -f frontend\docker-compose.yml --env-file .env kill tailscale
 )
 
 
@@ -127,10 +127,10 @@ if %ERRORLEVEL% NEQ 0 (
 )
 
 echo [INFO] Stopping OpenWebUI backup scheduler...
-docker compose stop openwebui-backup
+docker compose -f frontend\docker-compose.yml --env-file .env stop openwebui-backup
 if %ERRORLEVEL% NEQ 0 (
     echo [WARN] OpenWebUI backup stop failed, attempting force kill...
-    docker compose kill openwebui-backup
+    docker compose -f frontend\docker-compose.yml --env-file .env kill openwebui-backup
 )
 
 echo [INFO] Stopping the inference project (gateway -^> llm-queue -^> upstreams)...
@@ -141,10 +141,10 @@ if %ERRORLEVEL% NEQ 0 (
 )
 
 echo [INFO] Stopping OpenWebUI container...
-docker compose stop openwebui
+docker compose -f frontend\docker-compose.yml --env-file .env stop openwebui
 if %ERRORLEVEL% NEQ 0 (
     echo [WARN] OpenWebUI stop failed, attempting force kill...
-    docker compose kill openwebui
+    docker compose -f frontend\docker-compose.yml --env-file .env kill openwebui
 )
 
 echo [INFO] Waiting for cleanup...
@@ -153,7 +153,7 @@ timeout /t 15 /nobreak >nul
 REM Phase 2: Restart with proper timing for GPU/network dependencies
 echo [INFO] Phase 2: Service restart
 echo [INFO] Starting OpenWebUI with GPU support...
-docker compose up -d openwebui
+docker compose -f frontend\docker-compose.yml --env-file .env up -d openwebui
 if %ERRORLEVEL% NEQ 0 (
     echo [ERROR] Failed to start OpenWebUI container
     goto :nuclear_option
@@ -161,7 +161,7 @@ if %ERRORLEVEL% NEQ 0 (
 
 echo [INFO] Waiting for OpenWebUI to be healthy (required for Tailscale network dependency)...
 :wait_openwebui
-docker compose ps openwebui | findstr "healthy" >nul 2>&1
+docker ps --filter "name=openwebui" --format "{{.Status}}" | findstr "healthy" >nul 2>&1
 if %ERRORLEVEL% NEQ 0 (
     echo [INFO] OpenWebUI not yet healthy, waiting 10 more seconds...
     timeout /t 10 /nobreak >nul
@@ -180,7 +180,7 @@ echo [INFO] Waiting for the inference plane to initialize...
 timeout /t 45 /nobreak >nul
 
 echo [INFO] Starting Tailscale with shared network namespace...
-docker compose up -d tailscale
+docker compose -f frontend\docker-compose.yml --env-file .env up -d tailscale
 if %ERRORLEVEL% NEQ 0 (
     echo [ERROR] Failed to start Tailscale container
     goto :nuclear_option
@@ -198,7 +198,7 @@ docker compose -f memory\docker-compose.yml --env-file .env up -d mnemory-cloud-
 
 echo [INFO] Starting backup schedulers (main/host resources)...
 docker compose -f memory\docker-compose.yml --env-file .env up -d mnemory-backup
-docker compose up -d openwebui-backup tailscale-backup open-notebook-backup
+docker compose -f frontend\docker-compose.yml --env-file .env up -d openwebui-backup tailscale-backup open-notebook-backup
 
 echo [INFO] Starting surrealdb (open-notebook database)...
 docker compose up -d surrealdb
@@ -237,7 +237,7 @@ if exist "%AGENTORG_COMPOSE%" (
 
 REM Phase 3: Connectivity verification
 echo [INFO] Phase 3: Testing connectivity...
-docker compose exec tailscale ping -c 1 8.8.8.8 >nul 2>&1
+docker exec tailscale ping -c 1 8.8.8.8 >nul 2>&1
 
 if %ERRORLEVEL% NEQ 0 (
     echo [WARN] Basic recovery failed, attempting nuclear option...
@@ -259,16 +259,16 @@ docker compose -f inference\docker-compose.yml --env-file .env stop --timeout 30
 docker compose -f memory\docker-compose.yml --env-file .env stop --timeout 30
 docker compose -f search\docker-compose.yml --env-file .env stop --timeout 30
 docker compose -f coder\docker-compose.yml --env-file .env stop --timeout 30
-docker compose stop tailscale openwebui-backup open_notebook surrealdb
+docker compose -f frontend\docker-compose.yml --env-file .env stop --timeout 45-backup open_notebook surrealdb
 if exist "%OB1_COMPOSE%" docker compose -f "%OB1_COMPOSE%" stop
 
 REM Restart OpenWebUI first and wait for health
 echo [INFO] Restarting OpenWebUI...
-docker compose restart openwebui
+docker compose -f frontend\docker-compose.yml --env-file .env restart openwebui
 
 echo [INFO] Waiting for OpenWebUI to be healthy...
 :wait_openwebui_minimal
-docker compose ps openwebui | findstr "healthy" >nul 2>&1
+docker ps --filter "name=openwebui" --format "{{.Status}}" | findstr "healthy" >nul 2>&1
 if %ERRORLEVEL% NEQ 0 (
     echo [INFO] OpenWebUI not yet healthy, waiting 10 more seconds...
     timeout /t 10 /nobreak >nul
@@ -284,7 +284,7 @@ timeout /t 15 /nobreak >nul
 timeout /t 5 /nobreak >nul
 
 echo [INFO] Starting Tailscale with fresh network namespace...
-docker compose up -d tailscale
+docker compose -f frontend\docker-compose.yml --env-file .env up -d tailscale
 timeout /t 30 /nobreak >nul
 
 
@@ -293,7 +293,7 @@ docker compose -f memory\docker-compose.yml --env-file .env up -d
 timeout /t 15 /nobreak >nul
 
 echo [INFO] Starting backup schedulers (main/host resources)...
-docker compose up -d openwebui-backup tailscale-backup open-notebook-backup
+docker compose -f frontend\docker-compose.yml --env-file .env up -d openwebui-backup tailscale-backup open-notebook-backup
 
 echo [INFO] Starting surrealdb (open-notebook database)...
 docker compose up -d surrealdb
@@ -315,7 +315,7 @@ if exist "%OB1_COMPOSE%" (
 if exist "%AGENTORG_COMPOSE%" docker compose -f "%AGENTORG_COMPOSE%" up -d
 
 echo [INFO] Testing if minimal recovery worked...
-docker compose exec tailscale ping -c 1 8.8.8.8 >nul 2>&1
+docker exec tailscale ping -c 1 8.8.8.8 >nul 2>&1
 if %ERRORLEVEL% EQU 0 (
     echo [SUCCESS] Minimal recovery successful!
     goto :verify_services
@@ -335,7 +335,7 @@ echo [WARN] PERFORMING NUCLEAR RECOVERY
 echo [WARN] ========================================
 
 echo [INFO] Last chance diagnostic check...
-docker compose exec tailscale ping -c 1 8.8.8.8 >nul 2>&1
+docker exec tailscale ping -c 1 8.8.8.8 >nul 2>&1
 if %ERRORLEVEL% EQU 0 (
     echo [SUCCESS] Wait - connectivity actually working! Trying minimal recovery instead...
     goto :minimal_recovery
@@ -361,7 +361,7 @@ if exist "%OB1_COMPOSE%" (
 if exist "%AGENTORG_COMPOSE%" docker compose -f "%AGENTORG_COMPOSE%" up -d
 
 echo [INFO] Testing post-nuclear connectivity...
-docker compose exec tailscale ping -c 1 8.8.8.8 >nul 2>&1
+docker exec tailscale ping -c 1 8.8.8.8 >nul 2>&1
 if %ERRORLEVEL% NEQ 0 (
     echo [ERROR] Nuclear recovery failed - manual intervention required
     echo [INFO] Try: docker system prune -f && docker compose build --no-cache
@@ -383,15 +383,15 @@ docker exec llama-cpp-embed-upstream curl -s http://localhost:8080/health
 
 echo.
 echo [INFO] Tailscale status:
-docker compose exec tailscale tailscale --socket=/tmp/tailscaled.sock status
+docker exec tailscale tailscale --socket=/tmp/tailscaled.sock status
 
 echo.
 echo [INFO] Tailscale serve configuration:
-docker compose exec tailscale tailscale --socket=/tmp/tailscaled.sock serve status
+docker exec tailscale tailscale --socket=/tmp/tailscaled.sock serve status
 
 echo.
 echo [INFO] OpenWebUI GPU status:
-docker compose exec openwebui python -c "import torch; print('CUDA available:', torch.cuda.is_available())" 2>nul
+docker exec openwebui python -c "import torch; print('CUDA available:', torch.cuda.is_available())" 2>nul
 
 echo.
 echo [INFO] Mnemory status:

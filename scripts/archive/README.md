@@ -16,3 +16,5 @@ hooks, recovery scripts, or modules. Each subdirectory notes what retired it.
 
 Convention: archive (`git mv`) — don't delete — anything with history; explain
 the retirement in the commit message and in this table.
+
+- `docker-compose.override.yml` — archived 2026-08-21 (Part K.5). Watchtower-era override that re-declared tailscale restart/labels/depends_on/healthcheck on the root project; every setting already lives in `frontend/docker-compose.yml` (and watchtower itself was retired 2026-08-20). With openwebui/tailscale moved to the frontend project it declared a phantom service, so it left the root.
