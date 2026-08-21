@@ -1,0 +1,197 @@
+# coder/docker-compose.yml — the CODER compose project (K.4, 2026-08-21).
+# The little-coder control plane: open-terminal (EXECUTES; moved in from the
+# core plane — it is this plane's executor and was the last lc-net member
+# outside it), little-coder (DECIDES), lc-egress (git-host-only egress), and
+# the expertise-volume backup. Moved out of the root ai-stack project
+# (CLEANUP-PLAN Part K); definitions unchanged, only paths (../) and
+# network/volume ownership.
+#
+# Drive it with scripts/stack/stack.ps1, or manually FROM THE REPO ROOT:
+#   docker compose -f coder/docker-compose.yml --env-file .env up -d
+# The ${OPEN_TERMINAL_API_KEY:?} guard makes a bare `up` fail loud.
+#
+# Seams: llm-net external (inference via the llama-cpp alias; OWUI's
+# little_coder pipe and agent-org reach the daemon over it). lc-net is
+# plane-internal and native. lc-egress gets internet via a project-local
+# default bridge (no cross-project consumer of its DNS name).
+name: coder
+
+services:
+  open-terminal:
+    build:
+      context: ../little-coder
+      dockerfile: docker/Dockerfile.open-terminal
+    image: little-coder-open-terminal:local
+    container_name: open-terminal
+    networks:
+      - lc-net      # reachable by the control plane
+      - llm-net     # llama-cpp inference
+    env_file:
+      - ../.env
+    environment:
+      - API_KEY=${OPEN_TERMINAL_API_KEY:?set via --env-file ../.env or scripts/stack/stack.ps1}
+      # All internet traffic goes through lc-egress, which permits only the
+      # operator-configured git host (design §3.4). Internal peers bypass it.
+      - HTTP_PROXY=http://lc-egress:8888
+      - HTTPS_PROXY=http://lc-egress:8888
+      - http_proxy=http://lc-egress:8888
+      - https_proxy=http://lc-egress:8888
+      - NO_PROXY=llama-cpp,little-coder,lc-egress,localhost,127.0.0.1
+      - no_proxy=llama-cpp,little-coder,lc-egress,localhost,127.0.0.1
+    volumes:
+      - little-coder-workspace:/workspace
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    # (cross-project since K.1 2026-08-21: llm-gateway lives in the inference
+    #  project; startup order is enforced by stack.ps1 / recovery, and the
+    #  service retries until the gateway answers -- same posture as OB1.)
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "--max-time", "5", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
+  little-coder:
+    build:
+      context: ../little-coder
+      dockerfile: docker/Dockerfile.agent
+      args:
+        LITTLE_CODER_VERSION: ${LITTLE_CODER_VERSION:-latest}
+    image: little-coder:local
+    container_name: little-coder
+    networks:
+      - lc-net      # control plane ↔ open-terminal
+      - llm-net     # llama-cpp inference
+    env_file:
+      - ../.env
+    environment:
+      - LC_CONFIG=/app/config/little-coder.config.yaml
+      - LC_LLAMA_API_KEY=${LC_LLAMA_API_KEY:-llama}
+      - OPEN_TERMINAL_API_KEY=${OPEN_TERMINAL_API_KEY}
+      - LC_DEPLOY_TOKEN=${LC_DEPLOY_TOKEN:-}
+      # Route the agent's shell into open-terminal (design §3.4). Verified
+      # working; default on. Set 0 to fall back to built-in bash (runs in the
+      # network-isolated little-coder container). See pi-extension/README.md.
+      - LC_ROUTE_EXEC=${LC_ROUTE_EXEC:-1}
+      # open-terminal exec params, exposed statically so a direct interactive
+      # `little-coder` run (docker exec) has working exec routing — not only
+      # the daemon-spawned agent (the daemon also sets these per task).
+      - LC_OPEN_TERMINAL_URL=http://open-terminal:8000
+      - LC_OPEN_TERMINAL_KEY=${OPEN_TERMINAL_API_KEY}
+      - LC_WORKSPACE=/workspace
+      # 1.9.x llama-cpp-provider probes the server's /props at startup to detect
+      # the live context window. Our base_url is the LiteLLM gateway, which does
+      # not forward llama.cpp's /props — the probe just fails (silently) on every
+      # task and falls back to models.json's declared window (131072), which is
+      # what we want anyway. Skip the futile probe + its log noise.
+      - LITTLE_CODER_NO_CTX_PROBE=1
+    volumes:
+      - ../little-coder/config:/app/config:ro
+      - little-coder-journals:/var/lib/little-coder/journals
+      - little-coder-skill:/var/lib/little-coder/skill
+      - little-coder-cohorts:/var/lib/little-coder/cohorts
+      - little-coder-polyglot:/var/lib/little-coder/polyglot
+      - little-coder-sessions:/var/lib/little-coder/sessions
+      - little-coder-workspace:/workspace
+    ports:
+      - "127.0.0.1:9091:9090"   # Prometheus metrics (loopback only)
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    # (cross-project since K.1 2026-08-21: llm-gateway lives in the inference
+    #  project; startup order is enforced by stack.ps1 / recovery, and the
+    #  service retries until the gateway answers -- same posture as OB1.)
+    depends_on:
+      open-terminal:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "--max-time", "5", "http://localhost:8090/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
+  # MCP→OpenAPI edge. Built in Tool, DORMANT until chapter 2 registers it as
+  # an OWUI tool (design §3.1). API-key'd; carries task triggers only —
+  # operator commands authenticate elsewhere (design §12.6).
+
+  # lc-mcpo (MCP->OpenAPI edge, :8002) retired 2026-08-20 (v3 D-13): dormant
+  # since build ("until chapter 2"), zero consumers - OWUI's little_coder
+  # pipe and agent-org's harness both call the daemon directly. Chapter 2's
+  # keyed OWUI->little-coder edge gets rebuilt from
+  # little-coder/src/littlecoder/mcp_server.py (kept) when it lands.
+  lc-egress:
+    build:
+      context: ../little-coder
+      dockerfile: docker/Dockerfile.egress
+    image: little-coder-egress:local
+    container_name: lc-egress
+    networks:
+      - lc-net      # reachable by open-terminal
+      - default     # the only little-coder-side service with internet
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
+  # Nightly backup of the four little-coder expertise volumes (design §3.6).
+  # The workspace volume is project-scoped and re-clonable — not backed up.
+
+  little-coder-backup:
+    image: alpine:3.21
+    container_name: little-coder-backup
+    volumes:
+      - little-coder-journals:/data/journals:ro
+      - little-coder-skill:/data/skill:ro
+      - little-coder-cohorts:/data/cohorts:ro
+      - little-coder-polyglot:/data/polyglot:ro
+      - little-coder-sessions:/data/sessions:ro
+      - ../backups/little-coder:/backups
+      - ../backup/little-coder-backup.sh:/scripts/backup.sh:ro
+    environment:
+      - BACKUP_DIR=/backups
+      - DATA_DIR=/data
+      - RETAIN_COUNT=${LC_BACKUP_RETAIN_COUNT:-2}
+      - BACKUP_CRON=${LC_BACKUP_CRON:-0 2 * * *}
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        chmod +x /scripts/backup.sh
+        echo "$${BACKUP_CRON} /scripts/backup.sh >> /var/log/backup.log 2>&1" > /etc/crontabs/root
+        echo "[$(date -u +%FT%TZ)] little-coder backup scheduler started (cron: $${BACKUP_CRON}, retain: $${RETAIN_COUNT} most recent)"
+        crond -f -l 2
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
+volumes:
+  # The five expertise volumes + per-chat sessions + the shared workspace —
+  # migrated from the ai-stack_* volumes 2026-08-21 (data copied).
+  little-coder-journals:
+  little-coder-skill:
+  little-coder-cohorts:
+  little-coder-polyglot:
+  little-coder-sessions:
+  little-coder-workspace:
+
+networks:
+  # Shared caller seam — owned by the root ai-stack anchor project.
+  llm-net:
+    external: true
+    name: ai-stack_llm-net
+  # Plane-internal control net — native: control plane ⇄ executor ⇄ egress.
+  lc-net:
+    internal: true
+  # Project-local bridge: lc-egress's internet leg (allowlisted git host only).
+  default:
+    driver: bridge

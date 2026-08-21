@@ -25,10 +25,11 @@ $ErrorActionPreference = "Stop"
 #    is its own compose project since 2026-08-21 Part K.2: memory\docker-compose.yml)
 #   (the SEARCH plane -- vpn, redis, searxng, gateway -- is its own compose
 #    project since 2026-08-21 Part K.3: search\docker-compose.yml)
-#   coder   open-terminal, little-coder, lc-egress
+#   (the CODER plane -- open-terminal, little-coder, lc-egress,
+#    little-coder-backup -- is its own compose project since 2026-08-21
+#    Part K.4: coder\docker-compose.yml. open-terminal moved in from core.)
 #   aux    , surrealdb, open_notebook
-#   backup  openwebui-backup, little-coder-backup,
-#          , tailscale-backup, open-notebook-backup
+#   backup  openwebui-backup, tailscale-backup, open-notebook-backup
 #           (openbrain-db/wiki backups live in the OB1 project; llm-gateway/
 #            lm-models backups live in the inference project -- 2026-08-21)
 #
@@ -80,20 +81,25 @@ $Script:MemoryServices = @("mnemory", "mnemory-cloud-gateway", "mnemory-backup")
 $Script:SearchCompose = "search\docker-compose.yml"
 $Script:SearchServices = @("search-vpn", "search-redis", "searxng", "search-gateway")
 
+# The CODER plane is a separate compose project since 2026-08-21 (Part K.4,
+# project name "coder"): open-terminal (executor; moved in from core),
+# little-coder, lc-egress, little-coder-backup. Owns lc-net natively.
+$Script:CoderCompose = "coder\docker-compose.yml"
+$Script:CoderServices = @("open-terminal", "little-coder", "lc-egress", "little-coder-backup")
+
 # Main compose services, low-level dependency first.
 # (Portal plane omitted on purpose — profile-gated; see the header note.)
 $Script:MainStackServices = @(
     "openwebui", "tailscale",
      "surrealdb", "open_notebook",
-    "open-terminal", "little-coder", "lc-egress",
     # Backup cron sidecars (see helper arrays below).
-    "openwebui-backup", "little-coder-backup",
+    "openwebui-backup",
      "tailscale-backup", "open-notebook-backup"
 )
 
 # Backup sidecars touching only main-stack/host resources — safe to nudge anytime.
 $Script:MainBackups = @(
-    "openwebui-backup", "little-coder-backup",
+    "openwebui-backup",
      "tailscale-backup", "open-notebook-backup"
 )
 # (openbrain-db-backup / openbrain-wiki-backup moved INTO the OB1 compose
@@ -373,7 +379,7 @@ function Test-BasicConnectivity {
         # Inference plane lives in its own project - look its containers up by
         # NAME (container names are stable across projects).
         $running = @(docker ps --format "{{.Names}}")
-        foreach ($svc in ($Script:InferenceServices + $Script:MemoryServices + $Script:SearchServices)) {
+        foreach ($svc in ($Script:InferenceServices + $Script:MemoryServices + $Script:SearchServices + $Script:CoderServices)) {
             $states[$svc] = if ($running -contains $svc) { "running" } else { "absent" }
         }
 
@@ -513,10 +519,10 @@ function Invoke-MinimalRecovery {
 
         docker compose -f $Script:MemoryCompose --env-file .env up -d
 
-        docker compose up -d surrealdb open_notebook `
-            open-terminal little-coder lc-egress
+        docker compose up -d surrealdb open_notebook
 
         docker compose -f $Script:SearchCompose --env-file .env up -d
+        docker compose -f $Script:CoderCompose --env-file .env up -d
 
         # Backup cron sidecars touching only main/host resources (safe anytime).
         Start-ServiceGroup "main backups" $Script:MainBackups
@@ -656,9 +662,8 @@ function Invoke-EmergencyRecovery {
     # Open Brain (OB1) next — it attaches to the main stack's llm-net.
     Stop-OB1Stack
 
-    # little-coder control plane (reverse dependency order).
-    Stop-ServiceGroup "little-coder control plane" `
-        @("little-coder-backup", "lc-egress", "little-coder", "open-terminal")
+    # Coder project (its compose stop runs reverse dependency order).
+    Stop-PlaneStack "coder" $Script:CoderCompose
 
     # Search project (its compose stop runs reverse dependency order).
     Stop-PlaneStack "search" $Script:SearchCompose
@@ -768,31 +773,9 @@ function Invoke-EmergencyRecovery {
         Write-Log "WARN" "Search gateway slow to come up, but continuing..."
     }
 
-    # little-coder control plane — open-terminal (workspace) before the
-    # little-coder daemon (control), then the MCP edge and egress sidecars.
-    Write-Log "INFO" "Starting open-terminal (little-coder workspace plane)..."
-    try {
-        docker compose up -d open-terminal
-        if (-not (Wait-ForHealthy "open-terminal" 90)) {
-            Write-Log "WARN" "open-terminal health check failed, but continuing..."
-        }
-    }
-    catch {
-        Write-Log "WARN" "Failed to start open-terminal: $_"
-    }
-
-    Write-Log "INFO" "Starting little-coder (control daemon)..."
-    try {
-        docker compose up -d little-coder
-        if (-not (Wait-ForHealthy "little-coder" 120)) {
-            Write-Log "WARN" "little-coder health check failed, but continuing..."
-        }
-    }
-    catch {
-        Write-Log "WARN" "Failed to start little-coder: $_"
-    }
-
-    Start-ServiceGroup "little-coder edges" @("lc-egress", "little-coder-backup")
+    # Coder project — open-terminal (executor) -> little-coder (control) ->
+    # edges, ordered by its own depends_on (own project since K.4).
+    Start-PlaneStack "coder" $Script:CoderCompose "little-coder" 120
 
     # Open Brain (OB1) last — needs ai-stack_llm-net + llama-cpp-upstream healthy.
     # (Its own openbrain-db/wiki backup sidecars come up with it.)
@@ -836,20 +819,20 @@ function Invoke-EmergencyRecovery {
         docker compose exec gateway curl -s http://localhost:8080/healthz 2>$null
 
         Write-Log "INFO" "open-terminal status:"
-        docker compose exec open-terminal curl -s http://localhost:8000/health 2>$null
+        docker exec open-terminal curl -s http://localhost:8000/health 2>$null
 
         Write-Log "INFO" "little-coder daemon status:"
-        docker compose exec little-coder curl -s http://localhost:8090/health 2>$null
+        docker exec little-coder curl -s http://localhost:8090/health 2>$null
 
         Write-Log "INFO" "surrealdb running state:"
         docker compose ps surrealdb --format "table {{.Service}}\t{{.Status}}" 2>$null
 
         Write-Log "INFO" "Memory + coder plane status:"
-        docker compose ps lc-egress --format "table {{.Service}}\t{{.Status}}" 2>$null
         docker compose -f $Script:MemoryCompose --env-file .env ps --format "table {{.Service}}\t{{.Status}}" 2>$null
+        docker compose -f $Script:CoderCompose --env-file .env ps --format "table {{.Service}}\t{{.Status}}" 2>$null
 
         Write-Log "INFO" "Backup scheduler status:"
-        docker compose ps openwebui-backup little-coder-backup `
+        docker compose ps openwebui-backup `
             tailscale-backup open-notebook-backup `
             --format "table {{.Service}}\t{{.Status}}" 2>$null
 
@@ -1001,7 +984,7 @@ function Invoke-GPUReset {
                     docker compose -f $Script:MemoryCompose --env-file .env up -d
                     Write-Log "INFO" "Mnemory layer started"
 
-                    docker compose up -d open-terminal little-coder lc-egress little-coder-backup
+                    docker compose -f $Script:CoderCompose --env-file .env up -d
                     Write-Log "INFO" "little-coder control plane started"
 
                     Start-OB1Stack

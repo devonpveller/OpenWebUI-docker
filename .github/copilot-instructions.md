@@ -11,9 +11,9 @@ Docker Compose projects** (Part K, 2026-08-21, is dissolving the old main
 project into per-plane projects; root `ai-stack` = the network anchor):
 
 - **Main** (`ai-stack`, `docker-compose.yml`): Open WebUI, tailscale,
-  little-coder, aux services, backup sidecars — shrinking as planes split
-  out (memory = `memory/docker-compose.yml` since K.2; search =
-  `search/docker-compose.yml` since K.3). The portal is its OWN compose project since 2026-08-21
+  aux services, backup sidecars — shrinking as planes split out
+  (memory since K.2, search since K.3, coder since K.4 — each at
+  `<plane>/docker-compose.yml`, driven with `--env-file .env`). The portal is its OWN compose project since 2026-08-21
   (`portal/docker-compose.yml`), driven only by `scripts/portal/portal-on.ps1`.
 - **Inference** (`inference/docker-compose.yml`, own project since K.1):
   `llm-gateway` = LiteLLM front door → `llm-queue` →

@@ -15,9 +15,8 @@ include:
   #  `docker compose -f <plane>/docker-compose.yml --env-file .env ...`:
   #    K.1 inference/docker-compose.yml
   #    K.2 memory/docker-compose.yml
-  #    K.3 search/docker-compose.yml)
-  - path: compose/coder.yml
-    project_directory: .
+  #    K.3 search/docker-compose.yml
+  #    K.4 coder/docker-compose.yml)
   - path: compose/auxiliary.yml
     project_directory: .
   - path: compose/backups.yml
@@ -34,17 +33,8 @@ volumes:
   smolcrawl-data:   # kept after smolcrawl-pipelines retired 2026-08-21 (crawl indexes; delete when confident)
   # (llm-gateway-db-data + llm-queue-data moved to the inference project
   #  2026-08-21, Part K.1 — data copied to inference_* volumes.)
-  # little-coder — five expertise volumes (persistence boundary, design §3.6)
-  # plus the project-scoped workspace shared with open-terminal.
-  # `little-coder-sessions` holds pi's per-chat session files — added in
-  # the §3.1 follow-up that switched from --no-session to per-trigger
-  # `--session <id>` for OWUI in-chat continuity + native compaction.
-  little-coder-journals:
-  little-coder-skill:
-  little-coder-cohorts:
-  little-coder-polyglot:
-  little-coder-sessions:
-  little-coder-workspace:
+  # (the little-coder volumes moved to the coder project 2026-08-21, Part
+  #  K.4 — data copied to coder_little-coder-*.)
   # (Portal volumes moved to the `portal` compose project 2026-08-21 —
   # data migrated to portal_* volumes during the split cutover.)
   # Cross-project named volume from the open-brain compose project,
@@ -71,11 +61,8 @@ networks:
   #  search/docker-compose.yml. The `vpn`/`gateway` DNS names stay reachable
   #  for OB1/OWUI because those two attach to THIS project's `default`
   #  externally.)
-  # Internal-only network for the little-coder control plane. little-coder
-  # and open-terminal talk here; none reaches the internet except
-  # via lc-egress, which is allowlisted to the git host (design §3.4).
-  lc-net:
-    internal: true
+  # (lc-net moved WITH the coder plane 2026-08-21, Part K.4 — native to
+  #  coder/docker-compose.yml.)
   default:
     driver: bridge
   # app-net: the ai-stack↔portal seam — the portal project's caddy attaches

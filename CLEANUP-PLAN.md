@@ -938,3 +938,12 @@ Per-plane playbook (portal-split procedure, now run 3×):
   healthy under project `search`; :8085/healthz ok; a REAL query returned
   Mullvad-egressed results; `gateway`/`vpn` resolve from openbrain-research.
   Root main stack = 11 default services.
+- **K.4 coder — EXECUTED 2026-08-21.** `coder/docker-compose.yml`
+  (4 services; `${OPEN_TERMINAL_API_KEY:?}` guard). open-terminal moved in
+  from core (decision K.0.6) — lc-net fully native; 7 volumes copied to
+  coder_little-coder-* (expertise ×5 + sessions + workspace); llm-net
+  external (OWUI pipe + agent-org reach the daemon there); lc-egress on a
+  project-local bridge. VERIFIED: all four healthy under project `coder`;
+  daemon :8090/health ok WITH journals + workspace focus intact
+  (github.com/anthropics/skills); open-terminal keyed /health ok.
+  Root main stack = 7 default services.

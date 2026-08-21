@@ -67,13 +67,6 @@ Run with: `docker compose ...` from the workspace root.
 | `openwebui` | Open WebUI chat surface | 127.0.0.1:3000 | default, llm-net, app-net | yes |
 | `tailscale` | Tailnet VPN; shares openwebui netns; serves ON :8443/:5055 + wiki :8444 (via caddy:8446) + LiteLLM Admin UI :8445 (→ `llm-gateway-ui`) | — (`network_mode: service:openwebui`) | — | no |
 
-**Coder (little-coder control plane)**
-| Container | Role | Host port | Networks |
-|-----------|------|-----------|----------|
-| `open-terminal` | Workspace plane — executes agent commands (egress via `lc-egress`) | — | lc-net, llm-net |
-| `little-coder` | Control daemon — decides (daemon :8090) | 127.0.0.1:9091 (metrics) | lc-net, llm-net |
-| `lc-egress` | Egress allowlist proxy (git host only) | — | lc-net, default |
-
 **Aux**
 | Container | Role | Host port | Networks |
 |-----------|------|-----------|----------|
@@ -84,7 +77,6 @@ Run with: `docker compose ...` from the workspace root.
 | Container | Backs up | Networks | Profile |
 |-----------|----------|----------|---------|
 | `openwebui-backup` | openwebui-data (mem-capped 1g) | — | default |
-| `little-coder-backup` | the little-coder expertise volumes | — | default |
 | `openbrain-db-backup` | `pg_dump` of OB1 Postgres (**open-brain** project since 2026-08-21; output still `./backups/openbrain-db`) | obnet (native) | default (open-brain) |
 | `openbrain-wiki-backup` | openbrain-wiki-data + wiki-assets (**open-brain** project since 2026-08-21; output still `./backups/openbrain-wiki`) | — | default (open-brain) |
 | `agent-bridge-db-backup` | `pg_dump` of `agent-bridge-db` (**agent-org** project; governance/effort/project state) | ao-net | default (agent-org) |
@@ -177,6 +169,24 @@ Run with: `docker compose ...` from the workspace root.
 | `search-redis` | `redis` | SearXNG cache | — | search-net |
 | `searxng` | `searxng` | Metasearch engine | — | search-net |
 | `search-gateway` | `gateway` | REST / Tavily-shim API | 127.0.0.1:8085 | search-net, ai-stack_default (external) |
+
+---
+
+## 1e. Coder — compose project `coder` (SEPARATE since 2026-08-21, Part K.4)
+
+> `coder/docker-compose.yml` — the little-coder control plane. `open-terminal`
+> moved in from core (it is this plane's executor; control-plane DECIDES /
+> open-terminal EXECUTES), making `lc-net` fully plane-native. Owns the seven
+> coder_little-coder-* volumes (expertise ×5 + sessions + workspace; data
+> migrated). llm-net external (inference + the OWUI/agent-org callers of the
+> daemon); lc-egress gets internet via a project-local bridge.
+
+| Container | Role | Host port | Networks |
+|-----------|------|-----------|----------|
+| `open-terminal` | Workspace plane — executes agent commands (egress via `lc-egress`) | — | lc-net, llm-net |
+| `little-coder` | Control daemon — decides (daemon :8090) | 127.0.0.1:9091 (metrics) | lc-net, llm-net |
+| `lc-egress` | Egress allowlist proxy (git host only) | — | lc-net, default (project-local) |
+| `little-coder-backup` | nightly tar of the expertise volumes (output still `./backups/little-coder`) | — | — |
 
 ## 2. Open Brain — compose project `open-brain` (SEPARATE)
 

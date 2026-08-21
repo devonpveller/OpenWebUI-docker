@@ -91,10 +91,10 @@ echo [INFO] Stopping Open Brain (OB1) stack...
 if exist "%OB1_COMPOSE%" docker compose -f "%OB1_COMPOSE%" stop
 
 echo [INFO] Stopping little-coder control plane...
-docker compose stop little-coder-backup lc-egress little-coder open-terminal
+docker compose -f coder\docker-compose.yml --env-file .env stop --timeout 30
 if %ERRORLEVEL% NEQ 0 (
     echo [WARN] little-coder plane stop failed, attempting force kill...
-    docker compose kill little-coder-backup lc-egress little-coder open-terminal
+    docker compose -f coder\docker-compose.yml --env-file .env kill
 )
 
 echo [INFO] Stopping Private Search Gateway...
@@ -213,13 +213,13 @@ echo [INFO] Allowing the VPN tunnel to build...
 timeout /t 30 /nobreak >nul
 
 echo [INFO] Starting open-terminal (little-coder workspace plane)...
-docker compose up -d open-terminal
+docker compose -f coder\docker-compose.yml --env-file .env up -d open-terminal
 timeout /t 20 /nobreak >nul
 
 echo [INFO] Starting little-coder control plane (daemon, MCP edge, egress)...
-docker compose up -d little-coder
+docker compose -f coder\docker-compose.yml --env-file .env up -d little-coder
 timeout /t 20 /nobreak >nul
-docker compose up -d lc-egress little-coder-backup
+docker compose -f coder\docker-compose.yml --env-file .env up -d lc-egress little-coder-backup
 
 echo [INFO] Starting Open Brain (OB1) stack...
 if exist "%OB1_COMPOSE%" (
@@ -258,7 +258,8 @@ echo [INFO] Stopping Tailscale and dependent services (network dependents)...
 docker compose -f inference\docker-compose.yml --env-file .env stop --timeout 30
 docker compose -f memory\docker-compose.yml --env-file .env stop --timeout 30
 docker compose -f search\docker-compose.yml --env-file .env stop --timeout 30
-docker compose stop tailscale openwebui-backup open_notebook surrealdb little-coder-backup lc-egress little-coder open-terminal
+docker compose -f coder\docker-compose.yml --env-file .env stop --timeout 30
+docker compose stop tailscale openwebui-backup open_notebook surrealdb
 if exist "%OB1_COMPOSE%" docker compose -f "%OB1_COMPOSE%" stop
 
 REM Restart OpenWebUI first and wait for health
@@ -305,7 +306,7 @@ echo [INFO] Starting Private Search Gateway...
 docker compose -f search\docker-compose.yml --env-file .env up -d
 
 echo [INFO] Starting little-coder control plane...
-docker compose up -d open-terminal little-coder lc-egress little-coder-backup
+docker compose -f coder\docker-compose.yml --env-file .env up -d
 
 echo [INFO] Starting Open Brain (OB1) stack...
 if exist "%OB1_COMPOSE%" (
@@ -407,11 +408,11 @@ docker exec search-gateway curl -s http://localhost:8080/healthz 2>nul
 
 echo.
 echo [INFO] open-terminal status:
-docker compose exec open-terminal curl -s http://localhost:8000/health 2>nul
+docker exec open-terminal curl -s http://localhost:8000/health 2>nul
 
 echo.
 echo [INFO] little-coder daemon status:
-docker compose exec little-coder curl -s http://localhost:8090/health 2>nul
+docker exec little-coder curl -s http://localhost:8090/health 2>nul
 
 echo.
 echo [INFO] surrealdb running state:
@@ -419,7 +420,7 @@ docker compose ps surrealdb --format "table {{.Service}}\t{{.Status}}" 2>nul
 
 echo.
 echo [INFO] Memory + coder plane status:
-docker compose ps lc-egress --format "table {{.Service}}\t{{.Status}}" 2>nul
+docker compose -f coder\docker-compose.yml --env-file .env ps lc-egress --format "table {{.Service}}\t{{.Status}}" 2>nul
 docker compose -f memory\docker-compose.yml --env-file .env ps --format "table {{.Service}}\t{{.Status}}" 2>nul
 
 echo.

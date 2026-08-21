@@ -38,9 +38,9 @@
       { "container": "search-gateway", "project": "search", "service": "gateway", "critical": false, "host_health": "http://127.0.0.1:8085/healthz" }
     ],
     "coder": [
-      { "container": "open-terminal", "project": "ai-stack", "critical": false },
-      { "container": "little-coder",  "project": "ai-stack", "critical": false },
-      { "container": "lc-egress",     "project": "ai-stack", "critical": false }
+      { "container": "open-terminal", "project": "coder", "critical": false },
+      { "container": "little-coder",  "project": "coder", "critical": false },
+      { "container": "lc-egress",     "project": "coder", "critical": false }
     ],
     "notebook": [
       { "container": "open_notebook", "project": "ai-stack", "critical": false, "note": "being retired (Quartz workbench); still live for podcasts" },

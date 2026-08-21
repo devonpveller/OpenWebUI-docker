@@ -392,12 +392,12 @@ echo [INFO] Open Terminal Health:
 cd /d "%SCRIPT_DIR%\..\.."
 REM open-terminal is the little-coder workspace plane — it left openwebui's
 REM network namespace, so probe it inside its OWN container.
-docker compose exec -T open-terminal curl -s -o NUL -w "%%{http_code}" http://localhost:8000/health 2>nul | findstr /C:"200" >nul
+docker exec open-terminal curl -s -o NUL -w "%%{http_code}" http://localhost:8000/health 2>nul | findstr /C:"200" >nul
 cd /d "%SCRIPT_DIR%"
 if %ERRORLEVEL% EQU 0 (
     echo [SUCCESS] Open Terminal health: OK
 ) else (
-    echo [ERROR] Open Terminal health: FAILED - run: docker compose up -d open-terminal
+    echo [ERROR] Open Terminal health: FAILED - run: docker compose -f coder\docker-compose.yml --env-file .env up -d open-terminal
 )
 echo.
 echo [INFO] Mnemory Health:
@@ -438,7 +438,7 @@ echo [INFO] Extended planes running state (search / little-coder / mnemory-cloud
 echo        ^(compose service keys: gateway=search-gateway, vpn=search-vpn^)
 cd /d "%SCRIPT_DIR%\..\.."
 docker compose -f search\docker-compose.yml --env-file .env ps --format "table {{.Service}}\t{{.Status}}" 2>nul
-docker compose ps little-coder lc-egress --format "table {{.Service}}\t{{.Status}}" 2>nul
+docker compose -f coder\docker-compose.yml --env-file .env ps little-coder lc-egress --format "table {{.Service}}\t{{.Status}}" 2>nul
 cd /d "%SCRIPT_DIR%"
 echo.
 echo [INFO] Open Brain stack (mcp/mcpo/db/gateway/wiki - SEPARATE compose project):

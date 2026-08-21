@@ -68,35 +68,7 @@ services:
   # serve block in entrypoint.sh + the .env LITELLM_UI_* vars.
   # =====================================================================
 
-  little-coder-backup:
-    image: alpine:3.21
-    container_name: little-coder-backup
-    volumes:
-      - little-coder-journals:/data/journals:ro
-      - little-coder-skill:/data/skill:ro
-      - little-coder-cohorts:/data/cohorts:ro
-      - little-coder-polyglot:/data/polyglot:ro
-      - little-coder-sessions:/data/sessions:ro
-      - ./backups/little-coder:/backups
-      - ./backup/little-coder-backup.sh:/scripts/backup.sh:ro
-    environment:
-      - BACKUP_DIR=/backups
-      - DATA_DIR=/data
-      - RETAIN_COUNT=${LC_BACKUP_RETAIN_COUNT:-2}
-      - BACKUP_CRON=${LC_BACKUP_CRON:-0 2 * * *}
-    entrypoint: /bin/sh
-    command:
-      - -c
-      - |
-        chmod +x /scripts/backup.sh
-        echo "$${BACKUP_CRON} /scripts/backup.sh >> /var/log/backup.log 2>&1" > /etc/crontabs/root
-        echo "[$(date -u +%FT%TZ)] little-coder backup scheduler started (cron: $${BACKUP_CRON}, retain: $${RETAIN_COUNT} most recent)"
-        crond -f -l 2
-    restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
-    labels:
-      - "com.centurylinklabs.watchtower.enable=false"
+  # (little-coder-backup moved to the coder project 2026-08-21, K.4.)
 
   # =====================================================================
   # Unified snapshot backups (post-2026-05-29 plan).
