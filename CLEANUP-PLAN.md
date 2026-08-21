@@ -920,3 +920,13 @@ Per-plane playbook (portal-split procedure, now run 3×):
   completion via the `llama-cpp` alias from openwebui (HTTP 200, MTP
   drafting); llm-queue lane attribution intact (`key: owui-chat`). Root main
   stack = 18 default services.
+- **K.2 memory — EXECUTED 2026-08-21.** `memory/docker-compose.yml`
+  (3 services; `${MCP_API_KEY:?}` guard); mnemory-data copied to
+  `memory_mnemory-data`; llm-net external, project-local default bridge.
+  TRAP found: a fresh mnemory `--build` crash-loops (unpinned newer `mcp`
+  package moved fastmcp) — pinned to the proven image as `mnemory:local`
+  with a rebuild-deliberately comment. Recovery scripts: generic
+  `Start-/Stop-PlaneStack` driver added (memory uses it; later planes will
+  too). VERIFIED: all three healthy under project `memory`; cloud door
+  :8060/health = ok from host; mnemory:8050 reachable from openwebui over
+  llm-net. Root main stack = 15 default services.

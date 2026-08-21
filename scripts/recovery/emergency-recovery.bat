@@ -120,10 +120,10 @@ if %ERRORLEVEL% NEQ 0 (
 )
 
 echo [INFO] Stopping Mnemory containers...
-docker compose stop mnemory-cloud-gateway mnemory mnemory-backup
+docker compose -f memory\docker-compose.yml --env-file .env stop --timeout 30
 if %ERRORLEVEL% NEQ 0 (
     echo [WARN] Mnemory stop failed, attempting force kill...
-    docker compose kill mnemory-cloud-gateway mnemory mnemory-backup
+    docker compose -f memory\docker-compose.yml --env-file .env kill
 )
 
 echo [INFO] Stopping OpenWebUI backup scheduler...
@@ -190,14 +190,15 @@ echo [INFO] Waiting for Tailscale network connectivity and serve configuration..
 timeout /t 60 /nobreak >nul
 
 echo [INFO] Starting Mnemory memory service...
-docker compose up -d mnemory
+docker compose -f memory\docker-compose.yml --env-file .env up -d mnemory
 timeout /t 15 /nobreak >nul
 
 echo [INFO] Starting Mnemory gateway (cloud MCP proxy)...
-docker compose up -d mnemory-cloud-gateway
+docker compose -f memory\docker-compose.yml --env-file .env up -d mnemory-cloud-gateway
 
 echo [INFO] Starting backup schedulers (main/host resources)...
-docker compose up -d mnemory-backup openwebui-backup tailscale-backup open-notebook-backup
+docker compose -f memory\docker-compose.yml --env-file .env up -d mnemory-backup
+docker compose up -d openwebui-backup tailscale-backup open-notebook-backup
 
 echo [INFO] Starting surrealdb (open-notebook database)...
 docker compose up -d surrealdb
@@ -255,7 +256,8 @@ echo [INFO] Restarting with proper network dependency sequence...
 REM Stop dependent containers first
 echo [INFO] Stopping Tailscale and dependent services (network dependents)...
 docker compose -f inference\docker-compose.yml --env-file .env stop --timeout 30
-docker compose stop tailscale mnemory mnemory-cloud-gateway mnemory-backup openwebui-backup open_notebook surrealdb gateway searxng redis vpn little-coder-backup lc-egress little-coder open-terminal
+docker compose -f memory\docker-compose.yml --env-file .env stop --timeout 30
+docker compose stop tailscale openwebui-backup open_notebook surrealdb gateway searxng redis vpn little-coder-backup lc-egress little-coder open-terminal
 if exist "%OB1_COMPOSE%" docker compose -f "%OB1_COMPOSE%" stop
 
 REM Restart OpenWebUI first and wait for health
@@ -285,7 +287,7 @@ timeout /t 30 /nobreak >nul
 
 
 echo [INFO] Starting Mnemory services...
-docker compose up -d mnemory mnemory-cloud-gateway mnemory-backup
+docker compose -f memory\docker-compose.yml --env-file .env up -d
 timeout /t 15 /nobreak >nul
 
 echo [INFO] Starting backup schedulers (main/host resources)...
@@ -391,7 +393,7 @@ docker compose exec openwebui python -c "import torch; print('CUDA available:', 
 
 echo.
 echo [INFO] Mnemory status:
-docker compose exec mnemory python -c "import urllib.request; print(urllib.request.urlopen('http://localhost:8051/health').read().decode())" 2>nul
+docker exec mnemory python -c "import urllib.request; print(urllib.request.urlopen('http://localhost:8051/health').read().decode())" 2>nul
 
 
 echo.
@@ -416,7 +418,8 @@ docker compose ps surrealdb --format "table {{.Service}}\t{{.Status}}" 2>nul
 
 echo.
 echo [INFO] Memory + coder plane status:
-docker compose ps mnemory-cloud-gateway lc-egress --format "table {{.Service}}\t{{.Status}}" 2>nul
+docker compose ps lc-egress --format "table {{.Service}}\t{{.Status}}" 2>nul
+docker compose -f memory\docker-compose.yml --env-file .env ps --format "table {{.Service}}\t{{.Status}}" 2>nul
 
 echo.
 echo [INFO] Backup schedulers status:

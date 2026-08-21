@@ -67,12 +67,6 @@ Run with: `docker compose ...` from the workspace root.
 | `openwebui` | Open WebUI chat surface | 127.0.0.1:3000 | default, llm-net, app-net | yes |
 | `tailscale` | Tailnet VPN; shares openwebui netns; serves ON :8443/:5055 + wiki :8444 (via caddy:8446) + LiteLLM Admin UI :8445 (→ `llm-gateway-ui`) | — (`network_mode: service:openwebui`) | — | no |
 
-**Memory (mnemory)**
-| Container | Role | Host port | Networks |
-|-----------|------|-----------|----------|
-| `mnemory` | Unified memory layer (mgmt :8051) | — (internal only) | llm-net |
-| `mnemory-cloud-gateway` | Privacy-enforcing MCP proxy for cloud clients | 127.0.0.1:8060 | llm-net, default |
-
 **Search (Private Search Gateway — all egress over Mullvad WireGuard since 2026-08-21)**
 | Container | Compose service | Role | Host port | Networks |
 |-----------|-----------------|------|-----------|----------|
@@ -97,7 +91,6 @@ Run with: `docker compose ...` from the workspace root.
 **Backups (unified snapshot sidecars — `backup/` scripts, nightly cron; NAS-synced)**
 | Container | Backs up | Networks | Profile |
 |-----------|----------|----------|---------|
-| `mnemory-backup` | mnemory-data | — | default |
 | `openwebui-backup` | openwebui-data (mem-capped 1g) | — | default |
 | `little-coder-backup` | the little-coder expertise volumes | — | default |
 | `openbrain-db-backup` | `pg_dump` of OB1 Postgres (**open-brain** project since 2026-08-21; output still `./backups/openbrain-db`) | obnet (native) | default (open-brain) |
@@ -157,6 +150,24 @@ Run with: `docker compose ...` from the workspace root.
 | `llama-cpp-embed-upstream` | bge-m3 embeddings server (was `llama-cpp-embed`) | 127.0.0.1:8082 | llm-backend-net (isolated) | yes (device 1) |
 | `llm-gateway-backup` | nightly `pg_dump` of the LiteLLM spend ledger (output still `./backups/llm-gateway`) | — | llm-net | no |
 | `lm-models-backup` | weekly tar of the GGUF model store (HEALTH_TCP liveness probe to `llama-cpp-upstream`; output still `./backups/lm-models`) | — | llm-backend-net | no |
+
+---
+
+## 1c. Memory — compose project `memory` (SEPARATE since 2026-08-21, Part K.2)
+
+> `memory/docker-compose.yml` — mnemory + its cloud privacy gateway + backup.
+> Attaches to `ai-stack_llm-net` (external); owns `memory_mnemory-data` (data
+> migrated) and a project-local default bridge (host-publishes :8060, carries
+> the backup's HEALTH_TCP probe). Doors rule unchanged: local callers hit
+> mnemory on llm-net; cloud clients get ONLY the gateway. TRAP: `mnemory` is
+> pinned to image `mnemory:local` — a fresh build pulls an unpinned newer
+> `mcp` package that crash-loops (fastmcp moved); rebuild deliberately only.
+
+| Container | Role | Host port | Networks |
+|-----------|------|-----------|----------|
+| `mnemory` | Unified memory layer (mgmt :8051) | — (internal only) | llm-net |
+| `mnemory-cloud-gateway` | Privacy-enforcing MCP proxy for cloud clients | 127.0.0.1:8060 | llm-net, default |
+| `mnemory-backup` | nightly tar of mnemory-data (output still `./backups/mnemory`) | — | default |
 
 ## 2. Open Brain — compose project `open-brain` (SEPARATE)
 

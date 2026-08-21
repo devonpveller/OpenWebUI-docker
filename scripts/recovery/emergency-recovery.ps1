@@ -21,11 +21,12 @@ $ErrorActionPreference = "Stop"
 #    2026-08-21 Part K.1: inference\docker-compose.yml, driven below via
 #    Start-/Stop-InferenceStack. It owns llm-backend-net and attaches to the
 #    anchor's ai-stack_llm-net externally.)
-#   memory  mnemory, mnemory-cloud-gateway
+#   (the MEMORY plane -- mnemory, mnemory-cloud-gateway, mnemory-backup --
+#    is its own compose project since 2026-08-21 Part K.2: memory\docker-compose.yml)
 #   search  vpn, redis, searxng, gateway (Private Search Gateway)
 #   coder   open-terminal, little-coder, lc-egress
 #   aux    , surrealdb, open_notebook
-#   backup  mnemory-backup, openwebui-backup, little-coder-backup,
+#   backup  openwebui-backup, little-coder-backup,
 #          , tailscale-backup, open-notebook-backup
 #           (openbrain-db/wiki backups live in the OB1 project; llm-gateway/
 #            lm-models backups live in the inference project -- 2026-08-21)
@@ -67,22 +68,26 @@ $Script:InferenceServices = @(
     "llm-gateway-backup", "lm-models-backup"
 )
 
+# The MEMORY plane is a separate compose project since 2026-08-21 (Part K.2,
+# project name "memory"): mnemory + mnemory-cloud-gateway + mnemory-backup.
+$Script:MemoryCompose = "memory\docker-compose.yml"
+$Script:MemoryServices = @("mnemory", "mnemory-cloud-gateway", "mnemory-backup")
+
 # Main compose services, low-level dependency first.
 # (Portal plane omitted on purpose — profile-gated; see the header note.)
 $Script:MainStackServices = @(
     "openwebui", "tailscale",
-    "mnemory", "mnemory-cloud-gateway",
      "surrealdb", "open_notebook",
     "vpn", "redis", "searxng", "gateway",
     "open-terminal", "little-coder", "lc-egress",
     # Backup cron sidecars (see helper arrays below).
-    "mnemory-backup", "openwebui-backup", "little-coder-backup",
+    "openwebui-backup", "little-coder-backup",
      "tailscale-backup", "open-notebook-backup"
 )
 
 # Backup sidecars touching only main-stack/host resources — safe to nudge anytime.
 $Script:MainBackups = @(
-    "mnemory-backup", "openwebui-backup", "little-coder-backup",
+    "openwebui-backup", "little-coder-backup",
      "tailscale-backup", "open-notebook-backup"
 )
 # (openbrain-db-backup / openbrain-wiki-backup moved INTO the OB1 compose
@@ -228,6 +233,34 @@ function Stop-InferenceStack {
     }
 }
 
+function Start-PlaneStack {
+    # Generic driver for a Part K plane project: one `up -d` (the project's
+    # own depends_on orders it), then an optional health gate by container
+    # name. Requires the anchor networks (any root-project `up` creates them).
+    param([string]$Label, [string]$ComposePath, [string]$GateContainer = "", [int]$GateTimeout = 90)
+    Write-Log "INFO" "Starting $Label project..."
+    try {
+        docker compose -f $ComposePath --env-file .env up -d
+        if ($GateContainer -and -not (Wait-ForHealthy $GateContainer $GateTimeout)) {
+            Write-Log "WARN" "$Label health gate ($GateContainer) failed, but continuing..."
+        }
+    }
+    catch {
+        Write-Log "ERROR" "Failed to start $Label project: $_"
+    }
+}
+
+function Stop-PlaneStack {
+    param([string]$Label, [string]$ComposePath, [int]$Timeout = 30)
+    Write-Log "INFO" "Stopping $Label project..."
+    try {
+        docker compose -f $ComposePath --env-file .env stop --timeout $Timeout
+    }
+    catch {
+        Write-Log "WARN" "$Label stop had issues, continuing: $_"
+    }
+}
+
 function Start-OB1Stack {
     # Bring the Open Brain (OB1) compose project up. OB1's own depends_on
     # handles its internal ordering; it must run AFTER the main stack so
@@ -334,7 +367,7 @@ function Test-BasicConnectivity {
         # Inference plane lives in its own project - look its containers up by
         # NAME (container names are stable across projects).
         $running = @(docker ps --format "{{.Names}}")
-        foreach ($svc in $Script:InferenceServices) {
+        foreach ($svc in ($Script:InferenceServices + $Script:MemoryServices)) {
             $states[$svc] = if ($running -contains $svc) { "running" } else { "absent" }
         }
 
@@ -472,8 +505,9 @@ function Invoke-MinimalRecovery {
         # nudge them so a cold dependent comes back.
         docker compose -f $Script:InferenceCompose --env-file .env up -d llm-queue llm-gateway
 
-        docker compose up -d mnemory mnemory-cloud-gateway `
-            surrealdb open_notebook `
+        docker compose -f $Script:MemoryCompose --env-file .env up -d
+
+        docker compose up -d surrealdb open_notebook `
             vpn redis searxng gateway `
             open-terminal little-coder lc-egress
 
@@ -631,8 +665,8 @@ function Invoke-EmergencyRecovery {
     # OpenWebUI-dependent auxiliary services (open_notebook before surrealdb).
     Stop-ServiceGroup "auxiliary services" @( "open_notebook", "surrealdb")
 
-    # Mnemory memory layer (gateway before mnemory).
-    Stop-ServiceGroup "Mnemory layer" @("mnemory-cloud-gateway", "mnemory", "mnemory-backup")
+    # Memory project (its compose stop orders gateway before mnemory).
+    Stop-PlaneStack "memory" $Script:MemoryCompose
 
     # OpenWebUI backup scheduler.
     Stop-ServiceGroup "OpenWebUI backup" @("openwebui-backup")
@@ -695,21 +729,8 @@ function Invoke-EmergencyRecovery {
         throw
     }
 
-    # Start Mnemory memory layer (depends on llama-cpp-upstream services)
-    Write-Log "INFO" "Starting Mnemory memory service..."
-    try {
-        docker compose up -d mnemory
-        if (-not (Wait-ForHealthy "mnemory" 90)) {
-            Write-Log "WARN" "Mnemory health check failed, but continuing..."
-        }
-    }
-    catch {
-        Write-Log "WARN" "Failed to start Mnemory: $_"
-        # Don't throw - Mnemory is not critical for basic functionality
-    }
-
-    # mnemory-cloud-gateway (cloud MCP proxy — depends on mnemory)
-    Start-ServiceGroup "mnemory-cloud-gateway" @("mnemory-cloud-gateway")
+    # Memory project (mnemory -> cloud gateway -> backup; own project since K.2).
+    Start-PlaneStack "memory" $Script:MemoryCompose "mnemory" 90
 
     # Backup schedulers (independent cron sidecars, main/host resources).
     Start-ServiceGroup "backup schedulers" $Script:MainBackups
@@ -804,7 +825,7 @@ function Invoke-EmergencyRecovery {
         docker compose exec tailscale tailscale --socket=/tmp/tailscaled.sock serve status
 
         Write-Log "INFO" "Mnemory status:"
-        docker compose exec mnemory python -c "import urllib.request; print(urllib.request.urlopen('http://localhost:8051/health').read().decode())" 2>$null
+        docker exec mnemory python -c "import urllib.request; print(urllib.request.urlopen('http://localhost:8051/health').read().decode())" 2>$null
         Write-Log "INFO" "open-notebook API status:"
         docker compose exec open_notebook python3 -c "import urllib.request; print(urllib.request.urlopen('http://localhost:5055/api/config').read().decode())" 2>$null
 
@@ -821,10 +842,11 @@ function Invoke-EmergencyRecovery {
         docker compose ps surrealdb --format "table {{.Service}}\t{{.Status}}" 2>$null
 
         Write-Log "INFO" "Memory + coder plane status:"
-        docker compose ps mnemory-cloud-gateway lc-egress --format "table {{.Service}}\t{{.Status}}" 2>$null
+        docker compose ps lc-egress --format "table {{.Service}}\t{{.Status}}" 2>$null
+        docker compose -f $Script:MemoryCompose --env-file .env ps --format "table {{.Service}}\t{{.Status}}" 2>$null
 
         Write-Log "INFO" "Backup scheduler status:"
-        docker compose ps mnemory-backup openwebui-backup little-coder-backup `
+        docker compose ps openwebui-backup little-coder-backup `
             tailscale-backup open-notebook-backup `
             --format "table {{.Service}}\t{{.Status}}" 2>$null
 
@@ -948,7 +970,9 @@ function Invoke-GPUReset {
     Write-Log "INFO" "Stopping GPU-dependent services for reset..."
     try { docker compose -f $Script:InferenceCompose --env-file .env down }
     catch { Write-Log "WARN" "Inference teardown had issues: $_" }
-    docker compose down openwebui mnemory
+    try { docker compose -f $Script:MemoryCompose --env-file .env down }
+    catch { Write-Log "WARN" "Memory teardown had issues: $_" }
+    docker compose down openwebui
 
     Write-Log "INFO" "Rebuilding OpenWebUI with fresh GPU configuration..."
     docker compose build --no-cache openwebui
@@ -971,7 +995,7 @@ function Invoke-GPUReset {
 
                     # Restart the planes that consume llama-cpp-upstream inference:
                     # the memory layer, the little-coder plane, and OB1.
-                    docker compose up -d mnemory mnemory-cloud-gateway mnemory-backup
+                    docker compose -f $Script:MemoryCompose --env-file .env up -d
                     Write-Log "INFO" "Mnemory layer started"
 
                     docker compose up -d open-terminal little-coder lc-egress little-coder-backup

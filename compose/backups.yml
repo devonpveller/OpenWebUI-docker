@@ -2,35 +2,7 @@
 # Split from the 2,2xx-line root docker-compose.yml 2026-08-20 (CLEANUP-PLAN v3 D.1).
 # Networks/volumes are defined in the root file.
 services:
-  mnemory-backup:
-    image: alpine:3.21
-    container_name: mnemory-backup
-    volumes:
-      - mnemory-data:/data:ro
-      - ./backups/mnemory:/backups
-      - ./backup/mnemory-backup.sh:/scripts/backup.sh:ro
-    environment:
-      - BACKUP_DIR=/backups
-      - DATA_DIR=/data
-      - RETAIN_COUNT=${BACKUP_RETAIN_COUNT:-2}
-      - HEALTH_TCP=mnemory-cloud-gateway:8060 # gateway listens on 8060; 8080 made the precheck skip (=zero artifacts) silently from 2026-05-29 to 07-05
-      - BACKUP_CRON=${BACKUP_CRON:-0 2 * * *}
-    entrypoint: /bin/sh
-    command:
-      - -c
-      - |
-        chmod +x /scripts/backup.sh
-        echo "$${BACKUP_CRON} /scripts/backup.sh >> /var/log/backup.log 2>&1" > /etc/crontabs/root
-        echo "[$(date -u +%FT%TZ)] Backup scheduler started (cron: $${BACKUP_CRON}, retain: $${RETAIN_COUNT} most recent)"
-        crond -f -l 2
-    restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
-    depends_on:
-      mnemory:
-        condition: service_healthy
-    labels:
-      - "com.centurylinklabs.watchtower.enable=false"
+  # (mnemory-backup moved to the memory project 2026-08-21, K.2.)
 
   openwebui-backup:
     image: alpine:3.21

@@ -1,0 +1,141 @@
+# memory/docker-compose.yml — the MEMORY compose project (K.2, 2026-08-21).
+# mnemory + its cloud privacy gateway + backup sidecar, moved out of the root
+# ai-stack project (CLEANUP-PLAN Part K). Definition-identical to the former
+# compose/memory.yml + the mnemory-backup block from compose/backups.yml —
+# only paths (../) and network/volume ownership changed.
+#
+# Drive it with scripts/stack/stack.ps1, or manually FROM THE REPO ROOT:
+#   docker compose -f memory/docker-compose.yml --env-file .env up -d
+# The ${MCP_API_KEY:?} guard makes a bare `up` without the env file fail loud.
+#
+# Doors rule (unchanged): local callers on llm-net talk to mnemory directly;
+# cloud clients get ONLY the host-published mnemory-cloud-gateway (:8060).
+name: memory
+
+services:
+  mnemory:
+    build:
+      context: ../../mnemory
+      dockerfile: Dockerfile
+    # Pinned to the proven image (retagged from ai-stack-mnemory at the K.2
+    # split). TRAP found 2026-08-21: a fresh `--build` pulls an unpinned newer
+    # `mcp` package whose fastmcp module moved -> ModuleNotFoundError crash
+    # loop. Rebuild deliberately (fix/pin deps in ../../mnemory) — never as a
+    # side effect of `up --build`.
+    image: mnemory:local
+    pull_policy: never
+    container_name: mnemory
+    networks:
+      - llm-net
+    # NO host ports: mnemory is reachable only inside llm-net (internal,
+    # no gateway). Trusted local clients (Open WebUI) talk to it directly.
+    # Cloud services must go through mnemory-cloud-gateway, which is the only
+    # host-published door and enforces the privacy policy.
+    environment:
+      - LLM_API_KEY=${MNEMORY_LLM_API_KEY:-mnemory}
+      - LLM_BASE_URL=http://llama-cpp:8080/v1
+      - LLM_MODEL=qwen36-27b:nothink
+      - EMBED_BASE_URL=http://llama-cpp-embed:8080/v1
+      - EMBED_MODEL=qllama/bge-m3:latest
+      - EMBED_DIMS=1024
+      - MCP_API_KEY=${MCP_API_KEY:?set via --env-file ../.env or scripts/stack/stack.ps1}
+      - MCP_API_KEYS=${MCP_API_KEYS}
+      - FIND_MEMORIES_QUERIES=3
+      - LLM_CONTEXT_SIZE=${MNEMORY_LLM_CONTEXT_SIZE:-131072}
+      - LABELS_INDEXES=origin,share,project
+      - MGMT_PORT=8051
+    volumes:
+      - mnemory-data:/data
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    # (cross-project since K.1 2026-08-21: llm-gateway lives in the inference
+    #  project; startup order is enforced by stack.ps1 / recovery, and the
+    #  service retries until the gateway answers -- same posture as OB1.)
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8051/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # Privacy-enforcing MCP proxy for CLOUD services (Claude Code, etc.).
+  # Only host-published mnemory door. Holds the real mnemory key; cloud
+  # clients use MNEMORY_GATEWAY_KEY and never see the mnemory key.
+
+  mnemory-cloud-gateway:
+    build:
+      context: ../mnemory-gateway
+      dockerfile: Dockerfile
+    container_name: mnemory-cloud-gateway
+    networks:
+      - llm-net      # reach mnemory:8050 internally
+      - default      # be reachable from the host (non-internal => publishable)
+    ports:
+      - "127.0.0.1:8060:8060"
+    environment:
+      - MNEMORY_URL=http://mnemory:8050
+      - MNEMORY_KEY=${MCP_API_KEY}
+      - GATEWAY_KEY=${MNEMORY_GATEWAY_KEY}
+      - BOUND_USER_ID=${MNEMORY_CLOUD_USER:-yamaoka01@gmail.com}
+      - SHARE_LABEL_VALUE=cloud
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      mnemory:
+        condition: service_healthy
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8060/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  mnemory-backup:
+    image: alpine:3.21
+    container_name: mnemory-backup
+    volumes:
+      - mnemory-data:/data:ro
+      - ../backups/mnemory:/backups
+      - ../backup/mnemory-backup.sh:/scripts/backup.sh:ro
+    environment:
+      - BACKUP_DIR=/backups
+      - DATA_DIR=/data
+      - RETAIN_COUNT=${BACKUP_RETAIN_COUNT:-2}
+      - HEALTH_TCP=mnemory-cloud-gateway:8060 # gateway listens on 8060; 8080 made the precheck skip (=zero artifacts) silently from 2026-05-29 to 07-05
+      - BACKUP_CRON=${BACKUP_CRON:-0 2 * * *}
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        chmod +x /scripts/backup.sh
+        echo "$${BACKUP_CRON} /scripts/backup.sh >> /var/log/backup.log 2>&1" > /etc/crontabs/root
+        echo "[$(date -u +%FT%TZ)] Backup scheduler started (cron: $${BACKUP_CRON}, retain: $${RETAIN_COUNT} most recent)"
+        crond -f -l 2
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      mnemory:
+        condition: service_healthy
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
+volumes:
+  # Migrated from ai-stack_mnemory-data 2026-08-21 (data copied).
+  mnemory-data:
+
+networks:
+  # Shared caller seam — owned by the root ai-stack anchor project.
+  llm-net:
+    external: true
+    name: ai-stack_llm-net
+  # Project-local bridge: host-publishes the cloud gateway (:8060) and lets
+  # mnemory-backup's HEALTH_TCP probe reach it. No cross-project consumers.
+  default:
+    driver: bridge

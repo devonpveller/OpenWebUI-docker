@@ -29,8 +29,8 @@
       { "container": "llama-cpp-embed-upstream", "project": "inference", "critical": false, "host_health": "http://127.0.0.1:8082/health" }
     ],
     "memory": [
-      { "container": "mnemory",         "project": "ai-stack", "critical": false },
-      { "container": "mnemory-cloud-gateway", "project": "ai-stack", "critical": false }
+      { "container": "mnemory",         "project": "memory", "critical": false },
+      { "container": "mnemory-cloud-gateway", "project": "memory", "critical": false }
     ],
     "search": [
       { "container": "search-redis",   "project": "ai-stack", "service": "redis",   "critical": false },

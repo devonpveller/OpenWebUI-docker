@@ -402,12 +402,12 @@ if %ERRORLEVEL% EQU 0 (
 echo.
 echo [INFO] Mnemory Health:
 cd /d "%SCRIPT_DIR%\..\.."
-docker compose exec mnemory python -c "import urllib.request; urllib.request.urlopen('http://localhost:8051/health')" >nul 2>&1
+docker exec mnemory python -c "import urllib.request; urllib.request.urlopen('http://localhost:8051/health')" >nul 2>&1
 cd /d "%SCRIPT_DIR%"
 if %ERRORLEVEL% EQU 0 (
     echo [SUCCESS] Mnemory health: OK
 ) else (
-    echo [ERROR] Mnemory health: FAILED - run: docker compose up -d mnemory
+    echo [ERROR] Mnemory health: FAILED - run: docker compose -f memory\docker-compose.yml --env-file .env up -d mnemory
 )
 echo.
 echo.
@@ -437,7 +437,7 @@ echo.
 echo [INFO] Extended planes running state (search / little-coder / mnemory-cloud-gateway):
 echo        ^(compose service keys: gateway=search-gateway, vpn=search-vpn^)
 cd /d "%SCRIPT_DIR%\..\.."
-docker compose ps vpn redis searxng gateway little-coder lc-egress mnemory-cloud-gateway --format "table {{.Service}}\t{{.Status}}" 2>nul
+docker compose ps vpn redis searxng gateway little-coder lc-egress --format "table {{.Service}}\t{{.Status}}" 2>nul
 cd /d "%SCRIPT_DIR%"
 echo.
 echo [INFO] Open Brain stack (mcp/mcpo/db/gateway/wiki - SEPARATE compose project):
@@ -445,7 +445,8 @@ powershell -ExecutionPolicy Bypass -NoProfile -File "%SCRIPT_DIR%check-openbrain
 echo.
 echo [INFO] Backup schedulers (no health endpoints - running state only):
 cd /d "%SCRIPT_DIR%\..\.."
-docker compose ps mnemory-backup openwebui-backup --format "table {{.Service}}\t{{.Status}}" 2>nul
+docker compose ps openwebui-backup --format "table {{.Service}}\t{{.Status}}" 2>nul
+docker compose -f memory\docker-compose.yml --env-file .env ps mnemory-backup --format "table {{.Service}}\t{{.Status}}" 2>nul
 cd /d "%SCRIPT_DIR%"
 if "%1"=="" (
     echo.
@@ -466,7 +467,8 @@ echo.
 echo [INFO] Stopping dependent containers first...
 cd /d "%SCRIPT_DIR%\..\.."
 docker compose -f inference\docker-compose.yml --env-file .env stop --timeout 30
-docker compose stop tailscale mnemory mnemory-backup openwebui-backup open_notebook surrealdb
+docker compose -f memory\docker-compose.yml --env-file .env stop --timeout 30
+docker compose stop tailscale openwebui-backup open_notebook surrealdb
 cd /d "%SCRIPT_DIR%"
 echo [INFO] Restarting OpenWebUI...
 cd /d "%SCRIPT_DIR%\..\.."
@@ -519,9 +521,9 @@ cd /d "%SCRIPT_DIR%\..\.."
 docker compose start mnemory
 if %ERRORLEVEL% NEQ 0 (
     echo [WARN] Mnemory start failed, trying up -d...
-    docker compose up -d mnemory
+    docker compose -f memory\docker-compose.yml --env-file .env up -d mnemory
 )
-docker compose up -d mnemory-backup
+docker compose -f memory\docker-compose.yml --env-file .env up -d mnemory-backup
 docker compose up -d openwebui-backup
 cd /d "%SCRIPT_DIR%"
 cd /d "%SCRIPT_DIR%"
@@ -563,10 +565,10 @@ echo ========================================
 echo.
 echo [INFO] Checking Mnemory service status...
 cd /d "%SCRIPT_DIR%\..\.."
-docker compose ps mnemory --format "table {{.Service}}\t{{.Status}}"
+docker compose -f memory\docker-compose.yml --env-file .env ps mnemory --format "table {{.Service}}\t{{.Status}}"
 echo.
 echo [INFO] Testing Mnemory health endpoint...
-docker compose exec mnemory python -c "import urllib.request; urllib.request.urlopen('http://localhost:8051/health')" >nul 2>&1
+docker exec mnemory python -c "import urllib.request; urllib.request.urlopen('http://localhost:8051/health')" >nul 2>&1
 set RESULT=%ERRORLEVEL%
 cd /d "%SCRIPT_DIR%"
 if %RESULT% EQU 0 (
@@ -574,12 +576,12 @@ if %RESULT% EQU 0 (
 ) else (
     echo [WARN] Mnemory health check failed, restarting...
     cd /d "%SCRIPT_DIR%\..\.."
-    docker compose restart mnemory
+    docker restart mnemory
     cd /d "%SCRIPT_DIR%"
     echo [INFO] Waiting for Mnemory to start...
     timeout /t 30 /nobreak >nul
     cd /d "%SCRIPT_DIR%\..\.."
-    docker compose exec mnemory python -c "import urllib.request; urllib.request.urlopen('http://localhost:8051/health')" >nul 2>&1
+    docker exec mnemory python -c "import urllib.request; urllib.request.urlopen('http://localhost:8051/health')" >nul 2>&1
     set RESULT=%ERRORLEVEL%
     cd /d "%SCRIPT_DIR%"
     if %RESULT% EQU 0 (
@@ -591,7 +593,7 @@ if %RESULT% EQU 0 (
 echo.
 echo [INFO] Mnemory backup service status:
 cd /d "%SCRIPT_DIR%\..\.."
-docker compose ps mnemory-backup --format "table {{.Service}}\t{{.Status}}"
+docker compose -f memory\docker-compose.yml --env-file .env ps mnemory-backup --format "table {{.Service}}\t{{.Status}}"
 cd /d "%SCRIPT_DIR%"
 if "%1"=="" (
     echo.

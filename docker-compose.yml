@@ -10,11 +10,11 @@
 include:
   - path: compose/core.yml
     project_directory: .
-  # (inference plane moved to its own compose project 2026-08-21, Part K.1:
-  #  inference/docker-compose.yml — drive via scripts/stack/stack.ps1 or
-  #  `docker compose -f inference/docker-compose.yml --env-file .env ...`.)
-  - path: compose/memory.yml
-    project_directory: .
+  # (Part K plane splits, 2026-08-21 — these are their own compose projects
+  #  now, driven via scripts/stack/stack.ps1 or
+  #  `docker compose -f <plane>/docker-compose.yml --env-file .env ...`:
+  #    K.1 inference/docker-compose.yml
+  #    K.2 memory/docker-compose.yml)
   - path: compose/search.yml
     project_directory: .
   - path: compose/coder.yml
@@ -30,7 +30,8 @@ include:
 
 volumes:
   openwebui-data:
-  mnemory-data:
+  # (mnemory-data moved to the memory project 2026-08-21, Part K.2 —
+  #  data copied to memory_mnemory-data.)
   smolcrawl-data:   # kept after smolcrawl-pipelines retired 2026-08-21 (crawl indexes; delete when confident)
   # (llm-gateway-db-data + llm-queue-data moved to the inference project
   #  2026-08-21, Part K.1 — data copied to inference_* volumes.)
