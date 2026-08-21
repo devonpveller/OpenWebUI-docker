@@ -161,6 +161,28 @@ OFF: cloud-model escalation lane, master-key'd, enabled per-engagement.)
 
 ---
 
+## Which door do I use? (the anti-wrong-endpoint matrix)
+
+Every misconnection risk in this stack is one of these lanes. Pick by WHO is
+calling, never by which port happens to answer.
+
+| You are… | You want… | Use | NEVER use |
+|---|---|---|---|
+| Any container needing chat/embeddings | Inference | `http://llama-cpp:8080/v1` / `llama-cpp-embed` aliases + your `sk-` virtual key | `*-upstream` directly (bypasses ledger/queue; pre-commit-blocked) |
+| A human/agent on the host | Inference | Same aliases via an llm-net container, or the tailnet `/llama-cpp` route | LiteLLM `/health` via the alias (model-load thrash — `/health/liveliness` only) |
+| OWUI (a tool server) | Open Brain | `openbrain-mcpo:8000/open-brain` + `-mcpo-ext` (OpenAPI, key'd) | the MCP servers directly |
+| A local/trusted process (Claude Code, recipes) | Open Brain | `openbrain-mcp` (obnet MCP) or `openbrain-rest`:3001 (PostgREST) | the cloud gateway (it FILTERS: share=cloud only) |
+| A cloud/external client | Open Brain | `openbrain-gateway` 127.0.0.1:8061 (bearer key; forced share=cloud) | anything else — this is the only cloud door BY DESIGN |
+| A local/trusted process | mnemory | `mnemory:8050` REST directly (full access) | `mnemory-cloud-gateway` (it BLOCKS personal reads/writes) |
+| A cloud/external client | mnemory | `mnemory-cloud-gateway` 127.0.0.1:8060 | `mnemory:8050` (not published; and no cloud client is trusted with it) |
+| Anything fetching web pages | Anonymous egress | Mullvad HTTP proxy `http://vpn:8888` | direct egress (home IP) — tor retired 2026-08-21 |
+| Anything searching the web | Search | `gateway:8080` (search-gateway REST, key'd) | SearXNG directly (internal-only by design) |
+| OWUI / agent-org | Coding tasks | little-coder daemon `little-coder:8090` (lc-net) | open-terminal directly (exec plane, key'd, workers only) |
+
+The rule behind the table: **cloud doors filter, local doors trust** — a
+gateway refusing you data usually means you picked the cloud door for a
+local job (or vice versa), not that something is broken.
+
 ## External projects on this host (out of scope — per operator, 2026-08-20)
 
 | Project | Containers | Note |
