@@ -1,82 +1,51 @@
-# docker-compose.yml - ai-stack root (thin since 2026-08-20, CLEANUP-PLAN v3 D.1)
-# Service definitions live in compose/<plane>.yml via include; networks and
-# volumes stay here. UX unchanged: plain `docker compose ...` from this dir.
-# Container rule: adding/removing/moving a service = compose file + recovery
-# scripts (emergency-recovery.ps1/.bat) + stack-map doc together.
-
-# The long include form pins project_directory to the repo root so that the
-# included files' relative paths (./config, ./scripts, ./backup, .env
-# interpolation) keep resolving exactly as they did in the monolithic file.
-include:
-  # (Part K plane splits, 2026-08-21 — these are their own compose projects
-  #  now, driven via scripts/stack/stack.ps1 or
-  #  `docker compose -f <plane>/docker-compose.yml --env-file .env ...`:
-  #    K.1 inference/docker-compose.yml
-  #    K.2 memory/docker-compose.yml
-  #    K.3 search/docker-compose.yml
-  #    K.4 coder/docker-compose.yml
-  #    K.5 frontend/docker-compose.yml — openwebui + tailscale netns pair)
-  - path: compose/auxiliary.yml
-    project_directory: .
-  - path: compose/backups.yml
-    project_directory: .
-  # The portal slice moved to its own compose project 2026-08-21:
-  # portal/docker-compose.yml (project name `portal`), driven by
-  # scripts/portal/portal-on.ps1 / portal-off.ps1. It attaches to this
-  # project's app-net externally to reach openwebui / open_notebook.
+# docker-compose.yml — the ai-stack PLATFORM ANCHOR (Part K, 2026-08-21).
+#
+# This project owns NO services anymore — only the shared seam networks that
+# every plane project attaches to externally. `docker compose up -d` here
+# creates the networks and starts nothing; run it once before any plane on a
+# cold host (scripts/stack/stack.ps1 does this for you).
+#
+# The service trees are self-contained compose projects, each driven with
+# `docker compose -f <dir>/docker-compose.yml --env-file .env ...` from this
+# directory (single root .env; every plane file carries a ${VAR:?} fail-loud
+# guard against running without it):
+#
+#   frontend/   openwebui + tailscale (netns pair) + their backups   (K.5)
+#   inference/  llama.cpp upstreams + llm-queue + LiteLLM gateway    (K.1)
+#   memory/     mnemory + cloud gateway + backup                     (K.2)
+#   search/     Mullvad vpn + redis + searxng + gateway              (K.3)
+#   coder/      open-terminal + little-coder + lc-egress + backup    (K.4)
+#   portal/     internet front-end (portal-on.ps1 / portal-off.ps1)
+#   OB1/docker/ Open Brain — incl. the Open Notebook trio since K.5b
+#   agent-org/docker/  Mattermost + the governed agent-bridge org
+#
+# Keeping the project name `ai-stack` is what keeps every external reference
+# (ai-stack_llm-net / ai-stack_app-net / ai-stack_default) valid unchanged.
+# Container rule still applies: adding/removing/moving a service = the plane
+# compose file + recovery scripts + the stack-map doc together.
 
 volumes:
-  # (openwebui-data moved to the frontend project 2026-08-21, Part K.5 —
-  #  data copied to frontend_openwebui-data, ~10 GB.)
-  # (mnemory-data moved to the memory project 2026-08-21, Part K.2 —
-  #  data copied to memory_mnemory-data.)
-  smolcrawl-data:   # kept after smolcrawl-pipelines retired 2026-08-21 (crawl indexes; delete when confident)
-  # (llm-gateway-db-data + llm-queue-data moved to the inference project
-  #  2026-08-21, Part K.1 — data copied to inference_* volumes.)
-  # (the little-coder volumes moved to the coder project 2026-08-21, Part
-  #  K.4 — data copied to coder_little-coder-*.)
-  # (Portal volumes moved to the `portal` compose project 2026-08-21 —
-  # data migrated to portal_* volumes during the split cutover.)
-  # Cross-project named volume from the open-brain compose project,
-  # mounted read-only by open_notebook (Quartz workbench reads the wiki
-  # vault). ai-stack does not own this; it must already exist (it does,
-  # when OB1 is up). The wiki backup sidecars moved INTO the OB1 project
-  # 2026-08-21, taking the wiki-assets external decl with them.
-  openbrain-wiki-data:
-    external: true
-    name: open-brain_openbrain-wiki-data
+  # Orphan from smolcrawl-pipelines (retired 2026-08-21) — old crawl indexes.
+  # Delete when confident nothing wants them back.
+  smolcrawl-data:
 
 networks:
-  # Internal-only CALLER plane: no internet access. Every service that consumes
-  # inference sits here and reaches it ONLY via the `llama-cpp` /
-  # `llama-cpp-embed` aliases on llm-gateway. The real inference servers are NOT
-  # here (moved to llm-backend-net, 2026-06-13), so callers physically cannot
-  # route around LiteLLM.
+  # Internal-only CALLER plane: no internet access. Every inference consumer
+  # (frontend, memory, coder, OB1, agent-org) attaches here externally and
+  # reaches inference ONLY via the `llama-cpp` / `llama-cpp-embed` aliases on
+  # the inference project's llm-gateway. The real inference servers sit on the
+  # inference project's NATIVE llm-backend-net, so callers physically cannot
+  # route around LiteLLM. Enforced by scripts/checks/check-llm-gateway-routing.ps1.
   llm-net:
     internal: true
-  # (llm-backend-net moved WITH the inference plane 2026-08-21, Part K.1 —
-  #  it is native to inference/docker-compose.yml now, so nothing outside
-  #  that project can even declare membership.)
-  # (search-net moved WITH the search plane 2026-08-21, Part K.3 — native to
-  #  search/docker-compose.yml. The `vpn`/`gateway` DNS names stay reachable
-  #  for OB1/OWUI because those two attach to THIS project's `default`
-  #  externally.)
-  # (lc-net moved WITH the coder plane 2026-08-21, Part K.4 — native to
-  #  coder/docker-compose.yml.)
+  # The shared internet-capable bridge. Cross-project DNS seam: the search
+  # project's `vpn` (:8888 proxy) + `gateway` and the frontend's `openwebui`
+  # attach externally; OB1's research/podcast resolve them here
+  # (search-gw-net in OB1's compose = this network).
   default:
     driver: bridge
-  # app-net: the ai-stack↔portal seam — the portal project's caddy attaches
-  # here EXTERNALLY (name: ai-stack_app-net) to reach openwebui +
-  # open_notebook. edge/auth/notify nets moved to the portal project
-  # 2026-08-21.
+  # The app seam: portal caddy → openwebui / open_notebook, and the tailnet
+  # QUARTZ serve route → caddy:8446. Portal + frontend + OB1 (wiki-viewer,
+  # open_notebook) attach externally.
   app-net:
     driver: bridge
-  # ----- Cross-project networks (declared external) ----------------------
-  # obnet: the open-brain compose project's own bridge. open_notebook joins
-  # it to reach openbrain-db (IKS canonical store). OB1 must be UP for that
-  # path to work -- consistent with the existing cross-project dependency
-  # (OB1 depends on ai-stack_llm-net). The openbrain-* backup sidecars that
-  # used to join from here moved into the OB1 project 2026-08-21.
-  obnet:
-    external: true
-    name: open-brain_obnet

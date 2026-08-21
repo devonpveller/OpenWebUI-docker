@@ -99,14 +99,13 @@ $Script:FrontendServices = @("openwebui", "tailscale", "openwebui-backup", "tail
 
 # Main compose services, low-level dependency first.
 # (Portal plane omitted on purpose — profile-gated; see the header note.)
-$Script:MainStackServices = @(
-    "surrealdb", "open_notebook", "open-notebook-backup"
-)
+# The root ai-stack project owns NO services since K.5b (2026-08-21) — it is
+# the pure network anchor. The former aux trio (surrealdb, open_notebook,
+# open-notebook-backup) lives in the OB1 project now.
+$Script:MainStackServices = @()
 
-# Backup sidecars touching only main-stack/host resources — safe to nudge anytime.
-$Script:MainBackups = @("open-notebook-backup")
-# (openbrain-db-backup / openbrain-wiki-backup moved INTO the OB1 compose
-# project 2026-08-21 — they now start/stop with Start-OB1Stack, no nudge needed.)
+# (Every backup sidecar starts/stops with its own plane project since Part K;
+# there is no root-project backup group left.)
 
 # Open Brain (OB1) services, low-level dependency first.
 # The trailing block (cron + 3 HTTP-triggered scheduled services) lives
@@ -124,6 +123,7 @@ $Script:OB1Services = @(
     "openbrain-cron", "openbrain-gmail-pull", "openbrain-gmail-prune", "openbrain-digest",
     "openbrain-podcast",
     "openbrain-db-backup", "openbrain-wiki-backup",   # backup sidecars (moved from ai-stack 2026-08-21; output still lands in ai-stack/backups/)
+    "surrealdb", "open_notebook", "open-notebook-backup",   # Open Notebook trio (moved from ai-stack 2026-08-21, K.5b — ON is OB1-tethered; NOT retiring)
     "openbrain-idea-refinery"   # Idea Refinery drain (profile-gated 'idea-refinery'; started via the profile below)
 )
 
@@ -395,12 +395,9 @@ function Test-BasicConnectivity {
             $states["search-vpn"], $states["search-redis"], $states["searxng"], $states["search-gateway"])
         Write-Log "INFO" ("Coder  - open-terminal: {0}, little-coder: {1}, lc-egress: {2}" -f `
             $states["open-terminal"], $states["little-coder"], $states["lc-egress"])
-        Write-Log "INFO" ("Aux    - surrealdb: {0}, open_notebook: {1}" -f `
-            $states["surrealdb"], $states["open_notebook"])
-        Write-Log "INFO" ("Backup - mnemory: {0}, owui: {1}, lc: {2}, tailscale: {3}, lm-models: {4}, on: {5}" -f `
-            $states["mnemory-backup"], $states["openwebui-backup"], $states["little-coder-backup"], `
-            $states["tailscale-backup"], $states["lm-models-backup"], `
-            $states["open-notebook-backup"])
+        # (aux trio + backup sidecars report inside their own projects since
+        # Part K — inference/memory/search/coder/frontend states above cover
+        # the backups by name; the ON trio counts under OB1.)
 
         # Open Brain (OB1) — separate compose project, reported as a count.
         if (Test-OB1Available) {
@@ -522,13 +519,10 @@ function Invoke-MinimalRecovery {
 
         docker compose -f $Script:MemoryCompose --env-file .env up -d
 
-        docker compose up -d surrealdb open_notebook
-
         docker compose -f $Script:SearchCompose --env-file .env up -d
         docker compose -f $Script:CoderCompose --env-file .env up -d
 
         # Backup cron sidecars touching only main/host resources (safe anytime).
-        Start-ServiceGroup "main backups" $Script:MainBackups
 
         # Open Brain (OB1) — separate compose project (includes its own
         # openbrain-db/wiki backup sidecars since 2026-08-21).
@@ -671,8 +665,6 @@ function Invoke-EmergencyRecovery {
     # Search project (its compose stop runs reverse dependency order).
     Stop-PlaneStack "search" $Script:SearchCompose
 
-    # OpenWebUI-dependent auxiliary services (open_notebook before surrealdb).
-    Stop-ServiceGroup "auxiliary services" @( "open_notebook", "surrealdb")
 
     # Memory project (its compose stop orders gateway before mnemory).
     Stop-PlaneStack "memory" $Script:MemoryCompose
@@ -735,35 +727,11 @@ function Invoke-EmergencyRecovery {
     # Memory project (mnemory -> cloud gateway -> backup; own project since K.2).
     Start-PlaneStack "memory" $Script:MemoryCompose "mnemory" 90
 
-    # Backup schedulers (independent cron sidecars, main/host resources).
-    Start-ServiceGroup "backup schedulers" $Script:MainBackups
-    # Start surrealdb first, then open-notebook (which depends on it).
-    Write-Log "INFO" "Starting surrealdb (open-notebook database)..."
-    try {
-        docker compose up -d surrealdb
-        Start-Sleep -Seconds 10
-        Write-Log "SUCCESS" "surrealdb started"
-    }
-    catch {
-        Write-Log "WARN" "Failed to start surrealdb: $_"
-    }
-
-    Write-Log "INFO" "Starting open-notebook..."
-    try {
-        docker compose up -d open_notebook
-        if (-not (Wait-ForHealthy "open_notebook" 90)) {
-            Write-Log "WARN" "open-notebook health check failed, but continuing..."
-        }
-    }
-    catch {
-        Write-Log "WARN" "Failed to start open-notebook: $_"
-    }
+    # (surrealdb / open_notebook / open-notebook-backup start with the OB1
+    # project since K.5b; every backup sidecar starts with its plane.)
 
     # Search project — vpn -> redis -> searxng -> gateway (own project since K.3).
     Start-PlaneStack "search" $Script:SearchCompose "search-gateway" 150
-    if (-not (Wait-ForHealthy "gateway" 150)) {
-        Write-Log "WARN" "Search gateway slow to come up, but continuing..."
-    }
 
     # Coder project — open-terminal (executor) -> little-coder (control) ->
     # edges, ordered by its own depends_on (own project since K.4).
@@ -805,7 +773,7 @@ function Invoke-EmergencyRecovery {
         Write-Log "INFO" "Mnemory status:"
         docker exec mnemory python -c "import urllib.request; print(urllib.request.urlopen('http://localhost:8051/health').read().decode())" 2>$null
         Write-Log "INFO" "open-notebook API status:"
-        docker compose exec open_notebook python3 -c "import urllib.request; print(urllib.request.urlopen('http://localhost:5055/api/config').read().decode())" 2>$null
+        docker exec open_notebook python3 -c "import urllib.request; print(urllib.request.urlopen('http://localhost:5055/api/config').read().decode())" 2>$null
 
         Write-Log "INFO" "Private Search Gateway status:"
         docker compose exec gateway curl -s http://localhost:8080/healthz 2>$null
@@ -817,14 +785,13 @@ function Invoke-EmergencyRecovery {
         docker exec little-coder curl -s http://localhost:8090/health 2>$null
 
         Write-Log "INFO" "surrealdb running state:"
-        docker compose ps surrealdb --format "table {{.Service}}\t{{.Status}}" 2>$null
+        docker ps --filter "name=surrealdb" --format "table {{.Names}}\t{{.Status}}" 2>$null
 
         Write-Log "INFO" "Memory + coder plane status:"
         docker compose -f $Script:MemoryCompose --env-file .env ps --format "table {{.Service}}\t{{.Status}}" 2>$null
         docker compose -f $Script:CoderCompose --env-file .env ps --format "table {{.Service}}\t{{.Status}}" 2>$null
 
         Write-Log "INFO" "Backup scheduler status:"
-        docker compose ps open-notebook-backup --format "table {{.Service}}\t{{.Status}}" 2>$null
         docker compose -f $Script:FrontendCompose --env-file .env ps --format "table {{.Service}}\t{{.Status}}" 2>$null
 
         Write-Log "INFO" "Inference project status:"

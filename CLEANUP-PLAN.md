@@ -966,3 +966,14 @@ Per-plane playbook (portal-split procedure, now run 3×):
   `frontend`; OWUI :3000 health ok; ALL 8 tailnet serve routes configured
   in <60 s; from the new openwebui: inference (keyed alias) + search
   gateway + mnemory all reachable. Root main stack = 3 services (aux trio).
+- **K.5b Open Notebook → OB1 — EXECUTED 2026-08-21** (operator decision,
+  mid-ladder). surrealdb + open_notebook + open-notebook-backup adopted by
+  the OB1 project (OB1 commit a2e99bd): obnet + wiki volume references now
+  NATIVE; SURREAL_*/encryption env copied into OB1/docker/.env; backup
+  builds from OB1/docker/backup/Dockerfile.surreal, output unchanged.
+  NO retirement — ON stays until the wiki workbench matures (D-10).
+  **The root ai-stack project is now a PURE NETWORK ANCHOR: 0 services**
+  (docker-compose.yml rewritten as the anchor; compose/ dir deleted;
+  watchtower-era override archived at K.5). VERIFIED: trio healthy under
+  `open-brain`; ON API :5055/api/config dbStatus=online; UI :8503 alive;
+  openbrain-podcast resolves open_notebook over native obnet.

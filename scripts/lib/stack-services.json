@@ -43,8 +43,8 @@
       { "container": "lc-egress",     "project": "coder", "critical": false }
     ],
     "notebook": [
-      { "container": "open_notebook", "project": "ai-stack", "critical": false, "note": "being retired (Quartz workbench); still live for podcasts" },
-      { "container": "surrealdb",     "project": "ai-stack", "critical": false, "note": "open-notebook DB; WS-only, no HTTP health" }
+      { "container": "open_notebook", "project": "open-brain", "critical": false, "note": "being retired (Quartz workbench); still live for podcasts" },
+      { "container": "surrealdb",     "project": "open-brain", "critical": false, "note": "open-notebook DB; WS-only, no HTTP health" }
     ],
     "openbrain": [
       { "container": "openbrain-db",          "project": "open-brain", "critical": true,  "note": "stale-pool dependency: if this restarts after openbrain-mcp, mcp must be restarted" },

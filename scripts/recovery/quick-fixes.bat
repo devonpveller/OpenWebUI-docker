@@ -413,7 +413,7 @@ echo.
 echo.
 echo [INFO] open-notebook Health (API on port 5055):
 cd /d "%SCRIPT_DIR%\..\.."
-docker compose exec open_notebook python3 -c "import urllib.request,sys; urllib.request.urlopen('http://localhost:5055/api/config', timeout=5); sys.exit(0)" >nul 2>&1
+docker exec open_notebook python3 -c "import urllib.request,sys; urllib.request.urlopen('http://localhost:5055/api/config', timeout=5); sys.exit(0)" >nul 2>&1
 cd /d "%SCRIPT_DIR%"
 if %ERRORLEVEL% EQU 0 (
     echo [SUCCESS] open-notebook health: OK
@@ -423,7 +423,7 @@ if %ERRORLEVEL% EQU 0 (
 echo.
 echo [INFO] surrealdb (open-notebook DB) running state:
 cd /d "%SCRIPT_DIR%\..\.."
-docker compose ps surrealdb --format "table {{.Service}}\t{{.Status}}" 2>nul
+docker compose -f OB1\docker\docker-compose.yml ps surrealdb --format "table {{.Service}}\t{{.Status}}" 2>nul
 cd /d "%SCRIPT_DIR%"
 echo.
 echo [INFO] Web-search gateway health (:8085/healthz):
@@ -533,7 +533,7 @@ cd /d "%SCRIPT_DIR%\..\.."
 docker compose start surrealdb
 if %ERRORLEVEL% NEQ 0 (
     echo [WARN] surrealdb start failed, trying up -d...
-    docker compose up -d surrealdb
+    docker compose -f OB1\docker\docker-compose.yml up -d surrealdb
 )
 cd /d "%SCRIPT_DIR%"
 echo [INFO] Starting open-notebook...
@@ -541,7 +541,7 @@ cd /d "%SCRIPT_DIR%\..\.."
 docker compose start open_notebook
 if %ERRORLEVEL% NEQ 0 (
     echo [WARN] open-notebook start failed, trying up -d...
-    docker compose up -d open_notebook
+    docker compose -f OB1\docker\docker-compose.yml up -d open_notebook
 )
 cd /d "%SCRIPT_DIR%"
 echo.
@@ -708,29 +708,29 @@ echo ========================================
 echo.
 echo [INFO] Checking surrealdb (open-notebook DB) status...
 cd /d "%SCRIPT_DIR%\..\.."
-docker compose ps surrealdb --format "table {{.Service}}\t{{.Status}}"
-docker compose ps surrealdb --format json 2>nul | findstr /C:"\"State\":\"running\"" >nul 2>&1
+docker compose -f OB1\docker\docker-compose.yml ps surrealdb --format "table {{.Service}}\t{{.Status}}"
+docker compose -f OB1\docker\docker-compose.yml ps surrealdb --format json 2>nul | findstr /C:"\"State\":\"running\"" >nul 2>&1
 set RESULT=%ERRORLEVEL%
 if not %RESULT% EQU 0 (
     echo [WARN] surrealdb not running, starting...
-    docker compose up -d surrealdb
+    docker compose -f OB1\docker\docker-compose.yml up -d surrealdb
     timeout /t 10 /nobreak >nul
 )
 echo.
 echo [INFO] Checking open_notebook service status...
-docker compose ps open_notebook --format "table {{.Service}}\t{{.Status}}"
+docker compose -f OB1\docker\docker-compose.yml ps open_notebook --format "table {{.Service}}\t{{.Status}}"
 echo.
 echo [INFO] Testing open-notebook API endpoint (port 5055)...
-docker compose exec open_notebook python3 -c "import urllib.request,sys; urllib.request.urlopen('http://localhost:5055/api/config', timeout=5); sys.exit(0)" >nul 2>&1
+docker exec open_notebook python3 -c "import urllib.request,sys; urllib.request.urlopen('http://localhost:5055/api/config', timeout=5); sys.exit(0)" >nul 2>&1
 set RESULT=%ERRORLEVEL%
 if %RESULT% EQU 0 (
     echo [SUCCESS] open-notebook API is healthy and running
 ) else (
     echo [WARN] open-notebook API health check failed, restarting...
-    docker compose restart open_notebook
+    docker restart open_notebook
     echo [INFO] Waiting for open-notebook to start ^(Next.js waits for FastAPI, may take up to 90 seconds^)...
     timeout /t 60 /nobreak >nul
-    docker compose exec open_notebook python3 -c "import urllib.request,sys; urllib.request.urlopen('http://localhost:5055/api/config', timeout=5); sys.exit(0)" >nul 2>&1
+    docker exec open_notebook python3 -c "import urllib.request,sys; urllib.request.urlopen('http://localhost:5055/api/config', timeout=5); sys.exit(0)" >nul 2>&1
     set RESULT=!ERRORLEVEL!
     if !RESULT! EQU 0 (
         echo [SUCCESS] open-notebook restored after restart

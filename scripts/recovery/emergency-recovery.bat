@@ -113,10 +113,10 @@ if %ERRORLEVEL% NEQ 0 (
 
 
 echo [INFO] Stopping open-notebook and surrealdb containers...
-docker compose stop open_notebook surrealdb
+docker compose -f OB1\docker\docker-compose.yml stop open_notebook surrealdb
 if %ERRORLEVEL% NEQ 0 (
     echo [WARN] open-notebook/surrealdb stop failed, attempting force kill...
-    docker compose kill open_notebook surrealdb
+    docker compose -f OB1\docker\docker-compose.yml kill open_notebook surrealdb
 )
 
 echo [INFO] Stopping Mnemory containers...
@@ -201,11 +201,11 @@ docker compose -f memory\docker-compose.yml --env-file .env up -d mnemory-backup
 docker compose -f frontend\docker-compose.yml --env-file .env up -d openwebui-backup tailscale-backup open-notebook-backup
 
 echo [INFO] Starting surrealdb (open-notebook database)...
-docker compose up -d surrealdb
+docker compose -f OB1\docker\docker-compose.yml up -d surrealdb
 timeout /t 10 /nobreak >nul
 
 echo [INFO] Starting open-notebook...
-docker compose up -d open_notebook
+docker compose -f OB1\docker\docker-compose.yml up -d open_notebook
 
 echo [INFO] Starting Private Search Gateway (vpn, redis, searxng, gateway)...
 docker compose -f search\docker-compose.yml --env-file .env up -d
@@ -296,11 +296,11 @@ echo [INFO] Starting backup schedulers (main/host resources)...
 docker compose -f frontend\docker-compose.yml --env-file .env up -d openwebui-backup tailscale-backup open-notebook-backup
 
 echo [INFO] Starting surrealdb (open-notebook database)...
-docker compose up -d surrealdb
+docker compose -f OB1\docker\docker-compose.yml up -d surrealdb
 timeout /t 10 /nobreak >nul
 
 echo [INFO] Starting open-notebook...
-docker compose up -d open_notebook
+docker compose -f OB1\docker\docker-compose.yml up -d open_notebook
 
 echo [INFO] Starting Private Search Gateway...
 docker compose -f search\docker-compose.yml --env-file .env up -d
@@ -400,7 +400,7 @@ docker exec mnemory python -c "import urllib.request; print(urllib.request.urlop
 
 echo.
 echo [INFO] open-notebook API status:
-docker compose exec open_notebook python3 -c "import urllib.request; print(urllib.request.urlopen('http://localhost:5055/api/config').read().decode())" 2>nul
+docker exec open_notebook python3 -c "import urllib.request; print(urllib.request.urlopen('http://localhost:5055/api/config').read().decode())" 2>nul
 
 echo.
 echo [INFO] Private Search Gateway status:
@@ -416,7 +416,7 @@ docker exec little-coder curl -s http://localhost:8090/health 2>nul
 
 echo.
 echo [INFO] surrealdb running state:
-docker compose ps surrealdb --format "table {{.Service}}\t{{.Status}}" 2>nul
+docker compose -f OB1\docker\docker-compose.yml ps surrealdb --format "table {{.Service}}\t{{.Status}}" 2>nul
 
 echo.
 echo [INFO] Memory + coder plane status:

@@ -644,7 +644,7 @@ function Test-OpenNotebookHealth {
     }
     try {
         Write-LogEntry "Testing open-notebook API..." "DEBUG"
-        docker compose exec -T open_notebook python3 -c "import urllib.request,sys; urllib.request.urlopen('http://localhost:5055/api/config', timeout=5); sys.exit(0)" 2>$null | Out-Null
+        docker exec open_notebook python3 -c "import urllib.request,sys; urllib.request.urlopen('http://localhost:5055/api/config', timeout=5); sys.exit(0)" 2>$null | Out-Null
         if ($LASTEXITCODE -eq 0) {
             Write-LogEntry "open-notebook API responding on port 5055" "DEBUG"
             return $true
@@ -668,16 +668,16 @@ function Repair-OpenNotebook {
     try {
         if (-not (Test-ServiceHealth "surrealdb")) {
             Write-LogEntry "surrealdb (open-notebook DB) not running, starting..." "WARN"
-            docker compose up -d surrealdb 2>&1 | Out-Null
+            docker compose -f OB1\docker\docker-compose.yml up -d surrealdb 2>&1 | Out-Null
             Start-Sleep 10
         }
 
         if (-not (Test-ServiceHealth "open_notebook")) {
             Write-LogEntry "open_notebook container not running, starting..." "WARN"
-            docker compose up -d open_notebook 2>&1 | Out-Null
+            docker compose -f OB1\docker\docker-compose.yml up -d open_notebook 2>&1 | Out-Null
         } else {
             Write-LogEntry "open_notebook running but API unresponsive, restarting..." "WARN"
-            docker compose restart open_notebook 2>&1 | Out-Null
+            docker restart open_notebook 2>&1 | Out-Null
         }
 
         # Frontend (Next.js) waits for FastAPI via wait-for-api.sh, so first start

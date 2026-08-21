@@ -63,12 +63,6 @@ Run with: `docker compose ...` from the workspace root.
 
 ### Planes & containers
 
-**Aux**
-| Container | Role | Host port | Networks |
-|-----------|------|-----------|----------|
-| `surrealdb` | Open Notebook database (SurrealDB v2) | 127.0.0.1:8003 | default |
-| `open_notebook` | Open Notebook UI + API (IKS fork → OB1 Postgres) | 127.0.0.1:8503 / :5055 | default, llm-net, app-net, obnet |
-
 **Backups (unified snapshot sidecars — `backup/` scripts, nightly cron; NAS-synced)**
 | Container | Backs up | Networks | Profile |
 |-----------|----------|----------|---------|
@@ -76,7 +70,6 @@ Run with: `docker compose ...` from the workspace root.
 | `openbrain-wiki-backup` | openbrain-wiki-data + wiki-assets (**open-brain** project since 2026-08-21; output still `./backups/openbrain-wiki`) | — | default (open-brain) |
 | `agent-bridge-db-backup` | `pg_dump` of `agent-bridge-db` (**agent-org** project; governance/effort/project state) | ao-net | default (agent-org) |
 | `mattermost-db-backup` | `pg_dump` of `mattermost-db` (**agent-org** project; conversation content) | ao-net | default (agent-org) |
-| `open-notebook-backup` | SurrealDB logical export + notebook_data | default | default |
 | `caddy-backup` | caddy-data | default, edge-net | internet, local-test |
 | `authelia-backup` | authelia-data | default, auth-net | internet, local-test |
 
@@ -279,6 +272,15 @@ images now, audio later — written by `openbrain-workbench`, served read-only b
 binaries never enter the vault git history).
 
 ---
+
+### Open Notebook trio (moved from ai-stack 2026-08-21, Part K.5b — NOT retiring; stays until the wiki workbench matures)
+
+| Container | Purpose | Host port | Networks |
+|-----------|---------|-----------|----------|
+| `surrealdb` | Open Notebook local store (SurrealDB v2, digest-pinned) | 127.0.0.1:8003 | default (open-brain) |
+| `open_notebook` | Open Notebook UI + API (IKS fork — openbrain-db is the canonical store) | 127.0.0.1:8503 / :5055 | default, obnet, ai-stack_llm-net + app-net (external) |
+| `open-notebook-backup` | SurrealDB logical export + notebook_data tar (output still `ai-stack/backups/open-notebook`) | — | default (open-brain) |
+
 
 ## 3. agent-org — compose project `agent-org` (SEPARATE)
 
