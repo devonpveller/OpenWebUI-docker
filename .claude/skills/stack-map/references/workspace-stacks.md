@@ -79,7 +79,6 @@ Run with: `docker compose ...` from the workspace root.
 | Container | Compose service | Role | Host port | Networks |
 |-----------|-----------------|------|-----------|----------|
 | `search-vpn` | `vpn` | Mullvad WireGuard (gluetun) — SearXNG's engine-query egress + kill-switch | — | search-net, default |
-| `search-tor` | `tor` | Tor egress — page-FETCH leg (openbrain-research/digest/podcast `FETCH_PROXY_URL`); bridges out | — | search-net, default |
 | `search-redis` | `redis` | SearXNG cache | — | search-net |
 | `searxng` | `searxng` | Metasearch engine | — | search-net |
 | `search-gateway` | `gateway` | REST / Tavily-shim API | 127.0.0.1:8085 | search-net, default |
@@ -318,7 +317,7 @@ Bottom-up (start in this order; stop in reverse):
 4. `mnemory` → `mnemory-cloud-gateway` → `mnemory-backup`
 5. `openwebui-backup`, `smolcrawl-pipelines`
 6. `surrealdb` → `open_notebook`
-7. Search: `vpn` → `tor` → `redis` → `searxng` → `gateway`
+7. Search: `vpn` → `redis` → `searxng` → `gateway`
 8. Coder: `open-terminal` → `little-coder` → `lc-egress`
 9. **Backup sidecars** — each starts after its target is healthy; idle cron otherwise
     (`mnemory-backup`, `openwebui-backup`, `little-coder-backup`, `smolcrawl-backup`,

@@ -1408,7 +1408,7 @@ function Invoke-HealthCheck {
 
     # --- Private web-search gateway plane (SearXNG-over-Tor) — non-critical ---
     # Compose SERVICE keys differ from container names here: service tor ->
-    # search-tor, redis -> search-redis, gateway -> search-gateway. Probe /readyz first (covers the whole plane); only ensure the
+    # redis -> search-redis, gateway -> search-gateway (tor retired 2026-08-21). Probe /readyz first (covers the whole plane); only ensure the
     # individual containers if it is not ready.
     if (Test-SearchGatewayHealth) {
         Write-LogEntry "search-gateway /healthz OK" "DEBUG"
@@ -1418,7 +1418,6 @@ function Invoke-HealthCheck {
         }
     } else {
         Write-LogEntry "search-gateway /healthz down, ensuring web-search plane containers..." "WARN"
-        Confirm-AuxiliaryContainer -ServiceName "tor"     -RestartWaitSeconds 15 | Out-Null
         Confirm-AuxiliaryContainer -ServiceName "redis"   -RestartWaitSeconds 10 | Out-Null
         Confirm-AuxiliaryContainer -ServiceName "searxng" -RestartWaitSeconds 15 | Out-Null
         Confirm-AuxiliaryContainer -ServiceName "gateway" -RestartWaitSeconds 15 | Out-Null

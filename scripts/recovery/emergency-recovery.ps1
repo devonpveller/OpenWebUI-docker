@@ -20,7 +20,7 @@ $ErrorActionPreference = "Stop"
 #           (llm-queue = B2 admission controller between the upstreams and LiteLLM;
 #            llm-gateway-ui = master-key'd Admin-UI sidecar / analytics dashboard)
 #   memory  mnemory, mnemory-cloud-gateway
-#   search  vpn, tor, redis, searxng, gateway (Private Search Gateway)
+#   search  vpn, redis, searxng, gateway (Private Search Gateway)
 #   coder   open-terminal, little-coder, lc-egress
 #   aux     smolcrawl-pipelines, surrealdb, open_notebook
 #   backup  mnemory-backup, openwebui-backup, little-coder-backup,
@@ -59,7 +59,7 @@ $Script:MainStackServices = @(
     "llm-queue", "llm-gateway-db", "llm-gateway", "llm-gateway-ui", "tailscale",
     "mnemory", "mnemory-cloud-gateway",
     "smolcrawl-pipelines", "surrealdb", "open_notebook",
-    "vpn", "tor", "redis", "searxng", "gateway",
+    "vpn", "redis", "searxng", "gateway",
     "open-terminal", "little-coder", "lc-egress",
     # Backup cron sidecars (see helper arrays below).
     "mnemory-backup", "openwebui-backup", "little-coder-backup",
@@ -293,8 +293,8 @@ function Test-BasicConnectivity {
             $states["openwebui"], $states["llama-cpp-upstream"], $states["llama-cpp-embed-upstream"], $states["tailscale"])
         Write-Log "INFO" ("Memory - mnemory: {0}, mnemory-cloud-gateway: {1}" -f `
             $states["mnemory"], $states["mnemory-cloud-gateway"])
-        Write-Log "INFO" ("Search - vpn: {0}, tor: {1}, redis: {2}, searxng: {3}, gateway: {4}" -f `
-            $states["vpn"], $states["tor"], $states["redis"], $states["searxng"], $states["gateway"])
+        Write-Log "INFO" ("Search - vpn: {0}, redis: {1}, searxng: {2}, gateway: {3}" -f `
+            $states["vpn"], $states["redis"], $states["searxng"], $states["gateway"])
         Write-Log "INFO" ("Coder  - open-terminal: {0}, little-coder: {1}, lc-egress: {2}" -f `
             $states["open-terminal"], $states["little-coder"], $states["lc-egress"])
         Write-Log "INFO" ("Aux    - smolcrawl-pipelines: {0}, surrealdb: {1}, open_notebook: {2}" -f `
@@ -424,7 +424,7 @@ function Invoke-MinimalRecovery {
 
         docker compose up -d mnemory mnemory-cloud-gateway `
             smolcrawl-pipelines surrealdb open_notebook `
-            vpn tor redis searxng gateway `
+            vpn redis searxng gateway `
             open-terminal little-coder lc-egress
 
         # Backup cron sidecars touching only main/host resources (safe anytime).
@@ -575,7 +575,7 @@ function Invoke-EmergencyRecovery {
 
     # Private Search Gateway (reverse dependency order).
     Stop-ServiceGroup "Private Search Gateway" `
-        @("gateway", "searxng", "redis", "tor", "vpn")
+        @("gateway", "searxng", "redis", "vpn")
 
     # Tailscale (shares the OpenWebUI network namespace).
     if (-not (Stop-ServiceGracefully "tailscale" 30)) {
@@ -772,10 +772,11 @@ function Invoke-EmergencyRecovery {
         Write-Log "WARN" "Failed to start open-notebook: $_"
     }
 
-    # Private Search Gateway — vpn -> tor -> redis -> searxng -> gateway.
+    # Private Search Gateway — vpn -> redis -> searxng -> gateway.
     # depends_on chains the internal order; vpn (Mullvad) is searxng's egress and
-    # the WireGuard tunnel is slow to build; tor stays as the page-fetch egress.
-    Start-ServiceGroup "Private Search Gateway" @("vpn", "tor", "redis", "searxng", "gateway")
+    # the WireGuard tunnel is slow to build. (tor retired 2026-08-21; the vpn
+    # proxy carries page fetches too.)
+    Start-ServiceGroup "Private Search Gateway" @("vpn", "redis", "searxng", "gateway")
     if (-not (Wait-ForHealthy "gateway" 150)) {
         Write-Log "WARN" "Search gateway slow to come up, but continuing..."
     }

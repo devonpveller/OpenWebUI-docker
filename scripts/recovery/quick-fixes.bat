@@ -451,7 +451,7 @@ if %ERRORLEVEL% EQU 0 (
 )
 echo.
 echo [INFO] Extended planes running state (search / little-coder / mnemory-cloud-gateway):
-echo        ^(compose service keys: tor=search-tor, gateway=search-gateway, mcpo=search-mcpo^)
+echo        ^(compose service keys: gateway=search-gateway, vpn=search-vpn^)
 cd /d "%SCRIPT_DIR%\..\.."
 docker compose ps tor redis searxng gateway mcpo little-coder lc-mcpo lc-egress mnemory-cloud-gateway --format "table {{.Service}}\t{{.Status}}" 2>nul
 cd /d "%SCRIPT_DIR%"

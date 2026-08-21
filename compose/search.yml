@@ -1,47 +1,11 @@
-# compose/search.yml - private search plane: Mullvad vpn egress, tor page-fetch, redis, searxng, gateway, mcpo
+# compose/search.yml - private search plane: Mullvad vpn egress (engine queries + page fetches), redis, searxng, gateway
 # Split from the 2,2xx-line root docker-compose.yml 2026-08-20 (CLEANUP-PLAN v3 D.1).
 # Networks/volumes are defined in the root file.
 services:
-  tor:
-    image: ${TOR_IMAGE:-osminogin/tor-simple:latest}
-    container_name: search-tor
-    networks:
-      - search-net
-      - default
-    volumes:
-      - ./search-gateway/tor/torrc:/etc/tor/torrc:ro
-    restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
-    healthcheck:
-      test: ["CMD-SHELL", "nc -z 127.0.0.1 9050 || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 60s
-    labels:
-      - "com.centurylinklabs.watchtower.enable=false"
-
-  # ---------------------------------------------------------------------
-  # vpn (Mullvad WireGuard via gluetun) — SearXNG's engine-query egress
-  # (2026-06-14). Replaces Tor for the SEARCH leg ONLY: search engines
-  # blocklist Tor exit IPs by reputation (brave/ddg/startpage/mojeek all
-  # 403/429/CAPTCHA on sight), which neutralises SearXNG's multi-engine
-  # aggregation. Mullvad gives a clean, non-Tor exit IP so aggregation works
-  # again. Page FETCH moved to the Mullvad HTTP proxy too (2026-08-21):
-  # tor exit nodes are blocked by most large sites now, so openbrain-research
-  # + grounding-backfiller set FETCH_PROXY_URL=http://vpn:8888 (OB1/.env).
-  # `tor` stays as the documented FALLBACK (unset those env vars to revert);
-  # candidate for retirement after a soak period. Historically Tor kept
-  # "what you actually read" private.
-  #
-  # Privacy invariant preserved: like `tor`, `vpn` is the ONLY search-net
-  # member that ALSO joins `default`, so SearXNG stays internal-only and can
-  # egress solely through this HTTP proxy. gluetun's firewall is a KILL-SWITCH
-  # — if the WireGuard tunnel drops, all egress is blocked (no clear-IP leak).
-  # Secrets (MULLVAD_WG_*) live in .env and are NEVER committed.
-  # ---------------------------------------------------------------------
-
+  # tor RETIRED 2026-08-21 (operator, after dependency validation): its
+  # exits are blocked by most large sites, and it carried zero real traffic
+  # since the 2026-08-20 Mullvad flip. ALL search-plane egress (engine
+  # queries AND page fetches) now leaves via the vpn service below.
   vpn:
     image: ${VPN_IMAGE:-qmcgaw/gluetun:latest}
     container_name: search-vpn

@@ -45,8 +45,7 @@ purpose. Containers that failed that test today were removed (see
 
 | Container | Purpose | Why |
 |---|---|---|
-| `search-vpn` | Mullvad WireGuard egress — engine queries AND (since 2026-08-21) page fetches via its HTTP proxy :8888 | All search-plane traffic leaves via VPN, not the home IP; anonymity without tor-exit blocking |
-| `search-tor` | Tor egress — **FALLBACK only since 2026-08-21** | Tor exits are blocked by most large sites; page-fetch now egresses via the Mullvad HTTP proxy on `search-vpn` (:8888). Tor kept as the documented fallback; retirement candidate after a soak |
+| `search-vpn` | Mullvad WireGuard egress — ALL search-plane traffic (engine queries + page fetches via its HTTP proxy :8888) | Anonymity without tor-exit blocking. `search-tor` RETIRED 2026-08-21 after validation (zero traffic since the flip; torrc archived) |
 | `search-redis` | SearXNG's rate-limit/cache store | SearXNG requirement; FLUSHDB db0 clears engine suspensions |
 | `searxng` | The metasearch engine (internal-only net) | Aggregates engines without API keys |
 | `search-gateway` | REST face (:8085, key'd) + Tavily shim | What `openbrain-research` and tools actually call; provider abstraction + rotation |

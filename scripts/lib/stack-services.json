@@ -10,7 +10,7 @@
     "",
     "IMPORTANT: 'container' is the docker container NAME (use with `docker inspect`).",
     "For the ai-stack project some compose SERVICE keys differ from container names",
-    "(service tor->search-tor, redis->search-redis, gateway->search-gateway,",
+    "(service redis->search-redis, gateway->search-gateway,",
     "— see the 'service' field where it differs.",
     "Open Brain is a SEPARATE compose project (open-brain); a plain `docker compose`",
     "from the ai-stack dir cannot see it — probe its containers by name."
@@ -33,7 +33,6 @@
       { "container": "mnemory-cloud-gateway", "project": "ai-stack", "critical": false }
     ],
     "search": [
-      { "container": "search-tor",     "project": "ai-stack", "service": "tor",     "critical": false },
       { "container": "search-redis",   "project": "ai-stack", "service": "redis",   "critical": false },
       { "container": "searxng",        "project": "ai-stack", "service": "searxng", "critical": false },
       { "container": "search-gateway", "project": "ai-stack", "service": "gateway", "critical": false, "host_health": "http://127.0.0.1:8085/healthz" }
