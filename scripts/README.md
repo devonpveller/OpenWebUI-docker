@@ -65,3 +65,9 @@ in `../backup/`; conventions in
   subsystem leaves them behind; move manually and re-point configs.
 - Container-name inventories: the recovery scripts + watchdog carry them
   inline; keep them in sync via the container rule (CLAUDE.md).
+
+## One-time installers / alternates (checks/)
+
+`install-service.ps1` (registers the watchdog as a service/task),
+`simple-monitor.ps1` (non-admin loop alternative to the StackWatchdog task),
+`setup-prereqs.ps1` (fresh-machine Docker/WSL2 prereq checks, self-elevating).

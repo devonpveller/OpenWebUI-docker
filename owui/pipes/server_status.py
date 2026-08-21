@@ -36,10 +36,10 @@ compose projects: main `ai-stack` + separate `open-brain`).
   Coverage: ★ ALL containers across BOTH compose projects (34 services).
             Scopable to any container below:
     core    openwebui · tailscale · llm-gateway · llm-queue · llama-cpp ·
-            llama-cpp-embed · watchtower
+            llama-cpp-embed
     memory  mnemory · mnemory-cloud-gateway · mnemory-backup
-    search  tor · redis · searxng · gateway · mcpo
-    coder   open-terminal · little-coder · lc-mcpo · lc-egress ·
+    search  vpn · redis · searxng · gateway
+    coder   open-terminal · little-coder · lc-egress ·
             little-coder-backup
     aux     smolcrawl-pipelines · surrealdb · open_notebook · openwebui-backup
     OB1     openbrain-db · openbrain-mcp · openbrain-ext · openbrain-mcpo ·

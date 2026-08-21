@@ -123,7 +123,7 @@ cd agent-org/agent-bridge && pip install -e .[test] && pytest -q   # 55 tests, n
 
 ## Conventions honored
 - **G1** — never commit/push or merge to `main` without an explicit ask.
-- **3-place change** — every container is in compose **+** `scripts/emergency-recovery.ps1`/`.bat`
+- **3-place change** — every container is in compose **+** `scripts/recovery/emergency-recovery.ps1`/`.bat`
   **+** `.claude/skills/stack-map/references/workspace-stacks.md` (run `/stack-map`).
 - **No secrets in files** — bot tokens / DB passwords / model keys via env only.
 - **Reuse, don't reinvent** — little-coder for workers, its floor (git-proxy/lc-egress) for

@@ -567,8 +567,6 @@ function Invoke-EmergencyRecovery {
     # Open Brain (OB1) next — it attaches to the main stack's llm-net.
     Stop-OB1Stack
 
-    # Watchtower (independent monitor).
-
     # little-coder control plane (reverse dependency order).
     Stop-ServiceGroup "little-coder control plane" `
         @("little-coder-backup", "lc-egress", "little-coder", "open-terminal")
@@ -807,15 +805,6 @@ function Invoke-EmergencyRecovery {
 
     Start-ServiceGroup "little-coder edges" @("lc-egress", "little-coder-backup")
 
-    # Start Watchtower (independent service)
-    Write-Log "INFO" "Starting Watchtower monitoring service..."
-    try {
-        Write-Log "SUCCESS" "Watchtower started"
-    }
-    catch {
-        Write-Log "WARN" "Failed to start Watchtower: $_"
-    }
-
     # Open Brain (OB1) last — needs ai-stack_llm-net + llama-cpp-upstream healthy.
     Start-OB1Stack
 
@@ -875,7 +864,7 @@ function Invoke-EmergencyRecovery {
         Write-Log "INFO" "Memory + coder plane status:"
         docker compose ps mnemory-cloud-gateway lc-egress --format "table {{.Service}}\t{{.Status}}" 2>$null
 
-        Write-Log "INFO" "Backup schedulers + Watchtower status:"
+        Write-Log "INFO" "Backup scheduler status:"
         docker compose ps mnemory-backup openwebui-backup little-coder-backup `
             smolcrawl-backup tailscale-backup lm-models-backup open-notebook-backup `
             openbrain-db-backup openbrain-wiki-backup --format "table {{.Service}}\t{{.Status}}" 2>$null

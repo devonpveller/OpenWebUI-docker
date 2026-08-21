@@ -25,7 +25,7 @@ status-pipe/
   serve/            tailscale_serve_pipe.py — LIVE serve management, dispatched
                     by the custom-tools module; drives
                     modules/custom-tools/service/tailscale_serve_admin.py
-  utilities/        shared helpers imported by modules (docker/gpu/system)
+  utilities/        module_cli.py — the shared CLI dispatch every module bootstraps
 ```
 
 Rules:

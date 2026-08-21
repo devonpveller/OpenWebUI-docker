@@ -8,7 +8,7 @@ Per-container purpose & justification: [documentation/CONTAINER-REGISTRY.md](../
 **Last reconciled against live compose: 2026-08-20** — CLEANUP-PLAN v3 execution
 day: the root compose is now a thin include of `compose/<plane>.yml` files
 (rendered model proven identical); **retired**: `watchtower`, `search-mcpo`,
-`lc-mcpo` (main = **31 services**); the **portal became its own compose
+`lc-mcpo` (main = **30 services** after tor retired 2026-08-21); the **portal became its own compose
 project `portal`** on 2026-08-21 (12 services, `portal/docker-compose.yml`,
 data migrated to `portal_*` volumes, joins `ai-stack_app-net` externally); the status-pipe
 subsystem consolidated to `status-pipe/` and OWUI's whole-repo mount replaced
@@ -26,7 +26,7 @@ and the portal networks (`edge/auth/app/notify-net`).
 
 Source files:
 - `docker-compose.yml` + `docker-compose.override.yml` — the **main** project
-- `docker-compose.local-test.override.yml` — portal `local-test` profile (no Cloudflare)
+- `portal/local-test.override.yml` — portal test mode, no Cloudflare (own project since 2026-08-21)
 - `OB1/docker/docker-compose.yml` (+ `docker-compose.scheduled.yml`) — the **open-brain** project (separate)
 - `agent-org/docker/docker-compose.yml` — the **agent-org** project (separate; teams-chat orchestration)
 
@@ -34,7 +34,7 @@ Source files:
 
 ## 1. Main stack — compose project `ai-stack`
 
-Files: `docker-compose.yml`, `docker-compose.override.yml` (+ `docker-compose.local-test.override.yml`).
+Files: `docker-compose.yml` (thin include of `compose/<plane>.yml`); portal = `portal/docker-compose.yml` (own project).
 Run with: `docker compose ...` from the workspace root.
 
 > **Profiles:** the **Portal** plane below is gated behind `profiles: [internet]`

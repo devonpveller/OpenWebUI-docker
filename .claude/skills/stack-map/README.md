@@ -14,7 +14,7 @@ layer:
 - **`open-brain`** — `OB1/docker/docker-compose.yml`: the Open Brain memory
   system (~10 containers), a separate project that attaches to the main
   stack's network.
-- **Recovery stack** — `scripts/emergency-recovery.{ps1,bat}`: orchestrated
+- **Recovery stack** — `scripts/recovery/emergency-recovery.{ps1,bat}`: orchestrated
   restart/repair for both projects.
 
 The skill reads the live compose files, groups containers by plane, and

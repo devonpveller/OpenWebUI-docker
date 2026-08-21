@@ -74,8 +74,9 @@ networks:
   # by scripts/checks/check-llm-gateway-routing.ps1; see CLAUDE.md "Inference plane".
   llm-backend-net:
     internal: true
-  # Internal-only network for the search stack. SearXNG/redis/gateway/mcpo
-  # have NO internet route here; only `tor` (also on `default`) can egress.
+  # Internal-only network for the search stack. SearXNG/redis/gateway have NO
+  # internet route here; only `vpn` (Mullvad, also on `default`) can egress —
+  # engine queries AND page fetches (tor retired 2026-08-21).
   search-net:
     internal: true
   # Internal-only network for the little-coder control plane. little-coder

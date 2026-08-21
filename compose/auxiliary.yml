@@ -134,13 +134,14 @@ services:
     pull_policy: never
 
   # ---------------------------------------------------------------------
-  # Private Search Gateway (privacy-first web search over Tor).
-  # See documentation/web-search/integration-plan-private-search-gateway.md
+  # Private Search Gateway (privacy-first web search over Mullvad).
+  # See documentation/implementation-guide/web-search/guide-Private-Search-Gateway.md
   #
-  # Privacy invariant enforced at the network layer: redis/searxng/gateway/
-  # mcpo sit on `search-net` (internal: true — no internet). `tor` is the
-  # ONLY service bridging to `default`, so SearXNG physically cannot egress
-  # except through Tor. `gateway` also joins `default` purely so openwebui
-  # (on `default`) can resolve http://gateway:8080.
+  # Privacy invariant enforced at the network layer: redis/searxng/gateway
+  # sit on `search-net` (internal: true — no internet). `vpn` (Mullvad
+  # WireGuard, kill-switched) is the ONLY egress bridge, so SearXNG
+  # physically cannot leak the home IP. `gateway` also joins `default`
+  # purely so openwebui can resolve http://gateway:8080. (tor retired
+  # 2026-08-21; search-mcpo retired 2026-08-20.)
   # ---------------------------------------------------------------------
 

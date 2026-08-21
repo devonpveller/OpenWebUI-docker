@@ -69,7 +69,7 @@ Documents security posture, decisions, and known gaps. Last updated 2026-08-20.
 - Pre-flight §6.1/§6.2 verified: `open_notebook` and `surrealdb` are LAN-unreachable
 
 ### Port Exposure (local-test mode)
-- Caddy binds `127.0.0.1:8443` only (localhost) via `docker-compose.local-test.override.yml`
+- Caddy binds `127.0.0.1:8443` only (localhost) via `portal/local-test.override.yml`
 - `cloudflared` is not started — portal is NOT internet-reachable in this mode
 
 ### Docker network segmentation

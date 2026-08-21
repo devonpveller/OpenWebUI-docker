@@ -11,7 +11,7 @@ services:
     image: little-coder:local
     container_name: little-coder
     networks:
-      - lc-net      # control plane ↔ open-terminal ↔ lc-mcpo
+      - lc-net      # control plane ↔ open-terminal
       - llm-net     # llama-cpp inference
     env_file:
       - .env

@@ -122,10 +122,10 @@ class HelpSystemModule:
                 "refactored_system": {
                     "description": "Modern manifest-driven architecture with explicit contracts",
                     "components": [
-                        "core/router.py - Advanced routing with schema validation",
-                        "modules/ - Independent modules with explicit capability definitions",
-                        "schemas/ - JSON Schema validation for all communications",
-                        "tools/ - Migration automation and validation utilities"
+                        "status-pipe/router.py - keyword routing with schema validation",
+                        "status-pipe/modules/ - independent modules with manifest-declared capabilities",
+                        "status-pipe/schemas/ - JSON Schema contracts for requests/results",
+                        "status-pipe/serve/ - tailscale serve management pipe"
                     ]
                 }
             },

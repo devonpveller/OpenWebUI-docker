@@ -702,7 +702,7 @@ function Repair-OpenNotebook {
 
 # search-gateway /healthz is fast process liveness (always 200 if the event loop
 # is serving). We gate restarts on THIS, not /readyz: /readyz does a deep check
-# (SearXNG through the Tor chain) that is slow and Tor-flaky, so it would
+# (SearXNG through the VPN chain) that can be slow, so it would
 # false-trigger plane restarts on a 60s loop. /readyz is probed informationally
 # (longer timeout, logged only) below.
 function Test-SearchGatewayHealth {
@@ -714,8 +714,8 @@ function Test-SearchGatewayHealth {
     }
 }
 
-# Informational only: is the full web-search path actually ready (redis + tor +
-# searxng reachable)? Slow/Tor-dependent, so logged but never used to restart.
+# Informational only: is the full web-search path actually ready (redis +
+# searxng + vpn reachable)? Can be slow, so logged but never used to restart.
 function Get-SearchGatewayReady {
     try {
         $r = Invoke-WebRequest -Uri 'http://127.0.0.1:8085/readyz' -UseBasicParsing -TimeoutSec 15
@@ -1414,7 +1414,7 @@ function Invoke-HealthCheck {
         Write-LogEntry "search-gateway /healthz OK" "DEBUG"
         # Deep readiness is informational only (slow/Tor-flaky); never drives a restart.
         if (-not (Get-SearchGatewayReady)) {
-            Write-LogEntry "search-gateway up but /readyz not ready (tor/searxng/redis warming or degraded)" "INFO"
+            Write-LogEntry "search-gateway up but /readyz not ready (vpn/searxng/redis warming or degraded)" "INFO"
         }
     } else {
         Write-LogEntry "search-gateway /healthz down, ensuring web-search plane containers..." "WARN"
@@ -1539,7 +1539,7 @@ switch ($Mode.ToLower()) {
     }
     
     default {
-        Write-Host "Usage: check-tailscale-health.ps1 [-Mode check|daemon|install-service] [-IntervalSeconds 60]"
+        Write-Host "Usage: stack-watchdog.ps1 [-Mode check|daemon|install-service] [-IntervalSeconds 60]"
         Write-Host ""
         Write-Host "Modes:"
         Write-Host "  check           - Run single health check (default)"

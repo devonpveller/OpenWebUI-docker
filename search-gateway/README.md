@@ -1,12 +1,12 @@
 # Private Search Gateway
 
-Privacy-first web search for the ai-stack. Fronts **SearXNG routed over Tor**,
+Privacy-first web search for the ai-stack. Fronts **SearXNG routed over Mullvad WireGuard** (tor retired 2026-08-21),
 exposes native REST + a Tavily-compatible shim + a SearXNG-compatible endpoint
 + an MCP/OpenAPI surface, and is built around a pluggable `SearchProvider`
 interface for future paid-provider rotation.
 
-> Build spec: [`../documentation/web-search/guide-Private-Search-Gateway.md`](../documentation/web-search/guide-Private-Search-Gateway.md)
-> Integration decisions: [`../documentation/web-search/integration-plan-private-search-gateway.md`](../documentation/web-search/integration-plan-private-search-gateway.md)
+> Build spec: [`../documentation/implementation-guide/web-search/guide-Private-Search-Gateway.md`](../documentation/implementation-guide/web-search/guide-Private-Search-Gateway.md)
+> Integration decisions: [`../documentation/implementation-guide/web-search/integration-plan-private-search-gateway.md`](../documentation/implementation-guide/web-search/integration-plan-private-search-gateway.md)
 
 ## Quickstart
 
@@ -18,7 +18,7 @@ The gateway is part of the **main ai-stack compose** — no separate stack.
    SEARXNG_SECRET_KEY=<openssl rand -hex 32>
    ```
 2. From the ai-stack root: `docker compose up -d --build`
-3. Verify (Tor's first circuit build is slow — allow ~30–90s):
+3. Verify (the WireGuard tunnel takes a few seconds):
    ```bash
    curl -fsS http://localhost:8085/readyz
    curl -fsS -H "Authorization: Bearer $GATEWAY_API_KEY" \
@@ -47,7 +47,7 @@ model the stack already uses for `mnemory`.
 
 - **OWUI → gateway via the SearXNG engine (Approach B)**, not the Tavily shim.
   OWUI **v0.8.10** hardcodes `https://api.tavily.com/search` with no base-URL
-  override, so `WEB_SEARCH_ENGINE=tavily` would bypass the gateway and Tor.
+  override, so `WEB_SEARCH_ENGINE=tavily` would bypass the gateway and the VPN.
   Approach B uses OWUI's unmodified `searxng` engine → upgrade-safe, no OWUI
   patch. The Tavily shim remains for *external* Tavily clients. **Re-verify
   on every OWUI version bump** that the searxng engine contract still matches
@@ -59,7 +59,7 @@ model the stack already uses for `mnemory`.
 
 | Invariant | Enforcement here |
 | --- | --- |
-| SearXNG outbound via Tor | **Network-layer, not best-effort.** `search-net` is `internal: true`; SearXNG has no internet route except `tor:9050`. A misconfig cannot leak — §8 is *over*-enforced. |
+| SearXNG outbound via the VPN | **Network-layer, not best-effort.** `search-net` is `internal: true`; SearXNG has no internet route except the kill-switched `vpn` proxy. A misconfig cannot leak — §8 is *over*-enforced. |
 | No query logging unless `LOG_QUERIES=true` (hash only) | structlog config logs a 16-char sha256 *fingerprint* only when explicitly enabled; default false. |
 | Result URLs not logged at INFO | URLs never logged; only counts/provider/latency. |
 | No telemetry | SearXNG `enable_metrics: false`; no metrics endpoint. |

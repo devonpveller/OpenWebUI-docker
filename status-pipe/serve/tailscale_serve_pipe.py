@@ -156,13 +156,13 @@ _STACK_ROSTER: List[str] = [
     # admission controller on llm-backend-net, observed via the gateway's
     # read-only /observe/* pass-through)
     "openwebui", "tailscale", "llm-gateway", "llm-queue",
-    "llama-cpp", "llama-cpp-embed", "watchtower",
+    "llama-cpp", "llama-cpp-embed",
     # main project — memory layer
     "mnemory", "mnemory-cloud-gateway", "mnemory-backup",
     # main project — Private Search Gateway
-    "tor", "redis", "searxng", "gateway", "mcpo",
+    "vpn", "redis", "searxng", "gateway",
     # main project — little-coder control plane
-    "open-terminal", "little-coder", "lc-mcpo", "lc-egress", "little-coder-backup",
+    "open-terminal", "little-coder", "lc-egress", "little-coder-backup",
     # main project — auxiliary
     "smolcrawl-pipelines", "surrealdb", "open_notebook", "openwebui-backup",
     # Open Brain (OB1) — separate compose project (project name "open-brain")
@@ -457,7 +457,7 @@ def _format_help_message(commands: List[Dict[str, Any]]) -> str:
     lines.append(
         "_Service registry covers: openwebui, lmstudio, llama-cpp, "
         "llama-cpp-embed, open-notebook, open-notebook-api. "
-        "Stack scope adds smolcrawl, mnemory, surrealdb, tailscale, watchtower, "
+        "Stack scope adds smolcrawl, mnemory, surrealdb, tailscale, "
         "open-terminal._"
     )
     return "\n".join(lines)
@@ -607,7 +607,7 @@ def _build_tailnet_urls(scope_service: Optional[str] = None) -> Dict[str, Any]:
 #
 # Only services REACHABLE from the openwebui container get a probe (openwebui
 # is on default + llm-net). Containers on the internal-only search-net
-# (tor/redis/searxng/mcpo) or OB1's obnet have no probe — they still appear in
+# (vpn/redis/searxng) or OB1's obnet have no probe — they still appear in
 # the container table (from _STACK_ROSTER) as "registered".
 _PROBES: Dict[str, Dict[str, Any]] = {
     # llama-cpp / llama-cpp-embed are network ALIASES on llm-gateway (LiteLLM)
@@ -678,10 +678,6 @@ _PROBES: Dict[str, Dict[str, Any]] = {
     "little-coder": {
         "host": "little-coder", "port": 8090,
         "kind": "http_health",
-    },
-    "lc-mcpo": {
-        "host": "lc-mcpo", "port": 8002,
-        "kind": "http_health", "health_path": "/openapi.json",
     },
     # Open Brain (OB1) — openbrain-mcpo joins ai-stack_llm-net, so the MCP
     # bridge is reachable; its health endpoint is the core OpenAPI doc.

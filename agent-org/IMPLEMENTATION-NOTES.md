@@ -406,7 +406,7 @@ live, and they require worker-side protocol changes, not just bridge wiring.
 | Task | Status | Landing site / note |
 |------|--------|---------------------|
 | R.1 compose | ✅ | [`docker/docker-compose.yml`](docker/docker-compose.yml) — validates with all v1 services. |
-| R.2 recovery scripts | ✅ | `scripts/emergency-recovery.ps1` (parses clean) + `.bat` — agent-org added to inventory + shutdown-first/startup-last sequences + status report. |
+| R.2 recovery scripts | ✅ | `scripts/recovery/emergency-recovery.ps1` (parses clean) + `.bat` — agent-org added to inventory + shutdown-first/startup-last sequences + status report. |
 | R.3 stack-map reference | ✅ | `.claude/skills/stack-map/references/workspace-stacks.md` §3 (new agent-org section) + dependency order + recovery notes. |
 
 ### P7 — Mobile + hardening

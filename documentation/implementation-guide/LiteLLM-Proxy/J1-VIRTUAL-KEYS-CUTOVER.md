@@ -57,7 +57,7 @@ a caller identity llm-queue can trust.
 | Open WebUI main connection | `owui-chat` (prio 0) | Admin → Connections in `webui.db` (also listed in update-owui-to-0-11-0 UPGRADE-PLAN §connections) |
 | `githelper` pipe | default | valve in `webui.db` (base `llama-cpp:8080/v1`) |
 | `mnemory` | `ollama` (prio 1) | `compose/memory.yml` `LLM_API_KEY` (rename the string to `mnemory` while touching it) |
-| `smolcrawl-pipelines` | — | `compose/auxiliary.yml` env |
+| `smolcrawl-pipelines` | — | (VALIDATED 2026-08-21: does NOT call the gateway — its LLM work goes through OWUI; no key needed) |
 | `open_notebook` | — | model config in its SurrealDB, **encrypted with `OPEN_NOTEBOOK_ENCRYPTION_KEY`** — update via its UI, not the DB |
 | `little-coder` / workers | `lc-coder` (prio 2) | `little-coder/config/little-coder.config.yaml` + compose env (recreate ao-workers after — they keep stale env, see `ao-worker-stale-deploy-token` memory) |
 | OB1 services (research, entity/suggestion/chunk workers, digest, podcast, wiki, workbench, mcp, extract) | `ob-mcp`/`ob-entity`/`ob-wiki`/`ob-research`/`ob-podcast` | `OB1/docker/.env` + compose env (one shared var per lane) |

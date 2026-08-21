@@ -337,11 +337,6 @@ cd /d "%SCRIPT_DIR%\..\.."
 docker compose ps
 cd /d "%SCRIPT_DIR%"
 echo.
-echo [INFO] Starting any missing services...
-cd /d "%SCRIPT_DIR%\..\.."
-docker compose up -d watchtower >nul 2>&1
-cd /d "%SCRIPT_DIR%"
-echo.
 echo [INFO] OpenWebUI GPU Status:
 cd /d "%SCRIPT_DIR%\..\.."
 docker compose exec openwebui python -c "import torch; print('CUDA available:', torch.cuda.is_available()); print('GPU count:', torch.cuda.device_count())" 2>nul
@@ -447,21 +442,21 @@ curl -s -f -m 5 http://127.0.0.1:8085/healthz >nul 2>&1
 if %ERRORLEVEL% EQU 0 (
     echo [SUCCESS] search-gateway healthz: OK
 ) else (
-    echo [ERROR] search-gateway healthz: FAILED - run: docker compose up -d tor redis searxng gateway mcpo
+    echo [ERROR] search-gateway healthz: FAILED - run: docker compose up -d vpn redis searxng gateway
 )
 echo.
 echo [INFO] Extended planes running state (search / little-coder / mnemory-cloud-gateway):
 echo        ^(compose service keys: gateway=search-gateway, vpn=search-vpn^)
 cd /d "%SCRIPT_DIR%\..\.."
-docker compose ps tor redis searxng gateway mcpo little-coder lc-mcpo lc-egress mnemory-cloud-gateway --format "table {{.Service}}\t{{.Status}}" 2>nul
+docker compose ps vpn redis searxng gateway little-coder lc-egress mnemory-cloud-gateway --format "table {{.Service}}\t{{.Status}}" 2>nul
 cd /d "%SCRIPT_DIR%"
 echo.
 echo [INFO] Open Brain stack (mcp/mcpo/db/gateway/wiki - SEPARATE compose project):
 powershell -ExecutionPolicy Bypass -NoProfile -File "%SCRIPT_DIR%check-openbrain-health.ps1"
 echo.
-echo [INFO] Backup schedulers and Watchtower (no health endpoints - running state only):
+echo [INFO] Backup schedulers (no health endpoints - running state only):
 cd /d "%SCRIPT_DIR%\..\.."
-docker compose ps mnemory-backup openwebui-backup watchtower --format "table {{.Service}}\t{{.Status}}" 2>nul
+docker compose ps mnemory-backup openwebui-backup --format "table {{.Service}}\t{{.Status}}" 2>nul
 cd /d "%SCRIPT_DIR%"
 if "%1"=="" (
     echo.

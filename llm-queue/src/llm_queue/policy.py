@@ -58,7 +58,7 @@ class PriorityPolicy:
 
 
 # Default ordering from design §8c, expressed over the key strings callers
-# actually present today (litellm-proxy-status: mnemory sends "ollama",
+# actually present today (legacy direct callers: mnemory once sent "ollama",
 # little-coder sends "llama", others send junk/empty). Tune in P2 as real keys
 # are attributed. Budgets: interactive short, batch long.
 _DEFAULT_CLASSES: dict[str, PriorityClass] = {
