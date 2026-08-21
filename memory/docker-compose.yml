@@ -108,15 +108,18 @@ services:
       - DATA_DIR=/data
       - RETAIN_COUNT=${BACKUP_RETAIN_COUNT:-2}
       - HEALTH_TCP=mnemory-cloud-gateway:8060 # gateway listens on 8060; 8080 made the precheck skip (=zero artifacts) silently from 2026-05-29 to 07-05
-      - BACKUP_CRON=${BACKUP_CRON:-0 2 * * *}
+      - BACKUP_INTERVAL=${MNEMORY_BACKUP_INTERVAL:-86400}   # daily (sleep-loop; unified 2026-08-21)
     entrypoint: /bin/sh
     command:
       - -c
       - |
-        chmod +x /scripts/backup.sh
-        echo "$${BACKUP_CRON} /scripts/backup.sh >> /var/log/backup.log 2>&1" > /etc/crontabs/root
-        echo "[$(date -u +%FT%TZ)] Backup scheduler started (cron: $${BACKUP_CRON}, retain: $${RETAIN_COUNT} most recent)"
-        crond -f -l 2
+        # Sleep-loop scheduler (unified 2026-08-21; was crond, which
+        # misses fire-windows on Docker Desktop VM clock jumps).
+        echo "[$$(date -u +%FT%TZ)] mnemory-backup started (sleep-loop; interval=$${BACKUP_INTERVAL}s, retain=$${RETAIN_COUNT})"
+        while true; do
+          sh /scripts/backup.sh || echo "[$$(date -u +%FT%TZ)] mnemory-backup backup.sh exited $$?"
+          sleep "$${BACKUP_INTERVAL}"
+        done
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true

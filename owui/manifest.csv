@@ -4,11 +4,9 @@ actions/copy_sources.py,action,Copy Sources,copy_sources,7728
 filters/context_window_manager.py,filter,Context Window Manager,context_window_manager,11902
 filters/mnemory_persistent_memory.py,filter,Mnemory Persistent Memory,mnemory_persistent_memory,41836
 pipes/server_status.py,pipe,Server Status,ai_stack_unified_pipe_function,20317
-pipes/code_agent.py,pipe,Code Agent,code_agent,133419
 pipes/githelper.py,pipe,GitHelper,githelper,27607
 pipes/github_chat_mcp.py,pipe,GitHub Chat MCP,github_chat_mcp,10953
 pipes/little_coder.py,pipe,Little Coder,little_coder,32467
-tools/code_agent_tools.py,tool,Code Agent Tools,code_agent_tools,33235
 tools/deep_research.py,tool,Deep Research,deep_research,15452
 tools/fileshed.py,tool,FileShed,fileshed,438768
 tools/github_chat_mcp_tools.py,tool,GitHub Repo Analyzer,github_chat_mcp_tools,50690

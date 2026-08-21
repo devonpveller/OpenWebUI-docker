@@ -35,10 +35,36 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       # .env.example is kept complete on purpose (v3 A.4) — it makes compose
-      # interpolation resolvable in CI without any real secret.
-      - run: cp .env.example .env
-      - run: docker compose config -q
-      - run: docker compose --profile internet --profile local-test config -q
+      # interpolation resolvable in CI without any real secret. Since Part K
+      # (2026-08-21) the workspace is one anchor + per-plane compose projects;
+      # validate every one of them. (OB1 is a submodule with its own gitignored
+      # env — not checked out here; agent-org likewise carries its own env.)
+      - run: docker compose --env-file .env.example config -q
+      - run: docker compose -f inference/docker-compose.yml --env-file .env.example config -q
+      - run: docker compose -f frontend/docker-compose.yml --env-file .env.example config -q
+      - run: docker compose -f memory/docker-compose.yml --env-file .env.example config -q
+      - run: docker compose -f search/docker-compose.yml --env-file .env.example config -q
+      - run: docker compose -f coder/docker-compose.yml --env-file .env.example config -q
+      - run: docker compose -f portal/docker-compose.yml --env-file .env.example --profile internet config -q
+
+  powershell-parse:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The ops plane is PowerShell 5.1 on the host; pwsh's PSParser catches
+      # the same syntax-error class in CI so a broken script never lands.
+      - shell: pwsh
+        run: |
+          $bad = 0
+          Get-ChildItem -Recurse -Filter *.ps1 -File |
+            Where-Object { $_.FullName -notmatch '[\\/](archive|OB1|node_modules)[\\/]' } |
+            ForEach-Object {
+              $errs = $null
+              [System.Management.Automation.PSParser]::Tokenize((Get-Content $_.FullName -Raw), [ref]$errs) | Out-Null
+              if ($errs.Count -gt 0) { Write-Host "PARSE ERROR: $($_.FullName) - $($errs[0].Message)"; $bad++ }
+            }
+          if ($bad -gt 0) { exit 1 }
+          Write-Host "all .ps1 files parse clean"
 
   pytest-llm-queue:
     runs-on: ubuntu-latest

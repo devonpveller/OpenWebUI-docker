@@ -134,7 +134,8 @@ If issues occur despite prevention measures:
 
 2. **Emergency rebuild**:
    ```batch
-   .\scriptsecovery\emergency-recovery.bat
+   .\scripts
+ecovery\emergency-recovery.ps1 (the .bat twin was archived 2026-08-21)
    ```
 
 3. **Full system recovery**:

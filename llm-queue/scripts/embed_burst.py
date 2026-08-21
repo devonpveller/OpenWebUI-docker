@@ -19,7 +19,8 @@ async def one(client):
     try:
         r = await client.post(f"{BASE}/v1/embeddings", json=BODY,
                               headers={"Authorization": "Bearer not-needed"})
-        ok = r.status_code == 200 and len(r.json().get("data", [{}])[0].get("embedding", [])) == 1024
+        emb = r.json().get("data", [{}])[0].get("embedding", [])
+        ok = r.status_code == 200 and len(emb) == 1024
         return r.status_code, ok
     except Exception:  # noqa: BLE001
         return -1, False
@@ -35,7 +36,8 @@ async def main():
         good += ok
     print(f"target={BASE} embed_burst={N}")
     print("status tally:", dict(sorted(codes.items())))
-    print(f"valid 1024-dim embeddings: {good}/{N}  →  {'PASS — no regression' if good == N else 'CHECK'}")
+    verdict = 'PASS — no regression' if good == N else 'CHECK'
+    print(f"valid 1024-dim embeddings: {good}/{N}  →  {verdict}")
 
 
 asyncio.run(main())

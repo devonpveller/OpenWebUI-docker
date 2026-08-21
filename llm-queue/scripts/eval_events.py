@@ -14,7 +14,8 @@ import sqlite3
 import statistics
 import sys
 
-DB = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("LLM_QUEUE_EVENTS_DB_PATH", "/data/events.db")
+DB = sys.argv[1] if len(sys.argv) > 1 else os.environ.get(
+    "LLM_QUEUE_EVENTS_DB_PATH", "/data/events.db")
 
 
 def pct(values, p):
@@ -30,13 +31,15 @@ def main():
         print(f"no event store at {DB}")
         return
     c = sqlite3.connect(DB)
-    models = [r[0] for r in c.execute("SELECT DISTINCT model FROM queue_events WHERE model IS NOT NULL")]
+    models = [r[0] for r in
+              c.execute("SELECT DISTINCT model FROM queue_events WHERE model IS NOT NULL")]
     total = c.execute("SELECT COUNT(*) FROM queue_events").fetchone()[0]
     print(f"event store: {DB}  ·  {total} events  ·  models: {models}\n")
 
     for m in models:
         counts = dict(
-            c.execute("SELECT event, COUNT(*) FROM queue_events WHERE model=? GROUP BY event", (m,)).fetchall()
+            c.execute("SELECT event, COUNT(*) FROM queue_events WHERE model=? GROUP BY event",
+                      (m,)).fetchall()
         )
         fins = c.execute(
             "SELECT wait_s, duration_s, est_wait_s FROM queue_events "

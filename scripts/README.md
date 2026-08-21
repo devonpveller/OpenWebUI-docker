@@ -19,7 +19,6 @@
 
 `emergency-recovery.ps1` (canonical; `recover`/`nuclear`/`gpu-reset`; now
 pins CWD to the repo root — it was silently CWD-dependent before),
-`emergency-recovery.bat` (legacy twin), `quick-fixes.bat` (interactive menu),
 plus the Python primitives they drive (`namespace_reset.py`,
 `nuclear_option.py`, `rebuild_tailscale.py`, `restart_openwebui.py`,
 `gpu_check.py`, `status_check.py` — all locate the repo by walking up to

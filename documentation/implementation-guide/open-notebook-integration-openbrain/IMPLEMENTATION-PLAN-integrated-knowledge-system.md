@@ -56,7 +56,7 @@ The concept was written against upstream OB1's vocabulary. The self-hosted stack
 | ON source surface — DB driver + migrations | `open_notebook\database\repository.py` (`repo_query`/`repo_create`, `AsyncSurreal`), `open_notebook\database\migrations\*.surrealql` |
 | ON source surface — service + routers + ingest graph | `api\sources_service.py`, `api\routers\sources.py`, `api\routers\notebooks.py`, `open_notebook\graphs\source.py` — **NB: services and routers live under `api\`, not `open_notebook\`** |
 | ON compose wiring (image vs build) | `ai-stack/docker-compose.yml` (services `open_notebook`, `surrealdb`) |
-| Recovery scripts (three-places rule) | `scripts/emergency-recovery.ps1`, `scripts/emergency-recovery.bat` |
+| Recovery scripts (three-places rule) | `scripts/emergency-recovery.ps1`, `scripts/emergency-recovery.ps1 (the .bat twin was archived 2026-08-21)` |
 | Stack-map reference (three-places rule) | `.claude/skills/stack-map/references/workspace-stacks.md` |
 | Wiki notes target for Phase 7 | `openbrain-wiki-data` repo `notes/` (volume `open-brain_openbrain-wiki-data`), deploy key `secrets/openbrain-wiki-deploy_key` |
 

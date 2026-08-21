@@ -91,9 +91,9 @@ artifacts still land in `backups/`. `smolcrawl-backup` retired 2026-08-21
 with smolcrawl-pipelines.
 Justification: every stateful byte has exactly one
 sidecar producing verified artifacts into `backups/`, freshness-watched
-twice (watchdog recency table + sysadmin daily check). Scheduler flavors are
-a known 3-way split (crond/supercronic/sleep-loop) — unification queued in
-D.1 follow-ups.
+twice (watchdog recency table + sysadmin daily check). Schedulers UNIFIED
+2026-08-21 (K.8): sleep-loop for interval tars (crond missed fire-windows on
+VM clock jumps), supercronic for cron-timed dumps (OB1 pg/surreal, portal).
 
 ### Portal — own compose project `portal` since 2026-08-21 (12 services, **currently ON**)
 

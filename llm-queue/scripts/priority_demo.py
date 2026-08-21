@@ -57,7 +57,8 @@ async def main():
         if code == 200 and wait >= 0:
             waits.setdefault(key, []).append(wait)
     for key, ws in sorted(waits.items()):
-        print(f"{key:12} served={len(ws):2d}  mean_wait={sum(ws)/len(ws):6.2f}s  max={max(ws):6.2f}s")
+        print(f"{key:12} served={len(ws):2d}  "
+              f"mean_wait={sum(ws)/len(ws):6.2f}s  max={max(ws):6.2f}s")
     if "owui-chat" in waits and "ob-entity" in waits:
         owui = sum(waits["owui-chat"]) / len(waits["owui-chat"])
         batch = sum(waits["ob-entity"]) / len(waits["ob-entity"])

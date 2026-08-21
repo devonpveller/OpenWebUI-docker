@@ -198,19 +198,19 @@ services:
       - DATA_DIR=/data
       - RETAIN_COUNT=${OPENWEBUI_BACKUP_RETAIN_COUNT:-2}
       - HEALTH_TCP=openwebui:8080
-      - BACKUP_CRON=${OPENWEBUI_BACKUP_CRON:-0 2 * * *}
+      - BACKUP_INTERVAL=${OPENWEBUI_BACKUP_INTERVAL:-86400}   # daily (sleep-loop; unified 2026-08-21)
     entrypoint: /bin/sh
     command:
       - -c
       - |
-        # pigz = parallel gzip. The nightly tar of this ~40GB volume took ~50min
-        # with plain gzip (measured); pigz benchmarked 8x faster on the same data.
-        # Best-effort: the script falls back to gzip if this install fails
-        # (e.g. no network at container start), so backups never break on it.
         apk add --no-cache pigz >/dev/null 2>&1           && echo "[$(date -u +%FT%TZ)] pigz installed (parallel compression enabled)"           || echo "[$(date -u +%FT%TZ)] WARN: pigz install failed -- falling back to gzip"
-        echo "$${BACKUP_CRON} sh /scripts/backup.sh >> /var/log/backup.log 2>&1" > /etc/crontabs/root
-        echo "[$(date -u +%FT%TZ)] Backup scheduler started (cron: $${BACKUP_CRON}, retain: $${RETAIN_COUNT} most recent)"
-        crond -f -l 2
+        # Sleep-loop scheduler (unified 2026-08-21; was crond, which
+        # misses fire-windows on Docker Desktop VM clock jumps).
+        echo "[$$(date -u +%FT%TZ)] openwebui-backup started (sleep-loop; interval=$${BACKUP_INTERVAL}s, retain=$${RETAIN_COUNT})"
+        while true; do
+          sh /scripts/backup.sh || echo "[$$(date -u +%FT%TZ)] openwebui-backup backup.sh exited $$?"
+          sleep "$${BACKUP_INTERVAL}"
+        done
     # Cap memory so the nightly `tar` of the (large) /data volume cannot
     # balloon the WSL VM with reclaimable page cache. The kernel evicts this
     # cgroup's own file cache to stay under the limit, so the backup streams

@@ -13,9 +13,9 @@ the id is cryptic the filename uses the friendly name instead — e.g. the
 
 | Folder | OWUI kind | Files |
 |--------|-----------|-------|
-| `tools/`   | Tools (model-callable)        | `superpowers_tool`, `fileshed`, `mnemory`, `deep_research`, `github_chat_mcp_tools` (GitHub Repo Analyzer), `code_agent_tools` |
+| `tools/`   | Tools (model-callable)        | `superpowers_tool`, `fileshed`, `mnemory`, `deep_research`, `github_chat_mcp_tools` (GitHub Repo Analyzer) |
 | `filters/` | Filter functions              | `context_window_manager`, `mnemory_persistent_memory` |
-| `pipes/`   | Pipe functions (custom models)| `server_status` (the AI-Stack unified status pipe), `little_coder`, `githelper`, `github_chat_mcp`, `code_agent` *(inactive)* |
+| `pipes/`   | Pipe functions (custom models)| `server_status` (the AI-Stack unified status pipe), `little_coder`, `githelper`, `github_chat_mcp` |
 | `actions/` | Action functions (buttons)    | `copy_research_note`, `copy_sources` (`add_web_sources_to_knowledge` retired 2026-08-20 — wrote into the retired OWUI Knowledge layer; deactivated in webui.db, snapshot in `scripts/archive/owui-retired/`) |
 | `skills/`  | Skills (attached to models via `skillIds`) | `skill-creator`, `docx`, `canvas-design`, `doc-coauthoring`, `github-repo-analyzer`, `feature-validation-workflow`, `github-repo-expert`, `openwebui-tools` |
 
@@ -44,7 +44,6 @@ centralized here:
   `smolcrawl/deep_research/`, and the v1.0.0 client snapshot at
   `smolcrawl/deep_research_thin_client.py`, were retired 2026-08-20 — this file
   is the only OWUI-side artifact.
-- `pipes/code_agent.py` + `tools/code_agent_tools.py` ← [`tools/code-generation/`](../tools/code-generation/) (docs/system prompt)
 - `pipes/server_status.py` (OWUI id `ai_stack_unified_pipe_function`) is the
   verbatim deploy snapshot of [`status-pipe/orchestrator.py`](../status-pipe/)
   (the unified status pipe subsystem — orchestrator + router + modules +
@@ -98,3 +97,8 @@ direct `UPDATE function|tool SET content=…` in the container's `webui.db`
 > rebuilds that namespace and orphans `tailscale` — it stays "Up" but loses all
 > connectivity. Always: restart `openwebui` → wait until **healthy** → then
 > restart `tailscale`, which re-applies its whole serve config on boot.
+
+> `code_agent` + `code_agent_tools` RETIRED 2026-08-21 (operator): the
+> pre-little-coder coding harness. Files archived to
+> `scripts/archive/owui-retired/`; rows removed from the live webui.db
+> (pipe was already inactive) and from `manifest.csv`.

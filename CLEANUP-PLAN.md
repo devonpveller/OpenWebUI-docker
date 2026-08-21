@@ -1016,3 +1016,78 @@ Per-plane playbook (portal-split procedure, now run 3×):
   open_notebook added to the openbrain-db writer stop-list (IKS);
   **non-destructive restore drill PASSED** (mnemory artifact → scratch
   volume via the real script: 17/17 files match live).
+
+- **K.8 operator-review round — EXECUTED 2026-08-21** (responses to the
+  post-K review):
+  - `code_agent` + `code_agent_tools` RETIRED (operator confirmed: the
+    pre-little-coder harness) — files + `tools/code-generation/` archived to
+    scripts/archive/owui-retired/, manifest rows dropped, live webui.db rows
+    deleted (pipe was already inactive).
+  - Backup schedulers UNIFIED: the 3 remaining crond sidecars (mnemory,
+    openwebui, little-coder) → the sleep-loop idiom (crond misses fire
+    windows on VM clock jumps); each produced a fresh verified backup on
+    recreate. Idioms now: sleep-loop for interval tars, supercronic for
+    cron-timed dumps.
+  - Pre-commit gains check-project-configs.ps1 (staged-aware: any yml →
+    render all 7 ai-stack-side compose projects against .env.example; any
+    ps1 → PSParser). CI compose-validate rewritten for the multi-project
+    world + new powershell-parse job. .env.example guard vars got
+    placeholders (empty values trip the ${:?} guards — intentional).
+  - `stack.ps1 health` — 12 functional probes across every plane (the Part K
+    gate checks, one command); 12/12 green on first run.
+  - emergency-recovery.bat ARCHIVED (operator: redundant next to the ps1 +
+    stack.ps1 + the Mattermost/sysadmin channel); references swept; the
+    routing-check allowlist paths refreshed to the G.2 layout.
+  - SERVICE-LIFECYCLE.md runbook created (the full container-rule checklist:
+    compose/env/virtual-key/recovery/health-probe/watchdog/backup+restore/
+    stack-services/status/docs) and wired into CLAUDE.md — the operator's
+    "every change stays supported by sysadmin + status + recovery" rule.
+  - DISK ROTATION (the F.1-resumption blocker): the elevated compact-vhdx
+    task existed but had NO trigger — new scripts/maintenance/
+    weekly-maintenance.ps1 (safe reclaim: dangling images + build cache
+    with 10GB keep, NEVER volume prune → triggers the elevated compact via
+    schtasks /run → polls its JSON result → posts to #sysadmin) registered
+    as 'AI-Stack Weekly Maintenance' (Sundays 03:15, unelevated). Reclaim
+    leg tested live: 1.4 GB freed, MM post confirmed.
+  - llm-queue's 17 E501s wrapped — repo-wide `ruff check .` is now FULLY
+    clean (the CI ruff job was failing on the nested config); 40/40
+    llm-queue tests green in-container after the wraps.
+  - E.1 clarified for the operator (it is a code-dedup of the twin gateway
+    IMPLEMENTATIONS, not a merged runtime); decision parked pending their
+    read. D-12 explained; generator decision parked.
+
+## Part L — NEW (2026-08-21): self-contained plane directories (operator-approved direction)
+
+Operator: "I do want the directories to be self contained" + per-plane env
+"would be a big win… make navigating the project much easier". Two phases,
+each its own execution day:
+
+### L.1 — source-tree colocation
+
+Move each service's SOURCE into its plane directory so a plane dir is the
+whole module (compose + source + config):
+
+| Move | Notes |
+|------|-------|
+| `llm-queue/` → `inference/llm-queue/` | build context + CI job paths + docs |
+| `search-gateway/` → `search/gateway/` | build context, searxng config bind, CI job |
+| `mnemory-gateway/` → `memory/mnemory-gateway/` | build context |
+| `Dockerfile.openwebui-gpu`, `dockerfile.tailscale`, `entrypoint.sh` → `frontend/` | build contexts are `..`-rooted today |
+| `little-coder/` → `coder/little-coder/` | COORDINATE WITH H.2: it becomes a submodule at that path; the operator's self-learning work (expertise volumes + in-repo learning artifacts) MUST survive — inventory before moving |
+| `openbrain-gateway/` stays | deliberately beside its twin pending E.1 |
+| (`mnemory` source is OUTSIDE the repo at `d:\Open WebUI\mnemory` — unaffected) |
+
+Per move: git mv (history-preserving) + compose build-context/bind updates +
+CI paths + routing-check/docs sweep + rebuild-verify per plane. Config split
+(`config/litellm*` → `inference/config/`, searxng → `search/`) rides along.
+
+### L.2 — per-plane .env split
+
+One `.env` per plane dir holding ONLY that plane's variables (compose then
+loads it natively — the `--env-file` flag and the `:?` guards' "set via"
+text retire). Needs its own careful pass: killswitch/backup scripts that
+read `.env`, `.env.example` split, secret-guard globs, stack.ps1/recovery
+`--env-file` args, J.1 key distribution. Do AFTER L.1 so paths only move
+once.
+
+Gate for both: `stack.ps1 health` 12/12 + a plane rebuild proof, per phase.

@@ -37,7 +37,8 @@ class AppState:
         await self.events.start()
         # Connection-leak reaper: reclaims held slots that Starlette abandoned on client disconnect
         # (their release generator never ran). Without this, leaked slots accumulate and permanently
-        # wedge the hard connection cap — shedding all load while the GPU is idle (observed failure).
+        # wedge the hard connection cap — shedding all load while the GPU is idle
+        # (observed failure).
         self._reaper_task = asyncio.create_task(self._reap_loop())
 
     async def stop(self) -> None:
@@ -52,7 +53,8 @@ class AppState:
         await self.upstream.aclose()
 
     async def _reap_loop(self) -> None:
-        """Periodically reclaim leaked held connections. Any reap is LOGGED (WARNING) + emitted as an
+        """Periodically reclaim leaked held connections. Any reap is LOGGED
+        (WARNING) + emitted as an
         event so a persistent leak stays visible rather than being silently self-healed forever."""
         ttl = self.settings.conn_ttl_s
         interval = self.settings.reap_interval_s

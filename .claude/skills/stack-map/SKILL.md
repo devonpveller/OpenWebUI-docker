@@ -78,7 +78,7 @@ A third concern — the **recovery stack** (`scripts/recovery/emergency-recovery
 | Main · coder | `open-terminal`, `little-coder`, `lc-egress`, `little-coder-backup` |
 | Main · aux | `smolcrawl-pipelines`, `surrealdb`, `open_notebook`, `openwebui-backup` |
 | OB1 (`open-brain`) | `openbrain-db`, `openbrain-mcp`, `openbrain-ext`, `openbrain-mcpo`, `openbrain-mcpo-ext`, `openbrain-postgrest`, `openbrain-rest`, `openbrain-entity-worker`, `openbrain-wiki`, `openbrain-wiki-viewer` |
-| Recovery stack | `scripts/recovery/emergency-recovery.ps1`, `scripts/recovery/emergency-recovery.bat` |
+| Recovery stack | `scripts/recovery/emergency-recovery.ps1`, `scripts/recovery/emergency-recovery.ps1 (the .bat twin was archived 2026-08-21)` |
 
 ## Consistency rule
 

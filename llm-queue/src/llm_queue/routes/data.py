@@ -35,10 +35,13 @@ log = get_logger("llm_queue.data")
 class _ReleasingStreamingResponse(StreamingResponse):
     """A StreamingResponse that CLOSES its body iterator when streaming ends — including on client
     disconnect. Starlette 1.3.1's `stream_response` does NOT aclose the generator on disconnect (it
-    lets `send()` raise and abandons the `async for`), so the generator's `finally` — where llm-queue
+    lets `send()` raise and abandons the `async for`), so the generator's
+    `finally` — where llm-queue
     releases its held connection slot — is left to async-generator GC (delayed / effectively never
-    under load). That is the connection-leak the reaper backstops; this closes it at the source so the
-    slot is freed immediately on disconnect, not up to a reap-interval later. aclose() on an already-
+    under load). That is the connection-leak the reaper backstops; this closes
+    it at the source so the
+    slot is freed immediately on disconnect, not up to a reap-interval later.
+    aclose() on an already-
     exhausted generator (normal completion) is a harmless no-op, and the release is idempotent."""
 
     async def stream_response(self, send) -> None:  # type: ignore[override]

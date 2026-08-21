@@ -900,7 +900,7 @@ all three of these together**. The plan/task doc must cover every line.
 - Insert into the **shutdown sequence** as the inverse: callers stop first,
   then `llm-gateway`, then `llm-gateway-db`, then llama-cpp.
 
-### 10.2 `scripts/recovery/emergency-recovery.bat`
+### 10.2 `scripts/recovery/emergency-recovery.ps1 (the .bat twin was archived 2026-08-21)`
 
 Mirror the same inventory + ordering changes. The `.bat` is the linear legacy
 equivalent; keep the two scripts in lock-step.
@@ -1195,7 +1195,7 @@ llama-cpp references stay; the new `llm-gateway` + `llm-gateway-db` are
 | File | Existing llama-cpp refs (preserve) | Additions needed |
 |---|---|---|
 | [scripts/recovery/emergency-recovery.ps1:30](scripts/recovery/emergency-recovery.ps1#L30) | line 30 `MainStackServices`; lines 177-178, 202-203, 261, 428-432, 472-493, 626-627, 745, 754-792 (startup/shutdown/probes) | Add `"llm-gateway", "llm-gateway-db", "llm-gateway-backup"` to `MainStackServices`; insert startup between `llama-cpp-embed` healthy and the consumer planes (mnemory, openwebui, OB1); insert shutdown as the inverse |
-| [scripts/recovery/emergency-recovery.bat:6](scripts/recovery/emergency-recovery.bat#L6) | line 6 header; lines 39-42, 120-124, 156-167, 243, 261-266, 354-359 | Mirror the .ps1 additions linearly |
+| [scripts/recovery/emergency-recovery.ps1 (the .bat twin was archived 2026-08-21):6](scripts/recovery/emergency-recovery.ps1 (the .bat twin was archived 2026-08-21)#L6) | line 6 header; lines 39-42, 120-124, 156-167, 243, 261-266, 354-359 | Mirror the .ps1 additions linearly |
 | [scripts/recovery/quick-fixes.bat:20](scripts/recovery/quick-fixes.bat#L20) | lines 20, 43, 226, 238-292, 310, 347-354, 387-392, 505-543, 693-729 | Add `llm-gateway` to menu option 11; new probe + restart helpers paralleling the llama-cpp pair |
 | [scripts/checks/stack-watchdog.ps1:158](scripts/checks/stack-watchdog.ps1#L158) | lines 158-228 (OpenWebUI↔llama-cpp connectivity recovery), 364-470, 640-671 (test/repair functions) | Optional: add a `Test-LlmGatewayConnectivity` function + `Repair-LlmGateway`. Non-blocking — the gateway has its own healthcheck. |
 | [scripts/recovery/gpu_check.py:116](scripts/recovery/gpu_check.py#L116) | lines 116-167 (llama-cpp probes inside `docker compose exec`), 216-275 | No change — probes inference plane directly, which is correct |

@@ -61,11 +61,12 @@ $queueUpstreamAllow = '(?i)LLM_QUEUE(_EMBED)?_UPSTREAM_BASE_URL'
 # config, recovery/health probe scripts, host monitor modules, docs, this guard.
 $allowPathLike = @(
     '*\config\litellm.config.yaml'
-    '*\scripts\emergency-recovery.ps1'
-    '*\scripts\emergency-recovery.bat'
-    '*\scripts\check-tailscale-health.ps1'
-    '*\scripts\check-backup-coverage.ps1'
-    '*\scripts\check-llm-gateway-routing.ps1'
+    # (paths refreshed 2026-08-21: G.2 moved these under scripts\recovery\
+    #  and scripts\checks\; the .bat twin was archived at K.8)
+    '*\scripts\recovery\emergency-recovery.ps1'
+    '*\scripts\checks\stack-watchdog.ps1'
+    '*\scripts\checks\check-backup-coverage.ps1'
+    '*\scripts\checks\check-llm-gateway-routing.ps1'
     '*\modules\system-health\*'
     '*\modules\gpu-status\*'
     '*\documentation\*'

@@ -37,5 +37,14 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
+# --- 4. project configs (staged-aware, K.8) ---------------------------------
+# Any staged yml => render all compose projects against .env.example;
+# any staged ps1 => PSParser tokenize. Skips itself when neither is staged.
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File './scripts/checks/check-project-configs.ps1'
+if [ $? -ne 0 ]; then
+    echo "Pre-commit validation failed (compose/ps1 structural check)!"
+    exit 1
+fi
+
 echo "Pre-commit validations passed!"
 exit 0

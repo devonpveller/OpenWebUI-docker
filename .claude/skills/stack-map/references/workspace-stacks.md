@@ -348,7 +348,7 @@ update, or network-namespace break.
 | File | Role |
 |------|------|
 | `scripts/recovery/emergency-recovery.ps1` | Primary recovery — `recover` / `nuclear` / `gpu-reset`; 5-phase ordered restart that also drives the OB1 project |
-| `scripts/recovery/emergency-recovery.bat` | Legacy linear equivalent (PowerShell version preferred) |
+| `scripts/recovery/emergency-recovery.ps1 (the .bat twin was archived 2026-08-21)` | Legacy linear equivalent (PowerShell version preferred) |
 | `scripts/archive/emergency-recovery-module/` | ARCHIVED 2026-08-20 (was OWUI-reachable stale guidance; recovery keywords now route to help-system) |
 
 The recovery scripts hold a service inventory (`MainStackServices` — now incl. the

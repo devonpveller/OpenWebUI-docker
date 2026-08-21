@@ -19,10 +19,12 @@
 # scripts/recovery/emergency-recovery.ps1, which layers health gates and
 # GPU repair on top of the same order.
 
+#   .\scripts\stack\stack.ps1 health          # functional probes across every plane
+#
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet("up", "down", "status", "restart")]
+    [ValidateSet("up", "down", "status", "restart", "health")]
     [string]$Action = "status",
 
     [Parameter(Position = 1)]
@@ -102,5 +104,55 @@ switch ($Action) {
             Invoke-Project $p @("ps", "--format", "table {{.Service}}\t{{.Status}}")
             Write-Host ""
         }
+    }
+    "health" {
+        # One-command smoke test: the same functional gates the Part K
+        # cutovers used. Each probe is independent; failures don't stop the
+        # sweep. Exit code = number of failed probes.
+        $failed = 0
+        function Probe {
+            param([string]$Name, [scriptblock]$Check)
+            try {
+                $ok = & $Check
+                if ($ok) { Write-Host ("  [OK]   " + $Name) -ForegroundColor Green; return }
+            } catch {}
+            Write-Host ("  [FAIL] " + $Name) -ForegroundColor Red
+            $script:failed++
+        }
+        Write-Host "== container health (all projects)" -ForegroundColor Cyan
+        $unhealthy = @(docker ps --filter health=unhealthy --format "{{.Names}}")
+        Probe "0 unhealthy containers (found: $($unhealthy -join ', '))" { $unhealthy.Count -eq 0 }
+
+        Write-Host "== functional gates" -ForegroundColor Cyan
+        Probe "anchor: ai-stack_llm-net exists" {
+            (docker network inspect ai-stack_llm-net --format "{{.Name}}" 2>$null) -eq "ai-stack_llm-net" }
+        Probe "inference: llm-gateway liveliness" {
+            docker exec llm-gateway python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8080/health/liveliness', timeout=8).status==200 else 1)" 2>$null
+            $LASTEXITCODE -eq 0 }
+        Probe "frontend: OWUI http://127.0.0.1:3000/health" {
+            (Invoke-WebRequest -UseBasicParsing -TimeoutSec 8 http://127.0.0.1:3000/health).StatusCode -eq 200 }
+        Probe "frontend: 8 tailnet serve routes" {
+            $r = docker exec tailscale sh -c "tailscale --socket=/tmp/tailscaled.sock serve status 2>/dev/null | grep -c 'proxy http'" 2>$null
+            [int]$r -ge 8 }
+        Probe "memory: cloud door http://127.0.0.1:8060/health" {
+            (Invoke-WebRequest -UseBasicParsing -TimeoutSec 8 http://127.0.0.1:8060/health).StatusCode -eq 200 }
+        Probe "search: gateway http://127.0.0.1:8085/healthz" {
+            (Invoke-WebRequest -UseBasicParsing -TimeoutSec 8 http://127.0.0.1:8085/healthz).StatusCode -eq 200 }
+        Probe "coder: little-coder daemon :8090/health" {
+            docker exec little-coder curl -fsS --max-time 8 http://localhost:8090/health 2>$null | Out-Null
+            $LASTEXITCODE -eq 0 }
+        Probe "OB1: open_notebook API :5055/api/config" {
+            (Invoke-WebRequest -UseBasicParsing -TimeoutSec 8 http://127.0.0.1:5055/api/config).StatusCode -eq 200 }
+        Probe "OB1: openbrain-db accepting connections" {
+            docker exec openbrain-db pg_isready -U postgres -d openbrain -t 5 2>$null | Out-Null
+            $LASTEXITCODE -eq 0 }
+        Probe "agent-org: mattermost ping" {
+            docker exec agent-bridge python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://mattermost:8065/api/v4/system/ping', timeout=8).status==200 else 1)" 2>$null
+            $LASTEXITCODE -eq 0 }
+
+        Write-Host ""
+        if ($failed -eq 0) { Write-Host "ALL HEALTH PROBES PASSED" -ForegroundColor Green }
+        else { Write-Host "$failed probe(s) FAILED" -ForegroundColor Red }
+        exit $failed
     }
 }

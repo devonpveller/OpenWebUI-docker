@@ -77,7 +77,8 @@ _DEFAULT_CLASSES: dict[str, PriorityClass] = {
     # window instead of 429-ing them (which under sustained load blew past LiteLLM's
     # 3 retries and killed the job). max_concurrency caps it at 2 of the 3 slots so a
     # research burst can never starve interactive owui-chat (rank 0 preempts anyway).
-    "ob-research": PriorityClass("ob-research", rank=3, acceptable_wait_s=1800.0, max_concurrency=2),
+    "ob-research": PriorityClass("ob-research", rank=3, acceptable_wait_s=1800.0,
+                                 max_concurrency=2),
     "ob-podcast": PriorityClass("ob-research", rank=3, acceptable_wait_s=1800.0, max_concurrency=2),
 }
 

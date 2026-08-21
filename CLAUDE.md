@@ -22,7 +22,7 @@ for the full inventory — networks, ports, dependency order.
 | **Portal** (`portal`, own compose project since 2026-08-21) | `scripts/portal/portal-on.ps1` / `portal-off.ps1` (`portal/docker-compose.yml`) | 12 services (`caddy`, `authelia`, `cloudflared`, watchers/alerter/tripwire/cron + 2 backups). Internet-exposed auth front-end; attaches to `ai-stack_app-net` externally to reach openwebui/open_notebook — positioned to front more apps later. |
 | **Open Brain** (`open-brain`) | `docker compose -f OB1/docker/docker-compose.yml ...` | ~29 containers: the `openbrain-*` fleet + its two backup sidecars + the **Open Notebook trio** (`surrealdb`, `open_notebook`, `open-notebook-backup` — moved in K.5b 2026-08-21; ON stays live until the wiki workbench matures). Attaches to `ai-stack_llm-net`/`app-net` externally. Bring up **after** `llm-gateway` is healthy; tear down before the planes it depends on. |
 | **agent-org** | `docker compose -f agent-org/docker/docker-compose.yml ...` | Mattermost (+db) + `agent-bridge` (the governed org bus, 700+ tests) + profile-gated `workers`/`cloud` slices. |
-| **Recovery** | `scripts/recovery/emergency-recovery.ps1` (or `.bat`) | Ordered restart/repair across both projects — `recover` / `nuclear` / `gpu-reset`. Does **not** manage the Portal. |
+| **Recovery** | `scripts/recovery/emergency-recovery.ps1` | Ordered restart/repair across ALL projects — `recover` / `nuclear` / `gpu-reset`. Does **not** manage the Portal. (The `.bat` twin was archived 2026-08-21 — redundant next to this + `stack.ps1` + the Mattermost/sysadmin channel.) |
 
 Retired 2026-08-20 (CLEANUP-PLAN v3): `watchtower` (manual updates per
 `documentation/runbooks/UPDATE-MANAGEMENT.md`), `search-mcpo` and `lc-mcpo`
@@ -55,9 +55,12 @@ snapshots + `manifest.csv` (file → OWUI id; skills included).
 - **Git:** never commit or push on the user's behalf unless explicitly asked.
   Hooks live in `.githooks/` (`git config core.hooksPath .githooks`): secret
   guard, LF check, gateway-routing check.
-- **Container rule:** adding/removing/moving a container = the compose plane
-  file + recovery scripts (`emergency-recovery.ps1`/`.bat`) + the stack-map
-  reference doc **together**. `/stack-map` checks for drift.
+- **Container rule:** adding/removing/moving a container = the plane compose
+  file + recovery (`emergency-recovery.ps1` + `stack.ps1`) + the stack-map
+  reference doc **together** — and the rest of the lifecycle surfaces
+  (backups + restore catalog, watchdog, `stack.ps1 health` probe,
+  stack-services.json, registry). The FULL checklist is
+  `documentation/runbooks/SERVICE-LIFECYCLE.md`; `/stack-map` checks drift.
 - **Archive, don't delete:** retired code goes to `scripts/archive/` (see its
   README provenance table), retired docs to `documentation/archive/`.
 - **Verify against gitignored evidence** before declaring anything dead:

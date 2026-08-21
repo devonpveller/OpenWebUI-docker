@@ -159,15 +159,18 @@ services:
       - BACKUP_DIR=/backups
       - DATA_DIR=/data
       - RETAIN_COUNT=${LC_BACKUP_RETAIN_COUNT:-2}
-      - BACKUP_CRON=${LC_BACKUP_CRON:-0 2 * * *}
+      - BACKUP_INTERVAL=${LITTLE_CODER_BACKUP_INTERVAL:-86400}   # daily (sleep-loop; unified 2026-08-21)
     entrypoint: /bin/sh
     command:
       - -c
       - |
-        chmod +x /scripts/backup.sh
-        echo "$${BACKUP_CRON} /scripts/backup.sh >> /var/log/backup.log 2>&1" > /etc/crontabs/root
-        echo "[$(date -u +%FT%TZ)] little-coder backup scheduler started (cron: $${BACKUP_CRON}, retain: $${RETAIN_COUNT} most recent)"
-        crond -f -l 2
+        # Sleep-loop scheduler (unified 2026-08-21; was crond, which
+        # misses fire-windows on Docker Desktop VM clock jumps).
+        echo "[$$(date -u +%FT%TZ)] little-coder-backup started (sleep-loop; interval=$${BACKUP_INTERVAL}s, retain=$${RETAIN_COUNT})"
+        while true; do
+          sh /scripts/backup.sh || echo "[$$(date -u +%FT%TZ)] little-coder-backup backup.sh exited $$?"
+          sleep "$${BACKUP_INTERVAL}"
+        done
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
