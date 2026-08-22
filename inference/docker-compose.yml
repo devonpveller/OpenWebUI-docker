@@ -318,10 +318,13 @@ services:
     # the shared Postgres schema/prisma migrations never diverge).
     image: ghcr.io/berriai/litellm@sha256:c98c9395c56a35b7abacff8269d43ff99aabacb62bbf42a04cc1514fcb9bde4a
     container_name: llm-gateway-ui
-    # llm-net ONLY (reaches llm-gateway-db). NO aliases — must never be an
-    # inference path. NOT on llm-backend-net (can't reach the upstreams).
+    # llm-net (reaches llm-gateway-db) + app-net (2026-08-22: the portal Caddy
+    # fronts /ui at litellm.devinveller.ai behind Authelia). NO aliases — must
+    # never be an inference path. NOT on llm-backend-net (can't reach the
+    # upstreams).
     networks:
       - llm-net
+      - app-net
     volumes:
       - ../config/litellm.ui.config.yaml:/app/config.yaml:ro
     command: ["--config", "/app/config.yaml", "--port", "8080"]
@@ -445,6 +448,11 @@ networks:
   llm-net:
     external: true
     name: ai-stack_llm-net
+  # App seam — owned by the anchor; the portal Caddy reaches llm-gateway-ui
+  # here (litellm.devinveller.ai, added 2026-08-22).
+  app-net:
+    external: true
+    name: ai-stack_app-net
   # Internal-only BACKEND plane: the real inference servers + llm-queue +
   # the single ingress (llm-gateway) + the lm-models-backup liveness probe.
   # Native to this project — callers physically cannot route around LiteLLM.

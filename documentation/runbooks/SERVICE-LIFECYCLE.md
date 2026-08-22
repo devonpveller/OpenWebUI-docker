@@ -28,6 +28,19 @@ skipped.
 | 9 | **Status surfaces** | If operators should see it in OWUI's Server Status pipe: extend the relevant `status-pipe/` module (then re-paste per `status-pipe/README`). |
 | 10 | **Docs** | Stack-map reference (`/stack-map` checks drift), `documentation/CONTAINER-REGISTRY.md` (purpose + why), CLAUDE.md counts if a project's size line changes. |
 
+## When you EXPOSE a service (portal or tailnet)
+
+- **Portal (internet)**: the whole recipe lives at the top of
+  `config/caddy/Caddyfile` next to the `(authelia_gate)` snippet — app-net
+  attach → vhost (copy the litellm one) → hub card → Cloudflare hostname
+  (operator, dashboard) → validate + reload. Then re-accept the tripwire
+  baseline (`docker exec integrity-tripwire sh /scripts/tripwire.sh accept`)
+  or the next integrity check alerts on your own change.
+- **Tailnet**: add a row to the data-driven route table in `entrypoint.sh`
+  (name|enabled|host|port|ts_port|path|local_port|probe|attempts|verify) and
+  rebuild/restart the tailscale container. Probe LiteLLM-fronted targets
+  with `/health/liveliness`, never `/health` (thrash + 401).
+
 ## When you REMOVE a service
 
 Everything above in reverse, plus the house rules: **archive, don't delete**

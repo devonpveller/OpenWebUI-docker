@@ -79,6 +79,40 @@
     }
 }
 
+# ─── Authelia gate — ONE snippet for every protected vhost ────────────────
+# forward_auth against Authelia 4.39's AuthRequest endpoint; converts the
+# 401 (+ Location) into a browser-followable 302 to the auth portal. {host}
+# resolves per request, so the SAME snippet serves every subdomain.
+#
+# ADDING AN APP to the portal (the whole recipe, 2026-08-22):
+#   1. Attach the app's container to ai-stack_app-net (external) in its own
+#      compose project so this Caddy can reach it.
+#   2. Add a vhost below: http://<app>.{$PUBLIC_DOMAIN} with the three
+#      standard imports + `import authelia_gate` + a reverse_proxy to
+#      <container>:<port> (copy the litellm vhost as the template).
+#   3. Add a card to config/caddy/site/index.html (the hub page).
+#   4. Cloudflare dashboard (operator): add the public hostname
+#      <app>.devinveller.ai -> this tunnel -> http://caddy:80.
+#   5. docker exec caddy caddy validate --config /etc/caddy/Caddyfile
+#      then    docker exec caddy caddy reload --config /etc/caddy/Caddyfile
+# Authelia's *.devinveller.ai rules cover new subdomains automatically
+# (two_factor from the internet, one_factor on the LAN).
+(authelia_gate) {
+    forward_auth authelia:9091 {
+        uri /api/authz/auth-request
+        # Hardcode https in X-Original-URL: the portal is HTTPS-only at the
+        # Cloudflare edge, and Authelia 4.39 rejects http schemes. Set
+        # explicitly because sanitize_proxy_headers strips X-Forwarded-Host.
+        header_up X-Original-URL https://{host}{uri}
+        header_up X-Original-Method {method}
+        # Browsers do NOT follow Location on a 401 - convert to a real 302.
+        @denied status 401 403
+        handle_response @denied {
+            redir https://auth.{$PUBLIC_DOMAIN}/?rd=https://{host}{uri}&rm={method} 302
+        }
+    }
+}
+
 # Wiki app routing — the "reverse proxy (same)" shared by BOTH front-ends:
 #   Authelia > Caddy > (wiki_app)   on the public subdomain (forward_auth gates)
 #   Tailnet  > Caddy > (wiki_app)   on :8446 (no Authelia; tailnet is trusted)
@@ -150,21 +184,8 @@ http://openwebui.{$PUBLIC_DOMAIN} {
         max_size 100MB
     }
 
-    forward_auth authelia:9091 {
-        uri /api/authz/auth-request
-        header_up X-Original-URL https://{host}{uri}
-        header_up X-Original-Method {method}
-
-        # Authelia's AuthRequest implementation returns 401 + Location +
-        # a single-link HTML body when unauthenticated. Browsers do NOT
-        # follow Location on 401, so without this users see a bare
-        # "401 Unauthorized" link. Convert to a proper 302 so the browser
-        # bounces straight to Authelia and back after sign-in.
-        @denied status 401 403
-        handle_response @denied {
-            redir https://auth.{$PUBLIC_DOMAIN}/?rd=https://{host}{uri}&rm={method} 302
-        }
-    }
+    # Authelia gate (shared snippet - see (authelia_gate) near the top).
+    import authelia_gate
 
     # Defensive: strip a leftover /openwebui/ prefix the browser may still
     # have cached from before the subdomain switch.
@@ -192,21 +213,8 @@ http://notebook.{$PUBLIC_DOMAIN} {
         max_size 100MB
     }
 
-    forward_auth authelia:9091 {
-        uri /api/authz/auth-request
-        header_up X-Original-URL https://{host}{uri}
-        header_up X-Original-Method {method}
-
-        # Authelia's AuthRequest implementation returns 401 + Location +
-        # a single-link HTML body when unauthenticated. Browsers do NOT
-        # follow Location on 401, so without this users see a bare
-        # "401 Unauthorized" link. Convert to a proper 302 so the browser
-        # bounces straight to Authelia and back after sign-in.
-        @denied status 401 403
-        handle_response @denied {
-            redir https://auth.{$PUBLIC_DOMAIN}/?rd=https://{host}{uri}&rm={method} 302
-        }
-    }
+    # Authelia gate (shared snippet - see (authelia_gate) near the top).
+    import authelia_gate
 
     # Defensive: strip a leftover /notebook/ prefix from cached browsers.
     handle_path /notebook/* {
@@ -256,23 +264,33 @@ http://wiki.{$PUBLIC_DOMAIN} {
     import sanitize_proxy_headers
     import access_log
 
-    forward_auth authelia:9091 {
-        uri /api/authz/auth-request
-        header_up X-Original-URL https://{host}{uri}
-        header_up X-Original-Method {method}
-
-        # Convert Authelia's 401 + Location into a proper 302 so browsers
-        # follow it automatically (they don't follow Location on 401).
-        @denied status 401 403
-        handle_response @denied {
-            redir https://auth.{$PUBLIC_DOMAIN}/?rd=https://{host}{uri}&rm={method} 302
-        }
-    }
+    # Authelia gate (shared snippet - see (authelia_gate) near the top).
+    import authelia_gate
 
     # Authelia > Caddy > app. Backends (body-cap, /workbench key-inject, viewer,
     # rebuilding page) live in (wiki_app), shared verbatim with the tailnet
     # listener below.
     import wiki_app
+}
+
+# ─── LiteLLM Admin UI on its own subdomain ────────────────────────────────
+# Added 2026-08-22 (operator request): the spend/analytics dashboard joins
+# the portal. llm-gateway-ui (inference project) attaches to ai-stack_app-net
+# so this Caddy can reach it. Defense in depth: Authelia in front (2FA from
+# the internet) + LiteLLM's own UI login behind it. Serves NO inference -
+# the gateway-only routing policy is untouched.
+http://litellm.{$PUBLIC_DOMAIN} {
+    import security_headers
+    import sanitize_proxy_headers
+    import access_log
+    encode zstd gzip
+
+    import authelia_gate
+
+    reverse_proxy llm-gateway-ui:8080 {
+        header_up Host {upstream_hostport}
+        header_up X-Forwarded-Proto https
+    }
 }
 
 # Tailnet wiki — Tailnet > Caddy > app, the SAME (wiki_app) backends, just no
@@ -317,31 +335,8 @@ http://{$PUBLIC_DOMAIN} {
         max_size 2MB
     }
 
-    # Forward-auth: every request below this point flows through Authelia.
-    # Authelia 4.39 with AuthRequest implementation: endpoint is
-    # /api/authz/auth-request (not the legacy /api/verify). X-Original-URL
-    # is required by AuthRequest implementation; we set it explicitly because
-    # our sanitize_proxy_headers snippet strips X-Forwarded-Host (defense
-    # against client-supplied values) which Authelia would otherwise use.
-    # copy_headers omitted intentionally — trusted-header SSO is NOT enabled
-    # (plan sec.6.7).
-    forward_auth authelia:9091 {
-        uri /api/authz/auth-request
-        # Hardcode https in X-Original-URL: the portal is HTTPS-only at the
-        # Cloudflare edge by design, and Authelia 4.39 rejects http schemes
-        # (insecure cookie transport). Inside the tunnel + Docker, traffic
-        # appears as http, but the client-facing scheme is always https.
-        header_up X-Original-URL https://{host}{uri}
-        header_up X-Original-Method {method}
-
-        # Convert Authelia's 401 + Location into a proper 302 so browsers
-        # follow it automatically (they don't follow Location on 401).
-        # Without this, the user sees a bare "401 Unauthorized" link.
-        @denied status 401 403
-        handle_response @denied {
-            redir https://auth.{$PUBLIC_DOMAIN}/?rd=https://{host}{uri}&rm={method} 302
-        }
-    }
+    # Authelia gate (shared snippet - see (authelia_gate) near the top).
+    import authelia_gate
 
     # ─── Routes ──────────────────────────────────────────────────────────
 
