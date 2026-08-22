@@ -2,8 +2,8 @@
 issue: 24
 title: Podcast pipeline: Mattermost alert when the ON audio job fails
 created: 2026-08-22T18:20:00+00:00
-base_sha: 9a4d8c1a6
-target_branch: main
+base_sha: 9e465758e
+target_branch: development
 status: planned
 triage: bounded
 touches_live: true

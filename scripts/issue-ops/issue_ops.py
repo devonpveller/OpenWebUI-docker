@@ -151,10 +151,40 @@ def focus_clear() -> None:
 
 # ── github data ─────────────────────────────────────────────────────────────
 
+KNOWN = STATE / "known-issues.json"
+
+
+def _known_numbers() -> set[int]:
+    if KNOWN.is_file():
+        return set(json.loads(KNOWN.read_text(encoding="utf-8")))
+    return set()
+
+
+def _remember(numbers: set[int]) -> None:
+    STATE.mkdir(parents=True, exist_ok=True)
+    KNOWN.write_text(json.dumps(sorted(numbers)), encoding="utf-8")
+
+
 def open_issues() -> list[dict]:
+    """Open issues — resilient to GitHub's list-index lag (App-created issues
+    can take many minutes to appear in list/search while direct GETs work).
+    Merges the list with direct fetches of locally-known numbers, and also
+    remembers every number seen so the registry self-maintains."""
     c = cfg()
     rows = gh.api(f"/repos/{c['repo']}/issues?state=open&per_page=100")
-    return [r for r in rows if "pull_request" not in r]
+    rows = [r for r in rows if "pull_request" not in r]
+    seen = {r["number"] for r in rows}
+    known = _known_numbers() | seen
+    for n in sorted(known - seen):
+        try:
+            i = gh.api(f"/repos/{c['repo']}/issues/{n}")
+            if i.get("state") == "open" and "pull_request" not in i:
+                rows.append(i)
+        except Exception:
+            known.discard(n)  # deleted/inaccessible — forget it
+    _remember({r["number"] for r in rows} | known)
+    rows.sort(key=lambda r: r["number"])
+    return rows
 
 
 def open_prs() -> list[dict]:

@@ -1155,6 +1155,22 @@ Per-plane playbook (portal-split procedure, now run 3×):
   - Part M written (issues → plans → MM-governed execution with staleness
     audit, maintenance-window interlocks, per-action approvals).
 
+- **K.12 Part M build 1 — EXECUTED 2026-08-22 PM** (operator: "plan it then
+  build it", away, MM-governed): scripts/issue-ops/ subsystem LIVE —
+  GitHub-App auth (agent-org's App, installation tokens minted host-side, no
+  gh CLI), `status` console (issues × plan freshness vs origin/development ×
+  triage × focus), `plan N` (headless-claude planner, bridge-style binary
+  resolution), `radar` (overlap vs open PRs), `focus` lock, `gate PR`
+  harness (M.7 rubric: intent/evidence/scope/lifecycle/security;
+  RECOMMEND-MERGE or DENY + orchestration-adjustment). Founding issues
+  #24/#25/#26 filed from the real backlog; exemplar plans for #24/#25
+  hand-written; #26 planned by the autonomous path. **`development`
+  CREATED + pushed** from the deployed tip (operator approved via the MM
+  listener — the reply-listening loop worked in production). Resilience:
+  GitHub's list index lags App-created issues → local known-issues registry
+  + direct-fetch merge. MM console contract documented in
+  scripts/issue-ops/README.md for future Claude sessions.
+
 ## Part L — NEW (2026-08-21): self-contained plane directories (operator-approved direction)
 
 Operator: "I do want the directories to be self contained" + per-plane env
