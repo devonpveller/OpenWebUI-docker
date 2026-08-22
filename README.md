@@ -60,15 +60,81 @@ directory — the `--env-file` is required (plane files fail loud without it).
 never rotate casually. All published ports bind to `127.0.0.1`; external
 access is Tailscale serve or the portal only.
 
-## Health & recovery
+## Health & recovery — operator quick reference
 
-- `scripts/checks/stack-watchdog.ps1` — the 60 s watchdog (runs as a Windows
-  service; also covers Docker-engine restart, backup recency, bridge health).
-- `scripts/checks/check-openbrain-health.ps1`, `scripts/checks/check-agent-org-health.ps1`.
-- `scripts/recovery/emergency-recovery.ps1 recover|nuclear|gpu-reset` — ordered
-  cross-project repair. `scripts/recovery/quick-fixes.bat` — interactive menu.
-- Never restart `openwebui` alone (tailscale shares its netns): order is
-  openwebui → tailscale; the watchdog restores the tailnet serve routes.
+Everyday driving (all from the repo root):
+
+```powershell
+.\scripts\stack\stack.ps1 status            # per-project container states
+.\scripts\stack\stack.ps1 health            # 12 functional probes across every plane
+.\scripts\stack\stack.ps1 up|down [plane]   # dependency-ordered start/stop (planes: anchor,
+                                            #   inference, frontend, memory, search, coder, ob1, agent-org)
+.\scripts\stack\stack.ps1 restart <plane>   # one plane in place
+```
+
+Manual recovery, escalating:
+
+```powershell
+# One service misbehaving — restart just its plane:
+docker compose -f <plane>/docker-compose.yml --env-file .env restart <service>
+
+# Netns rule: NEVER restart openwebui alone — tailscale shares its network
+# namespace. Order: restart openwebui, wait healthy, then restart tailscale
+# (frontend/docker-compose.yml encodes this for full-project operations).
+
+# Crashed / wedged stack — the ordered repair paths:
+.\scripts\recovery\emergency-recovery.ps1 recover     # health-gated restart sweep
+.\scripts\recovery\emergency-recovery.ps1 nuclear     # full teardown + rebuild, all projects
+.\scripts\recovery\emergency-recovery.ps1 gpu-reset   # GPU/CUDA path rebuild
+scripts\recovery\quick-fixes.bat                      # interactive single-fix menu
+
+# Portal (internet exposure) is ALWAYS deliberate:
+.\scripts\portal\portal-on.ps1   /   portal-off.ps1
+
+# Restore from backups (see documentation/runbooks/restore-from-snapshot.md):
+.\scripts\backup\restore-from-snapshot.ps1 -Services <name|all> [-Apply]
+```
+
+Watching the watchers: `scripts/checks/stack-watchdog.ps1` runs every 60 s as
+the StackWatchdog scheduled task (tailnet serve repair, backup recency,
+Docker-engine restart recovery); the sysadmin scheduled tasks post to
+Mattermost `#sysadmin`.
+
+## Backups & the maintenance rotation
+
+Every stateful store has exactly one backup sidecar living **in its own
+plane project**, writing verified artifacts (+ sha256 sentinels) to
+`./backups/<service>/`, mirrored nightly to the NAS. Two scheduler idioms:
+**sleep-loop** for interval tars (runs once at container start, then every
+`BACKUP_INTERVAL` seconds) and **supercronic** for cron-timed DB dumps.
+
+**Changing a backup interval**: set the variable in the root `.env` and
+recreate that one sidecar (`docker compose -f <plane>/docker-compose.yml
+--env-file .env up -d <sidecar>`). All intervals are seconds; defaults live
+in the compose files:
+
+| Variable | Sidecar (project) | Default |
+|---|---|---|
+| `MNEMORY_BACKUP_INTERVAL` | mnemory-backup (memory) | 86400 (daily) |
+| `OPENWEBUI_BACKUP_INTERVAL` | openwebui-backup (frontend) | 86400 |
+| `TAILSCALE_BACKUP_INTERVAL` | tailscale-backup (frontend) | 86400 |
+| `LITTLE_CODER_BACKUP_INTERVAL` | little-coder-backup (coder) | 86400 |
+| `LM_MODELS_BACKUP_INTERVAL` | lm-models-backup (inference) | 604800 (weekly; empty = disabled) |
+| `OPENBRAIN_WIKI_BACKUP_INTERVAL` | openbrain-wiki-backup (OB1; set in `OB1/docker/.env`) | 86400 |
+| cron-timed | llm-gateway-backup (sleep-loop daily), openbrain-db-backup + open-notebook-backup (supercronic, `*_BACKUP_CRON` in `OB1/docker/.env`) | 02:00/02:20 UTC |
+
+**Disk rotation** (autonomous since 2026-08-21): the `AI-Stack Weekly
+Maintenance` scheduled task (Sundays 03:15) runs
+`scripts/maintenance/weekly-maintenance.ps1` — safe docker reclaim (dangling
+images + build cache; **never** volume prune), then triggers the elevated
+vhdx compaction task and posts the result to Mattermost `#sysadmin`.
+Re-register after edits with `weekly-maintenance.ps1 -Register`.
+
+Restore procedures: `documentation/runbooks/restore-from-snapshot.md` (per
+store) and `scripts/backup/restore-from-snapshot.ps1` (orchestrated DR).
+Adding/changing a service? Work through
+`documentation/runbooks/SERVICE-LIFECYCLE.md` — it keeps backups, recovery,
+health probes, and the sysadmin plane truthful.
 
 ## Repo map
 
