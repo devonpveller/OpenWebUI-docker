@@ -65,21 +65,52 @@ if (Test-Path $py) {
 
 $critical = $free -lt $CritFreeGb
 $stopped = @()
+$orgAction = ""
 if ($critical) {
-    # Stop the gym workers - the big uncapped /tmp writers. agent-bridge and
-    # Mattermost stay up, so nothing is lost except in-flight worker turns.
+    # GRACEFUL FIRST (operator direction 2026-08-22): delegate the stop to the
+    # org's own governance - engage the agent-bridge kill-switch so the
+    # orchestrator stops dispatching and workers wind down their in-flight
+    # turns, then wait a bounded grace window watching the scheduler drain.
+    $graceMinutes = 5
+    try {
+        Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:8830/kill-switch' `
+            -ContentType 'application/json' -Body '{"on": true}' -TimeoutSec 10 | Out-Null
+        $orgAction = "kill-switch engaged"
+        Log "org kill-switch ENGAGED via agent-bridge; waiting up to ${graceMinutes}m for the scheduler to drain..."
+        $deadline = (Get-Date).AddMinutes($graceMinutes)
+        while ((Get-Date) -lt $deadline) {
+            Start-Sleep -Seconds 20
+            try {
+                $sched = Invoke-RestMethod -Uri 'http://127.0.0.1:8830/scheduler' -TimeoutSec 10
+                if (-not $sched.instances -or @($sched.instances).Count -eq 0) {
+                    Log "scheduler drained cleanly"
+                    $orgAction = "kill-switch engaged, drained cleanly"
+                    break
+                }
+            } catch { break }  # bridge went away - fall through to the hard stop
+        }
+    }
+    catch {
+        $orgAction = "bridge unresponsive - hard stop only"
+        Log "WARN: agent-bridge kill-switch unreachable ($_) - falling back to hard stop"
+    }
+
+    # HARD FALLBACK: whatever is still running gets stopped - the disk wins.
     $workers = @(docker ps --format '{{.Names}}' | Where-Object { $_ -like 'ao-worker*' -or $_ -like 'ao-ot*' })
     foreach ($w in $workers) {
         docker stop $w 2>&1 | Out-Null
         $stopped += $w
     }
-    Log "CRITICAL: stopped gym workers: $($stopped -join ', ')"
+    if ($stopped.Count) { Log "CRITICAL: hard-stopped gym workers: $($stopped -join ', ')" }
+    else { Log "CRITICAL: no worker containers left running after the graceful drain" }
 }
 
 $after = CFreeGb
 $sev = if ($critical) { ':rotating_light: **DISK CRITICAL**' } else { ':warning: **Disk low**' }
 $msg = "$sev - C: free ${free} -> ${after} GB after reclaim. images[$img] cache[$bld]." +
-       $(if ($stopped.Count) { " Gym workers STOPPED to protect the disk: $($stopped -join ', ') - restart them when space is safe (docker start ...)." } else { "" }) +
+       $(if ($orgAction) { " Org: $orgAction." } else { "" }) +
+       $(if ($stopped.Count) { " Gym workers stopped: $($stopped -join ', ')." } else { "" }) +
+       $(if ($critical) { " To RESUME after space is safe: release the kill-switch (POST http://127.0.0.1:8830/kill-switch {\""on\"":false} or ask the org via Mattermost) and docker start the workers." } else { "" }) +
        " Weekly compaction: Sundays 03:15; trigger early via the sysadmin channel if needed."
 if (Test-Path $py) {
     & $py (Join-Path $repoRoot 'scripts\sysadmin-mcp\mm_post.py') $msg 2>&1 | Out-Null

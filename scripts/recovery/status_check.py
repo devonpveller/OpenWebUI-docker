@@ -74,9 +74,9 @@ def check_container_status():
         return False
     
     print()
-    log_info("Container Status:")
+    log_info("Container Status (all projects, docker ps):")
     result = run_docker_command(
-        ["docker", "compose", "ps"],
+        ["docker", "ps", "--format", "table {{.Names}}	{{.Status}}"],
         project_root,
         timeout=30
     )
@@ -89,20 +89,25 @@ def check_container_status():
         return False
 
 def start_missing_services():
-    """Start any missing services"""
-    project_root = find_project_root()
-    if not project_root:
-        return False
-    
+    """REPORT missing services (starting them belongs to stack.ps1 / the
+    recovery scripts - this checker stays read-only). Was a leftover
+    `docker compose up -d watchtower` until 2026-08-22; watchtower itself
+    was retired 2026-08-20."""
     print()
-    log_info("Starting any missing services...")
-    result = run_docker_command(
-        ["docker", "compose", "up", "-d", "watchtower"],
-        project_root,
-        timeout=60
-    )
-    
-    return result is not None
+    log_info("Missing-service report (start with: scripts\stack\stack.ps1 up <plane>):")
+    inv = load_inventory()
+    if not inv:
+        return False
+    missing = []
+    for services in inv.get("planes", {}).values():
+        for svc in services:
+            if _container_state(svc["container"]) != "running":
+                missing.append(f"{svc['container']} ({svc.get('project', '?')})")
+    if missing:
+        log_warn("  not running: " + ", ".join(missing))
+    else:
+        log_success("  every inventoried container is running")
+    return True
 
 def check_gpu_status():
     """Check OpenWebUI GPU status"""
@@ -113,7 +118,7 @@ def check_gpu_status():
     print()
     log_info("OpenWebUI GPU Status:")
     result = run_docker_command(
-        ["docker", "compose", "exec", "-T", "openwebui", "python", "-c", 
+        ["docker", "exec", "openwebui", "python", "-c", 
          "import torch; print('CUDA available:', torch.cuda.is_available()); print('GPU count:', torch.cuda.device_count())"],
         project_root,
         timeout=30
@@ -138,7 +143,7 @@ def check_llm_gateway_status():
     print()
     log_info("llm-gateway (LiteLLM front door) Status:")
     result = run_docker_command(
-        ["docker", "compose", "exec", "-T", "tailscale", "wget", "-q", "-T", "5", "-O", "-", "http://llm-gateway:8080/health/liveliness"],
+        ["docker", "exec", "tailscale", "wget", "-q", "-T", "5", "-O", "-", "http://llm-gateway:8080/health/liveliness"],
         project_root,
         timeout=15
     )
@@ -161,7 +166,7 @@ def check_llama_cpp_status():
     print()
     log_info("llama-cpp Status:")
     result = run_docker_command(
-        ["docker", "compose", "exec", "-T", "tailscale", "wget", "-q", "-T", "5", "-O", "-", "http://llama-cpp-upstream:8080/health"],
+        ["docker", "exec", "llama-cpp-upstream", "curl", "-sf", "--max-time", "5", "http://localhost:8080/health"],
         project_root,
         timeout=15
     )
@@ -175,7 +180,7 @@ def check_llama_cpp_status():
     
     # Check models loaded
     result = run_docker_command(
-        ["docker", "compose", "exec", "-T", "tailscale", "wget", "-q", "-T", "5", "-O", "-", "http://llama-cpp-upstream:8080/v1/models"],
+        ["docker", "exec", "llama-cpp-upstream", "curl", "-sf", "--max-time", "5", "http://localhost:8080/v1/models"],
         project_root,
         timeout=15
     )
@@ -197,7 +202,7 @@ def check_llama_cpp_embed_status():
     print()
     log_info("llama-cpp-embed Status:")
     result = run_docker_command(
-        ["docker", "compose", "exec", "-T", "tailscale", "wget", "-q", "-T", "5", "-O", "-", "http://llama-cpp-embed-upstream:8080/health"],
+        ["docker", "exec", "llama-cpp-embed-upstream", "curl", "-sf", "--max-time", "5", "http://localhost:8080/health"],
         project_root,
         timeout=15
     )
@@ -211,7 +216,7 @@ def check_llama_cpp_embed_status():
     
     # Check embeddings endpoint
     result = run_docker_command(
-        ["docker", "compose", "exec", "-T", "tailscale", "wget", "-q", "-T", "5", "-O", "-", "http://llama-cpp-embed-upstream:8080/v1/models"],
+        ["docker", "exec", "llama-cpp-embed-upstream", "curl", "-sf", "--max-time", "5", "http://localhost:8080/v1/models"],
         project_root,
         timeout=15
     )
@@ -233,7 +238,7 @@ def check_network_connectivity():
     print()
     log_info("Network Connectivity:")
     result = run_docker_command(
-        ["docker", "compose", "exec", "-T", "tailscale", "ping", "-c", "1", "8.8.8.8"],
+        ["docker", "exec", "tailscale", "ping", "-c", "1", "8.8.8.8"],
         project_root,
         timeout=15
     )
@@ -254,7 +259,7 @@ def check_tailscale_status():
     print()
     log_info("Tailscale Status:")
     result = run_docker_command(
-        ["docker", "compose", "exec", "-T", "tailscale", "tailscale", "--socket=/tmp/tailscaled.sock", "status"],
+        ["docker", "exec", "tailscale", "tailscale", "--socket=/tmp/tailscaled.sock", "status"],
         project_root,
         timeout=30
     )
@@ -275,7 +280,7 @@ def check_tailscale_serve():
     print()
     log_info("Tailscale Serve Status:")
     result = run_docker_command(
-        ["docker", "compose", "exec", "-T", "tailscale", "tailscale", "--socket=/tmp/tailscaled.sock", "serve", "status"],
+        ["docker", "exec", "tailscale", "tailscale", "--socket=/tmp/tailscaled.sock", "serve", "status"],
         project_root,
         timeout=30
     )
@@ -300,7 +305,7 @@ def check_open_terminal_status():
     # network namespace (it is on lc-net / llm-net now), so probe it INSIDE
     # its own container, not via openwebui's localhost:8000.
     result = run_docker_command(
-        ["docker", "compose", "exec", "-T", "open-terminal", "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", "http://localhost:8000/health"],
+        ["docker", "exec", "open-terminal", "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", "http://localhost:8000/health"],
         project_root,
         timeout=10
     )
@@ -324,7 +329,7 @@ def check_service_accessibility():
     
     # Check OpenWebUI accessibility
     result = run_docker_command(
-        ["docker", "compose", "exec", "-T", "tailscale", "wget", "-q", "-T", "3", "-O", "/dev/null", "http://127.0.0.1:8080"],
+        ["docker", "exec", "tailscale", "wget", "-q", "-T", "3", "-O", "/dev/null", "http://127.0.0.1:8080"],
         project_root,
         timeout=10
     )
@@ -339,7 +344,7 @@ def check_service_accessibility():
 
     # Check llama-cpp accessibility
     result = run_docker_command(
-        ["docker", "compose", "exec", "-T", "tailscale", "wget", "-q", "-T", "5", "-O", "/dev/null", "http://llama-cpp-upstream:8080/health"],
+        ["docker", "exec", "llama-cpp-upstream", "curl", "-sf", "-o", "/dev/null", "--max-time", "5", "http://localhost:8080/health"],
         project_root,
         timeout=10
     )
@@ -351,7 +356,7 @@ def check_service_accessibility():
     
     # Check llama-cpp-embed accessibility
     result = run_docker_command(
-        ["docker", "compose", "exec", "-T", "tailscale", "wget", "-q", "-T", "5", "-O", "/dev/null", "http://llama-cpp-embed-upstream:8080/health"],
+        ["docker", "exec", "llama-cpp-embed-upstream", "curl", "-sf", "-o", "/dev/null", "--max-time", "5", "http://localhost:8080/health"],
         project_root,
         timeout=10
     )
@@ -365,7 +370,9 @@ def check_service_accessibility():
 
 def load_inventory():
     """Load the canonical service inventory (lib/stack-services.json)."""
-    inv_path = Path(__file__).resolve().parent / "lib" / "stack-services.json"
+    # scripts/lib/ - NOT ./lib: this script moved to scripts/recovery/ in the
+    # 2026-08-21 G.2 reorg and the relative path silently broke (found 08-22).
+    inv_path = Path(__file__).resolve().parents[1] / "lib" / "stack-services.json"
     try:
         with open(inv_path, "r", encoding="utf-8") as f:
             return json.load(f)

@@ -13,50 +13,314 @@
     "(service redis->search-redis, gateway->search-gateway,",
     "— see the 'service' field where it differs.",
     "Open Brain is a SEPARATE compose project (open-brain); a plain `docker compose`",
-    "from the ai-stack dir cannot see it — probe its containers by name."
+    "from the ai-stack dir cannot see it — probe its containers by name.",
+    "",
+    "MACHINE-VERIFIED since 2026-08-22 (D-12): the pre-commit check",
+    "(check-project-configs.ps1) diffs every (container -> project) row against",
+    "the rendered compose configs - the inventory can no longer drift silently.",
+    "Curated fields (critical / host_health / notes) remain hand-owned."
   ],
   "projects": {
-    "ai-stack":   { "compose": "docker compose" },
-    "open-brain": { "compose": "docker compose -f OB1/docker/docker-compose.yml" }
+    "ai-stack": {
+      "compose": "docker compose"
+    },
+    "open-brain": {
+      "compose": "docker compose -f OB1/docker/docker-compose.yml"
+    }
   },
   "planes": {
     "core": [
-      { "container": "openwebui",       "project": "frontend", "critical": true,  "host_health": "http://127.0.0.1:3000/health" },
-      { "container": "tailscale",       "project": "frontend", "critical": true },
-      { "container": "llm-gateway",     "project": "inference", "critical": true,  "note": "LiteLLM front door (holds the llama-cpp / llama-cpp-embed aliases). No host_health: llm-net is internal so host :4000 is inert; liveliness is in-network (http://llm-gateway:8080/health/liveliness)." },
-      { "container": "llm-gateway-db",   "project": "inference", "critical": true,  "note": "Postgres spend-log ledger backing llm-gateway." },
-      { "container": "llama-cpp-upstream",       "project": "inference", "critical": true,  "host_health": "http://127.0.0.1:8081/health" },
-      { "container": "llama-cpp-embed-upstream", "project": "inference", "critical": false, "host_health": "http://127.0.0.1:8082/health" }
+      {
+        "container": "openwebui",
+        "project": "frontend",
+        "critical": true,
+        "host_health": "http://127.0.0.1:3000/health"
+      },
+      {
+        "container": "tailscale",
+        "project": "frontend",
+        "critical": true
+      },
+      {
+        "container": "llm-gateway",
+        "project": "inference",
+        "critical": true,
+        "note": "LiteLLM front door (holds the llama-cpp / llama-cpp-embed aliases). No host_health: llm-net is internal so host :4000 is inert; liveliness is in-network (http://llm-gateway:8080/health/liveliness)."
+      },
+      {
+        "container": "llm-gateway-db",
+        "project": "inference",
+        "critical": true,
+        "note": "Postgres spend-log ledger backing llm-gateway."
+      },
+      {
+        "container": "llama-cpp-upstream",
+        "project": "inference",
+        "critical": true,
+        "host_health": "http://127.0.0.1:8081/health"
+      },
+      {
+        "container": "llama-cpp-embed-upstream",
+        "project": "inference",
+        "critical": false,
+        "host_health": "http://127.0.0.1:8082/health"
+      },
+      {
+        "container": "llm-queue",
+        "project": "inference",
+        "critical": true,
+        "note": "B2 admission controller between LiteLLM and the upstreams (llm-backend-net only; liveness via docker exec /healthz)"
+      },
+      {
+        "container": "llm-gateway-ui",
+        "project": "inference",
+        "critical": false,
+        "note": "Admin-UI sidecar (tailnet :8445/ui + litellm.devinveller.ai); serves no inference"
+      }
     ],
     "memory": [
-      { "container": "mnemory",         "project": "memory", "critical": false },
-      { "container": "mnemory-cloud-gateway", "project": "memory", "critical": false }
+      {
+        "container": "mnemory",
+        "project": "memory",
+        "critical": false
+      },
+      {
+        "container": "mnemory-cloud-gateway",
+        "project": "memory",
+        "critical": false
+      }
     ],
     "search": [
-      { "container": "search-redis",   "project": "search", "service": "redis",   "critical": false },
-      { "container": "searxng",        "project": "search", "service": "searxng", "critical": false },
-      { "container": "search-gateway", "project": "search", "service": "gateway", "critical": false, "host_health": "http://127.0.0.1:8085/healthz" }
+      {
+        "container": "search-redis",
+        "project": "search",
+        "service": "redis",
+        "critical": false
+      },
+      {
+        "container": "searxng",
+        "project": "search",
+        "service": "searxng",
+        "critical": false
+      },
+      {
+        "container": "search-gateway",
+        "project": "search",
+        "service": "gateway",
+        "critical": false,
+        "host_health": "http://127.0.0.1:8085/healthz"
+      },
+      {
+        "container": "search-vpn",
+        "project": "search",
+        "critical": true,
+        "service": "vpn",
+        "note": "Mullvad egress + kill-switch; ALL search-plane traffic"
+      }
     ],
     "coder": [
-      { "container": "open-terminal", "project": "coder", "critical": false },
-      { "container": "little-coder",  "project": "coder", "critical": false },
-      { "container": "lc-egress",     "project": "coder", "critical": false }
+      {
+        "container": "open-terminal",
+        "project": "coder",
+        "critical": false
+      },
+      {
+        "container": "little-coder",
+        "project": "coder",
+        "critical": false
+      },
+      {
+        "container": "lc-egress",
+        "project": "coder",
+        "critical": false
+      }
     ],
     "notebook": [
-      { "container": "open_notebook", "project": "open-brain", "critical": false, "note": "being retired (Quartz workbench); still live for podcasts" },
-      { "container": "surrealdb",     "project": "open-brain", "critical": false, "note": "open-notebook DB; WS-only, no HTTP health" }
+      {
+        "container": "open_notebook",
+        "project": "open-brain",
+        "critical": false,
+        "note": "being retired (Quartz workbench); still live for podcasts"
+      },
+      {
+        "container": "surrealdb",
+        "project": "open-brain",
+        "critical": false,
+        "note": "open-notebook DB; WS-only, no HTTP health"
+      }
     ],
     "openbrain": [
-      { "container": "openbrain-db",          "project": "open-brain", "critical": true,  "note": "stale-pool dependency: if this restarts after openbrain-mcp, mcp must be restarted" },
-      { "container": "openbrain-mcp",         "project": "open-brain", "critical": true,  "stale_pool_guard": "openbrain-db", "note": "holds a long-lived DB connection that does NOT auto-reconnect; OWUI tool 500s / 'Broken pipe' when stale" },
-      { "container": "openbrain-mcpo",        "project": "open-brain", "critical": true,  "note": "MCP->OpenAPI bridge Open WebUI tools call" },
-      { "container": "openbrain-mcpo-ext",    "project": "open-brain", "critical": false },
-      { "container": "openbrain-gateway",     "project": "open-brain", "critical": false, "host_health": "http://127.0.0.1:8061/health" },
-      { "container": "openbrain-rest",        "project": "open-brain", "critical": false, "host_health": "http://127.0.0.1:3001/" },
-      { "container": "openbrain-postgrest",   "project": "open-brain", "critical": false },
-      { "container": "openbrain-wiki",        "project": "open-brain", "critical": false },
-      { "container": "openbrain-wiki-viewer", "project": "open-brain", "critical": false },
-      { "container": "openbrain-entity-worker","project": "open-brain","critical": false }
+      {
+        "container": "openbrain-db",
+        "project": "open-brain",
+        "critical": true,
+        "note": "stale-pool dependency: if this restarts after openbrain-mcp, mcp must be restarted"
+      },
+      {
+        "container": "openbrain-mcp",
+        "project": "open-brain",
+        "critical": true,
+        "stale_pool_guard": "openbrain-db",
+        "note": "holds a long-lived DB connection that does NOT auto-reconnect; OWUI tool 500s / 'Broken pipe' when stale"
+      },
+      {
+        "container": "openbrain-mcpo",
+        "project": "open-brain",
+        "critical": true,
+        "note": "MCP->OpenAPI bridge Open WebUI tools call"
+      },
+      {
+        "container": "openbrain-mcpo-ext",
+        "project": "open-brain",
+        "critical": false
+      },
+      {
+        "container": "openbrain-gateway",
+        "project": "open-brain",
+        "critical": false,
+        "host_health": "http://127.0.0.1:8061/health"
+      },
+      {
+        "container": "openbrain-rest",
+        "project": "open-brain",
+        "critical": false,
+        "host_health": "http://127.0.0.1:3001/"
+      },
+      {
+        "container": "openbrain-postgrest",
+        "project": "open-brain",
+        "critical": false
+      },
+      {
+        "container": "openbrain-wiki",
+        "project": "open-brain",
+        "critical": false
+      },
+      {
+        "container": "openbrain-wiki-viewer",
+        "project": "open-brain",
+        "critical": false
+      },
+      {
+        "container": "openbrain-entity-worker",
+        "project": "open-brain",
+        "critical": false
+      },
+      {
+        "container": "openbrain-ext",
+        "project": "open-brain",
+        "critical": false
+      },
+      {
+        "container": "openbrain-research",
+        "project": "open-brain",
+        "critical": true,
+        "host_health": "http://127.0.0.1:8818/health"
+      },
+      {
+        "container": "openbrain-curator",
+        "project": "open-brain",
+        "critical": false
+      },
+      {
+        "container": "openbrain-chunk-worker",
+        "project": "open-brain",
+        "critical": false
+      },
+      {
+        "container": "openbrain-suggestion-worker",
+        "project": "open-brain",
+        "critical": false
+      },
+      {
+        "container": "openbrain-grounding-backfiller",
+        "project": "open-brain",
+        "critical": false
+      },
+      {
+        "container": "openbrain-workbench",
+        "project": "open-brain",
+        "critical": false
+      },
+      {
+        "container": "openbrain-extract",
+        "project": "open-brain",
+        "critical": false
+      },
+      {
+        "container": "openbrain-cron",
+        "project": "open-brain",
+        "critical": true,
+        "note": "the clock for the whole scheduled chain"
+      },
+      {
+        "container": "openbrain-gmail-pull",
+        "project": "open-brain",
+        "critical": false
+      },
+      {
+        "container": "openbrain-gmail-prune",
+        "project": "open-brain",
+        "critical": false
+      },
+      {
+        "container": "openbrain-digest",
+        "project": "open-brain",
+        "critical": false
+      },
+      {
+        "container": "openbrain-podcast",
+        "project": "open-brain",
+        "critical": false
+      }
+    ],
+    "backups": [
+      {
+        "container": "llm-gateway-backup",
+        "project": "inference",
+        "critical": false
+      },
+      {
+        "container": "lm-models-backup",
+        "project": "inference",
+        "critical": false,
+        "note": "weekly GGUF-store tar; empty LM_MODELS_BACKUP_INTERVAL disables"
+      },
+      {
+        "container": "openwebui-backup",
+        "project": "frontend",
+        "critical": false
+      },
+      {
+        "container": "tailscale-backup",
+        "project": "frontend",
+        "critical": false
+      },
+      {
+        "container": "mnemory-backup",
+        "project": "memory",
+        "critical": false
+      },
+      {
+        "container": "little-coder-backup",
+        "project": "coder",
+        "critical": false
+      },
+      {
+        "container": "openbrain-db-backup",
+        "project": "open-brain",
+        "critical": false
+      },
+      {
+        "container": "openbrain-wiki-backup",
+        "project": "open-brain",
+        "critical": false
+      },
+      {
+        "container": "open-notebook-backup",
+        "project": "open-brain",
+        "critical": false
+      }
     ]
   }
 }

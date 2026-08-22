@@ -287,8 +287,12 @@ http://litellm.{$PUBLIC_DOMAIN} {
 
     import authelia_gate
 
+    # NO Host rewrite here (unlike the openwebui vhost): LiteLLM's UI builds
+    # ABSOLUTE redirect URLs from the Host it receives — rewriting to the
+    # upstream hostport bounced browsers to http://llm-gateway-ui:8080/ui/
+    # (found live 2026-08-22). Caddy passes the original public Host by
+    # default, so redirects stay on litellm.{$PUBLIC_DOMAIN}.
     reverse_proxy llm-gateway-ui:8080 {
-        header_up Host {upstream_hostport}
         header_up X-Forwarded-Proto https
     }
 }

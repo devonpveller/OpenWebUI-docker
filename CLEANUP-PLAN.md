@@ -1095,6 +1095,42 @@ Per-plane playbook (portal-split procedure, now run 3×):
     own session; it touches the live cloud MCP doors). Part L on operator
     go. D-12 generator pending operator read of the explanation.
 
+- **K.10 operator feedback round — EXECUTED 2026-08-22 PM:**
+  - LiteLLM portal bug FIXED: the vhost's Host rewrite made LiteLLM emit
+    absolute redirects to http://llm-gateway-ui:8080 (operator's browser
+    evidence); Host now passes through. Operator signed in successfully
+    (credentials surfaced via local Notepad, never chat).
+  - **PODCAST ROOT CAUSE FOUND — J.1 MISS #4, not queue saturation**: ON's
+    provider credentials (SurrealDB-stored, encrypted) carried literal
+    "not-required"/empty keys → every generate_podcast outline call 401'd
+    since the master-key flip ("ON job ended 'failed' — no audio", while
+    research dives completed 11/12 within budget). Fixed via ON's
+    credentials API (three gateway-pointed credentials → the
+    OPEN_NOTEBOOK_LLM_API_KEY virtual key; /test = success on all three);
+    episode 076's audio REPLAYED through /api/podcasts/generate.
+    Residual: a 6-calls/day `local-trust` caller in the 05:00 full-compile
+    path — confirm gone/identify via `stack.ps1 stats` after tomorrow's run.
+  - D-12 EXECUTED as wire-as-VERIFIED: pre-commit now diffs every
+    (container → project) row of stack-services.json against the rendered
+    compose configs (regex, PS5.1-safe) — first run found 25 missing
+    containers; inventory completed (+ backups plane). Its reader
+    status_check.py was itself broken FOUR ways (inventory path broke in
+    the G.2 move, root-compose execs, upstream probes unreachable since
+    the 06-13 isolation, `up -d watchtower` leftover) — fixed: 5/12 → 12/12
+    all-operational, report-only posture.
+  - disk-guard: critical path now DELEGATES first — agent-bridge
+    /kill-switch engaged + scheduler drain (≤5 min) before the hard
+    docker-stop fallback; MM message carries the release procedure.
+  - Research: relevance-gate FAIL-SAFE FLOOR (never empties a run's pool;
+    OB1 48a84ae). Proposed→promoted source lifecycle confirmed already
+    present (session candidate pool; only cited+grounded promoted at
+    curator ingest; report lists cited-only).
+  - PLANNED (not built): research report → wiki session pages (report +
+    per-claim source/chunk deep links); MM alert when the ON audio job
+    fails (no more silent email-only nights); queue-ETA notifications to
+    the user (MM/OWUI) for long-waiting jobs; backup interval
+    human-units + pre-change snapshot command (`stack.ps1 snapshot`).
+
 ## Part L — NEW (2026-08-21): self-contained plane directories (operator-approved direction)
 
 Operator: "I do want the directories to be self contained" + per-plane env

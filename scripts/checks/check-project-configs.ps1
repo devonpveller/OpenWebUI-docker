@@ -50,6 +50,54 @@ if ($ymlStaged.Count -gt 0) {
             }
         }
         if ($failed -eq 0) { Write-Host "  [configs] all $($projects.Count) compose projects render clean" }
+
+        # --- stack-services.json drift verifier (D-12, 2026-08-22) -----------
+        # The inventory's curated fields (critical/host_health/notes) stay
+        # hand-owned, but the MACHINE guarantees the (container -> project)
+        # rows are complete and correct against the rendered compose configs.
+        $invPath = 'scripts\lib\stack-services.json'
+        if (Test-Path $invPath) {
+            $inv = Get-Content $invPath -Raw | ConvertFrom-Json
+            $known = @{}
+            foreach ($plane in $inv.planes.PSObject.Properties) {
+                foreach ($row in $plane.Value) { $known[$row.container] = $row.project }
+            }
+            $renderTargets = @(
+                @{ P = 'inference'; F = 'inference\docker-compose.yml'; A = @('--env-file', '.env.example') }
+                @{ P = 'frontend';  F = 'frontend\docker-compose.yml';  A = @('--env-file', '.env.example') }
+                @{ P = 'memory';    F = 'memory\docker-compose.yml';    A = @('--env-file', '.env.example') }
+                @{ P = 'search';    F = 'search\docker-compose.yml';    A = @('--env-file', '.env.example') }
+                @{ P = 'coder';     F = 'coder\docker-compose.yml';     A = @('--env-file', '.env.example') }
+            )
+            # OB1 renders only where its gitignored env exists (not in CI).
+            if (Test-Path 'OB1\docker\.env') {
+                $renderTargets += @{ P = 'open-brain'; F = 'OB1\docker\docker-compose.yml'; A = @() }
+            }
+            $drift = @()
+            foreach ($rt in $renderTargets) {
+                # Regex extraction, NOT ConvertFrom-Json: PS 5.1's parser rejects
+                # the rendered config's case-duplicate env keys (HTTP_PROXY vs
+                # http_proxy on open-terminal). container_name lines are enough.
+                $raw = (& docker compose -f $rt.F @($rt.A) config --format json 2>$null) -join "`n"
+                if (-not $raw) { continue }
+                $names = [regex]::Matches($raw, '"container_name":\s*"([^"]+)"') |
+                    ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique
+                foreach ($cname in $names) {
+                    if (-not $known.ContainsKey($cname)) {
+                        $drift += "MISSING from stack-services.json: $cname (project $($rt.P))"
+                    }
+                    elseif ($known[$cname] -ne $rt.P) {
+                        $drift += "WRONG project for ${cname}: json says '$($known[$cname])', compose says '$($rt.P)'"
+                    }
+                }
+            }
+            if ($drift.Count) {
+                foreach ($d in $drift) { Write-Host "  [configs] INVENTORY DRIFT: $d" -ForegroundColor Red }
+                Write-Host "  [configs] fix scripts\lib\stack-services.json (curated fields are yours; container/project rows must match compose)" -ForegroundColor Yellow
+                $failed += $drift.Count
+            }
+            else { Write-Host "  [configs] stack-services.json inventory matches the compose configs" }
+        }
     }
 }
 

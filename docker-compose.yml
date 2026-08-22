@@ -49,3 +49,4 @@ networks:
   # open_notebook) attach externally.
   app-net:
     driver: bridge
+
