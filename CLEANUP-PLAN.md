@@ -1056,6 +1056,45 @@ Per-plane playbook (portal-split procedure, now run 3×):
     IMPLEMENTATIONS, not a merged runtime); decision parked pending their
     read. D-12 explained; generator decision parked.
 
+- **K.9 feature round — EXECUTED 2026-08-22** (operator's three additions +
+  follow-ups; also the structure's first real expansion test):
+  - README operator guide (backup intervals table, manual-recovery command
+    set, maintenance rotation) — #10/S5 asks.
+  - `disk-guard.ps1` hourly sentinel (#6): <30GB free ⇒ safe reclaim + tmp
+    sweep + MM warn; <12GB ⇒ also STOP the gym workers (paused round beats
+    a disk-full crash). Registered; warn path smoke-tested live (10.7GB
+    build cache freed).
+  - `stack.ps1 stats` (S2): llm-queue live board (running/next/permits) +
+    10-min demand buckets + per-caller hour view + global ledger totals
+    (260k requests / 2.14B tokens). Building it CAUGHT J.1 MISS #3:
+    openbrain-wiki's chat key was hardcoded not-needed — 1,686 failed
+    completions in 20h; fixed + verified compiling on its ob-wiki lane.
+  - RESEARCH REPORT TEMPLATES (#1): new templates.ts — 9 professional
+    report types (scientific paper, technical/non-technical proposal,
+    programming/engineering docs, product comparison, market analysis,
+    value proposition, general) with a deterministic classifier and a
+    shared grounding contract (citations preserved verbatim, no new facts,
+    honest gaps). renderResult now serves the templated report as the
+    chat-facing body (tagged synthesis remains machine-truth + fallback).
+  - RESEARCH FILTERING (#2): new filtering.ts — credibility-ranked search
+    hits (scholarly/.edu/.gov/docs first, retail like lowes/amazon last;
+    stable within tiers) + a per-page LLM relevance gate (fail-open,
+    confident-IRRELEVANT drops logged) on web-gathered sources; seeds +
+    KB recalls protected. 11 new deno tests; suite 57/57 (orchestrator
+    integration test needs its ob-claims-test rig — pre-existing).
+  - PORTAL EXTENSIBILITY (#3): (authelia_gate) snippet replaces 4
+    duplicated forward_auth blocks; add-an-app recipe documented in the
+    Caddyfile + SERVICE-LIFECYCLE ("EXPOSE a service" section incl.
+    tripwire re-baseline + tailnet route-table recipe); LiteLLM UI vhost
+    (litellm.devinveller.ai → llm-gateway-ui via app-net, Authelia 2FA in
+    front) + Wiki/LiteLLM cards on the devinveller.ai hub. Verified: caddy
+    validate + reload, all vhosts 302 to Authelia, tripwire re-baselined.
+    OPERATOR: add the litellm.devinveller.ai public hostname in the
+    Cloudflare dashboard (→ http://caddy:80).
+  - QUEUED NEXT: E.1 gateway unification (operator approved 2026-08-22 —
+    own session; it touches the live cloud MCP doors). Part L on operator
+    go. D-12 generator pending operator read of the explanation.
+
 ## Part L — NEW (2026-08-21): self-contained plane directories (operator-approved direction)
 
 Operator: "I do want the directories to be self contained" + per-plane env
