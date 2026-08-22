@@ -615,6 +615,13 @@ def cmd_t2(n: int, plane: str, service: str, probe: str,
         if not keep:
             subprocess.run([*base, "down", "-v", "--remove-orphans"],
                            capture_output=True, text=True, timeout=300)
+            # down -v can race a just-stopped container's volume ("in use");
+            # sweep whatever the project left behind.
+            left = subprocess.run(["docker", "volume", "ls", "-q", "--filter",
+                                   f"name={proj}_"], capture_output=True, text=True)
+            for v in (left.stdout or "").split():
+                subprocess.run(["docker", "volume", "rm", v],
+                               capture_output=True, text=True)
     ev = STATE / f"t2-issue-{n}-evidence.txt"
     ev.write_text(
         f"T2 validation evidence — issue #{n}\nstarted: {started}\n"
