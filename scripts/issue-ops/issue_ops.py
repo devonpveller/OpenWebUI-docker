@@ -493,6 +493,68 @@ def cmd_gate(pr_n: int) -> int:
     return 0
 
 
+PLAN_GATE_PROMPT = """You are the PLAN GATE for the ai-stack repo (Part M.7 two-gate design,
+operator 2026-08-22): the go/no-go BEFORE an issue plan is dispatched to the
+local worker org. The org's executor is intentionally isolated from the live
+stack, so anything the plan gets wrong is expensive — you are the cheap early
+kill. You never fix the plan yourself. Output ONLY this markdown shape:
+
+## Plan verdict: GO | NO-GO
+
+## Rubric
+- Grounded (every cited path/line exists at the pinned base; claims re-derived, not trusted): <pass/fail + one line>
+- Dispatchable scope (bounded for a small local model; triage honest; one issue, no drive-bys): <pass/fail + one line>
+- Validation is real (RED-at-base repro named; exact commands; T2/live steps assigned to the HOST harness, never the sandboxed worker): <pass/fail + one line>
+- Live-surface honesty (touches_live and bind-mount writes declared; OB1-submodule discipline if wiki/OB1 paths): <pass/fail + one line>
+- Security screen (plan directs no secret movement, no gateway bypass, no branch-policy violation, no unrelated file contact): <pass/fail + one line>
+
+## Reasoning
+<grounded — cite the plan lines and the repo paths you checked>
+
+## If NO-GO: plan adjustment
+<what the PLANNER must change (re-plan instructions), not a code fix>
+
+PLAN under review (issue #{n}, base {base} on {branch}):
+{plan}
+"""
+
+
+def cmd_gate_plan(n: int) -> int:
+    meta = read_plan(n)
+    if not meta:
+        print(f"NO-GO (machine): no plan file for issue #{n} — run: plan {n}")
+        return 1
+    # machine pre-checks — fail fast before spending a review
+    verdict, repro = meta.get("verdict"), meta.get("repro")
+    if verdict is None:
+        print(f"NO-GO (machine): plan predates the verdict contract — run: plan {n} --refresh")
+        return 1
+    if verdict != "fix" or repro != "confirmed-in-code":
+        print(f"NO-GO (machine): verdict={verdict} repro={repro} — not dispatchable; "
+              "see the plan's ## Disposition (draft reply needs operator approval)")
+        return 1
+    branch = meta.get("target_branch", "")
+    tip = remote_tip(branch)
+    if tip and not tip.startswith(meta.get("base_sha", "")[:9]):
+        print(f"NO-GO (machine): STALE — base {meta.get('base_sha', '?')[:9]} vs "
+              f"origin/{branch} {tip[:9]} — run: plan {n} --refresh")
+        return 1
+    prompt = PLAN_GATE_PROMPT.format(
+        n=n, base=meta.get("base_sha", "?")[:9], branch=branch, plan=meta["body"][:12000])
+    print(f"plan-gating issue #{n} via independent claude review…")
+    r = subprocess.run([_claude_bin(), "-p", prompt, "--allowedTools", "Read,Glob,Grep"],
+                       capture_output=True, text=True, cwd=ROOT, timeout=1200)
+    out_text = (r.stdout or "").strip()
+    if "## Plan verdict" not in out_text:
+        print("plan gate produced no verdict:", (out_text or r.stderr)[:300])
+        return 1
+    out = PLANS / f"gate-plan-{n}.md"
+    out.write_text(out_text + "\n", encoding="utf-8")
+    print(out_text[:800])
+    print(f"\nverdict saved: {out} — GO unblocks dispatch; NO-GO goes back to the planner.")
+    return 0 if "## Plan verdict: GO" in out_text else 2
+
+
 PLANES = {  # plane → (compose file, compose project name for native-network name resolution)
     "frontend": ("frontend/docker-compose.yml", "frontend"),
     "inference": ("inference/docker-compose.yml", "inference"),
@@ -640,6 +702,7 @@ def main() -> int:
     p = sub.add_parser("plan"); p.add_argument("n", type=int); p.add_argument("--refresh", action="store_true")
     p = sub.add_parser("radar"); p.add_argument("n", type=int)
     p = sub.add_parser("gate"); p.add_argument("n", type=int)
+    p = sub.add_parser("gate-plan"); p.add_argument("n", type=int)
     p = sub.add_parser("focus"); p.add_argument("action", choices=["show", "set", "clear"]); p.add_argument("arc", nargs="?")
     sub.add_parser("seed")
     p = sub.add_parser("t2")
@@ -655,6 +718,8 @@ def main() -> int:
         return cmd_radar(a.n)
     if a.cmd == "gate":
         return cmd_gate(a.n)
+    if a.cmd == "gate-plan":
+        return cmd_gate_plan(a.n)
     if a.cmd == "seed":
         return cmd_seed()
     if a.cmd == "t2":

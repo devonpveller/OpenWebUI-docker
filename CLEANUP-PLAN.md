@@ -1328,6 +1328,20 @@ The generator/verifier split, on the real stack:
   tags each issue simple|bounded|heavy; heavy issues queue for the
   OpenRouter era or the operator/Claude directly, instead of burning local
   worker rounds on work above the driver's ceiling.
+- **TWO-GATE + TWO-HARNESS split (operator, 2026-08-22 evening):** the
+  org's executor (open-terminal) is INTENTIONALLY blind to the live stack —
+  so validation splits by trust: the worker sandbox runs T1 (unit/static,
+  RED→GREEN in its clone); the HOST-side Claude session runs T2 live-twin
+  validation (M.8) — the entity that can reach live services is the trusted
+  verifier, never the sandboxed generator. Claude gates TWICE:
+  `gate-plan <N>` (go/no-go BEFORE dispatch — machine pre-checks: verdict
+  fix + repro confirmed-in-code + fresh base, then an independent review of
+  grounding/scope/validation-realism/live-surface-honesty/security) and
+  `gate <PR#>` on the delivered PR. ORDER LAW on a PR: static gate FIRST,
+  T2 only after the diff reads clean — T2 executes the branch's code near
+  live services, so untrusted code never runs with live reach before a
+  trusted read of it. Everything stays on the local network; human merge +
+  deploy approval unchanged.
 
 Build order when green-lit: M.2 read-only view first (issues + plan
 freshness — zero risk), then M.1 planner, then M.3 staleness, then M.4/M.5
