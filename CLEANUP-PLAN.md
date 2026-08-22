@@ -1244,6 +1244,39 @@ session, with the operator approving anything that touches live services.
   into `development` with the evidence in the description; issue closed by
   the merge. `main` promotion stays a manual operator act.
 
+### M.6 — Workspace isolation + the focus lock (operator design round, 2026-08-22)
+
+The operator's concern: if the local repo sits on a non-`development` branch,
+there is an active line of work — incoming issue fixes could duplicate
+in-flight fixes or collide with it. Resolution (the modern pattern every
+serious agent system uses — Copilot coding agent, Claude Code Actions,
+OpenHands, agent-org's own workers):
+
+- **Never work in the operator's checkout.** Every issue execution gets an
+  ISOLATED workspace — `git worktree add` (cheap, local) or a scratch clone —
+  checked out at **`origin/development`'s tip**, regardless of what branch
+  the operator's working copy is on. The local branch stops mattering; no
+  branch movement, no stash dances, no interference by construction.
+- **Plans pin `origin/development`** (not the local HEAD) as `base_sha`;
+  staleness (M.3) is measured against the remote development tip.
+- **Overlap radar instead of branch inference:** at plan time AND again at
+  execute time, diff the issue's touched paths against every open PR/active
+  branch (`gh pr list` + branch diffs). Overlaps mark the plan
+  `overlaps: [...]` and executing an overlapping plan requires an explicit
+  operator override in the MM thread ("touches llm-queue/, which
+  refactor/x also modifies — execute anyway / wait?").
+- **Focus lock (the operator's status-staging instinct, made explicit):** a
+  single operator-set flag ("active arc: <name>") rather than inferring
+  intent from the local branch name (fragile — this repo lived on
+  refactor/ai-stack-cleanup for days while healthy). While the lock is set:
+  planning continues freely (plans are just documents and go stale-checked
+  anyway), but ALL executions queue with status `queued-behind-focus`; the
+  MM "current issues" view says so. Clearing the lock (one MM command)
+  releases the queue through the normal M.3/M.4 gates.
+- **Merging stays the only integration point:** issue branches PR into
+  `development`; conflicts with the operator's arc surface in the PR merge
+  the way git intends — visible, reviewable, never silently rebased.
+
 Build order when green-lit: M.2 read-only view first (issues + plan
 freshness — zero risk), then M.1 planner, then M.3 staleness, then M.4/M.5
 execution. Each stage its own session with tests.
