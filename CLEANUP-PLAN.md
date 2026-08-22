@@ -1333,3 +1333,47 @@ Build order when green-lit: M.2 read-only view first (issues + plan
 freshness — zero risk), then M.1 planner, then M.3 staleness, then M.4/M.5
 execution. Each stage its own session with tests.
 
+### M.8 — DRAFT (operator design round, 2026-08-22 evening): live validation tiers
+
+Operator: "validating the fix is only theoretical until tested live … a test
+container could be deployed to run in then taken down." Industry version =
+ephemeral per-PR environments (Heroku Review Apps → GitLab Review Apps →
+Argo CD PR generators / Uffizzi / Render previews) + Testcontainers at the
+integration-test layer. The governing principle everywhere: **staging is the
+SAME definitions as production, parameterized — never a hand-maintained
+parallel stack.** Part K makes ai-stack unusually ready for this: planes are
+self-contained compose projects that attach to *named* external networks, so
+an ephemeral instance is the same files under a different project name +
+namespace.
+
+Three validation tiers, declared per-plan (`validation_tier` frontmatter),
+mapped from triage:
+
+- **T1 — static + unit (triage: simple).** pytest/ruff at the branch, RED at
+  base → GREEN at head. No containers. (#17's harness is exactly this.)
+- **T2 — ephemeral service slice (triage: bounded).** Build the touched
+  service's image from the PR branch, stand it up as
+  `docker compose -p test-issue-<N> …` with test volumes and NO host ports,
+  run the plan's validation commands + the service's health probe inside the
+  namespace, capture output into the PR, `compose down -v` the namespace.
+  Scarce shared deps (GPU inference) are NOT duplicated — the test slice
+  reaches the PROD gateway with a dedicated low-priority virtual key
+  (`test-validation` lane; J.1 + the llm-queue admission controller already
+  make shared-GPU isolation a policy line, not new infrastructure).
+- **T3 — full-plane staging (triage: heavy; rare).** Whole-plane bring-up in
+  a test namespace, `stack.ps1 health`-style probe sweep, torn down after.
+  Scheduled clear of the nightly 01:00–05:30 chain + Sun 03:15 maintenance
+  (M.4 interlocks apply — this is the only tier that can touch shared load).
+
+Prereqs to build:
+1. Parameterize the network-anchor prefix (`${STACK_NS:-ai-stack}_llm-net`
+   etc.) so a `test-*` namespace can own its own nets beside prod — today the
+   external names are hardcoded. Plus a `.env.test` profile: no host ports,
+   test volumes, `test-validation` gateway key.
+2. `issue_ops.py validate <N>`: drives the tier for a PR branch, captures
+   evidence (commands + output + probe results) into the PR description /
+   MM thread — the gate then reviews EVIDENCE, not claims.
+3. Teardown guarantee: validation namespaces are `down -v`'d even on failure
+   (trap/finally), and disk-guard treats `test-*` volumes as reclaimable.
+STATUS: DRAFT — discussing with operator in the MM thread.
+
