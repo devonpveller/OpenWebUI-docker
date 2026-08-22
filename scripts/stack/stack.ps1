@@ -24,7 +24,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet("up", "down", "status", "restart", "health")]
+    [ValidateSet("up", "down", "status", "restart", "health", "stats")]
     [string]$Action = "status",
 
     [Parameter(Position = 1)]
@@ -104,6 +104,11 @@ switch ($Action) {
             Invoke-Project $p @("ps", "--format", "table {{.Service}}\t{{.Status}}")
             Write-Host ""
         }
+    }
+    "stats" {
+        # Inference demand + queue statistics (read-only; see stack-stats.ps1).
+        & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'stack-stats.ps1')
+        exit $LASTEXITCODE
     }
     "health" {
         # One-command smoke test: the same functional gates the Part K
