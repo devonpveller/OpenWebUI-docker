@@ -63,6 +63,7 @@ a caller identity llm-queue can trust.
 | `little-coder` / workers | `lc-coder` (prio 2) | `little-coder/config/little-coder.config.yaml` + compose env (recreate ao-workers after — they keep stale env, see `ao-worker-stale-deploy-token` memory) |
 | OB1 services (research, entity/suggestion/chunk workers, digest, podcast, wiki, workbench, mcp, extract) | `ob-mcp`/`ob-entity`/`ob-wiki`/`ob-research`/`ob-podcast` | `OB1/docker/.env` + compose env (one shared var per lane) |
 | agent-org bridge (advisory/research) | — | `agent-org/docker/.env` |
+| `openbrain-gmail-pull` (nightly 05:00 cron) | `ob-gmail` | **MISSED at cutover — found 2026-08-22 by the Part M autonomous planner (issue #26)**: `OB1/recipes/email-history-import/pull-gmail.ts` sends `Bearer $OPENROUTER_API_KEY`, which the gitignored recipe `.env` set to the literal `local-trust` — nightly ingestion of NEW emails 401'd silently (metadata chat + embeddings both dropped) from the flip until 08-22. Key alias `ob-gmail` now in the recipe `.env`; container recreated + authed embed verified in-container. LESSON: gitignored per-recipe `.env`s are invisible to tracked-file audits — `grep --no-ignore` the whole tree for gateway URLs/keys on any auth change. |
 | Embeddings callers (same services) | routed by model to embed upstream | same keys ride along |
 
 ## Phase D — flip order (minimizes blast radius)

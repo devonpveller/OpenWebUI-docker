@@ -31,6 +31,15 @@ D:\...\ai-stack\.venv\Scripts\python.exe scripts\issue-ops\issue_ops.py status
 - `state/` (gitignored) — token cache, focus lock, known-issues registry
   (GitHub's list index lags App-created issues by minutes; the registry +
   direct fetches keep the console truthful)
+
+**KNOWN LIMIT (2026-08-22):** the App installation holds `contents` /
+`pull_requests` / `administration` write + `metadata` read — **no `issues`
+permission**. On the public repo it can *open* issues and *read* them, but
+comment/close returns 403 "Resource not accessible by integration" (and reads
+would break if the repo ever goes private). Until the operator grants
+**Issues: read & write** on the App and approves it on the installation,
+sessions must ask the operator to close issues, or record resolution in the
+plan file only. Do NOT repurpose `LC_DEPLOY_TOKEN` or other PATs for this.
 - Plans live in `documentation/issue-plans/` (see its README for the
   frontmatter contract)
 
