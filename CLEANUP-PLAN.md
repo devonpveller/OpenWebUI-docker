@@ -1277,6 +1277,42 @@ OpenHands, agent-org's own workers):
   `development`; conflicts with the operator's arc surface in the PR merge
   the way git intends — visible, reviewable, never silently rebased.
 
+### M.7 — Role architecture: local model drives, Claude gates, human merges (operator, 2026-08-22)
+
+The generator/verifier split, on the real stack:
+
+- **DRIVE (local, today → OpenRouter later):** issue executions run through
+  the EXISTING agent-org orchestration — governed dispatch, isolated worker
+  clones, plan gates, delivery verification, PR delivery via the GitHub App,
+  the production-branch guard. Workers run on the local model (AO_LOCAL lane
+  through the gateway); the already-defined `cloud` profile
+  (llm-gateway-cloud → OpenRouter) is the promotion path for a bigger
+  driver LATER — the gate below is model-agnostic and does not change.
+- **GATE (Claude):** every worker PR into `development` gets an independent
+  Claude review before the operator sees it. The gate NEVER fixes the code
+  itself (roles stay separated; fixing would blur the training signal and
+  invite gate-gaming). Verdict posted to the Mattermost thread:
+  RECOMMEND-MERGE with evidence summary, or DENY with (a) the concrete
+  reason and (b) a plan to adjust the WORKER ORCHESTRATION (charters /
+  prompts / plan-gate criteria) so the next attempt lands better. Rubric:
+  solves the ISSUE INTENT (not just tests green — see the anti-gaming
+  lesson), evidence quality (failing→passing repro), scope discipline,
+  SERVICE-LIFECYCLE compliance, security (secrets, gateway-routing).
+- **MERGE (human):** the operator remains the only merge authority —
+  Claude recommends, never merges; per-action live-service approvals (M.4)
+  still apply on deploy.
+- **SELF-IMPROVEMENT LOOP (the gym, on a real target):** deny reasons are
+  the training signal. They accumulate per issue-class; accepted
+  adjustment plans update the org's charters/prompts, exactly the
+  burn-down/charter mechanism the orchestration gym already exercises —
+  but scored against real deployed outcomes. Track the gate pass-rate over
+  time as the improvement metric.
+- **TRIAGE (capability ceiling guard):** the dark-factory ground truth
+  stands — the local org targets SMALL, BOUNDED scopes. The planner (M.1)
+  tags each issue simple|bounded|heavy; heavy issues queue for the
+  OpenRouter era or the operator/Claude directly, instead of burning local
+  worker rounds on work above the driver's ceiling.
+
 Build order when green-lit: M.2 read-only view first (issues + plan
 freshness — zero risk), then M.1 planner, then M.3 staleness, then M.4/M.5
 execution. Each stage its own session with tests.
