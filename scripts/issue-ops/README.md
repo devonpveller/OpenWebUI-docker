@@ -17,7 +17,7 @@ D:\...\ai-stack\.venv\Scripts\python.exe scripts\issue-ops\issue_ops.py status
 |---|---|---|
 | "current issues" | `status` | post the rendered view to the thread |
 | "plan issue N" / plan is 🔴 or stale | `plan N [--refresh]` | summarize the written plan; plans are cheap and always allowed |
-| "execute N" | `radar N` first | STALE plan ⇒ refuse + `plan N --refresh` (M.3). Overlaps ⇒ ask for the operator override (M.6). Focus lock set ⇒ it queues — say so. Then follow the plan in an ISOLATED worktree off `origin/development`, never the operator's checkout; `touches_live: true` steps need per-action approval in the thread (M.4) |
+| "execute N" | `radar N` first | STALE plan ⇒ refuse + `plan N --refresh` (M.3). `verdict` ≠ `fix` or `repro` ≠ `confirmed-in-code` ⇒ refuse — the plan's `## Disposition` holds the draft reply; get operator approval in the thread before posting ANYTHING public to GitHub. Overlaps ⇒ ask for the operator override (M.6). Focus lock set ⇒ it queues — say so. Then follow the plan in an ISOLATED worktree off `origin/development`, never the operator's checkout; `touches_live: true` steps need per-action approval in the thread (M.4) |
 | a worker PR appears | `gate <PR#>` | post the verdict (RECOMMEND-MERGE / DENY + orchestration-adjustment plan) to the thread; the operator merges, never you |
 | "pause issues" / big arc starting | `focus set "<arc>"` | `focus clear` when they release it |
 
