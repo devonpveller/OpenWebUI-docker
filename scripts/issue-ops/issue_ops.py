@@ -493,6 +493,139 @@ def cmd_gate(pr_n: int) -> int:
     return 0
 
 
+PLANES = {  # plane → (compose file, compose project name for native-network name resolution)
+    "frontend": ("frontend/docker-compose.yml", "frontend"),
+    "inference": ("inference/docker-compose.yml", "inference"),
+    "memory": ("memory/docker-compose.yml", "memory"),
+    "search": ("search/docker-compose.yml", "search"),
+    "coder": ("coder/docker-compose.yml", "coder"),
+    "ob1": ("OB1/docker/docker-compose.yml", "docker"),
+}
+
+# service keys copied into the test twin; everything else (ports, depends_on,
+# healthcheck, restart, deploy/GPU, container_name, devices, cap_add, ...) is
+# deliberately dropped — the twin is probe-shaped, not deployment-shaped.
+_T2_KEEP = ("image", "environment", "env_file", "volumes", "user", "working_dir",
+            "extra_hosts", "dns", "labels", "init", "stop_grace_period")
+
+
+def _t2_twin(plane: str, service: str, n: int, probe: str, image: str | None):
+    """Build {generated compose dict, twin service name} for a T2 validation run.
+
+    M.8 laws baked in: the twin runs under a DISTINCT service name (verified
+    2026-08-22: identical service names on a shared external network DNS
+    round-robin — a prod-named twin would intercept live traffic); named
+    volumes become FRESH project-scoped ones (never prod data); host ports
+    and GPU reservations never come along.
+    """
+    import yaml
+    file_rel, project = PLANES[plane]
+    plane_file = ROOT / file_rel
+    doc = yaml.safe_load(plane_file.read_text(encoding="utf-8"))
+    if service not in doc.get("services", {}):
+        raise SystemExit(f"service '{service}' not in {file_rel}")
+    src = doc["services"][service]
+    if "network_mode" in src:
+        raise SystemExit(f"'{service}' uses network_mode ({src['network_mode']}) — "
+                         "netns companions are not T2-able; validate its partner instead")
+    twin_name = f"test-{service}"
+    twin: dict = {k: src[k] for k in _T2_KEEP if k in src}
+    if image:
+        twin["image"] = image
+    twin.pop("build", None)
+    twin["container_name"] = f"test-issue-{n}-{service}"
+    twin["entrypoint"] = ["/bin/sh", "-lc"]
+    twin["command"] = [probe]
+    twin["restart"] = "no"
+    twin.setdefault("labels", {})
+    if isinstance(twin["labels"], list):
+        twin["labels"].append(f"ai-stack.test-issue={n}")
+    else:
+        twin["labels"]["ai-stack.test-issue"] = str(n)
+    env = twin.get("environment")
+    inject = "TEST_VALIDATION_LLM_KEY=${TEST_VALIDATION_LLM_KEY:-}"
+    if isinstance(env, list):
+        env.append(inject)
+    elif isinstance(env, dict):
+        env["TEST_VALIDATION_LLM_KEY"] = "${TEST_VALIDATION_LLM_KEY:-}"
+    else:
+        twin["environment"] = [inject]
+    # env_file + bind-mount paths resolve relative to the compose FILE — the
+    # generated file lives in state/, so absolutize against the plane dir.
+    plane_dir = plane_file.parent
+    ef = twin.get("env_file")
+    if ef:
+        ef = [ef] if isinstance(ef, str) else ef
+        twin["env_file"] = [str((plane_dir / e).resolve()) if not Path(e).is_absolute() else e
+                            for e in ef]
+    top_vols: dict = {}
+    vols = []
+    for v in twin.get("volumes", []):
+        if isinstance(v, str) and (v.startswith("./") or v.startswith("../")):
+            host, rest = v.split(":", 1)
+            v = f"{(plane_dir / host).resolve()}:{rest}"
+        elif isinstance(v, str) and ":" in v and not Path(v.split(":", 1)[0]).is_absolute():
+            top_vols[v.split(":", 1)[0]] = {}  # named volume → FRESH, project-scoped
+        vols.append(v)
+    if vols:
+        twin["volumes"] = vols
+    # networks: keep the service's refs; resolve each to the LIVE runtime name
+    # so the twin reaches deployed containers (operator requirement, M.8).
+    nets = src.get("networks", [])
+    net_keys = list(nets.keys()) if isinstance(nets, dict) else list(nets)
+    top_nets = {}
+    for k in net_keys:
+        decl = (doc.get("networks") or {}).get(k, {}) or {}
+        live = decl.get("name") if decl.get("external") else f"{project}_{k}"
+        if not live:
+            live = f"{project}_{k}"
+        top_nets[k] = {"external": True, "name": live}
+    if net_keys:
+        twin["networks"] = net_keys  # ref only — twin gets NO prod aliases
+    gen = {"services": {twin_name: twin}}
+    if top_nets:
+        gen["networks"] = top_nets
+    if top_vols:
+        gen["volumes"] = top_vols
+    return gen, twin_name
+
+
+def cmd_t2(n: int, plane: str, service: str, probe: str,
+           image: str | None, keep: bool) -> int:
+    """M.8 T2: run a probe inside an ephemeral twin of <service> attached to
+    the LIVE networks, capture evidence, tear everything down."""
+    import yaml
+    gen, twin_name = _t2_twin(plane, service, n, probe, image)
+    STATE.mkdir(parents=True, exist_ok=True)
+    gen_file = STATE / f"t2-issue-{n}.yml"
+    gen_file.write_text(yaml.safe_dump(gen, sort_keys=False), encoding="utf-8")
+    proj = f"test-issue-{n}"
+    envfiles = ["--env-file", str(ROOT / ".env")]
+    if (ROOT / ".env.test").is_file():
+        envfiles += ["--env-file", str(ROOT / ".env.test")]
+    base = ["docker", "compose", "-p", proj, "-f", str(gen_file), *envfiles]
+    print(f"T2 issue #{n}: {plane}/{service} → twin '{twin_name}' (project {proj})")
+    started = datetime.now(timezone.utc).isoformat()
+    try:
+        r = subprocess.run([*base, "run", "--rm", "--no-deps", twin_name],
+                           capture_output=True, text=True, timeout=600)
+        out = (r.stdout or "") + (("\n[stderr]\n" + r.stderr) if r.stderr.strip() else "")
+        verdict = "PASS" if r.returncode == 0 else f"FAIL (exit {r.returncode})"
+    finally:
+        if not keep:
+            subprocess.run([*base, "down", "-v", "--remove-orphans"],
+                           capture_output=True, text=True, timeout=300)
+    ev = STATE / f"t2-issue-{n}-evidence.txt"
+    ev.write_text(
+        f"T2 validation evidence — issue #{n}\nstarted: {started}\n"
+        f"plane/service: {plane}/{service}  image: {image or gen['services'][twin_name].get('image')}\n"
+        f"probe: {probe}\nverdict: {verdict}\n--- output ---\n{out}\n",
+        encoding="utf-8")
+    print(out.strip()[:2000])
+    print(f"\n{verdict} — evidence: {ev}")
+    return 0 if r.returncode == 0 else r.returncode
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(prog="issue_ops")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -502,6 +635,10 @@ def main() -> int:
     p = sub.add_parser("gate"); p.add_argument("n", type=int)
     p = sub.add_parser("focus"); p.add_argument("action", choices=["show", "set", "clear"]); p.add_argument("arc", nargs="?")
     sub.add_parser("seed")
+    p = sub.add_parser("t2")
+    p.add_argument("n", type=int); p.add_argument("plane", choices=sorted(PLANES))
+    p.add_argument("service"); p.add_argument("--probe", required=True)
+    p.add_argument("--image"); p.add_argument("--keep", action="store_true")
     a = ap.parse_args()
     if a.cmd == "status":
         return cmd_status()
@@ -513,6 +650,8 @@ def main() -> int:
         return cmd_gate(a.n)
     if a.cmd == "seed":
         return cmd_seed()
+    if a.cmd == "t2":
+        return cmd_t2(a.n, a.plane, a.service, a.probe, a.image, a.keep)
     if a.cmd == "focus":
         if a.action == "show":
             print(json.dumps(focus_get() or {"focus": "clear"}))

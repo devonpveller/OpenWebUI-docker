@@ -1365,15 +1365,43 @@ mapped from triage:
   Scheduled clear of the nightly 01:00–05:30 chain + Sun 03:15 maintenance
   (M.4 interlocks apply — this is the only tier that can touch shared load).
 
-Prereqs to build:
-1. Parameterize the network-anchor prefix (`${STACK_NS:-ai-stack}_llm-net`
-   etc.) so a `test-*` namespace can own its own nets beside prod — today the
-   external names are hardcoded. Plus a `.env.test` profile: no host ports,
-   test volumes, `test-validation` gateway key.
-2. `issue_ops.py validate <N>`: drives the tier for a PR branch, captures
-   evidence (commands + output + probe results) into the PR description /
-   MM thread — the gate then reviews EVIDENCE, not claims.
-3. Teardown guarantee: validation namespaces are `down -v`'d even on failure
-   (trap/finally), and disk-guard treats `test-*` volumes as reclaimable.
-STATUS: DRAFT — discussing with operator in the MM thread.
+**T2 CORE BUILT + LIVE-PROVEN same evening** (operator approved the
+direction: "test against the actual codebase deployed services… as long as
+the test space can reach the live containers"). The operator's reachability
+condition SIMPLIFIED the design: T2 twins attach to the LIVE anchor networks
+(no parallel network namespace needed — the parameterized-prefix prereq now
+belongs to T3 only, if ever).
+
+- **LAW (verified empirically 2026-08-22):** two compose projects sharing a
+  service name on one external network DNS ROUND-ROBIN — a prod-named twin
+  would intercept live traffic. T2 twins therefore always run as
+  `test-<service>` (they resolve live services by *their* names; never share
+  an alias).
+- `issue_ops.py t2 <N> <plane> <service> --probe "<cmd>" [--image tag]
+  [--keep]` — generates a probe-shaped twin from the plane compose file
+  (fresh project-scoped volumes, no host ports, no depends_on/healthcheck/
+  GPU-deploy/container_name carryover, live networks resolved to their
+  runtime names, `network_mode` services refused = netns companions are not
+  T2-able), `compose -p test-issue-<N> run --rm --no-deps`, evidence to
+  `state/t2-issue-<N>-evidence.txt`, guaranteed `down -v` in finally.
+- `test-validation` virtual key minted (J.1 flow) → gitignored `.env.test`
+  (+ tracked `.env.test.example`); twins get `TEST_VALIDATION_LLM_KEY`
+  injected.
+- **PROOF RUN:** frontend/openwebui twin on the live nets pulled the model
+  list AND a real completion ("T2-VALIDATION-OK") from live GPU inference
+  through llm-queue; ledger attributed it to the `test-validation` lane;
+  prod openwebui untouched (no restart); zero containers/volumes left.
+
+Remaining M.8 work:
+1. llm-queue policy: pin the `test-validation` lane to LOWEST priority
+   (today it gets the default lane priority — the isolation is attribution,
+   not yet priority). Live-service change → operator-approved window.
+2. `issue_ops.py validate <N>`: plan-driven wrapper (reads validation_tier +
+   commands from the plan, builds the PR-branch image, runs t2, attaches
+   evidence to the PR/MM) — the gate then reviews EVIDENCE, not claims.
+3. CAVEAT to encode in plans: host BIND mounts come along rw (they are live
+   surfaces — e.g. status-pipe/); a plan whose probe writes through a bind
+   mount must declare it and needs the M.4 approval treatment.
+4. disk-guard: treat `test-issue-*` volumes as reclaimable.
+5. T3 full-plane staging when a heavy issue actually needs it.
 

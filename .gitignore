@@ -74,3 +74,4 @@ scripts/sysadmin-mcp/bridge-state/
 # Telegram out-of-band listener runtime state (getUpdates offset, command audit)
 scripts/sysadmin-mcp/telegram-state/
 *.egg-info/
+.env.test
