@@ -2,25 +2,22 @@
 """
 LLM Traffic Module — per-caller GPU-demand attribution from the LiteLLM gateway.
 
-Manifest-driven module (mirrors modules/gpu-status, modules/system-health). It
-answers "who is using the GPU / the LLMs?" by reading the LiteLLM spend ledger
-(`/spend/logs`) and aggregating per presented API key — which, in the current
-PERMISSIVE deployment (guide §1A: no master_key, no virtual keys yet), IS the
-caller identity (each caller presents a distinct junk/empty key string that
-LiteLLM logs verbatim).
+Manifest-driven module (mirrors modules/gpu-status, modules/system-health).
+Answers "status of litellm / the queue / who is using the GPU" with the LIVE
+QUEUE BOARD: what request is running per model (caller key + elapsed + est
+remaining), who is waiting (position + est start + est completion), free
+permits, held connections.
 
-As-deployed reality this module is built for:
+As-deployed reality (J.1 master-key era, 2026-08-22 rework):
   - The gateway runs on the internal-only `llm-net`; reachable from the OWUI
-    container by name at http://llm-gateway:8080 (NOT host :4000 — llm-net is
-    internal, so host publish is inert).
-  - `GET /spend/logs` works unauthenticated in permissive mode and returns rows
-    keyed by the presented `api_key` string.
-  - `/spend/calculate` (405) and `/key/info` (500) only become useful once
-    virtual keys are issued (the optional TT5 "lazy keys" phase). This module
-    degrades gracefully: it tries them, falls back to /spend/logs aggregation.
-
-When virtual keys land later, the same /spend/logs rows carry the real key
-aliases and the friendly-name map below simply stops being needed.
+    container at http://llm-gateway:8080 (host :4000 is inert — internal net).
+  - The read-only /observe/* queue pass-through accepts any VIRTUAL key; this
+    module authenticates with OWUI's own low-privilege key
+    (OWUI_CHAT_LLM_API_KEY env, passed by frontend/docker-compose.yml).
+  - `GET /spend/logs` is ADMIN-ONLY under the master key, which deliberately
+    never enters this container (A.2 hardening). The per-caller history table
+    therefore degrades to a pointer at the host-side `stack.ps1 stats` view
+    unless an operator ever provides LITELLM_KEY_ADMIN here.
 """
 
 import json
@@ -45,9 +42,12 @@ logger = setup_logging()
 
 # Gateway base URL — in-network only (llm-net is internal). Overridable for tests.
 GATEWAY_URL = os.environ.get("LLM_GATEWAY_URL", "http://llm-gateway:8080").rstrip("/")
-# Optional admin/master key. Absent in permissive mode; if set (TT5 end state)
-# it is sent as a Bearer token so the same code keeps working once enforced.
+# Optional admin/master key — ONLY for the /spend ledger; deliberately absent
+# in this container (A.2: no admin secrets in the internet-facing frontend).
 ADMIN_KEY = os.environ.get("LITELLM_KEY_ADMIN") or os.environ.get("LITELLM_MASTER_KEY") or ""
+# OWUI's own low-privilege virtual key — enough for /health/liveliness and the
+# read-only /observe/* queue board (required since the J.1 master-key flip).
+VIRTUAL_KEY = os.environ.get("OWUI_CHAT_LLM_API_KEY") or ADMIN_KEY
 
 # Permissive-mode junk/empty key string → friendly caller name. These are the
 # literal keys each caller sends today (verified in the spend ledger). Update
@@ -88,10 +88,11 @@ def _parse_window(text: str) -> (str, datetime):
     return ("last 1h (default)", now - timedelta(hours=1))
 
 
-def _http_get_json(url: str, timeout: float = 8.0) -> Any:
+def _http_get_json(url: str, timeout: float = 8.0, key: str = "") -> Any:
     headers = {"User-Agent": "ai-stack-llm-traffic/1"}
-    if ADMIN_KEY:
-        headers["Authorization"] = f"Bearer {ADMIN_KEY}"
+    bearer = key or VIRTUAL_KEY
+    if bearer:
+        headers["Authorization"] = f"Bearer {bearer}"
     req = urllib.request.Request(url, headers=headers)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8"))
@@ -133,7 +134,7 @@ class LLMTrafficModule:
         end_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         try:
             narrowed = _http_get_json(
-                f"{GATEWAY_URL}/spend/logs?start_date={start_date}&end_date={end_date}"
+                f"{GATEWAY_URL}/spend/logs?start_date={start_date}&end_date={end_date}", key=ADMIN_KEY
             )
             if isinstance(narrowed, list) and narrowed:
                 rows = narrowed
@@ -141,7 +142,7 @@ class LLMTrafficModule:
             rows = []
         if not rows:
             # Authoritative: the unfiltered ledger (this build returns recent rows).
-            plain = _http_get_json(f"{GATEWAY_URL}/spend/logs")
+            plain = _http_get_json(f"{GATEWAY_URL}/spend/logs", key=ADMIN_KEY)
             rows = plain if isinstance(plain, list) else []
         out = []
         for r in rows:
@@ -186,17 +187,37 @@ class LLMTrafficModule:
                 f"| `{name}` | {running} | {waiting} | {m.get('permits_free', '?')} | "
                 f"{m.get('avg_T_s', '?')} | {m.get('P', '?')} | {ikey_s} |"
             )
-        # Surface the longest-waiting entries with their live wait estimate.
+        # RUNNING detail: caller key, elapsed, estimated remaining (avg_T bound).
+        runners = []
+        for name, m in models.items():
+            avg_t = float(m.get("avg_T_s") or 0)
+            for r in (m.get("running") or []):
+                elapsed = float(r.get("elapsed_s") or 0)
+                remaining = max(0, round(avg_t - elapsed))
+                runners.append(
+                    f"`{r.get('key', '?')}` on `{name}` — {round(elapsed)}s elapsed, ~{remaining}s remaining (avg {round(avg_t)}s)")
+        if runners:
+            lines += ["", "**Running now:**"] + [f"- {x}" for x in runners]
+
+        # WAITING queue: position, caller key, est start + est completion.
         waiters = []
         for name, m in models.items():
-            for w in (m.get("waiting") or []):
-                waiters.append((w.get("waited_s", 0), name, w))
-        waiters.sort(reverse=True)
+            avg_t = float(m.get("avg_T_s") or 0)
+            for i, w in enumerate(m.get("waiting") or [], 1):
+                est_wait = float(w.get("est_wait_s") or 0)
+                waiters.append((i, name, w, est_wait, avg_t))
         if waiters:
-            lines += ["", "_Longest-waiting now:_ " + ", ".join(
-                f"`{w['key']}` (waited {w['waited_s']}s, est {w['est_wait_s']}s, prio {w['prio']})"
-                for _ws, _n, w in waiters[:3]
-            )]
+            lines += ["", "**In queue (next first):**"]
+            for i, name, w, est_wait, avg_t in waiters[:8]:
+                done = round(est_wait + avg_t)
+                lines.append(
+                    f"- #{i} `{w.get('key', '?')}` on `{name}` — waited {round(float(w.get('waited_s') or 0))}s, "
+                    f"est start in ~{round(est_wait)}s, est completion ~{done}s (prio {w.get('prio', '?')})")
+            extra = len(waiters) - 8
+            if extra > 0:
+                lines.append(f"- … +{extra} more waiting")
+        if not runners and not waiters:
+            lines += ["", "_Queue idle — nothing running or waiting._"]
         held = board.get("held_total")
         cap = board.get("max_total_connections")
         if held is not None:
@@ -262,7 +283,13 @@ class LLMTrafficModule:
             ]
             return "\n".join(lines)
         if not agg:
-            lines.append("_No requests logged in this window._ (Widen it: append `today`, `last 24h`, `last week`, or `since boot`.)")
+            if live.get("log_error") and "401" in str(live.get("log_error")):
+                lines.append(
+                    "_Per-caller history needs the ADMIN ledger, which never enters this "
+                    "container (J.1 master-key posture). Use the host view instead: "
+                    "`.\\scripts\\stack\\stack.ps1 stats`._")
+            else:
+                lines.append("_No requests logged in this window._ (Widen it: append `today`, `last 24h`, `last week`, or `since boot`.)")
             return "\n".join(lines)
         lines += [
             "| Caller (presented key) | Reqs | Tok in | Tok out | Total tok | Fails | Avg ms | Models | Last seen (UTC) |",
@@ -278,10 +305,8 @@ class LLMTrafficModule:
             )
         lines += [
             "",
-            "_Permissive mode (guide §1A): the \"presented key\" IS the caller identity — "
-            "no virtual keys issued yet. Friendly names map the known junk/empty key "
-            "strings to services. `Fails` counts ledger rows with a failure status "
-            "(e.g. an upstream cold-start retry)._",
+            "_Per-caller virtual keys since J.1 (2026-08-21): the key alias IS the "
+            "caller. `Fails` counts ledger rows with a failure status._",
         ]
         return "\n".join(lines)
 

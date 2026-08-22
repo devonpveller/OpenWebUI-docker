@@ -54,7 +54,13 @@ snapshots + `manifest.csv` (file → OWUI id; skills included).
 
 - **Git:** never commit or push on the user's behalf unless explicitly asked.
   Hooks live in `.githooks/` (`git config core.hooksPath .githooks`): secret
-  guard, LF check, gateway-routing check.
+  guard, LF check, gateway-routing check, compose/ps1 structural check.
+- **Branch policy (operator, 2026-08-22):** `main` is UNTOUCHED — the
+  deliverable, representing the known-good ai-stack; `development` is the
+  LIVE-HOSTED deployment line; all work happens on feature/work branches cut
+  from `development` and merges back only with validation + testing evidence.
+  `main` is promoted from `development` deliberately by the operator, never
+  as a side effect.
 - **Container rule:** adding/removing/moving a container = the plane compose
   file + recovery (`emergency-recovery.ps1` + `stack.ps1`) + the stack-map
   reference doc **together** — and the rest of the lifecycle surfaces

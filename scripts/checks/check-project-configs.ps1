@@ -41,10 +41,12 @@ if ($ymlStaged.Count -gt 0) {
             @{ N = 'portal';    F = 'portal\docker-compose.yml';    A = @('--env-file', '.env.example', '--profile', 'internet') }
         )
         foreach ($p in $projects) {
-            & docker compose -f $p.F @($p.A) config -q 2>$null | Out-Null
+            # cmd /c so compose's stderr WARNINGS (e.g. an unset optional var)
+            # can't become PS 5.1 NativeCommandErrors under EAP=Stop.
+            $argStr = ($p.A -join ' ')
+            cmd /c "docker compose -f $($p.F) $argStr config -q 2>nul" | Out-Null
             if ($LASTEXITCODE -ne 0) {
-                # re-run without -q to surface the reason
-                $msg = (& docker compose -f $p.F @($p.A) config -q 2>&1 | Select-Object -First 2) -join ' '
+                $msg = (cmd /c "docker compose -f $($p.F) $argStr config -q 2>&1" | Select-Object -First 2) -join ' '
                 Write-Host "  [configs] COMPOSE INVALID: $($p.N) - $msg" -ForegroundColor Red
                 $failed++
             }
@@ -78,7 +80,8 @@ if ($ymlStaged.Count -gt 0) {
                 # Regex extraction, NOT ConvertFrom-Json: PS 5.1's parser rejects
                 # the rendered config's case-duplicate env keys (HTTP_PROXY vs
                 # http_proxy on open-terminal). container_name lines are enough.
-                $raw = (& docker compose -f $rt.F @($rt.A) config --format json 2>$null) -join "`n"
+                $argStr = ($rt.A -join ' ')
+                $raw = (cmd /c "docker compose -f $($rt.F) $argStr config --format json 2>nul") -join "`n"
                 if (-not $raw) { continue }
                 $names = [regex]::Matches($raw, '"container_name":\s*"([^"]+)"') |
                     ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique

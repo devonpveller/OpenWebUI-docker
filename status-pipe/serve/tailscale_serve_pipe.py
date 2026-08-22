@@ -909,7 +909,15 @@ def _http_get(
     (DNS / refused / timeout / etc.) so callers can surface it to users.
     """
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "ai-stack-admin-pipe/1"})
+        headers = {"User-Agent": "ai-stack-admin-pipe/1"}
+        # J.1 (2026-08-22): gateway endpoints (liveliness excepted) need a
+        # virtual key now. OWUI's own low-privilege key is injected by
+        # frontend/docker-compose.yml; scope it to gateway URLs only so the
+        # key never leaks to other services' probes.
+        _vk = os.environ.get("OWUI_CHAT_LLM_API_KEY", "")
+        if _vk and url.startswith(LLM_GATEWAY_URL):
+            headers["Authorization"] = f"Bearer {_vk}"
+        req = urllib.request.Request(url, headers=headers)
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             body = resp.read().decode("utf-8", errors="replace")
             try:
@@ -1108,6 +1116,13 @@ def _llm_last_activity() -> Dict[str, Any]:
         f"{LLM_GATEWAY_URL}/spend/logs/ui?{query}", timeout=HTTP_TIMEOUT_SLOW
     )
     if code != 200 or not isinstance(body, dict):
+        if code in (401, 403):
+            # Expected since J.1: the spend ledger is ADMIN-only and the master
+            # key never enters this container. Not an error — just unknown.
+            return {
+                "known": False,
+                "note": "last-activity unknown (spend ledger is admin-only since J.1; see stack.ps1 stats on the host)",
+            }
         return {
             "known": False,
             "note": f"spend ledger query failed (HTTP {code}) — idle duration unknown",
@@ -1195,6 +1210,27 @@ def _llm_gateway_panel() -> Dict[str, Any]:
             "waiting_depth": len(waiting),
             "top_waiting": top_waiting,
             "longest_wait_s": max((w.get("waited_s") or 0 for w in waiting), default=0),
+            # Operator ask (2026-08-22): WHO is in the queue and WHEN it
+            # finishes. est_done = est start + one avg completion.
+            "queue_detail": [
+                {
+                    "position": i,
+                    "caller": _llm_caller(w.get("key", "")),
+                    "waited_s": round(float(w.get("waited_s") or 0)),
+                    "est_start_s": round(float(w.get("est_wait_s") or 0)),
+                    "est_done_s": round(float(w.get("est_wait_s") or 0) + float(m.get("avg_T_s") or 0)),
+                    "prio": w.get("prio"),
+                }
+                for i, w in enumerate(waiting, 1)
+            ],
+            "running_detail": [
+                {
+                    "caller": _llm_caller(r.get("key", "")),
+                    "elapsed_s": round(float(r.get("elapsed_s") or 0)),
+                    "est_remaining_s": max(0, round(float(m.get("avg_T_s") or 0) - float(r.get("elapsed_s") or 0))),
+                }
+                for r in running
+            ],
             "permits_free": m.get("permits_free"),
             "slots": m.get("P"),
             "avg_T_s": m.get("avg_T_s"),
@@ -1432,6 +1468,25 @@ def _format_stack_status_message(
                 "completions); P = real parallel lanes. Avg T = rolling mean "
                 "of recent completions, worst trimmed._"
             )
+            # Per-request detail — running (est remaining) + queue (est
+            # start/completion). The operator's "what is in queue and when
+            # does it finish" view (2026-08-22).
+            detail_lines = []
+            for m in litellm["models"]:
+                for r in m.get("running_detail") or []:
+                    detail_lines.append(
+                        f"- ▶ `{r['caller']}` on `{m['model']}` — {r['elapsed_s']}s in, "
+                        f"~{r['est_remaining_s']}s remaining"
+                    )
+                for q in (m.get("queue_detail") or [])[:8]:
+                    detail_lines.append(
+                        f"- #{q['position']} `{q['caller']}` on `{m['model']}` — waited {q['waited_s']}s, "
+                        f"est start ~{q['est_start_s']}s, est completion ~{q['est_done_s']}s"
+                    )
+            if detail_lines:
+                lines.append("")
+                lines.append("**Now running / in queue:**")
+                lines.extend(detail_lines)
             held = litellm.get("held_total")
             if held is not None:
                 lines.append(

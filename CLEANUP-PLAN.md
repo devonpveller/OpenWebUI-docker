@@ -1131,6 +1131,30 @@ Per-plane playbook (portal-split procedure, now run 3×):
     the user (MM/OWUI) for long-waiting jobs; backup interval
     human-units + pre-change snapshot command (`stack.ps1 snapshot`).
 
+- **K.11 status-surface round — EXECUTED 2026-08-22 PM:**
+  - Watchdog noise FIXED (operator's health-check WARN): Test-ServiceHealth
+    is docker-inspect-by-name only (root project owns no services — every
+    `docker compose ps <svc>` there stderr'd "no such service"); two stray
+    root-compose tailscale lifecycle calls → frontend project; `docker logs`
+    reads via `cmd /c 2>&1` so PS 5.1 can't wrap container stderr into a
+    NativeCommandError; embed probes by container. One-shot run: fully clean.
+  - SERVER STATUS pipeline reworked for post-K + J.1 ("Status of litellm"):
+    the serve pipe's gateway calls now carry OWUI's LOW-PRIVILEGE virtual
+    key (new OWUI_CHAT_LLM_API_KEY env on the frontend; master key still
+    never enters the container) — the /observe/* board 401'd since the
+    flip. Board render upgraded to the operator's ask: per-request "now
+    running (elapsed, est remaining)" + "in queue (position, caller, est
+    start, est completion)". llm-traffic module got the same auth split +
+    queue detail; spend-ledger sections degrade to a stack.ps1-stats
+    pointer (admin-only by design). Router routes litellm/queue phrasings.
+    VERIFIED: live E2E through router→custom-tools→serve pipe (authed board
+    renders) + a synthetic busy-board render unit proving the running/queue
+    lines. Modules/router/serve load from the mount — live w/o re-paste.
+  - Branch policy codified in CLAUDE.md (operator): main = untouched
+    deliverable; development = live deployment; work branches + evidence.
+  - Part M written (issues → plans → MM-governed execution with staleness
+    audit, maintenance-window interlocks, per-action approvals).
+
 ## Part L — NEW (2026-08-21): self-contained plane directories (operator-approved direction)
 
 Operator: "I do want the directories to be self contained" + per-plane env
@@ -1166,3 +1190,61 @@ read `.env`, `.env.example` split, secret-guard globs, stack.ps1/recovery
 once.
 
 Gate for both: `stack.ps1 health` 12/12 + a plane rebuild proof, per phase.
+
+## Part M — NEW (2026-08-22): GitHub-issues → plans → Mattermost-governed execution
+
+Operator idea, planned here before any build. The loop: repository issues
+become AUDITED PLANS, plans become EXECUTED WORK through a Mattermost Claude
+session, with the operator approving anything that touches live services.
+
+### M.1 — Plan pipeline (intake)
+
+- A scheduled intake (or on-demand MM command) lists open issues (`gh issue
+  list` on the ai-stack repo) and, for each unplanned issue, spawns a
+  headless planning session (the claude-sessions bridge already runs
+  `claude -p` as @bot-claude) that reads the issue + the codebase and writes
+  `documentation/issue-plans/issue-<N>.md` with frontmatter:
+  `issue`, `title`, `created`, `base_sha` (HEAD at planning time),
+  `status: planned|stale|approved|executing|done`, `touches_live: true|false`.
+- Plans follow house rules by construction: validation + testing WITH
+  EVIDENCE before deploy; work on a branch cut from `development`
+  (`issue/<N>-<slug>`); `main` never touched (operator-promoted only).
+
+### M.2 — Mattermost surface (the operator's console)
+
+- "current issues" in MM ⇒ the bot renders: each open issue, whether a plan
+  exists, plan age + `base_sha` drift (see M.3), and the action menu:
+  `execute <N>` / `execute all` / `re-plan <N>` / `show plan <N>`.
+- All updates, progress, approvals, and completion evidence flow through the
+  SAME MM thread (the claude-sessions bridge's resume model).
+
+### M.3 — Staleness safeguard (mandatory)
+
+- A plan is STALE when `base_sha` is no longer `development`'s ancestor-tip
+  neighborhood (configurable commit-count/paths-touched threshold) or the
+  issue body changed after planning. `execute` on a stale plan is REFUSED:
+  the bot first runs an audit pass (re-read plan vs current code) and
+  rewrites the plan; only the refreshed plan is executable.
+
+### M.4 — Live-service safety interlocks
+
+- Before any container stop/build/redeploy the session must (a) check the
+  maintenance state — weekly compaction window (Sun 03:15), disk-guard
+  kill-switch engaged, an in-flight `weekly-maintenance`/`compact-vhdx`
+  run — and HOLD if active; (b) request explicit operator approval IN THE
+  MM THREAD for that specific action ("rebuild openbrain-research? y/n"),
+  per action, not blanket.
+- Execution follows SERVICE-LIFECYCLE.md for anything service-shaped, and
+  the evidence bar from `prove-fixes-with-a-failing-repro`: failing state
+  shown, fix, passing state shown, deployed artifact verified.
+
+### M.5 — Git mechanics
+
+- Branch per issue from `development`; commits reference the issue; PR back
+  into `development` with the evidence in the description; issue closed by
+  the merge. `main` promotion stays a manual operator act.
+
+Build order when green-lit: M.2 read-only view first (issues + plan
+freshness — zero risk), then M.1 planner, then M.3 staleness, then M.4/M.5
+execution. Each stage its own session with tests.
+

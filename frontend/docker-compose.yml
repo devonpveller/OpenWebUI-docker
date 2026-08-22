@@ -50,6 +50,11 @@ services:
       # (/app/backend/.webui_secret_key, outside the data volume), so a recreate would
       # rotate it and break every encrypted-at-rest value in webui.db + all sessions.
       - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY:?set via --env-file ../.env or scripts/stack/stack.ps1 - a recreate WITHOUT this key rotates it and breaks webui.db encrypted values + all sessions}
+      # OWUI's own LOW-PRIVILEGE virtual key (the same one its chat connection
+      # holds in webui.db) — the status-pipe llm-traffic module uses it for the
+      # gateway's read-only /observe/* queue board, which 401s unauthenticated
+      # since J.1. NEVER the master key (A.2: no admin secrets in the frontend).
+      - OWUI_CHAT_LLM_API_KEY=${OWUI_CHAT_LLM_API_KEY}
       - USE_CUDA=true
       - USE_CUDA_DOCKER=true
       - NVIDIA_VISIBLE_DEVICES=${GPU_AISTACK_DEVICE_ID:-1}

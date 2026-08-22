@@ -519,6 +519,10 @@ class AIStackRouter:
             "gateway traffic", "gateway usage", "llama traffic", "gpu demand",
             "gpu traffic", "who is using gpu", "who's using gpu", "whos using gpu",
             "who is using the gpu", "who is driving", "what is using the gpu",
+            # J.1/K.10 (2026-08-22): the LiteLLM + queue live board — "status of
+            # litellm", "what's in the queue", etc. all land here.
+            "litellm", "llm queue", "queue status", "in queue", "inference queue",
+            "what is queued", "whats queued", "what's queued",
         )):
             return "llm-traffic"
 

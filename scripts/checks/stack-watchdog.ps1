@@ -82,15 +82,18 @@ function Test-ServiceHealth {
     param($ServiceName)
     
     try {
-        $Status = docker compose ps $ServiceName --format json | ConvertFrom-Json
+        # Name-based lookup ONLY (K.10, 2026-08-22): since Part K the root
+        # project owns no services, so `docker compose ps <svc>` here always
+        # wrote "no such service" noise into the health log. Container names
+        # are stable across every project - inspect by name.
+        $InspectJson = docker inspect $ServiceName --format '{{json .State}}' 2>$null
+        if (-not $InspectJson) { return $false }
+        $State = $InspectJson | ConvertFrom-Json
+        $Status = [pscustomobject]@{
+            State  = $State.Status
+            Health = if ($State.Health) { $State.Health.Status } else { $null }
+        }
         if (-not $Status) {
-            # Not a root-project service (e.g. the inference plane is its own
-            # compose project since 2026-08-21 K.1) - look up by container NAME.
-            $ByName = docker ps --filter "name=^$ServiceName$" --format "{{.Names}} {{.Status}}"
-            if ($ByName -match '^' + [regex]::Escape($ServiceName) + ' Up') {
-                if ($ByName -match 'unhealthy') { return $false }
-                return $true
-            }
             return $false
         }
         
@@ -297,7 +300,10 @@ function Test-EntrypointHealth {
         # check — that exact misclassification (a docker stderr warning bubbling
         # up under -Stop) is what crashed every run before 2026-06-05.
         try {
-            $Logs = docker logs tailscale --tail 5 2>$null
+            # cmd /c merges the streams BEFORE PowerShell sees them - the tailscale
+            # container logs to stderr, which PS 5.1 would otherwise wrap into a
+            # NativeCommandError (the WARN the operator saw 2026-08-22).
+            $Logs = cmd /c "docker logs tailscale --tail 5 2>&1" | Out-String
             if ($Logs -match "no such file or directory" -and $Logs -match "entrypoint") {
                 Write-LogEntry "CRITICAL: Entrypoint script not found in container. Rebuild required." "ERROR"
                 Write-LogEntry "Run: docker compose build --no-cache tailscale" "INFO"
@@ -399,7 +405,7 @@ function Repair-TailscaleService {
             return $false
         }
         
-        docker compose start tailscale | Out-Null
+        docker compose -f frontend\docker-compose.yml --env-file .env start tailscale | Out-Null
         Start-Sleep 45  # Increased wait time for GPU container dependencies
         
         # Verify gentle restart worked
@@ -418,7 +424,8 @@ function Repair-TailscaleService {
         }
         
         # Use the proper network namespace recovery method
-        docker compose down tailscale | Out-Null
+        docker compose -f frontend\docker-compose.yml --env-file .env stop tailscale | Out-Null
+        docker compose -f frontend\docker-compose.yml --env-file .env rm -f tailscale | Out-Null
         Start-Sleep 5  # Give OpenWebUI time to stabilize
         docker compose -f frontend\docker-compose.yml --env-file .env up -d tailscale | Out-Null
         Start-Sleep 60  # Increased wait for GPU container + network namespace reattachment
@@ -448,7 +455,7 @@ function Test-OpenTerminalHealth {
         # open-terminal is the little-coder workspace plane — it left openwebui's
         # network namespace (it is on lc-net / llm-net now), so probe it INSIDE
         # its own container, not via openwebui's localhost:8000.
-        $Response = docker compose exec -T open-terminal curl -s -o /dev/null -w "%{http_code}" http://localhost:8000/health 2>$null
+        $Response = docker exec open-terminal curl -s -o /dev/null -w "%{http_code}" http://localhost:8000/health 2>$null
         if ($LASTEXITCODE -eq 0 -and $Response -eq "200") {
             Write-LogEntry "Open Terminal health check passed" "DEBUG"
             return $true
@@ -528,7 +535,7 @@ function Test-LlamaCppConnectivity {
     }
     try {
         Write-LogEntry "Testing llama-cpp-upstream connectivity..." "DEBUG"
-        $LlamaCppResponse = docker compose exec -T llama-cpp-upstream curl -s -f --max-time 10 http://localhost:8080/health 2>$null
+        $LlamaCppResponse = docker exec llama-cpp-upstream curl -s -f --max-time 10 http://localhost:8080/health 2>$null
         if ($LASTEXITCODE -eq 0 -and $LlamaCppResponse) {
             Write-LogEntry "llama-cpp connectivity verified" "DEBUG"
             return $true
@@ -558,7 +565,9 @@ function Test-LlamaCppEmbedConnectivity {
     # healthcheck false-positives under load — see comment above.
     $Status = $null
     try {
-        $Status = docker compose ps llama-cpp-embed-upstream --format json 2>$null | ConvertFrom-Json
+        $InspectJson = docker inspect llama-cpp-embed-upstream --format '{{json .State}}' 2>$null
+        $StateObj = if ($InspectJson) { $InspectJson | ConvertFrom-Json } else { $null }
+        $Status = if ($StateObj) { [pscustomobject]@{ State = $StateObj.Status; Health = if ($StateObj.Health) { $StateObj.Health.Status } else { $null } } } else { $null }
     } catch { }
     if (-not $Status -or $Status.State -ne "running") {
         Write-LogEntry "llama-cpp-embed container is not running" "DEBUG"
@@ -569,7 +578,7 @@ function Test-LlamaCppEmbedConnectivity {
     # monitor for 30 s on every cycle when the server is busy.
     try {
         Write-LogEntry "Testing llama-cpp-embed connectivity..." "DEBUG"
-        $EmbedResponse = docker compose exec -T llama-cpp-embed-upstream curl -s -f --max-time 5 http://localhost:8080/health 2>$null
+        $EmbedResponse = docker exec llama-cpp-embed-upstream curl -s -f --max-time 5 http://localhost:8080/health 2>$null
         if ($LASTEXITCODE -eq 0 -and $EmbedResponse) {
             Write-LogEntry "llama-cpp-embed /health OK" "DEBUG"
             return $true
@@ -582,7 +591,7 @@ function Test-LlamaCppEmbedConnectivity {
     # request-completion lines ("done request: POST /v1/embeddings ... 200")
     # and slot lifecycle markers.
     try {
-        $RecentLog = docker compose logs --tail=40 --since=2m llama-cpp-embed-upstream 2>$null | Out-String
+        $RecentLog = cmd /c "docker logs --tail 40 --since 2m llama-cpp-embed-upstream 2>&1" | Out-String
         if ($RecentLog -match 'POST /v1/embeddings.*\s200\b' -or
             $RecentLog -match 'launch_slot_|done request:|slot\s+release:') {
             Write-LogEntry "llama-cpp-embed /health unresponsive but actively serving embedding requests (busy, not dead)" "INFO"
