@@ -143,7 +143,7 @@ health probes, and the sysadmin plane truthful.
 | `docker-compose.yml` | The platform ANCHOR — shared networks only (Part K, 2026-08-21) |
 | `frontend/` `inference/` `memory/` `search/` `coder/` | The plane compose projects (one service tree each) |
 | `owui/` | Canonical deploy-by-paste OWUI artifacts: tools/pipes/filters/actions/skills + `manifest.csv` |
-| `scripts/` | Ops plane: recovery, checks, portal lifecycle, backups, bridges (`claude-sessions-bridge/`, `sysadmin-mcp/`, `mattermost-mcp/`), `archive/` |
+| `scripts/` | Ops plane: recovery, checks, portal lifecycle, backups, maintenance rotation, bridges (`claude-sessions-bridge/`, `sysadmin-mcp/`, `mattermost-mcp/`), `issue-ops/` (Part M issue pipeline), `archive/` |
 | `llm-queue/`, `search-gateway/`, `mnemory-cloud-gateway/`, `openbrain-gateway/`, `smolcrawl/`, `little-coder/` | Service source trees |
 | `agent-org/` | Governed multi-agent org (bus, charters, floor, 700+ tests) |
 | `OB1/` | Open Brain — pinned git submodule since 2026-08-21 (bump via PR; incl. the Open Notebook trio since K.5b) |
