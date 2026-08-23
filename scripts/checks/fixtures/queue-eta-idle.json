@@ -1,0 +1,9 @@
+{
+  "model": "llama3.1-8b-instruct",
+  "running": [],
+  "waiting": [],
+  "avg_T_s": 200.0,
+  "P": 2,
+  "permits_free": 2,
+  "inflight_by_key": {}
+}

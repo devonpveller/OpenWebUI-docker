@@ -1,0 +1,49 @@
+{
+  "model": "llama3.1-8b-instruct",
+  "running": [
+    {
+      "id": "r1",
+      "key": "owui-chat",
+      "model": "llama3.1-8b-instruct",
+      "started": 1755950000.0,
+      "elapsed_s": 42.5
+    },
+    {
+      "id": "r2",
+      "key": "little-coder",
+      "model": "llama3.1-8b-instruct",
+      "started": 1755950010.0,
+      "elapsed_s": 32.5
+    }
+  ],
+  "waiting": [
+    {
+      "id": "w1",
+      "key": "owui-chat",
+      "prio": 0,
+      "waited_s": 95.2,
+      "est_wait_s": 40.5
+    },
+    {
+      "id": "w2",
+      "key": "little-coder",
+      "prio": 1,
+      "waited_s": 130.0,
+      "est_wait_s": 25.0
+    },
+    {
+      "id": "w3",
+      "key": "owui-chat",
+      "prio": 2,
+      "waited_s": 10.0,
+      "est_wait_s": 5.0
+    }
+  ],
+  "avg_T_s": 200.0,
+  "P": 2,
+  "permits_free": 0,
+  "inflight_by_key": {
+    "owui-chat": 1,
+    "little-coder": 1
+  }
+}
