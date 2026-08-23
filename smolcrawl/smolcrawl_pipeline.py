@@ -57,7 +57,7 @@ def _normalize_kb_name(raw_name: str) -> str:
     name = re.sub(r"<[^>]*>", " ", raw_name)
     name = re.sub(r"[`*_#]", " ", name)
     name = re.sub(r"\s+", " ", name).strip().strip("\"'")
-    name = name.strip(".,;:!?)]}")
+    name = name.strip(".,;:!?)]}<>")
     return name
 
 
@@ -811,9 +811,18 @@ class Pipeline:
         if url_pos >= 0:
             search_space = message[url_pos + len(url):]
 
+        # Suffix-terminated variant first: it used to be dead code behind the
+        # $-anchored pattern, which always won. The word boundary is
+        # PER-ALTERNATIVE: into|to|as are bounded on BOTH sides and require
+        # following whitespace, so they match only as whole words -- neither
+        # mid-word hits (manda[to]ry, automa[tic]ally, databa[s]e) nor
+        # word-initial hits (t[o]day, a[s]ap, a[s]sistant) can capture. kb:
+        # and knowledge[- ]?base keep optional whitespace (kb:Gaggia Docs).
+        # The capture class excludes < > so tag tails like </instructions>
+        # fail the match instead of being captured, and caps names at 80 chars.
         for pattern in [
-            r'(?:into|to|as|kb:|knowledge[- ]?base[: ])\s*["\']?(.+?)["\']?\s*$',
-            r'(?:into|to|as|kb:|knowledge[- ]?base[: ])\s*["\']?(.+?)["\']?(?:\s+(?:with|using|from))',
+            r'(?:\b(?:into|to|as)\b\s+|kb:\s*|knowledge[- ]?base[: ]\s*)["\']?([^<>\n\r]{1,80}?)["\']?(?:\s+(?:with|using|from))',
+            r'(?:\b(?:into|to|as)\b\s+|kb:\s*|knowledge[- ]?base[: ]\s*)["\']?([^<>\n\r]{1,80}?)["\']?\s*$',
         ]:
             m = re.search(pattern, search_space, re.IGNORECASE)
             if m:
