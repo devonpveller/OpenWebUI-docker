@@ -316,8 +316,11 @@ def wait_for_mattermost() -> None:
 
 
 def find_claude_bin() -> str:
-    if os.environ.get("BRIDGE_CLAUDE_BIN"):
-        return os.environ["BRIDGE_CLAUDE_BIN"]
+    env_bin = os.environ.get("BRIDGE_CLAUDE_BIN")
+    if env_bin:
+        if os.path.isfile(env_bin):
+            return env_bin
+        log(f"BRIDGE_CLAUDE_BIN points at a missing file ({env_bin}) — falling back to PATH/extension glob")
     on_path = shutil.which("claude")
     if on_path:
         return on_path
@@ -327,6 +330,60 @@ def find_claude_bin() -> str:
     if exts:
         return exts[-1]  # newest version sorts last
     raise RuntimeError("claude CLI not found — set BRIDGE_CLAUDE_BIN")
+
+
+HEALTH_FILE = os.path.join(STATE_DIR, "health.json")
+
+
+def write_health(claude_bin: str, last_ok: float, last_err: str, fails: int) -> None:
+    """Functional-health beacon for stack-watchdog.ps1. Process liveness (the
+    lock port) says nothing about turns actually working — 2026-08-23 both
+    bridge personas held their locks for weeks while every turn died on a
+    cached claude.exe path that VS Code's extension pruning had deleted."""
+    try:
+        tmp = HEALTH_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump({"ts": int(time.time()), "pid": os.getpid(),
+                       "claude_bin": claude_bin,
+                       "bin_exists": os.path.isfile(claude_bin),
+                       "last_turn_ok_ts": int(last_ok),
+                       "last_err": (last_err or "")[:400],
+                       "consecutive_failures": fails}, fh, indent=1)
+        os.replace(tmp, HEALTH_FILE)
+    except OSError:
+        pass
+
+
+def _read_env_value(name: str) -> str:
+    for p in (os.path.join(REPO, ".env"),
+              os.path.join(REPO, "agent-org", "docker", ".env")):
+        try:
+            with open(p, "r", encoding="utf-8", errors="ignore") as fh:
+                for line in fh:
+                    if line.startswith(name + "="):
+                        return line.split("=", 1)[1].strip()
+        except OSError:
+            continue
+    return ""
+
+
+def telegram_alert(text: str) -> bool:
+    """Out-of-band escalation via the sysadmin Telegram channel (lock 48293's
+    bot). Used when the MM-facing turn machinery itself is broken — an MM post
+    would land in the same channel the operator already can't get answers in."""
+    tok = _read_env_value("SYSADMIN_TELEGRAM_BOT_TOKEN")
+    chat = _read_env_value("SYSADMIN_TELEGRAM_CHAT_ID")
+    if not (tok and chat):
+        return False
+    try:
+        import urllib.request as _ur
+        req = _ur.Request(f"https://api.telegram.org/bot{tok}/sendMessage",
+                          data=json.dumps({"chat_id": chat, "text": text}).encode(),
+                          headers={"Content-Type": "application/json"})
+        _ur.urlopen(req, timeout=15).read()
+        return True
+    except Exception:  # noqa: BLE001 - escalation must never take the bridge down with it
+        return False
 
 
 def load_state() -> dict:
@@ -746,6 +803,11 @@ class _ThreadQueue:
 class Bridge:
     def __init__(self) -> None:
         self.claude_bin = find_claude_bin()
+        self.turn_fail_count = 0
+        self.last_turn_ok_ts = 0.0
+        self.last_turn_err = ""
+        self._last_tg_alert = 0.0
+        self._last_health_write = 0.0
         self.state = load_state()
         self.state_lock = threading.Lock()
         self.queues: dict[str, _ThreadQueue] = {}
@@ -782,6 +844,37 @@ class Bridge:
             if question_parked(thread_root):
                 release_once("parked on a question")
                 return
+
+    def ensure_claude_bin(self) -> None:
+        """Self-heal the cached claude path. VS Code prunes old extension dirs
+        on auto-update, so a path resolved at startup can vanish mid-life
+        (2026-08-23: both personas dead for weeks exactly this way). One cheap
+        stat per call; raises only when NOTHING resolves any more."""
+        if os.path.isfile(self.claude_bin):
+            return
+        old = self.claude_bin
+        self.claude_bin = find_claude_bin()
+        log(f"claude binary healed: {old} -> {self.claude_bin} (old path pruned)")
+        audit({"event": "claude_bin_healed", "old": old, "new": self.claude_bin})
+
+    def note_turn(self, ok: bool, err: str = "", infra: bool = False) -> None:
+        """Track turn outcomes for the health beacon; escalate persistent or
+        infrastructure failures OUT-OF-BAND (Telegram), because when turns are
+        broken the MM channel itself is the thing the operator can't use."""
+        if ok:
+            self.turn_fail_count = 0
+            self.last_turn_ok_ts = time.time()
+            self.last_turn_err = ""
+        else:
+            self.turn_fail_count += 1
+            self.last_turn_err = err
+            if (infra or self.turn_fail_count >= 2) and time.time() - self._last_tg_alert > 1800:
+                self._last_tg_alert = time.time()
+                persona = "sysadmin" if os.environ.get("BRIDGE_LOCK_PORT") == "48292" else "claude-sessions"
+                telegram_alert(f"[ai-stack] {persona} bridge: {self.turn_fail_count} consecutive "
+                               f"failed turn(s){' (infra: spawn failure)' if infra else ''}; "
+                               f"last error: {err[:200]}")
+        write_health(self.claude_bin, self.last_turn_ok_ts, self.last_turn_err, self.turn_fail_count)
 
     def worker(self, thread_root: str) -> None:
         q = self.queues[thread_root]
@@ -827,8 +920,12 @@ class Bridge:
                 self.running.add(thread_root)
             try:
                 self.execute(thread_root, prompt, item.post_id, kind=item.kind)
+                self.note_turn(ok=True)
             except Exception as e:  # noqa: BLE001 - a broken turn must not kill the worker
                 log(f"worker {thread_root[:8]} error: {e}")
+                self.note_turn(ok=False, err=str(e),
+                               infra=isinstance(e, (FileNotFoundError, RuntimeError))
+                               or "WinError 2" in str(e))
                 try:
                     post(f"❌ Bridge error running this turn: `{e}`", thread_root)
                 except Exception:  # noqa: BLE001
@@ -1101,6 +1198,7 @@ class Bridge:
                 self.proc_kind[thread_root] = kind
                 self.proc_post[thread_root] = trigger_post
 
+        self.ensure_claude_bin()  # heal a pruned path BEFORE spawning, never after a failed turn
         resp = run_turn(self.claude_bin, thread_root, prompt, session_id, fork=fork,
                         model=thread_model or MODEL, on_event=on_event, title=title,
                         permission_mode=mode_label, on_proc=register_proc)
@@ -1755,6 +1853,7 @@ class Bridge:
             f"{' [ALLOW_SELF — TEST MODE]' if ALLOW_SELF else ''}")
         audit({"event": "bridge_started", "channel": CHANNEL_ID, "repo": REPO,
                "allow_self": ALLOW_SELF})
+        write_health(self.claude_bin, self.last_turn_ok_ts, self.last_turn_err, self.turn_fail_count)
         errors = 0
         while True:
             try:
@@ -1766,6 +1865,15 @@ class Bridge:
             except Exception as e:  # noqa: BLE001 - transient MM/network outage must not kill the bridge
                 errors += 1
                 log(f"poll error #{errors}: {e}")
+            # idle heartbeat: heal a pruned claude path while nobody is talking and
+            # keep the health beacon fresh for the watchdog's functional check.
+            if time.time() - self._last_health_write > 60:
+                self._last_health_write = time.time()
+                try:
+                    self.ensure_claude_bin()
+                except Exception as e:  # noqa: BLE001
+                    log(f"claude binary UNRESOLVABLE: {e}")
+                write_health(self.claude_bin, self.last_turn_ok_ts, self.last_turn_err, self.turn_fail_count)
             time.sleep(min(60, POLL_INTERVAL + min(errors, 6) * 5))
 
 

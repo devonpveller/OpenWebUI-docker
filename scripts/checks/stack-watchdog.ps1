@@ -1271,6 +1271,54 @@ function Confirm-HostTaskByPort {
     return $false
 }
 
+# --- Bridge FUNCTIONAL health (beyond lock-port liveness) ---------------------
+# 2026-08-23 incident: BOTH bridge personas held their lock ports for weeks while
+# every turn died with WinError 2 -- the claude.exe path cached at startup had
+# been deleted by VS Code extension pruning. Liveness said healthy; turns were
+# dead; nothing alerted. bridge.py now writes state/health.json (60s heartbeat:
+# ts, claude_bin, bin_exists, consecutive_failures) and self-heals a pruned
+# path. This check reads the beacon and acts on what liveness cannot see.
+function Confirm-BridgeFunctionalHealth {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$TaskName,
+        [Parameter(Mandatory)][int]$Port,
+        [Parameter(Mandatory)][string]$Label,
+        [Parameter(Mandatory)][string]$HealthPath
+    )
+    if (-not (Test-HostLockPort -Port $Port)) { return }  # liveness repair owns that case
+    if (-not (Test-Path $HealthPath)) {
+        Write-LogEntry "$Label : no health beacon at $HealthPath (pre-beacon build, or still waiting for Mattermost)" "DEBUG"
+        return
+    }
+    try { $h = Get-Content $HealthPath -Raw | ConvertFrom-Json } catch {
+        Write-LogEntry "$Label : health beacon unreadable: $($_.Exception.Message)" "WARN"; return
+    }
+    $ageMin = [int](((Get-Date) - (Get-Date "1970-01-01Z").AddSeconds($h.ts).ToLocalTime()).TotalMinutes)
+    if ($ageMin -gt 15) {
+        Write-LogEntry "$Label : health beacon STALE (${ageMin}m) while lock port is held -- poll loop wedged; restarting task '$TaskName'" "WARN"
+        try {
+            Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue; Start-Sleep 2
+            Start-ScheduledTask -TaskName $TaskName
+        } catch { Write-LogEntry "$Label wedge-restart error: $($_.Exception.Message)" "ERROR" }
+        Send-TelegramAlert "ALERT $Label heartbeat was stale ${ageMin}m (process alive, loop wedged) -- task restarted." -ThrottleKey ("wedge-" + $Port) -ThrottleHours 1
+        return
+    }
+    if (-not $h.bin_exists) {
+        # The bridge self-heals a pruned path; bin_exists=false in a FRESH beacon
+        # means re-resolution itself failed -- a restart cannot fix that.
+        Write-LogEntry "$Label : claude binary UNRESOLVABLE ($($h.claude_bin) missing and no replacement found) -- needs reinstall or BRIDGE_CLAUDE_BIN" "ERROR"
+        Send-TelegramAlert "ALERT $Label cannot resolve any claude.exe (last: $($h.claude_bin)). Reinstall the VS Code extension or set BRIDGE_CLAUDE_BIN." -ThrottleKey ("nobin-" + $Port) -ThrottleHours 1
+        return
+    }
+    if ([int]$h.consecutive_failures -ge 2) {
+        Write-LogEntry "$Label : $($h.consecutive_failures) consecutive failed turns; last error: $($h.last_err)" "ERROR"
+        Send-TelegramAlert "ALERT $Label : $($h.consecutive_failures) consecutive failed turns. Last error: $($h.last_err)" -ThrottleKey ("turns-" + $Port) -ThrottleHours 1
+        return
+    }
+    Write-LogEntry "$Label functionally healthy (beacon ${ageMin}m old, bin ok, fails=$($h.consecutive_failures))" "DEBUG"
+}
+
 function Invoke-HealthCheck {
     Write-LogEntry "Starting comprehensive health check..."
 
@@ -1476,18 +1524,21 @@ function Invoke-HealthCheck {
     #     ao-git-egress stale-mount guards, + its nightly pg_dump backup sidecars ---
     Invoke-AgentOrgHealth
 
+    # --- SYSADMIN FIRST (operator directive 2026-08-23: "the sysadmin above all
+    # else doesn't go down"). Liveness + FUNCTIONAL beacon for the sysadmin
+    # persona bridge (48292), then the break-glass Telegram listener (48293),
+    # then the claude-sessions bridge -- in that priority order.
+    Confirm-HostTaskByPort -TaskName 'sysadmin-bridge' -Port 48292 -Label 'sysadmin bridge' | Out-Null
+    Confirm-BridgeFunctionalHealth -TaskName 'sysadmin-bridge' -Port 48292 -Label 'sysadmin bridge' `
+        -HealthPath (Join-Path $PROJECT_DIR 'scripts\sysadmin-mcp\bridge-state\health.json')
+    Confirm-HostTaskByPort -TaskName 'sysadmin-telegram-listener' -Port 48293 -Label 'telegram listener' | Out-Null
+
     # --- claude-sessions bridge (Mattermost <-> Claude, HOST Scheduled Task) ---
     # After Invoke-AgentOrgHealth so the Mattermost container it connects to has
     # just been confirmed/repaired. Non-fatal for the overall check.
     Confirm-ClaudeSessionsBridge | Out-Null
-
-    # --- sysadmin persona bridge (#sysadmin, 48292) + out-of-band Telegram command
-    # listener (48293), both HOST Scheduled Tasks. Process-liveness + task-restart:
-    # the claude-bridge check above already repairs the shared Mattermost host
-    # port-forward, and the listener needs no container at all. This closes the gap
-    # where nothing watched the sysadmin bridge or the break-glass control channel.
-    Confirm-HostTaskByPort -TaskName 'sysadmin-bridge'            -Port 48292 -Label 'sysadmin bridge'   | Out-Null
-    Confirm-HostTaskByPort -TaskName 'sysadmin-telegram-listener' -Port 48293 -Label 'telegram listener' | Out-Null
+    Confirm-BridgeFunctionalHealth -TaskName 'claude-sessions-bridge' -Port 48291 -Label 'claude-sessions bridge' `
+        -HealthPath (Join-Path $PROJECT_DIR 'scripts\claude-sessions-bridge\state\health.json')
 
     # --- backup OUTPUT recency (all 14 backups/<dir> trees, incl. portal + OB) ---
     # Non-fatal for the overall check, but logs ERROR + Mattermost-alerts:
