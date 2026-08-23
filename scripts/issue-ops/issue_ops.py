@@ -576,26 +576,39 @@ def cmd_execute(n: int) -> int:
     if not gate_file.is_file() or "## Plan verdict: GO" not in gate_file.read_text(encoding="utf-8"):
         print(f"REFUSED: no GO verdict at {gate_file} — run: gate-plan {n} first (M.7 gate #1)")
         return 1
-    # charter = the plan body inline: worker clones track origin/<target_branch>,
-    # which generally does NOT contain documentation/issue-plans yet.
-    title = meta.get("title", f"issue {n}")
-    goal = (
-        f"for project {ORG_PROJECT}, work GitHub issue #{n}: {title}. "
-        f"Branch from {meta.get('target_branch', 'development')} (base {meta.get('base_sha', '')[:9]}); "
-        "deliver a PR into that branch — NEVER push to development or main directly. "
-        "Scope is ONLY this issue. Tests must go RED at base before the fix and GREEN after; "
-        "include both runs as evidence in the PR description. Live-stack validation is NOT yours: "
-        "the host-side harness runs it after your PR (your environment cannot see the live "
-        "containers, by design).\n\nCHARTER (the audited plan — follow it):\n"
-        + meta["body"][:9000]
+    # STRUCTURED dispatch (learned 2026-08-23 dry run): /nl condenses long goals
+    # into a terse intent and drops the charter — the first attempt became
+    # "effort-fix-ai-stack-errors" branched off the clone's DEFAULT branch.
+    # POST /effort + /effort/prepare carries the full charter verbatim, and the
+    # git contract below pins the base branch since worker clones default to main.
+    def bridge(path: str, payload: dict) -> dict:
+        req = urllib.request.Request(f"{BRIDGE_URL}{path}",
+                                     data=json.dumps(payload).encode(),
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            return json.loads(resp.read().decode() or "{}")
+
+    branch = meta.get("target_branch", "development")
+    base = meta.get("base_sha", "")[:9]
+    slug = f"issue-{n}-" + re.sub(r"[^a-z0-9]+", "-", meta.get("title", "").lower())[:28].strip("-")
+    eff = bridge("/effort", {"name": slug})
+    effort_id = eff.get("effort_id", f"effort-{slug}")
+    plan_body = re.sub(r"^---\n.*?\n---\n", "", meta["body"], flags=re.S)
+    request = (
+        f"PROJECT: {ORG_PROJECT}.\n"
+        f"GOAL: implement GitHub issue #{n} exactly per the audited charter below.\n\n"
+        "CRITICAL GIT CONTRACT (the clone's default branch is main — do NOT work there):\n"
+        f"1. git fetch origin {branch} && git checkout -b issue/{n}-work origin/{branch}\n"
+        f"   (origin/{branch} tip = {base}; verify with git rev-parse origin/{branch})\n"
+        f"2. Commit only the declared touched_paths; push the issue branch; the PR base branch\n"
+        f"   is {branch}, NEVER main.\n"
+        "3. Evidence contract: RED-at-base and GREEN-at-head transcripts go in the PR\n"
+        "   description; an ImportError is a harness bug, not a RED.\n\n"
+        "CHARTER (audited plan, gate-approved GO):\n\n" + plan_body[:12000]
     )
-    req = urllib.request.Request(f"{BRIDGE_URL}/nl",
-                                 data=json.dumps({"message": goal}).encode(),
-                                 headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=120) as resp:
-        body = json.loads(resp.read().decode() or "{}")
-    print(f"dispatched issue #{n} to the org via /nl — bridge said:")
-    print(json.dumps(body, indent=1)[:1200])
+    prep = bridge("/effort/prepare", {"effort_id": effort_id, "request": request, "risk": "routine"})
+    print(f"dispatched issue #{n} as {effort_id} — prepare said:")
+    print(json.dumps(prep, indent=1)[:600])
     p = plan_path(n)
     p.write_text(p.read_text(encoding="utf-8").replace("status: planned", "status: executing", 1),
                  encoding="utf-8")
