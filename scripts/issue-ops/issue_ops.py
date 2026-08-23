@@ -330,7 +330,7 @@ def cmd_plan(n: int, refresh: bool = False) -> int:
     )
     print(f"planning issue #{n} via headless claude (base {base[:9]} on {branch})…")
     r = subprocess.run(
-        [_claude_bin(), "-p", prompt, "--allowedTools", "Read,Glob,Grep"],
+        [_claude_bin(), "-p", "--allowedTools", "Read,Glob,Grep"], input=prompt,
         capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=ROOT, timeout=1800,
     )
     out = (r.stdout or "").strip()
@@ -485,7 +485,7 @@ def cmd_gate(pr_n: int) -> int:
         files="\n".join(files[:60]), diff=diff,
     )
     print(f"gating PR #{pr_n} via independent claude review…")
-    r = subprocess.run([_claude_bin(), "-p", prompt, "--allowedTools", "Read,Glob,Grep"],
+    r = subprocess.run([_claude_bin(), "-p", "--allowedTools", "Read,Glob,Grep"], input=prompt,
                        capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=ROOT, timeout=1200)
     verdict = (r.stdout or "").strip()
     if "## Verdict" not in verdict:
@@ -547,7 +547,7 @@ def cmd_gate_plan(n: int) -> int:
     prompt = PLAN_GATE_PROMPT.format(
         n=n, base=meta.get("base_sha", "?")[:9], branch=branch, plan=meta["body"][:20000])
     print(f"plan-gating issue #{n} via independent claude review…")
-    r = subprocess.run([_claude_bin(), "-p", prompt, "--allowedTools", "Read,Glob,Grep"],
+    r = subprocess.run([_claude_bin(), "-p", "--allowedTools", "Read,Glob,Grep"], input=prompt,
                        capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=ROOT, timeout=1200)
     out_text = (r.stdout or "").strip()
     if "## Plan verdict" not in out_text:
