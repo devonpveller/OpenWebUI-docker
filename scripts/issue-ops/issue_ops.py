@@ -602,29 +602,23 @@ def cmd_execute(n: int) -> int:
         "not claim it.\n\n"
         "CHARTER (audited plan, gate-approved GO):\n\n" + plan_body[:12000]
     )
-    # Two-step dispatch (2026-08-23 PM): a bare /nl goal for a project can
-    # REOPEN a prior effort via named-rerun matching (it revived the archived
-    # #17 effort with #25's charter). Create a distinctly-NAMED effort first,
-    # then steer the charter into it by name — "for effort <id>: …" goal
-    # steering is proven to land as goal_change on the right effort.
-    slug = f"issue-{n}-" + re.sub(r"[^a-z0-9]+", "-", meta.get("title", "").lower())[:24].strip("-")
+    # FINAL RAIL (proven across 4 revisions, 2026-08-23): a BARE /nl project
+    # goal is the ONLY inlet that registers the objective verbatim in
+    # goal_versions AND auto-flows survey→readiness→risk→dispatch. The
+    # steer-by-name path ("for effort <id>: …") registers NO goal (steering
+    # plane ≠ goal plane) — efforts dispatched that way are skipped with
+    # "no goal recorded". Named-rerun hijack of prior efforts is prevented by
+    # ARCHIVING them first — which the executing session must have done for
+    # any earlier effort on the same issue (say: `archive effort-…`).
     def bridge(path: str, payload: dict) -> dict:
         breq = urllib.request.Request(f"{BRIDGE_URL}{path}",
                                       data=json.dumps(payload).encode(),
                                       headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(breq, timeout=120) as resp:
             return json.loads(resp.read().decode() or "{}")
-    eff = bridge("/effort", {"name": slug})
-    effort_id = eff.get("effort_id", f"effort-{slug}")
-    out = bridge("/nl", {"message": f"for effort {effort_id}: {goal}"})
-    # the readiness/risk plane must run or the effort sits undispatched
-    # (learned twice: a named effort without /effort/prepare just stalls).
-    prep = bridge("/effort/prepare", {
-        "effort_id": effort_id,
-        "request": f"Implement issue #{n} per the steered charter (see goal).",
-        "risk": "routine"})
-    print(f"dispatched issue #{n} as {effort_id} — nl {json.dumps(out)[:120]} | "
-          f"prepare may_execute={prep.get('may_execute')}")
+    out = bridge("/nl", {"message": goal})
+    print(f"dispatched issue #{n} via bare /nl — {json.dumps(out)[:160]}")
+    print("(a fresh effort auto-flows survey→readiness→risk→dispatch; watch the audit stream)")
     p = plan_path(n)
     p.write_text(p.read_text(encoding="utf-8").replace("status: planned", "status: executing", 1),
                  encoding="utf-8")
