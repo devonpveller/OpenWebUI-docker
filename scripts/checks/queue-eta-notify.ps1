@@ -201,8 +201,8 @@ function Get-DedupState {
                         $state[$prop.Name] = [DateTime]::Parse($prop.Value.last_notified)
                     }
                     catch {
-                        # Log-and-skip, not rethrow: one corrupt lane must not
-                        # discard every valid lane's cooldown (mass re-notify).
+                        # Log-and-continue, not rethrow: one corrupt lane must
+                        # not discard every valid lane's cooldown (mass re-notify).
                         Write-LogEntry "dedup state: malformed last_notified for lane '$($prop.Name)' ($($_.Exception.Message)) -- lane will re-notify" "WARN"
                     }
                 }
