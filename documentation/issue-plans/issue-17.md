@@ -4,7 +4,7 @@ title: _extract_kb_name can infer invalid KB names from XML/tag-like prompt text
 created: 2026-08-23T04:34:15+00:00
 base_sha: 9e465758e48b6171478223fc143f6805d3246e01
 target_branch: development
-status: planned
+status: done
 triage: simple
 verdict: fix
 repro: confirmed-in-code
