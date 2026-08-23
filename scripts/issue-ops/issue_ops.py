@@ -63,7 +63,7 @@ def cfg() -> dict:
 
 
 def _run(cmd: list[str]) -> str:
-    r = subprocess.run(cmd, capture_output=True, text=True, cwd=ROOT, timeout=120)
+    r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=ROOT, timeout=120)
     return r.stdout.strip()
 
 
@@ -331,7 +331,7 @@ def cmd_plan(n: int, refresh: bool = False) -> int:
     print(f"planning issue #{n} via headless claude (base {base[:9]} on {branch})…")
     r = subprocess.run(
         [_claude_bin(), "-p", prompt, "--allowedTools", "Read,Glob,Grep"],
-        capture_output=True, text=True, cwd=ROOT, timeout=900,
+        capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=ROOT, timeout=900,
     )
     out = (r.stdout or "").strip()
     if not out.startswith("---"):
@@ -452,6 +452,10 @@ PLAN (frontmatter + body):
 {plan}
 
 PR #{pr_n} “{pr_title}” → base {base}
+
+PR DESCRIPTION (the worker's evidence lives here — verify claims against the diff):
+{pr_body}
+
 FILES CHANGED:
 {files}
 
@@ -477,11 +481,12 @@ def cmd_gate(pr_n: int) -> int:
         issue_body=(issue.get("body") or "")[:4000],
         plan=(meta or {}).get("body", "(NO PLAN — that alone argues DENY)")[:8000],
         pr_n=pr_n, pr_title=pr["title"], base=pr["base"]["ref"],
+        pr_body=(pr.get("body") or "(empty)")[:8000],
         files="\n".join(files[:60]), diff=diff,
     )
     print(f"gating PR #{pr_n} via independent claude review…")
     r = subprocess.run([_claude_bin(), "-p", prompt, "--allowedTools", "Read,Glob,Grep"],
-                       capture_output=True, text=True, cwd=ROOT, timeout=1200)
+                       capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=ROOT, timeout=1200)
     verdict = (r.stdout or "").strip()
     if "## Verdict" not in verdict:
         print("gate produced no verdict:", (verdict or r.stderr)[:300])
@@ -543,7 +548,7 @@ def cmd_gate_plan(n: int) -> int:
         n=n, base=meta.get("base_sha", "?")[:9], branch=branch, plan=meta["body"][:20000])
     print(f"plan-gating issue #{n} via independent claude review…")
     r = subprocess.run([_claude_bin(), "-p", prompt, "--allowedTools", "Read,Glob,Grep"],
-                       capture_output=True, text=True, cwd=ROOT, timeout=1200)
+                       capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=ROOT, timeout=1200)
     out_text = (r.stdout or "").strip()
     if "## Plan verdict" not in out_text:
         print("plan gate produced no verdict:", (out_text or r.stderr)[:300])
@@ -731,20 +736,20 @@ def cmd_t2(n: int, plane: str, service: str, probe: str,
     started = datetime.now(timezone.utc).isoformat()
     try:
         r = subprocess.run([*base, "run", "--rm", "--no-deps", twin_name],
-                           capture_output=True, text=True, timeout=600)
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600)
         out = (r.stdout or "") + (("\n[stderr]\n" + r.stderr) if r.stderr.strip() else "")
         verdict = "PASS" if r.returncode == 0 else f"FAIL (exit {r.returncode})"
     finally:
         if not keep:
             subprocess.run([*base, "down", "-v", "--remove-orphans"],
-                           capture_output=True, text=True, timeout=300)
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300)
             # down -v can race a just-stopped container's volume ("in use");
             # sweep whatever the project left behind.
             left = subprocess.run(["docker", "volume", "ls", "-q", "--filter",
-                                   f"name={proj}_"], capture_output=True, text=True)
+                                   f"name={proj}_"], capture_output=True, text=True, encoding="utf-8", errors="replace")
             for v in (left.stdout or "").split():
                 subprocess.run(["docker", "volume", "rm", v],
-                               capture_output=True, text=True)
+                               capture_output=True, text=True, encoding="utf-8", errors="replace")
     ev = STATE / f"t2-issue-{n}-evidence.txt"
     ev.write_text(
         f"T2 validation evidence — issue #{n}\nstarted: {started}\n"
