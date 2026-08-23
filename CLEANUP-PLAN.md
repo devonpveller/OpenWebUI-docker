@@ -1127,8 +1127,12 @@ Per-plane playbook (portal-split procedure, now run 3×):
     curator ingest; report lists cited-only).
   - PLANNED (not built): research report → wiki session pages (report +
     per-claim source/chunk deep links); MM alert when the ON audio job
-    fails (no more silent email-only nights); queue-ETA notifications to
-    the user (MM/OWUI) for long-waiting jobs; backup interval
+    fails (no more silent email-only nights); ~~queue-ETA notifications to
+    the user (MM/OWUI) for long-waiting jobs~~ **MM lane DONE 2026-08-23;
+    OWUI lane = follow-up (OB1 submodule PR)** (issue #25: MM half shipped
+    via `scripts/checks/queue-eta-notify.ps1` + fixtures + runbook
+    `documentation/runbooks/queue-eta-notifications.md`; OWUI half is an
+    OB1 submodule PR); backup interval
     human-units + pre-change snapshot command (`stack.ps1 snapshot`).
 
 - **K.11 status-surface round — EXECUTED 2026-08-22 PM:**
