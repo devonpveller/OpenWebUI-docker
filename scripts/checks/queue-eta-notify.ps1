@@ -1,6 +1,6 @@
 # Queue ETA notifier for the llm-queue admission queue (issue #25).
 #
-# Mirrors scripts/checks/stack-watchdog.ps1: -Mode check|daemon|install-service.
+# Mirrors scripts/checks/stack-watchdog.ps1: -Mode check|daemon|install-task.
 #
 # Each pass polls the queue snapshot:
 #   docker exec llm-queue curl -fsS http://localhost:8080/observe/queue
@@ -20,7 +20,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory=$false)]
-    [ValidateSet("check", "daemon", "install-service")]
+    [ValidateSet("check", "daemon", "install-task")]
     [string]$Mode = "check",
 
     [Parameter(Mandatory=$false)]
@@ -53,7 +53,7 @@ $STATE_FILE = Join-Path $PROJECT_DIR "logs\queue-eta-notify-state.json"
 $ENV_FILE = Join-Path $PROJECT_DIR "agent-org\docker\.env"
 $MM_API = "http://localhost:8065/api/v4/posts"
 $QUEUE_URL = "http://localhost:8080/observe/queue"
-$SERVICE_NAME = "QueueEtaNotifier"
+$TASK_NAME = "QueueEtaNotifier"
 $COOLDOWN_MINUTES = 10
 
 # Create logs directory if it doesn't exist
@@ -127,30 +127,46 @@ function Get-QueueSnapshot {
 # The lane's est start / est completion come from its worst row:
 #   est start      = now + est_wait_s
 #   est completion = now + est_wait_s + avg_T_s (per-model mean service time)
+#
+# The live GET /observe/queue payload is WRAPPED (llm-queue control.get_queue):
+# top-level keys are exactly models / held_total / max_total_connections, and
+# models is a map keyed by model name whose values carry model, running[],
+# waiting[], avg_T_s, P, permits_free, inflight_by_key. waiting/avg_T_s do
+# NOT exist at the top level -- iterate the models map, never the top level.
 function Get-FlaggedLanes {
     [CmdletBinding()]
     param($Snapshot)
-    $model = if ($Snapshot.model) { [string]$Snapshot.model } else { 'unknown' }
-    $avgT = 0.0
-    if ($null -ne $Snapshot.avg_T_s) { $avgT = [double]$Snapshot.avg_T_s }
     $now = Get-Date
-
-    $waiting = @()
-    if ($null -ne $Snapshot.waiting) { $waiting = @($Snapshot.waiting) }
-
     $flagged = @()
-    foreach ($row in $waiting) {
-        $waited = [double]$row.waited_s
-        $estWait = [double]$row.est_wait_s
-        if (($waited + $estWait) -lt $ThresholdSeconds) { continue }
-        $key = if ($row.key) { [string]$row.key } else { 'unknown' }
-        $flagged += [pscustomobject]@{
-            Key         = $key
-            Model       = $model
-            Row         = $row
-            Total       = $waited + $estWait
-            EstStart    = $now.AddSeconds($estWait)
-            EstCompletion = $now.AddSeconds($estWait + $avgT)
+
+    $models = @{}
+    if ($null -ne $Snapshot.models) {
+        foreach ($prop in $Snapshot.models.PSObject.Properties) {
+            $models[$prop.Name] = $prop.Value
+        }
+    }
+
+    foreach ($name in ($models.Keys | Sort-Object)) {
+        $mq = $models[$name]
+        $model = if ($mq.model) { [string]$mq.model } else { [string]$name }
+        $avgT = 0.0
+        if ($null -ne $mq.avg_T_s) { $avgT = [double]$mq.avg_T_s }
+        $waiting = @()
+        if ($null -ne $mq.waiting) { $waiting = @($mq.waiting) }
+
+        foreach ($row in $waiting) {
+            $waited = [double]$row.waited_s
+            $estWait = [double]$row.est_wait_s
+            if (($waited + $estWait) -lt $ThresholdSeconds) { continue }
+            $key = if ($row.key) { [string]$row.key } else { 'unknown' }
+            $flagged += [pscustomobject]@{
+                Key         = $key
+                Model       = $model
+                Row         = $row
+                Total       = $waited + $estWait
+                EstStart    = $now.AddSeconds($estWait)
+                EstCompletion = $now.AddSeconds($estWait + $avgT)
+            }
         }
     }
     if ($flagged.Count -eq 0) { return ,@() }
@@ -193,13 +209,18 @@ function Get-DedupState {
 }
 
 # Persist dedup state as JSON under logs/ (laneId -> last_notified, ISO-8601).
+# PS 5.1 hazard: ConvertTo-Json serializes a [DateTime] as /Date(...)/, which
+# [DateTime]::Parse cannot read back -- every timestamp is re-serialized with
+# .ToString('o') here so the dedup file stays ISO-8601 across passes.
 function Save-DedupState {
     [CmdletBinding()]
     param($Lanes)
     try {
         $lanesObj = [ordered]@{}
         foreach ($k in ($Lanes.Keys | Sort-Object)) {
-            $lanesObj[$k] = [pscustomobject]@{ last_notified = $Lanes[$k] }
+            $v = $Lanes[$k]
+            if ($v -is [DateTime]) { $v = $v.ToString('o') }
+            $lanesObj[$k] = [pscustomobject]@{ last_notified = [string]$v }
         }
         $state = [pscustomobject]@{ version = 1; lanes = $lanesObj }
         $state | ConvertTo-Json -Depth 4 | Out-File -FilePath $STATE_FILE -Encoding UTF8
@@ -243,7 +264,7 @@ function Send-Mattermost {
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$Message)
     if ($DryRun) {
-        Write-LogEntry "DRYRUN would post to channel $ChannelId: $Message" "INFO"
+        Write-LogEntry "DRYRUN would post to channel ${ChannelId}: $Message" "INFO"
         return $true
     }
     try {
@@ -305,7 +326,7 @@ function Invoke-QueueEtaCheck {
         $message = Format-LaneMessage -Lane $lane
         Write-LogEntry "lane $($lane.LaneId) flagged (worst total $([math]::Round($lane.WorstTotal, 1))s)" "INFO"
         if (Send-Mattermost -Message $message) {
-            $state[$lane.LaneId] = (Get-Date).ToUniversalTime().ToString("o")
+            $state[$lane.LaneId] = (Get-Date).ToUniversalTime()
             $posted++
         }
     }
@@ -329,26 +350,30 @@ function Start-Daemon {
     }
 }
 
-# Function to install as Windows Service
-function Install-WindowsService {
-    $ServicePath = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$($MyInvocation.MyCommand.Path)`" -Mode daemon -IntervalSeconds $IntervalSeconds -ThresholdSeconds $ThresholdSeconds -ChannelId $ChannelId"
+# Function to install as a Scheduled Task. A ps1 daemon cannot satisfy the
+# Windows Service Control Manager handshake (the service host must be an
+# executable that speaks SCM), so the daemon is registered as a task that
+# runs at startup instead of a service.
+function Install-ScheduledTask {
+    $TaskAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$($MyInvocation.MyCommand.Path)`" -Mode daemon -IntervalSeconds $IntervalSeconds -ThresholdSeconds $ThresholdSeconds -ChannelId $ChannelId"
+    $TaskTrigger = New-ScheduledTaskTrigger -AtStartup
+    $TaskSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
 
-    # Check if service already exists. We do NOT auto-remove an existing
-    # service (a destructive action without explicit operator intent): the
+    # Check if the task already exists. We do NOT auto-remove an existing
+    # task (a destructive action without explicit operator intent): the
     # operator removes it first (see runbook), then re-runs this mode.
-    if (Get-Service -Name $SERVICE_NAME -ErrorAction SilentlyContinue) {
-        Write-LogEntry "Service $SERVICE_NAME already exists -- stop and remove it first (see runbook), then re-run -Mode install-service" "ERROR"
+    if (Get-ScheduledTask -TaskName $TASK_NAME -ErrorAction SilentlyContinue) {
+        Write-LogEntry "Scheduled task $TASK_NAME already exists -- stop and remove it first (see runbook), then re-run -Mode install-task" "ERROR"
         exit 1
     }
 
-    # Create the service
-    Write-LogEntry "Installing Windows Service: $SERVICE_NAME"
-    sc.exe create $SERVICE_NAME binPath= $ServicePath start= auto
-    sc.exe description $SERVICE_NAME "Queue ETA notifier for the llm-queue admission queue (issue #25)"
+    # Create the task
+    Write-LogEntry "Installing Scheduled Task: $TASK_NAME"
+    Register-ScheduledTask -TaskName $TASK_NAME -Action $TaskAction -Trigger $TaskTrigger -Settings $TaskSettings -User "SYSTEM" -Description "Queue ETA notifier for the llm-queue admission queue (issue #25)" | Out-Null
 
-    # Start the service
-    Start-Service -Name $SERVICE_NAME
-    Write-LogEntry "Service installed and started successfully"
+    # Start the task
+    Start-ScheduledTask -TaskName $TASK_NAME
+    Write-LogEntry "Scheduled task installed and started successfully"
 }
 
 # Main execution logic
@@ -362,21 +387,21 @@ switch ($Mode.ToLower()) {
         Start-Daemon
     }
 
-    "install-service" {
+    "install-task" {
         if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
-            Write-LogEntry "Administrator privileges required to install service" "ERROR"
+            Write-LogEntry "Administrator privileges required to install the scheduled task" "ERROR"
             exit 1
         }
-        Install-WindowsService
+        Install-ScheduledTask
     }
 
     default {
-        Write-Host "Usage: queue-eta-notify.ps1 [-Mode check|daemon|install-service] [-IntervalSeconds 60] [-ThresholdSeconds 120] [-ChannelId <id>] [-DryRun] [-SnapshotFile <json>]"
+        Write-Host "Usage: queue-eta-notify.ps1 [-Mode check|daemon|install-task] [-IntervalSeconds 60] [-ThresholdSeconds 120] [-ChannelId <id>] [-DryRun] [-SnapshotFile <json>]"
         Write-Host ""
         Write-Host "Modes:"
         Write-Host "  check           - Run single notifier pass (default)"
         Write-Host "  daemon          - Run continuously as daemon"
-        Write-Host "  install-service - Install as Windows Service (requires admin)"
+        Write-Host "  install-task    - Install as Scheduled Task (requires admin)"
         exit 1
     }
 }

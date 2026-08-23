@@ -32,7 +32,7 @@ a down Mattermost or missing token is logged and never fails the check.
 ## Cadence
 
 - **Daemon (default deployment):** one pass every `-IntervalSeconds`
-  (default **60 s**). The daemon is the `QueueEtaNotifier` Windows Service
+  (default **60 s**). The daemon is the `QueueEtaNotifier` Scheduled Task
   (see below).
 - **Manual / one-shot:** `-Mode check` runs a single pass and exits
   (0 = probe succeeded, 1 = snapshot could not be fetched).
@@ -43,22 +43,24 @@ a down Mattermost or missing token is logged and never fails the check.
 
 | Parameter | Default | Meaning |
 |---|---|---|
-| `-Mode` | `check` | `check` (one pass) / `daemon` (loop) / `install-service` (Windows Service, admin) |
+| `-Mode` | `check` | `check` (one pass) / `daemon` (loop) / `install-task` (Scheduled Task, admin) |
 | `-IntervalSeconds` | `60` | Daemon poll interval (10–3600) |
 | `-ThresholdSeconds` | `120` | Flag when `waited_s + est_wait_s >=` this (1–86400) |
 | `-ChannelId` | `qqq97fwxd3f8ufenjybrf5w1yr` (#claude-code, same as `notify-mattermost.sh`) | Mattermost channel id to post to |
 | `-DryRun` | off | Print the would-be message to the log instead of posting |
 | `-SnapshotFile` | — | Feed a fixture JSON (e.g. `scripts/checks/fixtures/queue-eta-busy.json`) instead of `docker exec` — sandbox/host-harness testing without Docker |
 
-## Task name / service
+## Task name
 
-- **Windows Service:** `QueueEtaNotifier` (installed by
-  `-Mode install-service`, requires an elevated PowerShell). It runs the
-  daemon with the parameters captured at install time. If the service
-  already exists the install **refuses** (no auto-removal — a destructive
-  action needs explicit operator intent): stop and remove it first, then
-  re-run. Uninstall: `Stop-Service QueueEtaNotifier`, then remove it with
-  the standard `sc.exe` removal command (Services.msc works too).
+- **Scheduled Task:** `QueueEtaNotifier` (installed by `-Mode install-task`,
+  requires an elevated PowerShell). It runs the daemon at startup with the
+  parameters captured at install time. A Scheduled Task is used instead of a
+  Windows Service because a ps1 daemon cannot satisfy the Service Control
+  Manager handshake (the service host must be an executable that speaks
+  SCM). If the task already exists the install **refuses** (no auto-removal
+  — a destructive action needs explicit operator intent): stop and remove it
+  first, then re-run. Uninstall:
+  `Unregister-ScheduledTask -TaskName QueueEtaNotifier -Confirm:$false`.
 
   ```powershell
   powershell -NoProfile -ExecutionPolicy Bypass -File scripts\checks\queue-eta-notify.ps1 -Mode daemon -IntervalSeconds 60 -ThresholdSeconds 120 -ChannelId <id>
@@ -84,8 +86,8 @@ a down Mattermost or missing token is logged and never fails the check.
 
 Pick the narrowest one that fits:
 
-1. **Stop the service** (daemon keeps no state, so this is clean):
-   `Stop-Service QueueEtaNotifier` (or `sc.exe stop QueueEtaNotifier`).
+1. **Stop the scheduled task** (daemon keeps no state, so this is clean):
+   `Stop-ScheduledTask -TaskName QueueEtaNotifier`.
 2. **Raise the threshold** so nothing flags:
    `-ThresholdSeconds 86400` (max allowed).
 3. **Dry-run mode:** `-DryRun` logs instead of posting — the daemon keeps
@@ -99,26 +101,35 @@ Pick the narrowest one that fits:
 
 ## Fixtures
 
-- `scripts/checks/fixtures/queue-eta-busy.json` — full `snapshot()` shape
-  (see `llm-queue/src/llm_queue/scheduler.py`, `snapshot()`): 2 running +
-  3 waiting rows; at the default 120 s threshold two lanes flag
+Both fixtures mirror the REAL `GET /observe/queue` payload (see
+`llm-queue/src/llm_queue/routes/control.py`, `get_queue`): top-level keys
+are exactly `models` / `held_total` / `max_total_connections`, and `models`
+is a map keyed by model name whose values carry the per-model `snapshot()`
+shape (see `llm-queue/src/llm_queue/scheduler.py`, `snapshot()`).
+
+- `scripts/checks/fixtures/queue-eta-busy.json` — 2 models (`qwen36-27b`
+  and `bge-m3`); `qwen36-27b` has 2 running + 3 waiting rows and `bge-m3`
+  is idle. At the default 120 s threshold two lanes flag
   (`owui-chat`, `little-coder`) and one row stays under.
-- `scripts/checks/fixtures/queue-eta-idle.json` — same shape, empty
-  `waiting`; exercises the all-clear path (state lanes are dropped).
+- `scripts/checks/fixtures/queue-eta-idle.json` — same wrapped shape, all
+  `waiting` empty; exercises the all-clear path (state lanes are dropped).
 
 Validate them without PowerShell/Docker:
 
 ```bash
 python3 - <<'EOF'
 import json
-TOP = ["model", "running", "waiting", "avg_T_s", "P", "permits_free", "inflight_by_key"]
+TOP = ["models", "held_total", "max_total_connections"]
+MODEL_KEYS = ["model", "running", "waiting", "avg_T_s", "P", "permits_free", "inflight_by_key"]
 for name in ("busy", "idle"):
     s = json.load(open(f"scripts/checks/fixtures/queue-eta-{name}.json"))
-    assert all(k in s for k in TOP), name
-    for w in s["waiting"]:
-        assert all(k in w for k in ("id", "key", "prio", "waited_s", "est_wait_s")), w
-assert json.load(open("scripts/checks/fixtures/queue-eta-busy.json"))["waiting"]
-assert json.load(open("scripts/checks/fixtures/queue-eta-idle.json"))["waiting"] == []
+    assert sorted(s.keys()) == sorted(TOP), name
+    for m, snap in s["models"].items():
+        assert sorted(snap.keys()) == sorted(MODEL_KEYS), (name, m)
+        for w in snap["waiting"]:
+            assert all(k in w for k in ("id", "key", "prio", "waited_s", "est_wait_s")), w
+assert any(snap["waiting"] for snap in json.load(open("scripts/checks/fixtures/queue-eta-busy.json"))["models"].values())
+assert all(not snap["waiting"] for snap in json.load(open("scripts/checks/fixtures/queue-eta-idle.json"))["models"].values())
 print("fixtures OK")
 EOF
 ```
