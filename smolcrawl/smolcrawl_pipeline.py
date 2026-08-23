@@ -812,13 +812,17 @@ class Pipeline:
             search_space = message[url_pos + len(url):]
 
         # Suffix-terminated variant first: it used to be dead code behind the
-        # $-anchored pattern, which always won. \b keeps into|to|as from
-        # matching inside words (mandatory, automatically, database); the
-        # capture class excludes < > so tag tails like </instructions> fail
-        # the match instead of being captured, and caps names at 80 chars.
+        # $-anchored pattern, which always won. The word boundary is
+        # PER-ALTERNATIVE: into|to|as are bounded on BOTH sides and require
+        # following whitespace, so they match only as whole words -- neither
+        # mid-word hits (manda[to]ry, automa[tic]ally, databa[s]e) nor
+        # word-initial hits (t[o]day, a[s]ap, a[s]sistant) can capture. kb:
+        # and knowledge[- ]?base keep optional whitespace (kb:Gaggia Docs).
+        # The capture class excludes < > so tag tails like </instructions>
+        # fail the match instead of being captured, and caps names at 80 chars.
         for pattern in [
-            r'\b(?:into|to|as|kb:|knowledge[- ]?base[: ])\s*["\']?([^<>\n\r]{1,80}?)["\']?(?:\s+(?:with|using|from))',
-            r'\b(?:into|to|as|kb:|knowledge[- ]?base[: ])\s*["\']?([^<>\n\r]{1,80}?)["\']?\s*$',
+            r'(?:\b(?:into|to|as)\b\s+|kb:\s*|knowledge[- ]?base[: ]\s*)["\']?([^<>\n\r]{1,80}?)["\']?(?:\s+(?:with|using|from))',
+            r'(?:\b(?:into|to|as)\b\s+|kb:\s*|knowledge[- ]?base[: ]\s*)["\']?([^<>\n\r]{1,80}?)["\']?\s*$',
         ]:
             m = re.search(pattern, search_space, re.IGNORECASE)
             if m:

@@ -83,6 +83,64 @@ class TestExtractKbName(unittest.TestCase):
         message = "crawl https://example.com/ into " + "x" * 81
         self.assertEqual(self._name(message), "SmolCrawl - example.com")
 
+    # -- word-INITIAL hits: keyword at the start of a longer word must NOT
+    #    match (a shared leading \b alone leaves these open) --
+
+    def test_word_start_today_fallback(self):
+        # `to` at the start of `today` must not capture `day`.
+        self.assertEqual(
+            self._name("crawl https://example.com/ today"),
+            "SmolCrawl - example.com",
+        )
+
+    def test_word_start_asap_fallback(self):
+        # `as` at the start of `asap` must not capture `ap`.
+        self.assertEqual(
+            self._name("crawl https://example.com/ asap"),
+            "SmolCrawl - example.com",
+        )
+
+    def test_word_start_tomorrow_fallback(self):
+        # `to` at the start of `tomorrow` must not capture `morrow`.
+        self.assertEqual(
+            self._name("crawl https://example.com/ tomorrow"),
+            "SmolCrawl - example.com",
+        )
+
+    def test_prompt_wrapper_assistant(self):
+        # Prompt-wrapper tail: `as` at the start of `Assistant` must not
+        # capture `sistant: proceed`.
+        self.assertEqual(
+            self._name("crawl https://example.com/\nAssistant: proceed"),
+            "SmolCrawl - example.com",
+        )
+
+    # -- whole-word hits: `to` and `as` as standalone keywords must still
+    #    match (the boundary is per-alternative, not shared) --
+
+    def test_explicit_name_to(self):
+        self.assertEqual(
+            self._name("crawl https://example.com/ to My KB"),
+            "My KB",
+        )
+
+    def test_explicit_name_as(self):
+        self.assertEqual(
+            self._name("crawl https://example.com/ as My KB"),
+            "My KB",
+        )
+
+    # -- system/instruction text: tag tails must fail the match, not be
+    #    captured --
+
+    def test_system_instruction_tail(self):
+        self.assertEqual(
+            self._name(
+                "crawl https://example.com/ <instructions>be concise</instructions>"
+            ),
+            "SmolCrawl - example.com",
+        )
+
 
 class TestNormalizeKbName(unittest.TestCase):
     """_normalize_kb_name must not let dangling tag delimiters survive."""
