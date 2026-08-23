@@ -626,6 +626,22 @@ def cmd_execute(n: int) -> int:
     return 0
 
 
+def cmd_archive(effort_id: str) -> int:
+    """Archive a stale/hijacked effort via the NL inlet — the rail's stated
+    precondition for re-dispatching an issue (named-rerun hijack prevention).
+    The dispatch comment in cmd_execute says the executing session must have
+    archived every earlier effort on the same issue; this makes that a
+    first-class command instead of a hand-typed /nl message."""
+    import urllib.request
+    req = urllib.request.Request(f"{BRIDGE_URL}/nl",
+                                 data=json.dumps({"message": f"archive {effort_id}"}).encode(),
+                                 headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=120) as resp:
+        out = json.loads(resp.read().decode() or "{}")
+    print(f"archive {effort_id} — {json.dumps(out)[:300]}")
+    return 0
+
+
 PLANES = {  # plane → (compose file, compose project name for native-network name resolution)
     "frontend": ("frontend/docker-compose.yml", "frontend"),
     "inference": ("inference/docker-compose.yml", "inference"),
@@ -775,6 +791,7 @@ def main() -> int:
     p = sub.add_parser("gate"); p.add_argument("n", type=int)
     p = sub.add_parser("gate-plan"); p.add_argument("n", type=int)
     p = sub.add_parser("execute"); p.add_argument("n", type=int)
+    p = sub.add_parser("archive"); p.add_argument("effort_id")
     p = sub.add_parser("focus"); p.add_argument("action", choices=["show", "set", "clear"]); p.add_argument("arc", nargs="?")
     sub.add_parser("seed")
     p = sub.add_parser("t2")
@@ -794,6 +811,8 @@ def main() -> int:
         return cmd_gate_plan(a.n)
     if a.cmd == "execute":
         return cmd_execute(a.n)
+    if a.cmd == "archive":
+        return cmd_archive(a.effort_id)
     if a.cmd == "seed":
         return cmd_seed()
     if a.cmd == "t2":
