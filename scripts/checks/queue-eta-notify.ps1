@@ -197,7 +197,14 @@ function Get-DedupState {
             $raw = Get-Content $STATE_FILE -Raw | ConvertFrom-Json
             if ($raw -and $raw.lanes) {
                 foreach ($prop in $raw.lanes.PSObject.Properties) {
-                    try { $state[$prop.Name] = [DateTime]::Parse($prop.Value.last_notified) } catch { }
+                    try {
+                        $state[$prop.Name] = [DateTime]::Parse($prop.Value.last_notified)
+                    }
+                    catch {
+                        # Log-and-skip, not rethrow: one corrupt lane must not
+                        # discard every valid lane's cooldown (mass re-notify).
+                        Write-LogEntry "dedup state: malformed last_notified for lane '$($prop.Name)' ($($_.Exception.Message)) -- lane will re-notify" "WARN"
+                    }
                 }
             }
         }
