@@ -70,6 +70,10 @@ services:
       - ../.env
     environment:
       - LC_CONFIG=/app/config/little-coder.config.yaml
+      # J.1 miss #7 (2026-08-23): the node agent resolves models.json apiKey from its
+      # env at boot (entrypoint-agent.sh substitution); without this the literal
+      # placeholder goes to the gateway as the bearer (401 since the master-key flip).
+      - LLAMACPP_API_KEY=${LC_LLAMA_API_KEY}
       - LC_LLAMA_API_KEY=${LC_LLAMA_API_KEY:-llama}
       - OPEN_TERMINAL_API_KEY=${OPEN_TERMINAL_API_KEY}
       - LC_DEPLOY_TOKEN=${LC_DEPLOY_TOKEN:-}
