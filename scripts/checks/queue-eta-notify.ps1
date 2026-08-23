@@ -362,7 +362,9 @@ function Start-Daemon {
 # executable that speaks SCM), so the daemon is registered as a task that
 # runs at startup instead of a service.
 function Install-ScheduledTask {
-    $TaskAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$($MyInvocation.MyCommand.Path)`" -Mode daemon -IntervalSeconds $IntervalSeconds -ThresholdSeconds $ThresholdSeconds -ChannelId $ChannelId"
+    # $PSCommandPath, not $MyInvocation.MyCommand.Path: inside a function the
+    # latter is $null, so the task would register with -File '' and never run.
+    $TaskAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`" -Mode daemon -IntervalSeconds $IntervalSeconds -ThresholdSeconds $ThresholdSeconds -ChannelId $ChannelId"
     $TaskTrigger = New-ScheduledTaskTrigger -AtStartup
     $TaskSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
 
