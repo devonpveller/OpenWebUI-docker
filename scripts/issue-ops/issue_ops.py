@@ -602,12 +602,22 @@ def cmd_execute(n: int) -> int:
         "not claim it.\n\n"
         "CHARTER (audited plan, gate-approved GO):\n\n" + plan_body[:12000]
     )
-    req = urllib.request.Request(f"{BRIDGE_URL}/nl",
-                                 data=json.dumps({"message": goal}).encode(),
-                                 headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=120) as resp:
-        out = json.loads(resp.read().decode() or "{}")
-    print(f"dispatched issue #{n} via /nl — bridge said: {json.dumps(out)[:300]}")
+    # Two-step dispatch (2026-08-23 PM): a bare /nl goal for a project can
+    # REOPEN a prior effort via named-rerun matching (it revived the archived
+    # #17 effort with #25's charter). Create a distinctly-NAMED effort first,
+    # then steer the charter into it by name — "for effort <id>: …" goal
+    # steering is proven to land as goal_change on the right effort.
+    slug = f"issue-{n}-" + re.sub(r"[^a-z0-9]+", "-", meta.get("title", "").lower())[:24].strip("-")
+    def bridge(path: str, payload: dict) -> dict:
+        breq = urllib.request.Request(f"{BRIDGE_URL}{path}",
+                                      data=json.dumps(payload).encode(),
+                                      headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(breq, timeout=120) as resp:
+            return json.loads(resp.read().decode() or "{}")
+    eff = bridge("/effort", {"name": slug})
+    effort_id = eff.get("effort_id", f"effort-{slug}")
+    out = bridge("/nl", {"message": f"for effort {effort_id}: {goal}"})
+    print(f"dispatched issue #{n} as {effort_id} — bridge said: {json.dumps(out)[:200]}")
     p = plan_path(n)
     p.write_text(p.read_text(encoding="utf-8").replace("status: planned", "status: executing", 1),
                  encoding="utf-8")
