@@ -32,15 +32,22 @@ function Invoke-Unit {
   docker compose -f $ob1 config -q; if ($?) { Pass "docker compose config" } else { Fail "compose config" }
   foreach ($f in @(
       "OB1/recipes/_shared/slug.mjs",
+      "OB1/recipes/_shared/citations.mjs",
+      "OB1/recipes/_shared/write-if-changed.mjs",
+      "OB1/recipes/_shared/source-leaf.mjs",
       "OB1/recipes/entity-wiki/generate-wiki.mjs",
       "OB1/docker/wiki-service/wiki-service.mjs",
+      "OB1/docker/wiki-viewer/serve.mjs",
+      "OB1/docker/wiki-viewer/derive-graph-index.mjs",
       "OB1/recipes/wiki-synthesis/scripts/synthesize-notebooks.mjs")) {
     node --check $f; if ($?) { Pass "node --check $f" } else { Fail "node --check $f" }
   }
   python -m py_compile OB1/docker/extract/app.py; if ($?) { Pass "py_compile extract/app.py" } else { Fail "py_compile" }
 
-  Section "Node unit tests (slug + citation rewrite)"
-  node --test OB1/recipes/_shared/slug.test.mjs OB1/recipes/entity-wiki/generate-wiki.test.mjs
+  Section "Node unit tests (slug + citations + write-if-changed + notebook synth)"
+  node --test OB1/recipes/_shared/slug.test.mjs OB1/recipes/_shared/citations.test.mjs `
+    OB1/recipes/_shared/write-if-changed.test.mjs OB1/recipes/entity-wiki/generate-wiki.test.mjs `
+    OB1/recipes/wiki-synthesis/scripts/synthesize-notebooks.test.mjs
   if ($?) { Pass "node --test" } else { Fail "node --test" }
 
   Section "Deno: type-check + unit tests (workbench)"
