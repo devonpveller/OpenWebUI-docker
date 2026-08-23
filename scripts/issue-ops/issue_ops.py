@@ -331,7 +331,7 @@ def cmd_plan(n: int, refresh: bool = False) -> int:
     print(f"planning issue #{n} via headless claude (base {base[:9]} on {branch})…")
     r = subprocess.run(
         [_claude_bin(), "-p", prompt, "--allowedTools", "Read,Glob,Grep"],
-        capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=ROOT, timeout=900,
+        capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=ROOT, timeout=1800,
     )
     out = (r.stdout or "").strip()
     if not out.startswith("---"):
@@ -581,39 +581,33 @@ def cmd_execute(n: int) -> int:
     if not gate_file.is_file() or "## Plan verdict: GO" not in gate_file.read_text(encoding="utf-8"):
         print(f"REFUSED: no GO verdict at {gate_file} — run: gate-plan {n} first (M.7 gate #1)")
         return 1
-    # STRUCTURED dispatch (learned 2026-08-23 dry run): /nl condenses long goals
-    # into a terse intent and drops the charter — the first attempt became
-    # "effort-fix-ai-stack-errors" branched off the clone's DEFAULT branch.
-    # POST /effort + /effort/prepare carries the full charter verbatim, and the
-    # git contract below pins the base branch since worker clones default to main.
-    def bridge(path: str, payload: dict) -> dict:
-        req = urllib.request.Request(f"{BRIDGE_URL}{path}",
-                                     data=json.dumps(payload).encode(),
-                                     headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            return json.loads(resp.read().decode() or "{}")
-
+    # /nl IS the dispatch rail (re-learned 2026-08-23 PM): the DB proved it
+    # stores the FULL message as the effort objective — only the effort NAME
+    # condenses (cosmetic). The 'structured' /effort + /effort/prepare route
+    # creates a GOALLESS effort: prepare is the risk-approval plane, not a
+    # charter handoff. The git contract stays: the repo default branch is now
+    # development, but pin it explicitly anyway.
     branch = meta.get("target_branch", "development")
     base = meta.get("base_sha", "")[:9]
-    slug = f"issue-{n}-" + re.sub(r"[^a-z0-9]+", "-", meta.get("title", "").lower())[:28].strip("-")
-    eff = bridge("/effort", {"name": slug})
-    effort_id = eff.get("effort_id", f"effort-{slug}")
     plan_body = re.sub(r"^---\n.*?\n---\n", "", meta["body"], flags=re.S)
-    request = (
-        f"PROJECT: {ORG_PROJECT}.\n"
-        f"GOAL: implement GitHub issue #{n} exactly per the audited charter below.\n\n"
-        "CRITICAL GIT CONTRACT (the clone's default branch is main — do NOT work there):\n"
-        f"1. git fetch origin {branch} && git checkout -b issue/{n}-work origin/{branch}\n"
-        f"   (origin/{branch} tip = {base}; verify with git rev-parse origin/{branch})\n"
-        f"2. Commit only the declared touched_paths; push the issue branch; the PR base branch\n"
-        f"   is {branch}, NEVER main.\n"
-        "3. Evidence contract: RED-at-base and GREEN-at-head transcripts go in the PR\n"
-        "   description; an ImportError is a harness bug, not a RED.\n\n"
+    goal = (
+        f"for project {ORG_PROJECT}, implement GitHub issue #{n} exactly per the audited "
+        f"charter below.\n\n"
+        "GIT CONTRACT:\n"
+        f"1. Work on a branch cut from origin/{branch} (tip {base}); verify with "
+        f"git rev-parse origin/{branch}. Suggested branch name: issue/{n}-work.\n"
+        f"2. Commit only the declared touched_paths; the PR base branch is {branch}, NEVER main.\n"
+        "3. Evidence contract: the plan's worker-executable evidence goes in the PR description; "
+        "anything the plan assigns to the HOST harness is NOT yours — do not attempt it and do "
+        "not claim it.\n\n"
         "CHARTER (audited plan, gate-approved GO):\n\n" + plan_body[:12000]
     )
-    prep = bridge("/effort/prepare", {"effort_id": effort_id, "request": request, "risk": "routine"})
-    print(f"dispatched issue #{n} as {effort_id} — prepare said:")
-    print(json.dumps(prep, indent=1)[:600])
+    req = urllib.request.Request(f"{BRIDGE_URL}/nl",
+                                 data=json.dumps({"message": goal}).encode(),
+                                 headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=120) as resp:
+        out = json.loads(resp.read().decode() or "{}")
+    print(f"dispatched issue #{n} via /nl — bridge said: {json.dumps(out)[:300]}")
     p = plan_path(n)
     p.write_text(p.read_text(encoding="utf-8").replace("status: planned", "status: executing", 1),
                  encoding="utf-8")
