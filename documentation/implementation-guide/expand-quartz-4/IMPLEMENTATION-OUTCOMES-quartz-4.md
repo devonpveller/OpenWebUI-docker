@@ -225,3 +225,65 @@ layer links.
   `POST /recompile` (key via `x-brain-key` header from `$MCP_ACCESS_KEY`).
 - Migrations are mounted in compose but **only run on a fresh volume** — live DBs
   need the runbook's manual psql apply (G3).
+
+---
+
+## 7. Production hardening pass (2026-08-23)
+
+Six reported production issues audited + fixed on OB1 branch
+`feature/wiki-production-hardening` (5 commits, deployed same day; parent
+`scripts/checks/test-quartz4-offline.ps1` extended to cover the new suites).
+
+**The keystone defect — unconditional regeneration.** Every compile re-ran a
+full LLM synthesis for EVERY active notebook (~179 calls/compile) and rewrote
+~1,081 byte-identical files (fresh `generated_at` each run); the viewer's
+polling watcher then rebuilt + snapshotted 746MB every ~3min (measured: 102GB
+disk writes/6h, ~30% CPU steady). Fixes: `recipes/_shared/write-if-changed.mjs`
+everywhere (Stable variant ignores volatile `generated_at`-only diffs);
+`input_hash` in hub frontmatter skips LLM + rewrite when inputs are unchanged
+(`PROMPT_VERSION` bump forces a one-time regen wave); entrypoint snapshots via
+`rsync --link-dest` hardlinks.
+
+**Citations** — ONE grammar in `recipes/_shared/citations.mjs` (shared by
+entity/notebook/leaf emitters, 10 unit tests): grouped brackets (`[S1, S3]`,
+`[Source 1, 2]`, `[Sources 1 and 2]`) now link; the notebook prompt speaks
+S-tokens (never UUIDs — restoring the plan §Phase-1 contract; the UUID-
+transcription prompt was the raw `[S:uuid…]` root cause); unknown markers stay
+plain text (the `++extra` hallucinated-uuid linking is gone).
+
+**Report templates** — `report_type` flows harness → curator → 
+`sources.metadata` → leaf frontmatter; the curator stamp merges (never nulls
+good `prose_synthesis`); persist supersede drops the previous run's render
+keys; hub synthesis reads `prose_synthesis` (templated report) as input.
+
+**Sweeps** — entity kept-set now counts `source_entities`
+(tombstone-filtered) like candidate selection: source-only entities were
+being written and deleted in the SAME compile. Limit-capped kept-set queries
+skip the sweep. Failed entity generations land in `.failed-entity-ids.json`
+and are retried next compile (before: watermark advanced anyway → pages froze
+stale forever; how the J.1 26h 401 outage left permanent gaps).
+
+**Notes latency** — change-watch also counts dirty note-tree files (a note is
+a FILE first; the DB poll never saw it → "overnight" latency). serve.mjs
+tells misses apart: just-created (md exists, <1h) → auto-refreshing building
+page + prompt-publish; registered-but-unbuilt → honest "Queued for synthesis"
+page from the compiler's `planned.json` (the truthful wiki-filler queue);
+else the real 404.
+
+**Viewer perf** — `serve.mjs` rewritten async with ETag/Last-Modified + 304s
+(no-cache stays, revalidation is now ~free); dev hot-reload client no longer
+injected (`WIKI_HOT_RELOAD=1` to re-enable); `static/graphIndex.json` derived
+at publish time (contentIndex minus page content — 45MB → ~5MB) feeds
+graph/explorer/autocomplete, search lazily fetches the full index on first
+open; `graph.inline.ts` is now a FORKED overlay file (sha-guarded against
+QUARTZ_REF drift): O(1) data prep (was ~4.5e9 ops at 15k nodes/74k edges —
+the minutes-long fullscreen graph), global view drops `source/`+`thought/`
+provenance leaves and caps at the 2,000 most-connected nodes, 2×DPR labels,
+link redraw stops when the simulation cools. Explorer state fixes: an
+auto-opened current-path folder is recorded as open (the "snaps back" bug);
+saved collapse state survives snapshot swaps.
+
+**Still open (deliberately deferred)**: UI-1 wheel-scroll CSS fix (the JS
+workaround from 038dfc1 is kept — needs a browser check); Explorer
+virtualization; production (minified) Quartz build migration; hub
+transclusion of full reports.
