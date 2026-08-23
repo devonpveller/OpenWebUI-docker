@@ -302,6 +302,13 @@ def handle(msg: dict):
 
 
 def main() -> None:
+    # MCP frames are UTF-8 JSON; Windows stdio defaults to cp1252, which
+    # mangled every emoji/em-dash on its way to Mattermost (operator report
+    # 2026-08-23: posts rendering as mojibake). Force UTF-8 both directions.
+    if hasattr(sys.stdin, "reconfigure"):
+        sys.stdin.reconfigure(encoding="utf-8", errors="replace")
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     for line in sys.stdin:
         line = line.strip()
         if not line:
