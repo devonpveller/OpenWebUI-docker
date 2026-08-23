@@ -39,6 +39,10 @@ jobs:
       # (2026-08-21) the workspace is one anchor + per-plane compose projects;
       # validate every one of them. (OB1 is a submodule with its own gitignored
       # env — not checked out here; agent-org likewise carries its own env.)
+      # Plane files also declare env_file: .env for CONTAINER env — `config`
+      # stats that file, which exists on the host but not on a runner. Stub it
+      # from the example (found 2026-08-23 by PR #28, the first PR through CI).
+      - run: cp .env.example .env
       - run: docker compose --env-file .env.example config -q
       - run: docker compose -f inference/docker-compose.yml --env-file .env.example config -q
       - run: docker compose -f frontend/docker-compose.yml --env-file .env.example config -q
