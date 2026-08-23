@@ -540,7 +540,7 @@ def cmd_gate_plan(n: int) -> int:
               f"origin/{branch} {tip[:9]} — run: plan {n} --refresh")
         return 1
     prompt = PLAN_GATE_PROMPT.format(
-        n=n, base=meta.get("base_sha", "?")[:9], branch=branch, plan=meta["body"][:12000])
+        n=n, base=meta.get("base_sha", "?")[:9], branch=branch, plan=meta["body"][:20000])
     print(f"plan-gating issue #{n} via independent claude review…")
     r = subprocess.run([_claude_bin(), "-p", prompt, "--allowedTools", "Read,Glob,Grep"],
                        capture_output=True, text=True, cwd=ROOT, timeout=1200)
@@ -553,6 +553,54 @@ def cmd_gate_plan(n: int) -> int:
     print(out_text[:800])
     print(f"\nverdict saved: {out} — GO unblocks dispatch; NO-GO goes back to the planner.")
     return 0 if "## Plan verdict: GO" in out_text else 2
+
+
+BRIDGE_URL = "http://127.0.0.1:8830"  # agent-bridge NL inlet (same one the gym drives)
+ORG_PROJECT = "ai-stack"              # the deployed repo as an org project
+
+
+def cmd_execute(n: int) -> int:
+    """M.7 dispatch: hand a GO-stamped plan to the agent-org as a governed goal.
+    The org DRIVES (local model, isolated workers, PR delivery); Claude never
+    implements. Hard preconditions: gate-plan GO artifact + no focus lock."""
+    import urllib.request
+    lock = focus_get()
+    if lock:
+        print(f"QUEUED: focus lock is set ({lock.get('focus')}) — execution waits (M.6)")
+        return 1
+    meta = read_plan(n)
+    if not meta:
+        print(f"no plan for issue #{n} — run: plan {n}")
+        return 1
+    gate_file = PLANS / f"gate-plan-{n}.md"
+    if not gate_file.is_file() or "## Plan verdict: GO" not in gate_file.read_text(encoding="utf-8"):
+        print(f"REFUSED: no GO verdict at {gate_file} — run: gate-plan {n} first (M.7 gate #1)")
+        return 1
+    # charter = the plan body inline: worker clones track origin/<target_branch>,
+    # which generally does NOT contain documentation/issue-plans yet.
+    title = meta.get("title", f"issue {n}")
+    goal = (
+        f"for project {ORG_PROJECT}, work GitHub issue #{n}: {title}. "
+        f"Branch from {meta.get('target_branch', 'development')} (base {meta.get('base_sha', '')[:9]}); "
+        "deliver a PR into that branch — NEVER push to development or main directly. "
+        "Scope is ONLY this issue. Tests must go RED at base before the fix and GREEN after; "
+        "include both runs as evidence in the PR description. Live-stack validation is NOT yours: "
+        "the host-side harness runs it after your PR (your environment cannot see the live "
+        "containers, by design).\n\nCHARTER (the audited plan — follow it):\n"
+        + meta["body"][:9000]
+    )
+    req = urllib.request.Request(f"{BRIDGE_URL}/nl",
+                                 data=json.dumps({"message": goal}).encode(),
+                                 headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=120) as resp:
+        body = json.loads(resp.read().decode() or "{}")
+    print(f"dispatched issue #{n} to the org via /nl — bridge said:")
+    print(json.dumps(body, indent=1)[:1200])
+    p = plan_path(n)
+    p.write_text(p.read_text(encoding="utf-8").replace("status: planned", "status: executing", 1),
+                 encoding="utf-8")
+    print("plan status → executing. Watch the org's project channel; on PR: gate <PR#> then t2.")
+    return 0
 
 
 PLANES = {  # plane → (compose file, compose project name for native-network name resolution)
@@ -703,6 +751,7 @@ def main() -> int:
     p = sub.add_parser("radar"); p.add_argument("n", type=int)
     p = sub.add_parser("gate"); p.add_argument("n", type=int)
     p = sub.add_parser("gate-plan"); p.add_argument("n", type=int)
+    p = sub.add_parser("execute"); p.add_argument("n", type=int)
     p = sub.add_parser("focus"); p.add_argument("action", choices=["show", "set", "clear"]); p.add_argument("arc", nargs="?")
     sub.add_parser("seed")
     p = sub.add_parser("t2")
@@ -720,6 +769,8 @@ def main() -> int:
         return cmd_gate(a.n)
     if a.cmd == "gate-plan":
         return cmd_gate_plan(a.n)
+    if a.cmd == "execute":
+        return cmd_execute(a.n)
     if a.cmd == "seed":
         return cmd_seed()
     if a.cmd == "t2":
