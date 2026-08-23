@@ -617,7 +617,14 @@ def cmd_execute(n: int) -> int:
     eff = bridge("/effort", {"name": slug})
     effort_id = eff.get("effort_id", f"effort-{slug}")
     out = bridge("/nl", {"message": f"for effort {effort_id}: {goal}"})
-    print(f"dispatched issue #{n} as {effort_id} — bridge said: {json.dumps(out)[:200]}")
+    # the readiness/risk plane must run or the effort sits undispatched
+    # (learned twice: a named effort without /effort/prepare just stalls).
+    prep = bridge("/effort/prepare", {
+        "effort_id": effort_id,
+        "request": f"Implement issue #{n} per the steered charter (see goal).",
+        "risk": "routine"})
+    print(f"dispatched issue #{n} as {effort_id} — nl {json.dumps(out)[:120]} | "
+          f"prepare may_execute={prep.get('may_execute')}")
     p = plan_path(n)
     p.write_text(p.read_text(encoding="utf-8").replace("status: planned", "status: executing", 1),
                  encoding="utf-8")
