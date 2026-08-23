@@ -10,6 +10,18 @@ def test_default_classes_ordering():
     assert p.classify("ob-entity").max_concurrency == 2
 
 
+def test_ob_digest_lane():
+    # #27: openbrain-digest is wired to the gateway (LOCAL_LLM_BEARER /
+    # OB_DIGEST_LLM_KEY) and gets its own batch lane — rank 3, generous wait
+    # budget, capped so a digest burst can't starve interactive callers.
+    p = build_policy("", default_wait_s=120.0)
+    cls = p.classify("ob-digest")
+    assert cls.name == "ob-digest"
+    assert cls.rank == 3
+    assert cls.acceptable_wait_s == 600.0
+    assert cls.max_concurrency == 2
+
+
 def test_unknown_key_is_default():
     p = build_policy("", default_wait_s=120.0)
     cls = p.classify("some-random-junk-key")

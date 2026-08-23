@@ -61,7 +61,8 @@ a caller identity llm-queue can trust.
 | `smolcrawl-pipelines` | — | (VALIDATED 2026-08-21: does NOT call the gateway — its LLM work goes through OWUI; no key needed) |
 | `open_notebook` | — | model config in its SurrealDB, **encrypted with `OPEN_NOTEBOOK_ENCRYPTION_KEY`** — update via its UI, not the DB |
 | `little-coder` / workers | `lc-coder` (prio 2) | `little-coder/config/little-coder.config.yaml` + compose env (recreate ao-workers after — they keep stale env, see `ao-worker-stale-deploy-token` memory) |
-| OB1 services (research, entity/suggestion/chunk workers, digest, podcast, wiki, workbench, mcp, extract) | `ob-mcp`/`ob-entity`/`ob-wiki`/`ob-research`/`ob-podcast` | `OB1/docker/.env` + compose env (one shared var per lane) |
+| OB1 services (research, entity/suggestion/chunk workers, podcast, wiki, workbench, mcp, extract) | `ob-mcp`/`ob-entity`/`ob-wiki`/`ob-research`/`ob-podcast` | `OB1/docker/.env` + compose env (one shared var per lane) |
+| OB1 **digest** (openbrain-digest) | `ob-digest` (prio 3, added #27) | `OB1/docker/.env` `OB_DIGEST_LLM_KEY` → `LOCAL_LLM_BEARER` in `docker-compose.scheduled.yml` — **MISSED at cutover**: the row above claimed digest was covered, but the service had no key wired (it rode the recipe's `no-key` default); fixed 2026-08-23 (#27) |
 | agent-org bridge (advisory/research) | — | `agent-org/docker/.env` |
 | Embeddings callers (same services) | routed by model to embed upstream | same keys ride along |
 

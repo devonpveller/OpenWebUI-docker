@@ -80,6 +80,9 @@ _DEFAULT_CLASSES: dict[str, PriorityClass] = {
     "ob-research": PriorityClass("ob-research", rank=3, acceptable_wait_s=1800.0,
                                  max_concurrency=2),
     "ob-podcast": PriorityClass("ob-research", rank=3, acceptable_wait_s=1800.0, max_concurrency=2),
+    # Morning digest lane (openbrain-digest: weather brief, synthesizer, semantic
+    # search) — wired to the gateway in #27 (LOCAL_LLM_BEARER / OB_DIGEST_LLM_KEY).
+    "ob-digest": PriorityClass("ob-digest", rank=3, acceptable_wait_s=600.0, max_concurrency=2),
 }
 
 
