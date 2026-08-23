@@ -55,6 +55,12 @@ snapshots + `manifest.csv` (file → OWUI id; skills included).
 - **Git:** never commit or push on the user's behalf unless explicitly asked.
   Hooks live in `.githooks/` (`git config core.hooksPath .githooks`): secret
   guard, LF check, gateway-routing check, compose/ps1 structural check.
+- **Worktree-per-session (operator policy, 2026-08-23):** when multiple
+  Claude sessions run in parallel, each session that MUTATES git state works
+  in its own `git worktree` and merges back deliberately — never several
+  sessions committing in one checkout (a shared tree let one session's broad
+  `git add` sweep another's dirty OB1 gitlink into an unrelated commit).
+  The main checkout is the operator's; read-only work there is fine.
 - **Branch policy (operator, 2026-08-22):** `main` is UNTOUCHED — the
   deliverable, representing the known-good ai-stack; `development` is the
   LIVE-HOSTED deployment line; all work happens on feature/work branches cut
