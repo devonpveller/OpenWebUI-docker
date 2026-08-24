@@ -1,15 +1,18 @@
-﻿# Enhanced Tailscale Health Check and Recovery Service for Windows
+# Enhanced Tailscale Health Check and Recovery Service for Windows
 # This script provides autonomous management of Tailscale connectivity
 
 [CmdletBinding()]
 param(
     [Parameter(Mandatory=$false)]
-    [ValidateSet("check", "daemon", "install-service")]
+    [ValidateSet("check", "daemon", "install-task", "install-service")]
     [string]$Mode = "check",
     
     [Parameter(Mandatory=$false)]
     [ValidateRange(10, 3600)]
-    [int]$IntervalSeconds = 60
+    [int]$IntervalSeconds = 60,
+    
+    [Parameter(Mandatory=$false)]
+    [string]$InstallTaskName = "StackWatchdog"
 )
 
 # Set strict error handling
@@ -20,7 +23,6 @@ $ProgressPreference = "SilentlyContinue"
 $SCRIPT_DIR = Split-Path -Parent $PSCommandPath
 $PROJECT_DIR = Split-Path -Parent (Split-Path -Parent $PSCommandPath) | Split-Path -Parent
 $LOG_FILE = Join-Path $PROJECT_DIR "logs\tailscale-health.log"
-$SERVICE_NAME = "TailscaleHealthMonitor"
 
 # --- docker compose stderr guard (added 2026-06-05) ---------------------------
 # The caddy service references ${WORKBENCH_KEY} (docker-compose.yml). When that
@@ -29,7 +31,7 @@ $SERVICE_NAME = "TailscaleHealthMonitor"
 # with $ErrorActionPreference='Stop' above, the first docker call that redirects
 # stderr (e.g. `docker compose logs ... 2>$null` in Test-EntrypointHealth) turns
 # that benign warning into a TERMINATING error (PS 5.1 native-stderr gotcha) and
-# the whole health check aborts at step 1 — the window just flashes and exits 1,
+# the whole health check aborts at step 1 -- the window just flashes and exits 1,
 # checking/repairing nothing. Defining the var here silences the warning at the
 # source for every docker invocation this script makes. This only
 # affects this script's own process env; it does NOT modify .env or any container.
@@ -37,7 +39,7 @@ $SERVICE_NAME = "TailscaleHealthMonitor"
 # The value is a non-empty PLACEHOLDER, not the real key: Windows cannot store an
 # empty env var (PowerShell deletes it on `=''`), and docker only suppresses the
 # "is not set" warning for a DEFINED, non-empty value. This monitor never creates
-# or recreates the caddy service (the sole consumer of WORKBENCH_KEY — it is not
+# or recreates the caddy service (the sole consumer of WORKBENCH_KEY -- it is not
 # in the monitor's managed-service list), so this placeholder never reaches caddy;
 # and even if it somehow did, a wrong key makes caddy reject /workbench (fail
 # closed). A real value present in the environment (e.g. a manual run from a
@@ -297,7 +299,7 @@ function Test-EntrypointHealth {
         # Check for common Docker build issues in logs. Isolated in its own
         # try/catch: a failure to READ the logs (docker stderr, daemon hiccup)
         # must NOT be misread as "entrypoint invalid" and abort the whole health
-        # check — that exact misclassification (a docker stderr warning bubbling
+        # check -- that exact misclassification (a docker stderr warning bubbling
         # up under -Stop) is what crashed every run before 2026-06-05.
         try {
             # cmd /c merges the streams BEFORE PowerShell sees them - the tailscale
@@ -452,7 +454,7 @@ function Test-OpenTerminalHealth {
     param()
 
     try {
-        # open-terminal is the little-coder workspace plane — it left openwebui's
+        # open-terminal is the little-coder workspace plane -- it left openwebui's
         # network namespace (it is on lc-net / llm-net now), so probe it INSIDE
         # its own container, not via openwebui's localhost:8000.
         $Response = docker exec open-terminal curl -s -o /dev/null -w "%{http_code}" http://localhost:8000/health 2>$null
@@ -493,7 +495,7 @@ function Repair-OpenTerminal {
 # Generic helper: ensure a non-critical compose container is running.
 # Uses Test-ServiceHealth (which reads docker's compose-defined healthcheck
 # status, or just the running state for containers without a healthcheck).
-# Used for mnemory and the backup sidecars —
+# Used for mnemory and the backup sidecars --
 # none are required for the core OpenWebUI/Tailscale/LLM path, so failures
 # are logged but do not fail the overall health check.
 function Confirm-AuxiliaryContainer {
@@ -524,7 +526,7 @@ function Confirm-AuxiliaryContainer {
 
 # Function to test llama-cpp connectivity
 function Test-LlamaCppConnectivity {
-    # Skip the exec probe if the container isn't running — `docker compose exec`
+    # Skip the exec probe if the container isn't running -- `docker compose exec`
     # against a stopped service writes to stderr, which (with ErrorActionPreference
     # = "Stop" at the top of this script) bubbles up as a thrown exception and
     # lands in the catch block as a misleading [ERROR]. A stopped container is
@@ -555,14 +557,14 @@ function Test-LlamaCppConnectivity {
 # IMPORTANT: llama.cpp server's HTTP handler stalls /health and /v1/models while
 # embedding requests are in flight (verified: /health times out at 30s, but
 # /v1/embeddings keeps returning 200 in the logs). So a /health timeout does
-# NOT mean the container is dead — it just means it's busy. We use a two-stage
+# NOT mean the container is dead -- it just means it's busy. We use a two-stage
 # probe: try /health quickly; if it stalls, fall back to scanning recent logs
 # for active embedding traffic. Docker's healthcheck has the same blind spot
 # and frequently marks this container "unhealthy" while it is in fact serving.
 function Test-LlamaCppEmbedConnectivity {
     # Stage 0: container must be running. Note we deliberately DO NOT require
     # Health -ne "unhealthy" here (Test-ServiceHealth does), because the docker
-    # healthcheck false-positives under load — see comment above.
+    # healthcheck false-positives under load -- see comment above.
     $Status = $null
     try {
         $InspectJson = docker inspect llama-cpp-embed-upstream --format '{{json .State}}' 2>$null
@@ -574,7 +576,7 @@ function Test-LlamaCppEmbedConnectivity {
         return $false
     }
 
-    # Stage 1: quick /health probe. Short timeout — we don't want to block the
+    # Stage 1: quick /health probe. Short timeout -- we don't want to block the
     # monitor for 30 s on every cycle when the server is busy.
     try {
         Write-LogEntry "Testing llama-cpp-embed connectivity..." "DEBUG"
@@ -586,7 +588,7 @@ function Test-LlamaCppEmbedConnectivity {
     } catch { }
 
     # Stage 2: /health didn't answer. Scan recent logs for active embedding
-    # traffic — if the server has served an embedding request in the last 2 min
+    # traffic -- if the server has served an embedding request in the last 2 min
     # it is alive, just blocked on inference. Patterns match llama.cpp server's
     # request-completion lines ("done request: POST /v1/embeddings ... 200")
     # and slot lifecycle markers.
@@ -777,7 +779,7 @@ function Invoke-OpenBrainHealth {
 
 # agent-org is a SEPARATE compose project (project=agent-org); this monitor's
 # `docker compose` (ai-stack) can't see it. Delegate to the canonical by-name
-# probe scripts\check-agent-org-health.ps1 — same pattern as Open Brain. It
+# probe scripts\check-agent-org-health.ps1 -- same pattern as Open Brain. It
 # guards the agent-bridge stale-DB-pool + the ao-git-egress stale-mount classes.
 # -Repair auto-restarts/recreates broken pieces; -Quiet keeps per-OK lines out of
 # the loop; -LogPath routes its detail into this monitor's log.
@@ -803,7 +805,7 @@ function Invoke-AgentOrgHealth {
 # Function to perform comprehensive health check
 # --- HOST Tailscale daemon (a separate tailnet node from the container!) ---
 # 2026-07-05: after an OOM-crash reboot the host daemon sat in 'NoState' (the
-# tray app was not running and unattended mode was not yet enabled) — the
+# tray app was not running and unattended mode was not yet enabled) -- the
 # operator's remote access was dead while every container-side check passed.
 # Detect and best-effort repair by (re)starting the tray app; the daemon-level
 # fix (unattended mode) is set, this is the belt-and-braces layer.
@@ -1021,7 +1023,7 @@ function Confirm-ClaudeSessionsBridge {
 # --- Backup recency: an "Up" sidecar can still produce nothing ------------
 # The backup scripts precheck-skip with exit 0 (deliberately: never tar broken
 # state), so a wrong probe target means NO artifacts and NO error. That let
-# five sidecars go silent for ~5 weeks (2026-05-29 → 07-05) unnoticed. This
+# five sidecars go silent for ~5 weeks (2026-05-29 -> 07-05) unnoticed. This
 # watches the OUTPUT instead: newest artifact per backups/<dir> must be
 # younger than its cadence allows. Alerts to the log + Mattermost (throttled).
 $ExpectedBackupRecency = @(
@@ -1359,7 +1361,7 @@ function Invoke-HealthCheck {
         }
     }
     
-    # HOST tailscale node (operator remote access) — independent of the
+    # HOST tailscale node (operator remote access) -- independent of the
     # container node checked above; non-fatal but repairs + logs loudly.
     Test-HostTailscaleBackend | Out-Null
 
@@ -1402,18 +1404,18 @@ function Invoke-HealthCheck {
         }
     }
 
-    # Verify remaining compose containers (non-critical — log + attempt recovery
+    # Verify remaining compose containers (non-critical -- log + attempt recovery
     # but do not fail the overall health check). Order matters: mnemory depends
     # on llama-cpp + llama-cpp-embed, which are confirmed healthy above.
     Confirm-AuxiliaryContainer -ServiceName "mnemory"            -RestartWaitSeconds 20 | Out-Null
     Confirm-AuxiliaryContainer -ServiceName "mnemory-backup"      -RestartWaitSeconds 10 | Out-Null
     Confirm-AuxiliaryContainer -ServiceName "openwebui-backup"    -RestartWaitSeconds 10 | Out-Null
     # surrealdb has no HTTP healthcheck (WS-only); just verify the container is up.
-    # open_notebook gets a real API probe below — surrealdb must be up first since
+    # open_notebook gets a real API probe below -- surrealdb must be up first since
     # open_notebook depends on it.
     Confirm-AuxiliaryContainer -ServiceName "surrealdb"           -RestartWaitSeconds 10 | Out-Null
 
-    # Test open-notebook API independently (separate from running-state check —
+    # Test open-notebook API independently (separate from running-state check --
     # the FastAPI process can be unresponsive while the container is still up).
     # Non-fatal: notebook UI is non-critical for the core LLM/RAG path.
     if (-not (Test-OpenNotebookHealth)) {
@@ -1423,7 +1425,7 @@ function Invoke-HealthCheck {
         }
     }
 
-    # --- Private web-search gateway plane (SearXNG-over-Tor) — non-critical ---
+    # --- Private web-search gateway plane (SearXNG-over-Tor) -- non-critical ---
     # Compose SERVICE keys differ from container names here: service tor ->
     # redis -> search-redis, gateway -> search-gateway (tor retired 2026-08-21). Probe /readyz first (covers the whole plane); only ensure the
     # individual containers if it is not ready.
@@ -1440,7 +1442,7 @@ function Invoke-HealthCheck {
         Confirm-AuxiliaryContainer -ServiceName "gateway" -RestartWaitSeconds 15 | Out-Null
     }
 
-    # --- little-coder plane (autonomous coding agent) — non-critical ---
+    # --- little-coder plane (autonomous coding agent) -- non-critical ---
     # open-terminal (checked above) is its workspace; these are the agent + its
     # MCP-as-OpenAPI bridge + the egress proxy.
     Confirm-AuxiliaryContainer -ServiceName "little-coder" -RestartWaitSeconds 15 | Out-Null
@@ -1460,7 +1462,7 @@ function Invoke-HealthCheck {
 
     # --- remaining main-stack backup sidecars (cron loops; mnemory-backup and
     # openwebui-backup are confirmed above; portal backups (caddy/authelia) are
-    # deliberately NOT here — the portal has its own lifecycle (portal-on/off)
+    # deliberately NOT here -- the portal has its own lifecycle (portal-on/off)
     # and must not be auto-started; OB/agent-org backups live in their own
     # Invoke-*Health blocks. Test-BackupRecency below watches everyone's OUTPUT.
     Confirm-AuxiliaryContainer -ServiceName "little-coder-backup"  -RestartWaitSeconds 10 | Out-Null
@@ -1513,26 +1515,26 @@ function Start-Daemon {
     }
 }
 
-# Function to install as Windows Service
-function Install-WindowsService {
-    $ServicePath = "powershell.exe -File `"$($MyInvocation.MyCommand.Path)`" -Mode daemon"
+# Function to install as a Scheduled Task (issue #36)
+# A .ps1 cannot be a Windows Service: it cannot answer the Service Control
+# Manager handshake, so the old install-service mode could never start
+# (error 1053). The live StackWatchdog registration is a Scheduled Task.
+function Install-ScheduledTask {
+    # $PSCommandPath, not $MyInvocation.MyCommand (a FunctionInfo inside a function, whose Path is $null): the task would otherwise register with -File '' and never run.
+    $TaskAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`""
+    # Mirrors the live StackWatchdog registration captured 2026-08-23: time trigger, every 10 minutes, indefinite.
+    $TaskTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 10)
+    $TaskSettings = New-ScheduledTaskSettingsSet
+    $TaskPrincipal = New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive
     
-    # Check if service already exists
-    if (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue) {
-        Write-LogEntry "Service $ServiceName already exists. Removing first..."
-        Stop-Service -Name $ServiceName -Force
-        sc.exe delete $ServiceName
-        Start-Sleep 5
+    # Refuse to clobber: the script never removes an existing task (the live one is a lifeline).
+    if (Get-ScheduledTask -TaskName $InstallTaskName -ErrorAction SilentlyContinue) {
+        Write-LogEntry "Scheduled task '$InstallTaskName' already exists -- remove it deliberately first, then re-run -Mode install-task" "ERROR"
+        exit 1
     }
     
-    # Create the service
-    Write-LogEntry "Installing Windows Service: $ServiceName"
-    sc.exe create $ServiceName binPath= $ServicePath start= auto
-    sc.exe description $ServiceName "Autonomous Tailscale Health Monitor for AI Stack"
-    
-    # Start the service
-    Start-Service -Name $ServiceName
-    Write-LogEntry "Service installed and started successfully"
+    Register-ScheduledTask -TaskName $InstallTaskName -Action $TaskAction -Trigger $TaskTrigger -Settings $TaskSettings -Principal $TaskPrincipal -Description "ai-stack watchdog (scripts/checks/stack-watchdog.ps1), every 10 minutes" | Out-Null
+    Write-LogEntry "Scheduled task '$InstallTaskName' registered (every 10 minutes, current user)" "SUCCESS"
 }
 
 # Main execution logic
@@ -1546,21 +1548,23 @@ switch ($Mode.ToLower()) {
         Start-Daemon
     }
     
+    "install-task" {
+        Install-ScheduledTask
+    }
+    
     "install-service" {
-        if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
-            Write-LogEntry "Administrator privileges required to install service" "ERROR"
-            exit 1
-        }
-        Install-WindowsService
+        Write-LogEntry "-Mode install-service is deprecated (a .ps1 cannot run as a Windows Service); registering the Scheduled Task instead -- use -Mode install-task" "WARN"
+        Install-ScheduledTask
     }
     
     default {
-        Write-Host "Usage: stack-watchdog.ps1 [-Mode check|daemon|install-service] [-IntervalSeconds 60]"
+        Write-Host "Usage: stack-watchdog.ps1 [-Mode check|daemon|install-task|install-service] [-IntervalSeconds 60]"
         Write-Host ""
         Write-Host "Modes:"
         Write-Host "  check           - Run single health check (default)"
         Write-Host "  daemon          - Run continuously as daemon"
-        Write-Host "  install-service - Install as Windows Service (requires admin)"
+        Write-Host "  install-task    - register the StackWatchdog Scheduled Task, every 10 min, as the current user"
+        Write-Host "  install-service - deprecated alias for install-task (a .ps1 cannot run as a Windows Service)"
         exit 1
     }
 }
