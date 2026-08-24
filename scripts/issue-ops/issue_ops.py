@@ -52,6 +52,12 @@ DEFAULTS = {
     # A plan goes stale when the remote target tip moved more than this many
     # commits past its base_sha, or when the issue was edited after planning.
     "stale_after_commits": 15,
+    # Model tiering (operator direction 2026-08-24): pipeline machinery
+    # (planner, gates) runs Opus 5; long-horizon harness/architecture work
+    # stays with the interactive Fable session. Override per-install in
+    # config.json.
+    "planner_model": "claude-opus-5",
+    "gate_model": "claude-opus-5",
 }
 
 
@@ -330,7 +336,7 @@ def cmd_plan(n: int, refresh: bool = False) -> int:
     )
     print(f"planning issue #{n} via headless claude (base {base[:9]} on {branch})…")
     r = subprocess.run(
-        [_claude_bin(), "-p", "--allowedTools", "Read,Glob,Grep"], input=prompt,
+        [_claude_bin(), "-p", "--model", cfg()["planner_model"], "--allowedTools", "Read,Glob,Grep"], input=prompt,
         capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=ROOT, timeout=1800,
     )
     out = (r.stdout or "").strip()
@@ -485,7 +491,7 @@ def cmd_gate(pr_n: int) -> int:
         files="\n".join(files[:60]), diff=diff,
     )
     print(f"gating PR #{pr_n} via independent claude review…")
-    r = subprocess.run([_claude_bin(), "-p", "--allowedTools", "Read,Glob,Grep"], input=prompt,
+    r = subprocess.run([_claude_bin(), "-p", "--model", cfg()["gate_model"], "--allowedTools", "Read,Glob,Grep"], input=prompt,
                        capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=ROOT, timeout=1200)
     verdict = (r.stdout or "").strip()
     if "## Verdict" not in verdict:
@@ -547,7 +553,7 @@ def cmd_gate_plan(n: int) -> int:
     prompt = PLAN_GATE_PROMPT.format(
         n=n, base=meta.get("base_sha", "?")[:9], branch=branch, plan=meta["body"][:20000])
     print(f"plan-gating issue #{n} via independent claude review…")
-    r = subprocess.run([_claude_bin(), "-p", "--allowedTools", "Read,Glob,Grep"], input=prompt,
+    r = subprocess.run([_claude_bin(), "-p", "--model", cfg()["gate_model"], "--allowedTools", "Read,Glob,Grep"], input=prompt,
                        capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=ROOT, timeout=1200)
     out_text = (r.stdout or "").strip()
     if "## Plan verdict" not in out_text:
