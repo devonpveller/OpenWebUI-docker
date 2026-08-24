@@ -526,7 +526,7 @@ function Confirm-AuxiliaryContainer {
 
 # Function to test llama-cpp connectivity
 function Test-LlamaCppConnectivity {
-    # Skip the exec probe if the container isn't running -- `docker compose exec`
+    # Omit the exec probe if the container isn't running -- `docker compose exec`
     # against a stopped service writes to stderr, which (with ErrorActionPreference
     # = "Stop" at the top of this script) bubbles up as a thrown exception and
     # lands in the catch block as a misleading [ERROR]. A stopped container is
