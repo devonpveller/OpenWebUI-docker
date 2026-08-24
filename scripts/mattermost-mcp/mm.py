@@ -33,6 +33,7 @@ def main() -> None:
     r.add_argument("--since", type=int)
     r.add_argument("--exclude-self", action="store_true")
     r.add_argument("--channel")
+    r.add_argument("--thread", help="only posts in this thread (root post id)")
     p = sub.add_parser("post")
     p.add_argument("message")
     p.add_argument("--channel")
@@ -49,10 +50,12 @@ def main() -> None:
     w.add_argument("--timeout", type=int, default=2700, help="give up after N seconds (exit 2)")
     w.add_argument("--interval", type=int, default=15, help="poll every N seconds")
     w.add_argument("--channel")
+    w.add_argument("--thread", help="only posts in this thread (root post id)")
     a = ap.parse_args()
     if a.cmd == "read":
         print(server.tool_read({"limit": a.limit, "since": a.since,
-                                "exclude_self": a.exclude_self, "channel": a.channel}))
+                                "exclude_self": a.exclude_self, "channel": a.channel,
+                                "thread": a.thread}))
     elif a.cmd == "post":
         print(server.tool_post({"message": a.message, "channel": a.channel, "thread_id": a.thread}))
     elif a.cmd == "channels":
@@ -64,7 +67,8 @@ def main() -> None:
         while time.time() < end:
             try:
                 out = server.tool_read({"exclude_self": True, "since": a.since,
-                                        "channel": a.channel, "limit": 20})
+                                        "channel": a.channel, "limit": 20,
+                                        "thread": getattr(a, "thread", None)})
                 consecutive_errors = 0
                 if not out.startswith("(no messages"):
                     print(out)

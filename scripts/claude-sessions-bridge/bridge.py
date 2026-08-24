@@ -333,6 +333,22 @@ def find_claude_bin() -> str:
 
 
 HEALTH_FILE = os.path.join(STATE_DIR, "health.json")
+CLAIMS_FILE = os.path.join(STATE_DIR, "claimed-threads.json")
+
+
+def claimed_threads() -> dict:
+    """Threads CLAIMED by external (terminal/VS Code) Claude sessions
+    (2026-08-24 session-separation fix): the bridge must NOT spawn or resume a
+    headless session for operator messages in a claimed thread — the claiming
+    session's own listener answers there. Claim = add the thread root id to
+    this JSON ({root_id: {"owner": label, ...}}); re-read every poll so claims
+    take effect without a bridge restart."""
+    try:
+        with open(CLAIMS_FILE, "r", encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
 
 
 def write_health(claude_bin: str, last_ok: float, last_err: str, fails: int) -> None:
@@ -354,25 +370,13 @@ def write_health(claude_bin: str, last_ok: float, last_err: str, fails: int) -> 
         pass
 
 
-def _read_env_value(name: str) -> str:
-    for p in (os.path.join(REPO, ".env"),
-              os.path.join(REPO, "agent-org", "docker", ".env")):
-        try:
-            with open(p, "r", encoding="utf-8", errors="ignore") as fh:
-                for line in fh:
-                    if line.startswith(name + "="):
-                        return line.split("=", 1)[1].strip()
-        except OSError:
-            continue
-    return ""
-
-
 def telegram_alert(text: str) -> bool:
     """Out-of-band escalation via the sysadmin Telegram channel (lock 48293's
     bot). Used when the MM-facing turn machinery itself is broken — an MM post
     would land in the same channel the operator already can't get answers in."""
-    tok = _read_env_value("SYSADMIN_TELEGRAM_BOT_TOKEN")
-    chat = _read_env_value("SYSADMIN_TELEGRAM_CHAT_ID")
+    envs = mm_lib.default_env_files()
+    tok = mm_lib.read_env_key("SYSADMIN_TELEGRAM_BOT_TOKEN", envs)
+    chat = mm_lib.read_env_key("SYSADMIN_TELEGRAM_CHAT_ID", envs)
     if not (tok and chat):
         return False
     try:
@@ -1745,6 +1749,13 @@ class Bridge:
             if not msg:
                 continue
             thread_root = p.get("root_id") or pid
+            claims = claimed_threads()
+            if thread_root in claims:
+                log(f"thread {thread_root[:8]} claimed by "
+                    f"{claims[thread_root].get('owner', 'external session')} — leaving to it")
+                audit({"event": "claimed_thread_skipped", "thread": thread_root,
+                       "owner": claims[thread_root].get("owner", "")})
+                continue
             # HUMAN ENGAGEMENT with the session renews its follows' idle window (a live operator
             # message means "still working" — keep the auto-wake alive; the bot's own posts never
             # count, which uid != me guarantees).
