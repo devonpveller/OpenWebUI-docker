@@ -75,3 +75,4 @@ scripts/sysadmin-mcp/bridge-state/
 scripts/sysadmin-mcp/telegram-state/
 *.egg-info/
 .env.test
+documentation/issue-plans/
