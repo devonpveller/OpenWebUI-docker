@@ -30,7 +30,9 @@ docker-compose.yml) and `update-stack.bat`.
   renamed from check-tailscale-health 2026-08-21). Covers: tailnet serves,
   all three compose projects, Docker-engine restart, backup recency,
   claude-bridge health, Telegram alerting. Log stays at
-  `logs/tailscale-health.log` for continuity.
+  `logs/tailscale-health.log` for continuity. Register/re-register with
+  `stack-watchdog.ps1 -Mode install-task` (refuses to overwrite an existing
+  task).
 - `check-openbrain-health.ps1`, `check-agent-org-health.ps1` — per-project
   probes (fanned out from the watchdog).
 - `check-backup-coverage.ps1` — every stateful path has a sidecar (manual).
@@ -67,6 +69,6 @@ in `../backup/`; conventions in
 
 ## One-time installers / alternates (checks/)
 
-`install-service.ps1` (registers the watchdog as a service/task),
+`stack-watchdog.ps1 -Mode install-task` (registers the StackWatchdog Scheduled Task; refuses to overwrite an existing task),
 `simple-monitor.ps1` (non-admin loop alternative to the StackWatchdog task),
 `setup-prereqs.ps1` (fresh-machine Docker/WSL2 prereq checks, self-elevating).
