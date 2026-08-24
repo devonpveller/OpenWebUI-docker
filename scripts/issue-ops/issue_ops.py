@@ -590,9 +590,15 @@ def cmd_execute(n: int) -> int:
     branch = meta.get("target_branch", "development")
     base = meta.get("base_sha", "")[:9]
     plan_body = re.sub(r"^---\n.*?\n---\n", "", meta["body"], flags=re.S)
+    slug = f"issue-{n}-" + re.sub(r"[^a-z0-9]+", "-", meta.get("title", "").lower())[:24].strip("-")
     goal = (
-        f"for project {ORG_PROJECT}, implement GitHub issue #{n} exactly per the audited "
-        f"charter below.\n\n"
+        # "start a new effort" is the documented similarity-matcher bypass
+        # (orchestrator.py:3991: "say 'new effort' if you truly want a separate
+        # one") — without it, goals get routed as STEERING into existing or
+        # even FROZEN efforts by vocabulary similarity (rail lesson 6: #36's
+        # goal registered NOWHERE, absorbed by the frozen #25 effort).
+        f"start a new effort {slug} on the {ORG_PROJECT} project. "
+        f"Implement GitHub issue #{n} exactly per the audited charter below.\n\n"
         "GIT CONTRACT:\n"
         f"1. Work on a branch cut from origin/{branch} (tip {base}); verify with "
         f"git rev-parse origin/{branch}. Suggested branch name: issue/{n}-work.\n"
