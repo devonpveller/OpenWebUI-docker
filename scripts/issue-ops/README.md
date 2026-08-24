@@ -48,3 +48,12 @@ House rules the pipeline enforces by construction: evidence before merge,
 `main` untouched, per-issue branches off `development`, maintenance-window
 awareness (weekly compaction Sun 03:15, disk-guard kill-switch) before any
 live-service action.
+
+**PUBLIC-SURFACE POSTURE (operator concern, 2026-08-24):** GitHub issues,
+PRs, and comments are (or may be) PUBLIC. Post only MINIMAL text there:
+one-line gate verdicts ("Gate: approved" / "Gate: changes requested —
+details internal"), terse issue bodies, no internal analyses, no
+infrastructure topology, file:line maps, key aliases, schedules, or
+evidence transcripts. Full gate analyses and evidence live in the local
+plan store and the operator's Mattermost thread ONLY. (If the repo is
+private this is defense-in-depth; if public it is mandatory.)
