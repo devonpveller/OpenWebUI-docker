@@ -477,7 +477,7 @@ services:
 
   caddy-backup:
     build:
-      context: ./backup
+      context: ../backup
       dockerfile: Dockerfile
       args:
         # UID 10000 matches Caddy's UID so the backup process can read all
@@ -491,7 +491,7 @@ services:
     volumes:
       - caddy-data:/data:ro
       - ../backups/caddy:/backups
-      - ./backup/caddy-backup.sh:/scripts/backup.sh:ro
+      - ../backup/caddy-backup.sh:/scripts/backup.sh:ro
     environment:
       - BACKUP_DIR=/backups
       - DATA_DIR=/data
@@ -532,7 +532,7 @@ services:
 
   authelia-backup:
     build:
-      context: ./backup
+      context: ../backup
       dockerfile: Dockerfile
       args:
         # UID 10001 matches Authelia's UID so the backup process can read
@@ -546,7 +546,7 @@ services:
     volumes:
       - authelia-data:/data:ro
       - ../backups/authelia:/backups
-      - ./backup/authelia-backup.sh:/scripts/backup.sh:ro
+      - ../backup/authelia-backup.sh:/scripts/backup.sh:ro
     environment:
       - BACKUP_DIR=/backups
       - DATA_DIR=/data
