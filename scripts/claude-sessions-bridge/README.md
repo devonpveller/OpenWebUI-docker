@@ -89,10 +89,16 @@ Manual foreground run (debugging): `& .venv\Scripts\python.exe scripts\claude-se
    switches without running a turn. **`bypassPermissions` is refused** both via directive and
    flag — that's the bridge's hard floor. Note: headless `auto` is somewhat more conservative
    than interactive auto (e.g. first-time file writes may still ask). `--setting-sources
-   user,project` excludes `settings.local.json`, so allow-rules accumulated in interactive
-   sessions don't widen what a remote message can do.
-3. **Hard gate** — every gated tool call stops for an explicit in-thread `approve`;
-   deny and timeout both return deny to Claude, which then adapts or wraps up.
+   user,project,local` (operator, 2026-08-28) means bridge sessions honour the **same**
+   `.claude/settings.local.json` allow-list as interactive ones — add or remove a rule once and
+   both follow it. (It previously excluded `local`; that left remote sessions with no
+   pre-approved commands at all, so every call fell to the classifier.)
+3. **Hard gate** — a gated tool call stops for an explicit in-thread `approve`; deny and
+   timeout both return deny to Claude, which then adapts or wraps up. **Caveat — the `auto`
+   classifier has three verdicts, not two:** allow, *ask* (→ relayed here for approve/deny),
+   and **deny outright**. A hard deny never reaches the relay, so `approve` cannot lift one —
+   the turn reports it in-thread with the rule to add. Only an allow-rule (or a non-classifier
+   `mode:`) gets that class of command to run.
 4. **Budget rails** — `--max-budget-usd` per turn (default $50). On a subscription nothing is
    billed — this is a runaway-turn backstop (the estimate tracks Max-quota burn), sized to
    never fire on legitimate work; a budget-killed turn says so in-thread with recovery options.

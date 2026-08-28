@@ -38,8 +38,8 @@ Config via env (all optional):
   BRIDGE_APPROVAL_TIMEOUT  seconds an approval waits         (default 1800)
   BRIDGE_POLL_INTERVAL     channel poll seconds              (default 4)
   BRIDGE_MAX_CONCURRENT    concurrent turns across threads   (default 2)
-  BRIDGE_SETTING_SOURCES   claude --setting-sources          (default "user,project" — excludes
-                           settings.local.json so interactively-saved allows don't widen remote floor)
+  BRIDGE_SETTING_SOURCES   claude --setting-sources          (default "user,project,local" —
+                           ONE allow-list shared with interactive sessions, see SETTING_SOURCES)
   BRIDGE_ALLOWED_TOOLS     optional extra --allowedTools floor (e.g. "Read Glob Grep")
   BRIDGE_ALLOW_SELF        "1" = treat the bot's own posts as operator input (smoke tests only)
 """
@@ -119,7 +119,13 @@ TURN_TIMEOUT = int(os.environ.get("BRIDGE_TURN_TIMEOUT", "7200"))
 APPROVAL_TIMEOUT = int(os.environ.get("BRIDGE_APPROVAL_TIMEOUT", "1800"))
 POLL_INTERVAL = max(2, int(os.environ.get("BRIDGE_POLL_INTERVAL", "4")))
 MAX_CONCURRENT = max(1, int(os.environ.get("BRIDGE_MAX_CONCURRENT", "2")))
-SETTING_SOURCES = os.environ.get("BRIDGE_SETTING_SOURCES", "user,project")
+# Includes `local` (operator, 2026-08-28), reversing the original "don't let interactively-saved
+# allows widen the remote floor". Rationale: ONE allow-list is the dependency for both session
+# kinds, so a rule added or removed in `.claude/settings.local.json` moves them together — no
+# second list to keep in sync, and no class of command that works at the desk but dies remotely.
+# The hard floor is unchanged and lives elsewhere: bypassPermissions is refused, every gated call
+# still relays to the thread, and only BRIDGE_OPERATORS can drive a session at all.
+SETTING_SOURCES = os.environ.get("BRIDGE_SETTING_SOURCES", "user,project,local")
 ALLOWED_TOOLS = os.environ.get("BRIDGE_ALLOWED_TOOLS", "")
 ALLOW_SELF = os.environ.get("BRIDGE_ALLOW_SELF") == "1"
 
@@ -1266,6 +1272,24 @@ class Bridge:
         footer_bits.append(f"[model:{models or 'unknown'}]")
         footer = " · ".join(footer_bits)
 
+        # A classifier denial never reaches the approval relay: in `auto` mode the classifier
+        # returns allow / ask / DENY itself, and only `ask` calls the permission-prompt tool.
+        # So an in-thread `approve` is powerless against one — which "N denied tool call(s)"
+        # alone doesn't tell the operator (2026-08-28: a whole deploy stalled on exactly this).
+        # Auto mode only: under manual/acceptEdits a denial IS the operator's own verdict.
+        deny_note = ""
+        if denials and mode_label == "auto":
+            names = sorted({str(d.get("tool_name") or d.get("tool") or "")
+                            for d in denials if isinstance(d, dict)} - {""})
+            what = f" ({', '.join(names)})" if names else ""
+            deny_note = (
+                f"\n\n🚫 **{len(denials)} tool call(s) blocked by the auto-mode classifier**"
+                f"{what} — that gate denies outright, so it never reached this thread's "
+                f"approve/deny relay and replying `approve` cannot lift it. To let the session "
+                f"run it: add a permission rule to `.claude/settings.local.json` — the same "
+                f"allow-list your interactive sessions use — then reply `continue`. "
+                f"(Setting sources: `{SETTING_SOURCES}`.)")
+
         if resp.get("is_error"):
             subtype = str(resp.get("subtype") or "")
             reason = result_text or "(the CLI returned no error text)"
@@ -1280,9 +1304,9 @@ class Bridge:
             elif "timed out" in reason:
                 hint = "\n💡 Reply in this thread to resume the session where it left off."
             label = f"❌ **Turn failed** — `{subtype or 'error'}`"
-            post_chunked(f"{label}\n{reason}{hint}\n\n{footer}", thread_root)
+            post_chunked(f"{label}\n{reason}{hint}{deny_note}\n\n{footer}", thread_root)
         else:
-            post_chunked(f"{result_text}\n\n---\n{footer}", thread_root)
+            post_chunked(f"{result_text}{deny_note}\n\n---\n{footer}", thread_root)
         audit({"event": "turn_completed", "thread": thread_root, "session": new_sid,
                "seconds": dur, "cost_usd": cost, "is_error": bool(resp.get("is_error")),
                "denials": len(denials)})
