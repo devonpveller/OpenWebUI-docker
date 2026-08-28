@@ -324,19 +324,32 @@ anchor -> inference -> frontend -> memory -> search -> CODER -> ob1 -> agent-org
 
 The compose file is the source of truth. These are live discrepancies at the time
 of writing, listed so the next person does not "correct" the file to match a
-stale summary. Where a wrong claim is repeated in several files, every location
-is named — fixing one and leaving the others is how these survive.
+stale summary. Where a wrong claim is repeated in several files, **every**
+location is named — fixing one and leaving the others is how these survive.
+
+Two things about this table's shape, learned the hard way:
+
+- **The lists below are derived from a repo-wide sweep, not from memory.** Every
+  earlier attempt at this table under-named, because it enumerated the locations
+  someone already knew about. Before trusting a row, re-run the sweep in the
+  plane's test plan (case 17b) — phrasings drift and new restatements get added.
+- **`CLEANUP-PLAN.md`'s K.4 block (around lines 941–948) is the ancestor of most
+  of these.** It is the Part K.4 execution record, and `CLAUDE.md`'s Pointers
+  section calls it "the living cleanup/restructure plan". The stack-map
+  blockquote, the `CLAUDE.md` row and the compose comments are all downstream
+  restatements of it. **Fix the ancestor or they grow back.** (Line numbers here
+  were accurate on 2026-08-28; grep the quoted phrase, not the number.)
 
 | Claim | Where | Reality |
 |---|---|---|
-| "the 7 coder volumes" | `CLAUDE.md` | **6.** `docker compose -f coder/docker-compose.yml --env-file .env config` renders `coder_little-coder-{journals,skill,cohorts,polyglot,sessions,workspace}`. |
-| "expertise x5 + sessions + workspace" | `.claude/skills/stack-map/references/workspace-stacks.md` | **4 expertise volumes** (journals, skill, cohorts, polyglot — design §3.6) plus sessions and workspace = 6. |
+| "the 7 coder volumes" | **2 places**: `CLAUDE.md` (the Coder row); `CLEANUP-PLAN.md` K.4 — "7 volumes copied to coder_little-coder-*" (≈943, the **ancestor**) | **6.** `docker compose -f coder/docker-compose.yml --env-file .env config` renders `coder_little-coder-{journals,skill,cohorts,polyglot,sessions,workspace}`. |
+| "expertise x5 + sessions + workspace" | **2 places**: `.claude/skills/stack-map/references/workspace-stacks.md` (≈188); `CLEANUP-PLAN.md` K.4 (≈944, the **ancestor** — same sentence as the row above, so one edit fixes both) | **4 expertise volumes** (journals, skill, cohorts, polyglot — design §3.6) plus sessions and workspace = 6. |
 | "The five expertise volumes" | this compose file's own `volumes:` comment | Same as above: four. |
-| "Nightly backup of the four little-coder expertise volumes" | this compose file's `little-coder-backup` comment | It mounts **five** — the four expertise volumes **and** `sessions`. The mounts win. |
+| The backup covers "the four expertise volumes" | **3 places**: this compose file's `little-coder-backup` comment (≈148); `backup/little-coder-backup.sh`'s header (≈3) — **the script that actually does the tarring**; and, inverted, `documentation/runbooks/backup-restore-runbook.md` (≈36) which calls it "volume tar (**5 expertise vols**)" | It tars **five volumes**, of which **four** are expertise volumes — `sessions` is the fifth and is not an expertise volume. The compose comment and the script header undercount the volumes; the restore runbook overcounts the *expertise* ones. The mounts win: `tar czf … -C /data .` takes whatever is under `/data`, and compose puts five volumes there. |
 | `little-coder-backup` networks: "—" | stack-map table | It declares no `networks:`, so compose attaches it to `coder_default` (the internet-capable project bridge). |
-| agent-org reaches this plane's **daemon** | **five places**: this compose file's header comment and its `lc-mcpo` retirement note; the stack-map's `coder` blockquote; `documentation/CONTAINER-REGISTRY.md` (the `little-coder` row, and the door table's "OWUI / agent-org → little-coder:8090" row) | Only OWUI does. agent-org runs its own pooled worker pairs and depends on this plane's **images** (both directions — gotcha 2). Widened greps for `little-coder:8090`, `LC_DAEMON_URL`, `daemon_url` and `http://little-coder` across `agent-org/` find no caller. |
+| agent-org reaches this plane's **daemon** | **seven places**: this compose file's header comment (≈14) and its `lc-mcpo` retirement note (≈130); `CLEANUP-PLAN.md` K.4 — "OWUI pipe + agent-org reach the daemon there" (≈945, the **ancestor**); the stack-map's `coder` blockquote (≈189); and **three** rows in `documentation/CONTAINER-REGISTRY.md` — the `little-coder` row (≈71), the door table's "OWUI / agent-org → little-coder:8090" (≈211), and the retired-services row for `lc-mcpo`, "both real callers use the daemon directly" (≈232) | Only OWUI does. agent-org runs its own pooled worker pairs and depends on this plane's **images** (both directions — gotcha 2). Widened greps for `little-coder:8090`, `LC_DAEMON_URL`, `daemon_url` and `http://little-coder` across `agent-org/` find no caller. |
 | `contextWindow` falls back to **131072**, "which is what we want anyway" | this compose file's `LITTLE_CODER_NO_CTX_PROBE` comment | `little-coder/config/models.json` declares **90000**, and its `_comment` records 131072 as a *latent overflow bug* (it exceeded the then-current 87552 lane). See gotcha 9. |
-| "`.git/config`, `.git/hooks/`, `.git/info/` are **mounted read-only** to the agent" | design §3.3's headline sentence, echoed by git-proxy's own denial message (`git_proxy.py`, `blocklist:config-write`) | There is no such mount — the workspace is read-write in both containers. §3.3's own "Enforcement status" paragraph downgrades this to *partial closure* with an explicit root-write residual. Treat the headline as intent, the residual as the fact. |
+| "`.git/config`, `.git/hooks/`, `.git/info/` are **mounted read-only** to the agent" | **4 places**: design §3.3's headline sentence (≈118, the **ancestor** — though its own next paragraph retracts it); §13's threat-model line (≈470, which at least flags "enforcement gap noted in §3.3"); git-proxy's denial message (`git_proxy.py` ≈288, `blocklist:config-write`); and `little-coder/tests/test_git_proxy.py`'s docstring (≈3), which describes the mount as existing | There is no such mount — the workspace is read-write in both containers. §3.3's own "Enforcement status" paragraph downgrades this to *partial closure* with an explicit root-write residual. Treat the headline as intent, the residual as the fact. |
 
 ---
 
