@@ -76,3 +76,10 @@ scripts/sysadmin-mcp/telegram-state/
 *.egg-info/
 .env.test
 documentation/issue-plans/
+
+# Per-agent worktrees (worktree-per-session, 2026-08-28). Each is a full checkout
+# created by scripts/worktree/new-worktree.ps1 and carries COPIES of .env* - it must
+# never be committed, and it must never be scanned as if it were repo content.
+.claude/worktrees/
+# Worktree registry + merge-queue lock: machine-local runtime state, like the bridge's.
+scripts/worktree/state/

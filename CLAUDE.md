@@ -55,12 +55,29 @@ snapshots + `manifest.csv` (file → OWUI id; skills included).
 - **Git:** never commit or push on the user's behalf unless explicitly asked.
   Hooks live in `.githooks/` (`git config core.hooksPath .githooks`): secret
   guard, LF check, gateway-routing check, compose/ps1 structural check.
-- **Worktree-per-session (operator policy, 2026-08-23):** when multiple
-  Claude sessions run in parallel, each session that MUTATES git state works
-  in its own `git worktree` and merges back deliberately — never several
-  sessions committing in one checkout (a shared tree let one session's broad
-  `git add` sweep another's dirty OB1 gitlink into an unrelated commit).
-  The main checkout is the operator's; read-only work there is fine.
+- **Worktree-per-session (operator policy, 2026-08-23; mechanized 2026-08-28):**
+  each session that MUTATES git state works in its own `git worktree` and
+  merges back deliberately — never several sessions committing in one checkout
+  (a shared tree let one session's broad `git add` sweep another's dirty OB1
+  gitlink into an unrelated commit). The main checkout is the operator's;
+  read-only work there is fine.
+  **The trigger is your first mutating intent** (stage, commit, branch, gitlink
+  bump), not session start — cheap reads stay cheap. At that moment, before
+  touching the index:
+  `scripts/worktree/new-worktree.ps1 -Id <short-id>` then `EnterWorktree path:`
+  the path it prints. Never bare `git worktree add` (it leaves you with no
+  `.env`, an empty `OB1/`, and the wrong base branch) and never bare
+  `EnterWorktree name:` for repo work (it branches from the origin default
+  branch, not `development`). Land it via
+  `documentation/implementation-guide/multi-agent-concurrency/MERGE-PROTOCOL.md`
+  — take `merge-lock.ps1`, rebase onto `development`, re-run gates, merge
+  `--no-ff` with evidence, release, announce in-thread. Conflicts: the LATER
+  merger adapts; semantic clashes get negotiated in the other agent's
+  Mattermost thread (never `SendMessage` — it can be a headless peer mid-turn);
+  no convergence → ask the operator. Test in your own containers
+  (`-p test-<id>`, no host ports, images `:wt-<id>`) — prod containers and
+  `:local` tags are a gated deploy, not a test. Tooling + gotchas:
+  `scripts/worktree/README.md`.
 - **Branch policy (operator, 2026-08-22):** `main` is UNTOUCHED — the
   deliverable, representing the known-good ai-stack; `development` is the
   LIVE-HOSTED deployment line; all work happens on feature/work branches cut
