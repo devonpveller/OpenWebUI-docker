@@ -160,40 +160,89 @@ class ProvisioningIntegrationTests(unittest.TestCase):
 
 
 @unittest.skipUnless(_tooling_available(), "needs Windows + git + scripts/worktree")
-class MergeLockTests(unittest.TestCase):
-    """The merge queue's mutual exclusion, exercised through the real script."""
+class LeaseTests(unittest.TestCase):
+    """Named-lease mutual exclusion (lease.ps1), exercised through the real script.
+
+    Hermetic: AI_STACK_LEASE_DIR points every invocation at a temp dir, so these tests
+    can grab real plane names ('merge', 'frontend', ...) without ever colliding with an
+    actual agent's lease. Name VALIDATION still reads the repo's lease-names.conf, so
+    the policy file is covered too."""
 
     A, B = "wt-selftest-a", "wt-selftest-b"
 
-    def _lock(self, *args):
-        return bridge._run_worktree_script("merge-lock.ps1", list(args), timeout=120)
+    @classmethod
+    def setUpClass(cls):
+        import tempfile
+        cls.lease_dir = tempfile.mkdtemp(prefix="lease-test-")
+
+    @classmethod
+    def tearDownClass(cls):
+        import shutil
+        shutil.rmtree(cls.lease_dir, ignore_errors=True)
+
+    def _lease(self, *args):
+        env = dict(os.environ, AI_STACK_LEASE_DIR=self.lease_dir)
+        cmd = ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+               os.path.join(bridge.WORKTREE_SCRIPTS, "lease.ps1")] + list(args)
+        p = subprocess.run(cmd, cwd=bridge._REPO_ROOT, capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=120, env=env)
+        return p.returncode, ((p.stdout or "") + "\n" + (p.stderr or "")).strip()
 
     def tearDown(self):
         for owner in (self.A, self.B):
-            self._lock("-Release", "-Owner", owner)
+            self._lease("-Release", "-Name", "merge,frontend,coder,open-brain",
+                        "-Owner", owner)
 
     def test_second_agent_is_told_to_wait_not_allowed_through(self):
-        rc, _ = self._lock("-Acquire", "-Owner", self.A, "-Thread", "t-a")
+        rc, _ = self._lease("-Acquire", "-Name", "merge", "-Owner", self.A, "-Thread", "t-a")
         self.assertEqual(rc, 0)
-        rc, out = self._lock("-Acquire", "-Owner", self.B)
+        rc, out = self._lease("-Acquire", "-Name", "merge", "-Owner", self.B)
         self.assertEqual(rc, 3, "a second agent must be told to WAIT")
         self.assertIn("WAIT", out)
 
+    def test_disjoint_planes_do_not_serialize(self):
+        """The entire point of naming leases: no interference -> no queueing."""
+        self.assertEqual(self._lease("-Acquire", "-Name", "frontend", "-Owner", self.A)[0], 0)
+        self.assertEqual(self._lease("-Acquire", "-Name", "coder", "-Owner", self.B)[0], 0)
+
     def test_foreign_release_is_refused(self):
-        self.assertEqual(self._lock("-Acquire", "-Owner", self.A)[0], 0)
-        rc, out = self._lock("-Release", "-Owner", self.B)
+        self.assertEqual(self._lease("-Acquire", "-Name", "merge", "-Owner", self.A)[0], 0)
+        rc, out = self._lease("-Release", "-Name", "merge", "-Owner", self.B)
         self.assertEqual(rc, 3)
         self.assertIn("refusing", out.lower())
-        # ...and the rightful owner still holds it.
-        self.assertEqual(self._lock("-Acquire", "-Owner", self.A)[0], 0)
+        # ...and the rightful owner still holds it (idempotent re-acquire succeeds).
+        self.assertEqual(self._lease("-Acquire", "-Name", "merge", "-Owner", self.A)[0], 0)
 
-    def test_expired_lock_needs_explicit_takeover(self):
-        self.assertEqual(self._lock("-Acquire", "-Owner", self.A, "-TtlMin", "0")[0], 0)
-        rc, out = self._lock("-Acquire", "-Owner", self.B)
-        self.assertEqual(rc, 3, "an expired lock must not be silently stolen")
+    def test_expired_lease_needs_explicit_takeover(self):
+        # ttl 0 = instantly expired. Regression for the -ge/-gt boundary: with -gt a
+        # dead agent's ttl-0 lease never expired and held the queue forever.
+        self.assertEqual(self._lease("-Acquire", "-Name", "merge", "-Owner", self.A,
+                                     "-TtlMin", "0")[0], 0)
+        rc, out = self._lease("-Acquire", "-Name", "merge", "-Owner", self.B)
+        self.assertEqual(rc, 3, "an expired lease must not be silently stolen")
         self.assertIn("EXPIRED", out)
-        rc, _ = self._lock("-Takeover", "-Owner", self.B)
-        self.assertEqual(rc, 0, "-Takeover must claim an expired lock")
+        rc, _ = self._lease("-Takeover", "-Name", "merge", "-Owner", self.B)
+        self.assertEqual(rc, 0, "-Takeover must claim an expired lease")
+
+    def test_multi_name_is_all_or_nothing(self):
+        """A partial set held while waiting is deadlock bait - it must roll back."""
+        self.assertEqual(self._lease("-Acquire", "-Name", "frontend", "-Owner", self.A)[0], 0)
+        # B wants coder+frontend; coder is free, frontend is A's. Sorted order takes
+        # coder FIRST, so the rollback path is genuinely exercised.
+        rc, out = self._lease("-Acquire", "-Name", "coder,frontend", "-Owner", self.B)
+        self.assertEqual(rc, 3)
+        self.assertIn("rolled back", out)
+        # The proof: a third party can take coder immediately - B left nothing behind.
+        self.assertEqual(self._lease("-Acquire", "-Name", "coder", "-Owner", self.A)[0], 0)
+
+    def test_unknown_name_is_refused_so_typos_cannot_fragment_locking(self):
+        rc, out = self._lease("-Acquire", "-Name", "openbrain", "-Owner", self.A)
+        self.assertEqual(rc, 1, "a name absent from lease-names.conf must be refused")
+        self.assertIn("unknown lease name", out.lower())
+        # -AdHoc is the deliberate escape hatch for new coordination points.
+        rc, _ = self._lease("-Acquire", "-Name", "zz-adhoc-probe", "-Owner", self.A, "-AdHoc")
+        self.assertEqual(rc, 0)
+        self._lease("-Release", "-Name", "zz-adhoc-probe", "-Owner", self.A, "-AdHoc")
 
 
 if __name__ == "__main__":

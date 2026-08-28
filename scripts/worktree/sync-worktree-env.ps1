@@ -56,7 +56,7 @@ $updated = 0
 $stale = 0
 foreach ($t in $targets) {
     if (-not (Test-Path $t.path)) {
-        Say ("SKIP {0}: path is gone ({1}) - run test-reaper/prune to clean the registry" -f $t.id, $t.path) "Yellow"
+        Say ("SKIP {0}: path is gone ({1}) - run remove-worktree.ps1 -PruneRegistry to clean the registry" -f $t.id, $t.path) "Yellow"
         continue
     }
     foreach ($rel in $EnvFiles) {

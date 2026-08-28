@@ -14,15 +14,24 @@ The wider design (test containers, bridge integration):
 | `new-worktree.ps1` | Provision `.claude/worktrees/wt-<id>` on `work/<id>` from `development`, init the OB1 submodule, copy runtime env files, CRLF-check, register it |
 | `sync-worktree-env.ps1` | Re-copy `.env` / `.env.test` / `OB1/docker/.env` into worktrees when the main checkout's copy is newer (`-WhatIfOnly` reports drift) |
 | `remove-worktree.ps1` | Retire a worktree, **refusing** while it holds uncommitted or unmerged work (`-Force` to discard deliberately); `-PruneRegistry` drops rows whose path is gone |
-| `merge-lock.ps1` | Serialize merges into `development`: `-Acquire` / `-Refresh` / `-Release` / `-Status` / `-Takeover` (exit 3 = held, wait) |
+| `lease.ps1` | Named exclusive leases — the test queue AND the merge queue in one primitive: `-Acquire` / `-Refresh` / `-Release` / `-Status` / `-Takeover` (exit 3 = held, wait). Names validate against `lease-names.conf` (`-AdHoc` to escape); multi-name requests are sorted + all-or-nothing, so agents cannot deadlock |
+
+`lease.ps1` is deliberately **generic mechanism** with zero repo coupling and no
+native commands; `lease-names.conf` is the per-environment **policy** (one lease per
+compose plane + `merge`). Porting the toolkit elsewhere = copy the scripts, rewrite
+the conf. `AI_STACK_LEASE_DIR` / `AI_STACK_LEASE_NAMES_FILE` override the defaults
+(the tests use the former to stay hermetic). (`merge-lock.ps1`, its single-lock
+predecessor, was deleted the day after it landed — superseded by `-Name merge`; two
+lock implementations coordinating one filesystem is its own smell.)
 
 Runtime state lives in `state/` (gitignored, like the bridge's): `worktrees.json`
-registry + `merge-lock.json`.
+registry + `locks/<name>.json` leases.
 
-**Tests:** `python scripts/claude-sessions-bridge/test_worktree.py` — 13 tests covering
-the `worktree:` directive grammar, id derivation, the fail-closed contract, and real
-provisioning / refusal / lock-contention through these scripts (self-skips off Windows,
-always cleans up).
+**Tests:** `python scripts/claude-sessions-bridge/test_worktree.py` — 16 tests covering
+the `worktree:` directive grammar, id derivation, the fail-closed contract, real
+provisioning / removal-refusal, and the lease semantics (contention, disjoint planes
+not serializing, foreign-release refusal, expiry boundary, multi-name rollback, typo
+refusal). Self-skips off Windows; always cleans up.
 
 ## Using it from Mattermost
 
@@ -60,16 +69,22 @@ a per-worktree `info/exclude` is **not** honored — verified).
   verifies rather than assumes (`-StrictCrlf` to fail instead of warn).
 - **Keep ids short.** Each worktree carries a full OB1 checkout; Windows MAX_PATH
   plus `node_modules` depth is a real ceiling. Ids are capped at 24 chars.
-- **The lock is a file, not a port.** Both entry points share this filesystem, and a
-  lock must name its owner so a stuck one can be taken over with someone to notify.
+- **Leases are files, not ports.** Both entry points share this filesystem, and a
+  lease must name its owner so a stuck one can be taken over with someone to notify.
+- **Lease names are validated fail-closed.** A typo ("openbrain" vs "open-brain")
+  would create a second lock for the same plane and protect nothing — unknown names
+  are refused unless `-AdHoc` says the new coordination point is deliberate.
 
 ## Typical session
 
 ```powershell
 .\scripts\worktree\new-worktree.ps1 -Id wiki-perf -OwnerKind extension -OwnerRef <session>
-# EnterWorktree path: <printed path>   ... do the work, test in -p test-wiki-perf ...
-.\scripts\worktree\merge-lock.ps1 -Acquire -Owner wiki-perf -Thread <mm-thread>
+# EnterWorktree path: <printed path>   ... do the work ...
+.\scripts\worktree\lease.ps1 -Acquire -Name open-brain -Owner wiki-perf   # mutating test
+#   ... test against the plane, clean up your droppings ...
+.\scripts\worktree\lease.ps1 -Release -Name open-brain -Owner wiki-perf
+.\scripts\worktree\lease.ps1 -Acquire -Name merge -Owner wiki-perf
 #   rebase onto development, re-run gates, merge --no-ff with evidence
-.\scripts\worktree\merge-lock.ps1 -Release -Owner wiki-perf
+.\scripts\worktree\lease.ps1 -Release -Name merge -Owner wiki-perf
 .\scripts\worktree\remove-worktree.ps1 -Id wiki-perf
 ```

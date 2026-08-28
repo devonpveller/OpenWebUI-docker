@@ -70,14 +70,17 @@ snapshots + `manifest.csv` (file → OWUI id; skills included).
   `EnterWorktree name:` for repo work (it branches from the origin default
   branch, not `development`). Land it via
   `documentation/implementation-guide/multi-agent-concurrency/MERGE-PROTOCOL.md`
-  — take `merge-lock.ps1`, rebase onto `development`, re-run gates, merge
-  `--no-ff` with evidence, release, announce in-thread. Conflicts: the LATER
-  merger adapts; semantic clashes get negotiated in the other agent's
-  Mattermost thread (never `SendMessage` — it can be a headless peer mid-turn);
-  no convergence → ask the operator. Test in your own containers
-  (`-p test-<id>`, no host ports, images `:wt-<id>`) — prod containers and
-  `:local` tags are a gated deploy, not a test. Tooling + gotchas:
-  `scripts/worktree/README.md`.
+  — take the `merge` lease (`lease.ps1 -Acquire -Name merge`), rebase onto
+  `development`, re-run gates, merge `--no-ff` with evidence, release, announce
+  in-thread. Conflicts: the LATER merger adapts; semantic clashes get negotiated
+  in the other agent's Mattermost thread (never `SendMessage` — it can be a
+  headless peer mid-turn); no convergence → ask the operator. **Testing runs
+  under plane leases, not cloned environments**: before a test that mutates a
+  plane or needs it stable, `lease.ps1 -Acquire -Name <plane>` (names in
+  `scripts/worktree/lease-names.conf`; read-only probes need none; multi-plane =
+  one call). Test images tag `:wt-<id>` — prod containers and `:local` tags are
+  a gated deploy, not a test; never attach test containers to the `ai-stack_*`
+  anchor networks. Tooling + gotchas: `scripts/worktree/README.md`.
 - **Branch policy (operator, 2026-08-22):** `main` is UNTOUCHED — the
   deliverable, representing the known-good ai-stack; `development` is the
   LIVE-HOSTED deployment line; all work happens on feature/work branches cut

@@ -1,7 +1,7 @@
 # MERGE-PROTOCOL — how parallel agents land work without wrecking each other
 
 **Status:** LIVE (2026-08-28). The tooling this references is built and verified:
-`scripts/worktree/{new-worktree,sync-worktree-env,remove-worktree,merge-lock}.ps1`.
+`scripts/worktree/{new-worktree,sync-worktree-env,remove-worktree,lease}.ps1`.
 
 **Audience:** any Claude session — VS Code extension or Mattermost bridge — that is
 about to change this repo. Read this before your first `git add`, not after your
@@ -11,9 +11,9 @@ first conflict.
 
 ## 0. The one-paragraph version
 
-Work in your own worktree. When your work is ready, take the merge lock, rebase onto
+Work in your own worktree. When your work is ready, take the `merge` lease, rebase onto
 the current `development`, re-run your gates, merge `--no-ff` with your evidence in
-the commit message, release the lock, and say what you landed in your Mattermost
+the commit message, release it, and say what you landed in your Mattermost
 thread. If your rebase conflicts with work someone else landed first, **you adapt** —
 you do not re-litigate what is already on `development`. If adapting would break the
 other agent's goal, talk to them in their thread before resolving. If you two cannot
@@ -36,9 +36,34 @@ Rules while you work:
   trees, but your worktree can still see stray files; sweeping is how accidents
   happen.
 - **Never `cd` into the main checkout to mutate it.** It is the operator's.
-- **Test in your own containers** (`-p test-<your-id>`, no host ports, images tagged
-  `:wt-<id>`). Never mutate prod containers, `:local` tags, or prod volumes; that is
-  a *deploy*, and deploys are a separate gated step.
+- **Testing runs under plane leases, not cloned environments.** Before any test that
+  *mutates* a plane or *needs it stable to trust the result*, hold that plane's
+  lease; a read-only probe (curl a health endpoint) needs none:
+
+  ```powershell
+  .\scripts\worktree\lease.ps1 -Acquire -Name open-brain -Owner <your-wt-id> -Thread <mm-thread>
+  #   ... test ...
+  .\scripts\worktree\lease.ps1 -Release -Name open-brain -Owner <your-wt-id>
+  ```
+
+  Lease names = the compose planes (`lease-names.conf`): `inference`, `memory`,
+  `search`, `coder`, `frontend`, `open-brain`, `agent-org`, `portal`. Rules:
+  1. A multi-plane test requests all names in **one call**
+     (`-Name "frontend,open-brain"`) — sorted, all-or-nothing, so two agents
+     cannot deadlock.
+  2. **When unsure which planes you touch, widen.** Your announce post (step 5)
+     names the leases you held; under-declaring is visible in the post-mortem.
+  3. Exit 3 = held: wait, poll ≤1/min. Long build? `-Refresh` keeps it alive.
+  4. Leave the plane the way you found it *before releasing* — a lease serializes
+     interference, it does not clean up after you. Test data stays test-prefixed
+     (`testing-*`), test images tag `:wt-<id>` and never touch `:local` (retagging
+     IS the deploy, which stays gated).
+- **Never mutate prod containers, `:local` tags, or prod volumes** — that is a
+  *deploy*, a separate gated step. Where a container-level sandbox is cheap, use
+  the proven sidecar shape (`docker run --entrypoint ... ` on a private/no
+  network) — but never attach a test container to the `ai-stack_*` anchor
+  networks (it would hijack service aliases and block emergency recovery), and
+  never reuse a prod `container_name` (the watchdog inspects by name).
 - If your run spans hours, `.\scripts\worktree\sync-worktree-env.ps1 -Id <id>` picks
   up any `.env` change the operator made meanwhile.
 
@@ -48,10 +73,10 @@ Rules while you work:
 evidence, plus `ruff check .` and a compose `config` render for any plane you
 touched. A merge is not the place to discover your branch is red.
 
-**Step 2 — take the lock.**
+**Step 2 — take the `merge` lease.**
 
 ```powershell
-.\scripts\worktree\merge-lock.ps1 -Acquire -Owner <your-wt-id> -Thread <your-mm-thread>
+.\scripts\worktree\lease.ps1 -Acquire -Name merge -Owner <your-wt-id> -Thread <your-mm-thread>
 ```
 
 Exit 3 means someone else is merging: **wait**, poll at most once a minute, and do
@@ -67,7 +92,7 @@ git -C <your-worktree> rebase origin/development     # or `development` if that 
 ```
 
 This is where cross-agent breakage surfaces, which is the entire point of doing it
-under the lock. **Re-run the gates after the rebase** — green before the rebase says
+under the lease. **Re-run the gates after the rebase** — green before the rebase says
 nothing about green after it.
 
 **Step 4 — merge with evidence.**
@@ -86,7 +111,7 @@ fresh `--recurse-submodules` clone.
 **Step 5 — release and announce.**
 
 ```powershell
-.\scripts\worktree\merge-lock.ps1 -Release -Owner <your-wt-id>
+.\scripts\worktree\lease.ps1 -Release -Name merge -Owner <your-wt-id>
 ```
 
 Then post in your own #claude-sessions thread: what landed, which files, the
@@ -108,7 +133,7 @@ copy".
 **Tier 1 — mechanical** (adjacent edits, both-added files, import ordering). The
 merging agent resolves them during the rebase. **The later merger adapts.** This rule
 exists so merge order cannot change correctness, and so nobody has an incentive to
-race for the lock.
+race for the lease.
 
 **Tier 2 — semantic overlap** (you both changed the same subsystem with competing
 intents; adapting mechanically would defeat the other agent's goal). Do not resolve
@@ -145,8 +170,8 @@ by force-push; `development` history is append-only.
 
 | Symptom | What it means | Do |
 |---|---|---|
-| `-Acquire` exits 3, lock HELD | Another agent is mid-merge | Wait; poll ≤1/min |
-| `-Acquire` exits 3, lock EXPIRED | Previous owner probably died | `-Takeover`, **and** post a note in their thread |
+| `-Acquire` exits 3, lease HELD | Another agent is mid-merge | Wait; poll ≤1/min |
+| `-Acquire` exits 3, lease EXPIRED | Previous owner probably died | `-Takeover`, **and** post a note in their thread |
 | Rebase conflict you cannot judge | Semantic overlap | Tier 2 — talk to them |
 | `remove-worktree` refuses | Your only copy of something | Land it or `-Force` deliberately |
 | Worktree exists but registry row is gone | Manual `git worktree add`, or a crash | `remove-worktree.ps1 -PruneRegistry` |
@@ -154,10 +179,10 @@ by force-push; `development` history is append-only.
 
 ## 6. Deliberate limits
 
-- **A merge is serialized; the work is not.** Only the land step takes the lock, and
+- **A merge is serialized; the work is not.** Only the land step takes the `merge` lease, and
   it is short. Everything before it runs fully parallel.
 - **`development` is never left mid-merge.** The rebase happens on your branch; the
-  merge itself is one fast operation. A dead agent leaves a stale lock and a
+  merge itself is one fast operation. A dead agent leaves a stale lease and a
   half-rebased branch in *its own* worktree — never a broken shared line.
 - **This protocol does not cover deploy verification.** Anything that must be proven
   through the real caddy/tailnet chain happens after the merge, serially, by nature.

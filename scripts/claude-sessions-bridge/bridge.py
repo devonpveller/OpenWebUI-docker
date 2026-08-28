@@ -243,11 +243,14 @@ REMOTE_NOTE = (
     "call the approvals MCP server's follow_thread tool with that post's id and end your turn — "
     "the bridge will automatically wake this session with the reply when it arrives. "
     "If your working directory is under `.claude/worktrees/`, you are in YOUR OWN git worktree: "
-    "commit there freely, never `cd` into the main checkout to mutate it, test in your own "
-    "containers (`-p test-<id>`, no host ports, images tagged `:wt-<id>`) rather than prod ones, "
-    "and land your work with documentation/implementation-guide/multi-agent-concurrency/"
-    "MERGE-PROTOCOL.md — take scripts/worktree/merge-lock.ps1, rebase onto development, re-run "
-    "your gates, merge --no-ff with the evidence, release, then say what landed in this thread."
+    "commit there freely and never `cd` into the main checkout to mutate it. Before any test "
+    "that MUTATES a plane or needs it stable to trust the result, hold that plane's lease "
+    "(scripts/worktree/lease.ps1 -Acquire -Name <plane> -Owner <your-worktree-id>; names in "
+    "lease-names.conf; read-only probes need none; a multi-plane test requests all names in one "
+    "call). Test images tag `:wt-<id>`, never `:local` — prod containers are a gated deploy, "
+    "not a test. Land your work with documentation/implementation-guide/multi-agent-concurrency/"
+    "MERGE-PROTOCOL.md — take the `merge` lease, rebase onto development, re-run your gates, "
+    "merge --no-ff with the evidence, release, then say what landed in this thread."
 )
 
 

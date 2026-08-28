@@ -1,9 +1,10 @@
 # PLAN — Multi-agent concurrency: worktrees, test isolation, agent-coordinated merges
 
-**Status:** Phase A + D-lock **BUILT** (commit c1ecc30) and Phase B **BUILT** (bridge
-worktree-per-thread, default off, awaiting a restart to go live). Phase C (per-plane
-`compose.test.yml` + reaper) is still plan-only — deliberately deferred while the wiki
-viewer is mid-build. Operator directive: multiple Claude
+**Status:** Phases A, B, C and the merge queue are **BUILT and LIVE** (A: c1ecc30,
+B: a0fb0c9 + bridge restart, C: plane leases — see §4, which was adversarially
+rewritten on 2026-08-28 from an environment-cloning design to a lease design before
+anything was built; the clone design was never implemented). Operator directive:
+multiple Claude
 sessions (VS Code extension AND Mattermost bridge) working simultaneously without
 stepping on each other's code or each other's test containers; the agents themselves
 coordinate the merges back together.
@@ -44,9 +45,13 @@ which we need to invent:
    provides it (extension: `EnterWorktree`; subagents: `isolation:"worktree"`),
    provisioned by the bridge where it doesn't (Mattermost). One convention, two
    provisioners, single shared helper script so behavior can't drift.
-2. **Ephemeral per-agent test environments** (the testcontainers philosophy applied
-   to this stack): a session never touches prod containers/tags/volumes; it gets its
-   own compose *project* with no host ports, labeled for reaping.
+2. **Plane leases for testing** (revised — see §4 for the audit that killed the
+   original clone-the-environment design): when a test mutates a plane or needs it
+   stable, the agent holds that plane's named exclusive lease; read-only probes need
+   none. Serialization over duplication, because this stack's environments are
+   stateful, GPU-bound, and expensive — the regime where GitHub Actions
+   `concurrency.group` / Bazel `exclusive` tags / k8s Leases are the modern pattern,
+   not ephemeral preview environments.
 3. **A merge queue, not merge-anarchy**: merges into `development` are serialized by
    a lock; the merging agent rebases onto the latest tip, re-validates, merges with
    evidence; conflicts are negotiated agent-to-agent over Mattermost — the one bus
@@ -130,57 +135,97 @@ is the host, not the codebase (`BRIDGE_WORKTREE_DEFAULT=off` pinned in its launc
 zero cross-contamination (the RED case is documented 08-23 history); `close` on a
 merged thread removes; `close` on a dirty one keeps + reports.
 
-## 4. Phase C — per-agent test containers
+## 4. Phase C — test coordination by plane LEASES (v2; the v1 clone design is dead)
 
-**C1. The rule** (CLAUDE.md + REMOTE_NOTE): work sessions never mutate prod
-containers, `:local` image tags, or prod volumes. Testing happens in the session's
-own compose project; touching prod is a *deploy*, which stays an explicit gated step
-(allow-list / operator approval — exactly the machinery fixed on 08-28).
+### 4.0 Why v1 died — the adversarial audit, kept on the record
 
-**C2. Per-session compose project.** For the plane under test:
+v1 of this phase planned per-agent environment clones: `-p test-<wt-id>` compose
+projects, a `compose.test.yml` override per plane, a label reaper. It was **audited
+against the live stack before being built, and deleted**. Findings, all verified:
 
-```
-docker compose -p test-<wt-id> -f <plane>/docker-compose.yml \
-  -f <plane>/compose.test.yml --env-file <wt>/.env up -d <services>
-```
+1. **Every plane pins `container_name:`** (23 in OB1, 8 in inference, 4/4/4/3
+   elsewhere). Container names are daemon-global, not project-scoped — a test
+   project either collides or must rewrite every name, and the watchdog inspects
+   *by name*, so a test container stealing a prod name blinds it.
+2. **Alias hijack:** planes attach to the shared `ai-stack_llm-net`/`app-net`
+   anchors, and `llm-gateway` owns the `llama-cpp`/`llama-cpp-embed` aliases. A
+   test clone on the same network registers the same aliases → Docker DNS
+   round-robins prod inference traffic into the test container, silently.
+3. **Recovery block:** `emergency-recovery.ps1` drops the anchor networks with
+   `docker compose down`; a live test project attached to them stalls the teardown
+   mid-recovery.
+4. **Fidelity — the deepest one:** compose project-scopes volumes (verified: zero
+   explicit `name:`/`external:` in any plane's volume block), so a clone gets
+   *empty* volumes. A wiki viewer with no 48k-page vault proves nothing; honest
+   clones would need a seeding/snapshot pipeline — a framework to support a
+   framework, plus a standing `compose.test.yml`-drift tax on every plane change.
 
-where each plane grows one `compose.test.yml` override that (a) removes ALL host
-port publishing, (b) remaps named volumes to `test-<wt-id>-*` ephemerals, (c) labels
-everything `com.ai-stack.test-session=<wt-id>`. Probing happens container-to-
-container (`docker exec` + in-network curl) — the pattern the wiki sidecar work
-already proved. Start with the planes agents actually iterate on (OB1 wiki viewer,
-search, coder); the inference plane is explicitly NOT duplicated (§C4).
+Conclusion: this stack's environments are stateful, GPU-bound and single-host —
+the regime where the modern primitive is **serialized access (named leases)**, not
+ephemeral environments. Cloning is the right pattern only where environments are
+cheap and stateless; copying it here was paradigm mismatch.
 
-**C3. Image tags.** Test builds tag `<image>:wt-<id>`, never `:local`. The deploy
-step (post-merge, gated) is the only place `:local` is retagged — same shape as the
-wiki deploy that motivated the allow-list.
+### 4.1 The lease model (BUILT)
 
-**C4. Shared planes stay shared, deliberately.** GPU/inference: one 3090 — test
-traffic goes through the gateway on the session's own virtual key/lane (J.1 already
-provides admission + fairness). Live Mattermost, OWUI, prod SurrealDB: read
-freely, mutate never; tests needing prod-shaped data use a copy-volume snapshot
-recipe, not the live volume. This is an honest limit, not a gap: duplicating the
-GPU plane is impossible and duplicating stateful prod stores per-session is not
-worth the disk.
+`scripts/worktree/lease.ps1` — one self-contained script, mechanism only:
+`-Acquire / -Refresh / -Release / -Status / -Takeover`, atomic via `CreateNew`,
+TTL'd (expiry at `age >= ttl`), owner-checked (foreign release refused), exit 3 =
+wait. Policy lives beside it in `lease-names.conf`: one lease per compose plane
+(`inference`, `memory`, `search`, `coder`, `frontend`, `open-brain`, `agent-org`,
+`portal`) plus `merge`. Unknown names are refused unless `-AdHoc`, so a typo
+cannot fragment mutual exclusion into two locks that each protect nothing.
 
-**C5. Reaper.** `scripts/checks/test-reaper.ps1`: remove containers/volumes/images
-carrying `com.ai-stack.test-session` older than 24 h or whose registry entry is
-gone; report-only mode first run; wired beside the existing watchdog checks. By
-label only — never by port/name pattern (documented trap). Also reaps stale
-registry rows and prunable worktrees (`git worktree prune`).
+Rules (also in MERGE-PROTOCOL.md, the agent-facing copy):
 
-**Verify C:** two sessions run the same plane's test stack concurrently (distinct
-projects, zero port conflicts); reaper dry-run lists exactly the labeled leftovers
-and nothing else; prod `docker ps` diff is empty throughout.
+1. A test that **mutates** a plane, or needs it **stable to trust the result**,
+   holds that plane's lease. Read-only probes need none.
+2. Multi-plane tests request all names in **one call** — the script sorts them and
+   acquires all-or-nothing with rollback, which removes the two-agent deadlock
+   class outright.
+3. **When unsure, widen.** The announce post names the leases held; under-
+   declaration is visible in the collision post-mortem.
+4. The merge queue is the lease named `merge` — the "two queues" (test, merge) are
+   one primitive with different names.
+
+Portability by construction: the script has zero repo coupling and no native
+commands; state dir and names file are env-overridable (`AI_STACK_LEASE_DIR`,
+`AI_STACK_LEASE_NAMES_FILE`). Moving it to another environment = copying two files
+and editing the conf.
+
+### 4.2 What leases do NOT solve, said plainly
+
+- **State pollution.** Serialization stops *concurrent* interference, not a test
+  leaving droppings for the next agent. That stays convention, already practiced
+  here: test-prefixed data (`testing-*` notes), test image tags `:wt-<id>` (never
+  `:local` — retagging is the deploy, which stays gated), clean up before release.
+- **Contention on hot planes is physics.** A 25-min wiki build holds `open-brain`
+  for 25 min; cloning couldn't have parallelized the GPU or the vault either.
+  `-TtlMin` + `-Refresh` handle long holds.
+
+### 4.3 Guardrails inherited from the audit (the "never do this" residue)
+
+Where pointwise container isolation IS cheap, it stays welcome — the proven wiki
+sidecar pattern (`docker run` with `--entrypoint`, private/no network). But:
+never attach a test container to the `ai-stack_*` anchor networks (findings 2+3);
+never reuse a prod `container_name` (finding 1); anything left running is invisible
+to disk-guard's name-pattern sweep, so clean up in the same session.
+
+**Verified:** 6 lease tests in `test_worktree.py` drive the real script — contention
+(exit 3), disjoint planes not serializing, foreign-release refusal, expired-takeover
+(the `-ge` boundary regression), multi-name rollback proven by a third party
+immediately acquiring the rolled-back name, and typo refusal + `-AdHoc` escape.
+Hermetic via `AI_STACK_LEASE_DIR`, so tests can use real plane names without ever
+touching a live agent's lease.
 
 ## 5. Phase D — agent-coordinated merge queue
 
-**D1. The lock.** `scripts/worktree/state/merge-lock.json`, taken by atomic
-create-exclusive; contents `{owner, worktree, thread/session, taken_at, ttl_min:30}`.
-Holder refreshes `taken_at` while working; a lock past TTL may be taken over after
-posting a takeover note to the owner's thread. Filesystem beats a port here: both
-entry points share the disk, and the file carries metadata a port can't. (Precedent:
-bridge lock ports 4829x + `claimed-threads.json`.)
+**D1. The lock** is the lease named `merge` (`lease.ps1 -Acquire -Name merge` —
+§4.1; the queue and the test leases are one primitive). Atomic create-exclusive;
+contents `{name, owner, worktree, thread, taken_at, ttl_min:30}`. Holder refreshes
+while working; a lease past TTL may be taken over after posting a takeover note to
+the owner's thread. Filesystem beats a port here: both entry points share the disk,
+and the file carries metadata a port can't. (Precedent: bridge lock ports 4829x +
+`claimed-threads.json`.)
 
 **D2. The protocol** (a doc first, `/merge-queue` skill once stable — agents follow
 it from REMOTE_NOTE/CLAUDE.md):
@@ -241,8 +286,8 @@ RED cases are already documented history — cite, don't re-stage the damage).
 ## 7. Risks and honest limits
 
 - **Submodule worktrees:** each worktree owns a full OB1 checkout — fine at 953
-  files, but OB1 *builds* (node_modules) are per-worktree too; the reaper and
-  `close` keep disk bounded. Keep ids short (`wt-<8>`) — Windows MAX_PATH plus
+  files, but OB1 *builds* (node_modules) are per-worktree too; `close` /
+  `remove-worktree.ps1` keep disk bounded. Keep ids short (`wt-<8>`) — Windows MAX_PATH plus
   node_modules depth is a real ceiling.
 - **CRLF in worktrees:** `.gitattributes` now covers `*.sh`/hooks; any NEW
   docker-consumed text file type that breaks gets an attributes rule, not a
@@ -275,3 +320,15 @@ RED cases are already documented history — cite, don't re-stage the damage).
   liveness-only signal for a queue where the holder needs to be identifiable.
 - Later-merger-adapts as the conflict default — makes merge order irrelevant to
   correctness and removes the incentive to race for the lock.
+- **Leases over environment clones for test coordination** (2026-08-28, operator +
+  adversarial audit; see §4.0) — this stack's environments are stateful, GPU-bound
+  and single-host, so serialize access instead of duplicating state. The v1 clone
+  design was deleted before being built; its audit findings survive as §4.3
+  guardrails.
+- **Mechanism/policy split for the lease module** — `lease.ps1` is generic and
+  env-portable; `lease-names.conf` carries this stack's names. Unknown names are
+  refused (typo → two locks → zero safety) with `-AdHoc` as the deliberate escape.
+- **Merge queue = the lease named `merge`** — the operator's "two queues" (test,
+  merge) collapse into one primitive with different names, which is why
+  `merge-lock.ps1` was deleted the day after it landed rather than kept as a
+  wrapper: two lock implementations coordinating one filesystem is its own smell.
