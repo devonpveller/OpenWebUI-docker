@@ -42,6 +42,13 @@ $env:BRIDGE_TOKEN_KEY    = 'SYSADMIN_MM_BOT_TOKEN'
 $env:BRIDGE_LOCK_PORT    = '48292'
 $env:BRIDGE_CHARTER_FILE = (Join-Path $here 'charter.md')
 $env:BRIDGE_STATE_DIR    = (Join-Path $here 'bridge-state')  # isolated from the #claude-sessions bridge's state.json
+# This persona operates the HOST, not the codebase: it inspects containers, disks and
+# services, and its answers must describe the live checkout the operator is looking at.
+# Pinned OFF so that flipping the global BRIDGE_WORKTREE_DEFAULT to `on` (the plan's
+# post-soak step for #claude-sessions) can never silently relocate @bot-sysadmin into a
+# worktree. Same inheritance trap as BRIDGE_SETTING_SOURCES: one codebase, two personas,
+# and a default that means different things to each.
+$env:BRIDGE_WORKTREE_DEFAULT = 'off'
 if ($cfg.sysadmin_operators) { $env:BRIDGE_OPERATORS = [string]$cfg.sysadmin_operators }
 
 $venvPyw = Join-Path $repo '.venv\Scripts\pythonw.exe'

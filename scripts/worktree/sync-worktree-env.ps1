@@ -30,7 +30,10 @@ function Say([string]$Text, [string]$Color = "Gray") {
 
 # No stderr redirect on the native call: PS5.1 wraps redirected native stderr in
 # ErrorRecords, which trips $ErrorActionPreference='Stop' on harmless git chatter.
-$commonDir = (& git rev-parse --path-format=absolute --git-common-dir) | Select-Object -First 1
+$prevEap = $ErrorActionPreference
+$ErrorActionPreference = "Continue"   # capturing native output under Stop makes git stderr fatal
+try { $commonDir = (& git rev-parse --path-format=absolute --git-common-dir) | Select-Object -First 1 }
+finally { $ErrorActionPreference = $prevEap }
 if (-not $commonDir) { Write-Host "ERROR: not inside a git repository" -ForegroundColor Red; exit 1 }
 $MainCheckout = Split-Path -Parent $commonDir
 $Registry = Join-Path $PSScriptRoot "state\worktrees.json"

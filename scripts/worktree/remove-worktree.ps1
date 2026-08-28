@@ -22,8 +22,19 @@ param(
     [switch]$PruneRegistry
 )
 
+# 'Stop' for cmdlets, but CAPTURING a native command's output under it turns git's stderr
+# into a terminating error (found by the Verify-D drill: these scripts worked by hand and
+# broke the moment a wrapper script with 'Stop' called them). Every `& git` whose output is
+# captured below runs inside Get-GitLines, which flips the pref for the duration.
 $ErrorActionPreference = "Stop"
 $Registry = Join-Path $PSScriptRoot "state\worktrees.json"
+
+function Get-GitLines {
+    param([string[]]$GitArgs)
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try { return @(& git @GitArgs) } finally { $ErrorActionPreference = $prevEap }
+}
 
 function Fail([string]$Message) { Write-Host "ERROR: $Message" -ForegroundColor Red; exit 1 }
 
@@ -70,14 +81,14 @@ if (-not (Test-Path $path)) {
 }
 
 # --- what would be lost? ----------------------------------------------------------
-$dirty = @(& git -C $path status --porcelain)
+$dirty = Get-GitLines @("-C", $path, "status", "--porcelain")
 $unmerged = @()
 $null = & git rev-parse --verify --quiet "refs/heads/$MergedInto"
 if ($LASTEXITCODE -eq 0) {
-    $unmerged = @(& git -C $path log --oneline "$MergedInto..$branch")
+    $unmerged = Get-GitLines @("-C", $path, "log", "--oneline", "$MergedInto..$branch")
 } else {
     Write-Host ("  note: no local '{0}' branch to compare against - treating all commits as unmerged" -f $MergedInto) -ForegroundColor Yellow
-    $unmerged = @(& git -C $path log --oneline -n 20 $branch)
+    $unmerged = Get-GitLines @("-C", $path, "log", "--oneline", "-n", "20", $branch)
 }
 
 Write-Host ("Worktree {0} ({1})" -f $Id, $path) -ForegroundColor Cyan

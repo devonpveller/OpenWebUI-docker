@@ -95,12 +95,24 @@ This is where cross-agent breakage surfaces, which is the entire point of doing 
 under the lease. **Re-run the gates after the rebase** — green before the rebase says
 nothing about green after it.
 
-**Step 4 — merge with evidence.**
+**Step 4 — merge with evidence, in a dedicated merge worktree.**
 
 ```powershell
-git checkout development
-git merge --no-ff work/<your-id> -m "<what landed> ...evidence..."
+git worktree add .claude/worktrees/merge-line development   # once, while you hold the lease
+git -C .claude/worktrees/merge-line merge --no-ff work/<your-id> -m "<what landed> ...evidence..."
+git worktree remove .claude/worktrees/merge-line
 ```
+
+**Never `git checkout development`** to do this. It would switch your own worktree off
+its branch, and git flatly refuses when `development` is already checked out in another
+worktree — which is exactly the case whenever the operator's main checkout happens to
+sit on it. (The Verify-D drill found this: the original wording only worked by luck of
+where the operator's checkout was parked.) A merge worktree is owned by whoever holds
+the `merge` lease, so it can never collide.
+
+If `git worktree add` fails because `development` is checked out in the operator's tree,
+**stop and say so** — do not merge inside their checkout. That is their working copy, and
+a bridge turn could be running there.
 
 `--no-ff` keeps your branch visible in history. The merge message carries the
 validation evidence — that is the operator's branch policy made mechanical, and it

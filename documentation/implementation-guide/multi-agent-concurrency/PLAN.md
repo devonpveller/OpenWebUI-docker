@@ -269,10 +269,40 @@ already gates deliveries on exactly this — reuse the check's shape).
 agents do them (that is this phase). `main` promotion: human. Prod deploys: gated
 allow-list step, post-merge. Pushes: only when asked (git-handling boundary).
 
-**Verify D:** staged two-agent drill — both branches touch the same file with
-conflicting edits; agent 1 merges; agent 2's rebase conflicts, negotiates via
-thread wake, lands adapted; lock never held by two owners (audit the state file
-history); a third session confirms `development` green after both.
+**Verify D — RUN 2026-08-28, 21/21 checks pass.** Reproducible:
+`scripts/worktree/verify-merge-protocol.ps1` (idempotent, self-cleaning, runs
+against a scratch line so `development` is never touched — verified unmoved,
+`40f7b4b1` before and after).
+
+Proven end to end: two worktrees provisioned by the real script; conflicting edits
+to the same file; agent A takes the `merge` lease and **B is blocked (exit 3)**
+with the lease naming exactly one owner; A rebases and merges `--no-ff`; A
+releases; B acquires, rebases into a **real conflict**, applies
+**later-merger-adapts** (keeps A's landed line, expresses its own need as a
+per-caller override), merges; both intents survive; exactly 2 merge commits added;
+full cleanup leaves zero worktrees, branches and leases.
+
+**Three defects the drill found** — the reason it was worth running rather than
+asserting:
+
+1. **The protocol's Step 4 was unsafe.** `git checkout development` would switch
+   the agent's own worktree off its branch, and git refuses outright when
+   `development` is checked out elsewhere — i.e. whenever the operator's main
+   checkout sits on it. The original wording only worked by luck of where their
+   checkout was parked. Now: merge in a dedicated merge worktree owned by the
+   `merge` lease holder, and stop rather than merge inside the operator's tree.
+2. **`new-worktree.ps1` / `remove-worktree.ps1` / `sync-worktree-env.ps1` broke
+   when called from a wrapper script.** Under `$ErrorActionPreference='Stop'`,
+   *capturing* a native command's output makes git's ordinary stderr terminating —
+   so they worked by hand and failed the moment any automation invoked them. The
+   captures now flip the preference around the call.
+3. **Two PowerShell scoping traps** worth keeping on the record: `& git` inside a
+   function named `Git` calls itself (case-insensitive → call-depth overflow), and
+   functions leak into invoked scripts, so a helper named `Git` shadowed the real
+   binary *inside* `new-worktree.ps1` ("not inside a git repository").
+
+**Not covered, stated honestly:** Tier-2 thread negotiation (§5 D3) needs two live
+sessions and remains asserted by inspection, not by this script.
 
 ## 6. Rollout order
 

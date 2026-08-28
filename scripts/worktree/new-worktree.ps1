@@ -50,7 +50,14 @@ function Invoke-Git {
     # ("Preparing worktree (new branch ...)") becomes a terminating error - this script
     # died on exactly that on its first run. Let stderr flow to the console; trust
     # $LASTEXITCODE, which is the only honest success signal for a native command.
-    $out = & git @GitArgs
+    #
+    # The pref flip closes the same trap's second door, found by the Verify-D drill: even
+    # WITHOUT a redirect, CAPTURING a native command's output under 'Stop' turns its stderr
+    # into a terminating error. That made this script work when run by hand but fail the
+    # moment a wrapper script (or any future automation) called it with 'Stop' set.
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try { $out = & git @GitArgs } finally { $ErrorActionPreference = $prevEap }
     if ($LASTEXITCODE -ne 0 -and -not $AllowFail) {
         Fail ("git " + ($GitArgs -join " ") + " failed with exit code $LASTEXITCODE (message above)")
     }

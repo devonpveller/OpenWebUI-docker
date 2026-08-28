@@ -14,6 +14,7 @@ The wider design (test containers, bridge integration):
 | `new-worktree.ps1` | Provision `.claude/worktrees/wt-<id>` on `work/<id>` from `development`, init the OB1 submodule, copy runtime env files, CRLF-check, register it |
 | `sync-worktree-env.ps1` | Re-copy `.env` / `.env.test` / `OB1/docker/.env` into worktrees when the main checkout's copy is newer (`-WhatIfOnly` reports drift) |
 | `remove-worktree.ps1` | Retire a worktree, **refusing** while it holds uncommitted or unmerged work (`-Force` to discard deliberately); `-PruneRegistry` drops rows whose path is gone |
+| `verify-merge-protocol.ps1` | Executable proof of MERGE-PROTOCOL's two-agent path: 21 checks against a scratch line (never `development`), self-cleaning. Run it after changing any script here or the protocol |
 | `lease.ps1` | Named exclusive leases — the test queue AND the merge queue in one primitive: `-Acquire` / `-Refresh` / `-Release` / `-Status` / `-Takeover` (exit 3 = held, wait). Names validate against `lease-names.conf` (`-AdHoc` to escape); multi-name requests are sorted + all-or-nothing, so agents cannot deadlock |
 
 `lease.ps1` is deliberately **generic mechanism** with zero repo coupling and no
