@@ -25,6 +25,10 @@ $ErrorActionPreference = "Continue"   # native git stderr must never be fatal he
 $repo = "d:\Open WebUI\ai-stack"
 $wtScripts = Join-Path $repo "scripts\worktree"
 $lease = Join-Path $wtScripts "lease.ps1"
+. (Join-Path $wtScripts "common.ps1")
+# Resolve the lock path rather than hardcoding it: the lease dir moved to the shared
+# per-repository namespace, and this drill asserted on the old location for one run.
+$mergeLockFile = Join-Path (Join-Path (Get-SharedStateDir) "locks") "merge.json"
 $results = @()
 
 function Step($n, $text) { Write-Host "`n=== $n. $text ===" -ForegroundColor Cyan }
@@ -63,7 +67,7 @@ foreach ($b in @("work/drilla", "work/drillb", "drill/verify-d")) {
     if ($LASTEXITCODE -eq 0) { & git.exe branch -D $b | Out-Null }
 }
 foreach ($o in @("wt-drilla", "wt-drillb")) { & $lease -Release -Name merge -Owner $o | Out-Null }
-$reg = Join-Path $wtScripts "state\worktrees.json"
+$reg = Join-Path (Get-SharedStateDir) "worktrees.json"
 if (Test-Path $reg) { '{ "worktrees": {} }' | Set-Content $reg -Encoding ASCII }
 
 $devBefore = (Get-DrillGit rev-parse development).Trim()
@@ -95,7 +99,7 @@ Step 3 "lease mutual exclusion under real contention"
 Check "agent A acquired the merge lease" ($LASTEXITCODE -eq 0)
 & $lease -Acquire -Name merge -Owner wt-drillb | Out-Null
 Check "agent B is BLOCKED while A holds it (exit 3)" ($LASTEXITCODE -eq 3)
-$holder = (Get-Content (Join-Path $wtScripts "state\locks\merge.json") -Raw | ConvertFrom-Json).owner
+$holder = (Get-Content $mergeLockFile -Raw | ConvertFrom-Json).owner
 Check "lease names exactly one owner" ($holder -eq "wt-drilla") "holder=$holder"
 
 Step 4 "agent A rebases and merges into the shared line"
@@ -108,7 +112,7 @@ Check "merge worktree created for the shared line" (Test-Path $wtMerge)
 Invoke-DrillGit -C $wtMerge merge --no-ff work/drilla -m "merge drill A: raise timeout to 60s (evidence: drill)"
 Check "agent A's merge landed" ((Get-DrillGit -C $wtMerge log --oneline -1 --format=%s) -like "merge drill A*")
 & $lease -Release -Name merge -Owner wt-drilla | Out-Null
-Check "agent A released the lease" (-not (Test-Path (Join-Path $wtScripts "state\locks\merge.json")))
+Check "agent A released the lease" (-not (Test-Path $mergeLockFile))
 
 Step 5 "agent B acquires, rebases -> CONFLICT (the point of the drill)"
 & $lease -Acquire -Name merge -Owner wt-drillb -Thread drill-thread-b | Out-Null
@@ -146,13 +150,13 @@ Check "operator checkout still on its own branch" ((Get-DrillGit rev-parse --abb
 Step 8 "cleanup - leave nothing behind"
 Invoke-DrillGit worktree remove --force $wtMerge
 foreach ($id in @("drilla", "drillb")) {
-    & (Join-Path $wtScripts "remove-worktree.ps1") -Id $id -Force | Out-Null
+    & (Join-Path $wtScripts "remove-worktree.ps1") -Id $id -MergedInto "drill/verify-d" -Force | Out-Null
 }
 Invoke-DrillGit branch -D drill/verify-d
 Invoke-DrillGit worktree prune
 Check "all drill worktrees gone" (@(Get-ChildItem (Join-Path $repo ".claude\worktrees") -ErrorAction SilentlyContinue).Count -eq 0)
 Check "no drill/work branches left" (@(Get-DrillGit branch --list "work/*" "drill/*").Count -eq 0)
-Check "no leases held" (-not (Test-Path (Join-Path $wtScripts "state\locks\merge.json")))
+Check "no leases held" (-not (Test-Path $mergeLockFile))
 
 Write-Host "`n================ DRILL SUMMARY ================" -ForegroundColor Cyan
 $fail = @($results | Where-Object { -not $_.pass })
