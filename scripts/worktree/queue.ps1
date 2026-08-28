@@ -119,6 +119,25 @@ function Assert-Claim($item, [string]$role, [string]$who) {
     if ($holder -ne $who) { Die "the $role claim on '$($item.id)' is held by $holder, not $who" 3 }
 }
 
+function Normalize-Id([string]$who) {
+    # `wt-coder-readme` and `coder-readme` are the SAME agent - the worktree directory is
+    # prefixed, the registry id is not. Separation of duties is a string comparison, so
+    # without this a developer could test or review their own work simply by typing the
+    # other form of their own name. Found by a developer agent, not by me.
+    if (-not $who) { return "" }
+    return ($who.ToLower() -replace '^wt-', '')
+}
+
+function Test-KnownAgent([string]$who) {
+    # Advisory only: testers, reviewers and the operator legitimately have no worktree.
+    $reg = Join-Path (Get-SharedStateDir) "worktrees.json"
+    if (-not (Test-Path $reg)) { return $true }
+    try { $rows = (Get-Content -Raw -Path $reg | ConvertFrom-Json).worktrees } catch { return $true }
+    if (-not $rows) { return $true }
+    $known = @($rows.PSObject.Properties.Name | ForEach-Object { Normalize-Id $_ })
+    return ($known -contains (Normalize-Id $who))
+}
+
 function Drop-Claim([string]$i, [string]$role) {
     $c = ClaimPath $i $role
     if (Test-Path $c) { Remove-Item $c -Force }
@@ -137,7 +156,8 @@ if ($List) {
             $c = ClaimPath $it.id $r
             if (Test-Path $c) { $held = "$r=" + (Get-Content -Raw -Path $c | ConvertFrom-Json).by }
         }
-        Write-Host ("{0,-18} {1,-14} {2,-20} {3}" -f $it.id, $it.state, $it.developer, $held)
+        $flag = if ($it.PSObject.Properties.Name -contains "line_mergeable" -and -not $it.line_mergeable) { " [needs hand-off]" } else { "" }
+        Write-Host ("{0,-18} {1,-14} {2,-20} {3}{4}" -f $it.id, $it.state, $it.developer, $held, $flag)
     }
     exit 0
 }
@@ -159,19 +179,42 @@ if ($Submit) {
              "and 'I tested it myself' is not one either.")
     }
     if (Test-Path (ItemPath $Id)) { Die "queue item '$Id' already exists (use a new -Id, or -Show it)" }
+    # The plan is a FILE, and the tool must prove it. It used to store whatever string it was
+    # given, so `-TestPlan "I tested it"` sailed through - precisely what the error text
+    # claims to refuse. Both developer agents in the first pipeline run raised this.
+    if (-not (Test-Path $TestPlan)) {
+        Die ("-TestPlan must be a path to a file that exists (got '$TestPlan'). Write the plan " +
+             "down first - the tester executes it, and a sentence is not a plan.")
+    }
+    # And it needs a HOME. The obvious place is the developer's worktree, which is exactly
+    # what gets deleted at the end - leaving the item pointing at nothing. Copy it beside the
+    # item in the shared state dir, which outlives the worktree. Both agents independently
+    # improvised this same location; two agents guessing alike is luck, not a protocol.
+    $planDest = Join-Path $QueueDir "$Id.plan.md"
+    Copy-Item -Path $TestPlan -Destination $planDest -Force
     $line = Resolve-WorkLine
     $sha = (Invoke-GitCapture @("rev-parse", $Branch) | Select-Object -First 1)
     if ($LASTEXITCODE -ne 0 -or -not $sha) { Die "branch '$Branch' not found" }
     $item = [ordered]@{
         id = $Id; branch = $Branch; line = $line; developer = $Developer
-        state = "ready-to-test"; test_plan = $TestPlan; thread = $Thread; attempt = 1
+        state = "ready-to-test"; test_plan = $planDest; thread = $Thread; attempt = 1
+        line_mergeable = (-not (Test-LineCheckedOutElsewhere -Line $line))
         submitted_sha = $sha.Trim(); tested_at_sha = ""; merged_sha = ""
         results = @(); history = @()
     }
     Add-History $item "submitted for testing" $Developer
     Write-Item $item
     Write-Host ("Queued '{0}' for TESTING (branch {1} -> {2})." -f $Id, $Branch, $line) -ForegroundColor Green
+    Write-Host ("  Plan copied to {0}" -f $planDest)
     Write-Host "  A tester who is NOT the developer must claim and execute the plan."
+    if (-not $item.line_mergeable) {
+        Write-Host ("  NOTE: '{0}' is checked out in the main checkout, so the reviewer will have to" -f $line) -ForegroundColor Yellow
+        Write-Host "        hand the merge back to the operator. Known now rather than at landing time." -ForegroundColor Yellow
+    }
+    if (-not (Test-KnownAgent $Developer)) {
+        Write-Host ("  WARNING: '{0}' matches no worktree in the registry. Separation of duties is a" -f $Developer) -ForegroundColor Yellow
+        Write-Host "           name comparison - a mistyped id silently weakens it." -ForegroundColor Yellow
+    }
     exit 0
 }
 
@@ -184,7 +227,7 @@ if ($Claim) {
     # SEPARATION OF DUTIES, enforced rather than trusted. The developer may not test or
     # review their own work: a rule an agent has to remember is a rule that gets skipped
     # at 2am by the agent most convinced it is fine.
-    if ($By -eq $item.developer) {
+    if ((Normalize-Id $By) -eq (Normalize-Id $item.developer)) {
         Die ("$Role of '$Id' cannot be its developer ($By). Someone else must " +
              $RoleRules[$Role].duty + " - that separation is the point.") 4
     }
@@ -297,7 +340,7 @@ if ($Merged) {
     if (-not $Id -or -not $By -or -not $Sha) { Die "-Merged needs -Id, -By and -Sha (the merge commit)" }
     $item = Read-Item $Id
     Assert-Claim $item "reviewer" $By
-    if ($By -eq $item.developer) { Die "the developer cannot merge their own work" 4 }
+    if ((Normalize-Id $By) -eq (Normalize-Id $item.developer)) { Die "the developer cannot merge their own work" 4 }
     $item.state = "merged"; $item.merged_sha = $Sha
     Add-History $item "merged as $Sha" $By
     Drop-Claim $Id "reviewer"
@@ -316,7 +359,7 @@ if ($Approve) {
     if (-not $Id -or -not $By) { Die "-Approve needs -Id and -By (who is releasing it)" }
     $item = Read-Item $Id
     if ($item.state -ne "test-passed") { Die "'$Id' is '$($item.state)' - only a test-passed item can be released for review" }
-    if ($By -eq $item.developer) {
+    if ((Normalize-Id $By) -eq (Normalize-Id $item.developer)) {
         Die "the developer cannot release their own work for review - that is the human gate, and self-service defeats it" 4
     }
     $item.state = "ready-review"
@@ -332,7 +375,7 @@ if ($Resubmit) {
     if (-not $Id -or -not $By) { Die "-Resubmit needs -Id and -By" }
     $item = Read-Item $Id
     if ($item.state -ne "test-failed") { Die "'$Id' is '$($item.state)' - only a test-failed item is re-submitted" }
-    if ($By -ne $item.developer) { Die "only the developer ($($item.developer)) re-submits their own item" 4 }
+    if ((Normalize-Id $By) -ne (Normalize-Id $item.developer)) { Die "only the developer ($($item.developer)) re-submits their own item" 4 }
     $item.attempt = [int]$item.attempt + 1
     $item.state = "ready-to-test"
     $item.tested_at_sha = ""

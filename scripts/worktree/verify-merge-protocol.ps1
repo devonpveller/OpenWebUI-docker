@@ -97,10 +97,20 @@ Invoke-DrillGit -C $wtB commit -q -m "drill B: lower timeout to 5s"
 Check "two divergent commits exist" ((Get-DrillGit -C $wtA rev-parse HEAD) -ne (Get-DrillGit -C $wtB rev-parse HEAD))
 
 Step 3 "developers QUEUE their work with a test plan - they never merge it themselves"
+# The plan must be a FILE that exists - queue.ps1 now proves it, so the drill writes one
+# rather than passing a sentence. That the drill had to change is the contract working.
+$planFile = Join-Path $env:TEMP "drill-test-plan.md"
+Set-Content -Path $planFile -Encoding ascii -Value @(
+    "# Drill test plan",
+    "Case 1: DRILL-NOTE.md exists and states a timeout. Pass: it does. Fail: absent or silent.",
+    "Case 2: the file names exactly one owner. Pass: one. Fail: contradictory owners.")
 foreach ($id in @("a", "b")) {
-    & $queue -Submit -Id "drill-$id" -Branch "work/drill$id" -Developer "wt-drill$id" `
-        -TestPlan "DRILL-NOTE.md states the timeout; verify the file reads as intended" | Out-Null
+    & $queue -Submit -Id "drill-$id" -Branch "work/drill$id" -Developer "wt-drill$id" -TestPlan $planFile | Out-Null
 }
+Check "a plan that is not a file is refused" $(
+    (& $queue -Submit -Id "drill-badplan" -Branch "work/drilla" -Developer "wt-drilla" -TestPlan "I tested it myself" 2>&1 | Out-Null); $LASTEXITCODE -ne 0)
+Check "the submitted plan was COPIED beside the item (survives worktree removal)" `
+    (Test-Path (Join-Path $QueueDir "drill-a.plan.md"))
 Check "both items queued for testing" ((Get-QueueState "drill-a") -eq "ready-to-test" -and (Get-QueueState "drill-b") -eq "ready-to-test")
 & $queue -Submit -Id "drill-noplan" -Branch "work/drilla" -Developer "wt-drilla" 2>&1 | Out-Null
 Check "a submission with NO test plan is refused" ($LASTEXITCODE -ne 0)
@@ -110,6 +120,9 @@ Step 4 "separation of duties is ENFORCED, not trusted"
 Check "the developer cannot TEST their own work (exit 4)" ($LASTEXITCODE -eq 4)
 & $queue -Claim -Id drill-a -Role reviewer -By wt-drilla 2>&1 | Out-Null
 Check "the developer cannot REVIEW their own work (exit 4)" ($LASTEXITCODE -eq 4)
+# The guard is a name comparison, so the other form of your own name must not defeat it.
+& $queue -Claim -Id drill-a -Role tester -By drilla 2>&1 | Out-Null
+Check "the un-prefixed form of the developer's own id is also refused" ($LASTEXITCODE -eq 4)
 
 Step 5 "a case FAILS - the cycle exists because the test found something"
 & $queue -Claim -Id drill-a -Role tester -By wt-tester | Out-Null
@@ -193,8 +206,14 @@ foreach ($id in @("drilla", "drillb")) {
 Invoke-DrillGit branch -D drill/verify-d
 Invoke-DrillGit worktree prune
 Clear-DrillQueue
-Check "all drill worktrees gone" (@(Get-ChildItem (Join-Path $repo ".claude\worktrees") -ErrorAction SilentlyContinue).Count -eq 0)
-Check "no drill/work branches left" (@(Get-DrillGit branch --list "work/*" "drill/*").Count -eq 0)
+# Scoped to the DRILL's own artifacts. These asserted the whole worktree directory was
+# empty, which failed the moment real agents had work in flight - the drill must not
+# require an idle repo to pass, and must never look like it cleaned up someone else's work.
+$leftWorktrees = @("wt-drilla", "wt-drillb", "merge-line") |
+    Where-Object { Test-Path (Join-Path $repo ".claude\worktrees\$_") }
+Check "all drill worktrees gone" ($leftWorktrees.Count -eq 0) ("left: " + ($leftWorktrees -join ","))
+$leftBranches = @(Get-DrillGit branch --list "work/drilla" "work/drillb" "drill/verify-d")
+Check "no drill branches left" ($leftBranches.Count -eq 0) ("left: " + ($leftBranches -join ","))
 Check "queue emptied of drill items" (@(Get-ChildItem -Path $QueueDir -Filter "drill-*" -ErrorAction SilentlyContinue).Count -eq 0)
 
 Write-Host "`n================ DRILL SUMMARY ================" -ForegroundColor Cyan

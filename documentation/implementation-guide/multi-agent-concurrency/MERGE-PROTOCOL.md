@@ -91,9 +91,18 @@ Rules while you work:
 `git diff <work line>...work/<your-id>`. It is local on purpose: a GitHub PR would need
 branches pushed (against this repo's push policy), the `gh` CLI (absent), and network.
 
-**Step 1 - validate in your own worktree.** Your task's RED to GREEN evidence, plus
-`ruff check .` and a compose `config` render for any plane you touched. A queue submission
-is not the place to discover your branch is red.
+**Step 1 - validate in your own worktree.** `ruff check .`, plus a compose `config` render
+for any plane **whose compose file or env you changed** (editing a plane's *other* files is
+not touching it - see §1 rule 4; the two senses of "touch" collided here until a developer
+called it out). A queue submission is not the place to discover your branch is red.
+
+**What "evidence" means depends on the change.** For behaviour, it is RED to GREEN: a repro
+that failed before your change and passes after. **For documentation and other non-behavioural
+work there is no repro to fail** - do not invent theatre. What such a change owes instead is
+*verification against the source of truth*: every claim checked against the file it describes,
+disagreements between docs and reality called out explicitly, and links proven to resolve.
+Say which of the two you are offering; a documentation item claiming a RED to GREEN pass is a
+worse signal than one that says plainly what it checked.
 
 **Step 2 - write the test plan, then submit. This is the developer's last action.**
 
@@ -170,8 +179,7 @@ unreachable gitlink breaks every fresh `--recurse-submodules` clone.
 **Step 6 - the developer retires the worktree.**
 
 ```powershell
-.\scripts\worktree
-emove-worktree.ps1 -Id <id>
+.\scripts\worktree\remove-worktree.ps1 -Id <id>
 ```
 
 It refuses while you still hold uncommitted or unmerged work, and tells you what. That
