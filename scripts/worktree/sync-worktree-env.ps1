@@ -22,6 +22,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "common.ps1")
 $EnvFiles = @(".env", ".env.test", "OB1/docker/.env")
 
 function Say([string]$Text, [string]$Color = "Gray") {
@@ -36,7 +37,7 @@ try { $commonDir = (& git rev-parse --path-format=absolute --git-common-dir) | S
 finally { $ErrorActionPreference = $prevEap }
 if (-not $commonDir) { Write-Host "ERROR: not inside a git repository" -ForegroundColor Red; exit 1 }
 $MainCheckout = Split-Path -Parent $commonDir
-$Registry = Join-Path $PSScriptRoot "state\worktrees.json"
+$Registry = Join-Path (Get-SharedStateDir) "worktrees.json"
 
 # Resolve the target set.
 $targets = @()

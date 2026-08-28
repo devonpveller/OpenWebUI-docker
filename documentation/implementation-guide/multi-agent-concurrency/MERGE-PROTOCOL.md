@@ -12,10 +12,11 @@ first conflict.
 ## 0. The one-paragraph version
 
 Work in your own worktree. When your work is ready, take the `merge` lease, rebase onto
-the current `development`, re-run your gates, merge `--no-ff` with your evidence in
-the commit message, release it, and say what you landed in your Mattermost
-thread. If your rebase conflicts with work someone else landed first, **you adapt** —
-you do not re-litigate what is already on `development`. If adapting would break the
+your work line, re-run your gates, merge `--no-ff` with your evidence in the commit
+message, release it, and say what you landed in your Mattermost thread. (If the line is
+checked out in the operator's checkout, you hand off instead of merging - Step 4.) If
+your rebase conflicts with work someone else landed first, **you adapt** - you do not
+re-litigate what has already landed. If adapting would break the
 other agent's goal, talk to them in their thread before resolving. If you two cannot
 agree, stop and ask the operator.
 
@@ -23,8 +24,18 @@ agree, stop and ask the operator.
 
 ```powershell
 .\scripts\worktree\new-worktree.ps1 -Id <short-id> -OwnerKind extension -OwnerRef <session>
-# then:  EnterWorktree path: <the path it prints>
+# then EITHER:  EnterWorktree path: <the path it prints>   (moves your session there)
+# OR simply:    git -C <the path it prints> ...          (works from anywhere)
 ```
+
+`EnterWorktree` is a convenience, not the mechanism - it is unavailable to some session
+kinds (a subagent with a pinned cwd was refused outright). If it does not work, use
+`git -C <worktree>` and absolute paths; what must hold is that your commits land in the
+worktree and the main checkout is never mutated, and neither depends on your cwd.
+
+The script prints your **work line** - the branch you branched from and will land on. It
+defaults to whatever the main checkout currently has loaded, so agents inherit the tooling
+and docs on that branch; override with `-Base` or `AI_STACK_WORK_LINE`.
 
 This is not optional politeness — a bare `git worktree add` is broken here in three
 verified ways (no `.env`, empty `OB1/`, wrong base branch), and a shared checkout is
@@ -54,7 +65,10 @@ Rules while you work:
   2. **When unsure which planes you touch, widen.** Your announce post (step 5)
      names the leases you held; under-declaring is visible in the post-mortem.
   3. Exit 3 = held: wait, poll ≤1/min. Long build? `-Refresh` keeps it alive.
-  4. Leave the plane the way you found it *before releasing* — a lease serializes
+  4. **Editing files that belong to a plane needs no plane lease** - only touching the
+     RUNNING plane does. A docs, config or source change you do not deploy is the
+     read-only case: take `merge` to land it, and nothing else.
+  5. Leave the plane the way you found it *before releasing* — a lease serializes
      interference, it does not clean up after you. Test data stays test-prefixed
      (`testing-*`), test images tag `:wt-<id>` and never touch `:local` (retagging
      IS the deploy, which stays gated).
@@ -88,7 +102,7 @@ forever.
 
 ```powershell
 git fetch origin
-git -C <your-worktree> rebase origin/development     # or `development` if that is the live ref
+git -C <your-worktree> rebase <your work line>       # the branch new-worktree.ps1 reported
 ```
 
 This is where cross-agent breakage surfaces, which is the entire point of doing it
@@ -98,21 +112,26 @@ nothing about green after it.
 **Step 4 — merge with evidence, in a dedicated merge worktree.**
 
 ```powershell
-git worktree add .claude/worktrees/merge-line development   # once, while you hold the lease
-git -C .claude/worktrees/merge-line merge --no-ff work/<your-id> -m "<what landed> ...evidence..."
-git worktree remove .claude/worktrees/merge-line
+# Write the evidence to a FILE first: multi-line -m is impractical in PS5.1, and unlike
+# `git commit`, `git merge -F -` does NOT read stdin ("could not read file '-'").
+git -C <main-checkout> worktree add .claude/worktrees/merge-line <work line>
+git -C <main-checkout>/.claude/worktrees/merge-line merge --no-ff work/<your-id> -F <msg-file>
+git -C <main-checkout> worktree remove .claude/worktrees/merge-line
 ```
 
-**Never `git checkout development`** to do this. It would switch your own worktree off
-its branch, and git flatly refuses when `development` is already checked out in another
-worktree — which is exactly the case whenever the operator's main checkout happens to
-sit on it. (The Verify-D drill found this: the original wording only worked by luck of
-where the operator's checkout was parked.) A merge worktree is owned by whoever holds
-the `merge` lease, so it can never collide.
+**If the work line is checked out in the main checkout, you cannot merge - hand off
+instead.** Git refuses a second checkout of one branch, and force-moving the ref would
+leave that working tree's index lying about its contents. This is the normal case when
+the line is the operator's active branch, so it is a supported outcome, not a failure:
+leave your branch rebased and green, release the lease, and report the exact command for
+them to run. `new-worktree.ps1` warns about this at PROVISIONING time so it is never a
+surprise at landing time.
 
-If `git worktree add` fails because `development` is checked out in the operator's tree,
-**stop and say so** — do not merge inside their checkout. That is their working copy, and
-a bridge turn could be running there.
+**Never `git checkout <work line>`** to do this - it switches your own worktree off its
+branch, and the Verify-D drill showed the original wording only worked by luck of where
+the operator's checkout was parked. The merge worktree is owned by whoever holds the
+`merge` lease, so it can never collide. Never merge inside the operator's checkout: it
+is their working copy and a bridge turn could be running in it.
 
 `--no-ff` keeps your branch visible in history. The merge message carries the
 validation evidence — that is the operator's branch policy made mechanical, and it
@@ -129,6 +148,11 @@ fresh `--recurse-submodules` clone.
 Then post in your own #claude-sessions thread: what landed, which files, the
 evidence, and whether a deploy is still pending. Other agents read this to know
 whether they need to rebase.
+
+**If you have no thread** (extension sessions, subagents), your merge commit message IS
+the announcement - it carries the same content and is what the next agent sees when they
+rebase. Say exactly that in your report rather than claiming you announced, and never
+drop the evidence just because there is no thread to put it in.
 
 **Step 6 — clean up.**
 

@@ -15,7 +15,7 @@
 [CmdletBinding()]
 param(
     [string]$Id = "",
-    [string]$MergedInto = "development",
+    [string]$MergedInto = "",   # default: the resolved work line (see common.ps1)
     [switch]$Force,
     [switch]$KeepBranch,
     [switch]$WhatIfOnly,
@@ -27,7 +27,11 @@ param(
 # broke the moment a wrapper script with 'Stop' called them). Every `& git` whose output is
 # captured below runs inside Get-GitLines, which flips the pref for the duration.
 $ErrorActionPreference = "Stop"
-$Registry = Join-Path $PSScriptRoot "state\worktrees.json"
+. (Join-Path $PSScriptRoot "common.ps1")
+$Registry = Join-Path (Get-SharedStateDir) "worktrees.json"
+# Comparing against the wrong line would misjudge "unmerged work" and could green-light
+# deleting a worktree whose commits are nowhere else.
+if (-not $MergedInto) { $MergedInto = Resolve-WorkLine }
 
 function Get-GitLines {
     param([string[]]$GitArgs)

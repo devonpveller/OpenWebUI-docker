@@ -7,8 +7,12 @@
 #   1. it materializes TRACKED files only, so the worktree has no .env / .env.test /
 #      OB1/docker/.env - every compose command in it fails or silently uses defaults;
 #   2. it does not populate the OB1 submodule (the worktree gets an empty dir);
-#   3. the harness's own EnterWorktree branches from the origin default branch, not
-#      `development` - this repo's work line - so the base must be passed explicitly.
+#   3. the harness's own EnterWorktree branches from the origin default branch, not the
+#      line you are actually working on - so the base must be resolved explicitly.
+# By default it branches from the MAIN CHECKOUT'S CURRENT BRANCH (operator, 2026-08-28):
+# someone running several agents wants them working off whatever is loaded, and it means
+# agents inherit the tooling and docs that live on that branch. Override with -Base or
+# AI_STACK_WORK_LINE.
 # This script does all three, records the worktree in a registry the bridge and the
 # merge queue read, and refuses the footguns.
 #
@@ -23,7 +27,7 @@ param(
     # Short and path-safe: worktree dirs carry a full OB1 checkout, and Windows
     # MAX_PATH plus node_modules depth is a real ceiling.
     [Parameter(Mandatory = $true)][string]$Id,
-    [string]$Base = "development",
+    [string]$Base = "",   # default: the resolved work line (see common.ps1)
     [ValidateSet("extension", "bridge", "manual")][string]$OwnerKind = "manual",
     [string]$OwnerRef = "",
     [string]$Thread = "",
@@ -33,6 +37,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "common.ps1")
 
 # Runtime files a worktree needs but git will never give it. Copies, deliberately:
 # Windows symlinks need privilege, and compose resolves --env-file relative to cwd.
@@ -76,19 +81,30 @@ $MainCheckout = Split-Path -Parent $commonDir
 $WorktreeRoot = Join-Path $MainCheckout ".claude\worktrees"
 $Path = Join-Path $WorktreeRoot "wt-$Id"
 $Branch = "work/$Id"
-$StateDir = Join-Path $PSScriptRoot "state"
+$StateDir = Get-SharedStateDir   # shared across worktrees - see common.ps1
+if (-not $Base) { $Base = Resolve-WorkLine }
 $Registry = Join-Path $StateDir "worktrees.json"
 
 if (Test-Path $Path) { Fail "worktree path already exists: $Path (remove it with 'git worktree remove' or pick another -Id)" }
 
-# Resolve the base ref: prefer the remote tip so a stale local branch cannot silently
-# become the base of new work.
+# Resolve the base ref: prefer the LOCAL branch. The default line is now the operator's
+# active branch, where the local tip is the truth - preferring origin/<line> (as this did)
+# silently based agents on the last PUSHED commit, dropping any local work they were meant
+# to build on. If local and origin have diverged, say which one is being used.
 $baseRef = $null
-foreach ($candidate in @("origin/$Base", $Base)) {
+foreach ($candidate in @($Base, "origin/$Base")) {
     $null = Invoke-Git @("rev-parse", "--verify", "--quiet", $candidate) -AllowFail
     if ($LASTEXITCODE -eq 0) { $baseRef = $candidate; break }
 }
 if (-not $baseRef) { Fail "base ref '$Base' not found locally or on origin" }
+$null = Invoke-Git @("rev-parse", "--verify", "--quiet", "origin/$Base") -AllowFail
+if ($LASTEXITCODE -eq 0 -and $baseRef -eq $Base) {
+    $localSha = (Invoke-Git @("rev-parse", $Base)) | Select-Object -First 1
+    $originSha = (Invoke-Git @("rev-parse", "origin/$Base")) | Select-Object -First 1
+    if ($localSha -ne $originSha) {
+        Write-Host ("  NOTE   : local '{0}' differs from origin/{0} - branching from your LOCAL tip." -f $Base) -ForegroundColor Yellow
+    }
+}
 
 $branchExists = $false
 $null = Invoke-Git @("rev-parse", "--verify", "--quiet", "refs/heads/$Branch") -AllowFail
@@ -209,6 +225,19 @@ $reg.worktrees[$Id] = [ordered]@{
 $tmp = "$Registry.tmp"
 ($reg | ConvertTo-Json -Depth 6) | Set-Content -Path $tmp -Encoding ASCII
 Move-Item -Path $tmp -Destination $Registry -Force
+
+# --- merge-target warnings, raised NOW rather than 40 minutes later ----------------
+# Both of these are invisible until the agent is holding the merge lease, which is the
+# worst moment to find them.
+$holder = Test-LineCheckedOutElsewhere $Base
+if ($holder) {
+    Write-Host ("  NOTE   : '{0}' is checked out at {1}, so work cannot be MERGED into it" -f $Base, $holder) -ForegroundColor Yellow
+    Write-Host "           while it stays there (git refuses a second checkout of one branch)." -ForegroundColor Yellow
+    Write-Host "           Park that checkout elsewhere before landing, or land onto a different line." -ForegroundColor Yellow
+}
+if ($Base -in @("main", "master", "origin/main", "origin/master")) {
+    Write-Host ("  NOTE   : '{0}' is a protected line here - it is promoted deliberately, not merged into by agents." -f $Base) -ForegroundColor Yellow
+}
 
 Write-Host "Worktree ready." -ForegroundColor Green
 Write-Host "  Enter it with:  EnterWorktree path: $Path"

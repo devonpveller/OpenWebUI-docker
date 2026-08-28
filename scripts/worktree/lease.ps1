@@ -20,8 +20,8 @@
 # and on any failure the ones just taken are rolled back (all-or-nothing) - between
 # them, those two rules remove the classic two-agent deadlock outright.
 #
-# Atomicity: CreateNew on the lock file - no read-then-write window. No native
-# commands anywhere in this script, so there is nothing platform-entangled in it.
+# Atomicity: CreateNew on the lock file - no read-then-write window. The only native
+# call is git, via common.ps1, purely to locate the shared lock namespace.
 #
 # Usage:
 #   .\lease.ps1 -Acquire -Name open-brain -Owner wt-wiki-perf -Thread <mm-root>
@@ -49,8 +49,13 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "common.ps1")
+# The lock namespace must be ONE per repository, shared by the main checkout and every
+# worktree - see common.ps1. Anchoring it on $PSScriptRoot (as this did) meant a copy of
+# this toolkit inside a worktree got its OWN gitignored lock dir, so two agents could each
+# be told "ACQUIRED" for `merge` and exclude nobody. AI_STACK_LEASE_DIR still overrides.
 $LockDir = if ($env:AI_STACK_LEASE_DIR) { $env:AI_STACK_LEASE_DIR }
-           else { Join-Path $PSScriptRoot "state\locks" }
+           else { Join-Path (Get-SharedStateDir) "locks" }
 $NamesFile = if ($env:AI_STACK_LEASE_NAMES_FILE) { $env:AI_STACK_LEASE_NAMES_FILE }
              else { Join-Path $PSScriptRoot "lease-names.conf" }
 

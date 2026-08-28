@@ -148,6 +148,31 @@ class ProvisioningIntegrationTests(unittest.TestCase):
                                 capture_output=True, text=True, timeout=60).stdout
         self.assertNotIn(".env", status, f"an env copy is exposed to the index:\n{status}")
 
+        # THE REGRESSION THAT MATTERS (soak run 1): coordination state must be ONE
+        # namespace per repository. When the toolkit is checked out inside a worktree,
+        # that copy must resolve the SAME lease/registry dir as the main checkout - or
+        # two agents each get "ACQUIRED" for `merge` and exclude nobody.
+        wt_common = os.path.join(path, "scripts", "worktree", "common.ps1")
+        if not os.path.isfile(wt_common):
+            # Explicit skip, never a silent pass: when this file is uncommitted or the
+            # work line predates the toolkit, the worktree has no copy and there is
+            # nothing to compare - but a guard that quietly evaporates is worse than none.
+            self.skipTest("toolkit not present in the worktree (uncommitted?) - "
+                          "shared-state regression NOT exercised")
+        if True:
+            main_common = os.path.join(bridge._REPO_ROOT, "scripts", "worktree", "common.ps1")
+            dirs = []
+            for script, cwd in ((wt_common, path), (main_common, bridge._REPO_ROOT)):
+                r = subprocess.run(
+                    ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+                     f". '{script}'; Get-SharedStateDir"],
+                    cwd=cwd, capture_output=True, text=True, timeout=120)
+                dirs.append((r.stdout or "").strip().lower())
+            self.assertEqual(dirs[0], dirs[1],
+                             "a toolkit copy inside a worktree resolved a DIFFERENT state dir "
+                             f"({dirs[0]!r} vs {dirs[1]!r}) - leases would exclude nobody")
+            self.assertTrue(dirs[0], "state dir resolved empty")
+
         # Retirement REFUSES while the probe is uncommitted (exit 2), rather than deleting it.
         rc, out = bridge._run_worktree_script("remove-worktree.ps1", ["-Id", self.ID])
         self.assertEqual(rc, 2, f"expected refusal while dirty, got {rc}:\n{out}")

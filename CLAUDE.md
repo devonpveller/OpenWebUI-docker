@@ -68,11 +68,14 @@ snapshots + `manifest.csv` (file → OWUI id; skills included).
   the path it prints. Never bare `git worktree add` (it leaves you with no
   `.env`, an empty `OB1/`, and the wrong base branch) and never bare
   `EnterWorktree name:` for repo work (it branches from the origin default
-  branch, not `development`). Land it via
+  branch, not your work line). Land it via
   `documentation/implementation-guide/multi-agent-concurrency/MERGE-PROTOCOL.md`
-  — take the `merge` lease (`lease.ps1 -Acquire -Name merge`), rebase onto
-  `development`, re-run gates, merge `--no-ff` with evidence, release, announce
-  in-thread. Conflicts: the LATER merger adapts; semantic clashes get negotiated
+  — take the `merge` lease (`lease.ps1 -Acquire -Name merge`), rebase onto your
+  work line, re-run gates, merge `--no-ff` with evidence, release, announce
+  in-thread. The work line defaults to whatever the main checkout has loaded
+  (override: `-Base` / `AI_STACK_WORK_LINE`), so agents inherit the tooling on
+  that branch; when it is the branch you have checked out, agents hand the merge
+  back to you rather than touching your working copy. Conflicts: the LATER merger adapts; semantic clashes get negotiated
   in the other agent's Mattermost thread (never `SendMessage` — it can be a
   headless peer mid-turn); no convergence → ask the operator. **Testing runs
   under plane leases, not cloned environments**: before a test that mutates a
