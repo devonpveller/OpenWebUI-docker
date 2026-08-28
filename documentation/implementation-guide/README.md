@@ -25,6 +25,7 @@
 | `expand-OB1-research-inlet-service/` | 🟡 built, not live | Activation reference. |
 | `autonomous-project-lifecycle/` | 🟡 in build | D1/D4 human-gated merge live; D5 staging open. |
 | `idea-refinery/` | ✅ built (local) | OpenRouter cloud route PARKED → archived. |
+| `wiki-dynamic-index/` | 🟡 P0-P4 shipped 2026-08-26; A-E planned | ContentIndex OFF, wiki_pages feeds search/nav/graph; new note 900s->29s. `PLAN.md` v2 = shipped work, `BUILD-LOG.md` = results + traps, `PLAN-NO-REBUILD.md` = remaining phases A-E (DB-rendered pages, live nav/graph, search UI), `PLAN-VIEWER-PERF.md` = 2026-08-28 plan (not built) for the 2-4s-per-click / unresponsive-on-mobile symptom: per-nav whole-vault explorer rebuild + nav-cache stall. |
 | `supervised-research-pipeline/` | 📝 draft 2026-08-05 | 4 phases, no build. |
 | `research-source-admission/` | 📝 shelved 2026-08-20 | |
 | `ai-stack-control-tower/` | 📝 draft, not built | |
