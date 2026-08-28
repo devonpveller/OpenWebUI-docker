@@ -136,7 +136,8 @@ involved change that finds nothing on the first pass is a reason to doubt the pl
 does not fit a PS5.1 argument, and it is copied beside the item. A failure is exactly when
 the next person needs your evidence most.
 
-`-PlanAdequate` is a judgement, not a formality: the plan was written by the developer, so
+One of `-PlanAdequate` / `-PlanInadequate` is **required** on both verdicts. It is a
+judgement, not a formality: the plan was written by the developer, so
 a tester who only reports pass/fail is grading an exam without reading the syllabus. If the
 plan missed cases, run the ones you think are missing, say so, and withhold the flag - a
 plan that missed the finding is itself a finding. A failure returns the item to the

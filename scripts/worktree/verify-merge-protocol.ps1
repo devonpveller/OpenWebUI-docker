@@ -128,8 +128,10 @@ Step 5 "a case FAILS - the cycle exists because the test found something"
 & $queue -Claim -Id drill-a -Role tester -By wt-tester | Out-Null
 & $queue -Fail -Id drill-a -By wt-tester -Reason "case 2: the note does not state the unit" 2>&1 | Out-Null
 Check "a verdict with no evidence is refused - on the FAIL path too" ($LASTEXITCODE -ne 0)
+& $queue -Fail -Id drill-a -By wt-tester -Reason "case 2: no unit" -Evidence "read the file" 2>&1 | Out-Null
+Check "a verdict with no plan judgement is refused" ($LASTEXITCODE -ne 0)
 & $queue -Fail -Id drill-a -By wt-tester -Reason "case 2: the note does not state the unit" `
-    -Evidence "read DRILL-NOTE.md at HEAD; it names a number with no unit" | Out-Null
+    -Evidence "read DRILL-NOTE.md at HEAD; it names a number with no unit" -PlanInadequate | Out-Null
 Check "a failing case sends it back to the developer" ((Get-QueueState "drill-a") -eq "test-failed")
 Check "the failure records WHERE it was found" `
     ((Get-Content -Raw (Join-Path $QueueDir "drill-a.json") | ConvertFrom-Json).tested_at_sha -ne "")

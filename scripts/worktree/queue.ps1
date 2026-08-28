@@ -38,6 +38,7 @@
 #   .\queue.ps1 -List
 #   .\queue.ps1 -Claim -Id mem-readme -Role tester -By wt-tester-1
 #   .\queue.ps1 -Pass  -Id mem-readme -By wt-tester-1 -Evidence <path> -PlanAdequate
+#     (-PlanAdequate or -PlanInadequate is REQUIRED on both verdicts - see the checks)
 #   .\queue.ps1 -Fail  -Id mem-readme -By wt-tester-1 -Reason "case 3 fails on a cold cache"
 #   .\queue.ps1 -Resubmit -Id mem-readme -By wt-mem-readme          # after a -Fail: next lap
 #   .\queue.ps1 -Approve -Id mem-readme -By profnovice               # THE HUMAN GATE
@@ -72,6 +73,7 @@ param(
     [string]$Thread = "",
     [string]$State = "",
     [switch]$PlanAdequate,
+    [switch]$PlanInadequate,
     [int]$ClaimTtlMin = 60
 )
 
@@ -304,6 +306,16 @@ if ($Pass -or $Fail) {
     if (-not $Id -or -not $By) { Die "-Pass/-Fail need -Id and -By" }
     $item = Read-Item $Id
     Assert-Claim $item "tester" $By
+    # The plan judgement must be STATED, not defaulted. It used to be a lone switch, so a
+    # tester who simply forgot recorded `false` - identical to a considered "this plan is
+    # inadequate" - and the nudge only fired AFTER the verdict was already written. A
+    # tester reported that; it is the same class as an empty evidence field.
+    if ($PlanAdequate -and $PlanInadequate) { Die "-PlanAdequate and -PlanInadequate are contradictory" }
+    if (-not ($PlanAdequate -or $PlanInadequate)) {
+        Die ("state a plan judgement: -PlanAdequate, or -PlanInadequate with what it should " +
+             "have covered. The plan was written by the developer - whether it was good enough " +
+             "to find what you found is part of your verdict, not an afterthought.")
+    }
     if (-not $Evidence) {
         # Required on BOTH verdicts. It used to be pass-only, so two testers had to cram
         # paragraphs of findings into -Reason and the recorded evidence came out empty -
@@ -331,11 +343,8 @@ if ($Pass -or $Fail) {
         # actually covered the change.
         plan_adequate = [bool]$PlanAdequate
     }
-    if (-not $PlanAdequate) {
-        # Warned on BOTH paths. It was pass-only, which meant the judgement was easiest to
-        # omit on the path where a plan just demonstrably failed to catch something.
-        Write-Host "  NOTE: you did not mark the plan adequate. Say what the plan should have covered -" -ForegroundColor Yellow
-        Write-Host "        a plan that missed the finding is itself a finding." -ForegroundColor Yellow
+    if ($PlanInadequate) {
+        Write-Host "  Plan marked INADEQUATE - say in your report what it should have covered." -ForegroundColor Yellow
     }
     Drop-Claim $Id "tester"
     if ($Pass) {
