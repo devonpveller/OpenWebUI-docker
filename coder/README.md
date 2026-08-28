@@ -1,8 +1,9 @@
 # coder — the little-coder control plane
 
 Compose project **`coder`** (`coder/docker-compose.yml`), split out of the root
-`ai-stack` project on 2026-08-21 (CLEANUP-PLAN Part K.4). Four services, one
-plane-native network, six volumes, one loopback host port.
+`ai-stack` project on 2026-08-21 (CLEANUP-PLAN Part K.4). Four services, two
+project-owned networks (one internal, one bridge) plus the external anchor seam,
+six volumes, one loopback host port.
 
 This is the self-improving coding agent: a **control plane that decides** and a
 **workspace plane that executes**, kept in separate containers on purpose. The
@@ -31,10 +32,23 @@ Design reference: `documentation/implementation-guide/little-coder/Self-improvin
   `browser`) are removed at image build, and `permission-gate` is `accept-all`
   so nothing prompts around the routing.
 - `git` inside `open-terminal` **is** the git-proxy wrapper — the real binary is
-  relocated to `/usr/bin/git.real`. There is no raw-git fallback. `.git/config`,
-  `.git/hooks/` and `.git/info/` are read-only to the agent, and
-  `core.hooksPath` is baked to an empty operator-owned directory so a hostile
-  repo's hooks are never executed.
+  relocated to `/usr/bin/git.real`. There is no raw-git fallback, and
+  `core.hooksPath` is baked at image build to an empty operator-owned directory,
+  so whatever a hostile repo lands in any `.git/hooks/` is never executed by git.
+  Both of those are hard, image-level properties.
+- **`.git/config` protection is policy, not a mount — do not describe it as
+  read-only.** There is no `:ro` mount anywhere near `.git`; the workspace volume
+  is read-write in both containers. What exists is *partial closure* (design
+  §3.3): git-proxy denies `git config` writes at the command level
+  (`git_proxy.py`, `blocklist:config-write` — and its own denial message repeats
+  the "read-only" phrasing, which is where that claim propagates from), plus a
+  workspace-edge bash filter against the obvious direct-write bypasses
+  (`>`/`>>`/`tee`/`cp`/`mv`/`sed -i`/…). The design records the residual
+  explicitly: **`open-terminal` runs as root, so a `python -c '...write...'`, a
+  base64-obfuscated path, or a renamed utility still reaches `.git/config`.**
+  Full closure needs `CAP_DAC_OVERRIDE` dropped or a uid split, and is deferred.
+  Acceptable for the current friendly-upstream workload; **not** a containment
+  property to rely on for genuinely hostile repos.
 - Both containers mount `little-coder-workspace`, so the agent **edits files
   directly** while **execution** stays inside the isolated plane. The volume
   crosses container uids, which is why both images set `git safe.directory` to
@@ -70,8 +84,17 @@ is not the harmless fallback it looks like.
   Publishing it would put a task-execution endpoint on the host's TCP stack.
   Probe it with `docker exec little-coder curl -fsS localhost:8090/health`.
 - **`open-terminal:8000`** — arbitrary command execution, API-key'd but still a
-  shell. Never published; `stack-watchdog.ps1` and `stack.ps1 health` both probe
-  it via `docker exec` for exactly this reason.
+  shell. Never published. `stack-watchdog.ps1` probes it the only way that is
+  left — `docker exec open-terminal curl … localhost:8000/health`
+  (`Test-OpenTerminalHealth`).
+  **`stack.ps1 health` does NOT probe it.** `open-terminal` appears in
+  `scripts/stack/stack.ps1` exactly once, in the project registry's `Note`
+  string; the coder probe curls `little-coder:8090/health`, and that endpoint
+  reports only the daemon's own state — status, version, focus, queue depth,
+  in-flight count (`little-coder/src/littlecoder/daemon.py`, `@app.get("/health")`).
+  It never touches the executor. **So a dead `open-terminal` passes
+  `stack.ps1 health` green.** Check it directly before trusting a green sweep,
+  and see gotcha 1 for why the watchdog detects the failure but cannot repair it.
 - **`lc-egress:8888`** — proxy only, reachable from `lc-net` alone.
 - Note that `llm-net` is itself `internal: true`, so publishing a port on a
   service attached only to it would be inert anyway.
@@ -98,8 +121,8 @@ volumes at the K.4 split; data was copied, not recreated).
 |---|---|---|---|
 | `little-coder-journals` | the three journals + `audit.jsonl` (design §4) | **yes — accumulated, append-only** | yes |
 | `little-coder-skill` | the artifact / skill library (§7) | **yes — accumulated** | yes |
-| `little-coder-cohorts` | derived counters + repro corpora (§5) | derived, rebuildable | yes |
-| `little-coder-polyglot` | canonical Polyglot clone (§8) | rebuildable | yes |
+| `little-coder-cohorts` | derived counters + repro corpora (§5) | **yes — accumulated** | yes |
+| `little-coder-polyglot` | canonical Polyglot clone (§8) | **yes — accumulated** | yes |
 | `little-coder-sessions` | pi session files, one per OWUI chat / CLI channel | **yes — per-session continuity** | yes |
 | `little-coder-workspace` | the focused project clone, **shared with `open-terminal`** | project-scoped, re-clonable | **no, by design** |
 
@@ -179,22 +202,52 @@ anchor -> inference -> frontend -> memory -> search -> CODER -> ob1 -> agent-org
 
 ## Gotchas (each verified against this tree, 2026-08-28)
 
-1. **`docker compose up -d open-terminal` from the repo root does nothing.** The
-   root project has been a pure network anchor with **0 services** since K.5b —
-   `docker compose --env-file .env config --services` at the root prints nothing.
-   `Repair-OpenTerminal` in `scripts/checks/stack-watchdog.ps1` still issues
-   exactly that command, so the watchdog's open-terminal self-heal is a no-op.
-   Restart it with
+1. **Bare `docker compose` against the root project is a no-op — and it is a
+   CLASS of bug in the watchdog, not one instance.** The root project has been a
+   pure network anchor with **0 services** since K.5b
+   (`docker compose --env-file .env config --services` at the root prints
+   nothing), so any `docker compose <verb> <service>` without
+   `-f <plane>/docker-compose.yml` silently does nothing. In
+   `scripts/checks/stack-watchdog.ps1` the surviving pre-K call sites are:
+
+   | Line | Call | Hits |
+   |---|---|---|
+   | 477 | `docker compose up -d open-terminal` (`Repair-OpenTerminal`) | this plane's executor |
+   | 511 | `docker compose up -d $ServiceName` (`Confirm-AuxiliaryContainer`) | **generic** — every auxiliary service it is asked to repair, including `little-coder`, `lc-egress` and `little-coder-backup` |
+   | 612 | `docker compose up -d llama-cpp-embed-upstream` | the inference plane |
+   | 615 | `docker compose restart llama-cpp-embed-upstream` | the inference plane |
+
+   Other call sites in the same file *do* pass `-f` (e.g. lines 333/345 for
+   inference, 399–430 for the tailscale netns dance), and `Test-ServiceHealth`
+   was migrated to name-based `docker inspect` at K.10 precisely because of this
+   — so **detection** was fixed and **remediation** was not. Combined with the
+   `stack.ps1 health` gap noted under `open-terminal:8000` above: the watchdog
+   can see a dead executor and cannot restart it, and the health sweep cannot
+   see it at all. Restart it by hand with
    `docker compose -f coder/docker-compose.yml --env-file .env up -d open-terminal`.
-   *(Not fixed here — this was a documentation-only change.)*
+   *(Not fixed here — this was a documentation-only change. The operator's
+   uncommitted edit to this file is an unrelated DST fix, so the gotcha is live,
+   not stale.)*
 
 2. **agent-org consumes this plane's IMAGES, not its daemon.** `ao-worker-N` is
    `image: little-coder:local` with **no build stanza**, and `ao-ot-N` is
    `${AO_OTn_IMAGE:-little-coder-open-terminal:local}`. So a `--build` here
    retags `:local` and silently changes what the agent-org worker pool runs on
    its next recreate. Plain `up -d` does not rebuild an existing image; keep it
-   that way unless the retag is what you mean. Conversely, agent-org does **not**
-   call `little-coder:8090` — grep finds no such caller.
+   that way unless the retag is what you mean.
+
+   **And the coupling runs BOTH ways.** agent-org's `ao-git-egress` (profile
+   `workers`) and `ao-egress` (profile `cloud`) each carry their own
+   `build: {context: ../../little-coder, dockerfile: docker/Dockerfile.egress}`
+   producing **`little-coder-egress:local`** — the exact tag this plane's
+   `lc-egress` runs. So a `--build` in *agent-org* silently changes what
+   `lc-egress` runs on its next recreate, including the egress allowlist that is
+   this plane's blast-radius boundary. Neither project pins a digest and neither
+   warns about the other.
+
+   Conversely, agent-org does **not** call this plane's daemon — grepping
+   `agent-org/` for `little-coder:8090`, `LC_DAEMON_URL`, `daemon_url` and
+   `http://little-coder` finds no caller.
 
 3. **`LC_ROUTE_EXEC=0` is not a harmless fallback.** It moves execution into the
    `little-coder` container, which has **no internet on either of its internal
@@ -230,11 +283,19 @@ anchor -> inference -> frontend -> memory -> search -> CODER -> ob1 -> agent-org
    they stay green while `llm-net` DNS, the gateway, or the virtual key is
    broken. `stack.ps1 health` is the functional probe.
 
-9. **`LITTLE_CODER_NO_CTX_PROBE=1` is deliberate.** The 1.9.x llama-cpp provider
-   probes the server's `/props` for the live context window; our `base_url` is the
-   LiteLLM gateway, which does not forward it. The probe fails silently on every
-   task and falls back to `models.json`'s declared 131072 — which is the value we
-   want anyway. The flag just removes the futile round trip and its log noise.
+9. **`LITTLE_CODER_NO_CTX_PROBE=1` is deliberate — but the compose comment
+   next to it is stale about the number.** The 1.9.x llama-cpp provider probes
+   the server's `/props` for the live context window; our `base_url` is the
+   LiteLLM gateway, which does not forward it, so the probe fails silently on
+   every task and the provider falls back to the window declared in
+   `little-coder/config/models.json`. That declared value is **90000**, not the
+   131072 the compose comment claims. `models.json`'s own `_comment` is explicit:
+   the window must stay under the `qwen36-27b` per-request lane
+   (`ctx-size / n_parallel` — 90000 for the 98304 lane since 2026-07-09b), and
+   the **pre-2026-07-09 value 131072 was ABOVE the then-current 87552 lane, a
+   latent overflow bug.** Skipping the probe is still right; do not "restore"
+   131072 on the strength of the comment. Changing the window requires a
+   `little-coder` restart (gotcha 7).
 
 10. **The backup can succeed with no artifact.** `backup/little-coder-backup.sh`
     exits 0 when `/data` is missing or empty (a deliberate precheck), so
@@ -250,9 +311,12 @@ anchor -> inference -> frontend -> memory -> search -> CODER -> ob1 -> agent-org
     in the same map; PowerShell's JSON parser is case-insensitive and dies with
     `DuplicateKeysInJsonString`. Read the YAML output instead.
 
-12. **Images are `:local` with no registry path.** There is nothing to pull. A
-    lost image means a rebuild from `little-coder/` — and see gotcha 2 for who
-    else that affects.
+12. **The three `:local` images have no registry path.** `little-coder:local`,
+    `little-coder-open-terminal:local` and `little-coder-egress:local` are built
+    from `little-coder/` and exist nowhere else — losing one means a rebuild, not
+    a pull, and see gotcha 2 for who else that rebuild affects. (The backup
+    sidecar is the exception: `alpine:3.21` is an ordinary upstream tag and does
+    pull normally.)
 
 ---
 
@@ -260,7 +324,8 @@ anchor -> inference -> frontend -> memory -> search -> CODER -> ob1 -> agent-org
 
 The compose file is the source of truth. These are live discrepancies at the time
 of writing, listed so the next person does not "correct" the file to match a
-stale summary:
+stale summary. Where a wrong claim is repeated in several files, every location
+is named — fixing one and leaving the others is how these survive.
 
 | Claim | Where | Reality |
 |---|---|---|
@@ -269,7 +334,9 @@ stale summary:
 | "The five expertise volumes" | this compose file's own `volumes:` comment | Same as above: four. |
 | "Nightly backup of the four little-coder expertise volumes" | this compose file's `little-coder-backup` comment | It mounts **five** — the four expertise volumes **and** `sessions`. The mounts win. |
 | `little-coder-backup` networks: "—" | stack-map table | It declares no `networks:`, so compose attaches it to `coder_default` (the internet-capable project bridge). |
-| "OWUI's `little_coder` pipe **and agent-org** reach the daemon over [llm-net]" | this compose file's header comment | Only OWUI does. agent-org runs its own pooled worker pairs and depends on this plane's **images**, not its daemon. |
+| agent-org reaches this plane's **daemon** | **five places**: this compose file's header comment and its `lc-mcpo` retirement note; the stack-map's `coder` blockquote; `documentation/CONTAINER-REGISTRY.md` (the `little-coder` row, and the door table's "OWUI / agent-org → little-coder:8090" row) | Only OWUI does. agent-org runs its own pooled worker pairs and depends on this plane's **images** (both directions — gotcha 2). Widened greps for `little-coder:8090`, `LC_DAEMON_URL`, `daemon_url` and `http://little-coder` across `agent-org/` find no caller. |
+| `contextWindow` falls back to **131072**, "which is what we want anyway" | this compose file's `LITTLE_CODER_NO_CTX_PROBE` comment | `little-coder/config/models.json` declares **90000**, and its `_comment` records 131072 as a *latent overflow bug* (it exceeded the then-current 87552 lane). See gotcha 9. |
+| "`.git/config`, `.git/hooks/`, `.git/info/` are **mounted read-only** to the agent" | design §3.3's headline sentence, echoed by git-proxy's own denial message (`git_proxy.py`, `blocklist:config-write`) | There is no such mount — the workspace is read-write in both containers. §3.3's own "Enforcement status" paragraph downgrades this to *partial closure* with an explicit root-write residual. Treat the headline as intent, the residual as the fact. |
 
 ---
 
