@@ -111,16 +111,29 @@ Check "the developer cannot TEST their own work (exit 4)" ($LASTEXITCODE -eq 4)
 & $queue -Claim -Id drill-a -Role reviewer -By wt-drilla 2>&1 | Out-Null
 Check "the developer cannot REVIEW their own work (exit 4)" ($LASTEXITCODE -eq 4)
 
-Step 5 "an independent tester executes both plans"
+Step 5 "a case FAILS - the cycle exists because the test found something"
+& $queue -Claim -Id drill-a -Role tester -By wt-tester | Out-Null
+& $queue -Fail -Id drill-a -By wt-tester -Reason "case 2: the note does not state the unit" | Out-Null
+Check "a failing case sends it back to the developer" ((Get-QueueState "drill-a") -eq "test-failed")
+& $queue -Resubmit -Id drill-a -By wt-tester 2>&1 | Out-Null
+Check "only the DEVELOPER may re-submit their item" ($LASTEXITCODE -eq 4)
+& $queue -Resubmit -Id drill-a -By wt-drilla | Out-Null
+Check "the developer re-submits on the SAME item (attempt 2)" ((Get-QueueState "drill-a") -eq "ready-to-test")
+
+Step 6 "the tester passes both - and they STOP at the human gate"
 foreach ($id in @("a", "b")) {
     & $queue -Claim -Id "drill-$id" -Role tester -By wt-tester | Out-Null
-    & $queue -Pass -Id "drill-$id" -By wt-tester -Evidence "read the file; content matches the plan" -PlanAdequate | Out-Null
+    & $queue -Pass -Id "drill-$id" -By wt-tester -Evidence "every case green" -PlanAdequate | Out-Null
 }
-Check "both items passed testing" ((Get-QueueState "drill-a") -eq "ready-review" -and (Get-QueueState "drill-b") -eq "ready-review")
-& $queue -Claim -Id drill-a -Role tester -By wt-tester2 2>&1 | Out-Null
-Check "a tester claim on an already-passed item is refused" ($LASTEXITCODE -ne 0)
+Check "a pass does NOT queue for review by itself" ((Get-QueueState "drill-a") -eq "test-passed" -and (Get-QueueState "drill-b") -eq "test-passed")
+& $queue -Claim -Id drill-a -Role reviewer -By wt-reviewer 2>&1 | Out-Null
+Check "a reviewer cannot claim before the operator releases it" ($LASTEXITCODE -ne 0)
+& $queue -Approve -Id drill-a -By wt-drilla 2>&1 | Out-Null
+Check "the developer cannot release their OWN work (exit 4)" ($LASTEXITCODE -eq 4)
+foreach ($id in @("a", "b")) { & $queue -Approve -Id "drill-$id" -By profnovice | Out-Null }
+Check "the operator released both for review" ((Get-QueueState "drill-a") -eq "ready-review" -and (Get-QueueState "drill-b") -eq "ready-review")
 
-Step 6 "the reviewer - neither developer - lands the first item"
+Step 7 "the reviewer - neither developer - lands the first item"
 & $queue -Claim -Id drill-a -Role reviewer -By wt-reviewer | Out-Null
 Check "reviewer claimed drill-a" ((Get-QueueState "drill-a") -eq "reviewing")
 Invoke-DrillGit -C $wtA rebase drill/verify-d
@@ -131,7 +144,7 @@ Invoke-DrillGit -C $wtMerge merge --no-ff work/drilla -m "merge drill A: raise t
 & $queue -Merged -Id drill-a -By wt-reviewer -Sha ((Get-DrillGit -C $wtMerge rev-parse HEAD).Trim()) | Out-Null
 Check "drill-a merged by the reviewer" ((Get-QueueState "drill-a") -eq "merged")
 
-Step 7 "the second item's rebase CONFLICTS - the later merger adapts"
+Step 8 "the second item's rebase CONFLICTS - the later merger adapts"
 & $queue -Claim -Id drill-b -Role reviewer -By wt-reviewer | Out-Null
 $testedAt = (Get-Content -Raw -Path (Join-Path $QueueDir "drill-b.json") | ConvertFrom-Json).tested_at_sha
 Invoke-DrillGit -C $wtB rebase drill/verify-d   # expected to conflict
@@ -147,22 +160,23 @@ $env:GIT_EDITOR = "true"
 Invoke-DrillGit -C $wtB rebase --continue
 Check "B's rebase completed after adapting" (-not (Test-Path (Join-Path $wtB ".git\rebase-merge")))
 
-Step 8 "STALE PASS: the rebase changed the tested content, so it goes BACK to test"
+Step 9 "STALE PASS: the rebase changed the tested content, so it goes BACK to test"
 $afterRebase = (Get-DrillGit -C $wtB rev-parse HEAD).Trim()
 Check "the tested sha is no longer what would land" ($afterRebase -ne $testedAt)
 & $queue -Requeue -Id drill-b -By wt-reviewer -Reason "rebase onto A's merge changed the file; the pass no longer describes it" | Out-Null
 Check "reviewer returned it to testing rather than merging" ((Get-QueueState "drill-b") -eq "ready-to-test")
 & $queue -Claim -Id drill-b -Role tester -By wt-tester | Out-Null
 & $queue -Pass -Id drill-b -By wt-tester -Evidence "re-read the adapted file; both intents present" -PlanAdequate | Out-Null
-Check "re-tested at the new content" ((Get-QueueState "drill-b") -eq "ready-review")
+& $queue -Approve -Id drill-b -By profnovice | Out-Null
+Check "re-tested and re-released at the new content" ((Get-QueueState "drill-b") -eq "ready-review")
 
-Step 9 "the reviewer lands the adapted work"
+Step 10 "the reviewer lands the adapted work"
 & $queue -Claim -Id drill-b -Role reviewer -By wt-reviewer | Out-Null
 Invoke-DrillGit -C $wtMerge merge --no-ff work/drillb -m "merge drill B: per-caller override, A's default kept (evidence: drill)"
 & $queue -Merged -Id drill-b -By wt-reviewer -Sha ((Get-DrillGit -C $wtMerge rev-parse HEAD).Trim()) | Out-Null
 Check "drill-b merged after re-test" ((Get-QueueState "drill-b") -eq "merged")
 
-Step 10 "outcome: both intents survive, history readable, development untouched"
+Step 11 "outcome: both intents survive, history readable, development untouched"
 $final = Get-Content (Join-Path $wtMerge "DRILL-NOTE.md") -Raw
 Check "A's intent survived the later merge" ($final -match "raised to 60s")
 Check "B's adapted intent is present" ($final -match "per-caller override")
@@ -171,7 +185,7 @@ Check "two --no-ff merge commits on the line" ($merges.Count -eq 2) ("count=" + 
 Check "development NEVER moved" ((Get-DrillGit rev-parse development).Trim() -eq $devBefore)
 Check "operator checkout still on its own branch" ((Get-DrillGit rev-parse --abbrev-ref HEAD).Trim() -eq $mainBranch)
 
-Step 11 "cleanup - leave nothing behind"
+Step 12 "cleanup - leave nothing behind"
 Invoke-DrillGit worktree remove --force $wtMerge
 foreach ($id in @("drilla", "drillb")) {
     & (Join-Path $wtScripts "remove-worktree.ps1") -Id $id -MergedInto "drill/verify-d" -Force | Out-Null

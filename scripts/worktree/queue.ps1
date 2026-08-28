@@ -15,8 +15,16 @@
 # STATES
 #   ready-to-test  developer submitted; test plan written; nobody has claimed it
 #   testing        a tester holds it
-#   test-failed    tests failed; back to the developer, who fixes IN THE SAME worktree
-#   ready-review   tests passed; awaiting a reviewer
+#   test-failed    a case failed; back to the developer, who fixes IN THE SAME worktree and
+#                  re-submits with -Resubmit. A plan holds SEVERAL CASES; a cycle happens
+#                  because a case found something real, not as ceremony on the way to
+#                  review. Cycles are the tests doing their job - an involved change
+#                  finding nothing on the first pass is a reason to doubt the plan, not to
+#                  celebrate.
+#   test-passed    tests green, and STOPPED at the human gate (see -Approve). This is not
+#                  ready for review yet - the operator may want changes, or the world may
+#                  have moved, and review is the last cheap moment to say so.
+#   ready-review   the operator released it for review
 #   reviewing      a reviewer holds it
 #   merged         landed by the reviewer (terminal)
 #   (a reviewer whose rebase CHANGES the tested content sends it back with -Requeue:
@@ -31,6 +39,8 @@
 #   .\queue.ps1 -Claim -Id mem-readme -Role tester -By wt-tester-1
 #   .\queue.ps1 -Pass  -Id mem-readme -By wt-tester-1 -Evidence <path> -PlanAdequate
 #   .\queue.ps1 -Fail  -Id mem-readme -By wt-tester-1 -Reason "case 3 fails on a cold cache"
+#   .\queue.ps1 -Resubmit -Id mem-readme -By wt-mem-readme          # after a -Fail: next lap
+#   .\queue.ps1 -Approve -Id mem-readme -By profnovice               # THE HUMAN GATE
 #   .\queue.ps1 -Claim -Id mem-readme -Role reviewer -By wt-reviewer-1
 #   .\queue.ps1 -Merged -Id mem-readme -By wt-reviewer-1 -Sha <merge sha>
 #
@@ -47,6 +57,8 @@ param(
     [switch]$Merged,
     [switch]$Reject,
     [switch]$Requeue,
+    [switch]$Approve,
+    [switch]$Resubmit,
     [switch]$Unclaim,
     [string]$Id = "",
     [string]$Branch = "",
@@ -57,6 +69,7 @@ param(
     [string]$Evidence = "",
     [string]$Reason = "",
     [string]$Sha = "",
+    [string]$Thread = "",
     [string]$State = "",
     [switch]$PlanAdequate,
     [int]$ClaimTtlMin = 60
@@ -138,8 +151,12 @@ if ($Show) {
 # --- submit -------------------------------------------------------------------------
 if ($Submit) {
     if (-not $Id -or -not $Branch -or -not $Developer) { Die "-Submit needs -Id, -Branch and -Developer" }
+    # -Thread is how the bridge knows which Mattermost conversation to report back into.
     if (-not $TestPlan) {
-        Die "-Submit needs -TestPlan. The plan is written BEFORE the work is queued - it is what the tester executes, and 'I tested it myself' is not a plan."
+        Die ("-Submit needs -TestPlan. The plan is written BEFORE the work is queued - it is " +
+             "what someone else executes. List the CASES, and for each say what counts as " +
+             "passing and what would count as failing. A plan that cannot fail is not a plan, " +
+             "and 'I tested it myself' is not one either.")
     }
     if (Test-Path (ItemPath $Id)) { Die "queue item '$Id' already exists (use a new -Id, or -Show it)" }
     $line = Resolve-WorkLine
@@ -147,7 +164,7 @@ if ($Submit) {
     if ($LASTEXITCODE -ne 0 -or -not $sha) { Die "branch '$Branch' not found" }
     $item = [ordered]@{
         id = $Id; branch = $Branch; line = $line; developer = $Developer
-        state = "ready-to-test"; test_plan = $TestPlan
+        state = "ready-to-test"; test_plan = $TestPlan; thread = $Thread; attempt = 1
         submitted_sha = $sha.Trim(); tested_at_sha = ""; merged_sha = ""
         results = @(); history = @()
     }
@@ -240,7 +257,10 @@ if ($Pass -or $Fail) {
     $item = Read-Item $Id
     Assert-Claim $item "tester" $By
     if ($Pass -and -not $Evidence) { Die "-Pass needs -Evidence (what you ran and what it produced)" }
-    if ($Fail -and -not $Reason) { Die "-Fail needs -Reason" }
+    if ($Fail -and -not $Reason) {
+        Die ("-Fail needs -Reason: name the CASE that failed and what it revealed. The " +
+             "developer fixes the finding, not the verdict.")
+    }
     $headSha = (Invoke-GitCapture @("rev-parse", $item.branch) | Select-Object -First 1)
     $item.results += [ordered]@{
         at = Now; by = $By; verdict = $(if ($Pass) { "pass" } else { "fail" })
@@ -255,14 +275,18 @@ if ($Pass -or $Fail) {
     }
     Drop-Claim $Id "tester"
     if ($Pass) {
-        $item.state = "ready-review"
+        # STOP at the human gate. Tests being green says the code does what the plan said;
+        # it does not say the operator still wants it, or wants it THIS way. Review is the
+        # last cheap moment to change course, so the operator releases it, not the tester.
+        $item.state = "test-passed"
         $item.tested_at_sha = $headSha.Trim()
-        Add-History $item "tests PASSED" $By
-        Write-Host ("'{0}' PASSED at {1} - now awaiting a reviewer (not you, and not the developer)." -f $Id, $item.tested_at_sha.Substring(0, 8)) -ForegroundColor Green
+        Add-History $item "tests PASSED (attempt $($item.attempt))" $By
+        Write-Host ("'{0}' PASSED at {1} on attempt {2}." -f $Id, $item.tested_at_sha.Substring(0, 8), $item.attempt) -ForegroundColor Green
+        Write-Host "  It is NOT queued for review yet - the operator releases it (-Approve)." -ForegroundColor Yellow
     } else {
         $item.state = "test-failed"
-        Add-History $item "tests FAILED: $Reason" $By
-        Write-Host ("'{0}' FAILED - back to {1}, who fixes in the same worktree and re-submits." -f $Id, $item.developer) -ForegroundColor Yellow
+        Add-History $item "tests FAILED (attempt $($item.attempt)): $Reason" $By
+        Write-Host ("'{0}' FAILED on attempt {1} - back to {2}, who fixes in the same worktree and runs -Resubmit." -f $Id, $item.attempt, $item.developer) -ForegroundColor Yellow
     }
     Write-Item $item
     exit 0
@@ -280,6 +304,41 @@ if ($Merged) {
     Write-Item $item
     Write-Host ("'{0}' MERGED as {1} by {2}." -f $Id, $Sha, $By) -ForegroundColor Green
     Write-Host ("  {0} can now retire the worktree (remove-worktree.ps1 -Id ...)." -f $item.developer)
+    exit 0
+}
+
+if ($Approve) {
+    # THE HUMAN GATE (operator, 2026-08-28). Deterministic stage between "every case passed"
+    # and "someone may merge this". Deliberately NOT automatic: while the cases were finding
+    # and fixing things, the operator may have seen something concerning, or the world may
+    # have moved. Once review starts, the next step is a merge - this is the last cheap
+    # moment to change course.
+    if (-not $Id -or -not $By) { Die "-Approve needs -Id and -By (who is releasing it)" }
+    $item = Read-Item $Id
+    if ($item.state -ne "test-passed") { Die "'$Id' is '$($item.state)' - only a test-passed item can be released for review" }
+    if ($By -eq $item.developer) {
+        Die "the developer cannot release their own work for review - that is the human gate, and self-service defeats it" 4
+    }
+    $item.state = "ready-review"
+    Add-History $item "released for review" $By
+    Write-Item $item
+    Write-Host ("'{0}' released for REVIEW by {1}." -f $Id, $By) -ForegroundColor Green
+    exit 0
+}
+
+if ($Resubmit) {
+    # The iteration lap. A real task is several test cycles, not one - and forcing a new id
+    # per cycle would scatter one piece of work across several items and lose its history.
+    if (-not $Id -or -not $By) { Die "-Resubmit needs -Id and -By" }
+    $item = Read-Item $Id
+    if ($item.state -ne "test-failed") { Die "'$Id' is '$($item.state)' - only a test-failed item is re-submitted" }
+    if ($By -ne $item.developer) { Die "only the developer ($($item.developer)) re-submits their own item" 4 }
+    $item.attempt = [int]$item.attempt + 1
+    $item.state = "ready-to-test"
+    $item.tested_at_sha = ""
+    Add-History $item "re-submitted for testing (attempt $($item.attempt))" $By
+    Write-Item $item
+    Write-Host ("'{0}' re-submitted - attempt {1}, awaiting a tester." -f $Id, $item.attempt) -ForegroundColor Green
     exit 0
 }
 
@@ -311,4 +370,4 @@ if ($Reject) {
     exit 0
 }
 
-Die "pass one of -Submit | -List | -Show | -Claim | -Unclaim | -Pass | -Fail | -Merged | -Requeue | -Reject"
+Die "pass one of -Submit | -Resubmit | -List | -Show | -Claim | -Unclaim | -Pass | -Fail | -Approve | -Merged | -Requeue | -Reject"

@@ -103,7 +103,13 @@ is not the place to discover your branch is red.
 
 The plan is written *before* the work is queued, because it is what someone else will
 execute. "I tested it myself" is not a plan, and the tool refuses a submission without one.
-Say what to run, what counts as passing, and what would count as failing.
+List the **cases** - for each, what to run, what counts as passing, and what would count as
+failing. A plan that cannot fail is not a plan.
+
+Expect cycles. A case failing is the plan doing its job: the tester reports what it revealed,
+you fix the finding in the same worktree, and `-Resubmit` starts the next attempt on the same
+item so the history stays in one place. Tests are not a turnstile in front of review - an
+involved change that finds nothing on the first pass is a reason to doubt the plan.
 
 **Step 3 - a TESTER (not you) claims it and executes the plan.**
 
