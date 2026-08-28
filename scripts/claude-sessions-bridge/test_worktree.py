@@ -58,6 +58,45 @@ class DirectiveTests(unittest.TestCase):
         self.assertEqual(self._parse("worktree: maybe"), ("maybe", ""))
 
 
+class ReleaseDirectiveTests(unittest.TestCase):
+    """`release: <id>` is the pipeline's human gate reached from a thread."""
+
+    def _parse(self, text):
+        m = bridge.RELEASE_DIRECTIVE_RE.match(text)
+        return (m.group(1), m.group(2).strip()) if m else None
+
+    def test_parses_id_and_trailing_prompt(self):
+        self.assertEqual(self._parse("release: search-readme"), ("search-readme", ""))
+        self.assertEqual(self._parse("release:coder-readme carry on"), ("coder-readme", "carry on"))
+
+    def test_colon_required_so_prose_cannot_release_work(self):
+        self.assertIsNone(self._parse("release the item when you can"))
+        self.assertIsNone(self._parse("released the hounds"))
+
+    def test_does_not_collide_with_the_tool_approval_relay(self):
+        """`approve`/`ok`/`yes` already mean "run that gated command" mid-turn. One word
+        meaning both that and "send this to review" would be ambiguous exactly when it
+        matters, which is why the gate token is `release`."""
+        self.assertFalse(bridge.VERDICT_RE.match("release: x"))
+        for verdict in ("approve", "ok", "yes", "lgtm"):
+            self.assertIsNone(self._parse(verdict))
+            self.assertTrue(bridge.VERDICT_RE.match(verdict))
+
+    def test_every_reported_state_has_a_note(self):
+        """A transition the operator cares about must not pass silently."""
+        for state in ("test-failed", "test-passed", "ready-review", "merged", "rejected"):
+            self.assertIn(state, bridge.QUEUE_NOTES)
+        # the gate note must name the exact reply that opens it - a pass that just waits
+        # looks stalled
+        self.assertIn("release: {id}", bridge.QUEUE_NOTES["test-passed"])
+
+    def test_queue_dir_is_the_shared_repo_namespace(self):
+        d = bridge.queue_dir()
+        self.assertTrue(d, "queue dir did not resolve")
+        self.assertIn("agent-worktrees", d.replace("/", os.sep))
+        self.assertNotIn("scripts", d, "queue must not resolve under the script directory")
+
+
 class IdTests(unittest.TestCase):
     def test_id_is_stable_and_short(self):
         tid = "p4iic4trq7fnun7ke8arenhyuw"

@@ -213,6 +213,14 @@ CANCEL_EMOJI = {"-1", "thumbsdown"}
 # is deliberately NOT reachable from a chat message — that's the bridge's hard floor.
 MODE_DIRECTIVE_RE = re.compile(r"^\s*mode\s*[:=]\s*(\S+)\s*(.*)\Z", re.IGNORECASE | re.DOTALL)
 
+# The pipeline's HUMAN GATE, reachable from a thread: `release: <item-id>` moves a
+# test-passed queue item to ready-review. The token is deliberately NOT "approve": VERDICT_RE
+# above already claims `approve`/`ok`/`yes`/`lgtm` for the mid-turn tool-approval relay, and
+# one word meaning both "run that command" and "send this to review" is a trap. Only operator
+# posts reach execute(), so this is the one place the gate is genuinely authenticated - the
+# local script can only record who claimed to release it.
+RELEASE_DIRECTIVE_RE = re.compile(r"^\s*release\s*[:=]\s*(\S+)\s*(.*)\Z", re.IGNORECASE | re.DOTALL)
+
 # Per-thread git isolation: `worktree: on|off` (colon required, like the others). `on` gives
 # this thread its own checkout + branch `work/mm-<thread8>`, so two threads editing the same
 # file can never see each other's index. Persisted per thread.
@@ -605,6 +613,40 @@ def _run_worktree_script(script: str, args: list[str], timeout: int = 900) -> tu
     return p.returncode, ((p.stdout or "") + "\n" + (p.stderr or "")).strip()
 
 
+_QUEUE_DIR_CACHE: list[str] = []
+
+
+def queue_dir() -> str:
+    """`<git-common-dir>/agent-worktrees/queue` - the same shared namespace the scripts use.
+    Resolved once; anchoring on the repo (not on a script path) is what makes every worktree
+    and the bridge agree about which queue they are talking about."""
+    if _QUEUE_DIR_CACHE:
+        return _QUEUE_DIR_CACHE[0]
+    try:
+        r = subprocess.run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+                           cwd=_REPO_ROOT, capture_output=True, text=True, timeout=30)
+        if r.returncode != 0 or not (r.stdout or "").strip():
+            return ""
+        _QUEUE_DIR_CACHE.append(os.path.join((r.stdout or "").strip().splitlines()[0],
+                                             "agent-worktrees", "queue"))
+    except Exception:  # noqa: BLE001
+        return ""
+    return _QUEUE_DIR_CACHE[0]
+
+
+# What each transition says in-thread. `test-passed` is the one that matters: it names the
+# gate and the exact reply that opens it, because a pass that silently waits looks stalled.
+QUEUE_NOTES = {
+    "test-failed": "❌ **{id}** — a test case failed on attempt {attempt}: {detail}",
+    "test-passed": ("✅ **{id}** — every case passed (attempt {attempt}). It is "
+                    "**waiting on you**: reply `release: {id}` to send it to review, or say "
+                    "what you want changed first."),
+    "ready-review": "📋 **{id}** — released for review.",
+    "merged": "🎉 **{id}** — merged as `{sha}`. Task closed.",
+    "rejected": "🚫 **{id}** — rejected by review: {detail}",
+}
+
+
 def worktree_id(thread_root: str) -> str:
     """One worktree per THREAD, stable across resumes — the thread is the unit of work."""
     return "mm-" + thread_root[:8].lower()
@@ -869,6 +911,9 @@ class Bridge:
         self.last_turn_err = ""
         self._last_tg_alert = 0.0
         self._last_health_write = 0.0
+        # None until the first poll_queue(), which SEEDS from the queue without posting -
+        # otherwise a bridge restart would replay every item's current state into the channel.
+        self._queue_seen: dict[str, str] | None = None
         self.state = load_state()
         self.state_lock = threading.Lock()
         self.queues: dict[str, _ThreadQueue] = {}
@@ -1161,6 +1206,23 @@ class Bridge:
                     continue
                 thread_mode = resolved
                 changed.append(f"approvals → `{resolved}`")
+                continue
+            m = RELEASE_DIRECTIVE_RE.match(prompt)
+            if m:
+                item_id = m.group(1)
+                prompt = m.group(2).strip()
+                # Single-operator deployments (the norm here) can name the approver; with
+                # several configured we cannot tell which one posted without another API
+                # call, so record the role rather than guess a name.
+                approver = sorted(OPERATORS)[0] if len(OPERATORS) == 1 else "operator"
+                rc, out = _run_worktree_script("queue.ps1",
+                                               ["-Approve", "-Id", item_id, "-By", approver],
+                                               timeout=120)
+                icon = "✅" if rc == 0 else "🚫"
+                fence = "```"
+                detail = (out or "(no output)").strip()[-800:]
+                post("\n".join([f"{icon} `release: {item_id}`", fence, detail, fence]),
+                     thread_root)
                 continue
             m = WORKTREE_DIRECTIVE_RE.match(prompt)
             if m:
@@ -1489,6 +1551,49 @@ class Bridge:
         log(f"thread {thread_root[:8]}: reopened by an operator message")
         audit({"event": "session_reopened", "thread": thread_root})
         return True
+
+    def poll_queue(self) -> None:
+        """Report queue transitions into the Mattermost thread the item came from.
+
+        The pipeline runs OUTSIDE the bridge (agents drive queue.ps1 directly), so without
+        this the operator would have to poll `-List` to learn that their item failed, passed,
+        or landed. Only items carrying a `thread` are reported - the queue stays usable with
+        no Mattermost at all. The first pass SEEDS the snapshot without posting, so a bridge
+        restart does not replay every item's current state into the channel."""
+        qdir = queue_dir()
+        if not qdir or not os.path.isdir(qdir):
+            return
+        seeding = self._queue_seen is None
+        if seeding:
+            self._queue_seen = {}
+        for name in os.listdir(qdir):
+            if not name.endswith(".json"):
+                continue
+            try:
+                with open(os.path.join(qdir, name), "r", encoding="utf-8") as fh:
+                    item = json.load(fh)
+            except Exception:  # noqa: BLE001 - a half-written item is read again next cycle
+                continue
+            iid, state = item.get("id", ""), item.get("state", "")
+            if not iid or self._queue_seen.get(iid) == state:
+                continue
+            prev = self._queue_seen.get(iid)
+            self._queue_seen[iid] = state
+            thread = item.get("thread", "")
+            if seeding or prev is None or not thread:
+                continue
+            note = QUEUE_NOTES.get(state)
+            if not note:
+                continue
+            last = (item.get("results") or [{}])[-1]
+            try:
+                post(note.format(id=iid, attempt=item.get("attempt", 1),
+                                 sha=str(item.get("merged_sha", ""))[:12],
+                                 detail=str(last.get("reason") or last.get("evidence") or "")[:400]),
+                     thread)
+            except Exception as e:  # noqa: BLE001 - reporting must never break the loop
+                log(f"queue report failed for {iid}: {e}")
+            audit({"event": "queue_state", "item": iid, "from": prev, "to": state})
 
     def ensure_worktree(self, thread_root: str) -> tuple[str, str]:
         """Return (path, error) for this thread's worktree, provisioning it on first use.
@@ -2043,6 +2148,7 @@ class Bridge:
                 self.ingest_follow_requests()
                 self.poll_follows(me)
                 self.poll_cancellations()
+                self.poll_queue()
                 errors = 0
             except Exception as e:  # noqa: BLE001 - transient MM/network outage must not kill the bridge
                 errors += 1
