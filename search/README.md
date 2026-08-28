@@ -39,7 +39,7 @@ not duplicate endpoint tables or provider config here — link instead.
 | Service | Container | What it is for |
 |---|---|---|
 | `vpn` | `search-vpn` | gluetun (`${VPN_IMAGE:-qmcgaw/gluetun:latest}`) holding a Mullvad **WireGuard** tunnel with a kill-switch, and exposing an **HTTP forward proxy on `:8888`**. This is the plane's *only* route to the internet, and since tor was retired it carries **both** engine queries (SearXNG) **and** page fetches (OB1's `FETCH_PROXY_URL=http://vpn:8888`). `NET_ADMIN` + `/dev/net/tun` are required for the tunnel. |
-| `redis` | `search-redis` | Cache for SearXNG (`db0`) and for the gateway (`db1`, via `REDIS_URL=redis://redis:6379/1` — cache, circuit breaker, engine suspensions). Started with `--save "" --appendonly no`: **deliberately non-persistent**. |
+| `redis` | `search-redis` | Cache for SearXNG (`db0` — including *its* engine suspensions) and for the gateway (`db1`, via `REDIS_URL=redis://redis:6379/1` — response cache + circuit-breaker state; the gateway has no suspension logic of its own). Started with `--save "" --appendonly no`: **deliberately non-persistent**. |
 | `searxng` | `searxng` | The metasearch engine. Its config comes from the repo tree, not an image default: `../search-gateway/searxng` is bind-mounted at `/etc/searxng`. All outbound engine traffic is proxied to `http://vpn:8888` by that `settings.yml`. |
 | `gateway` | `search-gateway` | The plane's front door — the Python app in `../search-gateway/gateway`, built here as `private-search-gateway:local`. Normalises engines behind one API and adds auth, caching and a circuit breaker. Endpoints: see [`../search-gateway/README.md`](../search-gateway/README.md). |
 
@@ -185,12 +185,19 @@ Across the workspace it is **step 7** of the cold-start order
    not.
 4. **`WIREGUARD_ADDRESSES` must be IPv4-only** unless the Docker host has IPv6 —
    gluetun rejects v6 addresses. The `.env.example` default is empty.
-5. **`FIREWALL_OUTBOUND_SUBNETS` must cover `search-net`'s real subnet.** It
-   defaults to `${SEARCH_NET_SUBNET:-172.16.0.0/12}`, which covers Docker's usual
-   pool. If Docker allocates `search-net` outside that range, gluetun's
-   kill-switch silently drops the LAN-side traffic: every engine query dies while
-   all four containers report healthy. Check with
-   `docker network inspect search_search-net` before blaming SearXNG.
+5. **`SEARCH_NET_SUBNET` / `FIREWALL_OUTBOUND_SUBNETS` does *not* govern this
+   plane's own traffic — do not chase it during an incident.** gluetun
+   auto-detects the subnets of the networks it is *attached to* and keeps them
+   reachable; its own startup log says so
+   (`[routing] local ipnet found: 192.168.192.0/20`). `searxng` and `gateway`
+   share `search-net` with `vpn`, so they reach `vpn:8888` whatever this variable
+   says. What it actually does is add a route plus a firewall allowance for
+   subnets gluetun is **not** attached to — a client elsewhere on the LAN or on
+   another docker network. Live proof the two are unrelated (2026-08-28):
+   `search_search-net` is `192.168.192.0/20` while `FIREWALL_OUTBOUND_SUBNETS`
+   is `172.16.0.0/12`, and the plane serves queries normally. The
+   `172.16.0.0/12` default is effectively inert here; change it only if you add
+   an off-network client, not to fix a broken query path.
 6. **`/healthz` is not `/readyz`.** `/healthz` is the compose healthcheck and only
    proves the event loop is alive; `/readyz` walks vpn + searxng + redis. The
    watchdog treats `/readyz` as informational and never restarts on it — so a
