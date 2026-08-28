@@ -40,6 +40,8 @@ Config via env (all optional):
   BRIDGE_MAX_CONCURRENT    concurrent turns across threads   (default 2)
   BRIDGE_SETTING_SOURCES   claude --setting-sources          (default "user,project,local" —
                            ONE allow-list shared with interactive sessions, see SETTING_SOURCES)
+  BRIDGE_WORKTREE_DEFAULT  run threads in their own git worktree (default "off";
+                           per-thread override via `worktree: on|off`)
   BRIDGE_ALLOWED_TOOLS     optional extra --allowedTools floor (e.g. "Read Glob Grep")
   BRIDGE_ALLOW_SELF        "1" = treat the bot's own posts as operator input (smoke tests only)
 """
@@ -126,6 +128,14 @@ MAX_CONCURRENT = max(1, int(os.environ.get("BRIDGE_MAX_CONCURRENT", "2")))
 # The hard floor is unchanged and lives elsewhere: bypassPermissions is refused, every gated call
 # still relays to the thread, and only BRIDGE_OPERATORS can drive a session at all.
 SETTING_SOURCES = os.environ.get("BRIDGE_SETTING_SOURCES", "user,project,local")
+# Worktree-per-thread (2026-08-28). OFF by default: it changes WHERE every turn runs, so
+# it opts in per thread (`worktree: on`) until it has soaked. When on, a thread gets its
+# own checkout + branch and can no longer collide with another session's staged work.
+# Tooling and protocol: scripts/worktree/, documentation/implementation-guide/
+# multi-agent-concurrency/MERGE-PROTOCOL.md.
+WORKTREE_DEFAULT = os.environ.get("BRIDGE_WORKTREE_DEFAULT", "off").strip().lower() in (
+    "1", "on", "true", "yes")
+WORKTREE_SCRIPTS = os.path.join(_REPO_ROOT, "scripts", "worktree")
 ALLOWED_TOOLS = os.environ.get("BRIDGE_ALLOWED_TOOLS", "")
 ALLOW_SELF = os.environ.get("BRIDGE_ALLOW_SELF") == "1"
 
@@ -202,6 +212,12 @@ CANCEL_EMOJI = {"-1", "thumbsdown"}
 # Per-thread approval level: `mode: <level>` (colon required, like `model:`). bypassPermissions
 # is deliberately NOT reachable from a chat message — that's the bridge's hard floor.
 MODE_DIRECTIVE_RE = re.compile(r"^\s*mode\s*[:=]\s*(\S+)\s*(.*)\Z", re.IGNORECASE | re.DOTALL)
+
+# Per-thread git isolation: `worktree: on|off` (colon required, like the others). `on` gives
+# this thread its own checkout + branch `work/mm-<thread8>`, so two threads editing the same
+# file can never see each other's index. Persisted per thread.
+WORKTREE_DIRECTIVE_RE = re.compile(r"^\s*worktree\s*[:=]\s*(\S+)\s*(.*)\Z",
+                                   re.IGNORECASE | re.DOTALL)
 PERMISSION_MODES = {"auto": "auto", "acceptedits": "acceptEdits", "manual": "manual",
                     "default": "manual", "dontask": "dontAsk", "plan": "plan"}
 
@@ -225,7 +241,13 @@ REMOTE_NOTE = (
     "step and reporting over asking questions you could answer yourself. If you post a Mattermost "
     "message that expects an ASYNC reply (e.g. to another bot such as bot-pm), do not poll for it: "
     "call the approvals MCP server's follow_thread tool with that post's id and end your turn — "
-    "the bridge will automatically wake this session with the reply when it arrives."
+    "the bridge will automatically wake this session with the reply when it arrives. "
+    "If your working directory is under `.claude/worktrees/`, you are in YOUR OWN git worktree: "
+    "commit there freely, never `cd` into the main checkout to mutate it, test in your own "
+    "containers (`-p test-<id>`, no host ports, images tagged `:wt-<id>`) rather than prod ones, "
+    "and land your work with documentation/implementation-guide/multi-agent-concurrency/"
+    "MERGE-PROTOCOL.md — take scripts/worktree/merge-lock.ps1, rebase onto development, re-run "
+    "your gates, merge --no-ff with the evidence, release, then say what landed in this thread."
 )
 
 
@@ -564,9 +586,29 @@ def kill_tree(proc: subprocess.Popen) -> None:
             pass
 
 
+def _run_worktree_script(script: str, args: list[str], timeout: int = 900) -> tuple[int, str]:
+    """Run one of scripts/worktree/*.ps1 and return (exit_code, combined output).
+
+    Never raises: worktree provisioning failing must produce a readable in-thread message,
+    not a bridge traceback."""
+    cmd = ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+           os.path.join(WORKTREE_SCRIPTS, script)] + args
+    try:
+        p = subprocess.run(cmd, cwd=_REPO_ROOT, capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=timeout)
+    except Exception as e:  # noqa: BLE001
+        return 1, f"{script} could not be run: {e}"
+    return p.returncode, ((p.stdout or "") + "\n" + (p.stderr or "")).strip()
+
+
+def worktree_id(thread_root: str) -> str:
+    """One worktree per THREAD, stable across resumes — the thread is the unit of work."""
+    return "mm-" + thread_root[:8].lower()
+
+
 def run_turn(claude_bin: str, thread_root: str, prompt: str, session_id: str | None,
              fork: bool = False, model: str = "", on_event=None, title: str = "",
-             permission_mode: str = "", on_proc=None) -> dict:
+             permission_mode: str = "", on_proc=None, cwd: str = "") -> dict:
     """Run one headless turn, streaming NDJSON events. `on_event` receives each event as it
     arrives (used for the mid-turn progress log); the final `result` event is returned as the
     turn's result dict (same shape as --output-format json)."""
@@ -594,7 +636,7 @@ def run_turn(claude_bin: str, thread_root: str, prompt: str, session_id: str | N
             cmd += ["--fork-session"]
 
     t0 = time.time()
-    proc = subprocess.Popen(cmd, cwd=REPO, stdin=subprocess.PIPE,
+    proc = subprocess.Popen(cmd, cwd=(cwd or REPO), stdin=subprocess.PIPE,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if on_proc is not None:  # register with the bridge so `!stop` can abort a lane-2 turn
         try:
@@ -1085,6 +1127,7 @@ class Bridge:
         if thread_model.lower() in ("default", "reset"):
             thread_model = ""  # stored by an old `model: default` — never a real CLI alias
         thread_mode = meta.get("mode", "")
+        thread_worktree = bool(meta.get("worktree_enabled", WORKTREE_DEFAULT))
         changed = []
         while True:  # consume leading directives in any order: `model: …`, `mode: …`
             m = MODEL_DIRECTIVE_RE.match(prompt)
@@ -1115,6 +1158,20 @@ class Bridge:
                 thread_mode = resolved
                 changed.append(f"approvals → `{resolved}`")
                 continue
+            m = WORKTREE_DIRECTIVE_RE.match(prompt)
+            if m:
+                requested = m.group(1).lower()
+                prompt = m.group(2).strip()
+                if requested in ("on", "1", "true", "yes"):
+                    thread_worktree = True
+                elif requested in ("off", "0", "false", "no"):
+                    thread_worktree = False
+                else:
+                    post(f"⚠️ `worktree: {requested}` is not valid — use `on` or `off`. Keeping "
+                         f"`{'on' if thread_worktree else 'off'}`.", thread_root)
+                    continue
+                changed.append(f"worktree → `{'on' if thread_worktree else 'off'}`")
+                continue
             break
         if changed:
             with self.state_lock:
@@ -1122,6 +1179,7 @@ class Bridge:
                 entry["model"] = thread_model  # "" = unpinned (a `model: default` reset)
                 if thread_mode:
                     entry["mode"] = thread_mode
+                entry["worktree_enabled"] = thread_worktree
                 save_state(self.state)
         if not prompt:  # directive-only (or directive-error) message: no turn to run
             if changed:
@@ -1129,6 +1187,19 @@ class Bridge:
                      thread_root)
             return
         mode_label = thread_mode or PERMISSION_MODE
+
+        # Where this turn runs. Resolved BEFORE the header so the operator is told the truth
+        # about the working directory, and fail-closed: if an opted-in thread cannot get its
+        # worktree, the turn does not run in the shared checkout pretending to be isolated.
+        run_cwd = REPO
+        if thread_worktree:
+            run_cwd, wt_err = self.ensure_worktree(thread_root)
+            if not run_cwd:
+                post("🚫 **Could not provision this thread's worktree** — not running the turn "
+                     "in the shared checkout, because that is the collision `worktree: on` "
+                     "exists to prevent.\n```\n" + wt_err + "\n```\nFix it, or reply "
+                     "`worktree: off` to run in the main checkout deliberately.", thread_root)
+                return
 
         fork = False
         handoff = None
@@ -1149,7 +1220,9 @@ class Bridge:
                       + f" Model `{model_label}`, approvals `{mode_label}`.")
         elif not session_id:
             header = (f"🧵 Starting a **new Claude session** for this thread — model "
-                      f"`{model_label}`, approvals `{mode_label}`, working dir `{REPO}`. "
+                      f"`{model_label}`, approvals `{mode_label}`, working dir `{run_cwd}`"
+                      + (f" (its own worktree, branch `work/{worktree_id(thread_root)}`)"
+                         if run_cwd != REPO else "") + ". "
                       + ("Routine actions run automatically; anything the safety classifier "
                          "flags pauses here for your approve/deny." if mode_label == "auto"
                          else "Gated actions pause here for your approve/deny."))
@@ -1221,7 +1294,7 @@ class Bridge:
         self.ensure_claude_bin()  # heal a pruned path BEFORE spawning, never after a failed turn
         resp = run_turn(self.claude_bin, thread_root, prompt, session_id, fork=fork,
                         model=thread_model or MODEL, on_event=on_event, title=title,
-                        permission_mode=mode_label, on_proc=register_proc)
+                        permission_mode=mode_label, on_proc=register_proc, cwd=run_cwd)
         dur = int(time.time() - t0)
         if progress["post_id"] and progress["lines"]:
             try:  # final flush so the log is complete, and mark the turn done
@@ -1413,6 +1486,62 @@ class Bridge:
         audit({"event": "session_reopened", "thread": thread_root})
         return True
 
+    def ensure_worktree(self, thread_root: str) -> tuple[str, str]:
+        """Return (path, error) for this thread's worktree, provisioning it on first use.
+
+        ("", error) means provisioning FAILED and the caller must NOT fall back to the shared
+        checkout: running there is precisely the collision this feature exists to remove, and
+        a silent fallback would look like isolation while providing none."""
+        wid = worktree_id(thread_root)
+        with self.state_lock:
+            path = (self.state["threads"].get(thread_root) or {}).get("worktree", "")
+        if path and os.path.isdir(path):
+            # Cheap freshness pass: the operator may have edited .env since this was created.
+            _run_worktree_script("sync-worktree-env.ps1", ["-Id", wid, "-Quiet"], timeout=120)
+            return path, ""
+
+        rc, out = _run_worktree_script("new-worktree.ps1", [
+            "-Id", wid, "-OwnerKind", "bridge", "-OwnerRef", thread_root,
+            "-Thread", thread_root, "-Reuse", "-Json"])
+        path = ""
+        if rc == 0:
+            # -Json prints one compact object; take the last line that parses as one.
+            for line in reversed([ln for ln in out.splitlines() if ln.strip()]):
+                try:
+                    path = (json.loads(line) or {}).get("path", "")
+                except Exception:  # noqa: BLE001
+                    continue
+                if path:
+                    break
+        if not path or not os.path.isdir(path):
+            return "", (out or "no output")[-900:]
+        with self.state_lock:
+            self.state["threads"].setdefault(thread_root, {})["worktree"] = path
+            save_state(self.state)
+        log(f"thread {thread_root[:8]}: worktree ready at {path}")
+        audit({"event": "worktree_created", "thread": thread_root, "path": path, "id": wid})
+        return path, ""
+
+    def _retire_worktree(self, thread_root: str) -> str:
+        """Close-time cleanup. Removes ONLY a worktree that holds nothing unlanded — the
+        script refuses (exit 2) otherwise and we report that instead of forcing, because it
+        may hold the only copy of someone's work."""
+        with self.state_lock:
+            path = (self.state["threads"].get(thread_root) or {}).get("worktree", "")
+        if not path:
+            return ""
+        rc, out = _run_worktree_script("remove-worktree.ps1", ["-Id", worktree_id(thread_root)])
+        if rc == 0:
+            with self.state_lock:
+                entry = self.state["threads"].setdefault(thread_root, {})
+                entry.pop("worktree", None)
+                save_state(self.state)
+            return "removed its worktree"
+        if rc == 2:
+            return (f"**kept** its worktree `{path}` — it still holds uncommitted or unmerged "
+                    f"work (land it, or remove it with `-Force`)")
+        return f"could not remove its worktree (`{(out or '')[:150]}`)"
+
     def _close_session(self, thread_root: str, pid: str) -> None:
         """`close` / `end session` — dispose everything this session left running.
 
@@ -1464,6 +1593,10 @@ class Bridge:
             bits.append("left **your** in-flight turn running")
         if kept:
             bits.append(f"kept **{kept}** of your queued message(s) — they will still run")
+        # 5. The thread's worktree, if it had one. Removed only when it holds nothing unlanded.
+        wt_note = self._retire_worktree(thread_root)
+        if wt_note:
+            bits.append(wt_note)
         log(f"session closed in thread {thread_root[:8]}: follows={len(follows)} "
             f"purged={purged} kept={kept} aborted={aborted}")
         audit({"event": "session_closed", "thread": thread_root, "post": pid,

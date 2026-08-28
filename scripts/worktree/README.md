@@ -19,6 +19,20 @@ The wider design (test containers, bridge integration):
 Runtime state lives in `state/` (gitignored, like the bridge's): `worktrees.json`
 registry + `merge-lock.json`.
 
+**Tests:** `python scripts/claude-sessions-bridge/test_worktree.py` — 13 tests covering
+the `worktree:` directive grammar, id derivation, the fail-closed contract, and real
+provisioning / refusal / lock-contention through these scripts (self-skips off Windows,
+always cleans up).
+
+## Using it from Mattermost
+
+A bridge thread opts in with **`worktree: on`** (persisted per thread, like `model:`).
+The bridge then provisions `wt-mm-<thread8>` on first use, runs every turn there, keeps
+env copies fresh, and on `close` retires the worktree — *unless* it still holds unlanded
+work, in which case it says so and keeps it. Default is off
+(`BRIDGE_WORKTREE_DEFAULT`). If provisioning fails, the turn does **not** run: falling
+back to the shared checkout would look like isolation while providing none.
+
 ## Why a bare `git worktree add` is not enough here (all verified, not assumed)
 
 1. **It materializes tracked files only** — the worktree has no `.env`, `.env.test`

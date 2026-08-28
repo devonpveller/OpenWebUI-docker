@@ -50,8 +50,11 @@ function Show-Lock($L) {
     if (-not $L) { Write-Host "merge lock: FREE" -ForegroundColor Green; return }
     $age = (Now) - [int64]$L.taken_at
     $ttl = [int]$L.ttl_min * 60
-    $state = if ($age -gt $ttl) { "EXPIRED" } else { "HELD" }
-    $color = if ($age -gt $ttl) { "Yellow" } else { "Cyan" }
+    # -ge, not -gt: at exactly the TTL the lock IS expired. With -gt a ttl of 0 ("treat me as
+    # already dead") never expired, so a dead agent could hold the queue forever - caught by
+    # test_expired_lock_needs_explicit_takeover.
+    $state = if ($age -ge $ttl) { "EXPIRED" } else { "HELD" }
+    $color = if ($age -ge $ttl) { "Yellow" } else { "Cyan" }
     Write-Host ("merge lock: {0} by {1}" -f $state, $L.owner) -ForegroundColor $color
     Write-Host ("  worktree : {0}" -f $L.worktree)
     Write-Host ("  thread   : {0}" -f $L.thread)
@@ -68,7 +71,7 @@ if ($Acquire -or $Takeover) {
     $existing = Read-Lock
     if ($existing) {
         $age = (Now) - [int64]$existing.taken_at
-        $expired = $age -gt ([int]$existing.ttl_min * 60)
+        $expired = $age -ge ([int]$existing.ttl_min * 60)  # -ge: see Show-Lock
         if ($existing.owner -eq $Owner) {
             Write-Host "You already hold the merge lock." -ForegroundColor Green
             exit 0

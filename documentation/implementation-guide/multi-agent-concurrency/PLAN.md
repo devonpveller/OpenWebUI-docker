@@ -1,6 +1,9 @@
 # PLAN — Multi-agent concurrency: worktrees, test isolation, agent-coordinated merges
 
-**Status:** PLAN v1 (2026-08-28) — nothing built. Operator directive: multiple Claude
+**Status:** Phase A + D-lock **BUILT** (commit c1ecc30) and Phase B **BUILT** (bridge
+worktree-per-thread, default off, awaiting a restart to go live). Phase C (per-plane
+`compose.test.yml` + reaper) is still plan-only — deliberately deferred while the wiki
+viewer is mid-build. Operator directive: multiple Claude
 sessions (VS Code extension AND Mattermost bridge) working simultaneously without
 stepping on each other's code or each other's test containers; the agents themselves
 coordinate the merges back together.
