@@ -65,7 +65,21 @@ if ($PruneRegistry) {
 }
 
 if (-not $Id) { Fail "pass -Id <id> (or -PruneRegistry)" }
-if (-not $rows.ContainsKey($Id)) { Fail "no registered worktree with id '$Id'" }
+if (-not $rows.ContainsKey($Id)) {
+    # The registry is convenience, not truth - git is. A row can be missing because it
+    # was never written, or because something clobbered the file (a drill did exactly
+    # that mid-run, and this script was then the only way to retire the worktree and
+    # could not). Reconstruct from `git worktree list` instead of refusing.
+    $wtPath = ""
+    $current = ""
+    foreach ($row in (Invoke-GitCapture @("worktree", "list", "--porcelain"))) {
+        if ($row -like "worktree *") { $current = $row.Substring(9) }
+        if ($row -eq "branch refs/heads/work/$Id") { $wtPath = $current }
+    }
+    if (-not $wtPath) { Fail "no registered worktree with id '$Id', and git knows no worktree on work/$Id" }
+    Write-Host ("  note: no registry row for '{0}' - recovered its path from git ({1})" -f $Id, $wtPath) -ForegroundColor Yellow
+    $rows[$Id] = [pscustomobject]@{ path = $wtPath.Replace("/", "\"); branch = "work/$Id" }
+}
 
 $row = $rows[$Id]
 $path = $row.path

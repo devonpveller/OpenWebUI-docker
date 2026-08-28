@@ -69,8 +69,24 @@ foreach ($b in @("work/drilla", "work/drillb", "drill/verify-d")) {
     if ($LASTEXITCODE -eq 0) { & git.exe branch -D $b | Out-Null }
 }
 Clear-DrillQueue
+# Drop ONLY this drill's rows. This used to reset the whole file, which silently
+# destroyed the registry rows of real agents working alongside it - the drill wiped
+# `wt-search-readme` and `wt-coder-readme` mid-run, so their own developers could no
+# longer retire their worktrees by id. A test fixture that clobbers shared state is
+# the exact failure this toolkit exists to prevent, and it was mine.
 $reg = Join-Path (Get-SharedStateDir) "worktrees.json"
-if (Test-Path $reg) { '{ "worktrees": {} }' | Set-Content $reg -Encoding ASCII }
+if (Test-Path $reg) {
+    try {
+        $rows = (Get-Content -Raw -Path $reg | ConvertFrom-Json).worktrees
+        $keep = [ordered]@{}
+        if ($rows) {
+            foreach ($prop in $rows.PSObject.Properties) {
+                if ($prop.Name -notin @("drilla", "drillb")) { $keep[$prop.Name] = $prop.Value }
+            }
+        }
+        (@{ worktrees = $keep } | ConvertTo-Json -Depth 6) | Set-Content $reg -Encoding ASCII
+    } catch { }   # unreadable registry: leave it alone rather than truncate someone else's state
+}
 
 $devBefore = (Get-DrillGit rev-parse development).Trim()
 $mainBranch = (Get-DrillGit rev-parse --abbrev-ref HEAD).Trim()
