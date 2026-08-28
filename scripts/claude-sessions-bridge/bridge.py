@@ -249,8 +249,9 @@ REMOTE_NOTE = (
     "lease-names.conf; read-only probes need none; a multi-plane test requests all names in one "
     "call). Test images tag `:wt-<id>`, never `:local` — prod containers are a gated deploy, "
     "not a test. Land your work with documentation/implementation-guide/multi-agent-concurrency/"
-    "MERGE-PROTOCOL.md — take the `merge` lease, rebase onto your work line, re-run your gates, "
-    "merge --no-ff with the evidence, release, then say what landed in this thread."
+    "MERGE-PROTOCOL.md — you do NOT test or merge your own work. Write the test plan, then submit "
+    "it (scripts/worktree/queue.ps1 -Submit); a tester who did not write it executes that plan, "
+    "and a reviewer who did not write it rebases and merges. Say what you queued in this thread."
 )
 
 

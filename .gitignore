@@ -81,5 +81,6 @@ documentation/issue-plans/
 # created by scripts/worktree/new-worktree.ps1 and carries COPIES of .env* - it must
 # never be committed, and it must never be scanned as if it were repo content.
 .claude/worktrees/
-# Worktree registry + merge-queue lock: machine-local runtime state, like the bridge's.
-scripts/worktree/state/
+# (Worktree/queue/lease state used to live in scripts/worktree/state/ and needed an ignore
+# rule. It now lives in <git-common-dir>/agent-worktrees/ so every worktree shares ONE
+# namespace - inside .git, which is never tracked, so no rule is needed.)

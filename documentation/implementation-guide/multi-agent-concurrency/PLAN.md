@@ -1,13 +1,12 @@
 # PLAN — Multi-agent concurrency: worktrees, test isolation, agent-coordinated merges
 
-**Status:** Phases A, B, C and the merge queue are **BUILT and LIVE** (A: c1ecc30,
-B: a0fb0c9 + bridge restart, C: plane leases — see §4, which was adversarially
-rewritten on 2026-08-28 from an environment-cloning design to a lease design before
-anything was built; the clone design was never implemented). Operator directive:
-multiple Claude
-sessions (VS Code extension AND Mattermost bridge) working simultaneously without
-stepping on each other's code or each other's test containers; the agents themselves
-coordinate the merges back together.
+**Status: BUILT and LIVE** (2026-08-28). Worktree tooling + bridge `worktree: on`
+(c1ecc30, a0fb0c9), plane leases (5aaf6b3), shared coordination state + a resolved work
+line (658cb08), and the develop/test/review **pipeline** (this revision). Two designs were
+killed *before* being built, and both audits are kept below because the reasoning is the
+durable part: environment-cloning for test isolation (§4.0) and a merge lock (§5 D1).
+
+**Read §4.0 and §5 D1 before proposing either again.**
 
 **Non-negotiables inherited from operator policy (unchanged by this plan):**
 `main` untouched/human-promoted; `development` is the live-hosted line and merges into
@@ -17,7 +16,10 @@ remote; deploys to prod containers stay explicit, gated steps.
 
 ---
 
-## 0. Current state (verified 2026-08-28, not assumed)
+## 0. Pre-build snapshot (verified 2026-08-28, before any of this existed)
+
+*Kept as the evidence the design rested on. For what exists NOW, read the scripts and
+`scripts/worktree/README.md`; several rows below are deliberately obsolete.*
 
 | Fact | Where |
 |---|---|
@@ -52,10 +54,13 @@ which we need to invent:
    stateful, GPU-bound, and expensive — the regime where GitHub Actions
    `concurrency.group` / Bazel `exclusive` tags / k8s Leases are the modern pattern,
    not ephemeral preview environments.
-3. **A merge queue, not merge-anarchy**: merges into `development` are serialized by
-   a lock; the merging agent rebases onto the latest tip, re-validates, merges with
-   evidence; conflicts are negotiated agent-to-agent over Mattermost — the one bus
-   both entry points already share.
+3. **A pipeline with separated duties, not a merge lock** (revised — see §5 D1 for why
+   the lock was deleted): a developer queues work with a test plan and never tests or
+   merges it; a tester who did not write it executes the plan; a reviewer who did not
+   write it rebases and merges, returning the item to test if the rebase changed what
+   was tested. Worktrees already isolate files and git already refuses two worktrees on
+   one branch, so the coordination that matters is *who is allowed to sign off*, not
+   *who holds the mutex*. Conflicts are negotiated agent-to-agent over Mattermost.
 
 Deliberately NOT built: a bespoke orchestrator daemon, auto-merge without gates, or
 agent-org integration (its workers already have container isolation + git-proxy;
@@ -71,14 +76,14 @@ harness worktree would show up as an untracked dir in every `git status`).
 **A2. One provisioning script,** `scripts/worktree/new-worktree.ps1` (ASCII, PS5.1):
 
 ```
-new-worktree.ps1 -Id <short-id> [-Base development]
+new-worktree.ps1 -Id <short-id> [-Base <work line>]   # base now RESOLVES (see 4.1)
   → git worktree add .claude/worktrees/wt-<id> -b work/<id> <Base>
   → git -C <wt> submodule update --init          # OB1 at the pinned SHA
   → copy .env, .env.test, OB1/docker/.env into the worktree  (COPY, not symlink —
     symlinks need privilege on Windows and compose resolves --env-file relative to cwd)
   → verify: no CRLF in tracked *.sh inside the worktree (the docker-build trap);
     print the worktree path + branch
-  → register in scripts/worktree/state/worktrees.json
+  → register in <git-common-dir>/agent-worktrees/worktrees.json (shared by ALL worktrees)
     {id, path, branch, owner: {kind: extension|bridge, session/thread}, created}
 ```
 
@@ -100,8 +105,11 @@ The trigger is "first mutating intent", not session start — cheap reads stay c
 and the rule is checkable in review (a commit from the main checkout by a session is
 a violation on its face).
 
-**A5. Base ref.** Scripted creation branches from `development` explicitly (policy),
-so the harness `worktree.baseRef` default (origin default branch) never decides.
+**A5. Base ref.** *(Superseded 2026-08-28: the base is now RESOLVED — explicit `-Base` >
+`AI_STACK_WORK_LINE` > the main checkout's current branch > `development` — so agents run
+off whatever branch is loaded and inherit the tooling on it. Local tip is preferred over
+`origin/<line>`.)* Scripted creation passes the base explicitly, so the harness
+`worktree.baseRef` default (origin default branch) never decides.
 Prefer `new-worktree.ps1` + `EnterWorktree path:` over bare `EnterWorktree name:`
 for repo work; bare EnterWorktree remains fine for throwaway experiments.
 
@@ -219,13 +227,16 @@ touching a live agent's lease.
 
 ## 5. Phase D — agent-coordinated merge queue
 
-**D1. The lock** is the lease named `merge` (`lease.ps1 -Acquire -Name merge` —
-§4.1; the queue and the test leases are one primitive). Atomic create-exclusive;
-contents `{name, owner, worktree, thread, taken_at, ttl_min:30}`. Holder refreshes
-while working; a lease past TTL may be taken over after posting a takeover note to
-the owner's thread. Filesystem beats a port here: both entry points share the disk,
-and the file carries metadata a port can't. (Precedent: bridge lock ports 4829x +
-`claimed-threads.json`.)
+**D1. There is no merge lock** (revised 2026-08-28, operator). The original design used
+a lease named `merge`. That was a mutex for something that is not a race: a worktree
+already isolates files, and git already refuses two worktrees on one branch - verified.
+What the situation actually requires is **separation of duties**, which is a pipeline:
+`scripts/worktree/queue.ps1` carries each work item through
+`ready-to-test -> testing -> ready-review -> reviewing -> merged`, with the developer
+barred (exit 4) from both testing and reviewing their own work. With the developer never
+merging, merge contention stops being a category. Claims are atomic (CreateNew) and TTL'd,
+so a dead tester or reviewer does not strand an item. Leases survive for the SHARED
+RUNTIME only - the Docker daemon, GPU, ports and live databases a worktree cannot isolate.
 
 **D2. The protocol** (a doc first, `/merge-queue` skill once stable — agents follow
 it from REMOTE_NOTE/CLAUDE.md):

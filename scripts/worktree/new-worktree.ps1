@@ -49,20 +49,11 @@ function Fail([string]$Message) {
 }
 
 function Invoke-Git {
+    # Thin fail-fast wrapper over git-io's Invoke-GitCapture (which owns the PS5.1 stderr
+    # handling). Adds only the policy this script wants: a non-zero exit is fatal unless
+    # the caller says otherwise.
     param([string[]]$GitArgs, [switch]$AllowFail)
-    # NO `2>&1` here. In PS5.1 redirecting a native exe's stderr wraps every line in an
-    # ErrorRecord, and with $ErrorActionPreference='Stop' git's ORDINARY progress chatter
-    # ("Preparing worktree (new branch ...)") becomes a terminating error - this script
-    # died on exactly that on its first run. Let stderr flow to the console; trust
-    # $LASTEXITCODE, which is the only honest success signal for a native command.
-    #
-    # The pref flip closes the same trap's second door, found by the Verify-D drill: even
-    # WITHOUT a redirect, CAPTURING a native command's output under 'Stop' turns its stderr
-    # into a terminating error. That made this script work when run by hand but fail the
-    # moment a wrapper script (or any future automation) called it with 'Stop' set.
-    $prevEap = $ErrorActionPreference
-    $ErrorActionPreference = "Continue"
-    try { $out = & git @GitArgs } finally { $ErrorActionPreference = $prevEap }
+    $out = Invoke-GitCapture $GitArgs
     if ($LASTEXITCODE -ne 0 -and -not $AllowFail) {
         Fail ("git " + ($GitArgs -join " ") + " failed with exit code $LASTEXITCODE (message above)")
     }
@@ -73,11 +64,11 @@ if ($Id -notmatch '^[a-z0-9][a-z0-9-]{0,23}$') {
     Fail "Id must be lowercase alphanumeric/dash, max 24 chars (got '$Id'). Keep it short - worktree paths carry a full OB1 checkout."
 }
 
-# The MAIN checkout, not wherever this script happens to be copied. `--git-common-dir`
-# points at the shared .git even when we are called from inside another worktree.
-$commonDir = (Invoke-Git @("rev-parse", "--path-format=absolute", "--git-common-dir")) | Select-Object -First 1
+# The MAIN checkout, not wherever this script happens to be copied (git-io resolves this
+# from the shared git dir, so it holds even when we are called from inside a worktree).
+$commonDir = Get-GitCommonDir
 if (-not $commonDir) { Fail "not inside a git repository" }
-$MainCheckout = Split-Path -Parent $commonDir
+$MainCheckout = Get-MainCheckout
 $WorktreeRoot = Join-Path $MainCheckout ".claude\worktrees"
 $Path = Join-Path $WorktreeRoot "wt-$Id"
 $Branch = "work/$Id"
@@ -229,7 +220,7 @@ Move-Item -Path $tmp -Destination $Registry -Force
 # --- merge-target warnings, raised NOW rather than 40 minutes later ----------------
 # Both of these are invisible until the agent is holding the merge lease, which is the
 # worst moment to find them.
-$holder = Test-LineCheckedOutElsewhere $Base
+$holder = Test-LineCheckedOutElsewhere -Line $Base
 if ($holder) {
     Write-Host ("  NOTE   : '{0}' is checked out at {1}, so work cannot be MERGED into it" -f $Base, $holder) -ForegroundColor Yellow
     Write-Host "           while it stays there (git refuses a second checkout of one branch)." -ForegroundColor Yellow

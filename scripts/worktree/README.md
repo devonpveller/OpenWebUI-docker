@@ -16,16 +16,18 @@ The wider design (test containers, bridge integration):
 | `remove-worktree.ps1` | Retire a worktree, **refusing** while it holds uncommitted or unmerged work (`-Force` to discard deliberately); `-PruneRegistry` drops rows whose path is gone |
 | `common.ps1` | Dot-sourced by the rest: resolves the SHARED coordination state dir, the work line, and stderr-safe git capture. Not run directly |
 | `verify-merge-protocol.ps1` | Executable proof of MERGE-PROTOCOL's two-agent path: 21 checks against a scratch line (never `development`), self-cleaning. Run it after changing any script here or the protocol |
-| `lease.ps1` | Named exclusive leases — the test queue AND the merge queue in one primitive: `-Acquire` / `-Refresh` / `-Release` / `-Status` / `-Takeover` (exit 3 = held, wait). Names validate against `lease-names.conf` (`-AdHoc` to escape); multi-name requests are sorted + all-or-nothing, so agents cannot deadlock |
+| `queue.ps1` | The work pipeline: `-Submit` / `-Claim -Role tester|reviewer` / `-Pass` / `-Fail` / `-Requeue` / `-Merged` / `-Reject` / `-List`. Enforces separation of duties (exit 4) and the stale-pass rule |
+| `lease.ps1` | Named exclusive leases for the SHARED RUNTIME only (planes): `-Acquire` / `-Refresh` / `-Release` / `-Status` / `-Takeover` (exit 3 = held, wait). Names validate against `lease-names.conf` (`-AdHoc` to escape); multi-name requests are sorted + all-or-nothing, so agents cannot deadlock |
 
 `lease.ps1` is deliberately **generic mechanism** with zero repo coupling (its only
 native call is git, via `common.ps1`, to locate the shared lock namespace);
 `lease-names.conf` is the per-environment **policy** (one lease per
 compose plane + `merge`). Porting the toolkit elsewhere = copy the scripts, rewrite
 the conf. `AI_STACK_LEASE_DIR` / `AI_STACK_LEASE_NAMES_FILE` override the defaults
-(the tests use the former to stay hermetic). (`merge-lock.ps1`, its single-lock
-predecessor, was deleted the day after it landed — superseded by `-Name merge`; two
-lock implementations coordinating one filesystem is its own smell.)
+(the tests use the former to stay hermetic). (Lineage, so nobody re-proposes a dead branch: `merge-lock.ps1` → a `merge` lease →
+**no merge lock at all**. Merging needs no mutex - a worktree isolates files and git
+refuses two worktrees on one branch - so landing is governed by `queue.ps1`'s separated
+roles instead. Leases now cover only the shared runtime.)
 
 Runtime state lives in **`<git-common-dir>/agent-worktrees/`** (`worktrees.json`
 registry + `locks/<name>.json` leases) - anchored on the repository, NOT on this
@@ -97,8 +99,8 @@ a per-worktree `info/exclude` is **not** honored — verified).
 .\scripts\worktree\lease.ps1 -Acquire -Name open-brain -Owner wiki-perf   # mutating test
 #   ... test against the plane, clean up your droppings ...
 .\scripts\worktree\lease.ps1 -Release -Name open-brain -Owner wiki-perf
-.\scripts\worktree\lease.ps1 -Acquire -Name merge -Owner wiki-perf
-#   rebase onto the work line, re-run gates, merge --no-ff with evidence
-.\scripts\worktree\lease.ps1 -Release -Name merge -Owner wiki-perf
+# hand it to the pipeline - you do not test or merge your own work:
+.\scripts\worktree\queue.ps1 -Submit -Id wiki-perf -Branch work/wiki-perf -Developer wiki-perf -TestPlan <path>
+#   a tester claims + executes the plan; a reviewer rebases, merges --no-ff, and records it
 .\scripts\worktree\remove-worktree.ps1 -Id wiki-perf
 ```

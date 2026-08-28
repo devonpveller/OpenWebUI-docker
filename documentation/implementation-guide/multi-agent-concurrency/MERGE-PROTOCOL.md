@@ -11,14 +11,18 @@ first conflict.
 
 ## 0. The one-paragraph version
 
-Work in your own worktree. When your work is ready, take the `merge` lease, rebase onto
-your work line, re-run your gates, merge `--no-ff` with your evidence in the commit
-message, release it, and say what you landed in your Mattermost thread. (If the line is
-checked out in the operator's checkout, you hand off instead of merging - Step 4.) If
-your rebase conflicts with work someone else landed first, **you adapt** - you do not
-re-litigate what has already landed. If adapting would break the
-other agent's goal, talk to them in their thread before resolving. If you two cannot
-agree, stop and ask the operator.
+Work in your own worktree. When it is ready, write the test plan and **queue it** - you do
+not test or merge your own work. A tester who did not write it executes that plan and
+records evidence. A reviewer who did not write it reviews the diff, rebases onto the work
+line, and merges. If the rebase changes what was tested, the pass is stale and the item
+goes back to test rather than through. Conflicts are adapted by whoever lands later; if
+adapting would defeat another agent's goal, talk to them before resolving, and if you
+cannot agree, ask the operator.
+
+**Why there is no lock in that paragraph:** a worktree already isolates files, and git
+already refuses two worktrees on one branch. The coordination that actually matters is
+*separation of duties*, which is a pipeline, not a mutex. Leases exist only for the shared
+runtime a worktree cannot isolate - see §1.
 
 ## 1. Before you touch anything
 
@@ -67,7 +71,7 @@ Rules while you work:
   3. Exit 3 = held: wait, poll ≤1/min. Long build? `-Refresh` keeps it alive.
   4. **Editing files that belong to a plane needs no plane lease** - only touching the
      RUNNING plane does. A docs, config or source change you do not deploy is the
-     read-only case: take `merge` to land it, and nothing else.
+     read-only case: queue it for test and review, and take no lease at all.
   5. Leave the plane the way you found it *before releasing* — a lease serializes
      interference, it does not clean up after you. Test data stays test-prefixed
      (`testing-*`), test images tag `:wt-<id>` and never touch `:local` (retagging
@@ -81,88 +85,91 @@ Rules while you work:
 - If your run spans hours, `.\scripts\worktree\sync-worktree-env.ps1 -Id <id>` picks
   up any `.env` change the operator made meanwhile.
 
-## 2. Landing it
+## 2. Landing it - the pipeline
 
-**Step 1 — validate in your own worktree, first.** Your task's own RED→GREEN
-evidence, plus `ruff check .` and a compose `config` render for any plane you
-touched. A merge is not the place to discover your branch is red.
+`scripts/worktree/queue.ps1` carries the state a pull request would carry; the diff is just
+`git diff <work line>...work/<your-id>`. It is local on purpose: a GitHub PR would need
+branches pushed (against this repo's push policy), the `gh` CLI (absent), and network.
 
-**Step 2 — take the `merge` lease.**
+**Step 1 - validate in your own worktree.** Your task's RED to GREEN evidence, plus
+`ruff check .` and a compose `config` render for any plane you touched. A queue submission
+is not the place to discover your branch is red.
 
-```powershell
-.\scripts\worktree\lease.ps1 -Acquire -Name merge -Owner <your-wt-id> -Thread <your-mm-thread>
-```
-
-Exit 3 means someone else is merging: **wait**, poll at most once a minute, and do
-something useful meanwhile. Do not force. Refresh (`-Refresh`) if your rebase runs
-long; the TTL is 30 minutes and exists only so a dead agent cannot block the queue
-forever.
-
-**Step 3 — rebase onto the current tip and re-run your gates.**
+**Step 2 - write the test plan, then submit. This is the developer's last action.**
 
 ```powershell
-git fetch origin
-git -C <your-worktree> rebase <your work line>       # the branch new-worktree.ps1 reported
+.\scripts\worktree\queue.ps1 -Submit -Id <id> -Branch work/<id> -Developer <your-wt-id> -TestPlan <path>
 ```
 
-This is where cross-agent breakage surfaces, which is the entire point of doing it
-under the lease. **Re-run the gates after the rebase** — green before the rebase says
-nothing about green after it.
+The plan is written *before* the work is queued, because it is what someone else will
+execute. "I tested it myself" is not a plan, and the tool refuses a submission without one.
+Say what to run, what counts as passing, and what would count as failing.
 
-**Step 4 — merge with evidence, in a dedicated merge worktree.**
+**Step 3 - a TESTER (not you) claims it and executes the plan.**
+
+```powershell
+.\scripts\worktree\queue.ps1 -Claim -Id <id> -Role tester -By <their-id>
+#   ... run the plan. Touching a plane's RUNNING services? Hold its lease first ...
+.\scripts\worktree\queue.ps1 -Pass -Id <id> -By <their-id> -Evidence <what ran, what it produced> -PlanAdequate
+.\scripts\worktree\queue.ps1 -Fail -Id <id> -By <their-id> -Reason <what broke>
+```
+
+`-PlanAdequate` is a judgement, not a formality: the plan was written by the developer, so
+a tester who only reports pass/fail is grading an exam without reading the syllabus. If the
+plan missed cases, add them, and say the plan was inadequate. A failure returns the item to
+the developer, who fixes it **in the same worktree** and re-submits.
+
+**Step 4 - a REVIEWER (not the developer) claims it, rebases, and re-checks staleness.**
+
+```powershell
+.\scripts\worktree\queue.ps1 -Claim -Id <id> -Role reviewer -By <their-id>
+git -C <the developer's worktree> rebase <work line>
+```
+
+The tests passed at a specific commit. **If your rebase changes what would land, that pass
+no longer describes it** - return the item rather than merging it:
+
+```powershell
+.\scripts\worktree\queue.ps1 -Requeue -Id <id> -By <their-id> -Reason "rebase changed the tested content"
+```
+
+That is not a rejection; nothing is wrong with the work. Use `-Reject` only when the work
+itself should not land.
+
+**Step 5 - the REVIEWER merges, in a dedicated merge worktree.**
 
 ```powershell
 # Write the evidence to a FILE first: multi-line -m is impractical in PS5.1, and unlike
 # `git commit`, `git merge -F -` does NOT read stdin ("could not read file '-'").
 git -C <main-checkout> worktree add .claude/worktrees/merge-line <work line>
-git -C <main-checkout>/.claude/worktrees/merge-line merge --no-ff work/<your-id> -F <msg-file>
+git -C <main-checkout>/.claude/worktrees/merge-line merge --no-ff work/<id> -F <msg-file>
 git -C <main-checkout> worktree remove .claude/worktrees/merge-line
+.\scripts\worktree\queue.ps1 -Merged -Id <id> -By <their-id> -Sha <merge sha>
 ```
 
 **If the work line is checked out in the main checkout, you cannot merge - hand off
 instead.** Git refuses a second checkout of one branch, and force-moving the ref would
-leave that working tree's index lying about its contents. This is the normal case when
-the line is the operator's active branch, so it is a supported outcome, not a failure:
-leave your branch rebased and green, release the lease, and report the exact command for
-them to run. `new-worktree.ps1` warns about this at PROVISIONING time so it is never a
-surprise at landing time.
+leave that working tree's index lying about its contents. With the work line defaulting to
+the operator's active branch this is the normal case, so it is a supported outcome, not a
+failure: leave the branch rebased and green, release the claim, and report the exact command
+for them to run. `new-worktree.ps1` warns about this at provisioning time so it is never a
+surprise at landing time. Never merge inside the operator's checkout - it is their working
+copy and a bridge turn could be running in it.
 
-**Never `git checkout <work line>`** to do this - it switches your own worktree off its
-branch, and the Verify-D drill showed the original wording only worked by luck of where
-the operator's checkout was parked. The merge worktree is owned by whoever holds the
-`merge` lease, so it can never collide. Never merge inside the operator's checkout: it
-is their working copy and a bridge turn could be running in it.
+`--no-ff` keeps the branch visible in history, and the merge message carries the evidence -
+the operator's branch policy made mechanical, and what makes a later bisect readable. If the
+merge bumps the `OB1` gitlink, verify the SHA is reachable on the OB1 remote **first**; an
+unreachable gitlink breaks every fresh `--recurse-submodules` clone.
 
-`--no-ff` keeps your branch visible in history. The merge message carries the
-validation evidence — that is the operator's branch policy made mechanical, and it
-is what makes a later bisect readable. If your merge bumps the `OB1` gitlink, verify
-the SHA is reachable on the OB1 remote **first**; an unreachable gitlink breaks every
-fresh `--recurse-submodules` clone.
-
-**Step 5 — release and announce.**
+**Step 6 - the developer retires the worktree.**
 
 ```powershell
-.\scripts\worktree\lease.ps1 -Release -Name merge -Owner <your-wt-id>
+.\scripts\worktree
+emove-worktree.ps1 -Id <id>
 ```
 
-Then post in your own #claude-sessions thread: what landed, which files, the
-evidence, and whether a deploy is still pending. Other agents read this to know
-whether they need to rebase.
-
-**If you have no thread** (extension sessions, subagents), your merge commit message IS
-the announcement - it carries the same content and is what the next agent sees when they
-rebase. Say exactly that in your report rather than claiming you announced, and never
-drop the evidence just because there is no thread to put it in.
-
-**Step 6 — clean up.**
-
-```powershell
-.\scripts\worktree\remove-worktree.ps1 -Id <your-id>
-```
-
-It refuses if you still hold uncommitted or unmerged work, and tells you what. That
-refusal is a feature: it is the difference between "cleaned up" and "deleted the only
-copy".
+It refuses while you still hold uncommitted or unmerged work, and tells you what. That
+refusal is the difference between "cleaned up" and "deleted the only copy".
 
 ## 3. Conflicts: who talks to whom
 
@@ -215,10 +222,15 @@ by force-push; `development` history is append-only.
 
 ## 6. Deliberate limits
 
-- **A merge is serialized; the work is not.** Only the land step takes the `merge` lease, and
-  it is short. Everything before it runs fully parallel.
-- **`development` is never left mid-merge.** The rebase happens on your branch; the
-  merge itself is one fast operation. A dead agent leaves a stale lease and a
-  half-rebased branch in *its own* worktree — never a broken shared line.
+- **Only the landing is serialized, and git does it.** Development runs fully parallel in
+  worktrees; the merge step is one fast operation that git refuses to run twice on one
+  branch. There is no merge lock because there is no merge race.
+- **The shared line is never left mid-merge.** The rebase happens on the work branch. A
+  dead agent leaves a stale claim (TTL'd, takeable) and a half-rebased branch in *its own*
+  worktree - never a broken shared line.
+- **The pipeline costs a round trip.** Three roles means an item waits for a tester and
+  then a reviewer. That is the price of not merging your own work on a live-service
+  codebase, and it is paid deliberately - `queue.ps1 -List` is where you see what is
+  waiting on whom.
 - **This protocol does not cover deploy verification.** Anything that must be proven
   through the real caddy/tailnet chain happens after the merge, serially, by nature.

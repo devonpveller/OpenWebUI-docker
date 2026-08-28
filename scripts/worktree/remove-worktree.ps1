@@ -22,10 +22,8 @@ param(
     [switch]$PruneRegistry
 )
 
-# 'Stop' for cmdlets, but CAPTURING a native command's output under it turns git's stderr
-# into a terminating error (found by the Verify-D drill: these scripts worked by hand and
-# broke the moment a wrapper script with 'Stop' called them). Every `& git` whose output is
-# captured below runs inside Get-GitLines, which flips the pref for the duration.
+# 'Stop' for cmdlets. Every captured `git` call goes through git-io's Invoke-GitCapture,
+# which owns the PS5.1 rule that capturing native stderr under 'Stop' is fatal.
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "common.ps1")
 $Registry = Join-Path (Get-SharedStateDir) "worktrees.json"
@@ -33,12 +31,6 @@ $Registry = Join-Path (Get-SharedStateDir) "worktrees.json"
 # deleting a worktree whose commits are nowhere else.
 if (-not $MergedInto) { $MergedInto = Resolve-WorkLine }
 
-function Get-GitLines {
-    param([string[]]$GitArgs)
-    $prevEap = $ErrorActionPreference
-    $ErrorActionPreference = "Continue"
-    try { return @(& git @GitArgs) } finally { $ErrorActionPreference = $prevEap }
-}
 
 function Fail([string]$Message) { Write-Host "ERROR: $Message" -ForegroundColor Red; exit 1 }
 
@@ -85,14 +77,14 @@ if (-not (Test-Path $path)) {
 }
 
 # --- what would be lost? ----------------------------------------------------------
-$dirty = Get-GitLines @("-C", $path, "status", "--porcelain")
+$dirty = Invoke-GitCapture @("-C", $path, "status", "--porcelain")
 $unmerged = @()
 $null = & git rev-parse --verify --quiet "refs/heads/$MergedInto"
 if ($LASTEXITCODE -eq 0) {
-    $unmerged = Get-GitLines @("-C", $path, "log", "--oneline", "$MergedInto..$branch")
+    $unmerged = Invoke-GitCapture @("-C", $path, "log", "--oneline", "$MergedInto..$branch")
 } else {
     Write-Host ("  note: no local '{0}' branch to compare against - treating all commits as unmerged" -f $MergedInto) -ForegroundColor Yellow
-    $unmerged = Get-GitLines @("-C", $path, "log", "--oneline", "-n", "20", $branch)
+    $unmerged = Invoke-GitCapture @("-C", $path, "log", "--oneline", "-n", "20", $branch)
 }
 
 Write-Host ("Worktree {0} ({1})" -f $Id, $path) -ForegroundColor Cyan

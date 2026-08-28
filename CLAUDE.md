@@ -70,12 +70,16 @@ snapshots + `manifest.csv` (file → OWUI id; skills included).
   `EnterWorktree name:` for repo work (it branches from the origin default
   branch, not your work line). Land it via
   `documentation/implementation-guide/multi-agent-concurrency/MERGE-PROTOCOL.md`
-  — take the `merge` lease (`lease.ps1 -Acquire -Name merge`), rebase onto your
-  work line, re-run gates, merge `--no-ff` with evidence, release, announce
-  in-thread. The work line defaults to whatever the main checkout has loaded
-  (override: `-Base` / `AI_STACK_WORK_LINE`), so agents inherit the tooling on
-  that branch; when it is the branch you have checked out, agents hand the merge
-  back to you rather than touching your working copy. Conflicts: the LATER merger adapts; semantic clashes get negotiated
+  — **you do not test or merge your own work.** Write the test plan, then
+  `queue.ps1 -Submit`; a tester who did not write it executes the plan, and a
+  reviewer who did not write it rebases and merges (`--no-ff`, evidence in the
+  message). If the reviewer's rebase changes what was tested, the pass is stale
+  and the item returns to test. The work line defaults to whatever the main
+  checkout has loaded (override: `-Base` / `AI_STACK_WORK_LINE`), so agents
+  inherit the tooling on that branch; when it is the branch you have checked out,
+  the reviewer hands the merge back to you rather than touching your working copy.
+  There is no merge lock: a worktree isolates files and git refuses two worktrees
+  on one branch, so the coordination that matters is separation of duties. Conflicts: the LATER merger adapts; semantic clashes get negotiated
   in the other agent's Mattermost thread (never `SendMessage` — it can be a
   headless peer mid-turn); no convergence → ask the operator. **Testing runs
   under plane leases, not cloned environments**: before a test that mutates a

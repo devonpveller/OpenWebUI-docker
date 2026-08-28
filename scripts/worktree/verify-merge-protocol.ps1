@@ -1,50 +1,43 @@
-# verify-merge-protocol.ps1 - executable proof of MERGE-PROTOCOL.md's two-agent path.
+# verify-merge-protocol.ps1 - executable proof of MERGE-PROTOCOL.md's pipeline.
 #
-#   .\scripts\worktree\verify-merge-protocol.ps1     # 21 checks, ~1 min, cleans up after itself
+#   .\scripts\worktree\verify-merge-protocol.ps1     # ~1 min, cleans up after itself
 #
-# Run this after changing lease.ps1, the worktree scripts, or the protocol itself. The unit
-# tests (test_worktree.py) cover lease SEMANTICS; this covers the end-to-end CHOREOGRAPHY
-# two agents actually perform - which is where the protocol's real defects turned out to be
-# (its first run proved Step 4's `git checkout development` was unsafe).
+# Run after changing queue.ps1, lease.ps1, the worktree scripts, or the protocol. The unit
+# tests cover SEMANTICS; this covers the CHOREOGRAPHY the roles actually perform - which is
+# where the protocol's real defects have turned out to be (its first run proved the old
+# Step 4's `git checkout development` was unsafe).
 #
-# Runs against a SCRATCH line (drill/verify-d), never `development`: the drill validates
-# protocol mechanics, and the target branch is a parameter. The operator's checkout is
-# never switched (a bridge turn could land mid-switch). Idempotent: the preamble clears
+# What it drives: two developers produce conflicting work in isolated worktrees; both queue
+# it with test plans; a tester who wrote neither executes and passes them; a reviewer who is
+# neither developer merges the first; the second's rebase CONFLICTS, is adapted, and because
+# the rebase changed the tested content the reviewer returns it to test (the stale-pass rule)
+# before it can land. Separation of duties is asserted, not assumed.
+#
+# Runs against a SCRATCH line (drill/verify-d), never `development`. The operator's checkout
+# is never switched (a bridge turn could land mid-switch). Idempotent: the preamble clears
 # anything a previous failed run left behind.
 #
-# Covers: lease mutual exclusion under real contention, rebase conflict, later-merger-adapts,
-# --no-ff history, and full cleanup. Does NOT cover Tier-2 thread negotiation (needs two live
-# sessions) - the human half is asserted by inspection, not by this script.
-#
-# NOTE: no `2>&1` on any git call. PS5.1 wraps redirected native stderr in ErrorRecords, and
-# with $ErrorActionPreference='Stop' git's ordinary progress chatter becomes a terminating
-# error - this script died on exactly that on its first run, the same trap new-worktree.ps1
-# hit. Stderr flows to the console; $LASTEXITCODE is the only honest signal.
+# NOTE: no `2>&1` on any git call, and the helpers flip $ErrorActionPreference themselves. In
+# PS5.1, redirecting OR capturing a native command's stderr under 'Stop' turns git's ordinary
+# progress chatter into a terminating error - this script died on exactly that once.
 
 $ErrorActionPreference = "Continue"   # native git stderr must never be fatal here
 $repo = "d:\Open WebUI\ai-stack"
 $wtScripts = Join-Path $repo "scripts\worktree"
-$lease = Join-Path $wtScripts "lease.ps1"
+$queue = Join-Path $wtScripts "queue.ps1"
 . (Join-Path $wtScripts "common.ps1")
-# Resolve the lock path rather than hardcoding it: the lease dir moved to the shared
-# per-repository namespace, and this drill asserted on the old location for one run.
-$mergeLockFile = Join-Path (Join-Path (Get-SharedStateDir) "locks") "merge.json"
+$QueueDir = Join-Path (Get-SharedStateDir) "queue"
 $results = @()
 
 function Step($n, $text) { Write-Host "`n=== $n. $text ===" -ForegroundColor Cyan }
 function Check($label, $ok, $detail = "") {
     $script:results += [pscustomobject]@{ check = $label; pass = $ok; detail = $detail }
-    $c = if ($ok) { "Green" } else { "Red" }
-    Write-Host ("  [{0}] {1} {2}" -f $(if ($ok) { "PASS" } else { "FAIL" }), $label, $detail) -ForegroundColor $c
+    Write-Host ("  [{0}] {1} {2}" -f $(if ($ok) { "PASS" } else { "FAIL" }), $label, $detail) `
+        -ForegroundColor $(if ($ok) { "Green" } else { "Red" })
 }
-# TWO scoping traps hit live while writing this drill:
-#  1. PowerShell is case-insensitive, so `& git` inside a function named Invoke-DrillGit calls ITSELF
-#     -> call-depth overflow. Helpers must invoke git.EXE explicitly.
-#  2. Functions leak into scripts you invoke. A helper named `Git` shadowed the real binary
-#     INSIDE new-worktree.ps1, which then reported "not inside a git repository". Never name
-#     a wrapper after the command it wraps.
-#  3. Even without a redirect, CAPTURING or piping native output under 'Stop' makes git's
-#     stderr (warnings, progress) terminating - so both helpers flip the pref themselves.
+# Helpers must call git.EXE: PowerShell is case-insensitive, so `& git` inside a function
+# named Git calls itself (call-depth overflow), and functions leak into invoked scripts -
+# a helper named `Git` once shadowed the real binary INSIDE new-worktree.ps1.
 function Invoke-DrillGit {
     $prev = $ErrorActionPreference; $ErrorActionPreference = "Continue"
     try { & git.exe @args | Out-Null } finally { $ErrorActionPreference = $prev }
@@ -53,10 +46,19 @@ function Get-DrillGit {
     $prev = $ErrorActionPreference; $ErrorActionPreference = "Continue"
     try { return (& git.exe @args) } finally { $ErrorActionPreference = $prev }
 }
+function Get-QueueState([string]$id) {
+    $f = Join-Path $QueueDir "$id.json"
+    if (-not (Test-Path $f)) { return "(missing)" }
+    return (Get-Content -Raw -Path $f | ConvertFrom-Json).state
+}
+function Clear-DrillQueue {
+    Get-ChildItem -Path $QueueDir -Filter "drill-*" -ErrorAction SilentlyContinue |
+        ForEach-Object { Remove-Item $_.FullName -Force }
+}
 
 Set-Location $repo
 
-# --- idempotent preamble: clear anything a previous failed run left -----------------
+# --- idempotent preamble ------------------------------------------------------------
 foreach ($p in @("merge-line", "wt-drilla", "wt-drillb")) {
     $full = Join-Path $repo ".claude\worktrees\$p"
     if (Test-Path $full) { & git.exe worktree remove --force $full | Out-Null }
@@ -66,7 +68,7 @@ foreach ($b in @("work/drilla", "work/drillb", "drill/verify-d")) {
     & git.exe rev-parse --verify --quiet "refs/heads/$b" | Out-Null
     if ($LASTEXITCODE -eq 0) { & git.exe branch -D $b | Out-Null }
 }
-foreach ($o in @("wt-drilla", "wt-drillb")) { & $lease -Release -Name merge -Owner $o | Out-Null }
+Clear-DrillQueue
 $reg = Join-Path (Get-SharedStateDir) "worktrees.json"
 if (Test-Path $reg) { '{ "worktrees": {} }' | Set-Content $reg -Encoding ASCII }
 
@@ -74,7 +76,7 @@ $devBefore = (Get-DrillGit rev-parse development).Trim()
 $mainBranch = (Get-DrillGit rev-parse --abbrev-ref HEAD).Trim()
 Write-Host ("development before: {0} | operator checkout on: {1}" -f $devBefore.Substring(0, 8), $mainBranch)
 
-Step 1 "scratch line + two agent worktrees (via the real provisioning script)"
+Step 1 "two developers, two isolated worktrees (via the real provisioning script)"
 Invoke-DrillGit branch drill/verify-d development
 foreach ($id in @("drilla", "drillb")) {
     & (Join-Path $wtScripts "new-worktree.ps1") -Id $id -Base "drill/verify-d" -OwnerKind manual -OwnerRef "verify-d" | Out-Null
@@ -83,7 +85,7 @@ foreach ($id in @("drilla", "drillb")) {
 $wtA = Join-Path $repo ".claude\worktrees\wt-drilla"
 $wtB = Join-Path $repo ".claude\worktrees\wt-drillb"
 
-Step 2 "both agents edit THE SAME file with conflicting intent"
+Step 2 "both edit THE SAME file with conflicting intent, and commit"
 Set-Content -Path (Join-Path $wtA "DRILL-NOTE.md") -Encoding ascii -Value @(
     "# Drill note", "", "Agent A owns this line: A needs the timeout raised to 60s.")
 Set-Content -Path (Join-Path $wtB "DRILL-NOTE.md") -Encoding ascii -Value @(
@@ -94,34 +96,47 @@ Invoke-DrillGit -C $wtB add DRILL-NOTE.md
 Invoke-DrillGit -C $wtB commit -q -m "drill B: lower timeout to 5s"
 Check "two divergent commits exist" ((Get-DrillGit -C $wtA rev-parse HEAD) -ne (Get-DrillGit -C $wtB rev-parse HEAD))
 
-Step 3 "lease mutual exclusion under real contention"
-& $lease -Acquire -Name merge -Owner wt-drilla -Thread drill-thread-a | Out-Null
-Check "agent A acquired the merge lease" ($LASTEXITCODE -eq 0)
-& $lease -Acquire -Name merge -Owner wt-drillb | Out-Null
-Check "agent B is BLOCKED while A holds it (exit 3)" ($LASTEXITCODE -eq 3)
-$holder = (Get-Content $mergeLockFile -Raw | ConvertFrom-Json).owner
-Check "lease names exactly one owner" ($holder -eq "wt-drilla") "holder=$holder"
+Step 3 "developers QUEUE their work with a test plan - they never merge it themselves"
+foreach ($id in @("a", "b")) {
+    & $queue -Submit -Id "drill-$id" -Branch "work/drill$id" -Developer "wt-drill$id" `
+        -TestPlan "DRILL-NOTE.md states the timeout; verify the file reads as intended" | Out-Null
+}
+Check "both items queued for testing" ((Get-QueueState "drill-a") -eq "ready-to-test" -and (Get-QueueState "drill-b") -eq "ready-to-test")
+& $queue -Submit -Id "drill-noplan" -Branch "work/drilla" -Developer "wt-drilla" 2>&1 | Out-Null
+Check "a submission with NO test plan is refused" ($LASTEXITCODE -ne 0)
 
-Step 4 "agent A rebases and merges into the shared line"
+Step 4 "separation of duties is ENFORCED, not trusted"
+& $queue -Claim -Id drill-a -Role tester -By wt-drilla 2>&1 | Out-Null
+Check "the developer cannot TEST their own work (exit 4)" ($LASTEXITCODE -eq 4)
+& $queue -Claim -Id drill-a -Role reviewer -By wt-drilla 2>&1 | Out-Null
+Check "the developer cannot REVIEW their own work (exit 4)" ($LASTEXITCODE -eq 4)
+
+Step 5 "an independent tester executes both plans"
+foreach ($id in @("a", "b")) {
+    & $queue -Claim -Id "drill-$id" -Role tester -By wt-tester | Out-Null
+    & $queue -Pass -Id "drill-$id" -By wt-tester -Evidence "read the file; content matches the plan" -PlanAdequate | Out-Null
+}
+Check "both items passed testing" ((Get-QueueState "drill-a") -eq "ready-review" -and (Get-QueueState "drill-b") -eq "ready-review")
+& $queue -Claim -Id drill-a -Role tester -By wt-tester2 2>&1 | Out-Null
+Check "a tester claim on an already-passed item is refused" ($LASTEXITCODE -ne 0)
+
+Step 6 "the reviewer - neither developer - lands the first item"
+& $queue -Claim -Id drill-a -Role reviewer -By wt-reviewer | Out-Null
+Check "reviewer claimed drill-a" ((Get-QueueState "drill-a") -eq "reviewing")
 Invoke-DrillGit -C $wtA rebase drill/verify-d
-# The shared line is merged in a DEDICATED merge worktree - never by switching the
-# operator's checkout, and never by switching the agent's own worktree off its branch.
 $wtMerge = Join-Path $repo ".claude\worktrees\merge-line"
 Invoke-DrillGit worktree add $wtMerge drill/verify-d
-Check "merge worktree created for the shared line" (Test-Path $wtMerge)
+Check "merge worktree created (never the operator's checkout)" (Test-Path $wtMerge)
 Invoke-DrillGit -C $wtMerge merge --no-ff work/drilla -m "merge drill A: raise timeout to 60s (evidence: drill)"
-Check "agent A's merge landed" ((Get-DrillGit -C $wtMerge log --oneline -1 --format=%s) -like "merge drill A*")
-& $lease -Release -Name merge -Owner wt-drilla | Out-Null
-Check "agent A released the lease" (-not (Test-Path $mergeLockFile))
+& $queue -Merged -Id drill-a -By wt-reviewer -Sha ((Get-DrillGit -C $wtMerge rev-parse HEAD).Trim()) | Out-Null
+Check "drill-a merged by the reviewer" ((Get-QueueState "drill-a") -eq "merged")
 
-Step 5 "agent B acquires, rebases -> CONFLICT (the point of the drill)"
-& $lease -Acquire -Name merge -Owner wt-drillb -Thread drill-thread-b | Out-Null
-Check "agent B can now acquire" ($LASTEXITCODE -eq 0)
-Invoke-DrillGit -C $wtB rebase drill/verify-d   # expected to fail: conflict
+Step 7 "the second item's rebase CONFLICTS - the later merger adapts"
+& $queue -Claim -Id drill-b -Role reviewer -By wt-reviewer | Out-Null
+$testedAt = (Get-Content -Raw -Path (Join-Path $QueueDir "drill-b.json") | ConvertFrom-Json).tested_at_sha
+Invoke-DrillGit -C $wtB rebase drill/verify-d   # expected to conflict
 $conflicted = @(Get-DrillGit -C $wtB diff --name-only --diff-filter=U)
 Check "rebase produced a real conflict" ($conflicted -contains "DRILL-NOTE.md") ("files: " + ($conflicted -join ","))
-
-Step 6 "LATER-MERGER-ADAPTS: B keeps A's landed line and adds its own intent"
 Set-Content -Path (Join-Path $wtB "DRILL-NOTE.md") -Encoding ascii -Value @(
     "# Drill note", "",
     "Agent A owns this line: A needs the timeout raised to 60s.",
@@ -131,35 +146,46 @@ Invoke-DrillGit -C $wtB add DRILL-NOTE.md
 $env:GIT_EDITOR = "true"
 Invoke-DrillGit -C $wtB rebase --continue
 Check "B's rebase completed after adapting" (-not (Test-Path (Join-Path $wtB ".git\rebase-merge")))
-Invoke-DrillGit -C $wtMerge merge --no-ff work/drillb -m "merge drill B: per-caller override, A's default kept (evidence: drill)"
-Check "agent B's merge landed" ((Get-DrillGit -C $wtMerge log --oneline -1 --format=%s) -like "merge drill B*")
-& $lease -Release -Name merge -Owner wt-drillb | Out-Null
 
-Step 7 "outcome: both intents survive, history is readable, development untouched"
+Step 8 "STALE PASS: the rebase changed the tested content, so it goes BACK to test"
+$afterRebase = (Get-DrillGit -C $wtB rev-parse HEAD).Trim()
+Check "the tested sha is no longer what would land" ($afterRebase -ne $testedAt)
+& $queue -Requeue -Id drill-b -By wt-reviewer -Reason "rebase onto A's merge changed the file; the pass no longer describes it" | Out-Null
+Check "reviewer returned it to testing rather than merging" ((Get-QueueState "drill-b") -eq "ready-to-test")
+& $queue -Claim -Id drill-b -Role tester -By wt-tester | Out-Null
+& $queue -Pass -Id drill-b -By wt-tester -Evidence "re-read the adapted file; both intents present" -PlanAdequate | Out-Null
+Check "re-tested at the new content" ((Get-QueueState "drill-b") -eq "ready-review")
+
+Step 9 "the reviewer lands the adapted work"
+& $queue -Claim -Id drill-b -Role reviewer -By wt-reviewer | Out-Null
+Invoke-DrillGit -C $wtMerge merge --no-ff work/drillb -m "merge drill B: per-caller override, A's default kept (evidence: drill)"
+& $queue -Merged -Id drill-b -By wt-reviewer -Sha ((Get-DrillGit -C $wtMerge rev-parse HEAD).Trim()) | Out-Null
+Check "drill-b merged after re-test" ((Get-QueueState "drill-b") -eq "merged")
+
+Step 10 "outcome: both intents survive, history readable, development untouched"
 $final = Get-Content (Join-Path $wtMerge "DRILL-NOTE.md") -Raw
 Check "A's intent survived the later merge" ($final -match "raised to 60s")
 Check "B's adapted intent is present" ($final -match "per-caller override")
-# Scope to commits ADDED by the drill. `--merges <branch>` walks all reachable history
-# (25 merges from development) - the first run of this drill asserted on that and failed.
 $merges = @(Get-DrillGit -C $wtMerge log --oneline --merges "$devBefore..drill/verify-d")
 Check "two --no-ff merge commits on the line" ($merges.Count -eq 2) ("count=" + $merges.Count)
-$devAfter = (Get-DrillGit rev-parse development).Trim()
-Check "development NEVER moved" ($devAfter -eq $devBefore) ("{0} -> {1}" -f $devBefore.Substring(0, 8), $devAfter.Substring(0, 8))
+Check "development NEVER moved" ((Get-DrillGit rev-parse development).Trim() -eq $devBefore)
 Check "operator checkout still on its own branch" ((Get-DrillGit rev-parse --abbrev-ref HEAD).Trim() -eq $mainBranch)
 
-Step 8 "cleanup - leave nothing behind"
+Step 11 "cleanup - leave nothing behind"
 Invoke-DrillGit worktree remove --force $wtMerge
 foreach ($id in @("drilla", "drillb")) {
     & (Join-Path $wtScripts "remove-worktree.ps1") -Id $id -MergedInto "drill/verify-d" -Force | Out-Null
 }
 Invoke-DrillGit branch -D drill/verify-d
 Invoke-DrillGit worktree prune
+Clear-DrillQueue
 Check "all drill worktrees gone" (@(Get-ChildItem (Join-Path $repo ".claude\worktrees") -ErrorAction SilentlyContinue).Count -eq 0)
 Check "no drill/work branches left" (@(Get-DrillGit branch --list "work/*" "drill/*").Count -eq 0)
-Check "no leases held" (-not (Test-Path $mergeLockFile))
+Check "queue emptied of drill items" (@(Get-ChildItem -Path $QueueDir -Filter "drill-*" -ErrorAction SilentlyContinue).Count -eq 0)
 
 Write-Host "`n================ DRILL SUMMARY ================" -ForegroundColor Cyan
 $fail = @($results | Where-Object { -not $_.pass })
 $results | ForEach-Object { Write-Host ("  {0,-6} {1}" -f $(if ($_.pass) { "PASS" } else { "FAIL" }), $_.check) }
-Write-Host ("`n{0}/{1} checks passed" -f ($results.Count - $fail.Count), $results.Count) -ForegroundColor $(if ($fail.Count) { "Red" } else { "Green" })
+Write-Host ("`n{0}/{1} checks passed" -f ($results.Count - $fail.Count), $results.Count) `
+    -ForegroundColor $(if ($fail.Count) { "Red" } else { "Green" })
 if ($fail.Count) { exit 1 }
