@@ -30,7 +30,7 @@ Config via env (all optional):
   BRIDGE_OPERATORS         comma-separated usernames allowed to drive sessions (default profnovice)
   BRIDGE_REPO              working directory for sessions    (default this repo)
   BRIDGE_CLAUDE_BIN        path to claude CLI                (default: PATH, then newest VS Code ext)
-  BRIDGE_MODEL             model override (e.g. haiku)       (default: CLI default)
+  BRIDGE_MODEL             model for every turn              (default: opus — see MODEL below)
   BRIDGE_MAX_BUDGET_USD    per-turn cost-estimate backstop   (default 50; "" disables)
   BRIDGE_PERMISSION_MODE   default approval level            (default "auto"; per-thread
                            override via `mode: <level>` — bypassPermissions is refused)
@@ -101,7 +101,12 @@ CHANNEL_ID = os.environ.get("BRIDGE_CHANNEL_ID", "6z9khgkdd7df9q454be6fimw1h")  
 OPERATORS = {u.strip().lower() for u in os.environ.get("BRIDGE_OPERATORS", "profnovice").split(",") if u.strip()}
 
 REPO = os.environ.get("BRIDGE_REPO", _REPO_ROOT)
-MODEL = os.environ.get("BRIDGE_MODEL", "")
+# Pinned, NOT "whatever the CLI would pick" (operator, 2026-08-28). Passing no --model let every
+# unpinned thread inherit the account's default, which now resolves to the top-tier model
+# (fable, $10/$50 per Mtok) — 30 of 41 threads were silently running there. `opus` is the
+# operator's choice of floor; raise a single thread with `model: fable`, drop one with
+# `model: sonnet`/`haiku`, or move the whole bridge with BRIDGE_MODEL.
+MODEL = os.environ.get("BRIDGE_MODEL", "opus")
 # Per-turn cost-estimate cap. On a subscription nothing is billed — this is purely a
 # runaway-turn backstop (a "$50" turn ≈ a huge chunk of the Max usage window), sized so it
 # never fires on legitimate work. Set to "" to disable entirely.
@@ -1071,14 +1076,20 @@ class Bridge:
         session_id = meta.get("session_id")
 
         thread_model = meta.get("model", "")
+        if thread_model.lower() in ("default", "reset"):
+            thread_model = ""  # stored by an old `model: default` — never a real CLI alias
         thread_mode = meta.get("mode", "")
         changed = []
         while True:  # consume leading directives in any order: `model: …`, `mode: …`
             m = MODEL_DIRECTIVE_RE.match(prompt)
             if m:
-                thread_model = m.group(1)
+                requested = m.group(1)
                 prompt = m.group(2).strip()
-                changed.append(f"model → `{thread_model}`")
+                # `model: default` (or `reset`) DROPS the thread's pin and returns it to the
+                # bridge default — it is not an alias the CLI knows, so it must never be
+                # forwarded as `--model default`.
+                thread_model = "" if requested.lower() in ("default", "reset") else requested
+                changed.append(f"model → `{thread_model or MODEL or 'CLI default'}`")
                 continue
             m = MODE_DIRECTIVE_RE.match(prompt)
             if m:
@@ -1102,8 +1113,7 @@ class Bridge:
         if changed:
             with self.state_lock:
                 entry = self.state["threads"].setdefault(thread_root, {})
-                if thread_model:
-                    entry["model"] = thread_model
+                entry["model"] = thread_model  # "" = unpinned (a `model: default` reset)
                 if thread_mode:
                     entry["mode"] = thread_mode
                 save_state(self.state)

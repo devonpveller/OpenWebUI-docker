@@ -130,7 +130,7 @@ Creating a bot account needs Mattermost admin rights (bot-pm's token can't — 4
 ## Config (env vars, all optional)
 
 See the docstring at the top of `bridge.py` for the full table. The ones you'll actually
-touch: `BRIDGE_MODEL` (e.g. `haiku` for cheap tests; default = the CLI's default model),
+touch: `BRIDGE_MODEL` (the model every unpinned thread runs on; default `opus`),
 `BRIDGE_OPERATORS`, `BRIDGE_APPROVAL_TIMEOUT` (default 1800 s), `BRIDGE_MAX_BUDGET_USD`,
 `BRIDGE_REPO` (working dir for sessions). `BRIDGE_ALLOW_SELF=1` is **smoke-test only** — it
 lets the bot's own posts drive sessions.
@@ -146,11 +146,16 @@ lets the bot's own posts drive sessions.
 
 - Every result post ends with **`[model:<id>]`** — the model that *actually* ran the turn
   (from its usage report), so behavior can be tracked per model.
+- **The bridge default is `opus`** and is always passed explicitly (operator, 2026-08-28).
+  It used to pass no `--model` at all, which let every unpinned thread inherit the account's
+  default — that silently became the top-tier `claude-fable-5[1m]`, the most expensive model,
+  on 30 of 41 threads. Move the whole bridge with `BRIDGE_MODEL`, never by leaving it unset.
 - **`model: <alias-or-id>`** at the start of any message (colon required) sets the model for
   that thread's turns from then on — e.g. `model: haiku`, `model: sonnet`, `model: fable`.
   Persisted per thread; wins over `BRIDGE_MODEL`; a directive-only message just switches it
-  (🎛️ ack, no turn). Precedence: thread `model:` > `BRIDGE_MODEL` env > CLI default
-  (`~/.claude/settings.json` → currently `claude-fable-5[1m]`).
+  (🎛️ ack, no turn). Precedence: thread `model:` > `BRIDGE_MODEL` env > `opus`.
+- **`model: default`** (or `model: reset`) drops a thread's pin and returns it to the bridge
+  default. It is not a CLI alias, so it is never forwarded as `--model default`.
 - Combine with handoff: put `model: …` on the first line, `handoff`/`fork` after it.
 
 ### Session handoff (desktop → Mattermost)

@@ -19,15 +19,19 @@ state/restart.log. Stdlib only, like the bridge itself.
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
 import time
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-STATE_DIR = os.path.join(_HERE, "state")
+# Same resolution as bridge.py, so pointing this watcher at the other persona
+# (BRIDGE_STATE_DIR + BRIDGE_TASK_NAME + BRIDGE_CHANNEL_ID) reads ITS log and beacon, not this one's.
+STATE_DIR = os.environ.get("BRIDGE_STATE_DIR") or os.path.join(_HERE, "state")
 RESTART_LOG = os.path.join(STATE_DIR, "restart.log")
 BRIDGE_LOG = os.path.join(STATE_DIR, "bridge.log")
+HEALTH_FILE = os.path.join(STATE_DIR, "health.json")
 BRIDGE_TASK = os.environ.get("BRIDGE_TASK_NAME", "claude-sessions-bridge")
 WATCHER_TASK = os.environ.get("BRIDGE_WATCHER_TASK_NAME", "claude-bridge-restart-once")
 CHANNEL_ID = os.environ.get("BRIDGE_CHANNEL_ID", "6z9khgkdd7df9q454be6fimw1h")  # #claude-sessions
@@ -56,11 +60,26 @@ def pid_alive(pid: int) -> bool:
 
 
 def kill_bridge_processes() -> str:
-    """Kill any pythonw/python still running this bridge's bridge.py (task stop can leave the
-    venv-launcher/interpreter pair behind — the README's 'kill pythonw if needed')."""
-    ps = ("Get-CimInstance Win32_Process -Filter \"Name='pythonw.exe' or Name='python.exe'\" | "
-          "Where-Object { $_.CommandLine -match 'claude-sessions-bridge.bridge\\.py' } | "
-          "ForEach-Object { Stop-Process -Id $_.ProcessId -Force; \"killed $($_.ProcessId)\" }")
+    """Kill any pythonw/python still running THIS persona's bridge (task stop can leave the
+    venv-launcher/interpreter pair behind — the README's 'kill pythonw if needed').
+
+    Target the pid from THIS state dir's beacon, never a command-line match: the @bot-sysadmin
+    persona runs the SAME `claude-sessions-bridge/bridge.py` with a different env, so matching
+    the command line kills it too. That is exactly what happened on 2026-08-28 — a restart of
+    #claude-sessions took the sysadmin bridge (lock 48292) down with it and left it down,
+    because only the claude-sessions task gets started again below.
+    """
+    try:
+        with open(HEALTH_FILE, "r", encoding="utf-8") as fh:
+            pid = int(json.load(fh).get("pid") or 0)
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return "no readable beacon — killed nothing (a stray pair is safer than the wrong persona)"
+    if not pid:
+        return "beacon carries no pid — killed nothing"
+    # The venv launcher shim and its interpreter die as a pair, so the beacon's pid is enough.
+    ps = (f"$p = Get-CimInstance Win32_Process -Filter \"ProcessId={pid}\" -ErrorAction "
+          "SilentlyContinue; if ($p -and $p.CommandLine -match 'bridge\\.py') "
+          f"{{ Stop-Process -Id {pid} -Force; \"killed {pid}\" }}")
     r = run(["powershell", "-NoProfile", "-Command", ps])
     return (r.stdout or "").strip() or "none lingering"
 
@@ -125,9 +144,11 @@ def main() -> None:
     log(f"verify: fresh 'bridge up' line = {ok}")
 
     if ok:
-        post_to_channel("🔁 **Bridge restarted** — follow/auto-wake support is now live "
-                        "(`follow_thread`/`unfollow`/`list_follows` session tools, `follows` / "
-                        "`unfollow <id>` operator commands). Post `follows` to check the registry.")
+        # The reason travels in BRIDGE_RESTART_NOTE — a hard-coded blurb here describes whatever
+        # change prompted the FIRST restart and misreports every one after it.
+        note = os.environ.get("BRIDGE_RESTART_NOTE", "").strip()
+        post_to_channel("🔁 **Bridge restarted** — running the current `bridge.py`."
+                        + (f" {note}" if note else ""))
     else:
         post_to_channel(f"⚠️ **Bridge restart attempted but not verified** — no fresh startup "
                         f"line in `state/bridge.log` within 3 min. Check `state/restart.log`, "
