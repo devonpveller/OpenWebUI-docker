@@ -274,6 +274,11 @@ if ($Claim) {
     Write-Item $item
     Write-Host ("Claimed '{0}' as {1} ({2})." -f $Id, $Role, $By) -ForegroundColor Green
     if ($Role -eq "tester") {
+        # Tell the tester what to test, rather than leaving them to infer it from a
+        # recorded sha. `submitted_sha` is a RECORD of an attempt, not an instruction -
+        # reading it as one is how a tester ends up re-testing an already-failed commit.
+        $tip = (Invoke-GitCapture @("rev-parse", "--short", $item.branch) | Select-Object -First 1)
+        Write-Host ("  Test {0} at its CURRENT tip: {1} (attempt {2})" -f $item.branch, $tip, $item.attempt)
         Write-Host ("  Execute the plan: {0}" -f $item.test_plan)
         Write-Host "  Touching a plane's RUNNING services? Hold its lease first (lease.ps1)."
     } else {
@@ -299,7 +304,20 @@ if ($Pass -or $Fail) {
     if (-not $Id -or -not $By) { Die "-Pass/-Fail need -Id and -By" }
     $item = Read-Item $Id
     Assert-Claim $item "tester" $By
-    if ($Pass -and -not $Evidence) { Die "-Pass needs -Evidence (what you ran and what it produced)" }
+    if (-not $Evidence) {
+        # Required on BOTH verdicts. It used to be pass-only, so two testers had to cram
+        # paragraphs of findings into -Reason and the recorded evidence came out empty -
+        # on the FAIL path, which is exactly when the next person needs it most.
+        Die "-Pass and -Fail both need -Evidence (what you ran and what it produced). A verdict without evidence is an opinion."
+    }
+    # Long evidence does not fit a PS5.1 argument. Accept a FILE and copy it beside the
+    # item, the same way the test plan is stored.
+    $evidenceText = $Evidence
+    if (Test-Path $Evidence) {
+        $evDest = Join-Path $QueueDir ("{0}.attempt{1}.evidence.md" -f $Id, $item.attempt)
+        Copy-Item -Path $Evidence -Destination $evDest -Force
+        $evidenceText = $evDest
+    }
     if ($Fail -and -not $Reason) {
         Die ("-Fail needs -Reason: name the CASE that failed and what it revealed. The " +
              "developer fixes the finding, not the verdict.")
@@ -307,14 +325,17 @@ if ($Pass -or $Fail) {
     $headSha = (Invoke-GitCapture @("rev-parse", $item.branch) | Select-Object -First 1)
     $item.results += [ordered]@{
         at = Now; by = $By; verdict = $(if ($Pass) { "pass" } else { "fail" })
-        sha = $headSha.Trim(); evidence = $Evidence; reason = $Reason
+        sha = $headSha.Trim(); evidence = $evidenceText; reason = $Reason
         # The plan was written by the DEVELOPER. A tester who only reports pass/fail is
         # grading someone else's exam without reading the syllabus - say whether the plan
         # actually covered the change.
         plan_adequate = [bool]$PlanAdequate
     }
-    if ($Pass -and -not $PlanAdequate) {
-        Write-Host "  NOTE: you did not mark the plan adequate - the reviewer will see that and may send it back." -ForegroundColor Yellow
+    if (-not $PlanAdequate) {
+        # Warned on BOTH paths. It was pass-only, which meant the judgement was easiest to
+        # omit on the path where a plan just demonstrably failed to catch something.
+        Write-Host "  NOTE: you did not mark the plan adequate. Say what the plan should have covered -" -ForegroundColor Yellow
+        Write-Host "        a plan that missed the finding is itself a finding." -ForegroundColor Yellow
     }
     Drop-Claim $Id "tester"
     if ($Pass) {
@@ -328,6 +349,9 @@ if ($Pass -or $Fail) {
         Write-Host "  It is NOT queued for review yet - the operator releases it (-Approve)." -ForegroundColor Yellow
     } else {
         $item.state = "test-failed"
+        # Stamp the sha on failure too. Without it a resubmit loses which commit the
+        # finding was against, and `submitted_sha` gets overwritten by the next attempt.
+        $item.tested_at_sha = $headSha.Trim()
         Add-History $item "tests FAILED (attempt $($item.attempt)): $Reason" $By
         Write-Host ("'{0}' FAILED on attempt {1} - back to {2}, who fixes in the same worktree and runs -Resubmit." -f $Id, $item.attempt, $item.developer) -ForegroundColor Yellow
     }
@@ -379,9 +403,17 @@ if ($Resubmit) {
     $item.attempt = [int]$item.attempt + 1
     $item.state = "ready-to-test"
     $item.tested_at_sha = ""
+    # RE-READ THE BRANCH. This used to keep attempt 1's already-failed commit as
+    # `submitted_sha`, so a tester who checked it out would test the very commit that
+    # failed and re-report the identical finding - and the reviewer's staleness comparison
+    # would be against a sha that never described the fix. Found by a developer agent on
+    # its own resubmit, which is the first moment the bug is visible.
+    $newSha = (Invoke-GitCapture @("rev-parse", $item.branch) | Select-Object -First 1)
+    if ($LASTEXITCODE -ne 0 -or -not $newSha) { Die "branch '$($item.branch)' not found - cannot re-submit" }
+    $item.submitted_sha = $newSha.Trim()
     Add-History $item "re-submitted for testing (attempt $($item.attempt))" $By
     Write-Item $item
-    Write-Host ("'{0}' re-submitted - attempt {1}, awaiting a tester." -f $Id, $item.attempt) -ForegroundColor Green
+    Write-Host ("'{0}' re-submitted - attempt {1} at {2}, awaiting a tester." -f $Id, $item.attempt, $item.submitted_sha.Substring(0, 8)) -ForegroundColor Green
     exit 0
 }
 

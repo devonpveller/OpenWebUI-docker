@@ -70,7 +70,10 @@ Rules while you work:
      names the leases you held; under-declaring is visible in the post-mortem.
   3. Exit 3 = held: wait, poll ≤1/min. Long build? `-Refresh` keeps it alive.
   4. **Editing files that belong to a plane needs no plane lease** - only touching the
-     RUNNING plane does. A docs, config or source change you do not deploy is the
+     RUNNING plane does. Read-only inspection of a running plane (`curl` a health endpoint,
+     `docker ps`/`port`/`inspect`, a read-only `docker exec`) is not "touching" it either -
+     nothing changes, so nothing needs serialising. Anything that mutates, restarts,
+     rebuilds or retags does. A docs, config or source change you do not deploy is the
      read-only case: queue it for test and review, and take no lease at all.
   5. Leave the plane the way you found it *before releasing* — a lease serializes
      interference, it does not clean up after you. Test data stays test-prefixed
@@ -129,10 +132,26 @@ involved change that finds nothing on the first pass is a reason to doubt the pl
 .\scripts\worktree\queue.ps1 -Fail -Id <id> -By <their-id> -Reason <what broke>
 ```
 
+`-Evidence` is required on **both** verdicts, and may be a path to a file - long evidence
+does not fit a PS5.1 argument, and it is copied beside the item. A failure is exactly when
+the next person needs your evidence most.
+
 `-PlanAdequate` is a judgement, not a formality: the plan was written by the developer, so
 a tester who only reports pass/fail is grading an exam without reading the syllabus. If the
-plan missed cases, add them, and say the plan was inadequate. A failure returns the item to
-the developer, who fixes it **in the same worktree** and re-submits.
+plan missed cases, run the ones you think are missing, say so, and withhold the flag - a
+plan that missed the finding is itself a finding. A failure returns the item to the
+developer, who fixes it **in the same worktree** and `-Resubmit`s.
+
+**Executing the plan is the floor, not the ceiling.** Both testers in the first real run
+passed every case as written and then failed the item on something the plan never asked
+about. If the change makes claims the plan does not check, check them.
+
+**Two things a plan must not do**, both found in real plans on the first run: send you to
+`cat` a `docker compose config` render while forbidding you to print `.env` values (the
+render interpolates secrets in plaintext - grep sections instead), and check line endings on
+a working-tree file where `core.autocrlf=true` makes every text file CRLF regardless of
+`.gitattributes` (read the blob with `git show <branch>:<path>`). If a case would make you
+break the plan's own rules, that is a finding about the plan.
 
 **Step 4 - a REVIEWER (not the developer) claims it, rebases, and re-checks staleness.**
 
@@ -175,6 +194,11 @@ copy and a bridge turn could be running in it.
 the operator's branch policy made mechanical, and what makes a later bisect readable. If the
 merge bumps the `OB1` gitlink, verify the SHA is reachable on the OB1 remote **first**; an
 unreachable gitlink breaks every fresh `--recurse-submodules` clone.
+
+**A note on commit and merge messages.** PS5.1 mangles multi-line strings and embedded
+quotes for native commands - a developer agent had `git commit -m` split its message
+into pathspecs. Write the message to a file and use `-F <file>`, for `git commit` as
+well as `git merge`.
 
 **Step 6 - the developer retires the worktree.**
 
