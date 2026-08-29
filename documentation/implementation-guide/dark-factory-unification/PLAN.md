@@ -89,6 +89,80 @@ The anchor mechanism applies to the design itself (operator, 2026-08-29):
 
 ---
 
+## C. Autonomous execution — the standing decision policy (operator grant, 2026-08-29)
+
+Added while the plan is IN PRODUCTION, because the implementing session kept
+stopping for questions this plan should already answer. The operator is away
+during implementation; a paused factory is the failure mode this section
+exists to prevent. **A wrong reversible decision costs a revert; a stalled
+question costs hours of idle line.** Binding for any session implementing
+this plan.
+
+### C.1 The plan is the confirmed anchor for U0–U7
+
+The operator confirmed this plan as a whole. Each U-phase's *What* +
+*Validated by* row IS its confirmed anchor — do not stop to re-propose it.
+`-AmendAnchor` semantics still apply when reality contradicts the plan: amend
+on the record, log it (C.4), continue. Do not wait for a human acknowledgment
+of the amendment unless it crosses a C.2 class-4 line.
+
+### C.2 The decision ladder — every question routes here before it routes to a human
+
+| Class | What | Do |
+|---|---|---|
+| **1 — routine** | Naming, file layout, internal API shapes, test structure, config key names, order of work inside a phase, which house pattern to follow | Decide silently, consistent with §A. Not even logged unless surprising. |
+| **2 — judgment** | Plan ambiguities, discovered gaps, small scope adjustments, choosing between two defensible designs | Decide and CONTINUE. Pick the option that is (a) consistent with the pinned anchors (§0/§B), (b) most reversible, (c) closest to an existing house pattern — in that priority order. Record in DECISIONS.md (C.4) with the assumption stated. |
+| **3 — preference** | Choices with no technical winner the operator might enjoy weighing in on; cosmetic/product-taste calls | Take the default, record it as a QUESTION in DECISIONS.md, and keep moving. Batched for the operator's return — never a blocker. |
+| **4 — HARD STOP** | The only legitimate reasons to halt and wait | See the list below. Halt, post to the Mattermost thread, park that item, **work a different item meanwhile** if any is unblocked. |
+
+**Class 4, exhaustively** (if it is not on this list, it is not a reason to stop):
+- Merging or promoting anything to `main`.
+- Deploying to production runtime: restarting Scheduled Tasks, recreating or
+  stopping live containers, retagging `:local` images.
+- Pushing to any remote (the OB1-remote-first step included) — commits to
+  local work branches are expected and unrestricted.
+- Anything touching the personal data plane, credentials, or secret values.
+- Destroying data or any action with no clean revert.
+- Spending real money or calling external services beyond the session itself.
+
+### C.3 Formerly-open decisions — now DECIDED with standing defaults
+
+§4's open items were themselves stop-and-ask generators. Resolved (operator
+pre-authorized the recommended defaults, 2026-08-29):
+
+1. Reviewer verdict rename (`-FitsAnchor` → `-FitsCodebase`, intent
+   challenges route to the release gate): **fold into U2.**
+2. Dark-mode default: **per-anchor**, `attended` unless the anchor opts in.
+3. Unified config: **shared `org.config.json`**, multiple readers, the
+   cross-language test — the pattern already proven in the harness.
+4. Cadence scheduler owner: **supercronic** (OB1's crontab — the stack's
+   single source of cron truth).
+5. Issue intake: already superseded — the daily sweep takes everything;
+   selection happens at the weekly verdict thread.
+
+If implementation shows a default wrong, that is a class-2 decision: pick the
+better option, log it with the evidence, continue.
+
+### C.4 DECISIONS.md — judgment compounds instead of evaporating
+
+Append-only log beside this plan
+(`documentation/implementation-guide/dark-factory-unification/DECISIONS.md`).
+One entry per class-2/3 call: timestamp, phase, the decision, the class, the
+rule or anchor cited, and **how to revert it**. Before asking anything, check
+the log for precedent — the same question is never asked twice. The operator
+reviews it on return; a wrong call gets corrected then, which is the cheap
+path by design.
+
+### C.5 Report, don't ask
+
+Progress, amendments and class-4 halts go to the operator's Mattermost thread
+as **statements with a default and a deadline-free path forward** — "done X,
+assumed Y (logged), next Z" — never as questions that gate the next step.
+The operator interjects if they disagree; silence is not consent for class-4
+actions (those still wait), but silence never stalls classes 1–3.
+
+---
+
 ## 0. The audit — what each system assumes, and what the evidence now says
 
 Each row was checked against the named source and, where possible, against what
@@ -351,7 +425,10 @@ stays; the concepts merge.
 - **The memory plane keeps:** its entire plan, unmodified — it was already
   designed as the substrate this unification needs.
 
-## 4. Open decisions for the operator
+## 4. Open decisions for the operator — ALL RESOLVED, see §C.3
+
+Kept for the record of what was open and when; the standing defaults in §C.3
+govern. Original items:
 
 1. **Reviewer verdict rename** (`-FitsAnchor` → `-FitsCodebase` + routing of
    intent challenges to the release gate): fold into U2, or ship earlier as a
@@ -401,7 +478,9 @@ models to `claude-opus-5` in `scripts/issue-ops/issue_ops.py` DEFAULTS.)
    2026-08-25 — re-verify anchors older than your session before relying.
 5. `scripts/agent-harness/MODULE.md` + `harness.config.json` — the module
    boundary and config pattern you will extend.
-6. This plan: §A/§B are binding; §0's audit verdicts are pinned anchors.
+6. This plan: §A/§B/§C are binding; §0's audit verdicts are pinned anchors.
+   **§C is the answer to every "should I ask the operator?" moment — route the
+   question through its ladder before routing it to a human.**
 
 ### 5.2 The state you inherit (as of 2026-08-29)
 
