@@ -78,9 +78,10 @@ One host port is published, and the omissions are deliberate:
 
 Every command needs the root `.env`: the plane interpolates from it, and
 `MULLVAD_WG_PRIVATE_KEY` carries a `${...:?}` guard that aborts the `up` if it
-is missing. `stack.ps1` sets its own working directory and always passes
-`--env-file .env`, so it can be run from anywhere; **by hand, run from the repo
-root** so the relative `--env-file .env` resolves.
+is missing. `stack.ps1` sets its own working directory and adds
+`--env-file .env` for every plane project, this one included, so it can be run
+from anywhere; **by hand, run from the repo root** so the relative
+`--env-file .env` resolves.
 
 ```powershell
 .\scripts\stack\stack.ps1 up search        # this plane only - see the anchor note above

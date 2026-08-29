@@ -5,8 +5,13 @@ belong in [`search/README.md`](../../search/README.md), which is an operator
 document, not a defect log. Recorded here so they are neither pasted into the
 README nor lost.
 
-Each entry says what was checked and when. Nothing here has been fixed - fixing
-any of it is a separate item.
+Each entry says what was checked and when. **Where an entry says what a script
+or config does, it was checked against that code path, not against the comment
+above it** - a claim in this file is held to the same standard as one in the
+README, because the next item reads this file and acts on it. Where something
+is an observation rather than a reading of the source, the entry says so.
+
+Nothing here has been fixed - fixing any of it is a separate item.
 
 ## 1. `search-gateway/README.md` is partly stale
 
@@ -44,12 +49,21 @@ Checked 2026-08-28.
 `search/docker-compose.yml` guards the Mullvad key
 (`${MULLVAD_WG_PRIVATE_KEY:?...}`) but sets
 `SEARXNG_SECRET=${SEARXNG_SECRET_KEY}` unguarded. A missing or empty
-`SEARXNG_SECRET_KEY` therefore starts SearXNG with an *empty* session secret
-instead of failing the `up`. `.env.example` ships a placeholder, so a fresh
-checkout that never edits it starts in that state silently.
+`SEARXNG_SECRET_KEY` therefore does **not** fail the `up`: compose interpolates
+it to an empty string and starts the container with `SEARXNG_SECRET=`.
+`.env.example` ships a placeholder value, so a fresh checkout that never edits
+it starts in that state silently.
+
+Scope of what was checked (the compose file, `.env.example` and
+`search-gateway/searxng/settings.yml`, 2026-08-28): the absence of the guard,
+and that `settings.yml` carries
+`secret_key: "placeholder-overridden-by-SEARXNG_SECRET-env"`. What SearXNG
+itself does with an empty `SEARXNG_SECRET` - fall back to that placeholder, or
+run with no secret at all - was **not** verified: that behaviour lives inside
+the image, not in this tree. Verify it before acting on this entry.
 
 Symptom if it bites: SearXNG behaving oddly right after an `.env` edit, with no
-compose error. Checked 2026-08-28.
+compose error.
 
 ## 4. `SEARCH_NET_SUBNET` / `FIREWALL_OUTBOUND_SUBNETS` does not govern in-plane traffic
 
@@ -60,10 +74,18 @@ whatever this variable says. What the variable actually does is add a route plus
 a firewall allowance for subnets gluetun is **not** attached to - a client
 elsewhere on the LAN or on another docker network.
 
-Observed 2026-08-28 during the previous pass over this README: the live
-`search_search-net` was `192.168.192.0/20` while `FIREWALL_OUTBOUND_SUBNETS`
-carried the `172.16.0.0/12` default, and the plane served queries normally. So
-the shipped default is effectively inert for this plane.
+Provenance, so the next reader knows what this rests on:
+
+- **Read from the compose file (2026-08-28):** `vpn` sets
+  `FIREWALL_OUTBOUND_SUBNETS=${SEARCH_NET_SUBNET:-172.16.0.0/12}`, and `vpn`,
+  `searxng` and `gateway` all sit on `search-net`.
+- **Observed live on 2026-08-28**, during the previous pass over this README and
+  not re-run since: `search_search-net` was `192.168.192.0/20` while
+  `FIREWALL_OUTBOUND_SUBNETS` carried the `172.16.0.0/12` default, and the plane
+  served queries normally - so the shipped default is inert for this plane.
+- **Not verified from source:** gluetun's auto-detection is a third-party binary,
+  not code in this tree. The `[routing] local ipnet found` line is quoted from
+  its startup log, not read from its source.
 
 Consequence worth remembering: it is a tempting variable to chase during an
 incident and it is almost never the cause. Change it only when adding an
@@ -98,7 +120,7 @@ application's own keys (`GATEWAY_API_KEY`, `PROVIDER_PRIORITY`, the `CIRCUIT_*`
 values, `LOG_QUERIES`) will then have to be named explicitly in the compose file
 rather than arriving through `env_file`.
 
-## 7. Two places that describe the anchor precondition too broadly
+## 7. Where the anchor precondition is described loosely
 
 Found 2026-08-28 while testing the README rewrite - an earlier draft of
 `search/README.md` said "any `stack.ps1 up`" creates `ai-stack_default`, which
@@ -107,16 +129,32 @@ is false and would have sent a first-time operator into
 `Resolve-Planes` in `scripts/stack/stack.ps1` returns only the named plane's
 registry row and the `up` branch runs that one project; only `up` with no plane
 (the whole ordered registry, anchor first) or `up anchor` creates the networks.
-The README now says so. Two other files still carry the loose version:
+The README now says so. Two other places describe the same precondition, one
+loosely and one accurately but easily misread:
 
 - `docker-compose.yml` (the root anchor), header comment: "run it once before
   any plane on a cold host (scripts/stack/stack.ps1 does this for you)". True
   only for `stack.ps1 up` with no plane, or `up anchor`.
-- `scripts/recovery/emergency-recovery.ps1` never brings the anchor project up
-  at all - `Start-PlaneStack` documents the requirement ("Requires the anchor
-  networks (any root-project `up` creates them)") and relies on the networks
-  having survived. That is fine after a crash, where they usually have; it is
-  not a cold-host path.
+- `scripts/recovery/emergency-recovery.ps1` handles it on its two full paths and
+  deliberately not on its short one. `Invoke-EmergencyRecovery` (the `recover`
+  action, L686-689) and `Invoke-NuclearRecovery` (`nuclear`, L871-874) each run a
+  bare `docker compose up -d`, each with a comment saying that is what creates
+  the shared networks - and the script pins cwd to the repo root at L10, so that
+  bare command *is* the anchor project. `Invoke-MinimalRecovery` (L477) does not:
+  it only issues `docker compose ... restart` against containers that already
+  exist. Both full paths short-circuit into it when `Test-BasicConnectivity`
+  passes and **return early** if it succeeds, so a run that takes the minimal
+  path never touches the anchor. That is sound by construction - minimal recovery
+  only runs when connectivity already works, which means the networks are already
+  there - but it does mean "recovery recreates the networks" describes the full
+  paths, not every run. `Start-PlaneStack` creates nothing either; its comment
+  states the requirement rather than satisfying it.
+
+  This bullet is a correction. Attempt 2 of this item asserted the opposite - that
+  recovery never brings the anchor up - written from the `Start-PlaneStack`
+  comment at L253 without opening the call sites. That is the same error shape
+  attempt 1 was failed for, and it is why the provenance rule at the top of this
+  file now exists.
 
 ## 8. The stack-map's cold-start list draws the search plane as a chain
 
