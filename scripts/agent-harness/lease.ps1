@@ -44,12 +44,22 @@ param(
     [string]$Owner = "",
     [string]$Worktree = "",
     [string]$Thread = "",
-    [int]$TtlMin = 30,
+    [int]$TtlMin = 0,
     [switch]$AdHoc
 )
 
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "common.ps1")
+
+# The module OFF switch. "Off" must be inert and say so, not fail obscurely three calls
+# deeper - see harness.config.json / MODULE.md.
+# See the note in queue.ps1: param() binds before config is available, so 0 means "unset".
+if (-not $PSBoundParameters.ContainsKey("TtlMin")) {
+    $TtlMin = [int](Get-HarnessSetting "leases.default_ttl_minutes" 30)
+}
+
+$offReason = Get-HarnessDisabledReason
+if ($offReason) { Write-Host "REFUSED: $offReason" -ForegroundColor Yellow; exit 2 }
 # The lock namespace must be ONE per repository, shared by the main checkout and every
 # worktree - see common.ps1. Anchoring it on $PSScriptRoot (as this did) meant a copy of
 # this toolkit inside a worktree got its OWN gitignored lock dir, so two agents could each
@@ -57,7 +67,7 @@ $ErrorActionPreference = "Stop"
 $LockDir = if ($env:AI_STACK_LEASE_DIR) { $env:AI_STACK_LEASE_DIR }
            else { Join-Path (Get-SharedStateDir) "locks" }
 $NamesFile = if ($env:AI_STACK_LEASE_NAMES_FILE) { $env:AI_STACK_LEASE_NAMES_FILE }
-             else { Join-Path $PSScriptRoot "lease-names.conf" }
+             else { Join-Path $PSScriptRoot (Get-HarnessSetting "leases.names_file" "lease-names.conf") }
 
 function Now() { return [int64][System.DateTimeOffset]::UtcNow.ToUnixTimeSeconds() }
 

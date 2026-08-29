@@ -1,8 +1,14 @@
-# scripts/worktree — per-agent isolation for parallel Claude sessions
+# scripts/agent-harness — per-agent isolation for parallel Claude sessions
 
 Tooling for the worktree-per-session policy (CLAUDE.md, 2026-08-23) that until
 2026-08-28 had no mechanism. Two Claude sessions sharing one checkout is how one
 session's `git add` sweep captured another's staged OB1 gitlink.
+
+Renamed from `scripts/worktree/` on 2026-08-28: the directory holds the queue, the
+roles, the leases, the configuration and the verification drill, and "worktree" named
+one of them. **The module boundary, its configuration and its off switch are in
+[MODULE.md](MODULE.md)** — read that first if you are lifting this into another
+distribution, turning it off, or changing which models the roles run on.
 
 The protocol these scripts serve:
 [documentation/implementation-guide/multi-agent-concurrency/MERGE-PROTOCOL.md](../../documentation/implementation-guide/multi-agent-concurrency/MERGE-PROTOCOL.md).
@@ -14,9 +20,11 @@ The wider design (test containers, bridge integration):
 | `new-worktree.ps1` | Provision `.claude/worktrees/wt-<id>` on `work/<id>` from the work line, init the OB1 submodule, copy runtime env files, CRLF-check, register it |
 | `sync-worktree-env.ps1` | Re-copy `.env` / `.env.test` / `OB1/docker/.env` into worktrees when the main checkout's copy is newer (`-WhatIfOnly` reports drift) |
 | `remove-worktree.ps1` | Retire a worktree, **refusing** while it holds uncommitted or unmerged work (`-Force` to discard deliberately); `-PruneRegistry` drops rows whose path is gone |
+| `config.ps1` / `config.py` | The configuration, read the same way from PowerShell and from the bridge: `harness.config.json` < `harness.local.json` < environment. Holds the role/model profiles, the TTLs, the paths, and the on/off switches. `test_harness_config.py` asks both readers the same questions so they cannot drift |
+| `anchor.ps1` | The SHAPE of an anchor and whether one is usable. Owns no state; `queue.ps1` asks it whether the anchor it was handed is worth gating on |
 | `common.ps1` | Dot-sourced by the rest: resolves the SHARED coordination state dir, the work line, and stderr-safe git capture. Not run directly |
-| `verify-merge-protocol.ps1` | Executable proof of MERGE-PROTOCOL's two-agent path: 21 checks against a scratch line (never `development`), self-cleaning. Run it after changing any script here or the protocol |
-| `queue.ps1` | The work pipeline: `-Submit` / `-Claim -Role tester|reviewer` / `-Pass` / `-Fail` / `-Requeue` / `-Merged` / `-Reject` / `-List`. Enforces separation of duties (exit 4) and the stale-pass rule |
+| `verify-merge-protocol.ps1` | Executable proof of MERGE-PROTOCOL's two-agent path: 45 checks against a scratch line (never `development`), self-cleaning. Run it after changing any script here or the protocol |
+| `queue.ps1` | The work pipeline: `-Propose` / `-ConfirmAnchor` / `-Submit` / `-Claim -Role tester|reviewer` / `-Pass` / `-Fail` / `-Approve` / `-Requeue` / `-Merged` / `-Reject` / `-List`. Enforces separation of duties (exit 4), the anchor gate (exit 5) and the stale-pass rule |
 | `lease.ps1` | Named exclusive leases for the SHARED RUNTIME only (planes): `-Acquire` / `-Refresh` / `-Release` / `-Status` / `-Takeover` (exit 3 = held, wait). Names validate against `lease-names.conf` (`-AdHoc` to escape); multi-name requests are sorted + all-or-nothing, so agents cannot deadlock |
 
 `lease.ps1` is deliberately **generic mechanism** with zero repo coupling (its only
@@ -76,6 +84,28 @@ a per-worktree `info/exclude` is **not** honored — verified).
 
 ## Gotchas paid for in this code
 
+- **A TRUNCATED SEARCH IS NOT A SEARCH.** An agent put a script out of scope on the
+  grounds that it had grepped it and found nothing. The grep was piped through
+  `head -20`, twenty comment lines consumed the budget, and "nothing shown" was read as
+  "nothing there". The script had sixteen instances of exactly what it was looking for.
+  If a search decides a scope boundary, run it unbounded and count the results - and if
+  you must truncate, say in your finding that you did.
+- **Never `--no-verify`.** The same agent reflexively bypassed the pre-commit hooks on its
+  first commit, then reset and re-committed with them running. The reflex is the thing to
+  watch for: the hooks are the repo's only automatic guard against secrets, line endings,
+  gateway-routing bypasses and env_file scope, and an agent that skips them is removing
+  the check that exists precisely because humans and agents forget.
+
+- **An agent's PATH is not the operator's PATH.** A tester concluded that a README
+  command was unrunnable because `Get-Command grep` returned nothing in its process; I
+  contradicted it because `grep` resolves in mine. Both measurements were correct and both
+  conclusions were over-general. `grep.exe` exists at
+  `C:\Program Files\Git\usr\bin\grep.exe`, and whether it resolves depends entirely on the
+  PATH the shell was launched with - the harness process here gets only
+  `C:\Program Files\Git\cmd` (git.exe and friends, no Unix tools). **"The tool is not
+  available" is a fact about your process, never about the machine.** Say which shell you
+  measured in, and check the one the reader will actually use.
+
 - **Never `2>&1` a native command in PS5.1.** It wraps every stderr line in an
   ErrorRecord, so with `$ErrorActionPreference='Stop'` git's ordinary progress
   chatter ("Preparing worktree...") becomes a terminating error. This script died on
@@ -94,13 +124,17 @@ a per-worktree `info/exclude` is **not** honored — verified).
 ## Typical session
 
 ```powershell
-.\scripts\worktree\new-worktree.ps1 -Id wiki-perf -OwnerKind extension -OwnerRef <session>
+# agree what the work is FOR before building toward it - the operator confirms, and
+# -Submit refuses (exit 5) until they have:
+.\scripts\agent-harness\queue.ps1 -Propose -Id wiki-perf -Anchor <anchor.json> -Developer wiki-perf
+#   ... operator: queue.ps1 -ConfirmAnchor -Id wiki-perf -By <them> ...
+.\scripts\agent-harness\new-worktree.ps1 -Id wiki-perf -OwnerKind extension -OwnerRef <session>
 # EnterWorktree path: <printed path>   ... do the work ...
-.\scripts\worktree\lease.ps1 -Acquire -Name open-brain -Owner wiki-perf   # mutating test
+.\scripts\agent-harness\lease.ps1 -Acquire -Name open-brain -Owner wiki-perf   # mutating test
 #   ... test against the plane, clean up your droppings ...
-.\scripts\worktree\lease.ps1 -Release -Name open-brain -Owner wiki-perf
+.\scripts\agent-harness\lease.ps1 -Release -Name open-brain -Owner wiki-perf
 # hand it to the pipeline - you do not test or merge your own work:
-.\scripts\worktree\queue.ps1 -Submit -Id wiki-perf -Branch work/wiki-perf -Developer wiki-perf -TestPlan <path>
+.\scripts\agent-harness\queue.ps1 -Submit -Id wiki-perf -Branch work/wiki-perf -Developer wiki-perf -TestPlan <path>
 #   a tester claims + executes the plan; a reviewer rebases, merges --no-ff, and records it
-.\scripts\worktree\remove-worktree.ps1 -Id wiki-perf
+.\scripts\agent-harness\remove-worktree.ps1 -Id wiki-perf
 ```

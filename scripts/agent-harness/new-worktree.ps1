@@ -39,9 +39,17 @@ param(
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "common.ps1")
 
+# The module OFF switch. "Off" must be inert and say so, not fail obscurely three calls
+# deeper - see harness.config.json / MODULE.md.
+$offReason = Get-HarnessDisabledReason
+if ($offReason) { Write-Host "REFUSED: $offReason" -ForegroundColor Yellow; exit 2 }
+
 # Runtime files a worktree needs but git will never give it. Copies, deliberately:
 # Windows symlinks need privilege, and compose resolves --env-file relative to cwd.
-$EnvFiles = @(".env", ".env.test", "OB1/docker/.env")
+# The LIST is configuration (worktree.env_files) - which runtime files a worktree needs is
+# a property of the distribution, not of this script. Narrowing it is also the supported
+# way to keep a plane's secrets out of an agent's tree.
+$EnvFiles = @(Get-HarnessSetting "worktree.env_files" @(".env"))
 
 function Fail([string]$Message) {
     Write-Host "ERROR: $Message" -ForegroundColor Red
@@ -69,9 +77,9 @@ if ($Id -notmatch '^[a-z0-9][a-z0-9-]{0,23}$') {
 $commonDir = Get-GitCommonDir
 if (-not $commonDir) { Fail "not inside a git repository" }
 $MainCheckout = Get-MainCheckout
-$WorktreeRoot = Join-Path $MainCheckout ".claude\worktrees"
-$Path = Join-Path $WorktreeRoot "wt-$Id"
-$Branch = "work/$Id"
+$WorktreeRoot = Join-Path $MainCheckout (Get-HarnessSetting "worktree.root" ".claude/worktrees")
+$Path = Join-Path $WorktreeRoot ((Get-HarnessSetting "worktree.dir_prefix" "wt-") + $Id)
+$Branch = (Get-HarnessSetting "worktree.branch_prefix" "work/") + $Id
 $StateDir = Get-SharedStateDir   # shared across worktrees - see common.ps1
 if (-not $Base) { $Base = Resolve-WorkLine }
 $Registry = Join-Path $StateDir "worktrees.json"
@@ -104,7 +112,7 @@ if ($branchExists -and -not $Reuse) {
     Fail "branch $Branch already exists. Pass -Reuse to attach a new worktree to it, or pick another -Id."
 }
 
-Write-Host "Creating worktree wt-$Id" -ForegroundColor Cyan
+Write-Host "Creating worktree $(Split-Path -Leaf $Path)" -ForegroundColor Cyan
 Write-Host ("  base   : {0} ({1})" -f $baseRef, ((Invoke-Git @("rev-parse", "--short", $baseRef)) | Select-Object -First 1))
 Write-Host ("  branch : {0}{1}" -f $Branch, $(if ($branchExists) { " (existing, reused)" } else { "" }))
 Write-Host ("  path   : {0}" -f $Path)

@@ -19,7 +19,7 @@ remote; deploys to prod containers stay explicit, gated steps.
 ## 0. Pre-build snapshot (verified 2026-08-28, before any of this existed)
 
 *Kept as the evidence the design rested on. For what exists NOW, read the scripts and
-`scripts/worktree/README.md`; several rows below are deliberately obsolete.*
+`scripts/agent-harness/README.md`; several rows below are deliberately obsolete.*
 
 | Fact | Where |
 |---|---|
@@ -73,7 +73,7 @@ convergence later, not now).
 **A1. Ignore the worktree root.** Add `.claude/worktrees/` to `.gitignore` (today a
 harness worktree would show up as an untracked dir in every `git status`).
 
-**A2. One provisioning script,** `scripts/worktree/new-worktree.ps1` (ASCII, PS5.1):
+**A2. One provisioning script,** `scripts/agent-harness/new-worktree.ps1` (ASCII, PS5.1):
 
 ```
 new-worktree.ps1 -Id <short-id> [-Base <work line>]   # base now RESOLVES (see 4.1)
@@ -175,7 +175,7 @@ cheap and stateless; copying it here was paradigm mismatch.
 
 ### 4.1 The lease model (BUILT)
 
-`scripts/worktree/lease.ps1` — one self-contained script, mechanism only:
+`scripts/agent-harness/lease.ps1` — one self-contained script, mechanism only:
 `-Acquire / -Refresh / -Release / -Status / -Takeover`, atomic via `CreateNew`,
 TTL'd (expiry at `age >= ttl`), owner-checked (foreign release refused), exit 3 =
 wait. Policy lives beside it in `lease-names.conf`: one lease per compose plane
@@ -231,7 +231,7 @@ touching a live agent's lease.
 a lease named `merge`. That was a mutex for something that is not a race: a worktree
 already isolates files, and git already refuses two worktrees on one branch - verified.
 What the situation actually requires is **separation of duties**, which is a pipeline:
-`scripts/worktree/queue.ps1` carries each work item through
+`scripts/agent-harness/queue.ps1` carries each work item through
 `ready-to-test -> testing -> ready-review -> reviewing -> merged`, with the developer
 barred (exit 4) from both testing and reviewing their own work. With the developer never
 merging, merge contention stops being a category. Claims are atomic (CreateNew) and TTL'd,
@@ -281,7 +281,7 @@ agents do them (that is this phase). `main` promotion: human. Prod deploys: gate
 allow-list step, post-merge. Pushes: only when asked (git-handling boundary).
 
 **Verify D — RUN 2026-08-28, 21/21 checks pass.** Reproducible:
-`scripts/worktree/verify-merge-protocol.ps1` (idempotent, self-cleaning, runs
+`scripts/agent-harness/verify-merge-protocol.ps1` (idempotent, self-cleaning, runs
 against a scratch line so `development` is never touched — verified unmoved,
 `40f7b4b1` before and after).
 

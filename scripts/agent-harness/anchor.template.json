@@ -1,0 +1,28 @@
+{
+  "_howto": [
+    "Copy this, fill it in, and propose it BEFORE doing any work:",
+    "  queue.ps1 -Propose -Id <id> -Anchor <this file> -Developer <your id>",
+    "The operator confirms it (queue.ps1 -ConfirmAnchor), and only then does work begin.",
+    "Write it in the OPERATOR's terms, not yours. If you had to guess at what they meant,",
+    "the anchor is where you say so - that is the cheapest moment to be corrected."
+  ],
+
+  "goal": "One sentence. The outcome, in the operator's words, not a description of the steps.",
+
+  "artifact": "path/to/the/file.md - and what KIND of thing it is (an operator README, a patch, a test, a report).",
+
+  "audience": "Who reads or runs this, and what they already know. 'An operator who has never brought this plane up' produces a different document than 'a maintainer auditing the compose file'.",
+
+  "acceptance": [
+    "Each entry must be checkable by someone who did not do the work.",
+    "Say what would count as FAILING it, not only what passing looks like.",
+    "This list is what the tester tests. If it is not here, it will not be verified."
+  ],
+
+  "out_of_scope": [
+    "Name the tempting adjacent work this deliberately does not do.",
+    "Findings about problems elsewhere are real, and they still do not belong in the artifact."
+  ],
+
+  "findings_sink": "documentation/notes/<topic>-findings.md - where anything true but out of scope gets written down instead of being pasted into the deliverable or discarded. HELD TO THE SAME STANDARD AS THE ARTIFACT: a claim here about what a script does is verified against that code path, not against its comments. An unverified sink is worse than no sink - it looks like a record, and the next item acts on it."
+}

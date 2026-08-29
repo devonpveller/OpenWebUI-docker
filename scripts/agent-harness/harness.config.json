@@ -1,0 +1,108 @@
+{
+  "_comment": [
+    "The agent harness configuration. ONE file, two readers (config.ps1 for the",
+    "scripts, config.py for the Mattermost bridge), so a value is never defined",
+    "twice in two languages. Precedence, resolved only in the loaders:",
+    "  built-in defaults < this file < harness.local.json (gitignored) < environment",
+    "This file is committed and MUST NOT contain secrets - it holds policy and",
+    "topology only. Machine-specific or experimental overrides go in",
+    "harness.local.json beside it."
+  ],
+  "version": 1,
+
+  "enabled": true,
+
+  "surfaces": {
+    "extension": {
+      "enabled": true,
+      "profile": "all-cloud",
+      "profile_locked": true,
+      "_why_locked": "operator 2026-08-28: the surface the operator drives interactively must never silently degrade to a weaker model."
+    },
+    "mattermost": {
+      "enabled": true,
+      "profile": "all-cloud",
+      "profile_locked": false,
+      "_note": "switchable in a thread with 'profile: <name>', the same shape as the existing 'model:' and 'worktree:' directives."
+    }
+  },
+
+  "default_profile": "all-cloud",
+
+  "runners": {
+    "claude-code": {
+      "kind": "claude-code",
+      "status": "proven",
+      "default_model": "opus",
+      "models": {
+        "opus": "opus",
+        "sonnet": "sonnet",
+        "haiku": "haiku"
+      },
+      "_note": "a Claude Code agent - a subagent in an editor session, or 'claude -p' spawned by the bridge. Model names are CLI aliases, not API ids."
+    },
+    "little-coder": {
+      "kind": "little-coder",
+      "status": "unproven",
+      "endpoint": "http://127.0.0.1:8090",
+      "submit_path": "/tasks",
+      "events_path": "/tasks/{id}/events",
+      "default_model": "local-default",
+      "_note": "the local substrate: little-coder reaches llama-cpp through LiteLLM. Wired and callable, but no work item has completed through it yet - do not read config support as a proven feature."
+    }
+  },
+
+  "profiles": {
+    "all-cloud": {
+      "_desc": "the default everywhere; all three roles on cloud opus",
+      "worker": { "runner": "claude-code", "model": "opus" },
+      "tester": { "runner": "claude-code", "model": "opus" },
+      "reviewer": { "runner": "claude-code", "model": "opus" }
+    },
+    "all-local": {
+      "_desc": "no cloud calls at all; needs the inference plane healthy",
+      "worker": { "runner": "little-coder", "model": "local-default" },
+      "tester": { "runner": "little-coder", "model": "local-default" },
+      "reviewer": { "runner": "little-coder", "model": "local-default" }
+    },
+    "local-work-cloud-review": {
+      "_desc": "cheap production, expensive judgement - the reviewer is the last gate before a merge",
+      "worker": { "runner": "little-coder", "model": "local-default" },
+      "tester": { "runner": "little-coder", "model": "local-default" },
+      "reviewer": { "runner": "claude-code", "model": "opus" }
+    },
+    "cloud-work-local-test": {
+      "_desc": "expensive production, cheap verification - useful when the test plan is mechanical",
+      "worker": { "runner": "claude-code", "model": "opus" },
+      "tester": { "runner": "little-coder", "model": "local-default" },
+      "reviewer": { "runner": "claude-code", "model": "opus" }
+    }
+  },
+
+  "pipeline": {
+    "claim_ttl_minutes": 60,
+    "anchor_required": true,
+    "human_gates": {
+      "anchor": true,
+      "pre_review": true
+    },
+    "_note": "the role -> state -> duty table stays in queue.ps1: it is behavior, not tuning. Turning a gate off here is an operator decision with a real cost, which is why both are listed explicitly rather than assumed."
+  },
+
+  "worktree": {
+    "root": ".claude/worktrees",
+    "dir_prefix": "wt-",
+    "branch_prefix": "work/",
+    "work_line_env": "AI_STACK_WORK_LINE",
+    "work_line_fallback": "development",
+    "state_dir_env": "AI_STACK_WORKTREE_STATE",
+    "state_dir_name": "agent-worktrees",
+    "env_files": [".env", ".env.test", "OB1/docker/.env"],
+    "test_image_tag_prefix": "wt-"
+  },
+
+  "leases": {
+    "names_file": "lease-names.conf",
+    "default_ttl_minutes": 30
+  }
+}

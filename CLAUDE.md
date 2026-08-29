@@ -64,14 +64,18 @@ snapshots + `manifest.csv` (file → OWUI id; skills included).
   **The trigger is your first mutating intent** (stage, commit, branch, gitlink
   bump), not session start — cheap reads stay cheap. At that moment, before
   touching the index:
-  `scripts/worktree/new-worktree.ps1 -Id <short-id>` then `EnterWorktree path:`
+  `scripts/agent-harness/new-worktree.ps1 -Id <short-id>` then `EnterWorktree path:`
   the path it prints. Never bare `git worktree add` (it leaves you with no
   `.env`, an empty `OB1/`, and the wrong base branch) and never bare
   `EnterWorktree name:` for repo work (it branches from the origin default
   branch, not your work line). Land it via
   `documentation/implementation-guide/multi-agent-concurrency/MERGE-PROTOCOL.md`
-  — **you do not test or merge your own work.** Write the test plan, then
-  `queue.ps1 -Submit`; a tester who did not write it executes the plan, and a
+  — **you do not test or merge your own work.** And **before building, agree
+  what the work is for**: `queue.ps1 -Propose -Anchor <json>` (goal, artifact,
+  audience, acceptance, out-of-scope, findings sink), which the operator confirms;
+  `-Submit` refuses without it. The anchor exists because a run that passed every
+  check still shipped the wrong artifact — tests validate correctness, the anchor
+  validates intent. Write the test plan, then `queue.ps1 -Submit`; a tester who did not write it executes the plan, and a
   reviewer who did not write it rebases and merges (`--no-ff`, evidence in the
   message). If the reviewer's rebase changes what was tested, the pass is stale
   and the item returns to test. The work line defaults to whatever the main
@@ -84,10 +88,15 @@ snapshots + `manifest.csv` (file → OWUI id; skills included).
   headless peer mid-turn); no convergence → ask the operator. **Testing runs
   under plane leases, not cloned environments**: before a test that mutates a
   plane or needs it stable, `lease.ps1 -Acquire -Name <plane>` (names in
-  `scripts/worktree/lease-names.conf`; read-only probes need none; multi-plane =
+  `scripts/agent-harness/lease-names.conf`; read-only probes need none; multi-plane =
   one call). Test images tag `:wt-<id>` — prod containers and `:local` tags are
   a gated deploy, not a test; never attach test containers to the `ai-stack_*`
-  anchor networks. Tooling + gotchas: `scripts/worktree/README.md`.
+  anchor networks. Tooling + gotchas: `scripts/agent-harness/README.md`.
+  **The harness is a MODULE** (`scripts/agent-harness/MODULE.md`): one config file
+  (`harness.config.json`) holds the role→model profiles, the TTLs and the paths, and
+  `enabled: false` / `AI_STACK_HARNESS_ENABLED=0` turns it off cleanly per surface.
+  Default profile is `all-cloud` (opus for worker, tester and reviewer); extension
+  sessions are locked to it, Mattermost threads switch with `profile: <name>`.
 - **Branch policy (operator, 2026-08-22):** `main` is UNTOUCHED — the
   deliverable, representing the known-good ai-stack; `development` is the
   LIVE-HOSTED deployment line; all work happens on feature/work branches cut
@@ -102,6 +111,11 @@ snapshots + `manifest.csv` (file → OWUI id; skills included).
   `documentation/runbooks/SERVICE-LIFECYCLE.md`; `/stack-map` checks drift.
 - **Archive, don't delete:** retired code goes to `scripts/archive/` (see its
   README provenance table), retired docs to `documentation/archive/`.
+- **Findings go to `documentation/notes/`, not into the deliverable** (2026-08-28):
+  work on one thing turns up true problems with another. Neither deleting the
+  finding nor pasting it into the artifact is right — write it to a notes file
+  with what was checked and when. A harness anchor names the file as its
+  `findings_sink`; outside the harness, the same rule applies by hand.
 - **Verify against gitignored evidence** before declaring anything dead:
   `.env*` values and `backup/models/` OWUI exports are exactly where
   "zero references" verdicts die (`grep --no-ignore`, live `webui.db`).

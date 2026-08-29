@@ -22,10 +22,16 @@
 # progress chatter into a terminating error - this script died on exactly that once.
 
 $ErrorActionPreference = "Continue"   # native git stderr must never be fatal here
-$repo = "d:\Open WebUI\ai-stack"
-$wtScripts = Join-Path $repo "scripts\worktree"
+# The toolkit is wherever THIS script is - it is part of the module. Rebuilding the path
+# from the repo root hardcoded the directory name, which broke the whole drill the moment
+# the module was renamed (2026-08-28) while every message still said "not recognized".
+$wtScripts = $PSScriptRoot
 $queue = Join-Path $wtScripts "queue.ps1"
 . (Join-Path $wtScripts "common.ps1")
+# Asked, not assumed: the drill used to carry this machine's absolute path as a literal,
+# which is the kind of value that makes a toolkit non-portable for no benefit.
+$repo = Get-MainCheckout
+if (-not $repo) { throw "cannot locate the main checkout - run this from inside the repository" }
 $QueueDir = Join-Path (Get-SharedStateDir) "queue"
 $results = @()
 
@@ -120,8 +126,46 @@ Set-Content -Path $planFile -Encoding ascii -Value @(
     "# Drill test plan",
     "Case 1: DRILL-NOTE.md exists and states a timeout. Pass: it does. Fail: absent or silent.",
     "Case 2: the file names exactly one owner. Pass: one. Fail: contradictory owners.")
+# THE ANCHOR GATE comes first: work is agreed before it is built. A submit with no anchor,
+# and a submit against an UNCONFIRMED anchor, must both be refused with exit 5.
+& $queue -Submit -Id "drill-a" -Branch "work/drilla" -Developer "wt-drilla" -TestPlan $planFile 2>&1 | Out-Null
+Check "-Submit with no anchor at all is refused (exit 5)" ($LASTEXITCODE -eq 5)
+
+$anchorFile = Join-Path $env:TEMP "drill-anchor.json"
+$vagueAnchor = Join-Path $env:TEMP "drill-anchor-vague.json"
+Set-Content -Path $vagueAnchor -Encoding ascii -Value '{ "goal": "make it better", "acceptance": ["ok"] }'
+& $queue -Propose -Id "drill-vague" -Anchor $vagueAnchor -Developer "wt-drilla" 2>&1 | Out-Null
+Check "an anchor missing its fields is refused" ($LASTEXITCODE -ne 0)
+
+foreach ($id in @("a", "b")) {
+    Set-Content -Path $anchorFile -Encoding ascii -Value @(
+        "{",
+        "  ""goal"": ""DRILL-NOTE.md states one owner and one timeout, unambiguously."",",
+        "  ""artifact"": ""DRILL-NOTE.md - a one-line note naming an owner and a timeout."",",
+        "  ""audience"": ""The next agent to read the file with no other context."",",
+        "  ""acceptance"": [",
+        "    ""The file exists and names a timeout value in seconds."",",
+        "    ""Exactly one owner is named; two contradictory owners is a failure.""",
+        "  ],",
+        "  ""out_of_scope"": [ ""Changing anything outside DRILL-NOTE.md."" ],",
+        "  ""findings_sink"": ""DRILL-FINDINGS.md""",
+        "}")
+    & $queue -Propose -Id "drill-$id" -Anchor $anchorFile -Developer "wt-drill$id" | Out-Null
+}
+Check "both anchors are PROPOSED, not agreed" ((Get-QueueState "drill-a") -eq "anchor-draft")
+& $queue -Submit -Id "drill-a" -Branch "work/drilla" -Developer "wt-drilla" -TestPlan $planFile 2>&1 | Out-Null
+Check "-Submit before the operator confirms is refused (exit 5)" ($LASTEXITCODE -eq 5)
+foreach ($id in @("a", "b")) { & $queue -ConfirmAnchor -Id "drill-$id" -By "operator" | Out-Null }
+Check "the operator confirmed both anchors" ((Get-QueueState "drill-a") -eq "anchor-confirmed")
+Check "the anchor was COPIED beside the item (survives worktree removal)" `
+    (Test-Path (Join-Path $QueueDir "drill-a.anchor.json"))
+
 foreach ($id in @("a", "b")) {
     & $queue -Submit -Id "drill-$id" -Branch "work/drill$id" -Developer "wt-drill$id" -TestPlan $planFile | Out-Null
+}
+foreach ($probe in @("drill-badplan", "drill-noplan")) {
+    & $queue -Propose -Id $probe -Anchor $anchorFile -Developer "wt-drilla" | Out-Null
+    & $queue -ConfirmAnchor -Id $probe -By "operator" | Out-Null
 }
 Check "a plan that is not a file is refused" $(
     (& $queue -Submit -Id "drill-badplan" -Branch "work/drilla" -Developer "wt-drilla" -TestPlan "I tested it myself" 2>&1 | Out-Null); $LASTEXITCODE -ne 0)
@@ -130,6 +174,22 @@ Check "the submitted plan was COPIED beside the item (survives worktree removal)
 Check "both items queued for testing" ((Get-QueueState "drill-a") -eq "ready-to-test" -and (Get-QueueState "drill-b") -eq "ready-to-test")
 & $queue -Submit -Id "drill-noplan" -Branch "work/drilla" -Developer "wt-drilla" 2>&1 | Out-Null
 Check "a submission with NO test plan is refused" ($LASTEXITCODE -ne 0)
+
+# An anchor is confirmed against what was KNOWN then. When a scope justification turns out
+# false, the alternative to amending is carrying a known-wrong anchor to the reviewer.
+# Amending costs a cycle on purpose - see the handler.
+& $queue -AmendAnchor -Id drill-noplan -By operator -Anchor $anchorFile 2>&1 | Out-Null
+Check "-AmendAnchor without a -Reason is refused" ($LASTEXITCODE -ne 0)
+& $queue -Claim -Id drill-a -Role tester -By wt-tester | Out-Null
+& $queue -AmendAnchor -Id drill-a -By operator -Anchor $anchorFile -Reason "the world turned out different" | Out-Null
+Check "amending sends the item BACK to the developer" ((Get-QueueState "drill-a") -eq "anchor-confirmed")
+Check "amending DROPS the claim (a verdict describes the old target)" `
+    (-not (Test-Path (Join-Path $QueueDir "drill-a.tester.claim")))
+Check "the amendment and its reason are in the history" `
+    ((Get-Content -Raw (Join-Path $QueueDir "drill-a.json")) -match "anchor AMENDED")
+# put drill-a back where the rest of the drill expects it
+& $queue -Submit -Id drill-a -Branch "work/drilla" -Developer "wt-drilla" -TestPlan $planFile | Out-Null
+Check "the item re-submits normally after an amendment" ((Get-QueueState "drill-a") -eq "ready-to-test")
 
 Step 4 "separation of duties is ENFORCED, not trusted"
 & $queue -Claim -Id drill-a -Role tester -By wt-drilla 2>&1 | Out-Null
@@ -153,7 +213,13 @@ Check "the failure records WHERE it was found" `
     ((Get-Content -Raw (Join-Path $QueueDir "drill-a.json") | ConvertFrom-Json).tested_at_sha -ne "")
 & $queue -Resubmit -Id drill-a -By wt-tester 2>&1 | Out-Null
 Check "only the DEVELOPER may re-submit their item" ($LASTEXITCODE -eq 4)
-& $queue -Resubmit -Id drill-a -By wt-drilla | Out-Null
+$revisedPlan = Join-Path $env:TEMP "drill-test-plan-v2.md"
+Set-Content -Path $revisedPlan -Encoding ascii -Value @(
+    "# Drill test plan, attempt 2",
+    "Case 3 (new): the case attempt 1's plan was missing.")
+& $queue -Resubmit -Id drill-a -By wt-drilla -TestPlan $revisedPlan | Out-Null
+Check "-Resubmit REPLACES the queued plan when one is offered" `
+    ((Get-Content -Raw -Path (Join-Path $QueueDir "drill-a.plan.md")) -match "attempt 2")
 Check "the developer re-submits on the SAME item (attempt 2)" ((Get-QueueState "drill-a") -eq "ready-to-test")
 
 Step 6 "the tester passes both - and they STOP at the human gate"
@@ -177,7 +243,12 @@ $wtMerge = Join-Path $repo ".claude\worktrees\merge-line"
 Invoke-DrillGit worktree add $wtMerge drill/verify-d
 Check "merge worktree created (never the operator's checkout)" (Test-Path $wtMerge)
 Invoke-DrillGit -C $wtMerge merge --no-ff work/drilla -m "merge drill A: raise timeout to 60s (evidence: drill)"
-& $queue -Merged -Id drill-a -By wt-reviewer -Sha ((Get-DrillGit -C $wtMerge rev-parse HEAD).Trim()) | Out-Null
+$mergeSha = (Get-DrillGit -C $wtMerge rev-parse HEAD).Trim()
+& $queue -Merged -Id drill-a -By wt-reviewer -Sha $mergeSha 2>&1 | Out-Null
+Check "a merge with NO fitness verdict is refused" ((Get-QueueState "drill-a") -ne "merged")
+& $queue -Merged -Id drill-a -By wt-reviewer -Sha $mergeSha -MissesAnchor 2>&1 | Out-Null
+Check "-MissesAnchor cannot be merged (exit 4) - it is a rejection" ($LASTEXITCODE -eq 4)
+& $queue -Merged -Id drill-a -By wt-reviewer -Sha $mergeSha -FitsAnchor | Out-Null
 Check "drill-a merged by the reviewer" ((Get-QueueState "drill-a") -eq "merged")
 
 Step 8 "the second item's rebase CONFLICTS - the later merger adapts"
@@ -209,7 +280,7 @@ Check "re-tested and re-released at the new content" ((Get-QueueState "drill-b")
 Step 10 "the reviewer lands the adapted work"
 & $queue -Claim -Id drill-b -Role reviewer -By wt-reviewer | Out-Null
 Invoke-DrillGit -C $wtMerge merge --no-ff work/drillb -m "merge drill B: per-caller override, A's default kept (evidence: drill)"
-& $queue -Merged -Id drill-b -By wt-reviewer -Sha ((Get-DrillGit -C $wtMerge rev-parse HEAD).Trim()) | Out-Null
+& $queue -Merged -Id drill-b -By wt-reviewer -Sha ((Get-DrillGit -C $wtMerge rev-parse HEAD).Trim()) -FitsAnchor | Out-Null
 Check "drill-b merged after re-test" ((Get-QueueState "drill-b") -eq "merged")
 
 Step 11 "outcome: both intents survive, history readable, development untouched"

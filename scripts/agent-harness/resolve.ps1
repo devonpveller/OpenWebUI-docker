@@ -5,8 +5,11 @@
 # the policy is testable by pointing the environment overrides somewhere else.
 #
 # Both decisions are overridable by environment variable, which is what makes this toolkit
-# portable: another distribution changes the variables, not the code.
+# portable: another distribution changes the variables, not the code. Which variables, and
+# what to fall back to, are themselves configuration - this file reads them from
+# config.ps1 rather than hardcoding the names it happens to have been written with.
 
+. (Join-Path $PSScriptRoot "config.ps1")
 . (Join-Path $PSScriptRoot "git-io.ps1")
 
 function Get-SharedStateDir {
@@ -19,8 +22,10 @@ function Get-SharedStateDir {
     # so the copies could not even see each other. Two agents would each be told they held a
     # claim while excluding nobody. A lock that reports success and protects nothing is worse
     # than no lock, because people trust it.
-    if ($env:AI_STACK_WORKTREE_STATE) {
-        $dir = $env:AI_STACK_WORKTREE_STATE
+    $stateEnv = Get-HarnessSetting "worktree.state_dir_env" "AI_STACK_WORKTREE_STATE"
+    $override = [Environment]::GetEnvironmentVariable($stateEnv)
+    if ($override) {
+        $dir = $override
     } else {
         $common = Get-GitCommonDir
         if (-not $common) {
@@ -28,9 +33,9 @@ function Get-SharedStateDir {
             # private namespace and silently restore the exact bug described above.
             throw ("cannot resolve the shared git dir - refusing to fall back to a " +
                    "script-local state dir, which would make claims exclude nobody. " +
-                   "Set AI_STACK_WORKTREE_STATE if this is deliberate.")
+                   "Set $stateEnv if this is deliberate.")
         }
-        $dir = Join-Path $common "agent-worktrees"
+        $dir = Join-Path $common (Get-HarnessSetting "worktree.state_dir_name" "agent-worktrees")
     }
     if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
     return $dir
@@ -47,14 +52,15 @@ function Resolve-WorkLine {
     # does not contain.
     param([string]$Explicit = "")
     if ($Explicit) { return $Explicit }
-    if ($env:AI_STACK_WORK_LINE) { return $env:AI_STACK_WORK_LINE }
+    $lineEnv = Get-HarnessSetting "worktree.work_line_env" "AI_STACK_WORK_LINE"
+    $requested = [Environment]::GetEnvironmentVariable($lineEnv)
+    if ($requested) { return $requested }
     $main = Get-MainCheckout
     if ($main) {
         $branch = Get-CurrentBranch -RepoPath $main
         if ($branch) { return $branch }
     }
-    if ($env:AI_STACK_WORK_LINE_FALLBACK) { return $env:AI_STACK_WORK_LINE_FALLBACK }
-    return "development"
+    return (Get-HarnessSetting "worktree.work_line_fallback" "development")
 }
 
 function Test-LineCheckedOutElsewhere {

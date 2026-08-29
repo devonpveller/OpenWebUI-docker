@@ -13,6 +13,10 @@
 # `git diff <line>...work/<id>`; this file carries the state a PR would carry.
 #
 # STATES
+#   anchor-draft   an anchor has been PROPOSED and is waiting on the operator. No work yet.
+#   anchor-confirmed the operator agreed what this is for. Work may begin. (See anchor.ps1
+#                  for why this gate exists: the first real run shipped two artifacts that
+#                  passed every check and were still not what was asked for.)
 #   ready-to-test  developer submitted; test plan written; nobody has claimed it
 #   testing        a tester holds it
 #   test-failed    a case failed; back to the developer, who fixes IN THE SAME worktree and
@@ -34,21 +38,29 @@
 # EXCLUSIVITY comes from CreateNew on a per-role claim file - the same atomic primitive
 # the leases used, applied to the thing that actually needs it: the work item.
 #
+#   .\queue.ps1 -Propose -Id mem-readme -Anchor <path> -Developer wt-mem-readme   # BEFORE any work
+#   .\queue.ps1 -ConfirmAnchor -Id mem-readme -By profnovice                       # THE ANCHOR GATE
+#   .\queue.ps1 -AmendAnchor -Id mem-readme -By profnovice -Anchor <path> -Reason "..."
+#     (the world turned out different; sends the item BACK to the developer - see the handler)
 #   .\queue.ps1 -Submit -Id mem-readme -Branch work/mem-readme -Developer wt-mem-readme -TestPlan <path>
 #   .\queue.ps1 -List
 #   .\queue.ps1 -Claim -Id mem-readme -Role tester -By wt-tester-1
 #   .\queue.ps1 -Pass  -Id mem-readme -By wt-tester-1 -Evidence <path> -PlanAdequate
 #     (-PlanAdequate or -PlanInadequate is REQUIRED on both verdicts - see the checks)
 #   .\queue.ps1 -Fail  -Id mem-readme -By wt-tester-1 -Reason "case 3 fails on a cold cache"
-#   .\queue.ps1 -Resubmit -Id mem-readme -By wt-mem-readme          # after a -Fail: next lap
+#   .\queue.ps1 -Resubmit -Id mem-readme -By wt-mem-readme [-TestPlan <path>]  # after a -Fail
 #   .\queue.ps1 -Approve -Id mem-readme -By profnovice               # THE HUMAN GATE
 #   .\queue.ps1 -Claim -Id mem-readme -Role reviewer -By wt-reviewer-1
 #   .\queue.ps1 -Merged -Id mem-readme -By wt-reviewer-1 -Sha <merge sha>
 #
-# Exit codes: 0 ok | 1 usage/state error | 3 claimed by someone else | 4 refused (duties)
+# Exit codes: 0 ok | 1 usage/state error | 2 harness disabled | 3 claimed by someone else
+#             | 4 refused (duties) | 5 refused (no confirmed anchor)
 
 [CmdletBinding()]
 param(
+    [switch]$Propose,
+    [switch]$ConfirmAnchor,
+    [switch]$AmendAnchor,
     [switch]$Submit,
     [switch]$List,
     [switch]$Show,
@@ -65,6 +77,7 @@ param(
     [string]$Branch = "",
     [string]$Developer = "",
     [string]$TestPlan = "",
+    [string]$Anchor = "",
     [string]$Role = "",
     [string]$By = "",
     [string]$Evidence = "",
@@ -74,11 +87,26 @@ param(
     [string]$State = "",
     [switch]$PlanAdequate,
     [switch]$PlanInadequate,
-    [int]$ClaimTtlMin = 60
+    [switch]$FitsAnchor,
+    [switch]$MissesAnchor,
+    [int]$ClaimTtlMin = 0
 )
 
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "common.ps1")
+. (Join-Path $PSScriptRoot "anchor.ps1")
+
+# The module OFF switch. "Off" must be inert and say so, not fail obscurely three calls
+# deeper - see harness.config.json / MODULE.md.
+# A param default cannot call into config.ps1 - param() binds before common.ps1 is dot-
+# sourced. So 0 means "unset" and the configured value fills in, while an explicit -0 from
+# a caller is still honoured as "expire immediately".
+if (-not $PSBoundParameters.ContainsKey("ClaimTtlMin")) {
+    $ClaimTtlMin = [int](Get-HarnessSetting "pipeline.claim_ttl_minutes" 60)
+}
+
+$offReason = Get-HarnessDisabledReason
+if ($offReason) { Write-Host "REFUSED: $offReason" -ForegroundColor Yellow; exit 2 }
 
 # The role rules, declared ONCE. They were previously re-derived in four separate
 # if/else branches, so adding a role (or renaming a state) meant finding all of them and
@@ -108,6 +136,14 @@ function Write-Item($item) {
     $tmp = "$p.tmp"
     ($item | ConvertTo-Json -Depth 8) | Set-Content -Path $tmp -Encoding ASCII
     Move-Item -Path $tmp -Destination $p -Force
+}
+
+function Set-Field($item, [string]$name, $value) {
+    # An item written before a field existed has no such property, and PowerShell throws on
+    # assignment rather than creating it. Every live queue contains items older than the
+    # newest field, so this is the ordinary path.
+    if ($item.PSObject.Properties.Name -contains $name) { $item.$name = $value }
+    else { $item | Add-Member -NotePropertyName $name -NotePropertyValue $value }
 }
 
 function Add-History($item, [string]$what, [string]$who) {
@@ -149,8 +185,11 @@ function Drop-Claim([string]$i, [string]$role) {
 if ($List) {
     $items = @(Get-ChildItem -Path $QueueDir -Filter "*.json" -ErrorAction SilentlyContinue)
     if (-not $items.Count) { Write-Host "queue empty" -ForegroundColor Green; exit 0 }
-    Write-Host ("{0,-18} {1,-14} {2,-20} {3}" -f "ID", "STATE", "DEVELOPER", "HELD BY")
+    Write-Host ("{0,-18} {1,-17} {2,-20} {3}" -f "ID", "STATE", "DEVELOPER", "HELD BY")
     foreach ($f in ($items | Sort-Object Name)) {
+        # `<id>.anchor.json` sits beside `<id>.json` in this directory. Ids are
+        # [a-z0-9-], so a dot in the base name means a sidecar file, not a work item.
+        if ($f.BaseName.Contains(".")) { continue }
         $it = Get-Content -Raw -Path $f.FullName | ConvertFrom-Json
         if ($State -and $it.state -ne $State) { continue }
         $held = ""
@@ -159,14 +198,125 @@ if ($List) {
             if (Test-Path $c) { $held = "$r=" + (Get-Content -Raw -Path $c | ConvertFrom-Json).by }
         }
         $flag = if ($it.PSObject.Properties.Name -contains "line_mergeable" -and -not $it.line_mergeable) { " [needs hand-off]" } else { "" }
-        Write-Host ("{0,-18} {1,-14} {2,-20} {3}{4}" -f $it.id, $it.state, $it.developer, $held, $flag)
+        # The two states that are waiting on a PERSON are called out: an unread queue is
+        # how a human gate quietly becomes a human bottleneck.
+        if ($it.state -eq "anchor-draft") { $flag += " [waiting: operator to confirm the anchor]" }
+        if ($it.state -eq "test-passed")  { $flag += " [waiting: operator to release for review]" }
+        Write-Host ("{0,-18} {1,-17} {2,-20} {3}{4}" -f $it.id, $it.state, $it.developer, $held, $flag)
     }
     exit 0
 }
 
 if ($Show) {
     if (-not $Id) { Die "-Show needs -Id" }
-    (Read-Item $Id) | ConvertTo-Json -Depth 8
+    $it = Read-Item $Id
+    if ($it.anchor) {
+        Write-Host "--- ANCHOR ---" -ForegroundColor Cyan
+        Write-Host (Format-Anchor $it.anchor)
+        $who = if ($it.anchor_confirmed_by) { "confirmed by " + $it.anchor_confirmed_by } else { "NOT YET CONFIRMED" }
+        Write-Host ("(" + $who + ")")
+        Write-Host ""
+        Write-Host "--- RECORD ---" -ForegroundColor Cyan
+    }
+    $it | ConvertTo-Json -Depth 8
+    exit 0
+}
+
+# --- anchor: propose / confirm ------------------------------------------------------
+# The anchor gate. It sits BEFORE the work because that is the cheapest moment to correct
+# a misunderstanding - the pre-review gate catches "the world moved", this one catches
+# "we were never building the same thing".
+if ($Propose) {
+    if (-not $Id -or -not $Anchor) { Die "-Propose needs -Id and -Anchor <path to an anchor json>" }
+    if (Test-Path (ItemPath $Id)) { Die "queue item '$Id' already exists (use a new -Id, or -Show it)" }
+    try { $anchorObj = Read-AnchorFile $Anchor } catch { Die $_.Exception.Message }
+    # Copy it beside the item, for the same reason the test plan is copied: the developer's
+    # worktree is deleted at the end, and a tester or reviewer reading a dangling path is
+    # exactly the failure this whole mechanism exists to prevent.
+    $anchorDest = Join-Path $QueueDir "$Id.anchor.json"
+    Copy-Item -Path $Anchor -Destination $anchorDest -Force
+    $item = [ordered]@{
+        id = $Id; branch = ""; line = ""; developer = $Developer
+        state = "anchor-draft"; anchor = $anchorObj; anchor_file = $anchorDest
+        anchor_confirmed_by = ""; anchor_confirmed_at = 0
+        test_plan = ""; thread = $Thread; attempt = 1
+        line_mergeable = $true
+        submitted_sha = ""; tested_at_sha = ""; merged_sha = ""
+        results = @(); history = @()
+    }
+    Add-History $item "anchor proposed" $(if ($Developer) { $Developer } else { "unknown" })
+    Write-Item $item
+    Write-Host ("Anchor PROPOSED for '{0}'. Nothing may be built yet." -f $Id) -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host (Format-Anchor $anchorObj)
+    Write-Host ""
+    Write-Host ("  The operator confirms with: queue.ps1 -ConfirmAnchor -Id {0} -By <operator>" -f $Id)
+    Write-Host "  Until then this is a proposal, not an agreement."
+    exit 0
+}
+
+if ($ConfirmAnchor) {
+    if (-not $Id -or -not $By) { Die "-ConfirmAnchor needs -Id and -By (who is agreeing)" }
+    $item = Read-Item $Id
+    if ($item.state -ne "anchor-draft") {
+        Die ("'{0}' is '{1}', not 'anchor-draft' - an anchor is confirmed once, before the work" -f $Id, $item.state)
+    }
+    # An amended anchor REPLACES the proposal: the operator is allowed to change what the
+    # work is for, and the record must show what was actually agreed, not what was asked.
+    if ($Anchor) {
+        try { $anchorObj = Read-AnchorFile $Anchor } catch { Die $_.Exception.Message }
+        Copy-Item -Path $Anchor -Destination $item.anchor_file -Force
+        $item.anchor = $anchorObj
+        Add-History $item "anchor amended on confirmation" $By
+    }
+    $item.state = "anchor-confirmed"
+    $item.anchor_confirmed_by = $By
+    $item.anchor_confirmed_at = Now
+    Add-History $item "anchor confirmed" $By
+    Write-Item $item
+    Write-Host ("Anchor CONFIRMED for '{0}' by {1}. Work may begin." -f $Id, $By) -ForegroundColor Green
+    Write-Host ""
+    Write-Host (Format-Anchor $item.anchor)
+    exit 0
+}
+
+if ($AmendAnchor) {
+    # THE WORLD CAN TURN OUT DIFFERENT MID-FLIGHT. An anchor is confirmed against what was
+    # known then; when a scope justification turns out to be false, the honest move is to
+    # correct the record, not to carry a known-wrong anchor to the reviewer and explain it
+    # in prose. Found live: an anchor put a script out of scope "having grepped it - it
+    # contains no bare invocation", and it contained sixteen.
+    #
+    # THE COST IS DELIBERATE: amending sends the item BACK to the developer. A test verdict
+    # describes work against the target that existed when it ran, so moving the target
+    # invalidates it - the same reasoning as the stale-pass rule. Without that, amending
+    # would be the obvious way to make failing work fit, which is the one thing this gate
+    # exists to prevent.
+    if (-not $Id -or -not $By -or -not $Anchor -or -not $Reason) {
+        Die "-AmendAnchor needs -Id, -By, -Anchor <path> and -Reason (what changed about the world)"
+    }
+    $item = Read-Item $Id
+    if ($item.state -in @("merged", "rejected")) { Die "'$Id' is '$($item.state)' - open a new item" }
+    if ($item.state -eq "anchor-draft") { Die "'$Id' is not confirmed yet - amend it on -ConfirmAnchor instead" }
+    try { $anchorObj = Read-AnchorFile $Anchor } catch { Die $_.Exception.Message }
+    Copy-Item -Path $Anchor -Destination $item.anchor_file -Force
+    Set-Field $item "anchor" $anchorObj
+    Set-Field $item "anchor_confirmed_by" $By
+    Set-Field $item "anchor_confirmed_at" (Now)
+    $was = $item.state
+    foreach ($r in $RoleRules.Keys) { Drop-Claim $Id $r }
+    Set-Field $item "state" "anchor-confirmed"
+    Set-Field $item "tested_at_sha" ""
+    Add-History $item "anchor AMENDED (was '$was'): $Reason" $By
+    Write-Item $item
+    Write-Host ("Anchor AMENDED for '{0}' by {1}." -f $Id, $By) -ForegroundColor Yellow
+    Write-Host ("  {0}" -f $Reason)
+    if ($was -ne "anchor-confirmed") {
+        Write-Host ("  '{0}' was '{1}' and is now back with the developer: a verdict describes" -f $Id, $was) -ForegroundColor Yellow
+        Write-Host "  work against the target that existed when it ran, and the target moved." -ForegroundColor Yellow
+    }
+    Write-Host ""
+    Write-Host (Format-Anchor $item.anchor)
     exit 0
 }
 
@@ -180,7 +330,25 @@ if ($Submit) {
              "passing and what would count as failing. A plan that cannot fail is not a plan, " +
              "and 'I tested it myself' is not one either.")
     }
-    if (Test-Path (ItemPath $Id)) { Die "queue item '$Id' already exists (use a new -Id, or -Show it)" }
+    # The anchor gate. An item that was proposed and confirmed is ADVANCED here; creating
+    # one on the fly is only allowed when the operator has turned the gate off, and then it
+    # is a stated configuration choice rather than a silent bypass.
+    $anchorRequired = [bool](Get-HarnessSetting "pipeline.anchor_required" $true)
+    $existing = if (Test-Path (ItemPath $Id)) { Read-Item $Id } else { $null }
+    if ($existing) {
+        if ($existing.state -eq "anchor-draft") {
+            Die (("'{0}' has an anchor that nobody has confirmed. The operator agrees what this " +
+                  "is for BEFORE it is built: queue.ps1 -ConfirmAnchor -Id {0} -By <operator>") -f $Id) 5
+        }
+        if ($existing.state -ne "anchor-confirmed") {
+            Die ("queue item '$Id' already exists in state '$($existing.state)' (use a new -Id, or -Show it)")
+        }
+    } elseif ($anchorRequired) {
+        Die ("no anchor for '$Id'. Propose one first - the work is agreed before it is built:`n" +
+             "  queue.ps1 -Propose -Id $Id -Anchor <path> -Developer <you>`n" +
+             "Start from anchor.template.json. (Set pipeline.anchor_required=false in " +
+             "harness.config.json to work without anchors - see anchor.ps1 for what that costs.)") 5
+    }
     # The plan is a FILE, and the tool must prove it. It used to store whatever string it was
     # given, so `-TestPlan "I tested it"` sailed through - precisely what the error text
     # claims to refuse. Both developer agents in the first pipeline run raised this.
@@ -197,12 +365,24 @@ if ($Submit) {
     $line = Resolve-WorkLine
     $sha = (Invoke-GitCapture @("rev-parse", $Branch) | Select-Object -First 1)
     if ($LASTEXITCODE -ne 0 -or -not $sha) { Die "branch '$Branch' not found" }
-    $item = [ordered]@{
-        id = $Id; branch = $Branch; line = $line; developer = $Developer
-        state = "ready-to-test"; test_plan = $planDest; thread = $Thread; attempt = 1
-        line_mergeable = (-not (Test-LineCheckedOutElsewhere -Line $line))
-        submitted_sha = $sha.Trim(); tested_at_sha = ""; merged_sha = ""
-        results = @(); history = @()
+    if ($existing) {
+        $item = $existing
+        Set-Field $item "branch" $Branch; Set-Field $item "line" $line
+        Set-Field $item "developer" $Developer
+        Set-Field $item "state" "ready-to-test"; Set-Field $item "test_plan" $planDest
+        if ($Thread) { Set-Field $item "thread" $Thread }
+        Set-Field $item "line_mergeable" (-not (Test-LineCheckedOutElsewhere -Line $line))
+        Set-Field $item "submitted_sha" $sha.Trim()
+    } else {
+        $item = [ordered]@{
+            id = $Id; branch = $Branch; line = $line; developer = $Developer
+            state = "ready-to-test"; anchor = $null; anchor_file = ""
+            anchor_confirmed_by = ""; anchor_confirmed_at = 0
+            test_plan = $planDest; thread = $Thread; attempt = 1
+            line_mergeable = (-not (Test-LineCheckedOutElsewhere -Line $line))
+            submitted_sha = $sha.Trim(); tested_at_sha = ""; merged_sha = ""
+            results = @(); history = @()
+        }
     }
     Add-History $item "submitted for testing" $Developer
     Write-Item $item
@@ -275,6 +455,12 @@ if ($Claim) {
     Add-History $item "claimed as $Role" $By
     Write-Item $item
     Write-Host ("Claimed '{0}' as {1} ({2})." -f $Id, $Role, $By) -ForegroundColor Green
+    if ($item.anchor) {
+        Write-Host ""
+        Write-Host "  --- WHAT THIS IS FOR (the confirmed anchor) ---" -ForegroundColor Cyan
+        foreach ($ln in (Format-Anchor $item.anchor) -split "`n") { Write-Host ("  " + $ln) }
+        Write-Host ""
+    }
     if ($Role -eq "tester") {
         # Tell the tester what to test, rather than leaving them to infer it from a
         # recorded sha. `submitted_sha` is a RECORD of an attempt, not an instruction -
@@ -374,6 +560,35 @@ if ($Merged) {
     $item = Read-Item $Id
     Assert-Claim $item "reviewer" $By
     if ((Normalize-Id $By) -eq (Normalize-Id $item.developer)) { Die "the developer cannot merge their own work" 4 }
+    # THE FITNESS VERDICT. Green tests say the artifact is CORRECT; they say nothing about
+    # whether it is the thing that was asked for. That gap shipped two READMEs that passed
+    # every check and were still wrong (see anchor.ps1). So the reviewer states it, and it
+    # cannot be defaulted - the same reason the tester must state -PlanAdequate.
+    if ($item.anchor) {
+        if (-not ($FitsAnchor -or $MissesAnchor)) {
+            Die ("state the fitness verdict: -FitsAnchor or -MissesAnchor.`n`n" +
+                 (Format-Anchor $item.anchor) +
+                 "`n`nTests passing is not the question here. The question is whether what you " +
+                 "are about to land is what that anchor asked for.")
+        }
+        if ($MissesAnchor) {
+            Die ("you judged that '$Id' MISSES its anchor - that is a -Reject, not a merge. " +
+                 "Say what it missed in -Reason so the developer can aim at it.") 4
+        }
+    }
+    # THE SHA MUST ACTUALLY CONTAIN THE BRANCH. Recorded 2026-08-29 after I ran a merge that
+    # FAILED (a dirty index refused it), did not check the exit code, and then recorded
+    # `-Merged` with `git rev-parse HEAD` - which was simply the pre-merge tip. The queue
+    # said "merged" while nothing had merged. A pipeline whose terminal state can be reached
+    # without the thing happening is worse than no pipeline, because everyone downstream
+    # trusts it.
+    $reach = Invoke-GitCapture @("merge-base", "--is-ancestor", $item.branch, $Sha)
+    if ($LASTEXITCODE -ne 0) {
+        Die ("'$Sha' does not contain '$($item.branch)' - that is not a merge of this item. " +
+             "If the merge command failed, it failed silently: check its exit code before " +
+             "recording the outcome. Nothing has been recorded.") 1
+    }
+    Set-Field $item "fits_anchor" ([bool]$FitsAnchor)
     $item.state = "merged"; $item.merged_sha = $Sha
     Add-History $item "merged as $Sha" $By
     Drop-Claim $Id "reviewer"
@@ -420,9 +635,27 @@ if ($Resubmit) {
     $newSha = (Invoke-GitCapture @("rev-parse", $item.branch) | Select-Object -First 1)
     if ($LASTEXITCODE -ne 0 -or -not $newSha) { Die "branch '$($item.branch)' not found - cannot re-submit" }
     $item.submitted_sha = $newSha.Trim()
+    # AND RE-READ THE PLAN, when one is offered. A failed case very often means the plan
+    # missed something - the protocol tells the developer to add the case, and until now
+    # there was no mechanism behind that instruction: -Resubmit took no -TestPlan and left
+    # the queued copy at attempt 1, so the tester re-read a plan already known to be
+    # incomplete. A developer agent hit this, copied the file into place by hand, and said
+    # so rather than letting it pass; the workaround is what a tool is for.
+    if ($TestPlan) {
+        if (-not (Test-Path $TestPlan)) {
+            Die ("-TestPlan must be a path to a file that exists (got '$TestPlan')")
+        }
+        Copy-Item -Path $TestPlan -Destination $item.test_plan -Force
+        Add-History $item "test plan revised for attempt $([int]$item.attempt)" $By
+    }
     Add-History $item "re-submitted for testing (attempt $($item.attempt))" $By
     Write-Item $item
     Write-Host ("'{0}' re-submitted - attempt {1} at {2}, awaiting a tester." -f $Id, $item.attempt, $item.submitted_sha.Substring(0, 8)) -ForegroundColor Green
+    if ($TestPlan) { Write-Host ("  Plan REVISED for this attempt -> {0}" -f $item.test_plan) }
+    else {
+        Write-Host "  Plan unchanged. If the failure showed the plan missed a case, add it and" -ForegroundColor Yellow
+        Write-Host "  re-submit with -TestPlan <path> - the tester reads the queued copy, not yours." -ForegroundColor Yellow
+    }
     exit 0
 }
 
@@ -446,6 +679,9 @@ if ($Reject) {
     if (-not $Id -or -not $By -or -not $Reason) { Die "-Reject needs -Id, -By and -Reason" }
     $item = Read-Item $Id
     Assert-Claim $item "reviewer" $By
+    # Recorded because the two rejections mean different things to whoever picks this up:
+    # "it does not work" is a fix, "it is not what we asked for" is a re-aim.
+    if ($MissesAnchor) { Set-Field $item "fits_anchor" $false }
     $item.state = "rejected"
     Add-History $item "rejected: $Reason" $By
     Drop-Claim $Id "reviewer"
