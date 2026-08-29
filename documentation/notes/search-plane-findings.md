@@ -97,3 +97,33 @@ It is not on the work line, so `search/README.md` documents the committed state:
 application's own keys (`GATEWAY_API_KEY`, `PROVIDER_PRIORITY`, the `CIRCUIT_*`
 values, `LOG_QUERIES`) will then have to be named explicitly in the compose file
 rather than arriving through `env_file`.
+
+## 7. Two places that describe the anchor precondition too broadly
+
+Found 2026-08-28 while testing the README rewrite - an earlier draft of
+`search/README.md` said "any `stack.ps1 up`" creates `ai-stack_default`, which
+is false and would have sent a first-time operator into
+`network ai-stack_default declared as external, but could not be found`.
+`Resolve-Planes` in `scripts/stack/stack.ps1` returns only the named plane's
+registry row and the `up` branch runs that one project; only `up` with no plane
+(the whole ordered registry, anchor first) or `up anchor` creates the networks.
+The README now says so. Two other files still carry the loose version:
+
+- `docker-compose.yml` (the root anchor), header comment: "run it once before
+  any plane on a cold host (scripts/stack/stack.ps1 does this for you)". True
+  only for `stack.ps1 up` with no plane, or `up anchor`.
+- `scripts/recovery/emergency-recovery.ps1` never brings the anchor project up
+  at all - `Start-PlaneStack` documents the requirement ("Requires the anchor
+  networks (any root-project `up` creates them)") and relies on the networks
+  having survived. That is fine after a crash, where they usually have; it is
+  not a cold-host path.
+
+## 8. The stack-map's cold-start list draws the search plane as a chain
+
+`.claude/skills/stack-map/references/workspace-stacks.md` renders the plane's
+internal order as "Search: `vpn` -> `redis` -> `searxng` -> `gateway`", which
+reads as a chain. `redis` actually depends on nothing; `searxng` waits on `vpn`
+and `redis` (both healthy) and `gateway` waits on `searxng` (started) and
+`redis` (healthy). `search/README.md` now draws the real shape, so the two
+documents no longer match - if you correct one, correct the other. Checked
+2026-08-28 against `search/docker-compose.yml`.

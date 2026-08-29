@@ -5,9 +5,10 @@ Four containers give the rest of the stack a web-search and page-fetch surface
 whose egress leaves the host only through a Mullvad WireGuard tunnel. It was
 split out of the root `ai-stack` project on 2026-08-21 (CLEANUP-PLAN Part K.3).
 
-Drive it from the repo root:
+Drive it with the workspace script:
 
 ```powershell
+.\scripts\stack\stack.ps1 up anchor    # once per host - creates the shared networks
 .\scripts\stack\stack.ps1 up search
 ```
 
@@ -56,9 +57,13 @@ the reason nobody re-adds them.
   property structural rather than a matter of configuration.
 - **`default` is `external: true`, `name: ai-stack_default`** - the root
   anchor's shared bridge. `vpn` and `gateway` attach to it so their names keep
-  resolving for consumers in other compose projects. The anchor must exist
-  first, or compose refuses to start the plane: `docker compose up -d` at the
-  repo root (or any `stack.ps1 up`) creates it.
+  resolving for consumers in other compose projects. **The anchor must exist
+  before this plane starts**, or compose fails with `network ai-stack_default
+  declared as external, but could not be found`. Create it with `docker compose
+  up -d` at the repo root, or `.\scripts\stack\stack.ps1 up anchor`, or
+  `.\scripts\stack\stack.ps1 up` with no plane (which walks the whole
+  workspace in order, anchor first). Naming a single plane -
+  `stack.ps1 up search` - starts only that plane and creates nothing.
 
 One host port is published, and the omissions are deliberate:
 
@@ -71,18 +76,30 @@ One host port is published, and the omissions are deliberate:
 
 ## Bring it up and down
 
-Always **from the repo root**, and always with `--env-file .env`: the plane
-interpolates from the single root `.env`, and `MULLVAD_WG_PRIVATE_KEY` carries a
-`${...:?}` guard that aborts the `up` if it is missing.
+Every command needs the root `.env`: the plane interpolates from it, and
+`MULLVAD_WG_PRIVATE_KEY` carries a `${...:?}` guard that aborts the `up` if it
+is missing. `stack.ps1` sets its own working directory and always passes
+`--env-file .env`, so it can be run from anywhere; **by hand, run from the repo
+root** so the relative `--env-file .env` resolves.
 
 ```powershell
-# the workspace driver, which knows the plane order
-.\scripts\stack\stack.ps1 up search
-.\scripts\stack\stack.ps1 down search
-.\scripts\stack\stack.ps1 restart search
-.\scripts\stack\stack.ps1 health          # includes GET 127.0.0.1:8085/healthz
+.\scripts\stack\stack.ps1 up search        # this plane only - see the anchor note above
+.\scripts\stack\stack.ps1 down search      # compose down for this project
+.\scripts\stack\stack.ps1 restart search   # compose restart - see the caveat below
+.\scripts\stack\stack.ps1 health           # whole-workspace probe sweep, not plane-scoped;
+                                           # includes GET 127.0.0.1:8085/healthz
+```
 
-# the same thing by hand
+Each of those is a thin wrapper: `up search` runs
+`docker compose -f search\docker-compose.yml --env-file .env up -d` and nothing
+else. `restart` maps to `docker compose restart`, which restarts the existing
+containers **without recreating them** - a changed `.env` value or compose
+setting needs an `up -d`, not a restart. `health` takes no plane argument, runs
+every probe in the workspace, and exits with the number of failures.
+
+By hand:
+
+```powershell
 docker compose -f search/docker-compose.yml --env-file .env up -d
 docker compose -f search/docker-compose.yml --env-file .env down
 docker compose -f search/docker-compose.yml --env-file .env config   # render/validate
@@ -158,9 +175,9 @@ whole render.
   config is served straight out of your git working tree, and the mount is
   **`rw`**, so the container can write into your checkout: unexplained
   `git status` noise under `search-gateway/searxng/` is the container, not you.
-- Consequently `docker compose -f search/docker-compose.yml down -v` destroys
-  nothing that matters here. Do not carry that habit over to `memory` or
-  `open-brain`, where the same command is destructive.
+- Consequently `docker compose -f search/docker-compose.yml --env-file .env
+  down -v` destroys nothing that matters here. Do not carry that habit over to
+  `memory` or `open-brain`, where the same command is destructive.
 
 Images are not auto-updated: every service carries
 `com.centurylinklabs.watchtower.enable=false`, kept as recorded intent after
@@ -169,11 +186,18 @@ watchtower itself was retired. Update deliberately, per
 
 ## Startup order
 
-Inside the plane one `up -d` is enough; it is health-gated and self-ordering:
+Inside the plane one `up -d` is enough; it is health-gated and self-ordering.
+`vpn` and `redis` come up in parallel, and the gates are:
 
 ```
-vpn (healthy) -> redis (healthy) -> searxng -> gateway
+  vpn (healthy) ---+
+                   +--> searxng (started) --> gateway
+  redis (healthy) -+---------------------------^
 ```
+
+`searxng` waits for `vpn` **and** `redis` to be healthy; `gateway` waits for
+`searxng` to have *started* and for `redis` to be healthy. `redis` itself waits
+for nothing.
 
 Across the workspace it is step 7 of the cold-start order in the
 [stack-map](../.claude/skills/stack-map/references/workspace-stacks.md):
@@ -211,7 +235,7 @@ under another name.
 |---|---|
 | `up` aborts complaining about `MULLVAD_WG_PRIVATE_KEY` | The guard doing its job: you ran without `--env-file .env`, or the key is unset. |
 | `/healthz` green but `/readyz` 503 | The chain behind the gateway. Either the tunnel is still building (give SearXNG its 90 s), or redis or SearXNG is unhappy. The watchdog only restarts on `/healthz`, so a plane that is up but not working will not self-heal - somebody has to look. |
-| Searches return fewer engines than usual, without errors | Everything leaves through one exit IP, so a heavy fan-out can get the whole plane captcha'd at once. Engine suspensions live in redis `db0`; `FLUSHDB` there clears them. |
+| Searches return fewer engines than usual, without errors | Everything leaves through one exit IP, so a heavy fan-out can get the whole plane captcha'd at once. SearXNG keeps its state, engine suspensions included, in redis `db0` (`SEARXNG_REDIS_URL`); clear it with `docker exec search-redis redis-cli -n 0 FLUSHDB`. |
 | One engine in particular returns nothing | Engine enable/disable policy lives in [`../search-gateway/searxng/settings.yml`](../search-gateway/searxng/settings.yml), tuned for what actually answers a VPN exit IP. |
 | Bursts are not being throttled | SearXNG's own limiter is off on purpose (`server.limiter: false`): it is public-instance bot protection and would throttle our own research fan-out. Burst control lives in the gateway's cache and circuit breaker. |
 | Something outside the plane cannot reach `vpn:8888` | The kill-switch firewall. `SEARCH_NET_SUBNET` is the knob for clients on other networks; in-plane services never need it. |
