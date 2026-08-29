@@ -334,6 +334,9 @@ services:
       # reads API_KEY); set both to the pool key so the worker's Bearer matches.
       - OPEN_TERMINAL_API_KEY=${AO_OPEN_TERMINAL_KEY}
       - API_KEY=${AO_OPEN_TERMINAL_KEY}
+      # J.1 miss #7 second half: with LC_ROUTE_EXEC=1 the pi process can run inside
+      # the executor, so the gateway lane key must exist HERE too (see ao-worker note).
+      - LLAMACPP_API_KEY=${LC_LLAMA_API_KEY}
       # /workspace is a bind-mount; git 2.36+ refuses to discover a submodule's gitdir across the
       # mount boundary unless this is set — without it a RECURSIVE clone leaves nested submodule
       # content unpopulated (MSB1009) and the git-proxy's own `git remote` probe returns "known:
@@ -416,6 +419,9 @@ services:
       # reads API_KEY); set both to the pool key so the worker's Bearer matches.
       - OPEN_TERMINAL_API_KEY=${AO_OPEN_TERMINAL_KEY}
       - API_KEY=${AO_OPEN_TERMINAL_KEY}
+      # J.1 miss #7 second half: with LC_ROUTE_EXEC=1 the pi process can run inside
+      # the executor, so the gateway lane key must exist HERE too (see ao-worker note).
+      - LLAMACPP_API_KEY=${LC_LLAMA_API_KEY}
       # /workspace bind-mount: let git discover submodule gitdirs across the boundary (git 2.36+).
       # Without it a recursive clone leaves submodules unpopulated (MSB1009) + the proxy's `git
       # remote` probe sees "known: none" and denies fetches. Proxy still governs all ops.
