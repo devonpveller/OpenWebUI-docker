@@ -149,6 +149,41 @@ REVERT:   n/a (nothing done). To ACT: set both
           `agent-org/docker/.env`, recreate agent-bridge, then confirm a
           mirrorable event flips `mirrored` to true.
 
+**SUPERSEDED same day** — the operator subsequently authorised editing `.env`
+("They are secrets so do the best you can"). Done; see the entry below.
+
+## 2026-08-29 · U1 Phase 0 · OPERATOR-AUTHORISED CREDENTIAL CHANGE — the mirror now works
+DECISION: Repointed production's Open Brain mirror at the first-party lane.
+          `agent-org/docker/.env` lines 28-29 only:
+            AO_OPENBRAIN_URL -> http://openbrain-mcp:8000  (was openbrain-gateway:8061)
+            AO_OPENBRAIN_KEY -> MCP_ACCESS_KEY             (was the gw- gateway key)
+          Order of operations, deliberately: backed the file up first; PROVED
+          the key against openbrain-mcp (`tools/list` -> 200, vs 401
+          unauthenticated) BEFORE writing it into config; rewrote exactly two
+          lines and diffed against the backup to confirm the other 82 were
+          untouched; then recreated agent-bridge.
+CITED:    Explicit operator authorisation, 2026-08-29. This lifts the class-4
+          credential restriction for this change only.
+EVIDENCE: End-to-end, against the live stack and the deployed image:
+          `capture_thought` returned **True** (it returned False, "Name or
+          service not known", minutes earlier on the old config), and the row
+          is RETRIEVABLE in Open Brain — `thoughts` id 13314, content carrying
+          the marker, `metadata.source='agent-org'`, `metadata.kind='validation'`.
+          That last part also proves the `metadata_extra` fix: provenance now
+          lands, where the old `metadata` argument would have been dropped.
+          Verified retrievable rather than merely "returned true", per the
+          openbrain chunk-worker lesson.
+REVERT:   Restore `agent-org.env.bak-pre-openbrain-fix` from the session
+          scratchpad over `agent-org/docker/.env` and recreate agent-bridge.
+          Or set `AO_OPENBRAIN_MIRROR_ENABLED=false` to stop mirroring without
+          touching credentials.
+OPEN:     The 26 historical events remain `mirrored=false`; their provenance
+          was lost while the mirror was misconfigured. Backfilling them would
+          write 26 thoughts dated today for events dated up to 2026-08-24. That
+          is a provenance judgement for the operator, NOT a mechanical fix, so
+          it was deliberately not done. One validation-probe thought (id 13314)
+          was left in place as the audit record that the fix was verified.
+
 ## 2026-08-29 · U1 Phase 0.3 · class 2 (deploy sequencing)
 DECISION: Recreated `ao-worker-1/2` to attach the journals volumes, but
           EXTRACTED the existing journals first and restored them into the new
