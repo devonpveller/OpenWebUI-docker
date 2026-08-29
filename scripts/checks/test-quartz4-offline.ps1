@@ -55,6 +55,15 @@ function Invoke-Unit {
     -w /app denoland/deno:2.3.3 sh -c "deno check src/main.ts && deno test src/util/paths_test.ts src/util/chunk_test.ts"
   if ($?) { Pass "deno check + deno test" } else { Fail "deno check/test" }
 
+  Section "Deno: agent-memory policy (memory-plane P1.2)"
+  # Pure logic - no database, no network - so the plane's write/read policy is checkable
+  # without a stack. The invariant it pins is that a DEFAULT writeback is returned by the
+  # DEFAULT recall; upstream's Hermes integration ships the opposite and its plane is
+  # silently always empty.
+  docker run --rm -v "${rootFwd}/OB1/integrations/kubernetes-deployment:/app" `
+    -w /app denoland/deno:2.3.3 sh -c "deno check agent-memory-policy.ts agent-memory-policy.test.ts && deno test agent-memory-policy.test.ts"
+  if ($?) { Pass "agent-memory policy: deno check + test" } else { Fail "agent-memory policy: deno check/test" }
+
   Section "Caddy validate (portal route)"
   docker run --rm -e PUBLIC_DOMAIN=example.com -e ACME_EMAIL=a@b.c -e WORKBENCH_KEY=k `
     -v "${rootFwd}/config/caddy/Caddyfile:/etc/caddy/Caddyfile:ro" caddy:2.8.4-alpine `
