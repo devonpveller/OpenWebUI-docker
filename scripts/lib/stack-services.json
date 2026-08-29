@@ -18,14 +18,55 @@
     "MACHINE-VERIFIED since 2026-08-22 (D-12): the pre-commit check",
     "(check-project-configs.ps1) diffs every (container -> project) row against",
     "the rendered compose configs - the inventory can no longer drift silently.",
-    "Curated fields (critical / host_health / notes) remain hand-owned."
+    "Curated fields (critical / host_health / notes) remain hand-owned.",
+    "",
+    "'projects' CARRIES THE COMPOSE INVOCATION (2026-08-28). Each entry has:",
+    "  file     - compose file, repo-root-relative. null means the project owns",
+    "             NO services and nothing can be started in it (only 'ai-stack').",
+    "  env_file - extra --env-file, or null when the project needs none.",
+    "  compose  - the same thing spelled as a human-runnable command line.",
+    "stack-watchdog.ps1 resolves every container repair through this map, so a",
+    "plane split cannot leave remediation pointing at a project that no longer",
+    "owns the container - which is exactly what Part K did, silently, for 22",
+    "self-heal paths between 2026-08-21 and 2026-08-28."
   ],
   "projects": {
     "ai-stack": {
-      "compose": "docker compose"
+      "compose": "docker compose",
+      "file": null,
+      "env_file": null,
+      "note": "PURE NETWORK ANCHOR since Part K.5b (2026-08-21): owns the shared llm-net / app-net / default networks and ZERO services. `docker compose up -d <anything>` here exits 1 with 'no such service'. file=null marks it unstartable; no container row points at it."
+    },
+    "frontend": {
+      "compose": "docker compose -f frontend/docker-compose.yml --env-file .env",
+      "file": "frontend/docker-compose.yml",
+      "env_file": ".env"
+    },
+    "inference": {
+      "compose": "docker compose -f inference/docker-compose.yml --env-file .env",
+      "file": "inference/docker-compose.yml",
+      "env_file": ".env"
+    },
+    "memory": {
+      "compose": "docker compose -f memory/docker-compose.yml --env-file .env",
+      "file": "memory/docker-compose.yml",
+      "env_file": ".env"
+    },
+    "search": {
+      "compose": "docker compose -f search/docker-compose.yml --env-file .env",
+      "file": "search/docker-compose.yml",
+      "env_file": ".env"
+    },
+    "coder": {
+      "compose": "docker compose -f coder/docker-compose.yml --env-file .env",
+      "file": "coder/docker-compose.yml",
+      "env_file": ".env"
     },
     "open-brain": {
-      "compose": "docker compose -f OB1/docker/docker-compose.yml"
+      "compose": "docker compose -f OB1/docker/docker-compose.yml",
+      "file": "OB1/docker/docker-compose.yml",
+      "env_file": null,
+      "note": "env_file is deliberately null: compose's project directory here is OB1/docker, so it auto-loads OB1/docker/.env. Passing the ROOT .env would override it with the wrong values."
     }
   },
   "planes": {
