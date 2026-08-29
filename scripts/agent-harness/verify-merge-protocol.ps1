@@ -187,6 +187,14 @@ Check "the attestation checker exists" (Test-Path $attest)
 & $attest -Branch "work/drilla" -Base "drill/verify-d" -RepoRoot $repo | Out-Null
 Check "INACTIVE for a branch whose own hook cannot attest (exit 0)" ($LASTEXITCODE -eq 0)
 
+# The base ref must survive INTO the report. This caught a real one: a local $base variable
+# silently overwrote the $Base PARAMETER (PowerShell names are case-insensitive), so
+# rev-list ran "<filesystem path>..<branch>", matched nothing, and the checker cheerfully
+# reported "0 commits, all clean" for every branch. It only reproduced in the main checkout,
+# where --git-common-dir is relative - so every worktree test passed and it nearly shipped.
+$attestJson = (& $attest -Branch "work/drilla" -Base "drill/verify-d" -RepoRoot $repo -Json) | ConvertFrom-Json
+Check "the base ref round-trips into the report (not clobbered)" ($attestJson.base -eq "drill/verify-d") ("base=" + $attestJson.base)
+
 & $queue -Propose -Id "drill-bypass" -Anchor $anchorFile -Developer "wt-drilla" | Out-Null
 & $queue -ConfirmAnchor -Id "drill-bypass" -By "operator" | Out-Null
 & $queue -Submit -Id "drill-bypass" -Branch "work/drilla" -Developer "wt-drilla" -TestPlan $planFile 2>&1 | Out-Null
