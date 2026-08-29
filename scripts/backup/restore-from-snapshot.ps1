@@ -108,13 +108,21 @@ $catalog = [ordered]@{
     Compose = 'memory\docker-compose.yml'
     ComposeArgs = @('--env-file','.env')
   }
+  # little-coder writes ONE archive holding all five volumes as top-level directories
+  # (backup/little-coder-backup.sh: `tar czf ... -C /data .` over /data/{journals,skill,
+  # cohorts,polyglot,sessions}). This catalog used to look for five per-volume archives -
+  # little-coder-journals-*.tar.gz and friends - which NOTHING has ever produced, so
+  # discovery matched zero files and the restore aborted with "No archives discovered"
+  # while good backups sat in the directory. Fixed 2026-08-29 by describing the archive
+  # that actually exists rather than the one the catalog wished for; changing the PRODUCER
+  # instead would have left every archive already on disk and on the NAS unrestorable.
   'little-coder' = @{
     Archives = @(
-      @{ Pattern = "little-coder-journals-*.tar.gz"; Target = 'coder_little-coder-journals'; Type = 'volume-tar' }
-      @{ Pattern = "little-coder-skill-*.tar.gz";    Target = 'coder_little-coder-skill';    Type = 'volume-tar' }
-      @{ Pattern = "little-coder-cohorts-*.tar.gz";  Target = 'coder_little-coder-cohorts';  Type = 'volume-tar' }
-      @{ Pattern = "little-coder-polyglot-*.tar.gz"; Target = 'coder_little-coder-polyglot'; Type = 'volume-tar' }
-      @{ Pattern = "little-coder-sessions-*.tar.gz"; Target = 'coder_little-coder-sessions'; Type = 'volume-tar' }
+      @{ Pattern = "little-coder-backup-*.tar.gz"; Target = 'coder_little-coder-journals'; Subdir = 'journals'; Type = 'volume-tar-subdir' }
+      @{ Pattern = "little-coder-backup-*.tar.gz"; Target = 'coder_little-coder-skill';    Subdir = 'skill';    Type = 'volume-tar-subdir' }
+      @{ Pattern = "little-coder-backup-*.tar.gz"; Target = 'coder_little-coder-cohorts';  Subdir = 'cohorts';  Type = 'volume-tar-subdir' }
+      @{ Pattern = "little-coder-backup-*.tar.gz"; Target = 'coder_little-coder-polyglot'; Subdir = 'polyglot'; Type = 'volume-tar-subdir' }
+      @{ Pattern = "little-coder-backup-*.tar.gz"; Target = 'coder_little-coder-sessions'; Subdir = 'sessions'; Type = 'volume-tar-subdir' }
     )
     Stop    = @('little-coder','open-terminal','lc-egress')
     Start   = @('lc-egress','open-terminal','little-coder')
@@ -234,8 +242,13 @@ foreach ($svc in $requested) {
       Write-Log "  [MISS] $svc : no $($a.Pattern) for date $Date in $svcDir" 'WARN'
       continue
     }
-    $found += @{ Pattern = $a.Pattern; Target = $a.Target; Type = $a.Type; File = $matches[0].FullName }
-    Write-Log "  [FOUND] $svc : $($matches[0].Name)" 'OK'
+    # Subdir must be carried through: without it a volume-tar-subdir entry would reach
+    # Phase 4 with no subdirectory and restore nothing, silently - the same shape of bug
+    # this type was added to fix.
+    $found += @{ Pattern = $a.Pattern; Target = $a.Target; Type = $a.Type
+                 Subdir = $a.Subdir; File = $matches[0].FullName }
+    $what = if ($a.Subdir) { "$($matches[0].Name) [$($a.Subdir)/]" } else { $matches[0].Name }
+    Write-Log "  [FOUND] $svc : $what -> $($a.Target)" 'OK'
   }
   if ($found.Count -gt 0) { $discovered[$svc] = $found }
 }
@@ -288,7 +301,9 @@ if (-not $Apply) {
     $compose = if ($entry.Compose) { $entry.Compose } else { 'docker-compose.yml' }
     Write-Log "  Would stop: $($entry.Stop -join ', ') (via $compose)" 'PLAN'
     foreach ($a in $discovered[$svc]) {
-      Write-Log "    Would restore $($a.Type) -> $($a.Target) from $([System.IO.Path]::GetFileName($a.File))" 'PLAN'
+      $from = [System.IO.Path]::GetFileName($a.File)
+      if ($a.Subdir) { $from = "$from [$($a.Subdir)/]" }
+      Write-Log "    Would restore $($a.Type) -> $($a.Target) from $from" 'PLAN'
     }
     Write-Log "  Would start: $($entry.Start -join ', ')" 'PLAN'
   }
@@ -325,6 +340,41 @@ foreach ($svc in $restoreOrder) {
           -v "$($a.Target):/dest" `
           -v "${fileDir}:/in:ro" `
           alpine sh -c $cmd 2>&1 | ForEach-Object { Write-Log "    $_" }
+      }
+      'volume-tar-subdir' {
+        # One archive, several volumes: extract ONE top-level directory out of it into
+        # this target. Same replace-not-merge semantics as volume-tar (the destination is
+        # cleared first) - a restore is a replacement.
+        #
+        # The whole archive is unpacked to a scratch dir first rather than filtering with
+        # `tar xzf ... ./sub` or --strip-components: BusyBox tar's member matching and
+        # option support differ from GNU's, and these archives are small. Portable beats
+        # clever in the script you only run during an incident.
+        #
+        # A MISSING subdirectory is a hard error. Restoring nothing while reporting success
+        # is precisely the failure this restore type exists to remove.
+        $sub = $a.Subdir
+        Write-Log "  $svc : volume-tar-subdir $($a.Target) <- $fileBase [$sub/]"
+        if (-not $sub) {
+          Write-Log "    [ERROR] catalog entry for $($a.Target) has no Subdir" 'ERROR'
+          continue
+        }
+        $cmd = @(
+          'set -e'
+          'rm -rf /x; mkdir -p /x'
+          "tar xzf /in/$fileBase -C /x"
+          "if [ ! -d /x/$sub ]; then echo ""ERROR: '$sub' is not in this archive""; exit 1; fi"
+          'find /dest -mindepth 1 -delete'
+          "cp -a /x/$sub/. /dest/ 2>/dev/null || true"
+          'echo "restored $(find /dest -mindepth 1 | wc -l) entries"'
+        ) -join '; '
+        & docker run --rm `
+          -v "$($a.Target):/dest" `
+          -v "${fileDir}:/in:ro" `
+          alpine sh -c $cmd 2>&1 | ForEach-Object { Write-Log "    $_" }
+        if ($LASTEXITCODE -ne 0) {
+          Write-Log "    [ERROR] $svc : restoring '$sub' failed - $($a.Target) left as-is" 'ERROR'
+        }
       }
       'bind-tar' {
         Write-Log "  $svc : bind-tar $($a.Target) <- $fileBase"

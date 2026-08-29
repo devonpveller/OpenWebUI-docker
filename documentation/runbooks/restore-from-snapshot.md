@@ -205,10 +205,34 @@ Part K (2026-08-21)** — the live volumes are:
 |---|---|---|
 | openwebui | `frontend_openwebui-data` | `docker compose -f frontend/docker-compose.yml --env-file .env stop tailscale openwebui` (netns rule: tailscale first; start openwebui then tailscale) |
 | mnemory | `memory_mnemory-data` | `docker compose -f memory/docker-compose.yml --env-file .env stop mnemory mnemory-cloud-gateway` |
-| little-coder | `coder_little-coder-{journals,skill,cohorts,polyglot,sessions}` | `docker compose -f coder/docker-compose.yml --env-file .env stop little-coder open-terminal lc-egress` |
+| little-coder | `coder_little-coder-{journals,skill,cohorts,polyglot,sessions}` — **one archive, five volumes**, see below | `docker compose -f coder/docker-compose.yml --env-file .env stop little-coder open-terminal lc-egress` |
 | tailscale | bind `./data/tailscale` | frontend project, see below |
 | lm-models | bind `C:\Users\yamao\.lmstudio\models` | `docker compose -f inference/docker-compose.yml --env-file .env stop llama-cpp-upstream llama-cpp-embed-upstream` |
 | ao-journals | `agent-org_ao-worker-1-journals`, `agent-org_ao-worker-2-journals` | `docker compose -f agent-org/docker/docker-compose.yml --profile workers stop ao-worker-1 ao-worker-2` |
+
+**little-coder** is the one service whose backup is a SINGLE archive covering
+several volumes. `backup/little-coder-backup.sh` tars `/data` whole, so
+`little-coder-backup-<ts>.tar.gz` contains five top-level directories —
+`journals/ skill/ cohorts/ polyglot/ sessions/` — each of which restores into
+its own volume. `restore-from-snapshot.ps1` handles this with the
+`volume-tar-subdir` type; you do not need to unpack it by hand.
+
+> Until 2026-08-29 the restore catalog looked for five separate archives
+> (`little-coder-journals-*.tar.gz` and friends) that **nothing has ever
+> produced**, so `restore-from-snapshot.ps1 -Services little-coder` reported
+> "No archives discovered" and aborted — with good backups sitting in the
+> directory. If you are restoring from an archive older than that date, it is
+> the combined shape and the current script reads it correctly.
+
+To restore one volume by hand (the script does this for you), extract just its
+directory:
+
+```powershell
+docker run --rm -v coder_little-coder-journals:/dest `
+  -v "${PWD}\backups\little-coder:/in:ro" alpine sh -c `
+  "mkdir -p /x && tar xzf /in/little-coder-backup-<ts>.tar.gz -C /x && `
+   find /dest -mindepth 1 -delete && cp -a /x/journals/. /dest/"
+```
 
 **ao-journals** (agent-org worker task journals, added 2026-08-29 with
 memory-plane Phase 0.3): one archive per worker —
