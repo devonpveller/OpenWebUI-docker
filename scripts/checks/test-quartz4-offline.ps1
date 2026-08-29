@@ -65,20 +65,65 @@ function Invoke-Unit {
   $tmp = (Join-Path $env:TEMP "ob-initdb") -replace '\\', '/'
   Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
   New-Item -ItemType Directory $tmp -Force | Out-Null
-  $map = @(
-    @("init.sql", "10-init.sql"), @("init-extensions.sql", "20-init-extensions.sql"),
-    @("init-sources.sql", "30-init-sources.sql"), @("init-graph.sql", "40-init-graph.sql"),
-    @("init-grants.sql", "50-init-grants.sql"), @("init-source-graph.sql", "60-init-source-graph.sql"),
-    @("init-threads.sql", "70-init-threads.sql"), @("init-threads-slug.sql", "72-init-threads-slug.sql"),
-    @("init-source-revisions.sql", "80-init-source-revisions.sql"), @("init-source-retract.sql", "82-init-source-retract.sql"),
-    @("init-content-types.sql", "84-init-content-types.sql"), @("init-source-chunks.sql", "86-init-source-chunks.sql"),
-    @("init-import-jobs.sql", "88-init-import-jobs.sql")
-  )
-  foreach ($m in $map) { Copy-Item "OB1/docker/$($m[0])" (Join-Path $tmp $m[1]) }
+  # THE CHAIN IS DERIVED FROM COMPOSE, never hardcoded here.
+  #
+  # It used to be a literal list, and it had silently gone stale: it stopped at
+  # 88-init-import-jobs while compose mounted twenty files. So this harness was proving
+  # "fresh apply works" for a chain that was not the real one - seven migrations, including
+  # every one added since, were never exercised. A test that checks a copy of reality
+  # eventually checks something reality no longer resembles.
+  $map = @()
+  foreach ($m in ([regex]'\./(init[a-z0-9.\-]*\.sql):/docker-entrypoint-initdb\.d/([0-9a-z]+-init[a-z0-9.\-]*\.sql)').Matches((Get-Content -Raw $ob1))) {
+    $map += , @($m.Groups[1].Value, $m.Groups[2].Value)
+  }
+  if ($map.Count -lt 1) { Fail "could not parse any initdb mounts out of $ob1" }
+  else { Pass "initdb chain derived from compose ($($map.Count) migrations)" }
+
+  # INTEGRITY, BOTH DIRECTIONS. Each half is a real failure that has happened here:
+  #   - a mount naming a missing file breaks `up` on a FRESH volume only - discovered at
+  #     the worst possible moment, during a rebuild;
+  #   - a migration applied by hand to the live DB but never mounted means a rebuilt
+  #     database silently differs from the running one. Two files were in exactly that
+  #     state (agent-memory, and wiki-pages-links) before this check existed.
+  $missingFiles = @($map | Where-Object { -not (Test-Path "OB1/docker/$($_[0])") } | ForEach-Object { $_[0] })
+  if ($missingFiles.Count) { Fail ("compose mounts files that do not exist: " + ($missingFiles -join ", ")) }
+  else { Pass "every initdb mount points at a real file" }
+
+  $mounted = @($map | ForEach-Object { $_[0] })
+  $unmounted = @(Get-ChildItem "OB1/docker" -Filter "init*.sql" | Select-Object -ExpandProperty Name |
+                 Where-Object { $mounted -notcontains $_ })
+  if ($unmounted.Count) {
+    Fail ("init*.sql present but NOT in the initdb chain (a fresh volume would not get these): " +
+          ($unmounted -join ", "))
+  } else { Pass "every OB1/docker/init*.sql is mounted in the chain" }
+
+  foreach ($m in $map) {
+    if (Test-Path "OB1/docker/$($m[0])") { Copy-Item "OB1/docker/$($m[0])" (Join-Path $tmp $m[1]) }
+  }
   docker rm -f ob-initdb-test 2>$null | Out-Null
   docker run -d --name ob-initdb-test -e POSTGRES_DB=openbrain -e POSTGRES_USER=postgres `
     -e POSTGRES_PASSWORD=test -v "${tmp}:/docker-entrypoint-initdb.d:ro" pgvector/pgvector:pg16 | Out-Null
-  Start-Sleep 18
+  # POLL, do not sleep a magic number. The chain grew from 13 files to 20 and the old
+  # fixed 18s became a coin flip: too short and the harness greps a half-finished log and
+  # calls it clean. Wait for postgres to announce readiness, which is the actual signal
+  # that initdb finished.
+  # WAIT FOR THE RIGHT MARKER. "database system is ready to accept connections" appears
+  # TWICE: once for the TEMPORARY server postgres runs the initdb scripts against, and
+  # again when the real server starts. Polling for it catches the first one - i.e. BEFORE
+  # the migrations have run - and every verify query then reports 0 for everything the
+  # chain was supposed to create. (The previous fixed `Start-Sleep 18` had the same race,
+  # just less visibly; it only ever passed because nothing downstream was asserted.)
+  # "PostgreSQL init process complete" is the entrypoint's own end-of-initdb marker.
+  $ready = $false
+  for ($i = 0; $i -lt 90; $i++) {
+    Start-Sleep 2
+    if ((docker logs ob-initdb-test 2>&1 | Select-String -Quiet "PostgreSQL init process complete")) {
+      $ready = $true; break
+    }
+  }
+  if ($ready) { Pass "initdb finished (entrypoint reported init process complete)" }
+  else { Fail "initdb did not complete within 180s - results below are not trustworthy" }
+
   $errLines = docker logs ob-initdb-test 2>&1 | Select-String -Pattern "ERROR|FATAL" |
     Where-Object { $_ -notmatch "does not exist, skipping" }
   if ($errLines) { Write-Host ($errLines -join "`n") -ForegroundColor Red; Fail "init had errors" }
@@ -91,9 +136,26 @@ UNION ALL SELECT 'content_types_rows',count(*) FROM content_types
 UNION ALL SELECT 'content_type_fk',count(*) FROM pg_constraint WHERE conname='sources_content_type_fkey'
 UNION ALL SELECT 'old_check_gone(0)',count(*) FROM pg_constraint WHERE conname='sources_content_type_check'
 UNION ALL SELECT 'match_source_chunks',count(*) FROM pg_proc WHERE proname='match_source_chunks'
-UNION ALL SELECT 'import_jobs',count(*) FROM information_schema.tables WHERE table_name='import_jobs';
+UNION ALL SELECT 'import_jobs',count(*) FROM information_schema.tables WHERE table_name='import_jobs'
+UNION ALL SELECT 'agent_memory_tables(8)',count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name LIKE 'agent_memor%'
+UNION ALL SELECT 'agent_memory_trigger(1)',count(*) FROM pg_trigger WHERE tgname='trg_agent_memories_updated_at'
+UNION ALL SELECT 'agent_memory_functions(2)',count(*) FROM pg_proc WHERE proname IN ('agent_memories_set_updated_at','agent_memory_hash_text')
+UNION ALL SELECT 'wiki_links_gin(1)',count(*) FROM pg_indexes WHERE indexname='idx_wiki_pages_links_gin';
 "@
   Write-Host $verify
+  # The counts above are printed for the operator, but the ones that must HOLD are asserted -
+  # a verify query nobody checks is decoration. agent-memory is memory-plane P1.1; the wiki
+  # links GIN index is what stops every graph render sequential-scanning ~41k rows.
+  # Normalise first: `docker exec` may hand back one multi-line string or an array of
+  # lines depending on how it is invoked, and matching against the wrong one silently
+  # matches nothing - which reads exactly like a failing assertion.
+  $verifyLines = (($verify | Out-String) -split "`r?`n") | Where-Object { $_.Trim() }
+  foreach ($expect in @(@('agent_memory_tables(8)', '8'), @('agent_memory_trigger(1)', '1'),
+                        @('agent_memory_functions(2)', '2'), @('wiki_links_gin(1)', '1'))) {
+    $line = @($verifyLines | Where-Object { $_.StartsWith($expect[0] + '|') }) | Select-Object -First 1
+    if ($line -and (($line -split '\|')[1].Trim() -eq $expect[1])) { Pass "fresh volume: $($expect[0])" }
+    else { Fail "fresh volume: $($expect[0]) - got '$line'" }
+  }
   docker rm -f ob-initdb-test 2>$null | Out-Null
 }
 
