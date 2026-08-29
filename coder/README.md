@@ -202,32 +202,40 @@ anchor -> inference -> frontend -> memory -> search -> CODER -> ob1 -> agent-org
 
 ## Gotchas (each verified against this tree, 2026-08-28)
 
-1. **Bare `docker compose` against the root project is a no-op — and it is a
-   CLASS of bug in the watchdog, not one instance.** The root project has been a
+1. **Bare `docker compose` against the root project is a no-op — FIXED in the
+   watchdog on 2026-08-28, still live elsewhere.** The root project has been a
    pure network anchor with **0 services** since K.5b
    (`docker compose --env-file .env config --services` at the root prints
    nothing), so any `docker compose <verb> <service>` without
-   `-f <plane>/docker-compose.yml` silently does nothing. In
-   `scripts/checks/stack-watchdog.ps1` the surviving pre-K call sites are:
+   `-f <plane>/docker-compose.yml` silently does nothing — and it fails
+   *silently*, because an un-redirected native stderr does not throw under
+   `$ErrorActionPreference = "Stop"` in PS 5.1 and the old code never read
+   `$LASTEXITCODE`.
 
-   | Line | Call | Hits |
-   |---|---|---|
-   | 477 | `docker compose up -d open-terminal` (`Repair-OpenTerminal`) | this plane's executor |
-   | 511 | `docker compose up -d $ServiceName` (`Confirm-AuxiliaryContainer`) | **generic** — every auxiliary service it is asked to repair, including `little-coder`, `lc-egress` and `little-coder-backup` |
-   | 612 | `docker compose up -d llama-cpp-embed-upstream` | the inference plane |
-   | 615 | `docker compose restart llama-cpp-embed-upstream` | the inference plane |
+   In `scripts/checks/stack-watchdog.ps1` this is **fixed**: every repair now
+   routes through `Invoke-PlaneCompose`, which resolves the owning compose
+   project from `scripts/lib/stack-services.json` (whose container→project rows
+   are machine-verified against the rendered compose configs by the pre-commit
+   `check-project-configs.ps1`). The four former call sites — L477
+   `Repair-OpenTerminal`, L511 `Confirm-AuxiliaryContainer` (**generic**: 19 call
+   sites including `little-coder`, `lc-egress` and `little-coder-backup`), and
+   L612/L615 `Repair-LlamaCppEmbed` — were **22 dead self-heal paths** between
+   2026-08-21 and 2026-08-28. `scripts/checks/check-watchdog-repair-targets.ps1`
+   is the regression guard.
 
-   Other call sites in the same file *do* pass `-f` (e.g. lines 333/345 for
-   inference, 399–430 for the tailscale netns dance), and `Test-ServiceHealth`
-   was migrated to name-based `docker inspect` at K.10 precisely because of this
-   — so **detection** was fixed and **remediation** was not. Combined with the
-   `stack.ps1 health` gap noted under `open-terminal:8000` above: the watchdog
-   can see a dead executor and cannot restart it, and the health sweep cannot
-   see it at all. Restart it by hand with
+   The same pass fixed a second defect in the same half-migration: two call sites
+   passed the compose SERVICE keys `redis` and `gateway` to a helper that looks
+   containers up by NAME with `docker inspect`, so `search-redis` and
+   `search-gateway` could never read healthy either.
+
+   **`scripts/recovery/emergency-recovery.ps1` still has this defect class** — 16
+   bare `docker compose` invocations, of which ~10 name a service against the
+   root project. That is a separate item; what those calls do to that script's
+   control flow has not been verified. Manual restart of this plane's executor
+   remains
    `docker compose -f coder/docker-compose.yml --env-file .env up -d open-terminal`.
-   *(Not fixed here — this was a documentation-only change. The operator's
-   uncommitted edit to this file is an unrelated DST fix, so the gotcha is live,
-   not stale.)*
+   The `stack.ps1 health` gap noted under `open-terminal:8000` above is also
+   still open: the health sweep cannot see this container at all.
 
 2. **agent-org consumes this plane's IMAGES, not its daemon.** `ao-worker-N` is
    `image: little-coder:local` with **no build stanza**, and `ao-ot-N` is

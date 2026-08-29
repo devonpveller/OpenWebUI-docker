@@ -77,6 +77,118 @@ function Write-LogEntry {
     }
 }
 
+# --- repair ROUTING: which compose project actually owns this container? -----
+# (2026-08-28) Part K split the stack into per-plane compose PROJECTS and left
+# the root `ai-stack` project a PURE NETWORK ANCHOR with ZERO services
+# (`docker compose config --services` at the repo root prints nothing). The
+# DETECTION half of this monitor was migrated at K.10 - Test-ServiceHealth below
+# does a name-based `docker inspect` - but the REMEDIATION half was not: every
+# repair still issued a bare `docker compose up -d <name>`, which resolves to the
+# anchor and exits 1 with "no such service".
+#
+# That failure was SILENT for three compounding reasons, all verified 2026-08-28:
+#   1. the command targets a project that cannot see the container, so nothing
+#      is started;
+#   2. an UN-REDIRECTED native stderr write does NOT throw under
+#      $ErrorActionPreference = "Stop" in PS 5.1, so the surrounding catch block
+#      never fired; and
+#   3. the old code piped stdout to Out-Null and never read $LASTEXITCODE, so
+#      the log only ever said "recovery failed" with no hint that the repair
+#      command had not run at all.
+# 22 self-heal paths were dead this way between 2026-08-21 and 2026-08-28.
+#
+# The container -> project mapping is NOT duplicated here. scripts\lib\stack-services.json
+# is the canonical inventory and its (container -> project) rows are machine-verified
+# against the rendered compose configs by the pre-commit check
+# scripts\checks\check-project-configs.ps1, so it cannot drift silently. A container
+# missing from it fails LOUDLY (an ERROR naming the container) instead of no-op'ing.
+$Script:RepairTargets = $null
+
+function Get-RepairTargetMap {
+    [CmdletBinding()]
+    param()
+    if ($null -ne $Script:RepairTargets) { return $Script:RepairTargets }
+
+    $Map = @{}
+    $InvPath = Join-Path $PROJECT_DIR 'scripts\lib\stack-services.json'
+    try {
+        $Inv = Get-Content -Path $InvPath -Raw -ErrorAction Stop | ConvertFrom-Json
+    } catch {
+        Write-LogEntry "Service inventory unreadable ($InvPath): $($_.Exception.Message) - container repairs cannot be routed" "ERROR"
+        $Script:RepairTargets = $Map
+        return $Map
+    }
+
+    $Projects = @{}
+    foreach ($Prop in $Inv.projects.PSObject.Properties) { $Projects[$Prop.Name] = $Prop.Value }
+
+    foreach ($Plane in $Inv.planes.PSObject.Properties) {
+        foreach ($Row in $Plane.Value) {
+            if (-not $Row.container -or -not $Row.project) { continue }
+            if (-not $Projects.ContainsKey($Row.project)) { continue }
+            $Proj = $Projects[$Row.project]
+            # file = null marks a project that owns no services (the anchor).
+            # Such a project can never start anything, so it is not a repair target.
+            if (-not $Proj.file) { continue }
+
+            # Absolute paths: this function must not depend on the caller's CWD.
+            # Invoke-HealthCheck does Set-Location $PROJECT_DIR, but a repair
+            # helper that only works from one directory is a trap for the next
+            # caller.
+            $ComposeArgs = @('-f', (Join-Path $PROJECT_DIR ($Proj.file.Replace('/', [string][char]92))))
+            if ($Proj.env_file) {
+                $ComposeArgs += @('--env-file', (Join-Path $PROJECT_DIR ($Proj.env_file.Replace('/', [string][char]92))))
+            }
+            # 'service' is present only where the compose SERVICE key differs
+            # from the container name (search: redis -> search-redis,
+            # gateway -> search-gateway). `docker compose` wants the service key.
+            $Service = if ($Row.service) { [string]$Row.service } else { [string]$Row.container }
+
+            $Map[[string]$Row.container] = [pscustomobject]@{
+                Container   = [string]$Row.container
+                Project     = [string]$Row.project
+                Service     = $Service
+                ComposeArgs = $ComposeArgs
+            }
+        }
+    }
+    $Script:RepairTargets = $Map
+    return $Map
+}
+
+# Run a compose verb against the project that OWNS $Container, by CONTAINER name.
+# $Action is the verb plus its flags, e.g. @('up','-d') or @('restart'); the
+# resolved service key is appended. Returns $true only when docker exits 0.
+function Invoke-PlaneCompose {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Container,
+        [Parameter(Mandatory)][string[]]$Action
+    )
+    $Target = (Get-RepairTargetMap)[$Container]
+    if (-not $Target) {
+        Write-LogEntry ("Cannot repair '{0}': no compose project owns it in scripts\lib\stack-services.json. Add the row (documentation\runbooks\SERVICE-LIFECYCLE.md step 8) - a repair cannot be routed without it." -f $Container) "ERROR"
+        return $false
+    }
+
+    $Argv = @('compose') + $Target.ComposeArgs + $Action + @($Target.Service)
+    # stderr is deliberately NOT redirected: under $ErrorActionPreference="Stop"
+    # a REDIRECTED native stderr write becomes a terminating NativeCommandError
+    # in PS 5.1. $LASTEXITCODE is the reliable signal, and reading it is exactly
+    # what the pre-2026-08-28 code failed to do.
+    & docker @Argv | Out-Null
+    $Code = $LASTEXITCODE
+
+    if ($Code -ne 0) {
+        Write-LogEntry ("compose '{0}' FAILED for '{1}' (project {2}, service {3}) - exit {4}: docker {5}" -f `
+            ($Action -join ' '), $Container, $Target.Project, $Target.Service, $Code, ($Argv -join ' ')) "ERROR"
+        return $false
+    }
+    Write-LogEntry ("compose '{0}' issued for '{1}' (project {2}, service {3})" -f `
+        ($Action -join ' '), $Container, $Target.Project, $Target.Service) "DEBUG"
+    return $true
+}
+
 # Function to check Docker Compose service health
 function Test-ServiceHealth {
     param($ServiceName)
@@ -306,7 +418,12 @@ function Test-EntrypointHealth {
             $Logs = cmd /c "docker logs tailscale --tail 5 2>&1" | Out-String
             if ($Logs -match "no such file or directory" -and $Logs -match "entrypoint") {
                 Write-LogEntry "CRITICAL: Entrypoint script not found in container. Rebuild required." "ERROR"
-                Write-LogEntry "Run: docker compose build --no-cache tailscale" "INFO"
+                Write-LogEntry "Run: docker compose -f frontend\docker-compose.yml --env-file .env build --no-cache tailscale" "INFO"
+                # (the plane file is REQUIRED: tailscale lives in the frontend
+                #  project, and a bare `docker compose build` would hit the root
+                #  anchor, which declares no services - the operator would be
+                #  handed a command that cannot work, on the one CRITICAL path
+                #  where they most need it to.)
                 return $false
             }
         } catch {
@@ -474,7 +591,10 @@ function Test-OpenTerminalHealth {
 function Repair-OpenTerminal {
     Write-LogEntry "Attempting to restart open-terminal container..." "WARN"
     try {
-        docker compose up -d open-terminal | Out-Null
+        if (-not (Invoke-PlaneCompose -Container 'open-terminal' -Action @('up','-d'))) {
+            Write-LogEntry "Open Terminal recovery could not be ATTEMPTED (see the ERROR above) - not waiting on a command that never ran" "ERROR"
+            return $false
+        }
         Start-Sleep 10
         if (Test-OpenTerminalHealth) {
             Write-LogEntry "Open Terminal recovered successfully" "SUCCESS"
@@ -496,28 +616,40 @@ function Repair-OpenTerminal {
 # Used for mnemory and the backup sidecars —
 # none are required for the core OpenWebUI/Tailscale/LLM path, so failures
 # are logged but do not fail the overall health check.
+#
+# THE PARAMETER IS A CONTAINER NAME, NOT A COMPOSE SERVICE KEY (renamed
+# 2026-08-28). It was called -ServiceName while Test-ServiceHealth looked it up
+# with `docker inspect`, which takes CONTAINER names - and the misnomer did real
+# damage: two call sites passed the search plane's compose SERVICE keys, `redis`
+# and `gateway`, whose containers are named search-redis and search-gateway.
+# `docker inspect redis` returns "no such object", so those two could never read
+# healthy and their repair could never have worked. Where the two differ, the
+# service key comes from stack-services.json via Invoke-PlaneCompose.
 function Confirm-AuxiliaryContainer {
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory)][string]$ServiceName,
+        [Parameter(Mandatory)][string]$Container,
         [int]$RestartWaitSeconds = 15
     )
-    if (Test-ServiceHealth $ServiceName) {
-        Write-LogEntry "$ServiceName container healthy" "DEBUG"
+    if (Test-ServiceHealth $Container) {
+        Write-LogEntry "$Container container healthy" "DEBUG"
         return $true
     }
-    Write-LogEntry "$ServiceName is unhealthy or stopped, attempting recovery..." "WARN"
+    Write-LogEntry "$Container is unhealthy or stopped, attempting recovery..." "WARN"
     try {
-        docker compose up -d $ServiceName | Out-Null
+        if (-not (Invoke-PlaneCompose -Container $Container -Action @('up','-d'))) {
+            Write-LogEntry "$Container recovery could not be ATTEMPTED (see the ERROR above) - not waiting on a command that never ran" "WARN"
+            return $false
+        }
         Start-Sleep $RestartWaitSeconds
-        if (Test-ServiceHealth $ServiceName) {
-            Write-LogEntry "$ServiceName recovered successfully" "SUCCESS"
+        if (Test-ServiceHealth $Container) {
+            Write-LogEntry "$Container recovered successfully" "SUCCESS"
             return $true
         }
-        Write-LogEntry "$ServiceName recovery did not converge - feature may be degraded" "WARN"
+        Write-LogEntry "$Container recovery did not converge - feature may be degraded" "WARN"
         return $false
     } catch {
-        Write-LogEntry "$ServiceName recovery error: $($_.Exception.Message)" "WARN"
+        Write-LogEntry "$Container recovery error: $($_.Exception.Message)" "WARN"
         return $false
     }
 }
@@ -609,10 +741,10 @@ function Repair-LlamaCppEmbed {
     try {
         if (-not (Test-ServiceHealth "llama-cpp-embed-upstream")) {
             Write-LogEntry "llama-cpp-embed-upstream container not running, starting..." "WARN"
-            docker compose up -d llama-cpp-embed-upstream | Out-Null
+            Invoke-PlaneCompose -Container 'llama-cpp-embed-upstream' -Action @('up','-d') | Out-Null
         } else {
             Write-LogEntry "llama-cpp-embed-upstream running but unresponsive, restarting..." "WARN"
-            docker compose restart llama-cpp-embed-upstream | Out-Null
+            Invoke-PlaneCompose -Container 'llama-cpp-embed-upstream' -Action @('restart') | Out-Null
         }
 
         # Wait for the API to come back. bge-m3 model load is fast, but allow
@@ -1453,13 +1585,13 @@ function Invoke-HealthCheck {
     # Verify remaining compose containers (non-critical — log + attempt recovery
     # but do not fail the overall health check). Order matters: mnemory depends
     # on llama-cpp + llama-cpp-embed, which are confirmed healthy above.
-    Confirm-AuxiliaryContainer -ServiceName "mnemory"            -RestartWaitSeconds 20 | Out-Null
-    Confirm-AuxiliaryContainer -ServiceName "mnemory-backup"      -RestartWaitSeconds 10 | Out-Null
-    Confirm-AuxiliaryContainer -ServiceName "openwebui-backup"    -RestartWaitSeconds 10 | Out-Null
+    Confirm-AuxiliaryContainer -Container "mnemory"            -RestartWaitSeconds 20 | Out-Null
+    Confirm-AuxiliaryContainer -Container "mnemory-backup"      -RestartWaitSeconds 10 | Out-Null
+    Confirm-AuxiliaryContainer -Container "openwebui-backup"    -RestartWaitSeconds 10 | Out-Null
     # surrealdb has no HTTP healthcheck (WS-only); just verify the container is up.
     # open_notebook gets a real API probe below — surrealdb must be up first since
     # open_notebook depends on it.
-    Confirm-AuxiliaryContainer -ServiceName "surrealdb"           -RestartWaitSeconds 10 | Out-Null
+    Confirm-AuxiliaryContainer -Container "surrealdb"           -RestartWaitSeconds 10 | Out-Null
 
     # Test open-notebook API independently (separate from running-state check —
     # the FastAPI process can be unresponsive while the container is still up).
@@ -1472,9 +1604,13 @@ function Invoke-HealthCheck {
     }
 
     # --- Private web-search gateway plane (SearXNG-over-Tor) — non-critical ---
-    # Compose SERVICE keys differ from container names here: service tor ->
-    # redis -> search-redis, gateway -> search-gateway (tor retired 2026-08-21). Probe /readyz first (covers the whole plane); only ensure the
-    # individual containers if it is not ready.
+    # Compose SERVICE keys differ from CONTAINER names here (redis ->
+    # search-redis, gateway -> search-gateway; tor retired 2026-08-21). These
+    # calls take CONTAINER names - until 2026-08-28 they passed the service keys
+    # instead, so `docker inspect` never resolved them. The service key is looked
+    # up from stack-services.json when the repair actually runs. Probe /readyz
+    # first (covers the whole plane); only ensure the individual containers if it
+    # is not ready.
     if (Test-SearchGatewayHealth) {
         Write-LogEntry "search-gateway /healthz OK" "DEBUG"
         # Deep readiness is informational only (slow/Tor-flaky); never drives a restart.
@@ -1483,39 +1619,39 @@ function Invoke-HealthCheck {
         }
     } else {
         Write-LogEntry "search-gateway /healthz down, ensuring web-search plane containers..." "WARN"
-        Confirm-AuxiliaryContainer -ServiceName "redis"   -RestartWaitSeconds 10 | Out-Null
-        Confirm-AuxiliaryContainer -ServiceName "searxng" -RestartWaitSeconds 15 | Out-Null
-        Confirm-AuxiliaryContainer -ServiceName "gateway" -RestartWaitSeconds 15 | Out-Null
+        Confirm-AuxiliaryContainer -Container "search-redis"   -RestartWaitSeconds 10 | Out-Null
+        Confirm-AuxiliaryContainer -Container "searxng"        -RestartWaitSeconds 15 | Out-Null
+        Confirm-AuxiliaryContainer -Container "search-gateway" -RestartWaitSeconds 15 | Out-Null
     }
 
     # --- little-coder plane (autonomous coding agent) — non-critical ---
     # open-terminal (checked above) is its workspace; these are the agent + its
     # MCP-as-OpenAPI bridge + the egress proxy.
-    Confirm-AuxiliaryContainer -ServiceName "little-coder" -RestartWaitSeconds 15 | Out-Null
-    Confirm-AuxiliaryContainer -ServiceName "lc-egress"    -RestartWaitSeconds 10 | Out-Null
+    Confirm-AuxiliaryContainer -Container "little-coder" -RestartWaitSeconds 15 | Out-Null
+    Confirm-AuxiliaryContainer -Container "lc-egress"    -RestartWaitSeconds 10 | Out-Null
 
     # --- mnemory MCP gateway (the bridge clients reach; mnemory itself above) ---
-    Confirm-AuxiliaryContainer -ServiceName "mnemory-cloud-gateway" -RestartWaitSeconds 10 | Out-Null
+    Confirm-AuxiliaryContainer -Container "mnemory-cloud-gateway" -RestartWaitSeconds 10 | Out-Null
 
     # --- inference gateway plane (LiteLLM front door + admission queue) ---
     # ALL inference flows through llm-gateway (the llama-cpp:8080 alias) and
     # llm-queue. Test-LlamaCppConnectivity above exercises the data path;
     # these catch the db/UI sidecars the path test can't see.
-    Confirm-AuxiliaryContainer -ServiceName "llm-queue"      -RestartWaitSeconds 15 | Out-Null
-    Confirm-AuxiliaryContainer -ServiceName "llm-gateway"    -RestartWaitSeconds 20 | Out-Null
-    Confirm-AuxiliaryContainer -ServiceName "llm-gateway-db" -RestartWaitSeconds 15 | Out-Null
-    Confirm-AuxiliaryContainer -ServiceName "llm-gateway-ui" -RestartWaitSeconds 15 | Out-Null
+    Confirm-AuxiliaryContainer -Container "llm-queue"      -RestartWaitSeconds 15 | Out-Null
+    Confirm-AuxiliaryContainer -Container "llm-gateway"    -RestartWaitSeconds 20 | Out-Null
+    Confirm-AuxiliaryContainer -Container "llm-gateway-db" -RestartWaitSeconds 15 | Out-Null
+    Confirm-AuxiliaryContainer -Container "llm-gateway-ui" -RestartWaitSeconds 15 | Out-Null
 
     # --- remaining main-stack backup sidecars (cron loops; mnemory-backup and
     # openwebui-backup are confirmed above; portal backups (caddy/authelia) are
     # deliberately NOT here — the portal has its own lifecycle (portal-on/off)
     # and must not be auto-started; OB/agent-org backups live in their own
     # Invoke-*Health blocks. Test-BackupRecency below watches everyone's OUTPUT.
-    Confirm-AuxiliaryContainer -ServiceName "little-coder-backup"  -RestartWaitSeconds 10 | Out-Null
-    Confirm-AuxiliaryContainer -ServiceName "llm-gateway-backup"   -RestartWaitSeconds 10 | Out-Null
-    Confirm-AuxiliaryContainer -ServiceName "lm-models-backup"     -RestartWaitSeconds 10 | Out-Null
-    Confirm-AuxiliaryContainer -ServiceName "tailscale-backup"     -RestartWaitSeconds 10 | Out-Null
-    Confirm-AuxiliaryContainer -ServiceName "open-notebook-backup" -RestartWaitSeconds 10 | Out-Null
+    Confirm-AuxiliaryContainer -Container "little-coder-backup"  -RestartWaitSeconds 10 | Out-Null
+    Confirm-AuxiliaryContainer -Container "llm-gateway-backup"   -RestartWaitSeconds 10 | Out-Null
+    Confirm-AuxiliaryContainer -Container "lm-models-backup"     -RestartWaitSeconds 10 | Out-Null
+    Confirm-AuxiliaryContainer -Container "tailscale-backup"     -RestartWaitSeconds 10 | Out-Null
+    Confirm-AuxiliaryContainer -Container "open-notebook-backup" -RestartWaitSeconds 10 | Out-Null
 
     # --- Open Brain stack (SEPARATE compose project) incl. mcp stale-pool guard ---
     Invoke-OpenBrainHealth
