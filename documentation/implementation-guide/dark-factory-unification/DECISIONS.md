@@ -88,3 +88,76 @@ CITED:    §C.2 class 3 — no technical winner, the operator may prefer the roo
           file to mirror every key. Defaulted to "the file the compose project
           reads" and kept moving.
 REVERT:   Add the two keys to the root `.env.example`; nothing consumes them.
+
+---
+
+## 2026-08-29 · U1/U2 · OPERATOR OVERRIDE (not a class-2 call)
+DECISION: Self-reviewed and merged `work/dfu-mem0` and `work/dfu-anchor` into
+          `refactor/ai-stack-cleanup`, bypassing BOTH the anchor gate (neither
+          item was operator-confirmed) and separation of duties (neither was
+          tested by a second party).
+CITED:    Explicit operator instruction, 2026-08-29: "You're free to review,
+          merge, then confirm success with validation." NOT §C — §C.2 lists
+          merges to `main` as class 4 and says nothing that authorises
+          self-merge to the work line; this is the operator overriding their
+          own pipeline, recorded as such. The concern was raised once and
+          reaffirmed, which per house rules makes it their decision.
+          The queue items were deliberately NOT marked `merged`: they never
+          went through the pipeline, and recording otherwise would corrupt the
+          one record that says what the pipeline actually did. They remain
+          `anchor-draft` with the work merged — accurate, if untidy.
+          No reviewer identity was invented to satisfy the queue's exit-4
+          check; passing a different worktree id would have been gaming a
+          mechanical guard, which is the failure class this plan exists to stop.
+REVERT:   `git revert -m 1 5c18c26` and `git revert -m 1 0f528d1`, in that
+          order. Both merges are --no-ff, so each is one revertible commit.
+
+## 2026-08-29 · U1 Phase 0 · ANCHOR CONTRADICTED BY REALITY (§C.1 amendment)
+DECISION: The dfu-mem0 anchor's goal says the work lands "with no change to
+          live behaviour, because every flag stays off." **That premise is
+          false in production.** `agent-org/docker/.env` sets
+          `AO_OPENBRAIN_MIRROR_ENABLED=true`, and the RUNNING agent-bridge has
+          it true. The mirror is not dormant — it has been enabled and failing
+          silently. Evidence: 26 events of mirrorable kinds in
+          `agent-bridge-db`, every one `mirrored=false`; last such event
+          2026-08-24 (which is why a 72h log window showed no warnings).
+          Amended on the record and continued, per §C.1. The work is MORE
+          valuable than the anchor claimed, not less: it repairs a live path,
+          not a hypothetical one.
+CITED:    §C.1 (amend on the record, log it, continue). Root cause of the bad
+          premise: I verified the code default (`config.py`) and the compose
+          default (`${...:-false}`) and never opened the prod `.env` — exactly
+          the trap CLAUDE.md names ("verify against gitignored evidence …
+          `.env*` values are where 'zero references' verdicts die").
+REVERT:   Nothing to revert; this is a correction to the record, not a change.
+
+## 2026-08-29 · U1 Phase 0 · class 4 — NOT DONE, handed to the operator
+DECISION: Did NOT repoint production's `AO_OPENBRAIN_URL` at
+          `http://openbrain-mcp:8000`, even though that is the fix and the
+          merge is now live. Reason: the prod `AO_OPENBRAIN_KEY` is the
+          GATEWAY key (`gw-` prefix) and does not equal `MCP_ACCESS_KEY`, so
+          repointing the URL without also swapping the credential would turn a
+          silent connect-failure into a silent 401. Swapping it is a
+          credential change.
+CITED:    §C.2 class 4 — "Anything touching the personal data plane,
+          credentials, or secret values." The operator's grants this session
+          cover merging and container restarts/rebuilds; neither covers
+          rotating a secret into a new service.
+REVERT:   n/a (nothing done). To ACT: set both
+          `AO_OPENBRAIN_URL=http://openbrain-mcp:8000` and
+          `AO_OPENBRAIN_KEY=<MCP_ACCESS_KEY from OB1/docker/.env>` in
+          `agent-org/docker/.env`, recreate agent-bridge, then confirm a
+          mirrorable event flips `mirrored` to true.
+
+## 2026-08-29 · U1 Phase 0.3 · class 2 (deploy sequencing)
+DECISION: Recreated `ao-worker-1/2` to attach the journals volumes, but
+          EXTRACTED the existing journals first and restored them into the new
+          volumes, fixing ownership to `lc` (10002:10002) afterwards.
+CITED:    §C.2 class 2 + the operator's container grant ("be precise with the
+          containers"). A plain `up -d` would have silently destroyed 156K and
+          236K of journals — six days of corpus living on the containers'
+          writable layer, which is the very hole 0.3 exists to close. Doing the
+          upgrade carelessly would have caused the loss it prevents.
+REVERT:   Remove the two volume lines + the two sidecars from the compose file
+          and recreate; the rescued copies also remain under the session
+          scratchpad `journal-rescue/`.
