@@ -113,6 +113,11 @@ try {
     # agent-org — the two authoritative Postgres stores.
     'agent-bridge-db-data'   = 'agent-bridge-db-backup'
     'mattermost-db-data'     = 'mattermost-db-backup'
+    # agent-org worker journals (memory-plane Phase 0.3) - the append-only evidence
+    # corpus. NOT excluded like ao-worker-*-sessions: sessions regenerate per effort,
+    # journals do not. One sidecar PER VOLUME so each archive restores 1:1.
+    'ao-worker-1-journals'   = 'ao-worker-1-journals-backup'
+    'ao-worker-2-journals'   = 'ao-worker-2-journals-backup'
   }
 
   # ----- Pre-flight: ensure ./backups/<service>/ dirs exist ----------
@@ -120,7 +125,8 @@ try {
     'caddy', 'authelia', 'mnemory', 'openwebui', 'little-coder',
     'openbrain-db', 'openbrain-wiki', 'open-notebook',
     'tailscale', 'lm-models',
-    'agent-bridge-db', 'mattermost-db'
+    'agent-bridge-db', 'mattermost-db',
+    'ao-worker-1-journals', 'ao-worker-2-journals'
   )
   $missingDirs = @()
   foreach ($d in $expectedBackupDirs) {

@@ -135,9 +135,11 @@ services:
       # semaphore: no live GPU-occupancy signal (/slots dead on llama-swap — C6).
       AO_MAX_CONCURRENT_WORKERS: ${AO_MAX_CONCURRENT_WORKERS:-1}
       AO_WORKER_INSTANCE_URLS: ${AO_WORKER_INSTANCE_URLS:-}
-      # Audit mirror to Open Brain (P6.2) — off unless the operator wires the OB gateway.
+      # Audit mirror to Open Brain (P6.2) — off unless the operator turns it on (an ops step
+      # after a live smoke). Target is openbrain-mcp, the FIRST-PARTY lane we share llm-net
+      # with; openbrain-gateway is the cloud door and is obnet-only, i.e. unreachable here.
       AO_OPENBRAIN_MIRROR_ENABLED: ${AO_OPENBRAIN_MIRROR_ENABLED:-false}
-      AO_OPENBRAIN_URL: ${AO_OPENBRAIN_URL:-http://openbrain-gateway:8061}
+      AO_OPENBRAIN_URL: ${AO_OPENBRAIN_URL:-http://openbrain-mcp:8000}
       AO_OPENBRAIN_KEY: ${AO_OPENBRAIN_KEY:-}
       # Comms model (COMMS-MODEL — channel = project, effort = thread). Defaults are safe;
       # set AO_DEFAULT_REPO to point efforts at a real project channel (#proj-<repo-slug>).
@@ -308,6 +310,11 @@ services:
       - ../agent-bridge/worker-configs/worker-1:/app/config:ro
       - ao-worker-1-workspace:/workspace
       - ao-worker-1-sessions:/var/lib/little-coder/sessions
+      # Append-only task journals (little-coder design §4; the config's journals.dir).
+      # Without this mount they land in the container's writable layer and a recreate
+      # deletes them — the evidence corpus the later skills lane reads from would be
+      # silently reset on every image bump. Durable now; MINTING stays off (Phase 5).
+      - ao-worker-1-journals:/var/lib/little-coder/journals
     networks:
       - ao-worker-net
       - llm-net
@@ -395,6 +402,8 @@ services:
       - ../agent-bridge/worker-configs/worker-2:/app/config:ro
       - ao-worker-2-workspace:/workspace
       - ao-worker-2-sessions:/var/lib/little-coder/sessions
+      # See ao-worker-1: journals must outlive the container (little-coder design §4).
+      - ao-worker-2-journals:/var/lib/little-coder/journals
     networks:
       - ao-worker-net
       - llm-net
@@ -581,6 +590,90 @@ services:
     labels:
       - "com.centurylinklabs.watchtower.enable=false"
 
+  # Worker task journals (memory-plane Phase 0.3). Append-only JSONL that is safe to tar
+  # live, so these are generic-tar sidecars, not pg dumps.
+  #
+  # Backed up rather than excluded, unlike ao-worker-*-sessions: sessions are regenerable
+  # per-effort continuity, but the journals ARE the accruing evidence record — nothing
+  # else can reproduce them once the volume is gone.
+  #
+  # ONE SIDECAR PER VOLUME, deliberately. A single container tarring both volumes would
+  # produce one archive holding two volumes' worth of data, and every entry in
+  # scripts/backup/restore-from-snapshot.ps1 maps ONE archive to ONE volume — a combined
+  # archive would have no mechanical restore path, which is how you end up with backups
+  # that exist and cannot be used. Two archives, two targets, no new restore machinery.
+  ao-worker-1-journals-backup:
+    image: alpine:3.21
+    container_name: ao-worker-1-journals-backup
+    # Same profile as the worker it backs up. Ungated, this would run with no worker ever
+    # having written a journal — and check_backups.py treats a RUNNING sidecar with no
+    # artifacts as stale, so an ungated sidecar would alarm exactly when nothing is wrong.
+    profiles: ["workers"]
+    volumes:
+      - ao-worker-1-journals:/data:ro
+      - ../../backups/ao-worker-1-journals:/backups
+      - ../../backup/generic-tar-backup.sh:/scripts/backup.sh:ro
+    environment:
+      - DATA_DIR=/data
+      - BACKUP_DIR=/backups
+      - PREFIX=ao-worker-1-journals
+      - RETAIN_COUNT=${AO_BACKUP_RETAIN_COUNT:-7}
+      # No network attachment — the volume is the only source, so there is nothing to
+      # probe. The script's dir-exists + dir-nonempty prechecks are the guard: a worker
+      # that has never run leaves an empty corpus, which must NOT overwrite a good tar.
+      - HEALTH_TCP=
+      - BACKUP_INTERVAL=${AO_JOURNALS_BACKUP_INTERVAL:-86400}   # daily
+      - TZ=UTC
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        echo "[$$(date -u +%FT%TZ)] ao-worker-1-journals-backup started (sleep-loop; interval=$${BACKUP_INTERVAL}s, retain=$${RETAIN_COUNT})"
+        while true; do
+          sh /scripts/backup.sh || echo "[$$(date -u +%FT%TZ)] ao-worker-1-journals backup.sh exited $$?"
+          sleep "$${BACKUP_INTERVAL}"
+        done
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
+  ao-worker-2-journals-backup:
+    image: alpine:3.21
+    container_name: ao-worker-2-journals-backup
+    profiles: ["workers"]      # see ao-worker-1-journals-backup
+    volumes:
+      - ao-worker-2-journals:/data:ro
+      - ../../backups/ao-worker-2-journals:/backups
+      - ../../backup/generic-tar-backup.sh:/scripts/backup.sh:ro
+    environment:
+      - DATA_DIR=/data
+      - BACKUP_DIR=/backups
+      - PREFIX=ao-worker-2-journals
+      - RETAIN_COUNT=${AO_BACKUP_RETAIN_COUNT:-7}
+      - HEALTH_TCP=
+      - BACKUP_INTERVAL=${AO_JOURNALS_BACKUP_INTERVAL:-86400}   # daily
+      - TZ=UTC
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        echo "[$$(date -u +%FT%TZ)] ao-worker-2-journals-backup started (sleep-loop; interval=$${BACKUP_INTERVAL}s, retain=$${RETAIN_COUNT})"
+        while true; do
+          sh /scripts/backup.sh || echo "[$$(date -u +%FT%TZ)] ao-worker-2-journals backup.sh exited $$?"
+          sleep "$${BACKUP_INTERVAL}"
+        done
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
   mattermost-db-backup:
     image: postgres:15-alpine
     container_name: mattermost-db-backup
@@ -617,8 +710,10 @@ volumes:
   agent-bridge-db-data:
   ao-worker-1-workspace:
   ao-worker-1-sessions:
+  ao-worker-1-journals:     # append-only task journals — BACKED UP (ao-journals-backup)
   ao-worker-2-workspace:
   ao-worker-2-sessions:
+  ao-worker-2-journals:     # append-only task journals — BACKED UP (ao-journals-backup)
   ao-egress-config:        # bridge-written git-egress allowlist, shared with ao-git-egress
   llm-gateway-cloud-db-data:
 

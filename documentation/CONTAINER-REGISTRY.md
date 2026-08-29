@@ -177,14 +177,15 @@ Running-state is an operator choice (`portal-on.ps1`); the split into its own pr
 
 ---
 
-## Project `agent-org` — 11 running (6 default + 5 `workers` profile)
+## Project `agent-org` — 13 running (6 default + 7 `workers` profile)
 
 | Container | Purpose | Why |
 |---|---|---|
 | `mattermost` + `mattermost-db` | The org's chat fabric (11.7 ESR) | Every operator⟷agent conversation, approvals, and bridge traffic runs through it |
-| `agent-bridge` + `agent-bridge-db` | The governed org bus (:8830) + its Postgres | Charters/floor enforcement, wake bus (the one at-least-once delivery in the workspace), delivery gates, 723-test suite |
+| `agent-bridge` + `agent-bridge-db` | The governed org bus (:8830) + its Postgres | Charters/floor enforcement, wake bus (the one at-least-once delivery in the workspace), delivery gates, 731-test suite |
 | `agent-bridge-db-backup`, `mattermost-db-backup` | pg-backup sidecars | Same one-sidecar-per-store rule as the main stack |
 | `ao-worker-1/2` + `ao-ot-1/2` | little-coder worker pair ×2 (agent + its open-terminal) | The org's hands; profile-gated so the org can be quiesced |
+| `ao-worker-1-journals-backup`, `ao-worker-2-journals-backup` | tar sidecars for the workers' append-only task journals | The journals are the accruing evidence corpus; unlike workspaces (re-clonable) and sessions (regenerable) nothing can rebuild them. One sidecar per volume so each archive restores 1:1; `workers`-profiled so they never alarm while the org is quiesced |
 | `ao-git-egress` | Git-host allowlist proxy for workers | Workers never get raw internet; the bridge writes the allowlist |
 
 (The `cloud` profile — `llm-gateway-cloud` + db + `ao-egress` — is defined but

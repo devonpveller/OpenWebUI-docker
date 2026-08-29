@@ -167,6 +167,23 @@ $catalog = [ordered]@{
     Compose = 'inference\docker-compose.yml'
     ComposeArgs = @('--env-file','.env')
   }
+  # agent-org worker task journals (memory-plane Phase 0.3). Two volumes, two archives,
+  # 1:1 - the workers are stopped together because both mounts are recreated in one pass.
+  # The journals are append-only evidence, NOT authoritative effort state (that lives in
+  # agent-bridge-db), so this restore is about not losing the corpus, never about
+  # recovering the org's state.
+  'ao-journals' = @{
+    Archives = @(
+      @{ Pattern = "ao-worker-1-journals-*.tar.gz"; Target = 'agent-org_ao-worker-1-journals'; Type = 'volume-tar' }
+      @{ Pattern = "ao-worker-2-journals-*.tar.gz"; Target = 'agent-org_ao-worker-2-journals'; Type = 'volume-tar' }
+    )
+    Stop    = @('ao-worker-1','ao-worker-2')
+    Start   = @('ao-worker-1','ao-worker-2')
+    Compose = 'agent-org\docker\docker-compose.yml'
+    # The workers (and their backup sidecars) are profile-gated; without this the stop/start
+    # would silently address nothing.
+    ComposeArgs = @('--profile','workers')
+  }
 }
 
 # Restore order — services that other services depend on first.
@@ -174,6 +191,7 @@ $restoreOrder = @(
   'openbrain-db', 'openbrain-wiki', 'open-notebook',
   'mnemory', 'lm-models', 'tailscale',
   'openwebui', 'little-coder',
+  'ao-journals',
   'caddy', 'authelia'
 )
 
