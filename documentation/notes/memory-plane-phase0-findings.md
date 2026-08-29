@@ -84,6 +84,65 @@ bump — not something to fold into an ai-stack-repo phase.)
 
 ---
 
+## RUNTIME VALIDATION (2026-08-29, operator granted container access)
+
+The test plan originally said the sidecar run and the live Open Brain smoke were out of
+reach. The operator opened container access, so both gaps were closed as far as they can be
+closed without deploying unmerged work. **No production container was restarted, recreated
+or modified** — recreating `ao-worker-1/2` to add the journals mount would be deploying
+unreviewed compose changes to live containers, which is a different act from restarting one
+and is deliberately left for after the merge.
+
+**V1 — the data loss this phase prevents is REAL and is happening now.** In the running
+`ao-worker-1`:
+
+    /var/lib/little-coder/journals: audit.jsonl (12,933 B, mtime 2026-08-28 23:36),
+    errors.jsonl, outcomes.jsonl, tool_calls.jsonl (111,546 B) — 160K total
+    ao-worker-2: 244K, same four files
+
+And `docker inspect ao-worker-1` lists mounts for **only** `ao-worker-1-sessions` and
+`ao-worker-1-workspace`. There is **no volume at the journals path**, so all of it is on the
+container's writable layer. The container was created 2026-08-23T16:59Z — roughly six days
+of accrued corpus that any `--force-recreate` or image bump would destroy silently. This
+moves 0.3 from "a sensible hardening" to "a live hole with data in it".
+
+**V2 — the backup path works end to end, including the restore.** Using throwaway volumes
+(no prod names, all removed afterwards) and the real `backup/generic-tar-backup.sh`:
+
+- a journals-shaped volume produced `ao-worker-1-journals-<ts>.tar.gz` + its sentinel, and
+  `sha256sum -c` verified **OK**;
+- an EMPTY volume produced `PRECHECK SKIP: /data is empty` — it did not write an empty
+  tarball, which is the behaviour that stops a good NAS archive being clobbered;
+- the archive extracted into a fresh volume with both files, their content and their mtimes
+  intact — a genuine 1:1 restore, which is exactly the property F1 shows little-coder's own
+  backups do NOT have.
+
+**V3 — openbrain-mcp is reachable on the lane the fix targets.** A throwaway container on
+`ai-stack_llm-net` POSTing a `tools/call` to `http://openbrain-mcp:8000/` with no key got
+**HTTP 401**. That confirms, without touching a credential: the name resolves on llm-net,
+port 8000 is listening, `/` is served rather than 404, and `x-brain-key` is the gate. The
+old default (`openbrain-gateway:8061`) is on obnet and does not resolve from here at all.
+
+Still NOT proven, and it cannot be without enabling the flag with a real key: that an
+authenticated capture actually lands a row in `thoughts`. That remains an ops step.
+
+### Correction to this item's own claim, on the record
+
+The commit message lists the wrong PATH as the first of four bugs. That is **overstated**.
+`openbrain-mcp` serves `app.all("*")` (`index.ts:2052`), so it routes *any* path into the
+MCP transport — `/capture_thought` would have reached it too. The path mattered for the
+GATEWAY (which routes `/mcp` specifically); against openbrain-mcp it is non-canonical
+rather than fatal.
+
+The genuinely fatal bugs were the **host** (unreachable by construction) and the **body**
+(a flat REST payload where a JSON-RPC `tools/call` was required, with `metadata` for
+`metadata_extra`). The tests still assert `/` because that is the contract the gateway
+itself follows and the shape the next reader should copy — but the strict-server fixture's
+404 models the canonical contract, not openbrain-mcp's tolerance, and nobody should read it
+as proof that the old path 404'd.
+
+---
+
 ## Carried forward from earlier items (still open, still not fixed)
 
 These are not new. They are restated so they stay visible rather than aging
