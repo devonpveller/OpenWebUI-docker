@@ -84,8 +84,13 @@ fields answer most questions:
   is a reason to doubt the plan, not to celebrate.
 - `plan_adequate` — the tester's judgement of the developer's plan, stated on
   both verdicts.
-- `fits_anchor` — the reviewer's fitness judgement. A merge cannot happen without
-  it.
+- `fits_codebase` — the reviewer's fitness judgement (`-FitsCodebase`/`-Misfits`).
+  A merge cannot happen without it. It asks whether the work BELONGS in this
+  codebase — right module, house patterns, coherent tree — **not** whether it was
+  the right thing to build: intent is settled at the anchor gate and again at the
+  release gate, so an intent objection goes back there, not into this verdict.
+  Items merged before 2026-08-29 carry `fits_anchor` instead, which answered that
+  older question; the two are deliberately not migrated into one field.
 
 ## What the operator does NOT do
 
