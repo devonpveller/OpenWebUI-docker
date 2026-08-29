@@ -68,7 +68,46 @@ other. The next slice needs its own guard on the embedding path; passing
 
 ---
 
-## F4 — this module is unimported, and that is the point (but it is also a risk)
+## F4 — the harness's own pass/fail was lying, and I repeated its lie
+
+**Correction to my earlier report.** I baselined `deno check/test` and `caddy validate` as
+"pre-existing failures on the line" and merged around them. They were not failures. Both
+commands exit 0.
+
+The harness decided pass/fail with `if ($?)` after a native command. In PowerShell 5.1
+`$?` is set by the last *operation*, and a native command that writes to **stderr** — which
+`deno` does constantly (`Download …`, `Check …`) — leaves it `$false` even on exit 0. This
+is the same NativeCommandError trap CLAUDE.md already documents for `2>&1` and for
+capturing native output; it applies to `$?` too.
+
+Replacing all eight `if ($?)` with `if ($LASTEXITCODE -eq 0)` turned three FAILs into
+PASSes with no change to the things being tested:
+
+```
+before:  FAIL deno check/test | FAIL agent-memory policy | FAIL caddy validate
+after:   PASS deno check/test | PASS agent-memory policy | PASS caddy validate
+```
+
+Two consequences worth stating plainly:
+
+1. **My own new check was among the false failures.** I had written the module, watched
+   its 18 tests pass directly, then watched the harness call it FAIL — and my first
+   instinct was to look for a mount/quoting problem in my step. The bug was older and
+   wider than my change.
+2. **This is why the harness was ignorable.** A check that reports failure when nothing is
+   wrong gets read as noise, and then nobody notices when it reports failure because
+   something *is* wrong. That is precisely how a stale 13-file init chain and a decorative
+   verify query survived in it.
+
+The `compose config` failure is real but worktree-only: `new-worktree.ps1` copies `.env`,
+`.env.test` and `OB1/docker/.env`, while OB1 compose also references
+`OB1/recipes/email-history-import/.env`, which is gitignored and not copied. It passes in
+the main checkout. Adding that path to the worktree env-copy list is a one-line fix and its
+own item.
+
+---
+
+## F5 — this module is unimported, and that is the point (but it is also a risk)
 
 Nothing imports `agent-memory-policy.ts`. The plan asks for the invariant test to be
 written *before* the feature, and that is what this is.

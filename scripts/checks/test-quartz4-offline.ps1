@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
   Offline test harness for the Quartz-4-expansion work (workbench + extract +
   schema + compiler). Nothing here touches the live/prod stack or its data.
@@ -29,7 +29,7 @@ function Fail($t) { Write-Host "  FAIL  $t" -ForegroundColor Red; $script:fails+
 
 function Invoke-Unit {
   Section "Static checks"
-  docker compose -f $ob1 config -q; if ($?) { Pass "docker compose config" } else { Fail "compose config" }
+  docker compose -f $ob1 config -q; if ($LASTEXITCODE -eq 0) { Pass "docker compose config" } else { Fail "compose config" }
   foreach ($f in @(
       "OB1/recipes/_shared/slug.mjs",
       "OB1/recipes/_shared/citations.mjs",
@@ -40,20 +40,20 @@ function Invoke-Unit {
       "OB1/docker/wiki-viewer/serve.mjs",
       "OB1/docker/wiki-viewer/derive-graph-index.mjs",
       "OB1/recipes/wiki-synthesis/scripts/synthesize-notebooks.mjs")) {
-    node --check $f; if ($?) { Pass "node --check $f" } else { Fail "node --check $f" }
+    node --check $f; if ($LASTEXITCODE -eq 0) { Pass "node --check $f" } else { Fail "node --check $f" }
   }
-  python -m py_compile OB1/docker/extract/app.py; if ($?) { Pass "py_compile extract/app.py" } else { Fail "py_compile" }
+  python -m py_compile OB1/docker/extract/app.py; if ($LASTEXITCODE -eq 0) { Pass "py_compile extract/app.py" } else { Fail "py_compile" }
 
   Section "Node unit tests (slug + citations + write-if-changed + notebook synth)"
   node --test OB1/recipes/_shared/slug.test.mjs OB1/recipes/_shared/citations.test.mjs `
     OB1/recipes/_shared/write-if-changed.test.mjs OB1/recipes/entity-wiki/generate-wiki.test.mjs `
     OB1/recipes/wiki-synthesis/scripts/synthesize-notebooks.test.mjs
-  if ($?) { Pass "node --test" } else { Fail "node --test" }
+  if ($LASTEXITCODE -eq 0) { Pass "node --test" } else { Fail "node --test" }
 
   Section "Deno: type-check + unit tests (workbench)"
   docker run --rm -v "${rootFwd}/OB1/docker/workbench:/app" -v "${rootFwd}/OB1/recipes:/recipes:ro" `
     -w /app denoland/deno:2.3.3 sh -c "deno check src/main.ts && deno test src/util/paths_test.ts src/util/chunk_test.ts"
-  if ($?) { Pass "deno check + deno test" } else { Fail "deno check/test" }
+  if ($LASTEXITCODE -eq 0) { Pass "deno check + deno test" } else { Fail "deno check/test" }
 
   Section "Deno: agent-memory policy (memory-plane P1.2)"
   # Pure logic - no database, no network - so the plane's write/read policy is checkable
@@ -62,13 +62,13 @@ function Invoke-Unit {
   # silently always empty.
   docker run --rm -v "${rootFwd}/OB1/integrations/kubernetes-deployment:/app" `
     -w /app denoland/deno:2.3.3 sh -c "deno check agent-memory-policy.ts agent-memory-policy.test.ts && deno test agent-memory-policy.test.ts"
-  if ($?) { Pass "agent-memory policy: deno check + test" } else { Fail "agent-memory policy: deno check/test" }
+  if ($LASTEXITCODE -eq 0) { Pass "agent-memory policy: deno check + test" } else { Fail "agent-memory policy: deno check/test" }
 
   Section "Caddy validate (portal route)"
   docker run --rm -e PUBLIC_DOMAIN=example.com -e ACME_EMAIL=a@b.c -e WORKBENCH_KEY=k `
     -v "${rootFwd}/config/caddy/Caddyfile:/etc/caddy/Caddyfile:ro" caddy:2.8.4-alpine `
     caddy validate --adapter caddyfile --config /etc/caddy/Caddyfile
-  if ($?) { Pass "caddy validate" } else { Fail "caddy validate" }
+  if ($LASTEXITCODE -eq 0) { Pass "caddy validate" } else { Fail "caddy validate" }
 
   Section "Schema migrations on a throwaway pgvector (fresh volume)"
   $tmp = (Join-Path $env:TEMP "ob-initdb") -replace '\\', '/'
@@ -112,11 +112,11 @@ function Invoke-Unit {
   docker rm -f ob-initdb-test 2>$null | Out-Null
   docker run -d --name ob-initdb-test -e POSTGRES_DB=openbrain -e POSTGRES_USER=postgres `
     -e POSTGRES_PASSWORD=test -v "${tmp}:/docker-entrypoint-initdb.d:ro" pgvector/pgvector:pg16 | Out-Null
-  # POLL, do not sleep a magic number. The chain grew from 13 files to 20 and the old
-  # fixed 18s became a coin flip: too short and the harness greps a half-finished log and
-  # calls it clean. Wait for postgres to announce readiness, which is the actual signal
-  # that initdb finished.
-  # WAIT FOR THE RIGHT MARKER. "database system is ready to accept connections" appears
+  # POLL, do not sleep a magic number - and poll for the RIGHT marker.
+  # The chain grew from 13 files to 20 and the old fixed 18s became a coin flip: too short
+  # and the harness greps a half-finished log and calls it clean.
+  #
+  # "database system is ready to accept connections" appears
   # TWICE: once for the TEMPORARY server postgres runs the initdb scripts against, and
   # again when the real server starts. Polling for it catches the first one - i.e. BEFORE
   # the migrations have run - and every verify query then reports 0 for everything the
@@ -171,7 +171,7 @@ UNION ALL SELECT 'wiki_links_gin(1)',count(*) FROM pg_indexes WHERE indexname='i
 function Invoke-E2E {
   Section "Build images (compiles the Quartz overlay components)"
   docker compose -f $ob1 build openbrain-workbench openbrain-extract openbrain-wiki-viewer
-  if ($?) { Pass "image build" } else { Fail "image build"; return }
+  if ($LASTEXITCODE -eq 0) { Pass "image build" } else { Fail "image build"; return }
 
   Section "Throwaway stack (project ob-test, fresh volumes)"
   docker compose -p ob-test -f $ob1 up -d openbrain-db openbrain-extract openbrain-workbench
