@@ -1,0 +1,114 @@
+{
+  "version": 1,
+
+  "_why": [
+    "THE SHAPE OF AN ANCHOR, as data rather than as source.",
+    "",
+    "It lived in $script:AnchorFields inside anchor.ps1, which made it a policy literal in",
+    "code: PLAN A.2 forbids that, and it also meant only PowerShell could ever ask what an",
+    "anchor is. The org needs more readers than that - the harness, the sessions bridge, and",
+    "later agent-bridge - so the definition moves here and the readers become thin.",
+    "",
+    "TWO MODES, ONE OBJECT (ORCHESTRATION-DESIGN 6.6, adopted by dark-factory-unification L1).",
+    "agent-org already split convergence into generative discovery and adversarial hardening;",
+    "the harness's anchor was only ever the second kind. They are one concept with a mode",
+    "field, not two systems:",
+    "",
+    "  mode B - bounded work. A hard target with stated failure conditions. Approaches zero;",
+    "           completion is diminishing returns across DIVERSE lenses. This is every anchor",
+    "           the harness has ever taken, so B is the default and its contract is unchanged.",
+    "  mode A - generative discovery. The North Star is the original prompt, and it is a THEME,",
+    "           not a spec: the goal comes into focus by walking the path. Off-theme ideas",
+    "           become constraints that narrow it, never tasks. Zero propagation here is a red",
+    "           flag, not success.",
+    "",
+    "WHY MODE A FORBIDS AN ACCEPTANCE LIST. Not tidiness - gym-024 is the recorded cost. A",
+    "complete, D2-passing PR read as 'unconverged' because a fixed-target reading was applied",
+    "to a generative loop. 6.6 is explicit that no fixed acceptance list can exist for Mode A,",
+    "so an anchor carrying one is a category error the schema refuses rather than a style",
+    "preference it tolerates.",
+    "",
+    "COMPATIBILITY. Anchors written before this file have no `mode` field. Absent means B, so",
+    "every anchor already in the queue stays valid - this is an extension, not a migration."
+  ],
+
+  "default_mode": "B",
+
+  "rules": {
+    "min_acceptance_criterion_chars": 12,
+    "min_acceptance_criterion_why": "an acceptance criterion nobody can check is a wish; this catches the common shape - a single vague line - without pretending to judge English"
+  },
+
+  "modes": {
+    "B": {
+      "desc": "bounded work: a fixed target with stated failure conditions",
+      "fields": {
+        "goal": {
+          "required": true,
+          "kind": "string",
+          "why": "one sentence, the outcome in the operator's words - what stops goal drift across test cycles"
+        },
+        "artifact": {
+          "required": true,
+          "kind": "string",
+          "why": "the path and kind of the thing that will exist - 'a README' vs 'a report' is a decision, not a style"
+        },
+        "audience": {
+          "required": true,
+          "kind": "string",
+          "why": "who reads or runs it - the field that would have prevented the coder README"
+        },
+        "acceptance": {
+          "required": true,
+          "kind": "list",
+          "why": "objectively checkable criteria - this is what the tester tests against"
+        },
+        "out_of_scope": {
+          "required": true,
+          "kind": "list",
+          "why": "explicit non-goals - where 'and also fix what you find' gets refused"
+        },
+        "findings_sink": {
+          "required": false,
+          "kind": "string",
+          "why": "where incidental discoveries go, so real findings are neither lost nor pasted into the deliverable. Its contents are held to the SAME standard as the artifact - a claim about what a script does is verified against that code path, not against its comments"
+        }
+      },
+      "forbidden": {}
+    },
+
+    "A": {
+      "desc": "generative discovery: a theme walked toward, not a spec exhausted",
+      "fields": {
+        "north_star": {
+          "required": true,
+          "kind": "string",
+          "why": "the original prompt, kept verbatim - every round realigns against THIS, not against a re-derived scope goal, whose drift produces a meaningless count"
+        },
+        "audience": {
+          "required": true,
+          "kind": "string",
+          "why": "who the work is found toward - gym-035 ran ~13 hours on packaging metadata and linting config because nothing asked whether the work served a North Star phrased for a real person"
+        },
+        "constraints": {
+          "required": false,
+          "kind": "list",
+          "why": "the standing constraint ledger, seeded here and grown by the loop: an off-theme idea becomes a clause that narrows the path ('the way to this goal does not run here'), never a task and never a silent drop"
+        },
+        "out_of_scope": {
+          "required": false,
+          "kind": "list",
+          "why": "directions ruled out up front - the same refusal as mode B, but advisory here because Mode A expects the boundary to sharpen as the path is walked"
+        },
+        "findings_sink": {
+          "required": false,
+          "kind": "string",
+          "why": "as mode B - true-but-elsewhere goes here, held to the artifact's standard"
+        }
+      },
+      "forbidden": {
+        "acceptance": "mode A cannot carry a fixed acceptance list (ORCHESTRATION-DESIGN 6.6): the goal comes into focus by walking the path, so a list written up front is a target that does not exist yet. gym-024 read a delivered, D2-passing product as unconverged for exactly this conflation. Use mode B if the work really does have a fixed target."
+      }
+    }
+  }
+}

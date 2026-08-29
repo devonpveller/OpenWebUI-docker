@@ -246,10 +246,26 @@ Invoke-DrillGit -C $wtMerge merge --no-ff work/drilla -m "merge drill A: raise t
 $mergeSha = (Get-DrillGit -C $wtMerge rev-parse HEAD).Trim()
 & $queue -Merged -Id drill-a -By wt-reviewer -Sha $mergeSha 2>&1 | Out-Null
 Check "a merge with NO fitness verdict is refused" ((Get-QueueState "drill-a") -ne "merged")
-& $queue -Merged -Id drill-a -By wt-reviewer -Sha $mergeSha -MissesAnchor 2>&1 | Out-Null
-Check "-MissesAnchor cannot be merged (exit 4) - it is a rejection" ($LASTEXITCODE -eq 4)
-& $queue -Merged -Id drill-a -By wt-reviewer -Sha $mergeSha -FitsAnchor | Out-Null
+& $queue -Merged -Id drill-a -By wt-reviewer -Sha $mergeSha -Misfits 2>&1 | Out-Null
+Check "-Misfits cannot be merged (exit 4) - it is a rejection" ($LASTEXITCODE -eq 4)
+& $queue -Merged -Id drill-a -By wt-reviewer -Sha $mergeSha -FitsAnchor 2>&1 | Out-Null
+Check "the RETIRED -FitsAnchor spelling is not accepted" ((Get-QueueState "drill-a") -ne "merged")
+
+# THE SHA-CONTAINMENT GUARD. Added 2026-08-29: this guard was written after a merge that
+# silently failed was recorded as merged, and it had ZERO drill coverage - an edit that
+# inverted it would have left this drill 51/51 green. It is the one check standing between
+# "the queue says merged" and "nothing merged", so it gets exercised, not trusted.
+$notAMerge = (Get-DrillGit -C $wtMerge rev-parse HEAD~1).Trim()
+& $queue -Merged -Id drill-a -By wt-reviewer -Sha $notAMerge -FitsCodebase 2>&1 | Out-Null
+Check "a sha that does NOT contain the branch is refused" ((Get-QueueState "drill-a") -ne "merged")
+$bogus = "0000000000000000000000000000000000000000"
+& $queue -Merged -Id drill-a -By wt-reviewer -Sha $bogus -FitsCodebase 2>&1 | Out-Null
+Check "a nonexistent sha is refused, not recorded" ((Get-QueueState "drill-a") -ne "merged")
+
+& $queue -Merged -Id drill-a -By wt-reviewer -Sha $mergeSha -FitsCodebase | Out-Null
 Check "drill-a merged by the reviewer" ((Get-QueueState "drill-a") -eq "merged")
+Check "the verdict recorded is fits_codebase, not the retired fits_anchor" (
+    (Get-Content -Raw -Path (Join-Path $QueueDir "drill-a.json") | ConvertFrom-Json).fits_codebase -eq $true)
 
 Step 8 "the second item's rebase CONFLICTS - the later merger adapts"
 & $queue -Claim -Id drill-b -Role reviewer -By wt-reviewer | Out-Null
@@ -280,7 +296,7 @@ Check "re-tested and re-released at the new content" ((Get-QueueState "drill-b")
 Step 10 "the reviewer lands the adapted work"
 & $queue -Claim -Id drill-b -Role reviewer -By wt-reviewer | Out-Null
 Invoke-DrillGit -C $wtMerge merge --no-ff work/drillb -m "merge drill B: per-caller override, A's default kept (evidence: drill)"
-& $queue -Merged -Id drill-b -By wt-reviewer -Sha ((Get-DrillGit -C $wtMerge rev-parse HEAD).Trim()) -FitsAnchor | Out-Null
+& $queue -Merged -Id drill-b -By wt-reviewer -Sha ((Get-DrillGit -C $wtMerge rev-parse HEAD).Trim()) -FitsCodebase | Out-Null
 Check "drill-b merged after re-test" ((Get-QueueState "drill-b") -eq "merged")
 
 Step 11 "outcome: both intents survive, history readable, development untouched"

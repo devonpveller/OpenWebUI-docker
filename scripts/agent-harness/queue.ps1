@@ -87,8 +87,11 @@ param(
     [string]$State = "",
     [switch]$PlanAdequate,
     [switch]$PlanInadequate,
-    [switch]$FitsAnchor,
-    [switch]$MissesAnchor,
+    # The reviewer's forced verdict. Renamed from -FitsAnchor/-MissesAnchor on 2026-08-29
+    # (U2): review judges CODEBASE fit, not intent. No alias for the old spelling - a rename
+    # that leaves the old name working moves nobody, and this one is a change of question.
+    [switch]$FitsCodebase,
+    [switch]$Misfits,
     [int]$ClaimTtlMin = 0
 )
 
@@ -561,19 +564,31 @@ if ($Merged) {
     Assert-Claim $item "reviewer" $By
     if ((Normalize-Id $By) -eq (Normalize-Id $item.developer)) { Die "the developer cannot merge their own work" 4 }
     # THE FITNESS VERDICT. Green tests say the artifact is CORRECT; they say nothing about
-    # whether it is the thing that was asked for. That gap shipped two READMEs that passed
-    # every check and were still wrong (see anchor.ps1). So the reviewer states it, and it
-    # cannot be defaulted - the same reason the tester must state -PlanAdequate.
+    # whether it BELONGS here. So the reviewer states it, and it cannot be defaulted - the
+    # same reason the tester must state -PlanAdequate.
+    #
+    # RE-SCOPED 2026-08-29 (dark-factory-unification U2 / PLAN L1): this verdict was
+    # -FitsAnchor, which asked the reviewer to re-judge INTENT. That is the wrong seat.
+    # Intent is settled by the operator twice already - at the anchor gate before any work,
+    # and at the pre-review release gate - and re-litigating it at merge time puts the
+    # decision furthest from the person who owns it, at the moment it is most expensive to
+    # act on. Review is for merge safety, clean code, and DIFFERENT EYES ON CODEBASE FIT.
+    # An intent objection is still worth raising; it just routes back to the release gate
+    # rather than being decided here.
     if ($item.anchor) {
-        if (-not ($FitsAnchor -or $MissesAnchor)) {
-            Die ("state the fitness verdict: -FitsAnchor or -MissesAnchor.`n`n" +
+        if (-not ($FitsCodebase -or $Misfits)) {
+            Die ("state the fitness verdict: -FitsCodebase or -Misfits.`n`n" +
                  (Format-Anchor $item.anchor) +
                  "`n`nTests passing is not the question here. The question is whether what you " +
-                 "are about to land is what that anchor asked for.")
+                 "are about to land BELONGS in this codebase: does it follow the house " +
+                 "patterns, is it in the right module, does it leave the tree coherent?`n" +
+                 "If your objection is that the anchor asked for the wrong THING, that is an " +
+                 "intent challenge - it goes back to the operator at the release gate " +
+                 "(-Approve), not into this verdict.")
         }
-        if ($MissesAnchor) {
-            Die ("you judged that '$Id' MISSES its anchor - that is a -Reject, not a merge. " +
-                 "Say what it missed in -Reason so the developer can aim at it.") 4
+        if ($Misfits) {
+            Die ("you judged that '$Id' MISFITS the codebase - that is a -Reject, not a merge. " +
+                 "Say what misfits it in -Reason so the developer can aim at it.") 4
         }
     }
     # THE SHA MUST ACTUALLY CONTAIN THE BRANCH. Recorded 2026-08-29 after I ran a merge that
@@ -588,7 +603,9 @@ if ($Merged) {
              "If the merge command failed, it failed silently: check its exit code before " +
              "recording the outcome. Nothing has been recorded.") 1
     }
-    Set-Field $item "fits_anchor" ([bool]$FitsAnchor)
+    # Items merged before 2026-08-29 carry `fits_anchor` instead. That recorded the answer to
+    # a DIFFERENT question (did this match the intent?), so do not read the two as one field.
+    Set-Field $item "fits_codebase" ([bool]$FitsCodebase)
     $item.state = "merged"; $item.merged_sha = $Sha
     Add-History $item "merged as $Sha" $By
     Drop-Claim $Id "reviewer"
@@ -680,8 +697,8 @@ if ($Reject) {
     $item = Read-Item $Id
     Assert-Claim $item "reviewer" $By
     # Recorded because the two rejections mean different things to whoever picks this up:
-    # "it does not work" is a fix, "it is not what we asked for" is a re-aim.
-    if ($MissesAnchor) { Set-Field $item "fits_anchor" $false }
+    # "it does not work" is a fix, "it does not belong here like this" is a re-shape.
+    if ($Misfits) { Set-Field $item "fits_codebase" $false }
     $item.state = "rejected"
     Add-History $item "rejected: $Reason" $By
     Drop-Claim $Id "reviewer"
