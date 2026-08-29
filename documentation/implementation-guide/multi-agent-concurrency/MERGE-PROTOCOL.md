@@ -271,17 +271,27 @@ break the plan's own rules, that is a finding about the plan.
 **Step 4 - a REVIEWER (not the developer) claims it, judges it against the anchor, rebases,
 and re-checks staleness.**
 
-Claiming prints the confirmed anchor. **Read it before you read the diff.** Your first
-question is not "is this correct" - the tester already asked that - it is *"is this the
-thing that was asked for?"* Green tests plus an artifact that misses the anchor is a
-rejection, and the tool will not let you merge without saying which it is:
+Claiming prints the confirmed anchor. **Read it before you read the diff** — it is the
+context for the judgement, not the judgement itself. Your first question is not "is this
+correct" (the tester already asked that) but *"does this belong in this codebase?"* — right
+module, house patterns followed, tree still coherent afterwards. Green tests plus code that
+does not belong is a rejection, and the tool will not let you merge without saying which:
 
 ```powershell
-.\scripts\agent-harness\queue.ps1 -Merged -Id <id> -By <their-id> -Sha <sha> -FitsAnchor
-.\scripts\agent-harness\queue.ps1 -Reject  -Id <id> -By <their-id> -MissesAnchor -Reason "<what it missed>"
+.\scripts\agent-harness\queue.ps1 -Merged -Id <id> -By <their-id> -Sha <sha> -FitsCodebase
+.\scripts\agent-harness\queue.ps1 -Reject  -Id <id> -By <their-id> -Misfits -Reason "<what misfits>"
 ```
 
-`-MissesAnchor` on a merge is refused outright: if it misses, it does not land.
+`-Misfits` on a merge is refused outright: if it does not belong, it does not land.
+
+**Review is not where intent is decided (2026-08-29, U2).** This verdict used to be
+`-FitsAnchor`, which asked the reviewer to re-judge whether the work was the right *thing*.
+That is the operator's call and they have already made it twice — at the anchor gate before
+any work, and at the pre-review release gate. Re-opening it at merge time puts the decision
+furthest from the person who owns it, at the moment it costs most to act on. If you believe
+the anchor asked for the wrong thing, say so and send it back to the release gate; do not
+encode an intent objection as a codebase verdict. The old spelling is gone, not aliased —
+it asked a different question and answering it here was the mistake.
 
 ```powershell
 .\scripts\agent-harness\queue.ps1 -Claim -Id <id> -Role reviewer -By <their-id>
