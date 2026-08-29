@@ -1294,7 +1294,11 @@ function Confirm-BridgeFunctionalHealth {
     try { $h = Get-Content $HealthPath -Raw | ConvertFrom-Json } catch {
         Write-LogEntry "$Label : health beacon unreadable: $($_.Exception.Message)" "WARN"; return
     }
-    $ageMin = [int](((Get-Date) - (Get-Date "1970-01-01Z").AddSeconds($h.ts).ToLocalTime()).TotalMinutes)
+    # Epoch-to-epoch ON PURPOSE. (Get-Date "1970-01-01Z") carries the offset in
+    # force at the EPOCH (EST, -5), so a local-time subtraction reads exactly one
+    # DST hour stale all summer -- every cycle would see "60m" and restart both
+    # bridges. Comparing unix seconds to unix seconds has no timezone in it.
+    $ageMin = [int](([int64][System.DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - [int64]$h.ts) / 60)
     if ($ageMin -gt 15) {
         Write-LogEntry "$Label : health beacon STALE (${ageMin}m) while lock port is held -- poll loop wedged; restarting task '$TaskName'" "WARN"
         try {

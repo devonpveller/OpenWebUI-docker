@@ -370,6 +370,71 @@ sibling of `permissions` — and add that file to `.gitignore`:**
 
 ---
 
+## 12. Operational hardening — the functional-health beacon (2026-08-23)
+
+**Incident.** Both bridge personas (`claude-sessions` :48291 and `sysadmin`
+:48292) had been silently dead *for weeks*. Every turn failed with
+`WinError 2` while both processes held their lock ports and the watchdog
+reported them healthy. Cause: `find_claude_bin()` resolves `claude.exe` **once
+at startup** and caches the path; VS Code prunes the old extension directory on
+auto-update, so the cached
+`…\.vscode\extensions\anthropic.claude-code-<ver>\…\claude.exe` vanished
+underneath long-lived processes. Nothing detected it, because **liveness is not
+function**: the lock port, the poll loop, and the Mattermost endpoint were all
+genuinely fine — only the thing the bridge exists to do was broken.
+
+**Lesson.** Every host-process check in this stack asserted *the process is
+alive*. None asserted *the process still does its job*. A daemon whose one
+external dependency is a filesystem path needs a beacon that says the dependency
+still resolves.
+
+**What was built.**
+
+1. **`find_claude_bin()` validates `BRIDGE_CLAUDE_BIN`** instead of trusting it —
+   a stale override now falls through to PATH / extension glob with a log line,
+   rather than pinning the bridge to a deleted file.
+2. **`Bridge.ensure_claude_bin()`** re-resolves the path when the cached one no
+   longer exists. Called **before every spawn** (never as post-mortem repair)
+   and on the 60 s idle heartbeat, so an update that lands while the channel is
+   quiet is healed before the operator's next message. Raises only when *nothing*
+   resolves.
+3. **Health beacon `state/health.json`** — atomic write (`.tmp` + `os.replace`)
+   on the same 60 s heartbeat plus every turn boundary:
+   `ts`, `pid`, `claude_bin`, `bin_exists`, `last_turn_ok_ts`, `last_err`
+   (400-char cap), `consecutive_failures`. Written per persona, into each
+   bridge's own `BRIDGE_STATE_DIR` (`scripts/claude-sessions-bridge/state/`,
+   `scripts/sysadmin-mcp/bridge-state/`).
+4. **Out-of-band escalation.** `telegram_alert()` (creds via
+   `mm_lib.read_env_key`, the same pair `telegram_notify.py` uses) fires on an
+   infrastructure failure immediately, or after 2 consecutive failed turns,
+   throttled to 30 min. **Deliberately not Mattermost**: when the turn machinery
+   is broken, an MM post lands in the very channel the operator is already not
+   getting answers in. See `documentation/sysadmin-out-of-band-channel.md`.
+5. **Watchdog consumer** — `Confirm-BridgeFunctionalHealth` in
+   `scripts/checks/stack-watchdog.ps1`, run for *both* personas after the
+   existing lock-port checks. It defers entirely when the lock port is down
+   (liveness repair owns that), then acts on what liveness cannot see:
+   - beacon older than 15 min while the port is held → the poll loop is wedged →
+     restart the Scheduled Task + Telegram;
+   - `bin_exists:false` in a **fresh** beacon → self-heal already failed, a
+     restart cannot help → ERROR + Telegram naming the remedy (reinstall the
+     extension, or set `BRIDGE_CLAUDE_BIN`);
+   - `consecutive_failures >= 2` → ERROR + Telegram with the last error;
+   - missing beacon → DEBUG only (pre-beacon build, or still waiting for MM);
+     unreadable beacon → WARN, never a crash.
+   Ordering follows the operator directive of the same day — *the sysadmin above
+   all else doesn't go down*: sysadmin bridge (48292) → Telegram listener
+   (48293) → claude-sessions bridge (48291).
+
+**Trap for anyone touching the staleness check.** Beacon age is computed
+**epoch-to-epoch** (`[DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - ts`) on
+purpose. `(Get-Date "1970-01-01Z")` carries the offset in force *at the epoch*
+(EST, −5), so subtracting it from local `Get-Date` reads exactly one DST hour
+stale all summer — a fresh beacon would score 60 min and the watchdog would
+restart **both** bridges on every cycle. Caught in test before it shipped.
+
+---
+
 *Sources: Claude Code Channels + channels-reference, CLI reference (headless/flags),
 Remote Control, permission-modes, and Agent SDK docs (docs.claude.com, retrieved
 2026-07-04). Official Telegram/Discord channel plugins in
