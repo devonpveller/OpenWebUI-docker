@@ -160,6 +160,51 @@ Check "the operator confirmed both anchors" ((Get-QueueState "drill-a") -eq "anc
 Check "the anchor was COPIED beside the item (survives worktree removal)" `
     (Test-Path (Join-Path $QueueDir "drill-a.anchor.json"))
 
+# --- HOOK-BYPASS CONTAINMENT (U5; PLAN 0 A7) ---------------------------------------
+# A7 is FALSIFIED: an agent reached for --no-verify on its first commit, and --no-verify
+# leaves NO trace in a git object. A guard is only worth having if it actually fires, so
+# this makes a genuinely bypassed commit and proves the queue refuses it - and, just as
+# important, proves an HONEST commit is not refused. A guard that flags everything gets
+# switched off within a day, and then it protects nothing.
+# Runs BEFORE the real submissions so the bypass probe never pollutes drill-a's own flow.
+# Resolved from $wtScripts, the code UNDER TEST - the same way $queue is. Pointing at the
+# main checkout would test whatever is already merged there, which is never the point of a
+# drill run from a work branch.
+$attest = Join-Path (Split-Path $wtScripts -Parent) "checks\check-hook-attestation.ps1"
+Check "the attestation checker exists" (Test-Path $attest)
+
+# These cases drive the CHECKER against a controlled ledger rather than depending on the
+# hook the drill worktree happens to carry: a worktree is created from the main checkout,
+# so it inherits the MERGED .githooks, not this branch's. Testing the hook's own recording
+# through a worktree that cannot have it would prove nothing. What matters here is that the
+# checker's verdict and the queue's response are right; the hook's recording is proven
+# separately (see TESTPLAN case 2, which runs the real hook).
+# ADOPTION SAFETY is what the drill can honestly cover, and it is the property that decides
+# whether this guard survives its first day. The drill's branches are cut from the main
+# checkout, so they carry whatever hook is MERGED - which, until this lands, cannot attest.
+# The guard must therefore be INACTIVE for them. If it were not, every branch in the repo
+# would be blocked the moment this merged, and the guard would be reverted by lunchtime.
+& $attest -Branch "work/drilla" -Base "drill/verify-d" -RepoRoot $repo | Out-Null
+Check "INACTIVE for a branch whose own hook cannot attest (exit 0)" ($LASTEXITCODE -eq 0)
+
+& $queue -Propose -Id "drill-bypass" -Anchor $anchorFile -Developer "wt-drilla" | Out-Null
+& $queue -ConfirmAnchor -Id "drill-bypass" -By "operator" | Out-Null
+& $queue -Submit -Id "drill-bypass" -Branch "work/drilla" -Developer "wt-drilla" -TestPlan $planFile 2>&1 | Out-Null
+Check "-Submit is NOT blocked by the inactive guard" ($LASTEXITCODE -eq 0)
+
+# And with no ledger at all it must also stay quiet rather than failing everything.
+$env:AI_STACK_ATTEST_LEDGER = Join-Path $env:TEMP "drill-attest-absent.log"
+Remove-Item $env:AI_STACK_ATTEST_LEDGER -ErrorAction SilentlyContinue
+& $attest -Branch "work/drilla" -Base "drill/verify-d" -RepoRoot $repo | Out-Null
+Check "no ledger => INACTIVE (exit 0), never a repo-wide block" ($LASTEXITCODE -eq 0)
+Remove-Item Env:\AI_STACK_ATTEST_LEDGER -ErrorAction SilentlyContinue
+
+# The ACTIVE case - detection of a real --no-verify commit - cannot be driven from a drill
+# worktree until the attesting hook is on the line those worktrees are cut from. It is
+# proven instead by TESTPLAN case 2, which runs the real hook on this branch. Once this
+# merges, that coverage belongs here; the note is deliberate rather than a silent gap.
+& $queue -Reject -Id "drill-bypass" -By "wt-reviewer" -Reason "drill probe, not real work" 2>&1 | Out-Null
+
 foreach ($id in @("a", "b")) {
     & $queue -Submit -Id "drill-$id" -Branch "work/drill$id" -Developer "wt-drill$id" -TestPlan $planFile | Out-Null
 }

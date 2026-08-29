@@ -57,5 +57,40 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
+# --- 6. ATTESTATION -------------------------------------------------------
+# Record that these checks actually ran, because otherwise nobody can tell.
+#
+# WHY (PLAN 0 A7, FALSIFIED): an agent reached for `--no-verify` on its first
+# commit, and `--no-verify` leaves NO trace in a git object - "the hooks ran" is
+# unprovable from the repo afterwards. Normative rules ("never --no-verify") did
+# not hold; containment has to be mechanical. So the hook leaves proof, and
+# check-hook-attestation.ps1 reads it back.
+#
+# WE ATTEST THE TREE, not a commit sha - the commit does not exist yet, and the
+# tree is the durable identity of the content. `git write-tree` on the current
+# index yields exactly the tree the resulting commit will carry. Attesting the
+# tree also means a rebase or cherry-pick that does not change content KEEPS its
+# attestation, so the check does not fire on the reviewer's normal workflow. A
+# guard that false-positives on legitimate work gets switched off, and then it
+# protects nothing.
+#
+# This runs LAST, after every check above has passed, so a rejected commit is
+# never attested - attesting a tree the checks refused would launder it.
+#
+# The ledger lives in the SHARED git dir (--git-common-dir), never the worktree:
+# it must not be committable, and every worktree of this repo must read one
+# ledger, or a reviewer in another worktree could not verify a developer's work.
+_attest_tree=$(git write-tree 2>/dev/null)
+if [ -n "$_attest_tree" ]; then
+    _git_common=$(git rev-parse --git-common-dir 2>/dev/null)
+    if [ -n "$_git_common" ]; then
+        printf '%s %s %s\n' \
+            "$_attest_tree" \
+            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            "$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?')" \
+            >> "$_git_common/hook-attest.log" 2>/dev/null || true
+    fi
+fi
+
 echo "Pre-commit validations passed!"
 exit 0

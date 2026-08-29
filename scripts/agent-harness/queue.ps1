@@ -368,6 +368,40 @@ if ($Submit) {
     $line = Resolve-WorkLine
     $sha = (Invoke-GitCapture @("rev-parse", $Branch) | Select-Object -First 1)
     if ($LASTEXITCODE -ne 0 -or -not $sha) { Die "branch '$Branch' not found" }
+
+    # THE HOOKS MUST HAVE RUN (U5 containment parity; PLAN 0 A7 is FALSIFIED - an agent
+    # reached for --no-verify on its first commit, and --no-verify leaves no trace in a git
+    # object, so "the hooks ran" was unprovable). Submission is the right chokepoint: it is
+    # the moment work stops being the developer's private business and becomes something a
+    # tester and reviewer will trust. Checked mechanically, not asked about, because A7's
+    # whole finding is that asking does not work.
+    # Resolved from $PSScriptRoot, not the working directory: queue.ps1 is invoked from
+    # whichever worktree an agent happens to be in, and a cwd-relative path would silently
+    # miss the script - Test-Path would be false and the check would skip itself, which is
+    # the exact silent no-op this guard exists to prevent.
+    $harnessRepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
+    $attestScript = Join-Path $harnessRepoRoot "scripts\checks\check-hook-attestation.ps1"
+    if (Test-Path $attestScript) {
+        $attestOut = & $attestScript -Branch $Branch -Base $line -RepoRoot $harnessRepoRoot -Json
+        $attestExit = $LASTEXITCODE
+        if ($attestExit -eq 1) {
+            $report = $null
+            try { $report = $attestOut | ConvertFrom-Json } catch { }
+            $offenders = if ($report) {
+                (@($report.unattested) | ForEach-Object { "    $($_.sha.Substring(0,8))  $($_.subject)" }) -join "`n"
+            } else { "    (could not parse the checker's report)" }
+            Die (("'{0}' has commit(s) the pre-commit hooks never validated:`n{1}`n`n" +
+                  "The hooks are the secret guard, the line-ending rule, the LLM-gateway " +
+                  "routing rule and the compose/ps1 structural check. Each exists because it " +
+                  "caught a real failure, and --no-verify skips all four while leaving no " +
+                  "trace in the repo - which is why this is checked here rather than trusted.`n`n" +
+                  "REMEDY - re-commit the same content so the hooks run:`n" +
+                  "    git commit --amend --no-edit                      # the tip commit`n" +
+                  "    git rebase --exec 'git commit --amend --no-edit' {2}`n`n" +
+                  "Run scripts\checks\check-hook-attestation.ps1 -Branch {0} -Base {2} for the " +
+                  "full explanation, including the two innocent causes.") -f $Branch, $offenders, $line) 4
+        }
+    }
     if ($existing) {
         $item = $existing
         Set-Field $item "branch" $Branch; Set-Field $item "line" $line
