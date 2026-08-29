@@ -105,6 +105,7 @@ sys.path.insert(0, os.path.join(_HERE, "..", "mattermost-mcp"))
 sys.path.insert(0, _HERE)
 import server as mmapi  # noqa: E402
 import sessions as sessions_mod  # noqa: E402
+from inbox import Inbox  # noqa: E402
 
 # ── config ───────────────────────────────────────────────────────────────────
 CHANNEL_ID = os.environ.get("BRIDGE_CHANNEL_ID", "6z9khgkdd7df9q454be6fimw1h")  # #claude-sessions
@@ -196,6 +197,9 @@ STATE_DIR = os.environ.get("BRIDGE_STATE_DIR") or os.path.join(_HERE, "state")
 STATE_FILE = os.path.join(STATE_DIR, "state.json")
 AUDIT_FILE = os.path.join(STATE_DIR, "audit.jsonl")
 APPROVALS_LOG = os.path.join(STATE_DIR, "approvals.jsonl")
+# Durable operator-message log (see inbox.py). Under STATE_DIR so it moves with the
+# rest of the bridge state and BRIDGE_STATE_DIR redirects it for tests.
+INBOX_DIR = os.path.join(STATE_DIR, "inbox")
 
 # Matches approval_server.py — verdict replies during a running turn belong to the approval
 # relay, not to the session's prompt queue.
@@ -977,6 +981,9 @@ class Bridge:
         self.first_poll = True
         self.state.setdefault("follows", {})   # fid → follow record (see follow_matches)
         self._team: str | None = None          # cached team name for permalinks
+        # The crash boundary for operator messages. Constructed before any poll runs,
+        # because poll_once is not allowed to admit a message it cannot first record.
+        self.inbox = Inbox(INBOX_DIR)
 
     # -- worker ---------------------------------------------------------------
     def ensure_worker(self, thread_root: str) -> None:
@@ -1041,6 +1048,10 @@ class Bridge:
                        "kind": item.kind})
                 unreact(item.post_id, "hourglass_flowing_sand")
                 react(item.post_id, "no_entry_sign")
+                # A cancelled item IS resolved - the operator withdrew it. Without this
+                # it would stay pending and be replayed on every restart, resurrecting
+                # exactly the message they cancelled.
+                self.inbox.mark_consumed(thread_root, item.post_id)
                 continue
 
             prompt = item.prompt
@@ -1084,6 +1095,11 @@ class Bridge:
                 except Exception:  # noqa: BLE001
                     pass
             finally:
+                # THE TURN IS OVER - consume. In `finally` on purpose: it runs for an
+                # errored turn (the operator was told in-thread; replaying forever would
+                # make one poison message an infinite loop) and it does NOT run when the
+                # process is killed, which is the case the inbox exists for.
+                self.inbox.mark_consumed(thread_root, item.post_id)
                 stop_evt.set()
                 release_once()
                 with self.running_lock:
@@ -2203,6 +2219,11 @@ class Bridge:
             audit({"event": "message_received", "thread": thread_root, "post": pid,
                    "user": username, "chars": len(msg)})
             self.ensure_worker(thread_root)
+            # DURABILITY BOUNDARY. Recorded before the in-memory admission below, and
+            # therefore before this pass persists last_seen/processed at the end of the
+            # loop. Reverse these two lines and the message is once again only in RAM
+            # between here and the end of its turn (see inbox.py for what that cost).
+            self.inbox.record(thread_root, pid, msg)
             self.queues[thread_root].put_user(_Item("user", msg, pid))  # lane 1 — closes the valve
         if new_last != last_seen:
             with self.state_lock:
@@ -2210,6 +2231,32 @@ class Bridge:
                 self.state["processed"] = list(self.processed)
                 save_state(self.state)
         self.first_poll = False
+
+    def replay_inbox(self) -> int:
+        """Re-admit every message whose turn never finished. Returns how many were replayed.
+
+        This is the half that makes the record useful: recording a message the bridge then
+        ignores forever is only a more detailed way of losing it.
+
+        Safe to run on every start. `record()` is idempotent by post id and this path does NOT
+        re-record, so N restarts with no intervening turn leave a message pending exactly once
+        rather than N times. The poll loop cannot double-admit it either - its id is already in
+        `processed`, and `last_seen` is already past it.
+        """
+        replayed = 0
+        for thread_root in self.inbox.threads():
+            pend = self.inbox.pending(thread_root)
+            if not pend:
+                continue
+            self.ensure_worker(thread_root)
+            for rec in pend:
+                self.queues[thread_root].put_user(
+                    _Item("user", str(rec.get("prompt") or ""), str(rec.get("post_id") or "")))
+                replayed += 1
+            log(f"inbox: replayed {len(pend)} unfinished message(s) into thread "
+                f"{thread_root[:8]}")
+            audit({"event": "inbox_replayed", "thread": thread_root, "count": len(pend)})
+        return replayed
 
     def run(self) -> None:
         os.makedirs(STATE_DIR, exist_ok=True)
@@ -2229,6 +2276,13 @@ class Bridge:
         audit({"event": "bridge_started", "channel": CHANNEL_ID, "repo": REPO,
                "allow_self": ALLOW_SELF})
         write_health(self.claude_bin, self.last_turn_ok_ts, self.last_turn_err, self.turn_fail_count)
+        # Anything admitted but never finished - i.e. whatever the last death was holding.
+        try:
+            n = self.replay_inbox()
+            if n:
+                log(f"inbox: {n} message(s) recovered from the previous run")
+        except Exception as e:  # noqa: BLE001 - recovery must never stop the bridge starting
+            log(f"inbox replay failed: {e}")
         errors = 0
         while True:
             try:
