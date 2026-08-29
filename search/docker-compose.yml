@@ -119,8 +119,16 @@ services:
         condition: service_started
       redis:
         condition: service_healthy
-    env_file:
-      - ../.env
+    # NO env_file HERE, deliberately (2026-08-28). `env_file: ../.env` injected EVERY
+    # variable in the root .env into this container's environment (111 distinct names on
+    # 2026-08-28 - a measurement of that day, not a fixed property) - the Cloudflare tunnel
+    # token, the Authelia secrets, the Mullvad key, the Tailscale auth key, the Mattermost
+    # bot tokens - none of which this service uses. It was redundant from the day it was
+    # written (commit 0bc099e): `${VAR}` below is interpolated by the compose CLI from the
+    # project environment, never by env_file. A wildcard grant is safe until the thing it
+    # wildcards grows, and .env grew into the whole stack.
+    # THE RULE: a service names the variables it needs. Enforced by
+    # scripts/checks/check-env-file-scope.ps1.
     environment:
       - SEARXNG_URL=http://searxng:8080
       - REDIS_URL=redis://redis:6379/1

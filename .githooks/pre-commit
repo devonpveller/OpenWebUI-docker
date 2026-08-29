@@ -8,6 +8,8 @@
 #   1. secret guard      - staged-only scan; blocks env files + provider tokens
 #   2. line endings      - repo convention
 #   3. gateway routing   - inference must go through the LiteLLM alias
+#   4. project configs   - compose renders + ps1 tokenize
+#   5. env_file scope    - a service names the variables it needs
 
 echo "Running pre-commit validations..."
 
@@ -43,6 +45,15 @@ fi
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File './scripts/checks/check-project-configs.ps1'
 if [ $? -ne 0 ]; then
     echo "Pre-commit validation failed (compose/ps1 structural check)!"
+    exit 1
+fi
+
+# --- 5. env_file scope (staged-aware) --------------------------------------
+# Fail if this commit ADDS a service that grants itself a shared .env. Pre-existing
+# grants are reported, not blocked - a guard that fails on old debt gets disabled.
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File './scripts/checks/check-env-file-scope.ps1'
+if [ $? -ne 0 ]; then
+    echo "Pre-commit validation failed (a service granted itself a shared .env)!"
     exit 1
 fi
 
