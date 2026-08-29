@@ -57,6 +57,8 @@ _EXPECTED = [
     ("authelia",         "authelia-backup",         36),
     ("agent-bridge-db",  "agent-bridge-db-backup",  36),
     ("mattermost-db",    "mattermost-db-backup",    36),
+    ("ao-worker-1-journals", "ao-worker-1-journals-backup", 36),
+    ("ao-worker-2-journals", "ao-worker-2-journals-backup", 36),
     ("llm-gateway",      "llm-gateway-backup",      36),
     ("lm-models",        "lm-models-backup",        204),  # weekly + slack
 ]

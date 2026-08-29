@@ -27,15 +27,50 @@ log = logging.getLogger("agent_bridge.project_context")
 
 # (repo) -> factual summary
 SurveyFn = Callable[[str], Awaitable[str]]
+# Persistence seam (memory-plane Phase 0.2). Injected like `survey_fn`, so this module keeps
+# its no-coupling discipline: it knows nothing about the DB, and tests drive it with dicts.
+# load: () -> {project: (base_sha, summary)}   save: (project, base_sha, summary) -> None
+LoadSurveysFn = Callable[[], Awaitable[dict[str, tuple[str, str]]]]
+SaveSurveyFn = Callable[[str, str, str], Awaitable[None]]
+# delete: (project | None) -> None   — None means "every project" (mirrors `invalidate`).
+DeleteSurveyFn = Callable[[str | None], Awaitable[None]]
 
 
 class ProjectContext:
-    def __init__(self, survey_fn: SurveyFn, *, enabled: bool = True) -> None:
+    def __init__(
+        self,
+        survey_fn: SurveyFn,
+        *,
+        enabled: bool = True,
+        load_fn: LoadSurveysFn | None = None,
+        save_fn: SaveSurveyFn | None = None,
+        delete_fn: DeleteSurveyFn | None = None,
+    ) -> None:
         self._survey = survey_fn
         self._enabled = enabled
+        self._load = load_fn
+        self._save = save_fn
+        self._delete = delete_fn
         # {project: (base_sha, summary)} — base_sha "" = surveyed without a known base (the
         # pre-P8 behaviour; reused until a caller states a base that differs from a known one).
         self._cache: dict[str, tuple[str, str]] = {}
+
+    async def hydrate(self) -> int:
+        """Load persisted surveys into the cache at boot. Returns how many were restored.
+
+        Without this the in-memory cache started empty on every bounce and the first effort
+        after a restart paid for a re-survey. Best-effort like everything else here: a
+        failed load leaves an empty cache, which is exactly the pre-persistence behaviour.
+        """
+        if self._load is None:
+            return 0
+        try:
+            rows = await self._load()
+        except Exception as exc:  # noqa: BLE001 - advisory cache; never block boot
+            log.warning("project survey hydrate failed: %s", exc)
+            return 0
+        self._cache.update(rows)
+        return len(rows)
 
     async def ensure(self, project: str, repo: str, base_sha: str = "") -> str:
         """Return the project's cached survey summary, building it once on first use. `base_sha`
@@ -54,15 +89,34 @@ class ProjectContext:
             log.warning("project survey for %s (%s) failed: %s", project, repo, exc)
             summary = ""
         # Cache even an empty result so a flaky survey isn't retried on every request; an operator
-        # can force a refresh with `invalidate` (e.g. after a big repo change).
+        # can force a refresh with `invalidate` (e.g. after a big repo change). This EMPTY-RESULT
+        # CACHING is load-bearing, not an accident — dropping it brings back the retry storm.
         self._cache[project] = (base_sha, summary or "")
+        # Persist the same tuple (empty summaries included, for the same reason). Best-effort:
+        # a write failure costs a re-survey after the next restart, never the caller's request.
+        if self._save is not None:
+            try:
+                await self._save(project, base_sha, summary or "")
+            except Exception as exc:  # noqa: BLE001 - advisory; never block intake
+                log.warning("persisting project survey for %s failed: %s", project, exc)
         return self._cache[project][1]
 
     def get(self, project: str) -> str:
         return self._cache.get(project, ("", ""))[1]
 
-    def invalidate(self, project: str | None = None) -> None:
+    async def invalidate(self, project: str | None = None) -> None:
+        """Force a re-survey (operator affordance, e.g. after a big repo change).
+
+        ASYNC since Phase 0.2 (it had no callers, so no signature was broken): once the
+        cache is durable, clearing only the in-memory copy would be a trap — the row would
+        come straight back at the next restart and "invalidate" would silently not have.
+        """
         if project is None:
             self._cache.clear()
         else:
             self._cache.pop(project, None)
+        if self._delete is not None:
+            try:
+                await self._delete(project)
+            except Exception as exc:  # noqa: BLE001 - advisory; never raise at the operator
+                log.warning("clearing persisted survey for %s failed: %s", project, exc)

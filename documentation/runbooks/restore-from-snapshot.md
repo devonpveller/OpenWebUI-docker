@@ -208,6 +208,17 @@ Part K (2026-08-21)** — the live volumes are:
 | little-coder | `coder_little-coder-{journals,skill,cohorts,polyglot,sessions}` | `docker compose -f coder/docker-compose.yml --env-file .env stop little-coder open-terminal lc-egress` |
 | tailscale | bind `./data/tailscale` | frontend project, see below |
 | lm-models | bind `C:\Users\yamao\.lmstudio\models` | `docker compose -f inference/docker-compose.yml --env-file .env stop llama-cpp-upstream llama-cpp-embed-upstream` |
+| ao-journals | `agent-org_ao-worker-1-journals`, `agent-org_ao-worker-2-journals` | `docker compose -f agent-org/docker/docker-compose.yml --profile workers stop ao-worker-1 ao-worker-2` |
+
+**ao-journals** (agent-org worker task journals, added 2026-08-29 with
+memory-plane Phase 0.3): one archive per worker —
+`backups/ao-worker-1-journals/ao-worker-1-journals-<ts>.tar.gz` restores into
+`agent-org_ao-worker-1-journals`, and likewise for worker 2. Do not cross them.
+The `--profile workers` flag is REQUIRED: the workers and their backup sidecars
+are profile-gated, so a stop/start without it silently addresses nothing.
+These journals are the append-only evidence corpus, **not** authoritative org
+state — efforts, gates and audit live in `agent-bridge-db`. Restoring journals
+recovers the record, never the org's position.
 
 (The pre-split `ai-stack_*` volumes still exist as rollback copies until the
 post-K soak cleanup — do NOT restore into them, nothing reads them.

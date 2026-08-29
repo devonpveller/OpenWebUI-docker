@@ -11,12 +11,12 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-import httpx
 from sqlalchemy import select, update
 
 from ..config import Settings
 from ..db import Database
 from ..models import Event
+from .openbrain_client import OpenBrainClient
 
 log = logging.getLogger("agent_bridge.audit")
 
@@ -37,6 +37,9 @@ class AuditSink:
     def __init__(self, db: Database, settings: Settings) -> None:
         self.db = db
         self.s = settings
+        # The wire protocol lives in ONE place (modules/openbrain_client.py). Tests inject
+        # `self.openbrain.transport`, the same seam grounding.py uses.
+        self.openbrain = OpenBrainClient(settings)
 
     async def log(
         self,
@@ -68,15 +71,31 @@ class AuditSink:
     async def _mirror(
         self, event_id: int, kind: str, effort_id: str | None, payload: dict[str, Any]
     ) -> None:
-        """Capture to Open Brain via the cloud gateway's capture tool (best-effort)."""
+        """Capture the event to Open Brain via the first-party MCP lane (best-effort).
+
+        `Event.mirrored` flips ONLY when the write actually landed — the client returns
+        False for a non-200, a JSON-RPC error, or a tool-level `isError`. Marking an
+        event mirrored on anything weaker would record unwritten events as written,
+        which is worse than not mirroring at all: the audit log would claim durable
+        provenance it does not have.
+
+        Never raises: OpenBrainClient.call_tool swallows transport failures, and the
+        DB update is guarded, so an Open Brain outage cannot fail an audit write.
+        """
         try:
             text = f"[agent-org:{kind}] effort={effort_id} :: {payload}"
-            async with httpx.AsyncClient(timeout=15.0) as c:
-                await c.post(
-                    f"{self.s.openbrain_url.rstrip('/')}/capture_thought",
-                    headers={"x-brain-key": self.s.openbrain_key},
-                    json={"content": text, "metadata": {"source": "agent-org", "kind": kind}},
-                )
+            ok = await self.openbrain.capture_thought(
+                text,
+                metadata_extra={
+                    "source": "agent-org",
+                    "kind": kind,
+                    "effort_id": effort_id,
+                    "event_id": event_id,
+                },
+            )
+            if not ok:
+                log.warning("open-brain mirror did not land for event %s", event_id)
+                return
             async with self.db.session_factory() as s:
                 await s.execute(
                     update(Event).where(Event.id == event_id).values(mirrored=True)

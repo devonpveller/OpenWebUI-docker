@@ -547,3 +547,29 @@ class PendingApproval(Base):
     kind: Mapped[str] = mapped_column(String(24))                   # lifecycle | capability | effort_plan
     payload: Mapped[dict] = mapped_column(JSON)
     created_at: Mapped[str] = mapped_column(default=now_iso)
+
+
+class ProjectSurvey(Base):
+    """Durable Stage-1 project survey (memory-plane Phase 0.2; P3.8 / P8 #5).
+
+    A survey is a GPU cycle: a worker reads the repo and writes the factual summary every
+    effort on that project then reuses. It was cached in memory ONLY, so a bridge restart
+    threw the map away and the next effort re-surveyed — the exact cost P8 #5 introduced
+    the cache to avoid (a worker burned 26 read-only calls re-discovering a tiny template
+    and tripped the flail guard). Persisting it makes the map survive a bounce.
+
+    Keyed by project and versioned by the base commit the survey was taken at: same base
+    => reuse; base moved => the row is replaced with the fresh map. An EMPTY summary is
+    stored DELIBERATELY (see `project_context.ensure`) — a flaky survey must stay cached
+    or the retry storm it was designed to stop comes back.
+
+    New table, so `create_all` picks it up; no `_ADDITIVE_COLUMNS` entry is needed (that
+    list is for columns added to tables that already exist in a live DB).
+    """
+
+    __tablename__ = "project_surveys"
+
+    project_slug: Mapped[str] = mapped_column(String(96), primary_key=True)
+    base_sha: Mapped[str] = mapped_column(String(64), default="")
+    summary: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[str] = mapped_column(default=now_iso, onupdate=now_iso)
