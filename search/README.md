@@ -1,224 +1,218 @@
-# search — the Private Search Gateway compose plane
+# search - the Private Search Gateway plane
 
-Compose project **`search`** (`name: search`), split out of the root `ai-stack`
-project on 2026-08-21 by CLEANUP-PLAN Part **K.3**. Four services give the rest
-of the stack a web-search and page-fetch surface whose egress leaves the host
-only through a Mullvad WireGuard tunnel.
+Compose project **`search`** (`name: search` in [`docker-compose.yml`](docker-compose.yml)).
+Four containers give the rest of the stack a web-search and page-fetch surface
+whose egress leaves the host only through a Mullvad WireGuard tunnel. It was
+split out of the root `ai-stack` project on 2026-08-21 (CLEANUP-PLAN Part K.3).
+
+Drive it from the repo root:
+
+```powershell
+.\scripts\stack\stack.ps1 up search
+```
 
 ## Which document owns what
 
 | Question | Read |
 |---|---|
-| **How do I run, stop, wire or debug the four containers?** networks, ports, volumes, dependency order, compose gotchas | **this file** |
-| What the gateway *application* is: HTTP surfaces (`/v1/search`, the Tavily shim, the SearXNG-compat route), auth model, provider interface, privacy invariants, Python dev + tests, roadmap | [`../search-gateway/README.md`](../search-gateway/README.md) |
-| Build spec | [`guide-Private-Search-Gateway.md`](../documentation/implementation-guide/web-search/guide-Private-Search-Gateway.md) |
-| Where this plane sits among all the other planes | [stack-map §1d](../.claude/skills/stack-map/references/workspace-stacks.md) |
-| Adding/removing/moving a container here | [`SERVICE-LIFECYCLE.md`](../documentation/runbooks/SERVICE-LIFECYCLE.md) |
+| **How do I run, stop, wire or debug the four containers?** networks, ports, volumes, dependency order | **this file** |
+| What the gateway *application* is: HTTP endpoints, auth model, provider interface, privacy invariants, Python dev + tests | [`../search-gateway/README.md`](../search-gateway/README.md) |
+| Why the plane is built this way | [`guide-Private-Search-Gateway.md`](../documentation/implementation-guide/web-search/guide-Private-Search-Gateway.md) |
+| Where this plane sits among all the other planes | [stack-map](../.claude/skills/stack-map/references/workspace-stacks.md) |
+| Adding, removing or moving a container here | [`SERVICE-LIFECYCLE.md`](../documentation/runbooks/SERVICE-LIFECYCLE.md) |
 
-Roughly: `search-gateway/` owns the **code**, this file owns the **plane**. Do
-not duplicate endpoint tables or provider config here — link instead.
+`search-gateway/` owns the **code**; this file owns the **plane**. Endpoint
+tables and provider config belong there - link to them rather than copying them
+here.
 
-> **`search-gateway/README.md` is partly stale, and where the two disagree
-> `search/docker-compose.yml` is the authority.** The file says: (a) the gateway
-> is **not** "part of the main ai-stack compose" any more, and `docker compose
-> up -d --build` from the repo root builds nothing — the root project is a pure
-> network anchor with zero services; (b) there is **no `tor` service** (retired
-> 2026-08-21) and no `mcpo` / `:8001` surface (`search-mcpo` retired
-> 2026-08-20), so that README's "Tor image", "Tor latency" and "MCP → OpenAPI"
-> notes describe containers that do not exist; (c) its privacy table claims
-> `settings.yml` "disables Google/Bing/Yandex", but
-> `../search-gateway/searxng/settings.yml` inverted that on 2026-06-14 — behind
-> a Mullvad exit it *enables* google/bing/mojeek and disables
-> duckduckgo/brave/startpage, which captcha datacenter IPs. Its
-> "Integration decisions" link is also dead —
-> `integration-plan-private-search-gateway.md` is not in the tree, so it is not
-> linked from here.
+## The four services
 
-## Services (all four defined in `docker-compose.yml`)
-
-| Service | Container | What it is for |
+| Service | Container | What it does |
 |---|---|---|
-| `vpn` | `search-vpn` | gluetun (`${VPN_IMAGE:-qmcgaw/gluetun:latest}`) holding a Mullvad **WireGuard** tunnel with a kill-switch, and exposing an **HTTP forward proxy on `:8888`**. This is the plane's *only* route to the internet, and since tor was retired it carries **both** engine queries (SearXNG) **and** page fetches (OB1's `FETCH_PROXY_URL=http://vpn:8888`). `NET_ADMIN` + `/dev/net/tun` are required for the tunnel. |
-| `redis` | `search-redis` | Cache for SearXNG (`db0` — including *its* engine suspensions) and for the gateway (`db1`, via `REDIS_URL=redis://redis:6379/1` — response cache + circuit-breaker state; the gateway has no suspension logic of its own). Started with `--save "" --appendonly no`: **deliberately non-persistent**. |
-| `searxng` | `searxng` | The metasearch engine. Its config comes from the repo tree, not an image default: `../search-gateway/searxng` is bind-mounted at `/etc/searxng`. All outbound engine traffic is proxied to `http://vpn:8888` by that `settings.yml`. |
-| `gateway` | `search-gateway` | The plane's front door — the Python app in `../search-gateway/gateway`, built here as `private-search-gateway:local`. Normalises engines behind one API and adds auth, caching and a circuit breaker. Endpoints: see [`../search-gateway/README.md`](../search-gateway/README.md). |
+| `vpn` | `search-vpn` | gluetun (`${VPN_IMAGE:-qmcgaw/gluetun:latest}`) holding a Mullvad **WireGuard** tunnel with a kill-switch, and exposing an **HTTP forward proxy on `:8888`**. This is the plane's only route to the internet, and it carries both engine queries (SearXNG) and page fetches (OB1). Needs `NET_ADMIN` and `/dev/net/tun`. |
+| `redis` | `search-redis` | Cache for SearXNG (`db0`, including its engine suspensions) and for the gateway (`db1` - response cache and circuit-breaker state). Runs with `--save "" --appendonly no`: nothing it holds survives a restart, by design. |
+| `searxng` | `searxng` | The metasearch engine. Its config comes from the repo tree, not the image default: [`../search-gateway/searxng`](../search-gateway/searxng) is bind-mounted at `/etc/searxng`, and that `settings.yml` is what points every engine request at `http://vpn:8888`. |
+| `gateway` | `search-gateway` | The plane's front door: the Python app in `../search-gateway/gateway`, built here as `private-search-gateway:local`. Normalises engines behind one API and adds auth, caching and a circuit breaker. |
 
-Two more services appear in the file only as tombstones — **`tor`** (retired
-2026-08-21: its exits are blocked by most large sites and it carried no traffic
-after the Mullvad flip) and **`mcpo`** (retired 2026-08-20: keyless and
-unreachable, it sat only on the internal net with no consumer). Leave those
-comments in place; they are the reason nobody re-adds them.
+The compose file also carries comment tombstones for two services that no
+longer exist - `tor` (retired 2026-08-21, superseded by the Mullvad tunnel) and
+`mcpo` (retired 2026-08-20, no consumer). Leave the comments in place; they are
+the reason nobody re-adds them.
 
 ## Networks and ports
 
 ```
-                ai-stack_default  (external, internet-capable)
-                ├── vpn ───────── the tunnel out
-                └── gateway ───── consumers resolve it here
-                         │
-   search-net (internal: true, native to this project)
-   ├── vpn     ├── redis     ├── searxng     └── gateway
+  ai-stack_default (external, internet-capable)
+    |-- vpn ......... the tunnel out
+    +-- gateway ..... consumers resolve it by this name
+              |
+  search-net (internal: true, native to this project)
+    |-- vpn    |-- redis    |-- searxng    +-- gateway
 ```
 
-- **`search-net` is `internal: true`** and native to this project. Nothing on it
-  has a default route. That is what makes the privacy claim structural rather
-  than best-effort: `searxng` and `redis` *cannot* reach the internet even if
-  misconfigured — the only way out is the kill-switched `vpn` proxy.
-- **`default` is `external: true`, `name: ai-stack_default`** — the root anchor's
-  shared bridge. `vpn` and `gateway` attach to it so their bare DNS names keep
-  resolving for consumers in *other* compose projects. The anchor must therefore
-  exist before this plane comes up (`docker compose up -d` at the repo root, or
-  any `stack.ps1 up`); otherwise compose fails to find the network.
+- **`search-net` is `internal: true`.** Nothing on it has a default route, so
+  `searxng` and `redis` cannot reach the internet even if misconfigured. The
+  only way out is the kill-switched `vpn` proxy. That is what makes the privacy
+  property structural rather than a matter of configuration.
+- **`default` is `external: true`, `name: ai-stack_default`** - the root
+  anchor's shared bridge. `vpn` and `gateway` attach to it so their names keep
+  resolving for consumers in other compose projects. The anchor must exist
+  first, or compose refuses to start the plane: `docker compose up -d` at the
+  repo root (or any `stack.ps1 up`) creates it.
 
-**Deliberately not exposed:**
+One host port is published, and the omissions are deliberate:
 
-| Thing | Posture | Why |
+| Service | Host port | Why |
 |---|---|---|
-| `gateway` | `127.0.0.1:8085:8080` — **loopback only**, never `0.0.0.0` | It is the host-tools surface. Publishing it on the LAN would put an API-keyed search proxy on the network; in-stack consumers reach it by DNS (`http://gateway:8080`) and never need the host port. |
-| `vpn` proxy `:8888` | **no host port at all** | An open HTTP forward proxy into a VPN tunnel is exactly what you do not want reachable from the host or LAN. Consumers reach it as `http://vpn:8888` on `ai-stack_default`. |
-| `searxng` (`:8080`) | **no host port**, `search-net` only | Only `gateway` should talk to it. It is not on `ai-stack_default` either, which is what keeps the gateway's unauthenticated SearXNG-compat route the only keyless path in. |
-| `redis` (`:6379`) | **no host port**, `search-net` only | Unauthenticated redis. Internal-only is the whole of its security model. |
-
-Consumers, verified in their own compose files:
-
-- `openwebui` (frontend plane) — `SEARXNG_QUERY_URL=http://gateway:8080/search?q=<query>`, resolved on `ai-stack_default`.
-- `openbrain-research` (OB1) — `SEARCH_API_BASE=http://gateway:8080` and `FETCH_PROXY_URL=http://vpn:8888`.
-- `openbrain-grounding-backfiller`, `openbrain-podcast` (OB1) — `http://vpn:8888` for page fetches.
-- OB1 calls this network `search-gw-net` in its own compose; same network, different alias.
-- Host tools, probes and `stack.ps1 health` — `http://127.0.0.1:8085`.
-
-## Volumes and state
-
-**This plane holds no live state, and that is on purpose.** There is no
-top-level `volumes:` block in the compose file, no named volume, and no backup
-sidecar (`backups/` has no `search*` directory — every other stateful plane has
-one).
-
-- `redis` runs `--save "" --appendonly no`: everything it holds is cache and
-  circuit-breaker/suspension bookkeeping. Losing it on restart is the intended
-  behaviour, not data loss — `FLUSHDB` on `db0` is a documented way to clear
-  engine suspensions.
-- The one bind mount is **`../search-gateway/searxng:/etc/searxng:rw`** — SearXNG
-  config served straight out of the git working tree. Note the **`rw`**: the
-  container can write into your checkout, so unexplained `git status` noise under
-  `search-gateway/searxng/` is the container, not you.
-- Consequence for recovery: `docker compose -f search/docker-compose.yml down -v`
-  destroys nothing that matters here. The same command on `memory` or
-  `open-brain` would be catastrophic — do not generalise this plane's safety to
-  those.
+| `gateway` | `127.0.0.1:8085:8080` - loopback only | The host-tools surface. On `0.0.0.0` it would put an API-keyed search proxy on the LAN. In-stack consumers use `http://gateway:8080` instead. |
+| `vpn` proxy `:8888` | none | An open HTTP forward proxy into a VPN tunnel should not be reachable from the host or the LAN. Consumers use `http://vpn:8888` on `ai-stack_default`. |
+| `searxng` `:8080` | none | Only `gateway` should talk to it. It is not on `ai-stack_default` either, which keeps the gateway's unauthenticated SearXNG-compat route the only keyless path in. |
+| `redis` `:6379` | none | Unauthenticated redis. Internal-only is the whole of its security model. |
 
 ## Bring it up and down
 
-Always **from the repo root**, and always with `--env-file .env` — the plane
-interpolates from the single root `.env` and carries a fail-loud guard
-(`${MULLVAD_WG_PRIVATE_KEY:?}`) that aborts a bare `up`:
+Always **from the repo root**, and always with `--env-file .env`: the plane
+interpolates from the single root `.env`, and `MULLVAD_WG_PRIVATE_KEY` carries a
+`${...:?}` guard that aborts the `up` if it is missing.
 
 ```powershell
-# preferred: the workspace driver, which knows the plane order
+# the workspace driver, which knows the plane order
 .\scripts\stack\stack.ps1 up search
 .\scripts\stack\stack.ps1 down search
 .\scripts\stack\stack.ps1 restart search
-.\scripts\stack\stack.ps1 health            # includes GET 127.0.0.1:8085/healthz
+.\scripts\stack\stack.ps1 health          # includes GET 127.0.0.1:8085/healthz
 
-# equivalent by hand
+# the same thing by hand
 docker compose -f search/docker-compose.yml --env-file .env up -d
 docker compose -f search/docker-compose.yml --env-file .env down
-docker compose -f search/docker-compose.yml --env-file .env config    # render/validate
-docker compose -f search/docker-compose.yml --env-file .env build gateway
+docker compose -f search/docker-compose.yml --env-file .env config   # render/validate
 ```
 
-`gateway` is the only built image (`private-search-gateway:local`). A plain
-`up -d` will **not** pick up source changes in `../search-gateway/gateway` — pass
-`--build`, or build it explicitly. The other three images are pulled and pinnable
-from `.env` (`VPN_IMAGE`, `SEARXNG_IMAGE`, `SEARCH_REDIS_IMAGE`).
+`gateway` is the only image built here (`private-search-gateway:local`); the
+other three are pulled. **`up -d` alone does not pick up source changes** under
+`../search-gateway/gateway` - build it explicitly:
 
-Health by hand — the plane takes a minute to be *ready*, not just *up*, because
-the WireGuard handshake gates SearXNG's 90 s `start_period`:
+```powershell
+docker compose -f search/docker-compose.yml --env-file .env build gateway
+docker compose -f search/docker-compose.yml --env-file .env up -d gateway
+```
+
+Retagging `private-search-gateway:local` is a deploy, not a test. Under the
+[merge protocol](../documentation/implementation-guide/multi-agent-concurrency/MERGE-PROTOCOL.md)
+that is a gated step: test builds tag `:wt-<id>` and leave `:local` alone.
+
+Relative paths inside the compose file (`../.env`, `../search-gateway/gateway`,
+`../search-gateway/searxng`) resolve against the **file**, not your shell's
+working directory - so `-f search/docker-compose.yml` works from anywhere in the
+repo, but a copy of the file somewhere else will not.
+
+### Is it up, and is it working?
+
+Two different questions, two endpoints:
 
 ```bash
-curl -fsS http://127.0.0.1:8085/healthz    # process liveness only
-curl -fsS http://127.0.0.1:8085/readyz     # the whole chain: vpn + searxng + redis
+curl -fsS http://127.0.0.1:8085/healthz   # liveness: the gateway process is serving
+curl -fsS http://127.0.0.1:8085/readyz    # readiness: redis answers AND a provider answers
 ```
 
-`.env` keys this plane reads: `MULLVAD_WG_PRIVATE_KEY` (required),
-`MULLVAD_WG_ADDRESSES`, `MULLVAD_COUNTRIES`, `SEARCH_NET_SUBNET`,
-`SEARXNG_SECRET_KEY`, `VPN_IMAGE`, `SEARXNG_IMAGE`, `SEARCH_REDIS_IMAGE` — plus
-everything `gateway` inherits wholesale through `env_file: ../.env` (notably
-`GATEWAY_API_KEY`, `PROVIDER_PRIORITY`, `CACHE_TTL_SECONDS`, `LOG_QUERIES`). See
-the "Private Search Gateway" and "Search plane" blocks in `../.env.example`.
+`/healthz` returns 200 whenever the event loop is alive - it is the compose
+healthcheck, and what the watchdog restarts on. `/readyz` returns 503 until
+redis responds and at least one provider is healthy, which means a real SearXNG
+query got through and therefore that the tunnel is up. Expect a gap between the
+two after a cold start: SearXNG has a 90 s `start_period` because the WireGuard
+handshake has to complete first, and `gateway` waits on it with
+`condition: service_started`, not `service_healthy`.
 
-## Where it sits in the dependency order
+### Environment
 
-Internally the plane is health-gated and self-ordering, so one `up -d` is enough:
-**`vpn` (healthy) → `redis` (healthy) → `searxng` → `gateway`**. Note that
-`gateway` waits on `searxng` with `condition: service_started`, not
-`service_healthy` — it comes up while SearXNG is still warming, which is exactly
-why `/healthz` can be green while `/readyz` is not.
+Read straight from the root `.env` - see the "Private Search Gateway" and
+"Search plane" blocks in [`../.env.example`](../.env.example):
 
-Across the workspace it is **step 7** of the cold-start order
-([stack-map](../.claude/skills/stack-map/references/workspace-stacks.md)):
+| Key | Notes |
+|---|---|
+| `MULLVAD_WG_PRIVATE_KEY` | Required; guarded, so a missing value fails the `up` loudly. |
+| `MULLVAD_WG_ADDRESSES` | The tunnel's own addresses. **IPv4-only** unless the Docker host has IPv6 - gluetun rejects v6 addresses. |
+| `MULLVAD_COUNTRIES` | Exit-country selection; defaults to `Netherlands`. |
+| `SEARXNG_SECRET_KEY` | SearXNG's session secret. Required in practice - set it before starting the plane. |
+| `SEARCH_NET_SUBNET` | Passed to gluetun as `FIREWALL_OUTBOUND_SUBNETS`. It opens the kill-switch firewall to subnets gluetun is *not* attached to; the in-plane services never need it, because they share `search-net` with `vpn`. |
+| `VPN_IMAGE`, `SEARXNG_IMAGE`, `SEARCH_REDIS_IMAGE` | Pin the three pulled images. |
 
-- **After** the root network anchor — it needs `ai-stack_default` to exist.
-- **Independent of `inference`.** Nothing here calls an LLM; `stack.ps1` starts it
-  after `memory` for a stable order, not because of a dependency.
-- **Before OB1**, which *is* a hard dependency in the other direction:
-  `openbrain-research`, `-podcast` and `-grounding-backfiller` resolve `gateway`
-  and `vpn` by name. Bring this plane up before OB1, and tear it down after OB1.
-- **Underneath OWUI web search** — `openwebui` starts fine without it, but every
-  web search fails until `gateway` resolves.
+`gateway` additionally inherits the whole root `.env` through
+`env_file: ../.env` - notably `GATEWAY_API_KEY`, `PROVIDER_PRIORITY`,
+`CACHE_TTL_SECONDS`, the `CIRCUIT_*` values and `LOG_QUERIES`. Those are the
+application's knobs, and
+[`../search-gateway/README.md`](../search-gateway/README.md) explains them.
+
+None of these values belong in a paste. `docker compose config` renders them
+interpolated in plaintext, so grep the section you need rather than printing the
+whole render.
+
+## State
+
+**The plane holds no persistent state, deliberately.** There is no top-level
+`volumes:` block, no named volume, and no backup sidecar under `backups/`.
+
+- Everything in `redis` is cache plus circuit-breaker and suspension
+  bookkeeping. Losing it on restart is the intended behaviour.
+- The one bind mount is `../search-gateway/searxng:/etc/searxng:rw`. SearXNG
+  config is served straight out of your git working tree, and the mount is
+  **`rw`**, so the container can write into your checkout: unexplained
+  `git status` noise under `search-gateway/searxng/` is the container, not you.
+- Consequently `docker compose -f search/docker-compose.yml down -v` destroys
+  nothing that matters here. Do not carry that habit over to `memory` or
+  `open-brain`, where the same command is destructive.
+
+Images are not auto-updated: every service carries
+`com.centurylinklabs.watchtower.enable=false`, kept as recorded intent after
+watchtower itself was retired. Update deliberately, per
+[`UPDATE-MANAGEMENT.md`](../documentation/runbooks/UPDATE-MANAGEMENT.md).
+
+## Startup order
+
+Inside the plane one `up -d` is enough; it is health-gated and self-ordering:
+
+```
+vpn (healthy) -> redis (healthy) -> searxng -> gateway
+```
+
+Across the workspace it is step 7 of the cold-start order in the
+[stack-map](../.claude/skills/stack-map/references/workspace-stacks.md):
+
+- **After the root anchor**, which owns `ai-stack_default`.
+- **Independent of `inference`.** Nothing here calls an LLM; `stack.ps1` starts
+  the plane after `memory` for a stable order, not because of a dependency.
+- **Before OB1**, which depends on it in the other direction - and therefore
+  torn down after OB1.
+- **Underneath OWUI web search.** `openwebui` starts fine without this plane,
+  but every web search fails until `gateway` resolves.
 - Outside the portal lifecycle. `scripts/recovery/emergency-recovery.ps1` drives
-  it as project `search` with a 150 s gate on `search-gateway`.
+  it as project `search`, waiting up to 150 s for `search-gateway`.
 
-## Gotchas (each verified against the compose file or a config it names)
+## Who depends on this plane
 
-1. **A bare `docker compose -f search/docker-compose.yml up -d` fails**, by
-   design: `MULLVAD_WG_PRIVATE_KEY` carries a `${...:?}` guard and there is no
-   `--env-file`. That is the guard working, not a broken file. Add
-   `--env-file .env`.
-2. **`SEARXNG_SECRET` has no such guard.** `SEARXNG_SECRET=${SEARXNG_SECRET_KEY}`
-   is unguarded, so a missing key starts SearXNG with an *empty* secret instead
-   of failing loudly. If SearXNG behaves oddly right after an `.env` edit, check
-   that first.
-3. **Relative paths resolve against the compose file, not your cwd.** `../.env`,
-   `../search-gateway/gateway` and `../search-gateway/searxng` all mean the repo
-   root. Running from elsewhere with `-f` is fine; copying the file elsewhere is
-   not.
-4. **`WIREGUARD_ADDRESSES` must be IPv4-only** unless the Docker host has IPv6 —
-   gluetun rejects v6 addresses. The `.env.example` default is empty.
-5. **`SEARCH_NET_SUBNET` / `FIREWALL_OUTBOUND_SUBNETS` does *not* govern this
-   plane's own traffic — do not chase it during an incident.** gluetun
-   auto-detects the subnets of the networks it is *attached to* and keeps them
-   reachable; its own startup log says so
-   (`[routing] local ipnet found: 192.168.192.0/20`). `searxng` and `gateway`
-   share `search-net` with `vpn`, so they reach `vpn:8888` whatever this variable
-   says. What it actually does is add a route plus a firewall allowance for
-   subnets gluetun is **not** attached to — a client elsewhere on the LAN or on
-   another docker network. Live proof the two are unrelated (2026-08-28):
-   `search_search-net` is `192.168.192.0/20` while `FIREWALL_OUTBOUND_SUBNETS`
-   is `172.16.0.0/12`, and the plane serves queries normally. The
-   `172.16.0.0/12` default is effectively inert here; change it only if you add
-   an off-network client, not to fix a broken query path.
-6. **`/healthz` is not `/readyz`.** `/healthz` is the compose healthcheck and only
-   proves the event loop is alive; `/readyz` walks vpn + searxng + redis. The
-   watchdog treats `/readyz` as informational and never restarts on it — so a
-   plane that is up but not *working* will not self-heal, and somebody has to
-   look.
-7. **All four services carry `com.centurylinklabs.watchtower.enable=false`.**
-   Privacy infrastructure is not silently auto-updated. Watchtower itself was
-   retired on 2026-08-20; the labels stay as recorded intent, and updates are
-   manual per [`UPDATE-MANAGEMENT.md`](../documentation/runbooks/UPDATE-MANAGEMENT.md).
-8. **`vpn` and `gateway` are very generic DNS names on a shared bridge.** They are
-   the contract OB1 and OWUI are wired to. Renaming either service breaks
-   consumers in two other compose projects as a DNS failure, not a config error —
-   change them only together with those consumers.
-9. **SearXNG's own rate limiter is off** (`server.limiter: false` in
-   `settings.yml`). It is public-instance bot protection and would throttle our
-   own deep-research fan-out. Burst control lives in the gateway (cache + circuit
-   breaker) and in the research fan-out cap instead.
-10. **Everything shares one exit IP.** Engine queries and page fetches leave via
-    the same Mullvad tunnel, so a heavy fan-out can get the whole plane captcha'd
-    at once. The symptom is SearXNG returning fewer engines rather than erroring.
-    Clearing redis `db0` (`FLUSHDB`) resets engine suspensions.
-11. **Rebuilding `gateway` retags `private-search-gateway:local`, which is a
-    deploy.** Under the multi-agent merge protocol that is a gated step — test
-    builds tag `:wt-<id>` and leave `:local` alone.
+`vpn` and `gateway` are short, generic DNS names on a shared bridge, and two
+other compose projects are wired to them. Renaming either service breaks those
+consumers as a DNS failure rather than a config error, so change them only
+together with their consumers:
+
+| Consumer | Wiring |
+|---|---|
+| `openwebui` (frontend plane) | `SEARXNG_QUERY_URL` - defaults to `http://gateway:8080/search?q=<query>` |
+| `openbrain-research` (OB1) | `SEARCH_API_BASE` -> `http://gateway:8080`, `FETCH_PROXY_URL` -> `http://vpn:8888` (both compose defaults) |
+| `openbrain-grounding-backfiller`, `openbrain-podcast` (OB1) | `FETCH_PROXY_URL` -> `http://vpn:8888` for page fetches |
+| Host tools, probes, `stack.ps1 health` | `http://127.0.0.1:8085` |
+
+OB1's compose calls this network `search-gw-net`; that is `ai-stack_default`
+under another name.
+
+## When something looks wrong
+
+| Symptom | Where to look |
+|---|---|
+| `up` aborts complaining about `MULLVAD_WG_PRIVATE_KEY` | The guard doing its job: you ran without `--env-file .env`, or the key is unset. |
+| `/healthz` green but `/readyz` 503 | The chain behind the gateway. Either the tunnel is still building (give SearXNG its 90 s), or redis or SearXNG is unhappy. The watchdog only restarts on `/healthz`, so a plane that is up but not working will not self-heal - somebody has to look. |
+| Searches return fewer engines than usual, without errors | Everything leaves through one exit IP, so a heavy fan-out can get the whole plane captcha'd at once. Engine suspensions live in redis `db0`; `FLUSHDB` there clears them. |
+| One engine in particular returns nothing | Engine enable/disable policy lives in [`../search-gateway/searxng/settings.yml`](../search-gateway/searxng/settings.yml), tuned for what actually answers a VPN exit IP. |
+| Bursts are not being throttled | SearXNG's own limiter is off on purpose (`server.limiter: false`): it is public-instance bot protection and would throttle our own research fan-out. Burst control lives in the gateway's cache and circuit breaker. |
+| Something outside the plane cannot reach `vpn:8888` | The kill-switch firewall. `SEARCH_NET_SUBNET` is the knob for clients on other networks; in-plane services never need it. |
+| The whole plane needs bringing back after a crash | `scripts/recovery/emergency-recovery.ps1` restarts it in order along with the rest of the workspace. |
