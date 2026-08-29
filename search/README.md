@@ -134,12 +134,14 @@ curl -fsS http://127.0.0.1:8085/readyz    # readiness: redis answers AND a provi
 ```
 
 `/healthz` returns 200 whenever the event loop is alive - it is the compose
-healthcheck, and what the watchdog restarts on. `/readyz` returns 503 until
-redis responds and at least one provider is healthy, which means a real SearXNG
-query got through and therefore that the tunnel is up. Expect a gap between the
-two after a cold start: SearXNG has a 90 s `start_period` because the WireGuard
-handshake has to complete first, and `gateway` waits on it with
-`condition: service_started`, not `service_healthy`.
+healthcheck, and what the watchdog restarts on. `/readyz` returns 503 until redis
+answers a ping and at least one provider answers: for SearXNG that is a live
+`GET /search?q=healthcheck&format=json` returning 200. So a ready gateway can
+reach redis and SearXNG - it is not a separate proof that the tunnel is healthy.
+Expect a gap between the two after a cold start: SearXNG has a 90 s
+`start_period` because the WireGuard handshake has to complete first, and
+`gateway` waits on it with `condition: service_started`, not
+`service_healthy`.
 
 ### Environment
 

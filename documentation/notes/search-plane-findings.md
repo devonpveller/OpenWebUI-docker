@@ -93,16 +93,26 @@ off-network client.
 
 ## 5. `/readyz` does not check the tunnel directly
 
-`search-gateway/gateway/src/gateway/routes/health.py` computes readiness as
-`redis_ok and any_provider_healthy()`. The tunnel is covered only transitively -
-a provider is healthy because a SearXNG query succeeded, and SearXNG can only
-reach an engine through `vpn:8888`. A failure mode where redis and SearXNG are
-both fine but the tunnel is degraded in some way that still returns *some*
-result would read as ready. Nothing observed; noted because documentation
-(including the previous version of `search/README.md`) has described `/readyz`
-as walking "vpn + searxng + redis", which is stronger than what the code does.
+Read end to end, the readiness chain is:
 
-Checked 2026-08-28.
+- `routes/health.py` L26-28: `ready = redis_ok and provider_ok`.
+- `rotation.py` L157-158: `redis_ok()` is `self._cache.ping()`.
+- `rotation.py` L160-164: `any_provider_healthy()` returns True on the first
+  provider whose `health()` returns True.
+- `providers/searxng.py` L69-77: that provider's `health()` issues a live
+  `GET {base}/search?q=healthcheck&format=json` and returns `status_code == 200`.
+
+So `/readyz` proves redis answers and SearXNG answered one query with HTTP 200.
+It does **not** probe the tunnel, and the 200 is a transport-level check: what a
+200 implies about engines actually having answered is SearXNG's behaviour, inside
+the image, and was not verified here. Treat `/readyz` as "the gateway can talk to
+redis and to SearXNG", not as "the egress path is healthy".
+
+This matters because documentation has described `/readyz` as walking
+"vpn + searxng + redis" - stronger than what the code does. `search/README.md`
+now states the chain instead of the inference.
+
+Checked 2026-08-28 by reading each of the four functions above in full.
 
 ## 6. In flight elsewhere: `gateway` may stop inheriting the whole root `.env`
 
@@ -129,32 +139,19 @@ is false and would have sent a first-time operator into
 `Resolve-Planes` in `scripts/stack/stack.ps1` returns only the named plane's
 registry row and the `up` branch runs that one project; only `up` with no plane
 (the whole ordered registry, anchor first) or `up anchor` creates the networks.
-The README now says so. Two other places describe the same precondition, one
-loosely and one accurately but easily misread:
+The README now says so. One other place still describes it loosely:
 
 - `docker-compose.yml` (the root anchor), header comment: "run it once before
   any plane on a cold host (scripts/stack/stack.ps1 does this for you)". True
   only for `stack.ps1 up` with no plane, or `up anchor`.
-- `scripts/recovery/emergency-recovery.ps1` handles it on its two full paths and
-  deliberately not on its short one. `Invoke-EmergencyRecovery` (the `recover`
-  action, L686-689) and `Invoke-NuclearRecovery` (`nuclear`, L871-874) each run a
-  bare `docker compose up -d`, each with a comment saying that is what creates
-  the shared networks - and the script pins cwd to the repo root at L10, so that
-  bare command *is* the anchor project. `Invoke-MinimalRecovery` (L477) does not:
-  it only issues `docker compose ... restart` against containers that already
-  exist. Both full paths short-circuit into it when `Test-BasicConnectivity`
-  passes and **return early** if it succeeds, so a run that takes the minimal
-  path never touches the anchor. That is sound by construction - minimal recovery
-  only runs when connectivity already works, which means the networks are already
-  there - but it does mean "recovery recreates the networks" describes the full
-  paths, not every run. `Start-PlaneStack` creates nothing either; its comment
-  states the requirement rather than satisfying it.
-
-  This bullet is a correction. Attempt 2 of this item asserted the opposite - that
-  recovery never brings the anchor up - written from the `Start-PlaneStack`
-  comment at L253 without opening the call sites. That is the same error shape
-  attempt 1 was failed for, and it is why the provenance rule at the top of this
-  file now exists.
+*(An earlier version of this section carried a second bullet, about whether
+`scripts/recovery/emergency-recovery.ps1` creates the anchor networks. It was
+written twice and wrong twice - each time from part of that script rather than
+all of it. It is dropped rather than restated a third time: describing another
+script's control flow is outside what this item can responsibly verify, and a
+confident wrong entry costs whoever acts on it more than no entry at all. If you
+need to know what recovery does about the networks, read `emergency-recovery.ps1`
+end to end - do not rely on a summary in a search-plane note.)*
 
 ## 8. The stack-map's cold-start list draws the search plane as a chain
 
