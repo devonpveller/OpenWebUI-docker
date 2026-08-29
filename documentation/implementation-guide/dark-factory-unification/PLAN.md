@@ -4,7 +4,8 @@ Status: PLANNED 2026-08-29 (nothing implemented). Written from a grounded read o
 all three sources at their current tips, not from memory:
 
 - `agent-org/docs/ORCHESTRATION-DESIGN.md` — the org's ground truth (§1–§14)
-- `documentation/implementation-guide/agent-memory-plane/PLAN.md` — the NVIDIA
+- `implementation-guide/agent-memory-plane/PLAN.md` in the **documentation-plans-ai-stack**
+  private repo (moved there 2026-08-29) — the NVIDIA
   ARC-AGI-3 / AVO adoption plan (typed memory, exposure invariant, three doors)
 - `scripts/agent-harness/` + `documentation/implementation-guide/multi-agent-concurrency/`
   — this repo's session harness (anchor gate, pipeline, profiles), including the
@@ -394,7 +395,8 @@ models to `claude-opus-5` in `scripts/issue-ops/issue_ops.py` DEFAULTS.)
    their place" and the ground rules are paid-for; do not relearn them.
 3. `agent-org/docs/ORCHESTRATION-DESIGN.md` — the spine. §2, §4, §6.5–6.6,
    §7, §10, §14. Do not redesign what §14 marks BUILT + PROVEN.
-4. `documentation/implementation-guide/agent-memory-plane/PLAN.md` — adopt as
+4. `implementation-guide/agent-memory-plane/PLAN.md` in the **documentation-plans-ai-stack**
+   private repo (clone it beside this one) — adopt as
    written; its verified-assumptions ledger (file/line) is current as of
    2026-08-25 — re-verify anchors older than your session before relying.
 5. `scripts/agent-harness/MODULE.md` + `harness.config.json` — the module
