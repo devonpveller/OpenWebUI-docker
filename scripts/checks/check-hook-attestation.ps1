@@ -64,8 +64,16 @@ if (-not $common) {
 }
 if (-not [System.IO.Path]::IsPathRooted($common)) {
     # Relative to the repo we asked, not to wherever the caller happens to be standing.
-    $base = if ($RepoRoot) { $RepoRoot } else { (Get-Location).Path }
-    $common = Join-Path $base $common
+    #
+    # NOT named $base. PowerShell variable names are CASE-INSENSITIVE, so `$base` IS the
+    # `$Base` parameter - an earlier version of this line silently overwrote the base ref
+    # with a filesystem path, `rev-list "<path>..<branch>"` then matched nothing, and the
+    # check reported "0 commits, all clean" on every branch. It only fired in the MAIN
+    # checkout, where --git-common-dir returns a relative ".git"; worktrees return an
+    # absolute path and skipped this block entirely, so every test passed. A guard that
+    # vacuously passes is worse than no guard, and this one very nearly shipped.
+    $commonRoot = if ($RepoRoot) { $RepoRoot } else { (Get-Location).Path }
+    $common = Join-Path $commonRoot $common
 }
 $ledgerPath = Join-Path $common "hook-attest.log"
 # One override, for the drill only: it needs to drive this against a controlled ledger
