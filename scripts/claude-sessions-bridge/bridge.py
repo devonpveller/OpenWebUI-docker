@@ -42,6 +42,14 @@ Config via env (all optional):
                            ONE allow-list shared with interactive sessions, see SETTING_SOURCES)
   BRIDGE_WORKTREE_DEFAULT  run threads in their own git worktree (default "off";
                            per-thread override via `worktree: on|off`)
+
+  The agent harness (scripts/agent-harness) is configured in ITS OWN file, not here -
+  harness.config.json holds the role/model profiles and the on/off switches. From a thread:
+    profile: <name>        which models the worker/tester/reviewer roles run on
+    profile: list          show the profiles and what this thread is using
+    profile: default       drop the thread pin, back to the configured default
+  `model:` is the model of the session you are talking to; `profile:` is the models of the
+  agents it dispatches. With the harness disabled these directives say so and do nothing.
   BRIDGE_ALLOWED_TOOLS     optional extra --allowedTools floor (e.g. "Read Glob Grep")
   BRIDGE_ALLOW_SELF        "1" = treat the bot's own posts as operator input (smoke tests only)
 """
@@ -109,6 +117,7 @@ REPO = os.environ.get("BRIDGE_REPO", _REPO_ROOT)
 # operator's choice of floor; raise a single thread with `model: fable`, drop one with
 # `model: sonnet`/`haiku`, or move the whole bridge with BRIDGE_MODEL.
 MODEL = os.environ.get("BRIDGE_MODEL", "opus")
+
 # Per-turn cost-estimate cap. On a subscription nothing is billed — this is purely a
 # runaway-turn backstop (a "$50" turn ≈ a huge chunk of the Max usage window), sized so it
 # never fires on legitimate work. Set to "" to disable entirely.
@@ -131,11 +140,34 @@ SETTING_SOURCES = os.environ.get("BRIDGE_SETTING_SOURCES", "user,project,local")
 # Worktree-per-thread (2026-08-28). OFF by default: it changes WHERE every turn runs, so
 # it opts in per thread (`worktree: on`) until it has soaked. When on, a thread gets its
 # own checkout + branch and can no longer collide with another session's staged work.
-# Tooling and protocol: scripts/worktree/, documentation/implementation-guide/
+# Tooling and protocol: scripts/agent-harness/, documentation/implementation-guide/
 # multi-agent-concurrency/MERGE-PROTOCOL.md.
 WORKTREE_DEFAULT = os.environ.get("BRIDGE_WORKTREE_DEFAULT", "off").strip().lower() in (
     "1", "on", "true", "yes")
-WORKTREE_SCRIPTS = os.path.join(_REPO_ROOT, "scripts", "worktree")
+WORKTREE_SCRIPTS = os.path.join(_REPO_ROOT, "scripts", "agent-harness")
+# The agent harness is a MODULE (scripts/agent-harness). The bridge reaches it through this
+# one import and nothing else, so removing the module means removing this block and the
+# directives that use it - see scripts/agent-harness/MODULE.md. Import failure is not fatal:
+# a bridge that cannot orchestrate agents is still a bridge.
+sys.path.insert(0, WORKTREE_SCRIPTS)
+try:
+    import config as harness_config  # scripts/agent-harness/config.py
+except Exception as _harness_exc:  # noqa: BLE001
+    harness_config = None
+    _HARNESS_IMPORT_ERROR = str(_harness_exc)
+else:
+    _HARNESS_IMPORT_ERROR = ""
+
+
+def harness_off_reason() -> str:
+    """"" when the harness may be used from Mattermost, else why it may not."""
+    if harness_config is None:
+        return f"the agent harness module could not be loaded ({_HARNESS_IMPORT_ERROR})"
+    try:
+        return harness_config.disabled_reason("mattermost")
+    except Exception as e:  # noqa: BLE001
+        return f"the agent harness configuration is unreadable ({e})"
+
 ALLOWED_TOOLS = os.environ.get("BRIDGE_ALLOWED_TOOLS", "")
 ALLOW_SELF = os.environ.get("BRIDGE_ALLOW_SELF") == "1"
 
@@ -224,6 +256,12 @@ RELEASE_DIRECTIVE_RE = re.compile(r"^\s*release\s*[:=]\s*(\S+)\s*(.*)\Z", re.IGN
 # Per-thread git isolation: `worktree: on|off` (colon required, like the others). `on` gives
 # this thread its own checkout + branch `work/mm-<thread8>`, so two threads editing the same
 # file can never see each other's index. Persisted per thread.
+# `profile: <name>` picks which models the worker/tester/reviewer roles run on, the same
+# shape as `model:` above. Deliberately a SEPARATE directive: `model:` is the model of the
+# session you are talking to, `profile:` is the models of the agents it dispatches. Folding
+# them together would make one word mean two things at different scopes.
+PROFILE_DIRECTIVE_RE = re.compile(r"^\s*profile\s*[:=]\s*(\S+)\s*(.*)\Z",
+                                  re.IGNORECASE | re.DOTALL)
 WORKTREE_DIRECTIVE_RE = re.compile(r"^\s*worktree\s*[:=]\s*(\S+)\s*(.*)\Z",
                                    re.IGNORECASE | re.DOTALL)
 PERMISSION_MODES = {"auto": "auto", "acceptedits": "acceptEdits", "manual": "manual",
@@ -253,12 +291,12 @@ REMOTE_NOTE = (
     "If your working directory is under `.claude/worktrees/`, you are in YOUR OWN git worktree: "
     "commit there freely and never `cd` into the main checkout to mutate it. Before any test "
     "that MUTATES a plane or needs it stable to trust the result, hold that plane's lease "
-    "(scripts/worktree/lease.ps1 -Acquire -Name <plane> -Owner <your-worktree-id>; names in "
+    "(scripts/agent-harness/lease.ps1 -Acquire -Name <plane> -Owner <your-worktree-id>; names in "
     "lease-names.conf; read-only probes need none; a multi-plane test requests all names in one "
     "call). Test images tag `:wt-<id>`, never `:local` — prod containers are a gated deploy, "
     "not a test. Land your work with documentation/implementation-guide/multi-agent-concurrency/"
     "MERGE-PROTOCOL.md — you do NOT test or merge your own work. Write the test plan, then submit "
-    "it (scripts/worktree/queue.ps1 -Submit); a tester who did not write it executes that plan, "
+    "it (scripts/agent-harness/queue.ps1 -Submit); a tester who did not write it executes that plan, "
     "and a reviewer who did not write it rebases and merges. Say what you queued in this thread."
 )
 
@@ -599,7 +637,7 @@ def kill_tree(proc: subprocess.Popen) -> None:
 
 
 def _run_worktree_script(script: str, args: list[str], timeout: int = 900) -> tuple[int, str]:
-    """Run one of scripts/worktree/*.ps1 and return (exit_code, combined output).
+    """Run one of scripts/agent-harness/*.ps1 and return (exit_code, combined output).
 
     Never raises: worktree provisioning failing must produce a readable in-thread message,
     not a bridge traceback."""
@@ -654,7 +692,8 @@ def worktree_id(thread_root: str) -> str:
 
 def run_turn(claude_bin: str, thread_root: str, prompt: str, session_id: str | None,
              fork: bool = False, model: str = "", on_event=None, title: str = "",
-             permission_mode: str = "", on_proc=None, cwd: str = "") -> dict:
+             permission_mode: str = "", on_proc=None, cwd: str = "",
+             harness_profile: str = "") -> dict:
     """Run one headless turn, streaming NDJSON events. `on_event` receives each event as it
     arrives (used for the mid-turn progress log); the final `result` event is returned as the
     turn's result dict (same shape as --output-format json)."""
@@ -682,8 +721,16 @@ def run_turn(claude_bin: str, thread_root: str, prompt: str, session_id: str | N
             cmd += ["--fork-session"]
 
     t0 = time.time()
+    # The thread's harness profile travels as an environment variable, which is the layer
+    # config.ps1/config.py already resolve LAST. So a session started from this thread -
+    # and every harness script it runs - sees the profile the operator chose here, without
+    # the bridge having to thread a parameter through code it does not own.
+    env = None
+    if harness_profile:
+        env = dict(os.environ)
+        env["AI_STACK_HARNESS_PROFILE"] = harness_profile
     proc = subprocess.Popen(cmd, cwd=(cwd or REPO), stdin=subprocess.PIPE,
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
     if on_proc is not None:  # register with the bridge so `!stop` can abort a lane-2 turn
         try:
             on_proc(proc)
@@ -1177,6 +1224,7 @@ class Bridge:
             thread_model = ""  # stored by an old `model: default` — never a real CLI alias
         thread_mode = meta.get("mode", "")
         thread_worktree = bool(meta.get("worktree_enabled", WORKTREE_DEFAULT))
+        thread_profile = meta.get("harness_profile", "")
         changed = []
         while True:  # consume leading directives in any order: `model: …`, `mode: …`
             m = MODEL_DIRECTIVE_RE.match(prompt)
@@ -1211,6 +1259,10 @@ class Bridge:
             if m:
                 item_id = m.group(1)
                 prompt = m.group(2).strip()
+                off = harness_off_reason()
+                if off:
+                    post(f"🚫 `release:` is unavailable - {off}.", thread_root)
+                    continue
                 # Single-operator deployments (the norm here) can name the approver; with
                 # several configured we cannot tell which one posted without another API
                 # call, so record the role rather than guess a name.
@@ -1224,10 +1276,44 @@ class Bridge:
                 post("\n".join([f"{icon} `release: {item_id}`", fence, detail, fence]),
                      thread_root)
                 continue
+            m = PROFILE_DIRECTIVE_RE.match(prompt)
+            if m:
+                requested = m.group(1)
+                prompt = m.group(2).strip()
+                off = harness_off_reason()
+                if off:
+                    post(f"🚫 `profile:` is unavailable - {off}.", thread_root)
+                    continue
+                known = harness_config.profile_names()
+                if requested.lower() in ("list", "?"):
+                    lines = [harness_config.describe_profile(n) for n in known]
+                    post("**Harness profiles** (role -> runner/model)\n\n- "
+                         + "\n- ".join(lines)
+                         + f"\n\nThis thread: `{thread_profile or harness_config.profile_name('mattermost')}`",
+                         thread_root)
+                    continue
+                if requested.lower() in ("default", "reset"):
+                    thread_profile = ""
+                    changed.append(f"profile -> `{harness_config.profile_name('mattermost')}` (default)")
+                    continue
+                if requested not in known:
+                    # Loud, not silently defaulted: a typo that quietly ran the default
+                    # profile is how work ends up on a model nobody chose.
+                    post(f"⚠️ Unknown profile `{requested}` - known: {', '.join(known)}. "
+                         f"Keeping `{thread_profile or harness_config.profile_name('mattermost')}`.",
+                         thread_root)
+                    continue
+                thread_profile = requested
+                changed.append(f"profile -> `{requested}`")
+                continue
             m = WORKTREE_DIRECTIVE_RE.match(prompt)
             if m:
                 requested = m.group(1).lower()
                 prompt = m.group(2).strip()
+                off = harness_off_reason()
+                if off and requested in ("on", "1", "true", "yes"):
+                    post(f"🚫 `worktree: on` is unavailable - {off}.", thread_root)
+                    continue
                 if requested in ("on", "1", "true", "yes"):
                     thread_worktree = True
                 elif requested in ("off", "0", "false", "no"):
@@ -1246,6 +1332,7 @@ class Bridge:
                 if thread_mode:
                     entry["mode"] = thread_mode
                 entry["worktree_enabled"] = thread_worktree
+                entry["harness_profile"] = thread_profile  # "" = the configured default
                 save_state(self.state)
         if not prompt:  # directive-only (or directive-error) message: no turn to run
             if changed:
@@ -1360,7 +1447,8 @@ class Bridge:
         self.ensure_claude_bin()  # heal a pruned path BEFORE spawning, never after a failed turn
         resp = run_turn(self.claude_bin, thread_root, prompt, session_id, fork=fork,
                         model=thread_model or MODEL, on_event=on_event, title=title,
-                        permission_mode=mode_label, on_proc=register_proc, cwd=run_cwd)
+                        permission_mode=mode_label, on_proc=register_proc, cwd=run_cwd,
+                        harness_profile=thread_profile)
         dur = int(time.time() - t0)
         if progress["post_id"] and progress["lines"]:
             try:  # final flush so the log is complete, and mark the turn done

@@ -5,7 +5,7 @@
 
 Unit tests cover the directive grammar, id derivation, and the fail-closed contract.
 The integration tests actually provision and retire a real git worktree through
-scripts/worktree/*.ps1 (they self-skip when git or PowerShell is unavailable, and always
+scripts/agent-harness/*.ps1 (they self-skip when git or PowerShell is unavailable, and always
 clean up after themselves) — the point of this feature is filesystem isolation, and a
 mock cannot show that two threads stop sharing an index.
 """
@@ -132,7 +132,7 @@ class ScriptFailureTests(unittest.TestCase):
         self.assertTrue(out)
 
 
-@unittest.skipUnless(_tooling_available(), "needs Windows + git + scripts/worktree")
+@unittest.skipUnless(_tooling_available(), "needs Windows + git + scripts/agent-harness")
 class ProvisioningIntegrationTests(unittest.TestCase):
     """Real worktrees. These prove the isolation claim rather than asserting it."""
 
@@ -191,7 +191,7 @@ class ProvisioningIntegrationTests(unittest.TestCase):
         # namespace per repository. When the toolkit is checked out inside a worktree,
         # that copy must resolve the SAME lease/registry dir as the main checkout - or
         # two agents each get "ACQUIRED" for `merge` and exclude nobody.
-        wt_common = os.path.join(path, "scripts", "worktree", "common.ps1")
+        wt_common = os.path.join(path, "scripts", "agent-harness", "common.ps1")
         if not os.path.isfile(wt_common):
             # Explicit skip, never a silent pass: when this file is uncommitted or the
             # work line predates the toolkit, the worktree has no copy and there is
@@ -199,7 +199,7 @@ class ProvisioningIntegrationTests(unittest.TestCase):
             self.skipTest("toolkit not present in the worktree (uncommitted?) - "
                           "shared-state regression NOT exercised")
         if True:
-            main_common = os.path.join(bridge._REPO_ROOT, "scripts", "worktree", "common.ps1")
+            main_common = os.path.join(bridge._REPO_ROOT, "scripts", "agent-harness", "common.ps1")
             dirs = []
             for script, cwd in ((wt_common, path), (main_common, bridge._REPO_ROOT)):
                 r = subprocess.run(
@@ -223,7 +223,7 @@ class ProvisioningIntegrationTests(unittest.TestCase):
         self.assertFalse(os.path.isdir(path))
 
 
-@unittest.skipUnless(_tooling_available(), "needs Windows + git + scripts/worktree")
+@unittest.skipUnless(_tooling_available(), "needs Windows + git + scripts/agent-harness")
 class LeaseTests(unittest.TestCase):
     """Named-lease mutual exclusion (lease.ps1), exercised through the real script.
 
