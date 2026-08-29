@@ -183,6 +183,44 @@ OPEN:     The 26 historical events remain `mirrored=false`; their provenance
           is a provenance judgement for the operator, NOT a mechanical fix, so
           it was deliberately not done. One validation-probe thought (id 13314)
           was left in place as the audit record that the fix was verified.
+          **CLOSED same day — the operator said "write the history in open
+          brain as prescribed". See the entry below.**
+
+## 2026-08-29 · U1 Phase 0 · OPERATOR-DIRECTED BACKFILL — the lost history is restored
+DECISION: Replayed all 26 unmirrored safety-critical events into Open Brain and
+          flipped their `mirrored` flag. Range 2026-07-06 → 2026-08-24: six
+          `kill_switch`, six `effort_frozen`, six `concern_posted`, five
+          `operator_decision`, three `effort_cleared`.
+CITED:    Explicit operator instruction, 2026-08-29 ("as prescribed" — i.e. the
+          option described in the entry above).
+HOW, and why it differs from a naive replay:
+        - Each thought carries `backfilled: true` and `event_ts`, the ORIGINAL
+          event timestamp. The row's `created_at` is necessarily today, so
+          without that metadata the record would quietly assert 26 governance
+          events happened on 2026-08-29. A backfill indistinguishable from a
+          live write is a worse record than no backfill.
+        - Content shape is byte-identical to `audit_sink._mirror`, so a
+          backfilled thought reads the same as a live one apart from the
+          explicit backfill metadata.
+        - Idempotent by construction: selects only `mirrored=false`, and flips
+          the flag only on a genuine success (200 + no JSON-RPC error + no
+          tool-level isError). Dry-run by default; `--apply` to write.
+EVIDENCE: 26 applied, 0 failed. Verified on BOTH sides independently rather
+          than trusting the script's own report: `agent_bridge.events` now
+          shows `mirrored=t` for all 26 with none left false; `openbrain.thoughts`
+          holds 26 rows with `source=agent-org, backfilled=true` whose
+          `event_ts` values span exactly 2026-07-06T23:57:10 → 2026-08-24T07:36:18.
+          Content spot-checked (`[agent-org:kill_switch] effort=None :: {'on': True}`).
+          Re-running the script reports "0 event(s) to backfill" — proven
+          idempotent, not merely claimed.
+REVERT:   `UPDATE events SET mirrored=false WHERE id IN (...)` to restore the
+          flags, and delete the 26 thoughts by
+          `metadata->>'backfilled'='true'` — they are precisely identifiable,
+          which is the other reason that metadata is there.
+NOTE:     The script lives in the session scratchpad (`backfill_mirror.py`), not
+          the repo — it is a one-off remedy for a fixed misconfiguration. It was
+          removed from the container afterwards. Worth promoting to
+          `scripts/` only if the mirror ever breaks again.
 
 ## 2026-08-29 · U1 Phase 0.3 · class 2 (deploy sequencing)
 DECISION: Recreated `ao-worker-1/2` to attach the journals volumes, but
