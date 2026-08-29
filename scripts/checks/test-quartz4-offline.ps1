@@ -61,7 +61,7 @@ function Invoke-Unit {
   # DEFAULT recall; upstream's Hermes integration ships the opposite and its plane is
   # silently always empty.
   docker run --rm -v "${rootFwd}/OB1/integrations/kubernetes-deployment:/app" `
-    -w /app denoland/deno:2.3.3 sh -c "deno check agent-memory-policy.ts agent-memory-policy.test.ts && deno test agent-memory-policy.test.ts"
+    -w /app denoland/deno:2.3.3 sh -c "deno check agent-memory-policy.ts agent-memory-policy.test.ts agent-memory.ts agent-memory.test.ts index.ts && deno test agent-memory-policy.test.ts agent-memory.test.ts"
   if ($LASTEXITCODE -eq 0) { Pass "agent-memory policy: deno check + test" } else { Fail "agent-memory policy: deno check/test" }
 
   Section "Caddy validate (portal route)"
