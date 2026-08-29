@@ -334,7 +334,11 @@ class Settings(BaseSettings):
 
     # ── Audit mirror to Open Brain (governance §5/§6, P6.2) ─────────────────
     openbrain_mirror_enabled: bool = False
-    openbrain_url: str = "http://openbrain-gateway:8061"
+    # The FIRST-PARTY lane, not the cloud door. openbrain-gateway is obnet-only, Bearer-auth
+    # and allowlist-filtered — agent-bridge (ao-net + llm-net) cannot even resolve it, so the
+    # old `openbrain-gateway:8061` default made the mirror unreachable by construction.
+    # openbrain-mcp shares llm-net with us and takes `x-brain-key` directly.
+    openbrain_url: str = "http://openbrain-mcp:8000"
     openbrain_key: str = ""                # env only
 
     # ── Cost-tiered supervision (governance §3, P3.7) ───────────────────────

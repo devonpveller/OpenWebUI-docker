@@ -76,12 +76,12 @@ from .modules.router import Router, slugify
 from .modules.scheduler import NoCapacityError, Scheduler
 from .modules.scope_ledger import ScopeLedger
 from .modules.stop_gates import StopGates
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 
 from .models import (
     Concern as ConcernRow,
-    Effort, EffortConstraint, Event, GlobalState, LensReport, Project, ScopeNode, ScopeTask,
-    WorkerInstance,
+    Effort, EffortConstraint, Event, GlobalState, LensReport, Project, ProjectSurvey,
+    ScopeNode, ScopeTask, WorkerInstance,
 )
 from .modules.pending_store import PendingStore
 from .schemas import (
@@ -968,8 +968,14 @@ class Orchestrator:
         )
         # Stage-1 anchor: a cached read-only repo survey feeds the readiness gate (P3.8) so it
         # reasons from the real codebase instead of guessing. Only surveys when a repo is focused.
+        # Persistence seam (memory-plane Phase 0.2): the survey map is durable, so a bounce
+        # no longer costs a re-survey. Callbacks injected — the module stays DB-agnostic.
         self.project_context = ProjectContext(
-            self.router.survey_project, enabled=settings.project_survey_enabled
+            self.router.survey_project,
+            enabled=settings.project_survey_enabled,
+            load_fn=self._load_project_surveys,
+            save_fn=self._save_project_survey,
+            delete_fn=self._delete_project_survey,
         )
         self.events = EventGateway(db, chat, self.handle_event,
                                    max_attempts=settings.event_max_attempts)
@@ -2692,6 +2698,11 @@ class Orchestrator:
                 s.add(GlobalState(id=1, kill_switch=False))
                 await s.commit()
         await self._rehydrate_pending()   # restore proposals a prior run held (survives a rebuild, §3)
+        # Same idea one layer down: restore the project-survey map so the first effort after a
+        # bounce reuses it instead of paying for a re-survey (memory-plane Phase 0.2).
+        restored = await self.project_context.hydrate()
+        if restored:
+            log.info("restored %d persisted project survey(s)", restored)
         await self.profiles.load_from_disk()
         await self.charters.seed_floor_from_disk()
         self._load_pm_voice_charter()     # the operator-tunable "how the org talks to you" system prompt
@@ -13052,6 +13063,37 @@ class Orchestrator:
         await self.pending.rehydrate(
             self._pending_lifecycle, self._pending_capability,
             self._pending_plan, self._pending_merge)
+
+    # ── project-survey persistence (memory-plane Phase 0.2) ───────────────────
+    # The three callbacks injected into ProjectContext. They live here, not in the module,
+    # so project_context.py keeps its no-DB-coupling discipline (its docstring's promise).
+    async def _load_project_surveys(self) -> dict[str, tuple[str, str]]:
+        """Boot: durable survey rows → the in-memory map."""
+        async with self.db.session_factory() as s:
+            rows = (await s.execute(select(ProjectSurvey))).scalars().all()
+        return {r.project_slug: (r.base_sha or "", r.summary or "") for r in rows}
+
+    async def _save_project_survey(self, project: str, base_sha: str, summary: str) -> None:
+        """Upsert one survey. Re-surveying the same project REPLACES the row (a survey at a
+        new base supersedes the old map; keeping both would just be stale rows)."""
+        async with self.db.session_factory() as s:
+            row = await s.get(ProjectSurvey, project)
+            if row is None:
+                s.add(ProjectSurvey(project_slug=project, base_sha=base_sha, summary=summary))
+            else:
+                row.base_sha = base_sha
+                row.summary = summary
+            await s.commit()
+
+    async def _delete_project_survey(self, project: str | None) -> None:
+        """Operator invalidation — drop the durable row(s) too, or the next restart would
+        resurrect exactly what was just invalidated."""
+        async with self.db.session_factory() as s:
+            stmt = delete(ProjectSurvey)
+            if project is not None:
+                stmt = stmt.where(ProjectSurvey.project_slug == project)
+            await s.execute(stmt)
+            await s.commit()
 
     async def _reconcile_merge_gates(self) -> None:
         """Delegates to `PendingStore.reconcile_merge_gates` (prune gates whose PR is gone)."""
