@@ -341,6 +341,14 @@ class Settings(BaseSettings):
     openbrain_url: str = "http://openbrain-mcp:8000"
     openbrain_key: str = ""                # env only
 
+    # ── Agent-memory write paths (memory-plane PLAN §2.1) ───────────────────
+    # BOTH DEFAULT OFF, and the reason is one directory over: the audit mirror's code
+    # default said False while production had it true, so it spent weeks enabled and
+    # failing silently and nobody read the code as describing reality. A write path that
+    # turns itself on at deploy time cannot be reasoned about from the source.
+    memory_writeback_enabled: bool = False
+    memory_recall_enabled: bool = False
+
     # ── Cost-tiered supervision (governance §3, P3.7) ───────────────────────
     monitor_sample_rate: float = 0.25      # expensive-continuous LLM monitor sampling (0..1)
 
