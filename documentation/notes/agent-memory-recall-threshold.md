@@ -1,4 +1,4 @@
-# Finding — recall has no similarity threshold, and cannot be calibrated yet (2026-08-30)
+# Finding — the recall similarity threshold exists now, and is still uncalibrated (2026-08-30)
 
 Memory-plane PLAN §3 warns:
 
@@ -7,44 +7,79 @@ Memory-plane PLAN §3 warns:
 > often land 0.4–0.6). Calibrate against our corpus before enabling recall, or it returns
 > nothing.
 
-## What is actually true here
+**Updated 2026-08-30 (U6 / memory-plane P3, branch `work/u6recall`).** The first version of
+this note recorded that there was no threshold *at all* and that the two-phase recency blend
+was deferred with it. Both have since been built. What has NOT changed is the reason the
+number is blank, so the note stays open — the mechanism moved, the measurement did not.
 
-**We never inherited it.** The recall SQL has no cutoff at all —
-`agent-memory.ts` orders by `t.embedding <=> $1::vector` and `LIMIT`s, with no `WHERE` on
-similarity. So the failure the plan warns about (an inherited 0.7 making recall return
-nothing against bge-m3) cannot happen.
+## What is true now
 
-**The inverse risk is the live one.** With no cutoff, recall returns the top-K by distance
-whatever their relevance. On a small corpus that means a brief gets memories that have
-nothing to do with the goal — and the brief block states them as evidence the worker should
-weigh. Irrelevant evidence presented as relevant is worse than no evidence.
+**The floor exists, is named, and is unset.**
+`AGENT_MEMORY_RECALL_MIN_SIMILARITY` (plus `AGENT_MEMORY_RECALL_RECENCY_WEIGHT` and
+`AGENT_MEMORY_RECALL_HALF_LIFE_DAYS`) are read per call by `performRecall`
+(`OB1/integrations/kubernetes-deployment/agent-memory-ranking.ts`), wired through
+`OB1/docker/docker-compose.yml` on `openbrain-mcp`, and documented blank in
+`OB1/docker/.env.example`. Blank means **no floor and pure similarity** — byte-for-byte the
+ordering that shipped before the mechanism existed. Calibration is therefore a config change,
+not a code change.
 
-## Why it is not calibrated
+**It lives in the SQL, not in any client.** The floor is a predicate on the raw cosine in the
+outer filter of the recall query, so every door gets it and no caller can opt out. A
+per-caller floor would be a policy decision made in the wrong place — a second door could
+simply not send it.
 
-Calibration needs a corpus to calibrate against. There are currently **2** agent memories
-(`SELECT count(*) FROM agent_memories`), one of which is this phase's own acceptance probe.
-A threshold picked against two rows is a number with a story attached, not a measurement.
+**Recall is two-phase.** Phase 1 is an index scan ordered by the raw distance operator only
+(the ordering HNSW can serve), taking `limit x 4` candidates; phase 2 re-ranks that bounded
+set in memory by `sim*(1-w) + exp(-age/half_life)*w` and slices to `limit`. Upstream's
+`recency-boosted-match-thoughts` puts the blend in its `ORDER BY`, which seq-scans — we took
+the formula and not the shape, as PLAN §6 says to.
 
-## What was done instead
+**Nothing about live behaviour changed**, because both knobs default off and
+`AO_MEMORY_RECALL_ENABLED` is still off. Checked in the live env 2026-08-30:
+`agent-org/docker/.env` has `AO_MEMORY_WRITEBACK_ENABLED=true` and
+`AO_MEMORY_RECALL_ENABLED=false` — which is exactly the ordering this note asks for. The
+corpus is accruing right now; the read path is shut until there is enough of it to measure.
 
-`AO_MEMORY_RECALL_ENABLED` stays **off**, and it is a separate flag from
-`AO_MEMORY_WRITEBACK_ENABLED` precisely so the write path can run and build the corpus while
-the read path stays shut. That ordering is also what makes calibration possible later:
-writes first, then enough data to measure, then a threshold, then reads.
+## Why it is still not calibrated
+
+Calibration needs a corpus to calibrate against. There are currently **3** agent memories,
+all on the `ops` plane (measured 2026-08-30 by the session that assigned the U6 item; this
+note's earlier revision recorded 2 the same day):
+
+```sql
+SELECT COALESCE(metadata->>'exposure','personal'), count(*) FROM agent_memories GROUP BY 1;
+-- ops | 3
+```
+
+A threshold picked against three rows is a number with a story attached, not a measurement.
+Copying upstream's 0.7 would make recall return nothing against bge-m3 — the failure mode
+that looks exactly like success. Picking a low number because it makes a demo look good is
+the same mistake facing the other way. So both stay blank, and the *risk while blank* is the
+inverse of the plan's warning: with no floor, recall returns the top-K by distance whatever
+their relevance, and the brief presents them to a worker as evidence.
 
 ## To close this
 
-1. Let the write paths run until the corpus is large enough to show a distribution — Phase 2
-   writes one memory per finished effort, so this accumulates on its own.
+1. Let the write paths run until the corpus shows a distribution — Phase 2 writes one memory
+   per finished effort and one per learned failure signature, so this accumulates on its own.
+   `AO_MEMORY_WRITEBACK_ENABLED` is a separate flag from the recall one for exactly this:
+   writes first, then enough data to measure, then a threshold, then reads.
 2. Measure real query/memory pairs: for a sample of goals, record the cosine similarity of
    the memories a human judges relevant vs irrelevant. bge-m3 is expected to put related
-   items at 0.4–0.6, so the threshold is likely to sit well below upstream's 0.7 — but
-   "likely" is the reason to measure rather than to pick.
-3. Add the cutoff to `buildRecallScopeFilter`'s SQL, not to the client, so every caller gets
-   it and no door can opt out.
+   items at 0.4–0.6, so the floor is likely to sit well below upstream's 0.7 — but "likely"
+   is the reason to measure rather than to pick. The recall trace already records the tuning
+   each recall ran under, so the before/after of a change is answerable from the plane.
+3. Set `AGENT_MEMORY_RECALL_MIN_SIMILARITY` in `OB1/docker/.env` and recreate
+   `openbrain-mcp`. Consider the recency weight separately and later: it is a second
+   uncalibrated number, and changing two at once makes neither measurable.
 4. Then turn `AO_MEMORY_RECALL_ENABLED` on, and check §3's acceptance: a confirmed memory
    measurably appears in a worker brief, and a pending one never does.
 
-The two-phase recency blend §3 also describes (`sim*(1-w) + exp(-age/half_life)*w`, index
-scan then re-rank) is deferred with this, for the same reason: it is a re-ranking of scores
-whose scale has not been measured.
+## Related, and easy to conflate
+
+**A badly-chosen recall QUERY is not repaired by any threshold** — it is repaired by asking a
+better question. Fixed in the same branch: each of the four seams now embeds its own cleanest
+text (the request as asked, the step, the goal + error slice, the original goal) instead of
+the assembled brief, which had grown the org's standing preamble blocks — text identical on
+every effort, and so the one text guaranteed not to discriminate between goals. See
+`documentation/notes/u6recall-findings.md`.

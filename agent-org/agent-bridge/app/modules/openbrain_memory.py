@@ -196,18 +196,84 @@ RECALL_LIMIT = 8
 RECALL_SUMMARY_MAX = 300
 RECALL_BLOCK_MAX = 4000
 
-# NO SIMILARITY THRESHOLD IS APPLIED, and that is a deliberate gap rather than an oversight.
+# Timeouts, named because they sit on the DISPATCH PATH. `_agent_memory_context` runs while a
+# goal is being assembled and before it is frozen, so every second here is a second the org is
+# not working. RECALL is one call; USAGE is one per recalled memory, which is why it gets a
+# TOTAL budget rather than a per-call timeout: reported serially at 15s each, eight memories
+# added 24s to a dispatch (measured, tests/test_recall_seams.py) against a plane that answered
+# every request successfully. Enrichment that can stall the thing it enriches is not enrichment.
+RECALL_TIMEOUT_S = 15.0
+USAGE_TIMEOUT_S = 5.0
+USAGE_REPORT_BUDGET_S = 3.0
+
+# THE SIMILARITY FLOOR IS SERVER-SIDE AND UNCALIBRATED, deliberately, in that order.
 #
-# The plan warns against inheriting upstream's 0.7, which was tuned for
-# text-embedding-3-small; bge-m3 puts related items at 0.4-0.6, so an inherited threshold
-# would make recall return nothing. We never inherited it - the recall SQL has no cutoff at
-# all (agent-memory.ts: ORDER BY … LIMIT, no WHERE on similarity).
+# The plan warns against inheriting upstream's 0.7 (tuned for text-embedding-3-small; bge-m3
+# puts related items at 0.4-0.6, so an inherited 0.7 returns nothing). We never inherited it.
+# The floor now EXISTS as a named, configurable value on the server
+# (`AGENT_MEMORY_RECALL_MIN_SIMILARITY`, agent-memory.ts) and is UNSET by default, because
+# picking a number without measuring is the same mistake as inheriting one.
 #
-# The INVERSE risk is therefore the live one: with no cutoff, recall returns the top-K by
-# distance whatever their relevance, so a small corpus injects unrelated memories into a
-# brief. Calibrating needs a corpus to calibrate against and there are currently 2 memories.
-# Until then AO_MEMORY_RECALL_ENABLED stays off, which is why that flag is separate from the
-# writeback one. See documentation/notes/agent-memory-recall-threshold.md.
+# It lives in the SQL, not here, so every door gets it and no caller can opt out. This client
+# therefore does not send a threshold, and must not start: a per-caller floor is a policy
+# decision made in the wrong place.
+#
+# The live risk while it is unset is the inverse of the plan's: with no floor, recall returns
+# the top-K by distance whatever their relevance. That is why AO_MEMORY_RECALL_ENABLED is a
+# SEPARATE flag from the writeback one - writes build the corpus while reads stay shut.
+# Calibration steps: documentation/notes/agent-memory-recall-threshold.md.
+
+
+def _recall_lines(items: list) -> list:
+    """(item, rendered line) for every item that CAN be rendered. PURE.
+
+    Split out because two callers must agree on it: the block a worker reads, and the set of
+    memories we report as USED. When they disagreed, memories the brief never showed were
+    reported as used - which corrupts the one signal that can detect bad recall.
+    """
+    out = []
+    for it in items or []:
+        if not isinstance(it, dict):
+            continue
+        # ONE LINE PER MEMORY, ENFORCED — the block's structure is its only defence.
+        # Every line of this block says what a worker may do with the memory on it. A
+        # summary containing newlines renders as several lines, and the ones after the first
+        # carry no policy marker at all; a summary containing a blank line and a capitalised
+        # heading renders as a section of the brief that the org never wrote. Collapsing
+        # whitespace BEFORE clipping means a memory can only ever be one line, whatever it
+        # contains. (The server's unsafe-content gate screens secrets and transcripts, not
+        # this: it is about what may be STORED, and this is about what may be RENDERED.)
+        summary = _clip(" ".join(str(it.get("summary") or "").split()), RECALL_SUMMARY_MAX)
+        if not summary:
+            continue
+        # 'instruction' ONLY when the row actually carries the right. Everything an agent
+        # wrote unprompted is evidence, and mislabelling it here would launder it.
+        grade = "instruction" if it.get("can_use_as_instruction") else "evidence"
+        needs = " [needs-confirm]" if it.get("requires_user_confirmation") else ""
+        out.append((it, f"  - [{grade}]{needs} {summary}"))
+    return out
+
+
+def _fit_recall_lines(pairs: list) -> list:
+    """The leading pairs that fit the block budget. PURE — nothing downstream trims this
+    block (verified assumption #10: there is NO global brief token budget in this codebase)."""
+    kept, used = [], 0
+    for pair in pairs:
+        cost = len(pair[1]) + 1
+        if used + cost > RECALL_BLOCK_MAX:
+            break
+        kept.append(pair)
+        used += cost
+    return kept
+
+
+def select_recall_items(items: list) -> list:
+    """The memories that actually REACH the worker. PURE.
+
+    The honest input to a usage report: a recalled memory the block dropped was returned and
+    never shown, which is the `used=False` case the plane exists to be able to see.
+    """
+    return [it for it, _ in _fit_recall_lines(_recall_lines(items))]
 
 
 def render_recall_block(items: list) -> str:
@@ -218,23 +284,13 @@ def render_recall_block(items: list) -> str:
     that is where it actually has to hold - a memory a worker reads as an instruction is an
     instruction, whatever the database says about it.
     """
-    lines = []
-    for it in items or []:
-        if not isinstance(it, dict):
-            continue
-        summary = _clip(str(it.get("summary") or ""), RECALL_SUMMARY_MAX)
-        if not summary:
-            continue
-        # 'instruction' ONLY when the row actually carries the right. Everything an agent
-        # wrote unprompted is evidence, and mislabelling it here would launder it.
-        grade = "instruction" if it.get("can_use_as_instruction") else "evidence"
-        needs = " [needs-confirm]" if it.get("requires_user_confirmation") else ""
-        lines.append(f"  - [{grade}]{needs} {summary}")
-    if not lines:
+    pairs = _recall_lines(items)
+    kept = _fit_recall_lines(pairs)
+    if not kept:
         return ""
-    body = "\n".join(lines)
-    if len(body) > RECALL_BLOCK_MAX:
-        body = body[:RECALL_BLOCK_MAX].rsplit("\n", 1)[0] + "\n  - …(more memories omitted)"
+    body = "\n".join(line for _, line in kept)
+    if len(kept) < len(pairs):
+        body += "\n  - …(more memories omitted)"
     return (
         "\n\nRELEVANT MEMORIES — things this org recorded earlier. "
         "[instruction] = confirmed rules; [evidence] = supporting context only.\n"
@@ -247,17 +303,26 @@ def render_recall_block(items: list) -> str:
 class _RecallMixin:
     """Recall, split out only to keep the write path above readable."""
 
-    async def recall(self, *, project: str, query: str, limit: int = RECALL_LIMIT) -> list:
-        """Conservative recall for a brief. Returns [] for every failure, and never raises.
+    async def recall_traced(
+        self, *, project: str, query: str, limit: int = RECALL_LIMIT
+    ) -> tuple:
+        """Conservative recall for a brief: `(trace_id, items)`. Never raises; ("", []) on
+        every failure, including "switched off".
+
+        THE TRACE ID IS RETURNED, not discarded, because usage reports are keyed on it
+        (`agent_memory_audit_events.trace_id`). Without it the plane records that a memory
+        was used and loses WHICH RECALL surfaced it — the only question a recall trace exists
+        to answer, and the one that tells an operator whether recall is surfacing the right
+        thing or the same wrong thing repeatedly.
 
         `include_unconfirmed` is deliberately NOT exposed: a worker must not be able to ask
         for memories nobody has reviewed. The server's default gate already excludes them;
         this simply never sends the opt-in.
         """
         if not bool(getattr(self.s, "memory_recall_enabled", False)):
-            return []
+            return "", []
         if not (query or "").strip() or not self.s.openbrain_key:
-            return []
+            return "", []
         body = {
             "workspace_id": WORKSPACE,
             "project_id": project or None,
@@ -268,20 +333,32 @@ class _RecallMixin:
             import httpx
 
             url = self.s.openbrain_url.rstrip("/") + "/agent-memory/recall"
-            async with httpx.AsyncClient(timeout=15.0, transport=self.client.transport) as c:
+            async with httpx.AsyncClient(
+                timeout=RECALL_TIMEOUT_S, transport=self.client.transport
+            ) as c:
                 r = await c.post(url, headers={"x-brain-key": self.s.openbrain_key}, json=body)
             if r.status_code != 200:
                 log.debug("agent-memory recall: HTTP %s", r.status_code)
-                return []
+                return "", []
             data = r.json()
         except Exception as exc:  # noqa: BLE001 - recall is enrichment, never a blocker
             log.debug("agent-memory recall failed: %s", exc)
-            return []
-        items = data.get("items") if isinstance(data, dict) else None
-        return items if isinstance(items, list) else []
+            return "", []
+        if not isinstance(data, dict):
+            return "", []
+        items = data.get("items")
+        trace_id = data.get("trace_id")
+        return (str(trace_id) if isinstance(trace_id, str) else ""), (
+            items if isinstance(items, list) else [])
+
+    async def recall(self, *, project: str, query: str, limit: int = RECALL_LIMIT) -> list:
+        """Items only, for callers that do not report usage."""
+        _trace, items = await self.recall_traced(project=project, query=query, limit=limit)
+        return items
 
 
 # Attached rather than declared inline above so the write path stays the first thing read.
+OpenBrainMemory.recall_traced = _RecallMixin.recall_traced
 OpenBrainMemory.recall = _RecallMixin.recall
 
 
@@ -295,7 +372,8 @@ async def _report_usage(self, *, memory_id: str, used: bool, trace_id: str = "")
     if trace_id:
         args["trace_id"] = trace_id
     try:
-        return await self.client.call_tool("agent_memory_report_usage", args)
+        return await self.client.call_tool(
+            "agent_memory_report_usage", args, timeout=USAGE_TIMEOUT_S)
     except Exception:  # noqa: BLE001
         return False
 
