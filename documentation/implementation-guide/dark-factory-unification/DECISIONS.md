@@ -426,3 +426,45 @@ REVERT:   Concatenate them; no caller outside index.ts imports the inner files.
 NOTE:     Recorded because the plan and the tree otherwise disagree on their
           face, and a later reader would have to guess whether the split was
           deliberate.
+
+## 2026-08-30 · U2 · class 2 — the cadence owner is NOT supercronic
+DECISION: The daily sweep and weekly synthesis are scheduled by the HOST
+          Scheduled Task family (`scripts/issue-ops/register-issue-cadence.ps1`),
+          not by supercronic.
+CITED:    §C.3 decision 4 names supercronic (OB1's crontab) as the cadence owner,
+          and §C.3 itself says "if implementation shows a default wrong, that is
+          a class-2 decision: pick the better option, log it with the evidence".
+EVIDENCE: `issue_ops.py` shells to a headless `claude` binary, reads the GitHub
+          App private key from `agent-org/agent-bridge/secrets/`, and runs `git`
+          against the repo root. None of those exists inside an OB1 container,
+          and every entry in `OB1/docker/cron/crontab` is an HTTP call to a
+          service on obnet. Containerising the planner is a larger piece of work
+          than the cadence it would carry.
+REVERT:   `register-issue-cadence.ps1 -Unregister`. Nothing depends on the tasks
+          existing; the commands stay runnable by hand.
+
+## 2026-08-30 · U2 · class 2 — cadence registration is left to the operator
+DECISION: `register-issue-cadence.ps1` ships the mechanism and does NOT register
+          itself. `-WhatIfOnly` shows exactly what it would create.
+CITED:    §C.2 class 4 — "spending real money or calling external services beyond
+          the session". Registering starts an unattended daily job that runs
+          `claude -p` once per unplanned or stale issue.
+REVERT:   n/a (nothing was registered).
+
+## 2026-08-30 · harness · class 2 — close the stale rows out, do not stop creating them
+DECISION: Six queue rows (`ampolicy`, `dfu-anchor`, `dfu-mem0`, `hookattest`,
+          `lc-restore`, `memplane1`) sat in `anchor-draft` while their work was
+          merged. Closed with a new terminal state `closed-outside-gates` and a
+          per-row reason naming how many merges landed. The queue mechanism is
+          KEPT.
+CITED:    §C.1 — U0–U7 items do not run through queue.ps1's gates. These rows
+          predate that clause and were never going to reach a terminal state
+          through a pipeline this effort does not use.
+WHY NOT -Reject: 'rejected' asserts a reviewer turned the work down; it merged.
+          A convenient falsehood in the audit trail §C.7 calls the deliverable's
+          twin costs more than the tidiness is worth.
+WHY KEEP IT: three rows are NOT stale (`bridge-bg-task-note`,
+          `podcast-delivery-key`, `podcast-script-fallback` — zero merges each,
+          another effort's work). The mechanism is in use.
+REVERT:   Each row's `history` records its prior state; set `state` back and drop
+          `closed_reason`.
