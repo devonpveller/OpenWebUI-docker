@@ -1,0 +1,27 @@
+#!/bin/sh
+# pre-merge-commit - the same checks, for the commits `git commit` never sees.
+#
+# WHY THIS EXISTS (dark-factory-unification U5, review finding 5). The attestation
+# checker skipped every merge commit (`rev-list --no-merges`) and said so in its header,
+# calling merges "deliberately exempt" because `git merge` does not run pre-commit. That
+# left a content channel nothing validated. What was actually true was narrower than the
+# finding claimed, and was established by running it rather than by reading the docs:
+#
+#   CONFLICTED merge  -> git stops; the human resolves and runs `git commit`
+#                     -> pre-commit RUNS, and attests. Already covered.
+#   CLEAN merge       -> git commits by itself
+#                     -> pre-merge-commit is the ONLY hook invoked. Nothing ran here.
+#
+# So conflict resolution was never the hole. The hole was the clean merge, whose tree is
+# new content that no check had ever seen: two branches can each pass every check and
+# still produce a merged tree that does not - a caller added on one side and a URL changed
+# on the other is exactly the shape check-llm-gateway-routing.ps1 exists to catch, and
+# neither commit alone contains it.
+#
+# It DELEGATES rather than duplicating. Two copies of a five-check list drift, and the
+# copy that drifts is the one nobody looks at. `git write-tree` inside a clean merge yields
+# the merge tree, so pre-commit's attestation step records exactly the right object with no
+# special-casing.
+#
+# Activate in a fresh clone with:  git config core.hooksPath .githooks
+exec "$(dirname "$0")/pre-commit"
