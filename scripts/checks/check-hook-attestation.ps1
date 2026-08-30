@@ -126,16 +126,29 @@ if (Test-Path $ledgerPath) {
 #
 # Reading the hook out of the BRANCH (not the working tree) also means this cannot be
 # defeated by editing the file locally without committing it.
-$branchHook = (Invoke-GitLines @("show", "${Branch}:.githooks/pre-commit")) -join "`n"
+#
+# WHICH FILE ATTESTS MOVED (2026-08-30). Attestation used to live in .githooks/pre-commit,
+# and this gate read only that file. It is now the last block of .githooks/commit-msg -
+# pre-commit ran BEFORE commit-msg, so a tree it attested survived a commit-msg refusal and
+# the immediate `--no-verify` retry was waved through (.githooks/attest-lib.sh has the
+# reproduction). Both files are consulted, so this gate stays true for branches on either
+# side of that move rather than going silently INACTIVE - which, on a check whose whole job
+# is to notice absence, would have been the worst possible failure mode.
+$attestingHooks = @(".githooks/commit-msg", ".githooks/pre-commit")
+$branchHook = ""
+foreach ($h in $attestingHooks) {
+    $branchHook += ((Invoke-GitLines @("show", "${Branch}:$h")) -join "`n") + "`n"
+}
 if ($branchHook -notmatch 'hook-attest\.log') {
     if ($Json) {
         [pscustomobject]@{ branch = $Branch; base = $Base; checked = 0; ledger = $ledgerPath
                            ledgerFound = (Test-Path $ledgerPath); inactive = $true
-                           reason = "branch hook does not attest"; unattested = @() } |
+                           reason = "no attesting hook on branch"; unattested = @() } |
             ConvertTo-Json -Depth 5 -Compress
     } else {
         Write-Host "Hook attestation: INACTIVE for '$Branch'."
-        Write-Host "  That branch's .githooks/pre-commit does not record attestations, so its"
+        Write-Host "  Neither .githooks/commit-msg nor .githooks/pre-commit on that branch records"
+        Write-Host "  attestations, so its"
         Write-Host "  commits cannot have them. Nothing was bypassed - the mechanism is simply"
         Write-Host "  not present on this branch yet. It self-activates once the attesting hook"
         Write-Host "  is merged into the line these branches are cut from."

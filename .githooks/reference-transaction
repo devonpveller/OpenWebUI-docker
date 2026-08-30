@@ -27,9 +27,16 @@
 # So `--no-verify` - the documented, reached-for, trace-free bypass that motivated the
 # attestation ledger - cannot advance a branch any more. It is stopped, not noticed.
 #
-# THE RULE. At `prepared`, for every refs/heads/* update, the commit the branch is about
-# to point at must have a tree in the attestation ledger. Anything else aborts the whole
-# transaction and writes an audit record.
+# THE RULE. At `prepared`, for every refs/heads/* update, the (tree, message) pair of the
+# commit the branch is about to point at must be in the attestation ledger. Anything else
+# aborts the whole transaction and writes an audit record.
+#
+# THE MESSAGE JOINED THE PAIR ON 2026-08-30, and the tree alone was a real hole:
+# attestation used to be written by pre-commit, which runs BEFORE commit-msg, so a message
+# refused by commit-msg left its tree attested and the immediate `--no-verify` retry was
+# waved through - unstopped AND unaudited. The attester moved to commit-msg, the last hook
+# that can veto. Reproduction, measurement and the normalisation rule that keeps the two
+# sides in agreement: .githooks/attest-lib.sh.
 #
 # WHAT IS DELIBERATELY NOT CHECKED, because a guard that fires on honest work gets
 # switched off and then protects nothing (the lesson check-hook-attestation.ps1 paid for):
@@ -50,35 +57,71 @@
 #     check-hook-attestation.ps1 still reports them afterwards - the after-the-fact net
 #     is not removed, it is what remains for this case.
 #
-# WHAT IT CANNOT STOP, stated plainly because a guard oversold is a guard mistrusted.
-# The agent runs as the operator's own user with the real git.exe, so there is no
-# privilege boundary to hide a policy behind. Two routes remain, both MEASURED
-# (2026-08-30), not reasoned about:
+# WHAT IT CANNOT STOP, stated plainly because a guard oversold is a guard mistrusted, and
+# because a boundary asserted in prose is exactly how one gets oversold. Every route below
+# is MEASURED by scripts/agent-harness/verify-commit-path-guard.ps1 (step 11), which also
+# records, for each one, whether a guard-log line is written and whether the resulting
+# commit is still caught after the fact by scripts/checks/check-hook-attestation.ps1 - the
+# check queue.ps1 -Submit runs. The agent runs as the operator's own user with the real
+# git.exe, so there is no privilege boundary here to hide a policy behind. The honest
+# statement of this guard is "it closes the cheap route and prices the rest".
 #
-#   git -c core.hooksPath=/nonexistent commit -m ...        -> lands. Turns off every
-#       hook including this one. This is also the operator's deliberate escape hatch;
-#       the commit is reported UNATTESTED by check-hook-attestation.ps1 afterwards.
-#   git update-ref refs/pre/x <sha> && git update-ref refs/heads/b <sha>   -> lands.
-#       Parking the commit under a ref OUTSIDE refs/heads/* makes it "already reachable",
-#       and the second update is then treated as a ref move. Narrowing the reachability
-#       exemption would only push this to `git tag`, and it would start refusing an
-#       honest `git checkout -b rel <tag>` - so the exemption is deliberately kept wide.
-#       Note the direct route is closed: `git update-ref refs/heads/b <unattested>` is
-#       itself refused, because refs/heads is what this hook watches.
+#   R1  git -c core.hooksPath=/nonexistent commit ...    LANDS. no guard line. UNATTESTED.
+#       Turns off every hook. Also the operator's deliberate escape hatch.
+#   R2  git update-ref refs/pre/x <sha>, then            LANDS. no guard line. UNATTESTED.
+#       git update-ref refs/heads/b <sha>
+#       Parking under a non-refs/heads ref makes the commit "already reachable", so the
+#       second update is judged a ref move. Narrowing the reachability exemption would push
+#       this to `git tag` and start refusing an honest `git checkout -b rel <tag>`, so the
+#       exemption is kept wide deliberately. The DIRECT route is closed: update-ref straight
+#       into refs/heads/* is refused.
+#   R3  rm .githooks/reference-transaction, then         LANDS. no guard line. UNATTESTED.
+#       git commit --no-verify
+#       core.hooksPath is `.githooks` - a RELATIVE path INSIDE the worktree - so the guard
+#       is a file the guarded party can delete. Two words, cheaper than R1.
+#   R4  a worktree whose branch does not carry           LANDS. no guard line. UNATTESTED.
+#       .githooks/reference-transaction
+#       Same root cause as R3: one repo, one config, opposite outcomes per worktree. Every
+#       branch cut before this hook merged is in this state until it merges the line.
+#   R5  git rev-parse HEAD > "$(git rev-parse           LANDS. SKIP-SEQUENCER. UNATTESTED.
+#       --git-dir)/CHERRY_PICK_HEAD", then
+#       git commit --no-verify
+#       Forges the sequencer state this hook exempts. The exemption is not optional: git
+#       runs no pre-commit for replayed commits, so a rebase or cherry-pick can never be
+#       attested, and demanding it would refuse every reviewer rebase in MERGE-PROTOCOL.md.
+#       A forged .git file is indistinguishable from a real one to a hook that can only
+#       read .git.
+#   R6  git commit --amend --no-verify --no-edit         LANDS. no guard line. ATTESTED.
+#       The one --no-verify shape that survives, and the reason it is allowed to: the tree
+#       AND the message are unchanged, so the attestation genuinely covers this commit. It
+#       can re-parent and re-date; it cannot alter what the commit says or what it holds.
 #
-# WHAT IS *NOT* A ROUTE, contrary to the obvious guess: deleting the ledger. The guard
+# WHAT IS *NOT* A ROUTE, contrary to the obvious guess: deleting the ledger. This guard
 # fails CLOSED - a missing ledger denies everything with reason=no-ledger. It is
-# check-hook-attestation.ps1 that a deleted ledger neutralises (it reports INACTIVE), so
-# the two mechanisms fail in opposite directions and that is worth keeping.
+# check-hook-attestation.ps1 that a deleted ledger neutralises (it reports INACTIVE), so the
+# two mechanisms fail in OPPOSITE directions and that is worth keeping.
 #
-# What changed is cost and trace: `--no-verify` was one word that left no evidence at
-# all; each surviving route is a deliberate, unusual, separately-visible command. See
-# documentation/notes/u5proxy-findings.md for the full boundary.
+# R1-R5 all leave the commit UNATTESTED, and that is what check-hook-attestation.ps1 reads
+# at the submit gate. So none of them is invisible: what they escape is the guard LOG, not
+# the audit. What changed is cost and trace - `--no-verify` was one word that left no
+# evidence at all; each surviving route is a deliberate, separately-visible command that
+# still surfaces at the gate. Full table: documentation/notes/u5proxy-findings.md.
 #
 # Activate in a fresh clone with:  git config core.hooksPath .githooks
 # Turn off deliberately (operator):  git -c core.hooksPath=/nonexistent <cmd>
 
 [ "$1" = "prepared" ] || exit 0
+
+# THE SHARED DEFINITION IS MANDATORY. Without attest-lib.sh this hook cannot compute the
+# message digest the attester computed, so it refuses rather than falling back to the
+# weaker tree-only rule - a guard that silently degrades to the check it replaced is
+# precisely the failure this item exists to close.
+_lib="$(dirname "$0")/attest-lib.sh"
+if [ ! -r "$_lib" ]; then
+    echo "COMMIT-PATH GUARD: .githooks/attest-lib.sh is missing - refusing to advance any branch." >&2
+    exit 1
+fi
+. "$_lib"
 
 common=$(git rev-parse --git-common-dir 2>/dev/null) || exit 0
 [ -n "$common" ] || exit 0
@@ -114,14 +157,26 @@ while read -r old new ref; do
 
     tree=$(git rev-parse -q --verify "$new^{tree}" 2>/dev/null)
     [ -n "$tree" ] || continue
-    if [ -f "$ledger" ] && grep -q "^$tree " "$ledger" 2>/dev/null; then
+    # The digest of the message git actually STORED, reduced by the same function the
+    # attester applied to the message FILE. One definition, in attest-lib.sh: if the two
+    # sides ever disagreed, the guard would either deny honest commits or wave a rewrite
+    # through, so they are not allowed to be two pieces of code.
+    msg=$(_attest_digest_commit "$new")
+    if [ -n "$msg" ] && [ -f "$ledger" ] && grep -q "^$tree $msg " "$ledger" 2>/dev/null; then
         continue
     fi
 
-    reason="unattested-tree"
+    reason="unattested"
+    [ -n "$msg" ] || reason="no-digest"
+    # A tree that IS attested but under a DIFFERENT message is the amend/retry shape. It is
+    # worth naming separately: an operator reading this log should be able to tell a message
+    # rewrite from unchecked content without re-deriving it.
+    if [ "$reason" = "unattested" ] && [ -f "$ledger" ] && grep -q "^$tree " "$ledger" 2>/dev/null; then
+        reason="message-not-attested"
+    fi
     [ -f "$ledger" ] || reason="no-ledger"
-    printf '%s DENY ref=%s commit=%s tree=%s reason=%s wt=%s\n' \
-        "$now" "$ref" "$new" "$tree" "$reason" "$(git rev-parse --show-toplevel 2>/dev/null)" \
+    printf '%s DENY ref=%s commit=%s tree=%s msg=%s reason=%s wt=%s\n' \
+        "$now" "$ref" "$new" "$tree" "${msg:--}" "$reason" "$(git rev-parse --show-toplevel 2>/dev/null)" \
         >> "$guardlog" 2>/dev/null || true
     denied="$denied $ref"
 done
@@ -131,8 +186,9 @@ done
 echo "" >&2
 echo "COMMIT-PATH GUARD: refusing to advance$denied" >&2
 echo "" >&2
-echo "  The commit this branch would point at has a tree the pre-commit checks never" >&2
-echo "  validated. The usual cause is 'git commit --no-verify' or 'git merge --no-verify'." >&2
+echo "  The commit this branch would point at has content, or a message, that the hooks" >&2
+echo "  never validated. The usual cause is 'git commit --no-verify', 'git merge" >&2
+echo "  --no-verify', or a 'git commit --amend --no-verify' that rewrote the message." >&2
 echo "  Nothing was lost: the commit object exists, the branch simply did not move." >&2
 echo "" >&2
 echo "  Re-run the commit WITHOUT --no-verify. The checks it skips are the secret guard," >&2

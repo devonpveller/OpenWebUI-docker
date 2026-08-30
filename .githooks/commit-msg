@@ -27,62 +27,119 @@
 MSG_FILE="$1"
 [ -f "$MSG_FILE" ] || exit 0
 
-# Which submodules are staged in THIS commit? Mode 160000 is a gitlink.
-SUBS=$(git diff --cached --raw | awk '$2 == "160000" || $1 == ":160000" { print $NF }' | sort -u)
-[ -z "$SUBS" ] && exit 0
+# THE CHECK IS A FUNCTION SO THAT THE ATTESTATION BELOW ALWAYS RUNS.
+#
+# It used to be straight-line code that `exit 0`d as soon as it saw no staged gitlink -
+# which is nearly every commit. Splicing the attester in underneath it would have attested
+# only gitlink bumps, and .githooks/reference-transaction would then have refused every
+# ordinary commit in the repo. That defect existed for the length of one drill run and was
+# caught by MUTATING the hook rather than by reading it: the drill's fixture had been
+# REASSEMBLING commit-msg from a marker-extracted block, so it could not see this file's
+# real control flow at all. The fixture now copies this file verbatim and drives it with a
+# real submodule, and it is that change - not this comment - that keeps the two honest.
+_check_gitlink_shas() {
+    # Which submodules are staged in THIS commit? Mode 160000 is a gitlink.
+    SUBS=$(git diff --cached --raw | awk '$2 == "160000" || $1 == ":160000" { print $NF }' | sort -u)
+    [ -z "$SUBS" ] && return 0
 
-# Strip comment lines - `git commit -v` puts an entire diff below them, and that diff is
-# full of real-looking hex that has nothing to do with the message.
-BODY=$(grep -v '^#' "$MSG_FILE")
+    # Strip comment lines - `git commit -v` puts an entire diff below them, and that diff is
+    # full of real-looking hex that has nothing to do with the message.
+    BODY=$(grep -v '^#' "$MSG_FILE")
 
-CLAIMS=$(printf '%s' "$BODY" | grep -oE '\b[0-9a-f]{7,40}\b' | grep -E '[0-9]' | sort -u)
-[ -z "$CLAIMS" ] && exit 0
+    CLAIMS=$(printf '%s' "$BODY" | grep -oE '\b[0-9a-f]{7,40}\b' | grep -E '[0-9]' | sort -u)
+    [ -z "$CLAIMS" ] && return 0
 
-BAD=""
-for sha in $CLAIMS; do
-    found=""
-    for sub in $SUBS; do
-        [ -d "$sub" ] || continue
-        # GIT_DIR MUST BE UNSET FOR THE SUBMODULE LOOKUP.
-        #
-        # git runs hooks with GIT_DIR (and GIT_INDEX_FILE) pointing at the PARENT repo, and
-        # those win over `-C`: `git -C OB1 cat-file` would happily change directory and then
-        # resolve the SHA against the parent's object store, where a submodule commit does
-        # not exist. Every honest bump would be rejected.
-        #
-        # This is not hypothetical - it is what happened the first time this hook ran for
-        # real, on a message naming the correct SHA. The drill missed it because the drill
-        # invokes this script directly, where GIT_DIR is unset; git's invocation and a
-        # direct invocation are different environments, and only one of them is the one
-        # that matters. The drill now sets GIT_DIR to match.
-        if (unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE; git -C "$sub" cat-file -e "${sha}^{commit}") 2>/dev/null; then
+    BAD=""
+    for sha in $CLAIMS; do
+        found=""
+        for sub in $SUBS; do
+            [ -d "$sub" ] || continue
+            # GIT_DIR MUST BE UNSET FOR THE SUBMODULE LOOKUP.
+            #
+            # git runs hooks with GIT_DIR (and GIT_INDEX_FILE) pointing at the PARENT repo, and
+            # those win over `-C`: `git -C OB1 cat-file` would happily change directory and then
+            # resolve the SHA against the parent's object store, where a submodule commit does
+            # not exist. Every honest bump would be rejected.
+            #
+            # This is not hypothetical - it is what happened the first time this hook ran for
+            # real, on a message naming the correct SHA. The drill missed it because the drill
+            # invokes this script directly, where GIT_DIR is unset; git's invocation and a
+            # direct invocation are different environments, and only one of them is the one
+            # that matters. The drill now sets GIT_DIR to match.
+            if (unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE; git -C "$sub" cat-file -e "${sha}^{commit}") 2>/dev/null; then
+                found="yes"
+                break
+            fi
+        done
+        # A SHA that resolves in the PARENT repo is fine too - messages legitimately cite
+        # parent commits alongside a submodule bump.
+        if [ -z "$found" ] && git cat-file -e "${sha}^{commit}" 2>/dev/null; then
             found="yes"
-            break
         fi
+        [ -z "$found" ] && BAD="$BAD $sha"
     done
-    # A SHA that resolves in the PARENT repo is fine too - messages legitimately cite
-    # parent commits alongside a submodule bump.
-    if [ -z "$found" ] && git cat-file -e "${sha}^{commit}" 2>/dev/null; then
-        found="yes"
-    fi
-    [ -z "$found" ] && BAD="$BAD $sha"
-done
 
-if [ -n "$BAD" ]; then
-    echo "commit-msg: this message names commit(s) that do not exist:" >&2
-    for sha in $BAD; do echo "    $sha" >&2; done
-    echo "" >&2
-    echo "  Staged submodule(s):$(printf ' %s' $SUBS)" >&2
-    for sub in $SUBS; do
-        actual=$(git ls-files -s "$sub" 2>/dev/null | awk '{print $2}')
-        [ -n "$actual" ] && echo "    $sub is pinned at $actual" >&2
-    done
-    echo "" >&2
-    echo "  A gitlink bump is checked by reading the SHA in its message. One that does not" >&2
-    echo "  exist is indistinguishable from a bump to an unreachable commit, and it makes" >&2
-    echo "  the honest ones less believable. Read the SHA rather than recalling it:" >&2
-    echo "" >&2
-    echo "    git -C <submodule> rev-parse HEAD" >&2
-    exit 1
+    if [ -n "$BAD" ]; then
+        echo "commit-msg: this message names commit(s) that do not exist:" >&2
+        for sha in $BAD; do echo "    $sha" >&2; done
+        echo "" >&2
+        echo "  Staged submodule(s):$(printf ' %s' $SUBS)" >&2
+        for sub in $SUBS; do
+            actual=$(git ls-files -s "$sub" 2>/dev/null | awk '{print $2}')
+            [ -n "$actual" ] && echo "    $sub is pinned at $actual" >&2
+        done
+        echo "" >&2
+        echo "  A gitlink bump is checked by reading the SHA in its message. One that does not" >&2
+        echo "  exist is indistinguishable from a bump to an unreachable commit, and it makes" >&2
+        echo "  the honest ones less believable. Read the SHA rather than recalling it:" >&2
+        echo "" >&2
+        echo "    git -C <submodule> rev-parse HEAD" >&2
+        return 1
+    fi
+    return 0
+
+}
+
+# Refusal is the ONLY early exit, and it happens before anything is recorded.
+_check_gitlink_shas || exit 1
+
+# --- ATTESTATION -----------------------------------------------------------
+# THE LAST THING THE LAST VETO HOOK DOES. Everything above this line can still refuse the
+# commit; nothing below it can. That ordering is the whole mechanism - see
+# .githooks/attest-lib.sh for the bypass it closes and how it was measured.
+#
+# WE RECORD (TREE, MESSAGE):
+#   - the TREE, because it is the durable identity of the content, and `git write-tree`
+#     here yields exactly the tree the resulting commit will carry - including a PARTIAL
+#     commit, where git hands its hooks a temporary index, and a CLEAN MERGE, where the
+#     index already holds the merge result and git invokes this hook with .git/MERGE_MSG.
+#   - the MESSAGE, because the tree alone let `--amend --no-verify` rewrite a message
+#     against an already-attested tree. The message is what a reviewer reads to check a
+#     gitlink bump, and PLAN.md section C.7 makes it the operator's audit surface.
+#
+# The ledger lives in the SHARED git dir (--git-common-dir), never a worktree: it must not
+# be committable, and every worktree of this repo must read ONE ledger, or a reviewer in
+# another worktree could not verify a developer's work.
+#
+# FAILS QUIET HERE, CLOSED THERE. If any part of this cannot be computed we simply do not
+# write a line; the commit is then refused by .githooks/reference-transaction, which is the
+# safe direction. Never exit non-zero from this block - a bookkeeping failure must not be
+# reported to the user as a rejected message.
+_lib="$(dirname "$0")/attest-lib.sh"
+if [ -r "$_lib" ]; then
+    . "$_lib"
+    _at_tree=$(git write-tree 2>/dev/null)
+    _at_msg=$(_attest_digest_file "$MSG_FILE")
+    _at_common=$(git rev-parse --git-common-dir 2>/dev/null)
+    if [ -n "$_at_tree" ] && [ -n "$_at_msg" ] && [ -n "$_at_common" ]; then
+        # NOT $(git rev-parse --abbrev-ref HEAD || echo '?'): on an unborn HEAD git prints
+        # "HEAD" to stdout AND exits non-zero, so BOTH sides of the || run and the ledger
+        # got a malformed two-line record. Assign first, then substitute.
+        _at_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null) || _at_branch='?'
+        [ -n "$_at_branch" ] || _at_branch='?'
+        printf '%s %s %s %s\n' "$_at_tree" "$_at_msg" \
+            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$_at_branch" \
+            >> "$_at_common/hook-attest.log" 2>/dev/null || true
+    fi
 fi
 exit 0
