@@ -203,6 +203,20 @@ Binding:
 - **Ending a turn is a stop, and needs a class-4 reason like any other stop.**
   Completing a phase is not one. When a slice lands, pick the next, state it
   in one line, and begin it in the same turn.
+- **A turn ends for exactly three reasons**: a class-4 halt, every remaining
+  phase blocked, or every phase done. Nothing else qualifies — not a natural
+  reporting point, not a long turn, not the satisfaction of finishing
+  something.
+- **A merge is the middle of a turn, not the end of one.** Measured
+  2026-08-29/30: *every* observed stop landed on the commit immediately after a
+  `Merge work/…`. The slice completed, the report was accurate, the turn ended,
+  and the operator typed "continue". Landing work is the strongest available
+  evidence that the next slice is now unblocked — it is the worst possible
+  moment to stop.
+- **Never end a turn on a statement of intent.** "Continuing with X next",
+  followed by stopping, is worse than not naming X: it reads as momentum while
+  handing back the same gate. Naming the next step does not discharge it. If
+  you have named it, you have not earned the end of the turn — take it.
 - **The order is §2's table**, top to bottom, with wide phases sliced as
   class-2 calls. A phase is DONE when its *Validated by* column is satisfied
   and evidenced — not when its code is written.
