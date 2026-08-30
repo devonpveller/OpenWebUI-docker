@@ -1,6 +1,5 @@
 {
   "version": 1,
-
   "_why": [
     "THE SHAPE OF AN ANCHOR, as data rather than as source.",
     "",
@@ -31,14 +30,13 @@
     "COMPATIBILITY. Anchors written before this file have no `mode` field. Absent means B, so",
     "every anchor already in the queue stays valid - this is an extension, not a migration."
   ],
-
   "default_mode": "B",
-
   "rules": {
     "min_acceptance_criterion_chars": 12,
-    "min_acceptance_criterion_why": "an acceptance criterion nobody can check is a wish; this catches the common shape - a single vague line - without pretending to judge English"
+    "min_acceptance_criterion_why": "an acceptance criterion nobody can check is a wish; this catches the common shape - a single vague line - without pretending to judge English",
+    "executable_criteria_why": "an acceptance criterion may be a STRING (prose a tester judges) or an OBJECT {check, why} whose `check` is a command the tester RUNS. \u00a710's finding->check pipeline is the elevation path: prose lands only when no executable form exists, and an anchor that says so is honest rather than lazy",
+    "min_executable_check_chars": 3
   },
-
   "modes": {
     "B": {
       "desc": "bounded work: a fixed target with stated failure conditions",
@@ -61,7 +59,11 @@
         "acceptance": {
           "required": true,
           "kind": "list",
-          "why": "objectively checkable criteria - this is what the tester tests against"
+          "why": "objectively checkable criteria - this is what the tester tests against. Each entry is either prose (a string) or an EXECUTABLE criterion ({\"check\": \"<command>\", \"why\": \"<what passing it proves>\"}), which the tester runs instead of judging",
+          "item_kinds": [
+            "string",
+            "executable"
+          ]
         },
         "out_of_scope": {
           "required": true,
@@ -76,7 +78,6 @@
       },
       "forbidden": {}
     },
-
     "A": {
       "desc": "generative discovery: a theme walked toward, not a spec exhausted",
       "fields": {

@@ -243,3 +243,61 @@ async def test_the_gate_observer_never_breaks_the_transition():
         pass
     assert fired["n"] == 1
     assert GovernanceGate.on_lifecycle is None, "default must be unwired"
+
+
+# ── the write-through at the clause chokepoint (U3) ──────────────────────────
+@pytest.fixture
+def sig_writer():
+    """Bind the REAL _write_failure_signature onto a minimal host."""
+    from app.orchestrator import Orchestrator
+
+    def make(memory, project="proj-x", tainted=False):
+        host = _Orch(memory, project=project, tainted=tainted)
+        host._write_failure_signature = (
+            Orchestrator._write_failure_signature.__get__(host, _Orch)
+        )
+        return host
+
+    return make
+
+
+class _SigMem(_Mem):
+    def __init__(self, enabled=True):
+        super().__init__(enabled=enabled)
+        self.sigs = []
+
+    async def write_signature(self, **kw):
+        self.sigs.append(kw)
+        return True
+
+
+@pytest.mark.asyncio
+async def test_a_learned_signature_is_written_through(sig_writer):
+    mem = _SigMem()
+    host = sig_writer(mem)
+    assert await host._write_failure_signature("e1", "sig-1", "the drain stalled") is True
+    assert mem.sigs[0]["signature"] == "sig-1"
+    assert mem.sigs[0]["effort_id"] == "e1"
+
+
+@pytest.mark.asyncio
+async def test_the_write_through_carries_the_effort_taint(sig_writer):
+    mem = _SigMem()
+    host = sig_writer(mem, tainted=True)
+    await host._write_failure_signature("e1", "sig-1", "boom")
+    assert mem.sigs[0]["tainted"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_disabled_module_writes_no_signature(sig_writer):
+    mem = _SigMem(enabled=False)
+    host = sig_writer(mem)
+    assert await host._write_failure_signature("e1", "sig-1", "boom") is False
+    assert mem.sigs == []
+
+
+@pytest.mark.asyncio
+async def test_no_memory_module_is_not_an_error(sig_writer):
+    host = sig_writer(None)
+    host.memory = None
+    assert await host._write_failure_signature("e1", "sig-1", "boom") is False
