@@ -527,12 +527,15 @@ EVIDENCE: RED against the hooks at `cb08cd5`, in a scratch repo:
 COST:     Comment lines and scissors blocks are now stripped from every commit
           message this repo makes, including `# Conflicts:` on a `--no-edit` merge
           resolution. The hook says so on stderr when it changes anything.
-REVERT:   In `.githooks/attest-lib.sh`, restore `_attest_digest_commit` to
-          `git log -1 --format=%B "$1" | _attest_canon | git hash-object ...`,
-          restore `_attest_digest_file` to `_attest_canon < "$1" | ...`, and delete
-          the `_attest_canonicalise_file` call from `.githooks/commit-msg`. Drill
-          step 12 then fails, which is the intended signal. No data migration: the
-          ledger format is unchanged.
+REVERT:   Exactly the mutation that was executed above, and its effect is the
+          20-failure transcript: in `.githooks/attest-lib.sh` pipe both digests
+          through `_attest_canon` (`_attest_digest_file() { _attest_canon < "$1" |
+          git hash-object ...}` and `_attest_digest_commit() {
+          _attest_stored_message "$1" | _attest_canon | git hash-object ...}`), and
+          replace the `_attest_canonicalise_file "$MSG_FILE"` call in
+          `.githooks/commit-msg` with `:`. Drill steps 0, 12 and 12.5 then fail,
+          which is the intended signal. No data migration: the ledger FORMAT is
+          unchanged, so old lines stay readable either way.
 
 ## 2026-08-30 · U5 · class 2 — the submit gate reads the ledger's MESSAGE column
 DECISION: `scripts/checks/check-hook-attestation.ps1` requires the (tree, message)
@@ -558,10 +561,13 @@ EVIDENCE: RED: the shipped checker (`git show HEAD:...`) run against a commit wh
           hashed to f2046d1f instead of 3316699b), flagging an HONEST commit. The
           digest is computed in .NET now and drill step 12.6 pins it against
           `git hash-object`.
-REVERT:   In `check-hook-attestation.ps1`, drop the `$pairs` map and restore
-          `if ($tree -and $attested.ContainsKey($tree)) { continue }`. The activation
-          helper and `Get-StoredMessageDigest` become dead and can go with it. Drill
-          step 12.7 then fails.
+REVERT:   `git show cb08cd5:scripts/checks/check-hook-attestation.ps1` IS the
+          pre-change file; restoring it is the revert, and running it against the
+          forged fixture is the RED transcript quoted above (EXIT=0). The narrower
+          edit is to drop the `$pairs` map and restore
+          `if ($tree -and $attested.ContainsKey($tree)) { continue }`, after which
+          `Test-V2Attester`, `Get-StoredMessageDigest`, `Get-BlobId` and
+          `Invoke-GitBytes` are dead and can go with it. Drill step 12.7 then fails.
 
 ## 2026-08-30 · U5 · class 2 — completeness is a test, not a claim
 DECISION: Two drill steps exist purely to make omission fail loudly. **12.5** is the
