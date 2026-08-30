@@ -28,6 +28,8 @@ Everything else in here is internal and may change without notice.
 | `queue.ps1` | the pipeline: propose → confirm → submit → test → release → review → merge |
 | `lease.ps1` | named leases for SHARED RUNTIME only (Docker, GPU, ports, live DBs) |
 | `verify-merge-protocol.ps1` | the executable drill over the whole protocol |
+| `durable_checks.py` | the bank: tester finding -> executable check the line owns (shared registry) |
+| `seeded_regression_drill.py` | the executable drill over the bank: seed a regression, prove RED then GREEN |
 | `harness.config.json` | the configuration (see below) |
 | `config.py` | the reader other Python code imports (`bridge.py` does) |
 

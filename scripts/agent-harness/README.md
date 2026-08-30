@@ -24,6 +24,8 @@ The wider design (test containers, bridge integration):
 | `anchor.ps1` | The SHAPE of an anchor and whether one is usable. Owns no state; `queue.ps1` asks it whether the anchor it was handed is worth gating on |
 | `common.ps1` | Dot-sourced by the rest: resolves the SHARED coordination state dir, the work line, and stderr-safe git capture. Not run directly |
 | `verify-merge-protocol.ps1` | Executable proof of MERGE-PROTOCOL's two-agent path: 45 checks against a scratch line (never `development`), self-cleaning. Run it after changing any script here or the protocol |
+| `durable_checks.py` | The bank: a tester finding becomes an executable check the LINE owns (`add` / `list` / `run`), content-addressed, registry in the SHARED git dir so every worktree sees one bank. `mirror_to_plane` writes it to the agent-memory plane as `memory_type='check'` |
+| `seeded_regression_drill.py` | Executable proof of the bank: banks a real tester finding, seeds the regression it predicted in a disposable sandbox, and shows the banked check going RED and back to GREEN. Run it after changing `durable_checks.py` or a banked check |
 | `queue.ps1` | The work pipeline: `-Propose` / `-ConfirmAnchor` / `-Submit` / `-Claim -Role tester|reviewer` / `-Pass` / `-Fail` / `-Approve` / `-Requeue` / `-Merged` / `-Reject` / `-List`. Enforces separation of duties (exit 4), the anchor gate (exit 5) and the stale-pass rule |
 | `lease.ps1` | Named exclusive leases for the SHARED RUNTIME only (planes): `-Acquire` / `-Refresh` / `-Release` / `-Status` / `-Takeover` (exit 3 = held, wait). Names validate against `lease-names.conf` (`-AdHoc` to escape); multi-name requests are sorted + all-or-nothing, so agents cannot deadlock |
 
