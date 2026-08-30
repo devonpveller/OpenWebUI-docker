@@ -2114,7 +2114,35 @@ class Orchestrator:
         if fresh:
             await self.audit.log("constraint_learned", effort_id=effort_id,
                                  payload={"id": cid, "sig": sig, "origin": (origin or "")[:120]})
+            # WRITE-THROUGH (U3): the signature reaches the plane at LEARN time, so
+            # "have we seen this failure before?" stops being a per-effort question.
+            # Only on `fresh` - a re-recorded clause is subsumed here and must not
+            # produce a second write either.
+            await self._write_failure_signature(effort_id, sig, body, origin)
         return cid
+
+    async def _write_failure_signature(self, effort_id: str, signature: str,
+                                       body: str, origin: str = "") -> bool:
+        """Write a learned failure signature through to the memory plane (U3).
+
+        Claims LESS than §2.3's constraint promotion on purpose. 2.3 says at green close
+        "this dead end is a project fact"; this says at learn time "this failure was seen",
+        which is exactly what a novelty test needs and does not assert the clause is right.
+        That distinction is why this does not undo 2.3's judgement about efforts that never
+        converged.
+
+        Fail-soft, like every other write on this path: learning must never block a retry,
+        and that rule does not weaken because a second store is involved.
+        """
+        mem = getattr(self, "memory", None)
+        if mem is None or not getattr(mem, "enabled", False):
+            return False
+        project = await self._effort_project(effort_id) or ""
+        tainted = await self._effort_memory_tainted(effort_id)
+        return await mem.write_signature(
+            signature=signature, effort_id=effort_id, project=project,
+            body=body, origin=origin, tainted=tainted,
+        )
 
     async def _list_constraints(self, effort_id: str) -> list[dict]:
         """This effort's learned constraints (oldest first — the order they were discovered)."""
