@@ -225,6 +225,42 @@ ROLLBACK;
     Fail "agent-memory writeback SQL rejected by the real schema"
   }
 
+  # memory_type='check' (U3). The finding->durable-check pipeline writes this type, and
+  # it did not exist: the vendored schema permits eight values and a writeback with
+  # 'check' is rejected by the CHECK at runtime and by NOTHING at test time when the pool
+  # is stubbed. Both directions are asserted - the new value is accepted AND an invented
+  # one is still refused, because a migration that widened the constraint to anything
+  # would look identical from the accepting side alone.
+  $ckTypeSql = @"
+BEGIN;
+INSERT INTO agent_memories (workspace_id, summary, content, memory_type)
+VALUES ('ws-checktype', 'a durable check', 'pytest -q must stay green', 'check');
+SELECT 'check_type_ok', count(*) FROM agent_memories
+ WHERE workspace_id = 'ws-checktype' AND memory_type = 'check';
+ROLLBACK;
+"@
+  $ckTypeOut = docker exec -i ob-initdb-test psql -U postgres -d openbrain -tA -v ON_ERROR_STOP=1 -c $ckTypeSql 2>&1
+  if ($LASTEXITCODE -eq 0 -and ($ckTypeOut | Out-String) -match "check_type_ok\|1") {
+    Pass "memory_type 'check' is accepted by the real schema (U3)"
+  } else {
+    Write-Host ($ckTypeOut | Out-String) -ForegroundColor Red
+    Fail "memory_type 'check' was rejected - the U3 migration did not reach this volume"
+  }
+
+  $badTypeSql = @"
+BEGIN;
+INSERT INTO agent_memories (workspace_id, summary, content, memory_type)
+VALUES ('ws-badtype', 's', 'c', 'not_a_real_type');
+ROLLBACK;
+"@
+  $badTypeOut = docker exec -i ob-initdb-test psql -U postgres -d openbrain -tA -v ON_ERROR_STOP=1 -c $badTypeSql 2>&1
+  if ($LASTEXITCODE -ne 0 -and ($badTypeOut | Out-String) -match "violates check constraint") {
+    Pass "an invented memory_type is still refused (the CHECK was widened, not removed)"
+  } else {
+    Write-Host ($badTypeOut | Out-String) -ForegroundColor Red
+    Fail "an invented memory_type was ACCEPTED - the constraint is gone, not widened"
+  }
+
   # §1.1 EXPOSURE, against the real schema. The recall filter reads exposure out of a JSONB
   # key with COALESCE to 'personal', and two things there can only be answered by Postgres:
   # that the expression is valid at all, and that a row written BEFORE exposure shipped -

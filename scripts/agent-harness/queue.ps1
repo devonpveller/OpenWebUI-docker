@@ -74,6 +74,7 @@ param(
     [switch]$Resubmit,
     [switch]$Unclaim,
     [switch]$ScopeNodes,
+    [switch]$CloseOut,
     [string]$Id = "",
     [string]$Branch = "",
     [string]$Developer = "",
@@ -186,6 +187,34 @@ function Drop-Claim([string]$i, [string]$role) {
 }
 
 # --- list / show --------------------------------------------------------------------
+if ($CloseOut) {
+    # CLOSE OUT a row whose work landed OUTSIDE this queue's gates (§C.1).
+    #
+    # Not -Reject, and the distinction is the point. 'rejected' asserts a reviewer turned
+    # the work down; these items MERGED. Recording them as rejected would put a false
+    # statement into the audit trail that C.7 makes the deliverable's twin - and the whole
+    # reason that trail is trusted is that nobody writes convenient things into it.
+    #
+    # 'closed-outside-gates' says exactly what happened: the item existed, the work landed,
+    # and this queue did not adjudicate it.
+    if (-not $Id) { Die "-CloseOut needs -Id" }
+    if (-not $Reason) { Die "-CloseOut needs -Reason - a row closed without one is a row nobody can account for" }
+    $f = Join-Path $QueueDir "$Id.json"
+    if (-not (Test-Path $f)) { Die "no queue item '$Id'" }
+    $item = Get-Content -Raw -Path $f | ConvertFrom-Json
+    if ($item.state -in @("merged", "rejected", "closed-outside-gates")) {
+        Write-Host "'$Id' is already terminal ('$($item.state)') - nothing to close." -ForegroundColor Yellow
+        exit 0
+    }
+    $was = $item.state
+    Set-Field $item "state" "closed-outside-gates"
+    Set-Field $item "closed_reason" $Reason
+    Add-History $item "closed-outside-gates" ("was '{0}': {1}" -f $was, $Reason)
+    Write-Item $item
+    Write-Host "closed '$Id' (was '$was'): $Reason" -ForegroundColor Green
+    exit 0
+}
+
 if ($ScopeNodes) {
     # U2: THE QUEUE, AS THE SCOPE TREE IT ALREADY IS.
     #

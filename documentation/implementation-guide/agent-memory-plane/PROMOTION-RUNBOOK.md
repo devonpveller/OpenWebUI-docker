@@ -154,6 +154,7 @@ and a psql apply for the live one. There is no migration runner.
 |---|---|---|
 | `init-agent-memory-idempotency.sql` | per-workspace idempotency index (replaces the globally-unique one) | as below |
 | `init-agent-memory-promote-exposure.sql` | `promote_exposure` to the `agent_memory_review_actions` CHECK | as below |
+| `init-agent-memory-check-type.sql` | `check` to the `agent_memories.memory_type` CHECK (U3's finding→durable-check) | as below |
 
 ```powershell
 Get-Content OB1\docker\init-agent-memory-promote-exposure.sql |
@@ -176,3 +177,17 @@ before: the CHECK listed the original nine; after: `promote_exposure_allowed|1`,
 bogus action (`delete_everything`) is still refused, so the constraint was widened rather
 than loosened. Rollback is the same `ALTER` with the original
 nine-value list; no row becomes invalid unless a `promote_exposure` action has been written.
+
+### `check` memory_type — executed against the live volume 2026-08-30
+
+Before: `check_allowed|0`. After: `check_allowed_after|1`, and an invented type
+(`not_a_real_type`) is STILL refused — the constraint was widened, not removed, which is
+the direction a migration like this fails in silently.
+
+```powershell
+docker exec openbrain-db psql -U postgres -d openbrain -tA -c @"
+SELECT 'check_allowed', count(*) FROM pg_constraint
+ WHERE conname = 'agent_memories_memory_type_check'
+   AND pg_get_constraintdef(oid) LIKE '%''check''%';
+"@
+```

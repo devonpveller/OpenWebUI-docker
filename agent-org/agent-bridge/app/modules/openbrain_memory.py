@@ -301,3 +301,55 @@ async def _report_usage(self, *, memory_id: str, used: bool, trace_id: str = "")
 
 
 OpenBrainMemory.report_usage = _report_usage
+
+
+def build_signature_memory(
+    *,
+    signature: str,
+    effort_id: str,
+    project: str,
+    body: str,
+    origin: str = "",
+    tainted: bool = False,
+) -> dict[str, Any]:
+    """A learned failure SIGNATURE, written through to the plane (U3). PURE.
+
+    DISTINCT FROM §2.3's CONSTRAINT PROMOTION, and deliberately so. 2.3 promotes a clause at
+    GREEN CLOSE as a project fact: "this effort converged, and this dead end is real". This
+    writes at LEARN time and claims much less - "this failure was seen" - which is why it
+    does not undo 2.3's judgement that a clause from an effort that never converged "may just
+    be what this attempt got wrong".
+
+    WHAT IT BUYS: `EffortConstraint.signature` exists so "have we seen this failure before?"
+    is a cheap set-membership test, and today that set is PER EFFORT. Written through, the
+    set becomes cross-effort - a second effort walking into the same wall can recognise it as
+    a wall someone already hit rather than rediscovering it. That is the verification half of
+    unification: agent-org's CDCL novelty test stops being local to one effort.
+
+    IDEMPOTENT ON THE SIGNATURE, NOT THE EFFORT. The same failure hit by three efforts is ONE
+    memory; keying on the effort would produce three rows saying the same thing and make the
+    set-membership test useless at exactly the scale it starts mattering.
+    """
+    return {
+        "workspace_id": WORKSPACE,
+        "project_id": project or None,
+        "summary": _clip(f"failure signature {signature[:12]}: {body}", SUMMARY_MAX),
+        "content": _clip(body, CONTENT_MAX),
+        "memory_type": "failure",
+        "idempotency_key": f"failure-sig-{signature}",
+        "tainted": bool(tainted),
+        "metadata": {
+            "runtime_name": "agent-bridge",
+            "task_id": effort_id,
+            "source": "failure_signature",
+            "signature": signature,
+            "origin": origin[:200] if origin else "",
+        },
+    }
+
+
+async def _write_signature(self, **kw: Any) -> bool:
+    return await self.write(build_signature_memory(**kw))
+
+
+OpenBrainMemory.write_signature = _write_signature

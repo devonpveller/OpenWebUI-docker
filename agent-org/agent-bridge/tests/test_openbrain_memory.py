@@ -200,3 +200,64 @@ async def test_an_http_500_does_not_raise():
     assert await m.write_constraint(
         constraint_id="c1", effort_id="e1", project="p", text="t"
     ) is False
+
+
+# ── failure-signature write-through (U3) ─────────────────────────────────────
+from app.modules.openbrain_memory import build_signature_memory  # noqa: E402
+
+
+def test_a_signature_memory_is_keyed_on_the_SIGNATURE_not_the_effort():
+    """The whole value of the write-through.
+
+    `EffortConstraint.signature` exists so "have we seen this failure before?" is a cheap
+    set-membership test, and today that set is PER EFFORT. Keying on the effort would
+    produce one row per effort saying the same thing and make the test useless at exactly
+    the scale it starts mattering.
+    """
+    a = build_signature_memory(signature="abc123", effort_id="e1", project="p", body="boom")
+    b = build_signature_memory(signature="abc123", effort_id="e2", project="p", body="boom")
+    assert a["idempotency_key"] == b["idempotency_key"] == "failure-sig-abc123"
+
+
+def test_different_signatures_are_different_memories():
+    a = build_signature_memory(signature="aaa", effort_id="e1", project="p", body="x")
+    b = build_signature_memory(signature="bbb", effort_id="e1", project="p", body="y")
+    assert a["idempotency_key"] != b["idempotency_key"]
+
+
+def test_the_signature_memory_claims_LESS_than_a_promoted_constraint():
+    """It says "this failure was seen", not "this dead end is a project fact".
+
+    §2.3 promotes constraints only at GREEN CLOSE, because a clause from an effort that
+    never converged "may just be what this attempt got wrong". This writes at LEARN time and
+    must therefore not carry the constraint type, or it would quietly undo that judgement.
+    """
+    m = build_signature_memory(signature="s", effort_id="e1", project="p", body="boom")
+    assert m["memory_type"] == "failure"
+    assert m["memory_type"] != "constraint"
+
+
+def test_the_signature_is_recoverable_from_the_metadata():
+    # A set-membership test needs the key back out, not just a rendered summary.
+    m = build_signature_memory(signature="sig-xyz", effort_id="e1", project="p", body="b")
+    assert m["metadata"]["signature"] == "sig-xyz"
+    assert m["metadata"]["source"] == "failure_signature"
+
+
+def test_the_signature_memory_carries_taint():
+    m = build_signature_memory(signature="s", effort_id="e1", project="p", body="b",
+                               tainted=True)
+    assert m["tainted"] is True
+
+
+def test_the_signature_memory_omits_what_the_server_owns():
+    m = build_signature_memory(signature="s", effort_id="e1", project="p", body="b")
+    for owned in ("review_status", "visibility", "exposure", "provenance_status",
+                  "can_use_as_instruction", "requires_user_confirmation"):
+        assert owned not in m
+
+
+def test_a_long_failure_body_is_bounded():
+    m = build_signature_memory(signature="s", effort_id="e1", project="p", body="x" * 9000)
+    assert len(m["content"]) <= CONTENT_MAX
+    assert len(m["summary"]) <= SUMMARY_MAX

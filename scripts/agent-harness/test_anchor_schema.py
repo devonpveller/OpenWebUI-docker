@@ -320,3 +320,75 @@ def test_all_THREE_readers_report_the_same_problems():
         ps = _ps_problems(anchor)
         bridge = _bridge_problems(anchor)
         assert py == ps == bridge, f"readers disagree on {anchor}: {py} / {ps} / {bridge}"
+
+
+# ── EXECUTABLE ACCEPTANCE CRITERIA (U3) ──────────────────────────────────────
+# §10's finding->check pipeline is the elevation path: a tester should RUN what can be
+# run and judge only what cannot. These pin that BOTH readers agree about which is which,
+# because a criterion one reader calls executable and the other calls prose is worse than
+# either answer - the tester and the reviewer would be checking different things.
+
+EXEC_B = {
+    **VALID_B,
+    "acceptance": [
+        "a prose criterion long enough to be checkable by a human",
+        {"check": "python -m pytest -q", "why": "the suite is green"},
+    ],
+}
+
+
+def test_an_executable_criterion_is_valid_and_so_is_prose_beside_it():
+    # Backward compatibility is the requirement, not a nicety: every anchor in the queue
+    # today uses strings, and a schema change that invalidated them would strand them.
+    assert anchor_schema.problems(EXEC_B) == []
+
+
+def test_both_readers_agree_an_executable_criterion_is_valid():
+    assert anchor_schema.problems(EXEC_B) == _ps_problems(EXEC_B) == []
+
+
+def test_an_empty_check_is_refused_by_BOTH_readers():
+    """A criterion that claims to be runnable and is not is worse than prose.
+
+    A tester reading `check` will believe it ran.
+    """
+    bad = {**VALID_B, "acceptance": [{"check": "", "why": "something"}]}
+    py, ps = anchor_schema.problems(bad), _ps_problems(bad)
+    assert py and py == ps, f"readers disagree: {py} vs {ps}"
+
+
+def test_a_check_without_a_why_is_refused_by_BOTH_readers():
+    # A command whose purpose is unstated cannot be judged when it fails - the reader sees
+    # a red command and no way to tell whether the criterion or the code is wrong.
+    bad = {**VALID_B, "acceptance": [{"check": "pytest -q"}]}
+    py, ps = anchor_schema.problems(bad), _ps_problems(bad)
+    assert py and py == ps, f"readers disagree: {py} vs {ps}"
+
+
+def test_the_length_rule_applies_to_prose_and_NOT_to_a_terse_why():
+    # A `why` may be terse and still honest; prose has to carry the whole criterion.
+    short_why = {**VALID_B, "acceptance": [{"check": "pytest -q", "why": "green"}]}
+    assert anchor_schema.problems(short_why) == []
+    short_prose = {**VALID_B, "acceptance": ["too short"]}
+    assert anchor_schema.problems(short_prose) != []
+
+
+def test_executable_and_prose_criteria_partition_the_list():
+    ex = anchor_schema.executable_criteria(EXEC_B)
+    pr = anchor_schema.prose_criteria(EXEC_B)
+    assert [e["check"] for e in ex] == ["python -m pytest -q"]
+    assert pr == ["a prose criterion long enough to be checkable by a human"]
+    # Every entry is in exactly one bucket - a criterion in neither would be silently
+    # untested, which is the failure this whole seam exists to prevent.
+    assert len(ex) + len(pr) == len(EXEC_B["acceptance"])
+
+
+def test_an_anchor_with_no_executable_criteria_yields_an_empty_list():
+    assert anchor_schema.executable_criteria(VALID_B) == []
+    assert anchor_schema.prose_criteria(VALID_B) == list(VALID_B["acceptance"])
+
+
+def test_malformed_anchors_do_not_raise_the_extractors():
+    for bad in (None, "a string", 7, {}, {"acceptance": None}):
+        assert anchor_schema.executable_criteria(bad) == []
+        assert anchor_schema.prose_criteria(bad) == []

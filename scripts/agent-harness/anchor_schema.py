@@ -135,12 +135,56 @@ def problems(anchor: Any, schema: Dict[str, Any] | None = None) -> List[str]:
     # An acceptance criterion nobody can check is a wish. This catches the common shape -
     # a single vague line - without pretending to judge English.
     min_len = int(s["rules"]["min_acceptance_criterion_chars"])
+    min_cmd = int(s["rules"].get("min_executable_check_chars", 3))
     if "acceptance" in anchor and "acceptance" in spec["fields"]:
         for c in _nonempty_items(anchor.get("acceptance")):
+            if isinstance(c, dict):
+                # EXECUTABLE criterion. Judged on the command, not on the prose: a `why`
+                # can be one word and still be honest, while an empty `check` is a
+                # criterion that claims to be runnable and is not - which is worse than
+                # prose, because a tester will believe it ran.
+                cmd = str(c.get("check") or "").strip()
+                if len(cmd) < min_cmd:
+                    out.append(
+                        "an executable acceptance criterion needs a 'check' command - "
+                        # COMPACT separators, to match PowerShell's ConvertTo-Json
+                        # -Compress byte for byte. json.dumps defaults to ", " and ": ",
+                        # and the cross-reader test compares PROBLEMS rather than verdicts -
+                        # it caught this on the first run.
+                        f"got {json.dumps(c, separators=(',', ':'))}")
+                elif not str(c.get("why") or "").strip():
+                    out.append(
+                        f"executable criterion '{cmd}' needs a 'why' - a command whose "
+                        "purpose is unstated cannot be judged when it fails")
+                continue
             if len(str(c).strip()) < min_len:
                 out.append(
                     f"acceptance criterion '{c}' is too short to check - say what "
                     "would count as failing it")
+    return out
+
+
+def executable_criteria(anchor: Any, schema: Dict[str, Any] | None = None) -> List[Dict[str, str]]:
+    """The acceptance criteria that are COMMANDS, in order. [] when there are none.
+
+    U3's point: a tester should RUN what can be run and judge only what cannot. This is the
+    seam that makes that possible - it separates the two without forcing every criterion to
+    become a command, because some genuinely cannot be one and pretending otherwise produces
+    a check that passes for the wrong reason.
+    """
+    out: List[Dict[str, str]] = []
+    for c in _nonempty_items((anchor or {}).get("acceptance") if isinstance(anchor, dict) else None):
+        if isinstance(c, dict) and str(c.get("check") or "").strip():
+            out.append({"check": str(c["check"]).strip(), "why": str(c.get("why") or "").strip()})
+    return out
+
+
+def prose_criteria(anchor: Any, schema: Dict[str, Any] | None = None) -> List[str]:
+    """The acceptance criteria a human still has to judge. The complement of the above."""
+    out: List[str] = []
+    for c in _nonempty_items((anchor or {}).get("acceptance") if isinstance(anchor, dict) else None):
+        if not isinstance(c, dict):
+            out.append(str(c).strip())
     return out
 
 
@@ -166,3 +210,63 @@ def read_anchor_file(path: str | Path, schema: Dict[str, Any] | None = None) -> 
             f"the anchor in '{p}' is not usable:\n  - " + "\n  - ".join(found)
             + "\n\nFields:\n" + field_help(mode_of(anchor, schema or load())))
     return anchor
+
+
+def _run_criteria(anchor_path: str) -> int:
+    """`python anchor_schema.py <anchor.json>` — RUN the executable criteria.
+
+    This is what makes an executable criterion executable rather than declared. §C.7: only
+    an executable check counts, and a criterion nothing ever runs is prose wearing a command.
+
+    Exit codes are chosen so a caller can tell the three outcomes apart:
+      0  every executable criterion passed (or there were none — see the printed count)
+      1  at least one FAILED
+      2  the anchor could not be read or is not usable
+
+    Prose criteria are LISTED, never judged. A runner that silently ignored them would let
+    a reviewer read "all criteria passed" over criteria nobody looked at.
+    """
+    import subprocess
+
+    try:
+        anchor = json.loads(Path(anchor_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        print(f"cannot read anchor '{anchor_path}': {exc}")
+        return 2
+    bad = problems(anchor)
+    if bad:
+        print("anchor is not usable:")
+        for b in bad:
+            print("  -", b)
+        return 2
+
+    ex = executable_criteria(anchor)
+    pr = prose_criteria(anchor)
+    print(f"{len(ex)} executable criterion(s), {len(pr)} for a human to judge")
+    failed = 0
+    for c in ex:
+        print(f"\n$ {c['check']}\n  ({c['why']})")
+        try:
+            rc = subprocess.run(c["check"], shell=True, cwd=str(Path.cwd())).returncode
+        except Exception as exc:  # noqa: BLE001
+            print(f"  FAILED to run: {exc}")
+            failed += 1
+            continue
+        print("  PASS" if rc == 0 else f"  FAIL (exit {rc})")
+        if rc != 0:
+            failed += 1
+    if pr:
+        print("\nFor a human to judge (NOT run):")
+        for c in pr:
+            print("  -", c)
+    print(f"\n{len(ex) - failed}/{len(ex)} executable criteria passed")
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    import sys
+
+    if len(sys.argv) < 2:
+        print("usage: anchor_schema.py <anchor.json>   # run its executable criteria")
+        raise SystemExit(2)
+    raise SystemExit(_run_criteria(sys.argv[1]))
