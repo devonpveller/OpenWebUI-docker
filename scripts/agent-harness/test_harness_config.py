@@ -109,6 +109,34 @@ def test_unknown_runner_is_rejected():
         config.runner("little-codr")
 
 
+# --- describe_runner ----------------------------------------------------------------
+# `profile: list` in a Mattermost thread renders describe_profile() for every profile:
+# "all-local: worker=little-coder/local-default, ...". It never says that little-coder is
+# UNPROVEN, or how the harness reaches it. An operator switching a thread to a local
+# profile is choosing a substrate, and the listing does not tell them what they chose.
+# describe_runner() is the runner half of that listing (bridge.py:1305 renders it).
+
+def test_describe_runner_names_the_substrate_and_its_status():
+    line = config.describe_runner("little-coder")
+    assert line.startswith("little-coder: "), line
+    assert "local-default" in line, line          # the default model
+    assert "docker-exec" in line, line            # how the harness reaches it
+    assert "unproven" in line, line               # the A11 caveat, visible at the point of choice
+
+
+def test_describe_runner_reports_a_proven_runner_as_proven():
+    line = config.describe_runner("claude-code")
+    assert line.startswith("claude-code: "), line
+    assert "opus" in line, line
+    # "unproven" contains "proven"; a substring check alone would pass on the wrong word.
+    assert "proven" in line and "unproven" not in line, line
+
+
+def test_describe_runner_is_unknown_not_an_exception():
+    # Mirrors describe_profile: a listing must never blow up on a name it does not know.
+    assert config.describe_runner("nope") == "nope: (unknown)"
+
+
 # --- the door check -----------------------------------------------------------------
 # A runner record names how to REACH a daemon. Until 2026-08-30 the little-coder runner
 # declared endpoint "http://127.0.0.1:8090" and nothing ever called it, so nobody noticed
