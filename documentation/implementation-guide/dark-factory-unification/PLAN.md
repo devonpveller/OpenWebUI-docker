@@ -181,11 +181,43 @@ read §C from the file.
 
 ### C.5 Report, don't ask
 
-Progress, amendments and class-4 halts go to the operator's Mattermost thread
+Progress, amendments and class-4 halts go to the operator on whatever surface
+this session is running on (a Mattermost thread, a terminal, an IDE — the rule
+is the same and does not depend on the transport)
 as **statements with a default and a deadline-free path forward** — "done X,
 assumed Y (logged), next Z" — never as questions that gate the next step.
 The operator interjects if they disagree; silence is not consent for class-4
 actions (those still wait), but silence never stalls classes 1–3.
+
+### C.6 The phase table is a standing work queue — a finished slice is not a finished turn
+
+The failure this closes was observed repeatedly on 2026-08-29: a session
+completes a slice, reports it accurately, and ends its turn. It has obeyed
+every clause above — C.1 to C.5 all govern not stopping **for a question**,
+and none of them says what to do when there is no question. The operator then
+types "continue", which is a human gate in everything but name, and exactly
+the gate this section exists to remove.
+
+Binding:
+
+- **Ending a turn is a stop, and needs a class-4 reason like any other stop.**
+  Completing a phase is not one. When a slice lands, pick the next, state it
+  in one line, and begin it in the same turn.
+- **The order is §2's table**, top to bottom, with wide phases sliced as
+  class-2 calls. A phase is DONE when its *Validated by* column is satisfied
+  and evidenced — not when its code is written.
+- **A blocked phase is parked, not waited on.** If the next phase needs a
+  class-4 action or an unlanded prerequisite, say so and take the next
+  unblocked one. Everything-blocked is itself a report, and it names the list.
+- **The findings sinks are the overflow queue, not a graveyard.** Every entry
+  in `documentation/notes/*-findings.md` is real work that someone verified
+  and deliberately deferred. When §2 has nothing unblocked, work the sinks —
+  oldest first, one branch each, and remove the entry when it lands. (Proof
+  this is needed: agent-org's absence from `scripts/lib/stack-services.json`
+  was found, written down, and has sat unowned ever since.)
+- **Stopping is still right when the work has actually ended** — every phase
+  done, or every remaining one blocked. Say which, and why. That is a report,
+  not a question.
 
 ---
 
