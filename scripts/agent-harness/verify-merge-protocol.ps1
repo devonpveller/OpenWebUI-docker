@@ -318,6 +318,43 @@ Check "the report marks the offender as a merge (mergesChecked + isMerge)" `
     ("mergesChecked=" + $mjson.mergesChecked)
 Remove-Item -Recurse -Force $mrepo, $mrepo2 -ErrorAction SilentlyContinue
 Remove-Item $mledger -ErrorAction SilentlyContinue
+
+# --- retirement must not leave a stale registry row -------------------------------------
+#
+# THE ACCUMULATION BUG, as an executable case. The operator found "10 worktrees not merged";
+# most were already merged, and none had been deregistered. The cause was not forgetfulness:
+# on Windows `git worktree remove` drops its administrative record BEFORE deleting the
+# directory, so any open handle - a shell whose working directory is inside the worktree -
+# fails the delete and git exits non-zero AFTER it has stopped tracking the worktree.
+# remove-worktree.ps1 then bailed out, skipping the branch delete, the registry row and the
+# prune. git said gone, the registry said live, the branch survived. Four such rows were
+# sitting in worktrees.json when this was written.
+#
+# The probe HOLDS A REAL HANDLE rather than simulating the condition, and captures the
+# script's stderr - which is the other half of the bug: the bare `& git` ran under
+# $ErrorActionPreference='Stop', so a capturing caller (the bridge `close` path, the test
+# reaper) turned git's chatter into a terminating error that killed the script AT the git
+# line, before its own error handling could run.
+$rmScript = Join-Path $wtScripts "remove-worktree.ps1"
+$newScript = Join-Path $wtScripts "new-worktree.ps1"
+& $newScript -Id leakprobe | Out-Null
+$lpPath = Join-Path $repo ".claude\worktrees\wt-leakprobe"
+if (Test-Path $lpPath) {
+    $held = [System.IO.File]::Open((Join-Path $lpPath "CLAUDE.md"), 'Open', 'Read', 'None')
+    try { & $rmScript -Id leakprobe -Force 2>&1 | Out-Null } finally { $held.Close() }
+    $lpRows = (Get-Content -Raw (Join-Path (Get-SharedStateDir) "worktrees.json") | ConvertFrom-Json).worktrees
+    $lpRegistered = [bool]($lpRows.PSObject.Properties.Name -contains "leakprobe")
+    $lpTracked = [bool](Get-DrillGit -C $repo worktree list --porcelain | Select-String -SimpleMatch "wt-leakprobe")
+    $lpBranch = [bool](Get-DrillGit -C $repo branch --list "work/leakprobe")
+    Check "a held handle does NOT leave a stale registry row, ref or branch" `
+        (-not $lpRegistered -and -not $lpTracked -and -not $lpBranch) `
+        ("registry=" + $lpRegistered + " tracked=" + $lpTracked + " branch=" + $lpBranch)
+    Remove-Item -Recurse -Force $lpPath -ErrorAction SilentlyContinue
+    Invoke-DrillGit -C $repo worktree prune
+    if ($lpBranch) { Invoke-DrillGit -C $repo branch -D work/leakprobe }
+} else {
+    Check "a held handle does NOT leave a stale registry row, ref or branch" $false "probe worktree was not created"
+}
 & $queue -Reject -Id "drill-bypass" -By "wt-reviewer" -Reason "drill probe, not real work" 2>&1 | Out-Null
 
 foreach ($id in @("a", "b")) {
