@@ -1755,6 +1755,32 @@ class Bridge:
                     f"work (land it, or remove it with `-Force`)")
         return f"could not remove its worktree (`{(out or '')[:150]}`)"
 
+    def _write_session_rollup(self, thread_root: str, turns: list | None = None) -> bool:
+        """One reviewable memory per closed session (memory-plane §2.4). Never raises.
+
+        The turn texts are PASSED IN by the close handler, which pops the digest as part of
+        its teardown - reading `self.digest` here would find it already gone and write an
+        empty rollup for every session. An empty session still writes a valid rollup rather
+        than nothing, because "this session did nothing" is itself worth reviewing.
+
+        Import is LOCAL and guarded: the bridge must start on a checkout where this module is
+        absent or broken, and a memory feature is never a reason the bridge fails to boot.
+        """
+        try:
+            import memory_writer as _mw
+
+            if not _mw.rollup_enabled():
+                return False
+            lines = turns if turns is not None else self.digest.get(thread_root, [])
+            turns_text = [t for t in lines if isinstance(t, str)]
+            payload = _mw.build_session_rollup(thread_root, turns_text)
+            ok = _mw.write_memory(payload)
+            audit({"event": "memory_rollup", "thread": thread_root, "written": bool(ok)})
+            return bool(ok)
+        except Exception as exc:  # noqa: BLE001 - a memory write never takes the bridge down
+            log(f"session rollup failed for {thread_root[:8]}: {exc}")
+            return False
+
     def _close_session(self, thread_root: str, pid: str) -> None:
         """`close` / `end session` — dispose everything this session left running.
 
@@ -1774,7 +1800,11 @@ class Bridge:
         q = self.queues[thread_root]
         purged = q.purge_lane2()
         kept, _ = q.depth()
-        dropped_digest = len(self.digest.pop(thread_root, []))
+        # CAPTURED, not just counted. The rollup below needs these lines and this pop is
+        # what removes them - reading self.digest afterwards would have silently produced an
+        # empty rollup for every session, with nothing to indicate the lines had existed.
+        digest_lines = self.digest.pop(thread_root, [])
+        dropped_digest = len(digest_lines)
         # 3. A parked question would otherwise hold this session's valve shut forever.
         unparked = False
         if question_parked(thread_root):
@@ -1793,6 +1823,11 @@ class Bridge:
             aborted = True
         if kept == 0:
             q.set_valve(True)
+        # 5. AGENT-MEMORY ROLLUP (memory-plane §2.4). Default off; through the OPS DOOR,
+        #    because this is a host process and openbrain-mcp publishes no host port.
+        #    Last, and never in the way: the teardown above is what the operator is waiting
+        #    on, and write_memory swallows everything by contract.
+        self._write_session_rollup(thread_root, digest_lines)
         bits = [f"dropped **{len(follows)}** follow(s)"
                 + (" (" + ", ".join(f"`{x}`" for x in sorted(follows)) + ")" if follows else ""),
                 f"purged **{purged}** queued background wake(s)"]
