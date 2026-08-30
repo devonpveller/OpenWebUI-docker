@@ -189,11 +189,15 @@ try {
 
     # A 200 that wrote nothing is the failure mode this whole plane exists to prevent, so
     # the assertion is on the DATABASE, not on the response.
+    # PLAN §1 locks these. review_status is 'pending', NOT 'evidence_only' - a memory no
+    # human has looked at is not recallable by default, which is what the review door is
+    # for. An earlier version of this script asserted 'evidence_only', because the write
+    # default had been changed to satisfy a mis-stated invariant.
     $row = docker exec $DB psql -U postgres -d openbrain -tA -c `
-        "SELECT review_status || '|' || visibility || '|' || coalesce(project_id,'-') FROM agent_memories WHERE workspace_id = 'ws-smoke'"
+        "SELECT review_status || '|' || visibility || '|' || coalesce(project_id,'-') || '|' || coalesce(metadata->>'exposure','-') FROM agent_memories WHERE workspace_id = 'ws-smoke'"
     $rowTxt = ($row | Out-String).Trim()
-    if ($rowTxt -match "evidence_only\|project\|proj-smoke") { Pass "the memory is IN the database with the policy defaults ($rowTxt)" }
-    else { Fail "expected evidence_only|project|proj-smoke in agent_memories, got '$rowTxt'" }
+    if ($rowTxt -match "pending\|project\|proj-smoke\|ops") { Pass "the memory is IN the database with the LOCKED policy defaults ($rowTxt)" }
+    else { Fail "expected pending|project|proj-smoke|ops in agent_memories, got '$rowTxt'" }
 
     $audit = (docker exec $DB psql -U postgres -d openbrain -tA -c `
         "SELECT count(*) FROM agent_memory_audit_events WHERE workspace_id = 'ws-smoke' AND event_type = 'memory_written'" | Out-String).Trim()
@@ -257,11 +261,13 @@ try {
     if ($badStatus -eq 400) { Pass "malformed JSON is a 400, not a 500" }
     else { Fail "malformed JSON returned $badStatus, expected 400" }
 
-    # --- 5. THE PLANE-AGREEMENT INVARIANT, end to end -----------------------------------
-    # The unit tests prove the write defaults and the recall gate agree AS FUNCTIONS. This
-    # proves it through two doors and a database: write with defaults, recall with defaults,
-    # get it back. That is the property the whole plane exists for, and the one that fails
-    # silently - writes succeed, recall returns nothing, and nothing errors.
+    # --- 5. THE PLANE-AGREEMENT INVARIANT, as PLAN §1.3 states it -----------------------
+    # "the default writeback VISIBILITY/EXPOSURE must be provably returned by the default
+    # recall scope". Through two doors and a database, not two functions agreeing in a stub.
+    #
+    # The review gate is asserted in the OPPOSITE direction from the earlier version of this
+    # script: a fresh write is NOT returned by a conservative recall, and IS returned once
+    # the caller opts in. That is §1.3's "conservative recall returns nothing pending".
     Section "the plane-agreement invariant, through the doors"
     $recall = Invoke-Door -Path "/agent-memory/recall" -Body @{
         workspace_id = "ws-smoke"; project_id = "proj-smoke"
@@ -269,14 +275,84 @@ try {
     }
     $ids = @()
     if ($recall.Body -and $recall.Body.items) { $ids = @($recall.Body.items | ForEach-Object { $_.memory_id }) }
-    if ($recall.Status -eq 200 -and $ids -contains $write.Body.memory_id) {
-        Pass "a default writeback is returned by a default recall (through the doors, not in a stub)"
-    } else {
-        Write-Host ($recall | ConvertTo-Json -Depth 6) -ForegroundColor Red
-        Fail "the memory written above was NOT returned by the default recall"
+    if ($recall.Status -eq 200 -and $ids -notcontains $write.Body.memory_id) {
+        Pass "a conservative recall returns NOTHING pending - the review gate is real"
+    } else { Fail "an unreviewed memory was returned by the conservative recall" }
+
+    $recallU = Invoke-Door -Path "/agent-memory/recall" -Body @{
+        workspace_id = "ws-smoke"; project_id = "proj-smoke"
+        query = "a lesson worth keeping"; limit = 8; include_unconfirmed = $true
     }
-    if ($ids -notcontains $other.Body.memory_id) { Pass "another workspace's memory is not in the recall" }
+    $idsU = @()
+    if ($recallU.Body -and $recallU.Body.items) { $idsU = @($recallU.Body.items | ForEach-Object { $_.memory_id }) }
+    if ($recallU.Status -eq 200 -and $idsU -contains $write.Body.memory_id) {
+        Pass "include_unconfirmed DOES return it - reachable, just not by default"
+    } else {
+        Write-Host ($recallU | ConvertTo-Json -Depth 6) -ForegroundColor Red
+        Fail "include_unconfirmed did not return the pending memory"
+    }
+    if ($idsU -notcontains $other.Body.memory_id) { Pass "another workspace's memory is not in the recall" }
     else { Fail "CROSS-WORKSPACE LEAK: ws-other's memory was returned to a ws-smoke recall" }
+
+    # --- 6. §1.1 ACCESS BOUNDS WRITES ---------------------------------------------------
+    # The binding invariant (operator, 2026-08-25): a record's maximum exposure equals the
+    # access plane of the context that wrote it, enforced mechanically. Two halves, and
+    # only a running server can answer either.
+    Section "the exposure boundary (PLAN 1.1)"
+
+    # (a) THE MECHANICAL RULE BEATS THE CALLER'S CLAIM.
+    #     This door forces 'ops' (the internal lane stamps per the taint rule), so a caller
+    #     ASKING for ops is not an escalation and proves nothing. What must hold is that a
+    #     request the rule demotes lands personal no matter what the body claims - the
+    #     caller says tainted, and also says exposure:'ops' in two places, and loses.
+    $liar = Invoke-Door -Path "/agent-memory/writeback" -Body @{
+        workspace_id = "ws-smoke"; project_id = "proj-smoke"
+        summary = "claims to be ops"; content = "a lesson from a tainted effort"
+        memory_type = "lesson"; tainted = $true
+        exposure = "ops"; metadata = @{ exposure = "ops" }
+    }
+    if ($liar.Status -eq 200) {
+        $liarExp = (docker exec $DB psql -U postgres -d openbrain -tA -c `
+            "SELECT metadata->>'exposure' FROM agent_memories WHERE id = '$($liar.Body.memory_id)'" | Out-String).Trim()
+        if ($liarExp -eq "personal") { Pass "a tainted write claiming 'ops' is stamped personal anyway" }
+        else { Fail "EXPOSURE ESCALATION: a tainted caller reached plane '$liarExp'" }
+    } else { Fail "the exposure-escalation probe did not write ($($liar.Status))" }
+
+    # (b) PII DEMOTES, IT NEVER REJECTS. Code and ops prose are full of email-shaped
+    #     strings, so a gate that refused them would be switched off. The memory is kept -
+    #     on the narrower plane.
+    $pii = Invoke-Door -Path "/agent-memory/writeback" -Body @{
+        workspace_id = "ws-smoke"; project_id = "proj-smoke"
+        summary = "contains an address"; content = "ping someone@example.com about the drain"
+        memory_type = "lesson"
+    }
+    if ($pii.Status -eq 200 -and $pii.Body.ok -eq $true) {
+        $piiExp = (docker exec $DB psql -U postgres -d openbrain -tA -c `
+            "SELECT metadata->>'exposure' FROM agent_memories WHERE id = '$($pii.Body.memory_id)'" | Out-String).Trim()
+        if ($piiExp -eq "personal") { Pass "PII content was STORED and demoted to personal, not rejected" }
+        else { Fail "expected PII content to be demoted to personal, got '$piiExp'" }
+    } else { Fail "PII content was REFUSED - the gate must demote, never reject ($($pii.Status))" }
+
+    # (c) THE MIRROR. The exposure label is copied onto the linked thought, so the generic
+    #     search_thoughts lane enforces the same boundary. Without it a memory could be
+    #     unreachable through the agent-memory gate and readable through another lane,
+    #     which would make the gate decorative.
+    $mirror = (docker exec $DB psql -U postgres -d openbrain -tA -c `
+        "SELECT t.metadata->>'exposure' FROM thoughts t JOIN agent_memories am ON am.thought_id = t.id WHERE am.id = '$($pii.Body.memory_id)'" | Out-String).Trim()
+    if ($mirror -eq "personal") { Pass "the exposure label is mirrored onto the linked thought ($mirror)" }
+    else { Fail "the thought's exposure label is '$mirror', not mirrored from the memory" }
+
+    # (d) AND THE PERSONAL PLANE IS NOT IN A DEFAULT RECALL. This is the read half of the
+    #     invariant; (a) and (b) only proved the write half.
+    $recallP = Invoke-Door -Path "/agent-memory/recall" -Body @{
+        workspace_id = "ws-smoke"; project_id = "proj-smoke"
+        query = "drain"; limit = 25; include_unconfirmed = $true
+    }
+    $idsP = @()
+    if ($recallP.Body -and $recallP.Body.items) { $idsP = @($recallP.Body.items | ForEach-Object { $_.memory_id }) }
+    if ($idsP -notcontains $pii.Body.memory_id -and $idsP -notcontains $liar.Body.memory_id) {
+        Pass "personal-plane memories are NOT returned by a default recall"
+    } else { Fail "EXPOSURE LEAK: a personal-plane memory was returned by a default recall" }
 
 } catch {
     Write-Host ("  aborted: " + $_.Exception.Message) -ForegroundColor Red

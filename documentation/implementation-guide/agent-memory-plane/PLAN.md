@@ -37,14 +37,31 @@ stated in `../dark-factory-unification/DECISIONS.md`; the short version:
 | **1.3** offline harness + smoke script + plane-agreement invariant | **PARTIAL** | Done, and done first as the plan required: the plane-agreement invariant test. Harness and smoke script green. Missing: conservative-recall-returns-nothing-pending, `include_unconfirmed` returning it *and creating a trace*, usage report, `evidence_only` review action, and the **cloud-gateway negative test** (`agent_memory_*` denied via :8061; cloud `search_thoughts` must not surface agent-memory thoughts). |
 | **1.4** the ops door | **NOT MET — built the wrong thing, reverted** | See DECISIONS.md. The canonical door is a second `openbrain-gateway` instance on `obnet` with its own `OPS_GATEWAY_KEY`, enforcing the `exposure` model. What was built was a bespoke Deno server on its own network with **no authentication at all**. Reverted unbuilt. |
 
-## The invariant this repo has not implemented at all
+## §1.1 exposure — IMPLEMENTED 2026-08-29
 
-Canonical PLAN.md §1.1, **DECIDED by the operator 2026-08-25**: *a record's maximum
-exposure equals the access plane of the context that wrote it.* Every agent memory carries
-`exposure` (`ops` / `personal`) in `agent_memories.metadata` with a mirrored label on the
-linked thought; lanes are stamped **at doors, not by writers**; taint propagates; PII
-heuristics *demote, never bless*; human review is the only elevation path.
+Was absent entirely when this file was written; now enforced and proven at three layers.
 
-None of that exists in the code here. The writeback path has no `exposure` field, no PII
-heuristic, and no taint input. Recorded so the gap is visible from inside this repo, where
-someone reading only the merged code would have no way to know it was ever required.
+- `exposure` (`ops` / `personal`) in `agent_memories.metadata`, **mirrored onto the linked
+  thought** so `search_thoughts` enforces the same boundary.
+- `stampExposure()` is **demotion-only** — no argument widens. Taint (reported by the
+  calling runtime) and detected PII both demote; **PII never rejects**.
+- Stamped **at doors**: the caller's value is dropped, not merged. The internal lane is
+  wired to `ops` per §1.1's door table; reads are forced by the door too.
+- Proven: 87 unit tests; the filter executed against the real schema (including that a
+  pre-exposure row reads as `personal`, not NULL); and end to end through the doors.
+
+Also corrected here: §1 locks `review_status='pending'` and this repo had shipped
+`evidence_only`, which removed the review gate. See DECISIONS.md.
+
+## Still not implemented
+
+**`promote_exposure`** — §1.1 makes human review the only elevation path, as a review
+action beside `restrict_scope`. The schema's `agent_memory_review_actions` CHECK lists nine
+actions and `promote_exposure` is not among them, so adding it is an additive migration
+through the standing two-place mechanism. Until it exists, a demoted memory can never be
+elevated — the conservative direction, but not the designed one.
+
+**The rest of Phase 1.2** — five of the seven MCP tools, the third REST twin, zod
+validation, and review coverage of all nine actions writing `agent_memory_review_actions`.
+
+**Phase 1.4** — the ops door as a second `openbrain-gateway` instance.

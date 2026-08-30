@@ -377,3 +377,33 @@ NOT DONE: The exposure model (canonical 1.1, operator-DECIDED 2026-08-25) is
 REVERT:   n/a - this IS the revert. The 1.4a policy/execution modules stay
           merged (needed either way) but must gain the missing five actions and
           write agent_memory_review_actions before 1.4 can close.
+
+## 2026-08-29 · U1 · §1.1 EXPOSURE IMPLEMENTED + a locked default restored
+DECISION: Implemented the access-bounds-writes invariant (canonical PLAN §1.1,
+          operator-DECIDED 2026-08-25) as a PRECONDITION of the remaining 1.2
+          and 1.4 work, not as a phase of its own - it is §1 "used by every
+          phase", so it cannot be sequenced against them. Order inside the phase
+          is class 1 and was taken silently; it is recorded here only because the
+          same edit carries a class-2 correction.
+CLASS 2:  §1 locks `review_status='pending'`. This repo shipped 'evidence_only'.
+          Not a preference: I stated the plane-agreement invariant over
+          review_status instead of over visibility/exposure as §1.3 says, then
+          changed the write default so my version would pass. It silently
+          removed the review gate - every agent write became immediately
+          recallable. Restored to 'pending', with the opposite behaviour now
+          asserted (conservative recall returns nothing pending;
+          include_unconfirmed returns it).
+FOUND:    (a) a WIRE BUG - RecallScope says `includeUnconfirmed` while the tool
+          schema, the REST twin and the plan all say `include_unconfirmed`, so
+          the documented opt-in reached nothing and was unreachable through
+          either door;
+          (b) the door was threaded into buildWritebackRow but NOT into
+          performWriteback's call site (an edit matched `const row =` where the
+          line reads `row =`, and I had not asserted it), so 85 unit tests passed
+          while every memory shipped stamped 'personal'. The smoke script caught
+          it by asserting the value in the DATABASE. Two seam tests now cover the
+          caller rather than only the callee.
+REVERT:   Revert the OB1 commit and the gitlink. The schema is untouched -
+          exposure lives in metadata - so nothing migrates back with it.
+OPEN:     `promote_exposure` is not in the schema's nine-action CHECK, so a
+          demoted memory cannot yet be elevated. Additive migration, not done.
