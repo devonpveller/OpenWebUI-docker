@@ -171,5 +171,8 @@ SELECT 'promote_exposure_allowed', count(*)
 "@
 ```
 
-Expect `promote_exposure_allowed|1`. Rollback is the same `ALTER` with the original
+Expect `promote_exposure_allowed|1`. **Executed against the live volume 2026-08-30** —
+before: the CHECK listed the original nine; after: `promote_exposure_allowed|1`, and a
+bogus action (`delete_everything`) is still refused, so the constraint was widened rather
+than loosened. Rollback is the same `ALTER` with the original
 nine-value list; no row becomes invalid unless a `promote_exposure` action has been written.
