@@ -43,12 +43,48 @@ OPENBRAIN_KEY = os.environ["OPENBRAIN_KEY"]                 # real x-brain-key
 GATEWAY_KEY = os.environ["GATEWAY_KEY"]                     # key cloud clients use
 SHARE_VALUE = os.environ.get("SHARE_LABEL_VALUE", "cloud")
 
-# Tools a cloud client may call. Reads get a forced metadata_filter;
-# writes get forced metadata_extra stamping. Everything else (including
-# thought_stats — an aggregate that can't be filtered cleanly) is denied.
-READ_TOOLS = {"search", "fetch", "search_thoughts", "list_thoughts"}
-WRITE_TOOLS = {"capture_thought", "ingest_url", "ingest_urls"}
+# --- PROFILE (memory-plane PLAN §1.4) ---------------------------------------
+#
+# This image now runs as MORE THAN ONE DOOR. The cloud door (:8061) is unchanged; a second
+# instance (openbrain-ops-gateway, 127.0.0.1:8062) serves host processes with the
+# agent-memory tools allowlisted.
+#
+# EVERY DEFAULT BELOW REPRODUCES THE CLOUD DOOR'S PREVIOUS BEHAVIOUR EXACTLY, so the
+# existing instance needs no env change. That is a requirement, not a nicety: the cloud door
+# is live, and a regression there is a containment failure rather than a bug. The
+# byte-for-byte equivalence is asserted in smoke_test.py rather than argued for here.
+GATEWAY_PROFILE = os.environ.get("GATEWAY_PROFILE", "cloud")
+
+
+def _tool_set(var: str, default: set) -> set:
+    """Comma-separated env override, or the default. Empty string means EMPTY, not default -
+    a profile that deliberately allows no writes must be able to say so."""
+    raw = os.environ.get(var)
+    if raw is None:
+        return set(default)
+    return {t.strip() for t in raw.split(",") if t.strip()}
+
+
+# Tools a client may call. Reads get a forced filter; writes get forced stamping.
+# Everything else (including thought_stats — an aggregate that can't be filtered cleanly)
+# is denied. This stays an ALLOW-LIST: default-deny, and tools/list is filtered to it, so
+# adding a tool on openbrain-mcp does NOT expose it here.
+READ_TOOLS = _tool_set("GATEWAY_READ_TOOLS", {"search", "fetch", "search_thoughts", "list_thoughts"})
+WRITE_TOOLS = _tool_set("GATEWAY_WRITE_TOOLS", {"capture_thought", "ingest_url", "ingest_urls"})
 ALLOWED_TOOLS = READ_TOOLS | WRITE_TOOLS
+
+# The forced read filter and write stamp, as field/value pairs.
+#
+# The ops profile does NOT rely on the read filter for its exposure boundary: the
+# agent-memory recall path forces the exposure plane server-side from its own door value and
+# ignores anything a caller sends (agent-memory.ts, performRecall). A gateway-applied filter
+# is belt-and-braces there. It is load-bearing for the CLOUD profile, whose tools accept a
+# caller-supplied metadata_filter.
+READ_FILTER_FIELD = os.environ.get("GATEWAY_READ_FILTER_FIELD", "share")
+READ_FILTER_VALUE = os.environ.get("GATEWAY_READ_FILTER_VALUE", SHARE_VALUE)
+WRITE_ORIGIN = os.environ.get("GATEWAY_WRITE_ORIGIN", "cloud")
+WRITE_STAMP_FIELD = os.environ.get("GATEWAY_WRITE_STAMP_FIELD", "share")
+WRITE_STAMP_VALUE = os.environ.get("GATEWAY_WRITE_STAMP_VALUE", SHARE_VALUE)
 
 # NB (Integrated Knowledge System / guardrail 5): the research-thread and
 # suggestion tools (create_thread, list_threads, get_thread_sources,
@@ -64,15 +100,15 @@ ALLOWED_TOOLS = READ_TOOLS | WRITE_TOOLS
 
 def _force_read_filter(args: dict) -> dict:
     md = dict(args.get("metadata_filter") or {})
-    md["share"] = SHARE_VALUE        # non-overridable
+    md[READ_FILTER_FIELD] = READ_FILTER_VALUE        # non-overridable
     args["metadata_filter"] = md
     return args
 
 
 def _force_write_extra(args: dict) -> dict:
     md = dict(args.get("metadata_extra") or {})
-    md["origin"] = "cloud"
-    md["share"] = SHARE_VALUE
+    md["origin"] = WRITE_ORIGIN
+    md[WRITE_STAMP_FIELD] = WRITE_STAMP_VALUE
     args["metadata_extra"] = md
     return args
 

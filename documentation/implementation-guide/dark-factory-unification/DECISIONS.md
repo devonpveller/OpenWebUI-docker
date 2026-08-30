@@ -407,3 +407,22 @@ REVERT:   Revert the OB1 commit and the gitlink. The schema is untouched -
           exposure lives in metadata - so nothing migrates back with it.
 OPEN:     `promote_exposure` is not in the schema's nine-action CHECK, so a
           demoted memory cannot yet be elevated. Additive migration, not done.
+
+## 2026-08-30 · U1 Phase 1.2 · class 1 — the module split, recorded
+DECISION: §1.2 names ONE module, `agent-memory.ts`, exporting
+          `registerAgentMemory(server, app, deps)`. The tree has four files:
+          agent-memory.ts (write + recall), agent-memory-ops.ts (review
+          execution), agent-memory-review.ts (transition policy),
+          agent-memory-tools.ts (zod schemas + the read/report operations).
+CITED:    §C.2 class 1 (file layout). The ENTRY POINT is unchanged - index.ts
+          still calls registerAgentMemory exactly once, which is the property
+          §1.2 actually cares about ("index.ts calls it once; Dockerfile gains
+          one COPY line"). The Dockerfile now globs, so it gains no line at all.
+WHY:      The plan's own reason for a module was "not another 600 lines in the
+          monolith". Four files of one concern each serve that better than one
+          file of ~1200 lines, and the pure-logic halves (policy, transitions)
+          are testable without a database precisely because they are separate.
+REVERT:   Concatenate them; no caller outside index.ts imports the inner files.
+NOTE:     Recorded because the plan and the tree otherwise disagree on their
+          face, and a later reader would have to guess whether the split was
+          deliberate.

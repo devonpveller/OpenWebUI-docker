@@ -12,7 +12,21 @@ Tests (cloud client perspective):
   7. Pivot attack: caller sends metadata_filter={"share":"local"} ->
      gateway overrides to share=cloud, no leak
 
+BOTH PROFILES (memory-plane PLAN §1.4). This image now runs as more than one door:
+
+  --profile cloud   :8061, the existing door. Unchanged behaviour.
+  --profile ops     :8062, agent-memory tools for host processes.
+  --defaults        no server needed. Asserts that app.py's env-configurable
+                    allowlists and forced filter/stamp still DEFAULT to exactly
+                    what the cloud door had before they were parameterized.
+
+The --defaults check is the one that matters most. The cloud door is live, and §1.4
+requires the existing instance to need no env change, so a drifted default is a
+containment failure rather than a bug - and it is the kind that shows up as data on the
+wrong side of a boundary, not as an error.
+
 Run from the host: python openbrain-gateway/smoke_test.py
+                     [--profile cloud|ops] [--defaults] [--boundaries]
 """
 import json
 import os
@@ -22,11 +36,23 @@ import uuid
 
 import httpx
 
-GATEWAY = "http://127.0.0.1:8061"
-KEY = os.environ.get("OPENBRAIN_GATEWAY_KEY", "")
-if not KEY:
+PROFILE = "cloud"
+for _i, _a in enumerate(sys.argv):
+    if _a == "--profile" and _i + 1 < len(sys.argv):
+        PROFILE = sys.argv[_i + 1]
+
+_PORTS = {"cloud": 8061, "ops": 8062}
+if PROFILE not in _PORTS:
+    sys.exit(f"unknown profile {PROFILE!r} - expected one of {sorted(_PORTS)}")
+GATEWAY = f"http://127.0.0.1:{_PORTS[PROFILE]}"
+
+# Each door has its OWN key. Reading one key for both would make a pass on the cloud door
+# look like a pass on the ops door.
+_KEY_VAR = "OPENBRAIN_GATEWAY_KEY" if PROFILE == "cloud" else "OPS_GATEWAY_KEY"
+KEY = os.environ.get(_KEY_VAR, "")
+if not KEY and "--defaults" not in sys.argv:
     sys.exit(
-        "OPENBRAIN_GATEWAY_KEY is not set. Export it from OB1/docker/.env "
+        f"{_KEY_VAR} is not set. Export it from OB1/docker/.env "
         "before running (never hardcode it here - this file is tracked)."
     )
 
@@ -74,7 +100,178 @@ def parse_response(r):
         return None
 
 
+def check_defaults():
+    """Import app.py with NO gateway env overrides and assert the cloud values.
+
+    §1.4: "defaults preserving current cloud behavior byte-for-byte (existing instance needs
+    no env change)". These literals are the ones that were hardcoded before the
+    parameterization; if an edit ever changes a default, this fails rather than the cloud
+    door quietly serving a different allow-list.
+    """
+    import importlib
+
+    failures = []
+
+    def check(ok, label, detail=""):
+        print(f"  [{PASS if ok else FAIL}] {label}" + (f" -- {detail}" if detail else ""))
+        if not ok:
+            failures.append(label)
+
+    # Clear every gateway knob, then supply only the three the module requires to import.
+    saved = {}
+    for var in list(os.environ):
+        if var.startswith("GATEWAY_") or var in ("SHARE_LABEL_VALUE",):
+            saved[var] = os.environ.pop(var)
+    os.environ.setdefault("OPENBRAIN_URL", "http://openbrain-mcp:8000")
+    os.environ.setdefault("OPENBRAIN_KEY", "x")
+    os.environ.setdefault("GATEWAY_KEY", "x")
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        app = importlib.import_module("app")
+        importlib.reload(app)
+        print("[defaults] app.py with no gateway env set")
+        check(app.READ_TOOLS == {"search", "fetch", "search_thoughts", "list_thoughts"},
+              "READ_TOOLS default unchanged", str(sorted(app.READ_TOOLS)))
+        check(app.WRITE_TOOLS == {"capture_thought", "ingest_url", "ingest_urls"},
+              "WRITE_TOOLS default unchanged", str(sorted(app.WRITE_TOOLS)))
+        check(app.ALLOWED_TOOLS == app.READ_TOOLS | app.WRITE_TOOLS,
+              "ALLOWED_TOOLS is still the union")
+        check(app.READ_FILTER_FIELD == "share" and app.READ_FILTER_VALUE == "cloud",
+              "forced read filter is still share=cloud",
+              f"{app.READ_FILTER_FIELD}={app.READ_FILTER_VALUE}")
+        check(app.WRITE_ORIGIN == "cloud" and app.WRITE_STAMP_FIELD == "share"
+              and app.WRITE_STAMP_VALUE == "cloud",
+              "forced write stamp is still origin=cloud share=cloud")
+        check(app.GATEWAY_PROFILE == "cloud", "profile defaults to cloud")
+
+        # And the functions, not just the constants - a default is only preserved if the
+        # thing that uses it produces the same output.
+        check(app._force_read_filter({}) == {"metadata_filter": {"share": "cloud"}},
+              "_force_read_filter output byte-for-byte")
+        check(app._force_write_extra({}) == {"metadata_extra": {"origin": "cloud", "share": "cloud"}},
+              "_force_write_extra output byte-for-byte")
+        # A caller-supplied value must still be overridden, not merged around.
+        check(app._force_read_filter({"metadata_filter": {"share": "local"}})
+              == {"metadata_filter": {"share": "cloud"}},
+              "a pivot attempt is still overridden")
+
+        # An EMPTY override means empty, not "fall back to the default" - a profile that
+        # allows no writes has to be able to say so.
+        os.environ["GATEWAY_WRITE_TOOLS"] = ""
+        importlib.reload(app)
+        check(app.WRITE_TOOLS == set(), "an empty override means EMPTY, not default")
+    finally:
+        os.environ.pop("GATEWAY_WRITE_TOOLS", None)
+        os.environ.update(saved)
+
+    print()
+    if failures:
+        print(f"{len(failures)} DEFAULT CHECK(S) FAILED: {failures}")
+        return 1
+    print("cloud defaults preserved byte-for-byte")
+    return 0
+
+
+def check_boundaries():
+    """The CROSS-DOOR negatives and positives (PLAN §1.3, §1.4).
+
+    These are the assertions that make the two doors mean something, and none of them can be
+    made from inside one door: each is about what the OTHER door must not do.
+
+      - agent_memory_* is DENIED on the cloud door (:8061). The cloud allow-list is
+        default-deny, so this should hold automatically - which is exactly why it is worth
+        asserting, because "automatic" is what nobody checks.
+      - the cloud door's tools/list does not even ADVERTISE them.
+      - the ops door (:8062) advertises ONLY agent_memory_* - no search, no fetch, no
+        capture_thought. It is not a second cloud door.
+      - cloud search_thoughts does not surface agent-memory thoughts: those are written
+        with no share='cloud' label, and the cloud door forces share=cloud on reads.
+
+    Needs BOTH keys and both doors up.
+    """
+    failures = []
+
+    def check(ok, label, detail=""):
+        print(f"  [{PASS if ok else FAIL}] {label}" + (f" -- {detail}" if detail else ""))
+        if not ok:
+            failures.append(label)
+
+    cloud_key = os.environ.get("OPENBRAIN_GATEWAY_KEY", "")
+    ops_key = os.environ.get("OPS_GATEWAY_KEY", "")
+    if not cloud_key or not ops_key:
+        sys.exit("--boundaries needs BOTH OPENBRAIN_GATEWAY_KEY and OPS_GATEWAY_KEY exported.")
+
+    AGENT_MEMORY = [
+        "agent_memory_writeback", "agent_memory_recall", "agent_memory_review",
+        "agent_memory_list_review_queue", "agent_memory_inspect",
+        "agent_memory_recall_trace", "agent_memory_report_usage",
+    ]
+
+    def tools_on(url, key):
+        with httpx.Client(timeout=30.0) as c:
+            r = c.post(
+                f"{url}/mcp",
+                content=json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
+                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json",
+                         "Accept": "application/json, text/event-stream"},
+            )
+        body = parse_response(r)
+        return {t["name"] for t in (body.get("result", {}).get("tools") or [])}
+
+    def call_on(url, key, tool):
+        with httpx.Client(timeout=30.0) as c:
+            r = c.post(
+                f"{url}/mcp",
+                content=json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                                    "params": {"name": tool, "arguments": {}}}),
+                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json",
+                         "Accept": "application/json, text/event-stream"},
+            )
+        return parse_response(r)
+
+    print("[boundaries] the cloud door must NOT reach agent-memory")
+    cloud_tools = tools_on("http://127.0.0.1:8061", cloud_key)
+    leaked = sorted(set(AGENT_MEMORY) & cloud_tools)
+    check(not leaked, "cloud tools/list does not advertise agent_memory_*", str(leaked))
+    denied = call_on("http://127.0.0.1:8061", cloud_key, "agent_memory_recall")
+    check(denied.get("error", {}).get("code") == -32601,
+          "agent_memory_recall on the cloud door is DENIED (-32601)",
+          json.dumps(denied)[:160])
+
+    print("[boundaries] the ops door serves agent-memory AND NOTHING ELSE")
+    ops_tools = tools_on("http://127.0.0.1:8062", ops_key)
+    check(ops_tools <= set(AGENT_MEMORY),
+          "ops tools/list advertises only agent_memory_*", str(sorted(ops_tools - set(AGENT_MEMORY))))
+    check("agent_memory_recall" in ops_tools, "ops door advertises agent_memory_recall")
+    for forbidden in ("search", "fetch", "capture_thought", "search_thoughts"):
+        check(forbidden not in ops_tools, f"ops door does not advertise {forbidden}")
+        err = call_on("http://127.0.0.1:8062", ops_key, forbidden)
+        check(err.get("error", {}).get("code") == -32601,
+              f"{forbidden} on the ops door is DENIED (-32601)")
+
+    print("[boundaries] the two keys are not interchangeable")
+    with httpx.Client(timeout=30.0) as c:
+        r = c.post("http://127.0.0.1:8062/mcp",
+                   content=json.dumps({"jsonrpc": "2.0", "id": 3, "method": "tools/list"}),
+                   headers={"Authorization": f"Bearer {cloud_key}",
+                            "Content-Type": "application/json",
+                            "Accept": "application/json, text/event-stream"})
+    check(r.status_code == 401, "the CLOUD key is rejected by the ops door", f"status={r.status_code}")
+
+    print()
+    if failures:
+        print(f"{len(failures)} BOUNDARY CHECK(S) FAILED: {failures}")
+        return 1
+    print("both doors hold their boundaries")
+    return 0
+
+
 def main():
+    if "--defaults" in sys.argv:
+        return check_defaults()
+    if "--boundaries" in sys.argv:
+        return check_boundaries()
+
     failures = []
 
     def check(ok, label, detail=""):
@@ -238,4 +435,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # sys.exit(main()), not a bare main(). The live path already calls sys.exit(1) itself,
+    # but check_defaults RETURNS its code - so a bare call would print failures and exit 0,
+    # and CI would read a failed default check as a pass. A check that cannot fail the
+    # process is not a check.
+    sys.exit(main() or 0)

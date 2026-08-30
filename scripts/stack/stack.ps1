@@ -148,6 +148,8 @@ switch ($Action) {
             $LASTEXITCODE -eq 0 }
         Probe "OB1: open_notebook API :5055/api/config" {
             (Invoke-WebRequest -UseBasicParsing -TimeoutSec 8 http://127.0.0.1:5055/api/config).StatusCode -eq 200 }
+        Probe "OB1: ops door :8062/health" {
+            (Invoke-WebRequest -UseBasicParsing -TimeoutSec 8 http://127.0.0.1:8062/health).StatusCode -eq 200 }
         Probe "OB1: openbrain-db accepting connections" {
             docker exec openbrain-db pg_isready -U postgres -d openbrain -t 5 2>$null | Out-Null
             $LASTEXITCODE -eq 0 }

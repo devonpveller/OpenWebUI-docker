@@ -224,6 +224,7 @@ Run with: `docker compose -f OB1/docker/docker-compose.yml ...`.
 | `openbrain-mcp` | Core MCP server | — (internal only) | obnet, llm-net |
 | `openbrain-ext` | Extensions MCP server (39 tools) | — (internal only) | obnet |
 | `openbrain-gateway` | Privacy-enforcing MCP proxy for cloud clients | 127.0.0.1:8061 | obnet |
+| `openbrain-ops-gateway` | Same image, OPS profile: agent-memory tools for HOST processes, own key | 127.0.0.1:8062 | obnet |
 | `openbrain-mcpo` | MCP→OpenAPI bridge (core) | — | obnet, llm-net |
 | `openbrain-mcpo-ext` | MCP→OpenAPI bridge (extensions) | — | obnet, llm-net |
 | `openbrain-postgrest` | PostgREST API over openbrain-db | — | obnet |
