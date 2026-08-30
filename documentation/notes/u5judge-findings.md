@@ -434,6 +434,9 @@ Both would have shipped as green-for-the-wrong-reason:
   doc-claims-a-property-the-code-lacks shape this file keeps recording.
 - **The rating record is not authenticated.** `rated_by: me` is a valid record.
   It is an operator artifact under review, not a credential.
+- **The perimeter scans `*.yaml` / `*.yml` only.** A config renamed to another
+  extension would not be seen at commit time. The chokepoint has no such scope
+  limit: it tests the value pydantic produced, whatever file it came from.
 - **The running `little-coder` container does not have the gate yet.** It runs
   `little-coder:local`, built before this branch. The runtime chokepoint
   reaches production on the next image rebuild + recreate of that service. The

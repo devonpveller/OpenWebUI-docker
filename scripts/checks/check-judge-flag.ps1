@@ -53,6 +53,10 @@
 #   - a branch that does not carry this file. core.hooksPath is per-checkout
 #     and the hook is version-controlled, so this constrains commits made on
 #     branches that have it, and nothing else.
+#   - a flip staged in a file this script does not look at. It scans staged
+#     *.yaml / *.yml, which is what the daemon loads (LC_CONFIG points into
+#     the mounted config dir); a config renamed to some other extension would
+#     not be scanned here. That is a scope limit of the PERIMETER only.
 #   NEITHER OF THOSE REACHES THE JUDGE ANY MORE, which is the point of moving
 #   the decision: littlecoder.judge_gate.require is called by
 #   meta_wiring.build_meta_runner at daemon boot, so a flag that gets past this
