@@ -106,6 +106,25 @@ function Invoke-Unit {
           ($unmounted -join ", "))
   } else { Pass "every OB1/docker/init*.sql is mounted in the chain" }
 
+  # THE PREVIEW COMPOSE MUST CARRY THE SAME CHAIN.
+  # It kept its own hand-maintained copy and drifted EIGHT migrations behind - a preview
+  # database came up with no agent-memory plane, no wiki_pages and no claims layer, and
+  # nothing said so. Same class as the stale hardcoded list this section already fixed,
+  # one file over.
+  $previewPath = "OB1/docker/docker-compose.preview.yml"
+  if (Test-Path $previewPath) {
+    $previewSources = @(([regex]'\./(init[a-z0-9.\-]*\.sql):/docker-entrypoint-initdb\.d/').Matches((Get-Content -Raw $previewPath)) |
+                        ForEach-Object { $_.Groups[1].Value })
+    $mainSources = @($map | ForEach-Object { $_[0] })
+    $missingFromPreview = @($mainSources | Where-Object { $previewSources -notcontains $_ })
+    $extraInPreview = @($previewSources | Where-Object { $mainSources -notcontains $_ })
+    if ($missingFromPreview.Count -or $extraInPreview.Count) {
+      Fail ("preview compose chain differs from production" +
+            $(if ($missingFromPreview.Count) { " - missing: " + ($missingFromPreview -join ", ") }) +
+            $(if ($extraInPreview.Count) { " - extra: " + ($extraInPreview -join ", ") }))
+    } else { Pass "preview compose carries the same initdb chain as production" }
+  }
+
   foreach ($m in $map) {
     if (Test-Path "OB1/docker/$($m[0])") { Copy-Item "OB1/docker/$($m[0])" (Join-Path $tmp $m[1]) }
   }
