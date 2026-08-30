@@ -430,12 +430,12 @@ REVERT:   `git revert` the round-2 commit on `work/u3gym`. The measured matrix i
           (sections 3-6 of the drill); reverting restores the earlier, false docstring, so
           prefer editing over reverting if only part is unwanted.
 
-### 2026-08-30 · U3 · class 2 — `verify-merge-protocol.ps1` is single-flight; it was 2 clean runs in 8
+### 2026-08-30 · U3 · class 2 — `verify-merge-protocol.ps1` is single-flight; it was 2 clean runs in 7
 DECISION: The merge-protocol drill acquires the lease `merge-protocol-drill` before its
           destructive preamble and exits 3 when another copy holds it; `-LockProbe` takes
           the decision without running. `Test-IsWorktreeRoot` was added to `git-io.ps1` and
           the drill ABORTS if `$wtA`/`$wtB` is not a worktree root.
-CITED:    Measured 66/66, 66/66, 63, 59, 39, 34, 40 of 66 over eight consecutive runs, with
+CITED:    Measured 66, 66, 63, 59, 39, 34, 40 of 66 - eight launched, seven completed - with
           a concurrent copy (pid 137560) observed in `Get-CimInstance` mid-burst. `git -C`
           ASCENDS out of a non-worktree directory, so a half-failed provision aimed the
           drill's `rebase` at the OPERATOR'S checkout, which was found holding
