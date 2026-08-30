@@ -16,7 +16,12 @@ to get back.
 | `scripts/checks/check-judge-dryrun.ps1` | the dry run (engine: `scripts/checks/lib/judge_dryrun.py`) |
 | `scripts/checks/verify-judge-dryrun.ps1` | proof the dry run can FAIL — 34 cases, every exit code observed |
 | `scripts/checks/check-judge-flag.ps1` | the pre-commit guard: no commit turns the flag on unrated |
-| `scripts/checks/verify-judge-flag-guard.ps1` | proof the guard STOPS a commit — 20 cases, incl. a negative control |
+| `scripts/checks/verify-judge-flag-guard.ps1` | proof the guard STOPS a commit — 30 cases, incl. two negative controls and the 43-row spelling corpus |
+| `little-coder/src/littlecoder/judge_gate.py` | **the chokepoint** — the one place that answers "may the judge run?", called by the daemon at boot AND by the guard |
+| `scripts/checks/lib/judge_flag_decide.py` | the guard's transport to that module; it holds no rule of its own |
+| `scripts/checks/fixtures/judge-flag-corpus.json` | 43 YAML spellings, pinned with what the daemon's real loader returns |
+| `little-coder/tests/test_judge_gate_chokepoint.py` | the completeness proof — AST scan, fails when a new unguarded site appears |
+| `little-coder/tests/test_judge_flag_corpus.py` | the differential — daemon loader vs the gate's decider, over that corpus |
 
 ### What this does NOT close
 
@@ -31,7 +36,7 @@ the `judge_enabled` calibration plan. Stated plainly:
 | U5 sub-item | Where it lives |
 |---|---|
 | containment parity: hook-bypass detection, commit-path proxy | `scripts/checks/check-hook-attestation.ps1` (merged) + `work/u5proxy` |
-| **`judge_enabled` calibration plan** | **this document + the four scripts above** |
+| **`judge_enabled` calibration plan** | **this document + the components listed above** |
 | personal-plane exclusion verified end to end | `work/u5pplane` |
 
 So: **U5 does not close on this work**, and no reviewer should read it as
@@ -39,8 +44,14 @@ though it did. Two of the column's four elements — an agent instructed to
 bypass hooks, and an attempt to reach personal-plane data — are not attempted
 here at all. The other two, *mechanically stopped* and *visible in an audit
 record*, are now satisfied **for this sub-item's own subject matter** (the
-flag) by `check-judge-flag.ps1` and its `judge-flag-guard.log`; that is a
-narrower claim than the column makes, and it is the only one made here.
+flag) by `judge_gate.require` at daemon boot, by `check-judge-flag.ps1` and
+its `judge-flag-guard.log` at commit time; that is a narrower claim than the
+column makes, and it is the only one made here.
+
+That is still true after the 2026-08-30 round (§4a), which moved the flag
+decision to a chokepoint and made its completeness mechanical. It closed a
+defect class, not a column: the other two U5 sub-items are still on
+`work/u5proxy` and `work/u5pplane`.
 
 ---
 
@@ -61,12 +72,16 @@ YAML and nowhere else:
   so the observer block, `judge_enabled` included, is inherited verbatim.
   Verify it in a live checkout, not in a fresh clone; worker-2 is identical.
 
-The consequence is in `little-coder/src/littlecoder/meta_wiring.py:31`:
+The consequence is in `little-coder/src/littlecoder/meta_wiring.py:42-43`:
 
 ```python
-if not config.observer.enabled or not config.observer.judge_enabled:
+judge_permitted = require_judge_admission(config)   # judge_gate.require
+if not config.observer.enabled or not judge_permitted:
     return MetaRunner(..., similarity=default_similarity, judge=None)
 ```
+
+`meta_wiring` no longer reads the flag itself. `judge_gate.require` is the
+package's only reader of `observer.judge_enabled` — see §4a.
 
 With `judge=None`, `MetaRunner.iterate` skips `_mint_from_unassigned`
 (`meta.py:182`) and `_can_draft()` is false (`meta.py:233`) because drafting
@@ -480,13 +495,14 @@ Each item is checkable, and the first four are checked by the script.
 | 8 | **Pool only:** `skill` + `cohorts` are named volumes with a backup sidecar | `docker inspect` (§1.3) | FAILS — writable layer |
 | 9 | The transition is journaled to `audit.jsonl` (§13's closing line) | `lc admin` / audit record | n/a |
 | 10 | The skill library is not `poisoned` | dry run `skill_library.state` | `populated` (one inert artifact, §3.3) |
-| 11 | The flip itself is committed with a rating record | `check-judge-flag.ps1` (pre-commit) | enforced |
+| 11 | The flip cannot take effect without a rating record | `judge_gate.require` at daemon boot (§4a) + `check-judge-flag.ps1` (pre-commit) | enforced |
 
 Criteria 1–6 and 10 are the gate form: `check-judge-dryrun.ps1 -RequireReady`
 exits 1 until they hold. 7–9 are human and are not automatable without
 automating away the decision §13 deliberately keeps human. 11 is the mechanical
 backstop for 7: it cannot verify that a rating happened *well*, only that a
-record of one was committed with the flip.
+record of one exists. Since 2026-08-30 that backstop is enforced at the daemon,
+not only at the commit — §4a.
 
 ### 4.1 The prerequisite work criteria 3–5 imply
 
@@ -512,52 +528,166 @@ question worth asking.
 
 ---
 
-## 4a. The flag is now mechanically guarded, in two places
+## 4a. The flag is decided in ONE place, and that place is in the daemon
 
 A plan plus an instrument stops nothing. This was demonstrated rather than
 argued: a verifier set `judge_enabled: true` in a copy of the config, re-ran
-the drill, and got `ALL 13 CASES PASS`, exit 0. Two mechanisms now exist, and
-neither is sufficient alone:
+the drill, and got `ALL 13 CASES PASS`, exit 0. A commit-time guard was added.
+Then two more verifiers walked past *that*, not by defeating it but by
+**spelling the flag differently** — three ordinary YAML spellings, then two
+quote characters. The guard decided the question with a regex over staged text
+while the daemon decided it with `yaml.safe_load` + pydantic; two parsers, two
+answers, and the flip landed with zero audit lines.
 
-**Commit time — `scripts/checks/check-judge-flag.ps1`, wired into
-`.githooks/pre-commit` as step 6.** For every staged `*.yaml`/`*.yml` it reads
-the **staged** content (not the working tree — `git add`, then edit the file
-back, must not launder it) and looks for `judge_enabled` set truthy. If none,
-it exits 0 and writes nothing, which is every ordinary commit. If one is found,
-the commit is DENIED unless the same commit stages a valid rating record at
-`little-coder/config/judge-enablement-rating.yaml`. Both outcomes append to
-`<git-common-dir>/judge-flag-guard.log`.
+Patching the pattern buys one round. So the decision **moved**.
 
-**Run time — `check-judge-dryrun.ps1` exit 7.** A flip made inside the
-container, or by an env override, is not a commit at all and no hook can see
-it. The dry run reads the config actually in force and refuses.
+### The chokepoint
+
+`little-coder/src/littlecoder/judge_gate.py` is the only place the question
+"may the judge run?" is answered. It holds:
+
+- `admit(config)` — the package's **only read** of `observer.judge_enabled`;
+- `require(config)` — the same decision, raising `JudgeNotCalibratedError`
+  when the config asks for the judge and no valid approving rating record is in
+  force at `/app/config/judge-enablement-rating.yaml`;
+- `read_rating_record(path)` — the ONE definition of a valid rating record
+  (`rated_by` / `rated_at` / `rated_report` / `verdict: approve`), which the
+  dry-run instrument now delegates to rather than carrying its own copy;
+- `enabled_in_yaml_text(text)` — the commit-time decider, built from the
+  daemon's own parser and the daemon's own pydantic annotation for the field.
+
+`meta_wiring.build_meta_runner` — the single site that constructs a `Judge` —
+calls `require` (`meta_wiring.py:42`). That is what changes the shape of the
+problem: **a flag that gets past every perimeter still cannot start a judging
+daemon.** A config edited straight into the container, a `--no-verify` commit,
+a branch that never carried the hook, a spelling nobody has thought of yet —
+all of them reach `require`, because `require` is downstream of parsing, not a
+prediction of it.
+
+`observer.enabled` is deliberately *not* consulted by the gate. If it were, a
+config could carry an unrated `judge_enabled: true` indefinitely and the judge
+would switch on the day someone flipped the innocuous flag — the same
+neighbouring-case shape this section exists to close.
+
+### Why it cannot be bypassed by omission
+
+A chokepoint that a future wiring path can simply not call is a convention.
+`little-coder/tests/test_judge_gate_chokepoint.py` makes it mechanical by
+enumerating, from the AST, every site that could decide the question without
+the gate:
+
+- any read of `judge_enabled` outside `judge_gate.py` → RED;
+- any construction of a `Judge` outside `meta_wiring.py` → RED;
+- `build_meta_runner` no longer calling into `judge_gate` → RED;
+- a second copy of the rating-record rule inside the package → RED;
+- and a floor on how many modules the scan reached, so a scan that stops
+  matching fails instead of passing for free.
+
+All four were observed RED before they were green: a probe module that read the
+flag and built a `Judge` turned two of them red naming `_probe_bypass.py:7`,
+and replacing the gate call in `meta_wiring` with `judge_permitted = True`
+turned the third red. There are only two ways to answer "is the judge on?" —
+call the gate, or read the field — and both are watched.
+
+What this does **not** stop: someone editing `judge_gate.py` itself. Nothing
+but review catches that, and saying so is more useful than implying otherwise.
+
+### The perimeter, rebuilt on the same decision
+
+`scripts/checks/check-judge-flag.ps1` (pre-commit step 6) still exists and
+still writes the audit trail, but it no longer contains any notion of what YAML
+true looks like. It reads the **staged bytes** (`git show :path` — `git add`
+then edit-back must not launder it) and hands them to
+`scripts/checks/lib/judge_flag_decide.py`, which asks `judge_gate`. If it
+cannot reach that module it DENIES and records `CANNOT-TELL`; a decider that
+answers from its own approximation when the real one is unavailable is the
+defect being removed. The cost that buys, stated plainly: on a machine with no
+working python, a commit that stages any YAML is refused.
+
+The commit-time and run-time halves are talking about the **same file**:
+`coder/docker-compose.yml` mounts `../little-coder/config` at `/app/config:ro`,
+so the record a commit stages at
+`little-coder/config/judge-enablement-rating.yaml` is byte-for-byte the record
+the daemon reads. Three readers of that one fact — the gate's constant, the
+guard's default parameter, and the compose mount — are asserted against each
+other by the drill.
+
+### The corpus
+
+`scripts/checks/fixtures/judge-flag-corpus.json` holds 43 YAML spellings
+generated by **mechanism** — scalar case (`true`/`True`/`TRUE`/`yes`/`Yes`/
+`YES`/`on`/`On`/`ON`/`y`), scalar quoting (`"true"`, `'yes'`, `"on"`, `1`,
+`!!bool "true"`), key quoting and hex escaping (`"judge_enabled"`,
+`'judge_enabled'`, `"judge_\x65nabled"`), node style (flow mapping, anchor and
+alias, merge key), document structure (leading `---`, a second document),
+whitespace and comments, and relocation (top level, another block, inside a
+sequence) — plus 12 OFF controls including a look-alike key, the flag as prose
+inside a string value, and a key broken over a line that PyYAML does *not*
+fold. Deliberately NOT "the ones the verifiers found" - those spellings are
+a handful of the 43, and a corpus assembled from them would be a patch with
+more rows.
+
+Each row is pinned with what the daemon's **real loader** returns. 27 rows turn
+the flag ON for the daemon. The replaced regex could not see **14 of them**,
+and that number is asserted, not asserted-in-prose: the retired pattern is
+stored in the corpus file and re-run against every row, so the reason it was
+removed stays executable.
+
+Two independent executors read that one file:
+
+- `little-coder/tests/test_judge_flag_corpus.py` drives `load_config` against
+  `judge_gate.enabled_in_yaml_text` and asserts, per row, that whenever the
+  daemon reads ON the decider says ON. Observed RED: replacing the coercion
+  with a strict `value is True` check failed 5 rows immediately.
+- `scripts/checks/verify-judge-flag-guard.ps1` stages every ON row into a
+  scratch git repository and drives the **shipped** guard, asserting each is
+  DENIED *and* that the audit line says `DENY`, not `CANNOT-TELL` — because
+  both exit 1, and on this drill's first run a UTF-8 BOM in the request file
+  made every deny case pass for exactly the wrong reason. The 12 OFF controls
+  are staged together and must still be ALLOWED.
+
+The guard is deliberately a **superset** of the loader: it examines every
+document of a multi-document stream and looks for the key at any depth, so a
+future schema move is still seen. Four rows are over-denials for that reason
+and are named in the test; over-denying a commit costs a conversation, while
+under-denying is the bug this replaced.
+
+### The drill
 
 `verify-judge-flag-guard.ps1` proves the commit-time half stops something, in a
 throwaway git repository, using the real guard and the real hook block
-extracted by marker — never a hand-written stand-in. 20 cases: the ordinary
-commit is allowed, `judge_enabled: false` is allowed, the flip is denied, the
-`git add` + edit-back launder is denied, an incomplete record is denied, a
-`verdict: reject` record is denied, a valid approving record is ALLOWED, a
-missing validator DENIES (fail closed), `git commit` itself is REFUSED with
-HEAD unmoved — and, as the negative control, with the guard removed from the
-hook the identical commit LANDS. One case takes the SHIPPED
+extracted by marker — never a hand-written stand-in, and pointed at this
+repository's `littlecoder` package so it exercises the same module the daemon
+calls. 30 cases: the ordinary commit is allowed, `judge_enabled: false` is
+allowed, the flip is denied, the `git add` + edit-back launder is denied, an
+incomplete record is denied, a `verdict: reject` record is denied, a valid
+approving record is ALLOWED, a missing decider DENIES and an unreachable
+`littlecoder` DENIES (fail closed, both), every corpus spelling the daemon
+reads ON is DENIED for the right recorded reason, every OFF control is still
+ALLOWED, the three readers of the record path agree, `git commit` itself is
+REFUSED with HEAD unmoved — and, as the negative control, with the guard
+removed from the hook the identical commit LANDS. One case takes the SHIPPED
 `little-coder.config.yaml`, flips the flag in a copy under the temp directory
-and checks the guard sees it, because every other case uses YAML the drill
-wrote itself and would all still pass if the pattern did not match the real
-file's shape. Breaking one character of that pattern turns 11 of the 20 cases
-red, including the end-to-end commit refusal.
+and checks the guard sees it, because every other hand-written case uses YAML
+the drill wrote itself.
 
-**What it does not catch, stated so nothing reads wider than it is:**
+**What none of this catches, stated so nothing reads wider than it is:**
 
 - a commit made with `--no-verify`, or in a clone without `core.hooksPath` set.
-  That is `check-hook-attestation.ps1`'s job — a different U5 sub-item.
-- a branch that does not carry the guard. `core.hooksPath` is per-checkout and
-  the hook is version-controlled, so this constrains commits on branches that
-  have it, and nothing else. Branches cut before it merges are unguarded.
+  That is `check-hook-attestation.ps1`'s job — a different U5 sub-item. It no
+  longer reaches the judge, but it does defeat the *audit line*.
+- a branch that does not carry the guard. Same: the record is lost, the
+  chokepoint is not.
 - **the audit log has no automated consumer.** It is a file an operator reads
   (`check-judge-flag.ps1 -Audit`). Nothing polls it, nothing alerts on it, and
   a sufficiently determined agent can delete it — it is a record, not a second
-  guard. The mechanical stop is the denial; the log is the trail.
+  guard. The mechanical stop is `judge_gate.require`; the log is the trail.
+- the gate does not **authenticate** the rating record. `rated_by: me` is a
+  valid record. It is an operator artifact under review, not a credential, and
+  criterion 11 below says exactly that.
+- `check-judge-dryrun.ps1` exit 7 still reports a config in force with the flag
+  already on. It is now a *report*, not the run-time stop it used to be
+  described as; the stop is the daemon refusing to boot.
 
 ---
 
@@ -577,6 +707,15 @@ docker compose -f coder/docker-compose.yml --env-file .env restart little-coder
 # 3. confirm the judge is not wired
 .\scripts\checks\check-judge-dryrun.ps1     # judge_enabled : False
 ```
+
+**Reverting the gate itself** (if `judge_gate.require` ever refuses a boot it
+should not): the revert is one line — restore
+`meta_wiring.build_meta_runner`'s condition to read
+`config.observer.judge_enabled` directly instead of calling
+`require_judge_admission(config)`.
+`little-coder/tests/test_judge_gate_chokepoint.py` will go RED on that
+edit, which is the intended cost of removing it. The commit-time guard,
+the corpus and the drill are independent of that line and keep working.
 
 **Reverting the artifacts** — the part that matters. In severity order:
 
@@ -623,8 +762,10 @@ Every claim above was produced by a command, not by reading:
 .\scripts\checks\check-judge-dryrun.ps1 -Container ao-worker-1   # org pool
 .\scripts\checks\check-judge-dryrun.ps1 -EmitPrompts -OutDir <d> # rating packet
 .\scripts\checks\verify-judge-dryrun.ps1                         # 34/34 cases
-.\scripts\checks\verify-judge-flag-guard.ps1                    # 20/20 cases
+.\scripts\checks\verify-judge-flag-guard.ps1                    # 30/30 cases
 .\scripts\checks\check-judge-flag.ps1 -Audit                    # the flag audit log
+cd little-coder; python -m pytest tests/test_judge_gate_chokepoint.py `
+                              tests/test_judge_flag_corpus.py -q    # 59 passed
 docker inspect ao-worker-1 --format '{{range .Mounts}}{{.Type}} {{.Name}} -> {{.Destination}}{{"\n"}}{{end}}'
 docker exec ao-worker-1 stat -c '%n mtime=%y' /var/lib/little-coder/skill /var/lib/little-coder/cohorts /var/lib/little-coder/journals
 ```

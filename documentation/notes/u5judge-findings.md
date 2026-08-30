@@ -304,6 +304,150 @@ Recorded because they are the same shapes, in the work meant to close them.
 
 ---
 
+## 9. FIX ROUND 2026-08-30 (second) — the neighbouring case, and moving the decision
+
+The reported defect of round 1 was genuinely closed: verifiers reproduced the
+GREEN. Then a verifier turned the flag on with **three ordinary YAML
+spellings**, and a second did it with **two quote characters**. Neither
+defeated the guard; both walked around it, because the guard and the daemon
+were two different parsers of the same file.
+
+This round did not patch the pattern. It moved the decision.
+
+### 9.1 The finding I logged and then under-rated
+
+The last entry in this file before today was a class-3 QUESTION saying exactly
+this: *"`check-judge-flag.ps1` GREPS staged YAML rather than parsing it … A
+flip expressed as a YAML anchor, a merge key or a template would not match.
+… **Not a blocker either way.**"*
+
+It was the blocker. The default taken was justified with two reasons that both
+turn out to be wrong:
+
+- *"the guard runs on every commit"* — cost. Measured, the parse costs one
+  python launch on commits that stage YAML at all, roughly a second. The
+  previous version already paid that cost whenever it found a candidate.
+- *"the shipped schema types the key as a plain boolean"* — irrelevant. The
+  schema constrains what the DAEMON accepts after parsing; it says nothing
+  about how many ways a YAML file can spell a value that parses to `True`.
+  Measured, there are at least 27 in a 43-row corpus, and the pattern saw 13.
+
+The lesson is not "parse instead of grep". It is that **an approximation
+logged as a known limitation is still an unclosed hole**, and calling it "not
+a blocker" is a prediction, not a finding. Two verifiers falsified it in ten
+minutes each.
+
+### 9.2 RED, measured before anything changed
+
+Eighteen deliberately chosen spellings, run through the daemon's real loader
+(`littlecoder.config.load_config`) and through the shipped pattern
+(`check-judge-flag.ps1:114`):
+
+```
+YES / ON / y / "true" / 'yes' / quoted key / flow mapping / 1 /
+!!bool "true" / "judge_\x65nabled"     -> daemon reads ON, pattern sees nothing
+```
+
+**10 of 18 were bypasses.** The corpus that shipped grew to 43 rows generated
+by mechanism; of those, 27 turn the flag ON for the daemon and the retired
+pattern could not see **14**.
+
+### 9.3 The chokepoint
+
+`little-coder/src/littlecoder/judge_gate.py`. `meta_wiring.build_meta_runner`
+— the only site in the package that constructs a `Judge` — now calls
+`judge_gate.require(config)` instead of reading the flag. A config that asks
+for the judge without a valid approving rating record raises
+`JudgeNotCalibratedError` and the daemon does not boot.
+
+That changes what a bypass would have to be. The routes that beat the
+commit-time guard — `--no-verify`, a branch without the hook, a config edited
+straight into the container, a spelling nobody has thought of — all arrive at
+`require`, because `require` runs downstream of parsing rather than trying to
+predict it.
+
+Proven in a container built from this branch (`little-coder:wt-u5judge`), on
+the **shipped** config:
+
+```
+shipped config                 -> judge_enabled False, runner.judge None, boots
+judge_enabled: YES             -> loader True  -> REFUSED
+judge_enabled: ON              -> loader True  -> REFUSED
+judge_enabled: "true"          -> loader True  -> REFUSED
+YES + a valid rating record    -> runner.judge = Judge
+```
+
+### 9.4 Completeness, mechanically
+
+`little-coder/tests/test_judge_gate_chokepoint.py` AST-scans the package and
+fails when a new site could decide the question without the gate: any read of
+`judge_enabled` outside `judge_gate.py`, any `Judge(...)` outside
+`meta_wiring.py`, `build_meta_runner` no longer calling into `judge_gate`, a
+second copy of the rating-record rule, and a floor on modules scanned so a
+scan that stops matching cannot pass for free.
+
+All three failure modes were observed RED before green:
+
+- a probe module reading the flag and constructing a `Judge` turned two tests
+  red, naming `_probe_bypass.py:7`;
+- replacing the gate call with `judge_permitted = True` turned the third red.
+
+### 9.5 The differential, over one corpus, run by two executors
+
+`scripts/checks/fixtures/judge-flag-corpus.json` is read by
+`little-coder/tests/test_judge_flag_corpus.py` (daemon loader vs the gate's
+decider) and by `scripts/checks/verify-judge-flag-guard.ps1` (the shipped
+pre-commit guard, end to end in a scratch git repo). One corpus, two
+executors, so a disagreement is a test failure rather than a discovery — the
+house pattern already used for `harness.config.json`'s two readers and the zod
+enum vs the SQL CHECK.
+
+RED observed: replacing the gate's pydantic coercion with a strict
+`value is True` check failed 5 rows immediately.
+
+### 9.6 Two defects found by RUNNING this round's own work
+
+Both would have shipped as green-for-the-wrong-reason:
+
+1. **A UTF-8 BOM made every DENY case pass for the wrong reason.** PowerShell
+   5.1's `Set-Content -Encoding utf8` writes a BOM; `json.load` rejects it; the
+   decider exited 5; the guard failed closed and exited 1 — which is the same
+   exit code as a correct denial. Every DENY case in the drill went green while
+   the decider had never run. Only the audit-line assertions showed it. Fixed
+   twice: the guard writes the request with `WriteAllText`, and the decider
+   decodes `utf-8-sig`. The drill now also asserts the audit line says `DENY`
+   and not `CANNOT-TELL`.
+2. **The drill's `EXPECTED_CASES` was wrong** (28 vs the 29 actually run), and
+   said so rather than silently passing. That counter has now caught a
+   miscount twice.
+
+### 9.7 NOT closed — stated, not papered over
+
+- **The audit trail is still bypassable.** `--no-verify`, a branch without the
+  hook, or a clone without `core.hooksPath` still produce a flip with no audit
+  line. What has changed is that such a flip no longer *reaches the judge*.
+  The record is lost; the containment is not. Hook-bypass detection is
+  `check-hook-attestation.ps1` + `work/u5proxy`, a different sub-item.
+- **Nothing stops an edit to `judge_gate.py` itself.** The completeness test
+  watches every OTHER site; it cannot watch the file it is defending. Review is
+  the only control there, and pretending otherwise would be the
+  doc-claims-a-property-the-code-lacks shape this file keeps recording.
+- **The rating record is not authenticated.** `rated_by: me` is a valid record.
+  It is an operator artifact under review, not a credential.
+- **The running `little-coder` container does not have the gate yet.** It runs
+  `little-coder:local`, built before this branch. The runtime chokepoint
+  reaches production on the next image rebuild + recreate of that service. The
+  proof above used `little-coder:wt-u5judge`, built from this branch and never
+  attached to the anchor networks.
+- **U5 does not close on this.** `work/u5proxy` and `work/u5pplane` carry the
+  other two sub-items. This round closed a defect class inside one of the
+  three.
+- **The guard now fails closed harder than before.** On a machine with no
+  working python, a commit staging any YAML is refused rather than only a
+  commit that already looked like a flip. Deliberate; stated in the script
+  header; reversible by reverting the script.
+
+
 ## DECISIONS entries to append
 
 ## 2026-08-30 · U5 · class 2
@@ -408,3 +552,124 @@ QUESTION: `check-judge-flag.ps1` GREPS staged YAML for `judge_enabled:` set
           stronger form is to parse each staged YAML with the same python the
           validator already shells, at the cost of one python launch per
           staged YAML file. Not a blocker either way.
+
+## 2026-08-30 · U5 · class 2 (fix round 2 — the chokepoint)
+DECISION: The question "may the LLM-in-the-loop judge run?" has exactly ONE
+          decider: `little-coder/src/littlecoder/judge_gate.py`.
+          `meta_wiring.build_meta_runner` (the only site that constructs a
+          `Judge`) calls `judge_gate.require(config)` instead of reading
+          `observer.judge_enabled`, and that call RAISES
+          `JudgeNotCalibratedError` — failing the daemon boot — when the
+          config asks for the judge and no valid approving rating record is in
+          force at `/app/config/judge-enablement-rating.yaml` (the container
+          path `coder/docker-compose.yml:113` produces from
+          `little-coder/config/judge-enablement-rating.yaml`).
+          `observer.enabled` is deliberately NOT consulted, so an unrated
+          `judge_enabled: true` cannot lie dormant and switch on the day
+          someone flips the innocuous flag.
+CITED:    §C.7 (a phase closes only on an EXECUTABLE check) and §0 A7
+          (containment must be mechanical, never model self-restraint). The
+          previous round's guard was a PERIMETER with many doors —
+          `--no-verify`, a branch without the hook, a config edited inside the
+          container, and any YAML spelling the pattern did not anticipate. Two
+          verifiers walked through the last of those in ten minutes each.
+          Enforcing at the single consumption site makes all four irrelevant
+          to the property, because the value tested is the one pydantic
+          already produced. Proven in a container built from this branch
+          (`little-coder:wt-u5judge`) against the SHIPPED config: `YES`, `ON`
+          and `"true"` each read True by the loader and each REFUSED; the same
+          config with a valid rating record wires a `Judge`.
+REVERT:   One line. In `meta_wiring.build_meta_runner`, replace
+          `judge_permitted = require_judge_admission(config)` with a direct
+          read of `config.observer.judge_enabled` and drop the import.
+          `little-coder/tests/test_judge_gate_chokepoint.py` goes RED on that
+          edit, which is the intended cost. The commit-time guard, the corpus
+          and the drill are independent of that line. No runtime config was
+          touched: `judge_enabled: false` is unchanged in every config this
+          repository tracks, and no committed fixture sets it true.
+
+## 2026-08-30 · U5 · class 2 (fix round 2 — the completeness test)
+DECISION: The chokepoint's completeness is proved MECHANICALLY, not asserted.
+          `little-coder/tests/test_judge_gate_chokepoint.py` AST-scans every
+          module in `littlecoder` and fails when a new site could decide the
+          question without the gate: any read of `judge_enabled` outside
+          `judge_gate.py`, any `Judge(...)` construction outside
+          `meta_wiring.py`, `build_meta_runner` no longer calling into
+          `judge_gate`, a second copy of the rating-record rule in the
+          package, and a floor on how many modules the scan reached.
+CITED:    §C.7 — "prose verification is FALSIFIED". A chokepoint a future
+          wiring path can simply not call is a convention, and this repository
+          has now been walked through by omission three times. There are only
+          two ways to answer "is the judge on?" — call the gate or read the
+          field — and both are watched. Observed RED before green: a probe
+          module reading the flag and constructing a `Judge` turned two tests
+          red naming `_probe_bypass.py:7`; replacing the gate call with
+          `judge_permitted = True` turned the third red.
+REVERT:   Delete `little-coder/tests/test_judge_gate_chokepoint.py`. The gate
+          keeps working; only the guarantee that nothing bypasses it by
+          omission is lost.
+
+## 2026-08-30 · U5 · class 2 (fix round 2 — the guard stops parsing YAML)
+DECISION: `scripts/checks/check-judge-flag.ps1` no longer contains any notion
+          of what YAML true looks like. It reads the STAGED bytes and hands
+          them to `scripts/checks/lib/judge_flag_decide.py`, a transport that
+          asks `littlecoder.judge_gate` — the daemon's own decider — and fails
+          closed (DENY + `CANNOT-TELL`) if it cannot reach it. The
+          rating-record rule moved to `judge_gate.read_rating_record`;
+          `scripts/checks/lib/judge_dryrun.py` now delegates there instead of
+          carrying its own copy.
+CITED:    A regex approximating a YAML parser is a second and worse parser.
+          Measured before the change: of 18 deliberately chosen spellings, 10
+          turned the flag ON for the daemon and were invisible to the pattern;
+          across the 43-row shipped corpus, 27 turn it ON and the pattern saw
+          13. Same drift class as the SQL-CHECK-vs-zod-enum defect this
+          repository already fixed by testing two readers against each other.
+          Cost accepted, stated in the script header: on a machine with no
+          working python a commit staging any YAML is now refused, where
+          before only a commit that already looked like a flip was.
+REVERT:   `git revert` the change to `check-judge-flag.ps1`, delete
+          `scripts/checks/lib/judge_flag_decide.py`, and restore
+          `_RATING_REQUIRED` + the inline rule body in `judge_dryrun.py`. The
+          runtime chokepoint is independent and survives that revert.
+
+## 2026-08-30 · U5 · class 2 (fix round 2 — one corpus, two executors)
+DECISION: `scripts/checks/fixtures/judge-flag-corpus.json` holds 43 YAML
+          spellings generated by MECHANISM (scalar case, scalar quoting, key
+          quoting and hex escaping, flow style, anchors and aliases, merge
+          keys, document structure, whitespace, comments, relocation) plus 12
+          OFF controls, each PINNED with what the daemon's real loader
+          returns. It is read by two independent executors:
+          `little-coder/tests/test_judge_flag_corpus.py` (loader vs the gate's
+          decider) and `scripts/checks/verify-judge-flag-guard.ps1` (the
+          shipped guard, end to end in a scratch git repo, now 30 cases).
+          The retired regex is stored in the corpus and re-run against every
+          row, so the reason it was removed stays executable.
+CITED:    The house pattern of two things that must agree, tested against each
+          other — `harness.config.json`'s two readers, ScopeNode's columns vs
+          `models.py`, the zod enum vs the SQL CHECK, the anchor schema's three
+          readers. Generated by mechanism rather than collected from what the
+          verifiers tried, because "the ones the verifier found" is a patch
+          with more rows. Observed RED: replacing the gate's pydantic coercion
+          with a strict `value is True` check failed 5 rows immediately.
+          The guard is deliberately a SUPERSET of the loader (every document
+          of a multi-document stream; the key at any depth), so four rows are
+          over-denials and are named in the test — over-denying a commit costs
+          a conversation, under-denying is the defect being replaced.
+REVERT:   Delete the fixture and both readers' corpus tests. The gate and the
+          guard keep working; only the proof that they cannot drift is lost.
+
+## 2026-08-30 · U5 · class 1 (recorded because it was surprising)
+DECISION: The guard writes its request file with
+          `[System.IO.File]::WriteAllText`, and the decider decodes
+          `utf-8-sig`.
+CITED:    PowerShell 5.1's `Set-Content -Encoding utf8` writes a BOM;
+          `json.load` rejects it; the decider exited 5; the guard failed
+          closed and exited 1 — the SAME exit code as a correct denial. Every
+          DENY case in the drill went green while the decider had never run.
+          Only the audit-line assertions distinguished them, and the drill now
+          asserts that corpus denials say `DENY`, not `CANNOT-TELL`. Logged
+          because "the check passed" and "the check ran" were indistinguishable
+          without that assertion, which is the failure shape this phase keeps
+          recording.
+REVERT:   Restore `Set-Content -Encoding utf8`; the `utf-8-sig` decode makes it
+          work anyway, which is why both halves were fixed.

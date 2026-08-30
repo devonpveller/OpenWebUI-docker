@@ -121,10 +121,9 @@ EXIT_INTEGRITY = 8
 # Anything else under the skill root was not written by the skill library.
 _SKILL_SUBDIRS = ("knowledge", "tools", "plan-slots")
 
-# Required keys in a rating record. Design section 13 exit criterion 3 is a
-# HUMAN rating of the emitted prompts; a record without these four fields does
-# not identify who rated what, so it cannot stand in for that human.
-_RATING_REQUIRED = ("rated_by", "rated_at", "rated_report", "verdict")
+# The rating-record rule is NOT defined here. Its one definition lives in
+# littlecoder.judge_gate, which the daemon calls at boot and the pre-commit
+# guard calls through lib/judge_flag_decide.py -- see read_rating_record below.
 
 
 class _Cannot(Exception):
@@ -426,40 +425,26 @@ def _classify_skill_library(skill_dir: Path | None, store_cluster_ids: set | Non
 
 
 def read_rating_record(path: Path) -> tuple[dict | None, str]:
-    """Return (record, problem). A record is valid when it parses as YAML (or as
-    YAML frontmatter), carries every key in _RATING_REQUIRED with a non-empty
-    value, and its verdict is 'approve'.
+    """Delegate to littlecoder.judge_gate.read_rating_record -- the ONE
+    definition of a valid rating record, shared with the daemon's boot-time
+    gate (meta_wiring -> judge_gate.require) and with the pre-commit guard
+    (check-judge-flag.ps1 -> lib/judge_flag_decide.py).
 
-    Shared with the pre-commit flag guard (scripts/checks/check-judge-flag.ps1
-    shells this module) so there is exactly ONE definition of a valid rating.
-    Two copies of this rule would drift, and the copy that drifts is the one
-    nobody looks at.
+    This function used to CARRY the rule. It no longer does, because a second
+    copy of a rule is how a guard ends up disagreeing with the thing it
+    guards -- the same drift that let a regex here say OFF while the daemon
+    read ON. Requires --src, like every other littlecoder import in this
+    module; without it the caller gets a cannot-tell rather than a guess.
     """
     try:
-        text = path.read_text(encoding="utf-8")
-    except OSError as exc:
-        return None, "rating record unreadable: %s" % exc
-    body = text
-    if text.lstrip().startswith("---"):
-        stripped = text.lstrip()
-        end = stripped.find("\n---", 3)
-        if end < 0:
-            return None, "rating record frontmatter is unterminated"
-        body = stripped[stripped.find("\n") + 1 : end]
-    try:
-        import yaml
-
-        data = yaml.safe_load(body)
+        from littlecoder.judge_gate import read_rating_record as _read
     except Exception as exc:  # noqa: BLE001
-        return None, "rating record is not valid YAML: %s" % exc
-    if not isinstance(data, dict):
-        return None, "rating record must be a YAML mapping"
-    missing = [k for k in _RATING_REQUIRED if not str(data.get(k, "")).strip()]
-    if missing:
-        return None, "rating record is missing required key(s): " + ", ".join(missing)
-    if str(data.get("verdict", "")).strip().lower() != "approve":
-        return None, "rating record verdict is %r, not 'approve'" % data.get("verdict")
-    return data, ""
+        raise _Cannot(
+            EXIT_IMPORT,
+            f"littlecoder.judge_gate is not importable, so the rating-record "
+            f"rule cannot be evaluated: {exc!r}",
+        ) from exc
+    return _read(path)
 
 
 # --- main ----------------------------------------------------------------

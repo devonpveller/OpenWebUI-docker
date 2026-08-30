@@ -12,6 +12,7 @@ from pathlib import Path
 
 from .config import Config
 from .judge import Judge
+from .judge_gate import require as require_judge_admission
 from .llm import ChatClient, EmbeddingClient
 from .meta import MetaRunner, default_similarity
 from .sanitize import Sanitizer
@@ -27,8 +28,19 @@ def build_meta_runner(config: Config) -> MetaRunner:
         store. Useful for the operator's prompt-calibration window.
       - both True → embedding-based similarity + Judge wired; iteration
         can mint clusters AND draft tier-0 skills (Chapter 4 §4e —
-        skill_dir from `config.paths.skill_dir`)."""
-    if not config.observer.enabled or not config.observer.judge_enabled:
+        skill_dir from `config.paths.skill_dir`).
+
+    THE JUDGE FLAG IS NOT READ HERE. `judge_gate.require` is the single
+    reader of `observer.judge_enabled` in this package and the single place
+    the "may the judge run?" question is decided; it RAISES
+    `JudgeNotCalibratedError` if the config asks for the judge without a valid
+    human rating record at `/app/config/judge-enablement-rating.yaml`, so a
+    config edited inside the container, or committed past the pre-commit
+    guard, still cannot start a judging daemon. See judge_gate.py's header and
+    tests/test_judge_gate_chokepoint.py, which fails if any other module reads
+    the flag or constructs a `Judge`."""
+    judge_permitted = require_judge_admission(config)
+    if not config.observer.enabled or not judge_permitted:
         return MetaRunner(
             observer_cfg=config.observer,
             journals_dir=config.journals.dir,
