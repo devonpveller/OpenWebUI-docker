@@ -296,3 +296,84 @@ CITED:    §C.1 (amend on the record and continue) + §C.2 class 2.
 REVERT:   Delete the file; U1 returns to citing a document that does not exist.
 CAVEAT:   Anything the original required that is not in the reconstruction is
           LOST. Named rather than papered over.
+
+---
+
+## 2026-08-29 · U1 · CORRECTION — the memory-plane plan was never missing
+FINDING:  The entry "ANCHOR CONTRADICTED BY REALITY" above, and commit 97b20b3,
+          claimed the memory-plane plan "DOES NOT EXIST ... nowhere in this
+          repository's history and not on disk". WRONG. It is at
+          d:\Open WebUI\documentation-plans-ai-stack\implementation-guide\
+          agent-memory-plane\PLAN.md - 493 lines, sibling private plans repo,
+          outside this repo root. The operator supplied the path.
+CAUSE:    I searched this repo and two GUESSED paths. I never searched the
+          sibling plans repo. "Not in this repo" was true and is what I should
+          have said; "does not exist" was a claim about the world made from a
+          search of one directory tree. Same class as naming a commit SHA from
+          memory - a claim not earned by looking.
+DECISION: The sibling PLAN.md is CANONICAL. The in-repo file becomes a pointer
+          plus the evidence trail for what was validated here, and says in its
+          own heading that it must never become a plan again.
+CITED:    C.1 (amend on the record) + C.2 class 2.
+REVERT:   n/a - this is a correction, not a design choice.
+
+## 2026-08-29 · U1 Phase 1 · RECONCILIATION against the real gates
+Checked what was validated in 1.1-1.3 against canonical PLAN.md L186-L277.
+
+1.1 - MET, one deliberate deviation. The gate says mount as
+     99-init-agent-memory.sql ("next free prefix after 98"). The chain was
+     instead renumbered fixed-width 010-120, because a 99a-style suffix sorts
+     BEFORE 99- under bash + UTF-8 collation: the plan's prefix would not have
+     run where it reads as running. The deviation stands; it is the safer of the
+     two, and it is recorded rather than passed off as the gate.
+
+1.2 - PARTIAL, and further from the gate than the phase's own commits imply.
+     The gate names SEVEN MCP tools; two exist (writeback, recall). Missing:
+     report_usage, review, list_review_queue, inspect, recall_trace, plus the
+     third REST twin POST /agent-memory/usage. The gate says "validate (zod)";
+     there is no zod - which makes writeback-findings #11 (inputSchema {} with
+     four undiscoverable required fields) a MISSED GATE rather than taste.
+     The gate says review is "the 9 actions from the provenance guide, each
+     writing agent_memory_review_actions + status transition + audit event".
+     What was built covers FOUR actions and writes only
+     agent_memory_audit_events. agent_memory_review_actions EXISTS at
+     init-agent-memory.sql:156, in a file I read, listing exactly those nine
+     actions - and I read past it. merge and supersede are distinct there; my
+     implementation collapsed supersede onto review_status 'merged'.
+
+1.3 - PARTIAL. The plane-agreement invariant test was written before the
+     feature as the gate demands, and that is the part that held. Missing from
+     the smoke script: conservative recall returns nothing pending;
+     include_unconfirmed returns it AND creates a trace; usage report;
+     evidence_only review action; and the CLOUD-GATEWAY NEGATIVE TEST
+     (agent_memory_* denied via :8061, and cloud search_thoughts must not
+     surface agent-memory thoughts). That last is a privacy assertion, not a
+     coverage nicety.
+
+## 2026-08-29 · U1 Phase 1.4 · BUILT THE WRONG THING — reverted unbuilt
+DECISION: The Phase 1.4b work - a Deno ops-server.ts, an openbrain-memory-ops
+          container, a dedicated ob-ops-net, and the SERVICE-LIFECYCLE rows for
+          it - is REVERTED. It was designed against my reconstruction, not the
+          canonical gate.
+WHY:      Canonical 1.4 is a SECOND openbrain-gateway INSTANCE
+          (openbrain-ops-gateway), same openbrain-gateway:local image, on obnet,
+          127.0.0.1:8062, own OPS_GATEWAY_KEY, produced by PARAMETERIZING
+          openbrain-gateway/app.py's allowlists and forced read-filter /
+          write-stamp. Its job is the exposure model - reads forced
+          exposure='ops', writes stamped ops post-PII-gate - and it is the
+          loopback lane for HOST processes (claude-sessions bridge, Claude Code)
+          which cannot reach openbrain-mcp because it publishes no host port.
+          What I built was a review-only Deno door on its own network with NO
+          AUTHENTICATION AT ALL, relying entirely on network isolation. Even on
+          its own terms that is weaker than the gate; as an implementation of
+          the gate it is a different system.
+KEPT:     One independently-correct change survives: the Dockerfile's
+          hand-listed COPY became a glob. The list was already stale (it did not
+          name the review modules) and its own comment said what that costs.
+NOT DONE: The exposure model (canonical 1.1, operator-DECIDED 2026-08-25) is
+          absent from this repo entirely - no exposure field, no PII demotion,
+          no taint propagation, no promote_exposure action. It is the binding
+          invariant of the plane and nothing here implements it.
+REVERT:   n/a - this IS the revert. The 1.4a policy/execution modules stay
+          merged (needed either way) but must gain the missing five actions and
+          write agent_memory_review_actions before 1.4 can close.

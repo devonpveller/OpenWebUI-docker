@@ -43,8 +43,19 @@ for sha in $CLAIMS; do
     found=""
     for sub in $SUBS; do
         [ -d "$sub" ] || continue
-        # cat-file -e is the cheapest "does this object exist" question there is.
-        if git -C "$sub" cat-file -e "${sha}^{commit}" 2>/dev/null; then
+        # GIT_DIR MUST BE UNSET FOR THE SUBMODULE LOOKUP.
+        #
+        # git runs hooks with GIT_DIR (and GIT_INDEX_FILE) pointing at the PARENT repo, and
+        # those win over `-C`: `git -C OB1 cat-file` would happily change directory and then
+        # resolve the SHA against the parent's object store, where a submodule commit does
+        # not exist. Every honest bump would be rejected.
+        #
+        # This is not hypothetical - it is what happened the first time this hook ran for
+        # real, on a message naming the correct SHA. The drill missed it because the drill
+        # invokes this script directly, where GIT_DIR is unset; git's invocation and a
+        # direct invocation are different environments, and only one of them is the one
+        # that matters. The drill now sets GIT_DIR to match.
+        if (unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE; git -C "$sub" cat-file -e "${sha}^{commit}") 2>/dev/null; then
             found="yes"
             break
         fi
