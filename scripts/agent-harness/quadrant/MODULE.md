@@ -78,15 +78,18 @@ branch; the matrix, the report and the exit codes follow automatically.
 
 `cli -> {matrix, record, report, item, adapters}`; `report -> {matrix, record}`;
 `record -> matrix` (for the schema); `item -> anchor_schema` (the shared anchor contract,
-reused rather than re-implemented); `guards -> item`. Nothing in the harness imports
-`quadrant`.
+reused rather than re-implemented); `guards -> item`. The only importer outside the package
+is its own suite: `git grep -ln "from quadrant import" -- '*.py' ':!OB1' ':!scripts/agent-harness/quadrant'`
+prints `scripts/agent-harness/test_quadrant.py` and nothing else.
 
 ## To delete this module
 
 Delete `scripts/agent-harness/quadrant/`, `scripts/agent-harness/test_quadrant.py`, the
 `targets` and `quadrant` sections plus the `fixture` runner from `harness.config.json`, the
-`.quadrant/` line in `.gitignore`, and any `.quadrant/` directory. Nothing else in the
-workspace references it.
+`.quadrant/` line in `.gitignore`, and any `.quadrant/` directory. Two rows in
+`scripts/agent-harness/MODULE.md` then dangle and should go with it. Nothing else executes
+against the module: `git grep -ln quadrant -- . ':!OB1'` lists only those files plus prose
+that mentions it (this plan's `PLAN.md` / `DECISIONS.md` and two findings notes).
 
 ## Known limits (as of 2026-08-30)
 
@@ -94,14 +97,21 @@ workspace references it.
   that ran are `claude-code`; this is a comparison of the TARGET axis alone. What the
   module can support today is a decision about `self` vs `project` at n=1. It cannot
   support any statement about `little-coder` vs `claude-code`, and the report says so
-  rather than implying otherwise by silence. See
-  `documentation/notes/u4quad-findings.md` for the park, its reason, and what would lift
-  it.
-- **Two of four cells have never run.** `little-coder x *` is blocked: the running
-  container publishes no ports, so the API `harness.config.json` declares
-  (`http://127.0.0.1:8090`) has no route from the host. The harness reports this as
-  NOT RUN with that reason; it does not implement a second dispatch, because one is being
-  built as its own item.
+  rather than implying otherwise by silence. The park, its reason (rewritten 2026-08-30
+  after a verifier disproved the first one with a single command) and what would lift it
+  are in `documentation/notes/u4quad-findings.md`.
+- **Two of four cells have never run**, because this module speaks ONE transport and it
+  is the wrong one. `adapters._dispatch_little_coder` uses the HTTP endpoint
+  `harness.config.json` declares here (`http://127.0.0.1:8090`), and that door does not
+  exist: the running container publishes nothing
+  (`docker inspect little-coder --format '{{json .NetworkSettings.Ports}}'` →
+  `{"9090/tcp":[]}`) and `curl -s -m 4 http://127.0.0.1:8090/health` exits 7. The module
+  reports both cells NOT RUN with that reason, which is accurate about the transport and
+  must not be read as "little-coder is unreachable" — `docker exec little-coder curl -s
+  http://localhost:8090/health` answers 200, and `work/dfu-u4` has driven a real anchored
+  item through that route. The docker-exec transport is not added here because that item
+  already wrote one (`scripts/agent-harness/dispatch.ps1`). See
+  `documentation/notes/u4quad-findings.md` F7.
 - **n=1.** `quadrant.repeats` is 1, so no cell's number can yet be separated from one
   run's luck. The report says so in the confidence column and again at the bottom.
 - **The fixture runner is scaffolding**, permanently excluded from decision tables by its

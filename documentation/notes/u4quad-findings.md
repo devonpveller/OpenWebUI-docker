@@ -10,6 +10,14 @@ for a real defect: *the shipped CLI could shrink the comparison until it read co
 That is fixed here, RED first. The phase's column is still **UNMET**, and this note parks
 it rather than manufacturing a pass. See [The park](#the-park--u4s-validated-by-column-is-unmet).
 
+**Round 3 (2026-08-30, audit-trail only — no code changed).** One verifier did not refute
+the work; the other refuted the park's JUSTIFICATION and judged it dishonest. The second
+was right: the park's stated reason was disproved by one command, `docker exec little-coder
+curl -s http://localhost:8090/tasks`. See [F7](#f7--the-parks-reason-was-false-and-one-command-in-this-note-disproved-it)
+and [Reconciling the two verifiers](#reconciling-the-two-verifiers). This round rewrites
+the park's reason and three other prose claims a command does not support; `git diff
+fda4816..HEAD --stat` shows the changed files are documentation only.
+
 ## DECISIONS entries to append
 
 ### 2026-08-30 · U4 · class 2 — the comparison is scored from EVIDENCE, not from status fields
@@ -104,24 +112,47 @@ CITED:    §A.2 (configuration over hardcoding) and F3 below — a measured defe
           precaution.
 REVERT:   Empty the list; `test_build_artifacts_do_not_enter_the_item` goes red.
 
-### 2026-08-30 · U4 · PARK — the runner axis has no coverage, and cannot get any here
+### 2026-08-30 · U4 · PARK — the runner axis has no coverage in THIS module, which speaks one transport
 DECISION: U4's §2 "Validated by" column ("Gym: same anchored item run per quadrant
           (runner x target), outcomes compared; stall→oracle observed firing at least
           once") is **NOT satisfied** by this item and this item does not merge as a
-          completion of U4. The comparison harness merges; the phase parks. `little-coder`
-          cannot execute an anchored item from this process — the running container
-          publishes no ports (`docker inspect little-coder --format
-          '{{json .NetworkSettings.Ports}}'` → `{"9090/tcp":[]}`), so the endpoint
-          `harness.config.json` declares is unreachable, and no dispatch to it exists in
-          the harness at all. Both runner-axis cells are therefore permanently NOT RUN
-          here, and no amount of work inside this item changes that.
+          completion of U4. The comparison harness merges; the phase parks.
+          **The reason, restated in round 3 after a verifier refuted the round-2 wording**
+          (F7 — round 2 said little-coder "cannot execute an anchored item from this
+          process", which is false): `quadrant/adapters.py` dispatches little-coder over
+          exactly one transport, the HTTP endpoint `harness.config.json` declares on this
+          branch, and that door does not exist. `docker inspect little-coder --format
+          '{{json .NetworkSettings.Ports}}'` → `{"9090/tcp":[]}`, and
+          `curl -s -m 4 http://127.0.0.1:8090/health` exits 7. A `docker exec` route to
+          the same daemon answers (HTTP 200 on `/health`), and `work/dfu-u4` has already
+          driven a real anchored item through it to `outcome: pass`. The two cells are
+          NOT RUN because this module implements one transport and it is the wrong one —
+          not because little-coder is unreachable.
 CITED:    §C.7: "A phase that cannot satisfy its column does not merge. It parks with a
-          written reason." Forcing the two cells green would require either faking a
-          record (blocked by evidence-gated admission, by design) or building a second
-          little-coder dispatch — which is another item's scope and would be the
-          colliding-items andon §L4 names.
+          written reason." Forcing the two cells green would require faking a record
+          (blocked by evidence-gated admission, by design). Building the docker-exec
+          transport HERE would duplicate `scripts/agent-harness/dispatch.ps1`, which
+          `work/dfu-u4` shipped the same day (`git log --oneline work/dfu-u4 --
+          scripts/agent-harness/dispatch.ps1` → `f856b4e` then `bf10d96`, both
+          2026-08-30) — the colliding-items andon §L4 names.
 REVERT:   Nothing to revert; this is a status, not a change. It is lifted by the
           conditions in [What would meet the column](#what-would-meet-the-column).
+
+### 2026-08-30 · U4 · class 2 — round 3: a park states the reason a command supports, or it is not a park
+DECISION: The PARK entry above was rewritten. Its round-2 reason ("cannot", "no dispatch",
+          "permanently", "no amount of work inside this item changes that") was refuted by
+          `docker exec little-coder curl -s http://localhost:8090/tasks`, which shows a
+          completed little-coder task from a sibling item. The reason now names the one
+          thing that is true and checkable: this module implements a single transport and
+          the door it uses does not exist here. No code changed in this round —
+          `git diff fda4816..HEAD --stat` is documentation and docstrings only.
+CITED:    §C.7: the audit trail is what the operator reads instead of the diffs, "so they
+          must be true". A park is the one artifact of a phase that does NOT come with an
+          executable check, which is exactly why its prose has to be held to one.
+REVERT:   `git revert` this commit. Nothing depends on the wording; the module's behaviour,
+          its 39 tests and its 14 mutations are untouched by it. What must NOT be reverted
+          alone is the correction without the finding: F7 is the record of why the first
+          wording was wrong, and deleting it re-creates the conditions for it.
 
 ### 2026-08-30 · U4 · incident — the merge-protocol drill left the operator's checkout mid-rebase
 DECISION: Recorded, not repaired: running `scripts/agent-harness/verify-merge-protocol.ps1`
@@ -130,12 +161,17 @@ DECISION: Recorded, not repaired: running `scripts/agent-harness/verify-merge-pr
           present and a leftover `drill/verify-d` branch. **`git rebase --abort` in the
           main checkout is the repair; this session was denied permission to run it and
           did not work around the denial.**
+          **RESOLVED by someone else before this note was finalised.** Re-checked
+          2026-08-30 in `D:\Open WebUI\ai-stack`: `git status --short --branch` →
+          `## refactor/ai-stack-cleanup...origin/refactor/ai-stack-cleanup [ahead 6]`;
+          `ls .git/rebase-merge .git/rebase-apply` → no such file or directory;
+          `git branch --list 'drill/*'` → empty.
 CITED:    The worktree-per-session policy exists so one session cannot mutate another's
           git state. This drill is an exception to it that the policy does not name.
-REVERT:   `cd "D:\Open WebUI\ai-stack"; git rebase --abort` restores
-          `refactor/ai-stack-cleanup`, whose ref is intact at 98cf02e (`git log --oneline -1
-          refactor/ai-stack-cleanup`).
-          Nothing is lost — the drill's own commits are on `drill/verify-d`.
+REVERT:   No longer applicable — the repair has been applied. It was
+          `cd "D:\Open WebUI\ai-stack"; git rebase --abort`. The branch tip moves as other
+          sessions merge, so the checkable invariant is ancestry, not a SHA:
+          `git merge-base --is-ancestor 98cf02e refactor/ai-stack-cleanup` exits 0.
 
 ---
 
@@ -220,20 +256,31 @@ outcomes compared; stall→oracle observed firing at least once"*.
 | outcomes compared | **target axis only** | both compared cells are `claude-code`; the runner axis has zero coverage |
 | stall→oracle observed firing | **not this item's scope** | `work/u4oracle` |
 
-**Why the runner axis has no coverage.** `little-coder` cannot be handed an anchored item
-from this process. The running container publishes nothing (established by the
-orchestrator: `docker inspect little-coder --format '{{json .NetworkSettings.Ports}}'` →
-`{"9090/tcp":[]}`, `docker port little-coder` prints nothing) while
-`coder/docker-compose.yml:121` declares `127.0.0.1:9091:9090` — and 9091 is the metrics
-port, not the API. Separately, the harness contains no dispatch to little-coder at all:
-`Resolve-RoleTarget` has zero executable callers repo-wide and the runner `status` field is
-read nowhere (`documentation/notes/u4-profile-mechanism-deadcode.md`). So the axis is
-blocked twice over, at the transport and at the caller.
+**Why the runner axis has no coverage — corrected in round 3 (F7).** Round 2 wrote that
+`little-coder` "cannot be handed an anchored item from this process". One command disproves
+that, and it is the command in this note's own F1: `docker exec little-coder curl -s
+http://localhost:8090/tasks`. What is true, and all that is true:
 
-**Why this item did not fix it.** Building a second little-coder dispatch here is another
-item's scope (`work/u4bidir` and the coder-plane work), and a rival implementation is the
-colliding-items andon §L4 names. The honest output of this item is a comparison that
-refuses to pretend, plus this park.
+| Claim | Command | Result |
+|---|---|---|
+| the declared HTTP door does not exist | `curl -s -m 4 -o /dev/null -w "%{http_code}" http://127.0.0.1:8090/health` | `000`, exit 7 |
+| the live container publishes nothing | `docker inspect little-coder --format '{{json .NetworkSettings.Ports}}'` | `{"9090/tcp":[]}` |
+| compose declares only metrics | `coder/docker-compose.yml:121` | `"127.0.0.1:9091:9090"` (9090 is the Prometheus port, not the API) |
+| a `docker exec` route DOES answer | `docker exec little-coder curl -s -o /dev/null -w "%{http_code}" http://localhost:8090/health` | `200` |
+| this module speaks only the HTTP transport | `grep -n "_dispatch_little_coder\|transport" scripts/agent-harness/quadrant/adapters.py` | four hits: the definition, its call site, and two docstring lines about the transport this module does NOT implement. The function body is `urllib.request` against `rcfg["endpoint"]`; nothing reads a `transport` key and there is no `docker exec` branch |
+| the pipeline dispatches no runner at all | `documentation/notes/u4-profile-mechanism-deadcode.md` | `Resolve-RoleTarget` has zero executable callers repo-wide |
+
+So the axis is blocked at ONE place that this item owns — the transport inside
+`adapters._dispatch_little_coder` — and at one it does not, the pipeline. It is not blocked
+by the world.
+
+**Why this item did not fix it.** The docker-exec transport was built the same day on
+`work/dfu-u4` (`scripts/agent-harness/dispatch.ps1`, `Invoke-HarnessTask`; `git show --stat
+bf10d96`), together with the config change that points the runner at it
+(`git show bf10d96:scripts/agent-harness/harness.config.json` → `"transport":
+"docker-exec"`). Writing a second one here is the colliding-items andon §L4 names.
+The honest output of this item is a comparison that refuses to pretend, plus this park —
+and a park whose stated reason is the one a command supports.
 
 **What is genuinely delivered.** The apparatus that makes the comparison decidable and
 un-fakeable, and a real 2-cell measurement of the TARGET axis at n=1, which supports a
@@ -243,14 +290,22 @@ un-fakeable, and a real 2-cell measurement of the TARGET axis at n=1, which supp
 
 Concretely, in order:
 
-1. **A transport to little-coder.** Either recreate the coder plane so a published API
-   port exists (the live container has drifted from its own compose file, and even that
-   file publishes only metrics), or implement the `docker exec` transport —
-   `docker exec little-coder curl -fsS http://localhost:8090/tasks` returns `{"tasks":[]}`
-   today, so the API works and only the route is missing. The seam is
-   `adapters._dispatch_little_coder`; nothing else in the module changes.
-2. **One anchored item completed through little-coder**, which is A11's standing unproven
-   claim.
+1. **A `docker exec` transport in this module.** The seam is
+   `adapters._dispatch_little_coder` and the probe beside it,
+   `matrix.probe_little_coder`; nothing else in the module changes. Do NOT publish the
+   API port instead: `git show bf10d96:scripts/agent-harness/harness.config.json`
+   (`_why_docker_exec`) records that `POST /tasks` is unauthenticated since `lc-mcpo` was
+   retired, so publishing it would hand arbitrary agent execution to every process on the
+   machine. The transport itself is already written on `work/dfu-u4`
+   (`dispatch.ps1`'s `Invoke-HarnessTask`), so the work here is to call it or port it,
+   not to design it.
+2. **One anchored item completed through little-coder.** `work/dfu-u4` ran one on
+   2026-08-30 — `docker exec little-coder curl -s http://localhost:8090/tasks` → one task,
+   `user_id harness-dfu-u4`, `status done`, `outcome pass`, `signal "acceptance command
+   exit 0"`. Whether that closes A11 is that item's call to make, not this one's, and it
+   parked too: `bf10d96`'s message says "One quadrant ran; no comparison exists; no oracle
+   path exists at all." The two parks are complementary — that item proved the runner, this
+   one built the comparison, and the column needs both plus the oracle.
 3. **Then** `python -m quadrant.cli run-all --item u4-baseline` and
    `python -m quadrant.cli report`. When the column is met, `report` exits 0 by itself —
    that exit code is the column's machine-readable form. Nothing else in the module has to
@@ -296,7 +351,9 @@ The generalisable half: **a number in a document is a claim, and it decays.** Th
 that were simply stale were harmless; the two that named measurements whose artifacts no
 longer exist were not, because no reader could have discovered they were uncheckable.
 
-## F1 — little-coder is healthy and undispatchable, and the container is drifted
+## F1 — little-coder is healthy, the DECLARED door does not exist, and the container is drifted
+
+Heading corrected in round 3: round 2 said "undispatchable", which F7 disproves.
 
 | Claim | Command | Result |
 |---|---|---|
@@ -306,15 +363,20 @@ longer exist were not, because no reader could have discovered they were uncheck
 | what compose DECLARES | `coder/docker-compose.yml:121` | `"127.0.0.1:9091:9090"` (metrics, not the API) |
 
 The running container has drifted from its own compose file: even the metrics port compose
-publishes is not published on the live container. Two of four quadrants are therefore NOT
-RUN, with that sentence as the recorded reason — and it survives even a narrowed matrix
-(see the fix above).
+publishes is not published on the live container. Cause not established here. Two of four
+quadrants are therefore NOT RUN, with that sentence as the recorded reason — and it
+survives even a narrowed matrix (see the fix above).
 
-**This harness deliberately does not fix it.** Recorded for whoever owns the dispatch:
-`docker exec little-coder curl -fsS http://localhost:8090/tasks` returns `{"tasks":[]}`, so
-a `docker-exec` transport is a verified-working alternative to publishing a port.
-`adapters._dispatch_little_coder` is the seam — it speaks the HTTP API
-`harness.config.json` already declares and nothing more.
+**This harness deliberately does not fix it.** `adapters._dispatch_little_coder` is the
+seam — it speaks the HTTP API `harness.config.json` declares on this branch and nothing
+more. A `docker-exec` transport reaches the same daemon and is not hypothetical: see F7.
+
+**A decayed claim, left visible on purpose.** Round 2 wrote that `docker exec little-coder
+curl -fsS http://localhost:8090/tasks` returns `{"tasks":[]}`. Re-run on 2026-08-30 it
+returns ONE task (F7). A live API's response is a reading, not a fact, and quoting one as
+though it were fixed is the same mistake this note names in
+[Claims I made in round 1](#claims-i-made-in-round-1-that-a-command-does-not-support) —
+made again, in the note that names it.
 
 ## F2 — a workspace under `.claude/` measured the harness, not the quadrant
 
@@ -390,6 +452,75 @@ F811 scripts/agent-harness/test_anchor_schema.py:267     Redefinition of unused 
 repo-wide `ruff check .`, so anything merging after this inherits a red gate until U3's
 owner clears them.
 
+## F7 — the park's reason was false, and one command in this note disproved it
+
+Round 3, after one verifier judged the park dishonest while another found the work sound.
+Both are right, about different objects; see
+[Reconciling the two verifiers](#reconciling-the-two-verifiers).
+
+The round-2 park rested on three sentences. Each is checkable, and two are false:
+
+| Round-2 sentence | Command | Verdict |
+|---|---|---|
+| "`little-coder` cannot execute an anchored item from this process" | `docker exec little-coder curl -s http://localhost:8090/tasks` | **FALSE.** One task: `task_id 01M19JABFNQHR7CPDGCPDK2VEV`, `user_id harness-dfu-u4`, `channel batch`, `status done`, `outcome pass`, `signal "acceptance command exit 0"`, `created_ts 2026-08-30T14:49:00.661Z` |
+| "no dispatch to it exists in the harness at all" | `grep -n "_dispatch_little_coder" scripts/agent-harness/quadrant/adapters.py` | **FALSE.** Two hits, a definition and its call site, in this module. A second dispatch, `dispatch.ps1`'s `Invoke-HarnessTask`, exists on `work/dfu-u4`. The true claim is narrower and was already written a paragraph later: the *pipeline* dispatches no runner |
+| "both cells are permanently NOT RUN here, and no amount of work inside this item changes that" | this note, [What would meet the column](#what-would-meet-the-column) item 1 | **FALSE, and self-contradicted.** That item says the change is at `adapters._dispatch_little_coder` and "nothing else in the module changes" — which is work inside this item |
+
+**The timeline is the part that stings.** The `harness-dfu-u4` task was created at
+`14:49:00.661Z` and ended at `14:50:23.770Z` — 83 seconds, per the daemon's own record,
+quoted in `work/dfu-u4`'s commit `bf10d96` (`git log -1 --format=%B bf10d96`). This item's
+run records are timestamped `20260830T150151Z` onward (`ls .quadrant/runs`). little-coder
+had therefore already executed an anchored item to `outcome: pass` about eleven minutes
+BEFORE this module wrote its two little-coder cells down as blocked — and the recorded
+reason, "no route from the host", was true about the transport and false about the world.
+
+**What was actually wrong.** Not the code, and not the NOT RUN rows: preflight correctly
+found the declared HTTP door missing and correctly refused to invent a result. In fact the
+code was more careful than the prose about it. `python -m quadrant.cli preflight` prints,
+for both blocked cells: *"The daemon may well be healthy inside its container; what is
+missing is a route from the host. Verified 2026-08-30: the running container publishes no
+ports at all, so the API port is reachable only via 'docker exec'."* The machine-readable
+artifact named the workaround; the human-readable park said it could not be done. What was
+wrong is that the park generalised from "my one transport does not work" to "this cannot be
+done", without running the one command that separates those — the error class this
+workspace has already named: stopping the read early, then generalising.
+
+**Not corrected by this round.** `harness.config.json`'s little-coder entry on this branch
+still reads `"status": "unproven"` with `_note: "...no work item has completed through it
+yet..."`. That text predates this item (`git log -L` on the block → `0ebebf4`, the
+harness-module commit) and `work/dfu-u4` rewrites it. Two branches editing one JSON block
+is the collision this note is trying not to cause, so it is recorded here and left alone.
+PLAN §0's A11 verdict is left alone for the same reason: `work/dfu-u4` produced that
+evidence and should be the item that spends it.
+
+## Reconciling the two verifiers
+
+They disagreed, and both verdicts survive, because they judged different objects.
+
+- **Verifier 1 — the work is sound.** Re-checked here, with no pipe on any exit code:
+  `pytest scripts/agent-harness/test_quadrant.py -q` → `39 passed`;
+  `pytest scripts/agent-harness -q` → `144 passed`;
+  `python -m quadrant.prove_guards` → `14/14 guards proven to bite`, exit 0;
+  `python -m quadrant.cli report > out 2>&1; echo $?` → **1** (a pipe here reports the
+  pipe's exit code, not the CLI's — worth stating, because it is how an exit-code claim
+  gets faked by accident);
+  `ruff check scripts/agent-harness/quadrant scripts/agent-harness/test_quadrant.py` →
+  `All checks passed!`. F7 disturbs none of that.
+- **Verifier 2 — the park is not honest.** Also correct, and about the prose. The park's
+  stated REASON ("cannot", "no dispatch", "permanently") was stronger than any command
+  supported, and one command refuted it.
+
+Under §C.7 these are not in tension: the code's claims were executable and held; the audit
+trail's claims were prose and did not. That asymmetry is what §C.7 exists to catch, and it
+is why round 3 rewrote the park rather than the module.
+
+**What is parked, in terms anyone can check without the diff.** U4's §2 column asks for one
+anchored item run per quadrant with outcomes compared. Run `python -m quadrant.cli report`
+from `scripts/agent-harness`: it prints `COMPARED 2/4`, lists `little-coder x self` and
+`little-coder x project` as `NOT RUN`, and exits **1**. That exit code is the park in
+machine-readable form. It becomes 0 when, and only when, all four cells hold an admitted
+record. Nothing else in the module has to change for that; one transport does.
+
 ## Open, deliberately not done here
 
 1. **Two quadrants have never run.** Blocked on dispatch (F1). See
@@ -406,5 +537,11 @@ owner clears them.
    Recorded so nobody reads a column of zeroes as a measured result.
 5. **`gpu_seconds` is always null.** No runner reports it yet; null means unmeasured, and
    the report says so rather than printing 0.
-6. **The operator's main checkout needs `git rebase --abort`** (see the incident DECISION).
-   This session was denied permission to run it.
+6. ~~**The operator's main checkout needs `git rebase --abort`**~~ — **RESOLVED by
+   someone else** before this note was finalised; re-checked with `git status`,
+   `ls .git/rebase-merge`, `git branch --list 'drill/*'` (see the incident DECISION).
+   Left in the list because the incident — and that this session could not repair what it
+   broke — is the finding.
+7. **A `docker exec` transport for `adapters._dispatch_little_coder`** — F7. Not written
+   here because `work/dfu-u4` has one; whoever merges both should call it rather than
+   write a third.

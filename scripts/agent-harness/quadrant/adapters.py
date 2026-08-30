@@ -6,11 +6,17 @@ either honoured or quietly broken. A target adapter produces a WORKSPACE; a runn
 is handed a workspace and a task and produces a DISPATCH OUTCOME. Neither knows the other
 exists, which is what makes the four cells a cross product rather than four scripts.
 
-WHAT IS DELIBERATELY NOT HERE. The little-coder adapter speaks the HTTP API that
-`harness.config.json` already declares and nothing more. A richer dispatch - queueing,
-event streaming, retries - is being built as its own item, and a second implementation of
-it here would be exactly the "two ready items colliding on one file" andon condition PLAN
-L4 names. When that dispatch lands, this adapter is the seam it plugs into.
+WHAT IS DELIBERATELY NOT HERE, AND WHAT THAT COSTS. The little-coder adapter speaks the
+HTTP API that `harness.config.json` declares on this branch and nothing more. That door
+does not exist on this machine (`curl -s -m 4 http://127.0.0.1:8090/health` exits 7), so
+both little-coder cells preflight as BLOCKED and the comparison is 2/4. Do not read that
+as "little-coder is unreachable": `docker exec little-coder curl -s
+http://localhost:8090/health` answers 200, and `work/dfu-u4` shipped a docker-exec
+transport (`scripts/agent-harness/dispatch.ps1`, `Invoke-HarnessTask`) and drove a real
+anchored item through it on 2026-08-30. A second implementation here would be exactly the
+"two ready items colliding on one file" andon condition PLAN L4 names. This function, and
+`matrix.probe_little_coder` beside it, are the seam that transport plugs into.
+See `documentation/notes/u4quad-findings.md` F7.
 """
 
 from __future__ import annotations

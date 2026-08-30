@@ -2,8 +2,10 @@
 
 The recurring failure in this workspace is not a missing test - it is a check that passes
 while checking nothing (eight found in a single day; CLAUDE.md records the pattern). A
-suite of 33 greens is evidence that nothing currently breaks. It is NOT evidence that any
-particular guard would notice if it did.
+suite of greens is evidence that nothing currently breaks. It is NOT evidence that any
+particular guard would notice if it did. (Round 1 of this module wrote "a suite of 33
+greens" here and the suite printed 39 by round 2 - a count in a docstring is a claim with
+a shelf life, so this one names no number.)
 
 So each entry below breaks ONE guard on purpose, runs the ONE test that is supposed to
 catch it, and requires that test to go RED. A mutation that leaves its test green is
