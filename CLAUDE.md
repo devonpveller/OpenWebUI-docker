@@ -123,6 +123,30 @@ snapshots + `manifest.csv` (file → OWUI id; skills included).
   recovery scripts assume Docker Desktop. Never restart `openwebui` alone —
   `tailscale` shares its netns; order is openwebui → tailscale.
 - **Lint:** `ruff check .` (F + E9 gate; subprojects carry their own configs).
+- **Use subagents — you have them, and this workspace is built for them**
+  (operator, 2026-08-29). A Claude Code session here can spawn agents via the
+  Agent tool (`general-purpose` for open-ended work, `Explore` for read-only
+  fan-out searches). Reach for one when:
+  - **you want different eyes.** The recurring failure here is not a missing
+    test, it is a check that passes while checking nothing — eight were found
+    in a single day. An agent briefed to *refute* a claim, not confirm it,
+    finds those; the author re-reading their own work does not. This is the
+    same "differently-goaled reviewer" idea agent-org already uses (§4.4),
+    available to any session.
+  - **the answer needs a broad sweep** (which files reference X, where does Y
+    get set) — delegate it and keep the conclusion, not the file dumps.
+  - **work is genuinely parallel.** Launch them in ONE message so they run
+    concurrently, and background them so the operator can still interject.
+  Brief an agent the way you would brief a tester: name the claim, name what
+  would DISPROVE it, and tell it to report only what it verified by reading
+  the file or running the command. "Report anything suspicious" gets you
+  invented findings; "here are three claims, try to break them, cite
+  file:line" gets you real ones. An agent's report is not evidence until you
+  have checked the part you are about to act on — the A9 rule (verify before
+  you relay) applies to a subagent's output exactly as it does to your own.
+  Do NOT use one to escape a gate you are subject to: an agent you spawned is
+  not an independent party for the harness's separation of duties, and using
+  it as one is gaming the check rather than passing it.
 
 ## Pointers
 
