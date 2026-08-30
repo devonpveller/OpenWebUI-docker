@@ -27,6 +27,10 @@ simulation is exactly the over-claim section C.7 exists to prevent:
   REAL  the regression (a file rename, performed on disk) and the red/green (exit codes)
   REAL  the counterfactual - sections 3-6 EXECUTE the pre-existing checks against every
         seed rather than asserting what they would do (see below)
+  NOT   a measurement of check-project-configs.ps1. It is a pre-commit HOOK whose inventory
+        verifier engages only when a .yml is staged and then renders compose through docker,
+        so section 7 READS it and says so in the check label. Read, not run, is fine; read
+        while labelled 'measured' is what went wrong the first time.
   NOT   an agent-org / ai-orchestration-gym org cycle. No worker built the regression and
         no PR was scored. The regression is seeded deterministically by this file, in a
         disposable sandbox, so the loop is RE-RUNNABLE rather than a transcript.
@@ -125,7 +129,10 @@ def first_line(text):
 
 
 def have_powershell():
-    return shutil.which("powershell") is not None or shutil.which("pwsh") is not None
+    # Specifically `powershell`, because that is the executable PREEXISTING names. Accepting
+    # `pwsh` as a substitute would let the availability check pass while every measurement
+    # failed for a different reason - a green light in front of a door that is not there.
+    return shutil.which("powershell") is not None
 
 
 def build_sandbox(dest):
@@ -289,13 +296,21 @@ def main():
         check("reverting seed D returns the check to GREEN",
               durable_checks.run(sandbox, [from_registry])["failed"] == 0)
 
-        print("\n--- 7. why a stale field is not merely untidy: it is consumed at repair time")
+        print("\n--- 7. source facts (READ, not run): why a stale field bites, and where it does not")
+        # SOURCE FACTS, not measurements - labelled as such, because mislabelling exactly this
+        # is what produced the false counterfactual this drill was rewritten to correct.
+        # check-project-configs.ps1 is a pre-commit HOOK: its inventory verifier engages only
+        # when a .yml is STAGED, and it then shells out to `docker compose config` to render
+        # container_name. Measuring it would need a git repo with a staged compose file and a
+        # working docker, which this sandbox deliberately is not. So what follows is what the
+        # files SAY, offered as that and not as a counterfactual.
         watchdog = (REPO / "scripts/checks/stack-watchdog.ps1").read_text(encoding="utf-8")
-        check("the field IS consumed at repair time - a stale value fails on the host, not at commit",
+        check("SOURCE: the fields ARE consumed at repair time, so a stale value fails on the host "
+              "rather than at commit ($Proj.file / $Proj.env_file appear in stack-watchdog.ps1)",
               "$Proj.file" in watchdog and "$Proj.env_file" in watchdog)
         cfg = (REPO / "scripts/checks/check-project-configs.ps1").read_text(encoding="utf-8")
-        check("the PRE-COMMIT verifier reads planes[] rows only, so none of the four seeds is "
-              "caught at commit time by the hook",
+        check("SOURCE: the pre-commit verifier contains no read of $inv.projects and no mention of "
+              "env_file at all, so the hook has no code path to any of the four seeds",
               "$inv.planes" in cfg and "$inv.projects" not in cfg and "env_file" not in cfg)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

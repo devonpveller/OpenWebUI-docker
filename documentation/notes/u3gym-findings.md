@@ -70,7 +70,12 @@ where it does, verified by reading them:
 - `check-project-configs.ps1` (the pre-commit hook's drift verifier, lines 60–102) builds
   `$known[container] = project` from `planes[]` and compares it to rendered
   `container_name` values. It reads the CONTAINER rows, and only when a `.yml` is staged.
-  It catches **none** of the four seeds.
+  It has **no code path** to any of the four seeds. **This row is READ, not run** — it is a
+  hook needing a staged `.yml` and a working docker, so the sandbox cannot exercise it. The
+  drill labels those two assertions `SOURCE:` and section 7 is titled "source facts (READ,
+  not run)". Read-and-labelled is honest; read-and-presented-as-measured is precisely the
+  error this round is correcting, and it would have been absurd to correct it by committing
+  it again one section further down.
 - `check-watchdog-repair-targets.ps1` reaches a project only by resolving a container the
   watchdog claims to self-heal — 24 of them, spanning `coder`, `frontend`, `inference`,
   `memory`, `open-brain`, `search`. `agent-org` has no row in `planes[]`, so seed C is
@@ -406,9 +411,14 @@ describe a drill by its CONTRACT, never by a check count.
 - **`little-coder` was not exercised.** U3's column does not ask for it; A11/U4 does.
 - **`verify-merge-protocol.ps1` was not re-run to a clean burst** after the fix. See R2 for
   why, and for why that is a merge-order property rather than an unknown.
-- **The full agent-org suite was not re-run to completion this round.** The only agent-org
-  file this item touches is `tests/test_corpus_seeded_regression.py`; no production module
-  changed. That file passes 3/3 on three consecutive runs.
+- **The full agent-org suite was not re-run to completion this round.** It was ATTEMPTED
+  (`.venv/Scripts/python.exe -m pytest -q` from `agent-org/agent-bridge`, started 12:29:11);
+  the process died at ~40 minutes without emitting a summary line, and because the run was
+  piped to `tail` the partial output was lost with it. Round 1's 853-passed run stands for
+  the production code, which this round does not touch: the only agent-org file this item
+  changes is `tests/test_corpus_seeded_regression.py`, and that file passes 3/3 on six
+  consecutive runs. Stated rather than quietly re-cited — an unfinished run is not a green
+  one, and a `| tail` on a 30-minute suite is a way to have no evidence at all if it dies.
 
 ---
 

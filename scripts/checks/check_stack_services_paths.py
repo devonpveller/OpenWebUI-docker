@@ -35,7 +35,10 @@ Why each pre-existing reader stops where it does:
     `$known[container] = project` from `planes[]` and compares it to rendered
     `container_name` values. It reads the CONTAINER rows: it never opens
     `projects[*].file` or `projects[*].env_file`, and it only runs when a .yml is staged.
-    It catches none of the four seeds.
+    It therefore has no code path to any of the four seeds. NOTE this row is READ, not run:
+    the verifier needs a staged .yml and a working docker, so the drill labels it a source
+    fact rather than a measurement. Read-and-labelled is honest; read-and-called-measured is
+    the error being corrected here.
   * check-watchdog-repair-targets.ps1 does `Test-Path` on `projects[*].file` - but it
     reaches a project only by resolving a container the watchdog claims to self-heal, so a
     project with no managed row (agent-org) is invisible to it; and it never reads
