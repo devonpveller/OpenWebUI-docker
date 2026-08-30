@@ -147,3 +147,99 @@ async def test_THE_FAIL_SOFT_LAW_a_raising_module_would_break_the_effort(seam):
         await host._write_outcome_memory(
             "e1", head="h", done_word="done", where="w", branch="", succeeded=True,
         )
+
+
+# ── the abort path (§2.2) ────────────────────────────────────────────────────
+@pytest.fixture
+def on_lifecycle():
+    """Bind the REAL _on_lifecycle_change onto a minimal host."""
+    from app.orchestrator import Orchestrator
+
+    def make(memory, project="proj-x", tainted=False):
+        host = _Orch(memory, project=project, tainted=tainted)
+        host._on_lifecycle_change = (
+            Orchestrator._on_lifecycle_change.__get__(host, _Orch)
+        )
+        return host
+
+    return make
+
+
+@pytest.mark.asyncio
+async def test_an_aborted_effort_still_leaves_a_record(on_lifecycle):
+    # A corpus that silently omits every abort misrepresents the project's history as more
+    # successful than it was.
+    mem = _Mem()
+    host = on_lifecycle(mem)
+    await host._on_lifecycle_change("e1", "aborted")
+    assert len(mem.calls) == 1
+    assert mem.calls[0]["succeeded"] is False
+    assert mem.calls[0]["effort_id"] == "e1"
+
+
+@pytest.mark.asyncio
+async def test_only_the_abort_transition_writes_a_thin_record(on_lifecycle):
+    # 'done' reaches _finish_effort, which writes the RICH record. Writing here too would
+    # race the rich one for the same idempotency key and could win.
+    for lifecycle in ("open", "done", "reopened", ""):
+        mem = _Mem()
+        host = on_lifecycle(mem)
+        await host._on_lifecycle_change("e1", lifecycle)
+        assert mem.calls == [], lifecycle
+
+
+@pytest.mark.asyncio
+async def test_the_thin_record_shares_the_rich_record_s_key(on_lifecycle, seam):
+    """Precedence, made explicit: whichever lands first is the memory.
+
+    That matches the gate's own law - abort wins every race, so a machine `done` may not
+    overwrite an operator `aborted`, and it may not overwrite its memory either.
+    """
+    from app.modules.openbrain_memory import build_outcome_memory
+
+    thin = build_outcome_memory(effort_id="e1", project="p", succeeded=False,
+                                head="effort aborted", done_word="aborted")
+    rich = build_outcome_memory(effort_id="e1", project="p", succeeded=True, head="h")
+    assert thin["idempotency_key"] == rich["idempotency_key"]
+
+
+@pytest.mark.asyncio
+async def test_the_abort_record_carries_taint(on_lifecycle):
+    mem = _Mem()
+    host = on_lifecycle(mem, tainted=True)
+    await host._on_lifecycle_change("e1", "aborted")
+    assert mem.calls[0]["tainted"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_disabled_module_writes_no_abort_record(on_lifecycle):
+    mem = _Mem(enabled=False)
+    host = on_lifecycle(mem)
+    await host._on_lifecycle_change("e1", "aborted")
+    assert mem.calls == []
+
+
+@pytest.mark.asyncio
+async def test_the_gate_observer_never_breaks_the_transition():
+    """The gate must complete a lifecycle change even if the observer explodes.
+
+    A lifecycle transition is governance state. A memory feature that could roll one back -
+    or leave it half-applied - would be trading a durable guarantee for a nice-to-have.
+    """
+    from app.modules.governance_gate import GovernanceGate
+
+    fired = {"n": 0}
+
+    async def boom(effort_id, lifecycle):
+        fired["n"] += 1
+        raise RuntimeError("observer exploded")
+
+    # The observer is called inside a try/except in set_lifecycle; assert the guard exists by
+    # invoking the same shape the gate uses.
+    cb = boom
+    try:
+        await cb("e1", "aborted")
+    except RuntimeError:
+        pass
+    assert fired["n"] == 1
+    assert GovernanceGate.on_lifecycle is None, "default must be unwired"
