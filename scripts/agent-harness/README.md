@@ -138,3 +138,47 @@ a per-worktree `info/exclude` is **not** honored — verified).
 #   a tester claims + executes the plan; a reviewer rebases, merges --no-ff, and records it
 .\scripts\agent-harness\remove-worktree.ps1 -Id wiki-perf
 ```
+
+## Running it unattended (`dark` gate profile)
+
+`pipeline.gate_profile` decides who passes the two human gates. `attended` (the
+default, and what every example above assumes) means a person runs `-ConfirmAnchor`
+and `-Approve`. `dark` means both gates self-pass.
+
+The value is not the automation, it is the record. An auto-passed gate must be
+distinguishable afterwards from a human-passed one, or the trail reads as approval
+that never happened.
+
+```powershell
+# once per run: record where the protected refs stood, so a later move is detectable
+.\scripts\agent-harness\andon.ps1 -Baseline
+
+# is the line clear? exit 6 means it is not
+.\scripts\agent-harness\andon.ps1 -Evaluate
+
+# drive the pipeline with nobody at the gates
+.\scripts\agent-harness\queue.ps1 -GateProfile dark -Submit -Id x -Branch work/x -Developer wt-x -TestPlan <path>
+
+# afterwards, the two questions an operator actually has
+.\scripts\agent-harness\queue.ps1 -Audit -Id x          # WHICH gates did no human see?
+.\scripts\agent-harness\queue.ps1 -VerifyAudit -Id x    # is the trail complete? 0 / 1 / 7
+```
+
+Three things are worth knowing before relying on it:
+
+- **The board is currently RED on this repository**, and that is not a bug in the
+  board. `git-error-swallowed` names `Invoke-DrillGit` and `Get-DrillGit` in
+  `verify-merge-protocol.ps1`, and `work-branch-on-remote` names the eleven `work/*`
+  branches on `origin`. Both are the real conditions the board was built from. A
+  `dark` run will refuse to auto-pass until they are cleared — which is the andon
+  cord working, not a false alarm.
+- **`-VerifyAudit` exit 7 is not a pass.** It means the check found items it could
+  not audit (items predating the ledger). Coverage it does not have is not coverage.
+- **`auto:` is a reserved principal namespace.** `-ConfirmAnchor` and `-Approve`
+  refuse a `-By` inside it (exit 4), and the auto path never signs as a person.
+
+The whole mechanism has its own drill: `drill-dark-factory.ps1` shows every condition
+firing on a constructed instance and not firing on a clean one, runs the pipeline end
+to end with nobody at either gate, and proves the completeness check goes red on a
+tampered trail. It runs entirely in scratch repositories under `$env:TEMP` and never
+touches the operator's checkout.

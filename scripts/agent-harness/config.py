@@ -44,10 +44,14 @@ DEFAULTS: Dict[str, Any] = {
             "reviewer": {"runner": "claude-code", "model": "opus"},
         },
     },
+    "gate_profiles": {
+        "attended": {"anchor": "human", "pre_review": "human"},
+        "dark": {"anchor": "auto", "pre_review": "auto"},
+    },
     "pipeline": {
         "claim_ttl_minutes": 60,
         "anchor_required": True,
-        "human_gates": {"anchor": True, "pre_review": True},
+        "gate_profile": "attended",
     },
     "worktree": {
         "root": ".claude/worktrees",
@@ -64,6 +68,16 @@ DEFAULTS: Dict[str, Any] = {
 }
 
 ROLES = ("worker", "tester", "reviewer")
+
+#: The pipeline gates, in the order a work item crosses them. Declared once, here, so the
+#: two readers and the audit verifier cannot disagree about how many there are.
+GATES = ("anchor", "pre_review")
+
+#: Reserved principal namespace for a gate NOBODY looked at. A human ``-By`` value may
+#: never start with this, and an auto record may never omit it - that is what makes an
+#: auto-pass distinguishable from a human approval when the operator reads the ledger
+#: afterwards. A record saying only "passed" reads as approval and is worse than none.
+AUTO_PRINCIPAL_PREFIX = "auto:"
 
 _CACHE: Dict[str, Any] | None = None
 
@@ -219,6 +233,40 @@ def resolve_role(role: str, profile: str = "", surface: str = "") -> Dict[str, s
         "model": target.get("model") or runner.get("default_model", ""),
         "status": runner.get("status", "unknown"),
     }
+
+
+def gate_profile_name(requested: str = "") -> str:
+    """Which gate profile is in force. Explicit request beats the configured default."""
+    return requested or str(get("pipeline.gate_profile", "attended"))
+
+
+def resolve_gate(gate: str, profile: str = "") -> Dict[str, str]:
+    """gate + gate profile -> who passes it.
+
+    Raises rather than defaulting, for the same reason ``resolve_role`` does: a typo in a
+    gate profile name must be visible. Silently serving ``attended`` would be safe here and
+    silently serving ``dark`` would not, and a rule that depends on which way the typo fell
+    is not a rule.
+    """
+    if gate not in GATES:
+        raise HarnessConfigError(f"unknown gate '{gate}' - known gates: {', '.join(GATES)}")
+    name = gate_profile_name(profile)
+    profiles = get("gate_profiles") or {}
+    if name not in profiles:
+        known = ", ".join(k for k in profiles if not k.startswith("_"))
+        raise HarnessConfigError(f"unknown gate profile '{name}' - known gate profiles: {known}")
+    assigned = profiles[name]
+    if gate not in assigned:
+        raise HarnessConfigError(f"gate profile '{name}' does not assign the '{gate}' gate")
+    passer = str(assigned[gate])
+    if passer not in ("human", "auto"):
+        raise HarnessConfigError(
+            f"gate profile '{name}' assigns '{gate}' to '{passer}' - only 'human' or 'auto'")
+    return {"gate": gate, "profile": name, "passer": passer}
+
+
+def gate_profile_names() -> List[str]:
+    return [k for k in (get("gate_profiles") or {}) if not k.startswith("_")]
 
 
 def describe_profile(name: str) -> str:

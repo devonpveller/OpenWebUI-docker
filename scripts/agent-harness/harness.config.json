@@ -79,14 +79,121 @@
     }
   },
 
+  "gate_profiles": {
+    "_comment": [
+      "WHO passes a pipeline gate. Deliberately a SEPARATE block from `profiles`",
+      "above, not another key inside it. `profiles` is keyed by ROLE and every reader",
+      "iterates the three roles; a gate is not a role, and folding gates in would make",
+      "`resolve_role` and `describe_profile` iterate keys that are not roles. The",
+      "stronger reason is coupling: an operator switching to a cheaper MODEL profile",
+      "must not thereby also turn the human gates off. Those are two unrelated",
+      "decisions and one name must not carry both - the same reasoning that produced",
+      "`profile_locked` on the extension surface.",
+      "",
+      "This block is TUNING (who passes). What a gate DOES - the state transitions,",
+      "the duty separation, the refusal of self-service - stays in queue.ps1, because",
+      "that is BEHAVIOUR. Turning a gate to `auto` is an operator decision with a real",
+      "cost: nobody looks at the work before it moves on.",
+      "",
+      "Values: `human` (a person runs -ConfirmAnchor / -Approve) or `auto` (the gate",
+      "self-passes). Every auto-pass is refused unless the andon board is clear, and",
+      "every auto-pass writes an audit record under a RESERVED principal namespace",
+      "(`auto:<profile>`) that no human -By value is allowed to occupy."
+    ],
+    "attended": {
+      "_desc": "today's behaviour, unchanged - a human confirms the anchor and releases for review",
+      "anchor": "human",
+      "pre_review": "human"
+    },
+    "dark": {
+      "_desc": "unattended: both gates self-pass, andon-clear, and say so in the record",
+      "anchor": "auto",
+      "pre_review": "auto"
+    }
+  },
+
+  "andon": {
+    "_comment": [
+      "THE ANDON BOARD. Conditions are DATA here and executable predicates in andon.ps1;",
+      "a condition naming a predicate that does not exist is refused, so this block cannot",
+      "declare a detector nobody implements.",
+      "",
+      "Every condition here has a real incident behind it from the 2026-08-30 unattended",
+      "run - see `incident` on each. None was invented to round out a taxonomy.",
+      "",
+      "`on_fire` and `on_indeterminate` are both `halt` by default and on purpose: a",
+      "condition that could not be evaluated has NOT passed. A skip that counts as a pass",
+      "is one of the failure shapes this board exists to catch."
+    ],
+    "enabled": true,
+    "ledger_dir_name": "audit",
+    "raise": {
+      "ledger": true,
+      "stderr": true
+    },
+    "conditions": [
+      {
+        "id": "operator-checkout-off-branch",
+        "detects": "the operator's main checkout is detached, or has a rebase/merge/cherry-pick/bisect in progress",
+        "predicate": "git-checkout-state",
+        "params": { "repo": "", "stale_seconds": 0 },
+        "on_fire": "halt",
+        "on_indeterminate": "halt",
+        "incident": "documentation/notes/drill-rebased-the-work-line-incident.md"
+      },
+      {
+        "id": "policy-declared-unread",
+        "detects": "a policy knob declared in harness.config.json that no executable source reads - a setting that governs nothing while reading as though it does",
+        "predicate": "config-key-unread",
+        "params": {
+          "roots": ["pipeline"],
+          "exclude_sources": ["test_*", "drill-*"],
+          "_exclude_note": "GLOB patterns for what does NOT count as a reader: a test or drill that names a key exercises it rather than consuming it. config.ps1/config.py are NOT excluded - they hold the accessors, and the scan matches the DOTTED PATH, which their defaults blocks do not contain.",
+          "_roots_note": "scalar policy KNOBS only. Named data collections (profiles, gate_profiles, andon.conditions) are consumed generically by a loop, so an identifier scan says nothing true about them."
+        },
+        "on_fire": "halt",
+        "on_indeterminate": "halt",
+        "incident": "pipeline.human_gates and runners.*.status both had zero executable readers (verified 2026-08-30); Resolve-RoleTarget had zero executable callers"
+      },
+      {
+        "id": "git-error-swallowed",
+        "detects": "a function that runs git and neither inspects $LASTEXITCODE nor raises - it cannot report a git failure, so a check built on it cannot fail",
+        "predicate": "git-error-unchecked",
+        "params": {
+          "globs": ["scripts/checks/*.ps1", "scripts/agent-harness/*.ps1"],
+          "exclude_files": ["git-io.ps1"],
+          "_exclude_note": "git-io.ps1 is the adapter that deliberately RETURNS output and leaves $LASTEXITCODE for its callers - that contract is stated in the file and is the reason callers can check at all."
+        },
+        "on_fire": "halt",
+        "on_indeterminate": "halt",
+        "incident": "documentation/notes/drill-rebased-the-work-line-incident.md (Invoke-DrillGit swallowed every git error)"
+      },
+      {
+        "id": "work-branch-on-remote",
+        "detects": "a work branch of this run exists on a remote - an outward action CLAUDE.md does not grant without an explicit ask",
+        "predicate": "branch-on-remote",
+        "params": { "branches": [] },
+        "on_fire": "halt",
+        "on_indeterminate": "halt",
+        "incident": "DECISIONS.md 2026-08-30 'THE ORCHESTRATOR'S OWN THREE ERRORS' #3 - eleven work/* branches reached origin under an authorisation nobody gave"
+      },
+      {
+        "id": "protected-ref-moved",
+        "detects": "a protected ref moved since this run recorded its baseline",
+        "predicate": "protected-ref-moved",
+        "params": { "refs": ["main"] },
+        "on_fire": "halt",
+        "on_indeterminate": "halt",
+        "incident": "PLAN.md section C.2 class 4 - merging or promoting anything to main is the operator's, and no U-phase needs it"
+      }
+    ]
+  },
+
   "pipeline": {
     "claim_ttl_minutes": 60,
     "anchor_required": true,
-    "human_gates": {
-      "anchor": true,
-      "pre_review": true
-    },
-    "_note": "the role -> state -> duty table stays in queue.ps1: it is behavior, not tuning. Turning a gate off here is an operator decision with a real cost, which is why both are listed explicitly rather than assumed."
+    "gate_profile": "attended",
+    "_note": "the role -> state -> duty table stays in queue.ps1: it is behavior, not tuning. `gate_profile` names a row in `gate_profiles` above and is the ONLY knob here that decides whether a human sees a gate. It replaced `human_gates` on 2026-08-30 (U6): that pair of booleans had zero executable readers in any language - it read as policy and governed nothing, which is exactly what the `policy-declared-unread` andon condition now refuses."
   },
 
   "worktree": {

@@ -37,10 +37,14 @@ $script:Defaults = [ordered]@{
             reviewer = [ordered]@{ runner = "claude-code"; model = "opus" }
         }
     }
+    gate_profiles   = [ordered]@{
+        attended = [ordered]@{ anchor = "human"; pre_review = "human" }
+        dark     = [ordered]@{ anchor = "auto";  pre_review = "auto" }
+    }
     pipeline        = [ordered]@{
         claim_ttl_minutes = 60
         anchor_required   = $true
-        human_gates       = [ordered]@{ anchor = $true; pre_review = $true }
+        gate_profile      = "attended"
     }
     worktree        = [ordered]@{
         root               = ".claude/worktrees"
@@ -219,6 +223,65 @@ function Resolve-RoleTarget {
         model   = $model
         status  = $(if ($runner.Contains("status")) { $runner["status"] } else { "unknown" })
     }
+}
+
+# The pipeline gates, in the order a work item crosses them. Declared once so the two
+# readers and the audit verifier cannot disagree about how many there are.
+$script:Gates = @("anchor", "pre_review")
+
+# Reserved principal namespace for a gate NOBODY looked at. A human -By value may never
+# start with this, and an auto record may never omit it - that is what makes an auto-pass
+# distinguishable from a human approval when the operator reads the ledger afterwards.
+# A record that says only "passed" reads as approval, and is worse than no record at all.
+$script:AutoPrincipalPrefix = "auto:"
+
+function Get-GateNames { return @($script:Gates) }
+function Get-AutoPrincipalPrefix { return $script:AutoPrincipalPrefix }
+
+function Test-AutoPrincipal {
+    param([string]$Principal)
+    return [bool]($Principal -and $Principal.StartsWith($script:AutoPrincipalPrefix))
+}
+
+function Get-GateProfileName {
+    # Which gate profile is in force. An explicit request beats the configured default.
+    param([string]$Requested = "")
+    if ($Requested) { return $Requested }
+    return (Get-HarnessSetting "pipeline.gate_profile" "attended")
+}
+
+function Get-GateProfileNames {
+    $p = Get-HarnessSetting "gate_profiles"
+    if (-not $p) { return @() }
+    return @($p.Keys | Where-Object { $_ -notlike "_*" })
+}
+
+function Resolve-Gate {
+    # gate + gate profile -> who passes it: "human" or "auto".
+    # Throws rather than defaulting, for the same reason Resolve-RoleTarget does: a typo in
+    # a gate profile name must be visible. Silently serving 'attended' would be safe and
+    # silently serving 'dark' would not, and a rule that depends on which way the typo fell
+    # is not a rule.
+    param(
+        [Parameter(Mandatory = $true)][string]$Gate,
+        [string]$Profile = ""
+    )
+    if ($script:Gates -notcontains $Gate) {
+        throw "unknown gate '$Gate' - known gates: $($script:Gates -join ', ')"
+    }
+    $name = Get-GateProfileName -Requested $Profile
+    $profiles = Get-HarnessSetting "gate_profiles"
+    if (-not $profiles -or -not $profiles.Contains($name)) {
+        $known = if ($profiles) { (Get-GateProfileNames) -join ", " } else { "(none)" }
+        throw "unknown gate profile '$name' - known gate profiles: $known"
+    }
+    $p = $profiles[$name]
+    if (-not $p.Contains($Gate)) { throw "gate profile '$name' does not assign the '$Gate' gate" }
+    $passer = [string]$p[$Gate]
+    if ($passer -ne "human" -and $passer -ne "auto") {
+        throw "gate profile '$name' assigns '$Gate' to '$passer' - only 'human' or 'auto'"
+    }
+    return [ordered]@{ gate = $Gate; profile = $name; passer = $passer }
 }
 
 function Get-HarnessProfileNames {

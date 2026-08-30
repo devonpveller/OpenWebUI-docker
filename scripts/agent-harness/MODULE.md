@@ -28,11 +28,14 @@ Everything else in here is internal and may change without notice.
 | `queue.ps1` | the pipeline: propose → confirm → submit → test → release → review → merge |
 | `lease.ps1` | named leases for SHARED RUNTIME only (Docker, GPU, ports, live DBs) |
 | `verify-merge-protocol.ps1` | the executable drill over the whole protocol |
+| `andon.ps1` | the andon board: evaluate the stop-the-line conditions (`-Evaluate`, `-List`, `-Baseline`) |
+| `drill-dark-factory.ps1` | the executable drill over the andon board, the gate profiles and the audit trail |
 | `harness.config.json` | the configuration (see below) |
 | `config.py` | the reader other Python code imports (`bridge.py` does) |
 
 Internal: `common.ps1` (composition root), `git-io.ps1` (git facts), `resolve.ps1`
-(policy), `config.ps1` (settings), `anchor.ps1` (the anchor's shape and validation).
+(policy), `config.ps1` (settings), `anchor.ps1` (the anchor's shape and validation),
+`gate-audit.ps1` (the gate ledger and the definition of a complete audit trail).
 
 The dependency direction is one-way and deliberate:
 
@@ -92,6 +95,77 @@ plane reaching `llama-cpp` through LiteLLM.
 The `little-coder` runner is wired and callable but **unproven**: no work item has
 completed through it yet. Its `status` field says so, and that is not decoration —
 do not read config support as a working feature.
+
+## Gate profiles: who passes a gate (`attended` vs `dark`)
+
+A **gate profile** says who passes each pipeline gate — `human` or `auto`. It is a
+SEPARATE block from `profiles` above, and that is deliberate: `profiles` is keyed by
+role, a gate is not a role, and more importantly an operator switching to a cheaper
+MODEL profile must not thereby also remove the humans from the gates. Two unrelated
+decisions, two names.
+
+| profile | `anchor` | `pre_review` |
+|---|---|---|
+| `attended` (default) | human | human |
+| `dark` | auto | auto |
+
+`pipeline.gate_profile` selects one; `queue.ps1 -GateProfile <name>` overrides for a
+single call. **The default is `attended`** — a typo that lands on the default must
+leave a human at the gate, not remove one.
+
+What a gate DOES stays in `queue.ps1`: the state transitions, the duty separation,
+the refusal of self-service. That is behaviour. Who passes it is tuning.
+
+Under `dark`:
+
+- `-Submit` on an `anchor-draft` item self-passes the anchor gate instead of exiting 5;
+- a tester's `-Pass` releases straight to `ready-review` instead of stopping at `test-passed`;
+- **both refuse while the andon board is raised** (exit 6), parking the item where it stands;
+- **every auto-pass is recorded** under the reserved principal `auto:<profile>`, which
+  `-ConfirmAnchor` and `-Approve` refuse to accept as a human `-By` (exit 4). The
+  namespace is reserved in both directions.
+
+## The andon board: stop the line
+
+`harness.config.json -> andon.conditions` declares the conditions as DATA; `andon.ps1`
+holds the executable predicates. A condition naming a predicate that does not exist is
+**refused**, so the config cannot declare a detector nobody implemented.
+
+Every shipped condition names the incident it came from — they were mined from the
+2026-08-30 unattended run's own record, not invented:
+
+| id | fires when |
+|---|---|
+| `operator-checkout-off-branch` | the main checkout is detached or mid-rebase/merge/cherry-pick |
+| `policy-declared-unread` | a policy knob under `pipeline` that no executable source reads |
+| `git-error-swallowed` | a function that runs git and can neither see nor report its failure |
+| `work-branch-on-remote` | a work branch of this run exists on a remote |
+| `protected-ref-moved` | `main` moved since `andon.ps1 -Baseline` recorded it |
+
+`halt` is the default for BOTH `on_fire` and `on_indeterminate`. A condition that
+could not be evaluated has not passed — a skip that counts as a pass is one of the
+shapes this board exists to catch, and it does not get to be the board's own behaviour.
+
+**Halt** here means the gate refuses and the item parks; nothing is killed. The
+**raise** goes to the gate ledger and to stderr.
+
+## The gate ledger: which gates no human saw
+
+`<state dir>/audit/gates.jsonl`, append-only, one JSON record per gate event.
+
+- `queue.ps1 -Audit [-Id x]` — read it, auto-passes flagged in words.
+- `queue.ps1 -VerifyAudit [-Id x]` — is the trail COMPLETE? `0` complete, `1` findings,
+  `7` there were items it could not audit (**not** a green).
+
+"Complete" is defined executably in `gate-audit.ps1`: every gate an item crossed has a
+record; every record names a principal and a kind; an auto record additionally names its
+gate profile and the andon verdict that authorised it; and the item and the ledger agree.
+Crossed gates are derived from the ITEM'S OWN STATE, never from the ledger — that is what
+makes a missing record detectable rather than invisible.
+
+The failure this is built against is an audit record that says a gate "passed" without
+saying who or what passed it. That is worse than no record, because it reads as human
+approval.
 
 ## Turning it off
 
