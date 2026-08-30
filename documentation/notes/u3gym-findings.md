@@ -128,6 +128,11 @@ unconditionally (a check that checks nothing), then reverted.
 | `scripts/agent-harness/seeded_regression_drill.py` | 14/17, **exit 1** | 17/17, exit 0 |
 | `agent-org/.../test_corpus_seeded_regression.py` | 5/9, **exit 1** | 9/9, exit 0 |
 
+The full agent-org suite was run afterwards from this worktree with the new file in
+place: **853 passed**, exit 0, 27m25s
+(`.venv/Scripts/python.exe -m pytest -q`, 2026-08-30). Nothing regressed; the only
+agent-org change in this item is an added test file.
+
 In the sabotaged agent-org run the merge gate was NOT withdrawn — i.e. the gate's
 verdict tracks the check's verdict, which is the property the drill claims.
 
