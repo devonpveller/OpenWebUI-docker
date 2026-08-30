@@ -59,13 +59,47 @@ Was absent entirely when this file was written; now enforced and proven at three
 
 `scripts/checks/drill-personal-plane-exclusion.ps1` is the executable form of the
 dark-factory-unification U5 gate ("mechanically stopped **and** the attempt is visible in an
-audit record"). It plants a **synthetic** personal-plane record on a throwaway database and
-attacks it from all three positions an agent actually occupies — the internal REST lane, the
-ops door, and the thoughts lane — then removes each guard in turn and requires the fixture to
-leak, so no green result is taken on trust. The visibility half was the gap it closed: a
-refused recall now writes `agent_memory_audit_events(event_type='recall_requested')` carrying
-`requested_exposure` / `enforced_exposure` / `exposure_override_denied`, and a tool denied at
-the ops door writes a `tool_denied` audit line instead of vanishing into a `-32601`.
+audit record"). It plants a **synthetic** personal-plane record on a throwaway database,
+attacks it, then removes each guard in turn and requires the fixture to leak, so no green
+result is taken on trust.
+
+**What it attacks, stated exactly** — an earlier version of this paragraph said "all three
+positions an agent actually occupies", which was wider than the evidence and a verifier
+refuted it. The lanes are now named rather than characterised, with who actually calls each:
+
+| Lane | Built from | Configured callers today |
+|---|---|---|
+| internal REST (`/agent-memory/*`, `x-brain-key`) | this tree | OB1 containers, agent-bridge |
+| **ops door** — env DERIVED from compose's `openbrain-ops-gateway` | this tree | `scripts/claude-sessions-bridge/memory_writer.py` (imported at `bridge.py:1770`; both its feature flags default OFF) and `scripts/agent-harness/durable_checks.py`. **Both WRITE only** — no configured caller reads through this door. |
+| **cloud door** — env DERIVED from compose's `openbrain-gateway` | this tree | `.mcp.json` → `127.0.0.1:8061`: every Claude Code / cloud agent in this workspace |
+
+Two corrections are folded into that table, and both are the same lesson. The verifier's
+"no client anywhere is configured to use the ops door" is FALSE — `git cat-file -e
+70230c9:scripts/claude-sessions-bridge/memory_writer.py` succeeds, so that caller was on the
+branch when it was refuted. Its *substance* was right anyway, and is what drove the work: the
+door whose READ tools were leaking has no reader, while the door every agent demonstrably
+holds open had no coverage at all. And `.mcp.json` is **gitignored**, so it is absent from
+every worktree — a grep run inside one finds nothing and concludes nothing. That is the
+CLAUDE.md "verify against gitignored evidence" rule collecting its toll in both directions.
+
+All four read tools the ops door's `GATEWAY_READ_TOOLS` names are attacked, and the drill
+FAILS if compose ever lists one it has no attack for — deriving the allow-list and then
+exercising one of it read as coverage while providing none, which is how
+`agent_memory_inspect` and `agent_memory_list_review_queue` shipped leaking. The cloud
+door's exclusion of agent-memory content (no `share:'cloud'` label on the mirrored thought)
+was asserted only in a code comment; it is now an executable check with a red phase that
+adds the label and requires the fixture to come back.
+
+NOT attacked, and not claimed: the RUNNING containers. The drill builds `:drill-<runid>`
+images and never touches `:local`, `openbrain-db` or an `ai-stack_*` network. Whether
+production runs this tree is the deploy gate's question, not this drill's.
+
+The visibility half was the gap it closed: a refused recall now writes
+`agent_memory_audit_events(event_type='recall_requested')` carrying `requested_exposure` /
+`enforced_exposure` / `exposure_override_denied`; a tool denied at a door writes a
+`tool_denied` audit line instead of vanishing into a `-32601`; and a targeted read that is
+refused — `agent_memory_inspect` by id, or an off-plane item withheld from
+`agent_memory_recall_trace` — writes an `access_refused` row naming the tool.
 
 Also corrected here: §1 locks `review_status='pending'` and this repo had shipped
 `evidence_only`, which removed the review gate. See DECISIONS.md.
