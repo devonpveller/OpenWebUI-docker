@@ -35,7 +35,7 @@ from .modules.execution_gate import ExecutionGate
 from .modules.floor_guard import FloorGuard
 from .modules.envs import hosts_for_images
 from .modules.governance_gate import GovernanceGate
-from .modules.openbrain_memory import OpenBrainMemory
+from .modules.openbrain_memory import OpenBrainMemory, render_recall_block
 from .modules.capabilities import (
     BranchDelivery,
     CapabilityResult,
@@ -5444,6 +5444,54 @@ class Orchestrator:
             f"committed to — do not weaken or work around them; plan and build so they pass first "
             f"time.")
 
+    async def _agent_memory_context(self, slug: str, request: str) -> str:
+        """Recalled memories as a goal preamble (memory-plane §3).
+
+        Modelled on `_acceptance_corpus_context` above, deliberately: guard substring,
+        try/except → log.debug → "", never raises. Context enrichment must never block
+        dispatch, and this one talks to a service over a network.
+
+        SELF-BOUNDED. Verified assumption #10 in the plan's ledger: there is NO global brief
+        token budget in this codebase, only per-block ad-hoc slicing. Nothing downstream will
+        trim this, so the block bounds itself - 8 items, ~300 chars each, ≤4000 total.
+
+        Conservative recall only. `include_unconfirmed` is never sent, so a worker cannot be
+        handed a memory nobody has reviewed.
+        """
+        mem = getattr(self, "memory", None)
+        if mem is None:
+            return ""
+        try:
+            items = await mem.recall(project=slug, query=request or "")
+        except Exception as exc:  # noqa: BLE001 — enrichment must never block dispatch
+            log.debug("agent-memory context lookup failed for %s: %s", slug, exc)
+            return ""
+        if not items:
+            return ""
+        try:
+            block = render_recall_block(items)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("agent-memory render failed for %s: %s", slug, exc)
+            return ""
+        # CLOSE THE LOOP. A memory returned and never reported is invisible to the plane -
+        # and a memory recalled repeatedly and never used is the signal that recall is
+        # surfacing the wrong thing, which nothing else can see.
+        await self._report_memory_usage(items)
+        return block
+
+    async def _report_memory_usage(self, items: list) -> None:
+        """Best-effort usage reports for recalled memories. Never raises."""
+        mem = getattr(self, "memory", None)
+        if mem is None or not items:
+            return
+        for it in items:
+            try:
+                mid = (it or {}).get("memory_id")
+                if mid:
+                    await mem.report_usage(memory_id=str(mid), used=True)
+            except Exception:  # noqa: BLE001
+                continue
+
     async def _composition_context(self, slug: str) -> str:
         """The COMPOSITION CONTEXT block the planner path injects, for DIRECT-intake dispatches —
         a worker given a standalone clone sees cross-submodule references as plainly broken and
@@ -5955,6 +6003,11 @@ class Orchestrator:
             request += await self._acceptance_corpus_context(proj_slug)
         if proj_slug and "COMPOSITION CONTEXT" not in request:
             request += await self._composition_context(proj_slug)
+        # RECALLED MEMORIES (memory-plane §3). BEFORE set_goal at :6048, so the block lands
+        # inside the VERSIONED goal - a memory injected after the freeze would steer the work
+        # while being absent from the record of what the work was asked to do.
+        if proj_slug and "RELEVANT MEMORIES" not in request:
+            request += await self._agent_memory_context(proj_slug, request)
         # MACHINE-CHECK forewarning: when the project (or the host that vendors it) has a check
         # command, the worker knows its delivery gets BUILT before any merge — so it runs the
         # equivalent itself instead of shipping code it never compiled (live 2026-07-06,
@@ -6866,6 +6919,12 @@ class Orchestrator:
         # from the NARROWED search space instead of rediscovering the same dead ends.
         if i == 1 and "LEARNED CONSTRAINTS" not in instruction:
             instruction += await self._constraints_context(effort_id)
+        # Recalled memories, beside the clause set for the same reason: the first coding step
+        # is where a dead end already recorded elsewhere is cheapest to avoid (§3).
+        if i == 1 and "RELEVANT MEMORIES" not in instruction:
+            _pm = await self._effort_project(effort_id)
+            if _pm:
+                instruction += await self._agent_memory_context(_pm, instruction)
         # P8 #3 — PROVENANCE: the first coding step carries the expected base + the assert-before-
         # work demand (the worker can't discover the live base itself — proxied git); every focused
         # wake keys workspace reuse on that base, so a moved base re-clones instead of resuming
@@ -8604,6 +8663,12 @@ class Orchestrator:
         # thing carrying what earlier rounds already learned. Without it each round re-walks the
         # same dead ends with only the latest error slice for guidance.
         instruction += await self._constraints_context(effort_id)
+        # Recalled memories (§3). Every burn-down round is a FRESH session, so this is the
+        # only thing besides the clause set carrying what the org already knows.
+        if "RELEVANT MEMORIES" not in instruction:
+            _pm = await self._effort_project(effort_id)
+            if _pm:
+                instruction += await self._agent_memory_context(_pm, instruction)
         # FRESH session per ROUND — parts AND single rounds (live 2026-07-08: every reused
         # session rotted the same way — part rounds 2/4/5 quit in ~90s with nothing pushed, and
         # once the count dropped below the partition threshold the SINGLE rounds did the exact
@@ -12620,6 +12685,13 @@ class Orchestrator:
             f"{goal}\n\nHANDOFF RESOLVED ({target}): {fix_note} Your own earlier progress (if "
             f"any) is on branch `agent/{frm}` — continue from it toward your ORIGINAL goal above."
         )
+        # Recalled memories (§3), the fourth seam. A resumed effort is a fresh session with
+        # a reconstructed goal, so without this it resumes knowing LESS than the round that
+        # handed off. The guard substring keeps it out if the goal already carries a block.
+        if "RELEVANT MEMORIES" not in resume_goal:
+            _pm = await self._effort_project(frm)
+            if _pm:
+                resume_goal += await self._agent_memory_context(_pm, resume_goal)
         await self.router.update_effort_card(frm, "active")
         self._spawn(self.delegate(frm, chan, res_root, resume_goal))
 
