@@ -73,6 +73,7 @@ param(
     [switch]$Approve,
     [switch]$Resubmit,
     [switch]$Unclaim,
+    [switch]$ScopeNodes,
     [string]$Id = "",
     [string]$Branch = "",
     [string]$Developer = "",
@@ -185,6 +186,29 @@ function Drop-Claim([string]$i, [string]$role) {
 }
 
 # --- list / show --------------------------------------------------------------------
+if ($ScopeNodes) {
+    # U2: THE QUEUE, AS THE SCOPE TREE IT ALREADY IS.
+    #
+    # A queue item is one bounded tier below a project, handed to a developer deliberately
+    # unaware of the rest - which is agent-org's ScopeNode at depth 1, and which the harness
+    # has been building since it existed under a different name. This prints the projection
+    # so the shape is reachable rather than living only in a test; scope_node.py owns the
+    # mapping and test_scope_node.py pins it against agent-org's real model.
+    $py = (Get-Command python -ErrorAction SilentlyContinue)
+    if (-not $py) {
+        Write-Host "python not found - the ScopeNode projection needs it." -ForegroundColor Red
+        exit 2
+    }
+    $mod = Join-Path $PSScriptRoot "scope_node.py"
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    # Run the FILE, not a `python -c` snippet. The snippet form broke twice for reasons
+    # unrelated to the projection: Windows argument handling stripped the quotes out of a
+    # string literal, and the repo path (which contains a space) split across argv.
+    try { & python $mod $QueueDir $Line } finally { $ErrorActionPreference = $prev }
+    exit $LASTEXITCODE
+}
+
 if ($List) {
     $items = @(Get-ChildItem -Path $QueueDir -Filter "*.json" -ErrorAction SilentlyContinue)
     if (-not $items.Count) { Write-Host "queue empty" -ForegroundColor Green; exit 0 }
