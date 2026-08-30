@@ -113,7 +113,7 @@ $Script:MainStackServices = @()
 # (PostgREST proxy) so they sort after it.
 $Script:OB1Services = @(
     "openbrain-db", "openbrain-mcp", "openbrain-ext",
-    "openbrain-gateway",
+    "openbrain-gateway", "openbrain-ops-gateway",
     "openbrain-mcpo", "openbrain-mcpo-ext", "openbrain-postgrest",
     "openbrain-rest", "openbrain-entity-worker",
     "openbrain-suggestion-worker", "openbrain-curator", "openbrain-research", "openbrain-chunk-worker",

@@ -1,6 +1,6 @@
 {
   "_comment": [
-    "Canonical service inventory for the ai-stack health checkers — the single",
+    "Canonical service inventory for the ai-stack health checkers \u2014 the single",
     "source of truth for WHAT to check, to stop the three checkers from drifting.",
     "Consumed directly by status_check.py (data-driven liveness loop). The",
     "PowerShell monitor (stack-watchdog.ps1) and quick-fixes.bat keep their",
@@ -11,9 +11,9 @@
     "IMPORTANT: 'container' is the docker container NAME (use with `docker inspect`).",
     "For the ai-stack project some compose SERVICE keys differ from container names",
     "(service redis->search-redis, gateway->search-gateway,",
-    "— see the 'service' field where it differs.",
+    "\u2014 see the 'service' field where it differs.",
     "Open Brain is a SEPARATE compose project (open-brain); a plain `docker compose`",
-    "from the ai-stack dir cannot see it — probe its containers by name.",
+    "from the ai-stack dir cannot see it \u2014 probe its containers by name.",
     "",
     "MACHINE-VERIFIED since 2026-08-22 (D-12): the pre-commit check",
     "(check-project-configs.ps1) diffs every (container -> project) row against",
@@ -220,6 +220,13 @@
         "project": "open-brain",
         "critical": false,
         "host_health": "http://127.0.0.1:8061/health"
+      },
+      {
+        "container": "openbrain-ops-gateway",
+        "project": "open-brain",
+        "critical": false,
+        "host_health": "http://127.0.0.1:8062/health",
+        "note": "Ops door (PLAN \u00a71.4): a second openbrain-gateway instance with its own OPS_GATEWAY_KEY, allowlisting the agent_memory_* tools for HOST processes that cannot reach openbrain-mcp (it publishes no host port). Stateless - no backup sidecar. Not critical: without it host callers lose the agent-memory lane; nothing else degrades."
       },
       {
         "container": "openbrain-rest",
