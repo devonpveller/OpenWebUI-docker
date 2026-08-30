@@ -31,6 +31,12 @@ param(
     [Parameter(Mandatory = $true)][string]$Branch,
     [Parameter(Mandatory = $true)][string]$Base,
     [string]$RepoRoot = "",
+    # Drill-only. The ledger path used to be overridable by AI_STACK_ATTEST_LEDGER alone,
+    # which made the guard a one-line env-var switch for exactly the party it constrains:
+    # the agent that runs `queue.ps1 -Submit` sets its own environment. The override now
+    # requires this explicit flag, which only the drill passes - an environment variable
+    # by itself no longer disables anything.
+    [switch]$AllowLedgerOverride,
     [switch]$Json
 )
 
@@ -80,27 +86,20 @@ $ledgerPath = Join-Path $common "hook-attest.log"
 # (attested / unattested / absent) without touching the machine's real one. Deliberately a
 # single named variable rather than a general "point anything anywhere" scheme - a knob
 # nobody can enumerate is a knob that silently disables a guard.
-if ($env:AI_STACK_ATTEST_LEDGER) { $ledgerPath = $env:AI_STACK_ATTEST_LEDGER }
+if ($AllowLedgerOverride -and $env:AI_STACK_ATTEST_LEDGER) {
+    $ledgerPath = $env:AI_STACK_ATTEST_LEDGER
+}
 
 # The ledger is a set of attested tree hashes. It is append-only and one line per
 # validated tree; duplicates are expected (the same content committed twice) and harmless.
 $attested = @{}
-$activatedAt = $null
 if (Test-Path $ledgerPath) {
     foreach ($line in (Get-Content -Path $ledgerPath -ErrorAction SilentlyContinue)) {
-        $parts = $line -split '\s+'
-        $t = $parts[0]
+        # Only the tree hash is read. The timestamp column is kept in the ledger for a
+        # human reading it, but nothing branches on it any more - see the note at the
+        # exemption site for why a caller-controlled date cannot gate this.
+        $t = ($line -split '\s+')[0]
         if ($t) { $attested[$t] = $true }
-        # The EARLIEST entry is when attestation started existing on this machine.
-        if ($parts.Count -ge 2) {
-            # MinValue, not $null: PS 5.1 resolves the [ref] overload from the variable's
-            # CURRENT type, and an untyped $null makes TryParse unresolvable at runtime.
-            $stamp = [datetime]::MinValue
-            if ([datetime]::TryParse($parts[1], [ref]$stamp)) {
-                $utc = $stamp.ToUniversalTime()
-                if ($null -eq $activatedAt -or $utc -lt $activatedAt) { $activatedAt = $utc }
-            }
-        }
     }
 }
 
@@ -152,25 +151,25 @@ if (-not (Test-Path $ledgerPath)) {
 $revs = Invoke-GitLines @("rev-list", "--no-merges", "$Base..$Branch")
 $unattested = @()
 $checked = 0
-$exempt = 0
+
 foreach ($sha in $revs) {
     if (-not $sha) { continue }
     $checked++
     $tree = (Invoke-GitLines @("rev-parse", "$sha^{tree}") | Select-Object -First 1)
     if ($tree -and $attested.ContainsKey($tree)) { continue }
 
-    # PRE-EXISTING HISTORY IS EXEMPT. A commit made before attestation existed cannot
-    # possibly have an entry, and blocking it would punish people for the mechanism's own
-    # start date. The boundary is the ledger's earliest entry - honest, and it needs no
-    # separate state file to go stale.
-    if ($activatedAt) {
-        $cd = (Invoke-GitLines @("log", "-1", "--format=%cI", $sha) | Select-Object -First 1)
-        $when = [datetime]::MinValue      # see the MinValue note above
-        if ($cd -and [datetime]::TryParse($cd, [ref]$when)) {
-            if ($when.ToUniversalTime() -lt $activatedAt) { $exempt++; continue }
-        }
-    }
-
+    # NO DATE-BASED EXEMPTION. There used to be one: commits whose committer date preceded
+    # the ledger's first entry were skipped, so that a branch predating attestation was not
+    # punished for the mechanism's start date. It was defeated by one environment variable -
+    #     GIT_COMMITTER_DATE=2026-08-01 git commit --no-verify
+    # produced a commit the check silently exempted. Committer date is caller-controlled;
+    # it can never gate a guard against the caller.
+    #
+    # Nothing is lost by removing it, because the ADOPTION problem it was solving is
+    # already handled better upstream: the per-branch activation gate skips any branch
+    # whose own .githooks/pre-commit cannot attest, and that hook is read from the BRANCH,
+    # not from the environment. A branch that can attest has no excuse for a commit that
+    # is not attested.
     $subject = (Invoke-GitLines @("log", "-1", "--format=%s", $sha) | Select-Object -First 1)
     $unattested += [pscustomobject]@{ Sha = $sha; Tree = $tree; Subject = $subject }
 }
