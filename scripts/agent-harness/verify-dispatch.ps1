@@ -508,9 +508,19 @@ if ($Offline) {
         # The RUNTIME half of the door check. test_harness_config.py's _door_problems is a
         # substring match over compose TEXT: it proves a door is DECLARED. Those two genuinely
         # differ on this host - compose declares 127.0.0.1:9091->9090 for little-coder while
-        # `docker port little-coder` prints nothing, because the running container predates
-        # the declaration and was never recreated. Only a runtime probe sees that.
+        # `docker port little-coder` prints nothing and
+        # `docker inspect ... .NetworkSettings.Ports` gives {"9090/tcp":[]}. The declared and
+        # running states disagree; the CAUSE IS NOT ESTABLISHED (the container was created
+        # 2026-08-23, two days AFTER the ports line landed in 56af93a on 2026-08-21). Only a
+        # runtime probe sees the disagreement at all.
+        # $ErrorActionPreference is Stop for this drill, and a native exe writing to stderr
+        # under `2>&1` raises NativeCommandError - which made a missing container ABORT the
+        # run before the summary line. Drop to Continue for this one call so it fails as a
+        # RED check with a summary, not as an abort.
+        $prevEap = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
         $state = ((& docker.exe inspect -f "{{.State.Running}}" $container 2>&1) | Out-String).Trim()
+        $ErrorActionPreference = $prevEap
         Check "the docker-exec runner's container EXISTS and is running (not just declared)" `
             ($state -eq "True") ("docker inspect {0} -> {1}" -f $container, $state)
     }
@@ -542,7 +552,10 @@ Write-Host ""
 Write-Host ("{0}/{1} checks passed" -f (@($script:results).Count - $failed.Count), @($script:results).Count) `
     -ForegroundColor $(if ($failed.Count) { "Red" } else { "Green" })
 # The count alone is what made the old default run misleading - it excluded the only
-# real-transport coverage there is. Say what it covered, every time.
+# real-transport coverage there is. Every run that REACHES this line states the coverage:
+# COVERED, NOT COVERED, or ATTEMPTED AND FAILED. Not 'always' - a terminating error before
+# here still aborts with no summary at all. That is fail-safe (the run exits non-zero and
+# prints no count, so it cannot be read as green) but it is not a coverage statement.
 Write-Host ("real transport: {0}" -f $script:transportCoverage) `
     -ForegroundColor $(if ($script:transportCoverage -like "COVERED*") { "Green" } else { "Yellow" })
 if ($failed.Count) {

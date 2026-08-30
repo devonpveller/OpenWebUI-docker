@@ -64,11 +64,16 @@ paths, and the `lease` a caller must hold) as well as policy, readable through
 files: it proves the door is **declared** — a `127.0.0.1:<port>` publish for `http`, a
 `container_name:` for `docker-exec` — and it proves nothing about the running stack. Those
 two genuinely differ here: on 2026-08-30 `coder/docker-compose.yml` declared
-`127.0.0.1:9091->9090` for little-coder while `docker port little-coder` printed nothing,
-because the running container predates that declaration and was never recreated. The
-runtime claim is `verify-dispatch.ps1`'s live section, which by DEFAULT inspects that the
-container is really running and reaches the daemon over the declared transport; its summary
-line always states whether the real transport was covered.
+`127.0.0.1:9091->9090` for little-coder while `docker port little-coder` printed nothing and
+`docker inspect little-coder --format '{{json .NetworkSettings.Ports}}'` gave `{"9090/tcp":[]}`.
+**The cause of that disagreement is NOT established.** The obvious guess — that the running
+container predates the declaration — is wrong: `docker inspect little-coder --format
+'{{.Created}}'` is `2026-08-23T17:00:48Z` and the ports line has been in
+`coder/docker-compose.yml` since `56af93a` (2026-08-21), so the container POSTDATES the
+declaration by two days. The runtime claim is `verify-dispatch.ps1`'s live section, which by
+DEFAULT inspects that the container is really running and reaches the daemon over the
+declared transport; its summary line states the real transport's coverage on every run that
+reaches the end — `COVERED`, `NOT COVERED`, or `ATTEMPTED AND FAILED`.
 
 `dispatch.ps1` returns ONE outcome shape whatever the runner, and its exit code
 distinguishes "the dispatch worked" from "the work is right": `0` acceptance passed,
@@ -81,6 +86,16 @@ A runner that declares a `lease` cannot be dispatched unless the caller HOLDS th
 (`-LeaseOwner`, or `AI_STACK_LEASE_OWNER`): focusing little-coder wipes its workspace and a
 task runs arbitrary commands in it. Someone else's lease refuses the dispatch just as a free
 one does.
+
+**Run the drill as `powershell.exe -File`, not with `&` inside a session you are reusing.**
+Under `powershell.exe -NoProfile -File .\scripts\agent-harness\verify-dispatch.ps1` it is
+deterministic here. UNVERIFIED, reported by a U4 verifier and NOT reproduced: invoked with
+the call operator (`& $drill -Offline`) repeatedly inside one long-lived session they saw
+three different counts (50/51, 46/51, 48/51, differing checks) on an unmodified copy. Nine
+such runs in one session on 2026-08-30 gave `51/51 checks passed` every time with zero
+`[FAIL]` lines, so the cause is unknown and it may not be reproducible. The reported
+failures were spurious REDs only — never a green that should have been red — so the risk is
+a confusing verdict, not a false pass.
 
 **No pipeline consumes `dispatch.ps1` yet.** `queue.ps1` does not call it and nothing else
 does either — today it is driven by hand or by a session, and the only shipped consumer of

@@ -90,9 +90,21 @@ REAL container_name"). Both were wrong, and the two claims genuinely come apart 
     $ docker inspect little-coder --format '{{json .NetworkSettings.Ports}}'
     {"9090/tcp":[]}
 
-The compose file DECLARES a published metrics port; the RUNNING container publishes nothing,
-because it predates that declaration and was never recreated. A static check over compose text
-can never see that.
+The compose file DECLARES a published metrics port; the RUNNING container publishes nothing.
+A static check over compose text can never see that.
+
+**The CAUSE of the disagreement is NOT established.** The first version of this note said the
+container "predates that declaration and was never recreated". That explanation is FALSE and
+was never measured:
+
+    $ docker inspect little-coder --format '{{.Created}}'
+    2026-08-23T17:00:48.250774513Z
+
+    $ git log -1 --format='%h %ad' --date=short -L '/9091/,+1:coder/docker-compose.yml'
+    56af93a 2026-08-21     (K.4 - the only commit that has ever touched that line)
+
+The container POSTDATES the declaration by two days. What is measured is that the declared and
+running states disagree; why they disagree is unknown, and this note does not guess again.
 
 Fixed two ways: the prose in `MODULE.md` and in the test module now says DECLARED and says
 what it does not prove; and `verify-dispatch.ps1`'s live section — **which now runs by
@@ -118,7 +130,7 @@ The pipeline's exit code is `tail`'s, so a completely absent test runner reads a
 This is the "a check that passes while checking nothing" class CLAUDE.md warns about, arriving
 from a new direction: not a bad assertion, a swallowed exit code. It is why the U4 item's
 acceptance command is a bare `python3 -c "...assert..."` with no pipe — the daemon's
-`_verdict` (`little-coder/src/littlecoder/agent.py:496`) grades on the REAL exit code.
+`_verdict` (`little-coder/src/littlecoder/agent.py:497`) grades on the REAL exit code.
 
 **Worth building:** a lint that rejects `| tail`/`| head` on the right of a test invocation in
 acceptance commands and CI scripts, or `set -o pipefail` where the shell allows it. Not built
@@ -142,7 +154,7 @@ or the compose file says so; the failure is only visible in a task's activity lo
 Two compounding problems:
 
 1. **The daemon's verdict was `pass` while delivery had failed.** `_verdict`
-   (`little-coder/src/littlecoder/agent.py:496`) grades on the acceptance command alone. The
+   (`little-coder/src/littlecoder/agent.py:497`) grades on the acceptance command alone. The
    acceptance command tested the CODE, which was correct — so a correct verdict coexisted
    with an undelivered artifact. Exactly the shape of
    [[fix-delivery-not-observability]]: an unattended item's success criterion is the ARTIFACT.
@@ -255,7 +267,7 @@ worth its own entry because the blast radius is the shared checkout, not a workt
   44/66 with them, so it is not this branch's doing. The failures are queue/anchor/test-plan
   semantics (`-Submit is NOT blocked by the inactive guard`, `only the DEVELOPER may re-submit
   their item`, ...) plus its own cleanup checks.
-- **It rebases inside `D:\Open WebUIi-stack` itself.** `git reflog` in the main checkout:
+- **It rebases inside `D:\Open WebUI\ai-stack` itself.** `git reflog` in the main checkout:
   `rebase (start): checkout drill/verify-d` -> `rebase (pick): ...`. One run aborted cleanly
   and returned to `refs/heads/refactor/ai-stack-cleanup`; the next left the checkout
   **detached at 56f30cb with an interactive rebase in progress, 154 commits still queued**.
@@ -275,13 +287,26 @@ Not fixed here - it is a different module and a different item. But it is a live
 a drill that mutates the shared checkout and leaves it mid-rebase is more dangerous than the
 gap it is testing, and nothing warns you before you run it.
 
-## 10. Pre-existing: `ruff check scripts/agent-harness/` was RED on the work line
+## 10. Pre-existing: `ruff check scripts/agent-harness` was RED on the work line
 
 `test_anchor_schema.py` re-imported `shutil` and `subprocess` mid-file (lines 266-267) while
-already importing both at line 18-19 — F811, and `ruff check .` is the repo's lint gate
-(CLAUDE.md). Present on the base commit `5f4817d`, so not introduced here. Removed in this
-branch (one dead line) because a lint gate that is already red cannot be cited as evidence for
-anything else, which is what this item needed it for. Reverting is `git revert` of that hunk.
+already importing both at line 18-19 — F811. Present on the base commit `5f4817d`, so not
+introduced here. Removed in this branch (one dead line) because a lint gate that is already
+red cannot be cited as evidence for anything else, which is what this item needed it for.
+Reverting is `git revert` of that hunk.
+
+**Say which command, because the two differ.** CLAUDE.md names `ruff check .` as the gate,
+and on this branch that command still EXITS 1 — one F401 (`app.models.Effort` imported but
+unused) at `agent-org/agent-bridge/tests/test_org_drill.py:31`. `git blame` puts it on
+`e1e73dc` (U3's org drill), which is an ancestor of this branch and also sits on
+`refactor/ai-stack-cleanup`: inherited, not introduced here, and not in this branch's changed
+files. What this branch can claim is the narrower command:
+
+    $ ruff check .                     -> exit 1  (1 error, pre-existing, agent-org)
+    $ ruff check scripts/agent-harness -> exit 0
+
+Earlier rounds wrote "ruff clean" without a scope. That reads as the repo gate and is not
+true of it.
 
 ---
 
@@ -297,9 +322,9 @@ What now exists, all reproducible:
 | A dispatch path exists | `scripts/agent-harness/dispatch.ps1`; `verify-dispatch.ps1` **54/54**, including a real child process over a real socket and a probe of the real daemon |
 | The declared transport is the real one | `verify-dispatch.ps1` (default run): `docker inspect little-coder` → running, reachable over `docker-exec`, version 0.1.0. The compose-text door check is a separate, weaker claim — see finding 3 |
 | A real item completed on the local runner | task `01M19JABFNQHR7CPDGCPDK2VEV`, repo `devonpveller/openwebui-docker#work/dfu-u4-lc`, model `qwen36-27b` (`little-coder.config.yaml`: `model: llamacpp/qwen36-27b` via `http://llama-cpp:8080/v1`), 7 commands, outcome **pass**, signal "acceptance command exit 0" |
-| How long it took | **83s** — the daemon record says `created_ts 2026-08-30T14:49:00.661Z`, `ended_ts 2026-08-30T14:50:23.770Z`. The first round's commit message said "88s"; that number was not from the record |
+| How long it took | **83s of daemon time, 88s of dispatch wall-clock — BOTH measured, of DIFFERENT intervals.** The daemon record gives `created_ts 2026-08-30T14:49:00.661Z` → `ended_ts 2026-08-30T14:50:23.770Z` = 83.1s. The dispatch audit record `.git/agent-worktrees/dispatch/20260830T145035Z-01M19JABFNQHR7CPDGCPDK2VEV.json` carries `"elapsed_seconds": 88`, which `dispatch.ps1`'s `Wait-LcTask` computes as `(Get-Date) - $started` across its own poll loop (submission → the poll that observes a terminal state → a final event drain), so it necessarily exceeds the daemon's interval. The park commit `bf10d96` claimed "88s was not measured"; that correction was itself wrong and is retracted here |
 | The agent did not grade itself | the daemon ran the acceptance command (`agent.py:_verdict`); the command was written before dispatch and proved RED first (`/check` → exit 1, AttributeError) |
-| The change is real and durable | commit `247bac7` by `little-coder <little-coder@ai-stack.local>`, merged as `8a3539b`; host suite went 3 failed/15 passed → **18 passed**; whole module **115 passed**, `ruff` clean |
+| The change is real and durable | commit `247bac7` by `little-coder <little-coder@ai-stack.local>`, merged as `8a3539b`; host suite went 3 failed/15 passed → **18 passed**; whole module **115 passed**, `ruff check scripts/agent-harness` exit 0 (`ruff check .` exits 1 on a pre-existing agent-org F401 — see finding 10) |
 | What is consumed | `describe_runner()` — the function the local model wrote — is rendered by `bridge.py`'s `profile: list`, so an operator switching a thread sees `little-coder: model=local-default, transport=docker-exec, status=unproven`. **`dispatch.ps1` itself has NO consumer**: `queue.ps1` does not call `Invoke-HarnessTask` and nothing else does. The first round said "the function is consumed, not shelved" — true of `describe_runner`, and it was allowed to read as if it were true of the dispatch layer |
 
 **Verdict: A11 moves from UNTESTED to PARTIALLY PROVEN.** One item, one quadrant
@@ -417,8 +442,9 @@ REVERT:   Delete the `"lease"` key from `runners.little-coder` in
 
 ## 2026-08-30 · U4 · class 2
 DECISION: `verify-dispatch.ps1`'s live probe runs BY DEFAULT; `-Live` is
-          accepted and ignored, `-Offline` is the opt-out, and the summary
-          always prints whether the real transport was covered. It was opt-in,
+          accepted and ignored, `-Offline` is the opt-out, and every run that
+          reaches the summary states the real transport's coverage (`COVERED`,
+          `NOT COVERED`, or `ATTEMPTED AND FAILED`). It was opt-in,
           so the default run reported "31/31 checks passed" with zero coverage
           of the only transport that ships. The drill also gained a real
           child-process layer (dispatch.ps1 under powershell.exe against a
@@ -464,8 +490,15 @@ DECISION: Commit 2151193's SUBJECT read "U4 GREEN: ...". Its body, its PLAN.md
           satisfied and the evidence is named; otherwise PARKED.
           Corrected by a follow-up commit on `work/dfu-u4` rather than a
           rewrite, so the error and its correction both stay in the record.
-          Also corrected in that commit: "7 commands, 88s" - the daemon record
-          gives 83s (created 14:49:00.661Z, ended 14:50:23.770Z).
+          RETRACTED FROM THAT COMMIT: it also said "7 commands, 88s" was not
+          measured. It WAS. The dispatch audit record
+          `.git/agent-worktrees/dispatch/20260830T145035Z-01M19JABFNQHR7CPDGCPDK2VEV.json`
+          carries `"elapsed_seconds": 88`. Both numbers are measured and they
+          measure DIFFERENT INTERVALS: 83s is the daemon's `created_ts` to
+          `ended_ts`; 88s is `dispatch.ps1`'s own wall-clock across submission,
+          polling to a terminal state, and the final event drain. Neither the
+          original note nor that "correction" said so. A true statement was
+          corrected into a false one on a refutation that was not run.
 CITED:    §C.7 (the audit trail is the deliverable's twin, so it must be true);
           the 2026-08-30 DONE-vs-PARKED entry.
 REVERT:   n/a - a correction to the record.
@@ -479,6 +512,69 @@ DECISION: The item's brief named worktree id `u4disp`; the work was done on
           in a verifier's brief is copied from the builder's actual worktree,
           not from the id the builder was asked to use.
 REVERT:   n/a - a record.
+
+## 2026-08-30 · U4 · CORRECTION (third round, audit-trail only)
+DECISION: Three sentences in the second round's audit trail were not supported
+          by any command, and are corrected here. No code behaviour changed
+          except item 2.
+          1. RETRACTION. `bf10d96` said "'7 commands, 88s' was not measured".
+             FALSE. `.git/agent-worktrees/dispatch/20260830T145035Z-01M19JABFNQHR7CPDGCPDK2VEV.json`
+             carries `"elapsed_seconds": 88`. 83s and 88s are BOTH measured and
+             measure different intervals (daemon `created_ts`->`ended_ts` vs
+             `Wait-LcTask`'s own poll-loop wall clock). A true statement was
+             corrected into a false one on a refutation nobody ran.
+          2. `MODULE.md`, this note and `verify-dispatch.ps1` all explained the
+             declared-vs-published port disagreement as "the running container
+             predates that declaration and was never recreated". INVENTED.
+             `docker inspect little-coder --format '{{.Created}}'` is
+             `2026-08-23T17:00:48Z`; the ports line landed in `56af93a` on
+             2026-08-21, so the container POSTDATES it by two days. The
+             disagreement is measured (`{"9090/tcp":[]}`); the cause is NOT
+             established and is no longer guessed at.
+          3. "ruff clean" had no scope. `ruff check .` — the gate CLAUDE.md
+             names — EXITS 1 on this branch: one pre-existing F401 at
+             `agent-org/agent-bridge/tests/test_org_drill.py:31`, blamed to
+             `e1e73dc`, which is also on `refactor/ai-stack-cleanup` and is not
+             in this branch's changed files. `ruff check scripts/agent-harness`
+             exits 0. Both commands are now stated with their exit codes.
+CITED:    §C.7 — the operator audits by reading this trail instead of the
+          diffs, so a sentence no command supports is the defect that survives.
+REVERT:   n/a for 1 and 3 (record corrections). For 2, `git revert` the
+          `verify-dispatch.ps1` hunk restores the previous comment text.
+
+## 2026-08-30 · U4 · class 2
+DECISION: `verify-dispatch.ps1`'s live container probe drops
+          `$ErrorActionPreference` to `Continue` for the single
+          `docker.exe inspect` call. With it at `Stop`, a native exe writing to
+          stderr under `2>&1` raises `NativeCommandError`, and a missing
+          container ABORTED the whole drill at that line — no counts line, no
+          coverage line, exit 1. Reproduced by setting
+          `runners.little-coder.container` to `no-such-container-xyz` and
+          running without `-Offline`; after the fix the same input gives
+          `51/54 checks passed` / `real transport: ATTEMPTED AND FAILED over
+          docker-exec`, exit 1. The old behaviour was fail-SAFE (it could not
+          print a false green) but it was not a coverage statement, which is
+          why the claim that the summary "always" states coverage was wrong and
+          is now stated as "every run that reaches the summary".
+CITED:    §C.7 — a drill whose failure mode is an abort teaches a reviewer
+          nothing; RED with a reason is the point.
+REVERT:   restore the two `$ErrorActionPreference` lines around the
+          `docker.exe inspect` call to nothing (`git revert` that hunk); the
+          abort behaviour returns.
+
+## 2026-08-30 · U4 · class 3 (UNVERIFIED — recorded, not confirmed)
+DECISION: `MODULE.md` now recommends running the drill as
+          `powershell.exe -NoProfile -File ...` rather than with the call
+          operator inside a reused session. A U4 verifier reported that
+          repeated `& $drill -Offline` in one long-lived session gave three
+          different counts (50/51, 46/51, 48/51, differing checks) on an
+          unmodified copy. **NOT REPRODUCED.** Nine such runs in one session on
+          2026-08-30 gave `51/51 checks passed` every time with zero `[FAIL]`
+          lines. Recorded as UNVERIFIED and labelled as such in `MODULE.md`,
+          because the reported failures were spurious REDs only — a confusing
+          verdict, never a false green — and inventing a cause for an
+          unreproduced symptom is the exact error item 2 above corrects.
+REVERT:   delete the paragraph in `MODULE.md`; nothing depends on it.
 
 ## 2026-08-30 · U4 · STATUS
 STATUS:   **U4 = PARKED. NOT DONE.**
