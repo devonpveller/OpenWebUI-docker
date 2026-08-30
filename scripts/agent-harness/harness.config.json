@@ -108,7 +108,8 @@
       "readers (config.ps1 and config.py), so it would have broken the bridge alone."
     ],
     "env_files": [".env", ".env.test", "OB1/docker/.env",
-                  "OB1/recipes/daily-digest/.env", "OB1/recipes/email-history-import/.env"],
+                  "OB1/recipes/daily-digest/.env", "OB1/recipes/email-history-import/.env",
+                  "agent-org/docker/.env"],
     "test_image_tag_prefix": "wt-"
   },
 

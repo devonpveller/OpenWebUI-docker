@@ -67,6 +67,16 @@
       "file": "OB1/docker/docker-compose.yml",
       "env_file": null,
       "note": "env_file is deliberately null: compose's project directory here is OB1/docker, so it auto-loads OB1/docker/.env. Passing the ROOT .env would override it with the wrong values."
+    },
+    "agent-org": {
+      "compose": "docker compose -f agent-org/docker/docker-compose.yml",
+      "file": "agent-org/docker/docker-compose.yml",
+      "env_file": null,
+      "note": "env_file is deliberately null, same as open-brain: compose's project directory is agent-org/docker, so it auto-loads agent-org/docker/.env. Passing the ROOT .env would override it with the wrong values. The workers/cloud slices are PROFILE-GATED: a bare `config` or `up` renders only the six always-on services, so any tool reading this file must pass --profile workers --profile cloud to see the rest.",
+      "profiles": [
+        "workers",
+        "cloud"
+      ]
     }
   },
   "planes": {
@@ -368,6 +378,115 @@
         "container": "open-notebook-backup",
         "project": "open-brain",
         "critical": false
+      },
+      {
+        "container": "mattermost-db-backup",
+        "project": "agent-org",
+        "critical": false,
+        "note": "pg_dump sidecar for mattermost-db."
+      },
+      {
+        "container": "agent-bridge-db-backup",
+        "project": "agent-org",
+        "critical": false,
+        "note": "pg_dump sidecar for agent-bridge-db."
+      },
+      {
+        "container": "ao-worker-1-journals-backup",
+        "project": "agent-org",
+        "critical": false,
+        "profile": "workers",
+        "note": "Worker journal tarball sidecar (profile-gated with the pool it serves)."
+      },
+      {
+        "container": "ao-worker-2-journals-backup",
+        "project": "agent-org",
+        "critical": false,
+        "profile": "workers",
+        "note": "Worker journal tarball sidecar (profile-gated with the pool it serves)."
+      }
+    ],
+    "agent-org": [
+      {
+        "container": "mattermost",
+        "project": "agent-org",
+        "critical": true,
+        "host_health": "http://127.0.0.1:8065/api/v4/system/ping",
+        "note": "The org's whole operator surface. Its healthcheck uses mmctl, not curl - a curl-based one reported healthy while the server was unusable (see memory: mattermost-mobile-thread-bug)."
+      },
+      {
+        "container": "mattermost-db",
+        "project": "agent-org",
+        "critical": true,
+        "note": "Postgres behind Mattermost."
+      },
+      {
+        "container": "agent-bridge",
+        "project": "agent-org",
+        "critical": true,
+        "note": "The governed org bus - orchestrator, gates, workers. Holds a long-lived DB connection; see stale_pool_guard on openbrain-mcp for the same class of failure."
+      },
+      {
+        "container": "agent-bridge-db",
+        "project": "agent-org",
+        "critical": true,
+        "note": "Postgres behind agent-bridge: efforts, gates, constraints, audit."
+      },
+      {
+        "container": "ao-worker-1",
+        "project": "agent-org",
+        "critical": false,
+        "profile": "workers",
+        "note": "Worker pool slot 1. Stateless BY DESIGN - the flail guard forks a fresh session; what persists is curated memory, not context."
+      },
+      {
+        "container": "ao-worker-2",
+        "project": "agent-org",
+        "critical": false,
+        "profile": "workers",
+        "note": "Worker pool slot 2."
+      },
+      {
+        "container": "ao-ot-1",
+        "project": "agent-org",
+        "critical": false,
+        "profile": "workers",
+        "note": "open-terminal executor for worker 1. GIT_DISCOVERY_ACROSS_FILESYSTEM=1 lives here."
+      },
+      {
+        "container": "ao-ot-2",
+        "project": "agent-org",
+        "critical": false,
+        "profile": "workers",
+        "note": "open-terminal executor for worker 2."
+      },
+      {
+        "container": "ao-git-egress",
+        "project": "agent-org",
+        "critical": false,
+        "profile": "workers",
+        "note": "Git proxy for the worker pool. Hard-denies pushes to main/master (production-branch guard)."
+      },
+      {
+        "container": "ao-egress",
+        "project": "agent-org",
+        "critical": false,
+        "profile": "cloud",
+        "note": "Egress proxy for the cloud slice."
+      },
+      {
+        "container": "llm-gateway-cloud",
+        "project": "agent-org",
+        "critical": false,
+        "profile": "cloud",
+        "note": "Cloud LiteLLM slice; profile-gated and normally down."
+      },
+      {
+        "container": "llm-gateway-cloud-db",
+        "project": "agent-org",
+        "critical": false,
+        "profile": "cloud",
+        "note": "Spend ledger for the cloud slice."
       }
     ]
   }
