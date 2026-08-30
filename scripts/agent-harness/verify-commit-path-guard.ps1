@@ -1,7 +1,13 @@
 # verify-commit-path-guard.ps1 - executable proof of .githooks/reference-transaction.
 #
-#   .\scripts\agent-harness\verify-commit-path-guard.ps1          # ~30s, cleans up after itself
+#   .\scripts\agent-harness\verify-commit-path-guard.ps1          # 3-4 min, cleans up after itself
 #   .\scripts\agent-harness\verify-commit-path-guard.ps1 -Audit   # print this machine's guard log
+#
+# RUNTIME: 185-239 s end to end, across the timed runs on 2026-08-30. It used to say "~30s"
+# and a reviewer measured over 300 - a number in a comment is a claim like any other. It
+# builds five scratch repositories (four `git init`, one clone), one of them a real
+# submodule of another, and drives every check through them; that is where the time goes,
+# and it is the price of a fixture that is not a stand-in.
 #
 # WHAT IT PROVES (dark-factory-unification U5). The commit-path guard must do three things,
 # and the second and third are the ones guards usually fail:
@@ -13,13 +19,43 @@
 #      merge, conflicted merge resolution, reviewer rebase, cherry-pick, reset, branch
 #      creation, fast-forward pull, partial commit - must pass untouched. A guard that
 #      false-positives is switched off within a day and then protects nothing.
-#   3. STATE ITS OWN BOUNDARY TRUTHFULLY. Step 11 executes every route the documentation
+#   3. STATE ITS OWN BOUNDARY TRUTHFULLY. Step 13 executes every route the documentation
 #      admits survives, and records for each one whether it lands, whether a guard-log line
 #      is written, and whether the commit is still UNATTESTED (which is what
 #      scripts/checks/check-hook-attestation.ps1 reads at the submit gate). A boundary
 #      claimed in prose is how a guard gets oversold; this is the executable version of it.
 #      The branch shipped a table saying "two routes survive" and a reviewer measured three
 #      more, so the table is now generated from measurement instead of from memory.
+#
+# AND SINCE ROUND 3, THE PART THAT MATTERS MOST: it tests the message channel as an ATTACK
+# SURFACE, not only for false positives. Round 2 measured message normalisation only in the
+# "does it wrongly refuse honest work" direction - grep this file at that revision for
+# cleanup|scissors|stripspace|>8|comment and you get ZERO hits across 66 checks - and a
+# verifier walked straight through it: the digest was taken over a REDUCTION of the message,
+# so any text the reduction discarded but git stored was an unguarded rewrite channel.
+#
+# The fix was to stop reducing (the attester canonicalises the message file, both verifiers
+# hash the stored bytes), and steps 12.x are the mechanical proof that the chokepoint has no
+# way around it rather than a list of the two spellings that were found:
+#
+#   12    every shape a reduction would have discarded is REFUSED (comment-first,
+#         comment-anywhere, scissors, trailing whitespace, CRLF, blank runs) - red, each.
+#   12.5  THE COMPLETENESS TEST for the normalisation: the canonical form is a FIXED POINT
+#         of every way git can store a message. -m, -m twice, -F, the editor path, all five
+#         --cleanup modes, a non-ASCII message, a partial commit, a clean merge and a
+#         conflicted merge. If a future git changed cleanup so that stored != attested,
+#         honest commits would start being refused and this step goes red first.
+#   12.6  the two implementations of the blob id (git hash-object, and the .NET one
+#         check-hook-attestation.ps1 needs because PowerShell cannot pipe bytes into git
+#         without corrupting them) must agree over a corpus.
+#   12.7  the submit gate itself, driven end to end against a forged commit and against an
+#         honest one.
+#   12.8  THE COMPLETENESS TEST for the chokepoint itself: every file in the repo that
+#         touches the ledger is enumerated and must be REGISTERED with a role, and every
+#         file registered as a VERIFIER must have a behavioural check in this drill that
+#         proved it refuses a forgery. A new reader added without one fails this step -
+#         which is the defect that produced round 3: the ledger had a message column and
+#         NOTHING read it, so the submit gate blessed a commit whose message was a lie.
 #
 # It also carries a NEGATIVE CONTROL (step 12): with the hook removed, the same bypass
 # SUCCEEDS. Without that, a drill that passed would be equally consistent with a guard
@@ -127,10 +163,56 @@ Check "the block writes the ledger and records BOTH tree and message" `
 $ledgerWrites = @($cmLines | Select-String -SimpleMatch "hook-attest.log")
 Check "commit-msg touches the ledger ONLY inside that block (nothing attests earlier)" `
       (@($ledgerWrites | Where-Object { $_.LineNumber -lt $marker.LineNumber }).Count -eq 0)
-$lastRefusal = $cmLines | Select-String -Pattern '^\s*exit 1\s*$' | Select-Object -Last 1
+# THE PATTERN USED TO MATCH NOTHING, and the check therefore passed while checking
+# nothing - this repo's signature defect, shipped inside the drill that exists to prevent
+# it. It was '^\s*exit 1\s*$', and commit-msg refuses at `return 1` (inside the gitlink
+# function) and at `_check_gitlink_shas || exit 1`; NEITHER is a line whose whole content
+# is "exit 1", so the check reported "refusal at none" and asserted an ordering it had not
+# located. A pattern that finds zero refusals is now itself a FAILURE, which is what makes
+# this non-vacuous: it must find them before it can order them.
+$refusals = @($cmLines | Select-String -Pattern '(^|[^#])\b(exit|return)\s+1\b')
+$lastRefusal = $refusals | Select-Object -Last 1
+Check "the refusal statements in commit-msg are actually FOUND (a pattern matching none is a vacuous check)" `
+      ($refusals.Count -ge 2) ("found " + $refusals.Count + " at lines " + (($refusals | ForEach-Object { $_.LineNumber }) -join ","))
 Check "every refusal in commit-msg comes BEFORE the attestation block" `
-      ((-not $lastRefusal) -or ($lastRefusal.LineNumber -lt $marker.LineNumber)) `
-      ("refusal at " + $(if ($lastRefusal) { $lastRefusal.LineNumber } else { "none" }) + ", block at " + $marker.LineNumber)
+      ([bool]$lastRefusal -and ($lastRefusal.LineNumber -lt $marker.LineNumber)) `
+      ("last refusal at " + $(if ($lastRefusal) { $lastRefusal.LineNumber } else { "NONE" }) + ", block at " + $marker.LineNumber)
+
+# THE ATTESTER MUST CANONICALISE BEFORE IT JUDGES OR RECORDS. This is the chokepoint: if
+# the message file is not rewritten, the digest is over a reduction again and every text
+# the reduction drops is a rewrite channel. Structural companion to step 12's behaviour.
+$canonLine = $cmLines | Select-String -SimpleMatch "_attest_canonicalise_file" | Select-Object -First 1
+Check "commit-msg CANONICALISES the message file (so attested bytes == stored bytes)" `
+      ([bool]$canonLine) ("at line " + $(if ($canonLine) { $canonLine.LineNumber } else { "NONE" }))
+Check "it canonicalises BEFORE the refusal, so the veto judges what will be stored" `
+      ([bool]$canonLine -and [bool]$lastRefusal -and ($canonLine.LineNumber -lt $lastRefusal.LineNumber))
+
+# THE LEDGER FORMAT TOKEN IS A CONTRACT BETWEEN THREE FILES. attest-lib.sh declares it and
+# check-hook-attestation.ps1 refuses to demand a (tree,message) pair from a commit whose
+# parent did not carry it. If the token were renamed on one side only, that gate would go
+# silently inactive - the worst failure mode for a check whose job is noticing absence.
+$attCheck = Get-Content -Raw -Path (Join-Path $repo "scripts/checks/check-hook-attestation.ps1")
+Check "attest-lib.sh declares ATTEST-FORMAT: v2" ($libText -match 'ATTEST-FORMAT:\s*v2')
+# NOT a bare "does the file mention ATTEST-FORMAT" - that would pass on a comment. The
+# version has to be in it, on the same line, because a v3 attester read by a v2 gate is the
+# silently-inactive failure this pair exists to prevent.
+Check "check-hook-attestation.ps1 gates the message rule on that SAME token, version and all" `
+      ($attCheck -match "ATTEST-FORMAT:[^\r\n]*v2")
+# THE FIRST VERSION OF THIS CHECK MATCHED PROSE, and went red on its own header comment -
+# which is the same defect in the opposite direction as the vacuous refusal pattern above.
+# Assert on the DEFINITION instead: the verify-side digest function must hash the stored
+# message directly, with no canonicaliser and no stripspace anywhere in its body. That is
+# the chokepoint property in one line of code, so it is the line to test.
+$libLines = @($libText -split "`n")
+$dcDef  = @($libLines | Where-Object { $_ -match '^_attest_digest_commit\(\)' }) | Select-Object -First 1
+$smDef  = @($libLines | Where-Object { $_ -match '^_attest_stored_message\(\)' }) | Select-Object -First 1
+Check "attest-lib defines the verify-side digest and the stored-message reader" `
+      ([bool]$dcDef -and [bool]$smDef)
+Check "the VERIFY side applies NO reduction: it hashes the stored message directly" `
+      ([bool]$dcDef -and ($dcDef -match 'hash-object') -and ($dcDef -notmatch '_attest_canon') -and ($dcDef -notmatch 'stripspace')) `
+      ($dcDef)
+Check "and the stored-message reader only cuts the commit header (cat-file, no cleanup)" `
+      ([bool]$smDef -and ($smDef -match 'cat-file') -and ($smDef -notmatch 'stripspace')) ($smDef)
 $pcText = Get-Content -Raw -Path (Join-Path $repo ".githooks/pre-commit")
 Check "pre-commit no longer attests (attesting before commit-msg was the hole)" `
       (-not ($pcText -match '>>\s*"\$_git_common/hook-attest\.log"'))
@@ -186,6 +268,51 @@ function Attested([string]$tree) {
 }
 function Touch([string]$name, [string]$content) {
     [System.IO.File]::WriteAllText((Join-Path $work $name), $content + "`n", (New-Object System.Text.UTF8Encoding($false)))
+}
+
+# --- the message half, measured the way the submit gate measures it ----------------
+# Byte-exact, and deliberately the SAME implementation check-hook-attestation.ps1 uses, so
+# step 12.6 can pin it against git's own hash-object. Raw streams because PS 5.1 both
+# decodes native stdout with the console encoding and injects a UTF-8 preamble when it
+# writes to a redirected StandardInput - the second of those produced a FALSE POSITIVE on
+# an honest commit during this round and was caught only by running the honest control.
+function GitBytes([string]$Arguments, [string]$Cwd) {
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = "git.exe"; $psi.Arguments = $Arguments
+    $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
+    $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
+    if ($Cwd) { $psi.WorkingDirectory = $Cwd }
+    $p = [System.Diagnostics.Process]::Start($psi)
+    $p.BeginErrorReadLine()
+    $ms = New-Object System.IO.MemoryStream
+    $p.StandardOutput.BaseStream.CopyTo($ms)
+    $p.WaitForExit()
+    return , $ms.ToArray()
+}
+function BlobId([byte[]]$Bytes) {
+    $hdr = [System.Text.Encoding]::ASCII.GetBytes("blob " + $Bytes.Length + [char]0)
+    $all = New-Object byte[] ($hdr.Length + $Bytes.Length)
+    [System.Array]::Copy($hdr, 0, $all, 0, $hdr.Length)
+    [System.Array]::Copy($Bytes, 0, $all, $hdr.Length, $Bytes.Length)
+    $alg = [System.Security.Cryptography.SHA1]::Create()
+    return (($alg.ComputeHash($all) | ForEach-Object { $_.ToString("x2") }) -join "")
+}
+function StoredMsgBytes([string]$rev, [string]$Cwd = $work) {
+    $obj = GitBytes ("cat-file commit " + $rev) $Cwd
+    $split = -1
+    for ($i = 0; $i -lt $obj.Length - 1; $i++) { if ($obj[$i] -eq 10 -and $obj[$i + 1] -eq 10) { $split = $i + 2; break } }
+    if ($split -lt 0) { return , (New-Object byte[] 0) }
+    $msg = New-Object byte[] ($obj.Length - $split)
+    [System.Array]::Copy($obj, $split, $msg, 0, $msg.Length)
+    return , $msg
+}
+function StoredMsgDigest([string]$rev) { return (BlobId (StoredMsgBytes $rev)) }
+# "would the submit gate accept this commit?" - the PAIR, not just the tree.
+function PairAttested([string]$rev) {
+    if (-not (Test-Path $ledgerPath)) { return $false }
+    $t = TreeOf $rev
+    $m = StoredMsgDigest $rev
+    return [bool](@(Select-String -Path $ledgerPath -Pattern ("^" + $t + " " + $m + " ")).Count)
 }
 
 # --- GREEN: honest work must pass ---------------------------------------------------
@@ -440,8 +567,303 @@ Check "the tree IS attested, so only the message can have been refused" (Atteste
 Check "the record names the cause: reason=message-not-attested" `
       ([bool](Test-Path $guardLog) -and @(Select-String -Path $guardLog -SimpleMatch "reason=message-not-attested").Count -ge 1)
 
+# --- THE MESSAGE CHANNEL, AS AN ATTACK SURFACE --------------------------------------
+Step 12 "every shape a REDUCTION would have discarded is REFUSED (the round-3 hole)"
+# THE DEFECT THIS CLOSES, reproduced by a verifier in a scratch repo with a real submodule:
+# both sides hashed a REDUCTION of the message (cut the scissors block, then
+# `git stripspace --strip-comments`). git stores '#' lines VERBATIM under cleanup=whitespace,
+# which is what -m and -F select, so
+#
+#     git commit --amend --no-verify -m '# <lie>' + LF + '<the attested subject>'
+#
+# landed exit 0 with NO guard line, and `git log --oneline` showed the '#' line as the
+# SUBJECT. Round 2 had tested normalisation only for false positives; grepping that revision
+# of this file for cleanup|scissors|stripspace|>8|comment returned zero hits.
+#
+# THE FIX IS NOT A PATCH PER SPELLING. The attester canonicalises the message file, so the
+# attested bytes ARE the stored bytes and the verifier hashes them untouched - there is
+# nothing left to discard and therefore nowhere for a new spelling to hide. These shapes are
+# the evidence, not the mechanism: each one is a different thing the old reduction threw
+# away, and the point is that they are all refused by ONE rule.
+$null = G checkout -q main
+Touch "msgch.txt" "msgch"; $null = G add msgch.txt; $null = Commit "attested subject"
+$msgBase = Head
+$msgTree = TreeOf "HEAD"
+Check "the base commit is attested as a PAIR (tree AND stored message)" (PairAttested "HEAD")
+# Every one of these puts text into the STORED message that the old reduction discarded.
+# HEAD must not move for any of them, so the base is the same for the whole loop.
+$shapes = @(
+    @{ n = "a leading '#' line - git log shows IT as the subject"; m = "# OB1 -> deadbee1, pushed before this bump" + [char]10 + "attested subject" },
+    @{ n = "a '#' line further down the body";                     m = "attested subject" + [char]10 + [char]10 + "# OB1 -> deadbee1" },
+    @{ n = "a scissors line with prose under it";                  m = "attested subject" + [char]10 + "# ------------------------ >8 ------------------------" + [char]10 + "OB1 -> deadbee1, pushed" },
+    @{ n = "extra blank runs in the body";                         m = "attested subject" + [char]10 + [char]10 + [char]10 + [char]10 + "body" },
+    @{ n = "CRLF line endings";                                    m = "attested subject" + [char]13 + [char]10 + "body" }
+)
+foreach ($sh in $shapes) {
+    $denyBefore = DenyCount
+    $null = G commit -q --amend --no-verify -m $sh.m
+    $ex = $LASTEXITCODE
+    Check ("12 REFUSED: " + $sh.n) `
+          ($ex -eq 128 -and (Head) -eq $msgBase -and (DenyCount) -eq ($denyBefore + 1)) `
+          ("exit=" + $ex)
+}
+Check "the tree was attested throughout, so it is the MESSAGE that was refused each time" (Attested $msgTree)
+
+# THE CONTROLS. A step that refuses everything proves nothing, and one of these was a
+# genuine expectation error worth keeping: trailing whitespace on the subject was written
+# as an attack and it LANDS, correctly. git's own cleanup=whitespace strips it before
+# storing, so the stored bytes are byte-identical to the attested ones and there is nothing
+# to refuse. The guard judges what git STORED, not what was typed on the command line -
+# which is the whole point of hashing stored bytes, seen from the other side.
+$denyBefore = DenyCount
+$env:GIT_COMMITTER_DATE = "2030-02-01T00:00:00Z"
+$null = G commit -q --amend --no-verify -m "attested subject   "
+$wsExit = $LASTEXITCODE
+Remove-Item env:GIT_COMMITTER_DATE -ErrorAction SilentlyContinue
+Check "CONTROL: trailing whitespace LANDS - git's own cleanup removes it, so the stored bytes are unchanged" `
+      ($wsExit -eq 0 -and (DenyCount) -eq $denyBefore) ("exit=" + $wsExit)
+Check "... and the resulting commit is still an attested PAIR" (PairAttested "HEAD")
+$msgBase = Head
+$env:GIT_COMMITTER_DATE = "2030-02-02T00:00:00Z"
+$null = G commit -q --amend --no-verify --no-edit
+$noEditExit = $LASTEXITCODE
+Remove-Item env:GIT_COMMITTER_DATE -ErrorAction SilentlyContinue
+Check "CONTROL: --amend --no-verify --no-edit, which changes NEITHER, still lands (R6 is intact)" `
+      ($noEditExit -eq 0 -and (Head) -ne $msgBase) ("exit=" + $noEditExit)
+
+Step 12.5 "COMPLETENESS: the canonical form is a FIXED POINT of every way git stores a message"
+# THIS IS THE COMPLETENESS TEST FOR THE NORMALISATION, and it is why the fix is a chokepoint
+# rather than another patch. The whole scheme rests on one invariant: whatever cleanup git
+# applies AFTER commit-msg returns must leave the canonicalised file unchanged. If that ever
+# stopped holding - a new git, a cleanup mode nobody thought about - the stored bytes would
+# differ from the attested bytes and HONEST commits would start being refused. So it is not
+# asserted anywhere; it is enumerated here and it fails loudly.
+#
+# Every row lands only if canon(message file) == the bytes git stored, because that equality
+# IS the guard's rule. The pair assertion beside it says the same thing directly.
+$null = G checkout -q main
+$corpus = @(
+    @{ n = "-m plain";                    a = @("-m", "plain subject") },
+    @{ n = "-m with a leading '#' line";  a = @("-m", ("# c" + [char]10 + "subject one")) },
+    @{ n = "-m with a scissors block";    a = @("-m", ("subject two" + [char]10 + "# ---- >8 ----" + [char]10 + "cut")) },
+    @{ n = "-m twice (two paragraphs)";   a = @("-m", "subject three  ", "-m", "body   ") },
+    @{ n = "--cleanup=verbatim";          a = @("--cleanup=verbatim", "-m", ("# c" + [char]10 + "subject four" + [char]10 + [char]10)) },
+    @{ n = "--cleanup=whitespace";        a = @("--cleanup=whitespace", "-m", ("# c" + [char]10 + "subject five")) },
+    @{ n = "--cleanup=strip";             a = @("--cleanup=strip", "-m", ("# c" + [char]10 + "subject six")) },
+    @{ n = "--cleanup=scissors";          a = @("--cleanup=scissors", "-m", ("subject seven" + [char]10 + "# ------------------------ >8 ------------------------" + [char]10 + "cut")) },
+    @{ n = "--cleanup=default";           a = @("--cleanup=default", "-m", ("# c" + [char]10 + "subject eight")) },
+    # PARENTHESES ARE LOAD-BEARING. Without them PowerShell binds the array comma tighter
+    # than the concatenation, so @("-m", "s " + [char]0x00e9 + [char]0x4e2d) is a FOUR-element
+    # array and git sees two stray pathspecs. That is what this row did on its first run:
+    # "error: pathspec 'e-acute' did not match any file(s) known to git", read at first as a
+    # guard failure. Every other row here happens to be parenthesised already.
+    @{ n = "a non-ASCII message";         a = @("-m", ("subject nine " + [char]0x00e9 + [char]0x4e2d)) }
+)
+$ci = 0
+foreach ($c in $corpus) {
+    $ci++
+    Touch ("fp$ci.txt") ("fp" + $ci); $null = G add ("fp$ci.txt")
+    $before = Head
+    $cargs = @("commit", "-q") + $c.a
+    $o = G @cargs
+    $ex = $LASTEXITCODE
+    $moved = ((Head) -ne $before)
+    $paired = if ($moved) { PairAttested "HEAD" } else { $false }
+    Check ("12.5 canonical == stored: " + $c.n) `
+          ($ex -eq 0 -and $moved -and $paired) `
+          ("exit=" + $ex + " moved=" + $moved + " paired=" + $paired + $(if ($ex -ne 0) { " git: " + (($o | Out-String) -replace "\r?\n", " | ") } else { "" }))
+}
+# -F reads a FILE, which is the other door into the message and takes a different code path
+# in git than -m does.
+$mf = Join-Path $root "msg.txt"
+[System.IO.File]::WriteAllText($mf, "subject from a file" + [char]10 + "# comment" + [char]10 + [char]10 + [char]10, (New-Object System.Text.UTF8Encoding($false)))
+Touch "fpF.txt" "fpF"; $null = G add fpF.txt
+$before = Head
+$null = G commit -q -F $mf
+Check "12.5 canonical == stored: -F from a file with comments and trailing blanks" `
+      ($LASTEXITCODE -eq 0 -and (Head) -ne $before -and (PairAttested "HEAD"))
+# the editor path: GIT_EDITOR=true leaves COMMIT_EDITMSG as git prepared it
+Touch "fpE.txt" "fpE"; $null = G add fpE.txt
+$before = Head
+$env:GIT_EDITOR = "true"
+$null = G commit -q -e -m "subject via the editor path"
+$edExit = $LASTEXITCODE
+Remove-Item env:GIT_EDITOR -ErrorAction SilentlyContinue
+Check "12.5 canonical == stored: the EDITOR path (git prepares the file, cleanup=default)" `
+      ($edExit -eq 0 -and (Head) -ne $before -and (PairAttested "HEAD")) ("exit=" + $edExit)
+# a partial commit (temporary index) and a clean merge (MERGE_MSG) are separate doors again
+Touch "fpP1.txt" "p1"; Touch "fpP2.txt" "p2"; $null = G add fpP1.txt fpP2.txt; $null = G reset -q fpP2.txt
+$before = Head
+$null = G commit -q -m ("partial subject" + [char]10 + "# a comment") -- fpP1.txt
+Check "12.5 canonical == stored: a PARTIAL commit (git hands the hooks a temporary index)" `
+      ($LASTEXITCODE -eq 0 -and (Head) -ne $before -and (PairAttested "HEAD"))
+$null = G reset -q
+$null = G checkout -qb fpside
+Touch "fpS.txt" "s"; $null = G add fpS.txt; $null = Commit "fp side"
+$null = G checkout -q main
+Touch "fpM.txt" "m"; $null = G add fpM.txt; $null = Commit "fp main"
+$before = Head
+$null = G merge -q --no-ff -m ("merged" + [char]10 + "# a comment in a merge message") fpside
+Check "12.5 canonical == stored: a CLEAN merge (git invokes commit-msg with MERGE_MSG)" `
+      ($LASTEXITCODE -eq 0 -and (Head) -ne $before -and (PairAttested "HEAD"))
+# a CONFLICTED merge resolved with --no-edit is the case that decided the design: MERGE_MSG
+# carries "# Conflicts:" lines, git's cleanup KEEPS them when the message is not edited, and
+# a rule of "the stored message must survive the reduction unchanged" would have refused
+# every one of them. Canonicalising instead of testing removes the conflict entirely.
+Touch "fpC.txt" "base"; $null = G add fpC.txt; $null = Commit "fp conflict base"
+$null = G checkout -qb fpcx
+Touch "fpC.txt" "X"; $null = G add fpC.txt; $null = Commit "fp cx"
+$null = G checkout -q main
+Touch "fpC.txt" "Y"; $null = G add fpC.txt; $null = Commit "fp cy"
+$null = G merge --no-ff -m "fp merge cx" fpcx
+Check "12.5 the conflicted-merge fixture really conflicts" ($LASTEXITCODE -ne 0)
+Touch "fpC.txt" "resolved"; $null = G add fpC.txt
+$before = Head
+$null = G commit -q --no-edit
+Check "12.5 canonical == stored: a CONFLICTED merge resolved with --no-edit (# Conflicts: lines)" `
+      ($LASTEXITCODE -eq 0 -and (Head) -ne $before -and (PairAttested "HEAD")) ("exit=" + $LASTEXITCODE)
+
+Step 12.6 "the two blob-id implementations agree, and the header/body split survives a signature"
+# check-hook-attestation.ps1 cannot ask git for the digest: PowerShell 5.1 injects the
+# console encoding's UTF-8 preamble into a redirected StandardInput, which silently added
+# three bytes to the message and produced a FALSE POSITIVE on an honest commit. So it
+# computes git's blob id in .NET - a second implementation, and therefore a drift risk. Two
+# things that must agree, tested against each other.
+$agree = $true; $agreeDetail = ""
+foreach ($sample in @("", "x", "a subject" + [char]10, "utf8 " + [char]0x00e9 + [char]0x4e2d + [char]10, ("long " * 200))) {
+    $b = [System.Text.Encoding]::UTF8.GetBytes($sample)
+    $tf = Join-Path $root ("blob-" + $b.Length + ".bin")
+    [System.IO.File]::WriteAllBytes($tf, $b)
+    $fromGit = ((& git.exe -C $work hash-object -t blob --no-filters $tf 2>$null) | Select-Object -First 1)
+    $fromNet = BlobId $b
+    if ($fromGit -ne $fromNet) { $agree = $false; $agreeDetail = "len=" + $b.Length + " git=" + $fromGit + " net=" + $fromNet }
+}
+Check "12.6 the .NET blob id matches git hash-object on every sample" $agree $agreeDetail
+# A SIGNED commit puts an ASCII-armored block in a gpgsig HEADER. Its blank line is stored
+# as a single space (git prefixes every header continuation with one), so the first truly
+# empty line is still the header/body separator. Asserted in prose everywhere; measured here
+# against a hand-built commit object, because "surely git does X" is how this round started.
+$signedBody = "signed subject" + [char]10
+$hdr = "tree " + (TreeOf "HEAD") + [char]10 +
+       "author drill <drill@local> 1700000000 +0000" + [char]10 +
+       "committer drill <drill@local> 1700000000 +0000" + [char]10 +
+       "gpgsig -----BEGIN PGP SIGNATURE-----" + [char]10 +
+       " " + [char]10 +
+       " iQIzBAABCgAdFiEE" + [char]10 +
+       " -----END PGP SIGNATURE-----" + [char]10 +
+       [char]10 + $signedBody
+$sf = Join-Path $root "signed.commit"
+[System.IO.File]::WriteAllText($sf, $hdr, (New-Object System.Text.UTF8Encoding($false)))
+$signedSha = ((& git.exe -C $work hash-object -t commit -w --no-filters $sf 2>$null) | Select-Object -First 1)
+$extracted = [System.Text.Encoding]::UTF8.GetString((StoredMsgBytes $signedSha))
+Check "12.6 the header/body split ignores the blank line INSIDE a gpgsig block" `
+      ($extracted -eq $signedBody) ("got: [" + ($extracted -replace [char]10, "\n") + "]")
+
+Step 12.7 "the SUBMIT GATE reads the message column - end to end, forged and honest"
+# The compensating control that R7 defeated. A message-only rewrite leaves the tree attested,
+# and check-hook-attestation.ps1 read only the tree column - so it printed "[OK] every
+# commit's tree was validated", exit 0, and queue.ps1 -Submit gates on that exit code. A
+# ledger column nothing reads is not a control.
+#
+# A SEPARATE REPO, tracking .githooks/ the way ai-stack does (core.hooksPath = .githooks, a
+# relative in-tree path), because this gate reads the hook OUT OF THE BRANCH.
+$gate = Join-Path $root "gate"
+$null = New-Item -ItemType Directory -Force -Path (Join-Path $gate ".githooks")
+Copy-Item $hookSrc   (Join-Path $gate ".githooks/reference-transaction")
+Copy-Item $libSrc    (Join-Path $gate ".githooks/attest-lib.sh")
+Copy-Item $commitMsg (Join-Path $gate ".githooks/commit-msg")
+Write-Sh (Join-Path $gate ".githooks/pre-commit") @('#!/bin/sh', 'exit 0')
+Write-Sh (Join-Path $gate ".githooks/pre-merge-commit") @('#!/bin/sh', 'exec "$(dirname "$0")/pre-commit"')
+$null = & git.exe init -q -b base $gate 2>&1
+foreach ($kv in @(@("core.hooksPath", ".githooks"), @("user.email", "drill@local"), @("user.name", "drill"), @("core.autocrlf", "false"))) {
+    $null = & git.exe -C $gate config $kv[0] $kv[1] 2>&1
+}
+$null = & git.exe -C $gate add .githooks 2>&1
+$null = & git.exe -C $gate -c core.hooksPath=/nonexistent commit -q -m "seed: the hook set" 2>&1
+$null = & git.exe -C $gate checkout -qb work 2>&1
+[System.IO.File]::WriteAllText((Join-Path $gate "f.txt"), "one`n", (New-Object System.Text.UTF8Encoding($false)))
+$null = & git.exe -C $gate add f.txt 2>&1
+$null = & git.exe -C $gate commit -q -m "honest work, honest message" 2>&1
+$gateHonest = ((& git.exe -C $gate rev-parse HEAD 2>$null) | Select-Object -First 1)
+Check "12.7 the fixture's honest commit landed through the real hooks" ([bool]$gateHonest)
+
+$checker = Join-Path $repo "scripts/checks/check-hook-attestation.ps1"
+function RunGate([string]$repoPath) {
+    $env:AI_STACK_ATTEST_LEDGER = (Join-Path $repoPath ".git/hook-attest.log")
+    try {
+        $out = & $checker -Branch work -Base base -RepoRoot $repoPath -AllowLedgerOverride -Json 2>&1
+        return [pscustomobject]@{ exit = $LASTEXITCODE; out = ($out -join "`n") }
+    } finally { Remove-Item env:AI_STACK_ATTEST_LEDGER -ErrorAction SilentlyContinue }
+}
+$g = RunGate $gate
+Check "12.7 the gate PASSES the honest commit (no false positive - this half is load-bearing)" `
+      ($g.exit -eq 0) ("exit=" + $g.exit + " " + $g.out)
+# ... now rewrite ONLY the message, with every hook off. Tree untouched, ledger untouched.
+$null = & git.exe -C $gate -c core.hooksPath=/nonexistent commit --amend -q -m "OB1 -> deadbee1, pushed before this bump" 2>&1
+$gateForged = ((& git.exe -C $gate rev-parse HEAD 2>$null) | Select-Object -First 1)
+$forgedTree = ((& git.exe -C $gate rev-parse "${gateForged}^{tree}" 2>$null) | Select-Object -First 1)
+$honestTree = ((& git.exe -C $gate rev-parse "${gateHonest}^{tree}" 2>$null) | Select-Object -First 1)
+$sameTree = ($forgedTree -eq $honestTree)
+Check "12.7 the forgery changed the message and NOT the tree (so only the message column can catch it)" `
+      ($sameTree -and $gateForged -ne $gateHonest)
+$g = RunGate $gate
+Check "12.7 the submit gate REFUSES the message-rewritten commit (exit 1)" `
+      ($g.exit -eq 1) ("exit=" + $g.exit)
+Check "12.7 and it names the cause rather than reporting generic unattested content" `
+      ($g.out -match '"why":"message"') ($g.out)
+
+Step 12.8 "COMPLETENESS: every file that reads the ledger is registered, and every VERIFIER is proved"
+# THIS IS THE TEST THE ROUND EXISTS FOR. Round 3's defect was not a missing rule - it was a
+# ledger COLUMN that nothing read: check-hook-attestation.ps1 parsed field 0 and compared
+# trees, so a commit whose message was a lie printed "[OK]" at the submit gate. Enumerate-
+# and-patch cannot catch that class, because the next reader will omit the next column.
+#
+# So the sites are enumerated MECHANICALLY out of the tracked files, and a site that appears
+# without a declared role fails this step. A site declared VERIFIER additionally has to name
+# a check IN THIS RUN that proved it refuses a forgery - a verifier with no behavioural
+# proof is exactly the thing that shipped.
+#
+# Files under documentation/ are prose about the ledger, not readers of it, and carry no
+# behavioural obligation; everything else must be declared.
+#
+# IT RUNS LAST OF THE 12.x STEPS ON PURPOSE: it reads the verdicts of the checks before it,
+# so a verifier's proof has to have actually executed. Placed earlier it went red on its own
+# ordering, which is the correct failure but the wrong reason.
+$ledgerRoles = @{
+    ".githooks/attest-lib.sh"                            = @{ role = "definition"; proof = "" }
+    ".githooks/commit-msg"                               = @{ role = "writer";     proof = "" }
+    ".githooks/reference-transaction"                    = @{ role = "verifier";   proof = "12 REFUSED: a leading '#' line" }
+    ".githooks/README.md"                                = @{ role = "doc";        proof = "" }
+    "scripts/checks/check-hook-attestation.ps1"          = @{ role = "verifier";   proof = "12.7 the submit gate REFUSES" }
+    "scripts/agent-harness/queue.ps1"                    = @{ role = "caller";     proof = "" }
+    "scripts/agent-harness/verify-merge-protocol.ps1"    = @{ role = "caller";     proof = "" }
+    "scripts/agent-harness/verify-commit-path-guard.ps1" = @{ role = "drill";      proof = "" }
+}
+# git grep, not Select-String over ls-files: it searches only tracked content, it is one
+# process instead of thousands, and it cannot be fooled by an untracked scratch file.
+$prevEA = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+$touch = @(& git.exe -C $repo grep -l --fixed-strings "hook-attest" 2>$null) | Where-Object { $_ }
+$ErrorActionPreference = $prevEA
+Check "12.8 the ledger-reader scan found something (a scan that finds nothing proves nothing)" `
+      ($touch.Count -ge 5) ("found " + $touch.Count + " files")
+$unregistered = @($touch | Where-Object { $_ -notlike "documentation/*" -and -not $ledgerRoles.ContainsKey($_) })
+Check "12.8 every non-doc file touching the ledger is REGISTERED with a role" `
+      ($unregistered.Count -eq 0) ($(if ($unregistered.Count) { "UNREGISTERED: " + ($unregistered -join ", ") } else { "" }))
+$stale = @($ledgerRoles.Keys | Where-Object { $touch -notcontains $_ })
+Check "12.8 every registered site still touches the ledger (no stale registry rows)" `
+      ($stale.Count -eq 0) ($(if ($stale.Count) { "STALE: " + ($stale -join ", ") } else { "" }))
+$unproved = @()
+foreach ($k in $ledgerRoles.Keys) {
+    if ($ledgerRoles[$k].role -ne "verifier") { continue }
+    $needle = $ledgerRoles[$k].proof
+    $hit = @($results | Where-Object { $_.check -like ("*" + $needle + "*") -and $_.pass })
+    if (-not $hit.Count) { $unproved += ($k + " (wanted a passing check matching '" + $needle + "')") }
+}
+Check "12.8 every registered VERIFIER has a passing behavioural proof in THIS run" `
+      ($unproved.Count -eq 0) ($unproved -join "; ")
+
 # --- THE BOUNDARY, MEASURED ---------------------------------------------------------
-Step 12 "the documented BOUNDARY is measured, not asserted"
+Step 13 "the documented BOUNDARY is measured, not asserted"
 # .githooks/README.md and the hook header enumerate the routes that survive. Claims in prose
 # are how a guard ends up oversold - the shipped version said "two routes survive" and a
 # reviewer measured three more - so every entry in that table is executed here, and for each
@@ -489,8 +911,14 @@ Check "git update-ref straight into refs/heads is REFUSED" ($LASTEXITCODE -ne 0)
 $null = G update-ref refs/pre/parked $pcommit
 $parkExit = $LASTEXITCODE
 $null = G update-ref refs/heads/plumbed $pcommit
+$r2Move = $LASTEXITCODE
 Check "R2 parking under a NON-refs/heads ref first LANDS (known residual)" `
-      ($parkExit -eq 0 -and $LASTEXITCODE -eq 0) ("park=" + $parkExit + " move=" + $LASTEXITCODE)
+      ($parkExit -eq 0 -and $r2Move -eq 0) ("park=" + $parkExit + " move=" + $r2Move)
+# THE TABLE'S LAST COLUMN, ACTUALLY MEASURED. Commit bd4d891 said all six rows record
+# "whether the commit is still caught at the submit gate" and R2 and R4 measured no such
+# thing - two of six rows asserted a gate result nothing had run. They do now.
+Check "R2 leaves the commit UNATTESTED (so the submit gate still catches it)" `
+      (-not (Attested $ptree)) ("tree=" + $ptree)
 
 # (R5) forging the sequencer state. The exemption itself is not optional - git runs no
 #      pre-commit for replayed commits - and a hook that can only read .git cannot tell a
@@ -563,9 +991,11 @@ $r4Head = ((& git.exe -C $bare rev-parse HEAD 2>$null) | Select-Object -First 1)
 Check "R4 a tree without .githooks/ is unguarded: --no-verify LANDS there" `
       ($r4Exit -eq 0 -and $r4Head) ("exit=" + $r4Exit)
 Check "R4 writes no guard line (its git dir has none)" (-not (Test-Path (Join-Path $bare ".git/hook-guard.log")))
+Check "R4 leaves the commit UNATTESTED - that repo has no ledger at all, so nothing in it can be attested" `
+      (-not (Test-Path (Join-Path $bare ".git/hook-attest.log")))
 
 # --- NEGATIVE CONTROL + R3 -----------------------------------------------------------
-Step 13 "NEGATIVE CONTROL: with the hook removed, the same bypass SUCCEEDS (this is also R3)"
+Step 14 "NEGATIVE CONTROL: with the hook removed, the same bypass SUCCEEDS (this is also R3)"
 # Two things at once, and they are the same operation: it proves the earlier RED checks were
 # measuring THIS hook and not something incidental, and it measures the cheapest surviving
 # route - deleting the guard file, which core.hooksPath being a relative in-tree path makes
@@ -580,7 +1010,7 @@ Check "the bypass lands when the guard is gone (so the RED steps measured the gu
 Check "R3 writes NO guard line, and leaves the commit UNATTESTED (caught at the submit gate)" `
       ((LogLineCount) -eq $linesBefore -and -not (Attested (TreeOf "HEAD")))
 
-Step 14 "the documentation states this drill's REAL size"
+Step 15 "the documentation states this drill's REAL size"
 # Both READMEs shipped saying "33 checks" while the drill emitted 38. A number in prose next
 # to evidence is a claim like any other, and a stale one invites a reader to assume the rest
 # of the page is stale too - so it is checked rather than remembered. +1 because this check

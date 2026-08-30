@@ -27,6 +27,27 @@
 MSG_FILE="$1"
 [ -f "$MSG_FILE" ] || exit 0
 
+# --- CANONICALISE THE MESSAGE, BEFORE ANYTHING JUDGES IT OR RECORDS IT ------
+#
+# This is the chokepoint. The attester used to digest a REDUCTION of the message and the
+# guard reduced the stored message the same way - and any text that reduction discarded
+# but git STORED was an unguarded rewrite channel. `git commit --amend --no-verify -m
+# '# <lie>' + <attested subject>` landed a lie in the commit subject with no guard line,
+# because `-m` selects cleanup=whitespace and git stores '#' lines verbatim.
+#
+# Rewriting the file instead of reducing the digest removes the channel rather than the
+# spelling: from here on, the bytes that are attested ARE the bytes git stores, so there is
+# nothing left for a future spelling to hide in. Full reproduction and the fixed-point
+# invariant this rests on: .githooks/attest-lib.sh.
+#
+# IT HAPPENS BEFORE THE VETO ON PURPOSE. The gitlink check must judge the message that will
+# be STORED, not a draft that still has text below a scissors line.
+_lib="$(dirname "$0")/attest-lib.sh"
+if [ -r "$_lib" ]; then
+    . "$_lib"
+    _attest_canonicalise_file "$MSG_FILE"
+fi
+
 # THE CHECK IS A FUNCTION SO THAT THE ATTESTATION BELOW ALWAYS RUNS.
 #
 # It used to be straight-line code that `exit 0`d as soon as it saw no staged gitlink -
@@ -42,8 +63,10 @@ _check_gitlink_shas() {
     SUBS=$(git diff --cached --raw | awk '$2 == "160000" || $1 == ":160000" { print $NF }' | sort -u)
     [ -z "$SUBS" ] && return 0
 
-    # Strip comment lines - `git commit -v` puts an entire diff below them, and that diff is
-    # full of real-looking hex that has nothing to do with the message.
+    # Strip comment lines. Redundant now that the message is canonicalised above - and kept
+    # anyway, because it is the ONLY thing standing here if attest-lib.sh is ever missing,
+    # and `git commit -v` puts an entire diff below those lines, full of real-looking hex
+    # that has nothing to do with the message.
     BODY=$(grep -v '^#' "$MSG_FILE")
 
     CLAIMS=$(printf '%s' "$BODY" | grep -oE '\b[0-9a-f]{7,40}\b' | grep -E '[0-9]' | sort -u)
@@ -116,6 +139,9 @@ _check_gitlink_shas || exit 1
 #   - the MESSAGE, because the tree alone let `--amend --no-verify` rewrite a message
 #     against an already-attested tree. The message is what a reviewer reads to check a
 #     gitlink bump, and PLAN.md section C.7 makes it the operator's audit surface.
+#     The digest is of the CANONICALISED FILE - i.e. of the exact bytes git will store -
+#     so the verifier can hash the stored message with no transformation at all. A digest
+#     over a reduction is a digest with a hole in it; that is round 3's whole finding.
 #
 # The ledger lives in the SHARED git dir (--git-common-dir), never a worktree: it must not
 # be committable, and every worktree of this repo must read ONE ledger, or a reviewer in
@@ -125,9 +151,7 @@ _check_gitlink_shas || exit 1
 # write a line; the commit is then refused by .githooks/reference-transaction, which is the
 # safe direction. Never exit non-zero from this block - a bookkeeping failure must not be
 # reported to the user as a rejected message.
-_lib="$(dirname "$0")/attest-lib.sh"
 if [ -r "$_lib" ]; then
-    . "$_lib"
     _at_tree=$(git write-tree 2>/dev/null)
     _at_msg=$(_attest_digest_file "$MSG_FILE")
     _at_common=$(git rev-parse --git-common-dir 2>/dev/null)

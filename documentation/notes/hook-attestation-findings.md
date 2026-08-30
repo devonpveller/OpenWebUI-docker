@@ -57,8 +57,20 @@ it is what this closes. It is NOT the only way to commit content the hooks never
 - A commit made in a clone that never ran `git config core.hooksPath .githooks`.
 
 All three produce unattested trees, so **the checker catches them anyway** — it asks "was
-this content validated?", not "did you use the right flag". That is the right shape, and it
-is why attestation is over the tree rather than a flag or a commit message.
+this content validated?", not "did you use the right flag". That is the right shape.
+
+> **AMENDED 2026-08-30 (`work/u5proxy`).** The sentence that stood here — "and it is why
+> attestation is over the tree rather than a flag or a commit message" — was INVERTED by
+> later work on this same item, and is struck rather than deleted. Attesting the tree ALONE
+> was a hole. `pre-commit` attested before `commit-msg` could veto, so a message refused for
+> naming a gitlink SHA that does not exist could be re-committed with `--no-verify` and it
+> LANDED; and with only the tree in the ledger,
+> `git commit --amend --no-verify -m "<anything>"` rewrote the message of an
+> already-attested commit. Attestation is now over **(tree, message)** and is written by
+> `commit-msg`, the last hook that can veto. A further round found that hashing a
+> *reduction* of the message left everything the reduction discarded as a rewrite channel,
+> so the attester canonicalises the message file and both verifiers hash the stored bytes.
+> Reproductions: `.githooks/attest-lib.sh` and `documentation/notes/u5proxy-findings.md`.
 
 What it does NOT do is *prevent* any of them. The guard is detective at the submission
 chokepoint, not preventive at commit time. The preventive half is the "commit-path proxy

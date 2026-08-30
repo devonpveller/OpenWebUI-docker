@@ -1,17 +1,40 @@
-# check-hook-attestation.ps1 - did the pre-commit hooks actually run for these commits?
+# check-hook-attestation.ps1 - did the hooks actually run for these commits, and is the
+# message they validated still the message the commit carries?
 #
 # WHY THIS EXISTS (PLAN 0 A7, dark-factory-unification U5). The audit verdict:
 # "Cloud/worktree agents can be governed normatively" - FALSIFIED. An agent reached for
 # `--no-verify` on its first commit, and `--no-verify` leaves NO trace in a git object,
 # so "the hooks ran" was unprovable after the fact. A rule in a protocol document did not
-# stop it; only a mechanism can. The hook now leaves proof (.githooks/pre-commit step 6),
-# and this reads it back.
+# stop it; only a mechanism can. The attesting hook leaves proof - it is
+# .githooks/commit-msg, the LAST hook that can veto (it was .githooks/pre-commit until
+# 2026-08-30, and being FIRST was a hole: see .githooks/attest-lib.sh) - and this reads it
+# back.
 #
-# WHAT IT PROVES, AND WHAT IT DOES NOT. An attested tree means the checks passed for that
-# exact content. An UNATTESTED tree means one of:
+# IT READS BOTH LEDGER COLUMNS (2026-08-30, round 3). The ledger line is
+# "<tree> <message-digest> <iso> <branch>", and until this change NOTHING read the message
+# column - this script parsed field 0 and compared trees. A ledger column nothing reads is
+# not a control, and the gap was demonstrated rather than theorised: a message-only rewrite
+# against an already-attested tree
+#
+#     git -c core.hooksPath=/nonexistent commit --amend -m "OB1 -> deadbee1, pushed"
+#
+# left the tree attested, so this script printed "[OK] every commit's tree was validated"
+# and exited 0 - and queue.ps1 -Submit gates on exactly that exit code. The commit message
+# is the operator's audit surface under PLAN.md SS C.7 and the thing that carries the
+# gitlink-SHA claim CLAUDE.md makes hard, so that was the wrong column to leave unread.
+#
+# THE MESSAGE DIGEST IS OVER RAW STORED BYTES - the same rule .githooks/reference-transaction
+# applies live, so the two readers of this ledger cannot disagree about what a pair means.
+# The attester canonicalises the message FILE before hashing it (.githooks/attest-lib.sh),
+# which is what makes "attested bytes" and "stored bytes" the same bytes.
+#
+# WHAT IT PROVES, AND WHAT IT DOES NOT. An attested (tree, message) pair means the checks
+# passed for that exact content AND the commit still says what was validated. An UNATTESTED
+# commit means one of:
 #   - the commit was made with --no-verify (the case this exists for);
 #   - it was made before attestation shipped, or in a clone without core.hooksPath set;
-#   - a rebase/merge produced NEW content that no hook ever saw (conflict resolution).
+#   - a rebase/merge produced NEW content that no hook ever saw (conflict resolution);
+#   - its content was validated but its MESSAGE was rewritten afterwards.
 # It cannot tell those apart, and it does not pretend to - it reports what is unattested
 # and lets the caller decide. Being honest about that is what keeps it trustworthy.
 #
@@ -68,6 +91,77 @@ function Invoke-GitLines {
 }
 $script:GitDir = $RepoRoot
 
+# THE STORED MESSAGE, AS BYTES. Everything about this function is about not letting
+# PowerShell touch the bytes on the way past.
+#
+#   - "git cat-file commit <sha>", cutting everything through the first EMPTY line. NOT
+#     "git log -1 --format=%B", which appends a newline of its own and so hashes to a
+#     different blob than the one the hook attested - measured on four commits drawn from
+#     a 14-shape corpus, all four differed.
+#   - stdout is read as a RAW STREAM, not as a PowerShell string. PS 5.1 decodes native
+#     stdout using the console encoding, which mangles any message that is not pure ASCII.
+#   - the blob id is computed IN .NET, not by feeding the bytes back to
+#     "git hash-object --stdin". That was the first implementation and it was WRONG: 53
+#     bytes written to Process.StandardInput.BaseStream hashed to f2046d1f instead of
+#     3316699b, because the StreamWriter PowerShell wraps around that stream emits the
+#     console encoding's 3-byte UTF-8 preamble of its own accord. It is the repo's known
+#     "PS 5.1 prefixes a BOM when piping into a native process" trap wearing a different
+#     hat, and it produced a FALSE POSITIVE on an honest commit - caught only because the
+#     honest-commit control was run beside the forged one. The drill now pins the .NET
+#     implementation against "git hash-object" over a corpus, so the two cannot drift.
+#   - stderr is drained asynchronously so a chatty git cannot deadlock a full pipe.
+#
+# A signed commit is safe here: git writes multi-line headers (gpgsig) with every
+# continuation prefixed by a space, so the blank line inside an ASCII-armored signature is
+# stored as " " and is not the header/body separator. The drill exercises that against a
+# hand-built commit object carrying a gpgsig header.
+function Invoke-GitBytes {
+    param([string]$Arguments)
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = "git.exe"
+    $psi.Arguments = $Arguments
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    if ($script:GitDir) { $psi.WorkingDirectory = $script:GitDir }
+    $p = [System.Diagnostics.Process]::Start($psi)
+    $p.BeginErrorReadLine()
+    $ms = New-Object System.IO.MemoryStream
+    $p.StandardOutput.BaseStream.CopyTo($ms)
+    $p.WaitForExit()
+    return , $ms.ToArray()
+}
+
+# git's blob id: SHA of "blob <len>NUL<content>". The algorithm follows the repository's
+# object format so a SHA-256 repo is not silently judged with SHA-1 hashes it can never
+# match. Pinned against "git hash-object" by the drill.
+function Get-BlobId {
+    param([byte[]]$Bytes)
+    $hdr = [System.Text.Encoding]::ASCII.GetBytes("blob " + $Bytes.Length + [char]0)
+    $all = New-Object byte[] ($hdr.Length + $Bytes.Length)
+    [System.Array]::Copy($hdr, 0, $all, 0, $hdr.Length)
+    [System.Array]::Copy($Bytes, 0, $all, $hdr.Length, $Bytes.Length)
+    $alg = if ($script:ObjFormat -eq "sha256") { [System.Security.Cryptography.SHA256]::Create() }
+           else { [System.Security.Cryptography.SHA1]::Create() }
+    return (($alg.ComputeHash($all) | ForEach-Object { $_.ToString("x2") }) -join "")
+}
+
+function Get-StoredMessageDigest {
+    param([string]$Sha)
+    $obj = Invoke-GitBytes -Arguments ("cat-file commit " + $Sha)
+    if ($obj.Length -eq 0) { return "" }
+    # the first LF LF ends the header block
+    $split = -1
+    for ($i = 0; $i -lt $obj.Length - 1; $i++) {
+        if ($obj[$i] -eq 10 -and $obj[$i + 1] -eq 10) { $split = $i + 2; break }
+    }
+    if ($split -lt 0) { return "" }
+    $msg = New-Object byte[] ($obj.Length - $split)
+    [System.Array]::Copy($obj, $split, $msg, 0, $msg.Length)
+    return (Get-BlobId $msg)
+}
+
 # NO Set-Location ANYWHERE in this script. PowerShell's current location is SESSION-scoped,
 # so changing it here silently relocates whoever called us - which is not theoretical: an
 # earlier draft did exactly that and broke an unrelated assertion in
@@ -102,22 +196,34 @@ if ($AllowLedgerOverride -and $env:AI_STACK_ATTEST_LEDGER) {
     $ledgerPath = $env:AI_STACK_ATTEST_LEDGER
 }
 
-# The ledger is a set of attested tree hashes. It is append-only and one line per
-# validated tree; duplicates are expected (the same content committed twice) and harmless.
-$attested = @{}
+# The ledger is append-only, one line per validated commit-to-be:
+#     <tree> <message-digest> <iso-timestamp> <branch>
+# Duplicates are expected (the same content and message committed twice) and harmless.
+#
+# TWO MAPS, because two eras of ledger line exist on a long-lived machine. Lines written
+# before 2026-08-30 carry the TIMESTAMP in field 1, not a digest; they can support the tree
+# rule and cannot support the pair rule. Field 1 being object-id-shaped is what separates
+# them - not a date, which is exactly the caller-controlled thing this file refuses to gate
+# on anywhere else.
+$attested = @{}   # tree -> $true                (either era)
+$pairs    = @{}   # "<tree> <msg>" -> $true      (v2 lines only)
+$oidLen = 40
+$script:ObjFormat = (Invoke-GitLines @("rev-parse", "--show-object-format") | Select-Object -First 1)
+if ($script:ObjFormat -eq "sha256") { $oidLen = 64 }
+$oidRe = "^[0-9a-f]{$oidLen}$"
 if (Test-Path $ledgerPath) {
     foreach ($line in (Get-Content -Path $ledgerPath -ErrorAction SilentlyContinue)) {
-        # Only the tree hash is read. The timestamp column is kept in the ledger for a
-        # human reading it, but nothing branches on it any more - see the note at the
-        # exemption site for why a caller-controlled date cannot gate this.
-        $t = ($line -split '\s+')[0]
-        if ($t) { $attested[$t] = $true }
+        $f = @($line -split '\s+' | Where-Object { $_ })
+        if ($f.Count -lt 1) { continue }
+        if ($f[0] -notmatch $oidRe) { continue }
+        $attested[$f[0]] = $true
+        if ($f.Count -ge 2 -and $f[1] -match $oidRe) { $pairs[($f[0] + " " + $f[1])] = $true }
     }
 }
 
 # THE GUARD ACTIVATES PER BRANCH, from the branch's OWN hook.
 #
-# A branch whose .githooks/pre-commit does not write attestations CANNOT produce them, so
+# A branch whose attesting hook does not write attestations CANNOT produce them, so
 # demanding them would fail every honest commit on it. That is not hypothetical: it is what
 # happened the first time this ran - the merge-protocol drill creates its worktrees from the
 # main checkout, so they carry the MERGED hook, and the guard flagged the drill's own honest
@@ -167,7 +273,8 @@ if (-not (Test-Path $ledgerPath)) {
     } else {
         Write-Host "Hook attestation: INACTIVE - no ledger at $ledgerPath."
         Write-Host "  Nothing has been attested on this machine yet, so nothing can be judged."
-        Write-Host "  It starts recording on the next commit that runs .githooks/pre-commit."
+        Write-Host "  It starts recording on the next commit that runs .githooks/commit-msg,"
+        Write-Host "  which is the attester (it was .githooks/pre-commit before 2026-08-30)."
     }
     exit 0
 }
@@ -192,11 +299,44 @@ $revs = Invoke-GitLines $revArgs
 $unattested = @()
 $checked = 0
 
+# THE MESSAGE HALF ACTIVATES PER COMMIT, FROM THE HOOK THAT COULD HAVE RUN FOR IT.
+#
+# The hook that validated commit C is the one in C's FIRST PARENT's tree - the commit that
+# INTRODUCES a new attester is itself made by the old one. So the pair rule is demanded of a
+# commit only when its parent already carried the v2 library. Anything older is judged by
+# the tree rule alone, which is what it was able to produce.
+#
+# This is deliberately the same shape as the two activation gates above: read out of
+# committed history, never out of the environment or a date. A submitter who wanted to
+# escape the message rule this way would have to rewrite the parent chain - which changes
+# every SHA on the branch, and is refused live by .githooks/reference-transaction anyway.
+# THE TOKEN IS THE CONTRACT: .githooks/attest-lib.sh carries "ATTEST-FORMAT: v2" and the
+# drill asserts that the shipped library still carries the literal string this looks for, so
+# the two cannot drift into a silently-inactive gate.
+$v2Cache = @{}
+function Test-V2Attester {
+    param([string]$Sha)
+    $parent = (Invoke-GitLines @("rev-parse", "-q", "--verify", "$Sha^1") | Select-Object -First 1)
+    if (-not $parent) { return $false }
+    if ($v2Cache.ContainsKey($parent)) { return $v2Cache[$parent] }
+    $lib = (Invoke-GitLines @("show", "${parent}:.githooks/attest-lib.sh")) -join "`n"
+    $ok = [bool]($lib -match 'ATTEST-FORMAT:\s*v2')
+    $v2Cache[$parent] = $ok
+    return $ok
+}
+
 foreach ($sha in $revs) {
     if (-not $sha) { continue }
     $checked++
     $tree = (Invoke-GitLines @("rev-parse", "$sha^{tree}") | Select-Object -First 1)
-    if ($tree -and $attested.ContainsKey($tree)) { continue }
+    $why = "tree"
+    if ($tree -and $attested.ContainsKey($tree)) {
+        if (-not (Test-V2Attester $sha)) { continue }
+        # v2: the tree is not enough. The commit must still SAY what was validated.
+        $md = Get-StoredMessageDigest $sha
+        if ($md -and $pairs.ContainsKey("$tree $md")) { continue }
+        $why = "message"
+    }
 
     # NO DATE-BASED EXEMPTION. There used to be one: commits whose committer date preceded
     # the ledger's first entry were skipped, so that a branch predating attestation was not
@@ -207,13 +347,13 @@ foreach ($sha in $revs) {
     #
     # Nothing is lost by removing it, because the ADOPTION problem it was solving is
     # already handled better upstream: the per-branch activation gate skips any branch
-    # whose own .githooks/pre-commit cannot attest, and that hook is read from the BRANCH,
-    # not from the environment. A branch that can attest has no excuse for a commit that
-    # is not attested.
+    # whose own attesting hook (.githooks/commit-msg, or .githooks/pre-commit before the
+    # 2026-08-30 move) cannot attest, and that hook is read from the BRANCH, not from the
+    # environment. A branch that can attest has no excuse for a commit that is not attested.
     $subject = (Invoke-GitLines @("log", "-1", "--format=%s", $sha) | Select-Object -First 1)
     $parents = (Invoke-GitLines @("log", "-1", "--format=%P", $sha) | Select-Object -First 1)
     $isMerge = (($parents -split '\s+' | Where-Object { $_ }).Count -gt 1)
-    $unattested += [pscustomobject]@{ Sha = $sha; Tree = $tree; Subject = $subject; IsMerge = $isMerge }
+    $unattested += [pscustomobject]@{ Sha = $sha; Tree = $tree; Subject = $subject; IsMerge = $isMerge; Why = $why }
 }
 
 if ($Json) {
@@ -224,7 +364,7 @@ if ($Json) {
         mergesChecked = $mergeGateActive
         ledger      = $ledgerPath
         ledgerFound = (Test-Path $ledgerPath)
-        unattested  = @($unattested | ForEach-Object { @{ sha = $_.Sha; tree = $_.Tree; subject = $_.Subject; isMerge = $_.IsMerge } })
+        unattested  = @($unattested | ForEach-Object { @{ sha = $_.Sha; tree = $_.Tree; subject = $_.Subject; isMerge = $_.IsMerge; why = $_.Why } })
     } | ConvertTo-Json -Depth 5 -Compress
     exit ($(if ($unattested.Count) { 1 } else { 0 }))
 }
@@ -232,14 +372,25 @@ if ($Json) {
 Write-Host ("Hook attestation: {0} commit(s) on {1} not in {2} ({3})" -f $checked, $Branch, $Base, $(if ($mergeGateActive) { "merges included" } else { "merges skipped - no pre-merge-commit at the fork point" }))
 Write-Host ("  ledger: {0}{1}" -f $ledgerPath, $(if (Test-Path $ledgerPath) { "" } else { "  (NOT FOUND)" }))
 if ($unattested.Count -eq 0) {
-    Write-Host "  [OK] every commit's tree was validated by the pre-commit hooks." -ForegroundColor Green
+    Write-Host "  [OK] every commit's content AND message were validated by the hooks." -ForegroundColor Green
     exit 0
 }
 
 Write-Host ""
-Write-Host ("  [UNATTESTED] {0} commit(s) - the pre-commit hooks did not validate this content:" -f $unattested.Count) -ForegroundColor Red
+Write-Host ("  [UNATTESTED] {0} commit(s) - the hooks did not validate this:" -f $unattested.Count) -ForegroundColor Red
 foreach ($u in $unattested) {
-    Write-Host ("    {0}{1}  {2}" -f $u.Sha.Substring(0, 8), $(if ($u.IsMerge) { " (merge)" } else { "" }), $u.Subject) -ForegroundColor Red
+    $what = if ($u.Why -eq "message") { " [MESSAGE REWRITTEN AFTER VALIDATION]" } else { "" }
+    Write-Host ("    {0}{1}{2}  {3}" -f $u.Sha.Substring(0, 8), $(if ($u.IsMerge) { " (merge)" } else { "" }), $what, $u.Subject) -ForegroundColor Red
+}
+if ($unattested | Where-Object { $_.Why -eq "message" }) {
+    Write-Host ""
+    Write-Host "  A commit marked MESSAGE REWRITTEN has content the hooks DID validate, under a"
+    Write-Host "  message they never saw - the shape of a --no-verify amend against an already"
+    Write-Host "  attested tree. The message is what a reviewer reads to check a gitlink bump,"
+    Write-Host "  so this is not cosmetic. Re-commit it so the hooks see the message that will"
+    Write-Host "  actually be stored:"
+    Write-Host ""
+    Write-Host "    git commit --amend -c HEAD            # no --no-verify"
 }
 Write-Host ""
 Write-Host "  The usual cause is `git commit --no-verify`. Never use it: the checks it skips"

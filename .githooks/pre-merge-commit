@@ -18,10 +18,16 @@
 # on the other is exactly the shape check-llm-gateway-routing.ps1 exists to catch, and
 # neither commit alone contains it.
 #
-# It DELEGATES rather than duplicating. Two copies of a five-check list drift, and the
-# copy that drifts is the one nobody looks at. `git write-tree` inside a clean merge yields
-# the merge tree, so pre-commit's attestation step records exactly the right object with no
-# special-casing.
+# It DELEGATES rather than duplicating. Two copies of a five-check list drift, and the copy
+# that drifts is the one nobody looks at.
+#
+# IT NO LONGER ATTESTS ANYTHING, and this comment used to say it did ("pre-commit's
+# attestation step records exactly the right object"). Attestation moved out of pre-commit
+# on 2026-08-30 - being the FIRST hook was the hole - and lives in .githooks/commit-msg.
+# git DOES invoke commit-msg for a clean merge, with .git/MERGE_MSG, so the merge tree and
+# its message are attested there; `git write-tree` at that point yields the merge tree with
+# no special-casing. Measured by scripts/agent-harness/verify-commit-path-guard.ps1 steps 5
+# and 12.5 ("a CLEAN merge").
 #
 # Activate in a fresh clone with:  git config core.hooksPath .githooks
 exec "$(dirname "$0")/pre-commit"

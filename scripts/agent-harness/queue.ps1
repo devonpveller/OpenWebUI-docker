@@ -441,13 +441,18 @@ if ($Submit) {
             $report = $null
             try { $report = $attestOut | ConvertFrom-Json } catch { }
             $offenders = if ($report) {
-                (@($report.unattested) | ForEach-Object { "    $($_.sha.Substring(0,8))  $($_.subject)" }) -join "`n"
+                (@($report.unattested) | ForEach-Object { "    $($_.sha.Substring(0,8))  [why=$($_.why)]  $($_.subject)" }) -join "`n"
             } else { "    (could not parse the checker's report)" }
-            Die (("'{0}' has commit(s) the pre-commit hooks never validated:`n{1}`n`n" +
+            Die (("'{0}' has commit(s) the hooks never validated:`n{1}`n`n" +
                   "The hooks are the secret guard, the line-ending rule, the LLM-gateway " +
                   "routing rule and the compose/ps1 structural check. Each exists because it " +
                   "caught a real failure, and --no-verify skips all four while leaving no " +
                   "trace in the repo - which is why this is checked here rather than trusted.`n`n" +
+                  "A commit listed with why=message is a DIFFERENT fault: its content WAS " +
+                  "validated and its MESSAGE was rewritten afterwards, which is the shape of " +
+                  "a --no-verify amend against an already-attested tree. The message is what " +
+                  "a reviewer reads to check a gitlink bump, so re-commit it with " +
+                  "`"git commit --amend -c HEAD`" (no --no-verify).`n`n" +
                   "REMEDY - re-commit the same content so the hooks run:`n" +
                   "    git commit --amend --no-edit                      # the tip commit`n" +
                   "    git rebase --exec 'git commit --amend --no-edit' {2}`n`n" +

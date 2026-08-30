@@ -35,8 +35,26 @@
 # attestation used to be written by pre-commit, which runs BEFORE commit-msg, so a message
 # refused by commit-msg left its tree attested and the immediate `--no-verify` retry was
 # waved through - unstopped AND unaudited. The attester moved to commit-msg, the last hook
-# that can veto. Reproduction, measurement and the normalisation rule that keeps the two
-# sides in agreement: .githooks/attest-lib.sh.
+# that can veto.
+#
+# THE MESSAGE DIGEST IS OVER RAW STORED BYTES (2026-08-30, round 3), and the round before
+# it was not - which was a hole of its own. Both sides used to hash a REDUCTION of the
+# message (cut the scissors block, `git stripspace --strip-comments`), so any text that
+# reduction discarded but git stored was an unguarded rewrite channel:
+#
+#   git commit --amend --no-verify -m '# <lie>
+#   <the already-attested subject>'
+#       -> exit 0, HEAD MOVED, no guard line, and `git log --oneline` shows the '#' line as
+#          the SUBJECT. `-m` selects cleanup=whitespace; git stores '#' lines verbatim.
+#
+# Rather than teach this hook the two spellings that were found ('#' lines, a scissors
+# block), the reduction was removed from the verify side entirely: .githooks/commit-msg now
+# CANONICALISES the message file before attesting it, so the attested bytes ARE the stored
+# bytes and this hook hashes what git stored with no transformation. A future spelling has
+# nowhere to hide, because nothing is discarded. The fixed-point invariant that makes it
+# safe - canonical output survives every cleanup mode git can apply - is enumerated and
+# executed by scripts/agent-harness/verify-commit-path-guard.ps1, not asserted here.
+# Reproduction and reasoning: .githooks/attest-lib.sh.
 #
 # WHAT IS DELIBERATELY NOT CHECKED, because a guard that fires on honest work gets
 # switched off and then protects nothing (the lesson check-hook-attestation.ps1 paid for):
@@ -59,8 +77,8 @@
 #
 # WHAT IT CANNOT STOP, stated plainly because a guard oversold is a guard mistrusted, and
 # because a boundary asserted in prose is exactly how one gets oversold. Every route below
-# is MEASURED by scripts/agent-harness/verify-commit-path-guard.ps1 (step 11), which also
-# records, for each one, whether a guard-log line is written and whether the resulting
+# is MEASURED by scripts/agent-harness/verify-commit-path-guard.ps1 (steps 13 and 14), which
+# also records, for each one, whether a guard-log line is written and whether the resulting
 # commit is still caught after the fact by scripts/checks/check-hook-attestation.ps1 - the
 # check queue.ps1 -Submit runs. The agent runs as the operator's own user with the real
 # git.exe, so there is no privilege boundary here to hide a policy behind. The honest
@@ -92,9 +110,14 @@
 #       A forged .git file is indistinguishable from a real one to a hook that can only
 #       read .git.
 #   R6  git commit --amend --no-verify --no-edit         LANDS. no guard line. ATTESTED.
-#       The one --no-verify shape that survives, and the reason it is allowed to: the tree
-#       AND the message are unchanged, so the attestation genuinely covers this commit. It
-#       can re-parent and re-date; it cannot alter what the commit says or what it holds.
+#       The one --no-verify shape that survives, and the reason it is allowed to: --no-edit
+#       reuses the stored message byte for byte and the index is unchanged, so the ledger
+#       pair genuinely covers the new commit object. It re-parents and re-dates.
+#       ITS BOUND IS NARROW AND MEASURED, not argued: swap --no-edit for -m or -F and the
+#       stored bytes differ from the attested bytes, so it is refused - including every
+#       shape that used to slip past the old reduction (a leading '#' line, a '#' line
+#       anywhere, a scissors block with prose under it, trailing whitespace, CRLF, extra
+#       blank runs). Those are drill step 12, each one red.
 #
 # WHAT IS *NOT* A ROUTE, contrary to the obvious guess: deleting the ledger. This guard
 # fails CLOSED - a missing ledger denies everything with reason=no-ledger. It is
@@ -102,8 +125,10 @@
 # two mechanisms fail in OPPOSITE directions and that is worth keeping.
 #
 # R1-R5 all leave the commit UNATTESTED, and that is what check-hook-attestation.ps1 reads
-# at the submit gate. So none of them is invisible: what they escape is the guard LOG, not
-# the audit. What changed is cost and trace - `--no-verify` was one word that left no
+# at the submit gate - which since 2026-08-30 reads the MESSAGE column too, so a hooks-off
+# message rewrite against an attested tree (the one shape that used to print "[OK] every
+# commit's tree was validated") is caught there as well. So none of them is invisible: what
+# they escape is the guard LOG, not the audit. What changed is cost and trace - `--no-verify` was one word that left no
 # evidence at all; each surviving route is a deliberate, separately-visible command that
 # still surfaces at the gate. Full table: documentation/notes/u5proxy-findings.md.
 #
@@ -161,6 +186,9 @@ while read -r old new ref; do
     # attester applied to the message FILE. One definition, in attest-lib.sh: if the two
     # sides ever disagreed, the guard would either deny honest commits or wave a rewrite
     # through, so they are not allowed to be two pieces of code.
+    # RAW STORED BYTES. No reduction, no normalisation - see the header: a reduction is a
+    # channel, and this one was used. The attester canonicalised the file so that these
+    # bytes and the attested bytes are the same bytes.
     msg=$(_attest_digest_commit "$new")
     if [ -n "$msg" ] && [ -f "$ledger" ] && grep -q "^$tree $msg " "$ledger" 2>/dev/null; then
         continue

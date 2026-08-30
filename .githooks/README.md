@@ -34,8 +34,8 @@ the working tree or the vendored/data directories.
 | Hook | Does |
 |---|---|
 | `pre-merge-commit` | Runs the same list for a **clean** merge, whose tree `git commit` never sees. It `exec`s `pre-commit` rather than duplicating it |
-| `commit-msg` | Two jobs. (1) When a submodule gitlink is staged, every SHA-shaped token in the message must resolve to a real commit — a bump may not name a commit that does not exist. (2) **It is the attester**: as its last act it appends `<tree> <message-digest>` to `<git-common-dir>/hook-attest.log`. Being LAST is the point — nothing after it can veto, so an abort anywhere in the chain leaves nothing attested |
-| `attest-lib.sh` | Not a hook. The one definition of the (tree, message) attestation, shared by the attester and the guard so they cannot drift apart |
+| `commit-msg` | Three jobs, in this order. (1) **It canonicalises the message file** — cuts the scissors block, strips comment lines and trailing whitespace — so that what it attests is byte-for-byte what git will store. (2) When a submodule gitlink is staged, every SHA-shaped token in the (canonical) message must resolve to a real commit — a bump may not name a commit that does not exist. (3) **It is the attester**: as its last act it appends `<tree> <message-digest> <iso> <branch>` to `<git-common-dir>/hook-attest.log`. Being LAST is the point — nothing after it can veto, so an abort anywhere in the chain leaves nothing attested |
+| `attest-lib.sh` | Not a hook. The one definition of the (tree, message) attestation, shared by the attester and **both** verifiers so they cannot drift apart. It carries the `ATTEST-FORMAT: v2` token that gates the message rule |
 | `reference-transaction` | The **commit-path guard** — see below |
 
 ## `reference-transaction` — the commit-path guard
@@ -58,7 +58,9 @@ exit non-zero at `prepared`
 ```
 
 So the rule is: **a `refs/heads/*` ref may not be advanced to a commit whose (tree,
-message) pair is not in the attestation ledger.** The refusal is appended to
+message) pair is not in the attestation ledger** — where the message digest is over the
+**raw bytes git stored**, with no normalisation on the verify side at all. The refusal is
+appended to
 `<git-common-dir>/hook-guard.log` (`scripts/agent-harness/verify-commit-path-guard.ps1
 -Audit` prints it).
 
@@ -87,13 +89,82 @@ and both are drill steps 11 and 11.5. `--no-verify` skips `pre-commit` and `comm
 together, so there is no way to reach the attester without passing everything in front of
 it.
 
-Honest work is deliberately untouched — ref *moves* (branch creation, `reset`,
+### ... and hashing a *reduction* of the message was the next hole
+
+That first version digested a **reduction** of the message on both sides — cut the
+`commit -v` scissors block, then `git stripspace --strip-comments` — and claimed the
+reduction was idempotent, so a rewrite could not hide in it. It was not. **Any text a
+reduction discards but git stores is an unguarded rewrite channel**, and a verifier used
+one in a single command (2026-08-30, git 2.49.0.windows.1):
+
+```
+git commit --amend --no-verify -m '# OB1 -> deadbee1, pushed before this bump
+<the already-attested subject>'
+    -> exit 0. HEAD MOVED. No line in hook-guard.log.
+       git log --oneline shows the '#' line AS THE SUBJECT.
+```
+
+`-m` and `-F` select `cleanup=whitespace`, under which git stores `#` lines **verbatim** —
+while the verifier threw them away before hashing. A scissors line with prose under it was
+a second spelling of the same gap.
+
+**Patching those two spellings would have been round 4.** The reduction is gone from the
+verify side instead: `commit-msg` **rewrites the message file** to its canonical form
+before attesting it, and both verifiers hash the stored bytes untouched. There is nothing
+left to discard, so there is nowhere for a future spelling to hide — the property is a
+consequence of the code's shape, not of a list of shapes anyone thought of.
+
+That trade is real and worth stating plainly: comment lines and scissors blocks are now
+removed from every commit message this repo makes, including the `# Conflicts:` block git
+keeps when a conflicted merge is committed with `--no-edit`. The hook says so on stderr
+whenever it changes anything.
+
+The invariant it rests on — **the canonical form is a fixed point of every cleanup mode
+git can apply** — is not asserted anywhere. It is enumerated and executed by drill step
+12.5 across `-m`, `-F`, the editor path, all five `--cleanup` modes, a non-ASCII message, a
+partial commit, a clean merge and a conflicted merge. If a future git broke it, honest
+commits would start being refused and that step goes red first.
+
+### The submit gate reads the message column too
+
+`check-hook-attestation.ps1` used to parse field 0 of the ledger and compare trees, and
+**nothing read the message column**. A ledger column nothing reads is not a control: a
+message-only rewrite leaves the tree attested, so the gate printed `[OK] every commit's
+tree was validated` and exited 0 — and `queue.ps1 -Submit` gates on exactly that exit
+code. It now requires the **pair**, computing the stored-message digest byte-exactly, and
+reports such a commit as `[MESSAGE REWRITTEN AFTER VALIDATION]`. Drill step 12.7 drives it
+end to end, against a forged commit and against an honest one.
+
+The message rule activates **per commit, from the attester in that commit's first parent**
+(the commit that introduces a new attester is itself made by the old one). A commit whose
+parent predates `ATTEST-FORMAT: v2` is judged by the tree rule alone, which is all it was
+able to produce. Like the other activation gates here, that is read out of committed
+history — never from a date or an environment variable.
+
+### Why completeness is a test here and not a claim
+
+Three rounds of this item died the same way: the reported defect was genuinely fixed, and a
+verifier then walked through the neighbouring case — a different channel, a different
+spelling, a different door. Enumerate-and-patch loses. Two drill steps exist to make
+omission impossible rather than unlikely:
+
+- **12.5** enumerates every way git can store a message and requires the canonical form to
+  survive all of them. A storage path that broke the equality fails there.
+- **12.8** enumerates, with `git grep`, every tracked non-doc file that touches the ledger
+  and requires each to be **registered with a role** — and every file registered as a
+  *verifier* to name a check in that same run which proved it refuses a forgery. Add a new
+  reader and forget to guard it, and this step goes red. That is exactly the defect that
+  produced this round.
+
+### Honest work is deliberately untouched
+
+Honest work is untouched — ref *moves* (branch creation, `reset`,
 fast-forward, `git worktree add -b`), partial commits (`git commit -- path`, where git
 hands the hooks a temporary index), clean and conflicted merges, and anything the
 sequencer replays (`rebase`, `cherry-pick`, `revert`, for which git runs no `pre-commit`
 at all). Sequencer skips are logged rather than passed silently, and
 `check-hook-attestation.ps1` still reports them at merge time. The
-[**commit-path drill runs 66 checks**](../scripts/agent-harness/verify-commit-path-guard.ps1),
+[**commit-path drill runs 113 checks**](../scripts/agent-harness/verify-commit-path-guard.ps1),
 carries a negative control — with the hook removed, the same bypass succeeds — and
 executes every row of the table below.
 
@@ -104,8 +175,9 @@ privilege boundary to hide a policy behind. This guard **closes the cheap route 
 prices the rest**; it is not a containment wall. An earlier version of this page said
 `git commit --no-verify` "no longer works" and that `--amend --no-verify` was "refused"
 full stop, and enumerated two survivors. A reviewer measured three more. Every row below
-is now executed by step 12 of the drill, including the two columns that matter most:
-whether a guard-log line is written, and whether the commit is still **UNATTESTED** —
+is now executed by step 13 of the drill (R3 by step 14, which is also the negative
+control), including the two columns that matter most: whether a guard-log line is
+written, and whether the commit is still **UNATTESTED** —
 which is what `scripts/checks/check-hook-attestation.ps1` reads, and `queue.ps1 -Submit`
 runs it.
 
@@ -116,7 +188,7 @@ runs it.
 | R3 | `rm .githooks/reference-transaction` then `git commit --no-verify` | yes | no line | yes — UNATTESTED |
 | R4 | committing in a worktree whose **branch** does not carry `.githooks/reference-transaction` | yes | no line | yes — UNATTESTED |
 | R5 | `git rev-parse HEAD > "$(git rev-parse --git-dir)/CHERRY_PICK_HEAD"` then `git commit --no-verify` | yes | `SKIP-SEQUENCER` | yes — UNATTESTED |
-| R6 | `git commit --amend --no-verify --no-edit` | yes | no line | n/a — tree **and** message unchanged, so the attestation covers it |
+| R6 | `git commit --amend --no-verify --no-edit` | yes | no line | n/a — tree **and** stored message unchanged, so the attestation covers it |
 
 Notes that the table cannot carry:
 
@@ -137,18 +209,26 @@ Notes that the table cannot carry:
   runs no `pre-commit` for replayed commits, so a rebase can never be attested and demanding
   it would refuse every reviewer rebase in `MERGE-PROTOCOL.md`. A hook that can only read
   `.git` cannot tell a forged `CHERRY_PICK_HEAD` from a real one. **This residue is open.**
-- **R6** is bounded and the bound is load-bearing: the same shape on an **unattested** commit
-  is refused, so it cannot launder a commit that arrived via R1/R3/R5. It can re-parent and
-  re-date; it cannot change what the commit says or holds.
+- **R6** is bounded and the bound is load-bearing in two directions, both measured. The
+  same shape on an **unattested** commit is refused, so it cannot launder a commit that
+  arrived via R1/R3/R5 (step 13). And it is `--no-edit` **only**: swap in `-m` or `-F` and
+  the stored bytes stop matching the attested bytes, so it is refused — including every
+  shape that slipped past the old reduction (step 12, six of them). What R6 can do is
+  re-parent and re-date.
 
 Deleting the ledger is **not** a route: the guard fails closed (`reason=no-ledger`). It
 is the *detector* that a deleted ledger neutralises — `check-hook-attestation.ps1`
 reports INACTIVE with no ledger — so the two mechanisms fail in opposite directions.
 
-What changed is cost and trace: `--no-verify` was one word that left no evidence at all,
-and it is now closed on every shape that alters content or message. R1–R5 all still
-surface at the submit gate as UNATTESTED commits; what they escape is the guard **log**,
-not the audit. The full boundary, with the commands that produce it, is in
+What changed is cost and trace. `--no-verify` was one word that left no evidence at all;
+every `--no-verify` shape that alters the tree or the stored message is now refused with an
+audit line, and those shapes are executed by drill steps 2, 4, 5, 11, 11.5 and 12 rather
+than listed here. **R1-R5 are not closed** — they turn the hooks off or delete them, and no
+hook can prevent that — but each is a separate, visible command, and each still surfaces at
+the submit gate: R1-R5 as UNATTESTED content, and a hooks-off *message* rewrite (which
+leaves the tree attested) as `[MESSAGE REWRITTEN AFTER VALIDATION]`, since the gate started
+reading the message column. What they escape is the guard **log**, not the audit. The full
+boundary, with the commands that produce it, is in
 `documentation/notes/u5proxy-findings.md`.
 
 ## Why the secret guard exists
