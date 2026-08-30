@@ -30,6 +30,7 @@ Everything else in here is internal and may change without notice.
 | `verify-merge-protocol.ps1` | the executable drill over the whole protocol |
 | `harness.config.json` | the configuration (see below) |
 | `config.py` | the reader other Python code imports (`bridge.py` does) |
+| `quadrant/` | the runner x target comparison - its own submodule with its own boundary, see [quadrant/MODULE.md](quadrant/MODULE.md). The first executable CONSUMER of the runner axis: everything else resolves a runner and nothing runs one. |
 
 Internal: `common.ps1` (composition root), `git-io.ps1` (git facts), `resolve.ps1`
 (policy), `config.ps1` (settings), `anchor.ps1` (the anchor's shape and validation).
@@ -138,3 +139,4 @@ work — check with `git worktree list` before deleting it.
 - [HARNESS-V2-PLAN.md](../../documentation/implementation-guide/multi-agent-concurrency/HARNESS-V2-PLAN.md) — anchors, runners, profiles, this boundary
 - [MERGE-PROTOCOL.md](../../documentation/implementation-guide/multi-agent-concurrency/MERGE-PROTOCOL.md) — the agent-facing protocol
 - [README.md](README.md) — day-to-day usage and the gotchas found while building it
+- [quadrant/MODULE.md](quadrant/MODULE.md) - the runner x target quadrant comparison (dark-factory U4)

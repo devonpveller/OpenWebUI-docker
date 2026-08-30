@@ -9,9 +9,7 @@
     "harness.local.json beside it."
   ],
   "version": 1,
-
   "enabled": true,
-
   "surfaces": {
     "extension": {
       "enabled": true,
@@ -26,9 +24,7 @@
       "_note": "switchable in a thread with 'profile: <name>', the same shape as the existing 'model:' and 'worktree:' directives."
     }
   },
-
   "default_profile": "all-cloud",
-
   "runners": {
     "claude-code": {
       "kind": "claude-code",
@@ -49,36 +45,115 @@
       "events_path": "/tasks/{id}/events",
       "default_model": "local-default",
       "_note": "the local substrate: little-coder reaches llama-cpp through LiteLLM. Wired and callable, but no work item has completed through it yet - do not read config support as a proven feature."
+    },
+    "fixture": {
+      "kind": "fixture",
+      "status": "self-test",
+      "_note": "scaffolding for the quadrant comparison's own proof: performs an item deterministically with no model at all. status 'self-test' is load-bearing - quadrant/schema.json's comparable_runner_statuses excludes it, so it can never appear in a decision table, and test_quadrant.py asserts no profile assigns a role to it."
     }
   },
-
+  "targets": {
+    "_comment": [
+      "The TARGET axis (PLAN 1 L3), orthogonal to the runner axis and living in",
+      "configuration rather than code: 'Nothing in the pipeline layer knows which",
+      "quadrant it is in.'"
+    ],
+    "self": {
+      "kind": "self",
+      "status": "proven",
+      "_note": "the org works on ai-stack itself: a worktree off the operator's loaded branch, plane leases for shared runtime, this repo's branch policy. The quadrant harness uses a DETACHED worktree so a comparison never leaves a branch behind."
+    },
+    "project": {
+      "kind": "project",
+      "status": "unproven",
+      "scratch_root": ".quadrant/scratch",
+      "_note": "the org pointed at an external project: agent-org's clone/workspace model, git-proxy containment, the GitHub App as the door. For a COMPARISON the workspace is a local disposable repo - a comparison must never be the first thing to touch a real target."
+    }
+  },
+  "quadrant": {
+    "_comment": [
+      "The runner x target comparison (PLAN 2, U4: 'same anchored item run per",
+      "quadrant (runner x target), outcomes compared'). Listing the axes here",
+      "rather than in code is what lets a fifth runner or a third target be a",
+      "config edit; the harness derives the matrix, and its report always renders",
+      "one row per configured cell whether or not that cell produced a record."
+    ],
+    "runners": [
+      "little-coder",
+      "claude-code"
+    ],
+    "targets": [
+      "self",
+      "project"
+    ],
+    "repeats": 1,
+    "_repeats_note": "1 means every cell is n=1 and the report says so in those words. Raise it to 2+ before treating any difference between quadrants as real.",
+    "results_dir": ".quadrant/runs",
+    "item": "u4-baseline",
+    "_results_dir_note": "NOT under .claude/. Measured 2026-08-30: a claude-code run whose workspace lived at .claude/quadrant-runs/.../workspace had every Write and Edit turned into a permission request - Claude Code treats .claude/ as a sensitive path - so the quadrant scored 1/2 on a task the model had already solved correctly in its reply. The harness would have been measuring its own directory choice."
+  },
   "profiles": {
     "all-cloud": {
       "_desc": "the default everywhere; all three roles on cloud opus",
-      "worker": { "runner": "claude-code", "model": "opus" },
-      "tester": { "runner": "claude-code", "model": "opus" },
-      "reviewer": { "runner": "claude-code", "model": "opus" }
+      "worker": {
+        "runner": "claude-code",
+        "model": "opus"
+      },
+      "tester": {
+        "runner": "claude-code",
+        "model": "opus"
+      },
+      "reviewer": {
+        "runner": "claude-code",
+        "model": "opus"
+      }
     },
     "all-local": {
       "_desc": "no cloud calls at all; needs the inference plane healthy",
-      "worker": { "runner": "little-coder", "model": "local-default" },
-      "tester": { "runner": "little-coder", "model": "local-default" },
-      "reviewer": { "runner": "little-coder", "model": "local-default" }
+      "worker": {
+        "runner": "little-coder",
+        "model": "local-default"
+      },
+      "tester": {
+        "runner": "little-coder",
+        "model": "local-default"
+      },
+      "reviewer": {
+        "runner": "little-coder",
+        "model": "local-default"
+      }
     },
     "local-work-cloud-review": {
       "_desc": "cheap production, expensive judgement - the reviewer is the last gate before a merge",
-      "worker": { "runner": "little-coder", "model": "local-default" },
-      "tester": { "runner": "little-coder", "model": "local-default" },
-      "reviewer": { "runner": "claude-code", "model": "opus" }
+      "worker": {
+        "runner": "little-coder",
+        "model": "local-default"
+      },
+      "tester": {
+        "runner": "little-coder",
+        "model": "local-default"
+      },
+      "reviewer": {
+        "runner": "claude-code",
+        "model": "opus"
+      }
     },
     "cloud-work-local-test": {
       "_desc": "expensive production, cheap verification - useful when the test plan is mechanical",
-      "worker": { "runner": "claude-code", "model": "opus" },
-      "tester": { "runner": "little-coder", "model": "local-default" },
-      "reviewer": { "runner": "claude-code", "model": "opus" }
+      "worker": {
+        "runner": "claude-code",
+        "model": "opus"
+      },
+      "tester": {
+        "runner": "little-coder",
+        "model": "local-default"
+      },
+      "reviewer": {
+        "runner": "claude-code",
+        "model": "opus"
+      }
     }
   },
-
   "pipeline": {
     "claim_ttl_minutes": 60,
     "anchor_required": true,
@@ -88,7 +163,6 @@
     },
     "_note": "the role -> state -> duty table stays in queue.ps1: it is behavior, not tuning. Turning a gate off here is an operator decision with a real cost, which is why both are listed explicitly rather than assumed."
   },
-
   "worktree": {
     "root": ".claude/worktrees",
     "dir_prefix": "wt-",
@@ -107,12 +181,16 @@
       "ConvertFrom-Json accepted it; Python json.loads did not - and this file has BOTH",
       "readers (config.ps1 and config.py), so it would have broken the bridge alone."
     ],
-    "env_files": [".env", ".env.test", "OB1/docker/.env",
-                  "OB1/recipes/daily-digest/.env", "OB1/recipes/email-history-import/.env",
-                  "agent-org/docker/.env"],
+    "env_files": [
+      ".env",
+      ".env.test",
+      "OB1/docker/.env",
+      "OB1/recipes/daily-digest/.env",
+      "OB1/recipes/email-history-import/.env",
+      "agent-org/docker/.env"
+    ],
     "test_image_tag_prefix": "wt-"
   },
-
   "leases": {
     "names_file": "lease-names.conf",
     "default_ttl_minutes": 30

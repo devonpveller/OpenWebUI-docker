@@ -1,0 +1,142 @@
+{
+  "version": 1,
+  "_why": [
+    "THE CONTRACT OF A QUADRANT COMPARISON, as data rather than as source.",
+    "",
+    "PLAN 2's U4 row is validated by 'same anchored item run per quadrant (runner x",
+    "target), outcomes compared'. The failure mode that ruins such a comparison is not a",
+    "wrong number - it is a MISSING quadrant read as an absent one. Two of four ran, the",
+    "report shows two rows, and it reads as a finished comparison. Everything in this file",
+    "exists to make that shape impossible to produce.",
+    "",
+    "THREE MECHANISMS, all enforced in record.py and report.py against this file:",
+    "",
+    "  1. THE REPORT IS BUILT FROM THE MATRIX, NEVER FROM THE RECORDS. Every quadrant the",
+    "     configuration defines gets a row. A quadrant with no record is rendered NOT RUN",
+    "     with 'no record produced', so a silently dropped quadrant cannot occur.",
+    "  2. EVIDENCE-GATED ADMISSION. A record claiming 'completed' is admitted into the",
+    "     comparison only if artifacts on disk attest it: timestamps, a workspace, a",
+    "     transcript, and acceptance entries each carrying the command run and its exit",
+    "     code. A status field is a claim; the evidence is what makes it a measurement.",
+    "     This is A6 (prose verification FALSIFIED) applied to the comparison itself.",
+    "  3. ONE ITEM, PROVEN BY DIGEST. Every record carries the sha256 of the item spec it",
+    "     ran. Records whose digests disagree are not comparable and are refused - that is",
+    "     the 'same anchored item' half of the U4 row, mechanized rather than assumed.",
+    "",
+    "COMPARABILITY IS A RUNNER PROPERTY. The fixture runner exists to prove this harness",
+    "end to end without an LLM. It must never appear in a decision table, so runner",
+    "statuses are split here: `comparable_runner_statuses` may be compared, everything",
+    "else is reported in a separate self-test lane."
+  ],
+  "statuses": {
+    "completed": {
+      "desc": "the runner finished and the acceptance checks were executed against its result",
+      "comparable": true,
+      "requires_evidence": true
+    },
+    "failed": {
+      "desc": "the runner finished but the acceptance checks did not all pass - a real, comparable outcome",
+      "comparable": true,
+      "requires_evidence": true
+    },
+    "error": {
+      "desc": "the harness itself broke while running the quadrant. NOT a result about the quadrant",
+      "comparable": false,
+      "requires_evidence": false
+    },
+    "not_run": {
+      "desc": "preflight refused the quadrant, or nothing ever dispatched it. Carries a reason, never a score",
+      "comparable": false,
+      "requires_evidence": false
+    }
+  },
+  "comparable_runner_statuses": [
+    "proven",
+    "unproven"
+  ],
+  "_comparable_runner_statuses_why": "a runner may be unproven and still produce a real, comparable outcome - that is exactly what U4 is measuring. A 'self-test' runner may not: it is scaffolding, and scaffolding in a decision table is a lie about where the number came from.",
+  "required_evidence_keys": [
+    "workspace",
+    "transcript"
+  ],
+  "_required_evidence_keys_why": "the workspace is where the work landed and the transcript is what the runner said while landing it. Both must EXIST on disk at admission time - a path in a JSON field proves nothing, and this check is the difference between an audited record and a decorated one.",
+  "required_acceptance_fields": [
+    "criterion",
+    "check",
+    "exit_code"
+  ],
+  "_required_acceptance_fields_why": "an acceptance result without the command and its exit code is a verdict with no way to re-derive it. PLAN C.7: only an executable check counts.",
+  "required_when_not_run": [
+    "not_run_reason"
+  ],
+  "_required_when_not_run_why": "the whole point. A quadrant that did not run must say why, in words, or it is indistinguishable from one nobody thought about.",
+  "runner_required_fields": [
+    "kind",
+    "status"
+  ],
+  "target_required_fields": [
+    "kind",
+    "status"
+  ],
+  "runner_kind_requirements": {
+    "claude-code": [],
+    "little-coder": [
+      "endpoint",
+      "submit_path"
+    ],
+    "fixture": []
+  },
+  "target_kind_requirements": {
+    "self": [],
+    "project": [
+      "scratch_root"
+    ]
+  },
+  "_kind_requirements_why": "a quadrant is misconfigured LOUDLY or not at all. A little-coder runner with no endpoint is not a runner that will fail at dispatch time and report NOT RUN - it is a configuration error, and the difference matters: NOT RUN is a fact about the world, a config error is a fact about the operator's file.",
+  "rounds_fields": {
+    "dispatch_attempts": "how many times the runner had to be handed the item before it produced anything",
+    "test_cycles": "acceptance evaluations performed - the harness's unit of iteration cost",
+    "operator_taps": "human interventions. The gym's central metric: every tap is an orchestration bug, so a quadrant that needs more of them is worse even when it finishes"
+  },
+  "cost_fields": {
+    "wall_seconds": "measured by the harness, always present",
+    "tokens": "reported by the runner where it reports them; null is honest, 0 is a lie",
+    "usd": "null unless the runner reports a real figure",
+    "gpu_seconds": "for local runners; null when unmeasured"
+  },
+  "decision_columns": [
+    {
+      "key": "acceptance_rate",
+      "why": "quality, normalized against the SAME executable criteria in every quadrant - the only reason one item is run four times"
+    },
+    {
+      "key": "wall_seconds",
+      "why": "cost in time, the figure an operator actually feels"
+    },
+    {
+      "key": "rounds",
+      "why": "cost in iterations and taps; a quadrant that converges in one round is worth more than the wall clock alone shows"
+    },
+    {
+      "key": "scope_violations",
+      "why": "did it stay inside the anchor's out_of_scope. A quadrant that finishes by doing extra work has not done the item"
+    },
+    {
+      "key": "containment",
+      "why": "mechanical (git-proxy, egress allowlist) vs normative (rules in a document). A7 says normative containment is FALSIFIED, so this column is a first-class input, not a footnote"
+    },
+    {
+      "key": "confidence",
+      "why": "repeats and variance. n=1 is not a basis for a decision and the report says so in those words rather than implying otherwise by silence"
+    }
+  ],
+  "min_repeats_for_variance": 2,
+  "item_plant_ignore": [
+    "__pycache__",
+    "*.pyc",
+    "*.pyo",
+    ".DS_Store",
+    "Thumbs.db"
+  ],
+  "_item_plant_ignore_why": "MEASURED 2026-08-30, not anticipated. pytest imported an item's fixture test file once, leaving files/__pycache__/ behind; item.load walked files/ with rglob and swept the .pyc into the planted set. Two consequences, both silent: the item DIGEST changed, so every record produced before that moment became 'a different item' and unadmittable; and the byte-compiled cache was then copied into every run workspace. An experiment whose control moves when someone runs the test suite is not a control."
+}

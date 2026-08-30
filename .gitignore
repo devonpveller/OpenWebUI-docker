@@ -84,3 +84,6 @@ documentation/issue-plans/
 # (Worktree/queue/lease state used to live in scripts/worktree/state/ and needed an ignore
 # rule. It now lives in <git-common-dir>/agent-worktrees/ so every worktree shares ONE
 # namespace - inside .git, which is never tracked, so no rule is needed.)
+
+# quadrant comparison run artifacts (evidence for a run, not source)
+.quadrant/
