@@ -31,7 +31,7 @@ Everything else in here is internal and may change without notice.
 | `verify-merge-protocol.ps1` | the executable drill over the whole protocol |
 | `verify-dispatch.ps1` | the executable drill over the dispatch layer (probes the REAL daemon by default; `-Offline` skips that and says so) |
 | `verify-oracle-on-stall.ps1` | the executable drill for frontier-oracle-on-stall - a CONSTRUCTED stall, seconds, no live planes |
-| `observe-oracle-on-stall.ps1` | the OBSERVATION: dispatches an unsatisfiable item to the live local runner N times and lets the detector judge the real rounds. Needs the coder plane, the coder lease and minutes - an experiment, never a CI check |
+| `observe-oracle-on-stall.ps1` | the OBSERVATION: dispatches an unsatisfiable item to the live local runner N times and lets the detector judge the real rounds. Needs the coder plane, the coder lease and minutes - an experiment, never a CI check. **Its verdict names the ledger row THIS run appended** (row ids are snapshot before the rounds), every queue and git call is exit-code checked, and each run takes a stamped item id and probe branch which it deletes - including on every refusal path. Exit 0 = observed, 1 = no escalation, 2 = misuse, 3 = a step failed and there is no verdict |
 | `oracle_on_stall.py` | the stall detector, the escalation, and its ledger (U4) |
 | `harness.config.json` | the configuration (see below) |
 | `config.py` | the reader other Python code imports (`bridge.py` does) |
