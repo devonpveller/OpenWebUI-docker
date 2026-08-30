@@ -252,3 +252,71 @@ def test_the_agreement_test_would_catch_real_drift(tmp_path):
     assert anchor_schema.problems(no_artifact, edited_schema) == []
     assert _ps_problems(no_artifact, schema_path=edited) == []
     anchor_schema.load(fresh=True)  # restore the cache for later tests
+
+
+# ── THE THIRD READER: agent-bridge, in its container ─────────────────────────
+# The finding this closes (documentation/notes/anchor-schema-findings.md F1) is explicit
+# that whichever delivery mechanism won, "the cross-reader test is what keeps it honest — it
+# must be extended to ask the CONTAINERISED reader the same questions, or the copy will
+# drift silently".
+#
+# There is no copy to drift: the bridge bind-mounts the same file. These tests exist anyway,
+# because "there is no copy" is a claim about a compose file that somebody can edit.
+
+import shutil
+import subprocess
+
+BRIDGE_IMAGE = "agent-bridge:local"
+
+
+def _docker_available() -> bool:
+    if not shutil.which("docker"):
+        return False
+    probe = subprocess.run(["docker", "image", "inspect", BRIDGE_IMAGE],
+                           capture_output=True, text=True)
+    return probe.returncode == 0
+
+
+def _bridge_problems(anchor: dict) -> list:
+    """Ask the reader INSIDE the bridge image, over the same mounts compose declares."""
+    schema = str((HERE / "anchor.schema.json").resolve())
+    reader = str((HERE / "anchor_schema.py").resolve())
+    code = (
+        "import sys,json;sys.path.insert(0,'/app/anchor');"
+        "import anchor_schema as a;"
+        "print(json.dumps(a.problems(json.load(sys.stdin))))"
+    )
+    out = subprocess.run(
+        ["docker", "run", "--rm", "-i",
+         "-v", f"{schema}:/app/anchor/anchor.schema.json:ro",
+         "-v", f"{reader}:/app/anchor/anchor_schema.py:ro",
+         BRIDGE_IMAGE, "python", "-c", code],
+        input=json.dumps(anchor), capture_output=True, text=True,
+    )
+    assert out.returncode == 0, f"containerised reader failed: {out.stderr[-400:]}"
+    return json.loads(out.stdout.strip().splitlines()[-1])
+
+
+@pytest.mark.skipif(not _docker_available(), reason="docker or agent-bridge:local unavailable")
+def test_the_containerised_reader_sees_the_schema_at_all():
+    """The delivery half. Before the mount, the bridge could not read the file at all.
+
+    The finding said it was unreachable "at build time and at run time". The build-time half
+    was right; a bind mount is a HOST path resolved at container start and has nothing to do
+    with the build context, which is why no copy was needed.
+    """
+    assert _bridge_problems(VALID_B) == []
+
+
+@pytest.mark.skipif(not _docker_available(), reason="docker or agent-bridge:local unavailable")
+def test_all_THREE_readers_report_the_same_problems():
+    """Not just the same verdict - the same PROBLEMS.
+
+    Two readers that agree on "invalid" while disagreeing on WHY have already drifted; the
+    existing two-reader test says so, and a third reader does not get a weaker bar.
+    """
+    for anchor in (VALID_B, {}, {"goal": "only a goal"}):
+        py = anchor_schema.problems(anchor)
+        ps = _ps_problems(anchor)
+        bridge = _bridge_problems(anchor)
+        assert py == ps == bridge, f"readers disagree on {anchor}: {py} / {ps} / {bridge}"

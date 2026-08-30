@@ -5,33 +5,32 @@ that belong to OTHER work. Checked against `work/dfu-anchor` at `d7d1676`.
 
 ---
 
-## F1 — the third reader has nowhere to read from
+## F1 — CLOSED 2026-08-30 — the third reader now reads the same file
 
-`agent-bridge` is the reader U2 actually needs (the `set_goal` seam consuming anchors), and
-it **cannot see the schema file**. Its build context is `../agent-bridge`
-(`agent-org/docker/docker-compose.yml`), and its Dockerfile copies only `app/ profiles/
-charters/ floor/ hooks/` — all inside `agent-org/agent-bridge/`. Docker cannot `COPY` from
-outside the context, so `scripts/agent-harness/anchor.schema.json` is unreachable from the
-image, at build time and at run time.
+`agent-bridge` bind-mounts `scripts/agent-harness/anchor.schema.json` and
+`anchor_schema.py` read-only at `/app/anchor/`. It reads **the same file** the harness does;
+there is no copy anywhere.
 
-This is why this item ships two host-side readers and stops there: a third reader is a
-*delivery* problem, not a parsing one, and solving it inside a schema item would have been
-the wrong shape.
+**The finding was wrong on one point, and that point was the whole problem.** It said the
+schema is unreachable "at build time and at run time" because the build context is
+`../agent-bridge`. The build-time half is right — Docker cannot `COPY` from outside the
+context. The run-time half is not: a bind mount is a **host path resolved by the daemon at
+container start**, and has nothing to do with the build context.
 
-Three options, none obviously right, all cheap to trial:
+That single wrong clause is why all three options weighed here carried a cost — generate-in
+adds a build step that can be forgotten, widening the context pulls in `OB1/` and every
+worktree, moving the canonical file touches the harness's stated module boundary. Each one
+assumed a copy had to exist somewhere. None had to.
 
-1. **Generate it in**, the way `agent-org/scripts/gen-worker-configs.py` already generates
-   per-worker little-coder configs from the canonical one. Precedent exists; adds a build
-   step that can be forgotten.
-2. **Widen the build context** to the repo root. Honest but expensive — the context would
-   include `OB1/`, `backups/`, every worktree.
-3. **Move the canonical schema** to a neutral shared directory that is inside both consumers'
-   reach, and have the harness read it from there. Cleanest conceptually; touches the
-   harness's module boundary (`MODULE.md` states its public surface).
+The cross-reader test now asks the containerised reader the same questions, as this finding
+required: `test_the_containerised_reader_sees_the_schema_at_all` (the delivery half) and
+`test_all_THREE_readers_report_the_same_problems`, which compares the PROBLEMS and not just
+the verdicts — two readers that agree on "invalid" while disagreeing on why have already
+drifted, and a third reader does not get a weaker bar. Both run against `agent-bridge:local`
+and skip only if Docker or the image is absent; verified as RUN, not skipped.
 
-Whichever wins, the cross-reader test is what keeps it honest — it must be extended to ask
-the *containerised* reader the same questions, or the copy will drift silently, which is
-exactly the failure `test_harness_config.py` was written to prevent.
+What this unblocks: the `set_goal` seam consuming anchors, which is the reader U2 actually
+needed and the reason this was a blocker rather than a tidy-up.
 
 ---
 
