@@ -164,21 +164,38 @@ that never happened.
 .\scripts\agent-harness\queue.ps1 -VerifyAudit -Id x    # is the trail complete? 0 / 1 / 7
 ```
 
-Three things are worth knowing before relying on it:
+Four things are worth knowing before relying on it:
 
 - **The board is currently RED on this repository**, and that is not a bug in the
-  board. `git-error-swallowed` names `Invoke-DrillGit` and `Get-DrillGit` in
-  `verify-merge-protocol.ps1`, and `work-branch-on-remote` names the eleven `work/*`
-  branches on `origin`. Both are the real conditions the board was built from. A
-  `dark` run will refuse to auto-pass until they are cleared — which is the andon
-  cord working, not a false alarm.
+  board. `git-error-swallowed` reports 18 unchecked git call sites across
+  `scripts/checks/*.ps1` and `scripts/agent-harness/*.ps1` — including
+  `Invoke-DrillGit` and `Get-DrillGit` in `verify-merge-protocol.ps1`, the incident's
+  own functions. `protected-ref-moved` is indeterminate until a run records a
+  baseline, and indeterminate is deliberately not a pass. A `dark` run refuses to
+  auto-pass until those clear — which is the andon cord working, not a false alarm.
+- **`work-branch-on-remote` narrows to the branch the run owns.** At a gate,
+  `Invoke-AutoGate` passes only `$item.branch`, so a `dark` run is blocked by *its
+  own* branch being on a remote, not by anybody else's. Run bare —
+  `andon.ps1 -Evaluate` with no `-RunBranch` — it asks the broader question, and today
+  it names the eleven `work/*` branches that reached `origin` on 2026-08-30. Both
+  readings are deliberate; only the narrow one gates a run.
 - **`-VerifyAudit` exit 7 is not a pass.** It means the check found items it could
   not audit (items predating the ledger). Coverage it does not have is not coverage.
+  Nor is a green a claim about gates an item never reached — it prints that scope.
 - **`auto:` is a reserved principal namespace.** `-ConfirmAnchor` and `-Approve`
   refuse a `-By` inside it (exit 4), and the auto path never signs as a person.
 
+**Switching the board off does not switch the gates back on.** `andon.enabled: false`,
+or deleting the `andon` block, makes a `dark` run halt at the first gate with
+`not-evaluated` recorded in the ledger — it removes the thing that was watching the
+machine, not the machine. The revert to prior behaviour is
+`pipeline.gate_profile: attended`.
+
 The whole mechanism has its own drill: `drill-dark-factory.ps1` shows every condition
 firing on a constructed instance and not firing on a clean one, runs the pipeline end
-to end with nobody at either gate, and proves the completeness check goes red on a
-tampered trail. It runs entirely in scratch repositories under `$env:TEMP` and never
-touches the operator's checkout.
+to end with nobody at either gate, proves the completeness check goes red on a tampered
+trail, and proves that turning the board off halts rather than opens. Every WRITE it
+makes is to a scratch repository under `$env:TEMP` with the config and state dir
+redirected; it makes exactly one READ of a real repository, by name — one case scans
+this checkout's own `.ps1` files so the detector is shown naming the incident's
+function in the code that actually shipped.

@@ -13,7 +13,12 @@
 #     refuses to accept from a human -By value, in either direction;
 #   - an auto-pass must carry the gate profile that authorised it AND the andon verdict at
 #     that moment - "the board was clear when nobody was looking" is the whole claim, and
-#     an auto record that cannot state it is incomplete by definition;
+#     an auto record that cannot state it is incomplete by definition. The verdict includes
+#     its COVERAGE (declared / evaluated / switched off), because the first version of this
+#     file recorded `andon.status=clear conditions=5` for a board with `andon.enabled=false`
+#     that had evaluated NOTHING - a record indistinguishable from five conditions that
+#     looked and found nothing. "Clear" now requires evaluated >= 1 and none switched off,
+#     and Test-GateAuditComplete re-checks that from the record rather than trusting the word;
 #   - a gate the board REFUSED to auto-pass also writes a record. An unattended run that
 #     halts must leave the halt in the trail, not a gap.
 #
@@ -22,7 +27,10 @@
 # gets skipped. Crossed gates are derived from THE ITEM'S OWN STATE, never from the ledger
 # - that is what makes a MISSING record detectable rather than invisible.
 
-$script:GateLedgerSchema = 1
+# Schema 2 (2026-08-30) added andon.repo and the andon coverage counters. A record that
+# predates it cannot state whether the board actually looked, and Test-GateAuditComplete says
+# so rather than assuming it did.
+$script:GateLedgerSchema = 2
 
 function Get-GateAuditDir {
     $dir = Join-Path (Get-SharedStateDir) ([string](Get-HarnessSetting "andon.ledger_dir_name" "audit"))
@@ -32,6 +40,13 @@ function Get-GateAuditDir {
 
 function Get-GateLedgerPath { return (Join-Path (Get-GateAuditDir) "gates.jsonl") }
 
+function New-UnavailableAndon([string]$reason) {
+    # A board that could not be RUN. Every counter is zero and the status is its own word, so
+    # nothing downstream can read it as a clear board.
+    return [ordered]@{ status = "unavailable"; repo = ""; conditions = 0; evaluated = 0
+                       disabled = 0; disabled_ids = @(); fired = @($reason) }
+}
+
 function Invoke-AndonForGate {
     # Run the board as a child process. andon.ps1 owns a CLI and a param() block, so it is
     # invoked rather than dot-sourced; that also keeps the board a single artifact an
@@ -40,11 +55,16 @@ function Invoke-AndonForGate {
     # A board that could not be RUN returns "unavailable", and callers treat that exactly
     # like "raised". A gate that opens because its check crashed is the skip-that-counts-
     # as-a-pass shape, and this file is not going to ship it.
+    #
+    # THE COVERAGE COUNTERS ARE THE POINT of this function's return value. `status` alone was
+    # what the first version returned, and `clear` covered three different worlds: five
+    # conditions evaluated ok, five switched off by `andon.enabled=false`, and no conditions
+    # declared at all. The record has to be able to tell them apart afterwards, so all of
+    # declared / evaluated / disabled travel with it - and `repo` too, so an auditor can see
+    # WHICH checkout the board was looking at.
     param([string[]]$RunBranches = @(), [string]$RepoRoot = "")
     $script = Join-Path $PSScriptRoot "andon.ps1"
-    if (-not (Test-Path $script)) {
-        return [ordered]@{ status = "unavailable"; conditions = 0; fired = @("andon.ps1 not found at $script") }
-    }
+    if (-not (Test-Path $script)) { return (New-UnavailableAndon "andon.ps1 not found at $script") }
     $exe = Join-Path $PSHOME "powershell.exe"
     if (-not (Test-Path $exe)) { $exe = "powershell" }
     $argv = @("-NoProfile", "-NonInteractive", "-File", $script, "-Evaluate", "-Json")
@@ -55,15 +75,33 @@ function Invoke-AndonForGate {
     try { $out = & $exe @argv 2>$null } finally { $ErrorActionPreference = $prev }
     $code = $LASTEXITCODE
     $text = ($out | Where-Object { $_ }) -join ""
-    if (-not $text) {
-        return [ordered]@{ status = "unavailable"; conditions = 0; fired = @("andon.ps1 produced no verdict (exit $code)") }
-    }
+    if (-not $text) { return (New-UnavailableAndon "andon.ps1 produced no verdict (exit $code)") }
     try { $v = ConvertFrom-Json $text }
-    catch { return [ordered]@{ status = "unavailable"; conditions = 0; fired = @("andon verdict was not JSON (exit $code)") } }
+    catch { return (New-UnavailableAndon "andon verdict was not JSON (exit $code)") }
+    if (-not ($v.PSObject.Properties.Name -contains "coverage")) {
+        # An andon.ps1 too old to report coverage cannot answer the question this record has
+        # to answer. Unavailable, not clear.
+        return (New-UnavailableAndon "andon verdict carries no coverage - it cannot say whether anything was evaluated")
+    }
     $fired = @($v.conditions | Where-Object { $_.action -eq "halt" } | ForEach-Object { "$($_.id): $($_.detail)" })
-    $status = "clear"
-    if ($v.board -ne "clear") { $status = "raised" }
-    return [ordered]@{ status = $status; conditions = @($v.conditions).Count; fired = @($fired) }
+    $status = "$($v.board)"
+    if (-not $status) { return (New-UnavailableAndon "andon verdict names no board state") }
+    # A board that is not clear but named no fired condition still has to say WHY, or the
+    # halt reaches the operator as a blank refusal.
+    if ($status -ne "clear" -and @($fired).Count -eq 0) {
+        $why = "$($v.why)"
+        if (-not $why) { $why = "the board is '$status' and named no reason" }
+        $fired = @($why)
+    }
+    return [ordered]@{
+        status       = $status
+        repo         = "$($v.repo)"
+        conditions   = [int]$v.coverage.declared
+        evaluated    = [int]$v.coverage.evaluated
+        disabled     = [int]$v.coverage.disabled
+        disabled_ids = @($v.coverage.disabled_ids)
+        fired        = @($fired)
+    }
 }
 
 function Write-GateLedgerLine($record) {
@@ -86,7 +124,12 @@ function Write-GateRecord {
         [string]$ToState = "",
         $Andon = $null
     )
-    if (-not $Andon) { $Andon = [ordered]@{ status = "not-evaluated"; conditions = 0; fired = @() } }
+    # NO VERDICT IS NOT A CLEAR ONE. A caller that passes nothing gets a record that says so
+    # in every field, which Test-GateAuditComplete then refuses for an auto-pass.
+    if (-not $Andon) {
+        $Andon = [ordered]@{ status = "not-evaluated"; repo = ""; conditions = 0; evaluated = 0
+                             disabled = 0; disabled_ids = @(); fired = @("no andon verdict was supplied") }
+    }
     $rec = [ordered]@{
         schema       = $script:GateLedgerSchema
         ts           = [int64][System.DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
@@ -131,10 +174,20 @@ function Get-CrossedGates($item) {
     # from the ledger, and deliberately not from the item's `gates` field: both are the
     # things being audited, and a check that reads its subject as its own oracle checks
     # nothing.
+    #
+    # THE ANCHOR GATE AND `pipeline.anchor_required`. This used to count the anchor gate as
+    # crossed only when the item CARRIED an anchor, which meant an item that advanced with no
+    # anchor at all crossed no anchor gate and could not be missing a record for it. With
+    # `anchor_required=true` - the shipped default - an item past `anchor-draft` has crossed
+    # the gate whether or not an anchor survives on it, and a missing anchor is itself the
+    # finding. With `anchor_required=false` the anchor gate is genuinely not a gate for an
+    # anchorless item, and -VerifyAudit says so in words rather than quietly counting a
+    # narrower 'complete'.
     $crossed = @()
+    $anchorRequired = [bool](Get-HarnessSetting "pipeline.anchor_required" $true)
     $hasAnchor = ($item.PSObject.Properties.Name -contains "anchor_file" -and $item.anchor_file) -or
                  ($item.PSObject.Properties.Name -contains "anchor" -and $item.anchor)
-    if ($hasAnchor -and $item.state -ne "anchor-draft") { $crossed += "anchor" }
+    if ($item.state -ne "anchor-draft" -and ($hasAnchor -or $anchorRequired)) { $crossed += "anchor" }
     if (@("ready-review", "reviewing", "merged") -contains $item.state) { $crossed += "pre_review" }
     return @($crossed)
 }
@@ -209,6 +262,25 @@ function Test-GateAuditComplete {
                 if ($rec.andon.status -ne "clear") {
                     $findings += ("'{0}' gate '{1}': auto-passed with andon status '{2}' - only 'clear' authorises an unattended pass" -f $item.id, $g, $rec.andon.status)
                 }
+                # AND THE WORD 'clear' IS RE-CHECKED AGAINST ITS OWN COUNTERS. A record may
+                # say clear because the board looked and found nothing, or because nobody
+                # looked; those were once the same bytes. A record that cannot state its
+                # coverage is incomplete by the rule at the top of this file, and one whose
+                # counters say nothing was evaluated - or that a condition was switched off -
+                # is not an authorised unattended pass however it is labelled.
+                $cov = $rec.andon
+                $hasCov = ($cov -and ($cov.PSObject.Properties.Name -contains "evaluated") -and
+                                     ($cov.PSObject.Properties.Name -contains "disabled"))
+                if (-not $hasCov) {
+                    $findings += ("'{0}' gate '{1}': the auto-pass record does not state the andon COVERAGE - it cannot distinguish a board that was clear from a board nobody looked at" -f $item.id, $g)
+                } else {
+                    if ([int]$cov.evaluated -lt 1) {
+                        $findings += ("'{0}' gate '{1}': auto-passed on a board that evaluated {2} of {3} condition(s) - nothing was checked" -f $item.id, $g, [int]$cov.evaluated, [int]$cov.conditions)
+                    }
+                    if ([int]$cov.disabled -gt 0) {
+                        $findings += ("'{0}' gate '{1}': auto-passed with {2} andon condition(s) switched off ({3}) - a board with a condition turned off is not a clear board" -f $item.id, $g, [int]$cov.disabled, (@($cov.disabled_ids) -join ", "))
+                    }
+                }
             }
             if ($rec.kind -eq "human" -and ("$($rec.principal)").StartsWith($prefix)) {
                 $findings += ("'{0}' gate '{1}': a human pass claims the reserved '{2}' principal namespace" -f $item.id, $g, $prefix)
@@ -232,7 +304,18 @@ function Test-GateAuditComplete {
 function Format-GateRecord($r) {
     $who = "$($r.principal)"
     $tag = ""
-    if ($r.kind -eq "auto") { $tag = "  <- NO HUMAN SAW THIS (profile '$($r.gate_profile)', andon $($r.andon.status))" }
+    if ($r.kind -eq "auto") {
+        # The coverage is printed, not just the word. "andon clear" reads as five conditions
+        # looking; "andon clear (0/5 evaluated)" reads as what it is.
+        $cov = ""
+        if ($r.andon -and ($r.andon.PSObject.Properties.Name -contains "evaluated")) {
+            $cov = " {0}/{1} evaluated" -f [int]$r.andon.evaluated, [int]$r.andon.conditions
+            if ([int]$r.andon.disabled -gt 0) { $cov += (", {0} switched off" -f [int]$r.andon.disabled) }
+        } else {
+            $cov = " coverage NOT STATED"
+        }
+        $tag = "  <- NO HUMAN SAW THIS (profile '$($r.gate_profile)', andon $($r.andon.status);$cov)"
+    }
     return ("{0}  {1,-12} {2,-10} {3,-6} {4}{5}" -f
             ([DateTimeOffset]::FromUnixTimeSeconds([int64]$r.ts).ToString("yyyy-MM-dd HH:mm:ss")),
             $r.item, $r.gate, $r.decision, $who, $tag)

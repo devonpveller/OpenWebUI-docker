@@ -128,8 +128,16 @@
     "enabled": true,
     "ledger_dir_name": "audit",
     "raise": {
-      "ledger": true,
-      "stderr": true
+      "stderr": true,
+      "_ledger_note": [
+        "There is no `ledger` knob here and there deliberately never was one that worked.",
+        "A raise ALWAYS goes to the gate ledger - queue.ps1 writes a decision=refused record",
+        "at the gate that halted - because a run able to switch off the record of its own",
+        "halt is the failure this whole board exists to prevent. `ledger: true` sat here",
+        "until 2026-08-30 with ZERO executable readers: the dead-knob detector shipped a dead",
+        "knob, inside its own block. `roots` below now includes `andon`, so the detector",
+        "covers this block and the next one cannot hide here."
+      ]
     },
     "conditions": [
       {
@@ -146,10 +154,11 @@
         "detects": "a policy knob declared in harness.config.json that no executable source reads - a setting that governs nothing while reading as though it does",
         "predicate": "config-key-unread",
         "params": {
-          "roots": ["pipeline"],
+          "roots": ["pipeline", "andon"],
           "exclude_sources": ["test_*", "drill-*"],
           "_exclude_note": "GLOB patterns for what does NOT count as a reader: a test or drill that names a key exercises it rather than consuming it. config.ps1/config.py are NOT excluded - they hold the accessors, and the scan matches the DOTTED PATH, which their defaults blocks do not contain.",
-          "_roots_note": "scalar policy KNOBS only. Named data collections (profiles, gate_profiles, andon.conditions) are consumed generically by a loop, so an identifier scan says nothing true about them."
+          "_roots_note": "policy KNOBS. `andon` is a root so this condition covers its OWN block - it shipped with a dead `andon.raise.ledger` in it. Named data COLLECTIONS keyed by name (profiles, gate_profiles) are not roots: they are consumed generically by a loop, so a path scan says nothing true about them. `andon.conditions` is a leaf here - the list is read whole by Get-AndonConditions - so the scan asks only whether the list itself is read, never whether each condition is.",
+          "_match_note": "the dotted path is matched ANCHORED. Unanchored, any key that is a PREFIX of a live one reported 'read': with pipeline.gate_profile in the sources, pipeline.gate_profil, pipeline.claim_ttl and pipeline.a all passed (reproduced 2026-08-30). A container key counts as read when its own path OR any leaf beneath it is matched, which is why andon.raise is alive on the strength of andon.raise.stderr and pipeline.human_gates was not."
         },
         "on_fire": "halt",
         "on_indeterminate": "halt",
@@ -162,6 +171,8 @@
         "params": {
           "globs": ["scripts/checks/*.ps1", "scripts/agent-harness/*.ps1"],
           "exclude_files": ["git-io.ps1"],
+          "check_window_lines": 5,
+          "_window_note": "the unit is the CALL SITE, not the function body. Asking whether a body mentioned $LASTEXITCODE anywhere gave every git call in it an amnesty from an unrelated guard clause at the top (reproduced 2026-08-30), and code OUTSIDE any function was not scanned at all - a top-level `git push | Out-Null` reported ok. A check must fall within this many lines AFTER its call to count as its check.",
           "_exclude_note": "git-io.ps1 is the adapter that deliberately RETURNS output and leaves $LASTEXITCODE for its callers - that contract is stated in the file and is the reason callers can check at all."
         },
         "on_fire": "halt",

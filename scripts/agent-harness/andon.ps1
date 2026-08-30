@@ -26,9 +26,12 @@
 # human deciding, which is what attended means.
 #
 # WHERE THE RAISE GOES: the audit ledger (gate-audit.ps1, an append-only JSONL beside the
-# queue) and stderr. Both are configured under `andon.raise`. There is deliberately no
-# Mattermost knob here: declaring an output nothing writes to would trip this file's own
-# `policy-declared-unread` condition, which is the point.
+# queue) and stderr. The LEDGER write is unconditional and is deliberately NOT a knob - a run
+# that could switch off the record of its own halt is the failure this board exists to
+# prevent - so `andon.raise` configures the stderr copy only. It held a second key,
+# `andon.raise.ledger`, until 2026-08-30: nothing read it, which is exactly what this file's
+# own `policy-declared-unread` condition refuses, and that condition now covers the `andon`
+# block as well as `pipeline` so it can catch the next one here.
 #
 #   .\andon.ps1 -Evaluate                  # all enabled conditions; exit 6 if the board is raised
 #   .\andon.ps1 -Evaluate -Json            # machine-readable verdict on stdout
@@ -36,7 +39,10 @@
 #   .\andon.ps1 -List                      # what is declared, and what implements it
 #   .\andon.ps1 -Baseline                  # record the protected refs this run starts from
 #
-# Exit codes: 0 board clear | 1 usage/config error | 2 harness disabled | 6 ANDON RAISED
+# Exit codes: 0 board CLEAR | 1 usage/config error | 2 harness disabled |
+#             6 board not clear - raised, partial (some conditions switched off) or
+#               not-evaluated (andon off, or no conditions declared). All three refuse an
+#               unattended pass; only `clear` authorises one.
 
 [CmdletBinding()]
 param(
@@ -181,16 +187,52 @@ function Remove-CommentsOnly([string]$text, [bool]$IsPython) {
     return $out.ToString()
 }
 
-function Get-ConfigKeyIdentifiers($node, [string]$prefix, $sink) {
-    # Recursive helper for the predicate below. Derived FROM THE FILE, never from a
-    # hand-written list: a completeness test whose enumeration is hand-written is a list
-    # with a spell-checker (DECISIONS.md 2026-08-30, 'ENUMERATE-AND-PATCH LOSES').
+function Test-ConfigPathRead([string]$blob, [string]$path) {
+    # ANCHORED, and that is the whole point. A plain substring test says "read" for any key
+    # that happens to be a PREFIX of a live one: with `pipeline.gate_profile` in the sources,
+    # `pipeline.gate_profil`, `pipeline.claim_ttl` and even `pipeline.a` all reported read
+    # (reproduced 2026-08-30 - the detector printed "ok - all 4 policy keys under pipeline
+    # are read" for four keys no line mentions). A dotted path must be followed and preceded
+    # by something that is not part of a longer path, or the match is an accident.
+    $rx = '(?<![\w.])' + [regex]::Escape($path) + '(?![\w.])'
+    return [regex]::IsMatch($blob, $rx)
+}
+
+function Get-ConfigLeafPaths($node, [string]$prefix, $sink) {
+    # Every LEAF path under a node. Derived FROM THE FILE, never from a hand-written list: a
+    # completeness test whose enumeration is hand-written is a list with a spell-checker
+    # (DECISIONS.md 2026-08-30, 'ENUMERATE-AND-PATCH LOSES').
     if (-not ($node -is [System.Collections.IDictionary])) { return }
     foreach ($k in $node.Keys) {
         if ($k -like "_*") { continue }
         $path = if ($prefix) { "$prefix.$k" } else { "$k" }
-        [void]$sink.Add([ordered]@{ key = "$k"; path = $path })
-        Get-ConfigKeyIdentifiers $node[$k] $path $sink
+        if ($node[$k] -is [System.Collections.IDictionary]) { Get-ConfigLeafPaths $node[$k] $path $sink }
+        else { [void]$sink.Add($path) }
+    }
+}
+
+function Find-UnreadConfigPaths($node, [string]$prefix, [string]$blob, $sink, $counted) {
+    # Walk the tree reporting the SHALLOWEST unread node. A container counts as read when its
+    # own path is matched OR any leaf beneath it is: `andon.raise` is never written literally,
+    # but `andon.raise.stderr` is, and the block is alive. `pipeline.human_gates` - the real
+    # incident - had neither, so it is reported as the block it was, not as two leaves.
+    if (-not ($node -is [System.Collections.IDictionary])) { return }
+    foreach ($k in $node.Keys) {
+        if ($k -like "_*") { continue }
+        $path = if ($prefix) { "$prefix.$k" } else { "$k" }
+        if (-not ($node[$k] -is [System.Collections.IDictionary])) {
+            [void]$counted.Add($path)
+            if (-not (Test-ConfigPathRead $blob $path)) { [void]$sink.Add($path) }
+            continue
+        }
+        $leaves = New-Object System.Collections.ArrayList
+        Get-ConfigLeafPaths $node[$k] $path $leaves
+        $anyRead = Test-ConfigPathRead $blob $path
+        if (-not $anyRead) {
+            foreach ($lp in $leaves) { if (Test-ConfigPathRead $blob $lp) { $anyRead = $true; break } }
+        }
+        if ($anyRead) { Find-UnreadConfigPaths $node[$k] $path $blob $sink $counted }
+        else { [void]$counted.Add($path); [void]$sink.Add($path) }
     }
 }
 
@@ -225,14 +267,11 @@ function Predicate-ConfigKeyUnread($cond, $ctx) {
     try { $cfg = ConvertTo-HashtableDeep (ConvertFrom-Json $raw) }
     catch { return (New-Result "indeterminate" "config '$cfgPath' is not valid JSON" @()) }
 
-    $ids = New-Object System.Collections.ArrayList
     foreach ($r in $roots) {
         if (-not $cfg.Contains($r)) {
             return (New-Result "indeterminate" "configured root '$r' is not present in $cfgPath" @())
         }
-        Get-ConfigKeyIdentifiers $cfg[$r] $r $ids
     }
-    if ($ids.Count -eq 0) { return (New-Result "indeterminate" "no keys found under roots: $($roots -join ', ')" @()) }
 
     $sources = @(Get-ChildItem -Path $PSScriptRoot -File | Where-Object {
         if ($_.Extension -ne ".ps1" -and $_.Extension -ne ".py") { return $false }
@@ -244,19 +283,19 @@ function Predicate-ConfigKeyUnread($cond, $ctx) {
         Remove-CommentsOnly (Get-Content -Raw -Path $_.FullName) ($_.Extension -eq ".py")
     }) -join "`n"
 
-    # Match the DOTTED PATH, not the bare key. `Get-HarnessSetting "pipeline.gate_profile"`
-    # and `get("pipeline.gate_profile")` both contain it; a defaults block, which declares
-    # the key as a bare identifier, does not - which is what lets the accessors in
-    # config.ps1/config.py count as readers while the mirrors that merely declare a key do
-    # not, without excluding those two files and losing their accessors with them.
-    $orphans = @()
-    foreach ($e in $ids) {
-        if (-not $blob.Contains([string]$e.path)) { $orphans += [string]$e.path }
-    }
+    # Match the DOTTED PATH, not the bare key, and match it ANCHORED. `Get-HarnessSetting
+    # "pipeline.gate_profile"` and `get("pipeline.gate_profile")` both contain it; a defaults
+    # block, which declares the key as a bare identifier, does not - which is what lets the
+    # accessors in config.ps1/config.py count as readers while the mirrors that merely declare
+    # a key do not, without excluding those two files and losing their accessors with them.
+    $orphans = New-Object System.Collections.ArrayList
+    $counted = New-Object System.Collections.ArrayList
+    foreach ($r in $roots) { Find-UnreadConfigPaths $cfg[$r] $r $blob $orphans $counted }
+    if ($counted.Count -eq 0) { return (New-Result "indeterminate" "no keys found under roots: $($roots -join ', ')" @()) }
     if ($orphans.Count -gt 0) {
-        return (New-Result "fire" ("declared policy nothing reads: " + ($orphans -join ", ")) $orphans)
+        return (New-Result "fire" ("declared policy nothing reads: " + (@($orphans) -join ", ")) @($orphans))
     }
-    return (New-Result "ok" ("all " + $ids.Count + " policy keys under " + ($roots -join ", ") + " are read by harness sources") @())
+    return (New-Result "ok" ("all " + $counted.Count + " policy keys under " + ($roots -join ", ") + " are read by harness sources") @())
 }
 
 function Remove-PsNoise($lines) {
@@ -300,14 +339,79 @@ function Remove-PsNoise($lines) {
     return $out
 }
 
+function Get-PsRegions($lines) {
+    # Split a noise-stripped script into REGIONS: one per top-level function, plus a
+    # "(top level)" region for everything outside them.
+    #
+    # The top-level region is not a nicety. Without it the scan sees only `function` bodies,
+    # so a script whose git calls sit at file scope - `& git.exe push origin HEAD | Out-Null`
+    # with no function anywhere - reported "ok: every git-calling function can report a
+    # failure" (reproduced 2026-08-30), and a live in-glob instance,
+    # scripts/checks/check-project-configs.ps1:18, went unflagged.
+    #
+    # DISCLOSED LIMITS: a function declared at column 0 opens a region; an INDENTED (nested)
+    # function stays inside its enclosing region and is attributed to it. Here-strings
+    # (@" ... "@) are not tracked by the noise stripper, so a `git` inside one is still seen -
+    # a false positive, which is loud, not a false negative.
+    $regions = @()
+    $topLines = @()
+    $topIdx = @()
+    $i = 0
+    while ($i -lt $lines.Count) {
+        if ($lines[$i] -match '^function\s+([A-Za-z0-9_\-]+)') {
+            $name = $Matches[1]
+            $depth = 0; $opened = $false; $j = $i
+            while ($j -lt $lines.Count) {
+                foreach ($ch in $lines[$j].ToCharArray()) {
+                    if ($ch -eq '{') { $depth++; $opened = $true }
+                    elseif ($ch -eq '}') { $depth-- }
+                }
+                if ($opened -and $depth -le 0) { break }
+                $j++
+            }
+            if ($j -ge $lines.Count) { $j = $lines.Count - 1 }
+            $regions += @{ label = ($name + "()"); start = $i
+                           lines = @($lines[$i..$j]); idx = @($i..$j) }
+            $i = $j + 1
+            continue
+        }
+        $topLines += $lines[$i]
+        $topIdx += $i
+        $i++
+    }
+    if ($topLines.Count -gt 0) {
+        $regions += @{ label = "(top level)"; start = $topIdx[0]; lines = @($topLines); idx = @($topIdx) }
+    }
+    return @($regions)
+}
+
 function Predicate-GitErrorUnchecked($cond, $ctx) {
     # INCIDENT: `Invoke-DrillGit` in verify-merge-protocol.ps1 sets $ErrorActionPreference to
     # Continue for its whole body and pipes git to Out-Null - no exit-code check, no stderr.
     # A check built on a function that cannot see a git failure cannot fail. Ten guards that
     # could not fail were found across this effort; this is the mechanically decidable shape
     # of that class, not the whole class (see the findings note for what it does not cover).
+    #
+    # THE UNIT IS THE CALL SITE, not the function body. The first version asked whether a
+    # function body mentioned $LASTEXITCODE (or throw / Die / Write-Error / exit N) ANYWHERE,
+    # which handed a body-wide amnesty to every git call in it: a guard clause `if (-not
+    # $Branch) { throw }` at the TOP of a function cleared a swallowed `git push` five lines
+    # below it (reproduced 2026-08-30). A check that is not near its call is not its check, so
+    # each call site is asked about separately, within `check_window_lines` lines after it.
+    #
+    # WHAT THE WINDOW COSTS, measured rather than assumed: on this repository the call-site
+    # rule reports 18 sites across the two default globs at a window of 5 or 8, versus 2
+    # functions before. A sample of them was read line by line and each was a genuine
+    # unchecked call - `git ls-files` in validate-lineendings.ps1 whose failure prints
+    # "SUCCESS: No tracked shell scripts", `git diff --cached` in check-staged-secrets.ps1
+    # whose failure means "nothing staged - skip". One, check-hook-attestation.ps1's
+    # Invoke-AttestGit, is an adapter of the same shape as git-io.ps1; `exclude_files` is the
+    # knob for that, and it is deliberately NOT applied here because that file, unlike
+    # git-io.ps1, does not state the callers-check contract.
     $globs = @(Get-Param $cond "globs" @("scripts/checks/*.ps1", "scripts/agent-harness/*.ps1"))
     $excludeFiles = @(Get-Param $cond "exclude_files" @())
+    $window = [int](Get-Param $cond "check_window_lines" 5)
+    if ($window -lt 1) { return (New-Result "indeterminate" "check_window_lines must be >= 1, got $window" @()) }
     $root = [string]$ctx.repo_root
     $files = @()
     foreach ($g in $globs) {
@@ -316,46 +420,43 @@ function Predicate-GitErrorUnchecked($cond, $ctx) {
     $files = @($files | Where-Object { $excludeFiles -notcontains $_.Name } | Sort-Object FullName -Unique)
     if ($files.Count -eq 0) { return (New-Result "indeterminate" "no files matched: $($globs -join ', ')" @()) }
 
+    # `git`, `git.exe` (the drill calls the .exe deliberately - see its own comment about a
+    # helper named Git shadowing the binary), or the harness git adapter.
+    $callsGit = '(?m)(^|[^\w\-.])git(\.exe)?(\s|$)'
+    $canFail = '(\$LASTEXITCODE)|((^|\W)throw(\W|$))|((^|\W)Die(\W|$))|(Write-Error)|((^|\W)exit\s+[1-9])'
+
     $offenders = @()
+    $sites = 0
     foreach ($f in $files) {
         $raw = @(Get-Content -Path $f.FullName)
         if ($raw.Count -eq 0) { continue }
         $lines = @(Remove-PsNoise $raw)
-        # Function bodies are taken from one top-level `function` line to the next. Every
-        # function in the scanned families is declared at column 0; a nested one would be
-        # attributed to its parent, which is stated here rather than silently assumed.
-        $starts = @()
-        for ($i = 0; $i -lt $lines.Count; $i++) {
-            if ($lines[$i] -match '^function\s+([A-Za-z0-9_\-]+)') {
-                $starts += @{ line = $i; name = $Matches[1] }
-            }
-        }
-        for ($s = 0; $s -lt $starts.Count; $s++) {
-            $from = $starts[$s].line
-            $to = if ($s + 1 -lt $starts.Count) { $starts[$s + 1].line - 1 } else { $lines.Count - 1 }
-            $body = ($lines[$from..$to]) -join "`n"
-            # `git`, `git.exe` (the drill calls the .exe deliberately - see its own comment
-            # about a helper named Git shadowing the binary), or the harness git adapter.
-            $callsGit = ($body -match '(?m)(^|[^\w\-.])git(\.exe)?(\s|$)') -or ($body -match 'Invoke-GitCapture')
-            if (-not $callsGit) { continue }
-            $canFail = ($body -match '\$LASTEXITCODE') -or ($body -match '(?m)(^|\W)throw(\W|$)') -or
-                       ($body -match '(?m)(^|\W)Die(\W|$)') -or ($body -match 'Write-Error') -or
-                       ($body -match '(?m)(^|\W)exit\s+[1-9]')
-            if (-not $canFail) {
-                # git reports the toplevel with forward slashes and Get-ChildItem with
-                # backslashes, so normalise BOTH before comparing - otherwise the prefix
-                # never matches and every path is reported absolute.
-                $rel = ($f.FullName -replace '\\', '/')
-                $rootFwd = ($root -replace '\\', '/')
-                if ($rel.StartsWith($rootFwd)) { $rel = $rel.Substring($rootFwd.Length).TrimStart('/') }
-                $offenders += ("{0}:{1} {2}() runs git and cannot report a git failure" -f $rel, ($from + 1), $starts[$s].name)
+        # git reports the toplevel with forward slashes and Get-ChildItem with backslashes,
+        # so normalise BOTH before comparing - otherwise the prefix never matches and every
+        # path is reported absolute.
+        $rel = ($f.FullName -replace '\\', '/')
+        $rootFwd = ($root -replace '\\', '/')
+        if ($rel.StartsWith($rootFwd)) { $rel = $rel.Substring($rootFwd.Length).TrimStart('/') }
+
+        foreach ($region in (Get-PsRegions $lines)) {
+            $rl = @($region.lines)
+            for ($k = 0; $k -lt $rl.Count; $k++) {
+                $line = $rl[$k]
+                if (-not (($line -match $callsGit) -or ($line -match 'Invoke-GitCapture'))) { continue }
+                $sites++
+                $to = [Math]::Min($rl.Count - 1, $k + $window)
+                $after = ($rl[$k..$to]) -join "`n"
+                if ($after -match $canFail) { continue }
+                $lineNo = ([int]@($region.idx)[$k]) + 1
+                $offenders += ("{0}:{1} in {2} runs git and does not check the result within {3} line(s)" -f `
+                               $rel, $lineNo, $region.label, $window)
             }
         }
     }
     if ($offenders.Count -gt 0) {
-        return (New-Result "fire" ("git errors are swallowed in " + $offenders.Count + " function(s)") $offenders)
+        return (New-Result "fire" ("git errors are swallowed at " + $offenders.Count + " call site(s)") $offenders)
     }
-    return (New-Result "ok" ("scanned " + $files.Count + " file(s); every git-calling function can report a failure") @())
+    return (New-Result "ok" ("scanned " + $files.Count + " file(s) and " + $sites + " git call site(s); each checks its result") @())
 }
 
 function Predicate-BranchOnRemote($cond, $ctx) {
@@ -473,6 +574,25 @@ function Invoke-Predicate($cond, $ctx) {
 }
 
 function Invoke-AndonEvaluation {
+    # THE BOARD'S OWN HONESTY CLAUSE. A verdict must distinguish EVALUATED-OK from
+    # NOT-EVALUATED, because they are not the same fact and only one of them authorises an
+    # unattended pass.
+    #
+    # THE DEFECT THIS REPLACES, reproduced 2026-08-30 on a genuinely DETACHED checkout: with
+    # `andon.enabled: false` the verdict read `board=clear, conditions=5` and exited 0 -
+    # indistinguishable from five conditions that had actually looked and found nothing.
+    # Deleting the `andon` block gave `board=clear, conditions=0` and exit 0, so the
+    # documented revert path was a SILENT KILL SWITCH: under `dark` it did not restore prior
+    # behaviour, it removed the only thing between an unattended run and self-approval.
+    #
+    # So `clear` now means something narrow and checkable: at least one condition was
+    # evaluated, none halted, and none was skipped. Everything else gets its own name and is
+    # refused by the gate:
+    #   raised        - a condition fired, or could not be evaluated (on_indeterminate=halt)
+    #   partial       - some conditions were evaluated ok, others are switched off in config
+    #   not-evaluated - nothing was evaluated at all (andon off, or no conditions declared)
+    # A disabled condition is not an ok one. It is the operator saying "do not look", which is
+    # a decision they are entitled to make - attended. It is not a clear board.
     param([string]$OnlyId = "", [string]$Repo = "", [string[]]$RunBranches = @())
     $ctx = @{ repo_root = (Resolve-RepoRoot $Repo); run_branches = @($RunBranches) }
     $enabled = [bool](Get-HarnessSetting "andon.enabled" $true)
@@ -506,12 +626,39 @@ function Invoke-AndonEvaluation {
         }
     }
     if ($OnlyId -and $results.Count -eq 0) { throw "no andon condition with id '$OnlyId'" }
+
+    $disabledIds = @($results | Where-Object { $_.status -eq "disabled" } | ForEach-Object { $_.id })
+    $evaluated = @($results | Where-Object { $_.status -ne "disabled" }).Count
+    $coverage = [ordered]@{
+        declared     = @($results).Count
+        evaluated    = $evaluated
+        disabled     = @($disabledIds).Count
+        disabled_ids = @($disabledIds)
+    }
     $board = "clear"
-    if ($raised) { $board = "raised" }
+    $why = ""
+    if ($raised) {
+        $board = "raised"
+    } elseif ($evaluated -eq 0) {
+        $board = "not-evaluated"
+        $why = if (@($results).Count -eq 0) {
+                   "no andon conditions are declared - the board cannot certify anything"
+               } elseif (-not $enabled) {
+                   "andon.enabled=false - " + @($results).Count + " condition(s) declared, none evaluated"
+               } else {
+                   "every declared condition is disabled in config - none evaluated"
+               }
+    } elseif (@($disabledIds).Count -gt 0) {
+        $board = "partial"
+        $why = ("{0} of {1} condition(s) are switched off and were not evaluated: {2}" -f
+                @($disabledIds).Count, @($results).Count, (@($disabledIds) -join ", "))
+    }
     return [ordered]@{
         evaluated_at = [int64][System.DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
         repo         = $ctx.repo_root
         board        = $board
+        why          = $why
+        coverage     = $coverage
         conditions   = @($results)
     }
 }
@@ -565,9 +712,9 @@ if ($Evaluate) {
     if ($Json) {
         $verdict | ConvertTo-Json -Depth 8 -Compress
     } else {
-        $boardColour = "Green"
-        if ($verdict.board -eq "raised") { $boardColour = "Red" }
+        $boardColour = if ($verdict.board -eq "clear") { "Green" } else { "Red" }
         Write-Host ("ANDON BOARD: {0}" -f $verdict.board.ToUpper()) -ForegroundColor $boardColour
+        if ($verdict.why) { Write-Host ("  " + $verdict.why) -ForegroundColor Yellow }
         foreach ($r in $verdict.conditions) {
             $colour = "Green"
             if ($r.status -eq "fire") { $colour = "Red" }
@@ -576,11 +723,20 @@ if ($Evaluate) {
             Write-Host ("  [{0,-13}] {1,-30} {2}" -f $r.status, $r.id, $r.detail) -ForegroundColor $colour
             foreach ($e in $r.evidence) { Write-Host ("      - {0}" -f $e) -ForegroundColor DarkGray }
         }
+        Write-Host ("  coverage: {0} declared, {1} evaluated, {2} switched off" -f
+                    $verdict.coverage.declared, $verdict.coverage.evaluated, $verdict.coverage.disabled) -ForegroundColor DarkGray
     }
-    if ($verdict.board -eq "raised") {
+    # ANYTHING BUT `clear` EXITS 6. `partial` and `not-evaluated` are not softer greens - a
+    # board that did not look cannot say the line is clear, and exiting 0 there is precisely
+    # the skip-counts-as-a-pass shape this file refuses everywhere else.
+    if ($verdict.board -ne "clear") {
+        # The raise ALWAYS goes to the gate ledger (queue.ps1 writes a decision=refused
+        # record) - that is not a knob, because a run able to switch off the record of its own
+        # halt is the failure this board exists to prevent. Only the stderr copy is optional.
         if ([bool](Get-HarnessSetting "andon.raise.stderr" $true)) {
             $fired = @($verdict.conditions | Where-Object { $_.action -eq "halt" } | ForEach-Object { $_.id })
-            [Console]::Error.WriteLine("ANDON RAISED: " + ($fired -join ", "))
+            if (@($fired).Count -eq 0 -and $verdict.why) { $fired = @($verdict.why) }
+            [Console]::Error.WriteLine(("ANDON " + $verdict.board.ToUpper() + ": ") + (@($fired) -join ", "))
         }
         exit 6
     }

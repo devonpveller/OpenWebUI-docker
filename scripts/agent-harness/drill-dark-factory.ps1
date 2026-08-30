@@ -20,10 +20,20 @@
 #          machine. It is a real git remote for the purposes of the detector, which asks
 #          about refs/remotes/*, and that is the property under test.
 #
-# ISOLATION. Everything runs in scratch repositories under $env:TEMP with
-# AI_STACK_WORKTREE_STATE and AI_STACK_HARNESS_CONFIG redirected. This drill NEVER touches
-# the operator's checkout, the real queue, or the real ledger - which is not a stylistic
-# preference: the 2026-08-30 incident is a drill that rebased the live work line.
+# ISOLATION, stated exactly, because the previous wording ("runs entirely in scratch
+# repositories under $env:TEMP") was not true and an isolation claim nobody can check is how
+# the 2026-08-30 incident happened. Every WRITE is to a scratch repository under $env:TEMP,
+# with AI_STACK_WORKTREE_STATE and AI_STACK_HARNESS_CONFIG redirected: this drill mutates no
+# repository but its own, and never the real queue or the real ledger. It makes exactly one
+# READ of a real repository, deliberately and by name - step A3's last case scans THIS
+# checkout's .ps1 files so the detector is shown naming the incident's own function in the
+# code that actually shipped. Nothing is written there and no git command runs against it.
+#
+# The two conditions that could otherwise reach outside a fixture are PINNED to it:
+# `operator-checkout-off-branch` takes params.repo, which New-DarkFixture sets to the fixture
+# repo (unset it resolves the MAIN CHECKOUT via Get-MainCheckout), and step B asserts from the
+# ledger that the board the gate consulted was looking at a path under $env:TEMP. An isolation
+# property that is only true because of an inherited working directory is not a property.
 #
 # PROVE RED BEFORE GREEN. Every condition is shown FIRING on a constructed instance and NOT
 # firing on a clean one. A detector that always fires is as useless as one that never does,
@@ -161,6 +171,40 @@ $r = Invoke-Andon -Config $cfgA1 -Only "operator-checkout-off-branch" -Repo $rep
 Check "RED: an interrupted REBASE fires even though HEAD is on a branch" ((Get-CondStatus $r "operator-checkout-off-branch") -eq "fire") ((Get-CondEvidence $r "operator-checkout-off-branch") -join "; ")
 Remove-Item (Join-Path $gitDirA "rebase-merge") -Recurse -Force
 
+# The repo is still DETACHED and mid-rebase from the two cases above - a genuinely dirty
+# checkout, which is exactly the state in which "the board is clear" must be impossible to
+# say. Switching the board off must not launder it into a green.
+$cfgA1off = New-DrillConfig "a1-off" {
+    param($c)
+    (Get-Cond $c "operator-checkout-off-branch").params.repo = $repoA
+    $c.andon.enabled = $false
+}
+$r = Invoke-Andon -Config $cfgA1off -Repo $repoA
+Check "andon.enabled=false is NOT-EVALUATED, never 'clear'" ($r.verdict.board -eq "not-evaluated") ("board=" + $r.verdict.board)
+Check "and it exits 6, so no gate can read it as a pass" ($r.code -eq 6) ("exit=" + $r.code)
+Check "the verdict states its COVERAGE: 5 declared, 0 evaluated" (([int]$r.verdict.coverage.declared -eq 5) -and ([int]$r.verdict.coverage.evaluated -eq 0)) ("declared=" + $r.verdict.coverage.declared + " evaluated=" + $r.verdict.coverage.evaluated)
+
+# THE DOCUMENTED REVERT PATH. Deleting the andon block was described as restoring prior
+# behaviour; under `dark` it removed the only thing between an unattended run and its own
+# approval. An absent board is now an absent board, not a clear one.
+$cfgA1none = New-DrillConfig "a1-no-board" { param($c) $c.PSObject.Properties.Remove("andon") }
+$r = Invoke-Andon -Config $cfgA1none -Repo $repoA
+Check "an ABSENT andon block is NOT-EVALUATED (exit 6), not an empty clear board" (($r.verdict.board -eq "not-evaluated") -and ($r.code -eq 6)) ("board=" + $r.verdict.board + " exit=" + $r.code)
+
+# A condition switched off individually is reported as DISABLED and NAMED, and asking the
+# board about that one alone leaves it with nothing evaluated. (The mixed case - some
+# evaluated, some switched off - is `partial`, and it is proven at the real gate in step F,
+# because it needs a board on which the other conditions genuinely pass.)
+$cfgA1part = New-DrillConfig "a1-one-off" {
+    param($c)
+    (Get-Cond $c "operator-checkout-off-branch").params.repo = $repoA
+    (Get-Cond $c "operator-checkout-off-branch") | Add-Member -NotePropertyName enabled -NotePropertyValue $false -Force
+}
+$r = Invoke-Andon -Config $cfgA1part -Only "operator-checkout-off-branch" -Repo $repoA
+Check "a switched-off condition is reported DISABLED, never ok" ((Get-CondStatus $r "operator-checkout-off-branch") -eq "disabled") ("status=" + (Get-CondStatus $r "operator-checkout-off-branch"))
+Check "asking only about a switched-off condition evaluates NOTHING (exit 6)" (($r.verdict.board -eq "not-evaluated") -and ($r.code -eq 6)) ("board=" + $r.verdict.board + " exit=" + $r.code)
+Check "and the verdict NAMES the condition that was not evaluated" ((@($r.verdict.coverage.disabled_ids) -join ",") -eq "operator-checkout-off-branch") ((@($r.verdict.coverage.disabled_ids) -join ","))
+
 # ====================================================================================
 Step "A2  policy-declared-unread: RED on the PRE-U6 config, GREEN on the shipped one"
 # ====================================================================================
@@ -184,6 +228,28 @@ $r = Invoke-Andon -Config $cfgA2pre -Only "policy-declared-unread" -Repo $repoA2
 $ev = @(Get-CondEvidence $r "policy-declared-unread")
 Check "RED: the pre-U6 `human_gates` declaration fires" ((Get-CondStatus $r "policy-declared-unread") -eq "fire") ($ev -join ", ")
 Check "RED: it names pipeline.human_gates specifically" ($ev -contains "pipeline.human_gates") ($ev -join ", ")
+
+# THE DETECTOR MUST BE ABLE TO DETECT. Matching the dotted path as an unanchored SUBSTRING
+# made every key that is a PREFIX of a live one report "read": with `pipeline.gate_profile`
+# in the sources, all four keys below passed while no line mentions any of them.
+$cfgA2trunc = New-DrillConfig "a2-truncated" {
+    param($c)
+    $c.pipeline = [pscustomobject]@{ claim_ttl = 60; anchor_require = $true; gate_profil = "attended"; a = 1 }
+}
+$r = Invoke-Andon -Config $cfgA2trunc -Only "policy-declared-unread" -Repo $repoA2
+$ev = @(Get-CondEvidence $r "policy-declared-unread")
+Check "RED: keys that are only PREFIXES of live ones are unread, not read" ((Get-CondStatus $r "policy-declared-unread") -eq "fire") ("status=" + (Get-CondStatus $r "policy-declared-unread"))
+Check "RED: and all four truncated keys are named" ((($ev -contains "pipeline.claim_ttl") -and ($ev -contains "pipeline.anchor_require") -and ($ev -contains "pipeline.gate_profil") -and ($ev -contains "pipeline.a"))) ($ev -join ", ")
+
+# THE DEAD-KNOB DETECTOR SHIPPED A DEAD KNOB IN ITS OWN BLOCK (`andon.raise.ledger`, zero
+# readers). `andon` is a root now, so putting one back must fire.
+$cfgA2own = New-DrillConfig "a2-own-block" {
+    param($c)
+    $c.andon.raise | Add-Member -NotePropertyName ledger -NotePropertyValue $true -Force
+}
+$r = Invoke-Andon -Config $cfgA2own -Only "policy-declared-unread" -Repo $repoA2
+$ev = @(Get-CondEvidence $r "policy-declared-unread")
+Check "RED: a dead knob in the ANDON block is caught by the andon board's own condition" (($ev -contains "andon.raise.ledger")) ($ev -join ", ")
 
 # ====================================================================================
 Step "A3  git-error-swallowed: RED on a swallowing function, GREEN on a checking one"
@@ -222,6 +288,43 @@ Set-Content -Path (Join-Path $fixDir "commented.ps1") -Encoding ascii -Value @(
     '}')
 $r = Invoke-Andon -Config $cfgA3 -Only "git-error-swallowed" -Repo $repoA3
 Check "GREEN: the word 'git' in a COMMENT or STRING does not fire it" ((Get-CondStatus $r "git-error-swallowed") -eq "ok") ((Get-CondEvidence $r "git-error-swallowed") -join "; ")
+
+# CODE OUTSIDE ANY FUNCTION. The scan used to walk function bodies only, so a script whose
+# git calls sit at file scope was reported clean - and a live in-glob instance,
+# check-project-configs.ps1:18, went unflagged for it.
+Remove-Item (Join-Path $fixDir "commented.ps1") -Force
+Set-Content -Path (Join-Path $fixDir "toplevel.ps1") -Encoding ascii -Value @(
+    '# there is no function anywhere in this file',
+    '& git.exe push origin HEAD | Out-Null',
+    'Write-Host "pushed"')
+$r = Invoke-Andon -Config $cfgA3 -Only "git-error-swallowed" -Repo $repoA3
+$ev = @(Get-CondEvidence $r "git-error-swallowed")
+Check "RED: a git call OUTSIDE any function fires" ((Get-CondStatus $r "git-error-swallowed") -eq "fire") ($ev -join "; ")
+Check "RED: and it is attributed to the top level, not to some function" (($ev -join ";") -like "*(top level)*") ($ev -join "; ")
+
+# NO BODY-WIDE AMNESTY. An unrelated guard clause at the TOP of a function used to clear
+# every git call below it, because the old check asked whether the body mentioned
+# $LASTEXITCODE anywhere at all.
+Remove-Item (Join-Path $fixDir "toplevel.ps1") -Force
+Set-Content -Path (Join-Path $fixDir "amnesty.ps1") -Encoding ascii -Value @(
+    'function Push-Everything {',
+    '    param([string]$Branch)',
+    '    if (-not $Branch) { throw "no branch" }',
+    '    $prev = $ErrorActionPreference',
+    '    $ErrorActionPreference = "Continue"',
+    '    & git.exe push origin $Branch | Out-Null',
+    '    $ErrorActionPreference = $prev',
+    '}')
+$r = Invoke-Andon -Config $cfgA3 -Only "git-error-swallowed" -Repo $repoA3
+$ev = @(Get-CondEvidence $r "git-error-swallowed")
+Check "RED: a throw BEFORE the git call does not excuse the git call" ((Get-CondStatus $r "git-error-swallowed") -eq "fire") ($ev -join "; ")
+Check "RED: and the finding names the swallowing function" (($ev -join ";") -like "*Push-Everything*") ($ev -join "; ")
+Remove-Item (Join-Path $fixDir "amnesty.ps1") -Force
+Set-Content -Path (Join-Path $fixDir "commented.ps1") -Encoding ascii -Value @(
+    'function Get-Nothing {',
+    '    # Thin policy wrapper over the git fact - mentions git, runs none.',
+    '    return "no git here"',
+    '}')
 
 # And against the REAL repository it must name the function from the real incident.
 $repoReal = (Resolve-Path (Join-Path $HarnessDir "..\..")).Path
@@ -322,9 +425,14 @@ function New-DarkFixture([string]$name, [string]$gateProfile) {
         param($c)
         $c.pipeline.gate_profile = $gateProfile
     }
-    # The globs are per-fixture, so they are patched after the shared edit above.
+    # Per-fixture params, patched after the shared edit above.
     $o = Get-Content -Raw -Path $cfg | ConvertFrom-Json
     (Get-Cond $o "git-error-swallowed").params.globs = @("scripts/checks/*.ps1", "scripts/agent-harness/*.ps1")
+    # PIN THE CHECKOUT CONDITION TO THIS FIXTURE. Left empty it calls Get-MainCheckout, which
+    # answers from the CURRENT DIRECTORY - so the fixture's isolation would rest on every
+    # caller remembering to Push-Location, and a detached operator checkout would turn this
+    # fixture's board red for reasons that have nothing to do with the fixture.
+    (Get-Cond $o "operator-checkout-off-branch").params.repo = $repo
     ($o | ConvertTo-Json -Depth 40) | Set-Content -Path $cfg -Encoding ASCII
     return @{ repo = $repo; state = $state; cfg = $cfg }
 }
@@ -421,6 +529,13 @@ Check "the ledger holds exactly two gate events for this run" (@($led).Count -eq
 $autoRecs = @($led | Where-Object { $_.kind -eq "auto" -and $_.decision -eq "passed" })
 Check "both are AUTO passes, and each names its gate profile" ((@($autoRecs).Count -eq 2) -and (@($autoRecs | Where-Object { $_.gate_profile -eq "dark" }).Count -eq 2)) ""
 Check "each auto pass records the andon verdict that authorised it" ((@($autoRecs | Where-Object { $_.andon.status -eq "clear" }).Count -eq 2)) (($autoRecs | ForEach-Object { $_.andon.status }) -join ",")
+# 'clear' has to be checkable, not just readable. The record carries the COVERAGE, so an
+# auditor can tell five conditions that looked from five that were switched off.
+Check "each auto pass states its COVERAGE: 5 of 5 evaluated, none switched off" ((@($autoRecs | Where-Object { [int]$_.andon.evaluated -eq 5 -and [int]$_.andon.conditions -eq 5 -and [int]$_.andon.disabled -eq 0 }).Count -eq 2)) (($autoRecs | ForEach-Object { "$($_.andon.evaluated)/$($_.andon.conditions)" }) -join ",")
+# HERMETICITY, asserted rather than assumed: the board the GATE consulted was looking at the
+# fixture, not at the operator's checkout.
+$scratchOnly = @($autoRecs | Where-Object { "$($_.andon.repo)".Replace("/", [string][char]92).StartsWith($Root) })
+Check "the board the gate consulted was looking at the SCRATCH repo, not the operator's" (@($scratchOnly).Count -eq 2) (($autoRecs | ForEach-Object { $_.andon.repo }) -join " | ")
 Check "no record can be mistaken for a human approval" ((@($led | Where-Object { $_.kind -eq "human" }).Count -eq 0) -and (@($led | Where-Object { "$($_.principal)".StartsWith("auto:") }).Count -eq 2)) ""
 
 $r = Invoke-Queue $fixB @("-VerifyAudit", "-Id", "dfd")
@@ -454,6 +569,22 @@ $tampered = @($ledgerBak | ForEach-Object { $_ -replace '"status":"clear"', '"st
 Set-Content -Path $ledgerPath -Encoding ASCII -Value $tampered
 $r = Invoke-Queue $fixB @("-VerifyAudit", "-Id", "dfd")
 Check "RED: an auto pass taken while the board was raised is caught" ($r.code -eq 1) ("exit=" + $r.code)
+
+# C3b - the word 'clear' with counters that say nobody looked. This is the shape the record
+# used to be UNABLE to express: `andon.status=clear conditions=5` on a board that evaluated
+# nothing. The verifier re-derives the claim from the counters instead of trusting the word.
+$tampered = @($ledgerBak | ForEach-Object { $_ -replace '"evaluated":5', '"evaluated":0' })
+Set-Content -Path $ledgerPath -Encoding ASCII -Value $tampered
+$r = Invoke-Queue $fixB @("-VerifyAudit", "-Id", "dfd")
+Check "RED: 'clear' with 0 of 5 conditions evaluated is not an authorised pass" ($r.code -eq 1) ("exit=" + $r.code)
+Check "RED: and the finding says nothing was checked" ($r.out -like "*nothing was checked*") ""
+
+# C3c - a record that cannot state its coverage at all. Incomplete by definition, per the
+# rule at the top of gate-audit.ps1.
+$tampered = @($ledgerBak | ForEach-Object { $_ -replace ',"evaluated":5,"disabled":0', '' })
+Set-Content -Path $ledgerPath -Encoding ASCII -Value $tampered
+$r = Invoke-Queue $fixB @("-VerifyAudit", "-Id", "dfd")
+Check "RED: an auto record that does not state its coverage is incomplete" ($r.code -eq 1) ("exit=" + $r.code)
 
 Set-Content -Path $ledgerPath -Encoding ASCII -Value $ledgerBak
 $r = Invoke-Queue $fixB @("-VerifyAudit", "-Id", "dfd")
@@ -556,6 +687,84 @@ Check "attended: a human confirmation still works" ($r.code -eq 0 -and $it.state
 Check "attended: the record says 'human' and names the person" (($it.gates.anchor.kind -eq "human") -and ($it.gates.anchor.by -eq "profnovice")) ("kind=" + $it.gates.anchor.kind + " by=" + $it.gates.anchor.by)
 $ledE = Get-Ledger $fixE
 Check "attended: the human pass is in the ledger too" ((@($ledE | Where-Object { $_.kind -eq "human" }).Count -eq 1)) ("human records=" + @($ledE | Where-Object { $_.kind -eq "human" }).Count)
+
+# ====================================================================================
+Step "F  switching the board OFF must not open the gates - the revert is not a kill switch"
+# ====================================================================================
+# The findings note used to offer `andon.enabled: false`, or deleting the andon block, as the
+# revert that makes "every gate behave as it did before". Under `dark` that is the opposite of
+# true: it removes the only thing standing between an unattended run and its own approval. A
+# revert path that does something other than what it says is worse than none, because it is
+# reached for in a hurry. THE REVERT IS `pipeline.gate_profile: attended`, and step E proves
+# that one. These two cases prove the other reading cannot silently pass.
+foreach ($case in @(
+    @{ name = "andon-off";  label = "andon.enabled=false"; status = "not-evaluated"; evaluated = 0
+       edit = { param($o) $o.andon.enabled = $false } },
+    @{ name = "andon-gone"; label = "the andon block deleted"; status = "not-evaluated"; evaluated = 0
+       edit = { param($o) $o.PSObject.Properties.Remove("andon") } },
+    # The MIXED case. Four conditions look and pass; one is switched off. That is not a clear
+    # board either - it is the operator saying "do not look at this one", which is a decision
+    # they may make, and a decision to be attended.
+    @{ name = "one-off";    label = "one condition switched off"; status = "partial"; evaluated = 4
+       edit = { param($o) ($o.andon.conditions | Where-Object { $_.id -eq "work-branch-on-remote" }) |
+                          Add-Member -NotePropertyName enabled -NotePropertyValue $false -Force } }
+)) {
+    $fixF = New-DarkFixture ("dark-" + $case.name) "dark"
+    # Baseline FIRST, while the config still declares protected-ref-moved: two of these cases
+    # remove the block that -Baseline reads.
+    $prevCfg = $env:AI_STACK_HARNESS_CONFIG; $prevState = $env:AI_STACK_WORKTREE_STATE
+    $env:AI_STACK_HARNESS_CONFIG = $fixF.cfg; $env:AI_STACK_WORKTREE_STATE = $fixF.state
+    & $PsExe -NoProfile -NonInteractive -File $AndonPs -Baseline -RepoRoot $fixF.repo | Out-Null
+    $env:AI_STACK_HARNESS_CONFIG = $prevCfg; $env:AI_STACK_WORKTREE_STATE = $prevState
+    $o = Get-Content -Raw -Path $fixF.cfg | ConvertFrom-Json
+    & $case.edit $o
+    ($o | ConvertTo-Json -Depth 40) | Set-Content -Path $fixF.cfg -Encoding ASCII
+
+    $r = Invoke-Queue $fixF @("-Propose", "-Id", "dff", "-Anchor", $anchorFile, "-Developer", "wt-dfdrill")
+    $r = Invoke-Queue $fixF @("-Submit", "-Id", "dff", "-Branch", "work/dfdrill", "-Developer", "wt-dfdrill", "-TestPlan", $planFile)
+    $it = Get-QueueItem $fixF "dff"
+    Check ("HALT with " + $case.label + ": the anchor gate refuses (exit 6)") ($r.code -eq 6) ("exit=" + $r.code)
+    Check ("HALT with " + $case.label + ": the item stays parked at anchor-draft") ($it.state -eq "anchor-draft") ("state=" + $it.state)
+    $ledF = Get-Ledger $fixF
+    $ref = @($ledF | Where-Object { $_.decision -eq "refused" })
+    Check ("HALT with " + $case.label + ": the refusal is in the ledger, recorded as '" + $case.status + "'") ((@($ref).Count -ge 1) -and (@($ref)[0].andon.status -eq $case.status)) ("status=" + ((@($ref) | ForEach-Object { $_.andon.status }) -join ","))
+    Check ("HALT with " + $case.label + ": the refusal states " + $case.evaluated + " condition(s) evaluated") (([int](@($ref)[0].andon.evaluated)) -eq [int]$case.evaluated) ("evaluated=" + (@($ref)[0].andon.evaluated))
+}
+
+# ====================================================================================
+Step "G  'COMPLETE' is checked against the gates the pipeline REQUIRES, not only the ones an item happened to reach"
+# ====================================================================================
+# Get-CrossedGates counted the anchor gate as crossed only when the item CARRIED an anchor. An
+# item that ran end to end with no anchor therefore crossed no anchor gate, held one ledger
+# record, and verified COMPLETE - "complete" meaning "every gate this item happened to cross".
+# With anchor_required=true (the shipped default) an item past anchor-draft has crossed it,
+# anchor or not; with anchor_required=false the anchor gate genuinely is not a gate, and
+# -VerifyAudit now says that in words instead of quietly counting a narrower complete.
+$fixG = New-DarkFixture "no-anchor" "dark"
+$o = Get-Content -Raw -Path $fixG.cfg | ConvertFrom-Json
+$o.pipeline.anchor_required = $false
+($o | ConvertTo-Json -Depth 40) | Set-Content -Path $fixG.cfg -Encoding ASCII
+$prevCfg = $env:AI_STACK_HARNESS_CONFIG; $prevState = $env:AI_STACK_WORKTREE_STATE
+$env:AI_STACK_HARNESS_CONFIG = $fixG.cfg; $env:AI_STACK_WORKTREE_STATE = $fixG.state
+& $PsExe -NoProfile -NonInteractive -File $AndonPs -Baseline -RepoRoot $fixG.repo | Out-Null
+$env:AI_STACK_HARNESS_CONFIG = $prevCfg; $env:AI_STACK_WORKTREE_STATE = $prevState
+
+$r = Invoke-Queue $fixG @("-Submit", "-Id", "dfg", "-Branch", "work/dfdrill", "-Developer", "wt-dfdrill", "-TestPlan", $planFile)
+Check "anchor_required=false: an item may be submitted with NO anchor" ($r.code -eq 0) ("exit=" + $r.code)
+$r = Invoke-Queue $fixG @("-Claim", "-Id", "dfg", "-Role", "tester", "-By", "wt-tester")
+$r = Invoke-Queue $fixG @("-Pass", "-Id", "dfg", "-By", "wt-tester", "-Evidence", $evFile, "-PlanAdequate")
+Check "and it auto-passes pre_review under dark" ((Get-QueueItem $fixG "dfg").state -eq "ready-review") ("state=" + (Get-QueueItem $fixG "dfg").state)
+$r = Invoke-Queue $fixG @("-VerifyAudit", "-Id", "dfg")
+Check "COMPLETE says WHAT it covered - it does not let 'complete' read as 'all gates enforced'" ($r.out -like "*anchor_required=false*") ($r.out -split "`n" | Select-Object -Last 3) -join " / "
+
+# The shipped default is the case that matters, and there it is a FINDING, not a footnote:
+# an item past the anchor gate with no anchor record is a missing pass.
+$o = Get-Content -Raw -Path $fixG.cfg | ConvertFrom-Json
+$o.pipeline.anchor_required = $true
+($o | ConvertTo-Json -Depth 40) | Set-Content -Path $fixG.cfg -Encoding ASCII
+$r = Invoke-Queue $fixG @("-VerifyAudit", "-Id", "dfg")
+Check "anchor_required=true: the same anchorless item is INCOMPLETE (exit 1)" ($r.code -eq 1) ("exit=" + $r.code)
+Check "and the finding names the anchor gate with no pass record" ($r.out -like "*anchor*no pass record*") ""
 
 # ====================================================================================
 Write-Host ""

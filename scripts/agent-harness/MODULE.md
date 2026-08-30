@@ -137,8 +137,8 @@ Every shipped condition names the incident it came from — they were mined from
 | id | fires when |
 |---|---|
 | `operator-checkout-off-branch` | the main checkout is detached or mid-rebase/merge/cherry-pick |
-| `policy-declared-unread` | a policy knob under `pipeline` that no executable source reads |
-| `git-error-swallowed` | a function that runs git and can neither see nor report its failure |
+| `policy-declared-unread` | a policy knob under `pipeline` **or `andon`** that no executable source reads |
+| `git-error-swallowed` | a git call site whose result is not checked within `check_window_lines` lines |
 | `work-branch-on-remote` | a work branch of this run exists on a remote |
 | `protected-ref-moved` | `main` moved since `andon.ps1 -Baseline` recorded it |
 
@@ -147,7 +147,31 @@ could not be evaluated has not passed — a skip that counts as a pass is one of
 shapes this board exists to catch, and it does not get to be the board's own behaviour.
 
 **Halt** here means the gate refuses and the item parks; nothing is killed. The
-**raise** goes to the gate ledger and to stderr.
+**raise** always goes to the gate ledger — that is not a knob, because a run able to
+switch off the record of its own halt is the failure the board exists to prevent —
+and, under `andon.raise.stderr`, to stderr.
+
+### `clear` means the board LOOKED
+
+The verdict has four states, and only one of them opens an unattended gate:
+
+| board | means | exit |
+|---|---|---|
+| `clear` | ≥1 condition evaluated, none halted, none switched off | 0 |
+| `raised` | a condition fired, or could not be evaluated | 6 |
+| `partial` | some evaluated ok, others switched off in config | 6 |
+| `not-evaluated` | nothing was evaluated (`andon.enabled: false`, or no conditions) | 6 |
+
+Every verdict and every gate record carries its **coverage** — declared / evaluated /
+switched off, plus the repository the board was looking at. Before U6 landed this,
+`andon.enabled: false` produced `board=clear, conditions=5` on a genuinely detached
+checkout: indistinguishable from five conditions that looked and found nothing.
+
+**So switching the board off does not open the gates.** With `andon.enabled: false`, or
+with the whole `andon` block deleted, a `dark` run halts at the first gate with
+`not-evaluated` in the ledger. **The revert to prior behaviour is
+`pipeline.gate_profile: attended`** — that is the switch that puts a human back at the
+gate. Turning the board off only removes the thing that was watching the machine.
 
 ## The gate ledger: which gates no human saw
 
@@ -159,9 +183,19 @@ shapes this board exists to catch, and it does not get to be the board's own beh
 
 "Complete" is defined executably in `gate-audit.ps1`: every gate an item crossed has a
 record; every record names a principal and a kind; an auto record additionally names its
-gate profile and the andon verdict that authorised it; and the item and the ledger agree.
-Crossed gates are derived from the ITEM'S OWN STATE, never from the ledger — that is what
-makes a missing record detectable rather than invisible.
+gate profile, the andon verdict that authorised it, **and that verdict's coverage** — a
+record claiming `clear` with nothing evaluated is refused, and so is one that cannot state
+its coverage at all. The item and the ledger must agree. Crossed gates are derived from the
+ITEM'S OWN STATE, never from the ledger — that is what makes a missing record detectable
+rather than invisible.
+
+**What "complete" does not mean.** It is a statement about the gates those items
+*reached*, never that the pipeline's gates were all enforced; `-VerifyAudit` prints that
+scope with the green. With the shipped default `pipeline.anchor_required: true`, an item
+past `anchor-draft` has crossed the anchor gate whether or not an anchor survives on it, so
+an anchorless item is a finding. Set `anchor_required: false` and the anchor gate is not a
+gate for an anchorless item — `-VerifyAudit` says so in words rather than quietly counting
+a narrower complete.
 
 The failure this is built against is an audit record that says a gate "passed" without
 saying who or what passed it. That is worse than no record, because it reads as human

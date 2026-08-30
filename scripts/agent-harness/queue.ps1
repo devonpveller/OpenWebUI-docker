@@ -248,8 +248,14 @@ function Invoke-AutoGate($item, [string]$gate, $decision) {
 
 function Stop-OnAndon($andon, [string]$gate, [string]$id, [string]$parkedAt) {
     Write-Host ""
-    Write-Host ("ANDON RAISED - the '{0}' gate will NOT auto-pass." -f $gate) -ForegroundColor Red
+    Write-Host ("ANDON {0} - the '{1}' gate will NOT auto-pass." -f ("$($andon.status)").ToUpper(), $gate) -ForegroundColor Red
     foreach ($f in $andon.fired) { Write-Host ("  - {0}" -f $f) -ForegroundColor Red }
+    # State the coverage on the console too. A halt whose only word is 'not-evaluated' sends
+    # the operator to the config; a halt that says 0 of 5 evaluated sends them to the right line.
+    if ($andon -and ($andon.PSObject.Properties.Name -contains "evaluated")) {
+        Write-Host ("  board coverage: {0} of {1} condition(s) evaluated, {2} switched off" -f
+                    [int]$andon.evaluated, [int]$andon.conditions, [int]$andon.disabled) -ForegroundColor Red
+    }
     Write-Host ""
     Write-Host ("'{0}' is PARKED at '{1}'. The refusal is in the gate ledger (queue.ps1 -Audit -Id {0})." -f $id, $parkedAt) -ForegroundColor Yellow
     Write-Host ("Clear the condition, or pass the gate attended: queue.ps1 -{0} -Id {1} -By <operator>" -f $(if ($gate -eq "anchor") { "ConfirmAnchor" } else { "Approve" }), $id) -ForegroundColor Yellow
@@ -408,7 +414,18 @@ if ($VerifyAudit) {
         exit 7
     }
     Write-Host ""
-    Write-Host "COMPLETE - every crossed gate has a record, every record names who or what passed it." -ForegroundColor Green
+    Write-Host "COMPLETE - every gate these item(s) CROSSED has a record, and every record names who" -ForegroundColor Green
+    Write-Host "or what passed it." -ForegroundColor Green
+    # SAY WHAT 'COMPLETE' DOES NOT MEAN, in the same breath as saying it. 'Crossed' is derived
+    # from item state, so this is a statement about the gates these items reached - never a
+    # statement that the pipeline's gates were all enforced. An item that never reached a gate
+    # is not evidence about that gate.
+    Write-Host "  Scope: 'crossed' is derived from each item's own state. This says nothing about a" -ForegroundColor DarkGray
+    Write-Host "  gate an item never reached." -ForegroundColor DarkGray
+    if (-not [bool](Get-HarnessSetting "pipeline.anchor_required" $true)) {
+        Write-Host "  pipeline.anchor_required=false: an item created without an anchor crosses NO anchor" -ForegroundColor Yellow
+        Write-Host "  gate, so completeness cannot account for one. That is configuration, not coverage." -ForegroundColor Yellow
+    }
     exit 0
 }
 
