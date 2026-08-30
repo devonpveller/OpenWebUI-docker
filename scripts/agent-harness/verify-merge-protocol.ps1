@@ -216,10 +216,108 @@ Remove-Item Env:\AI_STACK_ATTEST_LEDGER -ErrorAction SilentlyContinue
 & $attest -Branch "work/drilla" -Base "drill/verify-d" -RepoRoot $repo | Out-Null
 Check "AI_STACK_ATTEST_LEDGER alone does NOT change the verdict" ($envOnlyExit -eq $LASTEXITCODE)
 
-# The ACTIVE case - detection of a real --no-verify commit - cannot be driven from a drill
-# worktree until the attesting hook is on the line those worktrees are cut from. It is
-# proven instead by TESTPLAN case 2, which runs the real hook on this branch. Once this
-# merges, that coverage belongs here; the note is deliberate rather than a silent gap.
+# THE ACTIVE CASE, in a throwaway repository of our own.
+#
+# This used to carry a note saying the active case "cannot be driven from a drill worktree
+# until the attesting hook is on the line those worktrees are cut from" - true, and a
+# permanent gap, because the drill's branches inherit whatever hooks the main checkout has.
+# The way out is not to wait for adoption: build a repository with the history the case
+# needs. Three cases, each proven RED before it was proven GREEN.
+$mrepo = Join-Path $env:TEMP ("drill-merge-attest-" + $PID)
+Remove-Item -Recurse -Force $mrepo -ErrorAction SilentlyContinue
+New-Item -ItemType Directory -Force -Path (Join-Path $mrepo ".githooks") | Out-Null
+function Build-AttestRepo([string]$root, [bool]$withMergeHook) {
+    # The pre-commit stub MUST mention hook-attest.log. The checker's per-branch gate reads
+    # that string out of the branch's own hook, and a stub without it turns the whole check
+    # INACTIVE - which is exactly how the first version of these cases passed: all three
+    # returned 0 because nothing was ever examined. Two of them were asserting the absence
+    # of a failure in a check that had switched itself off.
+    Set-Content -Path (Join-Path $root ".githooks\pre-commit") -Value "#!/bin/sh`n# writes hook-attest.log`nexit 0" -Encoding ASCII
+    if ($withMergeHook) {
+        Set-Content -Path (Join-Path $root ".githooks\pre-merge-commit") -Value "#!/bin/sh`nexec `"`$(dirname `"`$0`")/pre-commit`"" -Encoding ASCII
+    }
+    Invoke-DrillGit -C $root init -q .
+    Invoke-DrillGit -C $root config user.email "drill@local"
+    Invoke-DrillGit -C $root config user.name  "drill"
+    Set-Content -Path (Join-Path $root "f.txt") -Value "base" -Encoding ASCII
+    Invoke-DrillGit -C $root add -A
+    Invoke-DrillGit -C $root commit -q -m base
+    Invoke-DrillGit -C $root branch base-line
+    Invoke-DrillGit -C $root checkout -q -b feature
+    Set-Content -Path (Join-Path $root "a.txt") -Value "a" -Encoding ASCII
+    Invoke-DrillGit -C $root add -A
+    Invoke-DrillGit -C $root commit -q -m a
+    Invoke-DrillGit -C $root checkout -q base-line
+    Set-Content -Path (Join-Path $root "b.txt") -Value "b" -Encoding ASCII
+    Invoke-DrillGit -C $root add -A
+    Invoke-DrillGit -C $root commit -q -m b
+    Invoke-DrillGit -C $root checkout -q -B work-line base-line
+    # --no-ff: the merge commit is the object under test, so it must exist.
+    Invoke-DrillGit -C $root merge --no-ff feature --no-edit -q
+}
+# Attest the NON-merge commits only - the state a repo is in when every ordinary commit ran
+# the hooks and the merge did not.
+function Write-AttestLedger([string]$root, [string]$ledger, [bool]$includeMergeTree) {
+    $trees = @(Get-DrillGit -C $root rev-list --no-merges base-line..work-line |
+               ForEach-Object { Get-DrillGit -C $root rev-parse "$_^{tree}" })
+    if ($includeMergeTree) { $trees += (Get-DrillGit -C $root rev-parse "work-line^{tree}") }
+    Set-Content -Path $ledger -Value $trees -Encoding ASCII
+}
+# Returns BOTH the exit code and the parsed report. Asserting on the exit code alone is what
+# let the broken version through: 0 is equally what "all attested" and "the check switched
+# itself off" look like, and only the report tells them apart.
+function Invoke-AttestCheck([string]$root, [string]$ledger) {
+    $env:AI_STACK_ATTEST_LEDGER = $ledger
+    try {
+        $out  = (& $attest -Branch "work-line" -Base "base-line" -RepoRoot $root -AllowLedgerOverride -Json)
+        $code = $LASTEXITCODE
+    } finally { Remove-Item Env:\AI_STACK_ATTEST_LEDGER -ErrorAction SilentlyContinue }
+    return [pscustomobject]@{ Code = $code; Report = ($out | ConvertFrom-Json) }
+}
+$mledger = Join-Path $env:TEMP ("drill-merge-attest-" + $PID + ".log")
+
+# CASE A - no pre-merge-commit at the fork point. The gate must stay off and the unattested
+# merge must be SKIPPED, or this guard blocks every branch cut before the hook existed.
+Build-AttestRepo $mrepo $false
+Write-AttestLedger $mrepo $mledger $false
+$rA = Invoke-AttestCheck $mrepo $mledger
+# The check must be RUNNING (not inactive) and must have skipped the merge: 1 commit looked
+# at, not 2. Without the count this case cannot tell "merges skipped" from "nothing ran".
+Check "merge gate INACTIVE without pre-merge-commit at the fork point (exit 0)" `
+    ($rA.Code -eq 0 -and -not $rA.Report.inactive -and -not $rA.Report.mergesChecked -and $rA.Report.checked -eq 1) `
+    ("checked=" + $rA.Report.checked + " mergesChecked=" + $rA.Report.mergesChecked)
+
+# CASE B - the hook IS at the fork point and the merge tree is NOT attested. This is the
+# hole the gate exists to close: a clean merge is new content that no check ever saw.
+$mrepo2 = $mrepo + "-b"
+Remove-Item -Recurse -Force $mrepo2 -ErrorAction SilentlyContinue
+New-Item -ItemType Directory -Force -Path (Join-Path $mrepo2 ".githooks") | Out-Null
+Build-AttestRepo $mrepo2 $true
+Write-AttestLedger $mrepo2 $mledger $false
+$rB = Invoke-AttestCheck $mrepo2 $mledger
+Check "an UNATTESTED merge commit is CAUGHT once the gate is active (exit 1)" `
+    ($rB.Code -eq 1 -and $rB.Report.mergesChecked -and $rB.Report.checked -eq 2) `
+    ("checked=" + $rB.Report.checked + " mergesChecked=" + $rB.Report.mergesChecked)
+
+# CASE C - same repository, merge tree attested. Proves case B failed for the merge and not
+# for something incidental about the repo; without this, B could be passing by accident.
+Write-AttestLedger $mrepo2 $mledger $true
+$rC = Invoke-AttestCheck $mrepo2 $mledger
+Check "the same branch PASSES once the merge tree is attested (exit 0)" `
+    ($rC.Code -eq 0 -and $rC.Report.mergesChecked -and $rC.Report.checked -eq 2) `
+    ("checked=" + $rC.Report.checked + " mergesChecked=" + $rC.Report.mergesChecked)
+
+# And the report must NAME it as a merge - the remedy for a merge is not the remedy for an
+# ordinary commit, and an operator who is told to rebase across a merge will damage history.
+Write-AttestLedger $mrepo2 $mledger $false
+$env:AI_STACK_ATTEST_LEDGER = $mledger
+$mjson = (& $attest -Branch "work-line" -Base "base-line" -RepoRoot $mrepo2 -AllowLedgerOverride -Json) | ConvertFrom-Json
+Remove-Item Env:\AI_STACK_ATTEST_LEDGER -ErrorAction SilentlyContinue
+Check "the report marks the offender as a merge (mergesChecked + isMerge)" `
+    ($mjson.mergesChecked -and $mjson.unattested.Count -eq 1 -and $mjson.unattested[0].isMerge) `
+    ("mergesChecked=" + $mjson.mergesChecked)
+Remove-Item -Recurse -Force $mrepo, $mrepo2 -ErrorAction SilentlyContinue
+Remove-Item $mledger -ErrorAction SilentlyContinue
 & $queue -Reject -Id "drill-bypass" -By "wt-reviewer" -Reason "drill probe, not real work" 2>&1 | Out-Null
 
 foreach ($id in @("a", "b")) {

@@ -15,16 +15,28 @@
 # It cannot tell those apart, and it does not pretend to - it reports what is unattested
 # and lets the caller decide. Being honest about that is what keeps it trustworthy.
 #
-# MERGE COMMITS ARE EXEMPT, deliberately. `git merge` runs pre-merge-commit, never
-# pre-commit, so a merge tree is never attested. Requiring it would be a permanent false
-# positive on the reviewer's own workflow - and a guard that cries wolf gets disabled,
-# which is strictly worse than no guard.
+# MERGE COMMITS USED TO BE EXEMPT, and the reason given here was wrong. It said `git merge`
+# runs pre-merge-commit and never pre-commit, so a merge tree could never be attested.
+# Running it says otherwise:
+#
+#   CONFLICTED merge -> git stops; the resolution is committed with `git commit`
+#                    -> pre-commit RUNS and attests. Never was a gap.
+#   CLEAN merge      -> pre-merge-commit is the only hook invoked, and there was no such
+#                       hook -> nothing ran, and the tree went unchecked.
+#
+# So the exemption was blanket cover for a hole one case wide, and it also discarded the
+# conflicted-merge attestations the hook was already writing. Merges are now CHECKED, with
+# the false-positive problem solved by activation rather than by exemption: the gate turns
+# on only when .githooks/pre-merge-commit existed at the FORK POINT of Base..Branch. If it
+# did, every merge made on this branch had the hook available and has no excuse; if it did
+# not, the branch is silently skipped. Fork-point content is history - unlike a date or an
+# environment variable, the caller cannot arrange it after the fact.
 #
 # Usage:
 #   .\check-hook-attestation.ps1 -Branch work/foo -Base refactor/ai-stack-cleanup
 #   .\check-hook-attestation.ps1 -Branch work/foo -Base development -Json
 #
-# Exit: 0 = every non-merge commit attested | 1 = one or more unattested | 2 = usage/env
+# Exit: 0 = every checked commit attested | 1 = one or more unattested | 2 = usage/env
 
 [CmdletBinding()]
 param(
@@ -147,8 +159,23 @@ if (-not (Test-Path $ledgerPath)) {
     exit 0
 }
 
+# THE MERGE GATE ACTIVATES FROM THE FORK POINT, not from the branch tip.
+#
+# Reading it from the tip (which is what the pre-commit gate below does, correctly, for a
+# hook that must exist WHEN EACH COMMIT IS MADE) would be wrong here: a branch can carry
+# the merge hook at its tip and still contain merges made before it arrived, and flagging
+# those would be the cry-wolf failure the old exemption was trying to avoid. The fork point
+# is the moment the branch's own history begins, so a hook present THERE was available for
+# every merge on the branch. It is committed history: not a date, not an environment
+# variable, nothing the submitting party can arrange afterwards.
+$forkPoint = (Invoke-GitLines @("merge-base", $Base, $Branch) | Select-Object -First 1)
+$mergeHook = if ($forkPoint) { (Invoke-GitLines @("show", "${forkPoint}:.githooks/pre-merge-commit")) -join "`n" } else { "" }
+$mergeGateActive = [bool]($mergeHook -match '\S')
+
 # Commits on the branch that are NOT on the base - i.e. the work being submitted.
-$revs = Invoke-GitLines @("rev-list", "--no-merges", "$Base..$Branch")
+$revArgs = @("rev-list", "$Base..$Branch")
+if (-not $mergeGateActive) { $revArgs = @("rev-list", "--no-merges", "$Base..$Branch") }
+$revs = Invoke-GitLines $revArgs
 $unattested = @()
 $checked = 0
 
@@ -171,7 +198,9 @@ foreach ($sha in $revs) {
     # not from the environment. A branch that can attest has no excuse for a commit that
     # is not attested.
     $subject = (Invoke-GitLines @("log", "-1", "--format=%s", $sha) | Select-Object -First 1)
-    $unattested += [pscustomobject]@{ Sha = $sha; Tree = $tree; Subject = $subject }
+    $parents = (Invoke-GitLines @("log", "-1", "--format=%P", $sha) | Select-Object -First 1)
+    $isMerge = (($parents -split '\s+' | Where-Object { $_ }).Count -gt 1)
+    $unattested += [pscustomobject]@{ Sha = $sha; Tree = $tree; Subject = $subject; IsMerge = $isMerge }
 }
 
 if ($Json) {
@@ -179,14 +208,15 @@ if ($Json) {
         branch      = $Branch
         base        = $Base
         checked     = $checked
+        mergesChecked = $mergeGateActive
         ledger      = $ledgerPath
         ledgerFound = (Test-Path $ledgerPath)
-        unattested  = @($unattested | ForEach-Object { @{ sha = $_.Sha; tree = $_.Tree; subject = $_.Subject } })
+        unattested  = @($unattested | ForEach-Object { @{ sha = $_.Sha; tree = $_.Tree; subject = $_.Subject; isMerge = $_.IsMerge } })
     } | ConvertTo-Json -Depth 5 -Compress
     exit ($(if ($unattested.Count) { 1 } else { 0 }))
 }
 
-Write-Host ("Hook attestation: {0} non-merge commit(s) on {1} not in {2}" -f $checked, $Branch, $Base)
+Write-Host ("Hook attestation: {0} commit(s) on {1} not in {2} ({3})" -f $checked, $Branch, $Base, $(if ($mergeGateActive) { "merges included" } else { "merges skipped - no pre-merge-commit at the fork point" }))
 Write-Host ("  ledger: {0}{1}" -f $ledgerPath, $(if (Test-Path $ledgerPath) { "" } else { "  (NOT FOUND)" }))
 if ($unattested.Count -eq 0) {
     Write-Host "  [OK] every commit's tree was validated by the pre-commit hooks." -ForegroundColor Green
@@ -196,7 +226,7 @@ if ($unattested.Count -eq 0) {
 Write-Host ""
 Write-Host ("  [UNATTESTED] {0} commit(s) - the pre-commit hooks did not validate this content:" -f $unattested.Count) -ForegroundColor Red
 foreach ($u in $unattested) {
-    Write-Host ("    {0}  {1}" -f $u.Sha.Substring(0, 8), $u.Subject) -ForegroundColor Red
+    Write-Host ("    {0}{1}  {2}" -f $u.Sha.Substring(0, 8), $(if ($u.IsMerge) { " (merge)" } else { "" }), $u.Subject) -ForegroundColor Red
 }
 Write-Host ""
 Write-Host "  The usual cause is `git commit --no-verify`. Never use it: the checks it skips"
@@ -206,6 +236,19 @@ Write-Host "  real failure. THE REMEDY is to re-commit the same content so the h
 Write-Host ""
 Write-Host "    git commit --amend --no-edit          # for the tip commit"
 Write-Host "    git rebase --exec 'git commit --amend --no-edit' $Base   # for several"
+if ($unattested | Where-Object { $_.IsMerge }) {
+    Write-Host ""
+    # NO BACKTICKS IN THESE STRINGS. A backtick before the closing quote escapes it, the
+    # string runs on into the next line, and the leftover words parse as a command - which
+    # is how an earlier version of this block died with "parents: CommandNotFoundException"
+    # while the file still tokenized clean. A parse check is not a behaviour check.
+    Write-Host "  A MERGE commit above is a different cause with a different remedy. --amend"
+    Write-Host "  works on it (parents are preserved), but do not rebase across it. A clean"
+    Write-Host "  merge is validated by .githooks/pre-merge-commit, so an unattested one means"
+    Write-Host "  'git merge --no-verify', or core.hooksPath was not set in that clone:"
+    Write-Host ""
+    Write-Host "    git config core.hooksPath .githooks   # then re-do the merge"
+}
 Write-Host ""
 Write-Host "  If these commits predate attestation, or came from a clone without"
 Write-Host "  core.hooksPath set, say so explicitly in your submission rather than"
