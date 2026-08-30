@@ -1,133 +1,50 @@
-# Agent-memory plane — implementation plan
+# Agent-memory plane — THE PLAN IS NOT HERE
 
-> Status: **RECONSTRUCTED 2026-08-29.** Phases 0–1.3 are DONE; 1.4 onward are open.
+> **Canonical plan:**
+> `d:\Open WebUI\documentation-plans-ai-stack\implementation-guide\agent-memory-plane\PLAN.md`
+> — 493 lines, in the sibling private plans repo, outside this repo root.
 >
-> **This document is not the original.** The dark-factory-unification plan's U1 row
-> validates against "the memory-plane plan's own per-phase gates (already written,
-> file/line-grounded)". That document was never committed — it does not appear anywhere in
-> this repository's history, and it is not on disk. Phases 1.1, 1.2 and 1.3 were executed
-> against a working memory of it, which means U1's stated validation source did not exist
-> while U1 was being validated.
->
-> This file replaces it, built from evidence that DOES exist: the merged commits, the
-> promotion runbook beside it, the findings sinks, and the schema itself. Where a completed
-> phase's gate is recorded below, it is **what was actually validated**, cited to the
-> artifact that proves it — not a guess at what the original asked for. Where a future
-> phase's gate is stated, it is being set now, before implementation, per design constraint
-> A.4.
->
-> Anything the original required that is not here is lost. That is a real gap and it is
-> named rather than papered over.
+> That document is authoritative for phases, gates, and the operator-decided
+> invariants. **This file is not a plan and must never become one** — two plans for one
+> effort diverge, and this file already caused that once.
 
-Companion: [PROMOTION-RUNBOOK.md](PROMOTION-RUNBOOK.md) — how the schema is applied and
-verified against a live database.
+## Why this file exists at all, and what it got wrong
 
----
+An earlier version of this file was a *reconstruction*, written on the finding that the
+memory-plane plan "does not exist — nowhere in this repository's history and not on disk".
+The first half was right and the second half was wrong. I searched this repo and two
+guessed paths (`D:/Open WebUI/agent-memory-plane`, `D:/agent-memory-plane`); I did not
+search the sibling plans repo, where it has been the whole time.
 
-## The invariant the whole plane exists to hold
+So the reconstruction invented gates for phases whose real gates were written down, and
+declared "anything the original required that is not here is lost" — about a document that
+was never lost. The honest flag was right; the search behind it was not. That is the same
+error class as asserting a commit SHA from memory: a claim about what exists, made without
+looking hard enough to earn it.
 
-**A memory's write exposure never exceeds its writer's read plane**, and **nothing an agent
-writes unprompted is instruction-grade**. Everything below is in service of those two.
+The reconstruction is retired. What follows is the only thing this file should carry: a
+pointer, and the evidence trail for what was actually validated **in this repo**.
 
-The failure mode they guard is silent: the write side and the read side each look correct
-alone and disagree in combination, so a memory is written, nothing errors, and the default
-recall never returns it. The plane reports healthy and holds nothing retrievable. Two
-instances were found locally and reproduced against a real database — `review_status`
-defaulting to `pending` against a gate that admits only `confirmed`/`evidence_only`, and
-`visibility: 'project'` with a NULL `project_id` against a project-scoped recall.
+## What was validated here, against the canonical gates
 
----
+Reconciled 2026-08-29 against the canonical PLAN.md §Phase 1 (L186–L277). Divergences are
+stated in `../dark-factory-unification/DECISIONS.md`; the short version:
 
-## Phase 0 — provenance: the org's audit events actually reach Open Brain — **DONE**
+| Gate | State | Evidence in this repo |
+|---|---|---|
+| **1.1** schema lands via the two-place mechanism + promotion runbook | **MET**, one deliberate deviation | `OB1/docker/init-agent-memory.sql`; [PROMOTION-RUNBOOK.md](PROMOTION-RUNBOOK.md); `scripts/checks/test-quartz4-offline.ps1` proves fresh-apply (8 tables, trigger, 2 functions). Deviation: the chain is fixed-width `010`–`120`, not `99-init-agent-memory.sql` — a `99a`-style suffix sorts *before* `99-` under bash+UTF-8 collation, so the plan's "next free prefix" would not have run where it read as running. |
+| **1.2** server code: 7 MCP tools, 3 REST twins, zod, 9 review actions | **PARTIAL — 2 of 7 tools** | Built: `agent_memory_writeback`, `agent_memory_recall` + their REST twins. Missing: `report_usage`, `review`, `list_review_queue`, `inspect`, `recall_trace`, and `POST /agent-memory/usage`. No zod validation. Review logic covers **4** of the schema's **9** actions and writes only `agent_memory_audit_events` — never `agent_memory_review_actions`, the table that exists for it. |
+| **1.3** offline harness + smoke script + plane-agreement invariant | **PARTIAL** | Done, and done first as the plan required: the plane-agreement invariant test. Harness and smoke script green. Missing: conservative-recall-returns-nothing-pending, `include_unconfirmed` returning it *and creating a trace*, usage report, `evidence_only` review action, and the **cloud-gateway negative test** (`agent_memory_*` denied via :8061; cloud `search_thoughts` must not surface agent-memory thoughts). |
+| **1.4** the ops door | **NOT MET — built the wrong thing, reverted** | See DECISIONS.md. The canonical door is a second `openbrain-gateway` instance on `obnet` with its own `OPS_GATEWAY_KEY`, enforcing the `exposure` model. What was built was a bespoke Deno server on its own network with **no authentication at all**. Reverted unbuilt. |
 
-Prerequisite, not part of the schema. The memory plane is worthless if the events that
-feed it are silently dropped.
+## The invariant this repo has not implemented at all
 
-| | |
-|---|---|
-| **Gate** | An `Event.mirrored` flag flips only on genuine success — HTTP 200 **and** no JSON-RPC error **and** no `result.isError`. Covered by tests naming the exact wire lines. |
-| **Evidence** | `agent-org/agent-bridge/app/modules/openbrain_client.py` (owns the wire protocol); `audit_sink._mirror` delegates to it. DECISIONS.md, four entries under "U1 Phase 0". |
-| **Found here** | The tool argument is `metadata_extra`, not `metadata`. `x-brain-key` was correct and the anchor was wrong about it. The mirror had been **off in production** while I asserted from code defaults that it was on — 26 events lost provenance before the operator authorised the credential fix and the backfill. |
+Canonical PLAN.md §1.1, **DECIDED by the operator 2026-08-25**: *a record's maximum
+exposure equals the access plane of the context that wrote it.* Every agent memory carries
+`exposure` (`ops` / `personal`) in `agent_memories.metadata` with a mirrored label on the
+linked thought; lanes are stamped **at doors, not by writers**; taint propagates; PII
+heuristics *demote, never bless*; human review is the only elevation path.
 
-## Phase 1.1 — the schema reaches a fresh volume — **DONE**
-
-| | |
-|---|---|
-| **Gate** | On a throwaway pgvector volume running the **real** initdb chain: 8 sidecar tables, 1 trigger, 2 functions present — asserted **by query**, never by a clean exit code. |
-| **Evidence** | `OB1/docker/init-agent-memory.sql`; merge `a9febd8`; `PROMOTION-RUNBOOK.md`; `scripts/checks/test-quartz4-offline.ps1` prints `agent_memory_tables(8)\|8`. |
-| **Found here** | The harness was testing a **hardcoded** 13-file chain while compose mounted 20 — it had been proving "fresh apply works" for a chain that was not the real one. The chain is now derived from compose (`scripts/checks/lib/ob-initdb.ps1`), integrity checked both directions, and `docker-compose.preview.yml` is checked for drift after it fell eight migrations behind. |
-
-## Phase 1.2 — the server code: policy, writeback, recall — **DONE**
-
-| | |
-|---|---|
-| **Gate** | The plane-agreement invariant is a **test**, not a comment: a default writeback is admitted by the default recall, composed over every discriminating column — and the test is proven able to FAIL (forcing the column default must break it). Recall is parameterised, pins `lifecycle_status='active'`, and excludes `personal` by default. |
-| **Evidence** | `agent-memory-policy.ts`, `agent-memory.ts` and their suites (42 tests); merges `578a81c`, `920e8a2`, `9267f42`, `9f56cfb`, `22cd9a0`, `062a3d7`. |
-| **Found here** | Three live defects an adversarial reviewer caught: an insert into a `detail` column that **does not exist** (schema has `payload`) — every writeback would have failed *after* committing two rows; the three writes not being one transaction; and idempotency keyed **globally** rather than per workspace, so a second tenant was handed the first tenant's memory and told `duplicate: true` while its own was never written. |
-
-## Phase 1.3 — the doors are called, not just the logic — **DONE**
-
-| | |
-|---|---|
-| **Gate** | The real server, started in a container against a real database, answers over HTTP: bad key → 401; good key → the writeback contract (**the success is the reachability proof** — the MCP catch-all answers 401 too, so only a successful call distinguishes the two route orderings); the row and its audit event present in one transaction; idempotent retry; the cross-tenant case; 422 + named reason with **nothing written**; 400 on malformed JSON; and the plane-agreement invariant end to end through two doors and a database. |
-| **Evidence** | `scripts/checks/smoke-agent-memory.ps1` — ALL CHECKS PASSED. Closes writeback-findings F2 and F3. |
-| **Found here** | On PS 5.1 an HTTP error body lives in `$_.ErrorDetails.Message`, not in the response stream — every refusal assertion would have compared against `$null` and **failed a correct server**. |
-
----
-
-## Phase 1.4 — the review door — **slice 1 DONE, slice 2 open**
-
-**The gap, verified before this was written:** there is no `UPDATE agent_memories` and no
-`SET review_status` anywhere in the codebase. Every memory is written `evidence_only` and
-stays there for ever. `pending` can never become `confirmed`; nothing can be `rejected`,
-`superseded` or `merged`. The schema defines the whole lifecycle — and reserves a
-`memory_confirmed` audit event type (`init-agent-memory.sql:232`) — that nothing can emit.
-
-So the review gate the recall path enforces is currently a gate onto a room with no other
-door. That is safe (the conservative direction) but it means the plane can never accumulate
-anything a human has actually vouched for.
-
-**Why a separate door, on loopback.** Promotion is the one operation that changes what a
-memory is allowed to be used for. It must not live on the surface agents already speak to:
-an agent that can reach the promote route can vouch for its own memory, and the only thing
-standing between it and instruction-grade material would be a key check on a server it is
-already authenticated to. A distinct process bound to `127.0.0.1` is not reachable from the
-agent plane at all — a routing mistake cannot expose it, which is a stronger property than
-a correct authorisation check.
-
-| | |
-|---|---|
-| **Gate** (set before implementation, A.4) | 1. Promote/reject/supersede each write an audit event naming the actor, in the same transaction as the state change. 2. The door is **not reachable from the agent plane** — proven by attempting it from a container on the agent network and failing to connect, not by reading a bind address. 3. A promoted memory becomes visible to a default recall, and a rejected one is returned by **no** recall path, both proven through the doors. 4. Instruction-grade remains unmintable from the agent side: promotion may raise `review_status`, and the schema CHECK still refuses `can_use_as_instruction` for anything not user-confirmed or imported. 5. The full `documentation/runbooks/SERVICE-LIFECYCLE.md` checklist if this ships as a new container. |
-| **Depends on** | 1.3 (the smoke harness is the pattern its tests extend). |
-| **Sliced** (class-2, §C.6) | **1.4a — DONE.** The transition policy and its execution: `agent-memory-review.ts` (pure), `agent-memory-ops.ts` (one transaction, `FOR UPDATE`, state change and audit event together), 32 tests, and the statements executed against the real schema in the offline harness — including proof that the `can_use_as_instruction` CHECK still refuses generated provenance. No new container, no live deploy, fully reversible. **1.4b — OPEN.** The loopback entrypoint and its container, gate items 2 and 5: unreachability proven by connecting from the agent network and failing, and the full SERVICE-LIFECYCLE checklist. |
-
-## Phase 2 — write paths — **OPEN**
-
-Agents actually writing memories at the seams, rather than the door existing unused.
-
-| | |
-|---|---|
-| **Gate** (to be refined when 1.4 lands) | A real run produces memories through the door with correct provenance, and the count is asserted against what the run should have produced — not merely "greater than zero". A run that should produce none must produce none. |
-| **Depends on** | 1.4 |
-
-## Phase 3 — recall-informed briefs at the four seams — **OPEN**
-
-Named by the unification plan's U6 row.
-
-| | |
-|---|---|
-| **Gate** (to be refined) | At each seam, a brief demonstrably contains recalled material that changed it — shown by a differential run (same seam, recall disabled vs enabled), not by the presence of a recall call. |
-| **Depends on** | Phase 2 |
-
----
-
-## Standing rules for this plane
-
-- **Never assert a memory is retrievable because a write returned success.** Every gate
-  above that could be satisfied by a stub is instead satisfied by a query or an HTTP call.
-- **The findings sinks are part of this plan**, not a graveyard:
-  `documentation/notes/agent-memory-policy-findings.md` and
-  `documentation/notes/agent-memory-writeback-findings.md`. An entry is removed when it
-  lands, and closed entries say where.
-- **Test images tag `:smoke` or `:wt-<id>`, never `:local`** — that is the production tag,
-  and this plane has already had one accident there (writeback-findings F1).
+None of that exists in the code here. The writeback path has no `exposure` field, no PII
+heuristic, and no taint input. Recorded so the gap is visible from inside this repo, where
+someone reading only the merged code would have no way to know it was ever required.
