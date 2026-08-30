@@ -74,6 +74,7 @@ param(
     [switch]$Resubmit,
     [switch]$Unclaim,
     [switch]$ScopeNodes,
+    [switch]$Oracle,
     [switch]$CloseOut,
     [string]$Id = "",
     [string]$Branch = "",
@@ -87,6 +88,11 @@ param(
     [string]$Sha = "",
     [string]$Thread = "",
     [string]$State = "",
+    # NOT -Profile: $Profile is a PowerShell automatic variable (the profile script path),
+    # and a param of that name shadows it for the whole script scope. PSScriptAnalyzer
+    # flagged it; the name also reads better, since what it selects is which RUNNER each
+    # role executes on.
+    [string]$RunnerProfile = "",
     [switch]$PlanAdequate,
     [switch]$PlanInadequate,
     # The reviewer's forced verdict. Renamed from -FitsAnchor/-MissesAnchor on 2026-08-29
@@ -186,6 +192,38 @@ function Drop-Claim([string]$i, [string]$role) {
     if (Test-Path $c) { Remove-Item $c -Force }
 }
 
+function Invoke-OracleOnStall([string]$i) {
+    # FRONTIER-ORACLE-ON-STALL (dark-factory-unification U4; ORCHESTRATION-DESIGN sec 7).
+    #
+    # A failed test round is the ONLY moment the harness learns something new about whether
+    # this item is converging, so it is where the stall test belongs. oracle_on_stall.py
+    # owns the definition (agent-org's: no novel failure signature, no moved commit, twice)
+    # and the ledger; this just runs it and shows the operator what it found.
+    #
+    # ADVISORY: a stall check that could not run must never block a tester from recording a
+    # verdict. But it says SKIPPED and why - a check that quietly does nothing is the exact
+    # failure class this plan's sec 0 A6 is about, and eight of them were found here in a day.
+    $mod = Join-Path $PSScriptRoot "oracle_on_stall.py"
+    if (-not (Test-Path $mod)) {
+        Write-Host "  stall check SKIPPED: oracle_on_stall.py is not beside queue.ps1." -ForegroundColor Yellow
+        return
+    }
+    if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
+        Write-Host "  stall check SKIPPED: python not found on PATH." -ForegroundColor Yellow
+        return
+    }
+    $repo = Get-MainCheckout
+    if (-not $repo) {
+        Write-Host "  stall check SKIPPED: cannot resolve the main checkout." -ForegroundColor Yellow
+        return
+    }
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    # Run the FILE, not a `python -c` snippet - same reason as -ScopeNodes: the repo path
+    # contains a space and a snippet's quoting does not survive Windows argument handling.
+    try { & python $mod check $QueueDir $i --repo $repo } finally { $ErrorActionPreference = $prev }
+}
+
 # --- list / show --------------------------------------------------------------------
 if ($CloseOut) {
     # CLOSE OUT a row whose work landed OUTSIDE this queue's gates (§C.1).
@@ -235,6 +273,28 @@ if ($ScopeNodes) {
     # unrelated to the projection: Windows argument handling stripped the quotes out of a
     # string literal, and the repo path (which contains a space) split across argv.
     try { & python $mod $QueueDir $Line } finally { $ErrorActionPreference = $prev }
+    exit $LASTEXITCODE
+}
+
+if ($Oracle) {
+    # THE OBSERVATION SURFACE for frontier-oracle-on-stall (U4).
+    #
+    # "stall -> oracle observed firing at least once" is the phase's validation, and a
+    # firing nobody can point at afterwards has not been observed. This prints the ledger:
+    # every stall the detector found, what it saw, which runner stalled, which oracle it
+    # escalated to, and whether that escalation has been served yet.
+    if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
+        Write-Host "python not found - the oracle ledger needs it." -ForegroundColor Red
+        exit 2
+    }
+    $mod = Join-Path $PSScriptRoot "oracle_on_stall.py"
+    $repo = Get-MainCheckout
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        if ($Id) { & python $mod report --repo $repo --item $Id }
+        else { & python $mod report --repo $repo }
+    } finally { $ErrorActionPreference = $prev }
     exit $LASTEXITCODE
 }
 
@@ -461,6 +521,7 @@ if ($Submit) {
         Set-Field $item "developer" $Developer
         Set-Field $item "state" "ready-to-test"; Set-Field $item "test_plan" $planDest
         if ($Thread) { Set-Field $item "thread" $Thread }
+        if ($RunnerProfile) { Set-Field $item "profile" $RunnerProfile }
         Set-Field $item "line_mergeable" (-not (Test-LineCheckedOutElsewhere -Line $line))
         Set-Field $item "submitted_sha" $sha.Trim()
     } else {
@@ -469,6 +530,11 @@ if ($Submit) {
             state = "ready-to-test"; anchor = $null; anchor_file = ""
             anchor_confirmed_by = ""; anchor_confirmed_at = 0
             test_plan = $planDest; thread = $Thread; attempt = 1
+            # Which runner profile this item is being worked under. Recorded so the stall
+            # detector can name the runner that stalled and resolve the oracle ABOVE it
+            # (U4). Empty means "whatever the surface's default profile is at the time",
+            # which is what an item queued before this field existed also means.
+            profile = $RunnerProfile
             line_mergeable = (-not (Test-LineCheckedOutElsewhere -Line $line))
             submitted_sha = $sha.Trim(); tested_at_sha = ""; merged_sha = ""
             results = @(); history = @()
@@ -641,6 +707,10 @@ if ($Pass -or $Fail) {
         Write-Host ("'{0}' FAILED on attempt {1} - back to {2}, who fixes in the same worktree and runs -Resubmit." -f $Id, $item.attempt, $item.developer) -ForegroundColor Yellow
     }
     Write-Item $item
+    # The item must be WRITTEN before the stall test reads it: the detector reads results[]
+    # off disk, so running it first would score this round's failure as if it had not
+    # happened - and the round that trips a stall is exactly the one that would be missed.
+    if ($Fail) { Invoke-OracleOnStall $Id }
     exit 0
 }
 
