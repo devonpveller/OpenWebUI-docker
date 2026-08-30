@@ -75,7 +75,7 @@ feed it are silently dropped.
 
 ---
 
-## Phase 1.4 — the review door — **OPEN, next**
+## Phase 1.4 — the review door — **slice 1 DONE, slice 2 open**
 
 **The gap, verified before this was written:** there is no `UPDATE agent_memories` and no
 `SET review_status` anywhere in the codebase. Every memory is written `evidence_only` and
@@ -99,6 +99,7 @@ a correct authorisation check.
 |---|---|
 | **Gate** (set before implementation, A.4) | 1. Promote/reject/supersede each write an audit event naming the actor, in the same transaction as the state change. 2. The door is **not reachable from the agent plane** — proven by attempting it from a container on the agent network and failing to connect, not by reading a bind address. 3. A promoted memory becomes visible to a default recall, and a rejected one is returned by **no** recall path, both proven through the doors. 4. Instruction-grade remains unmintable from the agent side: promotion may raise `review_status`, and the schema CHECK still refuses `can_use_as_instruction` for anything not user-confirmed or imported. 5. The full `documentation/runbooks/SERVICE-LIFECYCLE.md` checklist if this ships as a new container. |
 | **Depends on** | 1.3 (the smoke harness is the pattern its tests extend). |
+| **Sliced** (class-2, §C.6) | **1.4a — DONE.** The transition policy and its execution: `agent-memory-review.ts` (pure), `agent-memory-ops.ts` (one transaction, `FOR UPDATE`, state change and audit event together), 32 tests, and the statements executed against the real schema in the offline harness — including proof that the `can_use_as_instruction` CHECK still refuses generated provenance. No new container, no live deploy, fully reversible. **1.4b — OPEN.** The loopback entrypoint and its container, gate items 2 and 5: unreachability proven by connecting from the agent network and failing, and the full SERVICE-LIFECYCLE checklist. |
 
 ## Phase 2 — write paths — **OPEN**
 

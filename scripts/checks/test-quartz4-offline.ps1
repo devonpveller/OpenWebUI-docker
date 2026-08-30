@@ -62,8 +62,13 @@ function Invoke-Unit {
   # DEFAULT recall. Two local instances of the opposite were found and reproduced against
   # a real database: review_status defaulting to 'pending' (which the gate excludes), and
   # visibility 'project' with a NULL project_id. Both look correct on each side alone.
+  # GLOBBED, not listed. The file list here named four files and was already stale when the
+  # review modules landed - two new suites would have sat in the repo, green on demand and
+  # run by nothing. Same class as the hardcoded initdb chain this harness caught: a list
+  # that has to be edited to stay true eventually stops being true. If the glob matches
+  # nothing it stays literal and deno errors, so an empty match fails rather than passes.
   docker run --rm -v "${rootFwd}/OB1/integrations/kubernetes-deployment:/app" `
-    -w /app denoland/deno:2.3.3 sh -c "deno check agent-memory-policy.ts agent-memory-policy.test.ts agent-memory.ts agent-memory.test.ts index.ts && deno test agent-memory-policy.test.ts agent-memory.test.ts"
+    -w /app denoland/deno:2.3.3 sh -c "deno check agent-memory*.ts index.ts && deno test agent-memory*.test.ts"
   if ($LASTEXITCODE -eq 0) { Pass "agent-memory policy: deno check + test" } else { Fail "agent-memory policy: deno check/test" }
 
   Section "Caddy validate (portal route)"
@@ -218,6 +223,80 @@ ROLLBACK;
   } else {
     Write-Host ($amOut | Out-String) -ForegroundColor Red
     Fail "agent-memory writeback SQL rejected by the real schema"
+  }
+
+  # THE REVIEW DOOR'S SQL, against the real schema (memory-plane Phase 1.4).
+  #
+  # Same reasoning as the writeback block above, and the same failure it is guarding: the
+  # ops tests stub the pool, so a column that does not exist or an enum value the CHECK
+  # refuses passes every one of them and fails on first real use. Three things here can
+  # only be answered by Postgres:
+  #   - review_status 'confirmed' and lifecycle 'rejected'/'superseded'/'disputed' are
+  #     accepted by their CHECK constraints;
+  #   - 'memory_confirmed' is accepted by the audit event_type CHECK, and actor_kind 'user'
+  #     by its own;
+  #   - setting provenance_status='user_confirmed' does not trip the
+  #     can_use_as_instruction CHECK (init-agent-memory.sql:94), which is the constraint the
+  #     confirm path moves closest to.
+  $revSql = @"
+BEGIN;
+INSERT INTO agent_memories (
+  thought_id, workspace_id, project_id, summary, content, memory_type, visibility,
+  review_status, lifecycle_status, provenance_status, can_use_as_evidence,
+  requires_user_confirmation, content_hash, metadata
+) VALUES (
+  NULL, 'ws-review', 'p-review', 'review summary', 'review content', 'lesson', 'project',
+  'evidence_only', 'active', 'generated', true, true,
+  agent_memory_hash_text('review content'), '{}'::jsonb
+);
+-- CONFIRM, exactly as agent-memory-ops.ts builds it.
+UPDATE agent_memories
+   SET review_status = 'confirmed', updated_at = now(),
+       provenance_status = 'user_confirmed', last_confirmed_at = now(),
+       requires_user_confirmation = false
+ WHERE workspace_id = 'ws-review';
+INSERT INTO agent_memory_audit_events
+  (memory_id, workspace_id, project_id, event_type, actor_kind, actor_label, payload)
+  SELECT id, 'ws-review', 'p-review', 'memory_confirmed', 'user', 'harness',
+         jsonb_build_object('from', 'evidence_only', 'to', 'confirmed')
+    FROM agent_memories WHERE workspace_id = 'ws-review';
+-- The other three lifecycle targets must each be accepted by their CHECK.
+UPDATE agent_memories SET review_status = 'rejected',  lifecycle_status = 'rejected'   WHERE workspace_id = 'ws-review';
+UPDATE agent_memories SET review_status = 'merged',    lifecycle_status = 'superseded' WHERE workspace_id = 'ws-review';
+UPDATE agent_memories SET review_status = 'restricted', lifecycle_status = 'disputed'  WHERE workspace_id = 'ws-review';
+INSERT INTO agent_memory_audit_events (memory_id, workspace_id, event_type, actor_kind, actor_label, payload)
+  SELECT id, 'ws-review', 'memory_rejected',   'user', 'harness', '{}'::jsonb FROM agent_memories WHERE workspace_id = 'ws-review';
+INSERT INTO agent_memory_audit_events (memory_id, workspace_id, event_type, actor_kind, actor_label, payload)
+  SELECT id, 'ws-review', 'memory_superseded', 'user', 'harness', '{}'::jsonb FROM agent_memories WHERE workspace_id = 'ws-review';
+INSERT INTO agent_memory_audit_events (memory_id, workspace_id, event_type, actor_kind, actor_label, payload)
+  SELECT id, 'ws-review', 'memory_disputed',   'user', 'harness', '{}'::jsonb FROM agent_memories WHERE workspace_id = 'ws-review';
+SELECT 'am_review_ok', count(*) FROM agent_memory_audit_events WHERE workspace_id = 'ws-review';
+ROLLBACK;
+"@
+  $revOut = docker exec -i ob-initdb-test psql -U postgres -d openbrain -tA -v ON_ERROR_STOP=1 -c $revSql 2>&1
+  if ($LASTEXITCODE -eq 0 -and ($revOut | Out-String) -match "am_review_ok\|4") {
+    Pass "agent-memory REVIEW SQL executes against the real schema (4 audit events)"
+  } else {
+    Write-Host ($revOut | Out-String) -ForegroundColor Red
+    Fail "agent-memory review SQL rejected by the real schema"
+  }
+
+  # AND THE CONSTRAINT THAT MATTERS MOST MUST STILL BITE. Confirming sets provenance to
+  # 'user_confirmed', which is one of the two values that make instruction-grade LEGAL. If
+  # the CHECK were ever dropped, nothing else in this repo would notice - so prove it still
+  # refuses the combination the review door must never be able to produce.
+  $ckSql = @"
+BEGIN;
+INSERT INTO agent_memories (workspace_id, summary, content, memory_type, provenance_status, can_use_as_instruction)
+VALUES ('ws-ck', 's', 'c', 'lesson', 'generated', true);
+ROLLBACK;
+"@
+  $ckOut = docker exec -i ob-initdb-test psql -U postgres -d openbrain -tA -v ON_ERROR_STOP=1 -c $ckSql 2>&1
+  if ($LASTEXITCODE -ne 0 -and ($ckOut | Out-String) -match "violates check constraint") {
+    Pass "instruction-grade is still REFUSED for generated provenance (the CHECK bites)"
+  } else {
+    Write-Host ($ckOut | Out-String) -ForegroundColor Red
+    Fail "a generated memory was allowed to claim can_use_as_instruction"
   }
 
   # The idempotency index must be scoped PER WORKSPACE. Globally unique, two tenants using
