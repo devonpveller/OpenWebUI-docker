@@ -468,3 +468,38 @@ WHY KEEP IT: three rows are NOT stale (`bridge-bg-task-note`,
           another effort's work). The mechanism is in use.
 REVERT:   Each row's `history` records its prior state; set `state` back and drop
           `closed_reason`.
+
+---
+
+## 2026-08-30 · U3 · CORRECTION — code-complete, VALIDATION-PARKED (not "complete")
+FINDING:  U3 was reported to the operator as "complete (321829d)". It is not.
+          §2's U3 *Validated by* column is a GYM run — "a seeded regression must
+          be caught by a check born from a *tester* finding in a prior round
+          (gym-007's shape, new source); drills green in both systems". Only the
+          second half is satisfied (harness 66/66, agent-org 9/9). The
+          seeded-regression gym run has not happened.
+STATUS:   **U3 = CODE-COMPLETE, VALIDATION-PARKED.** Carried as parked until the
+          gym run lands. §C.7: a phase closes ONLY when its Validated by column
+          is satisfied by an executable check.
+WHERE IT DISCHARGES: the gym run is runner-level work and belongs to U4's
+          quadrants, by this session's own analysis
+          (`documentation/notes/u3sig-findings.md` F3). It is scheduled there
+          rather than left to be forgotten because it was filed under another
+          phase.
+
+## 2026-08-30 · process · THE COMMITS WERE HONEST AND THE SUMMARY ROUNDED UP
+FINDING:  `u3sig`'s commit message says plainly: "U3's Validated-by column is
+          half-satisfied — 'drills green in both systems' is met, while the
+          seeded-regression GYM run needs a tester round". The phase summary
+          then reported "U3 — complete".
+WHY IT MATTERS MORE NOW: §C.7 makes the audit trail the deliverable's twin,
+          because the operator audits by reading DECISIONS entries, findings
+          notes and commit messages rather than diffs. A phase summary that
+          claims more than its commits is the ONE failure mode that survives an
+          unattended run — every other error is caught by something executable,
+          and nothing downstream checks a summary.
+RULE ADOPTED: a phase is reported as DONE only when its *Validated by* column is
+          satisfied and the evidence is named. Otherwise it is reported as
+          PARKED, with what is missing. "Code-complete" is not a synonym for
+          done and must not be shortened to it.
+REVERT:   n/a — this is a reporting correction.
