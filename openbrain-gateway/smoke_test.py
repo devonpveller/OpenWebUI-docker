@@ -198,7 +198,9 @@ def check_boundaries():
       - the ops door (:8062) advertises ONLY agent_memory_* - no search, no fetch, no
         capture_thought. It is not a second cloud door.
       - cloud search_thoughts does not surface agent-memory thoughts: those are written
-        with no share='cloud' label, and the cloud door forces share=cloud on reads.
+        with no share='cloud' label, and the cloud door forces share=cloud on reads. This
+        one is NOT covered by the tool denial - the cloud door never calls an agent-memory
+        tool, it calls search_thoughts, and the question is whether the row comes back.
 
     Needs BOTH keys and both doors up.
     """
@@ -231,6 +233,17 @@ def check_boundaries():
         body = parse_response(r)
         return {t["name"] for t in (body.get("result", {}).get("tools") or [])}
 
+    def call_args_on(url, key, tool, arguments):
+        with httpx.Client(timeout=CHAT_LANE_TIMEOUT) as c:
+            r = c.post(
+                f"{url}/mcp",
+                content=json.dumps({"jsonrpc": "2.0", "id": 4, "method": "tools/call",
+                                    "params": {"name": tool, "arguments": arguments}}),
+                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json",
+                         "Accept": "application/json, text/event-stream"},
+            )
+        return parse_response(r)
+
     def call_on(url, key, tool):
         with httpx.Client(timeout=CHAT_LANE_TIMEOUT) as c:
             r = c.post(
@@ -261,6 +274,50 @@ def check_boundaries():
         err = call_on("http://127.0.0.1:8062", ops_key, forbidden)
         check(err.get("error", {}).get("code") == -32601,
               f"{forbidden} on the ops door is DENIED (-32601)")
+
+    # §1.3's OTHER negative, and the one that is not automatic: an agent memory writes a
+    # THOUGHT, and thoughts are what the cloud door's search_thoughts reads. The tool
+    # denial above does not cover this at all - the cloud door never calls an agent-memory
+    # tool, it calls search_thoughts, and the question is whether the row comes back.
+    #
+    # It must not: agent-memory thoughts carry metadata {source:'agent-memory', exposure:…}
+    # and deliberately NO share='cloud' label, while the cloud door forces share=cloud on
+    # every read. That is the whole mechanism, and it is one missing label away from
+    # leaking every agent memory to the cloud surface.
+    print("[boundaries] cloud search_thoughts must not surface agent-memory thoughts")
+    marker = f"boundary-probe-{uuid.uuid4().hex[:8]}"
+    wrote = call_args_on(
+        "http://127.0.0.1:8062", ops_key, "agent_memory_writeback",
+        {
+            "workspace_id": "ai-stack",
+            "project_id": "boundary-probe",
+            "summary": "boundary probe",
+            "content": f"agent-memory boundary probe {marker}",
+            "memory_type": "work_log",
+            "idempotency_key": marker,
+        },
+    )
+    check(not wrote.get("error") and not (wrote.get("result") or {}).get("isError"),
+          "the ops door WROTE an agent memory", json.dumps(wrote)[:200])
+
+    found = call_args_on("http://127.0.0.1:8061", cloud_key, "search_thoughts",
+                         {"query": marker})
+    blob = json.dumps(found)
+    check(marker not in blob,
+          "the agent-memory thought is NOT visible through cloud search_thoughts",
+          f"marker leaked in {len(blob)} bytes of cloud response" if marker in blob else "")
+
+    # And prove the probe could have failed: the same marker IS findable on the local side,
+    # so a pass above means "filtered", not "never written" - which is the difference
+    # between a boundary and a typo.
+    local = subprocess.run(
+        ["docker", "exec", "openbrain-db", "psql", "-U", "postgres", "-d", "openbrain", "-tA",
+         "-c", f"SELECT count(*) FROM thoughts WHERE content LIKE '%{marker}%'"],
+        capture_output=True, text=True,
+    )
+    check(local.stdout.strip() == "1",
+          "the same thought IS present locally (so the cloud pass means filtered, not absent)",
+          f"local count={local.stdout.strip()!r}")
 
     print("[boundaries] the two keys are not interchangeable")
     with httpx.Client(timeout=CHAT_LANE_TIMEOUT) as c:
