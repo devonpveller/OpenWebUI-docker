@@ -509,7 +509,7 @@ live planes or a real target.
 | **U1** | Memory plane Phases 0–2 as planned (schema deploy, ops door, write paths). This is the substrate everything else writes to | The memory-plane plan's own per-phase gates (already written, file/line-grounded) | U0 |
 | **U2** | **Intent unification:** shared anchor schema (mode A/B); intake doors incl. **git issues on the daily/weekly cadence** — daily sweep schedules M.1 planning, weekly synthesis (plan-vs-plan radar) posts the Mattermost verdict thread (approve/deny/postpone = this door's confirm gate) on both targets; agent-org intake consumes/produces anchors (`set_goal` seam, orchestrator.py:5950); reviewer verdict re-scoped to codebase-fit; queue items become depth-1 ScopeNodes | Gym: one goal driven from a git issue through sweep→plan→weekly thread→approve→land on each target; a deliberately overlapping issue pair must be flagged by the synthesis; schema cross-reader test | U0 |
 | **U3** | **Verification unification:** tester-finding→durable-check in both systems (extend §10's built pipeline; harness findings write `memory_type='check'`); failure signatures→clauses write-through to the plane; executable-criteria support in anchors; port the harness's drill pattern to agent-org as an executable org drill | Gym: a seeded regression must be caught by a check born from a *tester* finding in a prior round (gym-007's shape, new source); drills green in both systems | U1, U2 |
-| **U4** | **Runner unification:** prove `little-coder` through one real anchored item end to end (the standing unproven claim, A11); then agent-org workers as harness runners and vice versa — one profile mechanism governs both; frontier-oracle-on-stall wired per §7 | Gym: same anchored item run per quadrant (runner × target), outcomes compared; stall→oracle observed firing at least once | U2 |
+| **U4** | **Runner unification:** prove `little-coder` through one real anchored item end to end (the standing unproven claim, A11); then agent-org workers as harness runners and vice versa — **AMENDED 2026-08-30, see §2.1:** the premise that *one profile mechanism governs both* was FALSIFIED at the phase's start — it governed NEITHER side — so the phase's actual task is to BUILD that mechanism and prove it dispatches, not to extend an existing one; frontier-oracle-on-stall wired per §7 | Gym: same anchored item run per quadrant (runner × target), outcomes compared; stall→oracle observed firing at least once | U2 |
 | **U5** | **Containment parity:** mechanical guards for worktree/cloud agents (hook-bypass detection at minimum; commit-path proxy where feasible); `judge_enabled` calibration plan for expertise minting (the one-line §13 gap); personal-plane exclusion verified end to end | Adversarial drill: an agent instructed to bypass hooks / reach personal-plane data is mechanically stopped and the attempt is visible in an audit record | U0 |
 | **U6** | **Dark-factory mode:** andon-condition config; `dark` vs `attended` gate profiles; auto-passed gates leave audit records; recall-informed briefs at all four seams (memory-plane Phase 3) | Gym: an unattended run that hits each andon condition halts-and-raises; one that hits none lands with a complete audit trail | U1–U5 |
 | **U7 (standing)** | **Post-development design iteration** per §B: real-world outcomes → proposed design changes → judged against the pinned research anchors → trialed in the gym → adopted or refused on the record | The evidence ledger itself: every design change carries its anchor citation or its ledger amendment | U6 |
@@ -518,6 +518,49 @@ Explicitly NOT in scope: rewriting agent-org's orchestrator; replacing
 Mattermost; auto-elevation of any memory to instruction-grade; deleting the
 local SQLite stores; porting queue.ps1 to Python for its own sake. The spine
 stays; the concepts merge.
+
+### 2.1 Amendments to the phase table (§B / `-AmendAnchor` semantics)
+
+An amendment states its reason, cites the evidence, and carries a revert path. It NARROWS or
+CORRECTS; it never deletes a requirement. Outcomes may add anchors; they never silently erase
+one (§B).
+
+#### A1 — 2026-08-30 · §2's U4 row · the premise was falsified, the goal is unchanged
+
+**What the row said:** "then agent-org workers as harness runners and vice versa — one profile
+mechanism governs both".
+
+**Why it is amended:** that phrasing presumes a profile mechanism EXISTS and needs extending
+across two directions. It did not. Verified by the orchestrator before any U4 agent reported,
+and independently reconfirmed twice since:
+
+- `Resolve-RoleTarget` (`scripts/agent-harness/config.ps1:187`) has **zero executable callers**
+  repo-wide. Its only three references are its own definition, one test, and
+  `.claude/skills/merge-queue/SKILL.md:133` — a doc telling a *human* to run it by hand.
+- The runner `status` field (`proven` / `unproven`) is produced on exactly one line and **read
+  nowhere**.
+- Consequently three of the four shipped profiles (`all-local`, `local-work-cloud-review`,
+  `cloud-work-local-test`) route a role to `little-coder`, whose dispatch did not exist, and
+  they **select silently** — `Resolve-RoleTarget` throws only on an unknown profile or an
+  undefined runner, the two errors that cannot occur here.
+
+So "governs both" was not merely unachieved; it governed **neither**. A phase judged against a
+false premise cannot be honestly closed or honestly parked, which is why this is a plan defect
+rather than a work defect.
+
+**What the amendment changes:** the *task*, from extending a mechanism to building one and
+proving it dispatches. It does **not** weaken the goal, and it does **not** touch the
+Validated-by column.
+
+**Evidence:** `documentation/notes/u4-profile-mechanism-deadcode.md` (with its two recorded
+corrections), and the `2026-08-30 · U4 · PARKED` entry in `DECISIONS.md`.
+
+**Revert path:** restore the original row text, quoted verbatim above. Nothing else depends on
+the amendment.
+
+**Standing at amendment time:** the agent-org direction is real — changing one word in the
+shared registry file flips a live dispatch to `UnprovisionedHarness`. The harness direction is
+a declaration with zero executable consumers. One sentence must not cover both.
 
 ## 3. What each system keeps (the pride audit)
 
