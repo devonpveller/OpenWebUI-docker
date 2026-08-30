@@ -184,7 +184,7 @@ Check "the attestation checker exists" (Test-Path $attest)
 # checkout, so they carry whatever hook is MERGED - which, until this lands, cannot attest.
 # The guard must therefore be INACTIVE for them. If it were not, every branch in the repo
 # would be blocked the moment this merged, and the guard would be reverted by lunchtime.
-& $attest -Branch "work/drilla" -Base "drill/verify-d" -RepoRoot $repo | Out-Null
+& $attest -Branch "work/drilla" -Base "drill/verify-d" -RepoRoot $repo -AllowLedgerOverride | Out-Null
 Check "INACTIVE for a branch whose own hook cannot attest (exit 0)" ($LASTEXITCODE -eq 0)
 
 # The base ref must survive INTO the report. This caught a real one: a local $base variable
@@ -192,7 +192,7 @@ Check "INACTIVE for a branch whose own hook cannot attest (exit 0)" ($LASTEXITCO
 # rev-list ran "<filesystem path>..<branch>", matched nothing, and the checker cheerfully
 # reported "0 commits, all clean" for every branch. It only reproduced in the main checkout,
 # where --git-common-dir is relative - so every worktree test passed and it nearly shipped.
-$attestJson = (& $attest -Branch "work/drilla" -Base "drill/verify-d" -RepoRoot $repo -Json) | ConvertFrom-Json
+$attestJson = (& $attest -Branch "work/drilla" -Base "drill/verify-d" -RepoRoot $repo -AllowLedgerOverride -Json) | ConvertFrom-Json
 Check "the base ref round-trips into the report (not clobbered)" ($attestJson.base -eq "drill/verify-d") ("base=" + $attestJson.base)
 
 & $queue -Propose -Id "drill-bypass" -Anchor $anchorFile -Developer "wt-drilla" | Out-Null
@@ -203,9 +203,18 @@ Check "-Submit is NOT blocked by the inactive guard" ($LASTEXITCODE -eq 0)
 # And with no ledger at all it must also stay quiet rather than failing everything.
 $env:AI_STACK_ATTEST_LEDGER = Join-Path $env:TEMP "drill-attest-absent.log"
 Remove-Item $env:AI_STACK_ATTEST_LEDGER -ErrorAction SilentlyContinue
-& $attest -Branch "work/drilla" -Base "drill/verify-d" -RepoRoot $repo | Out-Null
+& $attest -Branch "work/drilla" -Base "drill/verify-d" -RepoRoot $repo -AllowLedgerOverride | Out-Null
 Check "no ledger => INACTIVE (exit 0), never a repo-wide block" ($LASTEXITCODE -eq 0)
+
+# THE ENV VAR ALONE MUST NOT DISABLE THE GUARD. It used to: any agent running
+# `queue.ps1 -Submit` sets its own environment, so AI_STACK_ATTEST_LEDGER pointing at a
+# nonexistent file turned the check off for exactly the party it constrains. The override
+# now needs -AllowLedgerOverride, which only this drill passes.
+& $attest -Branch "work/drilla" -Base "drill/verify-d" -RepoRoot $repo | Out-Null
+$envOnlyExit = $LASTEXITCODE
 Remove-Item Env:\AI_STACK_ATTEST_LEDGER -ErrorAction SilentlyContinue
+& $attest -Branch "work/drilla" -Base "drill/verify-d" -RepoRoot $repo | Out-Null
+Check "AI_STACK_ATTEST_LEDGER alone does NOT change the verdict" ($envOnlyExit -eq $LASTEXITCODE)
 
 # The ACTIVE case - detection of a real --no-verify commit - cannot be driven from a drill
 # worktree until the attesting hook is on the line those worktrees are cut from. It is
