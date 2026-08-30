@@ -225,6 +225,39 @@ ROLLBACK;
     Fail "agent-memory writeback SQL rejected by the real schema"
   }
 
+  # §1.1 EXPOSURE, against the real schema. The recall filter reads exposure out of a JSONB
+  # key with COALESCE to 'personal', and two things there can only be answered by Postgres:
+  # that the expression is valid at all, and that a row written BEFORE exposure shipped -
+  # no metadata.exposure - reads as personal rather than dropping out of `= ANY` invisibly.
+  # A memory that silently vanishes from every recall is the failure this plane exists to
+  # prevent, and it would look identical to a memory that was never written.
+  $expSql = @"
+BEGIN;
+INSERT INTO agent_memories (workspace_id, summary, content, memory_type, visibility, metadata)
+VALUES ('ws-exp', 'legacy', 'written before exposure existed', 'lesson', 'project', '{}'::jsonb);
+INSERT INTO agent_memories (workspace_id, summary, content, memory_type, visibility, metadata)
+-- jsonb_build_object, NOT a JSON literal: PowerShell strips embedded double quotes when
+-- it passes an argument to a native command, so '{"exposure":"ops"}' arrives as
+-- {exposure:ops} and Postgres rejects it. The writeback block above uses the same function
+-- for the same reason.
+VALUES ('ws-exp', 'ops row', 'written after', 'lesson', 'project', jsonb_build_object('exposure', 'ops'));
+SELECT 'legacy_is_personal', count(*) FROM agent_memories am
+ WHERE am.workspace_id = 'ws-exp'
+   AND COALESCE(am.metadata->>'exposure', 'personal') = ANY(ARRAY['personal']);
+SELECT 'ops_visible', count(*) FROM agent_memories am
+ WHERE am.workspace_id = 'ws-exp'
+   AND COALESCE(am.metadata->>'exposure', 'personal') = ANY(ARRAY['ops']);
+ROLLBACK;
+"@
+  $expOut = docker exec -i ob-initdb-test psql -U postgres -d openbrain -tA -v ON_ERROR_STOP=1 -c $expSql 2>&1
+  $expTxt = ($expOut | Out-String)
+  if ($LASTEXITCODE -eq 0 -and $expTxt -match "legacy_is_personal\|1" -and $expTxt -match "ops_visible\|1") {
+    Pass "exposure filter works on the real schema, and a pre-exposure row reads as personal"
+  } else {
+    Write-Host $expTxt -ForegroundColor Red
+    Fail "the exposure filter did not behave against the real schema"
+  }
+
   # THE REVIEW DOOR'S SQL, against the real schema (memory-plane Phase 1.4).
   #
   # Same reasoning as the writeback block above, and the same failure it is guarding: the
