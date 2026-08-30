@@ -213,6 +213,14 @@ Binding:
   and the operator typed "continue". Landing work is the strongest available
   evidence that the next slice is now unblocked — it is the worst possible
   moment to stop.
+- **Your turn's last act is never a merge — move the boundary instead of
+  resisting it.** The two clauses above tell you not to stop at a merge, and
+  a merge is still where every stop lands, because it is a genuine boundary
+  and boundaries are where turns end. So stop making it the boundary: after
+  landing a slice the next act is `new-worktree.ps1` for the following one and
+  its first commit. **Land, branch, begin — then report.** A report written
+  from inside the next slice cannot be mistaken for a finished turn, and the
+  satisfying completion point moves to somewhere it is safe to have one.
 - **Never end a turn on a statement of intent.** "Continuing with X next",
   followed by stopping, is worse than not naming X: it reads as momentum while
   handing back the same gate. Naming the next step does not discharge it. If
