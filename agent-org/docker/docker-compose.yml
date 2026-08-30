@@ -237,6 +237,21 @@ services:
       # Read-only mount of the App key directory. The DIR always exists (.gitkeep), so `up` never
       # breaks before the App is set up; the .pem is gitignored + dropped in by the operator (P-APL.0).
       - ../agent-bridge/secrets:/etc/agent-bridge/secrets:ro
+      # THE ANCHOR SCHEMA, READ-ONLY (dark-factory-unification U2).
+      #
+      # The shared intent object lives in scripts/agent-harness/, and the bridge is the
+      # reader U2 actually needs - the set_goal seam consuming anchors. The recorded finding
+      # (documentation/notes/anchor-schema-findings.md F1) said it was unreachable "at build
+      # time and at run time" because the build context is ../agent-bridge. The build-time
+      # half is right. The RUN-TIME half is not: a bind mount is a HOST path resolved by the
+      # daemon at container start and has nothing to do with the build context.
+      #
+      # So the container reads THE SAME FILE the harness does. No generate step to forget,
+      # no widened context pulling in OB1/ and every worktree, no moved module boundary, and
+      # nothing copied that could drift. The three options that finding weighed all carried
+      # one of those costs, because each assumed a copy had to exist somewhere.
+      - ../../scripts/agent-harness/anchor.schema.json:/app/anchor/anchor.schema.json:ro
+      - ../../scripts/agent-harness/anchor_schema.py:/app/anchor/anchor_schema.py:ro
     networks:
       - ao-net
       - llm-net       # reach the existing llm-gateway via the llama-cpp alias
