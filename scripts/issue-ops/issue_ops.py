@@ -353,6 +353,93 @@ def cmd_plan(n: int, refresh: bool = False) -> int:
     return 0
 
 
+def sweep_targets(issues: list[dict], branch: str) -> list[tuple[int, str]]:
+    """Which issues need a plan generated, and why. PURE — no network, no writes.
+
+    Separated from `cmd_sweep` so the SELECTION is testable without GitHub or a headless
+    model run. The selection is the part with judgement in it; the loop around it is not.
+
+    Two reasons an issue is a target:
+      unplanned    — no plan file exists yet.
+      <freshness>  — a plan exists but `plan_freshness` says it no longer describes
+                     reality, because the code moved past its base or the issue was
+                     edited after it was written.
+
+    A FRESH plan is never regenerated. The daily sweep runs unattended against a headless
+    model; regenerating fresh plans would burn a model run per issue per day and, worse,
+    churn the plan text under a human who is part-way through reviewing it.
+    """
+    out: list[tuple[int, str]] = []
+    for i in issues:
+        n = i["number"]
+        meta = read_plan(n)
+        if not meta:
+            out.append((n, "unplanned"))
+            continue
+        fresh = plan_freshness(meta, i, branch)
+        if fresh != "fresh":
+            out.append((n, fresh))
+    return out
+
+
+def cmd_sweep(dry_run: bool = False, limit: int = 0) -> int:
+    """DAILY SWEEP (dark-factory-unification U2): plan what is unplanned or stale.
+
+    The M.1 `plan` path, scheduled rather than on-demand. It generates plans and NOTHING
+    else — no approval, no execution, no queueing. Selection happens later, at the weekly
+    verdict thread, which is this door's operator-confirm gate. §C.3 decision 5: "the daily
+    sweep takes everything; selection happens at the weekly verdict thread."
+
+    A plan produced here is an ANCHOR-DRAFT, never a confirmed anchor. That is the whole
+    reason a door can be automated at all: it proposes, and a human disposes.
+
+    `--limit` caps how many plans one run will generate, and a truncation is REPORTED rather
+    than silent. An unattended job that quietly does 3 of 40 looks identical to one that had
+    3 to do.
+    """
+    branch, _exists = target_branch()
+    issues = open_issues()
+    targets = sweep_targets(issues, branch)
+    truncated = 0
+    if limit and len(targets) > limit:
+        truncated = len(targets) - limit
+        targets = targets[:limit]
+
+    print(f"daily sweep: {len(issues)} open issue(s), {len(targets)} needing a plan")
+    if truncated:
+        print(f"  TRUNCATED: {truncated} more not planned this run (--limit {limit})")
+    if not targets:
+        print("  nothing to do")
+        return 0
+
+    failed = 0
+    for n, why in targets:
+        print(f"  #{n}: {why}")
+        if dry_run:
+            continue
+        try:
+            rc = cmd_plan(n, refresh=(why != "unplanned"))
+        except Exception as exc:  # noqa: BLE001
+            # One bad issue must not stop the sweep: the next one may be the important one,
+            # and an unattended job that dies on the first error plans nothing all day.
+            print(f"  #{n}: FAILED - {exc}")
+            failed += 1
+            continue
+        if rc != 0:
+            print(f"  #{n}: plan returned {rc}")
+            failed += 1
+
+    if dry_run:
+        # NOT "3 planned". A dry run that reports work it did not do is a report that
+        # overstates itself, and the next person reads the log as evidence plans exist.
+        print(f"daily sweep (DRY RUN): would plan {len(targets)}, generated nothing")
+        return 0
+    print(f"daily sweep: {len(targets) - failed} planned, {failed} failed")
+    # Non-zero only when EVERY target failed - a partial sweep did real work, and a job that
+    # reports failure for a partial success trains an operator to ignore its exit code.
+    return 1 if (failed and failed == len(targets)) else 0
+
+
 def cmd_radar(n: int) -> int:
     meta = read_plan(n)
     if not meta:
@@ -799,6 +886,9 @@ def main() -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("status")
     p = sub.add_parser("plan"); p.add_argument("n", type=int); p.add_argument("--refresh", action="store_true")
+    p = sub.add_parser("sweep")
+    p.add_argument("--dry-run", action="store_true", help="report targets, generate nothing")
+    p.add_argument("--limit", type=int, default=0, help="cap plans per run; truncation is reported")
     p = sub.add_parser("radar"); p.add_argument("n", type=int)
     p = sub.add_parser("gate"); p.add_argument("n", type=int)
     p = sub.add_parser("gate-plan"); p.add_argument("n", type=int)
@@ -815,6 +905,7 @@ def main() -> int:
         return cmd_status()
     if a.cmd == "plan":
         return cmd_plan(a.n, a.refresh)
+    if a.cmd == "sweep": return cmd_sweep(dry_run=a.dry_run, limit=a.limit)
     if a.cmd == "radar":
         return cmd_radar(a.n)
     if a.cmd == "gate":
