@@ -120,7 +120,8 @@ Under `dark`:
 
 - `-Submit` on an `anchor-draft` item self-passes the anchor gate instead of exiting 5;
 - a tester's `-Pass` releases straight to `ready-review` instead of stopping at `test-passed`;
-- **both refuse while the andon board is raised** (exit 6), parking the item where it stands;
+- **both refuse unless the andon board is CLEAR** (exit 6 otherwise - raised, warned,
+  incomplete, partial or not-evaluated), parking the item where it stands;
 - **every auto-pass is recorded** under the reserved principal `auto:<profile>`, which
   `-ConfirmAnchor` and `-Approve` refuse to accept as a human `-By` (exit 4). The
   namespace is reserved in both directions.
@@ -142,9 +143,22 @@ Every shipped condition names the incident it came from — they were mined from
 | `work-branch-on-remote` | a work branch of this run exists on a remote |
 | `protected-ref-moved` | `main` moved since `andon.ps1 -Baseline` recorded it |
 
-`halt` is the default for BOTH `on_fire` and `on_indeterminate`. A condition that
-could not be evaluated has not passed — a skip that counts as a pass is one of the
-shapes this board exists to catch, and it does not get to be the board's own behaviour.
+`halt` is the default for BOTH `on_fire` and `on_indeterminate`, and they are the only
+two words either may take (`halt`, `warn` — `config.ps1` `$script:AllowedAndonActions`,
+mirrored in `config.py`; `andon.ps1` refuses anything else with exit 1 and no verdict,
+which every gate reads as "not clear"). A condition that could not be evaluated has not
+passed — a skip that counts as a pass is one of the shapes this board exists to catch,
+and it does not get to be the board's own behaviour.
+
+**`warn` does not buy a pass.** A condition that FIRED is never a clear board whatever its
+`on_fire` says, so no unattended gate passes over one; what `warn` changes is the word
+(`warned` rather than `raised`) and the record. That is deliberate, and the alternatives
+were weighed: *coercing* `on_fire` to `halt` under `dark` would make the config say one
+thing while the run did another, and *refusing to start* when any condition declares `warn`
+would punish a declaration that may never fire. Narrowing what `clear` MEANS does the same
+job at the only point that matters — the gate — and leaves the operator's declaration
+readable in the verdict. Under `dark` specifically, `warn` and `halt` have the same
+consequence for the gate; the difference is triage for whoever reads the ledger.
 
 **Halt** here means the gate refuses and the item parks; nothing is killed. The
 **raise** always goes to the gate ledger — that is not a knob, because a run able to
@@ -157,11 +171,16 @@ The verdict has five states, and only one of them opens an unattended gate:
 
 | board | means | exit |
 |---|---|---|
-| `clear` | every required condition declared, ≥1 evaluated, none halted, none switched off | 0 |
+| `clear` | every required condition declared, ≥1 evaluated, **none FIRED** (not merely "none halted"), none switched off | 0 |
 | `incomplete` | a REQUIRED condition is **not declared at all** — the verdict names which | 6 |
-| `raised` | a condition fired, or could not be evaluated | 6 |
+| `raised` | a condition HALTED the line: it fired with `on_fire: halt`, or it could not be evaluated | 6 |
+| `warned` | a condition FIRED and its `on_fire` is not `halt`. Not a clear board — no unattended gate passes it | 6 |
 | `partial` | some evaluated ok, others switched off in config | 6 |
 | `not-evaluated` | conditions are declared, none was evaluated (`andon.enabled: false`, or every one switched off individually) | 6 |
+
+The `clear` row said "none halted" until 2026-08-30, and after the fired/halted split those
+are different facts: `fired` is what the detectors SAW, `halted` is what stopped the line.
+`clear` means neither happened. Every verdict and every gate record carries both lists.
 
 `incomplete` outranks the rest: a verdict from a board that is not the required board
 cannot be reported as that board's verdict. The conditions that *are* declared are still
@@ -190,12 +209,21 @@ to the config's own thinned list. A required list kept beside the conditions wou
 deleted along with the entry it names; kept in code, retiring a condition is a diff a
 reviewer sees.
 
-**So no route through the config opens the gates.** `andon.enabled: false`, the whole
-`andon` block deleted, individual conditions switched off, or condition entries deleted —
-each halts a `dark` run at the first gate and each is recorded under its own board state
-(`not-evaluated`, `incomplete`, `partial`, `incomplete`). **The revert to prior behaviour
-is `pipeline.gate_profile: attended`** — that is the switch that puts a human back at the
-gate. Turning the board off only removes the thing that was watching the machine.
+**The board's MEMBERSHIP is tamper-evident; its BEHAVIOUR is not.** Five ways of switching
+it off are closed, each proved at the real gate by a drill case and each open before it was
+closed: `andon.enabled: false` (`not-evaluated`), the whole `andon` block deleted
+(`incomplete`), individual conditions switched off (`partial`), condition entries deleted
+(`incomplete`), and `on_fire` downgraded (`warned`). What is NOT closed is what a *declared*
+condition does: its `predicate` and its `params` come from the config, so an entry keeping a
+required id while naming a different predicate, or one whose `params.repo` points at a clean
+decoy checkout, still passes every check the board makes at run time. `test_gate_profiles.py`
+pins the id → predicate map of the **committed** config; nothing pins params, and nothing
+pins either at run time or in a config named by `AI_STACK_HARNESS_CONFIG`. README.md lists
+the open routes explicitly.
+
+**The revert to prior behaviour is `pipeline.gate_profile: attended`** — that is the switch
+that puts a human back at the gate. Turning the board off only removes the thing that was
+watching the machine.
 
 That revert is the configured **default, not a lock**: `queue.ps1 -GateProfile dark`
 names a profile for a single call and takes the dark path regardless of what

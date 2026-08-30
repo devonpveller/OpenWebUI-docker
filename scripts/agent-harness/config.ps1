@@ -261,15 +261,43 @@ function Get-AutoPrincipalPrefix { return $script:AutoPrincipalPrefix }
 #
 # There is deliberately NO environment override. A variable that thins the board is the
 # same hole with a longer name.
-$script:RequiredAndonConditions = @(
-    "operator-checkout-off-branch",
-    "policy-declared-unread",
-    "git-error-swallowed",
-    "work-branch-on-remote",
-    "protected-ref-moved"
-)
+#
+# THE VALUE beside each id is the predicate that id is SUPPOSED to run. It pins the
+# COMMITTED config and nothing else, and the difference matters:
+#   - `test_gate_profiles.py` compares this map against harness.config.json, so an entry
+#     that keeps a required id while naming a different predicate - id squatting, which the
+#     id-set check at andon.ps1 cannot see because it compares ids only - fails the suite;
+#   - `andon.ps1` reads only the KEYS. It does NOT re-check the predicate at run time, so a
+#     swap in an uncommitted config, or in one named by AI_STACK_HARNESS_CONFIG, still runs
+#     whatever the entry says. That route is OPEN and is named as open in README.md and
+#     MODULE.md rather than papered over here.
+$script:RequiredAndonConditions = [ordered]@{
+    "operator-checkout-off-branch" = "git-checkout-state"
+    "policy-declared-unread"       = "config-key-unread"
+    "git-error-swallowed"          = "git-error-unchecked"
+    "work-branch-on-remote"        = "branch-on-remote"
+    "protected-ref-moved"          = "protected-ref-moved"
+}
 
-function Get-RequiredAndonConditionIds { return @($script:RequiredAndonConditions) }
+function Get-RequiredAndonConditionIds { return @($script:RequiredAndonConditions.Keys) }
+function Get-RequiredAndonPredicate {
+    param([Parameter(Mandatory = $true)][string]$Id)
+    if ($script:RequiredAndonConditions.Contains($Id)) { return [string]$script:RequiredAndonConditions[$Id] }
+    return ""
+}
+
+# THE ONLY WORDS an andon condition may use for `on_fire` and `on_indeterminate`. An action
+# the board does not understand cannot be honoured, and guessing at one is how a config ends
+# up deciding something nobody wrote down - so an unknown literal is refused rather than
+# treated as either.
+#
+# `warn` does NOT mean "carry on". A fired condition is never a clear board, whatever its
+# action says, so no unattended gate passes over one either way (andon.ps1
+# Invoke-AndonEvaluation). What `warn` buys is the WORD - `warned` rather than `raised` -
+# and the ledger's separate `fired` / `halted` lists, which is severity for a human reading
+# afterwards, not permission for a machine at the time.
+$script:AllowedAndonActions = @("halt", "warn")
+function Get-AllowedAndonActions { return @($script:AllowedAndonActions) }
 
 function Test-AutoPrincipal {
     param([string]$Principal)

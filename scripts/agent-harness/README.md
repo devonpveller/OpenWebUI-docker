@@ -185,9 +185,8 @@ Four things are worth knowing before relying on it:
 - **`auto:` is a reserved principal namespace.** `-ConfirmAnchor` and `-Approve`
   refuse a `-By` inside it (exit 4), and the auto path never signs as a person.
 
-**Switching the board off does not switch the gates back on — by any route through the
-config.** There are four, and each halts a `dark` run at the first gate under its own
-board state, recorded in the ledger:
+**Five ways of switching the board off were tried against the real gate, and each halts a
+`dark` run at the first gate under its own board state, recorded in the ledger:**
 
 | what you do to the board | board state | gate |
 |---|---|---|
@@ -195,13 +194,43 @@ board state, recorded in the ledger:
 | delete the whole `andon` block | `incomplete` (all five named) | halts |
 | set `enabled: false` on one condition | `partial` (names it) | halts |
 | **delete condition ENTRIES from `andon.conditions`** | `incomplete` (names the missing ids) | halts |
+| **set `on_fire` to anything but `halt`** | `warned` (names what fired) | halts |
 
-The last one is the one anybody would actually reach for, and until 2026-08-30 it was
-open: pruned to one of five on a genuinely detached checkout the gate **auto-passed** at
-exit 0, ledger `clear`, `-VerifyAudit COMPLETE`. Every counter it printed was true, and
-all of them counted against the config's own thinned list. The five required ids are now
-declared in `config.ps1`/`config.py` — in code, where the config cannot edit them — and a
-board missing any is `incomplete`, names them, and authorises nothing.
+Each row is a drill case driving the real `queue.ps1` (steps F, H and J). **The last two
+rows were OPEN until 2026-08-30**, and both were closed against a reproduction:
+
+- *deleting entries* — pruned to one of five on a genuinely detached checkout, the gate
+  **auto-passed** at exit 0, ledger `clear`, `-VerifyAudit COMPLETE`. Every counter it
+  printed was true, and every one counted against the config's own thinned list. The five
+  required ids now live in `config.ps1`/`config.py`, in code where the config cannot edit
+  them.
+- *downgrading `on_fire`* — the condition FIRED, the board still reported `clear` at exit 0,
+  the gate auto-passed signed `auto:dark`, the pass record's `fired` list was **empty** and
+  `-VerifyAudit` called the trail COMPLETE. `fired` was derived from `action -eq halt`, so a
+  fire that did not halt had nowhere in the ledger to appear. `fired` and `halted` are now
+  separate lists in every verdict and every record, and a board with a fire on it is never
+  `clear`.
+
+**What is NOT closed, and the sentence here used to claim otherwise.** The board's
+*membership* is pinned code-side and is tamper-evident. Its *behaviour* is not: what each
+condition DOES is still config-controlled, and three routes through it are open —
+
+- **a predicate swap.** The completeness check compares IDS (`andon.ps1`, `$missingIds`), so
+  an entry keeping a required id while naming a different implemented predicate is a full
+  board of five to every counter. `test_gate_profiles.py` pins the id → predicate map of the
+  **committed** config; nothing pins one edited at run time or named by
+  `AI_STACK_HARNESS_CONFIG`.
+- **a `params` redirect.** `params.repo` on `operator-checkout-off-branch` pointed at a clean
+  decoy checkout, or narrowed `globs`/`refs`/`branches`, leaves the detector running and
+  looking somewhere harmless. Nothing pins params, at run time or in the committed config.
+  The gate record does carry `andon.repo`, so the redirect is *visible afterwards* to a
+  reader who checks it — it is not refused.
+- **id squatting**, which is the first two together: a required id kept on an entry that is
+  a different check.
+
+`on_fire` is not in that list any more, and neither is deleting entries. The safe reading of
+this section is: *the set of conditions cannot be thinned, switched off, or downgraded into
+silence; a condition that is present can still be pointed somewhere else.*
 
 The revert to prior behaviour is `pipeline.gate_profile: attended`. That is the configured
 **default, not a lock**: `queue.ps1 -GateProfile dark` names a profile for one call and

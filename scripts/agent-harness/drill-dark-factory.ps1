@@ -39,6 +39,13 @@
 # firing on a clean one. A detector that always fires is as useless as one that never does,
 # so both directions are asserted for all five.
 #
+# WHAT THE STEPS COVER: A1-A6 each condition RED and GREEN; B a clean unattended run end to
+# end with a complete trail; C the completeness check going red on tampered trails; D/D2 a
+# halt and an unavailable board; E attended unchanged; F the board switched off three ways;
+# G what "complete" is measured against; H a THINNED board (entries deleted); I -GateProfile
+# overriding an attended config; J a fire whose `on_fire` is not `halt` - which auto-passed
+# the gate at exit 0 with `fired=[]` in the ledger until 2026-08-30.
+#
 #   .\drill-dark-factory.ps1            # run it
 #   .\drill-dark-factory.ps1 -Keep      # keep the scratch dirs for inspection
 #
@@ -887,6 +894,103 @@ Check "the configured profile is attended: -Submit refuses with exit 5 (no confi
 $r = Invoke-Queue $fixI @("-GateProfile", "dark", "-Submit", "-Id", "dfi", "-Branch", "work/dfdrill", "-Developer", "wt-dfdrill", "-TestPlan", $planFile)
 Check "-GateProfile dark on the SAME item takes the dark path instead (exit 6, andon)" ($r.code -eq 6) ("exit=" + $r.code)
 Check "so pipeline.gate_profile: attended is a DEFAULT, not a lock" ($r.out -like "*ANDON*") ""
+
+# ====================================================================================
+Step "J  a FIRED condition must not open a gate, and must be IN THE RECORD, whatever on_fire says"
+# ====================================================================================
+# THE FOURTH WAY OFF, and it never touches the board's on/off switch. Set `on_fire` to
+# anything but `halt` on ONE condition and, until 2026-08-30: the condition FIRED, the board
+# reported `clear`, the dark gate AUTO-PASSED at exit 0 signed `auto:dark`, and the ledger
+# read `status=clear evaluated=5 missing=0 fired=[]` with `-VerifyAudit COMPLETE`. `$raised`
+# was `action -eq halt` and the record's `fired` list was derived the same way, so a fire
+# that did not halt was in no audit surface at all - the clause inverted, since U6 (c) exists
+# precisely so an operator can tell afterwards what happened while nobody was looking.
+#
+# Two separate properties are asserted below, and they fail independently:
+#   THE RECORD  - `fired` means the detectors SAW something; `halted` means the line stopped.
+#   THE GATE    - a board with a fire on it is never `clear`, so no unattended gate passes it.
+$fixJ = New-DarkFixture "dark-warn-onfire" "dark"
+$prevCfg = $env:AI_STACK_HARNESS_CONFIG; $prevState = $env:AI_STACK_WORKTREE_STATE
+$env:AI_STACK_HARNESS_CONFIG = $fixJ.cfg; $env:AI_STACK_WORKTREE_STATE = $fixJ.state
+& $PsExe -NoProfile -NonInteractive -File $AndonPs -Baseline -RepoRoot $fixJ.repo | Out-Null
+$env:AI_STACK_HARNESS_CONFIG = $prevCfg; $env:AI_STACK_WORKTREE_STATE = $prevState
+
+# NOTHING ELSE IS TOUCHED: the board is enabled, all five entries are present with their
+# params, every on_indeterminate stays `halt`. One word changes.
+$o = Get-Content -Raw -Path $fixJ.cfg | ConvertFrom-Json
+(Get-Cond $o "work-branch-on-remote").on_fire = "warn"
+($o | ConvertTo-Json -Depth 40) | Set-Content -Path $fixJ.cfg -Encoding ASCII
+
+# Make that one condition TRUE, exactly as step D does.
+$bareJ = Join-Path $Root "origin-j.git"
+Invoke-Git init -q --bare $bareJ | Out-Null
+Push-Location $fixJ.repo
+try {
+    Invoke-Git remote add origin $bareJ | Out-Null
+    Invoke-Git push -q origin work/dfdrill | Out-Null
+} finally { Pop-Location }
+
+$rj = Invoke-Andon -Config $fixJ.cfg -Repo $fixJ.repo -StateDir $fixJ.state -RunBranch @("work/dfdrill")
+$condJ = @($rj.verdict.conditions | Where-Object { $_.id -eq "work-branch-on-remote" })
+Check "the condition genuinely FIRES with on_fire=warn" ((Get-CondStatus $rj "work-branch-on-remote") -eq "fire") ("status=" + (Get-CondStatus $rj "work-branch-on-remote"))
+Check "and its recorded ACTION is the configured one, not a rewritten halt" ($condJ[0].action -eq "warn") ("action=" + $condJ[0].action)
+Check "the BOARD is not clear: warned, exit 6" (($rj.verdict.board -eq "warned") -and ($rj.code -eq 6)) ("board=" + $rj.verdict.board + " exit=" + $rj.code)
+Check "the verdict SEPARATES what fired from what halted" ((@($rj.verdict.coverage.fired_ids) -contains "work-branch-on-remote") -and (@($rj.verdict.coverage.halted_ids).Count -eq 0)) ("fired_ids=" + (@($rj.verdict.coverage.fired_ids) -join ",") + " halted_ids=" + (@($rj.verdict.coverage.halted_ids) -join ","))
+
+$r = Invoke-Queue $fixJ @("-Propose", "-Id", "dfj", "-Anchor", $anchorFile, "-Developer", "wt-dfdrill")
+$r = Invoke-Queue $fixJ @("-Submit", "-Id", "dfj", "-Branch", "work/dfdrill", "-Developer", "wt-dfdrill", "-TestPlan", $planFile)
+$it = Get-QueueItem $fixJ "dfj"
+Check "HALT: a downgraded on_fire does NOT auto-pass the anchor gate (exit 6)" ($r.code -eq 6) ("exit=" + $r.code)
+Check "HALT: the item stays parked at anchor-draft" ($it.state -eq "anchor-draft") ("state=" + $it.state)
+Check "HALT: nothing signed the anchor gate" (-not $it.anchor_confirmed_by) ("anchor_confirmed_by='" + $it.anchor_confirmed_by + "'")
+$ledJ = @(Get-Ledger $fixJ | Where-Object { $_.decision -eq "refused" })
+Check "THE RECORD: the refusal is in the ledger as warned, not clear" ((@($ledJ).Count -ge 1) -and (@($ledJ)[0].andon.status -eq "warned")) ("status=" + ((@($ledJ) | ForEach-Object { $_.andon.status }) -join ","))
+Check "THE RECORD: the fired list NAMES the condition even though it did not halt" ((@(@($ledJ)[0].andon.fired) -join ";") -like "*work-branch-on-remote*") ("fired=" + (@(@($ledJ)[0].andon.fired) -join ";"))
+Check "THE RECORD: the halted list is empty - the two are not one derived list" (@(@($ledJ)[0].andon.halted).Count -eq 0) ("halted=" + (@(@($ledJ)[0].andon.halted) -join ";"))
+Check "THE CONSOLE: the halt names the fired condition too" ($r.out -like "*work-branch-on-remote*") ""
+
+# AN ACTION THE BOARD DOES NOT IMPLEMENT is refused rather than guessed at - and refusing
+# means the board produces no verdict, which every gate reads as "not clear".
+$o = Get-Content -Raw -Path $fixJ.cfg | ConvertFrom-Json
+(Get-Cond $o "work-branch-on-remote").on_fire = "log-it-and-carry-on"
+($o | ConvertTo-Json -Depth 40) | Set-Content -Path $fixJ.cfg -Encoding ASCII
+$rj2 = Invoke-Andon -Config $fixJ.cfg -Repo $fixJ.repo -StateDir $fixJ.state -RunBranch @("work/dfdrill")
+Check "an on_fire the board does not implement is REFUSED (exit 1, no verdict)" (($rj2.code -eq 1) -and ($null -eq $rj2.verdict)) ("exit=" + $rj2.code)
+$r = Invoke-Queue $fixJ @("-Submit", "-Id", "dfj", "-Branch", "work/dfdrill", "-Developer", "wt-dfdrill", "-TestPlan", $planFile)
+Check "and the gate treats an unreadable board as UNAVAILABLE, not as clear (exit 6)" ($r.code -eq 6) ("exit=" + $r.code)
+
+# THE NEGATIVE CONTROL. warn is not a blanket refusal: the condition has to actually FIRE.
+# Same fixture, same on_fire: warn, condition cleared - the gate passes.
+$o = Get-Content -Raw -Path $fixJ.cfg | ConvertFrom-Json
+(Get-Cond $o "work-branch-on-remote").on_fire = "warn"
+($o | ConvertTo-Json -Depth 40) | Set-Content -Path $fixJ.cfg -Encoding ASCII
+Push-Location $fixJ.repo
+try { Invoke-Git push -q origin --delete work/dfdrill | Out-Null; Invoke-Git remote remove origin | Out-Null } finally { Pop-Location }
+$r = Invoke-Queue $fixJ @("-Submit", "-Id", "dfj", "-Branch", "work/dfdrill", "-Developer", "wt-dfdrill", "-TestPlan", $planFile)
+$it = Get-QueueItem $fixJ "dfj"
+Check "CONTROL: with the condition CLEARED, the same warn-declared board auto-passes (exit 0)" (($r.code -eq 0) -and ($it.state -eq "ready-to-test")) ("exit=" + $r.code + " state=" + $it.state)
+$passJ = @(Get-Ledger $fixJ | Where-Object { $_.decision -eq "passed" })
+Check "CONTROL: the pass record states 0 fired and 0 halted" ((@($passJ).Count -ge 1) -and (@(@($passJ)[0].andon.fired).Count -eq 0) -and (@(@($passJ)[0].andon.halted).Count -eq 0)) ("fired=" + (@(@($passJ)[0].andon.fired).Count) + " halted=" + (@(@($passJ)[0].andon.halted).Count))
+$r = Invoke-Queue $fixJ @("-VerifyAudit", "-Id", "dfj")
+Check "CONTROL: the trail verifies COMPLETE (exit 0)" ($r.code -eq 0) ("exit=" + $r.code)
+
+# AND THE VERIFIER RE-DERIVES IT. A record that keeps the word clear while admitting a fire
+# must go red, or the ledger's own word is its only oracle.
+$ledgerJ = Join-Path $fixJ.state "audit\gates.jsonl"
+$bakJ = Get-Content -Path $ledgerJ
+$fireTamper = '"fired":["work-branch-on-remote: a work branch of this run is on a remote"]'
+Set-Content -Path $ledgerJ -Encoding ASCII -Value @($bakJ | ForEach-Object { $_.Replace('"fired":[]', $fireTamper) })
+$r = Invoke-Queue $fixJ @("-VerifyAudit", "-Id", "dfj")
+Check "RED: a record labelled clear that admits a FIRE is caught" ($r.code -eq 1) ("exit=" + $r.code)
+Check "RED: and the finding NAMES the fired condition" ($r.out -like "*work-branch-on-remote*") ""
+# A schema-3 shaped record - fired present, halted absent - cannot say whether a condition
+# fired without halting, and "cannot answer" is a finding, never a pass.
+Set-Content -Path $ledgerJ -Encoding ASCII -Value @($bakJ | ForEach-Object { $_.Replace(',"halted":[]', '') })
+$r = Invoke-Queue $fixJ @("-VerifyAudit", "-Id", "dfj")
+Check "RED: a record that cannot separate fired from halted is a FINDING, not a pass" ($r.code -eq 1) ("exit=" + $r.code)
+Set-Content -Path $ledgerJ -Encoding ASCII -Value $bakJ
+$r = Invoke-Queue $fixJ @("-VerifyAudit", "-Id", "dfj")
+Check "GREEN again once the ledger is restored" ($r.code -eq 0) ("exit=" + $r.code)
 
 # ====================================================================================
 Write-Host ""

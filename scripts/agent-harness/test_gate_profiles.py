@@ -93,22 +93,71 @@ def _andon_conditions():
     return config.get("andon.conditions") or []
 
 
-def test_every_andon_condition_is_fully_declared():
-    """Every DECLARED condition carries every field. What it does NOT check is which
-    conditions exist - that is ``test_the_shipped_config_declares_every_required_condition``
-    below, and the split is the whole lesson of 2026-08-30: this test asserted only
-    ``assert conds`` (non-empty), so four of the five could be deleted and it stayed green
-    while the board reported itself perfectly healthy. Non-emptiness is not a set.
+def _assert_declared_values(conds):
+    """The guard body itself, so a test can prove it FIRES rather than describe it.
+
+    Lifted out of ``test_every_andon_condition_is_fully_declared`` for exactly one reason:
+    the previous two versions of that guard were vacuous, and a guard is only verified by
+    making the thing it guards against and watching it go red. The mutation tests below call
+    this and require an ``AssertionError``.
     """
-    conds = _andon_conditions()
-    assert conds, "the shipped config declares no andon conditions"
     for c in conds:
         for field in ("id", "detects", "predicate", "on_fire", "on_indeterminate"):
             assert c.get(field), f"{c.get('id')} is missing '{field}'"
+        for field in ("on_fire", "on_indeterminate"):
+            assert c[field] in config.ALLOWED_ANDON_ACTIONS, (
+                f"{c['id']} declares {field}={c[field]!r}, which the board does not implement "
+                f"(allowed: {config.ALLOWED_ANDON_ACTIONS})")
+        expected = config.REQUIRED_ANDON_CONDITIONS.get(c["id"])
+        if expected is not None:
+            assert c["predicate"] == expected, (
+                f"{c['id']} is wired to predicate {c['predicate']!r}, not {expected!r} - "
+                "the id is required, so what it RUNS is required with it")
         # PLAN section 0 A6: a condition whose detection is prose is FALSIFIED. Every one
         # must name an incident it came from, so nobody can add an invented condition
         # without noticing they have nothing to cite.
         assert c.get("incident"), f"{c['id']} cites no incident"
+
+
+def test_every_andon_condition_is_fully_declared():
+    """Every DECLARED condition carries every field, WITH THE VALUE THAT MATTERS.
+
+    Two rounds of the same defect are pinned in this one test. It first asserted
+    ``assert conds`` - non-emptiness - so four of five conditions could be deleted and it
+    stayed green (fixed by the required-SET test below). Its replacement then asserted that
+    ``predicate`` and ``on_fire`` were TRUTHY, which is the same class one level down: a
+    condition keeping a required id while naming a different predicate, or downgrading
+    ``on_fire`` to a word that does not halt, satisfied it completely. So the fields that
+    DECIDE something are checked against their allowed values, not against emptiness:
+
+    * ``on_fire`` / ``on_indeterminate`` must be words the board implements
+      (``config.ALLOWED_ANDON_ACTIONS``, mirrored in ``andon.ps1``, which REFUSES any other);
+    * ``predicate`` must be the one that id is supposed to run
+      (``config.REQUIRED_ANDON_CONDITIONS``, declared in code).
+
+    ``id``/``detects``/``incident`` stay truthiness checks because they are prose: nothing
+    downstream branches on their content.
+
+    SCOPE: this reads the COMMITTED ``harness.config.json``. It cannot see a swap made at run
+    time or in a config named by ``AI_STACK_HARNESS_CONFIG`` - see
+    ``test_a_predicate_swap_that_keeps_the_id_is_detected`` for what is and is not covered.
+    """
+    conds = _andon_conditions()
+    assert conds, "the shipped config declares no andon conditions"
+    _assert_declared_values(conds)
+
+
+def test_no_shipped_condition_downgrades_on_fire():
+    """The shipped board halts on every fire, and that is a decision, not an accident.
+
+    ``warn`` is a legal word (a human at an attended board can use the severity), but no
+    shipped condition uses it: all five come from incidents where continuing was the
+    failure. The run-time half of this - a fired condition is never a ``clear`` board, so a
+    downgrade cannot open an unattended gate either - is proven at the real gate by
+    ``drill-dark-factory.ps1`` step J, not here.
+    """
+    for c in _andon_conditions():
+        assert c["on_fire"] == "halt", f"{c['id']} declares on_fire={c['on_fire']!r}"
 
 
 def test_the_shipped_config_declares_every_required_condition():
@@ -123,6 +172,9 @@ def test_the_shipped_config_declares_every_required_condition():
     assert set(declared) == set(config.REQUIRED_ANDON_CONDITIONS), (
         f"declared={sorted(declared)} required={sorted(config.REQUIRED_ANDON_CONDITIONS)}")
     assert config.missing_andon_conditions() == []
+    # ...and each of them runs the predicate it is supposed to run. The set test above
+    # compares IDS, which an entry can satisfy while being a different check entirely.
+    assert config.andon_predicate_mismatches() == []
 
 
 def _write_cfg(tmp_path, monkeypatch, mutate):
@@ -172,11 +224,69 @@ def test_the_required_set_is_not_reachable_from_the_config_file(tmp_path, monkey
     """
     _write_cfg(tmp_path, monkeypatch, lambda c: c["andon"].__setitem__(
         "required_conditions", ["work-branch-on-remote"]))
-    assert config.REQUIRED_ANDON_CONDITIONS == (
+    assert tuple(config.REQUIRED_ANDON_CONDITIONS) == (
         "operator-checkout-off-branch", "policy-declared-unread", "git-error-swallowed",
         "work-branch-on-remote", "protected-ref-moved")
     # ...and with every condition still declared, the board is still complete.
     assert config.missing_andon_conditions() == []
+
+
+@pytest.mark.parametrize("swap_to", ["branch-on-remote", "config-key-unread"])
+def test_a_predicate_swap_that_keeps_the_id_is_detected(swap_to, tmp_path, monkeypatch):
+    """RED-PROOF, kept permanently: an id can be squatted on.
+
+    ``operator-checkout-off-branch`` keeps its id, its ``detects`` prose and its incident,
+    and is re-pointed at another implemented predicate. Nothing about the SET changes - five
+    ids declared, five required, none missing - and the board still evaluates five
+    conditions. What is gone is the detector the id names.
+
+    WHAT THIS DOES AND DOES NOT COVER, stated because the sentence it replaced ("no route
+    through the config opens the gates") was false: it covers the COMMITTED config, which is
+    what a reviewer merges. It does not make a run-time swap detectable - ``andon.ps1`` reads
+    the ids and runs whatever predicate the entry names - and neither does anything else.
+    That route is open and is named as open in README.md and MODULE.md.
+    """
+    def mutate(c):
+        for cond in c["andon"]["conditions"]:
+            if cond["id"] == "operator-checkout-off-branch":
+                cond["predicate"] = swap_to
+
+    _write_cfg(tmp_path, monkeypatch, mutate)
+    conds = _andon_conditions()
+
+    # The vacuity, pinned so it cannot come back: the truthiness guard is fully satisfied.
+    assert conds and len(conds) == 5
+    for c in conds:
+        assert c.get("predicate") and c.get("on_fire")
+    # ...and so is the id-set check, which is why it cannot be the only one.
+    assert config.missing_andon_conditions() == []
+
+    # RED: the guard body goes off, and it names the id and both predicates.
+    with pytest.raises(AssertionError) as e:
+        _assert_declared_values(conds)
+    assert "operator-checkout-off-branch" in str(e.value)
+    assert swap_to in str(e.value) and "git-checkout-state" in str(e.value)
+
+    mismatches = config.andon_predicate_mismatches()
+    assert [m[0] for m in mismatches] == ["operator-checkout-off-branch"], mismatches
+    assert mismatches[0][1] == "git-checkout-state"
+    assert mismatches[0][2] == swap_to
+
+
+def test_an_on_fire_the_board_does_not_implement_is_not_allowed(tmp_path, monkeypatch):
+    """The other value the truthiness guard waved through: any non-empty string passed.
+
+    ``andon.ps1`` refuses an unknown action at evaluation time (exit 1, no verdict, which
+    every gate reads as "not clear"); this is the committed-config half of the same rule.
+    """
+    _write_cfg(tmp_path, monkeypatch, lambda c: c["andon"]["conditions"][0].__setitem__(
+        "on_fire", "log-it-and-carry-on"))
+    conds = _andon_conditions()
+    assert conds[0]["on_fire"], "precondition - the vacuous guard takes any non-empty word"
+    assert conds[0]["on_fire"] not in config.ALLOWED_ANDON_ACTIONS
+    with pytest.raises(AssertionError) as e:
+        _assert_declared_values(conds)
+    assert "log-it-and-carry-on" in str(e.value)
 
 
 def test_no_andon_condition_treats_indeterminate_as_a_pass():
@@ -224,6 +334,10 @@ def test_powershell_and_python_agree_about_the_gates():
         + "$o.prefix=(Get-AutoPrincipalPrefix);"
         + "$o.profiles=@(Get-GateProfileNames);"
         + "$o.required=@(Get-RequiredAndonConditionIds);"
+        + "$o.actions=@(Get-AllowedAndonActions);"
+        + "$o.predicates=[ordered]@{};"
+        + "foreach($i in (Get-RequiredAndonConditionIds)){"
+        + "$o.predicates[$i]=(Get-RequiredAndonPredicate -Id $i)};"
         + "$o.active=(Get-GateProfileName);"
         + "$o.resolved=[ordered]@{};"
         + "foreach($p in (Get-GateProfileNames)){"
@@ -243,6 +357,11 @@ def test_powershell_and_python_agree_about_the_gates():
     # duplicated constant that drifts. A PowerShell board that requires five conditions while
     # the bridge believes in one is a thinned board with a second opinion.
     assert list(ps["required"]) == list(config.REQUIRED_ANDON_CONDITIONS)
+    # The id -> predicate map and the allowed actions are duplicated constants for the same
+    # reason and drift the same way. A PowerShell board that allows a word the bridge does
+    # not, or that expects a different predicate behind an id, is two boards.
+    assert list(ps["actions"]) == list(config.ALLOWED_ANDON_ACTIONS)
+    assert {k: str(v) for k, v in ps["predicates"].items()} == dict(config.REQUIRED_ANDON_CONDITIONS)
     assert ps["active"] == config.gate_profile_name()
     for name in config.gate_profile_names():
         for gate in config.GATES:

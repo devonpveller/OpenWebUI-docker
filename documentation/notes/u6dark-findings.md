@@ -16,18 +16,19 @@ claim is a hypothesis it says so.
 | Artifact | What it is |
 |---|---|
 | `scripts/agent-harness/harness.config.json` | `andon` block (5 conditions as data), `gate_profiles` block (`attended`/`dark`), `pipeline.gate_profile` — which REPLACED `pipeline.human_gates` |
-| `scripts/agent-harness/andon.ps1` | the board: 5 executable predicates, `-Evaluate` / `-List` / `-Baseline`, exit 6 when raised |
+| `scripts/agent-harness/andon.ps1` | the board: 5 executable predicates, `-Evaluate` / `-List` / `-Baseline`, exit 6 unless the board is `clear` |
 | `scripts/agent-harness/gate-audit.ps1` | the append-only gate ledger and `Test-GateAuditComplete` — the executable definition of "complete" |
-| `scripts/agent-harness/queue.ps1` | both gates wired: auto-pass under `dark`, refusal under a raised board, a record on every pass either way |
+| `scripts/agent-harness/queue.ps1` | both gates wired: auto-pass under `dark` only on a `clear` board, a refusal record otherwise, a record on every pass either way |
 | `scripts/agent-harness/config.ps1` / `config.py` | gate resolution in both readers |
-| `scripts/agent-harness/drill-dark-factory.ps1` | the validation: **121 checks, 0 failed** |
-| `scripts/agent-harness/test_gate_profiles.py` | 16 tests incl. the PowerShell↔Python anti-drift test |
+| `scripts/agent-harness/drill-dark-factory.ps1` | the validation: **141 checks, 0 failed** |
+| `scripts/agent-harness/test_gate_profiles.py` | 20 tests incl. the PowerShell↔Python anti-drift test |
 | `scripts/claude-sessions-bridge/test_queue_narration.py` | 6 tests pinning the one consumer that narrates a gate transition to a human (§8.7) |
 
-Evidence: `drill-dark-factory.ps1` → `121 checks, 0 failed` (exit 0) — 60 at first, 96
-after the audit round of §8, 121 after the thinned-board round of §9.
-`python -m pytest scripts/agent-harness -q` → `121 passed` **in a checkout with a live
-queue** (117 before the §9 round); in a plain clone it is two fewer passed and two
+Evidence: `drill-dark-factory.ps1` → `141 checks, 0 failed` (exit 0) — 60 at first, 96
+after the audit round of §8, 121 after the thinned-board round of §9, 141 after the
+`on_fire` round of §10.
+`python -m pytest scripts/agent-harness -q` → `125 passed` **in a checkout with a live
+queue** (121 after the §9 round, 117 before it); in a plain clone it is two fewer passed and two
 skipped, and the two are the ones that ask the real queue:
 `test_anchor_schema.py::test_every_queued_anchor_validates` (skips on "no queued anchors
 under …") and `test_scope_node.py::test_the_live_queue_projects_without_raising` (skips on
@@ -268,7 +269,7 @@ nothing" shape this board exists for:
 | `check-env-file-scope.ps1:43,101` | `git rev-parse` fails → falls back to the CURRENT directory as the repo root; `git diff --cached` fails → "no compose files staged - skipped" |
 | `verify-merge-protocol.ps1:49,53` | the 2026-08-30 incident's own two functions |
 | `check-hook-attestation.ps1:67` | `Invoke-GitLines`, an adapter of the same shape as `git-io.ps1` |
-| `new-worktree.ps1:161,184`, `remove-worktree.ps1:92,111,115,118,158`, `queue.ps1:763,818` | listings that silently read as empty |
+| `new-worktree.ps1:161,184`, `remove-worktree.ps1:92,111,115,118,158`, `queue.ps1:772,827` | listings that silently read as empty |
 
 **Not mine to fix, and deliberately not fixed here.** Every one is a live pre-commit or
 harness script; changing nine files' git handling inside an audit-fix item is the
@@ -279,7 +280,7 @@ does not state that contract in the file, so it is left flagged rather than excu
 
 ### 4.6 `queue.ps1` contains one non-ASCII byte
 
-`queue.ps1:261` holds a UTF-8 `§` (`0xC2 0xA7`) inside a comment — the only non-ASCII
+`queue.ps1:301` holds a UTF-8 `§` (`0xC2 0xA7`) inside a comment — the only non-ASCII
 sequence in the file. CLAUDE.md requires ASCII no-BOM for scripts PowerShell 5.1 parses;
 PS 5.1 reads the file as ANSI, so that comment renders as `Â§C.1`. Harmless to execution
 (it is a comment) and PRE-EXISTING — it is present at `HEAD~1` — so it is recorded rather
@@ -376,7 +377,7 @@ rule stated at the top of `gate-audit.ps1`, broken by `gate-audit.ps1`.
 
 **FIXED.** The verdict now carries `coverage {declared, evaluated, disabled,
 disabled_ids}` and the repository it looked at, and `clear` is defined narrowly:
-≥1 evaluated, none halted, none switched off. `partial` and `not-evaluated` are their own
+≥1 evaluated, none halted, none switched off (§10 narrows it once more, to none FIRED). `partial` and `not-evaluated` are their own
 states and both exit 6 (§9 adds `incomplete`, and adds `required` / `missing` /
 `missing_ids` to the coverage: every counter here is relative to what the config
 DECLARED). The gate record carries all of it, `Test-GateAuditComplete`
@@ -694,8 +695,203 @@ Each was RUN by a verifier and re-run here before being changed.
 - `attended` behaviour is untouched — drill step E is unchanged and still passes.
 - `verify-merge-protocol.ps1` was still NOT run, for the reason in §4.3.
 - The 18 call sites of §4.5 were not fixed; their line numbers in `queue.ps1` moved with
-  this diff (763, 818) and the table is updated.
+  this diff and the table is updated (763, 818 at the time of §9; 772, 827 after §10 —
+  see §10.6).
 - The eleven remote branches were not deleted and `work/u6dark` was not pushed.
+- U6 clauses 1–3 remain **CODE-COMPLETE, GYM-VALIDATION PARKED**. This round did not run in
+  `ai-orchestration-gym` either.
+
+---
+
+## 10. THE `on_fire` ROUND — one real hole, two false universals, one vacuous guard again
+
+The board's membership was made tamper-evident in §9. This round is about what a condition
+that IS on the board is allowed to do, and about two sentences in `README.md`/`MODULE.md`
+that claimed more than the work had earned.
+
+### 10.1 DECISIVE — a fire that did not halt vanished from the audit record
+
+`on_fire` set to anything but the literal `halt`, on ONE condition, with the board otherwise
+untouched: enabled, all five entries present, every `on_indeterminate` still `halt`.
+
+**REPRODUCED HERE, twice, before anything was changed.**
+
+The board itself, on a scratch repo with `git-error-swallowed` firing and its `on_fire` set
+to `warn` (verbatim, abridged only by cutting three `[ok]` lines):
+
+```
+ANDON BOARD: CLEAR
+  [fire         ] git-error-swallowed            git errors are swallowed at 1 call site(s)
+      - scripts/checks/bad.ps1:3 in Invoke-SwallowingGit() runs git and does not check the result within 5 line(s)
+  coverage: 5 declared, 5 evaluated, 0 switched off, 0 of 5 required MISSING
+EXIT=0
+```
+
+Then the REAL gate, via `drill-dark-factory.ps1` step J run against the pre-fix sources
+(`git checkout HEAD --` on the five source files, the new step kept). 16 of its 20 checks
+failed, and these are the ones that matter:
+
+```
+[FAIL] the BOARD is not clear: warned, exit 6                          board=clear exit=0
+[FAIL] HALT: a downgraded on_fire does NOT auto-pass the anchor gate   exit=0
+[FAIL] HALT: the item stays parked at anchor-draft                     state=ready-to-test
+[FAIL] HALT: nothing signed the anchor gate                            anchor_confirmed_by='auto:dark'
+[FAIL] THE RECORD: the refusal is in the ledger as warned, not clear   status=
+[FAIL] CONTROL: the pass record states 0 fired and 0 halted            fired=0 halted=1
+[PASS] CONTROL: the trail verifies COMPLETE (exit 0)                   exit=0
+```
+
+Read them together: the condition fired, the gate auto-passed at exit 0, the item advanced
+to `ready-to-test` signed `auto:dark`, there was **no refusal record at all** (`status=`
+means the query found none), the PASS record's `fired` list was **empty**, and
+`-VerifyAudit` called the trail **COMPLETE**. (`halted=1` in that line is the pre-fix shape:
+the field does not exist, and `@($null).Count` is 1.)
+
+**Why it was invisible rather than merely permitted.** `andon.ps1` set `$raised` from
+`action -eq 'halt'`, and `gate-audit.ps1` derived the record's `fired` list the same way. So
+"fired" meant "halted" in both, and a fire that did not halt had nowhere to appear. The
+per-condition `[fire]` line does reach the console of a manual `-Evaluate` — but an
+unattended run has no console reader, and the ledger is the surface U6 clause (c) exists for.
+A detector fired and the audit trail said the board was clear.
+
+**FIXED — `fired` means fired.**
+
+- `andon.ps1` tracks fires and halts separately. Coverage gains `fired`/`fired_ids` and
+  `halted`/`halted_ids`; a verdict can now be asked what the detectors SAW as well as what
+  stopped the line.
+- **A board with a fire on it is never `clear`.** `warned` is its own board state — a
+  condition FIRED and its `on_fire` is not `halt` — exit 6, no auto-pass, its ids named in
+  `why` and on the stderr raise. It outranks `partial`/`not-evaluated` for the headline word
+  because a detector that saw something is more urgent than one that was switched off; the
+  counters carry both facts regardless, and `Test-GateAuditComplete` refuses on each of them
+  independently of the word.
+- Ledger schema 3 → 4: `fired` and `halted` are separate arrays in every record.
+  `Test-GateAuditComplete` re-derives rather than trusting: an auto-pass whose record admits
+  a fire is a finding whatever its status says, and a schema-3 record — `fired` present,
+  `halted` absent — cannot answer the question, which is a finding and never a pass.
+- `on_fire`/`on_indeterminate` may only be `halt` or `warn`
+  (`config.ps1 $script:AllowedAndonActions`, mirrored in `config.py`). Any other word is
+  refused at evaluation with exit 1 and no verdict, which every gate reads as `unavailable`.
+  Both directions are asserted in step J.
+
+### 10.2 THE POLICY QUESTION — what `warn` may mean under `dark`, and why
+
+Under `attended` a warning has a reader. Under `dark` it does not, so "fired but continue"
+is a decision nobody will see in time. Three answers were considered:
+
+1. **`dark` coerces every `on_fire` to `halt`.** Rejected: the config would say one thing
+   while the run did another, and the coercion would have to live at the gate, since the
+   board is deliberately run as a child process that is not told which profile invoked it.
+   A knob whose value is silently overwritten is the `policy-declared-unread` shape.
+2. **`dark` refuses to start if any condition declares a non-halt `on_fire`.** Rejected: it
+   punishes a declaration that may never fire, and it answers at start time a question that
+   is only decidable when a predicate runs.
+3. **CHOSEN — narrow what `clear` MEANS.** `clear` is the only word that authorises an
+   unattended pass, and a board with a fire on it is not clear. So under `dark`, `warn` and
+   `halt` have exactly the same consequence at the gate: refusal, parked item, ledger
+   record. `warn` still buys the board's WORD (`warned`, not `raised`) and the separate
+   `fired`/`halted` lists — triage for whoever reads the ledger afterwards, and severity a
+   human at an attended board can act on. It is not permission for a machine at the time.
+
+Both halves are proved at the real gate in step J: a `warn`-declared condition that FIRES
+refuses the gate (exit 6, parked, nothing signed, ledger `warned` naming it), and the same
+`warn`-declared board with the condition CLEARED auto-passes at exit 0 and verifies
+COMPLETE. A fix that refused everything would not be a fix.
+
+### 10.3 CORRECTED — "by any route through the config" was false
+
+`README.md` said "Switching the board off does not switch the gates back on — **by any route
+through the config**. There are four…" and `MODULE.md` said "**So no route through the config
+opens the gates.**" The four enumerated routes are real and each is drill-proved. The word
+**any** is what made the sentence false, and under §C.7 these sentences are audit surfaces.
+
+Four further routes exist. One of them — `on_fire` — is closed by §10.1 and is now a fifth
+row in the README table. The other three are **open**, and both files now say so:
+
+| route | what it does | status |
+|---|---|---|
+| `on_fire` downgrade | the condition fires and the board still says `clear` | **CLOSED** (10.1) |
+| predicate swap | an entry keeps a required id and names a different implemented predicate | **open at run time**; the committed config is pinned |
+| `params` redirect | `params.repo` → a clean decoy checkout; narrowed `globs`/`refs`/`branches` | **open** |
+| id squatting | the two above together: a required id on an entry that is a different check | **open at run time** |
+
+**Verified rather than relayed, for each:**
+
+- The completeness check compares IDS. `andon.ps1` computes `$missingIds` as required ids
+  not present in `$declaredIds` — nothing in it reads `predicate`. The new
+  `test_a_predicate_swap_that_keeps_the_id_is_detected` asserts, on a config with
+  `operator-checkout-off-branch` re-pointed at `branch-on-remote`, that
+  `config.missing_andon_conditions() == []` — i.e. the set check sees a complete board. That
+  assertion passes, which is the demonstration.
+- `params` genuinely redirects where a detector looks: the drill's own hermeticity rests on
+  it. `New-DarkFixture` sets `params.repo` to the fixture repo, and step B asserts from the
+  ledger that the board the gate consulted was looking at a path under `$env:TEMP` rather
+  than at the operator's checkout. The same lever pointed at a clean decoy is the attack.
+
+**What the pin covers, stated narrowly.** `config.ps1`/`config.py` now carry the required
+conditions as an id → predicate MAP, and `test_gate_profiles.py` compares it against
+`harness.config.json`. That catches a swap **in the committed config** — what a reviewer
+merges. It does not catch one made at run time, or in a config named by
+`AI_STACK_HARNESS_CONFIG`, because `andon.ps1` reads only the keys. Nothing pins `params` at
+all. A reader should come away with: the SET of conditions cannot be thinned, switched off or
+downgraded into silence; a condition that is present can still be pointed somewhere else.
+
+`MODULE.md`'s board table also had the `clear` row reading "none halted", which after 10.1 is
+a different fact from "none fired". It now says **none FIRED**, and the paragraph beneath says
+why the two are not the same.
+
+### 10.4 THE NEW GUARD WAS THE OLD VACUITY
+
+`test_gate_profiles.py::test_every_andon_condition_is_fully_declared` was §9's fix for
+`assert conds`, and it asserted that `predicate` and `on_fire` were **truthy**. Same class,
+one level down: a swapped predicate and a downgraded `on_fire` are both non-empty strings.
+
+The guard body is now a helper, `_assert_declared_values`, so a test can prove it FIRES
+rather than describe it:
+
+- `on_fire`/`on_indeterminate` must be in `config.ALLOWED_ANDON_ACTIONS`;
+- a required id's `predicate` must be the one the code says that id runs;
+- `id`/`detects`/`incident` stay truthiness checks — they are prose, and nothing branches on
+  their content.
+
+RED-proved by mutation, in tests that stay: the predicate-swap test (parameterised over two
+implemented predicates) asserts the OLD truthiness checks still pass on the mutated config,
+that the id-set check still reports a complete board, and then that
+`_assert_declared_values` raises naming the id and both predicates. The unknown-action test
+does the same for `on_fire: "log-it-and-carry-on"`. The two new cross-reader assertions were
+themselves mutation-checked: changing one value in `config.ps1`'s map, and adding a word to
+its allowed-action list, each fail `test_powershell_and_python_agree_about_the_gates`
+(`['halt','warn','shrug'] == ['halt','warn']` and
+`{'work-branch-on-remote': 'config-key-unread'} != {…: 'branch-on-remote'}`).
+
+### 10.5 Numbers, and what they depend on
+
+- `drill-dark-factory.ps1`: **141 checks, 0 failed** (121 before; step J adds 20). The same
+  file against the pre-fix sources: **141 checks, 16 failed**, all 16 in step J.
+- `pytest scripts/agent-harness`: **125 passed** in this worktree (121 before; four new
+  tests). Per §9.2 #7 that count needs a checkout with a live queue — without one it is
+  123 passed + 2 skipped.
+- `pytest scripts/claude-sessions-bridge/test_queue_narration.py`: 6 passed, unchanged.
+
+### 10.6 Line numbers that moved with this diff
+
+`queue.ps1` gained 11 lines, so the citations in §4.5 and §4.6 shift again: the two
+unchecked git call sites are now **772 and 827** (were 763, 818), and the single non-ASCII
+`§` byte is now at **301** (was 261). Both tables are corrected. The verbatim transcript in
+§3 is left as it was — it is a record of a run on the tree of that moment, and editing it
+would be the thing it exists to prevent.
+
+### 10.7 What this round did NOT change
+
+- No condition was added, removed, disabled or re-pointed. The shipped config's five
+  `on_fire` values are all still `halt`, now pinned by a test.
+- No run-time pin on `predicate` or `params` was built. Adding one would change what
+  `missing`/`incomplete` mean in the record and needs its own item; the routes are named as
+  open instead.
+- `attended` behaviour is untouched: step E is unchanged and still passes.
+- The 18 unchecked git call sites of §4.5 are still not fixed, `verify-merge-protocol.ps1`
+  is still not run, the eleven remote branches are still not deleted, and `work/u6dark` was
+  not pushed.
 - U6 clauses 1–3 remain **CODE-COMPLETE, GYM-VALIDATION PARKED**. This round did not run in
   `ai-orchestration-gym` either.
 
@@ -745,8 +941,9 @@ REVERT:   Restore the three-line block in all three files; nothing read it, so n
 FINDING:  Five conditions ship, each citing the 2026-08-30 incident it was mined from,
           each with an executable predicate in andon.ps1 and each proven FIRING on a
           constructed instance and NOT firing on a clean one (drill-dark-factory.ps1,
-          121 checks, 0 failed - 60 at first, 96 after the audit round below, 121 after
-          the thinned-board round). A condition naming a predicate that does not exist is
+          141 checks, 0 failed - 60 at first, 96 after the audit round below, 121 after
+          the thinned-board round, 141 after the on_fire round). A condition naming a
+          predicate that does not exist is
           REFUSED, so the config cannot declare a detector nobody wrote.
 STATE:    `andon.ps1 -Evaluate` on the work line is RAISED. `git-error-swallowed` names 18
           call sites, among them verify-merge-protocol.ps1:49 Invoke-DrillGit() and :53
@@ -847,7 +1044,8 @@ FINDING:  The machinery was confirmed by two independent verifiers - all five co
           the andon verdict at that moment, and a record that cannot state it is incomplete
           by definition.
 DECISION: `clear` now means something narrow and checkable - at least one condition
-          evaluated, none halted, none switched off. `partial` (some evaluated, some
+          evaluated, none halted, none switched off (narrowed once more by the on_fire
+          entry below, to none FIRED). `partial` (some evaluated, some
           switched off) and `not-evaluated` (nothing evaluated at all) are their own board
           states, both exit 6, and both refuse an unattended gate. Every verdict and every
           gate record carries `coverage {declared, evaluated, disabled, disabled_ids}` and
@@ -860,7 +1058,7 @@ PROVEN:   RED first, on a detached scratch repo - `clear/5/exit 0`. GREEN after 
           `not-evaluated`, exit 6, `declared=5 evaluated=0`. Three new ledger tampers go
           RED (evaluated forced to 0; the coverage fields stripped; the pre-existing status
           tamper). drill-dark-factory.ps1: 96 checks at that round, 121 after the
-          thinned-board round, 0 failed.
+          thinned-board round, 141 after the on_fire round, 0 failed.
 REVERT:   revert the andon.ps1 / gate-audit.ps1 diff; the ledger is additive and older
           records simply lack the coverage fields, which the verifier reports as a finding
           rather than a pass.
@@ -1014,7 +1212,8 @@ DECISION: PIN THE SET, NOT ITS SIZE. The five required condition ids are declare
           outranks the other non-clear words because a verdict from a board that is not the
           required board cannot be reported as that board's verdict; declared conditions are
           still evaluated and still listed. Coverage gains `required`/`missing`/`missing_ids`
-          (ledger schema 3) and Test-GateAuditComplete RE-DERIVES the fact from the record:
+          (ledger schema 3; the on_fire entry below takes the shipped schema to 4) and
+          Test-GateAuditComplete RE-DERIVES the fact from the record:
           a record still labelled `clear` while admitting missing conditions is a finding,
           and a schema-2 record that cannot state the required set is a finding, not a pass.
           Board REMOVAL is now `incomplete` naming all five rather than `not-evaluated`,
@@ -1033,8 +1232,9 @@ PROVEN:   RED FIRST. Drill step H drives the REAL gate for two thinnings - ONE e
           RED; restore, GREEN. test_gate_profiles.py adds the set test, a parameterised
           red-proof that pins the OLD vacuity inside the new test, a test that a config may
           neither narrow nor widen the required set, and the required ids in the
-          PowerShell/Python anti-drift test. drill-dark-factory.ps1: 121 checks, 0 failed.
-          pytest scripts/agent-harness: 121 passed.
+          PowerShell/Python anti-drift test. At that round: drill-dark-factory.ps1 121
+          checks, 0 failed; pytest scripts/agent-harness 121 passed. After the on_fire
+          round below: 141 checks and 125 passed, both still 0 failed.
 REVERT:   revert the config.ps1/config.py constant and the andon.ps1/gate-audit.ps1 diff;
           the ledger is additive and older records simply lack `required`/`missing`, which
           the verifier reports as a finding rather than a pass. Reverting restores the
@@ -1066,4 +1266,101 @@ DISCLOSED, NOT CHANGED: `-GateProfile dark` overrides an attended config for a s
           the configured DEFAULT, not a lock. That is the design - what needed fixing was
           the sentence that let "the revert" be read as "no run can self-pass now".
 REVERT:   n/a - corrections, plus one guard (Test-AndonField) that reverts with its diff.
+
+## 2026-08-30 · U6 · A FIRE THAT DOES NOT HALT MUST STILL BE IN THE RECORD
+FINDING:  `on_fire` set to anything but the literal `halt`, on ONE condition, with the board
+          otherwise untouched (enabled, all five entries present, every on_indeterminate
+          `halt`): the condition FIRED and the board reported `clear` at exit 0. REPRODUCED
+          twice before anything was changed - the board alone on a scratch repo
+          (`ANDON BOARD: CLEAR` with `[fire] git-error-swallowed` listed under it, exit 0),
+          and the REAL gate via drill step J run against the pre-fix sources: the dark
+          anchor gate AUTO-PASSED at exit 0, the item reached ready-to-test signed
+          `auto:dark`, NO refusal record was written, the PASS record's `fired` list was
+          EMPTY, and `-VerifyAudit` returned COMPLETE. `andon.ps1` set `$raised` from
+          `action -eq 'halt'` and `gate-audit.ps1` derived the record's `fired` list the
+          same way, so "fired" meant "halted" in both and a fire that did not halt had
+          nowhere in the ledger to appear. The `[fire]` line reaches the console of a manual
+          `-Evaluate`; an unattended run has no console reader, and the ledger is the surface
+          U6 clause (c) exists for. The clause inverted: a detector fired and the audit trail
+          said the board was clear.
+DECISION: FIRED MEANS FIRED. The board tracks fires and halts separately - coverage gains
+          `fired`/`fired_ids` and `halted`/`halted_ids`, ledger schema 3 -> 4 carries both as
+          separate arrays - and a board with a fire on it is NEVER `clear`. A fire that does
+          not halt is its own board state, `warned`: exit 6, ids named in `why` and on the
+          stderr raise, no auto-pass. Test-GateAuditComplete RE-DERIVES it: an auto-pass
+          record admitting a fire is a finding whatever its status word says, and a schema-3
+          record (`fired` present, `halted` absent) cannot answer the question, which is a
+          finding and never a pass. `on_fire`/`on_indeterminate` may only be `halt` or `warn`
+          (config.ps1 $script:AllowedAndonActions, mirrored in config.py); any other word is
+          refused at evaluation with exit 1 and no verdict, which every gate reads as
+          unavailable.
+          THE POLICY, argued rather than assumed. Coercing `on_fire` to `halt` under `dark`
+          was rejected: the config would say one thing while the run did another, and the
+          board is deliberately a child process that is not told which profile invoked it.
+          Refusing to START when a condition declares a non-halt action was rejected: it
+          punishes a declaration that may never fire, at a time when the question is not yet
+          decidable. What was chosen narrows what `clear` MEANS, at the one point that
+          matters. Under `dark`, `warn` and `halt` therefore have the same consequence at the
+          gate; what `warn` buys is the WORD and the record - triage for a human reading
+          afterwards, never permission for a machine at the time.
+PROVEN:   RED FIRST, at the REAL gate. Drill step J (20 checks) fails 16 against the pre-fix
+          sources and passes 20 after; the whole file is 141 checks, 0 failed (121 before).
+          It asserts the fire is genuine, that the recorded ACTION is still the configured
+          `warn` and not a rewritten `halt`, board `warned` + exit 6, the verdict separating
+          fired_ids from halted_ids, the gate refusing at exit 6 with the item parked at
+          anchor-draft and nothing signed, the ledger refusal recording `warned` with `fired`
+          NAMING the condition and `halted` EMPTY, an unimplemented on_fire refused (exit 1,
+          no verdict) and the gate reading that as unavailable - and a NEGATIVE CONTROL: the
+          same `warn`-declared board with the condition CLEARED auto-passes at exit 0 and
+          verifies COMPLETE. Ledger tampers: a record labelled `clear` that admits a fire
+          goes RED and NAMES it; a schema-3 shaped record goes RED; restore, GREEN.
+REVERT:   revert the andon.ps1/gate-audit.ps1/config.ps1/config.py/queue.ps1 diff. The ledger
+          is additive: older records simply lack `halted`, which the verifier reports as a
+          finding rather than a pass. Reverting restores the hole - a per-condition word that
+          opens an unattended gate.
+
+## 2026-08-30 · method · NAME THE ROUTES YOU CLOSED, NOT "ANY ROUTE"
+FINDING:  README.md said "Switching the board off does not switch the gates back on - BY ANY
+          ROUTE THROUGH THE CONFIG. There are four", and MODULE.md said "So no route through
+          the config opens the gates." The four enumerated routes are real and each is
+          drill-proved. The word ANY is what made both sentences false, and under C.7 those
+          sentences are audit surfaces. Four further routes exist: an `on_fire` downgrade
+          (closed by the entry above), a PREDICATE SWAP, a `params` REDIRECT, and ID
+          SQUATTING (the last two combined). VERIFIED HERE, not relayed: `andon.ps1` computes
+          its missing set from required ids against declared ids and reads no `predicate`, and
+          the new predicate-swap test asserts `missing_andon_conditions() == []` on a config
+          whose `operator-checkout-off-branch` runs `branch-on-remote` - a complete board to
+          every counter; and `params` genuinely redirects where a detector looks, which is
+          what the drill's own hermeticity rests on (New-DarkFixture sets `params.repo` to the
+          fixture and step B asserts from the ledger that the gate's board looked there).
+DECISION: state the CLOSED routes and the OPEN ones by name. README.md now lists five closed
+          routes as drill cases with their board states, then names the three that remain
+          open and what each does. MODULE.md's claim becomes "the board's MEMBERSHIP is
+          tamper-evident; its BEHAVIOUR is not": the SET of conditions cannot be thinned,
+          switched off or downgraded into silence, but a condition that is present can still
+          be pointed somewhere else. The required conditions become an id -> predicate MAP in
+          config.ps1/config.py and test_gate_profiles.py compares it against the shipped
+          config - which pins the COMMITTED config, what a reviewer merges, and NOT a
+          run-time swap or one via AI_STACK_HARNESS_CONFIG. That limit is written where the
+          pin is, in both readers and in both documents. MODULE.md's board table also said
+          `clear` means "none halted"; after the entry above that is a different fact from
+          "none fired", and it now says none FIRED.
+RULE:     a universal claim is a liability with a short life. It takes one counter-example to
+          falsify and a verifier ten minutes to find one - three of the four extra routes
+          here were found that way. A narrow sentence that names what was TESTED survives.
+PROVEN:   the guard that should have caught the swap was vacuous in the same class as the one
+          it replaced: `assert conds` became "assert `predicate` and `on_fire` are TRUTHY",
+          and a swapped predicate and a downgraded action are both non-empty strings. The
+          guard body is now `_assert_declared_values` - allowed literals for the actions, the
+          code-declared predicate for a required id - called by the shipped-config test and
+          RED-proved by two mutation tests that first assert the OLD checks still pass, then
+          require it to raise naming the id and both predicates. The two new cross-reader
+          assertions were mutation-checked too: one changed map value and one added allowed
+          action each fail test_powershell_and_python_agree_about_the_gates. pytest
+          scripts/agent-harness: 125 passed (121 before; 123 + 2 skipped without a live
+          queue). No behaviour changed in this entry - a map, a test helper, three prose
+          corrections.
+REVERT:   n/a for the documents. The id -> predicate map and the allowed-action list revert
+          with their diff; reverting them restores a guard that accepts any non-empty string.
+
 ```

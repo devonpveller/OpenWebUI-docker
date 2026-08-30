@@ -36,8 +36,13 @@
 # `missing_ids`: the counters answered "how many of the DECLARED conditions were evaluated"
 # and a board thinned by deleting condition entries answered that perfectly - 1 of 1, none
 # switched off - while four detectors were gone. A record has to be able to say whether the
-# board was the WHOLE board.
-$script:GateLedgerSchema = 3
+# board was the WHOLE board. Schema 4 (2026-08-30, same day) split `fired` from `halted`:
+# `fired` was DERIVED from `action -eq halt`, so a condition that fired with `on_fire`
+# set to anything else was absent from the record entirely - `status=clear ... fired=[]`
+# beside a detector that had just fired. `fired` now means the detectors saw something and
+# `halted` means the line stopped. A schema-3 record cannot tell the two apart, and
+# Test-GateAuditComplete reports that rather than assuming they were the same.
+$script:GateLedgerSchema = 4
 
 function Get-GateAuditDir {
     $dir = Join-Path (Get-SharedStateDir) ([string](Get-HarnessSetting "andon.ledger_dir_name" "audit"))
@@ -53,7 +58,8 @@ function New-UnavailableAndon([string]$reason) {
     return [ordered]@{ status = "unavailable"; repo = ""; conditions = 0; evaluated = 0
                        disabled = 0; disabled_ids = @(); required = @(Get-RequiredAndonConditionIds).Count
                        missing = @(Get-RequiredAndonConditionIds).Count
-                       missing_ids = @(Get-RequiredAndonConditionIds); fired = @($reason) }
+                       missing_ids = @(Get-RequiredAndonConditionIds); fired = @($reason)
+                       halted = @($reason) }
 }
 
 function Invoke-AndonForGate {
@@ -98,15 +104,22 @@ function Invoke-AndonForGate {
         # 1 declared / 1 evaluated / 0 switched off read as a clean sweep.
         return (New-UnavailableAndon "andon coverage does not state MISSING required conditions - it cannot say whether the board was the whole board")
     }
-    $fired = @($v.conditions | Where-Object { $_.action -eq "halt" } | ForEach-Object { "$($_.id): $($_.detail)" })
+    # TWO LISTS, AND NEITHER IS DERIVED FROM THE OTHER. `fired` was `action -eq halt` until
+    # 2026-08-30, which made the word "fired" mean "halted": a condition whose `on_fire` was
+    # not `halt` fired, and the record said `status=clear ... fired=[]` - the detector's
+    # finding was in no audit surface at all. A reader of this ledger has to be able to ask
+    # "what did the board SEE" separately from "what stopped the line".
+    $fired  = @($v.conditions | Where-Object { $_.status -eq "fire" } | ForEach-Object { "$($_.id): $($_.detail)" })
+    $halted = @($v.conditions | Where-Object { $_.action -eq "halt" } | ForEach-Object { "$($_.id): $($_.detail)" })
     $status = "$($v.board)"
     if (-not $status) { return (New-UnavailableAndon "andon verdict names no board state") }
-    # A board that is not clear but named no fired condition still has to say WHY, or the
-    # halt reaches the operator as a blank refusal.
-    if ($status -ne "clear" -and @($fired).Count -eq 0) {
+    # A board that is not clear but named nothing still has to say WHY, or the halt reaches
+    # the operator as a blank refusal. Asked of BOTH lists: an indeterminate condition halts
+    # without firing, and a `warned` board fires without halting.
+    if ($status -ne "clear" -and @($fired).Count -eq 0 -and @($halted).Count -eq 0) {
         $why = "$($v.why)"
         if (-not $why) { $why = "the board is '$status' and named no reason" }
-        $fired = @($why)
+        $halted = @($why)
     }
     return [ordered]@{
         status       = $status
@@ -119,6 +132,7 @@ function Invoke-AndonForGate {
         missing      = [int]$v.coverage.missing
         missing_ids  = @($v.coverage.missing_ids)
         fired        = @($fired)
+        halted       = @($halted)
     }
 }
 
@@ -149,7 +163,8 @@ function Write-GateRecord {
                              disabled = 0; disabled_ids = @(); required = @(Get-RequiredAndonConditionIds).Count
                              missing = @(Get-RequiredAndonConditionIds).Count
                              missing_ids = @(Get-RequiredAndonConditionIds)
-                             fired = @("no andon verdict was supplied") }
+                             fired = @("no andon verdict was supplied")
+                             halted = @("no andon verdict was supplied") }
     }
     $rec = [ordered]@{
         schema       = $script:GateLedgerSchema
@@ -312,6 +327,19 @@ function Test-GateAuditComplete {
                     } elseif ([int]$cov.missing -gt 0) {
                         $findings += ("'{0}' gate '{1}': auto-passed on a board missing {2} of {3} REQUIRED condition(s) ({4}) - those detectors were not switched off, they were not there" -f $item.id, $g, [int]$cov.missing, [int]$cov.required, (@($cov.missing_ids) -join ", "))
                     }
+                    # AND WHETHER ANY DETECTOR FIRED AT ALL. Every check above is about
+                    # whether the board LOOKED; this one is about what it SAW. Before schema
+                    # 4 the record could not answer it: `fired` was derived from
+                    # `action -eq halt`, so a condition that fired with `on_fire` set to
+                    # anything else left `fired=[]` beside `status=clear`. A record that
+                    # cannot separate the two says so, and one that admits a fire is a
+                    # finding whatever its status word claims.
+                    $hasHalted = ($cov.PSObject.Properties.Name -contains "halted")
+                    if (-not $hasHalted) {
+                        $findings += ("'{0}' gate '{1}': the auto-pass record predates the fired/halted split - its 'fired' list means 'halted', so it cannot say whether a condition fired without halting" -f $item.id, $g)
+                    } elseif (@($cov.fired).Count -gt 0) {
+                        $findings += ("'{0}' gate '{1}': auto-passed while {2} condition(s) FIRED ({3}) - a fired condition is not a clear board, whatever its on_fire says" -f $item.id, $g, @($cov.fired).Count, (@($cov.fired) -join "; "))
+                    }
                 }
             }
             if ($rec.kind -eq "human" -and ("$($rec.principal)").StartsWith($prefix)) {
@@ -343,6 +371,13 @@ function Format-GateRecord($r) {
         if ($r.andon -and ($r.andon.PSObject.Properties.Name -contains "evaluated")) {
             $cov = " {0}/{1} evaluated" -f [int]$r.andon.evaluated, [int]$r.andon.conditions
             if ([int]$r.andon.disabled -gt 0) { $cov += (", {0} switched off" -f [int]$r.andon.disabled) }
+            # A FIRE IS PRINTED EVEN WHEN THE STATUS WORD IS SOFT. `andon clear` beside a
+            # detector that fired is the shape this line exists to make unreadable.
+            if ($r.andon.PSObject.Properties.Name -contains "halted") {
+                if (@($r.andon.fired).Count -gt 0) { $cov += (", {0} FIRED" -f @($r.andon.fired).Count) }
+            } else {
+                $cov += ", fired/halted NOT SEPARATED"
+            }
             if ($r.andon.PSObject.Properties.Name -contains "missing") {
                 if ([int]$r.andon.missing -gt 0) { $cov += (", {0} REQUIRED MISSING: {1}" -f [int]$r.andon.missing, (@($r.andon.missing_ids) -join " ")) }
             } else {

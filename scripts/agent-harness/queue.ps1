@@ -264,7 +264,13 @@ function Test-AndonField($andon, [string]$name) {
 function Stop-OnAndon($andon, [string]$gate, [string]$id, [string]$parkedAt) {
     Write-Host ""
     Write-Host ("ANDON {0} - the '{1}' gate will NOT auto-pass." -f ("$($andon.status)").ToUpper(), $gate) -ForegroundColor Red
-    foreach ($f in $andon.fired) { Write-Host ("  - {0}" -f $f) -ForegroundColor Red }
+    # BOTH LISTS. `fired` is what the detectors saw and `halted` is what stopped the line;
+    # they were one derived list until 2026-08-30, which hid a fire whose on_fire was not
+    # `halt`. De-duplicated because a halting fire is legitimately in both.
+    $seen = @()
+    if (Test-AndonField $andon "halted") { $seen += @($andon.halted) }
+    $seen += @($andon.fired)
+    foreach ($f in @($seen | Where-Object { $_ } | Select-Object -Unique)) { Write-Host ("  - {0}" -f $f) -ForegroundColor Red }
     # State the coverage on the console too. A halt whose only word is 'not-evaluated' sends
     # the operator to the config; a halt that says 0 of 5 evaluated sends them to the right line.
     #
@@ -403,7 +409,10 @@ if ($Audit) {
         if ($r.kind -eq "auto") { $colour = "Yellow" }
         if ($r.decision -eq "refused") { $colour = "Red" }
         Write-Host ("  " + (Format-GateRecord $r)) -ForegroundColor $colour
-        foreach ($f in @($r.andon.fired)) { Write-Host ("      andon: {0}" -f $f) -ForegroundColor DarkGray }
+        $lines = @()
+        if ($r.andon -and ($r.andon.PSObject.Properties.Name -contains "halted")) { $lines += @($r.andon.halted) }
+        $lines += @($r.andon.fired)
+        foreach ($f in @($lines | Where-Object { $_ } | Select-Object -Unique)) { Write-Host ("      andon: {0}" -f $f) -ForegroundColor DarkGray }
     }
     $auto = @($recs | Where-Object { $_.kind -eq "auto" -and $_.decision -eq "passed" })
     Write-Host ""

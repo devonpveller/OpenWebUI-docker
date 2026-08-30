@@ -20,7 +20,7 @@ import copy
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 HERE = Path(__file__).resolve().parent
 
@@ -96,13 +96,32 @@ AUTO_PRINCIPAL_PREFIX = "auto:"
 #: ``$script:RequiredAndonConditions`` in ``config.ps1``; ``test_gate_profiles.py`` asks
 #: both readers and the shipped config the same question. No environment override exists —
 #: a variable that thins the board is the same hole with a longer name.
-REQUIRED_ANDON_CONDITIONS = (
-    "operator-checkout-off-branch",
-    "policy-declared-unread",
-    "git-error-swallowed",
-    "work-branch-on-remote",
-    "protected-ref-moved",
-)
+#:
+#: THE VALUE beside each id is the predicate that id is SUPPOSED to run, and it pins the
+#: COMMITTED config only. ``test_gate_profiles.py`` compares this map against
+#: ``harness.config.json``, so an entry that keeps a required id while naming a different
+#: predicate — id squatting, invisible to the id-set check, which compares ids — fails the
+#: suite. ``andon.ps1`` reads only the keys and does NOT re-check the predicate at run time:
+#: a swap in an uncommitted config, or in one named by ``AI_STACK_HARNESS_CONFIG``, still
+#: runs whatever the entry says. That route is open, and is named as open in README.md and
+#: MODULE.md rather than papered over here.
+REQUIRED_ANDON_CONDITIONS = {
+    "operator-checkout-off-branch": "git-checkout-state",
+    "policy-declared-unread": "config-key-unread",
+    "git-error-swallowed": "git-error-unchecked",
+    "work-branch-on-remote": "branch-on-remote",
+    "protected-ref-moved": "protected-ref-moved",
+}
+
+#: The only words an andon condition may use for ``on_fire`` / ``on_indeterminate``. An
+#: action the board does not understand cannot be honoured, and guessing at one is how a
+#: config ends up deciding something nobody wrote down, so an unknown literal is refused.
+#:
+#: ``warn`` does not mean "carry on": a fired condition is never a clear board whatever its
+#: action says, so no unattended gate passes over one either way. ``warn`` buys the WORD
+#: (``warned`` rather than ``raised``) and the ledger's separate ``fired``/``halted`` lists
+#: — severity for a human reading afterwards, not permission for a machine at the time.
+ALLOWED_ANDON_ACTIONS = ("halt", "warn")
 
 
 def missing_andon_conditions() -> List[str]:
@@ -117,6 +136,32 @@ def missing_andon_conditions() -> List[str]:
         if isinstance(c, dict)
     }
     return [c for c in REQUIRED_ANDON_CONDITIONS if c not in declared]
+
+
+def andon_predicate_mismatches() -> List[Tuple[str, str, str]]:
+    """``(id, expected, declared)`` for each required condition wired to the wrong predicate.
+
+    The id-set check above compares ids, so an entry that KEEPS a required id while naming a
+    different predicate satisfies it completely — the board still declares five ids and
+    still evaluates five conditions, one of which is now a different check. This asks the
+    other half of the question, of the config as loaded.
+
+    Scope, stated because it is narrow: this is what ``test_gate_profiles.py`` runs against
+    the committed ``harness.config.json``. Nothing calls it at a gate, so it does not make a
+    run-time swap detectable.
+    """
+    out: List[Tuple[str, str, str]] = []
+    for cond in (get("andon.conditions") or []):
+        if not isinstance(cond, dict):
+            continue
+        cid = str(cond.get("id", ""))
+        expected = REQUIRED_ANDON_CONDITIONS.get(cid)
+        if expected is None:
+            continue
+        declared = str(cond.get("predicate", ""))
+        if declared != expected:
+            out.append((cid, expected, declared))
+    return out
 
 _CACHE: Dict[str, Any] | None = None
 

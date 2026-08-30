@@ -21,7 +21,7 @@
 #
 # WHAT "HALT" MEANS HERE. This tool does not kill processes. It returns a verdict, and the
 # pipeline gate is the thing that obeys it: queue.ps1 REFUSES to auto-pass a gate while the
-# board is raised (exit 6), leaving the item parked in its pre-gate state with the raise
+# board is anything but clear (exit 6), leaving the item parked in its pre-gate state with the raise
 # written to the ledger. An attended gate is unaffected - a human passing a gate is the
 # human deciding, which is what attended means.
 #
@@ -34,6 +34,27 @@
 # config that would otherwise be agreeing with itself, and a board missing any of them is
 # `incomplete`: its own state, named ids, exit 6, no auto-pass.
 #
+# A FOURTH WAY OFF WAS OPEN UNTIL 2026-08-30, and it did not need the board switched off at
+# all: set `on_fire` to anything but `halt` on ONE condition. `$raised` was `action -eq halt`
+# and the ledger's `fired` list was derived the same way, so the condition FIRED, the board
+# reported `clear`, the dark gate auto-passed at exit 0 signed `auto:dark`, and the record
+# read `status=clear evaluated=5 missing=0 fired=[]` and verified COMPLETE. The fire was in
+# the console listing of `-Evaluate` and NOWHERE in the ledger - which is the surface an
+# operator audits afterwards, and the whole point of the clause. So: `fired` now means the
+# detectors SAW something and `halted` means the line stopped, they are separate lists in
+# every verdict and every record, and a board with a fire on it is never `clear`. The policy
+# that answers is deliberate and is argued in config.ps1 beside $script:AllowedAndonActions:
+# `warn` buys the WORD and the record, never the pass.
+#
+# WHAT IS STILL CONFIG-CONTROLLED, said plainly because the sentence this replaced said "no
+# route through the config opens the gates" and that was false: the SET of conditions is
+# pinned in code, and so is the vocabulary of `on_fire`. What each condition DOES is not. Its
+# `predicate` and its `params` come from the config, so an entry that keeps a required id
+# while naming a different predicate, or one whose `params.repo` points at a clean decoy
+# checkout, still satisfies every check the board makes at run time. test_gate_profiles.py
+# pins the id -> predicate map of the COMMITTED config; nothing pins an uncommitted one, or
+# one named by AI_STACK_HARNESS_CONFIG.
+#
 # WHERE THE RAISE GOES: the audit ledger (gate-audit.ps1, an append-only JSONL beside the
 # queue) and stderr. The LEDGER write is unconditional and is deliberately NOT a knob - a run
 # that could switch off the record of its own halt is the failure this board exists to
@@ -42,17 +63,18 @@
 # own `policy-declared-unread` condition refuses, and that condition now covers the `andon`
 # block as well as `pipeline` so it can catch the next one here.
 #
-#   .\andon.ps1 -Evaluate                  # all enabled conditions; exit 6 if the board is raised
+#   .\andon.ps1 -Evaluate                  # all enabled conditions; exit 6 unless the board is clear
 #   .\andon.ps1 -Evaluate -Json            # machine-readable verdict on stdout
 #   .\andon.ps1 -Evaluate -Only <id>       # one condition
 #   .\andon.ps1 -List                      # what is declared, and what implements it
 #   .\andon.ps1 -Baseline                  # record the protected refs this run starts from
 #
 # Exit codes: 0 board CLEAR | 1 usage/config error | 2 harness disabled |
-#             6 board not clear - raised, incomplete (a REQUIRED condition is not declared),
-#               partial (some conditions switched off) or not-evaluated (andon off, or every
-#               declared condition switched off). All four refuse an unattended pass; only
-#               `clear` authorises one.
+#             6 board not clear - raised, warned (a condition fired whose `on_fire` is not
+#               `halt`), incomplete (a REQUIRED condition is not declared), partial (some
+#               conditions switched off) or not-evaluated (andon off, or every declared
+#               condition switched off). All five refuse an unattended pass; only `clear`
+#               authorises one.
 
 [CmdletBinding()]
 param(
@@ -614,7 +636,10 @@ function Invoke-AndonEvaluation {
     # So `clear` now means something narrow and checkable: at least one condition was
     # evaluated, none halted, and none was skipped. Everything else gets its own name and is
     # refused by the gate:
-    #   raised        - a condition fired, or could not be evaluated (on_indeterminate=halt)
+    #   raised        - a condition halted the line: it fired with on_fire=halt, or it could
+    #                   not be evaluated (on_indeterminate=halt)
+    #   warned        - a condition FIRED and its on_fire is not `halt`. Still not a clear
+    #                   board - see the on_fire paragraph in this file's header
     #   incomplete    - a condition the system REQUIRES is not declared at all
     #   partial       - some conditions were evaluated ok, others are switched off in config
     #   not-evaluated - nothing was evaluated at all (andon off, or every condition switched off)
@@ -644,8 +669,26 @@ function Invoke-AndonEvaluation {
     # `missing` and `missing_ids` are always config-wide.
     $declaredIds = @($allConditions | ForEach-Object { [string]$_["id"] } | Where-Object { $_ })
     $missingIds = @((Get-RequiredAndonConditionIds) | Where-Object { $declaredIds -notcontains $_ })
+    # AN ACTION THE BOARD CANNOT READ IS NOT AN ACTION. Checked for every DECLARED condition
+    # before anything is evaluated, including switched-off ones: a config carrying a word
+    # this file does not implement has already decided something nobody wrote down, and
+    # which way it would have fallen is not something to discover at the moment it fires.
+    # Throwing exits 1 with no JSON, which Invoke-AndonForGate reads as `unavailable` and
+    # every gate treats as "not clear".
+    $allowed = @(Get-AllowedAndonActions)
+    foreach ($c in $allConditions) {
+        foreach ($key in @("on_fire", "on_indeterminate")) {
+            if (-not $c.Contains($key)) { continue }
+            $v = [string]$c[$key]
+            if ($allowed -notcontains $v) {
+                throw ("andon condition '{0}' declares {1}='{2}', which is not an action this board implements. Allowed: {3}" -f `
+                       $c["id"], $key, $v, ($allowed -join ", "))
+            }
+        }
+    }
     $results = @()
     $raised = $false
+    $firedIds = @()
     foreach ($c in $allConditions) {
         $id = [string]$c["id"]
         if ($OnlyId -and $id -ne $OnlyId) { continue }
@@ -666,6 +709,12 @@ function Invoke-AndonEvaluation {
             if ($c.Contains("on_indeterminate")) { $action = [string]$c["on_indeterminate"] }
         }
         if ($action -eq "halt") { $raised = $true }
+        # A FIRE IS RECORDED AS A FIRE, whatever its action. Tracked separately from $raised
+        # because they answered the same question until 2026-08-30 and they are not the same
+        # question: `fired` is what the detectors SAW, `halted` is what the config did about
+        # it. Deriving one from the other made a fire with on_fire other than `halt`
+        # disappear - board `clear`, ledger `fired=[]`, dark gate auto-passed at exit 0.
+        if ($r.status -eq "fire") { $firedIds += $id }
         $incident = ""
         if ($c.Contains("incident")) { $incident = [string]$c["incident"] }
         $results += [ordered]@{
@@ -677,6 +726,7 @@ function Invoke-AndonEvaluation {
 
     $disabledIds = @($results | Where-Object { $_.status -eq "disabled" } | ForEach-Object { $_.id })
     $evaluated = @($results | Where-Object { $_.status -ne "disabled" }).Count
+    $haltedIds = @($results | Where-Object { $_.action -eq "halt" } | ForEach-Object { $_.id })
     $coverage = [ordered]@{
         declared     = @($results).Count
         evaluated    = $evaluated
@@ -685,6 +735,14 @@ function Invoke-AndonEvaluation {
         required     = @(Get-RequiredAndonConditionIds).Count
         missing      = @($missingIds).Count
         missing_ids  = @($missingIds)
+        # BOTH LISTS TRAVEL. `fired` is every condition whose predicate said fire, halting or
+        # not; `halted` is every condition whose action was halt, which includes the
+        # indeterminate ones. Neither is derivable from the other, and the record has to be
+        # able to answer "what did the detectors see?" as well as "what stopped the line?".
+        fired        = @($firedIds).Count
+        fired_ids    = @($firedIds)
+        halted       = @($haltedIds).Count
+        halted_ids   = @($haltedIds)
     }
     $board = "clear"
     $why = ""
@@ -694,6 +752,18 @@ function Invoke-AndonEvaluation {
                 @($missingIds).Count, @(Get-RequiredAndonConditionIds).Count, (@($missingIds) -join ", "))
     } elseif ($raised) {
         $board = "raised"
+    } elseif (@($firedIds).Count -gt 0) {
+        # A FIRED CONDITION IS NOT A CLEAR BOARD, and this is the whole of the 2026-08-30
+        # `on_fire` correction. `clear` is the only word that authorises an unattended pass,
+        # so if a fire could leave the board clear then `on_fire` was a per-condition switch
+        # that opened the gates - which is the thing the board exists to prevent, spelled
+        # differently. `warned` outranks `partial` and `not-evaluated` for the headline word
+        # because a detector that SAW something is more urgent than one that was switched
+        # off; the coverage counters carry both facts either way, and
+        # Test-GateAuditComplete refuses on each of them independently of the word.
+        $board = "warned"
+        $why = ("{0} condition(s) FIRED and their on_fire is not 'halt': {1}. A fired condition is not a clear board - no unattended gate passes it." -f
+                @($firedIds).Count, (@($firedIds) -join ", "))
     } elseif ($evaluated -eq 0) {
         $board = "not-evaluated"
         # The "no conditions declared at all" case cannot land here while the required set is
@@ -800,7 +870,9 @@ if ($Evaluate) {
         # record) - that is not a knob, because a run able to switch off the record of its own
         # halt is the failure this board exists to prevent. Only the stderr copy is optional.
         if ([bool](Get-HarnessSetting "andon.raise.stderr" $true)) {
-            $fired = @($verdict.conditions | Where-Object { $_.action -eq "halt" } | ForEach-Object { $_.id })
+            # HALTED AND FIRED BOTH, de-duplicated. Taking only `action -eq halt` meant a
+            # `warned` board reached stderr with nothing but its board word.
+            $fired = @(@($verdict.coverage.halted_ids) + @($verdict.coverage.fired_ids) | Select-Object -Unique)
             if (@($fired).Count -eq 0 -and $verdict.why) { $fired = @($verdict.why) }
             [Console]::Error.WriteLine(("ANDON " + $verdict.board.ToUpper() + ": ") + (@($fired) -join ", "))
         }
