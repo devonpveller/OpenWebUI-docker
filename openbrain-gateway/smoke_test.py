@@ -59,6 +59,19 @@ if not KEY and "--defaults" not in sys.argv:
 PASS = "OK"
 FAIL = "FAIL"
 
+# A COLD MODEL LANE IS NOT A FAILURE.
+#
+# capture_thought runs metadata extraction through the chat lane, and a cold
+# qwen36-27b takes ~28s to answer its first request (measured: 27.7s from inside
+# openbrain-mcp; the embedding lane, by contrast, answers in 77ms). At the old 30s
+# client timeout this test failed on the first run after any inference restart and
+# passed on the second - which is the cry-wolf failure: whoever runs it learns that
+# a red result means "run it again".
+#
+# 120s is chosen to clear a cold load with room, not to hide a hang. A real hang
+# still fails, four times slower.
+CHAT_LANE_TIMEOUT = 120.0
+
 
 def jrpc(client, sid, method, params=None, id_=None):
     body = {"jsonrpc": "2.0", "method": method}
@@ -208,7 +221,7 @@ def check_boundaries():
     ]
 
     def tools_on(url, key):
-        with httpx.Client(timeout=30.0) as c:
+        with httpx.Client(timeout=CHAT_LANE_TIMEOUT) as c:
             r = c.post(
                 f"{url}/mcp",
                 content=json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
@@ -219,7 +232,7 @@ def check_boundaries():
         return {t["name"] for t in (body.get("result", {}).get("tools") or [])}
 
     def call_on(url, key, tool):
-        with httpx.Client(timeout=30.0) as c:
+        with httpx.Client(timeout=CHAT_LANE_TIMEOUT) as c:
             r = c.post(
                 f"{url}/mcp",
                 content=json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
@@ -250,7 +263,7 @@ def check_boundaries():
               f"{forbidden} on the ops door is DENIED (-32601)")
 
     print("[boundaries] the two keys are not interchangeable")
-    with httpx.Client(timeout=30.0) as c:
+    with httpx.Client(timeout=CHAT_LANE_TIMEOUT) as c:
         r = c.post("http://127.0.0.1:8062/mcp",
                    content=json.dumps({"jsonrpc": "2.0", "id": 3, "method": "tools/list"}),
                    headers={"Authorization": f"Bearer {cloud_key}",
@@ -280,7 +293,7 @@ def main():
         if not ok:
             failures.append(label)
 
-    with httpx.Client(timeout=30.0) as c:
+    with httpx.Client(timeout=CHAT_LANE_TIMEOUT) as c:
         # 1. health
         print("[1] /health (no auth)")
         r = c.get(f"{GATEWAY}/health")
