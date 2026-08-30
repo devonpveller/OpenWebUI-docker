@@ -975,6 +975,7 @@ class Orchestrator:
         self.runners = RunnerRegistry.load(
             registry_file=settings.runner_registry_file,
             fallback_urls=settings.worker_instance_urls,
+            pool_source=settings.worker_pool_source,
         )
         self.harness: WorkerHarness = harness or (
             FakeHarness()
@@ -2757,10 +2758,12 @@ class Orchestrator:
         await self.profiles.load_from_disk()
         await self.charters.seed_floor_from_disk()
         self._load_pm_voice_charter()     # the operator-tunable "how the org talks to you" system prompt
-        # The pool comes from the SHARED registry, which falls back to
-        # AO_WORKER_INSTANCE_URLS when the file is absent or silent - one declaration,
-        # so the session harness and this bridge cannot disagree about which daemons
-        # exist or what substrate each one is.
+        # The pool, with each instance's runner KIND attached. WHICH addresses those are is
+        # still AO_WORKER_INSTANCE_URLS by default - `AO_WORKER_POOL_SOURCE=registry` is the
+        # explicit opt-in to the shared file deciding it (app/modules/runners.py
+        # POOL_SOURCE_ENV says why that is not the default). What the registry always
+        # supplies is the substrate each address runs on, which is what RunnerDispatch
+        # routes on.
         await self.scheduler.register_pool(self.runners.pool())
         # F31.3 — a bridge restart orphans every in-flight DAEMON turn: the poll loop that drove it
         # is gone, but the daemon keeps running (reset_stale below only clears the bridge's bookkeeping,

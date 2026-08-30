@@ -59,6 +59,25 @@ log = logging.getLogger("agent_bridge.runners")
 # declared, never inferred, or a typo in a URL silently changes a worker's substrate.
 DEFAULT_KIND = "little-coder"
 
+# WHERE THE POOL COMES FROM - and why the default is the environment.
+#
+# The first cut of this module let a present registry file supply the pool whenever
+# `AO_WORKER_INSTANCE_URLS` was empty. That was a real behaviour change hiding in a
+# fallback: compose sets `AO_WORKER_INSTANCE_URLS: ${AO_WORKER_INSTANCE_URLS:-}` and its
+# own comment documents that state as "Empty in P0-P4", so in the DOCUMENTED DEFAULT the
+# org went from no capacity to two ao-workers - and clearing the variable, the documented
+# way to disable the pool, silently ENABLED it instead.
+#
+# So the source is explicit. `env` is the default and is byte-for-byte the pre-U4
+# behaviour: the CSV alone decides which addresses are work capacity, and an empty CSV
+# means an empty pool. `registry` is an operator opting in to the shared file deciding it.
+# The file is NOT inert under `env` - it still answers what KIND each address is, which is
+# what selects the WorkerHarness implementation - but it cannot create capacity nobody
+# asked for.
+POOL_SOURCE_ENV = "env"
+POOL_SOURCE_REGISTRY = "registry"
+POOL_SOURCES = (POOL_SOURCE_ENV, POOL_SOURCE_REGISTRY)
+
 
 class RunnerNotProvisionedError(RuntimeError):
     """A dispatch was routed to a runner kind that has no implementation here.
@@ -94,10 +113,20 @@ class RunnerSpec:
 class RunnerRegistry:
     """The declared substrates, and the pool that follows from them.
 
-    Precedence is the house one (built-in default < file < environment), so an operator's
-    existing `AO_WORKER_INSTANCE_URLS` keeps winning and this change cannot alter a live
-    pool by accident. What the file adds is that the pool is now DECLARED somewhere both
-    systems read, instead of only in one plane's `.env`.
+    Two questions, two owners, and the split is the whole design:
+
+    * **WHICH addresses are work capacity** - owned by `AO_WORKER_INSTANCE_URLS` unless an
+      operator explicitly hands that question to the file with
+      `AO_WORKER_POOL_SOURCE=registry`. Under the default the file cannot add a worker,
+      which is why an empty CSV means an empty pool exactly as it did before U4.
+    * **WHAT each address is** - the runner kind, which selects the `WorkerHarness`
+      implementation. Owned by the shared file, because a bare URL (every operator's
+      current shape) states an address and nothing else. A `kind=url` entry in the CSV
+      states its own substrate and overrides the file.
+
+    An earlier version of this docstring claimed the environment "keeps winning" outright.
+    It did not: with the file present and the CSV empty, the file supplied the pool. See
+    `POOL_SOURCE_ENV` above for what that cost and how it is now prevented.
     """
 
     def __init__(
@@ -133,18 +162,48 @@ class RunnerRegistry:
 
     # ── loading ─────────────────────────────────────────────────────────────
     @classmethod
-    def load(cls, registry_file: str = "", fallback_urls: str = "") -> "RunnerRegistry":
-        """Read the shared registry file, then let the environment CSV override the pool.
+    def load(
+        cls,
+        registry_file: str = "",
+        fallback_urls: str = "",
+        pool_source: str = POOL_SOURCE_ENV,
+    ) -> "RunnerRegistry":
+        """Read the shared registry file; take the POOL from the source the operator named.
 
-        A missing or unreadable file degrades to exactly the pre-U4 behaviour (the CSV) with
-        a warning - a bind-mount that did not land must not take the org down. That failure
-        mode is not hypothetical here: a bind-mount of a MISSING file yields a silent empty
+        `pool_source` defaults to `env` - the CSV, and only the CSV, decides which addresses
+        are work capacity. An empty CSV therefore yields an empty pool with the file fully
+        present, which is the pre-U4 behaviour and is deliberately NOT a fallback into the
+        file (see POOL_SOURCE_ENV for the defect that cost).
+
+        `pool_source=registry` is the opt-in: the file's `pooled` rows become the pool. Only
+        there does the CSV act as a fallback, and only when the file could not be read at
+        all - a bind-mount that did not land must not take the org down. That failure mode
+        is not hypothetical here: a bind-mount of a MISSING file yields a silent empty
         DIRECTORY on this host, so `_read` also has to survive being handed one.
+
+        An unrecognised value falls back to `env` with a warning rather than raising: a
+        typo in a compose variable must not stop the bridge from starting, and `env` is the
+        conservative answer (no capacity invented).
         """
         specs = cls._read(registry_file)
-        pool = cls._pool_from_urls(fallback_urls)
-        if not pool:
+        src = (pool_source or POOL_SOURCE_ENV).strip().lower()
+        if src not in POOL_SOURCES:
+            log.warning(
+                "AO_WORKER_POOL_SOURCE=%r is not one of %s - using %r",
+                pool_source, ", ".join(POOL_SOURCES), POOL_SOURCE_ENV,
+            )
+            src = POOL_SOURCE_ENV
+        if src == POOL_SOURCE_REGISTRY:
             pool = cls._pool_from_specs(specs)
+            if not pool:
+                log.warning(
+                    "AO_WORKER_POOL_SOURCE=registry but %s declares no pooled runner "
+                    "(unreadable, or every row is pooled:false) - falling back to the "
+                    "environment pool", registry_file or "(no registry file)",
+                )
+                pool = cls._pool_from_urls(fallback_urls)
+        else:
+            pool = cls._pool_from_urls(fallback_urls)
         return cls(specs, pool)
 
     @staticmethod

@@ -49,8 +49,18 @@
     "actually open the endpoint, and scripts/agent-harness/check-runner-endpoints.ps1 fails",
     "when the declaration and reality disagree in EITHER direction. It exists because this",
     "file claimed little-coder was at http://127.0.0.1:8090 for as long as nothing dispatched",
-    "- the coder plane publishes only 127.0.0.1:9091 (metrics), so that address was refused",
-    "by the host every single time. A runner nothing calls is a runner nothing corrects."
+    "- the only host port the coder plane even declares is 127.0.0.1:9091 (metrics), so that",
+    "address was refused by the host every single time. A runner nothing calls is a runner",
+    "nothing corrects - and neither is a CHECK nothing can fail: the first version of that",
+    "script probed only from the host, which for a container-DNS row made the FAILING probe",
+    "the passing branch, so a wrong port passed. It now probes from a container on each",
+    "declared network, and verify-runner-endpoint-check.ps1 executes both failure directions.",
+    "",
+    "pooled rows are agent-org's to acquire, and agent-org acquires them only when its own",
+    "AO_WORKER_POOL_SOURCE says registry. Declaring a pool here does NOT create capacity in",
+    "that plane: the default (env) keeps AO_WORKER_INSTANCE_URLS the sole answer to WHICH",
+    "daemons are the pool, which is what it was before U4. This file always answers WHAT",
+    "each address is."
   ],
   "runners": {
     "claude-code": {
@@ -75,6 +85,7 @@
       "default_model": "local-default",
       "reachable_from": ["ai-stack_llm-net", "coder_lc-net"],
       "pooled": false,
+      "_status_note": "'unproven' is the weaker half of the truth: nothing in the harness DISPATCHES to a runner at all, so this daemon has not been tried and failed - it has never been attempted, because the code path stops at resolution. See documentation/notes/u4-profile-mechanism-deadcode.md and scripts/agent-harness/MODULE.md.",
       "_note": "the coder plane's daemon. NOT pooled: it is the operator's interactive coder and its /workspace is a single shared volume, so an orchestrator acquiring it would collide with a human mid-task - little-coder's own design rejected sharing an executor between interactive and automated work as a deterministic collision (documentation/implementation-guide/little-coder/Self-improving-little-coder-design.md:656). NOT reachable from the host: coder/docker-compose.yml publishes 127.0.0.1:9091 (metrics) and nothing else, so a host-side dispatcher must either be given a published 8090 or run inside one of the networks above. Still unproven: no work item has completed through it - do not read config support as a proven feature."
     },
     "agent-org-worker": {
@@ -89,7 +100,7 @@
       "default_model": "local-default",
       "reachable_from": ["ai-stack_llm-net", "agent-org_ao-worker-net"],
       "pooled": true,
-      "_note": "agent-org's governed worker pool, declared here so both systems read one list - the 'agent-org workers as harness runners' half of U4. PROVEN in agent-org (it is the substrate its efforts have always run on), which is a different claim from proven as a HARNESS runner: a harness item lives in a host worktree and these daemons only ever work on a workspace they cloned themselves, so handing one an item means handing over a BRANCH, never a path. Reachability is the same story as little-coder above: container networks only."
+      "_note": "agent-org's governed worker pool, declared here so both systems read one list - the 'agent-org workers as harness runners' half of U4. Declaring them here does NOT put them to work: agent-org acquires this list only under AO_WORKER_POOL_SOURCE=registry, and the harness has no dispatcher to acquire anything. PROVEN in agent-org (it is the substrate its efforts have always run on), which is a different claim from proven as a HARNESS runner: a harness item lives in a host worktree and these daemons only ever work on a workspace they cloned themselves, so handing one an item means handing over a BRANCH, never a path. Reachability is the same story as little-coder above: container networks only."
     }
   },
 

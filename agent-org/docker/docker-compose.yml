@@ -135,13 +135,20 @@ services:
       # semaphore: no live GPU-occupancy signal (/slots dead on llama-swap — C6).
       AO_MAX_CONCURRENT_WORKERS: ${AO_MAX_CONCURRENT_WORKERS:-1}
       AO_WORKER_INSTANCE_URLS: ${AO_WORKER_INSTANCE_URLS:-}
-      # THE SHARED RUNNER REGISTRY (dark-factory-unification U4). AO_WORKER_INSTANCE_URLS
-      # above still says WHICH daemons are in the pool and still wins; this file says WHAT
-      # each address is - the runner KIND that selects the WorkerHarness implementation.
-      # Same file the session harness reads (config.ps1 / config.py), mounted below. If the
-      # mount is ever absent the bridge falls back to the URLs alone, i.e. the pre-U4
-      # behaviour, rather than failing to start.
+      # THE SHARED RUNNER REGISTRY (dark-factory-unification U4). Same file the session
+      # harness reads (config.ps1 / config.py), mounted below. It says WHAT each address is
+      # - the runner KIND that selects the WorkerHarness implementation. If the mount is
+      # ever absent the bridge falls back to the URLs alone, i.e. the pre-U4 behaviour,
+      # rather than failing to start.
       AO_RUNNER_REGISTRY_FILE: /etc/agent-bridge/runner-registry.json
+      # WHICH addresses are work capacity. "env" (the default) = AO_WORKER_INSTANCE_URLS
+      # alone, so the empty value above is an EMPTY POOL, exactly as it was before U4.
+      # "registry" hands that question to the file's `pooled: true` rows - an explicit
+      # operator act, never a side effect. It is a separate switch because letting the file
+      # fill an empty CSV meant this compose default silently created two workers, and
+      # clearing AO_WORKER_INSTANCE_URLS - the documented way to disable the pool - turned
+      # it ON. See agent-org/agent-bridge/app/modules/runners.py POOL_SOURCE_ENV.
+      AO_WORKER_POOL_SOURCE: ${AO_WORKER_POOL_SOURCE:-env}
       # Audit mirror to Open Brain (P6.2) — off unless the operator turns it on (an ops step
       # after a live smoke). Target is openbrain-mcp, the FIRST-PARTY lane we share llm-net
       # with; openbrain-gateway is the cloud door and is obnet-only, i.e. unreachable here.

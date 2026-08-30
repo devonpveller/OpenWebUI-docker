@@ -24,18 +24,21 @@ import json
 from pathlib import Path
 
 import pytest
+from sqlalchemy import select
 
 from app.adapters.chat import FakeChatAdapter
 from app.config import Settings
 from app.db import Database
 from app.modules.model_router import FakeModelClient
 from app.modules.runners import (
+    POOL_SOURCE_REGISTRY,
     RunnerDispatch,
     RunnerNotProvisionedError,
     RunnerRegistry,
 )
+from app.models import WorkerInstance
 from app.orchestrator import Orchestrator
-from app.worker.harness import FakeHarness, WorkResult
+from app.worker.harness import FakeHarness, LittleCoderHarness, WorkResult
 
 ROOT = Path(__file__).resolve().parents[1]
 SHARED_REGISTRY = ROOT.parents[1] / "scripts" / "agent-harness" / "harness.config.json"
@@ -65,10 +68,13 @@ def _registry_file(tmp_path: Path, runners: dict) -> str:
 def test_registry_reads_the_shared_harness_config():
     """The SHIPPED harness.config.json is a valid runner registry for this bridge too -
     that is what "one declaration, both systems" means. If this fails, the two drifted."""
-    reg = RunnerRegistry.load(registry_file=str(SHARED_REGISTRY), fallback_urls="")
+    reg = RunnerRegistry.load(registry_file=str(SHARED_REGISTRY), fallback_urls="",
+                              pool_source=POOL_SOURCE_REGISTRY)
     assert "claude-code" in reg.specs and "little-coder" in reg.specs
     assert reg.specs["claude-code"].kind == "claude-code"
-    # agent-org's own worker pool is declared THERE, not only in this plane's env file.
+    # agent-org's own worker pool is declared THERE, not only in this plane's env file -
+    # readable by this bridge on request. `pool_source` is what turns "readable" into
+    # "in force"; see test_an_empty_env_pool_stays_empty_with_the_file_present.
     pool = reg.pool()
     assert [u for _i, u, _k in pool] == [
         "http://ao-worker-1:8090",
@@ -269,7 +275,10 @@ def test_this_reader_agrees_with_the_harness_python_reader():
     try:
         harness_config.load(fresh=True)
         theirs = [(a["url"], a["kind"]) for a in harness_config.runner_pool()]
-        reg = RunnerRegistry.load(registry_file=str(SHARED_REGISTRY), fallback_urls="")
+        # pool_source=registry because the question here is "do the readers agree about what
+        # the FILE declares", not "what is this deployment's live pool".
+        reg = RunnerRegistry.load(registry_file=str(SHARED_REGISTRY), fallback_urls="",
+                                  pool_source=POOL_SOURCE_REGISTRY)
         ours = [(u, k) for _i, u, k in reg.pool()]
         assert ours == theirs
         assert set(harness_config.runner_names()) == set(reg.specs)
@@ -326,3 +335,147 @@ async def test_dispatch_forwards_every_method_the_protocol_declares(tmp_path):
         "every protocol method must reach the implementation the registry names; "
         f"forwarded {calls}, expected {protocol_methods}"
     )
+
+
+# -- the file must not invent work capacity ----------------------------------
+# These pin the correction to a defect this branch shipped and a reviewer found: with the
+# registry file present and AO_WORKER_INSTANCE_URLS empty - the state
+# agent-org/docker/docker-compose.yml documents as "Empty in P0-P4" - the pool went from
+# EMPTY to two ao-workers. Clearing the variable, the documented way to disable the pool,
+# turned it on. RED before app/modules/runners.py POOL_SOURCE_ENV: the first of these fails
+# on the pre-fix module, which resolved an empty CSV by falling back to the file.
+
+
+def test_an_empty_env_pool_stays_empty_with_the_file_present():
+    """The compose default state. The shipped registry declares two pooled ao-workers and
+    is fully readable here; the pool is still EMPTY, because WHICH addresses are capacity
+    is the environment's question unless an operator explicitly says otherwise."""
+    reg = RunnerRegistry.load(registry_file=str(SHARED_REGISTRY), fallback_urls="")
+    assert reg.pool() == []
+    # ... and the file is not inert: it still answers what each address IS, which is what
+    # selects the harness implementation. That is the half that was always safe.
+    assert reg.kind_for("http://ao-worker-1:8090") == "little-coder"
+    assert "agent-org-worker" in reg.specs
+
+
+def test_the_registry_pool_is_opt_in_and_explicit():
+    """The other side of the same switch: an operator who asks for the file gets the file."""
+    reg = RunnerRegistry.load(registry_file=str(SHARED_REGISTRY), fallback_urls="",
+                              pool_source=POOL_SOURCE_REGISTRY)
+    assert [u for _i, u, _k in reg.pool()] == [
+        "http://ao-worker-1:8090",
+        "http://ao-worker-2:8090",
+    ]
+
+
+def test_pool_source_registry_degrades_to_the_env_csv_when_the_file_is_absent(tmp_path):
+    """A bind-mount that did not land must not silently empty a pool the operator asked
+    for - under `registry` the CSV is the fallback, and only then."""
+    reg = RunnerRegistry.load(registry_file=str(tmp_path / "nope.json"),
+                              fallback_urls="http://w1:8090",
+                              pool_source=POOL_SOURCE_REGISTRY)
+    assert reg.pool() == [("worker-1", "http://w1:8090", "little-coder")]
+
+
+def test_an_unrecognised_pool_source_is_conservative():
+    """A typo in a compose variable must not start the org on a pool nobody chose. `env` is
+    the conservative answer because it can only ever produce what the CSV already named."""
+    reg = RunnerRegistry.load(registry_file=str(SHARED_REGISTRY), fallback_urls="",
+                              pool_source="registy")
+    assert reg.pool() == []
+
+
+async def test_startup_registers_no_worker_when_the_env_pool_is_empty(db_url):
+    """End to end, through the real `Orchestrator.setup()`: the compose default state
+    registers ZERO worker instances. This is the claim the reviewer refuted - that the
+    branch could not create capacity that did not exist before - made executable."""
+    settings = Settings(
+        _env_file=None, chat_adapter="fake",
+        profiles_dir=str(ROOT / "profiles"), charters_dir=str(ROOT / "charters"),
+        floor_dir=str(ROOT / "floor"),
+        worker_instance_urls="",                       # the compose default: set, and empty
+        runner_registry_file=str(SHARED_REGISTRY),     # the real shared file, present
+        max_concurrent_workers=1, database_url=db_url, project_survey_enabled=False,
+        review_mode="off", plan_approval="off",
+    )
+    db = Database(db_url)
+    orch = Orchestrator(settings, db, FakeChatAdapter(), model_client=FakeModelClient())
+    try:
+        await orch.setup()
+        assert await orch.scheduler.snapshot() == []
+    finally:
+        await db.dispose()
+
+
+async def test_startup_registers_the_file_pool_only_when_asked(db_url):
+    """The opt-in, proven at the same level: same file, same empty CSV, one setting."""
+    settings = Settings(
+        _env_file=None, chat_adapter="fake",
+        profiles_dir=str(ROOT / "profiles"), charters_dir=str(ROOT / "charters"),
+        floor_dir=str(ROOT / "floor"),
+        worker_instance_urls="",
+        runner_registry_file=str(SHARED_REGISTRY),
+        worker_pool_source=POOL_SOURCE_REGISTRY,
+        max_concurrent_workers=1, database_url=db_url, project_survey_enabled=False,
+        review_mode="off", plan_approval="off",
+    )
+    db = Database(db_url)
+    orch = Orchestrator(settings, db, FakeChatAdapter(), model_client=FakeModelClient())
+    try:
+        await orch.setup()
+        # snapshot() reports scheduling state, not addresses - read the pool rows themselves,
+        # because the address is the whole point of this assertion.
+        async with db.session_factory() as sess:
+            rows = (await sess.execute(select(WorkerInstance))).scalars().all()
+            addrs = sorted(r.base_url for r in rows)
+        assert addrs == ["http://ao-worker-1:8090", "http://ao-worker-2:8090"]
+    finally:
+        await db.dispose()
+
+
+# -- the line that INSTALLS the dispatcher ------------------------------------
+def test_the_orchestrator_installs_the_registry_dispatcher(db_url, tmp_path):
+    """The tests above swap a dispatcher in themselves, so they prove RunnerDispatch
+    consults the registry - NOT that the orchestrator uses RunnerDispatch. A reviewer
+    reverted that one line (`RunnerDispatch.default(...)` back to `LittleCoderHarness(...)`)
+    and 861/861 tests still passed. This is that revert's repro: it asserts the real
+    production selection, and that the dispatcher is wired to the orchestrator's OWN
+    registry rather than a throwaway one."""
+    settings = Settings(
+        _env_file=None, chat_adapter="mattermost",     # the non-fake path: the real binding
+        profiles_dir=str(ROOT / "profiles"), charters_dir=str(ROOT / "charters"),
+        floor_dir=str(ROOT / "floor"),
+        worker_instance_urls="http://w1:8090",
+        runner_registry_file=_registry_file(tmp_path, {}),
+        max_concurrent_workers=1, database_url=db_url, project_survey_enabled=False,
+        review_mode="off", plan_approval="off",
+    )
+    orch = Orchestrator(settings, Database(db_url), FakeChatAdapter(),
+                        model_client=FakeModelClient())
+    assert isinstance(orch.harness, RunnerDispatch), (
+        "the orchestrator must dispatch through the registry, not bind one implementation "
+        "for the whole pool - that global binding is what made a heterogeneous pool "
+        "inexpressible"
+    )
+    assert orch.harness.registry is orch.runners
+    # the Router - the thing every wake actually goes through - holds the same object.
+    assert orch.router.harness is orch.harness
+    # and the real little-coder implementation is still what a little-coder address gets.
+    assert isinstance(orch.harness.impls["little-coder"], LittleCoderHarness)
+
+
+def test_the_fake_adapter_still_bypasses_the_dispatcher(db_url, tmp_path):
+    """The other branch of the same line. Stated so that a future edit routing the fake
+    adapter through RunnerDispatch is a deliberate change rather than an accident."""
+    settings = Settings(
+        _env_file=None, chat_adapter="fake",
+        profiles_dir=str(ROOT / "profiles"), charters_dir=str(ROOT / "charters"),
+        floor_dir=str(ROOT / "floor"),
+        worker_instance_urls="http://w1:8090",
+        runner_registry_file=_registry_file(tmp_path, {}),
+        max_concurrent_workers=1, database_url=db_url, project_survey_enabled=False,
+        review_mode="off", plan_approval="off",
+    )
+    orch = Orchestrator(settings, Database(db_url), FakeChatAdapter(),
+                        model_client=FakeModelClient())
+    assert isinstance(orch.harness, FakeHarness)

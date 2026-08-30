@@ -29,6 +29,7 @@ Everything else in here is internal and may change without notice.
 | `lease.ps1` | named leases for SHARED RUNTIME only (Docker, GPU, ports, live DBs) |
 | `verify-merge-protocol.ps1` | the executable drill over the whole protocol |
 | `check-runner-endpoints.ps1` | does the runner registry tell the truth about reachability? (needs the stack up) |
+| `verify-runner-endpoint-check.ps1` | the drill that proves the check above can FAIL — six mutations, six expected exit codes |
 | `harness.config.json` | the configuration (see below) |
 | `config.py` | the reader other Python code imports (`bridge.py` does) |
 
@@ -93,9 +94,19 @@ plane reaching `llama-cpp` through LiteLLM.
   passes the choice to the session as `AI_STACK_HARNESS_PROFILE`, which is simply
   the configuration's own top layer — no separate mechanism.
 
-The `little-coder` runner is wired and callable but **unproven**: no work item has
-completed through it yet. Its `status` field says so, and that is not decoration —
-do not read config support as a working feature.
+The `little-coder` runner **resolves but does not dispatch**. `Resolve-RoleTarget`
+validates the profile, the role and the runner, and returns the runner's `status` —
+and nothing in this module submits a task to anything. So selecting `all-local`,
+`local-work-cloud-review` or `cloud-work-local-test` resolves cleanly and then the run
+proceeds on whatever the surface actually invokes.
+
+Say it precisely, because the earlier phrasing here ("wired and callable but unproven")
+read as *tried and not yet demonstrated* and the truth is *never attempted, because the
+code path stops one layer above*: the resolution is wired; the dispatch was never built
+([`u4-profile-mechanism-deadcode.md`](../../documentation/notes/u4-profile-mechanism-deadcode.md)).
+`all-cloud` being both the default and locked for extension sessions is what has kept
+this invisible. Building that dispatch is a separate piece of work; until it lands, the
+three local-bearing profiles are a choice this module cannot honour.
 
 ## Runners: the shared registry
 
@@ -114,6 +125,28 @@ in `config.ps1`, `runner()` / `runner_addresses()` / `runner_pool()` in `config.
 Dispatch is *not* here — this module answers questions about configuration and does
 not submit tasks to anything.
 
+### The two directions are not equally true
+
+U4's phrasing ("agent-org workers as harness runners **and vice versa**") invites one
+sentence covering two things of unequal status. They are:
+
+| direction | status | what backs the word |
+|---|---|---|
+| **agent-org reads this registry** | **DISPATCHING** | `RunnerDispatch` is on the live wake path; changing only this file changes which `WorkerHarness` implementation executes (`agent-org/agent-bridge/tests/test_runner_registry.py`) |
+| **the harness runs work on a runner** | **DECLARED, NOT DISPATCHING — parked** | there is no dispatcher here at all: nothing submits a task, no profile names `agent-org-worker`, and `Get-HarnessRunnerPool` has no executable caller |
+
+The park is asserted, not described:
+`test_the_harness_side_of_u4_is_declared_not_dispatching` fails the moment a harness
+script reads the pool, and `test_no_profile_routes_a_role_to_a_pooled_runner` fails if a
+profile ever aims a role at a daemon agent-org's scheduler owns. Whoever builds the
+dispatcher will be told by those two tests exactly which claims to re-state.
+
+Why parked rather than built here: a harness item lives in a git worktree **on the
+host**, and little-coder-kind daemons only ever work on a `/workspace` they cloned
+themselves — so handing one an item means handing over a pushed **branch**, never a
+path. That is a design question, not a wiring question, and it is the subject of a
+separate work item.
+
 Each row states three things that are claims, not decoration:
 
 | field | means | checked by |
@@ -130,10 +163,18 @@ design already rejected as deterministic
 ([`Self-improving-little-coder-design.md:656`](../../documentation/implementation-guide/little-coder/Self-improving-little-coder-design.md)).
 
 `reachable_from` exists because this file claimed `little-coder` lived at
-`http://127.0.0.1:8090` from the day the block was written, while the coder plane
-publishes only `127.0.0.1:9091` (metrics). Every host-side probe of that address was
-refused — and none was ever made, because nothing dispatched. A runner nobody calls
-is a runner nobody corrects, so the claim is now falsifiable by a script.
+`http://127.0.0.1:8090` from the day the block was written, while the only port the
+coder plane even declares on the host is `127.0.0.1:9091` (metrics). Every host-side
+probe of `8090` was refused — and none was ever made, because nothing dispatched. A
+runner nobody calls is a runner nobody corrects.
+
+"Falsifiable by a script" is itself a claim, and the first version of that script could
+not back it: it probed only from the host, so for a container-DNS row the *failing*
+probe was the branch that recorded a pass, and a wrong port passed. It now probes from a
+container on each declared network (`docker exec <probe> curl <url>`, which exercises the
+name **and** the port), and "could not look" is exit 2 rather than a silent zero.
+`verify-runner-endpoint-check.ps1` executes both failure directions on every run — start
+with its `wrong-port` case.
 
 `claude-code` contributes no pooled address, and that is the honest statement rather
 than an omission: a Claude Code agent is a host process with no task endpoint, so
@@ -176,9 +217,10 @@ because people trust it. `resolve.ps1` now throws rather than fall back.
 4. Remove the worktree/profile columns from `scripts/claude-sessions-bridge/sessions.py`.
 5. Drop the harness rows from `CLAUDE.md`.
 6. In `agent-org/docker/docker-compose.yml`, remove the `runner-registry.json` bind
-   mount and `AO_RUNNER_REGISTRY_FILE`. agent-org keeps working on
-   `AO_WORKER_INSTANCE_URLS` alone — `RunnerRegistry.load` treats an absent file as
-   "fall back to the environment pool", which is deliberately the pre-U4 behaviour.
+   mount, `AO_RUNNER_REGISTRY_FILE` and `AO_WORKER_POOL_SOURCE`. agent-org keeps
+   working on `AO_WORKER_INSTANCE_URLS` alone — an absent file leaves every address
+   at the documented default kind, and `AO_WORKER_POOL_SOURCE` already defaults to
+   `env`, which IS the pre-U4 pool behaviour.
 
 State under `.git/agent-worktrees/` is disposable once no worktree holds unmerged
 work — check with `git worktree list` before deleting it.

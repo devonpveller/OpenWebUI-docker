@@ -152,6 +152,60 @@ def test_claude_code_contributes_no_pool_address():
     assert "claude-code" not in {p["runner"] for p in config.runner_pool()}
 
 
+def test_the_harness_side_of_u4_is_declared_not_dispatching():
+    """The PARK, made mechanical - and the check that ends it when someone ends it.
+
+    U4 has two directions and they are not equally true. agent-org's direction DISPATCHES:
+    `RunnerDispatch` sits on the live wake path and the implementation that runs changes
+    when the registry's answer changes (agent-org/agent-bridge/tests/test_runner_registry.py).
+    THIS side does not. The harness has no dispatcher at all: nothing here submits a task to
+    a runner, no profile names `agent-org-worker`, and `Get-HarnessRunnerPool` /
+    `runner_pool()` have no executable caller - only tests and this file.
+
+    documentation/notes/u4-profile-mechanism-deadcode.md set the bar: "importing the
+    resolver is not consuming it". A sentence claiming both directions shipped equally would
+    fail that bar, so the park is asserted instead of described. When a real dispatcher
+    appears this test FAILS, which is the point: it is the reminder to re-state
+    `little-coder`'s `status`, MODULE.md and the findings note in the same commit that makes
+    the claim true.
+    """
+    here = HERE
+    consumers = []
+    for p in sorted(here.glob("*.ps1")):
+        if p.name == "config.ps1":
+            continue                      # defines the readers; defining is not consuming
+        text = p.read_text(encoding="utf-8", errors="replace")
+        if "Get-HarnessRunnerPool" in text:
+            consumers.append(p.name)
+    assert consumers == [], (
+        "a harness script now reads the runner POOL: " + ", ".join(consumers) + ". "
+        "If it dispatches work, the 'harness runner as an executor' direction is no longer "
+        "parked - update runners.little-coder.status, MODULE.md and "
+        "documentation/notes/u4bidir-findings.md, then delete this test."
+    )
+    # The one script that reads the registry today VALIDATES declarations; it does not run
+    # work on them. Named explicitly so the distinction survives the next reader.
+    check = here / "check-runner-endpoints.ps1"
+    assert check.is_file() and "Get-HarnessRunnerAddresses" in check.read_text(
+        encoding="utf-8", errors="replace")
+
+
+def test_no_profile_routes_a_role_to_a_pooled_runner():
+    """`pooled` runners are agent-org's to acquire, and agent-org has a scheduler with an
+    allocation lock, affinity and quarantine that stop one daemon being double-booked. A
+    harness profile that named one would hand out the same workspace behind that scheduler's
+    back. Nothing does today; this is the guard that keeps it that way until a harness
+    dispatcher exists that goes THROUGH agent-org rather than around it."""
+    pooled = {r["runner"] for r in config.runner_pool()}
+    for name in config.profile_names():
+        for role in config.ROLES:
+            target = config.resolve_role(role, profile=name)
+            assert target["runner"] not in pooled, (
+                "profile '" + name + "' assigns " + role + " to pooled runner '"
+                + target["runner"] + "'"
+            )
+
+
 PS = shutil.which("powershell") or shutil.which("pwsh")
 
 
