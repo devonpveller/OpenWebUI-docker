@@ -370,5 +370,15 @@ fixture that always matches), and query-text assertions for seams 2 and 4.
 - `scripts/checks/smoke-agent-memory-live.ps1` — **ALL LIVE CHECKS PASSED** against the real
   plane, with the corpus back at 4 memories and 0 personal rows afterwards.
 - `ruff check .` — **All checks passed** (2 pre-existing errors fixed).
-- Full `pytest -q` in `agent-org/agent-bridge` — see the commit message for the count at the
-  landed sha.
+- `scripts/checks/test-quartz4-offline.ps1 -Phase unit` — **32 pass / 0 fail**, including the
+  two-phase recall SQL executing against the real schema on a fresh pgvector volume.
+- Full `pytest -q` in `agent-org/agent-bridge` at `abf3287` — **881 passed, 0 failed**
+  (16:09). Base collected 850 and pass 1 collected 866; 881 is +15 with no collection drop.
+  Every suite that could plausibly be affected was also run on its own first — burn-down,
+  handoff, CDCL, outcome-memory, openbrain-memory, flail-replan (84), stage-5 governance,
+  dispatch errors, lenses, D2, removal gate, escalation routing (97), constraint promotion,
+  openbrain client, audit mirror, project context, org drill (56), end-to-end, execution
+  loop, acceptance corpus, standing intent (32).
+- The live smoke was run twice back-to-back at the final revision and passed both times,
+  each leaving the corpus at 4 memories and 0 personal rows — it is re-runnable, not a
+  one-shot that happened to line up.
