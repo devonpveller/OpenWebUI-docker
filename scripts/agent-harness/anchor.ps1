@@ -127,7 +127,28 @@ function Test-Anchor($anchor) {
         # Blank entries are skipped: an all-blank list already reported "must list at least
         # one entry", and adding "criterion '   ' is too short" on top is a second complaint
         # about one problem. (The cross-reader test caught this differing from Python.)
+        $minCmd = 3
+        if ($schema.rules.PSObject.Properties.Name -contains "min_executable_check_chars") {
+            $minCmd = [int]$schema.rules.min_executable_check_chars
+        }
         foreach ($c in @($anchor.acceptance | Where-Object { $_ -ne $null -and "$_".Trim() })) {
+            # EXECUTABLE criterion ({check, why}) or prose. Judged differently on purpose:
+            # a `why` may be terse and still honest, while an empty `check` claims to be
+            # runnable and is not - worse than prose, because a tester will believe it ran.
+            $isObj = ($c -is [psobject]) -and ($c.PSObject.Properties.Name -contains "check")
+            if ($isObj) {
+                $cmd = "$($c.check)".Trim()
+                if ($cmd.Length -lt $minCmd) {
+                    # Compact JSON, key order preserved, to match the Python reader's message
+                    # byte for byte - the cross-reader test compares PROBLEMS, not verdicts.
+                    $problems += ("an executable acceptance criterion needs a 'check' command - got " +
+                                  (ConvertTo-Json -Compress -Depth 5 -InputObject $c))
+                } elseif (-not "$($c.why)".Trim()) {
+                    $problems += (("executable criterion '{0}' needs a 'why' - a command whose " +
+                                   "purpose is unstated cannot be judged when it fails") -f $cmd)
+                }
+                continue
+            }
             if ("$c".Trim().Length -lt $minLen) {
                 $problems += (("acceptance criterion '{0}' is too short to check - say what " +
                                "would count as failing it") -f $c)
