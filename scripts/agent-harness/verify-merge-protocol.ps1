@@ -37,8 +37,14 @@
 # job is to CREATE worktrees. `merge-protocol-drill` is listed there for this reason.
 #
 #   -LockProbe   take the single-flight decision, print it, and exit WITHOUT touching
-#                anything. Exit 0 = would have run, 3 = another copy holds it. This is how
-#                test_drill_single_flight.py exercises the guard without a 90-second run.
+#                anything. This is how test_drill_single_flight.py exercises the guard
+#                without a 90-second run.
+#
+# Exit codes: 0 ok | 1 a check failed (or a worktree path is not a worktree root) |
+#             2 the harness module is OFF | 3 another copy holds the lease - WAIT.
+# 2 and 3 are lease.ps1's own codes, passed through: a drill that reported "another copy is
+# running" when the real cause was a disabled module would send the reader hunting a
+# process that does not exist.
 #
 # NOTE: no `2>&1` on any git call, and the helpers flip $ErrorActionPreference themselves. In
 # PS5.1, redirecting OR capturing a native command's stderr under 'Stop' turns git's ordinary
@@ -76,12 +82,24 @@ function Release-DrillLease {
     }
 }
 & $LeaseScript -Acquire -Name $LeaseName -Owner $LeaseOwner -TtlMin 20 | Out-Null
-if ($LASTEXITCODE -ne 0) {
+$leaseRc = $LASTEXITCODE
+if ($leaseRc -ne 0) {
+    # Distinguish the two reasons. Reporting "another copy is running" when the real cause
+    # is a disabled harness or a bad conf sends the reader looking for a process that does
+    # not exist - the class of misleading error this toolkit keeps paying for.
     Write-Host ""
-    Write-Host "REFUSED: another copy of this drill is running (lease '$LeaseName' is held)." -ForegroundColor Yellow
-    Write-Host "  This drill deletes and recreates FIXED branch and worktree names in the" -ForegroundColor DarkGray
-    Write-Host "  operator's checkout, so two copies destroy each other's run and can leave" -ForegroundColor DarkGray
-    Write-Host "  the main checkout mid-rebase. Wait, or:  lease.ps1 -Status" -ForegroundColor DarkGray
+    if ($leaseRc -eq 3) {
+        Write-Host "REFUSED: another copy of this drill is running (lease '$LeaseName' is held)." -ForegroundColor Yellow
+        Write-Host "  This drill deletes and recreates FIXED branch and worktree names in the" -ForegroundColor DarkGray
+        Write-Host "  operator's checkout, so two copies destroy each other's run and can leave" -ForegroundColor DarkGray
+        Write-Host "  the main checkout mid-rebase. Wait, or:  lease.ps1 -Status" -ForegroundColor DarkGray
+    }
+    else {
+        Write-Host "REFUSED: could not take the '$LeaseName' lease (lease.ps1 exit $leaseRc)." -ForegroundColor Yellow
+        Write-Host "  Not a collision - exit 2 means the harness module is disabled, exit 1 a" -ForegroundColor DarkGray
+        Write-Host "  usage/config error. This drill will not run without mutual exclusion." -ForegroundColor DarkGray
+        exit $leaseRc   # pass the module's own code through: 3 means WAIT, 2 means OFF
+    }
     exit 3
 }
 $LeaseHeld = $true

@@ -152,6 +152,13 @@ operator's checkout with an approved action, but not able to restore it, is a ba
    TTL expires it and `-Takeover` reclaims EXPIRED leases only, so the recovery path cannot
    jump a live run. New `-LockProbe` switch takes the decision, prints it, and exits
    without touching anything.
+   Exit codes are lease.ps1's own, passed through — `3` another copy holds it (WAIT),
+   `2` the harness module is OFF, `1` a check failed or a worktree path is not a worktree
+   root. A drill that said "another copy is running" when the real cause was a disabled
+   module would send the reader hunting a process that does not exist; the two paths print
+   different text and exit differently. Consequence worth naming: with the harness disabled
+   the drill now refuses instead of running. That is consistent with MODULE.md ("off must be
+   inert and say so") for a drill whose subject is the harness, but it IS a behaviour change.
 2. `Test-IsWorktreeRoot` added to `git-io.ps1` (the topology-facts module, where it
    belongs — it is a fact about git, not a policy). The drill asserts it for `$wtA`/`$wtB`
    immediately after provisioning and ABORTS if either is not a worktree root. A wrong
@@ -370,6 +377,15 @@ at line 19). `ruff check scripts/agent-harness/` fails on it. Introduced by `796
 ("U3: acceptance criteria can be commands, not only prose"), already merged. One line to
 delete; not touched here because it is not this item's file and a drive-by edit to a
 neighbouring U3 commit's work is how two agents end up conflicting.
+
+## F6b — two more counts in prose that the artifacts contradict
+
+`documentation/implementation-guide/dark-factory-unification/PLAN.md:615` describes
+`verify-merge-protocol.ps1` as "51/51 green". It prints 66. `README.md` said 45 (F5). Three
+different hard-coded counts for one drill, in three files, none of them current. Not edited
+here: PLAN.md is the confirmed anchor and a count inside it is the operator's to amend
+(`-AmendAnchor` semantics per §B), not a fix round's. The general rule this argues for:
+describe a drill by its CONTRACT, never by a check count.
 
 ## F7 — what was NOT done, in full
 
