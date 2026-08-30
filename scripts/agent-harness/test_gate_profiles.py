@@ -11,6 +11,7 @@ silent removal of a human from the loop.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -158,6 +159,117 @@ def test_no_shipped_condition_downgrades_on_fire():
     """
     for c in _andon_conditions():
         assert c["on_fire"] == "halt", f"{c['id']} declares on_fire={c['on_fire']!r}"
+
+
+def test_no_shipped_condition_downgrades_on_indeterminate():
+    """THE SIBLING KEY, and the reason this test exists as its own function.
+
+    ``on_fire`` was pinned here on 2026-08-30 and ``on_indeterminate`` was not, so the
+    identical downgrade stayed available on the sibling key and was reproduced end to end the
+    same day: ``protected-ref-moved`` with no baseline printed ``ANDON BOARD: CLEAR`` at exit
+    0, the dark gate auto-passed signed ``auto:dark``, and the condition that could not be
+    evaluated appeared in no audit surface at all.
+
+    A condition that could not be EVALUATED has not passed. The run-time half - an
+    indeterminate condition is never a ``clear`` board whatever its action says - is proven
+    at the real gate by ``drill-dark-factory.ps1`` step K, not here; this pins the shipped
+    config so the question never has to be asked at run time.
+    """
+    for c in _andon_conditions():
+        assert c["on_indeterminate"] == "halt", (
+            f"{c['id']} declares on_indeterminate={c['on_indeterminate']!r}")
+
+
+def test_an_unenumerated_outcome_lands_in_a_REFUSING_bucket():
+    """THE GENERALISATION, pinned in the mirror as well as at the gate.
+
+    Three rounds running, a fix closed one outcome key and left its sibling, because the
+    verdict was computed by exception: any outcome nobody enumerated silently meant "fine".
+    The bucket table is total - an unknown status, an unknown action, or an unknown
+    combination of two known words all land in ``unrecognised``, which is a bucket the board
+    refuses on. No branch names the new word, and none has to.
+    """
+    assert config.andon_bucket("ok", "none") == config.ANDON_CLEAR_BUCKET
+    for status, action in [
+        ("indeterminate", "warn"),   # the 2026-08-30 defect: a bucket, not a pass
+        ("fire", "warn"),            # the round before it
+    ]:
+        assert config.andon_bucket(status, action) != config.ANDON_CLEAR_BUCKET
+    for status, action in [
+        ("fire", "quarantine"),      # an action word nobody wrote
+        ("parked", "none"),          # a status no predicate returns
+        ("skipped", "shrug"),        # neither word enumerated
+        ("ok", "halt"),              # both words known, the PAIR is not
+        ("", ""),                    # and nothing at all
+    ]:
+        assert config.andon_bucket(status, action) == config.ANDON_UNRECOGNISED_BUCKET, (
+            f"({status!r}, {action!r}) fell somewhere other than the refusing bucket")
+    # Every bucket the table can produce must have a board word, or the verdict would have an
+    # outcome it cannot name - which is the same defect one level up.
+    for bucket in set(config.ANDON_BUCKETS.values()) | {config.ANDON_UNRECOGNISED_BUCKET}:
+        assert bucket in config.ANDON_BUCKET_BOARD, f"bucket {bucket!r} has no board word"
+    # ...and only ``evaluated_ok`` may map to ``clear``.
+    clear = [b for b, w in config.ANDON_BUCKET_BOARD.items() if w == "clear"]
+    assert clear == [config.ANDON_CLEAR_BUCKET], clear
+
+
+_WORD_NUMBERS = {"four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10}
+
+
+def _board_words():
+    """Every board word the code can actually produce.
+
+    Read from the CODE, not from a mirror: the literals `andon.ps1` assigns to ``$board``,
+    plus the words ``$script:AndonBucketBoard`` maps buckets to. A test that compared the doc
+    against a hand-kept list would only prove the list and the doc agree.
+    """
+    andon = (HERE / "andon.ps1").read_text(encoding="ascii")
+    literals = set(re.findall(r'\$board\s*=\s*"([a-z-]+)"', andon))
+    assert literals, "no $board assignments found - the regex has drifted from the file"
+    return literals | set(config.ANDON_BUCKET_BOARD.values())
+
+
+def test_the_MODULE_verdict_table_matches_the_board():
+    """A PROSE NUMBER BESIDE A TABLE IS A CLAIM THE TABLE CAN CONTRADICT.
+
+    MODULE.md said "The verdict has five states" above a SIX-row table on 2026-08-30: the
+    uncounted sixth was ``warned``, added that morning. It is the same defect class as the
+    board's own - a statement nobody re-derives - so it is re-derived here, against the words
+    ``andon.ps1`` can actually assign.
+    """
+    text = (HERE / "MODULE.md").read_text(encoding="utf-8")
+    m = re.search(r"The verdict has \*\*(\w+)\*\* states", text)
+    assert m, "MODULE.md no longer states how many verdict states there are"
+    claimed = _WORD_NUMBERS.get(m.group(1).lower())
+    assert claimed, f"unrecognised count word {m.group(1)!r}"
+
+    # The rows of the verdict table: `| \`word\` | ... | exit |`
+    rows = re.findall(r"^\| `([a-z-]+)` \|.*\| ([067]) \|$", text, re.M)
+    assert rows, "the verdict table did not parse - has its shape changed?"
+    listed = [w for w, _ in rows]
+    assert len(listed) == len(set(listed)), f"duplicate rows: {listed}"
+    assert len(listed) == claimed, f"MODULE claims {claimed} states, the table has {len(listed)}: {listed}"
+    assert set(listed) == _board_words(), (
+        f"table={sorted(listed)} code={sorted(_board_words())}")
+    # ...and exactly one of them opens an unattended gate.
+    zeroes = [w for w, code in rows if code == "0"]
+    assert zeroes == ["clear"], zeroes
+
+
+def test_the_MODULE_ledger_schema_number_matches_the_code():
+    """MODULE.md described the ledger as schema 3 while ``gate-audit.ps1`` was at 4.
+
+    A schema number is what tells a reader whether a record is too old to answer a question,
+    so a doc trailing the code by a release is worse than no number at all.
+    """
+    ga = (HERE / "gate-audit.ps1").read_text(encoding="ascii")
+    m = re.search(r"\$script:GateLedgerSchema\s*=\s*(\d+)", ga)
+    assert m, "gate-audit.ps1 no longer declares $script:GateLedgerSchema"
+    code = int(m.group(1))
+    text = (HERE / "MODULE.md").read_text(encoding="utf-8")
+    d = re.search(r"\*\*Ledger schema is (\d+)\*\*", text)
+    assert d, "MODULE.md no longer states the ledger schema number"
+    assert int(d.group(1)) == code, f"MODULE says schema {d.group(1)}, gate-audit.ps1 is at {code}"
 
 
 def test_the_shipped_config_declares_every_required_condition():
@@ -335,6 +447,12 @@ def test_powershell_and_python_agree_about_the_gates():
         + "$o.profiles=@(Get-GateProfileNames);"
         + "$o.required=@(Get-RequiredAndonConditionIds);"
         + "$o.actions=@(Get-AllowedAndonActions);"
+        + "$o.buckets=[ordered]@{};"
+        + "foreach($k in $script:AndonBuckets.Keys){$o.buckets[$k]=$script:AndonBuckets[$k]};"
+        + "$o.bucketboard=[ordered]@{};"
+        + "foreach($k in $script:AndonBucketBoard.Keys){$o.bucketboard[$k]=$script:AndonBucketBoard[$k]};"
+        + "$o.clearbucket=$script:AndonClearBucket;"
+        + "$o.unrecognisedbucket=$script:AndonUnrecognisedBucket;"
         + "$o.predicates=[ordered]@{};"
         + "foreach($i in (Get-RequiredAndonConditionIds)){"
         + "$o.predicates[$i]=(Get-RequiredAndonPredicate -Id $i)};"
@@ -361,6 +479,15 @@ def test_powershell_and_python_agree_about_the_gates():
     # reason and drift the same way. A PowerShell board that allows a word the bridge does
     # not, or that expects a different predicate behind an id, is two boards.
     assert list(ps["actions"]) == list(config.ALLOWED_ANDON_ACTIONS)
+    # THE BUCKET TABLE IS THE THIRD SUCH CONSTANT, and the one it would hurt most to drift:
+    # if the two readers disagree about which outcomes count as `evaluated_ok`, they disagree
+    # about when a human is needed. Compared as an ordered mapping because the board word is
+    # chosen by SEVERITY ORDER.
+    assert dict(ps["buckets"]) == {
+        f"{status}|{action}": bucket for (status, action), bucket in config.ANDON_BUCKETS.items()}
+    assert list(ps["bucketboard"].items()) == list(config.ANDON_BUCKET_BOARD.items())
+    assert ps["clearbucket"] == config.ANDON_CLEAR_BUCKET
+    assert ps["unrecognisedbucket"] == config.ANDON_UNRECOGNISED_BUCKET
     assert {k: str(v) for k, v in ps["predicates"].items()} == dict(config.REQUIRED_ANDON_CONDITIONS)
     assert ps["active"] == config.gate_profile_name()
     for name in config.gate_profile_names():

@@ -171,8 +171,16 @@ Four things are worth knowing before relying on it:
   `scripts/checks/*.ps1` and `scripts/agent-harness/*.ps1` — including
   `Invoke-DrillGit` and `Get-DrillGit` in `verify-merge-protocol.ps1`, the incident's
   own functions. `protected-ref-moved` is indeterminate until a run records a
-  baseline, and indeterminate is deliberately not a pass. A `dark` run refuses to
-  auto-pass until those clear — which is the andon cord working, not a false alarm.
+  baseline, and indeterminate is deliberately not a pass. **That sentence was FALSE at run
+  time until 2026-08-30**, and it is worth saying where it is written: with
+  `on_indeterminate: warn` on that condition - a one-word config edit - the board printed
+  `ANDON BOARD: CLEAR` at exit 0 while listing `[indeterminate] protected-ref-moved  no
+  baseline recorded`, the dark gate auto-passed signed `auto:dark`, `-VerifyAudit` said
+  COMPLETE, and the condition that could not be evaluated was in no ledger field at all.
+  What makes it true is not the `halt` default, which a config overrides; it is that `clear`
+  is now decided by a bucket census in which the `indeterminate` bucket must be EMPTY. Drill
+  step K is the proof. A `dark` run refuses to auto-pass until those clear - which is the
+  andon cord working, not a false alarm.
 - **`work-branch-on-remote` narrows to the branch the run owns.** At a gate,
   `Invoke-AutoGate` passes only `$item.branch`, so a `dark` run is blocked by *its
   own* branch being on a remote, not by anybody else's. Run bare —
@@ -185,8 +193,9 @@ Four things are worth knowing before relying on it:
 - **`auto:` is a reserved principal namespace.** `-ConfirmAnchor` and `-Approve`
   refuse a `-By` inside it (exit 4), and the auto path never signs as a person.
 
-**Five ways of switching the board off were tried against the real gate, and each halts a
-`dark` run at the first gate under its own board state, recorded in the ledger:**
+**Eight ways of switching the board off, or of getting a pass out of it, were tried against
+the real gate. Each halts a `dark` run at the first gate under its own board state, recorded
+in the ledger:**
 
 | what you do to the board | board state | gate |
 |---|---|---|
@@ -194,10 +203,19 @@ Four things are worth knowing before relying on it:
 | delete the whole `andon` block | `incomplete` (all five named) | halts |
 | set `enabled: false` on one condition | `partial` (names it) | halts |
 | **delete condition ENTRIES from `andon.conditions`** | `incomplete` (names the missing ids) | halts |
-| **set `on_fire` to anything but `halt`** | `warned` (names what fired) | halts |
+| **set `on_fire: warn`** | `warned` (names what fired) | halts |
+| **set `on_indeterminate: warn`** | `indeterminate` (names what could not be evaluated) | halts |
+| set either key to a word the board does not implement | refused at evaluation: exit 1, no verdict, and every gate reads that as `unavailable` | halts |
+| **an outcome the board does not enumerate at all** (a new status a predicate grows, a new word added to the allowed actions) | `unaccounted` (names the condition AND the word) | halts |
 
-Each row is a drill case driving the real `queue.ps1` (steps F, H and J). **The last two
-rows were OPEN until 2026-08-30**, and both were closed against a reproduction:
+Each row is a drill case driving the real `queue.ps1` (steps F, H, J and K). The two
+downgrade rows say **`warn`** rather than "anything but `halt`", because that is what is
+true: `warn` is the only other word `$script:AllowedAndonActions` holds, and any other
+literal is refused before a verdict exists - the row after them. It errs safe, but the
+earlier wording ("anything but halt") was not accurate.
+
+**Four of these rows were OPEN until 2026-08-30**, and each was closed against a
+reproduction:
 
 - *deleting entries* — pruned to one of five on a genuinely detached checkout, the gate
   **auto-passed** at exit 0, ledger `clear`, `-VerifyAudit COMPLETE`. Every counter it
@@ -210,6 +228,26 @@ rows were OPEN until 2026-08-30**, and both were closed against a reproduction:
   fire that did not halt had nowhere in the ledger to appear. `fired` and `halted` are now
   separate lists in every verdict and every record, and a board with a fire on it is never
   `clear`.
+- *downgrading `on_indeterminate`* - **the identical hole on the sibling key**, still open
+  after the fix above and reproduced the same day: `protected-ref-moved` with no baseline
+  printed `CLEAR` at exit 0, the gate auto-passed signed `auto:dark`, `-VerifyAudit` said
+  COMPLETE, and the ledger read `status: clear, fired: [], halted: []` with the unevaluated
+  condition absent from the record entirely. Three rounds running a fix had closed one
+  outcome key and left its sibling, so this one is not a third list. The verdict was computed
+  **by exception**: a halt flag set only for `action = halt`, a fired list only for
+  `status = fire`, every other outcome setting NOTHING, and `clear` as whatever was left when
+  nothing objected - so any outcome nobody had enumerated silently meant "fine".
+- *an outcome nobody enumerated* - closed by the same change, and it is the general form of
+  all four rows above. `clear` is now **proven**: every condition lands in exactly one census
+  bucket (`evaluated_ok` / `fired` / `indeterminate` / `disabled` / `unrecognised`), the
+  buckets must sum to the conditions in scope, and `clear` requires every bucket but
+  `evaluated_ok` to be empty with at least one condition in it. A `(status, action)` pair the
+  board does not enumerate falls to `unrecognised`, which refuses - **no branch names the new
+  word**. Drill step K proves that by introducing an action word and a status word the
+  harness has never contained, in a scratch COPY whose `andon.ps1` is asserted byte-identical
+  to the shipped one (K2) or differing by exactly one line inside a predicate (K3). The
+  census travels into the ledger, so `-VerifyAudit` **re-derives** the verdict from the
+  buckets instead of trusting the word `clear`.
 
 **What is NOT closed, and the sentence here used to claim otherwise.** The board's
 *membership* is pinned code-side and is tamper-evident. Its *behaviour* is not: what each
@@ -223,14 +261,24 @@ condition DOES is still config-controlled, and three routes through it are open 
 - **a `params` redirect.** `params.repo` on `operator-checkout-off-branch` pointed at a clean
   decoy checkout, or narrowed `globs`/`refs`/`branches`, leaves the detector running and
   looking somewhere harmless. Nothing pins params, at run time or in the committed config.
-  The gate record does carry `andon.repo`, so the redirect is *visible afterwards* to a
-  reader who checks it — it is not refused.
+  It is not refused. It *is* readable afterwards - but **not** from `andon.repo`, which is
+  what this bullet used to claim. `andon.repo` is the checkout the BOARD resolved
+  (`$ctx.repo_root`); a `params.repo` override does not touch it, so a redirect run recorded
+  the real detached checkout in the ledger while the detector examined the decoy. That was a
+  true sentence about a field that does not answer the question. The gate record now also
+  carries **`andon.looked_at`**, which names, for every condition, the predicate it ran and
+  the params it was handed - so both a redirect and a predicate swap are visible to a reader
+  of the ledger. Drill step L builds a decoy checkout and asserts exactly that: the gate
+  passes, `andon.repo` names the fixture, and `looked_at` names the decoy.
 - **id squatting**, which is the first two together: a required id kept on an entry that is
   a different check.
 
-`on_fire` is not in that list any more, and neither is deleting entries. The safe reading of
-this section is: *the set of conditions cannot be thinned, switched off, or downgraded into
-silence; a condition that is present can still be pointed somewhere else.*
+`on_fire` is not in that list any more, and neither is `on_indeterminate` nor deleting
+entries. The safe reading of this section is: *the set of conditions cannot be thinned,
+switched off, or downgraded into silence - by either outcome key, or by an outcome word
+nobody has thought of yet, because `clear` is decided by a census of buckets rather than by
+the absence of a flag; a condition that is present can still be pointed somewhere else, and
+that redirect is now readable in the ledger rather than refused.*
 
 The revert to prior behaviour is `pipeline.gate_profile: attended`. That is the configured
 **default, not a lock**: `queue.ps1 -GateProfile dark` names a profile for one call and
@@ -241,8 +289,10 @@ The whole mechanism has its own drill: `drill-dark-factory.ps1` shows every cond
 firing on a constructed instance and not firing on a clean one, runs the pipeline end
 to end with nobody at either gate, proves the completeness check goes red on a tampered
 trail, proves that turning the board off — or thinning it by deleting condition entries —
-halts rather than opens, and re-runs the clean board afterwards so a fix that refused
-everything would be caught. Every WRITE it
+halts rather than opens, proves that neither outcome key can be downgraded into silence and
+that an outcome word the board has never heard of is refused rather than ignored, shows that
+a `params` redirect is readable from the ledger, and re-runs the clean board afterwards so a
+fix that refused everything would be caught. Every WRITE it
 makes is to a scratch repository under `$env:TEMP` with the config and state dir
 redirected; it makes exactly one READ of a real repository, by name — one case scans
 this checkout's own `.ps1` files so the detector is shown naming the incident's

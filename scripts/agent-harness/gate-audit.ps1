@@ -17,11 +17,14 @@
 #     its COVERAGE (declared / evaluated / switched off / required MISSING), because the first version of this
 #     file recorded `andon.status=clear conditions=5` for a board with `andon.enabled=false`
 #     that had evaluated NOTHING - a record indistinguishable from five conditions that
-#     looked and found nothing. "Clear" now requires evaluated >= 1, none switched off, and
-#     no REQUIRED condition missing - the last because a board thinned by DELETING condition
-#     entries satisfied both of the others (1 evaluated of 1 declared, none off) while four
-#     detectors were gone - and Test-GateAuditComplete re-checks all three from the record
-#     rather than trusting the word;
+#     looked and found nothing. Each of those specific checks was added AFTER an outcome
+#     nobody had enumerated turned out to mean "clear", and enumerating the next one is not
+#     a strategy - so the record also carries the board's BUCKET CENSUS, and
+#     Test-GateAuditComplete RE-DERIVES the verdict from it: every condition in exactly one
+#     bucket, the buckets summing to the conditions in scope, every bucket except
+#     `evaluated_ok` empty, and at least one condition in `evaluated_ok`. The named checks
+#     stay because they say WHICH way a board was short; the census is what makes a board
+#     short in a way nobody anticipated still fail;
 #   - a gate the board REFUSED to auto-pass also writes a record. An unattended run that
 #     halts must leave the halt in the trail, not a gap.
 #
@@ -42,7 +45,34 @@
 # beside a detector that had just fired. `fired` now means the detectors saw something and
 # `halted` means the line stopped. A schema-3 record cannot tell the two apart, and
 # Test-GateAuditComplete reports that rather than assuming they were the same.
-$script:GateLedgerSchema = 4
+#
+# Schema 5 (2026-08-30, same day) added the BUCKET CENSUS - `census`, `census_total`,
+# `census_ids` - and it is the one that stops this list growing. Schemas 2-4 each added a
+# counter after an outcome nobody had enumerated turned out to mean "fine": the verdict was
+# computed by exception, so `on_fire: warn` slipped through (schema 4) and then
+# `on_indeterminate: warn` slipped through the identical hole on the sibling key - a
+# condition that could NOT BE EVALUATED left `status=clear, fired=[], halted=[]` and was
+# absent from the record entirely. The census classifies EVERY condition into exactly one
+# bucket and requires the buckets to sum to the conditions in scope, so
+# Test-GateAuditComplete can RE-DERIVE `clear` - every bucket but `evaluated_ok` empty, and
+# at least one condition in it - instead of trusting the word. An outcome the board does not
+# enumerate lands in `unrecognised`, which is in the census like any other bucket and refuses
+# like any other non-empty one. A schema-4 record carries no census, cannot be re-derived,
+# and is reported as a finding rather than assumed clear.
+$script:GateLedgerSchema = 5
+
+function New-EmptyAndonCensus {
+    # Every DECLARED bucket at zero. Not an empty map: a census missing a bucket is a census
+    # that cannot say the bucket was empty, and those are different facts.
+    $c = [ordered]@{}
+    foreach ($b in (Get-AndonBucketNames)) { $c[$b] = 0 }
+    return $c
+}
+function New-EmptyAndonCensusIds {
+    $c = [ordered]@{}
+    foreach ($b in (Get-AndonBucketNames)) { $c[$b] = @() }
+    return $c
+}
 
 function Get-GateAuditDir {
     $dir = Join-Path (Get-SharedStateDir) ([string](Get-HarnessSetting "andon.ledger_dir_name" "audit"))
@@ -59,7 +89,10 @@ function New-UnavailableAndon([string]$reason) {
                        disabled = 0; disabled_ids = @(); required = @(Get-RequiredAndonConditionIds).Count
                        missing = @(Get-RequiredAndonConditionIds).Count
                        missing_ids = @(Get-RequiredAndonConditionIds); fired = @($reason)
-                       halted = @($reason) }
+                       halted = @($reason); indeterminate = @($reason); unrecognised = @($reason)
+                       census = (New-EmptyAndonCensus); census_total = 0
+                       census_ids = (New-EmptyAndonCensusIds); unaccounted = @($reason)
+                       looked_at = @($reason) }
 }
 
 function Invoke-AndonForGate {
@@ -109,14 +142,32 @@ function Invoke-AndonForGate {
     # not `halt` fired, and the record said `status=clear ... fired=[]` - the detector's
     # finding was in no audit surface at all. A reader of this ledger has to be able to ask
     # "what did the board SEE" separately from "what stopped the line".
+    if (-not ($v.coverage.PSObject.Properties.Name -contains "census")) {
+        # AND ONE LEVEL DOWN AGAIN. Counters that name only `fired` and `halted` answer
+        # "did a detector see something" and "did the line stop". They do NOT answer
+        # "did every condition actually get evaluated", which is how an INDETERMINATE
+        # condition - `on_indeterminate: warn`, no baseline recorded - left a record reading
+        # `status=clear fired=[] halted=[]` with the unevaluated condition in no field at
+        # all. A board that cannot hand over its bucket census cannot have its verdict
+        # re-derived, so it is unavailable rather than clear.
+        return (New-UnavailableAndon "andon coverage carries no bucket CENSUS - the verdict cannot be re-derived, only trusted")
+    }
     $fired  = @($v.conditions | Where-Object { $_.status -eq "fire" } | ForEach-Object { "$($_.id): $($_.detail)" })
     $halted = @($v.conditions | Where-Object { $_.action -eq "halt" } | ForEach-Object { "$($_.id): $($_.detail)" })
+    # THE OTHER TWO BUCKETS TRAVEL BY NAME TOO, for the same reason `fired` had to: an
+    # operator reading a refusal needs the CONDITION, not a count. `indeterminate` is the
+    # one whose absence was the 2026-08-30 defect; `unrecognised` is every outcome word the
+    # board does not enumerate, and it is named here so a record can say WHICH word.
+    $indeterminate = @($v.conditions | Where-Object { $_.status -eq "indeterminate" } | ForEach-Object { "$($_.id): $($_.detail)" })
+    $unrecognised  = @($v.conditions | Where-Object { $_.bucket -eq $script:AndonUnrecognisedBucket } |
+                       ForEach-Object { "$($_.id): status '$($_.status)' action '$($_.action)' - $($_.detail)" })
     $status = "$($v.board)"
     if (-not $status) { return (New-UnavailableAndon "andon verdict names no board state") }
     # A board that is not clear but named nothing still has to say WHY, or the halt reaches
     # the operator as a blank refusal. Asked of BOTH lists: an indeterminate condition halts
     # without firing, and a `warned` board fires without halting.
-    if ($status -ne "clear" -and @($fired).Count -eq 0 -and @($halted).Count -eq 0) {
+    if ($status -ne "clear" -and @($fired).Count -eq 0 -and @($halted).Count -eq 0 -and
+        @($indeterminate).Count -eq 0 -and @($unrecognised).Count -eq 0) {
         $why = "$($v.why)"
         if (-not $why) { $why = "the board is '$status' and named no reason" }
         $halted = @($why)
@@ -133,6 +184,25 @@ function Invoke-AndonForGate {
         missing_ids  = @($v.coverage.missing_ids)
         fired        = @($fired)
         halted       = @($halted)
+        indeterminate = @($indeterminate)
+        unrecognised  = @($unrecognised)
+        # THE CENSUS ITSELF, so Test-GateAuditComplete re-derives `clear` from buckets
+        # rather than reading a word the writer chose.
+        census       = $v.coverage.census
+        census_total = [int]$v.coverage.census_total
+        census_ids   = $v.coverage.census_ids
+        unaccounted  = @($v.coverage.unaccounted)
+        # WHAT EACH CONDITION ACTUALLY RAN, and WHERE. `repo` above is the checkout the
+        # BOARD resolved; it is NOT where an individual condition looked, because
+        # `params.repo` points a predicate wherever it likes. README.md claimed a
+        # `params.repo` redirect was "visible afterwards" in `andon.repo` - it was not, and
+        # a redirect run recorded the real checkout while the detector examined a decoy.
+        # This line is what makes that sentence true: the record names each condition's
+        # predicate and the params it was handed, so a reader can see the redirect.
+        looked_at    = @($v.conditions | ForEach-Object {
+                            $pj = ""
+                            if ($_.params) { $pj = ($_.params | ConvertTo-Json -Depth 6 -Compress) }
+                            "{0} -> {1} {2}" -f $_.id, $_.predicate, $pj })
     }
 }
 
@@ -159,12 +229,16 @@ function Write-GateRecord {
     # NO VERDICT IS NOT A CLEAR ONE. A caller that passes nothing gets a record that says so
     # in every field, which Test-GateAuditComplete then refuses for an auto-pass.
     if (-not $Andon) {
+        $none = "no andon verdict was supplied"
         $Andon = [ordered]@{ status = "not-evaluated"; repo = ""; conditions = 0; evaluated = 0
                              disabled = 0; disabled_ids = @(); required = @(Get-RequiredAndonConditionIds).Count
                              missing = @(Get-RequiredAndonConditionIds).Count
                              missing_ids = @(Get-RequiredAndonConditionIds)
-                             fired = @("no andon verdict was supplied")
-                             halted = @("no andon verdict was supplied") }
+                             fired = @($none)
+                             halted = @($none); indeterminate = @($none); unrecognised = @($none)
+                             census = (New-EmptyAndonCensus); census_total = 0
+                             census_ids = (New-EmptyAndonCensusIds); unaccounted = @($none)
+                             looked_at = @($none) }
     }
     $rec = [ordered]@{
         schema       = $script:GateLedgerSchema
@@ -340,6 +414,51 @@ function Test-GateAuditComplete {
                     } elseif (@($cov.fired).Count -gt 0) {
                         $findings += ("'{0}' gate '{1}': auto-passed while {2} condition(s) FIRED ({3}) - a fired condition is not a clear board, whatever its on_fire says" -f $item.id, $g, @($cov.fired).Count, (@($cov.fired) -join "; "))
                     }
+                    # AND FINALLY THE VERDICT IS RE-DERIVED, NOT READ. Every check above
+                    # names a specific way a board can be short, and each was added AFTER an
+                    # outcome nobody had enumerated turned out to mean `clear`: first
+                    # `andon.enabled=false`, then a thinned board, then `on_fire: warn`, then
+                    # `on_indeterminate: warn`. Enumerating the next one is not a strategy.
+                    # The census closes it generally: every condition lands in exactly one
+                    # bucket, the buckets must SUM to the conditions the board had in scope,
+                    # and `clear` is the state where every bucket except `evaluated_ok` is
+                    # empty. This loop reads the buckets the RECORD carries, so a bucket
+                    # added to the board later is checked here without editing this file.
+                    $hasCensus = ($cov.PSObject.Properties.Name -contains "census") -and $cov.census
+                    if (-not $hasCensus) {
+                        $findings += ("'{0}' gate '{1}': the auto-pass record carries no BUCKET CENSUS - its verdict cannot be re-derived, only taken on trust, and every audit surface that could be trusted on its own word has so far been wrong" -f $item.id, $g)
+                    } else {
+                        $known = @(Get-AndonBucketNames)
+                        $total = 0
+                        foreach ($b in @($cov.census.PSObject.Properties)) {
+                            $total += [int]$b.Value
+                            if ($known -notcontains $b.Name) {
+                                $findings += ("'{0}' gate '{1}': the census names bucket '{2}', which this harness does not declare - the record and the board disagree about what the buckets ARE" -f $item.id, $g, $b.Name)
+                            }
+                        }
+                        if ($total -ne [int]$cov.conditions) {
+                            $findings += ("'{0}' gate '{1}': the census accounts for {2} outcome(s) but the board had {3} condition(s) in scope - something landed in no bucket, and an unbucketed outcome is exactly how three separate downgrades read as 'clear'" -f $item.id, $g, $total, [int]$cov.conditions)
+                        }
+                        if (($cov.PSObject.Properties.Name -contains "census_total") -and ([int]$cov.census_total -ne $total)) {
+                            $findings += ("'{0}' gate '{1}': the record's census_total is {2} but its own buckets sum to {3} - the record disagrees with itself" -f $item.id, $g, [int]$cov.census_total, $total)
+                        }
+                        $clearBucket = $script:AndonClearBucket
+                        foreach ($b in @($cov.census.PSObject.Properties)) {
+                            if ($b.Name -eq $clearBucket) { continue }
+                            if ([int]$b.Value -lt 1) { continue }
+                            $who = ""
+                            if (($cov.PSObject.Properties.Name -contains "census_ids") -and $cov.census_ids -and
+                                ($cov.census_ids.PSObject.Properties.Name -contains $b.Name)) {
+                                $who = (@($cov.census_ids.($b.Name)) -join "; ")
+                            }
+                            $findings += ("'{0}' gate '{1}': auto-passed with {2} condition(s) in the '{3}' bucket - a clear board has every bucket but '{4}' empty: {5}" -f $item.id, $g, [int]$b.Value, $b.Name, $clearBucket, $who)
+                        }
+                        $okCount = 0
+                        if ($cov.census.PSObject.Properties.Name -contains $clearBucket) { $okCount = [int]$cov.census.$clearBucket }
+                        if ($okCount -lt 1) {
+                            $findings += ("'{0}' gate '{1}': auto-passed with {2} condition(s) in the '{3}' bucket - a board that evaluated nothing certifies nothing" -f $item.id, $g, $okCount, $clearBucket)
+                        }
+                    }
                 }
             }
             if ($rec.kind -eq "human" -and ("$($rec.principal)").StartsWith($prefix)) {
@@ -377,6 +496,18 @@ function Format-GateRecord($r) {
                 if (@($r.andon.fired).Count -gt 0) { $cov += (", {0} FIRED" -f @($r.andon.fired).Count) }
             } else {
                 $cov += ", fired/halted NOT SEPARATED"
+            }
+            # EVERY NON-EMPTY NON-CLEAR BUCKET, by name. `andon clear` beside a condition
+            # that could not be evaluated is the shape this line exists to make unreadable,
+            # and naming the buckets generally means the next bucket is printed too.
+            if (($r.andon.PSObject.Properties.Name -contains "census") -and $r.andon.census) {
+                foreach ($b in @($r.andon.census.PSObject.Properties)) {
+                    if ($b.Name -eq $script:AndonClearBucket) { continue }
+                    if ([int]$b.Value -lt 1) { continue }
+                    $cov += (", {0} {1}" -f [int]$b.Value, $b.Name.ToUpper())
+                }
+            } else {
+                $cov += ", census NOT STATED"
             }
             if ($r.andon.PSObject.Properties.Name -contains "missing") {
                 if ([int]$r.andon.missing -gt 0) { $cov += (", {0} REQUIRED MISSING: {1}" -f [int]$r.andon.missing, (@($r.andon.missing_ids) -join " ")) }

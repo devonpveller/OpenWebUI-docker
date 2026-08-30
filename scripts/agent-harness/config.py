@@ -123,6 +123,53 @@ REQUIRED_ANDON_CONDITIONS = {
 #: — severity for a human reading afterwards, not permission for a machine at the time.
 ALLOWED_ANDON_ACTIONS = ("halt", "warn")
 
+#: THE OUTCOME TABLE — mirror of ``$script:AndonBuckets`` in ``config.ps1``. Every
+#: ``(status, action)`` pair the board knows how to think about, and the bucket it counts as.
+#:
+#: WHY IT EXISTS (2026-08-30): the verdict used to be computed BY EXCEPTION — a halt flag
+#: set only for ``action == "halt"``, a fired list only for ``status == "fire"``, every other
+#: outcome setting NOTHING, and ``clear`` as whatever was left when nothing objected. So an
+#: outcome nobody had enumerated silently meant "fine", which cost two rounds: ``on_fire:
+#: warn`` was closed and ``on_indeterminate: warn`` reopened the identical hole on the
+#: sibling key, auto-passing a dark gate on a condition that could not be evaluated. ``clear``
+#: is now PROVEN: every result lands in exactly one bucket, the buckets must sum to the
+#: conditions in scope, and every bucket but ``evaluated_ok`` must be empty. A pair that is
+#: not a key here — a new status, a new action word — falls to ``unrecognised``, which
+#: refuses, with no branch naming the new word.
+ANDON_BUCKETS = {
+    ("ok", "none"): "evaluated_ok",
+    ("fire", "halt"): "fired",
+    ("fire", "warn"): "fired",
+    ("indeterminate", "halt"): "indeterminate",
+    ("indeterminate", "warn"): "indeterminate",
+    ("disabled", "none"): "disabled",
+}
+
+#: The one bucket compatible with an unattended pass, and the bucket everything unenumerated
+#: falls into. Mirrors ``$script:AndonClearBucket`` / ``$script:AndonUnrecognisedBucket``.
+ANDON_CLEAR_BUCKET = "evaluated_ok"
+ANDON_UNRECOGNISED_BUCKET = "unrecognised"
+
+#: Bucket → the board's headline word, in SEVERITY ORDER. Also the declared bucket set: a
+#: bucket absent from here is not a bucket, and a result classified into one is
+#: ``unaccounted``. Mirrors ``$script:AndonBucketBoard``.
+ANDON_BUCKET_BOARD = {
+    "unrecognised": "unaccounted",
+    "fired": "warned",
+    "indeterminate": "indeterminate",
+    "disabled": "partial",
+    "evaluated_ok": "clear",
+}
+
+
+def andon_bucket(status: str, action: str) -> str:
+    """Which census bucket a ``(status, action)`` outcome counts as.
+
+    Mirrors ``Get-AndonBucket`` in ``config.ps1``. Anything unenumerated is
+    ``unrecognised`` — a REFUSING bucket — rather than falling through to a pass.
+    """
+    return ANDON_BUCKETS.get((status, action), ANDON_UNRECOGNISED_BUCKET)
+
 
 def missing_andon_conditions() -> List[str]:
     """Required condition ids that the loaded config does not declare, in required order.

@@ -54,8 +54,13 @@
 #   .\queue.ps1 -Merged -Id mem-readme -By wt-reviewer-1 -Sha <merge sha>
 #
 # Exit codes: 0 ok | 1 usage/state error | 2 harness disabled | 3 claimed by someone else
-#             | 4 refused (duties) | 5 refused (no confirmed anchor) | 6 ANDON not clear
-#               (raised / incomplete / partial / not-evaluated / unavailable)
+#             | 4 refused (duties) | 5 refused (no confirmed anchor) | 6 ANDON not clear.
+#               EVERY non-`clear` board word lands here, and the list is the board's, not a
+#               copy that drifts: raised / warned / indeterminate / unaccounted / incomplete
+#               / partial / not-evaluated, plus `unavailable` when the board could not be
+#               run at all. This enumeration omitted `warned` until 2026-08-30 and read as
+#               though a warn-declared fire were not an exit-6 refusal; the code has always
+#               refused anything that is not the literal word `clear` (Invoke-AutoGate).
 #             | 7 audit COVERAGE incomplete (-VerifyAudit found items it could not audit)
 #
 # GATE PROFILES (U6, 2026-08-30). `attended` is unchanged: a human runs -ConfirmAnchor
@@ -264,12 +269,16 @@ function Test-AndonField($andon, [string]$name) {
 function Stop-OnAndon($andon, [string]$gate, [string]$id, [string]$parkedAt) {
     Write-Host ""
     Write-Host ("ANDON {0} - the '{1}' gate will NOT auto-pass." -f ("$($andon.status)").ToUpper(), $gate) -ForegroundColor Red
-    # BOTH LISTS. `fired` is what the detectors saw and `halted` is what stopped the line;
-    # they were one derived list until 2026-08-30, which hid a fire whose on_fire was not
-    # `halt`. De-duplicated because a halting fire is legitimately in both.
+    # EVERY LIST THE VERDICT CARRIES. `fired` is what the detectors saw and `halted` is what
+    # stopped the line; they were one derived list until 2026-08-30, which hid a fire whose
+    # on_fire was not `halt`. Printing only those two then hid the SIBLING case the same day:
+    # an INDETERMINATE condition halts nothing and fires nothing, so a warn-declared
+    # indeterminate reached the operator as a bare board word. De-duplicated because a
+    # halting fire is legitimately in more than one.
     $seen = @()
-    if (Test-AndonField $andon "halted") { $seen += @($andon.halted) }
-    $seen += @($andon.fired)
+    foreach ($k in @("halted", "fired", "indeterminate", "unrecognised", "unaccounted")) {
+        if (Test-AndonField $andon $k) { $seen += @($andon.$k) }
+    }
     foreach ($f in @($seen | Where-Object { $_ } | Select-Object -Unique)) { Write-Host ("  - {0}" -f $f) -ForegroundColor Red }
     # State the coverage on the console too. A halt whose only word is 'not-evaluated' sends
     # the operator to the config; a halt that says 0 of 5 evaluated sends them to the right line.
@@ -289,6 +298,20 @@ function Stop-OnAndon($andon, [string]$gate, [string]$id, [string]$parkedAt) {
     if ((Test-AndonField $andon "missing") -and ([int]$andon.missing -gt 0)) {
         Write-Host ("  {0} of {1} REQUIRED condition(s) are NOT DECLARED: {2}" -f
                     [int]$andon.missing, [int]$andon.required, (@($andon.missing_ids) -join ", ")) -ForegroundColor Red
+    }
+    # THE BUCKET CENSUS, which is what the refusal actually rests on: `clear` requires every
+    # bucket but `evaluated_ok` to be empty, so the operator should be able to see WHICH
+    # bucket was not.
+    if (Test-AndonField $andon "census") {
+        $parts = @()
+        foreach ($k in @(Get-AndonBucketNames)) {
+            $n = 0
+            if ($andon.census -is [System.Collections.IDictionary]) {
+                if ($andon.census.Contains($k)) { $n = [int]$andon.census[$k] }
+            } elseif ($andon.census.PSObject.Properties.Name -contains $k) { $n = [int]$andon.census.$k }
+            $parts += ("{0}={1}" -f $k, $n)
+        }
+        Write-Host ("  board census: {0}" -f ($parts -join ", ")) -ForegroundColor Red
     }
     Write-Host ""
     Write-Host ("'{0}' is PARKED at '{1}'. The refusal is in the gate ledger (queue.ps1 -Audit -Id {0})." -f $id, $parkedAt) -ForegroundColor Yellow

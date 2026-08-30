@@ -299,6 +299,62 @@ function Get-RequiredAndonPredicate {
 $script:AllowedAndonActions = @("halt", "warn")
 function Get-AllowedAndonActions { return @($script:AllowedAndonActions) }
 
+# THE OUTCOME TABLE - every (status, action) pair this board knows how to think about, and
+# what bucket it counts as.
+#
+# WHY A TABLE AND NOT A LADDER (U6, 2026-08-30, and this is the fifth way off the board):
+# the verdict used to be computed BY EXCEPTION. `$raised` was set only when the action was
+# `halt`, `fired` only when the status was `fire`, and EVERY OTHER OUTCOME SET NOTHING -
+# after which `clear` was what you got because nothing had objected. So any outcome nobody
+# had enumerated silently meant "fine". That is the vacuous-check shape this whole effort
+# keeps finding, sitting in the function that decides whether a human is needed, and it
+# cost two rounds: `on_fire: warn` was closed on 2026-08-30 and `on_indeterminate: warn`
+# reopened the identical hole on the sibling key the same day - a condition that could not
+# be evaluated printed `ANDON BOARD: CLEAR` at exit 0, the dark gate auto-passed signed
+# `auto:dark`, and the unevaluated condition was absent from the ledger entirely.
+#
+# So `clear` is PROVEN, not defaulted. Every result is classified through this table into
+# EXACTLY ONE bucket; the buckets must SUM to the number of conditions the run had in
+# scope; and `clear` requires every bucket except `evaluated_ok` to be EMPTY - stated
+# positively, rather than as the absence of two particular flags.
+#
+# A KEY THAT IS NOT HERE IS NOT A PASS. An unlisted status (a predicate that grows a new
+# answer) and an unlisted action (a word added to $script:AllowedAndonActions just above)
+# both fall to `unrecognised`, which is a REFUSING bucket - no branch anywhere names the new
+# word, and none has to. That generalisation is what drill step K proves: it introduces an
+# action word and a status word this file has never heard of, in a scratch COPY of the
+# harness whose verdict logic is asserted byte-identical to the shipped one, and the board
+# refuses both.
+$script:AndonBuckets = [ordered]@{
+    "ok|none"            = "evaluated_ok"
+    "fire|halt"          = "fired"
+    "fire|warn"          = "fired"
+    "indeterminate|halt" = "indeterminate"
+    "indeterminate|warn" = "indeterminate"
+    "disabled|none"      = "disabled"
+}
+# The bucket every result must be in to authorise an unattended pass, and the ONLY one that
+# may be non-empty on a clear board.
+$script:AndonClearBucket = "evaluated_ok"
+$script:AndonUnrecognisedBucket = "unrecognised"
+# Bucket -> the board's headline word, in SEVERITY ORDER (most severe first). This is also
+# the declared bucket set: a bucket absent from here is not a bucket, and a result
+# classified into one is `unaccounted`. Adding a bucket later means adding a word for it
+# here, and until that is done the board refuses rather than guesses.
+$script:AndonBucketBoard = [ordered]@{
+    "unrecognised"  = "unaccounted"
+    "fired"         = "warned"
+    "indeterminate" = "indeterminate"
+    "disabled"      = "partial"
+    "evaluated_ok"  = "clear"
+}
+function Get-AndonBucketNames { return @($script:AndonBucketBoard.Keys) }
+function Get-AndonBucket([string]$status, [string]$action) {
+    $key = "{0}|{1}" -f $status, $action
+    if ($script:AndonBuckets.Contains($key)) { return [string]$script:AndonBuckets[$key] }
+    return $script:AndonUnrecognisedBucket
+}
+
 function Test-AutoPrincipal {
     param([string]$Principal)
     return [bool]($Principal -and $Principal.StartsWith($script:AutoPrincipalPrefix))

@@ -147,8 +147,13 @@ Every shipped condition names the incident it came from — they were mined from
 two words either may take (`halt`, `warn` — `config.ps1` `$script:AllowedAndonActions`,
 mirrored in `config.py`; `andon.ps1` refuses anything else with exit 1 and no verdict,
 which every gate reads as "not clear"). A condition that could not be evaluated has not
-passed — a skip that counts as a pass is one of the shapes this board exists to catch,
-and it does not get to be the board's own behaviour.
+passed - a skip that counts as a pass is one of the shapes this board exists to catch, and
+it does not get to be the board's own behaviour. **That was false at run time until
+2026-08-30**: `halt` is only the DEFAULT, and `on_indeterminate: warn` on one condition
+auto-passed a dark gate on a condition that could not be evaluated. What makes it true is
+not the default but the census below - an indeterminate condition lands in the
+`indeterminate` bucket, and `clear` requires that bucket to be empty whatever the action
+says.
 
 **`warn` does not buy a pass.** A condition that FIRED is never a clear board whatever its
 `on_fire` says, so no unattended gate passes over one; what `warn` changes is the word
@@ -167,20 +172,36 @@ and, under `andon.raise.stderr`, to stderr.
 
 ### `clear` means the board LOOKED, and that it was the WHOLE board
 
-The verdict has five states, and only one of them opens an unattended gate:
+The verdict has **eight** states, and only one of them opens an unattended gate. (This line
+said "five" above a SIX-row table on 2026-08-30 - the uncounted sixth was `warned`, added
+that morning and never counted. A prose number beside a table is a claim the table can
+contradict, so `test_gate_profiles.py::test_the_MODULE_verdict_table_matches_the_board`
+now compares both against the board words `config.ps1` can actually produce.)
 
 | board | means | exit |
 |---|---|---|
-| `clear` | every required condition declared, ≥1 evaluated, **none FIRED** (not merely "none halted"), none switched off | 0 |
-| `incomplete` | a REQUIRED condition is **not declared at all** — the verdict names which | 6 |
-| `raised` | a condition HALTED the line: it fired with `on_fire: halt`, or it could not be evaluated | 6 |
-| `warned` | a condition FIRED and its `on_fire` is not `halt`. Not a clear board — no unattended gate passes it | 6 |
-| `partial` | some evaluated ok, others switched off in config | 6 |
+| `clear` | census balances, no REQUIRED condition missing, **every bucket except `evaluated_ok` empty**, and at least one condition in `evaluated_ok` | 0 |
+| `unaccounted` | a condition produced an outcome the board does not enumerate (an unknown status or action word), or the census does not sum to the conditions in scope. Outranks everything: a board that cannot say where its own results went cannot report a verdict | 6 |
+| `incomplete` | a REQUIRED condition is **not declared at all** - the verdict names which | 6 |
+| `raised` | a condition HALTED the line (its action was `halt`) - a fire with `on_fire: halt`, or an unevaluable condition with `on_indeterminate: halt` | 6 |
+| `warned` | the `fired` bucket is non-empty: a condition FIRED and its `on_fire` is not `halt` | 6 |
+| `indeterminate` | the `indeterminate` bucket is non-empty: a condition COULD NOT BE EVALUATED and its `on_indeterminate` is not `halt`. The sibling of `warned`, and a silent PASS until 2026-08-30 | 6 |
+| `partial` | some evaluated ok, others switched off in config (the `disabled` bucket is non-empty beside a non-empty `evaluated_ok`) | 6 |
 | `not-evaluated` | conditions are declared, none was evaluated (`andon.enabled: false`, or every one switched off individually) | 6 |
 
-The `clear` row said "none halted" until 2026-08-30, and after the fired/halted split those
-are different facts: `fired` is what the detectors SAW, `halted` is what stopped the line.
-`clear` means neither happened. Every verdict and every gate record carries both lists.
+**`clear` is proven, not defaulted, and that is the 2026-08-30 correction.** The row used to
+read "none halted", then "none FIRED", and each rewrite closed one outcome key while leaving
+its sibling - because the verdict was computed BY EXCEPTION: a halt flag set only for
+`action = halt`, a fired list only for `status = fire`, every other outcome setting nothing,
+and `clear` as whatever was left when nothing objected. Now every condition is classified
+into exactly one **census bucket** - `evaluated_ok`, `fired`, `indeterminate`, `disabled`,
+`unrecognised` - the buckets must SUM to the conditions in scope, and `clear` requires every
+bucket but `evaluated_ok` to be empty. An outcome nobody enumerated lands in `unrecognised`
+and refuses, with no branch naming it. `fired` and `halted` remain separate reported lists
+(what the detectors SAW versus what stopped the line); neither decides the verdict any more.
+`unaccounted` and `indeterminate` are the two words the census added. If a bucket is ever
+added it needs a word in `$script:AndonBucketBoard`, and until it has one the board refuses
+rather than guesses.
 
 `incomplete` outranks the rest: a verdict from a board that is not the required board
 cannot be reported as that board's verdict. The conditions that *are* declared are still
@@ -191,6 +212,14 @@ switched off / **required missing (by id)** — plus the repository the board wa
 at. Before U6 landed the first three, `andon.enabled: false` produced `board=clear,
 conditions=5` on a genuinely detached checkout: indistinguishable from five conditions
 that looked and found nothing.
+
+It also carries the **bucket census** (`census`, `census_total`, `census_ids`) - which
+condition landed in which of `evaluated_ok` / `fired` / `indeterminate` / `disabled` /
+`unrecognised` - and **`looked_at`**, the predicate and params every condition actually ran
+with. The census is what lets `-VerifyAudit` re-derive `clear` instead of reading it;
+`looked_at` is what makes a `params.repo` redirect readable afterwards, which `andon.repo`
+alone did not do (it is the checkout the BOARD resolved, and a `params` override does not
+touch it).
 
 ### The required SET is code, not config
 
@@ -209,11 +238,16 @@ to the config's own thinned list. A required list kept beside the conditions wou
 deleted along with the entry it names; kept in code, retiring a condition is a diff a
 reviewer sees.
 
-**The board's MEMBERSHIP is tamper-evident; its BEHAVIOUR is not.** Five ways of switching
-it off are closed, each proved at the real gate by a drill case and each open before it was
-closed: `andon.enabled: false` (`not-evaluated`), the whole `andon` block deleted
-(`incomplete`), individual conditions switched off (`partial`), condition entries deleted
-(`incomplete`), and `on_fire` downgraded (`warned`). What is NOT closed is what a *declared*
+**The board's MEMBERSHIP is tamper-evident; its BEHAVIOUR is not.** Eight ways of switching
+it off, or of getting a pass out of it, are closed - each proved at the real gate by a drill
+case, and each open before it was closed: `andon.enabled: false` (`not-evaluated`), the whole
+`andon` block deleted (`incomplete`), individual conditions switched off (`partial`),
+condition entries deleted (`incomplete`), `on_fire: warn` (`warned`), `on_indeterminate:
+warn` (`indeterminate`), either key set to a word the board does not implement (refused at
+evaluation, which every gate reads as `unavailable`), and - the general one that subsumes the
+last three - **an outcome the board does not enumerate at all**, a new status or a new action
+word, which lands in the `unrecognised` census bucket and gives `unaccounted` with no branch
+naming it. What is NOT closed is what a *declared*
 condition does: its `predicate` and its `params` come from the config, so an entry keeping a
 required id while naming a different predicate, or one whose `params.repo` points at a clean
 decoy checkout, still passes every check the board makes at run time. `test_gate_profiles.py`
@@ -244,8 +278,25 @@ record; every record names a principal and a kind; an auto record additionally n
 gate profile, the andon verdict that authorised it, **and that verdict's coverage** — a
 record claiming `clear` with nothing evaluated is refused, so is one auto-passed on a
 board missing a required condition (the finding names the ids), and so is one that cannot
-state either at all. Ledger schema 3 carries `required` / `missing` / `missing_ids`; a
-schema-2 record cannot answer the thinned-board question and is a finding, not a pass. The item and the ledger must agree. Crossed gates are derived from the
+state either at all.
+
+Those are named checks, and each was added AFTER an outcome nobody had enumerated turned out
+to mean "clear" - which is why the record also carries the board's **bucket census**, and
+`-VerifyAudit` **re-derives** the verdict from it rather than reading the word: every
+condition in exactly one bucket, the buckets summing to the conditions in scope, every bucket
+but `evaluated_ok` empty, and at least one condition in it. The loop reads the buckets the
+RECORD carries, so a bucket added to the board later is checked without editing the verifier.
+
+**Ledger schema is 5** (`gate-audit.ps1` `$script:GateLedgerSchema`), and each number is a
+question an older record cannot answer, reported as a finding rather than assumed clear:
+schema 2 added `andon.repo` and the coverage counters; 3 added `missing` / `missing_ids` (a
+thinned board reported full coverage of itself); 4 split `fired` from `halted` (a fire that
+did not halt was in no field); 5 added `census` / `census_total` / `census_ids`, without
+which the verdict cannot be re-derived at all, plus `looked_at`, which names each condition's
+predicate and params so a `params` redirect is readable afterwards. This paragraph said
+"schema 3" while the code was already at 4 - a doc number that drifts one release behind is a
+reader's only clue that a record is old, so it is now stated once, beside what each number
+buys. The item and the ledger must agree. Crossed gates are derived from the
 ITEM'S OWN STATE, never from the ledger — that is what makes a missing record detectable
 rather than invisible.
 

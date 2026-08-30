@@ -20,15 +20,15 @@ claim is a hypothesis it says so.
 | `scripts/agent-harness/gate-audit.ps1` | the append-only gate ledger and `Test-GateAuditComplete` — the executable definition of "complete" |
 | `scripts/agent-harness/queue.ps1` | both gates wired: auto-pass under `dark` only on a `clear` board, a refusal record otherwise, a record on every pass either way |
 | `scripts/agent-harness/config.ps1` / `config.py` | gate resolution in both readers |
-| `scripts/agent-harness/drill-dark-factory.ps1` | the validation: **141 checks, 0 failed** |
-| `scripts/agent-harness/test_gate_profiles.py` | 20 tests incl. the PowerShell↔Python anti-drift test |
+| `scripts/agent-harness/drill-dark-factory.ps1` | the validation: **184 checks, 0 failed** |
+| `scripts/agent-harness/test_gate_profiles.py` | 24 tests incl. the PowerShell↔Python anti-drift test and the two doc-vs-code checks of §11.4 |
 | `scripts/claude-sessions-bridge/test_queue_narration.py` | 6 tests pinning the one consumer that narrates a gate transition to a human (§8.7) |
 
-Evidence: `drill-dark-factory.ps1` → `141 checks, 0 failed` (exit 0) — 60 at first, 96
+Evidence: `drill-dark-factory.ps1` → `184 checks, 0 failed` (exit 0) — 60 at first, 96
 after the audit round of §8, 121 after the thinned-board round of §9, 141 after the
-`on_fire` round of §10.
-`python -m pytest scripts/agent-harness -q` → `125 passed` **in a checkout with a live
-queue** (121 after the §9 round, 117 before it); in a plain clone it is two fewer passed and two
+`on_fire` round of §10, 184 after the `on_indeterminate` round of §11.
+`python -m pytest scripts/agent-harness -q` → `129 passed` **in a checkout with a live
+queue** (125 after the §10 round, 121 after §9, 117 before it); in a plain clone it is two fewer passed and two
 skipped, and the two are the ones that ask the real queue:
 `test_anchor_schema.py::test_every_queued_anchor_validates` (skips on "no queued anchors
 under …") and `test_scope_node.py::test_the_live_queue_projects_without_raising` (skips on
@@ -897,6 +897,158 @@ would be the thing it exists to prevent.
 
 ---
 
+## 11. THE `on_indeterminate` ROUND - the same defect one key over, and the fix that generalises
+
+§10 closed `on_fire`. This round starts from the report that `on_indeterminate: warn`
+reopened the identical hole on the sibling key, and ends somewhere else: the key was never
+the defect. The verdict was computed **by exception**, so *any* outcome nobody had
+enumerated silently meant "fine". That is the same vacuous-check shape this effort keeps
+finding, sitting in the function that decides whether a human is needed.
+
+### 11.1 DECISIVE - a condition that could not be evaluated auto-passed a dark gate
+
+Reproduced end to end before anything was changed, by running the NEW drill steps against
+the PRE-FIX sources (every file under `scripts/agent-harness/` restored from `HEAD` into a
+scratch directory, the new `drill-dark-factory.ps1` copied in):
+
+```
+=== K  an outcome NOBODY ENUMERATED is not a clear board ===
+[FAIL] the BOARD is not clear: indeterminate, exit 6                     board=clear exit=0
+[FAIL] HALT: a warn-declared INDETERMINATE does NOT auto-pass the gate   exit=0
+[FAIL] HALT: the item stays parked at anchor-draft                       state=ready-to-test
+[FAIL] HALT: nothing signed the anchor gate                       anchor_confirmed_by='auto:dark'
+[FAIL] THE RECORD: the refusal is in the ledger as indeterminate         status=
+[FAIL] THE RECORD: the unevaluated condition is NAMED                    indeterminate=
+```
+
+`protected-ref-moved` with no baseline - the state `README.md` calls "deliberately not a
+pass" - printed `ANDON BOARD: CLEAR` at exit 0 while listing `[indeterminate]
+protected-ref-moved  no baseline recorded`. The gate auto-passed, the item advanced to
+`ready-to-test` signed `auto:dark`, `-VerifyAudit` said COMPLETE, and `status=` above means
+the ledger query found **no refusal record at all**. The condition that could not be
+evaluated was in no field of the record: `fired: []`, `halted: []`, and no `indeterminate`
+counter existed to re-derive it from.
+
+**Why the sibling survived §10's fix.** `andon.ps1` set `$raised` only for
+`$action -eq "halt"` and `$firedIds` only for `$r.status -eq "fire"`. Every other outcome
+set NOTHING, and `clear` was the state you got when nothing objected. §10 added a `fired`
+list and a `warned` word - one more exception - which is why the round after it had the same
+sentence to write with one key renamed.
+
+### 11.2 FIXED - `clear` is proven, not defaulted
+
+The verdict is no longer computed by exception. `config.ps1` declares an OUTCOME TABLE -
+every `(status, action)` pair the board knows how to think about, and the census bucket it
+counts as - and `andon.ps1` classifies every result through it:
+
+- every condition lands in **exactly one** counted bucket (`evaluated_ok`, `fired`,
+  `indeterminate`, `disabled`, `unrecognised`) and is stamped with it, so the verdict, the
+  console and the ledger name the same fact;
+- the buckets must **sum** to the conditions the run had in scope; a mismatch, or a result
+  classified into a bucket nobody declared, is itself a refusal (`unaccounted`);
+- `clear` requires **every bucket except `evaluated_ok` to be empty**, with at least one
+  condition in it - stated positively, not as the absence of two particular flags;
+- a `(status, action)` pair that is **not a key in the table** - an unknown status, an
+  unknown action word, or an unknown pairing of two known words - falls to `unrecognised`,
+  which is a REFUSING bucket. No branch names the new word.
+
+The census travels into the ledger (`census`, `census_total`, `census_ids`, schema 5), and
+`Test-GateAuditComplete` **re-derives** the verdict from it instead of reading the word
+`clear`: it loops the buckets the RECORD carries, so a bucket added to the board later is
+checked without editing the verifier. A record with no census cannot be re-derived and is a
+finding, not a pass.
+
+Two board words were added: `indeterminate` (the sibling of `warned`) and `unaccounted`.
+`unaccounted` outranks everything including `incomplete` - a board that cannot say where its
+own results went cannot report any board's verdict.
+
+### 11.3 THE PROOF THAT MATTERS - an outcome word the harness has never contained
+
+A fix for `on_indeterminate` alone would have been the third round of the same mistake. So
+the drill introduces outcome words the board has never heard of and requires it to refuse
+them **without a branch naming either**. Both are done in a scratch COPY of the whole
+harness, and which line was changed is asserted rather than described:
+
+- **K2, a new ACTION word.** `quarantine` is added to `$script:AllowedAndonActions` in the
+  copy's `config.ps1` (without that it is refused at parse time, which errs safe but proves
+  nothing about the verdict) and declared as a firing condition's `on_fire`. The step
+  asserts the copy's `andon.ps1` is **byte-identical** to the shipped one and that the word
+  appears nowhere in it. Result: `board=unaccounted`, exit 6, census `unrecognised=1`,
+  record `work-branch-on-remote (status 'fire', action 'quarantine')`, and the real gate
+  refuses at exit 6 with the item parked.
+- **K3, a new STATUS word.** One predicate in the copy is made to answer `parked`, a status
+  no predicate has ever returned. The step asserts the copy differs from the shipped
+  `andon.ps1` by **exactly one line** and that the line sits above `function
+  Invoke-AndonEvaluation` - i.e. inside a predicate, not the verdict logic. Result: on a
+  fixture the SHIPPED board calls `clear` at exit 0, the one-word copy gives
+  `board=unaccounted`, exit 6, `operator-checkout-off-branch (status 'parked', action
+  'none')`, the census still sums, and the gate refuses.
+
+Pre-fix, K3 read `board=clear exit=0` and the item advanced. K2 pre-fix was refused (as
+`warned`) because the condition also *fired* - the fire caught it, not the action word - and
+the record named nothing: `unrecognised=`. That distinction is the honest one: an unknown
+action on a firing condition was already caught by §10's `fired` list; an unknown **status**
+was not caught at all.
+
+**NEGATIVE CONTROL, run every time**: a genuinely clean full board still auto-passes at
+exit 0 signed `auto:dark`, with `-VerifyAudit` COMPLETE (step K1's control, and step B).
+A board that refuses everything is not a fix.
+
+### 11.4 Claims that commands contradicted, each corrected
+
+Eleven were reported. Each was checked against the file or the command before being
+touched; all eleven were true reports.
+
+| # | claim | disposition |
+|---|---|---|
+| 1 | `andon.ps1` "INDETERMINATE IS NOT A PASS ... it does not get to be the board's own behaviour" | CORRECTED in place: the header now says the sentence was false at run time, and that what makes it true is the census, not the `halt` default a config overrides |
+| 2 | `README.md` "indeterminate is deliberately not a pass" | same correction, with the reproduction quoted where the claim is made |
+| 3 | `README.md` "the set of conditions cannot be thinned, switched off, or downgraded into silence" | `on_indeterminate` added to the closed list, and the safe-reading sentence now says *by either outcome key, or by an outcome word nobody has thought of yet* |
+| 4 | `MODULE.md` raised row "...or it could not be evaluated" | table rewritten: `raised` is "action was halt", and `indeterminate` is its own row |
+| 5 | `MODULE.md` "A condition that could not be evaluated has not passed" | kept, with "that was false at run time until 2026-08-30" and what makes it true now |
+| 6 | `README.md` "the gate record does carry `andon.repo`, so the redirect is visible afterwards" | **MADE TRUE**, not just corrected. `andon.repo` is `$ctx.repo_root` and a `params.repo` override does not touch it - verified by reading `Predicate-GitCheckoutState`. The record now also carries `looked_at`: every condition's predicate and the params it was handed. Drill step L builds a decoy checkout and asserts the gate passes, `andon.repo` names the fixture, and `looked_at` names the decoy |
+| 7 | `harness.config.json` "`gate_profile` is the ONLY knob here that decides whether a human sees a gate" | CORRECTED. `anchor_required: false` removes the anchor gate outright for an anchorless item under ANY profile, `attended` included - no anchor, no human, no gate record, no andon consultation (`queue.ps1` line 485 and the `elseif ($anchorRequired)` at 640) |
+| 8 | `MODULE.md` "The verdict has five states" above a SIX-row table | CORRECTED to eight above an eight-row table, and made a DURABLE CHECK: `test_the_MODULE_verdict_table_matches_the_board` parses the table and compares it against the `$board = "..."` literals in `andon.ps1` plus `$script:AndonBucketBoard`'s values |
+| 9 | `queue.ps1` exit-6 enumeration omits `warned` | CORRECTED: every non-`clear` word is listed, with a note that the code has always refused anything that is not the literal `clear` |
+| 10 | `MODULE.md` says schema 3 while `gate-audit.ps1` is at 4 | CORRECTED to 5 with what each number buys, and made a DURABLE CHECK: `test_the_MODULE_ledger_schema_number_matches_the_code` |
+| 11 | `README.md` "set `on_fire` to anything but halt -> warned" - true only for `warn` | CORRECTED: the table rows now say `on_fire: warn` / `on_indeterminate: warn`, with a following row for a word the board does not implement (exit 1, no verdict, gate reads `unavailable`) |
+
+### 11.5 What this round did NOT close
+
+Unchanged from §10, and still named as open in `README.md` and `MODULE.md`:
+
+- **a predicate swap** in an uncommitted config or one named by `AI_STACK_HARNESS_CONFIG`.
+  `test_gate_profiles.py` pins the id -> predicate map of the COMMITTED config only.
+- **a `params` redirect.** Still not refused - a condition can be pointed at a decoy. It is
+  now *readable* from the ledger (`looked_at`), which is what README claimed and did not
+  have, but reading it is a human act.
+- **id squatting**, the two together.
+
+And the census itself has a limit worth stating: it proves every condition landed in a
+bucket and that only `evaluated_ok` is non-empty. It says nothing about whether the
+predicate behind an id was the right one, or looked in the right place. Membership and
+accounting are tamper-evident; behaviour is not.
+
+### 11.6 Validation
+
+- `drill-dark-factory.ps1` -> **184 checks, 0 failed** (141 before this round; steps K and L
+  are new). Against the PRE-FIX sources with the same drill: **184 checks, 27 failed** - 26
+  of them in K and L, plus one unrelated artifact of running the drill from a scratch copy
+  (step A3's last case scans "this checkout", and a scratch copy is not the real checkout).
+- `python -m pytest scripts/agent-harness -q` -> **129 passed** (125 before) in a checkout
+  with a live queue; two of those are environment-dependent skips in a plain clone, as §1
+  records. `test_gate_profiles.py` alone: 24 passed (20 before).
+- RED-proved individually, each reverted afterwards: setting one shipped
+  `on_indeterminate` to `warn` fails `test_no_shipped_condition_downgrades_on_indeterminate`;
+  the pre-fix `config.py` fails `test_an_unenumerated_outcome_lands_in_a_REFUSING_bucket`
+  and `test_powershell_and_python_agree_about_the_gates` (`no attribute 'ANDON_BUCKETS'`);
+  changing MODULE's "eight" to "seven" and its schema 5 to 4 fails the two new doc checks.
+- Not run in `ai-orchestration-gym`. U6 clauses 1-3 remain **CODE-COMPLETE,
+  GYM-VALIDATION PARKED**.
+
+
+---
+
 ## DECISIONS entries to append
 
 > The orchestrator appends these at merge and verifies each sentence. Nothing here is
@@ -1362,5 +1514,134 @@ PROVEN:   the guard that should have caught the swap was vacuous in the same cla
           corrections.
 REVERT:   n/a for the documents. The id -> predicate map and the allowed-action list revert
           with their diff; reverting them restores a guard that accepts any non-empty string.
+
+## 2026-08-30 · U6 · `CLEAR` IS PROVEN, NOT DEFAULTED - the verdict stops being computed by exception
+FINDING:  `on_indeterminate: warn` on ONE condition reopened the IDENTICAL hole the entry
+          above closed on `on_fire`. REPRODUCED before anything was changed, by running the
+          new drill steps against every `scripts/agent-harness/` file restored from HEAD:
+          `protected-ref-moved` with no baseline - the state README calls "deliberately not a
+          pass" - printed `ANDON BOARD: CLEAR` at exit 0 while listing `[indeterminate]
+          protected-ref-moved  no baseline recorded`; the dark gate AUTO-PASSED, the item
+          advanced to ready-to-test signed `auto:dark`, `-VerifyAudit` said COMPLETE, and the
+          ledger query for a refusal record found NONE. The condition that could not be
+          evaluated was in no field of the record: `fired: []`, `halted: []`, and no
+          `indeterminate` counter existed for Test-GateAuditComplete to re-derive it from.
+          THE KEY WAS NEVER THE DEFECT. `$raised` was set only for `action -eq halt` and
+          `$firedIds` only for `status -eq fire`; every other outcome set NOTHING, and `clear`
+          was the state left when nothing objected - so any outcome nobody enumerated silently
+          meant "fine". That is the vacuous-check shape this effort keeps finding, sitting in
+          the function that decides whether a human is needed. Three rounds running a fix
+          closed one outcome key and left its sibling.
+DECISION: the verdict is decided by a BUCKET CENSUS, not by flags. config.ps1 declares an
+          outcome table - every (status, action) pair the board knows how to think about and
+          the bucket it counts as - beside the required-condition set and for the same reason
+          (gate-audit.ps1 must read the same declaration). andon.ps1 classifies every result
+          through it: exactly one counted bucket per condition, stamped onto the result; the
+          buckets must SUM to the conditions in scope; `clear` requires every bucket except
+          `evaluated_ok` to be EMPTY with at least one condition in it - stated positively,
+          not as the absence of two flags; and a pair that is not a key in the table falls to
+          `unrecognised`, a REFUSING bucket, with no branch naming the new word. Two board
+          words added: `indeterminate` (the sibling of `warned`) and `unaccounted`, which
+          outranks everything including `incomplete` - a board that cannot say where its own
+          results went cannot report any board's verdict. `fired` and `halted` remain
+          reported lists; neither decides the verdict any more.
+PROVEN:   ledger schema 5 carries `census` / `census_total` / `census_ids`, and
+          Test-GateAuditComplete RE-DERIVES the verdict from them instead of reading the word
+          `clear` - looping the buckets the RECORD carries, so a bucket added later is checked
+          without editing the verifier. A record with no census cannot be re-derived and is a
+          finding. RED first, GREEN after: the same drill against pre-fix sources gives
+          `184 checks, 27 failed`; against the fix, `184 checks, 0 failed`.
+          NEGATIVE CONTROL asserted in the same step: a genuinely clean full board still
+          auto-passes at exit 0 signed `auto:dark` with -VerifyAudit COMPLETE. A board that
+          refuses everything is not a fix.
+REVERT:   the census is one block in andon.ps1's Invoke-AndonEvaluation plus the table in
+          config.ps1/config.py; reverting them restores a verdict computed by exception and
+          re-opens both downgrade keys. Ledger records written under schema 5 stay readable -
+          older code reads the counters it knows and ignores the census.
+
+## 2026-08-30 · method · CLOSE THE CLASS, AND PROVE IT WITH A CASE NOBODY ANTICIPATED
+FINDING:  the previous two rounds each fixed the reported instance. `andon.enabled: false`
+          was closed, then deleting entries, then `on_fire`, then `on_indeterminate` - four
+          fixes, one defect. A verifier put it exactly right: "the same sentence as the
+          round-4 finding with one key renamed". Fixing the reported key again would have
+          been the third round of the same mistake, and the fifth key would have arrived.
+DECISION: when a fix is for one instance of a shape, the test is not the instance. The drill
+          now INTRODUCES AN OUTCOME THE CODE DOES NOT PRODUCE and requires the board to refuse
+          it with no branch naming it: step K2 adds an ACTION word (`quarantine`) to the
+          allowed vocabulary, step K3 makes one predicate answer a STATUS word (`parked`) no
+          predicate has ever returned. Both are done in a scratch COPY of the whole harness,
+          and WHICH LINE CHANGED IS ASSERTED, not described - K2 asserts the copy's andon.ps1
+          is byte-identical to the shipped one; K3 asserts it differs by exactly one line and
+          that the line sits above `function Invoke-AndonEvaluation`, i.e. inside a predicate.
+          If closing a new case had needed a new branch in the verdict logic, these two steps
+          are what would have said so.
+PROVEN:   K2 gives `board=unaccounted`, exit 6, census `unrecognised=1`, record
+          `work-branch-on-remote (status 'fire', action 'quarantine')`, gate refused, item
+          parked. K3 gives `board=unaccounted` on a fixture the SHIPPED board calls `clear` at
+          exit 0, record `operator-checkout-off-branch (status 'parked', action 'none')`, gate
+          refused. Pre-fix, K3 read `board=clear exit=0` and the item advanced. Pre-fix K2 was
+          refused as `warned` - because the condition also FIRED, which §10's list caught -
+          and named nothing (`unrecognised=`); that distinction is stated in the note rather
+          than claimed as a second win.
+RULE:     a fix that only closes the reported key is a report, not a fix. Invent the next
+          case and make it fail first.
+REVERT:   n/a - drill steps K2/K3 and the mirrored bucket table in config.py revert with
+          their diff.
+
+## 2026-08-30 · U6 · A PARAMS REDIRECT IS NOW READABLE FROM THE LEDGER - the claim made true
+FINDING:  README.md said a `params.repo` redirect was "visible afterwards" because "the gate
+          record does carry `andon.repo`". VERIFIED FALSE by reading the code, not relayed:
+          `andon.repo` is `$ctx.repo_root` from Resolve-RepoRoot, while `params.repo` is read
+          per condition by Predicate-GitCheckoutState via Get-Param - the two are unrelated,
+          so a redirect run recorded the real checkout while the detector examined a decoy. A
+          true sentence about a field that does not answer the question.
+DECISION: make it true rather than delete it. Every condition result now carries the params it
+          ran with (`_`-prefixed documentation keys dropped - the shipped config holds
+          paragraphs of prose that nothing reads at run time and that would bury the one field
+          an auditor wants), and the gate record carries `looked_at`: for every condition, the
+          predicate it ran and those params. A redirect AND a predicate swap are now readable
+          by a reader of the ledger. Neither is REFUSED, and README still says so.
+PROVEN:   drill step L builds a decoy scratch checkout, points `operator-checkout-off-branch`
+          at it, and asserts all three facts from the real ledger: the gate PASSES (the
+          redirect is not refused), `andon.repo` names the fixture and not the decoy, and
+          `looked_at` names the decoy plus the predicate behind every id. Against pre-fix
+          sources both `looked_at` checks fail with `looked_at=`.
+REVERT:   one field in Invoke-AndonForGate and Get-CondParams in andon.ps1; reverting them
+          restores a record that cannot show where a condition looked.
+
+## 2026-08-30 · method · A PROSE NUMBER BESIDE A TABLE IS A CLAIM THE TABLE CAN CONTRADICT
+FINDING:  MODULE.md said "The verdict has five states" above a SIX-row table - the uncounted
+          sixth was `warned`, added the same morning by the round that wrote the sentence
+          above it. It also described the ledger as schema 3 and called only a schema-2 record
+          a finding, while gate-audit.ps1 was already at 4 and treated schema-3 as one. Both
+          are audit surfaces under C.7: the operator reads these instead of the diffs.
+DECISION: correct both, and make the class of error DURABLE-CHECKED rather than re-read.
+          `test_the_MODULE_verdict_table_matches_the_board` parses the table and compares its
+          rows against the board words the CODE can produce - the `$board = "..."` literals in
+          andon.ps1 plus the values of `$script:AndonBucketBoard` - and against the prose
+          count, and asserts exactly one row exits 0.
+          `test_the_MODULE_ledger_schema_number_matches_the_code` compares MODULE's stated
+          schema against `$script:GateLedgerSchema`.
+PROVEN:   RED-proved and reverted: "eight" -> "seven" and "schema 5" -> "schema 4" each fail
+          their test. The words are read from andon.ps1 with a regex that asserts it matched
+          something, so a rename that empties it fails rather than passing vacuously - the
+          check-that-checks-nothing shape this file keeps recording.
+REVERT:   n/a for the prose. The two tests revert with their diff.
+
+## 2026-08-30 · U6 · `gate_profile` IS NOT THE ONLY KNOB THAT DECIDES WHETHER A HUMAN SEES A GATE
+FINDING:  harness.config.json's `pipeline._note` said `gate_profile` "is the ONLY knob here
+          that decides whether a human sees a gate". Disproved by reading queue.ps1:
+          `pipeline.anchor_required: false` removes the anchor gate outright for an item
+          created without an anchor, under ANY profile including `attended` - the item goes
+          to ready-to-test with no anchor, no human, no gate record and no andon consultation
+          (the `elseif ($anchorRequired)` that would Die is simply not taken, and
+          Get-CrossedGates then counts no anchor gate for it).
+DECISION: correct the note in place and state the split: `gate_profile` decides WHO passes a
+          gate; `anchor_required` decides whether the anchor gate EXISTS. The behaviour is
+          not changed - it is a deliberate escape hatch, `-VerifyAudit` already says so in
+          words rather than counting a narrower complete, and this is class 4 work.
+RULE:     "the only X" in a config note is a universal with a short life, same as "any route
+          through the config" was. Say what the knob does; let the next one say what it does.
+REVERT:   n/a - one string.
 
 ```

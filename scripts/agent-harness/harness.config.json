@@ -222,7 +222,7 @@
     "claim_ttl_minutes": 60,
     "anchor_required": true,
     "gate_profile": "attended",
-    "_note": "the role -> state -> duty table stays in queue.ps1: it is behavior, not tuning. `gate_profile` names a row in `gate_profiles` above and is the ONLY knob here that decides whether a human sees a gate. It replaced `human_gates` on 2026-08-30 (U6): that pair of booleans had zero executable readers in any language - it read as policy and governed nothing, which is exactly what the `policy-declared-unread` andon condition now refuses."
+    "_note": "the role -> state -> duty table stays in queue.ps1: it is behavior, not tuning. `gate_profile` names a row in `gate_profiles` above and decides WHO passes each gate. It replaced `human_gates` on 2026-08-30 (U6): that pair of booleans had zero executable readers in any language - it read as policy and governed nothing, which is exactly what the `policy-declared-unread` andon condition now refuses. THIS NOTE CALLED gate_profile THE ONLY KNOB THAT DECIDES WHETHER A HUMAN SEES A GATE, AND THAT WAS FALSE: `anchor_required: false` removes the anchor gate outright for an item created without an anchor, under ANY profile including `attended` - the item advances to ready-to-test with no anchor, no human, no gate record and no andon consultation, because a gate that is not a gate is not passed by anybody. queue.ps1 -VerifyAudit says so in words rather than counting a narrower complete. So: gate_profile decides who passes a gate; anchor_required decides whether the anchor gate exists at all."
   },
 
   "worktree": {

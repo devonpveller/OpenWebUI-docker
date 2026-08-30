@@ -44,7 +44,13 @@
 # halt and an unavailable board; E attended unchanged; F the board switched off three ways;
 # G what "complete" is measured against; H a THINNED board (entries deleted); I -GateProfile
 # overriding an attended config; J a fire whose `on_fire` is not `halt` - which auto-passed
-# the gate at exit 0 with `fired=[]` in the ledger until 2026-08-30.
+# the gate at exit 0 with `fired=[]` in the ledger until 2026-08-30; K an outcome NOBODY
+# ENUMERATED - `on_indeterminate: warn`, which is J's identical twin on the sibling key and
+# auto-passed the same way, then a brand-new ACTION word and a brand-new STATUS word
+# introduced in a scratch COPY of the harness, which the board must refuse with no branch
+# naming either. K is the generalisation test: three rounds running, a fix closed one
+# outcome key and left its sibling. L a `params.repo` REDIRECT - not refused, but readable
+# from the ledger afterwards, which is what README claimed and `andon.repo` did not deliver.
 #
 #   .\drill-dark-factory.ps1            # run it
 #   .\drill-dark-factory.ps1 -Keep      # keep the scratch dirs for inspection
@@ -123,11 +129,15 @@ function New-DrillConfig([string]$name, [scriptblock]$edit) {
 function Get-Cond($cfg, [string]$id) { return ($cfg.andon.conditions | Where-Object { $_.id -eq $id }) }
 
 function Invoke-Andon {
-    param([string]$Config, [string]$Only = "", [string]$Repo = "", [string]$StateDir = "", [string[]]$RunBranch = @())
+    # -Script names WHICH andon.ps1 to run. It defaults to the shipped one; step K points it
+    # at a scratch COPY of the whole harness so a novel outcome word can be introduced
+    # without editing the harness this repo ships.
+    param([string]$Config, [string]$Only = "", [string]$Repo = "", [string]$StateDir = "", [string[]]$RunBranch = @(), [string]$Script = "")
+    if (-not $Script) { $Script = $AndonPs }
     $prevCfg = $env:AI_STACK_HARNESS_CONFIG; $prevState = $env:AI_STACK_WORKTREE_STATE
     $env:AI_STACK_HARNESS_CONFIG = $Config
     if ($StateDir) { $env:AI_STACK_WORKTREE_STATE = $StateDir }
-    $argv = @("-NoProfile", "-NonInteractive", "-File", $AndonPs, "-Evaluate", "-Json")
+    $argv = @("-NoProfile", "-NonInteractive", "-File", $Script, "-Evaluate", "-Json")
     if ($Only) { $argv += @("-Only", $Only) }
     if ($Repo) { $argv += @("-RepoRoot", $Repo) }
     foreach ($b in $RunBranch) { $argv += @("-RunBranch", $b) }
@@ -448,14 +458,18 @@ function New-DarkFixture([string]$name, [string]$gateProfile) {
     return @{ repo = $repo; state = $state; cfg = $cfg }
 }
 
-function Invoke-Queue($fix, [string[]]$QArgs) {
+function Invoke-Queue($fix, [string[]]$QArgs, [string]$Script = "") {
+    # -Script names WHICH queue.ps1 to drive, for the same reason Invoke-Andon takes one:
+    # step K runs a scratch COPY of the whole harness so a novel outcome word can be
+    # introduced without editing the harness this repo ships.
+    if (-not $Script) { $Script = $QueuePs }
     $prevCfg = $env:AI_STACK_HARNESS_CONFIG; $prevState = $env:AI_STACK_WORKTREE_STATE; $prevLine = $env:AI_STACK_WORK_LINE
     $env:AI_STACK_HARNESS_CONFIG = $fix.cfg
     $env:AI_STACK_WORKTREE_STATE = $fix.state
     $env:AI_STACK_WORK_LINE = "dev"
     Push-Location $fix.repo
     $prev = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-    try { $out = & $PsExe -NoProfile -NonInteractive -File $QueuePs @QArgs 2>&1 }
+    try { $out = & $PsExe -NoProfile -NonInteractive -File $Script @QArgs 2>&1 }
     finally {
         $ErrorActionPreference = $prev
         Pop-Location
@@ -991,6 +1005,232 @@ Check "RED: a record that cannot separate fired from halted is a FINDING, not a 
 Set-Content -Path $ledgerJ -Encoding ASCII -Value $bakJ
 $r = Invoke-Queue $fixJ @("-VerifyAudit", "-Id", "dfj")
 Check "GREEN again once the ledger is restored" ($r.code -eq 0) ("exit=" + $r.code)
+
+# ====================================================================================
+Step "K  an outcome NOBODY ENUMERATED is not a clear board - the fifth way off, and the general one"
+# ====================================================================================
+# THE FIFTH WAY OFF, and the reason the previous four each needed their own fix. Step J
+# closed `on_fire: warn`. `on_indeterminate: warn` reopened the IDENTICAL hole on the
+# sibling key, and it was reproduced end to end on 2026-08-30: `protected-ref-moved` with no
+# baseline - the state README.md calls "deliberately not a pass" - printed
+# `ANDON BOARD: CLEAR` at exit 0 while listing `[indeterminate] protected-ref-moved  no
+# baseline recorded`; the dark gate AUTO-PASSED signed `auto:dark`; `-VerifyAudit` said
+# COMPLETE; and the ledger read `status=clear fired=[] halted=[]` with the condition that
+# COULD NOT BE EVALUATED absent from the record entirely.
+#
+# The root cause was never the key. `$raised` was set only for `action -eq halt` and `fired`
+# only for `status -eq fire`; every other outcome set NOTHING, and `clear` was what you got
+# when nothing objected. So the fix is not a third flag. `clear` is now PROVEN: every result
+# lands in exactly one census bucket, the buckets must sum to the conditions in scope, and
+# `clear` requires every bucket but `evaluated_ok` to be empty.
+#
+# K1 is the reported defect. K2 and K3 are the part that matters: they introduce outcome
+# words the board has NEVER HEARD OF - one action, one status - and assert it refuses them
+# with no branch anywhere naming the word. If closing a new case needed a new branch, the
+# fix would not have generalised, and these two steps are what would say so.
+
+# --- K1: the sibling key -----------------------------------------------------------
+# NO BASELINE is recorded for this fixture, deliberately: that is what makes
+# `protected-ref-moved` indeterminate. Nothing else is touched - the board is enabled, all
+# five entries are present with their params, every `on_fire` stays `halt`. One word changes.
+$fixK = New-DarkFixture "dark-warn-onindet" "dark"
+$o = Get-Content -Raw -Path $fixK.cfg | ConvertFrom-Json
+(Get-Cond $o "protected-ref-moved").on_indeterminate = "warn"
+($o | ConvertTo-Json -Depth 40) | Set-Content -Path $fixK.cfg -Encoding ASCII
+
+$rk = Invoke-Andon -Config $fixK.cfg -Repo $fixK.repo -StateDir $fixK.state -RunBranch @("work/dfdrill")
+$condK = @($rk.verdict.conditions | Where-Object { $_.id -eq "protected-ref-moved" })
+Check "the condition is genuinely INDETERMINATE - no baseline to compare against" ((Get-CondStatus $rk "protected-ref-moved") -eq "indeterminate") ("status=" + (Get-CondStatus $rk "protected-ref-moved"))
+Check "and its recorded ACTION is the configured warn, not a rewritten halt" ($condK[0].action -eq "warn") ("action=" + $condK[0].action)
+Check "the BOARD is not clear: indeterminate, exit 6" (($rk.verdict.board -eq "indeterminate") -and ($rk.code -eq 6)) ("board=" + $rk.verdict.board + " exit=" + $rk.code)
+Check "THE CENSUS puts it in the indeterminate bucket, NOT evaluated_ok" (([int]$rk.verdict.coverage.census.indeterminate -eq 1) -and ([int]$rk.verdict.coverage.census.evaluated_ok -eq 4)) ("indeterminate=" + [int]$rk.verdict.coverage.census.indeterminate + " evaluated_ok=" + [int]$rk.verdict.coverage.census.evaluated_ok)
+Check "the census SUMS to the conditions in scope - nothing landed outside a bucket" (([int]$rk.verdict.coverage.census_total -eq [int]$rk.verdict.coverage.declared) -and (@($rk.verdict.coverage.unaccounted).Count -eq 0)) ("census_total=" + [int]$rk.verdict.coverage.census_total + " declared=" + [int]$rk.verdict.coverage.declared)
+Check "it fired NOTHING and halted NOTHING - which is exactly why the old verdict called it clear" ((@($rk.verdict.coverage.fired_ids).Count -eq 0) -and (@($rk.verdict.coverage.halted_ids).Count -eq 0)) ("fired=" + (@($rk.verdict.coverage.fired_ids) -join ",") + " halted=" + (@($rk.verdict.coverage.halted_ids) -join ","))
+
+$r = Invoke-Queue $fixK @("-Propose", "-Id", "dfk", "-Anchor", $anchorFile, "-Developer", "wt-dfdrill")
+$r = Invoke-Queue $fixK @("-Submit", "-Id", "dfk", "-Branch", "work/dfdrill", "-Developer", "wt-dfdrill", "-TestPlan", $planFile)
+$it = Get-QueueItem $fixK "dfk"
+Check "HALT: a warn-declared INDETERMINATE does NOT auto-pass the anchor gate (exit 6)" ($r.code -eq 6) ("exit=" + $r.code)
+Check "HALT: the item stays parked at anchor-draft" ($it.state -eq "anchor-draft") ("state=" + $it.state)
+Check "HALT: nothing signed the anchor gate" (-not $it.anchor_confirmed_by) ("anchor_confirmed_by='" + $it.anchor_confirmed_by + "'")
+$ledK = @(Get-Ledger $fixK | Where-Object { $_.decision -eq "refused" })
+Check "THE RECORD: the refusal is in the ledger as indeterminate, not clear" ((@($ledK).Count -ge 1) -and (@($ledK)[0].andon.status -eq "indeterminate")) ("status=" + ((@($ledK) | ForEach-Object { $_.andon.status }) -join ","))
+Check "THE RECORD: the unevaluated condition is NAMED - it was in no field at all before" ((@(@($ledK)[0].andon.indeterminate) -join ";") -like "*protected-ref-moved*") ("indeterminate=" + (@(@($ledK)[0].andon.indeterminate) -join ";"))
+Check "THE RECORD: the census travels with it" ([int](@($ledK)[0].andon.census.indeterminate) -eq 1) ("census.indeterminate=" + [int](@($ledK)[0].andon.census.indeterminate))
+Check "THE CONSOLE: the halt names the condition that could not be evaluated" ($r.out -like "*protected-ref-moved*") ""
+
+# THE NEGATIVE CONTROL, and the one that matters most: this must not be a board that refuses
+# everything. Same fixture, same `on_indeterminate: warn`, condition made determinate by
+# recording the baseline the predicate asks for - the gate auto-passes at exit 0.
+$prevCfg = $env:AI_STACK_HARNESS_CONFIG; $prevState = $env:AI_STACK_WORKTREE_STATE
+$env:AI_STACK_HARNESS_CONFIG = $fixK.cfg; $env:AI_STACK_WORKTREE_STATE = $fixK.state
+& $PsExe -NoProfile -NonInteractive -File $AndonPs -Baseline -RepoRoot $fixK.repo | Out-Null
+$env:AI_STACK_HARNESS_CONFIG = $prevCfg; $env:AI_STACK_WORKTREE_STATE = $prevState
+$rk2 = Invoke-Andon -Config $fixK.cfg -Repo $fixK.repo -StateDir $fixK.state -RunBranch @("work/dfdrill")
+Check "CONTROL: with a baseline recorded the SAME board is clear (exit 0)" (($rk2.verdict.board -eq "clear") -and ($rk2.code -eq 0)) ("board=" + $rk2.verdict.board + " exit=" + $rk2.code)
+Check "CONTROL: and the census is 5 evaluated_ok, every other bucket empty" (([int]$rk2.verdict.coverage.census.evaluated_ok -eq 5) -and ([int]$rk2.verdict.coverage.census_total -eq 5)) ("evaluated_ok=" + [int]$rk2.verdict.coverage.census.evaluated_ok + " total=" + [int]$rk2.verdict.coverage.census_total)
+$r = Invoke-Queue $fixK @("-Submit", "-Id", "dfk", "-Branch", "work/dfdrill", "-Developer", "wt-dfdrill", "-TestPlan", $planFile)
+$it = Get-QueueItem $fixK "dfk"
+Check "CONTROL: the clean board auto-passes the anchor gate (exit 0)" (($r.code -eq 0) -and ($it.state -eq "ready-to-test")) ("exit=" + $r.code + " state=" + $it.state)
+$passK = @(Get-Ledger $fixK | Where-Object { $_.decision -eq "passed" })
+Check "CONTROL: signed by the reserved auto principal, not a human" ((@($passK).Count -ge 1) -and (@($passK)[0].principal -eq "auto:dark") -and (@($passK)[0].kind -eq "auto")) ("principal=" + (@($passK)[0].principal) + " kind=" + (@($passK)[0].kind))
+$r = Invoke-Queue $fixK @("-VerifyAudit", "-Id", "dfk")
+Check "CONTROL: the trail verifies COMPLETE (exit 0)" ($r.code -eq 0) ("exit=" + $r.code)
+
+# AND THE VERIFIER RE-DERIVES IT FROM THE BUCKETS. A record that keeps the word `clear`
+# while its census admits an unevaluated condition must go red, or the ledger's own word is
+# its only oracle - which is the property every one of these rounds has had to add by hand.
+$ledgerK = Join-Path $fixK.state "audit\gates.jsonl"
+$bakK = Get-Content -Path $ledgerK
+Set-Content -Path $ledgerK -Encoding ASCII -Value @($bakK | ForEach-Object { $_.Replace('"indeterminate":0', '"indeterminate":1') })
+$r = Invoke-Queue $fixK @("-VerifyAudit", "-Id", "dfk")
+Check "RED: a record labelled clear whose CENSUS admits a non-ok bucket is caught" ($r.code -eq 1) ("exit=" + $r.code)
+Check "RED: and the finding NAMES the bucket" ($r.out -like "*indeterminate*") ""
+# A schema-4 shaped record - every earlier counter present, no census - cannot have its
+# verdict re-derived at all, and "cannot answer" is a finding, never a pass.
+Set-Content -Path $ledgerK -Encoding ASCII -Value @($bakK | ForEach-Object { $_ -replace ',"census":\{[^}]*\}', '' })
+$r = Invoke-Queue $fixK @("-VerifyAudit", "-Id", "dfk")
+Check "RED: a record carrying NO census cannot be re-derived, so it is a finding" ($r.code -eq 1) ("exit=" + $r.code)
+Set-Content -Path $ledgerK -Encoding ASCII -Value $bakK
+$r = Invoke-Queue $fixK @("-VerifyAudit", "-Id", "dfk")
+Check "GREEN again once the ledger is restored" ($r.code -eq 0) ("exit=" + $r.code)
+
+# --- K2/K3: an outcome word the board has NEVER HEARD OF ----------------------------
+# THE GENERALISATION TEST, and the reason this step exists at all. Three rounds running, a
+# fix closed one outcome key and left its sibling; the question is whether the census closes
+# the NEXT one without anybody anticipating it. So: introduce a word the shipped harness does
+# not contain, and require the board to refuse it with no branch naming it.
+#
+# HOW THE WORD IS INTRODUCED, said exactly, because a test that edited the verdict logic to
+# make its own case pass would prove nothing: the whole harness is COPIED to a scratch
+# directory and ONE line of the copy is changed. Nothing under this repo is modified. Which
+# line is changed is asserted, not described - K2 asserts the copy's andon.ps1 is
+# byte-identical to the shipped one, and K3 asserts the copy differs by exactly one line and
+# that the line sits ABOVE `function Invoke-AndonEvaluation`, i.e. inside a predicate.
+function New-HarnessCopy([string]$name) {
+    $dst = Join-Path $Root $name
+    New-Item -ItemType Directory -Force -Path $dst | Out-Null
+    foreach ($f in (Get-ChildItem -Path $HarnessDir -File)) {
+        Copy-Item -Path $f.FullName -Destination (Join-Path $dst $f.Name) -Force
+    }
+    return $dst
+}
+function Set-OneLine([string]$path, [string]$from, [string]$to) {
+    $lines = @(Get-Content -Path $path)
+    $hits = @(0..($lines.Count - 1) | Where-Object { $lines[$_] -eq $from })
+    if ($hits.Count -ne 1) { throw ("expected exactly one '{0}' in {1}, found {2}" -f $from, $path, $hits.Count) }
+    $lines[$hits[0]] = $to
+    Set-Content -Path $path -Encoding ASCII -Value $lines
+}
+
+# K2 - a NEW ACTION WORD. `quarantine` is added to the ALLOWED action vocabulary in the
+# copy's config.ps1 (without which the board refuses it at parse time, which errs safe but
+# proves nothing about the verdict) and then declared as a condition's `on_fire`. The
+# verdict logic is untouched: there is no `quarantine` anywhere in andon.ps1, and the copy's
+# andon.ps1 is asserted identical to the shipped file.
+$copy2 = New-HarnessCopy "harness-novel-action"
+Set-OneLine (Join-Path $copy2 "config.ps1") '$script:AllowedAndonActions = @("halt", "warn")' '$script:AllowedAndonActions = @("halt", "warn", "quarantine")'
+$sameAndon = ((Get-FileHash (Join-Path $copy2 "andon.ps1")).Hash -eq (Get-FileHash $AndonPs).Hash)
+Check "K2 SETUP: the copy's andon.ps1 is byte-identical to the shipped one" $sameAndon ""
+Check "K2 SETUP: the word 'quarantine' appears NOWHERE in the shipped andon.ps1" (@(Select-String -Path $AndonPs -Pattern "quarantine" -SimpleMatch).Count -eq 0) ""
+
+$fixK2 = New-DarkFixture "dark-novel-action" "dark"
+$prevCfg = $env:AI_STACK_HARNESS_CONFIG; $prevState = $env:AI_STACK_WORKTREE_STATE
+$env:AI_STACK_HARNESS_CONFIG = $fixK2.cfg; $env:AI_STACK_WORKTREE_STATE = $fixK2.state
+& $PsExe -NoProfile -NonInteractive -File $AndonPs -Baseline -RepoRoot $fixK2.repo | Out-Null
+$env:AI_STACK_HARNESS_CONFIG = $prevCfg; $env:AI_STACK_WORKTREE_STATE = $prevState
+$o = Get-Content -Raw -Path $fixK2.cfg | ConvertFrom-Json
+(Get-Cond $o "work-branch-on-remote").on_fire = "quarantine"
+($o | ConvertTo-Json -Depth 40) | Set-Content -Path $fixK2.cfg -Encoding ASCII
+$bareK = Join-Path $Root "origin-k.git"
+Invoke-Git init -q --bare $bareK | Out-Null
+Push-Location $fixK2.repo
+try {
+    Invoke-Git remote add origin $bareK | Out-Null
+    Invoke-Git push -q origin work/dfdrill | Out-Null
+} finally { Pop-Location }
+
+$rk3 = Invoke-Andon -Config $fixK2.cfg -Repo $fixK2.repo -StateDir $fixK2.state -RunBranch @("work/dfdrill") -Script (Join-Path $copy2 "andon.ps1")
+Check "K2: an action word the board has never heard of does NOT clear it (exit 6)" (($rk3.verdict.board -ne "clear") -and ($rk3.code -eq 6)) ("board=" + $rk3.verdict.board + " exit=" + $rk3.code)
+Check "K2: the board word is 'unaccounted' - no branch anywhere names 'quarantine'" ($rk3.verdict.board -eq "unaccounted") ("board=" + $rk3.verdict.board)
+Check "K2: the CENSUS puts it in the unrecognised bucket" ([int]$rk3.verdict.coverage.census.unrecognised -eq 1) ("unrecognised=" + [int]$rk3.verdict.coverage.census.unrecognised)
+Check "K2: THE RECORD NAMES THE WORD and the condition" ((@($rk3.verdict.coverage.unrecognised_ids) -join ";") -like "*work-branch-on-remote*quarantine*") ("unrecognised_ids=" + (@($rk3.verdict.coverage.unrecognised_ids) -join ";"))
+$rk3g = Invoke-Queue @{ repo = $fixK2.repo; state = $fixK2.state; cfg = $fixK2.cfg } @("-Propose", "-Id", "dfk2", "-Anchor", $anchorFile, "-Developer", "wt-dfdrill") -Script (Join-Path $copy2 "queue.ps1")
+$rk3g = Invoke-Queue @{ repo = $fixK2.repo; state = $fixK2.state; cfg = $fixK2.cfg } @("-Submit", "-Id", "dfk2", "-Branch", "work/dfdrill", "-Developer", "wt-dfdrill", "-TestPlan", $planFile) -Script (Join-Path $copy2 "queue.ps1")
+$itK2 = Get-QueueItem $fixK2 "dfk2"
+Check "K2: THE GATE refuses it too (exit 6), item parked" (($rk3g.code -eq 6) -and ($itK2.state -eq "anchor-draft")) ("exit=" + $rk3g.code + " state=" + $itK2.state)
+$ledK2 = @(Get-Ledger $fixK2 | Where-Object { $_.decision -eq "refused" })
+Check "K2: THE LEDGER names the unrecognised outcome" ((@($ledK2).Count -ge 1) -and ((@(@($ledK2)[0].andon.unrecognised) -join ";") -like "*quarantine*")) ("unrecognised=" + (@(@($ledK2)[0].andon.unrecognised) -join ";"))
+
+# K3 - a NEW STATUS WORD. One predicate in the copy is made to answer `parked`, a status no
+# predicate has ever returned. Everything else about the board is clean: the fixture has a
+# baseline, no remote, and every other condition passes.
+$copy3 = New-HarnessCopy "harness-novel-status"
+Set-OneLine (Join-Path $copy3 "andon.ps1") `
+    '    return (New-Result "ok" ("$repo is on ''" + $head.Trim() + "'' with no operation in progress") @())' `
+    '    return (New-Result "parked" ("$repo is on ''" + $head.Trim() + "'' with no operation in progress") @())'
+$shipLines = @(Get-Content -Path $AndonPs)
+$copyLines = @(Get-Content -Path (Join-Path $copy3 "andon.ps1"))
+$diffIdx = @()
+if ($shipLines.Count -eq $copyLines.Count) {
+    $diffIdx = @(0..($shipLines.Count - 1) | Where-Object { $shipLines[$_] -ne $copyLines[$_] })
+}
+$evalIdx = @(0..($shipLines.Count - 1) | Where-Object { $shipLines[$_] -like "function Invoke-AndonEvaluation*" })
+Check "K3 SETUP: the copy differs from the shipped board by EXACTLY ONE line" (@($diffIdx).Count -eq 1) ("differing lines=" + @($diffIdx).Count)
+Check "K3 SETUP: and that line is inside a PREDICATE, not the verdict logic" ((@($diffIdx).Count -eq 1) -and (@($evalIdx).Count -eq 1) -and ($diffIdx[0] -lt $evalIdx[0])) ("line=" + $diffIdx[0] + " Invoke-AndonEvaluation at " + (@($evalIdx) -join ","))
+Check "K3 SETUP: the word 'parked' appears NOWHERE in the shipped andon.ps1 or config.ps1" ((@(Select-String -Path $AndonPs -Pattern '"parked"' -SimpleMatch).Count -eq 0) -and (@(Select-String -Path (Join-Path $HarnessDir "config.ps1") -Pattern '"parked"' -SimpleMatch).Count -eq 0)) ""
+
+$fixK3 = New-DarkFixture "dark-novel-status" "dark"
+$prevCfg = $env:AI_STACK_HARNESS_CONFIG; $prevState = $env:AI_STACK_WORKTREE_STATE
+$env:AI_STACK_HARNESS_CONFIG = $fixK3.cfg; $env:AI_STACK_WORKTREE_STATE = $fixK3.state
+& $PsExe -NoProfile -NonInteractive -File $AndonPs -Baseline -RepoRoot $fixK3.repo | Out-Null
+$env:AI_STACK_HARNESS_CONFIG = $prevCfg; $env:AI_STACK_WORKTREE_STATE = $prevState
+# The control first: run the SHIPPED board on this fixture and confirm it is genuinely clean.
+$rk4c = Invoke-Andon -Config $fixK3.cfg -Repo $fixK3.repo -StateDir $fixK3.state -RunBranch @("work/dfdrill")
+Check "K3 CONTROL: the shipped board calls this fixture CLEAR (exit 0)" (($rk4c.verdict.board -eq "clear") -and ($rk4c.code -eq 0)) ("board=" + $rk4c.verdict.board + " exit=" + $rk4c.code)
+$rk4 = Invoke-Andon -Config $fixK3.cfg -Repo $fixK3.repo -StateDir $fixK3.state -RunBranch @("work/dfdrill") -Script (Join-Path $copy3 "andon.ps1")
+Check "K3: the same board with ONE novel status is NOT clear (exit 6)" (($rk4.verdict.board -ne "clear") -and ($rk4.code -eq 6)) ("board=" + $rk4.verdict.board + " exit=" + $rk4.code)
+Check "K3: it is 'unaccounted' - a status nobody enumerated is refused, not ignored" ($rk4.verdict.board -eq "unaccounted") ("board=" + $rk4.verdict.board)
+Check "K3: THE RECORD NAMES THE STATUS and the condition" ((@($rk4.verdict.coverage.unrecognised_ids) -join ";") -like "*operator-checkout-off-branch*parked*") ("unrecognised_ids=" + (@($rk4.verdict.coverage.unrecognised_ids) -join ";"))
+Check "K3: the census still SUMS - the novel outcome is counted, not dropped" ([int]$rk4.verdict.coverage.census_total -eq [int]$rk4.verdict.coverage.declared) ("total=" + [int]$rk4.verdict.coverage.census_total + " declared=" + [int]$rk4.verdict.coverage.declared)
+$rk4g = Invoke-Queue @{ repo = $fixK3.repo; state = $fixK3.state; cfg = $fixK3.cfg } @("-Propose", "-Id", "dfk3", "-Anchor", $anchorFile, "-Developer", "wt-dfdrill") -Script (Join-Path $copy3 "queue.ps1")
+$rk4g = Invoke-Queue @{ repo = $fixK3.repo; state = $fixK3.state; cfg = $fixK3.cfg } @("-Submit", "-Id", "dfk3", "-Branch", "work/dfdrill", "-Developer", "wt-dfdrill", "-TestPlan", $planFile) -Script (Join-Path $copy3 "queue.ps1")
+$itK3 = Get-QueueItem $fixK3 "dfk3"
+Check "K3: THE GATE refuses it (exit 6), item parked at anchor-draft" (($rk4g.code -eq 6) -and ($itK3.state -eq "anchor-draft")) ("exit=" + $rk4g.code + " state=" + $itK3.state)
+
+# ====================================================================================
+Step "L  a params REDIRECT must be visible in the record - the claim README made, now made true"
+# ====================================================================================
+# README.md said a `params.repo` redirect was "visible afterwards" because "the gate record
+# does carry `andon.repo`". It was not. `andon.repo` is the checkout the BOARD resolved
+# ($ctx.repo_root); `params.repo` points ONE condition's predicate wherever it likes, and the
+# two are unrelated - so a redirect run recorded the real checkout in the ledger while the
+# detector was examining a decoy. That is a true sentence about a field that does not answer
+# the question, which is the shape of every other defect in this effort.
+#
+# The record now also carries `looked_at`: for every condition, the predicate it ran and the
+# params it was handed. This step asserts the redirect is READABLE FROM THE LEDGER, not that
+# it is refused - it is not refused, and README says so.
+$decoy = New-ScratchRepo "repo-decoy"
+$fixL = New-DarkFixture "dark-redirect" "dark"
+$prevCfg = $env:AI_STACK_HARNESS_CONFIG; $prevState = $env:AI_STACK_WORKTREE_STATE
+$env:AI_STACK_HARNESS_CONFIG = $fixL.cfg; $env:AI_STACK_WORKTREE_STATE = $fixL.state
+& $PsExe -NoProfile -NonInteractive -File $AndonPs -Baseline -RepoRoot $fixL.repo | Out-Null
+$env:AI_STACK_HARNESS_CONFIG = $prevCfg; $env:AI_STACK_WORKTREE_STATE = $prevState
+# Point the checkout detector at a clean decoy. Everything else is untouched.
+$o = Get-Content -Raw -Path $fixL.cfg | ConvertFrom-Json
+(Get-Cond $o "operator-checkout-off-branch").params.repo = $decoy
+($o | ConvertTo-Json -Depth 40) | Set-Content -Path $fixL.cfg -Encoding ASCII
+
+$r = Invoke-Queue $fixL @("-Propose", "-Id", "dfl", "-Anchor", $anchorFile, "-Developer", "wt-dfdrill")
+$r = Invoke-Queue $fixL @("-Submit", "-Id", "dfl", "-Branch", "work/dfdrill", "-Developer", "wt-dfdrill", "-TestPlan", $planFile)
+$itL = Get-QueueItem $fixL "dfl"
+Check "the redirect is NOT refused - the board runs and the gate passes, as README says" (($r.code -eq 0) -and ($itL.state -eq "ready-to-test")) ("exit=" + $r.code + " state=" + $itL.state)
+$passL = @(Get-Ledger $fixL | Where-Object { $_.decision -eq "passed" })
+Check "andon.repo names the checkout the BOARD resolved, NOT the decoy" ((@($passL).Count -ge 1) -and ((@($passL)[0].andon.repo) -ne $decoy)) ("andon.repo=" + (@($passL)[0].andon.repo))
+$lookedL = (@(@($passL)[0].andon.looked_at) -join " | ")
+Check "RECORD: looked_at NAMES the decoy the condition was pointed at" ($lookedL -like ("*" + (Split-Path -Leaf $decoy) + "*")) ("looked_at=" + $lookedL)
+Check "RECORD: and it names the predicate behind every id, so a swap is readable too" (($lookedL -like "*operator-checkout-off-branch -> git-checkout-state*") -and ($lookedL -like "*protected-ref-moved -> protected-ref-moved*")) ""
 
 # ====================================================================================
 Write-Host ""

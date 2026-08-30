@@ -14,10 +14,15 @@
 # declare a detector nobody implemented, which is the exact shape of the dead
 # `human_gates` declaration this work replaced.
 #
-# INDETERMINATE IS NOT A PASS. Every predicate may answer ok / fire / indeterminate, and
-# `on_indeterminate` defaults to halt. "The check could not run, so we continued" is one
-# of the failure shapes the board is here to catch; it does not get to be the board's own
-# behaviour.
+# INDETERMINATE IS NOT A PASS - and this sentence was FALSE at run time until 2026-08-30,
+# which is worth saying in the file that said it. Every predicate may answer ok / fire /
+# indeterminate, and `on_indeterminate` defaults to halt. But the verdict was computed by
+# exception, so `on_indeterminate: warn` on ONE condition made a condition that COULD NOT BE
+# EVALUATED print `ANDON BOARD: CLEAR` at exit 0, auto-pass the dark gate signed `auto:dark`,
+# and leave the ledger reading `status=clear fired=[] halted=[]` with the unevaluated
+# condition absent from the record entirely. It is not the default that makes indeterminate
+# a non-pass; it is the CENSUS (config.ps1 $script:AndonBuckets), under which `clear` requires
+# the indeterminate bucket to be EMPTY whatever any per-condition action says.
 #
 # WHAT "HALT" MEANS HERE. This tool does not kill processes. It returns a verdict, and the
 # pipeline gate is the thing that obeys it: queue.ps1 REFUSES to auto-pass a gate while the
@@ -33,6 +38,21 @@
 # requires are declared in CODE (config.ps1 `$script:RequiredAndonConditions`), not in the
 # config that would otherwise be agreeing with itself, and a board missing any of them is
 # `incomplete`: its own state, named ids, exit 6, no auto-pass.
+#
+# THE FIFTH WAY OFF, and the general one - closed 2026-08-30 by making `clear` PROVEN. The
+# fourth (`on_fire`, below) was fixed by adding a `fired` list and a `warned` board, and the
+# IDENTICAL hole stayed open on the sibling key: `on_indeterminate: warn` on
+# `protected-ref-moved` with no baseline - the state this file's own README calls
+# "deliberately not a pass" - printed CLEAR at exit 0, auto-passed the dark gate, verified
+# COMPLETE, and put nothing about the unevaluated condition in the ledger. Three rounds
+# running, a fix left its sibling. The root cause was never the key: `$raised` was set only
+# for `action -eq halt` and `fired` only for `status -eq fire`, EVERY OTHER OUTCOME SET
+# NOTHING, and `clear` was what you got when nothing objected. So the verdict is no longer
+# computed by exception. Every result lands in exactly one counted bucket, the buckets must
+# sum to the conditions in scope, and `clear` requires every bucket but `evaluated_ok` to be
+# empty - so an outcome nobody enumerated (a new status, a new action word) lands in
+# `unrecognised` and REFUSES, with no branch naming it. Drill step K proves that by
+# introducing outcome words this file has never heard of.
 #
 # A FOURTH WAY OFF WAS OPEN UNTIL 2026-08-30, and it did not need the board switched off at
 # all: set `on_fire` to anything but `halt` on ONE condition. `$raised` was `action -eq halt`
@@ -70,11 +90,19 @@
 #   .\andon.ps1 -Baseline                  # record the protected refs this run starts from
 #
 # Exit codes: 0 board CLEAR | 1 usage/config error | 2 harness disabled |
-#             6 board not clear - raised, warned (a condition fired whose `on_fire` is not
-#               `halt`), incomplete (a REQUIRED condition is not declared), partial (some
-#               conditions switched off) or not-evaluated (andon off, or every declared
-#               condition switched off). All five refuse an unattended pass; only `clear`
-#               authorises one.
+#             6 board not clear. The words, and each is a bucket the census found non-empty:
+#               raised        a condition HALTED the line (its action was `halt`)
+#               warned        a condition FIRED whose `on_fire` is not `halt`
+#               indeterminate a condition COULD NOT BE EVALUATED and its `on_indeterminate`
+#                             is not `halt` - the sibling of `warned`, and a pass until
+#                             2026-08-30
+#               unaccounted   an outcome the board does not enumerate (an unknown status or
+#                             action word), or a census that does not balance
+#               incomplete    a REQUIRED condition is not declared at all
+#               partial       some conditions were evaluated and others are switched off
+#               not-evaluated nothing was evaluated (andon off, or every condition off)
+#             All seven refuse an unattended pass; only `clear` authorises one, and `clear`
+#             is decided positively by the census, not by the absence of a flag.
 
 [CmdletBinding()]
 param(
@@ -621,6 +649,25 @@ function Invoke-Predicate($cond, $ctx) {
     return (& $fn $cond $ctx)
 }
 
+function Get-CondParams($cond) {
+    # The condition's declared params, as a plain map, for the record. Empty rather than
+    # $null when there are none: "this condition declared no params" and "nobody recorded
+    # what it declared" are different facts, and the second one is the audit hole.
+    #
+    # `_`-PREFIXED KEYS ARE DROPPED. The shipped config carries several `_..._note` keys -
+    # paragraphs of prose explaining a param to the next reader - and they are documentation,
+    # not behaviour. Carrying them would put kilobytes of unchanging prose on every ledger
+    # line and bury the one field an auditor is looking for. Nothing reads them at run time;
+    # if that ever changes, this filter is the thing to revisit.
+    if (-not $cond.Contains("params") -or -not $cond["params"]) { return [ordered]@{} }
+    $out = [ordered]@{}
+    foreach ($k in @($cond["params"].Keys)) {
+        if ([string]$k -like "_*") { continue }
+        $out[[string]$k] = $cond["params"][$k]
+    }
+    return $out
+}
+
 function Invoke-AndonEvaluation {
     # THE BOARD'S OWN HONESTY CLAUSE. A verdict must distinguish EVALUATED-OK from
     # NOT-EVALUATED, because they are not the same fact and only one of them authorises an
@@ -687,7 +734,6 @@ function Invoke-AndonEvaluation {
         }
     }
     $results = @()
-    $raised = $false
     $firedIds = @()
     foreach ($c in $allConditions) {
         $id = [string]$c["id"]
@@ -696,7 +742,8 @@ function Invoke-AndonEvaluation {
         if ($condOff -or -not $enabled) {
             $why = if ($condOff) { "disabled in config" } else { "andon.enabled=false" }
             $results += [ordered]@{ id = $id; status = "disabled"; action = "none"; detail = $why
-                                    evidence = @(); predicate = [string]$c["predicate"]; incident = "" }
+                                    evidence = @(); predicate = [string]$c["predicate"]; incident = ""
+                                    params = (Get-CondParams $c) }
             continue
         }
         $r = Invoke-Predicate $c $ctx
@@ -708,25 +755,62 @@ function Invoke-AndonEvaluation {
             $action = "halt"
             if ($c.Contains("on_indeterminate")) { $action = [string]$c["on_indeterminate"] }
         }
-        if ($action -eq "halt") { $raised = $true }
-        # A FIRE IS RECORDED AS A FIRE, whatever its action. Tracked separately from $raised
-        # because they answered the same question until 2026-08-30 and they are not the same
-        # question: `fired` is what the detectors SAW, `halted` is what the config did about
-        # it. Deriving one from the other made a fire with on_fire other than `halt`
-        # disappear - board `clear`, ledger `fired=[]`, dark gate auto-passed at exit 0.
+        # A FIRE IS RECORDED AS A FIRE, whatever its action. Tracked separately from what
+        # halted because they answered the same question until 2026-08-30 and they are not
+        # the same question: `fired` is what the detectors SAW, `halted` is what the config
+        # did about it. Deriving one from the other made a fire with on_fire other than
+        # `halt` disappear - board `clear`, ledger `fired=[]`, dark gate auto-passed at
+        # exit 0. Neither list decides the verdict any more; the census below does.
         if ($r.status -eq "fire") { $firedIds += $id }
         $incident = ""
         if ($c.Contains("incident")) { $incident = [string]$c["incident"] }
         $results += [ordered]@{
             id = $id; status = $r.status; action = $action; detail = $r.detail
             evidence = @($r.evidence); predicate = [string]$c["predicate"]; incident = $incident
+            # WHERE IT LOOKED, carried in the verdict so the redirect is visible afterwards.
+            # `params.repo` on a condition points its predicate at whatever checkout it
+            # names, and the verdict's own `repo` is the BOARD's checkout, not the
+            # condition's - so a decoy `params.repo` left the board reporting a path the
+            # detector never looked at. README.md claimed the redirect was "visible
+            # afterwards" on the strength of that field; it was not, until this line.
+            params = (Get-CondParams $c)
         }
     }
     if ($OnlyId -and $results.Count -eq 0) { throw "no andon condition with id '$OnlyId'" }
 
+    # THE CENSUS - the thing that makes `clear` proven rather than defaulted. Every result is
+    # classified through config.ps1's $script:AndonBuckets into EXACTLY ONE bucket and stamped
+    # with it, so the verdict, the console and the ledger all name the same fact. The table
+    # lives in config.ps1 beside the required-condition set for the same reason that one does:
+    # gate-audit.ps1 has to read the same declaration to re-derive this verdict from a record.
+    $census = [ordered]@{}
+    $censusIds = [ordered]@{}
+    foreach ($b in (Get-AndonBucketNames)) { $census[$b] = 0; $censusIds[$b] = @() }
+    # Results whose bucket is not a DECLARED bucket at all. Unreachable while every unknown
+    # pair falls to `unrecognised`, and kept because the census's whole claim is that nothing
+    # escapes it: a future classifier that returns a name nobody declared must be caught by
+    # the count, not by somebody noticing.
+    $unaccounted = @()
+    foreach ($r in $results) {
+        $b = Get-AndonBucket ([string]$r["status"]) ([string]$r["action"])
+        $r["bucket"] = $b
+        if (-not $census.Contains($b)) {
+            $unaccounted += ("{0}: status '{1}' + action '{2}' classified as '{3}', which is not a declared census bucket" -f `
+                             $r["id"], $r["status"], $r["action"], $b)
+            continue
+        }
+        $census[$b] = [int]$census[$b] + 1
+        $censusIds[$b] = @($censusIds[$b]) + @(("{0}: {1}" -f $r["id"], $r["detail"]))
+    }
+    $censusTotal = 0
+    foreach ($k in $census.Keys) { $censusTotal += [int]$census[$k] }
+    $censusBalances = ($censusTotal -eq @($results).Count)
+
     $disabledIds = @($results | Where-Object { $_.status -eq "disabled" } | ForEach-Object { $_.id })
     $evaluated = @($results | Where-Object { $_.status -ne "disabled" }).Count
     $haltedIds = @($results | Where-Object { $_.action -eq "halt" } | ForEach-Object { $_.id })
+    $unrecognisedIds = @($results | Where-Object { $_.bucket -eq $script:AndonUnrecognisedBucket } |
+                         ForEach-Object { "{0} (status '{1}', action '{2}')" -f $_.id, $_.status, $_.action })
     $coverage = [ordered]@{
         declared     = @($results).Count
         evaluated    = $evaluated
@@ -743,44 +827,85 @@ function Invoke-AndonEvaluation {
         fired_ids    = @($firedIds)
         halted       = @($haltedIds).Count
         halted_ids   = @($haltedIds)
+        # THE CENSUS TRAVELS TOO, so gate-audit.ps1 can RE-DERIVE the verdict from the
+        # buckets instead of trusting the word `clear`. A record that carries only a status
+        # is a record whose only oracle is itself.
+        census       = $census
+        census_total = $censusTotal
+        census_ids   = $censusIds
+        unaccounted  = @($unaccounted)
+        unrecognised_ids = @($unrecognisedIds)
     }
-    $board = "clear"
+
+    # `CLEAR` STATED POSITIVELY, which is the whole correction. Not "nothing set the halt
+    # flag" - that is how an outcome nobody enumerated became a pass, twice. Every one of
+    # these has to hold:
+    #   the census balances                 - no condition landed outside a counted bucket
+    #   nothing landed outside the buckets  - the census's own escape hatch is empty
+    #   no REQUIRED condition is missing    - the board is the whole board
+    #   every bucket but evaluated_ok is 0  - including buckets added after this was written
+    #   at least one condition evaluated ok - a board that looked at nothing certifies nothing
+    $nonClearBuckets = @()
+    foreach ($k in $census.Keys) {
+        if ($k -eq $script:AndonClearBucket) { continue }
+        if ([int]$census[$k] -gt 0) { $nonClearBuckets += $k }
+    }
+    $isClear = ($censusBalances -and (@($unaccounted).Count -eq 0) -and (@($missingIds).Count -eq 0) -and
+                (@($nonClearBuckets).Count -eq 0) -and ([int]$census[$script:AndonClearBucket] -ge 1))
+
+    $board = ""
     $why = ""
-    if (@($missingIds).Count -gt 0) {
+    if ($isClear) {
+        $board = "clear"
+    } elseif ((-not $censusBalances) -or (@($unaccounted).Count -gt 0)) {
+        # THE ACCOUNTING ITSELF IS BROKEN, so no verdict about the line can be trusted. This
+        # outranks everything, including `incomplete`: a board that cannot say where its own
+        # results went cannot report any board's verdict.
+        $board = "unaccounted"
+        $reasons = @($unaccounted)
+        if (-not $censusBalances) {
+            $reasons += ("the census counted {0} outcome(s) for {1} condition(s) in scope - something landed in no bucket" -f `
+                         $censusTotal, @($results).Count)
+        }
+        $why = ($reasons -join "; ")
+    } elseif (@($missingIds).Count -gt 0) {
         $board = "incomplete"
         $why = ("{0} of {1} REQUIRED condition(s) are not declared in the config: {2}" -f
                 @($missingIds).Count, @(Get-RequiredAndonConditionIds).Count, (@($missingIds) -join ", "))
-    } elseif ($raised) {
+    } elseif (@($haltedIds).Count -gt 0) {
         $board = "raised"
-    } elseif (@($firedIds).Count -gt 0) {
-        # A FIRED CONDITION IS NOT A CLEAR BOARD, and this is the whole of the 2026-08-30
-        # `on_fire` correction. `clear` is the only word that authorises an unattended pass,
-        # so if a fire could leave the board clear then `on_fire` was a per-condition switch
-        # that opened the gates - which is the thing the board exists to prevent, spelled
-        # differently. `warned` outranks `partial` and `not-evaluated` for the headline word
-        # because a detector that SAW something is more urgent than one that was switched
-        # off; the coverage counters carry both facts either way, and
-        # Test-GateAuditComplete refuses on each of them independently of the word.
-        $board = "warned"
-        $why = ("{0} condition(s) FIRED and their on_fire is not 'halt': {1}. A fired condition is not a clear board - no unattended gate passes it." -f
-                @($firedIds).Count, (@($firedIds) -join ", "))
-    } elseif ($evaluated -eq 0) {
-        $board = "not-evaluated"
-        # The "no conditions declared at all" case cannot land here while the required set is
-        # non-empty - an empty board is `incomplete` above, naming all five. The branch stays
-        # so that emptying the required set in code (a deliberate act, visible in a diff)
-        # still produces a true sentence rather than a confident wrong one.
-        $why = if (@($results).Count -eq 0) {
-                   "no andon conditions are declared - the board cannot certify anything"
-               } elseif (-not $enabled) {
-                   "andon.enabled=false - " + @($results).Count + " condition(s) declared, none evaluated"
-               } else {
-                   "every declared condition is disabled in config - none evaluated"
-               }
-    } elseif (@($disabledIds).Count -gt 0) {
-        $board = "partial"
-        $why = ("{0} of {1} condition(s) are switched off and were not evaluated: {2}" -f
-                @($disabledIds).Count, @($results).Count, (@($disabledIds) -join ", "))
+        $why = ("{0} condition(s) HALTED the line: {1}" -f @($haltedIds).Count, (@($haltedIds) -join ", "))
+    } else {
+        # EVERY REMAINING REASON IS A NON-EMPTY BUCKET, and its word comes from the bucket
+        # map in severity order - so a bucket added to that map later gets a word, refuses,
+        # and needs no branch here. The one special case is spelled out rather than implied:
+        # a board whose ONLY non-empty bucket is `disabled` evaluated nothing, and
+        # "everything is switched off" is `not-evaluated`, not `partial` (partial means some
+        # conditions did look and others were switched off).
+        foreach ($k in $script:AndonBucketBoard.Keys) {
+            if ($k -eq $script:AndonClearBucket) { continue }
+            if ([int]$census[$k] -lt 1) { continue }
+            if ($k -eq "disabled" -and [int]$census[$script:AndonClearBucket] -lt 1) { break }
+            $board = [string]$script:AndonBucketBoard[$k]
+            $why = ("{0} condition(s) landed in the '{1}' bucket - that is not a clear board, and no unattended gate passes it: {2}" -f `
+                    [int]$census[$k], $k, (@($censusIds[$k]) -join "; "))
+            break
+        }
+        if (-not $board) {
+            $board = "not-evaluated"
+            # The "no conditions declared at all" case cannot land here while the required
+            # set is non-empty - an empty board is `incomplete` above, naming all five. The
+            # branch stays so that emptying the required set in code (a deliberate act,
+            # visible in a diff) still produces a true sentence rather than a confident
+            # wrong one.
+            $why = if (@($results).Count -eq 0) {
+                       "no andon conditions are declared - the board cannot certify anything"
+                   } elseif (-not $enabled) {
+                       "andon.enabled=false - " + @($results).Count + " condition(s) declared, none evaluated"
+                   } else {
+                       "every declared condition is disabled in config - none evaluated"
+                   }
+        }
     }
     return [ordered]@{
         evaluated_at = [int64][System.DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
@@ -846,15 +971,32 @@ if ($Evaluate) {
         if ($verdict.why) { Write-Host ("  " + $verdict.why) -ForegroundColor Yellow }
         foreach ($r in $verdict.conditions) {
             $colour = "Green"
-            if ($r.status -eq "fire") { $colour = "Red" }
-            elseif ($r.status -eq "indeterminate") { $colour = "Yellow" }
-            elseif ($r.status -eq "disabled") { $colour = "DarkGray" }
-            Write-Host ("  [{0,-13}] {1,-30} {2}" -f $r.status, $r.id, $r.detail) -ForegroundColor $colour
+            if ($r.bucket -ne $script:AndonClearBucket) { $colour = "Yellow" }
+            if ($r.status -eq "fire" -or $r.bucket -eq $script:AndonUnrecognisedBucket) { $colour = "Red" }
+            if ($r.status -eq "disabled") { $colour = "DarkGray" }
+            # THE BUCKET IS PRINTED BESIDE THE STATUS. `[indeterminate] protected-ref-moved`
+            # under a green CLEAR headline is exactly what this board printed on 2026-08-30,
+            # and a reader had no way to tell from the line whether it counted. Now it says
+            # which bucket it landed in, and the headline is derived from those buckets.
+            Write-Host ("  [{0,-13}] {1,-30} {2,-14} {3}" -f $r.status, $r.id, ("-> " + $r.bucket), $r.detail) -ForegroundColor $colour
             foreach ($e in $r.evidence) { Write-Host ("      - {0}" -f $e) -ForegroundColor DarkGray }
         }
         Write-Host ("  coverage: {0} declared, {1} evaluated, {2} switched off, {3} of {4} required MISSING" -f
                     $verdict.coverage.declared, $verdict.coverage.evaluated, $verdict.coverage.disabled,
                     $verdict.coverage.missing, $verdict.coverage.required) -ForegroundColor DarkGray
+        # THE CENSUS, PRINTED. `clear` is the state where every bucket but evaluated_ok is
+        # zero, so the operator should be able to read that claim off the console rather
+        # than take the headline word for it.
+        $censusParts = @()
+        foreach ($k in $verdict.coverage.census.Keys) { $censusParts += ("{0}={1}" -f $k, [int]$verdict.coverage.census[$k]) }
+        Write-Host ("  census  : {0} (total {1} of {2} in scope)" -f ($censusParts -join ", "),
+                    $verdict.coverage.census_total, $verdict.coverage.declared) -ForegroundColor DarkGray
+        if (@($verdict.coverage.unrecognised_ids).Count -gt 0) {
+            Write-Host ("  UNRECOGNISED outcome(s): {0}" -f (@($verdict.coverage.unrecognised_ids) -join ", ")) -ForegroundColor Red
+        }
+        if (@($verdict.coverage.unaccounted).Count -gt 0) {
+            Write-Host ("  UNACCOUNTED: {0}" -f (@($verdict.coverage.unaccounted) -join "; ")) -ForegroundColor Red
+        }
         if ([int]$verdict.coverage.missing -gt 0) {
             # Named, not counted. "4 missing" sends an operator to the config to guess; the
             # ids send them to the four lines that are gone.
@@ -872,7 +1014,16 @@ if ($Evaluate) {
         if ([bool](Get-HarnessSetting "andon.raise.stderr" $true)) {
             # HALTED AND FIRED BOTH, de-duplicated. Taking only `action -eq halt` meant a
             # `warned` board reached stderr with nothing but its board word.
-            $fired = @(@($verdict.coverage.halted_ids) + @($verdict.coverage.fired_ids) | Select-Object -Unique)
+            # EVERY NON-CLEAR BUCKET, not only fired/halted. Taking those two meant an
+            # `indeterminate` or `unrecognised` board reached stderr with nothing but its
+            # board word - the same omission, one bucket over.
+            $fired = @(@($verdict.coverage.halted_ids) + @($verdict.coverage.fired_ids))
+            foreach ($k in $verdict.coverage.census.Keys) {
+                if ($k -eq $script:AndonClearBucket) { continue }
+                if ([int]$verdict.coverage.census[$k] -lt 1) { continue }
+                $fired += @($verdict.coverage.census_ids[$k])
+            }
+            $fired = @($fired | Where-Object { $_ } | Select-Object -Unique)
             if (@($fired).Count -eq 0 -and $verdict.why) { $fired = @($verdict.why) }
             [Console]::Error.WriteLine(("ANDON " + $verdict.board.ToUpper() + ": ") + (@($fired) -join ", "))
         }
