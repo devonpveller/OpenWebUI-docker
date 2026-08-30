@@ -27,7 +27,9 @@ Everything else in here is internal and may change without notice.
 | `sync-worktree-env.ps1 -Id <id>` | re-copy runtime env files when the main checkout's are newer |
 | `queue.ps1` | the pipeline: propose → confirm → submit → test → release → review → merge |
 | `lease.ps1` | named leases for SHARED RUNTIME only (Docker, GPU, ports, live DBs) |
+| `dispatch.ps1` | RUN the work: role+profile → runner → submit, follow, one outcome + exit code |
 | `verify-merge-protocol.ps1` | the executable drill over the whole protocol |
+| `verify-dispatch.ps1` | the executable drill over the dispatch layer (`-Live` adds a real probe) |
 | `harness.config.json` | the configuration (see below) |
 | `config.py` | the reader other Python code imports (`bridge.py` does) |
 
@@ -37,12 +39,33 @@ Internal: `common.ps1` (composition root), `git-io.ps1` (git facts), `resolve.ps
 The dependency direction is one-way and deliberate:
 
 ```
-queue.ps1 / lease.ps1 / new-worktree.ps1
+queue.ps1 / lease.ps1 / new-worktree.ps1 / dispatch.ps1
         |
      common.ps1 ──> resolve.ps1 ──> git-io.ps1   (facts about this repository)
                           └──────> config.ps1    (files + environment -> settings)
                     anchor.ps1                   (the shape of an anchor; owns no state)
 ```
+
+## Runners: resolving one and running one are two different things
+
+`config.ps1`'s `Resolve-RoleTarget` answers *which* runner and model a role uses.
+`dispatch.ps1` is what CALLS it. Until 2026-08-30 only the first half existed, which
+is why PLAN.md's A11 ("the little-coder runner is wired, status: unproven") read as
+optimistic: the wiring was a config entry naming a door — `http://127.0.0.1:8090` —
+that `coder/docker-compose.yml` never published. See
+`harness.config.json`'s `_why_docker_exec` for the transport decision and its revert path.
+
+A runner record therefore carries topology (`transport`, `container`, `base_url`, and the
+API paths) as well as policy, readable through `Get-HarnessRunner` / `config.runner()`.
+`test_harness_config.py` asserts that a declared transport corresponds to a door that
+actually exists — a published `127.0.0.1:<port>` for `http`, a real `container_name:`
+for `docker-exec` — so a config can no longer name one that does not.
+
+`dispatch.ps1` returns ONE outcome shape whatever the runner, and its exit code
+distinguishes "the dispatch worked" from "the work is right": `0` acceptance passed,
+`3` acceptance failed, `4` no checkable signal, `1` dispatch itself failed. The
+little-coder daemon runs the acceptance command itself, so the agent never grades its
+own work.
 
 `config.ps1` knows nothing about git, worktrees, queues or leases — which is what
 lets another distribution retarget the toolkit by editing JSON instead of code.
