@@ -275,3 +275,54 @@ def test_this_reader_agrees_with_the_harness_python_reader():
         assert set(harness_config.runner_names()) == set(reg.specs)
     finally:
         sys.modules.pop("_harness_config", None)
+
+# -- the dispatcher must cover the WHOLE protocol ----------------------------
+async def test_dispatch_forwards_every_method_the_protocol_declares(tmp_path):
+    """A dispatcher that covers only the methods someone remembered is worse than none.
+
+    `RunnerDispatch` stands between every call site and every implementation, so a method
+    added to `WorkerHarness` and not forwarded here would not fail at import or at review -
+    it would AttributeError in production, on the one dispatch that used it. This walks the
+    Protocol itself, so the guard cannot fall behind the thing it guards.
+    """
+    from app.worker import harness as harness_mod
+
+    protocol_methods = sorted(
+        n for n in vars(harness_mod.WorkerHarness)
+        if not n.startswith("_") and callable(vars(harness_mod.WorkerHarness)[n])
+    )
+    assert protocol_methods, "the WorkerHarness protocol declares no methods - check this test"
+
+    calls: list[str] = []
+
+    class _Recorder:
+        def __getattr__(self, name):
+            async def _call(*a, **kw):
+                calls.append(name)
+                return None
+            return _call
+
+    reg = RunnerRegistry.load(registry_file=_registry_file(tmp_path, {}),
+                              fallback_urls="http://w1:8090")
+    d = RunnerDispatch({"little-coder": _Recorder()}, reg)
+
+    # One positional argument per method beyond base_url, taken from the protocol's own
+    # signature so this does not encode a second, drifting copy of the surface.
+    import inspect
+
+    for name in protocol_methods:
+        assert hasattr(d, name), f"RunnerDispatch does not forward {name}()"
+        sig = inspect.signature(getattr(harness_mod.WorkerHarness, name))
+        params = [
+            p for p in sig.parameters.values()
+            if p.name not in ("self",)
+            and p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
+            and p.default is p.empty
+        ]
+        args = ["http://w1:8090"] + ["x"] * (len(params) - 1)
+        await getattr(d, name)(*args)
+
+    assert calls == protocol_methods, (
+        "every protocol method must reach the implementation the registry names; "
+        f"forwarded {calls}, expected {protocol_methods}"
+    )
