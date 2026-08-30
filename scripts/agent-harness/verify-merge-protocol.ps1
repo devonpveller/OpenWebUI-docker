@@ -17,9 +17,35 @@
 # is never switched (a bridge turn could land mid-switch). Idempotent: the preamble clears
 # anything a previous failed run left behind.
 #
+# SINGLE FLIGHT (added 2026-08-30, after this drill was measured at 2/8 green). Everything
+# above is only true of ONE running copy. This is the one component in the toolkit that
+# mutates shared git state under FIXED global names - it creates and force-deletes
+# `drill/verify-d`, `work/drilla`, `work/drillb` and three worktree paths in the OPERATOR'S
+# checkout, and its preamble deletes them unconditionally so a previous crash cannot wedge
+# it. Two copies therefore destroy each other. Measured burst, 8 consecutive runs on a
+# machine where other agents were also running the harness: 66, 66, 63, 59, 39, 34, 40 of 66
+# - and a second `verify-merge-protocol.ps1` (pid 137560) was caught running concurrently in
+# `Get-CimInstance Win32_Process` mid-burst. Worse than the noise, the collision left the
+# operator's checkout MID-REBASE, because `git -C <path>` ASCENDS when <path> is not a
+# worktree root: once a leftover plain directory sits at .claude\worktrees\wt-drillb, every
+# `git -C $wtB ...` below operates on the main checkout instead. So there are two guards,
+# and they are different guards: a LEASE stops a second copy starting, and
+# Test-IsWorktreeRoot stops a failed provision from redirecting git at the operator.
+#
+# lease-names.conf says "git state needs no lease (the worktree is the isolation)". That is
+# right for every other caller and wrong here: there is no worktree to isolate a run whose
+# job is to CREATE worktrees. `merge-protocol-drill` is listed there for this reason.
+#
+#   -LockProbe   take the single-flight decision, print it, and exit WITHOUT touching
+#                anything. Exit 0 = would have run, 3 = another copy holds it. This is how
+#                test_drill_single_flight.py exercises the guard without a 90-second run.
+#
 # NOTE: no `2>&1` on any git call, and the helpers flip $ErrorActionPreference themselves. In
 # PS5.1, redirecting OR capturing a native command's stderr under 'Stop' turns git's ordinary
 # progress chatter into a terminating error - this script died on exactly that once.
+
+[CmdletBinding()]
+param([switch]$LockProbe)
 
 $ErrorActionPreference = "Continue"   # native git stderr must never be fatal here
 # The toolkit is wherever THIS script is - it is part of the module. Rebuilding the path
@@ -34,6 +60,36 @@ $repo = Get-MainCheckout
 if (-not $repo) { throw "cannot locate the main checkout - run this from inside the repository" }
 $QueueDir = Join-Path (Get-SharedStateDir) "queue"
 $results = @()
+
+# ---- single flight: refuse to start rather than corrupt a run already in progress -------
+# Held for the whole drill and released at the summary. A crashed run does NOT strand it:
+# lease.ps1 expires it after the TTL and `lease.ps1 -Takeover -Name merge-protocol-drill`
+# reclaims an EXPIRED one only, so the recovery path cannot be used to jump a live run.
+$LeaseScript = Join-Path $wtScripts "lease.ps1"
+$LeaseName = "merge-protocol-drill"
+$LeaseOwner = "verify-merge-protocol-$PID"
+$LeaseHeld = $false
+function Release-DrillLease {
+    if ($script:LeaseHeld) {
+        & $LeaseScript -Release -Name $LeaseName -Owner $LeaseOwner | Out-Null
+        $script:LeaseHeld = $false
+    }
+}
+& $LeaseScript -Acquire -Name $LeaseName -Owner $LeaseOwner -TtlMin 20 | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    Write-Host ""
+    Write-Host "REFUSED: another copy of this drill is running (lease '$LeaseName' is held)." -ForegroundColor Yellow
+    Write-Host "  This drill deletes and recreates FIXED branch and worktree names in the" -ForegroundColor DarkGray
+    Write-Host "  operator's checkout, so two copies destroy each other's run and can leave" -ForegroundColor DarkGray
+    Write-Host "  the main checkout mid-rebase. Wait, or:  lease.ps1 -Status" -ForegroundColor DarkGray
+    exit 3
+}
+$LeaseHeld = $true
+if ($LockProbe) {
+    Write-Host "LOCK PROBE: acquired '$LeaseName' - a real run would proceed. Nothing was touched." -ForegroundColor Green
+    Release-DrillLease
+    exit 0
+}
 
 function Step($n, $text) { Write-Host "`n=== $n. $text ===" -ForegroundColor Cyan }
 function Check($label, $ok, $detail = "") {
@@ -106,6 +162,22 @@ foreach ($id in @("drilla", "drillb")) {
 }
 $wtA = Join-Path $repo ".claude\worktrees\wt-drilla"
 $wtB = Join-Path $repo ".claude\worktrees\wt-drillb"
+# Test-Path above says the DIRECTORY exists; it does not say git will treat it as a working
+# tree. If provisioning half-failed and left a plain directory, `git -C $wtA ...` ascends to
+# the operator's checkout and every mutation below - up to and including `rebase` - lands
+# there. That happened. Stop here instead: a wrong answer from this drill is recoverable, a
+# rebase in the operator's checkout is the thing the whole toolkit exists to prevent.
+foreach ($p in @($wtA, $wtB)) {
+    if (-not (Test-IsWorktreeRoot $p)) {
+        Write-Host ""
+        Write-Host "ABORT: '$p' is not a git worktree root." -ForegroundColor Red
+        Write-Host "  git -C would ASCEND from there to the main checkout, so continuing would" -ForegroundColor DarkGray
+        Write-Host "  run this drill's commits, rebases and branch deletions in the operator's" -ForegroundColor DarkGray
+        Write-Host "  tree. Remove the leftover path and re-run." -ForegroundColor DarkGray
+        Release-DrillLease
+        exit 1
+    }
+}
 
 Step 2 "both edit THE SAME file with conflicting intent, and commit"
 Set-Content -Path (Join-Path $wtA "DRILL-NOTE.md") -Encoding ascii -Value @(
@@ -546,4 +618,5 @@ $fail = @($results | Where-Object { -not $_.pass })
 $results | ForEach-Object { Write-Host ("  {0,-6} {1}" -f $(if ($_.pass) { "PASS" } else { "FAIL" }), $_.check) }
 Write-Host ("`n{0}/{1} checks passed" -f ($results.Count - $fail.Count), $results.Count) `
     -ForegroundColor $(if ($fail.Count) { "Red" } else { "Green" })
+Release-DrillLease
 if ($fail.Count) { exit 1 }

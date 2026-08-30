@@ -15,13 +15,35 @@ The tester PASSED the item. The finding was true, out of scope, and cost nothing
 ignore - which is precisely the finding class that evaporates into prose (dark-factory
 PLAN §0 A5). This file is that finding made executable and owned by the line.
 
-WHAT WOULD HAVE CAUGHT IT OTHERWISE: nothing. check-project-configs.ps1's drift
-verifier (lines 60-102) builds `$known[container] = project` from `planes[]` and
-compares it to rendered `container_name` values. It reads the CONTAINER rows. It never
-opens `projects[*].file` or `projects[*].env_file`, and it only runs when a .yml is
-staged - so a rename committed on its own, or a rename plus a compose edit that still
-renders, both pass it. stack-watchdog.ps1 CONSUMES those two fields (line 139-140,
-Invoke-PlaneCompose) and would fail at repair time, on the host, at 3am.
+WHAT WOULD HAVE CAUGHT IT OTHERWISE - MEASURED, not asserted (corrected 2026-08-30).
+This docstring used to say "nothing", and that was FALSE. A verifier disproved it by
+running the pre-existing check-watchdog-repair-targets.ps1 against a seeded sandbox. The
+honest matrix, reproduced on every run of scripts/agent-harness/seeded_regression_drill.py
+(sections 3-6, four seeds x two checks, exit codes asserted):
+
+    seed                                              pre-existing   this check
+    A  rename, inventory untouched                     CAUGHT         caught
+    B  half-fixed rename (file updated, -f not)        missed         caught
+    C  rename in a project no managed container
+       points at (agent-org)                           missed         caught
+    D  env_file points at a file that is not there     missed         caught
+
+So this check is NOT the only thing standing between the repo and the tester's rename;
+for seed A it is the second line, not the first. Its genuine remainder is B, C and D.
+Why each pre-existing reader stops where it does:
+  * check-project-configs.ps1 (the pre-commit hook's drift verifier, lines 60-102) builds
+    `$known[container] = project` from `planes[]` and compares it to rendered
+    `container_name` values. It reads the CONTAINER rows: it never opens
+    `projects[*].file` or `projects[*].env_file`, and it only runs when a .yml is staged.
+    It catches none of the four seeds.
+  * check-watchdog-repair-targets.ps1 does `Test-Path` on `projects[*].file` - but it
+    reaches a project only by resolving a container the watchdog claims to self-heal, so a
+    project with no managed row (agent-org) is invisible to it; and it never reads
+    `env_file`, nor the `-f` argument inside the `compose` command, so B and D pass it.
+    It is also not wired into pre-commit (its own header says so) - it is an on-demand
+    script, so even for seed A nothing catches the commit that makes the mistake.
+stack-watchdog.ps1 CONSUMES both fields (line 139-140, Invoke-PlaneCompose) and would
+fail at repair time, on the host, at 3am.
 
 WHAT IT CHECKS, and why each rule is here rather than being a nicety:
   1. every non-null projects[*].file exists            - the rename the tester named

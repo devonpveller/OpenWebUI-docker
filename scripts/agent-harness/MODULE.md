@@ -27,7 +27,7 @@ Everything else in here is internal and may change without notice.
 | `sync-worktree-env.ps1 -Id <id>` | re-copy runtime env files when the main checkout's are newer |
 | `queue.ps1` | the pipeline: propose → confirm → submit → test → release → review → merge |
 | `lease.ps1` | named leases for SHARED RUNTIME only (Docker, GPU, ports, live DBs) |
-| `verify-merge-protocol.ps1` | the executable drill over the whole protocol |
+| `verify-merge-protocol.ps1` | the executable drill over the whole protocol (single-flight: holds the `merge-protocol-drill` lease, exit 3 when held) |
 | `durable_checks.py` | the bank: tester finding -> executable check the line owns (shared registry) |
 | `seeded_regression_drill.py` | the executable drill over the bank: seed a regression, prove RED then GREEN |
 | `harness.config.json` | the configuration (see below) |

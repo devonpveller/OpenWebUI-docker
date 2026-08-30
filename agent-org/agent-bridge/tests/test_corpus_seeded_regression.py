@@ -107,15 +107,24 @@ def _git(repo: Path, *args: str) -> None:
 
 def _copy_tree(dest: Path) -> None:
     """The tree the check reads. Its file list is DERIVED from the inventory, so the sandbox
-    cannot quietly stop standing in for the thing it represents."""
+    cannot quietly stop standing in for the thing it represents.
+
+    The real .env is NEVER copied, and this sandbox is the reason it matters more here than
+    in the harness twin: `build_remote` COMMITS the tree. Following env_file literally put
+    live secret values into a git object, and "it is under %TEMP% and deleted afterwards" is
+    not the standard (dark-factory PLAN section C.2, class 4: no secret VALUES anywhere they
+    persist or travel). Rule 4 of the check accepts <path>.example, so the example file
+    exercises it exactly as well."""
     inv = json.loads((AI_STACK / "scripts/lib/stack-services.json").read_text(encoding="utf-8"))
     wanted = ["scripts/lib/stack-services.json",
               "scripts/checks/check_stack_services_paths.py", ".gitmodules", ".env.example"]
     for row in inv.get("projects", {}).values():
-        for key in ("file", "env_file"):
-            v = (row or {}).get(key)
-            if v:
-                wanted.append(str(v).replace("\\", "/"))
+        f = (row or {}).get("file")
+        if f:
+            wanted.append(str(f).replace("\\", "/"))
+        ef = (row or {}).get("env_file")
+        if ef:
+            wanted.append(str(ef).replace("\\", "/") + ".example")
     for rel in dict.fromkeys(wanted):
         src = AI_STACK / rel
         if src.is_file():

@@ -46,6 +46,30 @@ function Get-CurrentBranch {
     return $branch
 }
 
+function Test-IsWorktreeRoot {
+    # Is this path the ROOT of a working tree, rather than merely a directory that happens
+    # to sit inside one?
+    #
+    # WHY THIS IS A FACT WORTH OWNING (2026-08-30). `git -C <dir>` chdirs and then ASCENDS
+    # to the nearest enclosing repository. So when a worktree failed to provision - or a
+    # previous run left a plain directory behind at .claude/worktrees/wt-x - every
+    # subsequent `git -C <that path> ...` silently operates on the MAIN CHECKOUT instead of
+    # on nothing. verify-merge-protocol.ps1 hit exactly this: its `git -C $wtB rebase` ran
+    # in the operator's checkout and left it mid-rebase (.git/rebase-merge, head-name
+    # refs/heads/refactor/ai-stack-cleanup). Git does not consider that an error, so there
+    # is no exit code to trust; the containment has to be an explicit assertion before the
+    # first mutating call, which is what this function is for.
+    param([string]$Path)
+    if (-not $Path -or -not (Test-Path -LiteralPath $Path)) { return $false }
+    $top = (Invoke-GitCapture @("-C", $Path, "rev-parse", "--show-toplevel") | Select-Object -First 1)
+    if ($LASTEXITCODE -ne 0 -or -not $top) { return $false }
+    # Compare resolved full paths: git answers with forward slashes, callers pass Windows
+    # separators, and either side may be a substituted or differently-cased drive path.
+    $a = [System.IO.Path]::GetFullPath((Resolve-Path -LiteralPath $Path).Path)
+    $b = [System.IO.Path]::GetFullPath($top.Trim().Replace("/", [string][char]92))
+    return ($a.TrimEnd([char]92) -eq $b.TrimEnd([char]92))
+}
+
 function Get-WorktreeHoldingBranch {
     # Which worktree, if any, has this branch checked out. A branch checked out anywhere
     # CANNOT be a merge target: git refuses a second checkout, and force-moving the ref
