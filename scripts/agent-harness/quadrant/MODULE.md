@@ -17,11 +17,11 @@ and how confident a reader may be at this sample size.
 
 > A comparison silently missing two of four quadrants reads as a completed comparison.
 
-Three mechanisms make that unrepresentable (stated as data in `schema.json`, enforced in
-`record.py` / `report.py`, and each proven to bite by `prove_guards.py`):
+Four mechanisms make that unrepresentable (stated as data in `schema.json`, enforced in
+`record.py` / `report.py` / `cli.py`, and each proven to bite by `prove_guards.py`):
 
-1. **The report is built from the MATRIX, never from the records.** Every configured cell
-   gets a row; a cell with no record renders `NOT RUN - no record produced`.
+1. **The report is built from the MATRIX, never from the records.** Every cell in the
+   matrix gets a row; a cell with no record renders `NOT RUN - no record produced`.
 2. **Evidence-gated admission.** `completed` is admitted only when timestamps, a non-zero
    wall clock, evidence paths that EXIST on disk, and acceptance entries carrying the
    command and its exit code all attest it. A status field is a claim; the artifacts are
@@ -29,6 +29,24 @@ Three mechanisms make that unrepresentable (stated as data in `schema.json`, enf
 3. **One item, proven by digest.** Every record carries the sha256 of the item spec,
    anchor and planted bytes it ran. A record from a different item is refused, so "the
    same anchored item" is mechanical rather than assumed.
+4. **The matrix is DECLARED per results set, and only ever grows.** Added 2026-08-30 after
+   a verifier reproduced this module's own failure mode through its shipped CLI: mechanism
+   1 is only as strong as what "the matrix" is, and building it from today's configuration
+   let a one-line edit (`quadrant.runners: ["claude-code"]`) drop the two never-run cells
+   out of the table - the same evidence then read `COMPARED 2/2`, complete, exit 0. A
+   comparison is now over the union of the results set's pinned `matrix.json`, the
+   configured cells, and every cell a record on disk names. A declared cell that is no
+   longer configured renders `OFF MATRIX`, carries whatever reason its records gave, and
+   counts against completeness.
+
+### What mechanism 4 does not defend against
+
+A comparison begun in a **fresh** results directory with narrow axes is a genuinely narrow
+comparison, and it says so: `COMPARED 2/2` over a two-cell declared matrix, with the axes
+written into `matrix.json`. Laundering requires reusing an existing evidence set under a
+smaller matrix, and that is what the lock stops. The one remaining move - delete
+`matrix.json` **and** the records of the cells being hidden - is a deletion of evidence
+rather than a report that lies about it.
 
 ## Public surface
 
@@ -36,13 +54,13 @@ Three mechanisms make that unrepresentable (stated as data in `schema.json`, enf
 |---|---|
 | `python -m quadrant.cli preflight` | one line per configured cell: READY, or BLOCKED with the reason. Exit 0 when all ready, 1 otherwise. |
 | `python -m quadrant.cli run [--runner R] [--target T] [--item I]` | runs the selected cells, writes one run directory each, then renders the FULL-matrix report. Exit 0 iff every cell it attempted completed. |
-| `python -m quadrant.cli report` | re-renders from the accumulated records. **Exit 0 only when all four cells produced an admitted comparable outcome**; 1 while the comparison is incomplete. |
-| `python -m quadrant.prove_guards` | mutation drill: breaks each guard in turn and requires its test to go RED. Exit 0 iff every guard bites. |
-| `python -m pytest scripts/agent-harness/test_quadrant.py -q` | 33 checks over the matrix, admission, the report's completeness invariant, and one end-to-end fixture run. |
+| `python -m quadrant.cli report` | re-renders from the accumulated records. **Exit 0 only when every DECLARED cell produced an admitted comparable outcome**; 1 while the comparison is incomplete; 2 misconfigured. Narrowing the configured axes cannot raise this to 0 (mechanism 4). |
+| `python -m quadrant.prove_guards` | mutation drill: breaks each guard in turn and requires its test to go RED. Exit 0 iff every guard bites; prints `N/N guards proven to bite`. |
+| `python -m pytest scripts/agent-harness/test_quadrant.py -q` | the module's suite - the matrix, admission, the report's completeness invariant, the declared-matrix lock, and one end-to-end fixture run. The count is whatever the command prints; on 2026-08-30 it printed `39 passed`. |
 | `quadrant/guards.py <tests\|unmodified> --item <id>` | the acceptance checks themselves, run by the harness with the workspace as CWD. |
 
 Artifacts: `<repo>/.quadrant/runs/<utc>-<runner>-<target>/{record.json,transcript.txt,manifest.json,workspace/}`
-plus `COMPARISON.md` and `comparison.json` at the runs root. Gitignored — evidence for a
+plus `COMPARISON.md`, `comparison.json` and `matrix.json` (the declared matrix, append-only) at the runs root. Gitignored — evidence for a
 run, not source.
 
 ## Configuration
@@ -72,6 +90,13 @@ workspace references it.
 
 ## Known limits (as of 2026-08-30)
 
+- **The RUNNER axis has zero coverage, so U4's Validated by column is UNMET.** Both cells
+  that ran are `claude-code`; this is a comparison of the TARGET axis alone. What the
+  module can support today is a decision about `self` vs `project` at n=1. It cannot
+  support any statement about `little-coder` vs `claude-code`, and the report says so
+  rather than implying otherwise by silence. See
+  `documentation/notes/u4quad-findings.md` for the park, its reason, and what would lift
+  it.
 - **Two of four cells have never run.** `little-coder x *` is blocked: the running
   container publishes no ports, so the API `harness.config.json` declares
   (`http://127.0.0.1:8090`) has no route from the host. The harness reports this as

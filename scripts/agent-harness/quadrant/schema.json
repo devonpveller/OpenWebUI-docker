@@ -50,6 +50,26 @@
       "requires_evidence": false
     }
   },
+  "declared_matrix_lock": "matrix.json",
+  "_declared_matrix_lock_why": [
+    "MEASURED 2026-08-30, as a defect in mechanism 1 above, found by a verifier and not by",
+    "us. 'The report is built from the MATRIX' is only as strong as what 'the matrix' is.",
+    "Building it from the CURRENTLY configured axes moves the failure one layer up:",
+    "narrowing quadrant.runners to a single entry - one line of config - dropped the two",
+    "never-run cells out of the table, and the same evidence rendered COMPARED 2/2,",
+    "complete, exit 0. The module's own stated failure mode, reachable by configuration.",
+    "",
+    "So a comparison is over the DECLARED matrix of a results SET, pinned in this file's",
+    "named lock inside the results directory and APPEND-ONLY. cli._declared_matrix unions",
+    "the lock with the configured cells and with every cell a record on disk names, and",
+    "hands that union to report.render. A declared cell with no configuration renders",
+    "OFF MATRIX and counts against completeness. Adding a runner grows the comparison;",
+    "removing one cannot shrink it.",
+    "",
+    "The bound, stated so nobody over-reads it: a comparison begun in a FRESH results",
+    "directory with narrow axes is genuinely narrow and says so. What this stops is",
+    "reusing an existing evidence set under a smaller matrix."
+  ],
   "comparable_runner_statuses": [
     "proven",
     "unproven"

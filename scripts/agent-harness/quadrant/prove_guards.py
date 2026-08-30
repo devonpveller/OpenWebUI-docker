@@ -88,6 +88,38 @@ MUTATIONS: List[Tuple[str, str, str, str, str]] = [
      "        if False:",
      "test_a_refused_record_is_reported_as_not_compared_never_dropped",
      "a record refused at admission is reported as REFUSED, never quietly counted"),
+
+    # --- added 2026-08-30 after a verifier reproduced the module's own failure mode
+    # --- through its shipped CLI. Mechanism 1 was only as strong as what "the matrix" is.
+
+    ("report.py",
+     "    keys = declared_keys(quadrants, records, declared)",
+     "    keys = [q.key for q in quadrants]",
+     "test_a_declared_cell_survives_a_narrowed_configuration",
+     "the row set is the DECLARED matrix, not today's configuration - narrowing the axes "
+     "cannot shrink the comparison"),
+
+    ("cli.py",
+     "    records = _load_records(results_dir)",
+     "    records = [r for r in _load_records(results_dir)\n"
+     "               if r.get(\"quadrant\") in {q.key for q in quadrants}]",
+     "test_narrowing_the_axes_cannot_launder_a_partial_comparison_through_the_cli",
+     "THE SHIPPED DEFECT, restored verbatim: filtering records to the configured matrix "
+     "let a one-line config edit turn a 2/4 comparison into a complete 2/2 one at exit 0"),
+
+    ("cli.py",
+     "    declared = _declared_matrix(results_dir, quadrants, records)",
+     "    declared = None",
+     "test_the_matrix_lock_holds_a_cell_that_lost_both_its_config_and_its_record",
+     "the results set's pinned matrix.json is load-bearing on its own - it remembers a "
+     "cell that lost both its configuration and its record"),
+
+    ("report.py",
+     "    if said:",
+     "    if False:",
+     "test_narrowing_the_axes_cannot_launder_a_partial_comparison_through_the_cli",
+     "an off-matrix cell carries the reason its records gave - a cell that leaves the "
+     "configuration must not also lose the sentence explaining why it never ran"),
 ]
 
 

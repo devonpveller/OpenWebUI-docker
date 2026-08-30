@@ -26,6 +26,28 @@ report, so the artifact on disk never shows a comparison of one.
 file. The failure mode U4 has to survive is a two-of-four comparison that reads as done;
 an exit code that says "incomplete" is what makes that visible to cron, to CI, and to the
 next agent, none of which read the paragraph at the bottom.
+
+WHAT "COMPLETE" IS MEASURED AGAINST - a defect this file shipped once. Until 2026-08-30
+`_emit_report` filtered the records down to the CURRENTLY configured matrix before the
+report saw them. Narrowing `quadrant.runners` to one entry - one line of config - then
+made the two never-run cells vanish from the table and the comparison read COMPARED 2/2,
+complete, exit 0, over the very same evidence. The module's own stated failure mode,
+reachable by configuration.
+
+The comparison is therefore over the DECLARED matrix of a results SET, not over today's
+configuration. `matrix.json` in the results directory pins it on first write and is
+APPEND-ONLY: `_declared_matrix` unions the lock with the configured cells and with every
+cell a record on disk names, writes the union back, and hands it to the report. Adding a
+runner grows the comparison; removing one cannot shrink it. Nothing is filtered out of
+`_load_records` any more - a record the matrix does not know about is rendered, not
+dropped.
+
+What that does NOT defend against, stated plainly: a comparison started from a
+FRESH results directory with narrow axes is a genuinely narrow comparison, and it says so
+(`COMPARED 2/2` over a two-cell declared matrix, with the axes visible in matrix.json).
+Laundering requires reusing an existing evidence set, and that is what the lock stops. The
+remaining move - delete matrix.json AND the records of the cells being hidden - is a
+deletion of evidence rather than a report that lies about it.
 """
 
 from __future__ import annotations
@@ -250,6 +272,48 @@ def _load_records(results_dir: Path) -> List[Dict[str, Any]]:
     return out
 
 
+def _declared_matrix(results_dir: Path, quadrants: List["matrix_mod.Quadrant"],
+                     records: List[Dict[str, Any]]) -> List[str]:
+    """The declared matrix of this results SET - pinned on first write, append-only.
+
+    Read the lock, union it with the configured cells and with every cell the records
+    name, write the union back. The union is the point: a cell that has ever been part of
+    this comparison stays part of it, so narrowing `quadrant.runners` can no longer turn a
+    2-of-4 comparison into a complete 2-of-2 one (see the module docstring).
+
+    A missing lock is normal (the first run, or a results dir from before this existed) and
+    is written silently. An UNREADABLE lock is not: it is reported, and the declared set
+    falls back to config + records, which still holds every cell any record names.
+    """
+    lock_path = results_dir / (matrix_mod.schema().get("declared_matrix_lock")
+                               or "matrix.json")
+    prior: List[str] = []
+    if lock_path.is_file():
+        try:
+            prior = [str(k) for k in (json.loads(lock_path.read_text(encoding="utf-8"))
+                                      .get("declared") or [])]
+        except (json.JSONDecodeError, OSError) as exc:
+            print(f"  (matrix lock {lock_path} is unreadable: {exc}; the declared matrix "
+                  f"falls back to the configuration plus every cell the records name)")
+    declared = report_mod.declared_keys(quadrants, records, prior)
+    if declared != prior:
+        results_dir.mkdir(parents=True, exist_ok=True)
+        lock_path.write_text(json.dumps({
+            "version": 1,
+            "declared": declared,
+            "updated_utc": _now(),
+            "_why": [
+                "The cells THIS results set is a comparison over. Append-only: a cell that",
+                "has ever been declared stays declared, so narrowing quadrant.runners or",
+                "quadrant.targets cannot shrink the comparison into looking complete.",
+                "Delete this file and the declared matrix falls back to the configuration",
+                "plus every cell the records name - which is weaker, and is why it is",
+                "written rather than derived.",
+            ],
+        }, indent=2), encoding="utf-8")
+    return declared
+
+
 def _emit_report(results_dir: Path, item_id: str, argv: List[str]) -> int:
     cfg = _cfg({})
     try:
@@ -258,10 +322,16 @@ def _emit_report(results_dir: Path, item_id: str, argv: List[str]) -> int:
     except (matrix_mod.QuadrantConfigError, item_mod.QuadrantItemError) as exc:
         print(f"MISCONFIGURED: {exc}")
         return 2
-    records = [r for r in _load_records(results_dir)
-               if r.get("quadrant") in {q.key for q in quadrants}]
-    md = report_mod.render(quadrants, records, item=it)
-    summary = report_mod.summarize(quadrants, records, item=it)
+    # NOT filtered to the configured matrix. Dropping a record here is what let a narrowed
+    # configuration launder an incomplete comparison into a complete one.
+    records = _load_records(results_dir)
+    declared = _declared_matrix(results_dir, quadrants, records)
+    try:
+        md = report_mod.render(quadrants, records, item=it, declared=declared)
+        summary = report_mod.summarize(quadrants, records, item=it, declared=declared)
+    except report_mod.QuadrantReportError as exc:
+        print(f"UNRENDERABLE: {exc}")
+        return 2
     out_md = results_dir / "COMPARISON.md"
     out_md.write_text(md, encoding="utf-8")
     (results_dir / "comparison.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")

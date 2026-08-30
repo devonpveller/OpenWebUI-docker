@@ -291,11 +291,182 @@ def test_a_refused_record_is_reported_as_not_compared_never_dropped(evidence):
     assert "workspace" in md
 
 
-def test_report_refuses_a_record_for_a_quadrant_not_in_the_matrix(evidence):
+def test_a_record_off_the_matrix_is_absorbed_into_the_table_never_dropped(evidence):
+    """The record names a cell the configuration does not. It must still be VISIBLE.
+
+    This test replaced one that asserted `render` RAISED here. The raise was the pressure
+    that produced the real defect: the only caller silenced it by filtering those records
+    out before rendering, and filtering is what let a narrowed matrix launder an incomplete
+    comparison. A row nobody can drop is the stronger guard than an exception someone can
+    catch.
+    """
     qs = matrix_mod.build(cfg())
     stray = good_record(evidence, quadrant="gpt-5::mars")
+    md = report_mod.render(qs, [stray], item={"id": "u4-baseline", "digest": "d" * 64})
+    assert "gpt-5 x mars" in md
+    assert "OFF MATRIX" in md
+    assert "COMPARED 0/5" in md, "the off-matrix cell must count against the denominator"
+
+
+def test_a_record_naming_no_quadrant_at_all_is_unrenderable(evidence):
+    """The one disagreement that cannot be absorbed: there is no cell to put it in."""
+    qs = matrix_mod.build(cfg())
+    nameless = good_record(evidence, quadrant="")
     with pytest.raises(report_mod.QuadrantReportError):
-        report_mod.render(qs, [stray], item={"id": "u4-baseline", "digest": "d" * 64})
+        report_mod.render(qs, [nameless], item={"id": "u4-baseline", "digest": "d" * 64})
+
+
+def test_a_declared_cell_survives_a_narrowed_configuration(evidence):
+    """Shrinking the axes must not shrink the comparison.
+
+    The report is handed the DECLARED matrix of the results set. A cell that is declared
+    but no longer configured renders OFF MATRIX and counts as not compared, so the
+    completeness verdict cannot improve by deleting a runner from the config.
+    """
+    narrow = cfg()
+    narrow["quadrant"] = dict(narrow["quadrant"], runners=["claude-code"])
+    qs = matrix_mod.build(narrow)
+    assert len(qs) == 2
+    full = ["little-coder::self", "little-coder::project",
+            "claude-code::self", "claude-code::project"]
+    ran = [good_record(evidence, quadrant="claude-code::self"),
+           good_record(evidence, quadrant="claude-code::project", target="project")]
+    summary = report_mod.summarize(qs, ran, item={"id": "u4-baseline", "digest": "d" * 64},
+                                   declared=full)
+    assert summary["quadrants_total"] == 4
+    assert summary["compared"] == 2
+    assert summary["complete"] is False
+    assert sorted(summary["off_matrix"]) == sorted(full[:2])
+
+
+# ------------------------------------ the CLI cannot shrink the comparison either --
+
+def _write_record(runs, name, rec):
+    d = runs / name
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "record.json").write_text(json.dumps(rec), encoding="utf-8")
+    return d
+
+
+def _four_records(runs, evidence, digest):
+    """Two real-shaped completions and two honest not-runs - the comparison as it stands."""
+    for target in ("self", "project"):
+        _write_record(runs, f"2026-claude-code-{target}",
+                      good_record(evidence, quadrant=f"claude-code::{target}",
+                                  target=target, item_digest=digest))
+        _write_record(runs, f"2026-little-coder-{target}",
+                      good_record(evidence, quadrant=f"little-coder::{target}",
+                                  runner="little-coder", target=target, item_digest=digest,
+                                  status="not_run", acceptance=[], evidence={},
+                                  wall_seconds=0,
+                                  not_run_reason="no route from the host to the daemon"))
+
+
+def _config_at(path, runners):
+    c = cfg()
+    c["quadrant"] = dict(c["quadrant"], runners=runners)
+    path.write_text(json.dumps(c), encoding="utf-8")
+
+
+def test_narrowing_the_axes_cannot_launder_a_partial_comparison_through_the_cli(
+        tmp_path, monkeypatch):
+    """THE REGRESSION, end to end through the shipped CLI.
+
+    Reproduced by a verifier 2026-08-30: `cli._emit_report` filtered the records down to
+    the currently configured matrix, so narrowing `quadrant.runners` to one entry - a
+    one-line config edit - made the two never-run cells leave the table. The identical
+    evidence then rendered COMPARED 2/2, complete, exit 0.
+
+    The comparison must stay 2/4 and exit 1 across that edit.
+    """
+    from quadrant import cli
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    it = item_mod.load("u4-baseline")
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    tr = tmp_path / "transcript.txt"
+    tr.write_text("ran\n", encoding="utf-8")
+    _four_records(runs, {"workspace": str(ws), "transcript": str(tr)}, it["digest"])
+
+    cfg_path = tmp_path / "harness.config.json"
+    monkeypatch.setenv("AI_STACK_HARNESS_CONFIG", str(cfg_path))
+
+    _config_at(cfg_path, ["little-coder", "claude-code"])
+    assert cli.main(["report", "--results-dir", str(runs)]) == 1
+    before = json.loads((runs / "comparison.json").read_text(encoding="utf-8"))
+    assert (before["quadrants_total"], before["compared"], before["complete"]) == (4, 2, False)
+
+    _config_at(cfg_path, ["claude-code"])
+    rc = cli.main(["report", "--results-dir", str(runs)])
+    after = json.loads((runs / "comparison.json").read_text(encoding="utf-8"))
+    md = (runs / "COMPARISON.md").read_text(encoding="utf-8")
+
+    assert rc == 1, "a narrowed matrix must not turn an incomplete comparison into exit 0"
+    assert after["complete"] is False
+    assert after["quadrants_total"] == 4, "the two dropped cells must still be rows"
+    assert "COMPARED 2/4" in md
+    assert "MATRIX NARROWED" in md
+    assert "little-coder x self" in md and "little-coder x project" in md
+    assert "no route from the host to the daemon" in md, \
+        "the reason those cells did not run must survive the narrowing too"
+
+
+def test_the_matrix_lock_holds_a_cell_that_lost_both_its_config_and_its_record(
+        tmp_path, monkeypatch):
+    """The lock is load-bearing on its own, not just a restatement of the records.
+
+    Here the little-coder cells have NO records at all - config + records would declare a
+    two-cell matrix and report it complete. Only `matrix.json`, pinned when the comparison
+    was declared, remembers that this results set is a comparison of four.
+    """
+    from quadrant import cli
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    it = item_mod.load("u4-baseline")
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    tr = tmp_path / "transcript.txt"
+    tr.write_text("ran\n", encoding="utf-8")
+    ev = {"workspace": str(ws), "transcript": str(tr)}
+    for target in ("self", "project"):
+        _write_record(runs, f"2026-claude-code-{target}",
+                      good_record(ev, quadrant=f"claude-code::{target}", target=target,
+                                  item_digest=it["digest"]))
+    (runs / "matrix.json").write_text(json.dumps({"version": 1, "declared": [
+        "little-coder::self", "little-coder::project",
+        "claude-code::self", "claude-code::project"]}), encoding="utf-8")
+
+    cfg_path = tmp_path / "harness.config.json"
+    monkeypatch.setenv("AI_STACK_HARNESS_CONFIG", str(cfg_path))
+    _config_at(cfg_path, ["claude-code"])
+
+    rc = cli.main(["report", "--results-dir", str(runs)])
+    summary = json.loads((runs / "comparison.json").read_text(encoding="utf-8"))
+    assert rc == 1
+    assert summary["complete"] is False
+    assert summary["quadrants_total"] == 4
+    assert sorted(summary["off_matrix"]) == ["little-coder::project", "little-coder::self"]
+
+
+def test_the_declared_matrix_is_append_only(tmp_path, monkeypatch):
+    """A cell added to the axes joins the lock; one removed from them does not leave it."""
+    from quadrant import cli
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    cfg_path = tmp_path / "harness.config.json"
+    monkeypatch.setenv("AI_STACK_HARNESS_CONFIG", str(cfg_path))
+
+    _config_at(cfg_path, ["claude-code"])
+    cli.main(["report", "--results-dir", str(runs)])
+    first = json.loads((runs / "matrix.json").read_text(encoding="utf-8"))["declared"]
+    assert sorted(first) == ["claude-code::project", "claude-code::self"]
+
+    _config_at(cfg_path, ["little-coder"])
+    cli.main(["report", "--results-dir", str(runs)])
+    second = json.loads((runs / "matrix.json").read_text(encoding="utf-8"))["declared"]
+    assert set(first).issubset(set(second)), "the lock must never shrink"
+    assert len(second) == 4
 
 
 def test_report_states_the_confidence_limit_when_n_is_one(evidence):
