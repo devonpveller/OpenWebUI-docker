@@ -499,6 +499,127 @@ SEED_ISSUES = [
 ]
 
 
+def _norm_paths(raw: str) -> list[str]:
+    """`touched_paths` as comparable prefixes. PURE."""
+    out = []
+    for part in (raw or "").split(","):
+        q = part.strip().rstrip("/*").rstrip("/")
+        if q:
+            out.append(q.replace("\\", "/"))
+    return out
+
+
+def paths_overlap(a: list[str], b: list[str]) -> list[str]:
+    """The paths two plans genuinely share. PURE.
+
+    PREFIX-AWARE, and that is the whole difficulty. `scripts/` and
+    `scripts/checks/x.ps1` overlap; `scripts/checks` and `scripts/checksum.py` do NOT,
+    even though one is a string prefix of the other. Comparing raw strings would report
+    the second pair and a reviewer would learn to ignore the radar - which is worse than
+    not having it, because the real collisions arrive in the same list.
+    """
+    hits = []
+    for x in a:
+        for y in b:
+            if x == y or x.startswith(y + "/") or y.startswith(x + "/"):
+                hits.append(x if len(x) >= len(y) else y)
+    return sorted(set(hits))
+
+
+def plan_overlaps(plans: list[tuple[int, str]]) -> list[tuple[int, int, list[str]]]:
+    """Every pair of plans that would touch the same code. PURE.
+
+    This is the `radar` primitive widened from plan-vs-PRs to PLAN-VS-PLAN, which is what
+    the weekly synthesis is for: two issues planned in the same week that both rewrite the
+    same file are a collision the operator should see BEFORE either is approved, not after
+    the second one's rebase conflicts.
+
+    Each pair is reported once, low number first, so a reviewer reads N pairs and not 2N.
+    """
+    parsed = [(n, _norm_paths(raw)) for n, raw in plans]
+    out: list[tuple[int, int, list[str]]] = []
+    for i in range(len(parsed)):
+        for j in range(i + 1, len(parsed)):
+            (na, pa), (nb, pb) = parsed[i], parsed[j]
+            if not pa or not pb:
+                continue
+            shared = paths_overlap(pa, pb)
+            if shared:
+                lo, hi = (na, nb) if na <= nb else (nb, na)
+                out.append((lo, hi, shared))
+    return sorted(out)
+
+
+def synthesis_report(issues: list[dict], branch: str) -> tuple[str, list[tuple[int, int, list[str]]]]:
+    """The weekly verdict thread's body, and the overlaps it found. PURE.
+
+    Returns markdown for a human to render approve / deny / postpone against. It states
+    PROPOSALS ONLY - nothing here approves anything, and the thread IS this door's
+    operator-confirm gate (§C.3 decision 5).
+    """
+    planned: list[tuple[int, dict, dict]] = []
+    for i in issues:
+        meta = read_plan(i["number"])
+        if meta:
+            planned.append((i["number"], i, meta))
+
+    overlaps = plan_overlaps([(n, m.get("touched_paths", "")) for n, _i, m in planned])
+
+    lines = ["## Weekly plan synthesis — approve / deny / postpone", ""]
+    if not planned:
+        lines += ["_No plans this cycle._", ""]
+    else:
+        lines.append(f"**{len(planned)} plan(s)** awaiting a verdict:")
+        lines.append("")
+        for n, issue, meta in planned:
+            fresh = plan_freshness(meta, issue, branch)
+            badge = "🟢" if fresh == "fresh" else "🟡"
+            lines.append(f"- **#{n}** {issue['title']}  ")
+            lines.append(f"  {badge} {meta.get('status', 'planned')} · {fresh} · "
+                         f"triage: {meta.get('triage', '?')}")
+            paths = _norm_paths(meta.get("touched_paths", ""))
+            if paths:
+                lines.append(f"  touches: `{'`, `'.join(paths[:6])}`")
+        lines.append("")
+
+    lines.append("### Cross-plan overlaps")
+    if overlaps:
+        # Named as a REVIEW ITEM, not a blocker. Two plans touching one file is often
+        # correct - it is a thing to decide, not a thing to refuse.
+        lines.append("⚠ These plans would touch the same code. Decide the order, or fold them:")
+        for lo, hi, shared in overlaps:
+            lines.append(f"- **#{lo} ↔ #{hi}** — `{'`, `'.join(shared[:6])}`")
+    else:
+        lines.append("✅ No two plans touch the same paths.")
+    lines.append("")
+    lines.append("_Reply per plan: `approve #N` · `deny #N <why>` · `postpone #N`. "
+                 "An approved plan becomes a confirmed anchor; a denied one is recorded; "
+                 "a postponed one re-enters the next synthesis._")
+    return "\n".join(lines), overlaps
+
+
+def cmd_synthesis(post: bool = False) -> int:
+    """WEEKLY SYNTHESIS (U2): collect the cycle's plans, flag cross-plan overlaps, and
+    produce the verdict thread this door's operator-confirm gate lives in.
+
+    PRINTS BY DEFAULT, posts only with --post. An unattended weekly job that posts to
+    Mattermost without anyone having read its output once is how a channel becomes noise.
+    """
+    branch, _exists = target_branch()
+    body, overlaps = synthesis_report(open_issues(), branch)
+    print(body)
+    if overlaps:
+        print()
+        print(f"[synthesis] {len(overlaps)} cross-plan overlap(s) flagged")
+    if post:
+        print()
+        print("[synthesis] --post is not wired yet: the Mattermost console (M.2) owns the")
+        print("            thread, and posting from here would create a SECOND writer to the")
+        print("            same channel. Recorded rather than half-built.")
+        return 3
+    return 0
+
+
 def cmd_seed() -> int:
     c = cfg()
     # ensure labels exist (idempotent)
@@ -890,6 +1011,8 @@ def main() -> int:
     p.add_argument("--dry-run", action="store_true", help="report targets, generate nothing")
     p.add_argument("--limit", type=int, default=0, help="cap plans per run; truncation is reported")
     p = sub.add_parser("radar"); p.add_argument("n", type=int)
+    p = sub.add_parser("synthesis")
+    p.add_argument("--post", action="store_true", help="post the verdict thread (not wired yet)")
     p = sub.add_parser("gate"); p.add_argument("n", type=int)
     p = sub.add_parser("gate-plan"); p.add_argument("n", type=int)
     p = sub.add_parser("execute"); p.add_argument("n", type=int)
@@ -906,6 +1029,7 @@ def main() -> int:
     if a.cmd == "plan":
         return cmd_plan(a.n, a.refresh)
     if a.cmd == "sweep": return cmd_sweep(dry_run=a.dry_run, limit=a.limit)
+    if a.cmd == "synthesis": return cmd_synthesis(post=a.post)
     if a.cmd == "radar":
         return cmd_radar(a.n)
     if a.cmd == "gate":

@@ -181,3 +181,111 @@ def test_a_dry_run_does_not_claim_it_planned_anything(swept, capsys):
     assert "would plan 3" in out
     assert "generated nothing" in out
     assert "3 planned," not in out
+
+
+# ── the weekly synthesis (U2) ────────────────────────────────────────────────
+def test_a_deliberately_overlapping_pair_IS_flagged():
+    """§2's named validation for this door.
+
+    "a deliberately overlapping issue pair must be flagged by the synthesis"
+    """
+    pairs = issue_ops.plan_overlaps([
+        (10, "scripts/checks/test-quartz4-offline.ps1"),
+        (11, "scripts/checks/test-quartz4-offline.ps1, docs/x.md"),
+        (12, "OB1/docker/init.sql"),
+    ])
+    assert pairs == [(10, 11, ["scripts/checks/test-quartz4-offline.ps1"])]
+
+
+def test_overlap_is_PREFIX_AWARE_not_string_prefix():
+    """The trap that would make the radar noise.
+
+    `scripts/checks` is a string prefix of `scripts/checksum.py` and they share nothing.
+    A reviewer who is shown that pair learns to ignore the radar - and the real collisions
+    arrive in the same list.
+    """
+    assert issue_ops.paths_overlap(["scripts/checks"], ["scripts/checksum.py"]) == []
+    # A directory genuinely containing the other file DOES overlap.
+    assert issue_ops.paths_overlap(["scripts"], ["scripts/checks/x.ps1"]) == ["scripts/checks/x.ps1"]
+
+
+def test_a_directory_and_a_file_inside_it_overlap_either_way_round():
+    assert issue_ops.paths_overlap(["a/b/c.py"], ["a"]) == ["a/b/c.py"]
+    assert issue_ops.paths_overlap(["a"], ["a/b/c.py"]) == ["a/b/c.py"]
+
+
+def test_trailing_slashes_and_globs_do_not_create_false_pairs():
+    assert issue_ops.plan_overlaps([(1, "scripts/"), (2, "scripts/*")])[0][2] == ["scripts"]
+
+
+def test_a_plan_with_no_touched_paths_pairs_with_nothing():
+    # A non-fix verdict lists no paths. Pairing it with everything would flag every plan
+    # against every other one, which is the same as flagging nothing.
+    assert issue_ops.plan_overlaps([(1, ""), (2, "scripts/a.py")]) == []
+
+
+def test_each_pair_is_reported_ONCE_low_number_first():
+    pairs = issue_ops.plan_overlaps([(9, "x/y"), (3, "x/y")])
+    assert pairs == [(3, 9, ["x/y"])]
+
+
+def test_no_overlaps_is_an_empty_list_not_a_false_pair():
+    assert issue_ops.plan_overlaps([(1, "a/1"), (2, "b/2")]) == []
+
+
+def _issue_with_plan(monkeypatch, plans):
+    monkeypatch.setattr(issue_ops, "read_plan", lambda n: plans.get(n))
+    monkeypatch.setattr(issue_ops, "plan_freshness", lambda m, i, b: "fresh")
+
+
+def test_the_report_lists_plans_and_states_the_verdict_vocabulary(monkeypatch):
+    _issue_with_plan(monkeypatch, {
+        1: {"status": "planned", "triage": "fix", "touched_paths": "scripts/a.py"},
+        2: {"status": "planned", "triage": "fix", "touched_paths": "scripts/a.py"},
+    })
+    body, overlaps = issue_ops.synthesis_report([_issue(1), _issue(2)], "main")
+    assert "2 plan(s)" in body
+    assert "approve #N" in body and "deny #N" in body and "postpone #N" in body
+    assert overlaps and "#1 ↔ #2" in body
+
+
+def test_the_report_says_so_when_nothing_overlaps(monkeypatch):
+    _issue_with_plan(monkeypatch, {1: {"status": "planned", "touched_paths": "a/1"}})
+    body, overlaps = issue_ops.synthesis_report([_issue(1)], "main")
+    assert overlaps == []
+    assert "No two plans touch the same paths" in body
+
+
+def test_an_unplanned_issue_is_absent_from_the_verdict_thread(monkeypatch):
+    # The thread is for rendering verdicts on PLANS. An issue with no plan has nothing to
+    # approve, and listing it invites approving something that does not exist.
+    _issue_with_plan(monkeypatch, {1: {"status": "planned", "touched_paths": "a/1"}})
+    body, _ = issue_ops.synthesis_report([_issue(1), _issue(2)], "main")
+    assert "**#2**" not in body
+
+
+def test_no_plans_at_all_is_an_honest_empty_report(monkeypatch):
+    _issue_with_plan(monkeypatch, {})
+    body, overlaps = issue_ops.synthesis_report([_issue(1)], "main")
+    assert "No plans this cycle" in body
+    assert overlaps == []
+
+
+def test_synthesis_does_not_post_and_says_why(monkeypatch, capsys):
+    """--post is refused rather than half-built.
+
+    The Mattermost console (M.2) owns that thread; posting from here would make a SECOND
+    writer to the same channel. A non-zero exit and a stated reason beats a silent no-op.
+    """
+    monkeypatch.setattr(issue_ops, "target_branch", lambda: ("main", True))
+    monkeypatch.setattr(issue_ops, "open_issues", lambda: [])
+    _issue_with_plan(monkeypatch, {})
+    assert issue_ops.cmd_synthesis(post=True) == 3
+    assert "not wired yet" in capsys.readouterr().out
+
+
+def test_synthesis_without_post_is_success(monkeypatch):
+    monkeypatch.setattr(issue_ops, "target_branch", lambda: ("main", True))
+    monkeypatch.setattr(issue_ops, "open_issues", lambda: [])
+    _issue_with_plan(monkeypatch, {})
+    assert issue_ops.cmd_synthesis() == 0
