@@ -10,11 +10,17 @@
 #
 # WHAT THIS DRILL DOES AND DOES NOT PROVE. It CONSTRUCTS a stall - a scripted tester fails
 # the same case three times against a branch head the script moves itself - and proves the
-# detector fires on it, records it, and stays silent on the control. That is a mechanism
-# test, and it is how the detector is proven RED->GREEN. It is NOT an observation of the
-# oracle firing on a REAL stalled item: no real item has stalled here, and nothing yet runs
-# the oracle's round. U4's "stall -> oracle observed firing at least once" is only half met
-# by this file, and documentation/notes/u4oracle-findings.md F4 says which half.
+# detector fires on it, records it, and stays silent on the control. That is a MECHANISM
+# test, and it is how the detector is proven RED->GREEN. It is not, and was never, an
+# observation of the oracle firing on a stall that HAPPENED.
+#
+# THAT OBSERVATION EXISTS SEPARATELY, since 2026-08-30. `quadrant/items/u4-stall` is an
+# unsatisfiable item; three real dispatches to little-coder produced three real failing
+# rounds with the same failure signature over three real commits of the three different
+# implementations it wrote, and this drill's own -Fail path escalated on round 3:
+# little-coder/local-default -> claude-code/opus, hand back to little-coder. See
+# documentation/notes/u4close-findings.md. This file stays a mechanism test, because a
+# mechanism test that needs a live local model to run is not one.
 #
 # The unit tests (test_oracle_on_stall.py) cover the DEFINITION. This covers the
 # CHOREOGRAPHY - a tester recording a verdict through the real tool, on a real branch whose
@@ -351,5 +357,6 @@ if ($failed.Count) {
 }
 if (Test-Path $scratch) { Remove-Item -Recurse -Force $scratch -ErrorAction SilentlyContinue }
 Write-Host "frontier-oracle-on-stall: constructed stall detected, escalation recorded, control silent." -ForegroundColor Green
-Write-Host "  This is a MECHANISM proof. No real item has stalled here - see u4oracle-findings.md F4." -ForegroundColor Yellow
+Write-Host "  This is a MECHANISM proof - the stall it detects is one this script built." -ForegroundColor Yellow
+Write-Host "  The firing on a REAL stall is separate evidence: documentation/notes/u4close-findings.md." -ForegroundColor Yellow
 exit 0

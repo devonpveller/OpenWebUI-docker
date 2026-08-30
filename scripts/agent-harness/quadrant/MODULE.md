@@ -56,7 +56,7 @@ rather than a report that lies about it.
 | `python -m quadrant.cli run [--runner R] [--target T] [--item I]` | runs the selected cells, writes one run directory each, then renders the FULL-matrix report. Exit 0 iff every cell it attempted completed. |
 | `python -m quadrant.cli report` | re-renders from the accumulated records. **Exit 0 only when every DECLARED cell produced an admitted comparable outcome**; 1 while the comparison is incomplete; 2 misconfigured. Narrowing the configured axes cannot raise this to 0 (mechanism 4). |
 | `python -m quadrant.prove_guards` | mutation drill: breaks each guard in turn and requires its test to go RED. Exit 0 iff every guard bites; prints `N/N guards proven to bite`. |
-| `python -m pytest scripts/agent-harness/test_quadrant.py -q` | the module's suite - the matrix, admission, the report's completeness invariant, the declared-matrix lock, and one end-to-end fixture run. The count is whatever the command prints; on 2026-08-30 it printed `39 passed`. |
+| `python -m pytest scripts/agent-harness/test_quadrant.py -q` | the module's suite - the matrix, admission, the report's completeness invariant, the declared-matrix lock, the UTF-8 chokepoint scan, and one end-to-end fixture run. The count is whatever the command prints; on 2026-08-30 it printed `47 passed`. |
 | `quadrant/guards.py <tests\|unmodified> --item <id>` | the acceptance checks themselves, run by the harness with the workspace as CWD. |
 
 Artifacts: `<repo>/.quadrant/runs/<utc>-<runner>-<target>/{record.json,transcript.txt,manifest.json,workspace/}`
@@ -78,41 +78,56 @@ branch; the matrix, the report and the exit codes follow automatically.
 
 `cli -> {matrix, record, report, item, adapters}`; `report -> {matrix, record}`;
 `record -> matrix` (for the schema); `item -> anchor_schema` (the shared anchor contract,
-reused rather than re-implemented); `guards -> item`. The only importer outside the package
-is its own suite: `git grep -ln "from quadrant import" -- '*.py' ':!OB1' ':!scripts/agent-harness/quadrant'`
+reused rather than re-implemented); `guards -> item`; `adapters -> lc_docker` (the
+little-coder transport, kept out of `adapters` so the axis file stays about the two axes);
+and everything that runs a subprocess -> `proc` (the UTF-8 chokepoint - see its docstring
+for the failure that produced it). The only importer outside the package is its own suite: `git grep -ln "from quadrant import" -- '*.py' ':!OB1' ':!scripts/agent-harness/quadrant'`
 prints `scripts/agent-harness/test_quadrant.py` and nothing else.
 
 ## To delete this module
 
-Delete `scripts/agent-harness/quadrant/`, `scripts/agent-harness/test_quadrant.py`, the
-`targets` and `quadrant` sections plus the `fixture` runner from `harness.config.json`, the
-`.quadrant/` line in `.gitignore`, and any `.quadrant/` directory. Two rows in
+Delete `scripts/agent-harness/quadrant/`, `scripts/agent-harness/test_quadrant.py`,
+`scripts/agent-harness/observe-oracle-on-stall.ps1` (its only consumer), the `targets` and
+`quadrant` sections plus the `fixture` runner from `harness.config.json`, the `.quadrant/`
+line in `.gitignore`, and any `.quadrant/` directory. Two rows in
 `scripts/agent-harness/MODULE.md` then dangle and should go with it. Nothing else executes
 against the module: `git grep -ln quadrant -- . ':!OB1'` lists only those files plus prose
 that mentions it (this plan's `PLAN.md` / `DECISIONS.md` and two findings notes).
 
-## Known limits (as of 2026-08-30)
+## Known limits (as of 2026-08-30, after the runner axis was closed)
 
-- **The RUNNER axis has zero coverage, so U4's Validated by column is UNMET.** Both cells
-  that ran are `claude-code`; this is a comparison of the TARGET axis alone. What the
-  module can support today is a decision about `self` vs `project` at n=1. It cannot
-  support any statement about `little-coder` vs `claude-code`, and the report says so
-  rather than implying otherwise by silence. The park, its reason (rewritten 2026-08-30
-  after a verifier disproved the first one with a single command) and what would lift it
-  are in `documentation/notes/u4quad-findings.md`.
-- **Two of four cells have never run**, because this module speaks ONE transport and it
-  is the wrong one. `adapters._dispatch_little_coder` uses the HTTP endpoint
-  `harness.config.json` declares here (`http://127.0.0.1:8090`), and that door does not
-  exist: the running container publishes nothing
-  (`docker inspect little-coder --format '{{json .NetworkSettings.Ports}}'` →
-  `{"9090/tcp":[]}`) and `curl -s -m 4 http://127.0.0.1:8090/health` exits 7. The module
-  reports both cells NOT RUN with that reason, which is accurate about the transport and
-  must not be read as "little-coder is unreachable" — `docker exec little-coder curl -s
-  http://localhost:8090/health` answers 200, and `work/dfu-u4` has driven a real anchored
-  item through that route. The docker-exec transport is not added here because that item
-  already wrote one (`scripts/agent-harness/dispatch.ps1`). See
-  `documentation/notes/u4quad-findings.md` F7.
-- **n=1.** `quadrant.repeats` is 1, so no cell's number can yet be separated from one
-  run's luck. The report says so in the confidence column and again at the bottom.
+- **n=1.** `quadrant.repeats` is 1, so no cell's number can be separated from one run's
+  luck. The report says so in every confidence column and again at the bottom. The
+  comparison supports *"both runners completed this item"* and nothing about which is
+  better: the wall-clock spread (72.8/65.4s local vs 35.8/33.5s cloud) is one run each.
+- **The two claude-code records are REUSED, not re-run.** They were produced by
+  `work/u4quad` on 2026-08-30 and copied into the results set unmodified, because
+  re-running them is real external spend for no new information. Their
+  `evidence.workspace` still points into `.claude/worktrees/wt-u4quad`, so **removing that
+  worktree makes them fail admission and the comparison drops to 2/4** - the honest
+  behaviour of the admission gate. Whoever retires that worktree re-runs those two cells
+  or accepts the drop. `documentation/notes/u4close-findings.md` F5.
+- **The little-coder cells run on a MIRROR, and the record says so.** `lc_docker.py` copies
+  the workspace into the container and copies the changed files back; the host workspace's
+  `.git` is not carried across, so the runner gets a fresh `git init` and no history, while
+  the claude-code cells get a real checkout. Every little-coder record carries that as a
+  note. It is a real difference between the cells, not a detail.
 - **The fixture runner is scaffolding**, permanently excluded from decision tables by its
   `self-test` status, and `test_quadrant.py` asserts no profile can assign a role to it.
+- **`items/u4-stall` is not a comparison item.** It is deliberately unsatisfiable - a stall
+  probe for `observe-oracle-on-stall.ps1`. `quadrant.item` names `u4-baseline`; the probe is
+  only reachable with `--item u4-stall`. Scoring a comparison on an impossible task would
+  measure nothing about the quadrants.
+
+## History: what UNBLOCKED the runner axis (2026-08-30)
+
+Both little-coder cells reported NOT RUN for one reason: this module spoke ONE transport and
+it was the wrong one. `adapters._dispatch_little_coder` used the HTTP endpoint the config
+declared (`http://127.0.0.1:8090`), and that door does not exist - the running container
+publishes nothing (`docker inspect little-coder --format '{{json .NetworkSettings.Ports}}'`
+→ `{"9090/tcp":[]}`) while `docker exec little-coder curl -s http://localhost:8090/health`
+answers 200. Merging `work/u4quad` with `work/dfu-u4` (which had already built the
+docker-exec dispatch) turned that into a hard config error, and `quadrant/lc_docker.py` is
+the transport that resolved it. The park's reason is in
+`documentation/notes/u4quad-findings.md` F7; what lifted it is in
+`documentation/notes/u4close-findings.md`.
