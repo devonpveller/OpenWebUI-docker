@@ -426,3 +426,27 @@ REVERT:   Concatenate them; no caller outside index.ts imports the inner files.
 NOTE:     Recorded because the plan and the tree otherwise disagree on their
           face, and a later reader would have to guess whether the split was
           deliberate.
+
+## 2026-08-30 · U2 · class 2 — the cadence owner is NOT supercronic
+DECISION: The daily sweep and weekly synthesis are scheduled by the HOST
+          Scheduled Task family (`scripts/issue-ops/register-issue-cadence.ps1`),
+          not by supercronic.
+CITED:    §C.3 decision 4 names supercronic (OB1's crontab) as the cadence owner,
+          and §C.3 itself says "if implementation shows a default wrong, that is
+          a class-2 decision: pick the better option, log it with the evidence".
+EVIDENCE: `issue_ops.py` shells to a headless `claude` binary, reads the GitHub
+          App private key from `agent-org/agent-bridge/secrets/`, and runs `git`
+          against the repo root. None of those exists inside an OB1 container,
+          and every entry in `OB1/docker/cron/crontab` is an HTTP call to a
+          service on obnet. Containerising the planner is a larger piece of work
+          than the cadence it would carry.
+REVERT:   `register-issue-cadence.ps1 -Unregister`. Nothing depends on the tasks
+          existing; the commands stay runnable by hand.
+
+## 2026-08-30 · U2 · class 2 — cadence registration is left to the operator
+DECISION: `register-issue-cadence.ps1` ships the mechanism and does NOT register
+          itself. `-WhatIfOnly` shows exactly what it would create.
+CITED:    §C.2 class 4 — "spending real money or calling external services beyond
+          the session". Registering starts an unattended daily job that runs
+          `claude -p` once per unplanned or stale issue.
+REVERT:   n/a (nothing was registered).
