@@ -1,0 +1,8 @@
+# The item fixtures are CONTENT-ADDRESSED: item.load hashes the bytes of everything under
+# files/ and record.admit refuses any run record whose digest disagrees. Line-ending
+# translation would therefore make the item's identity MACHINE-DEPENDENT - a record
+# produced on Linux would be unadmittable on Windows, and the failure would read as "a
+# record from a different item" rather than as a checkout artefact.
+#
+# -text: store and check out the bytes verbatim, on every platform.
+* -text
