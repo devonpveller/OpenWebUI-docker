@@ -39,6 +39,17 @@ Two deliberate differences, each stated rather than absorbed:
      this, a flaky test would reset the stall counter forever and the detector would never
      fire on the one item that most needs it.
 
+     With one boundary the first version got wrong: a head that could not be READ is not
+     the same as a head that did not MOVE. That round is recorded and left UNSCORED - see
+     `evaluate`. The rule used to score it as "did not move", which turned `git rev-parse`
+     failing into a frontier escalation.
+
+  A NOTE ON THE THRESHOLD, because it is the difference that matters when comparing the
+  two implementations: agent-org seeds `seen_sigs` with the pre-existing failing log's
+  signature BEFORE its loop, so its first round can already be non-novel. A harness item
+  has no prior log, so round 1 here is unconditionally progress and `stall >= 2` therefore
+  needs strictly MORE than two rounds. `record()` enforces that as an invariant.
+
 WHAT FIRING DOES
 ----------------
 It does NOT swap the worker for a better one. It records an escalation: the stall evidence,
@@ -95,6 +106,24 @@ def failure_signature(log: str) -> str:
     return hashlib.sha1(norm.encode()).hexdigest()[:16]
 
 
+_OBJECT_NAME = re.compile(r"^[0-9a-f]{7,40}$")
+
+
+def object_name(value: str) -> str:
+    """`value` if it looks like a git object name, otherwise "" (meaning: not recorded).
+
+    Applied where REAL queue items are read, not inside `evaluate` - the detector takes
+    whatever shas it is handed, and the adapter is the layer that knows the shas came from
+    git. It exists because `git rev-parse <missing-ref>` prints THE REF NAME on stdout and
+    exits 128, so a queue item written before that exit code was checked carries a round
+    with `sha: "drill/oracle-stall"`. Two such rounds compare EQUAL, which the detector
+    would otherwise read as "the code did not move" and escalate on. A branch name is not a
+    commit; the honest reading of that field is "not recorded".
+    """
+    v = (value or "").strip().lower()
+    return v if _OBJECT_NAME.match(v) else ""
+
+
 def evaluate(rounds: List[Dict[str, str]], threshold: int = STALL_THRESHOLD) -> Dict[str, Any]:
     """The stall test. `rounds` are the item's FAILING rounds, oldest first.
 
@@ -110,12 +139,26 @@ def evaluate(rounds: List[Dict[str, str]], threshold: int = STALL_THRESHOLD) -> 
         sig = failure_signature(r.get("text", ""))
         sha = (r.get("sha") or "").strip()
         novel = sig not in seen
+        first = i == 1
+        # UNKNOWN IS NOT "DID NOT MOVE". If a round has no branch head recorded, the
+        # movement test could not be RUN - the harness failed to measure, which is not
+        # evidence about the code. Scoring it as "did not move" is what turns a tooling
+        # failure into a frontier escalation, and §6's hygiene rule ("noise must never be
+        # recorded as a constraint") applies with more force to a failed MEASUREMENT than
+        # to a flaky test. Such a round is recorded, its signature still counts toward
+        # novelty, and the stall counter is left exactly as it was: neither advanced nor
+        # reset. Reversed 2026-08-30 from "a missing sha counts as not moved" after the
+        # source of missing shas turned out to be `git rev-parse` failing silently
+        # (queue.ps1 now refuses that verdict outright; this is the second line of defence).
+        scored = first or bool(sha and prev_sha)
         # Round 1 has nothing before it: the code cannot have "not moved" yet.
-        moved = True if i == 1 else bool(sha and prev_sha and sha != prev_sha)
+        moved = True if first else (sha != prev_sha)
         progress = novel and moved
         seen.add(sig)
-        stall = 0 if progress else stall + 1
-        if not novel and not moved:
+        if not scored:
+            why = ("the branch head could not be read for this round - not scored either "
+                   "way (a failed measurement is not evidence that the code stood still)")
+        elif not novel and not moved:
             why = "the same failure, on the same commit"
         elif not novel:
             why = "a failure already seen on this item (a cycle, not a step)"
@@ -123,16 +166,25 @@ def evaluate(rounds: List[Dict[str, str]], threshold: int = STALL_THRESHOLD) -> 
             why = "the failure changed but the code did not - noise, not a learned clause"
         else:
             why = "new failure on new code"
+        if scored:
+            stall = 0 if progress else stall + 1
         trail.append({
-            "round": i, "sig": sig, "sha": sha[:12], "novel": novel, "moved": moved,
-            "progress": progress, "stall_after": stall, "why": why,
+            "round": i, "sig": sig, "sha": sha[:12], "novel": novel,
+            "moved": moved if scored else None, "scored": scored,
+            "progress": progress if scored else None, "stall_after": stall, "why": why,
         })
         prev_sha = sha or prev_sha
+    # THE STRUCTURAL INVARIANT, stated where it is produced: round 1 is ALWAYS progress
+    # (nothing precedes it, so it is novel and cannot have failed to move), and no round
+    # raises the counter by more than one. Therefore `stall <= rounds - 1`, and a stall of
+    # `threshold` needs STRICTLY MORE than `threshold` rounds. `len(rounds) > threshold` is
+    # not belt-and-braces: it makes the impossible state impossible rather than merely
+    # unobserved, and `record()` refuses to write a firing that violates it.
     return {
         "rounds": len(rounds),
         "stall": stall,
         "threshold": threshold,
-        "stalled": stall >= threshold and len(rounds) >= threshold,
+        "stalled": stall >= threshold and len(rounds) > threshold,
         "signatures_seen": len(seen),
         "trail": trail,
     }
@@ -274,7 +326,32 @@ def escalation_id(item: str, rounds: int) -> str:
 
 def record(repo, item: str, verdict: Dict[str, Any],
            escalation: Dict[str, Any], detail: str = "") -> Optional[Dict[str, Any]]:
-    """Write the firing. Returns the row, or None when this firing is already on record."""
+    """Write the firing. Returns the row, or None when this firing is already on record.
+
+    REFUSES a structurally impossible verdict, loudly. A verifier reported a ledger row with
+    `rounds=2, stall=2` and a two-entry trail on one run and could not reproduce it in
+    fifteen more. That state cannot come out of `evaluate` - round 1 is always progress and
+    the counter rises by at most one per round, so `stall >= threshold` requires strictly
+    more than `threshold` rounds - and the ledger is the audit trail this phase is validated
+    against (§C.7: "the audit trail is the deliverable's twin"). So the impossible row is
+    refused at the point of writing rather than left for someone to find and disbelieve
+    later: if it ever happens, it fails where it happened, with the verdict in the message.
+    """
+    rounds_n = verdict.get("rounds", 0)
+    stall_n = verdict.get("stall", 0)
+    thr = verdict.get("threshold", STALL_THRESHOLD)
+    trail = verdict.get("trail", [])
+    if stall_n > max(0, rounds_n - 1) or (stall_n >= thr and rounds_n <= thr):
+        raise ValueError(
+            "refusing to record a structurally impossible firing for '" + str(item) +
+            "': stall=" + str(stall_n) + " over " + str(rounds_n) + " round(s) at threshold "
+            + str(thr) + ". Round 1 is always progress, so stall <= rounds-1 always holds. "
+            "This verdict did not come from evaluate() on these rounds.")
+    if len(trail) != rounds_n:
+        raise ValueError(
+            "refusing to record a firing whose trail does not match its rounds for '" +
+            str(item) + "': " + str(len(trail)) + " trail entries, rounds=" + str(rounds_n) +
+            ". The trail IS the evidence; a truncated one is not a record of what was seen.")
     eid = escalation_id(item, verdict.get("rounds", 0))
     for row in read_ledger(repo, item=item):
         if row.get("id") == eid:
@@ -366,7 +443,7 @@ def failing_rounds(item: Dict[str, Any], queue_dir="") -> List[Dict[str, str]]:
             except OSError:
                 pass
         out.append({"text": (str(r.get("reason") or "") + "\n" + ev).strip(),
-                    "sha": str(r.get("sha") or "")})
+                    "sha": object_name(str(r.get("sha") or ""))})
     return out
 
 

@@ -676,7 +676,19 @@ if ($Pass -or $Fail) {
         Die ("-Fail needs -Reason: name the CASE that failed and what it revealed. The " +
              "developer fixes the finding, not the verdict.")
     }
+    # CHECK THE EXIT CODE. `git rev-parse <missing-ref>` prints the ARGUMENT ITSELF on
+    # STDOUT and exits 128 - so without this the branch NAME was stored as the round's sha
+    # and as `tested_at_sha`, silently, with a green exit. Two rounds recorded that way carry
+    # an identical "sha", which the stall detector reads as "the code did not move" and
+    # escalates on: a tooling failure manufacturing a frontier escalation. Reproduced
+    # 2026-08-30 by deleting the branch between two -Fail calls; the round recorded
+    # `sha: "probe/oracle"`. -Submit (line ~483) and -Resubmit (line ~810) already checked
+    # this; the verdict path was the one that did not.
     $headSha = (Invoke-GitCapture @("rev-parse", $item.branch) | Select-Object -First 1)
+    if ($LASTEXITCODE -ne 0 -or -not $headSha) {
+        Die ("branch '$($item.branch)' not found - cannot record a verdict against a branch " +
+             "that does not resolve. Recreate it, or the verdict names a commit nobody can read.")
+    }
     $item.results += [ordered]@{
         at = Now; by = $By; verdict = $(if ($Pass) { "pass" } else { "fail" })
         sha = $headSha.Trim(); evidence = $evidenceText; reason = $Reason
