@@ -40,6 +40,7 @@ from .modules.openbrain_memory import (
     OpenBrainMemory,
     render_recall_block,
     select_recall_items,
+    strip_recall_block,
 )
 from .modules.capabilities import (
     BranchDelivery,
@@ -5484,9 +5485,13 @@ class Orchestrator:
         try/except → log.debug → "", never raises. Context enrichment must never block
         dispatch, and this one talks to a service over a network.
 
-        SELF-BOUNDED. Verified assumption #10 in the plan's ledger: there is NO global brief
-        token budget in this codebase, only per-block ad-hoc slicing. Nothing downstream will
-        trim this, so the block bounds itself - 8 items, ~300 chars each, ≤4000 total.
+        SELF-BOUNDED, and the bound is the WHOLE BLOCK. Verified assumption #10 in the plan's
+        ledger: there is NO global brief token budget in this codebase, only per-block ad-hoc
+        slicing. Nothing downstream trims this, so the block bounds itself: at most
+        RECALL_LIMIT (8) items, each line at most RECALL_ITEM_LINE_MAX (334) chars, and the
+        rendered block at most RECALL_BLOCK_MAX (4000) chars INCLUDING its header and the
+        omitted-line marker. Those last two used to sit outside the budget, so a full block
+        measured 4312 against a stated 4000.
 
         Conservative recall only. `include_unconfirmed` is never sent, so a worker cannot be
         handed a memory nobody has reviewed.
@@ -5495,7 +5500,13 @@ class Orchestrator:
         if mem is None:
             return ""
         try:
-            trace_id, items = await mem.recall_traced(project=slug, query=request or "")
+            # NEVER EMBED OUR OWN LAST ANSWER. Seams 2-4 are handed ASSEMBLED text, which on
+            # the real path already carries the block an earlier seam injected - so without
+            # this the query is partly the summaries recall returned last time, and recall
+            # re-ranks what it already returned. With no similarity floor configured there
+            # is nothing downstream to correct it.
+            trace_id, items = await mem.recall_traced(
+                project=slug, query=strip_recall_block(request or ""))
         except Exception as exc:  # noqa: BLE001 — enrichment must never block dispatch
             log.debug("agent-memory context lookup failed for %s: %s", slug, exc)
             return ""
@@ -5506,12 +5517,14 @@ class Orchestrator:
             shown = {str((it or {}).get("memory_id") or "") for it in select_recall_items(items)}
         except Exception as exc:  # noqa: BLE001
             log.debug("agent-memory render failed for %s: %s", slug, exc)
-            return ""
-        if not block:
-            return ""
-        # CLOSE THE LOOP. A memory returned and never reported is invisible to the plane -
-        # and a memory recalled repeatedly and never used is the signal that recall is
-        # surfacing the wrong thing, which nothing else can see.
+            block, shown = "", set()
+        # REPORT ON EVERY PATH THAT RETURNED ROWS, including the one where NOTHING was
+        # renderable. An early return here skipped reporting entirely, so a recall that
+        # surfaced three memories the brief could not show left no trace at all - which is
+        # precisely the used=False signal these reports exist to preserve, and the state
+        # that "recall is returning junk" looks like from the plane side. A memory returned
+        # and never reported is invisible to the plane, and one recalled repeatedly and
+        # never used is the only signal that recall is surfacing the wrong thing.
         await self._report_memory_usage(items, shown, trace_id)
         return block
 
@@ -8662,7 +8675,13 @@ class Orchestrator:
             _, goal, _ = await self.charters.current_goal(effort_id)
         except Exception:  # noqa: BLE001
             goal = ""
-        base_goal = (goal or "").split("\n\nITERATION ")[0].strip()[:2500]
+        # STRIPPED, because on the REAL path this goal CARRIES the block seam 1 injected -
+        # and it is quoted into the round brief AND used as the recall query. Unstripped it
+        # made the guard below always false, so this seam silently never fired after a real
+        # intake (measured: one recall per effort, none from the burn-down), and it fed
+        # recall its own previous answer. The round still carries the memories - injected
+        # fresh below, against the query that includes THIS round's errors.
+        base_goal = strip_recall_block(goal or "").split("\n\nITERATION ")[0].strip()[:2500]
         proj = await self._effort_project(effort_id) or "the project"
         # PER-ROUND part branches (live 2026-07-08 v7: folds 404'd on rounds whose part worker
         # never pushed — unique names also make any stale leftover branch harmless).
@@ -12651,6 +12670,17 @@ class Orchestrator:
             goal += await self._composition_context(owner)
         except Exception:  # noqa: BLE001 — context is garnish, never a blocker
             pass
+        # RECALLED MEMORIES for the FIX effort (memory-plane §3), here rather than at a seam.
+        # A handoff fix effort never passes through `_intake_or_dispatch`, so seam 1 never
+        # runs for it and seam 2 would inject the block using the ENTIRE templated goal above
+        # as the query - a preamble that is byte-identical on every handoff, which is the one
+        # text guaranteed not to discriminate between two bugs. Same defect as 4/5: for an
+        # ORG-GENERATED effort the "incoming request" IS a template. The bug is the query.
+        # BEFORE `set_goal`, for seam 1's reason: a memory injected after the freeze steers
+        # the work while being absent from the record of what the work was asked to do.
+        if "RELEVANT MEMORIES" not in goal:
+            goal += await self._agent_memory_context(
+                owner, f"{target}: {summary}\n\n{ho['log'][:2400]}")
         short = effort_id.removeprefix("effort-")[:22]
         fix_eid, fix_chan, fix_root = await self.router.open_effort(
             f"hx-{short}-{n + 1}", project=owner, goal=goal)
@@ -12750,15 +12780,38 @@ class Orchestrator:
             f"{goal}\n\nHANDOFF RESOLVED ({target}): {fix_note} Your own earlier progress (if "
             f"any) is on branch `agent/{frm}` — continue from it toward your ORIGINAL goal above."
         )
-        # Recalled memories (§3), the fourth seam. A resumed effort is a fresh session with
-        # a reconstructed goal, so without this it resumes knowing LESS than the round that
-        # handed off. The guard substring keeps it out if the goal already carries a block.
-        if "RELEVANT MEMORIES" not in resume_goal:
-            _pm = await self._effort_project(frm)
-            if _pm:
-                # The ORIGINAL goal is the query — the handoff note appended above is about
-                # the fix that unblocked it, not about the work being resumed.
-                resume_goal += await self._agent_memory_context(_pm, goal)
+        # Recalled memories (§3), the fourth seam. IT RE-QUERIES AND REPLACES; it does not
+        # guard-and-skip, and the difference is the whole seam.
+        #
+        # WHAT WAS WRONG. `goal` here is the VERSIONED goal, which on the real path already
+        # carries the block seam 1 injected (seam 1 runs before `set_goal` precisely so it
+        # lands there). So `resume_goal` always contained "RELEVANT MEMORIES", the guard was
+        # always false, and this seam could only ever fire when seam 1 had produced nothing -
+        # i.e. exactly when recall had nothing to give. A spy at the real entry point recorded
+        # goal_has_block=True, seam4_fired=False; deleting the injection changed no test.
+        #
+        # WHY IT SHOULD RE-QUERY RATHER THAN BE DELETED. The corpus DEMONSTRABLY CHANGED
+        # between intake and here, in a way caused by this effort: the fix effort that just
+        # closed writes its own outcome memory at `_finish_effort` (memory-plane §2.2), and
+        # that close is the event that triggers this resume. The intake block cannot contain
+        # it. Inheriting the intake block is not "knowing what the handing-off round knew"
+        # plus the new information - it is knowing strictly less than the plane now holds
+        # about the bug this effort was blocked on.
+        #
+        # THE QUERY LEADS WITH THE HANDOFF. That is the new information, and the client clips
+        # the query at 2000 chars from the FRONT, so putting it second would let a long goal
+        # push it out entirely. The goal follows for topical anchoring, with its inherited
+        # block stripped by `_agent_memory_context` so recall cannot re-rank its own answer.
+        #
+        # REPLACE, DON'T APPEND: two blocks under the same header spend the budget twice and
+        # say the org recorded everything twice. And only ON SUCCESS - a dead plane or recall
+        # switched off returns "", and then the inherited block stays exactly as it was.
+        _pm = await self._effort_project(frm)
+        if _pm:
+            _fresh = await self._agent_memory_context(
+                _pm, f"HANDOFF RESOLVED ({target}): {fix_note}\n\n{goal}")
+            if _fresh:
+                resume_goal = strip_recall_block(resume_goal) + _fresh
         await self.router.update_effort_card(frm, "active")
         self._spawn(self.delegate(frm, chan, res_root, resume_goal))
 

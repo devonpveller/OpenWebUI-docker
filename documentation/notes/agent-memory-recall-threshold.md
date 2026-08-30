@@ -42,16 +42,19 @@ corpus is accruing right now; the read path is shut until there is enough of it 
 
 ## Why it is still not calibrated
 
-Calibration needs a corpus to calibrate against. There are currently **3** agent memories,
-all on the `ops` plane (measured 2026-08-30 by the session that assigned the U6 item; this
-note's earlier revision recorded 2 the same day):
+Calibration needs a corpus to calibrate against. There are currently **4** agent memories,
+all on the `ops` plane and all `pending` (measured directly, 2026-08-30 16:5x UTC, after the
+U6 live recall smoke had planted and removed its two synthetic fixtures). The count has moved
+three times in a day - 2, then 3, then 4 (the fourth landed at 14:46) - which is itself the
+argument: a distribution nobody can quote a stable size for is not one to fit a threshold to.
 
 ```sql
-SELECT COALESCE(metadata->>'exposure','personal'), count(*) FROM agent_memories GROUP BY 1;
--- ops | 3
+SELECT COALESCE(metadata->>'exposure','personal') AS exposure, review_status, count(*)
+  FROM agent_memories GROUP BY 1,2;
+-- ops | pending | 4
 ```
 
-A threshold picked against three rows is a number with a story attached, not a measurement.
+A threshold picked against four rows is a number with a story attached, not a measurement.
 Copying upstream's 0.7 would make recall return nothing against bge-m3 — the failure mode
 that looks exactly like success. Picking a low number because it makes a demo look good is
 the same mistake facing the other way. So both stay blank, and the *risk while blank* is the
@@ -72,14 +75,21 @@ their relevance, and the brief presents them to a worker as evidence.
 3. Set `AGENT_MEMORY_RECALL_MIN_SIMILARITY` in `OB1/docker/.env` and recreate
    `openbrain-mcp`. Consider the recency weight separately and later: it is a second
    uncalibrated number, and changing two at once makes neither measurable.
-4. Then turn `AO_MEMORY_RECALL_ENABLED` on, and check §3's acceptance: a confirmed memory
-   measurably appears in a worker brief, and a pending one never does.
+4. Then turn `AO_MEMORY_RECALL_ENABLED` on. §3's acceptance itself no longer waits on this:
+   `scripts/checks/smoke-agent-memory-live.ps1` proved it on 2026-08-30 against the live plane
+   with the floor UNSET - a confirmed synthetic memory reached a real worker brief and the
+   pending one never did, with the fixtures removed afterwards. What calibration is still
+   owed is the SEPARATION question the acceptance does not ask: with a real corpus, does the
+   floor keep out what a human would call irrelevant? Four rows cannot answer that.
 
 ## Related, and easy to conflate
 
 **A badly-chosen recall QUERY is not repaired by any threshold** — it is repaired by asking a
-better question. Fixed in the same branch: each of the four seams now embeds its own cleanest
-text (the request as asked, the step, the goal + error slice, the original goal) instead of
-the assembled brief, which had grown the org's standing preamble blocks — text identical on
-every effort, and so the one text guaranteed not to discriminate between goals. See
+better question. Fixed in the same branch: every seam now embeds its own cleanest text — the
+request as asked (intake), the step, the goal plus THIS round's error slice (burn-down), the
+handoff note plus the goal (resume), and the bug plus its debug log (a handoff FIX effort,
+which never passes through intake and was embedding its own template) — instead of the
+assembled brief, which had grown the org's standing preamble blocks: text identical on every
+effort, and so the one text guaranteed not to discriminate between goals. A query also never
+contains a block recall itself rendered, or it re-ranks its own previous answer. See
 `documentation/notes/u6recall-findings.md`.

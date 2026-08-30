@@ -9,10 +9,14 @@ import pytest
 
 from app.config import Settings
 from app.modules.openbrain_memory import (
+    RECALL_BLOCK_MARKER,
     RECALL_BLOCK_MAX,
+    RECALL_ITEM_LINE_MAX,
+    RECALL_SUMMARY_MAX,
     OpenBrainMemory,
     render_recall_block,
     select_recall_items,
+    strip_recall_block,
 )
 
 
@@ -82,9 +86,63 @@ def test_an_empty_recall_renders_nothing_at_all():
 def test_the_block_is_self_bounded():
     # Verified assumption #10: there is NO global brief token budget in this codebase, only
     # per-block slicing. Nothing downstream will trim this.
+    #
+    # THE BOUND IS THE DOCUMENTED ONE, not a padded one. This asserted
+    # `RECALL_BLOCK_MAX + 500` - a bound no comment, docstring or plan states, and one
+    # chosen wide enough to accommodate the very overrun it should have caught: the header
+    # and the omitted-line marker sat outside the budget, so a full block measured 4312
+    # against a stated 4000 and this test passed anyway.
     out = render_recall_block([{"summary": "x" * 400, "memory_id": str(i)} for i in range(50)])
-    assert len(out) <= RECALL_BLOCK_MAX + 500
+    assert len(out) <= RECALL_BLOCK_MAX, f"the block assembled to {len(out)} chars"
     assert "more memories omitted" in out
+
+
+def test_every_item_line_is_bounded_including_its_policy_markers():
+    """The per-item bound was asserted by no test at all, and the number quoted for it
+    (~300) was the SUMMARY clip rather than the rendered line - a line measured 329.
+    The markers are what make a line safe to read, so they belong inside the bound."""
+    items = [{"memory_id": str(i), "summary": "y" * 4000,
+              "can_use_as_instruction": bool(i % 2),
+              "requires_user_confirmation": bool((i + 1) % 2)} for i in range(6)]
+    lines = _item_lines(render_recall_block(items))
+    assert lines
+    longest = max(len(ln) for ln in lines)
+    assert longest <= RECALL_ITEM_LINE_MAX, f"an item line reached {longest} chars"
+    # ...and the bound is TIGHT, not a number large enough to be unfalsifiable: the
+    # longest line really does approach it once the markers are counted.
+    assert longest > RECALL_SUMMARY_MAX
+
+
+def test_a_rendered_block_is_exactly_one_paragraph():
+    """The premise `strip_recall_block` cuts on. A rendered block must contain no blank
+    line after its own leading one - otherwise the strip would cut the block in half and
+    leave the tail of it in the brief. Summaries are whitespace-collapsed, so this holds
+    even for a memory that tries to break it."""
+    items = [{"memory_id": "m-1", "summary": "one\n\ntwo\n\n\nthree"},
+             {"memory_id": "m-2", "summary": "z" * 4000}]
+    block = render_recall_block(items)
+    assert block.startswith(RECALL_BLOCK_MARKER)
+    assert "\n\n" not in block[2:], "the block is no longer one paragraph"
+
+
+def test_strip_removes_the_block_and_nothing_around_it():
+    """RECALL MUST NOT FEED ON ITS OWN OUTPUT. Seams 2-4 are handed assembled text that
+    already carries an earlier seam's block; embedding that means the query quotes the
+    answer, and recall re-ranks what it already returned."""
+    before = "the real request"
+    after = "\n\nACCEPTANCE CORPUS for `app`\n  - `pytest -q`"
+    text = before + render_recall_block([EVIDENCE, INSTRUCTION]) + after
+    out = strip_recall_block(text)
+    assert out == before + after
+    assert "RELEVANT MEMORIES" not in out
+    assert "the drain stalls" not in out
+
+
+def test_strip_is_a_no_op_on_text_that_carries_no_block():
+    # It must never eat a brief that merely mentions the words.
+    text = "fix the thing\n\nRELEVANT MEMORIES - a human wrote this line themselves"
+    assert strip_recall_block(text) == text
+    assert strip_recall_block("") == ""
 
 
 def test_malformed_items_do_not_break_rendering():

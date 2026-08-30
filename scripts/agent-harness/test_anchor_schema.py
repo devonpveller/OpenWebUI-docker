@@ -264,7 +264,6 @@ def test_the_agreement_test_would_catch_real_drift(tmp_path):
 # because "there is no copy" is a claim about a compose file that somebody can edit.
 
 import shutil
-import subprocess
 
 BRIDGE_IMAGE = "agent-bridge:local"
 
