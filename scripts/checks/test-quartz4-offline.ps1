@@ -303,12 +303,37 @@ INSERT INTO agent_memory_audit_events (memory_id, workspace_id, event_type, acto
   SELECT id, 'ws-review', 'memory_superseded', 'user', 'harness', '{}'::jsonb FROM agent_memories WHERE workspace_id = 'ws-review';
 INSERT INTO agent_memory_audit_events (memory_id, workspace_id, event_type, actor_kind, actor_label, payload)
   SELECT id, 'ws-review', 'memory_disputed',   'user', 'harness', '{}'::jsonb FROM agent_memories WHERE workspace_id = 'ws-review';
+-- THE REVIEW-ACTIONS TABLE. It exists to record who changed a memory's standing and what
+-- it looked like before; an earlier implementation wrote only audit events and never
+-- touched it. All TEN actions are exercised, because a CHECK rejects by value and a
+-- stubbed pool cannot see that.
+INSERT INTO agent_memory_review_actions (memory_id, action, actor_label, notes, before, after)
+  SELECT id, a.action, 'harness', 'exercising every action',
+         jsonb_build_object('review_status', 'pending'),
+         jsonb_build_object('review_status', 'confirmed')
+    FROM agent_memories,
+         unnest(ARRAY['confirm','edit','evidence_only','restrict_scope','promote_exposure',
+                      'mark_stale','merge','reject','dispute','supersede']) AS a(action)
+   WHERE workspace_id = 'ws-review';
+-- promote_exposure is the MIGRATED tenth (init-agent-memory-promote-exposure.sql). If that
+-- migration ever fails to reach a fresh volume, this insert is what says so - the CHECK
+-- would reject the value and nothing else here would notice.
+SELECT 'am_actions_ok', count(*) FROM agent_memory_review_actions ra
+  JOIN agent_memories am ON am.id = ra.memory_id WHERE am.workspace_id = 'ws-review';
+-- And the exposure merge the promote path performs, against the real column type.
+UPDATE agent_memories
+   SET metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('exposure', 'ops')
+ WHERE workspace_id = 'ws-review';
+SELECT 'am_promote_ok', count(*) FROM agent_memories
+ WHERE workspace_id = 'ws-review' AND metadata->>'exposure' = 'ops';
 SELECT 'am_review_ok', count(*) FROM agent_memory_audit_events WHERE workspace_id = 'ws-review';
 ROLLBACK;
 "@
   $revOut = docker exec -i ob-initdb-test psql -U postgres -d openbrain -tA -v ON_ERROR_STOP=1 -c $revSql 2>&1
-  if ($LASTEXITCODE -eq 0 -and ($revOut | Out-String) -match "am_review_ok\|4") {
-    Pass "agent-memory REVIEW SQL executes against the real schema (4 audit events)"
+  $revTxt = ($revOut | Out-String)
+  if ($LASTEXITCODE -eq 0 -and $revTxt -match "am_review_ok\|4" -and
+      $revTxt -match "am_actions_ok\|10" -and $revTxt -match "am_promote_ok\|1") {
+    Pass "agent-memory REVIEW SQL executes against the real schema (4 audit events, all 10 actions, promote merge)"
   } else {
     Write-Host ($revOut | Out-String) -ForegroundColor Red
     Fail "agent-memory review SQL rejected by the real schema"

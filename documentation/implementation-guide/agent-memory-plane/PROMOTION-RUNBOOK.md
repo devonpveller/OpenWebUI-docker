@@ -131,10 +131,45 @@ sha256sum OB1/schemas/agent-memory/schema.sql OB1/docker/init-agent-memory.sql
 At the 2026-08-29 apply both were
 `46a74f05d4992a552e584389ff2adad2835c5dae7d24b414840ac7af289dcd3e`.
 
-## The initdb prefix, and why it looks odd
+## The initdb prefix — CORRECTED
 
-The mount is `99a-init-agent-memory.sql`. Postgres runs initdb scripts in **lexicographic**
-order, not numeric: `99` was already taken by `init-wiki-pages`, and a three-digit `100-`
-would sort *before* `20-`, running agent-memory ahead of the tables it depends on. `99a`
-sorts after `99-` (`-` < `a`) and needs no renames. The two-digit scheme is now full — the
-next migration wants `99b`, or a deliberate renumbering of the whole chain.
+This section used to say the mount was `99a-init-agent-memory.sql`, and reasoned that
+"`99a` sorts after `99-` (`-` < `a`)". **That is ASCII order, which is what `sh` uses.**
+The Postgres entrypoint globs through bash under a UTF-8 locale, whose collation ignores
+punctuation for primary weight — so `99a-` sorts *before* `99-`, and the migration would
+have run ahead of the tables it depends on, exactly the failure the prefix was chosen to
+avoid.
+
+The chain is now **fixed-width, in tens**: `010-` … `130-`. No suffix tricks, no collation
+dependency, and room to insert between any two. `scripts/checks/test-quartz4-offline.ps1`
+derives the chain from compose and asserts both directions (every mount names a real file;
+every `init*.sql` is mounted), so a file that reaches only one place is caught.
+
+## Later migrations, and how to apply them
+
+Each is additive and each must reach **both** places — the initdb mount for fresh volumes
+and a psql apply for the live one. There is no migration runner.
+
+| File | Adds | Apply |
+|---|---|---|
+| `init-agent-memory-idempotency.sql` | per-workspace idempotency index (replaces the globally-unique one) | as below |
+| `init-agent-memory-promote-exposure.sql` | `promote_exposure` to the `agent_memory_review_actions` CHECK | as below |
+
+```powershell
+Get-Content OB1\docker\init-agent-memory-promote-exposure.sql |
+  docker exec -i openbrain-db psql -U postgres -d openbrain -v ON_ERROR_STOP=1
+```
+
+Verify **by query**, never by a clean exit code:
+
+```powershell
+docker exec openbrain-db psql -U postgres -d openbrain -tA -c @"
+SELECT 'promote_exposure_allowed', count(*)
+  FROM pg_constraint
+ WHERE conname = 'agent_memory_review_actions_action_check'
+   AND pg_get_constraintdef(oid) LIKE '%promote_exposure%';
+"@
+```
+
+Expect `promote_exposure_allowed|1`. Rollback is the same `ALTER` with the original
+nine-value list; no row becomes invalid unless a `promote_exposure` action has been written.
