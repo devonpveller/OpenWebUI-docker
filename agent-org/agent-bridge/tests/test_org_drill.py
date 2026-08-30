@@ -28,7 +28,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.config import Settings  # noqa: E402
 from app.db import Database  # noqa: E402
-from app.models import Effort  # noqa: E402
 from app.modules.audit_sink import AuditSink  # noqa: E402
 from app.modules.governance_gate import GovernanceGate  # noqa: E402
 from app.schemas import Concern, Decision, Trigger  # noqa: E402

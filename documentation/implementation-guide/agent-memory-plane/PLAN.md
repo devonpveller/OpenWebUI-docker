@@ -65,3 +65,30 @@ elevated — the conservative direction, but not the designed one.
 validation, and review coverage of all nine actions writing `agent_memory_review_actions`.
 
 **Phase 1.4** — the ops door as a second `openbrain-gateway` instance.
+
+## Phase 3 — governed recall into briefs, VALIDATED 2026-08-30 (U6, `work/u6recall`)
+
+Reconciled against canonical PLAN.md §Phase 3. The helper and the four injection points
+landed in `dbbffc8`; this pass verified them adversarially and fixed what the verification
+found. Full write-up + the DECISIONS entries owed: `documentation/notes/u6recall-findings.md`.
+
+| Gate (canonical §3) | State | Evidence in this repo |
+|---|---|---|
+| `_agent_memory_context` modelled on `_acceptance_corpus_context`: guard substring, `try/except → log.debug → ""`, never raises | **MET** | `orchestrator.py:5480`; fail-soft proven at the SEAM (`test_recall_seams.py::test_a_dead_plane_never_blocks_the_seam`), not only in the module |
+| Self-bounded: limit 8, ~300 chars/item, ≤4000 total | **MET, after a correction** | The budget bounded the ITEM LINES only, so a full block measured **4312** chars against a stated 4000 (header + omitted-line marker sat outside it), and the cap test asserted `RECALL_BLOCK_MAX + 500` — a bound no document states. `RECALL_BODY_MAX` now subtracts both; `test_the_block_is_self_bounded` asserts the documented bound, and `test_every_item_line_is_bounded_including_its_policy_markers` asserts the per-item one (334 = clip + markers; a real line measured 329, and nothing asserted it before). |
+| Injection at ALL FOUR seams, intake before `set_goal` | **MET, after two seams were found DEAD on the real path** | `orchestrator.py` 6082 / 7001 / 8754 / 12811, plus a fifth at `_open_handoff:12682`. Seams 3 and 4 both guarded on `"RELEVANT MEMORIES" not in <assembled text>`, and on the real path that text is the VERSIONED goal, which carries the block seam 1 deliberately put there — so both guards were always false and neither seam ever fired after a real intake. Both now re-query against their own new information and REPLACE the inherited block. Every seam has a fixture-backed test AND a recall-off control; deleting any seam turns its test red (`scripts/checks/recall-falsifiability-drill.py`). |
+| Conservative recall only; `include_unconfirmed` never exposed | **MET** | `test_recall_NEVER_asks_for_unconfirmed_memories` (asserts the wire body, not the server default) |
+| `agent_memory_report_usage` after injection | **MET, and corrected** | Usage now carries the `trace_id` that returned the memory, is `used=True` only for memories the brief actually showed, and is bounded — serial reporting added a measured 24s to a dispatch |
+| Brief rendering ports Hermes `_format_recall_context` | **MET, and hardened** | Whitespace is collapsed before clipping: a multi-line summary previously forged a column-0 `STANDING INTENT:` line into the brief |
+| Two-phase ranking (raw-distance scan, then blend re-rank), NOT upstream's execution shape | **MET, and now guarded** | OB1 `agent-memory-ranking.ts` + `performRecall`; 20 tests; the SELECT also executes against the real schema in `scripts/checks/test-quartz4-offline.ps1`. `RECALL_OVERFETCH = 1` collapses the two phases into one and left all 17 original tests green (each computed its expectation from that constant); two new tests fail at 1. The shape claim is **index-SERVABLE**, not "index scan": measured live, the statement plans as Nested Loop + Sort on a 4-row corpus and as `Index Scan using idx_thoughts_embedding ... Order By: (embedding <=> $1)` when the planner is forced off the sort. |
+| Similarity threshold NOT inherited; calibrate before enabling | **PARKED, deliberately** | `AGENT_MEMORY_RECALL_MIN_SIMILARITY` / `_RECENCY_WEIGHT` are named, wired through compose, documented, and **unset** — the corpus is **4** ops memories, all pending. `documentation/notes/agent-memory-recall-threshold.md` holds the procedure. `AO_MEMORY_RECALL_ENABLED` stays off. |
+| Acceptance: live smoke — a confirmed memory appears in a worker brief, a pending one never does | **MET 2026-08-30** | `scripts/checks/smoke-agent-memory-live.ps1` + `live_recall_probe.py`: `openbrain-mcp` rebuilt from OB1 `adb7345` and redeployed, two SYNTHETIC `ops` memories written through the LIVE writeback door, one moved `pending -> confirmed` through the live review tool, then ONE REAL EFFORT through `_intake_or_dispatch` with **no transport override**. The confirmed memory reached the worker brief and the versioned goal; the pending one reached neither. `agent_memory_recall_traces` went from **zero rows, ever** to a trace recording `{"examined": 1, "returned": 1}` at `candidates: 32`. Fixtures deleted; corpus back at 4; zero personal-plane rows before and after. |
+
+**Note on the Phase 1 rows above: they are STALE.** They were written 2026-08-29 and record
+five MCP tools and the third REST twin as missing. `agent-memory-tools.ts`,
+`agent-memory-review.ts` and `agent-memory-ops.ts` now implement `report_usage`, `review`,
+`list_review_queue`, `inspect` and `recall_trace`, `POST /agent-memory/usage` exists
+(`agent-memory.ts:661`), and the review path writes ten actions including
+`promote_exposure`. Those rows are not corrected here because this pass verified Phase 3,
+not Phase 1 — a row rewritten from a grep is exactly the kind of unearned claim this file
+exists to warn about.
