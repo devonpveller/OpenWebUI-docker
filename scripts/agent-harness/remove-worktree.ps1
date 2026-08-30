@@ -34,6 +34,23 @@ if (-not $MergedInto) { $MergedInto = Resolve-WorkLine }
 
 function Fail([string]$Message) { Write-Host "ERROR: $Message" -ForegroundColor Red; exit 1 }
 
+# Every bare `& git` in this script used to run under $ErrorActionPreference='Stop'. That is
+# fine until a CALLER captures our output: `remove-worktree.ps1 ... 2>&1 | ...` turns git's
+# ordinary stderr into a terminating NativeCommandError, and the script dies AT the git line
+# - before the error handling written for exactly that git call can run. The bridge `close`
+# path and the test reaper both invoke this script and read its output, so this was a live
+# defect, not a theoretical one; it surfaced when the probe for the leak fix below captured
+# stderr and killed the script mid-removal.
+#
+# Invoke-GitCapture (git-io.ps1) owns this rule for calls we read. This is its sibling for
+# calls we only need the EXIT CODE from, which is why it deliberately returns that.
+function Invoke-GitQuiet {
+    param([string[]]$GitArgs)
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try { & git @GitArgs 2>&1 | Out-Null; return $LASTEXITCODE } finally { $ErrorActionPreference = $prev }
+}
+
 function Read-Registry {
     if (-not (Test-Path $Registry)) { return @{} }
     $out = @{}
@@ -59,7 +76,7 @@ if ($PruneRegistry) {
     if (-not $WhatIfOnly) {
         foreach ($g in $gone) { $rows.Remove($g) }
         Write-Registry $rows
-        & git worktree prune
+        $null = Invoke-GitQuiet @('worktree','prune')
     }
     exit 0
 }
@@ -86,15 +103,15 @@ $path = $row.path
 $branch = $row.branch
 if (-not (Test-Path $path)) {
     Write-Host "Worktree path already gone; dropping the registry row." -ForegroundColor Yellow
-    if (-not $WhatIfOnly) { $rows.Remove($Id); Write-Registry $rows; & git worktree prune }
+    if (-not $WhatIfOnly) { $rows.Remove($Id); Write-Registry $rows; $null = Invoke-GitQuiet @('worktree','prune') }
     exit 0
 }
 
 # --- what would be lost? ----------------------------------------------------------
 $dirty = Invoke-GitCapture @("-C", $path, "status", "--porcelain")
 $unmerged = @()
-$null = & git rev-parse --verify --quiet "refs/heads/$MergedInto"
-if ($LASTEXITCODE -eq 0) {
+$refExit = Invoke-GitQuiet @('rev-parse','--verify','--quiet',"refs/heads/$MergedInto")
+if ($refExit -eq 0) {
     $unmerged = Invoke-GitCapture @("-C", $path, "log", "--oneline", "$MergedInto..$branch")
 } else {
     Write-Host ("  note: no local '{0}' branch to compare against - treating all commits as unmerged" -f $MergedInto) -ForegroundColor Yellow
@@ -122,14 +139,54 @@ if ($blocked -and $Force) {
     Write-Host "  -Force given: discarding the above deliberately." -ForegroundColor Yellow
 }
 
-& git worktree remove --force $path
-if ($LASTEXITCODE -ne 0) { Fail "git worktree remove failed for $path" }
+$removeExit = Invoke-GitQuiet @('worktree','remove','--force',$path)
+if ($removeExit -ne 0) {
+    # A FAILED DIRECTORY DELETE IS NOT A FAILED REMOVAL, and treating it as one is what
+    # produced the mess this script exists to prevent.
+    #
+    # On Windows `git worktree remove` drops its administrative record FIRST and then
+    # deletes the directory. Any open handle - a shell whose working directory is inside
+    # the worktree, an editor, a container bind mount - fails that delete with "Permission
+    # denied" and git exits non-zero, AFTER git has already stopped tracking the worktree.
+    # Bailing out here skipped the branch delete, the registry row and the prune, so git
+    # said the worktree was gone, the registry said it was live, the branch survived, and
+    # a directory nobody owned sat on disk. That is exactly the "10 worktrees not merged"
+    # the operator found - most of them already merged, none of them deregistered.
+    #
+    # So: ask git whether it STILL TRACKS this worktree. If it does, the removal really
+    # failed and we stop. If it does not, finish the job and be honest about the leftover.
+    $tracked = @(Invoke-GitCapture @("worktree", "list", "--porcelain") |
+                 Where-Object { $_ -like "worktree *" } |
+                 ForEach-Object { $_.Substring(9) })
+    # git reports forward slashes here and the registry stores backslashes; compare
+    # normalised or this always says "still tracked" and never deregisters anything.
+    $norm = { param($x) $x.Replace("\", "/").TrimEnd("/").ToLowerInvariant() }
+    $wanted = & $norm $path
+    if ($tracked | Where-Object { (& $norm $_) -eq $wanted }) {
+        Fail "git worktree remove failed for $path (git still tracks it)"
+    }
+    Write-Host ("  NOTE: git released this worktree but could not delete {0}." -f $path) -ForegroundColor Yellow
+    Write-Host  "        Something still holds a handle (usually a shell sitting inside it)."
+    Write-Host  "        Deregistering anyway - a stale row is worse than a stale directory."
+}
 if (-not $KeepBranch) {
-    & git branch -D $branch
-    if ($LASTEXITCODE -ne 0) { Write-Host ("  WARNING: could not delete branch {0} - remove it by hand" -f $branch) -ForegroundColor Yellow }
+    $branchExit = Invoke-GitQuiet @('branch','-D',$branch)
+    if ($branchExit -ne 0) { Write-Host ("  WARNING: could not delete branch {0} - remove it by hand" -f $branch) -ForegroundColor Yellow }
 }
 $rows.Remove($Id)
 Write-Registry $rows
-& git worktree prune
+$null = Invoke-GitQuiet @('worktree','prune')
+# One more attempt at the directory, now that git has let go of it. Best-effort: the point
+# of the retry is that the common holder (a shell that has since moved) is often gone by
+# now, not that the delete is guaranteed.
+if (Test-Path $path) { Remove-Item -Recurse -Force $path -ErrorAction SilentlyContinue }
+$leftover = Test-Path $path
 Write-Host ("Removed worktree {0}{1}." -f $Id, $(if ($KeepBranch) { " (branch kept)" } else { " and branch $branch" })) -ForegroundColor Green
+if ($leftover) {
+    # Said out loud rather than swallowed: the registry is now clean, so nothing else will
+    # ever mention this directory again.
+    Write-Host ("  LEFTOVER DIRECTORY: {0}" -f $path) -ForegroundColor Yellow
+    Write-Host  "  It is deregistered and no longer a worktree - delete it by hand once the"
+    Write-Host  "  process holding it exits. Nothing tracks it any more, so nothing will remind you."
+}
 exit 0
