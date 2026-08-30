@@ -64,8 +64,7 @@ if ($offReason) { Write-Host "REFUSED: $offReason" -ForegroundColor Yellow; exit
 # worktree - see common.ps1. Anchoring it on $PSScriptRoot (as this did) meant a copy of
 # this toolkit inside a worktree got its OWN gitignored lock dir, so two agents could each
 # be told "ACQUIRED" for `merge` and exclude nobody. AI_STACK_LEASE_DIR still overrides.
-$LockDir = if ($env:AI_STACK_LEASE_DIR) { $env:AI_STACK_LEASE_DIR }
-           else { Join-Path (Get-SharedStateDir) "locks" }
+$LockDir = Get-LeaseDir   # resolve.ps1 - AI_STACK_LEASE_DIR still overrides
 $NamesFile = if ($env:AI_STACK_LEASE_NAMES_FILE) { $env:AI_STACK_LEASE_NAMES_FILE }
              else { Join-Path $PSScriptRoot (Get-HarnessSetting "leases.names_file" "lease-names.conf") }
 

@@ -27,7 +27,9 @@ Everything else in here is internal and may change without notice.
 | `sync-worktree-env.ps1 -Id <id>` | re-copy runtime env files when the main checkout's are newer |
 | `queue.ps1` | the pipeline: propose → confirm → submit → test → release → review → merge |
 | `lease.ps1` | named leases for SHARED RUNTIME only (Docker, GPU, ports, live DBs) |
+| `dispatch.ps1` | RUN the work: role+profile → runner → submit, follow, one outcome + exit code |
 | `verify-merge-protocol.ps1` | the executable drill over the whole protocol |
+| `verify-dispatch.ps1` | the executable drill over the dispatch layer (probes the REAL daemon by default; `-Offline` skips that and says so) |
 | `harness.config.json` | the configuration (see below) |
 | `config.py` | the reader other Python code imports (`bridge.py` does) |
 
@@ -37,12 +39,68 @@ Internal: `common.ps1` (composition root), `git-io.ps1` (git facts), `resolve.ps
 The dependency direction is one-way and deliberate:
 
 ```
-queue.ps1 / lease.ps1 / new-worktree.ps1
+queue.ps1 / lease.ps1 / new-worktree.ps1 / dispatch.ps1
         |
      common.ps1 ──> resolve.ps1 ──> git-io.ps1   (facts about this repository)
                           └──────> config.ps1    (files + environment -> settings)
                     anchor.ps1                   (the shape of an anchor; owns no state)
 ```
+
+## Runners: resolving one and running one are two different things
+
+`config.ps1`'s `Resolve-RoleTarget` answers *which* runner and model a role uses.
+`dispatch.ps1` is what CALLS it. Until 2026-08-30 only the first half existed, which
+is why PLAN.md's A11 ("the little-coder runner is wired, status: unproven") read as
+optimistic: the wiring was a config entry naming a door — `http://127.0.0.1:8090` —
+that `coder/docker-compose.yml` never published. See
+`harness.config.json`'s `_why_docker_exec` for the transport decision and its revert path.
+
+A runner record therefore carries topology (`transport`, `container`, `base_url`, the API
+paths, and the `lease` a caller must hold) as well as policy, readable through
+`Get-HarnessRunner` / `config.runner()`.
+
+**DECLARED is not the same as EXISTS, and two different checks cover the two claims.**
+`test_harness_config.py`'s door check is a substring match over the TEXT of the compose
+files: it proves the door is **declared** — a `127.0.0.1:<port>` publish for `http`, a
+`container_name:` for `docker-exec` — and it proves nothing about the running stack. Those
+two genuinely differ here: on 2026-08-30 `coder/docker-compose.yml` declared
+`127.0.0.1:9091->9090` for little-coder while `docker port little-coder` printed nothing and
+`docker inspect little-coder --format '{{json .NetworkSettings.Ports}}'` gave `{"9090/tcp":[]}`.
+**The cause of that disagreement is NOT established.** The obvious guess — that the running
+container predates the declaration — is wrong: `docker inspect little-coder --format
+'{{.Created}}'` is `2026-08-23T17:00:48Z` and the ports line has been in
+`coder/docker-compose.yml` since `56af93a` (2026-08-21), so the container POSTDATES the
+declaration by two days. The runtime claim is `verify-dispatch.ps1`'s live section, which by
+DEFAULT inspects that the container is really running and reaches the daemon over the
+declared transport; its summary line states the real transport's coverage on every run that
+reaches the end — `COVERED`, `NOT COVERED`, or `ATTEMPTED AND FAILED`.
+
+`dispatch.ps1` returns ONE outcome shape whatever the runner, and its exit code
+distinguishes "the dispatch worked" from "the work is right": `0` acceptance passed,
+`3` acceptance failed, `4` completed with no checkable signal, `1` no usable outcome at all
+(no runner, no lease, unreachable transport, no focus, timeout, or a task that ended
+`abandoned`/`rejected`). The little-coder daemon runs the acceptance command itself, so the
+agent never grades its own work.
+
+A runner that declares a `lease` cannot be dispatched unless the caller HOLDS that lease
+(`-LeaseOwner`, or `AI_STACK_LEASE_OWNER`): focusing little-coder wipes its workspace and a
+task runs arbitrary commands in it. Someone else's lease refuses the dispatch just as a free
+one does.
+
+**Run the drill as `powershell.exe -File`, not with `&` inside a session you are reusing.**
+Under `powershell.exe -NoProfile -File .\scripts\agent-harness\verify-dispatch.ps1` it is
+deterministic here. UNVERIFIED, reported by a U4 verifier and NOT reproduced: invoked with
+the call operator (`& $drill -Offline`) repeatedly inside one long-lived session they saw
+three different counts (50/51, 46/51, 48/51, differing checks) on an unmodified copy. Nine
+such runs in one session on 2026-08-30 gave `51/51 checks passed` every time with zero
+`[FAIL]` lines, so the cause is unknown and it may not be reproducible. The reported
+failures were spurious REDs only — never a green that should have been red — so the risk is
+a confusing verdict, not a false pass.
+
+**No pipeline consumes `dispatch.ps1` yet.** `queue.ps1` does not call it and nothing else
+does either — today it is driven by hand or by a session, and the only shipped consumer of
+the runner layer is `bridge.py`'s `profile: list`, which renders `describe_runner()`.
+Wiring dispatch into the queue is U4's remaining half, not something this file already does.
 
 `config.ps1` knows nothing about git, worktrees, queues or leases — which is what
 lets another distribution retarget the toolkit by editing JSON instead of code.
@@ -66,6 +124,8 @@ Environment overrides are a short explicit list, not a naming convention:
 | `AI_STACK_HARNESS_CONFIG` | path to an alternate `harness.config.json` |
 | `AI_STACK_HARNESS_ENABLED` | `0` — kill switch, beats both files |
 | `AI_STACK_HARNESS_PROFILE` | profile name applied to every surface |
+| `AI_STACK_LEASE_OWNER` | default `-LeaseOwner` for `dispatch.ps1`'s lease assertion |
+| `AI_STACK_LEASE_DIR` | the lock namespace (drills point it at a temp dir to stay hermetic) |
 
 Two more are named *by* the configuration rather than hardcoded, so a distribution
 can rename them: `worktree.work_line_env` (default `AI_STACK_WORK_LINE`, which

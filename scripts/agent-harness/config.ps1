@@ -221,6 +221,27 @@ function Resolve-RoleTarget {
     }
 }
 
+function Get-HarnessRunner {
+    # The full runner record - kind, status, and (for a runner something has to CALL) its
+    # transport topology. Resolve-RoleTarget deliberately returns only the policy answer;
+    # dispatch.ps1 needs the topology too, and reading it here keeps that knowledge in the
+    # config file instead of hardcoded in a dispatcher. Throws on an unknown name for the
+    # same reason Resolve-RoleTarget does: a typo must be visible.
+    param([Parameter(Mandatory = $true)][string]$Name)
+    $runners = Get-HarnessSetting "runners"
+    if (-not $runners -or -not $runners.Contains($Name)) {
+        $known = if ($runners) { ($runners.Keys | Where-Object { $_ -notlike "_*" }) -join ", " } else { "(none)" }
+        throw "unknown runner '$Name' - known runners: $known"
+    }
+    return $runners[$Name]
+}
+
+function Get-HarnessRunnerNames {
+    $runners = Get-HarnessSetting "runners"
+    if (-not $runners) { return @() }
+    return @($runners.Keys | Where-Object { $_ -notlike "_*" })
+}
+
 function Get-HarnessProfileNames {
     $profiles = Get-HarnessSetting "profiles"
     if (-not $profiles) { return @() }
