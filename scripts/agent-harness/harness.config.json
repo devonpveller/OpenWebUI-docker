@@ -46,6 +46,7 @@
       "status": "unproven",
       "transport": "docker-exec",
       "container": "little-coder",
+      "lease": "coder",
       "base_url": "http://localhost:8090",
       "health_path": "/health",
       "project_path": "/project",
@@ -54,6 +55,14 @@
       "events_path": "/tasks/{id}/events",
       "default_model": "local-default",
       "_note": "the local substrate: little-coder reaches llama-cpp through LiteLLM. Dispatched by dispatch.ps1 (Invoke-HarnessTask).",
+      "_why_lease": [
+        "Focusing this runner WIPES its workspace and a task runs arbitrary commands in it,",
+        "so a dispatch is a live-plane mutation. dispatch.ps1's Assert-RunnerLease refuses",
+        "unless the named lease is held BY THE CALLER (lease.ps1 -Acquire -Name coder).",
+        "A runner without this key needs no lease - the policy lives here, not in the code.",
+        "Added 2026-08-30: the code claimed 'callers take the coder lease' in a comment while",
+        "nothing acquired, asserted or checked one."
+      ],
       "_why_docker_exec": [
         "This runner declared endpoint 'http://127.0.0.1:8090' until 2026-08-30. That door did",
         "not exist: coder/docker-compose.yml publishes ONLY 127.0.0.1:9091->9090 (Prometheus),",

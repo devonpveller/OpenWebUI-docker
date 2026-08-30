@@ -137,11 +137,18 @@ def test_describe_runner_is_unknown_not_an_exception():
     assert config.describe_runner("nope") == "nope: (unknown)"
 
 
-# --- the door check -----------------------------------------------------------------
+# --- the DECLARED-door check --------------------------------------------------------
 # A runner record names how to REACH a daemon. Until 2026-08-30 the little-coder runner
 # declared endpoint "http://127.0.0.1:8090" and nothing ever called it, so nobody noticed
 # that coder/docker-compose.yml publishes only 127.0.0.1:9091->9090 (Prometheus): the
-# config named a door that did not exist. Prose cannot keep that honest; this can.
+# config named a door no compose file declared. Prose cannot keep that honest; this can.
+#
+# WHAT THIS DOES NOT PROVE, stated here because the same claim was rounded up once already:
+# these are substring matches over the TEXT of the compose files. They prove a door is
+# DECLARED. They say nothing about the running stack, and the two differ on this host -
+# compose declares 127.0.0.1:9091->9090 for little-coder while `docker port little-coder`
+# prints nothing, because the container predates the declaration and was never recreated.
+# The RUNTIME claim belongs to verify-dispatch.ps1's live section, which probes the daemon.
 
 REPO_ROOT = HERE.parents[1]   # scripts/agent-harness -> scripts -> the checkout root
 COMPOSE_FILES = [
@@ -157,7 +164,7 @@ def _compose_text() -> str:
 
 
 def _door_problems(runners: dict, compose: str) -> list:
-    """Every declared transport must correspond to a door that actually exists.
+    """Every declared transport must correspond to a door some compose file DECLARES.
 
     docker-exec -> the named container must appear as a `container_name:` somewhere in the
     stack's compose files, and its base_url must be container-local (a host address there is
@@ -193,12 +200,12 @@ def _door_problems(runners: dict, compose: str) -> list:
             if hostname in ("localhost", "127.0.0.1"):
                 if f'"127.0.0.1:{port}:' not in compose and f"127.0.0.1:{port}:" not in compose:
                     problems.append(
-                        f"{name}: transport http on {base} but no compose file publishes "
-                        f"127.0.0.1:{port} - the door does not exist")
+                        f"{name}: transport http on {base} but no compose file declares "
+                        f"127.0.0.1:{port} - nothing publishes that door")
     return problems
 
 
-def test_no_runner_names_a_door_that_does_not_exist():
+def test_no_runner_names_a_door_no_compose_file_declares():
     assert _door_problems(config.get("runners") or {}, _compose_text()) == []
 
 
@@ -208,7 +215,7 @@ def test_the_door_check_catches_an_unpublished_port():
     bad = {"little-coder": {"kind": "little-coder", "transport": "http",
                             "base_url": "http://127.0.0.1:8090"}}
     problems = _door_problems(bad, _compose_text())
-    assert problems and "does not exist" in problems[0], problems
+    assert problems and "nothing publishes that door" in problems[0], problems
 
 
 def test_the_door_check_catches_a_url_with_no_transport():
@@ -222,6 +229,41 @@ def test_the_door_check_catches_a_missing_container():
                             "container": "no-such-container", "base_url": "http://localhost:8090"}}
     problems = _door_problems(bad, _compose_text())
     assert problems and "no compose file" in problems[0], problems
+
+
+# --- the lease a runner declares must be one lease.ps1 will actually grant -----------
+# dispatch.ps1 REFUSES to dispatch a runner whose declared lease the caller does not hold.
+# If that name is not in lease-names.conf, lease.ps1 refuses to grant it without -AdHoc,
+# so the runner becomes undispatchable by anyone following the documented path - a typo
+# here is a deadlock, not a warning.
+
+def _known_lease_names() -> set:
+    conf = HERE / "lease-names.conf"
+    names = set()
+    for line in conf.read_text(encoding="utf-8").splitlines():
+        name = line.split("#")[0].strip()
+        if name:
+            names.add(name)
+    return names
+
+
+def test_every_runner_lease_is_a_known_lease_name():
+    known = _known_lease_names()
+    assert "coder" in known, known          # the conf was found and parsed, not empty
+    for name, r in (config.get("runners") or {}).items():
+        if name.startswith("_") or not isinstance(r, dict):
+            continue
+        lease = r.get("lease")
+        if lease:
+            assert lease in known, f"{name} declares lease '{lease}', not in lease-names.conf"
+
+
+def test_the_dispatchable_runner_declares_a_lease():
+    """little-coder mutates a live plane when dispatched (focus wipes its workspace, and a
+    task runs arbitrary commands in it). A runner record with no lease means dispatch.ps1
+    asserts nothing - which is what the code CLAIMED to do in a comment until 2026-08-30
+    while acquiring, asserting and checking nothing."""
+    assert config.runner("little-coder").get("lease") == "coder"
 
 
 PS = shutil.which("powershell") or shutil.which("pwsh")
@@ -243,7 +285,7 @@ def test_powershell_and_python_readers_agree():
         + "$o.runners=@(Get-HarnessRunnerNames);"
         + "$lc=Get-HarnessRunner -Name 'little-coder';"
         + "$o.lc=[ordered]@{};"
-        + "foreach($k in @('kind','status','transport','container','base_url','submit_path','task_path','events_path','health_path','project_path','default_model')){"
+        + "foreach($k in @('kind','status','transport','container','lease','base_url','submit_path','task_path','events_path','health_path','project_path','default_model')){"
         + "$o.lc[$k]=[string]$lc[$k]};"
         + "$o.roles=[ordered]@{};"
         + "foreach($r in @('worker','tester','reviewer')){"

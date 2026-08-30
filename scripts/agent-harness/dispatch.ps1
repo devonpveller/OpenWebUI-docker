@@ -7,7 +7,12 @@
 # and two tests. So PLAN.md's A11 ("the little-coder runner is wired, status: unproven") was
 # understated - the RESOLUTION existed and the DISPATCH did not. This file is the dispatch.
 #
-# Transport decision (class-2, logged in DECISIONS.md as U4-1). harness.config.json used to
+# Transport decision (class-2). The DECISIONS.md entry for it is PENDING, not written: it
+# is staged under "DECISIONS entries to append" in documentation/notes/dfu-u4-findings.md
+# and the orchestrator appends it at merge (this branch does not touch DECISIONS.md).
+# An earlier revision of this header cited it as "logged in DECISIONS.md as U4-1", which was
+# a citation to a record that did not exist - worse than no citation, because it reads as
+# checkable and is not.  harness.config.json used to
 # declare endpoint "http://127.0.0.1:8090". little-coder publishes ONLY 127.0.0.1:9091->9090
 # (Prometheus); its task API is reachable only from the container networks, so the declared
 # door did not exist. Of the two honest fixes - publish the port, or dispatch through the
@@ -22,7 +27,7 @@
 #   Invoke-LcApi honours transport=http already.
 #
 # Usage (as a script):
-#   .\dispatch.ps1 -Role worker -Profile all-local -Prompt "..." -AcceptanceCommand "..."
+#   .\dispatch.ps1 -Role worker -Profile all-local -LeaseOwner wt-x -Prompt "..." -AcceptanceCommand "..."
 #   .\dispatch.ps1 -Role worker -Profile all-local -Prompt "..." -Repo https://host/o/r#branch
 #   .\dispatch.ps1 -Probe -Profile all-local        # transport reachability only
 #
@@ -31,8 +36,10 @@
 # Exit codes (a caller pipeline reads these, not the prose):
 #   0  the task completed AND its acceptance command passed
 #   3  the task completed and its acceptance command FAILED
-#   4  the task completed with no checkable signal (unverified), or was abandoned
-#   1  dispatch itself failed (no runner, unreachable transport, no focus, timeout)
+#   4  the task completed with no checkable signal (status done, outcome unverified)
+#   1  dispatch produced no usable outcome: no runner, no lease, unreachable transport,
+#      no focus, timeout, or the task ended `abandoned`/`rejected` (ok is false for any
+#      terminal status that is not `done`, so those land here and NOT on 4)
 #   2  the harness module is switched off
 #
 # 0 vs 3/4 is the whole point: "the agent answered" is not "the work is right".
@@ -53,6 +60,7 @@ param(
     [int]$TimeoutMinutes = 30,
     [int]$PollSeconds = 10,
     [string]$AuditDir = "",
+    [string]$LeaseOwner = "",
     [switch]$Probe,                     # reachability only; changes nothing
     [switch]$NoRun,                     # dot-source as a library
     [switch]$Json
@@ -175,7 +183,10 @@ function Get-LcHealth {
 
 function Set-LcFocus {
     # POST /project - point the runner's workspace at a repo. The daemon WIPES the workspace
-    # on a real switch, so this is a live-plane mutation: callers take the coder lease.
+    # on a real switch. That is a live-plane mutation, which is why Invoke-HarnessTask
+    # ASSERTS the runner's lease before it gets here (Assert-RunnerLease). Until 2026-08-30
+    # this comment claimed "callers take the coder lease" while nothing acquired, asserted or
+    # checked one - a lease claim with no lease.
     param(
         [Parameter(Mandatory = $true)]$Runner,
         [Parameter(Mandatory = $true)][string]$Repo,
@@ -185,6 +196,36 @@ function Set-LcFocus {
     $body = [ordered]@{ repo = $Repo; actor = $Actor }
     if ($Fresh) { $body["fresh"] = $true }
     return (Invoke-LcApi -Runner $Runner -Method POST -Path (Get-RunnerPath $Runner "project_path" "/project") -Body $body -TimeoutSeconds 900)
+}
+
+function Assert-RunnerLease {
+    # A runner record may declare `lease: <name>`: the plane whose lease a caller must hold
+    # before mutating it. little-coder declares `coder` because focusing it WIPES its
+    # workspace and a task runs arbitrary commands in it.
+    #
+    # HELD BY ME, not merely held: a lease held by another agent must BLOCK this dispatch,
+    # not satisfy the check. That is the whole point of the primitive, and an assertion that
+    # accepted anyone's lease would pass exactly when it matters least.
+    # A runner with no `lease` key needs none - the policy stays in the config file.
+    param([Parameter(Mandatory = $true)]$Runner, [string]$Owner = "")
+    $name = Get-RunnerPath $Runner "lease" ""
+    if (-not $name) { return "" }
+    if (-not $Owner) { $Owner = "$($env:AI_STACK_LEASE_OWNER)" }
+    if (-not $Owner) {
+        throw ("runner declares the '$name' lease but no owner was given - pass " +
+               "-LeaseOwner <your worktree id> (or set AI_STACK_LEASE_OWNER), after " +
+               ".\lease.ps1 -Acquire -Name $name -Owner <id>")
+    }
+    $held = Get-HeldLease -Name $name
+    if (-not $held) {
+        throw ("the '$name' lease is not held (free or expired) - this dispatch mutates that " +
+               "plane. Run: .\lease.ps1 -Acquire -Name $name -Owner $Owner")
+    }
+    if ("$($held.owner)" -ne $Owner) {
+        throw ("the '$name' lease is held by '$($held.owner)', not '$Owner' - another agent " +
+               "owns that plane right now. Wait, or run .\lease.ps1 -Status.")
+    }
+    return $name
 }
 
 function Submit-LcTask {
@@ -345,6 +386,7 @@ function Invoke-HarnessTask {
         [int]$TimeoutMinutes = 30,
         [int]$PollSeconds = 10,
         [string]$AuditDir = "",
+        [string]$LeaseOwner = "",
         [scriptblock]$OnProgress = $null
     )
     $target = Resolve-RunnerRecord -Role $Role -Profile $Profile -Surface $Surface
@@ -355,6 +397,8 @@ function Invoke-HarnessTask {
                -f $Role, $target.runner, $target.kind
     }
     $runner = $target.record
+    # BEFORE anything that mutates the plane - the focus wipe and the task both do.
+    [void](Assert-RunnerLease -Runner $runner -Owner $LeaseOwner)
 
     if ($Repo) {
         $focus = Set-LcFocus -Runner $runner -Repo $Repo -Fresh:$Fresh
@@ -448,7 +492,7 @@ try {
     $res = Invoke-HarnessTask -Role $Role -Profile $Profile -Surface $Surface -Prompt $Prompt `
         -AcceptanceCommand $AcceptanceCommand -Repo $Repo -Fresh:$Fresh -Channel $Channel `
         -UserId $UserId -SessionId $SessionId -TimeoutMinutes $TimeoutMinutes `
-        -PollSeconds $PollSeconds -AuditDir $AuditDir -OnProgress $progress
+        -PollSeconds $PollSeconds -AuditDir $AuditDir -LeaseOwner $LeaseOwner -OnProgress $progress
 } catch {
     Write-Host ("DISPATCH FAILED: {0}" -f $_.Exception.Message) -ForegroundColor Red
     exit 1

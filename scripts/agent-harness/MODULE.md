@@ -29,7 +29,7 @@ Everything else in here is internal and may change without notice.
 | `lease.ps1` | named leases for SHARED RUNTIME only (Docker, GPU, ports, live DBs) |
 | `dispatch.ps1` | RUN the work: role+profile → runner → submit, follow, one outcome + exit code |
 | `verify-merge-protocol.ps1` | the executable drill over the whole protocol |
-| `verify-dispatch.ps1` | the executable drill over the dispatch layer (`-Live` adds a real probe) |
+| `verify-dispatch.ps1` | the executable drill over the dispatch layer (probes the REAL daemon by default; `-Offline` skips that and says so) |
 | `harness.config.json` | the configuration (see below) |
 | `config.py` | the reader other Python code imports (`bridge.py` does) |
 
@@ -55,17 +55,37 @@ optimistic: the wiring was a config entry naming a door — `http://127.0.0.1:80
 that `coder/docker-compose.yml` never published. See
 `harness.config.json`'s `_why_docker_exec` for the transport decision and its revert path.
 
-A runner record therefore carries topology (`transport`, `container`, `base_url`, and the
-API paths) as well as policy, readable through `Get-HarnessRunner` / `config.runner()`.
-`test_harness_config.py` asserts that a declared transport corresponds to a door that
-actually exists — a published `127.0.0.1:<port>` for `http`, a real `container_name:`
-for `docker-exec` — so a config can no longer name one that does not.
+A runner record therefore carries topology (`transport`, `container`, `base_url`, the API
+paths, and the `lease` a caller must hold) as well as policy, readable through
+`Get-HarnessRunner` / `config.runner()`.
+
+**DECLARED is not the same as EXISTS, and two different checks cover the two claims.**
+`test_harness_config.py`'s door check is a substring match over the TEXT of the compose
+files: it proves the door is **declared** — a `127.0.0.1:<port>` publish for `http`, a
+`container_name:` for `docker-exec` — and it proves nothing about the running stack. Those
+two genuinely differ here: on 2026-08-30 `coder/docker-compose.yml` declared
+`127.0.0.1:9091->9090` for little-coder while `docker port little-coder` printed nothing,
+because the running container predates that declaration and was never recreated. The
+runtime claim is `verify-dispatch.ps1`'s live section, which by DEFAULT inspects that the
+container is really running and reaches the daemon over the declared transport; its summary
+line always states whether the real transport was covered.
 
 `dispatch.ps1` returns ONE outcome shape whatever the runner, and its exit code
 distinguishes "the dispatch worked" from "the work is right": `0` acceptance passed,
-`3` acceptance failed, `4` no checkable signal, `1` dispatch itself failed. The
-little-coder daemon runs the acceptance command itself, so the agent never grades its
-own work.
+`3` acceptance failed, `4` completed with no checkable signal, `1` no usable outcome at all
+(no runner, no lease, unreachable transport, no focus, timeout, or a task that ended
+`abandoned`/`rejected`). The little-coder daemon runs the acceptance command itself, so the
+agent never grades its own work.
+
+A runner that declares a `lease` cannot be dispatched unless the caller HOLDS that lease
+(`-LeaseOwner`, or `AI_STACK_LEASE_OWNER`): focusing little-coder wipes its workspace and a
+task runs arbitrary commands in it. Someone else's lease refuses the dispatch just as a free
+one does.
+
+**No pipeline consumes `dispatch.ps1` yet.** `queue.ps1` does not call it and nothing else
+does either — today it is driven by hand or by a session, and the only shipped consumer of
+the runner layer is `bridge.py`'s `profile: list`, which renders `describe_runner()`.
+Wiring dispatch into the queue is U4's remaining half, not something this file already does.
 
 `config.ps1` knows nothing about git, worktrees, queues or leases — which is what
 lets another distribution retarget the toolkit by editing JSON instead of code.
@@ -89,6 +109,8 @@ Environment overrides are a short explicit list, not a naming convention:
 | `AI_STACK_HARNESS_CONFIG` | path to an alternate `harness.config.json` |
 | `AI_STACK_HARNESS_ENABLED` | `0` — kill switch, beats both files |
 | `AI_STACK_HARNESS_PROFILE` | profile name applied to every surface |
+| `AI_STACK_LEASE_OWNER` | default `-LeaseOwner` for `dispatch.ps1`'s lease assertion |
+| `AI_STACK_LEASE_DIR` | the lock namespace (drills point it at a temp dir to stay hermetic) |
 
 Two more are named *by* the configuration rather than hardcoded, so a distribution
 can rename them: `worktree.work_line_env` (default `AI_STACK_WORK_LINE`, which
