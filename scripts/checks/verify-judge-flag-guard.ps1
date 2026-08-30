@@ -3,7 +3,7 @@
 # audit record when it does, and can no longer be walked past by SPELLING the
 # flag differently.
 #
-#   .\scripts\checks\verify-judge-flag-guard.ps1      # ~60s, cleans up after itself
+#   .\scripts\checks\verify-judge-flag-guard.ps1      # ~80s measured, cleans up after itself
 #
 # WHY A SEPARATE DRILL. verify-judge-dryrun.ps1 proves the INSTRUMENT can fail.
 # This proves the GUARD can stop something - a different claim, and the one a

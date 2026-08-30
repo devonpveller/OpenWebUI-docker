@@ -42,7 +42,7 @@ WIRING_MODULE = "meta_wiring.py"
 FLAG = judge_gate.FLAG_KEY  # "judge_enabled"
 
 # A scan that finds nothing passes for free. This is the floor the package was
-# at when the test was written (34 modules); it exists so that a broken path,
+# at when the test was written (38 modules); it exists so that a broken path,
 # a renamed package directory, or a glob that stops matching turns this file
 # RED instead of quietly green -- the "EXPECTED_CASES" discipline the flag
 # drill already uses.

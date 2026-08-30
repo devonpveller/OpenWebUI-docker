@@ -437,6 +437,14 @@ Both would have shipped as green-for-the-wrong-reason:
 - **The perimeter scans `*.yaml` / `*.yml` only.** A config renamed to another
   extension would not be seen at commit time. The chokepoint has no such scope
   limit: it tests the value pydantic produced, whatever file it came from.
+- **`LC_JUDGE_RATING_RECORD` lets environment control satisfy the gate.** Not a
+  new class of power — `daemon.py:1086` already resolves the entire config from
+  `LC_CONFIG`, so anyone who can set the daemon's environment could always
+  choose its config. Stated because a verifier will find the new variable and
+  should not have to work out whether it widened anything.
+- **The guard now parses arbitrary staged YAML**, so a maliciously crafted
+  alias-expansion file staged by the author would make their own commit slow or
+  fail. Self-inflicted and fail-closed; noted rather than mitigated.
 - **The running `little-coder` container does not have the gate yet.** It runs
   `little-coder:local`, built before this branch. The runtime chokepoint
   reaches production on the next image rebuild + recreate of that service. The

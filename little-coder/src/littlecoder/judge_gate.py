@@ -55,6 +55,11 @@ WHAT THIS DOES NOT DO, stated so nothing reads wider than it is:
     record. The record is an operator artifact under review, not a credential.
   * It says nothing about whether the judge's OUTPUT is good. That is
     JUDGE-CALIBRATION.md's dry run, a different instrument.
+  * `LC_JUDGE_RATING_RECORD` lets a caller point the gate at any file, which
+    means anyone who controls the daemon's ENVIRONMENT can satisfy it. That is
+    not a new class of power: `daemon.py:1086` already resolves the whole
+    config from `LC_CONFIG`, so environment control was always config control.
+    The override exists so tests and drills need no writable /app/config.
 """
 
 from __future__ import annotations
