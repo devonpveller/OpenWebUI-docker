@@ -58,8 +58,9 @@ function Invoke-Unit {
   Section "Deno: agent-memory policy (memory-plane P1.2)"
   # Pure logic - no database, no network - so the plane's write/read policy is checkable
   # without a stack. The invariant it pins is that a DEFAULT writeback is returned by the
-  # DEFAULT recall; upstream's Hermes integration ships the opposite and its plane is
-  # silently always empty.
+  # DEFAULT recall. Two local instances of the opposite were found and reproduced against
+  # a real database: review_status defaulting to 'pending' (which the gate excludes), and
+  # visibility 'project' with a NULL project_id. Both look correct on each side alone.
   docker run --rm -v "${rootFwd}/OB1/integrations/kubernetes-deployment:/app" `
     -w /app denoland/deno:2.3.3 sh -c "deno check agent-memory-policy.ts agent-memory-policy.test.ts agent-memory.ts agent-memory.test.ts index.ts && deno test agent-memory-policy.test.ts agent-memory.test.ts"
   if ($LASTEXITCODE -eq 0) { Pass "agent-memory policy: deno check + test" } else { Fail "agent-memory policy: deno check/test" }
