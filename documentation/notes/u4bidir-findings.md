@@ -202,13 +202,17 @@ Executable, all re-runnable:
 ## 6. Findings for someone else (deferred, not fixed here)
 
 1. **`agent-org/README.md:121` says "55 tests".** The suite is far larger (it did not
-   finish inside a 10-minute window on this host). Stale by a wide margin.
+   finish inside a 15-minute window on this host serially; 861 tests in 6m03s with
+   `-n 8`). Stale by a wide margin.
 2. **The documented test install is incomplete.** `pip install -e .[test]` does not
    yield a collectable suite: `tests/test_github_app.py` needs `pyjwt` +
    `cryptography` and `tests/test_http_api.py` needs `websockets`, neither of which is
    in `pyproject.toml`'s `[test]` extra. Collection is *interrupted*, so the whole run
    fails, not just those files. One-line fix to the extra; not taken here because it is
-   not this branch's subject.
+   not this branch's subject. `pytest-xdist` is absent too - not a correctness gap but a
+   practical one: the serial suite does not finish inside 15 minutes on this host, so a
+   reviewer following the README will conclude the suite hangs rather than that it is
+   long. (The 861-passed run in §5 used `-n 8`.)
 3. **`worker_instances.role` is documented as "profile bound while assigned"**
    (`models.py:218`) but nothing ever resolves it against `ProfileRegistry`. Either
    the comment is aspirational or the binding is missing; worth one look when U4's
