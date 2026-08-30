@@ -123,6 +123,42 @@
       "scratch_root"
     ]
   },
+  "venue_required_fields": [
+    "kind",
+    "repo"
+  ],
+  "venue_kinds": {
+    "gym": {
+      "desc": "a disposable training arena - ai-orchestration-gym. The subject of the experiment is a worktree of THAT repository, never the one under test",
+      "must_differ_from_harness_repo": true,
+      "satisfies_gym_column": true
+    },
+    "workspace": {
+      "desc": "the harness's own repository. A legitimate venue for a smoke run of the harness itself, and NOT a venue any 'Gym:' column accepts",
+      "must_differ_from_harness_repo": false,
+      "satisfies_gym_column": false
+    }
+  },
+  "_venue_why": [
+    "THE PLACE THE EXPERIMENT WAS PERFORMED, as data. Added 2026-08-30 after a verifier",
+    "found that this package measured the experiment with four mechanisms and represented",
+    "the VENUE with none. PLAN section 2's preamble, four lines above the phase table:",
+    "\"'gym' means measured runs in `ai-orchestration-gym`, never live planes or a real",
+    "target.\" Every U-phase column beginning 'Gym:' names an experiment AND a place.",
+    "",
+    "So a complete four-cell comparison - real dispatches, real acceptance runs, a declared",
+    "matrix lock, exit 0 - was produced against ai-stack itself, with `target: self`",
+    "resolving to the repository the harness lives in, and nothing in the record, the",
+    "report or the config could say so. That is mechanism 1's failure one layer up: not a",
+    "wrong number, a MISSING dimension read as a satisfied one.",
+    "",
+    "`must_differ_from_harness_repo` is the check. quadrant/venue.py compares GIT COMMON",
+    "DIRS, so a worktree of ai-stack is recognised as ai-stack rather than as a different",
+    "path. `satisfies_gym_column` is what a reader of a report may conclude from the venue",
+    "- it is rendered, never inferred."
+  ],
+  "record_venue_required": true,
+  "_record_venue_required_why": "every record carries the venue it ran in, and admission refuses one that does not - the same move as the item digest (mechanism 3). A results set pins its venue in the declared-matrix lock, so records from another venue are refused rather than averaged in. Records produced before 2026-08-30 carry no venue and are therefore no longer admissible: they were real runs in the wrong place, and the honest rendering of that is a refusal with a reason.",
   "_kind_requirements_why": "a quadrant is misconfigured LOUDLY or not at all. A little-coder runner with no endpoint is not a runner that will fail at dispatch time and report NOT RUN - it is a configuration error, and the difference matters: NOT RUN is a fact about the world, a config error is a fact about the operator's file.",
   "rounds_fields": {
     "dispatch_attempts": "how many times the runner had to be handed the item before it produced anything",

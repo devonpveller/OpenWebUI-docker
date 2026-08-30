@@ -5,6 +5,11 @@ PLAN `dark-factory-unification` §1 L3 names two orthogonal axes — **runner**
 row is validated by *"Gym: same anchored item run per quadrant (runner x target), outcomes
 compared"*. This module is that comparison.
 
+**The column has THREE parts, and the first one is a place.** §2's preamble, four lines
+above the phase table, binds it: *"'gym' means measured runs in `ai-orchestration-gym`,
+never live planes or a real target."* So a comparison is over one item, one set of cells,
+**and one VENUE** — see `venue.py` and mechanism 5 below.
+
 ## What it is for
 
 Not "show that the quadrants differ". **Let someone DECIDE between them.** A table saying
@@ -39,6 +44,22 @@ Four mechanisms make that unrepresentable (stated as data in `schema.json`, enfo
    longer configured renders `OFF MATRIX`, carries whatever reason its records gave, and
    counts against completeness.
 
+5. **One venue, pinned per results set.** Added 2026-08-30 after a verifier found the
+   dimension missing entirely: mechanisms 1-4 were all satisfied by a four-cell, exit-0,
+   fully evidenced comparison that ran **against ai-stack**, with `target: self` resolving
+   to the repository the harness lives in — and nothing in the record, the report, the exit
+   code or the config could say so. The config's own restatement of U4's column had even
+   dropped the leading word `Gym:`. A `venue` is now a name, a kind, a repo and a ref
+   (`quadrant.venue` / `quadrant.venues`); `venue.probe` REFUSES a `gym`-kind venue that
+   resolves to the harness's own repository (compared by **git common dir**, so a worktree
+   of ai-stack is recognised as ai-stack) and refuses one that is not a repository **root**
+   (git discovers upward, so a wrong path silently adopts whatever repo encloses it —
+   measured: `C:/Users/<user>` is itself a repo on this machine, so every path under the
+   home directory, temp included, answers `git rev-parse` with the personal repo). Every
+   record carries its venue, the results set pins it in `matrix.json` on first write, and
+   admission refuses a record from any other one. The report prints the venue and whether
+   it **SATISFIES a "Gym:" column**, so a reader never has to infer the place from a path.
+
 ### What mechanism 4 does not defend against
 
 A comparison begun in a **fresh** results directory with narrow axes is a genuinely narrow
@@ -52,11 +73,12 @@ rather than a report that lies about it.
 
 | Entry point | Contract |
 |---|---|
-| `python -m quadrant.cli preflight` | one line per configured cell: READY, or BLOCKED with the reason. Exit 0 when all ready, 1 otherwise. |
+| `python -m quadrant.cli preflight` | prints the harness repo, the VENUE (kind + whether it satisfies a "Gym:" column) and the item repo, then one line per configured cell: READY, or BLOCKED with the reason. Exit 0 when all ready, 1 otherwise. |
 | `python -m quadrant.cli run [--runner R] [--target T] [--item I]` | runs the selected cells, writes one run directory each, then renders the FULL-matrix report. Exit 0 iff every cell it attempted completed. |
 | `python -m quadrant.cli report` | re-renders from the accumulated records. **Exit 0 only when every DECLARED cell produced an admitted comparable outcome**; 1 while the comparison is incomplete; 2 misconfigured. Narrowing the configured axes cannot raise this to 0 (mechanism 4). |
 | `python -m quadrant.prove_guards` | mutation drill: breaks each guard in turn and requires its test to go RED. Exit 0 iff every guard bites; prints `N/N guards proven to bite`. |
-| `python -m pytest scripts/agent-harness/test_quadrant.py -q` | the module's suite - the matrix, admission, the report's completeness invariant, the declared-matrix lock, the UTF-8 chokepoint scan, and one end-to-end fixture run. The count is whatever the command prints; on 2026-08-30 it printed `47 passed`. |
+| `python -m pytest scripts/agent-harness/test_quadrant.py -q` | the module's suite - the matrix, admission, the report's completeness invariant, the declared-matrix lock, the UTF-8 chokepoint scan, the retained-evidence invariant, and one end-to-end fixture run. The count is whatever the command prints. |
+| `python -m pytest scripts/agent-harness/test_quadrant_venue.py -q` | the VENUE's suite - config loudness, the venue-violation refusal, the repository-root refusal, relative-path resolution from the main checkout, record admission by venue, and the results-set pin. |
 | `quadrant/guards.py <tests\|unmodified> --item <id>` | the acceptance checks themselves, run by the harness with the workspace as CWD. |
 
 Artifacts: `<repo>/.quadrant/runs/<utc>-<runner>-<target>/{record.json,transcript.txt,manifest.json,workspace/}`
@@ -76,7 +98,8 @@ branch; the matrix, the report and the exit codes follow automatically.
 
 ## Dependencies, one way only
 
-`cli -> {matrix, record, report, item, adapters}`; `report -> {matrix, record}`;
+`cli -> {matrix, record, report, item, adapters, venue}`; `report -> {matrix, record}`;
+`matrix -> venue` (and `venue` imports only `proc`, so it stays a leaf and the cycle cannot form);
 `record -> matrix` (for the schema); `item -> anchor_schema` (the shared anchor contract,
 reused rather than re-implemented); `guards -> item`; `adapters -> lc_docker` (the
 little-coder transport, kept out of `adapters` so the axis file stays about the two axes);
@@ -87,6 +110,7 @@ prints `scripts/agent-harness/test_quadrant.py` and nothing else.
 ## To delete this module
 
 Delete `scripts/agent-harness/quadrant/`, `scripts/agent-harness/test_quadrant.py`,
+`scripts/agent-harness/test_quadrant_venue.py`,
 `scripts/agent-harness/observe-oracle-on-stall.ps1` (its only consumer), the `targets` and
 `quadrant` sections plus the `fixture` runner from `harness.config.json`, the `.quadrant/`
 line in `.gitignore`, and any `.quadrant/` directory. Two rows in
@@ -114,6 +138,9 @@ that mentions it (this plan's `PLAN.md` / `DECISIONS.md` and two findings notes)
   note. It is a real difference between the cells, not a detail.
 - **The fixture runner is scaffolding**, permanently excluded from decision tables by its
   `self-test` status, and `test_quadrant.py` asserts no profile can assign a role to it.
+- **Records produced before 2026-08-30 are no longer admissible.** They carry no venue, so
+  `record.admit` refuses them with that reason. They were real runs in the wrong place; a
+  refusal with a reason is the honest rendering, and deleting them would be worse.
 - **`items/u4-stall` is not a comparison item.** It is deliberately unsatisfiable - a stall
   probe for `observe-oracle-on-stall.ps1`. `quadrant.item` names `u4-baseline`; the probe is
   only reachable with `--item u4-stall`. Scoring a comparison on an impossible task would

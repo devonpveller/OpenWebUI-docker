@@ -11,7 +11,11 @@ saying "completed" is precisely a self-report. So a record is admitted only when
   * its evidence paths EXIST on the filesystem at admission time (not merely are strings);
   * every acceptance entry carries the command that ran and the exit code it returned, and
     no entry's `passed` contradicts its own exit code;
-  * its item digest matches the item the comparison is about.
+  * its item digest matches the item the comparison is about;
+  * it names the VENUE it ran in, and that venue is the one this results set is a
+    comparison over. Same move as the digest, one axis out: "the same anchored item" was
+    mechanized while "in the gym" was not, and a run in the wrong place is not a data
+    point about the right one however well it was measured. See quadrant/venue.py.
 
 And symmetrically, a `not_run` record is admitted only when it carries a REASON and
 carries no acceptance results - because a quadrant that did not run cannot have checked
@@ -35,9 +39,17 @@ def _now() -> str:
     return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def new(q: "_matrix.Quadrant", item: Dict[str, Any], **over: Any) -> Dict[str, Any]:
-    """A blank record for a quadrant + item. Callers fill it in as the run proceeds."""
+def new(q: "_matrix.Quadrant", item: Dict[str, Any], *, venue: Any = None,
+        **over: Any) -> Dict[str, Any]:
+    """A blank record for a quadrant + item + VENUE. Callers fill it in as the run proceeds.
+
+    `venue` is a `venue.Venue` (or an already-serialised dict). It is a parameter rather
+    than something the caller remembers to `.update()` in, because the whole class of defect
+    this field addresses is a dimension nobody wrote down.
+    """
     rec: Dict[str, Any] = {
+        "venue": (venue.as_record() if hasattr(venue, "as_record")
+                  else (dict(venue) if isinstance(venue, dict) else {})),
         "quadrant": q.key,
         "runner": q.runner,
         "target": q.target,
@@ -62,7 +74,7 @@ def new(q: "_matrix.Quadrant", item: Dict[str, Any], **over: Any) -> Dict[str, A
 
 
 def not_run(q: "_matrix.Quadrant", item: Dict[str, Any],
-            preflight: "_matrix.PreflightResult") -> Dict[str, Any]:
+            preflight: "_matrix.PreflightResult", *, venue: Any = None) -> Dict[str, Any]:
     """The record a blocked quadrant produces.
 
     A blocked quadrant must produce a RECORD, not an exception. An exception is caught
@@ -71,7 +83,7 @@ def not_run(q: "_matrix.Quadrant", item: Dict[str, Any],
     """
     if preflight.ready:
         raise ValueError("not_run() called for a quadrant whose preflight was ready")
-    rec = new(q, item)
+    rec = new(q, item, venue=venue)
     rec["status"] = "not_run"
     rec["not_run_reason"] = preflight.reason
     rec["ended_utc"] = _now()
@@ -79,7 +91,7 @@ def not_run(q: "_matrix.Quadrant", item: Dict[str, Any],
     return rec
 
 
-def admit(rec: Any, *, item_digest: str = "",
+def admit(rec: Any, *, item_digest: str = "", venue: str = "",
           schema: Dict[str, Any] | None = None) -> List[str]:
     """[] means admitted. Otherwise, every reason it is not, in the operator's words."""
     s = schema or _matrix.schema()
@@ -103,6 +115,22 @@ def admit(rec: Any, *, item_digest: str = "",
                 f"item digest mismatch: record ran '{got[:12] or '(none)'}...', the "
                 f"comparison is about '{item_digest[:12]}...'. A record from a different "
                 f"item is not a data point about this one.")
+
+    if s.get("record_venue_required"):
+        rv = rec.get("venue")
+        rv = rv if isinstance(rv, dict) else {}
+        got = str(rv.get("name") or "").strip()
+        if not got:
+            problems.append(
+                "record names no VENUE. PLAN section 2's preamble binds every 'Gym:' column to "
+                "a place - 'measured runs in ai-orchestration-gym, never live planes or a "
+                "real target' - so a record that cannot say where it ran cannot be evidence "
+                "for one. Records produced before 2026-08-30 carry no venue by construction.")
+        elif venue and got != venue:
+            problems.append(
+                f"venue mismatch: record ran in venue '{got}' (repo {rv.get('repo') or '?'}), "
+                f"this comparison is over venue '{venue}'. A run in another place is not a "
+                f"data point about this one.")
 
     if statuses[status].get("requires_evidence"):
         problems += _evidence_problems(rec, s)

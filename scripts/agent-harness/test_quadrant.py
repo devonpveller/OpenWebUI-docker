@@ -67,6 +67,16 @@ def cfg(**over):
             "targets": ["self", "project"],
             "repeats": 1,
             "results_dir": ".claude/quadrant-runs",
+            # The VENUE is part of a complete configuration, so the fixture carries one.
+            # `test-gym` is kind `gym` and therefore subject to the same refusal the arena
+            # is: these tests describe the config layer, and the filesystem half is tested
+            # separately against real repositories in tmp_path.
+            "venue": "test-gym",
+            "venues": {
+                "test-gym": {"kind": "gym", "repo": "../ai-orchestration-gym",
+                             "ref": "main"},
+                "workspace": {"kind": "workspace", "repo": ".", "ref": "HEAD"},
+            },
         },
     }
     for k, v in over.items():
@@ -91,6 +101,8 @@ def good_record(ev, **over):
         "target": "self",
         "item": "u4-baseline",
         "item_digest": "d" * 64,
+        "venue": {"name": "test-gym", "kind": "gym", "repo": "/arena", "ref": "main",
+                  "source": "config"},
         "status": "completed",
         "started_utc": "2026-08-30T10:00:00Z",
         "ended_utc": "2026-08-30T10:04:00Z",
@@ -679,7 +691,9 @@ def test_no_shipped_profile_assigns_a_role_to_a_self_test_runner():
 def test_a_blocked_quadrant_becomes_a_not_run_record_not_an_exception():
     q = matrix_mod.build(cfg())[0]
     pf = matrix_mod.PreflightResult(ready=False, reason="little-coder API port is not published")
-    rec = record_mod.not_run(q, item={"id": "u4-baseline", "digest": "d" * 64}, preflight=pf)
+    rec = record_mod.not_run(q, item={"id": "u4-baseline", "digest": "d" * 64}, preflight=pf,
+                             venue={"name": "test-gym", "kind": "gym", "repo": "/arena",
+                                    "ref": "main", "source": "config"})
     assert rec["status"] == "not_run"
     assert "not published" in rec["not_run_reason"]
     assert record_mod.admit(rec, item_digest="d" * 64) == []
@@ -706,10 +720,22 @@ def test_fixture_runner_completes_the_real_item_end_to_end(tmp_path):
     construction (test_a_self_test_runner_record_does_not_count_as_compared), so a green
     here is a claim about the HARNESS and never about a quadrant."""
     from quadrant import cli
+    from quadrant import proc as _proc
+    # A DISPOSABLE VENUE, not the operator's arena checkout. The venue is now part of every
+    # invocation, and a suite that only passes on a machine where ai-orchestration-gym
+    # happens to be cloned is testing the machine.
+    arena = tmp_path / "arena"
+    arena.mkdir()
+    _proc.run(["git", "init", "-q", "-b", "main", str(arena)])
+    (arena / "README.md").write_text("disposable arena\n", encoding="utf-8")
+    _proc.run(["git", "-C", str(arena), "add", "-A"])
+    _proc.run(["git", "-C", str(arena), "-c", "user.email=t@l", "-c", "user.name=t",
+               "commit", "-q", "-m", "init"])
+
     out = tmp_path / "runs"
     rc = cli.main(["run", "--runner", "fixture", "--target", "project",
                    "--item", "u4-baseline", "--results-dir", str(out),
-                   "--scratch-root", str(tmp_path / "scratch")])
+                   "--scratch-root", str(tmp_path / "scratch"), "--repo", str(arena)])
     assert rc == 0, "the fixture quadrant must complete"
     recs = list(out.glob("*/record.json"))
     assert len(recs) == 1
@@ -717,7 +743,8 @@ def test_fixture_runner_completes_the_real_item_end_to_end(tmp_path):
     assert rec["status"] == "completed"
     assert rec["acceptance"] and all(a["exit_code"] == 0 for a in rec["acceptance"])
     it = item_mod.load("u4-baseline")
-    assert record_mod.admit(rec, item_digest=it["digest"]) == []
+    assert record_mod.admit(rec, item_digest=it["digest"], venue="gym") == []
+    assert rec["venue"]["repo"] == str(arena.resolve()),         "the record must name the repository the experiment was performed on"
 
 
 def test_cli_report_exits_nonzero_when_the_comparison_is_incomplete(tmp_path):
@@ -728,6 +755,55 @@ def test_cli_report_exits_nonzero_when_the_comparison_is_incomplete(tmp_path):
     out.mkdir()
     rc = cli.main(["report", "--results-dir", str(out), "--item", "u4-baseline"])
     assert rc != 0
+
+
+# ------------------------------------------- the retained evidence is re-checkable --
+
+def test_target_self_retains_enough_to_re_run_the_acceptance_checks(tmp_path):
+    """FOUND BY A VERIFIER, 2026-08-30. `finalize_target` kept only the CHANGED files, so
+    the two `target: self` cells' preserved workspaces held `slugify.py` and NOT
+    `test_slugify.py` - the frozen file, unchanged by definition. Their acceptance had
+    genuinely passed when it ran, and could no longer be re-derived from the retained
+    evidence: `guards.py unmodified` reported `test_slugify.py: MISSING`.
+
+    Evidence that cannot be re-checked is a record OF a check, not a check. This runs the
+    real guard against the real retained directory."""
+    from quadrant import adapters
+    from quadrant import proc as _proc
+
+    arena = tmp_path / "arena"
+    arena.mkdir()
+    _proc.run(["git", "init", "-q", "-b", "main", str(arena)])
+    (arena / "README.md").write_text("arena\n", encoding="utf-8")
+    for a in (["add", "-A"], ["-c", "user.email=t@l", "-c", "user.name=t", "commit", "-q",
+                              "-m", "init"]):
+        _proc.run(["git", "-C", str(arena), *a])
+
+    c = cfg()
+    q = [x for x in matrix_mod.build(c) if x.target == "self"][0]
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    it = item_mod.load("u4-baseline")
+
+    ws = adapters.prepare_target(q, c, run_dir=run_dir, repo=arena,
+                                 scratch_root=tmp_path / "scratch", ref="main")
+    manifest = item_mod.plant(it, ws)
+    (run_dir / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    adapters.baseline_commit(ws)
+    # the runner solves the item: exactly one file changes, the frozen one does not
+    shutil.copyfile(Path(it["dir"]) / "solution" / "slugify.py",
+                    ws / "quadrant-item" / "slugify.py")
+    adapters.finalize_target(q, run_dir=run_dir, repo=arena)
+
+    kept = run_dir / "workspace"
+    assert (kept / "quadrant-item" / "slugify.py").is_file()
+    assert (kept / "quadrant-item" / "test_slugify.py").is_file(),         "the frozen file is unchanged BY DEFINITION and is exactly what the guard needs"
+
+    guards = Path(item_mod.__file__).resolve().parent / "guards.py"
+    for guard in ("unmodified", "tests"):
+        out = _proc.run([sys.executable, str(guards), guard, "--item", "u4-baseline"],
+                        cwd=str(kept))
+        assert out.returncode == 0,             f"'{guard}' cannot be re-run from the retained evidence:\n{out.stdout}{out.stderr}"
 
 
 # ------------------------------------- the item's control cannot drift by accident --

@@ -110,8 +110,8 @@ MUTATIONS: List[Tuple[str, str, str, str, str]] = [
      "let a one-line config edit turn a 2/4 comparison into a complete 2/2 one at exit 0"),
 
     ("cli.py",
-     "    declared = _declared_matrix(results_dir, quadrants, records)",
-     "    declared = None",
+     "    declared, pinned = _declared_matrix(results_dir, quadrants, records, v)",
+     "    declared, pinned = None, \"\"",
      "test_the_matrix_lock_holds_a_cell_that_lost_both_its_config_and_its_record",
      "the results set's pinned matrix.json is load-bearing on its own - it remembers a "
      "cell that lost both its configuration and its record"),
@@ -122,6 +122,52 @@ MUTATIONS: List[Tuple[str, str, str, str, str]] = [
      "test_narrowing_the_axes_cannot_launder_a_partial_comparison_through_the_cli",
      "an off-matrix cell carries the reason its records gave - a cell that leaves the "
      "configuration must not also lose the sentence explaining why it never ran"),
+
+    # --- added 2026-08-30 with the VENUE. The comparison could not lie about WHAT ran and
+    # --- had no way to state WHERE, so a four-cell gym-column comparison ran on ai-stack.
+
+    ("venue.py",
+     "    if v.rules.get(\"must_differ_from_harness_repo\"):",
+     "    if False:",
+     "test_a_gym_venue_resolving_to_the_harness_repo_is_a_venue_violation",
+     "THE VENUE GUARD: a 'gym' venue that resolves to the harness's own repository is "
+     "refused, so a run whose SUBJECT is the repo under test cannot be evidence for a "
+     "column that begins 'Gym:'"),
+
+    ("venue.py",
+     "    if top and top != here:",
+     "    if False:",
+     "test_a_venue_path_inside_a_repository_does_not_silently_adopt_that_repository",
+     "a venue path must be a repository ROOT: git discovers upward, so a wrong path "
+     "otherwise adopts whatever repo encloses it - on this machine the user's HOME"),
+
+    ("record.py",
+     "        elif venue and got != venue:",
+     "        elif False:",
+     "test_a_record_from_another_venue_is_refused",
+     "a results set is a comparison over ONE place: a record from another venue is "
+     "refused rather than averaged in"),
+
+    ("record.py",
+     "        if not got:",
+     "        if False:",
+     "test_a_record_that_names_no_venue_is_refused",
+     "a record that cannot say where it ran is refused - the pre-venue records are real "
+     "runs in the wrong place and are rendered as refusals, not as results"),
+
+    ("adapters.py",
+     "    for rel in dict.fromkeys(changed + planted):",
+     "    for rel in changed:",
+     "test_target_self_retains_enough_to_re_run_the_acceptance_checks",
+     "a target-self cell retains what its acceptance NEEDS, not only what changed - the "
+     "frozen file is unchanged by definition and is exactly what the guard reads"),
+
+    ("matrix.py",
+     "    v = kw.get(\"venue\")",
+     "    v = None",
+     "test_a_venue_violation_blocks_every_cell_with_that_reason",
+     "the venue is checked BEFORE the runner and the target, so a cell whose subject is "
+     "the wrong repository is blocked rather than run to completion"),
 ]
 
 
@@ -154,7 +200,8 @@ def main(argv: List[str] | None = None) -> int:
         try:
             path.write_text(original.replace(old, new, 1), encoding="utf-8", newline="\n")
             proc = _proc.run(
-                [sys.executable, "-m", "pytest", "test_quadrant.py", "-q", "-k", test,
+                [sys.executable, "-m", "pytest", "test_quadrant.py",
+                 "test_quadrant_venue.py", "-q", "-k", test,
                  "-p", "no:cacheprovider"],
                 cwd=str(HARNESS), capture_output=True, text=True)
         finally:

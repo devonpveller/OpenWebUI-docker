@@ -5,6 +5,14 @@
     python -m quadrant.cli run-all --item u4-baseline
     python -m quadrant.cli report
 
+THE VENUE IS PART OF EVERY COMMAND. `quadrant.venue` names the repository the experiment is
+performed ON (`--repo` overrides it, an env var overrides the config). PLAN section 2's
+preamble - "'gym' means measured runs in `ai-orchestration-gym`, never live planes or a real
+target" - is a constraint on the PLACE, and until 2026-08-30 this package had no place: a
+complete four-cell comparison ran against ai-stack itself and nothing could say so. A gym
+venue that resolves to the harness's own repository is now a BLOCKED preflight, every record
+carries its venue, and admission refuses a record from another one. See quadrant/venue.py.
+
 EXIT CODES ARE PART OF THE CONTRACT, because a script consuming this has to be able to tell
 a finished comparison from a partial one without parsing prose:
 
@@ -70,6 +78,7 @@ from quadrant import item as item_mod    # noqa: E402
 from quadrant import matrix as matrix_mod  # noqa: E402
 from quadrant import record as record_mod  # noqa: E402
 from quadrant import report as report_mod  # noqa: E402
+from quadrant import venue as venue_mod    # noqa: E402
 
 GUARDS = f'"{sys.executable}" "{HERE / "guards.py"}"'
 DEFAULT_TIMEOUT = 1800.0
@@ -92,6 +101,15 @@ def _cfg(overrides: Dict[str, Any]) -> Dict[str, Any]:
     return cfg
 
 
+def _venue(cfg: Dict[str, Any], argv: List[str], repo: Path) -> "venue_mod.Venue":
+    """The venue for this invocation. Raises QuadrantConfigError, never guesses a place."""
+    try:
+        return venue_mod.resolve(cfg, matrix_mod.schema(), harness_repo=repo,
+                                 override_repo=str(_opt(argv, "--repo", "") or ""))
+    except venue_mod.VenueConfigError as exc:
+        raise matrix_mod.QuadrantConfigError(str(exc)) from exc
+
+
 def _opt(argv: List[str], name: str, default: Any = None) -> Any:
     return argv[argv.index(name) + 1] if name in argv and argv.index(name) + 1 < len(argv) else default
 
@@ -111,10 +129,20 @@ def cmd_preflight(argv: List[str]) -> int:
         print(f"MISCONFIGURED: {exc}")
         return 2
     repo = _repo_root()
+    try:
+        v = _venue(cfg, argv, repo)
+    except matrix_mod.QuadrantConfigError as exc:
+        print(f"MISCONFIGURED: {exc}")
+        return 2
     blocked = 0
-    print(f"item repo: {repo}")
+    # BOTH repositories, named and distinguished. "item repo" alone was the line that let a
+    # reader believe the arena had been used: it printed the harness's own path and nothing
+    # said that was wrong.
+    print(f"harness repo : {repo}")
+    print(f"venue        : {v.name} (kind {v.kind}, {'satisfies' if v.satisfies_gym_column else 'does NOT satisfy'} a \"Gym:\" column)")
+    print(f"item repo    : {v.repo} @ {v.ref}   (via {v.source})")
     for q in quadrants:
-        pf = matrix_mod.preflight(q, cfg, repo=repo,
+        pf = matrix_mod.preflight(q, cfg, repo=v.repo, venue=v, harness_repo=repo,
                                   scratch_root=scratch or str(repo / ".quadrant" / "scratch"))
         if pf.ready:
             print(f"  READY    {q.label}")
@@ -126,8 +154,8 @@ def cmd_preflight(argv: List[str]) -> int:
 
 
 def _run_one(q: "matrix_mod.Quadrant", cfg: Dict[str, Any], it: Dict[str, Any], *,
-             results_dir: Path, repo: Path, scratch_root: Path,
-             timeout: float) -> Dict[str, Any]:
+             results_dir: Path, repo: Path, scratch_root: Path, timeout: float,
+             venue: "venue_mod.Venue", harness_repo: Path) -> Dict[str, Any]:
     """One quadrant, one run. ALWAYS returns a record - blocked, errored or completed.
 
     The try/except is the honesty mechanism, not defensive coding: an adapter that raises
@@ -137,22 +165,23 @@ def _run_one(q: "matrix_mod.Quadrant", cfg: Dict[str, Any], it: Dict[str, Any], 
     run_dir = results_dir / f"{_now()}-{q.runner}-{q.target}"
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    pf = matrix_mod.preflight(q, cfg, repo=repo, scratch_root=str(scratch_root))
+    pf = matrix_mod.preflight(q, cfg, repo=repo, venue=venue, harness_repo=harness_repo,
+                              scratch_root=str(scratch_root))
     if not pf.ready:
         # A blocked quadrant is PERSISTED like any other. The first version returned this
         # record without writing it, and the report then rendered "no record produced" -
         # true, but a weaker sentence than the reason the preflight had already established.
         # Losing a known reason is the same failure as never having one.
-        rec = record_mod.not_run(q, it, pf)
+        rec = record_mod.not_run(q, it, pf, venue=venue)
         (run_dir / "record.json").write_text(json.dumps(rec, indent=2), encoding="utf-8")
         return rec
-    rec = record_mod.new(q, it)
+    rec = record_mod.new(q, it, venue=venue)
     t0 = _dt.datetime.now(_dt.timezone.utc)
     transcript_path = run_dir / "transcript.txt"
 
     try:
         ws = adapters.prepare_target(q, cfg, run_dir=run_dir, repo=repo,
-                                     scratch_root=scratch_root)
+                                     scratch_root=scratch_root, ref=venue.ref)
         manifest = item_mod.plant(it, ws)
         (run_dir / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
         adapters.baseline_commit(ws)
@@ -242,9 +271,11 @@ def cmd_run(argv: List[str], *, all_quadrants: bool = False) -> int:
         cfg = _cfg(overrides)
         quadrants = matrix_mod.build(cfg)
         it = item_mod.load(item_id)
+        v = _venue(cfg, argv, repo)
     except (matrix_mod.QuadrantConfigError, item_mod.QuadrantItemError) as exc:
         print(f"MISCONFIGURED: {exc}")
         return 2
+    print(f"venue: {v.name} ({v.kind}) - {v.repo} @ {v.ref} (via {v.source})")
 
     results_dir.mkdir(parents=True, exist_ok=True)
     scratch_root.mkdir(parents=True, exist_ok=True)
@@ -252,8 +283,9 @@ def cmd_run(argv: List[str], *, all_quadrants: bool = False) -> int:
     attempted = []
     for q in quadrants:
         for i in range(reps):
-            rec = _run_one(q, cfg, it, results_dir=results_dir, repo=repo,
-                           scratch_root=scratch_root, timeout=timeout)
+            rec = _run_one(q, cfg, it, results_dir=results_dir, repo=v.repo,
+                           scratch_root=scratch_root, timeout=timeout, venue=v,
+                           harness_repo=repo)
             attempted.append(rec)
             suffix = f" (repeat {i + 1}/{reps})" if reps > 1 else ""
             print(f"  {rec['status'].upper():9s} {q.label}{suffix}"
@@ -279,7 +311,8 @@ def _load_records(results_dir: Path) -> List[Dict[str, Any]]:
 
 
 def _declared_matrix(results_dir: Path, quadrants: List["matrix_mod.Quadrant"],
-                     records: List[Dict[str, Any]]) -> List[str]:
+                     records: List[Dict[str, Any]],
+                     venue: "venue_mod.Venue | None" = None) -> tuple:
     """The declared matrix of this results SET - pinned on first write, append-only.
 
     Read the lock, union it with the configured cells and with every cell the records
@@ -290,23 +323,45 @@ def _declared_matrix(results_dir: Path, quadrants: List["matrix_mod.Quadrant"],
     A missing lock is normal (the first run, or a results dir from before this existed) and
     is written silently. An UNREADABLE lock is not: it is reported, and the declared set
     falls back to config + records, which still holds every cell any record names.
+
+    THE LOCK ALSO PINS THE VENUE (2026-08-30). A results set is a comparison over one place
+    as well as over one item and one set of cells: pointing `--repo` somewhere else and
+    re-running into the same directory would otherwise mix two experiments into one table.
+    The venue is pinned on FIRST write and never rewritten, so the pin cannot be moved by a
+    later run - it is returned to the caller, which hands it to admission. Returns
+    (declared cells, pinned venue name).
     """
     lock_path = results_dir / (matrix_mod.schema().get("declared_matrix_lock")
                                or "matrix.json")
     prior: List[str] = []
+    prior_venue: Dict[str, Any] = {}
     if lock_path.is_file():
         try:
-            prior = [str(k) for k in (json.loads(lock_path.read_text(encoding="utf-8"))
-                                      .get("declared") or [])]
+            lock = json.loads(lock_path.read_text(encoding="utf-8"))
+            prior = [str(k) for k in (lock.get("declared") or [])]
+            pv = lock.get("venue")
+            prior_venue = dict(pv) if isinstance(pv, dict) else {}
         except (json.JSONDecodeError, OSError) as exc:
             print(f"  (matrix lock {lock_path} is unreadable: {exc}; the declared matrix "
                   f"falls back to the configuration plus every cell the records name)")
     declared = report_mod.declared_keys(quadrants, records, prior)
-    if declared != prior:
+
+    venue_block = dict(prior_venue)
+    pinned_venue = str(prior_venue.get("name") or "")
+    if pinned_venue:
+        if venue is not None and venue.name != pinned_venue:
+            print(f"  (this results set is PINNED to venue '{pinned_venue}'; the current "
+                  f"configuration says '{venue.name}'. The pin stands - records from "
+                  f"'{venue.name}' will be refused. Use a fresh --results-dir for a new venue.)")
+    elif venue is not None:
+        venue_block = venue.as_record()
+        pinned_venue = venue.name
+    if declared != prior or venue_block != prior_venue:
         results_dir.mkdir(parents=True, exist_ok=True)
         lock_path.write_text(json.dumps({
-            "version": 1,
+            "version": 2,
             "declared": declared,
+            "venue": venue_block,
             "updated_utc": _now(),
             "_why": [
                 "The cells THIS results set is a comparison over. Append-only: a cell that",
@@ -315,9 +370,14 @@ def _declared_matrix(results_dir: Path, quadrants: List["matrix_mod.Quadrant"],
                 "Delete this file and the declared matrix falls back to the configuration",
                 "plus every cell the records name - which is weaker, and is why it is",
                 "written rather than derived.",
+                "",
+                "`venue` is pinned on FIRST write and never rewritten: a results set is a",
+                "comparison over one PLACE as well as one item. record.admit refuses a",
+                "record from any other venue, so re-pointing --repo and re-running into",
+                "this directory cannot mix two experiments into one table.",
             ],
         }, indent=2), encoding="utf-8")
-    return declared
+    return declared, pinned_venue
 
 
 def _emit_report(results_dir: Path, item_id: str, argv: List[str]) -> int:
@@ -325,16 +385,22 @@ def _emit_report(results_dir: Path, item_id: str, argv: List[str]) -> int:
     try:
         quadrants = matrix_mod.build(cfg)
         it = item_mod.load(item_id)
+        v = _venue(cfg, argv, _repo_root())
     except (matrix_mod.QuadrantConfigError, item_mod.QuadrantItemError) as exc:
         print(f"MISCONFIGURED: {exc}")
         return 2
     # NOT filtered to the configured matrix. Dropping a record here is what let a narrowed
     # configuration launder an incomplete comparison into a complete one.
     records = _load_records(results_dir)
-    declared = _declared_matrix(results_dir, quadrants, records)
+    declared, pinned = _declared_matrix(results_dir, quadrants, records, v)
+    # The venue the REPORT is rendered against is the results set's PIN, not today's
+    # configuration - the same reasoning as the declared matrix. If the pin names a venue the
+    # configuration no longer selects, the pinned identity still governs admission.
+    rv = v if (not pinned or pinned == v.name) else pinned
     try:
-        md = report_mod.render(quadrants, records, item=it, declared=declared)
-        summary = report_mod.summarize(quadrants, records, item=it, declared=declared)
+        md = report_mod.render(quadrants, records, item=it, declared=declared, venue=rv)
+        summary = report_mod.summarize(quadrants, records, item=it, declared=declared,
+                                       venue=rv)
     except report_mod.QuadrantReportError as exc:
         print(f"UNRENDERABLE: {exc}")
         return 2

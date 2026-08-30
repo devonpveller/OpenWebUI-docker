@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from . import proc as _proc
+from . import venue as _venue
 
 HERE = Path(__file__).resolve().parent
 SCHEMA_PATH = HERE / "schema.json"
@@ -140,6 +141,14 @@ def build(cfg: Dict[str, Any]) -> List[Quadrant]:
             f"quadrant.repeats must be an integer >= 1, got {repeats!r}. A comparison that "
             f"runs a quadrant zero times still renders a row for it, which is worse than "
             f"refusing the configuration.")
+
+    # The VENUE is validated here for the same reason a runner name is: a comparison that
+    # cannot say WHERE it ran cannot be judged against a column that begins "Gym:". Shape
+    # only - whether the arena is reachable today is a preflight question, not a typo.
+    try:
+        _venue.validate_shape(cfg, s)
+    except _venue.VenueConfigError as exc:
+        raise QuadrantConfigError(str(exc)) from exc
 
     all_runners = (cfg or {}).get("runners") or {}
     all_targets = (cfg or {}).get("targets") or {}
@@ -299,6 +308,13 @@ def probe_fixture(runner_cfg: Dict[str, Any]) -> PreflightResult:
 
 
 def probe_target_self(target_cfg: Dict[str, Any], *, repo: Path | None = None) -> PreflightResult:
+    """`repo` is the VENUE's repository, passed down by the caller - not this process's CWD.
+
+    Until 2026-08-30 the fallback chain ended at `Path.cwd()` and the caller passed the
+    harness's own repo root, which is precisely how target 'self' came to mean 'ai-stack'
+    in a run that had to be in the arena. The venue now decides; a config-level `repo` on
+    the target still wins, because a target that names its own repository is being explicit.
+    """
     repo = Path(target_cfg.get("repo") or repo or Path.cwd())
     out = _proc.run(["git", "-C", str(repo), "rev-parse", "--git-common-dir"],
                          capture_output=True, text=True)
@@ -348,6 +364,17 @@ def preflight(q: Quadrant, cfg: Dict[str, Any], **kw: Any) -> PreflightResult:
     if tprobe is None:
         raise QuadrantConfigError(
             f"target kind '{q.target_kind}' has no preflight probe")
+    # THE VENUE FIRST. A cell whose runner and target are both ready but whose subject is
+    # the wrong repository has not been blocked by anything today - it will run, complete,
+    # and produce evidence for a column it does not satisfy. That is the failure this
+    # ordering exists to make impossible; the reason lands in the cell's own not_run record.
+    v = kw.get("venue")
+    if v is not None:
+        vres = _venue.probe(v, harness_repo=Path(kw.get("harness_repo") or Path.cwd()))
+        if not vres.ready:
+            return PreflightResult(False, reason=f"venue '{v.name}': {vres.reason}",
+                                   detail={"venue": vres.detail})
+
     rcfg = (cfg.get("runners") or {}).get(q.runner, {})
     tcfg = (cfg.get("targets") or {}).get(q.target, {})
     rres = rprobe(rcfg)

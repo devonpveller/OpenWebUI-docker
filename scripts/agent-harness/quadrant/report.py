@@ -121,7 +121,7 @@ def _off_matrix_row(key: str, recs: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 def _rows(quadrants: List["_matrix.Quadrant"], records: List[Dict[str, Any]],
           item: Dict[str, Any], s: Dict[str, Any],
-          keys: List[str]) -> List[Dict[str, Any]]:
+          keys: List[str], venue: str = "") -> List[Dict[str, Any]]:
     for r in records:
         if not str(r.get("quadrant") or "").strip():
             raise QuadrantReportError(
@@ -156,7 +156,7 @@ def _rows(quadrants: List["_matrix.Quadrant"], records: List[Dict[str, Any]],
 
         admitted, refused = [], []
         for r in recs:
-            probs = _record.admit(r, item_digest=digest, schema=s)
+            probs = _record.admit(r, item_digest=digest, venue=venue, schema=s)
             (admitted if not probs else refused).append((r, probs))
 
         if not admitted:
@@ -240,14 +240,20 @@ def _agreement(recs: List[Dict[str, Any]]) -> str:
 
 def summarize(quadrants: List["_matrix.Quadrant"], records: List[Dict[str, Any]], *,
               item: Dict[str, Any], schema: Dict[str, Any] | None = None,
-              declared: Any = None) -> Dict[str, Any]:
+              declared: Any = None, venue: Any = None) -> Dict[str, Any]:
     s = schema or _matrix.schema()
     keys = declared_keys(quadrants, records, declared)
-    rows = _rows(quadrants, records, item, s, keys)
+    vname = getattr(venue, "name", "") or (venue if isinstance(venue, str) else "")
+    rows = _rows(quadrants, records, item, s, keys, vname)
     compared = [r for r in rows if r["compared"]]
     return {
         "item": item.get("id"),
         "item_digest": item.get("digest"),
+        # WHERE, beside WHAT. A reader deciding whether a "Gym:" column is satisfied needs
+        # the venue in the summary they are handed, not in a path they have to interpret.
+        "venue": (venue.as_record() if hasattr(venue, "as_record")
+                  else ({"name": vname} if vname else {})),
+        "satisfies_gym_column": bool(getattr(venue, "satisfies_gym_column", False)),
         # The denominator is the DECLARED row set, not the configured matrix. They differ
         # exactly when someone narrowed the axes - which is when the difference matters.
         "quadrants_total": len(rows),
@@ -266,9 +272,10 @@ def summarize(quadrants: List["_matrix.Quadrant"], records: List[Dict[str, Any]]
 
 def render(quadrants: List["_matrix.Quadrant"], records: List[Dict[str, Any]], *,
            item: Dict[str, Any], schema: Dict[str, Any] | None = None,
-           declared: Any = None) -> str:
+           declared: Any = None, venue: Any = None) -> str:
     s = schema or _matrix.schema()
-    summary = summarize(quadrants, records, item=item, schema=s, declared=declared)
+    summary = summarize(quadrants, records, item=item, schema=s, declared=declared,
+                        venue=venue)
     rows = summary["rows"]
     n_total, n_cmp = summary["quadrants_total"], summary["compared"]
 
@@ -291,6 +298,22 @@ def render(quadrants: List["_matrix.Quadrant"], records: List[Dict[str, Any]], *
     out.append(f"Item digest `{str(item.get('digest') or '')[:16]}` - every record below "
                f"was checked against it, so a result from a different item cannot appear "
                f"in this table.")
+    out.append("")
+    # THE VENUE, stated where the verdict is read. A comparison is a claim about a place as
+    # well as about four cells, and the reader must not have to infer the place from a path.
+    v = summary.get("venue") or {}
+    if v.get("name"):
+        out.append(
+            "**Venue: `{}` (kind `{}`) - {}**  \n`{}` @ `{}` (via {}). {}".format(
+                v.get("name"), v.get("kind"),
+                "SATISFIES a \"Gym:\" column" if summary.get("satisfies_gym_column")
+                else "does NOT satisfy a \"Gym:\" column",
+                v.get("repo"), v.get("ref"), v.get("source"),
+                "Every record above was admitted only if it names this venue."))
+    else:
+        out.append("**Venue: UNSTATED.** This comparison does not say which repository the "
+                   "experiment was performed on, so it cannot be read against a column that "
+                   "begins \"Gym:\".")
     out.append("")
 
     out.append("## Outcome")

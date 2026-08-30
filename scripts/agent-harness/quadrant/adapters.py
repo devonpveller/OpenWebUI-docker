@@ -54,7 +54,8 @@ class AdapterError(RuntimeError):
 # ------------------------------------------------------------------ targets --
 
 def prepare_target(q: "_matrix.Quadrant", cfg: Dict[str, Any], *, run_dir: Path,
-                   repo: Path, scratch_root: Path | None = None) -> Path:
+                   repo: Path, scratch_root: Path | None = None,
+                   ref: str = "HEAD") -> Path:
     """Produce the workspace this quadrant's run happens in.
 
     The workspace always lives at ``<run_dir>/workspace`` regardless of target kind. That is
@@ -72,12 +73,18 @@ def prepare_target(q: "_matrix.Quadrant", cfg: Dict[str, Any], *, run_dir: Path,
     if q.target_kind == "self":
         # A DETACHED worktree: the comparison must not create a branch on the operator's
         # repo. Nothing here is landed, so a ref would be litter with a name.
+        #
+        # `repo` and `ref` come from the VENUE, not from this process's location. In a gym
+        # run they are the arena checkout and its arena branch, so "self" means "the
+        # repository the org is working in" - which in the arena is the arena's repo. The
+        # hardcoded "HEAD" this line used to carry is why a gym run silently became an
+        # ai-stack run: the only repo a hardcoded HEAD can name is the caller's.
         out = _proc.run(["git", "-C", str(repo), "worktree", "add", "--detach",
-                              str(ws), "HEAD"], capture_output=True, text=True)
+                              str(ws), ref], capture_output=True, text=True)
         if out.returncode != 0:
             raise AdapterError(
-                f"target 'self': could not create a detached worktree at {ws}: "
-                f"{out.stderr.strip()}")
+                f"target 'self': could not create a detached worktree at {ws} from "
+                f"'{ref}' in {repo}: {out.stderr.strip()}")
         return ws
     raise AdapterError(f"no target adapter for kind '{q.target_kind}'")
 
@@ -86,10 +93,19 @@ def finalize_target(q: "_matrix.Quadrant", *, run_dir: Path, repo: Path) -> None
     """Leave the operator's repo exactly as it was found, without losing the evidence.
 
     For target `self` the workspace is a registered worktree; leaving it registered would
-    accumulate one per run in the operator's `git worktree list`. So the diff and the
-    changed files are copied out first, then the worktree is deregistered, then the
-    directory is re-created from the copy. `evidence.workspace` keeps pointing at a real
-    directory holding exactly what the run produced.
+    accumulate one per run in the operator's `git worktree list`. So the files are copied
+    out first, then the worktree is deregistered, then the directory is re-created from the
+    copy. `evidence.workspace` keeps pointing at a real directory holding exactly what the
+    run produced.
+
+    WHAT IS KEPT, and a defect fixed 2026-08-30. The first version kept only the CHANGED
+    files. That is enough to see what the runner did and NOT enough to re-run the acceptance
+    checks: `guards.py unmodified` needs the frozen files, and on this item the frozen file
+    (`test_slugify.py`) is by definition unchanged - so it was dropped, and a verifier found
+    that the two `target: self` cells' acceptance was no longer reproducible from the
+    retained evidence even though it had genuinely passed when run. Evidence that cannot be
+    re-checked is a record of a check, not a check. The kept set is therefore the union of
+    the changed files and every path the PLANT MANIFEST names.
     """
     if q.target_kind != "self":
         return
@@ -99,7 +115,14 @@ def finalize_target(q: "_matrix.Quadrant", *, run_dir: Path, repo: Path) -> None
     keep = run_dir / "_workspace_changed"
     keep.mkdir(parents=True, exist_ok=True)
     changed = [ln[3:].strip().strip('"') for ln in _git_out(ws, "status", "--porcelain").splitlines() if ln.strip()]
-    for rel in changed:
+    planted: List[str] = []
+    mf = run_dir / "manifest.json"
+    if mf.is_file():
+        try:
+            planted = [str(k) for k in json.loads(mf.read_text(encoding="utf-8"))]
+        except (json.JSONDecodeError, OSError):
+            planted = []
+    for rel in dict.fromkeys(changed + planted):
         src = ws / rel
         if src.is_file():
             dst = keep / rel
