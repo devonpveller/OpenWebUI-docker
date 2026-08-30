@@ -171,6 +171,26 @@ def profile_names() -> List[str]:
     return [k for k in profiles if not k.startswith("_")]
 
 
+def runner_names() -> List[str]:
+    runners = get("runners") or {}
+    return [k for k in runners if not k.startswith("_")]
+
+
+def runner(name: str) -> Dict[str, Any]:
+    """The full runner record — kind, status, and (for a runner something has to CALL) its
+    transport topology.
+
+    `resolve_role` deliberately returns only the policy answer; a dispatcher needs the
+    topology too, and reading it here keeps that knowledge in the config file instead of
+    hardcoded in the dispatcher. Mirrors `Get-HarnessRunner` in config.ps1.
+    """
+    runners = get("runners") or {}
+    if name not in runners:
+        raise HarnessConfigError(
+            f"unknown runner '{name}' - known runners: {', '.join(runner_names())}")
+    return runners[name]
+
+
 def profile_name(surface: str = "", requested: str = "") -> str:
     """Which profile applies on a surface.
 
