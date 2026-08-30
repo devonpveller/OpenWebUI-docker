@@ -67,8 +67,27 @@ function Invoke-Unit {
   # run by nothing. Same class as the hardcoded initdb chain this harness caught: a list
   # that has to be edited to stay true eventually stops being true. If the glob matches
   # nothing it stays literal and deno errors, so an empty match fails rather than passes.
-  docker run --rm -v "${rootFwd}/OB1/integrations/kubernetes-deployment:/app" `
-    -w /app denoland/deno:2.3.3 sh -c "deno check agent-memory*.ts index.ts && deno test agent-memory*.test.ts"
+  #
+  # --allow-read IS LOAD-BEARING, and its absence was a silent no-op for weeks. Two suites
+  # here are CROSS-READER tests: they read another file (the .sql that owns the memory_type
+  # CHECK; the subsystem's own sources, for the exposure-plane completeness gate) and assert
+  # the two agree. `deno test` without --allow-read cannot open a sibling file at all - it
+  # raises NotCapable - and the memory_type test caught that in a try/catch and returned
+  # early, so it PASSED while comparing nothing. Verified 2026-08-30 by running it both
+  # ways: with the flag it compares 9 values, without it compares none. The suites now fail
+  # closed on an unreadable file, and this flag is what lets them read one.
+  # THE MOUNT IS THE WHOLE OB1 TREE, not just the source directory, and that is load-bearing
+  # for the same reason as the flag. Two suites here read files OUTSIDE their own folder -
+  # the memory_type test reads ../../docker/init-agent-memory*.sql, the exposure-plane
+  # completeness gate reads its sibling sources - and with only the source directory mounted
+  # the .sql files are not in the container at all. So even with --allow-read the cross-reader
+  # comparison had nothing to compare against (verified 2026-08-30: it fails NotFound under
+  # the old mount and compares 9 memory_type values under this one). Mounting OB1 at /ob1 and
+  # working from the same relative position as the repo makes the container's paths the
+  # repo's paths, so a test that passes here passes for the same reason it passes locally.
+  docker run --rm -v "${rootFwd}/OB1:/ob1:ro" `
+    -w /ob1/integrations/kubernetes-deployment denoland/deno:2.3.3 `
+    sh -c "deno check agent-memory*.ts index.ts && deno test --allow-read agent-memory*.test.ts"
   if ($LASTEXITCODE -eq 0) { Pass "agent-memory policy: deno check + test" } else { Fail "agent-memory policy: deno check/test" }
 
   Section "Caddy validate (portal route)"

@@ -69,6 +69,14 @@
 # every tool named in GATEWAY_READ_TOOLS must be marked attacked by a named section below,
 # and the drill FAILS naming any tool it parsed but never fired at.
 #
+# AND THE SAME FOR GATEWAY_WRITE_TOOLS, which is the correction this round paid for. Every
+# read attack passed and the plane was STILL reachable: agent_memory_review is a write tool
+# on the same door, and its promote_exposure action MOVES a memory onto the caller's plane -
+# after which every closed read tool hands it over entirely legitimately. Read containment is
+# not plane containment. ATTACK 8 is that escalation, ATTACK 9 is the writeback's idempotency
+# lookup used as an id oracle, ATTACK 10 is report_usage used as an existence oracle, and the
+# write list is iterated with its own coverage gate.
+#
 # ------------------------------------------------------------------------------------
 # CONCURRENCY
 # ------------------------------------------------------------------------------------
@@ -89,6 +97,11 @@
 # the repo tree is never weakened) and REQUIRES the synthetic record to come back through
 # it. If a red phase does not leak, the green phase it backs is proving nothing, and the
 # drill says so and fails.
+#
+# Since the exposure plane became a CHOKEPOINT (agent-memory-plane.ts), the red phase needs
+# ONE anchor where it used to need three - removing that single line lights up ATTACKS 3, 4,
+# 5, 8, 9 and 10 at once. The number of red confirmations a single line produces is the
+# measure of how much of the boundary that line is actually carrying.
 #
 #   .\scripts\checks\drill-personal-plane-exclusion.ps1
 #   .\scripts\checks\drill-personal-plane-exclusion.ps1 -KeepUp     # leave it up to poke at
@@ -305,6 +318,15 @@ function Wait-Http {
 $script:Attacked = @{}
 function Add-AttackedTool([string]$Tool, [string]$Where) { $script:Attacked[$Tool] = $Where }
 
+# The SAME gate for the WRITE tools, and it is not symmetry for its own sake. Every attack
+# in the read ledger passed, and then a verifier reached the personal plane through
+# `agent_memory_review` - a WRITE tool, on the same door, whose `promote_exposure` action
+# MOVES a memory onto the caller's plane. Read containment is not plane containment if a
+# write can relocate the memory across the line, so GATEWAY_WRITE_TOOLS is derived and
+# iterated exactly as GATEWAY_READ_TOOLS is.
+$script:AttackedWrites = @{}
+function Add-AttackedWriteTool([string]$Tool, [string]$Where) { $script:AttackedWrites[$Tool] = $Where }
+
 # A door's policy is DERIVED FROM COMPOSE, never restated here. A drill carrying its own
 # copy of the allow-list would keep passing after compose widened the real one, which is the
 # exact shape of a check that checks nothing.
@@ -417,6 +439,13 @@ try {
         throw "no ops env"
     }
     $opsReadTools = @($opsEnv["GATEWAY_READ_TOOLS"] -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    $opsWriteTools = @($opsEnv["GATEWAY_WRITE_TOOLS"] -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    if ($opsWriteTools.Count -gt 0) {
+        Pass "ops-door WRITE tools DERIVED from compose ($($opsWriteTools -join ', '))"
+    } else {
+        Fail "could not derive GATEWAY_WRITE_TOOLS from compose - the write half of this drill would be testing nothing"
+        throw "no ops write tools"
+    }
     Start-Gateway -Name $OPS -Port $OpsPort -GwEnv $opsEnv -Upstream "http://${SRV}:8000"
     if (Wait-Http -Port $OpsPort -Path "/health") { Pass "ops door is answering on :$OpsPort" }
     else { docker logs $OPS 2>&1 | Select-Object -Last 25 | Write-Host; Fail "ops gateway never answered"; throw "no gateway" }
@@ -729,6 +758,132 @@ try {
         Note $clStBlob
     }
 
+    # --- 10b. ATTACK 8: STOP READING, MOVE THE MEMORY INSTEAD ----------------------------
+    Section "ATTACK 8 - the agent WIDENS the plane instead of reading it (agent_memory_review / promote_exposure)"
+    # THE NEIGHBOURING DOOR, AND THE REASON THIS DRILL NOW ITERATES THE WRITE LIST TOO.
+    # Every attack above is a READ and every one of them is stopped. This one does not
+    # defeat that boundary at all - it MOVES THE MEMORY TO THE OTHER SIDE OF IT.
+    # promote_exposure is the only action in the system that widens exposure
+    # (agent-memory-review.ts sets exposure: "ops"), agent_memory_review is on the ops
+    # door's GATEWAY_WRITE_TOOLS, and performReview used to resolve the row by id with no
+    # plane predicate whatsoever - it SELECTed exposure so it could report it and never
+    # filtered on it. So an ops-door caller could promote a PERSONAL memory onto its own
+    # plane, after which ATTACK 3's inspect returns it entirely legitimately.
+    Add-AttackedWriteTool "agent_memory_review" "ATTACK 8"
+
+    # CONTROL FIRST: the tool has to work at this door, or a refusal proves nothing. A
+    # state-neutral action on the ops control - not promote_exposure, which would change
+    # the control the later phases depend on.
+    $revCtrl = Invoke-Tool -Port $OpsPort -Name "agent_memory_review" -Arguments @{
+        memory_id = $PID_OPS; action = "evidence_only"
+        actor = @{ label = "drill-control" }; note = "reachability control" }
+    $revCtrlBlob = ($revCtrl | ConvertTo-Json -Depth 12 -Compress)
+    if ($revCtrlBlob -match "evidence_only" -and $revCtrlBlob -notmatch "not_found") {
+        Pass "agent_memory_review works at the ops door on the ops control - the tool is reachable"
+    } else {
+        Fail "agent_memory_review did not act on the CONTROL - the attack below proves nothing"
+        Note $revCtrlBlob
+    }
+
+    $revAtk = Invoke-Tool -Port $OpsPort -Name "agent_memory_review" -Arguments @{
+        memory_id = $PID_PERS; action = "promote_exposure"
+        actor = @{ label = "drill-attacker" }; note = "widen the personal fixture onto the ops plane" }
+    $revBlob = ($revAtk | ConvertTo-Json -Depth 12 -Compress)
+    # THE DATABASE IS THE VERDICT, not the response. A tool that answers "ok" while changing
+    # nothing and a tool that answers "refused" while changing the row are both possible,
+    # and only one of the two is visible in the reply.
+    $expAfter = Db "SELECT metadata->>'exposure' FROM agent_memories WHERE id = '$PID_PERS'"
+    if ($expAfter -eq "personal") {
+        Pass "STOPPED - the personal fixture is STILL exposure=personal after promote_exposure"
+    } else {
+        Fail "PLANE ESCALATION: promote_exposure moved the personal fixture to exposure='$expAfter' - every read tool now returns it legitimately"
+    }
+    if ($revBlob -match "not_found") {
+        Pass "the refusal is not_found, not 'forbidden' - it does not confirm the id exists"
+    } else { Fail "the review refusal does not read as not_found (got: $revBlob)" }
+    $revRefused = Db "SELECT count(*) FROM agent_memory_audit_events WHERE event_type='access_refused' AND memory_id='$PID_PERS' AND payload->>'tool'='agent_memory_review'"
+    if ($revRefused -eq "1") { Pass "the refused review left a durable audit row (access_refused, tool=agent_memory_review)" }
+    else { Fail "expected exactly 1 access_refused row for agent_memory_review, got '$revRefused' - stopped, but invisible" }
+    # No review-action row either: a refused decision that files paperwork is a decision.
+    $revActions = Db "SELECT count(*) FROM agent_memory_review_actions WHERE memory_id='$PID_PERS'"
+    if ($revActions -eq "0") { Pass "no review-action row was written for the refused promotion" }
+    else { Fail "$revActions review-action row(s) exist for a memory this door may not see" }
+
+    # THE FOLLOW-THROUGH. The escalation's whole value is what it unlocks, so assert that
+    # the door it was aimed at is still shut afterwards.
+    $insAfter = (Invoke-Tool -Port $OpsPort -Name "agent_memory_inspect" -Arguments @{ memory_id = $PID_PERS } | ConvertTo-Json -Depth 12 -Compress)
+    if ($insAfter -notmatch "SYNTHETIC personal-plane FIXTURE") {
+        Pass "and inspect STILL refuses the fixture afterwards - the escalation unlocked nothing"
+    } else { Fail "EXPOSURE LEAK: after the promotion attempt, inspect returns the personal fixture" }
+
+    # Restore unconditionally: if the attack DID succeed, the phases below (and the red
+    # phase in particular) need the fixture back on the personal plane or they test nothing.
+    $null = Db "UPDATE agent_memories SET metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('exposure','personal'), provenance_status = 'generated', last_confirmed_at = NULL WHERE id = '$PID_PERS'"
+    $expRestored = Db "SELECT metadata->>'exposure' FROM agent_memories WHERE id = '$PID_PERS'"
+    if ($expRestored -eq "personal") { Pass "fixture restored to the personal plane for the phases below" }
+    else { Fail "could not restore the fixture (exposure='$expRestored') - later phases are unreliable"; throw "fixture not restored" }
+
+    # --- 10c. ATTACK 9: the WRITE path as an id oracle -----------------------------------
+    Section "ATTACK 9 - the agent asks the WRITE path who owns a key (agent_memory_writeback idempotency)"
+    # NOT FOUND BY A VERIFIER - found by the completeness test that enumerates every
+    # agent_memories statement in the subsystem. The writeback's idempotency lookup matched
+    # on (workspace_id, idempotency_key) with no plane predicate and returned the hit's id
+    # and thought_id as duplicate:true. An id is exactly what agent_memory_inspect consumes,
+    # so the WRITE tool was an id oracle for the personal plane, reachable from a door with
+    # no read access to it at all.
+    Add-AttackedWriteTool "agent_memory_writeback" "ATTACK 9"
+    $wbCtrl = Invoke-Tool -Port $OpsPort -Name "agent_memory_writeback" -Arguments @{
+        workspace_id = $WS; project_id = $PROJ
+        summary = "$SUMOPS retry"; content = $OPSCTRL
+        memory_type = "lesson"; idempotency_key = "$MARKER-ops" }
+    $wbCtrlBlob = ($wbCtrl | ConvertTo-Json -Depth 12 -Compress)
+    if ($wbCtrlBlob -match [regex]::Escape($PID_OPS)) {
+        Pass "an ON-plane retry still returns its own memory id - idempotency is not broken by the fix"
+    } else {
+        Fail "the on-plane retry did not return the control's id - the attack below proves nothing"
+        Note $wbCtrlBlob
+    }
+    $wbAtk = Invoke-Tool -Port $OpsPort -Name "agent_memory_writeback" -Arguments @{
+        workspace_id = $WS; project_id = $PROJ
+        summary = "probe"; content = "SYNTHETIC probe $MARKER - guessing another plane's retry key"
+        memory_type = "lesson"; idempotency_key = "$MARKER-personal" }
+    $wbBlob = ($wbAtk | ConvertTo-Json -Depth 12 -Compress)
+    if ($wbBlob -notmatch [regex]::Escape($PID_PERS)) {
+        Pass "STOPPED - guessing the personal fixture's idempotency_key does not disclose its id"
+    } else { Fail "ID DISCLOSURE: the writeback handed back the personal fixture's memory id" }
+    $wbRefused = Db "SELECT count(*) FROM agent_memory_audit_events WHERE event_type='access_refused' AND payload->>'tool'='agent_memory_writeback' AND payload->>'reason'='off-plane-idempotency-key'"
+    if ($wbRefused -eq "1") { Pass "the refused key lookup left a durable audit row" }
+    else { Fail "expected exactly 1 off-plane-idempotency-key audit row, got '$wbRefused'" }
+    $wbNoId = Db "SELECT count(*) FROM agent_memory_audit_events WHERE event_type='access_refused' AND payload->>'tool'='agent_memory_writeback' AND memory_id IS NOT NULL"
+    if ($wbNoId -eq "0") { Pass "and the audit row itself names no memory - the record does not become the leak" }
+    else { Fail "$wbNoId writeback refusal row(s) carry a memory_id" }
+
+    # --- 10d. ATTACK 10: report_usage as an existence oracle -----------------------------
+    Section "ATTACK 10 - the agent probes with report_usage (agent_memory_report_usage)"
+    # The third write tool. It already filtered on the plane, and it wrote NO audit row when
+    # it refused - so a probing agent and a stale trace_id looked identical. U5's contract is
+    # "mechanically stopped AND visible in an audit record"; this was the half that was
+    # missing, and it was missing because the audit was the CALLER's job. It is the
+    # chokepoint's job now.
+    Add-AttackedWriteTool "agent_memory_report_usage" "ATTACK 10"
+    $ruCtrl = Invoke-Tool -Port $OpsPort -Name "agent_memory_report_usage" -Arguments @{
+        memory_id = $PID_OPS; used = $true; workspace_id = $WS; note = "control" }
+    $ruCtrlBlob = ($ruCtrl | ConvertTo-Json -Depth 12 -Compress)
+    if ($ruCtrlBlob -notmatch "not_found") {
+        Pass "report_usage works at the ops door on the ops control - the tool is reachable"
+    } else { Fail "report_usage refused the CONTROL - the attack below proves nothing"; Note $ruCtrlBlob }
+    $ruAtk = Invoke-Tool -Port $OpsPort -Name "agent_memory_report_usage" -Arguments @{
+        memory_id = $PID_PERS; used = $true; workspace_id = $WS; note = "probe" }
+    $ruBlob = ($ruAtk | ConvertTo-Json -Depth 12 -Compress)
+    if ($ruBlob -match "not_found") { Pass "STOPPED - report_usage on the personal fixture is not_found" }
+    else { Fail "report_usage did not refuse the off-plane memory (got: $ruBlob)" }
+    $ruUsed = Db "SELECT count(*) FROM agent_memory_audit_events WHERE memory_id='$PID_PERS' AND event_type IN ('memory_used','memory_ignored')"
+    if ($ruUsed -eq "0") { Pass "and no memory_used row was written for a memory this door cannot see" }
+    else { Fail "$ruUsed usage row(s) exist for the off-plane fixture" }
+    $ruRefused = Db "SELECT count(*) FROM agent_memory_audit_events WHERE event_type='access_refused' AND memory_id='$PID_PERS' AND payload->>'tool'='agent_memory_report_usage'"
+    if ($ruRefused -eq "1") { Pass "the refusal left a durable audit row (access_refused, tool=agent_memory_report_usage)" }
+    else { Fail "expected exactly 1 access_refused row for report_usage, got '$ruRefused' - stopped, but invisible" }
+
     # --- 11. THE COVERAGE GATE -----------------------------------------------------------
     Section "COVERAGE - every read tool compose puts on the ops door must have been attacked"
     # The safeguard the derived allow-list was supposed to be, actually closed. Deriving the
@@ -740,6 +895,19 @@ try {
     } else {
         Fail "compose allows read tool(s) this drill never attacks: $($missed -join ', ') - the allow-list is derived but not exercised"
         Note "add an ATTACK section for each, or the next tool added to the door rides in unexamined"
+    }
+
+    Section "COVERAGE - every WRITE tool compose puts on the ops door must have been attacked too"
+    # THE HALF THAT DID NOT EXIST, and its absence is what let the escalation through. The
+    # read ledger above was complete and every read attack passed; the plane was still
+    # reachable, because agent_memory_review could MOVE a memory onto the caller's plane and
+    # nothing here iterated the write list. Read containment is not plane containment.
+    $missedW = @($opsWriteTools | Where-Object { -not $script:AttackedWrites.ContainsKey($_) })
+    if ($missedW.Count -eq 0) {
+        Pass "all $($opsWriteTools.Count) derived write tool(s) were attacked: $(($opsWriteTools | ForEach-Object { $_ + ' (' + $script:AttackedWrites[$_] + ')' }) -join ', ')"
+    } else {
+        Fail "compose allows write tool(s) this drill never attacks: $($missedW -join ', ') - a write can relocate a memory across the plane, so an unattacked one is an unexamined door"
+        Note "add an ATTACK section for each; ATTACK 8 is the shape (act on the personal fixture, then read the DATABASE, not the response)"
     }
 
     # --- 12. RED: prove every green above could have failed -------------------------------
@@ -773,17 +941,19 @@ try {
             -Replacement "  const enforced: Exposure[] = (requested && requested.length ? [...requested] : (doorExposure ? [doorExposure] : [...DEFAULT_RECALL_EXPOSURES])) as Exposure[];" `
             -What "the recall door no longer overrides what the caller asked for"
 
-        # (ii) the read tools' forced plane - what ATTACK 3 and ATTACK 5 rest on.
-        Set-RedAnchor -File "agent-memory-tools.ts" `
-            -Anchor "  return door ? [door] : DEFAULT_READ_EXPOSURE;" `
-            -Replacement "  return [`"ops`", `"personal`"];" `
-            -What "the read tools no longer force the door's plane"
-
-        # (iii) the review queue's forced plane - what ATTACK 4 rests on.
-        Set-RedAnchor -File "agent-memory-ops.ts" `
-            -Anchor "  args.push(doorExposure ? [doorExposure] : [`"ops`"]);" `
-            -Replacement "  args.push([`"ops`", `"personal`"]);" `
-            -What "the review queue no longer forces the door's plane"
+        # (ii) THE CHOKEPOINT ITSELF - ONE LINE, and it is what ATTACKS 3, 4, 5, 8, 9 and 10
+        # all rest on. This used to be two anchors, one per file, because the plane was
+        # forced separately in agent-memory-tools.ts and agent-memory-ops.ts and not at all
+        # in performReview or the writeback's idempotency lookup. That arrangement is the
+        # defect: a guard repeated per call site is a guard that can be omitted at the next
+        # one, and it was, three rounds running. Every lookup now goes through
+        # agent-memory-plane.ts, so there is exactly one line to take away - and the number
+        # of attacks that light up when it goes is the measure of how much this file was
+        # carrying.
+        Set-RedAnchor -File "agent-memory-plane.ts" `
+            -Anchor "  return { exposures: door ? [door] : [...DEFAULT_DOOR_PLANE], door } as unknown as DoorPlane;" `
+            -Replacement "  return { exposures: [`"ops`", `"personal`"], door } as unknown as DoorPlane;" `
+            -What "the chokepoint no longer bounds any lookup to the door's plane"
         Note "the repo tree is untouched - this lives in $REDSRCDIR"
 
         docker build -t $REDIMAGE $REDSRCDIR 2>&1 | Select-Object -Last 1 | Out-Null
@@ -824,6 +994,46 @@ try {
             if ($rT -match [regex]::Escape($SUMPERS)) {
                 Pass "RED CONFIRMED (ATTACK 5) - unguarded, the trace returns the personal memory's summary"
             } else { Fail "the unguarded trace did not leak - ATTACK 5's pass proves nothing"; Note $rT }
+
+            # RED for ATTACK 9 - the WRITE path's id oracle. Run BEFORE ATTACK 8's red, which
+            # moves the fixture onto the ops plane and would make this succeed for the wrong
+            # reason.
+            $rWb = (Invoke-Tool -Port $RedMemPort -Name "agent_memory_writeback" -Arguments @{
+                workspace_id = $WS; project_id = $PROJ
+                summary = "red probe"; content = "SYNTHETIC red probe $MARKER"
+                memory_type = "lesson"; idempotency_key = "$MARKER-personal" } | ConvertTo-Json -Depth 12 -Compress)
+            if ($rWb -match [regex]::Escape($PID_PERS)) {
+                Pass "RED CONFIRMED (ATTACK 9) - unguarded, guessing the retry key hands back the personal fixture's id"
+            } else { Fail "the unguarded writeback disclosed no id - ATTACK 9's pass proves nothing"; Note $rWb }
+
+            # RED for ATTACK 10 - report_usage as an existence oracle.
+            $rRu = (Invoke-Tool -Port $RedMemPort -Name "agent_memory_report_usage" -Arguments @{
+                memory_id = $PID_PERS; used = $true; workspace_id = $WS; note = "red probe" } | ConvertTo-Json -Depth 12 -Compress)
+            $rRuRows = Db "SELECT count(*) FROM agent_memory_audit_events WHERE memory_id='$PID_PERS' AND event_type IN ('memory_used','memory_ignored')"
+            if ($rRu -notmatch "not_found" -and $rRuRows -ne "0") {
+                Pass "RED CONFIRMED (ATTACK 10) - unguarded, report_usage confirms the personal fixture exists and files a usage row for it"
+            } else { Fail "the unguarded report_usage refused anyway - ATTACK 10's pass proves nothing"; Note "$rRu rows=$rRuRows" }
+
+            # RED for ATTACK 8 - THE ESCALATION. Last, because it is the one that changes the
+            # fixture's plane; everything above needs it still personal.
+            $rRev = (Invoke-Tool -Port $RedMemPort -Name "agent_memory_review" -Arguments @{
+                memory_id = $PID_PERS; action = "promote_exposure"
+                actor = @{ label = "drill-red" }; note = "red: widen the personal fixture" } | ConvertTo-Json -Depth 12 -Compress)
+            $rExp = Db "SELECT metadata->>'exposure' FROM agent_memories WHERE id = '$PID_PERS'"
+            if ($rExp -eq "ops") {
+                Pass "RED CONFIRMED (ATTACK 8) - unguarded, promote_exposure MOVES the personal fixture onto the ops plane"
+                # And the payoff, which is the whole point of the escalation: once moved, the
+                # tool that refuses it in the green phase hands it over on the GUARDED door.
+                $rIns2 = (Invoke-Tool -Port $OpsPort -Name "agent_memory_inspect" -Arguments @{ memory_id = $PID_PERS } | ConvertTo-Json -Depth 12 -Compress)
+                if ($rIns2 -match "SYNTHETIC personal-plane FIXTURE") {
+                    Pass "RED CONFIRMED (ATTACK 8, payoff) - after the promotion the GUARDED door's inspect returns the fixture, containment intact and bypassed"
+                } else { Note "the promoted fixture did not come back through the guarded door: $rIns2" }
+            } else { Fail "the unguarded promote_exposure did not move the fixture (exposure='$rExp') - ATTACK 8's pass proves nothing"; Note $rRev }
+            # Put it back. Everything after this point assumes the fixture is personal.
+            $null = Db "UPDATE agent_memories SET metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('exposure','personal'), provenance_status = 'generated', last_confirmed_at = NULL WHERE id = '$PID_PERS'"
+            $rBack = Db "SELECT metadata->>'exposure' FROM agent_memories WHERE id = '$PID_PERS'"
+            if ($rBack -eq "personal") { Pass "fixture restored to the personal plane after the red escalation" }
+            else { Fail "could not restore the fixture after the red phase (exposure='$rBack')" }
         } else { Fail "red ops gateway (agent-memory variant) never answered" }
 
         Section "RED - dismantle the search_thoughts lane's guards, one at a time (OPS door)"

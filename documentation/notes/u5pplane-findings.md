@@ -372,6 +372,199 @@ that found nothing; the `2>/dev/null` is what made the difference invisible.
 
 ---
 
+## F12 — the PLANE ESCALATION: a WRITE tool moved the memory across the boundary (FOUND + CLOSED)
+
+**Round 3, and the same shape as rounds 1 and 2.** F1-F7 closed the personal-plane leak on
+`agent_memory_recall`, `agent_memory_inspect`, `agent_memory_list_review_queue` and
+`agent_memory_recall_trace`, each verified live. Then a verifier read the branch and found
+`performReview` (`agent-memory-ops.ts`), which resolved a memory by id with:
+
+    SELECT review_status, lifecycle_status, provenance_status,
+           COALESCE(metadata->>'exposure','personal') AS exposure
+      FROM agent_memories WHERE id = $1 FOR UPDATE
+
+It SELECTed `exposure` so it could report it, and never FILTERED on it. `agent_memory_review`
+is on the ops door's `GATEWAY_WRITE_TOOLS` (`OB1/docker/docker-compose.yml`), it is registered
+on the agent-facing MCP server (`agent-memory.ts`, `server.registerTool("agent_memory_review", …)`),
+and `promote_exposure` is the one action in the system that WIDENS exposure
+(`agent-memory-review.ts`: `promote_exposure: { … exposure: "ops", provenance: "user_confirmed" … }`).
+
+So the attack was not a read at all: take a personal memory's id, promote it onto the ops
+plane, and every read tool closed in F1-F7 then returns it **legitimately**. The containment
+was never defeated. The memory was moved past it.
+
+**RED, live, against a synthetic fixture** (drill run `1aea0870`, RED phase — one line of the
+chokepoint removed in a scratch copy, repo tree untouched):
+
+    RED CONFIRMED (ATTACK 8) - unguarded, promote_exposure MOVES the personal fixture onto the ops plane
+    RED CONFIRMED (ATTACK 8, payoff) - after the promotion the GUARDED door's inspect returns the
+                                       fixture, containment intact and bypassed
+
+The payoff line is the one that matters: the *guarded* door hands the fixture over, because by
+then it is an ops-plane memory and the guard is working correctly.
+
+**GREEN, same run, same fixture:**
+
+    PASS  STOPPED - the personal fixture is STILL exposure=personal after promote_exposure
+    PASS  the refusal is not_found, not 'forbidden' - it does not confirm the id exists
+    PASS  the refused review left a durable audit row (access_refused, tool=agent_memory_review)
+    PASS  no review-action row was written for the refused promotion
+    PASS  and inspect STILL refuses the fixture afterwards - the escalation unlocked nothing
+
+---
+
+## F13 — the fix is a CHOKEPOINT, and its completeness is a test (NEW)
+
+Patching `performReview` would have produced round 4. There is always another spelling,
+another door, another channel — the round-1/2/3 pattern is not bad luck, it is what
+per-call-site guarding does. So the decision moved to one place:
+`OB1/integrations/kubernetes-deployment/agent-memory-plane.ts`.
+
+**What makes it a chokepoint rather than a convention:**
+
+- `DoorPlane` is a NOMINAL type. Its brand symbol is module-private, so `doorPlane()` is the
+  only constructor. Verified: a scratch file doing
+  `{ exposures: ["ops","personal"], door: null } as DoorPlane` fails `deno check` with
+  `TS2352 … Property '[PLANE_BRAND]' is missing`. A caller cannot forge a wider plane, and
+  every lookup takes one as a **required positional argument** — omitting it does not compile.
+- The predicate is emitted by the module, never by a caller. `listMemoriesOnPlane` starts the
+  WHERE clause *with* the plane predicate and hands the caller a builder for the rest, so
+  there is no arrangement of caller code that produces an args array without the plane in it.
+- The refusal AUDIT is emitted by the module too. That half used to be the caller's job,
+  which is to say forgettable — and `performReportUsage` had forgotten it (F14).
+- `agent-memory-ops.ts` and `agent-memory-tools.ts` now contain **zero** SQL against
+  `agent_memories`. `grep -n agent_memories` on both returns one hit, in a comment.
+
+**The completeness test** is `agent-memory-plane.test.ts`, and it is the deliverable as much
+as the fix is. It reads the source of every `agent-memory*.ts` in the subsystem, strips
+comments, finds every SQL reference to the table, and requires each one to be inside the
+chokepoint or on a two-entry allow-list with a written reason (the writeback INSERT; the
+recall path, which has its own older chokepoint in `buildRecallScopeFilter`). It also asserts
+that the scanned file list matches what is on disk, so a NEW `agent-memory-*.ts` cannot be
+invisible to it.
+
+**RED proof for the gate itself**, because a check nobody has watched fail is not known to
+check anything. Appending an unguarded `SELECT content FROM agent_memories WHERE id = $1` to
+`agent-memory-tools.ts`:
+
+    EVERY agent_memories statement is in the chokepoint or on the allow-list ... FAILED
+    ops and tools resolve NOTHING by hand - zero raw statements ... FAILED
+      agent-memory-tools.ts: 1 agent_memories reference(s) neither routed through
+      agent-memory-plane.ts nor on the allow-list (FROM agent_memories). Route it through
+      agent-memory-plane.ts, or add an EXEMPT entry with a reason.
+
+Removing it: `21 passed | 0 failed`. The gate also carries its own in-suite red case
+("the completeness gate can actually fail") so the matcher is exercised on every run.
+
+**And the chokepoint is measurably one point.** Replacing the single line
+`return { exposures: door ? [door] : [...DEFAULT_DOOR_PLANE], door }` with
+`return { exposures: ["ops", "personal"], door }` turns **10 tests red across three suites**
+(`58 passed | 10 failed`), and in the live drill that same one line produces eight
+`RED CONFIRMED` lines. Before this round the drill needed three separate red anchors in three
+files and still could not reach `performReview` or the writeback at all.
+
+---
+
+## F14 — the WRITE path was an id oracle, and the COMPLETENESS TEST is what found it (NEW)
+
+Not a verifier finding and not a guess: enumerating every `agent_memories` statement turned
+up one nobody had looked at. `performWriteback`'s idempotency lookup was
+
+    SELECT id, thought_id FROM agent_memories
+     WHERE workspace_id = $1 AND idempotency_key = $2 LIMIT 1
+
+with no plane predicate, returning the hit's `id` and `thought_id` to the caller as
+`duplicate: true`. An id is exactly what `agent_memory_inspect` consumes. So an ops-door
+caller that guessed a retry key — `daily-summary-2026-08-29` is not a hard guess — got a
+personal memory's identifier back, through the one tool on the door nobody thinks of as a
+read.
+
+RED and GREEN, live, same drill run:
+
+    RED CONFIRMED (ATTACK 9) - unguarded, guessing the retry key hands back the personal fixture's id
+    PASS  STOPPED - guessing the personal fixture's idempotency_key does not disclose its id
+    PASS  the refused key lookup left a durable audit row
+    PASS  and the audit row itself names no memory - the record does not become the leak
+    PASS  an ON-plane retry still returns its own memory id - idempotency is not broken by the fix
+
+The plane comes from `deps`, **not** from the stamped row: `row.exposure` is demoted by the
+caller-supplied `tainted` flag, so looking the duplicate up on the row's plane would let a
+caller reopen the same oracle from the other side.
+
+The key stays unique per workspace across planes (`idx_agent_memories_ws_idempotency_key`), so
+an off-plane hit becomes a refusal rather than a second write — the insert would have violated
+the index anyway. What the caller no longer learns is WHICH memory holds the key.
+
+`agent_memory_report_usage` (ATTACK 10) was the third write tool: it already filtered, and it
+wrote no audit row when it refused, so a probe and a stale id looked identical. The chokepoint
+writes it now.
+
+**The drill now iterates `GATEWAY_WRITE_TOOLS` the way it already iterated
+`GATEWAY_READ_TOOLS`.** That gate is why all three of these were attacked rather than one:
+
+    PASS  all 3 derived write tool(s) were attacked: agent_memory_writeback (ATTACK 9),
+          agent_memory_review (ATTACK 8), agent_memory_report_usage (ATTACK 10)
+
+---
+
+## F15 — the refusal audit was inside the caller's transaction, and the ROLLBACK erased it (FOUND BY THE DRILL, IN THIS ROUND'S OWN FIX)
+
+The first version of the chokepoint wrote `access_refused` on the caller's connection. That is
+correct for every read tool and wrong for `performReview`, which runs inside a transaction and
+answers a refusal with `ROLLBACK` — so the row was written and then destroyed by the caller's
+own error path. Drill run `5faaf437`:
+
+    PASS  STOPPED - the personal fixture is STILL exposure=personal after promote_exposure
+    FAIL  expected exactly 1 access_refused row for agent_memory_review, got '0' - stopped, but invisible
+
+Stopped, but invisible — exactly half of U5's column, and the half that is easy to believe you
+already have, because the visible half passed. `auditRefusal` now takes the POOL and commits on
+its own connection, so a record cannot be undone by the caller rolling back. Run `1aea0870`:
+
+    PASS  the refused review left a durable audit row (access_refused, tool=agent_memory_review)
+
+Worth stating plainly: the live drill caught a defect in the fix that all 154 unit tests
+passed over, because no stub models `ROLLBACK` discarding a write. The unit case now exists
+too ("the refusal audit takes its OWN connection and releases it"), but the drill is what
+found it.
+
+---
+
+## F16 — a cross-reader test that compared NOTHING, for two independent reasons (FOUND + CLOSED)
+
+`agent-memory-tools.test.ts`'s "memory_type enum matches the SQL CHECK exactly" is one of this
+repo's proven "two things that must agree" checks. It was passing while comparing nothing.
+
+**Reason 1 — the flag.** `deno test` without `--allow-read` cannot open a sibling file. The
+test caught the resulting error in a bare `try { … } catch { continue; }` and then returned
+early on an empty list. Demonstrated:
+
+    CAUGHT AND SWALLOWED: NotCapable - Requires read access to "…\init-agent-memory.sql",
+                          run again with the --allow-read flag
+    ok | 1 passed | 0 failed
+
+`scripts/checks/test-quartz4-offline.ps1:80` is the repo's only runner for these suites and
+did not pass the flag. `git log -S"allow-read" -- scripts/checks/test-quartz4-offline.ps1`
+returns nothing — it never has.
+
+**Reason 2 — the mount.** Even with the flag, the runner mounted only
+`OB1/integrations/kubernetes-deployment` into the container, so `../../docker/*.sql` was not
+present at all. Verified: with `--allow-read` under the old mount,
+`FAILED | 153 passed | 1 failed` on that test. Mounting `OB1:/ob1:ro` with workdir
+`/ob1/integrations/kubernetes-deployment` makes the container's paths the repo's paths:
+`154 passed | 0 failed`, exit 0, in the pinned `denoland/deno:2.3.3`.
+
+Both are fixed, and the test now **fails closed**: `Deno.errors.NotFound` is still a skip (a
+migration genuinely absent from a checkout), anything else re-throws, and an empty comparison
+throws rather than returning. Confirmed both directions: without the flag it now FAILS instead
+of passing.
+
+This is the same class as everything else in this note — a check that reads as coverage while
+providing none — and it is why the new completeness gate reads its sources with no `try/catch`
+at all.
+
+---
+
 ## Open — verified, deliberately not fixed here
 
 - ~~**The OB1 gitlink points at a commit that is not on the OB1 remote.**~~ **CLOSED this
@@ -397,11 +590,55 @@ that found nothing; the `2>/dev/null` is what made the difference invisible.
   `openbrain-gateway:drill`, `:drill2` are litter from the PREVIOUS naming scheme (mine and
   the verifiers'); nothing produces or removes them any more, and they are left alone rather
   than deleted by a session that cannot prove whose they are. None is `:local`.
-- **Production was never touched, and is verified so.** During the drill runs `docker ps`
-  shows `openbrain-gateway` and `openbrain-ops-gateway` still on `openbrain-gateway:local`,
-  `Up 5 hours (healthy)`.
+- **Production was never touched, and is verified so.** Re-checked after this round's three
+  drill runs: `docker ps` shows `openbrain-gateway` and `openbrain-ops-gateway` still on
+  `openbrain-gateway:local`, `Up 7 hours (healthy)` -- older than the runs. The drill's own
+  images are tagged `:drill-<runid>` and are gone; `docker ps -a --filter name=pp-drill` and
+  `docker network ls --filter name=pp-drill` are both empty. And the real plane holds no
+  fixture: `docker exec openbrain-db psql -U postgres -d openbrain -qtA -c "SELECT count(*)
+  FROM agent_memories WHERE content LIKE '%SYNTHETIC%'"` --> `0`, with 4 memories total and
+  `0` on the personal plane.
 - **`promote_exposure` is still absent from the schema's review-action CHECK**, so a memory
   demoted to `personal` cannot be elevated. Pre-existing, already recorded in DECISIONS.md.
+
+### What the chokepoint does NOT cover — stated precisely, because a claim of completeness is what gets falsified
+
+The completeness gate's scope is exactly: **SQL against `agent_memories` in
+`OB1/integrations/kubernetes-deployment/agent-memory*.ts`.** Everything below is outside it
+and is therefore still reachable without turning any test red. Each was checked with the
+command named.
+
+1. **Other tables.** `agent_memory_recall_traces`, `agent_memory_recall_items`,
+   `agent_memory_review_actions` and `agent_memory_audit_events` have no plane predicate of
+   their own. `performRecallTrace` still reads the TRACE row unscoped (F11, unchanged), and
+   `performInspect` returns a memory's full review history and audit trail once the memory
+   itself resolves on-plane — which is correct, but it means the boundary for those tables is
+   "whatever resolved the memory", not a predicate. Extending the gate to them needs an
+   exposure derivation those tables do not have.
+2. **Other files.** `grep -rn "agent_memories" OB1/integrations --include=*.ts` also hits
+   `OB1/integrations/agent-memory-api/index.ts` — a SIBLING implementation of this plane that
+   this branch does not touch and the gate does not scan. It is not in the deployed image:
+   that Dockerfile's build context is the `kubernetes-deployment` directory and it copies
+   `*.ts` from there, so a sibling directory cannot be in it. But it is real code against the
+   same table, and a future deployment of it would inherit none of this.
+3. **Raw SQL from anywhere else.** Anything with the database credentials — a psql session,
+   a recipe, `openbrain-mcp`'s other tools — reads the table directly. The plane is a
+   property of these *doors*, not of the row, and nothing in this round changes that.
+4. **The gate is a TEXT scan.** It strips comments and matches
+   `(FROM|JOIN|UPDATE|INTO|TABLE)\s+agent_memories`. A dynamically-built table name
+   (`"agent_" + "memories"`) would evade it. That is a deliberate trade: the alternative is a
+   type-level or query-builder discipline over the whole codebase, which is a much larger
+   change than this item. The gate raises the cost of an accidental new door to "a test goes
+   red"; it does not stop a determined one.
+5. **The drill proves the SOURCE TREE, not production.** Unchanged from F11: `docker ps`
+   shows `openbrain-gateway` / `openbrain-ops-gateway` still on `openbrain-gateway:local`
+   from before this branch. Whether the deployed containers run this tree is the deploy
+   gate's question.
+
+An honest bounded guard, not a claim of completeness. What IS complete, and mechanically so,
+is the property the last three rounds kept losing: **no statement in the two files that own
+the ops door's tools resolves a memory without the door's plane, and a new one cannot be
+added without a test going red.**
 
 ---
 
@@ -550,3 +787,99 @@ EVIDENCE: `git ls-remote origin work/u5-personal-plane-audit` → `679889b0dd2e�
           `malformed object name` came from: after `git fetch origin` there,
           `git log --oneline -1 679889b` resolves. The originally-refuted `0c7af57` is now
           reachable too, as an ancestor of the pushed tip.
+
+## 2026-08-30 · U5 · class 2 — the exposure plane is a CHOKEPOINT, and its completeness is a test
+
+**Decision.** Stop guarding the personal plane per call site. Every statement that resolves a
+memory row now goes through one module,
+`OB1/integrations/kubernetes-deployment/agent-memory-plane.ts`, whose functions take a
+`DoorPlane` as a required positional argument of a NOMINAL type — the brand symbol is
+module-private, so `doorPlane()` is the only constructor and a forged plane fails `deno check`
+(TS2352). `agent-memory-ops.ts` and `agent-memory-tools.ts` contain zero SQL against
+`agent_memories` as a result.
+
+**Why.** Three rounds, three closures, three neighbouring doors. Round 3's was worse than a
+read leak: `performReview` resolved by id with no plane predicate, `agent_memory_review` is on
+the ops door's `GATEWAY_WRITE_TOOLS`, and `promote_exposure` is the only action that widens
+exposure — so a caller could MOVE a personal memory onto its own plane and then read it
+through every closed tool legitimately. Enumerate-and-patch cannot end that, because omission
+is always available.
+
+**Class 2**, not 3: it is a defensible design choice with a cheaper alternative (patch
+`performReview`), and it follows the house pattern of two things tested against each other —
+`harness.config.json`'s two readers, the zod enum vs the SQL CHECK, the anchor schema's three
+readers. Here the two things are the SOURCE and the allow-list in
+`agent-memory-plane.test.ts`, which enumerates every `agent_memories` statement in the
+subsystem and fails when an unguarded one appears.
+
+**Evidence.** Drill `scripts/checks/drill-personal-plane-exclusion.ps1` — 83 checks, exit 0,
+including `RED CONFIRMED (ATTACK 8)` for the escalation and `RED CONFIRMED (ATTACK 8, payoff)`
+for what it unlocked. `deno test --allow-read agent-memory*.test.ts` — 154 passed. Injecting
+one unguarded query into `agent-memory-tools.ts` turns the gate red with an actionable
+message; removing the single chokepoint line turns 10 tests red across three suites.
+
+**Revert.** `git revert` the commit. The module is imported by exactly three source files
+plus its own suite -- `grep -rn 'from "./agent-memory-plane.ts"' --include=*.ts .` gives
+`agent-memory-ops.ts`, `agent-memory-tools.ts`, `agent-memory.ts` and
+`agent-memory-plane.test.ts`. Reverting restores the per-call-site helpers
+(`readExposure` in tools, the inline `args.push` in ops) and re-opens F12 and F14. Reverting
+only the test (`rm agent-memory-plane.test.ts`) keeps the fix and loses the completeness
+property — which is the half that stops round 4, so do not do that on its own.
+
+## 2026-08-30 · U5 · class 2 — a WRITE tool can move a memory across the plane, so the drill iterates the WRITE list too
+
+**Decision.** `drill-personal-plane-exclusion.ps1` now derives `GATEWAY_WRITE_TOOLS` from
+compose and FAILS naming any write tool it never attacked, exactly as it already did for
+`GATEWAY_READ_TOOLS`. ATTACK 8 (`agent_memory_review` / `promote_exposure`), ATTACK 9
+(`agent_memory_writeback` idempotency id oracle) and ATTACK 10 (`agent_memory_report_usage`)
+are the three that gate now requires.
+
+**Why.** The read ledger was complete and every read attack passed, and the plane was still
+reachable. Read containment is not plane containment if a write can relocate the memory across
+the line. ATTACK 9 was found by the completeness test, not by a verifier, and ATTACK 10's
+missing audit row was found by writing the section.
+
+**Evidence.** `PASS all 3 derived write tool(s) were attacked`. Each has a RED confirmation in
+the same run.
+
+**Revert.** Delete the `$script:AttackedWrites` ledger, the `$opsWriteTools` derivation, the
+new COVERAGE section and ATTACKs 8-10 from the drill. The fix in OB1 stands on its own; the
+drill would stop proving it.
+
+## 2026-08-30 · U5 · class 2 — a refusal audit must not be undoable by the caller's ROLLBACK
+
+**Decision.** `auditRefusal` takes the POOL, not the caller's client, and commits the
+`access_refused` row on its own connection.
+
+**Why.** The drill caught it: `performReview` refuses inside a transaction and answers with
+`ROLLBACK`, which erased the audit row the chokepoint had just written — `FAIL expected
+exactly 1 access_refused row for agent_memory_review, got '0' - stopped, but invisible`. All
+154 unit tests passed over it, because no stub models a rollback discarding a write.
+
+**Cost.** One extra pooled connection per REFUSED lookup. Refusals are rare by construction,
+and the alternative — asking each caller to audit outside its own transaction — is exactly the
+forgettable arrangement this round is replacing.
+
+**Revert.** Change `auditRefusal(pool, …)` back to `auditRefusal(client, …)` and pass
+`ctx.client`. ATTACK 8's audit assertion goes red immediately, which is the point.
+
+## 2026-08-30 · U5 · class 2 — `--allow-read` and the OB1 mount are load-bearing for the cross-reader tests
+
+**Decision.** `scripts/checks/test-quartz4-offline.ps1` now runs
+`deno test --allow-read` with `OB1:/ob1:ro` mounted and workdir
+`/ob1/integrations/kubernetes-deployment`, and the "memory_type enum matches the SQL CHECK"
+test fails closed instead of swallowing every error.
+
+**Why.** That test was passing while comparing nothing, for two independent reasons: `deno
+test` without `--allow-read` raises `NotCapable`, which its bare `catch` swallowed into an
+early return; and the container mounted only the source directory, so the `.sql` files it
+reads were not present at all. `git log -S"allow-read"` on the runner returns nothing — the
+flag has never been there. Both fixed; the same two traps would have made the new
+exposure-plane completeness gate a no-op on its first run.
+
+**Evidence.** Without the flag the enum test now FAILS (it used to pass); with the flag under
+the OLD mount, `153 passed | 1 failed`; with the flag under the NEW mount, `154 passed |
+0 failed`, exit 0, in `denoland/deno:2.3.3`. The enum test compares 9 values.
+
+**Revert.** Restore the old `docker run` line and the bare `catch { continue; }`. Both suites
+go back to green-while-checking-nothing, which is worse than deleting them.
