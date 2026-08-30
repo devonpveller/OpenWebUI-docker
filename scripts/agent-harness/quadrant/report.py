@@ -170,11 +170,21 @@ def _rows(quadrants: List["_matrix.Quadrant"], records: List[Dict[str, Any]],
             })
             continue
 
-        first = admitted[0][0]
-        status = str(first.get("status"))
-        comparable = q.comparable and _record.is_comparable(first, q, s)
+        # WHICH admitted record speaks for the cell. Records accumulate: a quadrant that was
+        # BLOCKED in an earlier session and RAN in a later one has both on disk, and
+        # `_load_records` hands them over oldest-first. Taking admitted[0] made the stale
+        # `not_run` speak for the cell - the row read "did not produce an outcome" beside a
+        # completed run sitting in the same directory, and `compared` stayed false, so a
+        # comparison could never be finished by fixing the thing that blocked it. Found
+        # 2026-08-30 when the docker-exec transport made the two little-coder cells runnable
+        # for the first time; the blocked records are evidence and must not be deleted, so
+        # the report is what had to change.
+        # An OUTCOME outranks a non-outcome, and among equals the most recent wins.
         outcome_recs = [r for r, _ in admitted
                         if s["statuses"].get(str(r.get("status")), {}).get("comparable")]
+        first = outcome_recs[-1] if outcome_recs else admitted[-1][0]
+        status = str(first.get("status"))
+        comparable = q.comparable and _record.is_comparable(first, q, s)
         why_not = ""
         if not q.comparable:
             why_not = q.incomparable_reason

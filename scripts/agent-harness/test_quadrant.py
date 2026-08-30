@@ -337,6 +337,57 @@ def test_report_headline_counts_only_admitted_comparable_records(evidence):
     assert "daemon unreachable from the host" in md
 
 
+def test_a_later_real_run_outranks_an_earlier_blocked_record_for_the_same_cell(evidence):
+    """A cell that was BLOCKED and then RAN is COMPARED, on the run.
+
+    Records accumulate and `_load_records` hands them over oldest-first, so a quadrant that
+    could not run in one session and ran in the next has both on disk. Until 2026-08-30 the
+    row was built from the FIRST admitted record: the stale `not_run` spoke for the cell, so
+    it read "did not produce an outcome" beside a completed run in the same directory and
+    `compared` stayed false. That made an incomplete comparison impossible to COMPLETE by
+    fixing whatever had blocked it - the only way out was deleting the blocked record, i.e.
+    deleting evidence, which is the one move this module refuses everywhere else.
+
+    Found by integration, not by review: the docker-exec transport made the two little-coder
+    cells runnable for the first time, and their earlier NOT RUN records were sitting in the
+    same results set.
+    """
+    qs = matrix_mod.build(cfg())
+    blocked = good_record(evidence, quadrant="little-coder::self", runner="little-coder",
+                          target="self", runner_status="unproven", status="not_run",
+                          not_run_reason="daemon unreachable from the host",
+                          acceptance=[], evidence={}, wall_seconds=0)
+    ran = good_record(evidence, quadrant="little-coder::self", runner="little-coder",
+                      target="self", runner_status="unproven")
+    md = report_mod.render(qs, [blocked, ran], item={"id": "u4-baseline", "digest": "d" * 64})
+    summary = report_mod.summarize(qs, [blocked, ran],
+                                   item={"id": "u4-baseline", "digest": "d" * 64})
+    row = [r for r in summary["rows"] if r["key"] == "little-coder::self"][0]
+    assert row["compared"] is True, row
+    assert row["status"] == "completed", row
+    assert "COMPARED 1/4" in md
+
+
+def test_the_most_recent_blocking_reason_is_the_one_reported(evidence):
+    """Two blocked records, no run: the row carries the LATER reason, not the first one.
+
+    The same ordering change, on the branch where nothing ever ran. A cell blocked for one
+    reason in the morning and a different one in the afternoon must report the afternoon's -
+    reporting the stale reason is how someone fixes a door that is no longer the problem.
+    """
+    qs = matrix_mod.build(cfg())
+    old = good_record(evidence, quadrant="little-coder::self", runner="little-coder",
+                      target="self", status="not_run", not_run_reason="no route from the host",
+                      acceptance=[], evidence={}, wall_seconds=0)
+    new = good_record(evidence, quadrant="little-coder::self", runner="little-coder",
+                      target="self", status="not_run",
+                      not_run_reason="the daemon has no focused project",
+                      acceptance=[], evidence={}, wall_seconds=0)
+    summary = report_mod.summarize(qs, [old, new], item={"id": "u4-baseline", "digest": "d" * 64})
+    row = [r for r in summary["rows"] if r["key"] == "little-coder::self"][0]
+    assert row["why_not"] == "the daemon has no focused project", row
+
+
 def test_a_refused_record_is_reported_as_not_compared_never_dropped(evidence):
     """A record that fails admission must be LOUDER than one that never existed."""
     qs = matrix_mod.build(cfg())
