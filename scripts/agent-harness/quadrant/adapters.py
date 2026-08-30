@@ -252,9 +252,10 @@ def _dispatch_little_coder_docker(rcfg: Dict[str, Any], item: Dict[str, Any],
     log: List[str] = [f"transport : docker-exec ({container}), workspace {cws}",
                       f"focus     : {prior_focus or '(none)'}"]
     notes: List[str] = [
-        f"little-coder ran on a MIRROR of this workspace inside {container}:{cws}; '.git' "
-        f"was not mirrored, so the runner had no git in its workspace. Scope and acceptance "
-        f"were measured host-side, after the changed files were copied back."]
+        f"little-coder ran on a MIRROR of this workspace inside {container}:{cws}. The host "
+        f"workspace's own '.git' was not carried across; the mirror was given a fresh "
+        f"'git init' and one baseline commit, so the runner saw no history. Scope and "
+        f"acceptance were measured host-side, after the changed files were copied back."]
 
     stage = workspace.parent / "_mirror"
     task: Dict[str, Any] = {}
@@ -262,13 +263,19 @@ def _dispatch_little_coder_docker(rcfg: Dict[str, Any], item: Dict[str, Any],
     timed_out = False
     try:
         try:
-            planted = _lc.mirror_in(container, cws, workspace, stage)
+            planted = _lc.mirror_in(container, cws, workspace, stage, log)
             log.append(f"mirrored  : {planted} file(s) into {container}:{cws}")
             before = _lc.snapshot(container, cws)
 
             created = _lc.api(container, base_url, "POST",
                               str(rcfg.get("submit_path") or "/tasks"),
-                              {"prompt": item["task"], "channel": "quadrant",
+                              # `channel` is a CLOSED SET in the daemon (TriggerRequest ->
+                              # 422 "channel must be one of ['batch','cli','owui',
+                              # 'validation']"). Measured, not guessed: the first run of
+                              # this adapter sent "quadrant" and the cell recorded an
+                              # error. 'batch' is the non-interactive lane dispatch.ps1
+                              # already uses.
+                              {"prompt": item["task"], "channel": "batch",
                                "user_id": "quadrant-harness"})
             task_id = str(created.get("task_id") or created.get("id") or "")
             if not task_id:

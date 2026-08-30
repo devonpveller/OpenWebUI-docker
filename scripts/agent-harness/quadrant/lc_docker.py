@@ -30,12 +30,14 @@ would make `scope.out_of_scope_hits` read empty for every little-coder run whate
 runner actually did, because the host `git status` would never see anything else. A column
 that cannot register a violation is worse than no column: it reads as a measurement.
 
-WHAT THE MIRROR COSTS, recorded in every record rather than left in a comment: `.git` is
-not mirrored (for target `self` the workspace's `.git` is a gitfile pointing into this
-repo's worktree store and means nothing inside the container), so the runner has no git in
-its workspace. The item does not ask for a commit and both acceptance guards run host-side,
-so this does not change the task - but it IS a difference between the quadrants, and the
-adapter attaches it to the record as a note.
+WHAT THE MIRROR COSTS, recorded in every record rather than left in a comment: the host
+workspace's own `.git` is not carried across (for target `self` it is a gitfile pointing
+into this repo's worktree store and means nothing inside the container), so the mirror gets
+a FRESH `git init` plus a baseline commit and the runner sees no history. That is not a
+nicety - the daemon refuses a task with HTTP 409 unless `<workspace>/.git/HEAD` exists on
+disk, which the first run of this transport discovered the hard way. The difference from
+the claude-code cells (a real checkout with this repo's history) is attached to every
+little-coder record as a note rather than left for a reader to infer.
 
 LIVE-PLANE MUTATION. Mirroring clears the daemon's workspace, so a run destroys whatever
 the runner was working on. That is why `harness.config.json` gives this runner
@@ -141,22 +143,81 @@ def diff(before: Dict[str, str], after: Dict[str, str]) -> Tuple[List[str], List
     return changed, deleted
 
 
-def mirror_in(container: str, cws: str, workspace: Path, stage: Path) -> int:
-    """Stage the workspace without `.git`, clear the container's workspace, copy it in."""
+_OWNER_PY = r"""
+import os
+root = __ROOT__
+try:
+    names = sorted(os.listdir(root))
+except OSError:
+    names = []
+for n in names:
+    try:
+        st = os.stat(os.path.join(root, n))
+    except OSError:
+        continue
+    print("%d:%d" % (st.st_uid, st.st_gid))
+    break
+"""
+
+
+def workspace_owner(container: str, root: str) -> str:
+    """uid:gid of whatever the daemon's own clone left in `root`, or "" if it is empty.
+
+    SAMPLED rather than configured, because the answer is a property of the running images
+    and would rot in a config file. Measured 2026-08-30: the clone's files are owned by
+    1000:1000 - open-terminal's service user (`docker exec open-terminal id user` ->
+    uid=1000), which is the uid every command the agent runs executes as, while the
+    `/workspace` mount point itself belongs to little-coder's `lc` (10002). Files arriving
+    by `docker cp` are root-owned with the host's modes, so without restoring this
+    ownership the agent cannot write its own answer and git reports dubious ownership -
+    a cell that fails for a reason about the harness, not about the runner.
+    """
+    out = _docker(["exec", "-i", container, "python3", "-"],
+                  input_text=_OWNER_PY.replace("__ROOT__", repr(root)))
+    return out.stdout.strip() if out.returncode == 0 else ""
+
+
+def mirror_in(container: str, cws: str, workspace: Path, stage: Path,
+              log: List[str] | None = None) -> int:
+    """Stage the workspace, clear the container's workspace, copy it in, make it usable.
+
+    A GIT REPOSITORY IS NOT OPTIONAL HERE, and that is the daemon's rule rather than a
+    preference: `POST /tasks` refuses with HTTP 409 "no project focused" unless
+    `WorkspaceManager.is_focused()` finds `<workspace>/.git/HEAD` on disk - an in-memory
+    focus record is not enough, deliberately, because a corrupt workspace once let a task
+    run "successfully" on a tree it could not branch or commit in. The first run of this
+    transport hit exactly that 409. So the mirror gets its own `git init` plus a baseline
+    commit, which also puts the little-coder cells closer to the claude-code ones, where
+    the target adapter hands over a real checkout.
+
+    The host workspace's own `.git` is NOT copied: for target `self` it is a gitfile
+    pointing into this repo's worktree store and means nothing inside the container.
+    """
+    log = log if log is not None else []
     if stage.exists():
         shutil.rmtree(stage, ignore_errors=True)
     shutil.copytree(workspace, stage, ignore=shutil.ignore_patterns(".git", "__pycache__"))
+    owner = workspace_owner(container, cws)
     clear(container, cws)
     # `<dir>/.` copies the directory's CONTENTS into cws, rather than nesting a directory
     # named after the staging dir underneath it.
     _docker_ok(["cp", f"{stage}/.", f"{container}:{cws}"],
                f"docker cp {stage} -> {container}:{cws}")
-    # The daemon's own clone is world-writable (0777 dirs, 0666 files, verified with
-    # `stat -c %a /workspace`); files arriving by `docker cp` carry the host's modes and
-    # root ownership, and the agent's exec does not run as root. Without this the runner
-    # cannot write its own answer and the cell records a failure that is about the harness.
-    _docker_ok(["exec", container, "sh", "-c", f"chmod -R a+rwX '{cws}'"],
-               f"chmod -R a+rwX {cws} in {container}")
+    _docker_ok(["exec", container, "sh", "-c",
+                f"cd '{cws}' && git init -q && git add -A && "
+                f"git -c user.email=quadrant@local -c user.name='quadrant harness' "
+                f"commit -q -m 'quadrant: mirrored baseline'"],
+               f"git init + baseline commit in {container}:{cws}")
+    if owner:
+        _docker_ok(["exec", container, "sh", "-c",
+                    f"chown -R {owner} '{cws}' && chmod -R a+rwX '{cws}'"],
+                   f"chown -R {owner} + chmod -R a+rwX {cws} in {container}")
+        log.append(f"ownership : restored to {owner} (sampled from the daemon's own clone)")
+    else:
+        _docker_ok(["exec", container, "sh", "-c", f"chmod -R a+rwX '{cws}'"],
+                   f"chmod -R a+rwX {cws} in {container}")
+        log.append("ownership : the workspace was EMPTY before the mirror, so no owner "
+                   "could be sampled; the mirror is root-owned and world-writable")
     return sum(1 for p in stage.rglob("*") if p.is_file())
 
 
