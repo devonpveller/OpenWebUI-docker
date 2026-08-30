@@ -194,6 +194,16 @@ produced:
    the gate is working as designed — but any ops memory quoting a build number, an epoch, a
    ticket id or an order count is silently narrowed, and nothing tells the writer.
    **Not fixed here** (it is the exposure plane's call, not recall's) — see the deferred list.
+
+   **Stated plainly, because it touches the class-4 line.** Those two demoted rows WERE
+   personal-plane rows on the live plane for the ~90 seconds between the writeback and the
+   same run's cleanup, on two runs. They were synthetic fixtures written by this smoke and
+   nothing else; they were deleted by the run that wrote them; the count is 0 before and 0
+   after every run, verified directly in SQL. It was still an outcome I did not intend, and
+   the wrapper's before/after check could not see it because it only looks either side of
+   the whole run. The probe now asserts `exposure == "ops"` on each fixture IMMEDIATELY
+   after planting, so a demotion fails the run at the point it happens instead of being
+   inferred later from a recall that returned nothing.
 2. **A vacuous assertion of my own, caught by the same discipline.** The first exposure check
    substring-matched `'"exposure": "ops"'` against the *outer* MCP envelope, where the tool's
    JSON is an escaped string — so it could never match and would have been "fixed" by
