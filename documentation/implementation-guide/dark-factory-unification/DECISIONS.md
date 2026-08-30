@@ -780,3 +780,62 @@ WHY THIS ENTRY EXISTS: this is the third time in this run that an explanation of
           the branch that cited this claim inherited my error, which is exactly how an
           unverified sentence propagates in a trail the operator reads instead of diffs.
 REVERT:   n/a — a correction.
+
+## 2026-08-30 · U5 round 5 · the gitlink discipline is FIXED; a fourth reader publishes the corpus
+FIXED, and it was the hard part: the branch now pins OB1 `e26a742`, and verifiers confirmed
+          the fix is AT that commit (exported with `git archive`, not read from the working
+          tree), is reachable on the OB1 remote, and DESCENDS from `adb7345`
+          (`merge-base --is-ancestor` exit 0) so the merged recall work is preserved.
+          **The drill now refuses to run unless OB1's HEAD matches the gitlink and the tree is
+          clean, with no override switch** — round 4's decisive defect, properly closed.
+          Both executed defeats are closed with RED proofs beside the greens: the
+          unparenthesised `OR`, and the plane array (now `object is not extensible`).
+          openbrain-mcp's `index.ts` has ZERO remaining `FROM thoughts`. Drill 128/0 exit 0,
+          built from the gitlink, including real tool calls on the RAW openbrain-mcp door.
+DEFECT A — THE GATE SCANS `.ts` ONLY. `walkTs` skips every other extension, so an unguarded
+          reader of `thoughts` + `agent_memories` + two sidecars, placed in a SCAN ROOT and
+          shipped by `COPY lib ./lib`, left the suite at **213 passed / 0 failed** purely
+          because it was named `.mjs`. Measured: `docker/wiki-service` has **0 `.ts` and 5
+          `.mjs`**, so the gate scans NONE of the openbrain-wiki image; four other roots are
+          similar; and `../recipes` is bind-mounted into two containers as executable code and
+          is in no root. The docblock claims the root set is "A SUPERSET OF WHAT SHIPS, on
+          purpose" — it is a strict SUBSET for 5 of 14 roots.
+DEFECT B — A SCHEDULED SERVICE READS THE CORPUS RAW AND PUBLISHES IT. `generate-wiki.mjs`
+          calls `match_thoughts` only under `--semantic-expand`; `wiki-service.mjs:919/926`
+          invokes it with `--batch`/`--ids` and never that flag, so the published path SELECTS
+          `thoughts` and `thought_entities?select=thoughts(content)` directly. The corpus-plane
+          SQL patches the `match_thoughts`/`upsert_thought` FUNCTION BODIES, which is not
+          underneath a direct table select.
+          ORCHESTRATOR-VERIFIED, unauthenticated from a container on `open-brain_obnet`:
+          `GET /thoughts?limit=1` → **200**; `GET /thought_entities?select=thoughts(content)`
+          → **200**. `wiki_pages` holds **48,032 rows**; a verifier measured the compiler's own
+          output at 6,776 files / 5,397 rows.
+DEFECT C — **THE LIFT IS WITHDRAWN.** The note claimed the boundary "CLOSED IN THE TREE",
+          "closed at BOTH ends", and the constraint "LIFTED FOR THAT TREE". It is not closed —
+          the compiler reads the same content and the drill never fires at it. The drill's own
+          lift block says every *TARGETED* door left an audit row, which is honest, and the
+          conclusion then treats the targeted set as the complete set. Worse, that door list is
+          enumerated BY HAND while the file gate is DERIVED — so the drill inherits none of the
+          derivation the branch is rightly proud of.
+**THE CONSTRAINT STANDS: do not write a personal-exposure memory.** It may be re-proposed only
+          when the drill's door set is derived the same way its file set is, and the compiler
+          path is closed.
+STATUS:   **U5 remains PARKED.** Round 6 is briefed on all three.
+REVERT:   nothing to revert — the branch is unmerged and production is unchanged.
+
+## 2026-08-30 · method · A DERIVED GATE IS ONLY AS WIDE AS ITS ALPHABET
+FINDING:  This effort replaced a hand-written file list with a gate derived from disk, and
+          called that closed. The derivation was real and the gate still missed entire images,
+          because it enumerated **directories** correctly and **file extensions** by
+          hard-coded assumption — `.ts` only. Five of fourteen roots contain more non-`.ts`
+          shipped code than `.ts`, and one contains none at all.
+RULE ADOPTED: when a gate claims completeness, ask what its ALPHABET is, not just what its
+          ITERATION is. "Derived from a scan" is not a property of the scan; it is a property
+          of scan × predicate. A root that yields ZERO scanned files must be an ERROR rather
+          than a silent pass — that is the exact signature of an alphabet too narrow for its
+          territory, and it is cheap to assert.
+WHY IT BELONGS HERE: it is the same shape as the U6 verdict computed by exception. Both
+          enumerate confidently over a set they chose, and both are silent about everything
+          outside it. The generalisation this run keeps arriving at is that **a check must be
+          able to say what it did NOT look at.**
+REVERT:   n/a — method.

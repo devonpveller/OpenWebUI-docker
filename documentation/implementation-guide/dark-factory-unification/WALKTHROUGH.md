@@ -24,7 +24,7 @@ is marked deliberately rather than rounded up.
 | **U2** | DONE (merge-record) | Intent unification: shared anchor schema, git-issue door, depth-1 ScopeNodes. |
 | **U3** | PARKED | Code complete and drills green in both systems; the **gym arena run** has not happened. |
 | **U4** | PARKED, closure in flight | Column unmet — the harness's own report prints `COMPARED 2/4, exit 1`. Row amended (§2.1 A1) because its premise was falsified. |
-| **U5** | PARKED, closure in flight | Doors are hardened and proven; content has a **second home** in `thoughts` and a **third** in an unauthenticated PostgREST projection. |
+| **U5** | PARKED, round 6 in flight | Doors hardened, gitlink discipline fixed; a **fourth** reader (the wiki compiler) publishes corpus content, and the gate scanned `.ts` only. **Constraint stands.** |
 | **U6** | clause 4 DONE, clauses 1–3 in round 5 | Recall-informed briefs merged and live-proven; andon + gate profiles work, their honesty layer is still being closed. |
 | **U7** | NOT STARTED | Standing, per §B. Depends on U6. |
 
@@ -150,7 +150,25 @@ mechanically stopped and the attempt is visible in an audit record."*
    both doors. **Bounded:** `3000/tcp` has no host binding, so it is not host- or
    internet-reachable, and personal rows are 0.
 
-**STANDING CONSTRAINT: do not write a personal-exposure memory until (1) is closed.** It is
+**STANDING CONSTRAINT: do not write a personal-exposure memory.** A round-5 note claimed this
+was LIFTED; the lift was **withdrawn** — the wiki compiler reads the same content and the drill
+never fires at it. It may be re-proposed only when the drill's door set is derived the way its
+file set is, and the compiler path is closed.
+
+**Round 5 fixed the hard part:** the branch pins OB1 `e26a742`, verified AT the commit rather
+than in the working tree, reachable on the remote, and descending from `adb7345` so merged
+recall work is preserved — and the drill now refuses to run unless OB1's HEAD matches the
+gitlink, with no override. Round 4's decisive defect is closed.
+
+**Round 5 also found a fourth reader and a gate blind spot:** `generate-wiki.mjs` selects
+`thoughts` and `thought_entities?select=thoughts(content)` directly on the published
+`--batch`/`--ids` path (it only calls `match_thoughts` under `--semantic-expand`), so the SQL
+floor does not cover it — a scheduled service publishing corpus content. Orchestrator-verified
+unauthenticated from `open-brain_obnet`: both endpoints return **200**; `wiki_pages` holds
+**48,032 rows**. And the completeness gate skipped every non-`.ts` file, so it scanned **none**
+of the openbrain-wiki image (0 `.ts`, 5 `.mjs`) nor the bind-mounted `../recipes`.
+
+**Superseded original wording:** It is
 unexploitable only because the personal plane is empty.
 **What would close it:** (1) is in flight — extend the boundary to every `thoughts` reader and
 lift the constraint on reproduced refusals, not on assertion. (2) is an **operator decision**:
