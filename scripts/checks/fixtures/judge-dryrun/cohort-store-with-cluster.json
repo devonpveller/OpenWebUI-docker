@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "clusters": {
+    "fixture0000000001": {
+      "cluster_id": "fixture0000000001",
+      "label": "python datetime awareness",
+      "discriminator": "naive vs aware datetime comparisons in python bugfix tasks",
+      "lang": "python",
+      "task_shape": "bugfix",
+      "baseline_covers": false,
+      "parents": [],
+      "inherited_count": 0
+    }
+  },
+  "counters": {},
+  "unassigned": {},
+  "lineage": [],
+  "consumed_records": {}
+}
