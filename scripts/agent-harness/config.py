@@ -254,3 +254,24 @@ def describe_profile(name: str) -> str:
             parts.append(f"{role}={t.get('runner')}/{t.get('model')}")
     desc = p.get("_desc", "")
     return f"{name}: " + ", ".join(parts) + (f" - {desc}" if desc else "")
+
+
+def describe_runner(name: str) -> str:
+    """One line per runner for an operator listing in chat.
+
+    The runner half of describe_profile: names the substrate (default model), how the
+    harness reaches it (transport, when it has one), and its status — so an operator
+    switching a thread to a local profile sees the caveat at the point of choice.
+    """
+    runners = get("runners") or {}
+    r = runners.get(name)
+    if not isinstance(r, dict):
+        return f"{name}: (unknown)"
+    parts = []
+    if r.get("default_model"):
+        parts.append(f"model={r['default_model']}")
+    if r.get("transport"):
+        parts.append(f"transport={r['transport']}")
+    if r.get("status"):
+        parts.append(f"status={r['status']}")
+    return f"{name}: " + ", ".join(parts)
