@@ -663,3 +663,77 @@ LATENT, non-blocking, and disclosed by the verifier rather than hidden: `DEFAULT
           explicit empty `"kind": ""`, which the cross-reader test catches for pooled rows
           only.
 REVERT:   nothing to revert — no U4 branch is merged.
+
+## 2026-08-30 · U5 · THE THIRD HOME — the memory table is published wholesale over PostgREST
+FINDING:  Not a mirror this time — the row itself. `openbrain-postgrest` runs with
+          `PGRST_DB_ANON_ROLE=service_role` and `PGRST_DB_SCHEMAS=public`, and
+          `service_role` holds `SELECT, INSERT, UPDATE, DELETE, TRUNCATE` on
+          `agent_memories`. So the table is projected over HTTP, **unauthenticated,
+          read AND write**, bypassing the ops door, the cloud door, every exposure
+          predicate and every audit row.
+ORCHESTRATOR-VERIFIED (not relayed):
+          - `docker inspect openbrain-postgrest` -> `PGRST_DB_ANON_ROLE=service_role`.
+          - grants: `service_role | DELETE,INSERT,REFERENCES,SELECT,TRIGGER,TRUNCATE,UPDATE`.
+          - live probe from `open_notebook` (a container on the same network):
+            `GET http://openbrain-postgrest:3000/agent_memories?limit=1` -> **200**.
+BOUNDED, and the bound matters: PostgREST publishes `3000/tcp` with NO host binding, so
+          it is NOT reachable from the host or the internet — only from containers on
+          `open-brain_obnet` (openbrain-mcp, openbrain-db, both gateways, open_notebook,
+          and the rest of that plane). `agent_memories` personal rows = **0**, so no
+          personal data is exposed today.
+WHY IT MATTERS ANYWAY: U5's column is "personal-plane exclusion verified end to end".
+          That property cannot hold while the table is projected wholesale to every
+          container on the plane. Four rounds hardened the doors; this bypasses the
+          concept of a door. The verifier's phrasing is right — it is not a second home,
+          it is the house with the front wall removed.
+NOT YET DECIDED, deliberately: restricting these grants or narrowing
+          `PGRST_DB_SCHEMAS` is a change to a live service with real consumers (recipes
+          and Open Notebook use local PostgREST). Doing that unattended risks breaking
+          them, and §C.7's answer to a phase that cannot satisfy its column is to PARK
+          with a written reason, not to ram a production change through at the end of a
+          long run. Recorded for the operator with the evidence above.
+STATUS:   **U5 stays PARKED**, now with TWO open containment findings: the `thoughts`
+          mirror and this PostgREST projection.
+CONSTRAINT (unchanged, and now doubly justified): do not write a personal-exposure
+          memory until both are closed.
+
+## 2026-08-30 · U5 · the round-4 fix WAS NOT IN THE BRANCH, and the drill could not tell
+FINDING:  `work/u5pplane`'s gitlink points at OB1 `8e3f164` (round 3). Every round-4 fix —
+          `mirrorToUnifiedSearch`, the derived completeness gate, `resolveTraceOnPlane`,
+          the frozen DoorPlane, the parenthesised query builder, the embedding migration —
+          lives in OB1 `822be2d`, which exists ONLY as an unstaged ` M OB1` in the
+          fixer's worktree, is on NO remote, and was never `git add OB1`'d.
+PROVEN CONSEQUENCE: a verifier built the image from what the branch actually pins
+          (`git archive 8e3f164`), wrote a synthetic PERSONAL memory through
+          `/agent-memory/writeback`, and it mirrored into `thoughts` with
+          `exposure = personal`; `search_thoughts` and `list_thoughts` at the raw
+          openbrain-mcp door returned its content verbatim, with `access_refused` rows
+          = 0. **Round 4's stated defect is fully present in what would merge.**
+ROOT CAUSE, and it generalises: the drill builds from
+          `$SRC = OB1\integrations\kubernetes-deployment` — the ON-DISK submodule working
+          tree — and never from the commit the parent records. So it is green in the
+          fixer's worktree and says nothing about what the branch pins. Nothing in the
+          branch compares the two.
+RULE ADOPTED: **a drill that builds from the working tree validates something that does
+          not necessarily merge.** For a submodule-bearing branch, the artifact under test
+          must be built from the RECORDED GITLINK, or the drill must assert the working
+          tree and the gitlink agree and fail when they do not.
+DISCLOSURE ASYMMETRY worth noting: the commit body did say "THE GITLINK IS DELIBERATELY
+          NOT BUMPED", but the findings note — which §C.7 designates as the operator's
+          audit surface — did not, and its verification ledger presented the unreachable
+          tree's numbers (176 passed) as the branch's evidence. Against the actual
+          gitlink the same command gives 154, and the branch's own drill gives
+          "11 DRILL CHECK(S) FAILED (71 passed)", exit 1.
+MERGE HAZARD, recorded for whoever lands this later: the work line's gitlink has since
+          moved FORWARD to `adb7345` (via the merged `work/u6recall`). Merging
+          `work/u5pplane` as it stands would drag OB1 **backward** to `8e3f164`. Do not
+          merge it without rebasing the gitlink forward.
+ALSO FOUND, unfixed: `init-agent-memory-embedding.sql` is absent from
+          `PROMOTION-RUNBOOK.md` and the live DB has no embedding column on
+          `agent_memories` — deployed as written, writeback and recall would break on
+          every plane. And two more unguarded readers outside the gate's one scanned
+          directory: `docker/extensions-server/index.ts` (running as `openbrain-ext`)
+          reads `thoughts` unguarded and copies content into `professional_contacts.notes`,
+          and `integrations/agent-memory-api/index.ts` selects from `agent_memories` with
+          no plane filter.
+REVERT:   nothing to revert — the branch is not merged.
