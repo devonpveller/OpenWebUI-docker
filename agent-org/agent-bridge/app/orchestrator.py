@@ -12194,10 +12194,55 @@ class Orchestrator:
             effort_id, head=head, done_word=done_word, where=where, branch=branch,
             succeeded=not unmet_or_partial,
         )
+        # CONSTRAINT PROMOTION (§2.3), GREEN CLOSE ONLY. A failure clause learned on an
+        # effort that did not actually converge is not yet knowledge about the project - it
+        # may just be what this attempt got wrong.
+        if not unmet_or_partial:
+            await self._promote_constraints_to_memory(effort_id)
         # Cross-effort DEBUG HANDOFF: if THIS effort was a handed-off fix, close the loop — tell
         # the waiting reporter and re-engage it (operator 2026-07-14). No-op for normal efforts.
         await self._resolve_handoff_if_any(effort_id, delivery, result,
                                            clean=not unmet_or_partial)
+
+    async def _promote_constraints_to_memory(self, effort_id: str) -> int:
+        """Promote this effort's FAILURE clauses from effort scope to project scope (§2.3).
+
+        A constraint is a dead end the work actually walked into. Effort-scoped, it dies with
+        the effort - which is the gap this closes: the next effort re-walks it.
+
+        WHAT THIS DELIBERATELY DOES NOT DO, per §2.3: write `acceptance_checks`. Those are
+        EXECUTABLE MERGE GATES. Auto-promoting prose into a hard gate would change the
+        propose-not-dispose posture - the org would start blocking merges on text no human
+        approved. A reviewer can still elevate any of these into a real acceptance check
+        through the existing projects.add_acceptance_check flow, which is the point: the
+        machine proposes, the human disposes.
+
+        FAILURE clauses only. An `off_theme` constraint narrows generation rather than
+        recording a dead end, and a `violation`/`defect` is about conduct rather than about
+        the code - neither is a fact about the project worth carrying forward.
+
+        Returns the number written, for tests. Idempotent: each memory keys on the
+        CONSTRAINT id, so a re-close writes nothing new.
+        """
+        mem = getattr(self, "memory", None)
+        if mem is None or not getattr(mem, "enabled", False):
+            return 0
+        rows = [c for c in await self._list_constraints(effort_id) if c.get("kind") == "failure"]
+        if not rows:
+            return 0
+        project = await self._effort_project(effort_id) or ""
+        tainted = await self._effort_memory_tainted(effort_id)
+        written = 0
+        for c in rows:
+            body = (c.get("body") or "").strip()
+            if not body:
+                continue
+            if await mem.write_constraint(
+                constraint_id=str(c.get("id") or ""), effort_id=effort_id,
+                project=project, text=body, tainted=tainted,
+            ):
+                written += 1
+        return written
 
     async def _write_outcome_memory(
         self, effort_id: str, *, head: str, done_word: str, where: str, branch: str,
