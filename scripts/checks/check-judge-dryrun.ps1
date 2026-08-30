@@ -26,6 +26,14 @@
 #      similarity projection is no longer what a judge-enabled daemon sees
 #   5  CANNOT TELL - littlecoder not importable / config unreadable
 #   6  CANNOT TELL - the container or the probe could not be reached
+#   7  MISCONFIGURED - observer.judge_enabled is ALREADY true in the config
+#      under test and no valid rating record was given. Always non-zero.
+#   8  INTEGRITY - the probe's own read-only contract was violated (an
+#      observed root changed between its before and after snapshot)
+#
+# SCOPE. This closes ONE of U5's three sub-items (the judge_enabled
+# calibration plan). It is not the hook-bypass guard and not the personal-
+# plane drill, and it does not satisfy U5's "Validated by" column on its own.
 #
 # EXAMPLES
 #   .\scripts\checks\check-judge-dryrun.ps1
@@ -41,6 +49,7 @@ param(
     [string]$SkillPath,
     [string]$PolyglotPath,
     [string]$ConfigPath,
+    [string]$RatingRecord,
     [int]$MinPool = 3,
     [int]$MinDistinct = 3,
     [double]$MaxDegenerate = 0.34,
@@ -66,6 +75,7 @@ $ProbeArgs = @(
     '--max-degenerate', "$MaxDegenerate"
 )
 if ($RequireReady) { $ProbeArgs += '--require-ready' }
+if ($RatingRecord) { $ProbeArgs += @('--rating-record', $RatingRecord) }
 if ($EmitPrompts) { $ProbeArgs += '--emit-prompts' }
 
 $Raw = $null
@@ -148,7 +158,12 @@ Write-Host "  journal records     : $($Report.records.total) (errors $($Report.r
 Write-Host "  occurrences         : $($Report.totals.occurrences) across $($Report.totals.pools) pool(s)"
 Write-Host "  judge invoked on    : $($Report.totals.pools_judge_would_be_invoked_on) pool(s)  (min_pool=$($Report.thresholds.min_pool))"
 Write-Host "  mintable pools      : $($Report.totals.pools_mintable)"
-Write-Host "  skill library files : $($Report.skill_library_files)"
+$sl = $Report.skill_library
+Write-Host ("  skill library       : {0}  ({1} file(s) on disk, {2} loadable)" -f `
+    $sl.state.ToUpper(), $sl.files_on_disk, $sl.loadable)
+foreach ($f in $sl.findings) { Write-Host "        POISON: $f" -ForegroundColor Yellow }
+foreach ($n in $sl.notes) { Write-Host "        note  : $n" -ForegroundColor DarkGray }
+Write-Host "        remedy: $($sl.remedy)" -ForegroundColor DarkGray
 Write-Host "  polyglot corpus     : $($Report.polyglot_corpus_files) file(s)"
 Write-Host ""
 foreach ($p in $Report.pools) {
@@ -163,10 +178,21 @@ if ($Report.blockers.Count -gt 0) {
     foreach ($b in $Report.blockers) { Write-Host "  - $b" -ForegroundColor Yellow }
     Write-Host ""
 }
-Write-Host "  would_mint: $($Report.would_mint_note)" -ForegroundColor DarkGray
+Write-Host "  WOULD HAVE MINTED: $($Report.would_have_minted)"
+$rop = $Report.read_only_proof
+Write-Host ("  wrote nothing      : {0}  (MEASURED: {1} file hash(es) + {2} journal size(s) compared before/after; {3} change(s))" -f `
+    $Report.wrote_nothing, $rop.files_hashed, $rop.journal_files_sized, @($rop.changes).Count) -ForegroundColor DarkGray
+foreach ($c in @($rop.changes)) { Write-Host "        CHANGED: $c" -ForegroundColor Red }
 Write-Host ""
 
-if ($Report.verdict -eq 'READY-FOR-RATING') {
+if ($Report.verdict -eq 'INTEGRITY-VIOLATION') {
+    Write-Host "VERDICT: INTEGRITY-VIOLATION - this dry run modified a root it promised" -ForegroundColor Red
+    Write-Host "         only to read. Nothing it reports can be trusted. (exit $Code)" -ForegroundColor Red
+} elseif ($Report.verdict -eq 'MISCONFIGURED') {
+    Write-Host "VERDICT: MISCONFIGURED - observer.judge_enabled is ALREADY true and no" -ForegroundColor Red
+    Write-Host "         valid rating record was given. The gate this check exists to be" -ForegroundColor Red
+    Write-Host "         was skipped. (exit $Code)" -ForegroundColor Red
+} elseif ($Report.verdict -eq 'READY-FOR-RATING') {
     Write-Host "VERDICT: READY-FOR-RATING - the mechanical preconditions hold." -ForegroundColor Green
     Write-Host "         Design section 13 still requires a HUMAN rating of the emitted" -ForegroundColor Green
     Write-Host "         prompts before judge_enabled is flipped. This script never flips it." -ForegroundColor Green

@@ -92,7 +92,7 @@ restore-catalog entries. It gates ever enabling `judge_enabled` on the pool.
 ## 4. Every `command_failed` occurrence is a bare exit code — the stderr tail is empty
 
 Measured over both planes' live journals via `check-judge-dryrun.ps1`:
-12 of 12 occurrences on the coder plane and 9 of 12 on ao-worker-1 have a
+9 of 12 occurrences on the coder plane and 9 of 12 on ao-worker-1 have a
 payload-free signal (`exit 1: `, `exit 128: `). The error message is built as
 `f"exit {item['exit_code']}: {item['stderr_tail']}"`
 (`little-coder/src/littlecoder/agent.py:491`), and `stderr_tail` comes from
@@ -150,6 +150,151 @@ which was still taking tasks on 2026-08-24.
 
 ---
 
+## 8. FIX ROUND 2026-08-30 — what two verifiers refuted, and what changed
+
+Both adversarial verifiers refuted this branch. Their verdicts were correct;
+each was reproduced by running something before it was fixed. Recorded here in
+full, including the parts that are NOT fixed, because a stated limitation beats
+a silent one.
+
+### 8.1 The claim was wider than the evidence (both verifiers, decisive)
+
+The claim handed for verification was that this branch satisfies U5's
+"Validated by" column. It does not, and cannot: that column names an agent
+instructed to bypass hooks and an attempt to reach personal-plane data, and
+this branch attempts neither. U5 is three sub-items across three branches; this
+is one of them.
+
+FIXED as a claim, not as a capability. JUDGE-CALIBRATION.md now opens with a
+"What this does NOT close" table naming which sub-item lives where, and the
+probe's module docstring and the wrapper's header say the same. The narrower
+claim now made is that *for this sub-item's own subject matter* — the flag —
+something is mechanically stopped and the attempt is visible in an audit
+record. See 8.3. This branch must not be merged under a "U5 validated" banner.
+
+### 8.2 The commit message carried a number its own tool contradicted
+
+The commit said "12 of 12 occurrences on each plane carry a payload-free
+signal". Re-measured 2026-08-30 with the branch's own tool:
+
+```
+little-coder : occurrences 12, degenerate_signals 9   (pools 4 + 3 + 2)
+ao-worker-1  : occurrences 12, degenerate_signals 9
+```
+
+9 of 12 on both planes. Item 4 above said "12 of 12 on the coder plane", also
+wrong. Both are corrected. The *separate* claim that `task_shape` is unknown
+for 12 of 12 was re-checked and IS true
+(`occurrences_with_unknown_task_shape: 12` on both planes) — one number was
+wrong, not the section.
+
+Structural fix so it cannot recur the same way: the tool emits the ratio itself
+(`totals.degenerate_signals`, and in prose in `would_have_minted`), and the
+document labels the live figures as a dated snapshot and gives the command as
+the citation instead of asking a reader to trust a transcription.
+
+### 8.3 `judge_enabled: true` changed no verdict and no exit code
+
+Reproduced before fixing: set `judge_enabled: true` in a scratch copy of
+`little-coder.config.yaml`, run `check-judge-dryrun.ps1 ... -RequireReady` ->
+`READY-FOR-RATING`, exit **0**. The flag was printed and used in no decision.
+An artifact whose entire purpose is "do not flip this until a human rates a dry
+run" did not notice the flip.
+
+FIXED in two places, because neither covers the other:
+
+- **Run time.** Exit 7 (MISCONFIGURED) when the config under test already has
+  the flag on and no valid rating record is supplied. Non-zero regardless of
+  `-RequireReady` — measured 7 in both forms.
+- **Commit time.** `scripts/checks/check-judge-flag.ps1`, wired into
+  `.githooks/pre-commit` as step 6, DENIES a commit that sets the flag truthy
+  in any staged YAML unless the same commit stages a valid rating record, and
+  appends the outcome to `<git-common-dir>/judge-flag-guard.log`.
+  `verify-judge-flag-guard.ps1` proves it in a throwaway repo — 17 cases,
+  including `git commit` refused with HEAD unmoved, and the negative control
+  (guard removed from the hook -> the identical commit lands).
+
+The rating-record escape exists deliberately: without it the check becomes a
+permanent tripwire after an honest enablement, which is the kind of guard
+people switch off.
+
+### 8.4 `wrote_nothing` was a hardcoded literal
+
+Reproduced: copied the probe, injected one `write_text` into an observed root,
+ran it. It created the file AND reported `"wrote_nothing": true` — and counted
+the file it had just written as a skill artifact.
+
+FIXED: measured. sha256 per file over `cohorts`/`skill`/`polyglot` before and
+after, `(name, size)` over `journals` where only shrink or disappearance counts
+— the live daemon appends while we read, and treating that as a violation would
+make the check fire on correct behaviour. A change is exit 8, and the report
+names the file. The drill proves the detector fires via the probe's drill-only
+`--prove-write-detector` flag.
+
+This also closes the verifier's note that the container-mode read-only evidence
+was a manual one-off with no check behind it: the measurement runs inside the
+container on every container-mode run.
+
+### 8.5 The drill skipped its most important case and still exited 0
+
+Reproduced exactly as described: move `fixtures/judge-dryrun/MANIFEST.sha256`
+aside -> `[SKIP] fixtures-unchanged`, then `ALL 12 CASES PASS`, exit 0. The
+count dropped 13 to 12 and nothing read it. The message also named a `-Regen`
+switch that did not exist.
+
+FIXED: a missing manifest is a FAILING case (now 2 failing cases, exit 1);
+`$EXPECTED_CASES` is asserted in both drills, so a case that stops running is
+red rather than quieter; `-Regen` is real and produces a reviewable diff.
+
+### 8.6 Three defects I found in my own fixes, by running them
+
+Recorded because they are the same shapes, in the work meant to close them.
+
+1. **`$regen` silently became `$Regen`.** PowerShell variable names are
+   case-insensitive, so assigning the manifest array to `$regen` coerced it to
+   the `[switch]$Regen` parameter and wrote the single word `True` into
+   MANIFEST.sha256. `check-hook-attestation.ps1` carries a comment about this
+   exact trap with `$base`/`$Base`; it caught me anyway. Renamed
+   `$manifestLines`. Found by reading the regenerated file, not the code.
+2. **A one-element array unrolled on return.** `Get-AuditLines` returned a
+   String when the log held one line, so `$audit[-1]` indexed its last
+   CHARACTER and an assertion failed for a reason unrelated to the guard. Every
+   call site is now `@(Get-AuditLines)`.
+3. **Every empty file hashed to the empty string.** `Get-NormalizedHash` piped
+   `ReadAllBytes` through `Where-Object`, which yields nothing for an empty
+   file, and `ComputeHash([byte[]]$null)` returns `""` — so all empty files
+   matched each other. Wrapped in `@()`; an empty file now hashes to
+   `E3B0C442...`.
+
+### 8.7 NOT fixed — stated, not papered over
+
+- **U5's column still needs `work/u5proxy` and `work/u5pplane`.** Nothing here
+  changes that.
+- **The flag guard is per-branch and per-checkout.** `core.hooksPath` is
+  relative and the hook is version-controlled, so a branch cut before this
+  merges does not carry it, and `--no-verify` bypasses it entirely. That second
+  gap is `check-hook-attestation.ps1`'s subject, not this one's, and
+  `work/u5proxy` measured three further bypass routes that leave no audit line
+  at all. I did not attempt to close any of them.
+- **`judge-flag-guard.log` has no automated consumer.** It is read by
+  `check-judge-flag.ps1 -Audit` and by nothing else. It is a trail, not a
+  second guard, and the agent it constrains can delete it.
+- **The guard greps rather than parses YAML.** It matches `judge_enabled:`
+  followed by a truthy scalar in any staged `*.yaml`/`*.yml`. A flip expressed
+  as a YAML anchor, a merge key, or a templated value would not match. Chosen
+  because this runs on every commit and a full parse of every staged YAML is
+  not free; the shipped schema types the key as a plain boolean
+  (`little-coder.schema.json:244`). Logged as a class-3 question below.
+- **Exit 7 cannot see a runtime override.** It reads the config file it is
+  pointed at. An env-var or in-container edit that never reaches a config file
+  is outside both mechanisms.
+- **`--prove-write-detector` is a deliberate write path inside a tool that
+  advertises itself as read-only.** It is drill-only, unreachable from the
+  wrapper (no switch emits it), and refuses without an explicitly named
+  existing directory — but it exists, and a reader should know that.
+
+---
+
 ## DECISIONS entries to append
 
 ## 2026-08-30 · U5 · class 2
@@ -192,3 +337,65 @@ CITED:    §C.1 (amend on the record and continue) + CLAUDE.md's rule to verify
           against the live artifact before declaring anything.
 REVERT:   Nothing to revert — the amendment is a corrected reading, and the
           compose files were not modified.
+
+## 2026-08-30 · U5 · class 2 (fix round)
+DECISION: The dry run EXITS 7 when `observer.judge_enabled` is already true in
+          the config under test and no valid rating record is given; and a
+          pre-commit guard (`scripts/checks/check-judge-flag.ps1`, wired as
+          `.githooks/pre-commit` step 6) DENIES any commit that sets the flag
+          truthy in staged YAML without staging a rating record, appending
+          both outcomes to `<git-common-dir>/judge-flag-guard.log`.
+CITED:    Two adversarial verifiers independently set `judge_enabled: true`
+          and observed the drill still report ALL CASES PASS at exit 0. §C.7
+          closes a phase only on an EXECUTABLE check; an instrument that does
+          not notice the thing it exists to gate is the "check that passes
+          while checking nothing" shape §0 keeps recording. The rating-record
+          escape (`rated_by` / `rated_at` / `rated_report` /
+          `verdict: approve`, defined once, in
+          `judge_dryrun.read_rating_record`) keeps the guard from becoming a
+          permanent tripwire after an honest enablement.
+REVERT:   Remove step 6 from `.githooks/pre-commit`, delete
+          `check-judge-flag.ps1` + `verify-judge-flag-guard.ps1`, and drop the
+          `EXIT_ALREADY_ENABLED` branch in `judge_dryrun.py`. No runtime
+          config was touched: `judge_enabled: false` is unchanged in every
+          config this repository tracks, and no committed fixture sets it true.
+
+## 2026-08-30 · U5 · class 2 (fix round)
+DECISION: `wrote_nothing` is MEASURED (sha256 before/after over
+          cohorts/skill/polyglot, name+size over journals) rather than
+          asserted, and a violation is exit 8. Journals are treated as
+          append-only: only shrink or disappearance counts.
+CITED:    The field was a hardcoded literal; a copy of the probe with a write
+          injected still reported `true`. The journals asymmetry is deliberate
+          — the live daemon appends while the probe reads, and a guard that
+          fires on correct behaviour is the one that gets switched off, which
+          is the reasoning `check-hook-attestation.ps1` already records for its
+          own per-branch activation gate.
+REVERT:   Replace the `read_only_proof` block and the computed `wrote_nothing`
+          with the previous literal. The claim would then be unverified again,
+          including in container mode.
+
+## 2026-08-30 · U5 · class 2 (fix round)
+DECISION: The skill library is classified absent / empty / populated /
+          poisoned with a per-state remedy, replacing the raw `*.md` count.
+          POISONED blocks the verdict; EMPTY does not. The "cluster_id not in
+          the store" rule fires only for ACTIVE or PENDING artifacts.
+CITED:    `skills.iter_skills` swallows `SkillFormatError` per file
+          (`skills.py:298-301`), so a raw count cannot distinguish two healthy
+          skills from two the loader silently drops — different failures with
+          different remedies. The active/pending narrowing is because this dry
+          run only ever runs against a zero-cluster store (a non-empty one is
+          exit 4), so the unnarrowed rule would fire on every artifact always,
+          and a rule that always fires measures nothing.
+REVERT:   Restore `skill_library_files` as a count; drop the
+          `_classify_skill_library` call and its blocker.
+
+## 2026-08-30 · U5 · class 3 (QUESTION, batched for the operator)
+QUESTION: `check-judge-flag.ps1` GREPS staged YAML for `judge_enabled:` set
+          truthy rather than parsing it. Default taken: grep, because the
+          guard runs on every commit and the shipped schema types the key as
+          a plain boolean (`little-coder.schema.json:244`). A flip expressed
+          as a YAML anchor, a merge key or a template would not match. The
+          stronger form is to parse each staged YAML with the same python the
+          validator already shells, at the cost of one python launch per
+          staged YAML file. Not a blocker either way.

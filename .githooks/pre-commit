@@ -10,6 +10,7 @@
 #   3. gateway routing   - inference must go through the LiteLLM alias
 #   4. project configs   - compose renders + ps1 tokenize
 #   5. env_file scope    - a service names the variables it needs
+#   6. judge flag       - no commit turns observer.judge_enabled on unrated
 
 echo "Running pre-commit validations..."
 
@@ -57,7 +58,18 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
-# --- 6. ATTESTATION -------------------------------------------------------
+# --- 6. judge_enabled flag guard (staged-aware, U5) -------------------------
+# A commit may not turn `observer.judge_enabled` on without a human rating
+# record staged alongside it. Exits 0 immediately when no staged YAML sets the
+# flag, which is every ordinary commit. Fails CLOSED when it cannot evaluate
+# the rule - the script's header states what it does and does not catch.
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File './scripts/checks/check-judge-flag.ps1'
+if [ $? -ne 0 ]; then
+    echo "Pre-commit validation failed (judge_enabled turned on without a rating record)!"
+    exit 1
+fi
+
+# --- 7. ATTESTATION -------------------------------------------------------
 # Record that these checks actually ran, because otherwise nobody can tell.
 #
 # WHY (PLAN 0 A7, FALSIFIED): an agent reached for `--no-verify` on its first

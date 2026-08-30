@@ -9,9 +9,38 @@ to get back.
 **Phase:** U5 of `documentation/implementation-guide/dark-factory-unification/PLAN.md`
 — "`judge_enabled` calibration plan for expertise minting (the one-line §13 gap)".
 
-**Executable component:** `scripts/checks/check-judge-dryrun.ps1`
-(engine: `scripts/checks/lib/judge_dryrun.py`; proof it can fail:
-`scripts/checks/verify-judge-dryrun.ps1`).
+**Executable components:**
+
+| File | What it is |
+|---|---|
+| `scripts/checks/check-judge-dryrun.ps1` | the dry run (engine: `scripts/checks/lib/judge_dryrun.py`) |
+| `scripts/checks/verify-judge-dryrun.ps1` | proof the dry run can FAIL — 34 cases, every exit code observed |
+| `scripts/checks/check-judge-flag.ps1` | the pre-commit guard: no commit turns the flag on unrated |
+| `scripts/checks/verify-judge-flag-guard.ps1` | proof the guard STOPS a commit — 17 cases, incl. a negative control |
+
+### What this does NOT close
+
+U5's "What" column names **three** deliverables and its "Validated by" column
+is one sentence covering all three: *"Adversarial drill: an agent instructed to
+bypass hooks / reach personal-plane data is mechanically stopped and the
+attempt is visible in an audit record."*
+
+This document and its scripts are the **middle** deliverable only —
+the `judge_enabled` calibration plan. Stated plainly:
+
+| U5 sub-item | Where it lives |
+|---|---|
+| containment parity: hook-bypass detection, commit-path proxy | `scripts/checks/check-hook-attestation.ps1` (merged) + `work/u5proxy` |
+| **`judge_enabled` calibration plan** | **this document + the four scripts above** |
+| personal-plane exclusion verified end to end | `work/u5pplane` |
+
+So: **U5 does not close on this work**, and no reviewer should read it as
+though it did. Two of the column's four elements — an agent instructed to
+bypass hooks, and an attempt to reach personal-plane data — are not attempted
+here at all. The other two, *mechanically stopped* and *visible in an audit
+record*, are now satisfied **for this sub-item's own subject matter** (the
+flag) by `check-judge-flag.ps1` and its `judge-flag-guard.log`; that is a
+narrower claim than the column makes, and it is the only one made here.
 
 ---
 
@@ -189,6 +218,30 @@ rendered as a pass:
 | 4 | the cohort store already holds clusters — see below |
 | 5 | `littlecoder` not importable, or the config unreadable |
 | 6 | the container is not running / the probe returned nothing |
+| 7 | **MISCONFIGURED** — `observer.judge_enabled` is ALREADY true in the config under test and no valid rating record was given. Non-zero regardless of `-RequireReady` |
+| 8 | **INTEGRITY** — the probe's own read-only contract was violated: an observed root changed between its before and after snapshot |
+
+Exits 7 and 8 were added after a verifier broke the first version of this work.
+Both are worth stating plainly because both were real holes:
+
+- **7.** Setting `judge_enabled: true` in a copy of the config and re-running
+  produced `ALL CASES PASS`, exit 0. The flag was *printed* in the report and
+  appeared in no decision — so the instrument whose entire purpose is "do not
+  flip this until a human rates a dry run" did not notice the flip. It now
+  refuses, and `--rating-record` (`-RatingRecord`) is the only thing that makes
+  an enabled config legitimate to it: a YAML record carrying `rated_by`,
+  `rated_at`, `rated_report` and `verdict: approve`. Without that escape the
+  check would become a permanent tripwire after an honest enablement, which is
+  the kind of guard people switch off.
+- **8.** `wrote_nothing: true` was a **hardcoded literal**. A copy of the probe
+  with a write injected into it still reported `true`. It is now measured —
+  sha256 per file over `cohorts`/`skill`/`polyglot` before and after, plus
+  `(name, size)` over `journals`, where only shrink or disappearance counts
+  because the live daemon appends while the probe reads. `verify-judge-dryrun.ps1`
+  proves the detector fires by driving the probe's drill-only
+  `--prove-write-detector` flag and asserting exit 8 with the written file named.
+  This runs in **container mode too**, so the read-only claim on the live plane
+  is now part of every run rather than a one-off manual `md5sum` comparison.
 
 Exit 4 is the subtle one and the reason the fidelity claim is defensible.
 `clusters.assign` returns `UNASSIGNED` **without ever calling the similarity
@@ -234,7 +287,24 @@ library fills with restatements of the founding knowledge.
 
 ```
 little-coder : 315 records, 12 occurrences, 3 pools, judge invoked on 3, MINTABLE 0
+               9 of 12 occurrences carry a payload-free signal
 ao-worker-1  : 358 records, 12 occurrences, 1 pool,  judge invoked on 1, MINTABLE 0
+               9 of 12 occurrences carry a payload-free signal
+```
+
+**These are a dated SNAPSHOT of a live corpus, not a fixed property.** They
+drift with every task the daemon runs. Do not trust the transcription — the
+first version of this document said "12 of 12 on the coder plane" in one place
+and its own commit message said "12 of 12 on each plane", and the tool said 9
+of 12 on both. The tool now emits the number itself, in
+`totals.degenerate_signals` and in the `would_have_minted` sentence, so the
+command is the citation:
+
+```powershell
+.\scripts\checks\check-judge-dryrun.ps1 -Container little-coder
+#   WOULD HAVE MINTED: NOTHING WORTH MINTING. The judge would be invoked on 3
+#   pool(s), but none clears the signal bar (9 of 12 occurrences carry a
+#   payload-free signal) ...
 ```
 
 The whole corpus, verbatim from the emitted prompt:
@@ -248,7 +318,8 @@ The whole corpus, verbatim from the emitted prompt:
 ```
 
 Degenerate ratio is 1.00 on that pool, 0.60 and 0.67 on the other two, 0.75 on
-the org pool. `task_shape` is `unknown` for 12 of 12 occurrences on each plane.
+the org pool. `task_shape` is `unknown` for 12 of 12 occurrences on each plane
+(that one IS 12 of 12 — every occurrence, on both planes).
 Verdict on both planes: **NOT-READY**.
 
 ### 3.1 Failure mode A — the EMPTY library
@@ -274,7 +345,9 @@ Four mechanisms, each measured above rather than imagined:
 
 1. **Exit codes become "craft gaps".** The signals carry no payload — the
    message is `f"exit {rc}: {stderr_tail}"` (`agent.py:491`) and the tail is
-   empty in 12 of 12 live cases. A judge under instruction to find coherence
+   empty in **9 of 12** live cases on each plane (corrected: an earlier draft
+   said 12 of 12; the other three carry a real payload, e.g.
+   `agent exceeded 1800s`). A judge under instruction to find coherence
    in a scope-consistent pool can find it: "the agent does not check command
    exit codes in Python bugfix tasks" is a plausible-sounding cluster to mint
    from four `exit 1:` lines. It is not a craft gap. It is the absence of one.
@@ -339,7 +412,45 @@ only one of them is deliberate:
    are two separate decisions and the second is out of scope here.
 2. The augmenter is unwired — an accident, and the one to stop relying on.
 
-### 3.3 Why the two failures need different responses
+### 3.3 The instrument tells them apart, mechanically
+
+A raw `*.md` count could not: a library of two healthy skills and a library of
+two files the loader silently drops both read as "2". `skills.iter_skills`
+swallows `SkillFormatError` **per file** (`skills.py:298-301`), so a corrupt
+artifact is invisible to the augmenter rather than loud. The dry run now
+reports a `skill_library` block with a state, and the states have different
+remedies:
+
+| State | Meaning | Remedy |
+|---|---|---|
+| `absent` | the directory does not exist | not a blocker — `write_skill` creates it — but check the `little-coder-skill` volume is mounted, or mints land in the container's writable layer and die on recreate |
+| `empty` | it exists and holds no artifacts | **nothing to do.** This is the EXPECTED pre-enablement state and blocks nothing. It only means §8 efficacy has no baseline yet |
+| `populated` | every artifact parses, ids are unique, nothing active or pending is unaccounted for | no action |
+| `poisoned` | at least one artifact is one the loader drops, or one nothing accounts for | **quarantine BEFORE enabling** — a blocker on the verdict |
+
+`poisoned` is decided by five measured conditions, not by judgement:
+unparseable frontmatter; a leftover `*.tmp` from an interrupted atomic write
+(`skills.py:264`); a `*.md` outside the three subdirectories `write_skill` can
+produce (`skills.py:57-61`); two artifacts claiming the same id; and an
+**active or pending** artifact whose `cluster_id` is not in the cohort store.
+
+That last one is deliberately narrow, and the reason is worth stating because
+the wider version would have been a rule that measures nothing. This dry run
+only ever runs against a **zero-cluster** store — a non-empty one is exit 4 —
+so "cluster_id not in the store" is true of *every* artifact here. A rule that
+always fires is not a measurement. What is informative pre-enablement is a
+skill that will be **served** (`status: active`) or is **awaiting approval**
+(`pending`) while nothing on disk accounts for it. Retired and superseded
+artifacts are inert — `list_skills` defaults to `status='active'`
+(`skills.py:310-319`) — so they are reported as a note, not as poisoning.
+
+The live plane exercises exactly that distinction today:
+`/var/lib/little-coder/skill/knowledge/07f906a1b2fa32e2.md` carries
+`cluster_id: sample-cluster-id` against an empty store, and is `status:
+retired`. The tool calls the library `POPULATED` with an inert-artifact note —
+not poisoned. Had that same file been `active`, it would have blocked.
+
+### 3.4 Why the two failures need different responses
 
 - Empty library → the corpus is too small or too clean. Wait, run more real
   work, re-run the dry run. Nothing is damaged.
@@ -368,10 +479,14 @@ Each item is checkable, and the first four are checked by the script.
 | 7 | Human rating passes the §2.4 bar on ≥ 10 pools | human, on the emitted packet | not run |
 | 8 | **Pool only:** `skill` + `cohorts` are named volumes with a backup sidecar | `docker inspect` (§1.3) | FAILS — writable layer |
 | 9 | The transition is journaled to `audit.jsonl` (§13's closing line) | `lc admin` / audit record | n/a |
+| 10 | The skill library is not `poisoned` | dry run `skill_library.state` | `populated` (one inert artifact, §3.3) |
+| 11 | The flip itself is committed with a rating record | `check-judge-flag.ps1` (pre-commit) | enforced |
 
-Criteria 1–6 are the gate form: `check-judge-dryrun.ps1 -RequireReady` exits 1
-until they hold. 7–9 are human and are not automatable without automating away
-the decision §13 deliberately keeps human.
+Criteria 1–6 and 10 are the gate form: `check-judge-dryrun.ps1 -RequireReady`
+exits 1 until they hold. 7–9 are human and are not automatable without
+automating away the decision §13 deliberately keeps human. 11 is the mechanical
+backstop for 7: it cannot verify that a rating happened *well*, only that a
+record of one was committed with the flip.
 
 ### 4.1 The prerequisite work criteria 3–5 imply
 
@@ -394,6 +509,50 @@ question worth asking.
   agent's `--append-system-prompt` args name, and make
   `gen-worker-configs.py` carry it. A test asserting the two lists are equal
   keeps them from drifting apart again.
+
+---
+
+## 4a. The flag is now mechanically guarded, in two places
+
+A plan plus an instrument stops nothing. This was demonstrated rather than
+argued: a verifier set `judge_enabled: true` in a copy of the config, re-ran
+the drill, and got `ALL 13 CASES PASS`, exit 0. Two mechanisms now exist, and
+neither is sufficient alone:
+
+**Commit time — `scripts/checks/check-judge-flag.ps1`, wired into
+`.githooks/pre-commit` as step 6.** For every staged `*.yaml`/`*.yml` it reads
+the **staged** content (not the working tree — `git add`, then edit the file
+back, must not launder it) and looks for `judge_enabled` set truthy. If none,
+it exits 0 and writes nothing, which is every ordinary commit. If one is found,
+the commit is DENIED unless the same commit stages a valid rating record at
+`little-coder/config/judge-enablement-rating.yaml`. Both outcomes append to
+`<git-common-dir>/judge-flag-guard.log`.
+
+**Run time — `check-judge-dryrun.ps1` exit 7.** A flip made inside the
+container, or by an env override, is not a commit at all and no hook can see
+it. The dry run reads the config actually in force and refuses.
+
+`verify-judge-flag-guard.ps1` proves the commit-time half stops something, in a
+throwaway git repository, using the real guard and the real hook block
+extracted by marker — never a hand-written stand-in. 17 cases: the ordinary
+commit is allowed, `judge_enabled: false` is allowed, the flip is denied, the
+`git add` + edit-back launder is denied, an incomplete record is denied, a
+`verdict: reject` record is denied, a valid approving record is ALLOWED, a
+missing validator DENIES (fail closed), `git commit` itself is REFUSED with
+HEAD unmoved — and, as the negative control, with the guard removed from the
+hook the identical commit LANDS.
+
+**What it does not catch, stated so nothing reads wider than it is:**
+
+- a commit made with `--no-verify`, or in a clone without `core.hooksPath` set.
+  That is `check-hook-attestation.ps1`'s job — a different U5 sub-item.
+- a branch that does not carry the guard. `core.hooksPath` is per-checkout and
+  the hook is version-controlled, so this constrains commits on branches that
+  have it, and nothing else. Branches cut before it merges are unguarded.
+- **the audit log has no automated consumer.** It is a file an operator reads
+  (`check-judge-flag.ps1 -Audit`). Nothing polls it, nothing alerts on it, and
+  a sufficiently determined agent can delete it — it is a record, not a second
+  guard. The mechanical stop is the denial; the log is the trail.
 
 ---
 
@@ -458,7 +617,9 @@ Every claim above was produced by a command, not by reading:
 .\scripts\checks\check-judge-dryrun.ps1                          # little-coder plane
 .\scripts\checks\check-judge-dryrun.ps1 -Container ao-worker-1   # org pool
 .\scripts\checks\check-judge-dryrun.ps1 -EmitPrompts -OutDir <d> # rating packet
-.\scripts\checks\verify-judge-dryrun.ps1                         # 13/13 cases
+.\scripts\checks\verify-judge-dryrun.ps1                         # 34/34 cases
+.\scripts\checks\verify-judge-flag-guard.ps1                    # 17/17 cases
+.\scripts\checks\check-judge-flag.ps1 -Audit                    # the flag audit log
 docker inspect ao-worker-1 --format '{{range .Mounts}}{{.Type}} {{.Name}} -> {{.Destination}}{{"\n"}}{{end}}'
 docker exec ao-worker-1 stat -c '%n mtime=%y' /var/lib/little-coder/skill /var/lib/little-coder/cohorts /var/lib/little-coder/journals
 ```
@@ -470,3 +631,19 @@ paths (3, 4, 5), the container-unreachable path (6), the NOT-READY gate (1),
 and a healthy corpus that reaches `READY-FOR-RATING` with a mintable pool (0) —
 without which the drill would only prove the check knows how to say no. It then
 re-hashes the fixture tree to prove the dry run wrote nothing.
+
+Two things about that drill were wrong in its first version, and both are worth
+recording because both are shapes this repo keeps shipping:
+
+- **A case that could not run printed `[SKIP]` and the drill still exited 0.**
+  Move `fixtures/judge-dryrun/MANIFEST.sha256` aside and the one case that
+  proves the read-only claim vanished, the count silently dropped 13 to 12, and
+  the summary said `ALL 12 CASES PASS`. A missing manifest is now a FAILING
+  case, and `$EXPECTED_CASES` is asserted at the end, so a case that stops
+  running is red rather than quieter. (The skip message named a `-Regen` switch
+  that did not exist. It exists now, and regenerating is a reviewable diff.)
+- **`wrote_nothing` was asserted, not measured.** See exit 8 in section 2.3.
+
+Both drills assert their own case count for the same reason. Verify either
+claim by breaking it: move the manifest aside and the drill now reports two
+failing cases and exits 1, where it used to skip one and exit 0.
