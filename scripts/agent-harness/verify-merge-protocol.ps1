@@ -319,6 +319,65 @@ Check "the report marks the offender as a merge (mergesChecked + isMerge)" `
 Remove-Item -Recurse -Force $mrepo, $mrepo2 -ErrorAction SilentlyContinue
 Remove-Item $mledger -ErrorAction SilentlyContinue
 
+# --- a gitlink bump may not name a commit that does not exist ---------------------------
+#
+# THE ERROR THIS CATCHES, committed in this repo: a bump message read "OB1 -> 5a54f18,
+# pushed before this bump". The gitlink was correct and it WAS pushed, but 5a54f18 is not a
+# commit in OB1 or anywhere - it was typed from memory rather than read. The submodule rule
+# here is "never bump the gitlink to a commit that isn't on the OB1 remote", and the message
+# is where a reader checks that, so a SHA that does not exist is indistinguishable from a
+# bump to an unreachable one.
+#
+# Driven directly against the hook script rather than through a commit: the drill worktree
+# carries whatever hooks the main checkout has, so committing here would test the MERGED
+# hook, not this branch's. Same reasoning as the attestation cases above.
+$msgHook = Join-Path $repo ".githooks\commit-msg"
+if (Test-Path $msgHook) {
+    $shaRepo = Join-Path $env:TEMP ("drill-shaguard-" + $PID)
+    Remove-Item -Recurse -Force $shaRepo -ErrorAction SilentlyContinue
+    New-Item -ItemType Directory -Force -Path $shaRepo | Out-Null
+    # A parent with a real submodule, so the hook has something to resolve against.
+    $subRepo = Join-Path $shaRepo "SUB"
+    New-Item -ItemType Directory -Force -Path $subRepo | Out-Null
+    Invoke-DrillGit -C $subRepo init -q .
+    Invoke-DrillGit -C $subRepo config user.email "drill@local"
+    Invoke-DrillGit -C $subRepo config user.name "drill"
+    Set-Content -Path (Join-Path $subRepo "f.txt") -Value "one" -Encoding ASCII
+    Invoke-DrillGit -C $subRepo add -A
+    Invoke-DrillGit -C $subRepo commit -q -m one
+    $realSha = (Get-DrillGit -C $subRepo rev-parse --short HEAD | Select-Object -First 1)
+
+    Invoke-DrillGit -C $shaRepo init -q .
+    Invoke-DrillGit -C $shaRepo config user.email "drill@local"
+    Invoke-DrillGit -C $shaRepo config user.name "drill"
+    Set-Content -Path (Join-Path $shaRepo "README.md") -Value "x" -Encoding ASCII
+    Invoke-DrillGit -C $shaRepo add README.md
+    Invoke-DrillGit -C $shaRepo commit -q -m base
+    # Stage the gitlink. -c protocol.file.allow is needed for a local-path submodule.
+    Invoke-DrillGit -C $shaRepo -c protocol.file.allow=always submodule add -q ./SUB SUB
+    Invoke-DrillGit -C $shaRepo add SUB .gitmodules
+
+    function Test-MsgHook([string]$text) {
+        $f = Join-Path $env:TEMP ("drill-msg-" + $PID + ".txt")
+        Set-Content -Path $f -Value $text -Encoding ASCII
+        $prev = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+        try { & sh.exe $msgHook $f 2>&1 | Out-Null } finally { $ErrorActionPreference = $prev }
+        return $LASTEXITCODE
+    }
+    Push-Location $shaRepo
+    try {
+        Check "a bump naming a NONEXISTENT commit is refused" ((Test-MsgHook "bump SUB`n`nSUB -> 5a54f18 pushed") -eq 1)
+        Check "a bump naming the REAL commit passes" ((Test-MsgHook "bump SUB`n`nSUB -> $realSha pushed") -eq 0)
+        # Without the at-least-one-digit rule these words are read as commit claims and the
+        # hook fails honest messages - which is how a guard gets switched off.
+        Check "hex-looking English words are not read as SHAs" `
+            ((Test-MsgHook "bump SUB`n`nthe defaced facade was added in a decade") -eq 0)
+    } finally { Pop-Location }
+    Remove-Item -Recurse -Force $shaRepo -ErrorAction SilentlyContinue
+} else {
+    Check "a bump naming a NONEXISTENT commit is refused" $false ".githooks/commit-msg not found"
+}
+
 # --- retirement must not leave a stale registry row -------------------------------------
 #
 # THE ACCUMULATION BUG, as an executable case. The operator found "10 worktrees not merged";
