@@ -106,6 +106,24 @@ The operator confirmed this plan as a whole. Each U-phase's *What* +
 on the record, log it (C.4), continue. Do not wait for a human acknowledgment
 of the amendment unless it crosses a C.2 class-4 line.
 
+**This effort does not run through `queue.ps1`'s gates.** The harness is the
+thing this plan is building; governing its construction with its own
+unfinished gates is circular, and it manufactures operator decisions that do
+not exist. `harness.config.json` sets `human_gates.anchor: true` and
+`-Submit` exits 5 without a human confirmation — **for U0–U7 items that gate
+does not apply.** Do not propose an anchor for confirmation, do not wait for
+a tester or reviewer hand-off, and never treat a queue state as a blocker.
+
+The record for a U-phase is its **branch**: the commits, the `DECISIONS.md`
+entries, the findings sink, and the suites and drills green — evidenced in
+the commit message, not in queue state. (Observed 2026-08-29: `dfu-mem0` and
+`dfu-anchor` both sat at `anchor-draft` while ~2,000 lines were committed and
+building on them. The queue row was not a gate; it was a false record.)
+
+The per-item anchor gate keeps its FULL force for end-user feature work,
+where the operator owns an intent the agent can only guess at. That is the
+case a real failure paid for. This is not that case.
+
 ### C.2 The decision ladder — every question routes here before it routes to a human
 
 | Class | What | Do |
@@ -152,6 +170,14 @@ rule or anchor cited, and **how to revert it**. Before asking anything, check
 the log for precedent — the same question is never asked twice. The operator
 reviews it on return; a wrong call gets corrected then, which is the cheap
 path by design.
+
+**First action in a fresh worktree: merge the work line.** `DECISIONS.md` was
+born in `d7d1676`, and so was this section — a worktree cut from an earlier
+base contains neither. A session in that state is running the autonomy policy
+from a chat paste rather than from the file, and would CREATE the log instead
+of appending to it: an add/add conflict at merge, and its judgment invisible
+to everyone until someone resolves it by hand. Merge the line first, then
+read §C from the file.
 
 ### C.5 Report, don't ask
 
