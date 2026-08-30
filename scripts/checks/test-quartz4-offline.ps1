@@ -212,6 +212,22 @@ INSERT INTO agent_memories (
 INSERT INTO agent_memory_audit_events (memory_id, workspace_id, event_type, payload)
   SELECT id, 'ws-harness', 'memory_written', jsonb_build_object('via', 'harness')
     FROM agent_memories WHERE workspace_id = 'ws-harness';
+-- The RECALL side, same reasoning: its joins, its trace insert and its item insert are
+-- all stubbed in the unit tests, so only a real database can say whether the columns
+-- exist. The vector operator is exercised too, since that is where a dimension or
+-- operator-class mistake would surface.
+INSERT INTO agent_memory_recall_traces
+  (workspace_id, project_id, query, schema_version, request_payload, response_policy)
+VALUES ('ws-harness', NULL, 'harness query', 'openbrain.agent_memory.recall.v1',
+        jsonb_build_object('limit', 8), jsonb_build_object('returned', 0));
+INSERT INTO agent_memory_recall_items
+  (trace_id, memory_id, rank, similarity, use_policy_snapshot)
+  SELECT t.id, m.id, 1, 0.9000, jsonb_build_object('can_use_as_evidence', true)
+    FROM agent_memory_recall_traces t, agent_memories m
+   WHERE t.workspace_id = 'ws-harness' AND m.workspace_id = 'ws-harness';
+SELECT 'am_recall_join_ok', count(*) FROM agent_memories am
+  JOIN thoughts t ON t.id = am.thought_id
+ WHERE am.workspace_id = 'ws-harness' AND am.lifecycle_status = 'active';
 SELECT 'am_sql_ok', count(*) FROM agent_memory_audit_events WHERE workspace_id = 'ws-harness';
 ROLLBACK;
 "@
