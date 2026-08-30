@@ -450,3 +450,21 @@ CITED:    §C.2 class 4 — "spending real money or calling external services be
           the session". Registering starts an unattended daily job that runs
           `claude -p` once per unplanned or stale issue.
 REVERT:   n/a (nothing was registered).
+
+## 2026-08-30 · harness · class 2 — close the stale rows out, do not stop creating them
+DECISION: Six queue rows (`ampolicy`, `dfu-anchor`, `dfu-mem0`, `hookattest`,
+          `lc-restore`, `memplane1`) sat in `anchor-draft` while their work was
+          merged. Closed with a new terminal state `closed-outside-gates` and a
+          per-row reason naming how many merges landed. The queue mechanism is
+          KEPT.
+CITED:    §C.1 — U0–U7 items do not run through queue.ps1's gates. These rows
+          predate that clause and were never going to reach a terminal state
+          through a pipeline this effort does not use.
+WHY NOT -Reject: 'rejected' asserts a reviewer turned the work down; it merged.
+          A convenient falsehood in the audit trail §C.7 calls the deliverable's
+          twin costs more than the tidiness is worth.
+WHY KEEP IT: three rows are NOT stale (`bridge-bg-task-note`,
+          `podcast-delivery-key`, `podcast-script-fallback` — zero merges each,
+          another effort's work). The mechanism is in use.
+REVERT:   Each row's `history` records its prior state; set `state` back and drop
+          `closed_reason`.
