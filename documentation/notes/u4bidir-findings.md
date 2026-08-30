@@ -166,8 +166,16 @@ Executable, all re-runnable:
   Falsified deliberately: breaking `Get-HarnessRunnerAddresses` so it drops
   endpoint-only rows makes it FAIL with a concrete diff, and reverting makes it pass.
 - `python -m pytest -q agent-org/agent-bridge/tests/test_runner_registry.py` —
-  **10 passed** (needs `pip install -e .[test]` plus `pyjwt`, `cryptography`,
-  `websockets`; see §6).
+  **11 passed** (needs `pip install -e .[test]` plus `pyjwt`, `cryptography`,
+  `websockets`; see §6). One of them walks the `WorkerHarness` Protocol itself and
+  asserts `RunnerDispatch` forwards every method — proved RED by deleting the
+  `cancel_task` forwarding.
+- **The whole agent-org suite: `pytest -q -n 8` → 861 passed** in 6m03s (the serial
+  run does not finish inside a 15-minute window, hence `pytest-xdist`). The one
+  warning is a pre-existing `Event loop is closed` ResourceWarning at teardown, not
+  a failure. This matters because the change replaces the pool-registration call
+  (`register_from_urls` → `register_pool`) and the harness binding that every one of
+  those tests constructs.
 - `powershell -File scripts/agent-harness/check-runner-endpoints.ps1` — exit **0** on
   the shipped registry; exit **1** on the pre-fix declaration
   (`declared reachable_from 'host' but the host cannot open it (…actively refused it
