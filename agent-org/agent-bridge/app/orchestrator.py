@@ -946,6 +946,8 @@ class Orchestrator:
         # module itself is the thing that checks the flag, so there is one place that
         # decides whether writes happen rather than a truthiness test at every call site.
         self.memory = OpenBrainMemory(settings)
+        # §2.2: thin records for efforts that never reach _finish_effort.
+        self.gate.on_lifecycle = self._on_lifecycle_change
         self.floor_guard = FloorGuard(self.scope)
         self.planner = Planner(db, self.models, self.audit)
         self.stop_gates = StopGates(db, self.models, self.audit)
@@ -12203,6 +12205,31 @@ class Orchestrator:
         # the waiting reporter and re-engage it (operator 2026-07-14). No-op for normal efforts.
         await self._resolve_handoff_if_any(effort_id, delivery, result,
                                            clean=not unmet_or_partial)
+
+    async def _on_lifecycle_change(self, effort_id: str, lifecycle: str) -> None:
+        """Thin outcome record for an effort that never reached _finish_effort (§2.2).
+
+        An aborted effort produced no closure post, no branch and no done_word - but it is
+        still something that happened, and a corpus that silently omits every abort would
+        misrepresent the project's history as more successful than it was.
+
+        KEYED IDENTICALLY to the rich record (`outcome-<effort_id>`), which makes the
+        precedence explicit: whichever lands first is the memory, and a later write is a
+        no-op. That matches the gate's own law that ABORT WINS EVERY RACE - a machine `done`
+        may not overwrite an operator `aborted`, and it may not overwrite its memory either.
+        """
+        if lifecycle != "aborted":
+            return
+        mem = getattr(self, "memory", None)
+        if mem is None or not getattr(mem, "enabled", False):
+            return
+        project = await self._effort_project(effort_id) or ""
+        tainted = await self._effort_memory_tainted(effort_id)
+        await mem.write_effort_outcome(
+            effort_id=effort_id, project=project, succeeded=False,
+            head="effort aborted", done_word="aborted",
+            where="aborted before it finished", branch="", tainted=tainted,
+        )
 
     async def _promote_constraints_to_memory(self, effort_id: str) -> int:
         """Promote this effort's FAILURE clauses from effort scope to project scope (§2.3).
