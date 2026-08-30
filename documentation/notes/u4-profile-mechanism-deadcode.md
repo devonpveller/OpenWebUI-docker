@@ -61,3 +61,36 @@ Its tests are honest — they test resolution, and resolution works.
   route roles to a runner that cannot execute, and select silently. Whatever U4 concludes
   about dispatch, the config must stop advertising choices it cannot honour — either the
   dispatch exists or the profile is marked unavailable and selecting it fails loudly.
+
+---
+
+## Correction, 2026-08-30 — the running container is worse than the declared one
+
+A U4 verifier reported that `docker port little-coder` returns nothing, which contradicted
+the row above. I re-checked rather than take either side on trust:
+
+```
+$ docker port little-coder                                          # prints nothing, exit 0
+$ docker inspect little-coder --format '{{json .NetworkSettings.Ports}}'
+{"9090/tcp":[]}
+```
+
+The verifier is right and my row was imprecise. What I wrote — "only `127.0.0.1:9091 -> 9090`,
+the metrics port" — was read off `docker compose config`, which is the **declared** state.
+The **running** container publishes nothing at all: `9090/tcp` is exposed with an empty host
+binding list. So the metrics port is not reachable either; the container predates that port
+declaration and was never recreated.
+
+The conclusion the note draws is unchanged and slightly strengthened — the harness's declared
+`http://127.0.0.1:8090` is unreachable, and so is `9091`. But the sentence was stated with
+more precision than the command behind it supported, which is the thing this effort keeps
+catching in everyone else.
+
+**The reusable finding is the gap itself**: on this host, compose text and the running stack
+disagree. That is why a check that greps a compose file cannot establish that a door exists —
+it establishes that a door is *declared*. A U4 branch shipped exactly that conflation
+(`_door_problems` is a substring match over compose text, described in MODULE.md as proving a
+door "actually exists"), and this host is a live counterexample to it.
+
+Rule for anything downstream: **`docker inspect` / `docker port` for what IS; compose text for
+what was INTENDED.** Never the second when you mean the first.
