@@ -95,11 +95,13 @@ Determinism: 5 consecutive runs, 28/28 each.
 
 ## R2 — the cited merge-protocol drill is flaky. Root-caused, fixed, and WITHDRAWN as evidence
 
-**The measurement.** `verify-merge-protocol.ps1`, cited at 66/66, run eight times in a row:
+**The measurement.** `verify-merge-protocol.ps1`, cited at 66/66, launched eight times in a
+row; seven completed before the burst's wall-clock cap cut the eighth off mid-run:
 
-    66/66  66/66  63/66  59/66  39/66  34/66  40/66   (run 8 cut short by a timeout)
+    66/66  66/66  63/66  59/66  39/66  34/66  40/66
 
-Two clean runs in eight. It is two defects, not one, and neither is "the machine was busy".
+Two clean of seven completed. It is two defects, not one, and neither is "the machine was
+busy".
 
 **Defect 1 — no mutual exclusion.** The drill creates and force-deletes FIXED global names
 (`drill/verify-d`, `work/drilla`, `work/drillb`, and three worktree paths) in the
@@ -134,7 +136,8 @@ drill's own header promises "the operator's checkout is never switched (a bridge
 could land mid-switch)" — falsified by its own runs.
 
 **INCIDENT, and a gap in this session's authority.** The stray rebase was left by this
-session's own burst. `git rebase --abort` in the main checkout was **denied by the
+session's own burst - the wedged `.git/rebase-merge` was observed at ~12:15, before the
+other session's run (pid 137560) started at 12:18:20, so the timeline is not ambiguous. `git rebase --abort` in the main checkout was **denied by the
 permission classifier** — twice, through Bash and PowerShell — so it could not be
 repaired from here. It has since cleared on its own (main checkout is back on
 `refactor/ai-stack-cleanup` at `98cf02e`, no `.git/rebase-merge`), almost certainly by
@@ -174,9 +177,12 @@ run. Deliberately not a grep for `lease.ps1` in the source: a source string prov
 was written, never that it runs first.
 
     sabotage: the drill ignores a held lease   -> 12/14, exit 1
-    sabotage: Test-IsWorktreeRoot always true  -> 12/14, exit 1  (13/13 form, pre-widening)
+              (fails "exits 3, not 0" and "says WHY, naming the lease")
+    sabotage: Test-IsWorktreeRoot always true  -> 13/14, exit 1
+              (fails "says NOT-ROOT for it", detail: ROOT)
     restored                                   -> 14/14, exit 0
-    determinism                                -> 8 consecutive runs, 14/14 each
+    determinism                                -> 8 consecutive runs, 14/14 each; 3 more
+                                                  after the exit-code follow-up
 
 **I nearly shipped a flaky check while fixing a flaky check.** The repro's first version
 snapshotted ALL of `refs/heads` and every worktree around the refused run, and failed 1 run

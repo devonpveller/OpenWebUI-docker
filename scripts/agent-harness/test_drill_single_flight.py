@@ -2,11 +2,12 @@
 """REPRODUCTION + REGRESSION GUARD for the two defects that made verify-merge-protocol.ps1
 non-deterministic. Run it directly (no pytest): python scripts/agent-harness/test_drill_single_flight.py
 
-THE INCIDENT (2026-08-30). The merge-protocol drill was cited as U3 evidence at 66/66. Run
-eight times in a row on a machine where other harness agents were live it produced
-66, 66, 63, 59, 39, 34, 40 of 66 - two clean runs in eight. A drill that fails half the time
-cannot stand between an item and an unread merge, so the flakiness had to be a defect with a
-name rather than "the machine was busy". It was two:
+THE INCIDENT (2026-08-30). The merge-protocol drill was cited as U3 evidence at 66/66.
+Launched eight times in a row on a machine where other harness agents were live, seven
+completed before the burst's wall-clock cap and produced 66, 66, 63, 59, 39, 34, 40 of 66 -
+two clean of seven. A drill that fails half the time cannot stand between an item and an
+unread merge, so the flakiness had to be a defect with a name rather than "the machine was
+busy". It was two:
 
  1. NO MUTUAL EXCLUSION. The drill creates and force-deletes FIXED global names -
     `drill/verify-d`, `work/drilla`, `work/drillb`, and three worktree paths - inside the

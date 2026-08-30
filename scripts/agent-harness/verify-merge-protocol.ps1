@@ -17,15 +17,17 @@
 # is never switched (a bridge turn could land mid-switch). Idempotent: the preamble clears
 # anything a previous failed run left behind.
 #
-# SINGLE FLIGHT (added 2026-08-30, after this drill was measured at 2/8 green). Everything
+# SINGLE FLIGHT (added 2026-08-30, after this drill was measured at two clean runs in seven).
+# Everything
 # above is only true of ONE running copy. This is the one component in the toolkit that
 # mutates shared git state under FIXED global names - it creates and force-deletes
 # `drill/verify-d`, `work/drilla`, `work/drillb` and three worktree paths in the OPERATOR'S
 # checkout, and its preamble deletes them unconditionally so a previous crash cannot wedge
-# it. Two copies therefore destroy each other. Measured burst, 8 consecutive runs on a
-# machine where other agents were also running the harness: 66, 66, 63, 59, 39, 34, 40 of 66
-# - and a second `verify-merge-protocol.ps1` (pid 137560) was caught running concurrently in
-# `Get-CimInstance Win32_Process` mid-burst. Worse than the noise, the collision left the
+# it. Two copies therefore destroy each other. Measured burst on a machine where other
+# agents were also running the harness - eight launched, seven completed before the burst's
+# wall-clock cap: 66, 66, 63, 59, 39, 34, 40 of 66. Two clean of seven. And a second
+# `verify-merge-protocol.ps1` (pid 137560) was caught running concurrently in
+# `Get-CimInstance Win32_Process` mid-burst, so the cause is observed, not inferred. Worse than the noise, the collision left the
 # operator's checkout MID-REBASE, because `git -C <path>` ASCENDS when <path> is not a
 # worktree root: once a leftover plain directory sits at .claude\worktrees\wt-drillb, every
 # `git -C $wtB ...` below operates on the main checkout instead. So there are two guards,
