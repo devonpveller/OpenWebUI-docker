@@ -15,7 +15,7 @@ The definition is agent-org's, not a new one. `orchestrator.py`'s burn-down loop
 converging?" every round, and it decides it like this:
 
   * every round's failure gets a SIGNATURE - the normalized log tail, digits and hashes
-    masked (`Orchestrator._failure_sig`, orchestrator.py:8845). `failure_signature` here is
+    masked (`Orchestrator._failure_sig`, orchestrator.py:8846). `failure_signature` here is
     that function, byte for byte, so a signature computed on either side of the
     unification means the same thing.
   * novelty is measured against EVERY signature seen so far, not just the previous round.
@@ -32,7 +32,7 @@ Two deliberate differences, each stated rather than absorbed:
      here, and `improved` has no analogue rather than a faked one.
 
   2. A round must also have MOVED THE CODE. little-coder's FLAIL GUARD kills a turn that
-     reads without editing (`littlecoder/agent.py:170`, `flail_tripped`); the round-level
+     reads without editing (`flail_tripped`, little-coder/src/littlecoder/agent.py:165); the round-level
      analogue is a round whose branch head is exactly the previous round's. If the code did
      not change and the failure signature did, the failure is nondeterministic - and §6's
      hygiene rule is explicit that noise "must never be recorded as a constraint". Without
@@ -97,7 +97,7 @@ def failure_signature(log: str) -> str:
     """A stable signature of WHAT failed - the normalized log tail (digits/hashes masked).
 
     Ported verbatim from `Orchestrator._failure_sig` (agent-org/agent-bridge/app/
-    orchestrator.py:8845). Verbatim on purpose: U3 already writes agent-org's signatures
+    orchestrator.py:8846). Verbatim on purpose: U3 already writes agent-org's signatures
     through to the memory plane, so a harness signature that normalized differently would
     produce a second, silently incompatible dialect of the same key.
     """

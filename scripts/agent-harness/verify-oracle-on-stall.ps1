@@ -1,6 +1,9 @@
 # verify-oracle-on-stall.ps1 - executable proof that a stall reaches the frontier oracle.
 #
-#   .\scripts\agent-harness\verify-oracle-on-stall.ps1     # a few seconds, cleans up after itself
+#   .\scripts\agent-harness\verify-oracle-on-stall.ps1     # ~13s measured here 2026-08-30
+#
+# It removes its scratch namespace and its three per-run refs ON SUCCESS ONLY. A FAILING
+# run deliberately KEEPS the scratch dir - see "ON FAILURE" further down in this header.
 #
 # dark-factory-unification U4; ORCHESTRATION-DESIGN sec 7 ("the frontier is an oracle
 # invoked on a stall signal - not a better worker").

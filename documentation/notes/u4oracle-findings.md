@@ -2,13 +2,49 @@
 
 Item: FRONTIER-ORACLE-ON-STALL, per PLAN §2's U4 row and ORCHESTRATION-DESIGN §7.
 Branch: `work/u4oracle`. Round 2 (fix round) appended 2026-08-30 after the item was
-refuted 2/2.
+refuted 2/2. Round 3 (2026-08-30) changed NO code behaviour — it is an audit-trail pass,
+listed under "Round 3" below.
+
+**Where the 19/25 first run stands: F7.** It has an answer for the mechanism (F7b, found
+and fixed) and an explicit *unexplained* remainder for the exact figure (F7c). It has not
+quietly vanished, and F7c is the part to read if you only read one.
 
 **STATUS: PARKED, not complete.** U4's *Validated by* column is not satisfied and cannot
 be from this item. §C.7: "a phase that cannot satisfy its column does not merge. It parks
 with a written reason." The reason is F4. What IS delivered is a stall signal a machine can
 compute, an escalation decision, a durable record, and the handle a dispatcher will read —
 all executable, all proven RED→GREEN.
+
+## Round 3 — audit-trail pass (2026-08-30)
+
+§C.7 makes these notes and the commit messages the thing that gets read instead of the
+diffs, so a sentence no command supports is the defect that survives. Every executable
+claim in this file and in `MODULE.md` was re-run. Five sentences did not survive; all five
+were mine, and four of them were introduced by round 2's own "corrections".
+
+| What was claimed | What a command actually shows | Where |
+|---|---|---|
+| round 2: `ruff check .` reports "2 pre-existing **F811s** from 86ffa62" | 2 errors, but ONE F811 (86ffa62) and one **F401** from U3's `e1e73dc` in a different file | F9, rewritten |
+| round 2: "PSScriptAnalyzer flagged it" (the `-Profile` naming) | `Get-Module -ListAvailable PSScriptAnalyzer` returns NOTHING on this machine | DECISIONS entry, withdrawn + replaced with a repro |
+| `Orchestrator._failure_sig` at `orchestrator.py:8845` | `grep -n "def _failure_sig"` → **8846** (8845 is the `@staticmethod`) | `oracle_on_stall.py` ×2 |
+| `flail_tripped` at `agent.py:170` | `grep -n flail_tripped` → **165** (this file already said 165; the module docstring disagreed with it) | `oracle_on_stall.py` |
+| the drill "cleans up after itself" | true on SUCCESS only; on failure it deliberately keeps the scratch dir, which the same header contradicts further down | drill usage line |
+| `drill/verify-d` "deliberately not deleted" (present tense) | `git rev-parse --verify drill/verify-d` now exits 128 — the ref is gone, and not by my hand | F10, re-dated |
+
+Two smaller ones, same class: `-Resubmit`'s exit-code guard is at line **822**, not "~810";
+and "eight checks that check nothing were found in a day" is **CLAUDE.md:131's** sentence,
+not an observation of mine — it is now attributed where it is quoted.
+
+**One figure I suspected and could not break.** `18/25` for the `-Fail`-wiring mutation
+looked wrong beside a 34-check drill, so I re-ran it rather than "fixing" it: it is
+**18/25 on the nose**, because the drill counts checks that RAN and an unwired run
+short-circuits before Step 8. The figure stands; what was missing was the reason the
+denominator moves, which F4 now gives.
+
+Re-run this round, all reproducing exactly: `test_oracle_on_stall.py` 52 passed; full
+harness suite 157 passed; `verify-oracle-on-stall.ps1` 34/34 twice with different run
+tokens; `progress = True` → 8 RED; `progress = False` → 22 RED, overlap of exactly 3
+(`comm -12`); `-Fail` wiring removed → 18/25.
 
 ## DECISIONS entries to append
 
@@ -72,8 +108,14 @@ REVERT:   Rename the key in `record()` and its one test; no consumer outside thi
 DECISION: The new submit parameter recording which profile an item is worked under
           is `-RunnerProfile`.
 CITED:    `$Profile` is a PowerShell AUTOMATIC variable (the profile script path);
-          a param of that name shadows it for the whole script scope.
-          PSScriptAnalyzer flagged it on the first edit.
+          a param of that name shadows it for the whole script scope. Shown directly:
+          a script whose body is `param([string]$Profile)` + `"[$Profile]"` prints
+          `[]` when called with no argument, where `$PROFILE` outside it is
+          `...\Microsoft.PowerShell_profile.ps1`.
+          (Round 2 also credited PSScriptAnalyzer with flagging this. WITHDRAWN — it is
+          not installed on this machine: `Get-Module -ListAvailable PSScriptAnalyzer`
+          returns nothing, so nothing here can have produced that. The naming decision
+          stands on the repro above; the attribution does not.)
 REVERT:   Rename the parameter and the one `Set-Field` call; the stored field is
           `profile`, and an item without it means "the surface default", which is
           also what every item queued before today means.
@@ -212,7 +254,9 @@ reading of that is on a real item, in a real run.
 
 - **What IS proven, executably:** the detector's definition (52 unit tests, both
   mutations RED with near-disjoint failure sets), the wiring at the only moment the
-  line learns anything (`-Fail`; unwire it and the drill drops to 18/25), the
+  line learns anything (`-Fail`; unwire it and the drill drops to 18/25 — the DENOMINATOR moves because the
+  drill counts checks that actually ran, and with nothing escalating the run short-circuits
+  before Step 8; re-measured 2026-08-30 and it is 18/25 on the nose), the
   escalation decision including `no-oracle-above`, the durable record, and
   `pending()` — the handle a dispatcher reads. 34/34 in the drill.
 - **What is NOT proven:** that the mechanism fires on a stall nobody arranged. That
@@ -333,10 +377,22 @@ on this machine, and only the first was isolated:
    verifier's, a sibling agent's, a crashed run's leftovers — rewrote or removed the
    branch heads a live run was computing its stall signal from.
 3. **The work line — NOT isolated.** `Resolve-WorkLine` falls back to the OPERATOR'S
-   MAIN CHECKOUT's current branch. That is out-of-process global state, and sibling
-   sessions move it: observed directly on 2026-08-30, the main checkout went from a
-   branch, to detached mid-rebase, to a different commit, inside ten minutes, because
-   another session's `verify-merge-protocol.ps1` was rebasing in it. When the line
+   MAIN CHECKOUT's current branch (`resolve.ps1:45-46` states that precedence). That is
+   out-of-process global state, and sibling sessions move it. This is not a recollection —
+   it is in the main checkout's reflog, and `git reflog --date=iso` there still shows it:
+
+   ```
+   98cf02e HEAD@{2026-08-30 12:24:10}: rebase (abort): returning to refs/heads/refactor/ai-stack-cleanup
+   56f30cb HEAD@{2026-08-30 12:19:25}: rebase (pick): Part M build 2: ...
+   104d8f0 HEAD@{2026-08-30 12:19:25}: rebase (start): checkout drill/verify-d
+   98cf02e HEAD@{2026-08-30 12:18:16}: rebase (abort): returning to refs/heads/refactor/ai-stack-cleanup
+   d154a96 HEAD@{2026-08-30 12:11:55}: rebase (pick): Part M build 2: ...
+   23bdf43 HEAD@{2026-08-30 12:11:54}: rebase (start): checkout drill/verify-d
+   ```
+
+   Branch → detached at a rebase pick → back to the branch → detached again, twice inside
+   thirteen minutes, from another session's `verify-merge-protocol.ps1` (the `drill/verify-d`
+   checkout names it). Round 2's round of this work was committed at 12:38. When the line
    resolved to one that does not contain the drill's branches, `-Submit` was refused
    by the hook-attestation guard — reproduced here exactly, and it fails in a way
    that reads as a detector bug.
@@ -407,21 +463,47 @@ this branch touched at the point it fails.
 
 ## F9 — `ruff check .` is not clean on the work line (NOT fixed, not mine)
 
-Round 1's commit message said `ruff — clean`. At repo root, `ruff check .` reports
-**2 errors**, both `F811 Redefinition of unused 'subprocess'` in
-`scripts/agent-harness/test_anchor_schema.py:267` — a duplicate import block. The
-duplicate block was introduced by U2's `86ffa62` (`git blame -L 266,268`), which is an
-ancestor of this branch, so the errors predate this work and the round-1 claim was false
-as stated.
+Round 1's commit message said `ruff — clean`. That is false at repo root.
+
+**Round 2's correction was itself wrong, and this is the corrected version.** Round 2
+said the 2 errors were "both F811 ... from 86ffa62". They are not both F811 and they are
+not both from that commit. `ruff check . --output-format concise` (2026-08-30, at
+`f8dc92a`) prints exactly:
+
+```
+agent-org\agent-bridge\tests\test_org_drill.py:31:24: F401 [*] `app.models.Effort` imported but unused
+scripts\agent-harness\test_anchor_schema.py:267:8: F811 [*] Redefinition of unused `subprocess` from line 19: `subprocess` redefined here
+Found 2 errors.
+[*] 2 fixable with the `--fix` option.
+```
+
+Two errors, two different rules, two different owners:
+
+- the **F811** is U2's, from `86ffa62` (`git blame -L 266,268 -- scripts/agent-harness/test_anchor_schema.py`);
+- the **F401** is U3's, from `e1e73dc` (`git blame -L 31,31 -- agent-org/agent-bridge/tests/test_org_drill.py`),
+  which reached this branch through the merge `a9e271f`.
+
+Both commits are ancestors of this branch's base `5f4817d`
+(`git merge-base --is-ancestor 86ffa62 HEAD`, likewise `e1e73dc 5f4817d`), so both errors
+predate this work and neither is in a file this branch touches
+(`git log --oneline 5f4817d..HEAD -- <both files>` is empty).
 
 This branch's own files ARE clean (`ruff check scripts/agent-harness/oracle_on_stall.py
 scripts/agent-harness/test_oracle_on_stall.py` → all checks passed). Not fixed here:
 it is another in-flight item's file and deleting a line from it would be editing
 someone else's worktree subject mid-flight. One-line fix for whoever owns it.
 
-## F10 — debris left by the merge-protocol drill: the ref `drill/verify-d`
+## F10 — debris left by the merge-protocol drill: the ref `drill/verify-d` (now gone)
 
-Deliberately NOT deleted. It is `verify-merge-protocol.ps1`'s base ref, that drill
-force-deletes it in its own preamble, and another session may be mid-run on it right
-now — deleting a shared ref out from under a running drill is the exact failure F7(2)
-and F8 are about. Recorded so the next person knows where it came from.
+At the time of writing it existed and was deliberately NOT deleted: it is
+`verify-merge-protocol.ps1`'s base ref, that drill force-deletes it in its own preamble,
+and another session may have been mid-run on it — deleting a shared ref out from under a
+running drill is the exact failure F7(2) and F8 are about.
+
+**Re-checked at the end of round 3: it no longer exists.** `git rev-parse --verify
+drill/verify-d` exits 128 and `git for-each-ref | grep -i drill` returns nothing. Not
+removed by me — `verify-oracle-on-stall.ps1`'s cleanup deletes only its own three
+`drill/oracle-*-$RUN` refs (the `foreach ($b in @($STALL_BRANCH, $MOVE_BRANCH,
+$GONE_BRANCH))` block), and I ran no other ref deletion. Whoever next runs the
+merge-protocol drill will recreate it. Recorded so the next person knows where it came
+from and why the entry above is written in the past tense.

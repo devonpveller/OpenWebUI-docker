@@ -89,9 +89,9 @@ param(
     [string]$Thread = "",
     [string]$State = "",
     # NOT -Profile: $Profile is a PowerShell automatic variable (the profile script path),
-    # and a param of that name shadows it for the whole script scope. PSScriptAnalyzer
-    # flagged it; the name also reads better, since what it selects is which RUNNER each
-    # role executes on.
+    # and a param of that name shadows it for the whole script scope: a script declaring
+    # `param([string]$Profile)` sees "" inside, not the profile path. The name also reads
+    # better, since what it selects is which RUNNER each role executes on.
     [string]$RunnerProfile = "",
     [switch]$PlanAdequate,
     [switch]$PlanInadequate,
@@ -202,7 +202,7 @@ function Invoke-OracleOnStall([string]$i) {
     #
     # ADVISORY: a stall check that could not run must never block a tester from recording a
     # verdict. But it says SKIPPED and why - a check that quietly does nothing is the exact
-    # failure class this plan's sec 0 A6 is about, and eight of them were found here in a day.
+    # failure class this plan's sec 0 A6 is about (CLAUDE.md:131 records eight found in a day).
     $mod = Join-Path $PSScriptRoot "oracle_on_stall.py"
     if (-not (Test-Path $mod)) {
         Write-Host "  stall check SKIPPED: oracle_on_stall.py is not beside queue.ps1." -ForegroundColor Yellow
@@ -682,7 +682,7 @@ if ($Pass -or $Fail) {
     # an identical "sha", which the stall detector reads as "the code did not move" and
     # escalates on: a tooling failure manufacturing a frontier escalation. Reproduced
     # 2026-08-30 by deleting the branch between two -Fail calls; the round recorded
-    # `sha: "probe/oracle"`. -Submit (line ~483) and -Resubmit (line ~810) already checked
+    # `sha: "probe/oracle"`. -Submit (line 483) and -Resubmit (line 822) already checked
     # this; the verdict path was the one that did not.
     $headSha = (Invoke-GitCapture @("rev-parse", $item.branch) | Select-Object -First 1)
     if ($LASTEXITCODE -ne 0 -or -not $headSha) {
