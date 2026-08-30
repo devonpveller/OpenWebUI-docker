@@ -41,7 +41,9 @@
     "",
     "pooled says whether an orchestrator may ACQUIRE the row's addresses as work capacity.",
     "It is not a synonym for addressable: the coder plane's little-coder is addressable and",
-    "is NOT pooled, because it is the operator's interactive daemon on one shared workspace.",
+    "is NOT pooled, because it is the operator's interactive daemon on one shared workspace, and",
+    "sharing an executor between interactive and automated work is a collision little-coder's",
+    "own design already rejected (Self-improving-little-coder-design.md:656).",
     "",
     "reachable_from is load-bearing, not documentation: it names the vantage points that can",
     "actually open the endpoint, and scripts/agent-harness/check-runner-endpoints.ps1 fails",
@@ -73,7 +75,7 @@
       "default_model": "local-default",
       "reachable_from": ["ai-stack_llm-net", "coder_lc-net"],
       "pooled": false,
-      "_note": "the coder plane's daemon. NOT pooled: it is the operator's interactive coder and its /workspace is a single shared volume, so an orchestrator acquiring it would collide with a human mid-task (that collision is a recorded incident, not a hypothetical). NOT reachable from the host: coder/docker-compose.yml publishes 127.0.0.1:9091 (metrics) and nothing else, so a host-side dispatcher must either be given a published 8090 or run inside one of the networks above. Still unproven: no work item has completed through it - do not read config support as a proven feature."
+      "_note": "the coder plane's daemon. NOT pooled: it is the operator's interactive coder and its /workspace is a single shared volume, so an orchestrator acquiring it would collide with a human mid-task - little-coder's own design rejected sharing an executor between interactive and automated work as a deterministic collision (documentation/implementation-guide/little-coder/Self-improving-little-coder-design.md:656). NOT reachable from the host: coder/docker-compose.yml publishes 127.0.0.1:9091 (metrics) and nothing else, so a host-side dispatcher must either be given a published 8090 or run inside one of the networks above. Still unproven: no work item has completed through it - do not read config support as a proven feature."
     },
     "agent-org-worker": {
       "kind": "little-coder",

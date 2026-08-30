@@ -86,7 +86,8 @@ class RunnerSpec:
     # synonym for addressable: the coder plane's `little-coder` is addressable from inside
     # llm-net and is deliberately NOT pooled - it is the operator's interactive daemon on a
     # single shared /workspace, and an org that acquired it would collide with a human
-    # mid-task. That collision is a recorded incident, not a hypothetical.
+    # mid-task - a collision little-coder's own design already rejected as deterministic
+    # (documentation/implementation-guide/little-coder/Self-improving-little-coder-design.md:656).
     pooled: bool = False
 
 

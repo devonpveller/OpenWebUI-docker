@@ -125,7 +125,9 @@ Each row states three things that are claims, not decoration:
 `pooled` is not a synonym for addressable. The coder plane's `little-coder` is
 addressable from inside `llm-net` and is deliberately **not** pooled: it is the
 operator's interactive daemon on one shared `/workspace`, and an orchestrator that
-acquired it would collide with a human mid-task.
+acquired it would collide with a human mid-task — the collision little-coder's own
+design already rejected as deterministic
+([`Self-improving-little-coder-design.md:656`](../../documentation/implementation-guide/little-coder/Self-improving-little-coder-design.md)).
 
 `reachable_from` exists because this file claimed `little-coder` lived at
 `http://127.0.0.1:8090` from the day the block was written, while the coder plane
