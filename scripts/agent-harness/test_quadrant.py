@@ -388,6 +388,52 @@ def test_the_most_recent_blocking_reason_is_the_one_reported(evidence):
     assert row["why_not"] == "the daemon has no focused project", row
 
 
+def test_every_subprocess_in_the_package_goes_through_the_utf8_chokepoint():
+    """No `subprocess.run(` anywhere in the package except `proc.py`.
+
+    THE COMPLETENESS TEST IS A SCAN, not a list of files. `subprocess.run(..., text=True)`
+    decodes with the LOCALE codec - cp1252 on this host - and everything this package reads
+    is UTF-8: a local model's answer, a container's JSON, a guard's output. A byte cp1252
+    cannot map (0x9d, live 2026-08-30) killed the reader thread inside subprocess, left
+    `stdout` as None, and the cell recorded `AttributeError: 'NoneType' object has no
+    attribute 'rpartition'` - an error record about the harness, in a table about runners.
+
+    DECISIONS.md 2026-08-30 "ENUMERATE-AND-PATCH LOSES", and its corollary: a completeness
+    test whose enumeration is a hand-written file list is a list with a spell-checker. This
+    one reads the directory, so a NEW file with a raw `subprocess.run` fails it on the day it
+    is added, whatever it is called.
+    """
+    pkg = Path(matrix_mod.__file__).resolve().parent
+    offenders = []
+    for py in sorted(pkg.rglob("*.py")):
+        if py.name == "proc.py" or "items" in py.parts:
+            continue
+        text = py.read_text(encoding="utf-8")
+        for i, line in enumerate(text.splitlines(), start=1):
+            if "subprocess.run(" in line and not line.lstrip().startswith("#"):
+                offenders.append(f"{py.relative_to(pkg)}:{i}: {line.strip()}")
+    assert not offenders, (
+        "these call sites bypass quadrant/proc.py and will decode with the locale codec:\n"
+        + "\n".join(offenders))
+
+
+def test_the_chokepoint_survives_a_byte_the_locale_codec_cannot_decode():
+    """0x9d is unmapped in cp1252. The exact byte that produced the live failure."""
+    from quadrant import proc
+    prog = "import sys; sys.stdout.buffer.write(bytes([0x41, 0x9d, 0x42]))"
+    out = proc.run([sys.executable, "-c", prog])
+    assert out.returncode == 0
+    assert isinstance(out.stdout, str) and out.stdout.startswith("A") and out.stdout.endswith("B")
+
+
+def test_the_chokepoint_refuses_to_be_talked_out_of_utf8():
+    """A caller passing text=True must not silently get the locale codec back."""
+    from quadrant import proc
+    prog = "import sys; sys.stdout.buffer.write('\u00fcber'.encode('utf-8'))"
+    out = proc.run([sys.executable, "-c", prog], text=True)
+    assert out.stdout == "\u00fcber"
+
+
 def test_a_refused_record_is_reported_as_not_compared_never_dropped(evidence):
     """A record that fails admission must be LOUDER than one that never existed."""
     qs = matrix_mod.build(cfg())

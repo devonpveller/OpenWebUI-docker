@@ -54,6 +54,8 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
+from . import proc as _proc
+
 TERMINAL = ("done", "abandoned", "rejected")
 
 # Digest the mirrored tree INSIDE the container. Content, not timestamps: `docker cp` does
@@ -83,7 +85,7 @@ class LcDockerError(RuntimeError):
 
 def _docker(args: List[str], *, input_text: str | None = None,
             timeout: float | None = None) -> subprocess.CompletedProcess:
-    return subprocess.run(["docker", *args], capture_output=True, text=True,
+    return _proc.run(["docker", *args], capture_output=True, text=True,
                           input=input_text, timeout=timeout)
 
 

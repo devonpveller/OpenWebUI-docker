@@ -54,7 +54,6 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
-import subprocess
 import sys
 from fnmatch import fnmatch
 from pathlib import Path
@@ -66,6 +65,7 @@ if str(HERE.parent) not in sys.path:
 
 import config as harness_config          # noqa: E402
 from quadrant import adapters            # noqa: E402
+from quadrant import proc as _proc       # noqa: E402
 from quadrant import item as item_mod    # noqa: E402
 from quadrant import matrix as matrix_mod  # noqa: E402
 from quadrant import record as record_mod  # noqa: E402
@@ -76,7 +76,7 @@ DEFAULT_TIMEOUT = 1800.0
 
 
 def _repo_root() -> Path:
-    out = subprocess.run(["git", "rev-parse", "--show-toplevel"],
+    out = _proc.run(["git", "rev-parse", "--show-toplevel"],
                          cwd=str(HERE), capture_output=True, text=True)
     return Path(out.stdout.strip()) if out.returncode == 0 else HERE.parents[2]
 
@@ -171,7 +171,7 @@ def _run_one(q: "matrix_mod.Quadrant", cfg: Dict[str, Any], it: Dict[str, Any], 
         acceptance = []
         for crit in it["criteria"]:
             cmd = item_mod.expand(crit["check"], guards=GUARDS, item_id=it["id"])
-            proc = subprocess.run(cmd, shell=True, cwd=str(ws), capture_output=True, text=True)
+            proc = _proc.run(cmd, shell=True, cwd=str(ws), capture_output=True, text=True)
             acceptance.append({
                 "criterion": crit.get("why") or crit["check"],
                 "check": cmd,

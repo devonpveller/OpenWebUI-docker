@@ -20,10 +20,10 @@ be able to leave a weakened guard on disk looking like source.
 
 from __future__ import annotations
 
-import subprocess
 import sys
 from pathlib import Path
 from typing import List, Tuple
+from quadrant import proc as _proc  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 HARNESS = HERE.parent
@@ -126,7 +126,7 @@ MUTATIONS: List[Tuple[str, str, str, str, str]] = [
 
 
 def _dirty() -> bool:
-    out = subprocess.run(["git", "status", "--porcelain", "--", str(HERE)],
+    out = _proc.run(["git", "status", "--porcelain", "--", str(HERE)],
                          capture_output=True, text=True, cwd=str(HARNESS))
     return any(ln for ln in out.stdout.splitlines()
                if ln.strip() and "prove_guards" not in ln)
@@ -153,7 +153,7 @@ def main(argv: List[str] | None = None) -> int:
             continue
         try:
             path.write_text(original.replace(old, new, 1), encoding="utf-8", newline="\n")
-            proc = subprocess.run(
+            proc = _proc.run(
                 [sys.executable, "-m", "pytest", "test_quadrant.py", "-q", "-k", test,
                  "-p", "no:cacheprovider"],
                 cwd=str(HARNESS), capture_output=True, text=True)

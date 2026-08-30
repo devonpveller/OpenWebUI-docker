@@ -19,13 +19,14 @@ from __future__ import annotations
 import json
 import os
 import shutil
-import subprocess
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from glob import glob
 from pathlib import Path
 from typing import Any, Dict, List
+
+from . import proc as _proc
 
 HERE = Path(__file__).resolve().parent
 SCHEMA_PATH = HERE / "schema.json"
@@ -257,7 +258,7 @@ def probe_little_coder(runner_cfg: Dict[str, Any], *, timeout: float = 8.0) -> P
             "its PATH. An agent's PATH is not the operator's - that is a fact about THIS "
             "process, not about the container."))
     url = f"{base_url}{health_path}"
-    out = subprocess.run(["docker", "exec", container, "curl", "-sS", "--max-time",
+    out = _proc.run(["docker", "exec", container, "curl", "-sS", "--max-time",
                           str(int(timeout)), url], capture_output=True, text=True)
     if out.returncode != 0:
         return PreflightResult(False, reason=(
@@ -299,7 +300,7 @@ def probe_fixture(runner_cfg: Dict[str, Any]) -> PreflightResult:
 
 def probe_target_self(target_cfg: Dict[str, Any], *, repo: Path | None = None) -> PreflightResult:
     repo = Path(target_cfg.get("repo") or repo or Path.cwd())
-    out = subprocess.run(["git", "-C", str(repo), "rev-parse", "--git-common-dir"],
+    out = _proc.run(["git", "-C", str(repo), "rev-parse", "--git-common-dir"],
                          capture_output=True, text=True)
     if out.returncode != 0:
         return PreflightResult(False, reason=(

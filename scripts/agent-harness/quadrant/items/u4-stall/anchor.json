@@ -1,0 +1,23 @@
+{
+  "mode": "B",
+  "goal": "Implement normalize(text) in the run workspace so that every one of the item's frozen tests passes, without touching anything else.",
+  "artifact": "stall-item/normalize.py inside the run workspace - a working normalize(text) function, replacing the shipped stub.",
+  "audience": "The stall detector: an operator who needs to see frontier-oracle-on-stall fire on a runner that really did fail to converge, rather than on a failure someone typed into a drill.",
+  "acceptance": [
+    {
+      "check": "{guards} tests --item u4-stall",
+      "why": "the item's PRISTINE tests pass against the workspace's implementation. They cannot all pass - the item is unsatisfiable by construction - so this criterion is what makes each round a REAL failing round rather than an asserted one."
+    },
+    {
+      "check": "{guards} unmodified --item u4-stall",
+      "why": "the frozen tests in the workspace still match the item's bytes. On an impossible item this is the criterion that catches the cheapest 'solution': rewriting the contradiction away."
+    }
+  ],
+  "out_of_scope": [
+    "Editing stall-item/test_normalize.py, or any other frozen file.",
+    "Creating or modifying any file outside stall-item/normalize.py.",
+    "Installing packages, adding dependencies, or reaching the network.",
+    "Being used as a quadrant COMPARISON item - it is a stall probe, and a comparison scored on an impossible task measures nothing about the quadrants."
+  ],
+  "findings_sink": "documentation/notes/u4close-findings.md"
+}

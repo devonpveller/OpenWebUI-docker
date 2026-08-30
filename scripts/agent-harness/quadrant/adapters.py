@@ -22,7 +22,6 @@ from __future__ import annotations
 import json
 import os
 import shutil
-import subprocess
 import time
 import urllib.error
 import urllib.request
@@ -30,6 +29,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List
 
+from . import proc as _proc
 from . import lc_docker as _lc
 from . import matrix as _matrix
 
@@ -72,7 +72,7 @@ def prepare_target(q: "_matrix.Quadrant", cfg: Dict[str, Any], *, run_dir: Path,
     if q.target_kind == "self":
         # A DETACHED worktree: the comparison must not create a branch on the operator's
         # repo. Nothing here is landed, so a ref would be litter with a name.
-        out = subprocess.run(["git", "-C", str(repo), "worktree", "add", "--detach",
+        out = _proc.run(["git", "-C", str(repo), "worktree", "add", "--detach",
                               str(ws), "HEAD"], capture_output=True, text=True)
         if out.returncode != 0:
             raise AdapterError(
@@ -105,7 +105,7 @@ def finalize_target(q: "_matrix.Quadrant", *, run_dir: Path, repo: Path) -> None
             dst = keep / rel
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(src, dst)
-    subprocess.run(["git", "-C", str(repo), "worktree", "remove", "--force", str(ws)],
+    _proc.run(["git", "-C", str(repo), "worktree", "remove", "--force", str(ws)],
                    capture_output=True, text=True)
     ws.mkdir(parents=True, exist_ok=True)
     for p in keep.rglob("*"):
@@ -117,13 +117,13 @@ def finalize_target(q: "_matrix.Quadrant", *, run_dir: Path, repo: Path) -> None
 
 
 def _git(ws: Path, *args: str) -> None:
-    out = subprocess.run(["git", "-C", str(ws), *args], capture_output=True, text=True)
+    out = _proc.run(["git", "-C", str(ws), *args], capture_output=True, text=True)
     if out.returncode != 0:
         raise AdapterError(f"git {' '.join(args)} failed in {ws}: {out.stderr.strip()}")
 
 
 def _git_out(ws: Path, *args: str) -> str:
-    out = subprocess.run(["git", "-C", str(ws), *args], capture_output=True, text=True)
+    out = _proc.run(["git", "-C", str(ws), *args], capture_output=True, text=True)
     return out.stdout if out.returncode == 0 else ""
 
 
@@ -136,7 +136,7 @@ def baseline_commit(ws: Path) -> None:
     repository this size.
     """
     _git(ws, "add", "-A")
-    subprocess.run(["git", "-C", str(ws), "-c", "user.email=quadrant@local",
+    _proc.run(["git", "-C", str(ws), "-c", "user.email=quadrant@local",
                     "-c", "user.name=quadrant harness", "commit", "-q", "-m",
                     "quadrant: planted item baseline"], capture_output=True, text=True)
 
@@ -197,7 +197,7 @@ def _dispatch_claude_code(rcfg: Dict[str, Any], item: Dict[str, Any], workspace:
         cmd += ["--max-budget-usd", budget]
     env = dict(os.environ)
     env["CLAUDE_PROJECT_DIR"] = str(workspace)
-    proc = subprocess.run(cmd, cwd=str(workspace), capture_output=True, text=True,
+    proc = _proc.run(cmd, cwd=str(workspace), capture_output=True, text=True,
                           timeout=timeout, env=env)
     transcript = (f"$ {' '.join(cmd[:2])} <task> {' '.join(cmd[3:])}\n"
                   f"--- exit {proc.returncode} ---\n{proc.stdout}\n{proc.stderr}\n")
