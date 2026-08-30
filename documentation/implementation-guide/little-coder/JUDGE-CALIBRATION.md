@@ -16,7 +16,7 @@ to get back.
 | `scripts/checks/check-judge-dryrun.ps1` | the dry run (engine: `scripts/checks/lib/judge_dryrun.py`) |
 | `scripts/checks/verify-judge-dryrun.ps1` | proof the dry run can FAIL — 34 cases, every exit code observed |
 | `scripts/checks/check-judge-flag.ps1` | the pre-commit guard: no commit turns the flag on unrated |
-| `scripts/checks/verify-judge-flag-guard.ps1` | proof the guard STOPS a commit — 17 cases, incl. a negative control |
+| `scripts/checks/verify-judge-flag-guard.ps1` | proof the guard STOPS a commit — 20 cases, incl. a negative control |
 
 ### What this does NOT close
 
@@ -534,13 +534,18 @@ it. The dry run reads the config actually in force and refuses.
 
 `verify-judge-flag-guard.ps1` proves the commit-time half stops something, in a
 throwaway git repository, using the real guard and the real hook block
-extracted by marker — never a hand-written stand-in. 17 cases: the ordinary
+extracted by marker — never a hand-written stand-in. 20 cases: the ordinary
 commit is allowed, `judge_enabled: false` is allowed, the flip is denied, the
 `git add` + edit-back launder is denied, an incomplete record is denied, a
 `verdict: reject` record is denied, a valid approving record is ALLOWED, a
 missing validator DENIES (fail closed), `git commit` itself is REFUSED with
 HEAD unmoved — and, as the negative control, with the guard removed from the
-hook the identical commit LANDS.
+hook the identical commit LANDS. One case takes the SHIPPED
+`little-coder.config.yaml`, flips the flag in a copy under the temp directory
+and checks the guard sees it, because every other case uses YAML the drill
+wrote itself and would all still pass if the pattern did not match the real
+file's shape. Breaking one character of that pattern turns 11 of the 20 cases
+red, including the end-to-end commit refusal.
 
 **What it does not catch, stated so nothing reads wider than it is:**
 
@@ -618,7 +623,7 @@ Every claim above was produced by a command, not by reading:
 .\scripts\checks\check-judge-dryrun.ps1 -Container ao-worker-1   # org pool
 .\scripts\checks\check-judge-dryrun.ps1 -EmitPrompts -OutDir <d> # rating packet
 .\scripts\checks\verify-judge-dryrun.ps1                         # 34/34 cases
-.\scripts\checks\verify-judge-flag-guard.ps1                    # 17/17 cases
+.\scripts\checks\verify-judge-flag-guard.ps1                    # 20/20 cases
 .\scripts\checks\check-judge-flag.ps1 -Audit                    # the flag audit log
 docker inspect ao-worker-1 --format '{{range .Mounts}}{{.Type}} {{.Name}} -> {{.Destination}}{{"\n"}}{{end}}'
 docker exec ao-worker-1 stat -c '%n mtime=%y' /var/lib/little-coder/skill /var/lib/little-coder/cohorts /var/lib/little-coder/journals

@@ -210,9 +210,12 @@ FIXED in two places, because neither covers the other:
   `.githooks/pre-commit` as step 6, DENIES a commit that sets the flag truthy
   in any staged YAML unless the same commit stages a valid rating record, and
   appends the outcome to `<git-common-dir>/judge-flag-guard.log`.
-  `verify-judge-flag-guard.ps1` proves it in a throwaway repo — 17 cases,
+  `verify-judge-flag-guard.ps1` proves it in a throwaway repo — 20 cases,
   including `git commit` refused with HEAD unmoved, and the negative control
-  (guard removed from the hook -> the identical commit lands).
+  (guard removed from the hook -> the identical commit lands). One case flips
+  the SHIPPED config in a temp copy, because every other case uses YAML the
+  drill wrote itself and would all pass even if the pattern did not match the
+  real file. Breaking one character of the pattern turns 11 of 20 cases red.
 
 The rating-record escape exists deliberately: without it the check becomes a
 permanent tripwire after an honest enablement, which is the kind of guard
@@ -246,7 +249,7 @@ FIXED: a missing manifest is a FAILING case (now 2 failing cases, exit 1);
 `$EXPECTED_CASES` is asserted in both drills, so a case that stops running is
 red rather than quieter; `-Regen` is real and produces a reviewable diff.
 
-### 8.6 Three defects I found in my own fixes, by running them
+### 8.6 Four defects I found in my own fixes, by running them
 
 Recorded because they are the same shapes, in the work meant to close them.
 
@@ -260,7 +263,13 @@ Recorded because they are the same shapes, in the work meant to close them.
    String when the log held one line, so `$audit[-1]` indexed its last
    CHARACTER and an assertion failed for a reason unrelated to the guard. Every
    call site is now `@(Get-AuditLines)`.
-3. **Every empty file hashed to the empty string.** `Get-NormalizedHash` piped
+3. **A case measured the wrong thing and went red for the wrong reason.** The
+   new "does the pattern match the SHIPPED config" case failed on its first
+   run (expected 1, got 0) because an earlier case had left a VALID rating
+   record in the scratch index — with that staged the guard is right to allow
+   anything. The case now clears the record first. A red for the wrong reason
+   is one step from a green for the wrong reason.
+4. **Every empty file hashed to the empty string.** `Get-NormalizedHash` piped
    `ReadAllBytes` through `Where-Object`, which yields nothing for an empty
    file, and `ComputeHash([byte[]]$null)` returns `""` — so all empty files
    matched each other. Wrapped in `@()`; an empty file now hashes to

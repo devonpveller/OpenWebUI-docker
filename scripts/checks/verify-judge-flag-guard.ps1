@@ -32,7 +32,7 @@ $Tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("judge-flag-drill-" + [guid]
 # EXPECTED_CASES exists so a case that silently stops running is a FAILURE and
 # not a quieter green. The drill it is modelled on could lose a case and still
 # print "ALL 12 CASES PASS" because nothing read the number.
-$EXPECTED_CASES = 17
+$EXPECTED_CASES = 20
 
 $results = @()
 function Case($label, $expected, $actual, $detail = '') {
@@ -182,6 +182,46 @@ try {
     Move-Item "$libInRepo.hidden" $libInRepo
 
     # -----------------------------------------------------------------
+    # 8b. THE REGEX AGAINST THE REAL FILE'S SHAPE. Every case above uses a
+    #     synthetic YAML this drill wrote, so all of them would still pass if
+    #     the guard's pattern did not match the shape the SHIPPED config
+    #     actually uses. This takes the real little-coder.config.yaml, flips
+    #     the flag in a copy INSIDE THE TEMP DIRECTORY, and checks the guard
+    #     sees it. The repository's own config is never modified.
+    # -----------------------------------------------------------------
+    $realCfg = Join-Path $RepoRoot 'little-coder\config\little-coder.config.yaml'
+    if (-not (Test-Path $realCfg)) {
+        Case 'real config present to test the regex against' $true $false $realCfg
+        Case 'the flip actually changed the real config text' $true $false 'skipped - no real config'
+        Case 'guard matches the REAL config shape when flipped' $true $false 'skipped - no real config'
+    } else {
+        Case 'real config present to test the regex against' $true $true ''
+        # Flip only the boolean, byte for byte otherwise - a rewritten YAML
+        # would test the rewriter's formatting, not the shipped file's.
+        # A literal replace, no regex metacharacters - and then ASSERT the text
+        # actually changed. Without that assertion a spacing change in the
+        # shipped config would make this replace a no-op, the guard would
+        # correctly allow an unflipped file, and the case would go GREEN for
+        # the wrong reason.
+        # Case 7 left a VALID rating record in the index, and with that staged
+        # the guard is right to allow anything. Clear it first, or this case
+        # measures the rating record rather than the regex - which is what it
+        # did on its first run: FAIL, expected 1 got 0, for the wrong reason.
+        Invoke-ScratchGit @('rm', '--cached', '-q', $ratingRel) | Out-Null
+        Remove-Item $ratingAbs -Force -ErrorAction SilentlyContinue
+        $realText = Get-Content -Raw $realCfg
+        $flipped = $realText.Replace('judge_enabled: false', 'judge_enabled: true')
+        Case 'the flip actually changed the real config text' $true ($flipped -ne $realText) 'shipped spacing may have changed'
+        $realCopy = Join-Path $script:Repo 'real.config.yaml'
+        Set-Content -Path $realCopy -Value $flipped -Encoding ascii
+        Invoke-ScratchGit @('add', 'real.config.yaml') | Out-Null
+        & powershell -NoProfile -ExecutionPolicy Bypass -File $ScratchGuard -RepoRoot $script:Repo | Out-Null
+        Case 'guard matches the REAL config shape when flipped' 1 $LASTEXITCODE
+        Invoke-ScratchGit @('rm', '--cached', '-q', 'real.config.yaml') | Out-Null
+        Remove-Item $realCopy -Force -ErrorAction SilentlyContinue
+    }
+
+    # -----------------------------------------------------------------
     # 9. END TO END: does the exit code actually reach git?
     #    A guard that returns 1 into a hook that ignores it stops nothing.
     #    The hook body is the REAL step-6 block, extracted by marker.
@@ -199,10 +239,8 @@ try {
         [System.IO.File]::WriteAllText($hookPath, ($hookBody -replace "`r`n", "`n"))
         Invoke-ScratchGit @('config', 'core.hooksPath', '.githooks') | Out-Null
 
-        # The index still holds judge_enabled: true plus the approving record
-        # from case 7; remove the record so the hook must deny.
-        Invoke-ScratchGit @('rm', '--cached', '-q', $ratingRel) | Out-Null
-        Remove-Item $ratingAbs -Force -ErrorAction SilentlyContinue
+        # The index holds judge_enabled: true and NO rating record (case 8b
+        # removed it), so the hook must deny.
         $headBefore = (Invoke-ScratchGit @('rev-parse', 'HEAD') | Select-Object -First 1)
         Invoke-ScratchGit @('commit', '-q', '-m', 'flip the flag') | Out-Null
         $headAfter = (Invoke-ScratchGit @('rev-parse', 'HEAD') | Select-Object -First 1)
