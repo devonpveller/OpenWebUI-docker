@@ -214,15 +214,32 @@ INSERT INTO agent_memory_recall_items
 SELECT 'am_recall_join_ok', count(*) FROM agent_memories am
   JOIN thoughts t ON t.id = am.thought_id
  WHERE am.workspace_id = 'ws-harness' AND am.lifecycle_status = 'active';
+-- THE TWO-PHASE RECALL SHAPE (memory-plane P3). The unit tests assert on the SQL TEXT -
+-- that the ORDER BY names the distance operator, that the floor is a predicate - which is
+-- exactly the class of assertion that passes on a statement Postgres rejects. Three things
+-- only a real database can answer: am.created_at exists (the re-rank reads it), the
+-- similarity alias is addressable from OUTSIDE the subquery (where the floor is applied),
+-- and the subquery-plus-outer-filter shape parses at all. Literals stand in for the bound
+-- parameters; the placeholder numbering is covered by the unit tests.
+SELECT 'am_twophase_ok', count(*) FROM (
+  SELECT am.id, am.created_at,
+         1 - (t.embedding <=> (SELECT ('[' || array_to_string(array_fill(0.0::float8, ARRAY[1024]), ',') || ']')::vector)) AS similarity
+    FROM agent_memories am
+    JOIN thoughts t ON t.id = am.thought_id
+   WHERE am.workspace_id = 'ws-harness' AND am.lifecycle_status = 'active'
+   ORDER BY t.embedding <=> (SELECT ('[' || array_to_string(array_fill(0.0::float8, ARRAY[1024]), ',') || ']')::vector)
+   LIMIT 32
+) s WHERE s.similarity >= 0.4;
 SELECT 'am_sql_ok', count(*) FROM agent_memory_audit_events WHERE workspace_id = 'ws-harness';
 ROLLBACK;
 "@
   $amOut = docker exec -i ob-initdb-test psql -U postgres -d openbrain -tA -v ON_ERROR_STOP=1 -c $amSql 2>&1
-  if ($LASTEXITCODE -eq 0 -and ($amOut | Out-String) -match "am_sql_ok\|1") {
-    Pass "agent-memory writeback SQL executes against the real schema"
+  $amTxt = ($amOut | Out-String)
+  if ($LASTEXITCODE -eq 0 -and $amTxt -match "am_sql_ok\|1" -and $amTxt -match "am_twophase_ok\|") {
+    Pass "agent-memory writeback + two-phase recall SQL execute against the real schema"
   } else {
-    Write-Host ($amOut | Out-String) -ForegroundColor Red
-    Fail "agent-memory writeback SQL rejected by the real schema"
+    Write-Host $amTxt -ForegroundColor Red
+    Fail "agent-memory writeback/recall SQL rejected by the real schema"
   }
 
   # memory_type='check' (U3). The finding->durable-check pipeline writes this type, and

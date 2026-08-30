@@ -65,3 +65,30 @@ elevated — the conservative direction, but not the designed one.
 validation, and review coverage of all nine actions writing `agent_memory_review_actions`.
 
 **Phase 1.4** — the ops door as a second `openbrain-gateway` instance.
+
+## Phase 3 — governed recall into briefs, VALIDATED 2026-08-30 (U6, `work/u6recall`)
+
+Reconciled against canonical PLAN.md §Phase 3. The helper and the four injection points
+landed in `dbbffc8`; this pass verified them adversarially and fixed what the verification
+found. Full write-up + the DECISIONS entries owed: `documentation/notes/u6recall-findings.md`.
+
+| Gate (canonical §3) | State | Evidence in this repo |
+|---|---|---|
+| `_agent_memory_context` modelled on `_acceptance_corpus_context`: guard substring, `try/except → log.debug → ""`, never raises | **MET** | `orchestrator.py:5480`; fail-soft proven at the SEAM (`test_recall_seams.py::test_a_dead_plane_never_blocks_the_seam`), not only in the module |
+| Self-bounded: limit 8, ~300 chars/item, ≤4000 total | **MET** | `select_recall_items` / `_fit_recall_lines`; `test_the_block_is_self_bounded` |
+| Injection at ALL FOUR seams, intake before `set_goal` | **MET** | `orchestrator.py` 6069 / 6988 / 8735 / 12761 — one fixture-backed test per seam, each paired with a recall-off control so a pass cannot mean "returned nothing" |
+| Conservative recall only; `include_unconfirmed` never exposed | **MET** | `test_recall_NEVER_asks_for_unconfirmed_memories` (asserts the wire body, not the server default) |
+| `agent_memory_report_usage` after injection | **MET, and corrected** | Usage now carries the `trace_id` that returned the memory, is `used=True` only for memories the brief actually showed, and is bounded — serial reporting added a measured 24s to a dispatch |
+| Brief rendering ports Hermes `_format_recall_context` | **MET, and hardened** | Whitespace is collapsed before clipping: a multi-line summary previously forged a column-0 `STANDING INTENT:` line into the brief |
+| Two-phase ranking (index scan by raw distance, then blend re-rank), NOT upstream's execution shape | **MET** | OB1 `agent-memory-ranking.ts` + `performRecall`; 17 tests; the two-phase SELECT also executes against the real schema in `scripts/checks/test-quartz4-offline.ps1` |
+| Similarity threshold NOT inherited; calibrate before enabling | **PARKED, deliberately** | `AGENT_MEMORY_RECALL_MIN_SIMILARITY` / `_RECENCY_WEIGHT` are named, wired through compose, documented, and **unset** — the corpus is 3 memories. `documentation/notes/agent-memory-recall-threshold.md` holds the procedure. `AO_MEMORY_RECALL_ENABLED` stays off. |
+| Acceptance: live smoke — a confirmed memory appears in a worker brief, a pending one never does | **NOT MET — parked with the threshold** | Needs the rebuilt `openbrain-mcp` and a confirmed memory; with 3 real memories only the *pending* half would mean anything. Proven with a fixture at every seam instead. |
+
+**Note on the Phase 1 rows above: they are STALE.** They were written 2026-08-29 and record
+five MCP tools and the third REST twin as missing. `agent-memory-tools.ts`,
+`agent-memory-review.ts` and `agent-memory-ops.ts` now implement `report_usage`, `review`,
+`list_review_queue`, `inspect` and `recall_trace`, `POST /agent-memory/usage` exists
+(`agent-memory.ts:661`), and the review path writes ten actions including
+`promote_exposure`. Those rows are not corrected here because this pass verified Phase 3,
+not Phase 1 — a row rewritten from a grep is exactly the kind of unearned claim this file
+exists to warn about.
