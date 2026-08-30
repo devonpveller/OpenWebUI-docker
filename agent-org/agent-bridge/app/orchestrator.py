@@ -35,6 +35,7 @@ from .modules.execution_gate import ExecutionGate
 from .modules.floor_guard import FloorGuard
 from .modules.envs import hosts_for_images
 from .modules.governance_gate import GovernanceGate
+from .modules.openbrain_memory import OpenBrainMemory
 from .modules.capabilities import (
     BranchDelivery,
     CapabilityResult,
@@ -941,6 +942,10 @@ class Orchestrator:
         self.profiles = ProfileRegistry(db, settings.profiles_dir)
         self.models = ModelRouter(settings, self.profiles, client=model_client)
         self.charters = Charters(db, settings, self.audit)
+        # Agent-memory write paths (memory-plane §2). Constructed unconditionally; the
+        # module itself is the thing that checks the flag, so there is one place that
+        # decides whether writes happen rather than a truthiness test at every call site.
+        self.memory = OpenBrainMemory(settings)
         self.floor_guard = FloorGuard(self.scope)
         self.planner = Planner(db, self.models, self.audit)
         self.stop_gates = StopGates(db, self.models, self.audit)
@@ -3094,6 +3099,38 @@ class Orchestrator:
         async with self.db.session_factory() as s:
             e = await s.get(Effort, effort_id)
             return e.project if e else None
+
+    async def _mark_memory_tainted(self, effort_id: str) -> None:
+        """Record that this effort consumed personal-plane-capable input (§1.1).
+
+        Fail-soft: a taint mark that cannot be written must not break the effort - but note
+        the asymmetry, because it decides which way to fail. An unmarked effort writes its
+        memory to the OPS plane, so losing this write widens exposure. It is logged loudly
+        rather than swallowed silently for that reason.
+        """
+        try:
+            async with self.db.session_factory() as sess:
+                e = await sess.get(Effort, effort_id)
+                if e is not None and not e.memory_tainted:
+                    e.memory_tainted = True
+                    await sess.commit()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("could not mark effort %s memory-tainted (memory may be written to "
+                        "the ops plane when it should be personal): %s", effort_id, exc)
+
+    async def _effort_memory_tainted(self, effort_id: str) -> bool:
+        """Read the taint flag. Defaults to TAINTED on any read failure.
+
+        The safe direction: an unreadable flag means we do not know the effort was clean,
+        and §1.1's rule is that exposure never exceeds the writer's plane. Guessing 'clean'
+        here would widen a memory on the strength of a database error.
+        """
+        try:
+            async with self.db.session_factory() as sess:
+                e = await sess.get(Effort, effort_id)
+                return True if e is None else bool(e.memory_tainted)
+        except Exception:  # noqa: BLE001
+            return True
 
     async def _effort_repo(self, effort_id: str) -> str | None:
         """The repo a worker should be focused on for this effort = its project's repo (registry),
@@ -6189,6 +6226,12 @@ class Orchestrator:
                 for c in res.claims[:20]:
                     body += f"- {c}\n"
                 await self.charters.set_steering(effort_id, body, actor="grounding")
+                # §1.1: THIS is the taint event. openbrain-research's corpus includes
+                # personal-plane, gmail-derived sources, so an effort that has read grounded
+                # claims can no longer be assumed ops-clean. Marked mechanically at the
+                # injection site rather than inferred later - by the time _finish_effort
+                # runs, the steering body is just text and nothing says where it came from.
+                await self._mark_memory_tainted(effort_id)
                 await self.comms.post(
                     Intent.worker_activity,
                     f"🔎 grounded {len(res.claims)} claim(s) into the effort context (P4.0).",
@@ -12137,10 +12180,44 @@ class Orchestrator:
         await self._mgmt_remember(
             effort_id, f"[effort {effort_id} finished] {head}" + (f" (branch {branch})" if branch else "")
         )
+        # AGENT-MEMORY OUTCOME RECORD (memory-plane §2.2). The terminal seam: every variable
+        # the record needs is in scope here, and every clean path crosses it.
+        #
+        # Deliberately AFTER the operator has been told and the card has been updated. A
+        # memory write is the least important thing happening in this function, and ordering
+        # it last means a slow Open Brain delays nothing a human is waiting on.
+        #
+        # It cannot raise - the module swallows everything and returns False - so there is no
+        # try/except here to hide a bug behind. If it ever starts raising, that is a defect
+        # in the fail-soft law and it should be loud.
+        await self._write_outcome_memory(
+            effort_id, head=head, done_word=done_word, where=where, branch=branch,
+            succeeded=not unmet_or_partial,
+        )
         # Cross-effort DEBUG HANDOFF: if THIS effort was a handed-off fix, close the loop — tell
         # the waiting reporter and re-engage it (operator 2026-07-14). No-op for normal efforts.
         await self._resolve_handoff_if_any(effort_id, delivery, result,
                                            clean=not unmet_or_partial)
+
+    async def _write_outcome_memory(
+        self, effort_id: str, *, head: str, done_word: str, where: str, branch: str,
+        succeeded: bool,
+    ) -> bool:
+        """One reviewable memory per finished effort. Idempotent by effort id.
+
+        Returns whether it was written, for tests - callers must NOT branch on it, per the
+        fail-soft law: an effort's outcome cannot depend on whether a memory landed.
+        """
+        mem = getattr(self, "memory", None)
+        if mem is None or not getattr(mem, "enabled", False):
+            return False
+        project = await self._effort_project(effort_id) or ""
+        tainted = await self._effort_memory_tainted(effort_id)
+        return await mem.write_effort_outcome(
+            effort_id=effort_id, project=project, succeeded=succeeded,
+            head=head, done_word=done_word, where=where, branch=branch,
+            tainted=tainted,
+        )
 
     async def _escalate_worker_failure(self, effort_id: str, result) -> None:
         """A worker that ended non-`done` climbs the escalation ladder (CM.3). A refusal/rejection

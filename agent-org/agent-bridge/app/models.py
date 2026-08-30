@@ -69,6 +69,14 @@ class Effort(Base):
     # Effort lifecycle (distinct from the gate FSM): open ⇒ still in play; done/aborted ⇒ closed.
     # `/status` shows open efforts by default so completed test efforts don't drown the signal.
     lifecycle: Mapped[str] = mapped_column(String(16), default="open")
+    # §1.1 TAINT. True once this effort has consumed personal-plane-capable input - today
+    # that means grounded/advisory content injected into its steering, whose corpus includes
+    # gmail-derived sources. Memories written from a tainted effort are stamped
+    # exposure='personal'; the stamp can only ever narrow, so a false positive costs reach
+    # and a false negative costs the boundary. It defaults to CLEAN because an effort is
+    # ops-clean by construction until something taints it - and the marking is mechanical,
+    # never a judgement the model makes about itself.
+    memory_tainted: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[str] = mapped_column(default=now_iso)
     updated_at: Mapped[str] = mapped_column(default=now_iso, onupdate=now_iso)
 
