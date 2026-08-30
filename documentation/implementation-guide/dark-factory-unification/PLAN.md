@@ -133,15 +133,22 @@ case a real failure paid for. This is not that case.
 | **3 — preference** | Choices with no technical winner the operator might enjoy weighing in on; cosmetic/product-taste calls | Take the default, record it as a QUESTION in DECISIONS.md, and keep moving. Batched for the operator's return — never a blocker. |
 | **4 — HARD STOP** | The only legitimate reasons to halt and wait | See the list below. Halt, post to the Mattermost thread, park that item, **work a different item meanwhile** if any is unblocked. |
 
-**Class 4, exhaustively** (if it is not on this list, it is not a reason to stop):
-- Merging or promoting anything to `main`.
-- Deploying to production runtime: restarting Scheduled Tasks, recreating or
-  stopping live containers, retagging `:local` images.
-- Pushing to any remote (the OB1-remote-first step included) — commits to
-  local work branches are expected and unrestricted.
-- Anything touching the personal data plane, credentials, or secret values.
-- Destroying data or any action with no clean revert.
-- Spending real money or calling external services beyond the session itself.
+**Class 4, exhaustively** (if it is not on this list, it is not a reason to
+stop). Narrowed 2026-08-30 under the operator's standing dark-factory grant:
+remote pushes, live-container restarts/recreates/retags, and merges into the
+work line are now AUTONOMOUS. What remains is what costs no throughput to
+exclude, because no U-phase requires it:
+- Merging or promoting anything to `main`. The work line is
+  `refactor/ai-stack-cleanup`; nothing in U0–U7 needs `main`, and branch
+  policy makes `main` an operator promotion.
+- The personal data plane — reading, writing, or recalling real personal
+  memories. U5's breach drill uses a SYNTHETIC fixture, never the real plane.
+- Writing secret VALUES anywhere they persist or travel — commits, notes,
+  logs, findings. Provisioning a new local key for a new container is normal
+  work and is not this.
+- Irreversible destruction with no clean revert: force-push, history rewrite,
+  volume or database deletion, dropping a table.
+- Spending real money or calling external services beyond the session.
 
 ### C.3 Formerly-open decisions — now DECIDED with standing defaults
 
@@ -241,6 +248,28 @@ Binding:
   done, or every remaining one blocked. Say which, and why. That is a report,
   not a question.
 
+
+### C.7 Dark-factory mode — the autonomous contract (operator grant, 2026-08-30)
+
+The operator will not read this work as it lands. That is a decision, and it
+changes what has to be true for the work to be trustworthy — it does not
+lower the bar, it moves who holds it.
+
+- **Verification replaces the operator's reading.** A phase closes ONLY when
+  its §2 "Validated by" column is satisfied by an EXECUTABLE check — a test,
+  a drill, a script that fails red. §0 A6 records the verdict on prose
+  verification: FALSIFIED. A phase whose evidence is a paragraph is not done.
+- **Nothing merges unrefuted.** Every item is verified by agents that did not
+  build it, prompted to REFUTE that it meets its Validated by column rather
+  than to bless it. Majority-refuted returns the item to its builder.
+- **A phase that cannot satisfy its column does not merge.** It parks with a
+  written reason and the factory takes the next one. Andon, not silence.
+- **The audit trail is the deliverable's twin.** Every phase leaves a
+  DECISIONS.md entry with its revert path, a findings note, and a commit
+  message stating what was validated and by which check. The operator audits
+  afterwards by reading those, not the diffs — so they must be true.
+- **Stop when every phase is done and validated, or every remaining one is
+  parked.** Report which, with the list.
 ---
 
 ## 0. The audit — what each system assumes, and what the evidence now says
