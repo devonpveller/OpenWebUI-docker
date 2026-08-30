@@ -737,3 +737,46 @@ ALSO FOUND, unfixed: `init-agent-memory-embedding.sql` is absent from
           and `integrations/agent-memory-api/index.ts` selects from `agent_memories` with
           no plane filter.
 REVERT:   nothing to revert — the branch is not merged.
+
+## 2026-08-30 · correction · MY DRILL-INCIDENT HYPOTHESIS IS DISPROVEN (and the real trap is better)
+WHAT I CLAIMED: in `documentation/notes/drill-rebased-the-work-line-incident.md` and the
+          DECISIONS entry for that incident, I offered as the leading hypothesis that a
+          `-C <worktree>` argument resolved empty, so `Invoke-DrillGit -C $wtA rebase
+          drill/verify-d` degraded to `git rebase` **in the current directory** — the
+          operator's checkout. I supported it by verifying that `git -C "" <cmd>` runs in
+          the current directory and exits 0. I labelled it a hypothesis, not a cause.
+IT IS WRONG, and a U6 verifier caught the over-generalisation. I re-tested in PowerShell —
+          the drill's own language and call path — both directly and splatted:
+              git.exe -C "" rev-parse --show-toplevel   -> EXIT 128
+              & git.exe @("-C","","rev-parse",...)      -> EXIT 128
+              "fatal: cannot change to 'rev-parse': No such file or directory"
+          My original test was in **bash**, where it does silently use the current directory
+          and exit 0. The behaviour is shell-dependent and I generalised across the boundary.
+THE REAL TRAP IS MORE USEFUL THAN THE ONE I CLAIMED: **PowerShell DROPS empty-string
+          arguments when invoking a native executable.** `git.exe -C "" rev-parse` is passed
+          to git as `git -C rev-parse` — the empty argument vanishes and every following
+          positional argument SHIFTS LEFT. That is why git reports "cannot change to
+          'rev-parse'": it took the next token as the directory.
+          So an empty variable in a native-command argument list does not become an empty
+          argument; it disappears and silently re-binds the arguments after it. That is a
+          general hazard for every `& native.exe $a $b $c` in this repo, and it is sharper
+          than the claim it replaces.
+WHAT SURVIVES OF THE INCIDENT, unchanged and still proven: the operator's main checkout WAS
+          found detached mid-rebase, rebasing `refactor/ai-stack-cleanup` onto a
+          development-line commit with its process dead 8 minutes; no commit was lost (the
+          branch ref held at `98cf02e`); `git rebase --abort` restored it; and
+          `Invoke-DrillGit` swallows EVERY git error, so any git step in the drill can fail
+          invisibly.
+WHAT IS NOW OPEN: the cause. In PowerShell an empty `-C` fails LOUDLY at 128 — and
+          `Invoke-DrillGit` would swallow that, producing a silently-skipped step rather
+          than a rebase of the main checkout. So the mechanism I proposed does not explain
+          what happened. **The incident's cause is unknown and the leading hypothesis is
+          retired.**
+WHY THIS ENTRY EXISTS: this is the third time in this run that an explanation of mine
+          outran its evidence, and the second caught by someone else. Each time the
+          MEASUREMENT was sound and the STORY attached to it was not. Recording the
+          retraction rather than editing the note quietly, because a note that silently
+          changes its story is worse than one that shows where it was wrong — and because
+          the branch that cited this claim inherited my error, which is exactly how an
+          unverified sentence propagates in a trail the operator reads instead of diffs.
+REVERT:   n/a — a correction.

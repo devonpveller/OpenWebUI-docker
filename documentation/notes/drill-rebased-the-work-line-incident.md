@@ -115,3 +115,36 @@ red-proof, and in-flight worktrees keep the vulnerable copy until they rebase.
   checkout") is worth nothing unless something refuses when it is violated. Two silent
   degradations — an unchecked git exit code and an empty `-C` — were enough to turn the drill
   that certifies the merge protocol into the thing that rebased the live work line.
+
+
+---
+
+## RETRACTION, 2026-08-30 — the hypothesis above is disproven
+
+Finding 4 of "What is PROVEN" said `git -C "" <cmd>` silently runs in the current directory
+and exits 0. **That is true in bash and false in PowerShell**, which is this drill's own
+language and call path. Re-tested, direct and splatted:
+
+```
+git.exe -C "" rev-parse --show-toplevel          -> EXIT 128
+& git.exe @("-C","","rev-parse","--show-toplevel") -> EXIT 128
+fatal: cannot change to 'rev-parse': No such file or directory
+```
+
+A U6 verifier caught the over-generalisation after a branch cited my sentence as though it
+held everywhere.
+
+**The real trap is sharper than the one I claimed.** PowerShell DROPS empty-string arguments
+when invoking a native executable, so `git.exe -C "" rev-parse` reaches git as
+`git -C rev-parse` — the empty argument vanishes and every later positional argument shifts
+left, which is why git reports "cannot change to 'rev-parse'". An empty variable in a
+native-command argument list does not become an empty argument; it disappears and silently
+re-binds what follows. That applies to every `& native.exe $a $b $c` in this repo.
+
+**Consequence for this incident:** in PowerShell an empty `-C` fails LOUDLY at 128, and
+`Invoke-DrillGit` would swallow that — producing a silently skipped step, not a rebase of the
+operator's checkout. So the mechanism I proposed does not explain what happened.
+
+**The cause is unknown and this hypothesis is retired.** Everything under "What is PROVEN"
+other than finding 4 stands: the checkout was detached mid-rebase on the live work line, no
+commit was lost, `rebase --abort` restored it, and `Invoke-DrillGit` swallows every git error.
