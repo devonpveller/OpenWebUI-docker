@@ -35,7 +35,8 @@ DEFAULTS: Dict[str, Any] = {
         "mattermost": {"enabled": True, "profile": "all-cloud", "profile_locked": False},
     },
     "runners": {
-        "claude-code": {"kind": "claude-code", "status": "proven", "default_model": "opus"},
+        "claude-code": {"kind": "claude-code", "status": "proven", "default_model": "opus",
+                        "reachable_from": ["host"]},
     },
     "profiles": {
         "all-cloud": {
@@ -234,3 +235,78 @@ def describe_profile(name: str) -> str:
             parts.append(f"{role}={t.get('runner')}/{t.get('model')}")
     desc = p.get("_desc", "")
     return f"{name}: " + ", ".join(parts) + (f" - {desc}" if desc else "")
+
+
+# ── the runner registry (dark-factory-unification U4) ────────────────────────
+# A runner is an execution SUBSTRATE - what runs a role, of what kind, at what address.
+# That is the one object this harness and agent-org genuinely share, so agent-org's bridge
+# reads the SAME `runners` block out of the same file
+# (agent-org/agent-bridge/app/modules/runners.py). Their PROFILE tables did not merge and
+# should not: agent-org's profile binds a role to a model LANE for the bridge's own
+# inference calls; this one binds a role to a runner. The reasoning, and the evidence that
+# forcing them together would have made both worse, is in
+# documentation/notes/u4bidir-findings.md.
+#
+# Readers only. Dispatch is a separate concern and deliberately not here.
+
+
+def runner_names() -> List[str]:
+    return [k for k in (get("runners") or {}) if not k.startswith("_")]
+
+
+def runner(name: str) -> Dict[str, Any]:
+    """One runner row, normalised.
+
+    Raises on an unknown name rather than returning an empty row: a typo in a runner name
+    must be visible where it is made, not three calls later as a dispatch to "".
+    """
+    runners = get("runners") or {}
+    if name not in runners:
+        raise HarnessConfigError(
+            f"unknown runner '{name}' - known runners: {', '.join(runner_names())}")
+    r = runners[name]
+    return {
+        "name": name,
+        "kind": r.get("kind", name),
+        "status": r.get("status", "unknown"),
+        "endpoint": r.get("endpoint", ""),
+        "default_model": r.get("default_model", ""),
+        "instances": {k: v for k, v in (r.get("instances") or {}).items()
+                      if not k.startswith("_")},
+        "reachable_from": list(r.get("reachable_from") or []),
+        # Whether an orchestrator may ACQUIRE these addresses as work capacity. NOT a
+        # synonym for addressable: the coder plane's little-coder is addressable and is not
+        # pooled, because it is the operator's interactive daemon on one shared /workspace.
+        "pooled": bool(r.get("pooled", False)),
+    }
+
+
+def runner_addresses() -> List[Dict[str, Any]]:
+    """Every address the registry declares, in declaration order - pooled or not.
+
+    A row with ``instances`` contributes each of them; a row with a single ``endpoint``
+    contributes that one; a row with neither (``claude-code``) contributes nothing, because
+    a Claude Code agent is a host process with no task endpoint to address - which is
+    exactly why agent-org cannot yet acquire one as a worker.
+
+    This is what the reachability check walks: a declaration is worth checking whether or
+    not anyone is allowed to acquire it.
+    """
+    out: List[Dict[str, Any]] = []
+    for name in runner_names():
+        r = runner(name)
+        rows = list(r["instances"].items()) or ([(name, r["endpoint"])] if r["endpoint"] else [])
+        for label, url in rows:
+            out.append({"runner": name, "label": label, "url": url, "kind": r["kind"],
+                        "reachable_from": r["reachable_from"], "pooled": r["pooled"]})
+    return out
+
+
+def runner_pool() -> List[Dict[str, Any]]:
+    """The addresses an orchestrator may ACQUIRE as work capacity (``pooled: true``).
+
+    This is the list agent-org's scheduler registers, which is why it is defined here and
+    not in agent-org: one declaration, three readers, no second opinion about which daemons
+    are the org's to use.
+    """
+    return [a for a in runner_addresses() if a["pooled"]]

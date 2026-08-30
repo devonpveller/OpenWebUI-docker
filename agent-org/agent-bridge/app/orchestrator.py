@@ -74,6 +74,7 @@ from .modules.project_context import ProjectContext
 from .modules.projects import ProjectRegistry
 from .modules.roles import RoleAuthority
 from .modules.router import Router, slugify
+from .modules.runners import RunnerDispatch, RunnerRegistry
 from .modules.scheduler import NoCapacityError, Scheduler
 from .modules.scope_ledger import ScopeLedger
 from .modules.stop_gates import StopGates
@@ -88,7 +89,7 @@ from .modules.pending_store import PendingStore
 from .schemas import (
     AlignmentVerdict, Concern, Decision, EscalationVerdict, Level, LifecyclePlan, LifecycleStep, MonitorVerdict, OperatorIntent, Trigger,
 )
-from .worker.harness import FakeHarness, LittleCoderHarness, WorkerHarness
+from .worker.harness import FakeHarness, WorkerHarness
 
 log = logging.getLogger("agent_bridge.orchestrator")
 
@@ -964,10 +965,25 @@ class Orchestrator:
         self.projects = ProjectRegistry(db, self.audit)
         self.egress = EgressAllowlist(db, self.audit, self.projects, settings.egress_allowlist_file)
 
+        # DFU U4 - the SHARED runner registry. Before this, ONE harness implementation was
+        # bound here for the whole pool, so a worker's substrate could not be a property of
+        # the worker: every address got whatever this line chose, and a heterogeneous pool
+        # was inexpressible. The registry now answers per address and RunnerDispatch (itself
+        # a WorkerHarness, so no call site changed) routes to the implementation it names.
+        # See app/modules/runners.py for why the RUNNER registry unified across the two
+        # systems and their PROFILE tables deliberately did not.
+        self.runners = RunnerRegistry.load(
+            registry_file=settings.runner_registry_file,
+            fallback_urls=settings.worker_instance_urls,
+        )
         self.harness: WorkerHarness = harness or (
             FakeHarness()
             if settings.chat_adapter == "fake"
-            else LittleCoderHarness(settings.worker_poll_interval_s, settings.worker_poll_timeout_s)
+            else RunnerDispatch.default(
+                self.runners,
+                poll_interval_s=settings.worker_poll_interval_s,
+                poll_timeout_s=settings.worker_poll_timeout_s,
+            )
         )
         self.router = Router(
             db, settings, self.gate, self.scheduler, self.harness, chat, self.audit,
@@ -2741,7 +2757,11 @@ class Orchestrator:
         await self.profiles.load_from_disk()
         await self.charters.seed_floor_from_disk()
         self._load_pm_voice_charter()     # the operator-tunable "how the org talks to you" system prompt
-        await self.scheduler.register_from_urls(self.s.worker_instance_urls)
+        # The pool comes from the SHARED registry, which falls back to
+        # AO_WORKER_INSTANCE_URLS when the file is absent or silent - one declaration,
+        # so the session harness and this bridge cannot disagree about which daemons
+        # exist or what substrate each one is.
+        await self.scheduler.register_pool(self.runners.pool())
         # F31.3 — a bridge restart orphans every in-flight DAEMON turn: the poll loop that drove it
         # is gone, but the daemon keeps running (reset_stale below only clears the bridge's bookkeeping,
         # not the daemon — its own docstring: "nothing is actually driving that worker"). Left alone the

@@ -80,8 +80,27 @@ class Scheduler:
             await s.commit()
 
     async def register_from_urls(self, urls_csv: str) -> None:
+        """Legacy shape: a bare CSV of daemon URLs, every one assumed little-coder.
+
+        Kept because it is the documented operator surface (`AO_WORKER_INSTANCE_URLS`) and
+        the tests that predate the registry use it. Prefer `register_pool`, which carries
+        each instance's runner KIND alongside its address (DFU U4).
+        """
         for i, url in enumerate(u.strip() for u in urls_csv.split(",") if u.strip()):
             await self.register(f"worker-{i + 1}", url)
+
+    async def register_pool(self, pool: list[tuple[str, str, str]]) -> None:
+        """Register `(instance_id, base_url, runner_kind)` triples from the shared runner
+        registry (`app/modules/runners.py`).
+
+        The kind is NOT stored on the row on purpose: it is a property of the ADDRESS, and
+        the registry is its single source of truth. Persisting a copy would create a second
+        one that drifts the first time an operator re-points a URL - the same class of
+        defect as a config value duplicated in two languages, which is what the shared
+        registry exists to end.
+        """
+        for instance_id, base_url, _kind in pool:
+            await self.register(instance_id, base_url)
 
     async def reset_stale(self) -> int:
         """On bridge startup, any `computing`/`waiting` instance is stale — the bridge lost its

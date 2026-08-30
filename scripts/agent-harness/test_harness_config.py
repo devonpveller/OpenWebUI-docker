@@ -104,6 +104,54 @@ def test_unknown_role_is_rejected():
         config.resolve_role("architect")
 
 
+# ── the runner registry (dark-factory-unification U4) ────────────────────────
+# These pin the SHARED half of U4: `runners` is read by this harness AND by agent-org's
+# bridge (agent-org/agent-bridge/app/modules/runners.py, whose own suite reads this same
+# file). Their PROFILE tables were deliberately left separate - see
+# documentation/notes/u4bidir-findings.md.
+
+
+def test_every_declared_runner_states_its_kind_status_and_reachability():
+    """A runner row is a claim about a substrate. `reachable_from` is the part that was
+    silently FALSE for as long as nothing dispatched: the shipped little-coder endpoint was
+    http://127.0.0.1:8090 while the coder plane publishes only the metrics port, so the
+    address was refused by the host every time. Declaring reachability makes the claim
+    checkable (check-runner-endpoints.ps1); requiring it here stops the next row from
+    omitting it."""
+    names = config.runner_names()
+    assert names, "the registry must declare at least one runner"
+    for name in names:
+        r = config.runner(name)
+        assert r["kind"], f"runner '{name}' has no kind"
+        assert r["status"] in ("proven", "unproven", "unknown"), r["status"]
+        assert r["reachable_from"], f"runner '{name}' does not say where it is reachable from"
+
+
+def test_an_unknown_runner_is_loud():
+    with pytest.raises(config.HarnessConfigError) as e:
+        config.runner("little-codr")
+    assert "little-codr" in str(e.value)
+
+
+def test_the_pool_carries_agent_orgs_workers():
+    """The 'agent-org workers as harness runners' half of U4: the ao-worker pool is
+    declared HERE, in the file both systems read, not only in agent-org's .env."""
+    pool = config.runner_pool()
+    urls = [p["url"] for p in pool]
+    assert "http://ao-worker-1:8090" in urls and "http://ao-worker-2:8090" in urls
+    ao = [p for p in pool if p["runner"] == "agent-org-worker"]
+    assert {p["kind"] for p in ao} == {"little-coder"}
+
+
+def test_claude_code_contributes_no_pool_address():
+    """Not an oversight - the honest statement of the OTHER half of U4. A Claude Code agent
+    is a host process with no task endpoint, so there is nothing for agent-org's scheduler
+    to address; `RunnerDispatch` raises RunnerNotProvisioned rather than pretending."""
+    assert config.runner("claude-code")["endpoint"] == ""
+    assert not config.runner("claude-code")["instances"]
+    assert "claude-code" not in {p["runner"] for p in config.runner_pool()}
+
+
 PS = shutil.which("powershell") or shutil.which("pwsh")
 
 
@@ -124,6 +172,8 @@ def test_powershell_and_python_readers_agree():
         + "foreach($r in @('worker','tester','reviewer')){"
         + "$t=Resolve-RoleTarget -Role $r -Surface extension;"
         + "$o.roles[$r]=('{0}/{1}' -f $t.runner,$t.model)};"
+        + "$o.runners=@(Get-HarnessRunnerNames);"
+        + "$o.pool=@(Get-HarnessRunnerPool | ForEach-Object { '{0}|{1}|{2}|{3}' -f $_.runner,$_.label,$_.url,$_.kind });"
         + "$o | ConvertTo-Json -Depth 6 -Compress"
     )
     out = subprocess.run(
@@ -138,6 +188,13 @@ def test_powershell_and_python_readers_agree():
     assert ps["claim_ttl"] == config.get("pipeline.claim_ttl_minutes")
     assert ps["root"] == config.get("worktree.root")
     assert ps["branch_prefix"] == config.get("worktree.branch_prefix")
+    # The runner registry is read by a THIRD reader (agent-org's bridge), so drift here is
+    # not a cosmetic disagreement - it is two orchestrators believing in different pools.
+    assert ps["runners"] == config.runner_names()
+    assert ps["pool"] == [
+        "{0}|{1}|{2}|{3}".format(p["runner"], p["label"], p["url"], p["kind"])
+        for p in config.runner_pool()
+    ]
     assert list(ps["env_files"]) == list(config.get("worktree.env_files"))
     assert sorted(ps["profiles"]) == sorted(config.profile_names())
     for role in config.ROLES:

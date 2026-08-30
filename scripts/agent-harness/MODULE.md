@@ -28,6 +28,7 @@ Everything else in here is internal and may change without notice.
 | `queue.ps1` | the pipeline: propose → confirm → submit → test → release → review → merge |
 | `lease.ps1` | named leases for SHARED RUNTIME only (Docker, GPU, ports, live DBs) |
 | `verify-merge-protocol.ps1` | the executable drill over the whole protocol |
+| `check-runner-endpoints.ps1` | does the runner registry tell the truth about reachability? (needs the stack up) |
 | `harness.config.json` | the configuration (see below) |
 | `config.py` | the reader other Python code imports (`bridge.py` does) |
 
@@ -49,9 +50,12 @@ lets another distribution retarget the toolkit by editing JSON instead of code.
 
 ## Configuration
 
-One file, two readers. `config.ps1` serves the scripts, `config.py` serves the
+One file, three readers. `config.ps1` serves the scripts, `config.py` serves the
 bridge, and `test_harness_config.py` asks them the same questions and compares the
-answers so they cannot drift apart unnoticed.
+answers so they cannot drift apart unnoticed. The third reader is **outside this
+module**: agent-org's `agent-bridge/app/modules/runners.py` reads the `runners`
+block out of this same file (bind-mounted read-only into the container), and its
+`tests/test_runner_registry.py` pins itself to `config.py` from the other side.
 
 Layers, lowest to highest:
 
@@ -76,7 +80,7 @@ branch agents work against) and `worktree.state_dir_env` (default
 
 A profile assigns each role a **runner** and a model. The runner matters because
 "cloud" and "local" are different execution substrates, not two values of one
-setting: `claude-code` is a Claude Code agent, `little-coder` is the local control
+setting: `claude-code` is a Claude Code agent, `little-coder` is a local control
 plane reaching `llama-cpp` through LiteLLM.
 
 `all-cloud` — opus for all three — is the default everywhere. `all-local`,
@@ -92,6 +96,47 @@ plane reaching `llama-cpp` through LiteLLM.
 The `little-coder` runner is wired and callable but **unproven**: no work item has
 completed through it yet. Its `status` field says so, and that is not decoration —
 do not read config support as a working feature.
+
+## Runners: the shared registry
+
+`runners{}` is the one part of this configuration that is **not only ours**.
+agent-org's bridge reads the same block out of the same file, because both systems
+need the same answer to "what execution substrates exist, of what kind, at what
+address" — agent-org used to hold it as a bare CSV of URLs
+(`AO_WORKER_INSTANCE_URLS`, kind implicit and always little-coder). Their *profile*
+tables were deliberately **not** merged: agent-org's profile binds a role to a model
+**lane** for the bridge's own inference calls; ours binds a role to a **runner**.
+The full argument, with the evidence for it, is in
+[`documentation/notes/u4bidir-findings.md`](../../documentation/notes/u4bidir-findings.md).
+
+Readers: `Get-HarnessRunner` / `Get-HarnessRunnerAddresses` / `Get-HarnessRunnerPool`
+in `config.ps1`, `runner()` / `runner_addresses()` / `runner_pool()` in `config.py`.
+Dispatch is *not* here — this module answers questions about configuration and does
+not submit tasks to anything.
+
+Each row states three things that are claims, not decoration:
+
+| field | means | checked by |
+|---|---|---|
+| `status` | `proven` only once a work item has completed through it | a human, honestly |
+| `reachable_from` | the vantage points that can actually open the address (`host`, or a docker network name) | `check-runner-endpoints.ps1`, in both directions |
+| `pooled` | an orchestrator may ACQUIRE these addresses as work capacity | `test_harness_config.py` + agent-org's suite |
+
+`pooled` is not a synonym for addressable. The coder plane's `little-coder` is
+addressable from inside `llm-net` and is deliberately **not** pooled: it is the
+operator's interactive daemon on one shared `/workspace`, and an orchestrator that
+acquired it would collide with a human mid-task.
+
+`reachable_from` exists because this file claimed `little-coder` lived at
+`http://127.0.0.1:8090` from the day the block was written, while the coder plane
+publishes only `127.0.0.1:9091` (metrics). Every host-side probe of that address was
+refused — and none was ever made, because nothing dispatched. A runner nobody calls
+is a runner nobody corrects, so the claim is now falsifiable by a script.
+
+`claude-code` contributes no pooled address, and that is the honest statement rather
+than an omission: a Claude Code agent is a host process with no task endpoint, so
+agent-org cannot acquire one as a worker. Routing to that kind raises
+`RunnerNotProvisionedError` naming what is missing.
 
 ## Turning it off
 
@@ -128,6 +173,10 @@ because people trust it. `resolve.ps1` now throws rather than fall back.
    `profile:` / `worktree:` / `release:` directive branches.
 4. Remove the worktree/profile columns from `scripts/claude-sessions-bridge/sessions.py`.
 5. Drop the harness rows from `CLAUDE.md`.
+6. In `agent-org/docker/docker-compose.yml`, remove the `runner-registry.json` bind
+   mount and `AO_RUNNER_REGISTRY_FILE`. agent-org keeps working on
+   `AO_WORKER_INSTANCE_URLS` alone — `RunnerRegistry.load` treats an absent file as
+   "fall back to the environment pool", which is deliberately the pre-U4 behaviour.
 
 State under `.git/agent-worktrees/` is disposable once no worktree holds unmerged
 work — check with `git worktree list` before deleting it.

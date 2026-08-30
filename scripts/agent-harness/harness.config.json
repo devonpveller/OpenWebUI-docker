@@ -29,6 +29,27 @@
 
   "default_profile": "all-cloud",
 
+  "_runners_comment": [
+    "THE SHARED RUNNER REGISTRY (dark-factory-unification U4). A runner is an execution",
+    "SUBSTRATE - what runs a role, of what kind, at what address - which is the one object",
+    "this harness and agent-org genuinely have in common. agent-org held the same facts as a",
+    "bare CSV of URLs (AO_WORKER_INSTANCE_URLS, kind implicit); it now reads THIS block",
+    "(agent-org/agent-bridge/app/modules/runners.py), which is why the ao-worker pool is",
+    "declared here. Their PROFILE tables did NOT merge and should not: agent-org's profile",
+    "binds a role to a model LANE for the bridge's own inference calls, this one binds a role",
+    "to a runner. See documentation/notes/u4bidir-findings.md.",
+    "",
+    "pooled says whether an orchestrator may ACQUIRE the row's addresses as work capacity.",
+    "It is not a synonym for addressable: the coder plane's little-coder is addressable and",
+    "is NOT pooled, because it is the operator's interactive daemon on one shared workspace.",
+    "",
+    "reachable_from is load-bearing, not documentation: it names the vantage points that can",
+    "actually open the endpoint, and scripts/agent-harness/check-runner-endpoints.ps1 fails",
+    "when the declaration and reality disagree in EITHER direction. It exists because this",
+    "file claimed little-coder was at http://127.0.0.1:8090 for as long as nothing dispatched",
+    "- the coder plane publishes only 127.0.0.1:9091 (metrics), so that address was refused",
+    "by the host every single time. A runner nothing calls is a runner nothing corrects."
+  ],
   "runners": {
     "claude-code": {
       "kind": "claude-code",
@@ -39,16 +60,34 @@
         "sonnet": "sonnet",
         "haiku": "haiku"
       },
-      "_note": "a Claude Code agent - a subagent in an editor session, or 'claude -p' spawned by the bridge. Model names are CLI aliases, not API ids."
+      "reachable_from": ["host"],
+      "pooled": false,
+      "_note": "a Claude Code agent - a subagent in an editor session, or 'claude -p' spawned by the bridge. Model names are CLI aliases, not API ids. It runs ON the host, in a worktree; it has no task endpoint, which is why agent-org cannot yet use one as a pooled worker (RunnerDispatch raises RunnerNotProvisioned for this kind)."
     },
     "little-coder": {
       "kind": "little-coder",
       "status": "unproven",
-      "endpoint": "http://127.0.0.1:8090",
+      "endpoint": "http://little-coder:8090",
       "submit_path": "/tasks",
       "events_path": "/tasks/{id}/events",
       "default_model": "local-default",
-      "_note": "the local substrate: little-coder reaches llama-cpp through LiteLLM. Wired and callable, but no work item has completed through it yet - do not read config support as a proven feature."
+      "reachable_from": ["ai-stack_llm-net", "coder_lc-net"],
+      "pooled": false,
+      "_note": "the coder plane's daemon. NOT pooled: it is the operator's interactive coder and its /workspace is a single shared volume, so an orchestrator acquiring it would collide with a human mid-task (that collision is a recorded incident, not a hypothetical). NOT reachable from the host: coder/docker-compose.yml publishes 127.0.0.1:9091 (metrics) and nothing else, so a host-side dispatcher must either be given a published 8090 or run inside one of the networks above. Still unproven: no work item has completed through it - do not read config support as a proven feature."
+    },
+    "agent-org-worker": {
+      "kind": "little-coder",
+      "status": "proven",
+      "instances": {
+        "ao-worker-1": "http://ao-worker-1:8090",
+        "ao-worker-2": "http://ao-worker-2:8090"
+      },
+      "submit_path": "/tasks",
+      "events_path": "/tasks/{id}/events",
+      "default_model": "local-default",
+      "reachable_from": ["ai-stack_llm-net", "agent-org_ao-worker-net"],
+      "pooled": true,
+      "_note": "agent-org's governed worker pool, declared here so both systems read one list - the 'agent-org workers as harness runners' half of U4. PROVEN in agent-org (it is the substrate its efforts have always run on), which is a different claim from proven as a HARNESS runner: a harness item lives in a host worktree and these daemons only ever work on a workspace they cloned themselves, so handing one an item means handing over a BRANCH, never a path. Reachability is the same story as little-coder above: container networks only."
     }
   },
 

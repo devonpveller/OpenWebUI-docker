@@ -28,7 +28,7 @@ $script:Defaults = [ordered]@{
         mattermost = [ordered]@{ enabled = $true; profile = "all-cloud"; profile_locked = $false }
     }
     runners         = [ordered]@{
-        "claude-code" = [ordered]@{ kind = "claude-code"; status = "proven"; default_model = "opus" }
+        "claude-code" = [ordered]@{ kind = "claude-code"; status = "proven"; default_model = "opus"; reachable_from = @("host") }
     }
     profiles        = [ordered]@{
         "all-cloud" = [ordered]@{
@@ -225,4 +225,89 @@ function Get-HarnessProfileNames {
     $profiles = Get-HarnessSetting "profiles"
     if (-not $profiles) { return @() }
     return @($profiles.Keys | Where-Object { $_ -notlike "_*" })
+}
+
+# ---------------------------------------------------------------------------
+# THE RUNNER REGISTRY (dark-factory-unification U4)
+#
+# A runner is an execution SUBSTRATE - what runs a role, of what kind, at what address.
+# That is the one object this harness and agent-org genuinely share, so agent-org's bridge
+# reads the SAME `runners` block out of the same file
+# (agent-org/agent-bridge/app/modules/runners.py). Their PROFILE tables did not merge and
+# should not: agent-org's profile binds a role to a model LANE for the bridge's own
+# inference calls; this one binds a role to a runner. See
+# documentation/notes/u4bidir-findings.md for why forcing them together would have made
+# both worse.
+#
+# These are READERS only. Dispatch - actually submitting a task to a runner - is a
+# separate concern and deliberately not here (config.ps1 knows nothing about git,
+# worktrees, queues or HTTP, and gains nothing by learning).
+
+function Get-HarnessRunnerNames {
+    $runners = Get-HarnessSetting "runners"
+    if (-not $runners) { return @() }
+    return @($runners.Keys | Where-Object { $_ -notlike "_*" })
+}
+
+function Get-HarnessRunner {
+    # One runner row, normalised. Throws on an unknown name rather than returning $null:
+    # a typo in a runner name must be visible where it is made, not three calls later as a
+    # dispatch to an empty endpoint.
+    param([Parameter(Mandatory = $true)][string]$Name)
+    $runners = Get-HarnessSetting "runners"
+    if (-not $runners -or -not $runners.Contains($Name)) {
+        $known = (Get-HarnessRunnerNames) -join ", "
+        throw "unknown runner '$Name' - known runners: $known"
+    }
+    $r = $runners[$Name]
+    $instances = [ordered]@{}
+    if ($r.Contains("instances") -and $r["instances"]) {
+        foreach ($k in $r["instances"].Keys) {
+            if ($k -notlike "_*") { $instances[$k] = $r["instances"][$k] }
+        }
+    }
+    return [ordered]@{
+        name           = $Name
+        kind           = $(if ($r.Contains("kind")) { $r["kind"] } else { $Name })
+        status         = $(if ($r.Contains("status")) { $r["status"] } else { "unknown" })
+        endpoint       = $(if ($r.Contains("endpoint")) { $r["endpoint"] } else { "" })
+        default_model  = $(if ($r.Contains("default_model")) { $r["default_model"] } else { "" })
+        instances      = $instances
+        reachable_from = @(if ($r.Contains("reachable_from")) { $r["reachable_from"] } else { @() })
+        # Whether an orchestrator may ACQUIRE these addresses as work capacity. NOT a
+        # synonym for addressable: the coder plane little-coder IS addressable and is NOT
+        # pooled - it is the operator interactive daemon on one shared /workspace.
+        pooled         = [bool]$(if ($r.Contains("pooled")) { $r["pooled"] } else { $false })
+    }
+}
+
+function Get-HarnessRunnerAddresses {
+    # Every address the registry declares, in declaration order - pooled or not:
+    #   @{ runner; label; url; kind; reachable_from; pooled }
+    # A row with `instances` contributes each of them; a row with a single `endpoint`
+    # contributes that one; a row with neither (claude-code) contributes nothing, because a
+    # Claude Code agent is a host process with no task endpoint to address.
+    # This is what check-runner-endpoints.ps1 walks: a declaration is worth checking whether
+    # or not anyone is allowed to acquire it.
+    $out = @()
+    foreach ($name in Get-HarnessRunnerNames) {
+        $r = Get-HarnessRunner -Name $name
+        $rows = @()
+        if ($r.instances.Count -gt 0) {
+            foreach ($label in $r.instances.Keys) { $rows += , @($label, $r.instances[$label]) }
+        }
+        elseif ($r.endpoint) { $rows += , @($name, $r.endpoint) }
+        foreach ($row in $rows) {
+            $out += [ordered]@{ runner = $name; label = $row[0]; url = $row[1]; kind = $r.kind; reachable_from = $r.reachable_from; pooled = $r.pooled }
+        }
+    }
+    return @($out)
+}
+
+function Get-HarnessRunnerPool {
+    # The addresses an orchestrator may ACQUIRE as work capacity (`pooled: true`). This is
+    # the list agent-org scheduler registers, which is why it is defined HERE and not in
+    # agent-org: one declaration, three readers, no second opinion about which daemons are
+    # the org to use.
+    return @(Get-HarnessRunnerAddresses | Where-Object { $_.pooled })
 }

@@ -287,6 +287,14 @@ class Settings(BaseSettings):
     # Base URLs of the pooled little-coder daemons (comma-separated). Empty in
     # P0-P4; filled when the worker profile is enabled (P5).
     worker_instance_urls: str = ""
+    # DFU U4 - the SHARED runner registry (scripts/agent-harness/harness.config.json,
+    # bind-mounted read-only). It declares what execution substrates exist, of what KIND,
+    # at what address - the one object the session harness and this bridge genuinely share
+    # (their profile tables do not: see app/modules/runners.py). Empty, or a path that did
+    # not mount, degrades to `worker_instance_urls` alone, i.e. the pre-U4 behaviour.
+    # `worker_instance_urls` still WINS where both speak, so a live pool cannot move by
+    # accident (house precedence: file < environment).
+    runner_registry_file: str = ""
     # The ACTIVE execution-sidecar toolchain images (mirrors compose's AO_OT1_IMAGE/AO_OT2_IMAGE)
     # — lets the bridge derive env-template egress (modules/envs.py) from what the operator
     # activated: the compose var IS the clearance.

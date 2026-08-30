@@ -135,6 +135,13 @@ services:
       # semaphore: no live GPU-occupancy signal (/slots dead on llama-swap — C6).
       AO_MAX_CONCURRENT_WORKERS: ${AO_MAX_CONCURRENT_WORKERS:-1}
       AO_WORKER_INSTANCE_URLS: ${AO_WORKER_INSTANCE_URLS:-}
+      # THE SHARED RUNNER REGISTRY (dark-factory-unification U4). AO_WORKER_INSTANCE_URLS
+      # above still says WHICH daemons are in the pool and still wins; this file says WHAT
+      # each address is - the runner KIND that selects the WorkerHarness implementation.
+      # Same file the session harness reads (config.ps1 / config.py), mounted below. If the
+      # mount is ever absent the bridge falls back to the URLs alone, i.e. the pre-U4
+      # behaviour, rather than failing to start.
+      AO_RUNNER_REGISTRY_FILE: /etc/agent-bridge/runner-registry.json
       # Audit mirror to Open Brain (P6.2) — off unless the operator turns it on (an ops step
       # after a live smoke). Target is openbrain-mcp, the FIRST-PARTY lane we share llm-net
       # with; openbrain-gateway is the cloud door and is obnet-only, i.e. unreachable here.
@@ -252,6 +259,14 @@ services:
       # one of those costs, because each assumed a copy had to exist somewhere.
       - ../../scripts/agent-harness/anchor.schema.json:/app/anchor/anchor.schema.json:ro
       - ../../scripts/agent-harness/anchor_schema.py:/app/anchor/anchor_schema.py:ro
+      # THE RUNNER REGISTRY, READ-ONLY (dark-factory-unification U4) - same reasoning as the
+      # anchor schema above, one layer down. `runners{}` in this file is the one object the
+      # session harness and this bridge genuinely share: what execution substrates exist, of
+      # what kind, at what address. Their PROFILE tables did NOT merge and should not (see
+      # agent-org/agent-bridge/app/modules/runners.py for why). Mounting the whole
+      # harness.config.json rather than an extracted copy is deliberate: an extract is a
+      # second source of truth with a generate step to forget.
+      - ../../scripts/agent-harness/harness.config.json:/etc/agent-bridge/runner-registry.json:ro
     networks:
       - ao-net
       - llm-net       # reach the existing llm-gateway via the llama-cpp alias
