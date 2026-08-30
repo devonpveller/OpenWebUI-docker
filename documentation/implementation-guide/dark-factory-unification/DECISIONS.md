@@ -234,3 +234,65 @@ CITED:    §C.2 class 2 + the operator's container grant ("be precise with the
 REVERT:   Remove the two volume lines + the two sidecars from the compose file
           and recreate; the rescued copies also remain under the session
           scratchpad `journal-rescue/`.
+
+## 2026-08-29 · U1 Phase 1.3 · class 2
+DECISION: The initdb chain logic was EXTRACTED to `scripts/checks/lib/ob-initdb.ps1`
+          and shared with the offline harness, rather than copied into the new
+          smoke script.
+CITED:    §C.2 class 2 (c) — closest to an existing house pattern. That exact
+          section is where two stale copies have already been caught (the
+          hardcoded 13-of-20 chain; `docker-compose.preview.yml` drifting eight
+          migrations behind). A third copy would have repeated the pattern
+          inside the file that documents it.
+REVERT:   Inline the three functions back into either caller; they are pure and
+          have no state. The offline harness was re-run after the refactor
+          (ALL OFFLINE CHECKS PASSED) so the regression surface is covered.
+
+## 2026-08-29 · U1 Phase 1.3 · class 2
+DECISION: Added a strict-JSON gate to `check-project-configs.ps1` — beyond the
+          phase's scope, kept anyway.
+CITED:    §C.2 class 2 — a discovered gap, found by causing it. A note written
+          into `harness.config.json` contained a raw newline inside a JSON
+          string. PowerShell's ConvertFrom-Json ACCEPTS that; Python's
+          json.loads does not — and that file is read by BOTH `config.ps1` and
+          `config.py` by design, so the harness would have worked from every
+          PowerShell path and broken only in the Mattermost bridge. The
+          pre-commit hook could not have caught it, because the parser it had
+          was the lenient one. `test_powershell_and_python_readers_agree()`
+          would have, but pre-commit does not run pytest.
+REVERT:   Delete section 3 of the check. Proven RED (exit 1 on the exact file
+          PowerShell accepted) then GREEN before landing.
+
+## 2026-08-29 · U1 Phase 1.3 · class 2
+DECISION: `worktree.env_files` gained the two OB1 recipe `.env` files.
+CITED:    §C.2 class 2 — `docker compose -f OB1/docker/docker-compose.yml config`
+          FAILS IN EVERY WORKTREE and passes in the main checkout, because those
+          files live inside the OB1 submodule and a fresh worktree clone never
+          has them. The offline harness has been failing that check in every
+          worktree it has ever run in. The list is configuration precisely so
+          this is a one-line fix.
+REVERT:   Remove the two entries. Verified by creating a probe worktree and
+          rendering compose in it (exit 0).
+
+---
+
+## 2026-08-29 · U1 · ANCHOR CONTRADICTED BY REALITY (§C.1 amendment)
+FINDING:  U1's *Validated by* column reads "The memory-plane plan's own
+          per-phase gates (already written, file/line-grounded)". THAT DOCUMENT
+          DOES NOT EXIST. It is nowhere in this repository's history
+          (`git log --all` finds it never committed) and it is not on disk. It
+          was an untracked working file and it is gone.
+IMPACT:   Phases 1.1, 1.2 and 1.3 were executed and validated against a working
+          memory of it. Their gates were real and the evidence is real — but
+          U1's stated validation SOURCE did not exist while U1 was being
+          validated, and nobody noticed because the phases kept passing.
+DECISION: Reconstructed as a tracked
+          `documentation/implementation-guide/agent-memory-plane/PLAN.md`,
+          marked at the top as NOT the original. Completed phases record what
+          was ACTUALLY validated, cited to the artifact that proves it. Future
+          phases (1.4, 2, 3) have their gates set now, before implementation,
+          per A.4.
+CITED:    §C.1 (amend on the record and continue) + §C.2 class 2.
+REVERT:   Delete the file; U1 returns to citing a document that does not exist.
+CAVEAT:   Anything the original required that is not in the reconstruction is
+          LOST. Named rather than papered over.
