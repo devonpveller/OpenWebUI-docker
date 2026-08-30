@@ -622,3 +622,44 @@ REVERT:   none needed — the repair was an abort; no code changed. Detail:
    unauthorised outward action.
 REVERT:   n/a — corrections. Detail: `documentation/notes/u4bidir-merge-guard.md`,
           `documentation/notes/verification-gate-deviation.md`.
+
+## 2026-08-30 · U4 clause 3 · final state — two residual defects closed, one false sentence remains
+FINDING:  `work/u4bidir` reached round 3. Its two residual defects were CLOSED and verified
+          with no regression: a runner row with absent or empty `reachable_from` no longer
+          exits 0 with a wrong port, and the registry no longer conflates "the file declares
+          no pooled row" with "the file was unreadable" (the mirror-image defect it had
+          reintroduced one file over). The orchestrator's probe ruling was implemented:
+          never exec into `openwebui` (netns coupling with `tailscale`), prefer
+          harness/coder-owned containers deterministically, and say so in the header.
+WHAT STILL FAILS: one FALSE justification sentence, shipped in code.
+          `check-runner-endpoints.ps1:105-106` and `u4bidir-findings.md:675` both assert
+          that `.Port` THROWS on a relative Uri and "would have CRASHED THE SCRIPT".
+          Verified false by the orchestrator under the script's own preamble
+          (`Set-StrictMode -Version Latest`, `$ErrorActionPreference = "Stop"`,
+          Windows PowerShell 5.1): `([Uri]'not a url at all').Port` returns `$null` with
+          `$Error.Count = 0`. The .NET getter raises `InvalidOperationException` and
+          PowerShell swallows it — no throw, no error record. The pre-fix script therefore
+          ran to completion and exited 2.
+          The CODE CHANGE IS CORRECT and its drill case is real; only the stated reason is
+          wrong. The true reason is the one the branch half-states: the cast yields a
+          RELATIVE Uri whose `.Port` is `$null` and `.Host` is `''`.
+WHY THIS ONE IS WORTH RECORDING: the false sentence sits inside the very bullet whose first
+          half reads "I verified the pre-fix behaviour rather than relaying it" — and that
+          half is TRUE and was reproduced exactly. One verified sentence and one unverified
+          sentence, same bullet, same confident voice.
+          This is the identical failure the orchestrator committed with the little-coder
+          container-age claim, and the identical reason refutations must be adjudicated
+          individually: **adjacency to a verified claim is not evidence.** A reader cannot
+          separate the halves, and under §C.7 they are reading these sentences instead of
+          the diff.
+STATUS:   parked with the rest of U4; the branch is not merged, so the false sentence ships
+          nowhere. Recorded so the park's record is accurate.
+LATENT, non-blocking, and disclosed by the verifier rather than hidden: `DEFAULT_KIND`
+          resolution makes a bare CSV url resolve differently with and without the registry
+          mount (unreachable today — no `claude-code` address); `Test-ReachableFromContainer`
+          treats `wget` exit codes as GNU while the file's own comment 40 lines earlier says
+          BusyBox `wget` exits 1 for a 404 and a DNS failure alike (unreached today — all
+          three declared networks have `curl`); and the three config readers diverge for an
+          explicit empty `"kind": ""`, which the cross-reader test catches for pooled rows
+          only.
+REVERT:   nothing to revert — no U4 branch is merged.
