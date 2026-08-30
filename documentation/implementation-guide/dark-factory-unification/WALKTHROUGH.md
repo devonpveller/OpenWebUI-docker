@@ -182,11 +182,23 @@ item parked, condition named in a `decision=refused` ledger record); `DISABLED` 
 distinguishable from `EVALUATED-OK` across four byte-distinct board states; a **thinned** board
 (entries deleted, disabled, or renamed) refuses and names the missing ids; the negative control
 still auto-passes at exit 0 signed `auto:dark` with `-VerifyAudit COMPLETE`.
-**Still open (round 4):** `on_fire` set to anything but `"halt"` makes a condition **fire while
-the board reports `clear`**, with the fire absent from the ledger entirely — `gate-audit.ps1`
-derives `fired` from `action -eq 'halt'`. And README/MODULE claim no config route opens the
-gates, which is false: a predicate swap, a `params.repo` redirect and an id-squatting rename
-also pass, because the completeness check compares **ids only**.
+**Still open (round 5):** `on_fire` is FIXED and verified — a downgraded condition now yields
+board `WARNED`, the gate refuses at exit 6, and the ledger carries `fired:[...] halted:[]`. The
+guard now pins **values**: swapping a predicate while keeping its id turns 4 tests red. But
+`on_indeterminate: warn` reopened the identical hole on the **sibling key** — an unevaluated
+condition counted as evaluated, the board fell through to `clear`, the dark gate auto-passed at
+exit 0 signed `auto:dark`, `-VerifyAudit` said COMPLETE, and the condition was **absent from the
+ledger entirely**.
+
+**Root cause, and why round 5 changed the instruction rather than patching another key:** the
+verdict was computed **by exception** — `$raised` set only on `halt`, `$firedIds` only on
+`fire` — so any outcome nobody enumerated silently meant *fine*. Round 5 requires `clear` to be
+**proven**: every condition outcome into exactly one counted bucket, buckets summing to the
+declared count, `clear` requiring all non-ok buckets empty, unrecognised statuses refusing, and
+the census carried into the ledger so completeness can be re-derived rather than trusted. The
+red-proof is inventing a **new** outcome word and showing the board refuses it *without* a
+branch being added for that word.
+
 **Note:** U6's *column* has been met for two rounds. The refutations are against claims the
 branch added **beyond** its column. Branch `work/u6dark` is unmerged.
 
@@ -215,6 +227,9 @@ instances, each executed:
 - a guard asserting only that a config list was **non-empty** — and its replacement asserting
   only that two fields were **truthy**, the same vacuity one round later.
 
+- a board verdict computed **by exception**, where `clear` was simply what you got when nothing
+  objected — so `on_fire: warn`, then `on_indeterminate: warn`, each silently meant "fine".
+
 The rule adopted: **enumerate-and-patch loses.** Enforce at a chokepoint that cannot be bypassed
 by omission, and derive the completeness test from a **scan of the code** — then prove it has
 teeth by adding an unguarded site yourself.
@@ -222,3 +237,16 @@ teeth by adding an unguarded site yourself.
 Two incidents and three orchestrator errors are recorded in `DECISIONS.md` under 2026-08-30,
 including one hypothesis I later **retracted** after re-testing it in the right shell. They are
 in the log because a trail that only records successes is not an audit trail.
+
+**The sharpest form of it**, found in U6 and worth stating separately because it names the
+shape rather than an instance:
+
+> A guard that decides by **exception** — flagging the cases it recognises and defaulting to
+> "fine" — is not a guard. It is a list of the failures someone thought of, wearing the costume
+> of a decision. Its successor decides by **exhaustive accounting**: every input lands in a
+> counted bucket, the buckets must sum, and the passing verdict requires every failing bucket to
+> be provably empty. The difference is testable — invent an outcome nobody enumerated, and see
+> whether the guard refuses it or waves it through.
+
+Three consecutive U6 rounds fixed a key and left its sibling. That is the signature of deciding
+by exception, and it is why the fix was eventually aimed at the shape instead of the keys.
