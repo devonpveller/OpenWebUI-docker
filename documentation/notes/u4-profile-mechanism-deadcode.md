@@ -94,3 +94,43 @@ door "actually exists"), and this host is a live counterexample to it.
 
 Rule for anything downstream: **`docker inspect` / `docker port` for what IS; compose text for
 what was INTENDED.** Never the second when you mean the first.
+
+---
+
+## Second correction, 2026-08-30 — my *explanation* was invented, and a verifier caught it
+
+The correction above ends: "the container predates that port declaration and was never
+recreated." **That is false.** A U4 verifier disputed it and I re-checked:
+
+```
+$ docker inspect little-coder --format '{{.Created}}'
+2026-08-23T17:00:48Z
+$ git log --format='%h %ad %s' --date=short -1 -S "9091:9090" -- coder/docker-compose.yml
+56af93a 2026-08-21 K.4: coder plane becomes its own compose project (open-terminal moves in)
+```
+
+The container **postdates** the declaration by two days. My sentence had the causality
+backwards.
+
+What survives, and what does not:
+
+- **SURVIVES (measured):** the running container publishes nothing —
+  `NetworkSettings.Ports` is `{"9090/tcp":[]}` and `docker port` prints nothing — while
+  `coder/docker-compose.yml` declares `127.0.0.1:9091:9090`. Compose text and the running
+  stack disagree. Every conclusion drawn from that stands, including that a substring check
+  over compose text proves a door is *declared*, never that it exists.
+- **DOES NOT SURVIVE (invented):** *why* they disagree. I do not know. "Never recreated" was a
+  plausible story I attached to a real measurement without checking it, and it is wrong.
+
+The honest statement is: **the declared and running states disagree, and I have not
+established the cause.**
+
+That this happened inside the note written to teach "`docker inspect` for what IS, compose for
+what was INTENDED" is the useful part. The measurement was sound both times; the failure was
+appending an unverified *mechanism* to a verified *observation* and writing them in the same
+voice. A reader cannot tell which half was checked — and under §C.7 the operator reads these
+notes instead of the diffs, so the two halves have to be visibly separated.
+
+This is the second time in this effort that an explanation of mine outran its evidence, and
+both were caught by someone else. Recorded rather than quietly edited, because a note that
+silently changes its story is worse than one that shows where it was wrong.
