@@ -204,6 +204,12 @@ def _run_one(q: "matrix_mod.Quadrant", cfg: Dict[str, Any], it: Dict[str, Any], 
             # The acceptance checks are the verdict, but a runner that reported failure
             # while the checks pass is worth saying out loud rather than smoothing over.
             rec["notes"].append(f"runner reported failure but acceptance passed: {outcome.error}")
+        # An adapter may have something to say about HOW it ran the cell - the little-coder
+        # transport mirrors the workspace into a container and says so, and says louder still
+        # when it could not put the plane back afterwards. Those belong in the record a
+        # reader of the comparison sees, not only in a transcript nobody opens.
+        for note in (outcome.detail.get("notes") or []):
+            rec["notes"].append(str(note))
     except Exception as exc:  # noqa: BLE001
         t1 = _dt.datetime.now(_dt.timezone.utc)
         transcript_path.write_text(f"adapter error: {exc}\n", encoding="utf-8")

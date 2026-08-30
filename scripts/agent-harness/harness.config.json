@@ -49,6 +49,17 @@
       "submit_path": "/tasks",
       "task_path": "/tasks/{id}",
       "events_path": "/tasks/{id}/events",
+      "container_workspace": "/workspace",
+      "_why_container_workspace": [
+        "The daemon's workspace root INSIDE the container (little-coder.config.yaml's",
+        "workspace.path), which is also the agent's cwd for every task. The quadrant",
+        "comparison mirrors a run workspace into this directory and mirrors the changed",
+        "files back out, because little-coder's workspace is a docker VOLUME shared with",
+        "open-terminal - there is no bind mount from a host worktree into the container, and",
+        "the daemon's own focus path clones from a git-host URL only (urlnorm.py rejects",
+        "local paths and file://). Declared here rather than assumed in code so a config",
+        "change is the whole change if the daemon's workspace ever moves."
+      ],
       "default_model": "local-default",
       "_note": "the local substrate: little-coder reaches llama-cpp through LiteLLM. Dispatched by dispatch.ps1 (Invoke-HarnessTask).",
       "_why_lease": [

@@ -50,7 +50,10 @@ def cfg(**over):
         "runners": {
             "claude-code": {"kind": "claude-code", "status": "proven", "default_model": "opus"},
             "little-coder": {"kind": "little-coder", "status": "unproven",
-                             "endpoint": "http://127.0.0.1:8090", "submit_path": "/tasks",
+                             "transport": "docker-exec", "container": "little-coder",
+                             "base_url": "http://localhost:8090",
+                             "container_workspace": "/workspace",
+                             "submit_path": "/tasks",
                              "default_model": "local-default"},
             "fixture": {"kind": "fixture", "status": "self-test"},
         },
@@ -134,17 +137,70 @@ def test_unknown_target_fails_loudly():
 
 
 def test_runner_missing_a_field_its_kind_needs_fails_loudly():
-    """A little-coder runner with no endpoint is a config error, not a NOT RUN.
+    """A little-coder runner that does not say HOW it is reached is a config error.
 
     The distinction is the point: NOT RUN is a fact about the world (the daemon is
-    unreachable); a missing endpoint is a fact about the operator's file, and reporting it
+    unreachable); a missing transport is a fact about the operator's file, and reporting it
     as NOT RUN would hide a typo behind a legitimate-looking result.
     """
     c = cfg()
-    del c["runners"]["little-coder"]["endpoint"]
+    del c["runners"]["little-coder"]["transport"]
     with pytest.raises(matrix_mod.QuadrantConfigError) as e:
         matrix_mod.build(c)
-    assert "endpoint" in str(e.value)
+    assert "transport" in str(e.value)
+
+
+def test_a_docker_exec_runner_missing_its_container_fails_loudly():
+    """The same rule one level down: the fields depend on the transport, and are required.
+
+    Written 2026-08-30 with the merge of the quadrant harness and the dispatch layer. The
+    schema used to demand `endpoint` of EVERY little-coder runner - a host door the running
+    container does not publish - so the requirement moved onto the transport. This test is
+    what stops that move from having quietly deleted the requirement: a docker-exec runner
+    with no container, or no workspace inside it, is still refused before anything runs.
+    """
+    for field in ("container", "base_url", "container_workspace"):
+        c = cfg()
+        del c["runners"]["little-coder"][field]
+        with pytest.raises(matrix_mod.QuadrantConfigError) as e:
+            matrix_mod.build(c)
+        assert field in str(e.value), field
+        assert "docker-exec" in str(e.value), field
+
+
+def test_an_unknown_transport_is_refused_rather_than_attempted():
+    """A transport the harness cannot check is one it must not silently attempt.
+
+    Same rule `preflight` applies to a runner KIND with no probe. Without this, a typo in
+    `transport` would fall through every requirement list (no requirements are declared for
+    an unknown name) and the cell would fail at dispatch time as if the world were at fault.
+    """
+    c = cfg()
+    c["runners"]["little-coder"]["transport"] = "carrier-pigeon"
+    with pytest.raises(matrix_mod.QuadrantConfigError) as e:
+        matrix_mod.build(c)
+    assert "carrier-pigeon" in str(e.value)
+
+
+def test_the_probe_reports_an_unfocused_daemon_as_blocked_with_that_reason():
+    """A healthy daemon with no focused project cannot take a task: POST /tasks is 409.
+
+    That is a fact about the plane, so it is a BLOCKED preflight carrying the reason - not
+    an adapter exception two minutes into a run, and not a silent READY that becomes an
+    `error` record about the harness.
+    """
+    body = {"status": "ok", "version": "0.1.0", "focus": ""}
+    pf = matrix_mod._lc_health_verdict(body, {"transport": "docker-exec"})
+    assert not pf.ready
+    assert "no focused project" in pf.reason and "409" in pf.reason
+
+    pf_ok = matrix_mod._lc_health_verdict(
+        {"status": "ok", "focus": "https://github.com/o/r"}, {"transport": "docker-exec"})
+    assert pf_ok.ready and pf_ok.detail["focus"] == "https://github.com/o/r"
+
+    pf_drain = matrix_mod._lc_health_verdict(
+        {"status": "draining", "focus": "https://github.com/o/r"}, {})
+    assert not pf_drain.ready and "draining" in pf_drain.reason
 
 
 def test_target_missing_a_field_its_kind_needs_fails_loudly():

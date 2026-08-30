@@ -101,11 +101,22 @@
   "runner_kind_requirements": {
     "claude-code": [],
     "little-coder": [
-      "endpoint",
+      "transport",
       "submit_path"
     ],
     "fixture": []
   },
+  "runner_transport_requirements": {
+    "docker-exec": [
+      "container",
+      "base_url",
+      "container_workspace"
+    ],
+    "http": [
+      "base_url"
+    ]
+  },
+  "_runner_transport_requirements_why": "A little-coder runner declares HOW it is reached, and the fields that answer 'where' depend on that answer. Until 2026-08-30 this file demanded `endpoint`, which named a host door (127.0.0.1:8090) the running container does not publish - so the two little-coder cells preflighted BLOCKED and the comparison was 2/4 (documentation/notes/u4quad-findings.md F7). scripts/agent-harness/dispatch.ps1 had already replaced that door with `docker exec`; merging the two branches made the demand for `endpoint` a config error on a runner that works. The requirement is now per-transport, so an unknown transport, or a docker-exec runner with no container, is still a LOUD config error rather than a NOT RUN - the distinction this file exists to keep.",
   "target_kind_requirements": {
     "self": [],
     "project": [

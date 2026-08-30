@@ -3,7 +3,7 @@
 TWO KINDS OF "NO", KEPT APART ON PURPOSE.
 
   * A CONFIG ERROR is a fact about the operator's file - a runner named in `quadrant.runners`
-    that no `runners` entry defines, a little-coder runner with no endpoint. `build` RAISES.
+    that no `runners` entry defines, a docker-exec runner with no container. `build` RAISES.
     Reporting a typo as "NOT RUN: unreachable" would file a mistake under a legitimate
     result and it would never be found.
   * A BLOCKED QUADRANT is a fact about the world - the daemon is not listening, the CLI is
@@ -92,6 +92,33 @@ def _require(mapping: Dict[str, Any], name: str, fields: List[str], what: str) -
             f"{what} '{name}' is missing required field(s): {', '.join(missing)}")
 
 
+def _require_transport(r: Dict[str, Any], name: str, s: Dict[str, Any]) -> None:
+    """A runner that declares a TRANSPORT must carry that transport's fields.
+
+    Added 2026-08-30 when the quadrant harness and the dispatch layer were merged. The
+    schema used to demand `endpoint` of every little-coder runner - an HTTP door on the host
+    that little-coder does not publish - while the dispatch layer had already moved to
+    `docker exec`. Making the demand per-transport keeps the property that mattered (a
+    misconfigured runner is a LOUD config error, never a quiet NOT RUN) while letting the
+    two answers to "how do I reach this runner" coexist.
+
+    An UNKNOWN transport raises for the same reason `preflight` refuses a kind with no probe:
+    a transport the harness cannot check is a transport it must not silently attempt.
+    """
+    reqs = s.get("runner_transport_requirements") or {}
+    if not reqs:
+        return
+    transport = str(r.get("transport") or "").strip()
+    if not transport:
+        return  # kinds that declare no transport (claude-code, fixture) are unaffected
+    if transport not in reqs:
+        raise QuadrantConfigError(
+            f"runner '{name}' declares transport '{transport}', which this harness has no "
+            f"requirements for (known: {', '.join(sorted(reqs)) or 'none'}). A transport the "
+            f"harness cannot check is one it must not silently attempt.")
+    _require(r, name, reqs[transport], f"runner (transport '{transport}')")
+
+
 def build(cfg: Dict[str, Any]) -> List[Quadrant]:
     """The configured cross product, validated. Raises QuadrantConfigError, never guesses."""
     s = schema()
@@ -126,6 +153,7 @@ def build(cfg: Dict[str, Any]) -> List[Quadrant]:
                 f"(defined: {', '.join(sorted(all_runners)) or 'none'})")
         _require(r, rname, s["runner_required_fields"], "runner")
         _require(r, rname, s["runner_kind_requirements"].get(r["kind"], []), "runner")
+        _require_transport(r, rname, s)
         for tname in targets:
             t = all_targets.get(tname)
             if not isinstance(t, dict):
@@ -179,27 +207,90 @@ def probe_claude_code(runner_cfg: Dict[str, Any]) -> PreflightResult:
         "VS Code extension binary"))
 
 
-def probe_little_coder(runner_cfg: Dict[str, Any], *, timeout: float = 4.0) -> PreflightResult:
-    """Can THIS process dispatch a task to little-coder?
+def probe_little_coder(runner_cfg: Dict[str, Any], *, timeout: float = 8.0) -> PreflightResult:
+    """Can THIS process dispatch a task to little-coder, over the transport it declares?
 
     Not "is little-coder healthy" - that question is answered by the container's own
     healthcheck and it is not the one that decides whether a quadrant can run. The question
-    is whether the harness has a route to the API the config names.
+    is whether the harness has a route to the API the config names, AND whether the daemon
+    is in a state that accepts work.
+
+    FOCUS IS PART OF READINESS. `POST /tasks` returns HTTP 409 when the daemon has no focused
+    project (daemon.py), so a dispatch into an unfocused daemon is not a result about the
+    quadrant - it is a fact about the plane, which is exactly what a BLOCKED preflight is
+    for. Checking it here turns that into a reason a reader can act on instead of an adapter
+    exception two minutes later.
     """
-    endpoint = str(runner_cfg.get("endpoint") or "").rstrip("/")
-    url = f"{endpoint}{runner_cfg.get('health_path') or '/health'}"
-    try:
-        with urllib.request.urlopen(url, timeout=timeout) as resp:  # noqa: S310
-            if 200 <= resp.status < 300:
-                return PreflightResult(True, detail={"endpoint": endpoint})
+    transport = str(runner_cfg.get("transport") or "").strip() or "http"
+    health_path = runner_cfg.get("health_path") or "/health"
+
+    if transport == "http":
+        endpoint = str(runner_cfg.get("endpoint") or runner_cfg.get("base_url") or "").rstrip("/")
+        url = f"{endpoint}{health_path}"
+        try:
+            with urllib.request.urlopen(url, timeout=timeout) as resp:  # noqa: S310
+                if not 200 <= resp.status < 300:
+                    return PreflightResult(False, reason=(
+                        f"little-coder endpoint {url} answered HTTP {resp.status}"))
+                body = json.loads(resp.read().decode("utf-8") or "{}")
+        except (urllib.error.URLError, OSError, ValueError) as exc:
             return PreflightResult(False, reason=(
-                f"little-coder endpoint {url} answered HTTP {resp.status}"))
-    except (urllib.error.URLError, OSError) as exc:
+                f"little-coder is not dispatchable from this process: {url} -> {exc}. "
+                f"The daemon may well be healthy inside its container; what is missing is a "
+                f"route from the host. Measured 2026-08-30: the running container publishes "
+                f"no ports at all, so the API port is reachable only via 'docker exec' - "
+                f"which is what transport 'docker-exec' does."))
+        return _lc_health_verdict(body, {"transport": "http", "endpoint": endpoint})
+
+    if transport != "docker-exec":
+        # build() already refuses an unknown transport; this is the second line of defence
+        # for a caller that assembled a config by hand.
         return PreflightResult(False, reason=(
-            f"little-coder is not dispatchable from this process: {url} -> {exc}. "
-            f"The daemon may well be healthy inside its container; what is missing is a "
-            f"route from the host. Verified 2026-08-30: the running container publishes no "
-            f"ports at all, so the API port is reachable only via 'docker exec'."))
+            f"little-coder declares transport '{transport}', which this harness cannot probe "
+            f"(known: docker-exec, http)"))
+
+    container = str(runner_cfg.get("container") or "").strip()
+    base_url = str(runner_cfg.get("base_url") or "").rstrip("/")
+    if not shutil.which("docker"):
+        return PreflightResult(False, reason=(
+            "little-coder is reached with 'docker exec' and this process has no 'docker' on "
+            "its PATH. An agent's PATH is not the operator's - that is a fact about THIS "
+            "process, not about the container."))
+    url = f"{base_url}{health_path}"
+    out = subprocess.run(["docker", "exec", container, "curl", "-sS", "--max-time",
+                          str(int(timeout)), url], capture_output=True, text=True)
+    if out.returncode != 0:
+        return PreflightResult(False, reason=(
+            f"docker exec {container} curl {url} exited {out.returncode}: "
+            f"{(out.stderr or out.stdout).strip()[:400]}"))
+    try:
+        body = json.loads(out.stdout or "{}")
+    except ValueError:
+        return PreflightResult(False, reason=(
+            f"little-coder {url} did not answer JSON via docker exec {container}: "
+            f"{out.stdout.strip()[:200]!r}"))
+    return _lc_health_verdict(body, {"transport": "docker-exec", "container": container,
+                                     "base_url": base_url})
+
+
+def _lc_health_verdict(body: Dict[str, Any], detail: Dict[str, Any]) -> PreflightResult:
+    """One reading of /health, whichever transport carried it."""
+    status = str(body.get("status") or "")
+    focus = str(body.get("focus") or "")
+    if status == "draining":
+        return PreflightResult(False, reason=(
+            "little-coder is draining (shutting down) and is not accepting triggers"))
+    if status != "ok":
+        return PreflightResult(False, reason=(
+            f"little-coder /health says status={status!r}, not 'ok'"))
+    if not focus:
+        return PreflightResult(False, reason=(
+            "little-coder has no focused project, and POST /tasks returns HTTP 409 without "
+            "one. Focus it first (POST /project {repo: <git-host url>}) - note that doing so "
+            "WIPES its workspace, which is why this runner declares the 'coder' lease."))
+    d = dict(detail)
+    d.update({"focus": focus, "version": str(body.get("version") or "")})
+    return PreflightResult(True, detail=d)
 
 
 def probe_fixture(runner_cfg: Dict[str, Any]) -> PreflightResult:
