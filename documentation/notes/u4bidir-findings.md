@@ -38,7 +38,7 @@ caller_key}` to a role name. `lane` is `local|cloud` and selects a **gateway**
 **It has never governed a worker.** Grepping every `models.structured(` /
 `models.complete(` call in the bridge yields exactly three profile names reaching
 `ModelRouter`: `po`, `pm`, `pm-voice` (plus `planner` and the stop-gate lenses through
-`self.models`). `worker-default` appears ~20 times in `orchestrator.py` and once in
+`self.models`). `worker-default` appears 25 times in `orchestrator.py` and once in
 `modules/router.py:636` — every one of them as the `role` argument to
 `Scheduler.acquire(effort_id, role, session_id)` or to `_agent_identity()` (the git
 author). It never reaches `ModelRouter`. The worker's model is decided *inside
@@ -103,7 +103,7 @@ both directions.
 ## 3. "harness runner as an agent-org worker" — TRUE in mechanism, PARKED on provisioning
 
 The protocol was never the blocker. `WorkerHarness`
-(`agent-org/agent-bridge/app/worker/harness.py:97`) is a 9-method `Protocol` with two
+(`agent-org/agent-bridge/app/worker/harness.py:97`) is an 8-method `Protocol` with two
 implementations already (`LittleCoderHarness`, `FakeHarness`), and every one of the 15
 call sites in `orchestrator.py` + `modules/router.py` already passes `inst.base_url`
 as the first argument. The address was always the routing key.
