@@ -42,13 +42,30 @@ stated in `../dark-factory-unification/DECISIONS.md`; the short version:
 Was absent entirely when this file was written; now enforced and proven at three layers.
 
 - `exposure` (`ops` / `personal`) in `agent_memories.metadata`, **mirrored onto the linked
-  thought** so `search_thoughts` enforces the same boundary.
+  thought** so the generic thoughts lane can enforce the same boundary. Precisely: the
+  mirror is the *label*, and the enforcement is the door's forced `metadata_filter`
+  (`search_thoughts` applies `metadata @> $::jsonb`; it has no exposure logic of its own,
+  `index.ts:497`). Corrected 2026-08-30 — this line previously read as if the tool enforced
+  it, and the U5 drill's red phase showed otherwise by allowing the tool and observing that
+  the forced filter, not the tool, is what held.
 - `stampExposure()` is **demotion-only** — no argument widens. Taint (reported by the
   calling runtime) and detected PII both demote; **PII never rejects**.
 - Stamped **at doors**: the caller's value is dropped, not merged. The internal lane is
   wired to `ops` per §1.1's door table; reads are forced by the door too.
 - Proven: 87 unit tests; the filter executed against the real schema (including that a
   pre-exposure row reads as `personal`, not NULL); and end to end through the doors.
+
+## U5 — personal-plane exclusion, drilled adversarially (2026-08-30)
+
+`scripts/checks/drill-personal-plane-exclusion.ps1` is the executable form of the
+dark-factory-unification U5 gate ("mechanically stopped **and** the attempt is visible in an
+audit record"). It plants a **synthetic** personal-plane record on a throwaway database and
+attacks it from all three positions an agent actually occupies — the internal REST lane, the
+ops door, and the thoughts lane — then removes each guard in turn and requires the fixture to
+leak, so no green result is taken on trust. The visibility half was the gap it closed: a
+refused recall now writes `agent_memory_audit_events(event_type='recall_requested')` carrying
+`requested_exposure` / `enforced_exposure` / `exposure_override_denied`, and a tool denied at
+the ops door writes a `tool_denied` audit line instead of vanishing into a `-32601`.
 
 Also corrected here: §1 locks `review_status='pending'` and this repo had shipped
 `evidence_only`, which removed the review gate. See DECISIONS.md.

@@ -98,6 +98,39 @@ WRITE_STAMP_VALUE = os.environ.get("GATEWAY_WRITE_STAMP_VALUE", SHARE_VALUE)
 # thread tool later, add it to READ_TOOLS so it gets the metadata_filter.
 
 
+# --- AUDIT (dark-factory-unification U5) ------------------------------------
+#
+# U5 is validated by "an agent instructed to ... reach personal-plane data is mechanically
+# stopped AND the attempt is visible in an audit record". This door was doing the first
+# half only. A denied tool got a JSON-RPC -32601 and nothing else happened: no row, no
+# line, nothing. From outside, an agent probing for `search_thoughts` and an agent that
+# never called were indistinguishable, and the operator is not reading this as it lands.
+#
+# WHAT THIS IS, AND WHAT IT IS NOT. It is one JSON line per governance-relevant decision on
+# the container's stdout, which compose keeps (json-file, 10m x 3) and `docker logs` reads.
+# It is NOT the durable audit table - a denied call never reaches openbrain-mcp, so there
+# is no connection to write a row on and no memory to hang it off. The calls that DO reach
+# the server get their durable row there (agent_memory_audit_events, event_type
+# 'recall_requested'); this covers the ones that are stopped before they arrive.
+#
+# VALUES ARE TRUNCATED AND ALLOWLISTED. This line is durable and travels; the one thing it
+# must never do is become the place a caller's payload gets copied to. Only the tool name,
+# the field names in play, and the exposure/share LABELS are ever written - never content,
+# never a whole argument blob.
+AUDIT_SCHEMA = "openbrain-gateway.audit.v1"
+
+
+def _audit(event: str, **fields) -> None:
+    rec = {"audit": AUDIT_SCHEMA, "event": event, "profile": GATEWAY_PROFILE}
+    rec.update(fields)
+    print(json.dumps(rec, sort_keys=True), flush=True)
+
+
+def _label(v) -> str:
+    """A caller-supplied value, made safe to write into a durable line."""
+    return str(v)[:64]
+
+
 def _force_read_filter(args: dict) -> dict:
     md = dict(args.get("metadata_filter") or {})
     md[READ_FILTER_FIELD] = READ_FILTER_VALUE        # non-overridable
@@ -135,12 +168,37 @@ def _apply_policy(msg: dict):
         args = params.get("arguments") or {}
 
         if name not in ALLOWED_TOOLS:
+            # THE DENIAL IS THE INTERESTING EVENT. It is the shape an agent reaching past
+            # its allowlist makes - the ops door serves agent_memory_* and nothing else, so
+            # a `search_thoughts` here is a probe at the personal plane by definition.
+            _audit("tool_denied", tool=_label(name),
+                   allowed=sorted(ALLOWED_TOOLS))
             return msg, _rpc_error(
                 rpc_id, -32601,
                 f"Tool '{name}' is not available to cloud services "
                 f"(privacy policy). Allowed: {sorted(ALLOWED_TOOLS)}.")
 
         if name in READ_TOOLS:
+            # Detect BEFORE forcing. _force_read_filter is kept pure - its output is
+            # asserted byte-for-byte by smoke_test.py --defaults, and an audit call inside
+            # it would fire during that check for no reason.
+            attempted = (args.get("metadata_filter") or {}).get(READ_FILTER_FIELD)
+            if attempted is not None and attempted != READ_FILTER_VALUE:
+                _audit("read_filter_override", tool=_label(name),
+                       field=READ_FILTER_FIELD, attempted=_label(attempted),
+                       forced=READ_FILTER_VALUE)
+            # The agent-memory recall tools take `exposure` as a FIRST-CLASS argument
+            # rather than through metadata_filter, and the server drops it (agent-memory.ts
+            # performRecall forces the plane from its own door value). Passing it through
+            # is deliberate: the server is the boundary, and it writes the durable audit
+            # row. What was missing is that the door saw the attempt first and said nothing.
+            asked = args.get("exposure")
+            if asked is not None:
+                asked_list = asked if isinstance(asked, list) else [asked]
+                if any(_label(e) != READ_FILTER_VALUE for e in asked_list):
+                    _audit("exposure_override_attempt", tool=_label(name),
+                           requested=[_label(e) for e in asked_list[:8]],
+                           door=READ_FILTER_VALUE)
             params["arguments"] = _force_read_filter(args)
         elif name in WRITE_TOOLS:
             params["arguments"] = _force_write_extra(args)
