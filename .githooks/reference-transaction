@@ -196,6 +196,12 @@ echo "  the line-ending rule, the LLM-gateway routing rule, the compose/ps1 stru
 echo "  check and the env_file scope rule - each of which exists because it caught a real" >&2
 echo "  failure. If a check is genuinely wrong, fix the check." >&2
 echo "" >&2
+echo "  IF AN HONEST COMMIT IS BEING REFUSED, check the hook set is CONSISTENT. The" >&2
+echo "  attester is .githooks/commit-msg and it must come from the same commit as this" >&2
+echo "  file: a half-merged .githooks/ - new guard, old attester that still writes the" >&2
+echo "  ledger from pre-commit - denies everything, because the old attester records a" >&2
+echo "  tree with no message digest and this hook requires the pair." >&2
+echo "" >&2
 echo "  Audit record: $guardlog" >&2
 echo "" >&2
 exit 1

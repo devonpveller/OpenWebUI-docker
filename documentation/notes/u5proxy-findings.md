@@ -214,6 +214,23 @@ escape is the guard **log**, not the audit.
 
 ---
 
+## One operational hazard for whoever merges this
+
+The guard and the attester must come from the **same commit**. A half-merged `.githooks/`
+— new `reference-transaction` beside an old `pre-commit`-based attester — denies
+*everything*, because the old attester writes a tree with no message digest and the new
+guard requires the pair. It fails in the safe direction and it is loud, and the refusal
+text now names this case explicitly, but a reviewer resolving a `.githooks/` conflict
+file-by-file could produce it. Resolve `.githooks/` as a set.
+
+Sibling worktrees are unaffected until they merge the line: `core.hooksPath` is relative,
+so a branch that does not carry these files keeps the old `pre-commit` attester and has no
+`reference-transaction` at all. Confirmed live — `work/u4bidir` wrote a legacy three-field
+ledger line at 15:14 while this branch wrote a four-field one at 15:15, from the same
+shared ledger.
+
+---
+
 ## Corrections to the first round's own record
 
 - "Nothing existing was weakened. `check-hook-attestation.ps1`, `pre-commit`,
