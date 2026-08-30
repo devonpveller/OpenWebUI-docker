@@ -30,6 +30,8 @@ Everything else in here is internal and may change without notice.
 | `dispatch.ps1` | RUN the work: role+profile → runner → submit, follow, one outcome + exit code |
 | `verify-merge-protocol.ps1` | the executable drill over the whole protocol |
 | `verify-dispatch.ps1` | the executable drill over the dispatch layer (probes the REAL daemon by default; `-Offline` skips that and says so) |
+| `verify-oracle-on-stall.ps1` | the executable drill for frontier-oracle-on-stall |
+| `oracle_on_stall.py` | the stall detector, the escalation, and its ledger (U4) |
 | `harness.config.json` | the configuration (see below) |
 | `config.py` | the reader other Python code imports (`bridge.py` does) |
 | `quadrant/` | the runner x target comparison - its own submodule with its own boundary, see [quadrant/MODULE.md](quadrant/MODULE.md). The first executable CONSUMER of the runner axis: everything else resolves a runner and nothing runs one. |
@@ -152,7 +154,60 @@ plane reaching `llama-cpp` through LiteLLM.
 
 The `little-coder` runner is wired and callable but **unproven**: no work item has
 completed through it yet. Its `status` field says so, and that is not decoration —
-do not read config support as a working feature.
+do not read config support as a working feature. To be precise about how
+little is wired: `resolve_role` maps a role and a profile to a runner, and
+**nothing in this module then dispatches to one**. There is no code path that
+submits a task to little-coder's API — and that API port is not reachable from
+where the harness runs in any case. Stated as two separate facts, because
+conflating them is its own error: the compose file **declares** one mapping,
+`127.0.0.1:9091 -> 9090` (the metrics port, not the API), and the **running**
+container publishes nothing at all — `docker inspect little-coder --format
+'{{json .NetworkSettings.Ports}}'` returns `{"9090/tcp":[]}` and `docker port
+little-coder` prints nothing (verified 2026-08-30). Compose text is what was
+intended; `docker inspect` is what is. A dispatcher must be built against the
+second.
+
+## Frontier-oracle-on-stall
+
+ORCHESTRATION-DESIGN sec 7 splits the work roughly 95% small-model search / 5%
+frontier unstick, and is specific that the frontier is "an oracle invoked on a
+stall signal — not a better worker": it injects the one constraint that only
+knowledge provides, then hands back.
+
+`oracle_on_stall.py` is that stall signal, and the durable record of the
+escalation. It runs on every `queue.ps1 -Fail`, because a failed test round is the
+only moment the line learns something new about whether an item is converging.
+
+- **A stall** is agent-org's definition, ported rather than re-invented: a round
+  whose failure signature is not novel against every signature seen on this item,
+  or whose branch head did not move, is not progress; two such rounds in a row is
+  a stall. `failure_signature` is `Orchestrator._failure_sig` byte for byte, and a
+  test extracts that function from `orchestrator.py` and compares behaviour, so
+  the two cannot drift apart quietly.
+- **Firing** appends to `oracle-escalations.jsonl` in the shared state dir: what
+  stalled, the round-by-round trail the detector saw, the runner that stalled, the
+  oracle above it, and `hand_back_to`. Read it with `queue.ps1 -Oracle`.
+- **When the worker is already the frontier runner** — which is what the default
+  `all-cloud` profile means — the outcome is `no-oracle-above`: recorded, not
+  escalated. Escalating claude-code to claude-code would fill the audit trail
+  while changing nothing.
+- **A round whose branch head could not be READ is not scored either way.** An
+  unmeasured round is not evidence that the code stood still, and treating it as
+  such turned a tooling failure into a frontier escalation: `git rev-parse
+  <missing-ref>` prints the ref NAME on stdout and exits 128, and `-Fail` did not
+  check the exit code, so a deleted branch was recorded as `sha:
+  "drill/oracle-stall"` — identical every round. `-Fail` now refuses that verdict,
+  and the detector normalizes any non-object-name to "not recorded".
+- **Nothing dispatches the oracle round yet.** `pending()` returns the target a
+  dispatcher would use; the dispatcher is the unbuilt half of U4.
+- **Nothing has stalled for real here.** `verify-oracle-on-stall.ps1` CONSTRUCTS a
+  stall and proves the mechanism end to end. It is not an observation of the oracle
+  firing on a real item, and the ledger is empty of one. Do not read a green drill
+  as "the oracle worked an item".
+
+`queue.ps1 -Submit -RunnerProfile <name>` records which profile an item is worked
+under, so the detector can name the runner that stalled. Not `-Profile`: `$Profile`
+is a PowerShell automatic variable, and a parameter of that name shadows it.
 
 ## Turning it off
 
@@ -170,7 +225,9 @@ the ordinary workflow changes behaviour.
 ## Where the state lives
 
 `<git-common-dir>/agent-worktrees/` — the `.git` directory of the MAIN checkout,
-shared by every worktree.
+shared by every worktree. `AI_STACK_WORKTREE_STATE` redirects it, which
+is how a drill runs against a scratch namespace instead of the live queue and
+ledger.
 
 This is load-bearing. It was originally anchored on the script's own location,
 which is correct only while exactly one copy of the toolkit exists — and the whole
