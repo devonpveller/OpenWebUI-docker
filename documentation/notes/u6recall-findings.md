@@ -285,6 +285,11 @@ fixture that always matches), and query-text assertions for seams 2 and 4.
   F811 `subprocess` redefined. Both were dead imports; both files' suites still pass (9 and 45).
   `ruff check .` is now **clean** on this branch — a documented gate that was red at base is a
   gate nobody can use.
+- **Two implementation-guide folders are missing their index row.** `README.md`'s own rule is
+  "one row per folder", and `dark-factory-unification/` and `multi-agent-concurrency/` have
+  none. I added the row for `agent-memory-plane/` (this item's own folder, and a docs-owed
+  item in the plan's §3 checklist) and deliberately did not invent the other two: a row is a
+  status claim, and I have not verified the status of either.
 - **`documentation/implementation-guide/agent-memory-plane/PLAN.md` still carries STALE Phase 1
   rows** (written 2026-08-29; they record five MCP tools and the third REST twin as missing,
   all of which now exist). Deliberately not rewritten: this pass verified Phase 3, and a row
