@@ -94,6 +94,12 @@ def _andon_conditions():
 
 
 def test_every_andon_condition_is_fully_declared():
+    """Every DECLARED condition carries every field. What it does NOT check is which
+    conditions exist - that is ``test_the_shipped_config_declares_every_required_condition``
+    below, and the split is the whole lesson of 2026-08-30: this test asserted only
+    ``assert conds`` (non-empty), so four of the five could be deleted and it stayed green
+    while the board reported itself perfectly healthy. Non-emptiness is not a set.
+    """
     conds = _andon_conditions()
     assert conds, "the shipped config declares no andon conditions"
     for c in conds:
@@ -103,6 +109,74 @@ def test_every_andon_condition_is_fully_declared():
         # must name an incident it came from, so nobody can add an invented condition
         # without noticing they have nothing to cite.
         assert c.get("incident"), f"{c['id']} cites no incident"
+
+
+def test_the_shipped_config_declares_every_required_condition():
+    """THE SET, not its size.
+
+    ``REQUIRED_ANDON_CONDITIONS`` lives in ``config.py``/``config.ps1`` - in code - precisely
+    so this comparison has two independent sides. A required list kept inside
+    ``harness.config.json`` beside the conditions would agree with itself no matter what was
+    deleted from it.
+    """
+    declared = [c["id"] for c in _andon_conditions()]
+    assert set(declared) == set(config.REQUIRED_ANDON_CONDITIONS), (
+        f"declared={sorted(declared)} required={sorted(config.REQUIRED_ANDON_CONDITIONS)}")
+    assert config.missing_andon_conditions() == []
+
+
+def _write_cfg(tmp_path, monkeypatch, mutate):
+    cfg = json.loads((HERE / "harness.config.json").read_text(encoding="utf-8"))
+    mutate(cfg)
+    p = tmp_path / "harness.config.json"
+    p.write_text(json.dumps(cfg), encoding="utf-8")
+    monkeypatch.setenv("AI_STACK_HARNESS_CONFIG", str(p))
+    config.load(fresh=True)
+    return p
+
+
+@pytest.mark.parametrize("keep", [
+    # pruned to one - the shape reproduced at the real gate on 2026-08-30
+    ["work-branch-on-remote"],
+    # and the single deletion, which is the one that would actually go unnoticed
+    ["operator-checkout-off-branch", "policy-declared-unread", "git-error-swallowed",
+     "work-branch-on-remote"],
+])
+def test_a_thinned_board_is_detected_as_a_MISSING_SET(keep, tmp_path, monkeypatch):
+    """RED-PROOF, kept permanently: deleting condition ENTRIES is not detectable by counting.
+
+    The board that produced this test read ``clear, 1 declared, 1 evaluated, 0 switched off``
+    on a genuinely detached checkout and auto-passed a dark gate at exit 0. Every counter it
+    reported was relative to the config's own thinned list, so every counter was true. Only a
+    set the config cannot edit can answer the question.
+    """
+    _write_cfg(tmp_path, monkeypatch, lambda c: c["andon"].__setitem__(
+        "conditions", [x for x in c["andon"]["conditions"] if x["id"] in keep]))
+    conds = _andon_conditions()
+
+    # The vacuity, pinned so it cannot come back: the OLD assertion is still satisfied.
+    assert conds, "precondition - a thinned board is not an empty one"
+    assert len(conds) == len(keep)
+
+    missing = config.missing_andon_conditions()
+    assert set(missing) == set(config.REQUIRED_ANDON_CONDITIONS) - set(keep)
+    assert missing, "a board missing required conditions must NAME them, not merely be short"
+
+
+def test_the_required_set_is_not_reachable_from_the_config_file(tmp_path, monkeypatch):
+    """A config may not edit the list it is checked against - in either direction.
+
+    Both halves matter. Declaring ``andon.required_conditions`` must not narrow the required
+    set (that would be the thinning with an extra step), and it must not widen it either, or
+    a config could invent a requirement no predicate implements.
+    """
+    _write_cfg(tmp_path, monkeypatch, lambda c: c["andon"].__setitem__(
+        "required_conditions", ["work-branch-on-remote"]))
+    assert config.REQUIRED_ANDON_CONDITIONS == (
+        "operator-checkout-off-branch", "policy-declared-unread", "git-error-swallowed",
+        "work-branch-on-remote", "protected-ref-moved")
+    # ...and with every condition still declared, the board is still complete.
+    assert config.missing_andon_conditions() == []
 
 
 def test_no_andon_condition_treats_indeterminate_as_a_pass():
@@ -149,6 +223,7 @@ def test_powershell_and_python_agree_about_the_gates():
         + "$o.gates=@(Get-GateNames);"
         + "$o.prefix=(Get-AutoPrincipalPrefix);"
         + "$o.profiles=@(Get-GateProfileNames);"
+        + "$o.required=@(Get-RequiredAndonConditionIds);"
         + "$o.active=(Get-GateProfileName);"
         + "$o.resolved=[ordered]@{};"
         + "foreach($p in (Get-GateProfileNames)){"
@@ -164,6 +239,10 @@ def test_powershell_and_python_agree_about_the_gates():
     assert list(ps["gates"]) == list(config.GATES)
     assert ps["prefix"] == config.AUTO_PRINCIPAL_PREFIX
     assert sorted(ps["profiles"]) == sorted(config.gate_profile_names())
+    # The required andon set is declared in BOTH readers, so it is exactly the kind of
+    # duplicated constant that drifts. A PowerShell board that requires five conditions while
+    # the bridge believes in one is a thinned board with a second opinion.
+    assert list(ps["required"]) == list(config.REQUIRED_ANDON_CONDITIONS)
     assert ps["active"] == config.gate_profile_name()
     for name in config.gate_profile_names():
         for gate in config.GATES:

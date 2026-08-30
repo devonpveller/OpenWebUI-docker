@@ -25,6 +25,15 @@
 # written to the ledger. An attended gate is unaffected - a human passing a gate is the
 # human deciding, which is what attended means.
 #
+# THE BOARD MUST BE THE WHOLE BOARD. Switching it off was closed two ways - `andon.enabled:
+# false` and deleting the `andon` block both report `not-evaluated` and halt. A THIRD way was
+# open until 2026-08-30 and it is the one anybody would actually reach for: DELETE CONDITION
+# ENTRIES from `andon.conditions`. Thinned to one of five on a genuinely detached checkout the
+# gate AUTO-PASSED, exit 0, ledger `clear`, `-VerifyAudit COMPLETE`. So the ids the system
+# requires are declared in CODE (config.ps1 `$script:RequiredAndonConditions`), not in the
+# config that would otherwise be agreeing with itself, and a board missing any of them is
+# `incomplete`: its own state, named ids, exit 6, no auto-pass.
+#
 # WHERE THE RAISE GOES: the audit ledger (gate-audit.ps1, an append-only JSONL beside the
 # queue) and stderr. The LEDGER write is unconditional and is deliberately NOT a knob - a run
 # that could switch off the record of its own halt is the failure this board exists to
@@ -40,9 +49,10 @@
 #   .\andon.ps1 -Baseline                  # record the protected refs this run starts from
 #
 # Exit codes: 0 board CLEAR | 1 usage/config error | 2 harness disabled |
-#             6 board not clear - raised, partial (some conditions switched off) or
-#               not-evaluated (andon off, or no conditions declared). All three refuse an
-#               unattended pass; only `clear` authorises one.
+#             6 board not clear - raised, incomplete (a REQUIRED condition is not declared),
+#               partial (some conditions switched off) or not-evaluated (andon off, or every
+#               declared condition switched off). All four refuse an unattended pass; only
+#               `clear` authorises one.
 
 [CmdletBinding()]
 param(
@@ -67,10 +77,18 @@ $offReason = Get-HarnessDisabledReason
 if ($offReason) { Write-Host "REFUSED: $offReason" -ForegroundColor Yellow; exit 2 }
 
 # --- where we are ------------------------------------------------------------------
-# REFUSE an empty repo path rather than defaulting to the current directory. `git -C ""`
-# silently runs wherever you happen to be and exits 0 - verified 2026-08-30 in a scratch
-# repo, and one of the two proven contributing defects in the incident that produced the
-# first condition on this board. A detector must not repeat the defect it detects.
+# REFUSE an empty repo path rather than defaulting to the current directory.
+#
+# THE BEHAVIOUR IS SHELL-SPECIFIC, and the first version of this comment was not. It said
+# `git -C ""` "silently runs wherever you happen to be and exits 0". That was verified IN
+# BASH. In POWERSHELL - this file's own language and the only way this code path is ever
+# reached - `git -C '' rev-parse --show-toplevel` exits 128 with "fatal: cannot change to
+# 'rev-parse': No such file or directory", both directly and splatted (re-run 2026-08-30).
+# The empty argument is dropped from the argv, so `rev-parse` lands in -C's slot: LOUD here,
+# silent there. The refusal below stands on its own merits - a repo path that resolved to
+# "wherever the process happens to be" is unusable to a board that has to say WHICH checkout
+# it looked at, and $ctx.repo_root is written into every gate record for exactly that reason.
+# The drill incident this came from is real; the sentence that generalised it was not.
 function Resolve-RepoRoot([string]$explicit) {
     if ($explicit) {
         if (-not (Test-Path $explicit)) { throw "repo path '$explicit' does not exist" }
@@ -311,8 +329,13 @@ function Remove-PsNoise($lines) {
     # is recorded rather than quietly corrected.
     #
     # LIMITATION, stated: here-strings (@" ... "@) are not tracked. A `git` inside one
-    # would still be seen. No scanned file uses one; a file that does would produce a false
-    # positive, not a false negative, and a false positive is loud.
+    # would still be seen. This said "no scanned file uses one" until 2026-08-30 and that was
+    # simply false - scripts/checks/test-quartz4-offline.ps1 is in the default glob and holds
+    # EIGHT (lines 145, 185, 251, 267, 287, 327, 399, 415, all SQL passed to psql). None of
+    # them contains the word git, which is why the limitation has produced no false positive
+    # yet; that is luck about content, not a property of the scan. The failure direction is
+    # still the safe one - a false POSITIVE, which is loud - but "no file uses one" was a
+    # claim about the corpus that nobody had asked the corpus.
     $text = ($lines -join "`n")
     # Block comments first, replaced by the same number of newlines they occupied.
     $text = [regex]::Replace($text, '(?s)<#.*?#>', {
@@ -350,7 +373,10 @@ function Get-PsRegions($lines) {
     # scripts/checks/check-project-configs.ps1:18, went unflagged.
     #
     # DISCLOSED LIMITS: a function declared at column 0 opens a region; an INDENTED (nested)
-    # function stays inside its enclosing region and is attributed to it. Here-strings
+    # function stays inside its enclosing region and is attributed to it - which is not
+    # hypothetical: scripts/checks/smoke-agent-memory.ps1:131 declares `Invoke-Door` indented,
+    # and it is the one such declaration in the two default globs (checked 2026-08-30). Its
+    # call sites are judged against the enclosing region and reported with its label. Here-strings
     # (@" ... "@) are not tracked by the noise stripper, so a `git` inside one is still seen -
     # a false positive, which is loud, not a false negative.
     $regions = @()
@@ -589,16 +615,38 @@ function Invoke-AndonEvaluation {
     # evaluated, none halted, and none was skipped. Everything else gets its own name and is
     # refused by the gate:
     #   raised        - a condition fired, or could not be evaluated (on_indeterminate=halt)
+    #   incomplete    - a condition the system REQUIRES is not declared at all
     #   partial       - some conditions were evaluated ok, others are switched off in config
-    #   not-evaluated - nothing was evaluated at all (andon off, or no conditions declared)
+    #   not-evaluated - nothing was evaluated at all (andon off, or every condition switched off)
     # A disabled condition is not an ok one. It is the operator saying "do not look", which is
     # a decision they are entitled to make - attended. It is not a clear board.
+    #
+    # THE THIRD WAY OFF, closed 2026-08-30 and the reason `incomplete` exists. Deleting
+    # condition ENTRIES was neither of the two cases above: thinned to one of five on a
+    # detached checkout the verdict read `clear, 1 declared, 1 evaluated, 0 switched off`,
+    # exit 0, and the dark gate auto-passed. Nothing in the record was false - and that is
+    # the point, because the board was answering a question about a board that is not the
+    # one the system requires. `declared` counts what the CONFIG holds; it can only be
+    # trusted against a list the config cannot edit, so the required ids live in config.ps1
+    # and MISSING ones are named here. `incomplete` outranks every other non-clear word: a
+    # verdict from a board that is not the board cannot be reported as that board's verdict,
+    # and the conditions that survive are still listed and still raise on stderr, so no fired
+    # condition is hidden by the rename.
     param([string]$OnlyId = "", [string]$Repo = "", [string[]]$RunBranches = @())
     $ctx = @{ repo_root = (Resolve-RepoRoot $Repo); run_branches = @($RunBranches) }
     $enabled = [bool](Get-HarnessSetting "andon.enabled" $true)
+    $allConditions = @(Get-AndonConditions)
+    # Asked of what the CONFIG DECLARES, never of what this invocation evaluated: `-Only`
+    # narrows a run to one condition on purpose, and a run narrowed by the operator is not a
+    # board with conditions missing. Otherwise `andon.ps1 -Evaluate -Only <id>` - the
+    # documented single-condition form - would report the other four as deleted. `declared`
+    # and `evaluated` below stay RUN-scoped (what this invocation had in scope); `required`,
+    # `missing` and `missing_ids` are always config-wide.
+    $declaredIds = @($allConditions | ForEach-Object { [string]$_["id"] } | Where-Object { $_ })
+    $missingIds = @((Get-RequiredAndonConditionIds) | Where-Object { $declaredIds -notcontains $_ })
     $results = @()
     $raised = $false
-    foreach ($c in (Get-AndonConditions)) {
+    foreach ($c in $allConditions) {
         $id = [string]$c["id"]
         if ($OnlyId -and $id -ne $OnlyId) { continue }
         $condOff = ($c.Contains("enabled") -and -not $c["enabled"])
@@ -634,13 +682,24 @@ function Invoke-AndonEvaluation {
         evaluated    = $evaluated
         disabled     = @($disabledIds).Count
         disabled_ids = @($disabledIds)
+        required     = @(Get-RequiredAndonConditionIds).Count
+        missing      = @($missingIds).Count
+        missing_ids  = @($missingIds)
     }
     $board = "clear"
     $why = ""
-    if ($raised) {
+    if (@($missingIds).Count -gt 0) {
+        $board = "incomplete"
+        $why = ("{0} of {1} REQUIRED condition(s) are not declared in the config: {2}" -f
+                @($missingIds).Count, @(Get-RequiredAndonConditionIds).Count, (@($missingIds) -join ", "))
+    } elseif ($raised) {
         $board = "raised"
     } elseif ($evaluated -eq 0) {
         $board = "not-evaluated"
+        # The "no conditions declared at all" case cannot land here while the required set is
+        # non-empty - an empty board is `incomplete` above, naming all five. The branch stays
+        # so that emptying the required set in code (a deliberate act, visible in a diff)
+        # still produces a true sentence rather than a confident wrong one.
         $why = if (@($results).Count -eq 0) {
                    "no andon conditions are declared - the board cannot certify anything"
                } elseif (-not $enabled) {
@@ -723,11 +782,18 @@ if ($Evaluate) {
             Write-Host ("  [{0,-13}] {1,-30} {2}" -f $r.status, $r.id, $r.detail) -ForegroundColor $colour
             foreach ($e in $r.evidence) { Write-Host ("      - {0}" -f $e) -ForegroundColor DarkGray }
         }
-        Write-Host ("  coverage: {0} declared, {1} evaluated, {2} switched off" -f
-                    $verdict.coverage.declared, $verdict.coverage.evaluated, $verdict.coverage.disabled) -ForegroundColor DarkGray
+        Write-Host ("  coverage: {0} declared, {1} evaluated, {2} switched off, {3} of {4} required MISSING" -f
+                    $verdict.coverage.declared, $verdict.coverage.evaluated, $verdict.coverage.disabled,
+                    $verdict.coverage.missing, $verdict.coverage.required) -ForegroundColor DarkGray
+        if ([int]$verdict.coverage.missing -gt 0) {
+            # Named, not counted. "4 missing" sends an operator to the config to guess; the
+            # ids send them to the four lines that are gone.
+            Write-Host ("  MISSING required condition(s): {0}" -f (@($verdict.coverage.missing_ids) -join ", ")) -ForegroundColor Red
+        }
     }
-    # ANYTHING BUT `clear` EXITS 6. `partial` and `not-evaluated` are not softer greens - a
-    # board that did not look cannot say the line is clear, and exiting 0 there is precisely
+    # ANYTHING BUT `clear` EXITS 6. `incomplete`, `partial` and `not-evaluated` are not
+    # softer greens - a board that did not look, or that is not the board the system
+    # requires, cannot say the line is clear, and exiting 0 there is precisely
     # the skip-counts-as-a-pass shape this file refuses everywhere else.
     if ($verdict.board -ne "clear") {
         # The raise ALWAYS goes to the gate ledger (queue.ps1 writes a decision=refused

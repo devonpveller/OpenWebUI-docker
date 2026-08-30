@@ -123,7 +123,15 @@
       "",
       "`on_fire` and `on_indeterminate` are both `halt` by default and on purpose: a",
       "condition that could not be evaluated has NOT passed. A skip that counts as a pass",
-      "is one of the failure shapes this board exists to catch."
+      "is one of the failure shapes this board exists to catch.",
+      "",
+      "WHICH CONDITIONS MUST EXIST IS NOT DECIDED HERE. The required ids live in code",
+      "(config.ps1 $script:RequiredAndonConditions / config.py REQUIRED_ANDON_CONDITIONS),",
+      "and a board missing any of them is `incomplete`: exit 6, the ids named, no auto-pass.",
+      "Deleting an entry from the list below is therefore visible, not silent - which it was",
+      "not until 2026-08-30, when a board pruned to one of five reported `clear` with 1 of 1",
+      "evaluated and a dark gate auto-passed at exit 0. A required list kept in THIS file",
+      "would be deleted alongside the entry it names."
     ],
     "enabled": true,
     "ledger_dir_name": "audit",
@@ -157,7 +165,7 @@
           "roots": ["pipeline", "andon"],
           "exclude_sources": ["test_*", "drill-*"],
           "_exclude_note": "GLOB patterns for what does NOT count as a reader: a test or drill that names a key exercises it rather than consuming it. config.ps1/config.py are NOT excluded - they hold the accessors, and the scan matches the DOTTED PATH, which their defaults blocks do not contain.",
-          "_roots_note": "policy KNOBS. `andon` is a root so this condition covers its OWN block - it shipped with a dead `andon.raise.ledger` in it. Named data COLLECTIONS keyed by name (profiles, gate_profiles) are not roots: they are consumed generically by a loop, so a path scan says nothing true about them. `andon.conditions` is a leaf here - the list is read whole by Get-AndonConditions - so the scan asks only whether the list itself is read, never whether each condition is.",
+          "_roots_note": "policy KNOBS. `andon` is a root so this condition covers its OWN block - it shipped with a dead `andon.raise.ledger` in it. Named data COLLECTIONS keyed by name (profiles, gate_profiles) are not roots: they are consumed generically by a loop, so a path scan says nothing true about them. `andon.conditions` is a leaf here - the list is read whole by Get-AndonConditions - so the scan asks only whether the list itself is read, never whether each condition is. WHICH conditions are present is a different question, answered by the required-set check in andon.ps1 against config.ps1's $script:RequiredAndonConditions, not by this scan.",
           "_match_note": "the dotted path is matched ANCHORED. Unanchored, any key that is a PREFIX of a live one reported 'read': with pipeline.gate_profile in the sources, pipeline.gate_profil, pipeline.claim_ttl and pipeline.a all passed (reproduced 2026-08-30). A container key counts as read when its own path OR any leaf beneath it is matched, which is why andon.raise is alive on the strength of andon.raise.stderr and pipeline.human_gates was not."
         },
         "on_fire": "halt",

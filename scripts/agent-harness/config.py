@@ -79,6 +79,45 @@ GATES = ("anchor", "pre_review")
 #: afterwards. A record saying only "passed" reads as approval and is worse than none.
 AUTO_PRINCIPAL_PREFIX = "auto:"
 
+#: The andon conditions the system REQUIRES, declared here in code and deliberately not in
+#: ``harness.config.json``. The config says which conditions are configured and with what
+#: parameters; this says which ones must EXIST.
+#:
+#: The defect that produced it (2026-08-30): the board could be switched off two ways and
+#: both were closed — ``andon.enabled: false`` and deleting the whole ``andon`` block each
+#: report ``not-evaluated`` and halt. There was a THIRD, the one actually reached for:
+#: deleting condition ENTRIES from ``andon.conditions``. Thinned to one of five on a
+#: genuinely detached checkout, the dark gate AUTO-PASSED — exit 0, ledger ``clear``,
+#: coverage ``1 declared / 1 evaluated / 0 switched off``, ``-VerifyAudit COMPLETE``.
+#:
+#: A required-set living in the same file as the conditions would be no guard: whoever
+#: deletes the entry deletes the name beside it and the file agrees with itself. Here,
+#: retiring a condition is a CODE edit that shows in a diff. Mirrors
+#: ``$script:RequiredAndonConditions`` in ``config.ps1``; ``test_gate_profiles.py`` asks
+#: both readers and the shipped config the same question. No environment override exists —
+#: a variable that thins the board is the same hole with a longer name.
+REQUIRED_ANDON_CONDITIONS = (
+    "operator-checkout-off-branch",
+    "policy-declared-unread",
+    "git-error-swallowed",
+    "work-branch-on-remote",
+    "protected-ref-moved",
+)
+
+
+def missing_andon_conditions() -> List[str]:
+    """Required condition ids that the loaded config does not declare, in required order.
+
+    The board's own :func:`Invoke-AndonEvaluation` computes the same set; this is here so
+    the bridge and the tests can ask without shelling out to PowerShell.
+    """
+    declared = {
+        str(c.get("id", ""))
+        for c in (get("andon.conditions") or [])
+        if isinstance(c, dict)
+    }
+    return [c for c in REQUIRED_ANDON_CONDITIONS if c not in declared]
+
 _CACHE: Dict[str, Any] | None = None
 
 

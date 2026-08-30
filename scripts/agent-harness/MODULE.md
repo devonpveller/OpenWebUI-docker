@@ -151,27 +151,57 @@ shapes this board exists to catch, and it does not get to be the board's own beh
 switch off the record of its own halt is the failure the board exists to prevent —
 and, under `andon.raise.stderr`, to stderr.
 
-### `clear` means the board LOOKED
+### `clear` means the board LOOKED, and that it was the WHOLE board
 
-The verdict has four states, and only one of them opens an unattended gate:
+The verdict has five states, and only one of them opens an unattended gate:
 
 | board | means | exit |
 |---|---|---|
-| `clear` | ≥1 condition evaluated, none halted, none switched off | 0 |
+| `clear` | every required condition declared, ≥1 evaluated, none halted, none switched off | 0 |
+| `incomplete` | a REQUIRED condition is **not declared at all** — the verdict names which | 6 |
 | `raised` | a condition fired, or could not be evaluated | 6 |
 | `partial` | some evaluated ok, others switched off in config | 6 |
-| `not-evaluated` | nothing was evaluated (`andon.enabled: false`, or no conditions) | 6 |
+| `not-evaluated` | conditions are declared, none was evaluated (`andon.enabled: false`, or every one switched off individually) | 6 |
+
+`incomplete` outranks the rest: a verdict from a board that is not the required board
+cannot be reported as that board's verdict. The conditions that *are* declared are still
+evaluated, still listed, and still raised on stderr, so nothing is hidden by the name.
 
 Every verdict and every gate record carries its **coverage** — declared / evaluated /
-switched off, plus the repository the board was looking at. Before U6 landed this,
-`andon.enabled: false` produced `board=clear, conditions=5` on a genuinely detached
-checkout: indistinguishable from five conditions that looked and found nothing.
+switched off / **required missing (by id)** — plus the repository the board was looking
+at. Before U6 landed the first three, `andon.enabled: false` produced `board=clear,
+conditions=5` on a genuinely detached checkout: indistinguishable from five conditions
+that looked and found nothing.
 
-**So switching the board off does not open the gates.** With `andon.enabled: false`, or
-with the whole `andon` block deleted, a `dark` run halts at the first gate with
-`not-evaluated` in the ledger. **The revert to prior behaviour is
-`pipeline.gate_profile: attended`** — that is the switch that puts a human back at the
+### The required SET is code, not config
+
+`config.ps1` (`$script:RequiredAndonConditions`) and `config.py`
+(`REQUIRED_ANDON_CONDITIONS`) name the five ids the system requires;
+`test_gate_profiles.py` asks both readers and the shipped config the same question so the
+two declarations cannot drift.
+
+It lives there rather than in `harness.config.json` because of the defect that produced
+it. The board could be switched off two ways and both were closed — but there is a
+**third**, and it is the one anybody actually reaches for: *delete condition entries from
+`andon.conditions`*. Pruned to one of five on a genuinely detached checkout, the gate
+**auto-passed** — exit 0, ledger `clear`, coverage `1 declared / 1 evaluated / 0 switched
+off`, `-VerifyAudit COMPLETE`. Every counter was true, because every counter was relative
+to the config's own thinned list. A required list kept beside the conditions would be
+deleted along with the entry it names; kept in code, retiring a condition is a diff a
+reviewer sees.
+
+**So no route through the config opens the gates.** `andon.enabled: false`, the whole
+`andon` block deleted, individual conditions switched off, or condition entries deleted —
+each halts a `dark` run at the first gate and each is recorded under its own board state
+(`not-evaluated`, `incomplete`, `partial`, `incomplete`). **The revert to prior behaviour
+is `pipeline.gate_profile: attended`** — that is the switch that puts a human back at the
 gate. Turning the board off only removes the thing that was watching the machine.
+
+That revert is the configured **default, not a lock**: `queue.ps1 -GateProfile dark`
+names a profile for a single call and takes the dark path regardless of what
+`pipeline.gate_profile` says (drill step I drives the same item both ways — exit 5
+attended, exit 6 dark). Removing the human from a gate is one flag away by design; what
+the gate profile decides is what happens when nobody passes one.
 
 ## The gate ledger: which gates no human saw
 
@@ -184,8 +214,10 @@ gate. Turning the board off only removes the thing that was watching the machine
 "Complete" is defined executably in `gate-audit.ps1`: every gate an item crossed has a
 record; every record names a principal and a kind; an auto record additionally names its
 gate profile, the andon verdict that authorised it, **and that verdict's coverage** — a
-record claiming `clear` with nothing evaluated is refused, and so is one that cannot state
-its coverage at all. The item and the ledger must agree. Crossed gates are derived from the
+record claiming `clear` with nothing evaluated is refused, so is one auto-passed on a
+board missing a required condition (the finding names the ids), and so is one that cannot
+state either at all. Ledger schema 3 carries `required` / `missing` / `missing_ids`; a
+schema-2 record cannot answer the thinned-board question and is a finding, not a pass. The item and the ledger must agree. Crossed gates are derived from the
 ITEM'S OWN STATE, never from the ledger — that is what makes a missing record detectable
 rather than invisible.
 

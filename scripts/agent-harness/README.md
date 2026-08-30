@@ -185,16 +185,35 @@ Four things are worth knowing before relying on it:
 - **`auto:` is a reserved principal namespace.** `-ConfirmAnchor` and `-Approve`
   refuse a `-By` inside it (exit 4), and the auto path never signs as a person.
 
-**Switching the board off does not switch the gates back on.** `andon.enabled: false`,
-or deleting the `andon` block, makes a `dark` run halt at the first gate with
-`not-evaluated` recorded in the ledger — it removes the thing that was watching the
-machine, not the machine. The revert to prior behaviour is
-`pipeline.gate_profile: attended`.
+**Switching the board off does not switch the gates back on — by any route through the
+config.** There are four, and each halts a `dark` run at the first gate under its own
+board state, recorded in the ledger:
+
+| what you do to the board | board state | gate |
+|---|---|---|
+| `andon.enabled: false` | `not-evaluated` | halts |
+| delete the whole `andon` block | `incomplete` (all five named) | halts |
+| set `enabled: false` on one condition | `partial` (names it) | halts |
+| **delete condition ENTRIES from `andon.conditions`** | `incomplete` (names the missing ids) | halts |
+
+The last one is the one anybody would actually reach for, and until 2026-08-30 it was
+open: pruned to one of five on a genuinely detached checkout the gate **auto-passed** at
+exit 0, ledger `clear`, `-VerifyAudit COMPLETE`. Every counter it printed was true, and
+all of them counted against the config's own thinned list. The five required ids are now
+declared in `config.ps1`/`config.py` — in code, where the config cannot edit them — and a
+board missing any is `incomplete`, names them, and authorises nothing.
+
+The revert to prior behaviour is `pipeline.gate_profile: attended`. That is the configured
+**default, not a lock**: `queue.ps1 -GateProfile dark` names a profile for one call and
+takes the dark path whatever the config says (drill step I drives the same item both ways
+— exit 5 attended, exit 6 dark).
 
 The whole mechanism has its own drill: `drill-dark-factory.ps1` shows every condition
 firing on a constructed instance and not firing on a clean one, runs the pipeline end
 to end with nobody at either gate, proves the completeness check goes red on a tampered
-trail, and proves that turning the board off halts rather than opens. Every WRITE it
+trail, proves that turning the board off — or thinning it by deleting condition entries —
+halts rather than opens, and re-runs the clean board afterwards so a fix that refused
+everything would be caught. Every WRITE it
 makes is to a scratch repository under `$env:TEMP` with the config and state dir
 redirected; it makes exactly one READ of a real repository, by name — one case scans
 this checkout's own `.ps1` files so the detector is shown naming the incident's

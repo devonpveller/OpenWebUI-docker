@@ -238,6 +238,39 @@ $script:AutoPrincipalPrefix = "auto:"
 function Get-GateNames { return @($script:Gates) }
 function Get-AutoPrincipalPrefix { return $script:AutoPrincipalPrefix }
 
+# THE ANDON CONDITIONS THE SYSTEM REQUIRES, declared HERE - in code - and deliberately not
+# in harness.config.json. The config says which conditions are configured and with what
+# parameters; this says which ones must EXIST.
+#
+# WHY IT IS NOT A CONFIG KEY (2026-08-30, and this is the defect that produced it): the
+# board could be switched off two ways, and both were closed - `andon.enabled: false` and
+# deleting the whole `andon` block each report `not-evaluated` and halt. There was a THIRD,
+# and it is the one an operator or an agent actually reaches for: DELETE CONDITION ENTRIES
+# from `andon.conditions`. Pruned to one of five on a genuinely detached checkout, the gate
+# AUTO-PASSED - exit 0, ledger `clear`, coverage `1 declared / 1 evaluated / 0 switched off`,
+# `-VerifyAudit COMPLETE`. A thinned board was neither "absent" nor "switched off": it was a
+# third state that reported itself perfectly healthy with four of five detectors gone.
+#
+# A required-set that lived in the same file as the conditions would be no guard at all -
+# whoever deletes the entry deletes the name beside it, and the file agrees with itself.
+# Here, retiring a condition is a CODE edit that shows up in a diff and passes a reviewer.
+# That asymmetry IS the mechanism, the same one `$script:Predicates` in andon.ps1 already
+# has: the config may not declare a detector nobody wrote, and it may not silently drop one
+# somebody did. Mirrored in config.py as REQUIRED_ANDON_CONDITIONS; test_gate_profiles.py
+# asks both readers and the shipped config the same question.
+#
+# There is deliberately NO environment override. A variable that thins the board is the
+# same hole with a longer name.
+$script:RequiredAndonConditions = @(
+    "operator-checkout-off-branch",
+    "policy-declared-unread",
+    "git-error-swallowed",
+    "work-branch-on-remote",
+    "protected-ref-moved"
+)
+
+function Get-RequiredAndonConditionIds { return @($script:RequiredAndonConditions) }
+
 function Test-AutoPrincipal {
     param([string]$Principal)
     return [bool]($Principal -and $Principal.StartsWith($script:AutoPrincipalPrefix))

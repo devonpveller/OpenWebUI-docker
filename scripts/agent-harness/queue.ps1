@@ -54,7 +54,8 @@
 #   .\queue.ps1 -Merged -Id mem-readme -By wt-reviewer-1 -Sha <merge sha>
 #
 # Exit codes: 0 ok | 1 usage/state error | 2 harness disabled | 3 claimed by someone else
-#             | 4 refused (duties) | 5 refused (no confirmed anchor) | 6 ANDON RAISED
+#             | 4 refused (duties) | 5 refused (no confirmed anchor) | 6 ANDON not clear
+#               (raised / incomplete / partial / not-evaluated / unavailable)
 #             | 7 audit COVERAGE incomplete (-VerifyAudit found items it could not audit)
 #
 # GATE PROFILES (U6, 2026-08-30). `attended` is unchanged: a human runs -ConfirmAnchor
@@ -64,7 +65,11 @@
 # passes it is tuning, and lives in harness.config.json under gate_profiles.
 #
 #   .\queue.ps1 -Audit [-Id x]         # the gate ledger, auto-passes flagged
-#   .\queue.ps1 -VerifyAudit [-Id x]   # is the trail COMPLETE? exit 1 if not
+#   .\queue.ps1 -VerifyAudit [-Id x]   # is the trail COMPLETE? 0 complete | 1 findings |
+#                                      # 7 there were items it could not audit (NOT a pass).
+#                                      # This line said "exit 1 if not" until 2026-08-30;
+#                                      # drill step C reaches 7, so the usage was narrower
+#                                      # than the tool and read as though 7 were impossible.
 
 [CmdletBinding()]
 param(
@@ -246,15 +251,38 @@ function Invoke-AutoGate($item, [string]$gate, $decision) {
     return $andon
 }
 
+function Test-AndonField($andon, [string]$name) {
+    # Does this andon verdict carry $name? Handles both shapes the verdict travels in: an
+    # [ordered] hashtable (fresh from Invoke-AndonForGate) and a PSCustomObject (parsed back
+    # out of the ledger). Asking `.PSObject.Properties.Name` of a hashtable answers about the
+    # DICTIONARY, not its contents - see Stop-OnAndon.
+    if ($null -eq $andon) { return $false }
+    if ($andon -is [System.Collections.IDictionary]) { return $andon.Contains($name) }
+    return ($andon.PSObject.Properties.Name -contains $name)
+}
+
 function Stop-OnAndon($andon, [string]$gate, [string]$id, [string]$parkedAt) {
     Write-Host ""
     Write-Host ("ANDON {0} - the '{1}' gate will NOT auto-pass." -f ("$($andon.status)").ToUpper(), $gate) -ForegroundColor Red
     foreach ($f in $andon.fired) { Write-Host ("  - {0}" -f $f) -ForegroundColor Red }
     # State the coverage on the console too. A halt whose only word is 'not-evaluated' sends
     # the operator to the config; a halt that says 0 of 5 evaluated sends them to the right line.
-    if ($andon -and ($andon.PSObject.Properties.Name -contains "evaluated")) {
-        Write-Host ("  board coverage: {0} of {1} condition(s) evaluated, {2} switched off" -f
+    #
+    # THIS GUARD USED TO BE `$andon.PSObject.Properties.Name -contains "evaluated"`, WHICH IS
+    # ALWAYS FALSE HERE. Invoke-AndonForGate returns an [ordered] hashtable, and an
+    # OrderedDictionary's PSObject properties are the .NET ones - Count, Keys, Values,
+    # IsReadOnly - never its keys. So the line never printed and a real dark halt reached the
+    # operator with no coverage at all: a check that could not fire, inside the tool built to
+    # refuse checks that cannot fire. Test-AndonField below asks the question in a way that
+    # works for a hashtable AND for a PSCustomObject, because a record read back from the
+    # ledger is the latter.
+    if (Test-AndonField $andon "evaluated") {
+        Write-Host ("  board coverage: {0} of {1} declared condition(s) evaluated, {2} switched off" -f
                     [int]$andon.evaluated, [int]$andon.conditions, [int]$andon.disabled) -ForegroundColor Red
+    }
+    if ((Test-AndonField $andon "missing") -and ([int]$andon.missing -gt 0)) {
+        Write-Host ("  {0} of {1} REQUIRED condition(s) are NOT DECLARED: {2}" -f
+                    [int]$andon.missing, [int]$andon.required, (@($andon.missing_ids) -join ", ")) -ForegroundColor Red
     }
     Write-Host ""
     Write-Host ("'{0}' is PARKED at '{1}'. The refusal is in the gate ledger (queue.ps1 -Audit -Id {0})." -f $id, $parkedAt) -ForegroundColor Yellow

@@ -14,11 +14,14 @@
 #   - an auto-pass must carry the gate profile that authorised it AND the andon verdict at
 #     that moment - "the board was clear when nobody was looking" is the whole claim, and
 #     an auto record that cannot state it is incomplete by definition. The verdict includes
-#     its COVERAGE (declared / evaluated / switched off), because the first version of this
+#     its COVERAGE (declared / evaluated / switched off / required MISSING), because the first version of this
 #     file recorded `andon.status=clear conditions=5` for a board with `andon.enabled=false`
 #     that had evaluated NOTHING - a record indistinguishable from five conditions that
-#     looked and found nothing. "Clear" now requires evaluated >= 1 and none switched off,
-#     and Test-GateAuditComplete re-checks that from the record rather than trusting the word;
+#     looked and found nothing. "Clear" now requires evaluated >= 1, none switched off, and
+#     no REQUIRED condition missing - the last because a board thinned by DELETING condition
+#     entries satisfied both of the others (1 evaluated of 1 declared, none off) while four
+#     detectors were gone - and Test-GateAuditComplete re-checks all three from the record
+#     rather than trusting the word;
 #   - a gate the board REFUSED to auto-pass also writes a record. An unattended run that
 #     halts must leave the halt in the trail, not a gap.
 #
@@ -29,8 +32,12 @@
 
 # Schema 2 (2026-08-30) added andon.repo and the andon coverage counters. A record that
 # predates it cannot state whether the board actually looked, and Test-GateAuditComplete says
-# so rather than assuming it did.
-$script:GateLedgerSchema = 2
+# so rather than assuming it did. Schema 3 (2026-08-30, same day) added `missing` /
+# `missing_ids`: the counters answered "how many of the DECLARED conditions were evaluated"
+# and a board thinned by deleting condition entries answered that perfectly - 1 of 1, none
+# switched off - while four detectors were gone. A record has to be able to say whether the
+# board was the WHOLE board.
+$script:GateLedgerSchema = 3
 
 function Get-GateAuditDir {
     $dir = Join-Path (Get-SharedStateDir) ([string](Get-HarnessSetting "andon.ledger_dir_name" "audit"))
@@ -44,7 +51,9 @@ function New-UnavailableAndon([string]$reason) {
     # A board that could not be RUN. Every counter is zero and the status is its own word, so
     # nothing downstream can read it as a clear board.
     return [ordered]@{ status = "unavailable"; repo = ""; conditions = 0; evaluated = 0
-                       disabled = 0; disabled_ids = @(); fired = @($reason) }
+                       disabled = 0; disabled_ids = @(); required = @(Get-RequiredAndonConditionIds).Count
+                       missing = @(Get-RequiredAndonConditionIds).Count
+                       missing_ids = @(Get-RequiredAndonConditionIds); fired = @($reason) }
 }
 
 function Invoke-AndonForGate {
@@ -83,6 +92,12 @@ function Invoke-AndonForGate {
         # to answer. Unavailable, not clear.
         return (New-UnavailableAndon "andon verdict carries no coverage - it cannot say whether anything was evaluated")
     }
+    if (-not ($v.coverage.PSObject.Properties.Name -contains "missing")) {
+        # Same rule one level down. A coverage block that counts only the DECLARED conditions
+        # cannot distinguish a whole board from a thinned one, and that was the exact gap:
+        # 1 declared / 1 evaluated / 0 switched off read as a clean sweep.
+        return (New-UnavailableAndon "andon coverage does not state MISSING required conditions - it cannot say whether the board was the whole board")
+    }
     $fired = @($v.conditions | Where-Object { $_.action -eq "halt" } | ForEach-Object { "$($_.id): $($_.detail)" })
     $status = "$($v.board)"
     if (-not $status) { return (New-UnavailableAndon "andon verdict names no board state") }
@@ -100,6 +115,9 @@ function Invoke-AndonForGate {
         evaluated    = [int]$v.coverage.evaluated
         disabled     = [int]$v.coverage.disabled
         disabled_ids = @($v.coverage.disabled_ids)
+        required     = [int]$v.coverage.required
+        missing      = [int]$v.coverage.missing
+        missing_ids  = @($v.coverage.missing_ids)
         fired        = @($fired)
     }
 }
@@ -128,7 +146,10 @@ function Write-GateRecord {
     # in every field, which Test-GateAuditComplete then refuses for an auto-pass.
     if (-not $Andon) {
         $Andon = [ordered]@{ status = "not-evaluated"; repo = ""; conditions = 0; evaluated = 0
-                             disabled = 0; disabled_ids = @(); fired = @("no andon verdict was supplied") }
+                             disabled = 0; disabled_ids = @(); required = @(Get-RequiredAndonConditionIds).Count
+                             missing = @(Get-RequiredAndonConditionIds).Count
+                             missing_ids = @(Get-RequiredAndonConditionIds)
+                             fired = @("no andon verdict was supplied") }
     }
     $rec = [ordered]@{
         schema       = $script:GateLedgerSchema
@@ -280,6 +301,17 @@ function Test-GateAuditComplete {
                     if ([int]$cov.disabled -gt 0) {
                         $findings += ("'{0}' gate '{1}': auto-passed with {2} andon condition(s) switched off ({3}) - a board with a condition turned off is not a clear board" -f $item.id, $g, [int]$cov.disabled, (@($cov.disabled_ids) -join ", "))
                     }
+                    # AND WHETHER THE BOARD WAS THE WHOLE BOARD. Every counter above is
+                    # relative to what the config DECLARED, so a board thinned by deleting
+                    # condition entries satisfied all of them: 1 evaluated of 1 declared,
+                    # none switched off, status `clear`. The required set is CODE, not
+                    # config, which is what makes this question answerable from the record.
+                    $hasReq = ($cov.PSObject.Properties.Name -contains "missing")
+                    if (-not $hasReq) {
+                        $findings += ("'{0}' gate '{1}': the auto-pass record does not state whether the board declared every REQUIRED condition - a board thinned to one condition reports full coverage of itself" -f $item.id, $g)
+                    } elseif ([int]$cov.missing -gt 0) {
+                        $findings += ("'{0}' gate '{1}': auto-passed on a board missing {2} of {3} REQUIRED condition(s) ({4}) - those detectors were not switched off, they were not there" -f $item.id, $g, [int]$cov.missing, [int]$cov.required, (@($cov.missing_ids) -join ", "))
+                    }
                 }
             }
             if ($rec.kind -eq "human" -and ("$($rec.principal)").StartsWith($prefix)) {
@@ -311,6 +343,11 @@ function Format-GateRecord($r) {
         if ($r.andon -and ($r.andon.PSObject.Properties.Name -contains "evaluated")) {
             $cov = " {0}/{1} evaluated" -f [int]$r.andon.evaluated, [int]$r.andon.conditions
             if ([int]$r.andon.disabled -gt 0) { $cov += (", {0} switched off" -f [int]$r.andon.disabled) }
+            if ($r.andon.PSObject.Properties.Name -contains "missing") {
+                if ([int]$r.andon.missing -gt 0) { $cov += (", {0} REQUIRED MISSING: {1}" -f [int]$r.andon.missing, (@($r.andon.missing_ids) -join " ")) }
+            } else {
+                $cov += ", required set NOT STATED"
+            }
         } else {
             $cov = " coverage NOT STATED"
         }

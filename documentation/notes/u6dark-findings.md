@@ -20,13 +20,20 @@ claim is a hypothesis it says so.
 | `scripts/agent-harness/gate-audit.ps1` | the append-only gate ledger and `Test-GateAuditComplete` — the executable definition of "complete" |
 | `scripts/agent-harness/queue.ps1` | both gates wired: auto-pass under `dark`, refusal under a raised board, a record on every pass either way |
 | `scripts/agent-harness/config.ps1` / `config.py` | gate resolution in both readers |
-| `scripts/agent-harness/drill-dark-factory.ps1` | the validation: **96 checks, 0 failed** |
-| `scripts/agent-harness/test_gate_profiles.py` | 12 tests incl. the PowerShell↔Python anti-drift test |
+| `scripts/agent-harness/drill-dark-factory.ps1` | the validation: **121 checks, 0 failed** |
+| `scripts/agent-harness/test_gate_profiles.py` | 16 tests incl. the PowerShell↔Python anti-drift test |
 | `scripts/claude-sessions-bridge/test_queue_narration.py` | 6 tests pinning the one consumer that narrates a gate transition to a human (§8.7) |
 
-Evidence: `drill-dark-factory.ps1` → `96 checks, 0 failed` (exit 0) — 60 before the audit
-round of §8 added 36 more.
-`python -m pytest scripts/agent-harness -q` → `117 passed` (was 105 before this work).
+Evidence: `drill-dark-factory.ps1` → `121 checks, 0 failed` (exit 0) — 60 at first, 96
+after the audit round of §8, 121 after the thinned-board round of §9.
+`python -m pytest scripts/agent-harness -q` → `121 passed` **in a checkout with a live
+queue** (117 before the §9 round); in a plain clone it is two fewer passed and two
+skipped, and the two are the ones that ask the real queue:
+`test_anchor_schema.py::test_every_queued_anchor_validates` (skips on "no queued anchors
+under …") and `test_scope_node.py::test_the_live_queue_projects_without_raising` (skips on
+"no live queue in this checkout"). Was 105 before this work. The earlier note said "117
+passed" flat, which made a number depend on an unstated environment — a verifier running
+it in a clone got `115 passed, 2 skipped`, and both skip guards were then read here.
 `python -m pytest scripts/claude-sessions-bridge -q` → `130 passed` (was 124).
 `python -m ruff check .` → `All checks passed!`
 
@@ -68,10 +75,19 @@ not.
     lines below a `git push` still clears that push. Narrowing further would need to
     know which variable the check reads, which is data flow, not a scan.
   - a function declared **indented** (nested) is attributed to its enclosing region, so
-    its call sites are judged against the enclosing region's line numbers. Every
-    function in the scanned families is at column 0.
+    its call sites are judged against the enclosing region's line numbers. This bullet
+    said "every function in the scanned families is at column 0" and that was false:
+    `scripts/checks/smoke-agent-memory.ps1:131` declares `Invoke-Door` indented. It is
+    the only one in the two default globs (`grep -n "^[ 	]\+function "` over both,
+    2026-08-30) — but "there are none" and "there is one, here" are different sentences
+    and only the second was checked.
   - **here-strings** (`@" ... "@`) are not tracked by the noise stripper, so a `git`
     inside one is still seen. That is a false POSITIVE, which is loud, not a miss.
+    `andon.ps1` claimed "no scanned file uses one"; `scripts/checks/test-quartz4-offline.ps1`
+    is in the default glob and has **eight** (lines 145, 185, 251, 267, 287, 327, 399,
+    415 — all SQL for `psql`). None contains the word `git`, so the limitation has cost
+    nothing yet; that is a fact about their contents, not a property of the scan, and the
+    claim about the corpus had never been put to the corpus.
   - it says nothing about a call whose result IS checked and then ignored.
 - **`policy-declared-unread` scope.** It is a path scan over dotted config paths, not a
   data-flow analysis. It proves a key is *referenced*, not that it is *honoured*. The
@@ -85,23 +101,53 @@ not.
 
 ## 3. THE BOARD IS RED ON THIS REPOSITORY RIGHT NOW
 
-`powershell -File scripts/agent-harness/andon.ps1 -Evaluate` from the work line:
+`powershell -NoProfile -NonInteractive -File scripts/agent-harness/andon.ps1 -Evaluate
+-RunBranch work/u6dark`, run in this worktree on 2026-08-30, exit 6 — **verbatim, whole,
+and in the order the tool prints it**:
 
 ```
 ANDON BOARD: RAISED
-  [ok           ] operator-checkout-off-branch   D:\Open WebUI\ai-stack is on 'refactor/ai-stack-cleanup'
-  [ok           ] policy-declared-unread         all 7 policy keys under pipeline, andon are read
-  [fire         ] git-error-swallowed            18 call site(s)
-      - scripts/agent-harness/verify-merge-protocol.ps1:49 in Invoke-DrillGit()
-      - scripts/agent-harness/verify-merge-protocol.ps1:53 in Get-DrillGit()
-      - scripts/checks/check-project-configs.ps1:18 in (top level)
-      - ...15 more, listed in §4.5
+  [ok           ] operator-checkout-off-branch   D:\Open WebUI\ai-stack is on 'refactor/ai-stack-cleanup' with no operation in progress
+  [ok           ] policy-declared-unread         all 7 policy keys under pipeline, andon are read by harness sources
+  [fire         ] git-error-swallowed            git errors are swallowed at 18 call site(s)
+      - scripts/agent-harness/new-worktree.ps1:161 in (top level) runs git and does not check the result within 5 line(s)
+      - scripts/agent-harness/new-worktree.ps1:184 in (top level) runs git and does not check the result within 5 line(s)
+      - scripts/agent-harness/queue.ps1:763 in (top level) runs git and does not check the result within 5 line(s)
+      - scripts/agent-harness/queue.ps1:818 in (top level) runs git and does not check the result within 5 line(s)
+      - scripts/agent-harness/remove-worktree.ps1:92 in (top level) runs git and does not check the result within 5 line(s)
+      - scripts/agent-harness/remove-worktree.ps1:111 in (top level) runs git and does not check the result within 5 line(s)
+      - scripts/agent-harness/remove-worktree.ps1:115 in (top level) runs git and does not check the result within 5 line(s)
+      - scripts/agent-harness/remove-worktree.ps1:118 in (top level) runs git and does not check the result within 5 line(s)
+      - scripts/agent-harness/remove-worktree.ps1:158 in (top level) runs git and does not check the result within 5 line(s)
+      - scripts/agent-harness/verify-merge-protocol.ps1:49 in Invoke-DrillGit() runs git and does not check the result within 5 line(s)
+      - scripts/agent-harness/verify-merge-protocol.ps1:53 in Get-DrillGit() runs git and does not check the result within 5 line(s)
+      - scripts/checks/check-env-file-scope.ps1:43 in (top level) runs git and does not check the result within 5 line(s)
+      - scripts/checks/check-env-file-scope.ps1:101 in (top level) runs git and does not check the result within 5 line(s)
+      - scripts/checks/check-hook-attestation.ps1:67 in Invoke-GitLines() runs git and does not check the result within 5 line(s)
+      - scripts/checks/check-project-configs.ps1:18 in (top level) runs git and does not check the result within 5 line(s)
+      - scripts/checks/check-staged-secrets.ps1:27 in (top level) runs git and does not check the result within 5 line(s)
+      - scripts/checks/check-staged-secrets.ps1:30 in (top level) runs git and does not check the result within 5 line(s)
+      - scripts/checks/validate-lineendings.ps1:16 in (top level) runs git and does not check the result within 5 line(s)
   [ok           ] work-branch-on-remote          checked 1 branch(es); none is on a remote
-  [indeterminate] protected-ref-moved            no baseline recorded
-  coverage: 5 declared, 5 evaluated, 0 switched off
+  [indeterminate] protected-ref-moved            no baseline recorded - run: andon.ps1 -Baseline (expected at D:\Open WebUI\ai-stack\.git\agent-worktrees\audit\andon-baseline.json)
+  coverage: 5 declared, 5 evaluated, 0 switched off, 0 of 5 required MISSING
+ANDON RAISED: git-error-swallowed, protected-ref-moved
 ```
 
-That run is `andon.ps1 -Evaluate -RunBranch work/u6dark` — the branch-scoped question,
+**That block used to be abridged and RE-ORDERED.** It put
+`verify-merge-protocol.ps1:49/:53` at the top under a "...15 more" elision and shortened
+the detail lines, while being labelled as the command's output. The real order is
+`Sort-Object FullName` over the two globs: the first two sites are
+`new-worktree.ps1:161` and `:184`, and the merge-protocol drill's two functions are
+**10th and 11th of 18** — the abridgement inverted that and made the incident's own
+functions read as the detector's headline. A fenced block presented as command output
+must BE the output; if it is too long, elide with the elision visible and the order
+intact, or do not fence it. (`b679c04`'s commit message carries the same error in words —
+"its two functions are still what `git-error-swallowed` names first" — and is left as
+written, per the rule in this file's own §8.6: editing a landed message to hide an error
+is the opposite of an audit trail. §8.8 below is corrected.)
+
+That run is the branch-scoped question,
 which is what a gate asks. **Run bare** (`-Evaluate`, no `-RunBranch`),
 `work-branch-on-remote` asks the broader question and fires on the eleven `work/*`
 branches that reached `origin` on 2026-08-30: `work/dfu-u4, work/dfu-u4-lc, work/pod-key,
@@ -222,7 +268,7 @@ nothing" shape this board exists for:
 | `check-env-file-scope.ps1:43,101` | `git rev-parse` fails → falls back to the CURRENT directory as the repo root; `git diff --cached` fails → "no compose files staged - skipped" |
 | `verify-merge-protocol.ps1:49,53` | the 2026-08-30 incident's own two functions |
 | `check-hook-attestation.ps1:67` | `Invoke-GitLines`, an adapter of the same shape as `git-io.ps1` |
-| `new-worktree.ps1:161,184`, `remove-worktree.ps1:92,111,115,118,158`, `queue.ps1:735,790` | listings that silently read as empty |
+| `new-worktree.ps1:161,184`, `remove-worktree.ps1:92,111,115,118,158`, `queue.ps1:763,818` | listings that silently read as empty |
 
 **Not mine to fix, and deliberately not fixed here.** Every one is a live pre-commit or
 harness script; changing nine files' git handling inside an audit-fix item is the
@@ -271,7 +317,8 @@ gym run would be the over-claim §C.7 exists to prevent.**
 - **REAL:** real git repositories, the real `andon.ps1`, the real `queue.ps1`, the real
   `gate-audit.ps1`, the real config loaders. Every state transition in parts B–E is
   produced by the shipped tools. The `git-error-swallowed` RED is measured against the
-  REAL repository and names the real incident's function. 60 checks, 0 failed.
+  REAL repository and names the real incident's function. 121 checks, 0 failed (60 at the
+  first round, 96 after the §8 audit round, 121 after the §9 thinned-board round).
 - **NOT the gym:** `ai-orchestration-gym`'s runner drives the agent-org bridge against
   GitHub with a real App installation and mutates remote repositories. U6's mechanism is
   the HARNESS pipeline, which has no gym scenario at all, and a gym run would require
@@ -330,7 +377,9 @@ rule stated at the top of `gate-audit.ps1`, broken by `gate-audit.ps1`.
 **FIXED.** The verdict now carries `coverage {declared, evaluated, disabled,
 disabled_ids}` and the repository it looked at, and `clear` is defined narrowly:
 ≥1 evaluated, none halted, none switched off. `partial` and `not-evaluated` are their own
-states and both exit 6. The gate record carries all of it, `Test-GateAuditComplete`
+states and both exit 6 (§9 adds `incomplete`, and adds `required` / `missing` /
+`missing_ids` to the coverage: every counter here is relative to what the config
+DECLARED). The gate record carries all of it, `Test-GateAuditComplete`
 re-derives the claim from the counters instead of trusting the word, and
 `Format-GateRecord` prints `andon clear; 5/5 evaluated` rather than `andon clear`.
 
@@ -348,16 +397,20 @@ false`, or delete the `andon` block — every gate behaves as it did before"* �
 under `dark`: it did not restore prior behaviour, it removed the only thing between an
 unattended run and its own approval.
 
-**FIXED**, both ways. Mechanically: an absent or switched-off board is `not-evaluated`, the
-gate refuses (exit 6), and the refusal is in the ledger saying `evaluated=0`. Documentally:
-**the revert is `pipeline.gate_profile: attended`** — that is the switch that puts a human
-back at the gate — and the corrected sentence is in the DECISIONS entry below, in
-`MODULE.md` and in `README.md`.
+**FIXED**, both ways. Mechanically: a switched-off board is `not-evaluated` and an absent
+one is `incomplete` (§9 gave board removal its own state, naming all five ids); either way
+the gate refuses (exit 6) and the refusal is in the ledger with `evaluated=0`.
+Documentally: **the revert is `pipeline.gate_profile: attended`** — the switch that puts a
+human back at the gate, and the configured DEFAULT rather than a lock (§9.2 item 6) — and
+the corrected sentence is in the DECISIONS entry below, in `MODULE.md` and in `README.md`.
 
 **GREEN:** drill step F drives the real gate for three cases — `andon.enabled=false`, the
 block deleted, and one condition switched off — and asserts exit 6, the item parked at
-`anchor-draft`, and a ledger refusal recording `not-evaluated` / `not-evaluated` /
+`anchor-draft`, and a ledger refusal recording `not-evaluated` / `incomplete` /
 `partial` with `evaluated` 0 / 0 / 4.
+
+**WHAT THIS DID NOT CLOSE, and §9 does:** neither of those is what somebody actually does
+to a condition that is in their way. They delete its ENTRY.
 
 ### 8.3 The dead-knob detector shipped a dead knob, in its own block
 
@@ -476,11 +529,175 @@ equal.
 
 - No condition was added or removed; the five are the five.
 - `attended` behaviour is untouched: step E is unchanged and still passes.
-- `verify-merge-protocol.ps1` was still NOT run, for the reason in §4.3 — and its two
-  functions are still what `git-error-swallowed` names first.
+- `verify-merge-protocol.ps1` was still NOT run, for the reason in §4.3. Its two
+  functions are still among the 18 sites `git-error-swallowed` reports — but **not
+  first**: the order is `Sort-Object FullName`, so `new-worktree.ps1:161` and `:184` come
+  first and `verify-merge-protocol.ps1:49/:53` are 10th and 11th. The commit message for
+  `b679c04` says "first" and is wrong about it; the run that establishes the real order is
+  the verbatim block in §3.
 - The eleven remote branches were not deleted and `work/u6dark` was not pushed.
 - The 18 call sites of §4.5 were not fixed. They are real, they are other people's files,
   and fixing them is its own item.
+
+## 9. THE THINNED-BOARD ROUND — one real gap, and nine claims commands contradicted
+
+The machinery and the audit layer of §1–§8 were reproduced independently by two verifiers,
+each in their own fixture rather than in mine. What survived was **one** defect and a list
+of sentences that were narrower, wider or staler than the commands behind them.
+
+### 9.1 DECISIVE — a THINNED board still opened the gates
+
+**The two ways off that §8.2 closed were not the way anyone takes.** An operator or an
+agent with a condition in their way does not disable the board; they delete **that
+condition's entry** from `andon.conditions`.
+
+**REPRODUCED** on a genuinely detached scratch checkout, `pipeline.gate_profile: dark`,
+`andon.enabled: true`, the `andon` block present, every surviving condition keeping its
+params — only four of the five entries removed. What the board said, then what the gate did
+(**abridged transcript of a five-command repro script, not one command's output** — the
+lines are verbatim, the interleaving is mine, and the ledger line is elided at `…`):
+
+```
+$ andon.ps1 -Evaluate -RepoRoot <fixture>
+ANDON BOARD: CLEAR
+  [ok           ] work-branch-on-remote          checked 1 branch(es); none is on a remote
+  coverage: 1 declared, 1 evaluated, 0 switched off
+  -> exit 0
+
+$ queue.ps1 -Submit -Id thin -Branch work/thin ...
+Anchor AUTO-PASSED for 'thin' under gate profile 'dark' - NO HUMAN CONFIRMED IT.
+Queued 'thin' for TESTING (branch work/thin -> dev).
+  -> exit 0;  item: state=ready-to-test  anchor_confirmed_by=auto:dark
+
+<state>/audit/gates.jsonl
+{"schema":2,...,"decision":"passed","kind":"auto","principal":"auto:dark",
+ "gate_profile":"dark","andon":{"status":"clear","repo":"…","conditions":1,
+ "evaluated":1,"disabled":0,"disabled_ids":[],"fired":[]},"tool":"queue.ps1"}
+
+$ queue.ps1 -VerifyAudit -Id thin
+COMPLETE - every gate these item(s) CROSSED has a record, and every record names who
+or what passed it.
+  -> exit 0
+```
+
+Every counter in that record is **true**. `conditions`, `evaluated` and `disabled` are all
+relative to what the config declared, and the config declared one. So a thinned board was
+neither "absent" nor "switched off" — a third state that reported itself perfectly healthy
+with four of five detectors gone. `README.md` and `MODULE.md` said "switching the board off
+does not switch the gates back on"; that was true of the two routes enumerated and false of
+this one, and under §C.7 that sentence is an audit surface, so it had to become true rather
+than narrower.
+
+**AND THE GUARD THAT SHOULD HAVE CAUGHT IT COULD NOT.**
+`test_gate_profiles.py::test_every_andon_condition_is_fully_declared` was cited as failing
+"if one is not fully declared", but its first line was `assert conds` — non-emptiness.
+Demonstrated: with the config thinned 5 → 1, the exact body of that test still passes. The
+same vacuity class this whole effort exists to kill, inside the guard protecting the
+anti-tamper property.
+
+**FIXED — pin the SET, not its size.** The five required condition ids are declared in
+CODE: `config.ps1` `$script:RequiredAndonConditions` and `config.py`
+`REQUIRED_ANDON_CONDITIONS`. Not in `harness.config.json`, because a required list kept
+beside the conditions is deleted along with the entry it names and the file agrees with
+itself either way; in code, retiring a condition is a diff a reviewer sees. This is the
+same asymmetry `$script:Predicates` already gives the other direction — the config may not
+declare a detector nobody wrote, and now may not silently drop one somebody did. There is
+deliberately no environment override.
+
+A board missing any required id is **`incomplete`**: its own board state, the missing ids
+NAMED in the verdict, on the console, in the stderr raise and in the ledger record, exit 6,
+no auto-pass — the same shape `not-evaluated` and `partial` already had. `incomplete`
+outranks the other non-clear words because a verdict from a board that is not the required
+board cannot be reported as that board's verdict; the conditions that *are* declared are
+still evaluated and still listed, so nothing is hidden by the name. Coverage gains
+`required` / `missing` / `missing_ids` (ledger schema 3), and `Test-GateAuditComplete`
+re-derives the fact from the record rather than trusting `status` — a record still labelled
+`clear` while admitting four missing conditions is a finding, and a schema-2 record that
+cannot state the required set at all is a finding, not a pass.
+
+**Board removal now has the right name.** With the whole `andon` block deleted the board is
+`incomplete` naming all five, not `not-evaluated` — which also fixes `MODULE.md`'s table
+row, which read as covering board removal while covering only "every declared condition
+switched off".
+
+**GREEN, RED-proven first.** Drill step H drives the REAL gate for two thinnings — ONE entry
+deleted and FOUR deleted — asserting exit 6, the item parked at `anchor-draft`, nothing
+signed, a ledger refusal recording `incomplete`, and **the record naming every missing id**.
+It also asserts that the OLD counters would have said full coverage (`evaluated=4/4` and
+`1/1`, `disabled=0`), so the reason those counters could not catch it survives the fix.
+Then the **negative control**, re-run on a fresh fixture built the same way: a full board
+still auto-passes at exit 0, still prints `NO HUMAN CONFIRMED IT`, still signs `auto:dark`,
+records `0 of 5 required MISSING`, and still verifies COMPLETE — because a fix that refuses
+everything is not a fix. RED proof: the same drill file against the pre-fix sources
+(`git show HEAD:` into a copy) fails **22** checks, all twelve of step H's halt assertions
+among them, while every CONTROL check passes on both sides.
+
+`test_gate_profiles.py` gained the set test, a parameterised red-proof that a thinned board
+is a MISSING SET (asserting *in the test* that the old `assert conds` is still satisfied, so
+the vacuity cannot come back), a test that a config may neither narrow nor widen the
+required set, and the required ids in the PowerShell↔Python anti-drift test.
+
+### 9.2 Claims that commands contradicted
+
+Each was RUN by a verifier and re-run here before being changed.
+
+1. **`andon.ps1`'s `git -C ""` note was widened past its evidence.** It said the empty
+   `-C` "silently runs wherever you happen to be and exits 0 — verified 2026-08-30". That
+   was verified in BASH. In POWERSHELL — this file's own language and the only way the code
+   path is reached — `git -C '' rev-parse --show-toplevel` exits **128**: `fatal: cannot
+   change to 'rev-parse': No such file or directory`, direct and splatted (re-run
+   2026-08-30). The empty argument is dropped from argv, so `rev-parse` lands in `-C`'s
+   slot. The drill incident is real and the refusal stands on its own merits; the comment
+   now says which shell the silent behaviour holds in.
+2. **`queue.ps1`'s usage said `-VerifyAudit … exit 1 if not`.** Coverage-incomplete exits
+   **7** — proven by this item's own drill C and by a verifier against a copy of the live
+   queue. The usage was narrower than the tool and read as though 7 were impossible. Now
+   `0 complete | 1 findings | 7 items it could not audit`.
+3. **A halt's coverage line could never print.** `Stop-OnAndon` guarded it with
+   `$andon.PSObject.Properties.Name -contains "evaluated"`, and `$andon` is an
+   `[ordered]` hashtable whose PSObject properties are `Count, IsReadOnly, Keys, Values,
+   IsFixedSize, SyncRoot, IsSynchronized` — never its keys. **Always false**, so a real dark
+   halt reached the operator with no coverage at all: a check that could not fire, inside
+   the tool built to refuse checks that cannot fire. Replaced with `Test-AndonField`, which
+   handles the hashtable and the PSCustomObject a ledger record parses back into, and the
+   missing-ids line is printed beside it.
+4. **The §3 fenced block was re-ordered.** See §3: it is now the verbatim, whole output.
+   `verify-merge-protocol.ps1:49/:53` are **10th and 11th of 18**, not first;
+   `new-worktree.ps1:161` and `:184` are first (`Sort-Object FullName`, deterministic).
+   §8.8 is corrected; `b679c04`'s message is left as written, per §8.6.
+5. **"No scanned file uses a here-string"** — `scripts/checks/test-quartz4-offline.ps1` is
+   in the default glob and has **eight** (lines 145, 185, 251, 267, 287, 327, 399, 415).
+   Corrected in `andon.ps1` and in §2.
+6. **"Every function in the scanned families is at column 0"** —
+   `scripts/checks/smoke-agent-memory.ps1:131` declares `Invoke-Door` indented. It is the
+   only one in the two globs, which is a different sentence and the only one now made.
+7. **`pytest scripts/agent-harness` → 117 passed** needs a checkout with a live queue. A
+   verifier running the pre-§9 tree in a clone got **115 passed, 2 skipped**. Reproduced
+   here rather than relayed: the same suite in a checkout with no `agent-worktrees` state
+   skips exactly `test_anchor_schema.py:200` ("no queued anchors under …\queue") and
+   `test_scope_node.py:210` ("no live queue in this checkout"). The count is therefore two
+   lower wherever the state dir is absent — after this round, 119 + 2 rather than 121.
+   Stated with its condition in §1 rather than as a bare number.
+8. **`MODULE.md`'s `not-evaluated` row** read as covering board removal. Board removal is
+   now `incomplete` and has its own row; `not-evaluated` says what it actually covers.
+9. **`-GateProfile dark` overrides an attended config for a single call** (verified: same
+   item, exit 5 attended, exit 6 dark — drill step I). So
+   `pipeline.gate_profile: attended` is the configured DEFAULT, not a lock. Disclosed in
+   `README.md`, `MODULE.md` and the DECISIONS entry rather than changed: removing the human
+   from a gate being one flag away is the design, and the sentence that mattered was the one
+   that let "the revert" be read as "no run can self-pass now".
+
+### 9.3 What this round did NOT change
+
+- No condition was added or removed: the five are the five, and they are now the five the
+  code requires.
+- `attended` behaviour is untouched — drill step E is unchanged and still passes.
+- `verify-merge-protocol.ps1` was still NOT run, for the reason in §4.3.
+- The 18 call sites of §4.5 were not fixed; their line numbers in `queue.ps1` moved with
+  this diff (763, 818) and the table is updated.
+- The eleven remote branches were not deleted and `work/u6dark` was not pushed.
+- U6 clauses 1–3 remain **CODE-COMPLETE, GYM-VALIDATION PARKED**. This round did not run in
+  `ai-orchestration-gym` either.
 
 ---
 
@@ -528,12 +745,14 @@ REVERT:   Restore the three-line block in all three files; nothing read it, so n
 FINDING:  Five conditions ship, each citing the 2026-08-30 incident it was mined from,
           each with an executable predicate in andon.ps1 and each proven FIRING on a
           constructed instance and NOT firing on a clean one (drill-dark-factory.ps1,
-          96 checks, 0 failed - 60 before the audit round below). A condition naming a
-          predicate that does not exist is
+          121 checks, 0 failed - 60 at first, 96 after the audit round below, 121 after
+          the thinned-board round). A condition naming a predicate that does not exist is
           REFUSED, so the config cannot declare a detector nobody wrote.
-STATE:    `andon.ps1 -Evaluate` on the work line is RAISED. `git-error-swallowed` names
-          verify-merge-protocol.ps1:47 Invoke-DrillGit() and :51 Get-DrillGit() - the
-          incident's own functions. `work-branch-on-remote` names the eleven work/*
+STATE:    `andon.ps1 -Evaluate` on the work line is RAISED. `git-error-swallowed` names 18
+          call sites, among them verify-merge-protocol.ps1:49 Invoke-DrillGit() and :53
+          Get-DrillGit() - the incident's own functions. (Sites, not functions, and :49/:53,
+          not :47/:51; they are 10th and 11th in the tool's own order, not first. The
+          verbatim run is in u6dark-findings.md section 3.) `work-branch-on-remote` names the eleven work/*
           branches on origin. `protected-ref-moved` is indeterminate until a run records
           a baseline, and indeterminate is deliberately NOT a pass.
 CONSEQUENCE, stated plainly: a `dark` run CANNOT auto-pass a gate in this repository
@@ -549,8 +768,11 @@ REVERT:   `pipeline.gate_profile: attended` in harness.config.json - that is the
           under `dark` those remove the thing WATCHING the machine, not the machine, and
           an earlier draft of this entry said the opposite. Proven: with the block deleted,
           a dark -Submit on a detached checkout returned exit 0 / ready-to-test with the
-          ledger reading `clear conditions=0`. It now halts at exit 6 with `not-evaluated`
-          in the ledger (drill step F, three cases).
+          ledger reading `clear conditions=0`. It now halts at exit 6 with `incomplete` in
+          the ledger, naming all five missing ids (drill step F). Nor is DELETING CONDITION
+          ENTRIES a revert: that is `incomplete` too (drill step H). And `attended` is the
+          configured DEFAULT, not a lock - `-GateProfile dark` overrides it for one call
+          (drill step I).
 
 ## 2026-08-30 · U6 · AUTO-PASSED GATES ARE DISTINGUISHABLE, AND THE CHECK HAS TEETH
 DECISION: Every gate pass writes an append-only record to <state>/audit/gates.jsonl
@@ -630,11 +852,15 @@ DECISION: `clear` now means something narrow and checkable - at least one condit
           states, both exit 6, and both refuse an unattended gate. Every verdict and every
           gate record carries `coverage {declared, evaluated, disabled, disabled_ids}` and
           the repository the board was looking at; Test-GateAuditComplete re-derives the
-          claim from those counters instead of trusting the word `clear`.
+          claim from those counters instead of trusting the word `clear`. A LATER ENTRY
+          BELOW adds the fifth state, `incomplete`, and two more coverage fields: these
+          counters are all relative to what the config DECLARED, which a board thinned by
+          deleting condition entries satisfies perfectly.
 PROVEN:   RED first, on a detached scratch repo - `clear/5/exit 0`. GREEN after -
           `not-evaluated`, exit 6, `declared=5 evaluated=0`. Three new ledger tampers go
           RED (evaluated forced to 0; the coverage fields stripped; the pre-existing status
-          tamper). drill-dark-factory.ps1: 96 checks, 0 failed.
+          tamper). drill-dark-factory.ps1: 96 checks at that round, 121 after the
+          thinned-board round, 0 failed.
 REVERT:   revert the andon.ps1 / gate-audit.ps1 diff; the ledger is additive and older
           records simply lack the coverage fields, which the verifier reports as a finding
           rather than a pass.
@@ -649,14 +875,21 @@ FINDING:  This item's own findings note offered "andon.enabled: false, or delete
 WHY IT MATTERS MORE THAN THE BUG: a revert path is read in a hurry, by someone who has
           already decided to stop. One that does something other than what it says is worse
           than none.
-DECISION: The revert to prior behaviour is `pipeline.gate_profile: attended`, and only
-          that. An absent or switched-off board is `not-evaluated`: the gate REFUSES (exit
-          6), the item parks, and the refusal is in the ledger saying 0 conditions were
-          evaluated. Corrected in the entry above, in MODULE.md and in README.md.
+DECISION: The revert to prior behaviour is `pipeline.gate_profile: attended`. A
+          switched-off board is `not-evaluated` and an ABSENT one is `incomplete` (see the
+          thinned-board entry below, which gave board removal its own state): either way
+          the gate REFUSES (exit 6), the item parks, and the refusal is in the ledger.
+          Corrected in the entry above, in MODULE.md and in README.md. `attended` is the
+          configured DEFAULT, not a lock - `queue.ps1 -GateProfile dark` names a profile
+          for a single call and takes the dark path regardless (verified: same item, exit 5
+          attended, exit 6 dark; drill step I). Removing the human from a gate is one flag
+          away by design, and this entry says so rather than leaving "the revert" to be
+          read as "no run can self-pass now".
 PROVEN:   drill step F drives the REAL gate for three cases - `andon.enabled=false`, the
           andon block deleted, and one condition switched off - asserting exit 6, the item
           parked at anchor-draft, and a ledger refusal recording not-evaluated /
-          not-evaluated / partial with evaluated 0 / 0 / 4.
+          incomplete / partial with evaluated 0 / 0 / 4. Step I proves the override: the
+          same item, exit 5 under the attended config and exit 6 under `-GateProfile dark`.
 REVERT:   n/a - a correction. The behaviour it documents reverts with the entry above.
 
 ## 2026-08-30 · method · A DETECTOR'S OWN BLOCK IS NOT EXEMPT, AND ITS MATCH MUST BE ANCHORED
@@ -749,4 +982,88 @@ ALSO ADJUDICATED, and the refutation was WRONG on the mechanism: the drill's "ne
           params.repo is now pinned per fixture and step B asserts from the LEDGER that the
           board the gate consulted was looking under $env:TEMP.
 REVERT:   n/a - corrections.
+
+## 2026-08-30 · U6 · A BOARD MISSING A CONDITION IS NOT A CLEAR BOARD — the third way off
+FINDING:  Two ways of switching the andon board off were closed: `andon.enabled: false`
+          and deleting the `andon` block both report a non-clear state and halt. There was
+          a THIRD, and it is the one an operator or an agent actually reaches for - DELETE
+          THE CONDITION'S ENTRY from `andon.conditions`. REPRODUCED on a genuinely detached
+          scratch checkout with the board otherwise untouched (enabled, block present,
+          surviving params intact), pruned to one of five: `ANDON BOARD: CLEAR`, andon exit
+          0, the dark anchor gate AUTO-PASSED at exit 0 to ready-to-test signed `auto:dark`,
+          ledger `status=clear conditions=1 evaluated=1 disabled=0`, `-VerifyAudit`
+          COMPLETE. Every counter was TRUE, because every counter was relative to the
+          config's own thinned list. README.md and MODULE.md said "switching the board off
+          does not switch the gates back on" - true of the two enumerated routes, false of
+          this one, and under C.7 that sentence is an audit surface.
+          The guard that should have caught it could not: test_gate_profiles.py's
+          `test_every_andon_condition_is_fully_declared` asserted only `assert conds`
+          (NON-EMPTY), so four of five could be deleted and it stayed green. The same
+          vacuity class this effort exists to kill, inside the anti-tamper guard.
+DECISION: PIN THE SET, NOT ITS SIZE. The five required condition ids are declared in CODE -
+          config.ps1 `$script:RequiredAndonConditions` and config.py
+          `REQUIRED_ANDON_CONDITIONS` - and NOT in harness.config.json, because a required
+          list kept beside the conditions is deleted along with the entry it names and the
+          file agrees with itself either way. In code, retiring a condition is a diff a
+          reviewer sees. Same asymmetry `$script:Predicates` already provides in the other
+          direction: the config may not declare a detector nobody wrote, and may not
+          silently drop one somebody did. No environment override.
+          A board missing any required id is `incomplete`: its own board state, the missing
+          ids NAMED in the verdict, on the console, in the stderr raise and in the ledger,
+          exit 6, no auto-pass - the shape `not-evaluated` and `partial` already had. It
+          outranks the other non-clear words because a verdict from a board that is not the
+          required board cannot be reported as that board's verdict; declared conditions are
+          still evaluated and still listed. Coverage gains `required`/`missing`/`missing_ids`
+          (ledger schema 3) and Test-GateAuditComplete RE-DERIVES the fact from the record:
+          a record still labelled `clear` while admitting missing conditions is a finding,
+          and a schema-2 record that cannot state the required set is a finding, not a pass.
+          Board REMOVAL is now `incomplete` naming all five rather than `not-evaluated`,
+          which is also the correction to MODULE.md's board table.
+PROVEN:   RED FIRST. Drill step H drives the REAL gate for two thinnings - ONE entry
+          deleted and FOUR deleted - asserting exit 6, the item parked at anchor-draft,
+          nothing signed, a ledger refusal recording `incomplete`, and the record NAMING
+          every missing id; it also asserts the old counters would have said full coverage
+          (4/4 and 1/1 evaluated, 0 disabled), so the reason they could not catch it
+          survives the fix. The same drill file run against the PRE-FIX sources fails 22
+          checks. NEGATIVE CONTROL, re-run after the fix on a fresh fixture built the same
+          way: a full board still auto-passes at exit 0, still prints NO HUMAN CONFIRMED IT,
+          signs `auto:dark`, records 0 of 5 required MISSING, and verifies COMPLETE - and
+          those CONTROL checks pass on both sides of the fix. Ledger tampers: a record
+          labelled clear but admitting 4 missing goes RED; a schema-2 shaped record goes
+          RED; restore, GREEN. test_gate_profiles.py adds the set test, a parameterised
+          red-proof that pins the OLD vacuity inside the new test, a test that a config may
+          neither narrow nor widen the required set, and the required ids in the
+          PowerShell/Python anti-drift test. drill-dark-factory.ps1: 121 checks, 0 failed.
+          pytest scripts/agent-harness: 121 passed.
+REVERT:   revert the config.ps1/config.py constant and the andon.ps1/gate-audit.ps1 diff;
+          the ledger is additive and older records simply lack `required`/`missing`, which
+          the verifier reports as a finding rather than a pass. Reverting restores the
+          thinned-board hole - it is not a knob for a reason.
+
+## 2026-08-30 · method · A CHECK THAT CANNOT FIRE IS THE DEFECT, WHEREVER IT SITS
+FINDING:  Three of this round's nine corrections are the same shape as the work itself, in
+          the work itself. (1) `Stop-OnAndon`'s coverage line was guarded by
+          `$andon.PSObject.Properties.Name -contains "evaluated"`, and `$andon` is an
+          [ordered] hashtable whose PSObject properties are Count/IsReadOnly/Keys/Values/
+          IsFixedSize/SyncRoot/IsSynchronized - never its keys. ALWAYS FALSE, so a real dark
+          halt printed no coverage at all. (2) the andon condition-set guard asserted
+          non-emptiness. (3) `queue.ps1`'s usage said `-VerifyAudit ... exit 1 if not` while
+          coverage-incomplete exits 7 - the usage was narrower than the tool and read as
+          though 7 were impossible.
+RULE:     a guard is not verified by reading it. It is verified by making the thing it
+          guards against and watching it fire. Every one of these was found by a verifier
+          RUNNING the command, not by re-reading the file - including on this item, whose
+          entire subject is checks that check nothing.
+ALSO:     four claims were wider, staler or shallower than their evidence and are corrected
+          in the note - `git -C ""` exits 128 in POWERSHELL (the silent-exit-0 behaviour was
+          verified in bash, and this file's code path is PowerShell); a fenced block
+          presented as output had been RE-ORDERED to put the incident's own functions first
+          when they are 10th and 11th of 18; "no scanned file uses a here-string" (one has
+          eight); "every function in the scanned families is at column 0" (one is indented);
+          and "117 passed" needs a checkout with a live queue (a clone gives 115 + 2 skipped).
+DISCLOSED, NOT CHANGED: `-GateProfile dark` overrides an attended config for a single call
+          (same item: exit 5 attended, exit 6 dark), so `pipeline.gate_profile: attended` is
+          the configured DEFAULT, not a lock. That is the design - what needed fixing was
+          the sentence that let "the revert" be read as "no run can self-pass now".
+REVERT:   n/a - corrections, plus one guard (Test-AndonField) that reverts with its diff.
 ```

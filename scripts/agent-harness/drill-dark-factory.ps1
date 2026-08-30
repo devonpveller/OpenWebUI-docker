@@ -189,7 +189,11 @@ Check "the verdict states its COVERAGE: 5 declared, 0 evaluated" (([int]$r.verdi
 # approval. An absent board is now an absent board, not a clear one.
 $cfgA1none = New-DrillConfig "a1-no-board" { param($c) $c.PSObject.Properties.Remove("andon") }
 $r = Invoke-Andon -Config $cfgA1none -Repo $repoA
-Check "an ABSENT andon block is NOT-EVALUATED (exit 6), not an empty clear board" (($r.verdict.board -eq "not-evaluated") -and ($r.code -eq 6)) ("board=" + $r.verdict.board + " exit=" + $r.code)
+# INCOMPLETE, not not-evaluated, since 2026-08-30: an absent block is five REQUIRED
+# conditions that are not declared, and naming them is strictly more useful than saying
+# nothing was evaluated. Either way it exits 6; what changed is what the operator is told.
+Check "an ABSENT andon block is INCOMPLETE (exit 6), not an empty clear board" (($r.verdict.board -eq "incomplete") -and ($r.code -eq 6)) ("board=" + $r.verdict.board + " exit=" + $r.code)
+Check "and it NAMES all five required conditions as missing" (([int]$r.verdict.coverage.missing -eq 5) -and (@($r.verdict.coverage.missing_ids) -contains "git-error-swallowed")) ("missing=" + $r.verdict.coverage.missing + " ids=" + (@($r.verdict.coverage.missing_ids) -join ","))
 
 # A condition switched off individually is reported as DISABLED and NAMED, and asking the
 # board about that one alone leaves it with nothing evaluated. (The mixed case - some
@@ -666,7 +670,7 @@ $ledD2 = Get-Ledger $fixD2
 Check "the refusal records that the board was UNAVAILABLE, not that it was clear" ((@($ledD2 | Where-Object { $_.andon.status -eq "unavailable" }).Count -ge 1)) (($ledD2 | ForEach-Object { $_.andon.status }) -join ",")
 
 # ====================================================================================
-Step "E  `attended` is unchanged, and the reserved namespace is reserved both ways"
+Step 'E  attended is unchanged, and the reserved namespace is reserved both ways'
 # ====================================================================================
 $fixE = New-DarkFixture "attended" "attended"
 $prevCfg = $env:AI_STACK_HARNESS_CONFIG; $prevState = $env:AI_STACK_WORKTREE_STATE
@@ -700,7 +704,7 @@ Step "F  switching the board OFF must not open the gates - the revert is not a k
 foreach ($case in @(
     @{ name = "andon-off";  label = "andon.enabled=false"; status = "not-evaluated"; evaluated = 0
        edit = { param($o) $o.andon.enabled = $false } },
-    @{ name = "andon-gone"; label = "the andon block deleted"; status = "not-evaluated"; evaluated = 0
+    @{ name = "andon-gone"; label = "the andon block deleted"; status = "incomplete"; evaluated = 0
        edit = { param($o) $o.PSObject.Properties.Remove("andon") } },
     # The MIXED case. Four conditions look and pass; one is switched off. That is not a clear
     # board either - it is the operator saying "do not look at this one", which is a decision
@@ -765,6 +769,124 @@ $o.pipeline.anchor_required = $true
 $r = Invoke-Queue $fixG @("-VerifyAudit", "-Id", "dfg")
 Check "anchor_required=true: the same anchorless item is INCOMPLETE (exit 1)" ($r.code -eq 1) ("exit=" + $r.code)
 Check "and the finding names the anchor gate with no pass record" ($r.out -like "*anchor*no pass record*") ""
+
+# ====================================================================================
+Step "H  a THINNED board must not open the gates either - deleting condition ENTRIES"
+# ====================================================================================
+# THE THIRD WAY OFF, and the one an operator or an agent would actually reach for. Step F
+# closed two: `andon.enabled: false` and deleting the whole `andon` block. Neither is what
+# somebody does when a condition is in their way. They delete THAT CONDITION'S ENTRY from
+# `andon.conditions` - and until 2026-08-30 that produced a board reporting itself perfectly
+# healthy: pruned to one of five on a genuinely detached checkout the gate AUTO-PASSED, exit
+# 0, ledger `clear` with `1 declared / 1 evaluated / 0 switched off`, `-VerifyAudit COMPLETE`.
+# Every counter was TRUE, because every counter was relative to the config's own thinned list.
+#
+# The fix is the required SET, declared in config.ps1 where the config cannot edit it. These
+# cases prove the refusal at the REAL gate, prove the record NAMES which ids are gone, and -
+# because a fix that refuses everything is not a fix - re-run the negative control after them.
+foreach ($case in @(
+    @{ name = "thin-one"; label = "ONE condition entry deleted"
+       drop = @("protected-ref-moved") },
+    @{ name = "thin-four"; label = "FOUR condition entries deleted"
+       drop = @("operator-checkout-off-branch", "policy-declared-unread", "git-error-swallowed", "protected-ref-moved") }
+)) {
+    $fixH = New-DarkFixture ("dark-" + $case.name) "dark"
+    # Baseline FIRST: one of these cases deletes the condition -Baseline reads.
+    $prevCfg = $env:AI_STACK_HARNESS_CONFIG; $prevState = $env:AI_STACK_WORKTREE_STATE
+    $env:AI_STACK_HARNESS_CONFIG = $fixH.cfg; $env:AI_STACK_WORKTREE_STATE = $fixH.state
+    & $PsExe -NoProfile -NonInteractive -File $AndonPs -Baseline -RepoRoot $fixH.repo | Out-Null
+    $env:AI_STACK_HARNESS_CONFIG = $prevCfg; $env:AI_STACK_WORKTREE_STATE = $prevState
+
+    $o = Get-Content -Raw -Path $fixH.cfg | ConvertFrom-Json
+    # NOTHING ELSE IS TOUCHED: andon.enabled stays true, the block stays present, every
+    # surviving condition keeps its params. Only the entries are gone.
+    $o.andon.conditions = @($o.andon.conditions | Where-Object { $case.drop -notcontains $_.id })
+    ($o | ConvertTo-Json -Depth 40) | Set-Content -Path $fixH.cfg -Encoding ASCII
+    $kept = @($o.andon.conditions).Count
+
+    $r = Invoke-Queue $fixH @("-Propose", "-Id", "dfh", "-Anchor", $anchorFile, "-Developer", "wt-dfdrill")
+    $r = Invoke-Queue $fixH @("-Submit", "-Id", "dfh", "-Branch", "work/dfdrill", "-Developer", "wt-dfdrill", "-TestPlan", $planFile)
+    $it = Get-QueueItem $fixH "dfh"
+    Check ("HALT with " + $case.label + ": the anchor gate refuses (exit 6)") ($r.code -eq 6) ("exit=" + $r.code + " kept=" + $kept)
+    Check ("HALT with " + $case.label + ": the item stays parked at anchor-draft") ($it.state -eq "anchor-draft") ("state=" + $it.state)
+    Check ("HALT with " + $case.label + ": nothing signed the anchor gate") (-not $it.anchor_confirmed_by) ("anchor_confirmed_by='" + $it.anchor_confirmed_by + "'")
+    $ledH = @(Get-Ledger $fixH | Where-Object { $_.decision -eq "refused" })
+    Check ("HALT with " + $case.label + ": the refusal is recorded as 'incomplete', not 'clear'") ((@($ledH).Count -ge 1) -and (@($ledH)[0].andon.status -eq "incomplete")) ("status=" + ((@($ledH) | ForEach-Object { $_.andon.status }) -join ","))
+    # NAMED, not counted. "the board is short" sends an operator to diff the config; the ids
+    # send them to the lines that are gone.
+    $named = @(@($ledH)[0].andon.missing_ids)
+    $allNamed = $true
+    foreach ($d in $case.drop) { if ($named -notcontains $d) { $allNamed = $false } }
+    Check ("HALT with " + $case.label + ": the record NAMES every missing id") (($allNamed) -and (@($named).Count -eq @($case.drop).Count)) ("missing_ids=" + ($named -join ","))
+    # The counters the OLD record carried are all still satisfied by this board - which is
+    # precisely why they could not catch it. Asserted, so the reason survives the fix.
+    Check ("HALT with " + $case.label + ": and the old counters would have said 'full coverage'") ((([int](@($ledH)[0].andon.evaluated)) -eq $kept) -and (([int](@($ledH)[0].andon.disabled)) -eq 0)) ("evaluated=" + (@($ledH)[0].andon.evaluated) + "/" + (@($ledH)[0].andon.conditions) + " disabled=" + (@($ledH)[0].andon.disabled))
+}
+
+# THE NEGATIVE CONTROL, re-run after the fix. A gate that refuses everything is not a gate.
+# Step B already lands a clean board end to end; this repeats the auto-pass on a fresh fixture
+# built exactly like the two thinned ones above, so the ONLY difference between refusing and
+# passing is which condition entries are present.
+$fixHok = New-DarkFixture "dark-thin-control" "dark"
+$prevCfg = $env:AI_STACK_HARNESS_CONFIG; $prevState = $env:AI_STACK_WORKTREE_STATE
+$env:AI_STACK_HARNESS_CONFIG = $fixHok.cfg; $env:AI_STACK_WORKTREE_STATE = $fixHok.state
+& $PsExe -NoProfile -NonInteractive -File $AndonPs -Baseline -RepoRoot $fixHok.repo | Out-Null
+$env:AI_STACK_HARNESS_CONFIG = $prevCfg; $env:AI_STACK_WORKTREE_STATE = $prevState
+$r = Invoke-Queue $fixHok @("-Propose", "-Id", "dfhok", "-Anchor", $anchorFile, "-Developer", "wt-dfdrill")
+$r = Invoke-Queue $fixHok @("-Submit", "-Id", "dfhok", "-Branch", "work/dfdrill", "-Developer", "wt-dfdrill", "-TestPlan", $planFile)
+$it = Get-QueueItem $fixHok "dfhok"
+Check "CONTROL: a FULL board still auto-passes the anchor gate (exit 0)" (($r.code -eq 0) -and ($it.state -eq "ready-to-test")) ("exit=" + $r.code + " state=" + $it.state)
+Check "CONTROL: and it still says NO HUMAN CONFIRMED IT" ($r.out -like "*NO HUMAN CONFIRMED IT*") ""
+Check "CONTROL: signed by the reserved auto principal" ($it.anchor_confirmed_by -eq "auto:dark") ("got '" + $it.anchor_confirmed_by + "'")
+$ledHok = @(Get-Ledger $fixHok | Where-Object { $_.decision -eq "passed" })
+Check "CONTROL: the pass record states 0 of 5 required MISSING" ((@($ledHok).Count -ge 1) -and ([int](@($ledHok)[0].andon.missing) -eq 0) -and ([int](@($ledHok)[0].andon.required) -eq 5)) ("missing=" + (@($ledHok)[0].andon.missing) + "/" + (@($ledHok)[0].andon.required))
+$r = Invoke-Queue $fixHok @("-VerifyAudit", "-Id", "dfhok")
+Check "CONTROL: the audit trail still verifies COMPLETE (exit 0)" ($r.code -eq 0) ("exit=" + $r.code)
+
+# AND THE COMPLETENESS CHECK RE-DERIVES IT rather than trusting `status`. A tamper that leaves
+# the word `clear` in place while admitting a thinned board must still go red - otherwise the
+# ledger's own word is its only oracle, which is the defect this file exists to refuse.
+$ledgerHok = Join-Path $fixHok.state "audit\gates.jsonl"
+$bakHok = Get-Content -Path $ledgerHok
+$thinTamper = '"missing":4,"missing_ids":["operator-checkout-off-branch","policy-declared-unread","git-error-swallowed","protected-ref-moved"]'
+Set-Content -Path $ledgerHok -Encoding ASCII -Value @($bakHok | ForEach-Object { $_.Replace('"missing":0,"missing_ids":[]', $thinTamper) })
+$r = Invoke-Queue $fixHok @("-VerifyAudit", "-Id", "dfhok")
+Check "RED: a record still labelled 'clear' but admitting 4 missing conditions is caught" ($r.code -eq 1) ("exit=" + $r.code)
+Check "RED: and the finding NAMES them" (($r.out -like "*REQUIRED*") -and ($r.out -like "*git-error-swallowed*")) ""
+# A schema-2 shaped record - coverage present, required set absent - cannot answer the
+# question at all, and "cannot answer" is a finding, never a pass.
+Set-Content -Path $ledgerHok -Encoding ASCII -Value @($bakHok | ForEach-Object { $_.Replace(',"required":5,"missing":0,"missing_ids":[]', '') })
+$r = Invoke-Queue $fixHok @("-VerifyAudit", "-Id", "dfhok")
+Check "RED: a record that cannot state the required set is a FINDING, not a pass" ($r.code -eq 1) ("exit=" + $r.code)
+Set-Content -Path $ledgerHok -Encoding ASCII -Value $bakHok
+$r = Invoke-Queue $fixHok @("-VerifyAudit", "-Id", "dfhok")
+Check "GREEN again once the ledger is restored" ($r.code -eq 0) ("exit=" + $r.code)
+
+# ====================================================================================
+Step 'I  -GateProfile OVERRIDES an attended config, so attended is a default not a lock'
+# ====================================================================================
+# Disclosed rather than changed. `pipeline.gate_profile: attended` is the right revert and
+# step E proves it works - but it is the CONFIGURED DEFAULT, and a single call may name a
+# different profile. Reading "the revert is attended" as "no run can self-pass now" would be
+# wrong, so the same item is driven both ways here.
+$fixI = New-DarkFixture "attended-overridden" "attended"
+$prevCfg = $env:AI_STACK_HARNESS_CONFIG; $prevState = $env:AI_STACK_WORKTREE_STATE
+$env:AI_STACK_HARNESS_CONFIG = $fixI.cfg; $env:AI_STACK_WORKTREE_STATE = $fixI.state
+& $PsExe -NoProfile -NonInteractive -File $AndonPs -Baseline -RepoRoot $fixI.repo | Out-Null
+$env:AI_STACK_HARNESS_CONFIG = $prevCfg; $env:AI_STACK_WORKTREE_STATE = $prevState
+# The board is thinned here on purpose, so the override shows up as a DIFFERENT REFUSAL
+# rather than as an unattended pass: this step is about which profile the call took, and the
+# drill does not need to demonstrate a dark auto-pass a third time.
+$o = Get-Content -Raw -Path $fixI.cfg | ConvertFrom-Json
+$o.andon.conditions = @($o.andon.conditions | Where-Object { $_.id -ne "protected-ref-moved" })
+($o | ConvertTo-Json -Depth 40) | Set-Content -Path $fixI.cfg -Encoding ASCII
+
+$r = Invoke-Queue $fixI @("-Propose", "-Id", "dfi", "-Anchor", $anchorFile, "-Developer", "wt-dfdrill")
+$r = Invoke-Queue $fixI @("-Submit", "-Id", "dfi", "-Branch", "work/dfdrill", "-Developer", "wt-dfdrill", "-TestPlan", $planFile)
+Check "the configured profile is attended: -Submit refuses with exit 5 (no confirmed anchor)" ($r.code -eq 5) ("exit=" + $r.code)
+$r = Invoke-Queue $fixI @("-GateProfile", "dark", "-Submit", "-Id", "dfi", "-Branch", "work/dfdrill", "-Developer", "wt-dfdrill", "-TestPlan", $planFile)
+Check "-GateProfile dark on the SAME item takes the dark path instead (exit 6, andon)" ($r.code -eq 6) ("exit=" + $r.code)
+Check "so pipeline.gate_profile: attended is a DEFAULT, not a lock" ($r.out -like "*ANDON*") ""
 
 # ====================================================================================
 Write-Host ""
