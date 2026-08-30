@@ -165,6 +165,61 @@ UNION ALL SELECT 'wiki_links_gin(1)',count(*) FROM pg_indexes WHERE indexname='i
     if ($line -and (($line -split '\|')[1].Trim() -eq $expect[1])) { Pass "fresh volume: $($expect[0])" }
     else { Fail "fresh volume: $($expect[0]) - got '$line'" }
   }
+  # THE MODULE'S REAL SQL, AGAINST THE REAL SCHEMA.
+  #
+  # agent-memory.ts is unit-tested with a stubbed pool whose queryObject accepts any
+  # string. That is fine for control flow and useless for SQL: the first version of the
+  # writeback inserted into a `detail` column that does not exist (the schema has
+  # `payload`), and the suite passed because the assertion was that the statement CONTAINED
+  # "INSERT INTO agent_memory_audit_events" - true of a statement Postgres rejects. Every
+  # writeback would have failed, after committing two rows.
+  #
+  # So the statements are executed here against the schema that ships beside them. The
+  # throwaway DB is already up; this costs one psql call. thought_id is left NULL (the
+  # column is nullable) so this needs no embedding lane.
+  $amSql = @"
+BEGIN;
+INSERT INTO agent_memories (
+  thought_id, workspace_id, project_id, channel_kind, channel_id,
+  summary, content, memory_type, visibility, review_status,
+  lifecycle_status, provenance_status, can_use_as_evidence,
+  requires_user_confirmation, idempotency_key, content_hash, metadata
+) VALUES (
+  NULL, 'ws-harness', NULL, NULL, NULL,
+  'harness summary', 'harness content', 'lesson', 'project', 'evidence_only',
+  'active', 'generated', true,
+  true, 'harness-key', agent_memory_hash_text('harness content'), '{}'::jsonb
+);
+INSERT INTO agent_memory_audit_events (memory_id, workspace_id, event_type, payload)
+  SELECT id, 'ws-harness', 'memory_written', jsonb_build_object('via', 'harness')
+    FROM agent_memories WHERE workspace_id = 'ws-harness';
+SELECT 'am_sql_ok', count(*) FROM agent_memory_audit_events WHERE workspace_id = 'ws-harness';
+ROLLBACK;
+"@
+  $amOut = docker exec -i ob-initdb-test psql -U postgres -d openbrain -tA -v ON_ERROR_STOP=1 -c $amSql 2>&1
+  if ($LASTEXITCODE -eq 0 -and ($amOut | Out-String) -match "am_sql_ok\|1") {
+    Pass "agent-memory writeback SQL executes against the real schema"
+  } else {
+    Write-Host ($amOut | Out-String) -ForegroundColor Red
+    Fail "agent-memory writeback SQL rejected by the real schema"
+  }
+
+  # The idempotency index must be scoped PER WORKSPACE. Globally unique, two tenants using
+  # the same obvious key collide and the loser is handed the winner's memory.
+  $idxOut = docker exec ob-initdb-test psql -U postgres -d openbrain -tA -c @"
+SELECT 'ws_scoped', count(*) FROM pg_indexes
+ WHERE indexname = 'idx_agent_memories_ws_idempotency_key';
+SELECT 'global_gone', count(*) FROM pg_indexes
+ WHERE indexname = 'idx_agent_memories_idempotency_key';
+"@
+  $idxTxt = ($idxOut | Out-String)
+  if ($idxTxt -match "ws_scoped\|1" -and $idxTxt -match "global_gone\|0") {
+    Pass "idempotency_key is unique per workspace, not globally"
+  } else {
+    Write-Host $idxTxt -ForegroundColor Red
+    Fail "idempotency_key index scope is wrong"
+  }
+
   docker rm -f ob-initdb-test 2>$null | Out-Null
 }
 
