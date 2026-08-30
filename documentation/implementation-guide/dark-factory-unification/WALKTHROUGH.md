@@ -25,7 +25,7 @@ is marked deliberately rather than rounded up.
 | **U3** | PARKED | Code complete and drills green in both systems; the **gym arena run** has not happened. |
 | **U4** | PARKED, closure in flight | Column unmet — the harness's own report prints `COMPARED 2/4, exit 1`. Row amended (§2.1 A1) because its premise was falsified. |
 | **U5** | PARKED, closure in flight | Doors are hardened and proven; content has a **second home** in `thoughts` and a **third** in an unauthenticated PostgREST projection. |
-| **U6** | clause 4 DONE, clauses 1–3 in round 4 | Recall-informed briefs merged and live-proven; andon + gate profiles work, their honesty layer is still being closed. |
+| **U6** | clause 4 DONE, clauses 1–3 in round 5 | Recall-informed briefs merged and live-proven; andon + gate profiles work, their honesty layer is still being closed. |
 | **U7** | NOT STARTED | Standing, per §B. Depends on U6. |
 
 ---
@@ -175,7 +175,7 @@ confirmed reachable on the OB1 remote before merging.
 re-rank is order-preserving — two-phase overfetch is proven in tests and a **no-op in
 production** until that tuning is set. Threshold calibration remains blocked on corpus size (4).
 
-### Clauses 1–3 — andon config, `dark`/`attended` profiles, auto-pass audit records
+### Clauses 1–3 — andon config, `dark`/`attended` profiles, auto-pass audit records — **round 5 in flight**
 **Confirmed working by two verifiers, in their own fixtures:** all **5** andon conditions fire on
 real instances and stay quiet on clean ones; the halt works end-to-end at the real gate (exit 6,
 item parked, condition named in a `decision=refused` ledger record); `DISABLED` is
