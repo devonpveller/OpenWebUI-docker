@@ -33,6 +33,9 @@ Everything else in here is internal and may change without notice.
 | `verify-oracle-on-stall.ps1` | the executable drill for frontier-oracle-on-stall - a CONSTRUCTED stall, seconds, no live planes |
 | `observe-oracle-on-stall.ps1` | the OBSERVATION: dispatches an unsatisfiable item to the live local runner N times and lets the detector judge the real rounds. Needs the coder plane, the coder lease and minutes - an experiment, never a CI check. **Its verdict names the ledger row THIS run appended** (row ids are snapshot before the rounds), every queue and git call is exit-code checked, and each run takes a stamped item id and probe branch which it deletes - including on every refusal path. Exit 0 = observed, 1 = no escalation, 2 = misuse, 3 = a step failed and there is no verdict |
 | `oracle_on_stall.py` | the stall detector, the escalation, and its ledger (U4) |
+| `durable_checks.py` | tester finding -> durable executable check, banked in the SHARED git-dir registry (U3) |
+| `u3_evidence_regression_gym.py` | U3's GYM RUN: banks the check born from a tester finding, seeds regressions into a sandbox inside the ARENA, and measures the counterfactual against the pre-existing gate. Refuses outside a gym venue |
+| `test_evidence_reproduces.py` | the fast guards for that banked check - what the drill proves in the arena, provable anywhere in a second |
 | `harness.config.json` | the configuration (see below) |
 | `config.py` | the reader other Python code imports (`bridge.py` does) |
 | `quadrant/` | the runner x target comparison - its own submodule with its own boundary, see [quadrant/MODULE.md](quadrant/MODULE.md). The first executable CONSUMER of the runner axis: everything else resolves a runner and nothing runs one. |
