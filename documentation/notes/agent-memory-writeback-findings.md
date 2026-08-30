@@ -24,36 +24,31 @@ build must restore the tag afterwards, which is easy to forget.
 
 ---
 
-## F2 — the REST twin is registered but nothing exercises it end to end
+## F2 — CLOSED 2026-08-29 by the Phase 1.3 smoke script
 
-`POST /agent-memory/writeback` shares `performWriteback` with the MCP tool, so their
-behaviour cannot diverge in the logic. What is NOT covered is the plumbing either side of
-it: the auth predicate, JSON parsing, the 422-on-refusal mapping, and — most importantly —
-that the route is reachable at all.
+`scripts/checks/smoke-agent-memory.ps1` starts the real container against a throwaway
+database and a stub embedding endpoint and calls both doors over HTTP. The REST twin now
+has: a bad key rejected 401; a good key returning the writeback contract (which is what
+proves the route is reachable — the MCP catch-all also answers 401, so only a SUCCESSFUL
+call distinguishes the two orderings); the row present in `agent_memories` with the policy
+defaults; the audit event in the same transaction; idempotent retry; the cross-tenant case;
+422 + `refused: secret_shaped` with nothing written; 400 on malformed JSON; and the
+plane-agreement invariant end to end — write with defaults, recall with defaults, get it
+back.
 
-It is registered before `app.all("*")`, which matters: the MCP catch-all would otherwise
-swallow it. That ordering is currently guaranteed only by a comment and by where the call
-sits in `index.ts`. A route-level test belongs with the smoke script (Phase 1.3), which can
-start the server and actually call both doors.
-
-**Until that exists, treat "the REST twin works" as unproven.** The tool's logic is tested;
-the door is not.
+Found while writing it, and worth keeping: on PS 5.1 the body of an HTTP error response is
+in `$_.ErrorDetails.Message`, NOT in `GetResponseStream()` — `Invoke-WebRequest` has already
+drained it, so re-reading returns an empty string. Every assertion about a refusal body
+would have compared against `$null` and failed a CORRECT server. That is the cry-wolf
+failure, and it only surfaced loudly because StrictMode happened to be in effect.
 
 ---
 
-## F3 — `agent_memory_audit_events` columns were inferred, not verified
+## F3 — CLOSED (earlier, by the offline harness)
 
-The insert writes `(memory_id, workspace_id, event_type, detail)`. Those names came from
-reading the schema's CREATE TABLE, not from exercising an insert against a real database.
-The unit tests stub the pool, so a wrong column name would pass every test here and fail
-only on first real use.
-
-The same applies to the `RETURNING id` shapes. This is the honest limit of a stubbed-pool
-test suite: it proves the control flow and the policy, not the SQL.
-
-**The smoke script (1.3) is where this gets caught**, and it should be written before this
-path is enabled anywhere. Recorded so nobody reads the green suite as evidence the SQL is
-right.
+`test-quartz4-offline.ps1` executes the writeback and recall statements against the real
+schema on a fresh volume, which is what caught the `detail`-vs-`payload` column error. The
+audit-event insert is covered there, and again through the door by the smoke script above.
 
 ---
 

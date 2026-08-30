@@ -23,6 +23,7 @@ $root = (Get-Location).Path
 $rootFwd = $root -replace '\\', '/'
 $ob1 = "OB1/docker/docker-compose.yml"
 $fails = 0
+. (Join-Path $PSScriptRoot "lib\ob-initdb.ps1")
 function Section($t) { Write-Host "`n=== $t ===" -ForegroundColor Cyan }
 function Pass($t) { Write-Host "  PASS  $t" -ForegroundColor Green }
 function Fail($t) { Write-Host "  FAIL  $t" -ForegroundColor Red; $script:fails++ }
@@ -82,10 +83,10 @@ function Invoke-Unit {
   # "fresh apply works" for a chain that was not the real one - seven migrations, including
   # every one added since, were never exercised. A test that checks a copy of reality
   # eventually checks something reality no longer resembles.
-  $map = @()
-  foreach ($m in ([regex]'\./(init[a-z0-9.\-]*\.sql):/docker-entrypoint-initdb\.d/([0-9a-z]+-init[a-z0-9.\-]*\.sql)').Matches((Get-Content -Raw $ob1))) {
-    $map += , @($m.Groups[1].Value, $m.Groups[2].Value)
-  }
+  # Derived by scripts/checks/lib/ob-initdb.ps1, which the agent-memory smoke script also
+  # uses. It was extracted rather than copied precisely because THIS section is where two
+  # stale copies were already caught (the hardcoded list, and the preview compose).
+  $map = Get-ObInitChain -ComposePath $ob1
   if ($map.Count -lt 1) { Fail "could not parse any initdb mounts out of $ob1" }
   else { Pass "initdb chain derived from compose ($($map.Count) migrations)" }
 
@@ -126,35 +127,14 @@ function Invoke-Unit {
     } else { Pass "preview compose carries the same initdb chain as production" }
   }
 
-  foreach ($m in $map) {
-    if (Test-Path "OB1/docker/$($m[0])") { Copy-Item "OB1/docker/$($m[0])" (Join-Path $tmp $m[1]) }
-  }
-  docker rm -f ob-initdb-test 2>$null | Out-Null
-  docker run -d --name ob-initdb-test -e POSTGRES_DB=openbrain -e POSTGRES_USER=postgres `
-    -e POSTGRES_PASSWORD=test -v "${tmp}:/docker-entrypoint-initdb.d:ro" pgvector/pgvector:pg16 | Out-Null
-  # POLL, do not sleep a magic number - and poll for the RIGHT marker.
-  # The chain grew from 13 files to 20 and the old fixed 18s became a coin flip: too short
-  # and the harness greps a half-finished log and calls it clean.
-  #
-  # "database system is ready to accept connections" appears
-  # TWICE: once for the TEMPORARY server postgres runs the initdb scripts against, and
-  # again when the real server starts. Polling for it catches the first one - i.e. BEFORE
-  # the migrations have run - and every verify query then reports 0 for everything the
-  # chain was supposed to create. (The previous fixed `Start-Sleep 18` had the same race,
-  # just less visibly; it only ever passed because nothing downstream was asserted.)
-  # "PostgreSQL init process complete" is the entrypoint's own end-of-initdb marker.
-  $ready = $false
-  for ($i = 0; $i -lt 90; $i++) {
-    Start-Sleep 2
-    if ((docker logs ob-initdb-test 2>&1 | Select-String -Quiet "PostgreSQL init process complete")) {
-      $ready = $true; break
-    }
-  }
+  $null = Copy-ObInitChain -Chain $map -SourceDir (Join-Path $PWD "OB1\docker") -TargetDir $tmp
+  # The container start and the WAIT-FOR-THE-RIGHT-MARKER logic live in the lib; the note
+  # about "ready to accept connections" appearing twice is there with them.
+  $ready = Start-ObInitdb -Name "ob-initdb-test" -InitDir $tmp
   if ($ready) { Pass "initdb finished (entrypoint reported init process complete)" }
   else { Fail "initdb did not complete within 180s - results below are not trustworthy" }
 
-  $errLines = docker logs ob-initdb-test 2>&1 | Select-String -Pattern "ERROR|FATAL" |
-    Where-Object { $_ -notmatch "does not exist, skipping" }
+  $errLines = Get-ObInitdbErrors -Name "ob-initdb-test"
   if ($errLines) { Write-Host ($errLines -join "`n") -ForegroundColor Red; Fail "init had errors" }
   else { Pass "init chain ran without errors" }
   $verify = docker exec ob-initdb-test psql -U postgres -d openbrain -tA -c @"

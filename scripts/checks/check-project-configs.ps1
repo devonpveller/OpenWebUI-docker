@@ -118,6 +118,41 @@ if ($ps1Staged.Count -gt 0 -and $failed -eq 0) {
     Write-Host "  [configs] $($ps1Staged.Count) staged .ps1 file(s) parse clean"
 }
 
+# --- 3. staged JSON, under the STRICTER of the two parsers -------------------
+#
+# WHY PYTHON AND NOT ConvertFrom-Json. PowerShell's JSON parser is lenient: it accepts a
+# raw newline inside a string literal, which is invalid JSON. Python's does not. That is
+# not academic here - scripts/agent-harness/harness.config.json is read by BOTH
+# config.ps1 and config.py (it says so in its own header), and a multi-line comment string
+# written into it parsed fine in every PowerShell path while json.loads rejected it. The
+# result would have been a harness that worked from the scripts and broke in the Mattermost
+# bridge, with nothing at commit time to say so.
+#
+# So the gate uses the stricter parser deliberately. If python is unavailable it says so
+# and skips - a check that cannot run must never masquerade as one that passed.
+$jsonStaged = @($staged | Where-Object { $_ -match '\.json$' -and (Test-Path $_) })
+if ($jsonStaged.Count -gt 0) {
+    $py = (Get-Command python -ErrorAction SilentlyContinue)
+    if (-not $py) {
+        Write-Host "  [configs] python not found - staged JSON NOT validated (this is a gap, not a pass)" -ForegroundColor Yellow
+    } else {
+        $jsonBad = 0
+        foreach ($f in $jsonStaged) {
+            $prev = $ErrorActionPreference
+            $ErrorActionPreference = 'Continue'
+            $out = & python -c "import json,sys; json.load(open(sys.argv[1], encoding='utf-8'))" $f 2>&1
+            $code = $LASTEXITCODE
+            $ErrorActionPreference = $prev
+            if ($code -ne 0) {
+                Write-Host "  [configs] INVALID JSON: $f" -ForegroundColor Red
+                Write-Host ("             " + (($out | Out-String).Trim() -split "`n" | Select-Object -Last 1)) -ForegroundColor Red
+                $failed++; $jsonBad++
+            }
+        }
+        if ($jsonBad -eq 0) { Write-Host "  [configs] $($jsonStaged.Count) staged .json file(s) are strict-valid" }
+    }
+}
+
 Pop-Location
 if ($failed -gt 0) { exit 1 }
 exit 0

@@ -97,7 +97,18 @@
     "work_line_fallback": "development",
     "state_dir_env": "AI_STACK_WORKTREE_STATE",
     "state_dir_name": "agent-worktrees",
-    "env_files": [".env", ".env.test", "OB1/docker/.env"],
+    "_env_files_note": [
+      "Runtime files a worktree needs but git will not materialize. The two recipe",
+      ".env files live INSIDE the OB1 submodule, so a fresh worktree clone never has",
+      "them and `docker compose -f OB1/docker/docker-compose.yml config` fails there",
+      "while passing in the main checkout - which is how the offline harness came to",
+      "fail only in worktrees. An ARRAY of lines, like _comment above: a JSON string",
+      "cannot contain a raw newline, and the first version of this note did. PowerShell",
+      "ConvertFrom-Json accepted it; Python json.loads did not - and this file has BOTH",
+      "readers (config.ps1 and config.py), so it would have broken the bridge alone."
+    ],
+    "env_files": [".env", ".env.test", "OB1/docker/.env",
+                  "OB1/recipes/daily-digest/.env", "OB1/recipes/email-history-import/.env"],
     "test_image_tag_prefix": "wt-"
   },
 
