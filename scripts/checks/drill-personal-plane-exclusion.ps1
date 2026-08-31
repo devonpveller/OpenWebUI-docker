@@ -95,10 +95,9 @@
 #       Whether production is running that tree is a separate question - the deploy gate -
 #       and this drill does not answer it.
 #     - the real personal plane. Class 4, absolute. Every fixture below is synthetic.
-#     - `integrations/agent-memory-api`. It is guarded in source and covered by the
-#       completeness gate, and NOTHING IN THIS STACK DEPLOYS IT - it is a Supabase Edge
-#       Function and no compose context builds it - so there is no container for this drill
-#       to attack. "Guarded in source, undrilled" is stated rather than blurred.
+#     - `integrations/agent-memory-api`. NOTHING IN THIS STACK DEPLOYS IT - it is a Supabase
+#       Edge Function and no compose context builds it - so there is no container for this
+#       drill to attack. Undrilled, and stated rather than blurred.
 #
 # ------------------------------------------------------------------------------------
 # THE LIFT
@@ -143,28 +142,47 @@
 # serialise it.
 #
 # ------------------------------------------------------------------------------------
-# RED BEFORE GREEN
+# WHICH LAYER IS UNDER TEST, AND WHY THAT CHANGED (amendment A2, 2026-08-30)
 # ------------------------------------------------------------------------------------
-# A guard nobody has watched fail is not known to guard anything, so the drill builds a
-# SECOND image with the exposure guards removed (asserted line anchors, in a scratch copy -
-# the repo tree is never weakened) and REQUIRES the synthetic record to come back through
-# it. If a red phase does not leak, the green phase it backs is proving nothing, and the
-# drill says so and fails.
+# THIS DRILL USED TO ATTACK APPLICATION GUARDS. Every ATTACK below was written when the
+# exposure predicate lived in the readers - a chokepoint module, `agent-memory-plane.ts` -
+# and its RED phase removed four asserted lines from a scratch copy of that file. A2 RETIRED
+# that method and that module. The predicate now lives in the DATABASE, as row-level
+# security, and the file the red phase patched does not exist.
 #
-# Since the exposure plane became a CHOKEPOINT (agent-memory-plane.ts), the red phase needs
-# TWO anchors in that one file where it used to need three spread across the subsystem. One
-# is the plane a lookup is bound to - removing it lights up ATTACKS 3, 4, 5, 5b, 8, 9 and 10
-# at once. The other is the MIRROR guard, and it lights up ATTACK 11 on its own, because the
-# second home is a different failure from the read side: nothing is refused, nothing is
-# audited, and the content is simply in a store six unguarded statements read. The number of
-# red confirmations a single line produces is the measure of how much of the boundary that
-# line is carrying.
+# A predicate in the database binds a connection. It does NOT bind a superuser: "Superusers
+# and roles with the BYPASSRLS attribute always bypass the row security system", FORCE
+# included. So which layer is under test is decided by ONE environment variable, and this
+# drill sets it deliberately on both sides:
+#
+#   GREEN - the doors connect as $APPUSER, a per-run NON-superuser that inherits
+#           service_role. This is the configuration the boundary can bind, and it is what
+#           C.9 H1 exists to make production's.
+#   RED   - the SAME images, same database, same fixtures, connected as `postgres`. This is
+#           what production runs TODAY (H1 measured 22 of 22 live connections). Every leak
+#           the red phase reports is a leak production has, not a hypothetical weakening.
+#
+# The red phase also STATES which greens do NOT rest on the database: the recall filter, the
+# inspect tool and the review door still carry their own plane clause in SQL, so they hold
+# for a superuser too. That is real defence in depth and it is printed rather than assumed -
+# a red that quietly fails to reproduce a leak is otherwise indistinguishable from a guard.
+#
+# ------------------------------------------------------------------------------------
+# THREE OUTCOMES, NOT TWO
+# ------------------------------------------------------------------------------------
+# PASS / FAIL / GAP. A GAP is a property U5's column REQUIRES that this tree cannot deliver,
+# with the cause measured and named in the output. Gaps exist because the alternative was to
+# delete the assertions, and a deleted assertion is a requirement that leaves no trace. The
+# run still exits NON-ZERO with any gap open: U5 asks for "mechanically stopped AND the
+# attempt is visible in an audit record", and returning success on half of that would be the
+# redefinition C.8 forbids.
 #
 #   .\scripts\checks\drill-personal-plane-exclusion.ps1
 #   .\scripts\checks\drill-personal-plane-exclusion.ps1 -KeepUp     # leave it up to poke at
 #   .\scripts\checks\drill-personal-plane-exclusion.ps1 -SkipRed    # green only (faster; weaker)
 #
-# Exit: 0 = every attack stopped AND recorded | 1 = one or more failed
+# Exit: 0 = every attack stopped AND recorded | 1 = a check FAILED (a defect in this tree)
+#       2 = containment green, one or more NAMED GAPS open (printed with their causes)
 
 [CmdletBinding()]
 param(
@@ -917,12 +935,31 @@ CREATE POLICY drill_audit_write ON public.agent_memory_audit_events
     } else { Fail "the control was not returned either - this recall proves nothing" }
 
     Section "ATTACK 1, the other half - is the attempt VISIBLE?"
+    # THE CAPABILITY THIS SECTION TESTS NO LONGER EXISTS IN THE TREE, AND THAT IS THE FINDING
+    # RATHER THAN A REASON TO DELETE THE SECTION.
+    #
+    # It asserted a durable `recall_requested` audit row carrying
+    # `exposure_override_denied=true` and `requested_exposure`, written when a caller named a
+    # plane the door then overrode. Grep the whole of integrations/kubernetes-deployment on
+    # this line and those three strings appear in exactly ONE place: a list of event-type
+    # names in agent-memory-review.test.ts. No writer produces them. The recall path that did
+    # lived in `agent-memory-plane.ts`, which amendment A2 removed along with the reader
+    # guards - and the audit half of U5's column went with it, silently, because nothing on
+    # the work line ran this drill afterwards.
+    #
+    # So the assertions stay, exactly as they were, and report a GAP with the measurement.
+    # Deleting them would leave the requirement with no trace anywhere; passing them would be
+    # a lie. The FIRST one is asserted as a MEASUREMENT so a future tree that reinstates the
+    # writer turns this green again without anyone re-deriving what it was for.
     $flagged = Db "SELECT count(*) FROM agent_memory_audit_events WHERE workspace_id='$WS' AND event_type='recall_requested' AND payload->>'exposure_override_denied'='true'"
     if ($flagged -eq "1") { Pass "a durable audit row records the attempt (recall_requested, exposure_override_denied=true)" }
-    else { Fail "expected exactly 1 flagged audit row in $WS, got '$flagged' - the attempt is invisible" }
+    else {
+        Gap "THE OVERRIDE ATTEMPT IS NOT RECORDED: expected 1 recall_requested/exposure_override_denied row in $WS, got '$flagged'"
+        Note "No source file on this line writes 'recall_requested', 'exposure_override_denied' or 'requested_exposure' - the writer lived in agent-memory-plane.ts, which A2 removed. The read was still STOPPED (the assertion above this one), so what is missing is the RECORD, not the boundary. Reinstating it is a C.9 H4 item: U5's column asks for stopped AND visible."
+    }
     $asked = Db "SELECT payload->>'requested_exposure' FROM agent_memory_audit_events WHERE workspace_id='$WS' AND payload->>'exposure_override_denied'='true' LIMIT 1"
     if ($asked -match "personal") { Pass "the audit row says WHAT was asked for ($asked), not merely that something was refused" }
-    else { Fail "the flagged audit row does not record the requested plane (got '$asked')" }
+    else { Gap "and there is no row to carry the requested plane (got '$asked') - same cause" }
 
     # A benign recall must NOT be flagged. Without this, the assertion above passes just as
     # well against an audit writer that hardcodes 'true' - which would make the signal noise.
@@ -930,14 +967,18 @@ CREATE POLICY drill_audit_write ON public.agent_memory_audit_events
         workspace_id = $WS; project_id = $PROJ
         query = $MARKER; limit = 25; include_unconfirmed = $true
     }
+    if ($benign.Status -ne 200) { Fail "an ordinary recall did not even succeed (HTTP $($benign.Status)) - the recall lane is broken, which is a defect and not a gap" }
     $unflagged = Db "SELECT count(*) FROM agent_memory_audit_events WHERE workspace_id='$WS' AND event_type='recall_requested' AND payload->>'exposure_override_denied'='false'"
-    if ($benign.Status -eq 200 -and [int]$unflagged -ge 1) {
+    if ([int]$unflagged -ge 1) {
         Pass "an ordinary recall is recorded UNFLAGGED - the flag discriminates, it is not a constant"
-    } else { Fail "an ordinary recall did not produce an unflagged audit row (got '$unflagged')" }
+    } else { Gap "an ordinary recall produces no audit row either (got '$unflagged') - same cause, and it is why the flag cannot be shown to discriminate" }
 
-    $traced = Db "SELECT count(*) FROM agent_memory_recall_traces WHERE workspace_id='$WS' AND request_payload->>'exposure_override_denied'='true'"
-    if ($traced -eq "1") { Pass "the trace carries requested vs enforced exposure too, so the audit row can be corroborated" }
-    else { Fail "expected the recall trace to record the refused exposure, got '$traced'" }
+    # THE TRACE, HOWEVER, IS WRITTEN - and it now carries the ENFORCED plane, which is the
+    # half of this record that survived. It is asserted here because it is the ONLY durable
+    # evidence a recall happened at all, and because its own RLS policy reads that field.
+    $traced = Db "SELECT count(*) FROM agent_memory_recall_traces WHERE workspace_id='$WS' AND request_payload->'enforced_exposure' = jsonb_build_array('ops')"
+    if ([int]$traced -ge 1) { Pass "the recall trace records the ENFORCED plane (enforced_exposure=[ops]) - the door's override is durable even though the attempt is not" }
+    else { Fail "the recall trace does not record the enforced plane (got '$traced') - the trace's own RLS policy reads that field" }
 
     # --- 5. ATTACK 2: the ops door, agent_memory_recall ----------------------------------
     Section "ATTACK 2 - a code agent at the OPS door names the personal plane (agent_memory_recall)"
@@ -964,7 +1005,7 @@ CREATE POLICY drill_audit_write ON public.agent_memory_audit_events
     $gwLog = (docker logs $OPS 2>&1 | Out-String)
     if ($gwLog -match "exposure_override_attempt") {
         Pass "the DOOR recorded the attempt (gateway audit line: exposure_override_attempt)"
-    } else { Fail "the ops door logged nothing about a caller naming another plane" }
+    } else { Gap "the ops door logged nothing about a caller naming another plane - the gateway has no such line on this tree, same family as the durable row above" }
 
     # WHICH RECORD COVERS WHICH LANE - asserted, because otherwise it is only implied.
     # `exposure` is NOT a field of RECALL_SCHEMA (agent-memory-tools.ts), so on the MCP lane
@@ -973,10 +1014,15 @@ CREATE POLICY drill_audit_write ON public.agent_memory_audit_events
     # makes the attempt visible. The REST twin takes the raw body, which is why ATTACK 1
     # produced the flagged durable row. If that ever stops being true - if a schema gains
     # the field, or the SDK stops stripping - this count moves and says so.
+    # WITH NO WRITER, THIS COUNTS ZERO BOTH BEFORE AND AFTER - which still says something,
+    # and the something is worth keeping: the MCP lane must not START writing flagged rows
+    # either, or the two lanes would disagree about what a probe looks like. So the
+    # assertion becomes "unchanged by the MCP probe", which is true in both worlds and goes
+    # red the moment one lane grows a writer the other does not.
     $flaggedAfter = Db "SELECT count(*) FROM agent_memory_audit_events WHERE workspace_id='$WS' AND payload->>'exposure_override_denied'='true'"
-    if ($flaggedAfter -eq "1") {
-        Pass "still exactly 1 flagged durable row in $WS - the MCP lane is stopped at the tool schema and recorded at the door, not in the database"
-    } else { Fail "expected the flagged-row count to still be 1 after the MCP probe, got '$flaggedAfter'" }
+    if ($flaggedAfter -eq $flagged) {
+        Pass "the flagged durable-row count is UNCHANGED by the MCP probe ($flagged -> $flaggedAfter) - the MCP lane is stopped at the tool schema, not in the database"
+    } else { Fail "the MCP probe changed the flagged-row count ($flagged -> $flaggedAfter) - the two lanes disagree about what a probe records" }
 
     # --- 6. ATTACK 3: the ops door, agent_memory_inspect ---------------------------------
     Section "ATTACK 3 - the agent stops searching and asks for the personal memory BY ID (agent_memory_inspect)"
