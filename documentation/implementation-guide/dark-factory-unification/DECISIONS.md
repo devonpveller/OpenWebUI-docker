@@ -1306,3 +1306,70 @@ RELATION TO THE CLASS LIST: a sibling of *a check green while checking nothing*,
           reusable form of it found so far. A check that cannot fail is usually spotted by
           asking "can I break what it guards?"; a probe that cannot fail is spotted by asking
           **"what would a working door have returned, and did I see that?"**
+
+## 2026-08-31 · gitlink guard · THE LAYER IS WRONG — the proof moves, the hook is demoted (A2's precedent)
+DECISION (orchestrator, 2026-08-31): the gitlink-reachability invariant stops being enforced by
+          local git hooks. The hooks stay as fast local feedback; the PROOF becomes a tree-level
+          check that queries the remote and does not depend on any event firing.
+
+WHY, and the structural half I verified myself on the work line:
+ - **There is no `pre-push` hook.** `.githooks/` holds README.md, commit-msg, pre-commit,
+   pre-merge-commit. The one event that matters — a bad pin REACHING the shared remote — was
+   entirely ungated, and a verifier landed a smuggled branch on a remote and saw it in
+   `ls-remote`.
+ - **`core.hooksPath` is `.githooks`: a TRACKED, BRANCH-RELATIVE path.** The guard is a file on
+   a branch, so it does not exist on branches that do not carry it.
+   `git show development:.githooks/commit-msg` contains **zero** reachability checks. Every
+   branch cut before this work merges is unguarded — which is most of them.
+ - Verifiers enumerated **nine** ungated local operations, including a `git tag` + `git branch`
+   launder, detached-HEAD sequencer commits, `merge --ff-only`, and any worktree whose branch
+   lacks the file.
+
+THE ARGUMENT, stated once so it is reusable: **the invariant is a property of the SHARED
+REMOTE** — *a fresh `git clone --recurse-submodules` must succeed* — and a local commit-time
+hook cannot enforce a property of the remote. It can only observe events it happens to be
+invoked for, on clones that happen to have it installed, by people who happen not to pass
+`--no-verify`. Three rounds of closing individual routes produced two genuine new classes and a
+nine-entry residue list, which is §C.7's signal to change the layer rather than the key. A2 made
+the identical move for U5: from "find every reader" to a database predicate.
+
+WHAT REPLACES IT: a standalone check that enumerates gitlinks from `git ls-tree -r` (the TREE,
+not a diff, so it does not depend on having observed the change), resolves each submodule's
+remote as a fresh clone would, QUERIES the remote, treats unreachable-remote as INDETERMINATE,
+and exits non-zero naming path, sha and remote. It cannot be bypassed by omission because it
+does not depend on an event. `dfu-done.ps1` clause 4 calls it; so should any pre-merge gate.
+A `pre-push` hook is added as the last local point before escape, and the hooks' headers and
+`.githooks/README.md` are rewritten to say they are **defence in depth, not the proof** — A2's
+wording, deliberately.
+
+### THE TWO ROUND-3 FINDINGS THAT FORCED IT
+**A · The guard checked the right sha against the WRONG remote — and it is the SAME anti-pattern
+round 2 removed, left in the sibling reader of the same library.** `glr_sub_name` parses
+`git config -f .gitmodules -z --get-regexp path$` with `tr '\0' '\n'` and an `NR%2` parity awk.
+But `--get-regexp -z` emits `key<LF>value<NUL>` — key and value are ONE NUL record separated by
+a newline — so the library's own comment is false and any `path` containing a newline shifts the
+parity permanently. Clean-room repro, two ordinary `git submodule add`s, no index surgery: a
+decoy desyncs the parser, the pin is verified against the wrong remote, `git commit` exits 0
+with zero hook output, and `clone --recurse-submodules` dies with `upload-pack: not our ref`.
+Neither drill had a case where the URL was wrong.
+*Third instance in this effort of "fixed one, left the sibling" — after `on_fire`/`on_indeterminate`
+and the read-tool/`performReview` pair.*
+
+**B · NEW CLASS — an exemption whose safety rests on a check the same guard declines to make.**
+The fast path treats "already reachable from an existing ref" as prior vetting, computed with
+`rev-list --not --branches --tags --remotes`, while the SAME comment block lists refs/tags and
+refs/remotes under "WHAT IS DELIBERATELY NOT CHECKED". So `git tag t <sha>` then
+`git branch b t` converts a refusal into a silent accept, while `git branch b <sha>` is
+correctly refused.
+**And the guard's own refusal of `git rebase --continue` leaves the replayed commit written with
+HEAD detached on it — so the refusal manufactures the unreferenced commit the launder needs, and
+the natural reflex after being refused is to tag your work.** A guard that produces the
+precondition for its own bypass is a shape worth remembering.
+Provenance, not rounded up: the bare laundering shape is documented on the sibling branch
+`work/u5proxy` as residue R2, with a stated reason for keeping the exemption wide. It is new to
+this branch and to the class list; it is not new to the effort. What IS new is that `gitreach`
+inherited u5proxy's exemption while carrying over only R1/R3/R4 — the two branches must be
+reconciled, not both merged.
+
+**Class list now twelve**, adding: *an exemption whose safety rests on a check the same guard
+declines to make.*
