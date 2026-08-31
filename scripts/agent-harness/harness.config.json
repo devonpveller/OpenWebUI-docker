@@ -242,14 +242,151 @@
       }
     }
   },
+
+  "gate_profiles": {
+    "_comment": [
+      "WHO passes a pipeline gate. Deliberately a SEPARATE block from `profiles`",
+      "above, not another key inside it. `profiles` is keyed by ROLE and every reader",
+      "iterates the three roles; a gate is not a role, and folding gates in would make",
+      "`resolve_role` and `describe_profile` iterate keys that are not roles. The",
+      "stronger reason is coupling: an operator switching to a cheaper MODEL profile",
+      "must not thereby also turn the human gates off. Those are two unrelated",
+      "decisions and one name must not carry both - the same reasoning that produced",
+      "`profile_locked` on the extension surface.",
+      "",
+      "This block is TUNING (who passes). What a gate DOES - the state transitions,",
+      "the duty separation, the refusal of self-service - stays in queue.ps1, because",
+      "that is BEHAVIOUR. Turning a gate to `auto` is an operator decision with a real",
+      "cost: nobody looks at the work before it moves on.",
+      "",
+      "Values: `human` (a person runs -ConfirmAnchor / -Approve) or `auto` (the gate",
+      "self-passes). Every auto-pass is refused unless the andon board is clear, and",
+      "every auto-pass writes an audit record under a RESERVED principal namespace",
+      "(`auto:<profile>`) that no human -By value is allowed to occupy."
+    ],
+    "attended": {
+      "_desc": "today's behaviour, unchanged - a human confirms the anchor and releases for review",
+      "anchor": "human",
+      "pre_review": "human"
+    },
+    "dark": {
+      "_desc": "unattended: both gates self-pass, andon-clear, and say so in the record",
+      "anchor": "auto",
+      "pre_review": "auto"
+    }
+  },
+
+  "andon": {
+    "_comment": [
+      "THE ANDON BOARD. Conditions are DATA here and executable predicates in andon.ps1;",
+      "a condition naming a predicate that does not exist is refused, so this block cannot",
+      "declare a detector nobody implements.",
+      "",
+      "Every condition here has a real incident behind it from the 2026-08-30 unattended",
+      "run - see `incident` on each. None was invented to round out a taxonomy.",
+      "",
+      "`on_fire` and `on_indeterminate` are both `halt` by default and on purpose: a",
+      "condition that could not be evaluated has NOT passed. A skip that counts as a pass",
+      "is one of the failure shapes this board exists to catch.",
+      "",
+      "THE ONLY TWO WORDS EITHER MAY TAKE are `halt` and `warn` (config.ps1",
+      "$script:AllowedAndonActions / config.py ALLOWED_ANDON_ACTIONS); anything else is",
+      "refused with exit 1 and no verdict, which every gate reads as `not clear`. And `warn`",
+      "does NOT buy a pass: a condition that FIRED is never a clear board, so no unattended",
+      "gate passes over one either way. It changes the board's WORD (`warned` rather than",
+      "`raised`) and the record, which is triage for a human, not permission for a machine.",
+      "Until 2026-08-30 it did buy a pass - the condition fired, the board said `clear`, the",
+      "dark gate auto-passed at exit 0 and the ledger recorded `fired=[]`, because `fired`",
+      "was derived from `action -eq halt`.",
+      "",
+      "WHICH CONDITIONS MUST EXIST IS NOT DECIDED HERE. The required ids live in code",
+      "(config.ps1 $script:RequiredAndonConditions / config.py REQUIRED_ANDON_CONDITIONS),",
+      "and a board missing any of them is `incomplete`: exit 6, the ids named, no auto-pass.",
+      "Deleting an entry from the list below is therefore visible, not silent - which it was",
+      "not until 2026-08-30, when a board pruned to one of five reported `clear` with 1 of 1",
+      "evaluated and a dark gate auto-passed at exit 0. A required list kept in THIS file",
+      "would be deleted alongside the entry it names."
+    ],
+    "enabled": true,
+    "ledger_dir_name": "audit",
+    "raise": {
+      "stderr": true,
+      "_ledger_note": [
+        "There is no `ledger` knob here and there deliberately never was one that worked.",
+        "A raise ALWAYS goes to the gate ledger - queue.ps1 writes a decision=refused record",
+        "at the gate that halted - because a run able to switch off the record of its own",
+        "halt is the failure this whole board exists to prevent. `ledger: true` sat here",
+        "until 2026-08-30 with ZERO executable readers: the dead-knob detector shipped a dead",
+        "knob, inside its own block. `roots` below now includes `andon`, so the detector",
+        "covers this block and the next one cannot hide here."
+      ]
+    },
+    "conditions": [
+      {
+        "id": "operator-checkout-off-branch",
+        "detects": "the operator's main checkout is detached, or has a rebase/merge/cherry-pick/bisect in progress",
+        "predicate": "git-checkout-state",
+        "params": { "repo": "", "stale_seconds": 0 },
+        "on_fire": "halt",
+        "on_indeterminate": "halt",
+        "incident": "documentation/notes/drill-rebased-the-work-line-incident.md"
+      },
+      {
+        "id": "policy-declared-unread",
+        "detects": "a policy knob declared in harness.config.json that no executable source reads - a setting that governs nothing while reading as though it does",
+        "predicate": "config-key-unread",
+        "params": {
+          "roots": ["pipeline", "andon"],
+          "exclude_sources": ["test_*", "drill-*"],
+          "_exclude_note": "GLOB patterns for what does NOT count as a reader: a test or drill that names a key exercises it rather than consuming it. config.ps1/config.py are NOT excluded - they hold the accessors, and the scan matches the DOTTED PATH, which their defaults blocks do not contain.",
+          "_roots_note": "policy KNOBS. `andon` is a root so this condition covers its OWN block - it shipped with a dead `andon.raise.ledger` in it. Named data COLLECTIONS keyed by name (profiles, gate_profiles) are not roots: they are consumed generically by a loop, so a path scan says nothing true about them. `andon.conditions` is a leaf here - the list is read whole by Get-AndonConditions - so the scan asks only whether the list itself is read, never whether each condition is. WHICH conditions are present is a different question, answered by the required-set check in andon.ps1 against config.ps1's $script:RequiredAndonConditions, not by this scan.",
+          "_match_note": "the dotted path is matched ANCHORED. Unanchored, any key that is a PREFIX of a live one reported 'read': with pipeline.gate_profile in the sources, pipeline.gate_profil, pipeline.claim_ttl and pipeline.a all passed (reproduced 2026-08-30). A container key counts as read when its own path OR any leaf beneath it is matched, which is why andon.raise is alive on the strength of andon.raise.stderr and pipeline.human_gates was not."
+        },
+        "on_fire": "halt",
+        "on_indeterminate": "halt",
+        "incident": "pipeline.human_gates and runners.*.status both had zero executable readers (verified 2026-08-30); Resolve-RoleTarget had zero executable callers"
+      },
+      {
+        "id": "git-error-swallowed",
+        "detects": "a function that runs git and neither inspects $LASTEXITCODE nor raises - it cannot report a git failure, so a check built on it cannot fail",
+        "predicate": "git-error-unchecked",
+        "params": {
+          "globs": ["scripts/checks/*.ps1", "scripts/agent-harness/*.ps1"],
+          "exclude_files": ["git-io.ps1"],
+          "check_window_lines": 5,
+          "_window_note": "the unit is the CALL SITE, not the function body. Asking whether a body mentioned $LASTEXITCODE anywhere gave every git call in it an amnesty from an unrelated guard clause at the top (reproduced 2026-08-30), and code OUTSIDE any function was not scanned at all - a top-level `git push | Out-Null` reported ok. A check must fall within this many lines AFTER its call to count as its check.",
+          "_exclude_note": "git-io.ps1 is the adapter that deliberately RETURNS output and leaves $LASTEXITCODE for its callers - that contract is stated in the file and is the reason callers can check at all."
+        },
+        "on_fire": "halt",
+        "on_indeterminate": "halt",
+        "incident": "documentation/notes/drill-rebased-the-work-line-incident.md (Invoke-DrillGit swallowed every git error)"
+      },
+      {
+        "id": "work-branch-on-remote",
+        "detects": "a work branch of this run exists on a remote - an outward action CLAUDE.md does not grant without an explicit ask",
+        "predicate": "branch-on-remote",
+        "params": { "branches": [] },
+        "on_fire": "halt",
+        "on_indeterminate": "halt",
+        "incident": "DECISIONS.md 2026-08-30 'THE ORCHESTRATOR'S OWN THREE ERRORS' #3 - eleven work/* branches reached origin under an authorisation nobody gave"
+      },
+      {
+        "id": "protected-ref-moved",
+        "detects": "a protected ref moved since this run recorded its baseline",
+        "predicate": "protected-ref-moved",
+        "params": { "refs": ["main"] },
+        "on_fire": "halt",
+        "on_indeterminate": "halt",
+        "incident": "PLAN.md section C.2 class 4 - merging or promoting anything to main is the operator's, and no U-phase needs it"
+      }
+    ]
+  },
+
   "pipeline": {
     "claim_ttl_minutes": 60,
     "anchor_required": true,
-    "human_gates": {
-      "anchor": true,
-      "pre_review": true
-    },
-    "_note": "the role -> state -> duty table stays in queue.ps1: it is behavior, not tuning. Turning a gate off here is an operator decision with a real cost, which is why both are listed explicitly rather than assumed."
+    "gate_profile": "attended",
+    "_note": "the role -> state -> duty table stays in queue.ps1: it is behavior, not tuning. `gate_profile` names a row in `gate_profiles` above and decides WHO passes each gate. It replaced `human_gates` on 2026-08-30 (U6): that pair of booleans had zero executable readers in any language - it read as policy and governed nothing, which is exactly what the `policy-declared-unread` andon condition now refuses. THIS NOTE CALLED gate_profile THE ONLY KNOB THAT DECIDES WHETHER A HUMAN SEES A GATE, AND THAT WAS FALSE: `anchor_required: false` removes the anchor gate outright for an item created without an anchor, under ANY profile including `attended` - the item advances to ready-to-test with no anchor, no human, no gate record and no andon consultation, because a gate that is not a gate is not passed by anybody. queue.ps1 -VerifyAudit says so in words rather than counting a narrower complete. So: gate_profile decides who passes a gate; anchor_required decides whether the anchor gate exists at all."
   },
   "worktree": {
     "root": ".claude/worktrees",

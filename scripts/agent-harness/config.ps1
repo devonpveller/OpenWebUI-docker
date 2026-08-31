@@ -37,10 +37,14 @@ $script:Defaults = [ordered]@{
             reviewer = [ordered]@{ runner = "claude-code"; model = "opus" }
         }
     }
+    gate_profiles   = [ordered]@{
+        attended = [ordered]@{ anchor = "human"; pre_review = "human" }
+        dark     = [ordered]@{ anchor = "auto";  pre_review = "auto" }
+    }
     pipeline        = [ordered]@{
         claim_ttl_minutes = 60
         anchor_required   = $true
-        human_gates       = [ordered]@{ anchor = $true; pre_review = $true }
+        gate_profile      = "attended"
     }
     worktree        = [ordered]@{
         root               = ".claude/worktrees"
@@ -73,7 +77,13 @@ function ConvertTo-HashtableDeep($obj) {
         foreach ($p in $obj.PSObject.Properties) { $h[$p.Name] = ConvertTo-HashtableDeep $p.Value }
         return $h
     }
-    if ($obj -is [array]) { return @($obj | ForEach-Object { ConvertTo-HashtableDeep $_ }) }
+    # `,@(...)` - the leading comma is load-bearing. Returning `@()` from a PowerShell function
+    # emits NOTHING, so an EMPTY array in the config became `$null` in the hashtable: the
+    # shipped `work-branch-on-remote` params are `{"branches": []}`, and every gate record
+    # wrote them as `{"branches":{}}` - so `looked_at`, whose whole job is to name the params a
+    # predicate was handed, did not name the list it claimed to. Found 2026-08-30 in drill step
+    # L's evidence line. The comma wraps the result so an empty array survives as an array.
+    if ($obj -is [array]) { return , @($obj | ForEach-Object { ConvertTo-HashtableDeep $_ }) }
     return $obj
 }
 
@@ -240,6 +250,186 @@ function Get-HarnessRunnerNames {
     $runners = Get-HarnessSetting "runners"
     if (-not $runners) { return @() }
     return @($runners.Keys | Where-Object { $_ -notlike "_*" })
+}
+
+# The pipeline gates, in the order a work item crosses them. Declared once so the two
+# readers and the audit verifier cannot disagree about how many there are.
+$script:Gates = @("anchor", "pre_review")
+
+# Reserved principal namespace for a gate NOBODY looked at. A human -By value may never
+# start with this, and an auto record may never omit it - that is what makes an auto-pass
+# distinguishable from a human approval when the operator reads the ledger afterwards.
+# A record that says only "passed" reads as approval, and is worse than no record at all.
+$script:AutoPrincipalPrefix = "auto:"
+
+function Get-GateNames { return @($script:Gates) }
+function Get-AutoPrincipalPrefix { return $script:AutoPrincipalPrefix }
+
+# THE ANDON CONDITIONS THE SYSTEM REQUIRES, declared HERE - in code - and deliberately not
+# in harness.config.json. The config says which conditions are configured and with what
+# parameters; this says which ones must EXIST.
+#
+# WHY IT IS NOT A CONFIG KEY (2026-08-30, and this is the defect that produced it): the
+# board could be switched off two ways, and both were closed. They report DIFFERENT states,
+# and this comment claimed otherwise until 2026-08-30 - the same false sentence as andon.ps1
+# and config.py carried, all three written by the commit that made it false. The mapping is
+# stated once, in README.md's ways-off table, and cited here by route id:
+#   andon-disabled      -> not-evaluated
+#   andon-block-deleted -> incomplete
+# Both halt. There was a THIRD, and it is the one an operator or an agent actually reaches
+# for: DELETE CONDITION ENTRIES from `andon.conditions` (route `conditions-deleted`). Pruned to one of five on a genuinely detached checkout, the gate
+# AUTO-PASSED - exit 0, ledger `clear`, coverage `1 declared / 1 evaluated / 0 switched off`,
+# `-VerifyAudit COMPLETE`. A thinned board was neither "absent" nor "switched off": it was a
+# third state that reported itself perfectly healthy with four of five detectors gone.
+#
+# A required-set that lived in the same file as the conditions would be no guard at all -
+# whoever deletes the entry deletes the name beside it, and the file agrees with itself.
+# Here, retiring a condition is a CODE edit that shows up in a diff and passes a reviewer.
+# That asymmetry IS the mechanism, the same one `$script:Predicates` in andon.ps1 already
+# has: the config may not declare a detector nobody wrote, and it may not silently drop one
+# somebody did. Mirrored in config.py as REQUIRED_ANDON_CONDITIONS; test_gate_profiles.py
+# asks both readers and the shipped config the same question.
+#
+# There is deliberately NO environment override. A variable that thins the board is the
+# same hole with a longer name.
+#
+# THE VALUE beside each id is the predicate that id is SUPPOSED to run. It pins the
+# COMMITTED config and nothing else, and the difference matters:
+#   - `test_gate_profiles.py` compares this map against harness.config.json, so an entry
+#     that keeps a required id while naming a different predicate - id squatting, which the
+#     id-set check at andon.ps1 cannot see because it compares ids only - fails the suite;
+#   - `andon.ps1` reads only the KEYS. It does NOT re-check the predicate at run time, so a
+#     swap in an uncommitted config, or in one named by AI_STACK_HARNESS_CONFIG, still runs
+#     whatever the entry says. That route is OPEN and is named as open in README.md and
+#     MODULE.md rather than papered over here.
+$script:RequiredAndonConditions = [ordered]@{
+    "operator-checkout-off-branch" = "git-checkout-state"
+    "policy-declared-unread"       = "config-key-unread"
+    "git-error-swallowed"          = "git-error-unchecked"
+    "work-branch-on-remote"        = "branch-on-remote"
+    "protected-ref-moved"          = "protected-ref-moved"
+}
+
+function Get-RequiredAndonConditionIds { return @($script:RequiredAndonConditions.Keys) }
+function Get-RequiredAndonPredicate {
+    param([Parameter(Mandatory = $true)][string]$Id)
+    if ($script:RequiredAndonConditions.Contains($Id)) { return [string]$script:RequiredAndonConditions[$Id] }
+    return ""
+}
+
+# THE ONLY WORDS an andon condition may use for `on_fire` and `on_indeterminate`. An action
+# the board does not understand cannot be honoured, and guessing at one is how a config ends
+# up deciding something nobody wrote down - so an unknown literal is refused rather than
+# treated as either.
+#
+# `warn` does NOT mean "carry on". A fired condition is never a clear board, whatever its
+# action says, so no unattended gate passes over one either way (andon.ps1
+# Invoke-AndonEvaluation). What `warn` buys is the WORD - `warned` rather than `raised` -
+# and the ledger's separate `fired` / `halted` lists, which is severity for a human reading
+# afterwards, not permission for a machine at the time.
+$script:AllowedAndonActions = @("halt", "warn")
+function Get-AllowedAndonActions { return @($script:AllowedAndonActions) }
+
+# THE OUTCOME TABLE - every (status, action) pair this board knows how to think about, and
+# what bucket it counts as.
+#
+# WHY A TABLE AND NOT A LADDER (U6, 2026-08-30, and this is the fifth way off the board):
+# the verdict used to be computed BY EXCEPTION. `$raised` was set only when the action was
+# `halt`, `fired` only when the status was `fire`, and EVERY OTHER OUTCOME SET NOTHING -
+# after which `clear` was what you got because nothing had objected. So any outcome nobody
+# had enumerated silently meant "fine". That is the vacuous-check shape this whole effort
+# keeps finding, sitting in the function that decides whether a human is needed, and it
+# cost two rounds: `on_fire: warn` was closed on 2026-08-30 and `on_indeterminate: warn`
+# reopened the identical hole on the sibling key the same day - a condition that could not
+# be evaluated printed `ANDON BOARD: CLEAR` at exit 0, the dark gate auto-passed signed
+# `auto:dark`, and the unevaluated condition was absent from the ledger entirely.
+#
+# So `clear` is PROVEN, not defaulted. Every result is classified through this table into
+# EXACTLY ONE bucket; the buckets must SUM to the number of conditions the run had in
+# scope; and `clear` requires every bucket except `evaluated_ok` to be EMPTY - stated
+# positively, rather than as the absence of two particular flags.
+#
+# A KEY THAT IS NOT HERE IS NOT A PASS. An unlisted status (a predicate that grows a new
+# answer) and an unlisted action (a word added to $script:AllowedAndonActions just above)
+# both fall to `unrecognised`, which is a REFUSING bucket - no branch anywhere names the new
+# word, and none has to. That generalisation is what drill step K proves: it introduces an
+# action word and a status word this file has never heard of, in a scratch COPY of the
+# harness whose verdict logic is asserted byte-identical to the shipped one, and the board
+# refuses both.
+$script:AndonBuckets = [ordered]@{
+    "ok|none"            = "evaluated_ok"
+    "fire|halt"          = "fired"
+    "fire|warn"          = "fired"
+    "indeterminate|halt" = "indeterminate"
+    "indeterminate|warn" = "indeterminate"
+    "disabled|none"      = "disabled"
+}
+# The bucket every result must be in to authorise an unattended pass, and the ONLY one that
+# may be non-empty on a clear board.
+$script:AndonClearBucket = "evaluated_ok"
+$script:AndonUnrecognisedBucket = "unrecognised"
+# Bucket -> the board's headline word, in SEVERITY ORDER (most severe first). This is also
+# the declared bucket set: a bucket absent from here is not a bucket, and a result
+# classified into one is `unaccounted`. Adding a bucket later means adding a word for it
+# here, and until that is done the board refuses rather than guesses.
+$script:AndonBucketBoard = [ordered]@{
+    "unrecognised"  = "unaccounted"
+    "fired"         = "warned"
+    "indeterminate" = "indeterminate"
+    "disabled"      = "partial"
+    "evaluated_ok"  = "clear"
+}
+function Get-AndonBucketNames { return @($script:AndonBucketBoard.Keys) }
+function Get-AndonBucket([string]$status, [string]$action) {
+    $key = "{0}|{1}" -f $status, $action
+    if ($script:AndonBuckets.Contains($key)) { return [string]$script:AndonBuckets[$key] }
+    return $script:AndonUnrecognisedBucket
+}
+
+function Test-AutoPrincipal {
+    param([string]$Principal)
+    return [bool]($Principal -and $Principal.StartsWith($script:AutoPrincipalPrefix))
+}
+
+function Get-GateProfileName {
+    # Which gate profile is in force. An explicit request beats the configured default.
+    param([string]$Requested = "")
+    if ($Requested) { return $Requested }
+    return (Get-HarnessSetting "pipeline.gate_profile" "attended")
+}
+
+function Get-GateProfileNames {
+    $p = Get-HarnessSetting "gate_profiles"
+    if (-not $p) { return @() }
+    return @($p.Keys | Where-Object { $_ -notlike "_*" })
+}
+
+function Resolve-Gate {
+    # gate + gate profile -> who passes it: "human" or "auto".
+    # Throws rather than defaulting, for the same reason Resolve-RoleTarget does: a typo in
+    # a gate profile name must be visible. Silently serving 'attended' would be safe and
+    # silently serving 'dark' would not, and a rule that depends on which way the typo fell
+    # is not a rule.
+    param(
+        [Parameter(Mandatory = $true)][string]$Gate,
+        [string]$Profile = ""
+    )
+    if ($script:Gates -notcontains $Gate) {
+        throw "unknown gate '$Gate' - known gates: $($script:Gates -join ', ')"
+    }
+    $name = Get-GateProfileName -Requested $Profile
+    $profiles = Get-HarnessSetting "gate_profiles"
+    if (-not $profiles -or -not $profiles.Contains($name)) {
+        $known = if ($profiles) { (Get-GateProfileNames) -join ", " } else { "(none)" }
+        throw "unknown gate profile '$name' - known gate profiles: $known"
+    }
+    $p = $profiles[$name]
+    if (-not $p.Contains($Gate)) { throw "gate profile '$name' does not assign the '$Gate' gate" }
+    $passer = [string]$p[$Gate]
+    if ($passer -ne "human" -and $passer -ne "auto") {
+        throw "gate profile '$name' assigns '$Gate' to '$passer' - only 'human' or 'auto'"
+    }
+    return [ordered]@{ gate = $Gate; profile = $name; passer = $passer }
 }
 
 function Get-HarnessProfileNames {

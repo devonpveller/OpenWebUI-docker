@@ -138,3 +138,217 @@ a per-worktree `info/exclude` is **not** honored — verified).
 #   a tester claims + executes the plan; a reviewer rebases, merges --no-ff, and records it
 .\scripts\agent-harness\remove-worktree.ps1 -Id wiki-perf
 ```
+
+## Running it unattended (`dark` gate profile)
+
+`pipeline.gate_profile` decides who passes the two human gates. `attended` (the
+default, and what every example above assumes) means a person runs `-ConfirmAnchor`
+and `-Approve`. `dark` means both gates self-pass.
+
+The value is not the automation, it is the record. An auto-passed gate must be
+distinguishable afterwards from a human-passed one, or the trail reads as approval
+that never happened.
+
+```powershell
+# once per run: record where the protected refs stood, so a later move is detectable
+.\scripts\agent-harness\andon.ps1 -Baseline
+
+# is the line clear? exit 6 means it is not
+.\scripts\agent-harness\andon.ps1 -Evaluate
+
+# drive the pipeline with nobody at the gates
+.\scripts\agent-harness\queue.ps1 -GateProfile dark -Submit -Id x -Branch work/x -Developer wt-x -TestPlan <path>
+
+# afterwards, the two questions an operator actually has
+.\scripts\agent-harness\queue.ps1 -Audit -Id x          # WHICH gates did no human see?
+.\scripts\agent-harness\queue.ps1 -VerifyAudit -Id x    # is the trail complete? 0 / 1 / 7
+```
+
+Five things are worth knowing before relying on it:
+
+- **The board is currently RED on this repository**, and that is not a bug in the
+  board. `git-error-swallowed` reports 18 unchecked git call sites across
+  `scripts/checks/*.ps1` and `scripts/agent-harness/*.ps1` — including
+  `Invoke-DrillGit` and `Get-DrillGit` in `verify-merge-protocol.ps1`, the incident's
+  own functions. `protected-ref-moved` is indeterminate until a run records a
+  baseline, and indeterminate is deliberately not a pass. **That sentence was FALSE at run
+  time until 2026-08-30**, and it is worth saying where it is written: with
+  `on_indeterminate: warn` on that condition - a one-word config edit - the board printed
+  `ANDON BOARD: CLEAR` at exit 0 while listing `[indeterminate] protected-ref-moved  no
+  baseline recorded`, the dark gate auto-passed signed `auto:dark`, `-VerifyAudit` said
+  COMPLETE, and the condition that could not be evaluated was in no ledger field at all.
+  What makes it true is not the `halt` default, which a config overrides; it is that `clear`
+  is now decided by a bucket census in which the `indeterminate` bucket must be EMPTY. Drill
+  step K is the proof. A `dark` run refuses to auto-pass until those clear - which is the
+  andon cord working, not a false alarm.
+- **`work-branch-on-remote` narrows to the branch the run owns - at BOTH gates now.**
+  `Invoke-AutoGate` hands the board the run's branch, so a `dark` run is blocked by *its
+  own* branch being on a remote, not by anybody else's. Run bare — `andon.ps1 -Evaluate`
+  with no `-RunBranch` — it asks the broader question, and today it names the eleven
+  `work/*` branches that reached `origin` on 2026-08-30. Both readings are deliberate; only
+  the narrow one gates a run. **This paragraph was FALSE at the ANCHOR gate until
+  2026-08-30**, and it is worth saying where it was written: `-Propose` writes `branch = ""`
+  and `-Submit` stores the real branch only AFTER the anchor gate has run, so that gate
+  passed no branch at all and the board fell back to the broad question — which on this
+  repository is those eleven foreign branches, none of them the run's, and none of them a
+  run is permitted to delete. A `dark` run could therefore never auto-pass an anchor gate
+  here, for a reason the doc said could not block it. The branch was known at that point
+  (`-Submit -Branch` is mandatory); it simply was not passed. Drill step M is the proof, in
+  four parts: a foreign branch on a remote passes the anchor gate, the run's own branch on a
+  remote still halts it, a branch name that does not resolve leaves the condition
+  **unevaluated** rather than clear, and a name that is not a name at all — a space, a tab,
+  an empty string — is REFUSED rather than skipped. A narrow question is only as good as the
+  name it is handed. **Both of those last two halt the gate, and neither of them is a board
+  word to quote**: the condition ends unevaluated, and the board that carries it reads
+  `raised`, because an unevaluated condition halts under the shipped policy. Until
+  2026-08-30 the whitespace case did not halt at all — both loops in the predicate stepped
+  over a name that trimmed to nothing while still counting it, so `-Branch ' '` came back
+  "checked 1 branch(es); none is on a remote", a clean board and an AUTO-PASSED anchor gate
+  for a question nobody asked. It is refused twice now: at the door by `queue.ps1`, which
+  used to count `" "` as a supplied branch because PowerShell calls it truthy, and again by
+  the board, so neither is a single point of failure.
+- **`-VerifyAudit` exit 7 is not a pass.** It means the check found items it could
+  not audit (items predating the ledger). Coverage it does not have is not coverage.
+  Nor is a green a claim about gates an item never reached — it prints that scope.
+- **`auto:` is a reserved principal namespace.** `-ConfirmAnchor` and `-Approve`
+  refuse a `-By` inside it (exit 4), and the auto path never signs as a person.
+- **The board's words are checked wherever they are written down.** Four sentences in three
+  files listed some of the eight verdict words as though they were all of them, so
+  `test_gate_profiles.py` now derives every enumeration of board words in the repository
+  (`git ls-files`) and requires it to be complete, and derives every citation of a ways-off
+  `route` id and requires it to name the state the table below proves. It reads two list
+  shapes — an inline run joined by list punctuation, whose items may be quoted, and a block
+  of consecutive lines that each introduce a word, bulleted or numbered or as table or
+  definition rows or the word alone on its line. That sentence used to read "both list
+  shapes" and name neither; on 2026-08-30 an ordered list and a quoted array were planted as
+  tracked files and both stayed green, so the shapes and the limits are now written out in
+  the test's DISCLOSED LIMITS block, which is the one place to change them. Write three or more board words as a list and you are enumerating the alphabet;
+  if you mean a narrower set, say so in words or write it as a mapping.
+
+**Eight ways of switching the board off, or of getting a pass out of it, were tried against
+the real gate. Each halts a `dark` run at the first gate under its own board state, recorded
+in the ledger. THIS TABLE IS THE ONE PLACE THAT SAYS WHICH WAY GIVES WHICH STATE** - every
+other file cites a row by its `route` id instead of restating the mapping, because the
+mapping was restated in three files and was wrong in all three (see below):
+
+| route | what you do to the board | board state | gate |
+|---|---|---|---|
+| `andon-disabled` | `andon.enabled: false` | `not-evaluated` | halts |
+| `andon-block-deleted` | delete the whole `andon` block | `incomplete` (all five named) | halts |
+| `condition-disabled` | set `enabled: false` on one condition | `partial` (names it) | halts |
+| `conditions-deleted` | **delete condition ENTRIES from `andon.conditions`** | `incomplete` (names the missing ids) | halts |
+| `on-fire-downgraded` | **set `on_fire: warn`** | `warned` (names what fired) | halts |
+| `on-indeterminate-downgraded` | **set `on_indeterminate: warn`** | `indeterminate` (names what could not be evaluated) | halts |
+| `action-word-unimplemented` | set either key to a word the board does not implement | refused at evaluation: exit 1, no verdict, and every gate reads that as `unavailable` | halts |
+| `outcome-unenumerated` | **an outcome the board does not enumerate at all** (a new status a predicate grows, a new word added to the allowed actions) | `unaccounted` (names the condition AND the word) | halts |
+
+Each row is a drill case driving the real `queue.ps1` (steps F, H, J and K), and the drill
+declares the same map in `$script:WaysOffProven`, which its own assertions read - so a row
+here whose word differs from the drill's, or which reaches no drill code at all, fails
+`test_gate_profiles.py::test_the_ways_off_table_matches_the_drill_that_proves_it`. **That
+test compares two written-down copies of the mapping, and it used to claim more than that.**
+Until 2026-08-30 it said a row nobody drills is a claim rather than a proof, and it did not
+establish it: a phantom row planted in BOTH copies, with zero assertions anywhere, passed
+with the whole suite green. What a row is EXERCISED by is checked where it can be - in the
+drill: `Check` registers a route the moment a PASSING assertion cites `(route <id>)` in its
+label, and **drill step N** fails on any row declared here that no assertion exercised. The
+`route` ids exist so the fact can be CITED rather than copied: any line anywhere in the
+repository that names a route id and a board word is checked against this table by
+`test_every_citation_of_a_way_off_names_the_state_this_table_proves`. Two of these rows had
+their ledger claim unchecked until 2026-08-30: `action-word-unimplemented` asserted
+`andon.status = unavailable` in the record and no drill check read that field, and the
+block-deletion row was written up in three files carrying the state that belongs to
+`andon-disabled` (`not-evaluated`). That is why the citation rule exists rather than a fourth
+carefully written sentence.
+
+The two downgrade rows say **`warn`** rather than "anything but `halt`", because that is what
+is true: `warn` is the only other word `$script:AllowedAndonActions` holds, and any other
+literal is refused before a verdict exists - the `action-word-unimplemented` row. It errs
+safe, but the earlier wording ("anything but halt") was not accurate.
+
+**Four of these rows were OPEN until 2026-08-30**, and each was closed against a
+reproduction:
+
+- *deleting entries* — pruned to one of five on a genuinely detached checkout, the gate
+  **auto-passed** at exit 0, ledger `clear`, `-VerifyAudit COMPLETE`. Every counter it
+  printed was true, and every one counted against the config's own thinned list. The five
+  required ids now live in `config.ps1`/`config.py`, in code where the config cannot edit
+  them.
+- *downgrading `on_fire`* — the condition FIRED, the board still reported `clear` at exit 0,
+  the gate auto-passed signed `auto:dark`, the pass record's `fired` list was **empty** and
+  `-VerifyAudit` called the trail COMPLETE. `fired` was derived from `action -eq halt`, so a
+  fire that did not halt had nowhere in the ledger to appear. `fired` and `halted` are now
+  separate lists in every verdict and every record, and a board with a fire on it is never
+  `clear`.
+- *downgrading `on_indeterminate`* - **the identical hole on the sibling key**, still open
+  after the fix above and reproduced the same day: `protected-ref-moved` with no baseline
+  printed `CLEAR` at exit 0, the gate auto-passed signed `auto:dark`, `-VerifyAudit` said
+  COMPLETE, and the ledger read `status: clear, fired: [], halted: []` with the unevaluated
+  condition absent from the record entirely. Three rounds running a fix had closed one
+  outcome key and left its sibling, so this one is not a third list. The verdict was computed
+  **by exception**: a halt flag set only for `action = halt`, a fired list only for
+  `status = fire`, every other outcome setting NOTHING, and `clear` as whatever was left when
+  nothing objected - so any outcome nobody had enumerated silently meant "fine".
+- *an outcome nobody enumerated* - closed by the same change, and it is the general form of
+  all four rows above. `clear` is now **proven**: every condition lands in exactly one census
+  bucket (`evaluated_ok` / `fired` / `indeterminate` / `disabled` / `unrecognised`), the
+  buckets must sum to the conditions in scope, and `clear` requires every bucket but
+  `evaluated_ok` to be empty with at least one condition in it. A `(status, action)` pair the
+  board does not enumerate falls to `unrecognised`, which refuses - **no branch names the new
+  word**. Drill step K proves that by introducing an action word and a status word the
+  harness has never contained, in a scratch COPY whose `andon.ps1` is asserted byte-identical
+  to the shipped one (K2) or differing by exactly one line inside a predicate (K3). The
+  census travels into the ledger, so `-VerifyAudit` **re-derives** the verdict from the
+  buckets instead of trusting the word `clear`.
+
+**What is NOT closed, and the sentence here used to claim otherwise.** The board's
+*membership* is pinned code-side and is tamper-evident. Its *behaviour* is not: what each
+condition DOES is still config-controlled, and three routes through it are open —
+
+- **a predicate swap.** The completeness check compares IDS (`andon.ps1`, `$missingIds`), so
+  an entry keeping a required id while naming a different implemented predicate is a full
+  board of five to every counter. `test_gate_profiles.py` pins the id → predicate map of the
+  **committed** config; nothing pins one edited at run time or named by
+  `AI_STACK_HARNESS_CONFIG`.
+- **a `params` redirect.** `params.repo` on `operator-checkout-off-branch` pointed at a clean
+  decoy checkout, or narrowed `globs`/`refs`/`branches`, leaves the detector running and
+  looking somewhere harmless. Nothing pins params, at run time or in the committed config.
+  It is not refused. It *is* readable afterwards - but **not** from `andon.repo`, which is
+  what this bullet used to claim. `andon.repo` is the checkout the BOARD resolved
+  (`$ctx.repo_root`); a `params.repo` override does not touch it, so a redirect run recorded
+  the real detached checkout in the ledger while the detector examined the decoy. That was a
+  true sentence about a field that does not answer the question. The gate record now also
+  carries **`andon.looked_at`**, which names, for every condition, the predicate it ran and
+  the params it was handed - so both a redirect and a predicate swap are visible to a reader
+  of the ledger. Drill step L builds a decoy checkout and asserts exactly that: the gate
+  passes, `andon.repo` names the fixture, and `looked_at` names the decoy.
+- **id squatting**, which is the first two together: a required id kept on an entry that is
+  a different check.
+
+`on_fire` is not in that list any more, and neither is `on_indeterminate` nor deleting
+entries. The safe reading of this section is: *the set of conditions cannot be thinned,
+switched off, or downgraded into silence - by either outcome key, or by an outcome word
+nobody has thought of yet, because `clear` is decided by a census of buckets rather than by
+the absence of a flag; a condition that is present can still be pointed somewhere else, and
+that redirect is now readable in the ledger rather than refused.*
+
+The revert to prior behaviour is `pipeline.gate_profile: attended`. That is the configured
+**default, not a lock**: `queue.ps1 -GateProfile dark` names a profile for one call and
+takes the dark path whatever the config says (drill step I drives the same item both ways
+— exit 5 attended, exit 6 dark).
+
+The whole mechanism has its own drill: `drill-dark-factory.ps1` shows every condition
+firing on a constructed instance and not firing on a clean one, runs the pipeline end
+to end with nobody at either gate, proves the completeness check goes red on a tampered
+trail, proves that turning the board off — or thinning it by deleting condition entries —
+halts rather than opens, proves that neither outcome key can be downgraded into silence and
+that an outcome word the board has never heard of is refused rather than ignored, shows that
+a `params` redirect is readable from the ledger, proves that the ANCHOR gate asks the narrow
+branch question and that a branch name which does not resolve - or is not a name at all -
+halts it rather than clearing it (step M), checks that every row of the ways-off table above
+was exercised by an assertion that actually ran (step N), and re-runs the clean board
+afterwards so a fix that refused everything would be caught. Every WRITE it
+makes is to a scratch repository under `$env:TEMP` with the config and state dir
+redirected; it makes exactly one READ of a real repository, by name — one case scans
+this checkout's own `.ps1` files so the detector is shown naming the incident's
+function in the code that actually shipped.

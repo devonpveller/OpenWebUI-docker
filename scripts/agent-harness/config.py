@@ -20,7 +20,7 @@ import copy
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 HERE = Path(__file__).resolve().parent
 
@@ -44,10 +44,14 @@ DEFAULTS: Dict[str, Any] = {
             "reviewer": {"runner": "claude-code", "model": "opus"},
         },
     },
+    "gate_profiles": {
+        "attended": {"anchor": "human", "pre_review": "human"},
+        "dark": {"anchor": "auto", "pre_review": "auto"},
+    },
     "pipeline": {
         "claim_ttl_minutes": 60,
         "anchor_required": True,
-        "human_gates": {"anchor": True, "pre_review": True},
+        "gate_profile": "attended",
     },
     "worktree": {
         "root": ".claude/worktrees",
@@ -64,6 +68,154 @@ DEFAULTS: Dict[str, Any] = {
 }
 
 ROLES = ("worker", "tester", "reviewer")
+
+#: The pipeline gates, in the order a work item crosses them. Declared once, here, so the
+#: two readers and the audit verifier cannot disagree about how many there are.
+GATES = ("anchor", "pre_review")
+
+#: Reserved principal namespace for a gate NOBODY looked at. A human ``-By`` value may
+#: never start with this, and an auto record may never omit it - that is what makes an
+#: auto-pass distinguishable from a human approval when the operator reads the ledger
+#: afterwards. A record saying only "passed" reads as approval and is worse than none.
+AUTO_PRINCIPAL_PREFIX = "auto:"
+
+#: The andon conditions the system REQUIRES, declared here in code and deliberately not in
+#: ``harness.config.json``. The config says which conditions are configured and with what
+#: parameters; this says which ones must EXIST.
+#:
+#: The defect that produced it (2026-08-30): the board could be switched off two ways and
+#: both were closed. They report DIFFERENT states, and this comment claimed otherwise until
+#: 2026-08-30 — the same false sentence as ``andon.ps1`` and ``config.ps1`` carried, all three
+#: written by the commit that made it false. The mapping is stated once, in README.md's
+#: ways-off table, and cited here by route id:
+#:
+#:   andon-disabled      -> not-evaluated
+#:   andon-block-deleted -> incomplete
+#:
+#: Both halt. There was a THIRD, the one actually reached for: deleting condition ENTRIES
+#: from ``andon.conditions`` (route ``conditions-deleted``). Thinned to one of five on a
+#: genuinely detached checkout, the dark gate AUTO-PASSED — exit 0, ledger ``clear``,
+#: coverage ``1 declared / 1 evaluated / 0 switched off``, ``-VerifyAudit COMPLETE``.
+#:
+#: A required-set living in the same file as the conditions would be no guard: whoever
+#: deletes the entry deletes the name beside it and the file agrees with itself. Here,
+#: retiring a condition is a CODE edit that shows in a diff. Mirrors
+#: ``$script:RequiredAndonConditions`` in ``config.ps1``; ``test_gate_profiles.py`` asks
+#: both readers and the shipped config the same question. No environment override exists —
+#: a variable that thins the board is the same hole with a longer name.
+#:
+#: THE VALUE beside each id is the predicate that id is SUPPOSED to run, and it pins the
+#: COMMITTED config only. ``test_gate_profiles.py`` compares this map against
+#: ``harness.config.json``, so an entry that keeps a required id while naming a different
+#: predicate — id squatting, invisible to the id-set check, which compares ids — fails the
+#: suite. ``andon.ps1`` reads only the keys and does NOT re-check the predicate at run time:
+#: a swap in an uncommitted config, or in one named by ``AI_STACK_HARNESS_CONFIG``, still
+#: runs whatever the entry says. That route is open, and is named as open in README.md and
+#: MODULE.md rather than papered over here.
+REQUIRED_ANDON_CONDITIONS = {
+    "operator-checkout-off-branch": "git-checkout-state",
+    "policy-declared-unread": "config-key-unread",
+    "git-error-swallowed": "git-error-unchecked",
+    "work-branch-on-remote": "branch-on-remote",
+    "protected-ref-moved": "protected-ref-moved",
+}
+
+#: The only words an andon condition may use for ``on_fire`` / ``on_indeterminate``. An
+#: action the board does not understand cannot be honoured, and guessing at one is how a
+#: config ends up deciding something nobody wrote down, so an unknown literal is refused.
+#:
+#: ``warn`` does not mean "carry on": a fired condition is never a clear board whatever its
+#: action says, so no unattended gate passes over one either way. ``warn`` buys the WORD
+#: (``warned`` rather than ``raised``) and the ledger's separate ``fired``/``halted`` lists
+#: — severity for a human reading afterwards, not permission for a machine at the time.
+ALLOWED_ANDON_ACTIONS = ("halt", "warn")
+
+#: THE OUTCOME TABLE — mirror of ``$script:AndonBuckets`` in ``config.ps1``. Every
+#: ``(status, action)`` pair the board knows how to think about, and the bucket it counts as.
+#:
+#: WHY IT EXISTS (2026-08-30): the verdict used to be computed BY EXCEPTION — a halt flag
+#: set only for ``action == "halt"``, a fired list only for ``status == "fire"``, every other
+#: outcome setting NOTHING, and ``clear`` as whatever was left when nothing objected. So an
+#: outcome nobody had enumerated silently meant "fine", which cost two rounds: ``on_fire:
+#: warn`` was closed and ``on_indeterminate: warn`` reopened the identical hole on the
+#: sibling key, auto-passing a dark gate on a condition that could not be evaluated. ``clear``
+#: is now PROVEN: every result lands in exactly one bucket, the buckets must sum to the
+#: conditions in scope, and every bucket but ``evaluated_ok`` must be empty. A pair that is
+#: not a key here — a new status, a new action word — falls to ``unrecognised``, which
+#: refuses, with no branch naming the new word.
+ANDON_BUCKETS = {
+    ("ok", "none"): "evaluated_ok",
+    ("fire", "halt"): "fired",
+    ("fire", "warn"): "fired",
+    ("indeterminate", "halt"): "indeterminate",
+    ("indeterminate", "warn"): "indeterminate",
+    ("disabled", "none"): "disabled",
+}
+
+#: The one bucket compatible with an unattended pass, and the bucket everything unenumerated
+#: falls into. Mirrors ``$script:AndonClearBucket`` / ``$script:AndonUnrecognisedBucket``.
+ANDON_CLEAR_BUCKET = "evaluated_ok"
+ANDON_UNRECOGNISED_BUCKET = "unrecognised"
+
+#: Bucket → the board's headline word, in SEVERITY ORDER. Also the declared bucket set: a
+#: bucket absent from here is not a bucket, and a result classified into one is
+#: ``unaccounted``. Mirrors ``$script:AndonBucketBoard``.
+ANDON_BUCKET_BOARD = {
+    "unrecognised": "unaccounted",
+    "fired": "warned",
+    "indeterminate": "indeterminate",
+    "disabled": "partial",
+    "evaluated_ok": "clear",
+}
+
+
+def andon_bucket(status: str, action: str) -> str:
+    """Which census bucket a ``(status, action)`` outcome counts as.
+
+    Mirrors ``Get-AndonBucket`` in ``config.ps1``. Anything unenumerated is
+    ``unrecognised`` — a REFUSING bucket — rather than falling through to a pass.
+    """
+    return ANDON_BUCKETS.get((status, action), ANDON_UNRECOGNISED_BUCKET)
+
+
+def missing_andon_conditions() -> List[str]:
+    """Required condition ids that the loaded config does not declare, in required order.
+
+    The board's own :func:`Invoke-AndonEvaluation` computes the same set; this is here so
+    the bridge and the tests can ask without shelling out to PowerShell.
+    """
+    declared = {
+        str(c.get("id", ""))
+        for c in (get("andon.conditions") or [])
+        if isinstance(c, dict)
+    }
+    return [c for c in REQUIRED_ANDON_CONDITIONS if c not in declared]
+
+
+def andon_predicate_mismatches() -> List[Tuple[str, str, str]]:
+    """``(id, expected, declared)`` for each required condition wired to the wrong predicate.
+
+    The id-set check above compares ids, so an entry that KEEPS a required id while naming a
+    different predicate satisfies it completely — the board still declares five ids and
+    still evaluates five conditions, one of which is now a different check. This asks the
+    other half of the question, of the config as loaded.
+
+    Scope, stated because it is narrow: this is what ``test_gate_profiles.py`` runs against
+    the committed ``harness.config.json``. Nothing calls it at a gate, so it does not make a
+    run-time swap detectable.
+    """
+    out: List[Tuple[str, str, str]] = []
+    for cond in (get("andon.conditions") or []):
+        if not isinstance(cond, dict):
+            continue
+        cid = str(cond.get("id", ""))
+        expected = REQUIRED_ANDON_CONDITIONS.get(cid)
+        if expected is None:
+            continue
+        declared = str(cond.get("predicate", ""))
+        if declared != expected:
+            out.append((cid, expected, declared))
+    return out
 
 _CACHE: Dict[str, Any] | None = None
 
@@ -239,6 +391,40 @@ def resolve_role(role: str, profile: str = "", surface: str = "") -> Dict[str, s
         "model": target.get("model") or runner.get("default_model", ""),
         "status": runner.get("status", "unknown"),
     }
+
+
+def gate_profile_name(requested: str = "") -> str:
+    """Which gate profile is in force. Explicit request beats the configured default."""
+    return requested or str(get("pipeline.gate_profile", "attended"))
+
+
+def resolve_gate(gate: str, profile: str = "") -> Dict[str, str]:
+    """gate + gate profile -> who passes it.
+
+    Raises rather than defaulting, for the same reason ``resolve_role`` does: a typo in a
+    gate profile name must be visible. Silently serving ``attended`` would be safe here and
+    silently serving ``dark`` would not, and a rule that depends on which way the typo fell
+    is not a rule.
+    """
+    if gate not in GATES:
+        raise HarnessConfigError(f"unknown gate '{gate}' - known gates: {', '.join(GATES)}")
+    name = gate_profile_name(profile)
+    profiles = get("gate_profiles") or {}
+    if name not in profiles:
+        known = ", ".join(k for k in profiles if not k.startswith("_"))
+        raise HarnessConfigError(f"unknown gate profile '{name}' - known gate profiles: {known}")
+    assigned = profiles[name]
+    if gate not in assigned:
+        raise HarnessConfigError(f"gate profile '{name}' does not assign the '{gate}' gate")
+    passer = str(assigned[gate])
+    if passer not in ("human", "auto"):
+        raise HarnessConfigError(
+            f"gate profile '{name}' assigns '{gate}' to '{passer}' - only 'human' or 'auto'")
+    return {"gate": gate, "profile": name, "passer": passer}
+
+
+def gate_profile_names() -> List[str]:
+    return [k for k in (get("gate_profiles") or {}) if not k.startswith("_")]
 
 
 def describe_profile(name: str) -> str:

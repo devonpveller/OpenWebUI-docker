@@ -54,7 +54,27 @@
 #   .\queue.ps1 -Merged -Id mem-readme -By wt-reviewer-1 -Sha <merge sha>
 #
 # Exit codes: 0 ok | 1 usage/state error | 2 harness disabled | 3 claimed by someone else
-#             | 4 refused (duties) | 5 refused (no confirmed anchor)
+#             | 4 refused (duties) | 5 refused (no confirmed anchor) | 6 ANDON not clear.
+#               EVERY non-`clear` board word lands here, and the list is the board's, not a
+#               copy that drifts: raised / warned / indeterminate / unaccounted / incomplete
+#               / partial / not-evaluated, plus `unavailable` when the board could not be
+#               run at all. This enumeration omitted `warned` until 2026-08-30 and read as
+#               though a warn-declared fire were not an exit-6 refusal; the code has always
+#               refused anything that is not the literal word `clear` (Invoke-AutoGate).
+#             | 7 audit COVERAGE incomplete (-VerifyAudit found items it could not audit)
+#
+# GATE PROFILES (U6, 2026-08-30). `attended` is unchanged: a human runs -ConfirmAnchor
+# and -Approve. `dark` makes both gates SELF-PASS - but only while the andon board is
+# clear, and every self-pass writes a ledger record under the reserved `auto:` principal
+# namespace that no -By value may occupy. What a gate DOES is still decided here; who
+# passes it is tuning, and lives in harness.config.json under gate_profiles.
+#
+#   .\queue.ps1 -Audit [-Id x]         # the gate ledger, auto-passes flagged
+#   .\queue.ps1 -VerifyAudit [-Id x]   # is the trail COMPLETE? 0 complete | 1 findings |
+#                                      # 7 there were items it could not audit (NOT a pass).
+#                                      # This line said "exit 1 if not" until 2026-08-30;
+#                                      # drill step C reaches 7, so the usage was narrower
+#                                      # than the tool and read as though 7 were impossible.
 
 [CmdletBinding()]
 param(
@@ -76,6 +96,9 @@ param(
     [switch]$ScopeNodes,
     [switch]$Oracle,
     [switch]$CloseOut,
+    [switch]$Audit,
+    [switch]$VerifyAudit,
+    [string]$GateProfile = "",
     [string]$Id = "",
     [string]$Branch = "",
     [string]$Developer = "",
@@ -106,6 +129,7 @@ param(
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "common.ps1")
 . (Join-Path $PSScriptRoot "anchor.ps1")
+. (Join-Path $PSScriptRoot "gate-audit.ps1")
 
 # The module OFF switch. "Off" must be inert and say so, not fail obscurely three calls
 # deeper - see harness.config.json / MODULE.md.
@@ -224,6 +248,144 @@ function Invoke-OracleOnStall([string]$i) {
     try { & python $mod check $QueueDir $i --repo $repo } finally { $ErrorActionPreference = $prev }
 }
 
+# --- gates: who passes them, and what the record says --------------------------------
+# The gate PROFILE decides who passes; this file still decides what passing DOES. See the
+# header and harness.config.json -> gate_profiles.
+
+function Get-EmptyGateMap {
+    $m = [ordered]@{}
+    foreach ($g in (Get-GateNames)) { $m[$g] = [ordered]@{ kind = ""; by = ""; at = 0; profile = "" } }
+    return $m
+}
+
+function Set-ItemGate($item, [string]$gate, [string]$kind, [string]$by, [string]$profile) {
+    if (-not ($item.PSObject.Properties.Name -contains "gates") -or -not $item.gates) {
+        Set-Field $item "gates" (Get-EmptyGateMap)
+    }
+    Set-Field $item.gates $gate ([ordered]@{ kind = $kind; by = $by; at = (Now); profile = $profile })
+}
+
+function Assert-HumanPrincipal([string]$who, [string]$flag) {
+    # The reserved namespace is reserved in BOTH directions. A human may not sign as `auto:`
+    # (which would let a person hide behind the machine), and the auto path may not sign as
+    # a person (which is the failure this whole clause exists to prevent: a record that
+    # reads as human approval when no human was there).
+    if (Test-AutoPrincipal $who) {
+        Die ("'{0}' is in the reserved auto-pass namespace '{1}' and cannot be used as {2} -By. " -f $who, (Get-AutoPrincipalPrefix), $flag) 4
+    }
+}
+
+function Resolve-GateOrDie([string]$gate) {
+    try { return (Resolve-Gate -Gate $gate -Profile $GateProfile) }
+    catch { Die $_.Exception.Message }
+}
+
+function Invoke-AutoGate($item, [string]$gate, $decision, [string]$runBranch = "") {
+    # Try to auto-pass $gate. Returns the andon verdict; the CALLER halts on a raise, so the
+    # halt is visible at the state transition rather than buried in here.
+    #
+    # THE RUN'S OWN BRANCH HAS TO REACH THE BOARD, and until 2026-08-30 it did not reach the
+    # ANCHOR gate. `-Propose` writes `branch = ""` - there is no branch yet when the anchor is
+    # proposed - and `-Submit` stores the real one only AFTER the anchor gate has run. So at
+    # that gate $item.branch was empty, no -RunBranch was passed, and `work-branch-on-remote`
+    # fell back to its BROAD reading: is ANY local work branch on a remote. README.md promised
+    # the narrow one ("a dark run is blocked by ITS OWN branch being on a remote, not by
+    # anybody else's"); the gate asked the broad one. On this repository that is eleven foreign
+    # work/* branches somebody else pushed, so `dark` could never auto-pass an anchor gate here
+    # - a run refused for a fact about the operator's remote that the run neither caused nor is
+    # allowed to clear. Reproduced before the fix: own branch clean, ONE foreign work branch on
+    # a remote, anchor gate exit 6, ledger `fired=work-branch-on-remote`.
+    #
+    # The branch IS known at that point - it is `-Submit -Branch`, a mandatory parameter - it
+    # simply had not been written to the item yet. The caller passes it, and both gates now ask
+    # the same narrow question about the same branch. The BROAD question is still asked by a
+    # bare `andon.ps1 -Evaluate`, which is the operator's reading, not a run's.
+    #
+    # A GATE THAT CANNOT NAME THE BRANCH DOES NOT AUTO-PASS. Falling back to the broad question
+    # is the defect above; falling back to an empty list would be worse still, because
+    # Predicate-BranchOnRemote answers `ok` for one - "no local work branches to check" - and
+    # that is a pass nobody proved. Unreachable by construction (both call sites have a branch:
+    # -Submit requires -Branch, and pre_review runs after -Submit stored it), and kept because
+    # the two alternatives are a wrong answer and a silent one.
+    $branches = @()
+    if ($item.branch) { $branches += $item.branch }
+    elseif ($runBranch) { $branches += $runBranch }
+    if (@($branches).Count -eq 0) {
+        Die (("the '{0}' gate cannot name the branch this run owns, so it cannot ask whether that " +
+              "branch is on a remote. An unattended gate does not pass a question it did not ask.") -f $gate) 1
+    }
+    $andon = Invoke-AndonForGate -RunBranches $branches
+    if ($andon.status -ne "clear") {
+        [void](Write-GateRecord -Item $item.id -Gate $gate -Decision "refused" -Kind "auto" `
+                 -Principal ((Get-AutoPrincipalPrefix) + $decision.profile) -GateProfile $decision.profile `
+                 -FromState $item.state -ToState $item.state -Andon $andon)
+    }
+    return $andon
+}
+
+function Test-AndonField($andon, [string]$name) {
+    # Does this andon verdict carry $name? Handles both shapes the verdict travels in: an
+    # [ordered] hashtable (fresh from Invoke-AndonForGate) and a PSCustomObject (parsed back
+    # out of the ledger). Asking `.PSObject.Properties.Name` of a hashtable answers about the
+    # DICTIONARY, not its contents - see Stop-OnAndon.
+    if ($null -eq $andon) { return $false }
+    if ($andon -is [System.Collections.IDictionary]) { return $andon.Contains($name) }
+    return ($andon.PSObject.Properties.Name -contains $name)
+}
+
+function Stop-OnAndon($andon, [string]$gate, [string]$id, [string]$parkedAt) {
+    Write-Host ""
+    Write-Host ("ANDON {0} - the '{1}' gate will NOT auto-pass." -f ("$($andon.status)").ToUpper(), $gate) -ForegroundColor Red
+    # EVERY LIST THE VERDICT CARRIES. `fired` is what the detectors saw and `halted` is what
+    # stopped the line; they were one derived list until 2026-08-30, which hid a fire whose
+    # on_fire was not `halt`. Printing only those two then hid the SIBLING case the same day:
+    # an INDETERMINATE condition halts nothing and fires nothing, so a warn-declared
+    # indeterminate reached the operator as a bare board word. De-duplicated because a
+    # halting fire is legitimately in more than one.
+    $seen = @()
+    foreach ($k in @("halted", "fired", "indeterminate", "unrecognised", "unaccounted")) {
+        if (Test-AndonField $andon $k) { $seen += @($andon.$k) }
+    }
+    foreach ($f in @($seen | Where-Object { $_ } | Select-Object -Unique)) { Write-Host ("  - {0}" -f $f) -ForegroundColor Red }
+    # State the coverage on the console too. A halt whose only word is 'not-evaluated' sends
+    # the operator to the config; a halt that says 0 of 5 evaluated sends them to the right line.
+    #
+    # THIS GUARD USED TO BE `$andon.PSObject.Properties.Name -contains "evaluated"`, WHICH IS
+    # ALWAYS FALSE HERE. Invoke-AndonForGate returns an [ordered] hashtable, and an
+    # OrderedDictionary's PSObject properties are the .NET ones - Count, Keys, Values,
+    # IsReadOnly - never its keys. So the line never printed and a real dark halt reached the
+    # operator with no coverage at all: a check that could not fire, inside the tool built to
+    # refuse checks that cannot fire. Test-AndonField below asks the question in a way that
+    # works for a hashtable AND for a PSCustomObject, because a record read back from the
+    # ledger is the latter.
+    if (Test-AndonField $andon "evaluated") {
+        Write-Host ("  board coverage: {0} of {1} declared condition(s) evaluated, {2} switched off" -f
+                    [int]$andon.evaluated, [int]$andon.conditions, [int]$andon.disabled) -ForegroundColor Red
+    }
+    if ((Test-AndonField $andon "missing") -and ([int]$andon.missing -gt 0)) {
+        Write-Host ("  {0} of {1} REQUIRED condition(s) are NOT DECLARED: {2}" -f
+                    [int]$andon.missing, [int]$andon.required, (@($andon.missing_ids) -join ", ")) -ForegroundColor Red
+    }
+    # THE BUCKET CENSUS, which is what the refusal actually rests on: `clear` requires every
+    # bucket but `evaluated_ok` to be empty, so the operator should be able to see WHICH
+    # bucket was not.
+    if (Test-AndonField $andon "census") {
+        $parts = @()
+        foreach ($k in @(Get-AndonBucketNames)) {
+            $n = 0
+            if ($andon.census -is [System.Collections.IDictionary]) {
+                if ($andon.census.Contains($k)) { $n = [int]$andon.census[$k] }
+            } elseif ($andon.census.PSObject.Properties.Name -contains $k) { $n = [int]$andon.census.$k }
+            $parts += ("{0}={1}" -f $k, $n)
+        }
+        Write-Host ("  board census: {0}" -f ($parts -join ", ")) -ForegroundColor Red
+    }
+    Write-Host ""
+    Write-Host ("'{0}' is PARKED at '{1}'. The refusal is in the gate ledger (queue.ps1 -Audit -Id {0})." -f $id, $parkedAt) -ForegroundColor Yellow
+    Write-Host ("Clear the condition, or pass the gate attended: queue.ps1 -{0} -Id {1} -By <operator>" -f $(if ($gate -eq "anchor") { "ConfirmAnchor" } else { "Approve" }), $id) -ForegroundColor Yellow
+    exit 6
+}
+
 # --- list / show --------------------------------------------------------------------
 if ($CloseOut) {
     # CLOSE OUT a row whose work landed OUTSIDE this queue's gates (§C.1).
@@ -318,6 +480,10 @@ if ($List) {
         # how a human gate quietly becomes a human bottleneck.
         if ($it.state -eq "anchor-draft") { $flag += " [waiting: operator to confirm the anchor]" }
         if ($it.state -eq "test-passed")  { $flag += " [waiting: operator to release for review]" }
+        if ($it.PSObject.Properties.Name -contains "gates" -and $it.gates) {
+            $autoGates = @(Get-GateNames | Where-Object { $it.gates.$_ -and $it.gates.$_.kind -eq "auto" })
+            if ($autoGates.Count -gt 0) { $flag += (" [AUTO-PASSED: " + ($autoGates -join ", ") + "]") }
+        }
         Write-Host ("{0,-18} {1,-17} {2,-20} {3}{4}" -f $it.id, $it.state, $it.developer, $held, $flag)
     }
     exit 0
@@ -329,12 +495,86 @@ if ($Show) {
     if ($it.anchor) {
         Write-Host "--- ANCHOR ---" -ForegroundColor Cyan
         Write-Host (Format-Anchor $it.anchor)
-        $who = if ($it.anchor_confirmed_by) { "confirmed by " + $it.anchor_confirmed_by } else { "NOT YET CONFIRMED" }
+        $who = if (Test-AutoPrincipal $it.anchor_confirmed_by) {
+                   "AUTO-PASSED by " + $it.anchor_confirmed_by + " - NO HUMAN CONFIRMED THIS"
+               } elseif ($it.anchor_confirmed_by) { "confirmed by " + $it.anchor_confirmed_by }
+               else { "NOT YET CONFIRMED" }
         Write-Host ("(" + $who + ")")
         Write-Host ""
         Write-Host "--- RECORD ---" -ForegroundColor Cyan
     }
     $it | ConvertTo-Json -Depth 8
+    exit 0
+}
+
+# --- the gate audit trail -----------------------------------------------------------
+if ($Audit) {
+    $recs = @(Read-GateLedger -Item $Id)
+    if ($recs.Count -eq 0) {
+        Write-Host "The gate ledger is empty$(if ($Id) { " for '$Id'" })." -ForegroundColor Yellow
+        Write-Host ("  ({0})" -f (Get-GateLedgerPath))
+        exit 0
+    }
+    Write-Host ("GATE LEDGER  {0}" -f (Get-GateLedgerPath)) -ForegroundColor Cyan
+    foreach ($r in $recs) {
+        $colour = "Gray"
+        if ($r.kind -eq "auto") { $colour = "Yellow" }
+        if ($r.decision -eq "refused") { $colour = "Red" }
+        Write-Host ("  " + (Format-GateRecord $r)) -ForegroundColor $colour
+        $lines = @()
+        if ($r.andon -and ($r.andon.PSObject.Properties.Name -contains "halted")) { $lines += @($r.andon.halted) }
+        $lines += @($r.andon.fired)
+        foreach ($f in @($lines | Where-Object { $_ } | Select-Object -Unique)) { Write-Host ("      andon: {0}" -f $f) -ForegroundColor DarkGray }
+    }
+    $auto = @($recs | Where-Object { $_.kind -eq "auto" -and $_.decision -eq "passed" })
+    Write-Host ""
+    Write-Host ("{0} gate event(s); {1} passed with NO HUMAN in the loop." -f $recs.Count, $auto.Count) -ForegroundColor $(if ($auto.Count -gt 0) { "Yellow" } else { "Green" })
+    exit 0
+}
+
+if ($VerifyAudit) {
+    # IS THE TRAIL COMPLETE? This is the half of U6's validation column that gets skipped:
+    # a clean unattended run must leave a trail something can CHECK, or "dark-factory mode"
+    # is just a halt mechanism with a nicer name. The rules are in gate-audit.ps1.
+    $items = @()
+    foreach ($f in (Get-ChildItem -Path $QueueDir -Filter "*.json" -File | Where-Object { $_.Name -notlike "*.anchor.json" })) {
+        try { $items += (Get-Content -Raw -Path $f.FullName | ConvertFrom-Json) } catch { }
+    }
+    $only = @()
+    if ($Id) { $only = @($Id) }
+    $verdict = Test-GateAuditComplete -Items $items -OnlyItems $only
+    Write-Host ("AUDIT COMPLETENESS  ({0} item(s) audited)" -f @($verdict.audited).Count) -ForegroundColor Cyan
+    foreach ($a in $verdict.audited) { Write-Host ("  audited   : {0}" -f $a) }
+    foreach ($u in $verdict.unaudited) { Write-Host ("  UNAUDITED : {0} (predates the gate ledger - not a pass)" -f $u) -ForegroundColor DarkGray }
+    if (@($verdict.findings).Count -gt 0) {
+        Write-Host ""
+        Write-Host ("INCOMPLETE - {0} finding(s):" -f @($verdict.findings).Count) -ForegroundColor Red
+        foreach ($f in $verdict.findings) { Write-Host ("  - {0}" -f $f) -ForegroundColor Red }
+        exit 1
+    }
+    if (@($verdict.unaudited).Count -gt 0) {
+        # NOT A PASS. An item this check could not audit is coverage it does not have, and
+        # reporting that as green is the same skip-counts-as-a-pass shape the andon board
+        # refuses. A distinct code so a caller can tell "the trail is wrong" (1) from "the
+        # trail does not cover everything" (7).
+        Write-Host ""
+        Write-Host ("COVERAGE INCOMPLETE - {0} item(s) could not be audited. Nothing is wrong with" -f @($verdict.unaudited).Count) -ForegroundColor Yellow
+        Write-Host "what WAS audited; this is not a green." -ForegroundColor Yellow
+        exit 7
+    }
+    Write-Host ""
+    Write-Host "COMPLETE - every gate these item(s) CROSSED has a record, and every record names who" -ForegroundColor Green
+    Write-Host "or what passed it." -ForegroundColor Green
+    # SAY WHAT 'COMPLETE' DOES NOT MEAN, in the same breath as saying it. 'Crossed' is derived
+    # from item state, so this is a statement about the gates these items reached - never a
+    # statement that the pipeline's gates were all enforced. An item that never reached a gate
+    # is not evidence about that gate.
+    Write-Host "  Scope: 'crossed' is derived from each item's own state. This says nothing about a" -ForegroundColor DarkGray
+    Write-Host "  gate an item never reached." -ForegroundColor DarkGray
+    if (-not [bool](Get-HarnessSetting "pipeline.anchor_required" $true)) {
+        Write-Host "  pipeline.anchor_required=false: an item created without an anchor crosses NO anchor" -ForegroundColor Yellow
+        Write-Host "  gate, so completeness cannot account for one. That is configuration, not coverage." -ForegroundColor Yellow
+    }
     exit 0
 }
 
@@ -354,7 +594,7 @@ if ($Propose) {
     $item = [ordered]@{
         id = $Id; branch = ""; line = ""; developer = $Developer
         state = "anchor-draft"; anchor = $anchorObj; anchor_file = $anchorDest
-        anchor_confirmed_by = ""; anchor_confirmed_at = 0
+        anchor_confirmed_by = ""; anchor_confirmed_at = 0; gates = (Get-EmptyGateMap)
         test_plan = ""; thread = $Thread; attempt = 1
         line_mergeable = $true
         submitted_sha = ""; tested_at_sha = ""; merged_sha = ""
@@ -373,6 +613,7 @@ if ($Propose) {
 
 if ($ConfirmAnchor) {
     if (-not $Id -or -not $By) { Die "-ConfirmAnchor needs -Id and -By (who is agreeing)" }
+    Assert-HumanPrincipal $By "-ConfirmAnchor"
     $item = Read-Item $Id
     if ($item.state -ne "anchor-draft") {
         Die ("'{0}' is '{1}', not 'anchor-draft' - an anchor is confirmed once, before the work" -f $Id, $item.state)
@@ -385,11 +626,15 @@ if ($ConfirmAnchor) {
         $item.anchor = $anchorObj
         Add-History $item "anchor amended on confirmation" $By
     }
+    $was = $item.state
     $item.state = "anchor-confirmed"
     $item.anchor_confirmed_by = $By
     $item.anchor_confirmed_at = Now
+    Set-ItemGate $item "anchor" "human" $By (Get-GateProfileName -Requested $GateProfile)
     Add-History $item "anchor confirmed" $By
     Write-Item $item
+    [void](Write-GateRecord -Item $Id -Gate "anchor" -Decision "passed" -Kind "human" -Principal $By `
+             -GateProfile (Get-GateProfileName -Requested $GateProfile) -FromState $was -ToState $item.state)
     Write-Host ("Anchor CONFIRMED for '{0}' by {1}. Work may begin." -f $Id, $By) -ForegroundColor Green
     Write-Host ""
     Write-Host (Format-Anchor $item.anchor)
@@ -438,7 +683,20 @@ if ($AmendAnchor) {
 
 # --- submit -------------------------------------------------------------------------
 if ($Submit) {
-    if (-not $Id -or -not $Branch -or -not $Developer) { Die "-Submit needs -Id, -Branch and -Developer" }
+    if (-not $Id -or -not $Developer) { Die "-Submit needs -Id, -Branch and -Developer" }
+    # A NAME THAT IS NOT A NAME IS NOT A MISSING PARAMETER. `" "` is TRUTHY in PowerShell, so
+    # `-not $Branch` waved it through, and the anchor gate below is reached BEFORE the
+    # rev-parse further down: the board trimmed it to nothing, stepped over it, and reported
+    # "checked 1 branch(es); none is on a remote" - a clear board and `decision=passed` in the
+    # ledger for a branch question nobody asked. Reproduced 2026-08-30 with `-Branch ' '`.
+    # The board refuses this now too (Predicate-BranchOnRemote returns indeterminate); this is
+    # the same refusal at the door, so the gate is never handed an input it cannot use.
+    if ([string]::IsNullOrWhiteSpace($Branch)) {
+        Die ("-Branch is empty or whitespace, which is not a branch. It is the name the anchor " +
+             "gate asks the andon board about, and a question asked about nothing comes back " +
+             "clear. Pass the branch this work is on.")
+    }
+    $Branch = $Branch.Trim()
     # -Thread is how the bridge knows which Mattermost conversation to report back into.
     if (-not $TestPlan) {
         Die ("-Submit needs -TestPlan. The plan is written BEFORE the work is queued - it is " +
@@ -453,8 +711,29 @@ if ($Submit) {
     $existing = if (Test-Path (ItemPath $Id)) { Read-Item $Id } else { $null }
     if ($existing) {
         if ($existing.state -eq "anchor-draft") {
-            Die (("'{0}' has an anchor that nobody has confirmed. The operator agrees what this " +
-                  "is for BEFORE it is built: queue.ps1 -ConfirmAnchor -Id {0} -By <operator>") -f $Id) 5
+            # THE ANCHOR GATE. Under `attended` this is where an unconfirmed anchor stops.
+            # Under `dark` the gate self-passes - but only while the andon board is clear,
+            # and the pass is written to the ledger as an AUTO pass under the reserved
+            # principal namespace, so an operator reading the trail afterwards can see at a
+            # glance that no human agreed what this item was for.
+            $gd = Resolve-GateOrDie "anchor"
+            if ($gd.passer -ne "auto") {
+                Die (("'{0}' has an anchor that nobody has confirmed. The operator agrees what this " +
+                      "is for BEFORE it is built: queue.ps1 -ConfirmAnchor -Id {0} -By <operator>") -f $Id) 5
+            }
+            $andon = Invoke-AutoGate $existing "anchor" $gd $Branch
+            if ($andon.status -ne "clear") { Stop-OnAndon $andon "anchor" $Id "anchor-draft" }
+            $autoWho = (Get-AutoPrincipalPrefix) + $gd.profile
+            $existing.state = "anchor-confirmed"
+            $existing.anchor_confirmed_by = $autoWho
+            $existing.anchor_confirmed_at = Now
+            Set-ItemGate $existing "anchor" "auto" $autoWho $gd.profile
+            Add-History $existing "anchor AUTO-PASSED (gate profile '$($gd.profile)') - no human saw it" $autoWho
+            Write-Item $existing
+            [void](Write-GateRecord -Item $Id -Gate "anchor" -Decision "passed" -Kind "auto" -Principal $autoWho `
+                     -GateProfile $gd.profile -FromState "anchor-draft" -ToState "anchor-confirmed" -Andon $andon)
+            Write-Host ("Anchor AUTO-PASSED for '{0}' under gate profile '{1}' - NO HUMAN CONFIRMED IT." -f $Id, $gd.profile) -ForegroundColor Yellow
+            $existing = Read-Item $Id
         }
         if ($existing.state -ne "anchor-confirmed") {
             Die ("queue item '$Id' already exists in state '$($existing.state)' (use a new -Id, or -Show it)")
@@ -528,7 +807,7 @@ if ($Submit) {
         $item = [ordered]@{
             id = $Id; branch = $Branch; line = $line; developer = $Developer
             state = "ready-to-test"; anchor = $null; anchor_file = ""
-            anchor_confirmed_by = ""; anchor_confirmed_at = 0
+            anchor_confirmed_by = ""; anchor_confirmed_at = 0; gates = (Get-EmptyGateMap)
             test_plan = $planDest; thread = $Thread; attempt = 1
             # Which runner profile this item is being worked under. Recorded so the stall
             # detector can name the runner that stalled and resolve the oracle ABOVE it
@@ -709,7 +988,24 @@ if ($Pass -or $Fail) {
         $item.tested_at_sha = $headSha.Trim()
         Add-History $item "tests PASSED (attempt $($item.attempt))" $By
         Write-Host ("'{0}' PASSED at {1} on attempt {2}." -f $Id, $item.tested_at_sha.Substring(0, 8), $item.attempt) -ForegroundColor Green
-        Write-Host "  It is NOT queued for review yet - the operator releases it (-Approve)." -ForegroundColor Yellow
+        $gd = Resolve-GateOrDie "pre_review"
+        if ($gd.passer -eq "auto") {
+            # THE PRE-REVIEW GATE, unattended. The tester's verdict is already written
+            # (state test-passed) BEFORE the gate is tried, so a raise parks the item with
+            # its pass intact rather than losing the test result to the halt.
+            Write-Item $item
+            $andon = Invoke-AutoGate $item "pre_review" $gd
+            if ($andon.status -ne "clear") { Stop-OnAndon $andon "pre_review" $Id "test-passed" }
+            $autoWho = (Get-AutoPrincipalPrefix) + $gd.profile
+            $item.state = "ready-review"
+            Set-ItemGate $item "pre_review" "auto" $autoWho $gd.profile
+            Add-History $item "released for review AUTOMATICALLY (gate profile '$($gd.profile)') - no human saw it" $autoWho
+            [void](Write-GateRecord -Item $Id -Gate "pre_review" -Decision "passed" -Kind "auto" -Principal $autoWho `
+                     -GateProfile $gd.profile -FromState "test-passed" -ToState "ready-review" -Andon $andon)
+            Write-Host ("  AUTO-RELEASED for review under gate profile '{0}' - NO HUMAN SAW IT." -f $gd.profile) -ForegroundColor Yellow
+        } else {
+            Write-Host "  It is NOT queued for review yet - the operator releases it (-Approve)." -ForegroundColor Yellow
+        }
     } else {
         $item.state = "test-failed"
         # Stamp the sha on failure too. Without it a resubmit loses which commit the
@@ -791,14 +1087,19 @@ if ($Approve) {
     # have moved. Once review starts, the next step is a merge - this is the last cheap
     # moment to change course.
     if (-not $Id -or -not $By) { Die "-Approve needs -Id and -By (who is releasing it)" }
+    Assert-HumanPrincipal $By "-Approve"
     $item = Read-Item $Id
     if ($item.state -ne "test-passed") { Die "'$Id' is '$($item.state)' - only a test-passed item can be released for review" }
     if ((Normalize-Id $By) -eq (Normalize-Id $item.developer)) {
         Die "the developer cannot release their own work for review - that is the human gate, and self-service defeats it" 4
     }
+    $was = $item.state
     $item.state = "ready-review"
+    Set-ItemGate $item "pre_review" "human" $By (Get-GateProfileName -Requested $GateProfile)
     Add-History $item "released for review" $By
     Write-Item $item
+    [void](Write-GateRecord -Item $Id -Gate "pre_review" -Decision "passed" -Kind "human" -Principal $By `
+             -GateProfile (Get-GateProfileName -Requested $GateProfile) -FromState $was -ToState $item.state)
     Write-Host ("'{0}' released for REVIEW by {1}." -f $Id, $By) -ForegroundColor Green
     exit 0
 }
@@ -876,4 +1177,4 @@ if ($Reject) {
     exit 0
 }
 
-Die "pass one of -Submit | -Resubmit | -List | -Show | -Claim | -Unclaim | -Pass | -Fail | -Approve | -Merged | -Requeue | -Reject"
+Die "pass one of -Submit | -Resubmit | -List | -Show | -Claim | -Unclaim | -Pass | -Fail | -Approve | -Merged | -Requeue | -Reject | -Audit | -VerifyAudit"

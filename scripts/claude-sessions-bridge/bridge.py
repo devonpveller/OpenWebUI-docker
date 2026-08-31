@@ -683,10 +683,44 @@ QUEUE_NOTES = {
     "test-passed": ("✅ **{id}** — every case passed (attempt {attempt}). It is "
                     "**waiting on you**: reply `release: {id}` to send it to review, or say "
                     "what you want changed first."),
-    "ready-review": "📋 **{id}** — released for review.",
+    # THE PRINCIPAL IS PART OF THE SENTENCE, not a detail. "released for review" was
+    # byte-identical whether a human typed `release:` or a dark run passed the gate with
+    # nobody watching - and a gate transition reported with no principal reads as human
+    # approval, which is the exact failure the gate ledger exists to prevent. {principal}
+    # is filled by gate_principal_note() below and is never empty for a gate-crossing state.
+    "ready-review": "📋 **{id}** — released for review.{principal}",
     "merged": "🎉 **{id}** — merged as `{sha}`. Task closed.",
     "rejected": "🚫 **{id}** — rejected by review: {detail}",
 }
+
+
+# Which pipeline gate a queue state means the item has just crossed. Only states that
+# CROSS a gate belong here: the others are worker/tester transitions with no gate and no
+# principal to name.
+QUEUE_STATE_GATE = {"ready-review": "pre_review"}
+
+
+def gate_principal_note(item: dict, state: str) -> str:
+    """Who or what passed the gate this state transition crossed, as a sentence.
+
+    A gate transition narrated without a principal reads as approval: `ready-review` looked
+    identical whether a person typed `release:` or the `dark` gate profile self-passed it
+    with nobody in the loop, and the audit event {event, from, to} could not answer it
+    either. The queue item already records `gates.<gate> = {kind, by, profile}`; this only
+    refuses to drop it on the floor. An item that records no principal says so rather than
+    staying silent, because silence is what gets read as a human."""
+    gate = QUEUE_STATE_GATE.get(state)
+    if not gate:
+        return ""
+    rec = ((item.get("gates") or {}).get(gate) or {})
+    kind, by, profile = rec.get("kind", ""), rec.get("by", ""), rec.get("profile", "")
+    if kind == "auto":
+        return (f" ⚠️ **No human saw this gate** — auto-passed by `{by or 'auto:?'}`"
+                f" under gate profile `{profile or '?'}`.")
+    if kind == "human" and by:
+        return f" Released by **{by}**."
+    return (" (the queue item names no principal for this gate — do not read it as"
+            " an approval.)")
 
 
 def worktree_id(thread_root: str) -> str:
@@ -1699,11 +1733,18 @@ class Bridge:
             try:
                 post(note.format(id=iid, attempt=item.get("attempt", 1),
                                  sha=str(item.get("merged_sha", ""))[:12],
+                                 principal=gate_principal_note(item, state),
                                  detail=str(last.get("reason") or last.get("evidence") or "")[:400]),
                      thread)
             except Exception as e:  # noqa: BLE001 - reporting must never break the loop
                 log(f"queue report failed for {iid}: {e}")
-            audit({"event": "queue_state", "item": iid, "from": prev, "to": state})
+            gate = QUEUE_STATE_GATE.get(state, "")
+            grec = ((item.get("gates") or {}).get(gate) or {}) if gate else {}
+            # The audit event carries the principal too. A trail that cannot name who
+            # passed a gate is the same defect one layer down from the narration.
+            audit({"event": "queue_state", "item": iid, "from": prev, "to": state,
+                   "gate": gate, "gate_kind": grec.get("kind", ""),
+                   "principal": grec.get("by", "")})
 
     def ensure_worktree(self, thread_root: str) -> tuple[str, str]:
         """Return (path, error) for this thread's worktree, provisioning it on first use.
