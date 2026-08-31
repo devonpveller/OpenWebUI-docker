@@ -1441,3 +1441,63 @@ never verified its fixture INSERT landed, so a write-side boundary rejecting `ex
 — the direction U5 round 4 is briefed to build — would make the door pass by absence.
 **Verify a fixture landed before asserting on its absence: a positive control on the WRITE, not
 only on the read.**
+
+## 2026-08-31 · gitlink guard · STOP MODELLING THE INVARIANT — EXECUTE IT
+The layer move in round 4 was correct and insufficient: the new tree-level proof failed the same
+way the hooks did, twice, both demonstrated with real clones.
+
+**A · "could not enumerate" read as "no gitlinks".** `check-gitlink-reachability.sh:142` runs
+`glr_pins_tree "$COMMIT" > "$PINS" 2>/dev/null`, and the library's `glr_pins_tree` is
+`git ls-tree -r -z "$1" 2>/dev/null | awk …`. Neither git's exit status nor the pipeline status
+is inspected; both stderrs are discarded; an empty result is then reported as
+`OK $REF - no gitlinks in this tree` with RC 0. Reproduced with a treeless `--filter=tree:0`
+clone whose promisor was made unreachable: `EXIT=0`, `{"verdict":"pass","gitlinks":0}`, while
+ground truth from a complete clone is `160000 commit 225e42c… sub` and
+`clone --recurse-submodules` of that branch fails.
+**Every other unknown in that script refuses. The enumeration's own success is the one input it
+never checks — and it is the input everything else is derived from.**
+
+**B · `.gitmodules` path→name resolved by the FIRST matching section; git takes the LAST.**
+`glr_sub_name` does `print k; exit 0`. Ordinary ASCII config, no decoy newline, no pathspec
+magic: a `[submodule "decoy"] path=sub` section that HAS the pin, followed by
+`[submodule "sub"] path=sub` that LACKS it, makes the proof query a remote git will never use.
+The check printed "every pin served by its submodule's remote" at exit 0, the `pre-push` hook
+printed OK, the push LANDED, and `clone --recurse-submodules` died with `upload-pack: not our
+ref`. With the sections swapped the check REFUSES while the clone SUCCEEDS — so the divergence
+is precedence, and it is exploitable in the direction that matters.
+
+### THE DECISION
+Five times this guard has been wrong by re-implementing git's own rules: pathspec
+interpretation, `--get-regexp -z` record framing, and now `.gitmodules` section precedence.
+
+> **A model of another system's behaviour has bugs. That system does not disagree with itself.**
+> Where the property is cheap enough to EXECUTE, execute it: run the operation whose success
+> *is* the invariant, and take its result as the verdict.
+
+The invariant here is literally *"a fresh `git clone --recurse-submodules` of this ref
+succeeds"* — so the proof now performs that clone. No parser to disagree with git, no
+enumeration to fail silently, no precedence rule to get backwards, and the failure message is
+ground truth rather than a prediction of it.
+
+Kept, and demoted a second time: the parser check remains as a **fast pre-filter** for
+`pre-push`, because a push must stay fast and because it yields a precise error naming path,
+sha and remote where a clone failure yields only a fetch error. Both its defects are still to be
+fixed — **a pre-filter that lies is worse than none.**
+The split is stated explicitly: pre-filter where speed matters, clone where minutes are
+acceptable (`dfu-done.ps1` clause 4, a pre-merge gate, CI).
+
+### WHY THIS IS THE INTERESTING RESULT OF THE WHOLE EFFORT
+Every layer we tried failed in the same shape until we stopped predicting and started doing:
+ - **normative** ("the rule says push first") — an agent reached for `--no-verify`, §0 A7;
+ - **local hook** — not invoked by rebase, absent on branches without the file, no `pre-push`;
+ - **tree model** — the parser disagreed with git twice, and a failed read looked like an empty
+   one.
+The progression is not a story about git. It is what happens whenever a check is a *model* of
+the thing it certifies: each model is more faithful than the last, and each is still a model.
+Executing the operation ends the regress because there is nothing left to be faithful *to*.
+
+### CONVERGENCE
+Another NEW class — *re-implementing another system's resolution rules* — so the counter stays
+at 0. Class list now **fourteen**. Notably, three of this effort's fourteen classes were found
+in the last two days by attacking one 200-line shell guard, which is itself evidence for the
+value of adversarial verification over review-by-reading.
