@@ -298,6 +298,42 @@ lower the bar, it moves who holds it.
   been the signal to change the enforcement layer rather than the key — which is
   exactly what A2 did for U5, one layer down.
 
+### C.7b Validation goes stale — the rule §C.1 switched off by accident
+
+**Recorded as an error by the author of §C.1, 2026-08-31.** §C.1 took U-phase work
+out of `queue.ps1`'s gates because the harness cannot govern its own construction.
+That was right about the ANCHOR gate and wrong by omission about a second
+mechanism living in the same place: `queue.ps1` records `tested_at_sha` and
+enforces the merge protocol's **stale-pass rule** — *if the rebase changes what was
+tested, the pass is stale and the item returns to test.* Both gates were disabled
+by one sentence, and only the intended one was noticed.
+
+**What that cost, measured 2026-08-31:** branches carrying validated work sat
+**59–89 commits** behind the work line — `u5pplane` 89, `u4bidir` 87, `u3gym` 86,
+`u5rls` 62, `gitreach` 59 — with real textual conflicts on four of them. A pass
+recorded on `u5pplane` describes a tree that has not existed for most of a day.
+`u5rls` is the dangerous case rather than the safe one: 62 behind with ZERO
+conflicts, because a clean textual merge says nothing about semantic validity.
+
+Binding, for every branch in this effort:
+
+- **Record the sha you validated at.** A verification result that does not name
+  its base is not a result. `queue.ps1`'s `tested_at_sha` field already exists for
+  this — use it, or carry the sha in the branch's findings note. Do not invent a
+  third place.
+- **A branch whose base has moved is UNVALIDATED until re-run.** Rebase or merge
+  the line in FIRST, then re-run the column, then merge. Never merge a pass taken
+  against a base the line has left behind.
+- **A clean `git merge-tree` is not a revalidation.** It proves no textual
+  conflict. Semantic clashes — a predicate the line tightened, a table the line
+  governs, a helper whose contract moved — produce no conflict markers at all.
+- **Never stack a branch on an unmerged parent.** `u5rls` carries 11 of `u5pplane`'s
+  commits, so a refutation against the parent invalidates the child and neither can
+  be landed independently.
+
+This restores what §C.1 removed without restoring the anchor gate: the plan is
+still the confirmed anchor, and a stale pass is still a stale pass.
+
 ### C.8 The success condition — what "the plan is 100% met" means
 
 §C.7 gives a STOP condition ("every phase done, or every remaining one parked").
