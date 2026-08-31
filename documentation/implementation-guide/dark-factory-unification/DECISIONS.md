@@ -1189,3 +1189,81 @@ worktrees, not the branches):
 
 **A stale worktree is unfinished work wearing a finished face** (§C.8). 15 worktrees against 8
 branches means 7 are on merged or detached refs and are pure residue.
+
+## 2026-08-31 · convergence · TWO NEW DEFECT CLASSES — the counter RESETS to 0
+The first genuine reset since the criterion was adopted, and it is the criterion working. Both
+were found by attacking the reachability gate; both are now on the list future siblinghood
+judgements are measured against.
+
+### NEW CLASS · A PATH IS NOT A PATHSPEC
+`git ls-files -s -- "$sub"` — **`--` stops OPTION parsing; it does NOT stop WILDCARD or
+pathspec-magic interpretation.** Demonstrated at the mechanic level:
+```
+git ls-files -s -- 'sub*'            -> 160000 <sha of `sub`>  0  sub
+git ls-files -s -- ':(literal)sub*'  -> the entry actually staged at `sub*`
+```
+Four SILENT ACCEPTS of an unpushed pin, each with the sha verifiably absent from `ls-remote`:
+a path `sub*` glob-matching a published sibling; `:(icase)sub`; a newline path whose remainder
+begins with `:`, which the awk resync reads as a metadata record; and — **built with ordinary
+`git submodule add` on NTFS, no index hackery** — a pair `x[0]` and `x0`, where `x0` sorts first
+and the pathspec `x[0]` glob-matches it, so `NR==1` returns the sibling's published sha.
+
+**WHY IT IS NOT A SIBLING of "a silent pass on unhandled input", which round 2 fixed:** that
+class always ended in an EMPTY sha, so "refuse what cannot be read" caught it. This one ends in
+a **well-formed 40-hex sha belonging to a different, correctly-published gitlink**. Nothing is
+unreadable, so no refusal path fires, and every downstream guard treats the answer as
+trustworthy. The round-2 fix — `--raw -z`, `while IFS= read -r`, quoting, `--` before every
+path, refuse-on-unresolvable, a newline sentinel — shipped in `1ec57d5` and prevents **none of
+the four**. That is the §C.7 test for a new class, met exactly.
+
+GENERAL FORM: **when a string that names a thing is passed to an interface that interprets
+strings as PATTERNS, a guard can be answered about the wrong object.** The answer is
+well-formed, so every validity check downstream passes. Applies far beyond git: globs, LIKE
+patterns, regex-as-identifier, and any lookup that accepts wildcards where an identifier was
+meant.
+
+### NEW CLASS · A GUARD COVERS ONLY SOME OF THE OPERATIONS THAT PERFORM THE GUARDED ACTION
+`commit-msg` is **not invoked by `git rebase` or `git cherry-pick`**, while it IS invoked by
+`git merge --no-ff`. Clean repro with no `--no-verify` anywhere: a reviewer rebases, git reports
+`CONFLICT (submodule)` and prints **its own advice** to merge inside the submodule and
+`git add sub`; following that advice verbatim creates a submodule commit on no remote;
+`git add sub` + `git rebase --continue` → rc=0, commit created, **zero lines of hook output**.
+The resulting pin is genuinely broken: `git fetch origin <sha>` returns
+`upload-pack: not our ref`, which is **verbatim the string the hook's own refusal message
+quotes as the failure it exists to prevent**.
+
+**WHY IT IS BLOCKING:** `MERGE-PROTOCOL.md` mandates that the reviewer REBASE every item before
+merging. The guard is therefore bypassed by the exact operation the protocol requires on every
+single item, and the conflict git itself advises resolving is a submodule conflict whose
+documented resolution creates a local-only submodule commit.
+
+GENERAL FORM: **a guard is scoped to an EVENT, not to an ACTION.** Auditing what it does when it
+runs never reveals what never runs it. The question "which operations can perform this action?"
+is separate from "does the check work?", and no amount of the second answers the first.
+
+### AND THE DRILL STAYED GREEN
+`verify-commit-msg-hook.sh` reported "28 passed, 0 failed" against a hook carrying all four
+silent accepts. Its stated purpose is "so the coverage cannot rot into a check that checks
+nothing"; for this class it is the twelfth instance of exactly that. A drill enumerates the
+attacks its author imagined — which is why the class list, not the drill, is the thing that has
+to grow.
+
+### CONVERGENCE STATE
+`gitreach` counter **RESET to 0** (was 1 of 2). Round 3 is scoped to both classes. The reset is
+the correct outcome and not a penalty: the criterion exists to separate learning from
+whack-a-mole, and this round learned something that changes how every future guard in this repo
+should be written.
+
+**The class list now stands at eleven:** a check green while checking nothing · a guard deciding
+by exception · a label mistaken for enforcement · a derived gate whose alphabet is too narrow ·
+a claim wider than its evidence · a summary rounding up its own detail · a counterfactual
+measuring the wrong thing · a fix landing outside what merges · two readers of one config
+disagreeing · **a path treated as a pathspec** · **a guard covering only some of the operations
+that perform the guarded action**.
+
+### CONSEQUENCE FOR THIS EFFORT'S OWN MERGES
+Every merge I have performed used `git merge --no-ff`, which IS gated, so no unreachable pin
+entered the work line by that route. Agents following MERGE-PROTOCOL's rebase step were exposed
+and remain so until round 3 lands. `work/u5proxy` already built a `reference-transaction` guard
+for the hook-bypass work and is the natural home for this; the two branches now overlap and the
+orchestrator must reconcile them rather than merge both.
