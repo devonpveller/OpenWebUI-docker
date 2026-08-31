@@ -790,10 +790,15 @@ branch's merge-base, so C.7b required no rebase. The OB1 gitlink moved once.
 
 ```
 work line base : 1a6b0b813e241cfb4b74659cbb2c11c8f86616aa  (refactor/ai-stack-cleanup, unmoved)
-ai-stack HEAD  : 0c0c3d551f3956d3934b3e68c8528a43abf2047c  (work/u8h3)
+VALIDATED AT   : 0c0c3d551f3956d3934b3e68c8528a43abf2047c  (work/u8h3)
 OB1 gitlink    : 8ebe19780ce93613689fd8241d787c1a77749454
               -> e9be2cdb0eb340662df0edadb1ff4b90b0493775  (the twelve producers + 195 s7/s8d)
 ```
+
+Every number below is from a run against **`0c0c3d5`**. The commits that follow it on this
+branch touch `documentation/notes/u8h3-findings.md` and nothing else - no script, no migration,
+no compose file - so no run above them is stale. `git diff 0c0c3d5..HEAD --name-only` is the
+check for that claim, and it is one line long.
 
 Both suites were run from this checkout with a **clean working tree at `0c0c3d5`**, one at a
 time - never concurrently, which is the isolation "one suite per checkout" exists to buy (see
