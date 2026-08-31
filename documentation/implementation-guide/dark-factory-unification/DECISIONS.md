@@ -1635,3 +1635,72 @@ check"; two coincidental substrings in an unrelated commit are not that.
 Worth keeping because it is this effort's own standard turned on itself: the audit trail is the
 deliverable's twin, and the clause checking the trail was satisfied by a commit that validated
 nothing.
+
+## 2026-08-31 · REPO-WIDE, OPERATOR DECISION · CI HAS NEVER RUN ON `development`, THE LIVE DEPLOYMENT LINE
+ORCHESTRATOR-VERIFIED, and it predates this effort entirely:
+```
+.github/workflows/ci.yml   on: push: branches: [main, develop, "feature/**", "refactor/**", "update/**"]
+git branch -r              origin/development · origin/main · origin/refactor/ai-stack-cleanup
+                           origin/feature/** · origin/issue/** · origin/agent/**
+grep -rn development .github/workflows/   -> no match in any workflow
+```
+There is exactly ONE workflow, its push trigger names **`develop`**, and no branch of that name
+exists — the branch is **`development`**, which CLAUDE.md designates the **LIVE-HOSTED
+deployment line**. Nothing matches `work/**` either, and MERGE-PROTOCOL.md:135-137 says PRs are
+not used in this repo, so the `pull_request:` half does not compensate.
+
+**Consequence: every push to the live deployment line has run no CI, ever.** The trigger list is
+a GitFlow-shaped default (`develop`, `feature/**`, `update/**`) that was never reconciled with
+this repo's actual branch names. `refactor/**` matches, which is why the current work line does
+get CI and the gap has stayed invisible.
+
+**This is the "a check that cannot fire" class at repository scale**, and it is the same shape as
+the effort's own findings — a guard whose scope was written once and never checked against what
+it was supposed to cover.
+
+NOT FIXED HERE, deliberately. The change is one word, but switching CI on for a line that has
+never had it is a judgement about the deployment branch, not plan work: it may surface a wall of
+pre-existing failures, and the operator may have a reason for the current state. **Recorded as an
+operator decision with the fix stated:** add `development` to `ci.yml`'s push branches (and
+consider `work/**`, since every agent branch uses that prefix per
+`harness.config.json` → `worktree.branch_prefix`).
+COST OF NOT FIXING: any repo-wide check wired into CI — including the gitlink clone proof — is
+licensed on a gate that does not fire for the branches this effort actually pushes.
+
+## 2026-08-31 · gitlink guard · THE HARNESS INHERITS AN ENVIRONMENT, AND THE INHERITED HALF IS THE DANGEROUS ONE
+Round 6 made the origin substitution mandatory, which closed the RELATIVE-url instance and left
+the general case open: **the scratch clone inherits the runner's git configuration wholesale.**
+`pcr_git()` strips `GIT_DIR`, `GIT_WORK_TREE` and `GIT_INDEX_FILE`, and leaves every config
+channel untouched.
+Reproduced with an **absolute** `.gitmodules` url — the same shape as this repo's real OB1 url,
+so round 6's precondition never fires — and one narrow rewrite,
+`[url "…/mirror/rem.git"] insteadOf = …/pub/rem.git`:
+```
+ground truth   git clone --recurse-submodules …/pub/parent.git   -> rc=128 not our ref
+clean config   proof -> rc=1 FAILED     pre-filter -> rc=1 REFUSE      (both correct)
+with rewrite   proof -> "CLONED … SUCCEEDED" rc=0    pre-filter -> "OK" rc=0
+end to end     pre-push OK · git push rc=0 · branch ON the remote · fresh recursive clone rc=128
+```
+**Same tree, same code, two verdicts, decided by a line in the runner's config.**
+
+THE GENERALISATION, which is why this is worth more than the fix: round 5 established that
+executing an invariant beats modelling it, and round 6 that *any step where the harness
+substitutes for the real environment re-introduces the model*. This adds the sharper half —
+**the substitutions a harness INHERITS are more dangerous than the ones it makes, because nobody
+wrote them down.** A harness's authors enumerate what they inject; they rarely enumerate what
+the environment injects on their behalf. Ask of any execution-based check: *what has the
+environment already decided for me, and would I notice if it decided differently?*
+The fix is not only to neutralise (`GIT_CONFIG_NOSYSTEM`, an empty `GIT_CONFIG_GLOBAL`) but to
+**detect and refuse** on anything able to redirect a fetch, and to PRINT what was neutralised —
+so the verdict states the environment it was reached in.
+
+## 2026-08-31 · gitlink guard · the wiring failed again, one layer down
+Round 6 was sent back partly because the proof gated nothing. Round 6's fix added a `clone-proof`
+job to `ci.yml` and a step in MERGE-PROTOCOL — and **the job cannot fire on this repo's path**
+(see the trigger finding above), while the MERGE-PROTOCOL step is prose that
+`verify-merge-protocol.ps1` never executes: `grep -rn prove-clone-recursive` finds exactly one
+executing caller, `ci.yml:127`.
+So round 6's own class — *the proof gated nothing, in the present tense* — reappeared **inside
+the fix for that class**. Recorded because it is the second time in this item that a fix
+reproduced the defect it was closing, one layer down, and because it is the argument for
+demanding a DEMONSTRATION that a gate fired rather than a citation that it exists.
