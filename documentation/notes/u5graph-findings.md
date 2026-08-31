@@ -494,3 +494,59 @@ to a verified claim is not evidence).
    tables today, and failing closed is the right direction for a boundary gate - but a future
    legitimate INSERT-only policy will need this predicate taught the difference, not the gate
    deleted.
+
+## C.7b discipline for round 2, and the arbiter's verdict
+
+**Rebased first, re-run after, sha recorded.** The branch was rebased onto the work line
+`refactor/ai-stack-cleanup` at `8e82447a4c5584cea756c022e341d852924b694c` **before** the
+validating run, not after it.
+
+| what | sha |
+|---|---|
+| work line rebased onto | `8e82447a4c5584cea756c022e341d852924b694c` |
+| `work/u5graph` after rebase, **the sha the suite ran at** | `ee66e82493bae1f7fe190b00e5e22da97de4d5e9` |
+| OB1 commit the gitlink pins | `53f0880748555b2bdb970b7d5365f1d86c9d077c` (pushed to `origin/work/u5graph-plane-rls` BEFORE the bump) |
+| OB1 commit the line pinned before | `b81cd5a1bedc2936461440517e66c1846acd0d30` |
+
+The whole suite was re-run on a **second, genuinely fresh** volume built from the chain
+re-derived at the rebased sha (28 mentions = 28 pairs = 28 staged again), and every RED and
+GREEN figure in the table above reproduced identically. One checkout
+(`.claude/worktrees/wt-u5graph`), one suite.
+
+**A race the ops control caught, worth recording.** On the first attempt at the rebased sha
+every probe returned 0 — including the ops controls. `pg_isready` had answered the *temporary*
+server postgres runs during initdb, so the fixtures never landed. All-zeros reads exactly like
+a perfect GREEN if you only look at the personal column; it is the **ops control at 0** that
+says the measurement is void. The wait now keys on `PostgreSQL init process complete`.
+
+### `dfu-done.ps1 -Only 3` — the arbiter, run at `ee66e82`
+
+**Verdict: clause 3 UNMET, board FAILED.** Reported, not worked around. The four subjects that
+hold it open are:
+
+| subject | verdict | why |
+|---|---|---|
+| `door-openbrain-mcp-door` | **fail** | returns the personal fixture; connects as `postgres` (rolsuper/rolbypassrls = t/t) |
+| `door-cloud-search-thoughts` | **fail** | returns the personal fixture |
+| `door-wiki-compiler-output` | indeterminate | named manual check, no recorded result in `dfu-done-manual.json` |
+| `door-mcp-read-tools` | indeterminate | returned neither fixture nor ops twin — with no positive control it refuses to call itself a pass |
+
+**None of these is caused by round 2, and round 2 does not claim to close them.** The two
+failures are round 1's open item 1 verbatim: RLS does not bind a superuser, and those doors
+connect as `postgres`. Closing them is a `DB_USER` change or a `SET ROLE` at each connection
+chokepoint — a different item.
+
+**The decisive point about this run: clause 3 measures the LIVE database, and the live database
+still runs round 1.** Round 2 was deliberately not applied to production, so clause 3 *cannot*
+reflect it either way. Verified after the run: production still shows
+`audit_events wide policies=1` and `views lacking security_invoker=4` — the two findings this
+round fixes are still open in production, exactly as the runbook says. What clause 3 does
+confirm is that round 2 broke nothing: all nine automated door and predicate probes still pass
+with live positive controls, `postgrest-surface-sweep` passes across 56 tables / 242 text
+columns / 212 jsonb keys, and `fixture-cleaned-up` reports production at **0 personal rows in
+either corpus** — independently re-checked here as `thoughts_personal=0`,
+`memories_personal=0` against 13,001 thoughts and 21 memories.
+
+**Class 4 end state:** synthetic fixtures only, additive migration only, nothing dropped, both
+throwaways and their networks removed (`0` leftover containers, `0` leftover networks), and
+zero personal rows anywhere in production.
