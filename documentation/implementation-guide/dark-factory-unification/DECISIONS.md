@@ -1883,3 +1883,65 @@ design change as a measured gym session — the arena at `d:\Open WebUI\ai-orche
 which U4's quadrants already used successfully — before the next enforcement-layer change,
 rather than retroactively for this one. Retrofitting a trial to a decision already adopted and
 already live would be theatre, and it would prove nothing about the decision.
+
+## 2026-08-31 · clause 8 · THE PLANE DOES NOT YET COMPOUND — an honest failure, with the cost
+§C.8 clause 8 says explicitly *"This clause may FAIL. That is why it is here."* It has, and this
+is the honest report the clause asks for rather than a manufactured pass.
+
+**WHAT IS GENUINELY BUILT AND VERIFIED.** Both verifiers followed the chain in the database and
+confirmed it end to end: memory row → `agent_memory_recall_traces` → `agent_memory_recall_items`
+→ a `memory_used` audit event on the SAME trace → the memory id cited in the findings note. The
+rows were written through the real ops door, not injected. `agent_memories` went 4 → 21, traces
+8 → 65, items 0 → 19, all `exposure='ops'`, zero personal rows. The probe is **not tautological**
+— run against an empty DECISIONS/notes fixture it goes UNMET with the correct distinct sentence;
+against the real record it passes. The silent-empty trap is closed with three distinguishable
+outcomes: INFORMED exit 0, EMPTY exit 4 (*"THE PLANE RETURNED NOTHING… a MEASUREMENT, not a
+clearance"*), UNAVAILABLE exit 5. And it fixed a real defect on the way: four orphan traces
+claim `returned=1` with ZERO item rows, because the REST twin at
+`agent-memory-api/index.ts:389` writes no `returned` key.
+
+**WHY IT STILL FAILS.** Every memory the probe counts as consumed was written by **the same
+agent, in the same session, minutes before it was recalled**:
+`73a38752` written 11:42:18 → recalled 11:43:29 → used 11:43:39 — a gap of **70 seconds**, and
+its recall query text is literally *"probe test of the report-usage loop"*. The 17 seeded rows
+landed in one **4-second batch** from a purpose-built seeder. Meanwhile clause 8's first half —
+*"real efforts write to it as they run"* — is measured only by `SELECT count(*) > 0`, which was
+already green at 4 rows before the item started.
+So the plumbing is real and the demonstration is a **round-trip**, which is exactly what U1's
+column already proved. The clause asks for a recall that **informed a LATER effort**, and an
+effort that seeds and consumes its own memory 70 seconds later is not a later effort.
+
+**THE FIRST REAL SIGNAL, and it is partial.** U5's graph round 2 was made the later effort: it
+had to recall the *"fixed one, left the sibling"* class before writing any SQL and cite what it
+was told. **Both verifiers set `recall_changed_the_work = true`** — the sweep of relkinds
+(matviews, foreign tables, partitions) is attributable to it. That is the first genuine
+cross-attempt signal in this effort.
+But the caveat is the whole point and must not be lost: **the class was named in the send-back
+brief and typed verbatim into the recall query.** The plane CONFIRMED a class already in hand; it
+did not surface one the effort lacked. The round's own note claimed the recall "named the class
+before I wrote a line", which is wider than the evidence, and correcting that is more important
+than the claim it makes — it is the one piece of evidence the clause rests on.
+
+**WHAT IT WOULD COST TO MEET HONESTLY.** A recall that surfaces a class the consuming effort did
+NOT already hold, across a session boundary, with the trace to prove it. Two things block it,
+both measured:
+1. **Corpus size.** Threshold calibration is blocked (bge-m3 lands related items at 0.4–0.6
+   while the inherited 0.7 is OpenAI-tuned) and the corpus is now 21 rows, all written today by
+   one effort. Recall cannot yet distinguish "nothing relevant" from "threshold wrong".
+2. **The seam is advisory.** `queue.ps1 -Resubmit` writes a history line and blocks nothing, so
+   acting on a recall remains NORMATIVE — the governance mode §0 A7 records as FALSIFIED.
+The cost is therefore not a code change: it is **time and independent efforts**. The plane
+compounds when a future effort, briefed without the class, recalls it anyway and is changed by
+it. That cannot be produced inside the run that seeded it, and trying would be theatre.
+
+**UNCLAIMED DEFECT FOUND IN THE NEW CODE, worth keeping:** `recall-sibling-class.ps1:140`
+captures `$before` (the trace count before the recall) and **never reads it** — a vestigial
+positive control, in a tool whose own header preaches positive controls. The tool then recovers
+"its" trace by `WHERE query=<exact text> ORDER BY created_at DESC LIMIT 1`, so a recall that
+wrote no trace, with an older identical-query trace present, reports INFORMED with a stale trace
+id — which flows into probe 3 as evidence. The one control that would have caught it is the one
+left unread.
+
+**STATUS: clause 8 UNMET, reported not dropped.** The probe, the seam and the fixed REST-twin
+defect all stay — they are the machinery the clause needs. What is missing is a later effort,
+and that arrives with time rather than with another round.
