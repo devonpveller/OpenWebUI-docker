@@ -1025,3 +1025,79 @@ AND THE COROLLARY, which is the *deciding by exception* class again: when the re
           "fine". Every instance of that class in this effort has been an unhandled state
           falling through to a pass.
 REVERT:   n/a — method.
+
+## 2026-08-31 · U5 STEP 1 APPLIED TO THE LIVE DATABASE — the PostgREST plane is bound
+CORRECTION OF MY OWN BLOCK (operator, 2026-08-30): I reported U5 blocked because nine
+          containers connect as `postgres`. The block was real; **its scope was wrong.** Two
+          orchestrator-run experiments settle it:
+          - `as postgres: 4` / `SET ROLE service_role: 0` on `household_items` — **RLS binds on
+            `current_user`, not `session_user`.** A superuser CONNECTION is not automatically an
+            unbound CLIENT.
+          - `GET /household_items` → `200 []` while `GET /agent_memories` → `200 {row}`.
+            **PostgREST `SET ROLE`s per request and was already bound**; `USING (true)` was the
+            only cause. It is not one of the nine — and it is the client that was actually
+            serving the corpus.
+APPLIED: `init-agent-memory-rls.sql` from `work/u5rls`, `psql -v ON_ERROR_STOP=1`, exit 0,
+          `COMMIT`. Nine `agent_memory*` tables plus `thoughts` — RLS enabled on `thoughts`
+          (was off entirely) and `FORCE ROW LEVEL SECURITY` on all. `revert-agent-memory-rls.sql`
+          staged beside it in the container. Pre-validated by a verifier who restored the LIVE
+          schema to a clone and applied both the migration and its revert cleanly.
+**THE PROOF, a canary planted inside a transaction and ROLLED BACK so nothing persisted:**
+```
+postgres     sees thoughts canary: 1      agent-plane  sees thoughts canary: 0
+postgres     sees memories canary: 1      agent-plane  sees memories canary: 0
+agent-plane  ops thoughts visible: 12993  agent-plane  ops memories visible: 4
+```
+          After rollback: canary rows 0, personal rows 0, `thoughts` RLS `true/true`.
+          The canary was necessary because with zero personal rows the operator's probe 2 is
+          indistinguishable before and after — the ops rows are *supposed* to remain visible.
+          Unlabelled thoughts remain visible to the agent plane by design; the boundary is on
+          rows explicitly labelled `exposure='personal'`, and the corpus is unbroken.
+WHAT THIS CLOSES: every PostgREST path, including the wiki compiler's `/thoughts` and
+          `/thought_entities?select=thoughts(content)` reads, because the compiler reaches them
+          through PostgREST as `service_role`. That was the fourth-home finding.
+WHAT REMAINS — STEP 2, and it is NOT containment: nine deno clients connect as `postgres` and
+          never `SET ROLE`, so they are unbound. Measured after the migration:
+          `as postgres, no SET ROLE, sees all thoughts: 12993`. `openbrain-mcp` is among them —
+          the agent plane's own door. Their remaining protection is the APPLICATION guard built
+          in the earlier rounds, which §0 A7 already records as the falsified kind.
+          Step 2 is `SET LOCAL ROLE` inside a transaction at connection/transaction setup — one
+          line each, no new credentials — and it closes the ACCIDENT.
+          Step 3, dedicated non-superuser credentials, closes the ATTACK: a client that can
+          `RESET ROLE` is only NORMATIVELY bound, which is the verdict §0 A7 already reached.
+REVERT: `docker exec openbrain-db psql -f /tmp/rls-revert.sql` (staged), or the copy at
+          `OB1/docker/revert-agent-memory-rls.sql`.
+
+## 2026-08-31 · U5 · the RLS round found a SECURITY DEFINER trigger writing across the boundary
+FINDING (verifier, reproduced on a throwaway DB from the full derived init chain): writing a
+          personal thought the way the design intends, then reading as the agent plane through a
+          production-configured PostgREST:
+          `GET /thoughts?content=like.*PERSONALWRITE*` → `[]` (correctly bound), but
+          `GET /entity_extraction_queue` → `thought_id`, `queued_at`, and a
+          `source_fingerprint` that is the **SHA-256 of the hidden content, matched exactly**.
+          Mechanism: `trg_queue_entity_extraction` AFTER INSERT OR UPDATE ON `thoughts` calls
+          `queue_entity_extraction()`, declared **SECURITY DEFINER**, writing into a table whose
+          only policy is `USING (true) WITH CHECK (true)`. The migration governs ten tables and
+          never mentions it.
+ORCHESTRATOR-CONFIRMED on the live DB: four `SECURITY DEFINER` functions exist
+          (`queue_entity_extraction`, `queue_source_extraction`, `thought_edges_upsert`,
+          `touch_entities_for_deleted_thought`), and `entity_extraction_queue`, `entities`,
+          `thought_entities`, `thought_edges` and `consolidation_log` are all
+          `relrowsecurity=t, relforcerowsecurity=f` — enabled but not forced, and ungoverned by
+          this migration.
+CLASSIFICATION (§C.7): **SIBLING** of *a derived gate whose alphabet is too narrow* — the
+          alphabet here is "tables governed", and it was hand-listed as ten. A migration that
+          DERIVED its table set from "every table holding or referencing memory or thought
+          content" would have caught it.
+          BUT FLAGGED AS A CANDIDATE NEW CLASS: **derived data escaping a row-level boundary.**
+          What leaked was not content but a fingerprint OF content — and a hash is a disclosure.
+          Governing every table contains this instance; it does not contain the general case of
+          a `SECURITY DEFINER` routine computing a derivative of protected rows into a place the
+          reader may see. If a future round produces a leak that survives complete table
+          governance, that is the new class and the counter resets.
+ALSO OPEN, from the same round: `upsert_thought` called as `service_role` with personal content
+          takes the ELSE branch and materialises it as an unlabelled, ops-visible corpus row;
+          Axis 1 (tenancy) is PROVISIONED BUT INERT — nothing issues `SET ROLE ob_plane_personal`
+          or writes `user_id`, which the findings note discloses and the report did not; the
+          drill is 133/1, a FAILING gate presented in an evidence table; and `work/u5rls` is
+          stacked on the unmerged `work/u5pplane` (11 of 14 commits are u5pplane's).

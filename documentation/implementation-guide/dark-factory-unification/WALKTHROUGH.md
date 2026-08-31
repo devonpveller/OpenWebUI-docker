@@ -24,7 +24,7 @@ is marked deliberately rather than rounded up.
 | **U2** | DONE (merge-record) | Intent unification: shared anchor schema, git-issue door, depth-1 ScopeNodes. |
 | **U3** | DISCHARGED (closing with U4) | The arena run landed: seeds caught, check banked `source: tester-finding`, arena clean before/after. |
 | **U4** | COLUMN MET, round 7 (convergence 1 of 2) | 4/4 quadrants ran **in the arena**, stall real. Row amended (§2.1 A1). Closes if round 7 finds no new defect class. |
-| **U5** | METHOD REPLACED (§2.1 A2), **BLOCKED** | Database predicate is the right design, but **nine containers connect as the `postgres` SUPERUSER**, and RLS does not bind a superuser even with FORCE. Migration necessary, not sufficient. **Constraint stands.** |
+| **U5** | **STEP 1 APPLIED TO LIVE** | RLS + FORCE on `thoughts` and nine `agent_memory*` tables. Canary proof: agent plane sees **0** personal, **12993** ops. Every PostgREST path bound — including the wiki compiler. Steps 2–3 (direct deno clients) open. |
 | **U6** | clause 4 DONE, clauses 1–3 round 7 (convergence 1 of 2) | Recall-informed briefs merged and live-proven; andon + gate profiles work, their honesty layer is still being closed. |
 | **U7** | NOT STARTED | Standing, per §B. Depends on U6. |
 
