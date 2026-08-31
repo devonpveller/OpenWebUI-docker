@@ -389,8 +389,14 @@ docker exec openbrain-db psql -U postgres -d openbrain -tAc `
   UNION ALL SELECT 'edges', count(*) FROM edges
   UNION ALL SELECT 'entity_extraction_queue', count(*) FROM entity_extraction_queue
   UNION ALL SELECT 'source_entities', count(*) FROM source_entities
-  UNION ALL SELECT 'idea_revisions', count(*) FROM idea_revisions
-  UNION ALL SELECT 'wiki_pages', count(*) FROM wiki_pages;"
+  UNION ALL SELECT 'idea_revisions', count(*) FROM idea_revisions;"
+
+# ...and separately, because it DRIFTS. The wiki compiler runs on a schedule, so wiki_pages
+# moves on its own between two runs of this block. It is worth eyeballing for order of
+# magnitude; it is NOT an identity check, and leaving it in the column above made a moving
+# member weaken the eight that do not move.
+docker exec openbrain-db psql -U postgres -d openbrain -tAc `
+ "SET ROLE service_role; SELECT 'wiki_pages (DRIFTS)', count(*) FROM wiki_pages;"
 
 # 3. THE ONE THAT MATTERS -- the leak, attacked, with a positive control. Rolled back.
 docker exec openbrain-db psql -U postgres -d openbrain -tAc `
@@ -415,8 +421,12 @@ docker exec openbrain-db psql -U postgres -d openbrain -tAc `
 which are DELIBERATELY wide -- see section 3 of the migration, and the `COMMENT ON POLICY`
 that says so in the database. (2) identical before and after: thoughts `13001`, entities
 `69785`, thought_entities `54063`, edges `92865`, entity_extraction_queue `13001`,
-source_entities `81273`, idea_revisions `37`, wiki_pages `47987`. (3) `0` and `1` -- the
-fingerprint is refused while the control is returned.
+source_entities `81273`, idea_revisions `37`. `wiki_pages` was in this column when round 1
+was written, recorded at `47987`; it measured `47981` on 2026-08-31 with nothing having
+touched it, because the compiler writes to it continuously. It has been moved out of the
+identity check and is now read separately -- a member that moves on its own weakens every
+member that does not. (3) `0` and `1` -- the fingerprint is refused while the control is
+returned.
 
 Check 3 is the necessary one. Checks 1 and 2 look identical whether the policies bind or not;
 only the attack-with-a-control can tell a bound door from a broken query.
@@ -584,6 +594,234 @@ refused outright, because `security_invoker` cannot fix one.
 arm, and to clear `security_invoker` on the four views that lacked it. **It re-opens all three
 disclosures above in addition to the round 1 fingerprint leak.** The round trip was executed
 on the throwaway: GREEN -> revert -> RED returns -> re-apply -> GREEN.
+
+```powershell
+docker cp OB1\docker\revert-graph-plane-rls.sql openbrain-db:/tmp/
+docker exec openbrain-db psql -U postgres -d openbrain -v ON_ERROR_STOP=1 -f /tmp/revert-graph-plane-rls.sql
+```
+
+---
+
+## `init-graph-plane-rls.sql` — ROUND 3: absence must DENY, and the sweep moves to mechanisms
+
+**Still the same file at the same 200- mount point.** A live volume carrying round 1 or round 2
+must be re-applied to pick up the fixes below. The file is idempotent (three consecutive applies
+COMMIT) and re-applying it is the supported path.
+
+**This round CHANGES PRIVILEGES as well as policies.** §6a withdraws `INSERT`, `UPDATE` and
+`DELETE` from `service_role` on the agent-memory corpus and on `idea_revisions`. `SELECT` is
+untouched everywhere. Read the "what could break" note before applying.
+
+### Why
+
+Round 2 was refuted three times, and the three were one defect: **a policy arm that PERMITS
+when the row's plane cannot be established.**
+
+1. **`idea_revisions` was an unauthenticated existence oracle.** `WITH CHECK` was
+   `(thought_id IS NULL OR ob_thought_visible(thought_id))`. Omit the column, the NULL arm
+   passes, RLS never refuses — and `idea_revisions_pkey (idea_id, revision)`, which no policy
+   binds, answers instead. `ideas` is ungoverned by design, so `GET /ideas` hands over the ids.
+   Measured as `service_role`, with an ops control on **both** arms: revision 1 of a personal
+   idea `23505`, revision 99 `success`; ops idea identical. Both halves of both policies now
+   read `thought_id IS NOT NULL AND ob_thought_visible(thought_id)`.
+2. **`agent_memory_audit_events` was the same shape, armed by `ON DELETE SET NULL`.** Round 2's
+   parent-visibility policy held only while the parent lived: delete the memory and the audit
+   row orphans to `(NULL, NULL)` and becomes readable, carrying its `payload` free text.
+   Round 2's own evidence for that arm was wrong — **21** of the live rows have a NULL
+   `memory_id`, not 12, and every one is an orphan of a `memory_written` / `memory_used` /
+   `memory_confirmed` event, which are events that name a memory by definition. The table is
+   now **CLOSED** to the `service_role` door, read and write. Nothing deployed reads it there:
+   `authenticated` holds no grant on it, the only PostgREST reader in the repo
+   (`integrations/agent-memory-api`) is in no compose file, and both readers of the
+   `access_refused` drill evidence (`smoke-agent-memory.ps1`, `dfu-done.ps1`) use
+   `docker exec … psql` as `postgres`.
+3. **The dependency walk was one edge deep.** §6b joined `pg_rewrite` to `pg_depend` once, so
+   it saw a matview sitting directly on a table and nothing else. With one ordinary view in
+   between (`matview -> ideas_owed_research -> idea_revisions`) the migration COMMITted while
+   the matview returned the hidden row. The walk is now recursive.
+
+**And a fourth, found by the new assertion rather than by reading the schema:**
+`agent_memory_recall_traces` carried `WITH CHECK (true)` from 180 — an arm that permits
+unconditionally, absence included, on a table holding recall query text. It is narrowed to the
+`USING` predicate.
+
+### What actually changed, in one list
+
+| § | change |
+|---|---|
+| 2 | `idea_revisions`: both policies deny when `thought_id` is NULL |
+| 2b | `agent_memory_audit_events`: `USING (false) WITH CHECK (false)`, with a `COMMENT ON POLICY` saying why |
+| 2c | `agent_memory_recall_traces`: `WITH CHECK` narrowed from `true` to the ops-plane predicate |
+| 6a | `INSERT/UPDATE/DELETE` withdrawn from `service_role` on the **derived** agent-memory corpus (`agent_memories` + its FK children + their governed parents) and on `idea_revisions` |
+| 6a2 | two `ORACLE-DISPOSITION` comments on `thoughts_pkey` and `thought_edges_pkey` — the two surrogate-key oracles this file does **not** close, with the trade written down |
+| 6b | the matview guard walks `pg_depend` transitively |
+| 7 | the post-condition asserts PROPERTIES over a DERIVED population: (h) no policy arm permits an all-NULL row, (i) no unique constraint is an existence oracle, (j) no FK into a governed parent is unguarded by `WITH CHECK`, (k) the `SECURITY DEFINER` set is exactly the classified one, (l) nothing reaches a FORCE-RLS table around the boundary |
+
+### What could break, and why it should not
+
+The write withdrawal is the only behaviour change an operator needs to think about. Measured
+before it was written:
+
+* the agent-memory corpus is written by `openbrain-mcp`, which runs `DB_USER=postgres` — a
+  superuser, which no policy and no grant here binds;
+* `idea_revisions` is written by `openbrain-idea-refinery`, whose container sets **no**
+  `DB_USER`, so its code default `postgres` applies;
+* the tables that genuinely need a `service_role` write — `thought_entities`,
+  `entity_extraction_queue`, `thought_edges`, `entities` — keep every privilege they had, and
+  the entity-worker path plus the `thought_edges_upsert` rpc were exercised end to end as
+  `service_role` after the change.
+
+§6a also carries a **gate on the gate**: if the corpus derivation ever reaches a relation whose
+write path this file deliberately preserves, it RAISES instead of revoking. That check exists
+because during testing a probe added a FK from `thought_entities` to `agent_memories`, and the
+first version of the derivation silently stripped writes from `thought_entities` **and**
+`thoughts` — the ingestion path.
+
+### Preconditions
+
+180, 190 and this file at 200- already applied (round 1 or round 2 state). §0 refuses otherwise.
+
+### Apply
+
+```powershell
+docker cp OB1\docker\init-graph-plane-rls.sql openbrain-db:/tmp/
+docker exec openbrain-db psql -U postgres -d openbrain -v ON_ERROR_STOP=1 -f /tmp/init-graph-plane-rls.sql
+```
+
+Expect, in order:
+
+```
+NOTICE:  init-graph-plane-rls: write door closed on 9 relation(s): agent_memories, ... , idea_revisions
+NOTICE:  init-graph-plane-rls: mechanism sweeps run over 13 derived relation(s), floor of 13 satisfied
+NOTICE:  init-graph-plane-rls: post-conditions hold on 9 table(s), and the four mechanism sweeps
+         (absence, uniqueness, foreign keys, reachability) are clean
+COMMIT
+```
+
+A `write door closed on` line naming anything outside the agent-memory corpus and
+`idea_revisions` is a **stop**: re-read §6a before continuing.
+
+### Verify **by query**, never by a clean exit code
+
+Write each block to a file and run it with `-f`, so no shell quoting sits between the SQL and
+the database.
+
+```sql
+-- 1. THE PRIVILEGES. Expect exactly `SELECT` for service_role on all nine, and the tier A
+--    graph tables still carrying their writes.
+SELECT table_name, grantee, string_agg(privilege_type, ',' ORDER BY privilege_type) AS privs
+  FROM information_schema.role_table_grants
+ WHERE table_schema = 'public' AND grantee IN ('service_role','authenticated')
+   AND table_name IN ('agent_memories','agent_memory_audit_events','agent_memory_recall_traces',
+                      'agent_memory_recall_items','agent_memory_relations',
+                      'agent_memory_review_actions','agent_memory_source_refs',
+                      'agent_memory_artifacts','idea_revisions',
+                      'thoughts','thought_entities','entity_extraction_queue','thought_edges')
+ GROUP BY 1,2 ORDER BY 1,2;
+
+-- 2. THE POLICIES. Expect `arms that permit on absence: NONE` AND a non-zero policy count -
+--    a count of 0 means the population query matched nothing and the result is void. This is
+--    section 7(h) run by hand.
+DO $$
+DECLARE r RECORD; permits BOOLEAN; bad TEXT[] := ARRAY[]::TEXT[];
+BEGIN
+  FOR r IN SELECT p.tablename, p.policyname, p.qual, p.with_check
+             FROM pg_policies p
+            WHERE p.schemaname = 'public' AND p.permissive = 'PERMISSIVE'
+              AND p.tablename IN (SELECT c.relname FROM pg_class c
+                                   WHERE c.relnamespace = 'public'::regnamespace
+                                     AND c.relkind = 'r'
+                                     AND c.relrowsecurity AND c.relforcerowsecurity
+                                     AND c.relname NOT IN ('entities','edges','source_entities',
+                                                           'consolidation_log'))
+  LOOP
+    IF r.qual IS NOT NULL THEN
+      EXECUTE format('SELECT COALESCE((%s), false) FROM (SELECT (NULL::public.%I).*) AS %I',
+                     r.qual, r.tablename, r.tablename) INTO permits;
+      IF permits THEN bad := bad || (r.tablename||'.'||r.policyname||' USING'); END IF;
+    END IF;
+    IF r.with_check IS NOT NULL THEN
+      EXECUTE format('SELECT COALESCE((%s), false) FROM (SELECT (NULL::public.%I).*) AS %I',
+                     r.with_check, r.tablename, r.tablename) INTO permits;
+      IF permits THEN bad := bad || (r.tablename||'.'||r.policyname||' WITH CHECK'); END IF;
+    END IF;
+  END LOOP;
+  -- array_to_string of an EMPTY array is the empty string, not NULL, so a COALESCE here
+  -- would print a blank line for a clean run and for a query that matched nothing alike.
+  RAISE NOTICE 'policies checked: %, arms that permit on absence: %',
+               (SELECT count(*) FROM pg_policies p
+                 WHERE p.schemaname = 'public' AND p.permissive = 'PERMISSIVE'
+                   AND p.tablename IN (SELECT c.relname FROM pg_class c
+                                        WHERE c.relnamespace = 'public'::regnamespace
+                                          AND c.relkind = 'r'
+                                          AND c.relrowsecurity AND c.relforcerowsecurity
+                                          AND c.relname NOT IN ('entities','edges',
+                                                'source_entities','consolidation_log'))),
+               CASE WHEN array_length(bad, 1) IS NULL THEN 'NONE'
+                    ELSE array_to_string(bad, ', ') END;
+END $$;
+
+-- 3. THE OPS PATH IS UNBROKEN. Take these BEFORE and compare AFTER; they must be identical.
+--    wiki_pages is DELIBERATELY NOT HERE: the wiki compiler runs on a schedule and its row
+--    count moves on its own, so it cannot serve as an identity check.
+SELECT 'thoughts' AS t, count(*) FROM thoughts
+UNION ALL SELECT 'entities', count(*) FROM entities
+UNION ALL SELECT 'thought_entities', count(*) FROM thought_entities
+UNION ALL SELECT 'edges', count(*) FROM edges
+UNION ALL SELECT 'entity_extraction_queue', count(*) FROM entity_extraction_queue
+UNION ALL SELECT 'source_entities', count(*) FROM source_entities
+UNION ALL SELECT 'idea_revisions', count(*) FROM idea_revisions
+UNION ALL SELECT 'agent_memories', count(*) FROM agent_memories
+UNION ALL SELECT 'agent_memory_audit_events', count(*) FROM agent_memory_audit_events;
+```
+
+```sql
+-- 4. THE ONE THAT MATTERS — the oracle, attacked, with a live positive control, inside a
+--    transaction that is ROLLED BACK so nothing persists. All four inserts must return the
+--    SAME SQLSTATE. A 23505 on any line means the oracle is open again.
+BEGIN;
+CREATE OR REPLACE FUNCTION pg_temp.try(p_sql TEXT) RETURNS TEXT LANGUAGE plpgsql AS $$
+BEGIN EXECUTE p_sql; RETURN 'OK'; EXCEPTION WHEN OTHERS THEN RETURN SQLSTATE; END $$;
+SET LOCAL ROLE service_role;
+SELECT 'existing revision' AS arm,
+       pg_temp.try(format($f$INSERT INTO public.idea_revisions (idea_id, revision, summary)
+                             VALUES (%L, %s, 'probe')$f$,
+                          (SELECT idea_id FROM public.idea_revisions LIMIT 1),
+                          (SELECT revision FROM public.idea_revisions LIMIT 1))) AS sqlstate
+UNION ALL
+SELECT 'absent revision',
+       pg_temp.try(format($f$INSERT INTO public.idea_revisions (idea_id, revision, summary)
+                             VALUES (%L, 99999, 'probe')$f$,
+                          (SELECT idea_id FROM public.idea_revisions LIMIT 1)));
+SELECT 'audit rows visible to the door' AS arm, count(*) FROM public.agent_memory_audit_events;
+RESET ROLE;
+SELECT 'audit rows visible to postgres (CONTROL)' AS arm, count(*)
+  FROM public.agent_memory_audit_events;
+ROLLBACK;
+```
+
+Expect: both `idea_revisions` arms the same SQLSTATE (`42501`); `audit rows visible to the
+door` = **0**; `audit rows visible to postgres (CONTROL)` = the real row count (72 at the time
+of writing). A control of 0 means the probe measured nothing and the result is void.
+
+### Recorded result
+
+**Not yet applied to the live database.** Round 3 was validated on a throwaway built from the
+compose-derived 28-file chain, with production's grants replicated onto it after they were
+measured to differ (a fresh volume gives `service_role` only `SELECT` on `thoughts` and
+`thought_entities`; production has the full set — a live-vs-fresh drift recorded in
+`documentation/notes/u5graph-findings.md`). Production still runs round 1 and therefore still
+carries every finding this round and round 2 fix.
+
+### Rollback
+
+`OB1\docker\revert-graph-plane-rls.sql` — extended in round 3 to re-grant the withdrawn write
+privileges (to `service_role` only; `authenticated` never held them), restore the wide
+`agent_memory_audit_events` policy, restore `agent_memory_recall_traces`' open `WITH CHECK`,
+and clear the two `ORACLE-DISPOSITION` comments. **It re-opens the `idea_revisions` oracle and
+the audit-orphan leak in addition to everything the earlier rounds' revert re-opens.** The
+round trip was executed on the throwaway with production-like grants: GREEN -> revert -> RED
+returns on every probe -> re-apply -> GREEN.
 
 ```powershell
 docker cp OB1\docker\revert-graph-plane-rls.sql openbrain-db:/tmp/
