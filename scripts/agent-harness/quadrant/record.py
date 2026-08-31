@@ -163,9 +163,24 @@ def _venue_problems(rv: Any, pin: Any) -> List[str]:
     THE ORDER, most authoritative first:
 
       * IDENTITY, where both sides carry one. The repository's root commit (see
-        `venue.identity_of`) is content-addressed - it cannot be renamed into agreement.
+        `venue.identity_of`) is content-addressed, so it cannot be RENAMED into agreement.
         Identity deciding also means a checkout that was MOVED or re-cloned still matches,
         which is correct: it is the same repository, and the path was never the point.
+
+        LIMIT OF THIS CHECK, and it is the package's own failure class one turn further out
+        (orchestrator, 2026-08-30, at merge): the identity compared here is the one the
+        RECORD REPORTS - `rec_id` is read from `rv["identity"]`, not re-derived from the
+        repository on disk. Content-addressing makes it impossible to rename a venue into
+        agreement; it does not make it impossible to EDIT a record into agreement, because
+        the same hand that edits `repo` can edit `identity`. And on this branch a matching
+        identity RETURNS EARLY, so `repo` is not compared at all - which is what makes a
+        moved checkout match, and equally what makes an edited one match.
+        A verifier reported this path as holding and another reported it as admitting a
+        repo-repointed record; both were right, on records that did and did not carry an
+        identity. Closing it means re-deriving `identity_of(rv["repo"], rv["ref"])` at
+        admission wherever that repo is present, and refusing when it is not derivable.
+        Recorded as known-open at U4's closure rather than fixed, because it is a sibling of
+        the class this very function replaced and the phase reached its convergence bound.
       * A pin that carries an identity and a record that does not is a REFUSAL, not a
         downgrade. Otherwise stripping one field from a forged record buys the weaker check.
       * LABELS, only when neither side has an identity - a results set written before this
