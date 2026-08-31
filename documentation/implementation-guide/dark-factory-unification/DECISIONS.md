@@ -1101,3 +1101,43 @@ ALSO OPEN, from the same round: `upsert_thought` called as `service_role` with p
           or writes `user_id`, which the findings note discloses and the report did not; the
           drill is 133/1, a FAILING gate presented in an evidence table; and `work/u5rls` is
           stacked on the unmerged `work/u5pplane` (11 of 14 commits are u5pplane's).
+
+## 2026-08-31 · U6 CLOSES · clauses 1-3 merged at 8695deb, on §C.7's convergence bound
+EVIDENCE (verifiers who did not build it, each reproducing in their own fixtures): all five
+          andon conditions fire on real instances and stay quiet on clean ones; the halt works
+          end to end at the real gate (exit 6, item parked, condition named in a
+          `decision=refused` ledger record); the verdict is proven by an EXHAUSTIVE CENSUS, so
+          disabled, thinned, downgraded and **unenumerated** outcomes all refuse - an action
+          word nobody wrote a branch for is refused *without a branch being added for it*;
+          25 hostile branch names all exit 6 (NBSP, ZWSP, NUL, CRLF, `..`, `refs/heads/…`, a
+          `;echo pwn` injection, a 300-char name); a clean board still auto-passes signed
+          `auto:dark` with `-VerifyAudit COMPLETE`; drill 213 checks / 0 failed.
+WHY IT CLOSED RATHER THAN RAN AN EIGHTH ROUND: rounds 6 and 7 produced only SIBLINGS - a guard
+          deciding by exception, a check green while checking nothing, an alphabet too narrow,
+          a claim wider than its evidence. Two consecutive rounds, no new class.
+KNOWN-OPEN, recorded not buried: the doc-enumeration check reads five list shapes and misses
+          three (a bulleted term followed by a period; by a comma; a table row whose board word
+          is not the first cell), while its DISCLOSED LIMITS block claims to state the shapes it
+          reads "in full" - the false-universal shape one layer up. **And the repository's own
+          ways-off table puts board states in column 3, the exact shape the check cannot read.**
+          Also: `gate-audit.ps1:120` is a third layer that still drops an unusable branch name
+          silently; and `looked_at` records the CONFIG's declared branches rather than the
+          effective ones, so a narrow-question pass is byte-identical in the ledger to a
+          broad-question pass - the behaviour is right and a reader cannot audit which question
+          was asked.
+MERGE NOTE: four files conflicted with the U4 merge. All additive on both sides, but naive
+          concatenation BROKE both PowerShell files - each side ended mid-function because the
+          closing brace after the conflict was shared trailing context. Caught by parse-checking,
+          not by reading the diff, and resolved by inserting the brace that closes the U4 side.
+          Verified after: 287 pytest passed (union of both suites), drill 213/0.
+
+## 2026-08-31 · correction · MY "STALE TRACKING REFS" STORY OVERSTATED WHAT I SAW
+I reported that `git branch -r --contains <sha>` returned nothing for a commit `ls-remote`
+proved was on the remote, and generalised it as stale remote-tracking refs. A verifier re-ran
+it against the currently pinned OB1 sha and got THREE branches. The accurate, narrower
+statement: at that moment the remote-tracking ref for `work/u5-rls-boundary` **did not exist in
+that clone at all**, because it had been pushed from a worktree whose refs the clone had never
+fetched. Still a real failure mode for a reachability gate, and it still argues for querying the
+remote rather than reading local refs - but "stale" claimed more than the observation supported.
+Corrected in the gate's brief rather than left to propagate; a builder had already carried my
+wording into a file header.
