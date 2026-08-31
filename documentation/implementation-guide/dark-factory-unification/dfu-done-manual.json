@@ -1,0 +1,27 @@
+{
+  "_comment": [
+    "RECORDED RESULTS FOR THE NAMED MANUAL CHECKS in scripts/checks/dfu-done.ps1.",
+    "",
+    "A clause that cannot be machine-evaluated is printed by that script as a NAMED manual",
+    "check and lands in the refusing bucket 'manual_pending' until a result appears HERE",
+    "under that exact name. There is no path from 'unrecorded' to 'fine'.",
+    "",
+    "A record is only a result when it carries ALL FOUR fields. A record missing any of",
+    "them is a note somebody left, not a check somebody ran, and dfu-done.ps1 ignores it:",
+    "  verdict   'pass' or 'fail' - what the check actually returned",
+    "  by        WHO ran it. Per the merge protocol this must not be the person who built",
+    "            the thing being checked.",
+    "  date      when, ISO 8601",
+    "  evidence  what they saw - a command and its output, a file:line, a permalink.",
+    "            'looked fine' is not evidence.",
+    "",
+    "THIS FILE IS DELIBERATELY EMPTY OF RESULTS. Adding an entry here that nobody ran is",
+    "the same defect as amending a plan column to get a green, one file over.",
+    "",
+    "Shape:",
+    "  \"u7-cycle-judged-against-pinned-anchor\": {",
+    "    \"verdict\": \"pass\", \"by\": \"<who>\", \"date\": \"2026-09-01\",",
+    "    \"evidence\": \"<what they saw>\"",
+    "  }"
+  ]
+}

@@ -1,0 +1,33 @@
+{
+  "_comment": [
+    "DISPOSITIONS FOR REQUIREMENTS DROPPED FROM A PHASE'S 'Validated by' COLUMN.",
+    "",
+    "PLAN.md C.8 clause 2 judges each phase's CURRENT column against its ORIGINAL one -",
+    "never against its immediate predecessor, because pairwise comparison is exactly how a",
+    "column erodes while every individual step stays defensible. Any requirement present in",
+    "the ORIGINAL and absent from the CURRENT must be dispositioned here. NEITHER = FAIL.",
+    "",
+    "Key format:  \"<PHASE>::<the requirement, normalised>\"",
+    "The normalised form is what dfu-done.ps1 prints in the failing probe's note: lower",
+    "case, markdown emphasis and backticks stripped, whitespace collapsed, split on ';'.",
+    "",
+    "TWO dispositions are accepted, and nothing else:",
+    "",
+    "  { \"disposition\": \"incoherent\", \"evidence\": \"<what showed it was impossible as",
+    "    written>\" }",
+    "      The requirement could not be met AS ORIGINALLY WORDED. The evidence field is",
+    "      mandatory and must be checkable - the measurement or the file:line that showed it.",
+    "",
+    "  { \"disposition\": \"follow-on\", \"owner\": \"<who>\", \"findings_sink\": \"<path>\" }",
+    "      The requirement still stands and is carried forward as a named item. Both an",
+    "      owner and a findings sink are mandatory: a follow-on with neither is a deletion",
+    "      wearing a promise.",
+    "",
+    "ADDITIONS NEVER NEED A DISPOSITION - a chain that ADDED requirements is the chain",
+    "working as intended, and clause 2 does not fail on them.",
+    "",
+    "EMPTY IS THE HONEST DEFAULT. An entry here removes a requirement from the plan's",
+    "reckoning, so it is written by the operator or a reviewer, not by the agent whose work",
+    "the requirement was inconvenient for."
+  ]
+}
