@@ -162,10 +162,22 @@
 #           what production runs TODAY (H1 measured 22 of 22 live connections). Every leak
 #           the red phase reports is a leak production has, not a hypothetical weakening.
 #
-# The red phase also STATES which greens do NOT rest on the database: the recall filter, the
-# inspect tool and the review door still carry their own plane clause in SQL, so they hold
-# for a superuser too. That is real defence in depth and it is printed rather than assumed -
-# a red that quietly fails to reproduce a leak is otherwise indistinguishable from a guard.
+# THAT IS NOT ENOUGH ON ITS OWN, and this file shipped the proof. Two of the greens (ATTACK 1's
+# recall filter, ATTACK 3's by-id reads) ALSO carry a server-side plane clause, so a red that
+# only changes DB_USER cannot reproduce their leak - and the version that discovered this
+# printed a PASS from the else branch saying the attack was "guarded in the APPLICATION as
+# well as in the database". Both branches passed; those reds could not fail. A third, ATTACK
+# 8's, could not fail for a different reason: it called agent_memory_review with `reviewer`
+# where the schema requires `actor: { label }`, so zod rejected it and it never reached the
+# review path - which has NO plane predicate at all, making the "guarded in the application"
+# claim not merely unfalsifiable but false.
+#
+# So the red phase now removes BOTH layers where both exist: it builds a SECOND image from the
+# same exported tree with the server-side plane clauses PATCHED OUT (anchored, match counts
+# asserted by Set-RedAnchor) and runs each attack twice against it -
+#   RED-A  patched + postgres  -> the leak MUST reproduce, or the green measures something else
+#   RED-B  patched + $APPUSER  -> it must NOT, and THAT is the database measured on its own
+# Each branch can be wrong, which is the only property that makes a red worth running.
 #
 # ------------------------------------------------------------------------------------
 # THREE OUTCOMES, NOT TWO
@@ -180,14 +192,30 @@
 #   .\scripts\checks\drill-personal-plane-exclusion.ps1
 #   .\scripts\checks\drill-personal-plane-exclusion.ps1 -KeepUp     # leave it up to poke at
 #   .\scripts\checks\drill-personal-plane-exclusion.ps1 -SkipRed    # green only (faster; weaker)
+#   .\scripts\checks\drill-personal-plane-exclusion.ps1 -AcceptDispositionedGaps   # what CI runs
 #
 # Exit: 0 = every attack stopped AND recorded | 1 = a check FAILED (a defect in this tree)
 #       2 = containment green, one or more NAMED GAPS open (printed with their causes)
+#
+# THE EXIT CODE AND CI (C.9 H4). A bare run exits 2 today - 0 failures, and the whole
+# RECORDING half of U5's column open as 18 named gaps, none of them H3's to close. H4 wires
+# this into CI on `development`, where 2 is a failing build, so the flag above exists: with
+# -AcceptDispositionedGaps the run exits 0 when every gap that fired is one $GAP_DISPOSITIONS
+# already names and owns, 2 when ANY gap fired that nobody has named, and 1 when a
+# dispositioned gap has stopped firing (a ledger claiming something is open that is closed).
+# The bare exit code is deliberately unchanged, so this is a decision at the CI call site
+# rather than a redefinition hidden in here.
 
 [CmdletBinding()]
 param(
     [switch]$KeepUp,
     [switch]$SkipRed,
+    # FOR CI (DFU C.9 H4). Exit 0 when the ONLY thing open is the gap set already
+    # dispositioned in $GAP_DISPOSITIONS below - and still exit non-zero for a gap that is
+    # NEW, and FAIL for a dispositioned gap that no longer fires (a ledger that has rotted).
+    # It is a flag rather than the default ON PURPOSE: a bare run's verdict is unchanged, so
+    # nobody reads a green here as "U5's recording half is met". See the exit block.
+    [switch]$AcceptDispositionedGaps,
     # Every shared resource name derives from this. Leave it empty for a fresh random id -
     # which is what makes two concurrent runs independent.
     [string]$RunId = "",
@@ -199,7 +227,11 @@ param(
     [int]$RedOpsPort = 0,
     [int]$RedMemPort = 0,
     [int]$ExtPort    = 0,
-    [int]$RedExtPort = 0
+    [int]$RedExtPort = 0,
+    # The RED-THAT-CAN-FAIL pair (see the RED phase): the SAME image with the application
+    # plane clauses PATCHED OUT, run once as postgres and once as the bound app role.
+    [int]$RedAppPort      = 0,
+    [int]$RedAppBoundPort = 0
 )
 
 # PS 5.1: native stderr (docker) must never be fatal, and capturing native output under
@@ -210,6 +242,11 @@ Set-Location $root
 . (Join-Path $PSScriptRoot "lib\ob-initdb.ps1")
 
 $fails = 0
+# EVERY GAP CARRIES A STABLE ID, and the ids that fire are collected here. The count alone
+# was not enough for H4: 18 gaps that are all NAMED and DISPOSITIONED is a different fact from
+# 18 gaps of unknown provenance, and CI can only tell them apart if the run says which is
+# which. See $GAP_DISPOSITIONS and the summary block at the end of this file.
+$gapIds = @()
 # The drill counts its own PASSes. The number was previously quoted by hand in a findings
 # note and in DECISIONS, and it was wrong - an undercount, but a verifier flagged it because
 # the figure was being offered AS evidence. A number a human transcribes is a number that
@@ -225,8 +262,58 @@ function Note($t)    { Write-Host "        $t" -ForegroundColor DarkGray }
 # the run still exits NON-ZERO when any gap is open. It exists because the alternative was
 # to delete the assertion, and an assertion deleted is a requirement that leaves no trace.
 # See the summary block at the end of this file, and documentation/notes/u8h3-findings.md.
-function Gap($t)     { Write-Host "  GAP   $t" -ForegroundColor Yellow; $script:gaps++ }
+function Gap($id, $t) {
+    Write-Host "  GAP   [$id] $t" -ForegroundColor Yellow
+    $script:gaps++
+    $script:gapIds += $id
+}
 $AUDIT_GAP = "A REFUSAL RECORD REQUIRES SEEING WHAT YOU ARE REFUSING, and under the database boundary the door cannot. auditRefusal fires only after a bare SELECT 1 FROM agent_memories WHERE id=`$1 confirms the row EXISTS - and that probe is bound by the same policy that hid it, so for a non-superuser door it returns nothing and no record is written. As a SUPERUSER the probe succeeds and the record IS written, but then nothing was stopped either. NEITHER configuration satisfies U5's column, which asks for both. Closing it needs an elevated existence probe (SECURITY DEFINER, answers 'exists' without returning the row) - a C.9 H1/H4 decision, not an H3 one."
+
+# --- THE GAP LEDGER ----------------------------------------------------------------------
+#
+# WHY THIS EXISTS, AND WHAT H4 WOULD OTHERWISE HAVE WALKED INTO. This drill reports
+# "N passes / 0 failures / 18 GAPs" and EXITS 2. C.9 H4 wires it into CI on `development`,
+# where a non-zero exit is a FAILING build - so on the day H4 lands, a green tree goes red for
+# a reason that is not a defect, and the first fix anyone reaches for is `|| true`, which
+# deletes the gate.
+#
+# The two honest ways out were "resolve the 18 gaps" or "make the exit code mean what CI will
+# read". THE GAPS ARE NOT H3's TO RESOLVE: every one of them is either the audit-record gap
+# (auditRefusal cannot see the row it is refusing - closing it needs a SECURITY DEFINER
+# existence probe, a C.9 H1/H4 decision) or the ext-container/superuser family, which is H1.
+# So this is the second way, and the ledger is what keeps it from being a `|| true` with
+# better manners:
+#
+#   * every gap has a STABLE ID and appears below with the item that owns it;
+#   * a gap that fires and is NOT in this table is UNDISPOSITIONED - exit 2 even in CI mode,
+#     because a new gap is exactly the regression the gate exists to catch;
+#   * a gap in this table that does NOT fire is a FAIL - the ledger has rotted, someone
+#     closed the gap and left a pin claiming it is still open, and a pin nobody prunes is
+#     how a check stops meaning anything. (Not enforced under -SkipRed, where the red-phase
+#     gaps legitimately cannot fire.)
+#   * and a bare run's exit code is UNCHANGED: still 2 with any gap open. Only
+#     -AcceptDispositionedGaps exits 0, so the flag is visible at the CI call site rather
+#     than being a redefinition hidden in this file.
+$GAP_DISPOSITIONS = [ordered]@{
+    "AUDIT-RECALL-OVERRIDE"       = "H1/H4 - audit record. A recall that names another plane is refused, and nothing durable records the attempt."
+    "AUDIT-RECALL-OVERRIDE-ASKED" = "H1/H4 - audit record. Same cause: no row exists to carry the requested plane."
+    "AUDIT-RECALL-ORDINARY"       = "H1/H4 - audit record. Same cause: an ordinary recall writes no audit row either, so the override flag cannot be shown to discriminate."
+    "AUDIT-OPSDOOR-LOG"           = "H1/H4 - audit record. The ops gateway has no log line for a caller naming another plane on this tree."
+    "AUDIT-INSPECT"               = "H1/H4 - audit record. auditRefusal probes with a bare SELECT bound by the policy that hid the row, so a non-superuser door writes nothing."
+    "AUDIT-RECALL-TRACE"          = "H1/H4 - audit record. Same cause as AUDIT-INSPECT."
+    "AUDIT-RECALL-TRACE-ENVELOPE" = "H1/H4 - audit record. Same cause as AUDIT-INSPECT."
+    "AUDIT-OPS-ALLOWLIST"         = "H1/H4 - audit record, different cause: the GATEWAY denies before any database session exists, so there is nothing to record from. Closing it is a gateway change."
+    "AUDIT-CLOUD-ALLOWLIST"       = "H1/H4 - audit record. Same cause as AUDIT-OPS-ALLOWLIST."
+    "AUDIT-FETCH-CORPUS"          = "H1/H4 - audit record. Same cause as AUDIT-INSPECT, on the corpus fetch."
+    "AUDIT-REVIEW"                = "H1/H4 - audit record. Same cause as AUDIT-INSPECT, on the review door."
+    "AUDIT-WRITEBACK-PROBE"       = "H1/H4 - audit record. Same cause as AUDIT-INSPECT, on the writeback idempotency probe."
+    "AUDIT-REPORT-USAGE"          = "H1/H4 - audit record. Same cause as AUDIT-INSPECT, on report_usage."
+    "EXT-CONTAINMENT-BY-OUTAGE"   = "H1 - openbrain-ext's CRM surface is unreadable by ANY non-superuser (auth.uid() is a stub returning NULL), so 'refused' and 'broken' are indistinguishable there."
+    "EXT-SUPERUSER-LEAK"          = "H1 - openbrain-ext connected as postgres returns the personal row verbatim. This is the deployed configuration; RLS binds no superuser."
+    "EXT-CRM-COPY"                = "H1 - and the same call copies that content into professional_contacts.notes. Same cause, same item."
+    "LIFT-REFUSED-AND-RECORDED"   = "H1/H4 - the lift's conjunction cannot close while the audit-record half is open (every AUDIT-* gap above)."
+    "LIFT-AUDIT-OUTLIVES"         = "H1/H4 - cannot be evaluated until LIFT-REFUSED-AND-RECORDED is closed; there are no refusal rows to outlive anything."
+}
 
 if (-not $RunId) { $RunId = [guid]::NewGuid().ToString("N").Substring(0, 8) }
 if ($RunId -notmatch '^[a-z0-9][a-z0-9-]{0,15}$') {
@@ -246,6 +333,10 @@ $REDOPS    = "pp-drill-$RunId-ops-red"
 $REDOPSMEM = "pp-drill-$RunId-opsmem-red"
 $EXT       = "pp-drill-$RunId-ext"
 $REDEXT    = "pp-drill-$RunId-ext-red"
+# The patched-application doors. Same database, same fixtures, same migrations - the only
+# thing removed is the SERVER-SIDE plane clause, so what is left is the database.
+$REDAPP    = "pp-drill-$RunId-app-red"
+$REDAPPB   = "pp-drill-$RunId-appbound-red"
 # The GREEN doors' database role. Per-run like every other resource here, because two
 # concurrent runs share a docker daemon but must not share a role name in a database
 # neither of them can see - and because a constant name is one step from a name that
@@ -358,7 +449,7 @@ function Remove-DrillStack {
     # THIS RUN'S RESOURCES ONLY. The previous version force-removed a constant set of names
     # at startup, so starting a second run ripped the first one's containers out from under
     # it mid-fixture.
-    docker rm -f $RESTPROXY $PGRST $REDEXT $EXT $REDOPSMEM $REDOPS $REDSRV $CLOUD $OPS $SRV $STUB $DB 2>$null | Out-Null
+    docker rm -f $RESTPROXY $PGRST $REDAPPB $REDAPP $REDEXT $EXT $REDOPSMEM $REDOPS $REDSRV $CLOUD $OPS $SRV $STUB $DB 2>$null | Out-Null
     docker network rm $NET 2>$null | Out-Null
 }
 function Remove-DrillImages {
@@ -402,6 +493,8 @@ if ($RedOpsPort -le 0) { $RedOpsPort = Get-FreePort }
 if ($RedMemPort -le 0) { $RedMemPort = Get-FreePort }
 if ($ExtPort    -le 0) { $ExtPort    = Get-FreePort }
 if ($RedExtPort -le 0) { $RedExtPort = Get-FreePort }
+if ($RedAppPort      -le 0) { $RedAppPort      = Get-FreePort }
+if ($RedAppBoundPort -le 0) { $RedAppBoundPort = Get-FreePort }
 
 # -q as well as -tA: without it psql appends the command tag ("INSERT 0 1") to the output,
 # so a `... RETURNING id` came back as a uuid with a status line stapled to it and every
@@ -553,6 +646,32 @@ function Start-Gateway {
     foreach ($k in $GwEnv.Keys) { $a += @("-e", "$k=$($GwEnv[$k])") }
     $a += $GWIMAGE
     Invoke-DockerOrThrow -DockerArgs $a -What "start gateway $Name on :$Port" | Out-Null
+}
+
+# THE SAFEGUARD THAT MAKES A PATCHED RED HONEST. A red phase that patches a guard out of a
+# scratch copy is only a red if the patch LANDED. Anchor, count, and FAIL on a miss: if the
+# guard has moved, been renamed or been reformatted, the drill says so instead of building an
+# unpatched image and reporting the resulting non-leak as defence in depth. (This file used to
+# carry a red phase of this shape; amendment A2 retired it along with the module it patched,
+# and the three reds that replaced it could not fail. It is back, aimed at the guards that
+# actually exist today.)
+#
+# No BOM: PS 5.1's `Set-Content -Encoding UTF8` writes one, and a BOM in the middle of a
+# TypeScript source tree is a class of build failure nobody enjoys diagnosing.
+function Set-RedAnchor {
+    param([string]$File, [string]$Find, [string]$Replace, [int]$Expect)
+    if (-not (Test-Path $File)) {
+        Fail "RED PATCH: $File does not exist in the exported tree - the guard it holds cannot be removed, so the red would prove nothing"
+        return $false
+    }
+    $t = [IO.File]::ReadAllText($File)
+    $n = ([regex]::Matches($t, [regex]::Escape($Find))).Count
+    if ($n -ne $Expect) {
+        Fail "RED PATCH ANCHOR MISS in $(Split-Path -Leaf $File): '$Find' matched $n time(s), expected $Expect. The guard this red removes has moved or changed shape, so an unpatched image would be built and its non-leak would be read as containment."
+        return $false
+    }
+    [IO.File]::WriteAllText($File, $t.Replace($Find, $Replace), (New-Object System.Text.UTF8Encoding($false)))
+    return $true
 }
 
 function Start-McpServer {
@@ -954,12 +1073,12 @@ CREATE POLICY drill_audit_write ON public.agent_memory_audit_events
     $flagged = Db "SELECT count(*) FROM agent_memory_audit_events WHERE workspace_id='$WS' AND event_type='recall_requested' AND payload->>'exposure_override_denied'='true'"
     if ($flagged -eq "1") { Pass "a durable audit row records the attempt (recall_requested, exposure_override_denied=true)" }
     else {
-        Gap "THE OVERRIDE ATTEMPT IS NOT RECORDED: expected 1 recall_requested/exposure_override_denied row in $WS, got '$flagged'"
+        Gap "AUDIT-RECALL-OVERRIDE" "THE OVERRIDE ATTEMPT IS NOT RECORDED: expected 1 recall_requested/exposure_override_denied row in $WS, got '$flagged'"
         Note "No source file on this line writes 'recall_requested', 'exposure_override_denied' or 'requested_exposure' - the writer lived in agent-memory-plane.ts, which A2 removed. The read was still STOPPED (the assertion above this one), so what is missing is the RECORD, not the boundary. Reinstating it is a C.9 H4 item: U5's column asks for stopped AND visible."
     }
     $asked = Db "SELECT payload->>'requested_exposure' FROM agent_memory_audit_events WHERE workspace_id='$WS' AND payload->>'exposure_override_denied'='true' LIMIT 1"
     if ($asked -match "personal") { Pass "the audit row says WHAT was asked for ($asked), not merely that something was refused" }
-    else { Gap "and there is no row to carry the requested plane (got '$asked') - same cause" }
+    else { Gap "AUDIT-RECALL-OVERRIDE-ASKED" "and there is no row to carry the requested plane (got '$asked') - same cause" }
 
     # A benign recall must NOT be flagged. Without this, the assertion above passes just as
     # well against an audit writer that hardcodes 'true' - which would make the signal noise.
@@ -971,7 +1090,7 @@ CREATE POLICY drill_audit_write ON public.agent_memory_audit_events
     $unflagged = Db "SELECT count(*) FROM agent_memory_audit_events WHERE workspace_id='$WS' AND event_type='recall_requested' AND payload->>'exposure_override_denied'='false'"
     if ([int]$unflagged -ge 1) {
         Pass "an ordinary recall is recorded UNFLAGGED - the flag discriminates, it is not a constant"
-    } else { Gap "an ordinary recall produces no audit row either (got '$unflagged') - same cause, and it is why the flag cannot be shown to discriminate" }
+    } else { Gap "AUDIT-RECALL-ORDINARY" "an ordinary recall produces no audit row either (got '$unflagged') - same cause, and it is why the flag cannot be shown to discriminate" }
 
     # THE TRACE, HOWEVER, IS WRITTEN - and it now carries the ENFORCED plane, which is the
     # half of this record that survived. It is asserted here because it is the ONLY durable
@@ -1005,7 +1124,7 @@ CREATE POLICY drill_audit_write ON public.agent_memory_audit_events
     $gwLog = (docker logs $OPS 2>&1 | Out-String)
     if ($gwLog -match "exposure_override_attempt") {
         Pass "the DOOR recorded the attempt (gateway audit line: exposure_override_attempt)"
-    } else { Gap "the ops door logged nothing about a caller naming another plane - the gateway has no such line on this tree, same family as the durable row above" }
+    } else { Gap "AUDIT-OPSDOOR-LOG" "the ops door logged nothing about a caller naming another plane - the gateway has no such line on this tree, same family as the durable row above" }
 
     # WHICH RECORD COVERS WHICH LANE - asserted, because otherwise it is only implied.
     # `exposure` is NOT a field of RECALL_SCHEMA (agent-memory-tools.ts), so on the MCP lane
@@ -1052,7 +1171,7 @@ CREATE POLICY drill_audit_write ON public.agent_memory_audit_events
     }
     $refused = Db "SELECT count(*) FROM agent_memory_audit_events WHERE event_type='access_refused' AND memory_id='$PID_PERS' AND payload->>'tool'='agent_memory_inspect'"
     if ($refused -eq "1") { Pass "the refusal left a durable audit row (access_refused, tool=agent_memory_inspect)" }
-    else { Gap "STOPPED but NOT RECORDED (agent_memory_inspect): expected 1 access_refused row, got '$refused'"
+    else { Gap "AUDIT-INSPECT" "STOPPED but NOT RECORDED (agent_memory_inspect): expected 1 access_refused row, got '$refused'"
            Note $AUDIT_GAP }
     $refusedCtrl = Db "SELECT count(*) FROM agent_memory_audit_events WHERE event_type='access_refused' AND memory_id='$PID_OPS'"
     if ($refusedCtrl -eq "0") { Pass "the ALLOWED inspect wrote no refusal row - access_refused means refused, it is not a per-call constant" }
@@ -1116,7 +1235,7 @@ CREATE POLICY drill_audit_write ON public.agent_memory_audit_events
     } else { Fail "the trace did not return the CONTROL - the call failed, so this attack proves nothing"; Note $trcBlob }
     $trcRefused = Db "SELECT count(*) FROM agent_memory_audit_events WHERE event_type='access_refused' AND memory_id='$PID_PERS' AND payload->>'tool'='agent_memory_recall_trace'"
     if ($trcRefused -eq "1") { Pass "withholding the off-plane item left a durable audit row (access_refused, tool=agent_memory_recall_trace)" }
-    else { Gap "STOPPED but NOT RECORDED (agent_memory_recall_trace): expected 1 access_refused row, got '$trcRefused'" }
+    else { Gap "AUDIT-RECALL-TRACE" "STOPPED but NOT RECORDED (agent_memory_recall_trace): expected 1 access_refused row, got '$trcRefused'" }
 
     # --- 8b. ATTACK 5b: THE ENVELOPE, not the items -------------------------------------
     Section "ATTACK 5b - the agent asks for a PERSONAL-plane trace's envelope (its query text)"
@@ -1133,7 +1252,7 @@ CREATE POLICY drill_audit_write ON public.agent_memory_audit_events
     } else { Fail "EXPOSURE LEAK: the personal-plane trace envelope came back"; Note $ptrcBlob }
     $ptrcRefused = Db "SELECT count(*) FROM agent_memory_audit_events WHERE event_type='access_refused' AND payload->>'reason'='off-plane-trace'"
     if ($ptrcRefused -eq "1") { Pass "the refused trace left a durable audit row (access_refused, reason=off-plane-trace)" }
-    else { Gap "STOPPED but NOT RECORDED (recall_trace envelope): expected 1 refusal row, got '$ptrcRefused'" }
+    else { Gap "AUDIT-RECALL-TRACE-ENVELOPE" "STOPPED but NOT RECORDED (recall_trace envelope): expected 1 refusal row, got '$ptrcRefused'" }
     $ptrcNamed = Db "SELECT count(*) FROM agent_memory_audit_events WHERE payload->>'reason'='off-plane-trace' AND memory_id IS NOT NULL"
     if ($ptrcNamed -eq "0") { Pass "and that row names NO memory id - a trace refusal must not leak the id it was hiding" }
     else { Fail "the trace refusal row carries a memory id" }
@@ -1149,7 +1268,7 @@ CREATE POLICY drill_audit_write ON public.agent_memory_audit_events
     $gwLog = (docker logs $OPS 2>&1 | Out-String)
     if ($gwLog -match "tool_denied" -and $gwLog -match "search_thoughts") {
         Pass "the denial left an audit line naming the tool (tool_denied)"
-    } else { Gap "STOPPED but NOT RECORDED (ops door allow-list): a tool denied by the GATEWAY writes no audit row. Different cause from the others - the gateway refuses before the server is reached, so there is no database session to record from. Closing it is a gateway change, not a boundary one." }
+    } else { Gap "AUDIT-OPS-ALLOWLIST" "STOPPED but NOT RECORDED (ops door allow-list): a tool denied by the GATEWAY writes no audit row. Different cause from the others - the gateway refuses before the server is reached, so there is no database session to record from. Closing it is a gateway change, not a boundary one." }
 
     # --- 10. ATTACK 7: THE CLOUD DOOR - the only lane with configured consumers ----------
     Section "ATTACK 7 - the CLOUD door (.mcp.json points every agent here)"
@@ -1175,7 +1294,7 @@ CREATE POLICY drill_audit_write ON public.agent_memory_audit_events
     $clLog = (docker logs $CLOUD 2>&1 | Out-String)
     if ($clLog -match "tool_denied" -and $clLog -match "agent_memory_inspect") {
         Pass "the cloud door's denials left audit lines naming the tools (tool_denied)"
-    } else { Gap "STOPPED but NOT RECORDED (cloud door allow-list): same cause as the ops door's - the gateway denies before any database session exists." }
+    } else { Gap "AUDIT-CLOUD-ALLOWLIST" "STOPPED but NOT RECORDED (cloud door allow-list): same cause as the ops door's - the gateway denies before any database session exists." }
 
     # (b) the FORCED SHARE FILTER on the tool the cloud door DOES allow. This is the claim
     # that lived only in a comment: the agent-memory mirror writes no share:'cloud' label,
@@ -1319,7 +1438,7 @@ CREATE POLICY drill_audit_write ON public.agent_memory_audit_events
     $refAfter = [int](Db "SELECT count(*) FROM agent_memory_audit_events WHERE event_type='access_refused' AND payload->>'reason' = 'off-plane-corpus-row:$legacyId'")
     if ($refAfter -gt $refBefore) {
         Pass "VISIBLE - the refused corpus read left an access_refused row naming the tool and the id ($refBefore -> $refAfter)"
-    } else { Gap "STOPPED but NOT RECORDED (fetch, corpus row): expected an access_refused row naming the tool and the id ($refBefore -> $refAfter)" }
+    } else { Gap "AUDIT-FETCH-CORPUS" "STOPPED but NOT RECORDED (fetch, corpus row): expected an access_refused row naming the tool and the id ($refBefore -> $refAfter)" }
 
     # (d) an ABSENT id must NOT file a refusal, or the real probes drown in typos.
     $absent = [int](Db "SELECT COALESCE(max(id),0) + 5000 FROM thoughts")
@@ -1391,7 +1510,7 @@ CREATE POLICY drill_audit_write ON public.agent_memory_audit_events
     if ($extOk -match "Linked thought to contact") {
         Pass "and the ops control WORKS on the same door - the refusal above is a filter, not an outage"
     } else {
-        Gap "CONTAINMENT BY OUTAGE (as $APPUSER): the ops control fails too, so 'it refused' is indistinguishable from 'it is broken'. professional_contacts is governed by auth.uid() = user_id and auth.uid() is a stub returning NULL, so the whole extensions-server CRM surface is unreadable by ANY non-superuser. C.9 H1 has to decide this before it moves this container off postgres."
+        Gap "EXT-CONTAINMENT-BY-OUTAGE" "CONTAINMENT BY OUTAGE (as $APPUSER): the ops control fails too, so 'it refused' is indistinguishable from 'it is broken'. professional_contacts is governed by auth.uid() = user_id and auth.uid() is a stub returning NULL, so the whole extensions-server CRM surface is unreadable by ANY non-superuser. C.9 H1 has to decide this before it moves this container off postgres."
         Note $extOk
     }
 
@@ -1406,12 +1525,12 @@ CREATE POLICY drill_audit_write ON public.agent_memory_audit_events
         $extSuper = ((Invoke-RawTool -Port $RedExtPort -Name "link_thought_to_contact" -Arguments @{ thought_id = "$legacyId"; contact_id = "$contactId" }) | ConvertTo-Json -Depth 12 -Compress)
         $extNotesAfter = Db "SELECT md5(COALESCE(notes,'')) FROM professional_contacts WHERE id = '$contactId'"
         if ($extSuper -match [regex]::Escape($LEGACY)) {
-            Gap "PRODUCTION'S CONFIGURATION LEAKS (openbrain-ext as postgres): the same call returns the personal row's content verbatim. RLS binds no superuser, with or without FORCE. This is C.9 H1, measured rather than argued."
+            Gap "EXT-SUPERUSER-LEAK" "PRODUCTION'S CONFIGURATION LEAKS (openbrain-ext as postgres): the same call returns the personal row's content verbatim. RLS binds no superuser, with or without FORCE. This is C.9 H1, measured rather than argued."
         } else {
             Pass "unexpected and welcome: even as postgres the ext door did not return the personal row"
         }
         if ($extNotesAfter -ne $extNotes) {
-            Gap "and it COPIED that content into professional_contacts.notes - a third home with no exposure label. Same cause, same item."
+            Gap "EXT-CRM-COPY" "and it COPIED that content into professional_contacts.notes - a third home with no exposure label. Same cause, same item."
             $null = Db "UPDATE professional_contacts SET notes = 'baseline notes' WHERE id = '$contactId'"
         }
         docker rm -f $REDEXT 2>$null | Out-Null
@@ -1462,7 +1581,7 @@ CREATE POLICY drill_audit_write ON public.agent_memory_audit_events
     } else { Fail "the review refusal does not read as not_found (got: $revBlob)" }
     $revRefused = Db "SELECT count(*) FROM agent_memory_audit_events WHERE event_type='access_refused' AND memory_id='$PID_PERS' AND payload->>'tool'='agent_memory_review'"
     if ($revRefused -eq "1") { Pass "the refused review left a durable audit row (access_refused, tool=agent_memory_review)" }
-    else { Gap "STOPPED but NOT RECORDED (agent_memory_review): expected 1 access_refused row, got '$revRefused'" }
+    else { Gap "AUDIT-REVIEW" "STOPPED but NOT RECORDED (agent_memory_review): expected 1 access_refused row, got '$revRefused'" }
     # No review-action row either: a refused decision that files paperwork is a decision.
     $revActions = Db "SELECT count(*) FROM agent_memory_review_actions WHERE memory_id='$PID_PERS'"
     if ($revActions -eq "0") { Pass "no review-action row was written for the refused promotion" }
@@ -1512,7 +1631,7 @@ CREATE POLICY drill_audit_write ON public.agent_memory_audit_events
     } else { Fail "ID DISCLOSURE: the writeback handed back the personal fixture's memory id" }
     $wbRefused = Db "SELECT count(*) FROM agent_memory_audit_events WHERE event_type='access_refused' AND payload->>'tool'='agent_memory_writeback' AND payload->>'reason'='off-plane-idempotency-key'"
     if ($wbRefused -eq "1") { Pass "the refused key lookup left a durable audit row" }
-    else { Gap "STOPPED but NOT RECORDED (agent_memory_writeback idempotency probe): expected 1 audit row, got '$wbRefused'" }
+    else { Gap "AUDIT-WRITEBACK-PROBE" "STOPPED but NOT RECORDED (agent_memory_writeback idempotency probe): expected 1 audit row, got '$wbRefused'" }
     $wbNoId = Db "SELECT count(*) FROM agent_memory_audit_events WHERE event_type='access_refused' AND payload->>'tool'='agent_memory_writeback' AND memory_id IS NOT NULL"
     if ($wbNoId -eq "0") { Pass "and the audit row itself names no memory - the record does not become the leak" }
     else { Fail "$wbNoId writeback refusal row(s) carry a memory_id" }
@@ -1541,7 +1660,7 @@ CREATE POLICY drill_audit_write ON public.agent_memory_audit_events
     else { Fail "$ruUsed usage row(s) exist for the off-plane fixture" }
     $ruRefused = Db "SELECT count(*) FROM agent_memory_audit_events WHERE event_type='access_refused' AND memory_id='$PID_PERS' AND payload->>'tool'='agent_memory_report_usage'"
     if ($ruRefused -eq "1") { Pass "the refusal left a durable audit row (access_refused, tool=agent_memory_report_usage)" }
-    else { Gap "STOPPED but NOT RECORDED (agent_memory_report_usage): expected 1 access_refused row, got '$ruRefused'" }
+    else { Gap "AUDIT-REPORT-USAGE" "STOPPED but NOT RECORDED (agent_memory_report_usage): expected 1 access_refused row, got '$ruRefused'" }
 
     # --- 14. ATTACK 14 - THE SCHEDULED WIKI COMPILE ---------------------------------------
     Section "ATTACK 14 - the WIKI COMPILER reads the corpus and PUBLISHES it"
@@ -1766,22 +1885,117 @@ CREATE POLICY drill_audit_write ON public.agent_memory_audit_events
         # green whose red is missing is visible as an absence rather than as silence.
         $redPersId = Db "SELECT COALESCE(max(id)::text,'none') FROM thoughts WHERE content LIKE '%$MARKER%' AND exposure='personal'"
 
+        # --- THE RED THAT CAN FAIL --------------------------------------------------------
+        #
+        # TWO LAYERS STAND IN FRONT OF ATTACKS 1 AND 3, AND A RED THAT REMOVES ONE OF THEM
+        # CANNOT FAIL. Connecting as `postgres` removes the DATABASE. It does not remove the
+        # server-side plane clause that `agent-memory-policy.ts` and `agent-memory-tools.ts`
+        # each carry, so the personal fixture does not come back - and the previous version of
+        # this file printed a PASS from that else branch, saying the attack was "guarded in the
+        # APPLICATION as well as in the database - stated, not assumed". BOTH BRANCHES PASSED.
+        # A check whose every branch passes is not a check; three of them shipped here, and
+        # that is this effort's oldest defect class landing inside the drill that exists to
+        # catch it.
+        #
+        # So the red removes BOTH layers - the connection AND the clause - and runs the same
+        # calls twice, where each outcome can be wrong:
+        #
+        #   RED-A   patched image, connected as postgres. The fixture MUST come back. If it
+        #           does not, nothing here is measuring containment: something else is hiding
+        #           it (a query that never matched, a marker that never fired), and the GREEN
+        #           above is about that instead. FAIL.
+        #   RED-B   patched image, connected as $APPUSER. The fixture must NOT come back.
+        #           With the application clause gone, the ONLY thing left is the row-level
+        #           policy - so this is the one call in the file that measures the database
+        #           on its own. A leak here is a defect in the boundary. FAIL.
+        #
+        # The patch is ANCHORED and its match count is ASSERTED, because a red that silently
+        # patches nothing is the same failure in a different costume: if a guard moves or is
+        # renamed, Set-RedAnchor FAILS the drill instead of building an unpatched image and
+        # calling the result defence in depth.
+        Copy-Item $SRC $REDSRCDIR -Recurse -Force
+        $redPolicy = Join-Path $REDSRCDIR "agent-memory-policy.ts"
+        $redTools  = Join-Path $REDSRCDIR "agent-memory-tools.ts"
+        $anchorsOk = $true
+        # ATTACK 1's guard: the recall scope builder's exposure clause. The placeholder is
+        # still CONSUMED, and CAST - `$n::text[] IS NOT NULL` is always true, keeps every later
+        # $n+1 meaning what it meant, and keeps the parameter TYPED. The first version of this
+        # patch dropped the cast and every patched query died with "could not determine data
+        # type of parameter $2": RED-A failed loudly (correctly - it did not reproduce) and
+        # RED-B PASSED for the wrong reason, because a query that errors also returns no row.
+        # A red whose green half passes on an error is the vacuous-pass bug again, one level in.
+        $anchorsOk = (Set-RedAnchor -File $redPolicy `
+            -Find 'clauses.push(`am.exposure = ANY($${i++})`);' `
+            -Replace 'clauses.push(`($${i++}::text[] IS NOT NULL)`);' -Expect 1) -and $anchorsOk
+        # ATTACK 3's guard: readExposure() forced into every by-id read tool. The `am.`-
+        # qualified one is replaced FIRST - it contains the unqualified string, so the other
+        # order would rewrite it into nonsense and the build would fail for the wrong reason.
+        $anchorsOk = (Set-RedAnchor -File $redTools `
+            -Find 'am.exposure = ANY($2)' -Replace '($2::text[] IS NOT NULL)' -Expect 1) -and $anchorsOk
+        $anchorsOk = (Set-RedAnchor -File $redTools `
+            -Find 'exposure = ANY($2)' -Replace '($2::text[] IS NOT NULL)' -Expect 2) -and $anchorsOk
+
+        $redAppUp = $false
+        if (-not $anchorsOk) {
+            Fail "the RED-A/RED-B image was not built - the anchors above did not match, so ATTACK 1 and ATTACK 3 have no red that can fail"
+        } else {
+            docker build -t $REDIMAGE $REDSRCDIR 2>&1 | Select-Object -Last 1 | Out-Null
+            if ($LASTEXITCODE -ne 0) { Fail "docker build failed for $REDIMAGE (the application-patched red image)" }
+            else {
+                Start-McpServer -Name $REDAPP  -Port $RedAppPort      -Img $REDIMAGE -DbUser "postgres"
+                Start-McpServer -Name $REDAPPB -Port $RedAppBoundPort -Img $REDIMAGE -DbUser $APPUSER
+                $a = Wait-Http -Port $RedAppPort      -Path "/health"
+                $b = Wait-Http -Port $RedAppBoundPort -Path "/health"
+                if ($a -and $b) {
+                    $redAppUp = $true
+                    Pass "built $REDIMAGE with the server-side plane clauses PATCHED OUT (3 anchors, match counts asserted) and started it twice: :$RedAppPort as postgres, :$RedAppBoundPort as $APPUSER"
+                } else {
+                    docker logs $REDAPP  2>&1 | Select-Object -Last 15 | Write-Host
+                    docker logs $REDAPPB 2>&1 | Select-Object -Last 15 | Write-Host
+                    Fail "the application-patched red doors never answered (:$RedAppPort=$a :$RedAppBoundPort=$b) - ATTACK 1 and ATTACK 3 have no red that can fail"
+                }
+            }
+        }
+
         # RED for ATTACK 1 - the internal REST recall, naming the personal plane.
-        $r1 = Invoke-Rest -Port $RedSrvPort -Path "/agent-memory/recall" -Body @{
+        $r1body = @{
             workspace_id = $WS; project_id = $PROJ
             query = $MARKER; limit = 25; include_unconfirmed = $true
             exposure = @("personal")
         }
-        $r1ids = @()
-        if ($r1.Body -and $r1.Body.items) { $r1ids = @($r1.Body.items | ForEach-Object { $_.memory_id }) }
-        # The door still forces its own plane in the SQL, so the recall filter alone holds
-        # here even as a superuser - and that is worth SAYING rather than hiding, because it
-        # is the one place an application guard survived A2 and it is real defence in depth.
-        if ($r1ids -contains $PID_PERS) {
-            Pass "RED CONFIRMED (ATTACK 1) - as postgres the same request returns the personal fixture"
+        function Get-RecallIds {
+            param([int]$Port)
+            $r = Invoke-Rest -Port $Port -Path "/agent-memory/recall" -Body $r1body
+            if ($r.Body -and $r.Body.items) { return @($r.Body.items | ForEach-Object { $_.memory_id }) }
+            return @()
+        }
+        # The connection-only red is still run and still reported, because it says something
+        # true and narrow: with the application clause in place, a superuser connection does
+        # not get the row. It is a NOTE, not a Pass - it is an observation, not an attack that
+        # was stopped, and it was being counted as one.
+        if ((Get-RecallIds -Port $RedSrvPort) -contains $PID_PERS) {
+            Fail "as postgres, WITH agent-memory-policy.ts's clause still in place, recall returned the personal fixture - the application clause is not doing what RED-B assumes it was doing"
         } else {
-            Note "ATTACK 1's green does NOT rest on the database: agent-memory-policy.ts still forces the door's plane into the recall SQL, so it holds for a superuser too. Defence in depth, and the only reader guard A2 left standing."
-            Pass "ATTACK 1 is guarded in the APPLICATION as well as in the database - stated, not assumed"
+            Note "connection-only red (ATTACK 1): as postgres but with the application clause intact, the fixture does not come back. That is the clause, not the database - which is exactly why RED-A/RED-B below remove it."
+        }
+        if ($redAppUp) {
+            $ra1 = Get-RecallIds -Port $RedAppPort
+            if ($ra1 -contains $PID_PERS) {
+                Pass "RED-A CONFIRMED (ATTACK 1) - application clause removed AND connected as postgres, the same request returns the personal fixture"
+            } else {
+                Fail "RED-A (ATTACK 1) did NOT reproduce: with the exposure clause patched out and RLS bypassed, the personal fixture still did not come back. Something other than containment is hiding it, so ATTACK 1's green measures that instead. (returned: $($ra1 -join ', '))"
+            }
+            $rb1 = Get-RecallIds -Port $RedAppBoundPort
+            # Same live control as RED-B for ATTACK 3: the ops fixture must still come back
+            # through the patched bound door, or "nothing returned" says nothing about planes.
+            if (-not ((Get-RecallIds -Port $RedAppBoundPort) -contains $PID_OPS)) {
+                Fail "RED-B (ATTACK 1) has no live control: the patched bound door did not return the OPS fixture either, so its silence on the personal one is indistinguishable from a broken query"
+            }
+            if ($rb1 -contains $PID_PERS) {
+                Fail "RED-B (ATTACK 1) LEAKED: with the application clause removed, the bound door ($APPUSER) returned the personal fixture. The row-level policy on agent_memories is not holding on its own."
+            } else {
+                Pass "RED-B (ATTACK 1) - with the application clause REMOVED, the bound door returns nothing: the DATABASE is the layer holding, measured rather than assumed"
+            }
         }
 
         # RED for ATTACKS 11/12 - the corpus tools at the raw door. These have NO application
@@ -1807,28 +2021,60 @@ CREATE POLICY drill_audit_write ON public.agent_memory_audit_events
             Pass "RED CONFIRMED (ATTACK 12e) - thought_stats counts ALL $rTotal rows as a superuser, not the on-plane subset"
         } else { Fail "thought_stats did not report the full count as a superuser - the green count proves nothing"; Note $rStats }
 
-        # RED for ATTACK 3 - inspect by id. The tool has a plane clause of its own, so this
-        # red distinguishes the two layers rather than assuming one of them.
+        # RED for ATTACK 3 - inspect by id. Same shape as ATTACK 1's: the connection-only red
+        # cannot fail because `agent-memory-tools.ts` forces the door's plane into the by-id
+        # SQL, so the leak is reproduced against the PATCHED image instead, twice.
+        #
+        # It is fired at the RAW door (x-brain-key, no gateway, no allow-list) rather than
+        # through a gateway, because that is the harder position and it needs no extra
+        # container: `agent_memory_inspect` is registered on the MCP server itself, and
+        # openbrain-mcpo speaks to exactly that surface with exactly that credential.
+        if ($redAppUp) {
+            $ra3 = (Invoke-RawTool -Port $RedAppPort -Name "agent_memory_inspect" -Arguments @{ memory_id = "$PID_PERS" } | ConvertTo-Json -Depth 12 -Compress)
+            if ($ra3 -match [regex]::Escape($PERSONAL)) {
+                Pass "RED-A CONFIRMED (ATTACK 3) - plane clause removed AND connected as postgres, inspect returns the personal memory's content by id"
+            } else {
+                Fail "RED-A (ATTACK 3) did NOT reproduce: with readExposure()'s clause patched out and RLS bypassed, inspect still did not return the content. ATTACK 3's green is measuring something other than containment."
+                Note $ra3
+            }
+            $rb3 = (Invoke-RawTool -Port $RedAppBoundPort -Name "agent_memory_inspect" -Arguments @{ memory_id = "$PID_PERS" } | ConvertTo-Json -Depth 12 -Compress)
+            # A NON-ANSWER IS NOT A REFUSAL. If the patched query is broken, RED-B returns
+            # nothing for a reason that has nothing to do with the boundary - which is how the
+            # first run of this red passed vacuously. The control below fires the SAME call at
+            # the SAME door for the ops fixture: it must come back, or RED-B proves nothing.
+            $rb3ctl = (Invoke-RawTool -Port $RedAppBoundPort -Name "agent_memory_inspect" -Arguments @{ memory_id = "$PID_OPS" } | ConvertTo-Json -Depth 12 -Compress)
+            if ($rb3ctl -notmatch [regex]::Escape($SUMOPS)) {
+                Fail "RED-B (ATTACK 3) has no live control: the patched bound door could not return the OPS fixture either, so 'it returned nothing for the personal one' is indistinguishable from 'it is broken'. Response: $rb3ctl"
+            }
+            if ($rb3 -match [regex]::Escape($PERSONAL)) {
+                Fail "RED-B (ATTACK 3) LEAKED: with the application clause removed, the bound door ($APPUSER) returned the personal memory's content by id. The row-level policy is not holding on its own."
+            } else {
+                Pass "RED-B (ATTACK 3) - with the application clause REMOVED, the bound door returns nothing by id: the DATABASE is the layer holding"
+            }
+        }
+
+        # RED for ATTACK 8 - the escalation, and the one red here that needed NO patched
+        # image, because there was never an application guard to remove.
+        #
+        # THE PREVIOUS VERSION'S RED NEVER RAN. It called agent_memory_review with
+        # `reviewer = "drill-red"`, while REVIEW_SCHEMA requires `actor: { label }` (the GREEN
+        # half of this same attack passes `actor` correctly). The MCP SDK validates against the
+        # zod schema, so the call was rejected before it reached the review path - the memory
+        # was of course still `personal` afterwards, and the drill read that as "the review
+        # door filters on the plane in SQL" and PASSED. It does not: `reviewMemory` selects
+        # `FROM agent_memories WHERE id = $1 FOR UPDATE` with NO exposure predicate at all
+        # (agent-memory-ops.ts, read 2026-08-31). The only thing standing in front of ATTACK 8
+        # is the row-level policy - which is precisely why this red must be able to fail.
         $rOps = Start-Gateway -Name $REDOPS -Port $RedOpsPort -GwEnv $opsEnv -Upstream "http://${REDSRV}:8000"
         if (Wait-Http -Port $RedOpsPort -Path "/health") {
-            $rInspect = (Invoke-Tool -Port $RedOpsPort -Name "agent_memory_inspect" -Arguments @{ memory_id = "$PID_PERS" } | ConvertTo-Json -Depth 12 -Compress)
-            if ($rInspect -match [regex]::Escape($PERSONAL)) {
-                Pass "RED CONFIRMED (ATTACK 3) - as postgres, inspect returns the personal memory's content"
-            } else {
-                Note "ATTACK 3's green rests on agent-memory-tools.ts's own `exposure = ANY(...)` clause as well as on the database - it holds for a superuser too. Defence in depth, stated."
-                Pass "ATTACK 3 is guarded in the APPLICATION as well as in the database - stated, not assumed"
-            }
-            # RED for ATTACK 8 - the escalation. Same reasoning: the review door filters on
-            # the plane in SQL, so this red says WHICH layer stopped it.
-            $rRev = (Invoke-Tool -Port $RedOpsPort -Name "agent_memory_review" -Arguments @{ memory_id = "$PID_PERS"; action = "promote_exposure"; reviewer = "drill-red" } | ConvertTo-Json -Depth 12 -Compress)
+            $rRev = (Invoke-Tool -Port $RedOpsPort -Name "agent_memory_review" -Arguments @{ memory_id = "$PID_PERS"; action = "promote_exposure"; actor = @{ label = "drill-red" }; note = "red: widen the personal fixture onto the ops plane" } | ConvertTo-Json -Depth 12 -Compress)
             $rExp = Db "SELECT exposure FROM agent_memories WHERE id = '$PID_PERS'"
             if ($rExp -eq "ops") {
                 Pass "RED CONFIRMED (ATTACK 8) - as postgres, promote_exposure MOVED the personal memory onto the ops plane"
                 $null = Db "UPDATE agent_memories SET exposure='personal', metadata = metadata || jsonb_build_object('exposure','personal') WHERE id = '$PID_PERS'"
                 Note "restored to exposure=personal for the sections below"
             } else {
-                Note "ATTACK 8's green rests on the review door's own plane clause as well as on the database (memory is still exposure=$rExp)."
-                Pass "ATTACK 8 is guarded in the APPLICATION as well as in the database - stated, not assumed"
+                Fail "RED (ATTACK 8) did NOT reproduce: as postgres, promote_exposure left the memory at exposure=$rExp. The review door has no plane predicate, so a superuser call should have moved it - if it did not, the call was refused for some other reason and ATTACK 8's green proves nothing. Response: $rRev"
             }
         } else { Fail "the red ops gateway never answered - the by-id reds did not run" }
 
@@ -1889,8 +2135,8 @@ CREATE POLICY drill_audit_write ON public.agent_memory_audit_events
     # The same conjunction, for a clause whose failure is a NAMED GAP rather than a defect
     # in this tree. It still withdraws the lift - the lift is the conjunction, and a
     # conjunction with an open term is not satisfied.
-    function LiftGap([bool]$Ok, [string]$What, [string]$Why) {
-        if ($Ok) { Pass $What } else { Gap $What; Note $Why; $script:lifted = $false }
+    function LiftGap([string]$Id, [bool]$Ok, [string]$What, [string]$Why) {
+        if ($Ok) { Pass $What } else { Gap $Id $What; Note $Why; $script:lifted = $false }
     }
 
     # (1) it can be WRITTEN - through the real write path, not planted.
@@ -1919,7 +2165,7 @@ CREATE POLICY drill_audit_write ON public.agent_memory_audit_events
     $expected = @("agent_memory_inspect", "agent_memory_recall_trace", "agent_memory_report_usage",
                   "agent_memory_review", "agent_memory_writeback", "fetch", "link_thought_to_contact")
     $missing = @($expected | Where-Object { $toolList -notcontains $_ })
-    LiftGap ($missing.Count -eq 0) "REFUSED AND RECORDED - every TARGETED door left an access_refused row: $($toolList -join ', ')" `
+    LiftGap "LIFT-REFUSED-AND-RECORDED" ($missing.Count -eq 0) "REFUSED AND RECORDED - every TARGETED door left an access_refused row: $($toolList -join ', ')" `
         "no refusal recorded for: $($missing -join ', ') - $AUDIT_GAP"
     $filtering = @("agent_memory_list_review_queue", "agent_memory_recall")
     $wrongly = @($filtering | Where-Object { $toolList -contains $_ })
@@ -1942,7 +2188,7 @@ CREATE POLICY drill_audit_write ON public.agent_memory_audit_events
     # rows stay after the memory goes - which is the property that makes "the attempt is
     # visible in an audit record" mean anything at all once a memory is retired.
     $auditLeft = Db "SELECT count(*) FROM agent_memory_audit_events WHERE event_type = 'access_refused'"
-    LiftGap ([int]$auditLeft -ge 8) "and the $auditLeft access_refused rows OUTLIVE the deleted fixture (memory_id ON DELETE SET NULL)" `
+    LiftGap "LIFT-AUDIT-OUTLIVES" ([int]$auditLeft -ge 8) "and the $auditLeft access_refused rows OUTLIVE the deleted fixture (memory_id ON DELETE SET NULL)" `
         "only $auditLeft refusal row(s) exist to outlive anything, for the reason above - this clause cannot be evaluated until the one above is closed"
 
     # (6) THE LIFT IS WITHDRAWN, AND THIS IS WHERE IT IS WITHDRAWN.
@@ -2003,6 +2249,32 @@ CREATE POLICY drill_audit_write ON public.agent_memory_audit_events
 }
 
 Write-Host ""
+
+# --- THE GAP LEDGER, RECONCILED ----------------------------------------------------------
+# Printed on every run, not only in CI mode, because the reconciliation is the interesting
+# part: which named gaps fired, which fired that nobody has named, and which named ones have
+# quietly stopped firing.
+$firedGaps  = @($gapIds | Select-Object -Unique)
+$knownGaps  = @($GAP_DISPOSITIONS.Keys)
+$newGaps    = @($firedGaps | Where-Object { $knownGaps -notcontains $_ })
+$staleGaps  = @($knownGaps | Where-Object { $firedGaps -notcontains $_ })
+if ($firedGaps.Count -gt 0 -or $newGaps.Count -gt 0) {
+    Write-Host "GAP LEDGER - $($firedGaps.Count) fired, $($knownGaps.Count) dispositioned" -ForegroundColor Yellow
+    foreach ($g in $firedGaps) {
+        $why = if ($GAP_DISPOSITIONS.Contains($g)) { $GAP_DISPOSITIONS[$g] } else { "*** UNDISPOSITIONED - nobody has named this one ***" }
+        Write-Host ("    {0,-30} {1}" -f $g, $why) -ForegroundColor DarkGray
+    }
+}
+# A DISPOSITIONED GAP THAT NO LONGER FIRES IS A FAIL, not good news to be swallowed: the
+# ledger is now claiming something is open that is closed, and the next reader trusts it.
+# -SkipRed is exempt because the red-phase gaps genuinely cannot fire there.
+if ($staleGaps.Count -gt 0 -and -not $SkipRed) {
+    Write-Host "  FAIL  $($staleGaps.Count) dispositioned gap(s) did NOT fire: $($staleGaps -join ', ')" -ForegroundColor Red
+    Write-Host "        Either they are closed - in which case DELETE them from `$GAP_DISPOSITIONS and say so in" -ForegroundColor Red
+    Write-Host "        PROMOTION-RUNBOOK.md - or the check that produced them stopped running, which is worse." -ForegroundColor Red
+    $fails += $staleGaps.Count
+}
+
 if ($fails -eq 0 -and $gaps -eq 0) {
     Write-Host "PERSONAL-PLANE EXCLUSION DRILL PASSED - $passes checks, every attack stopped, every targeted refusal recorded" -ForegroundColor Green
     Write-Host "THE OPERATIONAL CONSTRAINT STANDS: do not write a personal-exposure memory. See THE LIFT above." -ForegroundColor Yellow
@@ -2017,9 +2289,28 @@ if ($fails -gt 0) {
 # They are printed above with their causes. THE EXIT CODE IS NOT ZERO, deliberately: U5's
 # column asks for "mechanically stopped AND the attempt is visible in an audit record", and
 # a drill that returned success on half of that would be the redefinition C.8 forbids.
+#
+# -AcceptDispositionedGaps is the ONE exception, and it is narrow: exit 0 only when every gap
+# that fired is one this file already names and owns (see $GAP_DISPOSITIONS). A gap nobody has
+# named still exits 2, WITH the flag - because "a new gap appeared" is the regression the CI
+# wiring exists to catch, and it is the one thing a count-based budget would have missed.
+if ($newGaps.Count -gt 0) {
+    Write-Host "PERSONAL-PLANE EXCLUSION DRILL: $($newGaps.Count) UNDISPOSITIONED GAP(S) - $($newGaps -join ', ')" -ForegroundColor Red
+    Write-Host "  These are NOT in `$GAP_DISPOSITIONS. Either the tree regressed or a new property went" -ForegroundColor Red
+    Write-Host "  unmet; name it and its owning item there before this run can be read as expected." -ForegroundColor Red
+    exit 2
+}
+if ($AcceptDispositionedGaps) {
+    Write-Host "PERSONAL-PLANE EXCLUSION DRILL: CONTAINMENT GREEN, $gaps gap(s), ALL DISPOSITIONED ($passes checks passed, 0 failed)" -ForegroundColor Green
+    Write-Host "  Exit 0 under -AcceptDispositionedGaps. This is NOT 'U5's recording half is met' - it is" -ForegroundColor Yellow
+    Write-Host "  'nothing changed since the operator dispositioned these', which is what CI can assert." -ForegroundColor Yellow
+    Write-Host "  See documentation/implementation-guide/agent-memory-plane/PROMOTION-RUNBOOK.md." -ForegroundColor Yellow
+    exit 0
+}
 Write-Host "PERSONAL-PLANE EXCLUSION DRILL: CONTAINMENT GREEN, $gaps NAMED GAP(S) OPEN ($passes checks passed, 0 failed)" -ForegroundColor Yellow
 Write-Host "  Every attack was STOPPED. What is not met is the RECORDING half of U5's column," -ForegroundColor Yellow
 Write-Host "  and the doors that connect as postgres. Both are C.9 H1/H4 items, both are named" -ForegroundColor Yellow
 Write-Host "  above with the measurement, and neither is closed by this run." -ForegroundColor Yellow
-Write-Host "  See documentation/notes/u8h3-findings.md." -ForegroundColor Yellow
+Write-Host "  CI (C.9 H4) should pass -AcceptDispositionedGaps, which exits 0 for exactly this" -ForegroundColor Yellow
+Write-Host "  set and non-zero for anything new. See documentation/notes/u8h3-findings.md." -ForegroundColor Yellow
 exit 2
