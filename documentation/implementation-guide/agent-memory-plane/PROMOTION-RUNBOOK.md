@@ -1062,8 +1062,11 @@ docker exec openbrain-db psql -U postgres -d openbrain -tAc `
 ```
 
 Applied to a throwaway built from the full 29-migration chain, twice: no init errors, §9's
-notice printed, `prove-agent-memory-rls.ps1` 68/68 and the personal-plane drill 105 passes /
-0 failures against it.
+notice printed, `prove-agent-memory-rls.ps1` 68/68 and the personal-plane drill green on
+containment against it. **Quote the drill's result in full, including the gaps and the exit
+code** — see "The drill's exit code, and what CI reads" below. An earlier version of this line
+said "105 passes / 0 failures" and stopped there, which reads as a pass; the run also reports
+18 named gaps and EXITS 2.
 
 ## `init-agent-memory-exposure-column.sql` — the exposure label becomes a TYPED COLUMN (DFU C.9 H3)
 
@@ -1084,9 +1087,22 @@ After this file `agent_memories.exposure` and `thoughts.exposure` are
 `TEXT NOT NULL CHECK (exposure IN ('ops','personal'))`, **the predicates read the COLUMN**, and
 `metadata->>'exposure'` is a non-authoritative mirror.
 
-**No DEFAULT, deliberately.** A default would make the NOT NULL unreachable from a writer that
-omits the column, which is the failure H3 exists to remove. A *door* may stamp its own forced
-value (`upsert_thought` does; so does `stampExposure()`); a *column* may not guess.
+**No DEFAULT, deliberately — and no default at the DOOR either.** A default would make the
+NOT NULL unreachable from a writer that omits the column, which is the failure H3 exists to
+remove. The first version of this migration then implemented that exact semantics one layer up:
+`upsert_thought` COALESCEd an absent, empty or null `metadata.exposure` to `'ops'`, so `{}`,
+`{"exposure":""}` and `{"exposure":null}` all wrote a row on the WIDER plane (measured on a
+throwaway from the full chain, 2026-08-31: all three succeeded). §C.9 H3 says "a writer that
+does not supply the column is rejected by the CHECK, which is the point", and the operator's
+ruling is "forcing every producer to state exposure explicitly is the intent, not a side
+effect" — so the door now REFUSES all of them, loudly, with the reason.
+
+A *door* may still stamp its own forced value — `stampExposure()` does, and its unstated value
+is `'personal'`, the NARROW end, and it can only ever demote. That is not what `upsert_thought`
+was doing: filling in the WIDE plane for a caller that said nothing is not stamping, it is
+guessing. **Every one of the ten `upsert_thought` callers in the tree now states `exposure:
+'ops'` at its own call site**, so the choice is visible in the producer's code rather than
+hidden in a COALESCE in the migration.
 
 ### What it does, in the only order that is safe
 
@@ -1102,10 +1118,30 @@ Every step is inside ONE transaction, so no other session observes any intermedi
    transient state, between `DROP POLICY` and `CREATE POLICY`, is *RLS enabled with no
    permissive policy*, i.e. default DENY. There is no ordering here that permits a row.
 8. **Re-point `upsert_thought`** — the shared rpc door for wiki synthesis, entity-wiki and
-   every import recipe — at the column, stamping its own lane `ops` and honouring an explicit
-   demotion to `personal`.
+   every import recipe — at the column, and make it REQUIRE the plane. Absent and JSON null are
+   a `not_null_violation`; `''`, `' '`, `'ops '`, `' ops'`, `'OPS'`, `'Ops'`, `'opsy'` and
+   `'"ops"'` are a `check_violation`; `'ops'` is the only accepted value.
+
+   **`'personal'` is refused too, and that is a correction, not a narrowing for its own sake.**
+   The door used to "honour an explicit demotion". Measured, it cannot deliver one:
+   `thoughts_personal_plane` is granted `TO ob_plane_personal` and requires
+   `user_id = ob_current_user_id()`, and this door has neither — so a BOUND connection's
+   personal insert through it is refused `42501` by the WITH CHECK, and a SUPERUSER's succeeds
+   only by bypassing the boundary and writes a row with `user_id IS NULL` that no personal-plane
+   session can ever read. Both are worse than a refusal that names the real path.
+
+   The UPDATE branch still does not re-decide an existing row's plane, and it now writes
+   `metadata.exposure` **from the row's COLUMN** in the same statement — so the two cannot
+   disagree, and a row that arrives disagreeing is repaired. See "the mirror" below.
+8b. **Re-point the LAST READER of the mirror** — `queue_entity_extraction()` — at the column,
+   with `200-`'s body verbatim, and **widen `trg_queue_entity_extraction` to fire on
+   `UPDATE OF content, metadata, exposure`**. Neither changes what any caller can SEE.
 9. **Self-test, before COMMIT:** an absent write and a malformed write are attempted on BOTH
-   tables and must be refused by the database; a second block proves no probe row survived.
+   tables and must be refused by the database; the DOOR is attacked with all twelve non-plane
+   payloads and must refuse each; `'ops'` must be accepted and must leave column and mirror
+   equal; both mirror-desync cases are red-proven closed; the database is scanned (over
+   `pg_policies` AND `pg_proc.prosrc`) for any remaining reader of the mirror; and a final block
+   proves no probe row survived.
 
 **What an absent key backfills to: `ops`. A malformed one: the migration REFUSES.** Absent was
 already ruled on and executed by `190-` (which stamped ~13,000 rows `ops` so the corpus stayed
@@ -1155,6 +1191,34 @@ docker exec openbrain-db psql -U postgres -d openbrain -tAc `
 docker exec openbrain-db psql -U postgres -d openbrain -tAc `
   "BEGIN; INSERT INTO thoughts (content, exposure) VALUES ('H3-OK','ops');
    SELECT 'control accepted'; ROLLBACK;"
+
+# 5. THE DOOR REFUSES WHAT THE COLUMN REFUSES - the check that would have caught the
+#    COALESCE. Expect three ERRORs and then 'ops/ops'. Rolled back; nothing persists.
+docker exec openbrain-db psql -U postgres -d openbrain -tAc `
+  "BEGIN; SELECT upsert_thought('H3-DOOR-ABSENT','{}'::jsonb); ROLLBACK;"
+docker exec openbrain-db psql -U postgres -d openbrain -tAc `
+  "BEGIN; SELECT upsert_thought('H3-DOOR-EMPTY','{\"metadata\":{\"exposure\":\"\"}}'::jsonb); ROLLBACK;"
+docker exec openbrain-db psql -U postgres -d openbrain -tAc `
+  "BEGIN; SELECT upsert_thought('H3-DOOR-NULL','{\"metadata\":{\"exposure\":null}}'::jsonb); ROLLBACK;"
+docker exec openbrain-db psql -U postgres -d openbrain -tAc `
+  "BEGIN; SELECT r.exposure||'/'||(r.metadata->>'exposure')
+     FROM upsert_thought('H3-DOOR-OK','{\"metadata\":{\"exposure\":\"ops\"}}'::jsonb) r; ROLLBACK;"
+
+# 6. NOTHING READS THE MIRROR. Expect two empty results.
+docker exec openbrain-db psql -U postgres -d openbrain -tAc `
+  "SELECT tablename||'.'||policyname FROM pg_policies WHERE schemaname='public'
+     AND replace(COALESCE(qual,'')||COALESCE(with_check,''),' ','')
+         LIKE ANY (ARRAY['%metadata->>''exposure''%','%on_ops_plane(metadata)%']);"
+docker exec openbrain-db psql -U postgres -d openbrain -tAc `
+  "SELECT p.proname FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+    WHERE n.nspname='public' AND p.prokind='f' AND p.proname<>'upsert_thought'
+      AND replace(COALESCE(p.prosrc,''),' ','')
+          LIKE ANY (ARRAY['%metadata->>''exposure''%','%on_ops_plane(NEW.metadata)%']);"
+
+# 7. THE TRANSITION TRIGGER FIRES ON THE COLUMN. Expect the definition to name `exposure`.
+docker exec openbrain-db psql -U postgres -d openbrain -tAc `
+  "SELECT pg_get_triggerdef(oid) FROM pg_trigger
+    WHERE tgname='trg_queue_entity_extraction' AND tgrelid='public.thoughts'::regclass;"
 ```
 
 **Recorded results, live volume, 2026-08-31 20:30 UTC (lease `open-brain`, owner `u8h3`):**
@@ -1210,18 +1274,56 @@ is disclosed — but it is an outage, so keep it to seconds.
 
 **`200-init-graph-plane-rls.sql` on the live volume is still ROUND 1** (measured 2026-08-31:
 `ob_relation_governed` is absent and `agent_memory_audit_events` still carries a
-`USING (true)` policy). `195-` does not depend on it and does not conflict with it: the round-1
-policies read `ob_thought_visible`, and the round-1 write gate reads the jsonb mirror, which
-every writer keeps in step with the column. Promoting the work line's `200-` is the `u5graph`
-item's deployment, not this one's, and it must go **after** `195-` because its policies, sweeps
-and write gate read the column.
+`USING (true)` policy). `195-` does not depend on it and does not conflict with it — but **the
+argument for that changed, because the one it used to rest on was false.**
+
+It used to read: *"the round-1 write gate reads the jsonb mirror, which every writer keeps in
+step with the column."* That is a premise about writer discipline, and the door this very
+migration was shipping falsified it in both directions. `upsert_thought`'s UPDATE branch merged
+the caller's `exposure` into `metadata` while deliberately not touching the column, so
+re-upserting a personal row with no exposure key produced `column='personal'` /
+`mirror='ops'` — and the round-1 gate is `ob_corpus_on_ops_plane(NEW.metadata)`, `SECURITY
+DEFINER`, so it would have QUEUED that personal thought's content fingerprint into
+`entity_extraction_queue`. Not tidiness: a carry across the boundary, through the gate that
+exists to stop one. (`generate-wiki.mjs`'s idempotent dossier PATCH replaced `metadata`
+wholesale with an object that had no `exposure` key, deleting the mirror on every compile —
+same class, on the only scheduled producer.)
+
+**So the premise was replaced with a property.** `195-` §7b re-points
+`queue_entity_extraction()` at the COLUMN in the same transaction that creates it, and §8(d)
+asserts — over `pg_policies` for declarative readers and over `pg_proc.prosrc` for opaque plpgsql
+bodies — that **nothing in the database reads `metadata->>'exposure'` for a trust decision.**
+Measured on the live volume before the change: that gate was the *only* function body reading
+it. After `195-`, the mirror has zero readers, so a desync cannot decide anything — and the
+door can no longer produce one anyway.
+
+`195-` §7b also widens `trg_queue_entity_extraction` to `UPDATE OF content, metadata, exposure`.
+`200-`'s own TRIGGER-DISPOSITION comment claims "an ops-to-personal transition deletes the
+existing one"; with the plane in a COLUMN, the only way to make that transition is
+`UPDATE thoughts SET exposure='personal'`, which touches neither `content` nor `metadata` and
+did not fire the trigger at all. RED on a throwaway: 1 queue row before, 1 queue row after the
+demotion, carrying `sha256` of now-personal content. GREEN after: 0.
+
+Promoting the work line's `200-` is the `u5graph` item's deployment, not this one's, and it must
+go **after** `195-` because its policies, sweeps and write gate read the column.
 
 ### Rollback
 
-`OB1\docker\revert-agent-memory-exposure-column.sql`. It re-points the policies at the jsonb
-predicate **first** (the mirror is complete at that moment, so no row's visibility changes),
-then de-constrains the column, then restores `upsert_thought`, then unstamps exactly the rows
-this migration labelled (`metadata->>'exposure_backfill' = 'dfu-h3-exposure-column'`).
+`OB1\docker\revert-agent-memory-exposure-column.sql`. In order: it refuses if `200-` is still
+applied or the jsonb predicates are gone; then (§1a, **new**) **repairs the mirror from the
+column and REFUSES if any row still disagrees**; then re-points the policies at the jsonb
+predicate; then de-constrains the column; then restores `upsert_thought`; then (§3b, **new**)
+puts `queue_entity_extraction` back on the mirror and narrows the trigger's column list again;
+then unstamps exactly the rows this migration labelled
+(`metadata->>'exposure_backfill' = 'dfu-h3-exposure-column'`).
+
+**§1a exists because the step after it used to justify itself with "the mirror is complete at
+this moment — the doors keep it in step", and that was the same false premise the no-conflict
+argument rested on.** Re-pointing the policies at a mirror that disagrees with the column is a
+**silent widening** of every row whose column says `personal` and whose mirror says `ops`. The
+column is the source of truth, so the revert copies it into the mirror before trusting the
+mirror — which changes no visibility, because at that moment the policies still read the
+column — and then asserts zero disagreement.
 **The column is NOT dropped** — dropping a column is not reversible and PLAN class 4 forbids it;
 it is left in place, populated and inert, and a re-apply is idempotent.
 
@@ -1238,3 +1340,48 @@ docker exec openbrain-db psql -U postgres -d openbrain -v ON_ERROR_STOP=1 `
 Round trip executed twice on a throwaway built from the full 29-migration chain (apply →
 revert → re-apply → re-apply again, all clean and idempotent) and once on the live volume
 (apply → verify → revert → verify against the before-snapshot, identical).
+
+### The drill's exit code, and what CI reads (C.9 H4)
+
+`scripts/checks/drill-personal-plane-exclusion.ps1` against the tree this gitlink pins reports
+**0 failures and 18 GAPs, and EXITS 2.** That is deliberate — U5's column asks for
+"mechanically stopped **and** the attempt is visible in an audit record", and the recording half
+is not met — but **H4 wires this drill into CI on `development`, where 2 is a failing build.**
+Left alone, the first green tree to hit that gate goes red for a reason that is not a defect,
+and the first fix anyone reaches for is `|| true`, which deletes the gate.
+
+**None of the 18 are H3's to close.** Thirteen are the audit-record gap in its various doors:
+`auditRefusal` fires only after a bare `SELECT 1 FROM agent_memories WHERE id=$1` confirms the
+row exists, and that probe is bound by the same policy that hid it — so a non-superuser door
+writes no record, and a superuser door records but stops nothing. Closing it needs an elevated
+existence probe (`SECURITY DEFINER`, answers "exists" without returning the row), which is an
+H1/H4 decision. Three are the `openbrain-ext` container: it connects as `postgres`, leaks the
+personal row verbatim and copies it into `professional_contacts.notes` — H1, measured. Two are
+the lift's own conjunction, which cannot close while the other thirteen are open.
+
+So the drill now carries a **gap ledger**: every gap has a stable id, and `$GAP_DISPOSITIONS`
+names each one with the item that owns it. The exit contract is:
+
+| invocation | outcome |
+|---|---|
+| bare run | **unchanged** — exit 2 with any gap open |
+| `-AcceptDispositionedGaps` | exit **0** iff every gap that fired is in the ledger |
+| `-AcceptDispositionedGaps`, a gap fired that is **not** in the ledger | exit **2**, naming it |
+| a gap in the ledger did **not** fire (and not `-SkipRed`) | exit **1** — the ledger has rotted |
+
+**CI runs it with `-AcceptDispositionedGaps`.** A count-based budget would have let "17 old + 1
+new" pass; the ledger is by name, so a new gap is red, and a gap that closes forces the ledger
+(and this section) to be updated rather than quietly drifting. When H1 closes the audit-record
+gap, the run goes RED until the corresponding ids are deleted from `$GAP_DISPOSITIONS` — that is
+the intended behaviour, not a bug to route around.
+
+### The write contract reaches the RECIPES, not just the image
+
+`195-` changes what a producer must send, and the producers are not all in the image. Ten
+`upsert_thought` callers were found and given an explicit `exposure: 'ops'`; the one that runs
+on a schedule is `recipes/entity-wiki/generate-wiki.mjs`, executed by `openbrain-wiki` from the
+**bind mount** `../recipes:/recipes:ro`. So its fix lands when the deployment checkout's OB1
+submodule is moved to this gitlink — no rebuild, no restart, but also **no protection from a
+stale checkout**: an operator who applies `195-` without moving the submodule gets a wiki
+compile that fails at the door on every dossier. Move the submodule first, apply second.
+

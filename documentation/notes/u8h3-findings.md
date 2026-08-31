@@ -11,6 +11,11 @@ items, because the drills this item salvaged had never been run against the merg
 
 ## C.7b — the sha this was validated at
 
+**SUPERSEDED BY §14 for the OB1 gitlink and every re-run.** Round 2 (an operator review of
+this item) changed the migration, the drill and this file; the work line did not move, so no
+second rebase was required, but the gitlink below is no longer the one under test. Read this
+section for what round 1 established and §14 for what currently holds.
+
 The work line moved while this item was in flight (`a9f4bb4` -> `1a6b0b8`, PLAN.md §2.1
 amendment A3 only). Per §C.7b the branch was REBASED onto the line FIRST and every column
 re-run afterwards; a pass taken against `a9f4bb4` would describe a tree the line has left.
@@ -288,3 +293,268 @@ changes: 201 assertions, 0 failed, 8 of 8 clauses with a constructed failing cas
 * **`thought_stats` counted the on-plane subset using `metadata->>'exposure' IS NULL OR = 'ops'`**
   in the drill — the pre-190 fail-open rule, still passing because the fixtures' mirrors agreed
   with their columns. Now reads the column with no `IS NULL` arm.
+
+---
+
+# ROUND 2 - the review that found the cutover sound and the DOOR not
+
+Added 2026-08-31 after an operator review of this item. The cutover, the constraint battery and
+the salvaged drill were re-verified and left alone. Four things were wrong, all of them one
+layer up from the schema, and each was RED-PROVEN on a throwaway built from the full
+29-migration initdb chain before being fixed.
+
+## 9. The door defaulted exactly what the column refuses (R1)
+
+`upsert_thought` read `COALESCE(NULLIF(v_meta->>'exposure',''),'ops')`. Measured, before:
+
+```
+probe     | exposure     <- all three WROTE A ROW, on the WIDER plane
+absent    | ops
+empty     | ops
+jsonnull  | ops
+' '       | ERROR  upsert_thought: metadata.exposure =   is not a plane
+'PERSONAL'| ERROR  ...
+```
+
+So the file's own header sentence - *"Anything else is REFUSED here rather than silently
+coerced, so a typo is a loud failure at the door"* - was half false, and the false half was the
+half H3 exists to remove. The same file's section 8(b) FAILS the migration if the COLUMN carries
+a DEFAULT, on the grounds that *"a writer that omits the column would then succeed silently on a
+plane it never stated"*. The COALESCE was that DEFAULT, moved one layer up where 8(b) could not
+see it. C.9 H3 sides with 8(b).
+
+**After:** absent and JSON null are `not_null_violation`; `''`, `' '`, `'ops '`, `' ops'`,
+`'OPS'`, `'Ops'`, `'opsy'`, `'"ops"'` are `check_violation`; `'ops'` is accepted. Twelve cases,
+asserted inside the migration (section 8c) so they run in BOTH places the migration reaches.
+
+**And `'personal'` is refused too.** The door advertised "an explicit demotion to personal is
+honoured, because narrowing is always allowed". Measured, it cannot deliver one:
+
+```
+as a BOUND role (NOSUPERUSER NOBYPASSRLS, member of service_role):
+  SELECT upsert_thought('b-personal','{"metadata":{"exposure":"personal"}}')
+  ERROR:  new row violates row-level security policy for table "thoughts"
+```
+
+`thoughts_personal_plane` is granted `TO ob_plane_personal` and requires
+`user_id = ob_current_user_id()`; the ops door has neither role nor tenant. As a superuser the
+insert succeeds only by bypassing the boundary, and writes a row with `user_id IS NULL` that no
+personal-plane session can ever read. Refusing, with the reason, is the only outcome that is
+neither an error nor an orphan.
+
+**OPEN, and named rather than invented: there is no narrowing path for a `thoughts` row.**
+`agent_memories` has one (`agent_memory_review`'s `restrict_scope`). The corpus does not, and
+adding a policy that admits a narrowing write is a boundary change, not an H3 one. Recorded
+here; not built.
+
+## 10. The mirror desynced in BOTH directions, and the runbook's argument rested on it (R2)
+
+Measured, before:
+
+```
+r2-personal (personal row, re-upserted with NO exposure key)  col=personal  mirror=ops
+r2-ops      (ops row, "demoted" through the door)             col=ops       mirror=personal
+                                     -> on_ops_by_column = t, on_ops_by_mirror = f
+```
+
+`PROMOTION-RUNBOOK.md`'s reason why `195-` does not conflict with the ROUND-1 `200-` still on
+the live volume was *"the round-1 write gate reads the jsonb mirror, which every writer keeps in
+step with the column"* - a premise about writer discipline, falsified by the door in the very
+migration being promoted.
+
+**This is not tidiness.** Read live off `openbrain-db` 2026-08-31, the round-1 gate is:
+
+```sql
+CREATE OR REPLACE FUNCTION public.queue_entity_extraction() ... SECURITY DEFINER ...
+  IF NOT COALESCE(public.ob_corpus_on_ops_plane(NEW.metadata), false) THEN
+    DELETE FROM public.entity_extraction_queue WHERE thought_id = NEW.id; RETURN NEW;
+  END IF;
+  INSERT INTO public.entity_extraction_queue (thought_id, ..., source_fingerprint, ...)
+```
+
+so a row with `column='personal'` and `mirror='ops'` gets `sha256(content)` written into the
+graph queue - by a definer function, across the boundary that gate exists to hold.
+
+**A third desync, on the only scheduled producer.** `recipes/entity-wiki/generate-wiki.mjs`'s
+idempotent dossier path does `sb.patch("thoughts?id=eq.N", { content, metadata, embedding })`,
+and that `metadata` object had no `exposure` key - so every wiki compile REPLACED the mirror
+with an object that did not contain it, deleting it. Fixed by putting `exposure: "ops"` on the
+shared metadata object, which is both the PATCH body and the rpc payload.
+
+**THE DECISION, stated: the COLUMN is the source of truth, and NOTHING READS THE MIRROR.**
+Both halves of the operator's either/or were taken, because each alone is fragile:
+
+* the door keeps them in step (INSERT writes both from one value; UPDATE writes the mirror FROM
+  the column, repairing a row that arrives disagreeing) - but a `PATCH` that replaces `metadata`
+  wholesale will always be able to drop the mirror, and "every writer remembers" is the model
+  self-restraint this workspace rejects;
+* so `195-` section 7b also re-points the LAST READER at the column, and section 8(d) ASSERTS
+  over `pg_policies` and over `pg_proc.prosrc` that no policy and no function body reads
+  `metadata->>'exposure'` for a trust decision. A desync can no longer decide anything.
+
+Measured on the live database before the change, that gate was the ONLY function body reading
+the mirror (`pg_proc` scan over `prosrc`: one hit). The runbook's argument now cites the
+assertion instead of the premise.
+
+Note the scan's own trap, hit on its first run: `LIKE '%metadata%exposure%'` matched the
+CORRECTED gate, whose body reads `metadata->>'generated_by'` on one line and `NEW.exposure`
+twenty lines later. A check that fires on code that is right is a check nobody keeps, so the
+scan is whitespace-normalised and anchored on the actual read forms.
+
+## 10b. The transition trigger did not fire on the transition
+
+`200-`'s own TRIGGER-DISPOSITION comment claims *"an ops-to-personal transition deletes the
+existing one"*. `trg_queue_entity_extraction` is `AFTER INSERT OR UPDATE OF content, metadata` -
+and once the plane lives in a COLUMN, the only way to make that transition is
+`UPDATE thoughts SET exposure='personal'`, which touches neither.
+
+```
+RED  : queued after ops insert                     1
+       queued after ops->personal (column only)    1   <- sha256 of now-personal content
+GREEN: queued after ops->personal (column only)    0
+```
+
+`195-` section 7b widens the column list to `(content, metadata, exposure)`. This is a defect in
+the `u5graph` item's file, found from here; it is fixed in `195-` because re-pointing the gate
+at the column without it would have made this file's gate weaker than the one it replaced.
+
+## 11. Three drill checks that could not fail, and one red that never ran (R3)
+
+`drill-personal-plane-exclusion.ps1` ATTACK 1, 3 and 8 each ended:
+
+```powershell
+} else {
+    Note "... Defence in depth, stated."
+    Pass "ATTACK N is guarded in the APPLICATION as well as in the database - stated, not assumed"
+}
+```
+
+Both branches Pass. All three fired in the verifier's run, so all three reds were vacuous - the
+defect class this drill exists to catch, inside the drill.
+
+**ATTACK 8's was worse than unfalsifiable: its claim was false.** The red passed
+`reviewer = "drill-red"` while `REVIEW_SCHEMA` requires `actor: { label }`, so zod rejected the
+call and it never reached the review path. The drill read "the memory is still personal" as "the
+review door filters on the plane in SQL". It does not: `reviewMemory` selects
+`FROM agent_memories WHERE id = $1 FOR UPDATE` with **no exposure predicate at all**
+(`agent-memory-ops.ts`, read 2026-08-31). The only thing in front of ATTACK 8 is the row-level
+policy. With `actor` passed, the red reproduces immediately: *"RED CONFIRMED (ATTACK 8) - as
+postgres, promote_exposure MOVED the personal memory onto the ops plane"*.
+
+**For ATTACKS 1 and 3 the guards are real**, so the red now removes BOTH layers. `Set-RedAnchor`
+patches the server-side clauses out of a copy of the exported gitlink tree - anchored, with the
+match count ASSERTED, so a guard that moves FAILS the drill instead of producing an unpatched
+image whose non-leak reads as containment - builds a second image, and runs each attack twice:
+
+| | ATTACK 1 (recall) | ATTACK 3 (inspect by id) |
+|---|---|---|
+| RED-A: patched + `postgres` | **leaks** - must, or the green measures something else | **leaks** |
+| RED-B: patched + app role | **nothing** - the database, on its own | **nothing** |
+
+**And the first version of that patch was itself vacuous.** Dropping the clause without a cast
+left `$2` untyped; every patched query died with `could not determine data type of parameter $2`.
+RED-A failed loudly and correctly - and **RED-B PASSED, on an error**. The cast
+(`$n::text[] IS NOT NULL`) fixes the query, and each RED-B now fires the SAME call at the SAME
+door for the OPS control first: if the control does not come back, RED-B FAILS rather than
+reading a broken query as a boundary.
+
+## 12. Exit 2 is red in CI, and H4 is about to wire it (R4)
+
+The drill reports 0 failures, 18 GAPs and EXITS 2. H4 wires it into CI on `development`, where 2
+is a failing build - so the first green tree hits a red gate for a reason that is not a defect,
+and the first fix anyone reaches for is `|| true`.
+
+**None of the 18 are H3's to close**: thirteen are the audit-record gap (`auditRefusal`'s
+existence probe is bound by the policy that hid the row - closing it needs a SECURITY DEFINER
+probe, an H1/H4 decision), three are `openbrain-ext` connecting as `postgres` (H1, measured),
+two are the lift's conjunction, which cannot close while the thirteen are open.
+
+So each gap now carries a stable ID and `$GAP_DISPOSITIONS` names it with its owning item. The
+bare exit code is UNCHANGED (2 with any gap open). `-AcceptDispositionedGaps` - what CI runs -
+exits 0 only when every gap that fired is in the ledger, exits 2 naming any gap that is NOT, and
+FAILS when a gap in the ledger stops firing. A count-based budget would have passed
+"17 old + 1 new"; a ledger by name does not. Written up in `PROMOTION-RUNBOOK.md` under
+"The drill's exit code, and what CI reads (C.9 H4)" so H4 does not discover it.
+
+## 13. Out of scope, stated so it is not re-found as new
+
+* **`dfu-done.ps1 -Only 3` is UNMET with 12 of 14 evaluated**, and both `[fail]`s - the RAW
+  `openbrain-mcp` door and the CLOUD door - are because they connect as `postgres`
+  (`rolsuper`/`bypassrls`). **That is H1, not H3.** Not touched here; section 7 above is the
+  same finding from the previous round.
+* **`recipes/instagram-import/import-instagram.mjs` sets `sensitivity_tier: "personal"`** and now
+  also `exposure: "ops"`. Those are DIFFERENT AXES - `sensitivity_tier` is a handling label on
+  the row, `exposure` is the access plane - but a reader will trip over the pair. The recipe is
+  mounted and never started; no row it would write exists. Stating `'ops'` reproduces 190's
+  ruling for the general corpus rather than inventing a plane, and whether an Instagram import
+  belongs on the personal plane is an operator decision, not a migration's.
+* **`recipes/vercel-neon-telegram/src/lib/db.ts`** inserts into a `thoughts` table with a
+  `source` column this schema does not have. It targets a separate Neon deployment, not
+  `openbrain-db`, and was left alone.
+* **`recipes/adaptive-capture-classification/capture-with-gating.ts`** is an EXAMPLE ("replace
+  with your MCP tool call"), but it is an example of writing THIS schema, so it was given the
+  column - a copied example that produces a `not_null_violation` teaches the wrong thing.
+
+## 14. ROUND 2 - the sha this was re-validated at, and every re-run
+
+The work line did NOT move during round 2: `refactor/ai-stack-cleanup` is still `1a6b0b8`, and
+it is this branch's merge-base, so C.7b required no second rebase. The OB1 gitlink DID move.
+
+```
+work line base : 1a6b0b813e241cfb4b74659cbb2c11c8f86616aa  (refactor/ai-stack-cleanup, unmoved)
+OB1 gitlink    : 4e2239305150c01e79ba860d0226eeb6ea9480a1
+              -> ac4e3450bb916369b8f587909e69649a724536ca  (pushed to origin
+                 feat/agent-memory-exposure-column BEFORE the bump; descends from 4e22393)
+```
+
+Every run below is against the tree that gitlink pins, one checkout, each throwaway on its own
+docker network, nothing attached to an `ai-stack_*` network and no `:local` tag written.
+
+| check | result |
+|---|---|
+| `deno check index.ts agent-memory.ts` + `deno test` (kubernetes-deployment) | clean / **133 passed, 0 failed** |
+| full 29-migration initdb chain on a throwaway | no init errors; 195's four notices printed (backfill, table self-test, **door self-test - 12 payloads**, **zero mirror readers**) |
+| 195 round trip on that throwaway | revert(200) -> revert(195) -> re-apply(195) -> re-apply(200) -> re-apply both AGAIN: clean, idempotent, row count preserved |
+| `scripts/checks/prove-agent-memory-rls.ps1` | **PASSED - 68 checks**, every green with a red beside it |
+| `scripts/checks/drill-personal-plane-exclusion.ps1` (bare) | **108 passed, 0 failed, 18 named gaps**, EXIT 2 - the bare contract is unchanged |
+| the same, `-AcceptDispositionedGaps` (what CI runs) | **108 passed, 0 failed, 18 gaps ALL DISPOSITIONED**, EXIT 0 |
+| production `openbrain-db`, after everything | `thoughts=13001 personal=0 memories=21 personal=0` - unchanged, and never touched |
+
+### The R1/R2 fixes, red then green, in one place
+
+| | RED (before) | GREEN (after) |
+|---|---|---|
+| `upsert_thought('{}')` | wrote a row, `exposure=ops` | `not_null_violation` at the door |
+| `{"exposure":""}` / `{"exposure":null}` | wrote a row, `exposure=ops` | `check_violation` / `not_null_violation` |
+| `{"exposure":"personal"}` | accepted (superuser) / 42501 (bound) | refused at the door, with the reason |
+| personal row re-upserted as `ops` | `col=personal mirror=ops` | `col=personal mirror=personal` |
+| ops row "demoted" through the door | `col=ops mirror=personal` | refused; row untouched, `col=ops mirror=ops` |
+| ops->personal by column UPDATE | queue row SURVIVES with `sha256(content)` | queue row DELETED |
+
+### The R3/R4 fixes, proven by breaking what they guard
+
+The three unfalsifiable `Pass`es and ATTACK 8's schema-rejected red are gone, and the
+replacements were watched failing before they were watched passing:
+
+* **run 1** (cast omitted from the red patch): `FAIL RED-A (ATTACK 1) did NOT reproduce`,
+  `FAIL RED-A (ATTACK 3) did NOT reproduce ... could not determine data type of parameter $2`.
+  The drill exited **1**. Two checks that previously could not fail, failing.
+* **run 2** (cast added, live ops controls added to both RED-Bs): all four RED-A/RED-B
+  branches pass on the real reason, `RED CONFIRMED (ATTACK 8) - as postgres, promote_exposure
+  MOVED the personal memory onto the ops plane`.
+
+The gap ledger was broken deliberately, on a throwaway copy of the script, to prove both of its
+detectors fire:
+
+* ledger key `AUDIT-INSPECT` renamed to `AUDIT-INSPECT-TYPO` and a never-emitted
+  `LEDGER-SELFTEST-NEVER-FIRES` added, run WITH `-AcceptDispositionedGaps`:
+  `AUDIT-INSPECT  *** UNDISPOSITIONED - nobody has named this one ***`, then
+  `FAIL 2 dispositioned gap(s) did NOT fire: LEDGER-SELFTEST-NEVER-FIRES, AUDIT-INSPECT-TYPO`,
+  **exit 1**.
+* the rename alone, `-AcceptDispositionedGaps -SkipRed`. `-SkipRed` exempts the stale check,
+  so the renamed key does not also trip the exit-1 branch and MASK this one; 18 gaps still
+  fired, `AUDIT-INSPECT` among them, and the undispositioned detector alone decided the exit -
+  **exit 2**, `1 UNDISPOSITIONED GAP(S) - AUDIT-INSPECT`.
+
+So CI cannot go green on a NEW gap, and cannot stay green on a ledger that has rotted. The
+throwaway copy was deleted.
