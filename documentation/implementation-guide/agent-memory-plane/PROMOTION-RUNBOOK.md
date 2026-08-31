@@ -155,6 +155,7 @@ and a psql apply for the live one. There is no migration runner.
 | `init-agent-memory-idempotency.sql` | per-workspace idempotency index (replaces the globally-unique one) | as below |
 | `init-agent-memory-promote-exposure.sql` | `promote_exposure` to the `agent_memory_review_actions` CHECK | as below |
 | `init-agent-memory-check-type.sql` | `check` to the `agent_memories.memory_type` CHECK (U3's finding→durable-check) | as below |
+| `init-agent-memory-corpus-failclosed.sql` | **the corpus predicate stops defaulting to visible** (DFU PLAN.md C.8 clause 3) - see the dedicated section below | **read that section first** |
 
 ```powershell
 Get-Content OB1\docker\init-agent-memory-promote-exposure.sql |
@@ -191,3 +192,82 @@ SELECT 'check_allowed', count(*) FROM pg_constraint
    AND pg_get_constraintdef(oid) LIKE '%''check''%';
 "@
 ```
+
+
+## `init-agent-memory-corpus-failclosed.sql` -- the corpus predicate stops defaulting to visible
+
+**Executed against the live volume 2026-08-31** (item `dfudone`, under an `open-brain` plane lease).
+
+### Why
+
+`ob_corpus_on_ops_plane` shipped as `md->>'exposure' IS NULL OR md->>'exposure' = 'ops'`.
+An **unlabelled** thought was therefore VISIBLE to the agent plane -- the
+"unlabelled defaults to fine" class from this effort's own class list, in SQL. Measured
+before the migration: **12,989 of 12,993** thoughts carried no exposure label at all, so
+almost the entire corpus was on the ops plane by *default* rather than by decision, and
+any future row whose write path forgot the label would join it silently.
+
+### What it does, and why the order matters
+
+1. **Label first** -- every unlabelled thought is stamped `exposure='ops'`, which is what
+   the predicate already treated it as, so **no row changes visibility**.
+2. **Then close** -- the predicate drops its `IS NULL` arm.
+
+The reverse order would hide 12,989 rows between the two statements.
+
+### Apply
+
+```powershell
+docker cp OB1\docker\init-agent-memory-corpus-failclosed.sql openbrain-db:/tmp/
+docker exec openbrain-db psql -U postgres -d openbrain -v ON_ERROR_STOP=1 `
+    -f /tmp/init-agent-memory-corpus-failclosed.sql
+```
+
+### Verify **by query**, never by a clean exit code
+
+The migration's whole claim is that the ops corpus is unchanged and the *default* is not.
+Both halves have to be measured, because the first is invisible in a row count alone.
+
+```powershell
+# 1. The ops corpus still reads normally: expect 12993 before AND after.
+docker exec openbrain-db psql -U postgres -d openbrain -tAc `
+  "SET ROLE service_role; SELECT count(*) FROM thoughts;"
+
+# 2. The label census: expect unlabelled 0 | ops 12993 | personal 0 | stamped 12989.
+docker exec openbrain-db psql -U postgres -d openbrain -tAc `
+  "SELECT count(*) FILTER (WHERE metadata->>'exposure' IS NULL)  AS unlabelled,
+          count(*) FILTER (WHERE metadata->>'exposure'='ops')     AS ops,
+          count(*) FILTER (WHERE metadata->>'exposure'='personal') AS personal,
+          count(*) FILTER (WHERE metadata->>'exposure_backfill'='dfu-c8-corpus-failclosed') AS stamped
+     FROM thoughts;"
+
+# 3. THE ONE THAT MATTERS -- an unlabelled row must now be INVISIBLE. Inside a
+#    transaction that is ROLLED BACK, so nothing persists. Expect 0.
+docker exec openbrain-db psql -U postgres -d openbrain -tAc `
+  "BEGIN;
+   INSERT INTO thoughts (content, metadata) VALUES ('UNLABELLED-CANARY','{}'::jsonb);
+   SET ROLE service_role;
+   SELECT 'agent-plane sees unlabelled canary: '||count(*) FROM thoughts
+    WHERE content='UNLABELLED-CANARY';
+   ROLLBACK;"
+```
+
+**Recorded results, 2026-08-31:** (1) `12993` before, `12993` after -- no difference.
+(2) `0|12993|0|12989|12993`. (3) `agent-plane sees unlabelled canary: 0` -- fail-closed.
+Check 3 is the necessary one: with the corpus already fully labelled by step 1, checks 1
+and 2 look identical whether the predicate was flipped or not.
+
+### Rollback
+
+`OB1\dockerevert-agent-memory-corpus-failclosed.sql` -- re-opens the predicate, **then**
+unstamps exactly the rows this migration stamped (matched on
+`metadata->>'exposure_backfill' = 'dfu-c8-corpus-failclosed'`, so the 4 rows labelled `ops`
+by the write path are left alone). Nothing is dropped and no row is deleted.
+
+```powershell
+docker cp OB1\dockerevert-agent-memory-corpus-failclosed.sql openbrain-db:/tmp/
+docker exec openbrain-db psql -U postgres -d openbrain -v ON_ERROR_STOP=1 `
+    -f /tmp/revert-agent-memory-corpus-failclosed.sql
+```
+
+Expect afterwards: unlabelled `12989`, ops `4`, stamped `0`.
