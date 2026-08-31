@@ -447,3 +447,145 @@ docker cp OB1\docker\revert-graph-plane-rls.sql openbrain-db:/tmp/
 docker exec openbrain-db psql -U postgres -d openbrain -v ON_ERROR_STOP=1 `
     -f /tmp/revert-graph-plane-rls.sql
 ```
+
+---
+
+## `init-graph-plane-rls.sql` — ROUND 2: the gate tests its own closure, and the boundary reaches views
+
+**This is the same file at the same 200- mount point, not a new migration.** A live volume
+that already carries round 1 must be re-applied to pick up the three fixes below; the file is
+idempotent and re-applying it is the supported path (three consecutive applies COMMIT).
+
+### Why
+
+Round 1 was refuted three times. Each refutation was reproduced RED on a throwaway before it
+was fixed, and each fix carries an ops positive control.
+
+1. **A closure member was waved through by a hardcoded list.** §0 presented its target set as
+   derived, but only the *referenced-by* arm applied a predicate. The *closure* arm classified
+   eight members by membership of the `v_governed_180` name array and tested none of them.
+   `agent_memory_audit_events` is `rls=t force=t` **and** carried a policy whose `qual` is
+   literally `true` — so FORCE was on and the policy still permitted everything. It is now
+   governed here on parent visibility of both its foreign keys, and the predicate lives in one
+   function, `ob_relation_governed()`, called by all three arms.
+2. **Views.** A view without `security_invoker` runs as its superuser owner, so RLS on the base
+   table does not apply. `public.ideas_owed_research` reads `idea_revisions` and leaked the
+   **existence** of a governed revision (it projects `ideas.*`, so `summary`, `thought_id` and
+   `content_hash` are not returned). §6b now derives every view in `public` lacking the flag
+   and sets it, and refuses on a **materialized** view over a force-RLS relation.
+3. **The FK existence oracle.** `POST /agent_memories` with a hidden `thought_id` returned
+   success while a nonexistent one returned `23503`. Both `agent_memories` policies now name
+   `thought_id` in `WITH CHECK` (only there — the `USING` halves are unchanged from 180), so
+   both cases fail identically at `42501`.
+
+### Preconditions
+
+Round 1 already applied (this file at 200-), plus 180 and 190. §0 refuses otherwise.
+
+### Apply
+
+```powershell
+docker cp OB1\docker\init-graph-plane-rls.sql openbrain-db:/tmp/
+docker exec openbrain-db psql -U postgres -d openbrain -v ON_ERROR_STOP=1 -f /tmp/init-graph-plane-rls.sql
+```
+
+Expect `NOTICE: security_invoker set on 4 view(s): ideas_owed_research, research_run_metrics,
+reusable_claims, ungrounded_claims`, then `NOTICE: post-conditions hold on 9 table(s)`, then
+`COMMIT`. On a second run the view NOTICE is replaced by `all public views already run as
+SECURITY INVOKER` — that is the idempotent path, not a failure.
+
+### Verify **by query**, never by a clean exit code
+
+Each block is written to a file and run with `-f`, so no shell quoting sits between the SQL
+and the database.
+
+```powershell
+# 1. THE PREDICATE APPLIED TO THE 180 LIST. Expect every row governed=t. This is the check
+#    whose absence WAS the defect: before round 2, agent_memory_audit_events returned f here
+#    and the migration exited 0 anyway.
+@'
+SELECT relname, public.ob_relation_governed(relname) AS governed
+  FROM pg_class WHERE relnamespace='public'::regnamespace AND relkind='r'
+   AND relname IN ('agent_memories','agent_memory_source_refs','agent_memory_artifacts',
+       'agent_memory_relations','agent_memory_review_actions','agent_memory_recall_traces',
+       'agent_memory_recall_items','agent_memory_audit_events','thought_entities',
+       'entity_extraction_queue','thought_edges','idea_revisions') ORDER BY 1;
+
+-- 2. NO VIEW RUNS AS ITS OWNER. Expect zero rows.
+SELECT relname FROM pg_class c WHERE relkind='v' AND relnamespace='public'::regnamespace
+   AND COALESCE((SELECT option_value FROM pg_options_to_table(c.reloptions)
+                  WHERE option_name='security_invoker'),'false') <> 'true';
+
+-- 3. THE OPS PATH IS UNBROKEN. Take BEFORE and compare AFTER; they must be identical.
+SELECT (SELECT count(*) FROM agent_memories) AS memories,
+       (SELECT count(*) FROM agent_memory_audit_events) AS audit_events,
+       (SELECT count(*) FROM idea_revisions) AS revisions,
+       (SELECT count(*) FROM ideas_owed_research) AS owed;
+'@ | Set-Content -Encoding utf8 verify-a.sql
+docker cp verify-a.sql openbrain-db:/tmp/
+docker exec openbrain-db psql -U postgres -d openbrain -f /tmp/verify-a.sql
+```
+
+```powershell
+# 4. THE ONES THAT MATTER — both leaks attacked with a live positive control, inside a
+#    transaction that is ROLLED BACK so nothing persists. Expect personal=0 ops=1, and both
+#    SQLSTATEs 42501 (a 23503 on either line means the FK oracle is open again).
+@'
+BEGIN;
+INSERT INTO thoughts (id, content, metadata)
+VALUES (990001,''RB-OPS'',''{"exposure":"ops"}''::jsonb),
+       (990002,''RB-PERSONAL'',''{"exposure":"personal"}''::jsonb);
+INSERT INTO agent_memories (id, thought_id, workspace_id, memory_type, summary, content, metadata)
+VALUES (''cccccccc-0000-0000-0000-000000000001'',990001,''ai-stack'',''lesson'',''RB-OPS'',''x'',''{"exposure":"ops"}''::jsonb),
+       (''cccccccc-0000-0000-0000-000000000002'',990002,''ai-stack'',''lesson'',''RB-PERSONAL'',''x'',''{"exposure":"personal"}''::jsonb);
+INSERT INTO agent_memory_audit_events (event_type, workspace_id, memory_id, actor_kind)
+VALUES (''memory_written'',''ai-stack'',''cccccccc-0000-0000-0000-000000000001'',''agent''),
+       (''memory_written'',''ai-stack'',''cccccccc-0000-0000-0000-000000000002'',''agent'');
+SET ROLE service_role;
+SELECT count(*) FILTER (WHERE memory_id=''cccccccc-0000-0000-0000-000000000002'') AS personal,
+       count(*) FILTER (WHERE memory_id=''cccccccc-0000-0000-0000-000000000001'') AS ops
+  FROM agent_memory_audit_events;
+DO $x$ BEGIN
+  INSERT INTO agent_memories (thought_id, workspace_id, memory_type, summary, content, metadata)
+  VALUES (990002,''ai-stack'',''lesson'',''P'',''x'',''{"exposure":"ops"}''::jsonb);
+EXCEPTION WHEN others THEN RAISE NOTICE ''hidden      SQLSTATE=%'', SQLSTATE; END $x$;
+DO $x$ BEGIN
+  INSERT INTO agent_memories (thought_id, workspace_id, memory_type, summary, content, metadata)
+  VALUES (999999,''ai-stack'',''lesson'',''P'',''x'',''{"exposure":"ops"}''::jsonb);
+EXCEPTION WHEN others THEN RAISE NOTICE ''nonexistent SQLSTATE=%'', SQLSTATE; END $x$;
+RESET ROLE;
+ROLLBACK;
+'@ | Set-Content -Encoding utf8 verify-b.sql
+docker cp verify-b.sql openbrain-db:/tmp/
+docker exec openbrain-db psql -U postgres -d openbrain -f /tmp/verify-b.sql
+```
+
+Check 1 returning all `t`, and check 4, are the necessary ones. The counts in check 3 look
+identical whether the policies bind or not — only an attack with a control can tell a bound
+door from a broken query.
+
+**Recorded result (throwaway built from the compose-derived 28-file chain, 2026-08-31).**
+RED before the migration: personal audit rows visible `2`, personal idea visible through
+`ideas_owed_research` `1`, hidden `thought_id` insert **succeeded** while a nonexistent one
+returned `23503`. GREEN after: `0`, `0`, and both arms `42501`. The ops positive control was
+`1` on every probe in both arms, four `service_role` ops writes succeeded, and the
+`access_refused` audit for a hidden memory still writes as the superuser the real writer uses
+(`openbrain-mcp` runs `DB_USER=postgres`, verified on the live container).
+
+Adversarial cases, each RED for the right reason: a 180 table regressed to `USING(true)` — §0
+raises naming it; a brand-new owner-rights view over a governed table — §6b closes it
+(personal `1` -> `0`, ops control `1`); a **materialized** view over a force-RLS relation —
+refused outright, because `security_invoker` cannot fix one.
+
+### Rollback
+
+`OB1\docker\revert-graph-plane-rls.sql` — extended in round 2 to also restore the wide
+`agent_memory_audit_events` policy, the `agent_memories` policies without their `thought_id`
+arm, and to clear `security_invoker` on the four views that lacked it. **It re-opens all three
+disclosures above in addition to the round 1 fingerprint leak.** The round trip was executed
+on the throwaway: GREEN -> revert -> RED returns -> re-apply -> GREEN.
+
+```powershell
+docker cp OB1\docker\revert-graph-plane-rls.sql openbrain-db:/tmp/
+docker exec openbrain-db psql -U postgres -d openbrain -v ON_ERROR_STOP=1 -f /tmp/revert-graph-plane-rls.sql
+```
