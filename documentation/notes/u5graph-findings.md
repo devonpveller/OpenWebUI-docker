@@ -1292,3 +1292,78 @@ error. New:
     relation whose body READS a governed one is the same mechanism and is counted as
     not-examined (16 such triggers today). Closing it needs body analysis or a read-side
     convention, neither of which belongs in a migration.
+
+## C.7b discipline, and the arbiter's verdict
+
+**The work line did not move during this round**, so no rebase was needed; the branch was
+already on `b618591` when round 4 started and still is.
+
+| what | sha |
+|---|---|
+| work line (`refactor/ai-stack-cleanup`) | `b6185915980462dcb65e189b96770db214f26751` |
+| `work/u5graph` at the START of round 4 | `6b93467` (round 3's last commit) |
+| **the sha the suite ran at** | `70e0000` (this commit) |
+| round 3's RED baseline, byte-compared from git | `49d2e3d:docker/init-graph-plane-rls.sql` |
+| OB1 commit the gitlink now pins | `4fdc21cb3529fac87f8584cc5c982cad5318e8ba` (pushed to `origin/work/u5graph-plane-rls` BEFORE the bump) |
+| OB1 commit the line pinned before | `49d2e3d12f36f327b40fd191b1ed67cf3e646a8e` |
+
+One checkout (`.claude/worktrees/wt-u5graph`), one suite, two throwaways on one throwaway
+network, both removed. The live plane was held under an `open-brain` lease for the `dfu-done`
+run and released after it.
+
+### `dfu-done.ps1 -Only 3` - the arbiter, run at `70e0000`, reported verbatim
+
+**Verdict: clause 3 UNMET, board FAILED.** Reported, not worked around. The four subjects that
+hold it open are **the same four as rounds 2 and 3**, and none is caused by this round:
+
+| subject | verdict | why |
+|---|---|---|
+| `door-openbrain-mcp-door` | **fail** | `HTTP 200; the door RETURNED the personal fixture; the door connects as 'postgres' (rolsuper/rolbypassrls = t/t)` |
+| `door-cloud-search-thoughts` | **fail** | `HTTP 200; the door RETURNED the personal fixture` |
+| `door-wiki-compiler-output` | indeterminate | named manual check, no recorded result in `dfu-done-manual.json` |
+| `door-mcp-read-tools` | indeterminate | `returned NEITHER the personal fixture NOR its ops-labelled twin - with no positive control this probe cannot tell a bound door from a broken query, so it refuses` |
+
+```
+ CENSUS (every clause in exactly one bucket; the buckets must sum)
+   unrecognised     0
+   unmet            1
+   unevaluated      7
+   manual_pending   0
+   met              0
+   total 8 for 8 clause(s) - balances: True
+
+ NOT DONE - board: FAILED
+   - 1 clause(s) in the 'unmet' bucket: clause 3
+   - 7 clause(s) in the 'unevaluated' bucket: clause 1, clause 2, clause 4, clause 5, clause 6, clause 7, clause 8
+```
+
+Both failures are residual class 2 above - **RLS binds no superuser** - and closing them is U5
+steps 2-3, deferred by the operator. What the run **does** confirm: nine automated door and
+predicate probes pass with live positive controls, `postgrest-surface-sweep` passes,
+`corpus-predicate-source-on-work-line` passes **citing the new pin `4fdc21c`**, and
+`fixture-cleaned-up` reports production at 0 personal rows in either corpus. And the point that
+has been true since round 2 is still true: **clause 3 measures the LIVE database, and the live
+database still runs round 1**, so it cannot reflect this round either way.
+
+**Class 4 end state**, verified after the run: production shows `thoughts_personal=0`,
+`memories_personal=0` against 13,001 thoughts and 21 memories; no `U5G4`, `RB-R4` or `DFU-DONE-`
+row remains anywhere in production, and 0 `U5G4` entities and 0 `u5g4`/`rb-r4` recall traces;
+both throwaways and their network removed (`0` leftover containers, `0` leftover networks, and
+no `wt-` container was ever attached to an `ai-stack_*` anchor network); the migration drops no
+table, column, view or row.
+
+## What "closed" means for U5, stated so a reader can disagree with it
+
+- **The policies deny by default.** Absence, vacuity and the four relkind/constraint/trigger
+  mechanisms this file sweeps are closed as far as a row-level policy can close them, measured
+  RED before GREEN with positive controls, on the deployed schema.
+- **The gate is honest, not complete.** It says what it looked at, what it did not, and that the
+  absence of a finding is not a proof. A relkind nobody thought about makes it fail rather than
+  pass quietly.
+- **Two classes remain open by disclosure, not by oversight**: constraint-violation oracles that
+  leak existence to a caller that may write, and superuser-session writers that no policy binds.
+  Both have a named closure path (withdraw the write / put the plane column in the constraint;
+  U5 steps 2-3) and neither is claimed as done here.
+- **Nothing is applied to production.** Every round's fixes are carried by the
+  PROMOTION-RUNBOOK's apply / verify-by-query / recorded-result / rollback sections, and clause 3
+  will keep failing on the two superuser doors until U5 steps 2-3 land.
