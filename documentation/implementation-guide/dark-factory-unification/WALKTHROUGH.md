@@ -7,6 +7,14 @@ command, and by whom — and it says "parked" where things are parked.**
 A row saying DONE means its §2 *Validated by* column is satisfied by an executable check that
 someone who did not build it re-ran. Anything else says PARKED, with what would close it.
 
+**Every command in this file must run AS WRITTEN, from the repository root.** One did not:
+U6's second check was listed as `python -m pytest agent-org/...` and fails with
+`ModuleNotFoundError: No module named 'sqlalchemy'`, because it needs the agent-bridge venv.
+Corrected 2026-08-31 to name that interpreter (it then passes, 25 tests). It was caught by a
+verifier attacking `dfu-done.ps1`, not by this file — the checker captured only the FIRST
+command after each *How to run* marker, so a red named check read green in the deliverable that
+clause 5 exists to audit. Both are fixed.
+
 **How to read the "verified by" column.** `orchestrator` = I ran the command myself.
 `verifier` = an adversarial agent that did not build the item ran it and reported the output.
 `merge-record` = it landed through the pipeline in an earlier session and I have the merge
@@ -183,7 +191,7 @@ pins `8e3f164`; merging it as-is would drag OB1 **backward** and revert merged r
 ### Clause 4 — recall-informed briefs at all four seams — **DONE**
 **Validated by:** deleting any seam reds a test that names *that* seam; and the live acceptance.
 **How to run:** `python scripts/checks/recall-falsifiability-drill.py`, and
-`python -m pytest agent-org/agent-bridge/tests/test_recall_seams.py -q`
+`agent-org/agent-bridge/.venv/Scripts/python.exe -m pytest agent-org/agent-bridge/tests/test_recall_seams.py -q`
 **Evidence:** `3bdf7a8`. Two verifiers not-refuted; they counted **4 and 5** live seams (one
 found an `_open_handoff` seam beyond the four the plan names).
 **Orchestrator-verified:** `agent_memory_recall_traces` went **0 → 8 rows** — recall has run
